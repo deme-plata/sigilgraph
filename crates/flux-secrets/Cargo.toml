@@ -1,0 +1,13 @@
+[package]
+name = "flux-secrets"
+version = "0.1.0"
+edition = "2021"
+description = "Sealed capability-scoped credential vault for the Flux/SIGIL agent network — visible, never hidden."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+flux-stamp = { path = "../flux-stamp" }

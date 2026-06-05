@@ -1,0 +1,36 @@
+[package]
+name = "sigil-tip-proof"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL tip-proof wire format — the artifact a joining node verifies in ≤10ms instead of downloading the chain. Carries (height, 4 state roots, flavor, signature/fingerprint). v0 ships the Blake3Fingerprint flavor (typo-prevention only); P4.1 swaps in SqiSignBlob (real producer signature) and StarkRecursive (flux-recursive-proofs tip_proof_v2 over chain prefix) — the wire shape is stable across the swap so producer + verifier code doesn't churn."
+
+# Shared by producer (P4-A: sigil-node::run_produce_block) and verifier
+# (P4-B: sigil-node::run_join). Living it in its own crate avoids a circular
+# dep between the producer side (sigil-node depends on sigil-state for roots)
+# and the verifier side (which only needs to know the wire shape + the verify
+# function, not how roots are produced).
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+blake3     = { workspace = true }
+thiserror  = { workspace = true }
+
+sigil-header = { path = "../sigil-header" }
+sigil-state  = { path = "../sigil-state" }
+# Transport (sigil-net → WireGuard/Tor) + SQIsign are needed ONLY by the native
+# producer/full-node path. A light client — including the browser WASM lightweight
+# node — verifies the Blake3 flavor with neither, so they're optional behind the
+# default `native` feature. This keeps the wire-format/verify crate wasm-buildable.
+sigil-net    = { path = "../sigil-net", optional = true }
+# Real producer signature (SQIsign Level-5, 292B) for the SqiSignBlob flavor —
+# upgrades the tip-proof from anti-corruption (BLAKE3) to adversary-resistant.
+flux-sqisign = { workspace = true, optional = true }
+
+[features]
+default = ["native"]
+native = ["dep:sigil-net", "dep:flux-sqisign"]
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -1,0 +1,69 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.8"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/flux-lang/sigil"
+
+# Canonical dep declarations. Crates that share a dep must use
+# `dep = { workspace = true }` so cargo dedups across the workspace.
+# Feature sets here are unions of every needed config; cargo's feature
+# unification means a single declaration is always cheaper than per-crate
+# variants. Adding features to a workspace dep is fine — it doesn't
+# trigger extra rebuilds, only feature-set changes do.
+[workspace.dependencies]
+# Serde / JSON
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Crypto / hashing
+blake3 = "1"
+sha2 = "0.10"
+sha3 = "0.10"
+hex = "0.4"
+
+# Async runtime + concurrency
+tokio = { version = "1", features = ["sync", "time", "macros", "rt", "rt-multi-thread", "signal"] }
+parking_lot = "0.12"
+once_cell = "1"
+
+# Logging
+tracing = "0.1"
+
+# Random
+rand = "0.8"
+rand_distr = "0.4"
+
+# Compute / collections
+rayon = "1.8"
+dashmap = "5.5"
+lru = "0.12"
+num_cpus = "1.16"
+sysinfo = "0.30"
+
+# Compression
+lz4 = "1.24"
+zstd = "0.13"
+
+# Flux crates path-dep'd by SIGIL (relative to workspace root)
+flux-p2p     = { path = "../flux/crates/flux-p2p" }
+flux-sqisign = { path = "../flux/crates/flux-sqisign" }
+flux-arxiv-latex = { path = "../flux/crates/flux-arxiv-latex" }
+
+# FLUXFOOD harmonization — the new prototype crates + their shared crypto deps,
+# declared once so the workspace dedups them (one build, shared target). Crates
+# pull these via `{ workspace = true }`.
+flux-vdf   = { path = "crates/flux-vdf" }
+flux-fold  = { path = "crates/flux-fold" }
+flux-miner = { path = "crates/flux-miner" }
+zk-flux    = { path = "crates/zk-flux" }
+num-bigint  = "0.4"
+num-integer = "0.1"
+num-traits  = "0.2"

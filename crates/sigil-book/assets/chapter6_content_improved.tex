@@ -1,0 +1,153 @@
+\hypertarget{chapter-6-the-sigil-veil}{%
+\section{Chapter 6: The Sigil Veil}\label{chapter-6-the-sigil-veil}}
+
+\begin{quote}
+\itshape ``A signature proves who. It will never prove what.''\\
+\normalfont\hfill---margin note, Nexus Veil postmortem
+\end{quote}
+
+\hypertarget{scene-1-the-poisoned-binary}{%
+\subsection{Scene 1: The Poisoned Binary}\label{scene-1-the-poisoned-binary}}
+
+The first sign that Nexus Veil was dying came not as an alarm but as a silence.
+
+Elena Voss had learned to read silences the way other people read faces. In a safehouse above a shuttered Belgrade record shop, three monitors threw cold light across her hands, and the middle one---the one that should have been scrolling the gossip of ten thousand mesh nodes---had simply stopped. No errors. No dropped peers. Just a feed that had quietly agreed to lie still.
+
+She did not panic. Panic was a luxury for people who still believed the world was on their side. Instead she pulled the last good block into a hex editor and walked it byte by byte, the way her old MI6 instructor had taught her to walk a room before she trusted it.
+
+The block validated. That was the problem.
+
+\emph{It validated, and it was wrong.}
+
+Somewhere in the previous eleven hours, a binary had shipped across the Veil's update channel---a routine patch, signed, hashed, blessed by the same chain of trust that had kept Elena breathing for two years. Every node on the network had taken it gratefully, the way the body takes a drug it has been taught to crave. And buried in that binary, beneath a signature that checked out perfectly, was a function that did one small, surgical thing: it taught every node to agree on a history that had never happened.
+
+``A double-spend,'' she murmured, ``that the whole network signs off on. Beautiful.''
+
+It was the attack everyone had sworn was impossible. The Veil's security had rested on a comfortable lie---that if the signature verified, the code was honest. But a signature only proves \emph{who} sent something. It says nothing about \emph{what the something does}. Someone had finally noticed the gap, slid a blade into it, and the entire anonymity infrastructure of the invisible people had quietly rolled over and obeyed.
+
+Marcus Hale had warned her about exactly this, once, across an interrogation table in Frankfurt, with the weary patience of a man explaining fire to people who insisted on living in a paper house.
+
+She picked up the burner and, against every rule she had ever made for herself, she called him.
+
+\hypertarget{scene-2-a-network-that-cannot-lie}{%
+\subsection{Scene 2: A Network That Cannot Lie}\label{scene-2-a-network-that-cannot-lie}}
+
+They met in the only place neither of them had a history: a 24-hour laundromat in Vienna's tenth district, fluorescent and humming, the air thick with the smell of cheap detergent and other people's lives spinning behind glass.
+
+Hale looked older. The obsession had hollowed him the way it hollows everyone who chases a ghost long enough to become one.
+
+``You called \emph{me},'' he said, sitting down across the folding table as if it were the most natural thing in the world. ``That means the Veil is gone.''
+
+``The Veil is worse than gone.'' Elena slid a tablet across the table. On it, a single transaction, confirmed by four thousand nodes, describing a movement of funds that had never occurred. ``It's a corpse that's still shaking everyone's hand.''
+
+Hale studied it for a long time. When he looked up, there was something in his face she had not seen before. Not triumph. Not the hunter finally cornering the fox. Something closer to grief.
+
+``There's a successor,'' he said quietly. ``A few of the old protocol people have been building it. Quietly. Not as a product. As an apology.'' He turned the tablet face-down, an old habit. ``They call it the Sigil.''
+
+Elena had heard the name in fragments---in the dead-drop forums, in the encrypted channels where the paranoid traded rumors like currency. She had assumed it was vaporware, another manifesto with a logo.
+
+``What makes it different?'' she asked. ``Everyone says theirs is different.''
+
+``Because the Sigil starts from the thing that killed the Veil.'' Hale leaned in, and for a moment he was not a CIA analyst and she was not a burned operative; they were just two people who had spent their lives inside a machine, finally describing its broken gear. ``Every binary the Sigil runs is \emph{provenance-signed at the moment it is built}. Not signed afterward, in some ceremony. Signed by the compiler itself, against the exact source, the exact author, the exact instant. A binary without a valid build-proof simply will not run. You cannot ship a poisoned patch, because the poison cannot forge a birth certificate.''
+
+He drew a square on the fogged glass of the washer beside them, four corners, four marks.
+
+``And it cannot lie about its own state. Every block carries four separate roots---wallet, market, events, contracts. Four cryptographic commitments to exactly what the world looks like. If two nodes disagree by a single coin, the roots diverge, loudly, instantly. There's no quiet corpse that keeps shaking hands. The disagreement is impossible to hide.''
+
+``And verification?'' Elena said. ``The Veil's audit took an hour. I had an hour. Plenty of people don't.''
+
+Hale almost smiled. ``Ten milliseconds. In a browser. On a phone. A stranger on a train can verify the tip of the entire chain before the doors close. They don't trust the Sigil. They \emph{check} it.''
+
+Elena sat with that. Two years of her life had been spent inside a system built on the polite assumption that the people running the code were the people who had written it. The Sigil simply refused to assume. It made honesty a property of the mathematics, not the participants.
+
+``Trust nothing,'' she said. ``Verify everything. In ten milliseconds.''
+
+``That's the whole religion.''
+
+\hypertarget{scene-3-obsidian-and-violet}{%
+\subsection{Scene 3: Obsidian and Violet}\label{scene-3-obsidian-and-violet}}
+
+The onboarding terminal lived behind seven hops and a hardware key Hale produced from the lining of his coat with the reluctance of a man handing over the last photograph of someone he had loved.
+
+The interface, when it finally rendered, was nothing like the Veil's frantic green cascade. It was dark---a deep obsidian that seemed to drink the laundromat's harsh light---and through it ran threads of violet, soft and certain, brightening wherever the chain confirmed something true. Here and there a single mark glowed gold: a provenance sigil, the signature of the compiler that had built the very code she was looking at, woven into the page like a watermark in old banknotes.
+
+\begin{quote}
+\emph{Welcome to the Sigil. Verify before you trust. You are about to mix.}
+\end{quote}
+
+This was the part Hale had not explained, because it was the part that mattered most to people like Elena---people whose survival was measured in how completely they could disappear.
+
+The Veil had hidden her transactions in noise. Crowds. The hope that one anonymous face in ten thousand was enough. But noise could be filtered, and crowds could be watched, and Elena had spent two years learning exactly how thin that hope really was.
+
+The Sigil did not hide her in a crowd. It made the crowd \emph{mathematically inseparable}.
+
+She watched her funds enter the mixer and dissolve---not vanish, \emph{dissolve}---into a pool where her input and a hundred others became a single indivisible knot. On the other side, clean outputs emerged, and there existed no proof, anywhere, in any ledger, in any seized server, that could link the coins that went in to the coins that came out. Not because the link was hidden. Because, by construction, the link had never been recorded at all. A zero-knowledge proof attested that the books balanced---that no coin had been created, none destroyed---while revealing nothing whatsoever about who had paid whom.
+
+It was, she realized, the first time in two years that she had moved money and felt genuinely \emph{unseen}. Not lucky. Not careful. Unseen, as a law of the system rather than a favor from it.
+
+Behind her, Hale watched the violet threads brighten across the glass.
+
+``You understand what you're joining,'' he said. It was not a question. ``The Veil promised you anonymity and gave you a head start. The Sigil promises you secrecy and gives you a proof. Those aren't the same thing. One is a sprint. The other is a wall.''
+
+``And the people who built the wall?'' Elena asked. ``Who do they answer to?''
+
+``That,'' Hale said, ``is the part you're not going to like.''
+
+\hypertarget{scene-4-the-architect-of-secrecy}{%
+\subsection{Scene 4: The Architect of Secrecy}\label{scene-4-the-architect-of-secrecy}}
+
+The message arrived not through a person but through the chain itself---a release announcement, gossiped across the network, carrying a new binary and a build-proof signed by an author whose key Elena did not recognize. Most nodes would simply verify it and, finding it honest, run it. But folded into the proof's free-form field, where the compiler recorded its provenance, was a single line of human text. A note. A door, left open on purpose.
+
+\begin{quote}
+\emph{Voss. You spent two years trusting a network that asked you to. Come meet the one that doesn't. Activation height plus one thousand twenty-four blocks. You'll know the address when you can verify it yourself.}
+\end{quote}
+
+She did the math. A thousand and twenty-four blocks. The revocation window---the same window the Sigil gave the whole network to reject a bad release before it took hold. Whoever had sent this was inviting her in using the protocol's own grammar, daring her to apply the only rule that mattered.
+
+Elena Voss looked at the obsidian screen, at the violet threads holding the world together, at the single gold sigil marking the code as honestly born. For the first time since Berlin, since the rain and the watcher in the second-floor window, she felt the specific vertigo of standing at the edge of a thing larger than the war she had been fighting.
+
+The Veil had been about hiding from power.
+
+The Sigil, she was beginning to understand, was about making power unnecessary---building a world where you did not have to trust the watchers, because you could check them, in ten milliseconds, from a train.
+
+She reached for the keyboard.
+
+Somewhere, a thousand and twenty-four blocks away, a door was waiting to be verified.
+
+\hypertarget{chapter-6-notes}{%
+\subsection{Chapter Notes}\label{chapter-6-notes}}
+
+The technology in this chapter is fiction wrapped around real ideas, and the
+ideas are worth separating from the thriller.
+
+\begin{itemize}
+\item
+  \textbf{Provenance-signed binaries.} The attack that kills the Veil exploits
+  a genuine gap: a digital signature proves \emph{authorship}, not
+  \emph{behavior}. The Sigil's answer---binaries cryptographically signed at
+  build time, against their exact source, by the compiler itself---mirrors real
+  work on build provenance and reproducible builds. A binary that cannot
+  present a valid birth certificate is refused.
+\item
+  \textbf{Four committed state roots.} ``State divergence impossible to hide''
+  is the chapter's load-bearing idea. By committing separate cryptographic
+  roots for balances, markets, events, and contracts in every block, any
+  disagreement between honest nodes becomes immediately visible rather than
+  silently absorbed---the failure mode that let the fictional Veil keep
+  ``shaking hands'' while dead.
+\item
+  \textbf{Ten-millisecond verification.} Light-client verification fast enough
+  to run in a browser turns ``trust the operator'' into ``check the operator.''
+  The stranger verifying the chain tip before the train doors close is the
+  whole political argument of the chapter, compressed into a gesture.
+\item
+  \textbf{Zero-knowledge mixing.} Elena's sense of being \emph{unseen as a law
+  rather than a favor} is the real distinction between anonymity (hiding in a
+  crowd that can be filtered) and secrecy (a proof that the books balance while
+  revealing nothing about who paid whom). The link is not concealed; it is
+  never recorded.
+\end{itemize}
+
+None of this makes secrecy simple, or safe, or free of the question Hale
+leaves hanging---\emph{who builds the wall, and who do they answer to?} That
+question is the spine of the chapters to come.

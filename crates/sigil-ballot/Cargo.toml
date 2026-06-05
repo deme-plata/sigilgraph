@@ -1,0 +1,10 @@
+[package]
+name = "sigil-ballot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL Nations v0.3 — the integrity-checked, committed vote record. Council decides thresholds; ballot is WHO voted: it enforces one-vote-per-citizen-per-proposal and folds every cast vote into ballot_root (incremental XOR accumulator) so the poll is O(1), order-independent, and tamper-evident. Feeds the franchise-weighted tally into sigil-council. Closes the double-vote / ballot-stuffing gap a raw running total can't catch."
+
+[dependencies]
+blake3 = { workspace = true }
+hex = { workspace = true }

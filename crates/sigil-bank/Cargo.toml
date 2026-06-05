@@ -1,0 +1,26 @@
+[package]
+name = "sigil-bank"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL bank layer — protocol-fee policy (master wallet, mining + swap skim rates), pure helpers callable from sigil-tx + the mining path. Foundational from genesis: master_wallet is installed in the genesis transition via StateMutation::SetMasterWallet and consulted by every fee-bearing op afterward."
+
+# Phase 0 scope is intentionally narrow:
+#   - Constants for mining + swap protocol-fee rates (basis points).
+#   - Pure split helpers (no I/O, no state borrow) so they can run from
+#     anywhere: sigil-tx::apply_tx for swaps, the future flux-mining
+#     reward path for blocks, audit/replay code for reproducibility.
+#   - Smoke tests for the math + rounding.
+#
+# Out of scope for Phase 0 (queued for P7+):
+#   - 3-of-5 threshold-signed ProtectedBankTransaction (port of q-quillon-bank
+#     §TemporalShield) — needs threshold-secret-sharing + STARK audit-share
+#     reconstruction.
+#   - On-chain governance for the rate constants (right now they're compile-
+#     time constants; a future patch makes them height-gated upgrade vars).
+#   - HNDL-resistant timeline obfuscation. Lock #15 in project_sigil_chain
+#     captures the full eventual design.
+
+[dependencies]
+serde     = { workspace = true }
+thiserror = { workspace = true }

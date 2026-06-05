@@ -1,0 +1,11 @@
+[package]
+name = "flux-revisions"
+version = "0.1.0"
+edition = "2021"
+description = "Flux boilerplate — flux-revisions (top-missing CMS feature from the 2026 gap analysis)."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+flux-stamp = { path = "../flux-stamp" }
+blake3 = { workspace = true }

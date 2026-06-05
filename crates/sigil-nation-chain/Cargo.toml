@@ -1,0 +1,10 @@
+[package]
+name = "sigil-nation-chain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wires NATION-IN-A-BOX into the live SIGIL chain: commits a Nation's nation_root into the chain's contract_state_root via a reserved governance contract slot, through the real commit_state_transition consensus path. No header/schema change — the nation's whole economy becomes part of consensus through an existing root."
+
+[dependencies]
+sigil-state = { path = "../sigil-state" }
+sigil-nation = { path = "../sigil-nation" }

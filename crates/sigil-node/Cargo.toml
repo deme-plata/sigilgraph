@@ -1,0 +1,52 @@
+[package]
+name = "sigil-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL node — main binary. Phase 0: integration shell over Track C (header + state + events), in-memory chain tracker, CLI to mint genesis and show tip. Real networking comes from flux-sigil-net (Track B) and consensus from flux-narwhal-core / flux-dagknight (Track A) in P2."
+
+[[bin]]
+name = "sigil-node"
+path = "src/main.rs"
+
+[features]
+# Pull real Arti Tor up through sigil-net → sigil-net-tor. Heavy (117 crates);
+# build with `--features arti` only when an operator actually wants Tor egress
+# (SIGIL_TRANSPORT=tor or wg+tor).
+arti = ["sigil-net/arti"]
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+blake3     = { workspace = true }
+anyhow     = { workspace = true }
+tokio      = { workspace = true }
+bincode    = "1"
+rmp-serde  = "1"   # MessagePack — compact AND self-describing, so it round-trips
+                   # SIGIL's internally-tagged enums (SigilEvent/SigilTx tag="kind")
+                   # that bincode cannot decode. The store codec.
+lz4        = "1"
+
+sigil-header  = { path = "../sigil-header" }
+sigil-state   = { path = "../sigil-state" }
+sigil-events  = { path = "../sigil-events" }
+sigil-net       = { path = "../sigil-net" }
+sigil-net-wg    = { path = "../sigil-net-wg" }
+sigil-updater   = { path = "../sigil-updater" }
+sigil-tx        = { path = "../sigil-tx" }
+sigil-tip-proof = { path = "../sigil-tip-proof" }
+flux-p2p      = { workspace = true }
+# our own file system: Reed-Solomon erasure + encryption. Wired here for
+# durable chain persistence — aether-load-on-boot (can't-lose).
+flux-aether   = { path = "../../../flux/crates/flux-aether" }
+# the (Vizily-ported) search engine — persistent index, TF-IDF/BM25, PageRank,
+# semantic embeddings. Makes a chronos-produced chain searchable.
+flux-search   = { path = "../../../flux/crates/flux-search" }
+# embedded LSM-tree, RocksDB-style block-SSTs with per-block LZ4. The real
+# durable graph store (replaces the JSON-snapshot path). See store.rs.
+flux-db       = { path = "../../../flux/crates/flux-db" }
+# deterministic block production for the footprint simulation (chronos_sim bin)
+sigil-chronos = { path = "../sigil-chronos" }
+flux-chronos  = { path = "../../../flux/crates/flux-chronos" }
+
+[dev-dependencies]

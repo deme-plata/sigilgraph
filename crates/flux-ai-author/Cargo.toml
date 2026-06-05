@@ -1,0 +1,10 @@
+[package]
+name = "flux-ai-author"
+version = "0.1.0"
+edition = "2021"
+description = "Flux's killer CMS feature: built-in FREE on-prem AI authoring — content generation, auto-tagging, SEO meta — driven by a local ollama model (qwen3.6). No other CMS ships a free local AI."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+flux-stamp = { path = "../flux-stamp" }

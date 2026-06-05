@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SIGIL · Chronos Multiverse</title>
+<style>
+  /* SIGIL obsidian + violet palette (project_sigil_chain visual identity) */
+  :root {
+    --bg:#0a0a0f; --panel:#1a1428; --panel2:#221934;
+    --accent:#8b5cf6; --bright:#c084fc; --gold:#fbbf24;
+    --text:#e2e8f0; --dim:#8b8ba0; --green:#34d399; --red:#f87171;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+    -webkit-font-smoothing:antialiased;
+  }
+  header {
+    padding:28px 32px 16px; border-bottom:1px solid #2a2140;
+    background:linear-gradient(180deg, #120e1f 0%, var(--bg) 100%);
+  }
+  h1 { margin:0; font-size:22px; letter-spacing:1px; }
+  h1 .glow { color:var(--bright); text-shadow:0 0 12px rgba(192,132,252,.5); }
+  .sub { color:var(--dim); font-size:13px; margin-top:6px; }
+  .wrap { padding:28px 32px; max-width:1100px; margin:0 auto; }
+  .meta {
+    display:flex; gap:24px; flex-wrap:wrap; margin-bottom:24px;
+    font-size:13px; color:var(--dim);
+  }
+  .meta b { color:var(--text); }
+  svg { width:100%; height:340px; display:block; }
+  .edge { stroke:#3a2f55; stroke-width:2; fill:none; }
+  .edge.div { stroke:var(--red); stroke-dasharray:5 4; }
+  .edge.conv { stroke:var(--accent); }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; margin-top:28px; }
+  .card {
+    background:var(--panel); border:1px solid #2a2140; border-radius:10px;
+    padding:16px 18px; position:relative; overflow:hidden;
+  }
+  .card.baseline { border-color:var(--gold); }
+  .card.conv { border-color:var(--accent); }
+  .card.div { border-color:var(--red); }
+  .card h3 { margin:0 0 10px; font-size:16px; display:flex; align-items:center; gap:8px; }
+  .tag { font-size:10px; padding:2px 8px; border-radius:20px; font-weight:600; letter-spacing:.5px; }
+  .tag.baseline { background:rgba(251,191,36,.15); color:var(--gold); }
+  .tag.conv { background:rgba(139,92,246,.18); color:var(--bright); }
+  .tag.div { background:rgba(248,113,113,.15); color:var(--red); }
+  .row { display:flex; justify-content:space-between; font-size:13px; padding:5px 0; border-top:1px solid #241c38; }
+  .row:first-of-type { border-top:none; }
+  .row .k { color:var(--dim); }
+  .row .v { color:var(--text); }
+  .root { font-size:12px; color:var(--bright); }
+  .root.div { color:var(--red); }
+  footer { padding:20px 32px 40px; color:var(--dim); font-size:12px; text-align:center; }
+  .pulse { animation:pulse 2.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:.85} 50%{opacity:1; filter:drop-shadow(0 0 6px var(--accent))} }
+</style>
+</head>
+<body>
+<header>
+  <h1>SIGIL · <span class="glow">Chronos Multiverse</span></h1>
+  <div class="sub">CHRONOS-B — fork a SIGIL chain at a checkpoint, run parallel timelines, diff where they split. Same chain code as the live node; deterministic.</div>
+</header>
+<div class="wrap">
+  <div class="meta" id="meta"></div>
+  <svg id="tree" viewBox="0 0 1000 340" preserveAspectRatio="xMidYMid meet"></svg>
+  <div class="cards" id="cards"></div>
+</div>
+<footer>
+  flux-chronos multiverse · branches sharing a wallet-state-root converged; a different root means that timeline diverged.
+  Identical workload → identical root (determinism survives the fork). Data: <code>multiverse-state.json</code> (regenerate via <code>sigil-multiverse-dump</code>).
+</footer>
+
+<script>
+// Embedded real snapshot (fallback if the sibling JSON isn't served).
+const EMBEDDED = {"checkpoint_height":11,"branches":[
+  {"label":"honest","height":21,"wallet_root":"b04636260fbe3d3b","master_balance":40,"divergence":0,"is_baseline":true,"converged_with":"honest"},
+  {"label":"honest-replay","height":21,"wallet_root":"b04636260fbe3d3b","master_balance":40,"divergence":0,"is_baseline":false,"converged_with":"honest"},
+  {"label":"missed-half","height":16,"wallet_root":"fa4ab6d8a5794438","master_balance":30,"divergence":0,"is_baseline":false,"converged_with":null}
+]};
+
+function classify(b){ if(b.is_baseline) return 'baseline'; return b.converged_with ? 'conv' : 'div'; }
+
+function render(data){
+  const branches = data.branches;
+  const meta = document.getElementById('meta');
+  const divs = branches.filter(b=>!b.is_baseline && !b.converged_with).length;
+  meta.innerHTML =
+    `<div>checkpoint height <b>${data.checkpoint_height}</b></div>`+
+    `<div>timelines <b>${branches.length}</b></div>`+
+    `<div>converged <b style="color:var(--bright)">${branches.filter(b=>b.converged_with&&!b.is_baseline).length}</b></div>`+
+    `<div>diverged <b style="color:var(--red)">${divs}</b></div>`;
+
+  // SVG tree: checkpoint node on the left, branches fanning right.
+  const svg = document.getElementById('tree');
+  const W=1000, H=340, cx=130, cy=H/2;
+  const n=branches.length, gapY=H/(n+1);
+  let s=`<circle cx="${cx}" cy="${cy}" r="14" fill="var(--gold)" class="pulse"/>`+
+        `<text x="${cx}" y="${cy-24}" fill="var(--gold)" font-size="13" text-anchor="middle">checkpoint H=${data.checkpoint_height}</text>`;
+  branches.forEach((b,i)=>{
+    const y=gapY*(i+1), bx=760;
+    const cls = b.is_baseline ? 'conv' : (b.converged_with ? 'conv' : 'div');
+    const col = b.is_baseline ? 'var(--gold)' : (b.converged_with ? 'var(--accent)' : 'var(--red)');
+    // curved edge
+    s+=`<path class="edge ${cls}" d="M ${cx+14} ${cy} C ${cx+200} ${cy}, ${bx-200} ${y}, ${bx-16} ${y}"/>`;
+    s+=`<circle cx="${bx}" cy="${y}" r="11" fill="${col}"/>`;
+    s+=`<text x="${bx+22}" y="${y-4}" fill="var(--text)" font-size="14">${b.label}</text>`;
+    s+=`<text x="${bx+22}" y="${y+14}" fill="var(--dim)" font-size="11">H=${b.height} · root ${b.wallet_root.slice(0,8)} · master ${b.master_balance}</text>`;
+  });
+  svg.innerHTML=s;
+
+  // Cards
+  const cards=document.getElementById('cards');
+  cards.innerHTML = branches.map(b=>{
+    const cls=classify(b);
+    const tagTxt = b.is_baseline?'BASELINE':(b.converged_with?'CONVERGED':'DIVERGED');
+    return `<div class="card ${cls}">
+      <h3>${b.label} <span class="tag ${cls}">${tagTxt}</span></h3>
+      <div class="row"><span class="k">height</span><span class="v">${b.height}</span></div>
+      <div class="row"><span class="k">wallet root</span><span class="v root ${b.converged_with||b.is_baseline?'':'div'}">${b.wallet_root}</span></div>
+      <div class="row"><span class="k">master fee</span><span class="v">${b.master_balance} SIGIL</span></div>
+      <div class="row"><span class="k">divergence flags</span><span class="v">${b.divergence}</span></div>
+      <div class="row"><span class="k">vs baseline</span><span class="v">${b.is_baseline?'—':(b.converged_with?'matches '+b.converged_with:'SPLIT')}</span></div>
+    </div>`;
+  }).join('');
+}
+
+fetch('multiverse-state.json').then(r=>r.ok?r.json():Promise.reject()).then(render).catch(()=>render(EMBEDDED));
+</script>
+</body>
+</html>

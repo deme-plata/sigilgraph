@@ -1,0 +1,38 @@
+# Rust build artifacts (all levels — crates have nested target/ dirs)
+/target
+target/
+**/target/
+.target-shared/
+**/.target-shared/
+
+# JS / frontend
+node_modules/
+**/node_modules/
+dist/
+dist-final/
+**/dist/
+**/dist-final/
+.vite/
+
+# compiled release binaries (kept out of source — built via fluxc)
+releases/
+*-musl-x86_64
+*-musl-aarch64
+soak_gate-*
+
+# secrets / env (keep *.example)
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials*.json
+
+# misc
+*.log
+.DS_Store
+*.swp
+
+# AI-scratch images (not source)
+ChatGPT Image*
+*.scratch.png

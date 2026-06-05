@@ -1,0 +1,356 @@
+/* SIGIL · Hyprland / Arch-Linux reskin layer
+ * ═══════════════════════════════════════════════════════════════════════════
+ * Imported LAST in main.tsx, so it composes on top of:
+ *   index.css → lighting.css → palette-override.css → (runtime-injected <style>)
+ *
+ * The SIGIL chrome (ribbon / HUD / Home / frame / tweaker / panels) is injected
+ * at runtime via document.head <style> blocks in main.tsx. Those rules use
+ * single-class selectors (`.sigil-ribbon`, specificity 0,0,1,0) and a few
+ * `[data-theme="sigil-bright"] .X` (0,0,2,0). To outrank them WITHOUT touching
+ * the 4159-line main.tsx, every rule here is prefixed `html[data-theme] …`
+ * (0,0,2,1) and carries `!important` on the paint-critical properties — the
+ * same proven pattern palette-override.css uses.
+ *
+ * Aesthetic target — Hyprland desktop:
+ *   · Catppuccin Mocha base (#0d1620), surfaces, mauve/pink/sky accents
+ *   · the signature ANIMATED gradient "focused-window" border ring
+ *   · generous window rounding + heavy backdrop blur
+ *   · Waybar-style pill modules on the top ribbon
+ *   · gold (--sigil-gold) demoted to provenance marks only (per genesis §12a)
+ *
+ * Opt out → add class `sigil-original` on <body> (matches existing convention).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Catppuccin Mocha — copied from dist/theme-hyprland.css for cross-surface parity */
+  --ctp-base:     #0d1620;
+  --ctp-mantle:   #0a141a;
+  --ctp-crust:    #060e12;
+  --ctp-surface0: #122b35;
+  --ctp-surface1: #1b3d49;
+  --ctp-surface2: #245466;
+  --ctp-overlay0: #6c7086;
+  --ctp-text:     #cfeaf2;
+  --ctp-subtext:  #8fb3bf;
+  --ctp-mauve:    #22d3ee;   /* primary accent */
+  --ctp-pink:     #67e8f9;
+  --ctp-flamingo: #f2cdcd;
+  --ctp-rosewater:#f5e0dc;
+  --ctp-sky:      #7dd3fc;
+  --ctp-sapphire: #38bdf8;
+  --ctp-teal:     #94e2d5;
+  --ctp-lavender: #67e8f9;
+  --ctp-green:    #a6e3a1;
+  --ctp-yellow:   #f9e2af;
+  --ctp-peach:    #fab387;
+  --ctp-red:      #f38ba8;
+
+  /* Hyprland focused-window gradient — the visual signature */
+  --hypr-border-grad: linear-gradient(
+      115deg,
+      var(--ctp-mauve)   0%,
+      var(--ctp-pink)   22%,
+      var(--ctp-sapphire)50%,
+      var(--ctp-lavender)78%,
+      var(--ctp-mauve) 100%);
+  --hypr-glow: 0 0 0 1px rgba(34, 211, 238,0.18),
+               0 8px 28px rgba(0,0,0,0.55),
+               0 0 36px rgba(34, 211, 238,0.16);
+  --hypr-round: 14px;
+  --hypr-round-lg: 20px;
+}
+
+/* The animated ring used on every "window". 8s linear sweep. */
+@keyframes hypr-border-sweep {
+  0%   { background-position:   0% 50%; }
+  100% { background-position: 300% 50%; }
+}
+
+/* Reusable focused-window ring — applied via a dedicated ::after so it never
+ * collides with content. inset:0 keeps it inside overflow:hidden parents. */
+html[data-theme] .sigil-ribbon::after,
+html[data-theme] .sigil-frame::after,
+html[data-theme] .sigil-tweaker.open::after,
+html[data-theme] .sigil-home .home-hero::after,
+html[data-theme] .sigil-hud .bal::after,
+html[data-theme] .sigil-hud .panel::after,
+html[data-theme] .sigil-home .home-stats .stat::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.6px;
+  background: var(--hypr-border-grad);
+  background-size: 300% 300%;
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+          mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  animation: hypr-border-sweep 8s linear infinite;
+  pointer-events: none;
+  z-index: 2;
+  opacity: 0.9;
+}
+
+/* ── Global base shift to Catppuccin Mocha ──────────────────────────────── */
+html[data-theme="sigil"],
+html[data-theme="sigil"] body:not(.sigil-original) {
+  background-color: var(--ctp-base) !important;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * TOP RIBBON  →  Waybar
+ * ════════════════════════════════════════════════════════════════════════ */
+html[data-theme] .sigil-ribbon {
+  position: fixed;
+  height: 38px !important;
+  margin: 6px 8px 0 !important;            /* waybar floats with a gap */
+  left: 0; right: 0; top: 0;
+  width: auto !important;
+  border-radius: 999px !important;          /* full pill bar */
+  border: 0 !important;
+  background: linear-gradient(180deg, rgba(10, 20, 26,0.92), rgba(6, 14, 18,0.86)) !important;
+  box-shadow: var(--hypr-glow) !important;
+  backdrop-filter: blur(16px) saturate(140%) !important;
+  color: var(--ctp-text) !important;
+  gap: 12px !important;
+  padding: 0 16px !important;
+  overflow: visible !important;
+}
+/* push page content below the floating bar */
+html[data-theme] body:not(.sigil-original) { padding-top: 50px !important; }
+
+/* Neutralize the aurora-violet ribbon wash injected by the runtime <style>
+ * (.sigil-ribbon::before). On the hyprland floating pill the parent is
+ * overflow:visible, so that blurred aurora cloud would leak around the bar.
+ * The waybar pill provides its own depth via --hypr-glow + the ::after ring. */
+html[data-theme] .sigil-ribbon::before { display: none !important; }
+
+html[data-theme] .sigil-ribbon .brand .dol { color: var(--ctp-yellow) !important; }
+html[data-theme] .sigil-ribbon .brand .sym { color: var(--ctp-mauve) !important; }
+html[data-theme] .sigil-ribbon .sep { background: var(--ctp-surface1) !important; opacity: 0.6; }
+
+/* waybar-style pill modules */
+html[data-theme] .sigil-ribbon .chip {
+  background: var(--ctp-surface0) !important;
+  color: var(--ctp-subtext) !important;
+  padding: 3px 11px !important;
+  border-radius: 999px !important;
+  border: 1px solid rgba(34, 211, 238,0.10) !important;
+  font-size: 10px !important;
+}
+html[data-theme] .sigil-ribbon .chip b { color: var(--ctp-lavender) !important; }
+html[data-theme] .sigil-ribbon .chip.ok { border-color: rgba(166,227,161,0.35) !important; }
+html[data-theme] .sigil-ribbon .chip.ok b { color: var(--ctp-green) !important; }
+html[data-theme] .sigil-ribbon .addr {
+  color: var(--ctp-subtext) !important;
+  background: var(--ctp-surface0) !important;
+  padding: 3px 10px !important; border-radius: 999px !important;
+}
+
+html[data-theme] .sigil-ribbon .open-hud {
+  border-radius: 999px !important;
+  border: 1px solid rgba(34, 211, 238,0.40) !important;
+  background: rgba(34, 211, 238,0.12) !important;
+  color: var(--ctp-mauve) !important;
+}
+html[data-theme] .sigil-ribbon .open-hud:hover {
+  background: var(--ctp-mauve) !important;
+  color: var(--ctp-crust) !important;
+  box-shadow: 0 0 18px rgba(34, 211, 238,0.55) !important;
+}
+/* Home button keeps a warm pill but mauve→pink gradient instead of gold */
+html[data-theme] .sigil-ribbon #rbHome {
+  background: linear-gradient(135deg, var(--ctp-mauve), var(--ctp-pink)) !important;
+  color: var(--ctp-crust) !important;
+  border: 0 !important;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * SIDE HUD  →  floating Hyprland window
+ * ════════════════════════════════════════════════════════════════════════ */
+html[data-theme] .sigil-hud {
+  top: 52px !important;
+  bottom: 10px !important;
+  left: 8px !important;
+  border: 0 !important;
+  border-radius: var(--hypr-round-lg) !important;
+  background: linear-gradient(180deg, rgba(13, 22, 32,0.96), rgba(6, 14, 18,0.96)) !important;
+  box-shadow: var(--hypr-glow) !important;
+  backdrop-filter: blur(18px) saturate(140%) !important;
+}
+html[data-theme] .sigil-hud.open { width: 392px !important; }
+html[data-theme] .sigil-hud-inner { width: 392px !important; }
+html[data-theme] .sigil-hud .head .title { color: var(--ctp-mauve) !important; }
+html[data-theme] .sigil-hud .head .x {
+  background: var(--ctp-surface0) !important;
+  border: 1px solid rgba(34, 211, 238,0.20) !important;
+}
+html[data-theme] .sigil-hud .head .x:hover {
+  background: rgba(243,139,168,0.18) !important; color: var(--ctp-red) !important;
+  border-color: rgba(243,139,168,0.45) !important;
+}
+
+/* balance card — surface with animated ring + soft mauve wash */
+html[data-theme] .sigil-hud .bal {
+  position: relative;
+  border: 0 !important;
+  border-radius: var(--hypr-round) !important;
+  background:
+    radial-gradient(ellipse 480px 220px at 80% 0%, rgba(34, 211, 238,0.12), transparent 60%),
+    var(--ctp-mantle) !important;
+}
+html[data-theme] .sigil-hud .bal .amount { color: var(--ctp-yellow) !important; }
+html[data-theme] .sigil-hud .bal .sym  { color: var(--ctp-mauve) !important; }
+html[data-theme] .sigil-hud .bal .usds b { color: var(--ctp-sky) !important; }
+
+/* action row buttons → surface pills */
+html[data-theme] .sigil-hud .actrow button {
+  border-radius: 10px !important;
+  background: var(--ctp-surface0) !important;
+  color: var(--ctp-text) !important;
+  border: 1px solid rgba(34, 211, 238,0.18) !important;
+}
+html[data-theme] .sigil-hud .actrow button:hover {
+  background: rgba(34, 211, 238,0.16) !important;
+  color: var(--ctp-mauve) !important;
+  border-color: var(--ctp-mauve) !important;
+}
+/* primary mint → mauve→pink, drop the gold candy-button look */
+html[data-theme] .sigil-hud .actrow .prim {
+  background: linear-gradient(135deg, var(--ctp-mauve), var(--ctp-pink)) !important;
+  color: var(--ctp-crust) !important;
+  box-shadow: 0 0 0 1px rgba(245,194,231,0.4) inset, 0 6px 22px rgba(34, 211, 238,0.35) !important;
+}
+html[data-theme] .sigil-hud .actrow .prim:hover {
+  transform: translateY(-1px) !important;
+  box-shadow: 0 0 24px rgba(34, 211, 238,0.6) !important;
+}
+
+html[data-theme] .sigil-hud .panel {
+  position: relative;
+  border: 0 !important;
+  border-radius: var(--hypr-round) !important;
+  background: var(--ctp-mantle) !important;
+}
+html[data-theme] .sigil-hud .panel .h { color: var(--ctp-subtext) !important; }
+html[data-theme] .sigil-hud .blklist .h { color: var(--ctp-lavender) !important; }
+html[data-theme] .sigil-hud .addrline code { color: var(--ctp-sky) !important; }
+html[data-theme] .sigil-hud .footnote { color: var(--ctp-overlay0) !important; }
+
+/* ════════════════════════════════════════════════════════════════════════
+ * SIGIL FRAME (bottom-left brand)  →  floating window
+ * ════════════════════════════════════════════════════════════════════════ */
+html[data-theme] .sigil-frame {
+  position: fixed;
+  border: 0 !important;
+  border-radius: var(--hypr-round) !important;
+  background: linear-gradient(180deg, rgba(13, 22, 32,0.93), rgba(6, 14, 18,0.93)) !important;
+  box-shadow: var(--hypr-glow) !important;
+  backdrop-filter: blur(14px) saturate(140%) !important;
+}
+html[data-theme] .sigil-frame .ticker .dollar { color: var(--ctp-yellow) !important; }
+html[data-theme] .sigil-frame .ticker .sym    { color: var(--ctp-mauve) !important; }
+html[data-theme] .sigil-frame .meta b { color: var(--ctp-lavender) !important; }
+/* gold mint candy → mauve gradient pill (gold reserved for provenance) */
+html[data-theme] .sigil-frame .mint {
+  background: linear-gradient(135deg, var(--ctp-mauve), var(--ctp-pink)) !important;
+  color: var(--ctp-crust) !important;
+  border-radius: 11px !important;
+  box-shadow: 0 0 0 1px rgba(245,194,231,0.4) inset, 0 8px 0 #0e7490, 0 12px 18px rgba(0,0,0,0.45) !important;
+}
+html[data-theme] .sigil-frame .mint:hover {
+  box-shadow: 0 0 0 1px rgba(245,194,231,0.6) inset, 0 5px 0 #0e7490, 0 8px 18px rgba(34, 211, 238,0.5) !important;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * HOME overlay  →  Catppuccin desktop wallpaper + ringed cards
+ * ════════════════════════════════════════════════════════════════════════ */
+html[data-theme="sigil"] .sigil-home {
+  background:
+    radial-gradient(ellipse 1100px 700px at 82% -5%, rgba(34, 211, 238,0.14) 0%, transparent 52%),
+    radial-gradient(ellipse 900px 700px at -5% 100%, rgba(116,199,236,0.12) 0%, transparent 55%),
+    radial-gradient(ellipse 600px 500px at 50% 50%, rgba(245,194,231,0.06) 0%, transparent 60%),
+    var(--ctp-base) !important;
+  color: var(--ctp-text) !important;
+}
+html[data-theme] .sigil-home h1 { color: var(--ctp-mauve) !important; }
+
+html[data-theme] .sigil-home .home-hero {
+  position: relative;
+  border: 0 !important;
+  border-radius: var(--hypr-round-lg) !important;
+  background:
+    radial-gradient(ellipse 800px 380px at 75% 0%, rgba(34, 211, 238,0.16), transparent 60%),
+    linear-gradient(180deg, rgba(13, 22, 32,0.92), rgba(6, 14, 18,0.78)) !important;
+  box-shadow: var(--hypr-glow) !important;
+}
+html[data-theme] .sigil-home .home-hero .amount {
+  color: var(--ctp-yellow) !important;
+  text-shadow: 0 0 40px rgba(34, 211, 238,0.30) !important;
+}
+html[data-theme] .sigil-home .home-hero .amount .sym { color: var(--ctp-mauve) !important; }
+html[data-theme] .sigil-home .home-hero .lbl b { color: var(--ctp-mauve) !important; }
+html[data-theme] .sigil-home .home-hero .usd b { color: var(--ctp-yellow) !important; }
+html[data-theme] .sigil-home .home-hero .cta-col .prim {
+  background: linear-gradient(135deg, var(--ctp-mauve), var(--ctp-pink)) !important;
+  color: var(--ctp-crust) !important;
+  box-shadow: 0 0 0 1px rgba(245,194,231,0.4) inset, 0 8px 0 #0e7490, 0 12px 22px rgba(0,0,0,0.45) !important;
+}
+html[data-theme] .sigil-home .home-hero .cta-col .ghost {
+  background: var(--ctp-surface0) !important;
+  color: var(--ctp-text) !important;
+  border: 1px solid rgba(34, 211, 238,0.25) !important;
+}
+html[data-theme] .sigil-home .home-hero .cta-col .ghost:hover {
+  background: rgba(34, 211, 238,0.16) !important; color: var(--ctp-mauve) !important;
+  border-color: var(--ctp-mauve) !important;
+}
+
+html[data-theme] .sigil-home .home-stats .stat {
+  position: relative;
+  border: 0 !important;
+  border-radius: var(--hypr-round) !important;
+  background: linear-gradient(180deg, rgba(13, 22, 32,0.88), rgba(6, 14, 18,0.6)) !important;
+}
+html[data-theme] .sigil-home .home-stats .stat .v { color: var(--ctp-lavender) !important; }
+html[data-theme] .sigil-home .home-stats .stat.gold .v { color: var(--ctp-yellow) !important; }
+html[data-theme] .sigil-home .home-stats .stat.ok .v { color: var(--ctp-green) !important; }
+html[data-theme] .sigil-home .close {
+  background: var(--ctp-surface0) !important;
+  border: 1px solid rgba(34, 211, 238,0.30) !important;
+  color: var(--ctp-text) !important;
+}
+html[data-theme] .sigil-home .close:hover {
+  background: rgba(243,139,168,0.18) !important; color: var(--ctp-red) !important;
+  border-color: rgba(243,139,168,0.45) !important;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * Theme toggle + live tweaker controls
+ * ════════════════════════════════════════════════════════════════════════ */
+html[data-theme] .sigil-tweak-btn {
+  border: 1.5px solid rgba(34, 211, 238,0.55) !important;
+  background: var(--ctp-surface0) !important;
+  color: var(--ctp-mauve) !important;
+}
+html[data-theme] .sigil-tweak-btn:hover {
+  border-color: var(--ctp-mauve) !important;
+  box-shadow: 0 0 28px rgba(34, 211, 238,0.5) !important;
+}
+html[data-theme] .sigil-tweaker {
+  border: 0 !important;
+  border-radius: var(--hypr-round) !important;
+  background: linear-gradient(180deg, rgba(13, 22, 32,0.98), rgba(6, 14, 18,0.98)) !important;
+  box-shadow: var(--hypr-glow) !important;
+  backdrop-filter: blur(16px) !important;
+}
+html[data-theme] .sigil-tweaker h4 { color: var(--ctp-mauve) !important; }
+html[data-theme] .sigil-tweaker .val { color: var(--ctp-yellow) !important; }
+html[data-theme] .sigil-tweaker .btn-save {
+  background: linear-gradient(135deg, var(--ctp-mauve), var(--ctp-pink)) !important;
+  color: var(--ctp-crust) !important;
+}
+html[data-theme] .sigil-tweaker input[type=range]::-webkit-slider-thumb {
+  background: linear-gradient(135deg, var(--ctp-mauve), var(--ctp-sapphire)) !important;
+}

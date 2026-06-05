@@ -1,0 +1,28 @@
+# FLUXFOOD lever 3: shared target dir.
+#
+# Both flux/ and sigil/ point here so cargo dedups rmeta files across them.
+# Currently only sigil/ has opted in — flux/ keeps its 52 GB local target/
+# until the Beta-deploy path stops grabbing from flux/target/debug/. When
+# flux/ opts in (same config in flux/.cargo/config.toml), cold rebuilds of
+# shared deps drop to near-zero.
+#
+# Initial population: sigil/target/ was hard-linked into this dir on
+# 2026-05-29 (rocky-sigil-72) so existing warmth carried over.
+
+[build]
+target-dir = "/home/storage/deepseek-codewhale/.target-shared"
+
+# FLUXFOOD lever 4: mold linker via clang.
+#
+# Applied 2026-05-29 (rocky-updater) after sigil-node binary touches were
+# costing ~84s, with link time dominating recompile. mold replaces ld at
+# the link step; clang dispatches -fuse-ld=mold to it. Doesn't help
+# `cargo check` (no link). Big win on `cargo build` / `cargo test` of
+# binary crates — sigil-node + sigil-updater are the beneficiaries.
+#
+# Pre-req on this box: `apt-get install -y mold clang` (mold 2.30.0,
+# clang 18.1.3 on Epsilon as of install). flux/ can opt into the same
+# config when it adopts the shared target dir.
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]

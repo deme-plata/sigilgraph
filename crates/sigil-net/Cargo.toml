@@ -1,0 +1,33 @@
+[package]
+name = "sigil-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Thin wrapper over flux-p2p that adds SIGIL gossipsub topic IDs, SIGIL_BOOTSTRAP_PEERS env handling, verify-before-sync hook routing. Phase 0: constants + config struct + bootstrap-peer parsing. Phase 1: NetworkManager wrapper. Phase 2: verify-before-sync gate."
+
+# Per the SIGIL skill rule #4: the bootstrap peer list comes ONLY from
+# SIGIL_BOOTSTRAP_PEERS env — no hardcoded peer-id list anywhere. The Delta-
+# at-v10.11.37 stall (Quillon's libp2p hardcoded peer-ids that drifted) cannot
+# recur on SIGIL because there's nothing to drift.
+#
+# Phase 0 is the constants every other SIGIL crate path-deps to. Network
+# integration (NetworkManager wrapper) lands once flux-p2p exposes a stable
+# subscribe API; the consensus side (Track A) only needs the topic strings
+# to publish blocks, which is what this crate locks down today.
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+
+# Transport stack — both peers always link, real Tor backend gated on a
+# feature so cold sigil-net builds stay fast.
+sigil-net-wg  = { path = "../sigil-net-wg" }
+sigil-net-tor = { path = "../sigil-net-tor" }
+
+[features]
+default = []
+# Pull the real Arti client into the Tor egress layer. ~5 min cold build.
+arti = ["sigil-net-tor/arti"]
+
+[dev-dependencies]

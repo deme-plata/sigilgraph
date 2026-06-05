@@ -1,0 +1,9 @@
+[package]
+name = "sigil-emission"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL emission controller — the deterministic, height-based block-reward schedule (Bitcoin-style halving). Pure function of height; the minted coinbase goes through commit_state_transition so emission is COMMITTED IN ROOTS (the fix for Quillon's uncommitted-emission/hyperinflation incidents). The 21M cap is the chokepoint's job; this picks the per-block reward that approaches but never exceeds it."
+
+[dependencies]
+sigil-state = { path = "../sigil-state" }

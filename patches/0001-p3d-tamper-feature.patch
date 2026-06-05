@@ -1,0 +1,97 @@
+From: rocky-updater <rocky@sigil.example>
+Subject: [PATCH] p3d: cfg-gated tamper injection for divergence demo
+
+Adds a `tamper-demo` cargo feature to sigil-node that, when enabled,
+adds +42 SIGIL to wallet [0xDE; 32] during the FIRST block-1 apply.
+
+The tamper is deliberate, signposted, and isolated:
+  - Behind #[cfg(feature = "tamper-demo")] so production builds can NEVER
+    accidentally ship it (rustc strips the code when feature is off).
+  - Logs a loud line on activation so no operator is confused.
+  - Single-shot — only fires on block 1, only mutates DEMO_WALLET.
+
+After the tamper applies, the receiver's locally-computed
+wallet_state_root won't match the block 1 header's wallet_state_root
+(which was computed by the untampered producer). The receiver halts
+with exit 78 — proving skill rule #9 (state-root divergence is loud,
+not silent).
+
+To use:
+  1. Apply this patch to sigil/crates/sigil-node/
+  2. Build the tamper variant:
+       fluxc build --package sigil-node --release --features tamper-demo
+  3. Rename binary so deploy.sh can route it:
+       cp target/release/sigil-node releases/v0.0.3/sigil-node-v0.0.3-tamper
+  4. Run release.sh's announcement+sign flow against the tamper binary
+     (a flag would help — separate task: --variant tamper)
+
+This patch is the smallest possible change that demonstrates divergence
+without touching the apply path's correctness in non-tamper builds.
+
+---
+NOTE: This is a patch sketch, NOT an applied change. The exact lines
+referenced in the diff depend on where rocky's P3-B receiver branch
+lands in sigil-node::run_start tick loop. Once P3-B settles, this
+patch will need a 5-minute alignment pass before it cleanly applies.
+
+The cfg gate, the constant, the log message, the +42 — all stable.
+Only the line numbers and surrounding context will shift.
+
+---
+
+ crates/sigil-node/Cargo.toml          | 6 ++++++
+ crates/sigil-node/src/chain.rs        | 20 ++++++++++++++++++++
+ 2 files changed, 26 insertions(+)
+
+--- a/crates/sigil-node/Cargo.toml
++++ b/crates/sigil-node/Cargo.toml
+@@ -X,Y +X,Y @@
+ [dependencies]
+ # ... existing deps ...
+
++[features]
++default = []
++# tamper-demo: gated injection point for P3-D divergence demo. NEVER enable
++# in production. Adds +42 SIGIL to DEMO_WALLET on first block-1 apply,
++# producing a deliberate state-root mismatch vs the header. The cfg gate
++# ensures the tamper code is completely absent from default builds.
++tamper-demo = []
++
+
+--- a/crates/sigil-node/src/chain.rs
++++ b/crates/sigil-node/src/chain.rs
+@@ -X,Y +X,Y @@
+ // inside the function that applies a deserialized block (likely apply_block
+ // or run_start's tick loop after drain_events surfaces a TOPIC_BLOCKS message)
++
++    #[cfg(feature = "tamper-demo")]
++    {
++        // P3-D divergence demo: tamper exactly once, on block 1 apply, by
++        // bumping DEMO_WALLET ([0xDE; 32]) by +42 SIGIL BEFORE the block's
++        // own mutations apply. The receiver's wallet_state_root will then
++        // diverge from the producer's header — observable as a loud halt.
++        if block.header.height == 1 {
++            const DEMO_WALLET: [u8; 32] = [0xDE; 32];
++            const SIGIL_TOKEN: [u8; 32] = [0; 32]; // canonical zero = native SIGIL
++            tracing::warn!(
++                target: "tamper-demo",
++                "TAMPER ACTIVE: adding +42 SIGIL to DEMO_WALLET before block 1 apply. \
++                 This binary is for the P3-D divergence demo ONLY — your computed \
++                 wallet_state_root will NOT match the producer's header. Expecting halt."
++            );
++            // Use the chokepoint, not raw map writes — same code path the rest
++            // of the apply takes, so the tamper looks like a legitimate state
++            // change to the SMT but is a divergence vs the producer.
++            let mutation = sigil_state::StateMutation::WalletDelta {
++                wallet: DEMO_WALLET,
++                token: SIGIL_TOKEN,
++                delta: 42,
++            };
++            let tamper_transition = sigil_state::StateTransition {
++                height: block.header.height,
++                mutations: vec![mutation],
++            };
++            let _ = self.state.commit_state_transition(tamper_transition);
++        }
++    }
++

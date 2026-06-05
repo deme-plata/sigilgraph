@@ -1,0 +1,48 @@
+[package]
+name = "sigil-handshake"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL ephemeral per-session handshake — long-term identity keys authorize short-lived session keys (Lock #13). Phase 0: wire shapes + SessionRole enum + transcript hash + stubbed sign/verify. Phase 1: real hybrid X25519+Kyber KEM + SQIsign5/Dilithium5 identity sigs + BLAKE3-HKDF session-key derivation."
+
+# Per Lock #13 (project_sigil_chain.md): every validator, agent, browser
+# verifier, and release publisher uses a short-lived session key
+# authorized by its long-term wallet/validator identity. Born out of the
+# rocky-updater-2140 PaymentChannel handshake; generalises to all live
+# coordination surfaces.
+#
+# Wire shape is stable from P0 so other crates (sigil-net,
+# sigil-updater, sigil-dex, FluxBridge browser verifier) integrate today.
+# Real PQ crypto lands in P1 without breaking the wire.
+#
+# What this crate is NOT:
+#   - The transport — sigil-net carries handshake bytes on a topic; this
+#     crate just defines the bytes.
+#   - Per-message encryption — once the session is open, sigil-net handles
+#     authenticated framing using the derived session keys. This crate just
+#     bootstraps + verifies the handshake itself.
+#   - Identity-key persistence — that's wallet territory. This crate takes
+#     identity_pubkey + identity_sig as inputs/outputs, never custodies a
+#     long-term key.
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+blake3     = { workspace = true }
+hex        = { workspace = true }
+thiserror  = { workspace = true }
+
+# Use sigil-state's WalletId so the identity attribution chain stays clean:
+# wallet (long-term) → agent_id (persona) → session_id (live terminal).
+sigil-state = { path = "../sigil-state" }
+
+[features]
+default = []
+# real-pq: pull flux-sqisign for actual identity signatures. Phase 1.
+real-pq = ["dep:flux-sqisign"]
+
+[dependencies.flux-sqisign]
+path = "../../../flux/crates/flux-sqisign"
+optional = true
+
+[dev-dependencies]

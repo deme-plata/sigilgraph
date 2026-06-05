@@ -1,0 +1,31 @@
+[package]
+name = "sigil-net-tor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL Tor egress layer — Arti-backed dial + SOCKS5 helper. Layered ABOVE sigil-net-wg per skill section 'Why WireGuard at all?': WG provides validator-set confidentiality + UDP wire-cover; Tor provides anonymity to anywhere outside the SIGIL mesh (downloads, OTA fetches, external RPC). The dial helper opens one Tor circuit per call; the SOCKS5 listener exposes the same client to local processes that already speak SOCKS."
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+blake3     = { workspace = true }
+thiserror  = { workspace = true }
+tokio      = { workspace = true }
+anyhow     = { workspace = true }
+
+# Arti is the official Rust Tor implementation. We pull `arti-client` only
+# (the embedded library form — no daemon binary). The `tokio` runtime
+# integration matches what sigil-node already uses.
+#
+# Disabled by default to keep `cargo build -p sigil-net-tor` fast for
+# anyone not touching Tor right now. Enable with `--features arti` to wire
+# the real client; the `stub` default is what compiles in CI.
+arti-client = { version = "0.32", default-features = false, features = ["tokio", "native-tls"], optional = true }
+tor-rtcompat = { version = "0.32", default-features = false, features = ["tokio", "native-tls"], optional = true }
+
+[features]
+default = []
+arti = ["dep:arti-client", "dep:tor-rtcompat"]
+
+[dev-dependencies]
+serde_json = { workspace = true }

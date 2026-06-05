@@ -1,0 +1,175 @@
+\hypertarget{chapter-8-the-twenty-one-million}{%
+\section{Chapter 8: The Twenty-One
+Million}\label{chapter-8-the-twenty-one-million}}
+
+\begin{quote}
+\itshape ``You can hide a single coin. You can never hide the sum.''\\
+\normalfont\hfill---Sigil genesis commentary
+\end{quote}
+
+\hypertarget{scene-1-a-number-that-cannot-move}{%
+\subsection{Scene 1: A Number That Cannot
+Move}\label{scene-1-a-number-that-cannot-move}}
+
+Every empire Elena had ever watched fall had fallen the same way, in the end:
+not to armies, but to arithmetic. Someone, somewhere, had decided that the
+number could move---that just this once, for the best of reasons, a little more
+could be made from nothing---and the lie had compounded quietly until the day it
+couldn't.
+
+The Sigil's deepest secret, Wren had told her in Tallinn, was not a hidden
+ledger or an unbreakable cipher. It was a refusal. A single number, fixed at the
+birth of the chain and welded into the code at four separate layers, that said:
+\emph{there will be twenty-one million, and not one coin more, ever.}
+
+``People think secrecy is about hiding what you have,'' Wren had said. ``The
+harder secret is being unable to lie about how much exists in total. Anyone can
+hide a transaction. Almost no system can prove it never quietly printed money in
+the dark.''
+
+The cap was not a policy. Policies could be voted away by the quorum Elena had
+just watched defend itself. The cap was enforced \emph{below} governance---a
+constant the compiler itself refused to build around, a consensus rule that
+rejected any block minting past the line, a commitment baked into the genesis
+signature, and a running total committed into the wallet root of every single
+block. Four walls around one number. To move it, you would have to corrupt all
+four at once, in the open, with a thousand blocks of warning.
+
+Which is precisely what someone was about to try.
+
+\hypertarget{scene-2-the-mint-in-the-dark}{%
+\subsection{Scene 2: The Mint in the
+Dark}\label{scene-2-the-mint-in-the-dark}}
+
+It began, as these things do, as a rounding error.
+
+A bank---one of the old, legitimate kind, the kind that had spent a century
+learning to make money appear---had quietly built a bridge onto the Sigil.
+Deposits in, wrapped tokens out, the familiar conjuring trick that had inflated
+every currency in history. Real assets locked on one side; representations
+minted on the other. The bank's accountants had assumed, as bankers always
+assume, that no one could see the seam between what was locked and what was
+minted.
+
+On the Sigil, the seam was a public root.
+
+Elena saw it before Wren did, because Elena had spent her life looking for the
+exact place where a story stopped matching the evidence. The bridge had minted
+more wrapped tokens than it had ever locked in collateral. Not much---a
+fraction of a percent, the kind of gap that on any other system would vanish
+into the noise of a billion transactions. Here it stood out like a bloodstain
+on snow, because the chain committed, in every block, to exactly how much of
+everything existed, and the number had stopped adding up.
+
+``They're minting against deposits that aren't there,'' Elena said. ``The old
+trick. Lend the same dollar twice.''
+
+``And the chain caught it the instant the roots stopped balancing.'' Wren's
+voice was very quiet. ``But here's what they're really doing. The bank doesn't
+care about the wrapped tokens. The wrapped tokens are bait. They want the network
+to accept that a committed total can be \emph{slightly} wrong---that a trusted
+enough institution can run a deficit the math is willing to overlook. Once the
+network swallows one impossible number, the cap is just a suggestion. Twenty-one
+million becomes twenty-one million \emph{plus exceptions}. And exceptions are
+where every god gets back in.''
+
+\hypertarget{scene-3-balance-or-it-didnt-happen}{%
+\subsection{Scene 3: Balance, or It Didn't
+Happen}\label{scene-3-balance-or-it-didnt-happen}}
+
+The bank had powerful friends. Within hours a release petition was moving
+through the quorum---honestly built, perfectly provenanced, asking for nothing
+more sinister than a ``settlement tolerance,'' a tiny allowance for bridges to
+be briefly out of balance ``to support institutional liquidity.'' It was the
+backdoor from Tallinn wearing a banker's suit instead of a security guard's. The
+same gap, the same maneuver: honest provenance, dishonest intent.
+
+This time, Elena did not broadcast a clever proof and wait for the network to
+notice. This time she understood what the system actually needed from her, which
+was nothing personal at all. It needed the arithmetic to be done where everyone
+could see it.
+
+She and Wren did it the boring way. They walked the bridge's history block by
+block, recomputed the locked collateral from the chain itself, recomputed the
+minted supply from the wallet root, and published the difference---not as an
+accusation, but as a reproducible calculation any node could rerun and confirm in
+milliseconds. Locked: a number. Minted: a larger number. The gap, named, signed
+with a mixed and unlinkable key, gossiped to the entire network.
+
+The mixer protected \emph{her}. The roots protected \emph{the truth}. Those were
+two different kinds of secrecy, and the Sigil was the first thing she had ever
+touched that refused to trade one for the other. She could be invisible. The
+total supply could not.
+
+The settlement-tolerance petition died at four signatures, one short, as the
+network lit violet with thousands of independent verifications of a number that
+would not move. The bank withdrew its bridge before dawn, the way the powerful
+always withdraw when the only weapon left against them is everyone being able to
+check.
+
+\hypertarget{scene-4-the-inversion}{%
+\subsection{Scene 4: The
+Inversion}\label{scene-4-the-inversion}}
+
+Later, on the harbor wall in the cold, Wren said: ``You know what you stopped.''
+
+``A rounding error,'' Elena said.
+
+``A theology.'' Wren watched the gulls. ``Every system before this one located
+its trust in a person or an institution---someone who could be reasoned with,
+bribed, threatened, or simply mistaken. The Master Node. The central bank. The
+founder with the master key. We took the trust and we put it somewhere no one
+can be tortured into betraying: into a number, four walls, and ten milliseconds
+of verification in a stranger's pocket.''
+
+Elena thought of Berlin, two years and a lifetime ago. The rain. The watcher in
+the second-floor window. She had spent all that time hiding from power, certain
+that the best she could hope for was a longer head start. The Sigil had not given
+her a head start. It had quietly, mathematically, made the watchers
+\emph{accountable to the watched}---and let her stay invisible while she held them
+to it.
+
+``It won't last,'' she said, because she had buried too many beautiful systems to
+believe otherwise. ``Someone will find the next gap. The one between honest
+provenance and honest intent. The one we still can't close.''
+
+``Probably,'' Wren agreed. ``That's why there are more chapters.'' She handed
+Elena a fresh hardware key---this one connected to something. ``The quorum took a
+vote it's not allowed to take. They want a witness who isn't anyone. No name, no
+country, no past anyone can seize. Just a hand that raises when the number tries
+to move.''
+
+Elena Voss looked at the key, and at the dark water, and at the obsidian-and-violet
+glow leaking from the screen in her bag---the color of a world that checked
+itself.
+
+She closed her hand around it.
+
+\hypertarget{chapter-8-notes}{%
+\subsection{Chapter Notes}\label{chapter-8-notes}}
+
+\begin{itemize}
+\tightlist
+\item
+  \textbf{A hard cap enforced below governance.} The ``twenty-one million''
+  motif is a fixed-supply rule defended at multiple independent layers
+  (compile-time constant, consensus validation, genesis commitment, and a
+  running total committed into the wallet state root each block) so that no
+  single layer---and no governance vote---can quietly move it.
+\item
+  \textbf{Supply you cannot lie about.} The thriller's distinction: hiding an
+  individual payment (anonymity / the mixer) is comparatively easy; proving that
+  the \emph{total} was never secretly inflated is the hard, rare property. The
+  bridge fraud is caught the instant the committed roots stop balancing.
+\item
+  \textbf{Two secrecies, not one.} Elena stays unlinkable (zero-knowledge
+  mixing) while the supply stays fully auditable (committed roots). The chapter's
+  argument is that a good system refuses to trade personal privacy for systemic
+  honesty---it provides both.
+\item
+  \textbf{The unclosed gap, again.} Honest provenance still cannot certify
+  honest intent; a ``settlement tolerance'' is a backdoor in respectable
+  clothes. The defense remains social and procedural---transparency plus the
+  activation window---not purely cryptographic. The story is not finished
+  because that gap is not closed.
+\end{itemize}

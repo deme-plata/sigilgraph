@@ -1,0 +1,14 @@
+[package]
+name = "sigil-nation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "NATION-IN-A-BOX — the facade. One Nation type composes sigil-citizenship + sigil-ballot + sigil-council + sigil-treasury into a sovereign agent economy with a single committed nation_root: admit → propose → endorse → vote → finalize → pay. Spin up a sovereign economy in ~10 lines; every state change is committed in a root so nothing drifts."
+
+[dependencies]
+sigil-citizenship = { path = "../sigil-citizenship" }
+sigil-ballot = { path = "../sigil-ballot" }
+sigil-council = { path = "../sigil-council" }
+sigil-treasury = { path = "../sigil-treasury" }
+blake3 = { workspace = true }
+hex = { workspace = true }

@@ -1,0 +1,116 @@
+//! In-memory chain tip tracker — Phase 0 substitute for `flux-db`-backed
+//! persistence. Holds the current tip header + state, plus a vector of
+//! historical blocks for replay.
+
+use anyhow::{anyhow, Context, Result};
+
+use sigil_header::{BlockHash, SigilBlockHeaderV0};
+use sigil_state::{commit_state_transition, SigilState, StateRoots, StateTransition};
+
+use crate::block::Block;
+
+/// One node's view of the chain. Phase 0: linear, single-producer.
+pub struct ChainTip {
+    state: SigilState,
+    blocks: Vec<Block>,
+}
+
+impl Default for ChainTip {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChainTip {
+    /// Fresh chain — no genesis seeded yet.
+    pub fn new() -> Self {
+        Self { state: SigilState::new(), blocks: Vec::new() }
+    }
+
+    /// Read-only snapshot of the four state roots at the current tip.
+    pub fn roots(&self) -> StateRoots {
+        self.state.roots()
+    }
+
+    /// Current chain height. `0` when no blocks have been applied.
+    pub fn height(&self) -> u64 {
+        self.blocks.last().map(|b| b.header.height + 1).unwrap_or(0)
+    }
+
+    /// All blocks — for snapshotting to aether RS shards + replay (persistence).
+    pub fn blocks(&self) -> &[Block] {
+        &self.blocks
+    }
+
+    /// Parent hash to set on the next block. All-zero before genesis is
+    /// applied (genesis itself uses this as `parent_hash`).
+    pub fn parent_hash(&self) -> BlockHash {
+        self.blocks.last().map(|b| b.hash()).unwrap_or([0u8; 32])
+    }
+
+    /// Hand-back of the tip header for callers building auto-update
+    /// activation windows etc.
+    pub fn tip_header(&self) -> Option<&SigilBlockHeaderV0> {
+        self.blocks.last().map(|b| &b.header)
+    }
+
+    /// Snapshot of the current state, for use by block builders that need to
+    /// dry-run a transition before producing the block whose header will
+    /// commit those roots. Cloning is fine in P0 (BTreeMap-backed state); P3
+    /// will swap this for a read-locked SMT view.
+    pub fn state_snapshot(&self) -> SigilState {
+        self.state.clone()
+    }
+
+    /// Apply a block. Runs header precheck, applies the state transition
+    /// through the chokepoint, verifies the resulting roots match the
+    /// header's declared roots, and appends on success.
+    ///
+    /// Phase 0 omits crypto verification (SQIsign nonce, producer sig, VDF,
+    /// STARK). Those land in P1+ when the relevant crates port.
+    pub fn apply(&mut self, block: Block) -> Result<()> {
+        block.header.precheck().with_context(|| "header precheck failed")?;
+
+        let expected_height = self.height();
+        if block.header.height != expected_height {
+            return Err(anyhow!(
+                "block height mismatch: chain expects {}, block claims {}",
+                expected_height, block.header.height
+            ));
+        }
+        if block.header.parent_hash != self.parent_hash() {
+            return Err(anyhow!(
+                "parent_hash mismatch: chain tip is {}, block parent is {}",
+                hex_short(&self.parent_hash()),
+                hex_short(&block.header.parent_hash),
+            ));
+        }
+        if block.transition.at_height != expected_height {
+            return Err(anyhow!(
+                "transition height mismatch with header: header={}, transition={}",
+                expected_height, block.transition.at_height
+            ));
+        }
+
+        let computed = commit_state_transition(&mut self.state, &block.transition, expected_height)
+            .map_err(|e| anyhow!("state commit failed: {}", e))?;
+
+        if !block.check_roots_match(&computed) {
+            return Err(anyhow!(
+                "STATE DIVERGENCE at height {} — local roots != header roots", expected_height
+            ));
+        }
+
+        self.blocks.push(block);
+        Ok(())
+    }
+}
+
+fn hex_short(b: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(8);
+    for byte in &b[..4] {
+        s.push_str(&format!("{:02x}", byte));
+    }
+    s.push_str("…");
+    s
+}

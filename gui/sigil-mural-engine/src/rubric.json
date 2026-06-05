@@ -1,0 +1,28 @@
+{
+  "title": "SIGIL Mural — UI fidelity rubric",
+  "purpose": "A falsifiable, machine-scored test of how faithfully a generated UI reproduces the SIGIL mural. Each criterion is measured from a headless Chromium render (pixels + DOM), not from human judgement. Total 100.",
+  "ground_truth": {
+    "source_art": "ChatGPT Image Jun 1, 2026 04_22_26 — the painterly 8-panel SIGIL mural",
+    "signature_palette": {
+      "red":    [255, 45, 85],
+      "gold":   [245, 197, 66],
+      "mauve":  [180, 142, 173],
+      "cyan":   [136, 192, 208],
+      "green":  [163, 190, 140],
+      "purple": [94, 58, 140]
+    },
+    "layout": "4x2 grid of 8 panels inside a gilt frame; SIGIL cartouche top; master-equation plate bottom",
+    "thread": "ONE continuous crimson red line through all 8 panels (boustrophedon), the stationary worldline / fabric +10% thread"
+  },
+  "criteria": [
+    { "id": "palette",    "weight": 20, "measure": "≥4 of the 6 signature colors present (sampled pixels within dist<70); dark-purple background present" },
+    { "id": "panels8",    "weight": 15, "measure": "engine exposes exactly 8 panels AND DOM legend renders 8 entries" },
+    { "id": "redline",    "weight": 20, "measure": "crimson pixels present in BOTH vertical halves AND span left-third → right-third (continuity)" },
+    { "id": "frame",      "weight": 10, "measure": "gold pixels in the border ring AND 'SIGIL' present in DOM" },
+    { "id": "equation",   "weight": 10, "measure": "DOM contains 'δS_SIGIL' and '= 0'" },
+    { "id": "richness",   "weight": 10, "measure": "bright-pixel count above blank threshold (composition is not a flat fill)" },
+    { "id": "animation",  "weight": 10, "measure": "__mural.frame advances over 600ms AND two renders differ (the red line flows)" },
+    { "id": "termlabels", "weight": 5,  "measure": "all 8 term labels present: δS/δg δS/δA δS/δφ δS/δJ δS/δK δS/δΣ '∮ fold' 'Σ → ∞'" }
+  ],
+  "grade_bands": { "A": 90, "B": 80, "C": 70, "D": 60, "F": 0 }
+}

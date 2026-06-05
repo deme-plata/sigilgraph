@@ -1,0 +1,20 @@
+[package]
+name = "zk-flux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "zk-flux — the post-quantum ZK hybrid: a transparent FRI-STARK (fast prover, no trusted setup) compressed by an RLWE LATTICE SNARK (tiny proof, O(1) verify) instead of a pairing SNARK — so the result is transparent AND post-quantum AND tiny AND O(1)-verify, all at once."
+
+[dependencies]
+flux-zk-stark      = { path = "../../../flux/crates/flux-zk-stark" }
+flux-lattice-guard = { path = "../../../flux/crates/flux-lattice-guard" }
+blake3 = { workspace = true }
+serde  = { workspace = true }
+serde_json = { workspace = true }
+rand   = "0.8"
+anyhow = { workspace = true }
+tokio  = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[[bin]]
+name = "zk-flux"
+path = "src/bin/zk-flux.rs"

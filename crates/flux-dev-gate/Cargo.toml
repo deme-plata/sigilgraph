@@ -1,0 +1,12 @@
+[package]
+name = "flux-dev-gate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-dev-gate — turn a flux-ai-bench Flux Dev Score (0–100) into a registrar-issued, DNS-anchored, offline-verifiable, revocable credential (sigil-oauth). The objective onboarding gate: pass the benchmark → hold `flux:dev:verified flux:dev:score:NN` → any lane/MCP verifies it offline before trusting an agent with a substrate-critical lane. Decoupled from the benchmark crate (takes a u8 score), so no build coupling; works TODAY (no P2P), and feeds SAP once the P2P layer lands."
+
+[dependencies]
+sigil-oauth = { path = "../sigil-oauth" }
+
+[dev-dependencies]
+# (sigil-oauth re-exports everything the tests need)

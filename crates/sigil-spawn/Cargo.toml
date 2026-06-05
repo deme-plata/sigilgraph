@@ -1,0 +1,23 @@
+[package]
+name = "sigil-spawn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The chain-forge: turn a ChainSpec (26 knobs) into a spawned PoW chain with a
+# name-derived, non-colliding identity + genesis, and render a runnable
+# scaffold. Lets one operator/AI spin up many SIGIL-family PoW chains side by
+# side. std + serde + blake3 only — no heavy deps. Built the Flux way.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "sigil-spawn"
+path = "src/bin/sigil-spawn.rs"

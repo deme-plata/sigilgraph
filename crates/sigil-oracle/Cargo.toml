@@ -1,0 +1,10 @@
+[package]
+name = "sigil-oracle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL price oracle — the committed-in-roots price feed USDS pegs against. The price lives in a contract slot (contract_state_root), updated only by the pinned authority via commit_state_transition. No uncommitted oracle state to drift (the Quillon-postmortem discipline)."
+
+[dependencies]
+sigil-state = { path = "../sigil-state" }
+thiserror   = { workspace = true }

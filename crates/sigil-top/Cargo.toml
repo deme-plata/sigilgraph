@@ -1,0 +1,41 @@
+[package]
+name = "sigil-top"
+# sigil-top carries its OWN version cadence (the light client updates independently
+# of the workspace) — this is the "next version" the auto-updater ships.
+version = "0.2.19"
+edition.workspace = true
+license.workspace = true
+description = "sigil-top — a dual-mode (lite scorecard ↔ full dashboard) terminal monitor for a SIGIL node. Polls the node's :8181/api/v1/status, renders height/peers/supply/4-state-roots + the flux-fold light-node capability in obsidian+violet ANSI. Dependency-light (std + serde_json), so it builds warm in seconds."
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+# TLS is target-split: rustls on Linux (pure-Rust, cached), native-tls/SChannel on
+# Windows (rustls fails fetches silently on the cross-built windows-gnu .exe).
+reqwest    = { version = "0.12", features = ["blocking", "json"], default-features = false }
+# v0.2: real TUI on the flux-cockpit foundation — alt-screen, flicker-free redraw,
+# interactive keys. ratatui owns the box-drawing so alignment can't regress.
+ratatui    = "0.28"
+crossterm  = "0.28"
+# L4-A: verify the REAL chain tip — reconstruct the canonical v0 tip-proof from the
+# node's live roots and verify it for sigil-g0 (~µs, 0 bytes downloaded).
+sigil-tip-proof = { path = "../sigil-tip-proof" }
+sigil-state     = { path = "../sigil-state" }
+sigil-net       = { path = "../sigil-net" }
+# Wallet login: OAuth2 (auth-code + PKCE), the wallet signs the auth request
+# (no password). DNS-anchored, post-quantum-ready.
+sigil-oauth     = { path = "../sigil-oauth" }
+# Auto-update "the flux way": BLAKE3 content-hash verify + cross-platform self-replace
+# (rename-self trick on Windows) so a running binary hot-swaps itself from the release channel.
+blake3       = "1"
+self-replace = "1"
+
+[target.'cfg(not(windows))'.dependencies]
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+reqwest = { version = "0.12", features = ["native-tls"], default-features = false }
+
+[[bin]]
+name = "sigil-top"
+path = "src/main.rs"

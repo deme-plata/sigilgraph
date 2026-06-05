@@ -1,0 +1,10 @@
+[package]
+name = "flux-snapshot"
+version = "0.1.0"
+edition = "2021"
+description = "Flux boilerplate — flux-snapshot (wrestle-list scaffold for qwen/deepseek to flesh out)."
+
+[dependencies]
+serde = { workspace = true }
+flux-stamp = { path = "../flux-stamp" }
+blake3 = { workspace = true }

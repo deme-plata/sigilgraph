@@ -1,0 +1,18 @@
+[package]
+name = "sigil-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL cross-chain bridge — ONE BETTER than Quillon's. Quillon mints wrapped tokens on a 7-of-11 committee that SIGNS attestations (trust the signers) over a custodial hot wallet, with a single-node-mint fallback. sigil-bridge mints only against a VERIFIABLE source-chain SPV proof (header→merkle-root→tx inclusion→confirmations, checked cryptographically by every node — even a browser light client), and commits the peg invariant (minted ≤ locked, per asset) into a bridge-supply root every block, so over-minting is impossible to hide. Proof, not trust; committed, not opaque. wBTC/wETH/wZEC/wIRON + a generic adapter."
+
+[dependencies]
+serde     = { workspace = true }
+blake3    = { workspace = true }
+sha2      = { workspace = true }
+thiserror = { workspace = true }
+hex       = { workspace = true }
+flux-fold = { path = "../flux-fold" }   # fold a whole epoch's deposits into one constant-size attestation
+
+[[bin]]
+name = "sigil-bridge-demo"
+path = "src/bin/sigil-bridge-demo.rs"

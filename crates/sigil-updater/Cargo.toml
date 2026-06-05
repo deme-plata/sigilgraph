@@ -1,0 +1,41 @@
+[package]
+name = "sigil-updater"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL release announcement + verification + binary swap. Phase 0 transport-agnostic core: publish/verify/apply take a ReleaseAnnouncement, leaving HTTP-pull or gossipsub-push to the caller. Phase 1 wires flux-sigil-net's /sigil/g0/release topic in."
+
+# The killer operator experience for an experimental chain: a release author
+# signs a binary's hash + .proof with SQIsign, broadcasts the announcement,
+# and every running node verifies → downloads → swaps → respawns when the
+# activation_height fires. No manual scp, no manual systemctl restart.
+#
+# Phase 0 keeps the wire schema + crypto + binary swap pure-rust and side-
+# effect-isolated. Three modules:
+#
+#   announcement  — serde + signing/verifying payload bytes
+#   verify        — BLAKE3 + SQIsign signature check + format precheck
+#   apply         — staged binary swap with rollback (matches the flux-arena-
+#                   agent v0.1.5 .bak/.new pattern proven in production)
+
+[[bin]]
+name = "sigil-updater"
+path = "src/bin/sigil-updater.rs"
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+blake3     = { workspace = true }
+hex        = { workspace = true }
+thiserror  = { workspace = true }
+flux-sqisign = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+rayon = { workspace = true }
+num_cpus = { workspace = true }
+
+# STARGATE lever #1 — measure the SQIsign verify wall (the real TPS ceiling).
+[[example]]
+name = "sqisign_wall"
+path = "examples/sqisign_wall.rs"

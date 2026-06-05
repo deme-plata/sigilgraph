@@ -1,0 +1,14 @@
+[package]
+name = "flux-fold"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-fold — the succinct lattice backend for zk-flux. A linearly-homomorphic Ajtai/SIS commitment + Fiat-Shamir folding that aggregates N statements into a CONSTANT-size proof (succinct in N). Transparent (public matrix from a seed) + post-quantum (SIS). The LaBRADOR-class compression layer's first sound step."
+
+[dependencies]
+blake3 = { workspace = true }
+serde  = { workspace = true }
+
+[[bin]]
+name = "flux-fold"
+path = "src/bin/flux-fold.rs"

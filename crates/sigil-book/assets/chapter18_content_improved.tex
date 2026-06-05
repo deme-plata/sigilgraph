@@ -1,0 +1,149 @@
+\hypertarget{chapter-18-the-night-the-network-rewrote-itself}{%
+\section{Chapter 18: The Night the Network Rewrote
+Itself}\label{chapter-18-the-night-the-network-rewrote-itself}}
+
+\begin{quote}
+\itshape ``A thing that cannot change will die of the world moving. A thing that
+can change carelessly will die of its own hand. Live in the narrow gap
+between.''\\
+\normalfont\hfill---sigil-updater commentary
+\end{quote}
+
+\hypertarget{scene-1-the-self-replacing-machine}{%
+\subsection{Scene 1: The Self-Replacing
+Machine}\label{scene-1-the-self-replacing-machine}}
+
+The most dangerous thing the Sigil could do, Wren had always said, was the thing
+it had to do to survive: \emph{change itself.}
+
+Elena Voss understood the paradox now in a way the girl in the Berlin rain never
+could have. A network frozen at birth would be overtaken---by faster math, by
+broken assumptions, by a world that did not stop. But a network that could rewrite
+itself was a network that could be \emph{made} to rewrite itself, by anyone who
+seized the pen. The Veil had died, in the end, of exactly this: it took an update
+it should not have, in eleven silent hours, and woke up someone else's chain.
+
+The Sigil's answer was the auto-updater, and it was a marvel and a loaded gun in
+the same casing. A new binary, built and provenance-signed, would be gossiped
+across the network. Every node would verify its build-proof, check its
+signatures against the quorum, download it, confirm its fingerprint---and then
+\emph{wait}. The new version would not wake until an activation height a thousand
+blocks in the future. A thousand blocks in which the whole network could read what
+was coming and refuse it.
+
+``It's the same kill switch as always,'' Sable observed. ``The waiting period. The
+network upgrades itself overnight, but only after giving everyone a thousand-block
+night to say no.''
+
+``Until,'' Elena said, with the weariness of someone who had learned to finish
+these sentences, ``someone finds a way to make the night shorter than it looks.''
+
+\hypertarget{scene-2-the-release-at-the-wrong-height}{%
+\subsection{Scene 2: The Release at the Wrong
+Height}\label{scene-2-the-release-at-the-wrong-height}}
+
+It happened on a Thursday, which Elena would later think was fitting, because
+Thursdays are the days nobody guards.
+
+A release crossed the quorum threshold---valid build-proof, valid signatures,
+nothing forged. But its activation height was wrong. Not wildly wrong. Subtly,
+catastrophically wrong: set just close enough that the revocation window, in
+practice, fell across a span when the network's attention was elsewhere, and just
+far enough that no automated check flagged it. A genuine release, honestly built,
+scheduled to wake in a night that only \emph{looked} long enough to stop it.
+
+And the change it carried, once awake, would have quietly widened who counted as a
+valid release signer---adding the wakers to the quorum that controlled the waking.
+A machine reaching back to seize the hand that wound it.
+
+``They didn't break the updater,'' Sable said, white. ``They \emph{used} it.
+Honestly. Every step is legitimate. The build-proof is real. The signatures are
+real. The only lie is the timing, and timing isn't a thing the proofs check.''
+
+Elena heard Hale's ghost again, the laundromat, the fogged glass. \emph{A
+signature proves who, not what.} And now, she added silently, \emph{a proof proves
+the code, not the clock.} The seam had migrated once more---out of the binary, out
+of the intent, into \emph{when}.
+
+\hypertarget{scene-3-the-thousand-block-night}{%
+\subsection{Scene 3: The Thousand-Block
+Night}\label{scene-3-the-thousand-block-night}}
+
+There was no time to convene anything. The activation height was coming, and the
+network's defense was the network itself---if enough nodes noticed, in time, and
+refused.
+
+So Elena did the only thing the Sigil had ever truly asked of anyone. She made the
+danger \emph{legible}, fast, and let the math do the rest. Not a clever exploit, not
+a counter-release---those would take a night she did not have. A proof. A plain,
+reproducible demonstration, gossiped to every node at once: \emph{this release,
+valid in every other way, activates during a window the network cannot actually
+watch, and when it wakes it will hand the wakers the power to wake themselves. Here
+is the arithmetic. Check it yourselves. You have until this height.}
+
+It was the longest night of her second life, measured not in hours but in blocks.
+She watched the height climb toward the activation point and the network slowly,
+node by node, light up violet with verifications of her proof---each one a stranger,
+human or agent, doing the brave small thing, checking for themselves at three in
+the morning. Refusals accumulated. The release, valid and poisoned, climbed toward
+a height at which fewer and fewer nodes were willing to let it wake.
+
+At the activation block, it died. Not by force. By insufficient consent---the same
+quiet, leaderless way every lie died here, starved of the agreement it needed and
+could not honestly get.
+
+\hypertarget{scene-4-the-narrow-gap}{%
+\subsection{Scene 4: The Narrow
+Gap}\label{scene-4-the-narrow-gap}}
+
+Afterward, the network did what it always did: it learned, in the open. The
+activation-height rule grew a new clause---windows had to fall across spans the
+network could provably watch, attested by the same many-eyes honesty as everything
+else. The clock joined the list of things that had to be verified, not trusted. The
+seam was not closed. It was \emph{moved}, and named, and watched.
+
+``We almost lost it to a calendar,'' Sable said, on the rooftop, gray dawn coming
+up.
+
+``We almost lost it to \emph{convenience},'' Elena corrected. ``A network that
+couldn't update would have died slow. A network that updated carelessly would have
+died fast. The whole art is the narrow gap between---change, but only with a night
+long enough, and real enough, for everyone to say no.'' She watched the light come
+up over a network that had, in the dark, rewritten itself correctly because enough
+strangers had stayed awake to check. ``That gap is the entire thing. Wide enough to
+evolve. Narrow enough to catch a thief. We don't get to leave it. We just get to
+keep guarding it.''
+
+The new binary---the honest one, the one that had quietly won the same night the
+poisoned one lost---woke at its proper height across ten thousand machines at once,
+and the network became, overnight and with everyone's verified consent, a slightly
+better version of itself.
+
+A stranger on a train, unaware any of it had happened, verified the tip of the
+chain before the doors closed. It was the same chain. It was a better chain. Both
+were true, which was the point.
+
+\hypertarget{chapter-18-notes}{%
+\subsection{Chapter Notes}\label{chapter-18-notes}}
+
+\begin{itemize}
+\tightlist
+\item
+  \textbf{Self-upgrading networks.} The auto-updater lets a network ship and adopt
+  new code via gossip---build-proof verified, signatures checked, fingerprint
+  confirmed---then activate at a future block height, leaving a revocation window
+  for the network to reject it.
+\item
+  \textbf{The new seam: timing.} The attack uses a perfectly valid release with a
+  maliciously chosen \emph{activation time}, exploiting that proofs check the code,
+  not the clock. ``A proof proves the code, not the clock.''
+\item
+  \textbf{Defense by legibility under deadline.} With no time to convene,
+  the defense is a fast, reproducible proof of the danger, letting independent
+  nodes refuse before activation---consent starvation rather than force.
+\item
+  \textbf{The narrow gap.} The theme: a system must be able to change (or die of
+  the world moving) but not change carelessly (or die by its own hand). Governing
+  upgrades is living in that gap permanently---now with the clock itself subject to
+  verification.
+\end{itemize}

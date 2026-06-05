@@ -1,0 +1,15 @@
+[package]
+name = "sigil-scoring"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL three-axis composite scoring: SAP + X-Algo + K-parameter, generic over Validator/Pool/Wallet/LP subjects"
+
+[dependencies]
+serde = { workspace = true }
+blake3 = { workspace = true }
+rand = { workspace = true }
+rand_distr = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]

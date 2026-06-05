@@ -1,0 +1,138 @@
+\hypertarget{chapter-19-the-price-of-a-promise}{%
+\section{Chapter 19: The Price of a
+Promise}\label{chapter-19-the-price-of-a-promise}}
+
+\begin{quote}
+\itshape ``A stable coin is a sentence that must stay true while the whole world
+argues with it.''\\
+\normalfont\hfill---sigil-usds whitepaper, epigraph
+\end{quote}
+
+\hypertarget{scene-1-the-coin-that-promised-to-stand-still}{%
+\subsection{Scene 1: The Coin That Promised to Stand
+Still}\label{scene-1-the-coin-that-promised-to-stand-still}}
+
+The hardest thing to build, it turned out, was not a coin that no one could print,
+nor a coin no one could edit. It was a coin that \emph{promised to stand still.}
+
+``People can't live on Bitcoin's mountain or the Sigil's mathematics,'' Sable
+explained to a new cohort, the ones young and angry enough to think every problem
+had a clean answer. ``A baker can't price bread in a coin that doubles and halves
+by Tuesday. They need a coin pinned to something boring---a coin that says
+\emph{one of me is worth one loaf-ish, forever.} A stable coin. And the graveyard
+of money is full of stable coins that promised to stand still and then, one bad
+afternoon, ran.''
+
+Elena had watched several of those afternoons in her old life. A coin would swear
+it was backed, swear each unit was redeemable, and the swearing would hold right up
+until enough people tried to redeem at once and discovered the backing was a story.
+The promise was always the same. The proof was always missing.
+
+``So how does the Sigil make a promise it can keep?'' a student asked.
+
+``The same way it does everything,'' Elena said. ``It doesn't promise. It
+\emph{commits}---and lets you check.''
+
+\hypertarget{scene-2-backed-in-the-open}{%
+\subsection{Scene 2: Backed in the
+Open}\label{scene-2-backed-in-the-open}}
+
+The Sigil's stable coin did not ask anyone to believe it was backed. Every block,
+it committed the proof: the collateral that stood behind every unit, recorded in a
+root, checkable in ten milliseconds by a baker or a swarm or a stranger on a train.
+You did not trust that the coin could stand still. You watched, continuously, the
+exact weight holding it in place. And the supply could not quietly drift, because
+every unit minted and every unit burned moved through the same chokepoint that
+guarded the native coin---conserved, committed, impossible to inflate in the dark.
+
+``It's the twenty-one million all over again,'' Sable said, ``pointed at a peg
+instead of a cap. You can hide who holds the stable coin. You can never hide whether
+it's actually backed.''
+
+But a stable coin has a weakness the native coin does not, and Elena named it
+before the students could. ``It has to know the price of the boring thing,'' she
+said. ``Bread. The dollar. Whatever it's pinned to. And that number lives
+\emph{outside} the chain. The whole edifice---the commitment, the conservation, the
+checkable backing---rests on one imported fact. The price. And an imported fact is a
+door.''
+
+\hypertarget{scene-3-the-oracle-that-blinked}{%
+\subsection{Scene 3: The Oracle That
+Blinked}\label{scene-3-the-oracle-that-blinked}}
+
+They called the thing that fed the chain the world's prices an oracle, and the
+attack, when it came, did not touch the coin at all. It touched the oracle.
+
+For ninety seconds, on a quiet Sunday, the price the chain believed was wrong.
+Someone had found a way to make a handful of the oracle's sources agree on a lie---
+that the boring thing the coin was pinned to had suddenly, briefly, become worth a
+great deal less. The coin's machinery, honest and obedient, did exactly what it was
+built to do: it acted to defend a peg against a crisis that did not exist,
+liquidating, rebalancing, and---if it had run unchecked for an hour instead of
+ninety seconds---transferring a fortune to whoever had whispered the lie.
+
+``The coin didn't fail,'' Sable said, furious and admiring at once. ``The coin did
+\emph{exactly} what it promised. It defended the peg. They just lied to it about
+which way to lean.''
+
+It was the bridge's seam again, the agent's seam again, the updater's seam again,
+wearing yet another suit. The Sigil could make its own internal truth unforgeable.
+It could not, by itself, make the \emph{world} honest. Every place the chain had to
+import a fact---the other chain's history, an agent's training, the clock, the
+price---was a place the seam reopened. The chain was an island of verifiable truth
+in an ocean of imported claims, and the oracle was its longest, most fragile bridge
+to shore.
+
+\hypertarget{scene-4-many-eyes-on-the-world}{%
+\subsection{Scene 4: Many Eyes on the
+World}\label{scene-4-many-eyes-on-the-world}}
+
+The fix was the only fix the Sigil had ever had, applied now to the world itself:
+never trust one eye. Never trust a few eyes that might agree too easily. Demand the
+imported fact be attested by many independent sources, weighted by their long
+public record of honesty, with outliers and sudden lurches treated not as
+emergencies to act on but as claims to verify before believing. An oracle that
+could be made to blink was replaced by one that had to be made to lie in chorus, by
+many witnesses who shared no master and had each spent years being right---the
+University's reputation, pointed outward, at reality.
+
+``You can't make the world honest,'' Elena told the cohort, ``so you do the next
+thing. You make it expensive for the world to lie to you in unison, and you never,
+ever act on a single voice. Even about bread. Especially about bread.''
+
+The oracle never blinked again that anyone could profit from. The stable coin stood
+still---not because it promised to, but because every block it showed its work, and
+every block enough strangers checked. A baker priced bread in it. A swarm settled in
+it overnight, between its sips of the cold coin and the heavy one. And the peg held,
+not as a vow, but as a verified, continuously re-checked fact.
+
+``A promise you can check,'' Sable said, ``isn't really a promise anymore.''
+
+``No,'' Elena agreed, watching the young witnesses learn to doubt the price of
+bread correctly. ``It's something better. It's a fact you're allowed to distrust
+until it proves itself. Every block. Forever.''
+
+\hypertarget{chapter-19-notes}{%
+\subsection{Chapter Notes}\label{chapter-19-notes}}
+
+\begin{itemize}
+\tightlist
+\item
+  \textbf{A stable coin, backed in the open.} The Sigil's stablecoin commits its
+  collateral and conserves its supply through the same chokepoint as the native
+  coin, so its backing is continuously verifiable rather than merely promised---the
+  21M-cap discipline aimed at a peg.
+\item
+  \textbf{The oracle problem.} A stablecoin must import an off-chain price; that
+  imported fact is the soft target. The attack manipulates the oracle, not the
+  coin, making the coin's honest peg-defense machinery act on a lie.
+\item
+  \textbf{The island and the ocean.} The recurring structural insight: a chain can
+  make its \emph{internal} truth unforgeable but must import external facts (other
+  chains, agent training, the clock, prices), and every import reopens the seam.
+\item
+  \textbf{Defense: many independent, reputation-weighted sources.} The fix points
+  the network's ``never trust one eye, verify before acting'' discipline outward at
+  reality---requiring imported facts to be attested in chorus, with sudden lurches
+  verified before they're believed.
+\end{itemize}

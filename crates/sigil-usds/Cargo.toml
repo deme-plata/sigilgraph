@@ -1,0 +1,11 @@
+[package]
+name = "sigil-usds"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "USDS (usdSIGIL) — SIGIL's native $-pegged stablecoin. Mint by locking SIGIL collateral at the committed oracle price; redeem to release it. NATIVE is conserved (locked in a vault, never destroyed → 21M cap untouched); USDS supply tracks collateral. Every mint/redeem goes through commit_state_transition (committed in roots)."
+
+[dependencies]
+sigil-state  = { path = "../sigil-state" }
+sigil-oracle = { path = "../sigil-oracle" }
+thiserror    = { workspace = true }

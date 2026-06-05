@@ -1,0 +1,119 @@
+/* sigil-tweak-dyn target — empty by default, written from main.tsx tweaker */
+#sigil-tweak-dyn { display: none; }
+
+/* SIGIL · Arnold-inspired global illumination
+ * ─────────────────────────────────────────────
+ * The wallet shipped pure obsidian which felt closed-in. This layer adds a
+ * physical-lighting feel without breaking the existing themes:
+ *
+ *   ✦ skydome     — gentle warm gradient from the top (like an HDR sky)
+ *   ✦ key light   — warm pool top-right (the sun)
+ *   ✦ fill light  — cool violet pool bottom-left (the bounced sky)
+ *   ✦ rim         — sub-pixel highlight on the top edges of cards/buttons
+ *   ✦ ground AO   — soft shadow under cards (contact occlusion)
+ *   ✦ bloom       — gold accents lift, violet accents glow
+ *
+ * Implementation: body::before / body::after layers + a few generic
+ * card/button rules using rgba so the existing palette is RESPECTED.
+ * No tokens are overwritten; this is purely an additive lighting layer.
+ *
+ * Toggle: <body class="sigil-darkroom"> turns the whole layer off
+ * (matches the Quillon look if anyone wants it back).
+ */
+
+@property --skydome-warm { syntax: '<color>'; initial-value: rgba(251, 191, 36, 0); inherits: false; }
+
+html, body { background-color: #0d1620; }
+
+/* skydome — warm hint from the top, fades into obsidian */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    /* key (warm Catppuccin yellow, top-right) */
+    radial-gradient(ellipse 800px 600px at 88% -10%, rgba(249, 226, 175, 0.07) 0%, transparent 55%),
+    /* fill (Catppuccin mauve, bottom-left) */
+    radial-gradient(ellipse 700px 700px at -10% 110%, rgba(34, 211, 238, 0.16) 0%, transparent 60%),
+    /* Catppuccin sapphire bounce, bottom-right */
+    radial-gradient(ellipse 620px 520px at 108% 104%, rgba(116, 199, 236, 0.10) 0%, transparent 58%),
+    /* skydome gradient */
+    linear-gradient(180deg,
+      rgba(180, 190, 254, 0.05) 0%,
+      rgba(108, 85, 148, 0.05) 25%,
+      transparent 55%,
+      rgba(13, 22, 32, 0.0) 100%);
+  /* very slow drift so it feels alive */
+  animation: sigil-skybreathe 28s ease-in-out infinite;
+}
+body.sigil-darkroom::before { display: none; }
+
+/* secondary fill — a smaller cool patch upper-left to balance the composition */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(ellipse 500px 400px at 6% 18%, rgba(180, 190, 254, 0.07) 0%, transparent 50%),
+    /* atmospheric haze near the horizon-line of the viewport */
+    linear-gradient(180deg, transparent 70%, rgba(34, 211, 238, 0.04) 100%);
+}
+body.sigil-darkroom::after { display: none; }
+
+@keyframes sigil-skybreathe {
+  0%, 100% { opacity: 0.95; }
+  50%      { opacity: 1.0; }
+}
+
+/* make sure interactive content sits above the lighting layers */
+#root, body > * { position: relative; z-index: 1; }
+
+/* ── rim + AO on cards (additive; matches existing dark cards) ────────────── */
+:where(.card, .panel, [class*="card"], [class*="panel"], section, .glass) {
+  /* AO: soft contact shadow directly underneath */
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.05) inset,            /* rim highlight on top edge */
+    0 14px 32px -18px rgba(0, 0, 0, 0.50),              /* near AO */
+    0 30px 80px -40px rgba(108, 85, 148, 0.35);          /* far violet bounce */
+}
+
+/* gold accent bloom — every element with explicit gold colour gets a soft halo */
+[style*="rgb(251, 191, 36)"],
+[style*="#fbbf24"],
+[class*="gold"],
+.text-amber-400,
+.text-amber-300,
+.text-yellow-300,
+.text-yellow-400 {
+  filter: drop-shadow(0 0 6px rgba(251, 191, 36, 0.45));
+}
+
+/* violet accent bloom — primary action elements glow softly */
+[class*="from-violet"],
+[class*="to-violet"],
+[class*="bg-violet"],
+[class*="text-violet"],
+.text-purple-400,
+.text-purple-300 {
+  filter: drop-shadow(0 0 5px rgba(34, 211, 238, 0.32));
+}
+
+/* button bounce — a tiny key+fill on solid-violet buttons */
+button[class*="violet"],
+button[class*="purple"],
+button[class*="primary"] {
+  background-image:
+    linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0) 40%, rgba(0,0,0,0.18));
+  box-shadow:
+    0 1px 0 rgba(255,255,255,0.12) inset,
+    0 8px 18px -8px rgba(34, 211, 238, 0.5);
+}
+
+/* respect reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  body::before { animation: none; }
+}

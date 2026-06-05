@@ -1,0 +1,12 @@
+[package]
+name = "flux-ai-cms"
+version = "0.1.0"
+edition = "2021"
+description = "Headless AI-CMS demo: flux-ai-author (local qwen3.6) generates content → flux-content-api stores + delivers it as JSON. The free on-prem AI-CMS, end-to-end."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+flux-stamp = { path = "../flux-stamp" }
+flux-ai-author = { path = "../flux-ai-author" }
+flux-content-api = { path = "../flux-content-api" }

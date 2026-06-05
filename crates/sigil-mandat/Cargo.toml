@@ -1,0 +1,12 @@
+[package]
+name = "sigil-mandat"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sigil-state = { path = "../sigil-state" }
+flux-uint   = { path = "../../../flux/crates/flux-uint" }
+blake3      = { workspace = true }
+thiserror   = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }

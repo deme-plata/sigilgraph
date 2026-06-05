@@ -1,0 +1,12 @@
+[package]
+name = "sigil-citizenship"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL Nations v0.1 — on-chain citizen registry. Maps a settlement address (qnk…) to a CitizenId + franchise Tier, gated by a pluggable Attestor (SQIsign-class; crypto-agility, never hardcode the scheme in consensus). The citizen set is committed in an incremental XOR multiset accumulator so citizenship_root() is O(1) per change, order-independent, and tamper-evident — the Quillon-postmortem 'commit it in roots' discipline."
+
+[dependencies]
+serde = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,24 @@
+=== P7-F soak gate (ed25519, parallel) ===
+cores:     48
+duration:  3s
+threshold: 1000 sigs/s (PASS = worst 1s window >= this)
+batch:     10000
+
+building 10000 signed items (untimed)...
+
+soaking for 3s...
+
+  [   1s]        58018 verifies/s
+  [   2s]        58408 verifies/s
+
+════════ SOAK GATE RESULT ════════
+  host cores:       48
+  wall time:        3.0s
+  total verifies:   180000
+  per-second min:   58018 sigs/s   <- the gate looks at THIS
+  per-second avg:   60097 sigs/s
+  per-second max:   63864 sigs/s
+  overall avg:      59980 sigs/s
+  threshold:        1000 sigs/s
+
+  ✅ PASS — worst 1s window cleared the bar; sustained for 3s.

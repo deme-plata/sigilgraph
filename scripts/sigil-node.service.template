@@ -1,0 +1,84 @@
+# SIGIL node systemd unit — template
+#
+# Render per-host with:
+#   scripts/render-systemd.sh delta   → sigil-node.service.delta
+#   scripts/render-systemd.sh epsilon → sigil-node.service.epsilon
+#
+# Install on target:
+#   sudo cp sigil-node.service.<host> /etc/systemd/system/sigil-node.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now sigil-node
+#
+# Two profile flavors:
+#   delta (dedicated SIGIL node):
+#       no CPU/memory caps; the box is yours
+#   epsilon (co-located with Quillon production):
+#       CPUQuota=200% (2 cores max) + MemoryMax=4G to protect Quillon's
+#       q-api-server. SIGIL gets the leftovers, never starves the production
+#       chain. Restart policy still always-on so SIGIL recovers from OOMs
+#       without operator intervention.
+
+[Unit]
+Description=SIGIL node (DagKnight chain on Flux) — @@HOST@@
+Documentation=https://sigilgraph.com /home/storage/deepseek-codewhale/sigil/SIGIL_GENESIS_v0.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=orobit
+Group=orobit
+WorkingDirectory=/home/orobit/sigil-data
+ExecStart=/home/orobit/sigil-data/bin/sigil-node start
+
+# Network identity + storage. Absolute paths only (skill rule #3, kills the
+# Quillon Q_DB_PATH foot-gun structurally).
+Environment="SIGIL_BOOTSTRAP_PEERS=@@BOOTSTRAP_PEERS@@"
+Environment="SIGIL_DB_PATH=/home/orobit/sigil-data/db"
+Environment="RUST_LOG=info,sigil_updater=debug,sigil_net=debug"
+
+# Restart on crash, but back off so flapping doesn't spam.
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# Exit 78 (Q_PREFLIGHT_FAIL) means "boot-time state-root mismatch detected"
+# — DO NOT auto-restart on that one; operator must look. Pre-flight gate
+# from skill rule #7 lands in a future commit; reservation here so we don't
+# forget to wire it.
+RestartPreventExitStatus=78
+
+# Resource caps — uncomment ONE of the two sets:
+
+##@@PROFILE_DELTA_BEGIN@@
+# Delta profile (dedicated SIGIL node, 1 Gbit, no neighbours): no caps.
+##@@PROFILE_DELTA_END@@
+
+##@@PROFILE_EPSILON_BEGIN@@
+# Epsilon profile (co-located with Quillon production): cap SIGIL so it
+# can't steal CPU/RAM from q-api-server. Production stays sacred.
+# CPUQuota=200%
+# MemoryMax=4G
+# MemoryHigh=3G
+# IOWeight=50
+##@@PROFILE_EPSILON_END@@
+
+# Security hardening — minimal capabilities, read-only root, private /tmp.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/orobit/sigil-data
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+
+# Journal output goes to systemd-journald; query via:
+#   journalctl -u sigil-node -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sigil-node
+
+[Install]
+WantedBy=multi-user.target

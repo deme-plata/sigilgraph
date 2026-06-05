@@ -1,0 +1,146 @@
+\hypertarget{chapter-13-the-sync-that-lied}{%
+\section{Chapter 13: The Sync That
+Lied}\label{chapter-13-the-sync-that-lied}}
+
+\begin{quote}
+\itshape ``The cruelest lie is not \emph{you are wrong}. It is \emph{you remember
+too much}.''\\
+\normalfont\hfill---verify-before-sync field note
+\end{quote}
+
+\hypertarget{scene-1-the-shorter-history}{%
+\subsection{Scene 1: The Shorter
+History}\label{scene-1-the-shorter-history}}
+
+Of all the ways to kill a thing that cannot be bribed or counterfeited, the
+oldest and quietest is to convince it that less happened than it remembers.
+
+Elena Voss had seen people destroyed this way---assets persuaded that the years
+they had given had never been logged, operatives told the missions they
+remembered were administrative errors. Memory was the softest target in any
+system, because a system that doubts its own past will accept almost any present
+offered to replace it.
+
+The attack on the Sigil came dressed as good news. A peer appeared on the
+network---well-connected, fast, generous---announcing a chain. Not a longer one.
+A \emph{shorter} one. It claimed, with perfect cryptographic politeness, that the
+true history was thousands of blocks behind where every honest node believed it to
+be, and it offered, helpfully, to bring everyone back into agreement.
+
+``If a node believes it,'' Wren said, very quietly, watching the announcement
+propagate, ``it doesn't just adopt a wrong number. It \emph{deletes}. It throws
+away every block past the lie, and every balance those blocks recorded, and calls
+it housekeeping. Thousands of blocks of real history, gone, because a stranger
+said \emph{you remember too much}.''
+
+Elena understood the horror of it immediately, because it was the exact shape of
+the thing she had spent her life resisting. ``It's not stealing the money,'' she
+said. ``It's stealing the \emph{proof the money was ever yours}.''
+
+\hypertarget{scene-2-the-handshake}{%
+\subsection{Scene 2: The
+Handshake}\label{scene-2-the-handshake}}
+
+The defense, Wren explained, was a rule so simple it sounded like cowardice, and
+so important that the whole network's survival rested on it: \emph{a node must
+never, under any circumstances, follow a peer downward.}
+
+``Forward, with proof, gladly,'' she said. ``If a peer has more history than I do,
+I demand it show me---block by verifiable block, each one valid, each one building
+on the last---and only then do I adopt it. But \emph{backward}? Never. A peer that
+asks me to discard history I can prove I hold is, by definition, either broken or
+hostile. There is no honest reason to ask someone to remember less. The node
+doesn't argue. It simply refuses to shrink.''
+
+It was a handshake before a sync---a verification before trust, the same liturgy
+as everything else here. \emph{Show me yours is longer and every block of it is
+true, or I keep mine.} The poisoned peer's shorter chain, however politely
+offered, could never satisfy it, because shorter was the one thing the rule would
+not accept.
+
+``So why is anyone worried?'' Elena asked. ``If the rule holds, the lie just
+bounces off.''
+
+``Because rules live in code,'' Wren said, ``and someone is about to argue that
+this one is too strict.''
+
+\hypertarget{scene-3-the-reasonable-exception}{%
+\subsection{Scene 3: The Reasonable
+Exception}\label{scene-3-the-reasonable-exception}}
+
+The release came through the quorum at the worst possible moment, when half the
+network was distracted defending against the false peer. It was, of course,
+beautifully reasonable. It proposed a small relaxation: that in cases of
+``severe network partition,'' to ``aid recovery,'' a node might be permitted to
+follow a peer to a \emph{slightly} lower height, if enough peers agreed on it.
+
+A tolerance. Again. The same blade, the same handle, worn smooth now by Elena's
+recognition.
+
+``They're not attacking the rule,'' she said. ``They're attacking the word
+\emph{never}. Turn \emph{never} into \emph{usually}, and the false peer doesn't
+need to convince a node anymore. It just needs to bring enough friends to vote
+that everyone remembers too much.''
+
+She did what she had learned to do. She did not plead. She published a
+proof---plain, reproducible, gossiped to the whole network---demonstrating
+exactly what the relaxation permitted: a path, narrow but real, by which a
+coordinated set of liars could march the entire chain backward and erase whatever
+history stood between the truth and their preferred past. Not a recovery
+mechanism. A demolition permit with good manners.
+
+The network read the proof, and the network did the arithmetic, and the
+relaxation died at five signatures with a sixth recoiling visibly. \emph{Never}
+survived, as a word and as a wall.
+
+\hypertarget{scene-4-what-a-chain-is-for}{%
+\subsection{Scene 4: What a Chain Is
+For}\label{scene-4-what-a-chain-is-for}}
+
+The false peer, finding no node willing to shrink and no rule willing to bend, did
+what lies do when no one believes them. It withered. Its announcements grew
+quieter, then stopped, the way a rumor stops when the last person who might have
+repeated it decides to check first.
+
+Later, on the rooftop that had become their place of after, Wren said: ``You know
+what you actually defended tonight. It wasn't the balances.''
+
+``It was the \emph{continuity},'' Elena said. She was looking east, where the sky
+was the gray of a screen waking up. ``The thing the Veil never had. A history that
+can grow but cannot be made to forget. That's what a chain is \emph{for}---not to
+remember everything, anyone can remember. To make forgetting require everyone's
+honest consent, and to make dishonest forgetting impossible to hide.''
+
+She thought of the burned years of her old life, the missions unlogged, the proof
+erased by people who owned the records. She had spent two years certain that the
+best a person could do was carry the truth alone and hope to outlive the people
+who denied it.
+
+She had been wrong about that too. You did not have to carry it alone.
+
+You could put it somewhere that refused to shrink.
+
+\hypertarget{chapter-13-notes}{%
+\subsection{Chapter Notes}\label{chapter-13-notes}}
+
+\begin{itemize}
+\tightlist
+\item
+  \textbf{The sync-down attack.} The chapter dramatizes a real catastrophic
+  failure mode: a node persuaded that the canonical chain is \emph{shorter} than
+  its own may discard valid history and the balances it recorded. The danger is
+  data loss, not theft of a key.
+\item
+  \textbf{Never follow a peer downward.} The defense is an asymmetry: adopt a
+  longer chain only after verifying every block, but \emph{never} shrink to match
+  a shorter one. There is no honest reason to ask a node to remember less.
+\item
+  \textbf{Verify before you sync.} A handshake that demands proof of a longer,
+  valid history before adoption is the same ``verify before you trust'' liturgy
+  applied to history itself.
+\item
+  \textbf{The word ``never'' as the real target.} The recurring antagonist
+  doesn't attack the rule head-on; it proposes a reasonable-sounding exception
+  that converts ``never'' into ``usually,'' which is all a coordinated attacker
+  needs. Defending the absoluteness of the rule is the chapter's quiet climax.
+\end{itemize}

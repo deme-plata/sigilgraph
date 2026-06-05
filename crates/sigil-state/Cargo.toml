@@ -1,0 +1,35 @@
+[package]
+name = "sigil-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL state SMTs + the commit_state_transition chokepoint — the one place state writes are allowed. flux_ai_audit enforces this at MIR time."
+
+# All write APIs are `pub(crate)`. External code can only mutate state by
+# constructing a StateTransition and passing it through
+# commit_state_transition(). That gives us a single auditable surface where
+# we can attach a STARK proof, recompute the 4 roots, and gate writes on the
+# pre-flight check.
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+blake3     = { workspace = true }
+thiserror  = { workspace = true }
+
+sigil-header = { path = "../sigil-header" }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+# stargate_500m.rs / sig_wall.rs / sig_agg.rs — measure the REAL wall
+# (signature verification) next to state-commitment throughput.
+ed25519-dalek = { version = "2.2", features = ["rand_core", "batch"] }
+rand = "0.8"
+flux-sqisign = { path = "../../../flux/crates/flux-sqisign" }
+# sig_agg.rs — proof-carrying-block cost structure (O(1)-in-N verify).
+flux-zk-stark = { path = "../../../flux/crates/flux-zk-stark" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# flux_vdf_lane.rs — the sequential VDF lane (Wesolowski repeated squaring).
+num-bigint = "0.4"
+num-integer = "0.1"
+num-traits = "0.2"

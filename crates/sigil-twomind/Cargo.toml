@@ -1,0 +1,8 @@
+[package]
+name = "sigil-twomind"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TWO-MIND — the seatbelt for agentic money. Every wallet action runs through a PROPOSER (throughput model) → a VETOER (judgment model) → a 2-of-2 Gate. Money class sets the bar: read-only fast-tracks, governance needs 2-of-2, real money ALWAYS requires a human even on a clean 2-of-2. The output is an auditable Decision recording exactly who signed and why — makes any LLM safe to hand a wallet."
+
+[dependencies]

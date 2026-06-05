@@ -1,0 +1,32 @@
+[package]
+name = "sigil-net-wg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL WireGuard transport layer — typed keypairs, peer config, and a backend trait. Default backend shells out to wg/wg-quick; `boringtun` userspace backend slots in P1 when the dep weight is justified. Includes a Rosenpass-style hybrid PQ pre-shared-key stub that lands real Kyber-1024 augmentation when flux-eternal-cypher ports."
+
+# Layering:
+#   sigil-net (gossipsub over libp2p) ──> sigil-net-wg ──> kernel WireGuard
+#   sigil-net (gossipsub over libp2p) ──> sigil-net-tor (Arti) ──> internet
+#   sigil-net (gossipsub over libp2p) ──> sigil-net-wg ──> sigil-net-tor (egress)
+#
+# This crate exposes the WG layer only. Composition with Tor lives in
+# sigil-net (the SigilTransport enum) so a single SigilNetConfig can carry
+# all three modes without circular deps.
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+blake3     = { workspace = true }
+thiserror  = { workspace = true }
+
+# Curve25519 keygen — same primitive WireGuard uses for its base layer.
+# Kept minimal — feature flags off, no x25519_diffie_hellman static keys.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+rand_core    = { version = "0.6", features = ["getrandom"] }
+# Base64 because that's the only encoding `wg`/`wg-quick` accept on stdin.
+base64       = "0.22"
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile   = "3"

@@ -1,0 +1,21 @@
+[package]
+name = "sigil-header"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL block header v0 — schema-locked container for the 4 state roots, VDF, SQIsign nonce-magic, fluxc provenance, producer signature."
+
+# Phase 0: defines the on-the-wire layout + serialization + content-addressed
+# hash. Real cryptographic verification is delegated to dependencies that will
+# land in later phases (flux-sqisign for nonce + sig, flux-vdf for Wesolowski,
+# flux-zk-stark for state_transition_proof, flux-zk for fluxc artifact proof).
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+blake3     = { workspace = true }
+hex        = { workspace = true }
+thiserror  = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

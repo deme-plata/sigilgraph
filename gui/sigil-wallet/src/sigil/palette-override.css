@@ -1,0 +1,229 @@
+/* SIGIL palette override — Catppuccin Mocha re-skin of the Quillon app
+ * ────────────────────────────────────────────────────────────────────────
+ * This layer re-colors the QUILLON Tailwind utility classes (bg-gray-900,
+ * text-emerald-400, …) that make up the actual wallet SCREENS. The SIGIL
+ * chrome (ribbon/HUD/home/frame) is themed separately by hyprland.css.
+ *
+ * v3 (2026-05-31): switched the whole mapping from SIGIL-violet to
+ * Catppuccin Mocha so the app BODY matches the hyprland chrome — the wallet
+ * now reads as one coherent Hyprland desktop instead of violet-app +
+ * catppuccin-chrome. Palette:
+ *   base #0d1620 · mantle #0a141a · crust #060e12
+ *   surface0 #122b35 · surface1 #1b3d49 · surface2 #245466
+ *   text #cfeaf2 · subtext #8fb3bf · overlay #5a7e8a
+ *   mauve #22d3ee (primary) · pink #67e8f9 · lavender #67e8f9
+ *   sky #7dd3fc · sapphire #38bdf8 · teal #94e2d5 · green #a6e3a1
+ *   yellow #f9e2af · peach #fab387 · red #f38ba8
+ *
+ * Selector pattern: `body:not(.sigil-original) .X` + `body[data-theme] .X`
+ * with !important so it outranks the existing Quillon theme CSS.
+ * To OPT OUT (return to Quillon look) add class `sigil-original` on body.
+ */
+
+/* ───── BACKGROUNDS → Catppuccin surfaces ───────────────────────────── */
+body:not(.sigil-original) .bg-gray-950,
+body:not(.sigil-original) .bg-slate-950,
+body:not(.sigil-original) .bg-zinc-950,
+body:not(.sigil-original) .bg-black { background-color: #060e12 !important; }
+
+body:not(.sigil-original) .bg-gray-900,
+body:not(.sigil-original) .bg-slate-900,
+body:not(.sigil-original) .bg-zinc-900 { background-color: #0a141a !important; }
+
+body:not(.sigil-original) .bg-gray-800,
+body:not(.sigil-original) .bg-slate-800,
+body:not(.sigil-original) .bg-zinc-800 { background-color: #122b35 !important; }
+
+body:not(.sigil-original) .bg-gray-700,
+body:not(.sigil-original) .bg-slate-700,
+body:not(.sigil-original) .bg-zinc-700 { background-color: #1b3d49 !important; }
+
+body:not(.sigil-original) .bg-gray-600,
+body:not(.sigil-original) .bg-slate-600,
+body:not(.sigil-original) .bg-zinc-600 { background-color: #245466 !important; }
+
+/* alpha modifiers (bg-slate-800/50 etc) */
+body:not(.sigil-original) [class*="bg-slate-800/"],
+body:not(.sigil-original) [class*="bg-slate-900/"],
+body:not(.sigil-original) [class*="bg-gray-800/"],
+body:not(.sigil-original) [class*="bg-gray-900/"] {
+  background-color: rgba(18, 43, 53, 0.65) !important;
+}
+
+/* Quillon themed body backgrounds — explicit overrides so we beat them */
+body[data-theme] { background-color: #0d1620 !important; }
+body[data-theme] .min-h-full { background-color: transparent !important; }
+body[data-theme] .topbar-main { background: linear-gradient(135deg, rgba(18, 43, 53,0.95), rgba(10, 20, 26,0.95)) !important; border-color: rgba(34, 211, 238,0.20) !important; }
+
+/* ───── ACCENT FAMILIES → Catppuccin mauve (emerald/green/teal/cyan) ─── */
+body:not(.sigil-original) .bg-emerald-500,
+body:not(.sigil-original) .bg-emerald-600,
+body:not(.sigil-original) .bg-green-500,
+body:not(.sigil-original) .bg-green-600,
+body:not(.sigil-original) .bg-teal-500,
+body:not(.sigil-original) .bg-teal-600,
+body:not(.sigil-original) .bg-cyan-500,
+body:not(.sigil-original) .bg-cyan-600 { background-color: #22d3ee !important; }
+
+body:not(.sigil-original) .bg-emerald-400,
+body:not(.sigil-original) .bg-green-400,
+body:not(.sigil-original) .bg-teal-400,
+body:not(.sigil-original) .bg-cyan-400 { background-color: #67e8f9 !important; }
+
+body:not(.sigil-original) .bg-emerald-700,
+body:not(.sigil-original) .bg-emerald-800,
+body:not(.sigil-original) .bg-emerald-900,
+body:not(.sigil-original) .bg-green-700,
+body:not(.sigil-original) .bg-green-800,
+body:not(.sigil-original) .bg-green-900 { background-color: #0e7490 !important; }
+
+body:not(.sigil-original) .text-emerald-300,
+body:not(.sigil-original) .text-emerald-400,
+body:not(.sigil-original) .text-green-300,
+body:not(.sigil-original) .text-green-400,
+body:not(.sigil-original) .text-teal-300,
+body:not(.sigil-original) .text-teal-400,
+body:not(.sigil-original) .text-cyan-300,
+body:not(.sigil-original) .text-cyan-400 { color: #67e8f9 !important; }
+
+body:not(.sigil-original) .text-emerald-500,
+body:not(.sigil-original) .text-emerald-600,
+body:not(.sigil-original) .text-green-500,
+body:not(.sigil-original) .text-green-600,
+body:not(.sigil-original) .text-teal-500,
+body:not(.sigil-original) .text-teal-600,
+body:not(.sigil-original) .text-cyan-500,
+body:not(.sigil-original) .text-cyan-600 { color: #22d3ee !important; }
+
+body:not(.sigil-original) .border-emerald-400,
+body:not(.sigil-original) .border-emerald-500,
+body:not(.sigil-original) .border-green-400,
+body:not(.sigil-original) .border-green-500,
+body:not(.sigil-original) .border-cyan-400,
+body:not(.sigil-original) .border-cyan-500,
+body:not(.sigil-original) .border-teal-400,
+body:not(.sigil-original) .border-teal-500 { border-color: rgba(34, 211, 238, 0.45) !important; }
+
+/* themed-aware: even higher specificity for the data-theme blocks */
+body[data-theme] .text-emerald-300,
+body[data-theme] .text-emerald-400,
+body[data-theme] .text-green-300,
+body[data-theme] .text-green-400,
+body[data-theme] .text-cyan-300,
+body[data-theme] .text-cyan-400 { color: #67e8f9 !important; }
+
+/* ───── PURPLE/VIOLET/INDIGO — clamp to Catppuccin mauve ──────────────── */
+body:not(.sigil-original) .bg-purple-500,
+body:not(.sigil-original) .bg-purple-600,
+body:not(.sigil-original) .bg-violet-500,
+body:not(.sigil-original) .bg-violet-600,
+body:not(.sigil-original) .bg-indigo-500,
+body:not(.sigil-original) .bg-indigo-600 { background-color: #22d3ee !important; }
+
+body:not(.sigil-original) .text-purple-300,
+body:not(.sigil-original) .text-purple-400,
+body:not(.sigil-original) .text-violet-300,
+body:not(.sigil-original) .text-violet-400,
+body:not(.sigil-original) .text-indigo-300,
+body:not(.sigil-original) .text-indigo-400 { color: #67e8f9 !important; }
+
+/* ───── BLUE / SKY → Catppuccin sapphire/sky ──────────────────────────── */
+body:not(.sigil-original) .bg-blue-500,
+body:not(.sigil-original) .bg-blue-600,
+body:not(.sigil-original) .bg-sky-500,
+body:not(.sigil-original) .bg-sky-600 { background-color: #38bdf8 !important; }
+
+body:not(.sigil-original) .text-blue-300,
+body:not(.sigil-original) .text-blue-400,
+body:not(.sigil-original) .text-sky-300,
+body:not(.sigil-original) .text-sky-400 { color: #7dd3fc !important; }
+
+/* ───── AMBER / YELLOW → Catppuccin yellow ───────────────────────────── */
+body:not(.sigil-original) .bg-amber-400,
+body:not(.sigil-original) .bg-amber-500,
+body:not(.sigil-original) .bg-yellow-400,
+body:not(.sigil-original) .bg-yellow-500 { background-color: #f9e2af !important; }
+
+body:not(.sigil-original) .text-amber-300,
+body:not(.sigil-original) .text-amber-400,
+body:not(.sigil-original) .text-amber-500,
+body:not(.sigil-original) .text-yellow-300,
+body:not(.sigil-original) .text-yellow-400,
+body:not(.sigil-original) .text-yellow-500 { color: #f9e2af !important; }
+
+body[data-theme] .text-amber-300,
+body[data-theme] .text-amber-400 { color: #f9e2af !important; }
+
+/* ───── BORDERS — generic gray → soft mauve ──────────────────────────── */
+body:not(.sigil-original) .border-gray-700,
+body:not(.sigil-original) .border-gray-800,
+body:not(.sigil-original) .border-slate-700,
+body:not(.sigil-original) .border-slate-800,
+body:not(.sigil-original) .border-zinc-700,
+body:not(.sigil-original) .border-zinc-800 { border-color: rgba(34, 211, 238, 0.18) !important; }
+
+body:not(.sigil-original) .border-gray-600,
+body:not(.sigil-original) .border-slate-600,
+body:not(.sigil-original) .border-zinc-600 { border-color: rgba(34, 211, 238, 0.28) !important; }
+
+/* ───── TEXT — keep gray text legible on the new Catppuccin panels ────── */
+body:not(.sigil-original) .text-gray-300,
+body:not(.sigil-original) .text-slate-300,
+body:not(.sigil-original) .text-zinc-300 { color: #cfeaf2 !important; }
+
+body:not(.sigil-original) .text-gray-400,
+body:not(.sigil-original) .text-slate-400,
+body:not(.sigil-original) .text-zinc-400 { color: #8fb3bf !important; }
+
+body:not(.sigil-original) .text-gray-500,
+body:not(.sigil-original) .text-slate-500,
+body:not(.sigil-original) .text-zinc-500 { color: #6f96a3 !important; }
+
+body:not(.sigil-original) .text-gray-600,
+body:not(.sigil-original) .text-slate-600,
+body:not(.sigil-original) .text-zinc-600 { color: #5a7e8a !important; }
+
+/* ───── GRADIENTS — re-tint common emerald/cyan → mauve/pink ─────────── */
+body:not(.sigil-original) [class*="from-emerald"],
+body:not(.sigil-original) [class*="from-green"],
+body:not(.sigil-original) [class*="from-cyan"],
+body:not(.sigil-original) [class*="from-teal"] {
+  --tw-gradient-from: #22d3ee var(--tw-gradient-from-position) !important;
+  --tw-gradient-to: rgba(34, 211, 238, 0) var(--tw-gradient-to-position) !important;
+  --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
+}
+body:not(.sigil-original) [class*="to-emerald"],
+body:not(.sigil-original) [class*="to-green"],
+body:not(.sigil-original) [class*="to-cyan"],
+body:not(.sigil-original) [class*="to-teal"] {
+  --tw-gradient-to: #67e8f9 var(--tw-gradient-to-position) !important;
+}
+body:not(.sigil-original) [class*="via-emerald"],
+body:not(.sigil-original) [class*="via-green"],
+body:not(.sigil-original) [class*="via-cyan"],
+body:not(.sigil-original) [class*="via-teal"] {
+  --tw-gradient-via: #0e7490 var(--tw-gradient-via-position) !important;
+  --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-via), var(--tw-gradient-to) !important;
+}
+
+/* ───── ring / shadow tints ──────────────────────────────────────────── */
+body:not(.sigil-original) [class*="ring-emerald"],
+body:not(.sigil-original) [class*="ring-green"],
+body:not(.sigil-original) [class*="ring-cyan"],
+body:not(.sigil-original) [class*="ring-teal"] { --tw-ring-color: rgba(34, 211, 238, 0.5) !important; }
+
+body:not(.sigil-original) [class*="shadow-emerald"],
+body:not(.sigil-original) [class*="shadow-green"],
+body:not(.sigil-original) [class*="shadow-cyan"],
+body:not(.sigil-original) [class*="shadow-teal"] { --tw-shadow-color: rgba(34, 211, 238, 0.4) !important; }
+
+/* ───── Force Quillon's theme variables to Catppuccin ─────────────────── */
+body[data-theme] {
+  --theme-bg: #0d1620 !important;
+  --theme-panel: #122b35 !important;
+  --theme-accent: #22d3ee !important;
+  --theme-accent-bright: #67e8f9 !important;
+  --theme-gold: #f9e2af !important;
+  --theme-text: #cfeaf2 !important;
+  --theme-muted: #8fb3bf !important;
+}

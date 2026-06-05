@@ -1,0 +1,22 @@
+[package]
+name = "sigil-oauth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "sigil-oauth — OAuth2 (authorization-code + PKCE) with a DNS-ANCHORED, post-quantum trust root. The Authorization Server's key lives in a DNS TXT record (DoH-verified), users sign in with their SIGIL wallet (no passwords), and access tokens are signed by the AS key so they verify OFFLINE (no introspection). OAuth2 minus its central points of trust."
+
+[dependencies]
+blake3     = { workspace = true }
+sha2       = { workspace = true }
+hex        = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+rand       = { workspace = true }
+# Crypto-agility: real SQIsign Level-5 (292B sig / 129B pubkey) for the issuer key + DNS anchor.
+# Cross-workspace path dep into the flux repo (sibling of sigil/). alg="sqisign5" dispatches here.
+flux-sqisign = { path = "../../../flux/crates/flux-sqisign" }
+
+[[bin]]
+name = "sigil-oauth"
+path = "src/bin/sigil-oauth.rs"

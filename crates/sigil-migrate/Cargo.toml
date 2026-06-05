@@ -1,0 +1,22 @@
+[package]
+name = "sigil-migrate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL day-one migration: import the entire Quillon economy (tokens, DEX pools, qcredit, qshare, defi indexes, memecoins) into SIGIL genesis as a SIGNED SNAPSHOT — not a live bridge. A QuillonSnapshot taken at Quillon height H maps deterministically to a Vec<StateMutation> for genesis, with a blake3 manifest root committed into SIGIL block 0 (provenance-anchored, reproducible, auditable)."
+
+# WHY a snapshot, not a bridge: Quillon block production isn't finalizing
+# (libp2p UnsupportedProtocols stall). A live two-chain bridge inherits every
+# one of those failures + replay/double-mint risk. A one-time authenticated
+# snapshot is static (can't double-spend), provenance-anchored (Quillon block
+# hash + manifest root in SIGIL block 0), survives Quillon being down (HTTP
+# reads work even with P2P broken), and is auditable forever (re-derive + diff).
+
+[dependencies]
+sigil-state = { path = "../sigil-state" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]

@@ -1,0 +1,10 @@
+[package]
+name = "sigil-treasury"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL Nations v0.4 — the foundation treasury. Collects the 10% dev fee on settled work, commits the balance in a root, and protects it with a MAX-WINS watermark: a stale/partial sync can never lower the balance (the literal fix for the Quillon save_wallet_balances bug that dropped a wallet 3200→1484). The ONLY way the balance goes down is a council-2of2-gated payout. No master key, no silent drift — owned by everyone, moved by quorum."
+
+[dependencies]
+blake3 = { workspace = true }
+hex = { workspace = true }

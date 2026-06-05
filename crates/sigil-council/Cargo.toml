@@ -1,0 +1,10 @@
+[package]
+name = "sigil-council"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL Nations v0.2 — fast-track governance. Proposals are risk-classed: LowRisk passes 1-of-2 (dev moves fast), MoneyOrConsensus needs a strict 2-of-2 + a 2/3 franchise supermajority + quorum. Votes are franchise-weighted from citizenship tiers. Every DECIDED proposal is committed into gov_root (incremental XOR accumulator) so the governance record is O(1), order-independent, and can't silently drift — the Quillon-postmortem 'commit it in roots' fix, by construction."
+
+[dependencies]
+blake3 = { workspace = true }
+hex = { workspace = true }

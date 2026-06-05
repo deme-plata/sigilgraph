@@ -1,0 +1,16 @@
+[package]
+name = "flux-nation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-nation — the consent-signed prototype behind nation.html. Wraps sigil-rpc::nation citizen primitives (attest/pay-utility/e-Boks) with REAL post-quantum MitID-style consent (flux-sqisign): every borger action requires a per-action SQIsign signature the chain + a lightweight node can verify. The gov data source is a swappable backend (LocalPrototype now; NemLog-in broker = NotOnboarded until official onboarding). Real crypto, real state, real conservation — only the broker agreement is pending."
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+blake3     = { workspace = true }
+thiserror  = { workspace = true }
+sigil-state = { path = "../sigil-state" }
+sigil-rpc   = { path = "../sigil-rpc" }
+# REAL post-quantum consent signing (MitID-style, per-action) — the citizen's key.
+flux-sqisign = { workspace = true }

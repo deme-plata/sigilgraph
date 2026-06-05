@@ -1,0 +1,14 @@
+[package]
+name = "sigil-btc-miner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "sigil-btc-miner — Prototype-1 EXPERIMENT: a Bitcoin SHA256d side-miner that uses only ~10% of CPU cores (CUDA GPU path = Vast follow-on), submits shares to the provable flux-pool, and reports HONEST expected yield. Inspired by our own miner; produces tiny amounts destined for Bitcoin LN payouts via flux-pool → sigil-bridge. Connects to Delta's Bitcoin Knots over the secret WireGuard. NOT a revenue path (CPU/GPU SHA256d ≈ 0 mainnet BTC) — it proves the share→pool→LN-payout pipeline + measures real hashrate."
+
+[dependencies]
+sha2      = { workspace = true }
+flux-pool = { path = "../flux-pool" }
+
+[[bin]]
+name = "sigil-btc-miner"
+path = "src/bin/sigil-btc-miner.rs"

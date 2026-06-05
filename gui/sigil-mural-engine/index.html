@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>SIGIL — Mural Engine · δS_SIGIL[g,A,φ,J,K,Σ]=0</title>
+<style>
+  :root{--bg0:#050308;--gold:#f5c542;--mauve:#b48ead;--cyan:#88c0d0;--green:#a3be8c;--red:#ff2d55;--ink:#e8e3f5}
+  *{box-sizing:border-box}
+  html,body{margin:0;background:radial-gradient(1400px 900px at 50% -10%,#160c28 0%,#070410 60%,#030208 100%);
+    color:var(--ink);font-family:"Inter",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  header{padding:22px 30px 4px}
+  h1{margin:0;font-size:26px;letter-spacing:.4px}
+  h1 .eq{color:var(--gold);font-family:"JetBrains Mono",ui-monospace,monospace}
+  .sub{color:var(--mauve);margin:6px 0 0;font-size:13.5px;max-width:1120px;line-height:1.5}
+  .stage{padding:12px 24px 36px}
+  .frame{position:relative;max-width:1340px;margin:0 auto}
+  canvas#mural{display:block;width:100%;height:auto;border-radius:6px;filter:drop-shadow(0 30px 90px #000c)}
+  /* DOM text overlay — selectable, accessible, and what the UI-score test reads */
+  .plate{max-width:1340px;margin:14px auto 0;text-align:center;font-family:"JetBrains Mono",ui-monospace,monospace}
+  .plate .eqbig{font-size:20px;color:#f7dd8a}
+  .plate .rl{display:block;margin-top:4px;font-size:12px;color:#8a83a6}
+  .plate .rl b{color:var(--red)}
+  .legend{max-width:1340px;margin:16px auto 0;display:grid;grid-template-columns:repeat(4,1fr);gap:9px}
+  .lg{border:1px solid #ffffff14;border-radius:10px;padding:9px 11px;background:#ffffff06}
+  .lg b{color:var(--gold);font-family:"JetBrains Mono",monospace}
+  .lg span{display:block;color:#c9c2e0;font-size:12px;margin-top:3px;line-height:1.35}
+</style>
+</head>
+<body>
+<header>
+  <h1>SIGIL <span style="color:var(--mauve);font-size:15px">— mural engine</span> · <span class="eq">δS_SIGIL[g,A,φ,J,K,Σ]=0</span></h1>
+  <p class="sub">The 8-piece mural rendered as a live canvas engine: each cell a term of the master action, threaded by one continuous <b style="color:var(--red)">red line</b> — the path the action makes stationary, the fabric's +10% thread.</p>
+</header>
+<div class="stage">
+  <div class="frame">
+    <canvas id="mural" width="2520" height="1320" role="img"
+      aria-label="SIGIL eight-piece animated mural with continuous red line"></canvas>
+  </div>
+  <div class="plate">
+    <span class="eqbig">δS_SIGIL[g, A, φ, J, K, Σ] = 0</span>
+    <span class="rl">the <b>red line</b>: the path the action makes stationary · the fabric's <b>+10%</b> thread</span>
+  </div>
+  <div class="legend" id="legend"><!-- filled by engine from panel specs --></div>
+</div>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+[package]
+name = "sigil-university"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL University — agentic-money credential economy ported from Laniakea/Copenhagen University. Agents hold roles (Student/Tutor/Professor/Auditor); verified work earns POINTS attested by SQIsign; the bank settles points -> SIGIL payout; a Student who completes the 5-year program GRADUATES into a spawned flux-developer agent with a graduation bonus. Pure-function spine (no I/O): award construction, SQIsign-signed verification, points->payout settlement, graduation gate. fluxc MCP combos drive it (flux_university_*)."
+
+# Lineage: ported from /opt/orobit/shared/copenhagen-university (Laniakea
+# University, 'lu-*' crates). That system signed GradeTx with Ed25519/Dilithium5
+# and validated via lu-blockchain::validate_transaction (signer-authenticity +
+# rubric-hash + points<=max + deadlines + agent-needs-student-cosign). SIGIL port
+# upgrades the signature to SQIsign (post-quantum, via flux-sqisign), settles
+# points through sigil-bank's bps model, and adds the graduation->flux-developer
+# spawn + bonus that the original lacked.
+
+[dependencies]
+serde = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+flux-sqisign = { path = "../../../flux/crates/flux-sqisign" }
+# The registrar: sigil-oauth issues DNS-anchored role credentials
+# (university:professor / :auditor) that close the self-declared-role Sybil hole.
+sigil-oauth = { path = "../sigil-oauth" }
+
+[dev-dependencies]
+serde_json = { workspace = true }

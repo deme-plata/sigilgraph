@@ -1,0 +1,24 @@
+=== P7-E: parallel sig-verify speedup (ed25519) ===
+cores: 48
+
+building 10000 signed items (outside timing)...
+
+── single-thread ──
+  10000 verifies in 1.313928106s
+  7611 verifies/sec
+
+── parallel (48 cores) ──
+  10000 verifies in 133.643837ms
+  74826 verifies/sec
+
+── all_valid_parallel (block gate) ──
+  all 10000 valid: true in 127.470714ms
+
+════════ THE WALL MOVES ════════
+  single-thread: 7611 verifies/s
+  parallel:      74826 verifies/s
+  speedup:       9.8× across 48 cores (20% of linear)
+
+  → at 10k-tx blocks, parallel verify turns the ed25519 wall
+    from a single-core bottleneck into an all-core one. Composes
+    with P7-A (verify-once on ingest) + P7-C (hot/settlement split).

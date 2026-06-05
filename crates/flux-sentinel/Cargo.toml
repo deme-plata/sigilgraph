@@ -1,0 +1,11 @@
+[package]
+name = "flux-sentinel"
+version = "0.1.0"
+edition = "2021"
+description = "Sentient (adaptive-heuristic) defensive scanner for the Flux/SIGIL fleet — signatures + entropy + IOC patterns + a learnable threat model. Detect, score, quarantine; never evade."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+flux-stamp = { path = "../flux-stamp" }

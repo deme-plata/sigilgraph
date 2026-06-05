@@ -1,0 +1,30 @@
+[package]
+name = "flux-miner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The dual-lane Flux miner: BLAKE4 proof-of-work (the POWER lane, Φ) + a Wesolowski VDF (the TIME lane, Ω). A valid block carries BOTH — power can't fake time, time can't fake power. Chain-agnostic; copies Quillon's standalone miner+node, Flux-native."
+
+[dependencies]
+flux-vdf   = { workspace = true }
+flux-fold  = { workspace = true }   # the succinct lattice backend (v0.3 light-node + block-proof folding)
+blake3     = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+anyhow     = { workspace = true }
+num-bigint = { workspace = true }
+# challenge/submit HTTP client — rustls (no openssl) so the miner stays a portable
+# single-binary download (musl / windows-gnu).
+reqwest    = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+# the light ECONOMIC node's earning engine: price + arb + sentiment + DCA (propose-only).
+flux-market = { path = "../../../flux/crates/flux-market" }
+# reference mining node (flux-mining-node bin) + the roundtrip test's mock node.
+tiny_http  = "0.12"
+
+[[bin]]
+name = "flux-miner"
+path = "src/bin/flux-miner.rs"
+
+[[bin]]
+name = "flux-mining-node"
+path = "src/bin/flux-mining-node.rs"

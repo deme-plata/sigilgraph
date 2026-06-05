@@ -1,0 +1,21 @@
+[package]
+name = "sigil-dex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL constant-product AMM — pure-function port of q-dex's swap/liquidity math, u128 reserves, integer basis-point fees, no I/O. Plugs into commit_state_transition via sigil-tx + sigil-state."
+
+# Phase 0 dep budget — no async, no tokio, no networking, no flux-db. This
+# crate is pure arithmetic over a Pool snapshot. Callers (sigil-tx today,
+# sigil-state's chokepoint tomorrow) own the I/O and the persistence; this
+# crate just answers "given these reserves + this fee, what's the outcome?"
+# and "what's the LP share allocation for this deposit?". Same shape as the
+# math half of q-dex/liquidity.rs, minus the BigDecimal + tokio + golden-ratio
+# cosmetic flourishes.
+
+[dependencies]
+serde     = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

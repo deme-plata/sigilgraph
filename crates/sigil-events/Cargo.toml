@@ -1,0 +1,23 @@
+[package]
+name = "sigil-events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Typed event ledger for SIGIL — every state mutation that matters to a wallet/indexer surfaces here, with deterministic encoding + Merkle root + inclusion-proof shape."
+
+# Genesis §4: every chain action ends as a SigilEvent. The encoding is
+# deterministic (canonical JSON in Phase 0, bincode in P3), so the
+# event_log_root in the header is reproducible by any node from the same
+# tx set.
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+blake3     = { workspace = true }
+thiserror  = { workspace = true }
+
+sigil-header = { path = "../sigil-header" }
+sigil-state  = { path = "../sigil-state" }
+
+[dev-dependencies]
+serde_json = { workspace = true }

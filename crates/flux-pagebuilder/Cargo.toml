@@ -1,0 +1,9 @@
+[package]
+name = "flux-pagebuilder"
+version = "0.1.0"
+edition = "2021"
+description = "Flux boilerplate — flux-pagebuilder (wrestle-list scaffold for qwen/deepseek to flesh out)."
+
+[dependencies]
+serde = { workspace = true }
+flux-stamp = { path = "../flux-stamp" }

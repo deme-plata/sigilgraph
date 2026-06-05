@@ -1,0 +1,43 @@
+=== P7-F soak gate (ed25519, parallel) ===
+cores:     48
+duration:  20s
+threshold: 1000000 sigs/s (PASS = worst 1s window >= this)
+batch:     10000
+
+building 10000 signed items (untimed)...
+
+soaking for 20s...
+
+  [   1s]        78639 verifies/s
+  [   2s]        97609 verifies/s
+  [   3s]        94359 verifies/s
+  [   4s]        99049 verifies/s
+  [   5s]       101507 verifies/s
+  [   6s]        93872 verifies/s
+  [   7s]       108677 verifies/s
+  [   8s]       103371 verifies/s
+  [   9s]        93339 verifies/s
+  [  10s]       100966 verifies/s
+  [  11s]        92528 verifies/s
+  [  12s]       102839 verifies/s
+  [  13s]       106872 verifies/s
+  [  14s]       111062 verifies/s
+  [  15s]       105000 verifies/s
+  [  16s]        94124 verifies/s
+  [  17s]       107583 verifies/s
+  [  18s]       105640 verifies/s
+  [  19s]       104739 verifies/s
+
+════════ SOAK GATE RESULT ════════
+  host cores:       48
+  wall time:        20.1s
+  total verifies:   2010000
+  per-second min:   78639 sigs/s   <- the gate looks at THIS
+  per-second avg:   100093 sigs/s
+  per-second max:   111062 sigs/s
+  overall avg:      100129 sigs/s
+  threshold:        1000000 sigs/s
+
+  ❌ FAIL — worst window 78639/s is 12.7× below the 1000000/s target.
+     (ed25519 alone won't reach 1M/s on this box; the gate is for the
+      combined P7 work — batch-verify P7-A, BLS P7-B, SIMD P7-D.)

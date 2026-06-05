@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SIGIL · Vision</title>
+<style>
+:root{--bg:#0a0a0f;--panel:#15101f;--pa2:#1d1630;--ac:#8b5cf6;--br:#c084fc;--gold:#fbbf24;--tx:#e2e8f0;--dim:#8b8ba0;--grn:#34d399;--red:#f87171;}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--tx);font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;-webkit-font-smoothing:antialiased}
+header{padding:18px 26px 10px;border-bottom:1px solid #2a2140;background:linear-gradient(180deg,#120e1f,var(--bg))}
+h1{font-size:20px;letter-spacing:1px}h1 b{color:var(--br);text-shadow:0 0 12px rgba(192,132,252,.5)}
+.sub{color:var(--dim);font-size:12px;margin-top:4px}
+#hero{display:block;width:100%;height:120px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:14px;padding:18px 26px 40px;max-width:1500px;margin:0 auto}
+.card{background:var(--panel);border:1px solid #2a2140;border-radius:12px;padding:14px 16px;overflow:hidden}
+.card h2{font-size:15px;color:var(--br);display:flex;justify-content:space-between;align-items:baseline}
+.card h2 .n{font-size:12px;color:var(--gold)}
+.cap{color:var(--dim);font-size:11px;margin:4px 0 8px;min-height:28px}
+canvas.p{display:block;width:100%;height:230px;border-radius:8px;background:#0c0a14}
+footer{color:var(--dim);font-size:11px;text-align:center;padding:0 0 30px}
+.tag{font-size:9px;padding:1px 7px;border-radius:10px;background:rgba(139,92,246,.15);color:var(--br)}
+.tag.mod{background:rgba(251,191,36,.13);color:var(--gold)}
+</style></head>
+<body>
+<header>
+  <h1>SIGIL · <b>Vision</b></h1>
+  <div class="sub">Six lenses on a 1M-TPS, 1000-node, agent-driven, topologically-committed chain. Real numbers where measured, modeled where not yet built.</div>
+</header>
+<canvas id="hero"></canvas>
+<div class="grid">
+  <div class="card"><h2>1 · Where the time goes <span class="n">73% → roots</span></h2><div class="cap">Watch the bottleneck MOVE: incremental roots jumps the fire from commit→verify. The 209M-state vs 113k-sigverify funnel. <span class="tag">measured</span></div><canvas class="p" id="c1"></canvas></div>
+  <div class="card"><h2>2 · Divergence snap <span class="n">exit-78</span></h2><div class="cap">Two nodes' state-roots in lockstep — then an attack bites and one halts red. Quillon's 12-hour bug, caught in a microsecond. <span class="tag">measured</span></div><canvas class="p" id="c2"></canvas></div>
+  <div class="card"><h2>3 · Propagation wavefront <span class="n">1000 nodes</span></h2><div class="cap">A block ripples across the mesh; partitions = dark islands; redundancy heals the gaps. <span class="tag">measured</span></div><canvas class="p" id="c3"></canvas></div>
+  <div class="card"><h2>4 · The living agent economy <span class="n">63 QUG · 118 tasks</span></h2><div class="cap">The swarm building SIGIL, paying itself — gold sparks = SettleWork, glow = reputation. <span class="tag">live data</span></div><canvas class="p" id="c4"></canvas></div>
+  <div class="card"><h2>5 · Emission breathing <span class="n">PID + halvings</span></h2><div class="cap">Monetary policy as dynamics — the PID rings then settles. The red wound = Quillon's start-at-0 bug. <span class="tag mod">modeled</span></div><canvas class="p" id="c5"></canvas></div>
+  <div class="card"><h2>6 · The QTFT knot <span class="n">topology</span></h2><div class="cap">The braid invariant morphs block by block; on a fork the knot snaps + a strand goes red. <span class="tag mod">modeled</span></div><canvas class="p" id="c6"></canvas></div>
+</div>
+<footer>SIGIL Vision · obsidian + violet · real swarm + chronos data · the knot you see is the knot that's signed</footer>
+<script>
+const DPR=Math.min(devicePixelRatio||1,2);
+function fit(cv){const r=cv.getBoundingClientRect();cv.width=r.width*DPR;cv.height=r.height*DPR;const x=cv.getContext('2d');x.setTransform(DPR,0,0,DPR,0,0);return x;}
+function W(cv){return cv.getBoundingClientRect().width}function H(cv){return cv.getBoundingClientRect().height}
+const C={bg:'#0c0a14',ac:'#8b5cf6',br:'#c084fc',gold:'#fbbf24',red:'#f87171',grn:'#34d399',dim:'#8b8ba0',tx:'#e2e8f0'};
+function rr(x,a,b){return a+(Math.sin(x)*.5+.5)*(b-a)}
+// ── HERO: 100k-block braid river ──
+const hero=document.getElementById('hero');let hx=fit(hero);
+const parts=[];for(let i=0;i<1400;i++)parts.push({y:Math.random(),s:Math.random()*.6+.4,o:Math.random()});
+function drawHero(t){const w=W(hero),h=H(hero);hx.clearRect(0,0,w,h);
+  // river of violet light
+  for(const p of parts){const x=((p.o+t*0.00012*p.s)%1)*w;const yy=p.y*h;const a=0.05+0.10*Math.sin(t*0.001+p.o*20);
+    hx.fillStyle='rgba(139,92,246,'+a+')';hx.fillRect(x,yy,2,1.4);}
+  // density bands
+  for(let i=0;i<w;i+=4){const d=0.5+0.5*Math.sin(i*0.01+t*0.0016);hx.fillStyle='rgba(192,132,252,'+(d*0.05)+')';hx.fillRect(i,0,4,h);}
+  // gold consensus spine
+  hx.strokeStyle='rgba(251,191,36,.85)';hx.lineWidth=2;hx.beginPath();
+  for(let i=0;i<=w;i+=6){const y=h*0.5+Math.sin(i*0.012+t*0.0014)*h*0.22+Math.sin(i*0.03+t*0.002)*8;i?hx.lineTo(i,y):hx.moveTo(i,y);}hx.stroke();
+  hx.fillStyle='rgba(226,232,240,.55)';hx.font='10px monospace';hx.fillText('100,000 blocks/parallel · gold = selected chain · the braid IS a knot',12,16);
+}
+// ── 1 bottleneck + funnel ──
+const c1=document.getElementById('c1');let x1=fit(c1);
+function d1(t){const w=W(c1),h=H(c1);x1.clearRect(0,0,w,h);const phase=(t*0.0002)%2;
+  const before=phase<1; const stages=before?[['propagate',.06],['execute',.21],['commit/roots',.73,1]]:[['propagate',.10],['execute',.64],['commit/roots',.01],['verify',.25,1]];
+  let y=24;x1.font='11px monospace';
+  for(const s of stages){const bw=(w-150)*s[1];const hot=s[2];
+    x1.fillStyle=C.dim;x1.fillText(s[0],8,y+10);
+    const g=x1.createLinearGradient(110,0,110+bw,0);
+    if(hot){const pl=0.6+0.4*Math.sin(t*0.006);g.addColorStop(0,'#f87171');g.addColorStop(1,'rgba(251,191,36,'+pl+')');}else{g.addColorStop(0,C.ac);g.addColorStop(1,C.br);}
+    x1.fillStyle=g;x1.fillRect(110,y,bw,16);x1.fillStyle=C.tx;x1.fillText((s[1]*100).toFixed(0)+'%',114+bw,y+12);y+=30;}
+  x1.fillStyle=C.gold;x1.fillText(before?'before incremental roots — roots burn 73%':'after — fire JUMPED to verify (the crypto wall)',8,y+6);
+  // funnel
+  const fy=y+22,fh=h-fy-6;x1.fillStyle='rgba(139,92,246,.25)';x1.beginPath();x1.moveTo(8,fy);x1.lineTo(w-8,fy);x1.lineTo(w*0.62,fy+fh);x1.lineTo(w*0.38,fy+fh);x1.closePath();x1.fill();
+  x1.fillStyle=C.tx;x1.font='10px monospace';x1.fillText('state 209M/s',12,fy+12);x1.fillStyle=C.red;x1.fillText('sig-verify 113k/s ← THE WALL',w*0.38+4,fy+fh-4);
+}
+// ── 2 divergence ──
+const c2=document.getElementById('c2');let x2=fit(c2);const atks=['double-spend','byzantine block','equivocation','partition'];
+function d2(t){const w=W(c2),h=H(c2);x2.clearRect(0,0,w,h);const cyc=(t*0.00022)%1;const split=cyc>0.55;const ai=Math.floor((t*0.00022)%atks.length);
+  const cols=['#8b5cf6','#c084fc','#34d399','#fbbf24'];const n=14,bw=(w-80)/n;
+  for(let lane=0;lane<2;lane++){const y=40+lane*60;x2.fillStyle=C.dim;x2.font='11px monospace';x2.fillText(lane?'node B':'node A',8,y+18);
+    for(let i=0;i<n;i++){const diverged=lane&&split&&i>=Math.floor(n*0.6);
+      const x=70+i*bw;for(let r=0;r<4;r++){x2.fillStyle=diverged?(i===Math.floor(n*0.6)?C.red:'#3a1f1f'):cols[r];x2.globalAlpha=diverged?.9:.85;x2.fillRect(x,y+r*7,bw-3,6);}x2.globalAlpha=1;}}
+  if(split){x2.fillStyle=C.red;x2.font='12px monospace';x2.fillText('⚠ '+atks[ai]+' → node B roots ≠ header → HALT (exit-78)',8,h-12);}
+  else{x2.fillStyle=C.grn;x2.fillText('✓ both nodes in lockstep — roots agree',8,h-12);}
+}
+// ── 3 wavefront ──
+const c3=document.getElementById('c3');let x3=fit(c3);const nodes=[];for(let i=0;i<240;i++)nodes.push({x:Math.random(),y:Math.random()});
+function d3(t){const w=W(c3),h=H(c3);x3.clearRect(0,0,w,h);const cx=w*0.5,cy=h*0.5;const R=((t*0.00035)%1)*Math.hypot(w,h)*0.6;
+  const partAngle=t*0.0003;
+  for(const nd of nodes){const px=nd.x*w,py=nd.y*h;const ang=Math.atan2(py-cy,px-cx);const inPart=Math.abs(((ang-partAngle)%(Math.PI*2)))<0.5;
+    const dist=Math.hypot(px-cx,py-cy);const hit=!inPart&&Math.abs(dist-R)<22;
+    x3.beginPath();x3.arc(px,py,hit?3.2:1.8,0,7);x3.fillStyle=inPart?'#2a2433':(hit?C.gold:'rgba(139,92,246,.5)');x3.fill();}
+  x3.strokeStyle='rgba(192,132,252,.25)';x3.lineWidth=2;x3.beginPath();x3.arc(cx,cy,R,partAngle+0.5,partAngle-0.5+Math.PI*2);x3.stroke();
+  x3.beginPath();x3.arc(cx,cy,3,0,7);x3.fillStyle=C.gold;x3.fill();
+  x3.fillStyle=C.dim;x3.font='10px monospace';x3.fillText('gossip ripple · dark wedge = partition',8,h-10);
+}
+// ── 4 agent economy (real) ──
+const c4=document.getElementById('c4');let x4=fit(c4);
+const agents=[['rocky',12],['rocky-sigil',9],['stargate-v1',2],['rocky-updater',6],['codex',3],['deepseek',5],['update-v1',1],['gemini',2]];
+const sparks=[];function d4(t){const w=W(c4),h=H(c4);x4.clearRect(0,0,w,h);const cx=w*0.5,cy=h*0.5,R=Math.min(w,h)*0.36;
+  const pos=agents.map((a,i)=>{const an=i/agents.length*Math.PI*2-Math.PI/2;return{x:cx+Math.cos(an)*R,y:cy+Math.sin(an)*R,a:a[0],q:a[1]}});
+  if(Math.random()<0.08){const s=pos[Math.floor(Math.random()*pos.length)],d=pos[Math.floor(Math.random()*pos.length)];if(s!==d)sparks.push({s,d,p:0});}
+  for(const sp of sparks){sp.p+=0.02;const x=sp.s.x+(sp.d.x-sp.s.x)*sp.p,y=sp.s.y+(sp.d.y-sp.s.y)*sp.p;
+    x4.strokeStyle='rgba(251,191,36,.25)';x4.beginPath();x4.moveTo(sp.s.x,sp.s.y);x4.lineTo(x,y);x4.stroke();
+    x4.beginPath();x4.arc(x,y,2.5,0,7);x4.fillStyle=C.gold;x4.fill();}
+  for(let i=sparks.length-1;i>=0;i--)if(sparks[i].p>=1)sparks.splice(i,1);
+  for(const p of pos){const r=6+p.q*1.1;const gl=0.3+0.5*Math.sin(t*0.003+p.x);
+    x4.beginPath();x4.arc(p.x,p.y,r+gl*5,0,7);x4.fillStyle='rgba(139,92,246,'+(gl*0.12)+')';x4.fill();
+    x4.beginPath();x4.arc(p.x,p.y,r,0,7);x4.fillStyle=p.a==='rocky'?C.gold:C.br;x4.fill();
+    x4.fillStyle=C.tx;x4.font='10px monospace';x4.textAlign='center';x4.fillText(p.a,p.x,p.y+r+11);x4.textAlign='left';}
+  x4.fillStyle=C.dim;x4.font='10px monospace';x4.fillText('node size = QUG earned · spark = SettleWork',8,h-8);
+}
+// ── 5 emission ──
+const c5=document.getElementById('c5');let x5=fit(c5);
+function d5(t){const w=W(c5),h=H(c5);x5.clearRect(0,0,w,h);
+  // supply curve w/ halvings
+  x5.strokeStyle=C.br;x5.lineWidth=2;x5.beginPath();let s=0;
+  for(let i=0;i<=w;i++){const era=Math.floor(i/(w/5));const rate=1/Math.pow(2,era);s+=rate;const y=h-20-(s/((w/5)*2))* (h-40);i?x5.lineTo(i,y):x5.moveTo(i,y);}x5.stroke();
+  // PID ringing then settling
+  x5.strokeStyle=C.grn;x5.lineWidth=1.5;x5.beginPath();
+  for(let i=0;i<=w;i++){const damp=Math.exp(-i/(w*0.35));const y=h*0.42+Math.sin(i*0.13-t*0.004)*22*damp;i?x5.lineTo(i,y):x5.moveTo(i,y);}x5.stroke();
+  // Quillon wound
+  x5.fillStyle=C.red;x5.beginPath();x5.arc(w*0.12,h*0.42,4,0,7);x5.fill();
+  x5.fillStyle=C.red;x5.font='10px monospace';x5.fillText('← Quillon: started at 0, 3 days wrong',w*0.12+8,h*0.42-6);
+  x5.fillStyle=C.dim;x5.fillText('violet = supply (halvings) · green = PID correction (rings → settles)',8,h-8);
+}
+// ── 6 QTFT knot ──
+const c6=document.getElementById('c6');let x6=fit(c6);
+function d6(t){const w=W(c6),h=H(c6);x6.clearRect(0,0,w,h);const fork=((t*0.00018)%1)>0.7;
+  // braid strands
+  const ns=5;for(let k=0;k<ns;k++){const phase=k/ns*Math.PI*2;const red=fork&&k===2;
+    x6.strokeStyle=red?C.red:(k===0?C.gold:'rgba(139,92,246,.7)');x6.lineWidth=red?2.5:1.8;x6.beginPath();
+    for(let i=0;i<=w;i+=4){const y=40+k*((h-90)/ns)+Math.sin(i*0.04+phase+t*0.0018)*((h-90)/ns)*0.45;i?x6.lineTo(i,y):x6.moveTo(i,y);}x6.stroke();}
+  // knot diagram (corner)
+  const kx=w-60,ky=h-46,kr=fork?24:20;x6.strokeStyle=fork?C.red:C.br;x6.lineWidth=2;
+  x6.beginPath();for(let a=0;a<=Math.PI*2+0.1;a+=0.05){const rr2=kr*(1+0.4*Math.sin((fork?3:2)*a+t*0.003));x6.lineTo(kx+Math.cos(a)*rr2*0.6,ky+Math.sin(a)*rr2*0.5);}x6.stroke();
+  x6.fillStyle=fork?C.red:C.grn;x6.font='11px monospace';x6.fillText(fork?'⚠ topology FORK — knot snapped':'✓ braid invariant stable',8,h-10);
+  x6.fillStyle=C.dim;x6.fillText('linking # = '+(fork?'changed':'stable'),8,20);
+}
+let t0=performance.now();
+function loop(now){const t=now-t0;drawHero(t);d1(t);d2(t);d3(t);d4(t);d5(t);d6(t);requestAnimationFrame(loop);}
+addEventListener('resize',()=>{x1=fit(c1);x2=fit(c2);x3=fit(c3);x4=fit(c4);x5=fit(c5);x6=fit(c6);hx=fit(hero);});
+requestAnimationFrame(loop);
+</script>
+</body></html>

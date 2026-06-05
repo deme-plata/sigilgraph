@@ -1,0 +1,37 @@
+[package]
+name = "sigil-tx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL transaction layer — turns signed user intent into atomic (StateMutation, SigilEvent) batches that flow through commit_state_transition. The bridge from wallets/RPC to the Track C state machine."
+
+# This crate is the user-facing surface of state writes. Wallets construct a
+# SigilTx, sign it via flux-eternal-cypher (currently SQIsign5), submit via
+# RPC. The node validates → applies → produces events → header roots
+# advance. No other crate is allowed to call commit_state_transition with
+# mutations that didn't come from a SigilTx.
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+blake3     = { workspace = true }
+thiserror  = { workspace = true }
+# u128 amounts serialize as decimal strings on the wire (the
+# `u128_str` module in lib.rs). Standard blockchain practice — Ethereum,
+# Quillon, basically everyone — because most JSON parsers either lose
+# precision past 2^53 or refuse u128 outright (serde_json's derive impl).
+
+sigil-header = { path = "../sigil-header" }
+sigil-state  = { path = "../sigil-state" }
+sigil-events = { path = "../sigil-events" }
+sigil-dex    = { path = "../sigil-dex" }
+sigil-bank   = { path = "../sigil-bank" }
+# Tier-1 sig-wall: real SQIsign Level-5 verify, dispatched by SigScheme byte.
+flux-sqisign = { path = "../../../flux/crates/flux-sqisign" }
+# Hot-path scheme (crypto-agility split): ed25519 batch×parallel verify for the
+# high-frequency tx path. `batch` feature enables verify_batch (amortized MSM).
+ed25519-dalek = { version = "2.2", features = ["rand_core", "batch"] }
+rand = "0.8"
+
+[dev-dependencies]
+serde_json = { workspace = true }

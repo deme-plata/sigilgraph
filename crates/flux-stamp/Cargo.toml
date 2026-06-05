@@ -1,0 +1,12 @@
+[package]
+name = "flux-stamp"
+version = "0.1.0"
+edition = "2021"
+description = "The genesis provenance stamp embedded in every Flux build — a verifiable one-liner so any system knows an artifact was built to the highest standard of Flux."
+
+[dependencies]
+blake3 = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -1,0 +1,140 @@
+{
+  "blocks_produced": 20000,
+  "curve": [
+    {
+      "fluxdb_full_bytes": 4222708,
+      "fluxdb_history_bytes": 2900708,
+      "fluxdb_pruned_bytes": 756000,
+      "height": 2000,
+      "json_bytes": 13415587,
+      "json_rs_bytes": 20123380
+    },
+    {
+      "fluxdb_full_bytes": 8450202,
+      "fluxdb_history_bytes": 5806202,
+      "fluxdb_pruned_bytes": 1512000,
+      "height": 4000,
+      "json_bytes": 26841890,
+      "json_rs_bytes": 40262835
+    },
+    {
+      "fluxdb_full_bytes": 12679802,
+      "fluxdb_history_bytes": 8713802,
+      "fluxdb_pruned_bytes": 2268000,
+      "height": 6000,
+      "json_bytes": 40271137,
+      "json_rs_bytes": 60406705
+    },
+    {
+      "fluxdb_full_bytes": 16909402,
+      "fluxdb_history_bytes": 11621402,
+      "fluxdb_pruned_bytes": 3024000,
+      "height": 8000,
+      "json_bytes": 53699498,
+      "json_rs_bytes": 80549247
+    },
+    {
+      "fluxdb_full_bytes": 21139002,
+      "fluxdb_history_bytes": 14529002,
+      "fluxdb_pruned_bytes": 3780000,
+      "height": 10000,
+      "json_bytes": 67129862,
+      "json_rs_bytes": 100694793
+    },
+    {
+      "fluxdb_full_bytes": 25368602,
+      "fluxdb_history_bytes": 17436602,
+      "fluxdb_pruned_bytes": 4536000,
+      "height": 12000,
+      "json_bytes": 80568254,
+      "json_rs_bytes": 120852381
+    },
+    {
+      "fluxdb_full_bytes": 29598202,
+      "fluxdb_history_bytes": 20344202,
+      "fluxdb_pruned_bytes": 5292000,
+      "height": 14000,
+      "json_bytes": 94008467,
+      "json_rs_bytes": 141012700
+    },
+    {
+      "fluxdb_full_bytes": 33827802,
+      "fluxdb_history_bytes": 23251802,
+      "fluxdb_pruned_bytes": 6048000,
+      "height": 16000,
+      "json_bytes": 107447670,
+      "json_rs_bytes": 161171505
+    },
+    {
+      "fluxdb_full_bytes": 38057402,
+      "fluxdb_history_bytes": 26159402,
+      "fluxdb_pruned_bytes": 6804000,
+      "height": 18000,
+      "json_bytes": 120887403,
+      "json_rs_bytes": 181331104
+    },
+    {
+      "fluxdb_full_bytes": 42287003,
+      "fluxdb_history_bytes": 29067003,
+      "fluxdb_pruned_bytes": 7560000,
+      "height": 20000,
+      "json_bytes": 134326624,
+      "json_rs_bytes": 201489936
+    }
+  ],
+  "generated_at": 1780613430,
+  "per_block_on_disk": {
+    "fluxdb_full": 2114.35015,
+    "fluxdb_history": 1453.35015,
+    "fluxdb_pruned": 378.0,
+    "json": 6716.3312
+  },
+  "projection_100y": [
+    {
+      "block_seconds": 0.1,
+      "blocks_100y": 31557600000.0,
+      "cadence": "100ms",
+      "fluxdb_full_bytes": 66723816293640.01,
+      "fluxdb_history_bytes": 45864242693640.0,
+      "fluxdb_pruned_bytes": 11928772800000.0,
+      "json_rs_bytes": 317926940215680.0
+    },
+    {
+      "block_seconds": 1.0,
+      "blocks_100y": 3155760000.0,
+      "cadence": "1s",
+      "fluxdb_full_bytes": 6672381629364.001,
+      "fluxdb_history_bytes": 4586424269364.0,
+      "fluxdb_pruned_bytes": 1192877280000.0,
+      "json_rs_bytes": 31792694021568.0
+    },
+    {
+      "block_seconds": 5.0,
+      "blocks_100y": 631152000.0,
+      "cadence": "5s",
+      "fluxdb_full_bytes": 1334476325872.8,
+      "fluxdb_history_bytes": 917284853872.8,
+      "fluxdb_pruned_bytes": 238575456000.0,
+      "json_rs_bytes": 6358538804313.6
+    },
+    {
+      "block_seconds": 10.0,
+      "blocks_100y": 315576000.0,
+      "cadence": "10s",
+      "fluxdb_full_bytes": 667238162936.4,
+      "fluxdb_history_bytes": 458642426936.4,
+      "fluxdb_pruned_bytes": 119287728000.0,
+      "json_rs_bytes": 3179269402156.8
+    }
+  ],
+  "shrink_vs_json": {
+    "fluxdb_full": 3.176546325593232,
+    "fluxdb_history": 4.621275334096191,
+    "fluxdb_pruned": 17.768071957671957
+  },
+  "tiers": {
+    "full": "header+sigs+transition+events — re-verifiable, full tx history, bootstraps peers",
+    "history": "drop crypto witness, keep transition+events — full tx history + state proofs, trusts past verify",
+    "pruned": "roots+identity only — state + inclusion proofs, NO tx enumeration"
+  }
+}

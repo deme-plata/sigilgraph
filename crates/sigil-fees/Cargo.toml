@@ -1,0 +1,18 @@
+[package]
+name = "sigil-fees"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL fee system. L1: SAP-priced base fee (reputation dominates because blockspace is abundant at 10k blocks/sec). Pure functions over SAP score + congestion — no I/O, no async, no chain state. L2 (work-escrow) + L3 (recirculation) land in later phases. Design: docs/sigil-fee-system-design.md (Lock #23)."
+
+# L1 is deliberately a pure-arithmetic crate: callers (sigil-tx fee calc,
+# sigil-state chokepoint) supply the SAP score + congestion + base, this
+# answers "what does this tx cost?". Spam-resistance priced by BEHAVIOR
+# (reputation), not a blind scarcity auction — the DAG's throughput makes
+# blockspace abundant, so trust is the scarce thing being priced.
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

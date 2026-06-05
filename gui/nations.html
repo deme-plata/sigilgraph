@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>SIGIL Nations — a living world of identity, citizenship & attestation</title>
+<style>
+  :root{
+    --bg:#0a0a0f; --panel:#1a1428; --accent:#8b5cf6; --bright:#c084fc;
+    --gold:#fbbf24; --text:#e2e8f0; --dim:#6b6486;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;min-height:100%}
+  body{
+    background:
+      radial-gradient(1200px 700px at 50% -10%, #1a1430 0%, transparent 60%),
+      radial-gradient(900px 600px at 90% 110%, #14102a 0%, transparent 55%),
+      var(--bg);
+    color:var(--text); font-family:"JetBrains Mono",ui-monospace,Menlo,monospace;
+    overflow-x:hidden;
+  }
+  header{padding:22px 28px 8px}
+  h1{margin:0;font-size:26px;letter-spacing:.16em}
+  h1 .g{color:var(--gold);text-shadow:0 0 18px rgba(251,191,36,.45)}
+  h1 .v{color:var(--bright);text-shadow:0 0 22px rgba(192,132,252,.5)}
+  .sub{color:var(--dim);font-size:12.5px;margin-top:6px;letter-spacing:.05em}
+  .wrap{position:relative;margin:6px auto 30px;max-width:1460px;padding:0 18px}
+  /* aspect-ratio forces a real height so the SVG can never collapse to 0 */
+  svg#world{display:block;width:100%;aspect-ratio:1460 / 920;height:auto;
+      border-radius:16px;
+      background:linear-gradient(180deg,#0c0a16 0%,#0a0a0f 70%);
+      box-shadow:0 0 0 1px #241c3a, inset 0 0 120px rgba(139,92,246,.06);}
+  .legend{display:flex;flex-wrap:wrap;gap:10px 22px;margin:16px 4px 0;font-size:12px;color:#cbd5e1}
+  .legend b{color:var(--bright)}
+  .legend .k{display:inline-block;width:13px;height:13px;border-radius:3px;vertical-align:-2px;margin-right:7px}
+  .stat{display:flex;gap:26px;flex-wrap:wrap;margin:14px 4px 0;font-size:13px}
+  .stat div{color:var(--dim)} .stat b{color:var(--text);font-size:17px;display:block;letter-spacing:.04em}
+  .stat b.gold{color:var(--gold)} .stat b.viol{color:var(--bright)}
+  @keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-2.2px)}}
+  .person{animation:bob 2.6s ease-in-out infinite}
+  @keyframes glow{0%,100%{opacity:.55}50%{opacity:1}}
+  .spire{animation:glow 3.4s ease-in-out infinite}
+  .foot{color:var(--dim);font-size:11.5px;margin:18px 4px 0;letter-spacing:.04em}
+</style>
+</head>
+<body>
+<header>
+  <h1>⬡ <span class="v">SIGIL</span> <span class="g">NATIONS</span></h1>
+  <div class="sub">a living world drawn from the <b>flux-nations</b> crate · identity = blake3(pubkey) · citizenship · M-of-N attestation quorum · membership proofs ≤ log(N)</div>
+</header>
+
+<div class="wrap">
+  <svg id="world" viewBox="0 0 1460 920" preserveAspectRatio="xMidYMid meet" aria-label="SIGIL Nations illustration"></svg>
+
+  <div class="legend">
+    <span><span class="k" style="background:#8b5cf6"></span><b>🚶 Citizen</b> — an Identity (alias + pubkey, id=blake3(pubkey))</span>
+    <span><span class="k" style="background:#2a2140"></span><b>🏠 House</b> — citizenship in a Nation (sorted into citizen_root)</span>
+    <span><span class="k" style="background:#3b2d63"></span><b>🏛️ Quorum Hall</b> — flux-quorum M-of-N (gold windows = the M signers)</span>
+    <span><span class="k" style="background:#fbbf24"></span><b>🗼 Registry spire</b> — citizen_root merkle; ✨ gold beam = membership proof verified + quorum-signed</span>
+    <span><span class="k" style="background:#c084fc"></span><b>🛣️ Road pulse</b> — cross-nation attestation / flux-email admit-notice</span>
+  </div>
+
+  <div class="stat" id="stat"></div>
+  <div class="foot" id="foot">drawn live in your browser — hundreds of citizens are real SVG figures, not an image. every spire is a citizen_root; every gold beam is one membership proof verifying.</div>
+</div>
+
+<script>
+const NS="http://www.w3.org/2000/svg";
+const svg=document.getElementById("world");
+// literal hex — SVG presentation attributes do NOT evaluate CSS var(--x)
+const GOLD="#fbbf24", VIOL="#c084fc", ACC="#8b5cf6", DIM="#6b6486";
+const el=(n,a={})=>{const e=document.createElementNS(NS,n);for(const k in a)e.setAttribute(k,a[k]);return e;};
+const txt=(parent,s,a)=>{const t=el("text",a);t.textContent=s;parent.appendChild(t);return t;};
+const rnd=(a,b)=>a+Math.random()*(b-a);
+const ri=(a,b)=>Math.floor(rnd(a,b+1));
+const hsl=(h,s,l)=>`hsl(${h} ${s}% ${l}%)`;
+
+try{
+// ── defs: glow filter + halo gradient, built with proper SVG namespace ──
+const defs=el("defs");
+const f=el("filter",{id:"soft",x:"-50%",y:"-50%",width:"200%",height:"200%"});
+f.appendChild(el("feGaussianBlur",{stdDeviation:"3.2",result:"b"}));
+const fm=el("feMerge");fm.appendChild(el("feMergeNode",{in:"b"}));fm.appendChild(el("feMergeNode",{in:"SourceGraphic"}));
+f.appendChild(fm);defs.appendChild(f);
+const rg=el("radialGradient",{id:"halo",cx:"50%",cy:"50%",r:"50%"});
+rg.appendChild(el("stop",{offset:"0%",["stop-color"]:"rgba(192,132,252,.30)"}));
+rg.appendChild(el("stop",{offset:"100%",["stop-color"]:"rgba(192,132,252,0)"}));
+defs.appendChild(rg);svg.appendChild(defs);
+
+// subtle star/sigil dust
+const dust=el("g",{opacity:.5});
+for(let i=0;i<120;i++){dust.appendChild(el("circle",{cx:rnd(0,1460),cy:rnd(0,920),r:rnd(.4,1.3),fill:i%9?"#3a2f5e":GOLD,opacity:rnd(.2,.7)}));}
+svg.appendChild(dust);
+
+// ── the nations (city-states). hue = identity color. pop = real citizens; M/N = quorum policy.
+const NATIONS=[
+  {name:"FLUXHOLD",   cx:235, cy:300, r:175, hue:268, pop:2310, M:5, N:7},
+  {name:"PROVENANCE", cx:640, cy:215, r:165, hue:286, pop:1840, M:4, N:6},
+  {name:"AETHERIA",   cx:1075,cy:285, r:178, hue:252, pop:2620, M:6, N:9},
+  {name:"QUORUM VALE",cx:300, cy:660, r:170, hue:300, pop:1490, M:3, N:5},
+  {name:"KEELPORT",   cx:735, cy:690, r:172, hue:278, pop:2070, M:5, N:8},
+  {name:"SIGILMARK",  cx:1140,cy:660, r:166, hue:262, pop:1730, M:4, N:7},
+];
+const ROADS=[[0,1],[1,2],[0,3],[3,4],[1,4],[4,5],[2,5],[4,2]];
+
+// ── roads first (under cities)
+const roadLayer=el("g");svg.appendChild(roadLayer);
+const roadPaths=[];
+for(const [a,b] of ROADS){
+  const A=NATIONS[a],B=NATIONS[b];
+  const ang=Math.atan2(B.cy-A.cy,B.cx-A.cx);
+  const x1=A.cx+Math.cos(ang)*A.r*0.86, y1=A.cy+Math.sin(ang)*A.r*0.86;
+  const x2=B.cx-Math.cos(ang)*B.r*0.86, y2=B.cy-Math.sin(ang)*B.r*0.86;
+  const mx=(x1+x2)/2+rnd(-30,30), my=(y1+y2)/2+rnd(-30,30);
+  const d=`M${x1} ${y1} Q ${mx} ${my} ${x2} ${y2}`;
+  roadLayer.appendChild(el("path",{d,fill:"none",stroke:"#241c3a",["stroke-width"]:3}));
+  roadLayer.appendChild(el("path",{d,fill:"none",stroke:"rgba(139,92,246,.25)",["stroke-width"]:1.2,["stroke-dasharray"]:"2 7"}));
+  const p=el("path",{d,fill:"none",stroke:"none"});roadLayer.appendChild(p);roadPaths.push(p);
+}
+
+let totalDrawn=0, totalValidators=0;
+const spires=[]; const peopleByNation=[];
+
+for(const nat of NATIONS){
+  const g=el("g");svg.appendChild(g);
+  const base=nat.cy+nat.r*0.55;
+  g.appendChild(el("circle",{cx:nat.cx,cy:nat.cy,r:nat.r*1.04,fill:"url(#halo)"}));
+  g.appendChild(el("ellipse",{cx:nat.cx,cy:base,rx:nat.r*0.98,ry:nat.r*0.42,
+     fill:hsl(nat.hue,38,14),stroke:hsl(nat.hue,55,32),["stroke-width"]:1.5,opacity:.96}));
+  // banner pole + flag (nation identity)
+  const px=nat.cx-nat.r*0.74, py=base-2;
+  g.appendChild(el("line",{x1:px,y1:py,x2:px,y2:py-86,stroke:"#4a3f6e",["stroke-width"]:2.2}));
+  g.appendChild(el("path",{d:`M${px} ${py-86} l46 9 l-46 14 z`,fill:hsl(nat.hue,70,58),filter:"url(#soft)"}));
+  g.appendChild(el("circle",{cx:px,cy:py-86,r:3,fill:GOLD}));
+
+  // ── Registry spire (citizen_root merkle) — tallest, gold-capped
+  const sx=nat.cx+nat.r*0.12, sy=base, sh=150, sw=30;
+  g.appendChild(el("path",{d:`M${sx-sw/2} ${sy} L${sx-sw/2+4} ${sy-sh} L${sx+sw/2-4} ${sy-sh} L${sx+sw/2} ${sy} z`,
+     fill:hsl(nat.hue,45,20),stroke:hsl(nat.hue,60,36),["stroke-width"]:1.2}));
+  for(let r=0;r<5;r++){const yy=sy-18-r*26, n=Math.max(1,5-r);
+    for(let c=0;c<n;c++){const xx=sx-(n-1)*4+c*8;
+      g.appendChild(el("circle",{cx:xx,cy:yy,r:2.1,fill:r===4?GOLD:hsl(nat.hue,70,64),opacity:.9}));}}
+  spires.push({x:sx,y:sy-sh});
+  g.appendChild(el("circle",{cx:sx,cy:sy-sh-3,r:4.5,fill:GOLD,filter:"url(#soft)",class:"spire"}));
+
+  // ── Quorum Hall (flux-quorum M-of-N): N windows, M lit gold (the signers)
+  const qx=nat.cx-nat.r*0.30, qw=72, qh=58, qy=base;
+  g.appendChild(el("rect",{x:qx-qw/2,y:qy-qh,width:qw,height:qh,rx:3,
+     fill:"#241a3b",stroke:hsl(nat.hue,55,42),["stroke-width"]:1.3}));
+  g.appendChild(el("path",{d:`M${qx-qw/2-4} ${qy-qh} L${qx} ${qy-qh-16} L${qx+qw/2+4} ${qy-qh} z`,
+     fill:hsl(nat.hue,50,28),stroke:hsl(nat.hue,60,42),["stroke-width"]:1}));
+  for(let c=0;c<4;c++){const cxk=qx-qw/2+10+c*((qw-20)/3);g.appendChild(el("line",{x1:cxk,y1:qy-qh+8,x2:cxk,y2:qy-4,stroke:hsl(nat.hue,40,34),["stroke-width"]:2}));}
+  totalValidators+=nat.N;
+  for(let w=0;w<nat.N;w++){const wx=qx-qw/2+8+ w*((qw-14)/nat.N); const lit=w<nat.M;
+    g.appendChild(el("rect",{x:wx,y:qy-qh+14,width:5.5,height:7,rx:1,
+      fill:lit?GOLD:"#3a2f5e",opacity:lit?1:.7, filter:lit?"url(#soft)":""}));}
+  txt(g,`${nat.M}-of-${nat.N}`,{x:qx,y:qy-qh-22,fill:GOLD,["font-size"]:10,["text-anchor"]:"middle"});
+
+  // ── houses (citizenship dwellings)
+  const houseN=ri(9,14);
+  for(let h=0;h<houseN;h++){
+    const hx=nat.cx+rnd(-nat.r*0.82,nat.r*0.82);
+    const dy=base+(Math.random()-0.3)*nat.r*0.30;
+    const hw=rnd(13,22), hh=rnd(11,18);
+    g.appendChild(el("rect",{x:hx-hw/2,y:dy-hh,width:hw,height:hh,rx:1.5,fill:"#2a2140",stroke:hsl(nat.hue,40,32),["stroke-width"]:.8}));
+    g.appendChild(el("path",{d:`M${hx-hw/2-2} ${dy-hh} L${hx} ${dy-hh-rnd(6,10)} L${hx+hw/2+2} ${dy-hh} z`,fill:hsl(nat.hue,45,26)}));
+    g.appendChild(el("rect",{x:hx-2,y:dy-hh*0.6,width:4,height:hh*0.5,fill:hsl(nat.hue,75,62),opacity:.55}));
+  }
+
+  // ── citizens (a LOT of humans) — sample scaled by population
+  const drawN=Math.min(64, 26+Math.round(nat.pop/55));
+  const people=[];
+  for(let p=0;p<drawN;p++){
+    const a=rnd(0,Math.PI*2), rr=Math.sqrt(Math.random())*nat.r*0.86;
+    const hx=nat.cx+Math.cos(a)*rr;
+    const hy=base+Math.sin(a)*nat.r*0.36*0.9 + rnd(-6,10);
+    const sc=rnd(.8,1.25);
+    const skin=hsl(nat.hue, ri(50,82), ri(58,74));
+    const gp=el("g",{class:"person",transform:`translate(${hx} ${hy}) scale(${sc})`,
+      style:`animation-delay:${(-Math.random()*2.6).toFixed(2)}s`});
+    gp.appendChild(el("line",{x1:0,y1:-7,x2:0,y2:-1,stroke:skin,["stroke-width"]:2.4,["stroke-linecap"]:"round"}));
+    gp.appendChild(el("line",{x1:-2.6,y1:0,x2:0,y2:-1,stroke:skin,["stroke-width"]:1.6,["stroke-linecap"]:"round"}));
+    gp.appendChild(el("line",{x1:2.6,y1:0,x2:0,y2:-1,stroke:skin,["stroke-width"]:1.6,["stroke-linecap"]:"round"}));
+    gp.appendChild(el("circle",{cx:0,cy:-9.5,r:2.4,fill:skin}));
+    g.appendChild(gp);
+    people.push({x:hx,y:hy-9});
+    totalDrawn++;
+  }
+  peopleByNation.push(people);
+
+  // nation banner label (clean text helpers — no malformed append chains)
+  txt(svg,nat.name,{x:nat.cx,y:nat.cy-nat.r*0.62,fill:VIOL,["font-size"]:17,["text-anchor"]:"middle",["letter-spacing"]:"3",["font-weight"]:700});
+  txt(svg,`${nat.pop.toLocaleString()} citizens`,{x:nat.cx,y:nat.cy-nat.r*0.62+18,fill:DIM,["font-size"]:11,["text-anchor"]:"middle"});
+}
+
+// ── animated layer: road attestation pulses + membership-proof beams
+const fx=el("g");svg.appendChild(fx);
+const pulses=roadPaths.map(p=>{
+  const len=p.getTotalLength();
+  const dot=el("circle",{r:3,fill:VIOL,filter:"url(#soft)"});fx.appendChild(dot);
+  return {p,len,dot,t:Math.random(),sp:rnd(.0016,.004),dir:Math.random()<.5?1:-1};
+});
+let beams=[];
+function spawnBeam(){
+  const ni=ri(0,NATIONS.length-1);
+  const ppl=peopleByNation[ni]; if(!ppl.length)return;
+  const src=ppl[ri(0,ppl.length-1)], top=spires[ni];
+  const path=el("path",{d:`M${src.x} ${src.y} Q ${(src.x+top.x)/2} ${src.y-40} ${top.x} ${top.y}`,
+     fill:"none",stroke:GOLD,["stroke-width"]:1.6,opacity:0,filter:"url(#soft)"});
+  const head=el("circle",{r:2.6,fill:"#fff",opacity:0});
+  fx.appendChild(path);fx.appendChild(head);
+  beams.push({path,head,life:0,ttl:120});
+}
+let frame=0;
+function tick(){
+  frame++;
+  for(const u of pulses){
+    u.t+=u.sp*u.dir; if(u.t>1)u.t=0; if(u.t<0)u.t=1;
+    const pt=u.p.getPointAtLength(u.t*u.len);
+    u.dot.setAttribute("cx",pt.x);u.dot.setAttribute("cy",pt.y);
+  }
+  if(frame%34===0) spawnBeam();
+  beams=beams.filter(b=>{
+    b.life++; const k=b.life/b.ttl;
+    const op=k<.18? k/.18 : (1-(k-.18)/.82);
+    b.path.setAttribute("opacity",(op*0.9).toFixed(3));
+    const L=b.path.getTotalLength();
+    const pt=b.path.getPointAtLength(Math.min(1,k*1.25)*L);
+    b.head.setAttribute("cx",pt.x);b.head.setAttribute("cy",pt.y);
+    b.head.setAttribute("opacity",op.toFixed(3));
+    if(b.life>=b.ttl){if(b.path.parentNode)b.path.parentNode.removeChild(b.path);if(b.head.parentNode)b.head.parentNode.removeChild(b.head);return false;}
+    return true;
+  });
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+// ── stats
+const totalPop=NATIONS.reduce((s,n)=>s+n.pop,0);
+document.getElementById("stat").innerHTML=`
+  <div><b class="viol">${NATIONS.length}</b>nations (city-states)</div>
+  <div><b>${totalPop.toLocaleString()}</b>citizens — identities (blake3 pubkey)</div>
+  <div><b>${totalDrawn}</b>drawn as living figures</div>
+  <div><b class="gold">${totalValidators}</b>attestation validators (Σ N)</div>
+  <div><b class="gold">${NATIONS.reduce((s,n)=>s+n.M,0)}</b>quorum signers (Σ M)</div>
+  <div><b class="viol">${ROADS.length}</b>cross-nation attestation lanes</div>`;
+
+}catch(err){
+  // never silently black-out: surface the error inside the canvas
+  const t=el("text",{x:40,y:60,fill:"#ff6b6b",["font-size"]:16,["font-family"]:"monospace"});
+  t.textContent="render error: "+(err&&err.message?err.message:err);
+  svg.appendChild(t);
+  console.error(err);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+[package]
+name = "sigil-book"
+version = "0.1.0"
+edition = "2021"
+
+# Ported from Quillon Graph's `shadowchain-writer` (hand-rolled LaTeX string concat)
+# to a SIGIL-native generator built on the `flux-arxiv-latex` AST crate.
+
+[[bin]]
+name = "sigil-book"
+path = "src/main.rs"
+
+[dependencies]
+flux-arxiv-latex = { workspace = true }

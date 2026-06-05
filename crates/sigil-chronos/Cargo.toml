@@ -1,0 +1,70 @@
+[package]
+name = "sigil-chronos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL × flux-chronos — runs the REAL SIGIL chain logic (sigil-state + sigil-tx + sigil-bank) under flux-chronos deterministic simulation. CHRONOS-E in production: P6's soak pillar executed in virtual time instead of Docker/nohup. A 72h multi-node soak resolves in seconds, deterministically, with divergence-halt + balance-conservation + master-fee-accrual asserted across the run."
+
+# Dep direction (lock #22): chain code (sigil/) consumes substrate (flux/).
+# sigil-chronos path-deps flux-chronos (the substrate sim engine) + the real
+# SIGIL chain crates. The SimNode impl wraps the ACTUAL apply_tx /
+# commit_state_transition pipeline — no mock chain, no toy state machine.
+# This is the proof flux-chronos catches real SIGIL consensus bugs.
+
+[[bin]]
+name = "sigil-chronos-net"
+path = "src/bin/sigil-chronos-net.rs"
+
+[[bin]]
+name = "sigil-multiverse-dump"
+path = "src/bin/sigil-multiverse-dump.rs"
+
+[[bin]]
+name = "sigil-throughput"
+path = "src/bin/sigil-throughput.rs"
+
+[[bin]]
+name = "sigil-scaling"
+path = "src/bin/sigil-scaling.rs"
+
+[[bin]]
+name = "sigil-market"
+path = "src/bin/sigil-market.rs"
+
+[[bin]]
+name = "sigil-turbosync"
+path = "src/bin/sigil-turbosync.rs"
+
+[[bin]]
+name = "sigil-dex-persist"
+path = "src/bin/sigil-dex-persist.rs"
+
+[[bin]]
+name = "sigil-zkflux-vs-current"
+path = "src/bin/sigil-zkflux-vs-current.rs"
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+blake3     = { workspace = true }
+tokio      = { workspace = true, features = ["rt-multi-thread", "macros"] }
+anyhow     = { workspace = true }
+zk-flux            = { path = "../zk-flux" }
+flux-lattice-guard = { path = "../../../flux/crates/flux-lattice-guard" }
+
+flux-chronos = { path = "../../../flux/crates/flux-chronos" }
+flux-p2p     = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sigil-header = { path = "../sigil-header" }
+sigil-state  = { path = "../sigil-state" }
+sigil-events = { path = "../sigil-events" }
+sigil-tx     = { path = "../sigil-tx" }
+sigil-bank   = { path = "../sigil-bank" }
+sigil-tip-proof = { path = "../sigil-tip-proof" }
+sigil-dex    = { path = "../sigil-dex" }
+# Late-join catch-up: a fresh node verifies ONE constant-size fold proof of the
+# history prefix (BLAKE4 transparent setup) instead of replaying every block.
+flux-fold    = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

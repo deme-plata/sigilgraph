@@ -1,0 +1,12 @@
+{
+  "name": "sigil-mural-engine",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Animated canvas 'engine' rendering of the SIGIL 8-piece mural. Built with the shared sigil-wallet node_modules (FLUXFOOD one-dep-tree lever). Never `npm run` — build with ./node_modules/.bin/vite build.",
+  "scripts": {
+    "_note": "scripts are documentation only; build via ./node_modules/.bin/vite build per FLUXFOOD",
+    "build": "vite build",
+    "uiscore": "node test/ui-score.mjs"
+  }
+}

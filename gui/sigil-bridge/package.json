@@ -1,0 +1,2 @@
+{ "name":"sigil-bridge","private":true,"type":"module","version":"0.1.0",
+  "scripts":{"start":"node bridge.mjs"} }

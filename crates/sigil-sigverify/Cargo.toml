@@ -1,0 +1,37 @@
+[package]
+name = "sigil-sigverify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL Prototype 7-E: parallel signature verification across cores. Fans N sig-verifies across N cores (rayon) BEFORE ordering, so consensus never blocks on crypto. Scheme-generic via the Verifier trait — same parallel path serves ed25519 (hot-path) and SQIsign (finality), composing with P7-A verify-once mempool + P7-C hot/settlement split."
+
+# The STARGATE 500M handoff found: STATE IS SOLVED, CRYPTO IS THE WALL.
+# sig-verify caps end-to-end TPS (~113k/s ed25519, far less SQIsign). P7-E is
+# the simplest lever to widen it: verify in parallel. A block's N txs can have
+# their sigs checked on N cores simultaneously — the verifications are
+# independent, embarrassingly parallel. This module is the reusable primitive
+# the mempool (P7-A) and the hot/settlement split (P7-C) both call.
+
+[dependencies]
+rayon = { workspace = true }
+num_cpus = { workspace = true }
+
+# ed25519 for the hot path. v2.x — the tree already resolves 2.2.0 (flux-mempool),
+# so this unifies on one major AND keeps the SIMD curve25519 backend that makes
+# verify fast (~7× the 1.0.1 throughput — and throughput is this crate's whole
+# point). SQIsign (flux-sqisign) is pulled with --features sqisign so the default
+# build stays light + fast (arkworks-free).
+ed25519-dalek = "2"
+
+[features]
+default = []
+# sqisign: add the SQIsign Verifier impl (pulls flux-sqisign — the L5 isogeny
+# path used for finality / settlement txs).
+sqisign = ["dep:flux-sqisign"]
+
+[dependencies.flux-sqisign]
+path = "../../../flux/crates/flux-sqisign"
+optional = true
+
+# No dev-deps: tests use deterministic seeds (any 32 bytes is a valid ed25519
+# secret), so no rand version coupling and fully reproducible test vectors.

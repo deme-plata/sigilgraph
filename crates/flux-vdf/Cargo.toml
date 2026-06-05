@@ -1,0 +1,16 @@
+[package]
+name = "flux-vdf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flux Verifiable Delay Function — the Wesolowski VDF protocol (eval + proof + O(1) verify) over a swappable group of unknown order. ModSquaring is the working group; a genus-2 hyperelliptic Jacobian is the ASIC-hardest drop-in (same trait). The TIME lane of the dual-lane Flux miner."
+
+[dependencies]
+blake3      = { workspace = true }
+serde       = { workspace = true }
+num-bigint  = { workspace = true }
+num-integer = { workspace = true }
+num-traits  = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }

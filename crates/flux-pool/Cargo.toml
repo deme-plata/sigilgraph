@@ -1,0 +1,11 @@
+[package]
+name = "flux-pool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-pool — the PROVABLE mining pool. Miners submit shares (weighted by difficulty); the pool pays each one a small BTC-LN amount PROPORTIONAL to its committed shares, and every payout is independently recomputable + the whole share set is committed in ONE constant-size flux-fold attestation. Trustless share accounting (vs a normal pool where you trust the operator). Composes flux-miner (shares) → flux-pool (provable split) → sigil-bridge (LN payout)."
+
+[dependencies]
+serde     = { workspace = true }
+blake3    = { workspace = true }
+flux-fold = { path = "../flux-fold" }

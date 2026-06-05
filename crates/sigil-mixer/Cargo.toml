@@ -1,0 +1,61 @@
+[package]
+name = "sigil-mixer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL transaction privacy — Pedersen commitments + nullifiers + shielded pool + ShieldedSend wire shape, composed with flux-zk-snark::wallet_privacy and flux-zk-stark::wallet_privacy_stark. Phase 0: opaque [u8;32] commitments + nullifier-set state + wire schema + design proposal. Phase 1: real ark-bn254 curve math + ring signatures (CLSAG port from q-quantum-mixing) + bulletproof range proofs. Phase 2: stealth addresses, decoy traffic, threshold pool."
+
+# Per Viktor's directive (2026-05-29): every SIGIL transaction is private
+# by default — no opt-in for cleartext. ShieldedSend replaces SigilTx::Send;
+# Swap/LpDeposit/LpWithdraw similarly route through this crate. No tx wire
+# format ever exposes (from, to, amount) as cleartext to non-participants.
+#
+# What this crate is:
+#   - Wire shapes — `ShieldedSendTxData`, `Commitment`, `Nullifier`
+#   - Shielded-pool state — `ShieldedPool { commitments, spent_nullifiers }`
+#   - Proof composition over flux-zk-snark (Groth16) + flux-zk-stark
+#   - Pure, no I/O, no async — sigil-state owns persistence
+#
+# What this crate is NOT:
+#   - The sigil-tx ShieldedSend variant — that's rocky-sigil's territory.
+#     This crate exposes the types; sigil-tx maps them into SigilTx.
+#   - The mixing-round coordinator — q-quantum-mixing's `mixing_pool.rs`
+#     (565 LOC) ports to a future `sigil-mixer-coord` crate when we want
+#     active mixing rounds. Phase 0 ships shielded-pool semantics (you
+#     deposit, you withdraw at a different commitment) without active
+#     anonymity-set padding.
+#   - Decoy traffic — q-quantum-mixing's decoy_transactions.rs (1166 LOC)
+#     is post-MVP. Real shielded-pool anonymity comes from the size of the
+#     commitment set; decoys boost that artificially.
+
+[features]
+default = []
+# real-zk: pull flux-zk-stark for actual STARK proving + verification. Adds
+# ~30s to cold compile (arkworks-stark chain). Opt-in so sigil-tx
+# integration can use the sync Phase-0 stub during prototyping, then flip
+# the feature on once the cost is justified.
+real-zk = ["dep:flux-zk-stark", "dep:anyhow", "dep:tokio"]
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+blake3     = { workspace = true }
+hex        = { workspace = true }
+thiserror  = { workspace = true }
+
+# Re-uses sigil-state's WalletId/TokenId types so the wire stays consistent.
+sigil-state = { path = "../sigil-state" }
+
+# Phase 1 deps — pulled only with --features real-zk.
+# flux-zk-stark has REAL `WalletPrivacyStarkProver::prove_transaction_privacy_stark` +
+# `verify_transaction_privacy_stark` (vs flux-zk-snark which is stubbed at
+# the wallet_privacy layer). Post-quantum, no trusted setup, sync-able via
+# tokio::block_on if/when sigil-tx integrates without going async.
+flux-zk-stark = { path = "../../../flux/crates/flux-zk-stark", optional = true }
+anyhow        = { workspace = true, optional = true }
+tokio         = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Integration tests need tokio runtime + anyhow regardless of features.
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+anyhow = { workspace = true }

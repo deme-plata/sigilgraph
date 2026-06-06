@@ -48,7 +48,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// flux release channel (see [`UPDATE_MANIFEST`]). The update bar glows when the
 /// channel reports a version newer than this binary, so an OLD build learns about a
 /// new release without recompilation — the whole point of "auto-update the flux way".
-const LATEST: &str = "0.2.19";
+const LATEST: &str = "0.2.31";
 /// The flux release channel for the lightweight node: `<product>-latest.json` in the
 /// q-flux downloads dir — the SAME manifest `flux_release_check` reads. Fetched at
 /// startup (throttled) and on `[U]`, so the running binary discovers new releases live.
@@ -725,7 +725,7 @@ fn main() {
     }
     // Default-ON pinned-channel auto-update (before anything else). Only advances to a version the
     // operator has promoted in the manifest; --no-update / SIGIL_TOP_NO_AUTOUPDATE=1 opts out.
-    if !std::io::stdout().is_terminal() { maybe_auto_update(&argv); }
+    maybe_auto_update(&argv);
     let cfg = parse_args();
     // Non-TTY (piped / redirected / captured), --once, or --lite → emit exactly ONE
     // plain ANSI frame and exit. ratatui needs a real terminal; this path never
@@ -964,6 +964,7 @@ fn maybe_auto_update(argv: &[String]) {
             // Re-exec the freshly-swapped binary with the original args (minus argv[0]).
             if let Ok(exe) = std::env::current_exe() {
                 let args: Vec<String> = std::env::args().skip(1).collect();
+                std::env::set_var("SIGIL_TOP_JUST_UPDATED", "1");
                 #[cfg(unix)]
                 {
                     use std::os::unix::process::CommandExt;
@@ -1052,6 +1053,9 @@ struct App {
     eclipse_k: u32,
     eclipse_sources: Vec<(String, bool)>,
     last_eclipse: Instant,
+    /// Post-update logo splash (flux updater return UX).
+    splash_until: Option<Instant>,
+    splash_frame: u8,
 }
 
 impl App {
@@ -1065,7 +1069,13 @@ impl App {
               target_height: 0, synced_height: 0, verified_count: 0, streak: 0, score: 0,
               mining: false, mine_rx: None, mine_stop: None, mine_accepted: 0, full_sync: false, sync_us: 0,
               eclipse_k: 0, eclipse_sources: Vec::new(),
-              last_eclipse: Instant::now() - Duration::from_secs(60) }
+              last_eclipse: Instant::now() - Duration::from_secs(60),
+              splash_until: if std::env::var("SIGIL_TOP_JUST_UPDATED").ok().as_deref() == Some("1") {
+                  let _ = std::env::remove_var("SIGIL_TOP_JUST_UPDATED");
+                  Some(Instant::now() + Duration::from_secs(3))
+              } else { None },
+              splash_frame: 0,
+        }
     }
     fn refresh(&mut self) {
         // Live testnet sync: pull {status, tip, blocks} over HTTPS; fall back to a local node.
@@ -1155,6 +1165,9 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
 
     let res = (|| -> std::io::Result<()> {
         loop {
+            if app.splash_until.map(|u| Instant::now() < u).unwrap_or(false) {
+                app.splash_frame = app.splash_frame.wrapping_add(1);
+            }
             term.draw(|f| draw_ui(f, &app))?;
             if event::poll(Duration::from_millis(250))? {
                 if let Event::Key(k) = event::read()? {
@@ -1242,6 +1255,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                             let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
                             if let Ok(exe) = std::env::current_exe() {
                                 let args: Vec<String> = std::env::args().skip(1).collect();
+                                std::env::set_var("SIGIL_TOP_JUST_UPDATED", "1");
                                 #[cfg(unix)]
                                 { use std::os::unix::process::CommandExt; let _ = std::process::Command::new(&exe).args(&args).exec(); }
                                 #[cfg(not(unix))]
@@ -1283,8 +1297,48 @@ fn group(n: u64) -> String {
 //    console. Each render_* returns an owned Paragraph<'static>. Integrated + bug-fixed
 //    by Claude (f.area, .areas, manual supply bar, owned spans).
 
+
+fn render_update_splash(frame: u8) -> Paragraph<'static> {
+    const FRAMES: [&str; 8] = [
+        "    ◆─────────◆",
+        "   ╱◆─────────◆╲",
+        "  ╱ ╲◆───────◆╱ ╲",
+        " │   ◆───────◆   │",
+        "  ╲ ╱◆───────◆╲ ╱",
+        "   ╲◆─────────◆╱",
+        "    ◇─────────◇",
+        "     ╲───────╱",
+    ];
+    let ring = FRAMES[frame as usize % FRAMES.len()];
+    let spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"][frame as usize % 8];
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(ring, Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(format!(" {spin} "), Style::default().fg(C_GOLD)),
+            Span::styled("SIGIL", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" · v{VERSION}"), Style::default().fg(C_GOLD)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("  flux channel synced — BLAKE3 verified", Style::default().fg(C_CYAN))),
+        Line::from(Span::styled("  restarting lightweight node…", Style::default().fg(C_DIM))),
+        Line::from(""),
+        Line::from(Span::styled("  ████████████████████░░░░  updating", Style::default().fg(C_GOLD))),
+    ];
+    Paragraph::new(lines)
+        .alignment(ratatui::layout::Alignment::Center)
+        .style(Style::default().bg(Color::Rgb(5, 5, 15)))
+}
+
 fn draw_ui(f: &mut Frame, app: &App) {
     let area = f.area();
+    if let Some(until) = app.splash_until {
+        if Instant::now() < until {
+            f.render_widget(render_update_splash(app.splash_frame), area);
+            return;
+        }
+    }
     let [header_area, body_area, footer_area] =
         Layout::vertical([Constraint::Length(2), Constraint::Min(0), Constraint::Length(2)]).areas(area);
 

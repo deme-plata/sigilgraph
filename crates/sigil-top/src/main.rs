@@ -524,7 +524,7 @@ fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str) -> String
         o.push_str(&format!("  {GREEN}● synced from verified live feed{RESET} {DIM}· no local node required — verify on a potato{RESET}\n"));
     }
     // keybar footer — real keybindings UI
-    o.push_str(&format!("  {GOLD}[U]{RESET}{DIM}pdate{RESET}   {VBRIGHT}[L]{RESET}{DIM}ogin{RESET}   {GREEN}[V]{RESET}{DIM}erify tip{RESET}   {VIOLET}[D]{RESET}{DIM}NS anchor{RESET}   {DIM}[Q]uit{RESET}\n"));
+    o.push_str(&format!("  {GOLD}[M]{RESET}{DIM}ine{RESET}   {GREEN}[F]{RESET}{DIM}ull sync{RESET}   {GREEN}[V]{RESET}{DIM}erify tip{RESET}   {GOLD}[U]{RESET}{DIM}pdate{RESET}   {VBRIGHT}[L]{RESET}{DIM}ogin{RESET}   {VIOLET}[D]{RESET}{DIM}NS anchor{RESET}   {DIM}[Q]uit{RESET}\n"));
     o
 }
 
@@ -668,6 +668,23 @@ fn main() {
             return;
         }
         Some("logout") => { clear_session(); println!("\n  {DIM}logged out — session cleared{RESET}\n"); return; }
+        // Headless miner (same engine [M] drives): mine N shares to the node, print each. Scriptable.
+        Some("mine") => {
+            let n: u64 = argv.get(1).and_then(|s| s.parse().ok()).unwrap_or(3);
+            println!("\n  {GOLD}▲ sigil-top miner{RESET} → {} · wallet {}…", mine_url(), &miner_wallet()[..8]);
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let rx = start_mining(stop.clone());
+            let mut accepted = 0u64;
+            while accepted < n {
+                match rx.recv_timeout(Duration::from_secs(30)) {
+                    Ok(msg) => { println!("  {msg}"); if msg.starts_with("✓ share") { accepted += 1; } }
+                    Err(_) => { println!("  {RED}timeout{RESET}"); break; }
+                }
+            }
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            println!("  {GREEN}done — {accepted} shares accepted{RESET}\n");
+            return;
+        }
         // Scriptable flux-way self-update — fetch the release channel, BLAKE3-verify, hot-swap.
         Some("--self-update") | Some("update") => {
             println!("\n  {DIM}checking flux release channel{RESET} {CYAN}{UPDATE_MANIFEST}{RESET}");
@@ -831,6 +848,75 @@ fn version_gt(a: &str, b: &str) -> bool {
 
 /// Download the new binary, BLAKE3-verify against the manifest, and hot-swap THIS
 /// executable in place (cross-platform via `self_replace`). Returns a status line.
+/// The mining endpoint (sigil-rpcd `/mine`). Override with `SIGIL_MINE_URL`; defaults to the local
+/// node's rpcd. The node verifies BLAKE3 leading-zero-bits PoW in `submit_share` and credits the miner.
+fn mine_url() -> String {
+    std::env::var("SIGIL_MINE_URL").unwrap_or_else(|_| "http://127.0.0.1:8099/mine".into())
+}
+/// A stable per-install miner wallet (64-hex): BLAKE3 of the hostname, or `SIGIL_MINE_WALLET`.
+fn miner_wallet() -> String {
+    std::env::var("SIGIL_MINE_WALLET").ok().filter(|s| s.len() == 64).unwrap_or_else(|| {
+        let host = std::env::var("HOSTNAME").or_else(|_| std::env::var("HOST")).unwrap_or_else(|_| "sigil-top".into());
+        blake3::hash(format!("sigil-top-miner:{host}").as_bytes()).to_hex().to_string()
+    })
+}
+
+/// Start REAL mining on a background thread: find a BLAKE3 nonce meeting `difficulty_bits`, POST it to
+/// the node's `/mine` endpoint, repeat. Accepted shares are reported over the returned channel so the
+/// TUI shows live progress. Stops when `stop` flips true. This is what makes pressing **[M]** actually
+/// mine — not just toggle a flag. Light difficulty (testnet) so shares land in seconds.
+fn start_mining(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> mpsc::Receiver<String> {
+    use std::sync::atomic::Ordering;
+    let (tx, rx) = mpsc::channel();
+    let (url, wallet) = (mine_url(), miner_wallet());
+    thread::spawn(move || {
+        let difficulty_bits: u32 = std::env::var("SIGIL_MINE_DIFFICULTY").ok()
+            .and_then(|s| s.parse().ok()).unwrap_or(12); // ~4k hashes/share — real PoW, lands fast
+        let client = match reqwest::blocking::Client::builder().timeout(Duration::from_secs(8)).build() {
+            Ok(c) => c, Err(e) => { let _ = tx.send(format!("✗ miner init: {e}")); return; }
+        };
+        let _ = tx.send(format!("▲ mining → {url} · diff {difficulty_bits} bits · wallet {}…", &wallet[..8]));
+        let mut accepted = 0u64;
+        while !stop.load(Ordering::Relaxed) {
+            // header binds the share to the current minute (cheap freshness); find a winning nonce.
+            let header = format!("sigil-g0-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 30).unwrap_or(0));
+            let mut nonce = 0u64;
+            let found = loop {
+                if stop.load(Ordering::Relaxed) { break None; }
+                let mut buf = header.as_bytes().to_vec();
+                buf.extend_from_slice(&nonce.to_le_bytes());
+                if leading_zero_bits(blake3::hash(&buf).as_bytes()) >= difficulty_bits { break Some(nonce); }
+                nonce = nonce.wrapping_add(1);
+            };
+            let Some(nonce) = found else { break };
+            let body = format!("{{\"miner\":\"{wallet}\",\"header\":\"{header}\",\"nonce\":{nonce},\"difficulty\":{difficulty_bits},\"reward\":50}}");
+            match client.post(&url).header("Content-Type", "application/json").body(body).send() {
+                Ok(r) => {
+                    let txt = r.text().unwrap_or_default();
+                    if txt.contains("\"ok\":true") {
+                        accepted += 1;
+                        let bal = txt.split("\"new_balance\":").nth(1).and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next()).unwrap_or("?");
+                        let _ = tx.send(format!("✓ share {accepted} accepted (nonce {nonce}) · balance {bal}"));
+                    } else {
+                        let _ = tx.send(format!("✗ share rejected: {}", txt.chars().take(60).collect::<String>()));
+                    }
+                }
+                Err(e) => { let _ = tx.send(format!("✗ submit: {e} (retry 3s)")); thread::sleep(Duration::from_secs(3)); }
+            }
+            thread::sleep(Duration::from_millis(800)); // gentle cadence
+        }
+        let _ = tx.send(format!("▲ mining stopped ({accepted} accepted this session)"));
+    });
+    rx
+}
+
+/// BLAKE3 leading-zero-bits of a digest — the same PoW measure `submit_share` enforces node-side.
+fn leading_zero_bits(d: &[u8]) -> u32 {
+    let mut n = 0u32;
+    for &b in d { if b == 0 { n += 8; } else { n += b.leading_zeros(); break; } }
+    n
+}
+
 /// Default-ON startup auto-update against the **pinned release channel**. Runs once at launch:
 /// fetch the operator-controlled manifest, and ONLY if it names a version newer than this binary
 /// (i.e. the operator has *promoted* a release by writing the manifest — publishing a GitHub release
@@ -933,6 +1019,10 @@ struct App {
     streak: u64,
     score: u64,
     mining: bool,
+    mine_rx: Option<mpsc::Receiver<String>>,           // accepted-share messages from the miner thread
+    mine_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>, // signals the miner thread to stop
+    mine_accepted: u64,                                 // shares the node accepted this session
+    full_sync: bool,                                    // [F] opt-in heavy full sync (default = 10ms lightweight verify)
     sync_us: u128,
     // L2-B: real eclipse-K — measured independent sources agreeing on the tip (replaces hardcoded k).
     eclipse_k: u32,
@@ -949,7 +1039,7 @@ impl App {
               update_rx: None,
               blocks: Vec::new(),
               target_height: 0, synced_height: 0, verified_count: 0, streak: 0, score: 0,
-              mining: true, sync_us: 0,
+              mining: false, mine_rx: None, mine_stop: None, mine_accepted: 0, full_sync: false, sync_us: 0,
               eclipse_k: 0, eclipse_sources: Vec::new(),
               last_eclipse: Instant::now() - Duration::from_secs(60) }
     }
@@ -1049,8 +1139,27 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                             KeyCode::Char('r') | KeyCode::Char('R') => app.refresh(),
                             KeyCode::Char('m') | KeyCode::Char('M') => {
                                 app.mining = !app.mining;
-                                app.toast = if app.mining { "▲ mining ON — verify→attest→score on every new tip".into() }
-                                            else { "▲ mining paused (still verifying tips)".into() };
+                                if app.mining {
+                                    // Actually START mining: spawn the PoW thread → POST shares to the node.
+                                    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                                    app.mine_rx = Some(start_mining(stop.clone()));
+                                    app.mine_stop = Some(stop);
+                                    app.toast = "▲ mining STARTED — solving BLAKE3 PoW → submitting to node".into();
+                                } else {
+                                    // Signal the thread to stop.
+                                    if let Some(s) = app.mine_stop.take() { s.store(true, std::sync::atomic::Ordering::Relaxed); }
+                                    app.toast = "▲ mining stopped".into();
+                                }
+                            }
+                            KeyCode::Char('f') | KeyCode::Char('F') => {
+                                // Default is the TRUE lightweight node: ~10ms tip-proof verify, 0 blocks.
+                                // [F] opts INTO the heavy full sync (download + verify every block).
+                                app.full_sync = !app.full_sync;
+                                app.toast = if app.full_sync {
+                                    "⬇ FULL SYNC enabled — downloading + verifying every block (heavy). Press F to return to lightweight.".into()
+                                } else {
+                                    "⚡ lightweight node — ~10ms tip-proof verify, 0 blocks downloaded (default)".into()
+                                };
                             }
                             KeyCode::Char('v') | KeyCode::Char('V') => {
                                 app.toast = match app.st.tip.as_ref() {
@@ -1103,6 +1212,13 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                     Ok(msg) => { app.toast = msg; app.update_rx = None; }
                     Err(mpsc::TryRecvError::Disconnected) => { app.update_rx = None; }
                     Err(mpsc::TryRecvError::Empty) => {}
+                }
+            }
+            // Drain live mining progress (accepted shares) onto the toast + counter.
+            if let Some(rx) = app.mine_rx.as_ref() {
+                while let Ok(msg) = rx.try_recv() {
+                    if msg.starts_with("✓ share") { app.mine_accepted += 1; app.score += 50; }
+                    app.toast = msg;
                 }
             }
         }

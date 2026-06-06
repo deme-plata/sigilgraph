@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<link rel="icon" href="/sigil-wallet/favicon.svg"/>
+<link rel="stylesheet" href="/src/cosmos.css"/>
+
+<title>κ-Phase Engine — Quantum Cosmos Sigil</title>
+</head>
+<body data-page="kappa.html">
+<header>
+  <div class="brand">
+    <div class="cube">κ</div>
+    <div>
+      <h1><span class="v">QUANTUM COSMOS</span> <span class="g">SIGIL ENGINE</span></h1>
+      <p class="tagline"><em>Probatione, non fide</em> — compute_kappa_eff · phase realms · merit aura</p>
+    </div>
+  </div>
+  <nav class="site"></nav>
+</header>
+<div class="wrap">
+  <div class="hero">
+    <div class="panel">
+      <h2>κ-PHASE MEASURE <span>mirrors sigil-cosmos-core</span></h2>
+      <label class="lbl">mass (kg) <input type="range" id="mass" min="0.001" max="100" step="0.1" value="70"></label>
+      <label class="lbl">radius (m) <input type="range" id="radius" min="0.001" max="2" step="0.01" value="0.5"></label>
+      <label class="lbl">temperature (K) <input type="range" id="temp" min="4" max="400" step="1" value="310"></label>
+      <label class="lbl">observer entropy (bits) <input type="range" id="entropy" min="6" max="14" step="0.1" value="10"></label>
+      <button class="btn" id="btnMeasure">Measure κ-state</button>
+      <div class="kpi" style="margin-top:14px">
+        <div><b id="kKappa">—</b><small>κ_eff</small></div>
+        <div><b id="kPhase">—</b><small>phase realm</small></div>
+        <div><b id="kTier">—</b><small>citizenship tier</small></div>
+        <div><b id="kMerit">—</b><small>merit aura</small></div>
+      </div>
+      <div class="phase-bar"><div class="phase-fill" id="kappaBar" style="width:0%"></div></div>
+    </div>
+    <div class="panel">
+      <h2>PHASE REALMS <span>κ boundaries</span></h2>
+      <table class="data">
+        <tr><th>κ regime</th><th>Realm</th><th>Sigil aura</th></tr>
+        <tr><td>κ &lt; 0.3</td><td>classical</td><td>crystalline determinism</td></tr>
+        <tr><td>0.3 ≤ κ &lt; 1</td><td>transitional</td><td>Lindblad edge · citizenship path</td></tr>
+        <tr><td>κ ≥ 1</td><td>quantum_coherent</td><td>Harlow-QEC weave</td></tr>
+      </table>
+      <p class="foot">Lindblad independence: Δ and Λ_comp are <em>different</em> channels → <a href="lindblad.html" style="color:var(--br)">Lindblad page</a></p>
+    </div>
+  </div>
+  </div>
+<script type="module">
+import { injectNav } from "/src/cosmos.js";
+injectNav("kappa.html");
+
+  import { computeKappa, phaseFromKappa, tierFor, TIER_NAMES } from "/src/cosmos.js";
+  function render() {
+    const mass = +document.getElementById("mass").value;
+    const radius = +document.getElementById("radius").value;
+    const temp = +document.getElementById("temp").value;
+    const entropy = 10 ** +document.getElementById("entropy").value;
+    const r = computeKappa(mass, radius, temp, entropy);
+    const ph = phaseFromKappa(r.kappa);
+    const tier = tierFor(r.kappa, r.merit, r.decoherence);
+    document.getElementById("kKappa").textContent = r.kappa.toExponential(3);
+    document.getElementById("kPhase").textContent = ph.label;
+    document.getElementById("kTier").textContent = TIER_NAMES[tier] || "—";
+    document.getElementById("kMerit").textContent = r.merit.toFixed(4);
+    document.getElementById("kappaBar").style.width = Math.min(100, r.kappa * 100) + "%";
+  }
+  ["mass","radius","temp","entropy"].forEach(id =>
+    document.getElementById(id).addEventListener("input", render));
+  document.getElementById("btnMeasure").onclick = render;
+  render();
+  
+</script>
+</body>
+</html>

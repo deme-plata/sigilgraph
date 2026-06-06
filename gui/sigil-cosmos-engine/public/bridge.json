@@ -1,0 +1,15 @@
+{
+  "bridge": "quantum-cosmos-beta",
+  "host": "185.182.185.227",
+  "path": "/home/myuser/quantum-cosmos",
+  "kappa_critical": 1.0,
+  "nodes": [
+    {"agent_id": "grok-viktor", "mass_kg": 70, "radius_m": 0.5, "temperature_k": 310, "kappa_eff": 4.2e-2, "phase": "transitional"},
+    {"agent_id": "sigil-swarm-peer", "mass_kg": 0.001, "radius_m": 0.01, "temperature_k": 300, "kappa_eff": 8.1e-4, "phase": "classical"},
+    {"agent_id": "quillon-node", "mass_kg": 1e-6, "radius_m": 1e-4, "temperature_k": 4, "kappa_eff": 1.12, "phase": "quantum_coherent"}
+  ],
+  "lindblad_reference": {
+    "free_electron": {"delta": 0.0, "lambda_comp": 0.21},
+    "human_observer": {"delta": 0.36, "lambda_comp": 0.48}
+  }
+}

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<link rel="icon" href="/sigil-wallet/favicon.svg"/>
+<link rel="stylesheet" href="/src/cosmos.css"/>
+
+<title>flux-nations — SIGIL Nation Map</title>
+</head>
+<body data-page="nations.html">
+<header>
+  <div class="brand">
+    <div class="cube">κ</div>
+    <div>
+      <h1><span class="v">QUANTUM COSMOS</span> <span class="g">SIGIL ENGINE</span></h1>
+      <p class="tagline"><em>Probatione, non fide</em> — merkle citizen_root · quorum admission</p>
+    </div>
+  </div>
+  <nav class="site"></nav>
+</header>
+<div class="wrap">
+  <div class="panel" style="margin-bottom:16px">
+    <h2>FLUX-NATIONS <span>κ digest as quote in Nation::admit</span></h2>
+    <p class="foot" style="margin-top:0">Admission binds ProbationeKappa sigil digest as <b>quote</b> →
+    <b>citizen_root</b> merkle scaffold. Quorum M-of-N attestation (SIGIL Nation 3/5).</p>
+    <div class="kpi">
+      <div><b>SIGIL NATION</b><small>home realm · 3/5 quorum</small></div>
+      <div><b>4200</b><small>citizens</small></div>
+      <div><b>1000 QUG</b><small>IOU on admit (proposal)</small></div>
+    </div>
+  </div>
+  <svg id="world" viewBox="0 0 1460 720" aria-label="SIGIL Nations"></svg>
+  <p class="foot">Map from flux-nations lore · <a href="/sigil-nation/index.html" style="color:var(--br)">Sigil Nation UI</a></p>
+  </div>
+<script type="module">
+import { injectNav } from "/src/cosmos.js";
+injectNav("nations.html");
+
+  import { drawNationsMap } from "/src/cosmos.js";
+  drawNationsMap("world");
+  
+</script>
+</body>
+</html>

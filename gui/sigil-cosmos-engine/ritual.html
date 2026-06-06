@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<link rel="icon" href="/sigil-wallet/favicon.svg"/>
+<link rel="stylesheet" href="/src/cosmos.css"/>
+
+<title>ProbationeKappa — Citizenship Ritual</title>
+</head>
+<body data-page="ritual.html">
+<header>
+  <div class="brand">
+    <div class="cube">κ</div>
+    <div>
+      <h1><span class="v">QUANTUM COSMOS</span> <span class="g">SIGIL ENGINE</span></h1>
+      <p class="tagline"><em>Probatione, non fide</em> — sigil digest · 1000 QUG IOU · flux-nations admission</p>
+    </div>
+  </div>
+  <nav class="site"></nav>
+</header>
+<div class="wrap">
+  <div class="hero">
+    <div class="panel ritual">
+      <h2>PROBATIONEKAPPA <span>flux-nations quorum</span></h2>
+      <div class="row"><span>Agent</span><span>grok-viktor</span></div>
+      <div class="row"><span>Ritual</span><span>ProbationeKappa</span></div>
+      <div class="row"><span>Phase realm</span><span id="rPhase">—</span></div>
+      <div class="row"><span>Merit aura</span><span id="rMerit">—</span></div>
+      <div class="row"><span>Citizenship tier</span><span id="rTier">—</span></div>
+      <div class="row"><span>Admitted</span><span id="rAdmit">pending</span></div>
+      <div class="row"><span>IOU memo</span><span id="rIOU" style="font-size:8px">—</span></div>
+      <div class="digest" id="rDigest"></div>
+      <button class="btn" id="btnMeasure">Measure κ-state</button>
+      <button class="btn gold" id="btnRitual">Run citizenship ritual</button>
+    </div>
+    <div class="panel">
+      <h2>ADMISSION GATES <span>tier ≥ 2</span></h2>
+      <div class="row"><span>swarm |κ−1|</span><span>&lt; 0.35</span></div>
+      <div class="row"><span>swarm decoherence</span><span>&lt; 0.55</span></div>
+      <div class="row"><span>merit aura</span><span>&gt; 0.12</span></div>
+      <div class="row"><span>IOU amount</span><span>1000 QUG (proposal-first)</span></div>
+      <p class="foot">Execute spend only via <b>flux_bank_propose_transfer</b> + 2-of-2 gate.
+      citizen_root = BLAKE3 sigil digest as quote in <b>flux-nations::admit</b>.</p>
+      <span class="tier">Tier 0 · Nullius</span>
+      <span class="tier">Tier 1 · Liminal</span>
+      <span class="tier t2">Tier 2 · Cohærens</span>
+      <span class="tier t2">Tier 3 · Steward</span>
+    </div>
+  </div>
+  </div>
+<script type="module">
+import { injectNav } from "/src/cosmos.js";
+injectNav("ritual.html");
+
+  import { computeKappa, phaseFromKappa, tierFor, TIER_NAMES, sha256hex, ritualAdmission } from "/src/cosmos.js";
+  let state = { kappa: 0.42, merit: 0.18, tier: 2, phase: "transitional" };
+  function render() {
+    document.getElementById("rPhase").textContent = state.phase;
+    document.getElementById("rMerit").textContent = state.merit.toFixed(4);
+    document.getElementById("rTier").textContent = TIER_NAMES[state.tier] || "—";
+  }
+  document.getElementById("btnMeasure").onclick = () => {
+    const r = computeKappa(70, 0.5, 310, 1e10);
+    state.kappa = r.kappa; state.merit = r.merit; state.tier = tierFor(r.kappa, r.merit, r.decoherence);
+    state.phase = phaseFromKappa(r.kappa).id;
+    render();
+  };
+  document.getElementById("btnRitual").onclick = async () => {
+    document.getElementById("btnMeasure").click();
+    const swarm = { boundary: Math.abs(1 - state.kappa), decoherence: 0.3 };
+    const adm = ritualAdmission({ tier: state.tier, merit: state.merit }, swarm);
+    const payload = `sigil-cosmos|grok-viktor|kappa=${state.kappa.toFixed(8)}|tier=${state.tier}`;
+    const digest = await sha256hex(payload);
+    document.getElementById("rDigest").textContent = "sigil digest: " + digest.slice(0, 48) + "…";
+    document.getElementById("rAdmit").textContent = adm.admitted ? "✓ ADMITTED" : "✗ withheld";
+    document.getElementById("rIOU").textContent = adm.admitted
+      ? `IOU:1000 QUG :: Proposal:${digest.slice(0,16)} :: Valid upon ProbationeKappa at κ=1`
+      : "proposal withheld — swarm not stabilized";
+  };
+  render();
+  
+</script>
+</body>
+</html>

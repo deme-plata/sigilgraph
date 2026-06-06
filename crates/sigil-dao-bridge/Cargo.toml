@@ -1,0 +1,22 @@
+[package]
+name = "sigil-dao-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SigilGraph integration bridge — wires sigil-council (DAO), sigil-vm, sigil-dex through sigil-state chokepoint for testnet deploy"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+
+sigil-state = { path = "../sigil-state" }
+sigil-dex = { path = "../sigil-dex" }
+sigil-vm = { path = "../sigil-vm" }
+sigil-council = { path = "../sigil-council" }
+sigil-treasury = { path = "../sigil-treasury" }
+
+[dev-dependencies]
+serde_json = { workspace = true }

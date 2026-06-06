@@ -851,7 +851,7 @@ fn version_gt(a: &str, b: &str) -> bool {
 /// The mining endpoint (sigil-rpcd `/mine`). Override with `SIGIL_MINE_URL`; defaults to the local
 /// node's rpcd. The node verifies BLAKE3 leading-zero-bits PoW in `submit_share` and credits the miner.
 fn mine_url() -> String {
-    std::env::var("SIGIL_MINE_URL").unwrap_or_else(|_| "http://127.0.0.1:8099/mine".into())
+    std::env::var("SIGIL_MINE_URL").unwrap_or_else(|_| "https://sigilgraph.quillon.xyz:8447/v1/mine".into())
 }
 /// A stable per-install miner wallet (64-hex): BLAKE3 of the hostname, or `SIGIL_MINE_WALLET`.
 fn miner_wallet() -> String {

@@ -1219,7 +1219,22 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             // background self-update result (if any) → toast
             if let Some(rx) = app.update_rx.as_ref() {
                 match rx.try_recv() {
-                    Ok(msg) => { app.toast = msg; app.update_rx = None; }
+                    Ok(msg) => {
+                        // Auto-restart: a successful swap re-execs the new binary so the user
+                        // never has to relaunch by hand. (Restores the terminal first.)
+                        if msg.contains("swapped") {
+                            let _ = disable_raw_mode();
+                            let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+                            if let Ok(exe) = std::env::current_exe() {
+                                let args: Vec<String> = std::env::args().skip(1).collect();
+                                #[cfg(unix)]
+                                { use std::os::unix::process::CommandExt; let _ = std::process::Command::new(&exe).args(&args).exec(); }
+                                #[cfg(not(unix))]
+                                { let _ = std::process::Command::new(&exe).args(&args).spawn(); std::process::exit(0); }
+                            }
+                        }
+                        app.toast = msg; app.update_rx = None;
+                    }
                     Err(mpsc::TryRecvError::Disconnected) => { app.update_rx = None; }
                     Err(mpsc::TryRecvError::Empty) => {}
                 }

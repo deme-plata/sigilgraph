@@ -704,7 +704,7 @@ fn main() {
     }
     // Default-ON pinned-channel auto-update (before anything else). Only advances to a version the
     // operator has promoted in the manifest; --no-update / SIGIL_TOP_NO_AUTOUPDATE=1 opts out.
-    maybe_auto_update(&argv);
+    if !std::io::stdout().is_terminal() { maybe_auto_update(&argv); }
     let cfg = parse_args();
     // Non-TTY (piped / redirected / captured), --once, or --lite → emit exactly ONE
     // plain ANSI frame and exit. ratatui needs a real terminal; this path never

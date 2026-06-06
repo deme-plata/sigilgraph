@@ -48,7 +48,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// flux release channel (see [`UPDATE_MANIFEST`]). The update bar glows when the
 /// channel reports a version newer than this binary, so an OLD build learns about a
 /// new release without recompilation — the whole point of "auto-update the flux way".
-const LATEST: &str = "0.2.32";
+const LATEST: &str = "0.2.33";
 /// The flux release channel for the lightweight node: `<product>-latest.json` in the
 /// q-flux downloads dir — the SAME manifest `flux_release_check` reads. Fetched at
 /// startup (throttled) and on `[U]`, so the running binary discovers new releases live.
@@ -99,6 +99,8 @@ struct NodeStatus {
     // Present on the live sigilgraph-testnet snapshot; absent on bare local nodes
     // (which still report the top-level string aliases above, kept for back-compat).
     tip: Option<Tip>,
+    #[serde(default)]
+    blocks_per_sec: f64,
 }
 
 /// The real, per-block tip the node publishes (LIGHT-3 L3-A, live).
@@ -166,6 +168,8 @@ struct FeedStatus {
     reward_sig: f64,
     network_id: String,
     live: bool,
+    #[serde(default)]
+    blocks_per_sec: f64,
 }
 
 /// Fetch + parse the live testnet feed over HTTPS (rustls). Returns the mapped
@@ -214,6 +218,7 @@ fn fetch_feed(url: &str) -> Option<(NodeStatus, Vec<FeedBlock>)> {
         event_root: er,
         contract_root: cr,
         tip: feed.tip,
+        blocks_per_sec: s.blocks_per_sec,
         ..Default::default()
     };
     Some((st, feed.blocks))
@@ -487,6 +492,10 @@ fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str) -> String
     let ver = if st.version.is_empty() { "—".into() } else { st.version.clone() };
     let disp_height = st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(st.height);
     o.push_str(&row("height", &format!("{GOLD}{}{RESET}", disp_height)));
+    if st.blocks_per_sec > 0.0 {
+        let bps_col = if st.blocks_per_sec >= 1000.0 { GOLD } else { GREEN };
+        o.push_str(&row("blocks/s", &format!("{bps_col}{:.0}{RESET} {DIM}(live feed){RESET}", st.blocks_per_sec)));
+    }
     o.push_str(&row("peers", &format!("{}", st.peers)));
     o.push_str(&row("producer", &prod));
     o.push_str(&row("binary", &ver));
@@ -1523,6 +1532,15 @@ fn render_security(app: &App) -> Paragraph<'static> {
 
 fn render_block_stream(app: &App) -> Paragraph<'static> {
     let tip_ok = app.verify.as_ref().map_or(false, |v| v.ok);
+    let title: &'static str = if app.st.blocks_per_sec >= 5000.0 {
+        " BLOCK STREAM · 5k+ blk/s"
+    } else if app.st.blocks_per_sec >= 1000.0 {
+        " BLOCK STREAM · 1k+ blk/s"
+    } else if app.st.blocks_per_sec > 0.0 {
+        " BLOCK STREAM · turbo"
+    } else {
+        " BLOCK STREAM · live"
+    };
     let lines: Vec<Line> = if app.blocks.is_empty() {
         vec![Line::from(dim("streaming…"))]
     } else {
@@ -1541,7 +1559,7 @@ fn render_block_stream(app: &App) -> Paragraph<'static> {
             ])
         }).collect()
     };
-    Paragraph::new(lines).block(card_block(" BLOCK STREAM · live", C_VBRIGHT))
+    Paragraph::new(lines).block(card_block(&title, C_VBRIGHT))
 }
 
 fn render_footer(app: &App) -> Paragraph<'static> {

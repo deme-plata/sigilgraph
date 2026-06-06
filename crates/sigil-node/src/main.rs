@@ -237,6 +237,13 @@ fn run_start() -> Result<()> {
             .unwrap_or(false);
         let produce_ms: u64 = std::env::var("SIGIL_PRODUCE_MS")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(100);
+        // Sub-ms target: SIGIL_PRODUCE_US=200 → 5000 blocks/s setpoint.
+        // Falls back to produce_ms×1000; floor 50µs so we don't spin the core.
+        let produce_us: u64 = std::env::var("SIGIL_PRODUCE_US")
+            .ok().and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| produce_ms.saturating_mul(1000).max(200));
+        let feed_every: u64 = std::env::var("SIGIL_FEED_EVERY")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(1).max(1);
         // Grace after first peer before minting block 1 — lets the gossipsub
         // mesh GRAFT so the receiver actually gets H=1 onward (otherwise it
         // joins mid-stream and gaps forever, Phase 0 has no backfill).
@@ -326,7 +333,8 @@ fn run_start() -> Result<()> {
             eprintln!("🕸 DAG mode — blocks merge peer tips as parents (DagKnight v0)");
         }
         let mut produce_tick =
-            tokio::time::interval(std::time::Duration::from_millis(produce_ms.max(1)));
+            tokio::time::interval(std::time::Duration::from_micros(produce_us.max(50)));
+        produce_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut produced: u64 = 0;
         let mut received: u64 = 0;
         let mut applied: u64 = 0;
@@ -334,8 +342,8 @@ fn run_start() -> Result<()> {
         let mut produced_tx: u64 = 0; // verify-once txs this node packed into its own blocks
         let t_start = std::time::Instant::now();
         if produce {
-            eprintln!("🏭 PRODUCER mode — minting a block every {}ms on {}",
-                produce_ms, sigil_net::TOPIC_BLOCKS);
+            eprintln!("🏭 PRODUCER mode — target {:.0} blocks/s ({}µs tick, feed every {}) on {}",
+                1_000_000.0 / produce_us as f64, produce_us, feed_every, sigil_net::TOPIC_BLOCKS);
         }
 
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -395,8 +403,13 @@ fn run_start() -> Result<()> {
                                     // parents[0] = selected parent, rest = DAG merge parents.
                                     let mut ps = vec![format!("\"{}\"", hex_short_block(&parent))];
                                     for m in &mps { ps.push(format!("\"{}\"", hex_short_block(m))); }
-                                    println!("📦{{\"h\":{},\"hash\":\"{}\",\"parents\":[{}],\"prod\":\"{}\",\"tiphash\":\"{}\",\"roots\":{}}}",
-                                        h, hex_short_block(&bhash), ps.join(","), prod_tag, tiphash, roots_json);
+                                    if produced == 1 || produced % feed_every == 0 {
+
+                                        println!("📦{{\"h\":{},\"hash\":\"{}\",\"parents\":[{}],\"prod\":\"{}\",\"tiphash\":\"{}\",\"roots\":{}}}",
+
+                                            h, hex_short_block(&bhash), ps.join(","), prod_tag, tiphash, roots_json);
+
+                                    }
                                     // Selective-egress policy governs the real
                                     // send path: block gossip is HotMesh → stays
                                     // on the fast WireGuard mesh, never Tor.

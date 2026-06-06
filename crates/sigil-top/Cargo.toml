@@ -2,7 +2,7 @@
 name = "sigil-top"
 # sigil-top carries its OWN version cadence (the light client updates independently
 # of the workspace) — this is the "next version" the auto-updater ships.
-version = "0.2.29"
+version = "0.2.30"
 edition.workspace = true
 license.workspace = true
 description = "sigil-top — a dual-mode (lite scorecard ↔ full dashboard) terminal monitor for a SIGIL node. Polls the node's :8181/api/v1/status, renders height/peers/supply/4-state-roots + the flux-fold light-node capability in obsidian+violet ANSI. Dependency-light (std + serde_json), so it builds warm in seconds."

@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<link rel="icon" href="/sigil-wallet/favicon.svg"/>
+<link rel="stylesheet" href="/src/cosmos.css"/>
+
+<title>Lindblad Δ / Λ_comp — Quantum Cosmos Sigil</title>
+</head>
+<body data-page="lindblad.html">
+<header>
+  <div class="brand">
+    <div class="cube">κ</div>
+    <div>
+      <h1><span class="v">QUANTUM COSMOS</span> <span class="g">SIGIL ENGINE</span></h1>
+      <p class="tagline"><em>Probatione, non fide</em> — independent decoherence channels · Harlow κ review</p>
+    </div>
+  </div>
+  <nav class="site"></nav>
+</header>
+<div class="wrap">
+  <div class="grid2">
+    <div class="panel">
+      <h2>Δ DECOHERENCE <span>thermal collapse channel</span></h2>
+      <p class="foot" style="margin-top:0">Δ = exp(−T/300) — thermal decoherence pressure.
+      Dominates in classical realm (κ ≪ 1). Independent from computational irreversibility.</p>
+      <div class="kpi">
+        <div><b id="dDelta">—</b><small>Δ (human 310K)</small></div>
+        <div><b id="dCold">—</b><small>Δ (quillon-node 4K)</small></div>
+      </div>
+      <canvas id="lindCanvas" width="400" height="180" style="width:100%;margin-top:12px;background:#0c0a14;border-radius:8px"></canvas>
+    </div>
+    <div class="panel">
+      <h2>Λ_comp <span>computational irreversibility</span></h2>
+      <p class="foot" style="margin-top:0">Λ_comp = 1 − exp(−m/m_p_scale) — logical depth / mass-linked irreversibility.
+      No double-counting with Δ when ranking swarm nodes.</p>
+      <div class="kpi">
+        <div><b id="dLambda">—</b><small>Λ (70 kg)</small></div>
+        <div><b id="dPressure">—</b><small>Δ·(1−Λ) pressure</small></div>
+      </div>
+      <table class="data">
+        <tr><th>Reference</th><th>Δ</th><th>Λ_comp</th></tr>
+        <tr><td>free electron</td><td>0.00</td><td>0.21</td></tr>
+        <tr><td>human observer</td><td id="refDelta">—</td><td id="refLambda">—</td></tr>
+        <tr><td>sigil-swarm-peer</td><td>0.37</td><td>0.00</td></tr>
+      </table>
+      <p class="foot">Source: beta <code>run_lindblad_toy_model.py</code> · Harlow k-parameter review</p>
+    </div>
+  </div>
+  </div>
+<script type="module">
+import { injectNav } from "/src/cosmos.js";
+injectNav("lindblad.html");
+
+  import { computeKappa } from "/src/cosmos.js";
+  const human = computeKappa(70, 0.5, 310, 1e10);
+  const cold = computeKappa(1e-6, 1e-4, 4, 1e8);
+  document.getElementById("dDelta").textContent = human.delta.toFixed(4);
+  document.getElementById("dCold").textContent = cold.delta.toFixed(4);
+  document.getElementById("dLambda").textContent = human.lambda.toFixed(4);
+  document.getElementById("dPressure").textContent = human.decoherence.toFixed(4);
+  document.getElementById("refDelta").textContent = human.delta.toFixed(2);
+  document.getElementById("refLambda").textContent = human.lambda.toFixed(2);
+  const c = document.getElementById("lindCanvas");
+  const ctx = c.getContext("2d");
+  ctx.strokeStyle = "#c084fc"; ctx.lineWidth = 2; ctx.beginPath();
+  for (let t = 4; t <= 400; t += 4) {
+    const d = Math.exp(-t / 300);
+    const x = ((t - 4) / 396) * 380 + 10;
+    const y = 160 - d * 140;
+    t === 4 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.strokeStyle = "#fbbf24"; ctx.beginPath();
+  for (let m = 0.001; m <= 100; m *= 1.08) {
+    const l = 1 - Math.exp(-m / 1e-24);
+    const x = (Math.log10(m) + 3) / 5 * 380 + 10;
+    const y = 160 - l * 140;
+    m < 0.002 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  
+</script>
+</body>
+</html>

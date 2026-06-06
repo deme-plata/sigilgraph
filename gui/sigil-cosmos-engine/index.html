@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<link rel="icon" href="/sigil-wallet/favicon.svg"/>
+<link rel="stylesheet" href="/src/cosmos.css"/>
+
+<title>Quantum Cosmos Sigil Engine — Hub</title>
+</head>
+<body data-page="index.html">
+<header>
+  <div class="brand">
+    <div class="cube">κ</div>
+    <div>
+      <h1><span class="v">QUANTUM COSMOS</span> <span class="g">SIGIL ENGINE</span></h1>
+      <p class="tagline"><em>Probatione, non fide</em> — Kristensen κ × SigilGraph × flux-nations · Ex Coherentia, Unitas</p>
+    </div>
+  </div>
+  <nav class="site"></nav>
+</header>
+<div class="wrap">
+  <div class="hero">
+    <div class="panel">
+      <h2>SIGIL COSMOS ENGINE <span>sigil-cosmos-core · sigil-cosmos-mcp</span></h2>
+      <p class="foot" style="margin-top:0">Kristensen <b>κ</b> is the live phase boundary for SigilGraph citizenship —
+      not decoration. Beta quantum-cosmos on <b>185.182.185.227</b> feeds the bridge; Epsilon runs
+      ProbationeKappa ritual + BLAKE3 sigil digest + <b>1000 QUG IOU</b> (proposal-first).</p>
+      <div class="arch">beta: quantum-cosmos (EnhancedKristensenTheory + Lindblad)
+        ↓ JSON bridge (sigilgraph_kappa_bridge.json)
+epsilon: sigil-cosmos-core (κ, merit aura, swarm field)
+        ↓ ProbationeKappa ritual + BLAKE3 sigil digest
+fluxc-mcp → flux_bank_propose_transfer (1000 QUG IOU, proposal-first)
+        ↓ flux-nations admit → citizen_root merkle quote</div>
+      <div class="kpi" id="hubKpi">
+        <div><b id="hkKappa">—</b><small>collective κ</small></div>
+        <div><b id="hkPhase">transitional</b><small>swarm phase</small></div>
+        <div><b id="hkMerit">—</b><small>merit aura</small></div>
+        <div><b id="hkIOU">1000 QUG</b><small>citizenship IOU (proposal)</small></div>
+      </div>
+    </div>
+    <div class="panel ritual">
+      <h2>LIVE SWARM <span>3 beta nodes</span></h2>
+      <div class="row"><span>Bridge host</span><span>185.182.185.227</span></div>
+      <div class="row"><span>κ critical</span><span>1.0</span></div>
+      <div class="row"><span>Ritual</span><span>ProbationeKappa</span></div>
+      <div class="row"><span>Crates</span><span>sigil-cosmos-core · -mcp</span></div>
+      <div class="phase-bar"><div class="phase-fill" id="hubBar" style="width:42%"></div></div>
+      <a class="btn" href="kappa.html">Measure κ-state →</a>
+      <a class="btn gold" href="ritual.html">Run ritual →</a>
+    </div>
+  </div>
+  <h2 style="font-size:12px;color:var(--br);letter-spacing:.1em;margin-bottom:10px">ENGINE SURFACES</h2>
+  <div class="cards">
+    <a class="card" href="kappa.html"><div class="ic">κ</div><h3>κ-Phase Engine</h3><p>compute_kappa_eff · phase realms · merit aura · citizenship tier</p></a>
+    <a class="card" href="ritual.html"><div class="ic">⚡</div><h3>ProbationeKappa</h3><p>Citizenship ritual · sigil digest · 1000 QUG IOU memo · admission gates</p></a>
+    <a class="card" href="lindblad.html"><div class="ic">Δ</div><h3>Lindblad Channels</h3><p>Δ decoherence vs Λ_comp — independent channels, no double-counting</p></a>
+    <a class="card" href="nations.html"><div class="ic">🌍</div><h3>flux-nations</h3><p>Merkle citizen_root · quorum M-of-N · SIGIL Nation admission</p></a>
+    <a class="card" href="bridge.html"><div class="ic">🔗</div><h3>Beta Bridge</h3><p>quantum-cosmos @ beta → sigilgraph_kappa_bridge.json</p></a>
+    <a class="card" href="mcp.html"><div class="ic">⬡</div><h3>MCP Tools</h3><p>flux_sigil_cosmos_measure · _citizenship_ritual · _beta_bridge</p></a>
+  </div>
+  <p class="foot">Built with <b>flux-vite-engine</b> verify gate · deployed via <b>fluxc serve</b> @ sigilgraph.fluxapp.xyz ·
+  <a href="/sigil-nation/index.html" style="color:var(--br)">Sigil Nation forsiden</a></p>
+  </div>
+<script type="module">
+import { injectNav } from "/src/cosmos.js";
+injectNav("index.html");
+
+  import { computeKappa, phaseFromKappa } from "/src/cosmos.js";
+  const r = computeKappa(70, 0.5, 310, 1e10, 0);
+  document.getElementById("hkKappa").textContent = r.kappa.toExponential(2);
+  document.getElementById("hkPhase").textContent = phaseFromKappa(r.kappa).label;
+  document.getElementById("hkMerit").textContent = r.merit.toFixed(4);
+  document.getElementById("hubBar").style.width = Math.min(100, r.kappa * 100) + "%";
+  
+</script>
+</body>
+</html>

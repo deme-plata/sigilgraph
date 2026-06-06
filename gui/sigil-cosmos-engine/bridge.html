@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<link rel="icon" href="/sigil-wallet/favicon.svg"/>
+<link rel="stylesheet" href="/src/cosmos.css"/>
+
+<title>Beta Bridge — quantum-cosmos → SigilGraph</title>
+</head>
+<body data-page="bridge.html">
+<header>
+  <div class="brand">
+    <div class="cube">κ</div>
+    <div>
+      <h1><span class="v">QUANTUM COSMOS</span> <span class="g">SIGIL ENGINE</span></h1>
+      <p class="tagline"><em>Probatione, non fide</em> — 185.182.185.227 · sigilgraph_kappa_bridge.json</p>
+    </div>
+  </div>
+  <nav class="site"></nav>
+</header>
+<div class="wrap">
+  <div class="panel">
+    <h2>BETA BRIDGE <span>quantum-cosmos @ 185.182.185.227</span></h2>
+    <p class="foot" style="margin-top:0">File-based JSON bridge (streaming chronos queued).
+    Path: <code>/home/myuser/quantum-cosmos/quantum_cosmos_results/sigilgraph_kappa_bridge.json</code></p>
+    <pre class="code" id="bridgeJson">loading…</pre>
+    <button class="btn" id="btnRefresh">Reload bridge.json</button>
+  </div>
+  </div>
+<script type="module">
+import { injectNav } from "/src/cosmos.js";
+injectNav("bridge.html");
+
+  async function load() {
+    const el = document.getElementById("bridgeJson");
+    try {
+      const r = await fetch("bridge.json");
+      const j = await r.json();
+      el.textContent = JSON.stringify(j, null, 2);
+    } catch (e) { el.textContent = "bridge load failed: " + e; }
+  }
+  document.getElementById("btnRefresh").onclick = load;
+  load();
+  
+</script>
+</body>
+</html>

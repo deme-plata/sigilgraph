@@ -6145,7 +6145,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-top"
-version = "0.2.24"
+version = "0.2.25"
 dependencies = [
  "blake3",
  "crossterm",

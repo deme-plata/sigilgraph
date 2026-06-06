@@ -3,31 +3,15 @@ name = "sigil-vm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "SIGIL deterministic WASM contract VM — the work engine for verifiable execution + SettleWork. Clean build on wasmi (pure-Rust, deterministic interpreter), NOT a verbatim port of q-vm's wasmer/wasmtime JIT — because cross-platform determinism is the prerequisite for proving a contract ran correctly. Spec: ../../SIGIL_AGENT_ECONOMY_v0.md."
-
-# DESIGN LOCK (the q-vm → sigil-vm improvement):
-#   q-vm uses wasmer 4.0 + wasmtime 14.0 — both JIT. JIT execution is NOT
-#   bit-for-bit deterministic across platforms (codegen differences, float
-#   NaN canonicalization, etc.). For VERIFIABLE execution — where two nodes
-#   must compute the identical contract_state_root, and a STARK must attest
-#   the transition — determinism is non-negotiable. So sigil-vm uses `wasmi`,
-#   a pure-Rust deterministic interpreter. Slower than JIT, but every
-#   execution is reproducible — which is the entire point of the work engine.
-#
-#   This is the same pattern as the rest of SIGIL: take what Quillon got
-#   right (WASM contracts + gas metering), change only what Flux/ZK make
-#   necessary (deterministic interpreter so execution is provable).
+description = "SIGIL deterministic WASM contract VM — wasmi interpreter (VM-1)."
 
 [dependencies]
 serde     = { workspace = true }
 thiserror = { workspace = true }
 blake3    = { workspace = true }
+wasmi     = { version = "0.31", default-features = false }
 
 sigil-state = { path = "../sigil-state" }
-
-# VM-1 adds: wasmi = { version = "0.31", default-features = false }
-# (held out of the skeleton so the crate compiles + the design is reviewable
-#  before the engine integration lands.)
 
 [dev-dependencies]
 serde_json = { workspace = true }

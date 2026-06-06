@@ -685,6 +685,9 @@ fn main() {
         }
         _ => {}
     }
+    // Default-ON pinned-channel auto-update (before anything else). Only advances to a version the
+    // operator has promoted in the manifest; --no-update / SIGIL_TOP_NO_AUTOUPDATE=1 opts out.
+    maybe_auto_update(&argv);
     let cfg = parse_args();
     // Non-TTY (piped / redirected / captured), --once, or --lite → emit exactly ONE
     // plain ANSI frame and exit. ratatui needs a real terminal; this path never
@@ -828,6 +831,46 @@ fn version_gt(a: &str, b: &str) -> bool {
 
 /// Download the new binary, BLAKE3-verify against the manifest, and hot-swap THIS
 /// executable in place (cross-platform via `self_replace`). Returns a status line.
+/// Default-ON startup auto-update against the **pinned release channel**. Runs once at launch:
+/// fetch the operator-controlled manifest, and ONLY if it names a version newer than this binary
+/// (i.e. the operator has *promoted* a release by writing the manifest — publishing a GitHub release
+/// alone does NOT advance the channel), download + BLAKE3-verify + hot-swap, then re-exec the new
+/// binary so the node is immediately running the chosen version. Silent + non-fatal on any failure
+/// (offline, unreachable channel) — the monitor still starts. Disable with `--no-update` or
+/// `SIGIL_TOP_NO_AUTOUPDATE=1`. This is what makes "every node gets the release I choose" automatic,
+/// while a stale manifest means a new publish reaches nobody until it's promoted.
+fn maybe_auto_update(argv: &[String]) {
+    if argv.iter().any(|a| a == "--no-update")
+        || std::env::var("SIGIL_TOP_NO_AUTOUPDATE").map(|v| v == "1").unwrap_or(false)
+    {
+        return;
+    }
+    let rel = match fetch_latest() {
+        Ok(r) if version_gt(&r.version, VERSION) => r,
+        _ => return, // up to date, channel unreachable, or malformed → just run
+    };
+    eprintln!("  {GOLD}⬆ auto-update v{VERSION} → v{}{RESET} ({SELF_TARGET}) — verifying…", rel.version);
+    match self_update(&rel) {
+        Ok(_) => {
+            // Re-exec the freshly-swapped binary with the original args (minus argv[0]).
+            if let Ok(exe) = std::env::current_exe() {
+                let args: Vec<String> = std::env::args().skip(1).collect();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt;
+                    let _ = std::process::Command::new(&exe).args(&args).exec(); // replaces this process
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = std::process::Command::new(&exe).args(&args).spawn();
+                    std::process::exit(0);
+                }
+            }
+        }
+        Err(e) => eprintln!("  {DIM}auto-update skipped: {e}{RESET}"),
+    }
+}
+
 fn self_update(rel: &Release) -> Result<String, String> {
     let t = rel.for_self();
     if t.url.is_empty() { return Err(format!("manifest has no {SELF_TARGET} build")); }

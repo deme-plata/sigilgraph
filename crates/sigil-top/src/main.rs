@@ -215,8 +215,13 @@ fn fetch_feed(url: &str) -> Option<(NodeStatus, Vec<FeedBlock>)> {
 /// node on the api port if the feed can't be reached. Returns (status, online,
 /// source) where source is "feed" | "local" | "offline".
 fn fetch_best(cfg: &Config) -> (NodeStatus, bool, &'static str) {
-    if let Some((st, _blocks)) = fetch_feed(&cfg.feed) {
-        return (st, true, "feed");
+    // Try the configured feed, then known-good public mirrors — so a node on a network where one
+    // host is blocked/unresolvable still syncs from another. (Was single-feed → looked "offline".)
+    for url in [cfg.feed.as_str(),
+                "https://sigilgraph.quillon.xyz/sigil-status.json",
+                "https://quillon.xyz/sigil-status.json",
+                "https://sigilgraph.fluxapp.xyz/sigil-status.json"] {
+        if let Some((st, _b)) = fetch_feed(url) { return (st, true, "feed"); }
     }
     match fetch(&cfg.api) {
         Ok(s) => (s, true, "local"),

@@ -173,6 +173,7 @@ struct FeedStatus {
 fn fetch_feed(url: &str) -> Option<(NodeStatus, Vec<FeedBlock>)> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(6))
+        .min_tls_version(reqwest::tls::Version::TLS_1_0)
         .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION")))
         .build().ok()?;
     let feed: Feed = client.get(url).send().ok()?.json().ok()?;
@@ -808,6 +809,7 @@ fn fetch_latest() -> Result<Release, String> {
     // error (was `.ok()?` → blind "unreachable") — surface the real reason instead.
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(8))
+        .min_tls_version(reqwest::tls::Version::TLS_1_0)
         .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION")))
         .build().map_err(|e| format!("client init: {e}"))?;
     // Read the body as text + parse explicitly (reqwest's .json() Display hides the
@@ -877,7 +879,8 @@ fn start_mining(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> mpsc::Re
     thread::spawn(move || {
         let difficulty_bits: u32 = std::env::var("SIGIL_MINE_DIFFICULTY").ok()
             .and_then(|s| s.parse().ok()).unwrap_or(12); // ~4k hashes/share — real PoW, lands fast
-        let client = match reqwest::blocking::Client::builder().timeout(Duration::from_secs(8)).build() {
+        let client = match reqwest::blocking::Client::builder().timeout(Duration::from_secs(8))
+        .min_tls_version(reqwest::tls::Version::TLS_1_0).build() {
             Ok(c) => c, Err(e) => { let _ = tx.send(format!("✗ miner init: {e}")); return; }
         };
         let _ = tx.send(format!("▲ mining → {url} · diff {difficulty_bits} bits · wallet {}…", &wallet[..8]));
@@ -967,6 +970,7 @@ fn self_update(rel: &Release) -> Result<String, String> {
     if t.url.is_empty() { return Err(format!("manifest has no {SELF_TARGET} build")); }
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(120))
+        .min_tls_version(reqwest::tls::Version::TLS_1_0)
         .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION")))
         .build().map_err(|e| e.to_string())?;
     let bytes = client.get(&t.url).send().map_err(|e| e.to_string())?
@@ -1105,7 +1109,8 @@ fn measure_eclipse_k(tip_height: u64, tip_ok: bool) -> (u32, Vec<(String, bool)>
     ];
     let mut sources: Vec<(String, bool)> = vec![("node (verified)".into(), tip_ok)];
     let marker = tip_height.to_string();
-    if let Ok(client) = reqwest::blocking::Client::builder().timeout(Duration::from_secs(3)).build() {
+    if let Ok(client) = reqwest::blocking::Client::builder().timeout(Duration::from_secs(3))
+        .min_tls_version(reqwest::tls::Version::TLS_1_0).build() {
         for (name, base) in resolvers {
             let url = format!("{base}?name={ANCHOR}&type=TXT");
             let agree = client

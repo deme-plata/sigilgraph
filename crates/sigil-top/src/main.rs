@@ -48,7 +48,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// flux release channel (see [`UPDATE_MANIFEST`]). The update bar glows when the
 /// channel reports a version newer than this binary, so an OLD build learns about a
 /// new release without recompilation — the whole point of "auto-update the flux way".
-const LATEST: &str = "0.2.31";
+const LATEST: &str = "0.2.32";
 /// The flux release channel for the lightweight node: `<product>-latest.json` in the
 /// q-flux downloads dir — the SAME manifest `flux_release_check` reads. Fetched at
 /// startup (throttled) and on `[U]`, so the running binary discovers new releases live.
@@ -924,7 +924,7 @@ fn start_mining(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> mpsc::Re
                         let _ = tx.send(format!("✗ share rejected: {}", txt.chars().take(60).collect::<String>()));
                     }
                 }
-                Err(e) => { let _ = tx.send(format!("✗ submit: {e} (retry 3s)")); thread::sleep(Duration::from_secs(3)); }
+                Err(e) => { let _ = tx.send(format!("✗ submit: {e} (retry 3s)")); thread::sleep(Duration::from_millis(2200)); }
             }
             thread::sleep(Duration::from_millis(800)); // gentle cadence
         }
@@ -1072,7 +1072,7 @@ impl App {
               last_eclipse: Instant::now() - Duration::from_secs(60),
               splash_until: if std::env::var("SIGIL_TOP_JUST_UPDATED").ok().as_deref() == Some("1") {
                   let _ = std::env::remove_var("SIGIL_TOP_JUST_UPDATED");
-                  Some(Instant::now() + Duration::from_secs(3))
+                  Some(Instant::now() + Duration::from_millis(2200))
               } else { None },
               splash_frame: 0,
         }
@@ -1134,7 +1134,7 @@ fn measure_eclipse_k(tip_height: u64, tip_ok: bool) -> (u32, Vec<(String, bool)>
     ];
     let mut sources: Vec<(String, bool)> = vec![("node (verified)".into(), tip_ok)];
     let marker = tip_height.to_string();
-    if let Ok(client) = reqwest::blocking::Client::builder().timeout(Duration::from_secs(3))
+    if let Ok(client) = reqwest::blocking::Client::builder().timeout(Duration::from_millis(2200))
         .min_tls_version(reqwest::tls::Version::TLS_1_0).build() {
         for (name, base) in resolvers {
             let url = format!("{base}?name={ANCHOR}&type=TXT");

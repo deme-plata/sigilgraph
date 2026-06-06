@@ -52,11 +52,11 @@ const LATEST: &str = "0.2.19";
 /// The flux release channel for the lightweight node: `<product>-latest.json` in the
 /// q-flux downloads dir — the SAME manifest `flux_release_check` reads. Fetched at
 /// startup (throttled) and on `[U]`, so the running binary discovers new releases live.
-const UPDATE_MANIFEST: &str = "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-latest.json";
+const UPDATE_MANIFEST: &str = "https://sigilgraph.quillon.xyz/downloads/sigil-top-latest.json";
 /// Which prebuilt this binary self-updates to (its per-OS entry in the manifest).
 const SELF_TARGET: &str = if cfg!(windows) { "windows-x64" } else { "linux-x64" };
 /// Live testnet feed (same source flux-node.html uses): status + tip + block stream.
-const DEFAULT_FEED: &str = "https://sigilgraph.fluxapp.xyz/sigil-status.json";
+const DEFAULT_FEED: &str = "https://sigilgraph.quillon.xyz/sigil-status.json";
 const MAX_SUPPLY_BASE: u128 = 2_100_000_000_000_000; // 21 M × 10^8
 const DECIMALS: u32 = 8;
 

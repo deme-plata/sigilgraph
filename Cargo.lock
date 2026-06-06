@@ -5842,6 +5842,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-dao-bridge"
+version = "0.0.10"
+dependencies = [
+ "blake3",
+ "hex",
+ "serde",
+ "serde_json",
+ "sigil-council",
+ "sigil-dex",
+ "sigil-state",
+ "sigil-treasury",
+ "sigil-vm",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "sigil-dex"
 version = "0.0.10"
 dependencies = [
@@ -6129,7 +6145,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-top"
-version = "0.2.21"
+version = "0.2.22"
 dependencies = [
  "blake3",
  "crossterm",

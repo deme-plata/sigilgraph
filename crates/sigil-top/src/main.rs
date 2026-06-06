@@ -170,13 +170,22 @@ struct FeedStatus {
 
 /// Fetch + parse the live testnet feed over HTTPS (rustls). Returns the mapped
 /// node status + the recent block stream — the real testnet sync source.
+static LAST_FEED_ERR: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+fn set_feed_err(e: String) { if let Ok(mut g)=LAST_FEED_ERR.lock(){ *g=e; } }
+/// The most recent feed-fetch failure reason — shown on the OFFLINE card so a user can SEE why
+/// (DNS, TLS, connection refused, HTTP status, or JSON parse) instead of a blind "offline".
+pub fn last_feed_err() -> String { LAST_FEED_ERR.lock().map(|g| g.clone()).unwrap_or_default() }
+
 fn fetch_feed(url: &str) -> Option<(NodeStatus, Vec<FeedBlock>)> {
-    let client = reqwest::blocking::Client::builder()
+    let client = match reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(6))
         .min_tls_version(reqwest::tls::Version::TLS_1_0)
         .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION")))
-        .build().ok()?;
-    let feed: Feed = client.get(url).send().ok()?.json().ok()?;
+        .build() { Ok(c)=>c, Err(e)=>{ set_feed_err(format!("client init @ {url}: {e}")); return None; } };
+    let resp = match client.get(url).send() { Ok(r)=>r, Err(e)=>{ set_feed_err(format!("connect @ {url}: {e}")); return None; } };
+    let code = resp.status();
+    let body = match resp.text() { Ok(b)=>b, Err(e)=>{ set_feed_err(format!("read @ {url} (HTTP {code}): {e}")); return None; } };
+    let feed: Feed = match serde_json::from_str(&body) { Ok(f)=>f, Err(e)=>{ set_feed_err(format!("parse @ {url} (HTTP {code}): {e}")); return None; } };
     let s = feed.status;
     let supply_whole: u128 = s.supply.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0);
     let native_supply = supply_whole.saturating_mul(10u128.pow(DECIMALS));
@@ -446,6 +455,12 @@ fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str) -> String
 
     // ── brand header — clean Quillon-graph node look (⬡ mark, one status line) ──
     o.push_str(&format!("\n  {GOLD}◆{RESET} {VBRIGHT}{BOLD}SIGIL{RESET} {DIM}lightweight node{RESET} {VBRIGHT}v{VERSION}{RESET}    {dot} {state}    {DIM}net {net}{RESET}\n"));
+    // SELF-DIAGNOSIS: when OFFLINE, show exactly WHY the feed fetch failed (DNS/TLS/connect/HTTP/parse)
+    // so the user can read the real cause instead of a blind "offline". This is the dogfood endpoint.
+    if !online {
+        let e = last_feed_err();
+        if !e.is_empty() { o.push_str(&format!("  {RED}why: {}{RESET}\n", e.chars().take(160).collect::<String>())); }
+    }
     // ST-2: FROZEN banner — the chain has stopped advancing (peering loss / no qualifying PoW)
     let stall = stall_check(st.height, online);
     if stall.frozen {

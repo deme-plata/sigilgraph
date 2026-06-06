@@ -132,19 +132,6 @@ impl Accumulator {
         *h.finalize().as_bytes()
     }
 
-    /// Light-client check: does this accumulator's root match the one published in a block header?
-    /// The whole "verify, don't trust" primitive in one call — a node recomputes its own root and
-    /// compares. Returns true on an exact match. (S1)
-    pub fn verify_root(&self, expected: &Root) -> bool {
-        &self.root() == expected
-    }
-
-    /// The published root as a lowercase hex string — for explorers, logs, and the `_sigil-tip` DNS
-    /// record. Pairs with [`Accumulator::root`] (the raw 32 bytes). (S2)
-    pub fn root_hex(&self) -> String {
-        self.root().iter().map(|b| format!("{b:02x}")).collect()
-    }
-
     /// Rebuild an accumulator from scratch over an iterator of
     /// `(key_bytes, value_bytes)` leaves. Used by tests to assert the
     /// incremental path matches a fresh fold, and available to callers that
@@ -159,27 +146,6 @@ impl Accumulator {
         }
         acc
     }
-
-    /// The 40-byte state commitment a light node carries: the 32-byte additive sum + the 8-byte leaf
-    /// count. This is *all* a 500 KB light client needs to re-derive and check the published root —
-    /// not the whole multi-TB state. Pairs with [`light_root`]. (S3)
-    pub fn commitment(&self) -> [u8; 40] {
-        let mut out = [0u8; 40];
-        out[..32].copy_from_slice(&self.sum);
-        out[32..].copy_from_slice(&self.count.to_le_bytes());
-        out
-    }
-}
-
-/// Recompute the published root from a 40-byte commitment (`sum ‖ count_le`) — the light-client
-/// primitive. A 500 KB node receives the commitment over the wire and calls this to verify a block's
-/// state-root in constant time, with zero access to the full state. (S3)
-pub fn light_root(commitment: &[u8; 40]) -> Root {
-    let mut h = blake3::Hasher::new();
-    h.update(ROOT_DOMAIN);
-    h.update(&commitment[..32]);          // sum
-    h.update(&commitment[32..]);          // count_le
-    *h.finalize().as_bytes()
 }
 
 /// Wrapping 256-bit little-endian addition of two byte arrays.
@@ -213,25 +179,6 @@ fn wrapping_sub_256(a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
-
-    #[test]
-    fn verify_root_and_hex_and_light_node() {
-        let mut acc = Accumulator::new();
-        for i in 0u64..1000 { acc.insert(&i.to_le_bytes(), &(i * 3).to_le_bytes()); }
-        let r = acc.root();
-        // S1: verify_root matches its own root, rejects a tampered one
-        assert!(acc.verify_root(&r));
-        let mut bad = r; bad[0] ^= 0xff;
-        assert!(!acc.verify_root(&bad));
-        // S2: hex round-trips to the same 32 bytes
-        let hex = acc.root_hex();
-        assert_eq!(hex.len(), 64);
-        assert_eq!(hex, r.iter().map(|b| format!("{b:02x}")).collect::<String>());
-        // S3: a 500KB light node re-derives the SAME root from the 40-byte commitment alone
-        let c = acc.commitment();
-        assert_eq!(c.len(), 40);
-        assert_eq!(super::light_root(&c), r, "light node reproduces the full-state root from 40 bytes");
-    }
     use super::*;
 
     fn k(n: u8) -> Vec<u8> { vec![n; 8] }

@@ -87,11 +87,22 @@ pub const DEFAULT_API_PORT: u16 = 8181;
 
 pub const BOOTSTRAP_ENV: &str = "SIGIL_BOOTSTRAP_PEERS";
 
-/// Parse the comma-separated env var into a list of multiaddrs. Whitespace is
-/// trimmed and empty entries are skipped. Missing var returns an empty list
-/// (lets single-node bootstrap work without env).
+/// Public seed nodes of the sigil-g0 testnet — so a FRESH node with no env syncs out-of-the-box.
+/// (The 4-box fleet listens on `0.0.0.0:9501`, publicly reachable.) Override with `SIGIL_BOOTSTRAP_PEERS`.
+pub const DEFAULT_BOOTSTRAP_PEERS: &[&str] = &[
+    "/ip4/89.149.241.126/tcp/9501",  // Epsilon (producer)
+    "/ip4/5.79.79.158/tcp/9501",     // Delta
+    "/ip4/109.205.176.60/tcp/9501",  // Gamma
+    "/ip4/185.182.185.227/tcp/9501", // Beta
+];
+
+/// Parse the comma-separated env var into a list of multiaddrs. Whitespace is trimmed, empty entries
+/// skipped. When the var is UNSET, fall back to the public testnet seeds so a node syncs out-of-the-box.
 pub fn read_bootstrap_peers() -> Vec<String> {
-    parse_bootstrap_list(&std::env::var(BOOTSTRAP_ENV).unwrap_or_default())
+    match std::env::var(BOOTSTRAP_ENV) {
+        Ok(s) if !s.trim().is_empty() => parse_bootstrap_list(&s),
+        _ => DEFAULT_BOOTSTRAP_PEERS.iter().map(|s| s.to_string()).collect(),
+    }
 }
 
 /// Pure-function form for tests and explicit overrides.

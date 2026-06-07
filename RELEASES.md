@@ -6,7 +6,7 @@ code carries a **content-addressed flux-rev provenance hash** — re-snapshot th
 
 | Version | Date | Type | git (signed) | flux-rev provenance |
 |---|---|---|---|---|
-| **v0.0.11** | 2026-06-07 | ✨ sigil-top v0.2.35 | `e083d57` | sigil-top `7d2da33aab4b37ad…` |
+| **v0.0.11** | 2026-06-07 | ✨ sigil-top v0.2.35 | `e083d57` | sigil-top `c468aedd58c37ecf…` (musl static-pie) |
 | **v0.0.10** | 2026-06-05 | 🐛 fix | `ec873b7` | — |
 | **v0.0.9** | 2026-06-05 | ✨ feature | `d03672d` | sigil-state `1f5c55a01cfe3aa9…` |
 | **v0.0.8** | 2026-06-05 | 🚀 initial public release (67 crates) | `b219791` | — |

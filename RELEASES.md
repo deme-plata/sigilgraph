@@ -6,10 +6,48 @@ code carries a **content-addressed flux-rev provenance hash** — re-snapshot th
 
 | Version | Date | Type | git (signed) | flux-rev provenance |
 |---|---|---|---|---|
+| **v0.0.13** | 2026-06-07 | 🚀 sigil-top v0.3.5 + Chronos Swarm | `HEAD` | sigil-top `—` (musl static-pie) |
+| **v0.0.12** | 2026-06-07 | 🚀 sigil-top v0.3.0 P1 Foundation | `4c98eb4` | sigil-top `0fb29075428d61e6…` (musl static-pie) |
 | **v0.0.11** | 2026-06-07 | ✨ sigil-top v0.2.35 | `e083d57` | sigil-top `c468aedd58c37ecf…` (musl static-pie) |
 | **v0.0.10** | 2026-06-05 | 🐛 fix | `ec873b7` | — |
 | **v0.0.9** | 2026-06-05 | ✨ feature | `d03672d` | sigil-state `1f5c55a01cfe3aa9…` |
 | **v0.0.8** | 2026-06-05 | 🚀 initial public release (67 crates) | `b219791` | — |
+
+## v0.0.13 — sigil-top v0.3.5 "Chronos Swarm + TPS Breakthrough"
+
+### sigil-top v0.3.5
+- **Chronos benchmark card** — displays latest Warp Drive TPS results from local JSON. Shows max TPS, block/tpb/wallets config, apply-vs-commit split, sweep duration.
+- **P2P Gossip health card** — peer count, mesh quality (healthy/warming/empty), estimated drop rate, verify latency. Fan-out derived from sqrt(peers).
+- **v0.3.5 version bump** — `LATEST = "0.3.5"`, auto-updater fetches from `sigilgraph.quillon.xyz/downloads/sigil-top-latest.json`.
+
+### Chronos Research (5 new binaries in sigil-chronos)
+- **`sigil-warp-drive`** — TPS parameter sweeper. Sweeps blocks×tpb×wallets via Chronos throughput harness, finds max TPS config. Parallel Rayon execution. Outputs JSON + Delta deploy env vars.
+- **`sigil-hurricane`** — Gossip parameter optimizer. Simulates multi-node mesh in Chronos, sweeps fan-out×latency×drop%, finds min block propagation latency. Outputs optimal flux-p2p NetworkConfig.
+- **`sigil-delta-pipeline`** — Pipeline block production benchmark. Models CPU/network overlap, sweeps depth×build-time×propagation-time, quantifies TPS speedup vs sequential.
+- **`delta-archive-oracle`** — 20TB block-range server. Sharded block store (1M/shard), zstd compression, BLAKE3 integrity, HTTP API (`GET /blocks?from=N&to=M`), binary index O(1) seeks. Deploy on Delta :9800.
+- **`sigil-swarm`** — Multi-Epsilon swarm orchestrator with 4 MCP combo verbs: `sigil_swarm_launch` (spawn N + health), `sigil_swarm_bench` (coordinated benchmark), `sigil_swarm_health` (aggregate), `sigil_swarm_diverge` (divergence detection). 70-85% token savings.
+
+### MCP Combos (new phrasal verbs)
+| Verb | Composes | Token savings |
+|------|----------|---------------|
+| `sigil_swarm_launch` | spawn N epsilon nodes + health check + mesh verify | 70% |
+| `sigil_swarm_bench` | launch + warp-drive TPS sweep + hurricane gossip sweep | 80% |
+| `sigil_swarm_health` | node_status × N + divergence check + aggregate | 75% |
+| `sigil_swarm_diverge` | diff all nodes + find divergence points + report | 85% |
+
+### flux-chronos (CHRONOS-S snapshot serde)
+- Full/delta snapshots with zstd/lz4 compression
+- BLAKE3 integrity checksums per snapshot
+- Atomic catalog writes (tmp→rename), genealogy tracking (parent/child)
+- SnapshotDiff engine (nodes changed/added/removed, event growth, seed/tick comparison)
+- Query/predicate/prune/annotate API
+- Enables 50K-100K checkpoints on 20TB
+- `Universe::serialize_to_vec()` / `deserialize_from_slice()` with node factory
+- `SimNode::type_tag()` for snapshot reconstruction
+
+### Dependencies added
+- `bincode`, `hex`, `blake3`, `serde_json`, `zstd`, `lz4` → flux-chronos + sigil-chronos
+- `rayon` → sigil-chronos (parallel benchmark sweeps)
 
 ## v0.0.11 — sigil-top v0.2.35 "visible wallet + SQIsign readiness"
 - **feat(sigil-top):** wallet balance display — fetches `wallet_balance` from feed + renders in MINING card (whole.fractional SIGIL, 8 decimals). Non-breaking: 0 when feed doesn't carry it.

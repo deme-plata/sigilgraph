@@ -14,16 +14,17 @@ export const PROTOCOL_VERSION = '6.6.0'
  * Bootstrap Peers - WebSocket Secure connections to bootstrap node
  *
  * Architecture:
- * Browser → wss://sigilgraph.quillon.xyz:9443 → nginx proxy → libp2p:9001/ws
+ * Browser → wss://sigilgraph.fluxapp.xyz:9443 → nginx proxy → libp2p:9001/ws
  *
  * Port 9443: Dedicated WebSocket proxy to libp2p (verified working)
- * Port 9444: Tor bridge (currently returns 502 - not yet functional)
+ * Port 9444: Tor bridge (via sigilgraph.fluxapp.xyz)
+// Port 9445: TRON wallet bridge (multi-chain support)
  */
 export const BOOTSTRAP_PEERS = [
-  // Server Epsilon (EU) - WebSocket Bootstrap via sigilgraph.com
+  // Server Epsilon (EU) - WebSocket Bootstrap via sigilgraph.fluxapp.xyz
   // Port 9443: nginx WSS proxy → libp2p WebSocket listener on port 9001
   // PeerID: Epsilon mainnet-genesis (v8.8.2)
-  '/dns4/sigilgraph.com/tcp/9443/wss/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM',
+  '/dns4/sigilgraph.fluxapp.xyz/tcp/9443/wss/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM',
 ]
 
 /**
@@ -255,3 +256,12 @@ export const VERIFICATION_REPORT_CONFIG = {
   // Cooldown period before reporting same block again (ms)
   REPORT_COOLDOWN: 60000, // 1 minute
 }
+
+/**
+ * TRON Wallet Bridge Peers
+ * Dedicated bootstrap peers for TRON multi-chain wallet connectivity.
+ * TRON wallets connect via sigilgraph.fluxapp.xyz:9445 (TRON bridge port).
+ */
+export const TRON_BOOTSTRAP_PEERS = [
+  '/dns4/sigilgraph.fluxapp.xyz/tcp/9445/wss/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM',
+]

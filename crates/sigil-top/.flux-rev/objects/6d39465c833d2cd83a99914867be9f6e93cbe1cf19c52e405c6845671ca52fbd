@@ -5,7 +5,7 @@
 //!                        (21 M cap bar) / flux-fold succinct-sync capability.
 //!   • lite  (`--lite`) — one compact scorecard line, for tmux strips & SSH peeks.
 //!
-//! Polls `https://sigilgraph.fluxapp.xyz/api/v1/status` with a hand-rolled std TCP GET (no
+//! Polls `http://127.0.0.1:8181/api/v1/status` with a hand-rolled std TCP GET (no
 //! http-client dep → builds warm in seconds). If the node is unreachable it shows
 //! an explicit OFFLINE card plus the known SIGIL constants, so the binary is always
 //! useful. Obsidian+violet ANSI to match the SIGIL visual identity.
@@ -19,15 +19,9 @@
 
 use std::io::{IsTerminal, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
-
-
-use std::fs;
-use std::sync::atomic::{AtomicBool, Ordering};
-
 
 use serde::Deserialize;
 
@@ -54,15 +48,15 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// flux release channel (see [`UPDATE_MANIFEST`]). The update bar glows when the
 /// channel reports a version newer than this binary, so an OLD build learns about a
 /// new release without recompilation — the whole point of "auto-update the flux way".
-const LATEST: &str = "0.4.1";
+const LATEST: &str = "0.2.19";
 /// The flux release channel for the lightweight node: `<product>-latest.json` in the
 /// q-flux downloads dir — the SAME manifest `flux_release_check` reads. Fetched at
 /// startup (throttled) and on `[U]`, so the running binary discovers new releases live.
-const UPDATE_MANIFEST: &str = "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-latest.json";
+const UPDATE_MANIFEST: &str = "https://sigilgraph.quillon.xyz/downloads/sigil-top-latest.json";
 /// Which prebuilt this binary self-updates to (its per-OS entry in the manifest).
-const SELF_TARGET: &str = if cfg!(windows) { "windows-x64" } else if cfg!(target_os = "macos") { "macos-arm64" } else { "linux-x64" };
+const SELF_TARGET: &str = if cfg!(windows) { "windows-x64" } else { "linux-x64" };
 /// Live testnet feed (same source flux-node.html uses): status + tip + block stream.
-const DEFAULT_FEED: &str = "https://sigilgraph.fluxapp.xyz/sigil-status.json";
+const DEFAULT_FEED: &str = "https://sigilgraph.quillon.xyz/sigil-status.json";
 const MAX_SUPPLY_BASE: u128 = 2_100_000_000_000_000; // 21 M × 10^8
 const DECIMALS: u32 = 8;
 
@@ -105,12 +99,6 @@ struct NodeStatus {
     // Present on the live sigilgraph-testnet snapshot; absent on bare local nodes
     // (which still report the top-level string aliases above, kept for back-compat).
     tip: Option<Tip>,
-    #[serde(default)]
-    blocks_per_sec: f64,
-    /// v0.2.35: wallet balance for the logged-in miner (u128 raw, 8 decimals). Zero when
-    /// the feed doesn't carry it yet — non-breaking, always present.
-    #[serde(default, alias = "balance")]
-    wallet_balance: u128,
 }
 
 /// The real, per-block tip the node publishes (LIGHT-3 L3-A, live).
@@ -178,8 +166,6 @@ struct FeedStatus {
     reward_sig: f64,
     network_id: String,
     live: bool,
-    #[serde(default)]
-    blocks_per_sec: f64,
 }
 
 /// Fetch + parse the live testnet feed over HTTPS (rustls). Returns the mapped
@@ -228,7 +214,6 @@ fn fetch_feed(url: &str) -> Option<(NodeStatus, Vec<FeedBlock>)> {
         event_root: er,
         contract_root: cr,
         tip: feed.tip,
-        blocks_per_sec: s.blocks_per_sec,
         ..Default::default()
     };
     Some((st, feed.blocks))
@@ -243,7 +228,7 @@ fn fetch_best(cfg: &Config) -> (NodeStatus, bool, &'static str) {
     // Try the configured feed, then known-good public mirrors — so a node on a network where one
     // host is blocked/unresolvable still syncs from another. (Was single-feed → looked "offline".)
     for url in [cfg.feed.as_str(),
-                "https://sigilgraph.fluxapp.xyz/sigil-status.json",
+                "https://sigilgraph.quillon.xyz/sigil-status.json",
                 "https://quillon.xyz/sigil-status.json",
                 "https://sigilgraph.fluxapp.xyz/sigil-status.json"] {
         if let Some((st, _b)) = fetch_feed(url) { return (st, true, "feed"); }
@@ -267,11 +252,6 @@ struct TipVerify {
     hash_is_fingerprint: bool,
     reported_hash: String,
     latency_us: u128,
-    /// v0.2.35 L4-B: whether the SQIsign post-quantum flavor is available on this
-    /// build. False = only BLAKE3 v0 flavor; true = flux-sqisign crate linked and
-    /// the SqiSignBlob flavor can be verified (adversary-resistant). The UI uses
-    /// this to show "PQ-ready" vs "base" security level.
-    sqisign_available: bool,
 }
 
 /// L4-A keystone: reconstruct the canonical v0 tip-proof from the node's real
@@ -280,17 +260,6 @@ struct TipVerify {
 /// network + uncorrupted — it does NOT alone prove canonicality/adversarial
 /// safety. That comes from K independent sources (L4-C) + the SQIsign/STARK
 /// flavors. The UI says so.
-///
-/// L4-B (v0.2.35 scaffolding): when flux-sqisign is linked and the node emits
-/// the `SqiSignBlob` tip-proof flavor, this function will also construct a
-/// `TipProof::new_sqisign()` and verify the post-quantum signature. The
-/// `sqisign_available` field in TipVerify signals whether that code path exists
-/// on this build — currently gated on the `sqisign` feature of sigil-tip-proof.
-/// v0.3.1 L4-B: testnet producer SQIsign public key (129 bytes, base64).
-/// Pinned here until DNS anchor (Lane 5) publishes it in _sigil-tip TXT.
-/// The SQIsign verify path uses this key to determine adversary-resistance.
-const PRODUCER_SQISIGN_PK: &[u8] = b""; // populated when the producer key is published
-
 fn verify_tip(tip: &Tip) -> TipVerify {
     let roots = tip.roots.to_state_roots();
     let t = Instant::now();
@@ -300,15 +269,6 @@ fn verify_tip(tip: &Tip) -> TipVerify {
     let fingerprint_hex = hex(&proof.fingerprint());
     let hash_is_fingerprint =
         !tip.hash.is_empty() && tip.hash.eq_ignore_ascii_case(&fingerprint_hex);
-    // v0.3.1 L4-B: SQIsign post-quantum flavor — now live via sigil-tip-proof's
-    // native feature (flux-sqisign linked). When the tip carries a SqiSignBlob
-    // flavor AND the producer public key is known, verify_sqisign() runs.
-    let sqisign_available = cfg!(feature = "sqisign");
-    // Future: if the TipProof flavor is SqiSignBlob and PRODUCER_SQISIGN_PK is set,
-    // call proof.verify_sqisign(sigil_net::NETWORK_ID, PRODUCER_SQISIGN_PK) and
-    // fold the result into `ok`. For now, the BLAKE3 v0 path remains the primary
-    // verify; the SQIsign path composes once the DNS anchor publishes the key.
-    let _ = PRODUCER_SQISIGN_PK; // silence unused warning until key is published
     TipVerify {
         ok: res.is_ok(),
         err: res.err().map(|e| e.to_string()),
@@ -317,7 +277,6 @@ fn verify_tip(tip: &Tip) -> TipVerify {
         hash_is_fingerprint,
         reported_hash: tip.hash.clone(),
         latency_us,
-        sqisign_available,
     }
 }
 
@@ -331,14 +290,11 @@ struct Config {
     api: String,
     /// Live testnet feed URL (HTTPS): {status, tip, blocks}. The TUI syncs from this.
     feed: String,
-    /// Toast set by startup auto-update (shown in TUI footer, not stderr).
-    initial_toast: Option<String>,
 }
 impl Default for Config {
     fn default() -> Self {
-        Self { lite: false, once: false, tui: true, interval: 2,
-            api: "https://sigilgraph.fluxapp.xyz/api/v1/status".into(), feed: DEFAULT_FEED.into(),
-            initial_toast: None }
+        Self { lite: false, once: false, tui: false, interval: 2,
+            api: "http://127.0.0.1:8181/api/v1/status".into(), feed: DEFAULT_FEED.into() }
     }
 }
 
@@ -370,7 +326,7 @@ fn print_help() {
          sigil-top --once       single snapshot, then exit\n  \
          sigil-top --interval N refresh seconds\n  \
          sigil-top --tui        opt-in ratatui TUI (alt-screen, interactive keys)\n  \
-         sigil-top --api URL    status endpoint (default https://sigilgraph.fluxapp.xyz/api/v1/status)"
+         sigil-top --api URL    status endpoint (default http://127.0.0.1:8181/api/v1/status)"
     );
 }
 
@@ -531,10 +487,6 @@ fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str) -> String
     let ver = if st.version.is_empty() { "—".into() } else { st.version.clone() };
     let disp_height = st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(st.height);
     o.push_str(&row("height", &format!("{GOLD}{}{RESET}", disp_height)));
-    if st.blocks_per_sec > 0.0 {
-        let bps_col = if st.blocks_per_sec >= 1000.0 { GOLD } else { GREEN };
-        o.push_str(&row("blocks/s", &format!("{bps_col}{:.0}{RESET} {DIM}(live feed){RESET}", st.blocks_per_sec)));
-    }
     o.push_str(&row("peers", &format!("{}", st.peers)));
     o.push_str(&row("producer", &prod));
     o.push_str(&row("binary", &ver));
@@ -593,7 +545,7 @@ fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str) -> String
         o.push_str(&format!("  {GREEN}● synced from verified live feed{RESET} {DIM}· no local node required — verify on a potato{RESET}\n"));
     }
     // keybar footer — real keybindings UI
-    o.push_str(&format!("  {GOLD}[M]{RESET}{DIM}ine{RESET}   {GREEN}[F]{RESET}{DIM}ull{RESET}  {GREEN}[V]{RESET}{DIM}erify{RESET}  {CYAN}[Y]{RESET}{DIM}esync{RESET}   {GOLD}[U]{RESET}{DIM}pdate{RESET}   {VBRIGHT}[L]{RESET}{DIM}ogin{RESET}   {DIM}[Q]uit{RESET}\n"));
+    o.push_str(&format!("  {GOLD}[M]{RESET}{DIM}ine{RESET}   {GREEN}[F]{RESET}{DIM}ull sync{RESET}   {GREEN}[V]{RESET}{DIM}erify tip{RESET}   {GOLD}[U]{RESET}{DIM}pdate{RESET}   {VBRIGHT}[L]{RESET}{DIM}ogin{RESET}   {VIOLET}[D]{RESET}{DIM}NS anchor{RESET}   {DIM}[Q]uit{RESET}\n"));
     o
 }
 
@@ -773,10 +725,8 @@ fn main() {
     }
     // Default-ON pinned-channel auto-update (before anything else). Only advances to a version the
     // operator has promoted in the manifest; --no-update / SIGIL_TOP_NO_AUTOUPDATE=1 opts out.
-    // Result toast is shown in the TUI footer — no eprintln! that would corrupt the alt-screen.
-    let auto_toast = maybe_auto_update(&argv);
-    let mut cfg = parse_args();
-    cfg.initial_toast = auto_toast;
+    if !std::io::stdout().is_terminal() { maybe_auto_update(&argv); }
+    let cfg = parse_args();
     // Non-TTY (piped / redirected / captured), --once, or --lite → emit exactly ONE
     // plain ANSI frame and exit. ratatui needs a real terminal; this path never
     // spams. The live, interactive dashboard is the TUI below.
@@ -843,7 +793,6 @@ struct Target {
 /// `targets` map so one channel serves both the Linux build and the Windows .exe.
 #[derive(Deserialize)]
 struct Release {
-    #[serde(default)]
     version: String,
     #[serde(default)]
     url: String,
@@ -909,58 +858,6 @@ fn fetch_latest() -> Result<Release, String> {
 }
 
 /// Is `a` a newer dotted version than `b`? Numeric per-part compare.
-/// v0.3.1: fetch the _sigil-tip DNS anchor via Cloudflare DoH, parse with
-/// sigil-dns-anchor, and return a human-readable status. Composes with the
-/// DNS-3 resolver-verifier lane once SQIsign verify is wired.
-fn fetch_dns_anchor() -> String {
-    const ANCHOR: &str = "_sigil-tip.sigilgraph.quillon.xyz";
-    let url = format!("https://cloudflare-dns.com/dns-query?name={ANCHOR}&type=TXT");
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .min_tls_version(reqwest::tls::Version::TLS_1_0)
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => return format!("✗ DNS anchor: client init failed: {e}"),
-    };
-    let resp = match client
-        .get(&url)
-        .header("accept", "application/dns-json")
-        .send()
-    {
-        Ok(r) => r,
-        Err(e) => return format!("✗ DNS anchor: DoH request failed: {e}"),
-    };
-    let body = match resp.text() {
-        Ok(b) => b,
-        Err(e) => return format!("✗ DNS anchor: read body: {e}"),
-    };
-    // Parse the DNS JSON response, extract the first TXT record
-    let txt: String = match serde_json::from_str::<serde_json::Value>(&body) {
-        Ok(v) => v
-            .get("Answer")
-            .and_then(|a| a.get(0))
-            .and_then(|r| r.get("data"))
-            .and_then(|d| d.as_str())
-            .map(|s| s.trim_matches('"').to_string())
-            .unwrap_or_default(),
-        Err(e) => return format!("✗ DNS anchor: JSON parse: {e}"),
-    };
-    if txt.is_empty() {
-        return "✗ DNS anchor: _sigil-tip TXT record not published yet".into();
-    }
-    // Structural-validate with sigil-dns-anchor
-    match sigil_dns_anchor::decode(&txt) {
-        Ok(anchor) => format!(
-            "✓ DNS anchor: {} @ height {} · key {}… (SQIsign sig present, verify pending)",
-            anchor.record_type,
-            anchor.height,
-            &anchor.key_id[..8]
-        ),
-        Err(e) => format!("✗ DNS anchor: parse failed: {e}"),
-    }
-}
-
 fn version_gt(a: &str, b: &str) -> bool {
     let parse = |s: &str| s.split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
     let (a, b) = (parse(a), parse(b));
@@ -976,7 +873,7 @@ fn version_gt(a: &str, b: &str) -> bool {
 /// The mining endpoint (sigil-rpcd `/mine`). Override with `SIGIL_MINE_URL`; defaults to the local
 /// node's rpcd. The node verifies BLAKE3 leading-zero-bits PoW in `submit_share` and credits the miner.
 fn mine_url() -> String {
-    std::env::var("SIGIL_MINE_URL").unwrap_or_else(|_| "https://sigilgraph.fluxapp.xyz:8447/v1/mine".into())
+    std::env::var("SIGIL_MINE_URL").unwrap_or_else(|_| "https://sigilgraph.quillon.xyz:8447/v1/mine".into())
 }
 /// A stable per-install miner wallet (64-hex): BLAKE3 of the hostname, or `SIGIL_MINE_WALLET`.
 fn miner_wallet() -> String {
@@ -1003,8 +900,6 @@ fn start_mining(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> mpsc::Re
         };
         let _ = tx.send(format!("▲ mining → {url} · diff {difficulty_bits} bits · wallet {}…", &wallet[..8]));
         let mut accepted = 0u64;
-        let mut hashes: u64 = 0;
-        let mut last_rate = Instant::now();
         while !stop.load(Ordering::Relaxed) {
             // header binds the share to the current minute (cheap freshness); find a winning nonce.
             let header = format!("sigil-g0-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 30).unwrap_or(0));
@@ -1013,15 +908,8 @@ fn start_mining(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> mpsc::Re
                 if stop.load(Ordering::Relaxed) { break None; }
                 let mut buf = header.as_bytes().to_vec();
                 buf.extend_from_slice(&nonce.to_le_bytes());
-                hashes = hashes.wrapping_add(1);
                 if leading_zero_bits(blake3::hash(&buf).as_bytes()) >= difficulty_bits { break Some(nonce); }
                 nonce = nonce.wrapping_add(1);
-                // Report hashrate every ~2s on the channel (v0.2.35).
-                if hashes % 500_000 == 0 && last_rate.elapsed() >= Duration::from_secs(2) {
-                    let rate = hashes as f64 / last_rate.elapsed().as_secs_f64().max(0.001);
-                    let _ = tx.send(format!("⛏ {:.2} MH/s · {}M hashes", rate / 1e6, hashes / 1_000_000));
-                    last_rate = Instant::now();
-                }
             };
             let Some(nonce) = found else { break };
             let body = format!("{{\"miner\":\"{wallet}\",\"header\":\"{header}\",\"nonce\":{nonce},\"difficulty\":{difficulty_bits},\"reward\":50}}");
@@ -1036,7 +924,7 @@ fn start_mining(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> mpsc::Re
                         let _ = tx.send(format!("✗ share rejected: {}", txt.chars().take(60).collect::<String>()));
                     }
                 }
-                Err(e) => { let _ = tx.send(format!("✗ submit: {e} (retry 3s)")); thread::sleep(Duration::from_millis(2200)); }
+                Err(e) => { let _ = tx.send(format!("✗ submit: {e} (retry 3s)")); thread::sleep(Duration::from_secs(3)); }
             }
             thread::sleep(Duration::from_millis(800)); // gentle cadence
         }
@@ -1056,25 +944,26 @@ fn leading_zero_bits(d: &[u8]) -> u32 {
 /// fetch the operator-controlled manifest, and ONLY if it names a version newer than this binary
 /// (i.e. the operator has *promoted* a release by writing the manifest — publishing a GitHub release
 /// alone does NOT advance the channel), download + BLAKE3-verify + hot-swap, then re-exec the new
-/// binary so the node is immediately running the chosen version. Returns an Option<String> toast
-/// for the TUI instead of eprintln! (which corrupts the alt-screen). Disable with `--no-update` or
-/// `SIGIL_TOP_NO_AUTOUPDATE=1`.
-fn maybe_auto_update(argv: &[String]) -> Option<String> {
+/// binary so the node is immediately running the chosen version. Silent + non-fatal on any failure
+/// (offline, unreachable channel) — the monitor still starts. Disable with `--no-update` or
+/// `SIGIL_TOP_NO_AUTOUPDATE=1`. This is what makes "every node gets the release I choose" automatic,
+/// while a stale manifest means a new publish reaches nobody until it's promoted.
+fn maybe_auto_update(argv: &[String]) {
     if argv.iter().any(|a| a == "--no-update")
         || std::env::var("SIGIL_TOP_NO_AUTOUPDATE").map(|v| v == "1").unwrap_or(false)
     {
-        return None;
+        return;
     }
     let rel = match fetch_latest() {
         Ok(r) if version_gt(&r.version, VERSION) => r,
-        _ => return None, // up to date, channel unreachable, or malformed → just run
+        _ => return, // up to date, channel unreachable, or malformed → just run
     };
+    eprintln!("  {GOLD}⬆ auto-update v{VERSION} → v{}{RESET} ({SELF_TARGET}) — verifying…", rel.version);
     match self_update(&rel) {
         Ok(_) => {
             // Re-exec the freshly-swapped binary with the original args (minus argv[0]).
             if let Ok(exe) = std::env::current_exe() {
                 let args: Vec<String> = std::env::args().skip(1).collect();
-                std::env::set_var("SIGIL_TOP_JUST_UPDATED", "1");
                 #[cfg(unix)]
                 {
                     use std::os::unix::process::CommandExt;
@@ -1086,9 +975,8 @@ fn maybe_auto_update(argv: &[String]) -> Option<String> {
                     std::process::exit(0);
                 }
             }
-            None // unreachable — exec replaces this process
         }
-        Err(e) => Some(format!("auto-update skipped: {e}")),
+        Err(e) => eprintln!("  {DIM}auto-update skipped: {e}{RESET}"),
     }
 }
 
@@ -1145,7 +1033,6 @@ struct App {
     last_fetch: Instant,
     verify: Option<TipVerify>,
     toast: String,
-    toast_sticky: bool,        // v0.2.35: user-action toasts survive mining noise
     latest: String,            // live version from the flux release channel (auto-refreshed)
     last_update_check: Instant,
     update_rx: Option<mpsc::Receiver<String>>, // [U] runs on a bg thread; result lands here
@@ -1159,53 +1046,26 @@ struct App {
     mine_rx: Option<mpsc::Receiver<String>>,           // accepted-share messages from the miner thread
     mine_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>, // signals the miner thread to stop
     mine_accepted: u64,                                 // shares the node accepted this session
-    mine_hashrate: f64,                                 // v0.2.35: live GH/s from the miner thread
-    mine_hashes: u64,                                   // v0.2.35: cumulative hashes computed
-    wallet_balance: u128,                               // v0.2.35: miner wallet balance from feed
     full_sync: bool,                                    // [F] opt-in heavy full sync (default = 10ms lightweight verify)
-    full_sync_height: u64,                              // blocks downloaded so far in full sync
-    full_sync_target: u64,                              // target height for full sync
-    full_sync_active: bool,                             // true while downloading
     sync_us: u128,
     // L2-B: real eclipse-K — measured independent sources agreeing on the tip (replaces hardcoded k).
     eclipse_k: u32,
     eclipse_sources: Vec<(String, bool)>,
     last_eclipse: Instant,
-    /// Post-update logo splash (flux updater return UX).
-    splash_until: Option<Instant>,
-    splash_frame: u8,
 }
 
 impl App {
     fn new(cfg: Config) -> Self {
-        let toast = cfg.initial_toast.clone().unwrap_or_default();
         App { cfg, st: NodeStatus::default(), online: false, last_fetch: Instant::now(),
-              verify: None, toast, toast_sticky: false,
+              verify: None, toast: String::new(),
               latest: LATEST.to_string(),
               last_update_check: Instant::now() - Duration::from_secs(3600),
               update_rx: None,
               blocks: Vec::new(),
               target_height: 0, synced_height: 0, verified_count: 0, streak: 0, score: 0,
-              mining: false, mine_rx: None, mine_stop: None, mine_accepted: 0,
-              mine_hashrate: 0.0, mine_hashes: 0, wallet_balance: 0,
-              full_sync: false, full_sync_height: 0, full_sync_target: 0, full_sync_active: false, sync_us: 0,
+              mining: false, mine_rx: None, mine_stop: None, mine_accepted: 0, full_sync: false, sync_us: 0,
               eclipse_k: 0, eclipse_sources: Vec::new(),
-              last_eclipse: Instant::now() - Duration::from_secs(60),
-              splash_until: if std::env::var("SIGIL_TOP_JUST_UPDATED").ok().as_deref() == Some("1") {
-                  let _ = std::env::remove_var("SIGIL_TOP_JUST_UPDATED");
-                  Some(Instant::now() + Duration::from_millis(2200))
-              } else { None },
-              splash_frame: 0,
-        }
-    }
-    fn resync(&mut self) {
-        // Full resync: clear local caches, force-fetch fresh state from all sources.
-        self.blocks.clear();
-        self.synced_height = 0;
-        self.verify = None;
-        self.toast = "⟳ Resync — clearing caches, re-fetching chain state…".into();
-        self.toast_sticky = false;
-        self.refresh();
+              last_eclipse: Instant::now() - Duration::from_secs(60) }
     }
     fn refresh(&mut self) {
         // Live testnet sync: pull {status, tip, blocks} over HTTPS; fall back to a local node.
@@ -1214,83 +1074,6 @@ impl App {
             .or_else(|| fetch(&self.cfg.api).ok().map(|s| (s, true)))
             .unwrap_or((NodeStatus::default(), false));
         self.st = got.0; self.online = got.1;
-        // v0.4.0: if feed returned empty blocks, try fallback API for recent blocks
-        if self.blocks.is_empty() && self.online {
-            if let Ok(client) = reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(8))
-                .danger_accept_invalid_certs(true)
-                .build()
-            {
-                let api_base = self.cfg.api.trim_end_matches('/');
-                if let Ok(resp) = client.get(format!("{}/v1/blocks/recent?limit=14", api_base)).send() {
-                    if let Ok(json) = resp.json::<serde_json::Value>() {
-                        if let Some(arr) = json.get("blocks").or_else(|| json.get("data")).and_then(|v| v.as_array()) {
-                            let fallback: Vec<FeedBlock> = arr.iter().filter_map(|b| {
-                                let h = b.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
-                                if h == 0 { return None; }
-                                Some(FeedBlock {
-                                    height: h,
-                                    hash: b.get("proposer").and_then(|p| p.as_str()).map(|s| &s[..s.len().min(16)]).unwrap_or("—").into(),
-                                    producer: b.get("proposer").and_then(|p| p.as_str()).unwrap_or("").into(),
-                                    txs: b.get("tx_count").and_then(|t| t.as_u64()).unwrap_or(0),
-                                    tip_ms: 0,
-                                })
-                            }).collect();
-                            if !fallback.is_empty() {
-                                self.blocks = fallback;
-                                self.toast = "📡 Blocks fetched from API fallback".into();
-        }
-        // v0.4.12: full sync — download entire chain graph in batches
-        if self.full_sync && self.online && !self.full_sync_active && self.st.height > 0 {
-            self.full_sync_target = self.st.height;
-            if self.full_sync_height < self.full_sync_target {
-                self.full_sync_active = true;
-                let start = self.full_sync_height + 1;
-                let batch = 100.min(self.full_sync_target - self.full_sync_height);
-                let api = self.cfg.api.trim_end_matches('/').to_string();
-                let client = reqwest::blocking::Client::builder()
-                    .timeout(Duration::from_secs(30))
-                    .danger_accept_invalid_certs(true)
-                    .build();
-                if let Ok(client) = client {
-                    let url = format!("{}/v1/blocks/recent?limit={}", api, batch);
-                    if let Ok(resp) = client.get(&url).send() {
-                        if let Ok(json) = resp.json::<serde_json::Value>() {
-                            if let Some(arr) = json.get("data").and_then(|v| v.as_array()) {
-                                for b in arr {
-                                    if let Some(h) = b.get("height").and_then(|v| v.as_u64()) {
-                                        if h > self.full_sync_height {
-                                            self.full_sync_height = h;
-                                            self.blocks.push(FeedBlock {
-                                                height: h,
-                                                hash: b.get("proposer").and_then(|p| p.as_str()).map(|s| &s[..s.len().min(16)]).unwrap_or("—").into(),
-                                                producer: b.get("proposer").and_then(|p| p.as_str()).unwrap_or("").into(),
-                                                txs: b.get("tx_count").and_then(|t| t.as_u64()).unwrap_or(0),
-                                                tip_ms: 0,
-                                            });
-                                        }
-                                    }
-                                }
-                                self.blocks.sort_by(|a,b| b.height.cmp(&a.height));
-                                self.blocks.truncate(500);
-                            }
-                        }
-                    }
-                }
-                self.full_sync_active = false;
-                self.toast = format!("⬇ Full sync: {}/{} blocks ({:.0}%)", self.full_sync_height, self.full_sync_target, 
-                    if self.full_sync_target > 0 { self.full_sync_height as f64 / self.full_sync_target as f64 * 100.0 } else { 0.0 });
-            } else {
-                self.toast = format!("✓ Full sync complete: {} blocks verified", self.full_sync_height);
-            }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        // v0.2.35: carry wallet balance from feed into local state (non-breaking — 0 when absent).
-        if self.st.wallet_balance > 0 { self.wallet_balance = self.st.wallet_balance; }
         // Auto-update signal: poll the flux release channel every 5 min so the update
         // bar lights up on its own when a new sigil-top is published (no [U] needed).
         if self.last_update_check.elapsed() > Duration::from_secs(300) {
@@ -1341,7 +1124,7 @@ fn measure_eclipse_k(tip_height: u64, tip_ok: bool) -> (u32, Vec<(String, bool)>
     ];
     let mut sources: Vec<(String, bool)> = vec![("node (verified)".into(), tip_ok)];
     let marker = tip_height.to_string();
-    if let Ok(client) = reqwest::blocking::Client::builder().timeout(Duration::from_millis(2200))
+    if let Ok(client) = reqwest::blocking::Client::builder().timeout(Duration::from_secs(3))
         .min_tls_version(reqwest::tls::Version::TLS_1_0).build() {
         for (name, base) in resolvers {
             let url = format!("{base}?name={ANCHOR}&type=TXT");
@@ -1372,17 +1155,13 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
 
     let res = (|| -> std::io::Result<()> {
         loop {
-            if app.splash_until.map(|u| Instant::now() < u).unwrap_or(false) {
-                app.splash_frame = app.splash_frame.wrapping_add(1);
-            }
             term.draw(|f| draw_ui(f, &app))?;
             if event::poll(Duration::from_millis(250))? {
                 if let Event::Key(k) = event::read()? {
                     if k.kind == KeyEventKind::Press {
                         match k.code {
                             KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return Ok(()),
-                            KeyCode::Char('r') | KeyCode::Char('R') => { app.refresh(); app.toast_sticky = false; }
-                            KeyCode::Char('y') | KeyCode::Char('Y') => { app.resync(); app.toast_sticky = false; }
+                            KeyCode::Char('r') | KeyCode::Char('R') => app.refresh(),
                             KeyCode::Char('m') | KeyCode::Char('M') => {
                                 app.mining = !app.mining;
                                 if app.mining {
@@ -1396,7 +1175,6 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                     if let Some(s) = app.mine_stop.take() { s.store(true, std::sync::atomic::Ordering::Relaxed); }
                                     app.toast = "▲ mining stopped".into();
                                 }
-                                app.toast_sticky = false;
                             }
                             KeyCode::Char('f') | KeyCode::Char('F') => {
                                 // Default is the TRUE lightweight node: ~10ms tip-proof verify, 0 blocks.
@@ -1407,14 +1185,12 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 } else {
                                     "⚡ lightweight node — ~10ms tip-proof verify, 0 blocks downloaded (default)".into()
                                 };
-                                app.toast_sticky = false;
                             }
                             KeyCode::Char('v') | KeyCode::Char('V') => {
                                 app.toast = match app.st.tip.as_ref() {
                                     Some(t) => { let v = verify_tip(t); let m = if v.ok { format!("✓ tip {} verified in {} µs · 0 blocks", v.height, v.latency_us) } else { format!("✗ verify failed: {}", v.err.clone().unwrap_or_default()) }; app.verify = Some(v); m }
                                     None => "no tip published by node — nothing to verify".into(),
                                 };
-                                app.toast_sticky = false;
                             }
                             KeyCode::Char('u') | KeyCode::Char('U') => {
                                 // Flux-way self-update on a BACKGROUND thread so the 11 MB
@@ -1422,10 +1198,8 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 // string lands on update_rx and is shown on the next draw.
                                 if app.update_rx.is_some() {
                                     app.toast = "↓ update already running…".into();
-                                    app.toast_sticky = false;
                                 } else {
                                     app.toast = "↓ checking flux release channel…".into();
-                                    app.toast_sticky = false;
                                     let (tx, rx) = mpsc::channel();
                                     thread::spawn(move || {
                                         let msg = match fetch_latest() {
@@ -1444,35 +1218,10 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 }
                             }
                             KeyCode::Char('l') | KeyCode::Char('L') => {
-                                app.toast = "🌐 Opening wallet login…".into(); open_browser("https://sigilgraph.fluxapp.xyz/sigil-wallet-tron.html");
-                                app.toast_sticky = false;
+                                app.toast = "login: quit + run `sigil-top login --seed <64-hex>` (PKCE wallet assertion, no password)".into();
                             }
                             KeyCode::Char('d') | KeyCode::Char('D') => {
-                                // v0.3.1: fetch the real _sigil-tip DNS anchor via DoH,
-                                // parse + structural-validate with sigil-dns-anchor crate.
-                                app.toast = "↓ DNS anchor: fetching _sigil-tip.sigilgraph.quillon.xyz…".into();
-                                app.toast_sticky = false;
-                                let (tx, rx) = mpsc::channel();
-                                thread::spawn(move || {
-                                    let msg = fetch_dns_anchor();
-                                    let _ = tx.send(msg);
-                                });
-                                app.update_rx = Some(rx);
-                            }
-                            KeyCode::Char('w') | KeyCode::Char('W') => {
-                                open_browser("https://sigilgraph.fluxapp.xyz/sigil-wallet-tron.html");
-                                app.toast = "🌐 Wallet opened in browser".into();
-                                app.toast_sticky = false;
-                            }
-                            KeyCode::Char('b') | KeyCode::Char('B') => {
-                                open_browser("https://sigilgraph.fluxapp.xyz/explorer/");
-                                app.toast = "🌐 Explorer opened in browser".into();
-                                app.toast_sticky = false;
-                            }
-                            KeyCode::Char('s') | KeyCode::Char('S') => {
-                                open_browser("https://sigilgraph.fluxapp.xyz/sigil-top/");
-                                app.toast = "🌐 Cockpit opened in browser".into();
-                                app.toast_sticky = false;
+                                app.toast = "DNS anchor: sigilgraph.quillon.xyz — TXT-published tip-proof (verifier cross-check, wiring pending)".into();
                             }
                             _ => {}
                         }
@@ -1493,38 +1242,23 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                             let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
                             if let Ok(exe) = std::env::current_exe() {
                                 let args: Vec<String> = std::env::args().skip(1).collect();
-                                std::env::set_var("SIGIL_TOP_JUST_UPDATED", "1");
                                 #[cfg(unix)]
                                 { use std::os::unix::process::CommandExt; let _ = std::process::Command::new(&exe).args(&args).exec(); }
                                 #[cfg(not(unix))]
                                 { let _ = std::process::Command::new(&exe).args(&args).spawn(); std::process::exit(0); }
                             }
                         }
-                        app.toast = msg; app.toast_sticky = false; app.update_rx = None;
+                        app.toast = msg; app.update_rx = None;
                     }
                     Err(mpsc::TryRecvError::Disconnected) => { app.update_rx = None; }
                     Err(mpsc::TryRecvError::Empty) => {}
                 }
             }
-            // Drain live mining progress (accepted shares + hashrate) onto the toast + counter.
-            // v0.2.35: mining noise never overwrites sticky user-action toasts ([U], [V], [L], [M]).
+            // Drain live mining progress (accepted shares) onto the toast + counter.
             if let Some(rx) = app.mine_rx.as_ref() {
                 while let Ok(msg) = rx.try_recv() {
                     if msg.starts_with("✓ share") { app.mine_accepted += 1; app.score += 50; }
-                    // v0.2.35: parse hashrate messages: "⛏ 12.34 MH/s · 5M hashes"
-                    if msg.starts_with("⛏ ") {
-                        if let Some(rate_part) = msg.strip_prefix("⛏ ").and_then(|s| s.split(" MH/s").next()) {
-                            if let Ok(rate) = rate_part.parse::<f64>() {
-                                app.mine_hashrate = rate;
-                            }
-                        }
-                        if let Some(hash_part) = msg.split("· ").nth(1).and_then(|s| s.split('M').next()) {
-                            if let Ok(mega) = hash_part.parse::<f64>() {
-                                app.mine_hashes = (mega * 1_000_000.0) as u64;
-                            }
-                        }
-                    }
-                    if !app.toast_sticky { app.toast = msg; }
+                    app.toast = msg;
                 }
             }
         }
@@ -1549,48 +1283,8 @@ fn group(n: u64) -> String {
 //    console. Each render_* returns an owned Paragraph<'static>. Integrated + bug-fixed
 //    by Claude (f.area, .areas, manual supply bar, owned spans).
 
-
-fn render_update_splash(frame: u8) -> Paragraph<'static> {
-    const FRAMES: [&str; 8] = [
-        "    ◆─────────◆",
-        "   ╱◆─────────◆╲",
-        "  ╱ ╲◆───────◆╱ ╲",
-        " │   ◆───────◆   │",
-        "  ╲ ╱◆───────◆╲ ╱",
-        "   ╲◆─────────◆╱",
-        "    ◇─────────◇",
-        "     ╲───────╱",
-    ];
-    let ring = FRAMES[frame as usize % FRAMES.len()];
-    let spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"][frame as usize % 8];
-    let lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(ring, Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(format!(" {spin} "), Style::default().fg(C_GOLD)),
-            Span::styled("SIGIL", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" · v{VERSION}"), Style::default().fg(C_GOLD)),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled("  flux channel synced — BLAKE3 verified", Style::default().fg(C_CYAN))),
-        Line::from(Span::styled("  restarting lightweight node…", Style::default().fg(C_DIM))),
-        Line::from(""),
-        Line::from(Span::styled("  ████████████████████░░░░  updating", Style::default().fg(C_GOLD))),
-    ];
-    Paragraph::new(lines)
-        .alignment(ratatui::layout::Alignment::Center)
-        .style(Style::default().bg(Color::Rgb(5, 5, 15)))
-}
-
 fn draw_ui(f: &mut Frame, app: &App) {
     let area = f.area();
-    if let Some(until) = app.splash_until {
-        if Instant::now() < until {
-            f.render_widget(render_update_splash(app.splash_frame), area);
-            return;
-        }
-    }
     let [header_area, body_area, footer_area] =
         Layout::vertical([Constraint::Length(2), Constraint::Min(0), Constraint::Length(2)]).areas(area);
 
@@ -1604,7 +1298,7 @@ fn draw_ui(f: &mut Frame, app: &App) {
         Constraint::Length(6), // StateRoots
         Constraint::Length(4), // Supply
         Constraint::Length(5), // SyncStatus
-        Constraint::Length(7), // Mining (v0.2.35: +2 lines for hashrate + balance)
+        Constraint::Length(4), // Mining
     ])
     .spacing(1)
     .split(left_area);
@@ -1741,33 +1435,6 @@ fn render_sync_status(app: &App) -> Paragraph<'static> {
 fn render_mining(app: &App) -> Paragraph<'static> {
     let (state, scol) = if app.mining { ("ON", C_GREEN) } else { ("off", C_RED) };
     let earn = format!("~{:.4}", app.verified_count as f64 * 0.0005);
-    // v0.2.35: live hashrate from the miner thread
-    let rate_line = if app.mine_hashrate > 0.0 {
-        let (val, unit) = if app.mine_hashrate >= 1000.0 {
-            (app.mine_hashrate / 1000.0, "GH/s")
-        } else {
-            (app.mine_hashrate, "MH/s")
-        };
-        Line::from(vec![
-            dim("rate "), Span::styled(format!("{:.2} {unit}", val), Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
-            dim("   hashes "), Span::styled(format!("{}M", app.mine_hashes / 1_000_000), Style::default().fg(C_DIM)),
-        ])
-    } else {
-        Line::from(dim("rate —   hashes —"))
-    };
-    // v0.2.35: wallet balance line
-    let bal_line = if app.wallet_balance > 0 {
-        let whole = app.wallet_balance / 100_000_000;
-        let frac = (app.wallet_balance % 100_000_000) / 1_000_000;
-        Line::from(vec![
-            dim("balance "), Span::styled(format!("{whole}.{frac:02} SIGIL"), Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
-            dim("   shares "), Span::styled(group(app.mine_accepted), Style::default().fg(C_DIM)),
-        ])
-    } else {
-        Line::from(vec![
-            dim("balance —   shares "), Span::styled(group(app.mine_accepted), Style::default().fg(C_DIM)),
-        ])
-    };
     let lines = vec![
         Line::from(vec![
             dim("mining "), Span::styled(state, Style::default().fg(scol).add_modifier(Modifier::BOLD)),
@@ -1778,8 +1445,6 @@ fn render_mining(app: &App) -> Paragraph<'static> {
             dim("streak "), Span::styled(format!("×{}", app.streak), Style::default().fg(C_GOLD)),
             dim("   est earn "), Span::styled(earn, Style::default().fg(C_GOLD)),
         ]),
-        rate_line,
-        bal_line,
     ];
     Paragraph::new(lines).block(card_block(" MINING", C_CYAN))
 }
@@ -1788,19 +1453,6 @@ fn render_security(app: &App) -> Paragraph<'static> {
     let k = app.eclipse_k;
     let agreed = app.eclipse_sources.iter().filter(|(_, b)| *b).count();
     let total = app.eclipse_sources.len().max(1);
-    // v0.2.35 L4-B: SQIsign post-quantum readiness indicator
-    let pq = app.verify.as_ref().map(|v| v.sqisign_available).unwrap_or(false);
-    let pq_line = if pq {
-        Line::from(vec![
-            dim("sig "), Span::styled("SQIsign ✓", Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
-            dim("  "), Span::styled("PQ-ready · 177B signatures", Style::default().fg(C_VBRIGHT)),
-        ])
-    } else {
-        Line::from(vec![
-            dim("sig "), Span::styled("BLAKE3  ", Style::default().fg(C_GOLD)),
-            dim("  "), Span::styled("SQIsign · gated (L4-B)", Style::default().fg(C_DIM)),
-        ])
-    };
     let lines = vec![
         Line::from(vec![
             dim("K "), Span::styled(k.to_string(), Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
@@ -1810,22 +1462,13 @@ fn render_security(app: &App) -> Paragraph<'static> {
         Line::from(vec![
             dim("P(eclipse) 0.30^K = "), Span::styled(format!("{:.1e}", 0.30_f64.powi(k as i32)), Style::default().fg(C_GOLD)),
         ]),
-        pq_line,
+        Line::from(dim("node + DoH resolvers (real)")),
     ];
     Paragraph::new(lines).block(card_block(" SECURITY", C_VIOLET))
 }
 
 fn render_block_stream(app: &App) -> Paragraph<'static> {
     let tip_ok = app.verify.as_ref().map_or(false, |v| v.ok);
-    let title: &'static str = if app.st.blocks_per_sec >= 5000.0 {
-        " BLOCK STREAM · 5k+ blk/s"
-    } else if app.st.blocks_per_sec >= 1000.0 {
-        " BLOCK STREAM · 1k+ blk/s"
-    } else if app.st.blocks_per_sec > 0.0 {
-        " BLOCK STREAM · turbo"
-    } else {
-        " BLOCK STREAM · live"
-    };
     let lines: Vec<Line> = if app.blocks.is_empty() {
         vec![Line::from(dim("streaming…"))]
     } else {
@@ -1844,32 +1487,7 @@ fn render_block_stream(app: &App) -> Paragraph<'static> {
             ])
         }).collect()
     };
-    Paragraph::new(lines).block(card_block(&title, C_VBRIGHT))
-}
-
-// ── v0.3.5: Browser shortcuts ────────────────────────────────────────────
-
-/// Open a URL in the system browser. Non-blocking — spawns the OS opener
-/// on a background thread so the TUI never freezes.
-
-fn dirs_next() -> Option<std::path::PathBuf> {
-    if cfg!(windows) {
-        std::env::var("APPDATA").ok().map(std::path::PathBuf::from)
-    } else {
-        std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join(".config"))
-    }
-}
-
-fn open_browser(url: &str) {
-    let url = url.to_string();
-    thread::spawn(move || {
-        #[cfg(target_os = "linux")]
-        { let _ = Command::new("xdg-open").arg(&url).spawn(); }
-        #[cfg(target_os = "macos")]
-        { let _ = Command::new("open").arg(&url).spawn(); }
-        #[cfg(target_os = "windows")]
-        { let _ = Command::new("cmd").args(["/c", "start", &url]).spawn(); }
-    });
+    Paragraph::new(lines).block(card_block(" BLOCK STREAM · live", C_VBRIGHT))
 }
 
 fn render_footer(app: &App) -> Paragraph<'static> {
@@ -1879,13 +1497,10 @@ fn render_footer(app: &App) -> Paragraph<'static> {
     };
     let mut kb = vec![Span::raw(" ")];
     kb.extend(keys("[M]", "ine", C_GOLD));
-    kb.extend(keys("[F]", "ull", C_GREEN));
     kb.extend(keys("[V]", "erify", C_GREEN));
-    kb.extend(keys("[Y]", "esync", C_CYAN));
-    kb.extend(keys("[W]", "allet", C_CYAN));
-    kb.extend(keys("[B]", "locks", C_CYAN));
+    kb.extend(keys("[R]", "efresh", C_GREEN));
     kb.extend(keys("[U]", "pdate", C_VBRIGHT));
-    kb.extend(keys("[L]", "ogin", C_VBRIGHT));
+    kb.extend(keys("[L]", "ogin", C_VIOLET));
     kb.extend(keys("[Q]", "uit", C_RED));
     Paragraph::new(vec![
         Line::from(Span::styled(toast, Style::default().fg(C_GOLD))),

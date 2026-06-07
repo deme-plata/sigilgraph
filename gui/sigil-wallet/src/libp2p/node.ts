@@ -20,7 +20,7 @@
  * - Future-proof against quantum computer attacks
  *
  * Architecture:
- * - Transport: WebSocket through Tor bridge (wss://sigilgraph.quillon.xyz:9444)
+ * - Transport: WebSocket through Tor bridge (wss://sigilgraph.fluxapp.xyz:9444)
  * - Security: Hybrid (Noise + PQ-Noise with Dilithium5/Kyber1024) + Tor
  * - Multiplexing: Yamux (stream multiplexing)
  * - PubSub: Gossipsub (real-time messaging)
@@ -474,7 +474,7 @@ function setupEventListeners(node: Libp2p) {
         isRelayConnection = true
       }
       // Check if this is a bootstrap connection (port 9443 or 9444)
-      if (remoteAddr.includes('/tcp/9443/') || remoteAddr.includes('/tcp/9444/') || remoteAddr.includes('sigilgraph.com')) {
+      if (remoteAddr.includes('/tcp/9443/') || remoteAddr.includes('/tcp/9444/') || remoteAddr.includes('sigilgraph.fluxapp.xyz')) {
         isTorBridge = true
       }
     }

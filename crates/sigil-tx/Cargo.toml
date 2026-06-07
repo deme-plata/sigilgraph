@@ -35,3 +35,7 @@ rand = "0.8"
 
 [dev-dependencies]
 serde_json = { workspace = true }
+
+[[example]]
+name = "gen_agora_txs"
+path = "examples/gen_agora_txs.rs"

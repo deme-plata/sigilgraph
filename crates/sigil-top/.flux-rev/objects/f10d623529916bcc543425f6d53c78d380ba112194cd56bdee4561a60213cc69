@@ -2,17 +2,17 @@
 name = "sigil-top"
 # sigil-top carries its OWN version cadence (the light client updates independently
 # of the workspace) — this is the "next version" the auto-updater ships.
-version = "0.5.0"
+version = "0.2.30"
 edition.workspace = true
 license.workspace = true
-description = "sigil-top — a dual-mode (lite scorecard ↔ full dashboard) terminal monitor for a SIGIL node. Polls the node's :8181/api/v1/status, renders height/peers/supply/4-state-roots + the flux-fold light-node capability in obsidian+violet ANSI. v0.3.5 adds Chronos benchmark card, archive storage gauge, gossip health, pipeline status, --export json mode, and multi-Epsilon peer tracking."
+description = "sigil-top — a dual-mode (lite scorecard ↔ full dashboard) terminal monitor for a SIGIL node. Polls the node's :8181/api/v1/status, renders height/peers/supply/4-state-roots + the flux-fold light-node capability in obsidian+violet ANSI. Dependency-light (std + serde_json), so it builds warm in seconds."
 
 [dependencies]
 serde      = { workspace = true }
 serde_json = { workspace = true }
-# v0.3.5: rustls + webpki-roots for ALL platforms. Bundles Mozilla CA certs in the
-# binary — no OS cert store dependency.
-reqwest    = { version = "0.12", features = ["blocking", "json", "rustls-tls-webpki-roots"], default-features = false }
+# TLS is target-split: rustls on Linux (pure-Rust, cached), native-tls/SChannel on
+# Windows (rustls fails fetches silently on the cross-built windows-gnu .exe).
+reqwest    = { version = "0.12", features = ["blocking", "json"], default-features = false }
 # v0.2: real TUI on the flux-cockpit foundation — alt-screen, flicker-free redraw,
 # interactive keys. ratatui owns the box-drawing so alignment can't regress.
 ratatui    = "0.28"
@@ -29,13 +29,12 @@ sigil-oauth     = { path = "../sigil-oauth" }
 # (rename-self trick on Windows) so a running binary hot-swaps itself from the release channel.
 blake3       = "1"
 self-replace = "1"
-sigil-dns-anchor = { path = "../sigil-dns-anchor" }
 
-# v0.2.35 L4-B: SQIsign post-quantum tip-proof flavor (gated, not yet enabled).
-# When activated, sigil-tip-proof links flux-sqisign and verify_tip() constructs
-# a TipProof::new_sqisign() for adversary-resistant tip verification.
-[features]
-sqisign = []
+[target.'cfg(not(windows))'.dependencies]
+reqwest = { version = "0.12", features = ["rustls-tls-webpki-roots"], default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+reqwest = { version = "0.12", features = ["native-tls"], default-features = false }
 
 [[bin]]
 name = "sigil-top"

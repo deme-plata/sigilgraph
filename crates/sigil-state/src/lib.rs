@@ -153,6 +153,16 @@ pub struct SigilState {
     /// per `set_balance`. [`commit_state_transition`] asserts this never exceeds
     /// [`MAX_SUPPLY`] — the hard 21M cap. Default 0 (empty genesis).
     pub(crate) native_supply: u128,
+    /// Incremental additive multiset accumulator over the DEX pool set
+    /// (Stargate #1 extension). `pool_acc == Σ pool_leaf(p,s)` over every
+    /// live `pools` entry, maintained O(1) per `set_pool`.
+    pub(crate) pool_acc: [u64; 4],
+    /// Incremental multiset accumulator over contract storage slots.
+    /// O(1) per `set_contract_slot`, so `contract_state_root` is O(1).
+    pub(crate) contract_acc: [u64; 4],
+    /// Incremental multiset accumulator over the event log.
+    /// O(1) per `push_event_hash`, reset on `clear_block_events`.
+    pub(crate) events_acc: [u64; 4],
 }
 
 /// The four state roots produced at the end of a block. These go into the
@@ -184,12 +194,12 @@ impl SigilState {
     /// The shape of [`StateRoots`] stays stable across that swap.
     pub fn roots(&self) -> StateRoots {
         StateRoots {
-            // O(1): the incrementally-maintained multiset accumulator, instead
-            // of an O(state) rehash of every wallet entry each block.
+            // O(1): the incrementally-maintained multiset accumulators,
+            // instead of O(state) rehash of every entry each block.
             wallet_state_root:   acc_to_root(self.wallet_acc),
-            dex_state_root:      hash_map(&self.pools),
-            event_log_root:      hash_event_log(&self.block_events),
-            contract_state_root: hash_map(&self.contracts),
+            dex_state_root:      acc_to_root(self.pool_acc),
+            event_log_root:      acc_to_root(self.events_acc),
+            contract_state_root: acc_to_root(self.contract_acc),
         }
     }
 
@@ -269,11 +279,19 @@ impl SigilState {
     }
 
     pub(crate) fn set_pool(&mut self, pool: PoolId, state: PoolState) {
+        // Maintain the incremental multiset accumulator: remove old leaf, add new.
+        if let Some(old_state) = self.pools.get(&pool) {
+            self.pool_acc = acc_sub(self.pool_acc, pool_leaf(&pool, old_state));
+        }
         self.pools.insert(pool, state);
+        if let Some(new_state) = self.pools.get(&pool) {
+            self.pool_acc = acc_add(self.pool_acc, pool_leaf(&pool, new_state));
+        }
     }
 
     pub(crate) fn push_event_hash(&mut self, h: [u8; 32]) {
         self.block_events.push(h);
+        self.events_acc = acc_add(self.events_acc, event_leaf(&h));
     }
 
     pub(crate) fn set_contract_slot(
@@ -282,15 +300,21 @@ impl SigilState {
         slot: SlotId,
         value: [u8; 32],
     ) {
+        // Maintain the incremental multiset accumulator: remove old leaf, add new.
+        if let Some(old_val) = self.contracts.get(&(contract, slot)) {
+            self.contract_acc = acc_sub(self.contract_acc, contract_leaf(&contract, &slot, old_val));
+        }
         if value == [0u8; 32] {
             self.contracts.remove(&(contract, slot));
         } else {
             self.contracts.insert((contract, slot), value);
+            self.contract_acc = acc_add(self.contract_acc, contract_leaf(&contract, &slot, &value));
         }
     }
 
     pub(crate) fn clear_block_events(&mut self) {
         self.block_events.clear();
+        self.events_acc = [0u64; 4];
     }
 
     /// One-shot install of the master wallet. Subsequent calls are rejected
@@ -797,6 +821,59 @@ fn acc_sub(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
     let (d2, b2a) = a[2].overflowing_sub(b[2]);
     let (d2, b2b) = d2.overflowing_sub((b1a | b1b) as u64);
     [d0, d1, d2, a[3].wrapping_sub(b[3]).wrapping_sub((b2a | b2b) as u64)]
+}
+
+/// Domain-separated 256-bit leaf for a DEX pool entry `(pool_id) -> PoolState`.
+fn pool_leaf(pool: &PoolId, state: &PoolState) -> [u64; 4] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"SIGIL/pool-acc/v1");
+    h.update(pool);
+    h.update(&state.token_a);
+    h.update(&state.token_b);
+    h.update(&state.reserve_a.to_le_bytes());
+    h.update(&state.reserve_b.to_le_bytes());
+    h.update(&state.lp_shares.to_le_bytes());
+    h.update(&state.fee_bps.to_le_bytes());
+    let b = h.finalize();
+    let d = b.as_bytes();
+    [
+        u64::from_le_bytes(d[0..8].try_into().unwrap()),
+        u64::from_le_bytes(d[8..16].try_into().unwrap()),
+        u64::from_le_bytes(d[16..24].try_into().unwrap()),
+        u64::from_le_bytes(d[24..32].try_into().unwrap()),
+    ]
+}
+
+/// Domain-separated 256-bit leaf for a contract storage slot `(contract, slot) -> value`.
+fn contract_leaf(contract: &ContractId, slot: &SlotId, value: &[u8; 32]) -> [u64; 4] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"SIGIL/contract-acc/v1");
+    h.update(contract);
+    h.update(slot);
+    h.update(value);
+    let b = h.finalize();
+    let d = b.as_bytes();
+    [
+        u64::from_le_bytes(d[0..8].try_into().unwrap()),
+        u64::from_le_bytes(d[8..16].try_into().unwrap()),
+        u64::from_le_bytes(d[16..24].try_into().unwrap()),
+        u64::from_le_bytes(d[24..32].try_into().unwrap()),
+    ]
+}
+
+/// Domain-separated 256-bit leaf for a single event hash.
+fn event_leaf(h: &[u8; 32]) -> [u64; 4] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"SIGIL/event-acc/v1");
+    hasher.update(h);
+    let b = hasher.finalize();
+    let d = b.as_bytes();
+    [
+        u64::from_le_bytes(d[0..8].try_into().unwrap()),
+        u64::from_le_bytes(d[8..16].try_into().unwrap()),
+        u64::from_le_bytes(d[16..24].try_into().unwrap()),
+        u64::from_le_bytes(d[24..32].try_into().unwrap()),
+    ]
 }
 
 /// Serialize the accumulator to the 32-byte `Root` carried in the header.

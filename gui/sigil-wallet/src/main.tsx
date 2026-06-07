@@ -1968,9 +1968,9 @@ try {
 
       type NetEndpoint = 'delta' | 'epsilon' | 'local'
       const NET_OPTIONS: Record<NetEndpoint, { url: string; label: string; tier: string }> = {
-        delta:   { url: 'https://delta.sigilgraph.com:8181',   label: 'Delta (1 Gbit)',   tier: 'fastest' },
-        epsilon: { url: 'https://epsilon.sigilgraph.com:8181', label: 'Epsilon (10 Gbit)', tier: 'co-located' },
-        local:   { url: 'http://127.0.0.1:8181',                label: 'Local (this box)', tier: 'dev only' },
+        delta:   { url: 'https://sigilgraph.fluxapp.xyz',   label: 'Delta (1 Gbit)',   tier: 'fastest' },
+        epsilon: { url: 'https://sigilgraph.fluxapp.xyz', label: 'Epsilon (10 Gbit)', tier: 'co-located' },
+        local:   { url: 'http://127.0.0.1:8080',                label: 'Local (this box)', tier: 'dev only' },
       }
       const getNet = (): NetEndpoint => (localStorage.getItem(NET_KEY) as NetEndpoint) || 'delta'
       const setNet = (n: NetEndpoint) => localStorage.setItem(NET_KEY, n)

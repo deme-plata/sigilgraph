@@ -11,8 +11,9 @@ import { discoverNode, getDiscoveredNodeUrl, onNodeDiscovered } from './nodeDisc
 // v8.8.3: Removed direct IP:8080 URLs — all servers now firewalled to nginx-only
 // Failover uses HTTPS through each server's nginx (rate-limited, cached, secure)
 const API_SERVERS = [
-  'https://sigilgraph.quillon.xyz',  // primary (Epsilon via q-flux)
-  'https://quillon.xyz',             // fallback (same node, apex)
+  'https://sigilgraph.fluxapp.xyz',  // primary (Epsilon via q-flux, canonical)
+  'https://sigilgraph.quillon.xyz',  // fallback (legacy, same node)
+  'https://quillon.xyz',             // fallback (apex domain)
 ];
 
 // Track which server is currently active (index into API_SERVERS)
@@ -81,10 +82,10 @@ const tryFailover = async (): Promise<string | null> => {
 };
 
 // v5.1.1: Return-to-primary logic
-// After failover to a backup server, periodically check if primary (sigilgraph.com) is back
+// After failover to a backup server, periodically check if primary (sigilgraph.fluxapp.xyz) is back
 // When it recovers, automatically switch back
 let returnToPrimaryInterval: ReturnType<typeof setInterval> | null = null;
-const PRIMARY_SERVER = API_SERVERS[0]; // https://sigilgraph.quillon.xyz
+const PRIMARY_SERVER = API_SERVERS[0]; // https://sigilgraph.fluxapp.xyz
 const RETURN_CHECK_INTERVAL_MS = 60000; // Check every 60s
 
 const startReturnToPrimaryCheck = () => {

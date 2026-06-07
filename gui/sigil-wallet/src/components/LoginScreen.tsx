@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Sparkles, Key, AlertCircle, Search, HelpCircle, X, Shield, Zap, Lock, Globe, Pickaxe, Download, Monitor, Laptop, Terminal as TerminalIcon, Blocks, Activity, Cpu, Users, Clock, ChevronDown, Hash, TrendingUp, Wallet, BookOpen } from 'lucide-react';
+import { Sparkles, Key, AlertCircle, Search, HelpCircle, X, Shield, Zap, Lock, Globe, Pickaxe, Download, Monitor, Laptop, Terminal as TerminalIcon, Blocks, Activity, Cpu, Users, Clock, ChevronDown, Hash, TrendingUp, Wallet, BookOpen, Satellite, Navigation } from 'lucide-react';
 import { qnkAPI } from '../services/api';
 import { storeWallet, walletSession, verifyPasswordHash, hasPasswordHash } from '../services/walletAuth';
 import ExplorerSearchBar from './ExplorerSearchBar';
 import PapersLibraryModal from './PapersLibraryModal';
+import StarshipBackground from './StarshipBackground';
 
 interface LoginScreenProps {
   onAuthenticate: () => void;
@@ -950,8 +951,8 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
 
   return (
     <div className="flex flex-col min-h-screen px-4 relative overflow-hidden">
-      {/* Quantum Field Background - Physics-inspired particles powered by live API data */}
-      <QuantumFieldBackground />
+      {/* Starship Background with Flux GPS - 3D cockpit + peer constellation */}
+      <StarshipBackground />
 
       {/* Subtle radial vignette overlay - above particles */}
       <div

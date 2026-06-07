@@ -43,7 +43,32 @@ path = "src/bin/sigil-dex-persist.rs"
 name = "sigil-zkflux-vs-current"
 path = "src/bin/sigil-zkflux-vs-current.rs"
 
+[[bin]]
+name = "sigil-warp-drive"
+path = "src/bin/sigil-warp-drive.rs"
+
+[[bin]]
+name = "sigil-hurricane"
+path = "src/bin/sigil-hurricane.rs"
+
+[[bin]]
+name = "delta-archive-oracle"
+path = "src/bin/delta-archive-oracle.rs"
+
+[[bin]]
+name = "sigil-delta-pipeline"
+path = "src/bin/sigil-delta-pipeline.rs"
+
+[[bin]]
+name = "sigil-swarm"
+path = "src/bin/sigil-swarm.rs"
+
 [dependencies]
+rayon      = { workspace = true }
+rand       = { workspace = true }
+zstd       = { workspace = true }
+lz4        = { workspace = true, optional = true }
+bincode    = "1.3"
 serde      = { workspace = true }
 serde_json = { workspace = true }
 blake3     = { workspace = true }

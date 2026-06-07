@@ -2,7 +2,7 @@
  * Transport Layer Configuration for Browser P2P Node
  *
  * Transport Strategy:
- * 1. WebSocket Secure (wss://sigilgraph.quillon.xyz:9443) → nginx → libp2p:9001/ws
+ * 1. WebSocket Secure (wss://sigilgraph.fluxapp.xyz:9443) → nginx → libp2p:9001/ws
  * 2. Circuit Relay for browser-to-browser connections
  * 3. NO WebRTC - Disabled to prevent IP leaks (STUN reveals real IP)
  *
@@ -81,7 +81,7 @@ export function createCircuitRelayTransport() {
  * 🧅 MANDATORY TOR - v3.6.0
  *
  * Transport stack (Tor-only):
- * 1. WebSocket → Tor bridge (wss://sigilgraph.quillon.xyz:9444)
+ * 1. WebSocket → Tor bridge (wss://sigilgraph.fluxapp.xyz:9444)
  * 2. Circuit Relay → Through Tor for browser-to-browser
  *
  * REMOVED (privacy risk):
@@ -191,7 +191,7 @@ export function getTransportStats() {
     },
     websocket: {
       enabled: true,
-      endpoint: 'wss://sigilgraph.quillon.xyz:9443',
+      endpoint: 'wss://sigilgraph.fluxapp.xyz:9443',
       description: 'WebSocket Secure to libp2p bootstrap node',
     },
     webrtc: {
@@ -204,4 +204,34 @@ export function getTransportStats() {
       description: 'Circuit Relay through Tor for browser-to-browser connections',
     },
   }
+}
+
+/**
+ * Create TRON wallet bridge transport
+ * 
+ * 🔷 TRON MULTI-CHAIN: Dedicated transport for TRON wallet connectivity.
+ * 
+ * TRON wallets connect via sigilgraph.fluxapp.xyz:9445 (TRON bridge port).
+ * This transport is used when the wallet detects TRON chain activity.
+ * 
+ * Traffic flow:
+ * TRON Wallet → wss://sigilgraph.fluxapp.xyz:9445 → nginx → libp2p:9003/tron
+ * 
+ * @returns WebSocket transport for TRON bridge
+ */
+export function createTronTransport() {
+  logTor('info', 'Creating TRON wallet bridge transport')
+  return webSockets()
+}
+
+/**
+ * Get all transports including TRON bridge
+ * Extended transport stack with TRON multi-chain support
+ */
+export function createAllTransports() {
+  const transports = createTransports()
+  // Add TRON transport for multi-chain wallet support
+  transports.push(createTronTransport())
+  logTor('info', '✅ TRON bridge transport added (multi-chain)')
+  return transports
 }

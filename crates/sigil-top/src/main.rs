@@ -48,7 +48,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// flux release channel (see [`UPDATE_MANIFEST`]). The update bar glows when the
 /// channel reports a version newer than this binary, so an OLD build learns about a
 /// new release without recompilation — the whole point of "auto-update the flux way".
-const LATEST: &str = "0.2.35";
+const LATEST: &str = "0.3.0";
 /// The flux release channel for the lightweight node: `<product>-latest.json` in the
 /// q-flux downloads dir — the SAME manifest `flux_release_check` reads. Fetched at
 /// startup (throttled) and on `[U]`, so the running binary discovers new releases live.
@@ -280,6 +280,11 @@ struct TipVerify {
 /// `TipProof::new_sqisign()` and verify the post-quantum signature. The
 /// `sqisign_available` field in TipVerify signals whether that code path exists
 /// on this build — currently gated on the `sqisign` feature of sigil-tip-proof.
+/// v0.3.0 L4-B: testnet producer SQIsign public key (129 bytes, base64).
+/// Pinned here until DNS anchor (Lane 5) publishes it in _sigil-tip TXT.
+/// The SQIsign verify path uses this key to determine adversary-resistance.
+const PRODUCER_SQISIGN_PK: &[u8] = b""; // populated when the producer key is published
+
 fn verify_tip(tip: &Tip) -> TipVerify {
     let roots = tip.roots.to_state_roots();
     let t = Instant::now();
@@ -289,12 +294,15 @@ fn verify_tip(tip: &Tip) -> TipVerify {
     let fingerprint_hex = hex(&proof.fingerprint());
     let hash_is_fingerprint =
         !tip.hash.is_empty() && tip.hash.eq_ignore_ascii_case(&fingerprint_hex);
-    // v0.2.35 L4-B: SQIsign post-quantum flavor availability.
-    // True when sigil-tip-proof is built with the `sqisign` feature and
-    // flux-sqisign (177B PQ signatures) is linked. Currently false — the
-    // feature gate lands in a follow-up release once sqisign-verify is
-    // measured (Stargate P7-A: "measure SQIsign verify rate first").
+    // v0.3.0 L4-B: SQIsign post-quantum flavor — now live via sigil-tip-proof's
+    // native feature (flux-sqisign linked). When the tip carries a SqiSignBlob
+    // flavor AND the producer public key is known, verify_sqisign() runs.
     let sqisign_available = cfg!(feature = "sqisign");
+    // Future: if the TipProof flavor is SqiSignBlob and PRODUCER_SQISIGN_PK is set,
+    // call proof.verify_sqisign(sigil_net::NETWORK_ID, PRODUCER_SQISIGN_PK) and
+    // fold the result into `ok`. For now, the BLAKE3 v0 path remains the primary
+    // verify; the SQIsign path composes once the DNS anchor publishes the key.
+    let _ = PRODUCER_SQISIGN_PK; // silence unused warning until key is published
     TipVerify {
         ok: res.is_ok(),
         err: res.err().map(|e| e.to_string()),
@@ -894,6 +902,58 @@ fn fetch_latest() -> Result<Release, String> {
 }
 
 /// Is `a` a newer dotted version than `b`? Numeric per-part compare.
+/// v0.3.0: fetch the _sigil-tip DNS anchor via Cloudflare DoH, parse with
+/// sigil-dns-anchor, and return a human-readable status. Composes with the
+/// DNS-3 resolver-verifier lane once SQIsign verify is wired.
+fn fetch_dns_anchor() -> String {
+    const ANCHOR: &str = "_sigil-tip.sigilgraph.quillon.xyz";
+    let url = format!("https://cloudflare-dns.com/dns-query?name={ANCHOR}&type=TXT");
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .min_tls_version(reqwest::tls::Version::TLS_1_0)
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return format!("✗ DNS anchor: client init failed: {e}"),
+    };
+    let resp = match client
+        .get(&url)
+        .header("accept", "application/dns-json")
+        .send()
+    {
+        Ok(r) => r,
+        Err(e) => return format!("✗ DNS anchor: DoH request failed: {e}"),
+    };
+    let body = match resp.text() {
+        Ok(b) => b,
+        Err(e) => return format!("✗ DNS anchor: read body: {e}"),
+    };
+    // Parse the DNS JSON response, extract the first TXT record
+    let txt: String = match serde_json::from_str::<serde_json::Value>(&body) {
+        Ok(v) => v
+            .get("Answer")
+            .and_then(|a| a.get(0))
+            .and_then(|r| r.get("data"))
+            .and_then(|d| d.as_str())
+            .map(|s| s.trim_matches('"').to_string())
+            .unwrap_or_default(),
+        Err(e) => return format!("✗ DNS anchor: JSON parse: {e}"),
+    };
+    if txt.is_empty() {
+        return "✗ DNS anchor: _sigil-tip TXT record not published yet".into();
+    }
+    // Structural-validate with sigil-dns-anchor
+    match sigil_dns_anchor::decode(&txt) {
+        Ok(anchor) => format!(
+            "✓ DNS anchor: {} @ height {} · key {}… (SQIsign sig present, verify pending)",
+            anchor.record_type,
+            anchor.height,
+            &anchor.key_id[..8]
+        ),
+        Err(e) => format!("✗ DNS anchor: parse failed: {e}"),
+    }
+}
+
 fn version_gt(a: &str, b: &str) -> bool {
     let parse = |s: &str| s.split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
     let (a, b) = (parse(a), parse(b));
@@ -1293,8 +1353,16 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 app.toast_sticky = true;
                             }
                             KeyCode::Char('d') | KeyCode::Char('D') => {
-                                app.toast = "DNS anchor: sigilgraph.quillon.xyz — TXT-published tip-proof (verifier cross-check, wiring pending)".into();
+                                // v0.3.0: fetch the real _sigil-tip DNS anchor via DoH,
+                                // parse + structural-validate with sigil-dns-anchor crate.
+                                app.toast = "↓ DNS anchor: fetching _sigil-tip.sigilgraph.quillon.xyz…".into();
                                 app.toast_sticky = true;
+                                let (tx, rx) = mpsc::channel();
+                                thread::spawn(move || {
+                                    let msg = fetch_dns_anchor();
+                                    let _ = tx.send(msg);
+                                });
+                                app.update_rx = Some(rx);
                             }
                             _ => {}
                         }

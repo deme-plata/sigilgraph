@@ -1,0 +1,13 @@
+[package]
+name = "sigil-dns-anchor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL DNS anchor — TipProof ⇄ TXT record codec. Encodes a SQIsign-signed tip-proof as a v=sigil1 DNS TXT string; decodes + structural-validates back. Pure, dep-light (blake3 + base64), composes with sigil-tip-proof for the full verify path."
+
+[dependencies]
+blake3 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]

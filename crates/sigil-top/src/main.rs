@@ -48,7 +48,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// flux release channel (see [`UPDATE_MANIFEST`]). The update bar glows when the
 /// channel reports a version newer than this binary, so an OLD build learns about a
 /// new release without recompilation — the whole point of "auto-update the flux way".
-const LATEST: &str = "0.2.33";
+const LATEST: &str = "0.2.35";
 /// The flux release channel for the lightweight node: `<product>-latest.json` in the
 /// q-flux downloads dir — the SAME manifest `flux_release_check` reads. Fetched at
 /// startup (throttled) and on `[U]`, so the running binary discovers new releases live.
@@ -101,6 +101,10 @@ struct NodeStatus {
     tip: Option<Tip>,
     #[serde(default)]
     blocks_per_sec: f64,
+    /// v0.2.35: wallet balance for the logged-in miner (u128 raw, 8 decimals). Zero when
+    /// the feed doesn't carry it yet — non-breaking, always present.
+    #[serde(default, alias = "balance")]
+    wallet_balance: u128,
 }
 
 /// The real, per-block tip the node publishes (LIGHT-3 L3-A, live).
@@ -257,6 +261,11 @@ struct TipVerify {
     hash_is_fingerprint: bool,
     reported_hash: String,
     latency_us: u128,
+    /// v0.2.35 L4-B: whether the SQIsign post-quantum flavor is available on this
+    /// build. False = only BLAKE3 v0 flavor; true = flux-sqisign crate linked and
+    /// the SqiSignBlob flavor can be verified (adversary-resistant). The UI uses
+    /// this to show "PQ-ready" vs "base" security level.
+    sqisign_available: bool,
 }
 
 /// L4-A keystone: reconstruct the canonical v0 tip-proof from the node's real
@@ -265,6 +274,12 @@ struct TipVerify {
 /// network + uncorrupted — it does NOT alone prove canonicality/adversarial
 /// safety. That comes from K independent sources (L4-C) + the SQIsign/STARK
 /// flavors. The UI says so.
+///
+/// L4-B (v0.2.35 scaffolding): when flux-sqisign is linked and the node emits
+/// the `SqiSignBlob` tip-proof flavor, this function will also construct a
+/// `TipProof::new_sqisign()` and verify the post-quantum signature. The
+/// `sqisign_available` field in TipVerify signals whether that code path exists
+/// on this build — currently gated on the `sqisign` feature of sigil-tip-proof.
 fn verify_tip(tip: &Tip) -> TipVerify {
     let roots = tip.roots.to_state_roots();
     let t = Instant::now();
@@ -274,6 +289,12 @@ fn verify_tip(tip: &Tip) -> TipVerify {
     let fingerprint_hex = hex(&proof.fingerprint());
     let hash_is_fingerprint =
         !tip.hash.is_empty() && tip.hash.eq_ignore_ascii_case(&fingerprint_hex);
+    // v0.2.35 L4-B: SQIsign post-quantum flavor availability.
+    // True when sigil-tip-proof is built with the `sqisign` feature and
+    // flux-sqisign (177B PQ signatures) is linked. Currently false — the
+    // feature gate lands in a follow-up release once sqisign-verify is
+    // measured (Stargate P7-A: "measure SQIsign verify rate first").
+    let sqisign_available = cfg!(feature = "sqisign");
     TipVerify {
         ok: res.is_ok(),
         err: res.err().map(|e| e.to_string()),
@@ -282,6 +303,7 @@ fn verify_tip(tip: &Tip) -> TipVerify {
         hash_is_fingerprint,
         reported_hash: tip.hash.clone(),
         latency_us,
+        sqisign_available,
     }
 }
 
@@ -295,11 +317,14 @@ struct Config {
     api: String,
     /// Live testnet feed URL (HTTPS): {status, tip, blocks}. The TUI syncs from this.
     feed: String,
+    /// Toast set by startup auto-update (shown in TUI footer, not stderr).
+    initial_toast: Option<String>,
 }
 impl Default for Config {
     fn default() -> Self {
-        Self { lite: false, once: false, tui: false, interval: 2,
-            api: "http://127.0.0.1:8181/api/v1/status".into(), feed: DEFAULT_FEED.into() }
+        Self { lite: false, once: false, tui: true, interval: 2,
+            api: "http://127.0.0.1:8181/api/v1/status".into(), feed: DEFAULT_FEED.into(),
+            initial_toast: None }
     }
 }
 
@@ -734,8 +759,10 @@ fn main() {
     }
     // Default-ON pinned-channel auto-update (before anything else). Only advances to a version the
     // operator has promoted in the manifest; --no-update / SIGIL_TOP_NO_AUTOUPDATE=1 opts out.
-    maybe_auto_update(&argv);
-    let cfg = parse_args();
+    // Result toast is shown in the TUI footer — no eprintln! that would corrupt the alt-screen.
+    let auto_toast = maybe_auto_update(&argv);
+    let mut cfg = parse_args();
+    cfg.initial_toast = auto_toast;
     // Non-TTY (piped / redirected / captured), --once, or --lite → emit exactly ONE
     // plain ANSI frame and exit. ratatui needs a real terminal; this path never
     // spams. The live, interactive dashboard is the TUI below.
@@ -909,6 +936,8 @@ fn start_mining(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> mpsc::Re
         };
         let _ = tx.send(format!("▲ mining → {url} · diff {difficulty_bits} bits · wallet {}…", &wallet[..8]));
         let mut accepted = 0u64;
+        let mut hashes: u64 = 0;
+        let mut last_rate = Instant::now();
         while !stop.load(Ordering::Relaxed) {
             // header binds the share to the current minute (cheap freshness); find a winning nonce.
             let header = format!("sigil-g0-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 30).unwrap_or(0));
@@ -917,8 +946,15 @@ fn start_mining(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> mpsc::Re
                 if stop.load(Ordering::Relaxed) { break None; }
                 let mut buf = header.as_bytes().to_vec();
                 buf.extend_from_slice(&nonce.to_le_bytes());
+                hashes = hashes.wrapping_add(1);
                 if leading_zero_bits(blake3::hash(&buf).as_bytes()) >= difficulty_bits { break Some(nonce); }
                 nonce = nonce.wrapping_add(1);
+                // Report hashrate every ~2s on the channel (v0.2.35).
+                if hashes % 500_000 == 0 && last_rate.elapsed() >= Duration::from_secs(2) {
+                    let rate = hashes as f64 / last_rate.elapsed().as_secs_f64().max(0.001);
+                    let _ = tx.send(format!("⛏ {:.2} MH/s · {}M hashes", rate / 1e6, hashes / 1_000_000));
+                    last_rate = Instant::now();
+                }
             };
             let Some(nonce) = found else { break };
             let body = format!("{{\"miner\":\"{wallet}\",\"header\":\"{header}\",\"nonce\":{nonce},\"difficulty\":{difficulty_bits},\"reward\":50}}");
@@ -953,21 +989,19 @@ fn leading_zero_bits(d: &[u8]) -> u32 {
 /// fetch the operator-controlled manifest, and ONLY if it names a version newer than this binary
 /// (i.e. the operator has *promoted* a release by writing the manifest — publishing a GitHub release
 /// alone does NOT advance the channel), download + BLAKE3-verify + hot-swap, then re-exec the new
-/// binary so the node is immediately running the chosen version. Silent + non-fatal on any failure
-/// (offline, unreachable channel) — the monitor still starts. Disable with `--no-update` or
-/// `SIGIL_TOP_NO_AUTOUPDATE=1`. This is what makes "every node gets the release I choose" automatic,
-/// while a stale manifest means a new publish reaches nobody until it's promoted.
-fn maybe_auto_update(argv: &[String]) {
+/// binary so the node is immediately running the chosen version. Returns an Option<String> toast
+/// for the TUI instead of eprintln! (which corrupts the alt-screen). Disable with `--no-update` or
+/// `SIGIL_TOP_NO_AUTOUPDATE=1`.
+fn maybe_auto_update(argv: &[String]) -> Option<String> {
     if argv.iter().any(|a| a == "--no-update")
         || std::env::var("SIGIL_TOP_NO_AUTOUPDATE").map(|v| v == "1").unwrap_or(false)
     {
-        return;
+        return None;
     }
     let rel = match fetch_latest() {
         Ok(r) if version_gt(&r.version, VERSION) => r,
-        _ => return, // up to date, channel unreachable, or malformed → just run
+        _ => return None, // up to date, channel unreachable, or malformed → just run
     };
-    eprintln!("  {GOLD}⬆ auto-update v{VERSION} → v{}{RESET} ({SELF_TARGET}) — verifying…", rel.version);
     match self_update(&rel) {
         Ok(_) => {
             // Re-exec the freshly-swapped binary with the original args (minus argv[0]).
@@ -985,8 +1019,9 @@ fn maybe_auto_update(argv: &[String]) {
                     std::process::exit(0);
                 }
             }
+            None // unreachable — exec replaces this process
         }
-        Err(e) => eprintln!("  {DIM}auto-update skipped: {e}{RESET}"),
+        Err(e) => Some(format!("auto-update skipped: {e}")),
     }
 }
 
@@ -1043,6 +1078,7 @@ struct App {
     last_fetch: Instant,
     verify: Option<TipVerify>,
     toast: String,
+    toast_sticky: bool,        // v0.2.35: user-action toasts survive mining noise
     latest: String,            // live version from the flux release channel (auto-refreshed)
     last_update_check: Instant,
     update_rx: Option<mpsc::Receiver<String>>, // [U] runs on a bg thread; result lands here
@@ -1056,6 +1092,9 @@ struct App {
     mine_rx: Option<mpsc::Receiver<String>>,           // accepted-share messages from the miner thread
     mine_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>, // signals the miner thread to stop
     mine_accepted: u64,                                 // shares the node accepted this session
+    mine_hashrate: f64,                                 // v0.2.35: live GH/s from the miner thread
+    mine_hashes: u64,                                   // v0.2.35: cumulative hashes computed
+    wallet_balance: u128,                               // v0.2.35: miner wallet balance from feed
     full_sync: bool,                                    // [F] opt-in heavy full sync (default = 10ms lightweight verify)
     sync_us: u128,
     // L2-B: real eclipse-K — measured independent sources agreeing on the tip (replaces hardcoded k).
@@ -1069,14 +1108,17 @@ struct App {
 
 impl App {
     fn new(cfg: Config) -> Self {
+        let toast = cfg.initial_toast.clone().unwrap_or_default();
         App { cfg, st: NodeStatus::default(), online: false, last_fetch: Instant::now(),
-              verify: None, toast: String::new(),
+              verify: None, toast, toast_sticky: false,
               latest: LATEST.to_string(),
               last_update_check: Instant::now() - Duration::from_secs(3600),
               update_rx: None,
               blocks: Vec::new(),
               target_height: 0, synced_height: 0, verified_count: 0, streak: 0, score: 0,
-              mining: false, mine_rx: None, mine_stop: None, mine_accepted: 0, full_sync: false, sync_us: 0,
+              mining: false, mine_rx: None, mine_stop: None, mine_accepted: 0,
+              mine_hashrate: 0.0, mine_hashes: 0, wallet_balance: 0,
+              full_sync: false, sync_us: 0,
               eclipse_k: 0, eclipse_sources: Vec::new(),
               last_eclipse: Instant::now() - Duration::from_secs(60),
               splash_until: if std::env::var("SIGIL_TOP_JUST_UPDATED").ok().as_deref() == Some("1") {
@@ -1093,6 +1135,8 @@ impl App {
             .or_else(|| fetch(&self.cfg.api).ok().map(|s| (s, true)))
             .unwrap_or((NodeStatus::default(), false));
         self.st = got.0; self.online = got.1;
+        // v0.2.35: carry wallet balance from feed into local state (non-breaking — 0 when absent).
+        if self.st.wallet_balance > 0 { self.wallet_balance = self.st.wallet_balance; }
         // Auto-update signal: poll the flux release channel every 5 min so the update
         // bar lights up on its own when a new sigil-top is published (no [U] needed).
         if self.last_update_check.elapsed() > Duration::from_secs(300) {
@@ -1183,7 +1227,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                     if k.kind == KeyEventKind::Press {
                         match k.code {
                             KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return Ok(()),
-                            KeyCode::Char('r') | KeyCode::Char('R') => app.refresh(),
+                            KeyCode::Char('r') | KeyCode::Char('R') => { app.refresh(); app.toast_sticky = false; }
                             KeyCode::Char('m') | KeyCode::Char('M') => {
                                 app.mining = !app.mining;
                                 if app.mining {
@@ -1197,6 +1241,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                     if let Some(s) = app.mine_stop.take() { s.store(true, std::sync::atomic::Ordering::Relaxed); }
                                     app.toast = "▲ mining stopped".into();
                                 }
+                                app.toast_sticky = true;
                             }
                             KeyCode::Char('f') | KeyCode::Char('F') => {
                                 // Default is the TRUE lightweight node: ~10ms tip-proof verify, 0 blocks.
@@ -1207,12 +1252,14 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 } else {
                                     "⚡ lightweight node — ~10ms tip-proof verify, 0 blocks downloaded (default)".into()
                                 };
+                                app.toast_sticky = true;
                             }
                             KeyCode::Char('v') | KeyCode::Char('V') => {
                                 app.toast = match app.st.tip.as_ref() {
                                     Some(t) => { let v = verify_tip(t); let m = if v.ok { format!("✓ tip {} verified in {} µs · 0 blocks", v.height, v.latency_us) } else { format!("✗ verify failed: {}", v.err.clone().unwrap_or_default()) }; app.verify = Some(v); m }
                                     None => "no tip published by node — nothing to verify".into(),
                                 };
+                                app.toast_sticky = true;
                             }
                             KeyCode::Char('u') | KeyCode::Char('U') => {
                                 // Flux-way self-update on a BACKGROUND thread so the 11 MB
@@ -1220,8 +1267,10 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 // string lands on update_rx and is shown on the next draw.
                                 if app.update_rx.is_some() {
                                     app.toast = "↓ update already running…".into();
+                                    app.toast_sticky = true;
                                 } else {
                                     app.toast = "↓ checking flux release channel…".into();
+                                    app.toast_sticky = true;
                                     let (tx, rx) = mpsc::channel();
                                     thread::spawn(move || {
                                         let msg = match fetch_latest() {
@@ -1241,9 +1290,11 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                             }
                             KeyCode::Char('l') | KeyCode::Char('L') => {
                                 app.toast = "login: quit + run `sigil-top login --seed <64-hex>` (PKCE wallet assertion, no password)".into();
+                                app.toast_sticky = true;
                             }
                             KeyCode::Char('d') | KeyCode::Char('D') => {
                                 app.toast = "DNS anchor: sigilgraph.quillon.xyz — TXT-published tip-proof (verifier cross-check, wiring pending)".into();
+                                app.toast_sticky = true;
                             }
                             _ => {}
                         }
@@ -1271,17 +1322,31 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 { let _ = std::process::Command::new(&exe).args(&args).spawn(); std::process::exit(0); }
                             }
                         }
-                        app.toast = msg; app.update_rx = None;
+                        app.toast = msg; app.toast_sticky = true; app.update_rx = None;
                     }
                     Err(mpsc::TryRecvError::Disconnected) => { app.update_rx = None; }
                     Err(mpsc::TryRecvError::Empty) => {}
                 }
             }
-            // Drain live mining progress (accepted shares) onto the toast + counter.
+            // Drain live mining progress (accepted shares + hashrate) onto the toast + counter.
+            // v0.2.35: mining noise never overwrites sticky user-action toasts ([U], [V], [L], [M]).
             if let Some(rx) = app.mine_rx.as_ref() {
                 while let Ok(msg) = rx.try_recv() {
                     if msg.starts_with("✓ share") { app.mine_accepted += 1; app.score += 50; }
-                    app.toast = msg;
+                    // v0.2.35: parse hashrate messages: "⛏ 12.34 MH/s · 5M hashes"
+                    if msg.starts_with("⛏ ") {
+                        if let Some(rate_part) = msg.strip_prefix("⛏ ").and_then(|s| s.split(" MH/s").next()) {
+                            if let Ok(rate) = rate_part.parse::<f64>() {
+                                app.mine_hashrate = rate;
+                            }
+                        }
+                        if let Some(hash_part) = msg.split("· ").nth(1).and_then(|s| s.split('M').next()) {
+                            if let Ok(mega) = hash_part.parse::<f64>() {
+                                app.mine_hashes = (mega * 1_000_000.0) as u64;
+                            }
+                        }
+                    }
+                    if !app.toast_sticky { app.toast = msg; }
                 }
             }
         }
@@ -1361,7 +1426,7 @@ fn draw_ui(f: &mut Frame, app: &App) {
         Constraint::Length(6), // StateRoots
         Constraint::Length(4), // Supply
         Constraint::Length(5), // SyncStatus
-        Constraint::Length(4), // Mining
+        Constraint::Length(7), // Mining (v0.2.35: +2 lines for hashrate + balance)
     ])
     .spacing(1)
     .split(left_area);
@@ -1498,6 +1563,33 @@ fn render_sync_status(app: &App) -> Paragraph<'static> {
 fn render_mining(app: &App) -> Paragraph<'static> {
     let (state, scol) = if app.mining { ("ON", C_GREEN) } else { ("off", C_RED) };
     let earn = format!("~{:.4}", app.verified_count as f64 * 0.0005);
+    // v0.2.35: live hashrate from the miner thread
+    let rate_line = if app.mine_hashrate > 0.0 {
+        let (val, unit) = if app.mine_hashrate >= 1000.0 {
+            (app.mine_hashrate / 1000.0, "GH/s")
+        } else {
+            (app.mine_hashrate, "MH/s")
+        };
+        Line::from(vec![
+            dim("rate "), Span::styled(format!("{:.2} {unit}", val), Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
+            dim("   hashes "), Span::styled(format!("{}M", app.mine_hashes / 1_000_000), Style::default().fg(C_DIM)),
+        ])
+    } else {
+        Line::from(dim("rate —   hashes —"))
+    };
+    // v0.2.35: wallet balance line
+    let bal_line = if app.wallet_balance > 0 {
+        let whole = app.wallet_balance / 100_000_000;
+        let frac = (app.wallet_balance % 100_000_000) / 1_000_000;
+        Line::from(vec![
+            dim("balance "), Span::styled(format!("{whole}.{frac:02} SIGIL"), Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
+            dim("   shares "), Span::styled(group(app.mine_accepted), Style::default().fg(C_DIM)),
+        ])
+    } else {
+        Line::from(vec![
+            dim("balance —   shares "), Span::styled(group(app.mine_accepted), Style::default().fg(C_DIM)),
+        ])
+    };
     let lines = vec![
         Line::from(vec![
             dim("mining "), Span::styled(state, Style::default().fg(scol).add_modifier(Modifier::BOLD)),
@@ -1508,6 +1600,8 @@ fn render_mining(app: &App) -> Paragraph<'static> {
             dim("streak "), Span::styled(format!("×{}", app.streak), Style::default().fg(C_GOLD)),
             dim("   est earn "), Span::styled(earn, Style::default().fg(C_GOLD)),
         ]),
+        rate_line,
+        bal_line,
     ];
     Paragraph::new(lines).block(card_block(" MINING", C_CYAN))
 }
@@ -1516,6 +1610,19 @@ fn render_security(app: &App) -> Paragraph<'static> {
     let k = app.eclipse_k;
     let agreed = app.eclipse_sources.iter().filter(|(_, b)| *b).count();
     let total = app.eclipse_sources.len().max(1);
+    // v0.2.35 L4-B: SQIsign post-quantum readiness indicator
+    let pq = app.verify.as_ref().map(|v| v.sqisign_available).unwrap_or(false);
+    let pq_line = if pq {
+        Line::from(vec![
+            dim("sig "), Span::styled("SQIsign ✓", Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
+            dim("  "), Span::styled("PQ-ready · 177B signatures", Style::default().fg(C_VBRIGHT)),
+        ])
+    } else {
+        Line::from(vec![
+            dim("sig "), Span::styled("BLAKE3  ", Style::default().fg(C_GOLD)),
+            dim("  "), Span::styled("SQIsign · gated (L4-B)", Style::default().fg(C_DIM)),
+        ])
+    };
     let lines = vec![
         Line::from(vec![
             dim("K "), Span::styled(k.to_string(), Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
@@ -1525,7 +1632,7 @@ fn render_security(app: &App) -> Paragraph<'static> {
         Line::from(vec![
             dim("P(eclipse) 0.30^K = "), Span::styled(format!("{:.1e}", 0.30_f64.powi(k as i32)), Style::default().fg(C_GOLD)),
         ]),
-        Line::from(dim("node + DoH resolvers (real)")),
+        pq_line,
     ];
     Paragraph::new(lines).block(card_block(" SECURITY", C_VIOLET))
 }

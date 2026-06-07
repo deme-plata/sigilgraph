@@ -48,7 +48,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// flux release channel (see [`UPDATE_MANIFEST`]). The update bar glows when the
 /// channel reports a version newer than this binary, so an OLD build learns about a
 /// new release without recompilation — the whole point of "auto-update the flux way".
-const LATEST: &str = "0.3.0";
+const LATEST: &str = "0.3.1";
 /// The flux release channel for the lightweight node: `<product>-latest.json` in the
 /// q-flux downloads dir — the SAME manifest `flux_release_check` reads. Fetched at
 /// startup (throttled) and on `[U]`, so the running binary discovers new releases live.
@@ -280,7 +280,7 @@ struct TipVerify {
 /// `TipProof::new_sqisign()` and verify the post-quantum signature. The
 /// `sqisign_available` field in TipVerify signals whether that code path exists
 /// on this build — currently gated on the `sqisign` feature of sigil-tip-proof.
-/// v0.3.0 L4-B: testnet producer SQIsign public key (129 bytes, base64).
+/// v0.3.1 L4-B: testnet producer SQIsign public key (129 bytes, base64).
 /// Pinned here until DNS anchor (Lane 5) publishes it in _sigil-tip TXT.
 /// The SQIsign verify path uses this key to determine adversary-resistance.
 const PRODUCER_SQISIGN_PK: &[u8] = b""; // populated when the producer key is published
@@ -294,7 +294,7 @@ fn verify_tip(tip: &Tip) -> TipVerify {
     let fingerprint_hex = hex(&proof.fingerprint());
     let hash_is_fingerprint =
         !tip.hash.is_empty() && tip.hash.eq_ignore_ascii_case(&fingerprint_hex);
-    // v0.3.0 L4-B: SQIsign post-quantum flavor — now live via sigil-tip-proof's
+    // v0.3.1 L4-B: SQIsign post-quantum flavor — now live via sigil-tip-proof's
     // native feature (flux-sqisign linked). When the tip carries a SqiSignBlob
     // flavor AND the producer public key is known, verify_sqisign() runs.
     let sqisign_available = cfg!(feature = "sqisign");
@@ -902,7 +902,7 @@ fn fetch_latest() -> Result<Release, String> {
 }
 
 /// Is `a` a newer dotted version than `b`? Numeric per-part compare.
-/// v0.3.0: fetch the _sigil-tip DNS anchor via Cloudflare DoH, parse with
+/// v0.3.1: fetch the _sigil-tip DNS anchor via Cloudflare DoH, parse with
 /// sigil-dns-anchor, and return a human-readable status. Composes with the
 /// DNS-3 resolver-verifier lane once SQIsign verify is wired.
 fn fetch_dns_anchor() -> String {
@@ -1353,7 +1353,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 app.toast_sticky = true;
                             }
                             KeyCode::Char('d') | KeyCode::Char('D') => {
-                                // v0.3.0: fetch the real _sigil-tip DNS anchor via DoH,
+                                // v0.3.1: fetch the real _sigil-tip DNS anchor via DoH,
                                 // parse + structural-validate with sigil-dns-anchor crate.
                                 app.toast = "↓ DNS anchor: fetching _sigil-tip.sigilgraph.quillon.xyz…".into();
                                 app.toast_sticky = true;

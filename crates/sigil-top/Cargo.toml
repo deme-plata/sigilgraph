@@ -2,7 +2,7 @@
 name = "sigil-top"
 # sigil-top carries its OWN version cadence (the light client updates independently
 # of the workspace) — this is the "next version" the auto-updater ships.
-version = "0.3.0"
+version = "0.3.1"
 edition.workspace = true
 license.workspace = true
 description = "sigil-top — a dual-mode (lite scorecard ↔ full dashboard) terminal monitor for a SIGIL node. Polls the node's :8181/api/v1/status, renders height/peers/supply/4-state-roots + the flux-fold light-node capability in obsidian+violet ANSI. Dependency-light (std + serde_json), so it builds warm in seconds."
@@ -10,9 +10,10 @@ description = "sigil-top — a dual-mode (lite scorecard ↔ full dashboard) ter
 [dependencies]
 serde      = { workspace = true }
 serde_json = { workspace = true }
-# TLS is target-split: rustls on Linux (pure-Rust, cached), native-tls/SChannel on
-# Windows (rustls fails fetches silently on the cross-built windows-gnu .exe).
-reqwest    = { version = "0.12", features = ["blocking", "json"], default-features = false }
+# v0.3.1: rustls + webpki-roots for ALL platforms. Bundles Mozilla CA certs in the
+# binary — no OS cert store dependency. Was split rustls/native-tls per-platform
+# before; SChannel silently dropped connections on Windows when min_tls_version was set.
+reqwest    = { version = "0.12", features = ["blocking", "json", "rustls-tls-webpki-roots"], default-features = false }
 # v0.2: real TUI on the flux-cockpit foundation — alt-screen, flicker-free redraw,
 # interactive keys. ratatui owns the box-drawing so alignment can't regress.
 ratatui    = "0.28"
@@ -36,12 +37,6 @@ sigil-dns-anchor = { path = "../sigil-dns-anchor" }
 # a TipProof::new_sqisign() for adversary-resistant tip verification.
 [features]
 sqisign = []
-
-[target.'cfg(not(windows))'.dependencies]
-reqwest = { version = "0.12", features = ["rustls-tls-webpki-roots"], default-features = false }
-
-[target.'cfg(windows)'.dependencies]
-reqwest = { version = "0.12", features = ["native-tls"], default-features = false }
 
 [[bin]]
 name = "sigil-top"

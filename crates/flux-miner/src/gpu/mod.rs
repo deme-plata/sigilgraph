@@ -29,7 +29,8 @@
 
 use opencl3::command_queue::CommandQueue;
 use opencl3::context::Context;
-use opencl3::device::{get_all_devices, Device, CL_DEVICE_TYPE_ALL, CL_DEVICE_TYPE_GPU};
+use opencl3::device::{Device, CL_DEVICE_TYPE_ALL, CL_DEVICE_TYPE_GPU};
+use opencl3::platform::get_platforms;
 use opencl3::kernel::{ExecuteKernel, Kernel};
 use opencl3::memory::{Buffer, CL_MEM_READ_ONLY, CL_MEM_WRITE_ONLY};
 use opencl3::program::Program;
@@ -48,12 +49,32 @@ pub struct GpuDeviceInfo {
     pub max_work_group: usize,
 }
 
-/// OpenCL devices, GPU-first then ANY (so a CPU OpenCL ICD like POCL works too —
-/// for testing the kernel without a GPU, and as a fallback on odd setups).
+/// OpenCL devices, GPU-first then ANY. Enumerates platforms ourselves and
+/// IGNORES per-platform errors — opencl3's 1-arg `get_all_devices(type)` does
+/// `for p { p.get_devices(type)? }`, so the `?` aborts the WHOLE call if ANY
+/// platform reports `CL_DEVICE_NOT_FOUND` (e.g. a Windows box with NVIDIA + an
+/// iGPU platform that has no GPU-typed device). That bug made multi-platform
+/// Windows boxes report "no platforms" while the NVIDIA GPU was right there.
+/// (This is the q-miner approach — proven on Windows.)
 fn pick_device_ids() -> Vec<opencl3::device::cl_device_id> {
-    match get_all_devices(CL_DEVICE_TYPE_GPU) {
-        Ok(v) if !v.is_empty() => v,
-        _ => get_all_devices(CL_DEVICE_TYPE_ALL).unwrap_or_default(),
+    let platforms = match get_platforms() {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    let mut gpu = Vec::new();
+    let mut any = Vec::new();
+    for p in &platforms {
+        if let Ok(d) = p.get_devices(CL_DEVICE_TYPE_GPU) {
+            gpu.extend(d);
+        }
+        if let Ok(d) = p.get_devices(CL_DEVICE_TYPE_ALL) {
+            any.extend(d);
+        }
+    }
+    if !gpu.is_empty() {
+        gpu
+    } else {
+        any
     }
 }
 

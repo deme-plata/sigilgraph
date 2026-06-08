@@ -66,7 +66,9 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// flux release channel (see [`UPDATE_MANIFEST`]). The update bar glows when the
 /// channel reports a version newer than this binary, so an OLD build learns about a
 /// new release without recompilation — the whole point of "auto-update the flux way".
-const LATEST: &str = "0.7.5";
+// Tracks the binary's own version so it can never go stale on a release bump
+// (a hardcoded "0.7.5" here caused the updater to re-exec the OLD versioned binary).
+const LATEST: &str = env!("CARGO_PKG_VERSION");
 /// The flux release channel for the lightweight node: `<product>-latest.json` in the
 /// q-flux downloads dir — the SAME manifest `flux_release_check` reads. Fetched at
 /// startup (throttled) and on `[U]`, so the running binary discovers new releases live.
@@ -1774,14 +1776,15 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 #[cfg(unix)]
                                 {
                                     use std::os::unix::process::CommandExt;
-                                    // Try the versioned binary first (self_replace saved it there)
-                                    let ver_exe = exe.with_file_name(format!("sigil-top-v{}", LATEST));
+                                    // Try the versioned binary self_update just saved
+                                    // (named for the FETCHED version, not a stale const).
+                                    let ver_exe = exe.with_file_name(format!("sigil-top-v{}", app.latest));
                                     let target = if ver_exe.exists() { &ver_exe } else { &exe };
                                     let _ = std::process::Command::new(target).args(&args).exec();
                                 }
                                 #[cfg(not(unix))]
                                 {
-                                    let ver_exe = exe.with_file_name(format!("sigil-top-v{}.exe", LATEST));
+                                    let ver_exe = exe.with_file_name(format!("sigil-top-v{}.exe", app.latest));
                                     let target = if ver_exe.exists() { &ver_exe } else { &exe };
                                     let _ = std::process::Command::new(target).args(&args).spawn();
                                     std::process::exit(0);

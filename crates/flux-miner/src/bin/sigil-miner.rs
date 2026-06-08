@@ -385,9 +385,13 @@ fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::var("SIGIL_MINE_URL").ok())
         .unwrap_or_else(|| DEFAULT_URL.to_string());
     let headless = args.iter().any(|a| a == "--headless" || a == "--no-tui");
-    let use_gpu = args.iter().any(|a| a == "--gpu");
+    // The GPU build mines on the GPU BY DEFAULT — downloading the -gpu exe IS the
+    // request for GPU. `--cpu` forces CPU; `--gpu` is still accepted (and is the
+    // only way to ask for GPU on a CPU build, where it stays CPU anyway).
+    let force_cpu = args.iter().any(|a| a == "--cpu");
+    let use_gpu = !force_cpu && (cfg!(feature = "gpu") || args.iter().any(|a| a == "--gpu"));
     // What lane A actually runs on. cfg!(feature="gpu") is false in the CPU build,
-    // so --gpu there correctly still reports CPU.
+    // so this correctly reports CPU there.
     let mode = if use_gpu && cfg!(feature = "gpu") { "GPU" } else { "CPU" };
 
     eprintln!("\n  ⛏  SIGIL MINER v{VERSION} — dual-lane (BLAKE4 Φ + VDF Ω)  ·  MODE: {mode}");

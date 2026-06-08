@@ -62,6 +62,33 @@ use flux_swarm_tools::{Activity, ActivityKind, ActivityLog, with_locked};
 use flux_rev::{Store, snapshot, Genesis};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// When the ratatui TUI owns the screen, raw `eprintln!` from the background P2P
+/// thread (and elsewhere) smears the frame. Once the TUI starts we flip this and
+/// route those lines to a logfile instead, so the dashboard stays clean.
+pub(crate) static IN_TUI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn log_line(s: String) {
+    if IN_TUI.load(std::sync::atomic::Ordering::Relaxed) {
+        let p = std::env::var("HOME")
+            .map(|h| format!("{h}/.sigil-top.log"))
+            .or_else(|_| std::env::var("TEMP").map(|t| format!("{t}\\sigil-top.log")))
+            .unwrap_or_else(|_| "sigil-top.log".into());
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+            use std::io::Write;
+            let _ = writeln!(f, "{s}");
+        }
+    } else {
+        eprintln!("{s}");
+    }
+}
+
+/// `tlog!(...)` — like `eprintln!` but TUI-safe (goes to the logfile while the
+/// dashboard is up). Use for all background/diagnostic output.
+#[macro_export]
+macro_rules! tlog {
+    ($($a:tt)*) => {{ $crate::log_line(format!($($a)*)); }};
+}
 /// Offline fallback only — the *live* update signal is fetched at runtime from the
 /// flux release channel (see [`UPDATE_MANIFEST`]). The update bar glows when the
 /// channel reports a version newer than this binary, so an OLD build learns about a
@@ -1506,6 +1533,9 @@ fn measure_eclipse_k(tip_height: u64, tip_ok: bool) -> (u32, Vec<(String, bool)>
 
 fn run_tui(cfg: Config) -> std::io::Result<()> {
     enable_raw_mode()?;
+    // From here ratatui owns the screen — divert background eprintln to the logfile
+    // (was smearing the dashboard with [p2p-sync]/[aether] lines).
+    IN_TUI.store(true, std::sync::atomic::Ordering::Relaxed);
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
@@ -1526,7 +1556,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
         Ok(n) if n > 0 => {
             app.toast = format!("⬇ Synced {n} blocks → flux-db (height {})", block_store.best_height());
         }
-        Err(e) => eprintln!("[aether] {e}"),
+        Err(e) => tlog!("[aether] {e}"),
         _ => {}
     }
 

@@ -29,6 +29,14 @@ use crate::block::Block;
 use crate::chain::ChainTip;
 use crate::cli::Cli;
 
+/// Backfill request multiplexed on TOPIC_BLOCKS (distinct field names so it never
+/// deserializes as a `Block`). A holder serves it by re-broadcasting the range.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SyncReq {
+    sync_from: u64,
+    sync_to: u64,
+}
+
 const SCHEMA_VERSION: u16 = HEADER_VERSION;
 
 fn main() -> ExitCode {
@@ -69,6 +77,13 @@ fn run_start() -> Result<()> {
     let mut cfg = SigilNetConfig::default();
     // Env-driven transport override: SIGIL_TRANSPORT=direct|wireguard:<iface>|tor|wg+tor:<iface>
     cfg.transport = read_transport_env().context("parsing SIGIL_TRANSPORT")?;
+    // SIGIL_P2P_PORT moves the direct-mode listen port (default 9501) so a second
+    // node can run on the same host (used to verify genesis backfill locally).
+    if let Ok(p) = std::env::var("SIGIL_P2P_PORT") {
+        if let Ok(n) = p.trim().parse::<u16>() {
+            if n != 0 { cfg.p2p_port = n; }
+        }
+    }
     cfg.validate()?;
 
     // Resolve the libp2p listen address based on the transport mode.
@@ -341,6 +356,14 @@ fn run_start() -> Result<()> {
         let mut tx_total: u64 = 0;   // verify-once txs seen in received blocks (TPS meter)
         let mut produced_tx: u64 = 0; // verify-once txs this node packed into its own blocks
         let t_start = std::time::Instant::now();
+        // ── genesis backfill (closes the Phase-0 "joins mid-stream, gaps forever" gap) ──
+        // Out-of-order / future blocks are buffered by height and applied contiguously
+        // as the tip advances; on a gap we ask peers (over TOPIC_BLOCKS, multiplexed)
+        // to RE-BROADCAST the missing range, which any holder serves from its chain.
+        let mut pending: std::collections::BTreeMap<u64, crate::block::Block> = std::collections::BTreeMap::new();
+        let mut last_syncreq = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(10)).unwrap_or_else(std::time::Instant::now);
+        let mut backfilled: u64 = 0;
         if produce {
             eprintln!("🏭 PRODUCER mode — target {:.0} blocks/s ({}µs tick, feed every {}) on {}",
                 1_000_000.0 / produce_us as f64, produce_us, feed_every, sigil_net::TOPIC_BLOCKS);
@@ -478,62 +501,97 @@ fn run_start() -> Result<()> {
                                 // halt). We ONLY halt on a TRUE root-divergence
                                 // at the CORRECT height.
                                 if diverged { continue; }
-                                received += 1;
+                                // Parse a block; if it isn't one, it may be a backfill
+                                // request multiplexed on this topic — serve it.
                                 let block: crate::block::Block = match serde_json::from_slice(&data) {
                                     Ok(b) => b,
-                                    Err(_) => continue,
+                                    Err(_) => {
+                                        if let Ok(req) = serde_json::from_slice::<SyncReq>(&data) {
+                                            let blks = chain.blocks();
+                                            let top = chain.height().saturating_sub(1);
+                                            let lo = req.sync_from;
+                                            let hi = req.sync_to.min(top).min(lo.saturating_add(2000));
+                                            let mut served = 0u32;
+                                            let mut hh = lo;
+                                            while hh <= hi {
+                                                if let Some(b) = blks.get(hh as usize) {
+                                                    if let Ok(by) = serde_json::to_vec(b) {
+                                                        let _ = mgr.publish(sigil_net::TOPIC_BLOCKS, by);
+                                                        served += 1;
+                                                    }
+                                                }
+                                                hh += 1;
+                                            }
+                                            if served > 0 {
+                                                eprintln!("↩ backfill: served {} blocks [{}..={}] to a peer", served, lo, hi);
+                                            }
+                                        }
+                                        continue;
+                                    }
                                 };
+                                received += 1;
                                 if dag_mode {
-                                    // DAG: record the peer's block as a tip our
-                                    // producer can merge as a parent; do NOT
-                                    // linear-apply (a 2nd producer forks the chain).
                                     peer_tips.push_back(block.hash());
                                     while peer_tips.len() > 4 { peer_tips.pop_front(); }
                                     tx_total += block.header.tx_count as u64;
                                     if received % 200 == 0 {
                                         let secs = t_start.elapsed().as_secs_f64().max(1e-6);
                                         eprintln!("🕸 merged {} peer blocks ({:.1}/s) · {} verify-once txs ({:.0} TPS) as DAG tips",
-                                            received, received as f64 / secs,
-                                            tx_total, tx_total as f64 / secs);
+                                            received, received as f64 / secs, tx_total, tx_total as f64 / secs);
                                     }
                                     continue;
                                 }
                                 let h = block.header.height;
                                 let expected = chain.height();
-                                if h != expected {
-                                    if received % 200 == 0 {
-                                        let secs = t_start.elapsed().as_secs_f64().max(1e-6);
-                                        eprintln!(
-                                            "📥 received {} blocks ({:.1}/s) — applied {} (gap: got H={}, want {})",
-                                            received, received as f64 / secs, applied, h, expected
-                                        );
+                                if h < expected {
+                                    continue; // already applied
+                                }
+                                if h > expected {
+                                    // Future block: buffer it, and ask peers to re-broadcast
+                                    // the missing range so we can apply genesis→tip in order.
+                                    if pending.len() < 200_000 {
+                                        pending.entry(h).or_insert(block);
+                                    }
+                                    if last_syncreq.elapsed() >= std::time::Duration::from_millis(200) {
+                                        last_syncreq = std::time::Instant::now();
+                                        let to = h.min(expected.saturating_add(2000));
+                                        if let Ok(by) = serde_json::to_vec(&SyncReq { sync_from: expected, sync_to: to }) {
+                                            let _ = mgr.publish(sigil_net::TOPIC_BLOCKS, by);
+                                        }
+                                        eprintln!("⇪ backfill: gap (have {}, saw {}) — requested [{}..={}]", expected, h, expected, to);
                                     }
                                     continue;
                                 }
-                                match chain.apply(block) {
-                                    Ok(_) => {
-                                        applied += 1;
-                                        if applied % 100 == 0 {
-                                            let secs = t_start.elapsed().as_secs_f64().max(1e-6);
-                                            eprintln!(
-                                                "✓ applied {} blocks ({:.1}/s) — recv {} — tip H={}",
-                                                applied, applied as f64 / secs, received, chain.height()
-                                            );
+                                // h == expected: apply, then drain contiguous buffered blocks.
+                                let mut next = Some(block);
+                                while let Some(b) = next.take() {
+                                    let bh = b.header.height;
+                                    match chain.apply(b) {
+                                        Ok(_) => {
+                                            applied += 1;
+                                            if bh != h { backfilled += 1; }
+                                            if applied % 100 == 0 {
+                                                let secs = t_start.elapsed().as_secs_f64().max(1e-6);
+                                                eprintln!("✓ applied {} blocks ({:.1}/s) — recv {} — backfilled {} — tip H={} — buffered {}",
+                                                    applied, applied as f64 / secs, received, backfilled, chain.height(), pending.len());
+                                            }
+                                            next = pending.remove(&chain.height());
                                         }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("🔴 STATE DIVERGENCE at H={} from {} — {}", h, from, e);
-                                        diverged = true;
-                                        fire_chain_event(
-                                            "divergence",
-                                            &serde_json::json!({
-                                                "node": node_id,
-                                                "height": h,
-                                                "from": from.to_string(),
-                                                "error": format!("{e}"),
-                                                "exit_code": 78,
-                                            }),
-                                        );
+                                        Err(e) => {
+                                            eprintln!("🔴 STATE DIVERGENCE at H={} from {} — {}", bh, from, e);
+                                            diverged = true;
+                                            fire_chain_event(
+                                                "divergence",
+                                                &serde_json::json!({
+                                                    "node": node_id,
+                                                    "height": bh,
+                                                    "from": from.to_string(),
+                                                    "error": format!("{e}"),
+                                                    "exit_code": 78,
+                                                }),
+                                            );
+                                            break;
+                                        }
                                     }
                                 }
                             } else if topic == TOPIC_RELEASE {

@@ -47,6 +47,9 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Pinned-channel auto-update manifest (per-platform), same model as sigil-top:
 /// only updates to the operator-promoted version in this file.
 fn manifest_url() -> String {
+    if let Ok(u) = std::env::var("SIGIL_MINER_MANIFEST") {
+        return u; // override (testing / private channels)
+    }
     let plat = if cfg!(windows) { "windows" } else { "linux" };
     // GPU builds track their OWN channel so they never self-downgrade to the CPU
     // binary (the CPU exe must run on machines with no OpenCL).
@@ -131,7 +134,12 @@ struct Stats {
 /// 4 h, poll the pinned-channel manifest; if a newer version is promoted, stage
 /// `<exe>.new` (swapped in on next launch by `swap_on_launch`). Surfaces status
 /// to the TUI footer. Opt out with `--no-update`.
-fn update_loop(stats: Arc<Mutex<Stats>>, stop: Arc<AtomicBool>, update_now: Arc<AtomicBool>) {
+fn update_loop(
+    stats: Arc<Mutex<Stats>>,
+    stop: Arc<AtomicBool>,
+    update_now: Arc<AtomicBool>,
+    restart: Arc<AtomicBool>,
+) {
     let mut first = true;
     loop {
         let wait = if first { 30 } else { 4 * 3600 };
@@ -152,18 +160,40 @@ fn update_loop(stats: Arc<Mutex<Stats>>, stop: Arc<AtomicBool>, update_now: Arc<
         first = false;
         stats.lock().unwrap().update_msg = Some(format!("checking for update (v{VERSION})…"));
         match flux_miner::updater::check(&manifest_url(), VERSION) {
-            Some(info) => {
-                let msg = match flux_miner::updater::stage(&info.url) {
-                    Ok(_) => format!("⬆ v{} staged — restart to apply", info.version),
-                    Err(e) => format!("update v{} fetch failed: {e}", info.version),
-                };
-                stats.lock().unwrap().update_msg = Some(msg);
-            }
+            Some(info) => match flux_miner::updater::stage(&info.url) {
+                Ok(_) => {
+                    stats.lock().unwrap().update_msg = Some(format!("⬆ v{} — restarting…", info.version));
+                    restart.store(true, Ordering::Relaxed); // main applies + re-execs
+                    return;
+                }
+                Err(e) => {
+                    stats.lock().unwrap().update_msg = Some(format!("update v{} fetch failed: {e}", info.version));
+                }
+            },
             None => {
                 stats.lock().unwrap().update_msg = Some(format!("✓ up to date (v{VERSION})"));
             }
         }
     }
+}
+
+/// Apply a staged update (swap `<exe>.new` into place) and re-exec with the same
+/// args — the auto-restart sigil-top does. Call ONLY after the terminal is
+/// restored. Does not return on success.
+fn apply_and_restart() -> ! {
+    flux_miner::updater::swap_on_launch(); // self→.old, .new→self
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("sigil-miner"));
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let _ = std::process::Command::new(&exe).args(&args).exec(); // replaces the image
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = std::process::Command::new(&exe).args(&args).spawn();
+    }
+    std::process::exit(0);
 }
 
 /// Mining supervisor: owns the worker thread's lifecycle so the engine can be
@@ -361,6 +391,7 @@ fn main() -> anyhow::Result<()> {
     let desired_gpu = Arc::new(AtomicBool::new(use_gpu && cfg!(feature = "gpu")));
     let gpu_failed = Arc::new(AtomicBool::new(false));
     let update_now = Arc::new(AtomicBool::new(false));
+    let restart = Arc::new(AtomicBool::new(false));
 
     // mining supervisor — owns the worker; hot-switches CPU↔GPU on the `g` key,
     // and falls back to CPU if the GPU worker reports an init failure.
@@ -378,23 +409,32 @@ fn main() -> anyhow::Result<()> {
 
     // auto-updater (default ON; --no-update to skip; `u` triggers an immediate check)
     if !args.iter().any(|a| a == "--no-update") {
-        let (s, st, un) = (stats.clone(), stop.clone(), update_now.clone());
-        thread::spawn(move || update_loop(s, st, un));
+        let (s, st, un, rs) = (stats.clone(), stop.clone(), update_now.clone(), restart.clone());
+        thread::spawn(move || update_loop(s, st, un, rs));
     }
 
-    if headless {
-        run_headless(&stats, &stop)
+    let res = if headless {
+        run_headless(&stats, &stop, &restart)
     } else {
-        run_tui(&stats, &stop, &url, &wallet, &desired_gpu, &update_now)
+        run_tui(&stats, &stop, &url, &wallet, &desired_gpu, &update_now, &restart)
+    };
+    // a staged update breaks the UI loop → apply it + re-exec with the same args
+    if restart.load(Ordering::Relaxed) {
+        apply_and_restart();
     }
+    res
 }
 
 /// Plain-output fallback (no TTY / CI / `--headless`).
-fn run_headless(stats: &Arc<Mutex<Stats>>, stop: &Arc<AtomicBool>) -> anyhow::Result<()> {
+fn run_headless(stats: &Arc<Mutex<Stats>>, stop: &Arc<AtomicBool>, restart: &Arc<AtomicBool>) -> anyhow::Result<()> {
     println!("  ⛏  SIGIL MINER v{VERSION} — dual-lane (BLAKE4 Φ + VDF Ω) — headless\n");
     let mut last_ok = 0u64;
     let mut last_update: Option<String> = None;
     loop {
+        if restart.load(Ordering::Relaxed) {
+            println!("  [update] restarting into the new version…");
+            break;
+        }
         thread::sleep(Duration::from_millis(500));
         let s = stats.lock().unwrap();
         if s.update_msg != last_update {
@@ -431,6 +471,7 @@ fn run_tui(
     wallet: &str,
     desired_gpu: &Arc<AtomicBool>,
     update_now: &Arc<AtomicBool>,
+    restart: &Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut out = io::stdout();
@@ -440,6 +481,9 @@ fn run_tui(
 
     let res = (|| -> anyhow::Result<()> {
         loop {
+            if restart.load(Ordering::Relaxed) {
+                break; // staged update → leave the loop so main re-execs
+            }
             term.draw(|f| draw(f, stats, url, wallet, start))?;
             if event::poll(Duration::from_millis(250))? {
                 if let Event::Key(k) = event::read()? {

@@ -29,7 +29,7 @@
 
 use opencl3::command_queue::CommandQueue;
 use opencl3::context::Context;
-use opencl3::device::{get_all_devices, Device, CL_DEVICE_TYPE_GPU};
+use opencl3::device::{get_all_devices, Device, CL_DEVICE_TYPE_ALL, CL_DEVICE_TYPE_GPU};
 use opencl3::kernel::{ExecuteKernel, Kernel};
 use opencl3::memory::{Buffer, CL_MEM_READ_ONLY, CL_MEM_WRITE_ONLY};
 use opencl3::program::Program;
@@ -48,10 +48,20 @@ pub struct GpuDeviceInfo {
     pub max_work_group: usize,
 }
 
-/// Enumerate OpenCL GPUs (empty if none / no OpenCL runtime).
+/// OpenCL devices, GPU-first then ANY (so a CPU OpenCL ICD like POCL works too —
+/// for testing the kernel without a GPU, and as a fallback on odd setups).
+fn pick_device_ids() -> Vec<opencl3::device::cl_device_id> {
+    match get_all_devices(CL_DEVICE_TYPE_GPU) {
+        Ok(v) if !v.is_empty() => v,
+        _ => get_all_devices(CL_DEVICE_TYPE_ALL).unwrap_or_default(),
+    }
+}
+
+/// Enumerate OpenCL devices (empty if none / no OpenCL runtime).
 pub fn list_devices() -> Vec<GpuDeviceInfo> {
     let mut out = Vec::new();
-    if let Ok(ids) = get_all_devices(CL_DEVICE_TYPE_GPU) {
+    {
+        let ids = pick_device_ids();
         for id in ids {
             let d = Device::new(id);
             out.push(GpuDeviceInfo {
@@ -90,8 +100,8 @@ pub struct GpuBlake4 {
 impl GpuBlake4 {
     /// Initialise the first GPU + build the kernels.
     pub fn new() -> anyhow::Result<Self> {
-        let ids = get_all_devices(CL_DEVICE_TYPE_GPU)?;
-        let id = *ids.first().ok_or_else(|| anyhow::anyhow!("no OpenCL GPU found"))?;
+        let ids = pick_device_ids();
+        let id = *ids.first().ok_or_else(|| anyhow::anyhow!("no OpenCL device found"))?;
         let device = Device::new(id);
         let device_name = device.name().unwrap_or_else(|_| "unknown".into());
         let context = Context::from_device(&device)?;

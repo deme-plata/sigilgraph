@@ -346,6 +346,31 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
             };
             ok(format!("{{\"ok\":true,\"q\":{},\"count\":{},\"results\":[{}]}}", js(&q), items.len(), items.join(",")))
         }
+        // Recent entries from flux-history (read lock — by_kind/recent are &self).
+        // ?kind=block → blocks; ?kind=tx → mine+swap; else → latest of all kinds.
+        ("GET", "/recent") => {
+            let kind = query_get(query, "kind").unwrap_or("");
+            let limit: usize = query_get(query, "limit").and_then(|s| s.parse().ok()).unwrap_or(20);
+            let js = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into());
+            let n = node.read().unwrap();
+            let mut entries = match n.history.as_ref() {
+                None => vec![],
+                Some(h) => match kind {
+                    "block" => h.by_kind("block").unwrap_or_default(),
+                    "tx" => { let mut v = h.by_kind("mine").unwrap_or_default(); v.extend(h.by_kind("swap").unwrap_or_default()); v }
+                    _ => h.recent(limit.max(1)).unwrap_or_default(),
+                },
+            };
+            entries.sort_by(|a, b| b.ts_ms.cmp(&a.ts_ms)); // newest first
+            entries.truncate(limit.max(1));
+            let items: Vec<String> = entries.iter().map(|e| format!(
+                "{{\"title\":{},\"content\":{},\"kind\":{},\"ts\":{},\"h\":{},\"hash\":{},\"prod\":{}}}",
+                js(&e.title), js(&e.content), js(&e.kind), e.ts_ms,
+                e.tags.get("height").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0),
+                js(e.tags.get("hash").map(|s| s.as_str()).unwrap_or("")),
+                js(&e.source))).collect();
+            ok(format!("{{\"ok\":true,\"kind\":{},\"count\":{},\"results\":[{}]}}", js(kind), items.len(), items.join(",")))
+        }
         ("GET", "/balance") => {
             let w = query_get(query, "wallet").and_then(hex32);
             let t = query_get(query, "token").and_then(hex32).unwrap_or(NATIVE);

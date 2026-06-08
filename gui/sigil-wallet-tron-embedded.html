@@ -80,7 +80,7 @@ body.view-desktop .desktop{display:flex}
 .sidecard .amt{font-size:28px;margin-top:5px}.sidecard .amt small{font-size:14px}
 .sidecard .d{font-family:'JetBrains Mono';font-size:12px;color:var(--teal);margin-top:3px}
 .snav{margin-top:18px;display:flex;flex-direction:column;gap:3px}
-.snav a{display:flex;align-items:center;gap:13px;padding:11px 13px;border-radius:12px;color:var(--dim);cursor:pointer;font-weight:600;font-size:15px;position:relative;transition:.18s}
+.snav a{text-decoration:none;display:flex;align-items:center;gap:13px;padding:11px 13px;border-radius:12px;color:var(--dim);cursor:pointer;font-weight:600;font-size:15px;position:relative;transition:.18s}
 .snav a .lic{width:21px;height:21px;color:var(--dim);filter:none;transition:.18s}
 .snav a:hover{color:var(--text);background:rgba(33,212,253,.06);transform:translateX(3px)}.snav a:hover .lic{color:var(--cyan)}
 .snav a.on{color:var(--cyan-bright);background:linear-gradient(90deg,rgba(33,212,253,.16),transparent)}
@@ -247,8 +247,11 @@ body.view-desktop .desktop{display:flex}
     const scd=document.querySelector('.sidecard .d'); if(scd) scd.innerHTML=SIGIL_BAL.toLocaleString('en-US',{maximumFractionDigits:2})+' SIGIL · '+SHORT;
     // address chip in the desktop top bar (replace the static net text once)
     const net=document.querySelector('.desktop .net'); if(net) net.innerHTML='◈ '+SHORT+' <span style="opacity:.6;cursor:pointer" onclick="copyAddr()">⧉</span>';
-    // Activity → the explorer (with search), pre-loaded with THIS wallet's address.
-    const exUrl='https://sigilgraph.fluxapp.xyz/explorer/?q='+encodeURIComponent(ADDR||'');
+    // Activity → the SIGIL-native BlockDAG explorer (no auth, no redirect loop).
+    // NB: the React /explorer/ is auth-walled (Quillon chain, qnk+39 addresses) and
+    // can't show SIGIL 64-hex activity — real per-address Activity needs a sigil-rpcd
+    // tx-history endpoint (TODO).
+    const exUrl='https://sigilgraph.fluxapp.xyz/dag.html';
     ['navActivity','cardExplorer'].forEach(id=>{const el=document.getElementById(id); if(el) el.href=exUrl;});
     // fresh wallet → no activity yet
     document.querySelectorAll('.card .act-item').forEach((el,i)=>{ if(SIGIL_BAL===0) el.style.display='none'; });

@@ -8,6 +8,7 @@
 
 mod block;
 mod chain;
+mod chain_log;
 mod cli;
 mod snapshot;
 
@@ -233,23 +234,26 @@ fn run_start() -> Result<()> {
         // GENESIS_TIMESTAMP_MS) so block 1+ can chain across nodes.
         let mut chain = ChainTip::new();
         let snap_dir = snapshot::snapshot_dir();
-        // aether-load-on-boot: if durable RS-aether shards exist, reassemble +
-        // replay the chain (can't-lose — survives kill/restart). Else genesis.
-        match snapshot::load(&snap_dir) {
-            Some(blocks) if !blocks.is_empty() => {
-                let n = blocks.len();
-                for b in blocks {
-                    chain.apply(b).map_err(|e| anyhow!("aether replay: {}", e))?;
-                }
-                eprintln!("♻️  RECOVERED {} blocks from aether shards → resuming at H={}", n, chain.height());
-            }
-            _ => {
-                let genesis = build_genesis().map_err(|e| anyhow!("build_genesis: {}", e))?;
-                let genesis_hash = genesis.hash();
-                chain.apply(genesis).map_err(|e| anyhow!("genesis apply: {}", e))?;
-                eprintln!("✓ chain initialised at H=0 — genesis hash {}",
-                    hex_short_block(&genesis_hash));
-            }
+        // Memory-bound persistence: an append-only on-disk block log. On boot we
+        // STREAM-replay it (one block at a time → bounded RAM) to rebuild state +
+        // the recent window; older blocks stay on disk. This replaced the
+        // load-the-whole-chain-into-RAM aether snapshot that OOM-killed the producer.
+        let mut chain_log = chain_log::ChainLog::open(&snap_dir)
+            .map_err(|e| anyhow!("open chain.log: {}", e))?;
+        if chain_log.height() > 0 {
+            let n = chain_log::ChainLog::replay(&snap_dir, |b| {
+                let _ = chain.apply(b); // our own log — applies cleanly; ignore tail tears
+            }).map_err(|e| anyhow!("chain.log replay: {}", e))?;
+            eprintln!("♻️  RECOVERED {} blocks from chain.log (streamed) → resuming at H={} (window base {})",
+                n, chain.height(), chain.window_base());
+        } else {
+            let genesis = build_genesis().map_err(|e| anyhow!("build_genesis: {}", e))?;
+            let genesis_hash = genesis.hash();
+            let graw = serde_json::to_vec(&genesis).unwrap_or_default();
+            chain.apply(genesis).map_err(|e| anyhow!("genesis apply: {}", e))?;
+            let _ = chain_log.append_bytes(&graw);
+            eprintln!("✓ chain initialised at H=0 — genesis hash {}",
+                hex_short_block(&genesis_hash));
         }
 
         // Halt latch: once flipped, the node stops accepting blocks but
@@ -384,7 +388,6 @@ fn run_start() -> Result<()> {
         let mut last_req = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(10)).unwrap_or_else(std::time::Instant::now);
         let mut backfilled: u64 = 0;
-        let mut last_snapshot = std::time::Instant::now();
         if produce {
             eprintln!("🏭 PRODUCER mode — target {:.0} blocks/s ({}µs tick, feed every {}) on {}",
                 1_000_000.0 / produce_us as f64, produce_us, feed_every, sigil_net::TOPIC_BLOCKS);
@@ -444,6 +447,7 @@ fn run_start() -> Result<()> {
                             // advance our own tip first, then broadcast it
                             match chain.apply(block) {
                                 Ok(_) => {
+                                    let _ = chain_log.append_bytes(&bytes); // durable, O(1)
                                     produced += 1;
                                     produced_tx += block_txs.len() as u64;
                                     // per-block feed line for dag.html (stdout; the
@@ -474,17 +478,9 @@ fn run_start() -> Result<()> {
                                             produced, produced as f64 / secs,
                                             produced_tx, produced_tx as f64 / secs, chain.height());
                                     }
-                                    // durable snapshot → aether Reed-Solomon shards. TIME-gated (30s),
-                                    // NOT per-100-blocks: snapshot::save serializes the WHOLE chain
-                                    // (O(N)), so firing it every 100 blocks made production O(N²) and
-                                    // crawl as the chain grew — the producer-slowdown root cause.
-                                    if last_snapshot.elapsed() >= std::time::Duration::from_secs(30) {
-                                        last_snapshot = std::time::Instant::now();
-                                        match snapshot::save(chain.blocks(), &snap_dir) {
-                                            Ok(_) => eprintln!("💾 snapshot → aether shards @ H={}", chain.height()),
-                                            Err(e) => eprintln!("⚠ snapshot failed: {}", e),
-                                        }
-                                    }
+                                    // Persistence is now per-block via chain_log.append_bytes
+                                    // above (O(1), bounded RAM) — no periodic full-chain
+                                    // snapshot (that was O(N²) + the OOM source).
                                 }
                                 Err(e) => eprintln!("⚠ producer self-apply H={} failed: {}", h, e),
                             }
@@ -534,15 +530,16 @@ fn run_start() -> Result<()> {
                                 Ok(r) => r,
                                 Err(_) => continue,
                             };
-                            let blks = chain.blocks();
                             let top = chain.height().saturating_sub(1);
                             let lo = req.from;
                             // point-to-point ⇒ a bigger chunk is fine.
                             let hi = req.to.min(top).min(lo.saturating_add(8192));
+                            // Serve recent heights from the in-RAM window; older
+                            // (pruned) heights straight from the on-disk chain_log.
                             let resp = BackfillResp {
                                 blocks: (lo..=hi)
-                                    .filter_map(|h| blks.get(h as usize))
-                                    .map(|b| serde_json::to_value(b).unwrap())
+                                    .filter_map(|h| chain.get(h).map(|b| serde_json::to_value(b).unwrap())
+                                        .or_else(|| chain_log.get(h).map(|b| serde_json::to_value(&b).unwrap())))
                                     .collect(),
                             };
                             eprintln!("↩ rr-backfill: served {} blocks [{}..={}] to {}",
@@ -622,8 +619,10 @@ fn run_start() -> Result<()> {
                                 let mut next = Some(block);
                                 while let Some(b) = next.take() {
                                     let bh = b.header.height;
+                                    let braw = serde_json::to_vec(&b).unwrap_or_default();
                                     match chain.apply(b) {
                                         Ok(_) => {
+                                            let _ = chain_log.append_bytes(&braw);
                                             applied += 1;
                                             if bh != h { backfilled += 1; }
                                             if applied % 100 == 0 {
@@ -782,8 +781,10 @@ fn run_start() -> Result<()> {
                         // Apply every contiguous block we now have, starting at the tip.
                         while let Some(b) = pending.remove(&chain.height()) {
                             let bh = b.header.height;
+                            let braw = serde_json::to_vec(&b).unwrap_or_default();
                             match chain.apply(b) {
                                 Ok(_) => {
+                                    let _ = chain_log.append_bytes(&braw);
                                     applied += 1;
                                     backfilled += 1;
                                     if applied % 100 == 0 {

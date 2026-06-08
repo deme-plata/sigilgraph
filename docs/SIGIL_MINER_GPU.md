@@ -25,6 +25,25 @@ You should see Φ/Ω cards, shares ✓ climbing, and your balance rising.
 
 ---
 
+## 1½. GPU miner — no build (cross-linked .exe)
+
+A prebuilt GPU exe is published (Linux→Windows cross-link via a synthesized
+OpenCL import lib — see `crates/flux-miner/gpu-cross/`). It **requires
+`OpenCL.dll`**, which your RTX 2060 driver already provides:
+
+```powershell
+Invoke-WebRequest https://sigilgraph.quillon.xyz/downloads/sigil-miner-windows-x64-gpu.exe -OutFile sigil-miner-gpu.exe
+.\sigil-miner-gpu.exe --gpu-list       # expect: NVIDIA GeForce RTX 2060
+.\sigil-miner-gpu.exe --gpu-selftest   # MUST print ✓ (GPU kernel == pow.rs)
+.\sigil-miner-gpu.exe <YOUR_WALLET> --gpu
+```
+
+In the TUI, press **`g`** to toggle GPU↔CPU live; the `[GPU]`/`[CPU]` badge + MODE
+card show which engine is running. ⚠️ This exe needs an OpenCL runtime — on a
+machine with no GPU/ICD it won't launch; use the plain `sigil-miner-windows-x64.exe`
+there. **Unvalidated until `--gpu-selftest` passes on real hardware** — that's the
+gate; if it prints ✗ with a mismatch, send it to me.
+
 ## 2. GPU miner — build on the box (RTX 2060, OpenCL)
 
 The RTX 2060 driver already ships the OpenCL **runtime** (`OpenCL.dll`). To

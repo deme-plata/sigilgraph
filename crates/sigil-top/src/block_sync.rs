@@ -254,36 +254,46 @@ impl P2PBlockSync {
                     // chunks get refilled — this is what actually reaches 100% (the old
                     // gossip cursor stalled partway, e.g. "stuck at 22%").
                     //
-                    // send_request().await is inline here: this is the monitor's single sync
-                    // thread, so pausing the loop during the request is fine.
-                    if last_bf.elapsed() >= Duration::from_millis(300) {
+                    // PARALLEL backfill: fan out one request per connected peer, each for a
+                    // DISTINCT chunk, and await them concurrently (join_all). One-at-a-time
+                    // inline await was the bottleneck — each 8192-block (~24MB) response takes
+                    // seconds, so serializing them capped throughput; N peers in parallel is ~Nx.
+                    // Tight cadence (50ms) so cycles pipeline back-to-back.
+                    if last_bf.elapsed() >= Duration::from_millis(50) {
                         last_bf = Instant::now();
                         let (peer_best, have) = {
                             let s = state_clone.lock().unwrap();
                             (s.peer_best_height, s.blocks_synced)
                         };
                         if peer_best > 0 && have < peer_best {
-                            if let Some(peer) = net.connected_peers().into_iter().next() {
-                                let from = sync_cursor;
-                                let to = from + 8192;
-                                state_clone.lock().unwrap().sync_cursor = from; // TUI: chunk in flight
-                                let req = BackfillReq { from, to };
-                                crate::tlog!("[p2p-sync] backfill req→{peer} [{from}..={to}] (have {have}/{peer_best})");
-                                match net.send_request(peer, serde_json::to_vec(&req).unwrap()).await {
-                                    Ok(bytes) => {
+                            let peers = net.connected_peers();
+                            if !peers.is_empty() {
+                                const CHUNK: u64 = 8192;
+                                state_clone.lock().unwrap().sync_cursor = sync_cursor; // TUI
+                                let netref = &net;
+                                let reqs = peers.iter().enumerate().map(|(i, peer)| {
+                                    let from = sync_cursor + i as u64 * CHUNK;
+                                    let payload = serde_json::to_vec(&BackfillReq { from, to: from + CHUNK }).unwrap();
+                                    let peer = *peer;
+                                    async move { netref.send_request(peer, payload).await }
+                                });
+                                let span = peers.len() as u64 * CHUNK;
+                                crate::tlog!("[p2p-sync] backfill: {} parallel reqs from {} (have {have}/{peer_best})", peers.len(), sync_cursor);
+                                let results = futures::future::join_all(reqs).await;
+                                let mut stored = 0u64;
+                                for r in results {
+                                    if let Ok(bytes) = r {
                                         if let Ok(resp) = serde_json::from_slice::<BackfillResp>(&bytes) {
-                                            let mut stored = 0u64;
                                             for v in &resp.blocks {
                                                 if ingest_block_value(v, &mut store, &state_clone, &net, &new_blocks_clone) {
                                                     stored += 1;
                                                 }
                                             }
-                                            crate::tlog!("[p2p-sync] backfill resp: {} blocks ({stored} new)", resp.blocks.len());
                                         }
                                     }
-                                    Err(_) => {}
                                 }
-                                sync_cursor = if to >= peer_best { 0 } else { to + 1 }; // loop to refill gaps
+                                crate::tlog!("[p2p-sync] backfill: +{stored} new blocks", );
+                                sync_cursor = if sync_cursor + span >= peer_best { 0 } else { sync_cursor + span };
                             }
                         }
                     }

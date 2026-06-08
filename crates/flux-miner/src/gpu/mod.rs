@@ -95,6 +95,44 @@ pub fn list_devices() -> Vec<GpuDeviceInfo> {
     out
 }
 
+/// Candidate devices to try, with names, NVIDIA/discrete first. GPU-typed across
+/// ALL platforms (errors per-platform ignored), then ANY-typed if no GPU found.
+/// Appends a discovery trace to `t`.
+fn candidate_devices(t: &mut String) -> Vec<(opencl3::device::cl_device_id, String)> {
+    let platforms = match get_platforms() {
+        Ok(p) => p,
+        Err(e) => {
+            t.push_str(&format!("get_platforms FAILED: {e}\n"));
+            return Vec::new();
+        }
+    };
+    t.push_str(&format!("platforms: {}\n", platforms.len()));
+    let named = |d: opencl3::device::cl_device_id| (d, Device::new(d).name().unwrap_or_else(|_| "?".into()));
+    let mut gpu = Vec::new();
+    let mut any = Vec::new();
+    for p in &platforms {
+        t.push_str(&format!("  - {}\n", p.name().unwrap_or_else(|_| "?".into())));
+        if let Ok(ds) = p.get_devices(CL_DEVICE_TYPE_GPU) {
+            gpu.extend(ds.into_iter().map(named));
+        }
+        if let Ok(ds) = p.get_devices(CL_DEVICE_TYPE_ALL) {
+            any.extend(ds.into_iter().map(named));
+        }
+    }
+    let mut out = if !gpu.is_empty() { gpu } else { any };
+    // discrete (NVIDIA/AMD) first — they're the ones that actually accelerate.
+    out.sort_by_key(|(_, n)| {
+        let l = n.to_lowercase();
+        if l.contains("nvidia") || l.contains("geforce") || l.contains("rtx") || l.contains("radeon") || l.contains("amd") {
+            0
+        } else {
+            1
+        }
+    });
+    t.push_str(&format!("candidate devices ({}): {}\n", out.len(), out.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(" | ")));
+    out
+}
+
 /// Build the 16-word (64-byte) base message block exactly as
 /// [`crate::pow::blake4_word`] lays it out: header at `0..hlen`, the 8 nonce
 /// bytes are spliced by the kernel at `hlen`, the rest zero. `hlen <= 56`.
@@ -119,65 +157,44 @@ pub struct GpuBlake4 {
 }
 
 impl GpuBlake4 {
-    /// Initialise the first GPU + build the kernels, with a STEP-BY-STEP trace so
-    /// any failure names the exact OpenCL call + error (and the NVIDIA build log
-    /// for kernel-build failures). The full trace is written to `sigil-gpu-init.log`
-    /// and, on failure, returned in the error.
+    /// Initialise a GPU. TRIES EVERY candidate device (GPU-typed across all
+    /// platforms, then ANY) until one fully initializes — so it can't get stuck on
+    /// a bad first device (e.g. a second-platform iGPU whose OpenCL rejects the
+    /// kernel) and quit, which is what made multi-platform Windows boxes fall back
+    /// to CPU after finding the GPU. NVIDIA/discrete devices are tried first. The
+    /// full attempt trace is written to `sigil-gpu-init.log`.
     pub fn new() -> anyhow::Result<Self> {
-        let mut t = String::from("[sigil-gpu init trace]\n");
-        macro_rules! step {
-            ($($a:tt)*) => {{ t.push_str(&format!($($a)*)); t.push('\n'); }};
+        let mut t = String::from("[sigil-gpu init]\n");
+        let cands = candidate_devices(&mut t);
+        if cands.is_empty() {
+            let _ = std::fs::write("sigil-gpu-init.log", &t);
+            return Err(anyhow::anyhow!("{t}no OpenCL device found"));
         }
-        let fail = |t: &str, what: &str| -> anyhow::Error {
-            let _ = std::fs::write("sigil-gpu-init.log", t);
-            anyhow::anyhow!("{}{}", t, what)
-        };
+        for (id, name) in &cands {
+            t.push_str(&format!("trying: {name}\n"));
+            match Self::try_init(*id, name) {
+                Ok(g) => {
+                    t.push_str(&format!("  ✓ INIT OK on {name}\n"));
+                    let _ = std::fs::write("sigil-gpu-init.log", &t);
+                    return Ok(g);
+                }
+                Err(e) => t.push_str(&format!("  ✗ {e}\n")),
+            }
+        }
+        let _ = std::fs::write("sigil-gpu-init.log", &t);
+        Err(anyhow::anyhow!("{t}all {} GPU device(s) failed init", cands.len()))
+    }
 
-        let platforms = match get_platforms() {
-            Ok(p) => p,
-            Err(e) => return Err(fail(&t, &format!("get_platforms FAILED: {e}"))),
-        };
-        step!("platforms found: {}", platforms.len());
-        for p in &platforms {
-            step!("  - {}", p.name().unwrap_or_else(|_| "?".into()));
-        }
-        let ids = pick_device_ids();
-        step!("devices picked (GPU-first/any): {}", ids.len());
-        let id = match ids.first() {
-            Some(id) => *id,
-            None => return Err(fail(&t, "no OpenCL device found")),
-        };
+    /// Full init for ONE device: context → queue → build kernel → create kernels.
+    fn try_init(id: opencl3::device::cl_device_id, _name: &str) -> anyhow::Result<Self> {
         let device = Device::new(id);
         let device_name = device.name().unwrap_or_else(|_| "unknown".into());
-        step!("device: {device_name}");
-        let context = match Context::from_device(&device) {
-            Ok(c) => c,
-            Err(e) => return Err(fail(&t, &format!("clCreateContext FAILED: {e}"))),
-        };
-        step!("context: ok");
-        let queue = match CommandQueue::create_default(&context, 0) {
-            Ok(q) => q,
-            Err(e) => return Err(fail(&t, &format!("create_command_queue FAILED: {e}"))),
-        };
-        step!("queue: ok");
-        let program = match Program::create_and_build_from_source(&context, KERNEL_SRC, "") {
-            Ok(p) => p,
-            Err(buildlog) => {
-                return Err(fail(&t, &format!("clBuildProgram FAILED — NVIDIA build log:\n{buildlog}")))
-            }
-        };
-        step!("program: built");
-        let kernel = match Kernel::create(&program, KERNEL_NAME) {
-            Ok(k) => k,
-            Err(e) => return Err(fail(&t, &format!("clCreateKernel({KERNEL_NAME}) FAILED: {e}"))),
-        };
-        let words_kernel = match Kernel::create(&program, WORDS_KERNEL_NAME) {
-            Ok(k) => k,
-            Err(e) => return Err(fail(&t, &format!("clCreateKernel({WORDS_KERNEL_NAME}) FAILED: {e}"))),
-        };
-        step!("kernels: ok");
-        step!("GPU INIT OK → {device_name}");
-        let _ = std::fs::write("sigil-gpu-init.log", &t); // success trace too
+        let context = Context::from_device(&device).map_err(|e| anyhow::anyhow!("clCreateContext: {e}"))?;
+        let queue = CommandQueue::create_default(&context, 0).map_err(|e| anyhow::anyhow!("create_command_queue: {e}"))?;
+        let program = Program::create_and_build_from_source(&context, KERNEL_SRC, "")
+            .map_err(|bl| anyhow::anyhow!("clBuildProgram: {bl}"))?;
+        let kernel = Kernel::create(&program, KERNEL_NAME).map_err(|e| anyhow::anyhow!("clCreateKernel({KERNEL_NAME}): {e}"))?;
+        let words_kernel = Kernel::create(&program, WORDS_KERNEL_NAME).map_err(|e| anyhow::anyhow!("clCreateKernel({WORDS_KERNEL_NAME}): {e}"))?;
         Ok(Self { context, queue, kernel, words_kernel, device_name })
     }
 

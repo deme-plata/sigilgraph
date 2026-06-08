@@ -51,6 +51,11 @@ struct Node {
     history: Option<flux_history::HistoryStore>,
 }
 
+/// Content address (blake3 CID, hex) — flux-aether's content-addressing primitive.
+/// The record's bytes are stored in flux-db (via flux-history); the CID is its hash,
+/// so retrieval (/aether?cid=) can verify blake3(content)==cid (verify-don't-trust).
+fn cid_of(s: &str) -> String { blake3::hash(s.as_bytes()).to_hex().to_string() }
+
 /// hex of a 32-byte id (searchable content + the `addr` tag).
 fn hexs(b: &[u8; 32]) -> String {
     let mut s = String::with_capacity(64);
@@ -65,11 +70,12 @@ fn now_ms() -> u64 {
 fn ingest(node: &mut Node, kind: &str, title: String, addrs: &[[u8; 32]], extra: &str) {
     let height = node.height;
     let ts = now_ms();
-    let Some(h) = node.history.as_mut() else { return };
     let addr_str: Vec<String> = addrs.iter().map(hexs).collect();
     let content = format!("block {height} {} {}", addr_str.join(" "), extra);
+    let cid = cid_of(&content); // blake3 content-address
+    let Some(h) = node.history.as_mut() else { return };
     let mut entry = flux_history::HistoryEntry::new(kind, addr_str.first().cloned().unwrap_or_default(), title, content, ts)
-        .with_tag("height", &height.to_string());
+        .with_tag("height", &height.to_string()).with_tag("cid", &cid);
     for a in &addr_str { entry = entry.with_tag("addr", a); }
     let _ = h.append(entry);
 }
@@ -245,9 +251,10 @@ fn backfill_blocks(history: &mut flux_history::HistoryStore) {
         let h = b.get("h").and_then(|x| x.as_u64()).unwrap_or(0);
         let hash = b.get("hash").and_then(|x| x.as_str()).unwrap_or("");
         let prod = b.get("prod").and_then(|x| x.as_str()).unwrap_or("?");
-        let entry = flux_history::HistoryEntry::new("block", prod, format!("Block #{h}"),
-            format!("block {h} hash {hash} producer {prod}"), now_ms())
-            .with_tag("height", &h.to_string()).with_tag("hash", hash).with_tag("kind", "block");
+        let content = format!("block {h} hash {hash} producer {prod}");
+        let cid = cid_of(&content); // blake3 content-address
+        let entry = flux_history::HistoryEntry::new("block", prod, format!("Block #{h}"), content, now_ms())
+            .with_tag("height", &h.to_string()).with_tag("hash", hash).with_tag("kind", "block").with_tag("cid", &cid);
         if history.append(entry).is_ok() { n += 1; }
     }
     let _ = history.append(flux_history::HistoryEntry::new("_meta", "backfill", "backfill done",
@@ -364,12 +371,29 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
             entries.sort_by(|a, b| b.ts_ms.cmp(&a.ts_ms)); // newest first
             entries.truncate(limit.max(1));
             let items: Vec<String> = entries.iter().map(|e| format!(
-                "{{\"title\":{},\"content\":{},\"kind\":{},\"ts\":{},\"h\":{},\"hash\":{},\"prod\":{}}}",
+                "{{\"title\":{},\"content\":{},\"kind\":{},\"ts\":{},\"h\":{},\"hash\":{},\"prod\":{},\"cid\":{}}}",
                 js(&e.title), js(&e.content), js(&e.kind), e.ts_ms,
                 e.tags.get("height").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0),
                 js(e.tags.get("hash").map(|s| s.as_str()).unwrap_or("")),
-                js(&e.source))).collect();
+                js(&e.source), js(e.tags.get("cid").map(|s| s.as_str()).unwrap_or("")))).collect();
             ok(format!("{{\"ok\":true,\"kind\":{},\"count\":{},\"results\":[{}]}}", js(kind), items.len(), items.join(",")))
+        }
+        // Content-addressed retrieve: /aether?cid=<blake3>. The record's bytes live in
+        // flux-db (flux-history); we look it up by its cid tag and VERIFY blake3(content)==cid
+        // (verify-don't-trust — the address is the hash, so a tampered record is detectable).
+        ("GET", "/aether") => {
+            let cid = query_get(query, "cid").unwrap_or("").trim().to_string();
+            let js = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into());
+            let n = node.read().unwrap();
+            let found = n.history.as_ref().and_then(|h| h.by_tag("cid", &cid).ok()).and_then(|v| v.into_iter().next());
+            match found {
+                Some(e) => {
+                    let verified = cid_of(&e.content) == cid;
+                    ok(format!("{{\"ok\":true,\"cid\":{},\"found\":true,\"verified\":{},\"title\":{},\"content\":{}}}",
+                        js(&cid), verified, js(&e.title), js(&e.content)))
+                }
+                None => ok(format!("{{\"ok\":true,\"cid\":{},\"found\":false}}", js(&cid))),
+            }
         }
         ("GET", "/balance") => {
             let w = query_get(query, "wallet").and_then(hex32);

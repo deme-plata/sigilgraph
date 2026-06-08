@@ -75,10 +75,10 @@ impl P2PBlockSync {
                 let mut net = flux_p2p::NetworkManager::for_sigil("top");
 
                 if let Err(e) = net.start().await {
-                    eprintln!("[p2p-sync] start failed: {e}");
+                    crate::tlog!("[p2p-sync] start failed: {e}");
                     return;
                 }
-                eprintln!("[p2p-sync] started on sigil-g0 mesh (port 9501)");
+                crate::tlog!("[p2p-sync] started on sigil-g0 mesh (port 9501)");
 
                 {
                     let mut s = state_clone.lock().unwrap();
@@ -95,7 +95,7 @@ impl P2PBlockSync {
                 });
                 let mut bf = Backfill::open(&store_dir, "sigil-g0").ok();
                 if bf.is_none() {
-                    eprintln!("[p2p-sync] flux_p2p::backfill store unavailable — backfill disabled");
+                    crate::tlog!("[p2p-sync] flux_p2p::backfill store unavailable — backfill disabled");
                 }
 
                 // Subscribe to blocks — event-driven, no polling
@@ -114,7 +114,7 @@ impl P2PBlockSync {
                         if let Ok(msg) = serde_json::from_slice::<SyncMsg>(&data) {
                             match msg {
                                 SyncMsg::Block { height, hash_hex, header_json } => {
-                                    eprintln!("[p2p-sync] block rx: h={height}");
+                                    crate::tlog!("[p2p-sync] block rx: h={height}");
                                     // Content-address the block so we can later SERVE it as
                                     // backfill + advertise it in our manifest.
                                     if let Some(b) = &mut bf {
@@ -169,7 +169,7 @@ impl P2PBlockSync {
                             if let BackfillMsg::Blob { root, blob_hex } = &bf_msg {
                                 let applied = bf.as_ref().and_then(|b| b.on_blob(root, blob_hex));
                                 match applied {
-                                    None => eprintln!(
+                                    None => crate::tlog!(
                                         "[p2p-sync] rejected tampered/absent blob root={}",
                                         &root[..root.len().min(12)]
                                     ),
@@ -198,7 +198,7 @@ impl P2PBlockSync {
                                                 if let Some(block) = store.get_block(&hash_hex) {
                                                     new_blocks_clone.lock().unwrap().push(block);
                                                 }
-                                                eprintln!("[p2p-sync] backfilled h={height} via flux_p2p::backfill (verified)");
+                                                crate::tlog!("[p2p-sync] backfilled h={height} via flux_p2p::backfill (verified)");
                                             }
                                         }
                                     }
@@ -224,7 +224,7 @@ impl P2PBlockSync {
                                 if addr.contains("89.149.241.126") {
                                     s.connected_epsilon = true;
                                 }
-                                eprintln!("[p2p-sync] peer + {peer_id} @ {addr} (total: {pc})");
+                                crate::tlog!("[p2p-sync] peer + {peer_id} @ {addr} (total: {pc})");
                             }
                             flux_p2p::SwarmAppEvent::PeerDisconnected { .. } => {
                                 let pc = net.peer_count();
@@ -244,7 +244,7 @@ impl P2PBlockSync {
                                 if peer_best_height > s.peer_best_height {
                                     s.peer_best_height = peer_best_height;
                                 }
-                                eprintln!("[p2p-sync] progress h={height} peer_best={peer_best_height} total={total_synced}");
+                                crate::tlog!("[p2p-sync] progress h={height} peer_best={peer_best_height} total={total_synced}");
                             }
                             _ => {}
                         }

@@ -211,7 +211,13 @@ body.view-desktop .desktop{display:flex}
 
   // ── wallet gate: need a derived address (set by enter-sigil.html) or onboard ──
   const ADDR=(()=>{try{return localStorage.getItem('sigil-wallet-address')}catch(e){return null}})();
-  if(!ADDR){ location.replace('enter-sigil.html'); }
+  // Onboard redirect WITH a loop-guard: only bounce to enter-sigil ONCE per tab
+  // session. If we somehow land here again with no address (pathological / storage
+  // blocked), DON'T redirect again — never ping-pong the browser into a loop.
+  if(!ADDR){
+    const n = +(sessionStorage.getItem('sigil-onboard-bounces')||0);
+    if(n < 1){ sessionStorage.setItem('sigil-onboard-bounces', n+1); location.replace('enter-sigil.html'); }
+  } else { sessionStorage.removeItem('sigil-onboard-bounces'); }
   const SHORT=ADDR?(ADDR.slice(0,8)+'…'+ADDR.slice(-6)):'';
   // Same-origin /api — when served by the sigil-top node (http://localhost:9800),
   // the node proxies /api/v1/* to the SIGIL node (real balance, no CORS/mixed-content).

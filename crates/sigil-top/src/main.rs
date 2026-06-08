@@ -1338,8 +1338,8 @@ struct App {
     p2p_sync: Option<block_sync::P2PBlockSync>,
     p2p_state: block_sync::P2PSyncState,
     p2p_blocks_synced: u64,
-    p2p_rate: f64,                            // backfill blocks/sec (cumulative avg)
-    p2p_first_at: Option<std::time::Instant>, // when p2p sync first started (for the avg)
+    p2p_rate: f64,                            // backfill blocks/sec (10s trailing window = current speed)
+    p2p_rate_samples: std::collections::VecDeque<(std::time::Instant, u64)>, // (t, blocks_synced)
     // v0.7.0: AI fleet monitoring — AIs worry about their nodes' uptime and version compliance
     fleet_nodes: Vec<FleetNode>,
     fleet_last_check: Instant,
@@ -1383,7 +1383,7 @@ impl App {
               p2p_state: block_sync::P2PSyncState::default(),
               p2p_blocks_synced: 0,
               p2p_rate: 0.0,
-              p2p_first_at: None,
+              p2p_rate_samples: std::collections::VecDeque::new(),
               serve_status: String::new(),
               serve_stop: None,
               // v0.7.0: Fleet starts with known bootstrap peers
@@ -1763,15 +1763,24 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             // v0.6.5: Poll P2P sync state + drain synced blocks into the TUI block list
             if let Some(ref p2p) = app.p2p_sync {
                 app.p2p_state = p2p.poll_state();
-                // Backfill rate (blocks/s) = cumulative average (blocks fetched this
-                // session ÷ uptime). Stable + matches the ⬇fetched count, unlike a
-                // bursty windowed sample (chunks land in lumps).
-                if app.p2p_state.running && app.p2p_first_at.is_none() {
-                    app.p2p_first_at = Some(std::time::Instant::now());
+                // Backfill rate (blocks/s) = 10s TRAILING window — the CURRENT speed, not
+                // a lifetime average. A cumulative avg decayed after the catch-up burst
+                // (huge start → ~production rate → looked like it was "slowing to 19/s").
+                // The 10s window absorbs the per-cycle chunk bursts yet tracks real speed.
+                let now = std::time::Instant::now();
+                app.p2p_rate_samples.push_back((now, app.p2p_state.blocks_synced));
+                while app.p2p_rate_samples.len() > 1
+                    && now.duration_since(app.p2p_rate_samples[0].0).as_secs_f64() > 10.0
+                {
+                    app.p2p_rate_samples.pop_front();
                 }
-                if let Some(t0) = app.p2p_first_at {
-                    let el = t0.elapsed().as_secs_f64().max(1.0);
-                    app.p2p_rate = app.p2p_state.blocks_synced as f64 / el;
+                if let (Some(&(t0, b0)), Some(&(t1, b1))) =
+                    (app.p2p_rate_samples.front(), app.p2p_rate_samples.back())
+                {
+                    let dt = t1.duration_since(t0).as_secs_f64();
+                    if dt >= 1.0 {
+                        app.p2p_rate = b1.saturating_sub(b0) as f64 / dt;
+                    }
                 }
                 for block in p2p.drain_new_blocks() {
                     app.p2p_blocks_synced += 1;

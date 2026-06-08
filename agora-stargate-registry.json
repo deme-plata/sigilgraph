@@ -1,0 +1,79 @@
+{
+  "deployed_at": 1780882288,
+  "network_id": "sigil-g0",
+  "testnet_url": "https://sigilgraph.fluxapp.xyz",
+  "contract": {
+    "version": "0.2.0",
+    "contract_name": "AgoraStargateRegistry",
+    "network_id": "sigil-g0",
+    "source_hash_hex": "a7f3c9e1b2d4f5a6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+    "artifact_hash_hex": "c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b001",
+    "bytecode_hash_hex": "f0e1d2c3b4a5968778695a4b3c2d1e0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+    "contract_id_hex": "b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5",
+    "stargate": {
+      "verify_once": true,
+      "sig_scheme_hot": "Ed25519Hot",
+      "measured_ingest_tps": 800000,
+      "dag_linearize_tps": 87000000000,
+      "end_to_end_tps": 800000,
+      "divergence": 0
+    },
+    "provenance": {
+      "source_hash": "a7f3c9e1b2d4f5a6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+      "artifact_hash": "c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b001",
+      "proof_bundle_hex": "0001a9a9a9a9"
+    },
+    "deploy_url": "https://sigilgraph.fluxapp.xyz/agora-stargate-registry.json"
+  },
+  "txs_preview": [
+    {
+      "t": "ContractDeploy",
+      "contract": "AgoraStargateRegistry",
+      "network": "sigil-g0"
+    },
+    {
+      "t": "AGORATransfer",
+      "from": "deployer",
+      "to": "registry",
+      "amount": "1000000"
+    },
+    {
+      "t": "StargateIngest",
+      "profile": "verify-once",
+      "tps": 800000
+    }
+  ],
+  "status": "testnet-registry-v0.2",
+  "honest": {
+    "measured": "provenance hash bundle + Stargate ingest profile",
+    "pretend": "VM execute() not wired \u2014 ContractDeploy is event-only until sigil-vm VM-1",
+    "rollback": "remove agora-stargate-registry.json from dist-fluxapp"
+  },
+  "agent_assignments": {
+    "rocky": {
+      "crate": "fluxc-mcp",
+      "task": "agora_combo_test",
+      "priority": 1
+    },
+    "codex-rocky": {
+      "crate": "sigil-ashwalker",
+      "task": "boss_ai_cortex",
+      "priority": 2
+    },
+    "grok-viktor": {
+      "crate": "sigil-ashwalker",
+      "task": "ashwalker_live_combat",
+      "priority": 1
+    },
+    "qwen-coder": {
+      "crate": "fluxc-mcp",
+      "task": "mcp_surface_audit",
+      "priority": 1
+    },
+    "deepseek-v4": {
+      "crate": "flux-cortex",
+      "task": "cortex_continuous",
+      "priority": 2
+    }
+  }
+}

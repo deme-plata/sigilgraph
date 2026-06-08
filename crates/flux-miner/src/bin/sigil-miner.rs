@@ -395,6 +395,14 @@ fn main() -> anyhow::Result<()> {
     eprintln!("  node:   {url}");
     eprintln!("  keys:   q quit · u update-now · g toggle GPU/CPU    flags: --headless --gpu --gpu-selftest --no-update\n");
 
+    // Startup ping → the node sees exactly which version + requested mode is running
+    // (removes "is the user on the new build?" ambiguity when debugging GPU remotely).
+    {
+        let gpu_feat = cfg!(feature = "gpu");
+        let os = if cfg!(windows) { "windows" } else { "linux" };
+        report_diag(&url, &format!("START os={os} mode={mode} use_gpu={use_gpu} gpu_feature={gpu_feat}"));
+    }
+
     let stats = Arc::new(Mutex::new(Stats::default()));
     stats.lock().unwrap().mode = mode.into();
     let stop = Arc::new(AtomicBool::new(false));

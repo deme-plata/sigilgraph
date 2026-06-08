@@ -1,0 +1,3 @@
+GPU: cpu-skylake-avx512-Intel(R) Xeon(R) Gold 5118 CPU @ 2.30GHz
+✓ KAT passed — kernel == pow.rs (R=7 ≡ BLAKE3, R=3)
+✓ SEARCH ok — GPU mining works (found nonce 124672)

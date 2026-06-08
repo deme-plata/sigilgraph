@@ -790,6 +790,24 @@ fn main() {
             return;
         }
         Some("logout") => { clear_session(); println!("\n  {DIM}logged out — session cleared{RESET}\n"); return; }
+        // Headless wallet server: start the embedded :9800 server (wallet + /api proxy)
+        // and block — no TUI. Same server the [W] shortcut opens. Ctrl-C to stop.
+        Some("serve") => {
+            let serve_dir = std::env::var("FLUX_STATIC_DIR")
+                .unwrap_or_else(|_| "/home/orobit/q-narwhalknight/dist-fluxapp".into());
+            let port: u16 = argv.iter().position(|a| a == "--port")
+                .and_then(|i| argv.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(9800);
+            match serve::start(&serve_dir, port) {
+                Ok(_stop) => {
+                    let node = std::env::var("SIGIL_NODE_URL")
+                        .unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:8099".into());
+                    println!("\n  sigil-top serve → http://localhost:{port}/  (wallet at /, /api → {node})");
+                    println!("  embedded out-of-the-box — no dist dir needed. Ctrl-C to stop.\n");
+                    loop { std::thread::sleep(Duration::from_secs(3600)); }
+                }
+                Err(e) => { eprintln!("  serve failed: {e}"); std::process::exit(1); }
+            }
+        }
         // Headless miner (same engine [M] drives): mine N shares to the node, print each. Scriptable.
         Some("mine") => {
             let n: u64 = argv.get(1).and_then(|s| s.parse().ok()).unwrap_or(3);

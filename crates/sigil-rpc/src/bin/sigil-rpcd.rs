@@ -127,16 +127,14 @@ fn trader(i: u8) -> WalletId {
 // drives sigil-rpcd unchanged. Operator-tunable via env.
 const MINING_BLAKE4_BITS: u32 = 16; // BLAKE4 target = u64::MAX >> bits (Lane A)
 const MINING_VDF_T: u64 = 600; // sequential VDF squarings per share (Lane B)
-const MINING_REWARD: u128 = 50; // NATIVE coinbase per accepted share (cap-enforced)
+// Coinbase reward follows the sigil-emission halving schedule (block_reward(height)),
+// NOT a flat constant — see /mining/submit.
 
 fn mining_bits() -> u32 {
     std::env::var("SIGIL_MINING_BLAKE4_BITS").ok().and_then(|s| s.parse().ok()).unwrap_or(MINING_BLAKE4_BITS)
 }
 fn mining_vdf_t() -> u64 {
     std::env::var("SIGIL_MINING_VDF_T").ok().and_then(|s| s.parse().ok()).unwrap_or(MINING_VDF_T)
-}
-fn mining_reward() -> u128 {
-    std::env::var("SIGIL_MINING_REWARD").ok().and_then(|s| s.parse().ok()).unwrap_or(MINING_REWARD)
 }
 /// BLAKE4 Lane-A target for a difficulty `bits`: target = u64::MAX >> bits.
 fn target_from_bits(bits: u32) -> u64 { u64::MAX >> bits.min(63) }
@@ -665,8 +663,11 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
             if !check_submission(&g, &c, &sub) {
                 return reject("dual-lane verify / header mismatch (wrong tip, target, or VDF)".into());
             }
-            // Verified on the current tip — credit through the cap-enforced chokepoint.
-            match credit_share(&mut n.state, h, miner, mining_reward()) {
+            // Verified on the current tip — credit the HALVING block reward (sigil-emission
+            // schedule, fix: was a flat 50) through the cap-enforced chokepoint. Schedule +
+            // 21M cap are two independent guards; block_reward(h) follows the 21M curve.
+            let reward = sigil_emission::block_reward(h);
+            match credit_share(&mut n.state, h, miner, reward) {
                 Ok(bal) => {
                     // Advance the tip: fold this block in so the NEXT challenge is fresh.
                     // fix #3 (VDF-chaining): fold the VDF OUTPUT (commit to the proof) into
@@ -685,7 +686,7 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
                     n.tip_hash = *hh.finalize().as_bytes();
                     n.height += 1;
                     retarget(&mut n); // fix #2: adjust BLAKE4 difficulty from real block times
-                    ingest(&mut n, "mine", format!("dual-lane mine reward {} SIGIL", mining_reward()), &[miner], "dual-lane blake4+vdf");
+                    ingest(&mut n, "mine", format!("dual-lane mine reward {} (height {h}, halving schedule)", reward), &[miner], "dual-lane blake4+vdf");
                     ok(format!("{{\"accepted\":true,\"reason\":null,\"new_balance\":{}}}", bal))
                 }
                 Err(e) => reject(e.to_string()),

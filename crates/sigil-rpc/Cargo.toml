@@ -15,6 +15,7 @@ sigil-state = { path = "../sigil-state" }
 sigil-dex   = { path = "../sigil-dex" }
 sigil-bank  = { path = "../sigil-bank" }
 sigil-oauth = { path = "../sigil-oauth" }
+sigil-emission = { path = "../sigil-emission" } # halving block-reward schedule (→21M)
 
 # Dual-lane mining gate for the sigil-rpcd /api/v1/mining/{challenge,submit}
 # endpoints. default-features = false keeps the keystone reqwest/market-free —

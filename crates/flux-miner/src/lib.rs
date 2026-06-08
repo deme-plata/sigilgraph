@@ -15,6 +15,10 @@ use flux_vdf::{eval, verify, VdfGroup, VdfProof};
 pub mod client;
 /// BLAKE4 — the parameterized-round PoW hash (R=7 ≡ BLAKE3, R<7 = the speed lever).
 pub mod pow;
+/// CPU/GPU hybrid mining — OpenCL BLAKE4 Lane-A search (ported from the QUG
+/// q-miner). Gated: needs the `gpu` feature + an OpenCL runtime (a GPU box).
+#[cfg(feature = "gpu")]
+pub mod gpu;
 /// The light ECONOMIC node (price + arb + DCA) — needs flux-market + flux-fold.
 #[cfg(feature = "market")]
 pub mod light;

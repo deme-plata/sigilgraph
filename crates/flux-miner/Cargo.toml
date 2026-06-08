@@ -28,6 +28,9 @@ tiny_http  = { version = "0.12", optional = true }
 # sigil-top uses so the workspace resolves one ratatui.
 ratatui    = { version = "0.28", optional = true }
 crossterm  = { version = "0.28", optional = true }
+# GPU Lane-A (BLAKE4) search — ported from the QUG q-miner. OpenCL first (most
+# portable); CUDA/Vulkan are follow-ons. Needs an OpenCL runtime → off by default.
+opencl3    = { version = "0.9", optional = true }
 
 [features]
 # Default = the full miner (all bins build with a plain `fluxc build`). A NODE
@@ -38,6 +41,7 @@ client  = ["dep:reqwest"]                         # MinerClient + updater (HTTP)
 market  = ["dep:flux-market", "dep:flux-fold"]    # the light economic node
 node    = ["dep:tiny_http"]                       # reference mining node + roundtrip test
 tui     = ["dep:ratatui", "dep:crossterm"]        # sigil-miner terminal dashboard
+gpu     = ["dep:opencl3"]                          # OpenCL BLAKE4 Lane-A (needs a GPU box) — NOT in default
 
 [[bin]]
 name = "flux-miner"

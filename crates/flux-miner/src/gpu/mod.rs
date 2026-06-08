@@ -119,18 +119,65 @@ pub struct GpuBlake4 {
 }
 
 impl GpuBlake4 {
-    /// Initialise the first GPU + build the kernels.
+    /// Initialise the first GPU + build the kernels, with a STEP-BY-STEP trace so
+    /// any failure names the exact OpenCL call + error (and the NVIDIA build log
+    /// for kernel-build failures). The full trace is written to `sigil-gpu-init.log`
+    /// and, on failure, returned in the error.
     pub fn new() -> anyhow::Result<Self> {
+        let mut t = String::from("[sigil-gpu init trace]\n");
+        macro_rules! step {
+            ($($a:tt)*) => {{ t.push_str(&format!($($a)*)); t.push('\n'); }};
+        }
+        let fail = |t: &str, what: &str| -> anyhow::Error {
+            let _ = std::fs::write("sigil-gpu-init.log", t);
+            anyhow::anyhow!("{}{}", t, what)
+        };
+
+        let platforms = match get_platforms() {
+            Ok(p) => p,
+            Err(e) => return Err(fail(&t, &format!("get_platforms FAILED: {e}"))),
+        };
+        step!("platforms found: {}", platforms.len());
+        for p in &platforms {
+            step!("  - {}", p.name().unwrap_or_else(|_| "?".into()));
+        }
         let ids = pick_device_ids();
-        let id = *ids.first().ok_or_else(|| anyhow::anyhow!("no OpenCL device found"))?;
+        step!("devices picked (GPU-first/any): {}", ids.len());
+        let id = match ids.first() {
+            Some(id) => *id,
+            None => return Err(fail(&t, "no OpenCL device found")),
+        };
         let device = Device::new(id);
         let device_name = device.name().unwrap_or_else(|_| "unknown".into());
-        let context = Context::from_device(&device)?;
-        let queue = CommandQueue::create_default(&context, 0)?;
-        let program = Program::create_and_build_from_source(&context, KERNEL_SRC, "")
-            .map_err(|e| anyhow::anyhow!("kernel build failed: {e}"))?;
-        let kernel = Kernel::create(&program, KERNEL_NAME)?;
-        let words_kernel = Kernel::create(&program, WORDS_KERNEL_NAME)?;
+        step!("device: {device_name}");
+        let context = match Context::from_device(&device) {
+            Ok(c) => c,
+            Err(e) => return Err(fail(&t, &format!("clCreateContext FAILED: {e}"))),
+        };
+        step!("context: ok");
+        let queue = match CommandQueue::create_default(&context, 0) {
+            Ok(q) => q,
+            Err(e) => return Err(fail(&t, &format!("create_command_queue FAILED: {e}"))),
+        };
+        step!("queue: ok");
+        let program = match Program::create_and_build_from_source(&context, KERNEL_SRC, "") {
+            Ok(p) => p,
+            Err(buildlog) => {
+                return Err(fail(&t, &format!("clBuildProgram FAILED — NVIDIA build log:\n{buildlog}")))
+            }
+        };
+        step!("program: built");
+        let kernel = match Kernel::create(&program, KERNEL_NAME) {
+            Ok(k) => k,
+            Err(e) => return Err(fail(&t, &format!("clCreateKernel({KERNEL_NAME}) FAILED: {e}"))),
+        };
+        let words_kernel = match Kernel::create(&program, WORDS_KERNEL_NAME) {
+            Ok(k) => k,
+            Err(e) => return Err(fail(&t, &format!("clCreateKernel({WORDS_KERNEL_NAME}) FAILED: {e}"))),
+        };
+        step!("kernels: ok");
+        step!("GPU INIT OK → {device_name}");
+        let _ = std::fs::write("sigil-gpu-init.log", &t); // success trace too
         Ok(Self { context, queue, kernel, words_kernel, device_name })
     }
 

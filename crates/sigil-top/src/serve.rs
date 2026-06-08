@@ -14,11 +14,14 @@ use std::time::Duration;
 
 /// Start the embedded server on 127.0.0.1:port, serving static_dir.
 /// Returns a shutdown signal (set to true to stop the server).
+///
+/// OUT-OF-THE-BOX: the static dir does NOT need to exist. On a user's own machine
+/// (who just downloaded sigil-top) there is no `dist-fluxapp` — but the wallet +
+/// vite-engine are compiled INTO the binary (`include_str!`), so `serve_file` falls
+/// through to the embedded copies. We bind regardless; the dir is just an optional
+/// overlay for richer assets when present (e.g. on a server with the full dist).
 pub fn start(static_dir: &str, port: u16) -> Result<Arc<AtomicBool>, String> {
-    let dir = PathBuf::from(static_dir);
-    if !dir.is_dir() {
-        return Err(format!("static dir not found: {static_dir}"));
-    }
+    let dir = PathBuf::from(static_dir); // may not exist — embedded wallet still serves
     let listener =
         TcpListener::bind(format!("127.0.0.1:{port}")).map_err(|e| format!("bind :{port}: {e}"))?;
     listener
@@ -65,7 +68,23 @@ fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf) {
     let _method = parts.next().unwrap_or("GET");
     let path = parts.next().unwrap_or("/");
 
-    // Decode URL
+    // /api/* → proxy to the SIGIL node (the "flux protocol" data path). The wallet,
+    // served from http://localhost:9800, hits same-origin /api/v1/... → we relay it
+    // to the node over std TCP. No CORS, no https→http mixed-content. Default node is
+    // the public sigil-rpcd; override with SIGIL_NODE_URL to point at a LOCAL node.
+    if path.starts_with("/api/") {
+        let (status, body, ct) = proxy_api(path);
+        let resp = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(resp.as_bytes());
+        let _ = stream.write_all(&body);
+        let _ = stream.flush();
+        return;
+    }
+
+    // Decode URL (static files)
     let path = path.split('?').next().unwrap_or(path);
     let path = if path == "/" { "/sigil-wallet-tron.html" } else { path };
     let safe = path.trim_start_matches('/').replace("..", "").replace('\\', "");
@@ -114,6 +133,54 @@ fn serve_file(dir: &PathBuf, safe: &str) -> (&'static str, Vec<u8>, &'static str
     }
 
     ("404 Not Found", b"404 Not Found\n".to_vec(), "text/plain")
+}
+
+/// Proxy a `GET /api/...` to the SIGIL node over std TCP and relay its JSON body.
+/// Node = `SIGIL_NODE_URL` env (point at a LOCAL node), else the public sigil-rpcd.
+/// The node speaks plain HTTP, so this works from the http://localhost wallet with
+/// no CORS / mixed-content issues. sigil-rpcd strips `/api/v1` itself.
+fn proxy_api(path_and_query: &str) -> (&'static str, Vec<u8>, &'static str) {
+    let node = std::env::var("SIGIL_NODE_URL")
+        .unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:8099".into());
+    let hostport = node
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    let hostport = hostport.split('/').next().unwrap_or(hostport);
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(8099)),
+        None => (hostport.to_string(), 8099),
+    };
+
+    let mut stream = match std::net::TcpStream::connect((host.as_str(), port)) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                "502 Bad Gateway",
+                format!("{{\"error\":\"node unreachable: {e}\"}}").into_bytes(),
+                "application/json",
+            )
+        }
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(6)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(6)));
+    let req = format!(
+        "GET {path_and_query} HTTP/1.1\r\nHost: {host}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(req.as_bytes()).is_err() {
+        return (
+            "502 Bad Gateway",
+            b"{\"error\":\"node write failed\"}".to_vec(),
+            "application/json",
+        );
+    }
+    let mut raw = Vec::new();
+    let _ = stream.read_to_end(&mut raw);
+    // split off the HTTP headers; relay the body (sigil-rpcd sends Content-Length + close)
+    let body = match raw.windows(4).position(|w| w == b"\r\n\r\n") {
+        Some(i) => raw[i + 4..].to_vec(),
+        None => raw,
+    };
+    ("200 OK", body, "application/json")
 }
 
 fn content_type(path: &str) -> &'static str {

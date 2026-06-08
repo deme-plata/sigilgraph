@@ -200,27 +200,67 @@ body.view-desktop .desktop{display:flex}
 
 <div class="caption">SIGIL Wallet · <b>cyan grid</b> · <b>⤢ expand → fullscreen</b></div>
 <script>
-  function setView(v){document.body.classList.toggle('view-desktop',v==='desktop');try{localStorage.setItem('sigil-view',v)}catch(e){}countUp(v==='desktop'?'damt':'amt');}
+  function setView(v){document.body.classList.toggle('view-desktop',v==='desktop');try{localStorage.setItem('sigil-view',v)}catch(e){}render();}
   if(location.search.includes('desktop')||(()=>{try{return localStorage.getItem('sigil-view')}catch(e){return null}})()==='desktop')document.body.classList.add('view-desktop');
-  const ASSETS=[['◈','SIGIL','native · grid','9,840.0','+5.1%','up','linear-gradient(135deg,#21d4fd,#1ba1e2)','#04080c'],
-    ['Q','QUG','bridged','3,142.2','+1.8%','up','linear-gradient(135deg,#8b5cf6,#5b21b6)','#fff'],
-    ['$','USDS','stablecoin','1,200.0','0.0%','','linear-gradient(135deg,#00e0c6,#0a7c70)','#04080c'],
-    ['₿','wBTC','wrapped','0.0084','−0.6%','dn','linear-gradient(135deg,#ff9d4d,#c2410c)','#04080c']];
-  const rows=ASSETS.map(a=>`<div class="row"><div class="coin" style="background:${a[6]};color:${a[7]}">${a[0]}</div><div><div class="nm">${a[1]}</div><div class="tk">${a[2]}</div></div><div class="rt"><div class="bal">${a[3]}</div><div class="chg ${a[5]}">${a[4]}</div></div></div>`).join('');
-  document.getElementById('passets').innerHTML=rows;document.getElementById('dassets').innerHTML=rows;
-  const target=14302.84;
-  function countUp(id){const el=document.getElementById(id);if(!el)return;let t0=null;
-    function tick(t){if(!t0)t0=t;const p=Math.min(1,(t-t0)/1100);const v=target*(1-Math.pow(1-p,3));
-      el.innerHTML=v.toLocaleString('en-US',{maximumFractionDigits:0})+'<small>.'+String(Math.round((v%1)*100)).padStart(2,'0')+' SIGIL</small>';
-      if(p<1)requestAnimationFrame(tick);else el.innerHTML='14,302<small>.84 SIGIL</small>';}
-    requestAnimationFrame(tick);}
-  ['amt','damt'].forEach(countUp);
+
+  // ── wallet gate: need a derived address (set by enter-sigil.html) or onboard ──
+  const ADDR=(()=>{try{return localStorage.getItem('sigil-wallet-address')}catch(e){return null}})();
+  if(!ADDR){ location.replace('enter-sigil.html'); }
+  const SHORT=ADDR?(ADDR.slice(0,8)+'…'+ADDR.slice(-6)):'';
+  // Same-origin /api — when served by the sigil-top node (http://localhost:9800),
+  // the node proxies /api/v1/* to the SIGIL node (real balance, no CORS/mixed-content).
+  // Served elsewhere it just 502s → fresh wallet stays 0 (graceful).
+  const NODE='';
+  let SIGIL_BAL=0;            // a freshly-derived wallet starts empty
+
+  function copyAddr(){ if(ADDR&&navigator.clipboard){navigator.clipboard.writeText(ADDR);} }
+  window.copyAddr=copyAddr;
+
+  function fmtAmt(v){return v.toLocaleString('en-US',{maximumFractionDigits:0})+'<small>.'+String(Math.round((v%1)*100)).padStart(2,'0')+' SIGIL</small>';}
+  function assetRows(){
+    const a=['◈','SIGIL','native · grid',SIGIL_BAL.toLocaleString('en-US',{maximumFractionDigits:2}),SIGIL_BAL>0?'':'fresh','','linear-gradient(135deg,#21d4fd,#1ba1e2)','#04080c'];
+    return `<div class="row"><div class="coin" style="background:${a[6]};color:${a[7]}">${a[0]}</div><div><div class="nm">${a[1]}</div><div class="tk">${a[2]}</div></div><div class="rt"><div class="bal">${a[3]}</div><div class="chg">${a[4]}</div></div></div>`;
+  }
+
+  function render(){
+    const pa=document.getElementById('passets'); if(pa) pa.innerHTML=assetRows();
+    const da=document.getElementById('dassets'); if(da) da.innerHTML=assetRows();
+    document.querySelectorAll('#amt,#damt').forEach(el=>el.innerHTML=fmtAmt(SIGIL_BAL));
+    // phone balance sub → the user's real address (copyable) + fresh badge
+    const sub=document.querySelector('.balance .sub');
+    if(sub) sub.innerHTML='wallet <b data-addr style="cursor:pointer" title="click to copy: '+ADDR+'" onclick="copyAddr()">'+SHORT+'</b>'+(SIGIL_BAL>0?'':' · <span style="color:var(--teal)">fresh wallet</span>');
+    // desktop gbar pill + sidecard + portfolio
+    document.querySelectorAll('.pill b').forEach(el=>el.textContent=SIGIL_BAL.toLocaleString('en-US'));
+    const sc=document.querySelector('.sidecard .amtbig'); if(sc) sc.textContent='$'+(SIGIL_BAL*1.3).toLocaleString('en-US',{maximumFractionDigits:0});
+    const scd=document.querySelector('.sidecard .d'); if(scd) scd.innerHTML=SIGIL_BAL.toLocaleString('en-US',{maximumFractionDigits:2})+' SIGIL · '+SHORT;
+    // address chip in the desktop top bar (replace the static net text once)
+    const net=document.querySelector('.desktop .net'); if(net) net.innerHTML='◈ '+SHORT+' <span style="opacity:.6;cursor:pointer" onclick="copyAddr()">⧉</span>';
+    // fresh wallet → no activity yet
+    document.querySelectorAll('.card .act-item').forEach((el,i)=>{ if(SIGIL_BAL===0) el.style.display='none'; });
+  }
+
+  // best-effort live balance (works once an HTTPS node route exists; until then a
+  // fresh wallet correctly shows 0). Node returns {ok,balance} or {data:{balance}}.
+  async function refresh(){
+    if(!ADDR) return;
+    try{
+      const r=await fetch(NODE+'/api/v1/balance?wallet='+ADDR,{cache:'no-store'});
+      const j=await r.json();
+      const b=(j&&(j.balance!=null?j.balance:(j.data&&j.data.balance)));
+      if(b!=null){ SIGIL_BAL=Number(b); render(); }
+    }catch(e){ /* offline / no route → stays fresh 0 */ }
+  }
+
   const RATE=0.92,FEE=0.003,MAX=3142;
   function swapCalc(q){q=+q;const out=q*RATE*(1-FEE);
     document.getElementById('swIn').textContent=q.toLocaleString('en-US');
     document.getElementById('swOut').innerHTML=out.toLocaleString('en-US',{maximumFractionDigits:2})+' <span style="font-size:16px;color:var(--dim)">SIGIL</span>';
     document.getElementById('swGo').textContent='⇄ SWAP '+q.toLocaleString('en-US')+' QUG';
     document.getElementById('swR').style.setProperty('--p',(q/MAX*100)+'%');}
+  window.setView=setView; window.swapCalc=swapCalc;
+
+  render();
+  refresh();
 </script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
 <script>if(window.lucide)lucide.createIcons();</script>

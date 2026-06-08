@@ -160,15 +160,52 @@ either one failing rejects the share.
 
 ---
 
+## 7½. BLAKE4 is now a real primitive — `flux_miner::pow`
+
+As of 2026-06-08 BLAKE4 is no longer "an alias for `blake3::hash`." The module
+`flux-miner/src/pow.rs` implements the BLAKE3 compression **from scratch with the
+round count as a parameter** (`blake4_rounds(input, R)`, `blake4_word(header,
+nonce, R)`):
+
+- **R = 7 (`FULL_ROUNDS`) is byte-identical to BLAKE3** — proven by a
+  known-answer test against the `blake3` crate (`pow::tests::
+  r7_is_byte_identical_to_blake3`, plus a check that the word extractor matches
+  the legacy `blake4()`). This is the soundness anchor: reduced-round variants are
+  *the same function with fewer rounds*, not a different hash.
+- **R < 7 is the real speed lever.** Measured (scalar reference impl, 48 cores,
+  `examples/blake4_rounds.rs`):
+
+  | R | hashrate | ×R=7 | |
+  |---|---|---|---|
+  | 7 | 4.97 MH/s | 0.95× | BLAKE3, KAT-verified (sound anchor) |
+  | 5 | 6.47 MH/s | 1.24× | reduced |
+  | 3 | 9.44 MH/s | 1.81× | reduced |
+  | 1 | 15.22 MH/s | 2.92× | reduced |
+
+  Roughly linear in rounds, as expected (each round is ~equal work).
+
+- **Crypto-agility, no consensus break.** `BLAKE4_ROUNDS` stays at `FULL_ROUNDS`
+  (= BLAKE3) so the live PoW path is unchanged. Promoting a reduced `R` is a
+  deliberate, gated consensus decision once a round count is shown to keep enough
+  preimage margin.
+
+Two **independent** speed levers compose: **fewer rounds** (this module) **×
+SIMD batching** (the blake3 crate already gets ~31× via AVX-512; the scalar
+numbers above are the per-round curve, not the deployable ceiling). The deployed
+hash would be SIMD × a validated R.
+
 ## 8. Honest checklist — what's still pretend
 
 - **BLAKE4-turbo is a ceiling, not a product.** The 12.9 GH/s number is an
-  *invertible* mix used only to measure the headroom. The deployable hash is
-  BLAKE4-sound (full BLAKE3, 155 MH/s). Don't quote turbo as a real rate.
-- **The reduced-round sound BLAKE4** that would capture the 83× lever is still
-  research, not shipped. Today's `blake4()` is literally full BLAKE3.
-- **GPU is not wired.** All measured rates are CPU. GPU is the obvious next lever
-  for the Φ lane.
+  *invertible* mix used only to measure the headroom. Don't quote turbo as a
+  real rate.
+- **No reduced-round `R` is deployed yet.** The primitive + curve exist and are
+  validated; choosing the safe `R` needs a diffusion / preimage-margin analysis
+  (avalanche, reduced-round attack survey) before `BLAKE4_ROUNDS` moves off 7.
+- **`pow.rs` is scalar.** The per-round curve is honest but un-SIMD'd; the
+  deployable rate is SIMD (blake3-crate-class) × the chosen R. SIMD is the
+  flux-cortex/flux-optimize lever.
+- **GPU is not wired.** All rates are CPU. GPU is the next lever for the Φ lane.
 - **VDF absolute rate is num-bigint-limited.** `flux-vdf` uses pure-Rust bigints,
   slower than a GMP / genus-2 Jacobian implementation. The *sequential character*
   (no speedup from cores) is the real result; the absolute mΩ is not the ceiling.

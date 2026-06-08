@@ -173,9 +173,47 @@ pub fn production_survives(serve_rate: u64, followers: u64, gossip: bool, budget
     producer_serve_load(serve_rate, followers, gossip) <= budget
 }
 
+/// Models recovery of a node that receives peer-height BEACONS but NO live gossip
+/// blocks — the "block-mesh isolated" failure seen live: after a producer restart a
+/// node stays connected (peers>0) yet never re-grafts into the block topic, so it
+/// gets no blocks. Backfill only runs if a request is TRIGGERED. The live-block
+/// trigger needs a live block (none arrive) → the node sits idle and the gap grows
+/// by `production_per_s` forever. The peer-heights trigger fires from the height
+/// beacon (which still arrives), so the node backfills and — if serve_rate exceeds
+/// production — closes the gap. Returns (caught_up, final_gap) over a 600s horizon.
+pub fn isolated_recovery(
+    gap: u64,
+    production_per_s: u64,
+    serve_rate: u64,
+    peer_heights_trigger: bool,
+) -> (bool, u64) {
+    let horizon_s = 600u64;
+    if !peer_heights_trigger {
+        return (false, gap + production_per_s * horizon_s);
+    }
+    if serve_rate <= production_per_s {
+        return (false, gap + (production_per_s - serve_rate) * horizon_s);
+    }
+    let net = serve_rate - production_per_s;
+    let secs_to_close = gap / net.max(1);
+    (secs_to_close <= horizon_s, 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_heights_trigger_recovers_a_block_mesh_isolated_node() {
+        let (live_only, gap_live) = isolated_recovery(10_000, 250, 4096, false);
+        let (beacon, gap_beacon) = isolated_recovery(10_000, 250, 4096, true);
+        println!("live-block trigger only: caught_up={live_only}, final_gap={gap_live}");
+        println!("peer-heights trigger:    caught_up={beacon}, final_gap={gap_beacon}");
+        assert!(!live_only, "live-block-only trigger leaves an isolated node stuck");
+        assert!(gap_live > 10_000, "isolated node's gap must grow without a beacon trigger");
+        assert!(beacon, "peer-heights trigger must recover a block-mesh-isolated node");
+        assert_eq!(gap_beacon, 0);
+    }
 
     #[test]
     fn gossip_floods_the_producer_but_request_response_does_not() {

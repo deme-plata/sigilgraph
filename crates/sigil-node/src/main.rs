@@ -513,6 +513,7 @@ fn run_start() -> Result<()> {
                             "ts":       ts,
                             "peers":    sum.peer_count,
                             "started":  sum.started,
+                            "height":   chain.height(),
                         });
                         let bytes = serde_json::to_vec(&hb).unwrap_or_default();
                         if let Err(e) = mgr.publish(TOPIC_PEER_HEIGHTS, bytes) {
@@ -716,6 +717,42 @@ fn run_start() -> Result<()> {
                                     }
                                     Err(e) => {
                                         eprintln!("🔴 RELEASE from {} apply error: {}", from, e);
+                                    }
+                                }
+                            } else if topic == TOPIC_PEER_HEIGHTS {
+                                // Self-healing backfill trigger: a peer announces its chain
+                                // height here. If it's ahead of us we proactively pull the
+                                // gap — even if we receive NO live blocks (e.g. not grafted
+                                // into the block-gossip mesh after a restart/rejoin). This is
+                                // what makes a connected-but-idle node recover on its own.
+                                if diverged { continue; }
+                                let peer_h = serde_json::from_slice::<serde_json::Value>(&data)
+                                    .ok()
+                                    .and_then(|v| v.get("height").and_then(|x| x.as_u64()))
+                                    .unwrap_or(0);
+                                let expected = chain.height();
+                                if peer_h > expected
+                                    && last_req.elapsed() >= std::time::Duration::from_millis(300)
+                                {
+                                    last_req = std::time::Instant::now();
+                                    if let Some(peer) = mgr.connected_peers().into_iter().next() {
+                                        let req = BackfillReq {
+                                            from: expected,
+                                            to: expected.saturating_add(8192),
+                                        };
+                                        eprintln!("⇪ rr-backfill: behind via peer-heights (have {}, net {}) — requesting [{}..={}]",
+                                            expected, peer_h, req.from, req.to);
+                                        let mgr2 = std::sync::Arc::clone(&mgr);
+                                        let bf_tx2 = bf_tx.clone();
+                                        tokio::spawn(async move {
+                                            if let Ok(payload) = serde_json::to_vec(&req) {
+                                                if let Ok(bytes) = mgr2.send_request(peer, payload).await {
+                                                    if let Ok(resp) = serde_json::from_slice::<BackfillResp>(&bytes) {
+                                                        let _ = bf_tx2.send(resp.blocks).await;
+                                                    }
+                                                }
+                                            }
+                                        });
                                     }
                                 }
                             } else {

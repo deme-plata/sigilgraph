@@ -153,9 +153,41 @@ pub fn tune(gap: u64, production_per_s: u64, followers: u64) -> Option<CatchupRe
     best
 }
 
+/// The producer's serialization load (blk/s) from SERVING backfill, by transport.
+/// GOSSIP re-broadcasts each served block on the shared topic, so EVERY node (incl.
+/// the producer's own echo) deserializes it → load ≈ serve_rate × (followers+1).
+/// REQUEST-RESPONSE serves point-to-point to the one requester → load ≈ serve_rate.
+/// If this exceeds the producer's processing budget, block production starves.
+pub fn producer_serve_load(serve_rate: u64, followers: u64, gossip: bool) -> u64 {
+    if gossip {
+        serve_rate * (followers + 1)
+    } else {
+        serve_rate
+    }
+}
+
+/// True if the producer keeps producing while serving backfill under `mode`.
+/// Budget = blocks/s the producer can deserialize before the mint loop starves
+/// (empirically ~5000/s for small empty blocks on the live box).
+pub fn production_survives(serve_rate: u64, followers: u64, gossip: bool, budget: u64) -> bool {
+    producer_serve_load(serve_rate, followers, gossip) <= budget
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gossip_floods_the_producer_but_request_response_does_not() {
+        // The tuned config serves ~4096 blk/s to close 10k at 1200/s for 3 nodes.
+        let serve = 4096;
+        let budget = 5000; // producer's deserialize headroom before mint starves
+        let gossip = producer_serve_load(serve, 3, true);
+        let rr = producer_serve_load(serve, 3, false);
+        println!("producer serve load — gossip: {} blk/s, request-response: {} blk/s (budget {})", gossip, rr, budget);
+        assert!(!production_survives(serve, 3, true, budget), "gossip MUST flood past budget (= prod collapse we saw live)");
+        assert!(production_survives(serve, 3, false, budget), "request-response MUST stay within budget");
+    }
 
     #[test]
     fn the_5s_drain_can_never_catch_up_at_1200() {

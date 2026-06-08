@@ -29,12 +29,21 @@ use crate::block::Block;
 use crate::chain::ChainTip;
 use crate::cli::Cli;
 
-/// Backfill request multiplexed on TOPIC_BLOCKS (distinct field names so it never
-/// deserializes as a `Block`). A holder serves it by re-broadcasting the range.
+/// Point-to-point backfill request, sent over the flux-p2p request-response
+/// channel (NOT gossipsub). The serving node answers a single requester with a
+/// `BackfillResp` — no flood re-broadcast. Wire format is shared with the
+/// sigil-top client; do not change these shapes.
 #[derive(serde::Serialize, serde::Deserialize)]
-struct SyncReq {
-    sync_from: u64,
-    sync_to: u64,
+struct BackfillReq {
+    from: u64,
+    to: u64,
+}
+
+/// Point-to-point backfill response: the requested block range serialized as
+/// JSON values (each element = `serde_json::to_value(&Block)`).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BackfillResp {
+    blocks: Vec<serde_json::Value>,
 }
 
 const SCHEMA_VERSION: u16 = HEADER_VERSION;
@@ -150,6 +159,11 @@ fn run_start() -> Result<()> {
         mgr.start()
             .await
             .map_err(|e| anyhow!("flux-p2p start: {}", e))?;
+        // NetworkManager is not Clone; share it across the async select loop and
+        // the spawned point-to-point backfill request tasks via Arc. All of
+        // publish/summary/drain_events/respond/stop/send_request take &self, so
+        // the Arc is sufficient (start() above ran while still owned mutable).
+        let mgr = std::sync::Arc::new(mgr);
         eprintln!("✓ flux-p2p NetworkManager started on :{}", cfg.p2p_port);
         eprintln!("  subscribed topics: {}", ALL_TOPICS.len());
 
@@ -358,24 +372,29 @@ fn run_start() -> Result<()> {
         let t_start = std::time::Instant::now();
         // ── genesis backfill (closes the Phase-0 "joins mid-stream, gaps forever" gap) ──
         // Out-of-order / future blocks are buffered by height and applied contiguously
-        // as the tip advances; on a gap we ask peers (over TOPIC_BLOCKS, multiplexed)
-        // to RE-BROADCAST the missing range, which any holder serves from its chain.
+        // as the tip advances; on a gap we ask ONE connected peer over the flux-p2p
+        // request-response channel (point-to-point, no flood) for the missing range.
+        // The peer answers from its chain with a BackfillResp; we feed the blocks
+        // back into `pending` via `bf_rx` (the request is awaited off the select loop
+        // in a spawned task so it never blocks production/drain).
         let mut pending: std::collections::BTreeMap<u64, crate::block::Block> = std::collections::BTreeMap::new();
-        let mut last_syncreq = std::time::Instant::now()
+        let (bf_tx, mut bf_rx) = tokio::sync::mpsc::channel::<Vec<serde_json::Value>>(64);
+        // Throttle gap requests so a sustained gap doesn't spawn a request task on
+        // every received future block (fire at most every ~300ms).
+        let mut last_req = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(10)).unwrap_or_else(std::time::Instant::now);
         let mut backfilled: u64 = 0;
         let mut last_snapshot = std::time::Instant::now();
-        // Backfill-serve rate limit: a peer stuck on an incompatible genesis (or many
-        // joiners) can spam SyncReq; serving re-broadcasts blocks (O(chunk)) and at
-        // full tilt starves block production. Cap serving to one chunk per interval.
-        let mut last_serve = std::time::Instant::now()
-            .checked_sub(std::time::Duration::from_secs(10)).unwrap_or_else(std::time::Instant::now);
         if produce {
             eprintln!("🏭 PRODUCER mode — target {:.0} blocks/s ({}µs tick, feed every {}) on {}",
                 1_000_000.0 / produce_us as f64, produce_us, feed_every, sigil_net::TOPIC_BLOCKS);
         }
 
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+        // Drain every 250ms (chronos-tuned) so request-response serving + apply stay
+        // responsive and spread out. Safe now that backfill is point-to-point (no
+        // gossip re-broadcast flood); heartbeat is gated to 5s below.
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+        let mut last_heartbeat = std::time::Instant::now();
         loop {
             tokio::select! {
                 _ = produce_tick.tick(), if produce => {
@@ -480,30 +499,58 @@ fn run_start() -> Result<()> {
                     return Ok::<(), anyhow::Error>(());
                 }
                 _ = tick.tick() => {
-                    let sum = mgr.summary();
-                    let ts = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0);
-                    let hb = serde_json::json!({
-                        "node":     node_id,
-                        "network":  NETWORK_ID_STR,
-                        "ts":       ts,
-                        "peers":    sum.peer_count,
-                        "started":  sum.started,
-                    });
-                    let bytes = serde_json::to_vec(&hb).unwrap_or_default();
-                    if let Err(e) = mgr.publish(TOPIC_PEER_HEIGHTS, bytes) {
-                        eprintln!("⚠ publish peer-heights failed: {}", e);
+                    // Heartbeat + peer-height publish stays on a 5s cadence.
+                    if last_heartbeat.elapsed() >= std::time::Duration::from_secs(5) {
+                        last_heartbeat = std::time::Instant::now();
+                        let sum = mgr.summary();
+                        let ts = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0);
+                        let hb = serde_json::json!({
+                            "node":     node_id,
+                            "network":  NETWORK_ID_STR,
+                            "ts":       ts,
+                            "peers":    sum.peer_count,
+                            "started":  sum.started,
+                        });
+                        let bytes = serde_json::to_vec(&hb).unwrap_or_default();
+                        if let Err(e) = mgr.publish(TOPIC_PEER_HEIGHTS, bytes) {
+                            eprintln!("⚠ publish peer-heights failed: {}", e);
+                        }
+                        eprintln!("⚡ heartbeat — peers={} started={}", sum.peer_count, sum.started);
                     }
-                    eprintln!("⚡ heartbeat — peers={} started={}", sum.peer_count, sum.started);
 
-                    // Drain incoming gossipsub messages from peers.
+                    // Drain incoming events from peers (every 250ms): live block gossip on
+                    // TOPIC_BLOCKS + point-to-point backfill requests (InboundRequest).
                     for ev in mgr.drain_events() {
-                        if let flux_p2p::SwarmAppEvent::GossipsubMessage {
+                        match ev {
+                        flux_p2p::SwarmAppEvent::InboundRequest { peer, request_id, payload } => {
+                            // Point-to-point backfill serve: answer ONE requester with
+                            // the requested block range straight from our chain. No
+                            // gossipsub re-broadcast — the response goes only to `peer`.
+                            let req: BackfillReq = match serde_json::from_slice(&payload) {
+                                Ok(r) => r,
+                                Err(_) => continue,
+                            };
+                            let blks = chain.blocks();
+                            let top = chain.height().saturating_sub(1);
+                            let lo = req.from;
+                            // point-to-point ⇒ a bigger chunk is fine.
+                            let hi = req.to.min(top).min(lo.saturating_add(1024));
+                            let resp = BackfillResp {
+                                blocks: (lo..=hi)
+                                    .filter_map(|h| blks.get(h as usize))
+                                    .map(|b| serde_json::to_value(b).unwrap())
+                                    .collect(),
+                            };
+                            eprintln!("↩ rr-backfill: served {} blocks [{}..={}] to {}",
+                                resp.blocks.len(), lo, hi, peer);
+                            mgr.respond(request_id, serde_json::to_vec(&resp).unwrap_or_default());
+                        }
+                        flux_p2p::SwarmAppEvent::GossipsubMessage {
                             topic, from, data, ..
-                        } = ev
-                        {
+                        } => {
                             if topic == sigil_net::TOPIC_BLOCKS {
                                 // Receiver: COUNT every block that arrives (the
                                 // cross-host throughput number), then apply in
@@ -513,39 +560,13 @@ fn run_start() -> Result<()> {
                                 // halt). We ONLY halt on a TRUE root-divergence
                                 // at the CORRECT height.
                                 if diverged { continue; }
-                                // Parse a block; if it isn't one, it may be a backfill
-                                // request multiplexed on this topic — serve it.
+                                // TOPIC_BLOCKS now carries ONLY live blocks; backfill
+                                // moved to the point-to-point request-response channel
+                                // (see the InboundRequest arm + the gap-request task).
+                                // Anything that isn't a block is ignored here.
                                 let block: crate::block::Block = match serde_json::from_slice(&data) {
                                     Ok(b) => b,
-                                    Err(_) => {
-                                        // Rate-limit serving so backfill can't starve production
-                                        // (≤1 chunk per 250ms ≈ ≤2k blocks/s served).
-                                        if last_serve.elapsed() < std::time::Duration::from_millis(250) {
-                                            continue;
-                                        }
-                                        if let Ok(req) = serde_json::from_slice::<SyncReq>(&data) {
-                                            last_serve = std::time::Instant::now();
-                                            let blks = chain.blocks();
-                                            let top = chain.height().saturating_sub(1);
-                                            let lo = req.sync_from;
-                                            let hi = req.sync_to.min(top).min(lo.saturating_add(512));
-                                            let mut served = 0u32;
-                                            let mut hh = lo;
-                                            while hh <= hi {
-                                                if let Some(b) = blks.get(hh as usize) {
-                                                    if let Ok(by) = serde_json::to_vec(b) {
-                                                        let _ = mgr.publish(sigil_net::TOPIC_BLOCKS, by);
-                                                        served += 1;
-                                                    }
-                                                }
-                                                hh += 1;
-                                            }
-                                            if served > 0 {
-                                                eprintln!("↩ backfill: served {} blocks [{}..={}] to a peer", served, lo, hi);
-                                            }
-                                        }
-                                        continue;
-                                    }
+                                    Err(_) => continue,
                                 };
                                 received += 1;
                                 if dag_mode {
@@ -565,18 +586,34 @@ fn run_start() -> Result<()> {
                                     continue; // already applied
                                 }
                                 if h > expected {
-                                    // Future block: buffer it, and ask peers to re-broadcast
-                                    // the missing range so we can apply genesis→tip in order.
+                                    // Future block: buffer it, then ask ONE connected
+                                    // peer point-to-point (request-response) for the
+                                    // missing range. send_request is async + awaits, so
+                                    // we spawn it off the select loop and feed the answer
+                                    // back through bf_rx — never blocking production/drain.
                                     if pending.len() < 200_000 {
                                         pending.entry(h).or_insert(block);
                                     }
-                                    if last_syncreq.elapsed() >= std::time::Duration::from_millis(200) {
-                                        last_syncreq = std::time::Instant::now();
-                                        let to = h.min(expected.saturating_add(2000));
-                                        if let Ok(by) = serde_json::to_vec(&SyncReq { sync_from: expected, sync_to: to }) {
-                                            let _ = mgr.publish(sigil_net::TOPIC_BLOCKS, by);
+                                    if last_req.elapsed() >= std::time::Duration::from_millis(300) {
+                                        last_req = std::time::Instant::now();
+                                        if let Some(peer) = mgr.connected_peers().into_iter().next() {
+                                            let req = BackfillReq { from: expected, to: expected.saturating_add(1024) };
+                                            eprintln!("⇪ rr-backfill: gap (have {}, saw {}) — requesting [{}..={}] from {}",
+                                                expected, h, req.from, req.to, peer);
+                                            let mgr2 = std::sync::Arc::clone(&mgr);
+                                            let bf_tx2 = bf_tx.clone();
+                                            tokio::spawn(async move {
+                                                let payload = match serde_json::to_vec(&req) {
+                                                    Ok(p) => p,
+                                                    Err(_) => return,
+                                                };
+                                                if let Ok(bytes) = mgr2.send_request(peer, payload).await {
+                                                    if let Ok(resp) = serde_json::from_slice::<BackfillResp>(&bytes) {
+                                                        let _ = bf_tx2.send(resp.blocks).await;
+                                                    }
+                                                }
+                                            });
                                         }
-                                        eprintln!("⇪ backfill: gap (have {}, saw {}) — requested [{}..={}]", expected, h, expected, to);
                                     }
                                     continue;
                                 }
@@ -686,6 +723,53 @@ fn run_start() -> Result<()> {
                                     .map(|s| s.chars().take(120).collect::<String>())
                                     .unwrap_or_else(|_| format!("<{} bytes>", data.len()));
                                 eprintln!("📨 {} from {} — {}", topic, from, preview);
+                            }
+                        }
+                        _ => {}
+                        }
+                    }
+                }
+                Some(vals) = bf_rx.recv() => {
+                    // Point-to-point backfill response arrived: buffer each block by
+                    // height, then drain `pending` contiguously into the chain via the
+                    // same apply path the live-block branch uses.
+                    if !diverged {
+                        for v in vals {
+                            if let Ok(block) = serde_json::from_value::<crate::block::Block>(v) {
+                                let h = block.header.height;
+                                if h >= chain.height() {
+                                    pending.entry(h).or_insert(block);
+                                }
+                            }
+                        }
+                        // Apply every contiguous block we now have, starting at the tip.
+                        while let Some(b) = pending.remove(&chain.height()) {
+                            let bh = b.header.height;
+                            match chain.apply(b) {
+                                Ok(_) => {
+                                    applied += 1;
+                                    backfilled += 1;
+                                    if applied % 100 == 0 {
+                                        let secs = t_start.elapsed().as_secs_f64().max(1e-6);
+                                        eprintln!("✓ applied {} blocks ({:.1}/s) — recv {} — backfilled {} — tip H={} — buffered {}",
+                                            applied, applied as f64 / secs, received, backfilled, chain.height(), pending.len());
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("🔴 STATE DIVERGENCE at H={} (rr-backfill) — {}", bh, e);
+                                    diverged = true;
+                                    fire_chain_event(
+                                        "divergence",
+                                        &serde_json::json!({
+                                            "node": node_id,
+                                            "height": bh,
+                                            "from": "rr-backfill",
+                                            "error": format!("{e}"),
+                                            "exit_code": 78,
+                                        }),
+                                    );
+                                    break;
+                                }
                             }
                         }
                     }

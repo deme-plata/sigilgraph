@@ -121,23 +121,33 @@ struct Stats {
     solve_hist: VecDeque<u64>, // recent solve ms (sparkline)
     log: VecDeque<String>,     // recent share lines (newest first)
     update_msg: Option<String>, // auto-updater status line
+    mode: String,              // live mining mode ("CPU" / "GPU"), owned by the supervisor
 }
 
 /// Auto-update loop (default-ON, sigil-top model): ~30 s after launch then every
 /// 4 h, poll the pinned-channel manifest; if a newer version is promoted, stage
 /// `<exe>.new` (swapped in on next launch by `swap_on_launch`). Surfaces status
 /// to the TUI footer. Opt out with `--no-update`.
-fn update_loop(stats: Arc<Mutex<Stats>>, stop: Arc<AtomicBool>) {
+fn update_loop(stats: Arc<Mutex<Stats>>, stop: Arc<AtomicBool>, update_now: Arc<AtomicBool>) {
     let mut first = true;
     loop {
         let wait = if first { 30 } else { 4 * 3600 };
-        for _ in 0..wait {
+        let mut waited = 0;
+        loop {
             if stop.load(Ordering::Relaxed) {
                 return;
             }
+            if update_now.swap(false, Ordering::Relaxed) {
+                break; // manual 'u' trigger
+            }
             thread::sleep(Duration::from_secs(1));
+            waited += 1;
+            if waited >= wait {
+                break;
+            }
         }
         first = false;
+        stats.lock().unwrap().update_msg = Some(format!("checking for update (v{VERSION})…"));
         match flux_miner::updater::check(&manifest_url(), VERSION) {
             Some(info) => {
                 let msg = match flux_miner::updater::stage(&info.url) {
@@ -150,6 +160,56 @@ fn update_loop(stats: Arc<Mutex<Stats>>, stop: Arc<AtomicBool>) {
                 stats.lock().unwrap().update_msg = Some(format!("✓ up to date (v{VERSION})"));
             }
         }
+    }
+}
+
+/// Mining supervisor: owns the worker thread's lifecycle so the engine can be
+/// hot-switched at runtime (the `g` key flips `desired_gpu`). When the desired
+/// mode changes it signals the current worker to stop and starts the other, and
+/// writes the live mode into Stats so the TUI badge reflects reality.
+fn supervisor(
+    url: String,
+    wallet: String,
+    stats: Arc<Mutex<Stats>>,
+    stop: Arc<AtomicBool>,
+    desired_gpu: Arc<AtomicBool>,
+) {
+    let mut cur: Option<bool> = None;
+    let mut wstop = Arc::new(AtomicBool::new(false));
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            wstop.store(true, Ordering::Relaxed);
+            return;
+        }
+        let mut want = desired_gpu.load(Ordering::Relaxed);
+        if want && !cfg!(feature = "gpu") {
+            // CPU-only build: can't switch to GPU — revert + tell the operator.
+            want = false;
+            desired_gpu.store(false, Ordering::Relaxed);
+            push_log(
+                &mut stats.lock().unwrap().log,
+                "⚠ GPU not in this build — rebuild with --features gpu".into(),
+            );
+        }
+        if cur != Some(want) {
+            wstop.store(true, Ordering::Relaxed); // stop the previous worker
+            wstop = Arc::new(AtomicBool::new(false));
+            cur = Some(want);
+            {
+                let m = if want { "GPU" } else { "CPU" };
+                let mut s = stats.lock().unwrap();
+                s.mode = m.into();
+                push_log(&mut s.log, format!("⚙ mining engine → {m}"));
+            }
+            let (u, w, st, ws) = (url.clone(), wallet.clone(), stats.clone(), wstop.clone());
+            if want {
+                #[cfg(feature = "gpu")]
+                thread::spawn(move || gpu_mining_loop(u, w, st, ws));
+            } else {
+                thread::spawn(move || mining_loop(u, w, st, ws));
+            }
+        }
+        thread::sleep(Duration::from_millis(200));
     }
 }
 
@@ -281,41 +341,37 @@ fn main() -> anyhow::Result<()> {
     eprintln!("\n  ⛏  SIGIL MINER v{VERSION} — dual-lane (BLAKE4 Φ + VDF Ω)  ·  MODE: {mode}");
     eprintln!("  wallet: {wallet}  ({wsource})");
     eprintln!("  node:   {url}");
-    eprintln!("  flags:  --headless · --gpu · --gpu-list · --gpu-selftest · --no-update\n");
+    eprintln!("  keys:   q quit · u update-now · g toggle GPU/CPU    flags: --headless --gpu --gpu-selftest --no-update\n");
 
     let stats = Arc::new(Mutex::new(Stats::default()));
+    stats.lock().unwrap().mode = mode.into();
     let stop = Arc::new(AtomicBool::new(false));
+    let desired_gpu = Arc::new(AtomicBool::new(use_gpu && cfg!(feature = "gpu")));
+    let update_now = Arc::new(AtomicBool::new(false));
+
+    // mining supervisor — owns the worker; hot-switches CPU↔GPU on the `g` key
     {
-        let (s, st, u, w) = (stats.clone(), stop.clone(), url.clone(), wallet.clone());
-        if use_gpu {
-            #[cfg(feature = "gpu")]
-            thread::spawn(move || gpu_mining_loop(u, w, s, st));
-            #[cfg(not(feature = "gpu"))]
-            {
-                eprintln!("  --gpu ignored: built without the `gpu` feature — mining on CPU");
-                thread::spawn(move || mining_loop(u, w, s, st));
-            }
-        } else {
-            thread::spawn(move || mining_loop(u, w, s, st));
-        }
+        let (u, w, s, st, dg) =
+            (url.clone(), wallet.clone(), stats.clone(), stop.clone(), desired_gpu.clone());
+        thread::spawn(move || supervisor(u, w, s, st, dg));
     }
 
-    // auto-updater (default ON; pass --no-update to skip)
+    // auto-updater (default ON; --no-update to skip; `u` triggers an immediate check)
     if !args.iter().any(|a| a == "--no-update") {
-        let (s, st) = (stats.clone(), stop.clone());
-        thread::spawn(move || update_loop(s, st));
+        let (s, st, un) = (stats.clone(), stop.clone(), update_now.clone());
+        thread::spawn(move || update_loop(s, st, un));
     }
 
     if headless {
-        run_headless(&stats, &stop, mode)
+        run_headless(&stats, &stop)
     } else {
-        run_tui(&stats, &stop, &url, &wallet, mode)
+        run_tui(&stats, &stop, &url, &wallet, &desired_gpu, &update_now)
     }
 }
 
 /// Plain-output fallback (no TTY / CI / `--headless`).
-fn run_headless(stats: &Arc<Mutex<Stats>>, stop: &Arc<AtomicBool>, mode: &str) -> anyhow::Result<()> {
-    println!("  ⛏  SIGIL MINER v{VERSION} [{mode}] — dual-lane (BLAKE4 Φ + VDF Ω) — headless\n");
+fn run_headless(stats: &Arc<Mutex<Stats>>, stop: &Arc<AtomicBool>) -> anyhow::Result<()> {
+    println!("  ⛏  SIGIL MINER v{VERSION} — dual-lane (BLAKE4 Φ + VDF Ω) — headless\n");
     let mut last_ok = 0u64;
     let mut last_update: Option<String> = None;
     loop {
@@ -331,7 +387,8 @@ fn run_headless(stats: &Arc<Mutex<Stats>>, stop: &Arc<AtomicBool>, mode: &str) -
             if s.shares_ok + s.shares_bad != last_ok {
                 last_ok = s.shares_ok + s.shares_bad;
                 println!(
-                    "  [{mode}] {line}   [✓{} ✗{}]  {} (Φ {})  bal {} SIGIL",
+                    "  [{}] {line}   [✓{} ✗{}]  {} (Φ {})  bal {} SIGIL",
+                    s.mode,
                     s.shares_ok,
                     s.shares_bad,
                     format_hps(s.hashrate),
@@ -347,7 +404,14 @@ fn run_headless(stats: &Arc<Mutex<Stats>>, stop: &Arc<AtomicBool>, mode: &str) -
     Ok(())
 }
 
-fn run_tui(stats: &Arc<Mutex<Stats>>, stop: &Arc<AtomicBool>, url: &str, wallet: &str, mode: &str) -> anyhow::Result<()> {
+fn run_tui(
+    stats: &Arc<Mutex<Stats>>,
+    stop: &Arc<AtomicBool>,
+    url: &str,
+    wallet: &str,
+    desired_gpu: &Arc<AtomicBool>,
+    update_now: &Arc<AtomicBool>,
+) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut out = io::stdout();
     execute!(out, EnterAlternateScreen)?;
@@ -356,12 +420,22 @@ fn run_tui(stats: &Arc<Mutex<Stats>>, stop: &Arc<AtomicBool>, url: &str, wallet:
 
     let res = (|| -> anyhow::Result<()> {
         loop {
-            term.draw(|f| draw(f, stats, url, wallet, mode, start))?;
+            term.draw(|f| draw(f, stats, url, wallet, start))?;
             if event::poll(Duration::from_millis(250))? {
                 if let Event::Key(k) = event::read()? {
                     match k.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
                         KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => break,
+                        // u — check for update now (stages on a newer promoted version)
+                        KeyCode::Char('u') | KeyCode::Char('U') => {
+                            update_now.store(true, Ordering::Relaxed);
+                            stats.lock().unwrap().update_msg = Some("checking for update…".into());
+                        }
+                        // g — toggle the mining engine GPU ↔ CPU (supervisor switches)
+                        KeyCode::Char('g') | KeyCode::Char('G') => {
+                            let now = desired_gpu.load(Ordering::Relaxed);
+                            desired_gpu.store(!now, Ordering::Relaxed);
+                        }
                         _ => {}
                     }
                 }
@@ -392,8 +466,9 @@ fn card(value: String, label: &str, color: Color) -> Paragraph<'static> {
     )
 }
 
-fn draw(f: &mut Frame, stats: &Arc<Mutex<Stats>>, url: &str, wallet: &str, mode: &str, start: Instant) {
+fn draw(f: &mut Frame, stats: &Arc<Mutex<Stats>>, url: &str, wallet: &str, start: Instant) {
     let s = stats.lock().unwrap();
+    let mode = s.mode.clone();
     let area = f.area();
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -516,8 +591,12 @@ fn draw(f: &mut Frame, stats: &Arc<Mutex<Stats>>, url: &str, wallet: &str, mode:
     let update = s.update_msg.clone().map(|u| format!("   {u}")).unwrap_or_default();
     let footer = Paragraph::new(Line::from(vec![
         Span::styled("  q ", Style::default().fg(VIOLET).add_modifier(Modifier::BOLD)),
-        Span::styled("quit", Style::default().fg(DIM)),
-        Span::styled(format!("   uptime {}m{:02}s", up / 60, up % 60), Style::default().fg(DIM)),
+        Span::styled("quit  ", Style::default().fg(DIM)),
+        Span::styled("u ", Style::default().fg(VIOLET).add_modifier(Modifier::BOLD)),
+        Span::styled("update  ", Style::default().fg(DIM)),
+        Span::styled("g ", Style::default().fg(VIOLET).add_modifier(Modifier::BOLD)),
+        Span::styled("GPU/CPU", Style::default().fg(DIM)),
+        Span::styled(format!("   {}m{:02}s", up / 60, up % 60), Style::default().fg(DIM)),
         Span::styled(update, Style::default().fg(GOLD)),
         Span::styled(err, Style::default().fg(RED)),
     ]));

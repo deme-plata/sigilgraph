@@ -694,18 +694,22 @@ fn gpu_selftest_and_exit() -> ! {
         // Accumulate the result so it's ALSO written to a file — a Windows
         // double-click flashes the window shut, so the file is how you read it.
         let (report, code) = match flux_miner::gpu::GpuBlake4::new() {
-            Ok(g) => match g.selftest() {
-                Ok(true) => (
-                    format!("GPU: {}\n✓ BLAKE4 GPU KAT passed — kernel == pow.rs (R=7 ≡ BLAKE3, R=3)\n", g.device_name),
-                    0,
-                ),
-                Ok(false) => (
-                    format!("GPU: {}\n✗ BLAKE4 GPU KAT FAILED — kernel disagrees with pow.rs\n", g.device_name),
-                    1,
-                ),
-                Err(e) => (format!("GPU: {}\ngpu selftest error: {e}\n", g.device_name), 1),
-            },
-            Err(e) => (format!("gpu init failed (build log below):\n{e}\n"), 1),
+            Ok(g) => {
+                let mut r = format!("GPU: {}\n", g.device_name);
+                let mut ok = true;
+                match g.selftest() {
+                    Ok(true) => r.push_str("✓ KAT passed — kernel == pow.rs (R=7 ≡ BLAKE3, R=3)\n"),
+                    Ok(false) => { r.push_str("✗ KAT FAILED — kernel disagrees with pow.rs\n"); ok = false; }
+                    Err(e) => { r.push_str(&format!("✗ KAT error: {e}\n")); ok = false; }
+                }
+                // THE mining path — names the exact failing OpenCL call if it fails.
+                match g.search_probe() {
+                    Ok(n) => r.push_str(&format!("✓ SEARCH ok — GPU mining works (found nonce {n})\n")),
+                    Err(e) => { r.push_str(&format!("✗ SEARCH FAILED: {e}\n")); ok = false; }
+                }
+                (r, if ok { 0 } else { 1 })
+            }
+            Err(e) => (format!("gpu init failed:\n{e}\n"), 1),
         };
         print!("  {report}");
         let _ = std::fs::write("sigil-gpu-selftest.txt", &report);

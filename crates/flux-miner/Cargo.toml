@@ -2,7 +2,7 @@
 name = "flux-miner"
 # Independent version (like sigil-top) so the miner auto-updates on its own
 # cadence — bump this per miner release so the updater can deliver it.
-version = "0.1.6"
+version = "0.1.7"
 edition.workspace = true
 license.workspace = true
 description = "The dual-lane Flux miner: BLAKE4 proof-of-work (the POWER lane, Φ) + a Wesolowski VDF (the TIME lane, Ω). A valid block carries BOTH — power can't fake time, time can't fake power. Chain-agnostic; copies Quillon's standalone miner+node, Flux-native."

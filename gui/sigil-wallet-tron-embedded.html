@@ -149,7 +149,7 @@ body.view-desktop .desktop{display:flex}
       <div class="snav">
         <a class="on"><i class="lic" data-lucide="layout-dashboard"></i>Dashboard</a>
         <a><i class="lic" data-lucide="wallet"></i>Assets</a>
-        <a><i class="lic" data-lucide="receipt-text"></i>Activity</a>
+        <a id="navActivity" target="_blank" rel="noopener"><i class="lic" data-lucide="receipt-text"></i>Activity</a>
         <div class="grp">Move</div>
         <a><i class="lic" data-lucide="arrow-up-from-dot"></i>Send</a>
         <a><i class="lic" data-lucide="arrow-down-to-dot"></i>Receive</a>
@@ -193,7 +193,7 @@ body.view-desktop .desktop{display:flex}
             <button class="go" id="swGo">⇄ SWAP 800 QUG</button>
           </div>
           <div class="card">
-            <div class="sect" style="margin-bottom:8px">Activity</div>
+            <div class="sect" style="margin-bottom:8px"><span>Activity</span><a id="cardExplorer" target="_blank" rel="noopener" style="color:var(--cyan);text-decoration:none;font-size:11px;border:1px solid var(--line);border-radius:999px;padding:3px 10px">🔍 explorer ↗</a></div>
             <div class="act-item"><div class="ai"><i class="lic" data-lucide="arrow-up-right"></i></div><div><div class="at">Sent</div><div class="as">to qnk…a91f · 2m</div></div><div class="av" style="color:var(--cyan)">−12.0</div></div>
             <div class="act-item"><div class="ai"><i class="lic" data-lucide="arrow-down-left" style="color:var(--teal)"></i></div><div><div class="at">Received</div><div class="as">from qnk…7e02 · 1h</div></div><div class="av" style="color:var(--teal)">+40.0</div></div>
             <div class="act-item"><div class="ai"><i class="lic" data-lucide="pickaxe"></i></div><div><div class="at">Mined</div><div class="as">block 18,740 · 3h</div></div><div class="av" style="color:var(--teal)">+5.0</div></div>
@@ -247,6 +247,9 @@ body.view-desktop .desktop{display:flex}
     const scd=document.querySelector('.sidecard .d'); if(scd) scd.innerHTML=SIGIL_BAL.toLocaleString('en-US',{maximumFractionDigits:2})+' SIGIL · '+SHORT;
     // address chip in the desktop top bar (replace the static net text once)
     const net=document.querySelector('.desktop .net'); if(net) net.innerHTML='◈ '+SHORT+' <span style="opacity:.6;cursor:pointer" onclick="copyAddr()">⧉</span>';
+    // Activity → the explorer (with search), pre-loaded with THIS wallet's address.
+    const exUrl='https://sigilgraph.fluxapp.xyz/explorer/?q='+encodeURIComponent(ADDR||'');
+    ['navActivity','cardExplorer'].forEach(id=>{const el=document.getElementById(id); if(el) el.href=exUrl;});
     // fresh wallet → no activity yet
     document.querySelectorAll('.card .act-item').forEach((el,i)=>{ if(SIGIL_BAL===0) el.style.display='none'; });
   }

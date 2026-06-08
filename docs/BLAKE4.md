@@ -194,7 +194,63 @@ SIMD batching** (the blake3 crate already gets ~31× via AVX-512; the scalar
 numbers above are the per-round curve, not the deployable ceiling). The deployed
 hash would be SIMD × a validated R.
 
+## 7¾. BLAKE4 on the GPU — Lane A → GPU (scaffold, 2026-06-08)
+
+The dual lanes map cleanly onto the two kinds of hardware, which is the third
+speed lever:
+
+```
+   Lane A — BLAKE4 (Φ, POWER)  → GPU   (millions of independent nonces in parallel)
+   Lane B — VDF    (Ω, TIME)   → CPU   (inherently sequential — a GPU cannot help)
+```
+
+So the GPU does exactly what it is good at (the embarrassingly-parallel nonce
+search) and the CPU does the one thing that *must* be sequential (the VDF).
+
+- **Kernel — `flux-miner/src/gpu/blake4.cl`.** One work-item per nonce; a
+  **byte-for-byte port of `pow::compress8`** (same IV, message schedule, G mix,
+  flags, single ≤64-byte block). It carries the same `rounds` parameter, so the
+  GPU has the identical round-count dial as the CPU.
+- **On-hardware KAT — `sigil-miner --gpu-selftest`.** Runs the kernel for 256
+  nonces at R=7 and R=3 and asserts every word equals the CPU `pow::blake4_word`.
+  ✓ means the OpenCL kernel is byte-correct on *that* GPU; only then is GPU mining
+  trustworthy. This is how a port is proven, not assumed.
+- **Hybrid mining — `sigil-miner --gpu`.** GPU `search()` finds a Lane-A nonce →
+  `flux_miner::block_for_nonce` runs the CPU VDF (Lane B) over it → submit. Uses
+  `FULL_ROUNDS` so shares pass the node's `verify_dual` (the live `blake4` ==
+  `pow` R=7); a reduced R needs a node-side promotion first.
+- **Gated.** Behind the `gpu` Cargo feature (default OFF → the normal build needs
+  no OpenCL). OpenCL is the first backend (most portable); CUDA / Vulkan (the QUG
+  q-miner has both) are follow-ons.
+- **Validate on:** any OpenCL GPU. First target = a Windows RTX 2060 — recipe in
+  [`SIGIL_MINER_GPU.md`](SIGIL_MINER_GPU.md).
+
+## 7⅞. Measured live — CPU miner on Epsilon (2026-06-08)
+
+`sigil-miner` (CPU, headless) against the live sigil-rpcd `:8099` node at the
+production difficulty (16 leading-zero bits, vdf_t 600): **48 dual-lane shares
+accepted, 0 rejected**, ~130 ms/share on one scalar thread, balance climbing
+50/share. End-to-end proof that the full loop — challenge → BLAKE4 nonce search →
+VDF → submit → cap-enforced credit — works on real binaries.
+
 ## 8. Honest checklist — what's still pretend
+
+- **BLAKE4-turbo is a ceiling, not a product.** The 12.9 GH/s number is an
+  *invertible* mix used only to measure the headroom. Don't quote turbo as a
+  real rate.
+- **No reduced-round `R` is deployed yet.** The primitive + curve exist and are
+  validated; choosing the safe `R` needs a diffusion / preimage-margin analysis
+  (avalanche, reduced-round attack survey) before `BLAKE4_ROUNDS` moves off 7.
+- **`pow.rs` is scalar.** The per-round curve is honest but un-SIMD'd; the
+  deployable rate is SIMD (blake3-crate-class) × the chosen R. SIMD is the
+  flux-cortex/flux-optimize lever.
+- **GPU is scaffolded, NOT yet validated.** The OpenCL kernel + `--gpu`/`--gpu-list`/
+  `--gpu-selftest` exist and the default build is green, but no `gpu`-feature code
+  has been compiled or run — Epsilon has no GPU. `--gpu-selftest` on a real GPU
+  (RTX 2060 next) is the gate before any GPU rate is quoted.
+- **VDF absolute rate is num-bigint-limited.** `flux-vdf` uses pure-Rust bigints,
+  slower than a GMP / genus-2 Jacobian implementation. The *sequential character*
+  (no speedup from cores) is the real result; the absolute mΩ is not the ceiling.
 
 - **BLAKE4-turbo is a ceiling, not a product.** The 12.9 GH/s number is an
   *invertible* mix used only to measure the headroom. Don't quote turbo as a
@@ -212,6 +268,9 @@ hash would be SIMD × a validated R.
 
 ---
 
-*Measured numbers from `project_flux_miner_blake4` (2026-05-31). Engine:
-`flux-miner` crate (sigil workspace). Unit definitions are LOCKED — don't
-re-derive Φ or Ω.*
+*Baseline measured numbers from `project_flux_miner_blake4` (2026-05-31); the real
+`pow` primitive, GPU scaffold, and live CPU run added 2026-06-08
+(`project_sigil_dual_lane_mining_wired`). Engine: `flux-miner` crate (sigil
+workspace) — `pow.rs` (CPU, parameterized rounds), `gpu/blake4.cl` (OpenCL),
+`sigil-miner` (TUI). Unit definitions are LOCKED — don't re-derive Φ or Ω. See
+also [`SIGIL_MINER_GPU.md`](SIGIL_MINER_GPU.md).*

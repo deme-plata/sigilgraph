@@ -7,12 +7,22 @@ use anyhow::{anyhow, Context, Result};
 use sigil_header::{BlockHash, SigilBlockHeaderV0};
 use sigil_state::{commit_state_transition, SigilState, StateRoots, StateTransition};
 
+use std::collections::VecDeque;
+
 use crate::block::Block;
 
-/// One node's view of the chain. Phase 0: linear, single-producer.
+/// Recent blocks kept in RAM. Older blocks are pruned from RAM and live on disk in
+/// the append-only [`crate::chain_log::ChainLog`] (served from there on backfill).
+/// This is what bounds producer memory so the chain can grow without OOM.
+pub const WINDOW: usize = 8192;
+
+/// One node's view of the chain. Phase 0: linear, single-producer. RAM holds only the
+/// last `WINDOW` blocks (a sliding window) + the current state; `base_height` is the
+/// height of the oldest in-RAM block, so `height()` stays correct after pruning.
 pub struct ChainTip {
     state: SigilState,
-    blocks: Vec<Block>,
+    blocks: VecDeque<Block>,
+    base_height: u64,
 }
 
 impl Default for ChainTip {
@@ -24,7 +34,7 @@ impl Default for ChainTip {
 impl ChainTip {
     /// Fresh chain — no genesis seeded yet.
     pub fn new() -> Self {
-        Self { state: SigilState::new(), blocks: Vec::new() }
+        Self { state: SigilState::new(), blocks: VecDeque::new(), base_height: 0 }
     }
 
     /// Read-only snapshot of the four state roots at the current tip.
@@ -34,24 +44,29 @@ impl ChainTip {
 
     /// Current chain height. `0` when no blocks have been applied.
     pub fn height(&self) -> u64 {
-        self.blocks.last().map(|b| b.header.height + 1).unwrap_or(0)
+        if self.blocks.is_empty() { 0 } else { self.base_height + self.blocks.len() as u64 }
     }
 
-    /// All blocks — for snapshotting to aether RS shards + replay (persistence).
-    pub fn blocks(&self) -> &[Block] {
-        &self.blocks
+    /// Block at `height` IF it is still in the in-RAM window; `None` for pruned
+    /// (older) heights, which the caller fetches from [`crate::chain_log::ChainLog`].
+    pub fn get(&self, height: u64) -> Option<&Block> {
+        if height < self.base_height { return None; }
+        self.blocks.get((height - self.base_height) as usize)
     }
+
+    /// Lowest height currently held in RAM (older blocks are on disk).
+    pub fn window_base(&self) -> u64 { self.base_height }
 
     /// Parent hash to set on the next block. All-zero before genesis is
     /// applied (genesis itself uses this as `parent_hash`).
     pub fn parent_hash(&self) -> BlockHash {
-        self.blocks.last().map(|b| b.hash()).unwrap_or([0u8; 32])
+        self.blocks.back().map(|b| b.hash()).unwrap_or([0u8; 32])
     }
 
     /// Hand-back of the tip header for callers building auto-update
     /// activation windows etc.
     pub fn tip_header(&self) -> Option<&SigilBlockHeaderV0> {
-        self.blocks.last().map(|b| &b.header)
+        self.blocks.back().map(|b| &b.header)
     }
 
     /// Snapshot of the current state, for use by block builders that need to
@@ -101,7 +116,11 @@ impl ChainTip {
             ));
         }
 
-        self.blocks.push(block);
+        self.blocks.push_back(block);
+        while self.blocks.len() > WINDOW {
+            self.blocks.pop_front();
+            self.base_height += 1;
+        }
         Ok(())
     }
 }

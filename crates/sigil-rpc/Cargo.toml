@@ -21,3 +21,6 @@ sigil-oauth = { path = "../sigil-oauth" }
 # we use ONLY the verification core (Challenge/Submission/check_submission).
 flux-vdf   = { workspace = true }
 flux-miner = { path = "../flux-miner", default-features = false }
+# flux-native explorer backend: flux-db (durable LSM) + flux-search (TF-IDF) via
+# flux-history — every tx is appended as a searchable HistoryEntry; /search queries it.
+flux-history = { path = "../../../flux/crates/flux-history" }

@@ -2,9 +2,9 @@
 <html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SIGIL Wallet</title>
-<link rel="icon" type="image/png" sizes="32x32" href="/icons/brand/favicon-32.png?v=1780639379">
-<link rel="icon" type="image/png" sizes="192x192" href="/icons/brand/favicon-192.png?v=1780639379">
-<link rel="apple-touch-icon" href="/icons/brand/favicon-180.png?v=1780639379">
+<link rel="icon" type="image/png" sizes="32x32" href="https://sigilgraph.fluxapp.xyz/icons/brand/favicon-32.png?v=1780639379">
+<link rel="icon" type="image/png" sizes="192x192" href="https://sigilgraph.fluxapp.xyz/icons/brand/favicon-192.png?v=1780639379">
+<link rel="apple-touch-icon" href="https://sigilgraph.fluxapp.xyz/icons/brand/favicon-180.png?v=1780639379">
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700;900&family=Rajdhani:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <style>
 :root{--bg:#04080c;--cyan:#21d4fd;--cyan-bright:#6df3ff;--cm:#1ba1e2;--teal:#00e0c6;
@@ -112,8 +112,12 @@ body.view-desktop .desktop{display:flex}
 <div class="phone">
   <div class="notch"></div>
   <div class="statusbar"><span>9:41</span><span>SIGIL·g0 · <b>H 18,742</b></span><span>▮▮▮ 5G</span></div>
-  <div class="phead"><img class="markimg" src="/icons/brand/sigil-flat.png?v=1780639379" style="width:78px;height:78px"><div class="brand">SIGIL<span>·</span>WALLET</div><button class="expand" onclick="setView('desktop')">⤢ desktop</button></div>
+  <div class="phead"><img class="markimg" src="https://sigilgraph.fluxapp.xyz/icons/brand/sigil-flat.png?v=1780639379" style="width:78px;height:78px"><div class="brand">SIGIL<span>·</span>WALLET</div><button class="expand" onclick="setView('desktop')">⤢ desktop</button></div>
   <div class="balance"><div class="lab"><span>total balance</span><span class="vbadge"><i data-lucide="badge-check"></i>verified</span></div><div class="amtbig amt" id="amt">14,302<small>.84 SIGIL</small></div><div class="sub">≈ <b>$18,594</b> · +4.2% today ▲</div></div>
+  <div style="display:flex;gap:9px;justify-content:center;margin:12px 8px 2px;font-family:'JetBrains Mono';font-size:11px">
+    <a href="flux://enter" style="color:var(--cyan);text-decoration:none;border:1px solid var(--line);background:rgba(33,212,253,.05);border-radius:999px;padding:5px 13px">＋ new wallet</a>
+    <a href="flux://stats" style="color:var(--teal);text-decoration:none;border:1px solid var(--line);background:rgba(0,224,198,.05);border-radius:999px;padding:5px 13px">◈ node stats</a>
+  </div>
   <div class="actions">
     <div class="act"><i class="lic" data-lucide="arrow-up-from-dot"></i><span class="t">Send</span></div>
     <div class="act"><i class="lic" data-lucide="arrow-down-to-dot"></i><span class="t">Receive</span></div>
@@ -127,20 +131,20 @@ body.view-desktop .desktop{display:flex}
 
 <div class="desktop">
   <div class="gbar">
-    <div class="logo"><img class="markimg" src="/icons/brand/sigil-cyan.png?v=1780639379"><div class="brand">SIGIL<span>·</span>WALLET</div></div>
+    <div class="logo"><img class="markimg" src="https://sigilgraph.fluxapp.xyz/icons/brand/sigil-cyan.png?v=1780639379"><div class="brand">SIGIL<span>·</span>WALLET</div></div>
     <div class="search"><i class="lic" data-lucide="search"></i>Search address, tx, token… <span style="margin-left:auto;opacity:.6">⌘K</span></div>
     <div class="gspacer"></div>
     <div class="gright">
       <div class="net">grid online · H 18,742</div>
       <div class="pill"><i class="lic" data-lucide="wallet" style="width:14px;height:14px;filter:none"></i><b>14,302</b> SIGIL</div>
-      <div class="agentbtn"><img class="markimg" src="/icons/brand/sigil-cyan.png?v=1780639379"><div class="at">Ask Flux</div></div>
+      <div class="agentbtn"><img class="markimg" src="https://sigilgraph.fluxapp.xyz/icons/brand/sigil-cyan.png?v=1780639379"><div class="at">Ask Flux</div></div>
       <div class="avatar">◈</div>
       <button class="collapse" onclick="setView('phone')">⤡ phone</button>
     </div>
   </div>
   <div class="dwrap">
     <div class="side">
-      <div class="sidelogo"><img src="/icons/brand/sigil-cyan.png?v=1780639379" alt="SIGIL"><div class="brand">SIGIL</div></div>
+      <div class="sidelogo"><img src="https://sigilgraph.fluxapp.xyz/icons/brand/sigil-cyan.png?v=1780639379" alt="SIGIL"><div class="brand">SIGIL</div></div>
       <div class="sidecard"><div class="l">portfolio value</div><div class="amtbig" style="font-size:30px">$18,594</div><div class="d">14,302.84 SIGIL · +4.2% ▲</div></div>
       <div class="snav">
         <a class="on"><i class="lic" data-lucide="layout-dashboard"></i>Dashboard</a>
@@ -154,10 +158,12 @@ body.view-desktop .desktop{display:flex}
         <a><i class="lic" data-lucide="layers"></i>Stake</a>
         <a><i class="lic" data-lucide="pickaxe"></i>Mine</a>
         <div class="grp">System</div>
+        <a href="flux://stats"><i class="lic" data-lucide="activity"></i>Node stats</a>
+        <a href="flux://enter"><i class="lic" data-lucide="user-plus"></i>New wallet</a>
         <a><i class="lic" data-lucide="settings"></i>Settings</a>
       </div>
       <div class="sfoot">
-        <div class="agentbtn" style="border-radius:14px"><img class="markimg" src="/icons/brand/sigil-cyan.png?v=1780639379"><div><div class="at">Ask Flux agent</div><div style="font-family:'JetBrains Mono';font-size:10px;color:var(--dim)">swap · send · explain</div></div></div>
+        <div class="agentbtn" style="border-radius:14px"><img class="markimg" src="https://sigilgraph.fluxapp.xyz/icons/brand/sigil-cyan.png?v=1780639379"><div><div class="at">Ask Flux agent</div><div style="font-family:'JetBrains Mono';font-size:10px;color:var(--dim)">swap · send · explain</div></div></div>
         <div style="font-family:'JetBrains Mono';font-size:10px;color:var(--dim);text-align:center">SIGIL Wallet v0 · grid g0</div>
       </div>
     </div>

@@ -36,3 +36,8 @@ credentials*.json
 # AI-scratch images (not source)
 ChatGPT Image*
 *.scratch.png
+
+# flux-rev content-addressed provenance stores (local, regenerable)
+.flux-rev/
+**/.flux-rev/
+--message/

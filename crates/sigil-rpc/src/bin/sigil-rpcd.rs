@@ -53,6 +53,11 @@ struct Node {
     /// challenge seed = BLAKE3(tip ‖ height), so the challenge for a future height
     /// is UNKNOWN until the prior block is accepted → no precompute (fix #1).
     tip_hash: [u8; 32],
+    /// BLAKE4 Lane-A difficulty (target = u64::MAX >> bits). Retargeted from real
+    /// block times every RETARGET_WINDOW blocks (fix #2).
+    bits: u32,
+    retarget_anchor_ts: u64,
+    retarget_anchor_height: u64,
 }
 
 /// Content address (blake3 CID, hex) — flux-aether's content-addressing primitive.
@@ -133,8 +138,30 @@ fn mining_vdf_t() -> u64 {
 fn mining_reward() -> u128 {
     std::env::var("SIGIL_MINING_REWARD").ok().and_then(|s| s.parse().ok()).unwrap_or(MINING_REWARD)
 }
-fn mining_blake4_target() -> u64 {
-    u64::MAX >> mining_bits()
+/// BLAKE4 Lane-A target for a difficulty `bits`: target = u64::MAX >> bits.
+fn target_from_bits(bits: u32) -> u64 { u64::MAX >> bits.min(63) }
+
+// ── Difficulty retarget (fix #2): adjust BLAKE4 `bits` from REAL block times ──
+const RETARGET_WINDOW: u64 = 16; // retarget every N accepted blocks
+const TARGET_BLOCK_MS_DEFAULT: u64 = 5000; // desired average block interval
+fn target_block_ms() -> u64 {
+    std::env::var("SIGIL_TARGET_BLOCK_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(TARGET_BLOCK_MS_DEFAULT)
+}
+/// Bitcoin-style difficulty retarget on the BLAKE4 lane. Called after each accepted
+/// block; fires once per RETARGET_WINDOW. Meaningful ONLY because fix #1 made block
+/// timestamps real (no precompute). Clamped to ±2 bits/window (≤4x) and bits ∈ [4,48].
+fn retarget(node: &mut Node) {
+    if node.height < node.retarget_anchor_height + RETARGET_WINDOW { return; }
+    let now = now_ms();
+    let actual = now.saturating_sub(node.retarget_anchor_ts).max(1);
+    let expected = RETARGET_WINDOW * target_block_ms();
+    // ratio>1 ⇒ blocks came too FAST ⇒ raise bits (harder); <1 ⇒ too slow ⇒ lower.
+    let delta = (expected as f64 / actual as f64).log2().round().clamp(-2.0, 2.0) as i64;
+    let new_bits = (node.bits as i64 + delta).clamp(4, 48) as u32;
+    eprintln!("retarget: h={} actual={}ms expected={}ms bits {}→{}", node.height, actual, expected, node.bits, new_bits);
+    node.bits = new_bits;
+    node.retarget_anchor_ts = now;
+    node.retarget_anchor_height = node.height;
 }
 /// Per-height VDF challenge seed bound to the chain TIP: BLAKE3(tip ‖ height).
 /// Because `tip` folds the prior accepted block, the seed for height H is
@@ -241,7 +268,8 @@ fn bootstrap() -> Node {
     };
     if let Some(h) = history.as_mut() { backfill_blocks(h); }
     let tip_hash = *blake3::hash(b"sigil-g0/mining-genesis").as_bytes();
-    Node { state, height: 2, students: VerifiedRegistry::new(), tokens, pools, citizens: vec![CITIZEN], history, tip_hash }
+    Node { state, height: 2, students: VerifiedRegistry::new(), tokens, pools, citizens: vec![CITIZEN], history,
+        tip_hash, bits: mining_bits(), retarget_anchor_ts: now_ms(), retarget_anchor_height: 2 }
 }
 
 /// One-time backfill: ingest the persisted DAG block headers (dag-blocks.json) into
@@ -598,7 +626,7 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
             let c = Challenge {
                 height: h,
                 vdf_input: mining_seed(&n.tip_hash, h),
-                blake4_target: mining_blake4_target(),
+                blake4_target: target_from_bits(n.bits),
                 vdf_t: mining_vdf_t(),
             };
             ok(serde_json::to_string(&c).unwrap_or_else(|_| "{}".into()))
@@ -630,7 +658,7 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
             let c = Challenge {
                 height: h,
                 vdf_input: mining_seed(&n.tip_hash, h),
-                blake4_target: mining_blake4_target(),
+                blake4_target: target_from_bits(n.bits),
                 vdf_t: mining_vdf_t(),
             };
             let g = ModSquaring::bench_2048();
@@ -649,6 +677,7 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
                     hh.update(&sub.block.nonce.to_le_bytes());
                     n.tip_hash = *hh.finalize().as_bytes();
                     n.height += 1;
+                    retarget(&mut n); // fix #2: adjust BLAKE4 difficulty from real block times
                     ingest(&mut n, "mine", format!("dual-lane mine reward {} SIGIL", mining_reward()), &[miner], "dual-lane blake4+vdf");
                     ok(format!("{{\"accepted\":true,\"reason\":null,\"new_balance\":{}}}", bal))
                 }

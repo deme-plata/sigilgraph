@@ -49,7 +49,7 @@ __kernel void blake4_search(
     const uint rounds,
     const uint block_len,        // hlen + 8
     __global ulong *found_nonce,
-    __global int *found_flag)
+    volatile __global int *found_flag)
 {
     const ulong nonce = nonce_base + (ulong)get_global_id(0);
 

@@ -24,15 +24,20 @@ reqwest    = { version = "0.12", features = ["blocking", "json", "rustls-tls"], 
 flux-market = { path = "../../../flux/crates/flux-market", optional = true }
 # reference mining node (flux-mining-node bin) + the roundtrip test's mock node.
 tiny_http  = { version = "0.12", optional = true }
+# sigil-miner TUI dashboard (obsidian + violet). Pinned to the same 0.28 line
+# sigil-top uses so the workspace resolves one ratatui.
+ratatui    = { version = "0.28", optional = true }
+crossterm  = { version = "0.28", optional = true }
 
 [features]
 # Default = the full miner (all bins build with a plain `fluxc build`). A NODE
 # that only needs the verification gate depends with default-features = false
 # and gets the reqwest-free core (types + check_submission + verify_dual).
-default = ["client", "market", "node"]
+default = ["client", "market", "node", "tui"]
 client  = ["dep:reqwest"]                         # MinerClient + updater (HTTP)
 market  = ["dep:flux-market", "dep:flux-fold"]    # the light economic node
 node    = ["dep:tiny_http"]                       # reference mining node + roundtrip test
+tui     = ["dep:ratatui", "dep:crossterm"]        # sigil-miner terminal dashboard
 
 [[bin]]
 name = "flux-miner"
@@ -43,3 +48,9 @@ required-features = ["client"]
 name = "flux-mining-node"
 path = "src/bin/flux-mining-node.rs"
 required-features = ["node"]
+
+# the SIGIL standalone miner — dual-lane engine (client) + TUI dashboard (tui).
+[[bin]]
+name = "sigil-miner"
+path = "src/bin/sigil-miner.rs"
+required-features = ["client", "tui"]

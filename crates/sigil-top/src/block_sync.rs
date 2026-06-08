@@ -256,7 +256,7 @@ impl P2PBlockSync {
                         if peer_best > 0 && have < peer_best {
                             if let Some(peer) = net.connected_peers().into_iter().next() {
                                 let from = sync_cursor;
-                                let to = from + 1024;
+                                let to = from + 8192;
                                 let req = BackfillReq { from, to };
                                 crate::tlog!("[p2p-sync] backfill req→{peer} [{from}..={to}] (have {have}/{peer_best})");
                                 match net.send_request(peer, serde_json::to_vec(&req).unwrap()).await {

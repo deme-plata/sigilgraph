@@ -537,7 +537,7 @@ fn run_start() -> Result<()> {
                             let top = chain.height().saturating_sub(1);
                             let lo = req.from;
                             // point-to-point ⇒ a bigger chunk is fine.
-                            let hi = req.to.min(top).min(lo.saturating_add(1024));
+                            let hi = req.to.min(top).min(lo.saturating_add(8192));
                             let resp = BackfillResp {
                                 blocks: (lo..=hi)
                                     .filter_map(|h| blks.get(h as usize))
@@ -597,7 +597,7 @@ fn run_start() -> Result<()> {
                                     if last_req.elapsed() >= std::time::Duration::from_millis(300) {
                                         last_req = std::time::Instant::now();
                                         if let Some(peer) = mgr.connected_peers().into_iter().next() {
-                                            let req = BackfillReq { from: expected, to: expected.saturating_add(1024) };
+                                            let req = BackfillReq { from: expected, to: expected.saturating_add(8192) };
                                             eprintln!("⇪ rr-backfill: gap (have {}, saw {}) — requesting [{}..={}] from {}",
                                                 expected, h, req.from, req.to, peer);
                                             let mgr2 = std::sync::Arc::clone(&mgr);

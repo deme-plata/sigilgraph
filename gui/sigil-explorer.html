@@ -170,11 +170,22 @@ async function load(){
 // content-addressing: retrieve a record by its blake3 CID via /api/v1/aether and show
 // whether blake3(content)==cid (verify-don't-trust). flux-aether content-addressing.
 async function verifyCid(cid){
+  var t=document.getElementById('cidToast');
+  if(!t){ t=document.createElement('div'); t.id='cidToast'; document.body.appendChild(t); }
+  t.style.cssText='position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:200;max-width:680px;width:92%;background:var(--panel);backdrop-filter:blur(20px);border:1px solid var(--violet);border-radius:14px;padding:15px 18px;box-shadow:0 0 26px rgba(149,128,255,.45);font-family:\'JetBrains Mono\';font-size:12px;color:var(--text)';
+  t.innerHTML='<div style="color:var(--violet)">⬡ verifying flux://b3/'+cid.slice(0,16)+'… via flux-aether</div>';
   try{
     var r=await fetch('/api/v1/aether?cid='+encodeURIComponent(cid),{cache:'no-store'}); var j=await r.json();
-    if(j.found) alert('⬡ CONTENT-ADDRESS '+(j.verified?'VERIFIED ✓':'MISMATCH ✗')+'\n\nflux://b3/'+cid+'\n\n'+(j.title||'')+'\n'+(j.content||'')+'\n\nblake3(content)==cid: '+j.verified);
-    else alert('not found in content store:\nflux://b3/'+cid);
-  }catch(e){ alert('verify failed: '+e); }
+    if(j.found){
+      var ok=j.verified, col=ok?'var(--teal)':'var(--orange)';
+      t.style.borderColor=col; t.style.boxShadow='0 0 26px '+(ok?'rgba(0,224,198,.45)':'rgba(255,122,60,.45)');
+      t.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center"><span style="color:'+col+';font-weight:600;font-size:13px">⬡ CONTENT-ADDRESS '+(ok?'VERIFIED ✓':'MISMATCH ✗')+'</span><span style="cursor:pointer;color:var(--dim)" onclick="document.getElementById(\'cidToast\').remove()">✕</span></div>'+
+        '<div style="color:var(--violet);word-break:break-all;margin:9px 0 5px">flux://b3/'+cid+'</div>'+
+        '<div style="color:var(--text)">'+(j.title||'')+'</div>'+
+        '<div style="color:var(--dim);margin-top:3px">'+(j.content||'')+'</div>'+
+        '<div style="color:var(--dim);margin-top:9px;font-size:10px">blake3(content) == cid → <b style="color:'+col+'">'+ok+'</b> · verify-don\'t-trust · flux-db + flux-aether</div>';
+    } else { t.style.borderColor='var(--orange)'; t.innerHTML='<div style="color:var(--orange)">⬡ not in content store: flux://b3/'+cid+'</div>'; }
+  }catch(e){ t.style.borderColor='var(--orange)'; t.innerHTML='<div style="color:var(--orange)">verify failed: '+e+'</div>'; }
 }
 window.verifyCid=verifyCid;
 load();
@@ -185,6 +196,8 @@ document.addEventListener('click',function(e){if(!e.target.closest('.search-wrap
 
 // pre-search from ?q= — the wallet embeds this explorer with the user's address
 (function(){try{var q=new URLSearchParams(location.search).get('q');if(q){var el=document.getElementById('search');if(el){el.value=q;if(typeof doSearch==='function')doSearch();}}}catch(e){}})();
+// deep-link: ?verify=<cid> auto-verifies a content-address (shows the toast)
+(function(){try{var vc=new URLSearchParams(location.search).get('verify');if(vc)setTimeout(function(){verifyCid(vc)},700);}catch(e){}})();
 </script>
 </body>
 </html>

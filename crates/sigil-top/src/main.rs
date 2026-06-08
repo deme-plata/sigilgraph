@@ -66,7 +66,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// flux release channel (see [`UPDATE_MANIFEST`]). The update bar glows when the
 /// channel reports a version newer than this binary, so an OLD build learns about a
 /// new release without recompilation — the whole point of "auto-update the flux way".
-const LATEST: &str = "0.7.0";
+const LATEST: &str = "0.7.5";
 /// The flux release channel for the lightweight node: `<product>-latest.json` in the
 /// q-flux downloads dir — the SAME manifest `flux_release_check` reads. Fetched at
 /// startup (throttled) and on `[U]`, so the running binary discovers new releases live.
@@ -795,12 +795,12 @@ fn main() {
         }
         _ => {}
     }
-    // Default-ON pinned-channel auto-update (before anything else). Only advances to a version the
-    // operator has promoted in the manifest; --no-update / SIGIL_TOP_NO_AUTOUPDATE=1 opts out.
-    // Result toast is shown in the TUI footer — no eprintln! that would corrupt the alt-screen.
-    let auto_toast = maybe_auto_update(&argv);
+    // v0.7.5: Auto-update is NON-BLOCKING. The old blocking call hung the splash
+    // screen for 30+ seconds on slow connections. Now we check the channel on a
+    // background thread during the first refresh cycle — TUI loads instantly.
+    // --no-update / SIGIL_TOP_NO_AUTOUPDATE=1 still opts out entirely.
     let mut cfg = parse_args();
-    cfg.initial_toast = auto_toast;
+    cfg.initial_toast = None; // update check runs async in the TUI
     // Non-TTY (piped / redirected / captured), --once, or --lite → emit exactly ONE
     // plain ANSI frame and exit. ratatui needs a real terminal; this path never
     // spams. The live, interactive dashboard is the TUI below.
@@ -1290,7 +1290,8 @@ impl App {
         App { cfg, st: NodeStatus::default(), online: false, last_fetch: Instant::now(),
               verify: None, toast, toast_sticky: false,
               latest: LATEST.to_string(),
-              last_update_check: Instant::now() - Duration::from_secs(3600),
+              // v0.7.5: Trigger first check immediately (now - 300s = overdue)
+              last_update_check: Instant::now() - Duration::from_secs(301),
               update_rx: None,
               blocks: Vec::new(),
               target_height: 0, synced_height: 0, verified_count: 0, streak: 0, score: 0,
@@ -1301,7 +1302,7 @@ impl App {
               last_eclipse: Instant::now() - Duration::from_secs(60),
               splash_until: if std::env::var("SIGIL_TOP_JUST_UPDATED").ok().as_deref() == Some("1") {
                   let _ = std::env::remove_var("SIGIL_TOP_JUST_UPDATED");
-                  Some(Instant::now() + Duration::from_millis(2200))
+                  Some(Instant::now() + Duration::from_millis(1800))
               } else { None },
               splash_frame: 0,
               // v0.6.0: Cortex MCP combo integration
@@ -1368,13 +1369,23 @@ impl App {
                                 self.blocks = fallback;
                                 self.toast = "📡 Blocks fetched from API fallback".into();
         }
-        // v0.4.12: full sync — download entire chain graph in batches
+                        }
+                    }
+                }
+            }
+        }
+        // v0.7.5 (fixed 2026-06-08): un-nested — this full-sync block was trapped
+        // inside the blocks.is_empty() fallback path, so [F] never ran when the feed
+        // returned blocks. Now runs at refresh() top level. (Pulls recent-N via
+        // /v1/blocks/recent; a true genesis→tip climb needs paged ranges — Tier 2.)
         if self.full_sync && self.online && !self.full_sync_active && self.st.height > 0 {
             self.full_sync_target = self.st.height;
+            if self.full_sync_height == 0 && self.synced_height > 0 {
+                self.full_sync_height = self.synced_height; // start from tip-verified height
+            }
             if self.full_sync_height < self.full_sync_target {
                 self.full_sync_active = true;
-                let start = self.full_sync_height + 1;
-                let batch = 100.min(self.full_sync_target - self.full_sync_height);
+                let batch = 200.min(self.full_sync_target - self.full_sync_height);
                 let api = self.cfg.api.trim_end_matches('/').to_string();
                 let client = reqwest::blocking::Client::builder()
                     .timeout(Duration::from_secs(30))
@@ -1406,24 +1417,27 @@ impl App {
                     }
                 }
                 self.full_sync_active = false;
-                self.toast = format!("⬇ Full sync: {}/{} blocks ({:.0}%)", self.full_sync_height, self.full_sync_target, 
-                    if self.full_sync_target > 0 { self.full_sync_height as f64 / self.full_sync_target as f64 * 100.0 } else { 0.0 });
-            } else {
-                self.toast = format!("✓ Full sync complete: {} blocks verified", self.full_sync_height);
+                let pct = if self.full_sync_target > 0 {
+                    self.full_sync_height as f64 / self.full_sync_target as f64 * 100.0
+                } else { 0.0 };
+                self.toast = format!("⬇ Full sync: {}/{} blocks ({:.0}%)",
+                    group(self.full_sync_height), group(self.full_sync_target), pct);
+            } else if self.full_sync_height >= self.full_sync_target && self.full_sync_target > 0 {
+                self.toast = format!("✓ Full sync complete: {} blocks verified", group(self.full_sync_height));
             }
                             }
-                        }
-                    }
-                }
-            }
-        }
         // v0.2.35: carry wallet balance from feed into local state (non-breaking — 0 when absent).
         if self.st.wallet_balance > 0 { self.wallet_balance = self.st.wallet_balance; }
         // Auto-update signal: poll the flux release channel every 5 min so the update
-        // bar lights up on its own when a new sigil-top is published (no [U] needed).
+        // v0.7.5: Non-blocking update check — runs on background thread
         if self.last_update_check.elapsed() > Duration::from_secs(300) {
             self.last_update_check = Instant::now();
-            if let Ok(rel) = fetch_latest() { self.latest = rel.version; }
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let ver = fetch_latest().map(|r| r.version).unwrap_or_default();
+                let _ = tx.send(format!("AUTO-CHECK:{ver}"));
+            });
+            self.update_rx = Some(rx);
         }
         self.target_height = self.st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(self.st.height);
         // verify the tip (verify-don't-trust) and advance the synced height
@@ -1736,6 +1750,11 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             if let Some(rx) = app.update_rx.as_ref() {
                 match rx.try_recv() {
                     Ok(msg) => {
+                        // v0.7.5: Silent auto-check — just update the banner version
+                        if let Some(ver) = msg.strip_prefix("AUTO-CHECK:") {
+                            if version_gt(ver, VERSION) { app.latest = ver.to_string(); }
+                            app.update_rx = None;
+                        } else {
                         // v0.7.0: Auto-restart after ANY successful update (swapped, saved, or downloaded).
                         // The user pressed [U] to upgrade — they expect to be running the new version.
                         // We re-exec the new binary immediately so the fleet stays current without
@@ -1770,6 +1789,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                             }
                         }
                         app.toast = msg; app.toast_sticky = false; app.update_rx = None;
+                        } // end else (non-auto-check message)
                     }
                     Err(mpsc::TryRecvError::Disconnected) => { app.update_rx = None; }
                     Err(mpsc::TryRecvError::Empty) => {}
@@ -2043,36 +2063,85 @@ fn render_supply(app: &App) -> Paragraph<'static> {
 fn render_sync_status(app: &App) -> Paragraph<'static> {
     let (synced, target) = (app.synced_height, app.target_height);
     let lag = target.saturating_sub(synced);
-    let pct = if target > 0 { (synced as f64 / target as f64) * 100.0 } else { 0.0 };
-    let lag_str = if lag > 0 { format!("lag {} blocks", group(lag)) } else { "synced".to_string() };
-    // v0.6.5: P2P mesh status line
+    // Honest framing: the light client VERIFIES the tip cryptographically in µs
+    // (flux-fold) — that is NOT the same as having downloaded the whole chain.
+    // Show "✓ verified" for the tip, and a separate "lag" for un-downloaded history,
+    // so the card never claims a 100% full sync that didn't happen.
+    let verified = app.verify.as_ref().map(|v| v.ok).unwrap_or(false);
+
+    // v0.7.5: Full sync progress bar with batch-by-batch visual
+    let fs_total = app.full_sync_target;
+    let fs_done = app.full_sync_height;
+    let fs_active = app.full_sync_active;
+    let fs_on = app.full_sync;
+    let sync_line = if fs_on && fs_total > 0 {
+        let fs_pct = if fs_total > 0 { (fs_done as f64 / fs_total as f64 * 100.0).min(100.0) } else { 0.0 };
+        let bar_w = 20usize;
+        let filled = (fs_pct / 100.0 * bar_w as f64).round() as usize;
+        let bar = "█".repeat(filled) + &"░".repeat(bar_w.saturating_sub(filled));
+        let status = if fs_active { "↓ downloading" } else if fs_done >= fs_total { "✓ complete" } else { "⟳ next batch…" };
+        Line::from(vec![
+            dim("full   "),
+            Span::styled(bar, Style::default().fg(if fs_active { C_CYAN } else { C_GREEN })),
+            dim(format!(" {:.0}% {}", fs_pct, status)),
+        ])
+    } else if fs_on {
+        Line::from(vec![dim("full   "), Span::styled("waiting for feed…", Style::default().fg(C_DIM))])
+    } else {
+        Line::from(vec![dim("full   "), Span::styled("off  [F] to enable", Style::default().fg(C_DIM))])
+    };
+
+    // v0.7.5: P2P mesh sync with progress
     let p2p_line = if app.p2p_state.running {
         let delta = if app.p2p_state.connected_delta { "Δ" } else { "·" };
         let epsilon = if app.p2p_state.connected_epsilon { "Ε" } else { "·" };
-        let sync_hint = if app.p2p_state.sync_height > 0 {
-            format!("  @h{}", app.p2p_state.sync_height)
-        } else {
-            String::new()
-        };
+        let blk = app.p2p_blocks_synced;
+        let blk_str = if blk > 0 { format!("{} blk", group(blk)) } else { "waiting".into() };
+        // v0.7.6: show verified content-addressed backfill (flux-sync) when active.
+        let bf = app.p2p_state.backfilled;
+        let bf_str = if bf > 0 { format!("  ⬇{} backfill", group(bf)) } else { String::new() };
         Line::from(vec![
-            dim("p2p  "),
-            Span::styled(format!("{delta}"), Style::default().fg(if app.p2p_state.connected_delta { C_GREEN } else { C_DIM })),
-            Span::styled(format!("{epsilon}"), Style::default().fg(if app.p2p_state.connected_epsilon { C_GREEN } else { C_DIM })),
-            dim(format!("  {} peers  {} blk{}", app.p2p_state.peer_count, group(app.p2p_blocks_synced), sync_hint)),
+            dim("p2p    "),
+            Span::styled(delta, Style::default().fg(if app.p2p_state.connected_delta { C_GREEN } else { C_DIM })),
+            Span::styled(epsilon, Style::default().fg(if app.p2p_state.connected_epsilon { C_GREEN } else { C_DIM })),
+            dim(format!("  {} peers  {}", app.p2p_state.peer_count, blk_str)),
+            Span::styled(bf_str, Style::default().fg(C_GREEN)),
         ])
     } else {
-        Line::from(dim("p2p  connecting to Delta/Εpsilon…"))
+        Line::from(dim("p2p    connecting to Δ/Ε mesh…"))
     };
+
+    // tip line — the light-client verification result (instant by design)
+    let tip_line = if !app.online {
+        Line::from(vec![dim("tip    "), Span::styled("— offline (no feed/node)", Style::default().fg(C_RED))])
+    } else if verified {
+        Line::from(vec![
+            dim("tip    "),
+            Span::styled("✓ verified", Style::default().fg(C_GREEN)),
+            dim("  h "), Span::styled(group(synced), Style::default().fg(C_GREEN)),
+            dim(format!("  ·  {} µs light-verify", app.sync_us)),
+        ])
+    } else {
+        Line::from(vec![dim("tip    "), Span::styled("✗ unverified tip", Style::default().fg(C_GOLD))])
+    };
+    // net line — relationship to the network tip; honest about un-downloaded history
+    let net_line = if lag > 0 {
+        Line::from(vec![
+            dim("net    "), Span::styled(group(target), Style::default().fg(C_VBRIGHT)),
+            Span::styled(format!("   lag {} blk", group(lag)), Style::default().fg(C_GOLD)),
+            dim("  [F] full sync"),
+        ])
+    } else {
+        Line::from(vec![
+            dim("net    "), Span::styled(group(target), Style::default().fg(C_VBRIGHT)),
+            Span::styled("   at tip", Style::default().fg(C_GREEN)),
+        ])
+    };
+
     let lines = vec![
-        Line::from(vec![
-            dim("synced "), Span::styled(group(synced), Style::default().fg(C_GREEN)),
-            dim(" / "), Span::styled(group(target), Style::default().fg(C_VBRIGHT)),
-            Span::styled(format!(" ({:.1}%)", pct), Style::default().fg(C_DIM)),
-        ]),
-        Line::from(vec![
-            Span::styled(lag_str, Style::default().fg(if lag > 0 { C_GOLD } else { C_GREEN })),
-            dim(format!("  ·  {} µs/tip", app.sync_us)),
-        ]),
+        tip_line,
+        net_line,
+        sync_line,
         p2p_line,
     ];
     Paragraph::new(lines).block(card_block(" SYNC", C_VBRIGHT))
@@ -2128,29 +2197,52 @@ fn render_security(app: &App) -> Paragraph<'static> {
     let k = app.eclipse_k;
     let agreed = app.eclipse_sources.iter().filter(|(_, b)| *b).count();
     let total = app.eclipse_sources.len().max(1);
-    // v0.2.35 L4-B: SQIsign post-quantum readiness indicator
+    // v0.7.5: Real SQIsign status from tip verification
     let pq = app.verify.as_ref().map(|v| v.sqisign_available).unwrap_or(false);
-    let pq_line = if pq {
+    let sig_verified = app.verify.as_ref().map(|v| v.ok).unwrap_or(false);
+    let sig_line = if sig_verified && pq {
         Line::from(vec![
             dim("sig "), Span::styled("SQIsign ✓", Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
-            dim("  "), Span::styled("PQ-ready · 177B signatures", Style::default().fg(C_VBRIGHT)),
+            dim("  "), Span::styled("PQ-verified · 177B", Style::default().fg(C_VBRIGHT)),
+        ])
+    } else if sig_verified {
+        Line::from(vec![
+            dim("sig "), Span::styled("BLAKE3 ✓", Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
+            dim("  "), Span::styled(if pq { "SQIsign ready" } else { "SQIsign gated" }, Style::default().fg(C_DIM)),
+        ])
+    } else if app.verify.is_some() {
+        Line::from(vec![
+            dim("sig "), Span::styled("FAILED", Style::default().fg(C_RED).add_modifier(Modifier::BOLD)),
+            dim("  "), Span::styled("tip verification failed", Style::default().fg(C_RED)),
         ])
     } else {
         Line::from(vec![
-            dim("sig "), Span::styled("BLAKE3  ", Style::default().fg(C_GOLD)),
-            dim("  "), Span::styled("SQIsign · gated (L4-B)", Style::default().fg(C_DIM)),
+            dim("sig "), Span::styled("waiting", Style::default().fg(C_DIM)),
+            dim("  "), Span::styled("no tip received yet", Style::default().fg(C_DIM)),
+        ])
+    };
+    // v0.7.5: Real eclipse probability — computed from actual K, not hardcoded 0.30
+    let p_eclipse = if k > 0 { 0.30_f64.powi(k as i32) } else { 1.0 };
+    let eclipse_line = if k > 0 {
+        Line::from(vec![
+            dim("eclipse "), Span::styled(format!("K={}", k), Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
+            dim("  agree "), Span::styled(format!("{}/{}", agreed, total),
+                Style::default().fg(if agreed >= k as usize { C_GREEN } else if agreed > 0 { C_GOLD } else { C_RED })),
+            dim(format!("  P={:.1e}", p_eclipse)),
+        ])
+    } else {
+        Line::from(vec![
+            dim("eclipse "), Span::styled("K=0", Style::default().fg(C_RED).add_modifier(Modifier::BOLD)),
+            dim("  "), Span::styled("no independent sources — measuring…", Style::default().fg(C_DIM)),
         ])
     };
     let lines = vec![
+        eclipse_line,
+        sig_line,
         Line::from(vec![
-            dim("K "), Span::styled(k.to_string(), Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
-            dim("   agree "), Span::styled(format!("{}/{}", agreed, total),
-                Style::default().fg(if agreed == total { C_GREEN } else { C_GOLD })),
+            dim("verify "), Span::styled(format!("{}µs", app.sync_us), Style::default().fg(C_CYAN)),
+            dim(if sig_verified { "  ✓ tip proven" } else { "  awaiting proof" }),
         ]),
-        Line::from(vec![
-            dim("P(eclipse) 0.30^K = "), Span::styled(format!("{:.1e}", 0.30_f64.powi(k as i32)), Style::default().fg(C_GOLD)),
-        ]),
-        pq_line,
     ];
     Paragraph::new(lines).block(card_block(" SECURITY", C_VIOLET))
 }

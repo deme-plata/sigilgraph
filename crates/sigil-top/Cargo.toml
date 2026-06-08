@@ -2,7 +2,7 @@
 name = "sigil-top"
 # sigil-top carries its OWN version cadence (the light client updates independently
 # of the workspace) — this is the "next version" the auto-updater ships.
-version = "0.7.0"
+version = "0.7.6"
 edition.workspace = true
 license.workspace = true
 description = "sigil-top — a dual-mode (lite scorecard ↔ full dashboard) terminal monitor for a SIGIL node. Polls the node's :8181/api/v1/status, renders height/peers/supply/4-state-roots + the flux-fold light-node capability in obsidian+violet ANSI. v0.3.5 adds Chronos benchmark card, archive storage gauge, gossip health, pipeline status, --export json mode, and multi-Epsilon peer tracking."
@@ -47,6 +47,9 @@ flux-optimize = { path = "../../../flux/crates/flux-optimize" }
 flux-p2p = { path = "../../../flux/crates/flux-p2p" }
 flux-swarm-tools = { path = "../../../flux/crates/flux-swarm-tools" }
 flux-rev = { path = "../../../flux/crates/flux-rev" }
+# v0.7.6: content-addressed block backfill (BLAKE3, verify-don't-trust) — closes the
+# gossip-only "can't backfill history" gap. The real history-sync behind [F].
+flux-sync = { path = "../../../flux/crates/flux-sync" }
 
 # v0.2.35 L4-B: SQIsign post-quantum tip-proof flavor (gated, not yet enabled).
 # When activated, sigil-tip-proof links flux-sqisign and verify_tip() constructs

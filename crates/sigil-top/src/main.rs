@@ -1550,12 +1550,14 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     let mut app = App::new(cfg);
     app.refresh();
 
-    // v0.7.0: Open flux-db block store, sync from local aether shards, then launch P2P
-    let mut block_store = block_store::BlockStore::open("/tmp/sigil-top-blocks.db")
-        .unwrap_or_else(|_| {
-            block_store::BlockStore::open("/dev/shm/sigil-top-blocks.db")
-                .unwrap_or_else(|e| panic!("block store: {e}"))
-        });
+    // v0.7.22: cross-platform PERSISTENT store path. The old /tmp + /dev/shm paths
+    // don't exist on Windows → the store never persisted → re-sync from 0 every launch
+    // ("starts over on update"). Now a per-user dir (override with SIGIL_TOP_DB).
+    let db_path = sigil_top_db_path();
+    let mut block_store = block_store::BlockStore::open(&db_path)
+        .or_else(|_| block_store::BlockStore::open(
+            std::env::temp_dir().join("sigil-top-blocks.db").to_string_lossy().as_ref()))
+        .unwrap_or_else(|e| panic!("block store: {e}"));
 
     // v0.7.1: Bootstrap from local aether shards into flux-db before starting P2P
     match block_store::sync_aether_to_fluxdb(&mut block_store, "/opt/orobit/sigil-data/db-epsilon/aether") {
@@ -2107,6 +2109,20 @@ fn render_supply(app: &App) -> Paragraph<'static> {
         Line::from(Span::styled(bar, Style::default().fg(C_GOLD))),
     ];
     Paragraph::new(lines).block(card_block(" SUPPLY", C_CYAN))
+}
+
+/// Cross-platform persistent path for the light client's block store. Windows has no
+/// /tmp or /dev/shm (the old hardcoded paths), so the store never persisted there →
+/// re-sync from 0 every launch. Prefer a per-user dir; override with SIGIL_TOP_DB.
+fn sigil_top_db_path() -> String {
+    if let Ok(p) = std::env::var("SIGIL_TOP_DB") {
+        if !p.trim().is_empty() { return p; }
+    }
+    let base = std::env::var("LOCALAPPDATA")
+        .or_else(|_| std::env::var("HOME"))
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
+    format!("{}/sigil-top-blocks.db", base.trim_end_matches(['/', '\\']))
 }
 
 fn render_sync_status(app: &App) -> Paragraph<'static> {

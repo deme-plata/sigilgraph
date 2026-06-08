@@ -153,9 +153,15 @@ impl P2PBlockSync {
                 }
                 crate::tlog!("[p2p-sync] started on sigil-g0 mesh (port 9501)");
 
+                // Resume from the PERSISTED store: seed the synced count + cursor from
+                // what's already on disk so a restart/update CONTINUES instead of
+                // re-fetching from 0 ("starts over"). best_height ≈ stored count for a
+                // contiguous store; the cursor loops anyway to refill any gaps.
+                let resume_h = store.best_height();
                 {
                     let mut s = state_clone.lock().unwrap();
                     s.running = true;
+                    s.blocks_synced = store.count() as u64;
                 }
 
                 // v0.7.6: content-addressed backfill via the shared flux_p2p::backfill
@@ -176,7 +182,7 @@ impl P2PBlockSync {
                 let tick = Duration::from_secs(5);
                 let mut last_announce = Instant::now();
                 let mut last_bf = Instant::now();
-                let mut sync_cursor: u64 = 0;
+                let mut sync_cursor: u64 = resume_h; // continue from persisted tip, not 0
 
                 loop {
                     if stop_rx.try_recv().is_ok() {

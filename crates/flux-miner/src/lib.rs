@@ -13,6 +13,8 @@
 use flux_vdf::{eval, verify, VdfGroup, VdfProof};
 
 pub mod client;
+/// BLAKE4 — the parameterized-round PoW hash (R=7 ≡ BLAKE3, R<7 = the speed lever).
+pub mod pow;
 /// The light ECONOMIC node (price + arb + DCA) — needs flux-market + flux-fold.
 #[cfg(feature = "market")]
 pub mod light;

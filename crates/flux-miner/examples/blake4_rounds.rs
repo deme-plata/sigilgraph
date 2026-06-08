@@ -6,7 +6,8 @@
 //! the flux-development loop can pick a round count that is both fast AND has
 //! enough preimage margin to deploy.
 //!
-//!   fluxc run --example blake4_rounds   (or build + run the example binary)
+//!   fluxc run --example blake4_rounds --features bench
+//! (reduced rounds are quarantined behind `bench` — never in a consensus build).
 
 use flux_miner::pow::{blake4_word, FULL_ROUNDS};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

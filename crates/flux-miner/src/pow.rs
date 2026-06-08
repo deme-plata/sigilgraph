@@ -100,7 +100,43 @@ fn compress8(block: &[u8], rounds: u32) -> [u32; 8] {
     out
 }
 
-/// BLAKE4 digest (32 bytes) of a ≤64-byte input at `rounds` rounds.
+// ── SOUND consensus API (ungated): the ONLY hashing reachable in a default build,
+// and it is ALWAYS FULL_ROUNDS (≡ BLAKE3). The reduced-round `rounds`-parameterized
+// variants below are QUARANTINED behind `test`/`bench`/`gpu` so no consensus or
+// fork-flag path can ever produce a weakened hash (red-team fix; DeepSeek flagged the
+// mere existence of a reduced-round option as a soundness smell). `compress8` is
+// private, so the `rounds` parameter is unreachable outside those gated callers.
+
+/// Sound BLAKE4 digest (32 bytes) of a ≤64-byte input at FULL_ROUNDS (≡ BLAKE3).
+pub fn blake4_digest(input: &[u8]) -> [u8; 32] {
+    let w = compress8(input, FULL_ROUNDS);
+    let mut out = [0u8; 32];
+    for i in 0..8 {
+        out[i * 4..i * 4 + 4].copy_from_slice(&w[i].to_le_bytes());
+    }
+    out
+}
+
+/// Sound miner target word at FULL_ROUNDS: first 8 bytes of `BLAKE4(header‖nonce)`
+/// as a little-endian `u64`. `header` must be ≤56 bytes; `header‖nonce` is one
+/// ≤64-byte block. This is what a consensus-grade miner uses.
+#[inline]
+pub fn blake4_word_sound(header: &[u8], nonce: u64) -> u64 {
+    let hlen = header.len().min(56);
+    let mut buf = [0u8; 64];
+    buf[..hlen].copy_from_slice(&header[..hlen]);
+    buf[hlen..hlen + 8].copy_from_slice(&nonce.to_le_bytes());
+    let w = compress8(&buf[..hlen + 8], FULL_ROUNDS);
+    (w[0] as u64) | ((w[1] as u64) << 32)
+}
+
+// ── QUARANTINED reduced-round API — bench/test/gpu builds ONLY ───────────────
+// Not compiled into a default (consensus) build, so a future careless change or a
+// fork flag cannot route consensus through R<7. The `gpu` feature is off by default
+// and reduced-round output can't pass the node's verify (it re-hashes at FULL_ROUNDS).
+
+/// BLAKE4 digest (32 bytes) of a ≤64-byte input at `rounds` rounds. **bench/test/gpu only.**
+#[cfg(any(test, feature = "bench", feature = "gpu"))]
 pub fn blake4_rounds(input: &[u8], rounds: u32) -> [u8; 32] {
     let w = compress8(input, rounds);
     let mut out = [0u8; 32];
@@ -110,10 +146,9 @@ pub fn blake4_rounds(input: &[u8], rounds: u32) -> [u8; 32] {
     out
 }
 
-/// The miner target word at `rounds`: the first 8 bytes of
-/// `BLAKE4(header‖nonce)` as a little-endian `u64` (what the difficulty search
-/// drives below the target). `header` must be ≤56 bytes (the 32-byte miner
-/// header fits trivially); `header‖nonce` is one ≤64-byte block.
+/// The miner target word at `rounds`. **bench/test/gpu only** — reduced rounds are a
+/// speed-research lever, never a consensus setting (use [`blake4_word_sound`]).
+#[cfg(any(test, feature = "bench", feature = "gpu"))]
 #[inline]
 pub fn blake4_word(header: &[u8], nonce: u64, rounds: u32) -> u64 {
     let hlen = header.len().min(56);

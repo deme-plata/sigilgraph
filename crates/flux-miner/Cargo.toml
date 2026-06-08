@@ -44,6 +44,13 @@ market  = ["dep:flux-market", "dep:flux-fold"]    # the light economic node
 node    = ["dep:tiny_http"]                       # reference mining node + roundtrip test
 tui     = ["dep:ratatui", "dep:crossterm"]        # sigil-miner terminal dashboard
 gpu     = ["dep:opencl3"]                          # OpenCL BLAKE4 Lane-A (needs a GPU box) — NOT in default
+bench   = []                                       # unlocks reduced-round BLAKE4 (pow::blake4_word/_rounds) for the speed-research bench ONLY — never consensus
+
+# The reduced-round hashrate bench is the ONLY non-test consumer of the lever, so it
+# requires the `bench` feature: `fluxc run --example blake4_rounds --features bench`.
+[[example]]
+name = "blake4_rounds"
+required-features = ["bench"]
 
 [[bin]]
 name = "flux-miner"

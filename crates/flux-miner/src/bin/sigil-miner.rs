@@ -786,9 +786,17 @@ fn gpu_mining_loop(
                     nonce_base = nonce_base.wrapping_add(BATCH as u64);
                 }
                 Err(e) => {
-                    stats.lock().unwrap().last_err = Some(format!("gpu search: {e}"));
-                    thread::sleep(Duration::from_secs(1));
-                    break;
+                    // a search failure (not just init) → log it + fall back to CPU
+                    // instead of silently stalling.
+                    let msg = format!("GPU search failed: {e}");
+                    {
+                        let mut s = stats.lock().unwrap();
+                        s.last_err = Some(msg.clone());
+                        push_log(&mut s.log, format!("✗ {msg} — falling back to CPU"));
+                    }
+                    let _ = std::fs::write("sigil-miner-gpu.log", &msg);
+                    gpu_failed.store(true, Ordering::Relaxed);
+                    return;
                 }
             }
         }

@@ -2536,6 +2536,21 @@ fn flux_run_terminal(cmd: &str) {
 
 /// Dispatch a flux:// URL.
 fn flux_open(raw: &str) {
+    // Debounce: if flux-open fired in the last 1.2s, ignore this one. Stops a tab
+    // storm if the browser/OS invokes the handler repeatedly for a single action.
+    {
+        let stamp = std::env::temp_dir().join("sigil-flux-open.ts");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        if let Ok(prev) = std::fs::read_to_string(&stamp) {
+            if let Ok(p) = prev.trim().parse::<u128>() {
+                if now.saturating_sub(p) < 1200 { return; }
+            }
+        }
+        let _ = std::fs::write(&stamp, now.to_string());
+    }
     let rest = raw.trim().trim_start_matches("flux://").trim_start_matches("flux:").trim_start_matches('/');
     let (head, tail) = match rest.split_once('/') { Some((a, b)) => (a, b), None => (rest, "") };
     let head = head.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();

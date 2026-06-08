@@ -123,7 +123,7 @@ pub struct PoolState {
 }
 
 /// Top-level state container. Internal mutation is `pub(crate)` only.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SigilState {
     /// Wallet balances. Keyed by `(wallet, token)` so multi-token is native
     /// from day one without a schema bump later.

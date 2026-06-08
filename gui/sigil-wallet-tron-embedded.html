@@ -1,156 +1,227 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SIGIL TRON Wallet</title>
+<!doctype html>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SIGIL Wallet</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/icons/brand/favicon-32.png?v=1780639379">
+<link rel="icon" type="image/png" sizes="192x192" href="/icons/brand/favicon-192.png?v=1780639379">
+<link rel="apple-touch-icon" href="/icons/brand/favicon-180.png?v=1780639379">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700;900&family=Rajdhani:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#04080c;--cyan:#21d4fd;--gold:#fbbf24;--teal:#00e0c6;--dim:#5f8390;--text:#d7eef5;--card:#0a1219;--glow:rgba(33,212,253,.55)}
+:root{--bg:#04080c;--cyan:#21d4fd;--cyan-bright:#6df3ff;--cm:#1ba1e2;--teal:#00e0c6;
+  --grid:rgba(33,212,253,.16);--glow:rgba(33,212,253,.55);--gold:#fbbf24;--orange:#ff7a3c;
+  --line:rgba(33,212,253,.2);--text:#d7eef5;--dim:#5f8390}
 *{box-sizing:border-box;margin:0;padding:0}
-body{min-height:100vh;background:var(--bg);color:var(--text);font-family:'JetBrains Mono','Courier New',monospace;display:grid;place-items:center;overflow-x:hidden}
-.bg{position:fixed;inset:0;background:radial-gradient(ellipse at 30% 20%,rgba(33,212,253,.08),transparent 60%),radial-gradient(ellipse at 70% 80%,rgba(0,224,198,.06),transparent 60%),var(--bg);z-index:0}
-.app{position:relative;z-index:1;width:100%;max-width:480px;padding:20px;display:flex;flex-direction:column;gap:16px}
-.header{text-align:center;padding:10px 0}
-.logo{font-family:'Orbitron',system-ui;font-size:28px;font-weight:900;letter-spacing:3px;background:linear-gradient(135deg,var(--cyan),var(--teal));-webkit-background-clip:text;-webkit-text-fill-color:transparent;filter:drop-shadow(0 0 12px var(--glow))}
-.logo span{color:var(--gold);-webkit-text-fill-color:var(--gold)}
-.net{display:inline-flex;align-items:center;gap:6px;font-size:10px;color:var(--teal);border:1px solid rgba(0,224,198,.35);border-radius:999px;padding:4px 12px;margin-top:8px;background:rgba(0,224,198,.08)}
-.net::before{content:'';width:7px;height:7px;border-radius:50%;background:var(--teal);animation:blink 1.8s infinite}
-@keyframes blink{50%{opacity:.25}}
-.card{background:var(--card);border:1px solid rgba(33,212,253,.15);border-radius:16px;padding:20px;transition:.2s}
-.card:hover{border-color:rgba(33,212,253,.35);box-shadow:0 0 24px rgba(33,212,253,.08)}
-.card-title{font-size:10px;text-transform:uppercase;letter-spacing:2px;color:var(--dim);margin-bottom:10px}
-.balance{font-size:36px;font-weight:700;color:var(--cyan);text-shadow:0 0 18px var(--glow)}
-.balance sub{font-size:16px;color:var(--dim);margin-left:4px}
-.row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(33,212,253,.08);font-size:13px}
-.row:last-child{border-bottom:0}
-.label{color:var(--dim)}
-.value{color:var(--text);font-weight:600}
-.value.gold{color:var(--gold)}
-.value.teal{color:var(--teal)}
-.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.btn{all:unset;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;padding:14px;border-radius:12px;font-size:13px;font-weight:700;letter-spacing:1px;text-transform:uppercase;transition:.2s;border:1px solid transparent}
-.btn-primary{background:linear-gradient(135deg,var(--cyan),#1ba1e2);color:#04080c;border-color:var(--cyan);box-shadow:0 0 16px rgba(33,212,253,.25)}
-.btn-primary:hover{transform:translateY(-2px);box-shadow:0 0 28px rgba(33,212,253,.45)}
-.btn-outline{background:transparent;border-color:rgba(33,212,253,.25);color:var(--cyan)}
-.btn-outline:hover{background:rgba(33,212,253,.08);border-color:var(--cyan)}
-.btn-gold{background:linear-gradient(135deg,var(--gold),#d97706);color:#04080c;border-color:var(--gold)}
-.btn-gold:hover{transform:translateY(-2px);box-shadow:0 0 20px rgba(251,191,36,.3)}
-.explorer{grid-column:span 2}
-.feed{max-height:200px;overflow-y:auto;font-size:11px;scrollbar-width:thin;scrollbar-color:var(--dim) transparent}
-.feed-item{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(33,212,253,.05);color:var(--dim)}
-.feed-item .type{color:var(--teal);text-transform:uppercase;font-weight:700;font-size:10px;letter-spacing:1px}
-.feed-item .hash{font-family:'JetBrains Mono',monospace;color:var(--text);font-size:10px}
-.footer{text-align:center;font-size:10px;color:var(--dim);padding:10px}
-.footer a{color:var(--cyan);text-decoration:none}
-.pulse{animation:pulse 2s infinite}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
-.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
-.status-dot.online{background:var(--teal);box-shadow:0 0 8px var(--teal)}
-.status-dot.offline{background:#ef4444}
-</style>
-</head>
+body{min-height:100vh;background:var(--bg);color:var(--text);font-family:'Rajdhani',system-ui,sans-serif;overflow:hidden}
+body:not(.view-desktop){display:grid;place-items:center}
+.scene{position:fixed;inset:0;overflow:hidden;background:var(--bg);z-index:0}
+.aurora{position:absolute;inset:-30%;filter:blur(70px);opacity:.5}
+.aurora i{position:absolute;border-radius:50%;mix-blend-mode:screen;animation:drift 18s ease-in-out infinite}
+.aurora i:nth-child(1){width:46%;height:46%;left:6%;top:4%;background:radial-gradient(circle,#21d4fd,transparent 65%)}
+.aurora i:nth-child(2){width:42%;height:42%;right:4%;top:14%;background:radial-gradient(circle,#00e0c6,transparent 65%);animation-delay:-5s}
+.aurora i:nth-child(3){width:52%;height:52%;left:22%;bottom:-4%;background:radial-gradient(circle,#7c3aed,transparent 60%);animation-delay:-9s;opacity:.6}
+@keyframes drift{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(7%,-5%) scale(1.12)}66%{transform:translate(-6%,4%) scale(.93)}}
+.markimg{object-fit:contain;filter:drop-shadow(0 0 11px var(--glow))}
+.brand{font-family:'Orbitron';font-weight:800;letter-spacing:2px}.brand span{color:var(--cyan)}
+.net{font-family:'JetBrains Mono';font-size:10px;color:var(--teal);border:1px solid rgba(0,224,198,.35);border-radius:999px;padding:3px 9px;background:rgba(0,224,198,.08);white-space:nowrap}
+.net::before{content:'●';margin-right:5px;animation:blink 2s infinite}@keyframes blink{50%{opacity:.3}}
+.lic{color:var(--cyan);stroke-width:2;filter:drop-shadow(0 0 6px var(--glow));transition:transform .14s,color .14s,filter .14s}
+.act{border:1px solid var(--line);background:rgba(33,212,253,.05);border-radius:16px;cursor:pointer;transition:.2s;display:grid;place-items:center}
+.act:hover{background:rgba(33,212,253,.13);box-shadow:0 0 18px var(--glow);transform:translateY(-2px)}
+.act:hover .lic{color:var(--cyan-bright);filter:drop-shadow(0 0 13px var(--cyan-bright));transform:scale(1.14)}
+.act:active .lic{transform:scale(.86);color:#eaffff;filter:drop-shadow(0 0 18px var(--cyan-bright))}
+.act .t{font-size:12px;font-weight:600;letter-spacing:.5px}
+.row{display:flex;align-items:center;gap:12px;padding:11px 13px;border-radius:15px;border:1px solid rgba(33,212,253,.12);background:linear-gradient(90deg,rgba(33,212,253,.05),transparent)}
+.row .coin{width:36px;height:36px;border-radius:11px;display:grid;place-items:center;font-weight:700;font-family:'Orbitron';font-size:13px}
+.row .nm{font-weight:600;font-size:15px}.row .tk{font-family:'JetBrains Mono';font-size:11px;color:var(--dim)}
+.row .rt{margin-left:auto;text-align:right}.row .bal{font-family:'JetBrains Mono';font-weight:600;font-size:15px}.row .chg{font-size:12px;font-family:'JetBrains Mono'}
+.up{color:var(--teal)}.dn{color:var(--orange)}
+.sect{font-family:'JetBrains Mono';font-size:10px;letter-spacing:2px;color:var(--dim);text-transform:uppercase;display:flex;justify-content:space-between;align-items:center;gap:8px}
+.pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:rgba(33,212,253,.06);border-radius:999px;padding:6px 13px;font-family:'JetBrains Mono';font-size:12px}.pill b{color:var(--cyan-bright)}
+.amtbig{font-family:'Orbitron';font-weight:900;line-height:1.05;background:linear-gradient(90deg,var(--cyan-bright),var(--teal));-webkit-background-clip:text;background-clip:text;color:transparent;filter:drop-shadow(0 0 14px rgba(33,212,253,.45))}
+.amtbig small{-webkit-text-fill-color:var(--dim);color:var(--dim);font-family:'Rajdhani';font-weight:600}
+.vbadge{display:inline-flex;align-items:center;gap:4px;font-family:'JetBrains Mono';font-size:10px;color:var(--gold);border:1px solid rgba(251,191,36,.3);border-radius:999px;padding:2px 7px;background:rgba(251,191,36,.07)}.vbadge .lic{width:13px;height:13px;color:var(--gold);filter:none}
+
+/* PHONE */
+.phone{position:relative;z-index:2;width:390px;height:820px;border-radius:42px;background:linear-gradient(180deg,#08121a,#050a0f);border:1px solid var(--line);box-shadow:0 0 0 2px rgba(0,0,0,.6),0 0 60px rgba(33,212,253,.18);padding:14px;overflow:hidden;display:flex;flex-direction:column}
+.notch{position:absolute;top:14px;left:50%;transform:translateX(-50%);width:120px;height:24px;background:#04080c;border-radius:0 0 16px 16px;border:1px solid var(--line);border-top:none;z-index:5}
+.statusbar{display:flex;justify-content:space-between;align-items:center;font-family:'JetBrains Mono';font-size:11px;color:var(--dim);padding:4px 10px 10px}.statusbar b{color:var(--cyan)}
+.phead{display:flex;align-items:center;gap:10px;padding:6px 6px 14px}.phead .brand{font-size:15px}
+.balance{margin:6px 8px 0;border-radius:22px;padding:22px 20px;background:linear-gradient(160deg,rgba(33,212,253,.14),rgba(0,224,198,.05) 60%,transparent);border:1px solid var(--line)}
+.balance .lab{font-family:'JetBrains Mono';font-size:11px;letter-spacing:2px;color:var(--dim);text-transform:uppercase;display:flex;justify-content:space-between;align-items:center}
+.balance .amt{font-size:42px;margin-top:6px}.balance .amt small{font-size:18px}
+.balance .sub{margin-top:6px;font-family:'JetBrains Mono';font-size:12px;color:var(--teal)}.balance .sub b{color:var(--cyan)}
+.actions{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:18px 8px 4px}.actions .act{padding:14px 4px;gap:8px}.actions .act .lic{width:42px;height:42px}
+.list{margin:0 8px;display:flex;flex-direction:column;gap:8px;overflow:auto}
+.expand{margin-left:auto;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.4);color:var(--gold);height:30px;border-radius:9px;cursor:pointer;font-size:12px;font-weight:700;font-family:'Rajdhani';display:flex;align-items:center;gap:6px;padding:0 11px}.expand:hover{background:rgba(251,191,36,.2)}
+.nav{margin-top:auto;display:grid;grid-template-columns:repeat(4,1fr);padding:12px 6px 4px;border-top:1px solid var(--line)}
+.nav div{display:grid;place-items:center;gap:4px;font-size:10px;font-family:'JetBrains Mono';color:var(--dim);cursor:pointer}.nav div.on{color:var(--cyan)}.nav .lic{width:24px;height:24px}.nav div:hover .lic{color:var(--cyan-bright);transform:scale(1.12)}
+
+/* DESKTOP FULLSCREEN */
+.desktop{display:none}
+body.view-desktop .phone,body.view-desktop .caption{display:none}
+body.view-desktop .desktop{display:flex}
+.desktop{position:fixed;inset:0;z-index:2;flex-direction:column}
+.gbar{height:64px;flex:none;display:flex;align-items:center;gap:16px;padding:0 20px;border-bottom:1px solid var(--line);background:rgba(8,16,24,.7);backdrop-filter:blur(14px)}
+.gbar .logo{display:flex;align-items:center;gap:11px}.gbar .logo img{width:44px;height:44px}.gbar .logo .brand{font-size:21px}
+.search{flex:1;max-width:440px;display:flex;align-items:center;gap:9px;border:1px solid var(--line);background:rgba(33,212,253,.04);border-radius:11px;padding:9px 13px;color:var(--dim);font-family:'JetBrains Mono';font-size:13px;cursor:text}
+.search:hover{border-color:rgba(33,212,253,.45);box-shadow:0 0 18px var(--glow)}.search .lic{width:16px;height:16px;filter:none}
+.gspacer{flex:1}.gright{display:flex;align-items:center;gap:11px}
+.agentbtn{display:flex;align-items:center;gap:9px;border:1px solid rgba(251,191,36,.35);background:rgba(251,191,36,.07);border-radius:11px;padding:7px 13px;cursor:pointer;transition:.2s}
+.agentbtn:hover{box-shadow:0 0 18px rgba(251,191,36,.4)}.agentbtn img{width:26px;height:26px}.agentbtn .at{font-weight:600;font-size:13px;color:var(--gold)}
+.avatar{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;background:linear-gradient(135deg,var(--cyan),var(--cm));color:#04080c;font-weight:800;cursor:pointer}
+.collapse{background:rgba(33,212,253,.08);border:1px solid var(--line);color:var(--cyan);height:36px;border-radius:10px;cursor:pointer;font-size:13px;font-weight:600;font-family:'Rajdhani';display:flex;align-items:center;gap:6px;padding:0 12px}.collapse:hover{box-shadow:0 0 16px var(--glow)}
+.dwrap{flex:1;display:flex;overflow:hidden}
+.side{width:248px;flex:none;border-right:1px solid var(--line);background:linear-gradient(180deg,rgba(33,212,253,.045),rgba(124,58,237,.04) 70%,transparent);display:flex;flex-direction:column;padding:18px 14px;overflow:auto}
+.sidelogo{display:flex;flex-direction:column;align-items:center;gap:6px;margin:4px 0 18px}
+.sidelogo img{width:168px;height:168px;object-fit:contain;filter:drop-shadow(0 0 24px var(--glow))}
+.sidelogo .brand{font-family:'Orbitron';font-weight:900;font-size:26px;letter-spacing:6px;background:linear-gradient(90deg,var(--cyan-bright),var(--teal));-webkit-background-clip:text;background-clip:text;color:transparent}
+.sidecard{border:1px solid var(--line);border-radius:16px;padding:16px;background:linear-gradient(150deg,rgba(33,212,253,.12),transparent);position:relative;overflow:hidden}
+.sidecard .l{font-family:'JetBrains Mono';font-size:10px;letter-spacing:2px;color:var(--dim);text-transform:uppercase}
+.sidecard .amt{font-size:28px;margin-top:5px}.sidecard .amt small{font-size:14px}
+.sidecard .d{font-family:'JetBrains Mono';font-size:12px;color:var(--teal);margin-top:3px}
+.snav{margin-top:18px;display:flex;flex-direction:column;gap:3px}
+.snav a{display:flex;align-items:center;gap:13px;padding:11px 13px;border-radius:12px;color:var(--dim);cursor:pointer;font-weight:600;font-size:15px;position:relative;transition:.18s}
+.snav a .lic{width:21px;height:21px;color:var(--dim);filter:none;transition:.18s}
+.snav a:hover{color:var(--text);background:rgba(33,212,253,.06);transform:translateX(3px)}.snav a:hover .lic{color:var(--cyan)}
+.snav a.on{color:var(--cyan-bright);background:linear-gradient(90deg,rgba(33,212,253,.16),transparent)}
+.snav a.on .lic{color:var(--cyan-bright);filter:drop-shadow(0 0 10px var(--glow))}
+.snav a.on::before{content:'';position:absolute;left:0;top:8px;bottom:8px;width:3px;border-radius:3px;background:var(--cyan);box-shadow:0 0 12px var(--cyan)}
+.snav .grp{font-family:'JetBrains Mono';font-size:9px;letter-spacing:2px;color:var(--dim);text-transform:uppercase;margin:14px 0 4px 13px;opacity:.7}
+.sfoot{margin-top:auto;padding-top:14px;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:8px}
+.dmain{flex:1;overflow:auto;padding:26px 34px}
+.dhero{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;flex-wrap:wrap}
+.dhero .amt{font-size:60px}.dhero .amt small{font-size:24px}
+.dhero .lab{font-family:'JetBrains Mono';font-size:11px;letter-spacing:2px;color:var(--dim);text-transform:uppercase;display:flex;gap:8px;align-items:center}
+.dactions{display:flex;gap:12px}.dactions .act{flex-direction:row;gap:9px;padding:13px 22px}.dactions .act .lic{width:22px;height:22px}.dactions .act .t{font-size:14px}
+.dgrid{display:grid;grid-template-columns:1.6fr 1fr;gap:20px;margin-top:26px;align-items:start}
+.card{border:1px solid var(--line);border-radius:18px;padding:20px;background:linear-gradient(180deg,rgba(33,212,253,.04),transparent)}
+.dassets .row{padding:13px 15px;margin-bottom:8px}
+.swap .leg{display:flex;justify-content:space-between;font-family:'JetBrains Mono';font-size:12px;color:var(--dim);margin:4px 0}.swap .leg b{color:var(--text)}
+.swap .out{font-family:'Orbitron';font-weight:700;font-size:32px;background:linear-gradient(90deg,var(--cyan-bright),var(--teal));-webkit-background-clip:text;background-clip:text;color:transparent;filter:drop-shadow(0 0 12px rgba(33,212,253,.4))}
+.swap input[type=range]{-webkit-appearance:none;width:100%;height:6px;border-radius:6px;margin:14px 0 6px;background:linear-gradient(90deg,var(--cyan) var(--p,30%),rgba(33,212,253,.15) var(--p,30%));outline:none}
+.swap input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:var(--cyan-bright);box-shadow:0 0 14px var(--glow);cursor:pointer;border:2px solid #04080c}
+.swap .go{margin-top:12px;width:100%;border:1px solid rgba(33,212,253,.4);background:linear-gradient(90deg,rgba(33,212,253,.18),rgba(0,224,198,.12));color:var(--cyan-bright);font-family:'Orbitron';font-weight:600;font-size:13px;letter-spacing:1px;padding:12px;border-radius:11px;cursor:pointer}.swap .go:hover{box-shadow:0 0 20px var(--glow)}
+.act-item{display:flex;align-items:center;gap:11px;padding:10px 0;border-bottom:1px solid rgba(33,212,253,.08)}
+.act-item .ai{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;border:1px solid var(--line)}.act-item .ai .lic{width:16px;height:16px;filter:none}
+.act-item .at{font-size:14px;font-weight:600}.act-item .as{font-family:'JetBrains Mono';font-size:11px;color:var(--dim)}.act-item .av{margin-left:auto;font-family:'JetBrains Mono';font-size:13px;font-weight:600}
+.caption{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:3;font-family:'JetBrains Mono';font-size:11px;color:var(--dim);letter-spacing:1px}.caption b{color:var(--cyan)}
+</style></head>
 <body>
-<div class="bg"></div>
-<div class="app">
-  <div class="header">
-    <div class="logo">⬡ SIGIL<span>TRON</span></div>
-    <div class="net" id="netStatus">mainnet · g0</div>
-  </div>
+<div class="scene"><div class="aurora"><i></i><i></i><i></i></div></div>
 
-  <!-- Balance Card -->
-  <div class="card">
-    <div class="card-title">💰 Balance</div>
-    <div class="balance" id="balanceDisplay">—<sub>SGL</sub></div>
-    <div style="margin-top:8px;font-size:11px;color:var(--dim)">
-      <span class="status-dot online"></span> <span id="nodeStatus">connecting…</span>
-    </div>
-  </div>
-
-  <!-- Actions -->
+<div class="phone">
+  <div class="notch"></div>
+  <div class="statusbar"><span>9:41</span><span>SIGIL·g0 · <b>H 18,742</b></span><span>▮▮▮ 5G</span></div>
+  <div class="phead"><img class="markimg" src="/icons/brand/sigil-flat.png?v=1780639379" style="width:78px;height:78px"><div class="brand">SIGIL<span>·</span>WALLET</div><button class="expand" onclick="setView('desktop')">⤢ desktop</button></div>
+  <div class="balance"><div class="lab"><span>total balance</span><span class="vbadge"><i data-lucide="badge-check"></i>verified</span></div><div class="amtbig amt" id="amt">14,302<small>.84 SIGIL</small></div><div class="sub">≈ <b>$18,594</b> · +4.2% today ▲</div></div>
   <div class="actions">
-    <button class="btn btn-primary" onclick="sendTx()">📤 Send</button>
-    <button class="btn btn-outline" onclick="receiveTx()">📥 Receive</button>
-    <button class="btn btn-gold explorer" onclick="openExplorer()">🔍 Explorer</button>
+    <div class="act"><i class="lic" data-lucide="arrow-up-from-dot"></i><span class="t">Send</span></div>
+    <div class="act"><i class="lic" data-lucide="arrow-down-to-dot"></i><span class="t">Receive</span></div>
+    <div class="act"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div>
+    <div class="act"><i class="lic" data-lucide="pickaxe"></i><span class="t">Mine</span></div>
   </div>
+  <div class="sect" style="margin:18px 16px 8px"><span>Assets</span><span style="color:var(--cyan)">4 ▾</span></div>
+  <div class="list" id="passets"></div>
+  <div class="nav"><div class="on"><i class="lic" data-lucide="wallet"></i>Wallet</div><div><i class="lic" data-lucide="arrow-left-right"></i>Swap</div><div><i class="lic" data-lucide="layers"></i>Stake</div><div><i class="lic" data-lucide="settings"></i>Settings</div></div>
+</div>
 
-  <!-- Activity Feed -->
-  <div class="card">
-    <div class="card-title">📡 Activity <span class="pulse" style="color:var(--teal)">● LIVE</span></div>
-    <div class="feed" id="activityFeed">
-      <div class="feed-item"><span class="type">init</span><span>Connecting to SIGIL node…</span></div>
+<div class="desktop">
+  <div class="gbar">
+    <div class="logo"><img class="markimg" src="/icons/brand/sigil-cyan.png?v=1780639379"><div class="brand">SIGIL<span>·</span>WALLET</div></div>
+    <div class="search"><i class="lic" data-lucide="search"></i>Search address, tx, token… <span style="margin-left:auto;opacity:.6">⌘K</span></div>
+    <div class="gspacer"></div>
+    <div class="gright">
+      <div class="net">grid online · H 18,742</div>
+      <div class="pill"><i class="lic" data-lucide="wallet" style="width:14px;height:14px;filter:none"></i><b>14,302</b> SIGIL</div>
+      <div class="agentbtn"><img class="markimg" src="/icons/brand/sigil-cyan.png?v=1780639379"><div class="at">Ask Flux</div></div>
+      <div class="avatar">◈</div>
+      <button class="collapse" onclick="setView('phone')">⤡ phone</button>
     </div>
   </div>
-
-  <div class="footer">
-    sigil-top v0.7.0 · fluxc serve :9800 · <a href="/vite-engine.html">⚡ Vite Engine</a>
+  <div class="dwrap">
+    <div class="side">
+      <div class="sidelogo"><img src="/icons/brand/sigil-cyan.png?v=1780639379" alt="SIGIL"><div class="brand">SIGIL</div></div>
+      <div class="sidecard"><div class="l">portfolio value</div><div class="amtbig" style="font-size:30px">$18,594</div><div class="d">14,302.84 SIGIL · +4.2% ▲</div></div>
+      <div class="snav">
+        <a class="on"><i class="lic" data-lucide="layout-dashboard"></i>Dashboard</a>
+        <a><i class="lic" data-lucide="wallet"></i>Assets</a>
+        <a><i class="lic" data-lucide="receipt-text"></i>Activity</a>
+        <div class="grp">Move</div>
+        <a><i class="lic" data-lucide="arrow-up-from-dot"></i>Send</a>
+        <a><i class="lic" data-lucide="arrow-down-to-dot"></i>Receive</a>
+        <a><i class="lic" data-lucide="arrow-left-right"></i>Swap</a>
+        <div class="grp">Earn</div>
+        <a><i class="lic" data-lucide="layers"></i>Stake</a>
+        <a><i class="lic" data-lucide="pickaxe"></i>Mine</a>
+        <div class="grp">System</div>
+        <a><i class="lic" data-lucide="settings"></i>Settings</a>
+      </div>
+      <div class="sfoot">
+        <div class="agentbtn" style="border-radius:14px"><img class="markimg" src="/icons/brand/sigil-cyan.png?v=1780639379"><div><div class="at">Ask Flux agent</div><div style="font-family:'JetBrains Mono';font-size:10px;color:var(--dim)">swap · send · explain</div></div></div>
+        <div style="font-family:'JetBrains Mono';font-size:10px;color:var(--dim);text-align:center">SIGIL Wallet v0 · grid g0</div>
+      </div>
+    </div>
+    <div class="dmain">
+      <div class="dhero">
+        <div><div class="lab"><span>total balance</span><span class="vbadge"><i data-lucide="badge-check"></i>verified</span></div><div class="amtbig amt" id="damt">14,302<small>.84 SIGIL</small></div></div>
+        <div class="dactions">
+          <div class="act"><i class="lic" data-lucide="arrow-up-from-dot"></i><span class="t">Send</span></div>
+          <div class="act"><i class="lic" data-lucide="arrow-down-to-dot"></i><span class="t">Receive</span></div>
+          <div class="act"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div>
+          <div class="act"><i class="lic" data-lucide="pickaxe"></i><span class="t">Mine</span></div>
+        </div>
+      </div>
+      <div class="dgrid">
+        <div class="card">
+          <div class="sect" style="margin-bottom:12px"><span>Assets · 4 holdings</span><span style="color:var(--cyan)">$18,594</span></div>
+          <div class="dassets" id="dassets"></div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:20px">
+          <div class="card swap">
+            <div class="sect" style="margin-bottom:10px"><span>Quick swap</span></div>
+            <div class="leg"><span>You pay</span><span><b id="swIn">800</b> QUG</span></div>
+            <input type="range" id="swR" min="0" max="3142" value="800" oninput="swapCalc(this.value)">
+            <div style="font-family:'JetBrains Mono';font-size:11px;color:var(--dim);text-align:right">1 QUG = 0.92 SIGIL · fee 0.3%</div>
+            <div class="leg" style="margin-top:10px"><span>You receive</span></div>
+            <div class="out" id="swOut">734.16 <span style="font-size:16px;color:var(--dim)">SIGIL</span></div>
+            <button class="go" id="swGo">⇄ SWAP 800 QUG</button>
+          </div>
+          <div class="card">
+            <div class="sect" style="margin-bottom:8px">Activity</div>
+            <div class="act-item"><div class="ai"><i class="lic" data-lucide="arrow-up-right"></i></div><div><div class="at">Sent</div><div class="as">to qnk…a91f · 2m</div></div><div class="av" style="color:var(--cyan)">−12.0</div></div>
+            <div class="act-item"><div class="ai"><i class="lic" data-lucide="arrow-down-left" style="color:var(--teal)"></i></div><div><div class="at">Received</div><div class="as">from qnk…7e02 · 1h</div></div><div class="av" style="color:var(--teal)">+40.0</div></div>
+            <div class="act-item"><div class="ai"><i class="lic" data-lucide="pickaxe"></i></div><div><div class="at">Mined</div><div class="as">block 18,740 · 3h</div></div><div class="av" style="color:var(--teal)">+5.0</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
+<div class="caption">SIGIL Wallet · <b>cyan grid</b> · <b>⤢ expand → fullscreen</b></div>
 <script>
-// Self-contained TRON wallet — no CDN deps, works fully offline
-const FEED_URL = '/sigil-status.json';
-const API_BASE = '/api/v1';
-const EXPLORER_URL = '/sigil-explorer.html';
-let pollTimer = null;
-
-function $(id){return document.getElementById(id)}
-
-function fmt(n){return n!=null?Number(n).toLocaleString(undefined,{maximumFractionDigits:8}):'—'}
-function fmtShort(h){return h?h.slice(0,8)+'…'+h.slice(-6):'—'}
-function ago(ts){if(!ts)return'';const s=Math.floor((Date.now()-ts)/1000);return s<60?s+'s':s<3600?Math.floor(s/60)+'m':Math.floor(s/3600)+'h'+' ago'}
-
-function addFeed(type,text,hash){
-  const f=$('activityFeed');
-  const d=document.createElement('div');
-  d.className='feed-item';
-  d.innerHTML=`<span class="type">${type}</span><span>${text}</span>${hash?`<span class="hash">${fmtShort(hash)}</span>`:''}`;
-  f.insertBefore(d,f.firstChild);
-  if(f.children.length>50)f.lastChild.remove();
-}
-
-async function pollStatus(){
-  try{
-    const r=await fetch(FEED_URL);
-    if(!r.ok)throw new Error(r.status);
-    const d=await r.json();
-    // sigil-status.json nests under "status"
-    const st=d.status||d;
-    // Update balance
-    const bal=parseFloat(st.supply?.replace(/,/g,''))||st.native_supply||0;
-    $('balanceDisplay').innerHTML=fmt(bal)+'<sub>SGL</sub>';
-    // Update network
-    const net=st.network_id||st.network||'g0';
-    const h=st.height||st.block_height||0;
-    $('netStatus').textContent=net+' · #'+fmt(h);
-    $('nodeStatus').innerHTML='<span class="status-dot online"></span> LIVE · height '+fmt(h)+' · peers '+(st.peers||st.peer_count||0);
-    // Feed
-    if(h>0)addFeed('block','#'+fmt(h),st.tip_hash||'');
-  }catch(e){
-    $('nodeStatus').innerHTML='<span class="status-dot offline"></span> offline · retrying…';
-    addFeed('warn','Node unreachable — retrying');
-  }
-}
-
-function sendTx(){
-  addFeed('send','Open wallet to sign transaction');
-  window.open(API_BASE+'/status','_blank');
-}
-function receiveTx(){
-  addFeed('receive','Your wallet address will appear here when wallet is connected');
-}
-function openExplorer(){
-  window.location.href=EXPLORER_URL;
-}
-
-// Start polling
-pollStatus();
-pollTimer=setInterval(pollStatus,4000);
-
-// Keyboard shortcuts
-document.addEventListener('keydown',function(e){
-  if(e.key==='s'||e.key==='S')sendTx();
-  if(e.key==='r'||e.key==='R')receiveTx();
-  if(e.key==='e'||e.key==='E')openExplorer();
-});
+  function setView(v){document.body.classList.toggle('view-desktop',v==='desktop');try{localStorage.setItem('sigil-view',v)}catch(e){}countUp(v==='desktop'?'damt':'amt');}
+  if(location.search.includes('desktop')||(()=>{try{return localStorage.getItem('sigil-view')}catch(e){return null}})()==='desktop')document.body.classList.add('view-desktop');
+  const ASSETS=[['◈','SIGIL','native · grid','9,840.0','+5.1%','up','linear-gradient(135deg,#21d4fd,#1ba1e2)','#04080c'],
+    ['Q','QUG','bridged','3,142.2','+1.8%','up','linear-gradient(135deg,#8b5cf6,#5b21b6)','#fff'],
+    ['$','USDS','stablecoin','1,200.0','0.0%','','linear-gradient(135deg,#00e0c6,#0a7c70)','#04080c'],
+    ['₿','wBTC','wrapped','0.0084','−0.6%','dn','linear-gradient(135deg,#ff9d4d,#c2410c)','#04080c']];
+  const rows=ASSETS.map(a=>`<div class="row"><div class="coin" style="background:${a[6]};color:${a[7]}">${a[0]}</div><div><div class="nm">${a[1]}</div><div class="tk">${a[2]}</div></div><div class="rt"><div class="bal">${a[3]}</div><div class="chg ${a[5]}">${a[4]}</div></div></div>`).join('');
+  document.getElementById('passets').innerHTML=rows;document.getElementById('dassets').innerHTML=rows;
+  const target=14302.84;
+  function countUp(id){const el=document.getElementById(id);if(!el)return;let t0=null;
+    function tick(t){if(!t0)t0=t;const p=Math.min(1,(t-t0)/1100);const v=target*(1-Math.pow(1-p,3));
+      el.innerHTML=v.toLocaleString('en-US',{maximumFractionDigits:0})+'<small>.'+String(Math.round((v%1)*100)).padStart(2,'0')+' SIGIL</small>';
+      if(p<1)requestAnimationFrame(tick);else el.innerHTML='14,302<small>.84 SIGIL</small>';}
+    requestAnimationFrame(tick);}
+  ['amt','damt'].forEach(countUp);
+  const RATE=0.92,FEE=0.003,MAX=3142;
+  function swapCalc(q){q=+q;const out=q*RATE*(1-FEE);
+    document.getElementById('swIn').textContent=q.toLocaleString('en-US');
+    document.getElementById('swOut').innerHTML=out.toLocaleString('en-US',{maximumFractionDigits:2})+' <span style="font-size:16px;color:var(--dim)">SIGIL</span>';
+    document.getElementById('swGo').textContent='⇄ SWAP '+q.toLocaleString('en-US')+' QUG';
+    document.getElementById('swR').style.setProperty('--p',(q/MAX*100)+'%');}
 </script>
-</body>
-</html>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script>if(window.lucide)lucide.createIcons();</script>
+</body></html>

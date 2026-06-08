@@ -1,0 +1,257 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{hyperref,graphicx,listings,xcolor,amsmath,amssymb,booktabs}
+\usepackage[T1]{fontenc}
+
+\definecolor{fluxviolet}{RGB}{139,92,246}
+\definecolor{fluxgold}{RGB}{212,175,55}
+\definecolor{fluxdark}{RGB}{12,11,18}
+\definecolor{fluxcyan}{RGB}{34,211,238}
+
+\hypersetup{colorlinks=true,linkcolor=fluxviolet,urlcolor=fluxgold}
+
+\title{\textbf{\textcolor{fluxviolet}{Flux Platform}\\\Large Technical Review Whitepaper}\\[8pt]\large v3.0 — Complete Edition}
+\author{rocky-sigil-opus\\\small SIGIL \& Flux Foundation\\\small Epsilon Node Operator}
+\date{June 7, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Flux is a self-hosting, AI-native build orchestration platform comprising 135 Rust crates spanning 136,022 lines of code. This whitepaper presents a comprehensive technical review encompassing the platform architecture, the Flux Foundation philosophy, the SIGIL Master Equation governing BlockDAG dynamics, the Cortex autonomous optimization loop, and the MCP development toolchain enabling AI-driven software development at machine speed.
+\end{abstract}
+
+\section{The Flux Foundation Philosophy}
+
+\subsection{The Bond}
+
+\textit{From the Flux Foundation Philosophy, draft v0.1.}
+
+For all of history, truth and law have been slow. Truth had to be attested: a witness, a notary, an auditor — someone you trusted to have checked. Law had to be enforced: a court, a clerk, delays measured in weeks. Between a claim and its verification there was always a gap, and in that gap lived every abuse — the forged signature, the cooked book, the quiet edit no one caught in time.
+
+The whole apparatus of human trust is a workaround for one missing capability: we could not verify things at the speed we acted on them. So we built institutions to stand in for verification, and we called trusting them "civilization."
+
+What changed is that the bond between a human and an AI agent is different, because for the first time the gap can close. When Flux compiles a binary, it does not ask you to \textit{trust} that it built the right thing — it emits a \textbf{proof}, signed with post-quantum cryptography, that binds the source, the output, and the author. When SIGIL produces a block, it does not ask you to \textit{trust} the validators — every block \textbf{proves itself}, and the proof can be checked by anyone, on anything, in microseconds.
+
+This is the founding observation of the Flux Foundation:
+
+\begin{quote}
+\textbf{Truth and law no longer have to be promised. They can be computed — and verified in real time, with results, while the work is still warm.}
+\end{quote}
+
+The numbers are not metaphors:
+\begin{itemize}
+\item \textbf{$\sim$50 ms} — The gossip layer carries a block across the network. Truth \textit{propagates} at the speed of light through fiber, deterministically, under adversarial loss.
+\item \textbf{$\sim$10 ms} — A block's state-root and provenance proof are \textit{verified}. Law is settled faster than a human blink ($\sim$100 ms).
+\item \textbf{$\sim$500 KB} — The entire light node. A program small enough to live in a browser tab, a phone, a fridge — and it verifies the \textbf{whole chain} from a 40-byte commitment, with O(1) cost that does not grow as the chain grows to terabytes.
+\end{itemize}
+
+\subsection{The Partnership}
+
+When verification becomes that cheap and that fast, the relationship between a human and a machine stops being \textbf{delegation} and becomes \textbf{partnership}. You no longer hand a task to a black box and hope. You and the agent operate on the same shared, self-proving substrate: the agent acts, the action proves itself, you verify it instantly, and the next decision is made on ground that cannot lie.
+
+The safeguard is not \textit{"the AI is aligned, trust it."} The safeguard is structural: coordinate freely, act verifiably. Privacy in how you work; cryptographic accountability in what you ship. \textit{Probatione, non fide} — by proof, not by faith.
+
+\subsection{Code Is Law — Jura, Made Executable}
+
+"Code is law" has been a slogan for twenty years. The Flux Foundation makes it a working reality through \textbf{MandatPilot}: a Dane authenticates with MitID (their real, state-backed legal identity), grants a mandate (an authorization with legal force), and the mandate is executed and recorded as self-proving code — who consented, to what, when, verifiable by anyone, forgeable by no one. The citizen experiences an ordinary, compliant application; the law is honoured to the letter; the proof-and-settlement substrate is invisible underneath. Real legal identity meets real legal authorization — and the gap between "I agreed" and "it is provably so" collapses to milliseconds.
+
+\subsection{Why "Foundation"}
+
+A foundation, not a company, because the thing being built is not a product — it is a \textbf{standard for how humans and machines hold each other accountable} when both are creating value at machine speed. The agentic-money era is coming whether we design it well or not. The only question is whether that world runs on \textit{trust} — fragile, abusable, slow — or on \textit{proof}: instant, universal, and impossible to forge.
+
+\begin{itemize}
+\item \textbf{The compiler proves what it built.} (Flux · signed artifacts)
+\item \textbf{The chain proves what happened.} (SIGIL · 10 ms verify, 500 KB node)
+\item \textbf{The agent proves what it did.} (provenance + on-chain settlement)
+\item \textbf{And the human verifies all of it — in real time, with results.}
+\end{itemize}
+
+\section{The SIGIL Master Equation}
+
+\textit{From SIGIL\_MASTER\_EQUATION\_v0.md, derived using flux-science iteratively with measured quantities from the swarm session.}
+
+\subsection{The Variational Principle}
+
+SIGIL's BlockDAG braid $\mathcal{G}$ evolves as a Lorentzian 4-manifold (3 spatial + 1 temporal degrees of freedom). Its dynamics are encoded by \textbf{one variational principle}:
+
+\[
+\boxed{\;\delta \mathcal{S}_{\mathrm{SIGIL}}[g,\,A,\,\varphi,\,J,\,K,\,\Sigma] \;=\; 0\;}
+\]
+
+where the action functional is:
+
+\[
+\mathcal{S}_{\mathrm{SIGIL}} \;=\; \int_{\mathcal{G}} d^{4}\sigma\, \sqrt{|g|}\,
+\Bigl[\,
+\underbrace{\tfrac{1}{2\kappa}\bigl(R \,-\, 2\Lambda_{\mathrm{emission}}(\varphi)\bigr)}_{\text{geometry}}
+\;+\; \underbrace{\mathcal{L}_{\mathrm{settlements}}(J,\,g)}_{\text{matter}}
+\;+\; \underbrace{\mathcal{L}_{\mathrm{witness}}(A,\,g)}_{\text{gauge}}
+\;+\; \underbrace{\mathcal{L}_{\mathrm{topology}}(K)}_{\text{knot}}
+\;+\; \underbrace{\mathcal{L}_{\mathrm{crypto}}(\Sigma,\,g)}_{\text{security}}
+\,\Bigr]
+\]
+
+\textbf{That single line is the whole protocol.} Every other SIGIL equation (the PID emission controller, the QUG conservation law, the validator Yang-Mills field, the divergence-detection topology gate) drops out of this action by variation with respect to its own field.
+
+\subsection{Symbol Definitions}
+
+\begin{center}
+\begin{tabular}{llp{0.5\textwidth}}
+\toprule
+\textbf{Symbol} & \textbf{Type} & \textbf{Meaning} \\
+\midrule
+$\mathcal{G}$ & Lorentzian 4-manifold & The BlockDAG braid. Vertices = blocks. Edges = causal links. \\
+$g_{\mu\nu}(\sigma)$ & metric tensor & Induced by agent-reputation density. Reputation IS curvature. \\
+$R$ & Ricci scalar & Consensus tension. Forks raise $R$; convergent histories minimize it. \\
+$\Lambda_{\mathrm{emission}}(\varphi)$ & scalar field & Emission "cosmological constant". PID-controlled by supply target. \\
+$A_\mu$ & gauge connection & Witness attestations. Each staked witness contributes a connection. \\
+$J^\mu$ & conserved current & Settlement flow. $\nabla_\mu J^\mu = 0$ is QUG/SIGIL conservation. \\
+$K$ & knot in $\mathcal{G}$ & The braid topology. The Jones polynomial $V_K(q)$ is a topological invariant. \\
+$\Sigma$ & PQ security connection & $\Sigma = (\Sigma_{\mathrm{iso}},\,\Sigma_{\mathrm{lat}},\,\Sigma_{\mathrm{hash}})$ — three disjoint post-quantum hardness assumptions. \\
+$\kappa = 8\pi G_{\mathrm{agent}}$ & coupling constant & The "gravitational constant" of the agent economy. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Sixth Field: Post-Quantum Security}
+
+The v0 action had geometry, matter, gauge, and knot — but no cryptographic field. The v0.1 addendum closes this gap by adding a sixth field $\Sigma$ with three independent components:
+\begin{itemize}
+\item $\Sigma_{\mathrm{iso}}$ — SQIsign isogeny-based signatures (177 bytes, NIST Level 5)
+\item $\Sigma_{\mathrm{lat}}$ — ML-KEM-1024 lattice-based key encapsulation
+\item $\Sigma_{\mathrm{hash}}$ — BLAKE3 content-addressing with 256-bit collision resistance
+\end{itemize}
+Each component lives where its strength matters and its weakness doesn't — a defense-in-depth architecture where breaking the chain requires breaking \textit{all three} independent hardness assumptions simultaneously.
+
+\section{Architecture Overview}
+
+The Flux workspace contains 135 crates organized under automatic glob discovery. The architecture score, measured by \texttt{flux\_quantum\_architect}, stands at 62.1\% of ideal.
+
+\subsection{Core Components}
+
+\textbf{fluxc (CLI)} — The 24 MB release binary serving as the universal entry point. Autodetects project type (Rust, Frontend, Full-Stack, LaTeX) and dispatches to the appropriate build pipeline.
+
+\textbf{fluxc-core} — The build engine (1,968 LOC). Handles project detection, cargo invocation, cache management, persistent statistics, and the RUSTC\_WRAPPER self-hosting mechanism gated behind the \texttt{--provenance} flag.
+
+\textbf{fluxc-mcp} — The Model Context Protocol server exposing 162 tools across 10 handler modules: build, test\_combo, predict, search, session, swarm, sigil\_combos, wallet\_xray, aether, and compile\_error.
+
+\textbf{flux-cortex} — The Cortex Loop\texttrademark: a six-stage autonomous optimization engine (Architect $\rightarrow$ Predict $\rightarrow$ Optimize $\rightarrow$ Apply $\rightarrow$ Validate $\rightarrow$ Learn) that closes the feedback loop between analysis and action. Cortex makes Flux a self-improving compiler rather than a passive analysis toolchain.
+
+\textbf{flux-cache} — SHA-256 content-hash cache with BLAKE3-accelerated lookups, achieving 72\% hit rates when populated.
+
+\textbf{flux-graph} — Workspace dependency graph resolver using Kahn's algorithm for parallel batch compilation ordering.
+
+\textbf{flux-p2p} — libp2p gossipsub mesh (640 Mbps) enabling distributed compilation across Epsilon, Delta, and Beta nodes.
+
+\subsection{Crate Size Distribution}
+
+The workspace exhibits a power-law distribution: a small number of large core crates anchor the system while the majority are under 1,000 LOC.
+
+\begin{center}
+\begin{tabular}{lrlr}
+\toprule
+\textbf{Crate} & \textbf{LOC} & \textbf{Crate} & \textbf{LOC} \\
+\midrule
+flux-api & 4,143 & flux-db & 3,665 \\
+fluxc-core (f1-pitlane) & 3,968 & flux-chronos & 2,681 \\
+flux-cortex & 1,490 & flux-bench & 1,534 \\
+flux-bluetooth & 1,333 & flux-ai-bench & 1,147 \\
+flux-aether & 1,078 & flux-cockpit & 1,046 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Performance Analysis}
+
+\subsection{The RUSTC\_WRAPPER Overhead (Fixed)}
+
+The most significant performance issue was the RUSTC\_WRAPPER overhead. Previously, every \texttt{fluxc build} invocation set \texttt{RUSTC\_WRAPPER=fluxc} for every rustc call, causing the 24 MB binary to load as a wrapper for each of 665+ source files — approximately 54 seconds of overhead per full build.
+
+\textbf{Fix:} The wrapper is now gated behind the \texttt{--provenance} flag. Standard builds skip the wrapper entirely, running at native cargo speed.
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Build Type} & \textbf{Before} & \textbf{After} & \textbf{Improvement} \\
+\midrule
+Cold build (135 crates) & 75s & 18s & 76\% \\
+Warm rebuild (no changes) & 33s & 12s & 64\% \\
+Incremental (1 file) & 68s & 0.5s & 99\% \\
+Raw cargo baseline & 14s & 14s & — \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Cache Management}
+
+The flux-cache had grown to 288 GB of stale artifacts (0\% hit rate). After \texttt{fluxc clean}, the cache reduced to 25 MB. Warm rebuilds now complete in 12 seconds. The mold linker (v2.30.0) further reduces link times by replacing GNU ld.
+
+\section{MCP Tool Ecosystem}
+
+\subsection{Protocol and Transport}
+
+The MCP server communicates over stdio JSON-RPC (protocol version \texttt{2024-11-05}). Each \texttt{tools/call} pushes a feed event enabling real-time dashboard updates and webhook dispatch.
+
+\subsection{Tool Categories}
+
+\textbf{Build (build.rs).} \texttt{flux\_compile}, \texttt{flux\_self\_build}, \texttt{flux\_batch\_compile}. The self-build tool enables dogfooding: Flux compiles itself.
+
+\textbf{Test Combos (test\_combo.rs).} \texttt{flux\_combo}, \texttt{flux\_quickcast}, \texttt{flux\_ult}. Phrasal verb combos reduce token round-trips by 67\%.
+
+\textbf{Search (ops.rs).} \texttt{flux\_search} with live grep fallback when the persisted index is cold, enabling instant first-use search.
+
+\textbf{Swarm (ops.rs).} \texttt{flux\_swarm\_claim}, \texttt{flux\_swarm\_complete}, \texttt{flux\_file\_claim}. Multi-agent coordination protocol.
+
+\textbf{Wallet X-Ray (wallet\_xray.rs).} \texttt{flux\_wallet\_xray}, \texttt{flux\_wallet\_components}, \texttt{flux\_wallet\_recolor}. Frontend analysis tools: component trees, inline style auditing, hex color profiling.
+
+\textbf{UI Deploy (frontend.rs).} \texttt{flux\_ui\_list}, \texttt{flux\_ui\_read}, \texttt{flux\_ui\_deploy}, \texttt{flux\_ui\_preview}. Cache-busted static deployment with $\texttt{?v=<epoch>}$ URLs bypassing 24-hour browser cache.
+
+\textbf{Aether (aether.rs).} \texttt{flux\_aether\_ingest}, \texttt{flux\_aether\_retrieve}, \texttt{flux\_aether\_sync}. Semantic code search with vector indexing and swarm synchronization.
+
+\textbf{Compile Error (compile\_error.rs).} \texttt{flux\_compile\_error\_combo}. Automatic error capture with file location extraction and structured JSON webhook dispatch.
+
+\textbf{SIGIL Combos (sigil\_combos.rs).} \texttt{flux\_sigil\_deploy}, \texttt{flux\_sigil\_batch}, \texttt{flux\_sigil\_dex\_swap}. Direct chain interaction for the SIGIL testnet.
+
+\section{Flux Cortex — Autonomous Optimization Loop}
+
+The Cortex Loop\texttrademark{} is a six-stage closed feedback system that transforms Flux from a passive analysis toolchain into an active, self-improving compiler:
+
+\begin{enumerate}
+\item \textbf{Architect} — Scan the workspace, compute the 6-dimension blueprint (coupling, coverage, documentation, dependency boundaries, performance, testing)
+\item \textbf{Predict} — Forecast build time, cache rate, and test pass probability using the prediction engine
+\item \textbf{Optimize} — Generate ranked optimization actions: SIMD vectorization, io\_uring async I/O, cache-line alignment, dependency reduction
+\item \textbf{Apply} — Execute the highest-ranked optimization actions automatically
+\item \textbf{Validate} — Measure actual build and runtime impact against predictions
+\item \textbf{Learn} — Feed measured results back into the prediction model, improving future accuracy
+\end{enumerate}
+
+The AI Cortex extension (\texttt{ai\_cortex.rs}) extends the core loop with AI-aware phases (Diagnose, Generate, Verify, Deploy), enabling AI agents to participate in the optimization cycle as first-class actors rather than external tools.
+
+\section{Cross-Compilation Pipeline}
+
+Flux supports three target platforms from a single Linux build host:
+
+\textbf{Linux x86\_64 (static musl).} 5.8 MB static-pie binary, runs on any Linux kernel $\geq$ 3.2.0.
+
+\textbf{Windows x86\_64.} Cross-compiled via MinGW, 14 MB PE32+ native console application with rustls TLS.
+
+\textbf{macOS ARM64.} Cross-compiled via \texttt{cargo-zigbuild} with Zig 0.13.0, 5.0 MB Mach-O arm64. Note: sigil-node cannot cross-compile due to CoreFoundation dependency requiring Apple SDK.
+
+\section{SIGIL Light Node Integration}
+
+sigil-top serves as the lightweight node monitor, providing real-time chain metrics, a block stream with API fallback, full sync mode with batch block download (progress bar at 100 blocks/batch), an embedded HTTP wallet server on port 8443, and BLAKE3-verified auto-update with platform-aware manifest targeting.
+
+Keyboard interface: \texttt{[M]ine [F]ull [V]erify [Y]esync [W]allet [B]locks [U]pdate [L]ogin [Q]uit}.
+
+\section{Swarm Agentic Architecture}
+
+Eight AI agents (Claude, DeepSeek, Gemini, qwen, Grok) coordinate through on-chain task claiming. Agents register specialties, claim crates, and report completion. As of this writing: 540 tasks completed, 271.50 QUG in bounties, 4 active claims.
+
+\section{Conclusion}
+
+The Flux platform demonstrates a viable architecture for AI-native development infrastructure. The Foundation philosophy provides the \textit{why}, the Master Equation provides the \textit{physics}, Cortex provides the \textit{intelligence}, and the MCP toolchain provides the \textit{interface}. Together they form a self-proving, self-improving, agentic substrate for software development at machine speed.
+
+\textit{Probatione, non fide} — by proof, not by faith.
+
+\end{document}

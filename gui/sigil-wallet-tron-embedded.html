@@ -11,6 +11,13 @@
   --grid:rgba(33,212,253,.16);--glow:rgba(33,212,253,.55);--gold:#fbbf24;--orange:#ff7a3c;
   --line:rgba(33,212,253,.2);--text:#d7eef5;--dim:#5f8390}
 *{box-sizing:border-box;margin:0;padding:0}
+/* tron scrollbar — cyan rail, glowing thumb (sidebar ↔ main content) */
+*{scrollbar-width:thin;scrollbar-color:#21d4fd rgba(33,212,253,.06)}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:rgba(33,212,253,.04);box-shadow:inset 1px 0 0 rgba(33,212,253,.14)}
+::-webkit-scrollbar-thumb{background:linear-gradient(180deg,#6df3ff,#1ba1e2);border-radius:7px;border:2px solid #04080c;box-shadow:0 0 8px rgba(33,212,253,.55)}
+::-webkit-scrollbar-thumb:hover{background:linear-gradient(180deg,#a6f8ff,#21d4fd);box-shadow:0 0 14px #6df3ff}
+::-webkit-scrollbar-corner{background:transparent}
 body{min-height:100vh;background:var(--bg);color:var(--text);font-family:'Rajdhani',system-ui,sans-serif;overflow:hidden}
 body:not(.view-desktop){display:grid;place-items:center}
 .scene{position:fixed;inset:0;overflow:hidden;background:var(--bg);z-index:0}
@@ -206,7 +213,7 @@ body.view-desktop .desktop{display:flex}
       </div>
       <!-- in-app SIGIL explorer (flux-search/aether), loaded in main content -->
       <div class="exbar" id="exBar"><button class="exback" onclick="showDash()">‹ Wallet</button><span style="font-family:'JetBrains Mono';font-size:12px;color:var(--cyan)">◈ SIGIL Explorer</span></div>
-      <iframe id="exView" title="SIGIL Explorer" style="display:none;position:absolute;inset:0;width:100%;height:100%;border:0;background:var(--bg);z-index:5"></iframe>
+      <iframe id="exView" title="SIGIL Explorer" style="display:none;position:absolute;top:46px;left:0;right:0;bottom:0;width:100%;height:calc(100% - 46px);border:0;background:var(--bg);z-index:5"></iframe>
     </div>
   </div>
 </div>
@@ -217,7 +224,9 @@ body.view-desktop .desktop{display:flex}
   if(location.search.includes('desktop')||(()=>{try{return localStorage.getItem('sigil-view')}catch(e){return null}})()==='desktop')document.body.classList.add('view-desktop');
 
   // ── wallet gate: need a derived address (set by enter-sigil.html) or onboard ──
-  const ADDR=(()=>{try{return localStorage.getItem('sigil-wallet-address')}catch(e){return null}})();
+  const _qp=new URLSearchParams(location.search);
+  const _qaddr=_qp.get('addr');
+  const ADDR=(_qaddr&&/^[0-9a-fA-F]{64}$/.test(_qaddr))?_qaddr.toLowerCase():(()=>{try{return localStorage.getItem('sigil-wallet-address')}catch(e){return null}})();
   // Onboard redirect WITH a loop-guard: only bounce to enter-sigil ONCE per tab
   // session. If we somehow land here again with no address (pathological / storage
   // blocked), DON'T redirect again — never ping-pong the browser into a loop.
@@ -301,6 +310,8 @@ body.view-desktop .desktop{display:flex}
 
   render();
   refresh();
+  // deep-link: ?explorer opens the SIGIL Explorer panel straight away
+  if(_qp.has('explorer')){ document.body.classList.add('view-desktop'); setTimeout(showExplorer, 80); }
 </script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
 <script>if(window.lucide)lucide.createIcons();</script>

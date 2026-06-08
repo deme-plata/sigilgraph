@@ -27,6 +27,76 @@ pub enum SyncMsg {
 // every consumer shares one verify-don't-trust backfill engine.
 use flux_p2p::backfill::{Backfill, BackfillMsg};
 
+// v0.7.7: point-to-point backfill over the flux-p2p request-response channel.
+// Wire format is shared byte-for-byte with sigil-node's server: the request is
+// `serde_json::to_vec(&BackfillReq { from, to })` and the response is
+// `serde_json::to_vec(&BackfillResp { blocks })`, where each element of `blocks`
+// is a full Block serialized as a JSON value (same `{"header":…}` shape that's
+// gossiped live on BLOCK_SYNC_TOPIC). DO NOT change these shapes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackfillReq {
+    pub from: u64,
+    pub to: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackfillResp {
+    pub blocks: Vec<serde_json::Value>,
+}
+
+/// Ingest one block (as a serde_json::Value with a `"header"` field) exactly like
+/// the live-gossip receive path: extract the SigilBlockHeaderV0, store it, and on a
+/// fresh insert bump the sync counters, push a progress event, and enqueue the
+/// stored block for the TUI/consumer. Returns true if a new block was stored.
+fn ingest_block_value(
+    v: &serde_json::Value,
+    store: &mut BlockStore,
+    state: &Arc<Mutex<P2PSyncState>>,
+    net: &flux_p2p::NetworkManager,
+    new_blocks: &Arc<Mutex<Vec<StoredBlock>>>,
+) -> bool {
+    let header_opt: Option<SigilBlockHeaderV0> = if let Some(h) = v.get("header") {
+        serde_json::from_value(h.clone()).ok()
+    } else if let Some(hj) = v.get("header_json").and_then(|x| x.as_str()) {
+        serde_json::from_str(hj).ok()
+    } else {
+        None
+    };
+    let header = match header_opt {
+        Some(h) => h,
+        None => return false,
+    };
+    let height = header.height;
+    let hash_hex = hex::encode(header.hash());
+    if store.put_block(header).unwrap_or(false) {
+        let best = store.best_height();
+        let peer_best = {
+            let mut s = state.lock().unwrap();
+            s.blocks_synced += 1;
+            s.sync_total = s.blocks_synced;
+            s.sync_height = height;
+            s.sync_hash_hex = hash_hex.clone();
+            if height > s.peer_best_height {
+                s.peer_best_height = height;
+            }
+            s.last_message_at = Some(Instant::now());
+            s.peer_best_height
+        };
+        net.push_sync_progress(height, &hash_hex, peer_best, best);
+        if let Some(block) = store.get_block(&hash_hex) {
+            new_blocks.lock().unwrap().push(block);
+        }
+        true
+    } else {
+        let mut s = state.lock().unwrap();
+        if height > s.peer_best_height {
+            s.peer_best_height = height;
+        }
+        s.last_message_at = Some(Instant::now());
+        false
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct P2PSyncState {
     pub running: bool,
@@ -122,35 +192,7 @@ impl P2PBlockSync {
                             Err(_) => continue,
                         };
                         if v.get("sync_from").is_some() { continue; }
-                        let header_opt: Option<SigilBlockHeaderV0> = if let Some(h) = v.get("header") {
-                            serde_json::from_value(h.clone()).ok()
-                        } else if let Some(hj) = v.get("header_json").and_then(|x| x.as_str()) {
-                            serde_json::from_str(hj).ok()
-                        } else { None };
-                        let header = match header_opt { Some(h) => h, None => continue };
-                        let height = header.height;
-                        let hash_hex = hex::encode(header.hash());
-                        if store.put_block(header).unwrap_or(false) {
-                            let best = store.best_height();
-                            let peer_best = {
-                                let mut s = state_clone.lock().unwrap();
-                                s.blocks_synced += 1;
-                                s.sync_total = s.blocks_synced;
-                                s.sync_height = height;
-                                s.sync_hash_hex = hash_hex.clone();
-                                if height > s.peer_best_height { s.peer_best_height = height; }
-                                s.last_message_at = Some(Instant::now());
-                                s.peer_best_height
-                            };
-                            net.push_sync_progress(height, &hash_hex, peer_best, best);
-                            if let Some(block) = store.get_block(&hash_hex) {
-                                new_blocks_clone.lock().unwrap().push(block);
-                            }
-                        } else {
-                            let mut s = state_clone.lock().unwrap();
-                            if height > s.peer_best_height { s.peer_best_height = height; }
-                            s.last_message_at = Some(Instant::now());
-                        }
+                        ingest_block_value(&v, &mut store, &state_clone, &net, &new_blocks_clone);
                     }
 
                     // Peer events from drain_events (non-block messages)
@@ -196,11 +238,15 @@ impl P2PBlockSync {
                         }
                     }
 
-                    // Fast backfill: walk genesis→tip in small chunks, asking the node to
-                    // (re)broadcast each range via SyncReq{sync_from,sync_to}. We store every
-                    // block received; the cursor LOOPS continuously (0→tip→0) so dropped
-                    // chunks get refilled — this is what actually reaches 100% (the old 5s
-                    // blind cursor stalled partway, e.g. "stuck at 22%").
+                    // Fast backfill: walk genesis→tip in chunks via the flux-p2p
+                    // request-response channel (point-to-point, NOT gossip). We pick a
+                    // connected peer, send a BackfillReq{from,to}, and ingest every block in
+                    // the BackfillResp. The cursor LOOPS continuously (0→tip→0) so dropped
+                    // chunks get refilled — this is what actually reaches 100% (the old
+                    // gossip cursor stalled partway, e.g. "stuck at 22%").
+                    //
+                    // send_request().await is inline here: this is the monitor's single sync
+                    // thread, so pausing the loop during the request is fine.
                     if last_bf.elapsed() >= Duration::from_millis(300) {
                         last_bf = Instant::now();
                         let (peer_best, have) = {
@@ -208,12 +254,27 @@ impl P2PBlockSync {
                             (s.peer_best_height, s.blocks_synced)
                         };
                         if peer_best > 0 && have < peer_best {
-                            let from = sync_cursor;
-                            let to = from + 512; // light chunk (node serves ≤512/req)
-                            let req = serde_json::json!({ "sync_from": from, "sync_to": to });
-                            if let Ok(d) = serde_json::to_vec(&req) { let _ = net.publish(BLOCK_SYNC_TOPIC, d); }
-                            sync_cursor = if to >= peer_best { 0 } else { to + 1 }; // loop to refill gaps
-                            crate::tlog!("[p2p-sync] backfill req [{from}..={to}] (have {have}/{peer_best})");
+                            if let Some(peer) = net.connected_peers().into_iter().next() {
+                                let from = sync_cursor;
+                                let to = from + 1024;
+                                let req = BackfillReq { from, to };
+                                crate::tlog!("[p2p-sync] backfill req→{peer} [{from}..={to}] (have {have}/{peer_best})");
+                                match net.send_request(peer, serde_json::to_vec(&req).unwrap()).await {
+                                    Ok(bytes) => {
+                                        if let Ok(resp) = serde_json::from_slice::<BackfillResp>(&bytes) {
+                                            let mut stored = 0u64;
+                                            for v in &resp.blocks {
+                                                if ingest_block_value(v, &mut store, &state_clone, &net, &new_blocks_clone) {
+                                                    stored += 1;
+                                                }
+                                            }
+                                            crate::tlog!("[p2p-sync] backfill resp: {} blocks ({stored} new)", resp.blocks.len());
+                                        }
+                                    }
+                                    Err(_) => {}
+                                }
+                                sync_cursor = if to >= peer_best { 0 } else { to + 1 }; // loop to refill gaps
+                            }
                         }
                     }
 

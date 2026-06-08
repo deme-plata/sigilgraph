@@ -1995,7 +1995,7 @@ fn draw_ui(f: &mut Frame, app: &App) {
         Constraint::Length(6), // Node
         Constraint::Length(6), // StateRoots
         Constraint::Length(4), // Supply
-        Constraint::Length(5), // SyncStatus
+        Constraint::Length(7), // SyncStatus (v0.7.19: 5 lines — tip/sync-bar/rate+ETA/chunk/p2p)
         Constraint::Length(7), // Mining (v0.2.35: +2 lines for hashrate + balance)
     ])
     .spacing(1)

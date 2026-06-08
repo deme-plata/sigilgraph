@@ -1896,7 +1896,7 @@ fn rev_snapshot(ws_root: &std::path::Path) -> Result<String, String> {
 
 fn local_wallet_url() -> String {
     if let Ok(u) = std::env::var("FLUX_WALLET_URL") { if !u.is_empty() { return u; } }
-    "http://localhost:9800/sigil-wallet-tron.html".into()
+    "http://localhost:9800/".into()
 }
 
 /// v0.6.0: Cortex loop result for the TUI
@@ -2541,7 +2541,7 @@ fn flux_open(raw: &str) {
     let head = head.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();
     let arg = flux_safe_arg(tail.split(['?', '#']).next().unwrap_or(""));
     match head.as_str() {
-        "" | "wallet" | "tron" | "w" => flux_open_local("/sigil-wallet-tron.html"),
+        "" | "wallet" | "tron" | "w" => flux_open_local("/"),
         "enter" | "enter-sigil" | "new" | "onboard" | "login" => flux_open_local("/enter-sigil.html"),
         "engine" | "vite" | "vite-engine" => flux_open_local("/vite-engine.html"),
         // content-addressed fetch (the existing flux:// meaning in flux-fleet)

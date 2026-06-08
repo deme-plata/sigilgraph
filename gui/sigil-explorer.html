@@ -126,46 +126,44 @@ async function doSearch(){
 }
 
 async function load(){
+  // node status via the same-origin /api proxy → stats bar
   try{
-    let r=await fetch('http://127.0.0.1:8080/api/v1/status');
-    let j=await r.json();
-    let d=j.data||{};
-    document.getElementById('live-txt').textContent='sigil-g0 · '+(d.dagknight_round||'?')+' blocks · '+(d.peer_count||0)+' peers';
+    let r=await fetch('/api/v1/status',{cache:'no-store'}); let d=await r.json();
+    var height=(d.height!=null?d.height:(d.data&&d.data.height))||0;
+    var peers=(d.peers!=null?d.peers:(d.data&&d.data.peer_count))||0;
+    var net=d.network||(d.data&&d.data.network_id)||'sigil-g0';
+    var status=d.status||(d.data&&d.data.status)||'ready';
+    document.getElementById('live-txt').textContent=net+' · h '+Number(height).toLocaleString()+' · '+peers+' peers';
     document.getElementById('stats').innerHTML=
-      '<div class="stat"><div class="lbl">Block Height</div><div class="val c">'+(d.dagknight_round||'—').toLocaleString()+'</div></div>'+
-      '<div class="stat"><div class="lbl">Network</div><div class="val v">'+(d.network_id||'sigil-g0')+'</div></div>'+
-      '<div class="stat"><div class="lbl">Peers</div><div class="val t">'+(d.peer_count||'—')+'</div></div>'+
-      '<div class="stat"><div class="lbl">Status</div><div class="val t">'+(d.status||'—')+'</div></div>'+
-      '<div class="stat"><div class="lbl">AGORA Token</div><div class="val g">DEV</div></div>'+
-      '<div class="stat"><div class="lbl">SGLD Coin</div><div class="val v">10M</div></div>';
-    if(d.multiaddrs){
-      document.getElementById('peers').innerHTML=d.multiaddrs.map(function(m){return'<span class="peer">'+m.slice(0,40)+'…</span>'}).join('');
-    }
-  }catch(e){
-    document.getElementById('live-txt').textContent='node unreachable · using disk cache';
-  }
+      '<div class="stat"><div class="lbl">Block Height</div><div class="val c">'+Number(height).toLocaleString()+'</div></div>'+
+      '<div class="stat"><div class="lbl">Network</div><div class="val v">'+net+'</div></div>'+
+      '<div class="stat"><div class="lbl">Peers</div><div class="val t">'+peers+'</div></div>'+
+      '<div class="stat"><div class="lbl">Status</div><div class="val t">'+status+'</div></div>'+
+      '<div class="stat"><div class="lbl">Index</div><div class="val g">flux-search</div></div>'+
+      '<div class="stat"><div class="lbl">Store</div><div class="val v">flux-db</div></div>';
+  }catch(e){ document.getElementById('live-txt').textContent='node unreachable'; }
 
+  // Recent Blocks ← flux-history (by_kind block)
   try{
-    let r=await fetch('/dag-blocks.json');
-    let j=await r.json();
-    var blocks=j.blocks||[];
+    let r=await fetch('/api/v1/recent?kind=block&limit=40',{cache:'no-store'}); let j=await r.json();
+    var blocks=(j.results||[]).map(function(e){return{h:e.h,hash:e.hash,prod:e.prod}});
     window._blocks=blocks;
-    if(blocks.length){
-      var recent=blocks.slice(-40).reverse();
-      document.getElementById('blocks').innerHTML=recent.map(function(b){
-        var cl='badge-d'; if(b.prod==='E')cl='badge-e'; else if(b.prod==='G')cl='badge-g'; else if(b.prod==='B')cl='badge-b';
-        return'<div class="block-row"><span class="bh">#'+b.h+'</span><span class="hash">'+b.hash+'</span><span class="badge '+cl+'">'+b.prod+'</span></div>';
-      }).join('');
-    }
+    var el=document.getElementById('blocks');
+    el.innerHTML=blocks.length?blocks.map(function(b){
+      var cl='badge-d'; if(b.prod==='E')cl='badge-e'; else if(b.prod==='G')cl='badge-g'; else if(b.prod==='B')cl='badge-b';
+      return'<div class="block-row"><span class="bh">#'+b.h+'</span><span class="hash">'+(b.hash||'')+'</span><span class="badge '+cl+'">'+(b.prod||'?')+'</span></div>';
+    }).join(''):'<div class="empty">No blocks indexed yet</div>';
   }catch(e){}
 
-  document.getElementById('txns').innerHTML=
-    '<div class="txn"><span class="type">DEPLOY</span><span class="detail"><b>AGORA Stargate</b> → sigil-g0 registry</span><span class="amt">#9b04c6ef</span></div>'+
-    '<div class="txn"><span class="type">DEPLOY</span><span class="detail"><b>SGLD DevCoin</b> → qnk1q-sigil-viktor</span><span class="amt">10,000,000</span></div>'+
-    '<div class="txn"><span class="type">STAKE</span><span class="detail"><b>Swarm</b> → fplan-sigil-v0.3.0</span><span class="amt">0.50 QUG</span></div>'+
-    '<div class="txn"><span class="type">SWAP</span><span class="detail"><b>SGL→USDS</b> via DEX router</span><span class="amt">1,000 SGL</span></div>'+
-    '<div class="txn"><span class="type">REGISTER</span><span class="detail"><b>Agent</b> qnk1q-sigil-viktor joined swarm</span><span class="amt">8 agents</span></div>'+
-    '<div class="txn"><span class="type">KEM</span><span class="detail"><b>KyberKEM-1024</b> PQ key exchange deployed</span><span class="amt">3/3 tests</span></div>';
+  // Transactions ← flux-history (mine + swap)
+  try{
+    let r=await fetch('/api/v1/recent?kind=tx&limit=20',{cache:'no-store'}); let j=await r.json();
+    var txs=j.results||[];
+    var el=document.getElementById('txns');
+    el.innerHTML=txs.length?txs.map(function(t){
+      return'<div class="txn"><span class="type">'+((t.kind||'tx').toUpperCase())+'</span><span class="detail">'+(t.title||'')+'</span><span class="amt">'+(t.content||'').slice(0,30)+'</span></div>';
+    }).join(''):'<div class="empty">No transactions yet — mine or swap to see activity</div>';
+  }catch(e){}
 }
 load();
 setInterval(load,10000);

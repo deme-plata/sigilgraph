@@ -38,6 +38,13 @@ use crate::cli::Cli;
 struct BackfillReq {
     from: u64,
     to: u64,
+    /// v0.7.27: the monitor (sigil-top) only stores HEADERS, so it asks for
+    /// headers-only — the node then replies with a bincode `Vec<SigilBlockHeaderV0>`
+    /// (≈20× smaller than full-block JSON, no JSON lexing) under the `H` magic.
+    /// Old nodes don't have this field → serde defaults it false → full-block JSON
+    /// (backward compatible). Node-to-node backfill leaves it false (needs full blocks).
+    #[serde(default)]
+    headers_only: bool,
 }
 
 /// Point-to-point backfill response: the requested block range serialized as
@@ -398,6 +405,11 @@ fn run_start() -> Result<()> {
         // gossip re-broadcast flood); heartbeat is gated to 5s below.
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
         let mut last_heartbeat = std::time::Instant::now();
+        // Rate-limit EXPENSIVE full-block serves (≤1 per 120ms) so catch-up backfill
+        // to behind followers can't saturate the single-threaded loop and starve block
+        // production. Headers-only serves (cheap, for the monitor) are NOT throttled.
+        let mut last_full_serve = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1)).unwrap_or_else(std::time::Instant::now);
         loop {
             tokio::select! {
                 _ = produce_tick.tick(), if produce => {
@@ -530,21 +542,47 @@ fn run_start() -> Result<()> {
                                 Ok(r) => r,
                                 Err(_) => continue,
                             };
+                            // Throttle costly full-block serves so they can't starve
+                            // production; the requester re-asks on its own cadence.
+                            if !req.headers_only {
+                                if last_full_serve.elapsed() < std::time::Duration::from_millis(120) {
+                                    let empty = BackfillResp { blocks: Vec::new() };
+                                    mgr.respond(request_id, serde_json::to_vec(&empty).unwrap_or_default());
+                                    continue;
+                                }
+                                last_full_serve = std::time::Instant::now();
+                            }
                             let top = chain.height().saturating_sub(1);
                             let lo = req.from;
                             // point-to-point ⇒ a bigger chunk is fine.
                             let hi = req.to.min(top).min(lo.saturating_add(8192));
-                            // Serve recent heights from the in-RAM window; older
-                            // (pruned) heights straight from the on-disk chain_log.
-                            let resp = BackfillResp {
-                                blocks: (lo..=hi)
-                                    .filter_map(|h| chain.get(h).map(|b| serde_json::to_value(b).unwrap())
-                                        .or_else(|| chain_log.get(h).map(|b| serde_json::to_value(&b).unwrap())))
-                                    .collect(),
-                            };
-                            eprintln!("↩ rr-backfill: served {} blocks [{}..={}] to {}",
-                                resp.blocks.len(), lo, hi, peer);
-                            mgr.respond(request_id, serde_json::to_vec(&resp).unwrap_or_default());
+                            // Gather the range: disk portion via ONE sequential read
+                            // (chain_log.get_range), recent portion from the in-RAM window.
+                            let wbase = chain.window_base();
+                            let mut blocks: Vec<crate::block::Block> = Vec::new();
+                            if lo < wbase {
+                                let disk_hi = hi.min(wbase.saturating_sub(1));
+                                blocks.extend(chain_log.get_range(lo, disk_hi));
+                            }
+                            for h in lo.max(wbase)..=hi {
+                                if let Some(b) = chain.get(h) { blocks.push(b.clone()); }
+                            }
+                            if req.headers_only {
+                                // monitor path: bincode Vec<header>, ~20× smaller, no JSON.
+                                let headers: Vec<_> = blocks.iter().map(|b| b.header.clone()).collect();
+                                let mut out = vec![b'H'];
+                                out.extend(bincode::serialize(&headers).unwrap_or_default());
+                                eprintln!("↩ rr-backfill: served {} HEADERS [{}..={}] to {} ({} B)",
+                                    headers.len(), lo, hi, peer, out.len());
+                                mgr.respond(request_id, out);
+                            } else {
+                                let resp = BackfillResp {
+                                    blocks: blocks.iter().map(|b| serde_json::to_value(b).unwrap()).collect(),
+                                };
+                                eprintln!("↩ rr-backfill: served {} blocks [{}..={}] to {}",
+                                    resp.blocks.len(), lo, hi, peer);
+                                mgr.respond(request_id, serde_json::to_vec(&resp).unwrap_or_default());
+                            }
                         }
                         flux_p2p::SwarmAppEvent::GossipsubMessage {
                             topic, from, data, ..
@@ -595,7 +633,7 @@ fn run_start() -> Result<()> {
                                     if last_req.elapsed() >= std::time::Duration::from_millis(300) {
                                         last_req = std::time::Instant::now();
                                         if let Some(peer) = mgr.connected_peers().into_iter().next() {
-                                            let req = BackfillReq { from: expected, to: expected.saturating_add(8192) };
+                                            let req = BackfillReq { from: expected, to: expected.saturating_add(8192), headers_only: false };
                                             eprintln!("⇪ rr-backfill: gap (have {}, saw {}) — requesting [{}..={}] from {}",
                                                 expected, h, req.from, req.to, peer);
                                             let mgr2 = std::sync::Arc::clone(&mgr);
@@ -738,6 +776,7 @@ fn run_start() -> Result<()> {
                                         let req = BackfillReq {
                                             from: expected,
                                             to: expected.saturating_add(8192),
+                                            headers_only: false,
                                         };
                                         eprintln!("⇪ rr-backfill: behind via peer-heights (have {}, net {}) — requesting [{}..={}]",
                                             expected, peer_h, req.from, req.to);

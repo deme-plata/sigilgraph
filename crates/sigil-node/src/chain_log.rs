@@ -93,6 +93,30 @@ impl ChainLog {
         serde_json::from_slice(&buf).ok()
     }
 
+    /// Read a contiguous height range `[from..=to]` from disk with ONE file open +
+    /// sequential read (vs `get()` which opens the file per height — 8192 opens/chunk
+    /// was a serve bottleneck). Stops at the end of the log.
+    pub fn get_range(&self, from: u64, to: u64) -> Vec<Block> {
+        let start = match self.offsets.get(from as usize) { Some(o) => *o, None => return Vec::new() };
+        let mut out = Vec::new();
+        let f = match File::open(&self.path) { Ok(f) => f, Err(_) => return out };
+        let mut r = BufReader::new(f);
+        if r.seek(SeekFrom::Start(start)).is_err() { return out; }
+        let last = (to as usize).min(self.offsets.len().saturating_sub(1));
+        for _ in from as usize..=last {
+            let mut lb = [0u8; 4];
+            if r.read_exact(&mut lb).is_err() { break; }
+            let n = u32::from_le_bytes(lb) as usize;
+            let mut buf = vec![0u8; n];
+            if r.read_exact(&mut buf).is_err() { break; }
+            match serde_json::from_slice::<Block>(&buf) {
+                Ok(b) => out.push(b),
+                Err(_) => break,
+            }
+        }
+        out
+    }
+
     /// Stream every block in order, invoking `f` per block. Bounded RAM (one block
     /// in flight) — used to rebuild state on recovery without loading the chain.
     pub fn replay<F: FnMut(Block)>(dir: &Path, mut f: F) -> std::io::Result<u64> {

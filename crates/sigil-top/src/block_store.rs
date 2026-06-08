@@ -135,6 +135,27 @@ impl BlockStore {
         Ok(true)
     }
 
+    /// Fast backfill store: no dupe-check read (overlapping chunks just overwrite —
+    /// idempotent), writes block + height index only. Does NOT advance the contiguous
+    /// pointer — call [`Self::advance`] ONCE after a batch (saves per-block work that
+    /// dominated ingest time). Skips the per-block `db.get` + `get_block` round-trips.
+    pub fn put_block_fast(&mut self, header: SigilBlockHeaderV0) -> Result<(), String> {
+        let hash_hex = hex::encode(header.hash());
+        let height = header.height;
+        let block = StoredBlock { header, hash_hex: hash_hex.clone(), synced_at: 0 };
+        let value = bincode::serialize(&block).map_err(|e| format!("serialize: {}", e))?;
+        self.db.put(hash_hex.as_bytes(), &value)?;
+        self.db.put(&height_key(height), hash_hex.as_bytes())?;
+        if height >= self.best_height {
+            self.best_height = height;
+            self.best_hash_hex = hash_hex;
+        }
+        Ok(())
+    }
+
+    /// Advance the contiguous pointer over consecutive heights now present (one pass).
+    pub fn advance(&mut self) { self.advance_synced(); }
+
     pub fn get_block(&self, hash_hex: &str) -> Option<StoredBlock> {
         self.db.get(hash_hex.as_bytes()).ok().flatten().and_then(|v| {
             bincode::deserialize::<StoredBlock>(&v).ok()

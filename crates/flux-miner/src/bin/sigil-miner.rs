@@ -151,6 +151,16 @@ fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<Stats>>, stop: Arc<
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+
+    // GPU utility modes (no wallet needed): enumerate devices / run the on-hardware
+    // KAT that proves the OpenCL kernel == pow.rs. The RTX-2060 validation path.
+    if args.iter().any(|a| a == "--gpu-list") {
+        gpu_list_and_exit();
+    }
+    if args.iter().any(|a| a == "--gpu-selftest") {
+        gpu_selftest_and_exit();
+    }
+
     let positional: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with("--")).collect();
     let wallet = positional
         .first()
@@ -167,17 +177,31 @@ fn main() -> anyhow::Result<()> {
         eprintln!("\n  ⛏  SIGIL MINER — dual-lane (BLAKE4 Φ + VDF Ω)\n");
         eprintln!("  usage: sigil-miner <wallet-64hex> [node-url]");
         eprintln!("     or: SIGIL_WALLET=<64hex> sigil-miner");
-        eprintln!("  flags: --headless  (plain log, no TUI)\n");
+        eprintln!("  flags: --headless     plain log, no TUI");
+        eprintln!("         --gpu          mine Lane A on the GPU (needs `gpu` build feature)");
+        eprintln!("         --gpu-list     list OpenCL GPUs");
+        eprintln!("         --gpu-selftest on-hardware BLAKE4 KAT (gpu kernel == pow.rs)\n");
         eprintln!("  default node: {DEFAULT_URL}\n");
         std::process::exit(2);
     }
 
     let headless = args.iter().any(|a| a == "--headless" || a == "--no-tui");
+    let use_gpu = args.iter().any(|a| a == "--gpu");
     let stats = Arc::new(Mutex::new(Stats::default()));
     let stop = Arc::new(AtomicBool::new(false));
     {
         let (s, st, u, w) = (stats.clone(), stop.clone(), url.clone(), wallet.clone());
-        thread::spawn(move || mining_loop(u, w, s, st));
+        if use_gpu {
+            #[cfg(feature = "gpu")]
+            thread::spawn(move || gpu_mining_loop(u, w, s, st));
+            #[cfg(not(feature = "gpu"))]
+            {
+                eprintln!("  --gpu ignored: built without the `gpu` feature — mining on CPU");
+                thread::spawn(move || mining_loop(u, w, s, st));
+            }
+        } else {
+            thread::spawn(move || mining_loop(u, w, s, st));
+        }
     }
 
     if headless {
@@ -372,4 +396,160 @@ fn draw(f: &mut Frame, stats: &Arc<Mutex<Stats>>, url: &str, wallet: &str, start
         Span::styled(err, Style::default().fg(RED)),
     ]));
     f.render_widget(footer, rows[4]);
+}
+
+// ── GPU modes ────────────────────────────────────────────────────────────────
+
+/// `--gpu-list`: enumerate OpenCL GPUs, then exit.
+fn gpu_list_and_exit() -> ! {
+    #[cfg(feature = "gpu")]
+    {
+        let devs = flux_miner::gpu::list_devices();
+        if devs.is_empty() {
+            println!("  no OpenCL GPU found (is the driver / OpenCL runtime installed?)");
+        }
+        for d in devs {
+            println!("  GPU: {}  ·  {} MB  ·  max work-group {}", d.name, d.global_mem_mb, d.max_work_group);
+        }
+    }
+    #[cfg(not(feature = "gpu"))]
+    println!("  built without GPU support — rebuild with:  --features gpu");
+    std::process::exit(0);
+}
+
+/// `--gpu-selftest`: run the on-hardware BLAKE4 KAT (GPU kernel must equal
+/// `pow::blake4_word`), then exit 0 on pass / 1 on fail.
+fn gpu_selftest_and_exit() -> ! {
+    #[cfg(feature = "gpu")]
+    {
+        match flux_miner::gpu::GpuBlake4::new() {
+            Ok(g) => {
+                println!("  GPU: {}", g.device_name);
+                match g.selftest() {
+                    Ok(true) => {
+                        println!("  ✓ BLAKE4 GPU KAT passed — kernel == pow.rs (R=7 ≡ BLAKE3, R=3)");
+                        std::process::exit(0);
+                    }
+                    Ok(false) => {
+                        println!("  ✗ BLAKE4 GPU KAT FAILED — kernel disagrees with pow.rs");
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        eprintln!("  gpu selftest error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("  gpu init failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        println!("  built without GPU support — rebuild with:  --features gpu");
+        std::process::exit(2);
+    }
+}
+
+/// `--gpu`: hybrid mining — GPU searches Lane A (BLAKE4), CPU does Lane B (VDF).
+/// Uses FULL_ROUNDS so shares pass the node's `verify_dual` (legacy blake4 == R7).
+#[cfg(feature = "gpu")]
+fn gpu_mining_loop(url: String, wallet: String, stats: Arc<Mutex<Stats>>, stop: Arc<AtomicBool>) {
+    use flux_miner::client::build_header;
+    const BATCH: usize = 1 << 20; // 1M nonces per GPU dispatch
+
+    let gpu = match flux_miner::gpu::GpuBlake4::new() {
+        Ok(g) => g,
+        Err(e) => {
+            stats.lock().unwrap().last_err = Some(format!("gpu init: {e}"));
+            return;
+        }
+    };
+    {
+        let mut s = stats.lock().unwrap();
+        push_log(&mut s.log, format!("GPU: {}", gpu.device_name));
+    }
+    let g = ModSquaring::bench_2048();
+    let rounds = flux_miner::pow::FULL_ROUNDS; // MUST match the node's verify_dual
+    let client = match MinerClient::new(Endpoints::standard(&url), wallet.clone()) {
+        Ok(c) => c,
+        Err(e) => {
+            stats.lock().unwrap().last_err = Some(format!("client init: {e}"));
+            return;
+        }
+    };
+
+    while !stop.load(Ordering::Relaxed) {
+        let c = match client.fetch_challenge() {
+            Ok(c) => c,
+            Err(e) => {
+                {
+                    let mut s = stats.lock().unwrap();
+                    s.connected = false;
+                    s.last_err = Some(format!("challenge: {e}"));
+                }
+                thread::sleep(Duration::from_secs(2));
+                continue;
+            }
+        };
+        let header = build_header(&c, &wallet);
+        let t0 = Instant::now();
+        let mut nonce_base = 0u64;
+        let mut found = None;
+        while found.is_none() && !stop.load(Ordering::Relaxed) {
+            match gpu.search(&header, c.blake4_target, rounds, nonce_base, BATCH) {
+                Ok(r) => {
+                    found = r;
+                    nonce_base = nonce_base.wrapping_add(BATCH as u64);
+                }
+                Err(e) => {
+                    stats.lock().unwrap().last_err = Some(format!("gpu search: {e}"));
+                    thread::sleep(Duration::from_secs(1));
+                    break;
+                }
+            }
+        }
+        let nonce = match found {
+            Some(n) => n,
+            None => continue,
+        };
+        let dt = t0.elapsed().as_secs_f64().max(1e-9);
+        let block = flux_miner::block_for_nonce(&header, nonce, &g, c.vdf_t); // Lane B on CPU
+        let sub = Submission { height: c.height, wallet: wallet.clone(), block };
+        let res = client.submit(&sub);
+        {
+            let mut s = stats.lock().unwrap();
+            s.connected = true;
+            s.last_err = None;
+            s.vdf_t = c.vdf_t;
+            s.last_height = c.height;
+            s.last_solve_ms = dt * 1000.0;
+            s.hashrate = nonce_base as f64 / dt; // GPU Lane-A rate
+            s.vdf_rate = c.vdf_t as f64 / dt;
+            s.solve_hist.push_back((dt * 1000.0) as u64);
+            while s.solve_hist.len() > 80 {
+                s.solve_hist.pop_front();
+            }
+            match res {
+                Ok(r) if r.accepted => {
+                    s.shares_ok += 1;
+                    push_log(&mut s.log, format!("✓ h={:<8} {:>6.0}ms  GPU ACCEPTED", c.height, dt * 1000.0));
+                }
+                Ok(r) => {
+                    s.shares_bad += 1;
+                    push_log(&mut s.log, format!("✗ h={:<8} rejected: {}", c.height, r.reason.unwrap_or_default()));
+                }
+                Err(e) => {
+                    s.shares_bad += 1;
+                    s.connected = false;
+                    push_log(&mut s.log, format!("! submit error: {e}"));
+                }
+            }
+        }
+        if let Some(b) = fetch_balance(&url, &wallet) {
+            stats.lock().unwrap().balance = b;
+        }
+    }
 }

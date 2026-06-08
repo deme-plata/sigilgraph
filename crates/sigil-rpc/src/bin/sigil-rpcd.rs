@@ -49,6 +49,10 @@ struct Node {
     /// flux-native explorer index: every tx appended as a searchable HistoryEntry
     /// (flux-db persist + flux-search TF-IDF). None if the store couldn't open.
     history: Option<flux_history::HistoryStore>,
+    /// Mining chain tip — folds every accepted dual-lane block. The per-height
+    /// challenge seed = BLAKE3(tip ‖ height), so the challenge for a future height
+    /// is UNKNOWN until the prior block is accepted → no precompute (fix #1).
+    tip_hash: [u8; 32],
 }
 
 /// Content address (blake3 CID, hex) — flux-aether's content-addressing primitive.
@@ -132,12 +136,15 @@ fn mining_reward() -> u128 {
 fn mining_blake4_target() -> u64 {
     u64::MAX >> mining_bits()
 }
-/// Deterministic per-height VDF seed (binds a challenge to its height) — same
-/// derivation as the reference flux-mining-node so one miner binary drives both.
-fn mining_seed_for(height: u64) -> [u8; 32] {
-    let mut s = [0u8; 32];
-    s[..8].copy_from_slice(&height.to_le_bytes());
-    s
+/// Per-height VDF challenge seed bound to the chain TIP: BLAKE3(tip ‖ height).
+/// Because `tip` folds the prior accepted block, the seed for height H is
+/// unknowable until H-1 lands — defeating precompute of future challenges.
+fn mining_seed(tip: &[u8; 32], height: u64) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"sigil-g0/mining-challenge/v1");
+    h.update(tip);
+    h.update(&height.to_le_bytes());
+    *h.finalize().as_bytes()
 }
 
 /// Integer sqrt (initial LP shares = √(a·b), Uniswap-V2 style).
@@ -233,7 +240,8 @@ fn bootstrap() -> Node {
         Err(e) => { eprintln!("flux-history: disabled ({e})"); None }
     };
     if let Some(h) = history.as_mut() { backfill_blocks(h); }
-    Node { state, height: 2, students: VerifiedRegistry::new(), tokens, pools, citizens: vec![CITIZEN], history }
+    let tip_hash = *blake3::hash(b"sigil-g0/mining-genesis").as_bytes();
+    Node { state, height: 2, students: VerifiedRegistry::new(), tokens, pools, citizens: vec![CITIZEN], history, tip_hash }
 }
 
 /// One-time backfill: ingest the persisted DAG block headers (dag-blocks.json) into
@@ -586,9 +594,10 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
         ("GET", "/mining/challenge") => {
             let n = node.read().unwrap();
             let h = n.height;
+            // seed binds to the CURRENT tip → unpredictable until the prior block lands.
             let c = Challenge {
                 height: h,
-                vdf_input: mining_seed_for(h),
+                vdf_input: mining_seed(&n.tip_hash, h),
                 blake4_target: mining_blake4_target(),
                 vdf_t: mining_vdf_t(),
             };
@@ -603,36 +612,47 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
                 Some(w) => w,
                 None => return bad("wallet must be 64-hex"),
             };
-            // Reconstruct the challenge this share's height was issued under
-            // (target + vdf_t fixed, seed height-derived), then run the dual-lane
-            // consensus gate (Lane A BLAKE4 ≤ target AND Lane B VDF verify).
+            let reject = |reason: String| {
+                let r = SubmitResult { accepted: false, reason: Some(reason) };
+                ok(serde_json::to_string(&r).unwrap_or_else(|_| "{}".into()))
+            };
+            // Take the write lock FIRST so the height + tip we validate against are the
+            // ones we'll advance — no TOCTOU between check and credit.
+            let mut n = node.write().unwrap();
+            let h = n.height;
+            // fix #1 (precompute): ONLY the current tip is mineable. A precomputed
+            // submission for a future/stale height is rejected here, and even at the
+            // right height its seed (BLAKE3(tip‖h)) won't match unless it was built on
+            // THIS tip — which is unknown until the prior block was accepted.
+            if sub.height != h {
+                return reject(format!("stale height: submitted {} but the mineable tip is {}", sub.height, h));
+            }
             let c = Challenge {
-                height: sub.height,
-                vdf_input: mining_seed_for(sub.height),
+                height: h,
+                vdf_input: mining_seed(&n.tip_hash, h),
                 blake4_target: mining_blake4_target(),
                 vdf_t: mining_vdf_t(),
             };
             let g = ModSquaring::bench_2048();
             if !check_submission(&g, &c, &sub) {
-                let r = SubmitResult {
-                    accepted: false,
-                    reason: Some("dual-lane verify / height / header mismatch".into()),
-                };
-                return ok(serde_json::to_string(&r).unwrap_or_else(|_| "{}".into()));
+                return reject("dual-lane verify / header mismatch (wrong tip, target, or VDF)".into());
             }
-            // Verified — credit through the SAME cap-enforced chokepoint as /mine.
-            let mut n = node.write().unwrap();
-            let h = n.height;
+            // Verified on the current tip — credit through the cap-enforced chokepoint.
             match credit_share(&mut n.state, h, miner, mining_reward()) {
                 Ok(bal) => {
+                    // Advance the tip: fold this block in so the NEXT challenge is fresh.
+                    let mut hh = blake3::Hasher::new();
+                    hh.update(b"sigil-g0/tip/v1");
+                    hh.update(&n.tip_hash);
+                    hh.update(&h.to_le_bytes());
+                    hh.update(&sub.block.blake4_hash.to_le_bytes());
+                    hh.update(&sub.block.nonce.to_le_bytes());
+                    n.tip_hash = *hh.finalize().as_bytes();
                     n.height += 1;
+                    ingest(&mut n, "mine", format!("dual-lane mine reward {} SIGIL", mining_reward()), &[miner], "dual-lane blake4+vdf");
                     ok(format!("{{\"accepted\":true,\"reason\":null,\"new_balance\":{}}}", bal))
                 }
-                // Cap hit / overflow → NOT credited; report as a rejected share.
-                Err(e) => {
-                    let r = SubmitResult { accepted: false, reason: Some(e.to_string()) };
-                    ok(serde_json::to_string(&r).unwrap_or_else(|_| "{}".into()))
-                }
+                Err(e) => reject(e.to_string()),
             }
         }
         ("POST", "/credit") => {

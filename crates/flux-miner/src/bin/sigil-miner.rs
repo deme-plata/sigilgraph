@@ -160,6 +160,18 @@ fn push_log(log: &mut VecDeque<String>, line: String) {
     }
 }
 
+/// Classical hashrate ladder: H/s · kH/s · MH/s · GH/s · TH/s · PH/s · EH/s.
+fn format_hps(hps: f64) -> String {
+    const U: [&str; 7] = ["H/s", "kH/s", "MH/s", "GH/s", "TH/s", "PH/s", "EH/s"];
+    let mut v = hps;
+    let mut i = 0;
+    while v >= 1000.0 && i < U.len() - 1 {
+        v /= 1000.0;
+        i += 1;
+    }
+    format!("{v:.2} {}", U[i])
+}
+
 /// GET {url}/api/v1/balance?wallet=… → the NATIVE balance (flat-JSON pluck).
 fn fetch_balance(url: &str, wallet: &str) -> Option<u128> {
     let u = format!("{url}/api/v1/balance?wallet={wallet}");
@@ -319,9 +331,10 @@ fn run_headless(stats: &Arc<Mutex<Stats>>, stop: &Arc<AtomicBool>, mode: &str) -
             if s.shares_ok + s.shares_bad != last_ok {
                 last_ok = s.shares_ok + s.shares_bad;
                 println!(
-                    "  [{mode}] {line}   [✓{} ✗{}]  Φ {}  bal {} SIGIL",
+                    "  [{mode}] {line}   [✓{} ✗{}]  {} (Φ {})  bal {} SIGIL",
                     s.shares_ok,
                     s.shares_bad,
+                    format_hps(s.hashrate),
                     format_flux(s.hashrate),
                     s.balance
                 );
@@ -386,9 +399,10 @@ fn draw(f: &mut Frame, stats: &Arc<Mutex<Stats>>, url: &str, wallet: &str, mode:
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // header
-            Constraint::Length(6), // stat cards
-            Constraint::Length(6), // sparkline
-            Constraint::Min(5),    // log
+            Constraint::Length(5), // stat cards · row 1 (rates)
+            Constraint::Length(5), // stat cards · row 2 (tally)
+            Constraint::Length(5), // sparkline
+            Constraint::Min(4),    // log
             Constraint::Length(1), // footer
         ])
         .split(area);
@@ -426,22 +440,31 @@ fn draw(f: &mut Frame, stats: &Arc<Mutex<Stats>>, url: &str, wallet: &str, mode:
     );
     f.render_widget(header, rows[0]);
 
-    // ── stat cards ──
-    let cols = Layout::default()
+    // ── stat cards · row 1 (the rates) ──
+    let r1 = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Ratio(1, 5),
-            Constraint::Ratio(1, 5),
-            Constraint::Ratio(1, 5),
-            Constraint::Ratio(1, 5),
-            Constraint::Ratio(1, 5),
-        ])
+        .constraints([Constraint::Ratio(1, 4); 4])
         .split(rows[1]);
-    f.render_widget(card(format_flux(s.hashrate), "Φ  POWER (BLAKE4)", VIOLET_HI), cols[0]);
-    f.render_widget(card(format_omega(s.vdf_rate), "Ω  TIME (VDF)", CYAN), cols[1]);
-    f.render_widget(card(format!("{}", s.shares_ok), "SHARES ✓", GREEN), cols[2]);
-    f.render_widget(card(format!("{}", s.shares_bad), "SHARES ✗", if s.shares_bad > 0 { RED } else { DIM }), cols[3]);
-    f.render_widget(card(format!("{}", s.balance), "BALANCE · SIGIL", GOLD), cols[4]);
+    f.render_widget(card(format_hps(s.hashrate), "HASHRATE (BLAKE4)", VIOLET_HI), r1[0]);
+    f.render_widget(card(format_flux(s.hashrate), "Φ FLUX  (1Φ=1EH/s)", VIOLET), r1[1]);
+    f.render_widget(card(format_omega(s.vdf_rate), "Ω VDF  (TIME)", CYAN), r1[2]);
+    f.render_widget(
+        card(mode.to_string(), "MODE", if mode == "GPU" { GREEN } else { CYAN }),
+        r1[3],
+    );
+
+    // ── stat cards · row 2 (the tally) ──
+    let total = s.shares_ok + s.shares_bad;
+    let accept = if total > 0 { s.shares_ok as f64 / total as f64 * 100.0 } else { 100.0 };
+    let r2 = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Ratio(1, 5); 5])
+        .split(rows[2]);
+    f.render_widget(card(format!("{}", s.shares_ok), "SHARES ✓", GREEN), r2[0]);
+    f.render_widget(card(format!("{}", s.shares_bad), "SHARES ✗", if s.shares_bad > 0 { RED } else { DIM }), r2[1]);
+    f.render_widget(card(format!("{accept:.0}%"), "ACCEPT", if accept >= 99.0 { GREEN } else { GOLD }), r2[2]);
+    f.render_widget(card(format!("{}", s.balance), "BALANCE · SIGIL", GOLD), r2[3]);
+    f.render_widget(card(format!("{}", s.last_height), "HEIGHT", VIOLET_HI), r2[4]);
 
     // ── sparkline of recent solve times ──
     let hist: Vec<u64> = s.solve_hist.iter().copied().collect();
@@ -458,13 +481,13 @@ fn draw(f: &mut Frame, stats: &Arc<Mutex<Stats>>, url: &str, wallet: &str, mode:
         )
         .data(&hist)
         .style(Style::default().fg(VIOLET));
-    f.render_widget(spark, rows[2]);
+    f.render_widget(spark, rows[3]);
 
     // ── recent shares log ──
     let log_lines: Vec<Line> = s
         .log
         .iter()
-        .take(rows[3].height.saturating_sub(2) as usize)
+        .take(rows[4].height.saturating_sub(2) as usize)
         .map(|l| {
             let color = if l.starts_with('✓') {
                 GREEN
@@ -485,7 +508,7 @@ fn draw(f: &mut Frame, stats: &Arc<Mutex<Stats>>, url: &str, wallet: &str, mode:
                 .border_style(Style::default().fg(Color::Rgb(0x2a, 0x20, 0x3a)))
                 .title(Span::styled(" recent shares ", Style::default().fg(VIOLET_HI))),
         );
-    f.render_widget(log, rows[3]);
+    f.render_widget(log, rows[4]);
 
     // ── footer ──
     let up = start.elapsed().as_secs();
@@ -498,7 +521,7 @@ fn draw(f: &mut Frame, stats: &Arc<Mutex<Stats>>, url: &str, wallet: &str, mode:
         Span::styled(update, Style::default().fg(GOLD)),
         Span::styled(err, Style::default().fg(RED)),
     ]));
-    f.render_widget(footer, rows[4]);
+    f.render_widget(footer, rows[5]);
 }
 
 // ── GPU modes ────────────────────────────────────────────────────────────────

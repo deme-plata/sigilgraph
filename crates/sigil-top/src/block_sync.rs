@@ -102,6 +102,7 @@ impl P2PBlockSync {
                 let mut block_rx = net.subscribe(BLOCK_SYNC_TOPIC);
                 let tick = Duration::from_secs(5);
                 let mut last_announce = Instant::now();
+                let mut last_bf = Instant::now();
                 let mut sync_cursor: u64 = 0;
 
                 loop {
@@ -195,27 +196,30 @@ impl P2PBlockSync {
                         }
                     }
 
-                    // Periodic announcements
-                    if last_announce.elapsed() >= tick {
-                        last_announce = Instant::now();
-                        // Pull history from the sigil-node mesh: walk genesis→tip in
-                        // chunks, asking the node to (re)broadcast each range via its
-                        // SyncReq{sync_from,sync_to}. We store every block we receive, so
-                        // the DB really fills (was a no-op + fake "complete" before).
-                        let best = store.best_height();
+                    // Fast backfill: walk genesis→tip in small chunks, asking the node to
+                    // (re)broadcast each range via SyncReq{sync_from,sync_to}. We store every
+                    // block received; the cursor LOOPS continuously (0→tip→0) so dropped
+                    // chunks get refilled — this is what actually reaches 100% (the old 5s
+                    // blind cursor stalled partway, e.g. "stuck at 22%").
+                    if last_bf.elapsed() >= Duration::from_millis(300) {
+                        last_bf = Instant::now();
                         let (peer_best, have) = {
                             let s = state_clone.lock().unwrap();
                             (s.peer_best_height, s.blocks_synced)
                         };
-                        if peer_best > 0 && have <= peer_best {
+                        if peer_best > 0 && have < peer_best {
                             let from = sync_cursor;
-                            let to = peer_best.min(from + 2000);
+                            let to = from + 512; // light chunk (node serves ≤512/req)
                             let req = serde_json::json!({ "sync_from": from, "sync_to": to });
                             if let Ok(d) = serde_json::to_vec(&req) { let _ = net.publish(BLOCK_SYNC_TOPIC, d); }
-                            sync_cursor = if to >= peer_best { 0 } else { to + 1 }; // loop to fill gaps
-                            crate::tlog!("[p2p-sync] backfill req [{from}..={to}] (have {have}/{peer_best}, tip {best})");
+                            sync_cursor = if to >= peer_best { 0 } else { to + 1 }; // loop to refill gaps
+                            crate::tlog!("[p2p-sync] backfill req [{from}..={to}] (have {have}/{peer_best})");
                         }
+                    }
 
+                    // Slow announce: peer-count refresh.
+                    if last_announce.elapsed() >= tick {
+                        last_announce = Instant::now();
                         state_clone.lock().unwrap().peer_count = net.peer_count();
                     }
 

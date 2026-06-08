@@ -37,6 +37,11 @@ use flux_p2p::backfill::{Backfill, BackfillMsg};
 pub struct BackfillReq {
     pub from: u64,
     pub to: u64,
+    /// v0.7.27: the monitor only stores headers — ask for headers-only so the node
+    /// replies with a compact bincode `Vec<SigilBlockHeaderV0>` (≈20× less wire, no
+    /// JSON to lex). Old nodes ignore it and reply with full-block JSON (we fall back).
+    #[serde(default)]
+    pub headers_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,6 +197,10 @@ impl P2PBlockSync {
                 let mut last_announce = Instant::now();
                 let mut last_bf = Instant::now();
                 let mut sync_cursor: u64 = resume_h; // continue from persisted tip, not 0
+                // Per-peer consecutive-timeout counter: a behind/slow peer (can't serve
+                // the range) is benched after 2 misses so it stops gating cycles; we
+                // retry the whole set when none are healthy. Converges to the fast peers.
+                let mut peer_fails: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
 
                 loop {
                     if stop_rx.try_recv().is_ok() {
@@ -275,47 +284,88 @@ impl P2PBlockSync {
                             (s.peer_best_height, s.blocks_synced)
                         };
                         if peer_best > 0 && have < peer_best {
-                            let peers = net.connected_peers();
-                            if !peers.is_empty() {
+                            let all_peers = net.connected_peers();
+                            // Route only to peers that are actually serving: bench a peer
+                            // after 2 consecutive misses (behind/slow → can't serve the
+                            // range) so it stops gating cycles. Retry the whole set when
+                            // none are healthy. Converges to the fast peers (e.g. epsilon).
+                            let mut candidates: Vec<_> = all_peers.iter().cloned()
+                                .filter(|p| *peer_fails.get(&p.to_string()).unwrap_or(&0) < 2).collect();
+                            if candidates.is_empty() && !all_peers.is_empty() {
+                                peer_fails.clear();
+                                candidates = all_peers.clone();
+                            }
+                            if !candidates.is_empty() {
                                 const CHUNK: u64 = 8192;
-                                // Walk FORWARD from the contiguous synced_to (never loop to
-                                // 0). Each cycle requests N consecutive chunks starting there;
-                                // store.put_block advances synced_to as the gap fills, so the
-                                // next cycle resumes at the new tip. A failed/slow chunk just
-                                // stalls synced_to at the gap → retried next cycle (peer
-                                // assignment ROTATES so no single slow peer permanently blocks).
+                                // Walk FORWARD from the contiguous synced_to; one consecutive
+                                // chunk per healthy peer, rotating which peer gets the lead chunk.
                                 let cursor = store.synced_to();
                                 state_clone.lock().unwrap().sync_cursor = cursor; // TUI
                                 let netref = &net;
-                                let np = peers.len();
-                                let reqs = (0..np).map(|i| {
+                                let nc = candidates.len();
+                                let rot = sync_cursor as usize;
+                                let reqs = (0..nc).map(|i| {
                                     let from = cursor + i as u64 * CHUNK;
-                                    let peer = peers[(i + sync_cursor as usize) % np]; // rotate
-                                    let payload = serde_json::to_vec(&BackfillReq { from, to: from + CHUNK }).unwrap();
-                                    async move { netref.send_request(peer, payload).await }
+                                    let peer = candidates[(i + rot) % nc];
+                                    let payload = serde_json::to_vec(&BackfillReq { from, to: from + CHUNK, headers_only: true }).unwrap();
+                                    // 3s cap so a slow/dead peer can't gate the cycle.
+                                    async move {
+                                        let r = match tokio::time::timeout(Duration::from_secs(3), netref.send_request(peer, payload)).await {
+                                            Ok(Ok(bytes)) => Some(bytes),
+                                            _ => None,
+                                        };
+                                        (peer, r)
+                                    }
                                 });
-                                crate::tlog!("[p2p-sync] backfill: {} parallel reqs from {} (have {have}/{peer_best})", np, cursor);
+                                crate::tlog!("[p2p-sync] backfill: {} reqs ({} healthy/{} peers) from {} (have {have}/{peer_best})", nc, candidates.len(), all_peers.len(), cursor);
+                                let t_net0 = Instant::now();
                                 let results = futures::future::join_all(reqs).await;
-                                for r in results {
-                                    match r {
-                                        Ok(bytes) => {
-                                            if let Ok(resp) = serde_json::from_slice::<BackfillResp>(&bytes) {
-                                                let hs: Vec<u64> = resp.blocks.iter()
-                                                    .filter_map(|v| v.get("header").and_then(|h| h.get("height")).and_then(|x| x.as_u64()))
-                                                    .collect();
-                                                crate::tlog!("[p2p-sync] resp: {} blocks, h {:?}..{:?}", resp.blocks.len(), hs.iter().min(), hs.iter().max());
-                                                for v in &resp.blocks {
-                                                    ingest_block_value(v, &mut store, &state_clone, &net, &new_blocks_clone);
+                                let t_net = t_net0.elapsed();
+                                let t_ing0 = Instant::now();
+                                // Lean batch ingest: store via the fast path, advance + update
+                                // TUI state ONCE. Track per-peer responsiveness.
+                                let mut got = 0usize;
+                                for (peer, r) in results {
+                                    let bytes = match r {
+                                        Some(b) => { peer_fails.insert(peer.to_string(), 0); b }
+                                        None => { *peer_fails.entry(peer.to_string()).or_insert(0) += 1; continue; }
+                                    };
+                                    if bytes.first() == Some(&b'H') {
+                                        // headers-only bincode (new node, fast path)
+                                        match bincode::deserialize::<Vec<sigil_header::SigilBlockHeaderV0>>(&bytes[1..]) {
+                                            Ok(headers) => {
+                                                for header in headers { let _ = store.put_block_fast(header); got += 1; }
+                                            }
+                                            Err(_) => crate::tlog!("[p2p-sync] resp: bad header bincode ({} B)", bytes.len()),
+                                        }
+                                    } else if let Ok(resp) = serde_json::from_slice::<BackfillResp>(&bytes) {
+                                        // full-block JSON (old node, fallback)
+                                        for v in &resp.blocks {
+                                            if let Some(h) = v.get("header") {
+                                                if let Ok(header) = serde_json::from_value::<sigil_header::SigilBlockHeaderV0>(h.clone()) {
+                                                    let _ = store.put_block_fast(header);
+                                                    got += 1;
                                                 }
-                                            } else {
-                                                crate::tlog!("[p2p-sync] resp: unparseable ({} bytes)", bytes.len());
                                             }
                                         }
-                                        Err(e) => crate::tlog!("[p2p-sync] req FAILED: {e}"),
+                                    } else {
+                                        crate::tlog!("[p2p-sync] resp: unparseable ({} bytes)", bytes.len());
                                     }
                                 }
+                                store.advance();
                                 let now_synced = store.synced_to();
-                                crate::tlog!("[p2p-sync] backfill: synced_to {} → {}", cursor, now_synced);
+                                {
+                                    let mut s = state_clone.lock().unwrap();
+                                    s.blocks_synced = now_synced;
+                                    s.sync_total = now_synced;
+                                    s.sync_cursor = now_synced;
+                                    s.sync_height = now_synced;
+                                    s.fetched_total += got as u64;
+                                    if now_synced > s.peer_best_height { s.peer_best_height = now_synced; }
+                                    s.last_message_at = Some(Instant::now());
+                                }
+                                crate::tlog!("[p2p-sync] CYCLE: {} blk · net {:?} · ingest {:?} · synced {} → {}",
+                                    got, t_net, t_ing0.elapsed(), cursor, now_synced);
                                 sync_cursor = sync_cursor.wrapping_add(1); // rotation counter
                             }
                         }

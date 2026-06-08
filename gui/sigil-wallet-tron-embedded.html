@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SIGIL TRON Wallet</title>
+<style>
+:root{--bg:#04080c;--cyan:#21d4fd;--gold:#fbbf24;--teal:#00e0c6;--dim:#5f8390;--text:#d7eef5;--card:#0a1219;--glow:rgba(33,212,253,.55)}
+*{box-sizing:border-box;margin:0;padding:0}
+body{min-height:100vh;background:var(--bg);color:var(--text);font-family:'JetBrains Mono','Courier New',monospace;display:grid;place-items:center;overflow-x:hidden}
+.bg{position:fixed;inset:0;background:radial-gradient(ellipse at 30% 20%,rgba(33,212,253,.08),transparent 60%),radial-gradient(ellipse at 70% 80%,rgba(0,224,198,.06),transparent 60%),var(--bg);z-index:0}
+.app{position:relative;z-index:1;width:100%;max-width:480px;padding:20px;display:flex;flex-direction:column;gap:16px}
+.header{text-align:center;padding:10px 0}
+.logo{font-family:'Orbitron',system-ui;font-size:28px;font-weight:900;letter-spacing:3px;background:linear-gradient(135deg,var(--cyan),var(--teal));-webkit-background-clip:text;-webkit-text-fill-color:transparent;filter:drop-shadow(0 0 12px var(--glow))}
+.logo span{color:var(--gold);-webkit-text-fill-color:var(--gold)}
+.net{display:inline-flex;align-items:center;gap:6px;font-size:10px;color:var(--teal);border:1px solid rgba(0,224,198,.35);border-radius:999px;padding:4px 12px;margin-top:8px;background:rgba(0,224,198,.08)}
+.net::before{content:'';width:7px;height:7px;border-radius:50%;background:var(--teal);animation:blink 1.8s infinite}
+@keyframes blink{50%{opacity:.25}}
+.card{background:var(--card);border:1px solid rgba(33,212,253,.15);border-radius:16px;padding:20px;transition:.2s}
+.card:hover{border-color:rgba(33,212,253,.35);box-shadow:0 0 24px rgba(33,212,253,.08)}
+.card-title{font-size:10px;text-transform:uppercase;letter-spacing:2px;color:var(--dim);margin-bottom:10px}
+.balance{font-size:36px;font-weight:700;color:var(--cyan);text-shadow:0 0 18px var(--glow)}
+.balance sub{font-size:16px;color:var(--dim);margin-left:4px}
+.row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(33,212,253,.08);font-size:13px}
+.row:last-child{border-bottom:0}
+.label{color:var(--dim)}
+.value{color:var(--text);font-weight:600}
+.value.gold{color:var(--gold)}
+.value.teal{color:var(--teal)}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.btn{all:unset;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;padding:14px;border-radius:12px;font-size:13px;font-weight:700;letter-spacing:1px;text-transform:uppercase;transition:.2s;border:1px solid transparent}
+.btn-primary{background:linear-gradient(135deg,var(--cyan),#1ba1e2);color:#04080c;border-color:var(--cyan);box-shadow:0 0 16px rgba(33,212,253,.25)}
+.btn-primary:hover{transform:translateY(-2px);box-shadow:0 0 28px rgba(33,212,253,.45)}
+.btn-outline{background:transparent;border-color:rgba(33,212,253,.25);color:var(--cyan)}
+.btn-outline:hover{background:rgba(33,212,253,.08);border-color:var(--cyan)}
+.btn-gold{background:linear-gradient(135deg,var(--gold),#d97706);color:#04080c;border-color:var(--gold)}
+.btn-gold:hover{transform:translateY(-2px);box-shadow:0 0 20px rgba(251,191,36,.3)}
+.explorer{grid-column:span 2}
+.feed{max-height:200px;overflow-y:auto;font-size:11px;scrollbar-width:thin;scrollbar-color:var(--dim) transparent}
+.feed-item{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(33,212,253,.05);color:var(--dim)}
+.feed-item .type{color:var(--teal);text-transform:uppercase;font-weight:700;font-size:10px;letter-spacing:1px}
+.feed-item .hash{font-family:'JetBrains Mono',monospace;color:var(--text);font-size:10px}
+.footer{text-align:center;font-size:10px;color:var(--dim);padding:10px}
+.footer a{color:var(--cyan);text-decoration:none}
+.pulse{animation:pulse 2s infinite}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
+.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.status-dot.online{background:var(--teal);box-shadow:0 0 8px var(--teal)}
+.status-dot.offline{background:#ef4444}
+</style>
+</head>
+<body>
+<div class="bg"></div>
+<div class="app">
+  <div class="header">
+    <div class="logo">⬡ SIGIL<span>TRON</span></div>
+    <div class="net" id="netStatus">mainnet · g0</div>
+  </div>
+
+  <!-- Balance Card -->
+  <div class="card">
+    <div class="card-title">💰 Balance</div>
+    <div class="balance" id="balanceDisplay">—<sub>SGL</sub></div>
+    <div style="margin-top:8px;font-size:11px;color:var(--dim)">
+      <span class="status-dot online"></span> <span id="nodeStatus">connecting…</span>
+    </div>
+  </div>
+
+  <!-- Actions -->
+  <div class="actions">
+    <button class="btn btn-primary" onclick="sendTx()">📤 Send</button>
+    <button class="btn btn-outline" onclick="receiveTx()">📥 Receive</button>
+    <button class="btn btn-gold explorer" onclick="openExplorer()">🔍 Explorer</button>
+  </div>
+
+  <!-- Activity Feed -->
+  <div class="card">
+    <div class="card-title">📡 Activity <span class="pulse" style="color:var(--teal)">● LIVE</span></div>
+    <div class="feed" id="activityFeed">
+      <div class="feed-item"><span class="type">init</span><span>Connecting to SIGIL node…</span></div>
+    </div>
+  </div>
+
+  <div class="footer">
+    sigil-top v0.7.0 · fluxc serve :9800 · <a href="/vite-engine.html">⚡ Vite Engine</a>
+  </div>
+</div>
+
+<script>
+// Self-contained TRON wallet — no CDN deps, works fully offline
+const FEED_URL = '/sigil-status.json';
+const API_BASE = '/api/v1';
+const EXPLORER_URL = '/sigil-explorer.html';
+let pollTimer = null;
+
+function $(id){return document.getElementById(id)}
+
+function fmt(n){return n!=null?Number(n).toLocaleString(undefined,{maximumFractionDigits:8}):'—'}
+function fmtShort(h){return h?h.slice(0,8)+'…'+h.slice(-6):'—'}
+function ago(ts){if(!ts)return'';const s=Math.floor((Date.now()-ts)/1000);return s<60?s+'s':s<3600?Math.floor(s/60)+'m':Math.floor(s/3600)+'h'+' ago'}
+
+function addFeed(type,text,hash){
+  const f=$('activityFeed');
+  const d=document.createElement('div');
+  d.className='feed-item';
+  d.innerHTML=`<span class="type">${type}</span><span>${text}</span>${hash?`<span class="hash">${fmtShort(hash)}</span>`:''}`;
+  f.insertBefore(d,f.firstChild);
+  if(f.children.length>50)f.lastChild.remove();
+}
+
+async function pollStatus(){
+  try{
+    const r=await fetch(FEED_URL);
+    if(!r.ok)throw new Error(r.status);
+    const d=await r.json();
+    // sigil-status.json nests under "status"
+    const st=d.status||d;
+    // Update balance
+    const bal=parseFloat(st.supply?.replace(/,/g,''))||st.native_supply||0;
+    $('balanceDisplay').innerHTML=fmt(bal)+'<sub>SGL</sub>';
+    // Update network
+    const net=st.network_id||st.network||'g0';
+    const h=st.height||st.block_height||0;
+    $('netStatus').textContent=net+' · #'+fmt(h);
+    $('nodeStatus').innerHTML='<span class="status-dot online"></span> LIVE · height '+fmt(h)+' · peers '+(st.peers||st.peer_count||0);
+    // Feed
+    if(h>0)addFeed('block','#'+fmt(h),st.tip_hash||'');
+  }catch(e){
+    $('nodeStatus').innerHTML='<span class="status-dot offline"></span> offline · retrying…';
+    addFeed('warn','Node unreachable — retrying');
+  }
+}
+
+function sendTx(){
+  addFeed('send','Open wallet to sign transaction');
+  window.open(API_BASE+'/status','_blank');
+}
+function receiveTx(){
+  addFeed('receive','Your wallet address will appear here when wallet is connected');
+}
+function openExplorer(){
+  window.location.href=EXPLORER_URL;
+}
+
+// Start polling
+pollStatus();
+pollTimer=setInterval(pollStatus,4000);
+
+// Keyboard shortcuts
+document.addEventListener('keydown',function(e){
+  if(e.key==='s'||e.key==='S')sendTx();
+  if(e.key==='r'||e.key==='R')receiveTx();
+  if(e.key==='e'||e.key==='E')openExplorer();
+});
+</script>
+</body>
+</html>

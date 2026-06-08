@@ -12,6 +12,8 @@
 //!   GET  /pools                                    (the bootstrapped pool)
 //!   POST /swap   {"from":HEX,"pool":HEX,"dir":"AtoB|BtoA","amount_in":N,"min_out":N}
 //!   POST /mine   {"miner":HEX,"header":"str","nonce":N,"difficulty":N,"reward":N}
+//!   GET  /api/v1/mining/challenge?wallet=HEX64   → dual-lane Challenge (flux-miner)
+//!   POST /api/v1/mining/submit  {Submission}     → SubmitResult (BLAKE4 Φ + VDF Ω)
 //!   POST /credit {"operator_pool":HEX,"pool_amount":N,"verifiers":[HEX,...]}
 
 use std::io::{Read, Write};
@@ -19,10 +21,12 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, RwLock};
 use std::thread;
 
+use flux_miner::client::{check_submission, Challenge, Submission, SubmitResult};
+use flux_vdf::ModSquaring;
 use sigil_dex::SwapDirection;
 use sigil_rpc::nation;
 use sigil_rpc::onboard::{self, VerifiedRegistry};
-use sigil_rpc::{credit_light_verifiers, execute_swap, submit_share};
+use sigil_rpc::{credit_light_verifiers, credit_share, execute_swap, submit_share};
 use sigil_state::{
     commit_state_transition, PoolId, PoolState, SigilState, StateMutation, StateTransition,
     TokenId, WalletId, NATIVE,
@@ -73,6 +77,35 @@ fn trader(i: u8) -> WalletId {
     let mut w = [0xA0; 32];
     w[31] = i;
     w
+}
+
+// ── Dual-lane mining (BLAKE4 Φ + VDF Ω) params ───────────────────────────────
+// These define the `/api/v1/mining/{challenge,submit}` work and MUST match the
+// flux-miner client's group (ModSquaring::bench_2048) + the reference
+// flux-mining-node defaults, so the same `flux-miner mine <url> <wallet>` binary
+// drives sigil-rpcd unchanged. Operator-tunable via env.
+const MINING_BLAKE4_BITS: u32 = 16; // BLAKE4 target = u64::MAX >> bits (Lane A)
+const MINING_VDF_T: u64 = 600; // sequential VDF squarings per share (Lane B)
+const MINING_REWARD: u128 = 50; // NATIVE coinbase per accepted share (cap-enforced)
+
+fn mining_bits() -> u32 {
+    std::env::var("SIGIL_MINING_BLAKE4_BITS").ok().and_then(|s| s.parse().ok()).unwrap_or(MINING_BLAKE4_BITS)
+}
+fn mining_vdf_t() -> u64 {
+    std::env::var("SIGIL_MINING_VDF_T").ok().and_then(|s| s.parse().ok()).unwrap_or(MINING_VDF_T)
+}
+fn mining_reward() -> u128 {
+    std::env::var("SIGIL_MINING_REWARD").ok().and_then(|s| s.parse().ok()).unwrap_or(MINING_REWARD)
+}
+fn mining_blake4_target() -> u64 {
+    u64::MAX >> mining_bits()
+}
+/// Deterministic per-height VDF seed (binds a challenge to its height) — same
+/// derivation as the reference flux-mining-node so one miner binary drives both.
+fn mining_seed_for(height: u64) -> [u8; 32] {
+    let mut s = [0u8; 32];
+    s[..8].copy_from_slice(&height.to_le_bytes());
+    s
 }
 
 /// Integer sqrt (initial LP shares = √(a·b), Uniswap-V2 style).
@@ -395,6 +428,63 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
                     }
                 }
                 None => bad("miner must be 64-hex"),
+            }
+        }
+        // ── Dual-lane miner (flux-miner): the BLAKE4 Φ + VDF Ω work surface. ──
+        // GET issues a height-bound challenge; POST verifies the solved block via
+        // flux-miner's shared `check_submission` gate, then credits through the
+        // cap-enforced money chokepoint. The wallet is bound into the header at
+        // solve time, so a share can't be re-pointed to a different miner.
+        ("GET", "/mining/challenge") => {
+            let n = node.read().unwrap();
+            let h = n.height;
+            let c = Challenge {
+                height: h,
+                vdf_input: mining_seed_for(h),
+                blake4_target: mining_blake4_target(),
+                vdf_t: mining_vdf_t(),
+            };
+            ok(serde_json::to_string(&c).unwrap_or_else(|_| "{}".into()))
+        }
+        ("POST", "/mining/submit") => {
+            let sub: Submission = match serde_json::from_str(body) {
+                Ok(s) => s,
+                Err(e) => return bad(&format!("bad submission json: {e}")),
+            };
+            let miner = match hex32(&sub.wallet) {
+                Some(w) => w,
+                None => return bad("wallet must be 64-hex"),
+            };
+            // Reconstruct the challenge this share's height was issued under
+            // (target + vdf_t fixed, seed height-derived), then run the dual-lane
+            // consensus gate (Lane A BLAKE4 ≤ target AND Lane B VDF verify).
+            let c = Challenge {
+                height: sub.height,
+                vdf_input: mining_seed_for(sub.height),
+                blake4_target: mining_blake4_target(),
+                vdf_t: mining_vdf_t(),
+            };
+            let g = ModSquaring::bench_2048();
+            if !check_submission(&g, &c, &sub) {
+                let r = SubmitResult {
+                    accepted: false,
+                    reason: Some("dual-lane verify / height / header mismatch".into()),
+                };
+                return ok(serde_json::to_string(&r).unwrap_or_else(|_| "{}".into()));
+            }
+            // Verified — credit through the SAME cap-enforced chokepoint as /mine.
+            let mut n = node.write().unwrap();
+            let h = n.height;
+            match credit_share(&mut n.state, h, miner, mining_reward()) {
+                Ok(bal) => {
+                    n.height += 1;
+                    ok(format!("{{\"accepted\":true,\"reason\":null,\"new_balance\":{}}}", bal))
+                }
+                // Cap hit / overflow → NOT credited; report as a rejected share.
+                Err(e) => {
+                    let r = SubmitResult { accepted: false, reason: Some(e.to_string()) };
+                    ok(serde_json::to_string(&r).unwrap_or_else(|_| "{}".into()))
+                }
             }
         }
         ("POST", "/credit") => {

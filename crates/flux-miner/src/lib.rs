@@ -13,7 +13,11 @@
 use flux_vdf::{eval, verify, VdfGroup, VdfProof};
 
 pub mod client;
+/// The light ECONOMIC node (price + arb + DCA) — needs flux-market + flux-fold.
+#[cfg(feature = "market")]
 pub mod light;
+/// The HTTP self-updater — needs reqwest, so it rides the `client` feature.
+#[cfg(feature = "client")]
 pub mod updater;
 
 // ── BLAKE4: the PoW hash (BLAKE3 core, Flux-parallelized) ───────────────────

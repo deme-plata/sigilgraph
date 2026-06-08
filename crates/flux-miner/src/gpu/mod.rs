@@ -257,6 +257,17 @@ impl GpuBlake4 {
         Ok(all_ok)
     }
 
+    /// Run ONE real `search()` (target = MAX so any work-item wins) — exercises the
+    /// exact mining kernel path (buffers → enqueue → read) and returns the winning
+    /// nonce, or the NAMED failing OpenCL call. This is what mining actually does.
+    pub fn search_probe(&self) -> anyhow::Result<u64> {
+        let header = [0x5au8; 32];
+        match self.search(&header, u64::MAX, crate::pow::FULL_ROUNDS, 0, 1 << 20)? {
+            Some(n) => Ok(n),
+            None => Err(anyhow::anyhow!("search ran but found no winner (impossible with MAX target)")),
+        }
+    }
+
     /// Lane A: search `batch` nonces from `nonce_base` for one whose
     /// BLAKE4(header‖nonce) word `<= target` at `rounds` rounds. Returns the
     /// winning nonce, or `None` if the whole batch missed.
@@ -287,6 +298,10 @@ impl GpuBlake4 {
                     .map_err(|e| anyhow::anyhow!("write found_flag: {e}"))?;
                 self.queue.enqueue_write_buffer(&mut found_nonce, CL_BLOCKING, 0, &[0 as cl_ulong], &[])
                     .map_err(|e| anyhow::anyhow!("write found_nonce: {e}"))?;
+                // explicit work-group size (NVIDIA can reject a NULL local size on
+                // a huge 1-D global range); global rounded up to a multiple of local.
+                let local = 64usize;
+                let global = batch.div_ceil(local) * local;
                 ExecuteKernel::new(&self.kernel)
                     .set_arg(&base_buf)
                     .set_arg(&hlen)
@@ -296,9 +311,10 @@ impl GpuBlake4 {
                     .set_arg(&(block_len as cl_uint))
                     .set_arg(&found_nonce)
                     .set_arg(&found_flag)
-                    .set_global_work_size(batch)
+                    .set_global_work_size(global)
+                    .set_local_work_size(local)
                     .enqueue_nd_range(&self.queue)
-                    .map_err(|e| anyhow::anyhow!("enqueue_nd_range(global={batch}): {e}"))?
+                    .map_err(|e| anyhow::anyhow!("enqueue_nd_range(global={global},local={local}): {e}"))?
                     .wait()
                     .map_err(|e| anyhow::anyhow!("kernel wait: {e}"))?;
                 let mut flag = [0 as cl_int; 1];

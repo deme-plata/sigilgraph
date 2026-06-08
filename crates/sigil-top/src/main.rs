@@ -1403,57 +1403,25 @@ impl App {
                 }
             }
         }
-        // v0.7.5 (fixed 2026-06-08): un-nested — this full-sync block was trapped
-        // inside the blocks.is_empty() fallback path, so [F] never ran when the feed
-        // returned blocks. Now runs at refresh() top level. (Pulls recent-N via
-        // /v1/blocks/recent; a true genesis→tip climb needs paged ranges — Tier 2.)
-        if self.full_sync && self.online && !self.full_sync_active && self.st.height > 0 {
-            self.full_sync_target = self.st.height;
-            if self.full_sync_height == 0 && self.synced_height > 0 {
-                self.full_sync_height = self.synced_height; // start from tip-verified height
-            }
-            if self.full_sync_height < self.full_sync_target {
-                self.full_sync_active = true;
-                let batch = 200.min(self.full_sync_target - self.full_sync_height);
-                let api = self.cfg.api.trim_end_matches('/').to_string();
-                let client = reqwest::blocking::Client::builder()
-                    .timeout(Duration::from_secs(30))
-                    .danger_accept_invalid_certs(true)
-                    .build();
-                if let Ok(client) = client {
-                    let url = format!("{}/v1/blocks/recent?limit={}", api, batch);
-                    if let Ok(resp) = client.get(&url).send() {
-                        if let Ok(json) = resp.json::<serde_json::Value>() {
-                            if let Some(arr) = json.get("data").and_then(|v| v.as_array()) {
-                                for b in arr {
-                                    if let Some(h) = b.get("height").and_then(|v| v.as_u64()) {
-                                        if h > self.full_sync_height {
-                                            self.full_sync_height = h;
-                                            self.blocks.push(FeedBlock {
-                                                height: h,
-                                                hash: b.get("proposer").and_then(|p| p.as_str()).map(|s| &s[..s.len().min(16)]).unwrap_or("—").into(),
-                                                producer: b.get("proposer").and_then(|p| p.as_str()).unwrap_or("").into(),
-                                                txs: b.get("tx_count").and_then(|t| t.as_u64()).unwrap_or(0),
-                                                tip_ms: 0,
-                                            });
-                                        }
-                                    }
-                                }
-                                self.blocks.sort_by(|a,b| b.height.cmp(&a.height));
-                                self.blocks.truncate(500);
-                            }
-                        }
-                    }
-                }
-                self.full_sync_active = false;
-                let pct = if self.full_sync_target > 0 {
-                    self.full_sync_height as f64 / self.full_sync_target as f64 * 100.0
-                } else { 0.0 };
-                self.toast = format!("⬇ Full sync: {}/{} blocks ({:.0}%)",
-                    group(self.full_sync_height), group(self.full_sync_target), pct);
-            } else if self.full_sync_height >= self.full_sync_target && self.full_sync_target > 0 {
-                self.toast = format!("✓ Full sync complete: {} blocks verified", group(self.full_sync_height));
-            }
+        // v0.7.8 (HONEST full sync): the old [F] equated full_sync_height with the
+        // tip height and printed "complete: N verified" while storing ZERO blocks —
+        // a false claim (the DB stayed empty). Full sync now reports the REAL number
+        // of blocks actually received + stored via the chain mesh (p2p block store).
+        // It only says "complete" when stored blocks actually reach the target, and
+        // shows the true count (0 until the node mesh serves history) otherwise.
+        if self.full_sync {
+            let stored = self.p2p_state.blocks_synced;          // blocks really stored
+            let target = self.p2p_state.peer_best_height.max(self.st.height);
+            self.full_sync_height = stored;
+            self.full_sync_target = target;
+            self.full_sync_active = self.p2p_state.running && (target == 0 || stored < target);
+            self.toast = if target > 0 && stored >= target {
+                format!("✓ Full sync: {} blocks stored + verified", group(stored))
+            } else if self.p2p_state.running {
+                format!("⬇ Full sync: {} / {} blocks stored via chain mesh", group(stored), group(target))
+            } else {
+                "⬇ Full sync: connecting to chain mesh…".into()
+            };
                             }
         // v0.2.35: carry wallet balance from feed into local state (non-breaking — 0 when absent).
         if self.st.wallet_balance > 0 { self.wallet_balance = self.st.wallet_balance; }

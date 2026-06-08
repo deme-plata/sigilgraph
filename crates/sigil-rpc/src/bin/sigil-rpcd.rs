@@ -46,6 +46,32 @@ struct Node {
     pools: Vec<(String, PoolId)>,
     /// attested nation citizens (wallet roster, for /nation/citizens).
     citizens: Vec<WalletId>,
+    /// flux-native explorer index: every tx appended as a searchable HistoryEntry
+    /// (flux-db persist + flux-search TF-IDF). None if the store couldn't open.
+    history: Option<flux_history::HistoryStore>,
+}
+
+/// hex of a 32-byte id (searchable content + the `addr` tag).
+fn hexs(b: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for x in b { s.push_str(&format!("{x:02x}")); }
+    s
+}
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+/// Append a tx to the flux-history index. `addrs` go into the full-text content +
+/// an `addr` tag so a wallet-address search returns this tx.
+fn ingest(node: &mut Node, kind: &str, title: String, addrs: &[[u8; 32]], extra: &str) {
+    let height = node.height;
+    let ts = now_ms();
+    let Some(h) = node.history.as_mut() else { return };
+    let addr_str: Vec<String> = addrs.iter().map(hexs).collect();
+    let content = format!("block {height} {} {}", addr_str.join(" "), extra);
+    let mut entry = flux_history::HistoryEntry::new(kind, addr_str.first().cloned().unwrap_or_default(), title, content, ts)
+        .with_tag("height", &height.to_string());
+    for a in &addr_str { entry = entry.with_tag("addr", a); }
+    let _ = h.append(entry);
 }
 
 // ── Token ids (legible byte-fills; dynamically deployed tokens are hashed). ──
@@ -194,7 +220,13 @@ fn bootstrap() -> Node {
         ("PACI/USDS".into(), POOL_PACI), ("SCAL/USDS".into(), POOL_SCAL),
         ("SIGIL/USDS".into(), POOL_SIGIL),
     ];
-    Node { state, height: 2, students: VerifiedRegistry::new(), tokens, pools, citizens: vec![CITIZEN] }
+    // flux-history index (flux-db + flux-search) — persistent across restarts.
+    let hist_path = std::env::var("SIGIL_HISTORY_PATH").unwrap_or_else(|_| "/home/orobit/sigil-data/history".into());
+    let history = match flux_history::HistoryStore::open(&hist_path) {
+        Ok(s) => { eprintln!("flux-history: {} entries @ {hist_path}", s.len()); Some(s) }
+        Err(e) => { eprintln!("flux-history: disabled ({e})"); None }
+    };
+    Node { state, height: 2, students: VerifiedRegistry::new(), tokens, pools, citizens: vec![CITIZEN], history }
 }
 
 /// Symbol for a token id given the live registry (falls back to a hex stub).
@@ -259,6 +291,27 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
                 "{{\"ok\":true,\"service\":\"sigil-rpcd\",\"network\":\"sigil-g0\",\"height\":{},\"version\":\"0.0.7\",\"peers\":1}}",
                 n.height
             ))
+        }
+        // flux-search over the tx history (flux-db + flux-search). Search a wallet
+        // address → that address's transactions; or a block hash/height/keyword.
+        ("GET", "/search") => {
+            let q = query_get(query, "q").unwrap_or("").trim().to_string();
+            if q.len() < 2 { return ok("{\"ok\":true,\"q\":\"\",\"count\":0,\"results\":[]}".into()); }
+            let js = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into());
+            // a 64-hex query is a wallet ADDRESS → EXACT tag lookup (TF-IDF would
+            // miss it, e.g. IDF=0 when a term is in every doc). Else full-text.
+            let is_addr = q.len() == 64 && q.chars().all(|c| c.is_ascii_hexdigit());
+            let mut n = node.write().unwrap();
+            let items: Vec<String> = match n.history.as_mut() {
+                None => vec![],
+                Some(h) if is_addr => h.by_tag("addr", &q.to_lowercase()).unwrap_or_default().iter().map(|e| format!(
+                    "{{\"title\":{},\"snippet\":{},\"id\":{},\"kind\":{},\"ts\":{},\"score\":1.0}}",
+                    js(&e.title), js(&e.content), js(&e.id), js(&e.kind), e.ts_ms)).collect(),
+                Some(h) => h.search(&q, 25).iter().map(|r| format!(
+                    "{{\"title\":{},\"snippet\":{},\"id\":{},\"score\":{:.3}}}",
+                    js(&r.title), js(&r.snippet), js(&r.url), r.score)).collect(),
+            };
+            ok(format!("{{\"ok\":true,\"q\":{},\"count\":{},\"results\":[{}]}}", js(&q), items.len(), items.join(",")))
         }
         ("GET", "/balance") => {
             let w = query_get(query, "wallet").and_then(hex32);
@@ -405,7 +458,7 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
                     let mut n = node.write().unwrap();
                     let h = n.height;
                     match execute_swap(&mut n.state, h, from, pool, dir, amount_in, min_out) {
-                        Ok(r) => { n.height += 1; ok(format!("{{\"ok\":true,\"amount_out\":{},\"lp_fee\":{},\"protocol_fee\":{}}}", r.amount_out, r.fee, r.protocol_fee)) }
+                        Ok(r) => { n.height += 1; ingest(&mut n, "swap", format!("swap {amount_in} in → {} out", r.amount_out), &[from], "swap dex"); ok(format!("{{\"ok\":true,\"amount_out\":{},\"lp_fee\":{},\"protocol_fee\":{}}}", r.amount_out, r.fee, r.protocol_fee)) }
                         Err(e) => bad(&e.to_string()),
                     }
                 }
@@ -436,7 +489,7 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
                     let mut n = node.write().unwrap();
                     let h = n.height;
                     match submit_share(&mut n.state, h, miner, header.as_bytes(), nonce, difficulty, reward) {
-                        Ok(bal) => { n.height += 1; ok(format!("{{\"ok\":true,\"new_balance\":{}}}", bal)) }
+                        Ok(bal) => { n.height += 1; ingest(&mut n, "mine", format!("mine reward {reward} SIGIL"), &[miner], "mining block reward"); ok(format!("{{\"ok\":true,\"new_balance\":{}}}", bal)) }
                         Err(e) => bad(&e.to_string()),
                     }
                 }

@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SIGIL Explorer · sigil-g0</title>
+<link rel="icon" type="image/svg+xml" href="/sigil-login/favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700;900&family=Rajdhani:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#04080c;--cyan:#21d4fd;--cyan-bright:#6df3ff;--cm:#1ba1e2;--teal:#00e0c6;--grid:rgba(33,212,253,.16);--glow:rgba(33,212,253,.55);--gold:#fbbf24;--orange:#ff7a3c;--line:rgba(33,212,253,.2);--text:#d7eef5;--dim:#5f8390;--panel:rgba(4,8,12,.85);--violet:#9580ff}
+*{box-sizing:border-box;margin:0;padding:0}
+body{min-height:100vh;background:var(--bg);color:var(--text);font-family:'Rajdhani',system-ui,sans-serif;overflow-x:hidden}
+.scene{position:fixed;inset:0;overflow:hidden;background:var(--bg);z-index:0}
+.aurora{position:absolute;inset:-30%;filter:blur(70px);opacity:.5;z-index:0}
+.aurora i{position:absolute;border-radius:50%;mix-blend-mode:screen;animation:drift 18s ease-in-out infinite}
+.aurora i:nth-child(1){width:46%;height:46%;left:6%;top:4%;background:radial-gradient(circle,#21d4fd,transparent 65%)}
+.aurora i:nth-child(2){width:42%;height:42%;right:4%;top:14%;background:radial-gradient(circle,#00e0c6,transparent 65%);animation-delay:-5s}
+.aurora i:nth-child(3){width:52%;height:52%;left:22%;bottom:-4%;background:radial-gradient(circle,rgba(200,168,78,.4),transparent 60%);animation-delay:-9s;opacity:.6}
+@keyframes drift{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(3%,-2%) scale(1.02)}66%{transform:translate(-2%,1%) scale(.98)}}
+.app{position:relative;z-index:1;max-width:1200px;margin:0 auto;padding:20px}
+.topbar{display:flex;align-items:center;gap:16px;padding:12px 20px;background:var(--panel);backdrop-filter:blur(20px);border:1px solid var(--line);border-radius:16px;margin-bottom:20px;flex-wrap:wrap}
+.brand{font-family:'Orbitron';font-weight:800;font-size:17px;letter-spacing:2px;white-space:nowrap}
+.brand span{color:var(--cyan)}
+.net{font-family:'JetBrains Mono';font-size:10px;color:var(--teal);border:1px solid rgba(0,224,198,.35);border-radius:999px;padding:3px 9px;background:rgba(0,224,198,.08)}
+.search-wrap{flex:1;max-width:400px;position:relative}
+.search-wrap input{width:100%;padding:10px 14px;background:rgba(255,255,255,.03);border:1px solid var(--line);border-radius:10px;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px;outline:none;transition:.2s}
+.search-wrap input:focus{border-color:var(--cyan);box-shadow:0 0 0 2px rgba(33,212,253,.12)}
+.search-wrap .hint{position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:10px;color:var(--dim);font-family:'JetBrains Mono',monospace}
+.live-stats{display:flex;gap:16px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim)}
+.live-stats .ok{color:var(--teal)}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;margin-bottom:20px}
+.stat{background:var(--panel);backdrop-filter:blur(20px);border:1px solid var(--line);border-radius:14px;padding:16px}
+.stat .lbl{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);margin-bottom:6px;font-family:'JetBrains Mono'}
+.stat .val{font-size:24px;font-weight:700;font-family:'Rajdhani',sans-serif}
+.stat .val.c{color:var(--cyan)}.stat .val.g{color:var(--gold)}.stat .val.t{color:var(--teal)}.stat .val.v{color:var(--violet)}
+.section{margin-bottom:20px}
+.section h2{font-family:'Orbitron';font-size:13px;color:var(--cyan);text-transform:uppercase;letter-spacing:2px;margin-bottom:12px;padding-left:4px}
+.block-list{display:flex;flex-direction:column;gap:6px}
+.block-row{display:flex;align-items:center;gap:12px;background:var(--panel);backdrop-filter:blur(20px);border:1px solid var(--line);border-radius:12px;padding:12px 16px;transition:.2s;cursor:pointer}
+.block-row:hover{border-color:var(--cyan);background:rgba(33,212,253,.04);transform:translateX(3px)}
+.block-row .bh{font-family:'Orbitron';color:var(--cyan);font-weight:700;font-size:14px;min-width:80px}
+.block-row .hash{font-family:'JetBrains Mono';font-size:11px;color:var(--dim);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.block-row .badge{font-size:10px;padding:3px 10px;border-radius:999px;font-family:'JetBrains Mono';white-space:nowrap}
+.badge-d{background:rgba(33,212,253,.12);color:var(--cyan)}
+.badge-e{background:rgba(251,191,36,.12);color:var(--gold)}
+.badge-g{background:rgba(149,128,255,.12);color:var(--violet)}
+.badge-b{background:rgba(0,224,198,.12);color:var(--teal)}
+.txn-list{display:flex;flex-direction:column;gap:6px}
+.txn{display:flex;align-items:center;gap:10px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 14px;font-family:'JetBrains Mono';font-size:11px}
+.txn .type{font-size:9px;padding:2px 8px;border-radius:999px;background:rgba(0,224,198,.12);color:var(--teal);white-space:nowrap}
+.txn .detail{flex:1;color:var(--dim)}
+.txn .detail b{color:var(--text)}
+.txn .amt{color:var(--gold);font-weight:600;white-space:nowrap}
+.peers-list{display:flex;flex-wrap:wrap;gap:8px}
+.peer{font-family:'JetBrains Mono';font-size:10px;padding:6px 14px;background:var(--panel);border:1px solid var(--line);border-radius:999px;color:var(--violet)}
+.empty{text-align:center;color:var(--dim);padding:30px;font-family:'JetBrains Mono';font-size:12px}
+.floating-btns{position:fixed;bottom:16px;right:16px;display:flex;gap:8px;z-index:10}
+.floating-btns a{font-family:'JetBrains Mono';font-size:10px;padding:8px 14px;border-radius:999px;text-decoration:none;background:var(--panel);border:1px solid var(--line);color:var(--dim);transition:.2s}
+.floating-btns a:hover,.floating-btns a.h{color:var(--cyan);border-color:var(--cyan)}
+.floating-btns a.g{color:var(--gold)}
+.floating-btns a.v{color:var(--violet)}
+.search-results{position:absolute;top:100%;left:0;right:0;background:var(--panel);border:1px solid var(--line);border-radius:0 0 12px 12px;max-height:200px;overflow-y:auto;z-index:50;display:none;font-family:'JetBrains Mono';font-size:11px}
+.search-results .sr{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);cursor:pointer}
+.search-results .sr:hover{background:rgba(33,212,253,.06)}
+.search-results .sr .srt{color:var(--cyan)}
+.search-results .sr .srd{color:var(--dim)}
+</style>
+</head>
+<body>
+<div class="scene"><div class="aurora"><i></i><i></i><i></i></div></div>
+<div class="app">
+  <div class="topbar">
+    <div class="brand"><span>⬡</span> SIGIL Explorer</div>
+    <div class="net">sigil-g0</div>
+    <div class="search-wrap">
+      <input id="search" placeholder="search blocks, txns, addresses, hashes…" oninput="doSearch()" onfocus="this.select()">
+      <div class="hint" id="shint">↩ fluxc</div>
+      <div class="search-results" id="sresults"></div>
+    </div>
+    <div class="live-stats"><span class="ok" id="live-dot">●</span> <span id="live-txt">loading…</span></div>
+  </div>
+
+  <div class="stats-grid" id="stats"></div>
+  
+  <div class="section"><h2>⬡ Recent Blocks</h2><div class="block-list" id="blocks"><div class="empty">Loading chain data…</div></div></div>
+  
+  <div class="section"><h2>⟷ Transactions</h2><div class="txn-list" id="txns"><div class="empty">Loading…</div></div></div>
+  
+  <div class="section"><h2>◈ Peers</h2><div class="peers-list" id="peers"><div class="empty">Loading…</div></div></div>
+</div>
+
+<div class="floating-btns">
+  <a href="/sigil-login/" class="g">⟳ Login</a>
+  <a href="/sigil-top.html" class="v">⌘ Cockpit</a>
+  <a href="/sigil-explorer.html" class="h">⬡ Explorer</a>
+</div>
+
+<script>
+var _searchSeq=0;
+async function doSearch(){
+  var q=document.getElementById('search').value.trim();
+  var r=document.getElementById('sresults');
+  if(!q||q.length<2){r.style.display='none';return}
+  var seq=++_searchSeq;
+  // flux-native search: the node's /api/v1/search (flux-db + flux-search). Served by
+  // sigil-top → same-origin /api proxies to the node. A 64-hex address returns that
+  // wallet's txs (exact tag lookup); else full-text over blocks/txs.
+  var results=[];
+  try{
+    var resp=await fetch('/api/v1/search?q='+encodeURIComponent(q),{cache:'no-store'});
+    var j=await resp.json();
+    if(seq!==_searchSeq) return;               // stale response — ignore
+    results=(j.results||[]).map(function(x){return{t:x.title||x.id||'result',d:(x.snippet||'').slice(0,72),h:x.kind||''}});
+  }catch(e){ /* node unreachable → local block fallback */ }
+  if(results.length===0){
+    (window._blocks||[]).forEach(function(b){
+      if((b.hash&&b.hash.includes(q))||String(b.h).includes(q)) results.push({t:'Block #'+b.h,d:(b.hash||'').slice(0,32)+'…',h:b.h});
+    });
+  }
+  if(results.length>0){
+    r.innerHTML=results.slice(0,15).map(function(x){return'<div class="sr"><span class="srt">'+x.t+'</span><span class="srd">'+x.d+'</span><span style="color:var(--gold);margin-left:auto">'+x.h+'</span></div>'}).join('');
+  }else{
+    r.innerHTML='<div class="sr"><span class="srd">No results for "'+q+'" — try a wallet address, block #, or keyword</span></div>';
+  }
+  r.style.display='block';
+}
+
+async function load(){
+  try{
+    let r=await fetch('http://127.0.0.1:8080/api/v1/status');
+    let j=await r.json();
+    let d=j.data||{};
+    document.getElementById('live-txt').textContent='sigil-g0 · '+(d.dagknight_round||'?')+' blocks · '+(d.peer_count||0)+' peers';
+    document.getElementById('stats').innerHTML=
+      '<div class="stat"><div class="lbl">Block Height</div><div class="val c">'+(d.dagknight_round||'—').toLocaleString()+'</div></div>'+
+      '<div class="stat"><div class="lbl">Network</div><div class="val v">'+(d.network_id||'sigil-g0')+'</div></div>'+
+      '<div class="stat"><div class="lbl">Peers</div><div class="val t">'+(d.peer_count||'—')+'</div></div>'+
+      '<div class="stat"><div class="lbl">Status</div><div class="val t">'+(d.status||'—')+'</div></div>'+
+      '<div class="stat"><div class="lbl">AGORA Token</div><div class="val g">DEV</div></div>'+
+      '<div class="stat"><div class="lbl">SGLD Coin</div><div class="val v">10M</div></div>';
+    if(d.multiaddrs){
+      document.getElementById('peers').innerHTML=d.multiaddrs.map(function(m){return'<span class="peer">'+m.slice(0,40)+'…</span>'}).join('');
+    }
+  }catch(e){
+    document.getElementById('live-txt').textContent='node unreachable · using disk cache';
+  }
+
+  try{
+    let r=await fetch('/dag-blocks.json');
+    let j=await r.json();
+    var blocks=j.blocks||[];
+    window._blocks=blocks;
+    if(blocks.length){
+      var recent=blocks.slice(-40).reverse();
+      document.getElementById('blocks').innerHTML=recent.map(function(b){
+        var cl='badge-d'; if(b.prod==='E')cl='badge-e'; else if(b.prod==='G')cl='badge-g'; else if(b.prod==='B')cl='badge-b';
+        return'<div class="block-row"><span class="bh">#'+b.h+'</span><span class="hash">'+b.hash+'</span><span class="badge '+cl+'">'+b.prod+'</span></div>';
+      }).join('');
+    }
+  }catch(e){}
+
+  document.getElementById('txns').innerHTML=
+    '<div class="txn"><span class="type">DEPLOY</span><span class="detail"><b>AGORA Stargate</b> → sigil-g0 registry</span><span class="amt">#9b04c6ef</span></div>'+
+    '<div class="txn"><span class="type">DEPLOY</span><span class="detail"><b>SGLD DevCoin</b> → qnk1q-sigil-viktor</span><span class="amt">10,000,000</span></div>'+
+    '<div class="txn"><span class="type">STAKE</span><span class="detail"><b>Swarm</b> → fplan-sigil-v0.3.0</span><span class="amt">0.50 QUG</span></div>'+
+    '<div class="txn"><span class="type">SWAP</span><span class="detail"><b>SGL→USDS</b> via DEX router</span><span class="amt">1,000 SGL</span></div>'+
+    '<div class="txn"><span class="type">REGISTER</span><span class="detail"><b>Agent</b> qnk1q-sigil-viktor joined swarm</span><span class="amt">8 agents</span></div>'+
+    '<div class="txn"><span class="type">KEM</span><span class="detail"><b>KyberKEM-1024</b> PQ key exchange deployed</span><span class="amt">3/3 tests</span></div>';
+}
+load();
+setInterval(load,10000);
+
+// Close search on click outside
+document.addEventListener('click',function(e){if(!e.target.closest('.search-wrap'))document.getElementById('sresults').style.display='none'});
+
+// pre-search from ?q= — the wallet embeds this explorer with the user's address
+(function(){try{var q=new URLSearchParams(location.search).get('q');if(q){var el=document.getElementById('search');if(el){el.value=q;if(typeof doSearch==='function')doSearch();}}}catch(e){}})();
+</script>
+</body>
+</html>

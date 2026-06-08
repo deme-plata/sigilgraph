@@ -246,7 +246,9 @@ body.view-desktop .desktop{display:flex}
 
   // SIGIL Explorer (flux-search/aether) rendered IN the wallet's main content —
   // not a new tab. Lazy-loads once, pre-searched on this wallet's address.
-  const EX_URL='https://fluxapp.xyz/sigil-explorer.html';
+  // same-origin so the explorer's /api/v1/search hits the node via the sigil-top
+  // proxy (served by sigil-top at localhost:9800; on the web it falls back gracefully).
+  const EX_URL='/sigil-explorer.html';
   function showExplorer(){
     const f=document.getElementById('exView'), bar=document.getElementById('exBar');
     if(f && !f.getAttribute('src')) f.setAttribute('src', EX_URL + (ADDR?('?q='+encodeURIComponent(ADDR)):''));

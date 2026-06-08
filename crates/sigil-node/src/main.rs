@@ -510,7 +510,7 @@ fn run_start() -> Result<()> {
                                             let blks = chain.blocks();
                                             let top = chain.height().saturating_sub(1);
                                             let lo = req.sync_from;
-                                            let hi = req.sync_to.min(top).min(lo.saturating_add(2000));
+                                            let hi = req.sync_to.min(top).min(lo.saturating_add(512));
                                             let mut served = 0u32;
                                             let mut hh = lo;
                                             while hh <= hi {

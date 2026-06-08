@@ -113,6 +113,9 @@ pub struct P2PSyncState {
     pub sync_total: u64,
     /// v0.7.6: blocks pulled via content-addressed backfill (flux-sync), verified.
     pub backfilled: u64,
+    /// v0.7.11: the height the in-flight request-response backfill chunk starts at
+    /// (the TUI shows the [from..from+chunk] range being fetched).
+    pub sync_cursor: u64,
 }
 
 pub struct P2PBlockSync {
@@ -257,6 +260,7 @@ impl P2PBlockSync {
                             if let Some(peer) = net.connected_peers().into_iter().next() {
                                 let from = sync_cursor;
                                 let to = from + 8192;
+                                state_clone.lock().unwrap().sync_cursor = from; // TUI: chunk in flight
                                 let req = BackfillReq { from, to };
                                 crate::tlog!("[p2p-sync] backfill req→{peer} [{from}..={to}] (have {have}/{peer_best})");
                                 match net.send_request(peer, serde_json::to_vec(&req).unwrap()).await {

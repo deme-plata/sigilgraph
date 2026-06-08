@@ -1338,6 +1338,9 @@ struct App {
     p2p_sync: Option<block_sync::P2PBlockSync>,
     p2p_state: block_sync::P2PSyncState,
     p2p_blocks_synced: u64,
+    p2p_rate: f64,                  // smoothed backfill blocks/sec (for the SYNC card)
+    p2p_prev_synced: u64,          // last sample of p2p_state.blocks_synced
+    p2p_rate_at: std::time::Instant,
     // v0.7.0: AI fleet monitoring — AIs worry about their nodes' uptime and version compliance
     fleet_nodes: Vec<FleetNode>,
     fleet_last_check: Instant,
@@ -1380,6 +1383,9 @@ impl App {
               p2p_sync: None,
               p2p_state: block_sync::P2PSyncState::default(),
               p2p_blocks_synced: 0,
+              p2p_rate: 0.0,
+              p2p_prev_synced: 0,
+              p2p_rate_at: std::time::Instant::now(),
               serve_status: String::new(),
               serve_stop: None,
               // v0.7.0: Fleet starts with known bootstrap peers
@@ -1757,6 +1763,16 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             // v0.6.5: Poll P2P sync state + drain synced blocks into the TUI block list
             if let Some(ref p2p) = app.p2p_sync {
                 app.p2p_state = p2p.poll_state();
+                // Smoothed backfill rate (blocks/s) for the SYNC card, sampled ≥1s apart.
+                let dt = app.p2p_rate_at.elapsed().as_secs_f64();
+                if dt >= 1.0 {
+                    let cur = app.p2p_state.blocks_synced;
+                    let delta = cur.saturating_sub(app.p2p_prev_synced) as f64;
+                    let inst = delta / dt;
+                    app.p2p_rate = if app.p2p_rate <= 0.0 { inst } else { app.p2p_rate * 0.6 + inst * 0.4 };
+                    app.p2p_prev_synced = cur;
+                    app.p2p_rate_at = std::time::Instant::now();
+                }
                 for block in p2p.drain_new_blocks() {
                     app.p2p_blocks_synced += 1;
                     // Also feed into the block stream display
@@ -2097,90 +2113,94 @@ fn render_supply(app: &App) -> Paragraph<'static> {
 }
 
 fn render_sync_status(app: &App) -> Paragraph<'static> {
-    let (synced, target) = (app.synced_height, app.target_height);
-    let lag = target.saturating_sub(synced);
-    // Honest framing: the light client VERIFIES the tip cryptographically in µs
-    // (flux-fold) — that is NOT the same as having downloaded the whole chain.
-    // Show "✓ verified" for the tip, and a separate "lag" for un-downloaded history,
-    // so the card never claims a 100% full sync that didn't happen.
+    let s = &app.p2p_state;
     let verified = app.verify.as_ref().map(|v| v.ok).unwrap_or(false);
+    let synced = s.blocks_synced;                          // blocks actually stored (DB fill)
+    let tip = s.peer_best_height.max(app.target_height);   // network tip
+    let gap = tip.saturating_sub(synced);
+    let at_tip = tip > 0 && gap < 8;
+    let rate = app.p2p_rate;
 
-    // v0.7.5: Full sync progress bar with batch-by-batch visual
-    let fs_total = app.full_sync_target;
-    let fs_done = app.full_sync_height;
-    let fs_active = app.full_sync_active;
-    let fs_on = app.full_sync;
-    let sync_line = if fs_on && fs_total > 0 {
-        let fs_pct = if fs_total > 0 { (fs_done as f64 / fs_total as f64 * 100.0).min(100.0) } else { 0.0 };
-        let bar_w = 20usize;
-        let filled = (fs_pct / 100.0 * bar_w as f64).round() as usize;
-        let bar = "█".repeat(filled) + &"░".repeat(bar_w.saturating_sub(filled));
-        let status = if fs_active { "↓ downloading" } else if fs_done >= fs_total { "✓ complete" } else { "⟳ next batch…" };
-        Line::from(vec![
-            dim("full   "),
-            Span::styled(bar, Style::default().fg(if fs_active { C_CYAN } else { C_GREEN })),
-            dim(format!(" {:.0}% {}", fs_pct, status)),
-        ])
-    } else if fs_on {
-        Line::from(vec![dim("full   "), Span::styled("waiting for feed…", Style::default().fg(C_DIM))])
-    } else {
-        Line::from(vec![dim("full   "), Span::styled("off  [F] to enable", Style::default().fg(C_DIM))])
-    };
-
-    // v0.7.5: P2P mesh sync with progress
-    let p2p_line = if app.p2p_state.running {
-        let delta = if app.p2p_state.connected_delta { "Δ" } else { "·" };
-        let epsilon = if app.p2p_state.connected_epsilon { "Ε" } else { "·" };
-        let blk = app.p2p_blocks_synced;
-        let blk_str = if blk > 0 { format!("{} blk", group(blk)) } else { "waiting".into() };
-        // v0.7.6: show verified content-addressed backfill (flux-sync) when active.
-        let bf = app.p2p_state.backfilled;
-        let bf_str = if bf > 0 { format!("  ⬇{} backfill", group(bf)) } else { String::new() };
-        Line::from(vec![
-            dim("p2p    "),
-            Span::styled(delta, Style::default().fg(if app.p2p_state.connected_delta { C_GREEN } else { C_DIM })),
-            Span::styled(epsilon, Style::default().fg(if app.p2p_state.connected_epsilon { C_GREEN } else { C_DIM })),
-            dim(format!("  {} peers  {}", app.p2p_state.peer_count, blk_str)),
-            Span::styled(bf_str, Style::default().fg(C_GREEN)),
-        ])
-    } else {
-        Line::from(dim("p2p    connecting to Δ/Ε mesh…"))
-    };
-
-    // tip line — the light-client verification result (instant by design)
+    // tip — light-client cryptographic verify (instant, ~µs)
     let tip_line = if !app.online {
-        Line::from(vec![dim("tip    "), Span::styled("— offline (no feed/node)", Style::default().fg(C_RED))])
+        Line::from(vec![dim("tip   "), Span::styled("— offline (no feed/node)", Style::default().fg(C_RED))])
     } else if verified {
         Line::from(vec![
-            dim("tip    "),
-            Span::styled("✓ verified", Style::default().fg(C_GREEN)),
-            dim("  h "), Span::styled(group(synced), Style::default().fg(C_GREEN)),
-            dim(format!("  ·  {} µs light-verify", app.sync_us)),
+            dim("tip   "), Span::styled("✓ verified", Style::default().fg(C_GREEN)),
+            dim("  h "), Span::styled(group(app.synced_height), Style::default().fg(C_GREEN)),
+            dim(format!("  · {} µs", app.sync_us)),
         ])
     } else {
-        Line::from(vec![dim("tip    "), Span::styled("✗ unverified tip", Style::default().fg(C_GOLD))])
+        Line::from(vec![dim("tip   "), Span::styled("✗ unverified", Style::default().fg(C_GOLD))])
     };
-    // net line — relationship to the network tip; honest about un-downloaded history
-    let net_line = if lag > 0 {
+
+    // sync — DB-fill progress bar (blocks stored vs network tip) + gap framing
+    let pct = if tip > 0 { (synced as f64 / tip as f64 * 100.0).min(100.0) } else { 100.0 };
+    let bar_w = 18usize;
+    let filled = ((pct / 100.0) * bar_w as f64).round() as usize;
+    let bar = "█".repeat(filled.min(bar_w)) + &"░".repeat(bar_w.saturating_sub(filled));
+    let (bar_col, tail) = if at_tip {
+        (C_GREEN, Span::styled("  AT TIP".to_string(), Style::default().fg(C_GREEN)))
+    } else {
+        (C_CYAN, Span::styled(format!("  {} behind", group(gap)), Style::default().fg(C_GOLD)))
+    };
+    let sync_line = Line::from(vec![
+        dim("sync  "),
+        Span::styled(bar, Style::default().fg(bar_col)),
+        dim(format!(" {:.0}%", pct)),
+        tail,
+    ]);
+
+    // rate + ETA — the live backfill throughput
+    let rate_line = if at_tip {
+        Line::from(vec![dim("rate  "), Span::styled("tracking live", Style::default().fg(C_GREEN))])
+    } else if rate > 0.5 {
+        let eta_s = (gap as f64 / rate) as u64;
+        let eta = if eta_s >= 3600 { format!("{}h{}m", eta_s / 3600, (eta_s % 3600) / 60) }
+            else if eta_s >= 60 { format!("{}m{:02}s", eta_s / 60, eta_s % 60) }
+            else { format!("{}s", eta_s) };
         Line::from(vec![
-            dim("net    "), Span::styled(group(target), Style::default().fg(C_VBRIGHT)),
-            Span::styled(format!("   lag {} blk", group(lag)), Style::default().fg(C_GOLD)),
-            dim("  [F] full sync"),
+            dim("rate  "),
+            Span::styled(format!("{} blk/s", group(rate.round() as u64)), Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
+            dim("   ETA "), Span::styled(eta, Style::default().fg(C_VBRIGHT)),
+        ])
+    } else {
+        Line::from(vec![dim("rate  "), Span::styled("starting…", Style::default().fg(C_DIM))])
+    };
+
+    // chunk — the request-response backfill range in flight (or stored total when synced)
+    let chunk_line = if !at_tip && s.running {
+        let from = s.sync_cursor;
+        let to = from.saturating_add(8192);
+        Line::from(vec![
+            dim("chunk "),
+            Span::styled(format!("[{}..{}]", group(from), group(to)), Style::default().fg(C_VBRIGHT)),
+            dim("  ⬇ "), Span::styled(format!("{} fetched", group(synced)), Style::default().fg(C_GREEN)),
         ])
     } else {
         Line::from(vec![
-            dim("net    "), Span::styled(group(target), Style::default().fg(C_VBRIGHT)),
-            Span::styled("   at tip", Style::default().fg(C_GREEN)),
+            dim("store "),
+            Span::styled(format!("{} blocks", group(synced)), Style::default().fg(C_GREEN)),
+            dim("  · req-response backfill"),
         ])
     };
 
-    let lines = vec![
-        tip_line,
-        net_line,
-        sync_line,
-        p2p_line,
-    ];
-    Paragraph::new(lines).block(card_block(" SYNC", C_VBRIGHT))
+    // p2p — mesh peers
+    let p2p_line = if s.running {
+        let d = if s.connected_delta { "Δ" } else { "·" };
+        let e = if s.connected_epsilon { "Ε" } else { "·" };
+        Line::from(vec![
+            dim("p2p   "),
+            Span::styled(d, Style::default().fg(if s.connected_delta { C_GREEN } else { C_DIM })),
+            Span::styled(e, Style::default().fg(if s.connected_epsilon { C_GREEN } else { C_DIM })),
+            dim(format!("  {} peers", s.peer_count)),
+        ])
+    } else {
+        Line::from(dim("p2p   connecting to mesh…"))
+    };
+
+    Paragraph::new(vec![tip_line, sync_line, rate_line, chunk_line, p2p_line])
+        .block(card_block(" SYNC", C_VBRIGHT))
 }
 
 fn render_mining(app: &App) -> Paragraph<'static> {

@@ -51,6 +51,51 @@ const GREEN: Color = Color::Rgb(0x34, 0xd3, 0x99);
 const RED: Color = Color::Rgb(0xf8, 0x71, 0x71);
 const DIM: Color = Color::Rgb(0x94, 0xa3, 0xb8);
 
+fn wallet_valid(w: &str) -> bool {
+    w.len() == 64 && w.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Generate a throwaway 64-hex payout wallet from runtime entropy (time + pid,
+/// xorshift). Fine for a test miner — it's just an on-testnet payout identifier.
+fn gen_wallet() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let mut x = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E37_79B9_7F4A_7C15)
+        ^ (std::process::id() as u64).wrapping_mul(0x0100_0000_01b3);
+    let mut out = String::with_capacity(64);
+    for _ in 0..32 {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        let b = (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 56) as u8;
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+/// Resolve the payout wallet so the miner ALWAYS runs (no flash-and-exit on a
+/// bare double-click): explicit arg/env → `sigil-wallet.txt` → freshly generated
+/// (and saved to the file so reruns reuse it). Returns (wallet, human source).
+fn resolve_wallet(explicit: Option<String>) -> (String, String) {
+    if let Some(w) = explicit {
+        if wallet_valid(&w) {
+            return (w, "arg/env".into());
+        }
+    }
+    let path = "sigil-wallet.txt";
+    if let Ok(s) = std::fs::read_to_string(path) {
+        let w = s.trim().to_string();
+        if wallet_valid(&w) {
+            return (w, format!("{path}"));
+        }
+    }
+    let w = gen_wallet();
+    let _ = std::fs::write(path, &w);
+    (w, format!("generated → {path}"))
+}
+
 /// Shared mining state, polled by the TUI/headless renderer.
 #[derive(Default)]
 struct Stats {
@@ -162,28 +207,22 @@ fn main() -> anyhow::Result<()> {
     }
 
     let positional: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with("--")).collect();
-    let wallet = positional
+    // Wallet ALWAYS resolves (arg/env → file → generated) so a bare double-click
+    // runs + mines instead of flashing a usage screen and closing.
+    let explicit = positional
         .first()
         .map(|s| s.to_string())
-        .or_else(|| std::env::var("SIGIL_WALLET").ok())
-        .unwrap_or_default();
+        .or_else(|| std::env::var("SIGIL_WALLET").ok());
+    let (wallet, wsource) = resolve_wallet(explicit);
     let url = positional
         .get(1)
         .map(|s| s.to_string())
         .or_else(|| std::env::var("SIGIL_MINE_URL").ok())
         .unwrap_or_else(|| DEFAULT_URL.to_string());
-
-    if wallet.len() != 64 || !wallet.chars().all(|c| c.is_ascii_hexdigit()) {
-        eprintln!("\n  ⛏  SIGIL MINER — dual-lane (BLAKE4 Φ + VDF Ω)\n");
-        eprintln!("  usage: sigil-miner <wallet-64hex> [node-url]");
-        eprintln!("     or: SIGIL_WALLET=<64hex> sigil-miner");
-        eprintln!("  flags: --headless     plain log, no TUI");
-        eprintln!("         --gpu          mine Lane A on the GPU (needs `gpu` build feature)");
-        eprintln!("         --gpu-list     list OpenCL GPUs");
-        eprintln!("         --gpu-selftest on-hardware BLAKE4 KAT (gpu kernel == pow.rs)\n");
-        eprintln!("  default node: {DEFAULT_URL}\n");
-        std::process::exit(2);
-    }
+    eprintln!("\n  ⛏  SIGIL MINER — dual-lane (BLAKE4 Φ + VDF Ω)");
+    eprintln!("  wallet: {wallet}  ({wsource})");
+    eprintln!("  node:   {url}");
+    eprintln!("  flags:  --headless · --gpu · --gpu-list · --gpu-selftest\n");
 
     let headless = args.iter().any(|a| a == "--headless" || a == "--no-tui");
     let use_gpu = args.iter().any(|a| a == "--gpu");

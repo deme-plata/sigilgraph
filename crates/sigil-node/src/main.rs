@@ -364,6 +364,12 @@ fn run_start() -> Result<()> {
         let mut last_syncreq = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(10)).unwrap_or_else(std::time::Instant::now);
         let mut backfilled: u64 = 0;
+        let mut last_snapshot = std::time::Instant::now();
+        // Backfill-serve rate limit: a peer stuck on an incompatible genesis (or many
+        // joiners) can spam SyncReq; serving re-broadcasts blocks (O(chunk)) and at
+        // full tilt starves block production. Cap serving to one chunk per interval.
+        let mut last_serve = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(10)).unwrap_or_else(std::time::Instant::now);
         if produce {
             eprintln!("🏭 PRODUCER mode — target {:.0} blocks/s ({}µs tick, feed every {}) on {}",
                 1_000_000.0 / produce_us as f64, produce_us, feed_every, sigil_net::TOPIC_BLOCKS);
@@ -448,7 +454,13 @@ fn run_start() -> Result<()> {
                                         eprintln!("🏭 produced {} blocks ({:.1}/s) · {} txs ({:.0} TPS verify-once) — tip H={}",
                                             produced, produced as f64 / secs,
                                             produced_tx, produced_tx as f64 / secs, chain.height());
-                                        // durable snapshot → aether Reed-Solomon shards (can't-lose)
+                                    }
+                                    // durable snapshot → aether Reed-Solomon shards. TIME-gated (30s),
+                                    // NOT per-100-blocks: snapshot::save serializes the WHOLE chain
+                                    // (O(N)), so firing it every 100 blocks made production O(N²) and
+                                    // crawl as the chain grew — the producer-slowdown root cause.
+                                    if last_snapshot.elapsed() >= std::time::Duration::from_secs(30) {
+                                        last_snapshot = std::time::Instant::now();
                                         match snapshot::save(chain.blocks(), &snap_dir) {
                                             Ok(_) => eprintln!("💾 snapshot → aether shards @ H={}", chain.height()),
                                             Err(e) => eprintln!("⚠ snapshot failed: {}", e),
@@ -506,7 +518,13 @@ fn run_start() -> Result<()> {
                                 let block: crate::block::Block = match serde_json::from_slice(&data) {
                                     Ok(b) => b,
                                     Err(_) => {
+                                        // Rate-limit serving so backfill can't starve production
+                                        // (≤1 chunk per 250ms ≈ ≤2k blocks/s served).
+                                        if last_serve.elapsed() < std::time::Duration::from_millis(250) {
+                                            continue;
+                                        }
                                         if let Ok(req) = serde_json::from_slice::<SyncReq>(&data) {
+                                            last_serve = std::time::Instant::now();
                                             let blks = chain.blocks();
                                             let top = chain.height().saturating_sub(1);
                                             let lo = req.sync_from;

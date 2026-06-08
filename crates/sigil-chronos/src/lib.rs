@@ -30,6 +30,7 @@ pub mod market;
 pub mod multiverse;
 pub mod property;
 pub mod scaling;
+pub mod snapshot_cadence;
 pub mod backfill;
 pub mod scenarios;
 pub mod throughput;

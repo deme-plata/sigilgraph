@@ -102,6 +102,7 @@ impl P2PBlockSync {
                 let mut block_rx = net.subscribe(BLOCK_SYNC_TOPIC);
                 let tick = Duration::from_secs(5);
                 let mut last_announce = Instant::now();
+                let mut sync_cursor: u64 = 0;
 
                 loop {
                     if stop_rx.try_recv().is_ok() {
@@ -111,99 +112,43 @@ impl P2PBlockSync {
 
                     // Process block messages from subscription
                     while let Ok((_topic, data)) = block_rx.try_recv() {
-                        if let Ok(msg) = serde_json::from_slice::<SyncMsg>(&data) {
-                            match msg {
-                                SyncMsg::Block { height, hash_hex, header_json } => {
-                                    crate::tlog!("[p2p-sync] block rx: h={height}");
-                                    // Content-address the block so we can later SERVE it as
-                                    // backfill + advertise it in our manifest.
-                                    if let Some(b) = &mut bf {
-                                        let _ = b.record(height, header_json.as_bytes());
-                                    }
-                                    if let Ok(header) = serde_json::from_str::<SigilBlockHeaderV0>(&header_json) {
-                                        if store.put_block(header).unwrap_or(false) {
-                                            let best = store.best_height();
-                                            let best_hash = store.best_hash_hex();
-                                            let mut s = state_clone.lock().unwrap();
-                                            s.blocks_synced += 1;
-                                            s.sync_height = height;
-                                            s.sync_hash_hex = hash_hex.clone();
-                                            s.sync_total = s.blocks_synced;
-                                            s.last_message_at = Some(Instant::now());
-                                            let peer_best = s.peer_best_height;
-                                            drop(s);
-                                            // Push progress to the P2P event channel for TUI consumption
-                                            net.push_sync_progress(height, &hash_hex, peer_best, best as u64);
-                                            if let Some(block) = store.get_block(&hash_hex) {
-                                                new_blocks_clone.lock().unwrap().push(block);
-                                            }
-                                        }
-                                    }
-                                }
-                                SyncMsg::Have { best_height, .. } => {
-                                    let mut s = state_clone.lock().unwrap();
-                                    if best_height > s.peer_best_height {
-                                        s.peer_best_height = best_height;
-                                    }
-                                    s.last_message_at = Some(Instant::now());
-                                }
-                                SyncMsg::Req { .. } => {}
-                            }
-                        } else if let Some(bf_msg) = BackfillMsg::from_bytes(&data) {
-                            // ── v0.7.6 content-addressed backfill (shared flux_p2p::backfill) ──
-                            // 1) react: Manifest→Wants, Want→Blob (immutable borrow), publish.
-                            if let Some(b) = &bf {
-                                for out in b.react(&bf_msg) {
-                                    let _ = net.publish(BLOCK_SYNC_TOPIC, out.to_bytes());
-                                }
-                            }
-                            // 2) track the peer's tip from its manifest.
-                            if let BackfillMsg::Manifest(remote) = &bf_msg {
+                        // sigil-node broadcasts raw Block JSON ({"header":{…},…})
+                        // on TOPIC_BLOCKS. Parse the header out and STORE it — THIS is
+                        // what fills the DB genesis→tip. Also accept legacy
+                        // {"header_json":"…"}; ignore our own SyncReq echoes.
+                        let v: serde_json::Value = match serde_json::from_slice(&data) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        if v.get("sync_from").is_some() { continue; }
+                        let header_opt: Option<SigilBlockHeaderV0> = if let Some(h) = v.get("header") {
+                            serde_json::from_value(h.clone()).ok()
+                        } else if let Some(hj) = v.get("header_json").and_then(|x| x.as_str()) {
+                            serde_json::from_str(hj).ok()
+                        } else { None };
+                        let header = match header_opt { Some(h) => h, None => continue };
+                        let height = header.height;
+                        let hash_hex = hex::encode(header.hash());
+                        if store.put_block(header).unwrap_or(false) {
+                            let best = store.best_height();
+                            let peer_best = {
                                 let mut s = state_clone.lock().unwrap();
-                                if remote.tip > s.peer_best_height {
-                                    s.peer_best_height = remote.tip;
-                                }
+                                s.blocks_synced += 1;
+                                s.sync_total = s.blocks_synced;
+                                s.sync_height = height;
+                                s.sync_hash_hex = hash_hex.clone();
+                                if height > s.peer_best_height { s.peer_best_height = height; }
                                 s.last_message_at = Some(Instant::now());
+                                s.peer_best_height
+                            };
+                            net.push_sync_progress(height, &hash_hex, peer_best, best);
+                            if let Some(block) = store.get_block(&hash_hex) {
+                                new_blocks_clone.lock().unwrap().push(block);
                             }
-                            // 3) Blob: verify+import (anti-poison), then apply to the chain.
-                            if let BackfillMsg::Blob { root, blob_hex } = &bf_msg {
-                                let applied = bf.as_ref().and_then(|b| b.on_blob(root, blob_hex));
-                                match applied {
-                                    None => crate::tlog!(
-                                        "[p2p-sync] rejected tampered/absent blob root={}",
-                                        &root[..root.len().min(12)]
-                                    ),
-                                    Some(bytes) => {
-                                        if let Ok(header) =
-                                            serde_json::from_slice::<SigilBlockHeaderV0>(&bytes)
-                                        {
-                                            let height = header.height;
-                                            let hash_hex = hex::encode(header.hash());
-                                            if store.put_block(header).unwrap_or(false) {
-                                                if let Some(b) = &mut bf {
-                                                    let _ = b.record(height, &bytes);
-                                                }
-                                                let best = store.best_height();
-                                                let peer_best = {
-                                                    let mut s = state_clone.lock().unwrap();
-                                                    s.blocks_synced += 1;
-                                                    s.backfilled += 1;
-                                                    s.sync_height = height;
-                                                    s.sync_hash_hex = hash_hex.clone();
-                                                    s.sync_total = s.blocks_synced;
-                                                    s.last_message_at = Some(Instant::now());
-                                                    s.peer_best_height
-                                                };
-                                                net.push_sync_progress(height, &hash_hex, peer_best, best as u64);
-                                                if let Some(block) = store.get_block(&hash_hex) {
-                                                    new_blocks_clone.lock().unwrap().push(block);
-                                                }
-                                                crate::tlog!("[p2p-sync] backfilled h={height} via flux_p2p::backfill (verified)");
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                        } else {
+                            let mut s = state_clone.lock().unwrap();
+                            if height > s.peer_best_height { s.peer_best_height = height; }
+                            s.last_message_at = Some(Instant::now());
                         }
                     }
 
@@ -253,30 +198,24 @@ impl P2PBlockSync {
                     // Periodic announcements
                     if last_announce.elapsed() >= tick {
                         last_announce = Instant::now();
+                        // Pull history from the sigil-node mesh: walk genesis→tip in
+                        // chunks, asking the node to (re)broadcast each range via its
+                        // SyncReq{sync_from,sync_to}. We store every block we receive, so
+                        // the DB really fills (was a no-op + fake "complete" before).
                         let best = store.best_height();
-                        if best > 0 {
-                            let have = SyncMsg::Have {
-                                best_height: best,
-                                best_hash_hex: store.best_hash_hex(),
-                            };
-                            if let Ok(data) = serde_json::to_vec(&have) {
-                                let _ = net.publish(BLOCK_SYNC_TOPIC, data);
-                            }
+                        let (peer_best, have) = {
+                            let s = state_clone.lock().unwrap();
+                            (s.peer_best_height, s.blocks_synced)
+                        };
+                        if peer_best > 0 && have <= peer_best {
+                            let from = sync_cursor;
+                            let to = peer_best.min(from + 2000);
+                            let req = serde_json::json!({ "sync_from": from, "sync_to": to });
+                            if let Ok(d) = serde_json::to_vec(&req) { let _ = net.publish(BLOCK_SYNC_TOPIC, d); }
+                            sync_cursor = if to >= peer_best { 0 } else { to + 1 }; // loop to fill gaps
+                            crate::tlog!("[p2p-sync] backfill req [{from}..={to}] (have {have}/{peer_best}, tip {best})");
                         }
-                        let peer_best = state_clone.lock().unwrap().peer_best_height;
-                        if peer_best > best && peer_best - best < 500 {
-                            let req = SyncMsg::Req { from: best + 1, to: peer_best.min(best + 50) };
-                            if let Ok(data) = serde_json::to_vec(&req) {
-                                let _ = net.publish(BLOCK_SYNC_TOPIC, data);
-                            }
-                        }
-                        // v0.7.6: advertise our content-addressed history so peers can
-                        // backfill from us (the engine caps refs to bound message size).
-                        if let Some(b) = &bf {
-                            if b.tip() > 0 {
-                                let _ = net.publish(BLOCK_SYNC_TOPIC, b.advertise().to_bytes());
-                            }
-                        }
+
                         state_clone.lock().unwrap().peer_count = net.peer_count();
                     }
 

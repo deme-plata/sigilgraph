@@ -113,6 +113,94 @@ fn store_block(node: &Node, bh: u64, sub: &Submission, reward: u128, prev_tip: [
     let _ = db.put(format!("block/{bh:020}").as_bytes(), rec.to_string().as_bytes());
 }
 
+/// The tip-fold (fix #3): tip_{h+1} = BLAKE3(domain ‖ prev_tip ‖ height ‖ blake4 ‖ nonce ‖
+/// BLAKE3(vdf)). Shared by the producer (on accept) and the follower (on apply) so both
+/// derive identical tips — the chain is deterministic.
+fn fold_tip(prev_tip: &[u8; 32], bh: u64, blake4_hash: u64, nonce: u64, vdf: &flux_vdf::VdfProof) -> [u8; 32] {
+    let vdf_commit = blake3::hash(&serde_json::to_vec(vdf).unwrap_or_default());
+    let mut hh = blake3::Hasher::new();
+    hh.update(b"sigil-g0/tip/v2");
+    hh.update(prev_tip);
+    hh.update(&bh.to_le_bytes());
+    hh.update(&blake4_hash.to_le_bytes());
+    hh.update(&nonce.to_le_bytes());
+    hh.update(vdf_commit.as_bytes());
+    *hh.finalize().as_bytes()
+}
+
+/// Minimal std HTTP GET (host:port + path) → response body. For peer sync.
+fn http_get(host_port: &str, path: &str) -> Option<String> {
+    let mut s = std::net::TcpStream::connect(host_port).ok()?;
+    let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(8)));
+    s.write_all(format!("GET {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n").as_bytes()).ok()?;
+    let mut o = String::new();
+    s.read_to_string(&mut o).ok()?;
+    Some(o.split("\r\n\r\n").nth(1)?.to_string())
+}
+
+/// Follower APPLY: independently RE-VERIFY a peer's block against our tip, then apply it
+/// (credit + advance) so our state converges. verify-don't-trust — a bad block is rejected,
+/// never applied. Returns the applied height.
+fn apply_block(n: &mut Node, rec: &serde_json::Value, g: &ModSquaring) -> Result<u64, String> {
+    let bh = rec["height"].as_u64().ok_or("no height")?;
+    if bh != n.block_height { return Err(format!("height gap: peer block {bh} != my tip {}", n.block_height)); }
+    if hex32(rec["prev_tip"].as_str().unwrap_or("")).ok_or("bad prev_tip")? != n.tip_hash {
+        return Err(format!("block {bh}: prev_tip != my tip (fork/divergence)"));
+    }
+    let bits = rec["bits"].as_u64().unwrap_or(0) as u32;
+    let vdf_t = rec["vdf_t"].as_u64().unwrap_or(0);
+    let reward: u128 = rec["reward"].as_str().unwrap_or("0").parse().map_err(|_| "bad reward")?;
+    let sub: Submission = serde_json::from_value(rec["submission"].clone()).map_err(|e| format!("bad submission: {e}"))?;
+    let miner = hex32(&sub.wallet).ok_or("bad wallet")?;
+    let c = Challenge { height: bh, vdf_input: mining_seed(&n.tip_hash, bh), blake4_target: target_from_bits(bits), vdf_t };
+    if !check_submission(g, &c, &sub) { return Err(format!("block {bh}: dual-lane verify FAILED")); }
+    if reward != sigil_emission::block_reward(bh) { return Err(format!("block {bh}: reward != schedule")); }
+    let new_tip = fold_tip(&n.tip_hash, bh, sub.block.blake4_hash, sub.block.nonce, &sub.block.vdf);
+    if hex32(rec["tip"].as_str().unwrap_or("")).ok_or("bad tip")? != new_tip { return Err(format!("block {bh}: tip-fold mismatch")); }
+    // All checks passed — APPLY (mirror the producer's accept exactly).
+    let eh = n.height;
+    credit_share(&mut n.state, eh, miner, reward).map_err(|e| e.to_string())?;
+    let prev_tip = n.tip_hash;
+    n.tip_hash = new_tip;
+    store_block(n, bh, &sub, reward, prev_tip, new_tip);
+    n.block_height += 1;
+    n.height += 1;
+    // ADOPT the producer's difficulty from the chain — a follower must NOT run its own
+    // wall-clock retarget (it applies blocks all at once → different timing → divergent bits).
+    // (Trust boundary until step ③: difficulty becomes fully chain-derived via in-block
+    // timestamps + a verified retarget rule.)
+    n.bits = bits;
+    n.retarget_anchor_ts = now_ms();
+    n.retarget_anchor_height = n.block_height;
+    ingest(n, "mine", format!("synced block #{bh} reward {reward} (from peer)"), &[miner], "dual-lane blake4+vdf synced");
+    Ok(bh)
+}
+
+/// Background sync loop: poll a peer's /tip and pull+verify+apply every block we're missing.
+fn follow_peer(node: std::sync::Arc<RwLock<Node>>, peer: String) {
+    let g = ModSquaring::bench_2048();
+    loop {
+        if let Some(tj) = http_get(&peer, "/api/v1/tip") {
+            if let Ok(ti) = serde_json::from_str::<serde_json::Value>(&tj) {
+                let head = ti["block_height"].as_u64().unwrap_or(0);
+                loop {
+                    let my_bh = node.read().unwrap().block_height;
+                    if my_bh >= head { break; }
+                    let Some(bj) = http_get(&peer, &format!("/api/v1/block?height={my_bh}")) else { break };
+                    let Ok(rec) = serde_json::from_str::<serde_json::Value>(&bj) else { break };
+                    if rec.get("found") == Some(&serde_json::Value::Bool(false)) { break; }
+                    let mut n = node.write().unwrap();
+                    match apply_block(&mut n, &rec, &g) {
+                        Ok(applied) => { persist(&n); eprintln!("follower: applied block #{applied} (tip now {})", n.block_height); }
+                        Err(e) => { eprintln!("follower: REJECT block {my_bh} — {e} (halting sync)"); break; }
+                    }
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
 /// Content address (blake3 CID, hex) — flux-aether's content-addressing primitive.
 /// The record's bytes are stored in flux-db (via flux-history); the CID is its hash,
 /// so retrieval (/aether?cid=) can verify blake3(content)==cid (verify-don't-trust).
@@ -733,6 +821,10 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
                 let r = SubmitResult { accepted: false, reason: Some(reason) };
                 ok(serde_json::to_string(&r).unwrap_or_else(|_| "{}".into()))
             };
+            // A follower node syncs from a peer and must NOT mint its own blocks (would fork).
+            if std::env::var("SIGIL_FOLLOW_PEER").is_ok() {
+                return reject("this node is a follower (SIGIL_FOLLOW_PEER set) — it syncs, does not mine".into());
+            }
             // Take the write lock FIRST so the height + tip we validate against are the
             // ones we'll advance — no TOCTOU between check and credit.
             let mut n = node.write().unwrap();
@@ -764,15 +856,7 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
                     // fix #3 (VDF-chaining): fold the VDF OUTPUT into the tip → height bh+1's
                     // challenge depends on this block's VDF output (sequential timeline).
                     let prev_tip = n.tip_hash;
-                    let vdf_commit = blake3::hash(&serde_json::to_vec(&sub.block.vdf).unwrap_or_default());
-                    let mut hh = blake3::Hasher::new();
-                    hh.update(b"sigil-g0/tip/v2");
-                    hh.update(&prev_tip);
-                    hh.update(&bh.to_le_bytes());
-                    hh.update(&sub.block.blake4_hash.to_le_bytes());
-                    hh.update(&sub.block.nonce.to_le_bytes());
-                    hh.update(vdf_commit.as_bytes());
-                    let new_tip = *hh.finalize().as_bytes();
+                    let new_tip = fold_tip(&prev_tip, bh, sub.block.blake4_hash, sub.block.nonce, &sub.block.vdf);
                     n.tip_hash = new_tip;
                     // decentralization step ①: persist the block so PEERS can pull + verify it.
                     store_block(&n, bh, &sub, reward, prev_tip, new_tip);
@@ -908,6 +992,13 @@ fn main() {
     let node = Arc::new(RwLock::new(bootstrap()));
     let listener = TcpListener::bind(&addr).expect("bind");
     eprintln!("sigil-rpcd listening on {addr} — thread-per-conn + RwLock (concurrent reads, serialized writes); pool USDS/wQUG, trader+operator funded");
+    // Follower mode: if SIGIL_FOLLOW_PEER is set, sync the mining chain from that peer
+    // (pull + independently verify + apply) so this node converges with the producer.
+    if let Ok(peer) = std::env::var("SIGIL_FOLLOW_PEER") {
+        eprintln!("follower mode: syncing the mining chain from peer {peer}");
+        let fnode = Arc::clone(&node);
+        thread::spawn(move || follow_peer(fnode, peer));
+    }
     for stream in listener.incoming().flatten() {
         let n = Arc::clone(&node);
         thread::spawn(move || handle(stream, &n));

@@ -198,6 +198,26 @@ pub fn submit_share(
         return Err(RpcError::ShareBelowTarget);
     }
 
+    // PoW verified — credit through the ONE cap-enforced money chokepoint.
+    credit_share(state, height, miner, reward)
+}
+
+/// Credit a coinbase `reward` for an ALREADY-VERIFIED mining share to `miner`,
+/// with the 21M native cap enforced by the state chokepoint (a reward that would
+/// push total native supply past MAX_SUPPLY is REJECTED, not clamped). Returns
+/// the miner's new NATIVE balance.
+///
+/// This is the credit half of [`submit_share`] factored out so BOTH lanes share
+/// one money path: the single-lane BLAKE3 PoW (via [`submit_share`]) AND the
+/// dual-lane BLAKE4 Φ + VDF Ω block (verified node-side by flux-miner's
+/// `check_submission`, then credited here). The verification rule differs per
+/// lane; the WRITE is identical and audited in exactly one place.
+pub fn credit_share(
+    state: &mut SigilState,
+    height: u64,
+    miner: WalletId,
+    reward: u128,
+) -> Result<u128, RpcError> {
     let new_balance = state
         .balance_of(&miner, &NATIVE)
         .checked_add(reward)

@@ -7,24 +7,39 @@ description = "The dual-lane Flux miner: BLAKE4 proof-of-work (the POWER lane, �
 
 [dependencies]
 flux-vdf   = { workspace = true }
-flux-fold  = { workspace = true }   # the succinct lattice backend (v0.3 light-node + block-proof folding)
 blake3     = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 anyhow     = { workspace = true }
 num-bigint = { workspace = true }
+# the succinct lattice backend (v0.3 light-node + block-proof folding) — only the
+# light ECONOMIC node needs it, so it rides the `market` feature.
+flux-fold  = { workspace = true, optional = true }
 # challenge/submit HTTP client — rustls (no openssl) so the miner stays a portable
-# single-binary download (musl / windows-gnu).
-reqwest    = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+# single-binary download (musl / windows-gnu). Optional: the verification CORE
+# (Challenge/Submission/check_submission/verify_dual) is reqwest-free so a node
+# (e.g. sigil-rpcd) can depend on flux-miner with default-features = false.
+reqwest    = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false, optional = true }
 # the light ECONOMIC node's earning engine: price + arb + sentiment + DCA (propose-only).
-flux-market = { path = "../../../flux/crates/flux-market" }
+flux-market = { path = "../../../flux/crates/flux-market", optional = true }
 # reference mining node (flux-mining-node bin) + the roundtrip test's mock node.
-tiny_http  = "0.12"
+tiny_http  = { version = "0.12", optional = true }
+
+[features]
+# Default = the full miner (all bins build with a plain `fluxc build`). A NODE
+# that only needs the verification gate depends with default-features = false
+# and gets the reqwest-free core (types + check_submission + verify_dual).
+default = ["client", "market", "node"]
+client  = ["dep:reqwest"]                         # MinerClient + updater (HTTP)
+market  = ["dep:flux-market", "dep:flux-fold"]    # the light economic node
+node    = ["dep:tiny_http"]                       # reference mining node + roundtrip test
 
 [[bin]]
 name = "flux-miner"
 path = "src/bin/flux-miner.rs"
+required-features = ["client"]
 
 [[bin]]
 name = "flux-mining-node"
 path = "src/bin/flux-mining-node.rs"
+required-features = ["node"]

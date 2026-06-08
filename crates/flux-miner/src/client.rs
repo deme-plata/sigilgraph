@@ -9,6 +9,7 @@
 use crate::{mine_dual, verify_dual, DualLaneBlock};
 use flux_vdf::VdfGroup;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "client")]
 use std::time::{Duration, Instant};
 
 /// A node-issued mining challenge.
@@ -99,13 +100,17 @@ pub struct MineStats {
     pub last_height: u64,
 }
 
-/// The HTTP mining client.
+/// The HTTP mining client. Gated behind the `client` feature so a node that
+/// only needs the verification gate ([`check_submission`]) can depend on
+/// flux-miner without pulling in reqwest.
+#[cfg(feature = "client")]
 pub struct MinerClient {
     pub endpoints: Endpoints,
     pub wallet: String,
     http: reqwest::blocking::Client,
 }
 
+#[cfg(feature = "client")]
 impl MinerClient {
     pub fn new(endpoints: Endpoints, wallet: impl Into<String>) -> anyhow::Result<Self> {
         let http = reqwest::blocking::Client::builder()
@@ -168,7 +173,9 @@ impl MinerClient {
     }
 }
 
-#[cfg(test)]
+// The roundtrip test spins a tiny_http mock node AND the reqwest MinerClient, so
+// it needs both features. The pure header test lives in `core_tests` below.
+#[cfg(all(test, feature = "client", feature = "node"))]
 mod tests {
     use super::*;
     use flux_vdf::ModSquaring;
@@ -225,6 +232,13 @@ mod tests {
         assert_eq!(stats.last_height, 7);
         assert!(node.join().unwrap(), "node-side verify must pass");
     }
+}
+
+// The header-binding test is pure (no HTTP, no mock node) — always compiled so
+// the reqwest-free core stays covered even under default-features = false.
+#[cfg(test)]
+mod core_tests {
+    use super::*;
 
     #[test]
     fn header_is_deterministic_and_binding() {

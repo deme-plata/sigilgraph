@@ -37,7 +37,14 @@ use sigil_state::{
 /// student registry (the earning gate), and the citizen roster.
 struct Node {
     state: SigilState,
+    /// Global state-event counter (DEX swaps + mining both bump it) — used for
+    /// state-transition ordering, NOT for emission/difficulty.
     height: u64,
+    /// Mining-chain height: a clean, contiguous 0,1,2,… sequence bumped ONLY by an
+    /// accepted dual-lane block. Drives the challenge, block_reward (halving), retarget,
+    /// and the tip — so swap volume can't distort the emission schedule (red-team:
+    /// height-conflation), and mining blocks form a peer-verifiable chain.
+    block_height: u64,
     /// Student / verified-user registry — onboarded users that may earn.
     students: VerifiedRegistry,
     /// symbol → token-id (predefined + dynamically deployed via /deploy_token).
@@ -69,6 +76,8 @@ struct Node {
 struct Snapshot {
     state: SigilState,
     height: u64,
+    #[serde(default)]
+    block_height: u64,
     tip_hash: [u8; 32],
     bits: u32,
     retarget_anchor_ts: u64,
@@ -83,7 +92,7 @@ struct Snapshot {
 fn persist(node: &Node) {
     let Some(db) = node.statedb.as_ref() else { return };
     let snap = Snapshot {
-        state: node.state.clone(), height: node.height, tip_hash: node.tip_hash,
+        state: node.state.clone(), height: node.height, block_height: node.block_height, tip_hash: node.tip_hash,
         bits: node.bits, retarget_anchor_ts: node.retarget_anchor_ts, retarget_anchor_height: node.retarget_anchor_height,
         tokens: node.tokens.clone(), pools: node.pools.clone(), citizens: node.citizens.clone(),
     };
@@ -92,6 +101,16 @@ fn persist(node: &Node) {
 /// Load a persisted snapshot, if one exists + decodes.
 fn load_snapshot(db: &flux_db::Database) -> Option<Snapshot> {
     db.get(b"snapshot").ok().flatten().and_then(|b| bincode::deserialize(&b).ok())
+}
+/// Persist an accepted dual-lane block under its mining height so peers can pull it
+/// (`GET /block?height=`) and INDEPENDENTLY re-verify the chain (verify-don't-trust).
+fn store_block(node: &Node, bh: u64, sub: &Submission, reward: u128, prev_tip: [u8; 32], new_tip: [u8; 32]) {
+    let Some(db) = node.statedb.as_ref() else { return };
+    let rec = serde_json::json!({
+        "height": bh, "prev_tip": hexs(&prev_tip), "tip": hexs(&new_tip),
+        "reward": reward.to_string(), "bits": node.bits, "vdf_t": mining_vdf_t(), "submission": sub,
+    });
+    let _ = db.put(format!("block/{bh:020}").as_bytes(), rec.to_string().as_bytes());
 }
 
 /// Content address (blake3 CID, hex) — flux-aether's content-addressing primitive.
@@ -183,17 +202,17 @@ fn target_block_ms() -> u64 {
 /// block; fires once per RETARGET_WINDOW. Meaningful ONLY because fix #1 made block
 /// timestamps real (no precompute). Clamped to ±2 bits/window (≤4x) and bits ∈ [4,48].
 fn retarget(node: &mut Node) {
-    if node.height < node.retarget_anchor_height + RETARGET_WINDOW { return; }
+    if node.block_height < node.retarget_anchor_height + RETARGET_WINDOW { return; }
     let now = now_ms();
     let actual = now.saturating_sub(node.retarget_anchor_ts).max(1);
     let expected = RETARGET_WINDOW * target_block_ms();
     // ratio>1 ⇒ blocks came too FAST ⇒ raise bits (harder); <1 ⇒ too slow ⇒ lower.
     let delta = (expected as f64 / actual as f64).log2().round().clamp(-2.0, 2.0) as i64;
     let new_bits = (node.bits as i64 + delta).clamp(4, 48) as u32;
-    eprintln!("retarget: h={} actual={}ms expected={}ms bits {}→{}", node.height, actual, expected, node.bits, new_bits);
+    eprintln!("retarget: bh={} actual={}ms expected={}ms bits {}→{}", node.block_height, actual, expected, node.bits, new_bits);
     node.bits = new_bits;
     node.retarget_anchor_ts = now;
-    node.retarget_anchor_height = node.height;
+    node.retarget_anchor_height = node.block_height;
 }
 /// Per-height VDF challenge seed bound to the chain TIP: BLAKE3(tip ‖ height).
 /// Because `tip` folds the prior accepted block, the seed for height H is
@@ -256,7 +275,7 @@ fn bootstrap() -> Node {
         eprintln!("flux-db: RESTORED state @ height {} ({} wallets, native supply {}) from {state_path}",
             snap.height, snap.state.wallet_count(), snap.state.native_supply());
         return Node {
-            state: snap.state, height: snap.height, students: VerifiedRegistry::new(),
+            state: snap.state, height: snap.height, block_height: snap.block_height, students: VerifiedRegistry::new(),
             tokens: snap.tokens, pools: snap.pools, citizens: snap.citizens, history,
             tip_hash: snap.tip_hash, bits: snap.bits,
             retarget_anchor_ts: snap.retarget_anchor_ts, retarget_anchor_height: snap.retarget_anchor_height,
@@ -320,8 +339,8 @@ fn bootstrap() -> Node {
         ("SIGIL/USDS".into(), POOL_SIGIL),
     ];
     let tip_hash = *blake3::hash(b"sigil-g0/mining-genesis").as_bytes();
-    let node = Node { state, height: 2, students: VerifiedRegistry::new(), tokens, pools, citizens: vec![CITIZEN], history,
-        tip_hash, bits: mining_bits(), retarget_anchor_ts: now_ms(), retarget_anchor_height: 2, statedb };
+    let node = Node { state, height: 2, block_height: 0, students: VerifiedRegistry::new(), tokens, pools, citizens: vec![CITIZEN], history,
+        tip_hash, bits: mining_bits(), retarget_anchor_ts: now_ms(), retarget_anchor_height: 0, statedb };
     persist(&node); // write the genesis snapshot so the next boot restores
     node
 }
@@ -408,6 +427,22 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
     }
     match (method, path) {
         ("GET", "/health") => ok("{\"ok\":true,\"service\":\"sigil-rpcd\"}".into()),
+        // ── peer sync (decentralization ①): expose the mining chain for verify-don't-trust ──
+        ("GET", "/tip") => {
+            let n = node.read().unwrap();
+            ok(format!("{{\"ok\":true,\"block_height\":{},\"height\":{},\"tip\":\"{}\",\"bits\":{}}}",
+                n.block_height, n.height, hexs(&n.tip_hash), n.bits))
+        }
+        ("GET", "/block") => {
+            let h: u64 = match query_get(query, "height").and_then(|s| s.parse().ok()) {
+                Some(h) => h, None => return bad("height query param required"),
+            };
+            let n = node.read().unwrap();
+            match n.statedb.as_ref().and_then(|db| db.get(format!("block/{h:020}").as_bytes()).ok().flatten()) {
+                Some(bytes) => ok(String::from_utf8_lossy(&bytes).to_string()),
+                None => ok(format!("{{\"ok\":true,\"height\":{h},\"found\":false}}")),
+            }
+        }
         ("GET", "/status") => {
             let n = node.read().unwrap();
             ok(format!(
@@ -675,7 +710,7 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
         // solve time, so a share can't be re-pointed to a different miner.
         ("GET", "/mining/challenge") => {
             let n = node.read().unwrap();
-            let h = n.height;
+            let h = n.block_height; // mining-chain height (contiguous; emission-clean)
             // seed binds to the CURRENT tip → unpredictable until the prior block lands.
             let c = Challenge {
                 height: h,
@@ -701,17 +736,17 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
             // Take the write lock FIRST so the height + tip we validate against are the
             // ones we'll advance — no TOCTOU between check and credit.
             let mut n = node.write().unwrap();
-            let h = n.height;
+            let bh = n.block_height; // MINING-chain height (contiguous; emission-clean)
             // fix #1 (precompute): ONLY the current tip is mineable. A precomputed
             // submission for a future/stale height is rejected here, and even at the
-            // right height its seed (BLAKE3(tip‖h)) won't match unless it was built on
+            // right height its seed (BLAKE3(tip‖bh)) won't match unless it was built on
             // THIS tip — which is unknown until the prior block was accepted.
-            if sub.height != h {
-                return reject(format!("stale height: submitted {} but the mineable tip is {}", sub.height, h));
+            if sub.height != bh {
+                return reject(format!("stale height: submitted {} but the mineable tip is {}", sub.height, bh));
             }
             let c = Challenge {
-                height: h,
-                vdf_input: mining_seed(&n.tip_hash, h),
+                height: bh,
+                vdf_input: mining_seed(&n.tip_hash, bh),
                 blake4_target: target_from_bits(n.bits),
                 vdf_t: mining_vdf_t(),
             };
@@ -719,31 +754,33 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
             if !check_submission(&g, &c, &sub) {
                 return reject("dual-lane verify / header mismatch (wrong tip, target, or VDF)".into());
             }
-            // Verified on the current tip — credit the HALVING block reward (sigil-emission
-            // schedule, fix: was a flat 50) through the cap-enforced chokepoint. Schedule +
-            // 21M cap are two independent guards; block_reward(h) follows the 21M curve.
-            let reward = sigil_emission::block_reward(h);
-            match credit_share(&mut n.state, h, miner, reward) {
+            // Verified on the current tip — credit the HALVING block reward on the MINING
+            // height (block_reward(bh) — swap volume no longer distorts emission). Schedule +
+            // 21M cap are two independent guards. State event ordered by the global height.
+            let reward = sigil_emission::block_reward(bh);
+            let eh = n.height;
+            match credit_share(&mut n.state, eh, miner, reward) {
                 Ok(bal) => {
-                    // Advance the tip: fold this block in so the NEXT challenge is fresh.
-                    // fix #3 (VDF-chaining): fold the VDF OUTPUT (commit to the proof) into
-                    // the tip. The next challenge seed = BLAKE3(tip‖height) then depends on
-                    // THIS block's VDF output → you cannot know height H+1's challenge until
-                    // you have RUN height H's VDF to completion. The VDFs chain into one
-                    // sequential timeline; no cross-block pipelining of nonce search.
+                    // fix #3 (VDF-chaining): fold the VDF OUTPUT into the tip → height bh+1's
+                    // challenge depends on this block's VDF output (sequential timeline).
+                    let prev_tip = n.tip_hash;
                     let vdf_commit = blake3::hash(&serde_json::to_vec(&sub.block.vdf).unwrap_or_default());
                     let mut hh = blake3::Hasher::new();
                     hh.update(b"sigil-g0/tip/v2");
-                    hh.update(&n.tip_hash);
-                    hh.update(&h.to_le_bytes());
+                    hh.update(&prev_tip);
+                    hh.update(&bh.to_le_bytes());
                     hh.update(&sub.block.blake4_hash.to_le_bytes());
                     hh.update(&sub.block.nonce.to_le_bytes());
                     hh.update(vdf_commit.as_bytes());
-                    n.tip_hash = *hh.finalize().as_bytes();
+                    let new_tip = *hh.finalize().as_bytes();
+                    n.tip_hash = new_tip;
+                    // decentralization step ①: persist the block so PEERS can pull + verify it.
+                    store_block(&n, bh, &sub, reward, prev_tip, new_tip);
+                    n.block_height += 1;
                     n.height += 1;
                     retarget(&mut n); // fix #2: adjust BLAKE4 difficulty from real block times
-                    ingest(&mut n, "mine", format!("dual-lane mine reward {} (height {h}, halving schedule)", reward), &[miner], "dual-lane blake4+vdf");
-                    ok(format!("{{\"accepted\":true,\"reason\":null,\"new_balance\":{}}}", bal))
+                    ingest(&mut n, "mine", format!("dual-lane block #{bh} reward {} (halving)", reward), &[miner], "dual-lane blake4+vdf");
+                    ok(format!("{{\"accepted\":true,\"reason\":null,\"block_height\":{},\"new_balance\":{}}}", bh, bal))
                 }
                 Err(e) => reject(e.to_string()),
             }

@@ -86,6 +86,12 @@ pub fn check_submission<G: VdfGroup>(g: &G, c: &Challenge, sub: &Submission) -> 
     if sub.block.header != build_header(c, &sub.wallet) {
         return false;
     }
+    // Enforce the REQUIRED sequential work (Lane B time): without this, a t=1 (instant)
+    // VDF proof would verify as "a valid VDF" and bypass the time lane entirely. The proof
+    // must commit to exactly the challenge's vdf_t squarings.
+    if sub.block.vdf.t != c.vdf_t {
+        return false;
+    }
     verify_dual(g, &sub.block, c.blake4_target)
 }
 

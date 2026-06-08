@@ -222,11 +222,37 @@ fn bootstrap() -> Node {
     ];
     // flux-history index (flux-db + flux-search) — persistent across restarts.
     let hist_path = std::env::var("SIGIL_HISTORY_PATH").unwrap_or_else(|_| "/home/orobit/sigil-data/history".into());
-    let history = match flux_history::HistoryStore::open(&hist_path) {
+    let mut history = match flux_history::HistoryStore::open(&hist_path) {
         Ok(s) => { eprintln!("flux-history: {} entries @ {hist_path}", s.len()); Some(s) }
         Err(e) => { eprintln!("flux-history: disabled ({e})"); None }
     };
+    if let Some(h) = history.as_mut() { backfill_blocks(h); }
     Node { state, height: 2, students: VerifiedRegistry::new(), tokens, pools, citizens: vec![CITIZEN], history }
+}
+
+/// One-time backfill: ingest the persisted DAG block headers (dag-blocks.json) into
+/// flux-history so historical blocks are searchable (by height/hash/producer). Guarded
+/// by a `meta=backfill` marker so it runs once. (Pre-session per-address tx data doesn't
+/// exist — the in-memory node never persisted it — so this backfills BLOCK headers.)
+fn backfill_blocks(history: &mut flux_history::HistoryStore) {
+    if history.by_tag("meta", "backfill").map(|v| !v.is_empty()).unwrap_or(false) { return; }
+    let path = std::env::var("SIGIL_DAG_BLOCKS").unwrap_or_else(|_| "/home/orobit/q-narwhalknight/dist-fluxapp/dag-blocks.json".into());
+    let Ok(data) = std::fs::read_to_string(&path) else { eprintln!("flux-history: backfill skipped (no {path})"); return };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else { return };
+    let blocks = v.get("blocks").and_then(|b| b.as_array()).cloned().unwrap_or_default();
+    let mut n = 0u64;
+    for b in &blocks {
+        let h = b.get("h").and_then(|x| x.as_u64()).unwrap_or(0);
+        let hash = b.get("hash").and_then(|x| x.as_str()).unwrap_or("");
+        let prod = b.get("prod").and_then(|x| x.as_str()).unwrap_or("?");
+        let entry = flux_history::HistoryEntry::new("block", prod, format!("Block #{h}"),
+            format!("block {h} hash {hash} producer {prod}"), now_ms())
+            .with_tag("height", &h.to_string()).with_tag("hash", hash).with_tag("kind", "block");
+        if history.append(entry).is_ok() { n += 1; }
+    }
+    let _ = history.append(flux_history::HistoryEntry::new("_meta", "backfill", "backfill done",
+        format!("backfilled {n} blocks from {path}"), now_ms()).with_tag("meta", "backfill"));
+    eprintln!("flux-history: backfilled {n} block headers from {path}");
 }
 
 /// Symbol for a token id given the live registry (falls back to a hex stub).
@@ -298,15 +324,22 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
             let q = query_get(query, "q").unwrap_or("").trim().to_string();
             if q.len() < 2 { return ok("{\"ok\":true,\"q\":\"\",\"count\":0,\"results\":[]}".into()); }
             let js = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into());
-            // a 64-hex query is a wallet ADDRESS → EXACT tag lookup (TF-IDF would
-            // miss it, e.g. IDF=0 when a term is in every doc). Else full-text.
+            // EXACT tag lookups for the ID-like queries (flux-search TF-IDF misses
+            // them — IDF=0 for ubiquitous terms, and pure-numeric tokens don't match):
+            //   64-hex → wallet ADDRESS; all-digits → block HEIGHT. Else full-text.
             let is_addr = q.len() == 64 && q.chars().all(|c| c.is_ascii_hexdigit());
+            let is_height = q.chars().all(|c| c.is_ascii_digit());
+            let map_e = |es: Vec<flux_history::HistoryEntry>| -> Vec<String> { es.iter().map(|e| format!(
+                "{{\"title\":{},\"snippet\":{},\"id\":{},\"kind\":{},\"ts\":{},\"score\":1.0}}",
+                serde_json::to_string(&e.title).unwrap_or_else(|_| "\"\"".into()),
+                serde_json::to_string(&e.content).unwrap_or_else(|_| "\"\"".into()),
+                serde_json::to_string(&e.id).unwrap_or_else(|_| "\"\"".into()),
+                serde_json::to_string(&e.kind).unwrap_or_else(|_| "\"\"".into()), e.ts_ms)).collect() };
             let mut n = node.write().unwrap();
             let items: Vec<String> = match n.history.as_mut() {
                 None => vec![],
-                Some(h) if is_addr => h.by_tag("addr", &q.to_lowercase()).unwrap_or_default().iter().map(|e| format!(
-                    "{{\"title\":{},\"snippet\":{},\"id\":{},\"kind\":{},\"ts\":{},\"score\":1.0}}",
-                    js(&e.title), js(&e.content), js(&e.id), js(&e.kind), e.ts_ms)).collect(),
+                Some(h) if is_addr => map_e(h.by_tag("addr", &q.to_lowercase()).unwrap_or_default()),
+                Some(h) if is_height => map_e(h.by_tag("height", &q).unwrap_or_default()),
                 Some(h) => h.search(&q, 25).iter().map(|r| format!(
                     "{{\"title\":{},\"snippet\":{},\"id\":{},\"score\":{:.3}}}",
                     js(&r.title), js(&r.snippet), js(&r.url), r.score)).collect(),

@@ -58,6 +58,13 @@ pub fn stage(url: &str) -> Result<String, String> {
         .bytes()
         .map_err(|e| e.to_string())?;
     std::fs::write(&staged, &bytes).map_err(|e| e.to_string())?;
+    // staged binary must be executable on unix (fs::write makes it 0644) or the
+    // re-exec fails with EACCES. Windows execs by extension, no bit needed.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755));
+    }
     Ok(staged.display().to_string())
 }
 

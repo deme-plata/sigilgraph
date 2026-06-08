@@ -48,7 +48,10 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// only updates to the operator-promoted version in this file.
 fn manifest_url() -> String {
     let plat = if cfg!(windows) { "windows" } else { "linux" };
-    format!("https://sigilgraph.quillon.xyz/downloads/sigil-miner-latest-{plat}.json")
+    // GPU builds track their OWN channel so they never self-downgrade to the CPU
+    // binary (the CPU exe must run on machines with no OpenCL).
+    let variant = if cfg!(feature = "gpu") { "-gpu" } else { "" };
+    format!("https://sigilgraph.quillon.xyz/downloads/sigil-miner-latest-{plat}{variant}.json")
 }
 
 // ── obsidian + violet SIGIL palette ──────────────────────────────────────────

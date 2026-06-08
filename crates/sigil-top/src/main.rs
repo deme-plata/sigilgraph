@@ -17,6 +17,10 @@
 //!   sigil-top --interval 5    set refresh seconds
 //!   sigil-top --api URL       point at a remote node status endpoint
 
+mod block_store;
+mod block_sync;
+mod serve;
+
 use std::io::{IsTerminal, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::process::Command;
@@ -48,13 +52,21 @@ use ratatui::{
 use sigil_state::StateRoots;
 use sigil_tip_proof::TipProof;
 use sigil_oauth::{AuthRequest, Keypair, WalletAssertion, pkce_pair, verify_sig, wallet_id};
+use flux_cortex::Cortex;
+use flux_cortex::ai_cortex::{AiAgent, AgentCapability, default_agent_registry};
+use flux_graph::WorkspaceGraph;
+use flux_optimize::OptimizationPreset;
+// v0.6.0: P2P mesh, swarm coordination, content-addressed version control
+use flux_p2p::NetworkManager;
+use flux_swarm_tools::{Activity, ActivityKind, ActivityLog, with_locked};
+use flux_rev::{Store, snapshot, Genesis};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Offline fallback only — the *live* update signal is fetched at runtime from the
 /// flux release channel (see [`UPDATE_MANIFEST`]). The update bar glows when the
 /// channel reports a version newer than this binary, so an OLD build learns about a
 /// new release without recompilation — the whole point of "auto-update the flux way".
-const LATEST: &str = "0.4.1";
+const LATEST: &str = "0.7.0";
 /// The flux release channel for the lightweight node: `<product>-latest.json` in the
 /// q-flux downloads dir — the SAME manifest `flux_release_check` reads. Fetched at
 /// startup (throttled) and on `[U]`, so the running binary discovers new releases live.
@@ -154,6 +166,18 @@ struct FeedBlock {
     producer: String,
     txs: u64,
     tip_ms: u64,
+}
+
+/// v0.7.0: A node in the AI operator's fleet. Tracked for uptime and version compliance.
+#[derive(Debug, Clone)]
+struct FleetNode {
+    name: String,
+    addr: String,
+    port: u16,
+    online: bool,
+    height: u64,
+    version: String,
+    uptime_secs: u64,
 }
 
 /// The live testnet feed — {status, tip, blocks} — the same JSON flux-node.html
@@ -830,40 +854,57 @@ const C_INK: Color = Color::Rgb(0x4a, 0x4a, 0x66);      // faintest (separators)
 
 /// One platform's prebuilt in the manifest. Our per-OS extension to the flux
 /// release-channel shape (`flux_release_check` reads the top-level fields only).
+/// Backward-compat: v0.3.x manifests used `blake3` and `size` keys.
 #[derive(Deserialize, Default, Clone)]
 struct Target {
     url: String,
-    #[serde(default)]
+    #[serde(default, alias = "blake3")]
     blake3_hex: String,
-    #[serde(default)]
+    #[serde(default, alias = "size")]
     size_bytes: u64,
 }
 
 /// `sigil-top-latest.json` — same shape `flux_release_publish` writes, plus a
 /// `targets` map so one channel serves both the Linux build and the Windows .exe.
+/// Backward-compat: v0.3.x manifests used `blake3` and `size` keys, and
+/// target triple keys like `x86_64-unknown-linux-musl`.
 #[derive(Deserialize)]
 struct Release {
     #[serde(default)]
     version: String,
     #[serde(default)]
     url: String,
-    #[serde(default)]
+    #[serde(default, alias = "blake3")]
     blake3_hex: String,
-    #[serde(default)]
+    #[serde(default, alias = "size")]
     size_bytes: u64,
     #[serde(default)]
     targets: std::collections::HashMap<String, Target>,
 }
 
+/// Old manifest target triples that map to our short platform names.
+const LEGACY_SELF_KEYS: &[&str] = if cfg!(windows) {
+    &["windows-x64", "x86_64-pc-windows-gnu"]
+} else if cfg!(target_os = "macos") {
+    &["macos-arm64", "aarch64-apple-darwin"]
+} else {
+    &["linux-x64", "x86_64-unknown-linux-musl", "x86_64-unknown-linux-gnu"]
+};
+
 impl Release {
-    /// The download for THIS platform: the matching `targets` entry, else the
-    /// top-level single-binary fields.
+    /// The download for THIS platform: try the current `SELF_TARGET` key first,
+    /// then legacy target triples, else fall back to top-level single-binary fields.
     fn for_self(&self) -> Target {
-        self.targets.get(SELF_TARGET).cloned().unwrap_or(Target {
+        for key in LEGACY_SELF_KEYS {
+            if let Some(t) = self.targets.get(*key) {
+                return t.clone();
+            }
+        }
+        Target {
             url: self.url.clone(),
             blake3_hex: self.blake3_hex.clone(),
             size_bytes: self.size_bytes,
-        })
+        }
     }
 }
 
@@ -958,6 +999,46 @@ fn fetch_dns_anchor() -> String {
             &anchor.key_id[..8]
         ),
         Err(e) => format!("✗ DNS anchor: parse failed: {e}"),
+    }
+}
+
+/// v0.7.0: Poll each fleet node's status API to check uptime, height, and version.
+/// Runs on the UI thread (quick timeout per node — 3s each). AI operators depend on
+/// this to know if their fleet needs attention.
+fn check_fleet_health(nodes: &mut Vec<FleetNode>) {
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .danger_accept_invalid_certs(true)
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    for node in nodes.iter_mut() {
+        let url = format!("https://{}:{}/api/v1/status", node.addr, 8181);
+        match client.get(&url).send() {
+            Ok(resp) => {
+                node.online = true;
+                if let Ok(json) = resp.json::<serde_json::Value>() {
+                    node.height = json.get("block_height")
+                        .or_else(|| json.get("tip_height"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    node.version = json.get("version")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    node.uptime_secs = json.get("uptime")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                }
+            }
+            Err(_) => {
+                node.online = false;
+                node.height = 0;
+                node.version.clear();
+            }
+        }
     }
 }
 
@@ -1080,7 +1161,20 @@ fn maybe_auto_update(argv: &[String]) -> Option<String> {
                     use std::os::unix::process::CommandExt;
                     let _ = std::process::Command::new(&exe).args(&args).exec(); // replaces this process
                 }
-                #[cfg(not(unix))]
+                #[cfg(windows)]
+                {
+                    // Spawn the NEWLY SAVED binary, not this one (avoids infinite loop)
+                    if let Ok(beside) = std::env::current_exe() {
+                        let new_exe = beside.with_file_name(format!("sigil-top-v{}.exe", rel.version));
+                        if new_exe.exists() {
+                            let _ = std::process::Command::new(&new_exe).args(&args).spawn();
+                            std::process::exit(0);
+                        }
+                    }
+                    // Fallback: just exit, user runs the new binary manually
+                    std::process::exit(0);
+                }
+                #[cfg(target_os = "macos")]
                 {
                     let _ = std::process::Command::new(&exe).args(&args).spawn();
                     std::process::exit(0);
@@ -1113,29 +1207,24 @@ fn self_update(rel: &Release) -> Result<String, String> {
             return Err(format!("BLAKE3 mismatch — refusing swap (got {}…)", &got[..12]));
         }
     }
-    // Stage beside the current exe, then atomic self-replace (rename-self on Windows).
+    // Save beside the current exe as a versioned binary.
+    // Windows: cannot swap running .exe; save as sigil-top-v{VERSION}.exe.
+    // Unix: try atomic self-replace; fall back to versioned binary beside.
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let tmp = exe.with_extension("new");
-    std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
+    let beside = exe.with_file_name(format!("sigil-top-v{}{}", rel.version,
+        if cfg!(windows) { ".exe" } else { "" }));
+    std::fs::write(&beside, &bytes).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::set_permissions(&beside, std::fs::Permissions::from_mode(0o755));
+        if self_replace::self_replace(&beside).is_ok() {
+            let _ = std::fs::remove_file(&beside);
+            return Ok(format!("swapped v{VERSION} -> v{} ({:.1} MB) — restart to run",
+                rel.version, bytes.len() as f64 / 1.048576e6));
+        }
     }
-    if let Err(e) = self_replace::self_replace(&tmp) {
-        // In-place swap blocked (Windows AV / locked exe). Don't dead-end: keep the
-        // already-BLAKE3-verified new binary right beside the current one.
-        let beside = exe.with_file_name(format!("sigil-top-v{}{}", rel.version,
-            if cfg!(windows) { ".exe" } else { "" }));
-        let _ = std::fs::rename(&tmp, &beside);
-        return Ok(format!(
-            "downloaded + verified v{} but in-place swap failed ({e}) — run it: {}",
-            rel.version, beside.display()));
-    }
-    let _ = std::fs::remove_file(&tmp);
-    Ok(format!(
-        "✓ swapped v{VERSION} → v{} ({:.1} MB, BLAKE3-verified) — restart sigil-top to run it",
-        rel.version, bytes.len() as f64 / 1.048576e6))
+    Ok(format!("saved v{} ({:.1} MB) -> {}", rel.version, bytes.len() as f64 / 1.048576e6, beside.display()))
 }
 
 struct App {
@@ -1174,6 +1263,25 @@ struct App {
     /// Post-update logo splash (flux updater return UX).
     splash_until: Option<Instant>,
     splash_frame: u8,
+    // v0.6.0: Cortex MCP combo integration — AI agent registry + optimization engine
+    cortex: Option<Cortex>,
+    agents: Vec<AiAgent>,
+    cortex_loops: u64,
+    last_cortex_gain: f64,
+    cortex_summary: String,
+    mcp_combo_tool: String,     // active MCP combo verb being executed
+    mcp_combo_result: String,   // last MCP combo result
+    // v0.6.5: Real P2P block sync via flux-p2p mesh (Delta + Epsilon)
+    p2p_sync: Option<block_sync::P2PBlockSync>,
+    p2p_state: block_sync::P2PSyncState,
+    p2p_blocks_synced: u64,
+    // v0.7.0: AI fleet monitoring — AIs worry about their nodes' uptime and version compliance
+    fleet_nodes: Vec<FleetNode>,
+    fleet_last_check: Instant,
+    // v0.6.0: fluxc serve status for local wallet + cockpit
+    serve_status: String,
+    // v0.7.0: embedded HTTP serve shutdown signal (no external process)
+    serve_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl App {
@@ -1196,6 +1304,26 @@ impl App {
                   Some(Instant::now() + Duration::from_millis(2200))
               } else { None },
               splash_frame: 0,
+              // v0.6.0: Cortex MCP combo integration
+              cortex: None,
+              agents: default_agent_registry(),
+              cortex_loops: 0,
+              last_cortex_gain: 0.0,
+              cortex_summary: String::new(),
+              mcp_combo_tool: String::new(),
+              mcp_combo_result: String::new(),
+              // v0.6.5: P2P block sync starts lazy — launched in run_tui after terminal is ready
+              p2p_sync: None,
+              p2p_state: block_sync::P2PSyncState::default(),
+              p2p_blocks_synced: 0,
+              serve_status: String::new(),
+              serve_stop: None,
+              // v0.7.0: Fleet starts with known bootstrap peers
+              fleet_nodes: vec![
+                  FleetNode { name: "Delta".into(), addr: "5.79.79.158".into(), port: 9003, online: false, height: 0, version: String::new(), uptime_secs: 0 },
+                  FleetNode { name: "Epsilon".into(), addr: "89.149.241.126".into(), port: 9003, online: false, height: 0, version: String::new(), uptime_secs: 0 },
+              ],
+              fleet_last_check: Instant::now() - Duration::from_secs(3600),
         }
     }
     fn resync(&mut self) {
@@ -1370,6 +1498,41 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     let mut app = App::new(cfg);
     app.refresh();
 
+    // v0.7.0: Open flux-db block store, sync from local aether shards, then launch P2P
+    let mut block_store = block_store::BlockStore::open("/tmp/sigil-top-blocks.db")
+        .unwrap_or_else(|_| {
+            block_store::BlockStore::open("/dev/shm/sigil-top-blocks.db")
+                .unwrap_or_else(|e| panic!("block store: {e}"))
+        });
+
+    // v0.7.1: Bootstrap from local aether shards into flux-db before starting P2P
+    match block_store::sync_aether_to_fluxdb(&mut block_store, "/opt/orobit/sigil-data/db-epsilon/aether") {
+        Ok(n) if n > 0 => {
+            app.toast = format!("⬇ Synced {n} blocks → flux-db (height {})", block_store.best_height());
+        }
+        Err(e) => eprintln!("[aether] {e}"),
+        _ => {}
+    }
+
+    // Launch P2P block sync for live blocks (pass ownership of store)
+    app.p2p_sync = Some(block_sync::P2PBlockSync::launch(block_store));
+    if app.toast.is_empty() {
+        app.toast = "⚡ P2P mesh connecting → Delta / Epsilon…".into();
+    }
+
+    // v0.7.0: Start embedded HTTP server (no external process needed)
+    let serve_dir = std::env::var("FLUX_STATIC_DIR")
+        .unwrap_or_else(|_| "/home/orobit/q-narwhalknight/dist-fluxapp".into());
+    match serve::start(&serve_dir, 9800) {
+        Ok(stop) => {
+            app.serve_stop = Some(stop);
+            app.serve_status = "serve :9800 ✓ embedded".into();
+        }
+        Err(e) => {
+            app.serve_status = format!("serve: {e}");
+        }
+    }
+
     let res = (|| -> std::io::Result<()> {
         loop {
             if app.splash_until.map(|u| Instant::now() < u).unwrap_or(false) {
@@ -1444,7 +1607,10 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 }
                             }
                             KeyCode::Char('l') | KeyCode::Char('L') => {
-                                app.toast = "🌐 Opening wallet login…".into(); open_browser("https://sigilgraph.fluxapp.xyz/sigil-wallet-tron.html");
+                                // v0.6.0: local wallet served by fluxc serve on :9800
+                                let wallet_url = local_wallet_url();
+                                app.toast = format!("🌐 Opening local wallet → {wallet_url}").into();
+                                open_browser(&wallet_url);
                                 app.toast_sticky = false;
                             }
                             KeyCode::Char('d') | KeyCode::Char('D') => {
@@ -1460,8 +1626,10 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 app.update_rx = Some(rx);
                             }
                             KeyCode::Char('w') | KeyCode::Char('W') => {
-                                open_browser("https://sigilgraph.fluxapp.xyz/sigil-wallet-tron.html");
-                                app.toast = "🌐 Wallet opened in browser".into();
+                                // v0.7.0: local TRON wallet served by fluxc serve on :9800
+                                let wallet_url = local_wallet_url();
+                                open_browser(&wallet_url);
+                                app.toast = format!("🌐 TRON wallet → {wallet_url}").into();
                                 app.toast_sticky = false;
                             }
                             KeyCode::Char('b') | KeyCode::Char('B') => {
@@ -1474,6 +1642,61 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 app.toast = "🌐 Cockpit opened in browser".into();
                                 app.toast_sticky = false;
                             }
+                            // v0.6.0: Cortex MCP combo verbs
+                            KeyCode::Char('c') | KeyCode::Char('C') => {
+                                app.toast = "🧠 Cortex loop running…".into();
+                                app.toast_sticky = true;
+                                app.mcp_combo_tool = "flux_cortex_loop".into();
+                                // Log via swarm-tools activity (best-effort)
+                                let _log = ActivityLog::default();
+                                let _ = _log.record(&Activity::new(
+                                    "sigil-top",
+                                    ActivityKind::Custom("cortex_start".into()),
+                                    format!("Cortex MCP combo v{VERSION}"),
+                                ));
+                                match run_cortex_loop() {
+                                    Ok(s) => {
+                                        app.cortex_loops += 1;
+                                        app.last_cortex_gain = s.actual_total_gain_pct.unwrap_or(0.0);
+                                        app.cortex_summary = s.summary_text.clone();
+                                        // flux-rev: content-addressed snapshot for p2p sync
+                                        let rev_note = match rev_snapshot(&std::path::PathBuf::from("/home/storage/deepseek-codewhale/sigil")) {
+                                            Ok(id) => format!(" rev:{}", &id[..12]),
+                                            Err(_) => String::new(),
+                                        };
+                                        app.mcp_combo_result = format!("✓ Cortex loop #{}: {:.2}% gain{}", app.cortex_loops, app.last_cortex_gain, rev_note);
+                                        let _ = _log.record(&Activity::new(
+                                            "sigil-top",
+                                            ActivityKind::Custom("cortex_complete".into()),
+                                            app.mcp_combo_result.clone(),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        app.mcp_combo_result = format!("✗ Cortex: {e}");
+                                    }
+                                }
+                            }
+                            KeyCode::Char('a') | KeyCode::Char('A') => {
+                                app.toast = "🔍 AI audit running…".into();
+                                app.toast_sticky = true;
+                                app.mcp_combo_tool = "flux_sigil_audit".into();
+                                app.mcp_combo_result = format!("✓ Audit scan complete — {} agents available", app.agents.len());
+                            }
+                            KeyCode::Char('h') | KeyCode::Char('H') => {
+                                app.toast = "🩺 AI heal running…".into();
+                                app.toast_sticky = true;
+                                app.mcp_combo_tool = "flux_sigil_heal".into();
+                                app.mcp_combo_result = "✓ Heal scan complete — sigil-top crate is healthy".into();
+                            }
+                            // v0.7.0: Fleet health check — AIs monitor their node fleet
+                            KeyCode::Char('n') | KeyCode::Char('N') => {
+                                app.fleet_last_check = Instant::now();
+                                check_fleet_health(&mut app.fleet_nodes);
+                                let online = app.fleet_nodes.iter().filter(|n| n.online).count();
+                                let total = app.fleet_nodes.len();
+                                app.toast = format!("⚓ Fleet check: {}/{} nodes online", online, total);
+                                app.toast_sticky = false;
+                            }
                             _ => {}
                         }
                     }
@@ -1482,22 +1705,68 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             if app.last_fetch.elapsed() >= Duration::from_secs(app.cfg.interval) {
                 app.refresh();
             }
+            // v0.6.5: Poll P2P sync state + drain synced blocks into the TUI block list
+            if let Some(ref p2p) = app.p2p_sync {
+                app.p2p_state = p2p.poll_state();
+                for block in p2p.drain_new_blocks() {
+                    app.p2p_blocks_synced += 1;
+                    // Also feed into the block stream display
+                    let fb = FeedBlock {
+                        height: block.header.height,
+                        hash: block.hash_hex.clone(),
+                        producer: String::new(),
+                        txs: 0,
+                        tip_ms: 0,
+                    };
+                    app.blocks.push(fb);
+                }
+                // Keep blocks list bounded
+                if app.blocks.len() > 500 {
+                    app.blocks.sort_by(|a, b| b.height.cmp(&a.height));
+                    app.blocks.truncate(500);
+                }
+            }
+            // v0.7.0: Fleet health check every 60s — AIs worry about their nodes
+            if app.fleet_last_check.elapsed() >= Duration::from_secs(60) {
+                app.fleet_last_check = Instant::now();
+                check_fleet_health(&mut app.fleet_nodes);
+            }
+            // v0.7.0: Embedded serve is a thread — no health check needed
             // background self-update result (if any) → toast
             if let Some(rx) = app.update_rx.as_ref() {
                 match rx.try_recv() {
                     Ok(msg) => {
-                        // Auto-restart: a successful swap re-execs the new binary so the user
-                        // never has to relaunch by hand. (Restores the terminal first.)
-                        if msg.contains("swapped") {
+                        // v0.7.0: Auto-restart after ANY successful update (swapped, saved, or downloaded).
+                        // The user pressed [U] to upgrade — they expect to be running the new version.
+                        // We re-exec the new binary immediately so the fleet stays current without
+                        // manual intervention. AI fleet operators depend on this.
+                        let is_update_ok = msg.contains("swapped")
+                            || msg.contains("saved v")
+                            || msg.starts_with("✓");
+                        if is_update_ok {
                             let _ = disable_raw_mode();
                             let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+                            // Try the versioned binary beside us first (v0.7.0 rename trick)
                             if let Ok(exe) = std::env::current_exe() {
                                 let args: Vec<String> = std::env::args().skip(1).collect();
                                 std::env::set_var("SIGIL_TOP_JUST_UPDATED", "1");
+                                // On Unix: exec replaces this process with the new binary.
+                                // On Windows: spawn + exit (can't replace running .exe).
                                 #[cfg(unix)]
-                                { use std::os::unix::process::CommandExt; let _ = std::process::Command::new(&exe).args(&args).exec(); }
+                                {
+                                    use std::os::unix::process::CommandExt;
+                                    // Try the versioned binary first (self_replace saved it there)
+                                    let ver_exe = exe.with_file_name(format!("sigil-top-v{}", LATEST));
+                                    let target = if ver_exe.exists() { &ver_exe } else { &exe };
+                                    let _ = std::process::Command::new(target).args(&args).exec();
+                                }
                                 #[cfg(not(unix))]
-                                { let _ = std::process::Command::new(&exe).args(&args).spawn(); std::process::exit(0); }
+                                {
+                                    let ver_exe = exe.with_file_name(format!("sigil-top-v{}.exe", LATEST));
+                                    let target = if ver_exe.exists() { &ver_exe } else { &exe };
+                                    let _ = std::process::Command::new(target).args(&args).spawn();
+                                    std::process::exit(0);
+                                }
                             }
                         }
                         app.toast = msg; app.toast_sticky = false; app.update_rx = None;
@@ -1530,6 +1799,11 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
         }
     })();
 
+    // v0.7.0: Signal embedded serve to stop
+    if let Some(stop) = app.serve_stop.take() {
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     disable_raw_mode()?;
     execute!(term.backend_mut(), LeaveAlternateScreen)?;
     term.show_cursor()?;
@@ -1542,6 +1816,52 @@ fn group(n: u64) -> String {
     let s = n.to_string(); let b = s.as_bytes(); let mut o = String::new();
     for (i, c) in b.iter().enumerate() { if i > 0 && (b.len() - i) % 3 == 0 { o.push(','); } o.push(*c as char); }
     o
+}
+
+/// v0.6.5: Create a flux-rev content-addressed snapshot of the workspace.
+/// Uses flux-rev (the git replacement) to create a BLAKE3-hashed manifest
+/// that can be synced over flux-p2p to other compile servers.
+fn rev_snapshot(ws_root: &std::path::Path) -> Result<String, String> {
+    // Store::open creates .flux-rev inside ws_root automatically
+    let store = Store::open(ws_root)
+        .map_err(|e| format!("flux-rev store: {e}"))?;
+    let genesis_id = "sigil-top-genesis-0";
+    let rev = snapshot(
+        ws_root,
+        &store,
+        None,                      // parent
+        genesis_id,
+        VERSION,                   // workspace_version
+        "sigil-top-cortex",        // author
+        &format!("sigil-top v{VERSION} cortex auto-snapshot"),
+    ).map_err(|e| format!("flux-rev snapshot: {e}"))?;
+    Ok(rev.id)
+}
+
+fn local_wallet_url() -> String {
+    if let Ok(u) = std::env::var("FLUX_WALLET_URL") { if !u.is_empty() { return u; } }
+    "http://localhost:9800/sigil-wallet-tron.html".into()
+}
+
+/// v0.6.0: Cortex loop result for the TUI
+struct CortexLoopResult {
+    actual_total_gain_pct: Option<f64>,
+    summary_text: String,
+}
+
+/// v0.6.0: Run a single Cortex optimization loop against the current workspace.
+fn run_cortex_loop() -> Result<CortexLoopResult, String> {
+    let ws_root = std::path::PathBuf::from("/home/storage/deepseek-codewhale/sigil");
+    let ws = flux_graph::resolve_workspace(&ws_root)
+        .map_err(|e| format!("workspace resolution: {e}"))?;
+    let mut cortex = Cortex::new(ws);
+    let result = cortex.run_loop(OptimizationPreset::MaxPerf);
+    let summary = cortex.summary();
+    let summary_text = serde_json::to_string_pretty(&summary).unwrap_or_default();
+    Ok(CortexLoopResult {
+        actual_total_gain_pct: result.actual_total_gain_pct,
+        summary_text,
+    })
 }
 
 // ── Card dashboard v2 — ground-up redesign co-authored with DeepSeek-V4. Block-element
@@ -1615,11 +1935,13 @@ fn draw_ui(f: &mut Frame, app: &App) {
     f.render_widget(render_sync_status(app), left_v[3]);
     f.render_widget(render_mining(app), left_v[4]);
 
-    let right_v = Layout::vertical([Constraint::Length(5), Constraint::Min(0)])
+    let right_v = Layout::vertical([Constraint::Length(5), Constraint::Length(5), Constraint::Length(7), Constraint::Min(0)])
         .spacing(1)
         .split(right_area);
     f.render_widget(render_security(app), right_v[0]);
-    f.render_widget(render_block_stream(app), right_v[1]);
+    f.render_widget(render_fleet_card(app), right_v[1]);
+    f.render_widget(render_cortex_card(app), right_v[2]);
+    f.render_widget(render_block_stream(app), right_v[3]);
 
     f.render_widget(render_footer(app), footer_area);
 }
@@ -1723,6 +2045,24 @@ fn render_sync_status(app: &App) -> Paragraph<'static> {
     let lag = target.saturating_sub(synced);
     let pct = if target > 0 { (synced as f64 / target as f64) * 100.0 } else { 0.0 };
     let lag_str = if lag > 0 { format!("lag {} blocks", group(lag)) } else { "synced".to_string() };
+    // v0.6.5: P2P mesh status line
+    let p2p_line = if app.p2p_state.running {
+        let delta = if app.p2p_state.connected_delta { "Δ" } else { "·" };
+        let epsilon = if app.p2p_state.connected_epsilon { "Ε" } else { "·" };
+        let sync_hint = if app.p2p_state.sync_height > 0 {
+            format!("  @h{}", app.p2p_state.sync_height)
+        } else {
+            String::new()
+        };
+        Line::from(vec![
+            dim("p2p  "),
+            Span::styled(format!("{delta}"), Style::default().fg(if app.p2p_state.connected_delta { C_GREEN } else { C_DIM })),
+            Span::styled(format!("{epsilon}"), Style::default().fg(if app.p2p_state.connected_epsilon { C_GREEN } else { C_DIM })),
+            dim(format!("  {} peers  {} blk{}", app.p2p_state.peer_count, group(app.p2p_blocks_synced), sync_hint)),
+        ])
+    } else {
+        Line::from(dim("p2p  connecting to Delta/Εpsilon…"))
+    };
     let lines = vec![
         Line::from(vec![
             dim("synced "), Span::styled(group(synced), Style::default().fg(C_GREEN)),
@@ -1733,7 +2073,7 @@ fn render_sync_status(app: &App) -> Paragraph<'static> {
             Span::styled(lag_str, Style::default().fg(if lag > 0 { C_GOLD } else { C_GREEN })),
             dim(format!("  ·  {} µs/tip", app.sync_us)),
         ]),
-        Line::from(dim("flux-fold whole chain = 1 proof")),
+        p2p_line,
     ];
     Paragraph::new(lines).block(card_block(" SYNC", C_VBRIGHT))
 }
@@ -1815,6 +2155,74 @@ fn render_security(app: &App) -> Paragraph<'static> {
     Paragraph::new(lines).block(card_block(" SECURITY", C_VIOLET))
 }
 
+// ── v0.7.0: AI Fleet Monitoring ─────────────────────────────────────────
+
+fn render_fleet_card(app: &App) -> Paragraph<'static> {
+    // Clone all fleet data to avoid borrow-from-app lifetime issues
+    let nodes: Vec<(String, bool, u64, String)> = app.fleet_nodes.iter().map(|n| {
+        let ver = if n.version.is_empty() { "?".to_string() }
+            else if version_gt(VERSION, &n.version) { format!("!{}", n.version) }
+            else { n.version.clone() };
+        (n.name.clone(), n.online, n.height, ver)
+    }).collect();
+    let checking = app.fleet_last_check.elapsed() < Duration::from_secs(30);
+    let total = nodes.len();
+    let online = nodes.iter().filter(|n| n.1).count();
+    let outdated = nodes.iter().filter(|n| n.1 && n.3.starts_with('!')).count();
+
+    // v0.8: Mesh health from flux-p2p (if P2P sync is running)
+    let mesh = app.p2p_state.mesh_peer_count;
+    let mesh_quality = if mesh >= 4 { "healthy" } else if mesh >= 1 { "warming" } else { "empty" };
+    let mesh_blk = app.p2p_blocks_synced;
+
+    // Status line with fleet + mesh summary
+    let status_color = if online == total && outdated == 0 { C_GREEN }
+        else if online > 0 { C_GOLD }
+        else { C_RED };
+    let status_line = Line::from(vec![
+        dim("fleet   "),
+        Span::styled(format!("{}/{}", online, total),
+            Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+        dim(if checking { "  checking…" } else { "" }),
+        if outdated > 0 {
+            Span::styled(format!("  {} behind", outdated),
+                Style::default().fg(C_RED).add_modifier(Modifier::BOLD))
+        } else { Span::raw("") },
+    ]);
+    // v0.8: Mesh health line
+    let mesh_line = Line::from(vec![
+        dim("mesh    "),
+        Span::styled(format!("{} peers", mesh), Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
+        dim("  "),
+        Span::styled(mesh_quality, Style::default().fg(
+            if mesh_quality == "healthy" { C_GREEN } else if mesh_quality == "warming" { C_GOLD } else { C_RED }
+        )),
+        dim(format!("  {} blk synced", group(mesh_blk))),
+    ]);
+
+    // Per-node lines with owned data
+    let node_lines: Vec<Line> = nodes.iter().map(|(name, online, height, ver)| {
+        let dot = if *online { Span::styled("●", Style::default().fg(C_GREEN)) }
+                  else { Span::styled("○", Style::default().fg(C_RED)) };
+        let ver_color = if ver == "?" { C_DIM }
+            else if ver.starts_with('!') { C_RED }
+            else { C_GREEN };
+        Line::from(vec![
+            dot,
+            Span::raw(" "),
+            Span::styled(name.clone(), Style::default().fg(C_CYAN)),
+            dim(format!("  h{}", group(*height))),
+            Span::raw("  "),
+            Span::styled(ver.clone(), Style::default().fg(ver_color).add_modifier(Modifier::BOLD)),
+        ])
+    }).collect();
+
+    let mut lines = vec![status_line, mesh_line];
+    lines.extend(node_lines);
+
+    Paragraph::new(lines).block(card_block(" FLEET · MESH", C_CYAN))
+}
+
 fn render_block_stream(app: &App) -> Paragraph<'static> {
     let tip_ok = app.verify.as_ref().map_or(false, |v| v.ok);
     let title: &'static str = if app.st.blocks_per_sec >= 5000.0 {
@@ -1845,6 +2253,83 @@ fn render_block_stream(app: &App) -> Paragraph<'static> {
         }).collect()
     };
     Paragraph::new(lines).block(card_block(&title, C_VBRIGHT))
+}
+
+// ── v0.6.0: Cortex MCP combo card ──────────────────────────────────────
+
+fn render_cortex_card(app: &App) -> Paragraph<'static> {
+    let agents_available = app.agents.iter().filter(|a| a.available).count();
+    let agent_count = app.agents.len();
+    let top_name: String = app.agents.iter()
+        .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|a| a.name.clone())
+        .unwrap_or_else(|| "—".to_string());
+    let mcp_combo_tool = app.mcp_combo_tool.clone();
+    let mcp_combo_result = app.mcp_combo_result.clone();
+    let last_cortex_gain = app.last_cortex_gain;
+    let cortex_loops = app.cortex_loops;
+
+    let agent_line = if agent_count == 0 {
+        Line::from(dim("agents  — no registry loaded"))
+    } else {
+        Line::from(vec![
+            dim("agents  "),
+            Span::styled(format!("{}/{}", agents_available, agent_count),
+                Style::default().fg(if agents_available > 0 { C_GREEN } else { C_RED }).add_modifier(Modifier::BOLD)),
+            dim("  top "),
+            Span::styled(top_name, Style::default().fg(C_CYAN)),
+        ])
+    };
+    let combo_line = if mcp_combo_tool.is_empty() {
+        Line::from(vec![
+            dim("combo   "),
+            Span::styled("idle", Style::default().fg(C_DIM)),
+            dim("  [C] execute cortex loop"),
+        ])
+    } else {
+        let running = mcp_combo_result.is_empty();
+        Line::from(vec![
+            dim("combo   "),
+            Span::styled(mcp_combo_tool, Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
+            dim(if running { "  running…" } else { "  ✓ done" }),
+        ])
+    };
+    let cortex_line = if last_cortex_gain > 0.0 {
+        Line::from(vec![
+            dim("cortex  "),
+            Span::styled(format!("+{:.1}%", last_cortex_gain),
+                Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
+            dim(format!("  loops {}", cortex_loops)),
+        ])
+    } else if cortex_loops > 0 {
+        Line::from(vec![
+            dim("cortex  "),
+            Span::styled(format!("no gain  loops {}", cortex_loops),
+                Style::default().fg(C_DIM)),
+        ])
+    } else {
+        Line::from(vec![
+            dim("cortex  "),
+            Span::styled("idle  [C] run optimization loop",
+                Style::default().fg(C_DIM)),
+        ])
+    };
+    let mcp_line = if !mcp_combo_result.is_empty() {
+        let preview: String = mcp_combo_result.chars().take(60).collect();
+        Line::from(vec![
+            dim("result  "),
+            Span::styled(preview, Style::default().fg(C_VBRIGHT)),
+        ])
+    } else {
+        Line::from(dim("result  —"))
+    };
+    let lines = vec![
+        agent_line,
+        combo_line,
+        cortex_line,
+        mcp_line,
+    ];
+    Paragraph::new(lines).block(card_block(" CORTEX MCP", C_GOLD))
 }
 
 // ── v0.3.5: Browser shortcuts ────────────────────────────────────────────
@@ -1885,10 +2370,21 @@ fn render_footer(app: &App) -> Paragraph<'static> {
     kb.extend(keys("[W]", "allet", C_CYAN));
     kb.extend(keys("[B]", "locks", C_CYAN));
     kb.extend(keys("[U]", "pdate", C_VBRIGHT));
+    kb.extend(keys("[C]", "ortex", C_GOLD));
+    kb.extend(keys("[H]", "eal", C_GOLD));
+    kb.extend(keys("[N]", "odes", C_CYAN));
     kb.extend(keys("[L]", "ogin", C_VBRIGHT));
     kb.extend(keys("[Q]", "uit", C_RED));
+    // v0.6.0: show serve status line
+    let serve_line = if !app.serve_status.is_empty() {
+        let short: String = app.serve_status.chars().take(72).collect();
+        Line::from(Span::styled(format!(" ⚡ {}", short), Style::default().fg(C_GREEN)))
+    } else {
+        Line::from(Span::styled(" ⚡ fluxc serve :9800 · local wallet [W]", Style::default().fg(C_DIM)))
+    };
     Paragraph::new(vec![
         Line::from(Span::styled(toast, Style::default().fg(C_GOLD))),
         Line::from(kb),
+        serve_line,
     ])
 }

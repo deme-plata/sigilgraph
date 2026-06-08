@@ -173,6 +173,7 @@ fn supervisor(
     stats: Arc<Mutex<Stats>>,
     stop: Arc<AtomicBool>,
     desired_gpu: Arc<AtomicBool>,
+    gpu_failed: Arc<AtomicBool>,
 ) {
     let mut cur: Option<bool> = None;
     let mut wstop = Arc::new(AtomicBool::new(false));
@@ -180,6 +181,11 @@ fn supervisor(
         if stop.load(Ordering::Relaxed) {
             wstop.store(true, Ordering::Relaxed);
             return;
+        }
+        // GPU worker reported an init failure → fall back to CPU (it logged why).
+        if gpu_failed.swap(false, Ordering::Relaxed) {
+            desired_gpu.store(false, Ordering::Relaxed);
+            push_log(&mut stats.lock().unwrap().log, "↩ GPU unavailable — switched to CPU".into());
         }
         let mut want = desired_gpu.load(Ordering::Relaxed);
         if want && !cfg!(feature = "gpu") {
@@ -204,7 +210,10 @@ fn supervisor(
             let (u, w, st, ws) = (url.clone(), wallet.clone(), stats.clone(), wstop.clone());
             if want {
                 #[cfg(feature = "gpu")]
-                thread::spawn(move || gpu_mining_loop(u, w, st, ws));
+                {
+                    let gf = gpu_failed.clone();
+                    thread::spawn(move || gpu_mining_loop(u, w, st, ws, gf));
+                }
             } else {
                 thread::spawn(move || mining_loop(u, w, st, ws));
             }
@@ -347,13 +356,21 @@ fn main() -> anyhow::Result<()> {
     stats.lock().unwrap().mode = mode.into();
     let stop = Arc::new(AtomicBool::new(false));
     let desired_gpu = Arc::new(AtomicBool::new(use_gpu && cfg!(feature = "gpu")));
+    let gpu_failed = Arc::new(AtomicBool::new(false));
     let update_now = Arc::new(AtomicBool::new(false));
 
-    // mining supervisor — owns the worker; hot-switches CPU↔GPU on the `g` key
+    // mining supervisor — owns the worker; hot-switches CPU↔GPU on the `g` key,
+    // and falls back to CPU if the GPU worker reports an init failure.
     {
-        let (u, w, s, st, dg) =
-            (url.clone(), wallet.clone(), stats.clone(), stop.clone(), desired_gpu.clone());
-        thread::spawn(move || supervisor(u, w, s, st, dg));
+        let (u, w, s, st, dg, gf) = (
+            url.clone(),
+            wallet.clone(),
+            stats.clone(),
+            stop.clone(),
+            desired_gpu.clone(),
+            gpu_failed.clone(),
+        );
+        thread::spawn(move || supervisor(u, w, s, st, dg, gf));
     }
 
     // auto-updater (default ON; --no-update to skip; `u` triggers an immediate check)
@@ -627,29 +644,26 @@ fn gpu_list_and_exit() -> ! {
 fn gpu_selftest_and_exit() -> ! {
     #[cfg(feature = "gpu")]
     {
-        match flux_miner::gpu::GpuBlake4::new() {
-            Ok(g) => {
-                println!("  GPU: {}", g.device_name);
-                match g.selftest() {
-                    Ok(true) => {
-                        println!("  ✓ BLAKE4 GPU KAT passed — kernel == pow.rs (R=7 ≡ BLAKE3, R=3)");
-                        std::process::exit(0);
-                    }
-                    Ok(false) => {
-                        println!("  ✗ BLAKE4 GPU KAT FAILED — kernel disagrees with pow.rs");
-                        std::process::exit(1);
-                    }
-                    Err(e) => {
-                        eprintln!("  gpu selftest error: {e}");
-                        std::process::exit(1);
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("  gpu init failed: {e}");
-                std::process::exit(1);
-            }
-        }
+        // Accumulate the result so it's ALSO written to a file — a Windows
+        // double-click flashes the window shut, so the file is how you read it.
+        let (report, code) = match flux_miner::gpu::GpuBlake4::new() {
+            Ok(g) => match g.selftest() {
+                Ok(true) => (
+                    format!("GPU: {}\n✓ BLAKE4 GPU KAT passed — kernel == pow.rs (R=7 ≡ BLAKE3, R=3)\n", g.device_name),
+                    0,
+                ),
+                Ok(false) => (
+                    format!("GPU: {}\n✗ BLAKE4 GPU KAT FAILED — kernel disagrees with pow.rs\n", g.device_name),
+                    1,
+                ),
+                Err(e) => (format!("GPU: {}\ngpu selftest error: {e}\n", g.device_name), 1),
+            },
+            Err(e) => (format!("gpu init failed (build log below):\n{e}\n"), 1),
+        };
+        print!("  {report}");
+        let _ = std::fs::write("sigil-gpu-selftest.txt", &report);
+        eprintln!("  (also written to sigil-gpu-selftest.txt)");
+        std::process::exit(code);
     }
     #[cfg(not(feature = "gpu"))]
     {
@@ -661,14 +675,29 @@ fn gpu_selftest_and_exit() -> ! {
 /// `--gpu`: hybrid mining — GPU searches Lane A (BLAKE4), CPU does Lane B (VDF).
 /// Uses FULL_ROUNDS so shares pass the node's `verify_dual` (legacy blake4 == R7).
 #[cfg(feature = "gpu")]
-fn gpu_mining_loop(url: String, wallet: String, stats: Arc<Mutex<Stats>>, stop: Arc<AtomicBool>) {
+fn gpu_mining_loop(
+    url: String,
+    wallet: String,
+    stats: Arc<Mutex<Stats>>,
+    stop: Arc<AtomicBool>,
+    gpu_failed: Arc<AtomicBool>,
+) {
     use flux_miner::client::build_header;
     const BATCH: usize = 1 << 20; // 1M nonces per GPU dispatch
 
     let gpu = match flux_miner::gpu::GpuBlake4::new() {
         Ok(g) => g,
         Err(e) => {
-            stats.lock().unwrap().last_err = Some(format!("gpu init: {e}"));
+            // Surface the full error (incl. the OpenCL build log) + signal the
+            // supervisor to fall back to CPU so the miner never silently stalls.
+            let msg = format!("GPU init failed: {e}");
+            {
+                let mut s = stats.lock().unwrap();
+                s.last_err = Some(msg.clone());
+                push_log(&mut s.log, format!("✗ {msg}"));
+            }
+            let _ = std::fs::write("sigil-miner-gpu.log", &msg);
+            gpu_failed.store(true, Ordering::Relaxed);
             return;
         }
     };

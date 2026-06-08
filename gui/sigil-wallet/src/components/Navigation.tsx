@@ -17,10 +17,10 @@ export default function Navigation({ currentScreen, onNavigate, className, walle
 
   const navItems = [
     { id: 'dashboard' as Screen, icon: Home, label: 'Dashboard' },
+    { id: 'explorer' as Screen, icon: Activity, label: 'Activity', badge: 'live' },
     { id: 'transactions' as Screen, icon: Send, label: 'Transactions' },
     { id: 'dex' as Screen, icon: ArrowDownUp, label: 'DEX' },
     { id: 'bridge' as Screen, icon: Repeat, label: 'Bridge' },
-    { id: 'explorer' as Screen, icon: Search, label: 'Explorer' },
     { id: 'mining' as Screen, icon: Pickaxe, label: 'Mining' },
     { id: 'vm' as Screen, icon: Boxes, label: 'QVM' },
     { id: 'map' as Screen, icon: MapPin, label: 'Map' },
@@ -94,6 +94,11 @@ export default function Navigation({ currentScreen, onNavigate, className, walle
               )}
               <item.icon className={`w-6 h-6 flex-shrink-0 ${currentScreen === item.id ? 'text-amber-400' : ''}`} />
               <span className="xl:block hidden font-semibold">{item.label}</span>
+              {(item as any).badge === 'live' && (
+                <span className="ml-1 px-1.5 py-0.5 text-[10px] font-bold rounded bg-green-500/20 text-green-400 border border-green-500/30 animate-pulse">
+                  LIVE
+                </span>
+              )}
               {currentScreen === item.id && (
                 <motion.div
                   className="ml-auto w-2 h-2 rounded-full bg-amber-400"

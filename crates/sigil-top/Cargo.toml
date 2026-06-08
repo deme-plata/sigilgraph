@@ -2,7 +2,7 @@
 name = "sigil-top"
 # sigil-top carries its OWN version cadence (the light client updates independently
 # of the workspace) — this is the "next version" the auto-updater ships.
-version = "0.5.0"
+version = "0.7.0"
 edition.workspace = true
 license.workspace = true
 description = "sigil-top — a dual-mode (lite scorecard ↔ full dashboard) terminal monitor for a SIGIL node. Polls the node's :8181/api/v1/status, renders height/peers/supply/4-state-roots + the flux-fold light-node capability in obsidian+violet ANSI. v0.3.5 adds Chronos benchmark card, archive storage gauge, gossip health, pipeline status, --export json mode, and multi-Epsilon peer tracking."
@@ -13,6 +13,8 @@ serde_json = { workspace = true }
 # v0.3.5: rustls + webpki-roots for ALL platforms. Bundles Mozilla CA certs in the
 # binary — no OS cert store dependency.
 reqwest    = { version = "0.12", features = ["blocking", "json", "rustls-tls-webpki-roots"], default-features = false }
+# v0.6.5: tokio runtime — required by flux-p2p's async NetworkManager for real block sync
+tokio      = { version = "1", features = ["rt-multi-thread", "macros"] }
 # v0.2: real TUI on the flux-cockpit foundation — alt-screen, flicker-free redraw,
 # interactive keys. ratatui owns the box-drawing so alignment can't regress.
 ratatui    = "0.28"
@@ -28,8 +30,23 @@ sigil-oauth     = { path = "../sigil-oauth" }
 # Auto-update "the flux way": BLAKE3 content-hash verify + cross-platform self-replace
 # (rename-self trick on Windows) so a running binary hot-swaps itself from the release channel.
 blake3       = "1"
+hex          = "0.4"
+bincode      = "1"
+rmp-serde    = "1"
 self-replace = "1"
 sigil-dns-anchor = { path = "../sigil-dns-anchor" }
+# v0.6.5: Block sync — SIGIL header types + local block storage via flux-db
+sigil-header = { path = "../sigil-header" }
+flux-db = { path = "../../../flux/crates/flux-db" }
+
+# v0.6.0: Cortex MCP combos — Autonomous Continuous Optimization Engine + AI agent registry
+flux-cortex = { path = "../../../flux/crates/flux-cortex" }
+flux-graph = { path = "../../../flux/crates/flux-graph" }
+flux-optimize = { path = "../../../flux/crates/flux-optimize" }
+# v0.6.0: P2P mesh + swarm coordination + content-addressed version control
+flux-p2p = { path = "../../../flux/crates/flux-p2p" }
+flux-swarm-tools = { path = "../../../flux/crates/flux-swarm-tools" }
+flux-rev = { path = "../../../flux/crates/flux-rev" }
 
 # v0.2.35 L4-B: SQIsign post-quantum tip-proof flavor (gated, not yet enabled).
 # When activated, sigil-tip-proof links flux-sqisign and verify_tip() constructs

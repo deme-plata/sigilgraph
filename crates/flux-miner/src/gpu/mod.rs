@@ -38,6 +38,7 @@ use std::ptr;
 
 const KERNEL_SRC: &str = include_str!("blake4.cl");
 const KERNEL_NAME: &str = "blake4_search";
+const WORDS_KERNEL_NAME: &str = "blake4_words";
 
 /// A discovered GPU.
 #[derive(Clone, Debug)]
@@ -82,11 +83,12 @@ pub struct GpuBlake4 {
     context: Context,
     queue: CommandQueue,
     kernel: Kernel,
+    words_kernel: Kernel,
     pub device_name: String,
 }
 
 impl GpuBlake4 {
-    /// Initialise the first GPU + build the kernel.
+    /// Initialise the first GPU + build the kernels.
     pub fn new() -> anyhow::Result<Self> {
         let ids = get_all_devices(CL_DEVICE_TYPE_GPU)?;
         let id = *ids.first().ok_or_else(|| anyhow::anyhow!("no OpenCL GPU found"))?;
@@ -97,7 +99,67 @@ impl GpuBlake4 {
         let program = Program::create_and_build_from_source(&context, KERNEL_SRC, "")
             .map_err(|e| anyhow::anyhow!("kernel build failed: {e}"))?;
         let kernel = Kernel::create(&program, KERNEL_NAME)?;
-        Ok(Self { context, queue, kernel, device_name })
+        let words_kernel = Kernel::create(&program, WORDS_KERNEL_NAME)?;
+        Ok(Self { context, queue, kernel, words_kernel, device_name })
+    }
+
+    /// Compute the BLAKE4 word for `count` consecutive nonces (from `nonce_base`)
+    /// on the GPU. Used by the KAT self-test.
+    pub fn words(
+        &self,
+        header: &[u8],
+        rounds: u32,
+        nonce_base: u64,
+        count: usize,
+    ) -> anyhow::Result<Vec<u64>> {
+        let (base_m, hlen) = build_base_m(header);
+        let block_len = hlen + 8;
+
+        let mut base_buf = unsafe {
+            Buffer::<cl_uint>::create(&self.context, CL_MEM_READ_ONLY, 16, ptr::null_mut())?
+        };
+        let mut out = unsafe {
+            Buffer::<cl_ulong>::create(&self.context, CL_MEM_WRITE_ONLY, count, ptr::null_mut())?
+        };
+        unsafe {
+            self.queue.enqueue_write_buffer(&mut base_buf, CL_BLOCKING, 0, &base_m, &[])?;
+            ExecuteKernel::new(&self.words_kernel)
+                .set_arg(&base_buf)
+                .set_arg(&hlen)
+                .set_arg(&(nonce_base as cl_ulong))
+                .set_arg(&(rounds as cl_uint))
+                .set_arg(&(block_len as cl_uint))
+                .set_arg(&out)
+                .set_global_work_size(count)
+                .enqueue_nd_range(&self.queue)?
+                .wait()?;
+        }
+        let mut host = vec![0 as cl_ulong; count];
+        unsafe {
+            self.queue.enqueue_read_buffer(&out, CL_BLOCKING, 0, &mut host, &[])?;
+        }
+        Ok(host.into_iter().map(|w| w as u64).collect())
+    }
+
+    /// On-hardware KAT: the GPU kernel's word MUST equal `pow::blake4_word` for
+    /// the same (header, nonce, rounds). Checks R=7 (the BLAKE3 anchor) + a
+    /// reduced round over a batch of nonces. Returns Ok(true) iff all match.
+    pub fn selftest(&self) -> anyhow::Result<bool> {
+        let header = [0x5au8; 32];
+        let count = 256;
+        let mut all_ok = true;
+        for rounds in [crate::pow::FULL_ROUNDS, 3] {
+            let gpu = self.words(&header, rounds, 0, count)?;
+            for (i, g) in gpu.iter().enumerate() {
+                let cpu = crate::pow::blake4_word(&header, i as u64, rounds);
+                if *g != cpu {
+                    eprintln!("  ✗ KAT mismatch R={rounds} nonce={i}: gpu={g:#018x} cpu={cpu:#018x}");
+                    all_ok = false;
+                    break;
+                }
+            }
+        }
+        Ok(all_ok)
     }
 
     /// Lane A: search `batch` nonces from `nonce_base` for one whose

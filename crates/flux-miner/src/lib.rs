@@ -99,6 +99,19 @@ pub fn mine_dual<G: VdfGroup>(header: &[u8], target: u64, vdf_t: u64, g: &G) -> 
     DualLaneBlock { header: header.to_vec(), nonce, blake4_hash, vdf }
 }
 
+/// Assemble a [`DualLaneBlock`] for an ALREADY-FOUND BLAKE4 nonce (e.g. one the
+/// GPU Lane-A search returned): recompute the BLAKE4 hash + run the VDF (Lane B)
+/// over it. The node's [`verify_dual`] re-checks both lanes with [`blake4`], so a
+/// GPU search must use the SAME hash (full-round `blake4` == `pow` R=7) for the
+/// share to be accepted. This is the CPU half of the hybrid: GPU finds the nonce,
+/// the CPU does the inherently-sequential VDF.
+pub fn block_for_nonce<G: VdfGroup>(header: &[u8], nonce: u64, g: &G, vdf_t: u64) -> DualLaneBlock {
+    let blake4_hash = blake4(header, nonce);
+    let x = g.from_seed(&vdf_seed(header, nonce));
+    let vdf = eval(g, &x, vdf_t);
+    DualLaneBlock { header: header.to_vec(), nonce, blake4_hash, vdf }
+}
+
 /// Verify a dual-lane block: BOTH the BLAKE4 PoW (`<= target`) AND the VDF proof
 /// must check out. This is the consensus rule a node enforces.
 pub fn verify_dual<G: VdfGroup>(g: &G, block: &DualLaneBlock, target: u64) -> bool {

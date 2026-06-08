@@ -82,3 +82,38 @@ __kernel void blake4_search(
         }
     }
 }
+
+// blake4_words — KAT helper: write the BLAKE4 word for nonce_base+gid to out[gid].
+// Lets the host compare GPU output against pow::blake4_word for identical inputs
+// (the on-hardware known-answer test). Same compression as blake4_search.
+__kernel void blake4_words(
+    __global const uint *base_m,
+    const uint hlen,
+    const ulong nonce_base,
+    const uint rounds,
+    const uint block_len,
+    __global ulong *out)
+{
+    const ulong nonce = nonce_base + (ulong)get_global_id(0);
+
+    uint m[16];
+    for (int i = 0; i < 16; i++) m[i] = base_m[i];
+    for (uint i = 0; i < 8u; i++) {
+        const uchar nb = (uchar)((nonce >> (8u * i)) & 0xffUL);
+        const uint byte_pos = hlen + i;
+        const uint widx = byte_pos >> 2;
+        const uint boff = (byte_pos & 3u) * 8u;
+        m[widx] = (m[widx] & ~(0xffu << boff)) | ((uint)nb << boff);
+    }
+
+    uint v[16];
+    for (int i = 0; i < 8; i++) v[i] = IV[i];
+    v[8] = IV[0]; v[9] = IV[1]; v[10] = IV[2]; v[11] = IV[3];
+    v[12] = 0u; v[13] = 0u; v[14] = block_len; v[15] = 11u;
+
+    for (uint r = 0; r < rounds; r++) { roundf(v, m); permute(m); }
+
+    const uint w0 = v[0] ^ v[8];
+    const uint w1 = v[1] ^ v[9];
+    out[get_global_id(0)] = ((ulong)w0) | (((ulong)w1) << 32);
+}

@@ -1681,21 +1681,37 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 app.update_rx = Some(rx);
                             }
                             KeyCode::Char('w') | KeyCode::Char('W') => {
-                                // v0.7.0: local TRON wallet served by fluxc serve on :9800
-                                let wallet_url = local_wallet_url();
-                                open_browser(&wallet_url);
-                                app.toast = format!("🌐 TRON wallet → {wallet_url}").into();
-                                app.toast_sticky = false;
+                                // GUI box: open the local wallet (fluxc serve :9800). Headless
+                                // (proxmox/SSH): no browser → show the HOSTED OAuth2 wallet link
+                                // to copy, since localhost:9800 isn't reachable there anyway.
+                                let local = local_wallet_url();
+                                if open_browser(&local) {
+                                    app.toast = format!("🌐 wallet → {local}").into();
+                                    app.toast_sticky = false;
+                                } else {
+                                    app.toast = format!("🔗 headless — open the wallet (OAuth2 login) in any browser:  {}", official_wallet_url()).into();
+                                    app.toast_sticky = true;
+                                }
                             }
                             KeyCode::Char('b') | KeyCode::Char('B') => {
-                                open_browser("https://sigilgraph.fluxapp.xyz/explorer/");
-                                app.toast = "🌐 Explorer opened in browser".into();
-                                app.toast_sticky = false;
+                                let url = "https://sigilgraph.fluxapp.xyz/explorer/";
+                                if open_browser(url) {
+                                    app.toast = "🌐 Explorer opened in browser".into();
+                                    app.toast_sticky = false;
+                                } else {
+                                    app.toast = format!("🔗 headless — open the explorer in any browser:  {url}").into();
+                                    app.toast_sticky = true;
+                                }
                             }
                             KeyCode::Char('s') | KeyCode::Char('S') => {
-                                open_browser("https://sigilgraph.fluxapp.xyz/sigil-top/");
-                                app.toast = "🌐 Cockpit opened in browser".into();
-                                app.toast_sticky = false;
+                                let url = "https://sigilgraph.fluxapp.xyz/sigil-top/";
+                                if open_browser(url) {
+                                    app.toast = "🌐 Cockpit opened in browser".into();
+                                    app.toast_sticky = false;
+                                } else {
+                                    app.toast = format!("🔗 headless — open the cockpit in any browser:  {url}").into();
+                                    app.toast_sticky = true;
+                                }
                             }
                             // v0.6.0: Cortex MCP combo verbs
                             KeyCode::Char('c') | KeyCode::Char('C') => {
@@ -1768,7 +1784,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                 // (huge start → ~production rate → looked like it was "slowing to 19/s").
                 // The 10s window absorbs the per-cycle chunk bursts yet tracks real speed.
                 let now = std::time::Instant::now();
-                app.p2p_rate_samples.push_back((now, app.p2p_state.blocks_synced));
+                app.p2p_rate_samples.push_back((now, app.p2p_state.fetched_total));
                 while app.p2p_rate_samples.len() > 1
                     && now.duration_since(app.p2p_rate_samples[0].0).as_secs_f64() > 10.0
                 {
@@ -2156,28 +2172,33 @@ fn render_sync_status(app: &App) -> Paragraph<'static> {
     };
     let l1 = Line::from(vec![dim("sync  "), Span::styled(bar, Style::default().fg(bcol)), dim(format!(" {:.0}%", pct)), tail]);
 
-    // 2) rate + ETA + fetched
+    // 2) rate + ETA + synced. Rate is the 10s trailing window over fetched_total
+    // (smooth) — once blocks flow we show the number (even 0 = momentarily idle),
+    // not a perpetual "starting…".
     let l2 = if at_tip {
         Line::from(vec![dim("rate  "), Span::styled("tracking live", Style::default().fg(C_GREEN)), dim(format!("  ⬇{}", group(synced)))])
-    } else if app.p2p_rate > 0.5 {
-        let x = (gap as f64 / app.p2p_rate) as u64;
-        let eta = if x >= 3600 { format!("{}h{}m", x / 3600, (x % 3600) / 60) }
-            else if x >= 60 { format!("{}m{:02}s", x / 60, x % 60) } else { format!("{}s", x) };
+    } else if s.fetched_total == 0 {
+        Line::from(vec![dim("rate  "), Span::styled("connecting…", Style::default().fg(C_DIM)), dim(format!("  ⬇{}", group(synced)))])
+    } else {
+        let r = app.p2p_rate.max(0.0);
+        let eta = if r > 0.5 {
+            let x = (gap as f64 / r) as u64;
+            if x >= 3600 { format!("{}h{}m", x / 3600, (x % 3600) / 60) }
+            else if x >= 60 { format!("{}m{:02}s", x / 60, x % 60) } else { format!("{}s", x) }
+        } else { "—".to_string() };
         Line::from(vec![
-            dim("rate  "), Span::styled(format!("{} blk/s", group(app.p2p_rate.round() as u64)), Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
+            dim("rate  "), Span::styled(format!("{} blk/s", group(r.round() as u64)), Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
             dim("  ETA "), Span::styled(eta, Style::default().fg(C_VBRIGHT)),
             dim("  ⬇"), Span::styled(group(synced), Style::default().fg(C_GREEN)),
         ])
-    } else {
-        Line::from(vec![dim("rate  "), Span::styled("starting…", Style::default().fg(C_DIM)), dim(format!("  ⬇{}", group(synced)))])
     };
 
     // 3) in-flight chunk range + tip-verify + peers
     let vmark = if !app.online { Span::styled("offline".to_string(), Style::default().fg(C_RED)) }
-        else if verified { Span::styled(format!("✓{}", group(app.synced_height)), Style::default().fg(C_GREEN)) }
+        else if verified { Span::styled(format!("✓{}", group(synced)), Style::default().fg(C_GREEN)) }
         else { Span::styled("✗tip".to_string(), Style::default().fg(C_GOLD)) };
     let l3 = if !at_tip && s.running {
-        let from = s.sync_cursor; let to = from.saturating_add(8192);
+        let from = synced; let to = from.saturating_add(8192);
         Line::from(vec![
             dim("chunk "), Span::styled(format!("[{}..{}]", group(from), group(to)), Style::default().fg(C_VBRIGHT)),
             dim("  "), vmark, dim(" "),
@@ -2486,7 +2507,27 @@ fn dirs_next() -> Option<std::path::PathBuf> {
     }
 }
 
-fn open_browser(url: &str) {
+/// The hosted SIGIL wallet (OAuth2 login) — works from ANY browser, so it's what we
+/// hand a headless/remote (proxmox/SSH) operator who has no local GUI. Override with
+/// SIGIL_WALLET_URL.
+fn official_wallet_url() -> String {
+    std::env::var("SIGIL_WALLET_URL").ok().filter(|u| !u.is_empty())
+        .unwrap_or_else(|| "https://sigilgraph.fluxapp.xyz/sigil-wallet/".into())
+}
+
+/// True if there's no local GUI to open a browser into (headless box / SSH / proxmox
+/// console). On Linux that's no DISPLAY and no WAYLAND_DISPLAY.
+fn is_headless() -> bool {
+    #[cfg(target_os = "linux")]
+    { std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() }
+    #[cfg(not(target_os = "linux"))]
+    { false }
+}
+
+/// Best-effort open a URL in the local browser. Returns false if we're headless
+/// (no GUI) — the caller then shows the link for the operator to copy instead.
+fn open_browser(url: &str) -> bool {
+    if is_headless() { return false; }
     let url = url.to_string();
     thread::spawn(move || {
         #[cfg(target_os = "linux")]
@@ -2496,6 +2537,7 @@ fn open_browser(url: &str) {
         #[cfg(target_os = "windows")]
         { let _ = Command::new("cmd").args(["/c", "start", &url]).spawn(); }
     });
+    true
 }
 
 // ── flux:// URL scheme ──────────────────────────────────────────────────────

@@ -73,9 +73,11 @@ fn ingest_block_value(
         let synced = store.synced_to(); // contiguous progress (not raw count)
         let peer_best = {
             let mut s = state.lock().unwrap();
-            s.blocks_synced = synced;
+            s.blocks_synced = synced;        // contiguous tip (bar/⬇/chunk all use this)
             s.sync_total = s.blocks_synced;
-            s.sync_height = height;
+            s.sync_cursor = synced;          // chunk shows [synced..synced+chunk] = next needed
+            s.fetched_total += 1;            // smooth, monotonic — drives the rate readout
+            s.sync_height = synced;          // ✓ badge tracks the contiguous tip, not a stale height
             s.sync_hash_hex = hash_hex.clone();
             if height > s.peer_best_height {
                 s.peer_best_height = height;
@@ -117,6 +119,11 @@ pub struct P2PSyncState {
     /// v0.7.11: the height the in-flight request-response backfill chunk starts at
     /// (the TUI shows the [from..from+chunk] range being fetched).
     pub sync_cursor: u64,
+    /// v0.7.26: monotonic count of blocks RECEIVED+stored this session (NOT the
+    /// contiguous tip — that's `blocks_synced`). Drives the rate readout so it's
+    /// smooth: the contiguous tip advances in bursts (gap-fills) and would read 0
+    /// between jumps, while this climbs continuously while fetching.
+    pub fetched_total: u64,
 }
 
 pub struct P2PBlockSync {

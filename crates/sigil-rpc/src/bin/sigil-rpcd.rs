@@ -669,12 +669,19 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
             match credit_share(&mut n.state, h, miner, mining_reward()) {
                 Ok(bal) => {
                     // Advance the tip: fold this block in so the NEXT challenge is fresh.
+                    // fix #3 (VDF-chaining): fold the VDF OUTPUT (commit to the proof) into
+                    // the tip. The next challenge seed = BLAKE3(tip‖height) then depends on
+                    // THIS block's VDF output → you cannot know height H+1's challenge until
+                    // you have RUN height H's VDF to completion. The VDFs chain into one
+                    // sequential timeline; no cross-block pipelining of nonce search.
+                    let vdf_commit = blake3::hash(&serde_json::to_vec(&sub.block.vdf).unwrap_or_default());
                     let mut hh = blake3::Hasher::new();
-                    hh.update(b"sigil-g0/tip/v1");
+                    hh.update(b"sigil-g0/tip/v2");
                     hh.update(&n.tip_hash);
                     hh.update(&h.to_le_bytes());
                     hh.update(&sub.block.blake4_hash.to_le_bytes());
                     hh.update(&sub.block.nonce.to_le_bytes());
+                    hh.update(vdf_commit.as_bytes());
                     n.tip_hash = *hh.finalize().as_bytes();
                     n.height += 1;
                     retarget(&mut n); // fix #2: adjust BLAKE4 difficulty from real block times

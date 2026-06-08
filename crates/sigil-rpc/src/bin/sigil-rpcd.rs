@@ -58,6 +58,40 @@ struct Node {
     bits: u32,
     retarget_anchor_ts: u64,
     retarget_anchor_height: u64,
+    /// flux-db handle for state persistence — the money (SigilState) + chain
+    /// (height/tip/bits) are snapshotted here so they survive a restart.
+    statedb: Option<flux_db::Database>,
+}
+
+/// Persisted snapshot: the money + chain state (NOT students — VerifiedRegistry isn't
+/// serde; re-onboard on restart. history persists itself in its own flux-db).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Snapshot {
+    state: SigilState,
+    height: u64,
+    tip_hash: [u8; 32],
+    bits: u32,
+    retarget_anchor_ts: u64,
+    retarget_anchor_height: u64,
+    tokens: Vec<(String, TokenId)>,
+    pools: Vec<(String, PoolId)>,
+    citizens: Vec<WalletId>,
+}
+
+/// Write the current money+chain state to flux-db (bincode — handles u128 + tuple-key
+/// maps that JSON can't). Called after every state-mutating request.
+fn persist(node: &Node) {
+    let Some(db) = node.statedb.as_ref() else { return };
+    let snap = Snapshot {
+        state: node.state.clone(), height: node.height, tip_hash: node.tip_hash,
+        bits: node.bits, retarget_anchor_ts: node.retarget_anchor_ts, retarget_anchor_height: node.retarget_anchor_height,
+        tokens: node.tokens.clone(), pools: node.pools.clone(), citizens: node.citizens.clone(),
+    };
+    if let Ok(bytes) = bincode::serialize(&snap) { let _ = db.put(b"snapshot", &bytes); }
+}
+/// Load a persisted snapshot, if one exists + decodes.
+fn load_snapshot(db: &flux_db::Database) -> Option<Snapshot> {
+    db.get(b"snapshot").ok().flatten().and_then(|b| bincode::deserialize(&b).ok())
 }
 
 /// Content address (blake3 CID, hex) — flux-aether's content-addressing primitive.
@@ -205,6 +239,33 @@ fn token_id_for(sym: &str) -> TokenId {
 }
 
 fn bootstrap() -> Node {
+    // flux-history index (its own flux-db, persists itself).
+    let hist_path = std::env::var("SIGIL_HISTORY_PATH").unwrap_or_else(|_| "/home/orobit/sigil-data/history".into());
+    let mut history = match flux_history::HistoryStore::open(&hist_path) {
+        Ok(s) => { eprintln!("flux-history: {} entries @ {hist_path}", s.len()); Some(s) }
+        Err(e) => { eprintln!("flux-history: disabled ({e})"); None }
+    };
+    if let Some(h) = history.as_mut() { backfill_blocks(h); }
+    // state persistence (flux-db): the money + chain survive restarts.
+    let state_path = std::env::var("SIGIL_STATE_PATH").unwrap_or_else(|_| "/home/orobit/sigil-data/state".into());
+    let statedb = match flux_db::Database::open(&state_path) {
+        Ok(d) => Some(d),
+        Err(e) => { eprintln!("flux-db state: disabled, in-memory only ({e})"); None }
+    };
+    if let Some(snap) = statedb.as_ref().and_then(load_snapshot) {
+        eprintln!("flux-db: RESTORED state @ height {} ({} wallets, native supply {}) from {state_path}",
+            snap.height, snap.state.wallet_count(), snap.state.native_supply());
+        return Node {
+            state: snap.state, height: snap.height, students: VerifiedRegistry::new(),
+            tokens: snap.tokens, pools: snap.pools, citizens: snap.citizens, history,
+            tip_hash: snap.tip_hash, bits: snap.bits,
+            retarget_anchor_ts: snap.retarget_anchor_ts, retarget_anchor_height: snap.retarget_anchor_height,
+            statedb,
+        };
+    }
+    eprintln!("flux-db: no snapshot — seeding fresh genesis @ {state_path}");
+
+    // ── FRESH GENESIS — seed initial state, then snapshot it ──
     let mut state = SigilState::new();
     let mut m: Vec<StateMutation> = vec![StateMutation::SetMasterWallet { wallet: MASTER }];
 
@@ -258,16 +319,11 @@ fn bootstrap() -> Node {
         ("PACI/USDS".into(), POOL_PACI), ("SCAL/USDS".into(), POOL_SCAL),
         ("SIGIL/USDS".into(), POOL_SIGIL),
     ];
-    // flux-history index (flux-db + flux-search) — persistent across restarts.
-    let hist_path = std::env::var("SIGIL_HISTORY_PATH").unwrap_or_else(|_| "/home/orobit/sigil-data/history".into());
-    let mut history = match flux_history::HistoryStore::open(&hist_path) {
-        Ok(s) => { eprintln!("flux-history: {} entries @ {hist_path}", s.len()); Some(s) }
-        Err(e) => { eprintln!("flux-history: disabled ({e})"); None }
-    };
-    if let Some(h) = history.as_mut() { backfill_blocks(h); }
     let tip_hash = *blake3::hash(b"sigil-g0/mining-genesis").as_bytes();
-    Node { state, height: 2, students: VerifiedRegistry::new(), tokens, pools, citizens: vec![CITIZEN], history,
-        tip_hash, bits: mining_bits(), retarget_anchor_ts: now_ms(), retarget_anchor_height: 2 }
+    let node = Node { state, height: 2, students: VerifiedRegistry::new(), tokens, pools, citizens: vec![CITIZEN], history,
+        tip_hash, bits: mining_bits(), retarget_anchor_ts: now_ms(), retarget_anchor_height: 2, statedb };
+    persist(&node); // write the genesis snapshot so the next boot restores
+    node
 }
 
 /// One-time backfill: ingest the persisted DAG block headers (dag-blocks.json) into
@@ -798,6 +854,11 @@ fn handle(mut stream: TcpStream, node: &RwLock<Node>) {
     let (path, query) = match full_path.split_once('?') { Some((p, q)) => (p, q), None => (full_path, "") };
     let body = String::from_utf8_lossy(&data[header_end..]).to_string();
     let resp = route(node, method, path, query, &body);
+    // Persist the money+chain snapshot after any mutating request (POST) so a restart
+    // restores balances/pools/height/tip instead of re-seeding genesis.
+    if method == "POST" {
+        if let Ok(n) = node.read() { persist(&n); }
+    }
     let _ = stream.write_all(resp.as_bytes());
 }
 

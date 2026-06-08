@@ -70,9 +70,10 @@ fn ingest_block_value(
     let hash_hex = hex::encode(header.hash());
     if store.put_block(header).unwrap_or(false) {
         let best = store.best_height();
+        let synced = store.synced_to(); // contiguous progress (not raw count)
         let peer_best = {
             let mut s = state.lock().unwrap();
-            s.blocks_synced += 1;
+            s.blocks_synced = synced;
             s.sync_total = s.blocks_synced;
             s.sync_height = height;
             s.sync_hash_hex = hash_hex.clone();
@@ -155,13 +156,14 @@ impl P2PBlockSync {
 
                 // Resume from the PERSISTED store: seed the synced count + cursor from
                 // what's already on disk so a restart/update CONTINUES instead of
-                // re-fetching from 0 ("starts over"). best_height ≈ stored count for a
-                // contiguous store; the cursor loops anyway to refill any gaps.
-                let resume_h = store.best_height();
+                // Resume from the CONTIGUOUS synced_to (blocks 0..synced_to all present),
+                // NOT best_height (a stray live block inflates it). The cursor walks
+                // forward from here and never re-walks from 0.
+                let resume_h = store.synced_to();
                 {
                     let mut s = state_clone.lock().unwrap();
                     s.running = true;
-                    s.blocks_synced = store.count() as u64;
+                    s.blocks_synced = resume_h;
                 }
 
                 // v0.7.6: content-addressed backfill via the shared flux_p2p::backfill
@@ -269,31 +271,45 @@ impl P2PBlockSync {
                             let peers = net.connected_peers();
                             if !peers.is_empty() {
                                 const CHUNK: u64 = 8192;
-                                state_clone.lock().unwrap().sync_cursor = sync_cursor; // TUI
+                                // Walk FORWARD from the contiguous synced_to (never loop to
+                                // 0). Each cycle requests N consecutive chunks starting there;
+                                // store.put_block advances synced_to as the gap fills, so the
+                                // next cycle resumes at the new tip. A failed/slow chunk just
+                                // stalls synced_to at the gap → retried next cycle (peer
+                                // assignment ROTATES so no single slow peer permanently blocks).
+                                let cursor = store.synced_to();
+                                state_clone.lock().unwrap().sync_cursor = cursor; // TUI
                                 let netref = &net;
-                                let reqs = peers.iter().enumerate().map(|(i, peer)| {
-                                    let from = sync_cursor + i as u64 * CHUNK;
+                                let np = peers.len();
+                                let reqs = (0..np).map(|i| {
+                                    let from = cursor + i as u64 * CHUNK;
+                                    let peer = peers[(i + sync_cursor as usize) % np]; // rotate
                                     let payload = serde_json::to_vec(&BackfillReq { from, to: from + CHUNK }).unwrap();
-                                    let peer = *peer;
                                     async move { netref.send_request(peer, payload).await }
                                 });
-                                let span = peers.len() as u64 * CHUNK;
-                                crate::tlog!("[p2p-sync] backfill: {} parallel reqs from {} (have {have}/{peer_best})", peers.len(), sync_cursor);
+                                crate::tlog!("[p2p-sync] backfill: {} parallel reqs from {} (have {have}/{peer_best})", np, cursor);
                                 let results = futures::future::join_all(reqs).await;
-                                let mut stored = 0u64;
                                 for r in results {
-                                    if let Ok(bytes) = r {
-                                        if let Ok(resp) = serde_json::from_slice::<BackfillResp>(&bytes) {
-                                            for v in &resp.blocks {
-                                                if ingest_block_value(v, &mut store, &state_clone, &net, &new_blocks_clone) {
-                                                    stored += 1;
+                                    match r {
+                                        Ok(bytes) => {
+                                            if let Ok(resp) = serde_json::from_slice::<BackfillResp>(&bytes) {
+                                                let hs: Vec<u64> = resp.blocks.iter()
+                                                    .filter_map(|v| v.get("header").and_then(|h| h.get("height")).and_then(|x| x.as_u64()))
+                                                    .collect();
+                                                crate::tlog!("[p2p-sync] resp: {} blocks, h {:?}..{:?}", resp.blocks.len(), hs.iter().min(), hs.iter().max());
+                                                for v in &resp.blocks {
+                                                    ingest_block_value(v, &mut store, &state_clone, &net, &new_blocks_clone);
                                                 }
+                                            } else {
+                                                crate::tlog!("[p2p-sync] resp: unparseable ({} bytes)", bytes.len());
                                             }
                                         }
+                                        Err(e) => crate::tlog!("[p2p-sync] req FAILED: {e}"),
                                     }
                                 }
-                                crate::tlog!("[p2p-sync] backfill: +{stored} new blocks", );
-                                sync_cursor = if sync_cursor + span >= peer_best { 0 } else { sync_cursor + span };
+                                let now_synced = store.synced_to();
+                                crate::tlog!("[p2p-sync] backfill: synced_to {} → {}", cursor, now_synced);
+                                sync_cursor = sync_cursor.wrapping_add(1); // rotation counter
                             }
                         }
                     }

@@ -21,6 +21,22 @@ pub struct BlockStore {
     db: flux_db::Database,
     best_height: u64,
     best_hash_hex: String,
+    /// Contiguous synced count: blocks 0..synced_to are ALL present, so `synced_to`
+    /// is the next height needed. This (not `best_height`, which a stray live block
+    /// inflates) drives the backfill cursor + the progress bar, so sync walks forward
+    /// sequentially and resumes correctly instead of re-walking from 0.
+    synced_to: u64,
+}
+
+/// Key prefix bytes (block data is keyed by 64-char hex hash, never starts with these).
+const KEY_HINDEX: u8 = 0x01; // 0x01 ++ height.to_be_bytes() -> hash_hex  (height index)
+const KEY_META: u8 = 0x02;   // 0x02'S' -> synced_to (meta)
+
+fn height_key(h: u64) -> Vec<u8> {
+    let mut k = Vec::with_capacity(9);
+    k.push(KEY_HINDEX);
+    k.extend_from_slice(&h.to_be_bytes());
+    k
 }
 
 impl BlockStore {
@@ -29,22 +45,64 @@ impl BlockStore {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
         }
-        let db = flux_db::Database::open(&db_path)?;
+        let mut db = flux_db::Database::open(&db_path)?;
 
         let mut best_height = 0u64;
         let mut best_hash_hex = String::new();
-        let iter = db.iter();
-        for (_key, value) in iter {
+        let mut have_index = false;
+        let mut blocks_idx: Vec<(u64, Vec<u8>)> = Vec::new(); // (height, hash bytes) for migration
+        for (key, value) in db.iter() {
+            match key.first() {
+                Some(&KEY_HINDEX) => { have_index = true; continue; }
+                Some(&KEY_META) => continue,
+                _ => {}
+            }
             if let Ok(block) = bincode::deserialize::<StoredBlock>(&value) {
-                if block.header.height > best_height {
+                if block.header.height >= best_height {
                     best_height = block.header.height;
                     best_hash_hex = block.hash_hex.clone();
                 }
+                blocks_idx.push((block.header.height, key));
+            }
+        }
+        // Migrate a pre-index store (built before the height index existed) so it
+        // resumes instead of re-syncing from 0.
+        if !have_index && !blocks_idx.is_empty() {
+            for (h, hashk) in &blocks_idx {
+                let _ = db.put(&height_key(*h), hashk);
             }
         }
 
-        Ok(BlockStore { db, best_height, best_hash_hex })
+        let synced_to = db
+            .get(&[KEY_META, b'S']).ok().flatten()
+            .and_then(|v| <[u8; 8]>::try_from(v.as_slice()).ok().map(u64::from_be_bytes))
+            .unwrap_or(0);
+
+        let mut s = BlockStore { db, best_height, best_hash_hex, synced_to };
+        s.advance_synced(); // catch up the contiguous pointer to whatever's on disk
+        Ok(s)
     }
+
+    /// True if a block at `height` is stored (via the height index).
+    pub fn has_height(&self, height: u64) -> bool {
+        self.db.get(&height_key(height)).ok().flatten().is_some()
+    }
+
+    /// Advance the contiguous pointer over any consecutive heights present, persisting
+    /// it. Called after every store + once on open.
+    fn advance_synced(&mut self) {
+        let mut moved = false;
+        while self.has_height(self.synced_to) {
+            self.synced_to += 1;
+            moved = true;
+        }
+        if moved {
+            let _ = self.db.put(&[KEY_META, b'S'], &self.synced_to.to_be_bytes());
+        }
+    }
+
+    /// Contiguous synced count: blocks 0..synced_to are all present (next needed = this).
+    pub fn synced_to(&self) -> u64 { self.synced_to }
 
     pub fn put_block(&mut self, header: SigilBlockHeaderV0) -> Result<bool, String> {
         let hash = header.hash();
@@ -63,13 +121,16 @@ impl BlockStore {
                 .as_secs(),
         };
 
+        let height = block.header.height;
         let value = bincode::serialize(&block).map_err(|e| format!("serialize: {}", e))?;
         self.db.put(hash_hex.as_bytes(), &value)?;
+        self.db.put(&height_key(height), hash_hex.as_bytes())?; // height index
 
-        if block.header.height > self.best_height {
-            self.best_height = block.header.height;
+        if height >= self.best_height {
+            self.best_height = height;
             self.best_hash_hex = hash_hex;
         }
+        self.advance_synced(); // extend the contiguous pointer if this filled the next gap
 
         Ok(true)
     }
@@ -104,10 +165,12 @@ impl BlockStore {
             .as_secs();
         let json = format!(r#"{{"h":{},"hash":"{}","ts":{}}}"#, height, hash_hex, ts);
         self.db.put(hash_hex.as_bytes(), json.as_bytes())?;
-        if height > self.best_height {
+        self.db.put(&height_key(height), hash_hex.as_bytes())?; // height index
+        if height >= self.best_height {
             self.best_height = height;
             self.best_hash_hex = hash_hex.to_string();
         }
+        self.advance_synced();
         Ok(true)
     }
 
@@ -115,8 +178,10 @@ impl BlockStore {
     pub fn best_hash_hex(&self) -> String { self.best_hash_hex.clone() }
     pub fn count(&self) -> usize {
         let mut c = 0usize;
-        let iter = self.db.iter();
-        for _ in iter { c += 1; }
+        for (key, _) in self.db.iter() {
+            if matches!(key.first(), Some(&KEY_HINDEX) | Some(&KEY_META)) { continue; }
+            c += 1;
+        }
         c
     }
 
@@ -210,4 +275,41 @@ pub fn sync_aether_to_fluxdb(store: &mut BlockStore, aether_dir: &str) -> Result
     store.flush()?;
     eprintln!("[aether] → flux-db: {synced} new blocks, height {}", store.best_height());
     Ok(synced)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(tag: &str) -> String {
+        std::env::temp_dir()
+            .join(format!("sigil-bstore-{}-{}", std::process::id(), tag))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    // Catches the monitor-sync class of bug (synced_to not advancing / not resuming)
+    // that previously only surfaced on slow live runs.
+    #[test]
+    fn synced_to_advances_contiguously_stops_at_gaps_and_resumes() {
+        let p = tmp("sync");
+        let _ = std::fs::remove_dir_all(&p);
+        {
+            let mut s = BlockStore::open(&p).unwrap();
+            assert_eq!(s.synced_to(), 0, "fresh store starts at 0");
+            for h in 0..5 {
+                assert!(s.put_block_raw(h, &format!("hash{h}")).unwrap());
+            }
+            assert_eq!(s.synced_to(), 5, "0..4 present -> next needed = 5");
+            s.put_block_raw(7, "hash7").unwrap(); // gap at 5,6
+            assert_eq!(s.synced_to(), 5, "a gap holds the contiguous pointer");
+            s.put_block_raw(5, "hash5").unwrap();
+            s.put_block_raw(6, "hash6").unwrap();
+            assert_eq!(s.synced_to(), 8, "filling the gap jumps the pointer to 8");
+            assert_eq!(s.count(), 8, "8 distinct blocks stored");
+        }
+        let s2 = BlockStore::open(&p).unwrap();
+        assert_eq!(s2.synced_to(), 8, "RESUMES from the persisted store, not 0");
+        let _ = std::fs::remove_dir_all(&p);
+    }
 }

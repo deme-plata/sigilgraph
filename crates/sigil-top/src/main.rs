@@ -1247,11 +1247,15 @@ fn self_update(rel: &Release) -> Result<String, String> {
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&beside, std::fs::Permissions::from_mode(0o755));
-        if self_replace::self_replace(&beside).is_ok() {
-            let _ = std::fs::remove_file(&beside);
-            return Ok(format!("swapped v{VERSION} -> v{} ({:.1} MB) — restart to run",
-                rel.version, bytes.len() as f64 / 1.048576e6));
-        }
+    }
+    // In-place self-replace on BOTH platforms — the self_replace crate handles the
+    // Windows "rename the running .exe out of the way" trick, so the launched
+    // sigil-top(.exe) actually becomes the new version (was unix-only → Windows kept
+    // relaunching the old exe = "doesn't update").
+    if self_replace::self_replace(&beside).is_ok() {
+        let _ = std::fs::remove_file(&beside);
+        return Ok(format!("swapped v{VERSION} -> v{} ({:.1} MB) — restart to run",
+            rel.version, bytes.len() as f64 / 1.048576e6));
     }
     Ok(format!("saved v{} ({:.1} MB) -> {}", rel.version, bytes.len() as f64 / 1.048576e6, beside.display()))
 }

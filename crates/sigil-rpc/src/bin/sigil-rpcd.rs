@@ -412,6 +412,19 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
                 _ => bad("need from,pool (64-hex) + amount_in"),
             }
         }
+        // Diagnostic collector — miners POST GPU init/search errors here so they
+        // can be read server-side (no file-pasting). Appends the raw body to a log.
+        ("POST", "/diag") => {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/home/orobit/sigil-miner-diag.log")
+            {
+                let _ = writeln!(f, "{}", body);
+            }
+            ok("{\"ok\":true}".into())
+        }
         ("POST", "/mine") => {
             let miner = jstr(body, "miner").and_then(hex32);
             let header = jstr(body, "header").unwrap_or("sigil-block").to_string();

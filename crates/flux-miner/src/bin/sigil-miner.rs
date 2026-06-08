@@ -274,6 +274,16 @@ fn format_hps(hps: f64) -> String {
     format!("{v:.2} {}", U[i])
 }
 
+/// Best-effort: POST a GPU diagnostic to the node so it can be read server-side
+/// (no file-pasting). Single-lines the message.
+fn report_diag(url: &str, msg: &str) {
+    let body = format!("[sigil-miner v{VERSION}] {}", msg.replace('\n', " | "));
+    let _ = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .and_then(|c| c.post(format!("{url}/api/v1/diag")).body(body).send());
+}
+
 /// GET {url}/api/v1/balance?wallet=… → the NATIVE balance (flat-JSON pluck).
 fn fetch_balance(url: &str, wallet: &str) -> Option<u128> {
     let u = format!("{url}/api/v1/balance?wallet={wallet}");
@@ -713,6 +723,7 @@ fn gpu_selftest_and_exit() -> ! {
         };
         print!("  {report}");
         let _ = std::fs::write("sigil-gpu-selftest.txt", &report);
+        report_diag(DEFAULT_URL, &format!("gpu-selftest: {report}"));
         eprintln!("  (also written to sigil-gpu-selftest.txt)");
         std::process::exit(code);
     }
@@ -748,6 +759,7 @@ fn gpu_mining_loop(
                 push_log(&mut s.log, format!("✗ {msg}"));
             }
             let _ = std::fs::write("sigil-miner-gpu.log", &msg);
+            report_diag(&url, &msg);
             gpu_failed.store(true, Ordering::Relaxed);
             return;
         }
@@ -799,6 +811,7 @@ fn gpu_mining_loop(
                         push_log(&mut s.log, format!("✗ {msg} — falling back to CPU"));
                     }
                     let _ = std::fs::write("sigil-miner-gpu.log", &msg);
+                    report_diag(&url, &msg);
                     gpu_failed.store(true, Ordering::Relaxed);
                     return;
                 }

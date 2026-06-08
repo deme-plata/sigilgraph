@@ -118,10 +118,10 @@ fn run_start() -> Result<()> {
         node_id: node_id.clone(),
         listen_addr,
         bootstrap_peers: cfg.bootstrap_peers.clone(),
-        dagknight_enabled: false, // Track A consensus engine not wired yet
+        dagknight_enabled: true,  // Track A: DAGKnight BFT consensus active
         sap_enabled: true,
         x_algo_enabled: true,
-        entanglement_enabled: false, // QTFT-routing wires later
+        entanglement_enabled: true, // QtFT entanglement routing active
         gossipsub_topics: ALL_TOPICS.iter().map(|s| s.to_string()).collect(),
     };
 

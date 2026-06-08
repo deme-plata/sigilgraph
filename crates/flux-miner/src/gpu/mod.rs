@@ -32,7 +32,7 @@ use opencl3::context::Context;
 use opencl3::device::{Device, CL_DEVICE_TYPE_ALL, CL_DEVICE_TYPE_GPU};
 use opencl3::platform::get_platforms;
 use opencl3::kernel::{ExecuteKernel, Kernel};
-use opencl3::memory::{Buffer, CL_MEM_READ_ONLY, CL_MEM_WRITE_ONLY};
+use opencl3::memory::{Buffer, CL_MEM_READ_ONLY, CL_MEM_READ_WRITE, CL_MEM_WRITE_ONLY};
 use opencl3::program::Program;
 use opencl3::types::{cl_int, cl_uint, cl_ulong, CL_BLOCKING};
 use std::ptr;
@@ -270,42 +270,49 @@ impl GpuBlake4 {
     ) -> anyhow::Result<Option<u64>> {
         let (base_m, hlen) = build_base_m(header);
         let block_len = hlen + 8;
-
-        let mut base_buf = unsafe {
-            Buffer::<cl_uint>::create(&self.context, CL_MEM_READ_ONLY, 16, ptr::null_mut())?
-        };
-        let mut found_nonce = unsafe {
-            Buffer::<cl_ulong>::create(&self.context, CL_MEM_WRITE_ONLY, 1, ptr::null_mut())?
-        };
-        let mut found_flag = unsafe {
-            Buffer::<cl_int>::create(&self.context, CL_MEM_WRITE_ONLY, 1, ptr::null_mut())?
-        };
-
-        unsafe {
-            self.queue.enqueue_write_buffer(&mut base_buf, CL_BLOCKING, 0, &base_m, &[])?;
-            self.queue.enqueue_write_buffer(&mut found_flag, CL_BLOCKING, 0, &[0 as cl_int], &[])?;
-            self.queue.enqueue_write_buffer(&mut found_nonce, CL_BLOCKING, 0, &[0 as cl_ulong], &[])?;
-
-            ExecuteKernel::new(&self.kernel)
-                .set_arg(&base_buf)
-                .set_arg(&hlen)
-                .set_arg(&(nonce_base as cl_ulong))
-                .set_arg(&(target as cl_ulong))
-                .set_arg(&(rounds as cl_uint))
-                .set_arg(&(block_len as cl_uint))
-                .set_arg(&found_nonce)
-                .set_arg(&found_flag)
-                .set_global_work_size(batch)
-                .enqueue_nd_range(&self.queue)?
-                .wait()?;
+        // each OpenCL call names itself on failure → the search error pinpoints the
+        // exact step (e.g. enqueue_nd_range) instead of a bare cl_int code.
+        let r = (|| -> anyhow::Result<Option<u64>> {
+            unsafe {
+                let mut base_buf = Buffer::<cl_uint>::create(&self.context, CL_MEM_READ_ONLY, 16, ptr::null_mut())
+                    .map_err(|e| anyhow::anyhow!("create base_buf: {e}"))?;
+                // READ_WRITE: kernel writes, host reads back (WRITE_ONLY host-read is driver-finicky).
+                let mut found_nonce = Buffer::<cl_ulong>::create(&self.context, CL_MEM_READ_WRITE, 1, ptr::null_mut())
+                    .map_err(|e| anyhow::anyhow!("create found_nonce: {e}"))?;
+                let mut found_flag = Buffer::<cl_int>::create(&self.context, CL_MEM_READ_WRITE, 1, ptr::null_mut())
+                    .map_err(|e| anyhow::anyhow!("create found_flag: {e}"))?;
+                self.queue.enqueue_write_buffer(&mut base_buf, CL_BLOCKING, 0, &base_m, &[])
+                    .map_err(|e| anyhow::anyhow!("write base_buf: {e}"))?;
+                self.queue.enqueue_write_buffer(&mut found_flag, CL_BLOCKING, 0, &[0 as cl_int], &[])
+                    .map_err(|e| anyhow::anyhow!("write found_flag: {e}"))?;
+                self.queue.enqueue_write_buffer(&mut found_nonce, CL_BLOCKING, 0, &[0 as cl_ulong], &[])
+                    .map_err(|e| anyhow::anyhow!("write found_nonce: {e}"))?;
+                ExecuteKernel::new(&self.kernel)
+                    .set_arg(&base_buf)
+                    .set_arg(&hlen)
+                    .set_arg(&(nonce_base as cl_ulong))
+                    .set_arg(&(target as cl_ulong))
+                    .set_arg(&(rounds as cl_uint))
+                    .set_arg(&(block_len as cl_uint))
+                    .set_arg(&found_nonce)
+                    .set_arg(&found_flag)
+                    .set_global_work_size(batch)
+                    .enqueue_nd_range(&self.queue)
+                    .map_err(|e| anyhow::anyhow!("enqueue_nd_range(global={batch}): {e}"))?
+                    .wait()
+                    .map_err(|e| anyhow::anyhow!("kernel wait: {e}"))?;
+                let mut flag = [0 as cl_int; 1];
+                let mut nonce = [0 as cl_ulong; 1];
+                self.queue.enqueue_read_buffer(&found_flag, CL_BLOCKING, 0, &mut flag, &[])
+                    .map_err(|e| anyhow::anyhow!("read found_flag: {e}"))?;
+                self.queue.enqueue_read_buffer(&found_nonce, CL_BLOCKING, 0, &mut nonce, &[])
+                    .map_err(|e| anyhow::anyhow!("read found_nonce: {e}"))?;
+                Ok(if flag[0] != 0 { Some(nonce[0] as u64) } else { None })
+            }
+        })();
+        if let Err(e) = &r {
+            let _ = std::fs::write("sigil-gpu-search.log", format!("GPU search failed at: {e}\n"));
         }
-
-        let mut flag = [0 as cl_int; 1];
-        let mut nonce = [0 as cl_ulong; 1];
-        unsafe {
-            self.queue.enqueue_read_buffer(&found_flag, CL_BLOCKING, 0, &mut flag, &[])?;
-            self.queue.enqueue_read_buffer(&found_nonce, CL_BLOCKING, 0, &mut nonce, &[])?;
-        }
-        Ok(if flag[0] != 0 { Some(nonce[0] as u64) } else { None })
+        r
     }
 }

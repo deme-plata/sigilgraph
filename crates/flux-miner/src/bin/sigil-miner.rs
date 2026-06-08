@@ -41,6 +41,15 @@ use flux_vdf::ModSquaring;
 /// Public dual-lane mining endpoint — sigil-rpcd's API port, reachable directly
 /// (firewall ACCEPTs :8099). Override with a positional arg or SIGIL_MINE_URL.
 const DEFAULT_URL: &str = "http://sigilgraph.quillon.xyz:8099";
+/// This build's version (the flux-miner crate version) — what the auto-updater
+/// compares against the published manifest.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Pinned-channel auto-update manifest (per-platform), same model as sigil-top:
+/// only updates to the operator-promoted version in this file.
+fn manifest_url() -> String {
+    let plat = if cfg!(windows) { "windows" } else { "linux" };
+    format!("https://sigilgraph.quillon.xyz/downloads/sigil-miner-latest-{plat}.json")
+}
 
 // ── obsidian + violet SIGIL palette ──────────────────────────────────────────
 const VIOLET: Color = Color::Rgb(0x8b, 0x5c, 0xf6);
@@ -111,6 +120,37 @@ struct Stats {
     balance: u128,
     solve_hist: VecDeque<u64>, // recent solve ms (sparkline)
     log: VecDeque<String>,     // recent share lines (newest first)
+    update_msg: Option<String>, // auto-updater status line
+}
+
+/// Auto-update loop (default-ON, sigil-top model): ~30 s after launch then every
+/// 4 h, poll the pinned-channel manifest; if a newer version is promoted, stage
+/// `<exe>.new` (swapped in on next launch by `swap_on_launch`). Surfaces status
+/// to the TUI footer. Opt out with `--no-update`.
+fn update_loop(stats: Arc<Mutex<Stats>>, stop: Arc<AtomicBool>) {
+    let mut first = true;
+    loop {
+        let wait = if first { 30 } else { 4 * 3600 };
+        for _ in 0..wait {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+        first = false;
+        match flux_miner::updater::check(&manifest_url(), VERSION) {
+            Some(info) => {
+                let msg = match flux_miner::updater::stage(&info.url) {
+                    Ok(_) => format!("⬆ v{} staged — restart to apply", info.version),
+                    Err(e) => format!("update v{} fetch failed: {e}", info.version),
+                };
+                stats.lock().unwrap().update_msg = Some(msg);
+            }
+            None => {
+                stats.lock().unwrap().update_msg = Some(format!("✓ up to date (v{VERSION})"));
+            }
+        }
+    }
 }
 
 fn push_log(log: &mut VecDeque<String>, line: String) {
@@ -195,6 +235,7 @@ fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<Stats>>, stop: Arc<
 }
 
 fn main() -> anyhow::Result<()> {
+    flux_miner::updater::swap_on_launch(); // apply any update staged last run
     let args: Vec<String> = std::env::args().collect();
 
     // GPU utility modes (no wallet needed): enumerate devices / run the on-hardware
@@ -219,13 +260,17 @@ fn main() -> anyhow::Result<()> {
         .map(|s| s.to_string())
         .or_else(|| std::env::var("SIGIL_MINE_URL").ok())
         .unwrap_or_else(|| DEFAULT_URL.to_string());
-    eprintln!("\n  ⛏  SIGIL MINER — dual-lane (BLAKE4 Φ + VDF Ω)");
-    eprintln!("  wallet: {wallet}  ({wsource})");
-    eprintln!("  node:   {url}");
-    eprintln!("  flags:  --headless · --gpu · --gpu-list · --gpu-selftest\n");
-
     let headless = args.iter().any(|a| a == "--headless" || a == "--no-tui");
     let use_gpu = args.iter().any(|a| a == "--gpu");
+    // What lane A actually runs on. cfg!(feature="gpu") is false in the CPU build,
+    // so --gpu there correctly still reports CPU.
+    let mode = if use_gpu && cfg!(feature = "gpu") { "GPU" } else { "CPU" };
+
+    eprintln!("\n  ⛏  SIGIL MINER v{VERSION} — dual-lane (BLAKE4 Φ + VDF Ω)  ·  MODE: {mode}");
+    eprintln!("  wallet: {wallet}  ({wsource})");
+    eprintln!("  node:   {url}");
+    eprintln!("  flags:  --headless · --gpu · --gpu-list · --gpu-selftest · --no-update\n");
+
     let stats = Arc::new(Mutex::new(Stats::default()));
     let stop = Arc::new(AtomicBool::new(false));
     {
@@ -243,25 +288,38 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // auto-updater (default ON; pass --no-update to skip)
+    if !args.iter().any(|a| a == "--no-update") {
+        let (s, st) = (stats.clone(), stop.clone());
+        thread::spawn(move || update_loop(s, st));
+    }
+
     if headless {
-        run_headless(&stats, &stop)
+        run_headless(&stats, &stop, mode)
     } else {
-        run_tui(&stats, &stop, &url, &wallet)
+        run_tui(&stats, &stop, &url, &wallet, mode)
     }
 }
 
 /// Plain-output fallback (no TTY / CI / `--headless`).
-fn run_headless(stats: &Arc<Mutex<Stats>>, stop: &Arc<AtomicBool>) -> anyhow::Result<()> {
-    println!("  ⛏  SIGIL MINER — dual-lane (BLAKE4 Φ + VDF Ω) — headless\n");
+fn run_headless(stats: &Arc<Mutex<Stats>>, stop: &Arc<AtomicBool>, mode: &str) -> anyhow::Result<()> {
+    println!("  ⛏  SIGIL MINER v{VERSION} [{mode}] — dual-lane (BLAKE4 Φ + VDF Ω) — headless\n");
     let mut last_ok = 0u64;
+    let mut last_update: Option<String> = None;
     loop {
         thread::sleep(Duration::from_millis(500));
         let s = stats.lock().unwrap();
+        if s.update_msg != last_update {
+            last_update = s.update_msg.clone();
+            if let Some(u) = &last_update {
+                println!("  [update] {u}");
+            }
+        }
         if let Some(line) = s.log.front() {
             if s.shares_ok + s.shares_bad != last_ok {
                 last_ok = s.shares_ok + s.shares_bad;
                 println!(
-                    "  {line}   [✓{} ✗{}]  Φ {}  bal {} SIGIL",
+                    "  [{mode}] {line}   [✓{} ✗{}]  Φ {}  bal {} SIGIL",
                     s.shares_ok,
                     s.shares_bad,
                     format_flux(s.hashrate),
@@ -276,7 +334,7 @@ fn run_headless(stats: &Arc<Mutex<Stats>>, stop: &Arc<AtomicBool>) -> anyhow::Re
     Ok(())
 }
 
-fn run_tui(stats: &Arc<Mutex<Stats>>, stop: &Arc<AtomicBool>, url: &str, wallet: &str) -> anyhow::Result<()> {
+fn run_tui(stats: &Arc<Mutex<Stats>>, stop: &Arc<AtomicBool>, url: &str, wallet: &str, mode: &str) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut out = io::stdout();
     execute!(out, EnterAlternateScreen)?;
@@ -285,7 +343,7 @@ fn run_tui(stats: &Arc<Mutex<Stats>>, stop: &Arc<AtomicBool>, url: &str, wallet:
 
     let res = (|| -> anyhow::Result<()> {
         loop {
-            term.draw(|f| draw(f, stats, url, wallet, start))?;
+            term.draw(|f| draw(f, stats, url, wallet, mode, start))?;
             if event::poll(Duration::from_millis(250))? {
                 if let Event::Key(k) = event::read()? {
                     match k.code {
@@ -321,7 +379,7 @@ fn card(value: String, label: &str, color: Color) -> Paragraph<'static> {
     )
 }
 
-fn draw(f: &mut Frame, stats: &Arc<Mutex<Stats>>, url: &str, wallet: &str, start: Instant) {
+fn draw(f: &mut Frame, stats: &Arc<Mutex<Stats>>, url: &str, wallet: &str, mode: &str, start: Instant) {
     let s = stats.lock().unwrap();
     let area = f.area();
     let rows = Layout::default()
@@ -344,6 +402,10 @@ fn draw(f: &mut Frame, stats: &Arc<Mutex<Stats>>, url: &str, wallet: &str, start
     let wshort = format!("{}…{}", &wallet[..8.min(wallet.len())], &wallet[wallet.len().saturating_sub(6)..]);
     let header = Paragraph::new(vec![Line::from(vec![
         Span::styled("  ⛏ SIGIL MINER  ", Style::default().fg(VIOLET_HI).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("[{mode}] "),
+            Style::default().fg(if mode == "GPU" { GREEN } else { CYAN }).add_modifier(Modifier::BOLD),
+        ),
         Span::styled("dual-lane  ", Style::default().fg(DIM)),
         Span::styled("BLAKE4 Φ", Style::default().fg(VIOLET).add_modifier(Modifier::BOLD)),
         Span::styled(" + ", Style::default().fg(DIM)),
@@ -428,10 +490,12 @@ fn draw(f: &mut Frame, stats: &Arc<Mutex<Stats>>, url: &str, wallet: &str, start
     // ── footer ──
     let up = start.elapsed().as_secs();
     let err = s.last_err.clone().map(|e| format!("  ⚠ {e}")).unwrap_or_default();
+    let update = s.update_msg.clone().map(|u| format!("   {u}")).unwrap_or_default();
     let footer = Paragraph::new(Line::from(vec![
         Span::styled("  q ", Style::default().fg(VIOLET).add_modifier(Modifier::BOLD)),
         Span::styled("quit", Style::default().fg(DIM)),
         Span::styled(format!("   uptime {}m{:02}s", up / 60, up % 60), Style::default().fg(DIM)),
+        Span::styled(update, Style::default().fg(GOLD)),
         Span::styled(err, Style::default().fg(RED)),
     ]));
     f.render_widget(footer, rows[4]);

@@ -126,6 +126,13 @@ fn serve_file(dir: &PathBuf, safe: &str) -> (&'static str, Vec<u8>, &'static str
         return ("200 OK", html.as_bytes().to_vec(), "text/html; charset=utf-8");
     }
 
+    // 3b. Built-in onboarding — 6-word mnemonic → fresh wallet (the wallet gate
+    // redirects fresh users here; it must be served or [W] dead-ends on a 404).
+    if safe == "enter-sigil.html" || safe.ends_with("/enter-sigil.html") {
+        let html = include_str!("../../../gui/enter-sigil.html");
+        return ("200 OK", html.as_bytes().to_vec(), "text/html; charset=utf-8");
+    }
+
     // 4. Built-in vite-engine
     if safe == "vite-engine.html" || safe.ends_with("/vite-engine.html") {
         let html = include_str!("../../../gui/vite-engine-embedded.html");

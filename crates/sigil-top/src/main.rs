@@ -799,6 +799,7 @@ fn main() {
                 .and_then(|i| argv.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(9800);
             match serve::start(&serve_dir, port) {
                 Ok(_stop) => {
+                    let _ = flux_register_scheme(); // flux:// works after a single run
                     let node = std::env::var("SIGIL_NODE_URL")
                         .unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:8099".into());
                     println!("\n  sigil-top serve → http://localhost:{port}/  (wallet at /, /api → {node})");
@@ -808,6 +809,17 @@ fn main() {
                 Err(e) => { eprintln!("  serve failed: {e}"); std::process::exit(1); }
             }
         }
+        // flux:// URL handler. The OS invokes `sigil-top flux-open flux://wallet`
+        // when the user types flux://wallet in the browser → ensure the local server
+        // is up, then open the mapped localhost page in the default browser.
+        Some("flux-open") => {
+            let url = argv.get(1).cloned().unwrap_or_default();
+            flux_open(&url);
+            return;
+        }
+        // Register / unregister the flux:// scheme with this OS (sigil-top = handler).
+        Some("flux-register") => { let _ = flux_register_scheme(); return; }
+        Some("flux-unregister") => { let _ = flux_unregister_scheme(); return; }
         // Headless miner (same engine [M] drives): mine N shares to the node, print each. Scriptable.
         Some("mine") => {
             let n: u64 = argv.get(1).and_then(|s| s.parse().ok()).unwrap_or(3);
@@ -1563,6 +1575,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
         Ok(stop) => {
             app.serve_stop = Some(stop);
             app.serve_status = "serve :9800 ✓ embedded".into();
+            let _ = flux_register_scheme(); // register flux:// (best-effort, once)
         }
         Err(e) => {
             app.serve_status = format!("serve: {e}");
@@ -2470,6 +2483,118 @@ fn open_browser(url: &str) {
         #[cfg(target_os = "windows")]
         { let _ = Command::new("cmd").args(["/c", "start", &url]).spawn(); }
     });
+}
+
+// ── flux:// URL scheme ──────────────────────────────────────────────────────
+// `flux://wallet` typed in the browser → the OS launches `sigil-top flux-open
+// flux://wallet`. UI targets open the embedded :9800 wallet; command targets run
+// the `fluxc` binary in a VISIBLE terminal (never silent exec from a URL).
+
+/// Keep only safe chars so a flux:// URL can't inject shell metacharacters.
+fn flux_safe_arg(s: &str) -> String {
+    s.chars().filter(|c| c.is_ascii_alphanumeric() || "._-/".contains(*c)).collect()
+}
+
+/// Ensure the :9800 wallet server is up (spawn a detached `serve` if not), open `path`.
+fn flux_open_local(path: &str) {
+    let up = "127.0.0.1:9800".parse::<std::net::SocketAddr>().ok()
+        .and_then(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_millis(350)).ok())
+        .is_some();
+    if !up {
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = Command::new(&exe).arg("serve")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            thread::sleep(Duration::from_millis(900));
+        }
+    }
+    open_browser(&format!("http://localhost:9800{path}"));
+    thread::sleep(Duration::from_millis(500)); // let the browser launch before exit
+}
+
+/// Run `cmd` in a VISIBLE terminal (cross-platform) — so a flux:// URL can't run
+/// fluxc commands behind the user's back.
+fn flux_run_terminal(cmd: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        let hold = format!("{cmd}; echo; echo '[flux:// done — press enter]'; read _");
+        for term in ["x-terminal-emulator", "gnome-terminal", "konsole", "xfce4-terminal", "alacritty", "kitty", "xterm"] {
+            let ok = match term {
+                "gnome-terminal" | "xfce4-terminal" => Command::new(term).args(["--", "sh", "-c", &hold]).spawn().is_ok(),
+                _ => Command::new(term).args(["-e", "sh", "-c", &hold]).spawn().is_ok(),
+            };
+            if ok { return; }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    { let _ = Command::new("osascript").args(["-e", &format!("tell app \"Terminal\" to do script \"{cmd}\"")]).spawn(); }
+    #[cfg(target_os = "windows")]
+    { let _ = Command::new("cmd").args(["/c", "start", "cmd", "/k", cmd]).spawn(); }
+}
+
+/// Dispatch a flux:// URL.
+fn flux_open(raw: &str) {
+    let rest = raw.trim().trim_start_matches("flux://").trim_start_matches("flux:").trim_start_matches('/');
+    let (head, tail) = match rest.split_once('/') { Some((a, b)) => (a, b), None => (rest, "") };
+    let head = head.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();
+    let arg = flux_safe_arg(tail.split(['?', '#']).next().unwrap_or(""));
+    match head.as_str() {
+        "" | "wallet" | "tron" | "w" => flux_open_local("/sigil-wallet-tron.html"),
+        "enter" | "enter-sigil" | "new" | "onboard" | "login" => flux_open_local("/enter-sigil.html"),
+        "engine" | "vite" | "vite-engine" => flux_open_local("/vite-engine.html"),
+        // content-addressed fetch (the existing flux:// meaning in flux-fleet)
+        "b3" => flux_run_terminal(&format!("flux-fleet get flux://b3/{arg}")),
+        // fluxc command surface — visible terminal, whitelisted verbs only
+        "build" | "dev" | "serve" | "test" | "stats" | "watch" | "plan" | "mcp" | "quick" | "self" | "run" => {
+            let c = if arg.is_empty() { format!("fluxc {head}") } else { format!("fluxc {head} {arg}") };
+            flux_run_terminal(&c);
+        }
+        // anything else → try a served page (graceful 404 if absent)
+        other => flux_open_local(&format!("/{}.html", flux_safe_arg(other))),
+    }
+}
+
+/// Register flux:// → this binary as the OS URL-scheme handler.
+fn flux_register_scheme() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?.to_string_lossy().to_string();
+    #[cfg(target_os = "linux")]
+    {
+        let home = std::env::var("HOME").map_err(|_| "no $HOME".to_string())?;
+        let apps = format!("{home}/.local/share/applications");
+        std::fs::create_dir_all(&apps).map_err(|e| e.to_string())?;
+        let desktop = format!(
+            "[Desktop Entry]\nType=Application\nName=Flux URL Handler\nComment=Open flux:// links (wallet, fluxc commands)\nExec={exe} flux-open %u\nTerminal=false\nNoDisplay=true\nStartupNotify=false\nMimeType=x-scheme-handler/flux;\n"
+        );
+        std::fs::write(format!("{apps}/flux-url-handler.desktop"), desktop).map_err(|e| e.to_string())?;
+        let _ = Command::new("xdg-mime").args(["default", "flux-url-handler.desktop", "x-scheme-handler/flux"]).status();
+        let _ = Command::new("update-desktop-database").arg(&apps).status();
+        println!("  ✓ flux:// registered. Try typing  flux://wallet  in your browser.");
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let cmd = format!("\"{exe}\" flux-open \"%1\"");
+        let _ = Command::new("reg").args(["add", "HKCU\\Software\\Classes\\flux", "/ve", "/d", "URL:Flux Protocol", "/f"]).status();
+        let _ = Command::new("reg").args(["add", "HKCU\\Software\\Classes\\flux", "/v", "URL Protocol", "/d", "", "/f"]).status();
+        let _ = Command::new("reg").args(["add", "HKCU\\Software\\Classes\\flux\\shell\\open\\command", "/ve", "/d", &cmd, "/f"]).status();
+        println!("  flux:// registered. Try: flux://wallet");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = &exe;
+        println!("  flux:// on macOS needs an .app bundle (manual) — open http://localhost:9800/ meanwhile.");
+    }
+    Ok(())
+}
+
+fn flux_unregister_scheme() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    { if let Ok(h) = std::env::var("HOME") { let _ = std::fs::remove_file(format!("{h}/.local/share/applications/flux-url-handler.desktop")); } }
+    #[cfg(target_os = "windows")]
+    { let _ = Command::new("reg").args(["delete", "HKCU\\Software\\Classes\\flux", "/f"]).status(); }
+    println!("  flux:// handler removed.");
+    Ok(())
 }
 
 fn render_footer(app: &App) -> Paragraph<'static> {

@@ -146,12 +146,13 @@ async function load(){
   // Recent Blocks ← flux-history (by_kind block)
   try{
     let r=await fetch('/api/v1/recent?kind=block&limit=40',{cache:'no-store'}); let j=await r.json();
-    var blocks=(j.results||[]).map(function(e){return{h:e.h,hash:e.hash,prod:e.prod}});
+    var blocks=(j.results||[]).map(function(e){return{h:e.h,hash:e.hash,prod:e.prod,cid:e.cid}});
     window._blocks=blocks;
     var el=document.getElementById('blocks');
     el.innerHTML=blocks.length?blocks.map(function(b){
       var cl='badge-d'; if(b.prod==='E')cl='badge-e'; else if(b.prod==='G')cl='badge-g'; else if(b.prod==='B')cl='badge-b';
-      return'<div class="block-row"><span class="bh">#'+b.h+'</span><span class="hash">'+(b.hash||'')+'</span><span class="badge '+cl+'">'+(b.prod||'?')+'</span></div>';
+      var cid=b.cid?'<span class="hash" style="color:var(--violet);font-size:10px;cursor:pointer;flex:none" title="content address (blake3) — click to verify" onclick="verifyCid(\''+b.cid+'\')">⬡b3:'+b.cid.slice(0,10)+'…</span>':'';
+      return'<div class="block-row"><span class="bh">#'+b.h+'</span><span class="hash">'+(b.hash||'')+'</span>'+cid+'<span class="badge '+cl+'">'+(b.prod||'?')+'</span></div>';
     }).join(''):'<div class="empty">No blocks indexed yet</div>';
   }catch(e){}
 
@@ -161,10 +162,21 @@ async function load(){
     var txs=j.results||[];
     var el=document.getElementById('txns');
     el.innerHTML=txs.length?txs.map(function(t){
-      return'<div class="txn"><span class="type">'+((t.kind||'tx').toUpperCase())+'</span><span class="detail">'+(t.title||'')+'</span><span class="amt">'+(t.content||'').slice(0,30)+'</span></div>';
+      var cid=t.cid?'<span style="color:var(--violet);font-family:\'JetBrains Mono\';font-size:9px;cursor:pointer" title="content address (blake3) — click to verify" onclick="verifyCid(\''+t.cid+'\')">⬡'+t.cid.slice(0,8)+'…</span>':'';
+      return'<div class="txn"><span class="type">'+((t.kind||'tx').toUpperCase())+'</span><span class="detail">'+(t.title||'')+'</span>'+cid+'<span class="amt">'+(t.content||'').slice(0,24)+'</span></div>';
     }).join(''):'<div class="empty">No transactions yet — mine or swap to see activity</div>';
   }catch(e){}
 }
+// content-addressing: retrieve a record by its blake3 CID via /api/v1/aether and show
+// whether blake3(content)==cid (verify-don't-trust). flux-aether content-addressing.
+async function verifyCid(cid){
+  try{
+    var r=await fetch('/api/v1/aether?cid='+encodeURIComponent(cid),{cache:'no-store'}); var j=await r.json();
+    if(j.found) alert('⬡ CONTENT-ADDRESS '+(j.verified?'VERIFIED ✓':'MISMATCH ✗')+'\n\nflux://b3/'+cid+'\n\n'+(j.title||'')+'\n'+(j.content||'')+'\n\nblake3(content)==cid: '+j.verified);
+    else alert('not found in content store:\nflux://b3/'+cid);
+  }catch(e){ alert('verify failed: '+e); }
+}
+window.verifyCid=verifyCid;
 load();
 setInterval(load,10000);
 

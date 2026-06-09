@@ -26,11 +26,17 @@ pub struct BlockStore {
     /// inflates) drives the backfill cursor + the progress bar, so sync walks forward
     /// sequentially and resumes correctly instead of re-walking from 0.
     synced_to: u64,
+    /// v0.9.0: Contiguous CRYPTOGRAPHICALLY-VERIFIED count: blocks 0..verified_to have
+    /// each passed `precheck()` AND link to their parent (`header[h].parent_hash ==
+    /// header[h-1].hash()`). `synced_to` only means "downloaded"; `verified_to` means
+    /// "downloaded AND validated as one connected chain". Persisted so a restart resumes
+    /// verification instead of re-walking 0. Invariant: `verified_to <= synced_to`.
+    verified_to: u64,
 }
 
 /// Key prefix bytes (block data is keyed by 64-char hex hash, never starts with these).
 const KEY_HINDEX: u8 = 0x01; // 0x01 ++ height.to_be_bytes() -> hash_hex  (height index)
-const KEY_META: u8 = 0x02;   // 0x02'S' -> synced_to (meta)
+const KEY_META: u8 = 0x02;   // 0x02'S' -> synced_to · 0x02'V' -> verified_to  (meta)
 
 fn height_key(h: u64) -> Vec<u8> {
     let mut k = Vec::with_capacity(9);
@@ -77,8 +83,13 @@ impl BlockStore {
             .get(&[KEY_META, b'S']).ok().flatten()
             .and_then(|v| <[u8; 8]>::try_from(v.as_slice()).ok().map(u64::from_be_bytes))
             .unwrap_or(0);
+        let verified_to = db
+            .get(&[KEY_META, b'V']).ok().flatten()
+            .and_then(|v| <[u8; 8]>::try_from(v.as_slice()).ok().map(u64::from_be_bytes))
+            .unwrap_or(0)
+            .min(synced_to); // never claim verified past what's downloaded
 
-        let mut s = BlockStore { db, best_height, best_hash_hex, synced_to };
+        let mut s = BlockStore { db, best_height, best_hash_hex, synced_to, verified_to };
         s.advance_synced(); // catch up the contiguous pointer to whatever's on disk
         Ok(s)
     }
@@ -103,6 +114,30 @@ impl BlockStore {
 
     /// Contiguous synced count: blocks 0..synced_to are all present (next needed = this).
     pub fn synced_to(&self) -> u64 { self.synced_to }
+
+    /// v0.9.0: Contiguous cryptographically-verified count: blocks 0..verified_to have
+    /// each passed precheck + parent linkage. The "full verifying sync" watermark.
+    pub fn verified_to(&self) -> u64 { self.verified_to }
+
+    /// v0.9.0: Persist the verified watermark. Clamped to `synced_to` (can't verify what
+    /// isn't downloaded) and monotonic guard is the caller's job — the verifier only ever
+    /// advances it. Cheap no-op if unchanged.
+    pub fn set_verified_to(&mut self, h: u64) {
+        let h = h.min(self.synced_to);
+        if h != self.verified_to {
+            self.verified_to = h;
+            let _ = self.db.put(&[KEY_META, b'V'], &self.verified_to.to_be_bytes());
+        }
+    }
+
+    /// v0.9.0: Load the full stored header at a given height (via the height index →
+    /// hash → block). Returns None if that height isn't stored. This is the read path the
+    /// chain verifier walks to recompute `hash()` and check `parent_hash` linkage.
+    pub fn get_header_at_height(&self, height: u64) -> Option<SigilBlockHeaderV0> {
+        let hashk = self.db.get(&height_key(height)).ok().flatten()?;
+        let hash_hex = String::from_utf8(hashk).ok()?;
+        self.get_block(&hash_hex).map(|b| b.header)
+    }
 
     pub fn put_block(&mut self, header: SigilBlockHeaderV0) -> Result<bool, String> {
         let hash = header.hash();

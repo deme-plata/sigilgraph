@@ -19,6 +19,7 @@
 
 mod block_store;
 mod block_sync;
+mod chain_verify; // v0.9.0: full verifying sync — spine continuity + precheck walk
 mod serve;
 
 use std::io::{IsTerminal, Read, Write};
@@ -27,6 +28,19 @@ use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// v0.7.21: Windows-safe "Instant N seconds in the past".
+/// `Instant::now() - Duration` panics with "overflow when subtracting duration
+/// from instant" when the monotonic clock is younger than the duration — which
+/// happens at process start on Windows (QPC epoch is near process/boot start),
+/// crashing sigil-top before the TUI even draws. `checked_sub` returns None in
+/// that case; we fall back to `now`. The intent of these call sites is "make the
+/// first periodic check overdue"; on the rare clamp the first tick is merely
+/// delayed by one interval instead of firing immediately — never a crash.
+fn instant_ago(secs: u64) -> Instant {
+    let now = Instant::now();
+    now.checked_sub(Duration::from_secs(secs)).unwrap_or(now)
+}
 
 
 use std::fs;
@@ -423,7 +437,12 @@ fn print_help() {
          sigil-top --once       single snapshot, then exit\n  \
          sigil-top --interval N refresh seconds\n  \
          sigil-top --tui        opt-in ratatui TUI (alt-screen, interactive keys)\n  \
-         sigil-top --api URL    status endpoint (default https://sigilgraph.fluxapp.xyz/api/v1/status)"
+         sigil-top --api URL    status endpoint (default https://sigilgraph.fluxapp.xyz/api/v1/status)\n\n  \
+         sigil-top full-sync    headless: download + VERIFY the chain genesis→tip, exit 0 when\n  \
+         {space}             the verified spine reaches the network tip ([--target H] [--timeout S])\n  \
+         sigil-top verify-chain re-verify the LOCAL store (precheck + parent linkage), exit 1 on a\n  \
+         {space}             break, 0 if it's a clean connected spine to genesis ([--json])",
+        space = "      "
     );
 }
 
@@ -850,6 +869,91 @@ fn main() {
                 }
                 Ok(rel) => { println!("  {GREEN}✓ already on the latest (v{VERSION}; channel: v{}){RESET}\n", rel.version); return; }
                 Err(e) => { eprintln!("  {RED}✗ update check: {e}{RESET}\n"); std::process::exit(1); }
+            }
+        }
+        // v0.9.0: re-verify the LOCAL block store as a connected spine (precheck +
+        // parent linkage), genesis→tip. No network. Exit 0 = clean chain to genesis,
+        // 1 = a real integrity break, 2 = couldn't open the store.
+        Some("verify-chain") => {
+            let json = argv.iter().any(|a| a == "--json");
+            let path = sigil_top_db_path();
+            let mut store = match block_store::BlockStore::open(&path) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("{RED}✗ open store {path}: {e}{RESET}"); std::process::exit(2); }
+            };
+            let synced = store.synced_to();
+            let t0 = Instant::now();
+            let report = chain_verify::verify_to(&mut store, u64::MAX);
+            let dt = t0.elapsed();
+            // A `Missing` at/after the download frontier is the clean terminator, not a break.
+            let real_break = match &report.first_break {
+                Some((h, chain_verify::BreakReason::Missing)) if *h >= synced => None,
+                Some((h, r)) => Some((*h, r.to_string())),
+                None => None,
+            };
+            if json {
+                let brk = real_break.as_ref()
+                    .map(|(h, r)| format!("{{\"height\":{h},\"reason\":{}}}", serde_json::Value::String(r.clone())))
+                    .unwrap_or_else(|| "null".into());
+                println!("{{\"verified_to\":{},\"synced_to\":{},\"checked\":{},\"clean\":{},\"break\":{brk},\"ms\":{}}}",
+                    report.verified_to, synced, report.checked, real_break.is_none(), dt.as_millis());
+            } else {
+                println!("\n  {VBRIGHT}{BOLD}◆ SIGIL chain verification{RESET}  {DIM}(local store · {path}){RESET}");
+                println!("  {DIM}downloaded:{RESET} {GOLD}{}{RESET} blocks   {DIM}verified spine:{RESET} {GREEN}{}{RESET} blocks   {DIM}checked:{RESET} {} in {} ms",
+                    synced, report.verified_to, report.checked, dt.as_millis());
+                match &real_break {
+                    None => println!("  {GREEN}✓ clean connected spine to genesis — every header prechecks and links to its parent{RESET}\n"),
+                    Some((h, r)) => println!("  {RED}✗ integrity break at height {h}: {r}{RESET}\n"),
+                }
+            }
+            std::process::exit(if real_break.is_some() { 1 } else { 0 });
+        }
+        // v0.9.0: headless FULL VERIFYING SYNC — launch the P2P backfill + the spine
+        // verifier, stream progress, exit 0 only when the verified spine reaches the
+        // network tip (or --target). Exit 1 on a verification break, 3 on timeout,
+        // 2 on setup failure. Scriptable / CI ("did this node fully + verifiably sync?").
+        Some("full-sync") => {
+            let target_arg: Option<u64> = argv.iter().position(|a| a == "--target")
+                .and_then(|i| argv.get(i + 1)).and_then(|s| s.parse().ok());
+            let timeout_s: u64 = argv.iter().position(|a| a == "--timeout")
+                .and_then(|i| argv.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(1800);
+            let path = sigil_top_db_path();
+            let store = match block_store::BlockStore::open(&path) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("{RED}✗ open store {path}: {e}{RESET}"); std::process::exit(2); }
+            };
+            println!("\n  {VBRIGHT}{BOLD}◆ SIGIL full verifying sync{RESET}  {DIM}(store {path}){RESET}");
+            println!("  {DIM}connecting to the sigil-g0 mesh — downloading + verifying genesis→tip…{RESET}");
+            if let Some(t) = target_arg { println!("  {DIM}target height pinned to {t}{RESET}"); }
+            println!("  {DIM}timeout {timeout_s}s · Ctrl-C to stop{RESET}\n");
+            let sync = block_sync::P2PBlockSync::launch(store);
+            let start = Instant::now();
+            let mut last_print = instant_ago(10);
+            loop {
+                let st = sync.poll_state();
+                if let Some(b) = &st.verify_break {
+                    eprintln!("  {RED}✗ verification break — {b}{RESET}");
+                    eprintln!("  {RED}  the downloaded chain does NOT form one connected spine. Aborting.{RESET}\n");
+                    std::process::exit(1);
+                }
+                let target = target_arg.unwrap_or(st.peer_best_height);
+                if last_print.elapsed() >= Duration::from_secs(2) {
+                    last_print = Instant::now();
+                    let pct = if target > 0 { (st.verified as f64 / target as f64 * 100.0).min(100.0) } else { 0.0 };
+                    println!("  {CYAN}⬇{RESET} verified {GREEN}{}{RESET} / synced {GOLD}{}{RESET} / tip {} · {VBRIGHT}{:.1}%{RESET} · {} peers · {}s",
+                        group(st.verified), group(st.blocks_synced), if target > 0 { group(target) } else { "?".into() },
+                        pct, st.peer_count, start.elapsed().as_secs());
+                }
+                if target > 0 && st.verified >= target {
+                    println!("\n  {GREEN}{BOLD}✓ full verifying sync complete — {} blocks verified as one connected spine to genesis{RESET}\n", group(st.verified));
+                    std::process::exit(0);
+                }
+                if start.elapsed() > Duration::from_secs(timeout_s) {
+                    eprintln!("\n  {RED}✗ timeout after {timeout_s}s — verified {} / target {} (peers={}){RESET}\n",
+                        group(st.verified), if target > 0 { group(target) } else { "?".into() }, st.peer_count);
+                    std::process::exit(3);
+                }
+                std::thread::sleep(Duration::from_millis(250));
             }
         }
         _ => {}
@@ -1356,7 +1460,7 @@ impl App {
               verify: None, toast, toast_sticky: false,
               latest: LATEST.to_string(),
               // v0.7.5: Trigger first check immediately (now - 300s = overdue)
-              last_update_check: Instant::now() - Duration::from_secs(301),
+              last_update_check: instant_ago(301),
               update_rx: None,
               blocks: Vec::new(),
               target_height: 0, synced_height: 0, verified_count: 0, streak: 0, score: 0,
@@ -1364,7 +1468,7 @@ impl App {
               mine_hashrate: 0.0, mine_hashes: 0, wallet_balance: 0,
               full_sync: false, full_sync_height: 0, full_sync_target: 0, full_sync_active: false, sync_us: 0,
               eclipse_k: 0, eclipse_sources: Vec::new(),
-              last_eclipse: Instant::now() - Duration::from_secs(60),
+              last_eclipse: instant_ago(60),
               splash_until: if std::env::var("SIGIL_TOP_JUST_UPDATED").ok().as_deref() == Some("1") {
                   let _ = std::env::remove_var("SIGIL_TOP_JUST_UPDATED");
                   Some(Instant::now() + Duration::from_millis(1800))
@@ -1391,7 +1495,7 @@ impl App {
                   FleetNode { name: "Delta".into(), addr: "5.79.79.158".into(), port: 9003, online: false, height: 0, version: String::new(), uptime_secs: 0 },
                   FleetNode { name: "Epsilon".into(), addr: "89.149.241.126".into(), port: 9003, online: false, height: 0, version: String::new(), uptime_secs: 0 },
               ],
-              fleet_last_check: Instant::now() - Duration::from_secs(3600),
+              fleet_last_check: instant_ago(3600),
         }
     }
     fn resync(&mut self) {
@@ -2165,7 +2269,11 @@ fn render_sync_status(app: &App) -> Paragraph<'static> {
     let bw = 14usize;
     let fill = ((pct / 100.0) * bw as f64).round() as usize;
     let bar = "█".repeat(fill.min(bw)) + &"░".repeat(bw.saturating_sub(fill));
-    let (bcol, tail) = if at_tip {
+    // v0.9.0: a real spine-verification break (not the download frontier) trumps the
+    // AT-TIP/behind readout — the chain didn't validate, say so loudly in red.
+    let (bcol, tail) = if s.verify_break.is_some() {
+        (C_RED, Span::styled(" ⚠ SPINE BREAK".to_string(), Style::default().fg(C_RED).add_modifier(Modifier::BOLD)))
+    } else if at_tip {
         (C_GREEN, Span::styled(" AT TIP".to_string(), Style::default().fg(C_GREEN)))
     } else {
         (C_CYAN, Span::styled(format!(" {} behind", group(gap)), Style::default().fg(C_GOLD)))
@@ -2193,10 +2301,23 @@ fn render_sync_status(app: &App) -> Paragraph<'static> {
         ])
     };
 
-    // 3) in-flight chunk range + tip-verify + peers
-    let vmark = if !app.online { Span::styled("offline".to_string(), Style::default().fg(C_RED)) }
-        else if verified { Span::styled(format!("✓{}", group(synced)), Style::default().fg(C_GREEN)) }
-        else { Span::styled("✗tip".to_string(), Style::default().fg(C_GOLD)) };
+    // 3) in-flight chunk range + spine-verified watermark + tip-verify + peers.
+    // v0.9.0: ⛓{N} = the contiguous CRYPTOGRAPHICALLY-VERIFIED spine height (precheck +
+    // parent linkage back to genesis) — distinct from synced (downloaded). A break shows
+    // red; an unverified-but-downloaded chain shows gold (verifier still walking).
+    let vmark = if !app.online && !s.running {
+        Span::styled("offline".to_string(), Style::default().fg(C_RED))
+    } else if s.verify_break.is_some() {
+        Span::styled("⚠spine".to_string(), Style::default().fg(C_RED).add_modifier(Modifier::BOLD))
+    } else if s.verified > 0 && s.verified >= synced.saturating_sub(8) {
+        Span::styled(format!("⛓✓{}", group(s.verified)), Style::default().fg(C_GREEN))
+    } else if s.verified > 0 {
+        Span::styled(format!("⛓{}", group(s.verified)), Style::default().fg(C_GOLD))
+    } else if verified {
+        Span::styled(format!("✓{}", group(synced)), Style::default().fg(C_GREEN))
+    } else {
+        Span::styled("✗tip".to_string(), Style::default().fg(C_GOLD))
+    };
     let l3 = if !at_tip && s.running {
         let from = synced; let to = from.saturating_add(8192);
         Line::from(vec![

@@ -1000,6 +1000,31 @@ fn main() {
         let fnode = Arc::clone(&node);
         thread::spawn(move || follow_peer(fnode, peer));
     }
+    // Status writer: keep $SIGIL_STATUS_OUT fresh so the frontend (sigilgraph)
+    // reflects the LIVE chain. Without this the file froze (was stale since the
+    // writer was dropped from rpcd) and the site showed a stuck height forever.
+    // Atomic tmp+rename so the frontend never reads a half-written file.
+    if let Ok(out) = std::env::var("SIGIL_STATUS_OUT") {
+        eprintln!("status writer: refreshing {out} every 2s");
+        let snode = Arc::clone(&node);
+        thread::spawn(move || loop {
+            {
+                let n = snode.read().unwrap();
+                let json = format!(
+                    "{{\"status\":{{\"height\":{h},\"network_id\":\"sigil-g0\",\"peers\":1,\"supply\":\"{s}\",\"max_supply\":\"21000000\"}},\"tip\":{{\"height\":{h},\"hash\":\"{tip}\",\"roots\":{{}}}},\"blocks\":[]}}",
+                    h = n.block_height,
+                    s = n.state.native_supply(),
+                    tip = to_hex(&n.tip_hash),
+                );
+                drop(n);
+                let tmp = format!("{out}.tmp");
+                if std::fs::write(&tmp, json.as_bytes()).is_ok() {
+                    let _ = std::fs::rename(&tmp, &out);
+                }
+            }
+            thread::sleep(std::time::Duration::from_secs(2));
+        });
+    }
     for stream in listener.incoming().flatten() {
         let n = Arc::clone(&node);
         thread::spawn(move || handle(stream, &n));

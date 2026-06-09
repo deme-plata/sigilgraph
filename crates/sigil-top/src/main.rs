@@ -2931,7 +2931,10 @@ fn render_sync_status(app: &App) -> Paragraph<'static> {
     let synced = s.blocks_synced;
     let tip = s.peer_best_height.max(app.target_height);
     let gap = tip.saturating_sub(synced);
-    let at_tip = tip > 0 && gap < 8;
+    // v0.21.2: a light monitor tracks the recent window, re-jumping base to chase the
+    // tip — it is NOT bulk-fetching a backlog, so within ~the recent window it IS at the
+    // head. Read that as tracking (green, "tracking live") instead of "N behind / 0 blk/s".
+    let at_tip = tip > 0 && gap < 16_384;
     let d = if s.connected_delta { "Δ" } else { "·" };
     let e = if s.connected_epsilon { "Ε" } else { "·" };
 

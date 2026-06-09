@@ -472,6 +472,11 @@ impl P2PBlockSync {
                 let mut last_verify = Instant::now() - Duration::from_secs(2); // slow verify+flush timer
                 let mut last_synced_seen: u64 = resume_h;             // dynamic-base detector
                 let mut last_advance_t = Instant::now();
+                // v0.31 DEEP DEBUG: session counters + a periodic comprehensive [DBG] snapshot.
+                let (mut lead_n, mut timeout_n, mut empty_n, mut req_n): (u64, u64, u64, u64) = (0, 0, 0, 0);
+                let mut bytes_session: u64 = 0;
+                let mut last_dbg = Instant::now() - Duration::from_secs(5);
+                let loop_start = Instant::now();
                 // v0.27 proof-of-useful-sync local accumulators
                 let mut pos_cursor: u64 = 0;
                 let mut pos_acc: u64 = 0;
@@ -516,6 +521,7 @@ impl P2PBlockSync {
                             flux_p2p::SwarmAppEvent::PeerConnected { peer_id, addr } => {
                                 let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                                 let pc = net.peer_count();
+                                let prev = s.peer_count;
                                 s.peer_count = pc;
                                 s.mesh_peer_count = pc;
                                 // Δ/Ε detection by IP — the peer_id is a base58 hash and
@@ -527,17 +533,31 @@ impl P2PBlockSync {
                                 if addr.contains("89.149.241.126") {
                                     s.connected_epsilon = true;
                                 }
-                                crate::tlog!("[p2p-sync] peer + {peer_id} @ {addr} (total: {pc})");
+                                // v0.31 DETAILED MESH DEBUG: name the fleet node by IP + show the
+                                // peer-count transition, so "caps at 3/4 peers" is diagnosable from
+                                // the log — you see exactly which node joins and which never does.
+                                let node = if addr.contains("89.149.241.126") { "epsilon" }
+                                    else if addr.contains("5.79.79.158") { "delta" }
+                                    else if addr.contains("109.205.176.60") { "gamma" }
+                                    else if addr.contains("185.182.185.227") { "beta" }
+                                    else { "peer" };
+                                crate::tlog!("[mesh] ＋CONNECT {node:<8} {peer_id} @ {addr}   peers {prev}→{pc}");
                             }
-                            flux_p2p::SwarmAppEvent::PeerDisconnected { .. } => {
+                            flux_p2p::SwarmAppEvent::PeerDisconnected { peer_id } => {
                                 let pc = net.peer_count();
                                 let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                let prev = s.peer_count;
                                 s.peer_count = pc;
                                 s.mesh_peer_count = pc;
                                 if pc == 0 {
                                     s.connected_delta = false;
                                     s.connected_epsilon = false;
                                 }
+                                // v0.31 DETAILED MESH DEBUG: which peer dropped + the new count. A
+                                // peer that repeatedly CONNECTs then DROPs is the rotating-identity
+                                // signature (the bug the stable peer-id in for_sigil v0.31 fixes).
+                                crate::tlog!("[mesh] －DROP    {peer_id}   peers {prev}→{pc}{}",
+                                    if pc == 0 { "   ⚠ MESH EMPTY — no peers" } else { "" });
                             }
                             flux_p2p::SwarmAppEvent::SyncProgress { height, hash_hex, peer_best_height, total_synced, peer_count: _ } => {
                                 let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
@@ -569,10 +589,12 @@ impl P2PBlockSync {
                             Some(b) => {
                                 peer_bench.remove(&peer);              // answered → healthy again
                                 let got = ingest_backfill_bytes(&b, &mut store);
+                                bytes_session += b.len() as u64;
+                                if got > 0 { lead_n += 1; } else { empty_n += 1; }
                                 if start <= store.synced_to() + CHUNK {
                                     let hd = if b.first()==Some(&b'H') { bincode::deserialize::<Vec<sigil_header::SigilBlockHeaderV0>>(&b[1..]).ok() } else { None };
                                     let (mn,mx) = hd.as_ref().map(|h| (h.iter().map(|x|x.height).min().unwrap_or(0), h.iter().map(|x|x.height).max().unwrap_or(0))).unwrap_or((0,0));
-                                    crate::tlog!("[D] LEAD start={start} got={got} h=[{mn}..{mx}] bytes={} synced={} inflight={inflight}", b.len(), store.synced_to());
+                                    crate::tlog!("[D] {} start={start} got={got} h=[{mn}..{mx}] bytes={} synced={} inflight={inflight}", if got>0 {"LEAD"} else {"EMPTY"}, b.len(), store.synced_to());
                                 }
                                 fetched_session += got as u64;
                                 // An EMPTY response over a still-needed range means this peer can't
@@ -591,6 +613,7 @@ impl P2PBlockSync {
                                 }
                             }
                             None => {
+                                timeout_n += 1;
                                 if start <= store.synced_to() + CHUNK {
                                     crate::tlog!("[D] TIMEOUT start={start} peer={} synced={}", &peer[..8.min(peer.len())], store.synced_to());
                                 }
@@ -704,15 +727,21 @@ impl P2PBlockSync {
                     // peer_best regardless of base, so the backfill base only needs to stay in the
                     // servable recent window — coarse re-snaps are plenty. Stale below-base chunks
                     // still in flight are simply ignored by the store on arrival (height < base).
-                    if recent_only && peer_best > store.synced_to() + RECENT_WINDOW {
-                        let new_base = peer_best.saturating_sub(RECENT_WINDOW).max(sync_base);
+                    // FIX: snap to the SERVED top (best_height = max block actually RECEIVED via
+                    // backfill/probe), NOT the gossip peer_best. The bootstrap nodes are BEHIND the
+                    // gossip tip and return EMPTY (got=0) for it, so snapping to peer_best requested
+                    // unservable ranges → 0 downloaded. best_height tracks what the mesh actually
+                    // serves, keeping the window in the servable range so downloaded climbs.
+                    let served_top = store.best_height();
+                    if recent_only && served_top > store.synced_to() + RECENT_WINDOW {
+                        let new_base = served_top.saturating_sub(RECENT_WINDOW).max(sync_base);
                         if new_base > store.base() {
                             store.set_base(new_base);
                             store.advance();
                             last_synced_seen = store.synced_to();
                             last_advance_t = Instant::now();
                             snapped = true;
-                            crate::tlog!("[sync] monitor track tip {} → base {} (synced {})", peer_best, new_base, store.synced_to());
+                            crate::tlog!("[sync] track SERVED top {} → base {} (synced {}, gossip tip {})", served_top, new_base, store.synced_to(), peer_best);
                         }
                     }
 
@@ -760,6 +789,7 @@ impl P2PBlockSync {
                                     let tx = done_tx.clone();
                                     let peer_str = peer.to_string();
                                     inflight += 1;
+                                    req_n += 1;
                                     tokio::spawn(async move {
                                         let r = tokio::time::timeout(REQ_TIMEOUT, n.send_request(peer, payload)).await;
                                         let bytes = match r { Ok(Ok(b)) => Some(b), _ => None };
@@ -838,6 +868,32 @@ impl P2PBlockSync {
                             s.sync_total = s.peer_best_height;
                         }
                         s.last_message_at = Some(Instant::now());
+                    }
+
+                    // ── v0.31 DEEP DEBUG: comprehensive sync snapshot every 2s ──────────────
+                    // One dense line with EVERYTHING needed to diagnose a stall from the log/Sync
+                    // Log tab: contiguous synced vs the live tip + gap, the displayed-ish rate, how
+                    // many backfill requests went out and how they resolved (LEAD/EMPTY/TIMEOUT),
+                    // in-flight + assigned, peer counts, bytes pulled, and tip-oracle freshness.
+                    if last_dbg.elapsed() >= Duration::from_secs(2) {
+                        last_dbg = Instant::now();
+                        let (synced_now, peers, hpeers, pbest, tip_age, mesh) = {
+                            let s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                            let now = Instant::now();
+                            let hp = net.connected_peers().into_iter()
+                                .filter(|p| peer_bench.get(&p.to_string()).map_or(true, |&u| now >= u)).count();
+                            (store.synced_to(), s.peer_count, hp, s.peer_best_height,
+                             s.last_tip_at.map(|t| t.elapsed().as_secs()).unwrap_or(9999), s.mesh_peer_count)
+                        };
+                        let gap = pbest.saturating_sub(synced_now);
+                        let upt = loop_start.elapsed().as_secs().max(1);
+                        let win = req_n.max(1);
+                        crate::tlog!(
+                            "[DBG] up={upt}s synced={synced_now} tip={pbest} gap={gap} | reqs={req_n} lead={lead_n}({:.0}%) empty={empty_n} timeout={timeout_n}({:.0}%) | inflight={inflight} assigned={} fetched={fetched_session} bytes={}MB | peers={peers}(mesh {mesh}, healthy {hpeers}) tip_age={tip_age}s base={}",
+                            lead_n as f64 / win as f64 * 100.0,
+                            timeout_n as f64 / win as f64 * 100.0,
+                            assigned.len(), bytes_session / 1_048_576, store.base()
+                        );
                     }
 
                     // ── SLOW PERIODIC (1.5s): verify the spine + flush the memtable ──────────

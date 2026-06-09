@@ -210,7 +210,12 @@ impl P2PBlockSync {
         }
     }
 
-    pub fn launch(mut store: BlockStore) -> Self {
+    /// `recent_only`: a far-behind MONITOR snaps its sync base to a recent window the
+    /// producers serve fast (instead of crawling genesis→tip at the rate slow/gappy
+    /// historical ranges dribble — the "1 blk/s" symptom). full-sync passes false.
+    pub fn launch(mut store: BlockStore, recent_only: bool) -> Self {
+        // SIGIL_SNAP=1 forces fast-snap even in full-sync (validation / "just track the tip").
+        let recent_only = recent_only || std::env::var("SIGIL_SNAP").is_ok();
         let state = Arc::new(Mutex::new(P2PSyncState::default()));
         let new_blocks = Arc::new(Mutex::new(Vec::new()));
         let (stop_tx, stop_rx) = mpsc::channel();
@@ -276,10 +281,11 @@ impl P2PBlockSync {
                 // independent chunk requests stream in parallel; a slow peer never blocks the
                 // fast ones, and the store's height-index + advance() reorder out-of-order
                 // arrivals (the store IS the buffer). Reviewed with DeepSeek-V4 2026-06-09.
-                const CHUNK: u64 = 8192;            // v0.12.1 perf: match the producer serve cap
-                                                   // (hi = lo+8192) — 4× blocks per round-trip vs 2048.
-                const MAX_INFLIGHT: usize = 16;     // v0.12.1 perf: 2× parallelism (16×8192 ≈ 128k
-                                                    // blocks in flight) to hide per-serve latency → 8000 blk/s target
+                const CHUNK: u64 = 4096;            // v0.15.1 STABILITY: 8192 (8 MB) chunks landed in
+                                                   // bursts then stalled (2k→2 blk/s swing). 4096 halves
+                                                   // tail latency so a stuck slot frees faster + bursts smooth.
+                const MAX_INFLIGHT: usize = 12;     // v0.15.1: slightly fewer slots so they don't all pile
+                                                    // onto a stalled frontier and crater the rate.
                 // Look-ahead cap must be TIGHT: a large window lets next_start race far ahead of a
                 // stalled frontier, so all MAX_INFLIGHT slots get consumed by high-range chunks that
                 // don't advance synced_to while the lead chunk starves (v0.10.0 frontier-stall bug).
@@ -288,10 +294,10 @@ impl P2PBlockSync {
                 // routinely takes >4s → EVERY request timed out → fetched_total stuck at
                 // 0 → the UI sat at "connecting…" forever. 15s lets a slow-but-alive
                 // serve complete; dead peers are still benched on timeout and rerouted.
-                const REQ_TIMEOUT: Duration = Duration::from_secs(15);
+                const REQ_TIMEOUT: Duration = Duration::from_secs(10); // v0.15.1: 15→10s — free a stuck slot faster (4 MB chunk lands well under 10s); still tolerant of slow WAN serves
                 const PROBE_EVERY: Duration = Duration::from_millis(500); // pull-height probe cadence
-                const BENCH: Duration = Duration::from_secs(8); // bench a timed-out peer this long
-                const EMPTY_BENCH: Duration = Duration::from_secs(45); // bench a peer that LACKS a needed range
+                const BENCH: Duration = Duration::from_secs(4); // v0.15.1: 8→4s — faster peer recovery so the pool doesn't thin out
+                const EMPTY_BENCH: Duration = Duration::from_secs(10); // v0.15.1: 45→10s — THE stall fix: 45s drained the 4-peer pool to ~0 on empty ranges → 2 blk/s. 10s rotates away yet keeps peers available.
                 let _ = resume_h; // frontier is read live from the store each cycle (anchored, not cursored)
                 // Completed request results flow back from the spawned tasks here.
                 let (done_tx, mut done_rx) =
@@ -308,6 +314,10 @@ impl P2PBlockSync {
                 let mut last_synced_seen: u64 = resume_h;             // dynamic-base detector
                 let mut last_advance_t = Instant::now();
                 let mut last_probe = Instant::now() - Duration::from_secs(10); // pull-height probe timer
+                // v0.15.2: far-behind monitor snaps to a recent window once peer_best is known.
+                const FAR_BEHIND: u64 = 200_000;   // gap beyond which crawling genesis is pointless
+                const RECENT_WINDOW: u64 = 50_000; // recent blocks to fetch when snapping (producers serve these fast)
+                let mut snapped = false;
 
                 loop {
                     if stop_rx.try_recv().is_ok() {
@@ -472,6 +482,26 @@ impl P2PBlockSync {
                     }
 
                     let peer_best = state_clone.lock().unwrap().peer_best_height;
+
+                    // v0.15.2: MONITOR FAST-SNAP. A monitor that's hundreds of thousands of
+                    // blocks behind gains nothing from crawling genesis→tip at the rate the
+                    // slow/gappy historical ranges dribble (the "1 blk/s" symptom). Once we
+                    // know a peer's tip, jump the base to a recent window the producers serve
+                    // fast — the monitor reaches the live tip in seconds. Full chain integrity
+                    // is the fold-proof's job, not a 6M-block contiguous download. (full-sync
+                    // passes recent_only=false and keeps the genesis-anchored crawl.)
+                    if recent_only && !snapped && peer_best > store.synced_to() + FAR_BEHIND {
+                        let new_base = peer_best.saturating_sub(RECENT_WINDOW).max(sync_base);
+                        if new_base > store.base() {
+                            store.set_base(new_base);
+                            store.advance();
+                            last_synced_seen = store.synced_to();
+                            last_advance_t = Instant::now();
+                            snapped = true;
+                            crate::tlog!("[sync] monitor {} behind tip {} — fast-snap base → {} (recent window)", peer_best.saturating_sub(store.synced_to()), peer_best, new_base);
+                        }
+                    }
+
                     if peer_best > 0 {
                         let now = Instant::now();
                         let healthy: Vec<_> = net.connected_peers().into_iter()
@@ -518,9 +548,18 @@ impl P2PBlockSync {
                         if now_synced > last_synced_seen {
                             last_synced_seen = now_synced;
                             last_advance_t = Instant::now();
-                        } else if peer_best > now_synced && last_advance_t.elapsed() >= Duration::from_secs(5) {
+                        } else if store.best_height() > now_synced && last_advance_t.elapsed() >= Duration::from_secs(2) {
+                            // v0.16: STABLE-SYNC gate. Only skip genuinely UNSERVABLE LOW history:
+                            // advance base when a HIGHER block has actually been RECEIVED
+                            // (best_height > frontier) yet the contiguous frontier won’t move — a
+                            // real gap from pruned-low ranges. Gating on best_height (the true max
+                            // received) instead of the possibly-SEEDED peer_best means that AT the
+                            // mesh’s top serving ceiling (best_height == frontier) we do NOT creep
+                            // base toward an unreachable/seeded tip — the sync HOLDS at the real
+                            // served height instead of thrashing base forever. This was the
+                            // instability set_known_tip exposed.
                             let new_base = store.base().saturating_add(CHUNK);
-                            crate::tlog!("[sync] frontier {} unservable ≥5s (early history pruned from mesh) — base → {}", now_synced, new_base);
+                            crate::tlog!("[sync] gap at frontier {} (received up to {}) — base → {} (skip pruned-low)", now_synced, store.best_height(), new_base);
                             store.set_base(new_base);
                             last_synced_seen = store.synced_to();
                             last_advance_t = Instant::now();

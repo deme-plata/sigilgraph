@@ -687,8 +687,18 @@ fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str) -> String
     let disp_height = st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(st.height);
     o.push_str(&row("height", &format!("{GOLD}{}{RESET}", disp_height)));
     if st.blocks_per_sec > 0.0 {
-        let bps_col = if st.blocks_per_sec >= 1000.0 { GOLD } else { GREEN };
-        o.push_str(&row("blocks/s", &format!("{bps_col}{:.0}{RESET} {DIM}(live feed){RESET}", st.blocks_per_sec)));
+        // v0.12: gauge the live backfill rate against the SIGIL-g0 sync target of
+        // 8000 blk/s (one full second of mainnet block production). A catch-up sync
+        // now shows how close it runs to line-rate, not just a bare number.
+        const SYNC_TARGET_BPS: f64 = 8000.0;
+        let frac = (st.blocks_per_sec / SYNC_TARGET_BPS).clamp(0.0, 1.0);
+        let filled = (frac * 10.0).round() as usize;
+        let bar: String = "▓".repeat(filled) + &"░".repeat(10 - filled);
+        let bps_col = if st.blocks_per_sec >= SYNC_TARGET_BPS { GOLD }
+            else if st.blocks_per_sec >= 1000.0 { GREEN } else { DIM };
+        o.push_str(&row("blocks/s", &format!(
+            "{bps_col}{:.0}{RESET} {DIM}/ 8000{RESET} {bps_col}{bar}{RESET} {DIM}{:.0}%{RESET}",
+            st.blocks_per_sec, frac * 100.0)));
     }
     o.push_str(&row("peers", &format!("{}", st.peers)));
     o.push_str(&row("producer", &prod));

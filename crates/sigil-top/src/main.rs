@@ -999,7 +999,11 @@ fn main() {
                 Ok(rel) if version_gt(&rel.version, VERSION) => {
                     println!("  {GOLD}↑ v{VERSION} → v{}{RESET} ({SELF_TARGET}) — downloading + BLAKE3-verifying…", rel.version);
                     match self_update(&rel) {
-                        Ok(msg) => { println!("  {GREEN}{msg}{RESET}\n"); std::process::exit(0); }
+                        Ok(msg) => {
+                            println!("  {GREEN}{msg}{RESET}\n  {DIM}relaunching v{}…{RESET}", rel.version);
+                            relaunch_new_binary(&rel.version); // re-exec/spawn the new binary instead of just exiting
+                            std::process::exit(0); // only reached if the exe path can't be resolved
+                        }
                         Err(e)  => { eprintln!("  {RED}✗ {e}{RESET}\n"); std::process::exit(1); }
                     }
                 }
@@ -1062,7 +1066,7 @@ fn main() {
             println!("  {DIM}connecting to the sigil-g0 mesh — downloading + verifying genesis→tip…{RESET}");
             if let Some(t) = target_arg { println!("  {DIM}target height pinned to {t}{RESET}"); }
             println!("  {DIM}timeout {timeout_s}s · Ctrl-C to stop{RESET}\n");
-            let sync = block_sync::P2PBlockSync::launch(store);
+            let sync = block_sync::P2PBlockSync::launch(store, false);
             // v0.15.1: a pinned --target also SEEDS the backfill tip so the refill
             // fires immediately (the gate is peer_best>0, not target_arg). Without
             // this, a quiet mesh left peer_best=0 and full-sync --target never pulled.
@@ -1455,35 +1459,36 @@ fn maybe_auto_update(argv: &[String]) -> Option<String> {
     };
     match self_update(&rel) {
         Ok(_) => {
-            // Re-exec the freshly-swapped binary with the original args (minus argv[0]).
+            // Relaunch into the new binary. self_replace installed the new version AT THE
+            // CURRENT EXE PATH, so that's the canonical relaunch target; a versioned copy
+            // beside us (if one survived) is only a fallback. The previous Windows branch
+            // spawned ONLY the versioned file and, when it was absent, hit a bare exit(0) —
+            // so the app updated in place but never restarted ("just exits"). Now every
+            // platform relaunches the in-place exe. The new process re-runs this check,
+            // sees its version == the channel, and proceeds — no update loop.
             if let Ok(exe) = std::env::current_exe() {
                 let args: Vec<String> = std::env::args().skip(1).collect();
                 std::env::set_var("SIGIL_TOP_JUST_UPDATED", "1");
+                let ver_exe = exe.with_file_name(format!(
+                    "sigil-top-v{}{}", rel.version, if cfg!(windows) { ".exe" } else { "" }));
+                let target = if ver_exe.exists() { ver_exe } else { exe.clone() };
                 #[cfg(unix)]
                 {
                     use std::os::unix::process::CommandExt;
-                    let _ = std::process::Command::new(&exe).args(&args).exec(); // replaces this process
-                }
-                #[cfg(windows)]
-                {
-                    // Spawn the NEWLY SAVED binary, not this one (avoids infinite loop)
-                    if let Ok(beside) = std::env::current_exe() {
-                        let new_exe = beside.with_file_name(format!("sigil-top-v{}.exe", rel.version));
-                        if new_exe.exists() {
-                            let _ = std::process::Command::new(&new_exe).args(&args).spawn();
-                            std::process::exit(0);
-                        }
-                    }
-                    // Fallback: just exit, user runs the new binary manually
+                    // exec replaces this process on success; it only RETURNS on failure,
+                    // in which case fall back to spawn+exit so we still restart.
+                    let _ = std::process::Command::new(&target).args(&args).exec();
+                    let _ = std::process::Command::new(&target).args(&args).spawn();
                     std::process::exit(0);
                 }
-                #[cfg(target_os = "macos")]
+                #[cfg(not(unix))]
                 {
-                    let _ = std::process::Command::new(&exe).args(&args).spawn();
+                    // Windows/macOS: can't replace a running image — spawn the new binary, then exit.
+                    let _ = std::process::Command::new(&target).args(&args).spawn();
                     std::process::exit(0);
                 }
             }
-            None // unreachable — exec replaces this process
+            Some("auto-update applied — could not locate exe to relaunch; restart manually".into())
         }
         Err(e) => Some(format!("auto-update skipped: {e}")),
     }
@@ -1532,6 +1537,28 @@ fn self_update(rel: &Release) -> Result<String, String> {
             rel.version, bytes.len() as f64 / 1.048576e6));
     }
     Ok(format!("saved v{} ({:.1} MB) -> {}", rel.version, bytes.len() as f64 / 1.048576e6, beside.display()))
+}
+
+/// Relaunch into the just-installed binary after a successful `self_update`. `self_replace`
+/// put the new version at the current exe path, so that's the canonical target; a versioned
+/// copy beside us (if any) is a fallback. On unix `exec` replaces this process; if it fails
+/// (or on Windows/macOS, which can't replace a running image) we spawn + exit. Only returns
+/// if the exe path can't be resolved — every normal path either re-execs or exits.
+fn relaunch_new_binary(version: &str) {
+    if let Ok(exe) = std::env::current_exe() {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        std::env::set_var("SIGIL_TOP_JUST_UPDATED", "1");
+        let ver_exe = exe.with_file_name(format!(
+            "sigil-top-v{}{}", version, if cfg!(windows) { ".exe" } else { "" }));
+        let target = if ver_exe.exists() { ver_exe } else { exe.clone() };
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            let _ = std::process::Command::new(&target).args(&args).exec();
+        }
+        let _ = std::process::Command::new(&target).args(&args).spawn();
+        std::process::exit(0);
+    }
 }
 
 struct App {
@@ -1915,7 +1942,12 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // pure light-monitor mode → those endpoints proxy to the remote node, as before).
     let mut sync_handle: Option<std::sync::Arc<std::sync::Mutex<block_sync::P2PSyncState>>> = None;
     if want_sync {
-        let p2p = block_sync::P2PBlockSync::launch(block_store);
+        // v0.16.5: the dashboard uses the FULL sync path (recent_only=false), not the
+        // recent_only fast-snap. Fast-snap jumps base to a window near peer_best; with
+        // the HTTP feed reporting a bogus/unservable height the snap landed in the void
+        // and synced_to stuck at 0 (syncing forever). Full sync reaches the real
+        // mesh-served height and — with the best_height base gate — holds there stably.
+        let p2p = block_sync::P2PBlockSync::launch(block_store, false);
         sync_handle = Some(p2p.state_handle());
         app.p2p_sync = Some(p2p);
         if app.toast.is_empty() {
@@ -2253,29 +2285,11 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                         if is_update_ok {
                             let _ = disable_raw_mode();
                             let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
-                            // Try the versioned binary beside us first (v0.7.0 rename trick)
-                            if let Ok(exe) = std::env::current_exe() {
-                                let args: Vec<String> = std::env::args().skip(1).collect();
-                                std::env::set_var("SIGIL_TOP_JUST_UPDATED", "1");
-                                // On Unix: exec replaces this process with the new binary.
-                                // On Windows: spawn + exit (can't replace running .exe).
-                                #[cfg(unix)]
-                                {
-                                    use std::os::unix::process::CommandExt;
-                                    // Try the versioned binary self_update just saved
-                                    // (named for the FETCHED version, not a stale const).
-                                    let ver_exe = exe.with_file_name(format!("sigil-top-v{}", app.latest));
-                                    let target = if ver_exe.exists() { &ver_exe } else { &exe };
-                                    let _ = std::process::Command::new(target).args(&args).exec();
-                                }
-                                #[cfg(not(unix))]
-                                {
-                                    let ver_exe = exe.with_file_name(format!("sigil-top-v{}.exe", app.latest));
-                                    let target = if ver_exe.exists() { &ver_exe } else { &exe };
-                                    let _ = std::process::Command::new(target).args(&args).spawn();
-                                    std::process::exit(0);
-                                }
-                            }
+                            // Relaunch into the new binary (re-exec on unix; spawn+exit on
+                            // Windows/macOS). The hardened helper falls back to spawn if exec
+                            // fails, so a failed relaunch never strands us in this torn-down
+                            // terminal state (raw mode + alt screen already left above).
+                            relaunch_new_binary(&app.latest);
                         }
                         app.toast = msg; app.toast_sticky = false; app.update_rx = None;
                         } // end else (non-auto-check message)

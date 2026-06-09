@@ -102,15 +102,18 @@ fn verify_one(
 /// multi-million-block chain — pass `u64::MAX` (or a big number) for an exhaustive walk
 /// (the `verify-chain` subcommand), a few thousand for an incremental tick.
 pub fn verify_to(store: &mut BlockStore, max_steps: u64) -> VerifyReport {
-    let start = store.verified_to();
+    let base = store.base();
+    let start = store.verified_to().max(base);
     let mut h = start;
     let mut checked = 0u64;
     let mut first_break = None;
 
-    // The parent header for the first step. For h==0 there is none; otherwise it MUST be
-    // the already-verified block at h-1 (which is present, since verified_to <= synced_to
-    // and the prefix is contiguous).
-    let mut parent = if h == 0 { None } else { store.get_header_at_height(h - 1) };
+    // The parent header for the first step. At the genesis anchor (`base`) there is no
+    // fetchable parent — the block at `base` is the verification trust-root (its parent,
+    // e.g. SIGIL's height-0 genesis, isn't backfill-servable), so it's accepted on precheck
+    // alone. Above `base` the parent MUST be the already-verified block at h-1 (present,
+    // since verified_to <= synced_to and the prefix is contiguous).
+    let mut parent = if h == base { None } else { store.get_header_at_height(h - 1) };
 
     while checked < max_steps {
         let header = match store.get_header_at_height(h) {

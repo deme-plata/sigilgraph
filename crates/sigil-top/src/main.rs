@@ -21,6 +21,7 @@ mod block_store;
 mod block_sync;
 mod chain_verify; // v0.9.0: full verifying sync — spine continuity + precheck walk
 mod serve;
+mod local_api;   // v0.11.0: serve the explorer /api/* from the LOCAL verified spine
 
 use std::io::{IsTerminal, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -75,6 +76,9 @@ use flux_p2p::NetworkManager;
 use flux_swarm_tools::{Activity, ActivityKind, ActivityLog, with_locked};
 use flux_rev::{Store, snapshot, Genesis};
 
+// v0.11.0: combined release — explorer local-spine /api (rocky-explorer) +
+// smooth-cruise (async refresh, panic-restore, offline backoff/banner, serve
+// watchdog). 0.11.0 is valid 3-part SemVer so VERSION flows straight from Cargo.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// When the ratatui TUI owns the screen, raw `eprintln!` from the background P2P
@@ -109,7 +113,7 @@ macro_rules! tlog {
 /// new release without recompilation — the whole point of "auto-update the flux way".
 // Tracks the binary's own version so it can never go stale on a release bump
 // (a hardcoded "0.7.5" here caused the updater to re-exec the OLD versioned binary).
-const LATEST: &str = env!("CARGO_PKG_VERSION");
+const LATEST: &str = VERSION; // ship cadence, not the 3-part Cargo version
 /// The flux release channel for the lightweight node: `<product>-latest.json` in the
 /// q-flux downloads dir — the SAME manifest `flux_release_check` reads. Fetched at
 /// startup (throttled) and on `[U]`, so the running binary discovers new releases live.
@@ -319,6 +323,79 @@ fn fetch_best(cfg: &Config) -> (NodeStatus, bool, &'static str) {
         Ok(s) => (s, true, "local"),
         Err(_) => (NodeStatus::default(), false, "offline"),
     }
+}
+
+/// v0.10.5: the result of one network refresh cycle, produced ENTIRELY on a
+/// background worker thread so the render loop never blocks on a socket. Owned
+/// data only — moves cleanly across the channel into `App::apply_refresh`.
+struct RefreshOutcome {
+    st: NodeStatus,
+    online: bool,
+    blocks: Option<Vec<FeedBlock>>,                // Some => replace the block list
+    fallback_note: bool,                           // show the "API fallback" toast
+    eclipse: Option<(u32, Vec<(String, bool)>)>,   // Some => eclipse-K re-measured this cycle
+}
+
+/// v0.10.5 "smooth cruise": all the blocking network I/O of the old
+/// `App::refresh` — feed fetch, the 8s reqwest block-fallback, the local API
+/// probe, and the DoH eclipse-K measurement — gathered into ONE function that
+/// runs off the UI thread. Previously these ran inline on every interval tick
+/// and every [R], so a slow/unreachable node froze the whole TUI for up to
+/// ~8 seconds (keystrokes ignored, animation stalled). Now the render loop
+/// spawns this and keeps drawing at full frame-rate while it works.
+fn fetch_refresh(feed: String, api: String, want_eclipse: bool, prior_synced: u64) -> RefreshOutcome {
+    // Primary: HTTPS status feed, then fall back to the local node API.
+    let (st, online, mut blocks) = match fetch_feed(&feed) {
+        Some((s, b)) => (s, true, Some(b)),
+        None => match fetch(&api) {
+            Ok(s) => (s, true, None),
+            Err(_) => (NodeStatus::default(), false, None),
+        },
+    };
+
+    // v0.4.0 fallback: feed online but no blocks → pull recent blocks from the API.
+    let mut fallback_note = false;
+    let empty_blocks = blocks.as_ref().map(|b| b.is_empty()).unwrap_or(true);
+    if empty_blocks && online {
+        if let Ok(client) = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .danger_accept_invalid_certs(true)
+            .build()
+        {
+            let api_base = api.trim_end_matches('/');
+            if let Ok(resp) = client.get(format!("{}/v1/blocks/recent?limit=14", api_base)).send() {
+                if let Ok(json) = resp.json::<serde_json::Value>() {
+                    if let Some(arr) = json.get("blocks").or_else(|| json.get("data")).and_then(|v| v.as_array()) {
+                        let fb: Vec<FeedBlock> = arr.iter().filter_map(|b| {
+                            let h = b.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+                            if h == 0 { return None; }
+                            Some(FeedBlock {
+                                height: h,
+                                hash: b.get("proposer").and_then(|p| p.as_str()).map(|s| &s[..s.len().min(16)]).unwrap_or("—").into(),
+                                producer: b.get("proposer").and_then(|p| p.as_str()).unwrap_or("").into(),
+                                txs: b.get("tx_count").and_then(|t| t.as_u64()).unwrap_or(0),
+                                tip_ms: 0,
+                            })
+                        }).collect();
+                        if !fb.is_empty() { blocks = Some(fb); fallback_note = true; }
+                    }
+                }
+            }
+        }
+    }
+
+    // L2-B eclipse-K (DoH, RTT-blocking) — also off the UI thread now. tip_ok is
+    // computed here from the just-fetched tip; height uses the verified tip when
+    // good, else the prior verified watermark.
+    let eclipse = if want_eclipse {
+        let tip_ok = st.tip.as_ref().map(|t| verify_tip(t).ok).unwrap_or(false);
+        let height = st.tip.as_ref().map(|t| t.height).filter(|_| tip_ok).unwrap_or(prior_synced);
+        Some(measure_eclipse_k(height, tip_ok))
+    } else {
+        None
+    };
+
+    RefreshOutcome { st, online, blocks, fallback_note, eclipse }
 }
 
 /// Outcome of verifying the node's real tip — every field is a fact the client
@@ -595,6 +672,12 @@ fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str) -> String
     } else {
         o.push_str(&format!("    {GREEN}✓ up to date{RESET} {DIM}v{VERSION}  ·{RESET} {GOLD}[U]{DIM} re-check via flux://{RESET}\n"));
     }
+    // Nerd Font probe: if these two show as real glyphs (a chain link + the Rust
+    // gear), your terminal has a Nerd Font and we can light up the whole UI with
+    // them. If they're boxes/?, we stay on the universal Unicode set below.
+    o.push_str(&format!(
+        "    {DIM}glyph test:{RESET}  {GOLD}\u{F0C1}{RESET} {DIM}chain{RESET}   {GOLD}\u{E7A8}{RESET} {DIM}rust{RESET}   {DIM}· boxes? install a Nerd Font{RESET}\n"
+    ));
     o.push('\n');
 
     // NODE panel (section title embedded in the top border)
@@ -799,7 +882,38 @@ fn do_login(seed_hex: Option<String>) {
     println!("  {DIM}OAuth2 PKCE wallet-assertion (no password) · sigil-oauth · session at {}{RESET}\n", session_path());
 }
 
+/// Make the Windows console speak UTF-8 and process ANSI/VT escapes, so the rich
+/// glyphs (◆ ● ✓ ╭─╮ ⚡ ⛓) render as real icons instead of `?`, and the colours
+/// show in legacy conhost too. No-op on Unix. Raw kernel32 FFI — no extra dep.
+#[cfg(windows)]
+fn enable_rich_console() {
+    type Dword = u32;
+    type Handle = *mut core::ffi::c_void;
+    const STD_OUTPUT_HANDLE: Dword = 0xFFFF_FFF5; // (DWORD)-11
+    const ENABLE_VIRTUAL_TERMINAL_PROCESSING: Dword = 0x0004;
+    const CP_UTF8: Dword = 65001;
+    extern "system" {
+        fn SetConsoleOutputCP(cp: Dword) -> i32;
+        fn SetConsoleCP(cp: Dword) -> i32;
+        fn GetStdHandle(n: Dword) -> Handle;
+        fn GetConsoleMode(h: Handle, mode: *mut Dword) -> i32;
+        fn SetConsoleMode(h: Handle, mode: Dword) -> i32;
+    }
+    unsafe {
+        SetConsoleOutputCP(CP_UTF8);
+        SetConsoleCP(CP_UTF8);
+        let h = GetStdHandle(STD_OUTPUT_HANDLE);
+        let mut mode: Dword = 0;
+        if GetConsoleMode(h, &mut mode) != 0 {
+            SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        }
+    }
+}
+#[cfg(not(windows))]
+fn enable_rich_console() {}
+
 fn main() {
+    enable_rich_console(); // UTF-8 + VT so icons/colours render (fixes the `?` glyphs)
     // subcommands: login / logout (handled before the render loop)
     let argv: Vec<String> = std::env::args().skip(1).collect();
     match argv.first().map(|s| s.as_str()) {
@@ -816,7 +930,19 @@ fn main() {
                 .unwrap_or_else(|_| "/home/orobit/q-narwhalknight/dist-fluxapp".into());
             let port: u16 = argv.iter().position(|a| a == "--port")
                 .and_then(|i| argv.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(9800);
-            match serve::start(&serve_dir, port) {
+            // v0.11.0: local-first explorer API in headless serve too. No live sync here,
+            // so status/recent/search proxy to SIGIL_NODE_URL (the real node) and only the
+            // cortex panel + any persisted-spine content-verify answer locally. Best-effort:
+            // if the store is locked by another instance, fall back to pure proxy (None).
+            let local_api = block_store::BlockStore::open(&sigil_top_db_path()).ok().map(|st| {
+                std::sync::Arc::new(local_api::LocalApi {
+                    reader: st.reader(),
+                    sync: None,
+                    cortex: std::sync::Arc::new(std::sync::Mutex::new(local_api::CortexSnapshot::default())),
+                    network: "sigil-g0".into(),
+                })
+            });
+            match serve::start_with_api(&serve_dir, port, local_api) {
                 Ok(_stop) => {
                     let _ = flux_register_scheme(); // flux:// works after a single run
                     let node = std::env::var("SIGIL_NODE_URL")
@@ -1436,6 +1562,9 @@ struct App {
     cortex_loops: u64,
     last_cortex_gain: f64,
     cortex_summary: String,
+    /// v0.11.0: cortex snapshot shared with the embedded HTTP server so the explorer's
+    /// `/api/v1/cortex` panel reflects the live optimization-engine state.
+    cortex_shared: std::sync::Arc<std::sync::Mutex<local_api::CortexSnapshot>>,
     mcp_combo_tool: String,     // active MCP combo verb being executed
     mcp_combo_result: String,   // last MCP combo result
     // v0.6.5: Real P2P block sync via flux-p2p mesh (Delta + Epsilon)
@@ -1451,6 +1580,14 @@ struct App {
     serve_status: String,
     // v0.7.0: embedded HTTP serve shutdown signal (no external process)
     serve_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    // v0.10.5 "smooth cruise": refresh runs off the render thread. The worker's
+    // result lands on refresh_rx; refresh_inflight stops duplicate workers piling up.
+    refresh_rx: Option<mpsc::Receiver<RefreshOutcome>>,
+    refresh_inflight: bool,
+    // v0.10.5.1: graceful offline handling + embedded-serve watchdog.
+    offline_since: Option<Instant>,  // when the node first stopped answering
+    offline_streak: u32,             // consecutive offline refreshes → backoff
+    last_serve_check: Instant,       // throttle the :9800 liveness probe
 }
 
 impl App {
@@ -1480,6 +1617,7 @@ impl App {
               cortex_loops: 0,
               last_cortex_gain: 0.0,
               cortex_summary: String::new(),
+              cortex_shared: std::sync::Arc::new(std::sync::Mutex::new(local_api::CortexSnapshot::default())),
               mcp_combo_tool: String::new(),
               mcp_combo_result: String::new(),
               // v0.6.5: P2P block sync starts lazy — launched in run_tui after terminal is ready
@@ -1496,6 +1634,25 @@ impl App {
                   FleetNode { name: "Epsilon".into(), addr: "89.149.241.126".into(), port: 9003, online: false, height: 0, version: String::new(), uptime_secs: 0 },
               ],
               fleet_last_check: instant_ago(3600),
+              refresh_rx: None,
+              refresh_inflight: false,
+              offline_since: None,
+              offline_streak: 0,
+              last_serve_check: Instant::now(),
+        }
+    }
+
+    /// v0.10.5.1: adaptive refresh cadence. Base interval while the node answers;
+    /// a gentle backoff (cap 15s) while it's offline so we don't hammer a dead
+    /// endpoint; instant snap-back the moment it reconnects. Cruise control: ease
+    /// off when the road's empty, accelerate the instant traffic returns.
+    fn refresh_delay(&self) -> Duration {
+        let base = self.cfg.interval.max(1);
+        if self.offline_streak == 0 {
+            Duration::from_secs(base)
+        } else {
+            let mult = 1u64 << self.offline_streak.saturating_sub(1).min(4); // 1,2,4,8,16
+            Duration::from_secs((base * mult).min(15))
         }
     }
     fn resync(&mut self) {
@@ -1507,44 +1664,71 @@ impl App {
         self.toast_sticky = false;
         self.refresh();
     }
-    fn refresh(&mut self) {
-        // Live testnet sync: pull {status, tip, blocks} over HTTPS; fall back to a local node.
-        let got = fetch_feed(&self.cfg.feed)
-            .map(|(s, b)| { self.blocks = b; (s, true) })
-            .or_else(|| fetch(&self.cfg.api).ok().map(|s| (s, true)))
-            .unwrap_or((NodeStatus::default(), false));
-        self.st = got.0; self.online = got.1;
-        // v0.4.0: if feed returned empty blocks, try fallback API for recent blocks
-        if self.blocks.is_empty() && self.online {
-            if let Ok(client) = reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(8))
-                .danger_accept_invalid_certs(true)
-                .build()
-            {
-                let api_base = self.cfg.api.trim_end_matches('/');
-                if let Ok(resp) = client.get(format!("{}/v1/blocks/recent?limit=14", api_base)).send() {
-                    if let Ok(json) = resp.json::<serde_json::Value>() {
-                        if let Some(arr) = json.get("blocks").or_else(|| json.get("data")).and_then(|v| v.as_array()) {
-                            let fallback: Vec<FeedBlock> = arr.iter().filter_map(|b| {
-                                let h = b.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
-                                if h == 0 { return None; }
-                                Some(FeedBlock {
-                                    height: h,
-                                    hash: b.get("proposer").and_then(|p| p.as_str()).map(|s| &s[..s.len().min(16)]).unwrap_or("—").into(),
-                                    producer: b.get("proposer").and_then(|p| p.as_str()).unwrap_or("").into(),
-                                    txs: b.get("tx_count").and_then(|t| t.as_u64()).unwrap_or(0),
-                                    tip_ms: 0,
-                                })
-                            }).collect();
-                            if !fallback.is_empty() {
-                                self.blocks = fallback;
-                                self.toast = "📡 Blocks fetched from API fallback".into();
-        }
-                        }
-                    }
-                }
+    /// Back-compat shim: callers that used to block now kick off an async refresh.
+    fn refresh(&mut self) { self.request_refresh(); }
+
+    /// v0.10.5: spawn the network refresh on a worker thread (if none in flight).
+    /// Returns immediately — the render loop keeps drawing while the socket work
+    /// happens elsewhere. Result is drained by `poll_refresh`.
+    fn request_refresh(&mut self) {
+        if self.refresh_inflight { return; }
+        self.refresh_inflight = true;
+        // Decide here (UI thread) whether this cycle re-measures eclipse-K, so the
+        // 30s throttle stays honest even though the DoH probe runs off-thread.
+        let want_eclipse = self.last_eclipse.elapsed() >= Duration::from_secs(30);
+        if want_eclipse { self.last_eclipse = Instant::now(); }
+        let feed = self.cfg.feed.clone();
+        let api = self.cfg.api.clone();
+        let prior_synced = self.synced_height;
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(fetch_refresh(feed, api, want_eclipse, prior_synced));
+        });
+        self.refresh_rx = Some(rx);
+    }
+
+    /// v0.10.5: drain a completed refresh without ever blocking. Called once per
+    /// render-loop iteration.
+    fn poll_refresh(&mut self) {
+        let Some(rx) = self.refresh_rx.as_ref() else { return };
+        match rx.try_recv() {
+            Ok(out) => { self.refresh_rx = None; self.apply_refresh(out); }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                // Worker died (panic / drop) — clear in-flight so the next interval retries.
+                self.refresh_rx = None;
+                self.refresh_inflight = false;
+                self.last_fetch = Instant::now();
             }
+            Err(mpsc::TryRecvError::Empty) => {}
         }
+    }
+
+    /// v0.10.5: merge a worker result into App state. Cheap (no I/O) → safe on the
+    /// UI thread. This is the non-network tail of the old `refresh`.
+    fn apply_refresh(&mut self, out: RefreshOutcome) {
+        self.st = out.st;
+        self.online = out.online;
+        // v0.10.5.1: track offline → online transitions for backoff + banner.
+        if out.online {
+            if self.offline_streak > 0 && !self.toast_sticky {
+                let was = self.offline_since.map(|t| fmt_uptime(t.elapsed().as_secs())).unwrap_or_default();
+                self.toast = format!("✓ reconnected after {} offline", was);
+            }
+            self.offline_streak = 0;
+            self.offline_since = None;
+        } else {
+            self.offline_streak = self.offline_streak.saturating_add(1);
+            if self.offline_since.is_none() { self.offline_since = Some(Instant::now()); }
+        }
+        if let Some(b) = out.blocks { self.blocks = b; }
+        if out.fallback_note && !self.toast_sticky {
+            self.toast = "📡 Blocks fetched from API fallback".into();
+        }
+        if let Some((k, srcs)) = out.eclipse {
+            self.eclipse_k = k;
+            self.eclipse_sources = srcs;
+        }
+        self.refresh_inflight = false;
         // v0.7.8 (HONEST full sync): the old [F] equated full_sync_height with the
         // tip height and printed "complete: N verified" while storing ZERO blocks —
         // a false claim (the DB stayed empty). Full sync now reports the REAL number
@@ -1595,14 +1779,8 @@ impl App {
                 self.streak = 0; // a bad tip breaks the streak
             }
         }
-        // L2-B: re-measure eclipse-K (real, throttled to 30s — DoH queries cost RTT).
-        if self.last_eclipse.elapsed() >= Duration::from_secs(30) {
-            let tip_ok = self.verify.as_ref().map(|v| v.ok).unwrap_or(false);
-            let (k, srcs) = measure_eclipse_k(self.synced_height, tip_ok);
-            self.eclipse_k = k;
-            self.eclipse_sources = srcs;
-            self.last_eclipse = Instant::now();
-        }
+        // eclipse-K is now measured off-thread in fetch_refresh and applied above
+        // via out.eclipse — no blocking DoH probe on the render thread anymore.
         self.last_fetch = Instant::now();
     }
 }
@@ -1648,11 +1826,28 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     IN_TUI.store(true, std::sync::atomic::Ordering::Relaxed);
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+
+    // v0.10.5 "stable uptime": a panic anywhere below would otherwise leave the
+    // user's terminal in raw mode + alternate screen = a bricked, unusable shell.
+    // Install a hook that ALWAYS restores the terminal first, then runs the
+    // default panic printer. Graceful recovery instead of a wedged terminal.
+    {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = disable_raw_mode();
+            let _ = execute!(std::io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+            use std::io::Write as _;
+            let _ = std::io::stdout().flush();
+            default_hook(info);
+        }));
+    }
+
     let backend = CrosstermBackend::new(stdout);
     let mut term = Terminal::new(backend)?;
 
     let mut app = App::new(cfg);
-    app.refresh();
+    // v0.10.5: async — kicks off the first fetch without blocking the first paint.
+    app.request_refresh();
 
     // v0.7.22: cross-platform PERSISTENT store path. The old /tmp + /dev/shm paths
     // don't exist on Windows → the store never persisted → re-sync from 0 every launch
@@ -1672,16 +1867,45 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
         _ => {}
     }
 
-    // Launch P2P block sync for live blocks (pass ownership of store)
-    app.p2p_sync = Some(block_sync::P2PBlockSync::launch(block_store));
-    if app.toast.is_empty() {
-        app.toast = "⚡ P2P mesh connecting → Delta / Epsilon…".into();
+    // v0.10.2: full P2P block-sync is OPT-IN. It spins a 3-worker tokio runtime +
+    // 8×~9 MB parallel header downloads to pull genesis→tip (~150k blocks), which
+    // pegged CPU + network on startup for no benefit — the dashboard already proves
+    // the WHOLE chain via the succinct fold-proof (~342 ms, 2.5 KB). So the default
+    // is a true light monitor; pass `--sync` (or SIGIL_TOP_SYNC=1), or use the
+    // `full-sync` / `verify-chain` subcommands, when you actually want live blocks.
+    // v0.11.0: a read-only view of the SAME flux-db, cloned BEFORE the store is moved
+    // into the sync thread. The embedded HTTP server uses it to answer the explorer's
+    // /api/v1/{recent,search,aether} from the local verified spine.
+    let block_reader = block_store.reader();
+
+    let want_sync = std::env::args().any(|a| a == "--sync")
+        || std::env::var("SIGIL_TOP_SYNC").is_ok();
+    // v0.11.0: the live sync-state handle the explorer reads for status/peers (None in
+    // pure light-monitor mode → those endpoints proxy to the remote node, as before).
+    let mut sync_handle: Option<std::sync::Arc<std::sync::Mutex<block_sync::P2PSyncState>>> = None;
+    if want_sync {
+        let p2p = block_sync::P2PBlockSync::launch(block_store);
+        sync_handle = Some(p2p.state_handle());
+        app.p2p_sync = Some(p2p);
+        if app.toast.is_empty() {
+            app.toast = "⚡ P2P mesh connecting → Delta / Epsilon…".into();
+        }
+    } else if app.toast.is_empty() {
+        app.toast = "◆ light monitor · fold-proof verified — [--sync] for live blocks".into();
     }
+
+    // v0.11.0: local-first explorer API over the verified spine + cortex snapshot.
+    let local_api = std::sync::Arc::new(local_api::LocalApi {
+        reader: block_reader,
+        sync: sync_handle,
+        cortex: app.cortex_shared.clone(),
+        network: "sigil-g0".into(),
+    });
 
     // v0.7.0: Start embedded HTTP server (no external process needed)
     let serve_dir = std::env::var("FLUX_STATIC_DIR")
         .unwrap_or_else(|_| "/home/orobit/q-narwhalknight/dist-fluxapp".into());
-    match serve::start(&serve_dir, 9800) {
+    match serve::start_with_api(&serve_dir, 9800, Some(local_api)) {
         Ok(stop) => {
             app.serve_stop = Some(stop);
             app.serve_status = "serve :9800 ✓ embedded".into();
@@ -1697,8 +1921,18 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             if app.splash_until.map(|u| Instant::now() < u).unwrap_or(false) {
                 app.splash_frame = app.splash_frame.wrapping_add(1);
             }
+            // v0.10.5: drain any completed async refresh (never blocks).
+            app.poll_refresh();
             term.draw(|f| draw_ui(f, &app))?;
-            if event::poll(Duration::from_millis(250))? {
+            // v0.10.5 "smooth cruise": adaptive frame pacing. When something is
+            // moving — splash animation, an in-flight refresh, or live mining — poll
+            // at ~30 fps so motion is buttery. When parked, fall back to a calm 200 ms
+            // so an idle cockpit barely touches the CPU. Keys stay responsive either way.
+            let animating = app.splash_until.map(|u| Instant::now() < u).unwrap_or(false)
+                || app.refresh_inflight
+                || app.mining;
+            let poll_ms = if animating { 33 } else { 200 };
+            if event::poll(Duration::from_millis(poll_ms))? {
                 if let Event::Key(k) = event::read()? {
                     if k.kind == KeyEventKind::Press {
                         match k.code {
@@ -1834,6 +2068,14 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                         app.cortex_loops += 1;
                                         app.last_cortex_gain = s.actual_total_gain_pct.unwrap_or(0.0);
                                         app.cortex_summary = s.summary_text.clone();
+                                        // v0.11.0: publish to the shared snapshot so the explorer's
+                                        // /api/v1/cortex panel reflects the engine live.
+                                        if let Ok(mut cx) = app.cortex_shared.lock() {
+                                            cx.loops = app.cortex_loops;
+                                            cx.last_gain_pct = app.last_cortex_gain;
+                                            cx.summary = app.cortex_summary.clone();
+                                            cx.last_tool = "flux_cortex_loop".into();
+                                        }
                                         // flux-rev: content-addressed snapshot for p2p sync
                                         let rev_note = match rev_snapshot(&std::path::PathBuf::from("/home/storage/deepseek-codewhale/sigil")) {
                                             Ok(id) => format!(" rev:{}", &id[..12]),
@@ -1877,8 +2119,28 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                     }
                 }
             }
-            if app.last_fetch.elapsed() >= Duration::from_secs(app.cfg.interval) {
-                app.refresh();
+            // v0.10.5.1: adaptive cadence — fast when online, gentle backoff when offline.
+            if !app.refresh_inflight && app.last_fetch.elapsed() >= app.refresh_delay() {
+                app.request_refresh();
+            }
+            // v0.10.5.1: embedded-serve watchdog — if the :9800 wallet server died,
+            // restart it so the local wallet/[W] never silently goes dark. Probe is
+            // throttled to 15s and only blocks (briefly) in the rare dead case.
+            if app.serve_stop.is_some() && app.last_serve_check.elapsed() >= Duration::from_secs(15) {
+                app.last_serve_check = Instant::now();
+                let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 9800));
+                let alive = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok();
+                if !alive {
+                    if let Some(old) = app.serve_stop.take() {
+                        old.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    let serve_dir = std::env::var("FLUX_STATIC_DIR")
+                        .unwrap_or_else(|_| "/home/orobit/q-narwhalknight/dist-fluxapp".into());
+                    match serve::start(&serve_dir, 9800) {
+                        Ok(stop) => { app.serve_stop = Some(stop); app.serve_status = "serve :9800 ✓ restarted by watchdog".into(); }
+                        Err(e) => { app.serve_status = format!("serve restart failed: {e}"); }
+                    }
+                }
             }
             // v0.6.5: Poll P2P sync state + drain synced blocks into the TUI block list
             if let Some(ref p2p) = app.p2p_sync {
@@ -2813,8 +3075,23 @@ fn render_footer(app: &App) -> Paragraph<'static> {
     } else {
         Line::from(Span::styled(" ⚡ fluxc serve :9800 · local wallet [W]", Style::default().fg(C_DIM)))
     };
+    // v0.10.5.1: when offline, the top line becomes a calm status banner with a
+    // live "offline for X · retry in Ns" countdown instead of a stale gold toast —
+    // the operator always knows the cockpit is reconnecting, not frozen.
+    let top_line = if !app.online {
+        let dur = app.offline_since.map(|t| fmt_uptime(t.elapsed().as_secs())).unwrap_or_else(|| "0s".into());
+        let txt = if app.refresh_inflight {
+            format!(" ⚠ offline {} · reconnecting…", dur)
+        } else {
+            let next = app.refresh_delay().as_secs().saturating_sub(app.last_fetch.elapsed().as_secs());
+            format!(" ⚠ offline {} · retry in {}s", dur, next)
+        };
+        Line::from(Span::styled(txt, Style::default().fg(C_RED).add_modifier(Modifier::BOLD)))
+    } else {
+        Line::from(Span::styled(toast, Style::default().fg(C_GOLD)))
+    };
     Paragraph::new(vec![
-        Line::from(Span::styled(toast, Style::default().fg(C_GOLD))),
+        top_line,
         Line::from(kb),
         serve_line,
     ])

@@ -353,6 +353,11 @@ impl BlockStore {
 }
 
 impl BlockReader {
+    /// v0.26 hardening #8: flush the shared flux-db (the reader holds a cloned `Database`
+    /// = same Arc as the live store), so a SIGTERM handler can durably persist the
+    /// synced/verified watermark before exit without owning the mutable store.
+    pub fn flush(&self) -> Result<(), String> { self.db.flush() }
+
     /// Decode a stored block (either bincode `StoredBlock` or the light-client raw
     /// JSON `{"h","hash","ts"}`) into a `BlockRow`. `verified` is true only when we
     /// hold the full header and `header.hash()` re-derives to the stored hash hex.

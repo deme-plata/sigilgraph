@@ -1598,6 +1598,10 @@ struct App {
     offline_since: Option<Instant>,  // when the node first stopped answering
     offline_streak: u32,             // consecutive offline refreshes → backoff
     last_serve_check: Instant,       // throttle the :9800 liveness probe
+    // v0.13: tabbed cockpit
+    tab: Tab,
+    swarm: SwarmView,
+    last_swarm_load: Instant,
 }
 
 impl App {
@@ -1649,6 +1653,9 @@ impl App {
               offline_since: None,
               offline_streak: 0,
               last_serve_check: Instant::now(),
+              tab: Tab::Node,
+              swarm: SwarmView::default(),
+              last_swarm_load: instant_ago(10),
         }
     }
 
@@ -1676,6 +1683,12 @@ impl App {
     }
     /// Back-compat shim: callers that used to block now kick off an async refresh.
     fn refresh(&mut self) { self.request_refresh(); }
+
+    /// v0.13: reload the swarm coordination snapshot for the [2]/[3] tabs.
+    fn load_swarm(&mut self) {
+        self.swarm = load_swarm_view();
+        self.last_swarm_load = Instant::now();
+    }
 
     /// v0.10.5: spawn the network refresh on a worker thread (if none in flight).
     /// Returns immediately — the render loop keeps drawing while the socket work
@@ -1888,8 +1901,12 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // /api/v1/{recent,search,aether} from the local verified spine.
     let block_reader = block_store.reader();
 
-    let want_sync = std::env::args().any(|a| a == "--sync")
-        || std::env::var("SIGIL_TOP_SYNC").is_ok();
+    // v0.12.1: sync is ON BY DEFAULT. The opt-in light-monitor default left users
+    // staring at a perpetual "connecting…" (block-sync never started, so fetched_total
+    // stayed 0). Opt OUT with --no-sync / SIGIL_TOP_NO_SYNC=1 for the low-CPU,
+    // dashboard-only view. --sync / SIGIL_TOP_SYNC remain accepted (no-ops) for compat.
+    let want_sync = !(std::env::args().any(|a| a == "--no-sync")
+        || std::env::var("SIGIL_TOP_NO_SYNC").is_ok());
     // v0.11.0: the live sync-state handle the explorer reads for status/peers (None in
     // pure light-monitor mode → those endpoints proxy to the remote node, as before).
     let mut sync_handle: Option<std::sync::Arc<std::sync::Mutex<block_sync::P2PSyncState>>> = None;
@@ -1948,6 +1965,11 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                         match k.code {
                             KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return Ok(()),
                             KeyCode::Char('r') | KeyCode::Char('R') => { app.refresh(); app.toast_sticky = false; }
+                            // v0.13: tab switching — Tab cycles, 1/2/3 jump
+                            KeyCode::Tab | KeyCode::BackTab => { app.tab = app.tab.next(); app.load_swarm(); }
+                            KeyCode::Char('1') => { app.tab = Tab::Node; }
+                            KeyCode::Char('2') => { app.tab = Tab::SwarmAi; app.load_swarm(); }
+                            KeyCode::Char('3') => { app.tab = Tab::Results; app.load_swarm(); }
                             KeyCode::Char('y') | KeyCode::Char('Y') => { app.resync(); app.toast_sticky = false; }
                             KeyCode::Char('m') | KeyCode::Char('M') => {
                                 app.mining = !app.mining;
@@ -2132,6 +2154,12 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             // v0.10.5.1: adaptive cadence — fast when online, gentle backoff when offline.
             if !app.refresh_inflight && app.last_fetch.elapsed() >= app.refresh_delay() {
                 app.request_refresh();
+            }
+            // v0.13: keep the Swarm AI / Results board live (2s) while it's on screen.
+            if matches!(app.tab, Tab::SwarmAi | Tab::Results)
+                && app.last_swarm_load.elapsed() >= Duration::from_secs(2)
+            {
+                app.load_swarm();
             }
             // v0.10.5.1: embedded-serve watchdog — if the :9800 wallet server died,
             // restart it so the local wallet/[W] never silently goes dark. Probe is
@@ -2376,6 +2404,280 @@ fn render_update_splash(frame: u8) -> Paragraph<'static> {
         .style(Style::default().bg(Color::Rgb(5, 5, 15)))
 }
 
+// ── v0.13: tabbed cockpit — Node dashboard + MCP Swarm AI job board + Results ──
+
+#[derive(Clone, Copy, PartialEq)]
+enum Tab { Node, SwarmAi, Results }
+
+impl Tab {
+    fn next(self) -> Tab {
+        match self { Tab::Node => Tab::SwarmAi, Tab::SwarmAi => Tab::Results, Tab::Results => Tab::Node }
+    }
+}
+
+#[derive(Default, Clone)]
+struct SwarmAgent { id: String, status: String, qug: f64 }
+#[derive(Default, Clone)]
+struct SwarmClaim { agent: String, path: String, note: String }
+#[derive(Default, Clone)]
+struct SwarmActivity { agent: String, kind: String, detail: String, at: u64 }
+#[derive(Default, Clone)]
+struct SwarmResult { agent: String, task_id: String, qug: f64, crates: String, success: bool, at: u64 }
+
+/// A snapshot of the swarm coordination files written by the Claude Code sessions
+/// (/tmp/flux-swarm*.json|jsonl). Drives the [2] Swarm AI + [3] Results tabs.
+#[derive(Default, Clone)]
+struct SwarmView {
+    agents: Vec<SwarmAgent>,
+    claims: Vec<SwarmClaim>,
+    activity: Vec<SwarmActivity>, // newest-first
+    results: Vec<SwarmResult>,    // newest-first
+    completed_count: u64,
+    qug_paid: f64,
+    err: Option<String>,
+}
+
+fn swarm_dir() -> String { std::env::var("SIGIL_SWARM_DIR").unwrap_or_else(|_| "/tmp".into()) }
+
+fn trunc(s: &str, n: usize) -> String {
+    if s.chars().count() <= n { s.to_string() }
+    else { format!("{}…", s.chars().take(n.saturating_sub(1)).collect::<String>()) }
+}
+
+/// Read + parse the swarm coordination files into a SwarmView. Cheap local file
+/// reads; tolerant of missing/partial files (off-box → shows a hint).
+fn load_swarm_view() -> SwarmView {
+    let dir = swarm_dir();
+    let mut v = SwarmView::default();
+    let mut any = false;
+    if let Ok(s) = std::fs::read_to_string(format!("{dir}/flux-swarm.json")) {
+        if let Ok(j) = serde_json::from_str::<serde_json::Value>(&s) {
+            any = true;
+            v.completed_count = j.get("completed_count").and_then(|x| x.as_u64()).unwrap_or(0);
+            v.qug_paid = j.get("qug_paid").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            if let Some(ags) = j.get("agents").and_then(|x| x.as_object()) {
+                for (id, a) in ags {
+                    v.agents.push(SwarmAgent {
+                        id: id.clone(),
+                        status: a.get("status").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        qug: a.get("total_earned_qug").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                    });
+                }
+                v.agents.sort_by(|a, b| b.qug.partial_cmp(&a.qug).unwrap_or(std::cmp::Ordering::Equal));
+            }
+        }
+    }
+    if let Ok(s) = std::fs::read_to_string(format!("{dir}/flux-swarm-files.json")) {
+        if let Ok(j) = serde_json::from_str::<serde_json::Value>(&s) {
+            any = true;
+            if let Some(cl) = j.get("claims").and_then(|x| x.as_object()) {
+                for (_p, c) in cl {
+                    v.claims.push(SwarmClaim {
+                        agent: c.get("agent").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        path: c.get("path").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        note: c.get("note").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    });
+                }
+            }
+        }
+    }
+    if let Ok(s) = std::fs::read_to_string(format!("{dir}/flux-swarm-activity.jsonl")) {
+        any = true;
+        for line in s.lines().rev().take(60) {
+            if let Ok(j) = serde_json::from_str::<serde_json::Value>(line) {
+                v.activity.push(SwarmActivity {
+                    agent: j.get("agent").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    kind: j.get("kind").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    detail: j.get("detail").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    at: j.get("at").and_then(|x| x.as_u64()).unwrap_or(0),
+                });
+            }
+        }
+    }
+    if let Ok(s) = std::fs::read_to_string(format!("{dir}/flux-swarm-completed.jsonl")) {
+        any = true;
+        for line in s.lines().rev().take(80) {
+            if let Ok(j) = serde_json::from_str::<serde_json::Value>(line) {
+                v.results.push(SwarmResult {
+                    agent: j.get("agent_id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    task_id: j.get("task_id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    qug: j.get("qug_earned").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                    crates: j.get("crates").and_then(|x| x.as_array())
+                        .map(|a| a.iter().filter_map(|c| c.as_str()).collect::<Vec<_>>().join(","))
+                        .unwrap_or_default(),
+                    success: j.get("success").and_then(|x| x.as_bool()).unwrap_or(false),
+                    at: j.get("completed_at").and_then(|x| x.as_u64()).unwrap_or(0),
+                });
+            }
+        }
+    }
+    if !any {
+        v.err = Some(format!("no swarm data under {dir} — set SIGIL_SWARM_DIR to the dev box's swarm dir"));
+    }
+    v
+}
+
+// ── v0.13 enrichment helpers (DeepSeek-consulted: color-hash, mini-bars, medals, rel-time, heat) ──
+
+/// Stable per-agent color from an id hash — premium control-panel feel, same agent always same hue.
+fn agent_color(id: &str) -> Color {
+    let pal = [C_CYAN, C_VBRIGHT, C_GREEN, C_GOLD, Color::Magenta, Color::LightBlue];
+    let mut h: u32 = 2166136261;
+    for b in id.bytes() { h = (h ^ b as u32).wrapping_mul(16777619); }
+    pal[(h as usize) % pal.len()]
+}
+
+/// Inline unicode mini-bar: `value` normalized to `max` across `width` cells.
+fn qug_bar(value: f64, max: f64, width: usize) -> String {
+    if max <= 0.0 || width == 0 { return " ".repeat(width); }
+    let filled = (((value / max) * width as f64).round() as usize).min(width);
+    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
+}
+
+/// Medal glyph for a 0-based rank.
+fn medal(rank: usize) -> &'static str {
+    match rank { 0 => "🥇", 1 => "🥈", 2 => "🥉", _ => "  " }
+}
+
+/// Relative "Nm ago" from a unix-secs timestamp.
+fn rel_time(at: u64) -> String {
+    if at == 0 { return "—".into(); }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(at);
+    let d = now.saturating_sub(at);
+    if d < 60 { format!("{}s", d) }
+    else if d < 3600 { format!("{}m", d / 60) }
+    else if d < 86400 { format!("{}h", d / 3600) }
+    else { format!("{}d", d / 86400) }
+}
+
+/// Status dot + color for an agent status string.
+fn status_glyph(status: &str) -> Span<'static> {
+    let (g, c) = match status.to_lowercase().as_str() {
+        "working" | "busy" | "active" | "claimed" => ("●", C_GREEN),
+        "idle" => ("○", C_DIM),
+        "error" | "failed" => ("●", C_RED),
+        _ => ("◦", C_DIM),
+    };
+    Span::styled(g, Style::default().fg(c))
+}
+
+fn render_tab_bar(app: &App) -> Paragraph<'static> {
+    let tab = |label: &'static str, key: &'static str, t: Tab| -> Vec<Span<'static>> {
+        let active = app.tab == t;
+        let style = if active {
+            Style::default().fg(Color::Black).bg(C_CYAN).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(C_DIM)
+        };
+        vec![Span::styled(format!(" {key} {label} "), style), Span::raw(" ")]
+    };
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(tab("Node", "1", Tab::Node));
+    spans.extend(tab("Swarm AI", "2", Tab::SwarmAi));
+    spans.extend(tab("Results", "3", Tab::Results));
+    spans.push(Span::styled(" · Tab cycles", Style::default().fg(C_DIM)));
+    Paragraph::new(Line::from(spans))
+}
+
+/// [2] MCP Swarm AI — the live job-index board from the Claude Code sessions.
+fn render_swarm_ai(app: &App) -> Paragraph<'static> {
+    let sw = &app.swarm;
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(e) = &sw.err {
+        lines.push(Line::from(Span::styled(format!(" ⚠ {e}"), Style::default().fg(C_GOLD))));
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(vec![
+        Span::styled("  AGENTS ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{}", sw.agents.iter().filter(|a| !a.id.starts_with("test_")).count()), Style::default().fg(C_VBRIGHT)),
+        Span::styled("   CLAIMS ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{}", sw.claims.len()), Style::default().fg(C_VBRIGHT)),
+        Span::styled("   COMPLETED ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{}", sw.completed_count), Style::default().fg(C_GREEN)),
+        Span::styled("   QUG PAID ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:.1}", sw.qug_paid), Style::default().fg(C_GOLD)),
+    ]));
+    lines.push(Line::from(""));
+    let real: Vec<&SwarmAgent> = sw.agents.iter().filter(|a| !a.id.starts_with("test_")).collect();
+    let max_q = real.iter().map(|a| a.qug).fold(0.0f64, f64::max);
+    lines.push(Line::from(Span::styled(" ▸ AGENTS — leaderboard by QUG earned", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
+    for (i, a) in real.iter().take(7).enumerate() {
+        let ac = agent_color(&a.id);
+        lines.push(Line::from(vec![
+            Span::raw(format!("  {} ", medal(i))),
+            status_glyph(&a.status),
+            Span::styled(format!(" {:<22}", trunc(&a.id, 22)), Style::default().fg(ac).add_modifier(Modifier::BOLD)),
+            Span::styled(qug_bar(a.qug, max_q, 12), Style::default().fg(C_GOLD)),
+            Span::styled(format!(" {:>8.1} QUG", a.qug), Style::default().fg(C_GOLD)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(" ▸ ACTIVE JOB BOARD — who's editing what", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
+    for c in sw.claims.iter().take(9) {
+        let file = c.path.rsplit('/').next().unwrap_or(&c.path).to_string();
+        lines.push(Line::from(vec![
+            Span::styled("   ◆ ", Style::default().fg(agent_color(&c.agent))),
+            Span::styled(format!("{:<16}", trunc(&c.agent, 16)), Style::default().fg(agent_color(&c.agent)).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{:<20}", trunc(&file, 20)), Style::default().fg(C_CYAN)),
+            Span::styled(trunc(&c.note, 52), Style::default().fg(C_DIM)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(" ▸ LIVE ACTIVITY", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
+    for ev in sw.activity.iter().filter(|e| !e.agent.starts_with("test_")).take(11) {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:>4} ", rel_time(ev.at)), Style::default().fg(C_DIM)),
+            Span::styled(format!("{:<16}", trunc(&ev.agent, 16)), Style::default().fg(agent_color(&ev.agent))),
+            Span::styled(format!("{:<14}", trunc(&ev.kind, 14)), Style::default().fg(C_GOLD)),
+            Span::styled(trunc(&ev.detail, 48), Style::default().fg(C_DIM)),
+        ]));
+    }
+    Paragraph::new(lines).block(card_block("⚡ MCP SWARM AI — JOB INDEX BOARD", C_VBRIGHT))
+}
+
+/// [3] Results — settled work + QUG payouts from the swarm.
+fn render_results(app: &App) -> Paragraph<'static> {
+    let sw = &app.swarm;
+    let mut lines: Vec<Line> = Vec::new();
+    let mut totals: std::collections::HashMap<String, (f64, u32)> = std::collections::HashMap::new();
+    for r in sw.results.iter().filter(|r| !r.agent.starts_with("test_")) {
+        let e = totals.entry(r.agent.clone()).or_insert((0.0, 0));
+        e.0 += r.qug; e.1 += 1;
+    }
+    let mut tv: Vec<(String, (f64, u32))> = totals.into_iter().collect();
+    tv.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap_or(std::cmp::Ordering::Equal));
+    let max_e = tv.iter().map(|(_, (q, _))| *q).fold(0.0f64, f64::max);
+    lines.push(Line::from(Span::styled(" ▸ EARNINGS — leaderboard", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
+    for (i, (ag, (qug, n))) in tv.iter().take(7).enumerate() {
+        lines.push(Line::from(vec![
+            Span::raw(format!("  {} ", medal(i))),
+            Span::styled(format!("{:<22}", trunc(ag, 22)), Style::default().fg(agent_color(ag)).add_modifier(Modifier::BOLD)),
+            Span::styled(qug_bar(*qug, max_e, 12), Style::default().fg(C_GOLD)),
+            Span::styled(format!(" {:>3}t", n), Style::default().fg(C_DIM)),
+            Span::styled(format!("{:>10.2} QUG", qug), Style::default().fg(C_GOLD)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(" ▸ COMPLETED TASKS (newest first)", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
+    for r in sw.results.iter().filter(|r| !r.agent.starts_with("test_")).take(13) {
+        let mark = if r.success { Span::styled("✓", Style::default().fg(C_GREEN)) } else { Span::styled("✗", Style::default().fg(C_RED)) };
+        lines.push(Line::from(vec![
+            Span::raw("  "), mark, Span::raw(" "),
+            Span::styled(format!("{:>4} ", rel_time(r.at)), Style::default().fg(C_DIM)),
+            Span::styled(format!("{:<14}", trunc(&r.agent, 14)), Style::default().fg(agent_color(&r.agent))),
+            Span::styled(format!("{:<18}", trunc(&r.crates, 18)), Style::default().fg(C_CYAN)),
+            Span::styled(format!("{:>7.2} QUG", r.qug), Style::default().fg(C_GOLD)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  TOTAL SETTLED: ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:.1} QUG", sw.qug_paid), Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("  ·  {} tasks completed", sw.completed_count), Style::default().fg(C_DIM)),
+    ]));
+    Paragraph::new(lines).block(card_block("🏆 RESULTS — SETTLED WORK", C_GOLD))
+}
+
 fn draw_ui(f: &mut Frame, app: &App) {
     let area = f.area();
     if let Some(until) = app.splash_until {
@@ -2384,11 +2686,24 @@ fn draw_ui(f: &mut Frame, app: &App) {
             return;
         }
     }
-    let [header_area, body_area, footer_area] =
-        Layout::vertical([Constraint::Length(2), Constraint::Min(0), Constraint::Length(2)]).areas(area);
+    // v0.13: tab bar between header and body — [1] Node · [2] Swarm AI · [3] Results.
+    let [header_area, tab_area, body_area, footer_area] =
+        Layout::vertical([Constraint::Length(2), Constraint::Length(1), Constraint::Min(0), Constraint::Length(2)]).areas(area);
 
     f.render_widget(render_header(app), header_area);
+    f.render_widget(render_tab_bar(app), tab_area);
 
+    match app.tab {
+        Tab::Node => draw_node_body(f, app, body_area),
+        Tab::SwarmAi => f.render_widget(render_swarm_ai(app), body_area),
+        Tab::Results => f.render_widget(render_results(app), body_area),
+    }
+
+    f.render_widget(render_footer(app), footer_area);
+}
+
+/// The original node dashboard, now the [1] Node tab body.
+fn draw_node_body(f: &mut Frame, app: &App, body_area: ratatui::layout::Rect) {
     let body_h = Layout::horizontal([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)]).split(body_area);
     let (left_area, right_area) = (body_h[0], body_h[1]);
 
@@ -2414,8 +2729,6 @@ fn draw_ui(f: &mut Frame, app: &App) {
     f.render_widget(render_fleet_card(app), right_v[1]);
     f.render_widget(render_cortex_card(app), right_v[2]);
     f.render_widget(render_block_stream(app), right_v[3]);
-
-    f.render_widget(render_footer(app), footer_area);
 }
 
 fn accent_stripe(color: Color) -> Span<'static> {

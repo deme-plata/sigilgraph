@@ -145,6 +145,35 @@ fn max_header_height(bytes: &[u8]) -> Option<u64> {
     }
 }
 
+/// Fetch the network's REAL tip height from the published `sigil-tip-live.json`.
+/// v0.17.0: the monitor's `/api/v1/status` mis-routes to a near-empty sigil-rpcd that
+/// returns height=2, so `set_known_tip` seeded `peer_best≈2` and the fast-snap (gated on
+/// `peer_best > synced+200k`) NEVER fired → genesis crawl at ~1 blk/s. The probe is
+/// clamped to frontier+CHUNK so it can't reveal the tip either. This signed-by-producer
+/// JSON carries the true height (~6.7M), so it's the reliable tip source for the snap.
+async fn fetch_live_tip() -> Option<u64> {
+    const URLS: [&str; 2] = [
+        "https://sigilgraph.fluxapp.xyz/sigil-tip-live.json",
+        "https://quillon.xyz/sigil-tip-live.json",
+    ];
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()?;
+    for url in URLS {
+        if let Ok(resp) = client.get(url).send().await {
+            if let Ok(v) = resp.json::<serde_json::Value>().await {
+                if let Some(h) = v.get("height").and_then(|x| x.as_u64()) {
+                    if h > 0 {
+                        return Some(h);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct P2PSyncState {
     pub running: bool,
@@ -304,6 +333,10 @@ impl P2PBlockSync {
                     tokio::sync::mpsc::unbounded_channel::<(u64, String, Option<Vec<u8>>)>();
                 // pull HEIGHT-PROBE replies (open-ended range → peer's clamped tip)
                 let (probe_tx, mut probe_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+                // v0.17.0: the TRUE network tip from the published sigil-tip-live.json (the
+                // /api/v1/status the monitor polls returns height=2 → snap never fired).
+                let (tip_tx, mut tip_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+                let mut last_tip_fetch = Instant::now() - Duration::from_secs(60);
                 let mut inflight: usize = 0;                          // outstanding spawned requests
                 let mut assigned: std::collections::HashSet<u64> = std::collections::HashSet::new();
                 let mut peer_bench: HashMap<String, Instant> = HashMap::new(); // peer.to_string() → benched-until
@@ -465,9 +498,15 @@ impl P2PBlockSync {
                     if last_probe.elapsed() >= PROBE_EVERY {
                         last_probe = Instant::now();
                         let now = Instant::now();
-                        let healthy: Vec<_> = net.connected_peers().into_iter()
+                        let mut healthy: Vec<_> = net.connected_peers().into_iter()
                             .filter(|p| peer_bench.get(&p.to_string()).map_or(true, |&u| now >= u))
                             .collect();
+                        // v0.17: HEALTHY-PEER FLOOR. With only ~4 peers a burst of timeouts
+                        // could bench the WHOLE pool, collapsing the backfill to ~0 blk/s until
+                        // benches expired — the erratic 57k/77k/127k progress. Never stall while
+                        // peers are connected: if every peer is benched, fall back to the full
+                        // set so the probe/refill keeps firing best-effort (bench is advisory).
+                        if healthy.is_empty() { healthy = net.connected_peers(); }
                         if let Some(&peer) = healthy.first() {
                             let payload = serde_json::to_vec(
                                 &BackfillReq { from: frontier_chunk, to: u64::MAX, headers_only: true }
@@ -479,6 +518,22 @@ impl P2PBlockSync {
                                 if let Ok(Ok(b)) = r { let _ = tx.send(b); }
                             });
                         }
+                    }
+
+                    // v0.17.0: refresh the TRUE tip from sigil-tip-live.json every 3s and seed
+                    // peer_best — the reliable signal that makes the fast-snap actually fire
+                    // (the /api/v1/status the monitor reads returns height=2). Spawned so the
+                    // HTTP round-trip never blocks the sync loop; result drained next tick.
+                    while let Ok(h) = tip_rx.try_recv() {
+                        let mut s = state_clone.lock().unwrap();
+                        if h > s.peer_best_height { s.peer_best_height = h; }
+                    }
+                    if last_tip_fetch.elapsed() >= Duration::from_secs(3) {
+                        last_tip_fetch = Instant::now();
+                        let tx = tip_tx.clone();
+                        tokio::spawn(async move {
+                            if let Some(h) = fetch_live_tip().await { let _ = tx.send(h); }
+                        });
                     }
 
                     let peer_best = state_clone.lock().unwrap().peer_best_height;
@@ -504,9 +559,15 @@ impl P2PBlockSync {
 
                     if peer_best > 0 {
                         let now = Instant::now();
-                        let healthy: Vec<_> = net.connected_peers().into_iter()
+                        let mut healthy: Vec<_> = net.connected_peers().into_iter()
                             .filter(|p| peer_bench.get(&p.to_string()).map_or(true, |&u| now >= u))
                             .collect();
+                        // v0.17: HEALTHY-PEER FLOOR. With only ~4 peers a burst of timeouts
+                        // could bench the WHOLE pool, collapsing the backfill to ~0 blk/s until
+                        // benches expired — the erratic 57k/77k/127k progress. Never stall while
+                        // peers are connected: if every peer is benched, fall back to the full
+                        // set so the probe/refill keeps firing best-effort (bench is advisory).
+                        if healthy.is_empty() { healthy = net.connected_peers(); }
                         if !healthy.is_empty() {
                             for i in 0..(MAX_INFLIGHT as u64) {
                                 if inflight >= MAX_INFLIGHT { break; }

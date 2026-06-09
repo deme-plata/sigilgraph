@@ -81,7 +81,9 @@ impl LocalApi {
     /// Our authoritative chain height: the verified-spine watermark if we have one,
     /// else the raw download tip.
     fn local_top(s: &P2PSyncState) -> u64 {
-        s.verified.max(s.sync_height)
+        // v0.18.5: "height" = the NETWORK TIP we are syncing toward (peer_best from gossip)
+        // so the dashboard shows the real target; synced_to/verified report OUR progress.
+        s.peer_best_height.max(s.verified).max(s.blocks_synced)
     }
 
     /// Try to answer `/api/...` locally. Returns `Some(json_body)` or `None` (proxy).
@@ -110,7 +112,9 @@ impl LocalApi {
             "source": "sigil-top-local",
             "network": self.network,
             "height": top,
-            "synced_to": s.sync_height,
+            "synced_to": s.blocks_synced,
+            "tip": s.peer_best_height,
+            "fetched": s.fetched_total,
             "verified": s.verified,
             "peers": s.peer_count,
             "mesh_peers": s.mesh_peer_count,

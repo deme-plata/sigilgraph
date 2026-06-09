@@ -1466,29 +1466,13 @@ fn maybe_auto_update(argv: &[String]) -> Option<String> {
             // so the app updated in place but never restarted ("just exits"). Now every
             // platform relaunches the in-place exe. The new process re-runs this check,
             // sees its version == the channel, and proceeds — no update loop.
-            if let Ok(exe) = std::env::current_exe() {
-                let args: Vec<String> = std::env::args().skip(1).collect();
-                std::env::set_var("SIGIL_TOP_JUST_UPDATED", "1");
-                let ver_exe = exe.with_file_name(format!(
-                    "sigil-top-v{}{}", rel.version, if cfg!(windows) { ".exe" } else { "" }));
-                let target = if ver_exe.exists() { ver_exe } else { exe.clone() };
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::CommandExt;
-                    // exec replaces this process on success; it only RETURNS on failure,
-                    // in which case fall back to spawn+exit so we still restart.
-                    let _ = std::process::Command::new(&target).args(&args).exec();
-                    let _ = std::process::Command::new(&target).args(&args).spawn();
-                    std::process::exit(0);
-                }
-                #[cfg(not(unix))]
-                {
-                    // Windows/macOS: can't replace a running image — spawn the new binary, then exit.
-                    let _ = std::process::Command::new(&target).args(&args).spawn();
-                    std::process::exit(0);
-                }
-            }
-            Some("auto-update applied — could not locate exe to relaunch; restart manually".into())
+            // relaunch_new_binary replaces this process (unix exec) / spawns+exits
+            // (win/mac) on success and only RETURNS on failure — it never spawns a
+            // detached child that would fight the terminal. On success this line is
+            // never reached; on failure the new binary is already swapped in place, so
+            // we keep running the current process this time and pick it up next launch.
+            relaunch_new_binary(&rel.version);
+            Some(format!("↑ updated to v{} — restart to run it", rel.version))
         }
         Err(e) => Some(format!("auto-update skipped: {e}")),
     }
@@ -1544,20 +1528,31 @@ fn self_update(rel: &Release) -> Result<String, String> {
 /// copy beside us (if any) is a fallback. On unix `exec` replaces this process; if it fails
 /// (or on Windows/macOS, which can't replace a running image) we spawn + exit. Only returns
 /// if the exe path can't be resolved — every normal path either re-execs or exits.
-fn relaunch_new_binary(version: &str) {
-    if let Ok(exe) = std::env::current_exe() {
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        std::env::set_var("SIGIL_TOP_JUST_UPDATED", "1");
-        let ver_exe = exe.with_file_name(format!(
-            "sigil-top-v{}{}", version, if cfg!(windows) { ".exe" } else { "" }));
-        let target = if ver_exe.exists() { ver_exe } else { exe.clone() };
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            let _ = std::process::Command::new(&target).args(&args).exec();
+fn relaunch_new_binary(version: &str) -> bool {
+    let exe = match std::env::current_exe() { Ok(e) => e, Err(_) => return false };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    std::env::set_var("SIGIL_TOP_JUST_UPDATED", "1");
+    let ver_exe = exe.with_file_name(format!(
+        "sigil-top-v{}{}", version, if cfg!(windows) { ".exe" } else { "" }));
+    let target = if ver_exe.exists() { ver_exe } else { exe.clone() };
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // exec REPLACES this process — it only returns on FAILURE. On failure we do NOT
+        // spawn a detached child: a backgrounded TUI fights the foreground shell for the
+        // terminal and looks exactly like a crash. Return false so the caller restores
+        // its own terminal and shows an error instead.
+        let _err = std::process::Command::new(&target).args(&args).exec();
+        false
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows/macOS can't replace a running image — spawn the new one, then exit, but
+        // ONLY if the spawn actually succeeded (else return false, don't exit on the user).
+        if std::process::Command::new(&target).args(&args).spawn().is_ok() {
+            std::process::exit(0);
         }
-        let _ = std::process::Command::new(&target).args(&args).spawn();
-        std::process::exit(0);
+        false
     }
 }
 
@@ -1947,7 +1942,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
         // the HTTP feed reporting a bogus/unservable height the snap landed in the void
         // and synced_to stuck at 0 (syncing forever). Full sync reaches the real
         // mesh-served height and — with the best_height base gate — holds there stably.
-        let p2p = block_sync::P2PBlockSync::launch(block_store, false);
+        let p2p = block_sync::P2PBlockSync::launch(block_store, true); // monitor: recent_only → fast-snap to tip (was false → genesis crawl = 1 blk/s)
         sync_handle = Some(p2p.state_handle());
         app.p2p_sync = Some(p2p);
         if app.toast.is_empty() {
@@ -2279,17 +2274,23 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                         // The user pressed [U] to upgrade — they expect to be running the new version.
                         // We re-exec the new binary immediately so the fleet stays current without
                         // manual intervention. AI fleet operators depend on this.
-                        let is_update_ok = msg.contains("swapped")
-                            || msg.contains("saved v")
-                            || msg.starts_with("✓");
+                        // ONLY relaunch on a REAL update. The old gate also matched
+                        // "✓ up to date" (the already-current message) → it relaunched when
+                        // NOTHING changed, and on exec-failure the spawn-fallback detached a
+                        // TUI child that fought the terminal = the "animation appears then it
+                        // crashes/exits" bug. Now: relaunch only on swap/save, and if the
+                        // relaunch fails, restore the TUI instead of crashing.
+                        let is_update_ok = msg.contains("swapped") || msg.contains("saved v");
                         if is_update_ok {
                             let _ = disable_raw_mode();
                             let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
-                            // Relaunch into the new binary (re-exec on unix; spawn+exit on
-                            // Windows/macOS). The hardened helper falls back to spawn if exec
-                            // fails, so a failed relaunch never strands us in this torn-down
-                            // terminal state (raw mode + alt screen already left above).
-                            relaunch_new_binary(&app.latest);
+                            if !relaunch_new_binary(&app.latest) {
+                                // relaunch failed — re-enter the TUI, don't crash out
+                                let _ = enable_raw_mode();
+                                let _ = execute!(std::io::stdout(), EnterAlternateScreen);
+                                app.toast = "↑ update saved — couldn't auto-restart; relaunch sigil-top manually".into();
+                                app.toast_sticky = true;
+                            }
                         }
                         app.toast = msg; app.toast_sticky = false; app.update_rx = None;
                         } // end else (non-auto-check message)

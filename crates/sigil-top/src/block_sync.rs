@@ -129,6 +129,15 @@ pub struct P2PSyncState {
     /// smooth: the contiguous tip advances in bursts (gap-fills) and would read 0
     /// between jumps, while this climbs continuously while fetching.
     pub fetched_total: u64,
+    /// v0.9.0: contiguous CRYPTOGRAPHICALLY-VERIFIED tip — blocks 0..verified each passed
+    /// precheck + parent-linkage (spine connects back to genesis). `blocks_synced` means
+    /// "downloaded"; THIS means "downloaded AND validated as one chain". The full-sync
+    /// completion gate watches this, not blocks_synced.
+    pub verified: u64,
+    /// v0.9.0: set when the verifier hit a real integrity break (NOT the clean download
+    /// frontier): "(height) reason". Empty while the chain is clean. Surfaced in the TUI
+    /// + makes `full-sync`/`verify-chain` exit non-zero.
+    pub verify_break: Option<String>,
 }
 
 pub struct P2PBlockSync {
@@ -176,6 +185,7 @@ impl P2PBlockSync {
                     let mut s = state_clone.lock().unwrap();
                     s.running = true;
                     s.blocks_synced = resume_h;
+                    s.verified = store.verified_to(); // v0.9.0: resume the verified watermark too
                 }
 
                 // v0.7.6: content-addressed backfill via the shared flux_p2p::backfill
@@ -197,10 +207,12 @@ impl P2PBlockSync {
                 let mut last_announce = Instant::now();
                 let mut last_bf = Instant::now();
                 let mut sync_cursor: u64 = resume_h; // continue from persisted tip, not 0
-                // Per-peer consecutive-timeout counter: a behind/slow peer (can't serve
-                // the range) is benched after 2 misses so it stops gating cycles; we
-                // retry the whole set when none are healthy. Converges to the fast peers.
-                let mut peer_fails: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
+                // Per-peer COOLDOWN (keyed by cycle index): a peer that times out is
+                // benched for N cycles regardless of partial successes on other ranges.
+                // A diverged/behind peer serves LOW ranges but times out on HIGH ones, so
+                // a plain reset-on-success counter never benches it; the cooldown does.
+                let mut peer_cd: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+                let mut cycle: u64 = 0;
 
                 loop {
                     if stop_rx.try_recv().is_ok() {
@@ -284,15 +296,14 @@ impl P2PBlockSync {
                             (s.peer_best_height, s.blocks_synced)
                         };
                         if peer_best > 0 && have < peer_best {
+                            cycle += 1;
                             let all_peers = net.connected_peers();
-                            // Route only to peers that are actually serving: bench a peer
-                            // after 2 consecutive misses (behind/slow → can't serve the
-                            // range) so it stops gating cycles. Retry the whole set when
-                            // none are healthy. Converges to the fast peers (e.g. epsilon).
+                            // Route only to peers not on cooldown (converges to the fast,
+                            // fully-synced servers). If everyone's cooling down, retry all.
                             let mut candidates: Vec<_> = all_peers.iter().cloned()
-                                .filter(|p| *peer_fails.get(&p.to_string()).unwrap_or(&0) < 2).collect();
+                                .filter(|p| cycle >= *peer_cd.get(&p.to_string()).unwrap_or(&0)).collect();
                             if candidates.is_empty() && !all_peers.is_empty() {
-                                peer_fails.clear();
+                                peer_cd.clear();
                                 candidates = all_peers.clone();
                             }
                             if !candidates.is_empty() {
@@ -310,7 +321,7 @@ impl P2PBlockSync {
                                     let payload = serde_json::to_vec(&BackfillReq { from, to: from + CHUNK, headers_only: true }).unwrap();
                                     // 3s cap so a slow/dead peer can't gate the cycle.
                                     async move {
-                                        let r = match tokio::time::timeout(Duration::from_secs(3), netref.send_request(peer, payload)).await {
+                                        let r = match tokio::time::timeout(Duration::from_secs(6), netref.send_request(peer, payload)).await {
                                             Ok(Ok(bytes)) => Some(bytes),
                                             _ => None,
                                         };
@@ -327,8 +338,8 @@ impl P2PBlockSync {
                                 let mut got = 0usize;
                                 for (peer, r) in results {
                                     let bytes = match r {
-                                        Some(b) => { peer_fails.insert(peer.to_string(), 0); b }
-                                        None => { *peer_fails.entry(peer.to_string()).or_insert(0) += 1; continue; }
+                                        Some(b) => { peer_cd.remove(&peer.to_string()); b }
+                                        None => { peer_cd.insert(peer.to_string(), cycle + 3); continue; } // bench 3 cycles
                                     };
                                     if bytes.first() == Some(&b'H') {
                                         // headers-only bincode (new node, fast path)
@@ -354,6 +365,18 @@ impl P2PBlockSync {
                                 }
                                 store.advance();
                                 let now_synced = store.synced_to();
+                                // v0.9.0 FULL VERIFYING SYNC: validate the freshly-downloaded
+                                // prefix as a connected spine (precheck + parent linkage) before
+                                // calling it "synced". Bounded per batch so a multi-M-block chain
+                                // stays responsive; the watermark persists + resumes. A real break
+                                // (not the download frontier) is surfaced loudly.
+                                const VERIFY_BUDGET: u64 = 50_000;
+                                let report = crate::chain_verify::verify_to(&mut store, VERIFY_BUDGET);
+                                let vbreak = match &report.first_break {
+                                    Some((h, crate::chain_verify::BreakReason::Missing)) if *h >= now_synced => None,
+                                    Some((h, reason)) => Some(format!("h={h}: {reason}")),
+                                    None => None,
+                                };
                                 {
                                     let mut s = state_clone.lock().unwrap();
                                     s.blocks_synced = now_synced;
@@ -361,6 +384,8 @@ impl P2PBlockSync {
                                     s.sync_cursor = now_synced;
                                     s.sync_height = now_synced;
                                     s.fetched_total += got as u64;
+                                    s.verified = report.verified_to;
+                                    s.verify_break = vbreak;
                                     if now_synced > s.peer_best_height { s.peer_best_height = now_synced; }
                                     s.last_message_at = Some(Instant::now());
                                 }

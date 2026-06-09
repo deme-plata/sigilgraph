@@ -11,6 +11,7 @@ use sigil_header::SigilBlockHeaderV0;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
+use std::collections::HashMap;
 
 pub const BLOCK_SYNC_TOPIC: &str = "/sigil/g0/blocks";
 
@@ -21,12 +22,6 @@ pub enum SyncMsg {
     Block { height: u64, hash_hex: String, header_json: String },
     Have { best_height: u64, best_hash_hex: String },
 }
-// v0.7.6 content-addressed backfill now uses the shared `flux_p2p::backfill`
-// protocol (BackfillMsg = Manifest/Want/Blob) on the same topic — disambiguated
-// from SyncMsg by its serde tag. The inline copy was extracted into flux-p2p so
-// every consumer shares one verify-don't-trust backfill engine.
-use flux_p2p::backfill::{Backfill, BackfillMsg};
-
 // v0.7.7: point-to-point backfill over the flux-p2p request-response channel.
 // Wire format is shared byte-for-byte with sigil-node's server: the request is
 // `serde_json::to_vec(&BackfillReq { from, to })` and the response is
@@ -105,6 +100,51 @@ fn ingest_block_value(
     }
 }
 
+/// Ingest a backfill response body via the fast (out-of-order) store path. Handles both
+/// the headers-only bincode format (`'H'` + `bincode(Vec<Header>)`, new nodes) and the
+/// legacy full-block JSON (`BackfillResp`, old nodes). Returns the number of headers
+/// stored. The store's height index + contiguous `advance()` handle out-of-order arrival,
+/// so chunks from different peers can land in any order — the store IS the reorder buffer.
+fn ingest_backfill_bytes(bytes: &[u8], store: &mut BlockStore) -> usize {
+    // v0.10.0: collect the chunk's headers, then ONE batched write (single WAL-lock hold)
+    // instead of 2 locked puts per block — the per-block path was the ingest bottleneck.
+    if bytes.first() == Some(&b'H') {
+        match bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&bytes[1..]) {
+            Ok(headers) => store.put_blocks_batch(&headers),
+            Err(_) => { crate::tlog!("[p2p-sync] resp: bad header bincode ({} B)", bytes.len()); 0 }
+        }
+    } else if let Ok(resp) = serde_json::from_slice::<BackfillResp>(bytes) {
+        let headers: Vec<SigilBlockHeaderV0> = resp.blocks.iter()
+            .filter_map(|v| v.get("header").and_then(|h| serde_json::from_value(h.clone()).ok()))
+            .collect();
+        store.put_blocks_batch(&headers)
+    } else {
+        crate::tlog!("[p2p-sync] resp: unparseable ({} bytes)", bytes.len());
+        0
+    }
+}
+
+/// Max block height present in a backfill/probe response body (headers-bincode or
+/// legacy full-block JSON), or None if empty/unparseable. Used by the pull HEIGHT
+/// PROBE to seed `peer_best_height` from a peer's actual tip — the responder clamps
+/// the served range to its own tip (`hi = req.to.min(top)…`), so the max height in a
+/// reply to an open-ended `[frontier, u64::MAX]` request is a real lower bound on the
+/// peer's head, learnable without any gossip.
+fn max_header_height(bytes: &[u8]) -> Option<u64> {
+    if bytes.first() == Some(&b'H') {
+        bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&bytes[1..])
+            .ok()
+            .and_then(|hs| hs.iter().map(|h| h.height).max())
+    } else if let Ok(resp) = serde_json::from_slice::<BackfillResp>(bytes) {
+        resp.blocks
+            .iter()
+            .filter_map(|v| v.get("header").and_then(|h| h.get("height")).and_then(|x| x.as_u64()))
+            .max()
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct P2PSyncState {
     pub running: bool,
@@ -149,6 +189,13 @@ pub struct P2PBlockSync {
 pub use super::block_store::StoredBlock;
 
 impl P2PBlockSync {
+    /// v0.11.0: share the live sync state with the embedded explorer API (serve.rs)
+    /// so `/api/v1/{status,peers}` reflect the real mesh height / verified watermark /
+    /// peer count instead of being proxied to the remote node.
+    pub fn state_handle(&self) -> Arc<Mutex<P2PSyncState>> {
+        self.state.clone()
+    }
+
     pub fn launch(mut store: BlockStore) -> Self {
         let state = Arc::new(Mutex::new(P2PSyncState::default()));
         let new_blocks = Arc::new(Mutex::new(Vec::new()));
@@ -158,8 +205,13 @@ impl P2PBlockSync {
         let new_blocks_clone = new_blocks.clone();
 
         thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all().build()
+            // v0.10.0: MULTI-thread runtime (3 workers). The v0.9.5 pipeline spawned chunk
+            // requests as independent tasks; on a current-thread runtime those only advance
+            // when the main loop awaits, so the live `SyncProgress` event flood starved them
+            // → every request timed out → synced stuck at 0. Worker threads run the request
+            // tasks truly concurrently, fully decoupled from the loop.
+            let rt = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(3).enable_all().build()
             {
                 Ok(rt) => rt,
                 Err(_) => return,
@@ -174,12 +226,23 @@ impl P2PBlockSync {
                     return;
                 }
                 crate::tlog!("[p2p-sync] started on sigil-g0 mesh (port 9501)");
+                // Share net into the spawned request tasks. All hot methods are &self;
+                // start() (the only &mut) already ran. Arc → Send + 'static for tokio::spawn.
+                let net = std::sync::Arc::new(net);
 
                 // Resume from the PERSISTED store: seed the synced count + cursor from
                 // what's already on disk so a restart/update CONTINUES instead of
                 // Resume from the CONTIGUOUS synced_to (blocks 0..synced_to all present),
                 // NOT best_height (a stray live block inflates it). The cursor walks
                 // forward from here and never re-walks from 0.
+                // v0.10.0 GENESIS ANCHOR: SIGIL's height-0 genesis is minted locally and is NOT
+                // served by the range-backfill endpoint once pruned from the producer's RAM, so a
+                // `from=0` request returns empty and `synced_to` could never leave 0. Anchor the
+                // contiguous frontier (and verification) at the lowest servable height (1 for SIGIL;
+                // env-overridable). Below `base` is never required.
+                let sync_base: u64 = std::env::var("SIGIL_SYNC_BASE").ok()
+                    .and_then(|s| s.parse().ok()).unwrap_or(1);
+                store.set_base(sync_base);
                 let resume_h = store.synced_to();
                 {
                     let mut s = state_clone.lock().unwrap();
@@ -188,31 +251,43 @@ impl P2PBlockSync {
                     s.verified = store.verified_to(); // v0.9.0: resume the verified watermark too
                 }
 
-                // v0.7.6: content-addressed backfill via the shared flux_p2p::backfill
-                // engine (flux-sync over flux-aether). Path overridable; default under
-                // $HOME. Backfill is simply disabled if the store can't open (graceful).
-                let store_dir = std::env::var("SIGIL_SYNC_STORE").unwrap_or_else(|_| {
-                    std::env::var("HOME")
-                        .map(|h| format!("{h}/.sigil-sync-blocks"))
-                        .unwrap_or_else(|_| "sigil-sync-blocks".into())
-                });
-                let mut bf = Backfill::open(&store_dir, "sigil-g0").ok();
-                if bf.is_none() {
-                    crate::tlog!("[p2p-sync] flux_p2p::backfill store unavailable — backfill disabled");
-                }
-
                 // Subscribe to blocks — event-driven, no polling
                 let mut block_rx = net.subscribe(BLOCK_SYNC_TOPIC);
-                let tick = Duration::from_secs(5);
-                let mut last_announce = Instant::now();
-                let mut last_bf = Instant::now();
-                let mut sync_cursor: u64 = resume_h; // continue from persisted tip, not 0
-                // Per-peer COOLDOWN (keyed by cycle index): a peer that times out is
-                // benched for N cycles regardless of partial successes on other ranges.
-                // A diverged/behind peer serves LOW ranges but times out on HIGH ones, so
-                // a plain reset-on-success counter never benches it; the cooldown does.
-                let mut peer_cd: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-                let mut cycle: u64 = 0;
+
+                // ── v0.9.5 PIPELINED SLIDING-WINDOW BACKFILL ──────────────────────────
+                // The v0.7.x design fired one request per peer then `join_all`-BARRIERED on
+                // ALL of them with a 6s timeout — so the single slowest/behind peer gated
+                // every cycle to 6s (net ≈4.9k blk/s, want ≥5k steadfast). This replaces the
+                // barrier with a continuously-refilled FuturesUnordered: up to MAX_INFLIGHT
+                // independent chunk requests stream in parallel; a slow peer never blocks the
+                // fast ones, and the store's height-index + advance() reorder out-of-order
+                // arrivals (the store IS the buffer). Reviewed with DeepSeek-V4 2026-06-09.
+                const CHUNK: u64 = 2048;            // headers/request (~9 MB) — smaller than the
+                                                   // old 8192 ⇒ lower tail latency, faster reroute
+                const MAX_INFLIGHT: usize = 8;      // outstanding requests across all peers
+                // Look-ahead cap must be TIGHT: a large window lets next_start race far ahead of a
+                // stalled frontier, so all MAX_INFLIGHT slots get consumed by high-range chunks that
+                // don't advance synced_to while the lead chunk starves (v0.10.0 frontier-stall bug).
+                const REQ_TIMEOUT: Duration = Duration::from_secs(4);
+                const PROBE_EVERY: Duration = Duration::from_millis(500); // pull-height probe cadence
+                const BENCH: Duration = Duration::from_secs(8); // bench a timed-out peer this long
+                const EMPTY_BENCH: Duration = Duration::from_secs(45); // bench a peer that LACKS a needed range
+                let _ = resume_h; // frontier is read live from the store each cycle (anchored, not cursored)
+                // Completed request results flow back from the spawned tasks here.
+                let (done_tx, mut done_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<(u64, String, Option<Vec<u8>>)>();
+                // pull HEIGHT-PROBE replies (open-ended range → peer's clamped tip)
+                let (probe_tx, mut probe_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+                let mut inflight: usize = 0;                          // outstanding spawned requests
+                let mut assigned: std::collections::HashSet<u64> = std::collections::HashSet::new();
+                let mut peer_bench: HashMap<String, Instant> = HashMap::new(); // peer.to_string() → benched-until
+                let mut rr: usize = 0;                                 // round-robin peer cursor
+                let mut last_state = Instant::now() - Duration::from_secs(1);
+                let mut fetched_session: u64 = 0;                      // headers stored this session
+                let mut last_verify = Instant::now() - Duration::from_secs(2); // slow verify+flush timer
+                let mut last_synced_seen: u64 = resume_h;             // dynamic-base detector
+                let mut last_advance_t = Instant::now();
+                let mut last_probe = Instant::now() - Duration::from_secs(10); // pull-height probe timer
 
                 loop {
                     if stop_rx.try_recv().is_ok() {
@@ -220,12 +295,15 @@ impl P2PBlockSync {
                         break;
                     }
 
-                    // Process block messages from subscription
-                    while let Ok((_topic, data)) = block_rx.try_recv() {
-                        // sigil-node broadcasts raw Block JSON ({"header":{…},…})
-                        // on TOPIC_BLOCKS. Parse the header out and STORE it — THIS is
-                        // what fills the DB genesis→tip. Also accept legacy
-                        // {"header_json":"…"}; ignore our own SyncReq echoes.
+                    // Process gossiped live-tip blocks — BOUNDED per iteration. The live mesh
+                    // (incl. our local catching-up node) floods this topic; an UNBOUNDED drain
+                    // here blocks the loop for seconds (each block costs a serde_json hash),
+                    // which starved the whole pipeline (v0.10.0 synced-stuck bug). Cap it so the
+                    // loop stays responsive; leftover messages drain over the next iterations.
+                    let mut gdrained = 0u32;
+                    while gdrained < 128 {
+                        let (_topic, data) = match block_rx.try_recv() { Ok(x) => x, Err(_) => break };
+                        gdrained += 1;
                         let v: serde_json::Value = match serde_json::from_slice(&data) {
                             Ok(v) => v,
                             Err(_) => continue,
@@ -271,138 +349,198 @@ impl P2PBlockSync {
                                 if peer_best_height > s.peer_best_height {
                                     s.peer_best_height = peer_best_height;
                                 }
-                                crate::tlog!("[p2p-sync] progress h={height} peer_best={peer_best_height} total={total_synced}");
+                                // NOTE: no per-event log here — the live mesh emits thousands of
+                                // SyncProgress/sec; eprintln-ing each one starved the sync loop
+                                // (v0.9.5 synced-stuck-at-0 bug). Progress is surfaced via state.
                             }
                             _ => {}
                         }
                     }
 
-                    // Fast backfill: walk genesis→tip in chunks via the flux-p2p
-                    // request-response channel (point-to-point, NOT gossip). We pick a
-                    // connected peer, send a BackfillReq{from,to}, and ingest every block in
-                    // the BackfillResp. The cursor LOOPS continuously (0→tip→0) so dropped
-                    // chunks get refilled — this is what actually reaches 100% (the old
-                    // gossip cursor stalled partway, e.g. "stuck at 22%").
-                    //
-                    // PARALLEL backfill: fan out one request per connected peer, each for a
-                    // DISTINCT chunk, and await them concurrently (join_all). One-at-a-time
-                    // inline await was the bottleneck — each 8192-block (~24MB) response takes
-                    // seconds, so serializing them capped throughput; N peers in parallel is ~Nx.
-                    // Tight cadence (50ms) so cycles pipeline back-to-back.
-                    if last_bf.elapsed() >= Duration::from_millis(50) {
-                        last_bf = Instant::now();
-                        let (peer_best, have) = {
-                            let s = state_clone.lock().unwrap();
-                            (s.peer_best_height, s.blocks_synced)
-                        };
-                        if peer_best > 0 && have < peer_best {
-                            cycle += 1;
-                            let all_peers = net.connected_peers();
-                            // Route only to peers not on cooldown (converges to the fast,
-                            // fully-synced servers). If everyone's cooling down, retry all.
-                            let mut candidates: Vec<_> = all_peers.iter().cloned()
-                                .filter(|p| cycle >= *peer_cd.get(&p.to_string()).unwrap_or(&0)).collect();
-                            if candidates.is_empty() && !all_peers.is_empty() {
-                                peer_cd.clear();
-                                candidates = all_peers.clone();
+                    // ── DRAIN completed request results from the spawned tasks ───────────
+                    while let Ok((start, peer, bytes)) = done_rx.try_recv() {
+                        inflight = inflight.saturating_sub(1);
+                        assigned.remove(&start);
+                        match bytes {
+                            Some(b) => {
+                                peer_bench.remove(&peer);              // answered → healthy again
+                                let got = ingest_backfill_bytes(&b, &mut store);
+                                if start <= store.synced_to() + CHUNK {
+                                    let hd = if b.first()==Some(&b'H') { bincode::deserialize::<Vec<sigil_header::SigilBlockHeaderV0>>(&b[1..]).ok() } else { None };
+                                    let (mn,mx) = hd.as_ref().map(|h| (h.iter().map(|x|x.height).min().unwrap_or(0), h.iter().map(|x|x.height).max().unwrap_or(0))).unwrap_or((0,0));
+                                    crate::tlog!("[D] LEAD start={start} got={got} h=[{mn}..{mx}] bytes={} synced={} inflight={inflight}", b.len(), store.synced_to());
+                                }
+                                fetched_session += got as u64;
+                                // An EMPTY response over a still-needed range means this peer can't
+                                // serve that range (e.g. it pruned genesis / lacks early offsets).
+                                // Re-queue to the FRONT (retry promptly) AND bench this peer briefly
+                                // so the range rotates to a peer that DOES serve it — otherwise the
+                                // lead/genesis chunk round-robins back to the same empty peer forever
+                                // and the frontier never advances (v0.10.0 synced-stuck-at-0 bug).
+                                let fc = (store.synced_to() / CHUNK) * CHUNK;
+                                if got == 0 && start >= fc {
+                                    // EMPTY over a needed range = this peer doesn't HAVE this range
+                                    // (e.g. a still-catching-up local node above its own height).
+                                    // Bench it LONG so the frontier routes to full peers; the
+                                    // frontier-anchored refill re-requests the range automatically.
+                                    peer_bench.insert(peer, Instant::now() + EMPTY_BENCH);
+                                }
                             }
-                            if !candidates.is_empty() {
-                                const CHUNK: u64 = 8192;
-                                // Walk FORWARD from the contiguous synced_to; one consecutive
-                                // chunk per healthy peer, rotating which peer gets the lead chunk.
-                                let cursor = store.synced_to();
-                                state_clone.lock().unwrap().sync_cursor = cursor; // TUI
-                                let netref = &net;
-                                let nc = candidates.len();
-                                let rot = sync_cursor as usize;
-                                let reqs = (0..nc).map(|i| {
-                                    let from = cursor + i as u64 * CHUNK;
-                                    let peer = candidates[(i + rot) % nc];
-                                    let payload = serde_json::to_vec(&BackfillReq { from, to: from + CHUNK, headers_only: true }).unwrap();
-                                    // 3s cap so a slow/dead peer can't gate the cycle.
-                                    async move {
-                                        let r = match tokio::time::timeout(Duration::from_secs(6), netref.send_request(peer, payload)).await {
-                                            Ok(Ok(bytes)) => Some(bytes),
-                                            _ => None,
-                                        };
-                                        (peer, r)
-                                    }
-                                });
-                                crate::tlog!("[p2p-sync] backfill: {} reqs ({} healthy/{} peers) from {} (have {have}/{peer_best})", nc, candidates.len(), all_peers.len(), cursor);
-                                let t_net0 = Instant::now();
-                                let results = futures::future::join_all(reqs).await;
-                                let t_net = t_net0.elapsed();
-                                let t_ing0 = Instant::now();
-                                // Lean batch ingest: store via the fast path, advance + update
-                                // TUI state ONCE. Track per-peer responsiveness.
-                                let mut got = 0usize;
-                                for (peer, r) in results {
-                                    let bytes = match r {
-                                        Some(b) => { peer_cd.remove(&peer.to_string()); b }
-                                        None => { peer_cd.insert(peer.to_string(), cycle + 3); continue; } // bench 3 cycles
-                                    };
-                                    if bytes.first() == Some(&b'H') {
-                                        // headers-only bincode (new node, fast path)
-                                        match bincode::deserialize::<Vec<sigil_header::SigilBlockHeaderV0>>(&bytes[1..]) {
-                                            Ok(headers) => {
-                                                for header in headers { let _ = store.put_block_fast(header); got += 1; }
-                                            }
-                                            Err(_) => crate::tlog!("[p2p-sync] resp: bad header bincode ({} B)", bytes.len()),
-                                        }
-                                    } else if let Ok(resp) = serde_json::from_slice::<BackfillResp>(&bytes) {
-                                        // full-block JSON (old node, fallback)
-                                        for v in &resp.blocks {
-                                            if let Some(h) = v.get("header") {
-                                                if let Ok(header) = serde_json::from_value::<sigil_header::SigilBlockHeaderV0>(h.clone()) {
-                                                    let _ = store.put_block_fast(header);
-                                                    got += 1;
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        crate::tlog!("[p2p-sync] resp: unparseable ({} bytes)", bytes.len());
-                                    }
+                            None => {
+                                if start <= store.synced_to() + CHUNK {
+                                    crate::tlog!("[D] TIMEOUT start={start} peer={} synced={}", &peer[..8.min(peer.len())], store.synced_to());
                                 }
-                                store.advance();
-                                let now_synced = store.synced_to();
-                                // v0.9.0 FULL VERIFYING SYNC: validate the freshly-downloaded
-                                // prefix as a connected spine (precheck + parent linkage) before
-                                // calling it "synced". Bounded per batch so a multi-M-block chain
-                                // stays responsive; the watermark persists + resumes. A real break
-                                // (not the download frontier) is surfaced loudly.
-                                const VERIFY_BUDGET: u64 = 50_000;
-                                let report = crate::chain_verify::verify_to(&mut store, VERIFY_BUDGET);
-                                let vbreak = match &report.first_break {
-                                    Some((h, crate::chain_verify::BreakReason::Missing)) if *h >= now_synced => None,
-                                    Some((h, reason)) => Some(format!("h={h}: {reason}")),
-                                    None => None,
-                                };
-                                {
-                                    let mut s = state_clone.lock().unwrap();
-                                    s.blocks_synced = now_synced;
-                                    s.sync_total = now_synced;
-                                    s.sync_cursor = now_synced;
-                                    s.sync_height = now_synced;
-                                    s.fetched_total += got as u64;
-                                    s.verified = report.verified_to;
-                                    s.verify_break = vbreak;
-                                    if now_synced > s.peer_best_height { s.peer_best_height = now_synced; }
-                                    s.last_message_at = Some(Instant::now());
-                                }
-                                crate::tlog!("[p2p-sync] CYCLE: {} blk · net {:?} · ingest {:?} · synced {} → {}",
-                                    got, t_net, t_ing0.elapsed(), cursor, now_synced);
-                                sync_cursor = sync_cursor.wrapping_add(1); // rotation counter
+                                // Timed out: bench the peer briefly so the fast peers carry the load.
+                                // Refill re-requests this range (now clear of `assigned`) next cycle.
+                                peer_bench.insert(peer, Instant::now() + BENCH);
                             }
                         }
                     }
 
-                    // Slow announce: peer-count refresh.
-                    if last_announce.elapsed() >= tick {
-                        last_announce = Instant::now();
-                        state_clone.lock().unwrap().peer_count = net.peer_count();
+                    // ── REFILL: keep the next MAX_INFLIGHT chunks AT THE FRONTIER in flight ──
+                    // FRONTIER-ANCHORED (not a monotonic cursor): every cycle we (re)issue the next
+                    // MAX_INFLIGHT consecutive chunks starting at the CURRENT contiguous frontier,
+                    // skipping any already in flight. So the frontier chunk is ALWAYS being fetched;
+                    // a stuck/slow chunk's `assigned` entry clears on completion/timeout and it's
+                    // re-requested to a ROTATING peer next cycle. No cursor / retry queue / look-ahead
+                    // racing past the frontier — that machinery starved the lead chunk (the chunk that
+                    // actually advances synced_to) while slots went to far-ahead ranges. Out-of-order
+                    // arrivals are reordered by the store (height index + advance); re-requests are
+                    // idempotent. advance() here keeps the frontier fresh the instant a chunk lands.
+                    store.advance();
+                    let frontier_chunk = ((store.synced_to() / CHUNK) * CHUNK).max(sync_base);
+
+                    // ── PROCESS HEIGHT-PROBE replies: seed peer_best from the peer's real tip ──
+                    while let Ok(b) = probe_rx.try_recv() {
+                        let got = ingest_backfill_bytes(&b, &mut store); // probe headers are free backfill
+                        fetched_session += got as u64;
+                        if let Some(maxh) = max_header_height(&b) {
+                            let mut s = state_clone.lock().unwrap();
+                            if maxh > s.peer_best_height { s.peer_best_height = maxh; }
+                        }
                     }
 
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    // ── PULL HEIGHT PROBE (the gossip⇄backfill deadlock fix) ──────────────────
+                    // peer_best was previously learnable ONLY from inbound gossip (live-tip
+                    // ingest / SyncProgress). A node that connects but receives no gossip
+                    // (gossipsub graft failure / silent producers) kept peer_best=0, so the
+                    // refill below — gated on `peer_best > 0` and itself a PULL (send_request) —
+                    // never fired a single backfill and the node stuck at base forever. This
+                    // asks a healthy peer for the open-ended range [frontier, u64::MAX]; the
+                    // responder CLAMPS the served range to its own tip (sigil-node main.rs:
+                    // `hi = req.to.min(top)…`), so the reply's max height is a real lower bound
+                    // on that peer's head — no responder change, no gossip dependency. Re-probed
+                    // every PROBE_EVERY so peer_best tracks the tip and the refill self-sustains
+                    // all the way to the true head (each reply also lands up to 8192 free headers).
+                    if last_probe.elapsed() >= PROBE_EVERY {
+                        last_probe = Instant::now();
+                        let now = Instant::now();
+                        let healthy: Vec<_> = net.connected_peers().into_iter()
+                            .filter(|p| peer_bench.get(&p.to_string()).map_or(true, |&u| now >= u))
+                            .collect();
+                        if let Some(&peer) = healthy.first() {
+                            let payload = serde_json::to_vec(
+                                &BackfillReq { from: frontier_chunk, to: u64::MAX, headers_only: true }
+                            ).unwrap();
+                            let n = net.clone();
+                            let tx = probe_tx.clone();
+                            tokio::spawn(async move {
+                                let r = tokio::time::timeout(REQ_TIMEOUT, n.send_request(peer, payload)).await;
+                                if let Ok(Ok(b)) = r { let _ = tx.send(b); }
+                            });
+                        }
+                    }
+
+                    let peer_best = state_clone.lock().unwrap().peer_best_height;
+                    if peer_best > 0 {
+                        let now = Instant::now();
+                        let healthy: Vec<_> = net.connected_peers().into_iter()
+                            .filter(|p| peer_bench.get(&p.to_string()).map_or(true, |&u| now >= u))
+                            .collect();
+                        if !healthy.is_empty() {
+                            for i in 0..(MAX_INFLIGHT as u64) {
+                                if inflight >= MAX_INFLIGHT { break; }
+                                let start = frontier_chunk + i * CHUNK;
+                                if start >= peer_best { break; }          // past the tip
+                                if !assigned.insert(start) { continue; }  // already in flight
+                                let peer = healthy[rr % healthy.len()];
+                                rr = rr.wrapping_add(1);
+                                let payload = serde_json::to_vec(
+                                    &BackfillReq { from: start, to: start + CHUNK, headers_only: true }
+                                ).unwrap();
+                                let n = net.clone();
+                                let tx = done_tx.clone();
+                                let peer_str = peer.to_string();
+                                inflight += 1;
+                                tokio::spawn(async move {
+                                    let r = tokio::time::timeout(REQ_TIMEOUT, n.send_request(peer, payload)).await;
+                                    let bytes = match r { Ok(Ok(b)) => Some(b), _ => None };
+                                    let _ = tx.send((start, peer_str, bytes));
+                                });
+                            }
+                        }
+                    }
+
+                    // ── FAST PERIODIC (150ms): advance the contiguous frontier + publish state ──
+                    // Cheap — just walks any newly-contiguous heights and updates the TUI/window.
+                    // Verification is split out to a SLOW timer below so its db-reads never gate
+                    // the ingest/refill hot path (that was a v0.10.0 t_verify=3.5s stall).
+                    if last_state.elapsed() >= Duration::from_millis(150) {
+                        last_state = Instant::now();
+                        store.advance();
+                        let now_synced = store.synced_to();
+                        // DYNAMIC BASE: the lowest servable height creeps UP as producers prune early
+                        // history from their RAM window (the disk range-serve of pruned-low ranges is
+                        // unreliable). If the frontier chunk stays unservable by ALL peers for ≥5s
+                        // while we're below the tip, skip it: advance `base` one chunk and re-anchor.
+                        // Self-heals to whatever the mesh actually serves (verified spine then anchors
+                        // at the lowest servable height, honestly — not necessarily genesis).
+                        if now_synced > last_synced_seen {
+                            last_synced_seen = now_synced;
+                            last_advance_t = Instant::now();
+                        } else if peer_best > now_synced && last_advance_t.elapsed() >= Duration::from_secs(5) {
+                            let new_base = store.base().saturating_add(CHUNK);
+                            crate::tlog!("[sync] frontier {} unservable ≥5s (early history pruned from mesh) — base → {}", now_synced, new_base);
+                            store.set_base(new_base);
+                            last_synced_seen = store.synced_to();
+                            last_advance_t = Instant::now();
+                        }
+                        let now_synced = store.synced_to();
+                        let mut s = state_clone.lock().unwrap();
+                        s.blocks_synced = now_synced;
+                        s.sync_total = now_synced;
+                        s.sync_cursor = now_synced;
+                        s.sync_height = now_synced;
+                        s.fetched_total = fetched_session;
+                        s.peer_count = net.peer_count();
+                        if now_synced > s.peer_best_height { s.peer_best_height = now_synced; }
+                        s.last_message_at = Some(Instant::now());
+                    }
+
+                    // ── SLOW PERIODIC (1.5s): verify the spine + flush the memtable ──────────
+                    // verify_to walks only NEW contiguous headers (precheck + parent linkage) and
+                    // persists the watermark; a small budget keeps each pass bounded. flush() rolls
+                    // the growing memtable to an SST so it can't balloon during a multi-M sync.
+                    if last_verify.elapsed() >= Duration::from_millis(1500) {
+                        last_verify = Instant::now();
+                        const VERIFY_BUDGET: u64 = 40_000;
+                        let report = crate::chain_verify::verify_to(&mut store, VERIFY_BUDGET);
+                        let vbreak = match &report.first_break {
+                            Some((h, crate::chain_verify::BreakReason::Missing)) if *h >= store.synced_to() => None,
+                            Some((_h, crate::chain_verify::BreakReason::Missing)) => None,
+                            Some((h, reason)) => Some(format!("h={h}: {reason}")),
+                            None => None,
+                        };
+                        let _ = store.flush();
+                        let mut s = state_clone.lock().unwrap();
+                        s.verified = report.verified_to;
+                        s.verify_break = vbreak;
+                    }
+
+                    // Yield: the request tasks run on worker threads (their results queue in
+                    // done_rx regardless), so a short tick keeps the loop from busy-spinning
+                    // while staying responsive to gossip + completions.
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             });
         });

@@ -719,25 +719,37 @@ impl P2PBlockSync {
                         // set so the probe/refill keeps firing best-effort (bench is advisory).
                         if healthy.is_empty() { healthy = net.connected_peers(); }
                         if !healthy.is_empty() {
+                            // v0.29 (chronos-driven): the FRONTIER chunk (i==0) is the ONE that
+                            // advances `synced`. On a lossy network a single peer's timeout stalls
+                            // it for a whole cycle → the [D] TIMEOUT storm / erratic progress.
+                            // chronos showed redundancy lifts lossy delivery 75%→98%, so request the
+                            // frontier from up to FRONTIER_REDUNDANCY peers IN PARALLEL — it lands as
+                            // soon as ANY responds; duplicate replies are idempotent (store dedups by
+                            // height). Look-ahead chunks (i>0) stay single-peer to avoid flooding.
+                            const FRONTIER_REDUNDANCY: usize = 3;
                             for i in 0..(MAX_INFLIGHT as u64) {
                                 if inflight >= MAX_INFLIGHT { break; }
                                 let start = frontier_chunk + i * CHUNK;
                                 if start >= peer_best { break; }          // past the tip
                                 if !assigned.insert(start) { continue; }  // already in flight
-                                let peer = healthy[rr % healthy.len()];
-                                rr = rr.wrapping_add(1);
-                                let payload = serde_json::to_vec(
-                                    &BackfillReq { from: start, to: start + CHUNK, headers_only: true }
-                                ).unwrap();
-                                let n = net.clone();
-                                let tx = done_tx.clone();
-                                let peer_str = peer.to_string();
-                                inflight += 1;
-                                tokio::spawn(async move {
-                                    let r = tokio::time::timeout(REQ_TIMEOUT, n.send_request(peer, payload)).await;
-                                    let bytes = match r { Ok(Ok(b)) => Some(b), _ => None };
-                                    let _ = tx.send((start, peer_str, bytes));
-                                });
+                                let fanout = if i == 0 { FRONTIER_REDUNDANCY.min(healthy.len()).max(1) } else { 1 };
+                                for k in 0..fanout {
+                                    if inflight >= MAX_INFLIGHT { break; }
+                                    let peer = healthy[(rr + k) % healthy.len()];
+                                    let payload = serde_json::to_vec(
+                                        &BackfillReq { from: start, to: start + CHUNK, headers_only: true }
+                                    ).unwrap();
+                                    let n = net.clone();
+                                    let tx = done_tx.clone();
+                                    let peer_str = peer.to_string();
+                                    inflight += 1;
+                                    tokio::spawn(async move {
+                                        let r = tokio::time::timeout(REQ_TIMEOUT, n.send_request(peer, payload)).await;
+                                        let bytes = match r { Ok(Ok(b)) => Some(b), _ => None };
+                                        let _ = tx.send((start, peer_str, bytes));
+                                    });
+                                }
+                                rr = rr.wrapping_add(fanout);
                             }
                         }
                     }

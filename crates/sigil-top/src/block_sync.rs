@@ -406,7 +406,13 @@ impl P2PBlockSync {
                             }
                             flux_p2p::SwarmAppEvent::SyncProgress { height, hash_hex, peer_best_height, total_synced, peer_count: _ } => {
                                 let mut s = state_clone.lock().unwrap();
-                                s.sync_height = height;
+                                // v0.18.5: the gossiped `height` is the NETWORK TIP, not our sync
+                                // progress. Do NOT clobber sync_height with it (that made the
+                                // dashboard show the ~6.9M tip as synced_to and a 0 blk/s rate while
+                                // the real backfill frontier climbed underneath). peer_best (the
+                                // target) is updated below; sync_height stays the real frontier set
+                                // in the fast-periodic from store.synced_to().
+                                let _gossiped_tip = height;
                                 s.sync_hash_hex = hash_hex;
                                 s.sync_total = total_synced;
                                 if peer_best_height > s.peer_best_height {

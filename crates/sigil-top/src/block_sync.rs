@@ -303,13 +303,37 @@ impl P2PBlockSync {
         // 0 blk/s). A standalone OS thread with BLOCKING reqwest polls every 3s, immune to
         // that contention, and seeds peer_best directly.
         if recent_only {
+            // v0.23: EAGER tip-seed. The fast-snap fires only once peer_best is non-zero, and
+            // it's read on the sync loop's FIRST cycle. Before this, peer_best was seeded ONLY
+            // by the poller thread's first fetch, which races the sync loop's startup — so the
+            // first snap could miss and the monitor showed "connecting…" for an extra RTT (or,
+            // if the poller thread was slow to schedule, several cycles). Seed SYNCHRONOUSLY
+            // here, before either thread spawns, so the snap is guaranteed on cycle 1 (no
+            // startup gap). Best-effort: a brief oracle blip just falls back to the poller.
+            if let Some(h) = fetch_live_tip_blocking() {
+                let mut s = state.lock().unwrap();
+                if h > s.peer_best_height { s.peer_best_height = h; }
+            }
+            // v0.21: DEDICATED tip-poller thread. The monitor's fast-snap needs a FRESH live
+            // tip in peer_best; the in-runtime async fetch was non-deterministically starved by
+            // the backfill/verify workload (peer_best froze → monitor parked behind the tip at
+            // 0 blk/s). A standalone OS thread with BLOCKING reqwest is immune to that
+            // contention and seeds peer_best directly.
+            // v0.23: ADAPTIVE cadence — poll every 1s during warmup (first ~15 polls) so a
+            // freshly-launched monitor pins to a fast-moving tip immediately, then settle to
+            // 3s steady-state (the tip moves ~100 blk/s, so 3s is ample once caught up).
             let tip_state = state.clone();
-            thread::spawn(move || loop {
-                if let Some(h) = fetch_live_tip_blocking() {
-                    let mut s = tip_state.lock().unwrap();
-                    if h > s.peer_best_height { s.peer_best_height = h; }
+            thread::spawn(move || {
+                let mut polls: u32 = 0;
+                loop {
+                    if let Some(h) = fetch_live_tip_blocking() {
+                        let mut s = tip_state.lock().unwrap();
+                        if h > s.peer_best_height { s.peer_best_height = h; }
+                    }
+                    polls = polls.saturating_add(1);
+                    let cadence = if polls < 15 { Duration::from_secs(1) } else { Duration::from_secs(3) };
+                    thread::sleep(cadence);
                 }
-                thread::sleep(Duration::from_secs(3));
             });
         }
 

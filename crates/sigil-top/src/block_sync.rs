@@ -238,6 +238,11 @@ pub struct P2PSyncState {
     /// smooth: the contiguous tip advances in bursts (gap-fills) and would read 0
     /// between jumps, while this climbs continuously while fetching.
     pub fetched_total: u64,
+    /// v0.22.26: the recent-window anchor (blocks below it are NOT downloaded — they are
+    /// attested by the fold-proof, not synced). `blocks_synced - base` = blocks REALLY
+    /// downloaded in the live window. Lets the UI tell the truth instead of reporting the
+    /// base-jumped `synced_to` as if the whole chain were downloaded.
+    pub base: u64,
     /// v0.9.0: contiguous CRYPTOGRAPHICALLY-VERIFIED tip — blocks 0..verified each passed
     /// precheck + parent-linkage (spine connects back to genesis). `blocks_synced` means
     /// "downloaded"; THIS means "downloaded AND validated as one chain". The full-sync
@@ -629,6 +634,14 @@ impl P2PBlockSync {
                         }
                     }
 
+                    // v0.21.1 FIX (0 blk/s after snap): `frontier_chunk` was computed at the TOP of
+                    // the loop from synced_to() BEFORE the snap above moved the base. So once a snap
+                    // fired, the refill below kept requesting GENESIS-area chunks (start=1,4097,…) —
+                    // blocks BELOW the new base that ingest but never advance synced_to → the monitor
+                    // displayed at the base yet sat at 0.0% / 0 blk/s forever. Recompute the frontier
+                    // from the CURRENT (post-snap) synced_to so the refill targets the snapped window.
+                    let frontier_chunk = ((store.synced_to() / CHUNK) * CHUNK).max(sync_base);
+
                     if peer_best > 0 {
                         let now = Instant::now();
                         let mut healthy: Vec<_> = net.connected_peers().into_iter()
@@ -711,12 +724,25 @@ impl P2PBlockSync {
                         let now_synced = store.synced_to();
                         let mut s = state_clone.lock().unwrap();
                         s.blocks_synced = now_synced;
+                        s.base = store.base();
                         s.sync_total = now_synced;
                         s.sync_cursor = now_synced;
                         s.sync_height = now_synced;
                         s.fetched_total = fetched_session;
                         s.peer_count = net.peer_count();
                         if now_synced > s.peer_best_height { s.peer_best_height = now_synced; }
+                        // v0.22: a MONITOR displays the VERIFIED LIVE TIP, not the contiguous
+                        // backfill frontier. The newest blocks aren't reliably range-served in
+                        // real time, so contiguous `synced` ALWAYS lags the head — an unwinnable
+                        // race that left the bar stuck "Nk behind / 0 blk/s". A light monitor's
+                        // job is to track + verify the live tip (the signed tip-proof in
+                        // peer_best), so show THAT as the sync height → the bar reads AT TIP.
+                        // The cryptographic spine watermark (⛓✓ = s.verified) stays honest.
+                        if recent_only && s.peer_best_height > now_synced {
+                            s.blocks_synced = s.peer_best_height;
+                            s.sync_height = s.peer_best_height;
+                            s.sync_total = s.peer_best_height;
+                        }
                         s.last_message_at = Some(Instant::now());
                     }
 

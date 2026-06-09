@@ -114,6 +114,8 @@ impl LocalApi {
             "height": top,
             "synced_to": s.blocks_synced,
             "tip": s.peer_best_height,
+            "base": s.base,
+            "downloaded": s.blocks_synced.saturating_sub(s.base),
             "fetched": s.fetched_total,
             "verified": s.verified,
             "peers": s.peer_count,

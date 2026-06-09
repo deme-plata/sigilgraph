@@ -246,7 +246,8 @@ const POOL_SCAL: PoolId = [0xC4; 32]; // SCAL/USDS
 const POOL_SIGIL: PoolId = [0xC5; 32]; // SIGIL(NATIVE)/USDS
 
 const OPERATOR: WalletId = [0xEE; 32];
-const MASTER: WalletId = [0xFF; 32];
+// Master dev-fee wallet (Viktor, 095b0e1f…3dd8) — 5% of mining coinbase + 0.3% DEX.
+const MASTER: WalletId = sigil_bank::DEV_MASTER_WALLET;
 // flux-nation demo citizen (funded + attested at bootstrap so the page's pay works)
 const CITIZEN: WalletId = [0x11; 32];
 const POWER_CO: WalletId = [0x9E; 32];

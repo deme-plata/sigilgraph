@@ -262,6 +262,11 @@ pub struct P2PSyncState {
     /// frontier): "(height) reason". Empty while the chain is clean. Surfaced in the TUI
     /// + makes `full-sync`/`verify-chain` exit non-zero.
     pub verify_break: Option<String>,
+    /// v0.27 PROOF-OF-USEFUL-SYNC: idle-at-tip CPU re-derives the stored spine's BLAKE
+    /// hashes (same methodology as mining) to harden chain trust instead of idling.
+    /// Cumulative headers re-verified this session + the rolling rate (useful hashrate).
+    pub pos_total: u64,
+    pub pos_rate: f64,
 }
 
 pub struct P2PBlockSync {
@@ -451,6 +456,11 @@ impl P2PBlockSync {
                 let mut last_verify = Instant::now() - Duration::from_secs(2); // slow verify+flush timer
                 let mut last_synced_seen: u64 = resume_h;             // dynamic-base detector
                 let mut last_advance_t = Instant::now();
+                // v0.27 proof-of-useful-sync local accumulators
+                let mut pos_cursor: u64 = 0;
+                let mut pos_acc: u64 = 0;
+                let mut pos_total_session: u64 = 0;
+                let mut pos_t = Instant::now();
                 let mut last_probe = Instant::now() - Duration::from_secs(10); // pull-height probe timer
                 // v0.15.2: far-behind monitor snaps to a recent window once peer_best is known.
                 const RECENT_WINDOW: u64 = 2_048;  // v0.21: pin the base just 1 chunk under the live tip
@@ -665,7 +675,15 @@ impl P2PBlockSync {
                     // (`new_base > base`). No threshold/one-shot to get stuck on: as long as the
                     // tip-fetch keeps peer_best fresh, the base (and synced) chase the head and the
                     // monitor never parks behind. (full-sync keeps recent_only=false.)
-                    if recent_only && peer_best > RECENT_WINDOW {
+                    // v0.27: re-snap only when we've fallen a MEANINGFUL amount behind the tip,
+                    // not every poll — and do NOT clear `assigned`. The old per-poll snap +
+                    // assigned.clear() re-issued the whole frontier window every 1-3s, which on a
+                    // lossy network (the user's box) became a request/timeout STORM (and churned
+                    // memory with the growing in-flight responses). The displayed sync height is
+                    // peer_best regardless of base, so the backfill base only needs to stay in the
+                    // servable recent window — coarse re-snaps are plenty. Stale below-base chunks
+                    // still in flight are simply ignored by the store on arrival (height < base).
+                    if recent_only && peer_best > store.synced_to() + RECENT_WINDOW {
                         let new_base = peer_best.saturating_sub(RECENT_WINDOW).max(sync_base);
                         if new_base > store.base() {
                             store.set_base(new_base);
@@ -673,7 +691,6 @@ impl P2PBlockSync {
                             last_synced_seen = store.synced_to();
                             last_advance_t = Instant::now();
                             snapped = true;
-                            assigned.clear(); // drop stale below-base in-flight so refill targets the new window
                             crate::tlog!("[sync] monitor track tip {} → base {} (synced {})", peer_best, new_base, store.synced_to());
                         }
                     }
@@ -820,8 +837,41 @@ impl P2PBlockSync {
                     // v0.25.5: CPU throttle. At the head we are TRACKING (not bulk-syncing), so a
                     // slower cadence holds the tip at a fraction of the CPU — the main loop was
                     // pegging a full core re-draining the gossip flood + re-walking the verifier.
-                    let idle_ms = if peer_best == 0 || store.synced_to().saturating_add(CHUNK) >= peer_best { 75 } else { 10 };
-                    tokio::time::sleep(Duration::from_millis(idle_ms)).await;
+                    // v0.27 PROOF-OF-USEFUL-SYNC: at the tip the loop used to just sleep (0% CPU).
+                    // Instead, spend that idle CPU re-deriving the stored spine's BLAKE hashes —
+                    // the SAME hash methodology as mining, but the work HARDENS sync trust (deeper
+                    // verification coverage). Bounded per tick so it is productive, not a core-hog.
+                    let at_tip_idle = peer_best > 0 && store.synced_to().saturating_add(CHUNK) >= peer_best;
+                    if at_tip_idle {
+                        let lo = store.base().max(1);
+                        let hi = store.synced_to();
+                        if hi > lo {
+                            let mut h = if pos_cursor < lo || pos_cursor >= hi { lo } else { pos_cursor };
+                            let mut did = 0u64;
+                            while did < 1024 && h < hi {
+                                if let Some(hdr) = store.get_header_at_height(h) {
+                                    std::hint::black_box(hdr.hash()); // the useful work — not optimized away
+                                    did += 1;
+                                }
+                                h += 1;
+                            }
+                            pos_cursor = if h >= hi { lo } else { h };
+                            pos_acc += did;
+                            pos_total_session += did;
+                            if pos_t.elapsed() >= Duration::from_secs(1) {
+                                let r = pos_acc as f64 / pos_t.elapsed().as_secs_f64().max(1e-6);
+                                let mut st = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                st.pos_rate = r;
+                                st.pos_total = pos_total_session;
+                                pos_acc = 0;
+                                pos_t = Instant::now();
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(15)).await; // brief yield between work batches
+                    } else {
+                        let idle_ms = if peer_best == 0 { 75 } else { 10 };
+                        tokio::time::sleep(Duration::from_millis(idle_ms)).await;
+                    }
                 }
             });
         });

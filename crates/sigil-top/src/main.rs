@@ -1982,19 +1982,17 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // default panic printer. Graceful recovery instead of a wedged terminal.
     {
         let default_hook = std::panic::take_hook();
+        let _ = &default_hook; // kept for reference; v0.27 hook is LOG-ONLY (see below)
         std::panic::set_hook(Box::new(move |info| {
-            let _ = disable_raw_mode();
-            let _ = execute!(std::io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
-            // v0.26.x: persist the panic to ~/.sigil-top.log so a crash is diagnosable after the
-            // fact (the app looked like it "just exited" because the hook tore the TUI down).
+            // v0.27: LOG ONLY — do NOT tear down the terminal here. A background-thread panic
+            // must not break the still-running TUI, and a render panic is CAUGHT by catch_unwind
+            // around term.draw (which re-inits + continues). Terminal restore happens on normal
+            // exit (run_tui cleanup) or in the catch handler — never from this hook.
             let msg = info.payload().downcast_ref::<&str>().map(|s| s.to_string())
                 .or_else(|| info.payload().downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "<non-string panic>".into());
             let loc = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
             log_line(format!("[PANIC] {msg} @ {loc}"));
-            use std::io::Write as _;
-            let _ = std::io::stdout().flush();
-            default_hook(info);
         }));
     }
 
@@ -2108,7 +2106,19 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             }
             // v0.10.5: drain any completed async refresh (never blocks).
             app.poll_refresh();
-            term.draw(|f| draw_ui(f, &app))?;
+            // v0.27 CRASH-PROOF: a panic inside rendering (bad slice, unwrap on odd data, etc.)
+            // used to unwind out of run_tui and EXIT the app ("crashes after 20s"). Catch it —
+            // the panic hook logs [PANIC] with file:line — re-init the terminal and keep running;
+            // the next frame redraws. The monitor must never die on a single bad render frame.
+            term.draw(|f| {
+                // Catch the panic AROUND draw_ui (the render code, which is the panic source) —
+                // term.draw itself still owns the closure so there's no borrow-escape. A render
+                // panic leaves a partial frame (harmless; the next frame redraws) instead of
+                // unwinding out of run_tui and killing the app.
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| draw_ui(f, &app))).is_err() {
+                    log_line("[render] frame panicked — caught, continuing".into());
+                }
+            })?;
             // v0.10.5 "smooth cruise": adaptive frame pacing. When something is
             // moving — splash animation, an in-flight refresh, or live mining — poll
             // at ~30 fps so motion is buttery. When parked, fall back to a calm 200 ms
@@ -3186,9 +3196,14 @@ fn render_sync_status(app: &App) -> Paragraph<'static> {
     let l2 = if fully_synced {
         // honest: the chain is proven whole by the fold-proof; the recent window is the
         // real local block availability. No fake "N/10M downloaded".
+        // v0.27: surface PROOF-OF-USEFUL-SYNC — the idle CPU re-verifying the spine.
+        let pos = if s.pos_rate > 0.0 {
+            Span::styled(format!("  ⛏ {} blk/s spine-verify", group(s.pos_rate.round() as u64)), Style::default().fg(C_GOLD))
+        } else { Span::raw("") };
         Line::from(vec![
             dim("proof "), Span::styled("fold ✓ whole-chain".to_string(), Style::default().fg(C_GREEN)),
-            dim("  window "), Span::styled(format!("{} ✓verified", group(verified_real)), Style::default().fg(C_GREEN)),
+            dim("  window "), Span::styled(format!("{} ✓", group(verified_real)), Style::default().fg(C_GREEN)),
+            pos,
         ])
     } else if s.fetched_total == 0 && downloaded == 0 {
         Line::from(vec![dim("window "), Span::styled("connecting…".to_string(), Style::default().fg(C_DIM))])

@@ -160,15 +160,21 @@ async fn fetch_live_tip() -> Option<u64> {
         .timeout(Duration::from_secs(5))
         .build()
         .ok()?;
+    // cache-buster (per-call) so a CDN/proxy never pins the tip; the publisher uses one too.
+    let cb = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
     for url in URLS {
-        if let Ok(resp) = client.get(url).send().await {
-            if let Ok(v) = resp.json::<serde_json::Value>().await {
-                if let Some(h) = v.get("height").and_then(|x| x.as_u64()) {
-                    if h > 0 {
-                        return Some(h);
+        let u = format!("{url}?cb={cb}");
+        match client.get(&u).header("cache-control", "no-cache").send().await {
+            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                Ok(v) => {
+                    if let Some(h) = v.get("height").and_then(|x| x.as_u64()) {
+                        if h > 0 { return Some(h); }
                     }
                 }
-            }
+                Err(e) => crate::tlog!("[tip] {url} json err: {e}"),
+            },
+            Err(e) => crate::tlog!("[tip] {url} get err: {e}"),
         }
     }
     None
@@ -348,8 +354,7 @@ impl P2PBlockSync {
                 let mut last_advance_t = Instant::now();
                 let mut last_probe = Instant::now() - Duration::from_secs(10); // pull-height probe timer
                 // v0.15.2: far-behind monitor snaps to a recent window once peer_best is known.
-                const FAR_BEHIND: u64 = 200_000;   // gap beyond which crawling genesis is pointless
-                const RECENT_WINDOW: u64 = 50_000; // recent blocks to fetch when snapping (producers serve these fast)
+                const RECENT_WINDOW: u64 = 2_048;  // v0.21: pin the base just 1 chunk under the live tip
                 let mut snapped = false;
 
                 loop {
@@ -551,7 +556,15 @@ impl P2PBlockSync {
                     // fast — the monitor reaches the live tip in seconds. Full chain integrity
                     // is the fold-proof's job, not a 6M-block contiguous download. (full-sync
                     // passes recent_only=false and keeps the genesis-anchored crawl.)
-                    if recent_only && !snapped && peer_best > store.synced_to() + FAR_BEHIND {
+                    // v0.21: CONTINUOUSLY re-snap to chase the live tip. A one-shot snap parked
+                    // ~10k under the tip on a gappy final range and never recovered. Re-snap
+                    // whenever synced falls RESNAP_GAP behind the tip so the monitor jumps the
+                    // gap and stays pinned at the head. (full-sync keeps recent_only=false.)
+                    // v0.21: drive the base to (live tip − RECENT_WINDOW) EVERY tick — monotonic
+                    // (`new_base > base`). No threshold/one-shot to get stuck on: as long as the
+                    // tip-fetch keeps peer_best fresh, the base (and synced) chase the head and the
+                    // monitor never parks behind. (full-sync keeps recent_only=false.)
+                    if recent_only && peer_best > RECENT_WINDOW {
                         let new_base = peer_best.saturating_sub(RECENT_WINDOW).max(sync_base);
                         if new_base > store.base() {
                             store.set_base(new_base);
@@ -559,7 +572,8 @@ impl P2PBlockSync {
                             last_synced_seen = store.synced_to();
                             last_advance_t = Instant::now();
                             snapped = true;
-                            crate::tlog!("[sync] monitor {} behind tip {} — fast-snap base → {} (recent window)", peer_best.saturating_sub(store.synced_to()), peer_best, new_base);
+                            assigned.clear(); // drop stale below-base in-flight so refill targets the new window
+                            crate::tlog!("[sync] monitor track tip {} → base {} (synced {})", peer_best, new_base, store.synced_to());
                         }
                     }
 

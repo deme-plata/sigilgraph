@@ -196,6 +196,20 @@ impl P2PBlockSync {
         self.state.clone()
     }
 
+    /// v0.13.1: seed the network tip from an EXTERNAL source (the HTTP status feed)
+    /// so the backfill refill fires even when gossip AND the P2P height-probe are
+    /// silent (a frozen or quiet mesh, or a producer that gossips nothing). Before
+    /// this, `peer_best_height` was learnable ONLY from inbound gossip / a probe
+    /// reply; on a quiet mesh it stayed 0, the `peer_best > 0` refill gate never
+    /// opened, and the sync sat on "connecting" forever. Only ever RAISES the tip.
+    pub fn set_known_tip(&self, height: u64) {
+        if height == 0 { return; }
+        let mut s = self.state.lock().unwrap();
+        if height > s.peer_best_height {
+            s.peer_best_height = height;
+        }
+    }
+
     pub fn launch(mut store: BlockStore) -> Self {
         let state = Arc::new(Mutex::new(P2PSyncState::default()));
         let new_blocks = Arc::new(Mutex::new(Vec::new()));
@@ -262,13 +276,19 @@ impl P2PBlockSync {
                 // independent chunk requests stream in parallel; a slow peer never blocks the
                 // fast ones, and the store's height-index + advance() reorder out-of-order
                 // arrivals (the store IS the buffer). Reviewed with DeepSeek-V4 2026-06-09.
-                const CHUNK: u64 = 2048;            // headers/request (~9 MB) — smaller than the
-                                                   // old 8192 ⇒ lower tail latency, faster reroute
-                const MAX_INFLIGHT: usize = 8;      // outstanding requests across all peers
+                const CHUNK: u64 = 8192;            // v0.12.1 perf: match the producer serve cap
+                                                   // (hi = lo+8192) — 4× blocks per round-trip vs 2048.
+                const MAX_INFLIGHT: usize = 16;     // v0.12.1 perf: 2× parallelism (16×8192 ≈ 128k
+                                                    // blocks in flight) to hide per-serve latency → 8000 blk/s target
                 // Look-ahead cap must be TIGHT: a large window lets next_start race far ahead of a
                 // stalled frontier, so all MAX_INFLIGHT slots get consumed by high-range chunks that
                 // don't advance synced_to while the lead chunk starves (v0.10.0 frontier-stall bug).
-                const REQ_TIMEOUT: Duration = Duration::from_secs(4);
+                // v0.12.1: was 4s — far too tight. The producers serve backfill while
+                // also producing ~100 blk/s (≈54% CPU), so a ~2 MB chunk over WAN
+                // routinely takes >4s → EVERY request timed out → fetched_total stuck at
+                // 0 → the UI sat at "connecting…" forever. 15s lets a slow-but-alive
+                // serve complete; dead peers are still benched on timeout and rerouted.
+                const REQ_TIMEOUT: Duration = Duration::from_secs(15);
                 const PROBE_EVERY: Duration = Duration::from_millis(500); // pull-height probe cadence
                 const BENCH: Duration = Duration::from_secs(8); // bench a timed-out peer this long
                 const EMPTY_BENCH: Duration = Duration::from_secs(45); // bench a peer that LACKS a needed range
@@ -523,7 +543,11 @@ impl P2PBlockSync {
                     // the growing memtable to an SST so it can't balloon during a multi-M sync.
                     if last_verify.elapsed() >= Duration::from_millis(1500) {
                         last_verify = Instant::now();
-                        const VERIFY_BUDGET: u64 = 40_000;
+                        // v0.15.0 perf: 40k/1.5s capped VERIFIED throughput at ~26.6k blk/s —
+                        // below the 33k target and far below the verify core's measured 52k/s
+                        // (chronos turbosync). 60k/1.5s lifts the verified-watermark ceiling to
+                        // ~40k blk/s so the apply pipeline, not this budget, sets the rate.
+                        const VERIFY_BUDGET: u64 = 60_000;
                         let report = crate::chain_verify::verify_to(&mut store, VERIFY_BUDGET);
                         let vbreak = match &report.first_break {
                             Some((h, crate::chain_verify::BreakReason::Missing)) if *h >= store.synced_to() => None,

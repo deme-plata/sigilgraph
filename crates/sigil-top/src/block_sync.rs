@@ -448,7 +448,7 @@ impl P2PBlockSync {
                     // which starved the whole pipeline (v0.10.0 synced-stuck bug). Cap it so the
                     // loop stays responsive; leftover messages drain over the next iterations.
                     let mut gdrained = 0u32;
-                    while gdrained < 128 {
+                    while gdrained < 48 {  // v0.25.5: smaller drain — less serde+blake per iter (CPU)
                         let (_topic, data) = match block_rx.try_recv() { Ok(x) => x, Err(_) => break };
                         gdrained += 1;
                         let v: serde_json::Value = match serde_json::from_slice(&data) {
@@ -797,7 +797,11 @@ impl P2PBlockSync {
                     // Yield: the request tasks run on worker threads (their results queue in
                     // done_rx regardless), so a short tick keeps the loop from busy-spinning
                     // while staying responsive to gossip + completions.
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    // v0.25.5: CPU throttle. At the head we are TRACKING (not bulk-syncing), so a
+                    // slower cadence holds the tip at a fraction of the CPU — the main loop was
+                    // pegging a full core re-draining the gossip flood + re-walking the verifier.
+                    let idle_ms = if peer_best == 0 || store.synced_to().saturating_add(CHUNK) >= peer_best { 75 } else { 10 };
+                    tokio::time::sleep(Duration::from_millis(idle_ms)).await;
                 }
             });
         });

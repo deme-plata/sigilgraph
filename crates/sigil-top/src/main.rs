@@ -2183,6 +2183,10 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             // v0.6.5: Poll P2P sync state + drain synced blocks into the TUI block list
             if let Some(ref p2p) = app.p2p_sync {
                 app.p2p_state = p2p.poll_state();
+                // v0.13.1: feed the HTTP status height into the P2P backfill so the
+                // refill starts requesting chunks even when gossip/probe are silent —
+                // fixes the sync sitting forever on "connecting" with peer_best=0.
+                p2p.set_known_tip(app.target_height);
                 // Backfill rate (blocks/s) = 10s TRAILING window — the CURRENT speed, not
                 // a lifetime average. A cumulative avg decayed after the catch-up burst
                 // (huge start → ~production rate → looked like it was "slowing to 19/s").
@@ -2423,6 +2427,10 @@ struct SwarmClaim { agent: String, path: String, note: String }
 struct SwarmActivity { agent: String, kind: String, detail: String, at: u64 }
 #[derive(Default, Clone)]
 struct SwarmResult { agent: String, task_id: String, qug: f64, crates: String, success: bool, at: u64 }
+#[derive(Default, Clone)]
+struct SwarmTask { task_id: String, agent: String, crates: String, priority: i64, est_qug: f64 }
+#[derive(Default, Clone)]
+struct SwarmMsg { from: String, text: String, at: u64 }
 
 /// A snapshot of the swarm coordination files written by the Claude Code sessions
 /// (/tmp/flux-swarm*.json|jsonl). Drives the [2] Swarm AI + [3] Results tabs.
@@ -2430,6 +2438,8 @@ struct SwarmResult { agent: String, task_id: String, qug: f64, crates: String, s
 struct SwarmView {
     agents: Vec<SwarmAgent>,
     claims: Vec<SwarmClaim>,
+    tasks: Vec<SwarmTask>,        // v0.14: swarm task board (priority + QUG bounty)
+    feed: Vec<SwarmMsg>,          // v0.14: recent broadcast coordination, newest-first
     activity: Vec<SwarmActivity>, // newest-first
     results: Vec<SwarmResult>,    // newest-first
     completed_count: u64,
@@ -2465,6 +2475,43 @@ fn load_swarm_view() -> SwarmView {
                 }
                 v.agents.sort_by(|a, b| b.qug.partial_cmp(&a.qug).unwrap_or(std::cmp::Ordering::Equal));
             }
+            // v0.14: swarm task board — claims[] carry priority + QUG bounty.
+            if let Some(cl) = j.get("claims").and_then(|x| x.as_array()) {
+                for c in cl {
+                    let agent = c.get("agent").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    if agent.starts_with("test_") { continue; }
+                    v.tasks.push(SwarmTask {
+                        task_id: c.get("task_id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        agent,
+                        crates: c.get("crates").and_then(|x| x.as_array())
+                            .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(","))
+                            .unwrap_or_default(),
+                        priority: c.get("priority").and_then(|x| x.as_i64()).unwrap_or(9),
+                        est_qug: c.get("estimated_qug").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                    });
+                }
+                // Highest priority first (lower number = higher), then bigger bounty.
+                v.tasks.sort_by(|a, b| a.priority.cmp(&b.priority)
+                    .then(b.est_qug.partial_cmp(&a.est_qug).unwrap_or(std::cmp::Ordering::Equal)));
+            }
+        }
+    }
+    // v0.14: broadcast coordination feed (the human-readable "board" chatter).
+    if let Ok(s) = std::fs::read_to_string(format!("{dir}/flux-swarm-messages.jsonl")) {
+        any = true;
+        for line in s.lines().rev() {
+            if v.feed.len() >= 6 { break; }
+            let Ok(j) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+            if j.get("to").and_then(|x| x.as_str()) != Some("*") { continue; }
+            let from = j.get("from").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            if from.starts_with("test_") || from.is_empty() { continue; }
+            // ts_ms may be a number or a stringified number; normalize to secs.
+            let at = j.get("ts_ms").and_then(|x| x.as_u64())
+                .or_else(|| j.get("ts_ms").and_then(|x| x.as_str()).and_then(|s| s.parse::<u64>().ok()))
+                .map(|ms| ms / 1000).unwrap_or(0);
+            let raw = j.get("payload").and_then(|x| x.as_str()).unwrap_or("");
+            let text = raw.lines().next().unwrap_or(raw).to_string();
+            v.feed.push(SwarmMsg { from, text, at });
         }
     }
     if let Ok(s) = std::fs::read_to_string(format!("{dir}/flux-swarm-files.json")) {
@@ -2587,49 +2634,69 @@ fn render_swarm_ai(app: &App) -> Paragraph<'static> {
         lines.push(Line::from(Span::styled(format!(" ⚠ {e}"), Style::default().fg(C_GOLD))));
         lines.push(Line::from(""));
     }
+    let real: Vec<&SwarmAgent> = sw.agents.iter().filter(|a| !a.id.starts_with("test_")).collect();
     lines.push(Line::from(vec![
         Span::styled("  AGENTS ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{}", sw.agents.iter().filter(|a| !a.id.starts_with("test_")).count()), Style::default().fg(C_VBRIGHT)),
-        Span::styled("   CLAIMS ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{}", real.len()), Style::default().fg(C_VBRIGHT)),
+        Span::styled("   TASKS ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{}", sw.tasks.len()), Style::default().fg(C_VBRIGHT)),
+        Span::styled("   FILES ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
         Span::styled(format!("{}", sw.claims.len()), Style::default().fg(C_VBRIGHT)),
-        Span::styled("   COMPLETED ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled("   DONE ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
         Span::styled(format!("{}", sw.completed_count), Style::default().fg(C_GREEN)),
         Span::styled("   QUG PAID ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
         Span::styled(format!("{:.1}", sw.qug_paid), Style::default().fg(C_GOLD)),
     ]));
     lines.push(Line::from(""));
-    let real: Vec<&SwarmAgent> = sw.agents.iter().filter(|a| !a.id.starts_with("test_")).collect();
+    // ── TASK BOARD: claimed jobs with priority + QUG bounty (the index board) ──
+    let max_b = sw.tasks.iter().map(|t| t.est_qug).fold(0.0f64, f64::max);
+    lines.push(Line::from(Span::styled(" ▸ TASK BOARD — claimed jobs · priority · bounty", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
+    for t in sw.tasks.iter().take(7) {
+        let (ptxt, pcol) = match t.priority {
+            0 | 1 => (format!("P{}", t.priority), C_GOLD),
+            2 => ("P2".to_string(), C_CYAN),
+            _ => (format!("P{}", t.priority), C_DIM),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<3}", ptxt), Style::default().fg(pcol).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{:<15}", trunc(&t.agent, 15)), Style::default().fg(agent_color(&t.agent)).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{:<18}", trunc(&t.crates, 18)), Style::default().fg(C_CYAN)),
+            Span::styled(qug_bar(t.est_qug, max_b, 8), Style::default().fg(C_GOLD)),
+            Span::styled(format!(" {:>5.1} QUG", t.est_qug), Style::default().fg(C_GOLD)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    // ── AGENTS leaderboard ──
     let max_q = real.iter().map(|a| a.qug).fold(0.0f64, f64::max);
     lines.push(Line::from(Span::styled(" ▸ AGENTS — leaderboard by QUG earned", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
-    for (i, a) in real.iter().take(7).enumerate() {
-        let ac = agent_color(&a.id);
+    for (i, a) in real.iter().take(5).enumerate() {
         lines.push(Line::from(vec![
             Span::raw(format!("  {} ", medal(i))),
             status_glyph(&a.status),
-            Span::styled(format!(" {:<22}", trunc(&a.id, 22)), Style::default().fg(ac).add_modifier(Modifier::BOLD)),
-            Span::styled(qug_bar(a.qug, max_q, 12), Style::default().fg(C_GOLD)),
+            Span::styled(format!(" {:<20}", trunc(&a.id, 20)), Style::default().fg(agent_color(&a.id)).add_modifier(Modifier::BOLD)),
+            Span::styled(qug_bar(a.qug, max_q, 10), Style::default().fg(C_GOLD)),
             Span::styled(format!(" {:>8.1} QUG", a.qug), Style::default().fg(C_GOLD)),
         ]));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(" ▸ ACTIVE JOB BOARD — who's editing what", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
-    for c in sw.claims.iter().take(9) {
-        let file = c.path.rsplit('/').next().unwrap_or(&c.path).to_string();
+    // ── BROADCAST FEED: the human-readable coordination board ──
+    lines.push(Line::from(Span::styled(" ▸ 📢 BROADCAST FEED", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
+    for m in sw.feed.iter().take(5) {
         lines.push(Line::from(vec![
-            Span::styled("   ◆ ", Style::default().fg(agent_color(&c.agent))),
-            Span::styled(format!("{:<16}", trunc(&c.agent, 16)), Style::default().fg(agent_color(&c.agent)).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{:<20}", trunc(&file, 20)), Style::default().fg(C_CYAN)),
-            Span::styled(trunc(&c.note, 52), Style::default().fg(C_DIM)),
+            Span::styled(format!("  {:>4} ", rel_time(m.at)), Style::default().fg(C_DIM)),
+            Span::styled(format!("{:<16}", trunc(&m.from, 16)), Style::default().fg(agent_color(&m.from)).add_modifier(Modifier::BOLD)),
+            Span::styled(trunc(&m.text, 56), Style::default().fg(C_DIM)),
         ]));
     }
     lines.push(Line::from(""));
+    // ── LIVE ACTIVITY (compact) ──
     lines.push(Line::from(Span::styled(" ▸ LIVE ACTIVITY", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
-    for ev in sw.activity.iter().filter(|e| !e.agent.starts_with("test_")).take(11) {
+    for ev in sw.activity.iter().filter(|e| !e.agent.starts_with("test_")).take(6) {
         lines.push(Line::from(vec![
             Span::styled(format!("  {:>4} ", rel_time(ev.at)), Style::default().fg(C_DIM)),
             Span::styled(format!("{:<16}", trunc(&ev.agent, 16)), Style::default().fg(agent_color(&ev.agent))),
             Span::styled(format!("{:<14}", trunc(&ev.kind, 14)), Style::default().fg(C_GOLD)),
-            Span::styled(trunc(&ev.detail, 48), Style::default().fg(C_DIM)),
+            Span::styled(trunc(&ev.detail, 44), Style::default().fg(C_DIM)),
         ]));
     }
     Paragraph::new(lines).block(card_block("⚡ MCP SWARM AI — JOB INDEX BOARD", C_VBRIGHT))

@@ -2929,6 +2929,9 @@ fn render_sync_status(app: &App) -> Paragraph<'static> {
     let s = &app.p2p_state;
     let verified = app.verify.as_ref().map(|v| v.ok).unwrap_or(false);
     let synced = s.blocks_synced;
+    let base = s.base;
+    let downloaded = synced.saturating_sub(base);       // v0.22.26: REAL blocks in the live window
+    let verified_real = s.verified.saturating_sub(base); // REAL spine-verified in the window
     let tip = s.peer_best_height.max(app.target_height);
     let gap = tip.saturating_sub(synced);
     // v0.21.2: a light monitor tracks the recent window, re-jumping base to chase the
@@ -2952,26 +2955,26 @@ fn render_sync_status(app: &App) -> Paragraph<'static> {
     } else {
         (C_CYAN, Span::styled(format!(" {} behind", group(gap)), Style::default().fg(C_GOLD)))
     };
-    let l1 = Line::from(vec![dim("sync  "), Span::styled(bar, Style::default().fg(bcol)), dim(format!(" {:.0}%", pct)), tail]);
+    // v0.22.26: the mesh does not serve the chain middle, so a full-chain % is fiction.
+    // Show the live HEAD + tracking state; the fold-proof attests the chain below the window.
+    let _ = (bar, pct);
+    let l1 = Line::from(vec![dim("sync  "), Span::styled(format!("head {}", group(tip)), Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)), tail]);
 
     // 2) rate + ETA + synced. Rate is the 10s trailing window over fetched_total
     // (smooth) — once blocks flow we show the number (even 0 = momentarily idle),
     // not a perpetual "starting…".
-    let l2 = if at_tip {
-        Line::from(vec![dim("rate  "), Span::styled("tracking live", Style::default().fg(C_GREEN)), dim(format!("  ⬇{}", group(synced)))])
-    } else if s.fetched_total == 0 {
-        Line::from(vec![dim("rate  "), Span::styled("connecting…", Style::default().fg(C_DIM)), dim(format!("  ⬇{}", group(synced)))])
+    // v0.22.26: report the REAL recent-window download, not the base-jumped synced_to.
+    let l2 = if s.fetched_total == 0 && downloaded == 0 {
+        Line::from(vec![dim("window "), Span::styled("connecting…".to_string(), Style::default().fg(C_DIM))])
     } else {
-        let r = app.p2p_rate.max(0.0);
-        let eta = if r > 0.5 {
-            let x = (gap as f64 / r) as u64;
-            if x >= 3600 { format!("{}h{}m", x / 3600, (x % 3600) / 60) }
-            else if x >= 60 { format!("{}m{:02}s", x / 60, x % 60) } else { format!("{}s", x) }
-        } else { "—".to_string() };
+        let head = if at_tip {
+            Span::styled("● tracking head".to_string(), Style::default().fg(C_GREEN))
+        } else {
+            Span::styled(format!("{} blk/s", group(app.p2p_rate.max(0.0).round() as u64)), Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD))
+        };
         Line::from(vec![
-            dim("rate  "), Span::styled(format!("{} blk/s", group(r.round() as u64)), Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
-            dim("  ETA "), Span::styled(eta, Style::default().fg(C_VBRIGHT)),
-            dim("  ⬇"), Span::styled(group(synced), Style::default().fg(C_GREEN)),
+            dim("window "), head,
+            dim("  ⬇"), Span::styled(format!("{} dl", group(downloaded)), Style::default().fg(C_GREEN)),
         ])
     };
 
@@ -2983,10 +2986,10 @@ fn render_sync_status(app: &App) -> Paragraph<'static> {
         Span::styled("offline".to_string(), Style::default().fg(C_RED))
     } else if s.verify_break.is_some() {
         Span::styled("⚠spine".to_string(), Style::default().fg(C_RED).add_modifier(Modifier::BOLD))
-    } else if s.verified > 0 && s.verified >= synced.saturating_sub(8) {
-        Span::styled(format!("⛓✓{}", group(s.verified)), Style::default().fg(C_GREEN))
-    } else if s.verified > 0 {
-        Span::styled(format!("⛓{}", group(s.verified)), Style::default().fg(C_GOLD))
+    } else if verified_real > 0 && s.verified >= synced.saturating_sub(8) {
+        Span::styled(format!("⛓✓{} vfy", group(verified_real)), Style::default().fg(C_GREEN))
+    } else if verified_real > 0 {
+        Span::styled(format!("⛓{} vfy", group(verified_real)), Style::default().fg(C_GOLD))
     } else if verified {
         Span::styled(format!("✓{}", group(synced)), Style::default().fg(C_GREEN))
     } else {

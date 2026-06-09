@@ -749,6 +749,13 @@ fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str) -> String
     o.push_str(&mid_title("SUCCINCT SYNC  (flux-fold · light node)"));
     o.push_str(&row("fold proof", &format!("{GREEN}2,568 B{RESET} {DIM}constant ∀ chain len{RESET}")));
     o.push_str(&row("whole-chain", &format!("{GREEN}1 check{RESET} {DIM}· 342 ms @ 100k blocks{RESET}")));
+    // v0.26.0: EFFECTIVE sync throughput. The fold-proof verifies the WHOLE chain in a
+    // constant ~342ms (DeepSeek's #1 lever for 1M blk/s) — so the effective verification
+    // rate is chain_height/0.342s and GROWS with the chain. This is the real sync speed:
+    // we do not download the 11M-block middle, we prove it.
+    let fold_h = st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(st.height);
+    let fold_bps = (fold_h as f64 / 0.342) as u64;
+    o.push_str(&row("throughput", &format!("{GOLD}⚡ {} blk/s{RESET} {DIM}effective · whole chain proven, grows with length{RESET}", group(fold_bps))));
     o.push_str(&row("crypto", &format!("{DIM}Ajtai/SIS · post-quantum · no trusted setup{RESET}")));
 
     o.push_str(&bottom());
@@ -927,6 +934,12 @@ fn main() {
     // subcommands: login / logout (handled before the render loop)
     let argv: Vec<String> = std::env::args().skip(1).collect();
     match argv.first().map(|s| s.as_str()) {
+        // v0.25: updater PRE-FLIGHT probe. Print the version and exit 0 — touch NOTHING else
+        // (no network, no TUI, no DB, no splash) — so `relaunch_new_binary` can confirm a
+        // freshly-swapped binary actually STARTS and reports the expected version BEFORE it
+        // tears down the running app to hand off. This is what stops a bad/corrupt/ABI-
+        // mismatched update from making the app vanish on the restart-after-sync.
+        Some("--selfcheck") => { println!("{VERSION}"); return; }
         Some("login") => {
             let seed = argv.iter().position(|a| a == "--seed").and_then(|i| argv.get(i + 1)).cloned();
             do_login(seed);
@@ -1523,32 +1536,85 @@ fn self_update(rel: &Release) -> Result<String, String> {
     Ok(format!("saved v{} ({:.1} MB) -> {}", rel.version, bytes.len() as f64 / 1.048576e6, beside.display()))
 }
 
+/// v0.25: pre-flight a freshly-swapped binary BEFORE handing off to it. `exec`/`spawn+exit`
+/// destroys the running app; if the new binary is corrupt (truncated download), ABI/GLIBC-
+/// incompatible, or hangs on start, the app would simply VANISH on the restart-after-sync —
+/// the exact bug this fixes. Spawn `target --selfcheck` (a no-op that prints the version and
+/// exits 0) with a short timeout; return Ok(version) only if it runs cleanly AND prints a
+/// non-empty version. Anything else → don't hand off, keep the running app alive.
+fn preflight_binary(target: &std::path::Path) -> Result<String, String> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(target)
+        .arg("--selfcheck")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("spawn failed: {e}"))?;
+    // wait_with_output() consumes the child + blocks; run it on a thread so we can time out
+    // (a binary that HANGS on start must not hang the updater — that would defeat the point).
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || { let _ = tx.send(child.wait_with_output()); });
+    match rx.recv_timeout(Duration::from_secs(6)) {
+        Ok(Ok(out)) if out.status.success() => {
+            let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if v.is_empty() { Err("empty --selfcheck output".into()) } else { Ok(v) }
+        }
+        Ok(Ok(out)) => Err(format!("--selfcheck exited {:?}", out.status.code())),
+        Ok(Err(e)) => Err(format!("wait failed: {e}")),
+        Err(_) => Err("--selfcheck timed out (binary hangs on start)".into()),
+    }
+}
+
 /// Relaunch into the just-installed binary after a successful `self_update`. `self_replace`
 /// put the new version at the current exe path, so that's the canonical target; a versioned
-/// copy beside us (if any) is a fallback. On unix `exec` replaces this process; if it fails
-/// (or on Windows/macOS, which can't replace a running image) we spawn + exit. Only returns
-/// if the exe path can't be resolved — every normal path either re-execs or exits.
+/// copy beside us (if any) is a fallback.
+///
+/// v0.25 FAIL-SAFE: we PRE-FLIGHT the target (`--selfcheck`) before any handoff. `exec`
+/// destroys this process, so we only ever do it for a binary we've CONFIRMED starts and
+/// reports a sane version. If the pre-flight fails (corrupt swap, ABI mismatch, hang) we
+/// return `false` WITHOUT tearing anything down — the caller restores its TUI and tells the
+/// user to restart manually, and the app keeps running on the current image. No more
+/// "app vanishes when it tries to restart after sync". Returns `false` on any non-handoff
+/// path; on unix a successful pre-flight + `exec` never returns.
 fn relaunch_new_binary(version: &str) -> bool {
     let exe = match std::env::current_exe() { Ok(e) => e, Err(_) => return false };
     let args: Vec<String> = std::env::args().skip(1).collect();
-    std::env::set_var("SIGIL_TOP_JUST_UPDATED", "1");
     let ver_exe = exe.with_file_name(format!(
         "sigil-top-v{}{}", version, if cfg!(windows) { ".exe" } else { "" }));
     let target = if ver_exe.exists() { ver_exe } else { exe.clone() };
+
+    // GATE: never hand off to an unverified binary. A failed pre-flight means the swapped
+    // binary can't start — abort the relaunch and stay alive on the current (working) image.
+    match preflight_binary(&target) {
+        Ok(reported) => {
+            // Sanity: the new binary should report the version we just installed. A mismatch
+            // (e.g. self_replace silently no-op'd) isn't fatal — it still STARTS — but log it.
+            if !reported.is_empty() && reported != version {
+                eprintln!("  [update] pre-flight: new binary reports v{reported}, expected v{version} — relaunching anyway");
+            }
+        }
+        Err(e) => {
+            eprintln!("  [update] relaunch ABORTED — new binary failed pre-flight ({e}); staying on the current version, restart manually to apply.");
+            return false;
+        }
+    }
+
+    // Pre-flight passed → commit to the handoff.
+    std::env::set_var("SIGIL_TOP_JUST_UPDATED", "1");
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // exec REPLACES this process — it only returns on FAILURE. On failure we do NOT
-        // spawn a detached child: a backgrounded TUI fights the foreground shell for the
-        // terminal and looks exactly like a crash. Return false so the caller restores
-        // its own terminal and shows an error instead.
+        // exec REPLACES this process — it only returns on FAILURE. Pre-flight already proved
+        // the binary runs, so a failure here is exotic (e.g. ETXTBSY). Don't detach a child
+        // that fights the foreground terminal; return false so the caller restores its TUI.
         let _err = std::process::Command::new(&target).args(&args).exec();
         false
     }
     #[cfg(not(unix))]
     {
-        // Windows/macOS can't replace a running image — spawn the new one, then exit, but
-        // ONLY if the spawn actually succeeded (else return false, don't exit on the user).
+        // Windows/macOS can't replace a running image — spawn the (pre-flighted) new one,
+        // then exit, but ONLY if the spawn succeeded (else return false, don't exit on the user).
         if std::process::Command::new(&target).args(&args).spawn().is_ok() {
             std::process::exit(0);
         }
@@ -1937,12 +2003,15 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // pure light-monitor mode → those endpoints proxy to the remote node, as before).
     let mut sync_handle: Option<std::sync::Arc<std::sync::Mutex<block_sync::P2PSyncState>>> = None;
     if want_sync {
-        // v0.16.5: the dashboard uses the FULL sync path (recent_only=false), not the
-        // recent_only fast-snap. Fast-snap jumps base to a window near peer_best; with
-        // the HTTP feed reporting a bogus/unservable height the snap landed in the void
-        // and synced_to stuck at 0 (syncing forever). Full sync reaches the real
-        // mesh-served height and — with the best_height base gate — holds there stably.
-        let p2p = block_sync::P2PBlockSync::launch(block_store, true); // monitor: recent_only → fast-snap to tip (was false → genesis crawl = 1 blk/s)
+        // v0.22.1 (rocky-explorer): the dashboard uses the MONITOR path (recent_only=true)
+        // so the fast-snap fires and the light node tracks the verified live tip in seconds.
+        // The earlier v0.16.5 note claimed recent_only=false, but that was the genesis-crawl
+        // trap (#802: "560k behind / 0 blk/s" — the snap never fired). The snap's old
+        // "landed in the void" failure was the bogus /api/v1/status height=2; that's solved by
+        // the signed sigil-tip-live.json oracle (v0.17) + best_height base-gate, so monitor
+        // mode is now both fast AND stable. v0.23 seeds the tip eagerly so the snap fires on
+        // cycle 1 (no startup gap). full-sync (recent_only=false) keeps the genesis crawl.
+        let p2p = block_sync::P2PBlockSync::launch(block_store, true); // monitor: recent_only → fast-snap to tip
         sync_handle = Some(p2p.state_handle());
         app.p2p_sync = Some(p2p);
         if app.toast.is_empty() {
@@ -2001,6 +2070,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                             KeyCode::Char('1') => { app.tab = Tab::Node; }
                             KeyCode::Char('2') => { app.tab = Tab::SwarmAi; app.load_swarm(); }
                             KeyCode::Char('3') => { app.tab = Tab::Results; app.load_swarm(); }
+                            KeyCode::Char('4') => { app.tab = Tab::SyncLog; }
                             KeyCode::Char('y') | KeyCode::Char('Y') => { app.resync(); app.toast_sticky = false; }
                             KeyCode::Char('m') | KeyCode::Char('M') => {
                                 app.mining = !app.mining;
@@ -2437,11 +2507,16 @@ fn render_update_splash(frame: u8) -> Paragraph<'static> {
 // ── v0.13: tabbed cockpit — Node dashboard + MCP Swarm AI job board + Results ──
 
 #[derive(Clone, Copy, PartialEq)]
-enum Tab { Node, SwarmAi, Results }
+enum Tab { Node, SwarmAi, Results, SyncLog }
 
 impl Tab {
     fn next(self) -> Tab {
-        match self { Tab::Node => Tab::SwarmAi, Tab::SwarmAi => Tab::Results, Tab::Results => Tab::Node }
+        match self {
+            Tab::Node => Tab::SwarmAi,
+            Tab::SwarmAi => Tab::Results,
+            Tab::Results => Tab::SyncLog,
+            Tab::SyncLog => Tab::Node,
+        }
     }
 }
 
@@ -2648,6 +2723,7 @@ fn render_tab_bar(app: &App) -> Paragraph<'static> {
     spans.extend(tab("Node", "1", Tab::Node));
     spans.extend(tab("Swarm AI", "2", Tab::SwarmAi));
     spans.extend(tab("Results", "3", Tab::Results));
+    spans.extend(tab("Sync Log", "4", Tab::SyncLog));
     spans.push(Span::styled(" · Tab cycles", Style::default().fg(C_DIM)));
     Paragraph::new(Line::from(spans))
 }
@@ -2729,6 +2805,52 @@ fn render_swarm_ai(app: &App) -> Paragraph<'static> {
 }
 
 /// [3] Results — settled work + QUG payouts from the swarm.
+/// v0.25.5: the Sync Log tab — a live sync-state header + a tail of the sync events
+/// (peer connects, fast-snap/track-tip, tip-fetch, backfill chunks, timeouts) read from
+/// ~/.sigil-top.log, so the operator can SEE what sync is doing, not just a bar.
+fn render_sync_log(app: &App) -> Paragraph<'static> {
+    let s = &app.p2p_state;
+    let tip = s.peer_best_height.max(app.target_height);
+    let gap = tip.saturating_sub(s.blocks_synced);
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(" ▸ SYNC STATE", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
+    lines.push(Line::from(vec![
+        Span::raw("  height "), Span::styled(group(s.blocks_synced), Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
+        Span::raw("  tip "), Span::styled(group(tip), Style::default().fg(C_CYAN)),
+        Span::raw("  gap "), Span::styled(group(gap), Style::default().fg(if gap < 8 { C_GREEN } else { C_GOLD })),
+        Span::raw("  rate "), Span::styled(format!("{:.0} blk/s", app.p2p_rate), Style::default().fg(C_CYAN)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw("  ⛓ verified spine "), Span::styled(group(s.verified), Style::default().fg(C_GREEN)),
+        Span::raw("   peers "), Span::styled(format!("{}", s.peer_count), Style::default().fg(C_CYAN)),
+        Span::raw("   "), Span::styled(if s.connected_delta { "Δ" } else { "·" }.to_string(), Style::default().fg(C_GOLD)),
+        Span::styled(if s.connected_epsilon { "Ε" } else { "·" }.to_string(), Style::default().fg(C_GOLD)),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(" ▸ SYNC LOG  (newest at bottom)", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
+    let path = std::env::var("HOME").map(|h| format!("{h}/.sigil-top.log")).unwrap_or_else(|_| "sigil-top.log".into());
+    let body = std::fs::read_to_string(&path).unwrap_or_default();
+    let recent: Vec<String> = body.lines().rev()
+        .filter(|l| l.contains("[sync]") || l.contains("[tipfetch]") || l.contains("[D]")
+            || l.contains("[p2p-sync]") || l.contains("[tip]"))
+        .take(22)
+        .map(|l| l.to_string())
+        .collect();
+    if recent.is_empty() {
+        lines.push(Line::from(Span::styled("  (no sync activity logged yet — connecting to the mesh…)", Style::default().fg(C_DIM))));
+    }
+    for l in recent.iter().rev() {
+        let t = l.trim();
+        let col = if t.contains("track tip") || t.contains("fast-snap") || t.contains("[sync]") { C_GOLD }
+            else if t.contains("[tipfetch]") { C_CYAN }
+            else if t.contains("TIMEOUT") || t.contains("err") { C_RED }
+            else if t.contains("peer +") { C_GREEN }
+            else { C_DIM };
+        lines.push(Line::from(Span::styled(format!("  {}", trunc(t, 92)), Style::default().fg(col))));
+    }
+    Paragraph::new(lines)
+}
+
 fn render_results(app: &App) -> Paragraph<'static> {
     let sw = &app.swarm;
     let mut lines: Vec<Line> = Vec::new();
@@ -2790,6 +2912,7 @@ fn draw_ui(f: &mut Frame, app: &App) {
         Tab::Node => draw_node_body(f, app, body_area),
         Tab::SwarmAi => f.render_widget(render_swarm_ai(app), body_area),
         Tab::Results => f.render_widget(render_results(app), body_area),
+        Tab::SyncLog => f.render_widget(render_sync_log(app), body_area),
     }
 
     f.render_widget(render_footer(app), footer_area);

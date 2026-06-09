@@ -959,6 +959,9 @@ fn main() {
         // tears down the running app to hand off. This is what stops a bad/corrupt/ABI-
         // mismatched update from making the app vanish on the restart-after-sync.
         Some("--selfcheck") => { println!("{VERSION}"); return; }
+        // v0.27.5: manual rollback escape hatch — revert to the previous binary the last update
+        // backed up (pre-flighted before the swap). The operator's "undo a bad update" button.
+        Some("revert") => { do_revert(); return; }
         Some("login") => {
             let seed = argv.iter().position(|a| a == "--seed").and_then(|i| argv.get(i + 1)).cloned();
             do_login(seed);
@@ -1547,6 +1550,12 @@ fn self_update(rel: &Release) -> Result<String, String> {
     // Windows "rename the running .exe out of the way" trick, so the launched
     // sigil-top(.exe) actually becomes the new version (was unix-only → Windows kept
     // relaunching the old exe = "doesn't update").
+    // v0.27.5: keep the CURRENT binary as the rollback image BEFORE swapping. If the new
+    // version passes pre-flight but then crash-loops in real operation, `crashloop_guard()`
+    // reverts to this on the next boot (self-healing updater). Best-effort.
+    if let (Ok(cur), Some(prev)) = (std::env::current_exe(), prev_binary_path()) {
+        let _ = std::fs::copy(&cur, &prev);
+    }
     if self_replace::self_replace(&beside).is_ok() {
         let _ = std::fs::remove_file(&beside);
         return Ok(format!("swapped v{VERSION} -> v{} ({:.1} MB) — restart to run",
@@ -1940,6 +1949,93 @@ impl App {
 /// only if its answer carries the current tip height (so a single lying resolver can't fake the tip —
 /// DNS-level eclipse resistance). HONEST: until the anchor is published (L2-C), the DoH paths return
 /// nothing → K reflects only what was really verified, never a simulated climb.
+// ── v0.27.5: self-healing crash-loop rollback (the updater's third layer) ────────────────
+// `--selfcheck` pre-flight (v0.25) catches binaries that can't START; the fail-safe relaunch
+// (v0.25) keeps the app alive if a handoff fails. THIS catches the last case: a new version
+// that passes pre-flight, starts, but then CRASHES in real operation. Every dashboard boot
+// records an attempt for the running VERSION; a detached timer clears it once the process has
+// survived HEAL_SECS ("healthy"). If a boot instead finds the SAME version already failed to
+// heal CRASH_STRIKES times in a row, it reverts to the binary the last update backed up and
+// relaunches — no operator intervention. A high-value 24/7 node self-heals from a bad update.
+const HEAL_SECS: u64 = 12;
+const CRASH_STRIKES: u32 = 3;
+
+fn prev_binary_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.with_file_name(if cfg!(windows) { "sigil-top-prev.exe" } else { "sigil-top-prev" }))
+}
+fn boot_marker_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.with_file_name(".sigil-top-boot"))
+}
+/// Record a boot attempt for the running VERSION; return the consecutive-unhealed strike count
+/// (1 on a fresh version). Best-effort — any IO failure returns 1 (proceed, just no rollback).
+fn record_boot_attempt() -> u32 {
+    let path = match boot_marker_path() { Some(p) => p, None => return 1 };
+    let strikes = match std::fs::read_to_string(&path).ok()
+        .as_deref().map(str::trim).and_then(|s| s.split_once(':'))
+    {
+        Some((ver, n)) if ver == VERSION => n.parse::<u32>().unwrap_or(0) + 1,
+        _ => 1, // fresh version / no marker / garbage → reset the counter
+    };
+    let _ = std::fs::write(&path, format!("{VERSION}:{strikes}"));
+    strikes
+}
+/// Clear the boot marker = "this version reached a healthy run".
+fn mark_boot_healthy() {
+    if let Some(p) = boot_marker_path() { let _ = std::fs::remove_file(p); }
+}
+/// Arm the detached "survived HEAL_SECS → healthy" timer (decoupled from the UI loop, so a
+/// normal long run clears the strike without any render-loop hook; a crash before HEAL_SECS
+/// leaves the strike for the next boot to count).
+fn arm_heal_timer() {
+    std::thread::spawn(|| { std::thread::sleep(Duration::from_secs(HEAL_SECS)); mark_boot_healthy(); });
+}
+/// At dashboard startup: detect a crash-loop of THIS version and auto-revert to the backed-up
+/// previous binary. Returns true if it reverted+relaunched (caller should return); false to run.
+fn crashloop_guard() -> bool {
+    let strikes = record_boot_attempt();
+    if strikes < CRASH_STRIKES { arm_heal_timer(); return false; }
+    let prev = match prev_binary_path() { Some(p) if p.exists() => p, _ => {
+        mark_boot_healthy(); arm_heal_timer(); return false; // nothing to revert to — just run
+    }};
+    eprintln!("\n  {GOLD}↩ sigil-top v{VERSION} crash-looped {strikes}× — reverting to the last working binary{RESET}");
+    if let Err(e) = preflight_binary(&prev) {
+        eprintln!("  {RED}revert target failed pre-flight ({e}) — staying on current{RESET}");
+        mark_boot_healthy(); arm_heal_timer(); return false;
+    }
+    if self_replace::self_replace(&prev).is_err() { mark_boot_healthy(); return false; }
+    mark_boot_healthy(); // the reverted binary boots fresh under its own version counter
+    let exe = match std::env::current_exe() { Ok(e) => e, Err(_) => return true };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(unix)]
+    { use std::os::unix::process::CommandExt; let _ = std::process::Command::new(&exe).args(&args).exec(); }
+    #[cfg(not(unix))]
+    { let _ = std::process::Command::new(&exe).args(&args).spawn(); }
+    true
+}
+/// `sigil-top revert` — operator's "undo a bad update" button. Pre-flights the backed-up
+/// previous binary, swaps to it, and relaunches.
+fn do_revert() {
+    let prev = match prev_binary_path() {
+        Some(p) if p.exists() => p,
+        _ => { println!("\n  {DIM}no previous binary to revert to (no update has run yet){RESET}\n"); return; }
+    };
+    println!("\n  {GOLD}↩ reverting to the previous binary{RESET} — pre-flighting…");
+    match preflight_binary(&prev) {
+        Ok(v) => {
+            if self_replace::self_replace(&prev).is_ok() {
+                println!("  {GREEN}✓ reverted → v{v}{RESET}\n  {DIM}relaunching…{RESET}");
+                mark_boot_healthy();
+                relaunch_new_binary(&v);
+            } else {
+                println!("  {RED}✗ swap failed{RESET}\n");
+            }
+        }
+        Err(e) => println!("  {RED}✗ previous binary failed pre-flight ({e}) — NOT reverting{RESET}\n"),
+    }
+}
+
 fn measure_eclipse_k(tip_height: u64, tip_ok: bool) -> (u32, Vec<(String, bool)>) {
     const ANCHOR: &str = "_sigil-tip.sigilgraph.quillon.xyz";
     let resolvers = [
@@ -1969,6 +2065,10 @@ fn measure_eclipse_k(tip_height: u64, tip_ok: bool) -> (u32, Vec<(String, bool)>
 }
 
 fn run_tui(cfg: Config) -> std::io::Result<()> {
+    // v0.27.5: self-healing crash-loop guard — long-running dashboard only (`--once` renders
+    // and exits faster than HEAL_SECS, which would false-trigger a revert). If THIS version
+    // has crash-looped, this reverts to the last working binary and relaunches.
+    if !cfg.once && crashloop_guard() { return Ok(()); }
     enable_raw_mode()?;
     // From here ratatui owns the screen — divert background eprintln to the logfile
     // (was smearing the dashboard with [p2p-sync]/[aether] lines).

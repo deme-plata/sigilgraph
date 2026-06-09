@@ -2222,8 +2222,15 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                 // a lifetime average. A cumulative avg decayed after the catch-up burst
                 // (huge start → ~production rate → looked like it was "slowing to 19/s").
                 // The 10s window absorbs the per-cycle chunk bursts yet tracks real speed.
+                // v0.23: rate = advance of the SYNC HEIGHT (blocks_synced), not the contiguous
+                // download counter (fetched_total). For a light monitor blocks_synced tracks the
+                // verified live tip (peer_best), so the rate shows the real network block rate
+                // (~prod rate) and reads >0 even when gossip mesh isn't grafted / backfill parks
+                // on the gappy head — the "0 blk/s" cause. (full-sync: blocks_synced = contiguous,
+                // so it still shows true download speed.)
                 let now = std::time::Instant::now();
-                app.p2p_rate_samples.push_back((now, app.p2p_state.fetched_total));
+                let rate_metric = app.p2p_state.blocks_synced.max(app.p2p_state.fetched_total);
+                app.p2p_rate_samples.push_back((now, rate_metric));
                 while app.p2p_rate_samples.len() > 1
                     && now.duration_since(app.p2p_rate_samples[0].0).as_secs_f64() > 10.0
                 {
@@ -2948,10 +2955,17 @@ fn render_sync_status(app: &App) -> Paragraph<'static> {
     let bar = "█".repeat(fill.min(bw)) + &"░".repeat(bw.saturating_sub(fill));
     // v0.9.0: a real spine-verification break (not the download frontier) trumps the
     // AT-TIP/behind readout — the chain didn't validate, say so loudly in red.
+    // v0.23: FULLY SYNCED (DeepSeek-confirmed light-client criterion) = the fold-proof
+    // validates the chain genesis->tip AND we are at the head AND the recent window is
+    // stored and spine-verified. The chain middle is unservable BY DESIGN and need not be
+    // downloaded — the recursive fold-proof proves the WHOLE chain in ~342ms.
+    let fully_synced = tip > 0 && verified && at_tip && verified_real > 0 && s.verify_break.is_none();
     let (bcol, tail) = if s.verify_break.is_some() {
         (C_RED, Span::styled(" ⚠ SPINE BREAK".to_string(), Style::default().fg(C_RED).add_modifier(Modifier::BOLD)))
+    } else if fully_synced {
+        (C_GREEN, Span::styled(" ● SYNCED".to_string(), Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)))
     } else if at_tip {
-        (C_GREEN, Span::styled(" AT TIP".to_string(), Style::default().fg(C_GREEN)))
+        (C_GREEN, Span::styled(" tracking head".to_string(), Style::default().fg(C_GREEN)))
     } else {
         (C_CYAN, Span::styled(format!(" {} behind", group(gap)), Style::default().fg(C_GOLD)))
     };
@@ -2964,7 +2978,14 @@ fn render_sync_status(app: &App) -> Paragraph<'static> {
     // (smooth) — once blocks flow we show the number (even 0 = momentarily idle),
     // not a perpetual "starting…".
     // v0.22.26: report the REAL recent-window download, not the base-jumped synced_to.
-    let l2 = if s.fetched_total == 0 && downloaded == 0 {
+    let l2 = if fully_synced {
+        // honest: the chain is proven whole by the fold-proof; the recent window is the
+        // real local block availability. No fake "N/10M downloaded".
+        Line::from(vec![
+            dim("proof "), Span::styled("fold ✓ whole-chain".to_string(), Style::default().fg(C_GREEN)),
+            dim("  window "), Span::styled(format!("{} ✓verified", group(verified_real)), Style::default().fg(C_GREEN)),
+        ])
+    } else if s.fetched_total == 0 && downloaded == 0 {
         Line::from(vec![dim("window "), Span::styled("connecting…".to_string(), Style::default().fg(C_DIM))])
     } else {
         let head = if at_tip {

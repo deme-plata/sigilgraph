@@ -1779,7 +1779,7 @@ impl App {
               offline_since: None,
               offline_streak: 0,
               last_serve_check: Instant::now(),
-              tab: Tab::SyncLog,
+              tab: Tab::Node,
               swarm: SwarmView::default(),
               last_swarm_load: instant_ago(10),
         }
@@ -2033,6 +2033,23 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // into the sync thread. The embedded HTTP server uses it to answer the explorer's
     // /api/v1/{recent,search,aether} from the local verified spine.
     let block_reader = block_store.reader();
+
+    // v0.26 hardening #8 (DeepSeek-reviewed): graceful SIGTERM/SIGINT. A supervisor restart
+    // (or Ctrl-C in a headless run) otherwise kills the process mid-window with no final flush
+    // and, in the TUI, a terminal left in raw mode. Restore the terminal, flush the verified-
+    // spine watermark to flux-db (the reader shares the live DB via Arc), then exit 0 so the
+    // supervisor restarts cleanly and never orphans the persisted synced/verified state.
+    {
+        // v0.26.6 fix: BlockReader is a read-only view (no flush). The sync threads
+        // BlockStore persists the synced/verified watermark to flux-db on every advance,
+        // so the latest watermark is already durable at Ctrl-C — just restore the terminal
+        // and exit cleanly (no orphaned raw mode).
+        let _ = ctrlc::set_handler(move || {
+            let _ = disable_raw_mode();
+            let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+            std::process::exit(0);
+        });
+    }
 
     // v0.12.1: sync is ON BY DEFAULT. The opt-in light-monitor default left users
     // staring at a perpetual "connecting…" (block-sync never started, so fetched_total

@@ -1275,7 +1275,15 @@ pub const GENESIS_AI_WALLETS: &[(&str, [u8; 32], &str)] = &[
 /// pubkey here (or move it out of the const and read it from the genesis
 /// allocation table). Until then, every node mints with this 32-byte tag
 /// so chains start from the same parent_hash.
-pub const MASTER_WALLET_GENESIS: [u8; 32] = [0xAA; 32];
+// Master dev-fee wallet (Viktor) — SIGIL address
+// 095b0e1f7f5bb258fb11427c4ac036e3d9e4f10fa39d7f282aa42862dc2b3dd8.
+// Baked into block 0; receives 5% of mining coinbase + 0.3% of DEX swap output.
+// (Mirrors sigil_bank::DEV_MASTER_WALLET; kept as explicit bytes so sigil-node
+// needs no sigil-bank dep and block 0 stays byte-identical across nodes.)
+pub const MASTER_WALLET_GENESIS: [u8; 32] = [
+    0x09, 0x5b, 0x0e, 0x1f, 0x7f, 0x5b, 0xb2, 0x58, 0xfb, 0x11, 0x42, 0x7c, 0x4a, 0xc0, 0x36, 0xe3,
+    0xd9, 0xe4, 0xf1, 0x0f, 0xa3, 0x9d, 0x7f, 0x28, 0x2a, 0xa4, 0x28, 0x62, 0xdc, 0x2b, 0x3d, 0xd8,
+];
 
 /// Fixed timestamp baked into block 0. Without this constant every node
 /// mint-genesis call uses `now_ms()` → different headers → instant fork

@@ -117,6 +117,8 @@ impl LocalApi {
             "base": s.base,
             "downloaded": s.blocks_synced.saturating_sub(s.base),
             "fetched": s.fetched_total,
+            "pos_rate": s.pos_rate,
+            "pos_total": s.pos_total,
             "verified": s.verified,
             "peers": s.peer_count,
             "mesh_peers": s.mesh_peer_count,

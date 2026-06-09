@@ -160,6 +160,40 @@ async fn fetch_live_tip() -> Option<u64> {
         .timeout(Duration::from_secs(5))
         .build()
         .ok()?;
+    fetch_live_tip_inner(&client).await
+}
+
+/// Blocking variant — runs on a DEDICATED OS thread, isolated from the busy block_sync
+/// tokio runtime where the async fetch was non-deterministically starved (peer_best froze
+/// → the monitor parked behind the tip). This is the reliable peer_best source.
+fn fetch_live_tip_blocking() -> Option<u64> {
+    const URLS: [&str; 2] = [
+        "https://sigilgraph.fluxapp.xyz/sigil-tip-live.json",
+        "https://quillon.xyz/sigil-tip-live.json",
+    ];
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()?;
+    let cb = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    for url in URLS {
+        if let Ok(resp) = client.get(&format!("{url}?cb={cb}")).header("cache-control", "no-cache").send() {
+            if let Ok(v) = resp.json::<serde_json::Value>() {
+                if let Some(h) = v.get("height").and_then(|x| x.as_u64()) {
+                    if h > 0 { return Some(h); }
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn fetch_live_tip_inner(client: &reqwest::Client) -> Option<u64> {
+    const URLS: [&str; 2] = [
+        "https://sigilgraph.fluxapp.xyz/sigil-tip-live.json",
+        "https://quillon.xyz/sigil-tip-live.json",
+    ];
     // cache-buster (per-call) so a CDN/proxy never pins the tip; the publisher uses one too.
     let cb = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
@@ -257,6 +291,22 @@ impl P2PBlockSync {
 
         let state_clone = state.clone();
         let new_blocks_clone = new_blocks.clone();
+
+        // v0.21: DEDICATED tip-poller thread. The monitor's fast-snap needs a FRESH live tip
+        // in peer_best; the in-runtime async fetch was non-deterministically starved by the
+        // backfill/verify workload (peer_best froze → the monitor parked behind the tip at
+        // 0 blk/s). A standalone OS thread with BLOCKING reqwest polls every 3s, immune to
+        // that contention, and seeds peer_best directly.
+        if recent_only {
+            let tip_state = state.clone();
+            thread::spawn(move || loop {
+                if let Some(h) = fetch_live_tip_blocking() {
+                    let mut s = tip_state.lock().unwrap();
+                    if h > s.peer_best_height { s.peer_best_height = h; }
+                }
+                thread::sleep(Duration::from_secs(3));
+            });
+        }
 
         thread::spawn(move || {
             // v0.10.0: MULTI-thread runtime (3 workers). The v0.9.5 pipeline spawned chunk
@@ -537,7 +587,9 @@ impl P2PBlockSync {
                     // HTTP round-trip never blocks the sync loop; result drained next tick.
                     while let Ok(h) = tip_rx.try_recv() {
                         let mut s = state_clone.lock().unwrap();
+                        let old = s.peer_best_height;
                         if h > s.peer_best_height { s.peer_best_height = h; }
+                        crate::tlog!("[tipfetch] got {} (peer_best {} -> {})", h, old, s.peer_best_height);
                     }
                     if last_tip_fetch.elapsed() >= Duration::from_secs(3) {
                         last_tip_fetch = Instant::now();
@@ -639,8 +691,19 @@ impl P2PBlockSync {
                             // base toward an unreachable/seeded tip — the sync HOLDS at the real
                             // served height instead of thrashing base forever. This was the
                             // instability set_known_tip exposed.
-                            let new_base = store.base().saturating_add(CHUNK);
-                            crate::tlog!("[sync] gap at frontier {} (received up to {}) — base → {} (skip pruned-low)", now_synced, store.best_height(), new_base);
+                            // v0.21.1: a monitor whose received tip is far above the contiguous
+                            // frontier is sitting on an UNSERVABLE MIDDLE (mesh serves genesis-low +
+                            // recent, not the 6M-block middle). Crawling base one chunk per 2s would
+                            // take ~an hour for a 600k gap (the "0 blk/s, 560k behind" parked bug).
+                            // In monitor mode, JUMP base straight to the recent contiguous window
+                            // under best_height so synced snaps to the live head in one step.
+                            // (full-sync recent_only=false keeps the genesis-anchored +CHUNK crawl.)
+                            let new_base = if recent_only && store.best_height() > now_synced + RECENT_WINDOW {
+                                store.best_height().saturating_sub(RECENT_WINDOW).max(sync_base)
+                            } else {
+                                store.base().saturating_add(CHUNK)
+                            };
+                            crate::tlog!("[sync] gap at frontier {} (received up to {}) — base → {} (jump to recent window)", now_synced, store.best_height(), new_base);
                             store.set_base(new_base);
                             last_synced_seen = store.synced_to();
                             last_advance_t = Instant::now();

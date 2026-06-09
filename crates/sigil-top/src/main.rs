@@ -1063,6 +1063,10 @@ fn main() {
             if let Some(t) = target_arg { println!("  {DIM}target height pinned to {t}{RESET}"); }
             println!("  {DIM}timeout {timeout_s}s · Ctrl-C to stop{RESET}\n");
             let sync = block_sync::P2PBlockSync::launch(store);
+            // v0.15.1: a pinned --target also SEEDS the backfill tip so the refill
+            // fires immediately (the gate is peer_best>0, not target_arg). Without
+            // this, a quiet mesh left peer_best=0 and full-sync --target never pulled.
+            if let Some(t) = target_arg { sync.set_known_tip(t); }
             let start = Instant::now();
             let mut last_print = instant_ago(10);
             loop {

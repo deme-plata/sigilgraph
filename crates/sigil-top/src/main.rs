@@ -92,9 +92,28 @@ pub(crate) fn log_line(s: String) {
             .map(|h| format!("{h}/.sigil-top.log"))
             .or_else(|_| std::env::var("TEMP").map(|t| format!("{t}\\sigil-top.log")))
             .unwrap_or_else(|_| "sigil-top.log".into());
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
             use std::io::Write;
             let _ = writeln!(f, "{s}");
+        }
+        // v0.26: cap the logfile so a 24/7 run can't fill the disk. Checked cheaply once
+        // every LOG_CAP_EVERY writes; when it exceeds 4 MB, keep only the last ~1 MB.
+        static LOG_WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        const LOG_CAP_EVERY: u64 = 512;
+        const LOG_MAX: u64 = 4 * 1024 * 1024;
+        const LOG_KEEP: u64 = 1024 * 1024;
+        if LOG_WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % LOG_CAP_EVERY == 0 {
+            if std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0) > LOG_MAX {
+                let tail = {
+                    use std::io::{Read, Seek, SeekFrom};
+                    std::fs::File::open(&p).ok().and_then(|mut fh| {
+                        let len = fh.metadata().map(|m| m.len()).unwrap_or(0);
+                        fh.seek(SeekFrom::Start(len.saturating_sub(LOG_KEEP))).ok()?;
+                        let mut b = Vec::new(); fh.take(LOG_KEEP).read_to_end(&mut b).ok()?; Some(b)
+                    })
+                };
+                if let Some(b) = tail { let _ = std::fs::write(&p, &b); }
+            }
         }
     } else {
         eprintln!("{s}");
@@ -1544,6 +1563,7 @@ fn self_update(rel: &Release) -> Result<String, String> {
 /// non-empty version. Anything else → don't hand off, keep the running app alive.
 fn preflight_binary(target: &std::path::Path) -> Result<String, String> {
     use std::process::{Command, Stdio};
+    use std::io::Read;
     let mut child = Command::new(target)
         .arg("--selfcheck")
         .stdin(Stdio::null())
@@ -1551,19 +1571,33 @@ fn preflight_binary(target: &std::path::Path) -> Result<String, String> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("spawn failed: {e}"))?;
-    // wait_with_output() consumes the child + blocks; run it on a thread so we can time out
-    // (a binary that HANGS on start must not hang the updater — that would defeat the point).
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || { let _ = tx.send(child.wait_with_output()); });
-    match rx.recv_timeout(Duration::from_secs(6)) {
-        Ok(Ok(out)) if out.status.success() => {
-            let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if v.is_empty() { Err("empty --selfcheck output".into()) } else { Ok(v) }
+    // v0.26 (DeepSeek-hardened): poll on THIS thread so we keep the Child handle and can KILL
+    // it on timeout — a binary that HANGS on start must not leak a thread + zombie child (the
+    // old wait_with_output-on-a-thread design couldn't reach the child to kill it). --selfcheck
+    // prints ~7 bytes then exits immediately, so the stdout pipe never fills → no try_wait
+    // deadlock. A hung child is itself a strong "don't hand off" signal.
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait(); // reap the zombie
+                    return Err("--selfcheck timed out (binary hangs on start)".into());
+                }
+                std::thread::sleep(Duration::from_millis(30));
+            }
+            Err(e) => { let _ = child.kill(); let _ = child.wait(); return Err(format!("wait failed: {e}")); }
         }
-        Ok(Ok(out)) => Err(format!("--selfcheck exited {:?}", out.status.code())),
-        Ok(Err(e)) => Err(format!("wait failed: {e}")),
-        Err(_) => Err("--selfcheck timed out (binary hangs on start)".into()),
+    };
+    let mut buf = String::new();
+    if let Some(mut out) = child.stdout.take() { let _ = out.read_to_string(&mut buf); }
+    if !status.success() {
+        return Err(format!("--selfcheck exited {:?}", status.code()));
     }
+    let v = buf.trim().to_string();
+    if v.is_empty() { Err("empty --selfcheck output".into()) } else { Ok(v) }
 }
 
 /// Relaunch into the just-installed binary after a successful `self_update`. `self_replace`
@@ -1745,7 +1779,7 @@ impl App {
               offline_since: None,
               offline_streak: 0,
               last_serve_check: Instant::now(),
-              tab: Tab::Node,
+              tab: Tab::SyncLog,
               swarm: SwarmView::default(),
               last_swarm_load: instant_ago(10),
         }
@@ -1951,6 +1985,13 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
         std::panic::set_hook(Box::new(move |info| {
             let _ = disable_raw_mode();
             let _ = execute!(std::io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+            // v0.26.x: persist the panic to ~/.sigil-top.log so a crash is diagnosable after the
+            // fact (the app looked like it "just exited" because the hook tore the TUI down).
+            let msg = info.payload().downcast_ref::<&str>().map(|s| s.to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic>".into());
+            let loc = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+            log_line(format!("[PANIC] {msg} @ {loc}"));
             use std::io::Write as _;
             let _ = std::io::stdout().flush();
             default_hook(info);
@@ -2804,6 +2845,19 @@ fn render_swarm_ai(app: &App) -> Paragraph<'static> {
     Paragraph::new(lines).block(card_block("⚡ MCP SWARM AI — JOB INDEX BOARD", C_VBRIGHT))
 }
 
+/// v0.26: read at most the last `max_bytes` of a (possibly huge) log file — seek to the
+/// tail instead of slurping the whole thing, so the Sync Log tab stays O(1) per frame.
+fn read_log_tail(path: &str, max_bytes: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = match std::fs::File::open(path) { Ok(f) => f, Err(_) => return String::new() };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(max_bytes);
+    if f.seek(SeekFrom::Start(start)).is_err() { return String::new(); }
+    let mut buf = Vec::with_capacity(max_bytes as usize);
+    let _ = f.take(max_bytes).read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 /// [3] Results — settled work + QUG payouts from the swarm.
 /// v0.25.5: the Sync Log tab — a live sync-state header + a tail of the sync events
 /// (peer connects, fast-snap/track-tip, tip-fetch, backfill chunks, timeouts) read from
@@ -2813,7 +2867,16 @@ fn render_sync_log(app: &App) -> Paragraph<'static> {
     let tip = s.peer_best_height.max(app.target_height);
     let gap = tip.saturating_sub(s.blocks_synced);
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::styled(" ▸ SYNC STATE", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
+    // v0.26: LIVE/STALE badge — if the tip-poller hasn't gotten a fresh tip in >12s
+    // (oracle down / partition), say so instead of a falsely confident "AT TIP".
+    let stale = s.last_tip_at.map(|t| t.elapsed().as_secs() > 12).unwrap_or(true);
+    let (badge, bcol) = if stale {
+        (format!(" ⏳ STALE{}", s.last_tip_at.map(|t| format!(" ({}s)", t.elapsed().as_secs())).unwrap_or_default()), C_RED)
+    } else { (" ● LIVE".to_string(), C_GREEN) };
+    lines.push(Line::from(vec![
+        Span::styled(" ▸ SYNC STATE", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
+        Span::styled(badge, Style::default().fg(bcol).add_modifier(Modifier::BOLD)),
+    ]));
     lines.push(Line::from(vec![
         Span::raw("  height "), Span::styled(group(s.blocks_synced), Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
         Span::raw("  tip "), Span::styled(group(tip), Style::default().fg(C_CYAN)),
@@ -2829,7 +2892,9 @@ fn render_sync_log(app: &App) -> Paragraph<'static> {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(" ▸ SYNC LOG  (newest at bottom)", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
     let path = std::env::var("HOME").map(|h| format!("{h}/.sigil-top.log")).unwrap_or_else(|_| "sigil-top.log".into());
-    let body = std::fs::read_to_string(&path).unwrap_or_default();
+    // v0.26: read only the LAST 16 KB (not the whole file) — O(1) per frame, never
+    // O(log-size), which would freeze the UI as the log grows over a 24/7 run.
+    let body = read_log_tail(&path, 16 * 1024);
     let recent: Vec<String> = body.lines().rev()
         .filter(|l| l.contains("[sync]") || l.contains("[tipfetch]") || l.contains("[D]")
             || l.contains("[p2p-sync]") || l.contains("[tip]"))

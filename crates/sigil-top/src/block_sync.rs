@@ -72,7 +72,7 @@ fn ingest_block_value(
         let best = store.best_height();
         let synced = store.synced_to(); // contiguous progress (not raw count)
         let peer_best = {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
             s.blocks_synced = synced;        // contiguous tip (bar/⬇/chunk all use this)
             s.sync_total = s.blocks_synced;
             s.sync_cursor = synced;          // chunk shows [synced..synced+chunk] = next needed
@@ -87,11 +87,18 @@ fn ingest_block_value(
         };
         net.push_sync_progress(height, &hash_hex, peer_best, best);
         if let Some(block) = store.get_block(&hash_hex) {
-            new_blocks.lock().unwrap().push(block);
+            // v0.26 (DeepSeek-hardened): cap the hand-off buffer so a slow or absent consumer
+            // (headless `full-sync`, or a UI that briefly stalls) can't grow it unbounded over a
+            // multi-million-block sync — a real OOM risk on a long-running operator terminal.
+            // Keep the newest 10k; a live monitor only ever renders the tail anyway.
+            let mut nb = new_blocks.lock().unwrap_or_else(|e| e.into_inner());
+            nb.push(block);
+            let n = nb.len();
+            if n > 10_000 { nb.drain(0..n - 10_000); }
         }
         true
     } else {
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
         if height > s.peer_best_height {
             s.peer_best_height = height;
         }
@@ -222,6 +229,9 @@ pub struct P2PSyncState {
     pub peer_best_height: u64,
     pub blocks_synced: u64,
     pub last_message_at: Option<Instant>,
+    /// v0.26: when the tip-poller last got a fresh tip. UI shows STALE if this ages out
+    /// (oracle down / network partition) instead of a falsely confident "AT TIP".
+    pub last_tip_at: Option<Instant>,
     pub connected_delta: bool,
     pub connected_epsilon: bool,
     /// v0.7.0: Latest sync progress from the P2P mesh (consumed by TUI gauge).
@@ -278,7 +288,7 @@ impl P2PBlockSync {
     /// opened, and the sync sat on "connecting" forever. Only ever RAISES the tip.
     pub fn set_known_tip(&self, height: u64) {
         if height == 0 { return; }
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if height > s.peer_best_height {
             s.peer_best_height = height;
         }
@@ -311,7 +321,7 @@ impl P2PBlockSync {
             // here, before either thread spawns, so the snap is guaranteed on cycle 1 (no
             // startup gap). Best-effort: a brief oracle blip just falls back to the poller.
             if let Some(h) = fetch_live_tip_blocking() {
-                let mut s = state.lock().unwrap();
+                let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                 if h > s.peer_best_height { s.peer_best_height = h; }
             }
             // v0.21: DEDICATED tip-poller thread. The monitor's fast-snap needs a FRESH live
@@ -325,14 +335,24 @@ impl P2PBlockSync {
             let tip_state = state.clone();
             thread::spawn(move || {
                 let mut polls: u32 = 0;
+                let mut fail_backoff = Duration::from_secs(0);
                 loop {
-                    if let Some(h) = fetch_live_tip_blocking() {
-                        let mut s = tip_state.lock().unwrap();
-                        if h > s.peer_best_height { s.peer_best_height = h; }
+                    match fetch_live_tip_blocking() {
+                        Some(h) => {
+                            fail_backoff = Duration::from_secs(0); // healthy → normal cadence
+                            let mut s = tip_state.lock().unwrap_or_else(|e| e.into_inner());
+                            if h > s.peer_best_height { s.peer_best_height = h; }
+                            s.last_tip_at = Some(Instant::now());
+                        }
+                        None => {
+                            // v0.26: exponential backoff (cap 60s) on repeated oracle failure so we
+                            // don't hammer a dead endpoint; the UI surfaces STALE via last_tip_at.
+                            fail_backoff = (fail_backoff.max(Duration::from_secs(2)) * 2).min(Duration::from_secs(60));
+                        }
                     }
                     polls = polls.saturating_add(1);
-                    let cadence = if polls < 15 { Duration::from_secs(1) } else { Duration::from_secs(3) };
-                    thread::sleep(cadence);
+                    let base = if polls < 15 { Duration::from_secs(1) } else { Duration::from_secs(3) };
+                    thread::sleep(base.max(fail_backoff));
                 }
             });
         }
@@ -378,7 +398,7 @@ impl P2PBlockSync {
                 store.set_base(sync_base);
                 let resume_h = store.synced_to();
                 {
-                    let mut s = state_clone.lock().unwrap();
+                    let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                     s.running = true;
                     s.blocks_synced = resume_h;
                     s.verified = store.verified_to(); // v0.9.0: resume the verified watermark too
@@ -463,7 +483,7 @@ impl P2PBlockSync {
                     for event in net.drain_events() {
                         match event {
                             flux_p2p::SwarmAppEvent::PeerConnected { peer_id, addr } => {
-                                let mut s = state_clone.lock().unwrap();
+                                let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                                 let pc = net.peer_count();
                                 s.peer_count = pc;
                                 s.mesh_peer_count = pc;
@@ -480,7 +500,7 @@ impl P2PBlockSync {
                             }
                             flux_p2p::SwarmAppEvent::PeerDisconnected { .. } => {
                                 let pc = net.peer_count();
-                                let mut s = state_clone.lock().unwrap();
+                                let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                                 s.peer_count = pc;
                                 s.mesh_peer_count = pc;
                                 if pc == 0 {
@@ -489,7 +509,7 @@ impl P2PBlockSync {
                                 }
                             }
                             flux_p2p::SwarmAppEvent::SyncProgress { height, hash_hex, peer_best_height, total_synced, peer_count: _ } => {
-                                let mut s = state_clone.lock().unwrap();
+                                let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                                 // v0.18.5: the gossiped `height` is the NETWORK TIP, not our sync
                                 // progress. Do NOT clobber sync_height with it (that made the
                                 // dashboard show the ~6.9M tip as synced_to and a 0 blk/s rate while
@@ -568,7 +588,7 @@ impl P2PBlockSync {
                         let got = ingest_backfill_bytes(&b, &mut store); // probe headers are free backfill
                         fetched_session += got as u64;
                         if let Some(maxh) = max_header_height(&b) {
-                            let mut s = state_clone.lock().unwrap();
+                            let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                             if maxh > s.peer_best_height { s.peer_best_height = maxh; }
                         }
                     }
@@ -615,7 +635,7 @@ impl P2PBlockSync {
                     // (the /api/v1/status the monitor reads returns height=2). Spawned so the
                     // HTTP round-trip never blocks the sync loop; result drained next tick.
                     while let Ok(h) = tip_rx.try_recv() {
-                        let mut s = state_clone.lock().unwrap();
+                        let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                         let old = s.peer_best_height;
                         if h > s.peer_best_height { s.peer_best_height = h; }
                         crate::tlog!("[tipfetch] got {} (peer_best {} -> {})", h, old, s.peer_best_height);
@@ -628,7 +648,7 @@ impl P2PBlockSync {
                         });
                     }
 
-                    let peer_best = state_clone.lock().unwrap().peer_best_height;
+                    let peer_best = state_clone.lock().unwrap_or_else(|e| e.into_inner()).peer_best_height;
 
                     // v0.15.2: MONITOR FAST-SNAP. A monitor that's hundreds of thousands of
                     // blocks behind gains nothing from crawling genesis→tip at the rate the
@@ -746,7 +766,7 @@ impl P2PBlockSync {
                             last_advance_t = Instant::now();
                         }
                         let now_synced = store.synced_to();
-                        let mut s = state_clone.lock().unwrap();
+                        let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                         s.blocks_synced = now_synced;
                         s.base = store.base();
                         s.sync_total = now_synced;
@@ -789,7 +809,7 @@ impl P2PBlockSync {
                             None => None,
                         };
                         let _ = store.flush();
-                        let mut s = state_clone.lock().unwrap();
+                        let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                         s.verified = report.verified_to;
                         s.verify_break = vbreak;
                     }
@@ -810,11 +830,11 @@ impl P2PBlockSync {
     }
 
     pub fn poll_state(&self) -> P2PSyncState {
-        self.state.lock().unwrap().clone()
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn drain_new_blocks(&self) -> Vec<StoredBlock> {
-        std::mem::take(&mut *self.new_blocks.lock().unwrap())
+        std::mem::take(&mut *self.new_blocks.lock().unwrap_or_else(|e| e.into_inner()))
     }
 }
 

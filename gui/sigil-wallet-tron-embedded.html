@@ -137,7 +137,7 @@ body.view-desktop .desktop{display:flex}
 
 <div class="phone">
   <div class="notch"></div>
-  <div class="statusbar"><span>9:41</span><span>SIGIL·g0 · <b>H 18,742</b></span><span>▮▮▮ 5G</span></div>
+  <div class="statusbar"><span>9:41</span><span>SIGIL·g0 · <b data-blockcount>H …</b></span><span>▮▮▮ 5G</span></div>
   <div class="phead"><img class="markimg" src="https://sigilgraph.fluxapp.xyz/icons/brand/sigil-flat.png?v=1780639379" style="width:78px;height:78px"><div class="brand">SIGIL<span>·</span>WALLET</div><button class="expand" onclick="setView('desktop')">⤢ desktop</button></div>
   <div class="balance"><div class="lab"><span>total balance</span><span class="vbadge"><i data-lucide="badge-check"></i>verified</span></div><div class="amtbig amt" id="amt">14,302<small>.84 SIGIL</small></div><div class="sub">≈ <b>$18,594</b> · +4.2% today ▲</div></div>
   <div style="display:flex;gap:9px;justify-content:center;margin:12px 8px 2px;font-family:'JetBrains Mono';font-size:11px">
@@ -167,6 +167,7 @@ body.view-desktop .desktop{display:flex}
     <div class="gspacer"></div>
     <div class="gright">
       <div class="net">grid online · H 18,742</div>
+      <div class="pill" title="live mine-chain height" style="border-color:rgba(0,224,198,.4)"><i class="lic" data-lucide="box" style="width:14px;height:14px;filter:none"></i><b data-blockcount style="color:var(--teal)">H …</b></div>
       <div class="pill"><i class="lic" data-lucide="wallet" style="width:14px;height:14px;filter:none"></i><b>14,302</b> SIGIL</div>
       <div class="agentbtn"><img class="markimg" src="https://sigilgraph.fluxapp.xyz/icons/brand/sigil-cyan.png?v=1780639379"><div class="at">Ask Flux</div></div>
       <div class="avatar">◈</div>
@@ -255,11 +256,21 @@ body.view-desktop .desktop{display:flex}
     if(n < 1){ sessionStorage.setItem('sigil-onboard-bounces', n+1); location.replace('enter-sigil.html'); }
   } else { sessionStorage.removeItem('sigil-onboard-bounces'); }
   const SHORT=ADDR?(ADDR.slice(0,8)+'…'+ADDR.slice(-6)):'';
+  window.ADDR=ADDR;          // expose for the v0.58 send modal (separate script scope)
   // Same-origin /api — when served by the sigil-top node (http://localhost:9800),
   // the node proxies /api/v1/* to the SIGIL node (real balance, no CORS/mixed-content).
   // Served elsewhere it just 502s → fresh wallet stays 0 (graceful).
   const NODE='';
-  let SIGIL_BAL=0;            // a freshly-derived wallet starts empty
+  // v0.58: balance is RAW base units (SIGIL_DECIMALS=8 → 10^8 per whole coin). Keep it
+  // as a BigInt-safe string so 8-decimal precision never rounds (Number loses precision
+  // past ~9e15). SIGIL_BAL (whole-coin float) is derived for the $-value / pill only.
+  let SIGIL_RAW='0';
+  let SIGIL_BAL=0;            // = Number(SIGIL_RAW)/1e8, for fiat estimate + pill
+  // LANE-N: mined coins land in the MINING wallet (SIGIL_MINE_WALLET / hostname-hash),
+  // NOT necessarily the session/login wallet the page derived. Resolve it from the node
+  // so [W] shows the balance the Mining tab shows (the real "balance actually works" fix).
+  let MINE_ADDR=null;
+  let BLOCK_H=0;             // live mine-chain height for the topbar block counter
 
   function copyAddr(){ if(ADDR&&navigator.clipboard){navigator.clipboard.writeText(ADDR);} }
   window.copyAddr=copyAddr;
@@ -286,7 +297,15 @@ body.view-desktop .desktop{display:flex}
   }
   window.showExplorer=showExplorer; window.showDash=showDash;
 
-  function fmtAmt(v){return v.toLocaleString('en-US',{maximumFractionDigits:0})+'<small>.'+String(Math.round((v%1)*100)).padStart(2,'0')+' SIGIL</small>';}
+  // v0.58: format RAW base units (8 decimals) with BigInt — every mined block adds
+  // exactly 50.00000000 and the operator sees the FULL decimal climb, no rounding.
+  function fmtAmt(raw){
+    var r; try{ r=BigInt(raw||0); }catch(e){ r=0n; }
+    var whole=r/100000000n, frac=r%100000000n; if(frac<0n)frac=-frac;
+    var ws=whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',');
+    var fs=frac.toString().padStart(8,'0');
+    return ws+'<small>.'+fs+' SIGIL</small>';
+  }
   function assetRows(){
     const a=['◈','SIGIL','native · grid',SIGIL_BAL.toLocaleString('en-US',{maximumFractionDigits:2}),SIGIL_BAL>0?'':'fresh','','linear-gradient(135deg,#21d4fd,#1ba1e2)','#04080c'];
     return `<div class="row"><div class="coin" style="background:${a[6]};color:${a[7]}">${a[0]}</div><div><div class="nm">${a[1]}</div><div class="tk">${a[2]}</div></div><div class="rt"><div class="bal">${a[3]}</div><div class="chg">${a[4]}</div></div></div>`;
@@ -295,12 +314,12 @@ body.view-desktop .desktop{display:flex}
   function render(){
     const pa=document.getElementById('passets'); if(pa) pa.innerHTML=assetRows();
     const da=document.getElementById('dassets'); if(da) da.innerHTML=assetRows();
-    document.querySelectorAll('#amt,#damt').forEach(el=>el.innerHTML=fmtAmt(SIGIL_BAL));
+    document.querySelectorAll('#amt,#damt').forEach(el=>el.innerHTML=fmtAmt(SIGIL_RAW));
     // phone balance sub → the user's real address (copyable) + fresh badge
     const sub=document.querySelector('.balance .sub');
     if(sub) sub.innerHTML='wallet <b data-addr style="cursor:pointer" title="click to copy: '+ADDR+'" onclick="copyAddr()">'+SHORT+'</b>'+(SIGIL_BAL>0?'':' · <span style="color:var(--teal)">fresh wallet</span>');
     // desktop gbar pill + sidecard + portfolio
-    document.querySelectorAll('.pill b').forEach(el=>el.textContent=SIGIL_BAL.toLocaleString('en-US'));
+    document.querySelectorAll('.pill b:not([data-blockcount])').forEach(el=>el.textContent=SIGIL_BAL.toLocaleString('en-US'));
     const sc=document.querySelector('.sidecard .amtbig'); if(sc) sc.textContent='$'+(SIGIL_BAL*1.3).toLocaleString('en-US',{maximumFractionDigits:0});
     const scd=document.querySelector('.sidecard .d'); if(scd) scd.innerHTML=SIGIL_BAL.toLocaleString('en-US',{maximumFractionDigits:2})+' SIGIL · '+SHORT;
     // address chip in the desktop top bar (replace the static net text once)
@@ -312,15 +331,39 @@ body.view-desktop .desktop{display:flex}
 
   // best-effort live balance (works once an HTTPS node route exists; until then a
   // fresh wallet correctly shows 0). Node returns {ok,balance} or {data:{balance}}.
+  // Resolve the MINING wallet once (the address the node actually credits mined coins
+  // to). When the [W] page derived a different session address, this is why the balance
+  // looked stuck at 0 — we were querying the wrong wallet (LANE-N).
+  async function loadMineWallet(){
+    try{ const r=await fetch(NODE+'/api/v1/mine-wallet',{cache:'no-store'}); const j=await r.json();
+      if(j&&j.mining_wallet&&/^[0-9a-fA-F]{64}$/.test(j.mining_wallet)){ MINE_ADDR=j.mining_wallet.toLowerCase(); window.MINE_ADDR=MINE_ADDR; }
+    }catch(e){}
+  }
+  // Live balance of the wallet that actually accrues coins (mining wallet, else session).
+  // Keeps RAW base units so the 8-decimal climb is exact; re-rendered every poll so the
+  // operator sees it rise while mining to the local node.
   async function refresh(){
-    if(!ADDR) return;
+    const who = MINE_ADDR || ADDR; if(!who) return;
     try{
-      const r=await fetch(NODE+'/api/v1/balance?wallet='+ADDR,{cache:'no-store'});
+      const r=await fetch(NODE+'/api/v1/balance?wallet='+who,{cache:'no-store'});
       const j=await r.json();
       const b=(j&&(j.balance!=null?j.balance:(j.data&&j.data.balance)));
-      if(b!=null){ SIGIL_BAL=Number(b); render(); }
+      if(b!=null){ SIGIL_RAW=String(b); window.SIGIL_RAW=SIGIL_RAW; SIGIL_BAL=Number(BigInt(SIGIL_RAW)/100000000n); render(); }
     }catch(e){ /* offline / no route → stays fresh 0 */ }
   }
+  // Live mine-chain height for the topbar block counter (auto-updated, never static).
+  async function pollStatus(){
+    try{
+      const r=await fetch(NODE+'/api/v1/status',{cache:'no-store'}); const j=await r.json();
+      const h=(j&&(j.height!=null?j.height:(j.block_height!=null?j.block_height:0)))||0;
+      if(h){ BLOCK_H=Number(h); paintBlockCounter(); }
+    }catch(e){}
+  }
+  function paintBlockCounter(){
+    const txt='H '+BLOCK_H.toLocaleString('en-US');
+    document.querySelectorAll('[data-blockcount]').forEach(el=>el.textContent=txt);
+  }
+  window.refresh=refresh;
 
   const RATE=0.92,FEE=0.003,MAX=3142;
   function swapCalc(q){q=+q;const out=q*RATE*(1-FEE);
@@ -331,7 +374,11 @@ body.view-desktop .desktop{display:flex}
   window.setView=setView; window.swapCalc=swapCalc;
 
   render();
-  refresh();
+  // v0.58 live loop: resolve the mining wallet, then poll balance + mine-chain height
+  // every 3s so the balance climbs in real time while mining to the local node and the
+  // topbar block counter stays current. Cheap same-origin /api hits via the node proxy.
+  loadMineWallet().then(()=>{ refresh(); pollStatus(); });
+  setInterval(()=>{ refresh(); pollStatus(); }, 3000);
   // deep-link: ?explorer opens the SIGIL Explorer panel straight away
   if(_qp.has('explorer')){ document.body.classList.add('view-desktop'); setTimeout(showExplorer, 80); }
 </script>
@@ -496,5 +543,116 @@ async function wRun(q){
 window.wSearch=wSearch; window.wKey=wKey; window.wGo=wGo;
 document.addEventListener('keydown',function(e){ if(e.key==='/'&&document.activeElement.id!=='wsearch'){ var s=document.getElementById('wsearch'); if(s){ e.preventDefault(); s.focus(); } } });
 document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWrap')){ var d=document.getElementById('wdrop'); if(d)d.style.display='none'; } });
+</script>
+
+<!-- v0.58: SEND modal + ADDRESS BOOK (own modal, QUG-style). Cyan SIGIL theme, vanilla.
+     Recipient (64-hex) + amount (8-decimal aware) + a localStorage address book you can
+     save/pick/delete. Posts to /api/v1/send; if the node has no send route yet it reports
+     it honestly instead of failing silently. -->
+<div id="send-modal" style="display:none;position:fixed;inset:0;z-index:10001;background:rgba(2,5,9,.82);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:18px">
+  <div style="width:100%;max-width:460px;max-height:88vh;display:flex;flex-direction:column;background:linear-gradient(160deg,#06121c,#04080c);border:1px solid rgba(33,212,253,.32);border-radius:16px;box-shadow:0 0 60px rgba(33,212,253,.18);overflow:hidden;font-family:'Rajdhani',system-ui,sans-serif">
+    <div style="flex:none;display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid rgba(33,212,253,.18);background:rgba(8,16,24,.7)">
+      <div style="font-size:20px">↗</div>
+      <div style="flex:1"><div style="font-family:'Orbitron';font-weight:700;letter-spacing:1px;color:#6df3ff;font-size:15px">SEND SIGIL</div>
+        <div style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8">available <b id="sendAvail" style="color:#00e0c6">0.00000000</b> SIGIL</div></div>
+      <button id="sendClose" style="background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:8px;width:30px;height:30px;cursor:pointer;font-size:15px">✕</button>
+    </div>
+    <div style="flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:14px">
+      <div>
+        <label style="font-family:'JetBrains Mono';font-size:10px;letter-spacing:1px;color:#6df3ff;text-transform:uppercase">Recipient address</label>
+        <input id="sendTo" placeholder="64-hex SIGIL address" autocomplete="off" spellcheck="false"
+          style="width:100%;margin-top:6px;background:rgba(4,8,12,.7);border:1px solid rgba(33,212,253,.22);border-radius:10px;color:#cfe9f2;font-family:'JetBrains Mono';font-size:12px;padding:11px 12px;outline:none">
+      </div>
+      <div>
+        <label style="font-family:'JetBrains Mono';font-size:10px;letter-spacing:1px;color:#6df3ff;text-transform:uppercase">Amount (SIGIL)</label>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <input id="sendAmt" type="text" inputmode="decimal" placeholder="0.00000000"
+            style="flex:1;background:rgba(4,8,12,.7);border:1px solid rgba(33,212,253,.22);border-radius:10px;color:#cfe9f2;font-family:'Orbitron';font-size:18px;padding:10px 12px;outline:none">
+          <button onclick="sendMax()" style="background:rgba(0,224,198,.1);border:1px solid rgba(0,224,198,.4);color:#00e0c6;border-radius:10px;padding:0 14px;font-family:'Rajdhani';font-weight:700;cursor:pointer">MAX</button>
+        </div>
+      </div>
+      <button id="sendGo" onclick="doSend()" style="border:1px solid rgba(33,212,253,.45);background:linear-gradient(90deg,rgba(33,212,253,.2),rgba(0,224,198,.13));color:#6df3ff;font-family:'Orbitron';font-weight:700;font-size:14px;letter-spacing:1px;padding:13px;border-radius:11px;cursor:pointer">↗ SEND</button>
+      <div id="sendMsg" style="font-family:'JetBrains Mono';font-size:11px;color:#8fb3c2;min-height:14px"></div>
+      <div style="border-top:1px solid rgba(33,212,253,.14);padding-top:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <span style="font-family:'JetBrains Mono';font-size:11px;color:#a78bfa;text-transform:uppercase;letter-spacing:1px">Address book</span>
+          <button onclick="abAdd()" style="background:rgba(167,139,250,.1);border:1px solid rgba(167,139,250,.35);color:#cdbdfa;border-radius:8px;padding:4px 10px;font-size:11px;font-family:'Rajdhani';font-weight:700;cursor:pointer">＋ save current</button>
+        </div>
+        <div id="abList" style="display:flex;flex-direction:column;gap:6px"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  var AB_KEY='sigil-addrbook';
+  function abLoad(){ try{ return JSON.parse(localStorage.getItem(AB_KEY)||'[]'); }catch(e){ return []; } }
+  function abSave(a){ try{ localStorage.setItem(AB_KEY, JSON.stringify(a)); }catch(e){} }
+  function shortA(a){ return a?(a.slice(0,8)+'…'+a.slice(-6)):''; }
+  function abRender(){
+    var box=document.getElementById('abList'); if(!box) return;
+    var a=abLoad();
+    if(!a.length){ box.innerHTML='<div style="color:#5a93a8;font-size:12px">No saved addresses yet — fill recipient + ＋ save current.</div>'; return; }
+    box.innerHTML=a.map(function(e,i){
+      return '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:rgba(8,16,24,.55);border:1px solid rgba(33,212,253,.12);border-radius:9px">'
+        +'<div style="flex:1;min-width:0;cursor:pointer" onclick="abPick('+i+')">'
+        +'<div style="font-family:Rajdhani;font-weight:700;font-size:13px;color:#cfe9f2">'+(e.label||'unnamed')+'</div>'
+        +'<div style="font-family:JetBrains Mono;font-size:10px;color:#5a93a8">'+shortA(e.addr)+'</div></div>'
+        +'<button onclick="abPick('+i+')" style="background:rgba(33,212,253,.1);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:7px;padding:4px 9px;font-size:11px;cursor:pointer">use</button>'
+        +'<button onclick="abDel('+i+')" style="background:rgba(255,90,90,.08);border:1px solid rgba(255,90,90,.3);color:#ff8a8a;border-radius:7px;padding:4px 8px;font-size:11px;cursor:pointer">✕</button></div>';
+    }).join('');
+  }
+  window.abPick=function(i){ var a=abLoad(); if(a[i]){ document.getElementById('sendTo').value=a[i].addr; } };
+  window.abDel=function(i){ var a=abLoad(); a.splice(i,1); abSave(a); abRender(); };
+  window.abAdd=function(){
+    var addr=(document.getElementById('sendTo').value||'').trim().toLowerCase();
+    if(!/^[0-9a-f]{64}$/.test(addr)){ sendStatus('Enter a valid 64-hex address first.', '#ff8a8a'); return; }
+    var label=prompt('Label for this address:', shortA(addr))||shortA(addr);
+    var a=abLoad(); if(!a.some(function(e){return e.addr===addr;})){ a.unshift({label:label,addr:addr}); abSave(a); abRender(); }
+  };
+  function sendStatus(m,c){ var el=document.getElementById('sendMsg'); if(el){ el.textContent=m; el.style.color=c||'#8fb3c2'; } }
+  window.sendStatus=sendStatus;
+  window.sendMax=function(){
+    try{ var raw=BigInt(window.SIGIL_RAW||'0'); document.getElementById('sendAmt').value=(Number(raw)/1e8).toFixed(8); }catch(e){}
+  };
+  window.openSend=function(){
+    var m=document.getElementById('send-modal'); if(!m) return;
+    try{ var raw=BigInt(window.SIGIL_RAW||'0'); var w=raw/100000000n, f=(raw%100000000n).toString().padStart(8,'0');
+      document.getElementById('sendAvail').textContent=w.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')+'.'+f; }catch(e){}
+    sendStatus(''); abRender(); m.style.display='flex';
+    setTimeout(function(){ var t=document.getElementById('sendTo'); if(t)t.focus(); }, 30);
+  };
+  window.closeSend=function(){ var m=document.getElementById('send-modal'); if(m)m.style.display='none'; };
+  window.doSend=async function(){
+    var to=(document.getElementById('sendTo').value||'').trim().toLowerCase();
+    var amtStr=(document.getElementById('sendAmt').value||'').trim();
+    if(!/^[0-9a-f]{64}$/.test(to)){ sendStatus('Recipient must be a 64-hex address.', '#ff8a8a'); return; }
+    if(!/^\d+(\.\d{1,8})?$/.test(amtStr) || Number(amtStr)<=0){ sendStatus('Amount must be > 0 (max 8 decimals).', '#ff8a8a'); return; }
+    // to base units (8 decimals) without float rounding
+    var parts=amtStr.split('.'); var base=BigInt(parts[0]||'0')*100000000n + BigInt(((parts[1]||'')+'00000000').slice(0,8));
+    var from=(window.MINE_ADDR||window.ADDR||'');
+    sendStatus('Submitting…', '#6df3ff'); var btn=document.getElementById('sendGo'); if(btn)btn.disabled=true;
+    try{
+      var r=await fetch('/api/v1/send',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({from:from,to:to,amount:base.toString(),token:'native'})});
+      var j=null; try{ j=await r.json(); }catch(_){}
+      if(r.ok && j && j.ok){ sendStatus('✓ sent — tx '+((j.tx||j.hash||'').slice(0,16))+'…', '#00e0c6'); setTimeout(function(){ if(window.refresh)refresh(); }, 600); }
+      else if(r.status===404){ sendStatus('Send endpoint not yet wired on this node (rpcd /api/v1/send pending). Address saved; transfer once the route ships.', '#fbbf24'); }
+      else { sendStatus('✗ '+((j&&(j.error||j.message))||('HTTP '+r.status)), '#ff8a8a'); }
+    }catch(e){ sendStatus('✗ network error — node unreachable.', '#ff8a8a'); }
+    if(btn)btn.disabled=false;
+  };
+  // wire every Send action (phone + desktop hero + sidebar)
+  function wireSend(){
+    document.querySelectorAll('.act,.snav a,.dactions .act').forEach(function(el){
+      var t=(el.textContent||'').trim().toLowerCase();
+      if(t==='send'){ el.style.cursor='pointer'; el.addEventListener('click',function(ev){ ev.preventDefault(); window.openSend(); }); }
+    });
+  }
+  document.getElementById('sendClose').addEventListener('click',window.closeSend);
+  document.getElementById('send-modal').addEventListener('click',function(e){ if(e.target===this) window.closeSend(); });
+  window.addEventListener('keydown',function(e){ if(e.key==='Escape') window.closeSend(); });
+  if(document.readyState!=='loading') wireSend(); else document.addEventListener('DOMContentLoaded',wireSend);
+})();
 </script>
 </body></html>

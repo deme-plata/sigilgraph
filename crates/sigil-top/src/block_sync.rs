@@ -50,9 +50,22 @@ pub struct BackfillReq {
 /// CAPPED at 64 MB output: a malicious peer must not zstd-bomb the monitor (a real chunk
 /// decompresses to ≤ ~8 MB). None on any malformed/oversized stream — caller treats it
 /// exactly like an unparseable response (logged, peer benched), never a panic.
+/// v0.39: bounded-raise guard for PEER-claimed tips. peer_best only-raises, so a
+/// single bogus gossip claim (the 26.8M phantom) used to poison the sync target until
+/// the oracle reset-detection healed it ~9s later — meanwhile the backfill frontier
+/// chased the phantom. A claim may raise the target at most 2M blocks past the current
+/// belief (the oracle seeds it at boot); wilder jumps are ignored — the ORACLE is the
+/// only authority allowed to move the target that far.
+fn sane_raise(cur: u64, claim: u64) -> bool {
+    cur == 0 || claim <= cur.saturating_add(2_000_000)
+}
+
 fn zstd_decompress_body(body: &[u8]) -> Option<Vec<u8>> {
     use std::io::Read;
-    const MAX_OUT: u64 = 64 * 1024 * 1024;
+    // v0.39: 64 MiB was 8x too generous — a real chunk is <= ~8 MB, and the worst-case
+    // burst is MAX_OUT x inflight slots DURING STARTUP (before the first frame). 12 MiB
+    // keeps full headroom while capping the burst ~6x lower.
+    const MAX_OUT: u64 = 12 * 1024 * 1024;
     let mut dec = ruzstd::StreamingDecoder::new(body).ok()?;
     let mut out = Vec::new();
     dec.take(MAX_OUT + 1).read_to_end(&mut out).ok()?;
@@ -100,7 +113,7 @@ fn ingest_block_value(
             s.fetched_total += 1;            // smooth, monotonic — drives the rate readout
             s.sync_height = synced;          // ✓ badge tracks the contiguous tip, not a stale height
             s.sync_hash_hex = hash_hex.clone();
-            if height > s.peer_best_height {
+            if height > s.peer_best_height && sane_raise(s.peer_best_height, height) {
                 s.peer_best_height = height;
             }
             s.last_message_at = Some(Instant::now());
@@ -120,7 +133,7 @@ fn ingest_block_value(
         true
     } else {
         let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-        if height > s.peer_best_height {
+        if height > s.peer_best_height && sane_raise(s.peer_best_height, height) {
             s.peer_best_height = height;
         }
         s.last_message_at = Some(Instant::now());
@@ -529,7 +542,11 @@ impl P2PBlockSync {
                 const CHUNK: u64 = 4096;            // v0.15.1 STABILITY: 8192 (8 MB) chunks landed in
                                                    // bursts then stalled (2k→2 blk/s swing). 4096 halves
                                                    // tail latency so a stuck slot frees faster + bursts smooth.
-                const MAX_INFLIGHT: usize = 12;     // v0.15.1: slightly fewer slots so they don't all pile
+                // v0.39: was const 12 — at first boot (empty DB) all slots fire decode
+                // bursts at once, pre-TUI, which pressured small/busy machines hard. 8 by
+                // default; SIGIL_SYNC_INFLIGHT=1..16 to tune (raise on a beefy box).
+                let max_inflight: usize = std::env::var("SIGIL_SYNC_INFLIGHT").ok()
+                    .and_then(|v| v.parse::<usize>().ok()).map(|n| n.clamp(1, 16)).unwrap_or(8);
                                                     // onto a stalled frontier and crater the rate.
                 // Look-ahead cap must be TIGHT: a large window lets next_start race far ahead of a
                 // stalled frontier, so all MAX_INFLIGHT slots get consumed by high-range chunks that
@@ -664,7 +681,8 @@ impl P2PBlockSync {
                                 let _gossiped_tip = height;
                                 s.sync_hash_hex = hash_hex;
                                 s.sync_total = total_synced;
-                                if peer_best_height > s.peer_best_height {
+                                if peer_best_height > s.peer_best_height
+                                    && sane_raise(s.peer_best_height, peer_best_height) {
                                     s.peer_best_height = peer_best_height;
                                 }
                                 // NOTE: no per-event log here — the live mesh emits thousands of
@@ -906,14 +924,14 @@ impl P2PBlockSync {
                             // soon as ANY responds; duplicate replies are idempotent (store dedups by
                             // height). Look-ahead chunks (i>0) stay single-peer to avoid flooding.
                             const FRONTIER_REDUNDANCY: usize = 3;
-                            for i in 0..(MAX_INFLIGHT as u64) {
-                                if inflight >= MAX_INFLIGHT { break; }
+                            for i in 0..(max_inflight as u64) {
+                                if inflight >= max_inflight { break; }
                                 let start = frontier_chunk + i * CHUNK;
                                 if start >= peer_best { break; }          // past the tip
                                 if !assigned.insert(start) { continue; }  // already in flight
                                 let fanout = if i == 0 { FRONTIER_REDUNDANCY.min(healthy.len()).max(1) } else { 1 };
                                 for k in 0..fanout {
-                                    if inflight >= MAX_INFLIGHT { break; }
+                                    if inflight >= max_inflight { break; }
                                     let peer = healthy[(rr + k) % healthy.len()];
                                     let payload = serde_json::to_vec(
                                         &BackfillReq { from: start, to: start + CHUNK, headers_only: true, codec: 1 }

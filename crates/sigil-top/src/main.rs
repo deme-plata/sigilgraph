@@ -2161,7 +2161,12 @@ impl App {
             });
             self.update_rx = Some(rx);
         }
-        self.target_height = self.st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(self.st.height);
+        // v0.40.2: the API fallback is the rpcd's MINING chain (a few thousand
+        // blocks) and carries no `tip` object — never let it clobber the
+        // produce-chain tip the feed gave us (the "tip 1,495" phantom). A tip
+        // DROP is only believed when the verified feed tip itself reports it.
+        let fresh_tip = self.st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(self.st.height);
+        self.target_height = if self.st.tip.is_some() { fresh_tip } else { fresh_tip.max(self.target_height) };
         // verify the tip (verify-don't-trust) and advance the synced height
         self.verify = self.st.tip.as_ref().map(verify_tip);
         if let Some(v) = self.verify.as_ref() {
@@ -3563,11 +3568,17 @@ fn sigil_top_db_path() -> String {
 /// NOT s.blocks_synced (faked to the tip in light-monitor mode — see memory/render note).
 fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let s = &app.p2p_state;
+    // v0.40.2: with the sync engine off (the Windows light-monitor default) the
+    // hero must SAY so instead of rendering a 0% backfill that looks broken.
+    let light = app.p2p_sync.is_none();
     let fold_ok = app.verify.as_ref().map(|v| v.ok).unwrap_or(false);
     let net_tip = s.peer_best_height.max(app.target_height);
     let spine = s.verified;
     let gap = net_tip.saturating_sub(spine);
     let frac = if net_tip > 0 { (spine as f64 / net_tip as f64).clamp(0.0, 1.0) } else { 0.0 };
+    // light mode: the bar reflects the 10ms TIP-PROOF verify (the thing a light
+    // monitor actually does), not a backfill that is deliberately off.
+    let frac = if light { if fold_ok { 1.0 } else { 0.0 } } else { frac };
     let following = net_tip > 0;
     let caught = following && gap < 16_384;
     let synced = caught && fold_ok && s.verify_break.is_none();
@@ -3575,7 +3586,8 @@ fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let kf_rate = app.sync_kf.x.max(0.0);                       // Kalman-smoothed blk/s
     let eta = if synced || kf_rate < 1.0 { f64::INFINITY } else { gap as f64 / kf_rate };
 
-    let (vtext, vcol) = if s.verify_break.is_some() { ("⚠ SPINE BREAK", C_NEON_PINK) }
+    let (vtext, vcol) = if light { ("◇ LIGHT MONITOR", C_NEON_CYAN) }
+        else if s.verify_break.is_some() { ("⚠ SPINE BREAK", C_NEON_PINK) }
         else if synced { ("◆ SYNCED", C_NEON_GREEN) }
         else if connecting { ("… CONNECTING", C_DIM) }
         else if caught { ("≈ TRACKING HEAD", C_NEON_CYAN) }
@@ -3618,16 +3630,31 @@ fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     } else { Span::raw("") };
 
     let tlines = vec![
-        Line::from(vec![
-            dim("tip "), val(group(net_tip)),
-            dim("   spine "), Span::styled(format!("⛓{}", group(spine)), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
-            dim("   gap "), Span::styled(group(gap), Style::default().fg(if caught { C_NEON_GREEN } else { C_GOLD })),
-        ]),
-        Line::from(vec![
-            dim("rate "), Span::styled(format!("{} blk/s", group(kf_rate.round() as u64)), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)),
-            dim(" ~kalman   eta "), Span::styled(if synced { "—".to_string() } else { fmt_eta(eta) }, Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
-            dim("   chunk "), Span::styled(chunk, Style::default().fg(C_VBRIGHT)),
-        ]),
+        if light {
+            Line::from(vec![
+                dim("tip "), val(group(net_tip)),
+                dim("   mode "), Span::styled("light tip-proof verify (~10ms)", Style::default().fg(C_NEON_CYAN)),
+            ])
+        } else {
+            Line::from(vec![
+                dim("tip "), val(group(net_tip)),
+                dim("   spine "), Span::styled(format!("⛓{}", group(spine)), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+                dim("   gap "), Span::styled(group(gap), Style::default().fg(if caught { C_NEON_GREEN } else { C_GOLD })),
+            ])
+        },
+        if light {
+            Line::from(vec![
+                dim("backfill "), Span::styled("off — light monitor", Style::default().fg(C_DIM)),
+                dim("   enable: "), Span::styled("--sync", Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+                dim(" (tungt: henter hele kæden)"),
+            ])
+        } else {
+            Line::from(vec![
+                dim("rate "), Span::styled(format!("{} blk/s", group(kf_rate.round() as u64)), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)),
+                dim(" ~kalman   eta "), Span::styled(if synced { "—".to_string() } else { fmt_eta(eta) }, Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+                dim("   chunk "), Span::styled(chunk, Style::default().fg(C_VBRIGHT)),
+            ])
+        },
         Line::from(vec![
             dim("fleet "), Span::styled(format!("{}/{}", fleet_on, fleet_total), Style::default().fg(if fleet_total > 0 && fleet_on == fleet_total { C_NEON_GREEN } else { C_GOLD })),
             dim("   mesh "), Span::styled(format!("{} peers", mesh), Style::default().fg(if mesh >= 4 { C_NEON_GREEN } else if mesh >= 1 { C_GOLD } else { C_RED })),
@@ -3645,7 +3672,8 @@ fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     f.render_widget(Paragraph::new(tlines), tele);
 
     // ── static starship (right) ──────────────────────────────────────────
-    let (dtxt, dcol) = if synced { ("DOCKED", C_NEON_GREEN) }
+    let (dtxt, dcol) = if light { ("MONITOR", C_NEON_CYAN) }
+        else if synced { ("DOCKED", C_NEON_GREEN) }
         else if connecting { ("OFFLINE", C_RED) }
         else { ("ENGAGED", vcol) };
     let ship_lines = vec![

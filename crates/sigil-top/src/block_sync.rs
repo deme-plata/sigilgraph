@@ -496,6 +496,18 @@ impl P2PBlockSync {
                                     reset_streak += 1;
                                     if reset_streak >= 3 {
                                         s.peer_best_height = h; // RESET to the live oracle tip
+                                        // v0.59: a chain reset also invalidates the checkpoint/spine
+                                        // high-water marks — they were verified against the OLD
+                                        // (now-dead) chain. Without this the SYNC hero showed a
+                                        // phantom "checkpoint 5M / verified 1.3M" while tip was only
+                                        // 0.33M (the high-water marks only ever rose). Clamp every
+                                        // displayed progress field down to the live tip so the
+                                        // checkpoint can never read ABOVE the real network head.
+                                        s.blocks_synced = s.blocks_synced.min(h);
+                                        s.sync_height   = s.sync_height.min(h);
+                                        s.sync_total    = s.sync_total.min(h);
+                                        s.verified      = s.verified.min(h);
+                                        if s.base > h { s.base = h; }
                                         reset_streak = 0;
                                         clear_persisted_tip();
                                         persist = Some(h);

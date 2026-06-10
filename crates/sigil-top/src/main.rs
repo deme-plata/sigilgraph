@@ -3995,7 +3995,11 @@ fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let light = app.p2p_sync.is_none();
     let fold_ok = app.verify.as_ref().map(|v| v.ok).unwrap_or(false);
     let net_tip = s.peer_best_height.max(app.target_height);
-    let spine = s.verified;
+    // v0.59: a checkpoint/spine can NEVER be above the real network tip. A phantom gossip
+    // claim (or a stale high-water mark from a chain that was reset) used to make the hero
+    // read "✓ checkpoint 5M" while the tip was only 0.33M — clamp the displayed value to the
+    // live tip so it's always honest (the chain-reset detector clamps the state too).
+    let spine = if net_tip > 0 { s.verified.min(net_tip) } else { s.verified };
     // v0.57 (LANE-M): RECENT-WINDOW monitor (base snapped forward, sync engine ON). `verified` is
     // anchored at the CHECKPOINT base, not genesis — so a verified/tip bar is dishonest: it implies
     // a full-genesis spine and FREEZES when the base-anchored watermark can't reach genesis (the

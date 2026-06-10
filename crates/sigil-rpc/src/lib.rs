@@ -144,15 +144,19 @@ pub fn execute_swap(
                 // pre-state + the known credit (out.amount_out to the trader).
                 let trader_out_pre = state.balance_of(&from, &out_token);
                 let master_out_pre = state.balance_of(&master, &out_token);
+                // checked: raw +/- could panic (debug) or wrap (release). The
+                // trader keeps amount_out minus the master cut; master gets the cut.
+                let trader_credit = out.amount_out
+                    .checked_sub(split.master_share).ok_or(RpcError::Overflow)?;
                 mutations.push(StateMutation::SetBalance {
                     wallet: from,
                     token: out_token,
-                    amount: trader_out_pre + out.amount_out - split.master_share,
+                    amount: trader_out_pre.checked_add(trader_credit).ok_or(RpcError::Overflow)?,
                 });
                 mutations.push(StateMutation::SetBalance {
                     wallet: master,
                     token: out_token,
-                    amount: master_out_pre + split.master_share,
+                    amount: master_out_pre.checked_add(split.master_share).ok_or(RpcError::Overflow)?,
                 });
             }
         }

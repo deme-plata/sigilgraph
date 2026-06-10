@@ -56,22 +56,24 @@ impl Treasury {
     /// Collect the 10% dev fee on `gross` settled work into the treasury. Returns the fee taken.
     pub fn collect_dev_fee(&mut self, gross: u128) -> u128 {
         let fee = dev_fee(gross);
-        self.balance += fee;
-        self.total_in += fee;
+        // saturating: an overflow here must not panic the writer (or wrap the
+        // MAX-WINS watermark this crate exists to protect).
+        self.balance = self.balance.saturating_add(fee);
+        self.total_in = self.total_in.saturating_add(fee);
         fee
     }
 
     /// Direct inflow (e.g. a grant/endowment) — monotonic up.
     pub fn accrue(&mut self, amount: u128) {
-        self.balance += amount;
-        self.total_in += amount;
+        self.balance = self.balance.saturating_add(amount);
+        self.total_in = self.total_in.saturating_add(amount);
     }
 
     /// MAX-WINS sync — the Quillon fix. A stale/partial observation can only RAISE the balance, never
     /// lower it. Returns true if it raised the balance, false if refused (`observed <= balance`).
     pub fn commit_sync(&mut self, observed: u128) -> bool {
         if observed > self.balance {
-            self.total_in += observed - self.balance;
+            self.total_in = self.total_in.saturating_add(observed - self.balance);
             self.balance = observed;
             true
         } else {

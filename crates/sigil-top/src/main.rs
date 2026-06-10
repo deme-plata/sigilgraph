@@ -989,10 +989,25 @@ fn init_ui_ascii() {
 fn sa<S: Into<String>>(s: S) -> String {
     let s = s.into();
     if !ui_ascii() { return s; }
-    // Only the genuinely-wide emoji glyphs — everything else passes through rich.
-    s.replace('⛏', "^").replace('⛓', "=").replace('⬇', "v").replace('⬆', "^")
-     .replace('⚡', "!").replace('⟳', "@").replace('◐', "O").replace('🏆', "*")
-     .replace('⚠', "!").replace('▦', "#")
+    // v0.33.5: CP437 raster consoles (classic conhost) LACK heavy/rounded/diagonal box-
+    // drawing, geometric icons, arrows and emoji → they render as `?`. Map every such glyph
+    // to a CP437-safe ASCII stand-in. KEEP (fall through `other`): light box-drawing
+    // (─│┌┐└┘├┤┬┴┼) + block elements (█▓▒░▌▐) + · µ — those ARE in CP437 and render fine.
+    s.chars().map(|c| match c {
+        '◆' | '✦' | '✶' | '★' | '◇' | '⬣' | '⬢' | '⬡' | '🏆' => '*',
+        '◈' | '▦' | '⛓' | '▩' | '▣' => '#',
+        '●' | '◐' => 'o', '○' | '◦' | '∙' => '.',
+        '✓' | '✔' => 'v', '✗' | '✘' | '✕' | '×' | '╳' => 'x',
+        '→' | '➜' | '↩' | '⟳' | '➤' => '>', '←' => '<',
+        '⬆' | '↑' | '▲' => '^', '⬇' | '↓' | '▼' => 'v',
+        '≈' => '~', '…' => '.', '⚡' | '⚠' | '⛏' => '!',
+        '‹' | '«' => '<', '›' | '»' => '>',
+        '╱' => '/', '╲' => '\\', '▕' | '▏' | '▎' | '▍' => '|',
+        '━' => '-', '┃' => '|',
+        '┏' | '┓' | '┗' | '┛' | '╭' | '╮' | '╰' | '╯' => '+',
+        'Δ' => 'D', 'Ε' => 'E',
+        other => other,
+    }).collect()
 }
 
 fn main() {
@@ -3281,9 +3296,10 @@ fn draw_node_body(f: &mut Frame, app: &App, body_area: ratatui::layout::Rect) {
 fn card_block(title: &'static str, color: Color) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
-        // v0.33.3: Thick (┏┓┗┛) — Rounded corners (╭╮╰╯) render as `?` on the user's console
-        // font; Thick is confirmed to render. Heavy is on-brand for the bold-neon look anyway.
-        .border_type(BorderType::Thick)
+        // v0.33.5: light box-drawing (┌─┐│└┘) IS in CP437 → renders on classic raster conhost;
+        // heavy/rounded corners are NOT and showed as `?`. Use Plain on ascii consoles, Rounded
+        // on rich terminals (Windows Terminal / VS Code / *nix) where it's prettier.
+        .border_type(if ui_ascii() { BorderType::Plain } else { BorderType::Rounded })
         .padding(Padding::horizontal(1))
         .title(Line::from(vec![
             Span::styled(format!("{} ", title.trim_start()),

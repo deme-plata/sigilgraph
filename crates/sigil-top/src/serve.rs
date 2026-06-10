@@ -122,14 +122,59 @@ fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Optio
     let safe = path.trim_start_matches('/').replace("..", "").replace('\\', "");
 
     let (status, body, ct) = serve_file(dir, &safe);
+    // v0.59 FEED-LESS HOST FIX: a client with no co-located producer doesn't have the live DAG
+    // feed files on disk (they're published only on the producer box), so serve_file 404s, the
+    // explorer's same-origin fetch fails, and it falls back to the rpcd MINING sub-chain — showing
+    // height ~3k / 56k-high blocks instead of the real multi-million DAG chain. Proxy the known
+    // feed files from the sigilgraph host SERVER-SIDE (reqwest HTTPS — no CORS, no mixed-content)
+    // so the explorer sees the REAL chain on any host. Everything else keeps its normal 404.
+    let (status, body, ct): (&str, Vec<u8>, &str) = if status.starts_with("404") && is_feed_path(&safe) {
+        match proxy_feed(&safe) {
+            Some((b, c)) => ("200 OK", b, c),
+            None => (status, body, ct),
+        }
+    } else {
+        (status, body, ct)
+    };
 
     let resp = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
         body.len()
     );
     let _ = stream.write_all(resp.as_bytes());
     let _ = stream.write_all(&body);
     let _ = stream.flush();
+}
+
+/// Remote host publishing the live DAG-chain feeds (recent-blocks, tip, tip-live). Override with
+/// `SIGIL_FEED_URL`. Used only for the feed-less-host fallback in `handle_conn`.
+fn feed_host() -> String {
+    std::env::var("SIGIL_FEED_URL").unwrap_or_else(|_| "https://sigilgraph.fluxapp.xyz".into())
+}
+
+/// The static feed files a feed-less client may request but won't have on disk. Restricted to this
+/// known set so the fallback can never become an open proxy.
+fn is_feed_path(safe: &str) -> bool {
+    matches!(
+        safe,
+        "sigil-recent-blocks.json" | "sigil-tip.json" | "sigil-tip-live.json" | "sigil-anchor-key.json"
+    )
+}
+
+/// Fetch a feed file from `feed_host()` over HTTPS. Blocking (we run per-connection in a thread);
+/// `None` on any error so the caller falls back to the original 404.
+fn proxy_feed(safe: &str) -> Option<(Vec<u8>, &'static str)> {
+    let url = format!("{}/{}", feed_host().trim_end_matches('/'), safe);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(6))
+        .build()
+        .ok()?;
+    let resp = client.get(&url).send().ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body = resp.bytes().ok()?.to_vec();
+    Some((body, "application/json; charset=utf-8"))
 }
 
 fn serve_file(dir: &PathBuf, safe: &str) -> (&'static str, Vec<u8>, &'static str) {

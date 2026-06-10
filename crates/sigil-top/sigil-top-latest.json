@@ -1,14 +1,22 @@
 {
   "product": "sigil-top",
-  "version": "0.55.0",
+  "version": "0.56.0",
   "channel": "stable",
   "released": "2026-06-10",
   "url": "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-linux-x86_64",
-  "blake3_hex": "33b0bdca9b21223bce0290a662f0810e6e7e616ccd1e08a5c430c088d7658d32",
-  "size_bytes": 16095368,
-  "notes": "v0.55.0: folds in LANE-A real-time gossip head (sub-second tip tracking) that the published 0.50.0 missed, plus the 0.42/0.50 reliability stack — instant rpcd restart (background explorer index + /readyz), O(n) search index, seamless auto-relaunch (INSTALL_EXE captured before self-replace, fixes the post-swap ENOENT), SQIsign-signed snapshots, auth-gate on :8099, BOLT11-bound LN, chain-reset detection.",
+  "blake3_hex": "c9d31b7037df7bee2cb84b8aefe9ab03a0286282e0a11ff1b2dbe0b9c4f6412d",
+  "size_bytes": 16125080,
+  "notes": "v0.56.0: FAIL-CLOSED auto-updater \u2014 a preflight version mismatch now ABORTS + reverts to the rollback image instead of relaunching the wrong binary (fixes 'reports vX, expected vY \u2014 relaunching anyway'). Aether bootstrap no longer spams stderr off-server (Epsilon-only dir; SIGIL_AETHER_DIR override; skip silently when absent). Update toast surfaces build provenance (manifest flux_rev vs running FLUX_REV). Folds in the LANE-C GPU thermal guard (nvidia-smi >=85C -> CPU fallback) the 0.55.0 binary missed. Both linux-x64 and windows-x64 published at 0.56.0.",
   "targets": {
-    "linux-x64": { "url": "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-linux-x86_64", "blake3_hex": "33b0bdca9b21223bce0290a662f0810e6e7e616ccd1e08a5c430c088d7658d32", "size_bytes": 16095368 },
-    "windows-x64": { "url": "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-windows-x64.exe", "blake3_hex": "fafb056499a14c52eefaaf00a84613b915a62917291298f051b75558d333324e", "size_bytes": 27510799 }
+    "linux-x64": {
+      "url": "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-linux-x86_64",
+      "blake3_hex": "c9d31b7037df7bee2cb84b8aefe9ab03a0286282e0a11ff1b2dbe0b9c4f6412d",
+      "size_bytes": 16125080
+    },
+    "windows-x64": {
+      "url": "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-windows-x64.exe",
+      "blake3_hex": "dc9d93ec03f6d4bbd7fec49ca75faf991db3a9cdbb199b4e75a5bfb439917d85",
+      "size_bytes": 27577333
+    }
   }
 }

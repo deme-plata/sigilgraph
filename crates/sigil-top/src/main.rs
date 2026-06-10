@@ -1318,7 +1318,11 @@ fn main() {
     // Non-TTY (piped / redirected / captured), --once, or --lite → emit exactly ONE
     // plain ANSI frame and exit. ratatui needs a real terminal; this path never
     // spams. The live, interactive dashboard is the TUI below.
-    let interactive = std::io::stdout().is_terminal();
+    // v0.63.1: a DOUBLE-CLICKED console on Windows can report is_terminal()=false on
+    // stdout (tray/subsystem quirk), which dropped the app to the one-frame path and
+    // "closed" instead of showing the dashboard. Treat it as interactive if EITHER
+    // stdin or stdout is a tty — only a full pipe/redirect (both non-tty) stays plain.
+    let interactive = std::io::stdout().is_terminal() || std::io::stdin().is_terminal();
     // Non-TTY (piped / captured / redirected) or --once → one plain frame, no loop.
     if cfg.once || !interactive {
         let (st, online, source) = fetch_best(&cfg);

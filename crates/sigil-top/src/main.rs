@@ -2160,6 +2160,69 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // and exits faster than HEAL_SECS, which would false-trigger a revert). If THIS version
     // has crash-looped, this reverts to the last working binary and relaunches.
     if !cfg.once && crashloop_guard() { return Ok(()); }
+
+    // ── v0.35 (sync-starts-earlier, DeepSeek audit S4): the ENTIRE sync bootstrap runs
+    // BEFORE the terminal is touched. It used to sit after raw-mode + alt-screen + panic-
+    // hook + Terminal::new, so the store open (formerly a full-db scan!), the aether
+    // bootstrap and the P2P launch all waited on UI plumbing. Now the mesh is dialing and
+    // the first probe is in flight while crossterm sets up; pre-TUI prints go to stderr
+    // (IN_TUI is still false), which is exactly where pre-UI diagnostics belong. ─────────
+    let mut app = App::new(cfg);
+    // v0.10.5: async — kicks off the first fetch without blocking the first paint.
+    app.request_refresh();
+
+    // v0.7.22: cross-platform PERSISTENT store path. The old /tmp + /dev/shm paths
+    // don't exist on Windows → the store never persisted → re-sync from 0 every launch
+    // ("starts over on update"). Now a per-user dir (override with SIGIL_TOP_DB).
+    let db_path = sigil_top_db_path();
+    let mut block_store = block_store::BlockStore::open(&db_path)
+        .or_else(|_| block_store::BlockStore::open(
+            std::env::temp_dir().join("sigil-top-blocks.db").to_string_lossy().as_ref()))
+        .unwrap_or_else(|e| panic!("block store: {e}"));
+
+    // v0.7.1: Bootstrap from local aether shards into flux-db before starting P2P
+    match block_store::sync_aether_to_fluxdb(&mut block_store, "/opt/orobit/sigil-data/db-epsilon/aether") {
+        Ok(n) if n > 0 => {
+            app.toast = format!("⬇ Synced {n} blocks → flux-db (height {})", block_store.best_height());
+        }
+        Err(e) => tlog!("[aether] {e}"),
+        _ => {}
+    }
+
+    // v0.11.0: a read-only view of the SAME flux-db, cloned BEFORE the store is moved
+    // into the sync thread. The embedded HTTP server uses it to answer the explorer's
+    // /api/v1/{recent,search,aether} from the local verified spine.
+    let block_reader = block_store.reader();
+
+    // v0.26 hardening #8 (DeepSeek-reviewed): graceful SIGTERM/SIGINT — restore the
+    // terminal (harmless no-op if Ctrl-C lands before raw mode) and exit cleanly; the
+    // sync thread's BlockStore persists watermarks on every advance, so state is durable.
+    {
+        let _ = ctrlc::set_handler(move || {
+            let _ = disable_raw_mode();
+            let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+            std::process::exit(0);
+        });
+    }
+
+    // v0.12.1: sync is ON BY DEFAULT. Opt OUT with --no-sync / SIGIL_TOP_NO_SYNC=1.
+    let want_sync = !(std::env::args().any(|a| a == "--no-sync")
+        || std::env::var("SIGIL_TOP_NO_SYNC").is_ok());
+    let mut sync_handle: Option<std::sync::Arc<std::sync::Mutex<block_sync::P2PSyncState>>> = None;
+    if want_sync {
+        // v0.22.1: monitor path (recent_only=true) → fast-snap to the verified live tip.
+        // v0.33.5: SIGIL_FULLSYNC=1 launches a genuine genesis→tip crawl instead.
+        let recent_only = std::env::var("SIGIL_FULLSYNC").map(|v| v == "0" || v.is_empty()).unwrap_or(true);
+        let p2p = block_sync::P2PBlockSync::launch(block_store, recent_only);
+        sync_handle = Some(p2p.state_handle());
+        app.p2p_sync = Some(p2p);
+        if app.toast.is_empty() {
+            app.toast = "⚡ P2P mesh connecting → Delta / Epsilon…".into();
+        }
+    } else if app.toast.is_empty() {
+        app.toast = "◆ light monitor · fold-proof verified — [--sync] for live blocks".into();
+    }
+
     enable_raw_mode()?;
     // From here ratatui owns the screen — divert background eprintln to the logfile
     // (was smearing the dashboard with [p2p-sync]/[aether] lines).
@@ -2189,84 +2252,9 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
 
     let backend = CrosstermBackend::new(stdout);
     let mut term = Terminal::new(backend)?;
-
-    let mut app = App::new(cfg);
-    // v0.10.5: async — kicks off the first fetch without blocking the first paint.
-    app.request_refresh();
-
-    // v0.7.22: cross-platform PERSISTENT store path. The old /tmp + /dev/shm paths
-    // don't exist on Windows → the store never persisted → re-sync from 0 every launch
-    // ("starts over on update"). Now a per-user dir (override with SIGIL_TOP_DB).
-    let db_path = sigil_top_db_path();
-    let mut block_store = block_store::BlockStore::open(&db_path)
-        .or_else(|_| block_store::BlockStore::open(
-            std::env::temp_dir().join("sigil-top-blocks.db").to_string_lossy().as_ref()))
-        .unwrap_or_else(|e| panic!("block store: {e}"));
-
-    // v0.7.1: Bootstrap from local aether shards into flux-db before starting P2P
-    match block_store::sync_aether_to_fluxdb(&mut block_store, "/opt/orobit/sigil-data/db-epsilon/aether") {
-        Ok(n) if n > 0 => {
-            app.toast = format!("⬇ Synced {n} blocks → flux-db (height {})", block_store.best_height());
-        }
-        Err(e) => tlog!("[aether] {e}"),
-        _ => {}
-    }
-
-    // v0.10.2: full P2P block-sync is OPT-IN. It spins a 3-worker tokio runtime +
-    // 8×~9 MB parallel header downloads to pull genesis→tip (~150k blocks), which
-    // pegged CPU + network on startup for no benefit — the dashboard already proves
-    // the WHOLE chain via the succinct fold-proof (~342 ms, 2.5 KB). So the default
-    // is a true light monitor; pass `--sync` (or SIGIL_TOP_SYNC=1), or use the
-    // `full-sync` / `verify-chain` subcommands, when you actually want live blocks.
-    // v0.11.0: a read-only view of the SAME flux-db, cloned BEFORE the store is moved
-    // into the sync thread. The embedded HTTP server uses it to answer the explorer's
-    // /api/v1/{recent,search,aether} from the local verified spine.
-    let block_reader = block_store.reader();
-
-    // v0.26 hardening #8 (DeepSeek-reviewed): graceful SIGTERM/SIGINT. A supervisor restart
-    // (or Ctrl-C in a headless run) otherwise kills the process mid-window with no final flush
-    // and, in the TUI, a terminal left in raw mode. Restore the terminal, flush the verified-
-    // spine watermark to flux-db (the reader shares the live DB via Arc), then exit 0 so the
-    // supervisor restarts cleanly and never orphans the persisted synced/verified state.
-    {
-        // v0.26.6 fix: BlockReader is a read-only view (no flush). The sync threads
-        // BlockStore persists the synced/verified watermark to flux-db on every advance,
-        // so the latest watermark is already durable at Ctrl-C — just restore the terminal
-        // and exit cleanly (no orphaned raw mode).
-        let _ = ctrlc::set_handler(move || {
-            let _ = disable_raw_mode();
-            let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
-            std::process::exit(0);
-        });
-    }
-
-    // v0.12.1: sync is ON BY DEFAULT. The opt-in light-monitor default left users
-    // staring at a perpetual "connecting…" (block-sync never started, so fetched_total
-    // stayed 0). Opt OUT with --no-sync / SIGIL_TOP_NO_SYNC=1 for the low-CPU,
-    // dashboard-only view. --sync / SIGIL_TOP_SYNC remain accepted (no-ops) for compat.
-    let want_sync = !(std::env::args().any(|a| a == "--no-sync")
-        || std::env::var("SIGIL_TOP_NO_SYNC").is_ok());
-    // v0.11.0: the live sync-state handle the explorer reads for status/peers (None in
-    // pure light-monitor mode → those endpoints proxy to the remote node, as before).
-    let mut sync_handle: Option<std::sync::Arc<std::sync::Mutex<block_sync::P2PSyncState>>> = None;
-    if want_sync {
-        // v0.22.1 (rocky-explorer): the dashboard uses the MONITOR path (recent_only=true)
-        // so the fast-snap fires and the light node tracks the verified live tip in seconds.
-        // The earlier v0.16.5 note claimed recent_only=false, but that was the genesis-crawl
-        // trap (#802: "560k behind / 0 blk/s" — the snap never fired). The snap's old
-        // "landed in the void" failure was the bogus /api/v1/status height=2; that's solved by
-        // the signed sigil-tip-live.json oracle (v0.17) + best_height base-gate, so monitor
-        // mode is now both fast AND stable. v0.23 seeds the tip eagerly so the snap fires on
-        // cycle 1 (no startup gap). full-sync (recent_only=false) keeps the genesis crawl.
-        let p2p = block_sync::P2PBlockSync::launch(block_store, true); // monitor: recent_only → fast-snap to tip
-        sync_handle = Some(p2p.state_handle());
-        app.p2p_sync = Some(p2p);
-        if app.toast.is_empty() {
-            app.toast = "⚡ P2P mesh connecting → Delta / Epsilon…".into();
-        }
-    } else if app.toast.is_empty() {
-        app.toast = "◆ light monitor · fold-proof verified — [--sync] for live blocks".into();
-    }
+    // (v0.35: app/store/aether/ctrlc/sync-launch all moved ABOVE terminal init — see the
+    // sync-starts-earlier block after crashloop_guard. block_reader/sync_handle/app are in
+    // scope from there.)
 
     // v0.11.0: local-first explorer API over the verified spine + cortex snapshot.
     let local_api = std::sync::Arc::new(local_api::LocalApi {

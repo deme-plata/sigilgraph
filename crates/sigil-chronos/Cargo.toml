@@ -64,6 +64,8 @@ name = "sigil-swarm"
 path = "src/bin/sigil-swarm.rs"
 
 [dependencies]
+# chronos_scale: the 5TB storage-curve driver writes through the real store engine.
+flux-db = { path = "../../../flux/crates/flux-db" }
 rayon      = { workspace = true }
 rand       = { workspace = true }
 zstd       = { workspace = true }

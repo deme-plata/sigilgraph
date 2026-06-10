@@ -45,6 +45,13 @@ struct BackfillReq {
     /// (backward compatible). Node-to-node backfill leaves it false (needs full blocks).
     #[serde(default)]
     headers_only: bool,
+    /// v0.33 (1M-blk/s lane): requested response codec for the headers_only path.
+    /// 0 = raw `'H'+bincode` (default — old clients omit the field), 1 = `'Z'+zstd-1`.
+    /// Measured on a real 4096-header chunk: 14.0× smaller (1019 → ~73 B/header) at
+    /// ~20 ms compress — the wire stops being the sync bottleneck. Old servers ignore
+    /// this field (serde_json skips unknown keys) and reply 'H'; clients decode both.
+    #[serde(default)]
+    codec: u8,
 }
 
 /// Point-to-point backfill response: the requested block range serialized as
@@ -55,6 +62,46 @@ struct BackfillResp {
 }
 
 const SCHEMA_VERSION: u16 = HEADER_VERSION;
+
+/// Genesis-pinned trusted release-author SQIsign pubkeys (hex). The auto-updater
+/// will ONLY apply a binary whose announcement is signed by one of these keys.
+/// This is the single defense against fleet-wide RCE over the `/sigil/g0/release`
+/// gossip topic — a release's authorizing key must be pinned here, NEVER read
+/// from the announcement itself.
+///
+/// ⚠️ EMPTY BY DEFAULT = auto-update is OFF (fails closed). Populate with the
+/// real release key(s) — run `sigil-updater keygen`, then paste the pubkey hex
+/// here (or set `SIGIL_TRUSTED_RELEASE_KEYS`, comma-separated hex) — before
+/// relying on OTA upgrades.
+const TRUSTED_RELEASE_KEYS_HEX: &[&str] = &[
+    // "<release-author SQIsign L5 pubkey hex>",
+];
+
+/// Build the trusted-release-key allowlist from the compiled-in constant plus
+/// the optional `SIGIL_TRUSTED_RELEASE_KEYS` env (comma-separated hex). Invalid
+/// hex entries are skipped with a warning rather than crashing the node.
+fn trusted_release_keys() -> Vec<Vec<u8>> {
+    let mut keys: Vec<Vec<u8>> = Vec::new();
+    let mut push_hex = |h: &str| {
+        let h = h.trim();
+        if h.is_empty() {
+            return;
+        }
+        match hex::decode(h) {
+            Ok(b) => keys.push(b),
+            Err(e) => eprintln!("⚠ SIGIL_TRUSTED_RELEASE_KEYS: skipping invalid hex '{}': {}", h, e),
+        }
+    };
+    for k in TRUSTED_RELEASE_KEYS_HEX {
+        push_hex(k);
+    }
+    if let Ok(env_keys) = std::env::var("SIGIL_TRUSTED_RELEASE_KEYS") {
+        for k in env_keys.split(',') {
+            push_hex(k);
+        }
+    }
+    keys
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -410,6 +457,20 @@ fn run_start() -> Result<()> {
         // production. Headers-only serves (cheap, for the monitor) are NOT throttled.
         let mut last_full_serve = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(1)).unwrap_or_else(std::time::Instant::now);
+        // v0.33.6 AETHER CACHE-SERVE: epsilon is the sole deep-history server and is overloaded
+        // (produce ~151 blk/s + serve 3 catching-up followers + light clients), re-reading disk +
+        // re-serializing + re-zstd'ing the SAME finalized ranges over and over (the journal shows
+        // identical [from..to] served to multiple peers seconds apart). Cache the exact response
+        // bytes for IMMUTABLE ranges (hi < window_base, finalized → never change) keyed by the
+        // request shape; a hit is a pure memcpy that bypasses the 120ms throttle. FIFO-capped so
+        // memory stays bounded (~CAP chunks of recent finalized history).
+        let mut serve_cache: std::collections::HashMap<(u64, u64, bool, u32), std::sync::Arc<Vec<u8>>> =
+            std::collections::HashMap::new();
+        let mut serve_cache_order: std::collections::VecDeque<(u64, u64, bool, u32)> =
+            std::collections::VecDeque::new();
+        const SERVE_CACHE_CAP: usize = 2048; // ~2048 finalized chunks hot in RAM
+        let (mut cache_hits, mut cache_miss): (u64, u64) = (0, 0);
+        let mut last_cache_log = std::time::Instant::now();
         loop {
             tokio::select! {
                 _ = produce_tick.tick(), if produce => {
@@ -542,8 +603,35 @@ fn run_start() -> Result<()> {
                                 Ok(r) => r,
                                 Err(_) => continue,
                             };
-                            // Throttle costly full-block serves so they can't starve
-                            // production; the requester re-asks on its own cadence.
+                            let top = chain.height().saturating_sub(1);
+                            let lo = req.from;
+                            // point-to-point ⇒ a bigger chunk is fine.
+                            let hi = req.to.min(top).min(lo.saturating_add(8192));
+                            let wbase = chain.window_base();
+                            // v0.33.6: a range entirely BELOW the live window is FINALIZED — its
+                            // bytes never change, so cache + replay them. The tip/window chunk is
+                            // excluded (it still mutates).
+                            let immutable = hi >= lo && hi < wbase;
+                            let ckey = (lo, hi, req.headers_only, req.codec as u32);
+
+                            // ── CACHE HIT: pure memcpy, bypasses the throttle entirely ──
+                            if immutable {
+                                if let Some(blob) = serve_cache.get(&ckey) {
+                                    cache_hits += 1;
+                                    mgr.respond(request_id, blob.as_ref().clone());
+                                    if last_cache_log.elapsed() >= std::time::Duration::from_secs(5) {
+                                        let tot = (cache_hits + cache_miss).max(1);
+                                        eprintln!("⚡ serve-cache: {} hits / {} miss ({:.0}% hit) · {} chunks RAM",
+                                            cache_hits, cache_miss, cache_hits as f64 * 100.0 / tot as f64, serve_cache.len());
+                                        last_cache_log = std::time::Instant::now();
+                                    }
+                                    continue;
+                                }
+                            }
+
+                            // Throttle costly full-block MISSES so catch-up backfill can't starve
+                            // production; the requester re-asks on its own cadence. (Hits already
+                            // returned above — they're free.)
                             if !req.headers_only {
                                 if last_full_serve.elapsed() < std::time::Duration::from_millis(120) {
                                     let empty = BackfillResp { blocks: Vec::new() };
@@ -552,13 +640,10 @@ fn run_start() -> Result<()> {
                                 }
                                 last_full_serve = std::time::Instant::now();
                             }
-                            let top = chain.height().saturating_sub(1);
-                            let lo = req.from;
-                            // point-to-point ⇒ a bigger chunk is fine.
-                            let hi = req.to.min(top).min(lo.saturating_add(8192));
+                            if immutable { cache_miss += 1; }
+
                             // Gather the range: disk portion via ONE sequential read
                             // (chain_log.get_range), recent portion from the in-RAM window.
-                            let wbase = chain.window_base();
                             let mut blocks: Vec<crate::block::Block> = Vec::new();
                             if lo < wbase {
                                 let disk_hi = hi.min(wbase.saturating_sub(1));
@@ -567,22 +652,42 @@ fn run_start() -> Result<()> {
                             for h in lo.max(wbase)..=hi {
                                 if let Some(b) = chain.get(h) { blocks.push(b.clone()); }
                             }
-                            if req.headers_only {
+                            let out: Vec<u8> = if req.headers_only {
                                 // monitor path: bincode Vec<header>, ~20× smaller, no JSON.
                                 let headers: Vec<_> = blocks.iter().map(|b| b.header.clone()).collect();
-                                let mut out = vec![b'H'];
-                                out.extend(bincode::serialize(&headers).unwrap_or_default());
-                                eprintln!("↩ rr-backfill: served {} HEADERS [{}..={}] to {} ({} B)",
-                                    headers.len(), lo, hi, peer, out.len());
-                                mgr.respond(request_id, out);
+                                let body = bincode::serialize(&headers).unwrap_or_default();
+                                // v0.33 zstd wire: codec=1 → 'Z' + zstd-1(body). Measured 14.0×
+                                // on a real chunk (~20 ms/4 MB — far cheaper than the wire time
+                                // it saves). Any compress error falls back to plain 'H'.
+                                let out = if req.codec == 1 {
+                                    match zstd::encode_all(&body[..], 1) {
+                                        Ok(z) => { let mut o = vec![b'Z']; o.extend(z); o }
+                                        Err(_) => { let mut o = vec![b'H']; o.extend(&body); o }
+                                    }
+                                } else {
+                                    let mut o = vec![b'H']; o.extend(&body); o
+                                };
+                                eprintln!("↩ rr-backfill: served {} HEADERS [{}..={}] to {} ({} B, codec {})",
+                                    headers.len(), lo, hi, peer, out.len(),
+                                    if out.first() == Some(&b'Z') { "zstd" } else { "raw" });
+                                out
                             } else {
                                 let resp = BackfillResp {
                                     blocks: blocks.iter().map(|b| serde_json::to_value(b).unwrap()).collect(),
                                 };
                                 eprintln!("↩ rr-backfill: served {} blocks [{}..={}] to {}",
                                     resp.blocks.len(), lo, hi, peer);
-                                mgr.respond(request_id, serde_json::to_vec(&resp).unwrap_or_default());
+                                serde_json::to_vec(&resp).unwrap_or_default()
+                            };
+                            // ── CACHE FILL (finalized ranges only), FIFO-capped ──
+                            if immutable && !out.is_empty() {
+                                serve_cache.insert(ckey, std::sync::Arc::new(out.clone()));
+                                serve_cache_order.push_back(ckey);
+                                while serve_cache_order.len() > SERVE_CACHE_CAP {
+                                    if let Some(k) = serve_cache_order.pop_front() { serve_cache.remove(&k); }
+                                }
                             }
+                            mgr.respond(request_id, out);
                         }
                         flux_p2p::SwarmAppEvent::GossipsubMessage {
                             topic, from, data, ..
@@ -633,7 +738,7 @@ fn run_start() -> Result<()> {
                                     if last_req.elapsed() >= std::time::Duration::from_millis(300) {
                                         last_req = std::time::Instant::now();
                                         if let Some(peer) = mgr.connected_peers().into_iter().next() {
-                                            let req = BackfillReq { from: expected, to: expected.saturating_add(8192), headers_only: false };
+                                            let req = BackfillReq { from: expected, to: expected.saturating_add(8192), headers_only: false, codec: 0 };
                                             eprintln!("⇪ rr-backfill: gap (have {}, saw {}) — requesting [{}..={}] from {}",
                                                 expected, h, req.from, req.to, peer);
                                             let mgr2 = std::sync::Arc::clone(&mgr);
@@ -710,9 +815,18 @@ fn run_start() -> Result<()> {
                                     }
                                 };
                                 let fetcher = CurlFetcher::default();
+                                let trusted = trusted_release_keys();
+                                if trusted.is_empty() {
+                                    eprintln!(
+                                        "🔒 RELEASE from {}: auto-update is OFF (no pinned release keys); set TRUSTED_RELEASE_KEYS_HEX or SIGIL_TRUSTED_RELEASE_KEYS to enable. Ignoring.",
+                                        from
+                                    );
+                                    continue;
+                                }
                                 let outcome = handle_release_message(
                                     &data,
                                     Some(&from_str),
+                                    &trusted,
                                     env!("CARGO_PKG_VERSION"),
                                     &target,
                                     &fetcher,
@@ -777,6 +891,7 @@ fn run_start() -> Result<()> {
                                             from: expected,
                                             to: expected.saturating_add(8192),
                                             headers_only: false,
+                                            codec: 0, // node-to-node needs full blocks; raw JSON path
                                         };
                                         eprintln!("⇪ rr-backfill: behind via peer-heights (have {}, net {}) — requesting [{}..={}]",
                                             expected, peer_h, req.from, req.to);
@@ -1275,7 +1390,15 @@ pub const GENESIS_AI_WALLETS: &[(&str, [u8; 32], &str)] = &[
 /// pubkey here (or move it out of the const and read it from the genesis
 /// allocation table). Until then, every node mints with this 32-byte tag
 /// so chains start from the same parent_hash.
-pub const MASTER_WALLET_GENESIS: [u8; 32] = [0xAA; 32];
+// Master dev-fee wallet (Viktor) — SIGIL address
+// 095b0e1f7f5bb258fb11427c4ac036e3d9e4f10fa39d7f282aa42862dc2b3dd8.
+// Baked into block 0; receives 5% of mining coinbase + 0.3% of DEX swap output.
+// (Mirrors sigil_bank::DEV_MASTER_WALLET; kept as explicit bytes so sigil-node
+// needs no sigil-bank dep and block 0 stays byte-identical across nodes.)
+pub const MASTER_WALLET_GENESIS: [u8; 32] = [
+    0x09, 0x5b, 0x0e, 0x1f, 0x7f, 0x5b, 0xb2, 0x58, 0xfb, 0x11, 0x42, 0x7c, 0x4a, 0xc0, 0x36, 0xe3,
+    0xd9, 0xe4, 0xf1, 0x0f, 0xa3, 0x9d, 0x7f, 0x28, 0x2a, 0xa4, 0x28, 0x62, 0xdc, 0x2b, 0x3d, 0xd8,
+];
 
 /// Fixed timestamp baked into block 0. Without this constant every node
 /// mint-genesis call uses `now_ms()` → different headers → instant fork

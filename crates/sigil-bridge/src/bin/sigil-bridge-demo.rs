@@ -3,10 +3,20 @@
 //! supply root, and rejected over-mint / weak-PoW attacks.
 
 use sha2::{Digest, Sha256};
-use sigil_bridge::proof::{dsha256, header_meets_target};
+use sigil_bridge::proof::{dsha256, header_meets_target, DEPOSIT_MAGIC};
 use sigil_bridge::{process_deposit, process_ln_deposit, BridgeAsset, BridgeLedger, LnProof, SpvProof};
 
 const EASY_NBITS: u32 = 0x207f_ffff;
+
+/// Build a tx carrying the SIGIL deposit memo (amount + recipient are bound to
+/// the proven bytes — see audit C9).
+fn deposit_tx(amount: u128, recipient: [u8; 32]) -> Vec<u8> {
+    let mut v = b"deposit:".to_vec();
+    v.extend_from_slice(DEPOSIT_MAGIC);
+    v.extend_from_slice(&amount.to_le_bytes());
+    v.extend_from_slice(&recipient);
+    v
+}
 
 fn mine(prev: [u8; 32], merkle_root: [u8; 32]) -> [u8; 80] {
     let mut h = [0u8; 80];
@@ -49,8 +59,8 @@ fn main() {
     let mut ledger = BridgeLedger::new();
 
     // ── on-chain rail: a BTC deposit buried under 6 real-PoW headers ──
-    let proof = spv_proof(b"deposit:bc1q...:100000sat", 6);
-    match process_deposit(&mut ledger, BridgeAsset::Btc, 100_000, "qnk_miner", &proof) {
+    let proof = spv_proof(&deposit_tx(100_000, [0x11; 32]), 6);
+    match process_deposit(&mut ledger, BridgeAsset::Btc, &proof, None) {
         Ok(r) => println!("  ✓ on-chain: 6 PoW headers verified → minted {} {} · root {}",
             r.amount, r.asset.wrapped_symbol(), hex::encode(&r.supply_root[..8])),
         Err(e) => println!("  ✗ on-chain: {e}"),
@@ -72,8 +82,8 @@ fn main() {
         Err(e) => println!("REJECTED ✓ — {e}"),
     }
     print!("  BTC deposit with only 2 PoW headers:   ");
-    let weak = spv_proof(b"deposit:shallow", 2); // need 6
-    match process_deposit(&mut ledger, BridgeAsset::Btc, 9_999, "qnk_x", &weak) {
+    let weak = spv_proof(&deposit_tx(9_999, [0x22; 32]), 2); // need 6
+    match process_deposit(&mut ledger, BridgeAsset::Btc, &weak, None) {
         Ok(_) => println!("minted (BUG)"),
         Err(e) => println!("REJECTED ✓ — {e}"),
     }

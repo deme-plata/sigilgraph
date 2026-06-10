@@ -27,4 +27,4 @@ pub use transport::{
     handle_release_message, is_strictly_newer, BinaryFetcher, ClosureFetcher,
     CurlFetcher, HandledRelease,
 };
-pub use verify::{verify_announcement, verify_binary_bytes, VerifyOk};
+pub use verify::{verify_announcement, verify_announcement_pinned, verify_binary_bytes, VerifyOk};

@@ -1357,17 +1357,22 @@ impl P2PBlockSync {
                     // the growing memtable to an SST so it can't balloon during a multi-M sync.
                     if last_verify.elapsed() >= Duration::from_millis(1500) {
                         last_verify = Instant::now();
-                        // ── LANE-S: GENESIS-ANCHOR CHECK (runs FIRST) ──────────────────────────
-                        // The block at `base` IS the chain's genesis fingerprint. Key the persisted
-                        // watermarks to it: when a testnet restart mints a FRESH genesis, the new
-                        // block-at-base hash differs from the one our watermarks belong to, so
-                        // `note_genesis` wipes the stale OLD-chain watermarks + clears the persisted
-                        // genesis. We then drop the last-tip cache + zero the in-memory peer_best /
-                        // verified so the SYNC hero self-heals to the fresh tip with NO manual wipe,
-                        // and SKIP this tick's verify (its report would describe the dead chain).
+                        // ── LANE-S: GENESIS-ANCHOR CHECK (full-sync ONLY) ──────────────────────
+                        // Key the persisted watermarks to the genesis fingerprint so a testnet
+                        // restart (fresh genesis) auto-wipes the stale OLD-chain watermarks.
+                        //
+                        // ⚠️ REGRESSION FIX (v0.70 → v0.71.x): the block at `base` is the genesis
+                        // fingerprint ONLY in full-sync mode, where `base` == the true genesis anchor
+                        // (height 1) and is STABLE. In recent-window / light mode `base` is a MOVING
+                        // checkpoint that snaps FORWARD as the window advances (e.g. 3.04M → 3.12M);
+                        // hashing the block there and comparing to the stored anchor false-fired a
+                        // reset on EVERY snap — wiping synced 3.08M → 0 and re-syncing from genesis
+                        // every few minutes (the "4 peers but 3.1M gap" churn). So only key the
+                        // genesis when `base` is the genuine genesis anchor (≤1). In light mode the
+                        // oracle-tip-drop heuristic + sane_raise already handle testnet resets.
                         let base_g = store.base();
                         let mut genesis_reset = false;
-                        if base_g > 0 && store.has_height(base_g) {
+                        if base_g <= 1 && store.has_height(base_g) {
                             if let Some(hdr) = store.get_header_at_height(base_g) {
                                 if store.note_genesis(&hex::encode(hdr.hash())) {
                                     genesis_reset = true;

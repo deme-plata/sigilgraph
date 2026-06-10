@@ -268,7 +268,14 @@ async function load(){
       var badge=b.isGenesis?'<span class="badge badge-e" style="font-weight:700">⬡ GENESIS</span>':'<span class="badge '+cl+'">'+(b.prod||'?')+'</span>';
       return'<div class="block-row" onclick="openBlockModal('+i+')" title="click for block details" style="'+(b.isGenesis?'border-color:rgba(251,191,36,.4);background:rgba(251,191,36,.04)':'')+'"><span class="bh"'+(b.isGenesis?' style="color:var(--gold)"':'')+'>#'+b.h+'</span><span class="hash">'+(b.hash||'')+'</span>'+cid+badge+'</div>';
     }).join(''):'<div class="empty">No blocks indexed yet</div>';
-  }catch(e){}
+  }catch(e){
+    // NEVER leave the "Loading chain data…" placeholder stuck on a transient fetch error —
+    // load() re-runs on the refresh interval, so show an honest retrying state instead.
+    var el=document.getElementById('blocks');
+    if(el && (!el.children.length || el.querySelector('.empty'))){
+      el.innerHTML='<div class="empty">chain feed momentarily unavailable — retrying…</div>';
+    }
+  }
 
   // Transactions ← flux-history (mine + swap)
   try{

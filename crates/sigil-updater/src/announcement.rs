@@ -186,6 +186,8 @@ pub enum UpdaterError {
     BinaryHashMismatch { expected_hex: String, actual_hex: String },
     #[error("SQIsign verification failed")]
     SignatureInvalid,
+    #[error("release signing key is not on the trusted allowlist: {key_hex}")]
+    UntrustedReleaseKey { key_hex: String },
     #[error("SQIsign error: {0}")]
     Sqisign(String),
     #[error("activation height {activation} is not in the future from current height {current}")]

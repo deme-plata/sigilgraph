@@ -45,6 +45,13 @@ struct BackfillReq {
     /// (backward compatible). Node-to-node backfill leaves it false (needs full blocks).
     #[serde(default)]
     headers_only: bool,
+    /// v0.33 (1M-blk/s lane): requested response codec for the headers_only path.
+    /// 0 = raw `'H'+bincode` (default — old clients omit the field), 1 = `'Z'+zstd-1`.
+    /// Measured on a real 4096-header chunk: 14.0× smaller (1019 → ~73 B/header) at
+    /// ~20 ms compress — the wire stops being the sync bottleneck. Old servers ignore
+    /// this field (serde_json skips unknown keys) and reply 'H'; clients decode both.
+    #[serde(default)]
+    codec: u8,
 }
 
 /// Point-to-point backfill response: the requested block range serialized as
@@ -55,6 +62,46 @@ struct BackfillResp {
 }
 
 const SCHEMA_VERSION: u16 = HEADER_VERSION;
+
+/// Genesis-pinned trusted release-author SQIsign pubkeys (hex). The auto-updater
+/// will ONLY apply a binary whose announcement is signed by one of these keys.
+/// This is the single defense against fleet-wide RCE over the `/sigil/g0/release`
+/// gossip topic — a release's authorizing key must be pinned here, NEVER read
+/// from the announcement itself.
+///
+/// ⚠️ EMPTY BY DEFAULT = auto-update is OFF (fails closed). Populate with the
+/// real release key(s) — run `sigil-updater keygen`, then paste the pubkey hex
+/// here (or set `SIGIL_TRUSTED_RELEASE_KEYS`, comma-separated hex) — before
+/// relying on OTA upgrades.
+const TRUSTED_RELEASE_KEYS_HEX: &[&str] = &[
+    // "<release-author SQIsign L5 pubkey hex>",
+];
+
+/// Build the trusted-release-key allowlist from the compiled-in constant plus
+/// the optional `SIGIL_TRUSTED_RELEASE_KEYS` env (comma-separated hex). Invalid
+/// hex entries are skipped with a warning rather than crashing the node.
+fn trusted_release_keys() -> Vec<Vec<u8>> {
+    let mut keys: Vec<Vec<u8>> = Vec::new();
+    let mut push_hex = |h: &str| {
+        let h = h.trim();
+        if h.is_empty() {
+            return;
+        }
+        match hex::decode(h) {
+            Ok(b) => keys.push(b),
+            Err(e) => eprintln!("⚠ SIGIL_TRUSTED_RELEASE_KEYS: skipping invalid hex '{}': {}", h, e),
+        }
+    };
+    for k in TRUSTED_RELEASE_KEYS_HEX {
+        push_hex(k);
+    }
+    if let Ok(env_keys) = std::env::var("SIGIL_TRUSTED_RELEASE_KEYS") {
+        for k in env_keys.split(',') {
+            push_hex(k);
+        }
+    }
+    keys
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -570,10 +617,21 @@ fn run_start() -> Result<()> {
                             if req.headers_only {
                                 // monitor path: bincode Vec<header>, ~20× smaller, no JSON.
                                 let headers: Vec<_> = blocks.iter().map(|b| b.header.clone()).collect();
-                                let mut out = vec![b'H'];
-                                out.extend(bincode::serialize(&headers).unwrap_or_default());
-                                eprintln!("↩ rr-backfill: served {} HEADERS [{}..={}] to {} ({} B)",
-                                    headers.len(), lo, hi, peer, out.len());
+                                let body = bincode::serialize(&headers).unwrap_or_default();
+                                // v0.33 zstd wire: codec=1 → 'Z' + zstd-1(body). Measured 14.0×
+                                // on a real chunk (~20 ms/4 MB — far cheaper than the wire time
+                                // it saves). Any compress error falls back to plain 'H'.
+                                let out = if req.codec == 1 {
+                                    match zstd::encode_all(&body[..], 1) {
+                                        Ok(z) => { let mut o = vec![b'Z']; o.extend(z); o }
+                                        Err(_) => { let mut o = vec![b'H']; o.extend(&body); o }
+                                    }
+                                } else {
+                                    let mut o = vec![b'H']; o.extend(&body); o
+                                };
+                                eprintln!("↩ rr-backfill: served {} HEADERS [{}..={}] to {} ({} B, codec {})",
+                                    headers.len(), lo, hi, peer, out.len(),
+                                    if out.first() == Some(&b'Z') { "zstd" } else { "raw" });
                                 mgr.respond(request_id, out);
                             } else {
                                 let resp = BackfillResp {
@@ -633,7 +691,7 @@ fn run_start() -> Result<()> {
                                     if last_req.elapsed() >= std::time::Duration::from_millis(300) {
                                         last_req = std::time::Instant::now();
                                         if let Some(peer) = mgr.connected_peers().into_iter().next() {
-                                            let req = BackfillReq { from: expected, to: expected.saturating_add(8192), headers_only: false };
+                                            let req = BackfillReq { from: expected, to: expected.saturating_add(8192), headers_only: false, codec: 0 };
                                             eprintln!("⇪ rr-backfill: gap (have {}, saw {}) — requesting [{}..={}] from {}",
                                                 expected, h, req.from, req.to, peer);
                                             let mgr2 = std::sync::Arc::clone(&mgr);
@@ -710,9 +768,18 @@ fn run_start() -> Result<()> {
                                     }
                                 };
                                 let fetcher = CurlFetcher::default();
+                                let trusted = trusted_release_keys();
+                                if trusted.is_empty() {
+                                    eprintln!(
+                                        "🔒 RELEASE from {}: auto-update is OFF (no pinned release keys); set TRUSTED_RELEASE_KEYS_HEX or SIGIL_TRUSTED_RELEASE_KEYS to enable. Ignoring.",
+                                        from
+                                    );
+                                    continue;
+                                }
                                 let outcome = handle_release_message(
                                     &data,
                                     Some(&from_str),
+                                    &trusted,
                                     env!("CARGO_PKG_VERSION"),
                                     &target,
                                     &fetcher,
@@ -777,6 +844,7 @@ fn run_start() -> Result<()> {
                                             from: expected,
                                             to: expected.saturating_add(8192),
                                             headers_only: false,
+                                            codec: 0, // node-to-node needs full blocks; raw JSON path
                                         };
                                         eprintln!("⇪ rr-backfill: behind via peer-heights (have {}, net {}) — requesting [{}..={}]",
                                             expected, peer_h, req.from, req.to);

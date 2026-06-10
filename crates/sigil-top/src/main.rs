@@ -2339,8 +2339,17 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     }
 
     // v0.12.1: sync is ON BY DEFAULT. Opt OUT with --no-sync / SIGIL_TOP_NO_SYNC=1.
-    let want_sync = !(std::env::args().any(|a| a == "--no-sync")
-        || std::env::var("SIGIL_TOP_NO_SYNC").is_ok());
+    // v0.39.1 WINDOWS: default OFF — the LIGHT monitor. v0.10.2 already learned
+    // this lesson (the sync engine ate the operator's PC; made opt-in), v0.12.1
+    // regressed it to on-by-default, and it froze the desktop twice today. The
+    // Mining tab / wallet / explorer don't need the local backfill engine — a
+    // fleet node (epsilon) carries the chain. Opt IN with --sync / SIGIL_TOP_SYNC=1.
+    let want_sync = if cfg!(windows) {
+        std::env::args().any(|a| a == "--sync") || std::env::var("SIGIL_TOP_SYNC").is_ok()
+    } else {
+        !(std::env::args().any(|a| a == "--no-sync")
+            || std::env::var("SIGIL_TOP_NO_SYNC").is_ok())
+    };
     let mut sync_handle: Option<std::sync::Arc<std::sync::Mutex<block_sync::P2PSyncState>>> = None;
     if want_sync {
         // v0.22.1: monitor path (recent_only=true) → fast-snap to the verified live tip.

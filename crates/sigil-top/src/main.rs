@@ -1869,6 +1869,7 @@ struct App {
     mine_gpu_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,  // v0.37: engine signals GPU init failure -> CPU fallback
     bps_ema: f64,            // v0.37: smoothed network block-rate (raw bps blinks 0<->250)
     bps_zero_streak: u32,    // consecutive zero-bps polls before showing honest idle
+    idle_store: Option<block_store::BlockStore>, // v0.40.3: parked store so [F] can launch sync ON DEMAND
     full_sync: bool,                                    // [F] opt-in heavy full sync (default = 10ms lightweight verify)
     full_sync_height: u64,                              // blocks downloaded so far in full sync
     full_sync_target: u64,                              // target height for full sync
@@ -1975,6 +1976,7 @@ impl App {
               mine_gpu_failed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
               bps_ema: 0.0,
               bps_zero_streak: 0,
+              idle_store: None,
               tab: Tab::Node,
               swarm: SwarmView::default(),
               last_swarm_load: instant_ago(10),
@@ -2385,8 +2387,13 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
         if app.toast.is_empty() {
             app.toast = "⚡ P2P mesh connecting → Delta / Epsilon…".into();
         }
-    } else if app.toast.is_empty() {
-        app.toast = "◆ light monitor · fold-proof verified — [--sync] for live blocks".into();
+    } else {
+        // v0.40.3: park the opened store so [F] can launch the sync engine ON
+        // DEMAND from inside the TUI — startup stays the safe light monitor.
+        app.idle_store = Some(block_store);
+        if app.toast.is_empty() {
+            app.toast = "◆ light monitor — press F to start live sync".into();
+        }
     }
 
     enable_raw_mode()?;
@@ -2514,15 +2521,27 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 app.toast_sticky = true;
                             }
                             KeyCode::Char('f') | KeyCode::Char('F') => {
-                                // Default is the TRUE lightweight node: ~10ms tip-proof verify, 0 blocks.
-                                // [F] opts INTO the heavy full sync (download + verify every block).
-                                app.full_sync = !app.full_sync;
-                                app.toast = if app.full_sync {
-                                    "⬇ FULL SYNC enabled — downloading + verifying every block (heavy). Press F to return to lightweight.".into()
+                                // v0.40.3: first F STARTS the sync engine (startup is the safe
+                                // light monitor — no engine, no --sync flag needed). After the
+                                // engine runs, F toggles the heavy full-sync mode as before.
+                                if app.p2p_sync.is_none() {
+                                    if let Some(store) = app.idle_store.take() {
+                                        let p2p = block_sync::P2PBlockSync::launch(store, true);
+                                        app.p2p_sync = Some(p2p);
+                                        app.toast = "⬇ SYNC STARTED — P2P mesh dialing, live backfill running. F again = heavy full mode.".into();
+                                    } else {
+                                        app.toast = "✗ sync store unavailable — restart with --sync".into();
+                                    }
+                                    app.toast_sticky = true;
                                 } else {
-                                    "⚡ lightweight node — ~10ms tip-proof verify, 0 blocks downloaded (default)".into()
-                                };
-                                app.toast_sticky = false;
+                                    app.full_sync = !app.full_sync;
+                                    app.toast = if app.full_sync {
+                                        "⬇ FULL SYNC enabled — downloading + verifying every block (heavy). Press F to return to lightweight.".into()
+                                    } else {
+                                        "⚡ lightweight node — ~10ms tip-proof verify, 0 blocks downloaded (default)".into()
+                                    };
+                                    app.toast_sticky = false;
+                                }
                             }
                             KeyCode::Char('v') | KeyCode::Char('V') => {
                                 app.toast = match app.st.tip.as_ref() {

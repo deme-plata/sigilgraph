@@ -43,6 +43,14 @@ fn instant_ago(secs: u64) -> Instant {
     now.checked_sub(Duration::from_secs(secs)).unwrap_or(now)
 }
 
+/// LANE-B v0.50: how long the SIGIL rune animation stays on screen per play
+/// (draw-on → hold → fade). Kept inside the 3–5 s band the side-mission specifies.
+const RUNE_PLAY: Duration = Duration::from_millis(4200);
+/// LANE-B v0.50: re-play cadence. An update being available is the loud signal →
+/// play often (every 10 min); otherwise it is a quiet "still alive" pulse (every 2 h).
+const RUNE_INTERVAL_UPDATE: Duration = Duration::from_secs(600);
+const RUNE_INTERVAL_IDLE: Duration = Duration::from_secs(7200);
+
 
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1056,7 +1064,18 @@ fn lower_process_priority() {
     }
 }
 
+/// The install path captured at startup, BEFORE any self-replace. After
+/// `self_replace` swaps the binary, `/proc/self/exe` (what `current_exe()` reads)
+/// points at the moved-aside OLD inode — often a "(deleted)" path — so a relaunch
+/// that spawns `current_exe()` fails with ENOENT even though the NEW binary sits
+/// at this original path. Capturing it up front makes relaunch reliable.
+static INSTALL_EXE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
 fn main() {
+    // Capture the real install path NOW, before anything can self-replace us.
+    if let Ok(e) = std::env::current_exe() {
+        if e.exists() { let _ = INSTALL_EXE.set(e); }
+    }
     #[cfg(windows)]
     lower_process_priority();
     enable_rich_console(); // UTF-8 + VT so icons/colours render (fixes the `?` glyphs)
@@ -1800,11 +1819,21 @@ fn preflight_binary(target: &std::path::Path) -> Result<String, String> {
 /// "app vanishes when it tries to restart after sync". Returns `false` on any non-handoff
 /// path; on unix a successful pre-flight + `exec` never returns.
 fn relaunch_new_binary(version: &str) -> bool {
-    let exe = match std::env::current_exe() { Ok(e) => e, Err(_) => return false };
+    // Use the startup-captured install path — current_exe() points at the
+    // moved-aside OLD inode after self_replace (a "(deleted)" path), which would
+    // make the pre-flight spawn fail with ENOENT even though the NEW binary is in
+    // place. Fall back to current_exe() only if the early capture somehow missed.
+    let exe = match INSTALL_EXE.get().cloned().or_else(|| std::env::current_exe().ok()) {
+        Some(e) => e, None => return false,
+    };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let ver_exe = exe.with_file_name(format!(
         "sigil-top-v{}{}", version, if cfg!(windows) { ".exe" } else { "" }));
-    let target = if ver_exe.exists() { ver_exe } else { exe.clone() };
+    // Prefer the original install path (now holding the new binary); the versioned
+    // sibling is a fallback only if it still exists and current_exe() is unusable.
+    let target = if exe.exists() { exe.clone() }
+        else if ver_exe.exists() { ver_exe }
+        else { exe.clone() };
 
     // GATE: never hand off to an unverified binary. A failed pre-flight means the swapped
     // binary can't start — abort the relaunch and stay alive on the current (working) image.
@@ -1905,6 +1934,21 @@ struct App {
     /// Post-update logo splash (flux updater return UX).
     splash_until: Option<Instant>,
     splash_frame: u8,
+    // ── LANE-B v0.50: SIGIL rune animation tied to update availability ──────────
+    // A floating overlay band — a sigil drawing itself line-by-line then fading.
+    // Frame-counter + elapsed-envelope, driven entirely off the existing render
+    // tick (never blocks input/render). Plays every 10 min when an update is
+    // available, every 2 h otherwise. Timestamps live in-process only (no disk).
+    rune_until: Option<Instant>,    // Some(end) while the band is on screen
+    rune_started: Option<Instant>,  // when the current play began (draw-on/fade envelope)
+    rune_frame: u16,                // shimmer phase, bumped each tick like splash_frame
+    rune_last_played: Instant,      // last time a play started (resets per process)
+    // ── LANE-B v0.50: Mining-tab depth, derived App-side from MinerStats deltas ──
+    // engine.rs / MinerStats are LANE-C's; we only OBSERVE them here, never mutate.
+    accept_hist: std::collections::VecDeque<u8>,                   // accept-rate % samples (sparkline)
+    last_accept_sample: Instant,                                   // throttle accept sampling
+    mined_recent: std::collections::VecDeque<(u64, f64, Instant)>, // (mine-chain height, solve ms, when), newest first
+    mine_shares_seen: u64,          // last shares_ok observed → detect freshly mined blocks
     // v0.6.0: Cortex MCP combo integration — AI agent registry + optimization engine
     cortex: Option<Cortex>,
     agents: Vec<AiAgent>,
@@ -1965,6 +2009,17 @@ impl App {
                   Some(Instant::now() + Duration::from_millis(1800))
               } else { None },
               splash_frame: 0,
+              // LANE-B v0.50: rune animation — first play deferred a full interval
+              // (no flash on launch; the post-update splash already covers just-updated).
+              rune_until: None,
+              rune_started: None,
+              rune_frame: 0,
+              rune_last_played: Instant::now(),
+              // LANE-B v0.50: mining-depth history (App-side observers of MinerStats)
+              accept_hist: std::collections::VecDeque::new(),
+              last_accept_sample: instant_ago(10),
+              mined_recent: std::collections::VecDeque::new(),
+              mine_shares_seen: 0,
               // v0.6.0: Cortex MCP combo integration
               cortex: None,
               agents: default_agent_registry(),
@@ -2003,6 +2058,71 @@ impl App {
               tab: Tab::Node,
               swarm: SwarmView::default(),
               last_swarm_load: instant_ago(10),
+        }
+    }
+
+    /// LANE-B v0.50: advance + schedule the SIGIL rune animation. Pure frame-state,
+    /// called once per render tick — never blocks input. Starts a ~4 s play every
+    /// 10 min when an update is available, every 2 h otherwise (subtle alive-pulse),
+    /// and never overlaps the post-update splash.
+    fn tick_rune(&mut self) {
+        let now = Instant::now();
+        // currently playing → just bump the shimmer phase (like splash_frame).
+        if self.rune_until.map(|u| now < u).unwrap_or(false) {
+            self.rune_frame = self.rune_frame.wrapping_add(1);
+            return;
+        }
+        // a play just ended → drop the handles so we stop counting as "animating".
+        if self.rune_until.is_some() {
+            self.rune_until = None;
+            self.rune_started = None;
+        }
+        // never overlap the post-update logo splash.
+        if self.splash_until.map(|u| now < u).unwrap_or(false) { return; }
+        let interval = if version_gt(&self.latest, VERSION) {
+            RUNE_INTERVAL_UPDATE
+        } else {
+            RUNE_INTERVAL_IDLE
+        };
+        if now.saturating_duration_since(self.rune_last_played) >= interval {
+            self.rune_until = Some(now + RUNE_PLAY);
+            self.rune_started = Some(now);
+            self.rune_frame = 0;
+            self.rune_last_played = now;
+        }
+    }
+
+    /// LANE-B v0.50: true while the rune band is on screen (drives the 33/66 ms cadence).
+    fn rune_active(&self) -> bool {
+        self.rune_until.map(|u| Instant::now() < u).unwrap_or(false)
+    }
+
+    /// LANE-B v0.50: observe MinerStats and accumulate render-side history for the
+    /// Mining tab — accept-rate sparkline + a ring of recently-mined MINE-CHAIN
+    /// blocks. Read-only on the shared MinerStats (engine.rs is LANE-C's); all the
+    /// derived state lives in App fields we own. Cheap; called each tick.
+    fn tick_mining_history(&mut self) {
+        let now = Instant::now();
+        let (ok, bad, height, solve_ms) = match self.mine_stats.lock() {
+            Ok(s) => (s.shares_ok, s.shares_bad, s.last_height, s.last_solve_ms),
+            Err(_) => return,
+        };
+        // a freshly accepted share == a new block on our own mine-chain.
+        if ok > self.mine_shares_seen {
+            self.mined_recent.push_front((height, solve_ms, now));
+            while self.mined_recent.len() > 12 { self.mined_recent.pop_back(); }
+            self.mine_shares_seen = ok;
+        } else if ok < self.mine_shares_seen {
+            // engine restarted (counters reset) → re-baseline, don't log phantom blocks.
+            self.mine_shares_seen = ok;
+        }
+        // sample the accept-rate every ~3 s while mining (CP437-safe shade sparkline).
+        if self.mining && now.saturating_duration_since(self.last_accept_sample) >= Duration::from_secs(3) {
+            let total = ok + bad;
+            let acc = if total > 0 { ((ok as f64 / total as f64) * 100.0).round() as u8 } else { 100 };
+            self.accept_hist.push_back(acc.min(100));
+            while self.accept_hist.len() > 80 { self.accept_hist.pop_front(); }
+            self.last_accept_sample = now;
         }
     }
 
@@ -2479,6 +2599,10 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             if app.splash_until.map(|u| Instant::now() < u).unwrap_or(false) {
                 app.splash_frame = app.splash_frame.wrapping_add(1);
             }
+            // LANE-B v0.50: advance/schedule the rune animation + accumulate mining
+            // history. Both are pure frame-state and never block the render loop.
+            app.tick_rune();
+            app.tick_mining_history();
             // v0.10.5: drain any completed async refresh (never blocks).
             app.poll_refresh();
             // v0.27 CRASH-PROOF: a panic inside rendering (bad slice, unwrap on odd data, etc.)
@@ -2516,7 +2640,8 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             // so an idle cockpit barely touches the CPU. Keys stay responsive either way.
             let animating = app.splash_until.map(|u| Instant::now() < u).unwrap_or(false)
                 || app.refresh_inflight
-                || app.mining;
+                || app.mining
+                || app.rune_active();   // LANE-B v0.50: smooth the rune band's draw-on/fade
             // v0.40: 33ms full redraws are cheap on a modern terminal but heavy on the
             // legacy CP437 conhost — halve the animating cadence on Windows so the
             // console host never becomes a load source itself.
@@ -3012,6 +3137,91 @@ fn render_update_splash(frame: u8) -> Paragraph<'static> {
         .style(Style::default().bg(Color::Rgb(5, 5, 15)))
 }
 
+/// LANE-B v0.50: the SIGIL rune drawing itself line-by-line then fading — a floating
+/// overlay band, NOT a fullscreen splash. The envelope (draw-on → hold → fade) is
+/// driven by ELAPSED TIME, not raw frame count, so it looks identical at the 33 ms
+/// (*nix) and 66 ms (legacy-conhost Windows) render cadences. CP437-safe by
+/// construction: only light box-drawing (┌─┐│└┘├┤┬┴) + block elements (█▓▒░) +
+/// ASCII, every string also run through `sa()` and the global ascii pass as a
+/// belt-and-suspenders. Never reads input; the event loop is untouched.
+fn draw_rune_band(f: &mut Frame, app: &App, area: Rect, start: Instant, until: Instant) {
+    // The sigil itself — pure CP437-safe glyphs.
+    const RUNE: [&str; 7] = [
+        "    ┌───────┴───────┐    ",
+        "    │  ░▒▓█████▓▒░  │    ",
+        "    ├──┐  ▓███▓  ┌──┤    ",
+        "    │  └──┐███┌──┘  │    ",
+        "    ├──┘  ▒███▒  └──┤    ",
+        "    │  ░▒▓█████▓▒░  │    ",
+        "    └───────┬───────┘    ",
+    ];
+    let n = RUNE.len();
+
+    // ── time envelope ────────────────────────────────────────────────────────
+    let total = until.saturating_duration_since(start).as_secs_f64().max(0.001);
+    let progress = (Instant::now().saturating_duration_since(start).as_secs_f64() / total)
+        .clamp(0.0, 1.0);
+    // draw-on over the first 40% (top→bottom), full hold to 72%, then fade out.
+    let revealed = if progress >= 0.40 { n }
+        else { (((progress / 0.40) * n as f64).ceil() as usize).clamp(1, n) };
+    let glyph_col = if progress < 0.72 {
+        C_VBRIGHT
+    } else {
+        // lerp brand-violet → obsidian so the rune dissolves into the background.
+        let fde = ((progress - 0.72) / 0.28).clamp(0.0, 1.0);
+        let lerp = |a: u32, b: u32| (a as f64 * (1.0 - fde) + b as f64 * fde) as u8;
+        Color::Rgb(lerp(0xc8, 0x10), lerp(0xb6, 0x10), lerp(0xff, 0x1e))
+    };
+
+    // ── content: a version/alive banner line + the revealed rune lines ─────────
+    let update_avail = version_gt(&app.latest, VERSION);
+    let pulse = ["░", "▒", "▓", "█", "▓", "▒"][(app.rune_frame as usize) % 6];
+    let mut lines: Vec<Line> = Vec::with_capacity(n + 1);
+    if update_avail {
+        lines.push(Line::from(vec![
+            Span::styled(sa(format!("{pulse} ")), Style::default().fg(C_GOLD)),
+            Span::styled("SIGIL ", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
+            Span::styled(sa(format!("⬆ v{} ", app.latest)),
+                Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(sa("— [U]"), Style::default().fg(C_GOLD)),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(sa(format!("{pulse} ")), Style::default().fg(C_DIM)),
+            Span::styled("SIGIL", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
+            Span::styled("  still alive", Style::default().fg(C_DIM)),
+        ]));
+    }
+    for (i, art) in RUNE.iter().enumerate() {
+        if i < revealed {
+            lines.push(Line::from(Span::styled(sa(*art),
+                Style::default().fg(glyph_col).add_modifier(Modifier::BOLD))));
+        } else {
+            lines.push(Line::from(""));
+        }
+    }
+
+    // ── floating band geometry — centered, upper portion, never full screen ────
+    let bw = 40u16.min(area.width.max(1));
+    let bh = ((n as u16) + 3).min(area.height.max(1)); // banner + rune + 2 border
+    let bx = area.x + area.width.saturating_sub(bw) / 2;
+    let by = area.y + area.height.saturating_sub(bh) / 4;
+    let band = Rect { x: bx, y: by, width: bw, height: bh };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(if ui_ascii() { BorderType::Plain } else { BorderType::Rounded })
+        .border_style(Style::default().fg(glyph_col))
+        .style(Style::default().bg(C_BG));
+    f.render_widget(Clear, band); // float above whatever tab is live
+    f.render_widget(
+        Paragraph::new(lines)
+            .alignment(ratatui::layout::Alignment::Center)
+            .block(block),
+        band,
+    );
+}
+
 // ── v0.13: tabbed cockpit — Node dashboard + MCP Swarm AI job board + Results ──
 
 use flux_miner::engine::{self, MinerStats};
@@ -3464,6 +3674,14 @@ fn draw_ui(f: &mut Frame, app: &App) {
     }
 
     f.render_widget(render_footer(app), footer_area);
+
+    // LANE-B v0.50: float the SIGIL rune band ABOVE the live cockpit — drawn last
+    // so it overlays every tab, fades on its own clock, and steals no layout slot.
+    if let (Some(start), Some(until)) = (app.rune_started, app.rune_until) {
+        if Instant::now() < until {
+            draw_rune_band(f, app, area, start, until);
+        }
+    }
 }
 
 /// The original node dashboard, now the [1] Node tab body.
@@ -3758,9 +3976,9 @@ fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let [head, rates, tally, barrow, logarea, hint] = Layout::vertical([
+    let [head, rates, tally, solverow, acctrow, body, hint] = Layout::vertical([
         Constraint::Length(1), Constraint::Length(1), Constraint::Length(1),
-        Constraint::Length(1), Constraint::Min(0), Constraint::Length(1),
+        Constraint::Length(1), Constraint::Length(1), Constraint::Min(0), Constraint::Length(1),
     ]).areas(inner);
 
     let wallet = miner_wallet();
@@ -3796,22 +4014,81 @@ fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         dim(" (egen kaede - ikke produce-tippen)"),
     ])), tally);
 
+    // ── solve-time sparkline (last solve relative to the session max) ─────────
     let maxv = s.solve_hist.iter().copied().max().unwrap_or(1).max(1);
     let last = s.solve_hist.back().copied().unwrap_or(0);
-    let barw = (barrow.width as usize).saturating_sub(18).max(4);
+    let barw = (solverow.width as usize).saturating_sub(20).max(4);
     let fill = ((last as f64 / maxv as f64) * barw as f64).round() as usize;
     let bar = "█".repeat(fill.min(barw)) + &"░".repeat(barw.saturating_sub(fill));
     f.render_widget(Paragraph::new(Line::from(vec![
-        dim(" solve "), Span::styled(bar, Style::default().fg(mcol)),
+        dim(" solve  "), Span::styled(bar, Style::default().fg(mcol)),
         Span::styled(format!(" {last} ms"), Style::default().fg(C_DIM)),
-    ])), barrow);
+    ])), solverow);
 
-    let maxlines = logarea.height as usize;
-    let loglines: Vec<Line> = s.log.iter().take(maxlines).map(|l| {
+    // ── LANE-B v0.50: accept-rate sparkline from App-side history. CP437-safe:
+    // each sample maps to a block shade by band (<90 ░ · <97 ▒ · <100 ▓ · 100 █).
+    let mut acc_line: Vec<Span> = vec![dim(" accept ")];
+    if app.accept_hist.is_empty() {
+        acc_line.push(dim("—"));
+    } else {
+        let aw = (acctrow.width as usize).saturating_sub(20).max(4);
+        let tail: Vec<u8> = app.accept_hist.iter().rev().take(aw).rev().copied().collect();
+        for a in tail {
+            let (ch, col) = if a < 90 { ("░", C_RED) }
+                else if a < 97 { ("▒", C_NEON_GOLD) }
+                else if a < 100 { ("▓", C_NEON_GREEN) }
+                else { ("█", C_NEON_GREEN) };
+            acc_line.push(Span::styled(ch, Style::default().fg(col)));
+        }
+    }
+    acc_line.push(Span::styled(format!(" {accept:.0}%"),
+        Style::default().fg(if accept >= 99.0 { C_NEON_GREEN } else { C_NEON_GOLD })));
+    f.render_widget(Paragraph::new(Line::from(acc_line)), acctrow);
+
+    // ── LANE-B v0.50: split the lower area — recent MINE-CHAIN blocks (left) vs
+    // the live share log (right). The mine-chain is THIS miner's own chain; the
+    // produce-tip is what the node syncs/serves — both shown so they never blur.
+    let [mined_col, log_col] = Layout::horizontal([
+        Constraint::Percentage(48), Constraint::Percentage(52),
+    ]).spacing(1).areas(body);
+
+    let produce_tip = app.st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(app.st.height);
+    let now = Instant::now();
+    let mut mlines: Vec<Line> = Vec::new();
+    mlines.push(Line::from(vec![
+        Span::styled(" MINE-CHAIN", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
+        dim(" — your shares, not the produce-tip"),
+    ]));
+    mlines.push(Line::from(vec![
+        dim("  produce-tip "), Span::styled(group(produce_tip), Style::default().fg(C_NEON_CYAN)),
+        dim("   mine-tip "), Span::styled(group(s.last_height), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+    ]));
+    if app.mined_recent.is_empty() {
+        mlines.push(Line::from(dim(if mining { "  warming up — no accepted blocks yet" } else { "  press [m] to mine" })));
+    } else {
+        let rows = (mined_col.height as usize).saturating_sub(2);
+        for (h, ms, when) in app.mined_recent.iter().take(rows) {
+            let age = now.saturating_duration_since(*when).as_secs();
+            let agestr = if age < 60 { format!("{age}s ago") }
+                else if age < 3600 { format!("{}m ago", age / 60) }
+                else { format!("{}h ago", age / 3600) };
+            mlines.push(Line::from(vec![
+                Span::styled(format!("  #{}", group(*h)), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+                dim("  "), Span::styled(format!("{ms:.0}ms"), Style::default().fg(C_GOLD)),
+                dim("  "), Span::styled(agestr, Style::default().fg(C_DIM)),
+            ]));
+        }
+    }
+    f.render_widget(Paragraph::new(mlines), mined_col);
+
+    let mut llines: Vec<Line> = Vec::new();
+    llines.push(Line::from(Span::styled(" SHARE LOG", Style::default().fg(C_NEON_PINK).add_modifier(Modifier::BOLD))));
+    let maxlines = (log_col.height as usize).saturating_sub(1);
+    for l in s.log.iter().take(maxlines) {
         let c = if l.starts_with('✓') { C_NEON_GREEN } else if l.starts_with('✗') { C_NEON_GOLD } else { C_DIM };
-        Line::from(Span::styled(format!("  {l}"), Style::default().fg(c)))
-    }).collect();
-    f.render_widget(Paragraph::new(loglines), logarea);
+        llines.push(Line::from(Span::styled(format!("  {l}"), Style::default().fg(c))));
+    }
+    f.render_widget(Paragraph::new(llines), log_col);
 
     let err = s.last_err.as_ref().map(|e| format!("   ⚠ {e}")).unwrap_or_default();
     f.render_widget(Paragraph::new(Line::from(vec![

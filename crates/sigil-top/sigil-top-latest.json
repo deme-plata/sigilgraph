@@ -1,15 +1,15 @@
 {
   "product": "sigil-top",
-  "version": "0.38.0",
+  "version": "0.42.0",
   "channel": "stable",
   "released": "2026-06-10",
-  "notes": "v0.38.0: Verifying Full Sync — genesis→tip provable spine (parent_hash linkage + persisted verified_to watermark). zstd wire codec (14.0x on real headers). Snapshot boot (35min->5.8s tail-replay). Self-healing auto-updater: --selfcheck preflight + crash-loop auto-rollback + revert. Node+miner in one binary (dual-lane BLAKE4 Phi + VDF Omega, Mining tab). TUI corruption fixed (eprintln->tracing). Persisted per-install peer identity.",
+  "notes": "v0.42.0 (DeepSeek-guided reliability): node binds :8099 + serves money/chain routes INSTANTLY on restart; the explorer full-text index now builds in a background thread (no more synchronous re-tokenize blocking startup) with a /readyz probe + index_ready in /status. Balance/status stay responsive while the index warms up. sigil-top TUI surfaces an 'explorer: indexing…' badge while the node warms its search. Builds on the v0.40 O(n) search-index fix.",
   "targets": {
     "linux-x64": {
       "url": "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-linux-x86_64",
-      "blake3_hex": "5784ec6fd3b32cfd5a3d460ab2ff9d94eaf72dda8d2472d7eb3b23102cffbc37",
-      "sha256_hex": "45edfadbbad1cf8592727d3887b362cc8185a395def859b737c1db75711a7889",
-      "size_bytes": 16076912
+      "blake3_hex": "649ce77f4974eeec651b349a3f3ff5163e6f99a0a8d4b4a30808367bca4c4f66",
+      "sha256_hex": "ca92eab4eb2aa212c2605cb9bc3647683fccca98e954254e80b534a43c889ea5",
+      "size_bytes": 16078704
     }
   }
 }

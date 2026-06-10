@@ -205,7 +205,14 @@ struct NodeStatus {
     /// the feed doesn't carry it yet — non-breaking, always present.
     #[serde(default, alias = "balance")]
     wallet_balance: u128,
+    /// v0.42: false while the node is (re)building its explorer full-text index in
+    /// the background — money/chain data is live, only search is briefly empty.
+    /// Absent on older nodes → defaults true (don't show a stale "indexing" badge).
+    #[serde(default = "default_true")]
+    index_ready: bool,
 }
+
+fn default_true() -> bool { true }
 
 /// The real, per-block tip the node publishes (LIGHT-3 L3-A, live).
 #[derive(Debug, Default, Deserialize)]
@@ -730,6 +737,12 @@ fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str) -> String
     let ver = if st.version.is_empty() { "—".into() } else { st.version.clone() };
     let disp_height = st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(st.height);
     o.push_str(&row("height", &format!("{GOLD}{}{RESET}", disp_height)));
+    // v0.42: explorer search readiness. The node now binds + serves money/chain
+    // routes instantly on restart and builds its full-text index in the
+    // background, so this briefly reads "indexing…" before "search ready".
+    if !st.index_ready {
+        o.push_str(&row("explorer", &format!("{GOLD}⟳ indexing…{RESET} {DIM}money/chain live; search warming up{RESET}")));
+    }
     if st.blocks_per_sec > 0.0 {
         // v0.12: gauge the live backfill rate against the SIGIL-g0 sync target of
         // 8000 blk/s (one full second of mainnet block production). A catch-up sync

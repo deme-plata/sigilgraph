@@ -18,8 +18,13 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
+
+/// false until the background full-text index build finishes (see main()).
+/// `/readyz` reports it; the money/chain routes serve regardless.
+static INDEX_READY: AtomicBool = AtomicBool::new(false);
 
 use flux_miner::client::{check_submission, Challenge, Submission, SubmitResult};
 use flux_vdf::ModSquaring;
@@ -363,8 +368,12 @@ fn token_id_for(sym: &str) -> TokenId {
 fn bootstrap() -> Node {
     // flux-history index (its own flux-db, persists itself).
     let hist_path = std::env::var("SIGIL_HISTORY_PATH").unwrap_or_else(|_| "/home/orobit/sigil-data/history".into());
-    let mut history = match flux_history::HistoryStore::open(&hist_path) {
-        Ok(s) => { eprintln!("flux-history: {} entries @ {hist_path}", s.len()); Some(s) }
+    // open_fast: bind the port NOW, build the full-text index off the hot path.
+    // The synchronous index rebuild used to add ~15s (and, pre-bulk_load, was an
+    // O(n²) hang) to every restart before :8099 came up. main() spawns the index
+    // build in the background and flips INDEX_READY when it's done.
+    let mut history = match flux_history::HistoryStore::open_fast(&hist_path) {
+        Ok(s) => { eprintln!("flux-history: {} entries @ {hist_path} (index building in background)", s.len()); Some(s) }
         Err(e) => { eprintln!("flux-history: disabled ({e})"); None }
     };
     if let Some(h) = history.as_mut() { backfill_blocks(h); }
@@ -591,11 +600,17 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 None => ok(format!("{{\"ok\":true,\"height\":{h},\"found\":false}}")),
             }
         }
+        // Readiness probe: true once the background search index is live. The
+        // money/chain routes serve from boot regardless — this only gates search.
+        ("GET", "/readyz") => {
+            let ready = INDEX_READY.load(Ordering::Relaxed);
+            ok(format!("{{\"ok\":true,\"index_ready\":{ready}}}"))
+        }
         ("GET", "/status") => {
             let n = node.read().unwrap();
             ok(format!(
-                "{{\"ok\":true,\"service\":\"sigil-rpcd\",\"network\":\"sigil-g0\",\"height\":{},\"version\":\"0.0.7\",\"peers\":1}}",
-                n.height
+                "{{\"ok\":true,\"service\":\"sigil-rpcd\",\"network\":\"sigil-g0\",\"height\":{},\"version\":\"0.0.7\",\"peers\":1,\"index_ready\":{}}}",
+                n.height, INDEX_READY.load(Ordering::Relaxed)
             ))
         }
         // flux-search over the tx history (flux-db + flux-search). Search a wallet
@@ -1129,6 +1144,34 @@ fn main() {
     let node = Arc::new(RwLock::new(bootstrap()));
     let listener = TcpListener::bind(&addr).expect("bind");
     eprintln!("sigil-rpcd listening on {addr} — thread-per-conn + RwLock (concurrent reads, serialized writes); pool USDS/wQUG, trader+operator funded");
+
+    // Background full-text index build: the port is already bound and serving the
+    // money/chain routes. We build the explorer search index off the hot path so a
+    // restart never blocks on re-tokenizing the whole history. The build reads under
+    // a SHARED read lock (balance/status readers stay responsive — only writers wait
+    // the few seconds it takes), then swaps the finished index in under a brief
+    // exclusive lock. `/readyz` flips true when search is live.
+    {
+        let inode = Arc::clone(&node);
+        thread::spawn(move || {
+            let t0 = std::time::Instant::now();
+            let built = {
+                let n = inode.read().unwrap();
+                n.history.as_ref().map(|h| h.build_detached_index())
+            };
+            match built {
+                Some(Ok(engine)) => {
+                    let mut n = inode.write().unwrap();
+                    if let Some(h) = n.history.as_mut() { h.install_index(engine); }
+                    drop(n);
+                    INDEX_READY.store(true, Ordering::Relaxed);
+                    eprintln!("flux-history: search index built in {:?} — /readyz ✓", t0.elapsed());
+                }
+                Some(Err(e)) => eprintln!("flux-history: background index build failed ({e}) — search disabled"),
+                None => INDEX_READY.store(true, Ordering::Relaxed), // no history store; nothing to build
+            }
+        });
+    }
     // Follower mode: if SIGIL_FOLLOW_PEER is set, sync the mining chain from that peer
     // (pull + independently verify + apply) so this node converges with the producer.
     if let Ok(peer) = std::env::var("SIGIL_FOLLOW_PEER") {

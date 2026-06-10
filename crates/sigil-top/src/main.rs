@@ -1856,10 +1856,20 @@ fn relaunch_new_binary(version: &str) -> bool {
     // binary can't start — abort the relaunch and stay alive on the current (working) image.
     match preflight_binary(&target) {
         Ok(reported) => {
-            // Sanity: the new binary should report the version we just installed. A mismatch
-            // (e.g. self_replace silently no-op'd) isn't fatal — it still STARTS — but log it.
+            // v0.56 FAIL-CLOSED: the new binary MUST report the version the channel advertised.
+            // A mismatch means the swap didn't take (self_replace no-op'd → still the OLD binary)
+            // or the manifest version disagrees with the artifact — relaunching either would run
+            // the WRONG version (operator hit "reports v0.40.4, expected v0.42.0 — relaunching
+            // anyway"). Abort the handoff AND revert to the rollback image so the next start is
+            // known-good, instead of silently running a mismatched binary.
             if !reported.is_empty() && reported != version {
-                eprintln!("  [update] pre-flight: new binary reports v{reported}, expected v{version} — relaunching anyway");
+                eprintln!("  [update] relaunch ABORTED — new binary reports v{reported}, expected v{version} (version mismatch); reverting to the rollback image and staying on the current version. Restart manually once the channel is fixed.");
+                if let Some(prev) = prev_binary_path() {
+                    if prev.exists() && self_replace::self_replace(&prev).is_err() {
+                        let _ = std::fs::copy(&prev, &target);
+                    }
+                }
+                return false;
             }
         }
         Err(e) => {
@@ -2505,13 +2515,21 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             std::env::temp_dir().join("sigil-top-blocks.db").to_string_lossy().as_ref()))
         .unwrap_or_else(|e| panic!("block store: {e}"));
 
-    // v0.7.1: Bootstrap from local aether shards into flux-db before starting P2P
-    match block_store::sync_aether_to_fluxdb(&mut block_store, "/opt/orobit/sigil-data/db-epsilon/aether") {
-        Ok(n) if n > 0 => {
-            app.toast = format!("⬇ Synced {n} blocks → flux-db (height {})", block_store.best_height());
+    // v0.7.1: Bootstrap from local aether shards into flux-db before starting P2P.
+    // v0.56: the default aether dir is an EPSILON-server path; on Windows/other operators
+    // it never exists, which spammed stderr with "[aether] aether dir not found" every
+    // launch. Only attempt the sync when the dir is actually present (overridable via
+    // SIGIL_AETHER_DIR); otherwise skip SILENTLY — a missing dir is the normal case off-server.
+    let aether_dir = std::env::var("SIGIL_AETHER_DIR")
+        .unwrap_or_else(|_| "/opt/orobit/sigil-data/db-epsilon/aether".to_string());
+    if std::path::Path::new(&aether_dir).is_dir() {
+        match block_store::sync_aether_to_fluxdb(&mut block_store, &aether_dir) {
+            Ok(n) if n > 0 => {
+                app.toast = format!("⬇ Synced {n} blocks → flux-db (height {})", block_store.best_height());
+            }
+            Err(e) => tlog!("[aether] {e}"),
+            _ => {}
         }
-        Err(e) => tlog!("[aether] {e}"),
-        _ => {}
     }
 
     // v0.11.0: a read-only view of the SAME flux-db, cloned BEFORE the store is moved

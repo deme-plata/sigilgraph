@@ -613,6 +613,15 @@ fn fmt_uptime(secs: u64) -> String {
     if d > 0 { format!("{d}d {h}h {m}m") } else if h > 0 { format!("{h}h {m}m") } else { format!("{m}m {}s", secs % 60) }
 }
 
+/// v0.33.3: seconds → compact ETA ("4h 11m", "38m", "2d 3h"). "∞" when not making progress.
+fn fmt_eta(secs: f64) -> String {
+    if !secs.is_finite() || secs <= 0.0 { return "—".into(); }
+    if secs > 60.0 * 60.0 * 24.0 * 99.0 { return "∞".into(); }
+    let s = secs as u64;
+    let (d, h, m) = (s / 86400, (s % 86400) / 3600, (s % 3600) / 60);
+    if d > 0 { format!("{d}d {h}h") } else if h > 0 { format!("{h}h {m}m") } else if m > 0 { format!("{m}m") } else { format!("{s}s") }
+}
+
 fn short_root(r: &str) -> String {
     if r.is_empty() { format!("{DIM}—{RESET}") }
     else if r.len() <= 18 { r.to_string() }
@@ -1711,6 +1720,25 @@ fn relaunch_new_binary(version: &str) -> bool {
     }
 }
 
+/// v0.33.3: a tiny 1D Kalman filter that smooths the noisy 10s-window blk/s into a stable
+/// rate estimate, used for a steady time-to-sync ETA (raw rate jitters too much to divide by).
+/// Constant-value model: predict adds process noise q; update blends the measurement with
+/// gain k = p/(p+r). Larger r = trust the model more = smoother. Tuned for block rates.
+#[derive(Clone)]
+struct Kalman1D { x: f64, p: f64, q: f64, r: f64, init: bool }
+impl Kalman1D {
+    fn new() -> Self { Self { x: 0.0, p: 1.0, q: 6.0, r: 180.0, init: false } }
+    fn update(&mut self, z: f64) -> f64 {
+        if !z.is_finite() { return self.x; }
+        if !self.init { self.x = z; self.init = true; return self.x; }
+        self.p += self.q;                       // predict
+        let k = self.p / (self.p + self.r);     // Kalman gain
+        self.x += k * (z - self.x);             // correct
+        self.p *= 1.0 - k;
+        self.x
+    }
+}
+
 struct App {
     cfg: Config,
     st: NodeStatus,
@@ -1764,6 +1792,7 @@ struct App {
     p2p_blocks_synced: u64,
     p2p_rate: f64,                            // backfill blocks/sec (10s trailing window = current speed)
     p2p_rate_samples: std::collections::VecDeque<(std::time::Instant, u64)>, // (t, blocks_synced)
+    sync_kf: Kalman1D,                         // v0.33.3: Kalman-smoothed sync rate (→ stable ETA)
     // v0.7.0: AI fleet monitoring — AIs worry about their nodes' uptime and version compliance
     fleet_nodes: Vec<FleetNode>,
     fleet_last_check: Instant,
@@ -1821,6 +1850,7 @@ impl App {
               p2p_blocks_synced: 0,
               p2p_rate: 0.0,
               p2p_rate_samples: std::collections::VecDeque::new(),
+              sync_kf: Kalman1D::new(),
               serve_status: String::new(),
               serve_stop: None,
               // v0.7.0: Fleet starts with known bootstrap peers
@@ -2554,6 +2584,8 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                     let dt = t1.duration_since(t0).as_secs_f64();
                     if dt >= 1.0 {
                         app.p2p_rate = b1.saturating_sub(b0) as f64 / dt;
+                        // v0.33.3: feed the measured rate into the Kalman filter for a stable ETA.
+                        app.sync_kf.update(app.p2p_rate);
                     }
                 }
                 for block in p2p.drain_new_blocks() {
@@ -3197,7 +3229,14 @@ fn draw_ui(f: &mut Frame, app: &App) {
     f.render_widget(render_tab_bar(app), tab_area);
 
     match app.tab {
-        Tab::Node => draw_node_body(f, app, body_area),
+        Tab::Node => {
+            // v0.33.3: SYNC is now a full-width HERO band on top of the Node tab, with a big
+            // progress bar + Kalman-ETA telemetry + starship; the other cards flow beneath it.
+            let [hero_area, cards_area] =
+                Layout::vertical([Constraint::Length(9), Constraint::Min(0)]).areas(body_area);
+            draw_sync_hero(f, app, hero_area);
+            draw_node_body(f, app, cards_area);
+        }
         Tab::SwarmAi => f.render_widget(render_swarm_ai(app), body_area),
         Tab::Results => f.render_widget(render_results(app), body_area),
         Tab::SyncLog => f.render_widget(render_sync_log(app), body_area),
@@ -3217,16 +3256,15 @@ fn draw_node_body(f: &mut Frame, app: &App, body_area: ratatui::layout::Rect) {
         Constraint::Length(6), // Node
         Constraint::Length(6), // StateRoots
         Constraint::Length(4), // Supply
-        Constraint::Length(5), // SyncStatus (v0.7.21: 3 lines, robust on short terminals)
         Constraint::Length(7), // Mining (v0.2.35: +2 lines for hashrate + balance)
+        Constraint::Min(0),    // spacer
     ])
     .split(left_area);
 
     f.render_widget(render_node_card(app), left_v[0]);
     f.render_widget(render_state_roots(app), left_v[1]);
     f.render_widget(render_supply(app), left_v[2]);
-    f.render_widget(render_sync_status(app), left_v[3]);
-    f.render_widget(render_mining(app), left_v[4]);
+    f.render_widget(render_mining(app), left_v[3]); // v0.33.3: SYNC moved to the top hero band
 
     let right_v = Layout::vertical([Constraint::Length(5), Constraint::Length(5), Constraint::Length(7), Constraint::Min(0)])
         .spacing(1)
@@ -3343,73 +3381,106 @@ fn sigil_top_db_path() -> String {
     format!("{}/sigil-top-blocks.db", base.trim_end_matches(['/', '\\']))
 }
 
-fn render_sync_status(app: &App) -> Paragraph<'static> {
+/// v0.33.3: the SYNC HERO — a full-width band with a BIG progress bar, Kalman-smoothed rate
+/// + ETA, in-flight chunk / fleet / mesh / PID telemetry, and a static starship motif. The
+/// whole frame is themed by the sync verdict color. Progress = s.verified (the honest spine),
+/// NOT s.blocks_synced (faked to the tip in light-monitor mode — see memory/render note).
+fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let s = &app.p2p_state;
     let fold_ok = app.verify.as_ref().map(|v| v.ok).unwrap_or(false);
-    let net_tip = s.peer_best_height.max(app.target_height); // network head (signed tip-proof)
-    // HONEST progress = s.verified, the contiguous spine cryptographically linked from
-    // genesis. NOTE: s.blocks_synced is DELIBERATELY faked to the tip in light-monitor mode
-    // (block_sync.rs ~L974: "show the live tip as sync height so the bar reads AT TIP") — so
-    // it is NOT a storage count. Only `verified` tells the truth about what's been checked.
+    let net_tip = s.peer_best_height.max(app.target_height);
     let spine = s.verified;
-    let behind = net_tip.saturating_sub(spine);
+    let gap = net_tip.saturating_sub(spine);
     let frac = if net_tip > 0 { (spine as f64 / net_tip as f64).clamp(0.0, 1.0) } else { 0.0 };
-    let following = net_tip > 0;                          // we know + track the live head
-    let caught = following && behind < 16_384;            // spine has reached the head window
+    let following = net_tip > 0;
+    let caught = following && gap < 16_384;
     let synced = caught && fold_ok && s.verify_break.is_none();
     let connecting = s.fetched_total == 0 && spine == 0 && !following;
+    let kf_rate = app.sync_kf.x.max(0.0);                       // Kalman-smoothed blk/s
+    let eta = if synced || kf_rate < 1.0 { f64::INFINITY } else { gap as f64 / kf_rate };
 
-    // ── L1: network TIP + one loud verdict banner ──────────────────────
-    let verdict = if s.verify_break.is_some() {
-        banner("⚠ SPINE BREAK", C_NEON_PINK)
-    } else if synced {
-        banner("◆ SYNCED", C_NEON_GREEN)
-    } else if connecting {
-        banner("… CONNECTING", C_DIM)
-    } else if following {
-        banner("≈ TRACKING HEAD", C_NEON_CYAN)
-    } else {
-        banner("⬇ SYNCING", C_NEON_GOLD)
-    };
-    let l1 = Line::from(vec![dim("tip "), val(group(net_tip)), Span::raw("  "), verdict]);
+    let (vtext, vcol) = if s.verify_break.is_some() { ("⚠ SPINE BREAK", C_NEON_PINK) }
+        else if synced { ("◆ SYNCED", C_NEON_GREEN) }
+        else if connecting { ("… CONNECTING", C_DIM) }
+        else if caught { ("≈ TRACKING HEAD", C_NEON_CYAN) }
+        else { ("⬇ SYNCING", C_NEON_GOLD) };
 
-    // ── L2: HONEST spine-verify progress (verified-from-genesis vs head) ─
-    let l2 = if synced {
+    // state-themed border; title chip stays neon-cyan
+    let block = card_block(" ◇ SYNC · sigil-g0", C_NEON_CYAN)
+        .border_style(Style::default().fg(vcol));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // [ big bar (full width) ] over [ telemetry | starship ]
+    let [bar_row, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
+    let [tele, ship] = Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).spacing(1).areas(body);
+
+    // ── BIG progress bar ─────────────────────────────────────────────────
+    let label = format!(" {:>5.1}%  {}", frac * 100.0, vtext);
+    let total = bar_row.width as usize;
+    let barw = total.saturating_sub(label.chars().count() + 1).max(4);
+    let fill = (frac * barw as f64).round() as usize;
+    let bar_str = "█".repeat(fill.min(barw)) + &"░".repeat(barw.saturating_sub(fill));
+    f.render_widget(Paragraph::new(Line::from(vec![
+        Span::styled(bar_str, Style::default().fg(vcol).add_modifier(Modifier::BOLD)),
+        Span::styled(label, Style::default().fg(vcol).add_modifier(Modifier::BOLD)),
+    ])), bar_row);
+
+    // ── telemetry (left) ─────────────────────────────────────────────────
+    let chunk = if s.sync_cursor > 0 {
+        format!("[{}…{}]", group(s.sync_cursor), group(s.sync_cursor.saturating_add(2048)))
+    } else { "—".into() };
+    let fleet_total = app.fleet_nodes.len();
+    let fleet_on = app.fleet_nodes.iter().filter(|n| n.online).count();
+    let mesh = s.mesh_peer_count;
+    let pid = std::process::id();
+    let proof = if s.verify_break.is_some() { Span::styled("fold ✗ break".to_string(), Style::default().fg(C_RED).add_modifier(Modifier::BOLD)) }
+        else if fold_ok { Span::styled("fold ✓ attests rest".to_string(), Style::default().fg(C_NEON_GREEN)) }
+        else { Span::styled("fold … verifying".to_string(), Style::default().fg(C_GOLD)) };
+    let pos = if s.pos_rate > 0.0 {
+        Span::styled(format!("   ⛏{} blk/s verify", group(s.pos_rate.round() as u64)), Style::default().fg(C_GOLD))
+    } else { Span::raw("") };
+
+    let tlines = vec![
         Line::from(vec![
-            dim("chain "),
-            Span::styled("genesis→head verified".to_string(), Style::default().fg(C_NEON_GREEN)),
-            dim("  "),
-            Span::styled(format!("{} blk ⛓", group(spine)), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
-        ])
-    } else if connecting {
-        Line::from(vec![dim("chain "), Span::styled("waiting for peers…".to_string(), Style::default().fg(C_DIM))])
-    } else {
-        // neon bar of verified-spine / head + the real count + live verify rate.
+            dim("tip "), val(group(net_tip)),
+            dim("   spine "), Span::styled(format!("⛓{}", group(spine)), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+            dim("   gap "), Span::styled(group(gap), Style::default().fg(if caught { C_NEON_GREEN } else { C_GOLD })),
+        ]),
         Line::from(vec![
-            neon_bar(frac, 10, C_NEON_GOLD),
-            Span::styled(format!(" {:>4.1}%", frac * 100.0), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)),
-            dim("  ⛓"),
-            Span::styled(group(spine), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
-            dim(format!("  {} blk/s", group(app.p2p_rate.max(0.0).round() as u64))),
-        ])
-    };
+            dim("rate "), Span::styled(format!("{} blk/s", group(kf_rate.round() as u64)), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)),
+            dim(" ~kalman   eta "), Span::styled(if synced { "—".to_string() } else { fmt_eta(eta) }, Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+            dim("   chunk "), Span::styled(chunk, Style::default().fg(C_VBRIGHT)),
+        ]),
+        Line::from(vec![
+            dim("fleet "), Span::styled(format!("{}/{}", fleet_on, fleet_total), Style::default().fg(if fleet_total > 0 && fleet_on == fleet_total { C_NEON_GREEN } else { C_GOLD })),
+            dim("   mesh "), Span::styled(format!("{} peers", mesh), Style::default().fg(if mesh >= 4 { C_NEON_GREEN } else if mesh >= 1 { C_GOLD } else { C_RED })),
+            dim("   "),
+            Span::styled("Δ", Style::default().fg(if s.connected_delta { C_NEON_GREEN } else { C_DIM }).add_modifier(Modifier::BOLD)),
+            Span::styled("Ε", Style::default().fg(if s.connected_epsilon { C_NEON_GREEN } else { C_DIM }).add_modifier(Modifier::BOLD)),
+            dim(format!("   pid {}", pid)),
+        ]),
+        Line::from(vec![
+            dim("proof "), proof,
+            dim("   fetched "), Span::styled(group(s.fetched_total), Style::default().fg(C_GREEN)),
+            pos,
+        ]),
+    ];
+    f.render_widget(Paragraph::new(tlines), tele);
 
-    // ── L3: fold-proof attestation + peer mesh ─────────────────────────
-    let proof = if s.verify_break.is_some() {
-        Span::styled("fold ✗ break".to_string(), Style::default().fg(C_RED).add_modifier(Modifier::BOLD))
-    } else if fold_ok {
-        Span::styled("fold ✓ attests rest".to_string(), Style::default().fg(C_NEON_GREEN))
-    } else {
-        Span::styled("fold … verifying".to_string(), Style::default().fg(C_GOLD))
-    };
-    let l3 = Line::from(vec![
-        dim("proof "), proof, dim("   "),
-        Span::styled("Δ", Style::default().fg(if s.connected_delta { C_NEON_GREEN } else { C_DIM }).add_modifier(Modifier::BOLD)),
-        Span::styled("Ε", Style::default().fg(if s.connected_epsilon { C_NEON_GREEN } else { C_DIM }).add_modifier(Modifier::BOLD)),
-        dim(format!(" {}p", s.peer_count)),
-    ]);
-
-    Paragraph::new(vec![l1, l2, l3]).block(card_block(" ◇ SYNC", C_NEON_CYAN))
+    // ── static starship (right) ──────────────────────────────────────────
+    let (dtxt, dcol) = if synced { ("DOCKED", C_NEON_GREEN) }
+        else if connecting { ("OFFLINE", C_RED) }
+        else { ("ENGAGED", vcol) };
+    let ship_lines = vec![
+        Line::from(Span::styled("    ╱╲    ", Style::default().fg(C_NEON_CYAN))),
+        Line::from(Span::styled("   ╱██╲   ", Style::default().fg(C_NEON_CYAN))),
+        Line::from(Span::styled("  ▕████▏  ", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled("  ▕◆◆◆▏  ", Style::default().fg(dcol))),
+        Line::from(Span::styled("  ╱╲██╱╲  ", Style::default().fg(C_NEON_PINK))),
+        Line::from(vec![dim(" drive "), Span::styled(dtxt, Style::default().fg(dcol).add_modifier(Modifier::BOLD))]),
+    ];
+    f.render_widget(Paragraph::new(ship_lines), ship);
 }
 
 fn render_mining(app: &App) -> Paragraph<'static> {

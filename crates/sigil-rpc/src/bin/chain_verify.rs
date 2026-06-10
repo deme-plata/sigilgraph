@@ -29,7 +29,7 @@ fn hx(s: &str) -> [u8; 32] { let mut o = [0u8; 32]; for i in 0..32 { o[i] = u8::
 /// Independently verify one block against `my_tip`. Returns `(new_tip, this_block_ts_us)` —
 /// the ts is threaded into the next call as `prev_ts` for the time-based reward check.
 /// `genesis_ts == 0` → legacy block-based chain (no time anchor).
-fn verify_block(rec: &Value, my_tip: &[u8; 32], g: &ModSquaring, genesis_ts: u128, prev_ts: u128) -> Result<([u8; 32], u128), String> {
+fn verify_block(rec: &Value, my_tip: &[u8; 32], g: &ModSquaring, genesis_ts: u128, prev_ts: u128, carry_in: u128) -> Result<([u8; 32], u128, u128), String> {
     let bh = rec["height"].as_u64().ok_or("no height")?;
     if hx(rec["prev_tip"].as_str().unwrap_or("")) != *my_tip { return Err(format!("block {bh}: linkage break (prev_tip != my tip)")); }
     let bits = rec["bits"].as_u64().unwrap_or(0) as u32;
@@ -41,15 +41,15 @@ fn verify_block(rec: &Value, my_tip: &[u8; 32], g: &ModSquaring, genesis_ts: u12
     if !check_submission(g, &c, &sub) { return Err(format!("block {bh}: dual-lane verify FAILED (work/VDF/header)")); }
     // LANE-R: recompute the reward exactly as the producer/follower do — time-based from the
     // block's stored µs ts when genesis is anchored, else the legacy block-based schedule.
-    let expected = if genesis_ts == 0 {
-        sigil_emission::block_reward(bh)
+    let (expected, new_carry) = if genesis_ts == 0 {
+        (sigil_emission::block_reward(bh), 0u128)
     } else {
-        sigil_emission::block_reward_time(genesis_ts, prev_ts, rec_ts, 0).0
+        sigil_emission::block_reward_time(genesis_ts, prev_ts, rec_ts, carry_in)
     };
     if reward != expected { return Err(format!("block {bh}: reward {reward} != schedule {expected}")); }
     let computed = tip_v2(my_tip, bh, sub.block.blake4_hash, sub.block.nonce, &serde_json::to_vec(&sub.block.vdf).unwrap());
     if computed != hx(rec["tip"].as_str().unwrap_or("")) { return Err(format!("block {bh}: tip-fold mismatch")); }
-    Ok((computed, rec_ts))
+    Ok((computed, rec_ts, new_carry))
 }
 
 fn main() {
@@ -65,11 +65,12 @@ fn main() {
     let genesis_ts: u128 = tip_info["genesis_ts_us"].as_str().unwrap_or("0").parse().unwrap_or(0);
     let mut tip = genesis();
     let mut prev_ts = genesis_ts;
+    let mut carry = 0u128; // EXACT CARRY threaded from genesis — must mirror produce/apply
     let mut verified = 0u64;
     for bh in 0..head_bh {
         let rec: Value = serde_json::from_str(&http(&addr, &format!("/api/v1/block?height={bh}"))).unwrap_or(Value::Null);
-        match verify_block(&rec, &tip, &g, genesis_ts, prev_ts) {
-            Ok((t, ts)) => { tip = t; prev_ts = ts; verified += 1; }
+        match verify_block(&rec, &tip, &g, genesis_ts, prev_ts, carry) {
+            Ok((t, ts, c)) => { tip = t; prev_ts = ts; carry = c; verified += 1; }
             Err(e) => { println!("[FAIL] {e}"); std::process::exit(1); }
         }
     }
@@ -82,7 +83,7 @@ fn main() {
     if head_bh > 0 {
         let mut rec0: Value = serde_json::from_str(&http(&addr, "/api/v1/block?height=0")).unwrap();
         rec0["reward"] = Value::String("999999999".into());
-        tamper_ok = verify_block(&rec0, &genesis(), &g, genesis_ts, genesis_ts).is_err();
+        tamper_ok = verify_block(&rec0, &genesis(), &g, genesis_ts, genesis_ts, 0).is_err();
         println!("[{}] tampered block (wrong reward) is REJECTED: {tamper_ok}", if tamper_ok { "PASS" } else { "FAIL" });
     }
 

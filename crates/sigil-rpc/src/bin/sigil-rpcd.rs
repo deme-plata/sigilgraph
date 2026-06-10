@@ -88,8 +88,13 @@ struct Node {
     genesis_ts_us: u128,
     /// The previous accepted block's timestamp (µs). `block_reward_time` integrates the
     /// emission rate over [last_block_ts_us, this_block_ts]. Updated on every accept/apply so
-    /// produce and follower-replay compute the SAME reward (stateless carry — deterministic).
+    /// produce and follower-replay compute the SAME reward.
     last_block_ts_us: u128,
+    /// LANE-R EXACT CARRY: the sub-unit numerator remainder carried across blocks so a 400µs
+    /// block loses ZERO emission to integer truncation and the curve reaches EXACTLY 21M.
+    /// Part of committed/snapshot state → deterministic replay (a follower threads the SAME
+    /// carry from genesis, or restores it from a snapshot). Produce and verify MUST agree.
+    emission_carry: u128,
 }
 
 /// Persisted snapshot: the money + chain state (NOT students — VerifiedRegistry isn't
@@ -118,6 +123,8 @@ struct Snapshot {
     genesis_ts_us: u128,
     #[serde(default)]
     last_block_ts_us: u128,
+    #[serde(default)]
+    emission_carry: u128,
 }
 
 /// Write the current money+chain state to flux-db (bincode — handles u128 + tuple-key
@@ -130,6 +137,7 @@ fn persist(node: &Node) {
         tokens: node.tokens.clone(), pools: node.pools.clone(), citizens: node.citizens.clone(),
         auth_nonces: node.auth_nonces.clone(),
         genesis_ts_us: node.genesis_ts_us, last_block_ts_us: node.last_block_ts_us,
+        emission_carry: node.emission_carry,
     };
     if let Ok(bytes) = bincode::serialize(&snap) { let _ = db.put(b"snapshot", &bytes); }
 }
@@ -196,10 +204,10 @@ fn apply_block(n: &mut Node, rec: &serde_json::Value, g: &ModSquaring) -> Result
     // LANE-R: recompute the reward the SAME way the producer did — time-based from the block's
     // stored µs ts when genesis is anchored, else the legacy block-based schedule. A follower
     // that diverges here would fork, so this MUST mirror the produce path exactly.
-    let expected_reward = if n.genesis_ts_us == 0 {
-        sigil_emission::block_reward(bh)
+    let (expected_reward, new_carry) = if n.genesis_ts_us == 0 {
+        (sigil_emission::block_reward(bh), 0u128)
     } else {
-        sigil_emission::block_reward_time(n.genesis_ts_us, n.last_block_ts_us, rec_ts, 0).0
+        sigil_emission::block_reward_time(n.genesis_ts_us, n.last_block_ts_us, rec_ts, n.emission_carry)
     };
     if reward != expected_reward { return Err(format!("block {bh}: reward {reward} != schedule {expected_reward}")); }
     let new_tip = fold_tip(&n.tip_hash, bh, sub.block.blake4_hash, sub.block.nonce, &sub.block.vdf);
@@ -210,7 +218,7 @@ fn apply_block(n: &mut Node, rec: &serde_json::Value, g: &ModSquaring) -> Result
     let prev_tip = n.tip_hash;
     n.tip_hash = new_tip;
     store_block(n, bh, &sub, reward, prev_tip, new_tip, rec_ts);
-    if n.genesis_ts_us != 0 { n.last_block_ts_us = rec_ts; } // advance the emission clock
+    if n.genesis_ts_us != 0 { n.last_block_ts_us = rec_ts; n.emission_carry = new_carry; } // advance clock + carry
     n.block_height += 1;
     n.height += 1;
     // ADOPT the producer's difficulty from the chain — a follower must NOT run its own
@@ -430,6 +438,7 @@ fn bootstrap() -> Node {
             auth_nonces: snap.auth_nonces,
             onboard_rl: std::collections::HashMap::new(),
             genesis_ts_us: snap.genesis_ts_us, last_block_ts_us: snap.last_block_ts_us,
+            emission_carry: snap.emission_carry,
         };
     }
     eprintln!("flux-db: no snapshot — seeding fresh genesis @ {state_path}");
@@ -498,7 +507,7 @@ fn bootstrap() -> Node {
     let node = Node { state, height: 2, block_height: 0, students: VerifiedRegistry::new(), tokens, pools, citizens: vec![CITIZEN], history,
         tip_hash, bits: mining_bits(), retarget_anchor_ts: now_ms(), retarget_anchor_height: 0, statedb,
         auth_nonces: std::collections::HashMap::new(), onboard_rl: std::collections::HashMap::new(),
-        genesis_ts_us, last_block_ts_us: genesis_ts_us };
+        genesis_ts_us, last_block_ts_us: genesis_ts_us, emission_carry: 0 };
     persist(&node); // write the genesis snapshot so the next boot restores
     node
 }
@@ -1038,10 +1047,12 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             // carry=0, deterministic). genesis_ts_us==0 → pre-LANE-R chain, keep the block-based
             // schedule (time-based only activates on a fresh genesis that anchors genesis_ts_us).
             let ts_us = now_us();
-            let reward = if n.genesis_ts_us == 0 {
-                sigil_emission::block_reward(bh)
+            // EXACT CARRY: thread the sub-unit remainder so nothing is lost to truncation; the
+            // returned carry is committed AFTER the block is accepted (alongside last_block_ts).
+            let (reward, new_carry) = if n.genesis_ts_us == 0 {
+                (sigil_emission::block_reward(bh), 0u128)
             } else {
-                sigil_emission::block_reward_time(n.genesis_ts_us, n.last_block_ts_us, ts_us, 0).0
+                sigil_emission::block_reward_time(n.genesis_ts_us, n.last_block_ts_us, ts_us, n.emission_carry)
             };
             let eh = n.height;
             match credit_share(&mut n.state, eh, miner, reward) {
@@ -1054,7 +1065,8 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                     // decentralization step ①: persist the block (+ its µs ts) so PEERS can pull
                     // + recompute the SAME time-based reward.
                     store_block(&n, bh, &sub, reward, prev_tip, new_tip, ts_us);
-                    n.last_block_ts_us = ts_us; // advance the emission clock for the next block
+                    n.last_block_ts_us = ts_us;   // advance the emission clock for the next block
+                    n.emission_carry = new_carry; // commit the carried sub-unit remainder
                     n.block_height += 1;
                     n.height += 1;
                     retarget(&mut n); // fix #2: adjust BLAKE4 difficulty from real block times

@@ -232,27 +232,26 @@ mod tests {
         // ITS own independently-tracked last_block_ts. They MUST agree block-by-block (any
         // divergence = a chain fork) and the chain total MUST equal the closed-form integral.
         let genesis = 1_700_000_000_000_000u128;
-        let mut prod_prev = genesis; // producer's last_block_ts_us
-        let mut ver_prev = genesis;  // follower's last_block_ts_us (separate state, same updates)
+        let mut prod_prev = genesis; let mut prod_carry = 0u128; // producer state
+        let mut ver_prev = genesis;  let mut ver_carry = 0u128;  // follower state (separate, same updates)
         let mut total = 0u128;
-        let dt_us = 4_545u128;       // ~220 blk/s
+        let dt_us = 4_545u128;       // ~220 blk/s — a sub-millisecond block
         let n = 10_000u128;
         for i in 1..=n {
             let ts = genesis + i * dt_us;                           // block i's stamped µs ts
-            let produced = block_reward_time(genesis, prod_prev, ts, 0).0;
-            let verified = block_reward_time(genesis, ver_prev, ts, 0).0; // follower recompute
+            let (produced, pc) = block_reward_time(genesis, prod_prev, ts, prod_carry);
+            let (verified, vc) = block_reward_time(genesis, ver_prev, ts, ver_carry); // follower recompute
             assert_eq!(produced, verified, "produce/verify reward diverged at block {i} — would FORK");
+            assert_eq!(pc, vc, "carry diverged at block {i} — would FORK");
+            assert!(produced > 0, "a sub-millisecond block must NEVER truncate to a 0 reward");
             total += produced;
-            prod_prev = ts; ver_prev = ts;                          // both advance the emission clock
+            prod_prev = ts; prod_carry = pc; ver_prev = ts; ver_carry = vc; // advance clock + carry
         }
-        // STATELESS model: each block floors its reward (carry=0), so the chain total is the
-        // time integral MINUS a sub-unit-per-block truncation. The loss is bounded by n base
-        // units (< 1 per block) — the documented <0.003%-over-4-years tradeoff for a stateless,
-        // fork-free verify. Asserts total ∈ (integral − n, integral].
+        // EXACT-CARRY model: the sub-unit remainder is carried across blocks, so the chain total
+        // equals the closed-form time integral EXACTLY — ZERO emission lost to truncation.
         let elapsed_us = n * dt_us;
         let integral = ((MAX_SUPPLY / 2) * elapsed_us) / EMISSION_DENOM;
-        assert!(total <= integral, "stateless total can't exceed the integral");
-        assert!(total + n >= integral, "truncation loss must be < 1 base unit per block");
+        assert_eq!(total, integral, "with the carry, summed rewards == the time integral EXACTLY");
         assert!(total < MAX_SUPPLY);
     }
 }

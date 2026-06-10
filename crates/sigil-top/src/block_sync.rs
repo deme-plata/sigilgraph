@@ -1037,7 +1037,12 @@ impl P2PBlockSync {
                     // serves, keeping the window in the servable range so downloaded climbs.
                     let served_top = store.best_height();
                     if recent_only && served_top > store.synced_to() + RECENT_WINDOW {
-                        let new_base = served_top.saturating_sub(RECENT_WINDOW).max(sync_base);
+                        // v0.57 FRONTIER-STALL FIX: align the recent-window base to a CHUNK boundary.
+                        // An UNALIGNED base (e.g. 20481) made the floor-aligned refill request ranges
+                        // offset from where the server windows them, leaving a permanent 1-block hole
+                        // at base+k*CHUNK (synced_to froze at 57345 = 20481 + 9*4096 — proven live).
+                        // align_base() snaps it down to a CHUNK multiple so frontier chunks line up.
+                        let new_base = align_base(served_top.saturating_sub(RECENT_WINDOW), CHUNK, sync_base);
                         if new_base > store.base() {
                             store.set_base(new_base);
                             store.advance();

@@ -204,6 +204,28 @@ fn max_header_height(bytes: &[u8]) -> Option<u64> {
     }
 }
 
+/// Min+max block height present in a backfill response body, across ALL wire codecs
+/// (`'Z'` zstd, `'H'` raw-bincode, legacy JSON). Mirrors `max_header_height` but returns
+/// the full `[lo..hi]` range — used by the `[D]` sync debug line so the operator sees the
+/// REAL heights in a chunk. (Before v0.38.1 that line only decoded `'H'`, so once the
+/// zstd codec=1 lane went live every chunk logged `h=[0..0]` and looked like a broken
+/// decode — a pure display bug; `ingest_backfill_bytes` always stored the blocks fine.)
+fn header_height_range(bytes: &[u8]) -> Option<(u64, u64)> {
+    let heights: Vec<u64> = if bytes.first() == Some(&b'Z') {
+        let body = zstd_decompress_body(&bytes[1..])?;
+        bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&body).ok()?.iter().map(|h| h.height).collect()
+    } else if bytes.first() == Some(&b'H') {
+        bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&bytes[1..]).ok()?.iter().map(|h| h.height).collect()
+    } else if let Ok(resp) = serde_json::from_slice::<BackfillResp>(bytes) {
+        resp.blocks.iter()
+            .filter_map(|v| v.get("header").and_then(|h| h.get("height")).and_then(|x| x.as_u64()))
+            .collect()
+    } else {
+        return None;
+    };
+    Some((*heights.iter().min()?, *heights.iter().max()?))
+}
+
 /// Fetch the network's REAL tip height from the published `sigil-tip-live.json`.
 /// v0.17.0: the monitor's `/api/v1/status` mis-routes to a near-empty sigil-rpcd that
 /// returns height=2, so `set_known_tip` seeded `peer_best≈2` and the fast-snap (gated on
@@ -614,8 +636,25 @@ impl P2PBlockSync {
                     // here blocks the loop for seconds (each block costs a serde_json hash),
                     // which starved the whole pipeline (v0.10.0 synced-stuck bug). Cap it so the
                     // loop stays responsive; leftover messages drain over the next iterations.
+                    // v0.50 (LANE-A · fix-3 REAL-TIME GOSSIP HEAD): split the gossip drain into
+                    // a CHEAP head-scan + a BOUNDED full-ingest. Before this, the tip (peer_best)
+                    // effectively advanced only at the 1-3 s ORACLE cadence (`[tipfetch]`): the
+                    // gossip drain that could advance it was capped at 48/iter, so under bulk-sync
+                    // load the live head blocks queued behind the cap and the hero gap tracked the
+                    // oracle's staleness, not the real tip. Now EVERY pending gossip block (up to
+                    // HEAD_SCAN_CAP) cheaply contributes its height to `head_seen` → peer_best is
+                    // raised the MOMENT a block gossips in (sub-second, gossip-driven, independent
+                    // of the oracle). The EXPENSIVE work (hash + store + hand-off, the per-block
+                    // serde+blake the v0.10.0 synced-stuck bug warns about) stays BOUNDED at
+                    // INGEST_CAP so the loop never blocks for seconds under a re-gossip flood;
+                    // leftover blocks ingest over later iterations and the backfill fills any
+                    // contiguity gap. No new polling — pure event drain, poll budget unchanged.
+                    const HEAD_SCAN_CAP: u32 = 512;  // cheap height-peek bound per iter (flood-proof head)
+                    const INGEST_CAP: u32 = 48;      // expensive store bound (v0.25.5 value, unchanged)
                     let mut gdrained = 0u32;
-                    while gdrained < 48 {  // v0.25.5: smaller drain — less serde+blake per iter (CPU)
+                    let mut ingested = 0u32;
+                    let mut head_seen: u64 = 0;
+                    while gdrained < HEAD_SCAN_CAP {
                         let (_topic, data) = match block_rx.try_recv() { Ok(x) => x, Err(_) => break };
                         gdrained += 1;
                         let v: serde_json::Value = match serde_json::from_slice(&data) {
@@ -623,7 +662,30 @@ impl P2PBlockSync {
                             Err(_) => continue,
                         };
                         if v.get("sync_from").is_some() { continue; }
-                        ingest_block_value(&v, &mut store, &state_clone, &net, &new_blocks_clone);
+                        // Cheap: the live tip is the MAX gossiped height. Peek it without the
+                        // costly header.hash() so the head advances even past the ingest cap.
+                        let h = v.get("header").and_then(|x| x.get("height")).and_then(|x| x.as_u64())
+                            .or_else(|| v.get("header_json").and_then(|x| x.as_str())
+                                .and_then(|hj| serde_json::from_str::<SigilBlockHeaderV0>(hj).ok())
+                                .map(|hdr| hdr.height));
+                        if let Some(h) = h { if h > head_seen { head_seen = h; } }
+                        // Expensive: store + advance the contiguous frontier — bounded per iter.
+                        if ingested < INGEST_CAP {
+                            ingested += 1;
+                            ingest_block_value(&v, &mut store, &state_clone, &net, &new_blocks_clone);
+                        }
+                    }
+                    // Advance the live tip from gossip immediately (gossip is proof the network is
+                    // AT LEAST at head_seen). sane_raise still vetoes phantom jumps (>2M past belief
+                    // stay the oracle's call). Stamp last_tip_at so the head stays FRESH off gossip
+                    // alone — the hero no longer reads STALE / parks behind a 1-3 s oracle poll.
+                    if head_seen > 0 {
+                        let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        if head_seen > s.peer_best_height && sane_raise(s.peer_best_height, head_seen) {
+                            s.peer_best_height = head_seen;
+                            s.last_message_at = Some(Instant::now());
+                            s.last_tip_at = Some(Instant::now());
+                        }
                     }
 
                     // Peer events from drain_events (non-block messages)
@@ -716,8 +778,11 @@ impl P2PBlockSync {
                                     peer_top.insert(peer.clone(), (start.saturating_sub(1), Instant::now()));
                                 }
                                 if start <= store.synced_to() + CHUNK {
-                                    let hd = if b.first()==Some(&b'H') { bincode::deserialize::<Vec<sigil_header::SigilBlockHeaderV0>>(&b[1..]).ok() } else { None };
-                                    let (mn,mx) = hd.as_ref().map(|h| (h.iter().map(|x|x.height).min().unwrap_or(0), h.iter().map(|x|x.height).max().unwrap_or(0))).unwrap_or((0,0));
+                                    // v0.38.1: decode the height range across ALL codecs ('Z' zstd /
+                                    // 'H' bincode / JSON). The old line only handled 'H', so since the
+                                    // codec=1 zstd lane went live every chunk logged h=[0..0] — a pure
+                                    // display bug that made a healthy sync look broken ("0.38 doesn't sync").
+                                    let (mn,mx) = header_height_range(&b).unwrap_or((0,0));
                                     crate::tlog!("[D] {} start={start} got={got} h=[{mn}..{mx}] bytes={} synced={} inflight={inflight}", if got>0 {"LEAD"} else {"EMPTY"}, b.len(), store.synced_to());
                                 }
                                 fetched_session += got as u64;
@@ -794,7 +859,19 @@ impl P2PBlockSync {
                         // peers are connected: if every peer is benched, fall back to the full
                         // set so the probe/refill keeps firing best-effort (bench is advisory).
                         if healthy.is_empty() { healthy = net.connected_peers(); }
-                        if let Some(&peer) = healthy.first() {
+                        // v0.38.1: prefer a peer NOT known to be behind the frontier for the
+                        // open-ended probe. A behind peer answers EMPTY for [frontier, MAX], so
+                        // probing it wastes a round-trip AND seeds nothing useful into peer_best.
+                        // Pick a peer whose known top is at/above the frontier (or unknown — give
+                        // it a chance); fall back to healthy.first() so we never skip a probe.
+                        let probe_peer = {
+                            let fc = frontier_chunk;
+                            healthy.iter().find(|p| match peer_top.get(&p.to_string()) {
+                                Some(&(top, seen)) => top + CHUNK >= fc || now.duration_since(seen).as_secs() > 4,
+                                None => true,
+                            }).or_else(|| healthy.first()).copied()
+                        };
+                        if let Some(peer) = probe_peer {
                             // v0.35 (DeepSeek audit S5): stamp the timer ONLY when a probe is
                             // actually SENT. It used to be stamped before the peer check, so
                             // with 0 peers connected (the first loop ticks, pre-bootstrap) the

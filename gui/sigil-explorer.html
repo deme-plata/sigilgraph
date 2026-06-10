@@ -110,15 +110,29 @@ body{min-height:100vh;background:var(--bg);color:var(--text);font-family:'Rajdha
     </div>
   </div>
 
+  <!-- Two tabs: the chain explorer + the flux-rev provenance / version view -->
+  <div class="extabs" style="display:flex;gap:8px;margin:6px 0 18px">
+    <button id="tabbtn-blocks" onclick="showTab('blocks')" style="flex:1;padding:9px;border:1px solid var(--cyan);border-radius:9px;background:rgba(33,212,253,.12);color:var(--cyan);font-family:'Orbitron',sans-serif;letter-spacing:2px;text-transform:uppercase;font-size:12px;cursor:pointer">⬡ Blocks</button>
+    <button id="tabbtn-fluxrev" onclick="showTab('fluxrev')" style="flex:1;padding:9px;border:1px solid var(--line);border-radius:9px;background:transparent;color:var(--dim);font-family:'Orbitron',sans-serif;letter-spacing:2px;text-transform:uppercase;font-size:12px;cursor:pointer">⚡ Flux Rev</button>
+  </div>
+
+  <div id="tab-blocks">
   <div class="stats-grid" id="stats"></div>
-  
+
   <div class="section"><h2>⬡ Recent Blocks</h2><div class="block-list" id="blocks"><div class="empty">Loading chain data…</div></div></div>
-  
+
   <div class="section"><h2>⟷ Transactions</h2><div class="txn-list" id="txns"><div class="empty">Loading…</div></div></div>
-  
+
   <div class="section"><h2>◈ Peers</h2><div class="peers-list" id="peers"><div class="empty">Loading…</div></div></div>
 
   <div class="section"><h2>⚙ Cortex Optimizer</h2><div id="cortex"><div class="empty">idle — press [C] in the cockpit to run a flux-cortex loop</div></div></div>
+  </div>
+
+  <!-- Flux Rev tab: the flux-rev provenance / version-control view. Loaded from the sigilgraph
+       host so it works on any client (the local sigil-top serve doesn't embed this page). -->
+  <div id="tab-fluxrev" style="display:none">
+    <iframe id="fluxrevFrame" data-src="https://sigilgraph.fluxapp.xyz/flux-versions.html" title="Flux Version Control — flux-rev provenance" loading="lazy" style="width:100%;height:80vh;border:1px solid var(--line);border-radius:12px;background:var(--bg)"></iframe>
+  </div>
 </div>
 
 <div class="floating-btns">
@@ -388,6 +402,20 @@ function openBlockModal(i){
 window.openBlockModal=openBlockModal;
 if(!document.getElementById('blkAnim')){var st=document.createElement('style');st.id='blkAnim';st.textContent='@keyframes blkIn{from{opacity:0}to{opacity:1}}';document.head.appendChild(st);}
 document.addEventListener('keydown',function(e){if(e.key==='Escape'){var m=document.getElementById('blkModal');if(m)m.remove();}});
+
+// Tab switch: chain explorer ⇄ flux-rev provenance. The flux-rev iframe is LAZY — its real src is
+// only set the first time the tab is opened, so the explorer's first paint stays fast.
+function showTab(t){
+  var on = t==='fluxrev';
+  var b=document.getElementById('tab-blocks'), f=document.getElementById('tab-fluxrev');
+  var bb=document.getElementById('tabbtn-blocks'), fb=document.getElementById('tabbtn-fluxrev');
+  if(b) b.style.display = on?'none':'';
+  if(f) f.style.display = on?'':'none';
+  if(on){ var fr=document.getElementById('fluxrevFrame'); if(fr && !fr.getAttribute('src')) fr.setAttribute('src', fr.getAttribute('data-src')); }
+  function paint(el,active){ if(!el)return; el.style.borderColor=active?'var(--cyan)':'var(--line)'; el.style.background=active?'rgba(33,212,253,.12)':'transparent'; el.style.color=active?'var(--cyan)':'var(--dim)'; }
+  paint(bb,!on); paint(fb,on);
+}
+window.showTab=showTab;
 
 load();
 setInterval(load,10000);

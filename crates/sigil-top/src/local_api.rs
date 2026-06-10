@@ -164,7 +164,12 @@ impl LocalApi {
 
     fn search(&self, query: &str) -> Option<String> {
         let q = qparam(query, "q").unwrap_or_default();
-        if q.trim().len() < 2 {
+        let qt = q.trim();
+        // v0.57: allow a single-char NUMERIC query (height "0" genesis, "1", …) — a block height is
+        // a valid search. Only reject a too-short NON-numeric fragment (which would match nothing
+        // useful and just spam the proxy). Before this, "0"/"1" hit the len<2 wall → returned None
+        // → proxied → the explorer showed nothing for the genesis/first block.
+        if qt.len() < 2 && qt.parse::<u64>().is_err() {
             return None;
         }
         // v0.57: anchor the recent-window scan at the REAL stored max (see `recent()`), not the

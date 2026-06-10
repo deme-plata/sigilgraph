@@ -1922,7 +1922,13 @@ fn relaunch_new_binary(version: &str) -> bool {
             // the WRONG version (operator hit "reports v0.40.4, expected v0.42.0 — relaunching
             // anyway"). Abort the handoff AND revert to the rollback image so the next start is
             // known-good, instead of silently running a mismatched binary.
-            if !reported.is_empty() && reported != version {
+            //
+            // v0.59 LANE-O (c): but DON'T abort a genuinely-newer swap just because `version`
+            // (= the possibly-STALE app.latest) disagrees. The channel can move 0.57<->0.58 while
+            // app.latest still caches the older number; if the staged binary reports a version
+            // NEWER than the one we're running, the swap is GOOD — relaunch it. Only revert when
+            // the staged binary is NOT an upgrade over the current image (a real no-op / downgrade).
+            if !reported.is_empty() && reported != version && !version_gt(&reported, VERSION) {
                 eprintln!("  [update] relaunch ABORTED — new binary reports v{reported}, expected v{version} (version mismatch); reverting to the rollback image and staying on the current version. Restart manually once the channel is fixed.");
                 if let Some(prev) = prev_binary_path() {
                     if prev.exists() && self_replace::self_replace(&prev).is_err() {
@@ -1952,10 +1958,35 @@ fn relaunch_new_binary(version: &str) -> bool {
     #[cfg(not(unix))]
     {
         // Windows/macOS can't replace a running image — spawn the (pre-flighted) new one,
-        // then exit, but ONLY if the spawn succeeded (else return false, don't exit on the user).
-        if std::process::Command::new(&target).args(&args).spawn().is_ok() {
-            std::process::exit(0);
+        // then exit. v0.59 LANE-O: the exe we JUST self_replace'd is frequently still
+        // briefly LOCKED right after the swap (AV scan / the old file handle settling), so a
+        // single spawn() fails → we used to return false and silently NEVER restart (the
+        // operator's "swapped … restart to run, but it never restarts" frustration). Settle,
+        // then RETRY a few times so the lock clears.
+        use std::thread::sleep;
+        use std::time::Duration;
+        sleep(Duration::from_millis(300)); // let self_replace's handle + any AV scan settle
+        for _ in 0..5 {
+            if std::process::Command::new(&target).args(&args).spawn().is_ok() {
+                std::process::exit(0);
+            }
+            sleep(Duration::from_millis(250));
         }
+        // Detached fallback: a fresh console via `cmd /C start` launches the new binary even
+        // when a direct child spawn keeps losing the file-lock race; the new process cleanly
+        // inherits its own console after this parent exits. (start's first quoted arg is the
+        // window title — keep it empty so the path isn't mis-parsed as the title.)
+        #[cfg(windows)]
+        {
+            if let Some(t) = target.to_str() {
+                if std::process::Command::new("cmd").args(["/C", "start", "", t]).args(&args).spawn().is_ok() {
+                    sleep(Duration::from_millis(400));
+                    std::process::exit(0);
+                }
+            }
+        }
+        // Every path failed → return false so the caller surfaces an HONEST "couldn't
+        // auto-restart — please relaunch manually" (and does NOT overwrite it, see [U] handler).
         false
     }
 }
@@ -3066,6 +3097,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                         // crashes/exits" bug. Now: relaunch only on swap/save, and if the
                         // relaunch fails, restore the TUI instead of crashing.
                         let is_update_ok = msg.contains("swapped") || msg.contains("saved v");
+                        let mut relaunch_failed = false;
                         if is_update_ok {
                             let _ = disable_raw_mode();
                             let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
@@ -3073,11 +3105,20 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 // relaunch failed — re-enter the TUI, don't crash out
                                 let _ = enable_raw_mode();
                                 let _ = execute!(std::io::stdout(), EnterAlternateScreen);
-                                app.toast = "↑ update saved — couldn't auto-restart; relaunch sigil-top manually".into();
-                                app.toast_sticky = true;
+                                relaunch_failed = true;
                             }
                         }
-                        app.toast = msg; app.toast_sticky = false; app.update_rx = None;
+                        // LANE-O (b): do NOT clobber a relaunch-FAILURE toast with the self_update
+                        // "restart to run" msg — that hid WHY the restart didn't happen. On failure
+                        // keep a STICKY honest message; only show msg when the handoff succeeded
+                        // (unix exec never returns here) or nothing was swapped.
+                        if relaunch_failed {
+                            app.toast = format!("↑ {msg} — but AUTO-RESTART FAILED; please quit and relaunch sigil-top manually");
+                            app.toast_sticky = true;
+                        } else {
+                            app.toast = msg; app.toast_sticky = false;
+                        }
+                        app.update_rx = None;
                         } // end else (non-auto-check message)
                     }
                     Err(mpsc::TryRecvError::Disconnected) => { app.update_rx = None; }

@@ -193,6 +193,23 @@ impl BlockStore {
         }
     }
 
+    /// LANE-S: a chain reset (fresh genesis) invalidates EVERY watermark — they describe the
+    /// OLD chain's blocks, which no longer exist on the network. Without this the persisted
+    /// synced_to/verified_to/best_height survive the reset and the SYNC hero keeps showing a
+    /// phantom checkpoint (e.g. 5M) while the fresh tip is 0.39M, until a manual local wipe.
+    /// Zero every watermark + persist so the store re-downloads from the fresh genesis. Stale
+    /// block bodies are harmless — they get overwritten by height as the new chain syncs in.
+    pub fn reset_watermarks(&mut self) {
+        self.synced_to = 0;
+        self.verified_to = 0;
+        self.best_height = 0;
+        self.best_hash_hex = String::new();
+        self.base = 0;
+        let _ = self.db.put(&[KEY_META, b'S'], &0u64.to_be_bytes());
+        let _ = self.db.put(&[KEY_META, b'V'], &0u64.to_be_bytes());
+        self.persist_best(); // write best_height=0 under meta 'B'
+    }
+
     /// v0.9.0: Load the full stored header at a given height (via the height index →
     /// hash → block). Returns None if that height isn't stored. This is the read path the
     /// chain verifier walks to recompute `hash()` and check `parent_hash` linkage.

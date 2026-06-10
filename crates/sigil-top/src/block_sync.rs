@@ -401,6 +401,12 @@ pub struct P2PSyncState {
     /// downloaded in the live window. Lets the UI tell the truth instead of reporting the
     /// base-jumped `synced_to` as if the whole chain were downloaded.
     pub base: u64,
+    /// LANE-S: set by the tip-poller when it detects a chain reset (the live oracle tip is
+    /// drastically below peer_best). The sync loop consumes it on its next tick — wipes the
+    /// block-store watermarks (synced_to/verified_to/best) so the stale OLD-genesis chain is
+    /// forgotten and re-downloaded from the fresh tip — then clears the flag. This is what
+    /// makes a testnet reset self-heal with NO manual local wipe.
+    pub reset_pending: bool,
     /// v0.9.0: contiguous CRYPTOGRAPHICALLY-VERIFIED tip — blocks 0..verified each passed
     /// precheck + parent-linkage (spine connects back to genesis). `blocks_synced` means
     /// "downloaded"; THIS means "downloaded AND validated as one chain". The full-sync
@@ -527,20 +533,21 @@ impl P2PBlockSync {
                                 let pb = s.peer_best_height;
                                 if pb > 0 && h < pb / 2 && pb - h > 100_000 {
                                     reset_streak += 1;
-                                    if reset_streak >= 3 {
+                                    // LANE-S: fire IMMEDIATELY on an UNAMBIGUOUS reset (live tip < ¼
+                                    // of peer_best — a 4×+ drop is never a transient dip). The old
+                                    // 3-poll (~9s) wait is what left the phantom checkpoint (5M while
+                                    // tip was 394k = 13× below) up for "a LONG time". A milder ¼..½
+                                    // drop still needs the 3-poll confirm to avoid flapping.
+                                    if reset_streak >= 3 || h < pb / 4 {
                                         s.peer_best_height = h; // RESET to the live oracle tip
-                                        // v0.59: a chain reset also invalidates the checkpoint/spine
-                                        // high-water marks — they were verified against the OLD
-                                        // (now-dead) chain. Without this the SYNC hero showed a
-                                        // phantom "checkpoint 5M / verified 1.3M" while tip was only
-                                        // 0.33M (the high-water marks only ever rose). Clamp every
-                                        // displayed progress field down to the live tip so the
-                                        // checkpoint can never read ABOVE the real network head.
+                                        // a chain reset invalidates the checkpoint/spine high-water
+                                        // marks — they were verified against the OLD (now-dead) chain.
                                         s.blocks_synced = s.blocks_synced.min(h);
                                         s.sync_height   = s.sync_height.min(h);
                                         s.sync_total    = s.sync_total.min(h);
                                         s.verified      = s.verified.min(h);
                                         if s.base > h { s.base = h; }
+                                        s.reset_pending = true; // tell the sync loop to wipe the store
                                         reset_streak = 0;
                                         clear_persisted_tip();
                                         persist = Some(h);
@@ -564,6 +571,7 @@ impl P2PBlockSync {
                                         s.sync_total    = s.sync_total.min(h);
                                         s.verified      = s.verified.min(h);
                                         if s.base > h { s.base = h; }
+                                        s.reset_pending = true; // LANE-S: wipe the store too
                                         clear_persisted_tip();
                                         persist = Some(h);
                                     }
@@ -733,6 +741,25 @@ impl P2PBlockSync {
                     if stop_rx.try_recv().is_ok() {
                         let _ = net.stop().await;
                         break;
+                    }
+
+                    // LANE-S CHAIN-RESET SELF-HEAL: the tip-poller flagged a reset (the live tip
+                    // is drastically below our peer_best — a fresh genesis). Wipe the block-store
+                    // watermarks (synced_to/verified_to/best) so the stale OLD chain is forgotten
+                    // and re-downloaded from the fresh tip, and reset the local cursors so the
+                    // refill restarts cleanly. NO manual local wipe needed.
+                    {
+                        let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        if s.reset_pending {
+                            s.reset_pending = false;
+                            drop(s);
+                            store.reset_watermarks();
+                            assigned.clear();
+                            last_synced_seen = 0;
+                            last_advance_t = Instant::now();
+                            snapped = false;
+                            crate::tlog!("[sync] CHAIN-RESET self-heal — block store watermarks wiped, re-syncing from the fresh genesis");
+                        }
                     }
 
                     // Process gossiped live-tip blocks — BOUNDED per iteration. The live mesh

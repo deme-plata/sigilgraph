@@ -17,7 +17,7 @@ export default function Navigation({ currentScreen, onNavigate, className, walle
 
   const navItems = [
     { id: 'dashboard' as Screen, icon: Home, label: 'Dashboard' },
-    { id: 'explorer' as Screen, icon: Activity, label: 'Activity', badge: 'live' },
+    { id: 'explorer' as Screen, icon: Activity, label: 'Explorer', badge: 'live' },
     { id: 'transactions' as Screen, icon: Send, label: 'Transactions' },
     { id: 'dex' as Screen, icon: ArrowDownUp, label: 'DEX' },
     { id: 'bridge' as Screen, icon: Repeat, label: 'Bridge' },

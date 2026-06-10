@@ -50,14 +50,42 @@ pub struct BackfillReq {
 /// CAPPED at 64 MB output: a malicious peer must not zstd-bomb the monitor (a real chunk
 /// decompresses to ≤ ~8 MB). None on any malformed/oversized stream — caller treats it
 /// exactly like an unparseable response (logged, peer benched), never a panic.
-/// v0.39: bounded-raise guard for PEER-claimed tips. peer_best only-raises, so a
-/// single bogus gossip claim (the 26.8M phantom) used to poison the sync target until
-/// the oracle reset-detection healed it ~9s later — meanwhile the backfill frontier
-/// chased the phantom. A claim may raise the target at most 2M blocks past the current
-/// belief (the oracle seeds it at boot); wilder jumps are ignored — the ORACLE is the
-/// only authority allowed to move the target that far.
-fn sane_raise(cur: u64, claim: u64) -> bool {
-    cur == 0 || claim <= cur.saturating_add(2_000_000)
+/// v0.59: how far a gossip-claimed tip may LEAD the signed oracle before it's a phantom.
+/// Generous enough for sub-second gossip liveness ahead of the ~1s oracle cadence, tight
+/// enough to reject a post-genesis-reset ghost (a 1.4M claim while the oracle is at 0.88M).
+const SANE_LEAD: u64 = 65_536;
+
+/// v0.39/v0.59: bounded-raise guard for PEER-claimed tips. peer_best only-raises, so a single
+/// bogus gossip claim (the 26.8M / post-reset 1.4M phantom) used to poison the sync target. The
+/// signed `sigil-tip-live.json` oracle is the AUTHORITY: once it has answered (`oracle > 0`), a
+/// gossip claim may lead it by at most `SANE_LEAD`; wilder jumps are ignored. Before any oracle
+/// answers (offline / cold CDN) fall back to a bounded raise off the current belief.
+fn sane_raise(oracle: u64, cur: u64, claim: u64) -> bool {
+    if oracle > 0 {
+        claim <= oracle.saturating_add(SANE_LEAD)
+    } else {
+        cur == 0 || claim <= cur.saturating_add(2_000_000)
+    }
+}
+
+#[cfg(test)]
+mod oracle_anchor_tests {
+    use super::{sane_raise, SANE_LEAD};
+    #[test]
+    fn oracle_caps_phantom_gossip() {
+        // oracle 0.88M: the post-reset 1.4M phantom is rejected; a small lead is allowed.
+        assert!(!sane_raise(883_000, 883_000, 1_400_000), "1.4M phantom must be rejected");
+        assert!(sane_raise(883_000, 883_000, 883_000 + 1_000), "small gossip lead ok");
+        assert!(sane_raise(883_000, 883_000, 883_000 + SANE_LEAD), "exactly the lead ok");
+        assert!(!sane_raise(883_000, 883_000, 883_000 + SANE_LEAD + 1), "just past the lead rejected");
+    }
+    #[test]
+    fn pre_oracle_falls_back_to_bounded_raise() {
+        // oracle == 0 (cold boot, offline): bounded +2M off current; cur==0 seeds anything.
+        assert!(sane_raise(0, 0, 5_000_000), "cold seed allowed");
+        assert!(sane_raise(0, 1_000_000, 2_900_000), "within +2M ok");
+        assert!(!sane_raise(0, 1_000_000, 3_100_001), "beyond +2M rejected");
+    }
 }
 
 fn zstd_decompress_body(body: &[u8]) -> Option<Vec<u8>> {
@@ -119,7 +147,7 @@ fn ingest_block_value(
             s.fetched_total += 1;            // smooth, monotonic — drives the rate readout
             s.sync_height = synced;          // ✓ badge tracks the contiguous tip, not a stale height
             s.sync_hash_hex = hash_hex.clone();
-            if height > s.peer_best_height && sane_raise(s.peer_best_height, height) {
+            if height > s.peer_best_height && sane_raise(s.oracle_tip, s.peer_best_height, height) {
                 s.peer_best_height = height;
             }
             s.last_message_at = Some(Instant::now());
@@ -139,7 +167,7 @@ fn ingest_block_value(
         true
     } else {
         let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-        if height > s.peer_best_height && sane_raise(s.peer_best_height, height) {
+        if height > s.peer_best_height && sane_raise(s.oracle_tip, s.peer_best_height, height) {
             s.peer_best_height = height;
         }
         s.last_message_at = Some(Instant::now());
@@ -398,6 +426,11 @@ pub struct P2PSyncState {
     /// not advanced for a while while a higher tip is known. Surfaced in the SYNC hero so a
     /// stall is NEVER a silent 0 blk/s; cleared the moment the frontier advances again.
     pub stall_reason: String,
+    /// v0.59: the latest height from the SIGNED sigil-tip-live.json oracle — the network AUTHORITY
+    /// for the tip. Gossip-claimed raises are gated against this (see `sane_raise`) so a phantom or
+    /// post-genesis-reset gossip can't push the sync target above the real chain head. 0 until the
+    /// first oracle answer.
+    pub oracle_tip: u64,
 }
 
 pub struct P2PBlockSync {
@@ -514,7 +547,26 @@ impl P2PBlockSync {
                                     }
                                 } else {
                                     reset_streak = 0;
-                                    if h > s.peer_best_height { s.peer_best_height = h; persist = Some(h); }
+                                    s.oracle_tip = h; // the signed oracle anchor — gates gossip raises
+                                    if h > s.peer_best_height {
+                                        s.peer_best_height = h; persist = Some(h);
+                                    } else if s.peer_best_height > h.saturating_add(SANE_LEAD) {
+                                        // v0.59 ORACLE-AUTHORITATIVE: peer_best drifted ABOVE the signed
+                                        // oracle by more than a sane lead — a phantom gossip claim (the
+                                        // 1.4M post-genesis-reset ghost) that the drastic-drop branch
+                                        // above MISSES (it isn't < pb/2). The signed oracle wins: snap
+                                        // peer_best back to it + clamp the progress watermarks so the UI
+                                        // can't chase a tip that doesn't exist, and clear the persisted
+                                        // seed so a restart doesn't re-poison from disk.
+                                        s.peer_best_height = h;
+                                        s.blocks_synced = s.blocks_synced.min(h);
+                                        s.sync_height   = s.sync_height.min(h);
+                                        s.sync_total    = s.sync_total.min(h);
+                                        s.verified      = s.verified.min(h);
+                                        if s.base > h { s.base = h; }
+                                        clear_persisted_tip();
+                                        persist = Some(h);
+                                    }
                                 }
                             }
                             if let Some(h) = persist { persist_tip(h); }
@@ -733,7 +785,7 @@ impl P2PBlockSync {
                     // alone — the hero no longer reads STALE / parks behind a 1-3 s oracle poll.
                     if head_seen > 0 {
                         let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
-                        if head_seen > s.peer_best_height && sane_raise(s.peer_best_height, head_seen) {
+                        if head_seen > s.peer_best_height && sane_raise(s.oracle_tip, s.peer_best_height, head_seen) {
                             s.peer_best_height = head_seen;
                             s.last_message_at = Some(Instant::now());
                             s.last_tip_at = Some(Instant::now());
@@ -796,7 +848,7 @@ impl P2PBlockSync {
                                 s.sync_hash_hex = hash_hex;
                                 s.sync_total = total_synced;
                                 if peer_best_height > s.peer_best_height
-                                    && sane_raise(s.peer_best_height, peer_best_height) {
+                                    && sane_raise(s.oracle_tip, s.peer_best_height, peer_best_height) {
                                     s.peer_best_height = peer_best_height;
                                 }
                                 // NOTE: no per-event log here — the live mesh emits thousands of

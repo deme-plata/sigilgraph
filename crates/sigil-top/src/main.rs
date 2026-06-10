@@ -322,8 +322,13 @@ fn fetch_feed(url: &str) -> Option<(NodeStatus, Vec<FeedBlock>)> {
     let body = match resp.text() { Ok(b)=>b, Err(e)=>{ set_feed_err(format!("read @ {url} (HTTP {code}): {e}")); return None; } };
     let feed: Feed = match serde_json::from_str(&body) { Ok(f)=>f, Err(e)=>{ set_feed_err(format!("parse @ {url} (HTTP {code}): {e}")); return None; } };
     let s = feed.status;
-    let supply_whole: u128 = s.supply.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0);
-    let native_supply = supply_whole.saturating_mul(10u128.pow(DECIMALS));
+    // v0.64 LANE-T: the status feed sends supply in BASE units on some sources and
+    // WHOLE SIGIL on others. Multiplying a base value by 10^8 again double-scaled it
+    // (showed 1,748,502,017,000 instead of ~17,485). Auto-detect by magnitude: nothing
+    // can exceed the 21M WHOLE cap, so a value above it is already base -> keep; a value
+    // at/under 21M is whole -> scale to base.
+    let supply_raw: u128 = s.supply.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0);
+    let native_supply = if supply_raw > 21_000_000u128 { supply_raw } else { supply_raw.saturating_mul(10u128.pow(DECIMALS)) };
     // Carry the committed roots through as hex so the no-local-node view still
     // shows the 4 state roots, not "—".
     let (wr, dr, er, cr) = feed
@@ -363,14 +368,31 @@ fn fetch_feed(url: &str) -> Option<(NodeStatus, Vec<FeedBlock>)> {
 fn fetch_best(cfg: &Config) -> (NodeStatus, bool, &'static str) {
     // Try the configured feed, then known-good public mirrors — so a node on a network where one
     // host is blocked/unresolvable still syncs from another. (Was single-feed → looked "offline".)
+    // v0.64.1: remember the last PRODUCE-feed height so the local-API fallback can
+    // never silently swap chains. The :8099 rpcd is the MINE chain (height ~3.5k);
+    // when all feed mirrors hiccup for one poll, falling back to it made the hero
+    // JUMP 520k -> 3.5k -> 520k. A fallback drastically below the last feed height
+    // is a different chain -> show an honest offline/retry instead of lying.
+    static LAST_FEED_H: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     for url in [cfg.feed.as_str(),
                 "https://sigilgraph.fluxapp.xyz/sigil-status.json",
                 "https://quillon.xyz/sigil-status.json",
                 "https://sigilgraph.fluxapp.xyz/sigil-status.json"] {
-        if let Some((st, _b)) = fetch_feed(url) { return (st, true, "feed"); }
+        if let Some((st, _b)) = fetch_feed(url) {
+            LAST_FEED_H.store(st.height, std::sync::atomic::Ordering::Relaxed);
+            return (st, true, "feed");
+        }
     }
     match fetch(&cfg.api) {
-        Ok(s) => (s, true, "local"),
+        Ok(s) => {
+            let lf = LAST_FEED_H.load(std::sync::atomic::Ordering::Relaxed);
+            if lf > 0 && s.height.saturating_mul(4) < lf {
+                // mine-chain rpcd answering for a produce-feed blip — suppress, retry feed
+                (NodeStatus::default(), false, "offline")
+            } else {
+                (s, true, "local")
+            }
+        }
         Err(_) => (NodeStatus::default(), false, "offline"),
     }
 }
@@ -1071,7 +1093,21 @@ fn lower_process_priority() {
 /// at this original path. Capturing it up front makes relaunch reliable.
 static INSTALL_EXE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
+/// v0.64: append a startup breadcrumb to %TEMP%/sigil-top-startup.log (best-effort).
+fn boot_trace(msg: &str) {
+    use std::io::Write;
+    let p = std::env::temp_dir().join("sigil-top-startup.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+        let _ = writeln!(f, "{}", msg);
+    }
+}
+
 fn main() {
+    // v0.64: STARTUP TRACE + panic capture. If the app exits unexpectedly on a
+    // Windows double-click, the breadcrumb + panic land in this file so we can
+    // read the EXACT reason instead of guessing.
+    boot_trace(&format!("main() entry v{} pid {}", env!("CARGO_PKG_VERSION"), std::process::id()));
+    std::panic::set_hook(Box::new(|info| { boot_trace(&format!("PANIC: {info}")); }));
     // Capture the real install path NOW, before anything can self-replace us.
     if let Ok(e) = std::env::current_exe() {
         if e.exists() { let _ = INSTALL_EXE.set(e); }
@@ -1323,6 +1359,8 @@ fn main() {
     // "closed" instead of showing the dashboard. Treat it as interactive if EITHER
     // stdin or stdout is a tty — only a full pipe/redirect (both non-tty) stays plain.
     let interactive = std::io::stdout().is_terminal() || std::io::stdin().is_terminal();
+    boot_trace(&format!("interactive={} (stdout_tty={} stdin_tty={}) once={} lite={}",
+        interactive, std::io::stdout().is_terminal(), std::io::stdin().is_terminal(), cfg.once, cfg.lite));
     // Non-TTY (piped / captured / redirected) or --once → one plain frame, no loop.
     if cfg.once || !interactive {
         let (st, online, source) = fetch_best(&cfg);
@@ -1346,7 +1384,9 @@ fn main() {
     // DEFAULT — the custom ratatui dashboard (Quillon-graph-node styled, multi-panel).
     // ratatui owns all box-drawing + layout, so alignment can never regress.
     let _ = cfg.tui; // --tui kept as an explicit alias; it's the default now
+    boot_trace("entering run_tui (interactive dashboard)");
     if let Err(e) = run_tui(cfg) {
+        boot_trace(&format!("run_tui returned Err: {e}"));
         let _ = disable_raw_mode();
         let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
         eprintln!("sigil-top: TUI error: {e}");
@@ -2628,7 +2668,10 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     flux_webhook("boot", concat!("sigil-top v", env!("CARGO_PKG_VERSION"), " starting"));
     // Windows: bring up the notification-area icon (Open Wallet / Explorer / Start-at-login /
     // Quit). Detached + best-effort, so it can never gate or crash the node. No-op elsewhere.
-    spawn_system_tray();
+    // v0.64: the tray helper Stop-Process'es NodePid and broke double-click launches
+    // (window closed instantly). OFF by default now; SIGIL_TOP_TRAY=1 opts back in.
+    if std::env::var("SIGIL_TOP_TRAY").is_ok() { spawn_system_tray(); }
+    boot_trace("tray gated (off unless SIGIL_TOP_TRAY)");
     // v0.10.5: async — kicks off the first fetch without blocking the first paint.
     app.request_refresh();
 

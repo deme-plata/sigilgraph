@@ -3208,7 +3208,9 @@ fn draw_ui(f: &mut Frame, app: &App) {
 
 /// The original node dashboard, now the [1] Node tab body.
 fn draw_node_body(f: &mut Frame, app: &App, body_area: ratatui::layout::Rect) {
-    let body_h = Layout::horizontal([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)]).split(body_area);
+    let body_h = Layout::horizontal([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
+        .spacing(1)  // v0.33.2: breathing room so the two columns don't fuse at the border
+        .split(body_area);
     let (left_area, right_area) = (body_h[0], body_h[1]);
 
     let left_v = Layout::vertical([
@@ -3235,24 +3237,19 @@ fn draw_node_body(f: &mut Frame, app: &App, body_area: ratatui::layout::Rect) {
     f.render_widget(render_block_stream(app), right_v[3]);
 }
 
-fn accent_stripe(color: Color) -> Span<'static> {
-    Span::styled("▐ ", Style::default().fg(color).add_modifier(Modifier::BOLD))
-}
-
-/// v0.33.2 BOLD NEON card: thick-bordered obsidian card with a bright neon title block
-/// (icon + UPPERCASE label) glowing in the accent color, and a border tinted toward the
-/// accent instead of flat grey. The title's leading stripe is a solid neon edge.
+/// v0.33.2 BOLD NEON card: rounded obsidian card with a bright neon title chip glowing in
+/// the accent color, and a border tinted toward the accent instead of flat grey. The title
+/// is a filled chip (` ◆ NODE `) so it reads as a label, not glued to the corner.
 fn card_block(title: &'static str, color: Color) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Thick)
+        .border_type(BorderType::Rounded)
         .padding(Padding::horizontal(1))
         .title(Line::from(vec![
-            accent_stripe(color),
-            Span::styled(title, Style::default().fg(color).add_modifier(Modifier::BOLD)),
-            Span::styled(" ", Style::default()),
+            Span::styled(format!("{} ", title.trim_start()),
+                Style::default().bg(color).fg(C_BG).add_modifier(Modifier::BOLD)),
         ]))
-        .border_style(Style::default().fg(color).add_modifier(Modifier::DIM))
+        .border_style(Style::default().fg(color))
         .style(Style::default().bg(C_BG))
 }
 
@@ -3348,82 +3345,71 @@ fn sigil_top_db_path() -> String {
 
 fn render_sync_status(app: &App) -> Paragraph<'static> {
     let s = &app.p2p_state;
-    let verified = app.verify.as_ref().map(|v| v.ok).unwrap_or(false);
-    let synced = s.blocks_synced;
-    let base = s.base;
-    let window = synced.saturating_sub(base);            // blocks REALLY held in the live window
-    let verified_real = s.verified.saturating_sub(base); // spine-verified within the window
-    let net_tip = s.peer_best_height.max(app.target_height); // the network head (gossip/oracle)
-    let gap = net_tip.saturating_sub(synced);
-    // A light client tracks a recent window near the head — it does NOT bulk-download the
-    // whole chain. Within ~16k of the head it is "at the head"; everything below the window
-    // is attested by the recursive fold-proof, not stored. That's WHY "2,049 blk" next to a
-    // 21.5M tip is correct, not broken — the redesign makes that explicit (Tip/Window/Proof).
-    let at_tip = net_tip > 0 && gap < 16_384;
-    let fully_synced = at_tip && verified && verified_real > 0 && s.verify_break.is_none();
-    let d_on = s.connected_delta;
-    let e_on = s.connected_epsilon;
+    let fold_ok = app.verify.as_ref().map(|v| v.ok).unwrap_or(false);
+    let net_tip = s.peer_best_height.max(app.target_height); // network head (signed tip-proof)
+    // HONEST progress = s.verified, the contiguous spine cryptographically linked from
+    // genesis. NOTE: s.blocks_synced is DELIBERATELY faked to the tip in light-monitor mode
+    // (block_sync.rs ~L974: "show the live tip as sync height so the bar reads AT TIP") — so
+    // it is NOT a storage count. Only `verified` tells the truth about what's been checked.
+    let spine = s.verified;
+    let behind = net_tip.saturating_sub(spine);
+    let frac = if net_tip > 0 { (spine as f64 / net_tip as f64).clamp(0.0, 1.0) } else { 0.0 };
+    let following = net_tip > 0;                          // we know + track the live head
+    let caught = following && behind < 16_384;            // spine has reached the head window
+    let synced = caught && fold_ok && s.verify_break.is_none();
+    let connecting = s.fetched_total == 0 && spine == 0 && !following;
 
     // ── L1: network TIP + one loud verdict banner ──────────────────────
     let verdict = if s.verify_break.is_some() {
         banner("⚠ SPINE BREAK", C_NEON_PINK)
-    } else if fully_synced {
-        banner("◆ LIGHT-SYNCED", C_NEON_GREEN)
-    } else if at_tip {
-        banner("≈ TRACKING HEAD", C_NEON_CYAN)
-    } else if s.fetched_total == 0 && window == 0 {
+    } else if synced {
+        banner("◆ SYNCED", C_NEON_GREEN)
+    } else if connecting {
         banner("… CONNECTING", C_DIM)
+    } else if following {
+        banner("≈ TRACKING HEAD", C_NEON_CYAN)
     } else {
-        banner("⬇ CATCHING UP", C_NEON_GOLD)
+        banner("⬇ SYNCING", C_NEON_GOLD)
     };
     let l1 = Line::from(vec![dim("tip "), val(group(net_tip)), Span::raw("  "), verdict]);
 
-    // ── L2: honest stored window  OR  neon catch-up progress ───────────
-    let l2 = if at_tip {
-        // You hold the most-recent `window` blocks [base+1 … synced]; the fold-proof
-        // attests genesis→base. Show the real range so the small count makes sense.
-        if window > 0 {
-            Line::from(vec![
-                dim("window "),
-                Span::styled(format!("{}…{}", group(base + 1), group(synced)), Style::default().fg(C_NEON_CYAN)),
-                dim("  "),
-                Span::styled(format!("{} held", group(window)), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
-            ])
-        } else {
-            Line::from(vec![dim("window "), Span::styled("priming recent window…", Style::default().fg(C_DIM))])
-        }
-    } else if s.fetched_total == 0 && window == 0 {
-        Line::from(vec![dim("window "), Span::styled("waiting for peers…", Style::default().fg(C_DIM))])
+    // ── L2: HONEST spine-verify progress (verified-from-genesis vs head) ─
+    let l2 = if synced {
+        Line::from(vec![
+            dim("chain "),
+            Span::styled("genesis→head verified".to_string(), Style::default().fg(C_NEON_GREEN)),
+            dim("  "),
+            Span::styled(format!("{} blk ⛓", group(spine)), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+        ])
+    } else if connecting {
+        Line::from(vec![dim("chain "), Span::styled("waiting for peers…".to_string(), Style::default().fg(C_DIM))])
     } else {
-        let frac = if net_tip > 0 { synced as f64 / net_tip as f64 } else { 0.0 };
+        // neon bar of verified-spine / head + the real count + live verify rate.
         Line::from(vec![
             neon_bar(frac, 10, C_NEON_GOLD),
-            Span::styled(format!(" {:>3.0}%", frac * 100.0), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)),
-            dim("  "),
-            Span::styled(format!("{} blk/s", group(app.p2p_rate.max(0.0).round() as u64)), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
-            dim(format!("  {} to go", group(gap))),
+            Span::styled(format!(" {:>4.1}%", frac * 100.0), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)),
+            dim("  ⛓"),
+            Span::styled(group(spine), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+            dim(format!("  {} blk/s", group(app.p2p_rate.max(0.0).round() as u64))),
         ])
     };
 
-    // ── L3: fold-proof attestation + spine watermark + peer mesh ───────
+    // ── L3: fold-proof attestation + peer mesh ─────────────────────────
     let proof = if s.verify_break.is_some() {
         Span::styled("fold ✗ break".to_string(), Style::default().fg(C_RED).add_modifier(Modifier::BOLD))
-    } else if verified {
-        Span::styled("fold ✓ gen→tip".to_string(), Style::default().fg(C_NEON_GREEN))
+    } else if fold_ok {
+        Span::styled("fold ✓ attests rest".to_string(), Style::default().fg(C_NEON_GREEN))
     } else {
         Span::styled("fold … verifying".to_string(), Style::default().fg(C_GOLD))
     };
-    let spine = if verified_real > 0 {
-        Span::styled(format!("  ⛓{} ✓", group(verified_real)), Style::default().fg(C_GREEN))
-    } else { Span::raw("") };
     let l3 = Line::from(vec![
-        dim("proof "), proof, spine, dim("  "),
-        Span::styled("Δ", Style::default().fg(if d_on { C_NEON_GREEN } else { C_DIM }).add_modifier(Modifier::BOLD)),
-        Span::styled("Ε", Style::default().fg(if e_on { C_NEON_GREEN } else { C_DIM }).add_modifier(Modifier::BOLD)),
+        dim("proof "), proof, dim("   "),
+        Span::styled("Δ", Style::default().fg(if s.connected_delta { C_NEON_GREEN } else { C_DIM }).add_modifier(Modifier::BOLD)),
+        Span::styled("Ε", Style::default().fg(if s.connected_epsilon { C_NEON_GREEN } else { C_DIM }).add_modifier(Modifier::BOLD)),
         dim(format!(" {}p", s.peer_count)),
     ]);
 
-    Paragraph::new(vec![l1, l2, l3]).block(card_block(" SYNC", C_NEON_CYAN))
+    Paragraph::new(vec![l1, l2, l3]).block(card_block(" ◇ SYNC", C_NEON_CYAN))
 }
 
 fn render_mining(app: &App) -> Paragraph<'static> {

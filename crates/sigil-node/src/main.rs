@@ -295,11 +295,47 @@ fn run_start() -> Result<()> {
         let mut chain_log = chain_log::ChainLog::open(&snap_dir)
             .map_err(|e| anyhow!("open chain.log: {}", e))?;
         if chain_log.height() > 0 {
+            // ── v0.36.1 GENESIS GUARD L1: before touching anything, confirm the on-disk
+            // chain was produced by a binary with OUR genesis. INCIDENT 2026-06-10: a
+            // diverged binary read 21.9M blocks, chain.apply REJECTED every one, it resumed
+            // at H=0 and APPENDED a fresh chain to the live 57GB log (data corruption).
+            // Compare genesis hashes BEFORE replay; mismatch → refuse, touch nothing.
+            let expected_genesis_hash = build_genesis()
+                .map_err(|e| anyhow!("build_genesis (guard): {}", e))?
+                .hash();
+            match chain_log.get(0) {
+                Some(disk_genesis) => {
+                    let disk_hash = disk_genesis.hash();
+                    if disk_hash != expected_genesis_hash {
+                        eprintln!("\n🛑 FATAL: genesis mismatch — refusing to start. chain.log left UNTOUCHED.");
+                        eprintln!("   expected (this binary): {}", hex_short_block(&expected_genesis_hash));
+                        eprintln!("   on disk (chain.log):    {}", hex_short_block(&disk_hash));
+                        eprintln!("   This binary is INCOMPATIBLE with the existing chain.");
+                        eprintln!("   → use a matching binary, restore a backup, or archive chain.log to start fresh.\n");
+                        std::process::exit(1);
+                    }
+                }
+                None => {
+                    eprintln!("\n🛑 FATAL: chain.log reports height {} but block 0 is unreadable — refusing to start.\n",
+                        chain_log.height());
+                    std::process::exit(1);
+                }
+            }
+            // ── GENESIS GUARD L2: count APPLIED vs READ during replay. If the log has
+            // blocks but none apply, ABORT instead of silently falling through to a fresh
+            // genesis that appends to the existing log (the exact incident failure mode).
+            let mut applied: u64 = 0;
             let n = chain_log::ChainLog::replay(&snap_dir, |b| {
-                let _ = chain.apply(b); // our own log — applies cleanly; ignore tail tears
+                if chain.apply(b).is_ok() { applied += 1; }
             }).map_err(|e| anyhow!("chain.log replay: {}", e))?;
-            eprintln!("♻️  RECOVERED {} blocks from chain.log (streamed) → resuming at H={} (window base {})",
-                n, chain.height(), chain.window_base());
+            if n > 0 && (applied == 0 || chain.height() == 0) {
+                eprintln!("\n🛑 FATAL: replay read {} blocks but applied {} (chain at H={}).", n, applied, chain.height());
+                eprintln!("   Every block was REJECTED — binary incompatible with chain data.");
+                eprintln!("   Refusing to re-genesis over the existing log.\n");
+                std::process::exit(1);
+            }
+            eprintln!("♻️  RECOVERED {} blocks from chain.log (streamed, {} applied) → resuming at H={} (window base {})",
+                n, applied, chain.height(), chain.window_base());
         } else {
             let genesis = build_genesis().map_err(|e| anyhow!("build_genesis: {}", e))?;
             let genesis_hash = genesis.hash();

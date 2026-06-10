@@ -183,7 +183,15 @@ fn run_start() -> Result<()> {
     ));
     eprintln!("⚡ sigil-node start");
     eprintln!("   node_id:         {}", node_id);
-    eprintln!("   local_peer_id:   {}", flux_p2p::swarm::peer_id_string(&node_id));
+    let local_peer_id = flux_p2p::swarm::peer_id_string(&node_id);
+    eprintln!("   local_peer_id:   {}", local_peer_id);
+    // v0.57 (sync): publish our peer-id so a CO-LOCATED sigil-top monitor can auto-dial us over
+    // loopback (tip-complete, LAN, ~0 WAN timeouts) instead of crawling the remote fleet. Same-box
+    // only; the monitor confirms 127.0.0.1:9501 is live before using it. Best-effort.
+    match flux_p2p::publish_sigil_peerid(&local_peer_id) {
+        Ok(()) => eprintln!("   peerid published:{}", flux_p2p::sigil_peerid_path().display()),
+        Err(e) => eprintln!("   (peerid publish failed: {e})"),
+    }
     eprintln!("   network_id:      {}", NETWORK_ID_STR);
     eprintln!("   transport:       {}", cfg.transport.label());
     if let Some(iface) = cfg.transport.wg_interface() {

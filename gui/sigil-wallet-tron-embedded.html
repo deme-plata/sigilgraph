@@ -270,6 +270,7 @@ body.view-desktop .desktop{display:flex}
   // NOT necessarily the session/login wallet the page derived. Resolve it from the node
   // so [W] shows the balance the Mining tab shows (the real "balance actually works" fix).
   let MINE_ADDR=null;
+  let SESSION_RAW='0'; // LANE-Q: session-wallet balance, surfaced alongside the mining wallet when they differ
   let BLOCK_H=0;             // live mine-chain height for the topbar block counter
 
   function copyAddr(){ if(ADDR&&navigator.clipboard){navigator.clipboard.writeText(ADDR);} }
@@ -317,7 +318,19 @@ body.view-desktop .desktop{display:flex}
     document.querySelectorAll('#amt,#damt').forEach(el=>el.innerHTML=fmtAmt(SIGIL_RAW));
     // phone balance sub → the user's real address (copyable) + fresh badge
     const sub=document.querySelector('.balance .sub');
-    if(sub) sub.innerHTML='wallet <b data-addr style="cursor:pointer" title="click to copy: '+ADDR+'" onclick="copyAddr()">'+SHORT+'</b>'+(SIGIL_BAL>0?'':' · <span style="color:var(--teal)">fresh wallet</span>');
+    if(sub){
+      if(MINE_ADDR && MINE_ADDR!==ADDR){
+        // LANE-Q(a): mining credits a DIFFERENT address than this session wallet — show BOTH, and
+        // offer a one-click to redirect future mining to this wallet, so [W] never silently reads 0.
+        const sBal=Number(BigInt(SESSION_RAW||'0')/100000000n);
+        const mShort=MINE_ADDR.slice(0,8)+'…'+MINE_ADDR.slice(-4);
+        sub.innerHTML='⛏ mining <b title="'+MINE_ADDR+'">'+mShort+'</b> '+SIGIL_BAL.toLocaleString('en-US',{maximumFractionDigits:2})+' SIGIL'
+          +' · 👤 session <b data-addr style="cursor:pointer" title="click to copy: '+ADDR+'" onclick="copyAddr()">'+SHORT+'</b> '+sBal.toLocaleString('en-US',{maximumFractionDigits:2})
+          +' · <a style="color:var(--cyan);cursor:pointer;text-decoration:none" onclick="useMyWalletForMining()">credit my wallet ▸</a>';
+      } else {
+        sub.innerHTML='wallet <b data-addr style="cursor:pointer" title="click to copy: '+ADDR+'" onclick="copyAddr()">'+SHORT+'</b>'+(SIGIL_BAL>0?'':' · <span style="color:var(--teal)">fresh wallet</span>');
+      }
+    }
     // desktop gbar pill + sidecard + portfolio
     document.querySelectorAll('.pill b:not([data-blockcount])').forEach(el=>el.textContent=SIGIL_BAL.toLocaleString('en-US'));
     const sc=document.querySelector('.sidecard .amtbig'); if(sc) sc.textContent='$'+(SIGIL_BAL*1.3).toLocaleString('en-US',{maximumFractionDigits:0});
@@ -339,18 +352,32 @@ body.view-desktop .desktop{display:flex}
       if(j&&j.mining_wallet&&/^[0-9a-fA-F]{64}$/.test(j.mining_wallet)){ MINE_ADDR=j.mining_wallet.toLowerCase(); window.MINE_ADDR=MINE_ADDR; }
     }catch(e){}
   }
+  // One balance fetch (raw base units, exact 8-decimal). Returns null on offline / no route.
+  async function fetchBal(addr){
+    try{ const r=await fetch(NODE+'/api/v1/balance?wallet='+addr,{cache:'no-store'}); const j=await r.json();
+      const b=(j&&(j.balance!=null?j.balance:(j.data&&j.data.balance))); return b!=null?String(b):null;
+    }catch(e){ return null; }
+  }
   // Live balance of the wallet that actually accrues coins (mining wallet, else session).
-  // Keeps RAW base units so the 8-decimal climb is exact; re-rendered every poll so the
-  // operator sees it rise while mining to the local node.
+  // LANE-Q: when mining credits a DIFFERENT address than the session wallet, surface BOTH so the
+  // operator always sees where their coins are (the "Mining tab shows X but [W] shows 0" split).
   async function refresh(){
     const who = MINE_ADDR || ADDR; if(!who) return;
-    try{
-      const r=await fetch(NODE+'/api/v1/balance?wallet='+who,{cache:'no-store'});
-      const j=await r.json();
-      const b=(j&&(j.balance!=null?j.balance:(j.data&&j.data.balance)));
-      if(b!=null){ SIGIL_RAW=String(b); window.SIGIL_RAW=SIGIL_RAW; SIGIL_BAL=Number(BigInt(SIGIL_RAW)/100000000n); render(); }
-    }catch(e){ /* offline / no route → stays fresh 0 */ }
+    const mb = await fetchBal(who);
+    if(mb!=null){ SIGIL_RAW=mb; window.SIGIL_RAW=SIGIL_RAW; SIGIL_BAL=Number(BigInt(SIGIL_RAW)/100000000n); }
+    if(MINE_ADDR && MINE_ADDR!==ADDR){ const sb=await fetchBal(ADDR); if(sb!=null) SESSION_RAW=sb; }
+    render();
   }
+  // LANE-Q(b): one-click "credit MY wallet when mining" — points the node's mining reward at the
+  // session wallet so future mined coins land in THIS visible [W] wallet. (Restart the miner to apply.)
+  async function useMyWalletForMining(){
+    if(!ADDR) return;
+    try{ const r=await fetch(NODE+'/api/v1/use-wallet?address='+ADDR,{cache:'no-store'}); const j=await r.json();
+      if(j&&j.ok){ MINE_ADDR=ADDR; window.MINE_ADDR=ADDR; SESSION_RAW='0'; refresh();
+        const sub=document.querySelector('.balance .sub'); if(sub) sub.insertAdjacentHTML('beforeend',' · <span style="color:var(--teal)">✓ restart miner to apply</span>'); }
+    }catch(e){}
+  }
+  window.useMyWalletForMining=useMyWalletForMining;
   // Live mine-chain height for the topbar block counter (auto-updated, never static).
   async function pollStatus(){
     try{

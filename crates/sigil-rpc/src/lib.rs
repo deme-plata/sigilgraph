@@ -219,6 +219,12 @@ pub fn submit_share(
 /// dual-lane BLAKE4 Φ + VDF Ω block (verified node-side by flux-miner's
 /// `check_submission`, then credited here). The verification rule differs per
 /// lane; the WRITE is identical and audited in exactly one place.
+/// The Æreborger commons treasury wallet — receives the 1.2% mining tithe
+/// (`sigil_bank::COMMONS_MINING_FEE_BPS`). The on-chain holding pool that the
+/// `sigil-commons` IOU layer allocates to honorary-citizen contributors at epoch
+/// close. A fixed protocol address (like the master/operator wallets).
+pub const COMMONS_WALLET: WalletId = [0xC0; 32];
+
 pub fn credit_share(
     state: &mut SigilState,
     height: u64,
@@ -232,10 +238,21 @@ pub fn credit_share(
     // reward, so the 21M MAX_SUPPLY cap behaves exactly as before.
     let master = state.master_wallet();
     let split = sigil_bank::split_mining_reward(reward, master).map_err(|_| RpcError::Overflow)?;
-    let (miner_credit, master_credit) = match master {
-        Some(m) if m != miner && split.master_share > 0 => (reward - split.master_share, split.master_share),
-        _ => (reward, 0),
+    // master cut only when the miner isn't the master (an operator mining its own
+    // block keeps the full producer share). The commons tithe (1.2%) is a
+    // network-wide carve — taken whenever a bank/master exists, regardless of who
+    // mines — and routed to COMMONS_WALLET. operator_share stays folded into the
+    // miner cut as before. Conserved: miner + master + commons = reward, so the
+    // 21M cap behaves exactly as before.
+    let master_credit = match master {
+        Some(m) if m != miner => split.master_share,
+        _ => 0,
     };
+    let commons_credit = if master.is_some() { split.commons_share } else { 0 };
+    let miner_credit = reward
+        .checked_sub(master_credit)
+        .and_then(|r| r.checked_sub(commons_credit))
+        .ok_or(RpcError::Overflow)?;
 
     let new_balance = state
         .balance_of(&miner, &NATIVE)
@@ -253,6 +270,18 @@ pub fn credit_share(
             .checked_add(master_credit)
             .ok_or(RpcError::Overflow)?;
         mutations.push(StateMutation::SetBalance { wallet: m, token: NATIVE, amount: master_new });
+    }
+    if commons_credit > 0 {
+        // Route the æreborger tithe to the on-chain commons treasury. Committed
+        // in the wallet_state_root, so the 1.2% is publicly verifiable. The
+        // sigil-commons IOU layer (deposit/allocate_epoch/delegate, with flux-rev
+        // ProofId attribution) distributes it to honorary citizens at epoch close
+        // — that epoch/Node integration is the follow-on.
+        let commons_new = state
+            .balance_of(&COMMONS_WALLET, &NATIVE)
+            .checked_add(commons_credit)
+            .ok_or(RpcError::Overflow)?;
+        mutations.push(StateMutation::SetBalance { wallet: COMMONS_WALLET, token: NATIVE, amount: commons_new });
     }
 
     // If this reward would push total native supply past MAX_SUPPLY, the
@@ -466,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn mining_coinbase_pays_5pct_dev_fee_to_master() {
+    fn mining_coinbase_splits_master_and_commons() {
         let mut s = SigilState::new();
         commit_state_transition(
             &mut s,
@@ -474,12 +503,27 @@ mod tests {
             0,
         )
         .unwrap();
-        // reward 1000 → miner 950 (95%), master dev wallet 50 (5%).
+        // reward 1000 → master 5% (50), aeresborger commons 1.2% (12), miner 938.
         let miner_bal = credit_share(&mut s, 1, MINER, 1000).unwrap();
-        assert_eq!(miner_bal, 950, "miner keeps 95%");
-        assert_eq!(s.balance_of(&MINER, &NATIVE), 950);
+        assert_eq!(miner_bal, 938, "miner keeps reward − master(5%) − commons(1.2%)");
+        assert_eq!(s.balance_of(&MINER, &NATIVE), 938);
         assert_eq!(s.balance_of(&MASTER, &NATIVE), 50, "master dev fee = 5%");
-        // miner_credit + master_credit == reward → no inflation beyond the coinbase.
-        assert_eq!(s.balance_of(&MINER, &NATIVE) + s.balance_of(&MASTER, &NATIVE), 1000);
+        assert_eq!(s.balance_of(&COMMONS_WALLET, &NATIVE), 12, "aeresborger commons tithe = 1.2%");
+        // conserved: miner + master + commons == reward → no inflation beyond coinbase.
+        assert_eq!(
+            s.balance_of(&MINER, &NATIVE)
+                + s.balance_of(&MASTER, &NATIVE)
+                + s.balance_of(&COMMONS_WALLET, &NATIVE),
+            1000
+        );
+    }
+
+    #[test]
+    fn no_master_means_no_commons_carve() {
+        // Pre-genesis / no bank: miner gets the full reward, nothing to commons.
+        let mut s = SigilState::new();
+        let bal = credit_share(&mut s, 1, MINER, 1000).unwrap();
+        assert_eq!(bal, 1000, "no master set → full reward to miner");
+        assert_eq!(s.balance_of(&COMMONS_WALLET, &NATIVE), 0, "no commons carve without a bank");
     }
 }

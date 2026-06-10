@@ -19,7 +19,7 @@ import './App.css';
 
 // Lazy-loaded screens — split into separate chunks, loaded on first navigation
 const TransactionScreenV2 = lazy(() => import('./components/TransactionScreenV2'));
-const ExplorerScreen = lazy(() => import('./components/ExplorerScreen'));
+const ExplorerHub = lazy(() => import('./components/ExplorerHub'));
 const MiningScreen = lazy(() => import('./components/MiningScreen'));
 const VittuaVMScreen = lazy(() => import('./components/VittuaVMScreen'));
 const DownloadNodeScreen = lazy(() => import('./components/DownloadNodeScreen'));
@@ -1006,7 +1006,7 @@ function App() {
               {/* Keep ExplorerScreen mounted — on remount, 7 optional-metric requests contend with core stats for rate-limiter slots, causing stats to never load */}
               <div style={{ display: currentScreen === 'explorer' ? 'block' : 'none' }}>
                 <Suspense fallback={null}>
-                  <ExplorerScreen isActive={currentScreen === 'explorer'} />
+                  <ExplorerHub isActive={currentScreen === 'explorer'} />
                 </Suspense>
               </div>
               <Suspense fallback={<LoadingSpinner />}>

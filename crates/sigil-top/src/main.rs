@@ -2014,7 +2014,13 @@ impl App {
               rune_until: None,
               rune_started: None,
               rune_frame: 0,
-              rune_last_played: Instant::now(),
+              // SIGIL_RUNE_DEMO=1 forces the first play immediately (QA/demo); off by
+              // default so production launches don't flash (interval governs replays).
+              rune_last_played: if std::env::var("SIGIL_RUNE_DEMO").ok().as_deref() == Some("1") {
+                  instant_ago(86_400)
+              } else {
+                  Instant::now()
+              },
               // LANE-B v0.50: mining-depth history (App-side observers of MinerStats)
               accept_hist: std::collections::VecDeque::new(),
               last_accept_sample: instant_ago(10),

@@ -26,6 +26,12 @@ pub mod light;
 #[cfg(feature = "client")]
 pub mod updater;
 
+/// The mining ENGINE orchestration (MinerStats + supervisor + CPU/GPU workers),
+/// shared by the standalone  binary AND sigil-top in-node Mining
+/// tab so both run byte-identical mining code. Needs the HTTP client.
+#[cfg(feature = "client")]
+pub mod engine;
+
 // ── BLAKE4: the PoW hash (BLAKE3 core, Flux-parallelized) ───────────────────
 
 /// One BLAKE4 evaluation over `header || nonce`; the first 8 bytes are the

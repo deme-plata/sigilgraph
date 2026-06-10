@@ -1778,6 +1778,11 @@ struct App {
     mine_hashrate: f64,                                 // v0.2.35: live GH/s from the miner thread
     mine_hashes: u64,                                   // v0.2.35: cumulative hashes computed
     wallet_balance: u128,                               // v0.2.35: miner wallet balance from feed
+    mine_stats: std::sync::Arc<std::sync::Mutex<MinerStats>>, // v0.37: REAL dual-lane engine stats (shared w/ in-process miner thread)
+    mine_desired_gpu: std::sync::Arc<std::sync::atomic::AtomicBool>, // v0.37: GPU/CPU toggle for the engine
+    mine_gpu_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,  // v0.37: engine signals GPU init failure -> CPU fallback
+    bps_ema: f64,            // v0.37: smoothed network block-rate (raw bps blinks 0<->250)
+    bps_zero_streak: u32,    // consecutive zero-bps polls before showing honest idle
     full_sync: bool,                                    // [F] opt-in heavy full sync (default = 10ms lightweight verify)
     full_sync_height: u64,                              // blocks downloaded so far in full sync
     full_sync_target: u64,                              // target height for full sync
@@ -1879,9 +1884,36 @@ impl App {
               offline_since: None,
               offline_streak: 0,
               last_serve_check: Instant::now(),
+              mine_stats: std::sync::Arc::new(std::sync::Mutex::new(MinerStats::default())),
+              mine_desired_gpu: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+              mine_gpu_failed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+              bps_ema: 0.0,
+              bps_zero_streak: 0,
               tab: Tab::Node,
               swarm: SwarmView::default(),
               last_swarm_load: instant_ago(10),
+        }
+    }
+
+    /// v0.37: start/stop the REAL in-process dual-lane miner — the SAME engine
+    /// (flux_miner::engine::supervisor) as the standalone `sigil-miner` exe. One
+    /// binary is now node + miner: no separate exe to run alongside. [g] flips GPU/CPU.
+    fn toggle_engine_mining(&mut self) {
+        self.mining = !self.mining;
+        if self.mining {
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (url, wallet) = (engine_node_url(), miner_wallet());
+            let (st, dg, gf) = (self.mine_stats.clone(), self.mine_desired_gpu.clone(), self.mine_gpu_failed.clone());
+            let stopc = stop.clone();
+            std::thread::spawn(move || engine::supervisor(url, wallet, st, stopc, dg, gf));
+            self.mine_stop = Some(stop);
+            self.tab = Tab::Mining;
+            self.toast = "▲ MINING STARTED — dual-lane BLAKE4 Φ + VDF Ω, in-process".into();
+            self.toast_sticky = true;
+        } else {
+            if let Some(s) = self.mine_stop.take() { s.store(true, std::sync::atomic::Ordering::Relaxed); }
+            self.toast = "■ mining stopped".into();
+            self.toast_sticky = true;
         }
     }
 
@@ -1899,12 +1931,28 @@ impl App {
         }
     }
     fn resync(&mut self) {
-        // Full resync: clear local caches, force-fetch fresh state from all sources.
+        // v0.37: a resync that ACTUALLY restarts the sync surface. The old one only
+        // cleared the feed list (which the SYNC hero ignores), so [y] looked like a
+        // no-op. Now we reset every sync-progress signal the hero reads — counters,
+        // the trailing-rate window, and the Kalman ETA filter — re-assert the tip
+        // target to the engine, and kick a fresh tip/status fetch.
         self.blocks.clear();
         self.synced_height = 0;
         self.verify = None;
-        self.toast = "⟳ Resync — clearing caches, re-fetching chain state…".into();
-        self.toast_sticky = false;
+        self.p2p_blocks_synced = 0;
+        self.p2p_rate = 0.0;
+        self.p2p_rate_samples.clear();
+        self.sync_kf = Kalman1D::new();
+        self.full_sync_height = 0;
+        self.full_sync_target = 0;
+        self.full_sync_active = false;
+        if let Some(ref p2p) = self.p2p_sync {
+            // re-arm the target so the hero shows progress-to-tip again and the
+            // engine re-checks it is tracking the latest tip.
+            p2p.set_known_tip(self.st.height.max(self.target_height));
+        }
+        self.toast = "⟳ RESYNC — sync restarted: counters, rate + ETA reset, re-fetching tip".into();
+        self.toast_sticky = true; // confirmation survives mining/refresh noise (was vanishing instantly)
         self.refresh();
     }
     /// Back-compat shim: callers that used to block now kick off an async refresh.
@@ -1956,6 +2004,20 @@ impl App {
     /// UI thread. This is the non-network tail of the old `refresh`.
     fn apply_refresh(&mut self, out: RefreshOutcome) {
         self.st = out.st;
+        // v0.37: smooth the node jumpy blocks_per_sec (it blinks between 0 and
+        // ~250-300 between its own measurement windows) so the MINING / NETWORK
+        // POWER card always shows steady production. EMA on real samples; HOLD the
+        // last rate through brief zero-gaps; fall to honest idle only after a
+        // sustained run of zero polls (a genuine stop).
+        let raw_bps = self.st.blocks_per_sec;
+        if raw_bps > 0.0 {
+            self.bps_ema = if self.bps_ema <= 0.0 { raw_bps } else { self.bps_ema * 0.7 + raw_bps * 0.3 };
+            self.bps_zero_streak = 0;
+        } else {
+            self.bps_zero_streak += 1;
+            if self.bps_zero_streak > 12 { self.bps_ema = 0.0; }
+        }
+        self.st.blocks_per_sec = self.bps_ema;
         self.online = out.online;
         // v0.10.5.1: track offline → online transitions for backoff + banner.
         if out.online {
@@ -2334,21 +2396,15 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                             KeyCode::Char('2') => { app.tab = Tab::SwarmAi; app.load_swarm(); }
                             KeyCode::Char('3') => { app.tab = Tab::Results; app.load_swarm(); }
                             KeyCode::Char('4') => { app.tab = Tab::SyncLog; }
+                            KeyCode::Char('5') => { app.tab = Tab::Mining; }
                             KeyCode::Char('y') | KeyCode::Char('Y') => { app.resync(); app.toast_sticky = false; }
-                            KeyCode::Char('m') | KeyCode::Char('M') => {
-                                app.mining = !app.mining;
-                                if app.mining {
-                                    // Actually START mining: spawn the PoW thread → POST shares to the node.
-                                    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                                    app.mine_rx = Some(start_mining(stop.clone()));
-                                    app.mine_stop = Some(stop);
-                                    app.toast = "▲ mining STARTED — solving BLAKE3 PoW → submitting to node".into();
-                                } else {
-                                    // Signal the thread to stop.
-                                    if let Some(s) = app.mine_stop.take() { s.store(true, std::sync::atomic::Ordering::Relaxed); }
-                                    app.toast = "▲ mining stopped".into();
-                                }
-                                app.toast_sticky = false;
+                            KeyCode::Char('m') | KeyCode::Char('M') => { app.toggle_engine_mining(); }
+                            KeyCode::Char('g') | KeyCode::Char('G') if app.tab == Tab::Mining => {
+                                use std::sync::atomic::Ordering;
+                                let now = app.mine_desired_gpu.load(Ordering::Relaxed);
+                                app.mine_desired_gpu.store(!now, Ordering::Relaxed);
+                                app.toast = if !now { "⚙ engine → GPU (needs a -gpu build)".into() } else { "⚙ engine → CPU".into() };
+                                app.toast_sticky = true;
                             }
                             KeyCode::Char('f') | KeyCode::Char('F') => {
                                 // Default is the TRUE lightweight node: ~10ms tip-proof verify, 0 blocks.
@@ -2653,6 +2709,13 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                     Err(mpsc::TryRecvError::Empty) => {}
                 }
             }
+            // v0.37: mirror the in-process dual-lane engine into the Node hero legacy fields.
+            if app.mining {
+                if let Ok(es) = app.mine_stats.try_lock() {
+                    app.mine_hashrate = es.hashrate / 1_000_000.0;
+                    app.mine_accepted = es.shares_ok;
+                }
+            }
             // Drain live mining progress (accepted shares + hashrate) onto the toast + counter.
             // v0.2.35: mining noise never overwrites sticky user-action toasts ([U], [V], [L], [M]).
             if let Some(rx) = app.mine_rx.as_ref() {
@@ -2802,8 +2865,10 @@ fn render_update_splash(frame: u8) -> Paragraph<'static> {
 
 // ── v0.13: tabbed cockpit — Node dashboard + MCP Swarm AI job board + Results ──
 
+use flux_miner::engine::{self, MinerStats};
+
 #[derive(Clone, Copy, PartialEq)]
-enum Tab { Node, SwarmAi, Results, SyncLog }
+enum Tab { Node, SwarmAi, Results, SyncLog, Mining }
 
 impl Tab {
     fn next(self) -> Tab {
@@ -2811,7 +2876,8 @@ impl Tab {
             Tab::Node => Tab::SwarmAi,
             Tab::SwarmAi => Tab::Results,
             Tab::Results => Tab::SyncLog,
-            Tab::SyncLog => Tab::Node,
+            Tab::SyncLog => Tab::Mining,
+            Tab::Mining => Tab::Node,
         }
     }
 }
@@ -3020,6 +3086,7 @@ fn render_tab_bar(app: &App) -> Paragraph<'static> {
     spans.extend(tab("Swarm AI", "2", Tab::SwarmAi));
     spans.extend(tab("Results", "3", Tab::Results));
     spans.extend(tab("Sync Log", "4", Tab::SyncLog));
+    spans.extend(tab("Mining", "5", Tab::Mining));
     spans.push(Span::styled(" · Tab cycles", Style::default().fg(C_DIM)));
     Paragraph::new(Line::from(spans))
 }
@@ -3233,16 +3300,18 @@ fn draw_ui(f: &mut Frame, app: &App) {
 
     match app.tab {
         Tab::Node => {
-            // v0.33.3: SYNC is now a full-width HERO band on top of the Node tab, with a big
-            // progress bar + Kalman-ETA telemetry + starship; the other cards flow beneath it.
-            let [hero_area, cards_area] =
-                Layout::vertical([Constraint::Length(9), Constraint::Min(0)]).areas(body_area);
-            draw_sync_hero(f, app, hero_area);
+            // v0.33.3: SYNC full-width HERO band on top; v0.36.1: an equally-large MINING hero
+            // (network power + personal mining) right below it; the other cards flow beneath.
+            let [hero_sync, hero_mining, cards_area] =
+                Layout::vertical([Constraint::Length(9), Constraint::Length(9), Constraint::Min(0)]).areas(body_area);
+            draw_sync_hero(f, app, hero_sync);
+            draw_mining_hero(f, app, hero_mining);
             draw_node_body(f, app, cards_area);
         }
         Tab::SwarmAi => f.render_widget(render_swarm_ai(app), body_area),
         Tab::Results => f.render_widget(render_results(app), body_area),
         Tab::SyncLog => f.render_widget(render_sync_log(app), body_area),
+        Tab::Mining => draw_mining_tab(f, app, body_area),
     }
 
     f.render_widget(render_footer(app), footer_area);
@@ -3259,15 +3328,13 @@ fn draw_node_body(f: &mut Frame, app: &App, body_area: ratatui::layout::Rect) {
         Constraint::Length(6), // Node
         Constraint::Length(6), // StateRoots
         Constraint::Length(4), // Supply
-        Constraint::Length(7), // Mining (v0.2.35: +2 lines for hashrate + balance)
-        Constraint::Min(0),    // spacer
+        Constraint::Min(0),    // spacer (v0.36.1: MINING promoted to a top hero band)
     ])
     .split(left_area);
 
     f.render_widget(render_node_card(app), left_v[0]);
     f.render_widget(render_state_roots(app), left_v[1]);
     f.render_widget(render_supply(app), left_v[2]);
-    f.render_widget(render_mining(app), left_v[3]); // v0.33.3: SYNC moved to the top hero band
 
     let right_v = Layout::vertical([Constraint::Length(5), Constraint::Length(5), Constraint::Length(7), Constraint::Min(0)])
         .spacing(1)
@@ -3487,6 +3554,174 @@ fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Line::from(vec![dim(" drive "), Span::styled(dtxt, Style::default().fg(dcol).add_modifier(Modifier::BOLD))]),
     ];
     f.render_widget(Paragraph::new(ship_lines), ship);
+}
+
+/// v0.36.1: the MINING HERO — a full-width band (sized like the SYNC hero) under it, with a
+/// big NETWORK-POWER bar (the chain's block-production pulse), network economics, the
+/// operator's PERSONAL mining (hashrate / accepted shares / wallet / streak), and a forge
+/// motif that glows HOT while [M]ining. Honest: SIGIL P0 is verify-once, so "network power"
+/// is the real block-production throughput + emission, not a fictional global hashrate;
+/// personal hashrate IS real local BLAKE work.
+/// v0.37: the engine's node base-URL (rpcd) — distinct from the legacy [m] BLAKE3
+/// `mine_url()`. The dual-lane engine talks /api/v1/mining/{challenge,submit}.
+fn engine_node_url() -> String {
+    std::env::var("SIGIL_MINE_NODE").unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:8099".into())
+}
+
+/// [5] Mining — the REAL in-process dual-lane miner. Reads the SAME engine state
+/// (flux_miner::engine::MinerStats) the standalone sigil-miner exe shows, so
+/// sigil-top is node + miner in ONE binary. [m] start/stop · [g] GPU/CPU.
+fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let s = app.mine_stats.lock().unwrap().clone();
+    let mining = app.mining;
+    let mode = if s.mode.is_empty() { "CPU".to_string() } else { s.mode.clone() };
+    let mcol = if mode == "GPU" { C_NEON_GREEN } else { C_NEON_CYAN };
+    let (conn_txt, conn_col) = if !mining { ("○ stopped", C_DIM) }
+        else if s.connected { ("● LIVE", C_NEON_GREEN) }
+        else { ("◌ connecting", C_NEON_GOLD) };
+
+    let block = card_block(" ⛏ MINING · DUAL-LANE ENGINE", C_NEON_PINK)
+        .border_style(Style::default().fg(if mining { mcol } else { C_DIM }));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let [head, rates, tally, barrow, logarea, hint] = Layout::vertical([
+        Constraint::Length(1), Constraint::Length(1), Constraint::Length(1),
+        Constraint::Length(1), Constraint::Min(0), Constraint::Length(1),
+    ]).areas(inner);
+
+    let wallet = miner_wallet();
+    let wshort = if wallet.len() >= 14 {
+        format!("{}…{}", &wallet[..8], &wallet[wallet.len() - 6..])
+    } else { wallet.clone() };
+
+    f.render_widget(Paragraph::new(Line::from(vec![
+        Span::styled(format!(" [{mode}] "), Style::default().fg(mcol).add_modifier(Modifier::BOLD)),
+        Span::styled("BLAKE4 Φ", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
+        dim(" + "), Span::styled("VDF Ω", Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+        dim("   "), Span::styled(conn_txt, Style::default().fg(conn_col).add_modifier(Modifier::BOLD)),
+        dim("   node "), Span::styled(engine_node_url(), Style::default().fg(C_DIM)),
+        dim("   "), Span::styled(wshort, Style::default().fg(C_DIM)),
+    ])), head);
+
+    f.render_widget(Paragraph::new(Line::from(vec![
+        dim(" hashrate "), Span::styled(engine::format_hps(s.hashrate), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)),
+        dim("   "), Span::styled(flux_miner::format_flux(s.hashrate), Style::default().fg(C_VBRIGHT)),
+        dim("   vdf "), Span::styled(flux_miner::format_omega(s.vdf_rate), Style::default().fg(C_NEON_CYAN)),
+        dim("   last solve "), Span::styled(format!("{:.0} ms", s.last_solve_ms), Style::default().fg(C_GOLD)),
+        dim("   vdf_t "), Span::styled(group(s.vdf_t), Style::default().fg(C_DIM)),
+    ])), rates);
+
+    let total = s.shares_ok + s.shares_bad;
+    let accept = if total > 0 { s.shares_ok as f64 / total as f64 * 100.0 } else { 100.0 };
+    f.render_widget(Paragraph::new(Line::from(vec![
+        dim(" shares "), Span::styled(format!("{} ✓", group(s.shares_ok)), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("  {} ✗", group(s.shares_bad)), Style::default().fg(if s.shares_bad > 0 { C_RED } else { C_DIM })),
+        dim("   accept "), Span::styled(format!("{accept:.0}%"), Style::default().fg(if accept >= 99.0 { C_NEON_GREEN } else { C_NEON_GOLD })),
+        dim("   balance "), Span::styled(format!("{} SIGIL", s.balance), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+        dim("   height "), Span::styled(group(s.last_height), Style::default().fg(C_VBRIGHT)),
+    ])), tally);
+
+    let maxv = s.solve_hist.iter().copied().max().unwrap_or(1).max(1);
+    let last = s.solve_hist.back().copied().unwrap_or(0);
+    let barw = (barrow.width as usize).saturating_sub(18).max(4);
+    let fill = ((last as f64 / maxv as f64) * barw as f64).round() as usize;
+    let bar = "█".repeat(fill.min(barw)) + &"░".repeat(barw.saturating_sub(fill));
+    f.render_widget(Paragraph::new(Line::from(vec![
+        dim(" solve "), Span::styled(bar, Style::default().fg(mcol)),
+        Span::styled(format!(" {last} ms"), Style::default().fg(C_DIM)),
+    ])), barrow);
+
+    let maxlines = logarea.height as usize;
+    let loglines: Vec<Line> = s.log.iter().take(maxlines).map(|l| {
+        let c = if l.starts_with('✓') { C_NEON_GREEN } else if l.starts_with('✗') { C_NEON_GOLD } else { C_DIM };
+        Line::from(Span::styled(format!("  {l}"), Style::default().fg(c)))
+    }).collect();
+    f.render_widget(Paragraph::new(loglines), logarea);
+
+    let err = s.last_err.as_ref().map(|e| format!("   ⚠ {e}")).unwrap_or_default();
+    f.render_widget(Paragraph::new(Line::from(vec![
+        Span::styled(" m ", Style::default().fg(C_NEON_PINK).add_modifier(Modifier::BOLD)),
+        dim(if mining { "stop  " } else { "start  " }),
+        Span::styled("g ", Style::default().fg(C_NEON_PINK).add_modifier(Modifier::BOLD)),
+        dim("GPU/CPU  "),
+        Span::styled(err, Style::default().fg(C_RED)),
+    ])), hint);
+}
+
+fn draw_mining_hero(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let st = &app.st;
+    let bps = st.blocks_per_sec.max(0.0);
+    const TARGET_BPS: f64 = 250.0;                    // SIGIL_PRODUCE_US=4000 → 250 blk/s
+    let frac = (bps / TARGET_BPS).clamp(0.0, 1.0);
+    let emit = bps * 5.0;                             // reward 5 SIGIL/blk
+    let mining = app.mining;
+    let (hv, hu) = if app.mine_hashrate >= 1000.0 { (app.mine_hashrate / 1000.0, "GH/s") }
+        else { (app.mine_hashrate, "MH/s") };
+    let pcol = if bps >= TARGET_BPS * 0.8 { C_NEON_GREEN } else if bps > 0.0 { C_NEON_GOLD } else { C_RED };
+    let ptext = if bps >= TARGET_BPS * 0.8 { "◆ FULL POWER" } else if bps > 0.0 { "⚒ MINING" } else { "✕ IDLE" };
+
+    let block = card_block(" ✦ MINING · NETWORK POWER", C_NEON_PINK)
+        .border_style(Style::default().fg(pcol));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let [bar_row, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
+    let [tele, art] = Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).spacing(1).areas(body);
+
+    // ── BIG network-power bar ────────────────────────────────────────────
+    let label = format!(" {:.0} blk/s  {}", bps, ptext);
+    let total = bar_row.width as usize;
+    let barw = total.saturating_sub(label.chars().count() + 1).max(4);
+    let fill = (frac * barw as f64).round() as usize;
+    let bar_str = "█".repeat(fill.min(barw)) + &"░".repeat(barw.saturating_sub(fill));
+    f.render_widget(Paragraph::new(Line::from(vec![
+        Span::styled(bar_str, Style::default().fg(pcol).add_modifier(Modifier::BOLD)),
+        Span::styled(label, Style::default().fg(pcol).add_modifier(Modifier::BOLD)),
+    ])), bar_row);
+
+    // ── telemetry (left): network economics + YOUR mining ────────────────
+    let est_earn = format!("~{:.4}", app.verified_count as f64 * 0.0005);
+    let (whole, cents) = (app.wallet_balance / 100_000_000, (app.wallet_balance % 100_000_000) / 1_000_000);
+    let tlines = vec![
+        Line::from(vec![
+            dim("network "), Span::styled(format!("{:.0} blk/s", bps), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)),
+            dim("   reward "), Span::styled("5 SIGIL/blk".to_string(), Style::default().fg(C_GREEN)),
+            dim("   emit "), Span::styled(format!("{:.0} SIGIL/s", emit), Style::default().fg(C_NEON_CYAN)),
+        ]),
+        Line::from(vec![
+            dim("supply "), val(fmt_supply(st.native_supply)),
+            dim(" / 21M   height "), Span::styled(group(st.height), Style::default().fg(C_VBRIGHT)),
+            dim("   peers "), Span::styled(group(st.peers), Style::default().fg(C_NEON_GREEN)),
+        ]),
+        Line::from(vec![
+            dim("you  "), Span::styled(if mining { "◆ MINING".to_string() } else { "○ off".to_string() },
+                Style::default().fg(if mining { C_NEON_GREEN } else { C_DIM }).add_modifier(Modifier::BOLD)),
+            dim("   "), Span::styled(format!("{:.2} {}", hv, hu), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)),
+            dim("   "), Span::styled(format!("{} ✓ shares", group(app.mine_accepted)), Style::default().fg(C_NEON_GREEN)),
+            dim("   streak ×"), Span::styled(group(app.streak), Style::default().fg(C_GOLD)),
+        ]),
+        Line::from(vec![
+            dim("wallet "), Span::styled(format!("{whole}.{cents:02} SIGIL"), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+            dim("   hashes "), Span::styled(format!("{}M", app.mine_hashes / 1_000_000), Style::default().fg(C_DIM)),
+            dim("   est earn "), Span::styled(est_earn, Style::default().fg(C_GOLD)),
+            dim("   [M] mine"),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(tlines), tele);
+
+    // ── forge motif (right): glows HOT while you mine ────────────────────
+    let (ftxt, fcol) = if mining { ("HOT", C_NEON_PINK) } else { ("cold", C_DIM) };
+    let art_lines = vec![
+        Line::from(Span::styled("   ╱██╲   ", Style::default().fg(C_NEON_GOLD))),
+        Line::from(Span::styled("  ▕◆◆◆▏  ", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled("   ╲██╱   ", Style::default().fg(C_NEON_GOLD))),
+        Line::from(Span::styled("  ═════  ", Style::default().fg(C_DIM))),
+        Line::from(Span::styled(if mining { "  ✦ · ✦  ".to_string() } else { "         ".to_string() },
+            Style::default().fg(C_NEON_PINK))),
+        Line::from(vec![dim(" forge "), Span::styled(ftxt, Style::default().fg(fcol).add_modifier(Modifier::BOLD))]),
+    ];
+    f.render_widget(Paragraph::new(art_lines), art);
 }
 
 fn render_mining(app: &App) -> Paragraph<'static> {

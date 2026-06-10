@@ -2,7 +2,7 @@
 name = "sigil-top"
 # sigil-top carries its OWN version cadence (the light client updates independently
 # of the workspace) — this is the "next version" the auto-updater ships.
-version = "0.35.0"
+version = "0.38.0"
 edition.workspace = true
 license.workspace = true
 description = "sigil-top — a SIGIL lightweight node + dual-mode (lite scorecard ↔ full dashboard) terminal monitor. v0.9.0 'Verifying Full Sync': downloads the chain genesis→tip over the sigil-g0 P2P mesh AND verifies it as one connected spine (per-header precheck + parent_hash linkage back to genesis), with a persisted verified_to watermark. New `full-sync` (headless sync-and-verify, exit 0 at tip) and `verify-chain` (re-verify the local store) subcommands; TUI surfaces the ⛓ verified-spine height + ⚠ spine-break alarm distinct from raw download progress."
@@ -19,6 +19,9 @@ futures    = "0.3"
 # v0.2: real TUI on the flux-cockpit foundation — alt-screen, flicker-free redraw,
 # interactive keys. ratatui owns the box-drawing so alignment can't regress.
 ratatui    = "0.28"
+# v0.37: the REAL dual-lane miner engine — sigil-top is now node + miner in ONE
+# binary (Mining tab [5]). client-only (no tui/market/node); gpu rides the feature.
+flux-miner = { path = "../flux-miner", default-features = false, features = ["client"] }
 crossterm  = "0.28"
 # v0.26 hardening #8: graceful SIGTERM/SIGINT — flush the verified-spine watermark +
 # restore the terminal before exit, so a supervisor restart never orphans the DB state.
@@ -67,6 +70,7 @@ zstd = "0.13"
 # When activated, sigil-tip-proof links flux-sqisign and verify_tip() constructs
 # a TipProof::new_sqisign() for adversary-resistant tip verification.
 [features]
+gpu = ["flux-miner/gpu"]
 sqisign = []
 
 [[bin]]

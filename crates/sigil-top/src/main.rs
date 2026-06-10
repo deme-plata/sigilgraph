@@ -1599,12 +1599,72 @@ fn version_gt(a: &str, b: &str) -> bool {
 fn mine_url() -> String {
     std::env::var("SIGIL_MINE_URL").unwrap_or_else(|_| "https://sigilgraph.fluxapp.xyz:8447/v1/mine".into())
 }
-/// A stable per-install miner wallet (64-hex): BLAKE3 of the hostname, or `SIGIL_MINE_WALLET`.
-fn miner_wallet() -> String {
-    std::env::var("SIGIL_MINE_WALLET").ok().filter(|s| s.len() == 64).unwrap_or_else(|| {
-        let host = std::env::var("HOSTNAME").or_else(|_| std::env::var("HOST")).unwrap_or_else(|_| "sigil-top".into());
-        blake3::hash(format!("sigil-top-miner:{host}").as_bytes()).to_hex().to_string()
-    })
+/// LANE-N: where the operator's chosen mining wallet is persisted. The [W] wallet
+/// posts its (keyed) address here via `/api/v1/use-wallet` so mining credits the
+/// wallet the operator actually sees AND holds the private key for.
+pub(crate) fn mine_wallet_path() -> String { format!("{}/.flux/sigil-mine-wallet", flux_home()) }
+
+/// A 64-hex lowercase/upper address (the node keys balances by this).
+fn valid_addr(s: &str) -> bool {
+    let s = s.trim();
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// LANE-N: resolve the mining-credit wallet. PURE (for unit tests) — real I/O is in
+/// [`miner_wallet`]. Priority: explicit `SIGIL_MINE_WALLET` → the operator's chosen
+/// wallet (persisted by the [W] wallet) → a stable per-host hash. The first two are
+/// KEYED wallets the operator controls and sees in [W]; the hostname hash is an
+/// UNSPENDABLE last resort (no private key) kept only so a fresh box still mines to a
+/// stable address. This fixes the "Mining tab shows a balance but [W] shows 0" split:
+/// both now point at the same keyed address.
+fn resolve_mine_wallet(env_override: Option<&str>, chosen: Option<&str>, host: &str) -> String {
+    if let Some(w) = env_override { if valid_addr(w) { return w.trim().to_string(); } }
+    if let Some(w) = chosen { if valid_addr(w) { return w.trim().to_string(); } }
+    blake3::hash(format!("sigil-top-miner:{host}").as_bytes()).to_hex().to_string()
+}
+
+/// The miner-credit wallet (64-hex). See [`resolve_mine_wallet`] for the priority.
+pub(crate) fn miner_wallet() -> String {
+    let env = std::env::var("SIGIL_MINE_WALLET").ok();
+    let chosen = std::fs::read_to_string(mine_wallet_path()).ok();
+    let host = std::env::var("HOSTNAME").or_else(|_| std::env::var("HOST")).unwrap_or_else(|_| "sigil-top".into());
+    resolve_mine_wallet(env.as_deref(), chosen.as_deref(), &host)
+}
+
+/// LANE-N: persist the operator's chosen mining wallet (called from the local API when
+/// the [W] wallet claims "mine to me"). Validates the 64-hex shape; rejects garbage.
+pub(crate) fn set_mine_wallet(addr: &str) -> bool {
+    if !valid_addr(addr) { return false; }
+    let _ = std::fs::create_dir_all(format!("{}/.flux", flux_home()));
+    std::fs::write(mine_wallet_path(), addr.trim()).is_ok()
+}
+
+#[cfg(test)]
+mod lane_n_tests {
+    use super::resolve_mine_wallet;
+    #[test]
+    fn env_override_wins() {
+        let env = "a".repeat(64);
+        assert_eq!(resolve_mine_wallet(Some(&env), Some(&"b".repeat(64)), "host"), env);
+    }
+    #[test]
+    fn chosen_wallet_beats_hostname() {
+        let chosen = "c".repeat(64);
+        assert_eq!(resolve_mine_wallet(None, Some(&chosen), "host"), chosen);
+    }
+    #[test]
+    fn falls_back_to_stable_hostname_hash() {
+        let r = resolve_mine_wallet(None, None, "host");
+        assert_eq!(r.len(), 64);
+        assert_eq!(r, resolve_mine_wallet(None, None, "host")); // deterministic
+        assert_ne!(r, resolve_mine_wallet(None, None, "other")); // per-host
+    }
+    #[test]
+    fn invalid_inputs_are_ignored() {
+        let host_hash = resolve_mine_wallet(None, None, "host");
+        // too short + non-hex 64 → both rejected → hostname hash
+        assert_eq!(resolve_mine_wallet(Some("short"), Some(&"z".repeat(64)), "host"), host_hash);
+    }
 }
 
 /// Start REAL mining on a background thread: find a BLAKE3 nonce meeting `difficulty_bits`, POST it to
@@ -3605,8 +3665,16 @@ fn render_sync_log(app: &App) -> Paragraph<'static> {
         Span::raw(sa("  gap ")), Span::styled(group(gap), Style::default().fg(if gap < 8 { C_GREEN } else { C_GOLD })),
         Span::raw(sa("  rate ")), Span::styled(format!("{:.0} blk/s", app.p2p_rate), Style::default().fg(C_CYAN)),
     ]));
+    // v0.57 (LANE-M): label honestly. In recent-window (light) mode `verified` is anchored at the
+    // checkpoint base — a tip-proof, NOT a spine linked to genesis — so don't call it "verified
+    // spine" (which implies genesis linkage and reads as a stuck full-spine when it can't reach 0).
+    let (vlabel, vcol) = if s.light_mode {
+        (sa("  ✓ checkpoint-verified "), C_CYAN) // tip-proof from the snap base, not genesis
+    } else {
+        (sa("  ⛓ verified spine "), C_GREEN)     // full-sync: genuine genesis-linked spine
+    };
     lines.push(Line::from(vec![
-        Span::raw(sa("  ⛓ verified spine ")), Span::styled(group(s.verified), Style::default().fg(C_GREEN)),
+        Span::styled(vlabel, Style::default().fg(vcol)), Span::styled(group(s.verified), Style::default().fg(vcol)),
         Span::raw(sa("   peers ")), Span::styled(format!("{}", s.peer_count), Style::default().fg(C_CYAN)),
         Span::raw(sa("   ")), Span::styled(sa(if s.connected_delta { "Δ" } else { "·" }), Style::default().fg(C_GOLD)),
         Span::styled(sa(if s.connected_epsilon { "Ε" } else { "·" }), Style::default().fg(C_GOLD)),
@@ -3875,13 +3943,23 @@ fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let fold_ok = app.verify.as_ref().map(|v| v.ok).unwrap_or(false);
     let net_tip = s.peer_best_height.max(app.target_height);
     let spine = s.verified;
+    // v0.57 (LANE-M): RECENT-WINDOW monitor (base snapped forward, sync engine ON). `verified` is
+    // anchored at the CHECKPOINT base, not genesis — so a verified/tip bar is dishonest: it implies
+    // a full-genesis spine and FREEZES when the base-anchored watermark can't reach genesis (the
+    // "froze at 49,153, looks broken" repro). A light monitor's real job is TRACKING THE HEAD via
+    // the 10ms tip-proof, so drive the bar off that (caught + fold_ok ⇒ 100%) and show `verified`
+    // as a separate checkpoint badge below. Full-sync (--sync genesis, !light_mode) keeps the
+    // spine bar, which legitimately advances from genesis.
+    let snap_mode = !light && s.light_mode;
     let gap = net_tip.saturating_sub(spine);
-    let frac = if net_tip > 0 { (spine as f64 / net_tip as f64).clamp(0.0, 1.0) } else { 0.0 };
-    // light mode: the bar reflects the 10ms TIP-PROOF verify (the thing a light
-    // monitor actually does), not a backfill that is deliberately off.
-    let frac = if light { if fold_ok { 1.0 } else { 0.0 } } else { frac };
     let following = net_tip > 0;
     let caught = following && gap < 16_384;
+    let frac = if net_tip > 0 { (spine as f64 / net_tip as f64).clamp(0.0, 1.0) } else { 0.0 };
+    // light (engine off): bar = the 10ms tip-proof verdict, not the disabled backfill.
+    // snap (recent-window): caught + valid tip-proof ⇒ fully doing its job (100%), never a frozen %.
+    let frac = if light { if fold_ok { 1.0 } else { 0.0 } }
+        else if snap_mode && fold_ok && caught { 1.0 }
+        else { frac };
     let synced = caught && fold_ok && s.verify_break.is_none();
     let connecting = s.fetched_total == 0 && spine == 0 && !following;
     let kf_rate = app.sync_kf.x.max(0.0);                       // Kalman-smoothed blk/s
@@ -3935,6 +4013,15 @@ fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             Line::from(vec![
                 dim("tip "), val(group(net_tip)),
                 dim("   mode "), Span::styled("light tip-proof verify (~10ms)", Style::default().fg(C_NEON_CYAN)),
+            ])
+        } else if snap_mode {
+            // recent-window monitor: `verified` is checkpoint-anchored (NOT a genesis spine), so
+            // label it honestly as a tip-proof checkpoint badge — never "spine" (implies genesis).
+            Line::from(vec![
+                dim("tip "), val(group(net_tip)),
+                dim("   ✓ checkpoint "), Span::styled(group(spine), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+                dim(" (tip-proof, not genesis)"),
+                dim("   gap "), Span::styled(group(gap), Style::default().fg(if caught { C_NEON_GREEN } else { C_GOLD })),
             ])
         } else {
             Line::from(vec![

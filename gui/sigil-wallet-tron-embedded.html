@@ -381,8 +381,12 @@ body.view-desktop .desktop{display:flex}
   // Live mine-chain height for the topbar block counter (auto-updated, never static).
   async function pollStatus(){
     try{
-      const r=await fetch(NODE+'/api/v1/status',{cache:'no-store'}); const j=await r.json();
-      const h=(j&&(j.height!=null?j.height:(j.block_height!=null?j.block_height:0)))||0;
+      // The real DAG-chain tip drives the topbar counter. On a feed-less host /api/v1/status is
+      // the rpcd MINING sub-chain (~3k), so prefer the live DAG feed (now proxied server-side by
+      // sigil-top serve); fall back to status only if the feed is unavailable.
+      let h=0;
+      try{ const fr=await fetch('/sigil-recent-blocks.json?cb='+Date.now(),{cache:'no-store'}); const fj=await fr.json(); h=(fj&&fj.height)||0; }catch(e){}
+      if(!h){ const r=await fetch(NODE+'/api/v1/status',{cache:'no-store'}); const j=await r.json(); h=(j&&(j.height!=null?j.height:(j.block_height!=null?j.block_height:0)))||0; }
       if(h){ BLOCK_H=Number(h); paintBlockCounter(); }
     }catch(e){}
   }

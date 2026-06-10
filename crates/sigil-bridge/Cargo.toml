@@ -13,6 +13,13 @@ thiserror = { workspace = true }
 hex       = { workspace = true }
 flux-fold = { path = "../flux-fold" }   # fold a whole epoch's deposits into one constant-size attestation
 sigil-oauth = { path = "../sigil-oauth" } # ed25519 verify_sig for signed withdrawal authorization (C9)
+lightning-invoice = "0.31"  # BOLT11 parse + secp256k1 signature verify (C-lane: bind LN deposit amount)
+
+[dev-dependencies]
+# match lightning-invoice 0.31's transitive versions so the test-built invoice
+# types line up with what Bolt11Invoice expects.
+secp256k1 = { version = "0.27", features = ["recovery"] }
+bitcoin_hashes = "0.12"
 
 [[bin]]
 name = "sigil-bridge-demo"

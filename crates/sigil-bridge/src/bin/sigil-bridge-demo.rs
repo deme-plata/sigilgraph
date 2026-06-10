@@ -66,14 +66,13 @@ fn main() {
         Err(e) => println!("  ✗ on-chain: {e}"),
     }
 
-    // ── lightning rail: instant, gated on a paid-invoice preimage ──
-    let preimage = [42u8; 32];
-    let ln = LnProof { payment_hash: sha256(&preimage), preimage, amount_msat: 50_000_000 };
-    match process_ln_deposit(&mut ledger, "qnk_miner", &ln) {
-        Ok(r) => println!("  ⚡ lightning (LNbits): preimage verified → minted {} {} (instant) · root {}",
-            r.amount, r.asset.wrapped_symbol(), hex::encode(&r.supply_root[..8])),
-        Err(e) => println!("  ✗ lightning: {e}"),
-    }
+    // ── lightning rail: instant, gated on a SIGNED BOLT11 + the preimage ──
+    // (C9: the LN deposit amount is now bound to the payee-signed invoice, not a
+    // caller field. Constructing a signed invoice needs a secp key, so the rail
+    // is exercised in the unit tests — `cargo test -p sigil-bridge ln::tests`.)
+    println!("  ⚡ lightning (LNbits): LnProof now carries the SIGNED BOLT11 — its");
+    println!("     secp256k1 signature is verified and the minted amount + payment_hash");
+    println!("     are bound to the invoice (see ln::tests::signed_invoice_binds_amount).");
 
     // ── attacks the model structurally refuses ──
     print!("  over-mint wBTC with no backing:        ");

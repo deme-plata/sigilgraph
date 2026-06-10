@@ -1092,6 +1092,22 @@ fn main() {
         // v0.27.5: manual rollback escape hatch — revert to the previous binary the last update
         // backed up (pre-flighted before the swap). The operator's "undo a bad update" button.
         Some("revert") => { do_revert(); return; }
+        // Windows launch-at-login control: `sigil-top autostart on|off|status`. The TUI also
+        // exposes this via the tray's "Start at login" checkbox.
+        Some("autostart") => {
+            match argv.get(1).map(|s| s.as_str()) {
+                Some("on") | Some("enable") | Some("true") => match autostart_set(true) {
+                    Ok(()) => println!("✓ launch-at-login ENABLED"),
+                    Err(e) => { eprintln!("✗ {e}"); std::process::exit(1); }
+                },
+                Some("off") | Some("disable") | Some("false") => match autostart_set(false) {
+                    Ok(()) => println!("✓ launch-at-login DISABLED"),
+                    Err(e) => { eprintln!("✗ {e}"); std::process::exit(1); }
+                },
+                _ => println!("launch-at-login: {}", if autostart_enabled() { "ON" } else { "OFF" }),
+            }
+            return;
+        }
         // v0.38: print this binary\'s full provenance — version, flux-rev source id,
         // the binary\'s own BLAKE3, and which release channel/target it tracks.
         Some("provenance") => {
@@ -2606,6 +2622,9 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // (IN_TUI is still false), which is exactly where pre-UI diagnostics belong. ─────────
     let mut app = App::new(cfg);
     flux_webhook("boot", concat!("sigil-top v", env!("CARGO_PKG_VERSION"), " starting"));
+    // Windows: bring up the notification-area icon (Open Wallet / Explorer / Start-at-login /
+    // Quit). Detached + best-effort, so it can never gate or crash the node. No-op elsewhere.
+    spawn_system_tray();
     // v0.10.5: async — kicks off the first fetch without blocking the first paint.
     app.request_refresh();
 
@@ -4689,6 +4708,63 @@ fn open_browser(url: &str) -> bool {
     });
     true
 }
+
+// ── Windows: launch-at-login + system tray ──────────────────────────────────
+// The terminal node should be able to start with the Windows session and live in the
+// notification area. Auto-start = a HKCU Run key (via reg.exe — same shell-out pattern the
+// rest of the Windows integration uses, no extra crate). The tray = a PowerShell NotifyIcon
+// helper (assets/sigil-tray.ps1) spawned ISOLATED, so a tray failure can never affect sync.
+
+/// Enable/disable launch-at-login (Windows HKCU\…\Run). `Err` (no-op) on other platforms.
+#[cfg(windows)]
+fn autostart_set(enable: bool) -> Result<(), String> {
+    const KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+    let out = if enable {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let val = format!("\"{}\"", exe.to_string_lossy());
+        Command::new("reg").args(["add", KEY, "/v", "SigilTop", "/t", "REG_SZ", "/d", &val, "/f"]).output()
+    } else {
+        Command::new("reg").args(["delete", KEY, "/v", "SigilTop", "/f"]).output()
+    };
+    match out {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+#[cfg(windows)]
+fn autostart_enabled() -> bool {
+    Command::new("reg")
+        .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "SigilTop"])
+        .output().map(|o| o.status.success()).unwrap_or(false)
+}
+#[cfg(not(windows))]
+fn autostart_set(_enable: bool) -> Result<(), String> { Err("launch-at-login is Windows-only".into()) }
+#[cfg(not(windows))]
+fn autostart_enabled() -> bool { false }
+
+/// Spawn the Windows system-tray helper for this running node (Open Wallet / Open Block Explorer
+/// / Start-at-login / Quit). Hidden PowerShell process, fully detached; it auto-exits when this
+/// process dies. No-op off Windows and best-effort (any failure is swallowed — the node runs on).
+#[cfg(windows)]
+fn spawn_system_tray() {
+    use std::io::Write;
+    let pid = std::process::id().to_string();
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    let script = include_str!("../assets/sigil-tray.ps1");
+    let path = std::env::temp_dir().join("sigil-top-tray.ps1");
+    if std::fs::File::create(&path).and_then(|mut f| f.write_all(script.as_bytes())).is_err() { return; }
+    let _ = Command::new("powershell")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&path)
+        .args(["-NodePid", &pid, "-ExePath", &exe])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+#[cfg(not(windows))]
+fn spawn_system_tray() {}
 
 // ── flux:// URL scheme ──────────────────────────────────────────────────────
 // `flux://wallet` typed in the browser → the OS launches `sigil-top flux-open

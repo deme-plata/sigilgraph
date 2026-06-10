@@ -57,10 +57,10 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Padding, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph},
     Frame, Terminal,
 };
 
@@ -1526,6 +1526,16 @@ fn check_fleet_health(nodes: &mut Vec<FleetNode>) {
         Err(_) => return,
     };
     for node in nodes.iter_mut() {
+        // v0.50: the old https://:8181 status endpoint is long dead (fleet showed a
+        // permanent 0/2). HONEST probe: a TCP connect to the node's real listener
+        // (:9501) proves the process is up; we claim nothing we can't read.
+        let alive = std::net::TcpStream::connect_timeout(
+            &format!("{}:{}", node.addr, node.port).parse().unwrap_or_else(|_| std::net::SocketAddr::from(([0,0,0,0],0))),
+            Duration::from_secs(3),
+        ).is_ok();
+        node.online = alive;
+        if alive { continue; }
+        // legacy HTTPS status fallback (in case an old fleet node still serves it)
         let url = format!("https://{}:{}/api/v1/status", node.addr, 8181);
         match client.get(&url).send() {
             Ok(resp) => {
@@ -1975,8 +1985,8 @@ impl App {
               serve_stop: None,
               // v0.7.0: Fleet starts with known bootstrap peers
               fleet_nodes: vec![
-                  FleetNode { name: "Delta".into(), addr: "5.79.79.158".into(), port: 9003, online: false, height: 0, version: String::new(), uptime_secs: 0 },
-                  FleetNode { name: "Epsilon".into(), addr: "89.149.241.126".into(), port: 9003, online: false, height: 0, version: String::new(), uptime_secs: 0 },
+                  FleetNode { name: "Delta".into(), addr: "5.79.79.158".into(), port: 9501, online: false, height: 0, version: String::new(), uptime_secs: 0 },
+                  FleetNode { name: "Epsilon".into(), addr: "89.149.241.126".into(), port: 9501, online: false, height: 0, version: String::new(), uptime_secs: 0 },
               ],
               fleet_last_check: instant_ago(3600),
               refresh_rx: None,

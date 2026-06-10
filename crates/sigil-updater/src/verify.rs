@@ -24,9 +24,40 @@ pub struct VerifyOk {
     pub min_consensus_version: u32,
 }
 
+/// Verify an announcement against a PINNED set of trusted release keys.
+///
+/// THIS is the only function the node must use on the wire. It refuses any
+/// announcement whose `sqisign_pubkey` is not byte-for-byte present in
+/// `trusted_keys`, **before** running the signature check. Without this gate
+/// an attacker simply embeds their own pubkey in the announcement and signs
+/// with the matching secret — the sig verifies and the node execs an
+/// attacker-chosen binary (fleet-wide RCE). The key that authorizes a release
+/// must come from a genesis-pinned allowlist, never from the message itself.
+///
+/// Fails closed: an empty `trusted_keys` rejects every announcement.
+pub fn verify_announcement_pinned(
+    a: &ReleaseAnnouncement,
+    trusted_keys: &[Vec<u8>],
+) -> Result<VerifyOk, UpdaterError> {
+    a.precheck()?;
+    // Constant work over the allowlist; the key set is tiny (1-handful).
+    let trusted = trusted_keys.iter().any(|k| k.as_slice() == a.sqisign_pubkey.as_slice());
+    if !trusted {
+        return Err(UpdaterError::UntrustedReleaseKey {
+            key_hex: hex::encode(&a.sqisign_pubkey),
+        });
+    }
+    verify_announcement(a)
+}
+
 /// Run precheck + signature verification. Does NOT consult the binary bytes;
-/// use [`verify_binary_bytes`] for that. Useful for cheap pre-screening of
-/// gossipsub announcements before deciding to fetch the binary.
+/// use [`verify_binary_bytes`] for that.
+///
+/// ⚠️ SECURITY: this verifies the signature against the pubkey carried IN the
+/// announcement, so it proves only "whoever holds the embedded key signed
+/// this" — NOT that the key is trusted. Callers on an adversarial transport
+/// (gossipsub, HTTP) MUST use [`verify_announcement_pinned`] instead. This
+/// bare form is retained for tests and for the trusted-publisher local path.
 pub fn verify_announcement(a: &ReleaseAnnouncement) -> Result<VerifyOk, UpdaterError> {
     a.precheck()?;
     let msg = a.signing_bytes()?;
@@ -115,6 +146,39 @@ mod tests {
         assert!(matches!(
             verify_announcement(&a),
             Err(UpdaterError::SignatureInvalid) | Err(UpdaterError::Sqisign(_))
+        ));
+    }
+
+    #[test]
+    fn pinned_accepts_trusted_key() {
+        let (a, _binary) = fixture();
+        let trusted = vec![a.sqisign_pubkey.clone()];
+        let ok = verify_announcement_pinned(&a, &trusted).expect("pinned");
+        assert_eq!(ok.product, "sigil-node");
+    }
+
+    #[test]
+    fn pinned_rejects_untrusted_key_before_sig_check() {
+        // Attacker self-signs with their OWN valid keypair: bare verify passes,
+        // pinned verify must reject because the key isn't on the allowlist.
+        let (a, _binary) = fixture();
+        assert!(verify_announcement(&a).is_ok(), "attacker self-signed sig is valid");
+        let someone_else = {
+            let (_sk, pk) = flux_sqisign::keygen();
+            vec![pk]
+        };
+        assert!(matches!(
+            verify_announcement_pinned(&a, &someone_else),
+            Err(UpdaterError::UntrustedReleaseKey { .. })
+        ));
+    }
+
+    #[test]
+    fn pinned_empty_allowlist_fails_closed() {
+        let (a, _binary) = fixture();
+        assert!(matches!(
+            verify_announcement_pinned(&a, &[]),
+            Err(UpdaterError::UntrustedReleaseKey { .. })
         ));
     }
 

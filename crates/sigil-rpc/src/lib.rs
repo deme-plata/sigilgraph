@@ -46,6 +46,9 @@ pub enum RpcError {
 /// Verified-user onboarding + the earning gate (verified earns / unverified → dev-fee).
 pub mod onboard;
 
+/// Per-request wallet-signature authorization for the mutating RPC routes.
+pub mod auth;
+
 /// Result of a light-verifier credit batch.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct LightCreditResult {

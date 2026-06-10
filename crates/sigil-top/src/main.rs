@@ -3281,7 +3281,9 @@ fn draw_node_body(f: &mut Frame, app: &App, body_area: ratatui::layout::Rect) {
 fn card_block(title: &'static str, color: Color) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        // v0.33.3: Thick (┏┓┗┛) — Rounded corners (╭╮╰╯) render as `?` on the user's console
+        // font; Thick is confirmed to render. Heavy is on-brand for the bold-neon look anyway.
+        .border_type(BorderType::Thick)
         .padding(Padding::horizontal(1))
         .title(Line::from(vec![
             Span::styled(format!("{} ", title.trim_start()),

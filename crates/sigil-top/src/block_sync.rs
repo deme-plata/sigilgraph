@@ -1357,6 +1357,31 @@ impl P2PBlockSync {
                     // the growing memtable to an SST so it can't balloon during a multi-M sync.
                     if last_verify.elapsed() >= Duration::from_millis(1500) {
                         last_verify = Instant::now();
+                        // ── LANE-S: GENESIS-ANCHOR CHECK (runs FIRST) ──────────────────────────
+                        // The block at `base` IS the chain's genesis fingerprint. Key the persisted
+                        // watermarks to it: when a testnet restart mints a FRESH genesis, the new
+                        // block-at-base hash differs from the one our watermarks belong to, so
+                        // `note_genesis` wipes the stale OLD-chain watermarks + clears the persisted
+                        // genesis. We then drop the last-tip cache + zero the in-memory peer_best /
+                        // verified so the SYNC hero self-heals to the fresh tip with NO manual wipe,
+                        // and SKIP this tick's verify (its report would describe the dead chain).
+                        let base_g = store.base();
+                        let mut genesis_reset = false;
+                        if base_g > 0 && store.has_height(base_g) {
+                            if let Some(hdr) = store.get_header_at_height(base_g) {
+                                if store.note_genesis(&hex::encode(hdr.hash())) {
+                                    genesis_reset = true;
+                                    crate::tlog!("[sync] LANE-S: genesis CHANGED at base {base_g} → wiped stale watermarks, self-healing to the fresh chain");
+                                    clear_persisted_tip(); // LANE-S (b): drop the pre-reset cached tip
+                                    let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                    s.peer_best_height = 0;
+                                    s.verified = 0;
+                                    s.blocks_synced = 0;
+                                    s.reset_pending = false; // the wipe is done in-line here
+                                }
+                            }
+                        }
+                        if !genesis_reset {
                         // v0.15.0 perf: 40k/1.5s capped VERIFIED throughput at ~26.6k blk/s;
                         // 60k/1.5s lifted it to ~40k blk/s against the verify core's then-
                         // measured 52k/s.
@@ -1379,6 +1404,7 @@ impl P2PBlockSync {
                         let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                         s.verified = report.verified_to;
                         s.verify_break = vbreak;
+                        } // end if !genesis_reset
                     }
 
                     // Yield: the request tasks run on worker threads (their results queue in

@@ -3769,7 +3769,8 @@ fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Span::styled(format!("  {} ✗", group(s.shares_bad)), Style::default().fg(if s.shares_bad > 0 { C_RED } else { C_DIM })),
         dim("   accept "), Span::styled(format!("{accept:.0}%"), Style::default().fg(if accept >= 99.0 { C_NEON_GREEN } else { C_NEON_GOLD })),
         dim("   balance "), Span::styled(format!("{} SIGIL", s.balance), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
-        dim("   height "), Span::styled(group(s.last_height), Style::default().fg(C_VBRIGHT)),
+        dim("   mine-chain h "), Span::styled(group(s.last_height), Style::default().fg(C_VBRIGHT)),
+        dim(" (egen kaede - ikke produce-tippen)"),
     ])), tally);
 
     let maxv = s.solve_hist.iter().copied().max().unwrap_or(1).max(1);

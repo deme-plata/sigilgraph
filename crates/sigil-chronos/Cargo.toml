@@ -95,3 +95,7 @@ flux-fold    = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+
+[[bin]]
+name = "chronos_virtual"
+path = "src/bin/chronos_virtual.rs"

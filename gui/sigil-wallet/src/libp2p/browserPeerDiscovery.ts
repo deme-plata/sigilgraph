@@ -192,18 +192,32 @@ class BrowserPeerDiscoveryManager {
       // Detect Tor browser
       const isTorBrowser = this.detectTorBrowser()
 
-      // Build relay address through bootstrap
+      // Build the address other browsers should dial to reach us.
+      // v0.9.1: prefer the libp2p-generated, reservation-backed WebRTC multiaddr
+      // (…/p2p-circuit/webrtc/p2p/<self>) so peers establish a DIRECT datachannel.
+      // Fall back to the plain circuit address (relayed) when WebRTC isn't ready yet.
       let relayAddress: string | undefined
-      for (const conn of connections) {
-        const remoteAddr = conn.remoteAddr.toString()
-        if (remoteAddr.includes('/wss/')) {
-          // Extract bootstrap peer ID from connection
-          const match = remoteAddr.match(/\/p2p\/([^/]+)$/)
-          if (match) {
-            const bootstrapPeerId = match[1]
-            // Our relay address is: /p2p/BOOTSTRAP/p2p-circuit/p2p/OUR_PEER_ID
-            relayAddress = `/p2p/${bootstrapPeerId}/p2p-circuit/p2p/${this.myPeerId}`
-            break
+      try {
+        const myAddrs = this.node.getMultiaddrs().map((m: any) => m.toString())
+        // Direct-capable: circuit + webrtc (the one that upgrades to a direct conn)
+        relayAddress =
+          myAddrs.find((a: string) => a.includes('/p2p-circuit') && a.includes('/webrtc')) ||
+          myAddrs.find((a: string) => a.includes('/webrtc')) ||
+          myAddrs.find((a: string) => a.includes('/p2p-circuit'))
+      } catch { /* getMultiaddrs may be empty before relay reservation completes */ }
+
+      // Fallback: hand-build the relayed circuit address from the bootstrap conn.
+      if (!relayAddress) {
+        for (const conn of connections) {
+          const remoteAddr = conn.remoteAddr.toString()
+          if (remoteAddr.includes('/wss/')) {
+            const match = remoteAddr.match(/\/p2p\/([^/]+)$/)
+            if (match) {
+              const bootstrapPeerId = match[1]
+              // /p2p/BOOTSTRAP/p2p-circuit/p2p/OUR_PEER_ID (relayed; no direct upgrade)
+              relayAddress = `/p2p/${bootstrapPeerId}/p2p-circuit/p2p/${this.myPeerId}`
+              break
+            }
           }
         }
       }

@@ -70,8 +70,23 @@ body.view-desktop .desktop{display:flex}
 .desktop{position:fixed;inset:0;z-index:2;flex-direction:column}
 .gbar{height:64px;flex:none;display:flex;align-items:center;gap:16px;padding:0 20px;border-bottom:1px solid var(--line);background:rgba(8,16,24,.7);backdrop-filter:blur(14px)}
 .gbar .logo{display:flex;align-items:center;gap:11px}.gbar .logo img{width:44px;height:44px}.gbar .logo .brand{font-size:21px}
-.search{flex:1;max-width:440px;display:flex;align-items:center;gap:9px;border:1px solid var(--line);background:rgba(33,212,253,.04);border-radius:11px;padding:9px 13px;color:var(--dim);font-family:'JetBrains Mono';font-size:13px;cursor:text}
-.search:hover{border-color:rgba(33,212,253,.45);box-shadow:0 0 18px var(--glow)}.search .lic{width:16px;height:16px;filter:none}
+.search{position:relative;flex:1;max-width:460px;display:flex;align-items:center;gap:9px;border:1px solid var(--line);background:linear-gradient(180deg,rgba(33,212,253,.05),rgba(149,128,255,.05));border-radius:11px;padding:9px 13px;color:var(--dim);font-family:'JetBrains Mono';font-size:13px;cursor:text;transition:.2s}
+.search:hover{border-color:rgba(33,212,253,.45);box-shadow:0 0 18px var(--glow)}.search .lic{width:16px;height:16px;filter:none;color:var(--cyan)}
+.search:focus-within{border-color:transparent;box-shadow:0 0 22px rgba(33,212,253,.25)}
+.search::before{content:'';position:absolute;inset:-1px;border-radius:11px;padding:1px;background:linear-gradient(120deg,var(--cyan),var(--violet,#9580ff),var(--teal));-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;opacity:0;transition:.2s;pointer-events:none}
+.search:focus-within::before{opacity:1;animation:wschue 3s linear infinite}
+@keyframes wschue{to{filter:hue-rotate(360deg)}}
+.search input{flex:1;background:transparent;border:0;outline:none;color:var(--text);font-family:'JetBrains Mono';font-size:13px}
+.search input::placeholder{color:var(--dim)}
+.search kbd{font-family:'JetBrains Mono';font-size:11px;color:var(--dim);background:rgba(255,255,255,.05);border:1px solid var(--line);border-radius:6px;padding:2px 7px;line-height:1}
+.wdrop{position:absolute;top:calc(100% + 7px);left:0;right:0;background:rgba(4,8,12,.97);backdrop-filter:blur(20px);border:1px solid var(--line);border-radius:13px;max-height:360px;overflow-y:auto;z-index:140;box-shadow:0 22px 64px rgba(0,0,0,.62),0 0 30px rgba(33,212,253,.1);display:none;padding:6px}
+.wdrop .wr{display:flex;align-items:center;gap:11px;padding:11px 12px;border-radius:10px;cursor:pointer;transition:.13s}
+.wdrop .wr:hover{background:rgba(33,212,253,.08)}
+.wdrop .wr .wt{font-family:'Orbitron';font-size:13px;color:var(--text);min-width:120px}
+.wdrop .wr .wd{flex:1;font-family:'JetBrains Mono';font-size:10.5px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wdrop .wr .wty{font-size:8.5px;font-family:'JetBrains Mono';padding:2px 7px;border-radius:999px;text-transform:uppercase}
+.wdrop .wr .wty.live{background:rgba(0,224,198,.14);color:var(--teal)}.wdrop .wr .wty.flux{background:rgba(149,128,255,.14);color:var(--violet,#9580ff)}
+.wdrop .wfoot{padding:9px 12px;font-family:'JetBrains Mono';font-size:10px;color:var(--dim);border-top:1px solid var(--line);text-align:center}
 .gspacer{flex:1}.gright{display:flex;align-items:center;gap:11px}
 .agentbtn{display:flex;align-items:center;gap:9px;border:1px solid rgba(251,191,36,.35);background:rgba(251,191,36,.07);border-radius:11px;padding:7px 13px;cursor:pointer;transition:.2s}
 .agentbtn:hover{box-shadow:0 0 18px rgba(251,191,36,.4)}.agentbtn img{width:26px;height:26px}.agentbtn .at{font-weight:600;font-size:13px;color:var(--gold)}
@@ -143,7 +158,12 @@ body.view-desktop .desktop{display:flex}
 <div class="desktop">
   <div class="gbar">
     <div class="logo"><img class="markimg" src="https://sigilgraph.fluxapp.xyz/icons/brand/sigil-cyan.png?v=1780639379"><div class="brand">SIGIL<span>·</span>WALLET</div></div>
-    <div class="search"><i class="lic" data-lucide="search"></i>Search address, tx, token… <span style="margin-left:auto;opacity:.6">⌘K</span></div>
+    <div class="search" id="wsearchWrap" onclick="document.getElementById('wsearch').focus()">
+      <i class="lic" data-lucide="search"></i>
+      <input id="wsearch" placeholder="Search blocks · hashes · producers · heights…" autocomplete="off" spellcheck="false" oninput="wSearch()" onkeydown="wKey(event)">
+      <kbd>/</kbd>
+      <div class="wdrop" id="wdrop"></div>
+    </div>
     <div class="gspacer"></div>
     <div class="gright">
       <div class="net">grid online · H 18,742</div>
@@ -322,7 +342,7 @@ body.view-desktop .desktop{display:flex}
      Standalone bundle reusing the React-SPA libp2p stack. Auto-starts; the page still
      works HTTP-only if this fails to load. Pill shows live peer/browser-mesh status. -->
 <div id="p2p-pill" title="Open P2P Network" style="position:fixed;left:10px;bottom:10px;z-index:9999;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1;color:#21d4fd;background:rgba(4,8,12,.85);border:1px solid rgba(33,212,253,.35);border-radius:8px;padding:6px 9px;backdrop-filter:blur(6px);box-shadow:0 0 12px rgba(33,212,253,.25);cursor:pointer;user-select:none">🌐 P2P starting…</div>
-<script type="module" src="./sigil-tron-p2p.js"></script>
+<script type="module" src="./sigil-tron-p2p.js?v=091"></script>
 
 <!-- v0.9.2: P2P Network modal (ported from the QUG quantum-wallet NetworkMapModal,
      reskinned to the SIGIL cyan theme). Vanilla-JS: reads window.SigilTronP2P +
@@ -440,5 +460,41 @@ body.view-desktop .desktop{display:flex}
   window.addEventListener('browser-peer-discovered',function(e){var d=(e&&e.detail)||{};logLine('🌐 discovered browser '+short(d.peerId),'#a78bfa');if(modal.style.display!=='none')render();});
   window.addEventListener('browser-mesh-peer-connected',function(e){var d=(e&&e.detail)||{};logLine('🔗 direct mesh link to '+short(d.peerId||''),'#00e0c6');if(modal.style.display!=='none')render();});
 })();
+
+// ── Block search ported into the wallet topbar (same-origin; routes block detail to the explorer) ──
+var _wT=null;
+function wSearch(){
+  var q=((document.getElementById('wsearch')||{}).value||'').trim();
+  var d=document.getElementById('wdrop');
+  if(q.length<1){ if(d)d.style.display='none'; return; }
+  clearTimeout(_wT); _wT=setTimeout(function(){ wRun(q); },200);
+}
+function wKey(e){
+  if(e.key==='Enter'){ wGo(); }
+  else if(e.key==='Escape'){ var d=document.getElementById('wdrop'); if(d)d.style.display='none'; if(e.target&&e.target.blur)e.target.blur(); }
+}
+function wGo(){ var q=((document.getElementById('wsearch')||{}).value||'').trim(); if(q) location.href='/sigil-explorer.html?q='+encodeURIComponent(q); }
+async function wRun(q){
+  var ql=q.toLowerCase(), pn={d:'delta',e:'epsilon',g:'gamma',b:'beta'}, rows=[];
+  try{ var fr=await fetch('/sigil-recent-blocks.json?cb='+Date.now(),{cache:'no-store'}); var fj=await fr.json();
+    (fj.results||[]).forEach(function(b){
+      var hit = String(b.h).indexOf(q)===0 || (ql.length>=4&&b.hash&&b.hash.toLowerCase().indexOf(ql)>=0) || (ql.length>=3&&b.prod&&(pn[b.prod.toLowerCase()]||'').indexOf(ql)>=0);
+      if(hit&&!rows.some(function(r){return r.h===b.h;})) rows.push({type:'live',h:b.h,t:'Block #'+b.h,d:'producer '+(pn[(b.prod||'').toLowerCase()]||b.prod||'?')+' · b3:'+(b.hash||'').slice(0,18)+'…',q:String(b.h)});
+    });
+  }catch(e){}
+  try{ var sr=await fetch('/api/v1/search?q='+encodeURIComponent(q),{cache:'no-store'}); var sj=await sr.json();
+    (sj.results||[]).forEach(function(x){ var m=String(x.title||'').match(/#?(\d+)/); var h=m?+m[1]:null;
+      if(!rows.some(function(r){return r.h===h;})) rows.push({type:'flux',h:h,t:x.title||'result',d:(x.snippet||'').slice(0,58),q:(h!=null?String(h):q)});
+    });
+  }catch(e){}
+  var d=document.getElementById('wdrop'); if(!d)return;
+  rows=rows.slice(0,7);
+  if(!rows.length){ d.innerHTML='<div class="wfoot">No live matches — press ↵ to search the full explorer</div>'; }
+  else{ d.innerHTML=rows.map(function(r){ return '<div class="wr" onclick="location.href=\'/sigil-explorer.html?q='+encodeURIComponent(r.q)+'\'"><span class="wty '+r.type+'">'+r.type+'</span><span class="wt">'+r.t+'</span><span class="wd">'+(r.d||'')+'</span></div>'; }).join('')+'<div class="wfoot">↵ open in the SIGIL explorer</div>'; }
+  d.style.display='block';
+}
+window.wSearch=wSearch; window.wKey=wKey; window.wGo=wGo;
+document.addEventListener('keydown',function(e){ if(e.key==='/'&&document.activeElement.id!=='wsearch'){ var s=document.getElementById('wsearch'); if(s){ e.preventDefault(); s.focus(); } } });
+document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWrap')){ var d=document.getElementById('wdrop'); if(d)d.style.display='none'; } });
 </script>
 </body></html>

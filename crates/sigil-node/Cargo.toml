@@ -16,6 +16,7 @@ path = "src/main.rs"
 arti = ["sigil-net/arti"]
 
 [dependencies]
+flux-sqisign = { path = "../../../flux/crates/flux-sqisign" }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 blake3     = { workspace = true }

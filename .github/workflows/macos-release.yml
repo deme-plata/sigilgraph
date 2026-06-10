@@ -32,6 +32,9 @@ jobs:
         run: ls sigil/Cargo.toml flux/crates >/dev/null && echo layout-ok
       - name: build
         working-directory: sigil
+        env:
+          CARGO_TARGET_DIR: target        # the repo .cargo/config pins an epsilon-absolute path
+          RUSTC_WRAPPER: ""               # ditto for the fluxc cache wrapper
         run: |
           rustup target add aarch64-apple-darwin
           cargo build --release -p sigil-top --target aarch64-apple-darwin

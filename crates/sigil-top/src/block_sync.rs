@@ -382,6 +382,13 @@ pub struct P2PSyncState {
     /// frontier): "(height) reason". Empty while the chain is clean. Surfaced in the TUI
     /// + makes `full-sync`/`verify-chain` exit non-zero.
     pub verify_break: Option<String>,
+    /// v0.57 (LANE-M): true in RECENT-WINDOW (light monitor) mode — the base is snapped
+    /// forward to a recent servable window, so `verified` is anchored at that checkpoint base
+    /// (tip-proof semantics), NOT a full spine linked to genesis. The renderer reads this to be
+    /// HONEST: track STORED progress on the bar + show `verified` as a separate checkpoint badge,
+    /// never a frozen full-genesis-spine %. False in full-sync (--sync genesis) where `verified`
+    /// IS the genesis spine. See `chain_verify::verify_to` (walks from `max(verified_to, base)`).
+    pub light_mode: bool,
     /// v0.27 PROOF-OF-USEFUL-SYNC: idle-at-tip CPU re-derives the stored spine's BLAKE
     /// hashes (same methodology as mining) to harden chain trust instead of idling.
     /// Cumulative headers re-verified this session + the rolling rate (useful hashrate).
@@ -554,6 +561,7 @@ impl P2PBlockSync {
                     s.running = true;
                     s.blocks_synced = resume_h;
                     s.verified = store.verified_to(); // v0.9.0: resume the verified watermark too
+                    s.light_mode = recent_only;       // v0.57 (LANE-M): drives honest verified-vs-stored UI
                 }
 
                 // Subscribe to blocks — event-driven, no polling
@@ -567,17 +575,19 @@ impl P2PBlockSync {
                 // independent chunk requests stream in parallel; a slow peer never blocks the
                 // fast ones, and the store's height-index + advance() reorder out-of-order
                 // arrivals (the store IS the buffer). Reviewed with DeepSeek-V4 2026-06-09.
-                // v0.56 (sync throughput): the old 4096 was BELOW the responder's 8192-header
-                // cap — leaving 2× on the table — and the v0.15.1 "8192 = 8 MB stalls" note was
-                // about FULL-BLOCK chunks. This sync is headers_only: a header is ~70 B, so
-                // 32768 headers ≈ 2.3 MB raw / ~160 KB zstd. Bigger chunks = more headers per
-                // (round-trip-bound, lossy) serve = higher rate, which is THE fix for the thin-mesh
-                // ~200 headers/s crawl. Matches the responder's SIGIL_SERVE_HEADERS_CAP. Env-tunable;
-                // lower it on a tiny box if the per-chunk decode burst pressures RAM.
+                // CHUNK = the per-request span AND the look-ahead stride. It must MATCH what
+                // the responders actually serve per reply: today they serve ~4096 headers/reply,
+                // so a larger CHUNK makes look-ahead chunks land SPARSE (gaps between prefetched
+                // ranges) and the contiguous frontier ends up doing all the work serially — the
+                // exact regression a 0.56 bump to 32768 caused. Keep the default at the proven
+                // 4096; once the fleet responders serve a bigger SIGIL_SERVE_HEADERS_CAP, raise
+                // BOTH together via SIGIL_SYNC_CHUNK. The v0.57 frontier-exact fix below makes any
+                // value SAFE (partial fills always advance), but 4096 stays OPTIMAL for the live
+                // mesh. Env-tunable.
                 #[allow(non_snake_case)]
                 let CHUNK: u64 = std::env::var("SIGIL_SYNC_CHUNK").ok()
                     .and_then(|v| v.parse::<u64>().ok())
-                    .map(|n| n.clamp(1024, 65_536)).unwrap_or(32_768);
+                    .map(|n| n.clamp(1024, 65_536)).unwrap_or(4096);
                 // v0.39: was const 12 — at first boot (empty DB) all slots fire decode
                 // bursts at once, pre-TUI, which pressured small/busy machines hard. 8 by
                 // default; SIGIL_SYNC_INFLIGHT=1..16 to tune (raise on a beefy box).
@@ -1089,7 +1099,18 @@ impl P2PBlockSync {
                             const FRONTIER_REDUNDANCY: usize = 3;
                             for i in 0..(max_inflight as u64) {
                                 if inflight >= max_inflight { break; }
-                                let start = frontier_chunk + i * CHUNK;
+                                // v0.57 LANE-L (the real 0 blk/s): request the FRONTIER (i==0) from
+                                // the EXACT synced_to, not the floor-aligned `frontier_chunk`. The
+                                // floor-aligned request was the frontier-stall root: when the base
+                                // sits at a non-CHUNK-aligned height (recent-window snap) OR a peer
+                                // serves FEWER than CHUNK blocks per reply (responders cap ~4096
+                                // while the client now asks 32768), the floor request keeps re-
+                                // fetching the SAME already-stored sub-range and synced_to never
+                                // crosses the chunk — got>0 yet +0 advance, frozen. Requesting from
+                                // synced_to means every partial fill chains immediately. Look-ahead
+                                // (i>0) stays CHUNK-aligned above the frontier; the store dedups any
+                                // overlap by height.
+                                let start = if i == 0 { store.synced_to() } else { frontier_chunk + i * CHUNK };
                                 if start >= peer_best { break; }          // past the tip
                                 if !assigned.insert(start) { continue; }  // already in flight
                                 let fanout = if i == 0 { FRONTIER_REDUNDANCY.min(healthy.len()).max(1) } else { 1 };

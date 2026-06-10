@@ -1245,7 +1245,13 @@ fn main() {
             println!("  {DIM}connecting to the sigil-g0 mesh — downloading + verifying genesis→tip…{RESET}");
             if let Some(t) = target_arg { println!("  {DIM}target height pinned to {t}{RESET}"); }
             println!("  {DIM}timeout {timeout_s}s · Ctrl-C to stop{RESET}\n");
-            let sync = block_sync::P2PBlockSync::launch(store, false);
+            // LANE-P: --recent / SIGIL_SYNC_RECENT=1 launches the MONITOR path (recent_only,
+            // recent-window snap) headlessly — the exact branch where the unaligned-base 57345
+            // freeze lived — so the CI gate can verify it, not just the genesis crawl.
+            let recent = argv.iter().any(|a| a == "--recent")
+                || std::env::var("SIGIL_SYNC_RECENT").map(|v| v == "1" || v == "true").unwrap_or(false);
+            if recent { println!("  {DIM}monitor mode — recent-window snap (recent_only){RESET}"); }
+            let sync = block_sync::P2PBlockSync::launch(store, recent);
             // v0.15.1: a pinned --target also SEEDS the backfill tip so the refill
             // fires immediately (the gate is peer_best>0, not target_arg). Without
             // this, a quiet mesh left peer_best=0 and full-sync --target never pulled.
@@ -1267,7 +1273,13 @@ fn main() {
                         group(st.verified), group(st.blocks_synced), if target > 0 { group(target) } else { "?".into() },
                         pct, st.peer_count, start.elapsed().as_secs());
                 }
-                if target > 0 && st.verified >= target {
+                // LANE-P: don't declare "complete" before the mesh has actually connected and
+                // seeded a REAL network tip. With 0 peers, peer_best can momentarily seed to our
+                // own genesis (target=1) → verified>=1 → a FALSE "sync complete at height 1" the
+                // instant we start (the gate's flaky FAIL + a real "looks synced but isn't" bug).
+                // Require target>1 AND a live peer (or a 30s grace for a genuine solo-at-tip).
+                if target > 1 && st.verified >= target
+                    && (st.peer_count > 0 || start.elapsed() > Duration::from_secs(30)) {
                     println!("\n  {GREEN}{BOLD}✓ full verifying sync complete — {} blocks verified as one connected spine to genesis{RESET}\n", group(st.verified));
                     std::process::exit(0);
                 }
@@ -4012,6 +4024,13 @@ fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         else if connecting { ("… CONNECTING", C_DIM) }
         else if caught { ("≈ TRACKING HEAD", C_NEON_CYAN) }
         else { ("⬇ SYNCING", C_NEON_GOLD) };
+
+    // LANE-P v0.59: never a silent 0 blk/s — when the sync engine reports a PARKED frontier
+    // (stall_reason set), the hero headline says STALLED (full reason lives in the state /
+    // Sync Log) instead of a quiet "SYNCING" that looks broken.
+    let (vtext, vcol) = if !s.stall_reason.is_empty() && !synced && !light {
+        ("⚠ STALLED — nudging peer", C_NEON_PINK)
+    } else { (vtext, vcol) };
 
     // state-themed border; title chip stays neon-cyan
     let block = card_block(" ◇ SYNC · sigil-g0", C_NEON_CYAN)

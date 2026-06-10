@@ -1512,6 +1512,48 @@ fn flux_webhook(event: &str, detail: &str) {
     });
 }
 
+/// LANE-C: the pinned SIGIL release signing public key (ed25519, 32 B hex). The auto-updater
+/// REFUSES any manifest not signed by the matching secret — so a compromised release server / MITM
+/// that serves a matching-blake3 (but attacker-built) binary can't push it: without the secret it
+/// can't forge the manifest signature, and the blake3 the client trusts comes ONLY from a signed
+/// manifest. The secret lives solely on the release host (`/root/.config/sigil/release-sign.seed`,
+/// chmod 600). Ed25519 today; the sigil-oauth IssuerSigner abstraction lets a SQIsign-L5 PQ key
+/// replace it without a wire change once flux-sqisign is in the cross-build.
+const RELEASE_SIGN_PUBKEY_HEX: &str =
+    "150fb84d4b2c83e6e81a27f629e60686acf8663be5ce73f46208cce4f5686402";
+
+/// LANE-C: verify the release manifest is signed by [`RELEASE_SIGN_PUBKEY_HEX`]. The detached
+/// signature is published at `<manifest>.sig` as 128-hex (ed25519 over the EXACT manifest bytes).
+/// Returns `Err` (fail-closed → no update) on any missing/invalid signature. Dev bypass:
+/// `SIGIL_UPDATE_INSECURE=1` prints a loud warning and skips the check — never set it on a release.
+fn verify_manifest_sig(manifest_body: &str) -> Result<(), String> {
+    if std::env::var("SIGIL_UPDATE_INSECURE").as_deref() == Ok("1") {
+        eprintln!("⚠ SIGIL_UPDATE_INSECURE=1 — release-manifest signature NOT verified (DEV ONLY — never on a release)");
+        return Ok(());
+    }
+    let pk: [u8; 32] = hex::decode(RELEASE_SIGN_PUBKEY_HEX).ok()
+        .and_then(|v| v.try_into().ok())
+        .ok_or_else(|| "pinned release key malformed".to_string())?;
+    let bust = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs()).unwrap_or(0);
+    let sig_url = format!("{UPDATE_MANIFEST}.sig?t={bust}");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .min_tls_version(reqwest::tls::Version::TLS_1_0)
+        .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION")))
+        .build().map_err(|e| format!("sig client init: {e}"))?;
+    let sig_hex = client.get(&sig_url).send().and_then(|r| r.error_for_status()).and_then(|r| r.text())
+        .map_err(|e| format!("no release-manifest signature ({e}) — refusing update"))?;
+    let sig: [u8; 64] = hex::decode(sig_hex.trim()).ok()
+        .and_then(|v| v.try_into().ok())
+        .ok_or_else(|| "release-manifest signature malformed (want 128-hex ed25519)".to_string())?;
+    if sigil_oauth::verify_sig(&pk, manifest_body.as_bytes(), &sig) {
+        Ok(())
+    } else {
+        Err("MANIFEST SIGNATURE INVALID — refusing update (possible compromised release server)".into())
+    }
+}
+
 /// Fetch the live release manifest (short timeout — runs on the UI thread). `None`
 /// if the channel is unreachable or malformed.
 fn fetch_latest() -> Result<Release, String> {
@@ -1536,11 +1578,18 @@ fn fetch_latest() -> Result<Release, String> {
     for _ in 0..2 {
         match client.get(&url).send().and_then(|r| r.error_for_status()) {
             Ok(resp) => match resp.text() {
-                Ok(body) => match serde_json::from_str::<Release>(&body) {
-                    Ok(rel) => return Ok(rel),
-                    Err(e) => last = format!("parse: {e} [{}B: {:?}]",
-                        body.len(), body.chars().take(48).collect::<String>()),
-                },
+                Ok(body) => {
+                    // LANE-C: AUTHENTICATE the manifest before we trust a single field (incl. the
+                    // blake3 we'd verify the binary against). A bad signature is fatal — fail closed.
+                    if let Err(e) = verify_manifest_sig(&body) {
+                        return Err(e);
+                    }
+                    match serde_json::from_str::<Release>(&body) {
+                        Ok(rel) => return Ok(rel),
+                        Err(e) => last = format!("parse: {e} [{}B: {:?}]",
+                            body.len(), body.chars().take(48).collect::<String>()),
+                    }
+                }
                 Err(e) => last = format!("read body: {e}"),
             },
             Err(e) => {

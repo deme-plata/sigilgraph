@@ -78,6 +78,12 @@ pub struct BackfillResp {
     pub blocks: Vec<serde_json::Value>,
 }
 
+/// v0.50 (LANE-A sync): chunk-align a base height to the nearest CHUNK boundary at/below `h`,
+/// clamped to the lowest servable height `sync_base`. Used by the recent-window probe-before-snap.
+fn align_base(h: u64, chunk: u64, sync_base: u64) -> u64 {
+    ((h / chunk) * chunk).max(sync_base)
+}
+
 /// Ingest one block (as a serde_json::Value with a `"header"` field) exactly like
 /// the live-gossip receive path: extract the SigilBlockHeaderV0, store it, and on a
 /// fresh insert bump the sync counters, push a progress event, and enqueue the
@@ -561,9 +567,17 @@ impl P2PBlockSync {
                 // independent chunk requests stream in parallel; a slow peer never blocks the
                 // fast ones, and the store's height-index + advance() reorder out-of-order
                 // arrivals (the store IS the buffer). Reviewed with DeepSeek-V4 2026-06-09.
-                const CHUNK: u64 = 4096;            // v0.15.1 STABILITY: 8192 (8 MB) chunks landed in
-                                                   // bursts then stalled (2k→2 blk/s swing). 4096 halves
-                                                   // tail latency so a stuck slot frees faster + bursts smooth.
+                // v0.56 (sync throughput): the old 4096 was BELOW the responder's 8192-header
+                // cap — leaving 2× on the table — and the v0.15.1 "8192 = 8 MB stalls" note was
+                // about FULL-BLOCK chunks. This sync is headers_only: a header is ~70 B, so
+                // 32768 headers ≈ 2.3 MB raw / ~160 KB zstd. Bigger chunks = more headers per
+                // (round-trip-bound, lossy) serve = higher rate, which is THE fix for the thin-mesh
+                // ~200 headers/s crawl. Matches the responder's SIGIL_SERVE_HEADERS_CAP. Env-tunable;
+                // lower it on a tiny box if the per-chunk decode burst pressures RAM.
+                #[allow(non_snake_case)]
+                let CHUNK: u64 = std::env::var("SIGIL_SYNC_CHUNK").ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map(|n| n.clamp(1024, 65_536)).unwrap_or(32_768);
                 // v0.39: was const 12 — at first boot (empty DB) all slots fire decode
                 // bursts at once, pre-TUI, which pressured small/busy machines hard. 8 by
                 // default; SIGIL_SYNC_INFLIGHT=1..16 to tune (raise on a beefy box).
@@ -592,6 +606,18 @@ impl P2PBlockSync {
                 // /api/v1/status the monitor polls returns height=2 → snap never fired).
                 let (tip_tx, mut tip_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
                 let mut last_tip_fetch = Instant::now() - Duration::from_secs(60);
+                // v0.50 (LANE-A): RECENT-WINDOW PROBE-BEFORE-SNAP. A monitor resumed far below the
+                // tip crawls the middle history it doesn't need (the fold-proof attests it) because
+                // the fast-snap is gated on best_height (received), which only crawls forward at the
+                // backfill rate. This probes ONE chunk at peer_best-RECENT directly; a NON-EMPTY
+                // reply PROVES the reachable peers serve the recent window, so we snap the base there
+                // and reach the tip in seconds. An EMPTY reply (peers behind the oracle tip) costs
+                // one request and changes nothing — so this can NEVER trigger the v0.16 "snap to an
+                // unservable tip → 0 downloaded" regression (the reason the snap is best_height-gated).
+                let (recent_tx, mut recent_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<(u64, Option<Vec<u8>>)>();
+                let mut last_recent_probe = Instant::now() - Duration::from_secs(60);
+                let mut recent_probe_inflight = false;
                 let mut inflight: usize = 0;                          // outstanding spawned requests
                 let mut assigned: std::collections::HashSet<u64> = std::collections::HashSet::new();
                 let mut peer_bench: HashMap<String, Instant> = HashMap::new(); // peer.to_string() → benched-until
@@ -910,6 +936,66 @@ impl P2PBlockSync {
                     }
 
                     let peer_best = state_clone.lock().unwrap_or_else(|e| e.into_inner()).peer_best_height;
+
+                    // ── v0.50 RECENT-WINDOW PROBE-BEFORE-SNAP (monitor fast-track) ───────────────
+                    // Drain last cycle's probe reply first. got>0 = peers SERVE the recent window →
+                    // snap the base there (reach the tip in seconds); got==0 = peers are behind the
+                    // oracle tip → hold the contiguous crawl (the SAFE branch, no regression).
+                    while let Ok((rbase, bytes)) = recent_rx.try_recv() {
+                        recent_probe_inflight = false;
+                        if let Some(b) = bytes {
+                            let got = ingest_backfill_bytes(&b, &mut store); // free headers near the tip
+                            fetched_session += got as u64;
+                            if got > 0 && recent_only && rbase > store.synced_to() {
+                                let old = store.synced_to();
+                                store.set_base(rbase);
+                                store.advance();
+                                assigned.clear(); // stale frontier reqs are useless after the jump
+                                last_synced_seen = store.synced_to();
+                                last_advance_t = Instant::now();
+                                snapped = true;
+                                crate::tlog!("[sync] RECENT-PROBE hit: peers serve [{}..] (got {}) — snap base {} → {} (tip {})",
+                                    rbase, got, old, store.synced_to(), peer_best);
+                            } else if got == 0 {
+                                crate::tlog!("[sync] RECENT-PROBE miss at {}: peers behind oracle tip {} — hold crawl", rbase, peer_best);
+                            }
+                        }
+                    }
+                    // Send a new probe when a MONITOR is meaningfully behind: confirm whether the
+                    // recent window is servable before committing to a snap. Cheap (one request /3s).
+                    const RECENT_PROBE_EVERY: Duration = Duration::from_secs(3);
+                    // Only fast-track when MEANINGFULLY behind (~5 min of production), so normal
+                    // tip-tracking jitter (gap < a few k, held tight by the LANE-A gossip head)
+                    // never probes — only a real fall-behind triggers the snap attempt.
+                    const RECENT_PROBE_MIN_GAP: u64 = 65_536;
+                    if recent_only
+                        && peer_best > store.synced_to().saturating_add(RECENT_PROBE_MIN_GAP)
+                        && !recent_probe_inflight
+                        && last_recent_probe.elapsed() >= RECENT_PROBE_EVERY
+                    {
+                        let now = Instant::now();
+                        let mut healthy: Vec<_> = net.connected_peers().into_iter()
+                            .filter(|p| peer_bench.get(&p.to_string()).map_or(true, |&u| now >= u))
+                            .collect();
+                        if healthy.is_empty() { healthy = net.connected_peers(); }
+                        if let Some(&peer) = healthy.first() {
+                            last_recent_probe = Instant::now();
+                            recent_probe_inflight = true;
+                            // RECENT_WINDOW < CHUNK, so this chunk straddles the tip; the responder
+                            // clamps [from, min(to, its_tip)] and returns the recent headers it has.
+                            let rbase = align_base(peer_best.saturating_sub(RECENT_WINDOW), CHUNK, sync_base);
+                            let payload = serde_json::to_vec(
+                                &BackfillReq { from: rbase, to: rbase + CHUNK, headers_only: true, codec: 1 }
+                            ).unwrap();
+                            let n = net.clone();
+                            let tx = recent_tx.clone();
+                            tokio::spawn(async move {
+                                let r = tokio::time::timeout(REQ_TIMEOUT, n.send_request(peer, payload)).await;
+                                let bytes = match r { Ok(Ok(b)) => Some(b), _ => None };
+                                let _ = tx.send((rbase, bytes));
+                            });
+                        }
+                    }
 
                     // v0.15.2: MONITOR FAST-SNAP. A monitor that's hundreds of thousands of
                     // blocks behind gains nothing from crawling genesis→tip at the rate the

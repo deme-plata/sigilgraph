@@ -959,20 +959,31 @@ fn init_ui_ascii() {
     let on = match std::env::var("SIGIL_ASCII").ok().as_deref() {
         Some("1") | Some("true") => true,
         Some("0") | Some("false") => false,
-        _ => cfg!(windows),
+        // v0.33.2: default RICH on modern terminals. Windows Terminal (WT_SESSION /
+        // WT_PROFILE_ID), VS Code's integrated terminal (TERM_PROGRAM=vscode), and every
+        // *nix terminal render Unicode + emoji at the correct cell width → full rich icons.
+        // Only LEGACY Windows conhost (none of those signals) falls back to refined ASCII.
+        _ => {
+            cfg!(windows)
+                && std::env::var_os("WT_SESSION").is_none()
+                && std::env::var_os("WT_PROFILE_ID").is_none()
+                && std::env::var("TERM_PROGRAM").ok().as_deref() != Some("vscode")
+        }
     };
     UI_ASCII.store(on, std::sync::atomic::Ordering::Relaxed);
 }
-/// Sanitize a UI string for ASCII terminals: replace wide/emoji glyphs with width-1
-/// ASCII so ratatui's layout (which trusts unicode-width) matches what the console draws.
+/// Sanitize a UI string for legacy ASCII terminals: replace ONLY true emoji-presentation
+/// (width-2-in-font, width-1-in-unicode-width) glyphs that smear layout on old conhost.
+/// v0.33.2: width-1 BMP symbols (● ○ ✓ → ▲ ▼ █ ░ ▌ ◆ Δ Ε ≈ box-drawing) render AND align
+/// fine even on legacy conhost — keeping them is what restores "rich text + icons". Modern
+/// terminals (Windows Terminal, VS Code, any *nix) skip this entirely (ui_ascii=false).
 fn sa<S: Into<String>>(s: S) -> String {
     let s = s.into();
     if !ui_ascii() { return s; }
-    s.replace('⛏', ">").replace('⛓', "#").replace('⬇', "v").replace('⬆', "^")
-     .replace('▲', "^").replace('▼', "v").replace('●', "*").replace('✦', "*")
-     .replace('⟳', "@").replace('▦', "#").replace('◐', "O").replace('≈', "~")
-     .replace('░', ".").replace('█', "#").replace('▌', "|").replace('⚡', "!")
-     .replace('◆', "*").replace('✓', "v").replace('→', "->").replace('Δ', "D").replace('Ε', "E")
+    // Only the genuinely-wide emoji glyphs — everything else passes through rich.
+    s.replace('⛏', "^").replace('⛓', "=").replace('⬇', "v").replace('⬆', "^")
+     .replace('⚡', "!").replace('⟳', "@").replace('◐', "O").replace('🏆', "*")
+     .replace('⚠', "!").replace('▦', "#")
 }
 
 fn main() {
@@ -1217,6 +1228,13 @@ const C_DIM: Color = Color::Rgb(0x74, 0x74, 0x92);      // labels / subtle
 const C_CYAN: Color = Color::Rgb(0x4f, 0xd6, 0xe0);     // titles / links
 #[allow(dead_code)]
 const C_INK: Color = Color::Rgb(0x4a, 0x4a, 0x66);      // faintest (separators)
+// v0.33.2 BOLD NEON redesign — high-contrast neon-on-black accents for banners + bars.
+const C_NEON_CYAN: Color = Color::Rgb(0x22, 0xf5, 0xff);   // neon edge / live tip
+const C_NEON_GREEN: Color = Color::Rgb(0x4b, 0xff, 0x7a);  // neon synced / healthy
+const C_NEON_PINK: Color = Color::Rgb(0xff, 0x4d, 0xa6);   // neon alarm / brand pop
+const C_NEON_GOLD: Color = Color::Rgb(0xff, 0xd8, 0x52);   // neon value
+const C_BG: Color = Color::Rgb(0x07, 0x07, 0x12);          // obsidian card bg
+const C_BG_HEAD: Color = Color::Rgb(0x0c, 0x0a, 0x1f);     // header band bg
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Flux-way self-update — read the release channel, BLAKE3-verify, hot-swap in place.
@@ -2636,6 +2654,25 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
 }
 
 fn dim(s: impl Into<String>) -> Span<'static> { Span::styled(s.into(), Style::default().fg(C_DIM)) }
+
+// ── v0.33.2 BOLD NEON helpers ──────────────────────────────────────────
+/// A filled "banner" pill: bright text on a saturated neon background — used for the
+/// loud status verdicts (LIGHT-SYNCED, SPINE BREAK, LIVE). ASCII-safe (text only).
+fn banner(text: impl Into<String>, bg: Color) -> Span<'static> {
+    Span::styled(format!(" {} ", text.into()),
+        Style::default().bg(bg).fg(Color::Rgb(0x05, 0x05, 0x0d)).add_modifier(Modifier::BOLD))
+}
+/// A neon block-bar `█████░░░` sized to `frac` over `width` cells. Rich (uses █/░ — both
+/// width-1, conhost-safe). Returns a styled Span in the given neon color.
+fn neon_bar(frac: f64, width: usize, color: Color) -> Span<'static> {
+    let f = (frac.clamp(0.0, 1.0) * width as f64).round() as usize;
+    let s = "█".repeat(f.min(width)) + &"░".repeat(width.saturating_sub(f));
+    Span::styled(s, Style::default().fg(color))
+}
+/// Bright value span (neon gold, bold) — the headline numbers.
+fn val(s: impl Into<String>) -> Span<'static> {
+    Span::styled(s.into(), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD))
+}
 /// thousands-grouped integer (1135287 → "1,135,287")
 fn group(n: u64) -> String {
     let s = n.to_string(); let b = s.as_bytes(); let mut o = String::new();
@@ -2937,13 +2974,13 @@ fn render_tab_bar(app: &App) -> Paragraph<'static> {
     let tab = |label: &'static str, key: &'static str, t: Tab| -> Vec<Span<'static>> {
         let active = app.tab == t;
         let style = if active {
-            Style::default().fg(Color::Black).bg(C_CYAN).add_modifier(Modifier::BOLD)
+            Style::default().fg(C_BG).bg(C_NEON_CYAN).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(C_DIM)
         };
-        vec![Span::styled(format!(" {key} {label} "), style), Span::raw(sa(" "))]
+        vec![Span::styled(format!(" {key} {label} "), style), Span::raw(" ")]
     };
-    let mut spans = vec![Span::raw(sa(" "))];
+    let mut spans = vec![Span::raw(" ")];
     spans.extend(tab("Node", "1", Tab::Node));
     spans.extend(tab("Swarm AI", "2", Tab::SwarmAi));
     spans.extend(tab("Results", "3", Tab::Results));
@@ -3025,7 +3062,7 @@ fn render_swarm_ai(app: &App) -> Paragraph<'static> {
             Span::styled(trunc(&ev.detail, 44), Style::default().fg(C_DIM)),
         ]));
     }
-    Paragraph::new(lines).block(card_block("⚡ MCP SWARM AI — JOB INDEX BOARD", C_VBRIGHT))
+    Paragraph::new(lines).block(card_block(" ✦ MCP SWARM AI — JOB INDEX BOARD", C_NEON_PINK))
 }
 
 /// v0.26: read at most the last `max_bytes` of a (possibly huge) log file — seek to the
@@ -3199,42 +3236,48 @@ fn draw_node_body(f: &mut Frame, app: &App, body_area: ratatui::layout::Rect) {
 }
 
 fn accent_stripe(color: Color) -> Span<'static> {
-    Span::styled(" ▌ ", Style::default().fg(color))
+    Span::styled("▐ ", Style::default().fg(color).add_modifier(Modifier::BOLD))
 }
 
+/// v0.33.2 BOLD NEON card: thick-bordered obsidian card with a bright neon title block
+/// (icon + UPPERCASE label) glowing in the accent color, and a border tinted toward the
+/// accent instead of flat grey. The title's leading stripe is a solid neon edge.
 fn card_block(title: &'static str, color: Color) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(BorderType::Thick)
         .padding(Padding::horizontal(1))
         .title(Line::from(vec![
             accent_stripe(color),
             Span::styled(title, Style::default().fg(color).add_modifier(Modifier::BOLD)),
-            Span::raw(sa(" ")),
+            Span::styled(" ", Style::default()),
         ]))
-        .border_style(Style::default().fg(C_DIM))
-        .style(Style::default().bg(Color::Rgb(10, 10, 20)))
+        .border_style(Style::default().fg(color).add_modifier(Modifier::DIM))
+        .style(Style::default().bg(C_BG))
 }
 
 fn render_header(app: &App) -> Paragraph<'static> {
     let live = app.online;
-    let status_symbol = Span::styled(" █ ", Style::default().fg(if live { C_GREEN } else { C_RED }));
-    let live_span = Span::styled(if live { "LIVE" } else { "OFFLINE" },
-        Style::default().fg(if live { C_GREEN } else { C_RED }).add_modifier(Modifier::BOLD));
+    // v0.33.2: loud neon brand block + a filled status banner pill.
+    let status = if live { banner("◆ LIVE", C_NEON_GREEN) } else { banner("✕ OFFLINE", C_NEON_PINK) };
     let update = if version_gt(&app.latest, VERSION) {
-        Span::styled(format!("  ·  Update v{} [U]", app.latest), Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD))
+        Span::styled(format!("   ⬆ UPDATE v{} [U]", app.latest),
+            Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD))
     } else {
-        Span::raw(sa(""))
+        Span::raw("")
     };
     let line = Line::from(vec![
-        Span::styled(" SIGIL", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" · v{} · {} · ", VERSION, app.st.network), Style::default().fg(C_DIM)),
-        status_symbol,
-        live_span,
-        Span::styled(format!("  ·  uptime {}  ·  net height {}", fmt_uptime(app.st.uptime_secs), group(app.target_height)), Style::default().fg(C_DIM)),
+        Span::styled(" ◇ SIGIL ", Style::default().bg(C_NEON_CYAN).fg(C_BG_HEAD).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" v{}", VERSION), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" · {} ", app.st.network), Style::default().fg(C_DIM)),
+        status,
+        Span::styled("  uptime ", Style::default().fg(C_DIM)),
+        Span::styled(fmt_uptime(app.st.uptime_secs), Style::default().fg(C_CYAN)),
+        Span::styled("  ·  net height ", Style::default().fg(C_DIM)),
+        val(group(app.target_height)),
         update,
     ]);
-    Paragraph::new(line).style(Style::default().bg(Color::Rgb(5, 5, 15)))
+    Paragraph::new(line).style(Style::default().bg(C_BG_HEAD))
 }
 
 fn render_node_card(app: &App) -> Paragraph<'static> {
@@ -3251,7 +3294,7 @@ fn render_node_card(app: &App) -> Paragraph<'static> {
             dim("   uptime "), Span::raw(fmt_uptime(st.uptime_secs)),
         ]),
     ];
-    Paragraph::new(lines).block(card_block(" NODE", C_GREEN))
+    Paragraph::new(lines).block(card_block(" ◆ NODE", C_NEON_GREEN))
 }
 
 fn render_state_roots(app: &App) -> Paragraph<'static> {
@@ -3272,24 +3315,21 @@ fn render_state_roots(app: &App) -> Paragraph<'static> {
         Line::from(vec![ dim("wallet "), Span::raw(wallet), dim("  dex "), Span::raw(dex) ]),
         Line::from(vec![ dim("events "), Span::raw(event), dim("  contract "), Span::raw(contract) ]),
     ];
-    Paragraph::new(lines).block(card_block(" STATE ROOTS", C_GOLD))
+    Paragraph::new(lines).block(card_block(" ◈ STATE ROOTS", C_GOLD))
 }
 
 fn render_supply(app: &App) -> Paragraph<'static> {
     let supply = app.st.native_supply;
     let frac = if MAX_SUPPLY_BASE > 0 { (supply as f64 / MAX_SUPPLY_BASE as f64).clamp(0.0, 1.0) } else { 0.0 };
-    let bar_w = 34usize;
-    let filled = (frac * bar_w as f64).round() as usize;
-    let bar: String = "█".repeat(filled) + &"░".repeat(bar_w.saturating_sub(filled));
     let lines = vec![
         Line::from(vec![
-            Span::styled(fmt_supply(supply), Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
+            val(fmt_supply(supply)),
             dim(" / 21,000,000   "),
-            Span::styled(format!("{:.2}%", frac * 100.0), Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{:.2}%", frac * 100.0), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
         ]),
-        Line::from(Span::styled(bar, Style::default().fg(C_GOLD))),
+        Line::from(neon_bar(frac, 34, C_NEON_GOLD)),
     ];
-    Paragraph::new(lines).block(card_block(" SUPPLY", C_CYAN))
+    Paragraph::new(lines).block(card_block(" ⬣ SUPPLY", C_NEON_GOLD))
 }
 
 /// Cross-platform persistent path for the light client's block store. Windows has no
@@ -3311,108 +3351,79 @@ fn render_sync_status(app: &App) -> Paragraph<'static> {
     let verified = app.verify.as_ref().map(|v| v.ok).unwrap_or(false);
     let synced = s.blocks_synced;
     let base = s.base;
-    let downloaded = synced.saturating_sub(base);       // v0.22.26: REAL blocks in the live window
-    let verified_real = s.verified.saturating_sub(base); // REAL spine-verified in the window
-    let tip = s.peer_best_height.max(app.target_height);
-    let gap = tip.saturating_sub(synced);
-    // v0.21.2: a light monitor tracks the recent window, re-jumping base to chase the
-    // tip — it is NOT bulk-fetching a backlog, so within ~the recent window it IS at the
-    // head. Read that as tracking (green, "tracking live") instead of "N behind / 0 blk/s".
-    let at_tip = tip > 0 && gap < 16_384;
-    let d = if s.connected_delta { "Δ" } else { "·" };
-    let e = if s.connected_epsilon { "Ε" } else { "·" };
+    let window = synced.saturating_sub(base);            // blocks REALLY held in the live window
+    let verified_real = s.verified.saturating_sub(base); // spine-verified within the window
+    let net_tip = s.peer_best_height.max(app.target_height); // the network head (gossip/oracle)
+    let gap = net_tip.saturating_sub(synced);
+    // A light client tracks a recent window near the head — it does NOT bulk-download the
+    // whole chain. Within ~16k of the head it is "at the head"; everything below the window
+    // is attested by the recursive fold-proof, not stored. That's WHY "2,049 blk" next to a
+    // 21.5M tip is correct, not broken — the redesign makes that explicit (Tip/Window/Proof).
+    let at_tip = net_tip > 0 && gap < 16_384;
+    let fully_synced = at_tip && verified && verified_real > 0 && s.verify_break.is_none();
+    let d_on = s.connected_delta;
+    let e_on = s.connected_epsilon;
 
-    // 1) DB-fill bar + gap
-    let pct = if tip > 0 { (synced as f64 / tip as f64 * 100.0).min(100.0) } else { 100.0 };
-    let bw = 14usize;
-    let fill = ((pct / 100.0) * bw as f64).round() as usize;
-    let bar = "█".repeat(fill.min(bw)) + &"░".repeat(bw.saturating_sub(fill));
-    // v0.9.0: a real spine-verification break (not the download frontier) trumps the
-    // AT-TIP/behind readout — the chain didn't validate, say so loudly in red.
-    // v0.23: FULLY SYNCED (DeepSeek-confirmed light-client criterion) = the fold-proof
-    // validates the chain genesis->tip AND we are at the head AND the recent window is
-    // stored and spine-verified. The chain middle is unservable BY DESIGN and need not be
-    // downloaded — the recursive fold-proof proves the WHOLE chain in ~342ms.
-    let fully_synced = tip > 0 && verified && at_tip && verified_real > 0 && s.verify_break.is_none();
-    let (bcol, tail) = if s.verify_break.is_some() {
-        (C_RED, Span::styled(" ⚠ SPINE BREAK".to_string(), Style::default().fg(C_RED).add_modifier(Modifier::BOLD)))
+    // ── L1: network TIP + one loud verdict banner ──────────────────────
+    let verdict = if s.verify_break.is_some() {
+        banner("⚠ SPINE BREAK", C_NEON_PINK)
     } else if fully_synced {
-        (C_GREEN, Span::styled(" ● SYNCED".to_string(), Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)))
+        banner("◆ LIGHT-SYNCED", C_NEON_GREEN)
     } else if at_tip {
-        (C_GREEN, Span::styled(" tracking head".to_string(), Style::default().fg(C_GREEN)))
+        banner("≈ TRACKING HEAD", C_NEON_CYAN)
+    } else if s.fetched_total == 0 && window == 0 {
+        banner("… CONNECTING", C_DIM)
     } else {
-        (C_CYAN, Span::styled(format!(" {} behind", group(gap)), Style::default().fg(C_GOLD)))
+        banner("⬇ CATCHING UP", C_NEON_GOLD)
     };
-    // v0.22.26: the mesh does not serve the chain middle, so a full-chain % is fiction.
-    // Show the live HEAD + tracking state; the fold-proof attests the chain below the window.
-    let _ = (bar, pct);
-    let l1 = Line::from(vec![dim("sync  "), Span::styled(format!("head {}", group(tip)), Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)), tail]);
+    let l1 = Line::from(vec![dim("tip "), val(group(net_tip)), Span::raw("  "), verdict]);
 
-    // 2) rate + ETA + synced. Rate is the 10s trailing window over fetched_total
-    // (smooth) — once blocks flow we show the number (even 0 = momentarily idle),
-    // not a perpetual "starting…".
-    // v0.22.26: report the REAL recent-window download, not the base-jumped synced_to.
-    let l2 = if fully_synced {
-        // honest: the chain is proven whole by the fold-proof; the recent window is the
-        // real local block availability. No fake "N/10M downloaded".
-        // v0.27: surface PROOF-OF-USEFUL-SYNC — the idle CPU re-verifying the spine.
-        let pos = if s.pos_rate > 0.0 {
-            Span::styled(format!("  ⛏ {} blk/s spine-verify", group(s.pos_rate.round() as u64)), Style::default().fg(C_GOLD))
-        } else { Span::raw(sa("")) };
-        Line::from(vec![
-            dim("proof "), Span::styled("fold ✓ whole-chain".to_string(), Style::default().fg(C_GREEN)),
-            dim("  window "), Span::styled(format!("{} ✓", group(verified_real)), Style::default().fg(C_GREEN)),
-            pos,
-        ])
-    } else if s.fetched_total == 0 && downloaded == 0 {
-        Line::from(vec![dim("window "), Span::styled("connecting…".to_string(), Style::default().fg(C_DIM))])
-    } else {
-        let head = if at_tip {
-            Span::styled("● tracking head".to_string(), Style::default().fg(C_GREEN))
+    // ── L2: honest stored window  OR  neon catch-up progress ───────────
+    let l2 = if at_tip {
+        // You hold the most-recent `window` blocks [base+1 … synced]; the fold-proof
+        // attests genesis→base. Show the real range so the small count makes sense.
+        if window > 0 {
+            Line::from(vec![
+                dim("window "),
+                Span::styled(format!("{}…{}", group(base + 1), group(synced)), Style::default().fg(C_NEON_CYAN)),
+                dim("  "),
+                Span::styled(format!("{} held", group(window)), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+            ])
         } else {
-            Span::styled(format!("{} blk/s", group(app.p2p_rate.max(0.0).round() as u64)), Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD))
-        };
+            Line::from(vec![dim("window "), Span::styled("priming recent window…", Style::default().fg(C_DIM))])
+        }
+    } else if s.fetched_total == 0 && window == 0 {
+        Line::from(vec![dim("window "), Span::styled("waiting for peers…", Style::default().fg(C_DIM))])
+    } else {
+        let frac = if net_tip > 0 { synced as f64 / net_tip as f64 } else { 0.0 };
         Line::from(vec![
-            dim("window "), head,
-            dim("  ⬇"), Span::styled(format!("{} dl", group(downloaded)), Style::default().fg(C_GREEN)),
+            neon_bar(frac, 10, C_NEON_GOLD),
+            Span::styled(format!(" {:>3.0}%", frac * 100.0), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)),
+            dim("  "),
+            Span::styled(format!("{} blk/s", group(app.p2p_rate.max(0.0).round() as u64)), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+            dim(format!("  {} to go", group(gap))),
         ])
     };
 
-    // 3) in-flight chunk range + spine-verified watermark + tip-verify + peers.
-    // v0.9.0: ⛓{N} = the contiguous CRYPTOGRAPHICALLY-VERIFIED spine height (precheck +
-    // parent linkage back to genesis) — distinct from synced (downloaded). A break shows
-    // red; an unverified-but-downloaded chain shows gold (verifier still walking).
-    let vmark = if !app.online && !s.running {
-        Span::styled("offline".to_string(), Style::default().fg(C_RED))
-    } else if s.verify_break.is_some() {
-        Span::styled("⚠spine".to_string(), Style::default().fg(C_RED).add_modifier(Modifier::BOLD))
-    } else if verified_real > 0 && s.verified >= synced.saturating_sub(8) {
-        Span::styled(format!("⛓✓{} vfy", group(verified_real)), Style::default().fg(C_GREEN))
-    } else if verified_real > 0 {
-        Span::styled(format!("⛓{} vfy", group(verified_real)), Style::default().fg(C_GOLD))
+    // ── L3: fold-proof attestation + spine watermark + peer mesh ───────
+    let proof = if s.verify_break.is_some() {
+        Span::styled("fold ✗ break".to_string(), Style::default().fg(C_RED).add_modifier(Modifier::BOLD))
     } else if verified {
-        Span::styled(format!("✓{}", group(synced)), Style::default().fg(C_GREEN))
+        Span::styled("fold ✓ gen→tip".to_string(), Style::default().fg(C_NEON_GREEN))
     } else {
-        Span::styled("✗tip".to_string(), Style::default().fg(C_GOLD))
+        Span::styled("fold … verifying".to_string(), Style::default().fg(C_GOLD))
     };
-    let l3 = if !at_tip && s.running {
-        let from = synced; let to = from.saturating_add(8192);
-        Line::from(vec![
-            dim("chunk "), Span::styled(format!("[{}..{}]", group(from), group(to)), Style::default().fg(C_VBRIGHT)),
-            dim("  "), vmark, dim(" "),
-            Span::styled(d, Style::default().fg(if s.connected_delta { C_GREEN } else { C_DIM })),
-            Span::styled(e, Style::default().fg(if s.connected_epsilon { C_GREEN } else { C_DIM })),
-        ])
-    } else {
-        Line::from(vec![
-            dim("node  "), vmark, dim("  "),
-            Span::styled(d, Style::default().fg(if s.connected_delta { C_GREEN } else { C_DIM })),
-            Span::styled(e, Style::default().fg(if s.connected_epsilon { C_GREEN } else { C_DIM })),
-            dim(format!(" {} peers", s.peer_count)),
-        ])
-    };
+    let spine = if verified_real > 0 {
+        Span::styled(format!("  ⛓{} ✓", group(verified_real)), Style::default().fg(C_GREEN))
+    } else { Span::raw("") };
+    let l3 = Line::from(vec![
+        dim("proof "), proof, spine, dim("  "),
+        Span::styled("Δ", Style::default().fg(if d_on { C_NEON_GREEN } else { C_DIM }).add_modifier(Modifier::BOLD)),
+        Span::styled("Ε", Style::default().fg(if e_on { C_NEON_GREEN } else { C_DIM }).add_modifier(Modifier::BOLD)),
+        dim(format!(" {}p", s.peer_count)),
+    ]);
 
-    Paragraph::new(vec![l1, l2, l3]).block(card_block(" SYNC", C_VBRIGHT))
+    Paragraph::new(vec![l1, l2, l3]).block(card_block(" SYNC", C_NEON_CYAN))
 }
 
 fn render_mining(app: &App) -> Paragraph<'static> {
@@ -3458,7 +3469,7 @@ fn render_mining(app: &App) -> Paragraph<'static> {
         rate_line,
         bal_line,
     ];
-    Paragraph::new(lines).block(card_block(" MINING", C_CYAN))
+    Paragraph::new(lines).block(card_block(" ✦ MINING", C_NEON_PINK))
 }
 
 fn render_security(app: &App) -> Paragraph<'static> {
@@ -3512,7 +3523,7 @@ fn render_security(app: &App) -> Paragraph<'static> {
             dim(if sig_verified { "  ✓ tip proven" } else { "  awaiting proof" }),
         ]),
     ];
-    Paragraph::new(lines).block(card_block(" SECURITY", C_VIOLET))
+    Paragraph::new(lines).block(card_block(" ✶ SECURITY", C_VBRIGHT))
 }
 
 // ── v0.7.0: AI Fleet Monitoring ─────────────────────────────────────────
@@ -3580,7 +3591,7 @@ fn render_fleet_card(app: &App) -> Paragraph<'static> {
     let mut lines = vec![status_line, mesh_line];
     lines.extend(node_lines);
 
-    Paragraph::new(lines).block(card_block(" FLEET · MESH", C_CYAN))
+    Paragraph::new(lines).block(card_block(" ● FLEET · MESH", C_NEON_CYAN))
 }
 
 fn render_block_stream(app: &App) -> Paragraph<'static> {
@@ -3689,7 +3700,7 @@ fn render_cortex_card(app: &App) -> Paragraph<'static> {
         cortex_line,
         mcp_line,
     ];
-    Paragraph::new(lines).block(card_block(" CORTEX MCP", C_GOLD))
+    Paragraph::new(lines).block(card_block(" ◆ CORTEX MCP", C_NEON_GOLD))
 }
 
 // ── v0.3.5: Browser shortcuts ────────────────────────────────────────────

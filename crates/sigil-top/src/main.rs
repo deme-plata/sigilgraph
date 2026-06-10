@@ -138,9 +138,25 @@ const LATEST: &str = VERSION; // ship cadence, not the 3-part Cargo version
 /// startup (throttled) and on `[U]`, so the running binary discovers new releases live.
 const UPDATE_MANIFEST: &str = "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-latest.json";
 /// Which prebuilt this binary self-updates to (its per-OS entry in the manifest).
-const SELF_TARGET: &str = if cfg!(windows) { "windows-x64" } else if cfg!(target_os = "macos") { "macos-arm64" } else { "linux-x64" };
+const SELF_TARGET: &str = if cfg!(all(windows, feature = "gpu")) { "windows-x64-gpu" }
+    else if cfg!(windows) { "windows-x64" }
+    else if cfg!(target_os = "macos") { "macos-arm64" }
+    else if cfg!(feature = "gpu") { "linux-x64-gpu" }
+    else { "linux-x64" };
 /// Live testnet feed (same source flux-node.html uses): status + tip + block stream.
 const DEFAULT_FEED: &str = "https://sigilgraph.fluxapp.xyz/sigil-status.json";
+/// v0.38: flux-rev SOURCE provenance, stamped at release-build time via
+/// `SIGIL_TOP_FLUX_REV=$(flux-rev snapshot crates/sigil-top)` -> the BLAKE3
+/// `full:` content address of the source tree this binary was built from.
+/// "unstamped" on ad-hoc dev builds. Surfaced in the header + `provenance` cmd
+/// + every webhook event — SIGIL north-star claim #1 made visible.
+const FLUX_REV: &str = match option_env!("SIGIL_TOP_FLUX_REV") { Some(v) => v, None => "unstamped" };
+
+/// Short display form of [`FLUX_REV`] (strip `full:`, first 10 chars).
+fn short_rev() -> String {
+    let r = FLUX_REV.strip_prefix("full:").unwrap_or(FLUX_REV);
+    r.chars().take(10).collect()
+}
 const MAX_SUPPLY_BASE: u128 = 2_100_000_000_000_000; // 21 M × 10^8
 const DECIMALS: u32 = 8;
 
@@ -1025,6 +1041,20 @@ fn main() {
         // v0.27.5: manual rollback escape hatch — revert to the previous binary the last update
         // backed up (pre-flighted before the swap). The operator's "undo a bad update" button.
         Some("revert") => { do_revert(); return; }
+        // v0.38: print this binary\'s full provenance — version, flux-rev source id,
+        // the binary\'s own BLAKE3, and which release channel/target it tracks.
+        Some("provenance") => {
+            let exe_hash = std::env::current_exe().ok()
+                .and_then(|p| std::fs::read(p).ok())
+                .map(|b| blake3::hash(&b).to_hex().to_string())
+                .unwrap_or_else(|| "?".into());
+            println!("sigil-top v{VERSION}");
+            println!("flux-rev:      {FLUX_REV}");
+            println!("binary blake3: {exe_hash}");
+            println!("channel:       {UPDATE_MANIFEST}");
+            println!("target:        {SELF_TARGET}");
+            return;
+        }
         Some("login") => {
             let seed = argv.iter().position(|a| a == "--seed").and_then(|i| argv.get(i + 1)).cloned();
             do_login(seed);
@@ -1292,13 +1322,24 @@ struct Release {
     size_bytes: u64,
     #[serde(default)]
     targets: std::collections::HashMap<String, Target>,
+    /// v0.38: flux-rev `full:` source id of the published build (display/ledger;
+    /// the binary gate stays the per-target BLAKE3).
+    #[serde(default)]
+    flux_rev: String,
 }
 
 /// Old manifest target triples that map to our short platform names.
-const LEGACY_SELF_KEYS: &[&str] = if cfg!(windows) {
+/// v0.38 VARIANT PINNING: a GPU build reads ONLY its -gpu channel key — it must
+/// never cross-grade itself to the CPU binary (or vice versa). No -gpu key in the
+/// manifest -> a GPU build simply reports "no build for windows-x64-gpu" and stays.
+const LEGACY_SELF_KEYS: &[&str] = if cfg!(all(windows, feature = "gpu")) {
+    &["windows-x64-gpu"]
+} else if cfg!(windows) {
     &["windows-x64", "x86_64-pc-windows-gnu"]
 } else if cfg!(target_os = "macos") {
     &["macos-arm64", "aarch64-apple-darwin"]
+} else if cfg!(feature = "gpu") {
+    &["linux-x64-gpu"]
 } else {
     &["linux-x64", "x86_64-unknown-linux-musl", "x86_64-unknown-linux-gnu"]
 };
@@ -1312,12 +1353,38 @@ impl Release {
                 return t.clone();
             }
         }
+        if cfg!(feature = "gpu") {
+            // v0.38: the top-level single-binary fields are the CPU build — a GPU
+            // build must NOT fall back to them (that silently downgrades GPU->CPU).
+            return Target { url: String::new(), blake3_hex: String::new(), size_bytes: 0 };
+        }
         Target {
             url: self.url.clone(),
             blake3_hex: self.blake3_hex.clone(),
             size_bytes: self.size_bytes,
         }
     }
+}
+
+/// v0.38: best-effort lifecycle telemetry -> the flux webhook bus (the cockpit
+/// feed at :4178/api/mcp-webhook). OFF unless SIGIL_TOP_WEBHOOK is set — a user
+/// install posts nothing anywhere by default. Fire-and-forget on a thread; a dead
+/// bus can never slow or break the node.
+fn flux_webhook(event: &str, detail: &str) {
+    let Ok(url) = std::env::var("SIGIL_TOP_WEBHOOK") else { return };
+    if url.trim().is_empty() { return; }
+    let body = format!(
+        r#"{{"source":"sigil-top","version":"{}","flux_rev":"{}","event":{},"detail":{}}}"#,
+        VERSION, FLUX_REV,
+        serde_json::to_string(event).unwrap_or_else(|_| "\"?\"".into()),
+        serde_json::to_string(detail).unwrap_or_else(|_| "\"\"".into()),
+    );
+    std::thread::spawn(move || {
+        let _ = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(4))
+            .build()
+            .and_then(|c| c.post(&url).header("content-type", "application/json").body(body).send());
+    });
 }
 
 /// Fetch the live release manifest (short timeout — runs on the UI thread). `None`
@@ -1909,10 +1976,12 @@ impl App {
             self.mine_stop = Some(stop);
             self.tab = Tab::Mining;
             self.toast = "▲ MINING STARTED — dual-lane BLAKE4 Φ + VDF Ω, in-process".into();
+            flux_webhook("mining_start", &format!("engine supervisor up (gpu_wanted={})", self.mine_desired_gpu.load(std::sync::atomic::Ordering::Relaxed)));
             self.toast_sticky = true;
         } else {
             if let Some(s) = self.mine_stop.take() { s.store(true, std::sync::atomic::Ordering::Relaxed); }
             self.toast = "■ mining stopped".into();
+            flux_webhook("mining_stop", "engine stopped");
             self.toast_sticky = true;
         }
     }
@@ -2136,6 +2205,7 @@ fn record_boot_attempt() -> u32 {
 }
 /// Clear the boot marker = "this version reached a healthy run".
 fn mark_boot_healthy() {
+    flux_webhook("healthy", "boot survived HEAL_SECS");
     if let Some(p) = boot_marker_path() { let _ = std::fs::remove_file(p); }
 }
 /// Arm the detached "survived HEAL_SECS → healthy" timer (decoupled from the UI loop, so a
@@ -2230,6 +2300,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // the first probe is in flight while crossterm sets up; pre-TUI prints go to stderr
     // (IN_TUI is still false), which is exactly where pre-UI diagnostics belong. ─────────
     let mut app = App::new(cfg);
+    flux_webhook("boot", concat!("sigil-top v", env!("CARGO_PKG_VERSION"), " starting"));
     // v0.10.5: async — kicks off the first fetch without blocking the first paint.
     app.request_refresh();
 
@@ -3377,6 +3448,7 @@ fn render_header(app: &App) -> Paragraph<'static> {
     let line = Line::from(vec![
         Span::styled(" ◇ SIGIL ", Style::default().bg(C_NEON_CYAN).fg(C_BG_HEAD).add_modifier(Modifier::BOLD)),
         Span::styled(format!(" v{}", VERSION), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" {}", short_rev()), Style::default().fg(C_INK)),
         Span::styled(format!(" · {} ", app.st.network), Style::default().fg(C_DIM)),
         status,
         Span::styled("  uptime ", Style::default().fg(C_DIM)),

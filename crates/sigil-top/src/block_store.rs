@@ -21,16 +21,30 @@ pub struct BlockStore {
     db: flux_db::Database,
     best_height: u64,
     best_hash_hex: String,
+    /// v0.10.0: GENESIS ANCHOR. The lowest height the chain's backfill actually serves —
+    /// SIGIL's genesis (height 0) is minted locally and is NOT served by the range-backfill
+    /// endpoint once it's pruned from the producer's RAM window, so `synced_to`/`verified_to`
+    /// can never reach it. `base` is the trust anchor: contiguity + verification both start
+    /// here, and block at `base` is accepted without a parent-linkage check (we can't fetch
+    /// its parent). Default 0 (full chain); set to 1 for SIGIL via `set_base`.
+    base: u64,
     /// Contiguous synced count: blocks 0..synced_to are ALL present, so `synced_to`
     /// is the next height needed. This (not `best_height`, which a stray live block
     /// inflates) drives the backfill cursor + the progress bar, so sync walks forward
     /// sequentially and resumes correctly instead of re-walking from 0.
     synced_to: u64,
+    /// v0.9.0: Contiguous CRYPTOGRAPHICALLY-VERIFIED count: blocks 0..verified_to have
+    /// each passed `precheck()` AND link to their parent (`header[h].parent_hash ==
+    /// header[h-1].hash()`). `synced_to` only means "downloaded"; `verified_to` means
+    /// "downloaded AND validated as one connected chain". Persisted so a restart resumes
+    /// verification instead of re-walking 0. Invariant: `verified_to <= synced_to`.
+    verified_to: u64,
 }
 
 /// Key prefix bytes (block data is keyed by 64-char hex hash, never starts with these).
 const KEY_HINDEX: u8 = 0x01; // 0x01 ++ height.to_be_bytes() -> hash_hex  (height index)
-const KEY_META: u8 = 0x02;   // 0x02'S' -> synced_to (meta)
+const KEY_META: u8 = 0x02;   // 0x02'S' -> synced_to · 0x02'V' -> verified_to  (meta)
+                             // 0x02'B' -> be(best_height) ++ best_hash_hex  (v0.35: O(1) open)
 
 fn height_key(h: u64) -> Vec<u8> {
     let mut k = Vec::with_capacity(9);
@@ -47,40 +61,80 @@ impl BlockStore {
         }
         let mut db = flux_db::Database::open(&db_path)?;
 
+        // ── v0.35 (sync-starts-earlier, DeepSeek audit S1): O(1) open. ──────────────────
+        // The old open() ITERATED THE ENTIRE DB and bincode-deserialized every block just
+        // to learn best_height — measured in MINUTES on a multi-GB store, all spent BEFORE
+        // the sync thread could even spawn. Now best_(height,hash) persists under meta 'B'
+        // (written by every put path); when present we skip the scan entirely. Stores from
+        // before 'B' fall through to the legacy scan ONCE and write 'B' = self-migrating.
+        // Crash-staleness ('B' lags the final batch if we die between batch_put and the
+        // meta put) only ever UNDER-reports best_height by ≤1 batch and self-corrects on
+        // the next put — synced_to/verified_to (the consensus-relevant watermarks) have
+        // their own keys and are untouched by this.
         let mut best_height = 0u64;
         let mut best_hash_hex = String::new();
-        let mut have_index = false;
-        let mut blocks_idx: Vec<(u64, Vec<u8>)> = Vec::new(); // (height, hash bytes) for migration
-        for (key, value) in db.iter() {
-            match key.first() {
-                Some(&KEY_HINDEX) => { have_index = true; continue; }
-                Some(&KEY_META) => continue,
-                _ => {}
-            }
-            if let Ok(block) = bincode::deserialize::<StoredBlock>(&value) {
-                if block.header.height >= best_height {
-                    best_height = block.header.height;
-                    best_hash_hex = block.hash_hex.clone();
+        let mut need_best_migration = true;
+        if let Some(v) = db.get(&[KEY_META, b'B']).ok().flatten() {
+            if v.len() >= 8 {
+                if let Ok(hb) = <[u8; 8]>::try_from(&v[..8]) {
+                    best_height = u64::from_be_bytes(hb);
+                    best_hash_hex = String::from_utf8_lossy(&v[8..]).into_owned();
+                    need_best_migration = false;
                 }
-                blocks_idx.push((block.header.height, key));
             }
         }
-        // Migrate a pre-index store (built before the height index existed) so it
-        // resumes instead of re-syncing from 0.
-        if !have_index && !blocks_idx.is_empty() {
-            for (h, hashk) in &blocks_idx {
-                let _ = db.put(&height_key(*h), hashk);
+        if need_best_migration {
+            // Legacy path: one full scan (old behavior), then persist 'B' so every
+            // subsequent open is O(1).
+            let mut have_index = false;
+            let mut blocks_idx: Vec<(u64, Vec<u8>)> = Vec::new(); // (height, hash bytes)
+            for (key, value) in db.iter() {
+                match key.first() {
+                    Some(&KEY_HINDEX) => { have_index = true; continue; }
+                    Some(&KEY_META) => continue,
+                    _ => {}
+                }
+                if let Ok(block) = bincode::deserialize::<StoredBlock>(&value) {
+                    if block.header.height >= best_height {
+                        best_height = block.header.height;
+                        best_hash_hex = block.hash_hex.clone();
+                    }
+                    blocks_idx.push((block.header.height, key));
+                }
             }
+            // Migrate a pre-index store (built before the height index existed) so it
+            // resumes instead of re-syncing from 0.
+            if !have_index && !blocks_idx.is_empty() {
+                for (h, hashk) in &blocks_idx {
+                    let _ = db.put(&height_key(*h), hashk);
+                }
+            }
+            let mut bv = best_height.to_be_bytes().to_vec();
+            bv.extend_from_slice(best_hash_hex.as_bytes());
+            let _ = db.put(&[KEY_META, b'B'], &bv);
         }
 
         let synced_to = db
             .get(&[KEY_META, b'S']).ok().flatten()
             .and_then(|v| <[u8; 8]>::try_from(v.as_slice()).ok().map(u64::from_be_bytes))
             .unwrap_or(0);
+        let verified_to = db
+            .get(&[KEY_META, b'V']).ok().flatten()
+            .and_then(|v| <[u8; 8]>::try_from(v.as_slice()).ok().map(u64::from_be_bytes))
+            .unwrap_or(0)
+            .min(synced_to); // never claim verified past what's downloaded
 
-        let mut s = BlockStore { db, best_height, best_hash_hex, synced_to };
+        let mut s = BlockStore { db, best_height, best_hash_hex, synced_to, verified_to, base: 0 };
         s.advance_synced(); // catch up the contiguous pointer to whatever's on disk
         Ok(s)
+    }
+
+    /// v0.35: persist best_(height,hash) under meta 'B' — the key that makes open() O(1)
+    /// instead of a full-db scan. Called by every put path that can raise best_height.
+    fn persist_best(&mut self) {
+        let mut v = self.best_height.to_be_bytes().to_vec();
+        v.extend_from_slice(self.best_hash_hex.as_bytes());
+        let _ = self.db.put(&[KEY_META, b'B'], &v);
     }
 
     /// True if a block at `height` is stored (via the height index).
@@ -89,8 +143,11 @@ impl BlockStore {
     }
 
     /// Advance the contiguous pointer over any consecutive heights present, persisting
-    /// it. Called after every store + once on open.
+    /// it. Called after every store + once on open. Starts at `base` (the genesis anchor):
+    /// heights below `base` are never required (not backfill-servable), so the frontier is
+    /// clamped up to `base` before walking.
     fn advance_synced(&mut self) {
+        if self.synced_to < self.base { self.synced_to = self.base; }
         let mut moved = false;
         while self.has_height(self.synced_to) {
             self.synced_to += 1;
@@ -101,8 +158,62 @@ impl BlockStore {
         }
     }
 
-    /// Contiguous synced count: blocks 0..synced_to are all present (next needed = this).
+    /// v0.10.0: The genesis-anchor height — the lowest servable height. Blocks below this are
+    /// never required for "fully synced". See the `base` field doc.
+    pub fn base(&self) -> u64 { self.base }
+
+    /// v0.10.0: Set the genesis anchor (e.g. 1 for SIGIL, whose height-0 genesis isn't
+    /// backfill-servable). Bumps `synced_to`/`verified_to` up to `base` (heights below it are
+    /// never needed) and persists the new frontier. Call once after `open`, before sync.
+    pub fn set_base(&mut self, base: u64) {
+        self.base = base;
+        if self.synced_to < base {
+            self.synced_to = base;
+            let _ = self.db.put(&[KEY_META, b'S'], &self.synced_to.to_be_bytes());
+        }
+        if self.verified_to < base { self.set_verified_to(base); }
+        self.advance_synced();
+    }
+
+    /// Contiguous synced count: blocks base..synced_to are all present (next needed = this).
     pub fn synced_to(&self) -> u64 { self.synced_to }
+
+    /// v0.9.0: Contiguous cryptographically-verified count: blocks 0..verified_to have
+    /// each passed precheck + parent linkage. The "full verifying sync" watermark.
+    pub fn verified_to(&self) -> u64 { self.verified_to }
+
+    /// v0.9.0: Persist the verified watermark. Clamped to `synced_to` (can't verify what
+    /// isn't downloaded) and monotonic guard is the caller's job — the verifier only ever
+    /// advances it. Cheap no-op if unchanged.
+    pub fn set_verified_to(&mut self, h: u64) {
+        let h = h.min(self.synced_to);
+        if h != self.verified_to {
+            self.verified_to = h;
+            let _ = self.db.put(&[KEY_META, b'V'], &self.verified_to.to_be_bytes());
+        }
+    }
+
+    /// v0.9.0: Load the full stored header at a given height (via the height index →
+    /// hash → block). Returns None if that height isn't stored. This is the read path the
+    /// chain verifier walks to recompute `hash()` and check `parent_hash` linkage.
+    pub fn get_header_at_height(&self, height: u64) -> Option<SigilBlockHeaderV0> {
+        let hashk = self.db.get(&height_key(height)).ok().flatten()?;
+        let hash_hex = String::from_utf8(hashk).ok()?;
+        self.get_block(&hash_hex).map(|b| b.header)
+    }
+
+    /// v0.33 (1M-blk/s lane): like [`Self::get_header_at_height`] but returns the FULL
+    /// [`StoredBlock`] — crucially including `hash_hex`, the block hash computed ONCE at
+    /// ingest. `SigilBlockHeaderV0::hash()` JSON-serializes the entire ~1 KB header (≈3-5 KB
+    /// of JSON text) per call (~15-25 µs); the verifier used to recompute it for EVERY
+    /// parent-linkage check, doubling per-block verify cost. Reusing the stored hash makes
+    /// linkage a 32-byte compare. (Sound: `hash_hex` was produced by OUR ingest calling
+    /// `header.hash()` on these exact stored bytes — it IS that hash, cached.)
+    pub fn get_stored_at_height(&self, height: u64) -> Option<StoredBlock> {
+        let hashk = self.db.get(&height_key(height)).ok().flatten()?;
+        let hash_hex = String::from_utf8(hashk).ok()?;
+        self.get_block(&hash_hex)
+    }
 
     pub fn put_block(&mut self, header: SigilBlockHeaderV0) -> Result<bool, String> {
         let hash = header.hash();
@@ -129,6 +240,7 @@ impl BlockStore {
         if height >= self.best_height {
             self.best_height = height;
             self.best_hash_hex = hash_hex;
+            self.persist_best(); // v0.35: keep open() O(1)
         }
         self.advance_synced(); // extend the contiguous pointer if this filled the next gap
 
@@ -149,8 +261,68 @@ impl BlockStore {
         if height >= self.best_height {
             self.best_height = height;
             self.best_hash_hex = hash_hex;
+            self.persist_best(); // v0.35: keep open() O(1)
         }
         Ok(())
+    }
+
+    /// v0.10.0: Batched fast store — write a whole chunk's blocks in ONE `batch_put`
+    /// (single WAL-lock hold) instead of 2 locked `put`s per block. The per-block path
+    /// (4096 lock acquires per 2048-block chunk) dominated ingest time under load; batching
+    /// collapses it to one. Returns how many blocks were written. Does NOT advance the
+    /// contiguous pointer — call [`Self::advance`] once after.
+    pub fn put_blocks_batch(&mut self, headers: &[SigilBlockHeaderV0]) -> usize {
+        if headers.is_empty() { return 0; }
+        // v0.33 (1M-blk/s lane): hash + serialize IN PARALLEL. `header.hash()` JSON-encodes
+        // the whole ~1 KB header (≈3-5 KB text → ~15-25 µs each) — at CHUNK=4096 that's
+        // ~60-100 ms of pure CPU per chunk, serialized on the sync-loop thread. Every
+        // header is independent, so fan the (hash, bincode) work across cores with scoped
+        // threads (no new dep); only the single batch_put stays serial. On the 48-core
+        // box this turns the ingest CPU wall from ~25 µs/blk into ~1-2 µs/blk.
+        let nthreads = std::thread::available_parallelism()
+            .map(|n| n.get()).unwrap_or(4)
+            .min(16)                       // diminishing returns past the memory bandwidth
+            .min(headers.len().max(1));
+        let chunk_sz = headers.len().div_ceil(nthreads);
+        // per-header (height, hash_hex, bincode(StoredBlock)) — computed in parallel.
+        let prepared: Vec<(u64, String, Vec<u8>)> = std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(nthreads);
+            for chunk in headers.chunks(chunk_sz) {
+                handles.push(s.spawn(move || {
+                    let mut out = Vec::with_capacity(chunk.len());
+                    for header in chunk {
+                        let hash_hex = hex::encode(header.hash());
+                        let block = StoredBlock {
+                            header: header.clone(), hash_hex: hash_hex.clone(), synced_at: 0,
+                        };
+                        if let Ok(value) = bincode::serialize(&block) {
+                            out.push((block.header.height, hash_hex, value));
+                        }
+                    }
+                    out
+                }));
+            }
+            handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+        });
+        // Serial tail: assemble the (key, value) pairs + ONE batch_put (single WAL hold).
+        let mut owned: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(prepared.len() * 2);
+        let mut max_h = self.best_height;
+        let mut max_hash = self.best_hash_hex.clone();
+        for (height, hash_hex, value) in prepared {
+            owned.push((hash_hex.clone().into_bytes(), value));              // block by hash
+            owned.push((height_key(height), hash_hex.clone().into_bytes())); // height index
+            if height >= max_h { max_h = height; max_hash = hash_hex; }
+        }
+        let refs: Vec<(&[u8], &[u8])> = owned.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+        match self.db.batch_put(&refs) {
+            Ok(()) => {
+                self.best_height = max_h;
+                self.best_hash_hex = max_hash;
+                self.persist_best(); // v0.35: ONE meta put per batch keeps open() O(1)
+                headers.len()
+            }
+            Err(_) => 0,
+        }
     }
 
     /// Advance the contiguous pointer over consecutive heights now present (one pass).
@@ -190,6 +362,7 @@ impl BlockStore {
         if height >= self.best_height {
             self.best_height = height;
             self.best_hash_hex = hash_hex.to_string();
+            self.persist_best(); // v0.35: keep open() O(1)
         }
         self.advance_synced();
         Ok(true)
@@ -222,6 +395,155 @@ pub struct BlockStoreSummary {
     pub total_blocks: usize,
     pub best_height: u64,
     pub best_hash_hex: String,
+}
+
+// ── v0.11.0: read-only query view for the embedded explorer API ──────────────
+//
+// `BlockReader` clones the underlying `flux_db::Database` (which is `Arc<RwLock<…>>`
+// internally), so it shares the SAME memtable + SSTs + block cache as the live
+// `BlockStore` owned by the P2P sync thread — it sees writes as they land, with no
+// second open and no lock duplication. This is what lets `serve.rs` answer the
+// explorer's `/api/v1/{recent,search,aether}` from the LOCAL verified spine instead
+// of blindly proxying every request to the remote sigil-rpcd.
+
+/// One row of the explorer's block/tx feed, sourced from the local store.
+#[derive(Debug, Clone, Serialize)]
+pub struct BlockRow {
+    pub h: u64,
+    pub hash: String,
+    /// short producer tag (hex prefix of the 32-byte ValidatorId), "" if unknown
+    pub prod: String,
+    /// content address = the block's own hash hex (verify via aether_verify)
+    pub cid: String,
+    pub tx_count: u32,
+    pub verified: bool,
+}
+
+/// Read-only handle over the same flux-db. Cheap to clone.
+#[derive(Clone)]
+pub struct BlockReader {
+    db: flux_db::Database,
+    /// genesis anchor / verified watermark are passed in per-call from the sync
+    /// state (the reader doesn't own them).
+    base: u64,
+}
+
+impl BlockStore {
+    /// v0.11.0: hand a read-only view of THIS store to another thread (the embedded
+    /// HTTP server). Shares the live flux-db; sees the sync thread's writes.
+    pub fn reader(&self) -> BlockReader {
+        BlockReader { db: self.db.clone(), base: self.base }
+    }
+}
+
+impl BlockReader {
+    /// v0.26 hardening #8: flush the shared flux-db (the reader holds a cloned `Database`
+    /// = same Arc as the live store), so a SIGTERM handler can durably persist the
+    /// synced/verified watermark before exit without owning the mutable store.
+    pub fn flush(&self) -> Result<(), String> { self.db.flush() }
+
+    /// Decode a stored block (either bincode `StoredBlock` or the light-client raw
+    /// JSON `{"h","hash","ts"}`) into a `BlockRow`. `verified` is true only when we
+    /// hold the full header and `header.hash()` re-derives to the stored hash hex.
+    fn row_for_hash(&self, height_hint: Option<u64>, hash_hex: &str) -> Option<BlockRow> {
+        let raw = self.db.get(hash_hex.as_bytes()).ok().flatten()?;
+        if let Ok(sb) = bincode::deserialize::<StoredBlock>(&raw) {
+            let recomputed = hex::encode(sb.header.hash());
+            let verified = recomputed == sb.hash_hex;
+            let prod = {
+                let p = hex::encode(sb.header.producer);
+                p.chars().take(6).collect::<String>()
+            };
+            return Some(BlockRow {
+                h: sb.header.height,
+                hash: sb.hash_hex,
+                prod,
+                cid: hash_hex.to_string(),
+                tx_count: sb.header.tx_count,
+                verified,
+            });
+        }
+        // light-client raw JSON form
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw) {
+            let h = v.get("h").and_then(|x| x.as_u64()).or(height_hint).unwrap_or(0);
+            let hash = v.get("hash").and_then(|x| x.as_str()).unwrap_or(hash_hex).to_string();
+            return Some(BlockRow { h, hash, prod: String::new(), cid: hash_hex.to_string(), tx_count: 0, verified: false });
+        }
+        None
+    }
+
+    fn hash_at_height(&self, h: u64) -> Option<String> {
+        let hashk = self.db.get(&height_key(h)).ok().flatten()?;
+        String::from_utf8(hashk).ok()
+    }
+
+    /// Row at a specific height (via the height index → hash → block).
+    pub fn row_at_height(&self, h: u64) -> Option<BlockRow> {
+        let hash_hex = self.hash_at_height(h)?;
+        self.row_for_hash(Some(h), &hash_hex)
+    }
+
+    /// The `n` most-recent blocks at or below `top`, newest first. Walks the height
+    /// index DOWN by point lookups (O(n)) — never a full-store scan.
+    pub fn recent_from(&self, top: u64, n: usize) -> Vec<BlockRow> {
+        let mut out = Vec::with_capacity(n);
+        let mut h = top;
+        let mut budget = n.saturating_mul(4).max(8);
+        loop {
+            if out.len() >= n || budget == 0 { break; }
+            if let Some(row) = self.row_at_height(h) { out.push(row); }
+            budget -= 1;
+            if h <= self.base { break; }
+            h -= 1;
+        }
+        out
+    }
+
+    /// Local search: numeric query → block at that height; hex query → exact hash
+    /// hit, then a bounded scan of recent blocks for a hash-prefix match. Returns []
+    /// when nothing local matches so `serve.rs` can fall through to the remote node
+    /// (which also indexes txs / full-text). `top` anchors the recent-window scan.
+    pub fn search(&self, q: &str, top: u64) -> Vec<BlockRow> {
+        let q = q.trim();
+        let mut out = Vec::new();
+        // 1. exact height
+        if let Ok(h) = q.parse::<u64>() {
+            if let Some(r) = self.row_at_height(h) { out.push(r); }
+        }
+        // 2. exact / prefix hash (hex only)
+        let is_hex = !q.is_empty() && q.chars().all(|c| c.is_ascii_hexdigit());
+        if is_hex {
+            if q.len() == 64 {
+                if let Some(r) = self.row_for_hash(None, q) {
+                    if !out.iter().any(|x: &BlockRow| x.hash == r.hash) { out.push(r); }
+                }
+            }
+            if out.len() < 12 {
+                let ql = q.to_ascii_lowercase();
+                let mut h = top;
+                let mut budget = 400usize;
+                while out.len() < 12 && budget > 0 {
+                    if let Some(r) = self.row_at_height(h) {
+                        if r.hash.to_ascii_lowercase().contains(&ql)
+                            && !out.iter().any(|x: &BlockRow| x.hash == r.hash) {
+                            out.push(r);
+                        }
+                    }
+                    budget -= 1;
+                    if h <= self.base { break; }
+                    h -= 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// flux-aether content-address verify (LOCAL, verify-don't-trust): look the cid up
+    /// as a block hash, re-derive `header.hash()`, and report whether it matches. Returns
+    /// None when the cid isn't a local block (→ serve.rs proxies to the remote aether).
+    pub fn aether_verify(&self, cid: &str) -> Option<BlockRow> {
+        self.row_for_hash(None, cid)
+    }
 }
 
 // ── v0.7.1: Streaming aether sync ──
@@ -307,6 +629,37 @@ mod tests {
             .join(format!("sigil-bstore-{}-{}", std::process::id(), tag))
             .to_string_lossy()
             .into_owned()
+    }
+
+    /// Wire-codec lab tool (env-gated, skips by default): open the REAL local block DB
+    /// (`SIGIL_BENCH_DB=/path`) and dump an exact `'H' + bincode(Vec<Header>)` backfill
+    /// payload — byte-identical to what `headers_only` puts on the wire — to
+    /// `/tmp/wire-chunk-real.bin`. Compression candidates (lz4 vs zstd) are then benched
+    /// on REAL header bytes, not synthetic test headers whose empty proofs over-compress.
+    #[test]
+    fn dump_real_wire_chunk_for_codec_bench() {
+        let db = match std::env::var("SIGIL_BENCH_DB") { Ok(p) => p, Err(_) => return };
+        let s = match BlockStore::open(&db) { Ok(s) => s, Err(e) => { eprintln!("[dump] open: {e}"); return } };
+        eprintln!("[dump] db={db} best_height={} synced_to={}", s.best_height(), s.synced_to());
+        // ONE sequential iter scan — cold point-reads on a 2.7G LSM are ~ms each (the
+        // first two versions of this dump hung for minutes probing a gappy height index).
+        // A codec bench just needs 4096 REAL header byte-streams; order doesn't matter.
+        let mut headers: Vec<SigilBlockHeaderV0> = Vec::with_capacity(4096);
+        for (key, value) in s.db.iter() {
+            if matches!(key.first(), Some(&KEY_HINDEX) | Some(&KEY_META)) { continue; }
+            if let Ok(block) = bincode::deserialize::<StoredBlock>(&value) {
+                headers.push(block.header);
+                if headers.len() >= 4096 { break; }
+            }
+        }
+        eprintln!("[dump] collected {} real headers via iter scan", headers.len());
+        if headers.is_empty() { eprintln!("[dump] no headers found"); return; }
+        headers.sort_by_key(|h| h.height);
+        let mut payload = vec![b'H'];
+        payload.extend(bincode::serialize(&headers).expect("serialize"));
+        std::fs::write("/tmp/wire-chunk-real.bin", &payload).expect("write");
+        eprintln!("[dump] wrote /tmp/wire-chunk-real.bin: {} headers, {} bytes ({:.0} B/header)",
+            headers.len(), payload.len(), payload.len() as f64 / headers.len() as f64);
     }
 
     // Catches the monitor-sync class of bug (synced_to not advancing / not resuming)

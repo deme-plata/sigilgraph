@@ -1026,7 +1026,26 @@ fn sa<S: Into<String>>(s: S) -> String {
     }).collect()
 }
 
+/// v0.40: on Windows, drop to BELOW_NORMAL priority class BEFORE any thread
+/// spawns. The OS scheduler then always favors the user's own apps — whatever
+/// sigil-top does (render, mine, opt-in sync), it can never make the desktop
+/// stutter. No crate dep: two kernel32 calls.
+#[cfg(windows)]
+fn lower_process_priority() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn SetPriorityClass(handle: isize, class: u32) -> i32;
+    }
+    const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+    unsafe {
+        let _ = SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
+    }
+}
+
 fn main() {
+    #[cfg(windows)]
+    lower_process_priority();
     enable_rich_console(); // UTF-8 + VT so icons/colours render (fixes the `?` glyphs)
     init_ui_ascii();       // decide ASCII vs rich glyphs (Windows-safe layout)
     // subcommands: login / logout (handled before the render loop)
@@ -2463,7 +2482,10 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             let animating = app.splash_until.map(|u| Instant::now() < u).unwrap_or(false)
                 || app.refresh_inflight
                 || app.mining;
-            let poll_ms = if animating { 33 } else { 200 };
+            // v0.40: 33ms full redraws are cheap on a modern terminal but heavy on the
+            // legacy CP437 conhost — halve the animating cadence on Windows so the
+            // console host never becomes a load source itself.
+            let poll_ms = if animating { if cfg!(windows) { 66 } else { 33 } } else { 200 };
             if event::poll(Duration::from_millis(poll_ms))? {
                 if let Event::Key(k) = event::read()? {
                     if k.kind == KeyEventKind::Press {

@@ -108,6 +108,10 @@ body{font-family:var(--font-sans);background:linear-gradient(135deg,#0a0e1a 0%,#
         }
         localStorage.setItem('sigil-wallet-seed', seed);
         localStorage.setItem('sigil-wallet-address', address);
+        // LANE-N: tell the local node to MINE to this (keyed) wallet, so mined coins
+        // land where [W] shows them — not the unspendable hostname-hash default.
+        // Best-effort: only the embedded :9800 node serves /api/v1/use-wallet.
+        try { fetch('/api/v1/use-wallet?address='+encodeURIComponent(address), {cache:'no-store'}); } catch(e){}
         window.location.href='sigil-wallet-tron.html';
       };
 

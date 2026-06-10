@@ -96,6 +96,19 @@ impl LocalApi {
             "/api/v1/aether" => self.aether(query),
             "/api/v1/cortex" => Some(self.cortex_json()), // always local (our engine)
             "/api/v1/peers" => self.peers(),
+            // LANE-N: the mining-wallet reconcile pair (local, never proxied).
+            // GET /api/v1/mine-wallet → the address the miner credits (what the Mining tab shows).
+            "/api/v1/mine-wallet" => Some(format!(r#"{{"mining_wallet":"{}"}}"#, crate::miner_wallet())),
+            // GET /api/v1/use-wallet?address=<64hex> → the [W] wallet claims "mine to ME",
+            // so mined coins land in the keyed wallet the operator actually sees (not the
+            // unspendable hostname-hash default). Takes effect on the next mining (re)start.
+            "/api/v1/use-wallet" => {
+                match qparam(query, "address") {
+                    Some(addr) if crate::set_mine_wallet(&addr) =>
+                        Some(format!(r#"{{"ok":true,"mining_wallet":"{}"}}"#, addr.trim())),
+                    _ => Some(r#"{"ok":false,"error":"address must be 64 hex chars"}"#.to_string()),
+                }
+            }
             _ => None,
         }
     }

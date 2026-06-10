@@ -1,15 +1,14 @@
 {
   "product": "sigil-top",
-  "version": "0.42.0",
+  "version": "0.55.0",
   "channel": "stable",
   "released": "2026-06-10",
-  "notes": "v0.42.0 (DeepSeek-guided reliability): node binds :8099 + serves money/chain routes INSTANTLY on restart; the explorer full-text index now builds in a background thread (no more synchronous re-tokenize blocking startup) with a /readyz probe + index_ready in /status. Balance/status stay responsive while the index warms up. sigil-top TUI surfaces an 'explorer: indexing…' badge while the node warms its search. Builds on the v0.40 O(n) search-index fix.",
+  "url": "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-linux-x86_64",
+  "blake3_hex": "33b0bdca9b21223bce0290a662f0810e6e7e616ccd1e08a5c430c088d7658d32",
+  "size_bytes": 16095368,
+  "notes": "v0.55.0: folds in LANE-A real-time gossip head (sub-second tip tracking) that the published 0.50.0 missed, plus the 0.42/0.50 reliability stack — instant rpcd restart (background explorer index + /readyz), O(n) search index, seamless auto-relaunch (INSTALL_EXE captured before self-replace, fixes the post-swap ENOENT), SQIsign-signed snapshots, auth-gate on :8099, BOLT11-bound LN, chain-reset detection.",
   "targets": {
-    "linux-x64": {
-      "url": "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-linux-x86_64",
-      "blake3_hex": "649ce77f4974eeec651b349a3f3ff5163e6f99a0a8d4b4a30808367bca4c4f66",
-      "sha256_hex": "ca92eab4eb2aa212c2605cb9bc3647683fccca98e954254e80b534a43c889ea5",
-      "size_bytes": 16078704
-    }
+    "linux-x64": { "url": "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-linux-x86_64", "blake3_hex": "33b0bdca9b21223bce0290a662f0810e6e7e616ccd1e08a5c430c088d7658d32", "size_bytes": 16095368 },
+    "windows-x64": { "url": "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-windows-x64.exe", "blake3_hex": "fafb056499a14c52eefaaf00a84613b915a62917291298f051b75558d333324e", "size_bytes": 27510799 }
   }
 }

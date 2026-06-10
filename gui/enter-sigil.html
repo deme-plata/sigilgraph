@@ -24,9 +24,33 @@ body{font-family:var(--font-sans);background:linear-gradient(135deg,#0a0e1a 0%,#
 .footer{text-align:center;margin-top:16px;font-size:12px;color:var(--text-muted)}
 .footer a{color:var(--accent-gold);text-decoration:none}
 .status{margin-top:14px;padding:8px 12px;border-radius:8px;background:rgba(0,212,170,0.05);border:1px solid rgba(0,212,170,0.1);text-align:center;font-family:var(--font-mono);font-size:11px;color:var(--accent-cyan)}
+/* ── chain search bar (explore the chain from the gate) ── */
+.topsearch{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:50;width:min(560px,92vw);display:flex;align-items:center;gap:9px;padding:10px 14px;border-radius:13px;cursor:text;background:linear-gradient(180deg,rgba(0,212,170,.06),rgba(149,128,255,.06));border:1px solid var(--border-color);transition:.2s}
+.topsearch::before{content:'';position:absolute;inset:-1px;border-radius:13px;padding:1px;background:linear-gradient(120deg,var(--accent-cyan),var(--accent-violet),var(--accent-gold));-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;opacity:0;transition:.2s;pointer-events:none}
+.topsearch:focus-within{border-color:transparent;box-shadow:0 0 24px rgba(0,212,170,.22)}
+.topsearch:focus-within::before{opacity:1;animation:tshue 3s linear infinite}
+@keyframes tshue{to{filter:hue-rotate(360deg)}}
+.topsearch .ts-ico{color:var(--accent-cyan);font-size:15px;flex:none}
+.topsearch input{flex:1;background:transparent;border:0;outline:none;color:var(--text-primary);font-family:var(--font-mono);font-size:13px}
+.topsearch input::placeholder{color:var(--text-muted)}
+.topsearch kbd{font-family:var(--font-mono);font-size:11px;color:var(--text-muted);background:rgba(255,255,255,.05);border:1px solid var(--border-color);border-radius:6px;padding:2px 7px}
+.wdrop{position:absolute;top:calc(100% + 7px);left:0;right:0;background:rgba(15,19,34,.98);backdrop-filter:blur(20px);border:1px solid var(--border-color);border-radius:13px;max-height:340px;overflow-y:auto;z-index:60;box-shadow:0 22px 64px rgba(0,0,0,.6);display:none;padding:6px}
+.wdrop .wr{display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:10px;cursor:pointer;transition:.12s}
+.wdrop .wr:hover{background:rgba(0,212,170,.08)}
+.wdrop .wr .wt{font-family:var(--font-mono);font-weight:600;font-size:12px;color:var(--text-primary);min-width:116px}
+.wdrop .wr .wd{flex:1;font-family:var(--font-mono);font-size:10px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wdrop .wr .wty{font-size:8px;font-family:var(--font-mono);padding:2px 7px;border-radius:999px;text-transform:uppercase}
+.wdrop .wr .wty.live{background:rgba(0,212,170,.14);color:var(--accent-cyan)}.wdrop .wr .wty.flux{background:rgba(149,128,255,.14);color:var(--accent-violet)}
+.wdrop .wfoot{padding:9px 12px;font-family:var(--font-mono);font-size:10px;color:var(--text-muted);border-top:1px solid var(--border-color);text-align:center}
     </style>
   </head>
   <body>
+    <div class="topsearch" id="wsearchWrap" onclick="document.getElementById('wsearch').focus()">
+      <span class="ts-ico">⬡</span>
+      <input id="wsearch" placeholder="Explore the chain — blocks · hashes · producers · heights…" autocomplete="off" spellcheck="false" oninput="wSearch()" onkeydown="wKey(event)">
+      <kbd>/</kbd>
+      <div class="wdrop" id="wdrop"></div>
+    </div>
     <div class="card">
       <div class="brand">
         <h1>SIGILGRAPH</h1>
@@ -86,6 +110,41 @@ body{font-family:var(--font-sans);background:linear-gradient(135deg,#0a0e1a 0%,#
         localStorage.setItem('sigil-wallet-address', address);
         window.location.href='sigil-wallet-tron.html';
       };
+
+      // ── chain search from the gate (same as wallet/explorer; routes detail to the explorer) ──
+      var _wT=null;
+      function wSearch(){
+        var q=((document.getElementById('wsearch')||{}).value||'').trim();
+        var d=document.getElementById('wdrop');
+        if(q.length<1){ if(d)d.style.display='none'; return; }
+        clearTimeout(_wT); _wT=setTimeout(function(){ wRun(q); },200);
+      }
+      function wKey(e){ if(e.key==='Enter'){ wGo(); } else if(e.key==='Escape'){ var d=document.getElementById('wdrop'); if(d)d.style.display='none'; if(e.target&&e.target.blur)e.target.blur(); } }
+      function wGo(){ var q=((document.getElementById('wsearch')||{}).value||'').trim(); if(q) location.href='/sigil-explorer.html?q='+encodeURIComponent(q); }
+      async function wRun(q){
+        var ql=q.toLowerCase(), pn={d:'delta',e:'epsilon',g:'gamma',b:'beta'}, rows=[];
+        try{ var fr=await fetch('/sigil-recent-blocks.json?cb='+Date.now(),{cache:'no-store'}); var fj=await fr.json();
+          (fj.results||[]).forEach(function(b){
+            var hit = String(b.h).indexOf(q)===0 || (ql.length>=4&&b.hash&&b.hash.toLowerCase().indexOf(ql)>=0) || (ql.length>=3&&b.prod&&(pn[b.prod.toLowerCase()]||'').indexOf(ql)>=0);
+            if(hit&&!rows.some(function(r){return r.h===b.h;})) rows.push({type:'live',h:b.h,t:'Block #'+b.h,d:'producer '+(pn[(b.prod||'').toLowerCase()]||b.prod||'?')+' · b3:'+(b.hash||'').slice(0,18)+'…',q:String(b.h)});
+          });
+        }catch(e){}
+        try{ var sr=await fetch('/api/v1/search?q='+encodeURIComponent(q),{cache:'no-store'}); var sj=await sr.json();
+          (sj.results||[]).forEach(function(x){ var m=String(x.title||'').match(/#?(\d+)/); var h=m?+m[1]:null;
+            if(!rows.some(function(r){return r.h===h;})) rows.push({type:'flux',h:h,t:x.title||'result',d:(x.snippet||'').slice(0,58),q:(h!=null?String(h):q)});
+          });
+        }catch(e){}
+        var d=document.getElementById('wdrop'); if(!d)return;
+        rows=rows.slice(0,7);
+        if(!rows.length){ d.innerHTML='<div class="wfoot">No live matches — press ↵ to search the full explorer</div>'; }
+        else{ d.innerHTML=rows.map(function(r){ return '<div class="wr" onclick="location.href=\'/sigil-explorer.html?q='+encodeURIComponent(r.q)+'\'"><span class="wty '+r.type+'">'+r.type+'</span><span class="wt">'+r.t+'</span><span class="wd">'+(r.d||'')+'</span></div>'; }).join('')+'<div class="wfoot">↵ open in the SIGIL explorer</div>'; }
+        d.style.display='block';
+      }
+      // this script is a module (own scope) — expose the handlers the inline attributes call,
+      // exactly like `window.go` above.
+      window.wSearch=wSearch; window.wKey=wKey; window.wGo=wGo; window.wRun=wRun;
+      document.addEventListener('keydown',function(e){ if(e.key==='/'&&document.activeElement.id!=='wsearch'&&document.activeElement.id!=='seed'){ var s=document.getElementById('wsearch'); if(s){ e.preventDefault(); s.focus(); } } });
+      document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWrap')){ var d=document.getElementById('wdrop'); if(d)d.style.display='none'; } });
     </script>
   </body>
 </html>

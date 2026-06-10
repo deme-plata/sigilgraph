@@ -147,16 +147,19 @@ pub fn process_ln_deposit(
     ledger: &mut BridgeLedger,
     recipient: impl Into<String>,
     ln: &LnProof,
+    expected_payee: Option<&[u8]>,
 ) -> Result<MintReceipt, BridgeError> {
-    ln.verify()?; // SHA256(preimage) == payment_hash ⇒ paid
-    if ledger.is_spent(&ln.payment_hash) {
+    // Verifies the BOLT11 secp256k1 signature, binds amount + payment_hash to the
+    // SIGNED invoice, and checks the preimage proves payment. `expected_payee`
+    // (the bridge's own LN node pubkey) restricts mints to invoices it issued.
+    let v = ln.verify(expected_payee)?;
+    if ledger.is_spent(&v.payment_hash) {
         return Err(BridgeError::ReplayedDeposit);
     }
-    let amount = ln.amount_sats();
-    ledger.lock(BridgeAsset::Btc, amount)?;
-    ledger.mint(BridgeAsset::Btc, amount)?;
-    ledger.mark_spent(ln.payment_hash);
-    Ok(MintReceipt { asset: BridgeAsset::Btc, amount, recipient: recipient.into(), supply_root: ledger.root() })
+    ledger.lock(BridgeAsset::Btc, v.amount_sats)?;
+    ledger.mint(BridgeAsset::Btc, v.amount_sats)?;
+    ledger.mark_spent(v.payment_hash);
+    Ok(MintReceipt { asset: BridgeAsset::Btc, amount: v.amount_sats, recipient: recipient.into(), supply_root: ledger.root() })
 }
 
 #[cfg(test)]
@@ -206,20 +209,32 @@ mod tests {
 
     #[test]
     fn lightning_deposit_mints_wbtc_instantly() {
-        let mut ledger = BridgeLedger::new();
+        use bitcoin_hashes::{sha256 as bh_sha256, Hash};
+        use lightning_invoice::{Currency, InvoiceBuilder};
+        use secp256k1::{Secp256k1, SecretKey};
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(&[0x11; 32]).unwrap();
+        let payee = sk.public_key(&secp).serialize().to_vec();
         let preimage = [7u8; 32];
-        let payment_hash = {
-            let d = Sha256::digest(preimage);
-            let mut o = [0u8; 32];
-            o.copy_from_slice(&d);
-            o
-        };
-        let ln = LnProof { payment_hash, preimage, amount_msat: 250_000_000 }; // 250k sat
-        let r = process_ln_deposit(&mut ledger, "qnk_ln_user", &ln).unwrap();
-        assert_eq!(r.amount, 250_000);
-        assert_eq!(ledger.peg(BridgeAsset::Btc), AssetPeg { locked: 250_000, minted: 250_000 });
-        assert!(ledger.peg_ok());
+        let inv = InvoiceBuilder::new(Currency::Bitcoin)
+            .description("ln deposit".into())
+            .payment_hash(bh_sha256::Hash::hash(&preimage))
+            .payment_secret(lightning_invoice::PaymentSecret([0x42u8; 32]))
+            .current_timestamp()
+            .min_final_cltv_expiry_delta(144)
+            .amount_milli_satoshis(250_000_000) // 250k sat
+            .build_signed(|h| secp.sign_ecdsa_recoverable(h, &sk))
+            .unwrap();
+        let ln = LnProof { bolt11: inv.to_string(), preimage };
+        let r = process_ln_deposit(&mut ledger_new(), "qnk_ln_user", &ln, Some(&payee)).unwrap();
+        assert_eq!(r.amount, 250_000, "amount bound to the SIGNED invoice");
+        let mut l = BridgeLedger::new();
+        process_ln_deposit(&mut l, "qnk_ln_user", &ln, Some(&payee)).unwrap();
+        assert_eq!(l.peg(BridgeAsset::Btc), AssetPeg { locked: 250_000, minted: 250_000 });
+        assert!(l.peg_ok());
     }
+
+    fn ledger_new() -> BridgeLedger { BridgeLedger::new() }
 
     #[test]
     fn deposit_mints_amount_and_recipient_bound_to_the_proof() {

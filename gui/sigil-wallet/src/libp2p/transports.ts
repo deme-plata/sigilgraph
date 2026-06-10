@@ -13,10 +13,23 @@
 
 import { webSockets } from '@libp2p/websockets'
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2'
-// WebRTC import REMOVED - disabled to prevent IP leaks
-// import { webRTC } from '@libp2p/webrtc'
+// v0.9.1: WebRTC RE-ENABLED for true direct browser-to-browser (operator decision
+// 2026-06-09). Tradeoff accepted: ICE candidate gathering exposes each browser's
+// public IP to its peer (and to STUN). The privacy-only relay path still exists as
+// a fallback (circuitRelayTransport below) for when a direct upgrade can't be made.
+import { webRTC } from '@libp2p/webrtc'
 
 import { logTor } from './torConfig'
+
+/**
+ * STUN servers for WebRTC ICE (NAT traversal / srflx candidate gathering).
+ * Public STUN only — no TURN, so symmetric-NAT ↔ symmetric-NAT pairs may fail to
+ * connect directly and fall back to circuit relay. Add a TURN entry here if direct
+ * success rate needs to be ~100% (costs bandwidth).
+ */
+export const WEBRTC_ICE_SERVERS: RTCIceServer[] = [
+  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+]
 
 /**
  * Create WebSocket transport for Tor bridge connections
@@ -36,22 +49,22 @@ export function createWebSocketTransport() {
 }
 
 /**
- * WebRTC transport - DISABLED for privacy
+ * WebRTC transport — direct browser-to-browser (v0.9.1)
  *
- * 🚨 SECURITY: WebRTC is disabled to prevent IP leaks
+ * The circuit relay (below) is used as the SIGNALING channel: two browsers first
+ * meet over a relayed connection through the Epsilon bootstrap, then libp2p
+ * exchanges SDP/ICE over that circuit and upgrades to a DIRECT WebRTC datachannel.
+ * After the upgrade, browser↔browser traffic no longer transits Epsilon.
  *
- * Why WebRTC leaks IP even with Tor:
- * - STUN servers are contacted directly by the browser
- * - ICE candidates contain real public IP addresses
- * - Even with a proxy, WebRTC bypasses it for media/data channels
+ * ⚠️ Privacy note: ICE gathering reveals the browser's public IP to the peer (and
+ * STUN). This is the accepted tradeoff for direct connectivity; the relay path
+ * remains as a fallback when a direct upgrade fails.
  *
- * Browser-to-browser connections use Circuit Relay through Tor instead.
- *
- * @deprecated WebRTC disabled - use Circuit Relay through Tor
+ * @returns WebRTC transport configuration
  */
 export function createWebRTCTransport() {
-  logTor('warn', 'WebRTC transport requested but DISABLED for privacy')
-  throw new Error('WebRTC is disabled to prevent IP leaks. Use Circuit Relay through Tor.')
+  logTor('info', 'Creating WebRTC transport (direct browser-to-browser, relay-signaled)')
+  return webRTC({ rtcConfiguration: { iceServers: WEBRTC_ICE_SERVERS } })
 }
 
 /**
@@ -59,10 +72,11 @@ export function createWebRTCTransport() {
  *
  * 🧅 TOR: Circuit Relay routes through Tor-connected bootstrap node
  *
- * Browser A → Tor Bridge → Bootstrap Relay → Tor Bridge → Browser B
+ * Browser A → Bootstrap Relay → Browser B (initial reach + WebRTC signaling)
  *
- * This is the ONLY way for browsers to communicate with each other
- * since WebRTC is disabled for privacy.
+ * v0.9.1: This is the SIGNALING + fallback path. Once two browsers meet over the
+ * relay, the WebRTC transport upgrades them to a direct datachannel; the relay
+ * remains the fallback when a direct upgrade can't be established.
  *
  * v3.6.0: Circuit relay through Tor for browser-to-browser
  *
@@ -95,17 +109,19 @@ export function createTransports() {
 
   const transports = []
 
-  // 1. WebSocket through Tor bridge (PRIMARY)
+  // 1. WebSocket to bootstrap (PRIMARY — only way a browser can dial out)
   transports.push(createWebSocketTransport())
-  logTor('info', '✅ WebSocket transport (Tor bridge)')
+  logTor('info', '✅ WebSocket transport (bootstrap)')
 
-  // 2. Circuit Relay through Tor (browser-to-browser)
+  // 2. WebRTC — DIRECT browser-to-browser (relay-signaled). Must be present so the
+  //    relayed connection can be upgraded to a direct datachannel (v0.9.1).
+  transports.push(createWebRTCTransport())
+  logTor('info', '✅ WebRTC transport (direct browser-to-browser)')
+
+  // 3. Circuit Relay — initial reach + WebRTC signaling channel, and fallback path
+  //    when a direct upgrade can't be made.
   transports.push(createCircuitRelayTransport())
-  logTor('info', '✅ Circuit Relay transport (via Tor)')
-
-  // 3. NO WebRTC - explicitly NOT added
-  // WebRTC uses STUN which leaks real IP even through proxy
-  logTor('info', '🚫 WebRTC DISABLED (IP leak prevention)')
+  logTor('info', '✅ Circuit Relay transport (signaling + fallback)')
 
   logTor('info', `Transport stack ready: ${transports.length} transports`)
   return transports
@@ -195,13 +211,13 @@ export function getTransportStats() {
       description: 'WebSocket Secure to libp2p bootstrap node',
     },
     webrtc: {
-      enabled: false, // v3.6.0: DISABLED for privacy
-      reason: 'Disabled - STUN/ICE leaks real IP address',
-      description: 'WebRTC is permanently disabled to prevent IP leaks',
+      enabled: true, // v0.9.1: RE-ENABLED for direct browser-to-browser
+      reason: 'Direct datachannel after relay-signaled upgrade; ICE exposes public IP',
+      description: 'WebRTC enabled for direct browser-to-browser (relay used as signaling)',
     },
     relay: {
       enabled: true,
-      description: 'Circuit Relay through Tor for browser-to-browser connections',
+      description: 'Circuit Relay: initial reach + WebRTC signaling + fallback path',
     },
   }
 }

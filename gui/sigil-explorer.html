@@ -22,10 +22,33 @@ body{min-height:100vh;background:var(--bg);color:var(--text);font-family:'Rajdha
 .brand{font-family:'Orbitron';font-weight:800;font-size:17px;letter-spacing:2px;white-space:nowrap}
 .brand span{color:var(--cyan)}
 .net{font-family:'JetBrains Mono';font-size:10px;color:var(--teal);border:1px solid rgba(0,224,198,.35);border-radius:999px;padding:3px 9px;background:rgba(0,224,198,.08)}
-.search-wrap{flex:1;max-width:400px;position:relative}
-.search-wrap input{width:100%;padding:10px 14px;background:rgba(255,255,255,.03);border:1px solid var(--line);border-radius:10px;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px;outline:none;transition:.2s}
-.search-wrap input:focus{border-color:var(--cyan);box-shadow:0 0 0 2px rgba(33,212,253,.12)}
-.search-wrap .hint{position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:10px;color:var(--dim);font-family:'JetBrains Mono',monospace}
+/* ── Wicked-cool global search bar ── */
+.search-wrap{flex:1;max-width:460px;position:relative;display:flex;align-items:center;gap:9px;padding:0 14px;height:42px;border-radius:13px;cursor:text;
+  background:linear-gradient(180deg,rgba(33,212,253,.05),rgba(149,128,255,.05));border:1px solid var(--line);transition:.22s;overflow:hidden}
+.search-wrap::before{content:'';position:absolute;inset:-1px;border-radius:13px;padding:1px;background:linear-gradient(120deg,var(--cyan),var(--violet),var(--teal));-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;opacity:0;transition:.22s;pointer-events:none}
+.search-wrap:focus-within{border-color:transparent;box-shadow:0 0 24px rgba(33,212,253,.22)}
+.search-wrap:focus-within::before{opacity:1;animation:searchGlow 3s linear infinite}
+@keyframes searchGlow{to{filter:hue-rotate(360deg)}}
+.search-wrap .search-ico{color:var(--cyan);font-size:15px;filter:drop-shadow(0 0 5px var(--glow));flex:none}
+.search-wrap input{flex:1;width:100%;padding:0;background:transparent;border:0;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:13px;outline:none}
+.search-wrap input::placeholder{color:var(--dim)}
+.search-wrap .search-kbd{flex:none;font-family:'JetBrains Mono';font-size:11px;color:var(--dim);background:rgba(255,255,255,.05);border:1px solid var(--line);border-radius:6px;padding:2px 7px;line-height:1}
+/* ── Search results modal ── */
+.search-modal{position:fixed;inset:0;z-index:320;display:none;align-items:flex-start;justify-content:center;background:rgba(2,5,9,.72);backdrop-filter:blur(7px);padding-top:9vh}
+.search-modal.on{display:flex;animation:blkIn .16s ease}
+.search-card{width:92%;max-width:680px;max-height:74vh;display:flex;flex-direction:column;background:var(--panel);backdrop-filter:blur(26px);border:1px solid var(--line);border-radius:20px;box-shadow:0 28px 80px rgba(0,0,0,.6),0 0 44px rgba(33,212,253,.12);overflow:hidden}
+.search-card .schead{display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid var(--line)}
+.search-card .schead .q{flex:1;font-family:'JetBrains Mono';font-size:14px;color:var(--cyan)}
+.search-card .schead .cnt{font-family:'JetBrains Mono';font-size:11px;color:var(--dim)}
+.search-card .scbody{overflow-y:auto;padding:8px}
+.sresult{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:12px;cursor:pointer;transition:.14s}
+.sresult:hover{background:rgba(33,212,253,.07);transform:translateX(3px)}
+.sresult .stype{font-size:9px;font-family:'JetBrains Mono';padding:3px 8px;border-radius:999px;white-space:nowrap;text-transform:uppercase;letter-spacing:.5px}
+.sresult .stype.live{background:rgba(0,224,198,.14);color:var(--teal)}
+.sresult .stype.flux{background:rgba(149,128,255,.14);color:var(--violet)}
+.sresult .stitle{font-family:'Orbitron';font-size:14px;color:var(--text);min-width:128px}
+.sresult .ssub{flex:1;font-family:'JetBrains Mono';font-size:11px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sresult .sscore{font-family:'JetBrains Mono';font-size:10px;color:var(--gold)}
 .live-stats{display:flex;gap:16px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim)}
 .live-stats .ok{color:var(--teal)}
 .stats-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;margin-bottom:20px}
@@ -72,12 +95,19 @@ body{min-height:100vh;background:var(--bg);color:var(--text);font-family:'Rajdha
   <div class="topbar">
     <div class="brand"><span>⬡</span> SIGIL Explorer</div>
     <div class="net">sigil-g0</div>
-    <div class="search-wrap">
-      <input id="search" placeholder="search blocks, txns, addresses, hashes…" oninput="doSearch()" onfocus="this.select()">
-      <div class="hint" id="shint">↩ fluxc</div>
-      <div class="search-results" id="sresults"></div>
+    <div class="search-wrap" onclick="document.getElementById('search').focus()">
+      <span class="search-ico">⬡</span>
+      <input id="search" placeholder="Search blocks · hashes · producers · heights…" autocomplete="off" spellcheck="false" oninput="doSearch()" onkeydown="if(event.key==='Enter')doSearch(true);if(event.key==='Escape')this.blur()" onfocus="this.select()">
+      <kbd class="search-kbd">/</kbd>
     </div>
     <div class="live-stats"><span class="ok" id="live-dot">●</span> <span id="live-txt">loading…</span></div>
+  </div>
+
+  <div class="search-modal" id="searchModal" onclick="if(event.target===this)closeSearchModal()">
+    <div class="search-card">
+      <div class="schead"><span class="search-ico">⬡</span><span class="q" id="scq"></span><span class="cnt" id="sccnt"></span><span style="cursor:pointer;color:var(--dim);font-size:17px" onclick="closeSearchModal()">✕</span></div>
+      <div class="scbody" id="scbody"></div>
+    </div>
   </div>
 
   <div class="stats-grid" id="stats"></div>
@@ -87,6 +117,8 @@ body{min-height:100vh;background:var(--bg);color:var(--text);font-family:'Rajdha
   <div class="section"><h2>⟷ Transactions</h2><div class="txn-list" id="txns"><div class="empty">Loading…</div></div></div>
   
   <div class="section"><h2>◈ Peers</h2><div class="peers-list" id="peers"><div class="empty">Loading…</div></div></div>
+
+  <div class="section"><h2>⚙ Cortex Optimizer</h2><div id="cortex"><div class="empty">idle — press [C] in the cockpit to run a flux-cortex loop</div></div></div>
 </div>
 
 <div class="floating-btns">
@@ -97,62 +129,144 @@ body{min-height:100vh;background:var(--bg);color:var(--text);font-family:'Rajdha
 
 <script>
 var _searchSeq=0;
-async function doSearch(){
+// HYBRID search: flux-search backend (/api/v1/search — real TF-IDF index over chain
+// history) MERGED with a live scan of the DAG feed (the millions-height blocks the
+// backend hasn't indexed yet). Results render in a wicked-cool modal; block hits open
+// the block-detail modal. This is why search "actually works" for the live tip now.
+function closeSearchModal(){var m=document.getElementById('searchModal');if(m)m.classList.remove('on');}
+window.closeSearchModal=closeSearchModal;
+var _searchT=null;
+async function doSearch(force){
   var q=document.getElementById('search').value.trim();
-  var r=document.getElementById('sresults');
-  if(!q||q.length<2){r.style.display='none';return}
-  var seq=++_searchSeq;
-  // flux-native search: the node's /api/v1/search (flux-db + flux-search). Served by
-  // sigil-top → same-origin /api proxies to the node. A 64-hex address returns that
-  // wallet's txs (exact tag lookup); else full-text over blocks/txs.
-  var results=[];
+  if(q.length<1){ closeSearchModal(); return; }   // only empty closes — 1-char (e.g. "1") still searches
+  if(!force){ clearTimeout(_searchT); _searchT=setTimeout(function(){doSearch(true);},220); return; }
+  var seq=++_searchSeq, results=[]; window._sr=[];
+  var ql=q.toLowerCase(), pn={d:'delta',e:'epsilon',g:'gamma',b:'beta'};
+  function _seenByHeight(h){ var s=window._seen||{}; for(var k in s){ if(s[k].h===h) return s[k]; } return null; }
+  // 1) flux-search backend (real TF-IDF index, scored). Link each hit to a seen block so it's clickable.
   try{
     var resp=await fetch('/api/v1/search?q='+encodeURIComponent(q),{cache:'no-store'});
     var j=await resp.json();
-    if(seq!==_searchSeq) return;               // stale response — ignore
-    results=(j.results||[]).map(function(x){return{t:x.title||x.id||'result',d:(x.snippet||'').slice(0,72),h:x.kind||''}});
-  }catch(e){ /* node unreachable → local block fallback */ }
-  if(results.length===0){
-    (window._blocks||[]).forEach(function(b){
-      if((b.hash&&b.hash.includes(q))||String(b.h).includes(q)) results.push({t:'Block #'+b.h,d:(b.hash||'').slice(0,32)+'…',h:b.h});
+    if(seq!==_searchSeq) return;
+    (j.results||[]).forEach(function(x){
+      var bh=_heightFromTitle(x.title), blk=(bh!=null)?_seenByHeight(bh):null;
+      results.push({type:'flux',title:x.title||x.id||'result',sub:(x.snippet||x.id||'').slice(0,90),score:(x.score!=null?(+x.score).toFixed(2):''),sridx:(blk?window._sr.push(blk)-1:-1)});
     });
-  }
-  if(results.length>0){
-    r.innerHTML=results.slice(0,15).map(function(x){return'<div class="sr"><span class="srt">'+x.t+'</span><span class="srd">'+x.d+'</span><span style="color:var(--gold);margin-left:auto">'+x.h+'</span></div>'}).join('');
-  }else{
-    r.innerHTML='<div class="sr"><span class="srd">No results for "'+q+'" — try a wallet address, block #, or keyword</span></div>';
-  }
-  r.style.display='block';
+  }catch(e){}
+  // 2) scan EVERY block we've shown (rolling 'seen' buffer) — survives the ~6s live window
+  //    so a hash you just read is still findable. height / full-or-partial hash / producer / genesis.
+  var pool=[]; for(var k in (window._seen||{})) pool.push(window._seen[k]);
+  pool.sort(function(a,b){return (b.h||0)-(a.h||0);});
+  pool.forEach(function(b){
+    var title=b.isGenesis?'⬡ Genesis #0':'Block #'+b.h;
+    var hit = String(b.h)===q || (q.length>1&&String(b.h).indexOf(q)===0)
+      || (b.hash&&ql.length>=4&&b.hash.toLowerCase().indexOf(ql)>=0)
+      || (b.prod&&ql.length>=3&&(pn[b.prod.toLowerCase()]||'').indexOf(ql)>=0)
+      || (b.isGenesis&&((ql.length>=3&&'genesis'.indexOf(ql)===0)||ql==='#0'||q==='0'));
+    if(hit && !results.some(function(r){return r.title===title;}))
+      results.push({type:'live',title:title,sub:(b.isGenesis?'genesis · sigil-g0 · '+(b.sig_scheme||'SqiSign5')+' · b3:'+(b.hash||'').slice(0,22)+'…':'producer '+(pn[(b.prod||'').toLowerCase()]||b.prod||'?')+' · b3:'+(b.hash||'').slice(0,22)+'…'),score:'',sridx:window._sr.push(b)-1});
+  });
+  openSearchModal(q,results.slice(0,40));
 }
+function _heightFromTitle(t){ if(!t)return null; var m=String(t).match(/#?(\d+)/); return m?+m[1]:null; }
+function openSearchHit(i){ closeSearchModal(); var b=(window._sr||[])[i]; if(b)openBlockModal(b); }
+window.openSearchHit=openSearchHit;
+function openSearchModal(q,results){
+  document.getElementById('scq').textContent=q||'…';
+  document.getElementById('sccnt').textContent=results.length+' result'+(results.length===1?'':'s');
+  var body=document.getElementById('scbody');
+  if(!results.length){
+    body.innerHTML='<div class="empty">No matches for "'+(q||'')+'" — try a block height, full/partial hash, or producer (delta/epsilon)</div>';
+  }else{
+    body.innerHTML=results.map(function(x){
+      var act=(x.sridx!=null&&x.sridx>=0)?' onclick="openSearchHit('+x.sridx+')"':' style="cursor:default"';
+      return'<div class="sresult"'+act+'><span class="stype '+x.type+'">'+x.type+'</span><span class="stitle">'+x.title+'</span><span class="ssub">'+x.sub+'</span>'+(x.score?'<span class="sscore">'+x.score+'</span>':'')+'</div>';
+    }).join('');
+  }
+  document.getElementById('searchModal').classList.add('on');
+}
+window.doSearch=doSearch; window.openSearchModal=openSearchModal;
+// keyboard: "/" focuses search, Esc closes the modal
+document.addEventListener('keydown',function(e){
+  if(e.key==='/'&&document.activeElement.id!=='search'){e.preventDefault();var s=document.getElementById('search');if(s){s.focus();s.select();}}
+  if(e.key==='Escape'){closeSearchModal();}
+});
 
 async function load(){
+  // v0.11.5: the REAL chain height + recent blocks come from the DAG producer feed
+  // (sigil-node journal → /sigil-recent-blocks.json, millions height, ~107 blk/s).
+  // /api/v1/status reports a different sub-counter and /api/v1/recent is the stale
+  // dual-lane mining sub-chain — neither reflects the live testnet tip.
+  var dag=null;
+  try{ let fr=await fetch('/sigil-recent-blocks.json',{cache:'no-store'}); dag=await fr.json(); }catch(e){}
+  window._dag=dag;
+
   // node status via the same-origin /api proxy → stats bar
   try{
     let r=await fetch('/api/v1/status',{cache:'no-store'}); let d=await r.json();
-    var height=(d.height!=null?d.height:(d.data&&d.data.height))||0;
+    // DAG feed height is authoritative for the headline (the live tip); status height
+    // is a sub-counter. Fall back to status only if the feed is unavailable.
+    var height=(dag&&dag.height)||(d.height!=null?d.height:(d.data&&d.data.height))||0;
     var peers=(d.peers!=null?d.peers:(d.data&&d.data.peer_count))||0;
-    var net=d.network||(d.data&&d.data.network_id)||'sigil-g0';
-    var status=d.status||(d.data&&d.data.status)||'ready';
-    document.getElementById('live-txt').textContent=net+' · h '+Number(height).toLocaleString()+' · '+peers+' peers';
+    var net=(dag&&dag.network)||d.network||(d.data&&d.data.network_id)||'sigil-g0';
+    var status=d.status||(d.data&&d.data.status)||'producing';
+    // v0.11: when sigil-top answers from its LOCAL verified spine it tags source +
+    // exposes the cryptographically-verified watermark + break alarm.
+    var local=d.source==='sigil-top-local';
+    var verified=(d.verified!=null?d.verified:null);
+    var brk=d.verify_break||null;
+    var srcBadge=local?'⬡ local spine':'⬡ remote node';
+    document.getElementById('live-txt').textContent=net+' · h '+Number(height).toLocaleString()+' · '+peers+' peers · '+srcBadge;
+    var verTile=(verified!=null)?
+      '<div class="stat"><div class="lbl">Verified Spine</div><div class="val '+(brk?'g':'t')+'">'+(brk?'⚠ break':'⛓ '+Number(verified).toLocaleString())+'</div></div>':
+      '<div class="stat"><div class="lbl">Index</div><div class="val g">flux-search</div></div>';
     document.getElementById('stats').innerHTML=
       '<div class="stat"><div class="lbl">Block Height</div><div class="val c">'+Number(height).toLocaleString()+'</div></div>'+
       '<div class="stat"><div class="lbl">Network</div><div class="val v">'+net+'</div></div>'+
       '<div class="stat"><div class="lbl">Peers</div><div class="val t">'+peers+'</div></div>'+
       '<div class="stat"><div class="lbl">Status</div><div class="val t">'+status+'</div></div>'+
-      '<div class="stat"><div class="lbl">Index</div><div class="val g">flux-search</div></div>'+
-      '<div class="stat"><div class="lbl">Store</div><div class="val v">flux-db</div></div>';
+      verTile+
+      '<div class="stat"><div class="lbl">Store</div><div class="val v">flux-db'+(local?' · local':'')+'</div></div>';
   }catch(e){ document.getElementById('live-txt').textContent='node unreachable'; }
 
-  // Recent Blocks ← flux-history (by_kind block)
+  // Recent Blocks ← LIVE DAG producer feed (millions height). Falls back to the
+  // rpcd mining-chain /api/v1/recent only if the feed is unavailable.
   try{
-    let r=await fetch('/api/v1/recent?kind=block&limit=40',{cache:'no-store'}); let j=await r.json();
-    var blocks=(j.results||[]).map(function(e){return{h:e.h,hash:e.hash,prod:e.prod,cid:e.cid}});
+    var blocks=[];
+    if(dag&&dag.results&&dag.results.length){
+      blocks=dag.results.map(function(e){return{h:e.h,hash:e.hash,prod:e.prod,cid:e.cid,parents:e.parents,wallet_root:e.wallet_root,dex_root:e.dex_root,event_root:e.event_root,contract_root:e.contract_root,dag:true}});
+    } else {
+      let r=await fetch('/api/v1/recent?kind=block&limit=40',{cache:'no-store'}); let j=await r.json();
+      blocks=(j.results||[]).map(function(e){return{h:e.h,hash:e.hash,prod:e.prod,cid:e.cid,ts:e.ts,content:e.content,title:e.title}});
+    }
+    // Always include the GENESIS block (height 0) so it's findable + clickable even
+    // though it's outside the recent-feed window. Fetched once from /sigil-tip.json.
+    try{
+      if(!window._genesis){
+        let gr=await fetch('/sigil-tip.json',{cache:'no-store'}); let g=await gr.json();
+        if(g&&g.height===0){
+          window._genesis={h:0,hash:g.tip_hash,prod:'⬡',cid:g.tip_hash,isGenesis:true,parents:[],
+            wallet_root:g.wallet_state_root,dex_root:g.dex_state_root,event_root:g.event_log_root,contract_root:g.contract_state_root,
+            sig_scheme:g.sig_scheme,ts:g.timestamp_ms};
+        }
+      }
+    }catch(e){}
+    if(window._genesis){ blocks=blocks.concat([window._genesis]); }
     window._blocks=blocks;
+    // Rolling "seen" buffer: the live window holds only ~40 blocks (~6s of chain at
+    // 107 blk/s), so a hash the user just read scrolls out before they can search it.
+    // Accumulate every block we've rendered (keyed by hash) so it stays searchable.
+    window._seen=window._seen||{};
+    blocks.forEach(function(b){ if(b&&b.hash) window._seen[b.hash.toLowerCase()]=b; });
+    var _sk=Object.keys(window._seen);
+    if(_sk.length>5000){ _sk.slice(0,_sk.length-5000).forEach(function(k){delete window._seen[k];}); }
     var el=document.getElementById('blocks');
-    el.innerHTML=blocks.length?blocks.map(function(b){
+    el.innerHTML=blocks.length?blocks.map(function(b,i){
       var cl='badge-d'; if(b.prod==='E')cl='badge-e'; else if(b.prod==='G')cl='badge-g'; else if(b.prod==='B')cl='badge-b';
-      var cid=b.cid?'<span class="hash" style="color:var(--violet);font-size:10px;cursor:pointer;flex:none" title="content address (blake3) — click to verify" onclick="verifyCid(\''+b.cid+'\')">⬡b3:'+b.cid.slice(0,10)+'…</span>':'';
-      return'<div class="block-row"><span class="bh">#'+b.h+'</span><span class="hash">'+(b.hash||'')+'</span>'+cid+'<span class="badge '+cl+'">'+(b.prod||'?')+'</span></div>';
+      if(b.isGenesis)cl='badge-e';
+      var cid=b.cid?'<span class="hash" style="color:var(--violet);font-size:10px;cursor:pointer;flex:none" title="content address (blake3) — click to verify" onclick="event.stopPropagation();verifyCid(\''+b.cid+'\')">⬡b3:'+b.cid.slice(0,10)+'…</span>':'';
+      var badge=b.isGenesis?'<span class="badge badge-e" style="font-weight:700">⬡ GENESIS</span>':'<span class="badge '+cl+'">'+(b.prod||'?')+'</span>';
+      return'<div class="block-row" onclick="openBlockModal('+i+')" title="click for block details" style="'+(b.isGenesis?'border-color:rgba(251,191,36,.4);background:rgba(251,191,36,.04)':'')+'"><span class="bh"'+(b.isGenesis?' style="color:var(--gold)"':'')+'>#'+b.h+'</span><span class="hash">'+(b.hash||'')+'</span>'+cid+badge+'</div>';
     }).join(''):'<div class="empty">No blocks indexed yet</div>';
   }catch(e){}
 
@@ -165,6 +279,33 @@ async function load(){
       var cid=t.cid?'<span style="color:var(--violet);font-family:\'JetBrains Mono\';font-size:9px;cursor:pointer" title="content address (blake3) — click to verify" onclick="verifyCid(\''+t.cid+'\')">⬡'+t.cid.slice(0,8)+'…</span>':'';
       return'<div class="txn"><span class="type">'+((t.kind||'tx').toUpperCase())+'</span><span class="detail">'+(t.title||'')+'</span>'+cid+'<span class="amt">'+(t.content||'').slice(0,24)+'</span></div>';
     }).join(''):'<div class="empty">No transactions yet — mine or swap to see activity</div>';
+  }catch(e){}
+
+  // Peers ← local mesh state (was a dead "Loading…" placeholder before v0.11)
+  try{
+    let r=await fetch('/api/v1/peers',{cache:'no-store'}); let j=await r.json();
+    var pl=(j.results||j.peers||[]);
+    var el=document.getElementById('peers');
+    el.innerHTML=pl.length?pl.map(function(p){
+      var nm=(typeof p==='string')?p:(p.name||p.id||'peer');
+      return'<span class="peer">◈ '+nm+'</span>';
+    }).join(''):'<div class="empty">No peers — solo / light monitor</div>';
+  }catch(e){}
+
+  // Cortex ← flux-cortex optimization engine running inside sigil-top (local-only)
+  try{
+    let r=await fetch('/api/v1/cortex',{cache:'no-store'}); let c=await r.json();
+    var el=document.getElementById('cortex');
+    if(c&&c.active){
+      var g=(c.gain_pct||0);
+      el.innerHTML='<div class="stats-grid">'+
+        '<div class="stat"><div class="lbl">Cortex Loops</div><div class="val v">'+(c.loops||0)+'</div></div>'+
+        '<div class="stat"><div class="lbl">Last Gain</div><div class="val '+(g>0?'t':'g')+'">'+(g>0?'+':'')+g.toFixed(2)+'%</div></div>'+
+        '<div class="stat"><div class="lbl">Engine</div><div class="val c">'+(c.tool||'flux_cortex_loop')+'</div></div>'+
+      '</div>';
+    }else{
+      el.innerHTML='<div class="empty">cortex idle — press [C] in the cockpit to run a flux-cortex MaxPerf loop</div>';
+    }
   }catch(e){}
 }
 // content-addressing: retrieve a record by its blake3 CID via /api/v1/aether and show
@@ -188,11 +329,63 @@ async function verifyCid(cid){
   }catch(e){ t.style.borderColor='var(--orange)'; t.innerHTML='<div style="color:var(--orange)">verify failed: '+e+'</div>'; }
 }
 window.verifyCid=verifyCid;
+
+// ── Block detail modal (v0.11.5) — premium glassmorphism card, DeepSeek-informed:
+// gold-glow hero height, monospace hash/CID with copy, content-address verify-don't-trust.
+function _copy(txt,el){try{navigator.clipboard.writeText(txt);if(el){var o=el.textContent;el.textContent='copied ✓';el.style.color='var(--teal)';setTimeout(function(){el.textContent=o;el.style.color='';},1100);}}catch(e){}}
+window._copy=_copy;
+function _ago(ms){if(!ms)return'';var s=Math.max(0,(Date.now()-ms)/1000);if(s<60)return Math.floor(s)+'s ago';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago';}
+function _rootRow(name,hexv){
+  if(!hexv)return'';
+  var zero=/^0+$/.test(hexv);
+  return'<div style="display:flex;align-items:center;gap:8px;padding:6px 0;font-family:\'JetBrains Mono\';font-size:11px">'+
+    '<span style="color:var(--dim);min-width:72px">'+name+'</span>'+
+    '<span style="flex:1;color:'+(zero?'var(--dim)':'var(--cyan)')+';word-break:break-all">'+(zero?'∅ empty':hexv.slice(0,32)+'…')+'</span>'+
+    (zero?'':'<span onclick="event.stopPropagation();_copy(\''+hexv+'\',this)" style="cursor:pointer;color:var(--cyan)" title="copy">⧉</span>')+'</div>';
+}
+function openBlockModal(i){
+  // accept either an index into the live list OR a block object (search hits beyond the window)
+  var b=(i&&typeof i==='object')?i:(window._blocks||[])[i]; if(!b)return;
+  var prodName=b.isGenesis?'⬡ Genesis (network)':({D:'Delta',E:'Epsilon',G:'Gamma',B:'Beta'}[b.prod]||b.prod||'—');
+  var when=b.ts?new Date(b.ts).toISOString().replace('T',' ').slice(0,19)+' UTC':'—';
+  var ov=document.getElementById('blkModal');
+  if(!ov){ov=document.createElement('div');ov.id='blkModal';document.body.appendChild(ov);}
+  ov.style.cssText='position:fixed;inset:0;z-index:300;display:flex;align-items:center;justify-content:center;background:rgba(2,5,9,.72);backdrop-filter:blur(6px);animation:blkIn .18s ease';
+  ov.onclick=function(e){if(e.target===ov)ov.remove();};
+  function row(lbl,val,mono,copyable,extra){
+    return '<div style="display:flex;align-items:center;gap:10px;padding:11px 0;border-bottom:1px solid var(--line)">'+
+      '<div style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);font-family:\'JetBrains Mono\';min-width:118px">'+lbl+'</div>'+
+      '<div style="flex:1;'+(mono?'font-family:\'JetBrains Mono\';font-size:12px;':'font-size:14px;')+'color:var(--text);word-break:break-all">'+val+'</div>'+
+      (copyable?'<span onclick="event.stopPropagation();_copy(\''+copyable+'\',this)" style="cursor:pointer;font-size:10px;color:var(--cyan);font-family:\'JetBrains Mono\';white-space:nowrap" title="copy">⧉ copy</span>':'')+
+      (extra||'')+'</div>';
+  }
+  var verifyBtn=b.cid?'<span onclick="event.stopPropagation();verifyCid(\''+b.cid+'\')" style="cursor:pointer;font-size:10px;color:var(--violet);font-family:\'JetBrains Mono\';white-space:nowrap;border:1px solid var(--violet);border-radius:999px;padding:3px 9px" title="verify-don\'t-trust via flux-aether">⬡ verify</span>':'';
+  ov.innerHTML='<div onclick="event.stopPropagation()" style="position:relative;width:92%;max-width:600px;background:var(--panel);backdrop-filter:blur(24px);border:1px solid var(--line);border-radius:20px;padding:30px 32px;box-shadow:0 24px 70px rgba(0,0,0,.6),0 0 40px rgba(33,212,253,.10)">'+
+    '<span onclick="document.getElementById(\'blkModal\').remove()" style="position:absolute;top:16px;right:18px;cursor:pointer;color:var(--dim);font-size:18px">✕</span>'+
+    '<div style="text-align:center;margin-bottom:6px"><div style="font-size:10px;letter-spacing:3px;color:'+(b.isGenesis?'var(--gold)':'var(--teal)')+';font-family:\'JetBrains Mono\';text-transform:uppercase">'+(b.isGenesis?'⬡ Genesis Block':'⬡ Block Height')+'</div>'+
+      '<div style="font-family:\'Orbitron\';font-weight:900;font-size:46px;color:var(--gold);text-shadow:0 0 22px rgba(251,191,36,.5);line-height:1.1;margin-top:2px">#'+b.h+'</div>'+
+      '<div style="font-size:11px;color:var(--dim);font-family:\'JetBrains Mono\';margin-top:2px">'+_ago(b.ts)+' · sigil-g0 testnet</div></div>'+
+    '<div style="margin-top:18px">'+
+      row('Producer','<span class="badge badge-'+({D:'d',E:'e',G:'g',B:'b'}[b.prod]||'d')+'" style="font-size:11px">'+prodName+'</span>',false,'')+
+      row('Block Hash',(b.hash||'—'),true,(b.hash&&b.hash.indexOf('…')<0)?b.hash:'')+
+      (b.cid?row('Content-Addr','<span style="color:var(--violet)">flux://b3/'+b.cid.slice(0,24)+'…</span>',true,b.cid,verifyBtn):'')+
+      (b.parents&&b.parents.length?row('Parent',(b.parents[0]||'—'),true,(b.parents[0]&&b.parents[0].indexOf('…')<0)?b.parents[0]:''):'')+
+      (b.ts?row('Timestamp',when,true,''):'')+
+      (b.content?row('Detail',b.content,false,''):'')+
+    '</div>'+
+    (b.wallet_root?'<div style="margin-top:16px"><div style="font-size:10px;letter-spacing:2px;color:var(--teal);font-family:\'JetBrains Mono\';text-transform:uppercase;margin-bottom:4px">⬡ Committed State Roots</div>'+
+      _rootRow('wallet',b.wallet_root)+_rootRow('dex',b.dex_root)+_rootRow('event',b.event_root)+_rootRow('contract',b.contract_root)+'</div>':'')+
+    '<div style="margin-top:16px;font-size:10px;color:var(--dim);font-family:\'JetBrains Mono\';text-align:center">'+(b.dag?'live DAG producer · sigil-node · verify-don\'t-trust':'verify-don\'t-trust · flux-db spine · sigil-rpcd :8099')+'</div>'+
+  '</div>';
+}
+window.openBlockModal=openBlockModal;
+if(!document.getElementById('blkAnim')){var st=document.createElement('style');st.id='blkAnim';st.textContent='@keyframes blkIn{from{opacity:0}to{opacity:1}}';document.head.appendChild(st);}
+document.addEventListener('keydown',function(e){if(e.key==='Escape'){var m=document.getElementById('blkModal');if(m)m.remove();}});
+
 load();
 setInterval(load,10000);
 
-// Close search on click outside
-document.addEventListener('click',function(e){if(!e.target.closest('.search-wrap'))document.getElementById('sresults').style.display='none'});
+// (search results now live in #searchModal — it closes on backdrop click / ✕ / Esc)
 
 // pre-search from ?q= — the wallet embeds this explorer with the user's address
 (function(){try{var q=new URLSearchParams(location.search).get('q');if(q){var el=document.getElementById('search');if(el){el.value=q;if(typeof doSearch==='function')doSearch();}}}catch(e){}})();

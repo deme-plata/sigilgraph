@@ -408,7 +408,7 @@ impl SigilSimNode {
     fn build_coinbase(&self, height: u64) -> sigil_tx::ApplyResult {
         let master = self.state.master_wallet();
         let split = sigil_bank::split_mining_reward(BLOCK_REWARD, master)
-            .unwrap_or(sigil_bank::MiningSplit { validator_share: BLOCK_REWARD, master_share: 0, operator_share: 0 });
+            .unwrap_or(sigil_bank::MiningSplit { validator_share: BLOCK_REWARD, master_share: 0, operator_share: 0, commons_share: 0 });
 
         let mut mutations = Vec::new();
         let mut events = Vec::new();

@@ -46,10 +46,11 @@ async function getSnapshot(): Promise<Snapshot | null> {
         const s = (await res.json()) as Snapshot
         _snap = s
         _fetchedAt = now
-        // sync into the zustand store
+        // status + recent_blocks now come from js-libp2p GOSSIP (see
+        // sigil/p2pStoreBridge.ts) — do NOT write them here, or the HTTP poll
+        // would clobber the live P2P data every TTL. Only balances still ride the
+        // snapshot for now (no P2P BALANCE_QUERY client yet — TODO).
         const store = useSigilStore.getState()
-        store.setStatus(s.status)
-        store.setBlocks(s.recent_blocks)
         store.setBalances(s.address_balances, s.default_balance)
         return s
       }

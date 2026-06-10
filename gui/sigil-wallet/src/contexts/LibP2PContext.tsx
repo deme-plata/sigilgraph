@@ -41,6 +41,7 @@ import React, {
 import type { ReactNode } from 'react'
 import type { Libp2p } from 'libp2p'
 import { createBrowserNode, getNodeStats, stopNode, exposeDebugUtilities, prewarmConnections } from '../libp2p/node'
+import { attachSigilP2PBridge } from '../sigil/p2pStoreBridge'
 import { BOOTSTRAP_PEERS, NETWORK_ID } from '../libp2p/config'
 import { multiaddr } from '@multiformats/multiaddr'
 import { submitTransactionWithFallback, getTransactionStats } from '../libp2p/transactionSubmitter'
@@ -263,6 +264,14 @@ export function LibP2PProvider({
         // Expose debug utilities (always - needed for Tor status monitoring)
         exposeDebugUtilities(browserNode)
         console.log('🔧 [CONTEXT] Debug utilities exposed on window.libp2pDebug')
+
+        // Feed the zustand SIGIL store from libp2p GOSSIP (blocks/peers), not HTTP.
+        try {
+          ;(browserNode as any)._sigilBridgeCleanup = attachSigilP2PBridge(browserNode)
+          console.log('🔗 [CONTEXT] SIGIL store ← libp2p gossip bridge attached')
+        } catch (e) {
+          console.warn('[CONTEXT] failed to attach SIGIL P2P store bridge', e)
+        }
 
         // Set up connection event listeners
         browserNode.addEventListener('peer:connect', (evt) => {

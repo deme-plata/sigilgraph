@@ -271,6 +271,9 @@ fn persist_tip(h: u64) {
     if let Some(dir) = p.parent() { let _ = std::fs::create_dir_all(dir); }
     let _ = std::fs::write(p, h.to_string());
 }
+/// v0.36.1: drop the persisted tip so a restart doesn't re-seed a stale (pre-reset)
+/// height. Called when chain-reset detection fires in the tip-poller.
+fn clear_persisted_tip() { let _ = std::fs::remove_file(tip_cache_path()); }
 
 async fn fetch_live_tip_inner(client: &reqwest::Client) -> Option<u64> {
     const URLS: [&str; 2] = [
@@ -419,18 +422,38 @@ impl P2PBlockSync {
             let tip_state = state.clone();
             thread::spawn(move || {
                 let mut polls: u32 = 0;
+                let mut reset_streak: u32 = 0; // v0.36.1 chain-reset detection
                 let mut fail_backoff = Duration::from_secs(0);
                 loop {
                     match fetch_live_tip_blocking() {
                         Some(h) => {
                             fail_backoff = Duration::from_secs(0); // healthy → normal cadence
-                            let raised = {
+                            // v0.36.1 CHAIN-RESET DETECTION: the oracle is the network source of
+                            // truth. peer_best only ever RAISES (offline-resilience), so after a
+                            // testnet reset a stale high (e.g. 21.9M) sticks forever and the UI
+                            // shows a phantom tip. If the live oracle reports a tip DRASTICALLY
+                            // below peer_best for 3 consecutive polls (~9s — not a transient dip),
+                            // the chain was reset: adopt the oracle value + clear the persisted
+                            // last-tip so a restart doesn't re-poison from disk.
+                            let mut persist: Option<u64> = None;
+                            {
                                 let mut s = tip_state.lock().unwrap_or_else(|e| e.into_inner());
                                 s.last_tip_at = Some(Instant::now());
-                                if h > s.peer_best_height { s.peer_best_height = h; true } else { false }
-                            };
-                            // v0.32.5: cache the advancing tip for the next offline cold start.
-                            if raised { persist_tip(h); }
+                                let pb = s.peer_best_height;
+                                if pb > 0 && h < pb / 2 && pb - h > 100_000 {
+                                    reset_streak += 1;
+                                    if reset_streak >= 3 {
+                                        s.peer_best_height = h; // RESET to the live oracle tip
+                                        reset_streak = 0;
+                                        clear_persisted_tip();
+                                        persist = Some(h);
+                                    }
+                                } else {
+                                    reset_streak = 0;
+                                    if h > s.peer_best_height { s.peer_best_height = h; persist = Some(h); }
+                                }
+                            }
+                            if let Some(h) = persist { persist_tip(h); }
                         }
                         None => {
                             // v0.26: exponential backoff (cap 60s) on repeated oracle failure so we
@@ -439,7 +462,7 @@ impl P2PBlockSync {
                         }
                     }
                     polls = polls.saturating_add(1);
-                    let base = if polls < 15 { Duration::from_secs(1) } else { Duration::from_secs(3) };
+                    let base = if polls < 15 { Duration::from_millis(500) } else { Duration::from_millis(800) };
                     thread::sleep(base.max(fail_backoff));
                 }
             });

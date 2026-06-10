@@ -1,15 +1,15 @@
 {
   "product": "sigil-top",
-  "version": "0.7.0",
+  "version": "0.38.0",
   "channel": "stable",
-  "released": "2026-06-07",
-  "notes": "v0.7.0: Full Cortex MCP combo integration (flux-cortex, flux-graph, flux-optimize). P2P mesh block sync via flux-p2p (Delta+Epsilon+Gamma+Beta). Swarm coordination + content-addressed version control (flux-rev). Fleet node tracking for AI operators. MCP swarm compile handler (flux_swarm_compile) for cross-server distributed builds. Embedded HTTP server (serve.rs) for wallet+vite-engine on localhost:9800. Backward-compat auto-update from v0.5.7+.",
+  "released": "2026-06-10",
+  "notes": "v0.38.0: Verifying Full Sync — genesis→tip provable spine (parent_hash linkage + persisted verified_to watermark). zstd wire codec (14.0x on real headers). Snapshot boot (35min->5.8s tail-replay). Self-healing auto-updater: --selfcheck preflight + crash-loop auto-rollback + revert. Node+miner in one binary (dual-lane BLAKE4 Phi + VDF Omega, Mining tab). TUI corruption fixed (eprintln->tracing). Persisted per-install peer identity.",
   "targets": {
     "linux-x64": {
       "url": "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-linux-x86_64",
-      "blake3_hex": "165550c8c1c49b69166fbf95b3dfe8b2a4ebbb99c9c9321a45818011ca99a18f",
-      "sha256_hex": "8edf5213dc9a1e8fae3b9e9bc26074a8cfc5cda9c9fd72f730fb67e8b6e28691",
-      "size_bytes": 14454536
+      "blake3_hex": "5784ec6fd3b32cfd5a3d460ab2ff9d94eaf72dda8d2472d7eb3b23102cffbc37",
+      "sha256_hex": "45edfadbbad1cf8592727d3887b362cc8185a395def859b737c1db75711a7889",
+      "size_bytes": 16076912
     }
   }
 }

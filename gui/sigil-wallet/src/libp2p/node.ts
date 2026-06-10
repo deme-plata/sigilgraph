@@ -270,10 +270,15 @@ export async function createBrowserNode(): Promise<Libp2p> {
       // receive incoming connections from other browsers. Now browsers listen
       // on circuit relay through the bootstrap node, forming a real P2P mesh.
       addresses: {
-        // v10.3.0: Listen addresses empty initially — circuit relay is added
-        // AFTER connecting to bootstrap. Setting it here before connection
-        // causes a fatal "failed to listen" error.
-        listen: [],
+        // v0.9.1: Listen on circuit-relay + WebRTC for direct browser-to-browser.
+        //   - '/p2p-circuit': circuit-relay-v2 auto-discovers the bootstrap relay via
+        //     identify and makes a reservation, so other browsers can REACH us through
+        //     the relay (this is also the WebRTC signaling channel).
+        //   - '/webrtc': accept the upgrade to a DIRECT datachannel once signaled.
+        // Safe to set before the bootstrap connection because transportManager
+        // faultTolerance is NO_FATAL (below) — a not-yet-ready relay listen only
+        // logs a warning and is retried as relays are discovered, never crashes.
+        listen: ['/p2p-circuit', '/webrtc'],
         announce: [],
       },
 

@@ -73,6 +73,10 @@ struct Node {
     /// last one this wallet used). Persisted in the snapshot so replay protection
     /// survives a restart. See `sigil_rpc::auth`.
     auth_nonces: std::collections::HashMap<WalletId, u64>,
+    /// Per-IP onboarding rate-limit window: client-ip → (window_start_ms, count).
+    /// In-memory (resets on restart, fine) — bounds the /onboard faucet against
+    /// sybil drain. The faucet itself is finite (debits OPERATOR, see /onboard).
+    onboard_rl: std::collections::HashMap<String, (u64, u32)>,
 }
 
 /// Persisted snapshot: the money + chain state (NOT students — VerifiedRegistry isn't
@@ -380,6 +384,7 @@ fn bootstrap() -> Node {
             retarget_anchor_ts: snap.retarget_anchor_ts, retarget_anchor_height: snap.retarget_anchor_height,
             statedb,
             auth_nonces: snap.auth_nonces,
+            onboard_rl: std::collections::HashMap::new(),
         };
     }
     eprintln!("flux-db: no snapshot — seeding fresh genesis @ {state_path}");
@@ -441,7 +446,7 @@ fn bootstrap() -> Node {
     let tip_hash = *blake3::hash(b"sigil-g0/mining-genesis").as_bytes();
     let node = Node { state, height: 2, block_height: 0, students: VerifiedRegistry::new(), tokens, pools, citizens: vec![CITIZEN], history,
         tip_hash, bits: mining_bits(), retarget_anchor_ts: now_ms(), retarget_anchor_height: 0, statedb,
-        auth_nonces: std::collections::HashMap::new() };
+        auth_nonces: std::collections::HashMap::new(), onboard_rl: std::collections::HashMap::new() };
     persist(&node); // write the genesis snapshot so the next boot restores
     node
 }
@@ -560,7 +565,7 @@ fn bad(msg: &str) -> String {
     format!("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}", b.len(), b)
 }
 
-fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str) -> String {
+fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str, peer_ip: &str) -> String {
     // The SIGIL wallet (a q-api fork) calls the `/api/v1/*` shape — map it onto
     // our flat routes so the wallet works unchanged against sigil-rpcd.
     let path = path.strip_prefix("/api/v1").unwrap_or(path);
@@ -751,10 +756,19 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
                     let s_b = amt_b.saturating_mul(prev.lp_shares) / prev.reserve_b.max(1);
                     let shares = s_a.min(s_b);
                     if shares == 0 { return bad("deposit too small to mint shares"); }
+                    // checked: unbounded u128 + could panic (debug) / wrap (release) the reserves.
+                    let (ra, rb, ls) = match (
+                        prev.reserve_a.checked_add(amt_a),
+                        prev.reserve_b.checked_add(amt_b),
+                        prev.lp_shares.checked_add(shares),
+                    ) {
+                        (Some(ra), Some(rb), Some(ls)) => (ra, rb, ls),
+                        _ => return bad("reserve/shares overflow"),
+                    };
                     let pool_after = PoolState {
                         token_a: prev.token_a, token_b: prev.token_b,
-                        reserve_a: prev.reserve_a + amt_a, reserve_b: prev.reserve_b + amt_b,
-                        lp_shares: prev.lp_shares + shares, fee_bps: prev.fee_bps, accrued_fees: prev.accrued_fees,
+                        reserve_a: ra, reserve_b: rb,
+                        lp_shares: ls, fee_bps: prev.fee_bps, accrued_fees: prev.accrued_fees,
                     };
                     let h = n.height;
                     match commit_state_transition(&mut n.state, &StateTransition { at_height: h, mutations: vec![StateMutation::LpDelta { from, pool, amt_a, amt_b, shares_minted: shares, fee: 0, pool_after }] }, h) {
@@ -775,6 +789,21 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
                 s
             });
             let mut n = node.write().unwrap();
+            // C4 — per-IP rate-limit. /onboard can't pre-auth (cold start), so the
+            // sybil defense is a finite faucet (below) + this throttle. Max
+            // SIGIL_ONBOARD_MAX_PER_HOUR (default 3) onboards per client IP per hour.
+            {
+                let max_per_window: u32 = std::env::var("SIGIL_ONBOARD_MAX_PER_HOUR").ok()
+                    .and_then(|s| s.parse().ok()).unwrap_or(3);
+                const WINDOW_MS: u64 = 3_600_000;
+                let now = now_ms();
+                let e = n.onboard_rl.entry(peer_ip.to_string()).or_insert((now, 0));
+                if now.saturating_sub(e.0) >= WINDOW_MS { *e = (now, 0); } // window rolled over
+                if e.1 >= max_per_window {
+                    return bad("onboard rate limit exceeded for this IP — try again later");
+                }
+                e.1 += 1;
+            }
             let nonce = n.height;
             let (kp, verification) = onboard::onboard_user(&seed, nonce);
             let wallet = kp.pubkey();
@@ -787,12 +816,22 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
             let h = n.height;
             if let Err(e) = nation::attest_citizen(&mut n.state, h, nation::BORGER_AUTHORITY, wallet, cpr) { return bad(&format!("nation: {:?}", e)); }
             n.height += 1;
-            // starter funding so the new user can immediately trade.
+            // C4 — starter funding is now a TRANSFER from the OPERATOR faucet, NOT a
+            // mint. This conserves total supply (the old `saturating_add` minted
+            // free NATIVE+USDS on every call — an unbounded inflation faucet) and is
+            // intrinsically finite: grants stop when OPERATOR is drained. Grant
+            // min(target, available) so a near-empty faucet degrades gracefully.
             let h2 = n.height;
-            let nat = n.state.balance_of(&wallet, &NATIVE).saturating_add(100);
-            let usd = n.state.balance_of(&wallet, &USDS).saturating_add(1_000);
+            let op_nat = n.state.balance_of(&OPERATOR, &NATIVE);
+            let op_usd = n.state.balance_of(&OPERATOR, &USDS);
+            let grant_nat = 100u128.min(op_nat);
+            let grant_usd = 1_000u128.min(op_usd);
+            let nat = n.state.balance_of(&wallet, &NATIVE).saturating_add(grant_nat);
+            let usd = n.state.balance_of(&wallet, &USDS).saturating_add(grant_usd);
             let _ = commit_state_transition(&mut n.state, &StateTransition { at_height: h2, mutations: vec![
+                StateMutation::SetBalance { wallet: OPERATOR, token: NATIVE, amount: op_nat - grant_nat },
                 StateMutation::SetBalance { wallet, token: NATIVE, amount: nat },
+                StateMutation::SetBalance { wallet: OPERATOR, token: USDS, amount: op_usd - grant_usd },
                 StateMutation::SetBalance { wallet, token: USDS, amount: usd },
             ] }, h2);
             n.height += 1;
@@ -1059,7 +1098,20 @@ fn handle(mut stream: TcpStream, node: &RwLock<Node>) {
     let full_path = parts.next().unwrap_or("/");
     let (path, query) = match full_path.split_once('?') { Some((p, q)) => (p, q), None => (full_path, "") };
     let body = String::from_utf8_lossy(&data[header_end..]).to_string();
-    let resp = route(node, method, path, query, &body);
+    // Client IP for rate-limiting. We sit behind q-flux, so prefer the FIRST hop
+    // in X-Forwarded-For (the real client); fall back to the socket peer for a
+    // direct connection. Header match is case-insensitive (q-flux/proxies vary).
+    let peer_ip = head
+        .lines()
+        .find_map(|l| {
+            let ll = l.to_ascii_lowercase();
+            ll.strip_prefix("x-forwarded-for:").map(|v| {
+                v.trim().split(',').next().unwrap_or("").trim().to_string()
+            })
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| stream.peer_addr().map(|a| a.ip().to_string()).unwrap_or_else(|_| "unknown".into()));
+    let resp = route(node, method, path, query, &body, &peer_ip);
     // Persist the money+chain snapshot after any mutating request (POST) so a restart
     // restores balances/pools/height/tip instead of re-seeding genesis.
     if method == "POST" {

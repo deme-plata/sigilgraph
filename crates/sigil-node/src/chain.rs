@@ -37,6 +37,26 @@ impl ChainTip {
         Self { state: SigilState::new(), blocks: VecDeque::new(), base_height: 0 }
     }
 
+    /// v0.36.1: reconstruct a ChainTip from snapshot parts — the accumulated
+    /// state at the tip, the recent-block RAM window, and the window's base
+    /// height. These three fields ARE the whole ChainTip, so a restore is
+    /// bitwise-identical to having replayed every block up to the snapshot
+    /// height; applying blocks `snapshot_height+1..` afterwards produces the
+    /// exact same state/roots as a full replay. Callers (snapshot boot) MUST
+    /// verify integrity first (BLAKE3 checksum + tip-hash-vs-chain.log check
+    /// in `crate::snapshot::load_state` / `run_start`) — this constructor
+    /// trusts its inputs.
+    pub fn from_parts(state: SigilState, blocks: VecDeque<Block>, base_height: u64) -> Self {
+        Self { state, blocks, base_height }
+    }
+
+    /// v0.36.1: borrow the three snapshot parts (state, RAM window, window
+    /// base) for state-snapshot capture. Read-only — the caller clones what
+    /// it persists.
+    pub fn snapshot_parts(&self) -> (&SigilState, &VecDeque<Block>, u64) {
+        (&self.state, &self.blocks, self.base_height)
+    }
+
     /// Read-only snapshot of the four state roots at the current tip.
     pub fn roots(&self) -> StateRoots {
         self.state.roots()

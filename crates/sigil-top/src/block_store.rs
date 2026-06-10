@@ -166,6 +166,19 @@ impl BlockStore {
         self.get_block(&hash_hex).map(|b| b.header)
     }
 
+    /// v0.33 (1M-blk/s lane): like [`Self::get_header_at_height`] but returns the FULL
+    /// [`StoredBlock`] — crucially including `hash_hex`, the block hash computed ONCE at
+    /// ingest. `SigilBlockHeaderV0::hash()` JSON-serializes the entire ~1 KB header (≈3-5 KB
+    /// of JSON text) per call (~15-25 µs); the verifier used to recompute it for EVERY
+    /// parent-linkage check, doubling per-block verify cost. Reusing the stored hash makes
+    /// linkage a 32-byte compare. (Sound: `hash_hex` was produced by OUR ingest calling
+    /// `header.hash()` on these exact stored bytes — it IS that hash, cached.)
+    pub fn get_stored_at_height(&self, height: u64) -> Option<StoredBlock> {
+        let hashk = self.db.get(&height_key(height)).ok().flatten()?;
+        let hash_hex = String::from_utf8(hashk).ok()?;
+        self.get_block(&hash_hex)
+    }
+
     pub fn put_block(&mut self, header: SigilBlockHeaderV0) -> Result<bool, String> {
         let hash = header.hash();
         let hash_hex = hex::encode(hash);
@@ -222,17 +235,44 @@ impl BlockStore {
     /// contiguous pointer — call [`Self::advance`] once after.
     pub fn put_blocks_batch(&mut self, headers: &[SigilBlockHeaderV0]) -> usize {
         if headers.is_empty() { return 0; }
-        // Build all (key, value) byte pairs first; batch_put borrows them in one shot.
-        let mut owned: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(headers.len() * 2);
+        // v0.33 (1M-blk/s lane): hash + serialize IN PARALLEL. `header.hash()` JSON-encodes
+        // the whole ~1 KB header (≈3-5 KB text → ~15-25 µs each) — at CHUNK=4096 that's
+        // ~60-100 ms of pure CPU per chunk, serialized on the sync-loop thread. Every
+        // header is independent, so fan the (hash, bincode) work across cores with scoped
+        // threads (no new dep); only the single batch_put stays serial. On the 48-core
+        // box this turns the ingest CPU wall from ~25 µs/blk into ~1-2 µs/blk.
+        let nthreads = std::thread::available_parallelism()
+            .map(|n| n.get()).unwrap_or(4)
+            .min(16)                       // diminishing returns past the memory bandwidth
+            .min(headers.len().max(1));
+        let chunk_sz = headers.len().div_ceil(nthreads);
+        // per-header (height, hash_hex, bincode(StoredBlock)) — computed in parallel.
+        let prepared: Vec<(u64, String, Vec<u8>)> = std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(nthreads);
+            for chunk in headers.chunks(chunk_sz) {
+                handles.push(s.spawn(move || {
+                    let mut out = Vec::with_capacity(chunk.len());
+                    for header in chunk {
+                        let hash_hex = hex::encode(header.hash());
+                        let block = StoredBlock {
+                            header: header.clone(), hash_hex: hash_hex.clone(), synced_at: 0,
+                        };
+                        if let Ok(value) = bincode::serialize(&block) {
+                            out.push((block.header.height, hash_hex, value));
+                        }
+                    }
+                    out
+                }));
+            }
+            handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+        });
+        // Serial tail: assemble the (key, value) pairs + ONE batch_put (single WAL hold).
+        let mut owned: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(prepared.len() * 2);
         let mut max_h = self.best_height;
         let mut max_hash = self.best_hash_hex.clone();
-        for header in headers {
-            let hash_hex = hex::encode(header.hash());
-            let height = header.height;
-            let block = StoredBlock { header: header.clone(), hash_hex: hash_hex.clone(), synced_at: 0 };
-            let value = match bincode::serialize(&block) { Ok(v) => v, Err(_) => continue };
-            owned.push((hash_hex.clone().into_bytes(), value));               // block by hash
-            owned.push((height_key(height), hash_hex.clone().into_bytes()));  // height index
+        for (height, hash_hex, value) in prepared {
+            owned.push((hash_hex.clone().into_bytes(), value));              // block by hash
+            owned.push((height_key(height), hash_hex.clone().into_bytes())); // height index
             if height >= max_h { max_h = height; max_hash = hash_hex; }
         }
         let refs: Vec<(&[u8], &[u8])> = owned.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
@@ -545,6 +585,37 @@ mod tests {
             .join(format!("sigil-bstore-{}-{}", std::process::id(), tag))
             .to_string_lossy()
             .into_owned()
+    }
+
+    /// Wire-codec lab tool (env-gated, skips by default): open the REAL local block DB
+    /// (`SIGIL_BENCH_DB=/path`) and dump an exact `'H' + bincode(Vec<Header>)` backfill
+    /// payload — byte-identical to what `headers_only` puts on the wire — to
+    /// `/tmp/wire-chunk-real.bin`. Compression candidates (lz4 vs zstd) are then benched
+    /// on REAL header bytes, not synthetic test headers whose empty proofs over-compress.
+    #[test]
+    fn dump_real_wire_chunk_for_codec_bench() {
+        let db = match std::env::var("SIGIL_BENCH_DB") { Ok(p) => p, Err(_) => return };
+        let s = match BlockStore::open(&db) { Ok(s) => s, Err(e) => { eprintln!("[dump] open: {e}"); return } };
+        eprintln!("[dump] db={db} best_height={} synced_to={}", s.best_height(), s.synced_to());
+        // ONE sequential iter scan — cold point-reads on a 2.7G LSM are ~ms each (the
+        // first two versions of this dump hung for minutes probing a gappy height index).
+        // A codec bench just needs 4096 REAL header byte-streams; order doesn't matter.
+        let mut headers: Vec<SigilBlockHeaderV0> = Vec::with_capacity(4096);
+        for (key, value) in s.db.iter() {
+            if matches!(key.first(), Some(&KEY_HINDEX) | Some(&KEY_META)) { continue; }
+            if let Ok(block) = bincode::deserialize::<StoredBlock>(&value) {
+                headers.push(block.header);
+                if headers.len() >= 4096 { break; }
+            }
+        }
+        eprintln!("[dump] collected {} real headers via iter scan", headers.len());
+        if headers.is_empty() { eprintln!("[dump] no headers found"); return; }
+        headers.sort_by_key(|h| h.height);
+        let mut payload = vec![b'H'];
+        payload.extend(bincode::serialize(&headers).expect("serialize"));
+        std::fs::write("/tmp/wire-chunk-real.bin", &payload).expect("write");
+        eprintln!("[dump] wrote /tmp/wire-chunk-real.bin: {} headers, {} bytes ({:.0} B/header)",
+            headers.len(), payload.len(), payload.len() as f64 / headers.len() as f64);
     }
 
     // Catches the monitor-sync class of bug (synced_to not advancing / not resuming)

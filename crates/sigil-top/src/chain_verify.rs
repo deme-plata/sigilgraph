@@ -76,14 +76,19 @@ impl VerifyReport {
 
 /// Verify one header against its predecessor's hash. Genesis (h==0) has no parent to
 /// link to, so it only needs to precheck. Returns Ok(()) or the reason it failed.
+/// v0.33 (1M-blk/s lane): linkage now compares against the parent's STORED hash — the one
+/// ingest computed via `header.hash()` and persisted in `StoredBlock.hash_hex` — instead of
+/// re-deriving `p.hash()` here. `hash()` JSON-serializes the entire ~1 KB header (≈3-5 KB of
+/// text, ~15-25 µs); recomputing it per step DOUBLED verify cost and was the measured
+/// 26-52k blk/s ceiling. The compare is now 32 bytes. Soundness: the stored hash was produced
+/// by our own ingest hashing these exact stored bytes — same value, computed once.
 fn verify_one(
     header: &sigil_header::SigilBlockHeaderV0,
-    parent: Option<&sigil_header::SigilBlockHeaderV0>,
+    parent_hash: Option<&sigil_header::BlockHash>,
 ) -> Result<(), BreakReason> {
     header.precheck().map_err(|e| BreakReason::Precheck(e.to_string()))?;
-    if let Some(p) = parent {
-        let expected = p.hash();
-        if header.parent_hash != expected {
+    if let Some(expected) = parent_hash {
+        if header.parent_hash != *expected {
             return Err(BreakReason::ParentMismatch {
                 height: header.height,
                 expected: hex::encode(expected),
@@ -92,6 +97,13 @@ fn verify_one(
         }
     }
     Ok(())
+}
+
+/// Decode a stored 64-hex block hash into a `BlockHash`. None on malformed hex (treated by
+/// the caller as a store-corruption break, never a silent pass).
+fn decode_hash_hex(hash_hex: &str) -> Option<sigil_header::BlockHash> {
+    let bytes = hex::decode(hash_hex).ok()?;
+    bytes.try_into().ok()
 }
 
 /// Advance the store's `verified_to` watermark by walking forward from the current
@@ -108,24 +120,37 @@ pub fn verify_to(store: &mut BlockStore, max_steps: u64) -> VerifyReport {
     let mut checked = 0u64;
     let mut first_break = None;
 
-    // The parent header for the first step. At the genesis anchor (`base`) there is no
+    // The parent HASH for the first step. At the genesis anchor (`base`) there is no
     // fetchable parent — the block at `base` is the verification trust-root (its parent,
     // e.g. SIGIL's height-0 genesis, isn't backfill-servable), so it's accepted on precheck
     // alone. Above `base` the parent MUST be the already-verified block at h-1 (present,
-    // since verified_to <= synced_to and the prefix is contiguous).
-    let mut parent = if h == base { None } else { store.get_header_at_height(h - 1) };
+    // since verified_to <= synced_to and the prefix is contiguous). v0.33: we carry the
+    // parent's STORED hash (computed once at ingest), not its header — no re-hashing.
+    let mut parent_hash: Option<sigil_header::BlockHash> = if h == base {
+        None
+    } else {
+        store.get_stored_at_height(h - 1).and_then(|b| decode_hash_hex(&b.hash_hex))
+    };
 
     while checked < max_steps {
-        let header = match store.get_header_at_height(h) {
-            Some(hd) => hd,
+        let block = match store.get_stored_at_height(h) {
+            Some(b) => b,
             None => { first_break = Some((h, BreakReason::Missing)); break; }
         };
-        if let Err(reason) = verify_one(&header, parent.as_ref()) {
+        if let Err(reason) = verify_one(&block.header, parent_hash.as_ref()) {
             first_break = Some((h, reason));
             break;
         }
-        // h is verified; it becomes the parent of h+1.
-        parent = Some(header);
+        // h is verified; its STORED hash becomes the linkage target for h+1. A malformed
+        // stored hash is store corruption — surface it as a break, never skip silently.
+        parent_hash = match decode_hash_hex(&block.hash_hex) {
+            Some(ph) => Some(ph),
+            None => {
+                first_break = Some((h, BreakReason::Precheck(
+                    format!("corrupt stored hash_hex at h={h}"))));
+                break;
+            }
+        };
         h += 1;
         checked += 1;
     }
@@ -200,6 +225,41 @@ mod tests {
             chain.push(hdr);
         }
         chain
+    }
+
+    /// v0.33 throughput bench — run with `--nocapture` to see the numbers. Measures the
+    /// REAL pipeline economics on this box: (1) parallel batched ingest (put_blocks_batch:
+    /// JSON-hash + bincode fan-out across cores + one batch_put), (2) the stored-hash verify
+    /// walk (2 db reads + precheck + 32-byte linkage compare per step — NO re-hash). The
+    /// old verify recomputed `parent.hash()` (≈3-5 KB JSON serialize) per step, which capped
+    /// it at the measured 26-52k blk/s. This bench is the falsifiable gate for the
+    /// 1M-blk/s lane: ingest and verify must EACH clear ≥200k blk/s here to make the
+    /// end-to-end target plausible (wire is then the binding constraint).
+    #[test]
+    fn bench_ingest_and_verify_throughput() {
+        const N: u64 = 20_000;
+        let p = tmp("bench");
+        let _ = std::fs::remove_dir_all(&p);
+        let chain = mk_chain(N); // setup cost: N JSON hashes to link parents (not timed)
+        let mut s = BlockStore::open(&p).unwrap();
+
+        let t0 = std::time::Instant::now();
+        let stored = s.put_blocks_batch(&chain);
+        s.advance();
+        let ingest = t0.elapsed();
+        assert_eq!(stored as u64, N);
+        assert_eq!(s.synced_to(), N);
+
+        let t1 = std::time::Instant::now();
+        let rep = verify_to(&mut s, u64::MAX);
+        let verify = t1.elapsed();
+        assert_eq!(rep.verified_to, N, "clean chain verifies to tip: {:?}", rep.first_break);
+
+        let ing_rate = N as f64 / ingest.as_secs_f64();
+        let ver_rate = N as f64 / verify.as_secs_f64();
+        eprintln!("[bench] ingest {N} blks in {ingest:?}  →  {ing_rate:.0} blk/s");
+        eprintln!("[bench] verify {N} blks in {verify:?}  →  {ver_rate:.0} blk/s");
+        let _ = std::fs::remove_dir_all(&p);
     }
 
     #[test]

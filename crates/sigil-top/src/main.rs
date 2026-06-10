@@ -948,8 +948,36 @@ fn enable_rich_console() {
 #[cfg(not(windows))]
 fn enable_rich_console() {}
 
+/// v0.33: Windows consoles render emoji-class glyphs (⛏ ⛓ ⬇ ▲ ●) at the WRONG
+/// cell width vs what `unicode-width` (ratatui's layout) assumes → every cell after
+/// them shifts and the whole TUI "smears". ASCII mode swaps those for width-1 ASCII
+/// so layout is exact everywhere. Auto-on for Windows; `SIGIL_ASCII=0` forces it off,
+/// `SIGIL_ASCII=1` forces it on (e.g. a Linux box over a dumb terminal).
+static UI_ASCII: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+fn ui_ascii() -> bool { UI_ASCII.load(std::sync::atomic::Ordering::Relaxed) }
+fn init_ui_ascii() {
+    let on = match std::env::var("SIGIL_ASCII").ok().as_deref() {
+        Some("1") | Some("true") => true,
+        Some("0") | Some("false") => false,
+        _ => cfg!(windows),
+    };
+    UI_ASCII.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+/// Sanitize a UI string for ASCII terminals: replace wide/emoji glyphs with width-1
+/// ASCII so ratatui's layout (which trusts unicode-width) matches what the console draws.
+fn sa<S: Into<String>>(s: S) -> String {
+    let s = s.into();
+    if !ui_ascii() { return s; }
+    s.replace('⛏', ">").replace('⛓', "#").replace('⬇', "v").replace('⬆', "^")
+     .replace('▲', "^").replace('▼', "v").replace('●', "*").replace('✦', "*")
+     .replace('⟳', "@").replace('▦', "#").replace('◐', "O").replace('≈', "~")
+     .replace('░', ".").replace('█', "#").replace('▌', "|").replace('⚡', "!")
+     .replace('◆', "*").replace('✓', "v").replace('→', "->").replace('Δ', "D").replace('Ε', "E")
+}
+
 fn main() {
     enable_rich_console(); // UTF-8 + VT so icons/colours render (fixes the `?` glyphs)
+    init_ui_ascii();       // decide ASCII vs rich glyphs (Windows-safe layout)
     // subcommands: login / logout (handled before the render loop)
     let argv: Vec<String> = std::env::args().skip(1).collect();
     match argv.first().map(|s| s.as_str()) {
@@ -2218,6 +2246,22 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| draw_ui(f, &app))).is_err() {
                     log_line("[render] frame panicked — caught, continuing".into());
                 }
+                // v0.33 GLOBAL ASCII pass: on Windows (or SIGIL_ASCII=1) rewrite any remaining
+                // wide/emoji cell symbol to width-1 ASCII. Done on the buffer AFTER layout but
+                // BEFORE flush: ratatui already reserved 2 cells for a wide glyph, so emitting a
+                // width-1 symbol makes the backend emit a corrective MoveTo for the next cell →
+                // exact alignment on consoles that draw emoji at the wrong width. Catches every
+                // glyph everywhere in one place (belt-and-suspenders with the source sa() wraps).
+                if ui_ascii() {
+                    let buf = f.buffer_mut();
+                    for cell in buf.content.iter_mut() {
+                        let sym = cell.symbol().to_string();
+                        if !sym.is_ascii() {
+                            let repl = sa(sym.as_str());
+                            if repl != sym { cell.set_symbol(&repl); }
+                        }
+                    }
+                }
             })?;
             // v0.10.5 "smooth cruise": adaptive frame pacing. When something is
             // moving — splash animation, an in-flight refresh, or live mining — poll
@@ -2468,6 +2512,18 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                 // so it still shows true download speed.)
                 let now = std::time::Instant::now();
                 let rate_metric = app.p2p_state.blocks_synced.max(app.p2p_state.fetched_total);
+                // v0.31: a one-time CATCH-UP jump (synced snaps 0→~tip the instant the monitor
+                // reaches the head, or after a re-snap over a big gap) is NOT a sustained rate —
+                // it spiked the readout to ~1M blk/s then craters to 0 as the jump scrolls out of
+                // the 10s window (the "1M → 0" the user saw). If the metric leaps > CATCHUP_JUMP in
+                // one sample, reset the window so the rate reflects STEADY tip advance, never the
+                // snap. chronos confirmed delivery is fine — this was purely a display artifact.
+                const CATCHUP_JUMP: u64 = 50_000;
+                if let Some(&(_, last_b)) = app.p2p_rate_samples.back() {
+                    if rate_metric.saturating_sub(last_b) > CATCHUP_JUMP {
+                        app.p2p_rate_samples.clear();
+                    }
+                }
                 app.p2p_rate_samples.push_back((now, rate_metric));
                 while app.p2p_rate_samples.len() > 1
                     && now.duration_since(app.p2p_rate_samples[0].0).as_secs_f64() > 10.0
@@ -2885,9 +2941,9 @@ fn render_tab_bar(app: &App) -> Paragraph<'static> {
         } else {
             Style::default().fg(C_DIM)
         };
-        vec![Span::styled(format!(" {key} {label} "), style), Span::raw(" ")]
+        vec![Span::styled(format!(" {key} {label} "), style), Span::raw(sa(" "))]
     };
-    let mut spans = vec![Span::raw(" ")];
+    let mut spans = vec![Span::raw(sa(" "))];
     spans.extend(tab("Node", "1", Tab::Node));
     spans.extend(tab("Swarm AI", "2", Tab::SwarmAi));
     spans.extend(tab("Results", "3", Tab::Results));
@@ -2998,23 +3054,23 @@ fn render_sync_log(app: &App) -> Paragraph<'static> {
     // (oracle down / partition), say so instead of a falsely confident "AT TIP".
     let stale = s.last_tip_at.map(|t| t.elapsed().as_secs() > 12).unwrap_or(true);
     let (badge, bcol) = if stale {
-        (format!(" ⏳ STALE{}", s.last_tip_at.map(|t| format!(" ({}s)", t.elapsed().as_secs())).unwrap_or_default()), C_RED)
-    } else { (" ● LIVE".to_string(), C_GREEN) };
+        (sa(format!(" (STALE){}", s.last_tip_at.map(|t| format!(" ({}s)", t.elapsed().as_secs())).unwrap_or_default())), C_RED)
+    } else { (sa(" ● LIVE"), C_GREEN) };
     lines.push(Line::from(vec![
-        Span::styled(" ▸ SYNC STATE", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
+        Span::styled(sa(" ▸ SYNC STATE"), Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
         Span::styled(badge, Style::default().fg(bcol).add_modifier(Modifier::BOLD)),
     ]));
     lines.push(Line::from(vec![
-        Span::raw("  height "), Span::styled(group(s.blocks_synced), Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
-        Span::raw("  tip "), Span::styled(group(tip), Style::default().fg(C_CYAN)),
-        Span::raw("  gap "), Span::styled(group(gap), Style::default().fg(if gap < 8 { C_GREEN } else { C_GOLD })),
-        Span::raw("  rate "), Span::styled(format!("{:.0} blk/s", app.p2p_rate), Style::default().fg(C_CYAN)),
+        Span::raw(sa("  height ")), Span::styled(group(s.blocks_synced), Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
+        Span::raw(sa("  tip ")), Span::styled(group(tip), Style::default().fg(C_CYAN)),
+        Span::raw(sa("  gap ")), Span::styled(group(gap), Style::default().fg(if gap < 8 { C_GREEN } else { C_GOLD })),
+        Span::raw(sa("  rate ")), Span::styled(format!("{:.0} blk/s", app.p2p_rate), Style::default().fg(C_CYAN)),
     ]));
     lines.push(Line::from(vec![
-        Span::raw("  ⛓ verified spine "), Span::styled(group(s.verified), Style::default().fg(C_GREEN)),
-        Span::raw("   peers "), Span::styled(format!("{}", s.peer_count), Style::default().fg(C_CYAN)),
-        Span::raw("   "), Span::styled(if s.connected_delta { "Δ" } else { "·" }.to_string(), Style::default().fg(C_GOLD)),
-        Span::styled(if s.connected_epsilon { "Ε" } else { "·" }.to_string(), Style::default().fg(C_GOLD)),
+        Span::raw(sa("  ⛓ verified spine ")), Span::styled(group(s.verified), Style::default().fg(C_GREEN)),
+        Span::raw(sa("   peers ")), Span::styled(format!("{}", s.peer_count), Style::default().fg(C_CYAN)),
+        Span::raw(sa("   ")), Span::styled(sa(if s.connected_delta { "Δ" } else { "·" }), Style::default().fg(C_GOLD)),
+        Span::styled(sa(if s.connected_epsilon { "Ε" } else { "·" }), Style::default().fg(C_GOLD)),
     ]));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(" ▸ SYNC LOG  (newest at bottom)", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
@@ -3023,9 +3079,10 @@ fn render_sync_log(app: &App) -> Paragraph<'static> {
     // O(log-size), which would freeze the UI as the log grows over a 24/7 run.
     let body = read_log_tail(&path, 16 * 1024);
     let recent: Vec<String> = body.lines().rev()
-        .filter(|l| l.contains("[sync]") || l.contains("[tipfetch]") || l.contains("[D]")
-            || l.contains("[p2p-sync]") || l.contains("[tip]"))
-        .take(22)
+        .filter(|l| l.contains("[DBG]") || l.contains("[PANIC]") || l.contains("[sync]")
+            || l.contains("[tipfetch]") || l.contains("[D]") || l.contains("[p2p-sync]")
+            || l.contains("[tip]") || l.contains("[render]"))
+        .take(26)
         .map(|l| l.to_string())
         .collect();
     if recent.is_empty() {
@@ -3033,12 +3090,14 @@ fn render_sync_log(app: &App) -> Paragraph<'static> {
     }
     for l in recent.iter().rev() {
         let t = l.trim();
-        let col = if t.contains("track tip") || t.contains("fast-snap") || t.contains("[sync]") { C_GOLD }
+        let col = if t.contains("[PANIC]") { C_RED }
+            else if t.contains("[DBG]") { C_VBRIGHT }
+            else if t.contains("track tip") || t.contains("fast-snap") || t.contains("[sync]") { C_GOLD }
             else if t.contains("[tipfetch]") { C_CYAN }
             else if t.contains("TIMEOUT") || t.contains("err") { C_RED }
             else if t.contains("peer +") { C_GREEN }
             else { C_DIM };
-        lines.push(Line::from(Span::styled(format!("  {}", trunc(t, 92)), Style::default().fg(col))));
+        lines.push(Line::from(Span::styled(format!("  {}", trunc(t, 116)), Style::default().fg(col))));
     }
     Paragraph::new(lines)
 }
@@ -3069,7 +3128,7 @@ fn render_results(app: &App) -> Paragraph<'static> {
     for r in sw.results.iter().filter(|r| !r.agent.starts_with("test_")).take(13) {
         let mark = if r.success { Span::styled("✓", Style::default().fg(C_GREEN)) } else { Span::styled("✗", Style::default().fg(C_RED)) };
         lines.push(Line::from(vec![
-            Span::raw("  "), mark, Span::raw(" "),
+            Span::raw(sa("  ")), mark, Span::raw(sa(" ")),
             Span::styled(format!("{:>4} ", rel_time(r.at)), Style::default().fg(C_DIM)),
             Span::styled(format!("{:<14}", trunc(&r.agent, 14)), Style::default().fg(agent_color(&r.agent))),
             Span::styled(format!("{:<18}", trunc(&r.crates, 18)), Style::default().fg(C_CYAN)),
@@ -3151,7 +3210,7 @@ fn card_block(title: &'static str, color: Color) -> Block<'static> {
         .title(Line::from(vec![
             accent_stripe(color),
             Span::styled(title, Style::default().fg(color).add_modifier(Modifier::BOLD)),
-            Span::raw(" "),
+            Span::raw(sa(" ")),
         ]))
         .border_style(Style::default().fg(C_DIM))
         .style(Style::default().bg(Color::Rgb(10, 10, 20)))
@@ -3165,7 +3224,7 @@ fn render_header(app: &App) -> Paragraph<'static> {
     let update = if version_gt(&app.latest, VERSION) {
         Span::styled(format!("  ·  Update v{} [U]", app.latest), Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD))
     } else {
-        Span::raw("")
+        Span::raw(sa(""))
     };
     let line = Line::from(vec![
         Span::styled(" SIGIL", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
@@ -3299,7 +3358,7 @@ fn render_sync_status(app: &App) -> Paragraph<'static> {
         // v0.27: surface PROOF-OF-USEFUL-SYNC — the idle CPU re-verifying the spine.
         let pos = if s.pos_rate > 0.0 {
             Span::styled(format!("  ⛏ {} blk/s spine-verify", group(s.pos_rate.round() as u64)), Style::default().fg(C_GOLD))
-        } else { Span::raw("") };
+        } else { Span::raw(sa("")) };
         Line::from(vec![
             dim("proof "), Span::styled("fold ✓ whole-chain".to_string(), Style::default().fg(C_GREEN)),
             dim("  window "), Span::styled(format!("{} ✓", group(verified_real)), Style::default().fg(C_GREEN)),
@@ -3488,7 +3547,7 @@ fn render_fleet_card(app: &App) -> Paragraph<'static> {
         if outdated > 0 {
             Span::styled(format!("  {} behind", outdated),
                 Style::default().fg(C_RED).add_modifier(Modifier::BOLD))
-        } else { Span::raw("") },
+        } else { Span::raw(sa("")) },
     ]);
     // v0.8: Mesh health line
     let mesh_line = Line::from(vec![
@@ -3510,10 +3569,10 @@ fn render_fleet_card(app: &App) -> Paragraph<'static> {
             else { C_GREEN };
         Line::from(vec![
             dot,
-            Span::raw(" "),
+            Span::raw(sa(" ")),
             Span::styled(name.clone(), Style::default().fg(C_CYAN)),
             dim(format!("  h{}", group(*height))),
-            Span::raw("  "),
+            Span::raw(sa("  ")),
             Span::styled(ver.clone(), Style::default().fg(ver_color).add_modifier(Modifier::BOLD)),
         ])
     }).collect();
@@ -3809,9 +3868,9 @@ fn flux_unregister_scheme() -> Result<(), String> {
 fn render_footer(app: &App) -> Paragraph<'static> {
     let toast = if app.toast.is_empty() { String::new() } else { format!(" › {}", app.toast) };
     let keys = |c: &'static str, rest: &'static str, col: Color| -> Vec<Span<'static>> {
-        vec![Span::styled(c, Style::default().fg(col).add_modifier(Modifier::BOLD)), dim(rest), Span::raw("  ")]
+        vec![Span::styled(c, Style::default().fg(col).add_modifier(Modifier::BOLD)), dim(rest), Span::raw(sa("  "))]
     };
-    let mut kb = vec![Span::raw(" ")];
+    let mut kb = vec![Span::raw(sa(" "))];
     kb.extend(keys("[M]", "ine", C_GOLD));
     kb.extend(keys("[F]", "ull", C_GREEN));
     kb.extend(keys("[V]", "erify", C_GREEN));

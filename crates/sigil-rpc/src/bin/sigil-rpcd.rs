@@ -82,6 +82,14 @@ struct Node {
     /// In-memory (resets on restart, fine) — bounds the /onboard faucet against
     /// sybil drain. The faucet itself is finite (debits OPERATOR, see /onboard).
     onboard_rl: std::collections::HashMap<String, (u64, u32)>,
+    /// LANE-R time-based emission anchor: the genesis block's timestamp (µs since the unix
+    /// epoch). Set ONCE at genesis, persisted, never changed — emission halves on WALL-CLOCK
+    /// time elapsed since this, not on block height. All nodes must agree on it.
+    genesis_ts_us: u128,
+    /// The previous accepted block's timestamp (µs). `block_reward_time` integrates the
+    /// emission rate over [last_block_ts_us, this_block_ts]. Updated on every accept/apply so
+    /// produce and follower-replay compute the SAME reward (stateless carry — deterministic).
+    last_block_ts_us: u128,
 }
 
 /// Persisted snapshot: the money + chain state (NOT students — VerifiedRegistry isn't
@@ -103,6 +111,13 @@ struct Snapshot {
     /// so snapshots written before auth landed still load.
     #[serde(default)]
     auth_nonces: std::collections::HashMap<WalletId, u64>,
+    /// LANE-R time-based emission anchors (µs). `serde(default)` so pre-LANE-R snapshots
+    /// still load (a chain that predates time-based emission keeps genesis_ts_us=0 until a
+    /// fresh-genesis cut sets it).
+    #[serde(default)]
+    genesis_ts_us: u128,
+    #[serde(default)]
+    last_block_ts_us: u128,
 }
 
 /// Write the current money+chain state to flux-db (bincode — handles u128 + tuple-key
@@ -114,6 +129,7 @@ fn persist(node: &Node) {
         bits: node.bits, retarget_anchor_ts: node.retarget_anchor_ts, retarget_anchor_height: node.retarget_anchor_height,
         tokens: node.tokens.clone(), pools: node.pools.clone(), citizens: node.citizens.clone(),
         auth_nonces: node.auth_nonces.clone(),
+        genesis_ts_us: node.genesis_ts_us, last_block_ts_us: node.last_block_ts_us,
     };
     if let Ok(bytes) = bincode::serialize(&snap) { let _ = db.put(b"snapshot", &bytes); }
 }
@@ -123,11 +139,14 @@ fn load_snapshot(db: &flux_db::Database) -> Option<Snapshot> {
 }
 /// Persist an accepted dual-lane block under its mining height so peers can pull it
 /// (`GET /block?height=`) and INDEPENDENTLY re-verify the chain (verify-don't-trust).
-fn store_block(node: &Node, bh: u64, sub: &Submission, reward: u128, prev_tip: [u8; 32], new_tip: [u8; 32]) {
+fn store_block(node: &Node, bh: u64, sub: &Submission, reward: u128, prev_tip: [u8; 32], new_tip: [u8; 32], ts_us: u128) {
     let Some(db) = node.statedb.as_ref() else { return };
+    // LANE-R: persist the block's µs timestamp so a follower/standalone verifier recomputes
+    // the SAME time-based reward (block_reward_time(genesis_ts, prev_block_ts, ts, 0)).
     let rec = serde_json::json!({
         "height": bh, "prev_tip": hexs(&prev_tip), "tip": hexs(&new_tip),
         "reward": reward.to_string(), "bits": node.bits, "vdf_t": mining_vdf_t(), "submission": sub,
+        "ts": ts_us.to_string(),
     });
     let _ = db.put(format!("block/{bh:020}").as_bytes(), rec.to_string().as_bytes());
 }
@@ -169,11 +188,20 @@ fn apply_block(n: &mut Node, rec: &serde_json::Value, g: &ModSquaring) -> Result
     let bits = rec["bits"].as_u64().unwrap_or(0) as u32;
     let vdf_t = rec["vdf_t"].as_u64().unwrap_or(0);
     let reward: u128 = rec["reward"].as_str().unwrap_or("0").parse().map_err(|_| "bad reward")?;
+    let rec_ts: u128 = rec["ts"].as_str().unwrap_or("0").parse().unwrap_or(0);
     let sub: Submission = serde_json::from_value(rec["submission"].clone()).map_err(|e| format!("bad submission: {e}"))?;
     let miner = hex32(&sub.wallet).ok_or("bad wallet")?;
     let c = Challenge { height: bh, vdf_input: mining_seed(&n.tip_hash, bh), blake4_target: target_from_bits(bits), vdf_t };
     if !check_submission(g, &c, &sub) { return Err(format!("block {bh}: dual-lane verify FAILED")); }
-    if reward != sigil_emission::block_reward(bh) { return Err(format!("block {bh}: reward != schedule")); }
+    // LANE-R: recompute the reward the SAME way the producer did — time-based from the block's
+    // stored µs ts when genesis is anchored, else the legacy block-based schedule. A follower
+    // that diverges here would fork, so this MUST mirror the produce path exactly.
+    let expected_reward = if n.genesis_ts_us == 0 {
+        sigil_emission::block_reward(bh)
+    } else {
+        sigil_emission::block_reward_time(n.genesis_ts_us, n.last_block_ts_us, rec_ts, 0).0
+    };
+    if reward != expected_reward { return Err(format!("block {bh}: reward {reward} != schedule {expected_reward}")); }
     let new_tip = fold_tip(&n.tip_hash, bh, sub.block.blake4_hash, sub.block.nonce, &sub.block.vdf);
     if hex32(rec["tip"].as_str().unwrap_or("")).ok_or("bad tip")? != new_tip { return Err(format!("block {bh}: tip-fold mismatch")); }
     // All checks passed — APPLY (mirror the producer's accept exactly).
@@ -181,7 +209,8 @@ fn apply_block(n: &mut Node, rec: &serde_json::Value, g: &ModSquaring) -> Result
     credit_share(&mut n.state, eh, miner, reward).map_err(|e| e.to_string())?;
     let prev_tip = n.tip_hash;
     n.tip_hash = new_tip;
-    store_block(n, bh, &sub, reward, prev_tip, new_tip);
+    store_block(n, bh, &sub, reward, prev_tip, new_tip, rec_ts);
+    if n.genesis_ts_us != 0 { n.last_block_ts_us = rec_ts; } // advance the emission clock
     n.block_height += 1;
     n.height += 1;
     // ADOPT the producer's difficulty from the chain — a follower must NOT run its own
@@ -224,6 +253,12 @@ fn follow_peer(node: std::sync::Arc<RwLock<Node>>, peer: String) {
 /// The record's bytes are stored in flux-db (via flux-history); the CID is its hash,
 /// so retrieval (/aether?cid=) can verify blake3(content)==cid (verify-don't-trust).
 fn cid_of(s: &str) -> String { blake3::hash(s.as_bytes()).to_hex().to_string() }
+
+/// Wall-clock microseconds since the unix epoch. LANE-R: emission integrates over µs so a
+/// 400 µs producer block isn't truncated to a 0 reward (ms resolution would collapse dt→0).
+fn now_us() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_micros()).unwrap_or(0)
+}
 
 /// hex of a 32-byte id (searchable content + the `addr` tag).
 fn hexs(b: &[u8; 32]) -> String {
@@ -394,6 +429,7 @@ fn bootstrap() -> Node {
             statedb,
             auth_nonces: snap.auth_nonces,
             onboard_rl: std::collections::HashMap::new(),
+            genesis_ts_us: snap.genesis_ts_us, last_block_ts_us: snap.last_block_ts_us,
         };
     }
     eprintln!("flux-db: no snapshot — seeding fresh genesis @ {state_path}");
@@ -453,9 +489,16 @@ fn bootstrap() -> Node {
         ("SIGIL/USDS".into(), POOL_SIGIL),
     ];
     let tip_hash = *blake3::hash(b"sigil-g0/mining-genesis").as_bytes();
+    // LANE-R: anchor time-based emission at THIS fresh genesis. genesis_ts_us is the wall-clock
+    // µs the chain started; the first block integrates from here. Persisted + gossiped via the
+    // snapshot so every node halves on the same clock. (Set SIGIL_GENESIS_TS_US to pin an exact
+    // genesis instant across a coordinated fleet cut; else use now.)
+    let genesis_ts_us = std::env::var("SIGIL_GENESIS_TS_US").ok()
+        .and_then(|v| v.parse::<u128>().ok()).unwrap_or_else(now_us);
     let node = Node { state, height: 2, block_height: 0, students: VerifiedRegistry::new(), tokens, pools, citizens: vec![CITIZEN], history,
         tip_hash, bits: mining_bits(), retarget_anchor_ts: now_ms(), retarget_anchor_height: 0, statedb,
-        auth_nonces: std::collections::HashMap::new(), onboard_rl: std::collections::HashMap::new() };
+        auth_nonces: std::collections::HashMap::new(), onboard_rl: std::collections::HashMap::new(),
+        genesis_ts_us, last_block_ts_us: genesis_ts_us };
     persist(&node); // write the genesis snapshot so the next boot restores
     node
 }
@@ -587,8 +630,10 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
         // ── peer sync (decentralization ①): expose the mining chain for verify-don't-trust ──
         ("GET", "/tip") => {
             let n = node.read().unwrap();
-            ok(format!("{{\"ok\":true,\"block_height\":{},\"height\":{},\"tip\":\"{}\",\"bits\":{}}}",
-                n.block_height, n.height, hexs(&n.tip_hash), n.bits))
+            // LANE-R: expose genesis_ts_us so a standalone verifier (chain_verify) can recompute
+            // the time-based reward (0 on a legacy block-based chain).
+            ok(format!("{{\"ok\":true,\"block_height\":{},\"height\":{},\"tip\":\"{}\",\"bits\":{},\"genesis_ts_us\":\"{}\"}}",
+                n.block_height, n.height, hexs(&n.tip_hash), n.bits, n.genesis_ts_us))
         }
         ("GET", "/block") => {
             let h: u64 = match query_get(query, "height").and_then(|s| s.parse().ok()) {
@@ -913,6 +958,14 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                     if let Err(e) = authorize(&mut n, &miner, "mine",
                         &[to_hex(&miner), header.clone(), pow_nonce.to_string()], body) { return bad(&e); }
                     let difficulty = n.bits;
+                    // LANE-R: the legacy single-lane /mine credits LOCALLY (no stored/verifiable
+                    // block), so it must NOT touch the time-based emission clock (last_block_ts_us)
+                    // — advancing it here but not on a follower would FORK the reward of the next
+                    // dual-lane block. On a time-based chain it's disabled (use /mining/submit, the
+                    // verifiable lane). On the legacy block-based chain it keeps the old schedule.
+                    if n.genesis_ts_us != 0 {
+                        return bad("legacy /mine is disabled on time-based emission — use /mining/submit (dual-lane, verifiable)");
+                    }
                     let reward = sigil_emission::block_reward(n.block_height);
                     let h = n.height;
                     match submit_share(&mut n.state, h, miner, header.as_bytes(), pow_nonce, difficulty, reward) {
@@ -981,7 +1034,15 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             // Verified on the current tip — credit the HALVING block reward on the MINING
             // height (block_reward(bh) — swap volume no longer distorts emission). Schedule +
             // 21M cap are two independent guards. State event ordered by the global height.
-            let reward = sigil_emission::block_reward(bh);
+            // LANE-R TIME-BASED EMISSION: reward = ∫ rate dt over [last_block_ts, now] (stateless
+            // carry=0, deterministic). genesis_ts_us==0 → pre-LANE-R chain, keep the block-based
+            // schedule (time-based only activates on a fresh genesis that anchors genesis_ts_us).
+            let ts_us = now_us();
+            let reward = if n.genesis_ts_us == 0 {
+                sigil_emission::block_reward(bh)
+            } else {
+                sigil_emission::block_reward_time(n.genesis_ts_us, n.last_block_ts_us, ts_us, 0).0
+            };
             let eh = n.height;
             match credit_share(&mut n.state, eh, miner, reward) {
                 Ok(bal) => {
@@ -990,8 +1051,10 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                     let prev_tip = n.tip_hash;
                     let new_tip = fold_tip(&prev_tip, bh, sub.block.blake4_hash, sub.block.nonce, &sub.block.vdf);
                     n.tip_hash = new_tip;
-                    // decentralization step ①: persist the block so PEERS can pull + verify it.
-                    store_block(&n, bh, &sub, reward, prev_tip, new_tip);
+                    // decentralization step ①: persist the block (+ its µs ts) so PEERS can pull
+                    // + recompute the SAME time-based reward.
+                    store_block(&n, bh, &sub, reward, prev_tip, new_tip, ts_us);
+                    n.last_block_ts_us = ts_us; // advance the emission clock for the next block
                     n.block_height += 1;
                     n.height += 1;
                     retarget(&mut n); // fix #2: adjust BLAKE4 difficulty from real block times

@@ -442,6 +442,19 @@ impl BlockReader {
     /// synced/verified watermark before exit without owning the mutable store.
     pub fn flush(&self) -> Result<(), String> { self.db.flush() }
 
+    /// The REAL max stored height, read from the persisted `best` meta key (`[KEY_META,'B']`,
+    /// written by the live store's `persist_best`). The sync STATE fakes its height to the
+    /// network tip in light-monitor mode, so the explorer must anchor `recent_from`/`search`
+    /// HERE — the highest block we ACTUALLY hold — not the tip. Anchoring at the faked tip made
+    /// the down-walk start millions of blocks above anything stored → empty → the "at 4.5M but
+    /// Activity stuck on 'loading chain'" bug. 0 when the store is empty / key absent.
+    pub fn best_height(&self) -> u64 {
+        self.db.get(&[KEY_META, b'B']).ok().flatten()
+            .filter(|v| v.len() >= 8)
+            .map(|v| u64::from_be_bytes([v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]]))
+            .unwrap_or(0)
+    }
+
     /// Decode a stored block (either bincode `StoredBlock` or the light-client raw
     /// JSON `{"h","hash","ts"}`) into a `BlockRow`. `verified` is true only when we
     /// hold the full header and `header.hash()` re-derives to the stored hash hex.

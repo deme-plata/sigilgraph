@@ -148,8 +148,13 @@ impl LocalApi {
             return None; // txs live on the remote node — proxy
         }
         let limit = qparam(query, "limit").and_then(|l| l.parse::<usize>().ok()).unwrap_or(40).min(200);
-        let s = self.sync_snapshot()?;
-        let top = Self::local_top(&s);
+        // v0.57: anchor at the REAL stored max, NOT local_top. The sync state's height is faked to
+        // the network tip in light-monitor mode, so local_top() walks down from the tip and finds
+        // nothing stored → "loading chain" forever despite a populated store. best_height is the
+        // highest block we ACTUALLY hold; fall back to the sync-state top only if the store is empty.
+        let real_top = self.reader.best_height();
+        let top = if real_top > 0 { real_top } else { self.sync_snapshot().map(|s| Self::local_top(&s)).unwrap_or(0) };
+        if top == 0 { return None; }
         let rows = self.reader.recent_from(top, limit);
         if rows.is_empty() {
             return None; // nothing local yet — proxy so the explorer isn't blank
@@ -162,8 +167,11 @@ impl LocalApi {
         if q.trim().len() < 2 {
             return None;
         }
-        let s = self.sync_snapshot()?;
-        let top = Self::local_top(&s);
+        // v0.57: anchor the recent-window scan at the REAL stored max (see `recent()`), not the
+        // tip-faked sync-state top — otherwise the bounded scan never reaches a stored block.
+        let real_top = self.reader.best_height();
+        let top = if real_top > 0 { real_top } else { self.sync_snapshot().map(|s| Self::local_top(&s)).unwrap_or(0) };
+        if top == 0 { return None; }
         let rows = self.reader.search(q.trim(), top);
         if rows.is_empty() {
             return None; // let the remote node try tx / address / full-text

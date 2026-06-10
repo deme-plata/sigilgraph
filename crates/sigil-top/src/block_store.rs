@@ -44,6 +44,7 @@ pub struct BlockStore {
 /// Key prefix bytes (block data is keyed by 64-char hex hash, never starts with these).
 const KEY_HINDEX: u8 = 0x01; // 0x01 ++ height.to_be_bytes() -> hash_hex  (height index)
 const KEY_META: u8 = 0x02;   // 0x02'S' -> synced_to · 0x02'V' -> verified_to  (meta)
+                             // 0x02'B' -> be(best_height) ++ best_hash_hex  (v0.35: O(1) open)
 
 fn height_key(h: u64) -> Vec<u8> {
     let mut k = Vec::with_capacity(9);
@@ -60,30 +61,57 @@ impl BlockStore {
         }
         let mut db = flux_db::Database::open(&db_path)?;
 
+        // ── v0.35 (sync-starts-earlier, DeepSeek audit S1): O(1) open. ──────────────────
+        // The old open() ITERATED THE ENTIRE DB and bincode-deserialized every block just
+        // to learn best_height — measured in MINUTES on a multi-GB store, all spent BEFORE
+        // the sync thread could even spawn. Now best_(height,hash) persists under meta 'B'
+        // (written by every put path); when present we skip the scan entirely. Stores from
+        // before 'B' fall through to the legacy scan ONCE and write 'B' = self-migrating.
+        // Crash-staleness ('B' lags the final batch if we die between batch_put and the
+        // meta put) only ever UNDER-reports best_height by ≤1 batch and self-corrects on
+        // the next put — synced_to/verified_to (the consensus-relevant watermarks) have
+        // their own keys and are untouched by this.
         let mut best_height = 0u64;
         let mut best_hash_hex = String::new();
-        let mut have_index = false;
-        let mut blocks_idx: Vec<(u64, Vec<u8>)> = Vec::new(); // (height, hash bytes) for migration
-        for (key, value) in db.iter() {
-            match key.first() {
-                Some(&KEY_HINDEX) => { have_index = true; continue; }
-                Some(&KEY_META) => continue,
-                _ => {}
-            }
-            if let Ok(block) = bincode::deserialize::<StoredBlock>(&value) {
-                if block.header.height >= best_height {
-                    best_height = block.header.height;
-                    best_hash_hex = block.hash_hex.clone();
+        let mut need_best_migration = true;
+        if let Some(v) = db.get(&[KEY_META, b'B']).ok().flatten() {
+            if v.len() >= 8 {
+                if let Ok(hb) = <[u8; 8]>::try_from(&v[..8]) {
+                    best_height = u64::from_be_bytes(hb);
+                    best_hash_hex = String::from_utf8_lossy(&v[8..]).into_owned();
+                    need_best_migration = false;
                 }
-                blocks_idx.push((block.header.height, key));
             }
         }
-        // Migrate a pre-index store (built before the height index existed) so it
-        // resumes instead of re-syncing from 0.
-        if !have_index && !blocks_idx.is_empty() {
-            for (h, hashk) in &blocks_idx {
-                let _ = db.put(&height_key(*h), hashk);
+        if need_best_migration {
+            // Legacy path: one full scan (old behavior), then persist 'B' so every
+            // subsequent open is O(1).
+            let mut have_index = false;
+            let mut blocks_idx: Vec<(u64, Vec<u8>)> = Vec::new(); // (height, hash bytes)
+            for (key, value) in db.iter() {
+                match key.first() {
+                    Some(&KEY_HINDEX) => { have_index = true; continue; }
+                    Some(&KEY_META) => continue,
+                    _ => {}
+                }
+                if let Ok(block) = bincode::deserialize::<StoredBlock>(&value) {
+                    if block.header.height >= best_height {
+                        best_height = block.header.height;
+                        best_hash_hex = block.hash_hex.clone();
+                    }
+                    blocks_idx.push((block.header.height, key));
+                }
             }
+            // Migrate a pre-index store (built before the height index existed) so it
+            // resumes instead of re-syncing from 0.
+            if !have_index && !blocks_idx.is_empty() {
+                for (h, hashk) in &blocks_idx {
+                    let _ = db.put(&height_key(*h), hashk);
+                }
+            }
+            let mut bv = best_height.to_be_bytes().to_vec();
+            bv.extend_from_slice(best_hash_hex.as_bytes());
+            let _ = db.put(&[KEY_META, b'B'], &bv);
         }
 
         let synced_to = db
@@ -99,6 +127,14 @@ impl BlockStore {
         let mut s = BlockStore { db, best_height, best_hash_hex, synced_to, verified_to, base: 0 };
         s.advance_synced(); // catch up the contiguous pointer to whatever's on disk
         Ok(s)
+    }
+
+    /// v0.35: persist best_(height,hash) under meta 'B' — the key that makes open() O(1)
+    /// instead of a full-db scan. Called by every put path that can raise best_height.
+    fn persist_best(&mut self) {
+        let mut v = self.best_height.to_be_bytes().to_vec();
+        v.extend_from_slice(self.best_hash_hex.as_bytes());
+        let _ = self.db.put(&[KEY_META, b'B'], &v);
     }
 
     /// True if a block at `height` is stored (via the height index).
@@ -204,6 +240,7 @@ impl BlockStore {
         if height >= self.best_height {
             self.best_height = height;
             self.best_hash_hex = hash_hex;
+            self.persist_best(); // v0.35: keep open() O(1)
         }
         self.advance_synced(); // extend the contiguous pointer if this filled the next gap
 
@@ -224,6 +261,7 @@ impl BlockStore {
         if height >= self.best_height {
             self.best_height = height;
             self.best_hash_hex = hash_hex;
+            self.persist_best(); // v0.35: keep open() O(1)
         }
         Ok(())
     }
@@ -277,7 +315,12 @@ impl BlockStore {
         }
         let refs: Vec<(&[u8], &[u8])> = owned.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
         match self.db.batch_put(&refs) {
-            Ok(()) => { self.best_height = max_h; self.best_hash_hex = max_hash; headers.len() }
+            Ok(()) => {
+                self.best_height = max_h;
+                self.best_hash_hex = max_hash;
+                self.persist_best(); // v0.35: ONE meta put per batch keeps open() O(1)
+                headers.len()
+            }
             Err(_) => 0,
         }
     }
@@ -319,6 +362,7 @@ impl BlockStore {
         if height >= self.best_height {
             self.best_height = height;
             self.best_hash_hex = hash_hex.to_string();
+            self.persist_best(); // v0.35: keep open() O(1)
         }
         self.advance_synced();
         Ok(true)

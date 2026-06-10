@@ -394,20 +394,15 @@ impl P2PBlockSync {
         // 0 blk/s). A standalone OS thread with BLOCKING reqwest polls every 3s, immune to
         // that contention, and seeds peer_best directly.
         if recent_only {
-            // v0.23: EAGER tip-seed. The fast-snap fires only once peer_best is non-zero, and
-            // it's read on the sync loop's FIRST cycle. Before this, peer_best was seeded ONLY
-            // by the poller thread's first fetch, which races the sync loop's startup — so the
-            // first snap could miss and the monitor showed "connecting…" for an extra RTT (or,
-            // if the poller thread was slow to schedule, several cycles). Seed SYNCHRONOUSLY
-            // here, before either thread spawns, so the snap is guaranteed on cycle 1 (no
-            // startup gap). Best-effort: a brief oracle blip just falls back to the poller.
-            if let Some(h) = fetch_live_tip_blocking() {
-                let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-                if h > s.peer_best_height { s.peer_best_height = h; }
-            }
-            // v0.32.5: OFFLINE-RESILIENT fallback — if both CDN oracles were unreachable just now,
-            // seed from the LAST-KNOWN tip persisted on a prior run so the fast-snap STILL fires to
-            // a recent window instead of stalling at "connecting…". The poller corrects it upward
+            // v0.35 (sync-starts-earlier, DeepSeek audit S2): the v0.23 SYNCHRONOUS CDN
+            // eager-seed is GONE — it blocked launch() for up to ~6 s of HTTP before the
+            // sync loop could even spawn, serializing exactly the startup it meant to speed
+            // up. The poller thread below fires its first fetch IMMEDIATELY on spawn (fetch
+            // precedes the first sleep), so the CDN tip still lands within one RTT — now in
+            // parallel with the mesh bootstrap instead of ahead of it.
+            // v0.32.5: OFFLINE-RESILIENT instant seed — the LAST-KNOWN tip persisted on a
+            // prior run (one disk read, microseconds) so the fast-snap can fire on cycle 1
+            // even before any oracle answers / fully offline. The poller corrects it upward
             // the moment a CDN answers. Only ever raises peer_best.
             if let Some(h) = read_persisted_tip() {
                 let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -748,7 +743,6 @@ impl P2PBlockSync {
                     // every PROBE_EVERY so peer_best tracks the tip and the refill self-sustains
                     // all the way to the true head (each reply also lands up to 8192 free headers).
                     if last_probe.elapsed() >= PROBE_EVERY {
-                        last_probe = Instant::now();
                         let now = Instant::now();
                         let mut healthy: Vec<_> = net.connected_peers().into_iter()
                             .filter(|p| peer_bench.get(&p.to_string()).map_or(true, |&u| now >= u))
@@ -760,6 +754,13 @@ impl P2PBlockSync {
                         // set so the probe/refill keeps firing best-effort (bench is advisory).
                         if healthy.is_empty() { healthy = net.connected_peers(); }
                         if let Some(&peer) = healthy.first() {
+                            // v0.35 (DeepSeek audit S5): stamp the timer ONLY when a probe is
+                            // actually SENT. It used to be stamped before the peer check, so
+                            // with 0 peers connected (the first loop ticks, pre-bootstrap) the
+                            // overdue first probe was BURNED and the real first probe waited an
+                            // extra PROBE_EVERY after the first PeerConnected. Now the probe
+                            // fires on the very next 10ms tick after a peer lands.
+                            last_probe = Instant::now();
                             let payload = serde_json::to_vec(
                                 &BackfillReq { from: frontier_chunk, to: u64::MAX, headers_only: true, codec: 1 }
                             ).unwrap();

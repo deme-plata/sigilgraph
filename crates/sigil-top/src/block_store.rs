@@ -39,12 +39,18 @@ pub struct BlockStore {
     /// "downloaded AND validated as one connected chain". Persisted so a restart resumes
     /// verification instead of re-walking 0. Invariant: `verified_to <= synced_to`.
     verified_to: u64,
+    /// LANE-S: the GENESIS-anchor hash the persisted watermarks belong to (the hex hash of the
+    /// block at `base`). The watermarks describe ONE chain; a testnet restart mints a fresh
+    /// genesis, so a different hash here means the persisted synced_to/verified_to are for a
+    /// DEAD chain and must be wiped (see `note_genesis`). Empty until the anchor block is seen.
+    genesis_hash: String,
 }
 
 /// Key prefix bytes (block data is keyed by 64-char hex hash, never starts with these).
 const KEY_HINDEX: u8 = 0x01; // 0x01 ++ height.to_be_bytes() -> hash_hex  (height index)
 const KEY_META: u8 = 0x02;   // 0x02'S' -> synced_to · 0x02'V' -> verified_to  (meta)
                              // 0x02'B' -> be(best_height) ++ best_hash_hex  (v0.35: O(1) open)
+                             // 0x02'G' -> genesis-anchor hash hex            (LANE-S: reset key)
 
 fn height_key(h: u64) -> Vec<u8> {
     let mut k = Vec::with_capacity(9);
@@ -124,7 +130,12 @@ impl BlockStore {
             .unwrap_or(0)
             .min(synced_to); // never claim verified past what's downloaded
 
-        let mut s = BlockStore { db, best_height, best_hash_hex, synced_to, verified_to, base: 0 };
+        // LANE-S: the genesis-anchor hash the persisted watermarks belong to.
+        let genesis_hash = db
+            .get(&[KEY_META, b'G']).ok().flatten()
+            .map(|v| String::from_utf8_lossy(&v).into_owned())
+            .unwrap_or_default();
+        let mut s = BlockStore { db, best_height, best_hash_hex, synced_to, verified_to, base: 0, genesis_hash };
         s.advance_synced(); // catch up the contiguous pointer to whatever's on disk
         Ok(s)
     }
@@ -205,9 +216,41 @@ impl BlockStore {
         self.best_height = 0;
         self.best_hash_hex = String::new();
         self.base = 0;
+        self.genesis_hash = String::new(); // LANE-S: forget the dead chain's genesis anchor
         let _ = self.db.put(&[KEY_META, b'S'], &0u64.to_be_bytes());
         let _ = self.db.put(&[KEY_META, b'V'], &0u64.to_be_bytes());
+        let _ = self.db.put(&[KEY_META, b'G'], b""); // clear the persisted genesis key
         self.persist_best(); // write best_height=0 under meta 'B'
+    }
+
+    /// LANE-S: the genesis-anchor hash the persisted watermarks belong to ("" until first seen).
+    pub fn genesis_hash(&self) -> &str { &self.genesis_hash }
+
+    /// LANE-S: key the watermarks to the LIVE genesis anchor (the hash of the block at `base`) and
+    /// AUTO-INVALIDATE on a mismatch. Returns `true` ONLY when it detects a CHANGED genesis — i.e.
+    /// a testnet restart minted a fresh chain — in which case it has ALREADY wiped the now-stale
+    /// watermarks (`reset_watermarks`) and adopted the new anchor; the caller then drops the
+    /// last-tip cache + resets the in-memory peer_best/verified so the hero self-heals to the
+    /// fresh tip with NO manual local wipe. No-op (false) on unknown/first/unchanged genesis.
+    pub fn note_genesis(&mut self, live_hash: &str) -> bool {
+        let live = live_hash.trim();
+        if live.is_empty() {
+            return false;
+        }
+        if self.genesis_hash.is_empty() {
+            self.genesis_hash = live.to_string();
+            let _ = self.db.put(&[KEY_META, b'G'], self.genesis_hash.as_bytes());
+            return false;
+        }
+        if self.genesis_hash == live {
+            return false;
+        }
+        // Fresh genesis under our feet → the persisted watermarks describe a DEAD chain. Wipe them,
+        // then adopt the new anchor (reset_watermarks cleared genesis_hash, so set it AFTER).
+        self.reset_watermarks();
+        self.genesis_hash = live.to_string();
+        let _ = self.db.put(&[KEY_META, b'G'], self.genesis_hash.as_bytes());
+        true
     }
 
     /// v0.9.0: Load the full stored header at a given height (via the height index →
@@ -714,6 +757,45 @@ mod tests {
         }
         let s2 = BlockStore::open(&p).unwrap();
         assert_eq!(s2.synced_to(), 8, "RESUMES from the persisted store, not 0");
+        let _ = std::fs::remove_dir_all(&p);
+    }
+
+    /// LANE-S acceptance (mechanism): a stale client (OLD-genesis store with high watermarks) that
+    /// meets a FRESH-genesis producer must AUTO-WIPE its watermarks via `note_genesis` — the
+    /// self-heal that replaces the manual local wipe after a testnet restart. The live <10 s gate
+    /// is an integration concern; this CI test proves the keying: detect the changed genesis
+    /// anchor → zero + persist the watermarks, and never re-trigger on the same anchor.
+    #[test]
+    fn lane_s_genesis_change_auto_invalidates_watermarks() {
+        let p = tmp("lane-s-genesis");
+        let _ = std::fs::remove_dir_all(&p);
+        {
+            let mut s = BlockStore::open(&p).unwrap();
+            // OLD chain: learn its genesis anchor, then make progress.
+            assert!(!s.note_genesis("old_genesis_hash"), "first genesis is LEARNED, not a reset");
+            assert_eq!(s.genesis_hash(), "old_genesis_hash");
+            for h in 0..6 { s.put_block_raw(h, &format!("old{h}")).unwrap(); }
+            s.set_verified_to(5);
+            assert_eq!(s.synced_to(), 6);
+            assert_eq!(s.verified_to(), 5);
+            assert_eq!(s.best_height(), 5);
+            // Fresh genesis (testnet restart) → DIFFERENT anchor → AUTO-INVALIDATE.
+            assert!(s.note_genesis("fresh_genesis_hash"), "a CHANGED genesis is a reset");
+            assert_eq!(s.genesis_hash(), "fresh_genesis_hash", "adopts the fresh anchor");
+            assert_eq!(s.synced_to(), 0, "stale watermarks wiped on genesis change");
+            assert_eq!(s.verified_to(), 0);
+            assert_eq!(s.best_height(), 0);
+            // Idempotent: the SAME genesis again is NOT a reset.
+            assert!(!s.note_genesis("fresh_genesis_hash"));
+            // Unknown (empty) live genesis is a no-op (offline / pre-anchor).
+            assert!(!s.note_genesis(""));
+            assert_eq!(s.genesis_hash(), "fresh_genesis_hash");
+        }
+        // The fresh anchor PERSISTS across reopen (keyed under meta 'G').
+        {
+            let s = BlockStore::open(&p).unwrap();
+            assert_eq!(s.genesis_hash(), "fresh_genesis_hash", "genesis key survives reopen");
+        }
         let _ = std::fs::remove_dir_all(&p);
     }
 }

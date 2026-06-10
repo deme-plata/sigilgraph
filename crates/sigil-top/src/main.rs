@@ -328,7 +328,9 @@ fn fetch_feed(url: &str) -> Option<(NodeStatus, Vec<FeedBlock>)> {
     // can exceed the 21M WHOLE cap, so a value above it is already base -> keep; a value
     // at/under 21M is whole -> scale to base.
     let supply_raw: u128 = s.supply.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0);
-    let native_supply = if supply_raw > 21_000_000u128 { supply_raw } else { supply_raw.saturating_mul(10u128.pow(DECIMALS)) };
+    // LANE-T hardening: a value 10^8 over the cap is the double-scale tell — clamp to the
+    // 21M base cap so a corrupt/mis-scaled source can never show > 21M SIGIL in the hero.
+    let native_supply = (if supply_raw > 21_000_000u128 { supply_raw } else { supply_raw.saturating_mul(10u128.pow(DECIMALS)) }).min(MAX_SUPPLY_BASE);
     // Carry the committed roots through as hex so the no-local-node view still
     // shows the 4 state roots, not "—".
     let (wr, dr, er, cr) = feed
@@ -2111,6 +2113,7 @@ struct App {
     mine_gpu_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,  // v0.37: engine signals GPU init failure -> CPU fallback
     bps_ema: f64,            // v0.37: smoothed network block-rate (raw bps blinks 0<->250)
     bps_zero_streak: u32,    // consecutive zero-bps polls before showing honest idle
+    welcome_until: Option<Instant>, // LANE-U v0.67: first-launch welcome modal (SIGIL emblem + giant F); any key or 14s clears it
     idle_store: Option<block_store::BlockStore>, // v0.40.3: parked store so [F] can launch sync ON DEMAND
     full_sync: bool,                                    // [F] opt-in heavy full sync (default = 10ms lightweight verify)
     full_sync_height: u64,                              // blocks downloaded so far in full sync
@@ -2250,6 +2253,7 @@ impl App {
               mine_gpu_failed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
               bps_ema: 0.0,
               bps_zero_streak: 0,
+              welcome_until: Some(Instant::now() + Duration::from_secs(14)),
               idle_store: None,
               tab: Tab::Node,
               swarm: SwarmView::default(),
@@ -2859,6 +2863,9 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             if event::poll(Duration::from_millis(poll_ms))? {
                 if let Event::Key(k) = event::read()? {
                     if k.kind == KeyEventKind::Press {
+                        // LANE-U v0.67: the first key dismisses the welcome modal (F also falls
+                        // through to start sync/mining as usual).
+                        if app.welcome_until.is_some() { app.welcome_until = None; }
                         match k.code {
                             KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return Ok(()),
                             KeyCode::Char('r') | KeyCode::Char('R') => { app.refresh(); app.toast_sticky = false; }
@@ -3910,6 +3917,59 @@ fn draw_ui(f: &mut Frame, app: &App) {
             draw_rune_band(f, app, area, start, until);
         }
     }
+
+    // LANE-U v0.67: first-launch WELCOME — centered card with the SIGIL emblem + a giant F
+    // call-to-action. Drawn LAST so it floats above everything; any key or 14s clears it.
+    if app.welcome_until.map(|u| Instant::now() < u).unwrap_or(false) {
+        draw_welcome_modal(f, area);
+    }
+}
+
+/// LANE-U v0.67: the first-launch welcome modal — a centered card with a bold SIGIL emblem and a
+/// GIANT F prompt to start. CP437-safe by construction: only full-block (█) + light-box glyphs
+/// (the operator console renders nothing fancier), every string also run through `sa()`.
+fn draw_welcome_modal(f: &mut Frame, area: Rect) {
+    let w: u16 = 60.min(area.width.saturating_sub(2));
+    let h: u16 = 22.min(area.height.saturating_sub(2));
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height.saturating_sub(h) / 2;
+    let modal = Rect { x, y, width: w, height: h };
+    f.render_widget(Clear, modal); // punch a hole over the dashboard
+
+    let g = |t: &str, c: Color| Line::from(Span::styled(sa(t), Style::default().fg(c).add_modifier(Modifier::BOLD)));
+    let mut lines: Vec<Line> = vec![
+        Line::from(""),
+        // SIGIL emblem — a full-block diamond (CP437-safe)
+        g("        ███        ", C_NEON_CYAN),
+        g("      ███████      ", C_NEON_CYAN),
+        g("    ███████████    ", C_VBRIGHT),
+        g("      ███████      ", C_NEON_PINK),
+        g("        ███        ", C_NEON_PINK),
+        g("      S I G I L      ", C_NEON_CYAN),
+        Line::from(""),
+        // GIANT F (full-block) beside the call-to-action label
+        g("   ███████   start", C_NEON_GOLD),
+        g("   ███        the", C_NEON_GOLD),
+        g("   █████      live", C_NEON_GOLD),
+        g("   ███        node", C_NEON_GOLD),
+        g("   ███        + mining", C_NEON_GOLD),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(sa("  press "), Style::default().fg(C_DIM)),
+            Span::styled(" F ", Style::default().bg(C_NEON_GOLD).fg(C_BG).add_modifier(Modifier::BOLD)),
+            Span::styled(sa(" to START — "), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(sa("[5] Mining  [M] mine"), Style::default().fg(C_DIM)),
+        ]),
+        Line::from(Span::styled(sa("        any other key to skip"), Style::default().fg(C_DIM))),
+    ];
+    lines.truncate(h.saturating_sub(2) as usize);
+    let card = card_block(" ◇ WELCOME TO SIGIL", C_NEON_CYAN)
+        .border_style(Style::default().fg(C_NEON_CYAN))
+        .style(Style::default().bg(C_BG));
+    f.render_widget(
+        Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center).block(card),
+        modal,
+    );
 }
 
 /// The original node dashboard, now the [1] Node tab body.
@@ -4367,10 +4427,15 @@ fn draw_mining_hero(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let mining = app.mining;
     let (hv, hu) = if app.mine_hashrate >= 1000.0 { (app.mine_hashrate / 1000.0, "GH/s") }
         else { (app.mine_hashrate, "MH/s") };
-    let pcol = if bps >= TARGET_BPS * 0.8 { C_NEON_GREEN } else if bps > 0.0 { C_NEON_GOLD } else { C_RED };
-    let ptext = if bps >= TARGET_BPS * 0.8 { "◆ FULL POWER" } else if bps > 0.0 { "⚒ MINING" } else { "✕ IDLE" };
+    // v0.64.2 ONE GRAPH: this hero is about YOUR RIG. The network graph (supply,
+    // height, blk/s bar) lives ONLY on the Node tab — two competing "network"
+    // displays kept reading as a bug (mine-chain vs produce-chain confusion).
+    let _ = (bps, TARGET_BPS, emit, &st);
+    let pcol = if mining { C_NEON_GREEN } else { C_DIM };
+    let ptext = if mining { "⚒ MINING" } else { "✕ idle — press M" };
+    let rig_frac = if app.mine_hashrate >= 1000.0 { 1.0 } else { (app.mine_hashrate / 20.0).clamp(0.0, 1.0) };
 
-    let block = card_block(" ✦ MINING · NETWORK POWER", C_NEON_PINK)
+    let block = card_block(" ✦ MINING · YOUR RIG", C_NEON_PINK)
         .border_style(Style::default().fg(pcol));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -4379,10 +4444,10 @@ fn draw_mining_hero(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let [tele, art] = Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).spacing(1).areas(body);
 
     // ── BIG network-power bar ────────────────────────────────────────────
-    let label = format!(" {:.0} blk/s  {}", bps, ptext);
+    let label = format!(" {:.2} {}  {}", hv, hu, ptext);
     let total = bar_row.width as usize;
     let barw = total.saturating_sub(label.chars().count() + 1).max(4);
-    let fill = (frac * barw as f64).round() as usize;
+    let fill = (rig_frac * barw as f64).round() as usize;
     let bar_str = "█".repeat(fill.min(barw)) + &"░".repeat(barw.saturating_sub(fill));
     f.render_widget(Paragraph::new(Line::from(vec![
         Span::styled(bar_str, Style::default().fg(pcol).add_modifier(Modifier::BOLD)),
@@ -4394,14 +4459,8 @@ fn draw_mining_hero(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let (whole, cents) = (app.wallet_balance / 100_000_000, (app.wallet_balance % 100_000_000) / 1_000_000);
     let tlines = vec![
         Line::from(vec![
-            dim("network "), Span::styled(format!("{:.0} blk/s", bps), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)),
-            dim("   reward "), Span::styled("5 SIGIL/blk".to_string(), Style::default().fg(C_GREEN)),
-            dim("   emit "), Span::styled(format!("{:.0} SIGIL/s", emit), Style::default().fg(C_NEON_CYAN)),
-        ]),
-        Line::from(vec![
-            dim("supply "), val(fmt_supply(st.native_supply)),
-            dim(" / 21M   height "), Span::styled(group(st.height), Style::default().fg(C_VBRIGHT)),
-            dim("   peers "), Span::styled(group(st.peers), Style::default().fg(C_NEON_GREEN)),
+            dim("reward "), Span::styled("5 SIGIL/blk".to_string(), Style::default().fg(C_GREEN)),
+            dim("   network graph: Node tab [1]"),
         ]),
         Line::from(vec![
             dim("you  "), Span::styled(if mining { "◆ MINING".to_string() } else { "○ off".to_string() },

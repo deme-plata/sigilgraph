@@ -551,6 +551,33 @@ fn apply_swap_delta(
         ));
     }
 
+    // k-invariant (audit HIGH-1): the chokepoint INDEPENDENTLY enforces that the
+    // constant product reserve_a·reserve_b does not SHRINK (Uniswap-V2: fees make
+    // it grow). Without this, the reserve-match check above only confirms the
+    // pool moved by the CALLER-claimed (+in_amt, -out_amt) — it never checks that
+    // out_amt respects the curve, so a malicious/buggy producer could set
+    // out_amt ≈ reserve and drain the pool while the deltas still "match". The
+    // real DEX math lives in sigil_dex::swap; this is the chokepoint's own guard.
+    match (
+        prev.reserve_a.checked_mul(prev.reserve_b),
+        pool_after.reserve_a.checked_mul(pool_after.reserve_b),
+    ) {
+        (Some(k_before), Some(k_after)) => {
+            if k_after < k_before {
+                return Err(CommitError::DeltaInvariant(
+                    "swap delta shrinks the constant-product invariant k".into(),
+                ));
+            }
+        }
+        // u128 product overflow (astronomically large reserves) — reject rather
+        // than skip the guard. A u256 k-check is the follow-up for such pools.
+        _ => {
+            return Err(CommitError::DeltaInvariant(
+                "swap delta reserve product exceeds u128 (k-invariant uncheckable)".into(),
+            ));
+        }
+    }
+
     let from_native = state.balance_of(&from, &NATIVE);
     if in_token == NATIVE {
         let need = fee.checked_add(in_amt).ok_or(CommitError::DeltaOverflow)?;

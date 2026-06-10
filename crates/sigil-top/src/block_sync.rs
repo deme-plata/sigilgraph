@@ -394,6 +394,10 @@ pub struct P2PSyncState {
     /// Cumulative headers re-verified this session + the rolling rate (useful hashrate).
     pub pos_total: u64,
     pub pos_rate: f64,
+    /// LANE-P v0.59: HONEST stall surfacing — non-empty when the contiguous frontier has
+    /// not advanced for a while while a higher tip is known. Surfaced in the SYNC hero so a
+    /// stall is NEVER a silent 0 blk/s; cleared the moment the frontier advances again.
+    pub stall_reason: String,
 }
 
 pub struct P2PBlockSync {
@@ -915,8 +919,18 @@ impl P2PBlockSync {
                             // extra PROBE_EVERY after the first PeerConnected. Now the probe
                             // fires on the very next 10ms tick after a peer lands.
                             last_probe = Instant::now();
+                            // LANE-P v0.59 STALL-BREAKER: normally probe the floor-aligned
+                            // frontier_chunk (cache-friendly look-ahead). But if the contiguous
+                            // frontier hasn't advanced for a while, request the EXACT next-needed
+                            // height [synced_to..] from this (rotating) healthy peer — bypasses any
+                            // residual floor-alignment edge so the lead block lands and synced_to moves.
+                            let probe_from = if last_advance_t.elapsed() >= Duration::from_secs(6) {
+                                store.synced_to()
+                            } else {
+                                frontier_chunk
+                            };
                             let payload = serde_json::to_vec(
-                                &BackfillReq { from: frontier_chunk, to: u64::MAX, headers_only: true, codec: 1 }
+                                &BackfillReq { from: probe_from, to: u64::MAX, headers_only: true, codec: 1 }
                             ).unwrap();
                             let n = net.clone();
                             let tx = probe_tx.clone();
@@ -1207,6 +1221,16 @@ impl P2PBlockSync {
                             s.sync_height = s.peer_best_height;
                             s.sync_total = s.peer_best_height;
                         }
+                        // LANE-P v0.59: surface WHY the frontier is parked (never a silent 0).
+                        // Cleared the instant the contiguous frontier advances again.
+                        let net_tip = s.peer_best_height;
+                        let stalled_for = last_advance_t.elapsed();
+                        s.stall_reason = if net_tip > now_synced && stalled_for >= Duration::from_secs(6) {
+                            format!("no advance {}s @ {} (gap {}) — retrying exact [{}..] from a rotating peer",
+                                stalled_for.as_secs(), now_synced, net_tip.saturating_sub(now_synced), now_synced)
+                        } else {
+                            String::new()
+                        };
                         s.last_message_at = Some(Instant::now());
                     }
 

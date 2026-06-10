@@ -757,7 +757,17 @@ fn run_start() -> Result<()> {
                             let top = chain.height().saturating_sub(1);
                             let lo = req.from;
                             // point-to-point ⇒ a bigger chunk is fine.
-                            let hi = req.to.min(top).min(lo.saturating_add(8192));
+                            // v0.56 (sync throughput): headers are ~70 B, so a headers_only chunk
+                            // can be FAR larger than the full-block cap (32768 headers ≈ 2.3 MB raw,
+                            // ~160 KB zstd) and cut round-trips on a thin/lossy mesh — the
+                            // ~200 headers/s bottleneck was the round-trip-bound 8192 cap. Full-block
+                            // serves stay at 8192 (≈8 MB — the WAN-burst-stall limit). Env-tunable.
+                            let serve_cap: u64 = if req.headers_only {
+                                std::env::var("SIGIL_SERVE_HEADERS_CAP").ok()
+                                    .and_then(|v| v.parse::<u64>().ok())
+                                    .map(|n| n.clamp(8192, 262_144)).unwrap_or(32_768)
+                            } else { 8192 };
+                            let hi = req.to.min(top).min(lo.saturating_add(serve_cap));
                             let wbase = chain.window_base();
                             // v0.33.6: a range entirely BELOW the live window is FINALIZED — its
                             // bytes never change, so cache + replay them. The tip/window chunk is

@@ -140,6 +140,7 @@ body.view-desktop .desktop{display:flex}
   <div class="statusbar"><span>9:41</span><span>SIGIL·g0 · <b data-blockcount>H …</b></span><span>▮▮▮ 5G</span></div>
   <div class="phead"><img class="markimg" src="https://sigilgraph.fluxapp.xyz/icons/brand/sigil-flat.png?v=1780639379" style="width:78px;height:78px"><div class="brand">SIGIL<span>·</span>WALLET</div><button class="expand" onclick="setView('desktop')">⤢ desktop</button></div>
   <div class="balance"><div class="lab"><span>total balance</span><span class="vbadge"><i data-lucide="badge-check"></i>verified</span></div><div class="amtbig amt" id="amt">14,302<small>.84 SIGIL</small></div><div class="sub">≈ <b>$18,594</b> · +4.2% today ▲</div></div>
+  <div id="mineNotice" style="display:none;margin:8px 8px 0;border:1px solid rgba(251,191,36,.32);background:rgba(251,191,36,.06);border-radius:14px;padding:10px 12px;font-family:'JetBrains Mono';font-size:11px;color:var(--gold);line-height:1.5"></div>
   <div style="display:flex;gap:9px;justify-content:center;margin:12px 8px 2px;font-family:'JetBrains Mono';font-size:11px">
     <a href="flux://enter" style="color:var(--cyan);text-decoration:none;border:1px solid var(--line);background:rgba(33,212,253,.05);border-radius:999px;padding:5px 13px">＋ new wallet</a>
     <a href="flux://stats" style="color:var(--teal);text-decoration:none;border:1px solid var(--line);background:rgba(0,224,198,.05);border-radius:999px;padding:5px 13px">◈ node stats</a>
@@ -340,7 +341,31 @@ body.view-desktop .desktop{display:flex}
     // (Activity opens the SIGIL Explorer IN the main content — see showExplorer.)
     // fresh wallet → no activity yet
     document.querySelectorAll('.card .act-item').forEach((el,i)=>{ if(SIGIL_BAL===0) el.style.display='none'; });
+    // LANE-Q: when the [W] session wallet differs from the wallet the node MINES to, surface
+    // BOTH (so the operator SEES where the mined coins are) + a one-click "use my wallet".
+    const mn=document.getElementById('mineNotice');
+    if(mn){
+      const ml=(MINE_ADDR||'').toLowerCase(), al=(ADDR||'').toLowerCase();
+      if(MINE_ADDR && al && ml!==al){
+        const ms=MINE_ADDR.slice(0,8)+'…'+MINE_ADDR.slice(-6);
+        mn.innerHTML='⛏ balance shown is your <b style="color:var(--cyan)">mining wallet</b> '+ms+' — where mined coins land. '
+          +'Your login wallet '+SHORT+' is separate.<br>'
+          +'<a onclick="useMyWallet()" style="cursor:pointer;color:var(--cyan);border:1px solid var(--line);background:rgba(33,212,253,.06);border-radius:999px;padding:3px 10px;display:inline-block;margin-top:5px">⛏ use my login wallet for mining</a>';
+        mn.style.display='block';
+      } else { mn.style.display='none'; }
+    }
   }
+  // One-click: tell the node to credit FUTURE mining to this session wallet (persisted via
+  // /api/v1/use-wallet → SIGIL_MINE_WALLET file), so the visible wallet IS the mined wallet.
+  async function useMyWallet(){
+    if(!ADDR) return;
+    try{
+      const r=await fetch(NODE+'/api/v1/use-wallet?address='+ADDR,{cache:'no-store'});
+      const j=await r.json();
+      if(j&&j.ok){ MINE_ADDR=ADDR.toLowerCase(); window.MINE_ADDR=MINE_ADDR; refresh(); render(); }
+    }catch(e){}
+  }
+  window.useMyWallet=useMyWallet;
 
   // best-effort live balance (works once an HTTPS node route exists; until then a
   // fresh wallet correctly shows 0). Node returns {ok,balance} or {data:{balance}}.

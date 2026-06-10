@@ -1732,6 +1732,23 @@ fn self_update(rel: &Release) -> Result<String, String> {
             return Err(format!("BLAKE3 mismatch — refusing swap (got {}…)", &got[..12]));
         }
     }
+    // LANE-C v0.50: provenance surfacing. The manifest carries the NEW build's
+    // flux-rev (its fluxc `.proof` stamp). Show it next to the running FLUX_REV so
+    // the operator can SEE provenance actually changed across the swap — a "new"
+    // release whose flux-rev equals ours is suspicious (re-published same artifact).
+    // Informational only: BLAKE3 above is the gate; this never blocks the swap.
+    let prov = {
+        let cur = FLUX_REV.strip_prefix("full:").unwrap_or(FLUX_REV);
+        let newr = rel.flux_rev.strip_prefix("full:").unwrap_or(&rel.flux_rev);
+        let short = |s: &str| s.chars().take(10).collect::<String>();
+        if newr.is_empty() || newr == "unstamped" {
+            " · prov: manifest unstamped".to_string()
+        } else if short(newr) == short(cur) {
+            format!(" · ⚠ prov UNCHANGED {}", short(newr))
+        } else {
+            format!(" · prov {}→{}", short(cur), short(newr))
+        }
+    };
     // Save beside the current exe as a versioned binary.
     // Windows: cannot swap running .exe; save as sigil-top-v{VERSION}.exe.
     // Unix: try atomic self-replace; fall back to versioned binary beside.
@@ -1756,10 +1773,10 @@ fn self_update(rel: &Release) -> Result<String, String> {
     }
     if self_replace::self_replace(&beside).is_ok() {
         let _ = std::fs::remove_file(&beside);
-        return Ok(format!("swapped v{VERSION} -> v{} ({:.1} MB) — restart to run",
+        return Ok(format!("swapped v{VERSION} -> v{} ({:.1} MB){prov} — restart to run",
             rel.version, bytes.len() as f64 / 1.048576e6));
     }
-    Ok(format!("saved v{} ({:.1} MB) -> {}", rel.version, bytes.len() as f64 / 1.048576e6, beside.display()))
+    Ok(format!("saved v{} ({:.1} MB){prov} -> {}", rel.version, bytes.len() as f64 / 1.048576e6, beside.display()))
 }
 
 /// v0.25: pre-flight a freshly-swapped binary BEFORE handing off to it. `exec`/`spawn+exit`

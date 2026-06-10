@@ -178,6 +178,15 @@ pub fn supervisor(
 ) {
     let mut cur: Option<bool> = None;
     let mut wstop = Arc::new(AtomicBool::new(false));
+    // LANE-C v0.50: thermal guard — while GPU mining, poll nvidia-smi every 10 s and
+    // force a CPU fallback at >=85C (a laptop operator hard-powered-off twice mining
+    // on GPU — Windows Kernel-Power 41). Spawned + fail-silent: no nvidia-smi → no
+    // guard, CPU path untouched. GPU builds only (CPU-only builds never go GPU-active).
+    #[cfg(feature = "gpu")]
+    {
+        let (st, dg, gf, sp) = (stats.clone(), desired_gpu.clone(), gpu_failed.clone(), stop.clone());
+        thread::spawn(move || thermal_watch(st, dg, gf, sp));
+    }
     loop {
         if stop.load(Ordering::Relaxed) {
             wstop.store(true, Ordering::Relaxed);
@@ -360,5 +369,177 @@ pub fn gpu_mining_loop(
             stats.lock().unwrap().balance = b;
         }
         write_miner_status(&stats.lock().unwrap(), &wallet);
+    }
+}
+
+// ── LANE-C v0.50: GPU thermal guard ───────────────────────────────────────────
+// A laptop operator hard-powered-off twice mining on GPU (Windows Kernel-Power 41 —
+// the machine browned out under sustained GPU heat). This guard watches the GPU
+// temperature and forces a CPU fallback before the hardware does it the hard way.
+
+/// What the thermal policy decides for one temperature sample.
+#[cfg(any(feature = "gpu", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThermalAction {
+    /// Too hot — drop GPU mining to CPU now.
+    FallbackToCpu,
+    /// Sustained-cool after a thermal fallback — GPU is safe to use again.
+    AllowGpu,
+    /// No change this sample.
+    None,
+}
+
+/// Deterministic thermal policy. Time is counted in *samples* (the watcher polls on
+/// a fixed cadence), so the decision is a pure function of the temperature stream —
+/// trivially unit-testable with a mock temp source, no clock or real GPU needed.
+#[cfg(any(feature = "gpu", test))]
+#[derive(Debug, Clone)]
+pub struct ThermalGuard {
+    hot_c: f64,               // >= this → fall back (default 85C)
+    cool_c: f64,              // <= this counts as "cool" (default 70C)
+    cool_samples_needed: u32, // consecutive cool samples before re-allowing GPU
+    cool_streak: u32,
+    in_fallback: bool,        // true once WE forced a thermal fallback
+}
+
+#[cfg(any(feature = "gpu", test))]
+impl ThermalGuard {
+    /// Production policy: hot 85C, cool 70C, 30 samples (= 5 min at the 10 s cadence).
+    pub fn new() -> Self { Self::with(85.0, 70.0, 30) }
+
+    /// Construct with explicit thresholds (used by tests for short streaks).
+    pub fn with(hot_c: f64, cool_c: f64, cool_samples_needed: u32) -> Self {
+        ThermalGuard { hot_c, cool_c, cool_samples_needed, cool_streak: 0, in_fallback: false }
+    }
+
+    /// Whether the guard currently believes GPU is thermally disabled.
+    pub fn in_fallback(&self) -> bool { self.in_fallback }
+
+    /// Feed one temperature sample. `gpu_active` = is the engine GPU-mining right now.
+    pub fn step(&mut self, temp_c: f64, gpu_active: bool) -> ThermalAction {
+        if temp_c >= self.hot_c {
+            self.cool_streak = 0;
+            if gpu_active && !self.in_fallback {
+                self.in_fallback = true;
+                return ThermalAction::FallbackToCpu;
+            }
+            return ThermalAction::None;
+        }
+        if temp_c <= self.cool_c {
+            self.cool_streak = self.cool_streak.saturating_add(1);
+            if self.in_fallback && self.cool_streak >= self.cool_samples_needed {
+                self.in_fallback = false;
+                self.cool_streak = 0;
+                return ThermalAction::AllowGpu;
+            }
+        } else {
+            // between cool and hot — not sustained-cool, reset the streak.
+            self.cool_streak = 0;
+        }
+        ThermalAction::None
+    }
+}
+
+#[cfg(any(feature = "gpu", test))]
+impl Default for ThermalGuard {
+    fn default() -> Self { Self::new() }
+}
+
+/// Read GPU temperature (Celsius) via nvidia-smi. Returns None when nvidia-smi is
+/// absent or errors — the guard then simply does nothing (CPU path untouched).
+#[cfg(feature = "gpu")]
+fn read_gpu_temp() -> Option<f64> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    if !out.status.success() { return None; }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()?
+        .trim()
+        .parse::<f64>()
+        .ok()
+}
+
+/// Background thermal watcher (GPU builds only). Polls every 10 s; on >=85C while
+/// GPU mining it raises `gpu_failed` (the supervisor consumes it → CPU) and logs the
+/// temp; after 5 min sustained <=70C it re-arms `desired_gpu` so the supervisor
+/// switches GPU back on. Fail-silent when nvidia-smi is unavailable.
+#[cfg(feature = "gpu")]
+pub fn thermal_watch(
+    stats: Arc<Mutex<MinerStats>>,
+    desired_gpu: Arc<AtomicBool>,
+    gpu_failed: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+) {
+    let mut guard = ThermalGuard::new();
+    loop {
+        // sleep ~10 s in 100 ms steps so `stop` stays responsive.
+        for _ in 0..100 {
+            if stop.load(Ordering::Relaxed) { return; }
+            thread::sleep(Duration::from_millis(100));
+        }
+        let temp = match read_gpu_temp() { Some(t) => t, None => continue };
+        let gpu_active = stats.lock().map(|s| s.mode == "GPU").unwrap_or(false);
+        match guard.step(temp, gpu_active) {
+            ThermalAction::FallbackToCpu => {
+                gpu_failed.store(true, Ordering::Relaxed);
+                if let Ok(mut s) = stats.lock() {
+                    push_log(&mut s.log, format!("GPU {temp:.0}C — thermal fallback to CPU"));
+                }
+            }
+            ThermalAction::AllowGpu => {
+                desired_gpu.store(true, Ordering::Relaxed);
+                if let Ok(mut s) = stats.lock() {
+                    push_log(&mut s.log, format!("GPU {temp:.0}C cool 5+ min — re-enabling GPU"));
+                }
+            }
+            ThermalAction::None => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod thermal_tests {
+    use super::{ThermalAction, ThermalGuard};
+
+    #[test]
+    fn hot_sample_falls_back_to_cpu_once() {
+        let mut g = ThermalGuard::with(85.0, 70.0, 3);
+        assert_eq!(g.step(72.0, true), ThermalAction::None);          // below hot → nothing
+        assert_eq!(g.step(87.0, true), ThermalAction::FallbackToCpu); // hot + GPU → fall back
+        assert!(g.in_fallback());
+        assert_eq!(g.step(90.0, true), ThermalAction::None);          // still hot → no repeat
+    }
+
+    #[test]
+    fn no_fallback_when_gpu_inactive() {
+        let mut g = ThermalGuard::with(85.0, 70.0, 3);
+        // hot but NOT GPU-mining (CPU mode / CPU-only build) → guard must not act.
+        assert_eq!(g.step(95.0, false), ThermalAction::None);
+        assert!(!g.in_fallback());
+    }
+
+    #[test]
+    fn sustained_cool_re_enables_gpu_after_fallback() {
+        let mut g = ThermalGuard::with(85.0, 70.0, 3);
+        assert_eq!(g.step(88.0, true), ThermalAction::FallbackToCpu);
+        assert_eq!(g.step(65.0, false), ThermalAction::None);   // cool streak 1
+        assert_eq!(g.step(60.0, false), ThermalAction::None);   // streak 2
+        assert_eq!(g.step(58.0, false), ThermalAction::AllowGpu); // streak 3 → re-enable
+        assert!(!g.in_fallback());
+    }
+
+    #[test]
+    fn cool_streak_resets_on_a_warm_blip() {
+        let mut g = ThermalGuard::with(85.0, 70.0, 3);
+        assert_eq!(g.step(88.0, true), ThermalAction::FallbackToCpu);
+        assert_eq!(g.step(60.0, false), ThermalAction::None); // streak 1
+        assert_eq!(g.step(78.0, false), ThermalAction::None); // warm blip → reset
+        assert_eq!(g.step(60.0, false), ThermalAction::None); // streak 1 again
+        assert_eq!(g.step(60.0, false), ThermalAction::None); // streak 2
+        assert_eq!(g.step(60.0, false), ThermalAction::AllowGpu); // streak 3 → re-enable
+        assert!(!g.in_fallback());
     }
 }

@@ -385,10 +385,17 @@ body.view-desktop .desktop{display:flex}
     }catch(e){}
   }
   // One balance fetch (raw base units, exact 8-decimal). Returns null on offline / no route.
+  // LANE-AC #142: the q-flux /api proxy drops requests in WAVES while the apex backend
+  // crash-loops — one failed fetch must NOT blank the balance. Retry 3x w/ backoff;
+  // refresh() additionally keeps the last good value (never regresses on null).
   async function fetchBal(addr){
-    try{ const r=await fetch(NODE+'/api/v1/balance?wallet='+addr,{cache:'no-store'}); const j=await r.json();
-      const b=(j&&(j.balance!=null?j.balance:(j.data&&j.data.balance))); return b!=null?String(b):null;
-    }catch(e){ return null; }
+    for(let i=0;i<3;i++){
+      try{ const r=await fetch(NODE+'/api/v1/balance?wallet='+addr+'&cb='+Date.now(),{cache:'no-store'}); const j=await r.json();
+        const b=(j&&(j.balance!=null?j.balance:(j.data&&j.data.balance))); if(b!=null) return String(b);
+      }catch(e){}
+      await new Promise(res=>setTimeout(res,350));
+    }
+    return null;
   }
   // Live balance of the wallet that actually accrues coins (mining wallet, else session).
   // LANE-Q: when mining credits a DIFFERENT address than the session wallet, surface BOTH so the
@@ -472,12 +479,17 @@ body.view-desktop .desktop{display:flex}
     const h=e&&e.detail&&e.detail.height;
     if(h&&Number(h)>BLOCK_H){ BLOCK_H=Number(h); paintBlockCounter(); } // live tip, no HTTP
   });
-  // v0.58 live loop, now dynamic: 1.5s while mining (a coinbase landed within the
-  // last 2 min), 3s otherwise. Stays as the fallback when the P2P channel is down.
+  // v0.58 live loop, now dynamic (#142 operator directive): the P2P push is the
+  // realtime channel; HTTP is the fallback. While P2P is NOT connected (peers=0 —
+  // e.g. the AB dial hasn't landed or the bridge is down) poll at 1s so it still
+  // feels live; 1.5s while mining (coinbase within 2 min); 3s otherwise.
   loadMineWallet().then(()=>{ refresh(); pollStatus(); });
   (function liveLoop(){
-    const fast=(Date.now()-LAST_COINBASE_TS)<120000;
-    setTimeout(()=>{ refresh(); pollStatus(); liveLoop(); }, fast?1500:3000);
+    let p2pUp=false;
+    try{ const st=window.SigilTronP2P&&window.SigilTronP2P.status(); p2pUp=!!(st&&st.started&&st.peers>0); }catch(e){}
+    const mining=(Date.now()-LAST_COINBASE_TS)<120000;
+    const ms = !p2pUp ? 1000 : (mining ? 1500 : 3000);
+    setTimeout(()=>{ refresh(); pollStatus(); liveLoop(); }, ms);
   })();
   // deep-link: ?explorer opens the SIGIL Explorer panel straight away
   if(_qp.has('explorer')){ document.body.classList.add('view-desktop'); setTimeout(showExplorer, 80); }

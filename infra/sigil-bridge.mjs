@@ -16,6 +16,7 @@ import { identify } from '@libp2p/identify'
 import { multiaddr } from '@multiformats/multiaddr'
 import { createEd25519PeerId, createFromProtobuf, exportToProtobuf } from '@libp2p/peer-id-factory'
 import { readFileSync, writeFileSync } from 'node:fs'
+import { initPq } from './pq.mjs' // LANE-AD: ML-KEM-1024 hybrid session layer (classical noise kept)
 
 const RUST_NODE = process.env.SIGIL_RUST_NODE
   || '/ip4/127.0.0.1/tcp/9501/p2p/12D3KooWFi1Rpk14GCcmT9kES9Fys7tkEgZc6GbqLv2dcaTWYYp9'
@@ -54,6 +55,7 @@ const node = await createLibp2p({
 })
 
 await node.start()
+await initPq(node) // LANE-AD: register /sigil/g0/pq-hybrid responder + publish bridge-pq.json
 console.log('🌉 bridge peer:', node.peerId.toString())
 console.log('🌉 WS listen :', node.getMultiaddrs().map(m => m.toString()).join('  '))
 

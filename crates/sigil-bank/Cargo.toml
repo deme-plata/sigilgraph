@@ -24,3 +24,8 @@ description = "SIGIL bank layer — protocol-fee policy (master wallet, mining +
 [dependencies]
 serde     = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# credit-vault persistence contract test: bincode round-trip (what flux-db
+# stores; json can't key maps by [u8;32]). Same "1" line as sigil-rpc.
+bincode = "1"

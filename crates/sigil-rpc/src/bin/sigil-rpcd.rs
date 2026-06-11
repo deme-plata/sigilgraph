@@ -95,6 +95,11 @@ struct Node {
     /// Part of committed/snapshot state → deterministic replay (a follower threads the SAME
     /// carry from genesis, or restores it from a snapshot). Produce and verify MUST agree.
     emission_carry: u128,
+    /// LANE-X collateral-credit vault (lock SIGIL → mint CREDIT @50% LTV). Persisted under
+    /// its OWN flux-db key (`credit_vault`), NEVER inside `Snapshot` — bincode is positional,
+    /// so appending a field to Snapshot breaks decode of pre-existing snapshots → genesis
+    /// reseed → the restart-reset failure class LANE-X exists to prevent.
+    credit_vault: sigil_bank::credit::CreditVault,
 }
 
 /// Persisted snapshot: the money + chain state (NOT students — VerifiedRegistry isn't
@@ -140,10 +145,20 @@ fn persist(node: &Node) {
         emission_carry: node.emission_carry,
     };
     if let Ok(bytes) = bincode::serialize(&snap) { let _ = db.put(b"snapshot", &bytes); }
+    // LANE-X: the credit vault persists under its OWN key — additive, so the
+    // legacy `snapshot` blob keeps decoding on old AND new binaries.
+    if let Ok(bytes) = bincode::serialize(&node.credit_vault) { let _ = db.put(b"credit_vault", &bytes); }
 }
 /// Load a persisted snapshot, if one exists + decodes.
 fn load_snapshot(db: &flux_db::Database) -> Option<Snapshot> {
     db.get(b"snapshot").ok().flatten().and_then(|b| bincode::deserialize(&b).ok())
+}
+/// Load the persisted credit vault (own key, see `persist`). Missing/undecodable
+/// → empty vault (a chain that predates LANE-X simply has no positions yet).
+fn load_credit_vault(db: Option<&flux_db::Database>) -> sigil_bank::credit::CreditVault {
+    db.and_then(|d| d.get(b"credit_vault").ok().flatten())
+        .and_then(|b| bincode::deserialize(&b).ok())
+        .unwrap_or_default()
 }
 /// Persist an accepted dual-lane block under its mining height so peers can pull it
 /// (`GET /block?height=`) and INDEPENDENTLY re-verify the chain (verify-don't-trust).
@@ -429,9 +444,18 @@ fn bootstrap() -> Node {
     if let Some(snap) = statedb.as_ref().and_then(load_snapshot) {
         eprintln!("flux-db: RESTORED state @ height {} ({} wallets, native supply {}) from {state_path}",
             snap.height, snap.state.wallet_count(), snap.state.native_supply());
+        // LANE-X: restore the credit vault from its own key + ensure the CREDIT
+        // token is in the registry (idempotent — older snapshots don't list it).
+        let credit_vault = load_credit_vault(statedb.as_ref());
+        eprintln!("flux-db: credit vault — {} position(s), {} collateral locked, reserve {}",
+            credit_vault.status().position_count, credit_vault.total_collateral, credit_vault.protocol_reserve);
+        let mut tokens = snap.tokens;
+        if !tokens.iter().any(|(_, id)| *id == sigil_bank::credit::CREDIT_TOKEN) {
+            tokens.push(("CREDIT".into(), sigil_bank::credit::CREDIT_TOKEN));
+        }
         return Node {
             state: snap.state, height: snap.height, block_height: snap.block_height, students: VerifiedRegistry::new(),
-            tokens: snap.tokens, pools: snap.pools, citizens: snap.citizens, history,
+            tokens, pools: snap.pools, citizens: snap.citizens, history,
             tip_hash: snap.tip_hash, bits: snap.bits,
             retarget_anchor_ts: snap.retarget_anchor_ts, retarget_anchor_height: snap.retarget_anchor_height,
             statedb,
@@ -439,6 +463,7 @@ fn bootstrap() -> Node {
             onboard_rl: std::collections::HashMap::new(),
             genesis_ts_us: snap.genesis_ts_us, last_block_ts_us: snap.last_block_ts_us,
             emission_carry: snap.emission_carry,
+            credit_vault,
         };
     }
     eprintln!("flux-db: no snapshot — seeding fresh genesis @ {state_path}");
@@ -491,6 +516,7 @@ fn bootstrap() -> Node {
         ("SIGIL".into(), NATIVE), ("USDS".into(), USDS), ("wQUG".into(), WQUG),
         ("CLAI".into(), CLAI), ("PACI".into(), PACI), ("SCAL".into(), SCAL),
         ("GPU".into(), GPU_T),
+        ("CREDIT".into(), sigil_bank::credit::CREDIT_TOKEN), // LANE-X collateral-credit
     ];
     let pools = vec![
         ("USDS/wQUG".into(), POOL), ("CLAI/USDS".into(), POOL_CLAI),
@@ -507,7 +533,8 @@ fn bootstrap() -> Node {
     let node = Node { state, height: 2, block_height: 0, students: VerifiedRegistry::new(), tokens, pools, citizens: vec![CITIZEN], history,
         tip_hash, bits: mining_bits(), retarget_anchor_ts: now_ms(), retarget_anchor_height: 0, statedb,
         auth_nonces: std::collections::HashMap::new(), onboard_rl: std::collections::HashMap::new(),
-        genesis_ts_us, last_block_ts_us: genesis_ts_us, emission_carry: 0 };
+        genesis_ts_us, last_block_ts_us: genesis_ts_us, emission_carry: 0,
+        credit_vault: sigil_bank::credit::CreditVault::new() };
     persist(&node); // write the genesis snapshot so the next boot restores
     node
 }
@@ -1099,6 +1126,254 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                     }
                 }
                 None => bad("operator_pool must be 64-hex"),
+            }
+        }
+        // ── LANE-X collateral credit (QCREDIT port): lock SIGIL → mint CREDIT @50% LTV. ──
+        // Vault math lives in sigil-bank::credit (pure); every balance move below goes
+        // through the commit_state_transition chokepoint; the vault persists in its own
+        // flux-db key so a restart NEVER loses a loan (the LANE-X acceptance gate).
+        ("GET", "/credit/status") => {
+            let n = node.read().unwrap();
+            let s = n.credit_vault.status();
+            let vault_native = n.state.balance_of(&sigil_bank::credit::CREDIT_VAULT_WALLET, &NATIVE);
+            ok(serde_json::json!({
+                "ok": true,
+                "total_collateral": s.total_collateral.to_string(),
+                "total_credit_supply": s.total_credit_supply.to_string(),
+                "protocol_reserve": s.protocol_reserve.to_string(),
+                "total_yield_paid": s.total_yield_paid.to_string(),
+                "total_liquidated": s.total_liquidated.to_string(),
+                "position_count": s.position_count,
+                "vault_wallet": to_hex(&sigil_bank::credit::CREDIT_VAULT_WALLET),
+                "vault_native_balance": vault_native.to_string(),
+                "credit_token": to_hex(&sigil_bank::credit::CREDIT_TOKEN),
+                "ltv_bps": sigil_bank::credit::LTV_BPS as u64,
+                "tiers": s.tiers.iter().map(|t| serde_json::json!({
+                    "name": t.tier.display_name(), "lock_days": t.lock_days,
+                    "apy_percent": t.apy_percent, "ltv_percent": t.ltv_percent,
+                })).collect::<Vec<_>>(),
+            }).to_string())
+        }
+        ("GET", "/credit/tiers") => {
+            let tiers = sigil_bank::credit::CreditVault::get_tiers();
+            ok(serde_json::json!({
+                "ok": true,
+                "ltv_bps": sigil_bank::credit::LTV_BPS as u64,
+                "tiers": tiers.iter().map(|t| serde_json::json!({
+                    "name": t.tier.display_name(), "lock_days": t.lock_days,
+                    "apy_percent": t.apy_percent, "ltv_percent": t.ltv_percent,
+                })).collect::<Vec<_>>(),
+            }).to_string())
+        }
+        ("GET", "/credit/position") => {
+            let w = match query_get(query, "wallet").and_then(hex32) {
+                Some(w) => w, None => return bad("wallet must be 64-hex"),
+            };
+            let now = now_ms() / 1000;
+            let n = node.read().unwrap();
+            let mut total_locked = 0u128;
+            let mut total_pending = 0u128;
+            let details: Vec<serde_json::Value> = n.credit_vault.positions_with_yield(&w, now)
+                .iter().enumerate().map(|(i, (p, pending))| {
+                    total_locked = total_locked.saturating_add(p.collateral_locked);
+                    total_pending = total_pending.saturating_add(*pending);
+                    let remaining = p.unlock_timestamp.saturating_sub(now);
+                    serde_json::json!({
+                        "index": i,
+                        "collateral_locked": p.collateral_locked.to_string(),
+                        "credit_minted": p.credit_minted.to_string(),
+                        "tier": p.tier.display_name(),
+                        "apy_percent": p.tier.apy_bps() as f64 / 100.0,
+                        "lock_timestamp": p.lock_timestamp,
+                        "unlock_timestamp": p.unlock_timestamp,
+                        "is_unlockable": p.is_unlockable(now),
+                        "is_breached": p.is_breached(now),
+                        "claimed_yield": p.claimed_yield.to_string(),
+                        "pending_yield": pending.to_string(),
+                        "lock_days_remaining": remaining / 86_400,
+                    })
+                }).collect();
+            ok(serde_json::json!({
+                "ok": true, "wallet": to_hex(&w), "positions": details,
+                "total_collateral": total_locked.to_string(),
+                "total_pending_yield": total_pending.to_string(),
+                "credit_balance": n.state.balance_of(&w, &sigil_bank::credit::CREDIT_TOKEN).to_string(),
+            }).to_string())
+        }
+        ("POST", "/credit/lock") => {
+            let wallet = match jstr(body, "wallet").and_then(hex32) { Some(w) => w, None => return bad("wallet must be 64-hex") };
+            let amount = match jnum(body, "amount") { Some(a) if a > 0 => a, _ => return bad("amount required (positive, SIGIL base units)") };
+            let tier = match jstr(body, "tier").and_then(sigil_bank::credit::CreditTier::from_str_name) {
+                Some(t) => t, None => return bad("tier must be bronze|silver|gold|platinum"),
+            };
+            let now = now_ms() / 1000;
+            let mut n = node.write().unwrap();
+            // the locker must sign — collateral moves FROM this wallet.
+            if let Err(e) = authorize(&mut n, &wallet, "credit_lock",
+                &[to_hex(&wallet), amount.to_string(), tier.display_name().to_lowercase()], body) { return bad(&e); }
+            let vault_w = sigil_bank::credit::CREDIT_VAULT_WALLET;
+            let bal = n.state.balance_of(&wallet, &NATIVE);
+            if bal < amount { return bad(&format!("insufficient SIGIL: have {bal}, need {amount}")); }
+            let vault_bal = n.state.balance_of(&vault_w, &NATIVE);
+            let credit_bal = n.state.balance_of(&wallet, &sigil_bank::credit::CREDIT_TOKEN);
+            // vault math first (pure, rollback-able), then ONE atomic chokepoint commit.
+            let before = n.credit_vault.clone();
+            let pos = match n.credit_vault.lock(wallet, amount, tier, now) { Ok(p) => p, Err(e) => return bad(&e) };
+            let h = n.height;
+            let mutations = vec![
+                StateMutation::SetBalance { wallet, token: NATIVE, amount: bal - amount },
+                StateMutation::SetBalance { wallet: vault_w, token: NATIVE, amount: vault_bal.saturating_add(amount) },
+                StateMutation::SetBalance { wallet, token: sigil_bank::credit::CREDIT_TOKEN, amount: credit_bal.saturating_add(pos.credit_minted) },
+            ];
+            match commit_state_transition(&mut n.state, &StateTransition { at_height: h, mutations }, h) {
+                Ok(_) => {
+                    n.height += 1;
+                    ingest(&mut n, "credit", format!("credit lock {amount} SIGIL → {} CREDIT ({} tier)", pos.credit_minted, tier.display_name()), &[wallet], "credit lock collateral");
+                    ok(serde_json::json!({
+                        "ok": true, "collateral_locked": amount.to_string(),
+                        "credit_minted": pos.credit_minted.to_string(),
+                        "tier": tier.display_name(), "unlock_timestamp": pos.unlock_timestamp,
+                    }).to_string())
+                }
+                Err(e) => { n.credit_vault = before; bad(&e.to_string()) }
+            }
+        }
+        ("POST", "/credit/unlock") => {
+            let wallet = match jstr(body, "wallet").and_then(hex32) { Some(w) => w, None => return bad("wallet must be 64-hex") };
+            let idx = jnum(body, "position_index").unwrap_or(0) as usize;
+            let now = now_ms() / 1000;
+            let mut n = node.write().unwrap();
+            if let Err(e) = authorize(&mut n, &wallet, "credit_unlock",
+                &[to_hex(&wallet), idx.to_string()], body) { return bad(&e); }
+            let vault_w = sigil_bank::credit::CREDIT_VAULT_WALLET;
+            // the wallet must hold the full mint back — unlock burns it.
+            let need_burn = match n.credit_vault.positions.get(&wallet).and_then(|v| v.get(idx)) {
+                Some(p) => p.credit_minted, None => return bad("no such position"),
+            };
+            let credit_bal = n.state.balance_of(&wallet, &sigil_bank::credit::CREDIT_TOKEN);
+            if credit_bal < need_burn {
+                return bad(&format!("insufficient CREDIT to unlock: have {credit_bal}, must burn {need_burn} (the full mint)"));
+            }
+            let before = n.credit_vault.clone();
+            let out = match n.credit_vault.unlock(&wallet, idx, now) { Ok(o) => o, Err(e) => return bad(&e) };
+            let payout = out.collateral_returned.saturating_add(out.yield_paid);
+            let vault_bal = n.state.balance_of(&vault_w, &NATIVE);
+            let Some(vault_after) = vault_bal.checked_sub(payout) else {
+                n.credit_vault = before;
+                return bad("vault underfunded — invariant breach, refusing payout");
+            };
+            let nat_bal = n.state.balance_of(&wallet, &NATIVE);
+            let h = n.height;
+            let mutations = vec![
+                StateMutation::SetBalance { wallet, token: sigil_bank::credit::CREDIT_TOKEN, amount: credit_bal - out.credit_burned },
+                StateMutation::SetBalance { wallet: vault_w, token: NATIVE, amount: vault_after },
+                StateMutation::SetBalance { wallet, token: NATIVE, amount: nat_bal.saturating_add(payout) },
+            ];
+            match commit_state_transition(&mut n.state, &StateTransition { at_height: h, mutations }, h) {
+                Ok(_) => {
+                    n.height += 1;
+                    ingest(&mut n, "credit", format!("credit unlock: {} SIGIL returned + {} yield, {} CREDIT burned", out.collateral_returned, out.yield_paid, out.credit_burned), &[wallet], "credit unlock");
+                    ok(serde_json::json!({
+                        "ok": true, "collateral_returned": out.collateral_returned.to_string(),
+                        "credit_burned": out.credit_burned.to_string(),
+                        "yield_paid": out.yield_paid.to_string(),
+                        "total_received": payout.to_string(),
+                    }).to_string())
+                }
+                Err(e) => { n.credit_vault = before; bad(&e.to_string()) }
+            }
+        }
+        ("POST", "/credit/claim") => {
+            let wallet = match jstr(body, "wallet").and_then(hex32) { Some(w) => w, None => return bad("wallet must be 64-hex") };
+            let idx = jnum(body, "position_index").unwrap_or(0) as usize;
+            let now = now_ms() / 1000;
+            let mut n = node.write().unwrap();
+            if let Err(e) = authorize(&mut n, &wallet, "credit_claim",
+                &[to_hex(&wallet), idx.to_string()], body) { return bad(&e); }
+            let vault_w = sigil_bank::credit::CREDIT_VAULT_WALLET;
+            let before = n.credit_vault.clone();
+            let y = match n.credit_vault.claim_yield(&wallet, idx, now) { Ok(y) => y, Err(e) => return bad(&e) };
+            let vault_bal = n.state.balance_of(&vault_w, &NATIVE);
+            let Some(vault_after) = vault_bal.checked_sub(y) else {
+                n.credit_vault = before;
+                return bad("vault underfunded — invariant breach, refusing payout");
+            };
+            let nat_bal = n.state.balance_of(&wallet, &NATIVE);
+            let h = n.height;
+            let mutations = vec![
+                StateMutation::SetBalance { wallet: vault_w, token: NATIVE, amount: vault_after },
+                StateMutation::SetBalance { wallet, token: NATIVE, amount: nat_bal.saturating_add(y) },
+            ];
+            match commit_state_transition(&mut n.state, &StateTransition { at_height: h, mutations }, h) {
+                Ok(_) => {
+                    n.height += 1;
+                    ingest(&mut n, "credit", format!("credit yield claim {y} SIGIL"), &[wallet], "credit claim yield");
+                    ok(serde_json::json!({ "ok": true, "yield_claimed": y.to_string() }).to_string())
+                }
+                Err(e) => { n.credit_vault = before; bad(&e.to_string()) }
+            }
+        }
+        ("POST", "/credit/liquidate") => {
+            // Breach enforcement: term + grace expired without unlock → the bank pool
+            // takes the collateral. Destination is HARDCODED (MASTER), the breach test
+            // is chain-state-determined, so the caller gains nothing — callable by anyone
+            // (a keeper). The minted CREDIT stays circulating, backed 2:1 by the seizure.
+            let wallet = match jstr(body, "wallet").and_then(hex32) { Some(w) => w, None => return bad("wallet must be 64-hex") };
+            let idx = jnum(body, "position_index").unwrap_or(0) as usize;
+            let now = now_ms() / 1000;
+            let mut n = node.write().unwrap();
+            let vault_w = sigil_bank::credit::CREDIT_VAULT_WALLET;
+            let before = n.credit_vault.clone();
+            let out = match n.credit_vault.liquidate(&wallet, idx, now) { Ok(o) => o, Err(e) => return bad(&e) };
+            let vault_bal = n.state.balance_of(&vault_w, &NATIVE);
+            let Some(vault_after) = vault_bal.checked_sub(out.collateral_seized) else {
+                n.credit_vault = before;
+                return bad("vault underfunded — invariant breach, refusing seizure");
+            };
+            let bank_bal = n.state.balance_of(&MASTER, &NATIVE);
+            let h = n.height;
+            let mutations = vec![
+                StateMutation::SetBalance { wallet: vault_w, token: NATIVE, amount: vault_after },
+                StateMutation::SetBalance { wallet: MASTER, token: NATIVE, amount: bank_bal.saturating_add(out.collateral_seized) },
+            ];
+            match commit_state_transition(&mut n.state, &StateTransition { at_height: h, mutations }, h) {
+                Ok(_) => {
+                    n.height += 1;
+                    ingest(&mut n, "credit", format!("credit LIQUIDATION: bank seized {} SIGIL ({} CREDIT outstanding)", out.collateral_seized, out.credit_outstanding), &[wallet], "credit liquidate breach");
+                    ok(serde_json::json!({
+                        "ok": true, "collateral_seized": out.collateral_seized.to_string(),
+                        "credit_outstanding": out.credit_outstanding.to_string(),
+                    }).to_string())
+                }
+                Err(e) => { n.credit_vault = before; bad(&e.to_string()) }
+            }
+        }
+        ("POST", "/credit/fund") => {
+            // Fund the yield reserve: a signed transfer from `from` into the vault
+            // wallet, mirrored into the vault's reserve accounting (bank fees land here).
+            let from = match jstr(body, "from").and_then(hex32) { Some(w) => w, None => return bad("from must be 64-hex") };
+            let amount = match jnum(body, "amount") { Some(a) if a > 0 => a, _ => return bad("amount required (positive)") };
+            let mut n = node.write().unwrap();
+            if let Err(e) = authorize(&mut n, &from, "credit_fund",
+                &[to_hex(&from), amount.to_string()], body) { return bad(&e); }
+            let vault_w = sigil_bank::credit::CREDIT_VAULT_WALLET;
+            let bal = n.state.balance_of(&from, &NATIVE);
+            if bal < amount { return bad(&format!("insufficient SIGIL: have {bal}, need {amount}")); }
+            let vault_bal = n.state.balance_of(&vault_w, &NATIVE);
+            let h = n.height;
+            let mutations = vec![
+                StateMutation::SetBalance { wallet: from, token: NATIVE, amount: bal - amount },
+                StateMutation::SetBalance { wallet: vault_w, token: NATIVE, amount: vault_bal.saturating_add(amount) },
+            ];
+            match commit_state_transition(&mut n.state, &StateTransition { at_height: h, mutations }, h) {
+                Ok(_) => {
+                    n.height += 1;
+                    n.credit_vault.fund_reserve(amount);
+                    ingest(&mut n, "credit", format!("credit reserve funded +{amount} SIGIL"), &[from], "credit fund reserve");
+                    ok(serde_json::json!({ "ok": true, "funded": amount.to_string(),
+                        "protocol_reserve": n.credit_vault.protocol_reserve.to_string() }).to_string())
+                }
+                Err(e) => bad(&e.to_string()),
             }
         }
         ("OPTIONS", _) => ok("{}".into()),

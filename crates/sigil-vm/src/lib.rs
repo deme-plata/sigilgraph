@@ -2,6 +2,8 @@
 
 #![warn(missing_docs)]
 
+pub mod contracts;
+
 use serde::{Deserialize, Serialize};
 use wasmi::{Config, Engine, Linker, Module, Store, TypedFunc};
 
@@ -87,7 +89,10 @@ pub struct ExecOutcome {
 pub enum VmError {
     /// Execution exceeded the gas limit.
     #[error("out of gas (limit {limit})")]
-    OutOfGas { limit: u64 },
+    OutOfGas {
+        /// The gas limit that was exhausted.
+        limit: u64,
+    },
     /// Bytecode failed to load / validate.
     #[error("invalid wasm module: {0}")]
     InvalidModule(String),

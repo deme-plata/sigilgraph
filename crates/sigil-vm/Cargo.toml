@@ -12,6 +12,7 @@ blake3    = { workspace = true }
 wasmi     = { version = "0.31", default-features = false }
 
 sigil-state = { path = "../sigil-state" }
+sigil-dex   = { path = "../sigil-dex" }
 
 [dev-dependencies]
 serde_json = { workspace = true }

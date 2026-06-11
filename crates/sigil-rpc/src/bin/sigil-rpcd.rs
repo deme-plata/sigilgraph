@@ -100,6 +100,11 @@ struct Node {
     /// so appending a field to Snapshot breaks decode of pre-existing snapshots → genesis
     /// reseed → the restart-reset failure class LANE-X exists to prevent.
     credit_vault: sigil_bank::credit::CreditVault,
+    /// LANE-Y agent spend-mandates — the on-chain home for the agent-money guard. Persisted under
+    /// its OWN flux-db key (`mandates`), additive like `credit_vault` (never inside `Snapshot`).
+    mandates: sigil_bank::mandate::MandateBook,
+    /// LANE-Y bank 2-of-2 council (treasury transfers need two members). Own key (`bank_council`).
+    council: sigil_bank::council::Council,
 }
 
 /// Persisted snapshot: the money + chain state (NOT students — VerifiedRegistry isn't
@@ -148,6 +153,9 @@ fn persist(node: &Node) {
     // LANE-X: the credit vault persists under its OWN key — additive, so the
     // legacy `snapshot` blob keeps decoding on old AND new binaries.
     if let Ok(bytes) = bincode::serialize(&node.credit_vault) { let _ = db.put(b"credit_vault", &bytes); }
+    // LANE-Y: agent mandates + bank council each persist under their OWN additive key.
+    if let Ok(bytes) = bincode::serialize(&node.mandates) { let _ = db.put(b"mandates", &bytes); }
+    if let Ok(bytes) = bincode::serialize(&node.council) { let _ = db.put(b"bank_council", &bytes); }
 }
 /// Load a persisted snapshot, if one exists + decodes.
 fn load_snapshot(db: &flux_db::Database) -> Option<Snapshot> {
@@ -159,6 +167,21 @@ fn load_credit_vault(db: Option<&flux_db::Database>) -> sigil_bank::credit::Cred
     db.and_then(|d| d.get(b"credit_vault").ok().flatten())
         .and_then(|b| bincode::deserialize(&b).ok())
         .unwrap_or_default()
+}
+/// LANE-Y: load the persisted mandate book (own key). Missing/undecodable → empty book.
+fn load_mandates(db: Option<&flux_db::Database>) -> sigil_bank::mandate::MandateBook {
+    db.and_then(|d| d.get(b"mandates").ok().flatten())
+        .and_then(|b| bincode::deserialize(&b).ok())
+        .unwrap_or_default()
+}
+/// LANE-Y: load the persisted bank council (own key), seeded 2-of-2 [MASTER, OPERATOR] when empty.
+fn load_council(db: Option<&flux_db::Database>) -> sigil_bank::council::Council {
+    let mut c: sigil_bank::council::Council = db
+        .and_then(|d| d.get(b"bank_council").ok().flatten())
+        .and_then(|b| bincode::deserialize(&b).ok())
+        .unwrap_or_default();
+    c.seed(vec![MASTER, OPERATOR], 2); // idempotent — only seeds an empty roster
+    c
 }
 /// Persist an accepted dual-lane block under its mining height so peers can pull it
 /// (`GET /block?height=`) and INDEPENDENTLY re-verify the chain (verify-don't-trust).
@@ -449,6 +472,10 @@ fn bootstrap() -> Node {
         let credit_vault = load_credit_vault(statedb.as_ref());
         eprintln!("flux-db: credit vault — {} position(s), {} collateral locked, reserve {}",
             credit_vault.status().position_count, credit_vault.total_collateral, credit_vault.protocol_reserve);
+        let mandates = load_mandates(statedb.as_ref());
+        let council = load_council(statedb.as_ref());
+        eprintln!("flux-db: LANE-Y — {} mandate(s), council {}-of-{}",
+            mandates.mandates.len(), council.threshold, council.members.len());
         let mut tokens = snap.tokens;
         if !tokens.iter().any(|(_, id)| *id == sigil_bank::credit::CREDIT_TOKEN) {
             tokens.push(("CREDIT".into(), sigil_bank::credit::CREDIT_TOKEN));
@@ -464,6 +491,8 @@ fn bootstrap() -> Node {
             genesis_ts_us: snap.genesis_ts_us, last_block_ts_us: snap.last_block_ts_us,
             emission_carry: snap.emission_carry,
             credit_vault,
+            mandates,
+            council,
         };
     }
     eprintln!("flux-db: no snapshot — seeding fresh genesis @ {state_path}");
@@ -534,7 +563,9 @@ fn bootstrap() -> Node {
         tip_hash, bits: mining_bits(), retarget_anchor_ts: now_ms(), retarget_anchor_height: 0, statedb,
         auth_nonces: std::collections::HashMap::new(), onboard_rl: std::collections::HashMap::new(),
         genesis_ts_us, last_block_ts_us: genesis_ts_us, emission_carry: 0,
-        credit_vault: sigil_bank::credit::CreditVault::new() };
+        credit_vault: sigil_bank::credit::CreditVault::new(),
+        mandates: sigil_bank::mandate::MandateBook::default(),
+        council: { let mut c = sigil_bank::council::Council::default(); c.seed(vec![MASTER, OPERATOR], 2); c } };
     persist(&node); // write the genesis snapshot so the next boot restores
     node
 }
@@ -1417,6 +1448,107 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 }
                 None => bad("doc must be 64-hex"),
             }
+        }
+        // ── LANE-Y: agent spend-mandates (ON-CHAIN — CLI + MCP share one truth) ─────────
+        ("POST", "/mandate/create") => {
+            let agent = match jstr(body, "agent").and_then(hex32) { Some(a) => a, None => return bad("agent must be 64-hex") };
+            let max_amount = match jnum(body, "max_amount") { Some(m) if m > 0 => m, _ => return bad("max_amount required (>0, base units)") };
+            let purpose = jstr(body, "purpose").unwrap_or("").to_string();
+            let ttl_secs = jnum(body, "ttl_secs").unwrap_or(86_400) as u64; // default 24h
+            let mut n = node.write().unwrap();
+            // the agent signs — a mandate is the agent's own bounded spend authority
+            if let Err(e) = authorize(&mut n, &agent, "mandate_create",
+                &[to_hex(&agent), max_amount.to_string(), purpose.clone(), ttl_secs.to_string()], body) { return bad(&e); }
+            let now = now_ms() / 1000;
+            let id = format!("mn-{}", &to_hex(blake3::hash(format!("{}|{}|{}", to_hex(&agent), now, n.mandates.mandates.len()).as_bytes()).as_bytes())[..12]);
+            let m = n.mandates.create(id, agent, max_amount, purpose, ttl_secs, now);
+            persist(&n);
+            ok(format!("{{\"ok\":true,\"id\":\"{}\",\"agent\":\"{}\",\"max_amount\":{},\"expires_ts\":{},\"purpose\":{}}}",
+                m.id, to_hex(&agent), m.max_amount, m.expires_ts, serde_json::to_string(&m.purpose).unwrap_or_else(|_| "\"\"".into())))
+        }
+        ("GET", "/mandate/list") => {
+            let n = node.read().unwrap();
+            let now = now_ms() / 1000;
+            let items: Vec<String> = n.mandates.mandates.iter().map(|m| format!(
+                "{{\"id\":\"{}\",\"agent\":\"{}\",\"max_amount\":{},\"spent\":{},\"headroom\":{},\"purpose\":{},\"expires_ts\":{},\"status\":\"{}\",\"live\":{}}}",
+                m.id, to_hex(&m.agent), m.max_amount, m.spent, m.headroom(),
+                serde_json::to_string(&m.purpose).unwrap_or_else(|_| "\"\"".into()), m.expires_ts, m.status, m.is_live(now))).collect();
+            ok(format!("{{\"ok\":true,\"mandates\":[{}]}}", items.join(",")))
+        }
+        ("POST", "/mandate/close") => {
+            let id = jstr(body, "id").unwrap_or("").to_string();
+            let agent = match jstr(body, "agent").and_then(hex32) { Some(a) => a, None => return bad("agent must be 64-hex") };
+            let mut n = node.write().unwrap();
+            match n.mandates.get(&id) { Some(m) if m.agent == agent => {}, Some(_) => return bad("not your mandate"), None => return bad("mandate not found") }
+            if let Err(e) = authorize(&mut n, &agent, "mandate_close", &[id.clone(), to_hex(&agent)], body) { return bad(&e); }
+            n.mandates.close(&id);
+            persist(&n);
+            ok(format!("{{\"ok\":true,\"id\":\"{}\",\"status\":\"closed\"}}", id))
+        }
+        // ── LANE-Y: bank 2-of-2 council treasury transfers ─────────────────────────────
+        ("GET", "/bank/status") => {
+            let n = node.read().unwrap();
+            let members: Vec<String> = n.council.members.iter().map(|w| format!("\"{}\"", to_hex(w))).collect();
+            let props: Vec<String> = n.council.proposals.iter().map(|p| format!(
+                "{{\"id\":\"{}\",\"from\":\"{}\",\"to\":\"{}\",\"token\":\"{}\",\"amount\":{},\"approvals\":{},\"status\":\"{}\"}}",
+                p.id, to_hex(&p.from), to_hex(&p.to), to_hex(&p.token), p.amount, p.approvals.len(), p.status)).collect();
+            ok(format!("{{\"ok\":true,\"threshold\":{},\"members\":[{}],\"proposals\":[{}]}}",
+                n.council.threshold, members.join(","), props.join(",")))
+        }
+        ("POST", "/bank/propose_transfer") => {
+            let proposer = match jstr(body, "proposer").and_then(hex32) { Some(a) => a, None => return bad("proposer must be 64-hex (a council member)") };
+            let to = match jstr(body, "to").and_then(hex32) { Some(a) => a, None => return bad("to must be 64-hex") };
+            let from = jstr(body, "from").and_then(hex32).unwrap_or(MASTER); // treasury = master by default
+            let amount = match jnum(body, "amount") { Some(a) if a > 0 => a, _ => return bad("amount required (>0)") };
+            let tok_s = jstr(body, "token").unwrap_or("SIGIL").to_string();
+            let mut n = node.write().unwrap();
+            // resolve an EXISTING symbol (SIGIL→NATIVE, USDS, …) via the registry, then raw hex,
+            // then a derived id (deploy convention) — NOT token_id_for first, which would mint a
+            // brand-new id for "SIGIL" that no wallet holds.
+            let token = hex32(&tok_s)
+                .or_else(|| n.tokens.iter().find(|(s, _)| s.eq_ignore_ascii_case(&tok_s)).map(|(_, id)| *id))
+                .unwrap_or_else(|| token_id_for(&tok_s));
+            if !n.council.is_member(&proposer) { return bad("proposer is not a council member"); }
+            if let Err(e) = authorize(&mut n, &proposer, "bank_propose",
+                &[to_hex(&from), to_hex(&to), to_hex(&token), amount.to_string()], body) { return bad(&e); }
+            let now = now_ms() / 1000;
+            let id = format!("pr-{}", &to_hex(blake3::hash(format!("{}|{}|{}", to_hex(&to), amount, now).as_bytes()).as_bytes())[..12]);
+            match n.council.propose(id, from, to, token, amount, proposer, now) {
+                Ok(p) => { let id = p.id.clone(); let ap = p.approvals.len(); let th = n.council.threshold; persist(&n);
+                    ok(format!("{{\"ok\":true,\"id\":\"{}\",\"approvals\":{},\"threshold\":{},\"status\":\"pending\"}}", id, ap, th)) }
+                Err(e) => bad(&e),
+            }
+        }
+        ("POST", "/bank/approve") => {
+            let id = jstr(body, "id").unwrap_or("").to_string();
+            let approver = match jstr(body, "approver").and_then(hex32) { Some(a) => a, None => return bad("approver must be 64-hex (a council member)") };
+            let mut n = node.write().unwrap();
+            if !n.council.is_member(&approver) { return bad("approver is not a council member"); }
+            if let Err(e) = authorize(&mut n, &approver, "bank_approve", &[id.clone(), to_hex(&approver)], body) { return bad(&e); }
+            let ready = match n.council.approve(&id, approver) { Ok(r) => r, Err(e) => return bad(&e) };
+            if !ready {
+                let cnt = n.council.get(&id).map(|p| p.approvals.len()).unwrap_or(0);
+                let th = n.council.threshold;
+                persist(&n);
+                return ok(format!("{{\"ok\":true,\"id\":\"{}\",\"approvals\":{},\"threshold\":{},\"status\":\"pending\"}}", id, cnt, th));
+            }
+            // 2-of-2 reached → execute the transfer through the state chokepoint
+            let p = n.council.get(&id).cloned().unwrap();
+            let from_bal = n.state.balance_of(&p.from, &p.token);
+            if from_bal < p.amount { return bad("insufficient treasury balance for the approved transfer"); }
+            let to_bal = n.state.balance_of(&p.to, &p.token);
+            let muts = vec![
+                StateMutation::SetBalance { wallet: p.from, token: p.token, amount: from_bal - p.amount },
+                StateMutation::SetBalance { wallet: p.to,   token: p.token, amount: to_bal + p.amount },
+            ];
+            let h = n.height;
+            if let Err(e) = commit_state_transition(&mut n.state, &StateTransition { at_height: h, mutations: muts }, h) {
+                return bad(&format!("transfer commit failed: {e:?}"));
+            }
+            n.height += 1;
+            n.council.mark_executed(&id);
+            persist(&n);
+            ok(format!("{{\"ok\":true,\"id\":\"{}\",\"status\":\"executed\",\"amount\":{},\"to\":\"{}\"}}", id, p.amount, to_hex(&p.to)))
         }
         _ => bad("unknown route"),
     }

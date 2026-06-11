@@ -28,6 +28,8 @@
 #![warn(missing_docs)]
 
 pub mod credit;
+pub mod mandate; // LANE-Y: agent spend-mandates (on-chain home for the agent-money guard)
+pub mod council; // LANE-Y: bank 2-of-2 council for treasury transfers
 
 use serde::{Deserialize, Serialize};
 

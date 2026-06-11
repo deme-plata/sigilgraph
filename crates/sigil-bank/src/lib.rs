@@ -27,6 +27,8 @@
 
 #![warn(missing_docs)]
 
+pub mod credit;
+
 use serde::{Deserialize, Serialize};
 
 /// 32-byte wallet address. Mirrors `sigil_state::WalletId` without importing
@@ -191,10 +193,15 @@ mod tests {
     // ── Mining split ────────────────────────────────────────────────────────
 
     #[test]
-    fn mining_split_100_at_5_pct_is_5_95() {
+    fn mining_split_100_at_5_pct_is_5_94_plus_commons() {
+        // v0.36.1 commons tithe: 100 → master 5 (5%), operator 0 (0.1%
+        // floors to 0), commons 1 (1.2%), validator 94. (Test was stale
+        // since c455c11 added the commons skim — fixed by LANE-W.)
         let s = split_mining_reward(100, MASTER).unwrap();
         assert_eq!(s.master_share, 5);
-        assert_eq!(s.validator_share, 95);
+        assert_eq!(s.operator_share, 0);
+        assert_eq!(s.commons_share, 1);
+        assert_eq!(s.validator_share, 94);
     }
 
     #[test]
@@ -213,11 +220,18 @@ mod tests {
 
     #[test]
     fn mining_split_rounding_favors_validator() {
-        // 199 * 500 / 10_000 = 9.95 → floor = 9, validator gets 190.
+        // 199 × 500/10_000 = 9.95 → floor 9; operator 199×10/10_000 → 0;
+        // commons 199×120/10_000 = 2.388 → floor 2; validator gets the rest
+        // (188). Every floor favors the validator; nothing minted/destroyed.
         let s = split_mining_reward(199, MASTER).unwrap();
         assert_eq!(s.master_share, 9);
-        assert_eq!(s.validator_share, 190);
-        assert_eq!(s.master_share + s.validator_share, 199);
+        assert_eq!(s.operator_share, 0);
+        assert_eq!(s.commons_share, 2);
+        assert_eq!(s.validator_share, 188);
+        assert_eq!(
+            s.master_share + s.operator_share + s.commons_share + s.validator_share,
+            199
+        );
     }
 
     #[test]

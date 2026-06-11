@@ -21,6 +21,11 @@ import { getBrowserPeerCount, getKnownBrowserPeers } from './libp2p/browserPeerD
 import { TOPICS } from './libp2p/config'
 import type { Libp2p } from 'libp2p'
 
+// LANE-AC: the bridge-relayed SIGIL mesh topics (distinct from the /qnk/*
+// Quillon-era TOPICS in config.ts — the bridge only forwards /sigil/g0/*).
+const SIGIL_BLOCKS = '/sigil/g0/blocks'
+const SIGIL_BALANCE = '/sigil/g0/balance'
+
 let node: Libp2p | null = null
 let starting: Promise<Libp2p> | null = null
 
@@ -63,6 +68,24 @@ async function start(): Promise<Libp2p> {
       pubsub?.subscribe(TOPICS.BLOCKS)
       pubsub?.subscribe(TOPICS.TRANSACTIONS)
       pubsub?.subscribe(TOPICS.PEER_HEIGHTS)
+      // LANE-AC: the SIGIL bridge relays the rust mesh on /sigil/g0/* — the
+      // TOPICS above are the /qnk/* Quillon-fork legacy and never see bridge
+      // traffic. Subscribe the sigil topics explicitly and re-dispatch as DOM
+      // events so the page can go live-tip + live-balance without HTTP.
+      pubsub?.subscribe(SIGIL_BLOCKS)
+      pubsub?.subscribe(SIGIL_BALANCE)
+      pubsub?.addEventListener('message', (evt: any) => {
+        const t = evt?.detail?.topic
+        if (t !== SIGIL_BLOCKS && t !== SIGIL_BALANCE) return
+        let data: any
+        try { data = JSON.parse(new TextDecoder().decode(evt.detail.data)) } catch { return }
+        if (t === SIGIL_BLOCKS) {
+          const h = data?.header?.height ?? data?.height
+          if (h != null) window.dispatchEvent(new CustomEvent('sigil-p2p-block', { detail: { height: Number(h) } }))
+        } else {
+          window.dispatchEvent(new CustomEvent('sigil-p2p-balance', { detail: data }))
+        }
+      })
     } catch (e) { console.warn('[SIGIL TRON P2P] subscribe failed', e) }
 
     n.addEventListener('peer:connect', emitStatus)

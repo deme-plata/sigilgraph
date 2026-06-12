@@ -185,8 +185,14 @@ channel_check() {
   rm -f "$lt" "$wt"
 
   # manifest signature versus the pinned client pubkey (clients hard-require it)
+  # 0.77: `A || B && C` runs C even when A is true (bash precedence) — the old line
+  # OVERWROTE an existing candidate .sig with the LIVE channel's sig → false RED
+  # (InvalidSignature against the new manifest). Only fetch when no local .sig.
   local sig="$mf.sig"
-  [ -f "$sig" ] || sig=$(mktemp "$SCRATCH_ROOT/rg-sig.XXXXXX") && curl -fsS --max-time 30 "${CHANNEL_BASE}/${MANIFEST_NAME}.sig?t=${bust}" -o "$sig" 2>/dev/null
+  if [ ! -f "$sig" ]; then
+    sig=$(mktemp "$SCRATCH_ROOT/rg-sig.XXXXXX")
+    curl -fsS --max-time 30 "${CHANNEL_BASE}/${MANIFEST_NAME}.sig?t=${bust}" -o "$sig" 2>/dev/null
+  fi
   if [ -s "$sig" ] && python3 - "$mf" "$sig" "$RELEASE_SIGN_PUBKEY_HEX" <<'PYEOF'
 import sys
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey

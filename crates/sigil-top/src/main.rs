@@ -316,18 +316,33 @@ struct FeedStatus {
 /// Fetch + parse the live testnet feed over HTTPS (rustls). Returns the mapped
 /// node status + the recent block stream — the real testnet sync source.
 static LAST_FEED_ERR: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// 0.77: ONE shared pooled HTTP client for the per-tick fetchers (feed, block fallback,
+/// eclipse-k). Building a fresh Client per call opened a new TCP+TLS connection per tick
+/// that then sat in TIME_WAIT — over a multi-hour genesis-archive sync that exhausted
+/// Windows' ephemeral ports (the "tip frozen / error sending request" bug, #156 item 3).
+/// Timeouts are set PER REQUEST (each call site keeps its old value); the TLS posture is
+/// the union of the old per-site builders (TLS_1_0 feeds + the invalid-cert fallback).
+static HTTP: std::sync::LazyLock<reqwest::blocking::Client> = std::sync::LazyLock::new(|| {
+    reqwest::blocking::Client::builder()
+        .min_tls_version(reqwest::tls::Version::TLS_1_0)
+        .danger_accept_invalid_certs(true)
+        .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION")))
+        .pool_max_idle_per_host(4)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::blocking::Client::new())
+});
+
 fn set_feed_err(e: String) { if let Ok(mut g)=LAST_FEED_ERR.lock(){ *g=e; } }
 /// The most recent feed-fetch failure reason — shown on the OFFLINE card so a user can SEE why
 /// (DNS, TLS, connection refused, HTTP status, or JSON parse) instead of a blind "offline".
 pub fn last_feed_err() -> String { LAST_FEED_ERR.lock().map(|g| g.clone()).unwrap_or_default() }
 
 fn fetch_feed(url: &str) -> Option<(NodeStatus, Vec<FeedBlock>)> {
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(6))
-        .min_tls_version(reqwest::tls::Version::TLS_1_0)
-        .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION")))
-        .build() { Ok(c)=>c, Err(e)=>{ set_feed_err(format!("client init @ {url}: {e}")); return None; } };
-    let resp = match client.get(url).send() { Ok(r)=>r, Err(e)=>{ set_feed_err(format!("connect @ {url}: {e}")); return None; } };
+    // 0.77: shared pooled client (keep-alive) — was a fresh Client per call per tick.
+    let resp = match HTTP.get(url).timeout(Duration::from_secs(6)).send() { Ok(r)=>r, Err(e)=>{ set_feed_err(format!("connect @ {url}: {e}")); return None; } };
     let code = resp.status();
     let body = match resp.text() { Ok(b)=>b, Err(e)=>{ set_feed_err(format!("read @ {url} (HTTP {code}): {e}")); return None; } };
     let feed: Feed = match serde_json::from_str(&body) { Ok(f)=>f, Err(e)=>{ set_feed_err(format!("parse @ {url} (HTTP {code}): {e}")); return None; } };
@@ -441,13 +456,11 @@ fn fetch_refresh(feed: String, api: String, want_eclipse: bool, prior_synced: u6
     let mut fallback_note = false;
     let empty_blocks = blocks.as_ref().map(|b| b.is_empty()).unwrap_or(true);
     if empty_blocks && online {
-        if let Ok(client) = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(8))
-            .danger_accept_invalid_certs(true)
-            .build()
+        // 0.77: shared pooled client — was a fresh Client per fallback tick.
         {
+            let client = &*HTTP;
             let api_base = api.trim_end_matches('/');
-            if let Ok(resp) = client.get(format!("{}/v1/blocks/recent?limit=14", api_base)).send() {
+            if let Ok(resp) = client.get(format!("{}/v1/blocks/recent?limit=14", api_base)).timeout(Duration::from_secs(8)).send() {
                 if let Ok(json) = resp.json::<serde_json::Value>() {
                     if let Some(arr) = json.get("blocks").or_else(|| json.get("data")).and_then(|v| v.as_array()) {
                         let fb: Vec<FeedBlock> = arr.iter().filter_map(|b| {
@@ -1342,7 +1355,12 @@ fn main() {
             let start = Instant::now();
             let mut last_print = instant_ago(10);
             loop {
-                let st = sync.poll_state();
+                // 0.77: poll_state is try_lock (None = sync thread busy) — headless loop just
+                // retries on the next 250ms tick.
+                let Some(st) = sync.poll_state() else {
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
+                };
                 if let Some(b) = &st.verify_break {
                     eprintln!("  {RED}✗ verification break — {b}{RESET}");
                     eprintln!("  {RED}  the downloaded chain does NOT form one connected spine. Aborting.{RESET}\n");
@@ -2482,7 +2500,10 @@ impl App {
             let p2p = block_sync::P2PBlockSync::launch(store, true);
             p2p.set_known_tip(self.st.height.max(self.target_height));
             self.p2p_sync = Some(p2p);
-            persist_sync_mode("full");
+            // 0.77: the mode file now means full-ARCHIVE ([F]) specifically — [Y] starts
+            // the light engine, so persist "light" (was "full", which would have made the
+            // next restart launch a genesis archive the operator never asked for).
+            persist_sync_mode("light");
             self.toast = "⟳ RESYNC — engine STARTED (was light monitor), live backfill running".into();
         } else {
             self.toast = "✗ resync: sync store unavailable — restart the app".into();
@@ -2757,13 +2778,15 @@ fn measure_eclipse_k(tip_height: u64, tip_ok: bool) -> (u32, Vec<(String, bool)>
     ];
     let mut sources: Vec<(String, bool)> = vec![("node (verified)".into(), tip_ok)];
     let marker = tip_height.to_string();
-    if let Ok(client) = reqwest::blocking::Client::builder().timeout(Duration::from_millis(2200))
-        .min_tls_version(reqwest::tls::Version::TLS_1_0).build() {
+    // 0.77: shared pooled client — was a fresh Client per eclipse-k measurement.
+    {
+        let client = &*HTTP;
         for (name, base) in resolvers {
             let url = format!("{base}?name={ANCHOR}&type=TXT");
             let agree = client
                 .get(&url)
                 .header("accept", "application/dns-json")
+                .timeout(Duration::from_millis(2200))
                 .send()
                 .ok()
                 .and_then(|r| r.text().ok())
@@ -2868,7 +2891,10 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     if want_sync {
         // v0.22.1: monitor path (recent_only=true) → fast-snap to the verified live tip.
         // v0.33.5: SIGIL_FULLSYNC=1 launches a genuine genesis→tip crawl instead.
-        let recent_only = std::env::var("SIGIL_FULLSYNC").map(|v| v == "0" || v.is_empty()).unwrap_or(true);
+        // 0.77: the persisted [F] choice ("full") survives update/restart on this path
+        // (the LANE-V mode file — supersedes the disabled v0.71.1 resume block above).
+        let recent_only = std::env::var("SIGIL_FULLSYNC").map(|v| v == "0" || v.is_empty()).unwrap_or(true)
+            && read_sync_mode().as_deref() != Some("full");
         let p2p = block_sync::P2PBlockSync::launch(block_store, recent_only);
         sync_handle = Some(p2p.state_handle());
         app.p2p_sync = Some(p2p);
@@ -3041,26 +3067,36 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 app.toast_sticky = true;
                             }
                             KeyCode::Char('f') | KeyCode::Char('F') => {
-                                // v0.40.3: first F STARTS the sync engine (startup is the safe
-                                // light monitor — no engine, no --sync flag needed). After the
-                                // engine runs, F toggles the heavy full-sync mode as before.
+                                // 0.77 GENESIS ARCHIVE (#156): [F] is the explicit "hold the whole
+                                // chain" switch. No engine → start it in FULL-ARCHIVE mode (base
+                                // anchored at genesis, every block held — the redundant-backup
+                                // promise; the old code launched recent_only=true and the toggle
+                                // never reached the engine). Engine running → LIVE-FLIP it between
+                                // full-archive and light-monitor through the engine atomics.
+                                // Light-monitor's 10ms tip-verify stays the untouched startup default.
                                 if app.p2p_sync.is_none() {
                                     if let Some(store) = app.idle_store.take() {
-                                        let p2p = block_sync::P2PBlockSync::launch(store, true);
+                                        let p2p = block_sync::P2PBlockSync::launch(store, false);
                                         app.p2p_sync = Some(p2p);
+                                        app.full_sync = true;
                                         persist_sync_mode("full"); // LANE-V: survives update/restart
-                                        app.toast = "⬇ SYNC STARTED — P2P mesh dialing, live backfill running. F again = heavy full mode.".into();
+                                        app.toast = "⛓ FULL ARCHIVE started — syncing genesis→tip, holding every block (~1GB). F again = light monitor.".into();
                                     } else {
                                         app.toast = "✗ sync store unavailable — restart with --sync".into();
                                     }
                                     app.toast_sticky = true;
-                                } else {
-                                    app.full_sync = !app.full_sync;
-                                    app.toast = if app.full_sync {
-                                        "⬇ FULL SYNC enabled — downloading + verifying every block (heavy). Press F to return to lightweight.".into()
+                                } else if let Some(ref p2p) = app.p2p_sync {
+                                    if p2p.is_recent_only() {
+                                        p2p.set_full_archive();
+                                        app.full_sync = true;
+                                        persist_sync_mode("full");
+                                        app.toast = "⛓ FULL ARCHIVE — base → genesis, downloading + holding every block (~1GB). Press F for light monitor.".into();
                                     } else {
-                                        "⚡ lightweight node — ~10ms tip-proof verify, 0 blocks downloaded (default)".into()
-                                    };
+                                        p2p.set_light_monitor();
+                                        app.full_sync = false;
+                                        persist_sync_mode("light");
+                                        app.toast = "◇ LIGHT MONITOR — verifies the live tip (10ms proof), holds nothing new. Press F for full archive.".into();
+                                    }
                                     app.toast_sticky = false;
                                 }
                             }
@@ -3249,7 +3285,10 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             }
             // v0.6.5: Poll P2P sync state + drain synced blocks into the TUI block list
             if let Some(ref p2p) = app.p2p_sync {
-                app.p2p_state = p2p.poll_state();
+                // 0.77: poll_state is try_lock — None = the sync thread holds the lock right
+                // now (heavy ingest/flush). Keep rendering the previous clone; never block
+                // the draw thread (the Windows full-archive BLACK SCREEN, #156 item 2).
+                if let Some(s) = p2p.poll_state() { app.p2p_state = s; }
                 // v0.13.1: feed the HTTP status height into the P2P backfill so the
                 // refill starts requesting chunks even when gossip/probe are silent —
                 // fixes the sync sitting forever on "connecting" with peer_best=0.

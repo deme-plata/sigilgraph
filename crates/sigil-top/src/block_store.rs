@@ -186,6 +186,23 @@ impl BlockStore {
         self.advance_synced();
     }
 
+    /// 0.77 GENESIS ARCHIVE: re-anchor a snapped store back DOWN to `base` so the
+    /// contiguous frontier re-walks genesis→tip and the store HOLDS every block.
+    /// `set_base` can only RAISE the watermarks (its job is the one-time genesis
+    /// anchor); flipping a recent-window store into a full archive needs
+    /// `synced_to`/`verified_to` LOWERED to the anchor or they keep claiming a
+    /// contiguity the disk doesn't have. Blocks already stored (the recent window)
+    /// stay put — `advance_synced` sweeps any consecutive run at the anchor, and
+    /// the frontier absorbs the rest as out-of-order arrivals when it reaches them.
+    pub fn rebase(&mut self, base: u64) {
+        self.base = base;
+        self.synced_to = base;
+        let _ = self.db.put(&[KEY_META, b'S'], &self.synced_to.to_be_bytes());
+        self.verified_to = base;
+        let _ = self.db.put(&[KEY_META, b'V'], &self.verified_to.to_be_bytes());
+        self.advance_synced();
+    }
+
     /// Contiguous synced count: blocks base..synced_to are all present (next needed = this).
     pub fn synced_to(&self) -> u64 { self.synced_to }
 

@@ -93,21 +93,25 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
 
     let tlines = vec![
         if light {
+            // 0.77 (#156): name the mode + what it holds, verbatim with the [F] toasts.
             Line::from(vec![
                 dim("tip "), val(group(net_tip)),
-                dim("   mode "), Span::styled("light tip-proof verify (~10ms)", Style::default().fg(C_NEON_CYAN)),
+                dim("   mode "), Span::styled("◇ LIGHT MONITOR — verifies tip (~10ms), holds nothing", Style::default().fg(C_NEON_CYAN)),
             ])
         } else if snap_mode {
             // recent-window monitor: `verified` is checkpoint-anchored (NOT a genesis spine), so
             // label it honestly as a tip-proof checkpoint badge — never "spine" (implies genesis).
             Line::from(vec![
+                Span::styled("◇ LIGHT MONITOR ", Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
                 dim("tip "), val(group(net_tip)),
                 dim("   ✓ checkpoint "), Span::styled(group(spine), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
                 dim(" (tip-proof, not genesis)"),
                 dim("   gap "), Span::styled(group(gap), Style::default().fg(if caught { C_NEON_GREEN } else { C_GOLD })),
             ])
         } else {
+            // 0.77 (#156): the explicit [F] archive — genesis→tip, holding everything.
             Line::from(vec![
+                Span::styled("⛓ FULL ARCHIVE ", Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)),
                 dim("tip "), val(group(net_tip)),
                 dim("   spine "), Span::styled(format!("⛓{}", group(spine)), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
                 dim("   gap "), Span::styled(group(gap), Style::default().fg(if caught { C_NEON_GREEN } else { C_GOLD })),
@@ -116,8 +120,8 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
         if light {
             Line::from(vec![
                 dim("backfill "), Span::styled("off — light monitor", Style::default().fg(C_DIM)),
-                dim("   enable: "), Span::styled("--sync", Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
-                dim(" (tungt: henter hele kæden)"),
+                dim("   F "), Span::styled("= FULL ARCHIVE", Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+                dim(" (genesis→tip, holder hele kæden ~1GB)"),
             ])
         } else {
             Line::from(vec![
@@ -210,6 +214,13 @@ pub(crate) fn render_sync_log(app: &App) -> Paragraph<'static> {
         Span::raw(sa("   ")), Span::styled(sa(if s.connected_delta { "Δ" } else { "·" }), Style::default().fg(C_GOLD)),
         Span::styled(sa(if s.connected_epsilon { "Ε" } else { "·" }), Style::default().fg(C_GOLD)),
     ]));
+    // 0.77 (#156): name the live mode + exactly what it holds ([F] flips it live).
+    let (mlabel, mcol) = if s.light_mode {
+        (sa("  mode ◇ LIGHT MONITOR — verifies tip, holds nothing ([F] = full archive)"), C_CYAN)
+    } else {
+        (sa("  mode ⛓ FULL ARCHIVE — genesis→tip, holds everything ([F] = light monitor)"), C_GOLD)
+    };
+    lines.push(Line::from(Span::styled(mlabel, Style::default().fg(mcol))));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(" ▸ SYNC LOG  (newest at bottom)", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
     let path = std::env::var("HOME").map(|h| format!("{h}/.sigil-top.log")).unwrap_or_else(|_| "sigil-top.log".into());

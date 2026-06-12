@@ -1,22 +1,22 @@
 {
   "product": "sigil-top",
-  "version": "0.77.5",
+  "version": "0.77.6",
   "channel": "stable",
   "released": "2026-06-12",
   "url": "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-linux-x86_64",
-  "blake3_hex": "1f7f18d493418daeda318e6567ff63cfaba2da683ea3bcd1cc605b3b684f5662",
-  "size_bytes": 15934912,
-  "notes": "0.77.5 Peers First: bootstrap hardening \u2014 SIGIL_BOOTSTRAP_PEERS full env override, relay853 (:853) built-in firewall-fallback bootstrap, dedupe, co-located-producer-first. Linux binary now PORTABLE (no libOpenCL hard-dep \u2014 0.77.0 failed to start on boxes without OpenCL; win64 keeps gpu, engagement still SIGIL_GPU=1 opt-in). Genesis-archive [F] + black-screen + HTTP-pool fixes fra 0.77.0 medfoelger. Known: linux kraever stadig glibc 2.39+ (musl-lane aaben).",
+  "blake3_hex": "b80f09a390efab8191b8582c0603ffae6cadc505af01f158b6b5abbcaa573604",
+  "size_bytes": 15934216,
+  "notes": "0.77.6: alt fra 0.77.5 'Peers First' (bootstrap hardening, relay853 fallback, portabel linux uden OpenCL-dep) + L-F network stats RESTORED: Node-tabbens NETWORK·SUPPLY-kort viser igen produced blocks, blk/s og emit SIGIL/s (reward live fra feedet, time-halving respekteret). Known: linux kraever stadig glibc 2.39+ (musl-lane aaben).",
   "targets": {
     "linux-x64": {
       "url": "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-linux-x86_64",
-      "blake3_hex": "1f7f18d493418daeda318e6567ff63cfaba2da683ea3bcd1cc605b3b684f5662",
-      "size_bytes": 15934912
+      "blake3_hex": "b80f09a390efab8191b8582c0603ffae6cadc505af01f158b6b5abbcaa573604",
+      "size_bytes": 15934216
     },
     "windows-x64": {
       "url": "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-windows-x64.exe",
-      "blake3_hex": "a46d599607ddcbb971a5fc0732e082780d813449ed3acfc57164e84663a70c64",
-      "size_bytes": 27993069
+      "blake3_hex": "764d03689707e0b5516c30a7ded79ebf71b5c30b4c2de1ea1905fa734672afbd",
+      "size_bytes": 27992818
     }
   }
 }

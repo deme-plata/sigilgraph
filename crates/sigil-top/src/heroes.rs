@@ -145,7 +145,7 @@ pub(crate) fn draw_node_body(f: &mut Frame, app: &App, body_area: ratatui::layou
     let left_v = Layout::vertical([
         Constraint::Length(6), // Node
         Constraint::Length(6), // StateRoots
-        Constraint::Length(4), // Supply
+        Constraint::Length(6), // Network (L-F 0.77.5: supply + produced blocks + SIGIL/s)
         Constraint::Min(0),    // spacer (v0.36.1: MINING promoted to a top hero band)
     ])
     .split(left_area);
@@ -248,6 +248,26 @@ pub(crate) fn render_state_roots(app: &App) -> Paragraph<'static> {
 pub(crate) fn render_supply(app: &App) -> Paragraph<'static> {
     let supply = app.st.native_supply;
     let frac = if MAX_SUPPLY_BASE > 0 { (supply as f64 / MAX_SUPPLY_BASE as f64).clamp(0.0, 1.0) } else { 0.0 };
+    // L-F 0.77.5: restore the NETWORK stats that vanished with the v0.64.2
+    // ONE-GRAPH cut (it pointed "network graph: Node tab [1]" at a tab that
+    // never got them). Produced blocks = chain height; emission = bps × the
+    // feed's live per-block reward (fractional after halvings — NEVER a
+    // hardcoded 5, see sigil-emission block_reward_time). reward_sig == 0.0
+    // means an old feed → show blk/s but keep emit honest with "—".
+    let bps = app.st.blocks_per_sec.max(0.0);
+    let height = app.st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(app.st.height);
+    let reward = app.st.reward_sig;
+    let emit_line = if bps > 0.0 && reward > 0.0 {
+        Line::from(vec![
+            dim("emit "),
+            Span::styled(format!("{:.1} SIGIL/s", bps * reward), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+            dim(format!("   reward {} SIGIL/blk", fmt_reward(reward))),
+        ])
+    } else if bps > 0.0 {
+        Line::from(vec![dim("emit "), Span::styled("—", Style::default().fg(C_DIM)), dim("  (feed carries no reward yet)")])
+    } else {
+        Line::from(vec![dim("emit "), Span::styled("0 SIGIL/s", Style::default().fg(C_DIM)), dim("  · no block production seen")])
+    };
     let lines = vec![
         Line::from(vec![
             val(fmt_supply(supply)),
@@ -255,8 +275,21 @@ pub(crate) fn render_supply(app: &App) -> Paragraph<'static> {
             Span::styled(format!("{:.2}%", frac * 100.0), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(neon_bar(frac, 34, C_NEON_GOLD)),
+        Line::from(vec![
+            dim("produced "),
+            Span::styled(group(height), Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
+            dim(" blocks   "),
+            Span::styled(format!("{:.0} blk/s", bps), Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
+        ]),
+        emit_line,
     ];
-    Paragraph::new(lines).block(card_block(" ⬣ SUPPLY", C_NEON_GOLD))
+    Paragraph::new(lines).block(card_block(" ⬣ NETWORK · SUPPLY", C_NEON_GOLD))
+}
+
+/// L-F: reward formatting — whole numbers print bare ("5"), fractional halved
+/// rewards keep their precision ("2.5", "1.25").
+fn fmt_reward(r: f64) -> String {
+    if (r.fract()).abs() < f64::EPSILON { format!("{:.0}", r) } else { format!("{}", r) }
 }
 
 

@@ -228,6 +228,13 @@ struct NodeStatus {
     /// Absent on older nodes → defaults true (don't show a stale "indexing" badge).
     #[serde(default = "default_true")]
     index_ready: bool,
+    /// L-F 0.77.5: per-block reward in whole SIGIL (fractional after halvings,
+    /// e.g. 5 → 2.5). The feed has carried reward_sig all along but it was
+    /// dropped on the floor here — which is why "SIGIL/s" vanished from the UI
+    /// when mining moved in-node (the v0.64.2 ONE-GRAPH cut pointed at a Node
+    /// tab that never received the network stats). 0.0 = unknown (old feed).
+    #[serde(default)]
+    reward_sig: f64,
 }
 
 fn default_true() -> bool { true }
@@ -382,6 +389,7 @@ fn fetch_feed(url: &str) -> Option<(NodeStatus, Vec<FeedBlock>)> {
         contract_root: cr,
         tip: feed.tip,
         blocks_per_sec: s.blocks_per_sec,
+        reward_sig: s.reward_sig,
         ..Default::default()
     };
     Some((st, feed.blocks))

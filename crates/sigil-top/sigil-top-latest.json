@@ -1,22 +1,22 @@
 {
   "product": "sigil-top",
-  "version": "0.77.0",
+  "version": "0.77.5",
   "channel": "stable",
   "released": "2026-06-12",
   "url": "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-linux-x86_64",
-  "blake3_hex": "14eb174fd4b9f78073fe0844a1319829710252cf4f1bb9770105e32b2a9a9f99",
-  "size_bytes": 16091784,
-  "notes": "0.77.0 TRUE GENESIS ARCHIVE (#156): [F] now syncs+holds the COMPLETE chain genesis->tip (base pinned at genesis, live-flippable; recent-window stays light-monitor-only) \u2014 your PC becomes a redundant full archive. Render never blocks on the sync mutex (fixes the Windows full-sync BLACK SCREEN). Pooled keep-alive HTTP clients (fixes Windows ephemeral-port exhaustion / tip frozen). Honest mode labels: LIGHT MONITOR (verifies tip, holds nothing) vs FULL ARCHIVE (genesis->tip, holds everything).",
+  "blake3_hex": "1f7f18d493418daeda318e6567ff63cfaba2da683ea3bcd1cc605b3b684f5662",
+  "size_bytes": 15934912,
+  "notes": "0.77.5 Peers First: bootstrap hardening \u2014 SIGIL_BOOTSTRAP_PEERS full env override, relay853 (:853) built-in firewall-fallback bootstrap, dedupe, co-located-producer-first. Linux binary now PORTABLE (no libOpenCL hard-dep \u2014 0.77.0 failed to start on boxes without OpenCL; win64 keeps gpu, engagement still SIGIL_GPU=1 opt-in). Genesis-archive [F] + black-screen + HTTP-pool fixes fra 0.77.0 medfoelger. Known: linux kraever stadig glibc 2.39+ (musl-lane aaben).",
   "targets": {
     "linux-x64": {
       "url": "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-linux-x86_64",
-      "blake3_hex": "14eb174fd4b9f78073fe0844a1319829710252cf4f1bb9770105e32b2a9a9f99",
-      "size_bytes": 16091784
+      "blake3_hex": "1f7f18d493418daeda318e6567ff63cfaba2da683ea3bcd1cc605b3b684f5662",
+      "size_bytes": 15934912
     },
     "windows-x64": {
       "url": "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-windows-x64.exe",
-      "blake3_hex": "9a2f485b94a2525ffc49db8e6e4263cc208c2acb6c7c6d299fb01364e80d1425",
-      "size_bytes": 28013074
+      "blake3_hex": "a46d599607ddcbb971a5fc0732e082780d813449ed3acfc57164e84663a70c64",
+      "size_bytes": 27993069
     }
   }
 }

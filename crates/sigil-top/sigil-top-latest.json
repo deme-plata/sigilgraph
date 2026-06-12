@@ -1,22 +1,22 @@
 {
   "product": "sigil-top",
-  "version": "0.56.0",
+  "version": "0.77.0",
   "channel": "stable",
-  "released": "2026-06-10",
+  "released": "2026-06-12",
   "url": "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-linux-x86_64",
-  "blake3_hex": "c9d31b7037df7bee2cb84b8aefe9ab03a0286282e0a11ff1b2dbe0b9c4f6412d",
-  "size_bytes": 16125080,
-  "notes": "v0.56.0: FAIL-CLOSED auto-updater \u2014 a preflight version mismatch now ABORTS + reverts to the rollback image instead of relaunching the wrong binary (fixes 'reports vX, expected vY \u2014 relaunching anyway'). Aether bootstrap no longer spams stderr off-server (Epsilon-only dir; SIGIL_AETHER_DIR override; skip silently when absent). Update toast surfaces build provenance (manifest flux_rev vs running FLUX_REV). Folds in the LANE-C GPU thermal guard (nvidia-smi >=85C -> CPU fallback) the 0.55.0 binary missed. Both linux-x64 and windows-x64 published at 0.56.0.",
+  "blake3_hex": "14eb174fd4b9f78073fe0844a1319829710252cf4f1bb9770105e32b2a9a9f99",
+  "size_bytes": 16091784,
+  "notes": "0.77.0 TRUE GENESIS ARCHIVE (#156): [F] now syncs+holds the COMPLETE chain genesis->tip (base pinned at genesis, live-flippable; recent-window stays light-monitor-only) \u2014 your PC becomes a redundant full archive. Render never blocks on the sync mutex (fixes the Windows full-sync BLACK SCREEN). Pooled keep-alive HTTP clients (fixes Windows ephemeral-port exhaustion / tip frozen). Honest mode labels: LIGHT MONITOR (verifies tip, holds nothing) vs FULL ARCHIVE (genesis->tip, holds everything).",
   "targets": {
     "linux-x64": {
       "url": "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-linux-x86_64",
-      "blake3_hex": "c9d31b7037df7bee2cb84b8aefe9ab03a0286282e0a11ff1b2dbe0b9c4f6412d",
-      "size_bytes": 16125080
+      "blake3_hex": "14eb174fd4b9f78073fe0844a1319829710252cf4f1bb9770105e32b2a9a9f99",
+      "size_bytes": 16091784
     },
     "windows-x64": {
       "url": "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-windows-x64.exe",
-      "blake3_hex": "dc9d93ec03f6d4bbd7fec49ca75faf991db3a9cdbb199b4e75a5bfb439917d85",
-      "size_bytes": 27577333
+      "blake3_hex": "9a2f485b94a2525ffc49db8e6e4263cc208c2acb6c7c6d299fb01364e80d1425",
+      "size_bytes": 28013074
     }
   }
 }

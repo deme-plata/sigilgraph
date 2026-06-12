@@ -9,9 +9,36 @@ use super::block_store::BlockStore;
 use sigil_header::SigilBlockHeaderV0;
 
 use std::sync::{Arc, Mutex, mpsc};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
+
+// ── 0.77: ONE process-wide pooled HTTP client per flavor ─────────────────────────────
+// The old pattern built a fresh reqwest Client per poll/thread — every build opens a new
+// TCP+TLS connection that then sits in TIME_WAIT for ~60s. Over a multi-hour genesis
+// archive sync that exhausted Windows' ephemeral ports (the "tip frozen / error sending
+// request" bug, #156 item 3). A shared client = keep-alive reuse + a bounded idle pool;
+// per-call timeouts stay exactly as they were (set on the builder here).
+static HTTP_BLOCKING: std::sync::LazyLock<reqwest::blocking::Client> =
+    std::sync::LazyLock::new(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .pool_max_idle_per_host(4)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new())
+    });
+static HTTP_ASYNC: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .pool_max_idle_per_host(4)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
 
 pub const BLOCK_SYNC_TOPIC: &str = "/sigil/g0/blocks";
 
@@ -267,15 +294,8 @@ fn header_height_range(bytes: &[u8]) -> Option<(u64, u64)> {
 /// clamped to frontier+CHUNK so it can't reveal the tip either. This signed-by-producer
 /// JSON carries the true height (~6.7M), so it's the reliable tip source for the snap.
 async fn fetch_live_tip() -> Option<u64> {
-    const URLS: [&str; 2] = [
-        "https://sigilgraph.fluxapp.xyz/sigil-tip-live.json",
-        "https://quillon.xyz/sigil-tip-live.json",
-    ];
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .ok()?;
-    fetch_live_tip_inner(&client).await
+    // 0.77: shared pooled client (keep-alive) — was a fresh Client per call.
+    fetch_live_tip_inner(&HTTP_ASYNC).await
 }
 
 /// Blocking variant — runs on a DEDICATED OS thread, isolated from the busy block_sync
@@ -300,9 +320,8 @@ fn fetch_live_tip_blocking() -> Option<u64> {
         let u = format!("{url}?cb={cb}");
         std::thread::spawn(move || {
             let h = (|| -> Option<u64> {
-                let client = reqwest::blocking::Client::builder()
-                    .timeout(Duration::from_secs(5)).build().ok()?;
-                let v = client.get(&u).header("cache-control", "no-cache").send().ok()?
+                // 0.77: shared pooled client — was a fresh Client per racer thread per poll.
+                let v = HTTP_BLOCKING.get(&u).header("cache-control", "no-cache").send().ok()?
                     .json::<serde_json::Value>().ok()?;
                 v.get("height").and_then(|x| x.as_u64()).filter(|&h| h > 0)
             })();
@@ -443,6 +462,13 @@ pub struct P2PBlockSync {
     state: Arc<Mutex<P2PSyncState>>,
     new_blocks: Arc<Mutex<Vec<StoredBlock>>>,
     stop_tx: Option<mpsc::Sender<()>>,
+    /// 0.77 GENESIS ARCHIVE: the sync mode is LIVE-FLIPPABLE — [F] toggles a RUNNING
+    /// engine between light-monitor (recent-window snap) and full-archive (genesis→tip,
+    /// hold everything) with no restart. Every base-snap gate in the engine loads this.
+    recent_only: Arc<AtomicBool>,
+    /// Set by `set_full_archive`; the engine thread consumes it at tick-top and
+    /// re-anchors the store at the genesis base so the frontier re-walks genesis→tip.
+    rebase_pending: Arc<AtomicBool>,
 }
 
 pub use super::block_store::StoredBlock;
@@ -455,17 +481,52 @@ impl P2PBlockSync {
         self.state.clone()
     }
 
+    /// 0.77: non-blocking state access for the DRAW thread. The sync thread holds the
+    /// state mutex frequently (once per ingested block + ~15 sites per tick); a blocking
+    /// `lock()` from the render loop starved the draw thread under full-archive load on
+    /// Windows (unfair SRWLOCK) → BLACK SCREEN at 918MB sync (#156 item 2). `try_lock`
+    /// + the caller keeping its last clone = at worst a 1-frame-stale readout.
+    fn try_state(&self) -> Option<std::sync::MutexGuard<'_, P2PSyncState>> {
+        match self.state.try_lock() {
+            Ok(g) => Some(g),
+            Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+
+    /// 0.77 GENESIS ARCHIVE: flip a RUNNING engine to full-archive mode — base re-anchors
+    /// at genesis on the engine thread's next tick; the frontier re-walks genesis→tip and
+    /// HOLDS every block (the redundant-backup promise of [F], #156 item 1).
+    pub fn set_full_archive(&self) {
+        self.recent_only.store(false, Ordering::Relaxed);
+        self.rebase_pending.store(true, Ordering::Relaxed);
+    }
+
+    /// 0.77: flip a RUNNING engine back to light-monitor — the recent-window snap gates
+    /// re-engage and the base snaps forward to the servable window naturally.
+    pub fn set_light_monitor(&self) {
+        self.recent_only.store(true, Ordering::Relaxed);
+    }
+
+    /// 0.77: the engine's CURRENT mode (true = light-monitor / recent-window).
+    pub fn is_recent_only(&self) -> bool {
+        self.recent_only.load(Ordering::Relaxed)
+    }
+
     /// v0.13.1: seed the network tip from an EXTERNAL source (the HTTP status feed)
     /// so the backfill refill fires even when gossip AND the P2P height-probe are
     /// silent (a frozen or quiet mesh, or a producer that gossips nothing). Before
     /// this, `peer_best_height` was learnable ONLY from inbound gossip / a probe
     /// reply; on a quiet mesh it stayed 0, the `peer_best > 0` refill gate never
     /// opened, and the sync sat on "connecting" forever. Only ever RAISES the tip.
+    /// 0.77: try_lock — called from the draw thread every frame; a skipped hint is
+    /// retried next frame, but it must NEVER block render.
     pub fn set_known_tip(&self, height: u64) {
         if height == 0 { return; }
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if height > s.peer_best_height {
-            s.peer_best_height = height;
+        if let Some(mut s) = self.try_state() {
+            if height > s.peer_best_height {
+                s.peer_best_height = height;
+            }
         }
     }
 
@@ -474,7 +535,14 @@ impl P2PBlockSync {
     /// historical ranges dribble — the "1 blk/s" symptom). full-sync passes false.
     pub fn launch(mut store: BlockStore, recent_only: bool) -> Self {
         // SIGIL_SNAP=1 forces fast-snap even in full-sync (validation / "just track the tip").
-        let recent_only = recent_only || std::env::var("SIGIL_SNAP").is_ok();
+        let recent_only_init = recent_only || std::env::var("SIGIL_SNAP").is_ok();
+        // 0.77 GENESIS ARCHIVE: the mode is LIVE-FLIPPABLE ([F] reaches a running engine
+        // through this atomic — before 0.77 the bool was captured by value and the toggle
+        // was a TUI-local no-op). Every base-snap gate below loads it fresh.
+        let recent_only = Arc::new(AtomicBool::new(recent_only_init));
+        let rebase_pending = Arc::new(AtomicBool::new(false));
+        let recent_only_rt = recent_only.clone();
+        let rebase_pending_rt = rebase_pending.clone();
         let state = Arc::new(Mutex::new(P2PSyncState::default()));
         let new_blocks = Arc::new(Mutex::new(Vec::new()));
         let (stop_tx, stop_rx) = mpsc::channel();
@@ -487,7 +555,10 @@ impl P2PBlockSync {
         // backfill/verify workload (peer_best froze → the monitor parked behind the tip at
         // 0 blk/s). A standalone OS thread with BLOCKING reqwest polls every 3s, immune to
         // that contention, and seeds peer_best directly.
-        if recent_only {
+        // 0.77: the dedicated tip-poller spawn keeps gating on the LAUNCH-TIME mode (a
+        // full-archive launch flipped to light later still gets tips from the in-loop
+        // async fetch — just without the dedicated anti-starvation thread; acceptable).
+        if recent_only_init {
             // v0.35 (sync-starts-earlier, DeepSeek audit S2): the v0.23 SYNCHRONOUS CDN
             // eager-seed is GONE — it blocked launch() for up to ~6 s of HTTP before the
             // sync loop could even spawn, serializing exactly the startup it meant to speed
@@ -637,7 +708,7 @@ impl P2PBlockSync {
                     s.running = true;
                     s.blocks_synced = resume_h;
                     s.verified = store.verified_to(); // v0.9.0: resume the verified watermark too
-                    s.light_mode = recent_only;       // v0.57 (LANE-M): drives honest verified-vs-stored UI
+                    s.light_mode = recent_only_rt.load(Ordering::Relaxed); // v0.57 (LANE-M): drives honest verified-vs-stored UI
                 }
 
                 // Subscribe to blocks — event-driven, no polling
@@ -760,6 +831,21 @@ impl P2PBlockSync {
                             snapped = false;
                             crate::tlog!("[sync] CHAIN-RESET self-heal — block store watermarks wiped, re-syncing from the fresh genesis");
                         }
+                    }
+
+                    // ── 0.77 GENESIS ARCHIVE: [F] flipped a RUNNING engine to full-archive.
+                    // Re-anchor the store at the genesis base so the contiguous frontier
+                    // re-walks genesis→tip and HOLDS every block (#156: the operator's
+                    // Windows PC as a redundant full archive if the mine-node fleet is lost).
+                    // The recent-window blocks already on disk stay — the frontier absorbs
+                    // them as out-of-order arrivals when it reaches them.
+                    if rebase_pending_rt.swap(false, Ordering::Relaxed) {
+                        store.rebase(sync_base);
+                        assigned.clear();      // stale recent-window frontier reqs are useless now
+                        snapped = false;
+                        last_synced_seen = store.synced_to();
+                        last_advance_t = Instant::now();
+                        crate::tlog!("[sync] FULL ARCHIVE engaged — base → {} (frontier re-walks genesis→tip, holding every block)", sync_base);
                     }
 
                     // Process gossiped live-tip blocks — BOUNDED per iteration. The live mesh
@@ -1061,7 +1147,7 @@ impl P2PBlockSync {
                         if let Some(b) = bytes {
                             let got = ingest_backfill_bytes(&b, &mut store); // free headers near the tip
                             fetched_session += got as u64;
-                            if got > 0 && recent_only && rbase > store.synced_to() {
+                            if got > 0 && recent_only_rt.load(Ordering::Relaxed) && rbase > store.synced_to() {
                                 let old = store.synced_to();
                                 store.set_base(rbase);
                                 store.advance();
@@ -1083,7 +1169,7 @@ impl P2PBlockSync {
                     // tip-tracking jitter (gap < a few k, held tight by the LANE-A gossip head)
                     // never probes — only a real fall-behind triggers the snap attempt.
                     const RECENT_PROBE_MIN_GAP: u64 = 65_536;
-                    if recent_only
+                    if recent_only_rt.load(Ordering::Relaxed)
                         && peer_best > store.synced_to().saturating_add(RECENT_PROBE_MIN_GAP)
                         && !recent_probe_inflight
                         && last_recent_probe.elapsed() >= RECENT_PROBE_EVERY
@@ -1141,7 +1227,7 @@ impl P2PBlockSync {
                     // unservable ranges → 0 downloaded. best_height tracks what the mesh actually
                     // serves, keeping the window in the servable range so downloaded climbs.
                     let served_top = store.best_height();
-                    if recent_only && served_top > store.synced_to() + RECENT_WINDOW {
+                    if recent_only_rt.load(Ordering::Relaxed) && served_top > store.synced_to() + RECENT_WINDOW {
                         // v0.57 FRONTIER-STALL FIX: align the recent-window base to a CHUNK boundary.
                         // An UNALIGNED base (e.g. 20481) made the floor-aligned refill request ranges
                         // offset from where the server windows them, leaving a permanent 1-block hole
@@ -1280,7 +1366,7 @@ impl P2PBlockSync {
                             // In monitor mode, JUMP base straight to the recent contiguous window
                             // under best_height so synced snaps to the live head in one step.
                             // (full-sync recent_only=false keeps the genesis-anchored +CHUNK crawl.)
-                            let new_base = if recent_only && store.best_height() > now_synced + RECENT_WINDOW {
+                            let new_base = if recent_only_rt.load(Ordering::Relaxed) && store.best_height() > now_synced + RECENT_WINDOW {
                                 store.best_height().saturating_sub(RECENT_WINDOW).max(sync_base)
                             } else {
                                 store.base().saturating_add(CHUNK)
@@ -1307,11 +1393,14 @@ impl P2PBlockSync {
                         // job is to track + verify the live tip (the signed tip-proof in
                         // peer_best), so show THAT as the sync height → the bar reads AT TIP.
                         // The cryptographic spine watermark (⛓✓ = s.verified) stays honest.
-                        if recent_only && s.peer_best_height > now_synced {
+                        if recent_only_rt.load(Ordering::Relaxed) && s.peer_best_height > now_synced {
                             s.blocks_synced = s.peer_best_height;
                             s.sync_height = s.peer_best_height;
                             s.sync_total = s.peer_best_height;
                         }
+                        // 0.77: the mode is live-flippable — refresh the UI flag every tick
+                        // (was set once at launch) so the hero labels follow [F] instantly.
+                        s.light_mode = recent_only_rt.load(Ordering::Relaxed);
                         // LANE-P v0.59: surface WHY the frontier is parked (never a silent 0).
                         // Cleared the instant the contiguous frontier advances again.
                         let net_tip = s.peer_best_height;
@@ -1478,15 +1567,23 @@ impl P2PBlockSync {
             });
         });
 
-        P2PBlockSync { state, new_blocks, stop_tx: Some(stop_tx) }
+        P2PBlockSync { state, new_blocks, stop_tx: Some(stop_tx), recent_only, rebase_pending }
     }
 
-    pub fn poll_state(&self) -> P2PSyncState {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    /// 0.77: `None` when the sync thread holds the lock RIGHT NOW (heavy ingest/flush) —
+    /// the caller keeps rendering its previous clone instead of blocking the draw thread.
+    pub fn poll_state(&self) -> Option<P2PSyncState> {
+        self.try_state().map(|g| g.clone())
     }
 
+    /// 0.77: try_lock — on contention the blocks simply stay queued for the next frame
+    /// (the buffer is capped upstream), never stalling the render loop.
     pub fn drain_new_blocks(&self) -> Vec<StoredBlock> {
-        std::mem::take(&mut *self.new_blocks.lock().unwrap_or_else(|e| e.into_inner()))
+        match self.new_blocks.try_lock() {
+            Ok(mut g) => std::mem::take(&mut *g),
+            Err(std::sync::TryLockError::Poisoned(p)) => std::mem::take(&mut *p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => Vec::new(),
+        }
     }
 }
 

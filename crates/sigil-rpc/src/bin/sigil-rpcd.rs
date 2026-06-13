@@ -1619,9 +1619,12 @@ fn handle(mut stream: TcpStream, node: &RwLock<Node>) {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| stream.peer_addr().map(|a| a.ip().to_string()).unwrap_or_else(|_| "unknown".into()));
     let resp = route(node, method, path, query, &body, &peer_ip);
-    // Persist the money+chain snapshot after any mutating request (POST) so a restart
-    // restores balances/pools/height/tip instead of re-seeding genesis.
-    if method == "POST" {
+    // Persist the money+chain snapshot after a SUCCESSFUL mutating request so a restart
+    // restores balances/pools/height/tip instead of re-seeding genesis. Gating on the
+    // 200 response (C4 / audit DoS amplifier): a POST that fails validation, auth, or the
+    // /onboard rate-limit returns 400 and must NOT trigger a full-state serialize+flux-db
+    // write — otherwise anonymous invalid-POST spam forces an O(state) write per request.
+    if method == "POST" && resp.starts_with("HTTP/1.1 200") {
         if let Ok(n) = node.read() { persist(&n); }
     }
     let _ = stream.write_all(resp.as_bytes());

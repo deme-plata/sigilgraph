@@ -1349,6 +1349,9 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             // takes the collateral. Destination is HARDCODED (MASTER), the breach test
             // is chain-state-determined, so the caller gains nothing — callable by anyone
             // (a keeper). The minted CREDIT stays circulating, backed 2:1 by the seizure.
+            // INTENTIONALLY NOT gated by authorize(): permissionless keeper route — the
+            // destination is hardcoded (MASTER), the breach is chain-state-determined, and
+            // the caller gains nothing, so requiring a signature would only break liveness.
             let wallet = match jstr(body, "wallet").and_then(hex32) { Some(w) => w, None => return bad("wallet must be 64-hex") };
             let idx = jnum(body, "position_index").unwrap_or(0) as usize;
             let now = now_ms() / 1000;
@@ -1419,6 +1422,10 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             if amount == 0 { bad("amount required (positive)") }
             else {
                 let mut n = node.write().unwrap();
+                // C2/audit: the citizen whose funds move must sign — was unauthenticated,
+                // so anyone could drain the demo citizen wallet on the public daemon.
+                if let Err(e) = authorize(&mut n, &CITIZEN, "nation_pay",
+                    &[to_hex(&CITIZEN), amount.to_string()], body) { return bad(&e); }
                 let h = n.height;
                 match nation::pay_utility_bill(&mut n.state, h, CITIZEN, POWER_CO, amount) {
                     Ok(left) => { n.height += 1; ok(format!("{{\"ok\":true,\"paid\":{},\"citizen_native\":{},\"provider_native\":{}}}",
@@ -1431,6 +1438,9 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             match jstr(body, "doc").and_then(hex32) {
                 Some(doc) => {
                     let mut n = node.write().unwrap();
+                    // C2/audit: CITIZEN must sign — was unauthenticated state mutation.
+                    if let Err(e) = authorize(&mut n, &CITIZEN, "nation_eboks",
+                        &[to_hex(&CITIZEN), to_hex(&doc)], body) { return bad(&e); }
                     let h = n.height;
                     match nation::issue_eboks_receipt(&mut n.state, h, CITIZEN, doc) {
                         Ok(()) => { n.height += 1; ok(format!("{{\"ok\":true,\"doc\":\"{}\"}}", to_hex(&doc))) }

@@ -33,6 +33,32 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sigil_state::WalletId;
 
+/// Serialize a `BTreeMap<WalletId, u128>` as a sequence of `(wallet, amount)`
+/// pairs instead of a JSON object. `WalletId` is `[u8; 32]`, which serde_json
+/// refuses as an object key ("key must be a string"); a sequence sidesteps that
+/// and serializes identically across JSON and bincode. Deterministic: the
+/// source `BTreeMap` iterates in sorted key order, so the encoding is canonical.
+mod wallet_map_as_seq {
+    use super::WalletId;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    pub fn serialize<S: Serializer>(
+        map: &BTreeMap<WalletId, u128>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let pairs: Vec<(&WalletId, &u128)> = map.iter().collect();
+        pairs.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<WalletId, u128>, D::Error> {
+        let pairs = Vec::<(WalletId, u128)>::deserialize(deserializer)?;
+        Ok(pairs.into_iter().collect())
+    }
+}
+
 /// flux-rev provenance id (the BLAKE3 `full:` content id of a contribution).
 pub type ProofId = String;
 
@@ -87,8 +113,14 @@ pub struct Commons {
     /// The fælled: tithe accrued but not yet allocated (incl. carried dust).
     pub commons_balance: u128,
     /// Outstanding IOU claim per contributor (allocated, not yet redeemed).
+    /// Serialized as a sequence of (wallet, amount) pairs: a `[u8; 32]` map key
+    /// can't be a JSON object key ("key must be a string"), and a sequence is
+    /// format-agnostic (works in JSON and bincode) while staying deterministic
+    /// via the `BTreeMap`'s sorted iteration.
+    #[serde(with = "wallet_map_as_seq")]
     pub iou_balance: BTreeMap<WalletId, u128>,
     /// Contribution weight accumulated in the CURRENT (open) epoch.
+    #[serde(with = "wallet_map_as_seq")]
     pub pending_weight: BTreeMap<WalletId, u128>,
     /// Honorary citizens — only they may earn/delegate/redeem.
     pub citizens: BTreeSet<WalletId>,

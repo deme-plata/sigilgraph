@@ -701,3 +701,60 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+mod probe_height_tests {
+    //! `probe_height_fast` — the fast skip-probe used during tail-replay catch-up
+    //! (Tier 3). It was only exercised indirectly via replay. Its safety contract
+    //! is "return None on ANY doubt" so a wrong/missing probe can never change
+    //! which blocks get applied — these tests pin every doubt path.
+    use super::{probe_height_fast, PROBE_WINDOW};
+
+    #[test]
+    fn reads_the_first_height_then_stops_at_a_non_digit() {
+        assert_eq!(probe_height_fast(br#"{"header":{"version":0,"height":12345,"x":1}}"#), Some(12345));
+        assert_eq!(probe_height_fast(br#""height":42}"#), Some(42), "closing brace terminates");
+        assert_eq!(probe_height_fast(br#""height":7,"next":1"#), Some(7), "comma terminates");
+        assert_eq!(probe_height_fast(br#""height":0,"#), Some(0), "zero is a valid height");
+    }
+
+    #[test]
+    fn none_when_key_absent_or_at_height_only() {
+        assert_eq!(probe_height_fast(b"no height key present"), None);
+        // `"at_height":` must NOT match — the key requires a quote immediately
+        // before `height`, which `at_height` lacks (the docstring's invariant).
+        assert_eq!(probe_height_fast(br#"{"at_height":99}"#), None);
+        assert_eq!(probe_height_fast(b""), None);
+    }
+
+    #[test]
+    fn none_when_no_digits_follow_the_key() {
+        assert_eq!(probe_height_fast(br#""height":abc"#), None, "non-digit right after key");
+        assert_eq!(probe_height_fast(br#""height":"#), None, "key at end, no value");
+    }
+
+    #[test]
+    fn refuses_a_digit_run_cut_off_by_the_probe_window() {
+        // Place `"height":` so its digits run right up to the PROBE_WINDOW edge
+        // with NO terminator inside the window. The probe must REFUSE (None)
+        // rather than return a truncated, too-small height that could skip a
+        // block we must apply — the core safety guard.
+        let key = b"\"height\":";
+        let pad = PROBE_WINDOW - key.len() - 3; // leaves exactly 3 digits before the edge
+        let mut buf = vec![b' '; pad];
+        buf.extend_from_slice(key);
+        buf.extend_from_slice(b"123"); // these 3 digits sit at the very window edge
+        buf.extend_from_slice(b"456789,"); // the real terminator lives PAST the window
+        assert_eq!(buf.len() > PROBE_WINDOW, true);
+        assert_eq!(
+            probe_height_fast(&buf),
+            None,
+            "a digit run severed by the window edge must be refused, not truncated"
+        );
+        // Sanity: the SAME content with the terminator inside the window parses.
+        let mut ok = vec![b' '; pad];
+        ok.extend_from_slice(key);
+        ok.extend_from_slice(b"12,"); // terminator (comma) is inside the window
+        assert_eq!(probe_height_fast(&ok), Some(12));
+    }
+}

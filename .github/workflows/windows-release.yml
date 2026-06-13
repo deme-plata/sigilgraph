@@ -1,0 +1,131 @@
+name: windows-release
+# Mirror of macos-release.yml for the Windows lane of sigil-top.
+#
+# The macOS job builds + smoke-tests on REAL Apple silicon (macos-14). The Windows
+# equivalent builds + smoke-tests on a REAL Windows runner (windows-latest) so the
+# "release-safety-gate" actually LAUNCHES the .exe (`--selfcheck`) and confirms it
+# starts before any artifact is published — selfcheck is the same no-op probe the
+# in-app updater pre-flights with (prints the version, exits 0; touches no GPU).
+#
+# We build the x86_64-pc-windows-gnu target to stay byte-compatible with the mingw
+# cross-builds cut on Epsilon (same toolchain → same artifact shape the channel
+# already serves). Two binaries are produced: nogpu (the default channel build) and
+# gpu (OpenCL BLAKE4 lane). They are uploaded to the GitHub release; the canonical
+# `sigil-top-latest.json` manifest is updated on the Epsilon download host by the
+# release-gate, NOT here (see Q2 / publish-windows-manifest note below), so this CI
+# never half-publishes a manifest that drops the separately-built linux-x64 entry.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "sigilgraph commit to build (full sha)"
+        required: true
+      tag:
+        description: "existing release tag to upload to"
+        required: true
+        default: "v0.77.7"
+      flux_ref:
+        description: "deme-plata/flux ref (sibling path-dep workspace)"
+        required: false
+        default: "main"
+permissions:
+  contents: write
+jobs:
+  build-windows-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+          path: sigil
+      - uses: actions/checkout@v4
+        with:
+          repository: deme-plata/flux
+          ref: ${{ github.event.inputs.flux_ref }}
+          path: flux
+      - name: layout shim (deps expect ../flux relative to the sigil workspace)
+        shell: bash
+        run: ls sigil/Cargo.toml flux/crates >/dev/null && echo layout-ok
+      - name: rust toolchain (gnu target)
+        shell: bash
+        run: |
+          rustup default stable
+          rustup target add x86_64-pc-windows-gnu
+      - name: OpenCL ICD loader (for the gpu lane link)
+        shell: bash
+        run: |
+          # opencl3 links the OpenCL loader. vcpkg ships it preinstalled on the
+          # windows-latest image; expose it so the gpu build can find OpenCL.lib.
+          echo "OPENCL_ROOT=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> "$GITHUB_ENV"
+          vcpkg install opencl:x64-windows-static || vcpkg install opencl:x64-windows || true
+      - name: build windows-x64 (nogpu)
+        working-directory: sigil
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: target   # the repo .cargo/config pins an epsilon-absolute path
+          RUSTC_WRAPPER: ""          # ditto for the fluxc cache wrapper
+        run: |
+          cargo build --release -p sigil-top --target x86_64-pc-windows-gnu
+          cp target/x86_64-pc-windows-gnu/release/sigil-top.exe ../sigil-top-windows-x64.exe
+      - name: release-safety-gate — LAUNCH the nogpu exe, confirm it starts
+        working-directory: sigil
+        shell: bash
+        run: |
+          # actually run the freshly built binary; --selfcheck must print the
+          # version and exit 0 (the same pre-flight the in-app [U] updater runs).
+          out=$(../sigil-top-windows-x64.exe --selfcheck)
+          echo "selfcheck => $out"
+          test -n "$out" || { echo "EMPTY selfcheck output — binary did not start"; exit 1; }
+      - name: build windows-x64-gpu (OpenCL lane)
+        working-directory: sigil
+        shell: bash
+        continue-on-error: true   # OpenCL link is best-effort in CI; nogpu is the channel default
+        env:
+          CARGO_TARGET_DIR: target
+          RUSTC_WRAPPER: ""
+        run: |
+          cargo build --release -p sigil-top --features gpu --target x86_64-pc-windows-gnu
+          cp target/x86_64-pc-windows-gnu/release/sigil-top.exe ../sigil-top-windows-x64-gpu.exe
+      - name: release-safety-gate — LAUNCH the gpu exe (if it built)
+        working-directory: sigil
+        shell: bash
+        continue-on-error: true
+        run: |
+          if [ -f ../sigil-top-windows-x64-gpu.exe ]; then
+            out=$(../sigil-top-windows-x64-gpu.exe --selfcheck)
+            echo "gpu selfcheck => $out"
+            test -n "$out" || { echo "EMPTY gpu selfcheck output"; exit 1; }
+          else
+            echo "gpu build not produced (OpenCL unavailable) — skipping gpu smoke"
+          fi
+      - name: emit windows manifest fragment (blake3 + size, per target)
+        working-directory: sigil
+        shell: bash
+        run: |
+          # The signed `sigil-top-latest.json` lives ONLY on the Epsilon release host
+          # (the ed25519 seed is host-only, 600) — CI must never forge it. Instead emit a
+          # per-target FRAGMENT the host's release-gate merges into the live manifest so the
+          # separately-built linux-x64 entry is preserved (no half-publish). BLAKE3 comes from
+          # the binary's OWN `provenance` subcommand (dogfooded), matching what clients verify.
+          b3() { ../"$1" provenance 2>/dev/null | sed -n 's/^binary blake3:[[:space:]]*//p'; }
+          ver=$(../sigil-top-windows-x64.exe --selfcheck)
+          base="https://sigilgraph.fluxapp.xyz/downloads"
+          {
+            echo "{"
+            echo "  \"version\": \"$ver\","
+            echo "  \"windows-x64\": { \"url\": \"$base/sigil-top-windows-x64.exe\", \"blake3_hex\": \"$(b3 sigil-top-windows-x64.exe)\", \"size_bytes\": $(wc -c < ../sigil-top-windows-x64.exe) }"
+            if [ -f ../sigil-top-windows-x64-gpu.exe ]; then
+              echo "  ,\"windows-x64-gpu\": { \"url\": \"$base/sigil-top-windows-x64-gpu.exe\", \"blake3_hex\": \"$(b3 sigil-top-windows-x64-gpu.exe)\", \"size_bytes\": $(wc -c < ../sigil-top-windows-x64-gpu.exe) }"
+            fi
+            echo "}"
+          } > ../sigil-top-windows-fragment.json
+          cat ../sigil-top-windows-fragment.json
+      - name: upload to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.inputs.tag }}" sigil-top-windows-x64.exe sigil-top-windows-fragment.json --clobber --repo deme-plata/sigilgraph
+          if [ -f sigil-top-windows-x64-gpu.exe ]; then
+            gh release upload "${{ github.event.inputs.tag }}" sigil-top-windows-x64-gpu.exe --clobber --repo deme-plata/sigilgraph
+          fi

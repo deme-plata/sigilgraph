@@ -153,3 +153,66 @@ fn hex_short(b: &[u8; 32]) -> String {
     s.push_str("…");
     s
 }
+
+#[cfg(test)]
+mod window_accounting_tests {
+    //! Pure window-accounting for the RAM sliding window (Tier 3 — chain.rs had
+    //! zero tests). `get()`/`height()`/`window_base()` must stay correct after
+    //! old blocks are pruned to disk; `from_parts`/`snapshot_parts` is the
+    //! snapshot-boot equivalence contract. Uses opaque `__test_chain` blocks —
+    //! `get()` indexes by window position, it never re-validates the block.
+    use super::ChainTip;
+    use crate::block::__test_chain;
+    use sigil_state::SigilState;
+    use std::collections::VecDeque;
+
+    fn tip_with(n: u64, base: u64) -> ChainTip {
+        let blocks: VecDeque<_> = __test_chain(n).into_iter().collect();
+        ChainTip::from_parts(SigilState::new(), blocks, base)
+    }
+
+    #[test]
+    fn height_is_base_plus_len_and_get_is_base_relative() {
+        let t = tip_with(10, 100); // window holds 10 blocks based at height 100
+        assert_eq!(t.height(), 110, "height = base + window len");
+        assert_eq!(t.window_base(), 100);
+        // pruned (below base) and beyond-tip heights are absent from RAM…
+        assert!(t.get(99).is_none(), "pruned height is not in RAM");
+        assert!(t.get(110).is_none(), "beyond-tip height is absent");
+        // …everything inside [base, base+len) resolves.
+        assert!(t.get(100).is_some(), "window base resolves");
+        assert!(t.get(105).is_some());
+        assert!(t.get(109).is_some(), "window tip resolves");
+    }
+
+    #[test]
+    fn empty_window_is_height_zero_regardless_of_base() {
+        let t = ChainTip::from_parts(SigilState::new(), VecDeque::new(), 50);
+        assert_eq!(t.height(), 0, "empty window reports height 0 even with a nonzero base");
+        assert!(t.get(0).is_none());
+        assert!(t.get(50).is_none());
+    }
+
+    #[test]
+    fn get_boundaries_at_zero_base() {
+        let t = tip_with(5, 0);
+        assert_eq!(t.height(), 5);
+        for h in 0..5 {
+            assert!(t.get(h).is_some(), "height {h} in window");
+        }
+        assert!(t.get(5).is_none(), "one past the tip is absent");
+    }
+
+    #[test]
+    fn snapshot_parts_roundtrips_through_from_parts() {
+        let t = tip_with(10, 100);
+        let (_state, blocks, base) = t.snapshot_parts();
+        assert_eq!(base, 100);
+        assert_eq!(blocks.len(), 10);
+        // Rebuild from the captured parts → identical window geometry, which is
+        // the snapshot-boot equivalence guarantee (restore == replay-to-tip).
+        let rebuilt = ChainTip::from_parts(SigilState::new(), blocks.clone(), base);
+        assert_eq!(rebuilt.height(), t.height());
+        assert_eq!(rebuilt.window_base(), t.window_base());
+    }
+}

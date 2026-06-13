@@ -2277,4 +2277,30 @@ mod tests {
         let err = chain.apply(block).unwrap_err();
         assert!(format!("{}", err).contains("parent_hash mismatch"));
     }
+
+    /// End-to-end RAM-window pruning: applying past `chain::WINDOW` blocks must
+    /// drop the oldest from RAM (advancing `window_base`) WITHOUT corrupting
+    /// `height()` — the memory bound that lets the chain grow without OOM while
+    /// the tip stays accurate. Old heights vanish from RAM (served from the
+    /// on-disk chain-log instead); the tip stays resident.
+    #[test]
+    fn window_prunes_old_blocks_but_height_stays_correct() {
+        let mut chain = ChainTip::new();
+        chain.apply(build_genesis().unwrap()).unwrap(); // genesis at height 0
+        let extra = crate::chain::WINDOW as u64 + 5; // overflow the window
+        for h in 1..=extra {
+            let mut staging = chain.state_snapshot();
+            let t = sigil_state::StateTransition { at_height: h, mutations: vec![] };
+            let roots = sigil_state::commit_state_transition(&mut staging, &t, h).unwrap();
+            let block = build_block_at(h, chain.parent_hash(), roots, t, vec![]).unwrap();
+            chain.apply(block).unwrap();
+        }
+        let total = extra + 1; // genesis + extra blocks
+        assert_eq!(chain.height(), total, "height must still count pruned blocks");
+        assert!(chain.window_base() > 0, "oldest blocks must have been pruned from RAM");
+        assert_eq!(chain.window_base(), total - crate::chain::WINDOW as u64, "window holds exactly WINDOW blocks");
+        assert!(chain.get(0).is_none(), "pruned genesis is gone from RAM");
+        let tip_height = chain.height() - 1;
+        assert!(chain.get(tip_height).is_some(), "the tip block stays resident in RAM");
+    }
 }

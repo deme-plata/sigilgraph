@@ -39,12 +39,18 @@ pub struct BlockStore {
     /// "downloaded AND validated as one connected chain". Persisted so a restart resumes
     /// verification instead of re-walking 0. Invariant: `verified_to <= synced_to`.
     verified_to: u64,
+    /// LANE-S: the GENESIS-anchor hash the persisted watermarks belong to (the hex hash of the
+    /// block at `base`). The watermarks describe ONE chain; a testnet restart mints a fresh
+    /// genesis, so a different hash here means the persisted synced_to/verified_to are for a
+    /// DEAD chain and must be wiped (see `note_genesis`). Empty until the anchor block is seen.
+    genesis_hash: String,
 }
 
 /// Key prefix bytes (block data is keyed by 64-char hex hash, never starts with these).
 const KEY_HINDEX: u8 = 0x01; // 0x01 ++ height.to_be_bytes() -> hash_hex  (height index)
 const KEY_META: u8 = 0x02;   // 0x02'S' -> synced_to · 0x02'V' -> verified_to  (meta)
                              // 0x02'B' -> be(best_height) ++ best_hash_hex  (v0.35: O(1) open)
+                             // 0x02'G' -> genesis-anchor hash hex            (LANE-S: reset key)
 
 fn height_key(h: u64) -> Vec<u8> {
     let mut k = Vec::with_capacity(9);
@@ -54,23 +60,30 @@ fn height_key(h: u64) -> Vec<u8> {
 }
 
 impl BlockStore {
+    /// Open for the interactive TUI: returns IMMEDIATELY. A store that predates the
+    /// 'B' fast-open key migrates its index on a BACKGROUND thread (see
+    /// [`migrate_index`](Self::migrate_index)) so the dashboard paints at once
+    /// instead of hanging on a multi-GB scan. Under `cfg!(test)` migration is inline
+    /// so tests observe `best_height` synchronously.
     pub fn open(path: &str) -> Result<Self, String> {
+        Self::open_inner(path, false)
+    }
+
+    /// Open for headless tooling (verify / full-sync / explorer serve) that needs
+    /// `best_height` + the height index on return: the migration runs INLINE.
+    pub fn open_blocking(path: &str) -> Result<Self, String> {
+        Self::open_inner(path, true)
+    }
+
+    fn open_inner(path: &str, inline_migration: bool) -> Result<Self, String> {
         let db_path = PathBuf::from(path);
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
         }
-        let mut db = flux_db::Database::open(&db_path)?;
+        let db = flux_db::Database::open(&db_path)?;
 
-        // ── v0.35 (sync-starts-earlier, DeepSeek audit S1): O(1) open. ──────────────────
-        // The old open() ITERATED THE ENTIRE DB and bincode-deserialized every block just
-        // to learn best_height — measured in MINUTES on a multi-GB store, all spent BEFORE
-        // the sync thread could even spawn. Now best_(height,hash) persists under meta 'B'
-        // (written by every put path); when present we skip the scan entirely. Stores from
-        // before 'B' fall through to the legacy scan ONCE and write 'B' = self-migrating.
-        // Crash-staleness ('B' lags the final batch if we die between batch_put and the
-        // meta put) only ever UNDER-reports best_height by ≤1 batch and self-corrects on
-        // the next put — synced_to/verified_to (the consensus-relevant watermarks) have
-        // their own keys and are untouched by this.
+        // v0.35 fast open: best_(height,hash) persists under meta 'B'; when present we
+        // skip the scan entirely. Stores from before 'B' migrate ONCE (self-migrating).
         let mut best_height = 0u64;
         let mut best_hash_hex = String::new();
         let mut need_best_migration = true;
@@ -84,34 +97,29 @@ impl BlockStore {
             }
         }
         if need_best_migration {
-            // Legacy path: one full scan (old behavior), then persist 'B' so every
-            // subsequent open is O(1).
-            let mut have_index = false;
-            let mut blocks_idx: Vec<(u64, Vec<u8>)> = Vec::new(); // (height, hash bytes)
-            for (key, value) in db.iter() {
-                match key.first() {
-                    Some(&KEY_HINDEX) => { have_index = true; continue; }
-                    Some(&KEY_META) => continue,
-                    _ => {}
-                }
-                if let Ok(block) = bincode::deserialize::<StoredBlock>(&value) {
-                    if block.header.height >= best_height {
-                        best_height = block.header.height;
-                        best_hash_hex = block.hash_hex.clone();
-                    }
-                    blocks_idx.push((block.header.height, key));
-                }
+            // INSTANT-BOOT FIX. The legacy migration was a synchronous full-db scan
+            // (bincode-deserialize every block) that ran HERE, before the first TUI
+            // paint — minutes on a multi-GB store, an OOM-class RAM spike that lagged
+            // the whole machine, and because 'B' was only written AFTER the loop,
+            // closing mid-scan saved nothing so every launch re-scanned (= "5 minutes
+            // and it never gets faster"). Now it runs on a BACKGROUND thread over a
+            // cloned handle (flux_db::Database is Arc<RwLock> inside → the clone shares
+            // storage and writes are visible), checkpointing 'B' every CHECKPOINT
+            // blocks so an interrupt still leaves the next open O(1). open() returns at
+            // once; the light monitor paints immediately while the cache index rebuilds
+            // quietly. Inline only for headless tooling / tests (need best_height now).
+            if inline_migration || cfg!(test) {
+                let (h, hash) = Self::migrate_index(&db);
+                best_height = h;
+                best_hash_hex = hash;
+            } else {
+                let bg = db.clone();
+                let _ = std::thread::Builder::new()
+                    .name("sigil-blockstore-migrate".into())
+                    .spawn(move || {
+                        let _ = Self::migrate_index(&bg);
+                    });
             }
-            // Migrate a pre-index store (built before the height index existed) so it
-            // resumes instead of re-syncing from 0.
-            if !have_index && !blocks_idx.is_empty() {
-                for (h, hashk) in &blocks_idx {
-                    let _ = db.put(&height_key(*h), hashk);
-                }
-            }
-            let mut bv = best_height.to_be_bytes().to_vec();
-            bv.extend_from_slice(best_hash_hex.as_bytes());
-            let _ = db.put(&[KEY_META, b'B'], &bv);
         }
 
         let synced_to = db
@@ -124,9 +132,60 @@ impl BlockStore {
             .unwrap_or(0)
             .min(synced_to); // never claim verified past what's downloaded
 
-        let mut s = BlockStore { db, best_height, best_hash_hex, synced_to, verified_to, base: 0 };
+        // LANE-S: the genesis-anchor hash the persisted watermarks belong to.
+        let genesis_hash = db
+            .get(&[KEY_META, b'G']).ok().flatten()
+            .map(|v| String::from_utf8_lossy(&v).into_owned())
+            .unwrap_or_default();
+        let mut s = BlockStore { db, best_height, best_hash_hex, synced_to, verified_to, base: 0, genesis_hash };
         s.advance_synced(); // catch up the contiguous pointer to whatever's on disk
         Ok(s)
+    }
+
+    /// One-time index migration for a pre-'B' store. Rebuilds the height index and
+    /// persists best-(height,hash) under meta 'B', CHECKPOINTING every `CHECKPOINT`
+    /// blocks so an interrupted run still leaves the next open O(1) (the trap that
+    /// made boots permanently slow when the user closed mid-scan). `put` is `&self`
+    /// and `db.iter()` returns an owned snapshot, so this is safe to run on a cloned
+    /// handle off the main thread. Returns (best_height, best_hash_hex).
+    fn migrate_index(db: &flux_db::Database) -> (u64, String) {
+        const CHECKPOINT: u64 = 50_000;
+        let (mut best_height, mut best_hash_hex) = (0u64, String::new());
+        let mut have_index = false;
+        let mut pending: Vec<(Vec<u8>, Vec<u8>)> = Vec::new(); // (height_key, hash_key), flushed per checkpoint
+        let mut seen: u64 = 0;
+        let checkpoint = |db: &flux_db::Database, pending: &mut Vec<(Vec<u8>, Vec<u8>)>, h: u64, hash: &str| {
+            for (hk, hashk) in pending.drain(..) {
+                let _ = db.put(&hk, &hashk);
+            }
+            let mut bv = h.to_be_bytes().to_vec();
+            bv.extend_from_slice(hash.as_bytes());
+            let _ = db.put(&[KEY_META, b'B'], &bv);
+        };
+        for (key, value) in db.iter() {
+            match key.first() {
+                Some(&KEY_HINDEX) => { have_index = true; continue; }
+                Some(&KEY_META) => continue,
+                _ => {}
+            }
+            if let Ok(block) = bincode::deserialize::<StoredBlock>(&value) {
+                let h = block.header.height;
+                if h >= best_height {
+                    best_height = h;
+                    best_hash_hex = block.hash_hex.clone();
+                }
+                // Only rebuild the height index for a store that never had one.
+                if !have_index {
+                    pending.push((height_key(h), key));
+                }
+                seen += 1;
+                if seen % CHECKPOINT == 0 {
+                    checkpoint(db, &mut pending, best_height, &best_hash_hex);
+                }
+            }
+        }
+        checkpoint(db, &mut pending, best_height, &best_hash_hex);
+        (best_height, best_hash_hex)
     }
 
     /// v0.35: persist best_(height,hash) under meta 'B' — the key that makes open() O(1)
@@ -175,6 +234,23 @@ impl BlockStore {
         self.advance_synced();
     }
 
+    /// 0.77 GENESIS ARCHIVE: re-anchor a snapped store back DOWN to `base` so the
+    /// contiguous frontier re-walks genesis→tip and the store HOLDS every block.
+    /// `set_base` can only RAISE the watermarks (its job is the one-time genesis
+    /// anchor); flipping a recent-window store into a full archive needs
+    /// `synced_to`/`verified_to` LOWERED to the anchor or they keep claiming a
+    /// contiguity the disk doesn't have. Blocks already stored (the recent window)
+    /// stay put — `advance_synced` sweeps any consecutive run at the anchor, and
+    /// the frontier absorbs the rest as out-of-order arrivals when it reaches them.
+    pub fn rebase(&mut self, base: u64) {
+        self.base = base;
+        self.synced_to = base;
+        let _ = self.db.put(&[KEY_META, b'S'], &self.synced_to.to_be_bytes());
+        self.verified_to = base;
+        let _ = self.db.put(&[KEY_META, b'V'], &self.verified_to.to_be_bytes());
+        self.advance_synced();
+    }
+
     /// Contiguous synced count: blocks base..synced_to are all present (next needed = this).
     pub fn synced_to(&self) -> u64 { self.synced_to }
 
@@ -191,6 +267,55 @@ impl BlockStore {
             self.verified_to = h;
             let _ = self.db.put(&[KEY_META, b'V'], &self.verified_to.to_be_bytes());
         }
+    }
+
+    /// LANE-S: a chain reset (fresh genesis) invalidates EVERY watermark — they describe the
+    /// OLD chain's blocks, which no longer exist on the network. Without this the persisted
+    /// synced_to/verified_to/best_height survive the reset and the SYNC hero keeps showing a
+    /// phantom checkpoint (e.g. 5M) while the fresh tip is 0.39M, until a manual local wipe.
+    /// Zero every watermark + persist so the store re-downloads from the fresh genesis. Stale
+    /// block bodies are harmless — they get overwritten by height as the new chain syncs in.
+    pub fn reset_watermarks(&mut self) {
+        self.synced_to = 0;
+        self.verified_to = 0;
+        self.best_height = 0;
+        self.best_hash_hex = String::new();
+        self.base = 0;
+        self.genesis_hash = String::new(); // LANE-S: forget the dead chain's genesis anchor
+        let _ = self.db.put(&[KEY_META, b'S'], &0u64.to_be_bytes());
+        let _ = self.db.put(&[KEY_META, b'V'], &0u64.to_be_bytes());
+        let _ = self.db.put(&[KEY_META, b'G'], b""); // clear the persisted genesis key
+        self.persist_best(); // write best_height=0 under meta 'B'
+    }
+
+    /// LANE-S: the genesis-anchor hash the persisted watermarks belong to ("" until first seen).
+    pub fn genesis_hash(&self) -> &str { &self.genesis_hash }
+
+    /// LANE-S: key the watermarks to the LIVE genesis anchor (the hash of the block at `base`) and
+    /// AUTO-INVALIDATE on a mismatch. Returns `true` ONLY when it detects a CHANGED genesis — i.e.
+    /// a testnet restart minted a fresh chain — in which case it has ALREADY wiped the now-stale
+    /// watermarks (`reset_watermarks`) and adopted the new anchor; the caller then drops the
+    /// last-tip cache + resets the in-memory peer_best/verified so the hero self-heals to the
+    /// fresh tip with NO manual local wipe. No-op (false) on unknown/first/unchanged genesis.
+    pub fn note_genesis(&mut self, live_hash: &str) -> bool {
+        let live = live_hash.trim();
+        if live.is_empty() {
+            return false;
+        }
+        if self.genesis_hash.is_empty() {
+            self.genesis_hash = live.to_string();
+            let _ = self.db.put(&[KEY_META, b'G'], self.genesis_hash.as_bytes());
+            return false;
+        }
+        if self.genesis_hash == live {
+            return false;
+        }
+        // Fresh genesis under our feet → the persisted watermarks describe a DEAD chain. Wipe them,
+        // then adopt the new anchor (reset_watermarks cleared genesis_hash, so set it AFTER).
+        self.reset_watermarks();
+        self.genesis_hash = live.to_string();
+        let _ = self.db.put(&[KEY_META, b'G'], self.genesis_hash.as_bytes());
+        true
     }
 
     /// v0.9.0: Load the full stored header at a given height (via the height index →
@@ -442,6 +567,19 @@ impl BlockReader {
     /// synced/verified watermark before exit without owning the mutable store.
     pub fn flush(&self) -> Result<(), String> { self.db.flush() }
 
+    /// The REAL max stored height, read from the persisted `best` meta key (`[KEY_META,'B']`,
+    /// written by the live store's `persist_best`). The sync STATE fakes its height to the
+    /// network tip in light-monitor mode, so the explorer must anchor `recent_from`/`search`
+    /// HERE — the highest block we ACTUALLY hold — not the tip. Anchoring at the faked tip made
+    /// the down-walk start millions of blocks above anything stored → empty → the "at 4.5M but
+    /// Activity stuck on 'loading chain'" bug. 0 when the store is empty / key absent.
+    pub fn best_height(&self) -> u64 {
+        self.db.get(&[KEY_META, b'B']).ok().flatten()
+            .filter(|v| v.len() >= 8)
+            .map(|v| u64::from_be_bytes([v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]]))
+            .unwrap_or(0)
+    }
+
     /// Decode a stored block (either bincode `StoredBlock` or the light-client raw
     /// JSON `{"h","hash","ts"}`) into a `BlockRow`. `verified` is true only when we
     /// hold the full header and `header.hash()` re-derives to the stored hash hex.
@@ -684,6 +822,45 @@ mod tests {
         }
         let s2 = BlockStore::open(&p).unwrap();
         assert_eq!(s2.synced_to(), 8, "RESUMES from the persisted store, not 0");
+        let _ = std::fs::remove_dir_all(&p);
+    }
+
+    /// LANE-S acceptance (mechanism): a stale client (OLD-genesis store with high watermarks) that
+    /// meets a FRESH-genesis producer must AUTO-WIPE its watermarks via `note_genesis` — the
+    /// self-heal that replaces the manual local wipe after a testnet restart. The live <10 s gate
+    /// is an integration concern; this CI test proves the keying: detect the changed genesis
+    /// anchor → zero + persist the watermarks, and never re-trigger on the same anchor.
+    #[test]
+    fn lane_s_genesis_change_auto_invalidates_watermarks() {
+        let p = tmp("lane-s-genesis");
+        let _ = std::fs::remove_dir_all(&p);
+        {
+            let mut s = BlockStore::open(&p).unwrap();
+            // OLD chain: learn its genesis anchor, then make progress.
+            assert!(!s.note_genesis("old_genesis_hash"), "first genesis is LEARNED, not a reset");
+            assert_eq!(s.genesis_hash(), "old_genesis_hash");
+            for h in 0..6 { s.put_block_raw(h, &format!("old{h}")).unwrap(); }
+            s.set_verified_to(5);
+            assert_eq!(s.synced_to(), 6);
+            assert_eq!(s.verified_to(), 5);
+            assert_eq!(s.best_height(), 5);
+            // Fresh genesis (testnet restart) → DIFFERENT anchor → AUTO-INVALIDATE.
+            assert!(s.note_genesis("fresh_genesis_hash"), "a CHANGED genesis is a reset");
+            assert_eq!(s.genesis_hash(), "fresh_genesis_hash", "adopts the fresh anchor");
+            assert_eq!(s.synced_to(), 0, "stale watermarks wiped on genesis change");
+            assert_eq!(s.verified_to(), 0);
+            assert_eq!(s.best_height(), 0);
+            // Idempotent: the SAME genesis again is NOT a reset.
+            assert!(!s.note_genesis("fresh_genesis_hash"));
+            // Unknown (empty) live genesis is a no-op (offline / pre-anchor).
+            assert!(!s.note_genesis(""));
+            assert_eq!(s.genesis_hash(), "fresh_genesis_hash");
+        }
+        // The fresh anchor PERSISTS across reopen (keyed under meta 'G').
+        {
+            let s = BlockStore::open(&p).unwrap();
+            assert_eq!(s.genesis_hash(), "fresh_genesis_hash", "genesis key survives reopen");
+        }
         let _ = std::fs::remove_dir_all(&p);
     }
 }

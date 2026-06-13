@@ -70,6 +70,14 @@ pub const PRODUCER_WALLET: WalletId = [0xAAu8; 32];
 /// economic half of "more verifiers = more secure".
 pub const OPERATOR_POOL_WALLET: WalletId = [0x98u8; 32];
 
+/// The aeresborger commons treasury wallet — accrues the 1.2%
+/// [`sigil_bank::COMMONS_MINING_FEE_BPS`] tithe each block. Same address as
+/// sigil-rpc's `COMMONS_WALLET` (`0xC0`) so the sim and the live rpcd agree
+/// on where the commons accrues. (Was silently DROPPED by build_coinbase
+/// until LANE-W: the split debited it from the validator but credited it to
+/// nobody — 1.2% of every sim coinbase vanished.)
+pub const COMMONS_WALLET: WalletId = [0xC0u8; 32];
+
 /// Per-block coinbase reward (native SIGIL base units). Prototype of the
 /// mining reward the real flux-mining/flux-vdf path will award. Split three
 /// ways via [`sigil_bank::split_mining_reward`]: producer (≈94.9%), master/
@@ -408,7 +416,7 @@ impl SigilSimNode {
     fn build_coinbase(&self, height: u64) -> sigil_tx::ApplyResult {
         let master = self.state.master_wallet();
         let split = sigil_bank::split_mining_reward(BLOCK_REWARD, master)
-            .unwrap_or(sigil_bank::MiningSplit { validator_share: BLOCK_REWARD, master_share: 0, operator_share: 0 });
+            .unwrap_or(sigil_bank::MiningSplit { validator_share: BLOCK_REWARD, master_share: 0, operator_share: 0, commons_share: 0 });
 
         let mut mutations = Vec::new();
         let mut events = Vec::new();
@@ -449,6 +457,18 @@ impl SigilSimNode {
                 amount: op_bal.saturating_add(split.operator_share),
             });
             events.push(SigilEvent::MintReward { miner: OPERATOR_POOL_WALLET, height, amount: split.operator_share });
+        }
+
+        // Aeresborger commons tithe (1.2%) — LANE-W fix: this share was
+        // computed by the bank split but never credited, so it vanished.
+        if split.commons_share > 0 {
+            let c_bal = self.state.balance_of(&COMMONS_WALLET, &NATIVE);
+            mutations.push(StateMutation::SetBalance {
+                wallet: COMMONS_WALLET,
+                token: NATIVE,
+                amount: c_bal.saturating_add(split.commons_share),
+            });
+            events.push(SigilEvent::MintReward { miner: COMMONS_WALLET, height, amount: split.commons_share });
         }
 
         for ev in &events {
@@ -698,7 +718,8 @@ mod tests {
         let master = wallet(0x99);
         let expected_master = (n as u128) * 2500;   // floor(50000 * 5%)   per block
         let expected_operator = (n as u128) * 50;   // floor(50000 * 0.1%) per block
-        let expected_producer = (n as u128) * 47450;
+        let expected_commons = (n as u128) * 600;  // floor(50000 * 1.2%) per block
+        let expected_producer = (n as u128) * 46850; // remainder (93.7%)
         assert_eq!(
             node.balance_of(&master, &NATIVE),
             expected_master,
@@ -710,9 +731,14 @@ mod tests {
             "node-operator pool must accrue 0.1% of every block reward"
         );
         assert_eq!(
+            node.balance_of(&COMMONS_WALLET, &NATIVE),
+            expected_commons,
+            "aeresborger commons must accrue 1.2% of every block reward"
+        );
+        assert_eq!(
             node.balance_of(&PRODUCER_WALLET, &NATIVE),
             expected_producer,
-            "producer keeps the remainder (94.9%)"
+            "producer keeps the remainder (93.7%)"
         );
     }
 

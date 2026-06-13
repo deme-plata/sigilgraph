@@ -27,10 +27,20 @@ sigil-net    = { path = "../sigil-net", optional = true }
 # Real producer signature (SQIsign Level-5, 292B) for the SqiSignBlob flavor —
 # upgrades the tip-proof from anti-corruption (BLAKE3) to adversary-resistant.
 flux-sqisign = { workspace = true, optional = true }
+# DNS-anchor codec + encoders for the producer bin's `--sqisign` / `--anchor` modes.
+hex              = { workspace = true }
+base64           = "0.22"
+sigil-dns-anchor = { path = "../sigil-dns-anchor" }
 
 [features]
 default = ["native"]
 native = ["dep:sigil-net", "dep:flux-sqisign"]
+
+# The producer bin signs with SQIsign (native-only) — gate it so wasm/light builds
+# (--no-default-features) don't try to compile the signing path.
+[[bin]]
+name = "sigil-tip-emit"
+required-features = ["native"]
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -9,9 +9,36 @@ use super::block_store::BlockStore;
 use sigil_header::SigilBlockHeaderV0;
 
 use std::sync::{Arc, Mutex, mpsc};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
+
+// ── 0.77: ONE process-wide pooled HTTP client per flavor ─────────────────────────────
+// The old pattern built a fresh reqwest Client per poll/thread — every build opens a new
+// TCP+TLS connection that then sits in TIME_WAIT for ~60s. Over a multi-hour genesis
+// archive sync that exhausted Windows' ephemeral ports (the "tip frozen / error sending
+// request" bug, #156 item 3). A shared client = keep-alive reuse + a bounded idle pool;
+// per-call timeouts stay exactly as they were (set on the builder here).
+static HTTP_BLOCKING: std::sync::LazyLock<reqwest::blocking::Client> =
+    std::sync::LazyLock::new(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .pool_max_idle_per_host(4)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new())
+    });
+static HTTP_ASYNC: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .pool_max_idle_per_host(4)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
 
 pub const BLOCK_SYNC_TOPIC: &str = "/sigil/g0/blocks";
 
@@ -50,9 +77,50 @@ pub struct BackfillReq {
 /// CAPPED at 64 MB output: a malicious peer must not zstd-bomb the monitor (a real chunk
 /// decompresses to ≤ ~8 MB). None on any malformed/oversized stream — caller treats it
 /// exactly like an unparseable response (logged, peer benched), never a panic.
+/// v0.59: how far a gossip-claimed tip may LEAD the signed oracle before it's a phantom.
+/// Generous enough for sub-second gossip liveness ahead of the ~1s oracle cadence, tight
+/// enough to reject a post-genesis-reset ghost (a 1.4M claim while the oracle is at 0.88M).
+const SANE_LEAD: u64 = 65_536;
+
+/// v0.39/v0.59: bounded-raise guard for PEER-claimed tips. peer_best only-raises, so a single
+/// bogus gossip claim (the 26.8M / post-reset 1.4M phantom) used to poison the sync target. The
+/// signed `sigil-tip-live.json` oracle is the AUTHORITY: once it has answered (`oracle > 0`), a
+/// gossip claim may lead it by at most `SANE_LEAD`; wilder jumps are ignored. Before any oracle
+/// answers (offline / cold CDN) fall back to a bounded raise off the current belief.
+fn sane_raise(oracle: u64, cur: u64, claim: u64) -> bool {
+    if oracle > 0 {
+        claim <= oracle.saturating_add(SANE_LEAD)
+    } else {
+        cur == 0 || claim <= cur.saturating_add(2_000_000)
+    }
+}
+
+#[cfg(test)]
+mod oracle_anchor_tests {
+    use super::{sane_raise, SANE_LEAD};
+    #[test]
+    fn oracle_caps_phantom_gossip() {
+        // oracle 0.88M: the post-reset 1.4M phantom is rejected; a small lead is allowed.
+        assert!(!sane_raise(883_000, 883_000, 1_400_000), "1.4M phantom must be rejected");
+        assert!(sane_raise(883_000, 883_000, 883_000 + 1_000), "small gossip lead ok");
+        assert!(sane_raise(883_000, 883_000, 883_000 + SANE_LEAD), "exactly the lead ok");
+        assert!(!sane_raise(883_000, 883_000, 883_000 + SANE_LEAD + 1), "just past the lead rejected");
+    }
+    #[test]
+    fn pre_oracle_falls_back_to_bounded_raise() {
+        // oracle == 0 (cold boot, offline): bounded +2M off current; cur==0 seeds anything.
+        assert!(sane_raise(0, 0, 5_000_000), "cold seed allowed");
+        assert!(sane_raise(0, 1_000_000, 2_900_000), "within +2M ok");
+        assert!(!sane_raise(0, 1_000_000, 3_100_001), "beyond +2M rejected");
+    }
+}
+
 fn zstd_decompress_body(body: &[u8]) -> Option<Vec<u8>> {
     use std::io::Read;
-    const MAX_OUT: u64 = 64 * 1024 * 1024;
+    // v0.39: 64 MiB was 8x too generous — a real chunk is <= ~8 MB, and the worst-case
+    // burst is MAX_OUT x inflight slots DURING STARTUP (before the first frame). 12 MiB
+    // keeps full headroom while capping the burst ~6x lower.
+    const MAX_OUT: u64 = 12 * 1024 * 1024;
     let mut dec = ruzstd::StreamingDecoder::new(body).ok()?;
     let mut out = Vec::new();
     dec.take(MAX_OUT + 1).read_to_end(&mut out).ok()?;
@@ -63,6 +131,12 @@ fn zstd_decompress_body(body: &[u8]) -> Option<Vec<u8>> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackfillResp {
     pub blocks: Vec<serde_json::Value>,
+}
+
+/// v0.50 (LANE-A sync): chunk-align a base height to the nearest CHUNK boundary at/below `h`,
+/// clamped to the lowest servable height `sync_base`. Used by the recent-window probe-before-snap.
+fn align_base(h: u64, chunk: u64, sync_base: u64) -> u64 {
+    ((h / chunk) * chunk).max(sync_base)
 }
 
 /// Ingest one block (as a serde_json::Value with a `"header"` field) exactly like
@@ -100,7 +174,7 @@ fn ingest_block_value(
             s.fetched_total += 1;            // smooth, monotonic — drives the rate readout
             s.sync_height = synced;          // ✓ badge tracks the contiguous tip, not a stale height
             s.sync_hash_hex = hash_hex.clone();
-            if height > s.peer_best_height {
+            if height > s.peer_best_height && sane_raise(s.oracle_tip, s.peer_best_height, height) {
                 s.peer_best_height = height;
             }
             s.last_message_at = Some(Instant::now());
@@ -120,7 +194,7 @@ fn ingest_block_value(
         true
     } else {
         let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-        if height > s.peer_best_height {
+        if height > s.peer_best_height && sane_raise(s.oracle_tip, s.peer_best_height, height) {
             s.peer_best_height = height;
         }
         s.last_message_at = Some(Instant::now());
@@ -191,6 +265,28 @@ fn max_header_height(bytes: &[u8]) -> Option<u64> {
     }
 }
 
+/// Min+max block height present in a backfill response body, across ALL wire codecs
+/// (`'Z'` zstd, `'H'` raw-bincode, legacy JSON). Mirrors `max_header_height` but returns
+/// the full `[lo..hi]` range — used by the `[D]` sync debug line so the operator sees the
+/// REAL heights in a chunk. (Before v0.38.1 that line only decoded `'H'`, so once the
+/// zstd codec=1 lane went live every chunk logged `h=[0..0]` and looked like a broken
+/// decode — a pure display bug; `ingest_backfill_bytes` always stored the blocks fine.)
+fn header_height_range(bytes: &[u8]) -> Option<(u64, u64)> {
+    let heights: Vec<u64> = if bytes.first() == Some(&b'Z') {
+        let body = zstd_decompress_body(&bytes[1..])?;
+        bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&body).ok()?.iter().map(|h| h.height).collect()
+    } else if bytes.first() == Some(&b'H') {
+        bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&bytes[1..]).ok()?.iter().map(|h| h.height).collect()
+    } else if let Ok(resp) = serde_json::from_slice::<BackfillResp>(bytes) {
+        resp.blocks.iter()
+            .filter_map(|v| v.get("header").and_then(|h| h.get("height")).and_then(|x| x.as_u64()))
+            .collect()
+    } else {
+        return None;
+    };
+    Some((*heights.iter().min()?, *heights.iter().max()?))
+}
+
 /// Fetch the network's REAL tip height from the published `sigil-tip-live.json`.
 /// v0.17.0: the monitor's `/api/v1/status` mis-routes to a near-empty sigil-rpcd that
 /// returns height=2, so `set_known_tip` seeded `peer_best≈2` and the fast-snap (gated on
@@ -198,15 +294,8 @@ fn max_header_height(bytes: &[u8]) -> Option<u64> {
 /// clamped to frontier+CHUNK so it can't reveal the tip either. This signed-by-producer
 /// JSON carries the true height (~6.7M), so it's the reliable tip source for the snap.
 async fn fetch_live_tip() -> Option<u64> {
-    const URLS: [&str; 2] = [
-        "https://sigilgraph.fluxapp.xyz/sigil-tip-live.json",
-        "https://quillon.xyz/sigil-tip-live.json",
-    ];
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .ok()?;
-    fetch_live_tip_inner(&client).await
+    // 0.77: shared pooled client (keep-alive) — was a fresh Client per call.
+    fetch_live_tip_inner(&HTTP_ASYNC).await
 }
 
 /// Blocking variant — runs on a DEDICATED OS thread, isolated from the busy block_sync
@@ -231,9 +320,8 @@ fn fetch_live_tip_blocking() -> Option<u64> {
         let u = format!("{url}?cb={cb}");
         std::thread::spawn(move || {
             let h = (|| -> Option<u64> {
-                let client = reqwest::blocking::Client::builder()
-                    .timeout(Duration::from_secs(5)).build().ok()?;
-                let v = client.get(&u).header("cache-control", "no-cache").send().ok()?
+                // 0.77: shared pooled client — was a fresh Client per racer thread per poll.
+                let v = HTTP_BLOCKING.get(&u).header("cache-control", "no-cache").send().ok()?
                     .json::<serde_json::Value>().ok()?;
                 v.get("height").and_then(|x| x.as_u64()).filter(|&h| h > 0)
             })();
@@ -271,6 +359,9 @@ fn persist_tip(h: u64) {
     if let Some(dir) = p.parent() { let _ = std::fs::create_dir_all(dir); }
     let _ = std::fs::write(p, h.to_string());
 }
+/// v0.36.1: drop the persisted tip so a restart doesn't re-seed a stale (pre-reset)
+/// height. Called when chain-reset detection fires in the tip-poller.
+fn clear_persisted_tip() { let _ = std::fs::remove_file(tip_cache_path()); }
 
 async fn fetch_live_tip_inner(client: &reqwest::Client) -> Option<u64> {
     const URLS: [&str; 2] = [
@@ -329,6 +420,12 @@ pub struct P2PSyncState {
     /// downloaded in the live window. Lets the UI tell the truth instead of reporting the
     /// base-jumped `synced_to` as if the whole chain were downloaded.
     pub base: u64,
+    /// LANE-S: set by the tip-poller when it detects a chain reset (the live oracle tip is
+    /// drastically below peer_best). The sync loop consumes it on its next tick — wipes the
+    /// block-store watermarks (synced_to/verified_to/best) so the stale OLD-genesis chain is
+    /// forgotten and re-downloaded from the fresh tip — then clears the flag. This is what
+    /// makes a testnet reset self-heal with NO manual local wipe.
+    pub reset_pending: bool,
     /// v0.9.0: contiguous CRYPTOGRAPHICALLY-VERIFIED tip — blocks 0..verified each passed
     /// precheck + parent-linkage (spine connects back to genesis). `blocks_synced` means
     /// "downloaded"; THIS means "downloaded AND validated as one chain". The full-sync
@@ -338,17 +435,40 @@ pub struct P2PSyncState {
     /// frontier): "(height) reason". Empty while the chain is clean. Surfaced in the TUI
     /// + makes `full-sync`/`verify-chain` exit non-zero.
     pub verify_break: Option<String>,
+    /// v0.57 (LANE-M): true in RECENT-WINDOW (light monitor) mode — the base is snapped
+    /// forward to a recent servable window, so `verified` is anchored at that checkpoint base
+    /// (tip-proof semantics), NOT a full spine linked to genesis. The renderer reads this to be
+    /// HONEST: track STORED progress on the bar + show `verified` as a separate checkpoint badge,
+    /// never a frozen full-genesis-spine %. False in full-sync (--sync genesis) where `verified`
+    /// IS the genesis spine. See `chain_verify::verify_to` (walks from `max(verified_to, base)`).
+    pub light_mode: bool,
     /// v0.27 PROOF-OF-USEFUL-SYNC: idle-at-tip CPU re-derives the stored spine's BLAKE
     /// hashes (same methodology as mining) to harden chain trust instead of idling.
     /// Cumulative headers re-verified this session + the rolling rate (useful hashrate).
     pub pos_total: u64,
     pub pos_rate: f64,
+    /// LANE-P v0.59: HONEST stall surfacing — non-empty when the contiguous frontier has
+    /// not advanced for a while while a higher tip is known. Surfaced in the SYNC hero so a
+    /// stall is NEVER a silent 0 blk/s; cleared the moment the frontier advances again.
+    pub stall_reason: String,
+    /// v0.59: the latest height from the SIGNED sigil-tip-live.json oracle — the network AUTHORITY
+    /// for the tip. Gossip-claimed raises are gated against this (see `sane_raise`) so a phantom or
+    /// post-genesis-reset gossip can't push the sync target above the real chain head. 0 until the
+    /// first oracle answer.
+    pub oracle_tip: u64,
 }
 
 pub struct P2PBlockSync {
     state: Arc<Mutex<P2PSyncState>>,
     new_blocks: Arc<Mutex<Vec<StoredBlock>>>,
     stop_tx: Option<mpsc::Sender<()>>,
+    /// 0.77 GENESIS ARCHIVE: the sync mode is LIVE-FLIPPABLE — [F] toggles a RUNNING
+    /// engine between light-monitor (recent-window snap) and full-archive (genesis→tip,
+    /// hold everything) with no restart. Every base-snap gate in the engine loads this.
+    recent_only: Arc<AtomicBool>,
+    /// Set by `set_full_archive`; the engine thread consumes it at tick-top and
+    /// re-anchors the store at the genesis base so the frontier re-walks genesis→tip.
+    rebase_pending: Arc<AtomicBool>,
 }
 
 pub use super::block_store::StoredBlock;
@@ -361,17 +481,52 @@ impl P2PBlockSync {
         self.state.clone()
     }
 
+    /// 0.77: non-blocking state access for the DRAW thread. The sync thread holds the
+    /// state mutex frequently (once per ingested block + ~15 sites per tick); a blocking
+    /// `lock()` from the render loop starved the draw thread under full-archive load on
+    /// Windows (unfair SRWLOCK) → BLACK SCREEN at 918MB sync (#156 item 2). `try_lock`
+    /// + the caller keeping its last clone = at worst a 1-frame-stale readout.
+    fn try_state(&self) -> Option<std::sync::MutexGuard<'_, P2PSyncState>> {
+        match self.state.try_lock() {
+            Ok(g) => Some(g),
+            Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+
+    /// 0.77 GENESIS ARCHIVE: flip a RUNNING engine to full-archive mode — base re-anchors
+    /// at genesis on the engine thread's next tick; the frontier re-walks genesis→tip and
+    /// HOLDS every block (the redundant-backup promise of [F], #156 item 1).
+    pub fn set_full_archive(&self) {
+        self.recent_only.store(false, Ordering::Relaxed);
+        self.rebase_pending.store(true, Ordering::Relaxed);
+    }
+
+    /// 0.77: flip a RUNNING engine back to light-monitor — the recent-window snap gates
+    /// re-engage and the base snaps forward to the servable window naturally.
+    pub fn set_light_monitor(&self) {
+        self.recent_only.store(true, Ordering::Relaxed);
+    }
+
+    /// 0.77: the engine's CURRENT mode (true = light-monitor / recent-window).
+    pub fn is_recent_only(&self) -> bool {
+        self.recent_only.load(Ordering::Relaxed)
+    }
+
     /// v0.13.1: seed the network tip from an EXTERNAL source (the HTTP status feed)
     /// so the backfill refill fires even when gossip AND the P2P height-probe are
     /// silent (a frozen or quiet mesh, or a producer that gossips nothing). Before
     /// this, `peer_best_height` was learnable ONLY from inbound gossip / a probe
     /// reply; on a quiet mesh it stayed 0, the `peer_best > 0` refill gate never
     /// opened, and the sync sat on "connecting" forever. Only ever RAISES the tip.
+    /// 0.77: try_lock — called from the draw thread every frame; a skipped hint is
+    /// retried next frame, but it must NEVER block render.
     pub fn set_known_tip(&self, height: u64) {
         if height == 0 { return; }
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if height > s.peer_best_height {
-            s.peer_best_height = height;
+        if let Some(mut s) = self.try_state() {
+            if height > s.peer_best_height {
+                s.peer_best_height = height;
+            }
         }
     }
 
@@ -380,7 +535,14 @@ impl P2PBlockSync {
     /// historical ranges dribble — the "1 blk/s" symptom). full-sync passes false.
     pub fn launch(mut store: BlockStore, recent_only: bool) -> Self {
         // SIGIL_SNAP=1 forces fast-snap even in full-sync (validation / "just track the tip").
-        let recent_only = recent_only || std::env::var("SIGIL_SNAP").is_ok();
+        let recent_only_init = recent_only || std::env::var("SIGIL_SNAP").is_ok();
+        // 0.77 GENESIS ARCHIVE: the mode is LIVE-FLIPPABLE ([F] reaches a running engine
+        // through this atomic — before 0.77 the bool was captured by value and the toggle
+        // was a TUI-local no-op). Every base-snap gate below loads it fresh.
+        let recent_only = Arc::new(AtomicBool::new(recent_only_init));
+        let rebase_pending = Arc::new(AtomicBool::new(false));
+        let recent_only_rt = recent_only.clone();
+        let rebase_pending_rt = rebase_pending.clone();
         let state = Arc::new(Mutex::new(P2PSyncState::default()));
         let new_blocks = Arc::new(Mutex::new(Vec::new()));
         let (stop_tx, stop_rx) = mpsc::channel();
@@ -393,7 +555,10 @@ impl P2PBlockSync {
         // backfill/verify workload (peer_best froze → the monitor parked behind the tip at
         // 0 blk/s). A standalone OS thread with BLOCKING reqwest polls every 3s, immune to
         // that contention, and seeds peer_best directly.
-        if recent_only {
+        // 0.77: the dedicated tip-poller spawn keeps gating on the LAUNCH-TIME mode (a
+        // full-archive launch flipped to light later still gets tips from the in-loop
+        // async fetch — just without the dedicated anti-starvation thread; acceptable).
+        if recent_only_init {
             // v0.35 (sync-starts-earlier, DeepSeek audit S2): the v0.23 SYNCHRONOUS CDN
             // eager-seed is GONE — it blocked launch() for up to ~6 s of HTTP before the
             // sync loop could even spawn, serializing exactly the startup it meant to speed
@@ -419,18 +584,71 @@ impl P2PBlockSync {
             let tip_state = state.clone();
             thread::spawn(move || {
                 let mut polls: u32 = 0;
+                let mut reset_streak: u32 = 0; // v0.36.1 chain-reset detection
                 let mut fail_backoff = Duration::from_secs(0);
                 loop {
                     match fetch_live_tip_blocking() {
                         Some(h) => {
                             fail_backoff = Duration::from_secs(0); // healthy → normal cadence
-                            let raised = {
+                            // v0.36.1 CHAIN-RESET DETECTION: the oracle is the network source of
+                            // truth. peer_best only ever RAISES (offline-resilience), so after a
+                            // testnet reset a stale high (e.g. 21.9M) sticks forever and the UI
+                            // shows a phantom tip. If the live oracle reports a tip DRASTICALLY
+                            // below peer_best for 3 consecutive polls (~9s — not a transient dip),
+                            // the chain was reset: adopt the oracle value + clear the persisted
+                            // last-tip so a restart doesn't re-poison from disk.
+                            let mut persist: Option<u64> = None;
+                            {
                                 let mut s = tip_state.lock().unwrap_or_else(|e| e.into_inner());
                                 s.last_tip_at = Some(Instant::now());
-                                if h > s.peer_best_height { s.peer_best_height = h; true } else { false }
-                            };
-                            // v0.32.5: cache the advancing tip for the next offline cold start.
-                            if raised { persist_tip(h); }
+                                let pb = s.peer_best_height;
+                                if pb > 0 && h < pb / 2 && pb - h > 100_000 {
+                                    reset_streak += 1;
+                                    // LANE-S: fire IMMEDIATELY on an UNAMBIGUOUS reset (live tip < ¼
+                                    // of peer_best — a 4×+ drop is never a transient dip). The old
+                                    // 3-poll (~9s) wait is what left the phantom checkpoint (5M while
+                                    // tip was 394k = 13× below) up for "a LONG time". A milder ¼..½
+                                    // drop still needs the 3-poll confirm to avoid flapping.
+                                    if reset_streak >= 3 || h < pb / 4 {
+                                        s.peer_best_height = h; // RESET to the live oracle tip
+                                        // a chain reset invalidates the checkpoint/spine high-water
+                                        // marks — they were verified against the OLD (now-dead) chain.
+                                        s.blocks_synced = s.blocks_synced.min(h);
+                                        s.sync_height   = s.sync_height.min(h);
+                                        s.sync_total    = s.sync_total.min(h);
+                                        s.verified      = s.verified.min(h);
+                                        if s.base > h { s.base = h; }
+                                        s.reset_pending = true; // tell the sync loop to wipe the store
+                                        reset_streak = 0;
+                                        clear_persisted_tip();
+                                        persist = Some(h);
+                                    }
+                                } else {
+                                    reset_streak = 0;
+                                    s.oracle_tip = h; // the signed oracle anchor — gates gossip raises
+                                    if h > s.peer_best_height {
+                                        s.peer_best_height = h; persist = Some(h);
+                                    } else if s.peer_best_height > h.saturating_add(SANE_LEAD) {
+                                        // v0.59 ORACLE-AUTHORITATIVE: peer_best drifted ABOVE the signed
+                                        // oracle by more than a sane lead — a phantom gossip claim (the
+                                        // 1.4M post-genesis-reset ghost) that the drastic-drop branch
+                                        // above MISSES (it isn't < pb/2). The signed oracle wins: snap
+                                        // peer_best back to it + clamp the progress watermarks so the UI
+                                        // can't chase a tip that doesn't exist, and clear the persisted
+                                        // seed so a restart doesn't re-poison from disk.
+                                        s.peer_best_height = h;
+                                        s.blocks_synced = s.blocks_synced.min(h);
+                                        s.sync_height   = s.sync_height.min(h);
+                                        s.sync_total    = s.sync_total.min(h);
+                                        s.verified      = s.verified.min(h);
+                                        if s.base > h { s.base = h; }
+                                        s.reset_pending = true; // LANE-S: wipe the store too
+                                        clear_persisted_tip();
+                                        persist = Some(h);
+                                    }
+                                }
+                            }
+                            if let Some(h) = persist { persist_tip(h); }
                         }
                         None => {
                             // v0.26: exponential backoff (cap 60s) on repeated oracle failure so we
@@ -439,7 +657,7 @@ impl P2PBlockSync {
                         }
                     }
                     polls = polls.saturating_add(1);
-                    let base = if polls < 15 { Duration::from_secs(1) } else { Duration::from_secs(3) };
+                    let base = if polls < 15 { Duration::from_millis(500) } else { Duration::from_millis(800) };
                     thread::sleep(base.max(fail_backoff));
                 }
             });
@@ -490,6 +708,7 @@ impl P2PBlockSync {
                     s.running = true;
                     s.blocks_synced = resume_h;
                     s.verified = store.verified_to(); // v0.9.0: resume the verified watermark too
+                    s.light_mode = recent_only_rt.load(Ordering::Relaxed); // v0.57 (LANE-M): drives honest verified-vs-stored UI
                 }
 
                 // Subscribe to blocks — event-driven, no polling
@@ -503,10 +722,24 @@ impl P2PBlockSync {
                 // independent chunk requests stream in parallel; a slow peer never blocks the
                 // fast ones, and the store's height-index + advance() reorder out-of-order
                 // arrivals (the store IS the buffer). Reviewed with DeepSeek-V4 2026-06-09.
-                const CHUNK: u64 = 4096;            // v0.15.1 STABILITY: 8192 (8 MB) chunks landed in
-                                                   // bursts then stalled (2k→2 blk/s swing). 4096 halves
-                                                   // tail latency so a stuck slot frees faster + bursts smooth.
-                const MAX_INFLIGHT: usize = 12;     // v0.15.1: slightly fewer slots so they don't all pile
+                // CHUNK = the per-request span AND the look-ahead stride. It must MATCH what
+                // the responders actually serve per reply: today they serve ~4096 headers/reply,
+                // so a larger CHUNK makes look-ahead chunks land SPARSE (gaps between prefetched
+                // ranges) and the contiguous frontier ends up doing all the work serially — the
+                // exact regression a 0.56 bump to 32768 caused. Keep the default at the proven
+                // 4096; once the fleet responders serve a bigger SIGIL_SERVE_HEADERS_CAP, raise
+                // BOTH together via SIGIL_SYNC_CHUNK. The v0.57 frontier-exact fix below makes any
+                // value SAFE (partial fills always advance), but 4096 stays OPTIMAL for the live
+                // mesh. Env-tunable.
+                #[allow(non_snake_case)]
+                let CHUNK: u64 = std::env::var("SIGIL_SYNC_CHUNK").ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map(|n| n.clamp(1024, 65_536)).unwrap_or(4096);
+                // v0.39: was const 12 — at first boot (empty DB) all slots fire decode
+                // bursts at once, pre-TUI, which pressured small/busy machines hard. 8 by
+                // default; SIGIL_SYNC_INFLIGHT=1..16 to tune (raise on a beefy box).
+                let max_inflight: usize = std::env::var("SIGIL_SYNC_INFLIGHT").ok()
+                    .and_then(|v| v.parse::<usize>().ok()).map(|n| n.clamp(1, 16)).unwrap_or(8);
                                                     // onto a stalled frontier and crater the rate.
                 // Look-ahead cap must be TIGHT: a large window lets next_start race far ahead of a
                 // stalled frontier, so all MAX_INFLIGHT slots get consumed by high-range chunks that
@@ -530,6 +763,18 @@ impl P2PBlockSync {
                 // /api/v1/status the monitor polls returns height=2 → snap never fired).
                 let (tip_tx, mut tip_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
                 let mut last_tip_fetch = Instant::now() - Duration::from_secs(60);
+                // v0.50 (LANE-A): RECENT-WINDOW PROBE-BEFORE-SNAP. A monitor resumed far below the
+                // tip crawls the middle history it doesn't need (the fold-proof attests it) because
+                // the fast-snap is gated on best_height (received), which only crawls forward at the
+                // backfill rate. This probes ONE chunk at peer_best-RECENT directly; a NON-EMPTY
+                // reply PROVES the reachable peers serve the recent window, so we snap the base there
+                // and reach the tip in seconds. An EMPTY reply (peers behind the oracle tip) costs
+                // one request and changes nothing — so this can NEVER trigger the v0.16 "snap to an
+                // unservable tip → 0 downloaded" regression (the reason the snap is best_height-gated).
+                let (recent_tx, mut recent_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<(u64, Option<Vec<u8>>)>();
+                let mut last_recent_probe = Instant::now() - Duration::from_secs(60);
+                let mut recent_probe_inflight = false;
                 let mut inflight: usize = 0;                          // outstanding spawned requests
                 let mut assigned: std::collections::HashSet<u64> = std::collections::HashSet::new();
                 let mut peer_bench: HashMap<String, Instant> = HashMap::new(); // peer.to_string() → benched-until
@@ -569,13 +814,64 @@ impl P2PBlockSync {
                         break;
                     }
 
+                    // LANE-S CHAIN-RESET SELF-HEAL: the tip-poller flagged a reset (the live tip
+                    // is drastically below our peer_best — a fresh genesis). Wipe the block-store
+                    // watermarks (synced_to/verified_to/best) so the stale OLD chain is forgotten
+                    // and re-downloaded from the fresh tip, and reset the local cursors so the
+                    // refill restarts cleanly. NO manual local wipe needed.
+                    {
+                        let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        if s.reset_pending {
+                            s.reset_pending = false;
+                            drop(s);
+                            store.reset_watermarks();
+                            assigned.clear();
+                            last_synced_seen = 0;
+                            last_advance_t = Instant::now();
+                            snapped = false;
+                            crate::tlog!("[sync] CHAIN-RESET self-heal — block store watermarks wiped, re-syncing from the fresh genesis");
+                        }
+                    }
+
+                    // ── 0.77 GENESIS ARCHIVE: [F] flipped a RUNNING engine to full-archive.
+                    // Re-anchor the store at the genesis base so the contiguous frontier
+                    // re-walks genesis→tip and HOLDS every block (#156: the operator's
+                    // Windows PC as a redundant full archive if the mine-node fleet is lost).
+                    // The recent-window blocks already on disk stay — the frontier absorbs
+                    // them as out-of-order arrivals when it reaches them.
+                    if rebase_pending_rt.swap(false, Ordering::Relaxed) {
+                        store.rebase(sync_base);
+                        assigned.clear();      // stale recent-window frontier reqs are useless now
+                        snapped = false;
+                        last_synced_seen = store.synced_to();
+                        last_advance_t = Instant::now();
+                        crate::tlog!("[sync] FULL ARCHIVE engaged — base → {} (frontier re-walks genesis→tip, holding every block)", sync_base);
+                    }
+
                     // Process gossiped live-tip blocks — BOUNDED per iteration. The live mesh
                     // (incl. our local catching-up node) floods this topic; an UNBOUNDED drain
                     // here blocks the loop for seconds (each block costs a serde_json hash),
                     // which starved the whole pipeline (v0.10.0 synced-stuck bug). Cap it so the
                     // loop stays responsive; leftover messages drain over the next iterations.
+                    // v0.50 (LANE-A · fix-3 REAL-TIME GOSSIP HEAD): split the gossip drain into
+                    // a CHEAP head-scan + a BOUNDED full-ingest. Before this, the tip (peer_best)
+                    // effectively advanced only at the 1-3 s ORACLE cadence (`[tipfetch]`): the
+                    // gossip drain that could advance it was capped at 48/iter, so under bulk-sync
+                    // load the live head blocks queued behind the cap and the hero gap tracked the
+                    // oracle's staleness, not the real tip. Now EVERY pending gossip block (up to
+                    // HEAD_SCAN_CAP) cheaply contributes its height to `head_seen` → peer_best is
+                    // raised the MOMENT a block gossips in (sub-second, gossip-driven, independent
+                    // of the oracle). The EXPENSIVE work (hash + store + hand-off, the per-block
+                    // serde+blake the v0.10.0 synced-stuck bug warns about) stays BOUNDED at
+                    // INGEST_CAP so the loop never blocks for seconds under a re-gossip flood;
+                    // leftover blocks ingest over later iterations and the backfill fills any
+                    // contiguity gap. No new polling — pure event drain, poll budget unchanged.
+                    const HEAD_SCAN_CAP: u32 = 512;  // cheap height-peek bound per iter (flood-proof head)
+                    const INGEST_CAP: u32 = 48;      // expensive store bound (v0.25.5 value, unchanged)
                     let mut gdrained = 0u32;
-                    while gdrained < 48 {  // v0.25.5: smaller drain — less serde+blake per iter (CPU)
+                    let mut ingested = 0u32;
+                    let mut head_seen: u64 = 0;
+                    while gdrained < HEAD_SCAN_CAP {
                         let (_topic, data) = match block_rx.try_recv() { Ok(x) => x, Err(_) => break };
                         gdrained += 1;
                         let v: serde_json::Value = match serde_json::from_slice(&data) {
@@ -583,7 +879,30 @@ impl P2PBlockSync {
                             Err(_) => continue,
                         };
                         if v.get("sync_from").is_some() { continue; }
-                        ingest_block_value(&v, &mut store, &state_clone, &net, &new_blocks_clone);
+                        // Cheap: the live tip is the MAX gossiped height. Peek it without the
+                        // costly header.hash() so the head advances even past the ingest cap.
+                        let h = v.get("header").and_then(|x| x.get("height")).and_then(|x| x.as_u64())
+                            .or_else(|| v.get("header_json").and_then(|x| x.as_str())
+                                .and_then(|hj| serde_json::from_str::<SigilBlockHeaderV0>(hj).ok())
+                                .map(|hdr| hdr.height));
+                        if let Some(h) = h { if h > head_seen { head_seen = h; } }
+                        // Expensive: store + advance the contiguous frontier — bounded per iter.
+                        if ingested < INGEST_CAP {
+                            ingested += 1;
+                            ingest_block_value(&v, &mut store, &state_clone, &net, &new_blocks_clone);
+                        }
+                    }
+                    // Advance the live tip from gossip immediately (gossip is proof the network is
+                    // AT LEAST at head_seen). sane_raise still vetoes phantom jumps (>2M past belief
+                    // stay the oracle's call). Stamp last_tip_at so the head stays FRESH off gossip
+                    // alone — the hero no longer reads STALE / parks behind a 1-3 s oracle poll.
+                    if head_seen > 0 {
+                        let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        if head_seen > s.peer_best_height && sane_raise(s.oracle_tip, s.peer_best_height, head_seen) {
+                            s.peer_best_height = head_seen;
+                            s.last_message_at = Some(Instant::now());
+                            s.last_tip_at = Some(Instant::now());
+                        }
                     }
 
                     // Peer events from drain_events (non-block messages)
@@ -641,7 +960,8 @@ impl P2PBlockSync {
                                 let _gossiped_tip = height;
                                 s.sync_hash_hex = hash_hex;
                                 s.sync_total = total_synced;
-                                if peer_best_height > s.peer_best_height {
+                                if peer_best_height > s.peer_best_height
+                                    && sane_raise(s.oracle_tip, s.peer_best_height, peer_best_height) {
                                     s.peer_best_height = peer_best_height;
                                 }
                                 // NOTE: no per-event log here — the live mesh emits thousands of
@@ -675,8 +995,11 @@ impl P2PBlockSync {
                                     peer_top.insert(peer.clone(), (start.saturating_sub(1), Instant::now()));
                                 }
                                 if start <= store.synced_to() + CHUNK {
-                                    let hd = if b.first()==Some(&b'H') { bincode::deserialize::<Vec<sigil_header::SigilBlockHeaderV0>>(&b[1..]).ok() } else { None };
-                                    let (mn,mx) = hd.as_ref().map(|h| (h.iter().map(|x|x.height).min().unwrap_or(0), h.iter().map(|x|x.height).max().unwrap_or(0))).unwrap_or((0,0));
+                                    // v0.38.1: decode the height range across ALL codecs ('Z' zstd /
+                                    // 'H' bincode / JSON). The old line only handled 'H', so since the
+                                    // codec=1 zstd lane went live every chunk logged h=[0..0] — a pure
+                                    // display bug that made a healthy sync look broken ("0.38 doesn't sync").
+                                    let (mn,mx) = header_height_range(&b).unwrap_or((0,0));
                                     crate::tlog!("[D] {} start={start} got={got} h=[{mn}..{mx}] bytes={} synced={} inflight={inflight}", if got>0 {"LEAD"} else {"EMPTY"}, b.len(), store.synced_to());
                                 }
                                 fetched_session += got as u64;
@@ -753,7 +1076,19 @@ impl P2PBlockSync {
                         // peers are connected: if every peer is benched, fall back to the full
                         // set so the probe/refill keeps firing best-effort (bench is advisory).
                         if healthy.is_empty() { healthy = net.connected_peers(); }
-                        if let Some(&peer) = healthy.first() {
+                        // v0.38.1: prefer a peer NOT known to be behind the frontier for the
+                        // open-ended probe. A behind peer answers EMPTY for [frontier, MAX], so
+                        // probing it wastes a round-trip AND seeds nothing useful into peer_best.
+                        // Pick a peer whose known top is at/above the frontier (or unknown — give
+                        // it a chance); fall back to healthy.first() so we never skip a probe.
+                        let probe_peer = {
+                            let fc = frontier_chunk;
+                            healthy.iter().find(|p| match peer_top.get(&p.to_string()) {
+                                Some(&(top, seen)) => top + CHUNK >= fc || now.duration_since(seen).as_secs() > 4,
+                                None => true,
+                            }).or_else(|| healthy.first()).copied()
+                        };
+                        if let Some(peer) = probe_peer {
                             // v0.35 (DeepSeek audit S5): stamp the timer ONLY when a probe is
                             // actually SENT. It used to be stamped before the peer check, so
                             // with 0 peers connected (the first loop ticks, pre-bootstrap) the
@@ -761,8 +1096,18 @@ impl P2PBlockSync {
                             // extra PROBE_EVERY after the first PeerConnected. Now the probe
                             // fires on the very next 10ms tick after a peer lands.
                             last_probe = Instant::now();
+                            // LANE-P v0.59 STALL-BREAKER: normally probe the floor-aligned
+                            // frontier_chunk (cache-friendly look-ahead). But if the contiguous
+                            // frontier hasn't advanced for a while, request the EXACT next-needed
+                            // height [synced_to..] from this (rotating) healthy peer — bypasses any
+                            // residual floor-alignment edge so the lead block lands and synced_to moves.
+                            let probe_from = if last_advance_t.elapsed() >= Duration::from_secs(6) {
+                                store.synced_to()
+                            } else {
+                                frontier_chunk
+                            };
                             let payload = serde_json::to_vec(
-                                &BackfillReq { from: frontier_chunk, to: u64::MAX, headers_only: true, codec: 1 }
+                                &BackfillReq { from: probe_from, to: u64::MAX, headers_only: true, codec: 1 }
                             ).unwrap();
                             let n = net.clone();
                             let tx = probe_tx.clone();
@@ -793,6 +1138,66 @@ impl P2PBlockSync {
 
                     let peer_best = state_clone.lock().unwrap_or_else(|e| e.into_inner()).peer_best_height;
 
+                    // ── v0.50 RECENT-WINDOW PROBE-BEFORE-SNAP (monitor fast-track) ───────────────
+                    // Drain last cycle's probe reply first. got>0 = peers SERVE the recent window →
+                    // snap the base there (reach the tip in seconds); got==0 = peers are behind the
+                    // oracle tip → hold the contiguous crawl (the SAFE branch, no regression).
+                    while let Ok((rbase, bytes)) = recent_rx.try_recv() {
+                        recent_probe_inflight = false;
+                        if let Some(b) = bytes {
+                            let got = ingest_backfill_bytes(&b, &mut store); // free headers near the tip
+                            fetched_session += got as u64;
+                            if got > 0 && recent_only_rt.load(Ordering::Relaxed) && rbase > store.synced_to() {
+                                let old = store.synced_to();
+                                store.set_base(rbase);
+                                store.advance();
+                                assigned.clear(); // stale frontier reqs are useless after the jump
+                                last_synced_seen = store.synced_to();
+                                last_advance_t = Instant::now();
+                                snapped = true;
+                                crate::tlog!("[sync] RECENT-PROBE hit: peers serve [{}..] (got {}) — snap base {} → {} (tip {})",
+                                    rbase, got, old, store.synced_to(), peer_best);
+                            } else if got == 0 {
+                                crate::tlog!("[sync] RECENT-PROBE miss at {}: peers behind oracle tip {} — hold crawl", rbase, peer_best);
+                            }
+                        }
+                    }
+                    // Send a new probe when a MONITOR is meaningfully behind: confirm whether the
+                    // recent window is servable before committing to a snap. Cheap (one request /3s).
+                    const RECENT_PROBE_EVERY: Duration = Duration::from_secs(3);
+                    // Only fast-track when MEANINGFULLY behind (~5 min of production), so normal
+                    // tip-tracking jitter (gap < a few k, held tight by the LANE-A gossip head)
+                    // never probes — only a real fall-behind triggers the snap attempt.
+                    const RECENT_PROBE_MIN_GAP: u64 = 65_536;
+                    if recent_only_rt.load(Ordering::Relaxed)
+                        && peer_best > store.synced_to().saturating_add(RECENT_PROBE_MIN_GAP)
+                        && !recent_probe_inflight
+                        && last_recent_probe.elapsed() >= RECENT_PROBE_EVERY
+                    {
+                        let now = Instant::now();
+                        let mut healthy: Vec<_> = net.connected_peers().into_iter()
+                            .filter(|p| peer_bench.get(&p.to_string()).map_or(true, |&u| now >= u))
+                            .collect();
+                        if healthy.is_empty() { healthy = net.connected_peers(); }
+                        if let Some(&peer) = healthy.first() {
+                            last_recent_probe = Instant::now();
+                            recent_probe_inflight = true;
+                            // RECENT_WINDOW < CHUNK, so this chunk straddles the tip; the responder
+                            // clamps [from, min(to, its_tip)] and returns the recent headers it has.
+                            let rbase = align_base(peer_best.saturating_sub(RECENT_WINDOW), CHUNK, sync_base);
+                            let payload = serde_json::to_vec(
+                                &BackfillReq { from: rbase, to: rbase + CHUNK, headers_only: true, codec: 1 }
+                            ).unwrap();
+                            let n = net.clone();
+                            let tx = recent_tx.clone();
+                            tokio::spawn(async move {
+                                let r = tokio::time::timeout(REQ_TIMEOUT, n.send_request(peer, payload)).await;
+                                let bytes = match r { Ok(Ok(b)) => Some(b), _ => None };
+                                let _ = tx.send((rbase, bytes));
+                            });
+                        }
+                    }
+
                     // v0.15.2: MONITOR FAST-SNAP. A monitor that's hundreds of thousands of
                     // blocks behind gains nothing from crawling genesis→tip at the rate the
                     // slow/gappy historical ranges dribble (the "1 blk/s" symptom). Once we
@@ -822,8 +1227,13 @@ impl P2PBlockSync {
                     // unservable ranges → 0 downloaded. best_height tracks what the mesh actually
                     // serves, keeping the window in the servable range so downloaded climbs.
                     let served_top = store.best_height();
-                    if recent_only && served_top > store.synced_to() + RECENT_WINDOW {
-                        let new_base = served_top.saturating_sub(RECENT_WINDOW).max(sync_base);
+                    if recent_only_rt.load(Ordering::Relaxed) && served_top > store.synced_to() + RECENT_WINDOW {
+                        // v0.57 FRONTIER-STALL FIX: align the recent-window base to a CHUNK boundary.
+                        // An UNALIGNED base (e.g. 20481) made the floor-aligned refill request ranges
+                        // offset from where the server windows them, leaving a permanent 1-block hole
+                        // at base+k*CHUNK (synced_to froze at 57345 = 20481 + 9*4096 — proven live).
+                        // align_base() snaps it down to a CHUNK multiple so frontier chunks line up.
+                        let new_base = align_base(served_top.saturating_sub(RECENT_WINDOW), CHUNK, sync_base);
                         if new_base > store.base() {
                             store.set_base(new_base);
                             store.advance();
@@ -883,14 +1293,25 @@ impl P2PBlockSync {
                             // soon as ANY responds; duplicate replies are idempotent (store dedups by
                             // height). Look-ahead chunks (i>0) stay single-peer to avoid flooding.
                             const FRONTIER_REDUNDANCY: usize = 3;
-                            for i in 0..(MAX_INFLIGHT as u64) {
-                                if inflight >= MAX_INFLIGHT { break; }
-                                let start = frontier_chunk + i * CHUNK;
+                            for i in 0..(max_inflight as u64) {
+                                if inflight >= max_inflight { break; }
+                                // v0.57 LANE-L (the real 0 blk/s): request the FRONTIER (i==0) from
+                                // the EXACT synced_to, not the floor-aligned `frontier_chunk`. The
+                                // floor-aligned request was the frontier-stall root: when the base
+                                // sits at a non-CHUNK-aligned height (recent-window snap) OR a peer
+                                // serves FEWER than CHUNK blocks per reply (responders cap ~4096
+                                // while the client now asks 32768), the floor request keeps re-
+                                // fetching the SAME already-stored sub-range and synced_to never
+                                // crosses the chunk — got>0 yet +0 advance, frozen. Requesting from
+                                // synced_to means every partial fill chains immediately. Look-ahead
+                                // (i>0) stays CHUNK-aligned above the frontier; the store dedups any
+                                // overlap by height.
+                                let start = if i == 0 { store.synced_to() } else { frontier_chunk + i * CHUNK };
                                 if start >= peer_best { break; }          // past the tip
                                 if !assigned.insert(start) { continue; }  // already in flight
                                 let fanout = if i == 0 { FRONTIER_REDUNDANCY.min(healthy.len()).max(1) } else { 1 };
                                 for k in 0..fanout {
-                                    if inflight >= MAX_INFLIGHT { break; }
+                                    if inflight >= max_inflight { break; }
                                     let peer = healthy[(rr + k) % healthy.len()];
                                     let payload = serde_json::to_vec(
                                         &BackfillReq { from: start, to: start + CHUNK, headers_only: true, codec: 1 }
@@ -945,7 +1366,7 @@ impl P2PBlockSync {
                             // In monitor mode, JUMP base straight to the recent contiguous window
                             // under best_height so synced snaps to the live head in one step.
                             // (full-sync recent_only=false keeps the genesis-anchored +CHUNK crawl.)
-                            let new_base = if recent_only && store.best_height() > now_synced + RECENT_WINDOW {
+                            let new_base = if recent_only_rt.load(Ordering::Relaxed) && store.best_height() > now_synced + RECENT_WINDOW {
                                 store.best_height().saturating_sub(RECENT_WINDOW).max(sync_base)
                             } else {
                                 store.base().saturating_add(CHUNK)
@@ -972,11 +1393,24 @@ impl P2PBlockSync {
                         // job is to track + verify the live tip (the signed tip-proof in
                         // peer_best), so show THAT as the sync height → the bar reads AT TIP.
                         // The cryptographic spine watermark (⛓✓ = s.verified) stays honest.
-                        if recent_only && s.peer_best_height > now_synced {
+                        if recent_only_rt.load(Ordering::Relaxed) && s.peer_best_height > now_synced {
                             s.blocks_synced = s.peer_best_height;
                             s.sync_height = s.peer_best_height;
                             s.sync_total = s.peer_best_height;
                         }
+                        // 0.77: the mode is live-flippable — refresh the UI flag every tick
+                        // (was set once at launch) so the hero labels follow [F] instantly.
+                        s.light_mode = recent_only_rt.load(Ordering::Relaxed);
+                        // LANE-P v0.59: surface WHY the frontier is parked (never a silent 0).
+                        // Cleared the instant the contiguous frontier advances again.
+                        let net_tip = s.peer_best_height;
+                        let stalled_for = last_advance_t.elapsed();
+                        s.stall_reason = if net_tip > now_synced && stalled_for >= Duration::from_secs(6) {
+                            format!("no advance {}s @ {} (gap {}) — retrying exact [{}..] from a rotating peer",
+                                stalled_for.as_secs(), now_synced, net_tip.saturating_sub(now_synced), now_synced)
+                        } else {
+                            String::new()
+                        };
                         s.last_message_at = Some(Instant::now());
                     }
 
@@ -1012,6 +1446,36 @@ impl P2PBlockSync {
                     // the growing memtable to an SST so it can't balloon during a multi-M sync.
                     if last_verify.elapsed() >= Duration::from_millis(1500) {
                         last_verify = Instant::now();
+                        // ── LANE-S: GENESIS-ANCHOR CHECK (full-sync ONLY) ──────────────────────
+                        // Key the persisted watermarks to the genesis fingerprint so a testnet
+                        // restart (fresh genesis) auto-wipes the stale OLD-chain watermarks.
+                        //
+                        // ⚠️ REGRESSION FIX (v0.70 → v0.71.x): the block at `base` is the genesis
+                        // fingerprint ONLY in full-sync mode, where `base` == the true genesis anchor
+                        // (height 1) and is STABLE. In recent-window / light mode `base` is a MOVING
+                        // checkpoint that snaps FORWARD as the window advances (e.g. 3.04M → 3.12M);
+                        // hashing the block there and comparing to the stored anchor false-fired a
+                        // reset on EVERY snap — wiping synced 3.08M → 0 and re-syncing from genesis
+                        // every few minutes (the "4 peers but 3.1M gap" churn). So only key the
+                        // genesis when `base` is the genuine genesis anchor (≤1). In light mode the
+                        // oracle-tip-drop heuristic + sane_raise already handle testnet resets.
+                        let base_g = store.base();
+                        let mut genesis_reset = false;
+                        if base_g <= 1 && store.has_height(base_g) {
+                            if let Some(hdr) = store.get_header_at_height(base_g) {
+                                if store.note_genesis(&hex::encode(hdr.hash())) {
+                                    genesis_reset = true;
+                                    crate::tlog!("[sync] LANE-S: genesis CHANGED at base {base_g} → wiped stale watermarks, self-healing to the fresh chain");
+                                    clear_persisted_tip(); // LANE-S (b): drop the pre-reset cached tip
+                                    let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                    s.peer_best_height = 0;
+                                    s.verified = 0;
+                                    s.blocks_synced = 0;
+                                    s.reset_pending = false; // the wipe is done in-line here
+                                }
+                            }
+                        }
+                        if !genesis_reset {
                         // v0.15.0 perf: 40k/1.5s capped VERIFIED throughput at ~26.6k blk/s;
                         // 60k/1.5s lifted it to ~40k blk/s against the verify core's then-
                         // measured 52k/s.
@@ -1034,6 +1498,7 @@ impl P2PBlockSync {
                         let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                         s.verified = report.verified_to;
                         s.verify_break = vbreak;
+                        } // end if !genesis_reset
                     }
 
                     // Yield: the request tasks run on worker threads (their results queue in
@@ -1102,15 +1567,23 @@ impl P2PBlockSync {
             });
         });
 
-        P2PBlockSync { state, new_blocks, stop_tx: Some(stop_tx) }
+        P2PBlockSync { state, new_blocks, stop_tx: Some(stop_tx), recent_only, rebase_pending }
     }
 
-    pub fn poll_state(&self) -> P2PSyncState {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    /// 0.77: `None` when the sync thread holds the lock RIGHT NOW (heavy ingest/flush) —
+    /// the caller keeps rendering its previous clone instead of blocking the draw thread.
+    pub fn poll_state(&self) -> Option<P2PSyncState> {
+        self.try_state().map(|g| g.clone())
     }
 
+    /// 0.77: try_lock — on contention the blocks simply stay queued for the next frame
+    /// (the buffer is capped upstream), never stalling the render loop.
     pub fn drain_new_blocks(&self) -> Vec<StoredBlock> {
-        std::mem::take(&mut *self.new_blocks.lock().unwrap_or_else(|e| e.into_inner()))
+        match self.new_blocks.try_lock() {
+            Ok(mut g) => std::mem::take(&mut *g),
+            Err(std::sync::TryLockError::Poisoned(p)) => std::mem::take(&mut *p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => Vec::new(),
+        }
     }
 }
 
@@ -1149,5 +1622,61 @@ mod wire_tests {
 
         assert!(zstd_decompress_body(b"definitely not a zstd frame").is_none(), "garbage rejected");
         assert!(zstd_decompress_body(&[]).is_none(), "empty rejected");
+    }
+}
+
+#[cfg(test)]
+mod sync_math_tests {
+    //! Pure sync arithmetic + wire-tip extraction (Tier 3). A bug here makes the
+    //! fast-snap probe target the wrong height or fail to learn a peer's tip.
+    use super::{align_base, max_header_height, BackfillResp};
+
+    #[test]
+    fn align_base_snaps_below_h_and_clamps_to_floor() {
+        // chunk-aligned at/below h.
+        assert_eq!(align_base(10_000, 4_096, 0), 8_192, "2*4096");
+        assert_eq!(align_base(8_192, 4_096, 0), 8_192, "exact boundary stays");
+        assert_eq!(align_base(100, 4_096, 0), 0, "below one chunk floors to 0");
+        // sync_base floor wins when the alignment would go below it.
+        assert_eq!(align_base(100, 4_096, 500), 500, "clamped up to the servable floor");
+    }
+
+    #[test]
+    fn align_base_invariants_hold_over_a_sweep() {
+        for &chunk in &[1u64, 2, 1_024, 4_096] {
+            for h in [0u64, 1, 5_000, 1_000_000, u64::MAX / 2] {
+                for &base in &[0u64, 4_096, 10_000] {
+                    let a = align_base(h, chunk, base);
+                    assert!(a >= base, "never below the servable floor");
+                    // When the floor isn't binding, the result is chunk-aligned and ≤ h.
+                    if a > base {
+                        assert_eq!(a % chunk, 0, "must be chunk-aligned");
+                        assert!(a <= h, "must not jump past the requested height");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn max_header_height_reads_legacy_json_tip() {
+        // The legacy full-block JSON codec: max over the headers' heights.
+        let resp = BackfillResp {
+            blocks: vec![
+                serde_json::json!({"header": {"height": 12}}),
+                serde_json::json!({"header": {"height": 4_096_777}}),
+                serde_json::json!({"header": {"height": 5}}),
+            ],
+        };
+        let bytes = serde_json::to_vec(&resp).unwrap();
+        assert_eq!(max_header_height(&bytes), Some(4_096_777));
+    }
+
+    #[test]
+    fn max_header_height_is_none_on_empty_or_garbage() {
+        let empty = serde_json::to_vec(&BackfillResp { blocks: vec![] }).unwrap();
+        assert_eq!(max_header_height(&empty), None, "no headers → no tip");
+        assert_eq!(max_header_height(b"not a real wire payload"), None);
+        assert_eq!(max_header_height(b""), None);
     }
 }

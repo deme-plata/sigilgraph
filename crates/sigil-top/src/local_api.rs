@@ -96,6 +96,19 @@ impl LocalApi {
             "/api/v1/aether" => self.aether(query),
             "/api/v1/cortex" => Some(self.cortex_json()), // always local (our engine)
             "/api/v1/peers" => self.peers(),
+            // LANE-N: the mining-wallet reconcile pair (local, never proxied).
+            // GET /api/v1/mine-wallet → the address the miner credits (what the Mining tab shows).
+            "/api/v1/mine-wallet" => Some(format!(r#"{{"mining_wallet":"{}"}}"#, crate::miner_wallet())),
+            // GET /api/v1/use-wallet?address=<64hex> → the [W] wallet claims "mine to ME",
+            // so mined coins land in the keyed wallet the operator actually sees (not the
+            // unspendable hostname-hash default). Takes effect on the next mining (re)start.
+            "/api/v1/use-wallet" => {
+                match qparam(query, "address") {
+                    Some(addr) if crate::set_mine_wallet(&addr) =>
+                        Some(format!(r#"{{"ok":true,"mining_wallet":"{}"}}"#, addr.trim())),
+                    _ => Some(r#"{"ok":false,"error":"address must be 64 hex chars"}"#.to_string()),
+                }
+            }
             _ => None,
         }
     }
@@ -135,8 +148,13 @@ impl LocalApi {
             return None; // txs live on the remote node — proxy
         }
         let limit = qparam(query, "limit").and_then(|l| l.parse::<usize>().ok()).unwrap_or(40).min(200);
-        let s = self.sync_snapshot()?;
-        let top = Self::local_top(&s);
+        // v0.57: anchor at the REAL stored max, NOT local_top. The sync state's height is faked to
+        // the network tip in light-monitor mode, so local_top() walks down from the tip and finds
+        // nothing stored → "loading chain" forever despite a populated store. best_height is the
+        // highest block we ACTUALLY hold; fall back to the sync-state top only if the store is empty.
+        let real_top = self.reader.best_height();
+        let top = if real_top > 0 { real_top } else { self.sync_snapshot().map(|s| Self::local_top(&s)).unwrap_or(0) };
+        if top == 0 { return None; }
         let rows = self.reader.recent_from(top, limit);
         if rows.is_empty() {
             return None; // nothing local yet — proxy so the explorer isn't blank
@@ -146,11 +164,19 @@ impl LocalApi {
 
     fn search(&self, query: &str) -> Option<String> {
         let q = qparam(query, "q").unwrap_or_default();
-        if q.trim().len() < 2 {
+        let qt = q.trim();
+        // v0.57: allow a single-char NUMERIC query (height "0" genesis, "1", …) — a block height is
+        // a valid search. Only reject a too-short NON-numeric fragment (which would match nothing
+        // useful and just spam the proxy). Before this, "0"/"1" hit the len<2 wall → returned None
+        // → proxied → the explorer showed nothing for the genesis/first block.
+        if qt.len() < 2 && qt.parse::<u64>().is_err() {
             return None;
         }
-        let s = self.sync_snapshot()?;
-        let top = Self::local_top(&s);
+        // v0.57: anchor the recent-window scan at the REAL stored max (see `recent()`), not the
+        // tip-faked sync-state top — otherwise the bounded scan never reaches a stored block.
+        let real_top = self.reader.best_height();
+        let top = if real_top > 0 { real_top } else { self.sync_snapshot().map(|s| Self::local_top(&s)).unwrap_or(0) };
+        if top == 0 { return None; }
         let rows = self.reader.search(q.trim(), top);
         if rows.is_empty() {
             return None; // let the remote node try tx / address / full-text
@@ -224,4 +250,33 @@ fn rows_json(rows: &[BlockRow]) -> String {
         "verified": r.verified,
     })).collect();
     serde_json::json!({ "results": results, "source": "sigil-top-local" }).to_string()
+}
+
+#[cfg(test)]
+mod query_parse_tests {
+    //! `/api/v1/search?q=…` + `/api/v1/use-wallet?address=…` parsing (Tier 3).
+    //! A bug corrupts the explorer query or the operator's wallet-claim address.
+    use super::{qparam, urldecode};
+
+    #[test]
+    fn urldecode_handles_plus_and_percent() {
+        assert_eq!(urldecode("a+b"), "a b");
+        assert_eq!(urldecode("hello%20world"), "hello world");
+        assert_eq!(urldecode("%41%42%43"), "ABC");
+        assert_eq!(urldecode("plain"), "plain");
+        // malformed escapes are passed through literally, never panic.
+        assert_eq!(urldecode("%zz"), "%zz");
+        assert_eq!(urldecode("100%"), "100%");
+        assert_eq!(urldecode("%4"), "%4");
+    }
+
+    #[test]
+    fn qparam_extracts_decodes_and_misses_cleanly() {
+        let q = "q=foo%20bar&address=deadbeef&flag";
+        assert_eq!(qparam(q, "q").as_deref(), Some("foo bar"), "value is url-decoded");
+        assert_eq!(qparam(q, "address").as_deref(), Some("deadbeef"));
+        assert_eq!(qparam(q, "flag").as_deref(), Some(""), "bare key → empty value");
+        assert_eq!(qparam(q, "missing"), None);
+        assert_eq!(qparam("", "q"), None);
+    }
 }

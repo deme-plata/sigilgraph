@@ -21,10 +21,16 @@ export const PROTOCOL_VERSION = '6.6.0'
 // Port 9445: TRON wallet bridge (multi-chain support)
  */
 export const BOOTSTRAP_PEERS = [
-  // Server Epsilon (EU) - WebSocket Bootstrap via sigilgraph.fluxapp.xyz
-  // Port 9443: nginx WSS proxy → libp2p WebSocket listener on port 9001
-  // PeerID: Epsilon mainnet-genesis (v8.8.2)
-  '/dns4/sigilgraph.fluxapp.xyz/tcp/9443/wss/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM',
+  // Server Epsilon (EU) - WebSocket Bootstrap.
+  // v0.9.1 FIX (2026-06-09): host MUST be sigilgraph.quillon.xyz, NOT
+  // sigilgraph.fluxapp.xyz. The q-flux libp2p_ws listener on :9443 presents the
+  // quillon.xyz cert (SAN: quillon.xyz, sigilgraph.quillon.xyz) — it does NOT
+  // cover *.fluxapp.xyz, so a browser wss dial to sigilgraph.fluxapp.xyz:9443
+  // fails the TLS handshake (cert name mismatch) → 0 peers / 0 browsers. The
+  // wallet PAGE still lives on sigilgraph.fluxapp.xyz; only this P2P bootstrap
+  // endpoint uses the cert-valid host. Both resolve to Epsilon (89.149.241.126),
+  // q-flux :9443 → libp2p WS backend :9002. PeerID: Epsilon mainnet-genesis.
+  '/dns4/sigilgraph.quillon.xyz/tcp/9443/wss/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM',
 ]
 
 /**
@@ -263,5 +269,7 @@ export const VERIFICATION_REPORT_CONFIG = {
  * TRON wallets connect via sigilgraph.fluxapp.xyz:9445 (TRON bridge port).
  */
 export const TRON_BOOTSTRAP_PEERS = [
-  '/dns4/sigilgraph.fluxapp.xyz/tcp/9445/wss/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM',
+  // v0.9.1: cert-valid host (see BOOTSTRAP_PEERS note). Defined for completeness;
+  // the active node path uses BOOTSTRAP_PEERS via createBrowserNode().
+  '/dns4/sigilgraph.quillon.xyz/tcp/9445/wss/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM',
 ]

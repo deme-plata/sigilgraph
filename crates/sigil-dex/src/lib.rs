@@ -35,6 +35,9 @@
 
 #![warn(missing_docs)]
 
+/// Token + pool registry (LANE-W port of q-storage's token_registry).
+pub mod registry;
+
 use serde::{Deserialize, Serialize};
 
 /// Fee denominator. Per-pool fee rates are expressed in basis points (bps),

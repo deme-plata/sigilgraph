@@ -105,6 +105,26 @@ fn trusted_release_keys() -> Vec<Vec<u8>> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
+
+    // v0.36.1 snapshot subcommands, dispatched here ahead of Cli::parse —
+    // cli.rs is owned by a parallel work lane this cycle, so the two new
+    // verbs live in main.rs (fold into the Cli enum at the next cli.rs touch).
+    match args.get(1).map(|s| s.as_str()) {
+        Some("snapshot-create") => {
+            return match run_snapshot_create() {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => { eprintln!("sigil-node: {:#}", e); ExitCode::from(1) }
+            };
+        }
+        Some("snapshot-info") => {
+            return match run_snapshot_info() {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => { eprintln!("sigil-node: {:#}", e); ExitCode::from(1) }
+            };
+        }
+        _ => {}
+    }
+
     let cmd = Cli::parse(&args);
 
     let rc = match cmd {
@@ -163,7 +183,15 @@ fn run_start() -> Result<()> {
     ));
     eprintln!("⚡ sigil-node start");
     eprintln!("   node_id:         {}", node_id);
-    eprintln!("   local_peer_id:   {}", flux_p2p::swarm::peer_id_string(&node_id));
+    let local_peer_id = flux_p2p::swarm::peer_id_string(&node_id);
+    eprintln!("   local_peer_id:   {}", local_peer_id);
+    // v0.57 (sync): publish our peer-id so a CO-LOCATED sigil-top monitor can auto-dial us over
+    // loopback (tip-complete, LAN, ~0 WAN timeouts) instead of crawling the remote fleet. Same-box
+    // only; the monitor confirms 127.0.0.1:9501 is live before using it. Best-effort.
+    match flux_p2p::publish_sigil_peerid(&local_peer_id) {
+        Ok(()) => eprintln!("   peerid published:{}", flux_p2p::sigil_peerid_path().display()),
+        Err(e) => eprintln!("   (peerid publish failed: {e})"),
+    }
     eprintln!("   network_id:      {}", NETWORK_ID_STR);
     eprintln!("   transport:       {}", cfg.transport.label());
     if let Some(iface) = cfg.transport.wg_interface() {
@@ -321,9 +349,63 @@ fn run_start() -> Result<()> {
                     std::process::exit(1);
                 }
             }
+            // ── v0.36.1 SNAPSHOT BOOT: try the producer state snapshot FIRST. A valid
+            // snapshot replaces the full-log replay (~35 min over 52 GB / ~21M blocks)
+            // with restore + tail replay of only the blocks since the last 📸 (seconds).
+            // Every failure mode (missing / corrupt / wrong chain / ahead-of-log /
+            // incomplete tail) logs WHY and falls back to the full-replay path below,
+            // which stays byte-for-byte unchanged.
+            let t_boot = std::time::Instant::now();
+            let mut booted_from_snapshot = false;
+            match snapshot::load_state(&snap_dir) {
+                Some(snap) if snap.snapshot_height < chain_log.height() => {
+                    // Continuity gate: the snapshot's tip block must BE the chain.log
+                    // block at the same height — rejects snapshots from a diverged
+                    // chain or a truncated/rewritten log before any state is trusted.
+                    let log_tip_hash = chain_log.get(snap.snapshot_height).map(|b| b.hash());
+                    if snap.tip_block_hash() != log_tip_hash {
+                        eprintln!("⚠ snapshot tip @H={} does not match chain.log at that height — falling back to full replay",
+                            snap.snapshot_height);
+                    } else {
+                        let snap_h = snap.snapshot_height;
+                        let mut restored = snap.restore();
+                        let mut tail_applied: u64 = 0;
+                        match chain_log::ChainLog::replay_from(&snap_dir, snap_h + 1, |b| {
+                            if restored.apply(b).is_ok() { tail_applied += 1; }
+                        }) {
+                            Ok(tail_read) => {
+                                if restored.height() == chain_log.height() {
+                                    chain = restored;
+                                    booted_from_snapshot = true;
+                                    eprintln!("⚡ snapshot boot: H={} + tail {} blocks ({:.1}s) → resuming at H={} (window base {})",
+                                        snap_h, tail_read, t_boot.elapsed().as_secs_f64(),
+                                        chain.height(), chain.window_base());
+                                } else {
+                                    // Tail blocks rejected → restored chain is BEHIND the log.
+                                    // Producing from here would append diverging heights to the
+                                    // live log (the 2026-06-10 corruption mode) — full replay
+                                    // instead, which hits the L2 guard if truly incompatible.
+                                    eprintln!("⚠ snapshot boot incomplete: chain H={} vs log {} (tail read {}, applied {}) — falling back to full replay",
+                                        restored.height(), chain_log.height(), tail_read, tail_applied);
+                                }
+                            }
+                            Err(e) => eprintln!("⚠ snapshot tail replay failed: {} — falling back to full replay", e),
+                        }
+                    }
+                }
+                Some(snap) => {
+                    eprintln!("⚠ snapshot @H={} is AHEAD of chain.log (height {}) — log truncated? ignoring snapshot, full replay",
+                        snap.snapshot_height, chain_log.height());
+                }
+                None => {
+                    eprintln!("ℹ no usable state snapshot at {} (missing or failed checksum/decode) — full replay",
+                        snapshot::state_snapshot_path(&snap_dir).display());
+                }
+            }
             // ── GENESIS GUARD L2: count APPLIED vs READ during replay. If the log has
             // blocks but none apply, ABORT instead of silently falling through to a fresh
             // genesis that appends to the existing log (the exact incident failure mode).
+            if !booted_from_snapshot {
             let mut applied: u64 = 0;
             let n = chain_log::ChainLog::replay(&snap_dir, |b| {
                 if chain.apply(b).is_ok() { applied += 1; }
@@ -336,6 +418,7 @@ fn run_start() -> Result<()> {
             }
             eprintln!("♻️  RECOVERED {} blocks from chain.log (streamed, {} applied) → resuming at H={} (window base {})",
                 n, applied, chain.height(), chain.window_base());
+            }
         } else {
             let genesis = build_genesis().map_err(|e| anyhow!("build_genesis: {}", e))?;
             let genesis_hash = genesis.hash();
@@ -372,6 +455,20 @@ fn run_start() -> Result<()> {
         // joins mid-stream and gaps forever, Phase 0 has no backfill).
         let grace_ms: u64 = std::env::var("SIGIL_PRODUCE_GRACE_MS")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(4000);
+        // 📸 v0.36.1: periodic producer state snapshot every SIGIL_SNAPSHOT_EVERY
+        // blocks (default 100_000 ≈ 10 min at ~156 blk/s; 0 disables). The capture
+        // (clone of state + 8192-block window) happens on the producer tick; the
+        // serialize + atomic write run on a detached OS thread so the few-MB disk
+        // write never stalls block production (tick uses MissedTickBehavior::Skip
+        // anyway). `snap_inflight` prevents overlapping writers on the shared
+        // state-snapshot.tmp path.
+        let snapshot_every: u64 = std::env::var("SIGIL_SNAPSHOT_EVERY")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(100_000);
+        let snap_inflight = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if produce && snapshot_every > 0 {
+            eprintln!("📸 state snapshot every {} blocks → {}",
+                snapshot_every, snapshot::state_snapshot_path(&snap_dir).display());
+        }
         let mut first_peer_at: Option<std::time::Instant> = None;
         let mut producing = false;
         // Short producer tag for the per-block dag.html feed line.
@@ -590,6 +687,32 @@ fn run_start() -> Result<()> {
                                     // Persistence is now per-block via chain_log.append_bytes
                                     // above (O(1), bounded RAM) — no periodic full-chain
                                     // snapshot (that was O(N²) + the OOM source).
+                                    // 📸 v0.36.1: periodic STATE snapshot (bounded — window +
+                                    // accumulated state, NOT the chain) so the next boot is
+                                    // restore + tail replay instead of a 35-min full replay.
+                                    if snapshot_every > 0 && chain.height() % snapshot_every == 0
+                                        && !snap_inflight.swap(true, std::sync::atomic::Ordering::SeqCst)
+                                    {
+                                        match snapshot::StateSnapshot::capture(&chain) {
+                                            Some(snap) => {
+                                                let dir = snap_dir.clone();
+                                                let flag = std::sync::Arc::clone(&snap_inflight);
+                                                std::thread::spawn(move || {
+                                                    let t0 = std::time::Instant::now();
+                                                    match snapshot::save_state(&snap, &dir) {
+                                                        Ok(bytes) => eprintln!(
+                                                            "📸 state snapshot @ H={} ({} B, {:.2}s write, off hot path)",
+                                                            snap.snapshot_height, bytes, t0.elapsed().as_secs_f64()),
+                                                        Err(e) => eprintln!(
+                                                            "⚠ state snapshot @ H={} failed: {} (boot will full-replay)",
+                                                            snap.snapshot_height, e),
+                                                    }
+                                                    flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                                                });
+                                            }
+                                            None => { snap_inflight.store(false, std::sync::atomic::Ordering::SeqCst); }
+                                        }
+                                    }
                                 }
                                 Err(e) => eprintln!("⚠ producer self-apply H={} failed: {}", h, e),
                             }
@@ -642,7 +765,17 @@ fn run_start() -> Result<()> {
                             let top = chain.height().saturating_sub(1);
                             let lo = req.from;
                             // point-to-point ⇒ a bigger chunk is fine.
-                            let hi = req.to.min(top).min(lo.saturating_add(8192));
+                            // v0.56 (sync throughput): headers are ~70 B, so a headers_only chunk
+                            // can be FAR larger than the full-block cap (32768 headers ≈ 2.3 MB raw,
+                            // ~160 KB zstd) and cut round-trips on a thin/lossy mesh — the
+                            // ~200 headers/s bottleneck was the round-trip-bound 8192 cap. Full-block
+                            // serves stay at 8192 (≈8 MB — the WAN-burst-stall limit). Env-tunable.
+                            let serve_cap: u64 = if req.headers_only {
+                                std::env::var("SIGIL_SERVE_HEADERS_CAP").ok()
+                                    .and_then(|v| v.parse::<u64>().ok())
+                                    .map(|n| n.clamp(8192, 262_144)).unwrap_or(32_768)
+                            } else { 8192 };
+                            let hi = req.to.min(top).min(lo.saturating_add(serve_cap));
                             let wbase = chain.window_base();
                             // v0.33.6: a range entirely BELOW the live window is FINALIZED — its
                             // bytes never change, so cache + replay them. The tip/window chunk is
@@ -1006,6 +1139,74 @@ fn run_start() -> Result<()> {
         }
     })?;
 
+    Ok(())
+}
+
+/// `sigil-node snapshot-create` — rebuild state by FULL chain.log replay (the
+/// state only exists by applying blocks, so creating a snapshot out-of-band
+/// costs one full replay — same as the boot this snapshot will save), then
+/// write `<dir>/state-snapshot.bin` atomically. Run it once on a stopped
+/// producer to convert the NEXT boot from ~35 min to seconds; after that the
+/// running producer keeps the snapshot fresh every SIGIL_SNAPSHOT_EVERY blocks.
+fn run_snapshot_create() -> Result<()> {
+    let snap_dir = snapshot::snapshot_dir();
+    eprintln!("⏳ snapshot-create: full replay of {} (state must be rebuilt by applying blocks — this takes as long as a normal boot)",
+        snap_dir.join("chain.log").display());
+    let t0 = std::time::Instant::now();
+    let mut chain = ChainTip::new();
+    let mut applied: u64 = 0;
+    let n = chain_log::ChainLog::replay(&snap_dir, |b| {
+        if chain.apply(b).is_ok() { applied += 1; }
+    })
+    .map_err(|e| anyhow!("chain.log replay: {}", e))?;
+    if n == 0 {
+        return Err(anyhow!("no blocks in {} — nothing to snapshot", snap_dir.join("chain.log").display()));
+    }
+    if applied != n {
+        eprintln!("⚠ replay read {} blocks but applied only {} — snapshot captures state at H={}",
+            n, applied, chain.height().saturating_sub(1));
+    }
+    let replay_secs = t0.elapsed().as_secs_f64();
+    let snap = snapshot::StateSnapshot::capture(&chain)
+        .ok_or_else(|| anyhow!("chain is empty after replay — nothing to snapshot"))?;
+    let t1 = std::time::Instant::now();
+    let bytes = snapshot::save_state(&snap, &snap_dir).context("writing state snapshot")?;
+    println!("📸 state snapshot written: {}", snapshot::state_snapshot_path(&snap_dir).display());
+    println!("   snapshot_height: {}", snap.snapshot_height);
+    println!("   window:          [{}..={}] ({} blocks)", snap.base_height, snap.snapshot_height, snap.blocks.len());
+    println!("   size:            {} bytes", bytes);
+    println!("   replay:          {:.1}s ({} blocks) · write: {:.2}s", replay_secs, n, t1.elapsed().as_secs_f64());
+    Ok(())
+}
+
+/// `sigil-node snapshot-info` — print height / size / checksum status of the
+/// current state-snapshot file. Read-only, instant.
+fn run_snapshot_info() -> Result<()> {
+    let snap_dir = snapshot::snapshot_dir();
+    let path = snapshot::state_snapshot_path(&snap_dir);
+    println!("snapshot file: {}", path.display());
+    let meta = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(_) => {
+            println!("status:        MISSING (boot will full-replay; create via `sigil-node snapshot-create`)");
+            return Ok(());
+        }
+    };
+    println!("size:          {} bytes", meta.len());
+    match snapshot::load_state(&snap_dir) {
+        Some(s) => {
+            println!("checksum:      OK (BLAKE3 verified)");
+            println!("version:       {}", s.version);
+            println!("height:        {}", s.snapshot_height);
+            println!("window:        [{}..={}] ({} blocks)", s.base_height, s.snapshot_height, s.blocks.len());
+            if let Some(h) = s.tip_block_hash() {
+                println!("tip hash:      {}", hex_full(&h));
+            }
+        }
+        None => {
+            println!("checksum:      FAILED (corrupt, torn, or version-mismatched — boot will full-replay)");
+        }
+    }
     Ok(())
 }
 
@@ -2075,5 +2276,31 @@ mod tests {
         let block = build_block_at(1, bogus_parent, roots, empty_t, vec![]).unwrap();
         let err = chain.apply(block).unwrap_err();
         assert!(format!("{}", err).contains("parent_hash mismatch"));
+    }
+
+    /// End-to-end RAM-window pruning: applying past `chain::WINDOW` blocks must
+    /// drop the oldest from RAM (advancing `window_base`) WITHOUT corrupting
+    /// `height()` — the memory bound that lets the chain grow without OOM while
+    /// the tip stays accurate. Old heights vanish from RAM (served from the
+    /// on-disk chain-log instead); the tip stays resident.
+    #[test]
+    fn window_prunes_old_blocks_but_height_stays_correct() {
+        let mut chain = ChainTip::new();
+        chain.apply(build_genesis().unwrap()).unwrap(); // genesis at height 0
+        let extra = crate::chain::WINDOW as u64 + 5; // overflow the window
+        for h in 1..=extra {
+            let mut staging = chain.state_snapshot();
+            let t = sigil_state::StateTransition { at_height: h, mutations: vec![] };
+            let roots = sigil_state::commit_state_transition(&mut staging, &t, h).unwrap();
+            let block = build_block_at(h, chain.parent_hash(), roots, t, vec![]).unwrap();
+            chain.apply(block).unwrap();
+        }
+        let total = extra + 1; // genesis + extra blocks
+        assert_eq!(chain.height(), total, "height must still count pruned blocks");
+        assert!(chain.window_base() > 0, "oldest blocks must have been pruned from RAM");
+        assert_eq!(chain.window_base(), total - crate::chain::WINDOW as u64, "window holds exactly WINDOW blocks");
+        assert!(chain.get(0).is_none(), "pruned genesis is gone from RAM");
+        let tip_height = chain.height() - 1;
+        assert!(chain.get(tip_height).is_some(), "the tip block stays resident in RAM");
     }
 }

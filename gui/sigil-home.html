@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SIGILGRAPH · The Undeniable Chain</title>
+<link rel="icon" type="image/png" href="https://sigilgraph.fluxapp.xyz/icons/brand/favicon-32.png">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700;900&family=Rajdhani:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#04080c;--cyan:#21d4fd;--cyan-bright:#6df3ff;--teal:#00e0c6;--gold:#fbbf24;--violet:#9580ff;--orange:#ff7a3c;--line:rgba(33,212,253,.2);--glow:rgba(33,212,253,.55);--text:#d7eef5;--dim:#5f8390;--panel:rgba(4,8,12,.85)}
+*{box-sizing:border-box;margin:0;padding:0}
+body{min-height:100vh;background:var(--bg);color:var(--text);font-family:'Rajdhani',system-ui,sans-serif;overflow-x:hidden}
+.scene{position:fixed;inset:0;overflow:hidden;background:var(--bg);z-index:0}
+.aurora{position:absolute;inset:-30%;filter:blur(80px);opacity:.5}
+.aurora i{position:absolute;border-radius:50%;mix-blend-mode:screen;animation:drift 20s ease-in-out infinite}
+.aurora i:nth-child(1){width:48%;height:48%;left:4%;top:2%;background:radial-gradient(circle,#21d4fd,transparent 65%)}
+.aurora i:nth-child(2){width:44%;height:44%;right:2%;top:12%;background:radial-gradient(circle,#9580ff,transparent 65%);animation-delay:-6s}
+.aurora i:nth-child(3){width:54%;height:54%;left:24%;bottom:-6%;background:radial-gradient(circle,rgba(0,224,198,.4),transparent 60%);animation-delay:-11s;opacity:.55}
+@keyframes drift{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(3%,-2%) scale(1.03)}66%{transform:translate(-2%,1%) scale(.97)}}
+.wrap{position:relative;z-index:1;max-width:1080px;margin:0 auto;padding:18px 20px 60px;min-height:100vh;display:flex;flex-direction:column}
+/* search bar */
+.topbar{display:flex;align-items:center;gap:14px;margin-bottom:34px;flex-wrap:wrap}
+.tbrand{font-family:'Orbitron';font-weight:800;font-size:16px;letter-spacing:2px;white-space:nowrap}.tbrand span{color:var(--cyan)}
+.net{font-family:'JetBrains Mono';font-size:10px;color:var(--teal);border:1px solid rgba(0,224,198,.35);border-radius:999px;padding:3px 9px;background:rgba(0,224,198,.08)}
+.search{position:relative;flex:1;min-width:240px;max-width:520px;display:flex;align-items:center;gap:9px;padding:11px 14px;border-radius:13px;cursor:text;background:linear-gradient(180deg,rgba(33,212,253,.05),rgba(149,128,255,.05));border:1px solid var(--line);transition:.2s}
+.search::before{content:'';position:absolute;inset:-1px;border-radius:13px;padding:1px;background:linear-gradient(120deg,var(--cyan),var(--violet),var(--teal));-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;opacity:0;transition:.2s;pointer-events:none}
+.search:focus-within{border-color:transparent;box-shadow:0 0 24px rgba(33,212,253,.22)}.search:focus-within::before{opacity:1;animation:hue 3s linear infinite}
+@keyframes hue{to{filter:hue-rotate(360deg)}}
+.search .ic{color:var(--cyan);font-size:15px;flex:none}
+.search input{flex:1;background:transparent;border:0;outline:none;color:var(--text);font-family:'JetBrains Mono';font-size:13px}
+.search input::placeholder{color:var(--dim)}
+.search kbd{font-family:'JetBrains Mono';font-size:11px;color:var(--dim);background:rgba(255,255,255,.05);border:1px solid var(--line);border-radius:6px;padding:2px 7px}
+.wdrop{position:absolute;top:calc(100% + 7px);left:0;right:0;background:rgba(4,8,12,.97);backdrop-filter:blur(20px);border:1px solid var(--line);border-radius:13px;max-height:340px;overflow-y:auto;z-index:60;box-shadow:0 22px 64px rgba(0,0,0,.6);display:none;padding:6px}
+.wdrop .wr{display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:10px;cursor:pointer}.wdrop .wr:hover{background:rgba(33,212,253,.08)}
+.wdrop .wr .wt{font-family:'JetBrains Mono';font-weight:600;font-size:12px;color:var(--text);min-width:112px}
+.wdrop .wr .wd{flex:1;font-family:'JetBrains Mono';font-size:10px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wdrop .wr .ty{font-size:8px;font-family:'JetBrains Mono';padding:2px 7px;border-radius:999px;text-transform:uppercase}
+.wdrop .wr .ty.live{background:rgba(0,224,198,.14);color:var(--teal)}.wdrop .wr .ty.flux{background:rgba(149,128,255,.14);color:var(--violet)}
+.wdrop .ft{padding:9px 12px;font-family:'JetBrains Mono';font-size:10px;color:var(--dim);border-top:1px solid var(--line);text-align:center}
+/* hero */
+.hero{text-align:center;margin:24px 0 30px}
+.hero .mark{width:96px;height:96px;margin:0 auto 14px;filter:drop-shadow(0 0 26px var(--glow))}
+.hero h1{font-family:'Orbitron';font-weight:900;font-size:clamp(34px,7vw,62px);letter-spacing:4px;background:linear-gradient(90deg,var(--cyan-bright),var(--teal),var(--violet));-webkit-background-clip:text;background-clip:text;color:transparent;line-height:1.05}
+.hero p{margin-top:8px;color:var(--dim);font-size:16px;letter-spacing:1px}
+.hero .tip{display:inline-flex;align-items:center;gap:8px;margin-top:16px;font-family:'JetBrains Mono';font-size:12px;color:var(--teal);border:1px solid rgba(0,224,198,.3);border-radius:999px;padding:6px 14px;background:rgba(0,224,198,.06)}
+.hero .tip b{color:var(--cyan)}.hero .tip .dot{width:7px;height:7px;border-radius:50%;background:var(--teal);box-shadow:0 0 8px var(--teal);animation:pulse 2s infinite}
+@keyframes pulse{50%{opacity:.4}}
+/* stats */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:30px}
+.stat{background:var(--panel);backdrop-filter:blur(20px);border:1px solid var(--line);border-radius:14px;padding:15px 16px;text-align:center}
+.stat .l{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);font-family:'JetBrains Mono';margin-bottom:5px}
+.stat .v{font-size:23px;font-weight:700;font-family:'Rajdhani'}
+.stat .v.c{color:var(--cyan)}.stat .v.t{color:var(--teal)}.stat .v.g{color:var(--gold)}.stat .v.v{color:var(--violet)}
+/* login + links */
+.lower{display:grid;grid-template-columns:1.2fr 1fr;gap:18px;align-items:start}
+@media(max-width:720px){.lower{grid-template-columns:1fr}}
+.card{background:var(--panel);backdrop-filter:blur(20px);border:1px solid var(--line);border-radius:18px;padding:26px}
+.card h2{font-family:'Orbitron';font-size:15px;color:var(--cyan);text-transform:uppercase;letter-spacing:2px;margin-bottom:4px}
+.card .sub{color:var(--dim);font-size:13px;margin-bottom:18px}
+.fld label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);font-family:'JetBrains Mono';margin-bottom:7px}
+.fld input{width:100%;padding:13px 14px;background:rgba(255,255,255,.03);border:1px solid var(--line);border-radius:11px;color:var(--text);font-family:'JetBrains Mono';font-size:14px;outline:none;transition:.2s}
+.fld input:focus{border-color:var(--cyan);box-shadow:0 0 0 2px rgba(33,212,253,.12)}
+.btn{width:100%;margin-top:16px;padding:14px;border:0;border-radius:11px;background:linear-gradient(135deg,var(--cyan),var(--teal));color:#04080c;font-family:'Orbitron';font-weight:700;font-size:14px;letter-spacing:1px;cursor:pointer;transition:.2s}
+.btn:hover{filter:brightness(1.1);box-shadow:0 0 26px rgba(33,212,253,.4)}
+.gen{margin-top:14px;text-align:center;font-size:13px;color:var(--dim)}.gen a{color:var(--gold);cursor:pointer;text-decoration:none}.gen a:hover{text-decoration:underline}
+.mnem{margin-top:12px;font-family:'JetBrains Mono';font-size:14px;color:var(--gold);word-break:break-word;text-align:center;min-height:18px;letter-spacing:1px}
+.status{margin-top:16px;padding:8px 12px;border-radius:8px;background:rgba(0,224,198,.05);border:1px solid rgba(0,224,198,.12);text-align:center;font-family:'JetBrains Mono';font-size:11px;color:var(--teal)}
+.links{display:flex;flex-direction:column;gap:11px}
+.lnk{display:flex;align-items:center;gap:13px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px;text-decoration:none;color:var(--text);transition:.18s}
+.lnk:hover{border-color:var(--cyan);background:rgba(33,212,253,.04);transform:translateX(3px)}
+.lnk .ico{font-size:22px}.lnk .t{font-family:'Orbitron';font-size:14px}.lnk .d{font-family:'JetBrains Mono';font-size:10px;color:var(--dim)}
+.foot{margin-top:auto;padding-top:30px;text-align:center;font-family:'JetBrains Mono';font-size:11px;color:var(--dim)}
+</style>
+</head>
+<body>
+<div class="scene"><div class="aurora"><i></i><i></i><i></i></div></div>
+<div class="wrap">
+
+  <div class="topbar">
+    <div class="tbrand"><span>⬡</span> SIGILGRAPH</div>
+    <div class="net">sigil-g0 · live</div>
+    <div class="search" id="wsearchWrap" onclick="document.getElementById('wsearch').focus()">
+      <span class="ic">⬡</span>
+      <input id="wsearch" placeholder="Search blocks · hashes · producers · heights…" autocomplete="off" spellcheck="false" oninput="wSearch()" onkeydown="wKey(event)">
+      <kbd>/</kbd>
+      <div class="wdrop" id="wdrop"></div>
+    </div>
+  </div>
+
+  <div class="hero">
+    <img class="mark" src="https://sigilgraph.fluxapp.xyz/icons/brand/sigil-cyan.png" alt="SIGIL" onerror="this.style.display='none'">
+    <h1>SIGILGRAPH</h1>
+    <p>The Undeniable Chain · divergence-proof DAG</p>
+    <div class="tip"><span class="dot"></span> live tip <b id="heroH">…</b> · <span id="heroProd">…</span></div>
+  </div>
+
+  <div class="stats" id="stats">
+    <div class="stat"><div class="l">Block Height</div><div class="v c" id="sH">…</div></div>
+    <div class="stat"><div class="l">Throughput</div><div class="v t" id="sBps">…</div></div>
+    <div class="stat"><div class="l">Producer</div><div class="v v" id="sProd">…</div></div>
+    <div class="stat"><div class="l">Network</div><div class="v g">sigil-g0</div></div>
+  </div>
+
+  <div class="lower">
+    <div class="card">
+      <h2>◈ Enter SIGIL</h2>
+      <div class="sub">Your seed derives a real wallet — SHA3-256 → Ed25519 → 64-hex address. Nothing leaves your browser.</div>
+      <form onsubmit="event.preventDefault();sigilGo()">
+        <div class="fld">
+          <label>Node ID or Seed Phrase</label>
+          <input type="text" id="seed" placeholder="qnk… / 64-hex / 6–12 word phrase" autocomplete="off" spellcheck="false">
+        </div>
+        <button type="submit" class="btn">◈ Enter Sigilgraph</button>
+      </form>
+      <div class="gen">New here? <a onclick="sigilGen()">Generate a mnemonic</a></div>
+      <div class="mnem" id="mnemonic"></div>
+      <div class="status">● sigilgraph · flux-native · post-quantum tip-proofs · SSL valid</div>
+    </div>
+
+    <div class="links">
+      <a class="lnk" href="/sigil-explorer.html"><span class="ico">🔭</span><div><div class="t">Block Explorer</div><div class="d">live blocks · search · state roots</div></div></a>
+      <a class="lnk" href="/sigil-wallet-tron.html"><span class="ico">⬡</span><div><div class="t">Wallet</div><div class="d">send · swap · mine · verify</div></div></a>
+      <a class="lnk" href="/sigil-explorer.html?q=genesis"><span class="ico">✦</span><div><div class="t">Genesis</div><div class="d">block 0 · the commit point</div></div></a>
+    </div>
+  </div>
+
+  <div class="foot">⬡ SIGILGRAPH — built on Flux · verify-don't-trust</div>
+</div>
+
+<script>
+// ── live chain stats + search (plain script; routes block detail to the explorer) ──
+async function sigilStats(){
+  try{
+    var r=await fetch('/sigil-recent-blocks.json?cb='+Date.now(),{cache:'no-store'}); var j=await r.json();
+    var h=j.height, pn={D:'Delta',E:'Epsilon',G:'Gamma',B:'Beta'}, prod=(j.results&&j.results[0]&&j.results[0].prod)||'?';
+    document.getElementById('heroH').textContent='#'+Number(h).toLocaleString();
+    document.getElementById('heroProd').textContent=(pn[prod]||prod)+' producing';
+    document.getElementById('sH').textContent=Number(h).toLocaleString();
+    document.getElementById('sProd').textContent=pn[prod]||prod;
+    if(window._ph!=null && window._pt){ var bps=(h-window._ph)/((Date.now()-window._pt)/1000); if(bps>=0&&bps<1e5) document.getElementById('sBps').textContent=bps.toFixed(0)+' blk/s'; }
+    window._ph=h; window._pt=Date.now();
+  }catch(e){ document.getElementById('heroH').textContent='offline'; }
+}
+sigilStats(); setInterval(sigilStats,2500);
+
+var _wT=null;
+function wSearch(){ var q=((document.getElementById('wsearch')||{}).value||'').trim(); var d=document.getElementById('wdrop'); if(q.length<1){if(d)d.style.display='none';return;} clearTimeout(_wT); _wT=setTimeout(function(){wRun(q);},200); }
+function wKey(e){ if(e.key==='Enter')wGo(); else if(e.key==='Escape'){var d=document.getElementById('wdrop');if(d)d.style.display='none';if(e.target&&e.target.blur)e.target.blur();} }
+function wGo(){ var q=((document.getElementById('wsearch')||{}).value||'').trim(); if(q) location.href='/sigil-explorer.html?q='+encodeURIComponent(q); }
+async function wRun(q){
+  var ql=q.toLowerCase(), pn={d:'delta',e:'epsilon',g:'gamma',b:'beta'}, rows=[];
+  try{ var fr=await fetch('/sigil-recent-blocks.json?cb='+Date.now(),{cache:'no-store'}); var fj=await fr.json();
+    (fj.results||[]).forEach(function(b){ var hit=String(b.h).indexOf(q)===0||(ql.length>=4&&b.hash&&b.hash.toLowerCase().indexOf(ql)>=0)||(ql.length>=3&&b.prod&&(pn[b.prod.toLowerCase()]||'').indexOf(ql)>=0);
+      if(hit&&!rows.some(function(r){return r.h===b.h;})) rows.push({ty:'live',h:b.h,t:'Block #'+b.h,d:'producer '+(pn[(b.prod||'').toLowerCase()]||b.prod||'?')+' · b3:'+(b.hash||'').slice(0,18)+'…',q:String(b.h)}); }); }catch(e){}
+  try{ var sr=await fetch('/api/v1/search?q='+encodeURIComponent(q),{cache:'no-store'}); var sj=await sr.json();
+    (sj.results||[]).forEach(function(x){ var m=String(x.title||'').match(/#?(\d+)/),h=m?+m[1]:null; if(!rows.some(function(r){return r.h===h;})) rows.push({ty:'flux',h:h,t:x.title||'result',d:(x.snippet||'').slice(0,56),q:(h!=null?String(h):q)}); }); }catch(e){}
+  var d=document.getElementById('wdrop'); if(!d)return; rows=rows.slice(0,7);
+  d.innerHTML = rows.length ? rows.map(function(r){return '<div class="wr" onclick="location.href=\'/sigil-explorer.html?q='+encodeURIComponent(r.q)+'\'"><span class="ty '+r.ty+'">'+r.ty+'</span><span class="wt">'+r.t+'</span><span class="wd">'+(r.d||'')+'</span></div>';}).join('')+'<div class="ft">↵ open in the SIGIL explorer</div>' : '<div class="ft">No live matches — press ↵ to search the full explorer</div>';
+  d.style.display='block';
+}
+document.addEventListener('keydown',function(e){ if(e.key==='/'&&document.activeElement.id!=='wsearch'&&document.activeElement.id!=='seed'){ var s=document.getElementById('wsearch'); if(s){e.preventDefault();s.focus();} } });
+document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWrap')){ var d=document.getElementById('wdrop'); if(d)d.style.display='none'; } });
+</script>
+
+<script type="module">
+// ── mnemonic login — identical derivation to enter-sigil.html / the SIGIL wallet ──
+import { sha3_256 } from 'https://esm.sh/@noble/hashes@1.3.3/sha3';
+import { sha512 }   from 'https://esm.sh/@noble/hashes@1.3.3/sha512';
+import * as ed      from 'https://esm.sh/@noble/ed25519@2.1.0';
+ed.etc.sha512Sync = (...m) => sha512(ed.etc.concatBytes(...m));
+var WL=["abandon","ability","able","absorb","abstract","access","accident","account","achieve","acid","acoustic","acquire","across","action","actor","adapt","address","adjust","admit","adult","advance","advice","aerobic","afford","afraid","again","agent","agree","ahead","aim","air","airport","aisle","alarm","album","alert","alien","alley","allow","almost","alpha","already","also","alter","always","amaze","amber","amount","amuse","analyst","anchor","ancient","anger","angle","angry","animal","ankle","announce","annual","another","answer","antenna","antique","anxiety","any","apart","apology","appear","apple","approve","april","arch","arctic","area","arena","argue","arm","armor","army","around","arrange","arrest","arrive","arrow","art","artist","aspect","asset","assist","assume","astral","athlete","atom","attack","attend","auction","audit","august","aunt","author","auto","autumn","average","avoid","awake","aware","away","awesome","axis","baby","bacon","badge","balance","balcony","ball","bamboo","banana","banner","bar","bargain","barrel","base","basic","basket","battle","beach","bean","beauty","because","become","beef","before","begin","behave","behind","believe","below","belt","bench","benefit","best","betray","better","between","beyond","bicycle","bid","bike","bind","biology","bird","birth","bitter","black","blade","blame","blanket","blast","bleak","bless","blind","blood","blossom","blue","blur","blush","board","boat","body","boil","bomb","bone","bonus","book","boost","border","boring","borrow","boss","bottom","bounce","box","boy","bracket","brain","brand","brass","brave","bread","breeze","brick","bridge","brief","bright","bring","brisk","bronze","broom","brother","brown","brush","bubble","buddy","budget","buffalo","build","bulb","bulk","bullet","bundle","bunker","burden","burst","bus","busy","butter","buyer","cabin","cable","cactus","cage","cake","call","calm","camera","camp","canal","cancel","candy","cannon","canoe","canvas","canyon","capable","capital","captain","car","carbon","card","cargo","carpet","carry","cart","case","cash","casino","castle","casual","cat","catch","cattle","caught","cause","caution","cave","ceiling","celery","cement","census","century","cereal","certain","chair","chalk","champion","change","chaos","chapter","charge","chase","chat","cheap","check","cheese","chef","cherry","chest","chicken","chief","child","choice","choose","chronic","chunk","cipher","circle","citizen","city","civil","claim","clap","clarify","claw","clay","clean","clerk","clever","click","client","cliff","climb","clinic","clip","clock","close","cloth","cloud","club","clump","cluster","coach","coast","code","coffee","coil","coin","collect","color","column","combine","come","comfort","comic","common","cosmic","crystal","cyber","cypher"];
+function deriveAddress(mnemonic){ var priv=sha3_256(new TextEncoder().encode(mnemonic.trim())); var pub=ed.getPublicKey(priv); return Array.from(pub,function(b){return b.toString(16).padStart(2,'0');}).join(''); }
+window.sigilGen = function(){
+  var pool=new Uint32Array(6); crypto.getRandomValues(pool); var words=[];
+  for(var i=0;i<6;i++) words.push(WL[pool[i]%WL.length]);
+  var phrase=words.join(' ');
+  document.getElementById('mnemonic').textContent=phrase;
+  document.getElementById('seed').value=phrase;
+};
+window.sigilGo = function(){
+  var seed=document.getElementById('seed').value.trim();
+  if(!seed){ document.getElementById('mnemonic').textContent='↑ enter a seed phrase or generate one'; return; }
+  var address;
+  if(/^[0-9a-fA-F]{64}$/.test(seed)) address=seed.toLowerCase();
+  else { try{ address=deriveAddress(seed); }catch(e){ document.getElementById('mnemonic').textContent='could not derive: '+e; return; } }
+  try{ localStorage.setItem('sigil-wallet-seed',seed); localStorage.setItem('sigil-wallet-address',address); }catch(e){}
+  location.href='/sigil-wallet-tron.html?desktop';
+};
+</script>
+</body>
+</html>

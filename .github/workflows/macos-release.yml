@@ -1,0 +1,50 @@
+name: macos-release
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "sigilgraph commit to build (full sha)"
+        required: true
+      tag:
+        description: "existing release tag to upload to"
+        required: true
+        default: "v0.70.0"
+      flux_ref:
+        description: "deme-plata/flux ref (sibling path-dep workspace)"
+        required: false
+        default: "main"
+permissions:
+  contents: write
+jobs:
+  build-macos-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+          path: sigil
+      - uses: actions/checkout@v4
+        with:
+          repository: deme-plata/flux
+          ref: ${{ github.event.inputs.flux_ref }}
+          path: flux
+      - name: layout shim (deps expect ../flux relative to the sigil workspace)
+        run: ls sigil/Cargo.toml flux/crates >/dev/null && echo layout-ok
+      - name: build
+        working-directory: sigil
+        env:
+          CARGO_TARGET_DIR: target        # the repo .cargo/config pins an epsilon-absolute path
+          RUSTC_WRAPPER: ""               # ditto for the fluxc cache wrapper
+        run: |
+          rustup target add aarch64-apple-darwin
+          cargo build --release -p sigil-top --target aarch64-apple-darwin
+      - name: smoke test (real Apple silicon)
+        working-directory: sigil
+        run: |
+          BIN=target/aarch64-apple-darwin/release/sigil-top
+          $BIN --selfcheck
+          cp $BIN ../sigil-top-macos-arm64
+      - name: upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.event.inputs.tag }}" sigil-top-macos-arm64 --clobber --repo deme-plata/sigilgraph

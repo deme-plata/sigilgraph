@@ -20,7 +20,18 @@
 mod block_store;
 mod block_sync;
 mod chain_verify; // v0.9.0: full verifying sync — spine continuity + precheck walk
+mod gap_sync;     // SPINE-BREAK fix: testable genesis-up contiguity engine + shared watchdog/classify
 mod serve;
+mod heroes;
+use heroes::*;
+mod mining_ui;  // LANE-U: mining tab + hero renderers
+use mining_ui::*;
+mod sync_ui;    // LANE-U: sync hero + sync-log tab renderers
+use sync_ui::*;
+mod tabs_ui;    // LANE-U: draw_ui dispatcher + tab/card/footer renderers
+use tabs_ui::*;
+mod wallet_ui;  // LANE-U: wallet/browser/tray/scheme plumbing
+use wallet_ui::*;
 mod local_api;   // v0.11.0: serve the explorer /api/* from the LOCAL verified spine
 
 use std::io::{IsTerminal, Read, Write};
@@ -43,6 +54,14 @@ fn instant_ago(secs: u64) -> Instant {
     now.checked_sub(Duration::from_secs(secs)).unwrap_or(now)
 }
 
+/// LANE-B v0.50: how long the SIGIL rune animation stays on screen per play
+/// (draw-on → hold → fade). Kept inside the 3–5 s band the side-mission specifies.
+const RUNE_PLAY: Duration = Duration::from_millis(4200);
+/// LANE-B v0.50: re-play cadence. An update being available is the loud signal →
+/// play often (every 10 min); otherwise it is a quiet "still alive" pulse (every 2 h).
+const RUNE_INTERVAL_UPDATE: Duration = Duration::from_secs(600);
+const RUNE_INTERVAL_IDLE: Duration = Duration::from_secs(7200);
+
 
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -57,10 +76,10 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Padding, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph},
     Frame, Terminal,
 };
 
@@ -138,9 +157,25 @@ const LATEST: &str = VERSION; // ship cadence, not the 3-part Cargo version
 /// startup (throttled) and on `[U]`, so the running binary discovers new releases live.
 const UPDATE_MANIFEST: &str = "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-latest.json";
 /// Which prebuilt this binary self-updates to (its per-OS entry in the manifest).
-const SELF_TARGET: &str = if cfg!(windows) { "windows-x64" } else if cfg!(target_os = "macos") { "macos-arm64" } else { "linux-x64" };
+const SELF_TARGET: &str = if cfg!(all(windows, feature = "gpu")) { "windows-x64-gpu" }
+    else if cfg!(windows) { "windows-x64" }
+    else if cfg!(target_os = "macos") { "macos-arm64" }
+    else if cfg!(feature = "gpu") { "linux-x64-gpu" }
+    else { "linux-x64" };
 /// Live testnet feed (same source flux-node.html uses): status + tip + block stream.
 const DEFAULT_FEED: &str = "https://sigilgraph.fluxapp.xyz/sigil-status.json";
+/// v0.38: flux-rev SOURCE provenance, stamped at release-build time via
+/// `SIGIL_TOP_FLUX_REV=$(flux-rev snapshot crates/sigil-top)` -> the BLAKE3
+/// `full:` content address of the source tree this binary was built from.
+/// "unstamped" on ad-hoc dev builds. Surfaced in the header + `provenance` cmd
+/// + every webhook event — SIGIL north-star claim #1 made visible.
+const FLUX_REV: &str = match option_env!("SIGIL_TOP_FLUX_REV") { Some(v) => v, None => "unstamped" };
+
+/// Short display form of [`FLUX_REV`] (strip `full:`, first 10 chars).
+fn short_rev() -> String {
+    let r = FLUX_REV.strip_prefix("full:").unwrap_or(FLUX_REV);
+    r.chars().take(10).collect()
+}
 const MAX_SUPPLY_BASE: u128 = 2_100_000_000_000_000; // 21 M × 10^8
 const DECIMALS: u32 = 8;
 
@@ -189,7 +224,21 @@ struct NodeStatus {
     /// the feed doesn't carry it yet — non-breaking, always present.
     #[serde(default, alias = "balance")]
     wallet_balance: u128,
+    /// v0.42: false while the node is (re)building its explorer full-text index in
+    /// the background — money/chain data is live, only search is briefly empty.
+    /// Absent on older nodes → defaults true (don't show a stale "indexing" badge).
+    #[serde(default = "default_true")]
+    index_ready: bool,
+    /// L-F 0.77.5: per-block reward in whole SIGIL (fractional after halvings,
+    /// e.g. 5 → 2.5). The feed has carried reward_sig all along but it was
+    /// dropped on the floor here — which is why "SIGIL/s" vanished from the UI
+    /// when mining moved in-node (the v0.64.2 ONE-GRAPH cut pointed at a Node
+    /// tab that never received the network stats). 0.0 = unknown (old feed).
+    #[serde(default)]
+    reward_sig: f64,
 }
+
+fn default_true() -> bool { true }
 
 /// The real, per-block tip the node publishes (LIGHT-3 L3-A, live).
 #[derive(Debug, Default, Deserialize)]
@@ -275,24 +324,46 @@ struct FeedStatus {
 /// Fetch + parse the live testnet feed over HTTPS (rustls). Returns the mapped
 /// node status + the recent block stream — the real testnet sync source.
 static LAST_FEED_ERR: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// 0.77: ONE shared pooled HTTP client for the per-tick fetchers (feed, block fallback,
+/// eclipse-k). Building a fresh Client per call opened a new TCP+TLS connection per tick
+/// that then sat in TIME_WAIT — over a multi-hour genesis-archive sync that exhausted
+/// Windows' ephemeral ports (the "tip frozen / error sending request" bug, #156 item 3).
+/// Timeouts are set PER REQUEST (each call site keeps its old value); the TLS posture is
+/// the union of the old per-site builders (TLS_1_0 feeds + the invalid-cert fallback).
+static HTTP: std::sync::LazyLock<reqwest::blocking::Client> = std::sync::LazyLock::new(|| {
+    reqwest::blocking::Client::builder()
+        .min_tls_version(reqwest::tls::Version::TLS_1_0)
+        .danger_accept_invalid_certs(true)
+        .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION")))
+        .pool_max_idle_per_host(4)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::blocking::Client::new())
+});
+
 fn set_feed_err(e: String) { if let Ok(mut g)=LAST_FEED_ERR.lock(){ *g=e; } }
 /// The most recent feed-fetch failure reason — shown on the OFFLINE card so a user can SEE why
 /// (DNS, TLS, connection refused, HTTP status, or JSON parse) instead of a blind "offline".
 pub fn last_feed_err() -> String { LAST_FEED_ERR.lock().map(|g| g.clone()).unwrap_or_default() }
 
 fn fetch_feed(url: &str) -> Option<(NodeStatus, Vec<FeedBlock>)> {
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(6))
-        .min_tls_version(reqwest::tls::Version::TLS_1_0)
-        .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION")))
-        .build() { Ok(c)=>c, Err(e)=>{ set_feed_err(format!("client init @ {url}: {e}")); return None; } };
-    let resp = match client.get(url).send() { Ok(r)=>r, Err(e)=>{ set_feed_err(format!("connect @ {url}: {e}")); return None; } };
+    // 0.77: shared pooled client (keep-alive) — was a fresh Client per call per tick.
+    let resp = match HTTP.get(url).timeout(Duration::from_secs(6)).send() { Ok(r)=>r, Err(e)=>{ set_feed_err(format!("connect @ {url}: {e}")); return None; } };
     let code = resp.status();
     let body = match resp.text() { Ok(b)=>b, Err(e)=>{ set_feed_err(format!("read @ {url} (HTTP {code}): {e}")); return None; } };
     let feed: Feed = match serde_json::from_str(&body) { Ok(f)=>f, Err(e)=>{ set_feed_err(format!("parse @ {url} (HTTP {code}): {e}")); return None; } };
     let s = feed.status;
-    let supply_whole: u128 = s.supply.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0);
-    let native_supply = supply_whole.saturating_mul(10u128.pow(DECIMALS));
+    // v0.64 LANE-T: the status feed sends supply in BASE units on some sources and
+    // WHOLE SIGIL on others. Multiplying a base value by 10^8 again double-scaled it
+    // (showed 1,748,502,017,000 instead of ~17,485). Auto-detect by magnitude: nothing
+    // can exceed the 21M WHOLE cap, so a value above it is already base -> keep; a value
+    // at/under 21M is whole -> scale to base.
+    let supply_raw: u128 = s.supply.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0);
+    // LANE-T hardening: a value 10^8 over the cap is the double-scale tell — clamp to the
+    // 21M base cap so a corrupt/mis-scaled source can never show > 21M SIGIL in the hero.
+    let native_supply = (if supply_raw > 21_000_000u128 { supply_raw } else { supply_raw.saturating_mul(10u128.pow(DECIMALS)) }).min(MAX_SUPPLY_BASE);
     // Carry the committed roots through as hex so the no-local-node view still
     // shows the 4 state roots, not "—".
     let (wr, dr, er, cr) = feed
@@ -319,6 +390,7 @@ fn fetch_feed(url: &str) -> Option<(NodeStatus, Vec<FeedBlock>)> {
         contract_root: cr,
         tip: feed.tip,
         blocks_per_sec: s.blocks_per_sec,
+        reward_sig: s.reward_sig,
         ..Default::default()
     };
     Some((st, feed.blocks))
@@ -332,14 +404,31 @@ fn fetch_feed(url: &str) -> Option<(NodeStatus, Vec<FeedBlock>)> {
 fn fetch_best(cfg: &Config) -> (NodeStatus, bool, &'static str) {
     // Try the configured feed, then known-good public mirrors — so a node on a network where one
     // host is blocked/unresolvable still syncs from another. (Was single-feed → looked "offline".)
+    // v0.64.1: remember the last PRODUCE-feed height so the local-API fallback can
+    // never silently swap chains. The :8099 rpcd is the MINE chain (height ~3.5k);
+    // when all feed mirrors hiccup for one poll, falling back to it made the hero
+    // JUMP 520k -> 3.5k -> 520k. A fallback drastically below the last feed height
+    // is a different chain -> show an honest offline/retry instead of lying.
+    static LAST_FEED_H: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     for url in [cfg.feed.as_str(),
                 "https://sigilgraph.fluxapp.xyz/sigil-status.json",
                 "https://quillon.xyz/sigil-status.json",
                 "https://sigilgraph.fluxapp.xyz/sigil-status.json"] {
-        if let Some((st, _b)) = fetch_feed(url) { return (st, true, "feed"); }
+        if let Some((st, _b)) = fetch_feed(url) {
+            LAST_FEED_H.store(st.height, std::sync::atomic::Ordering::Relaxed);
+            return (st, true, "feed");
+        }
     }
     match fetch(&cfg.api) {
-        Ok(s) => (s, true, "local"),
+        Ok(s) => {
+            let lf = LAST_FEED_H.load(std::sync::atomic::Ordering::Relaxed);
+            if lf > 0 && s.height.saturating_mul(4) < lf {
+                // mine-chain rpcd answering for a produce-feed blip — suppress, retry feed
+                (NodeStatus::default(), false, "offline")
+            } else {
+                (s, true, "local")
+            }
+        }
         Err(_) => (NodeStatus::default(), false, "offline"),
     }
 }
@@ -376,13 +465,11 @@ fn fetch_refresh(feed: String, api: String, want_eclipse: bool, prior_synced: u6
     let mut fallback_note = false;
     let empty_blocks = blocks.as_ref().map(|b| b.is_empty()).unwrap_or(true);
     if empty_blocks && online {
-        if let Ok(client) = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(8))
-            .danger_accept_invalid_certs(true)
-            .build()
+        // 0.77: shared pooled client — was a fresh Client per fallback tick.
         {
+            let client = &*HTTP;
             let api_base = api.trim_end_matches('/');
-            if let Ok(resp) = client.get(format!("{}/v1/blocks/recent?limit=14", api_base)).send() {
+            if let Ok(resp) = client.get(format!("{}/v1/blocks/recent?limit=14", api_base)).timeout(Duration::from_secs(8)).send() {
                 if let Ok(json) = resp.json::<serde_json::Value>() {
                     if let Some(arr) = json.get("blocks").or_else(|| json.get("data")).and_then(|v| v.as_array()) {
                         let fb: Vec<FeedBlock> = arr.iter().filter_map(|b| {
@@ -714,6 +801,12 @@ fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str) -> String
     let ver = if st.version.is_empty() { "—".into() } else { st.version.clone() };
     let disp_height = st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(st.height);
     o.push_str(&row("height", &format!("{GOLD}{}{RESET}", disp_height)));
+    // v0.42: explorer search readiness. The node now binds + serves money/chain
+    // routes instantly on restart and builds its full-text index in the
+    // background, so this briefly reads "indexing…" before "search ready".
+    if !st.index_ready {
+        o.push_str(&row("explorer", &format!("{GOLD}⟳ indexing…{RESET} {DIM}money/chain live; search warming up{RESET}")));
+    }
     if st.blocks_per_sec > 0.0 {
         // v0.12: gauge the live backfill rate against the SIGIL-g0 sync target of
         // 8000 blk/s (one full second of mainnet block production). A catch-up sync
@@ -1010,11 +1103,84 @@ fn sa<S: Into<String>>(s: S) -> String {
     }).collect()
 }
 
+/// v0.40: on Windows, drop to BELOW_NORMAL priority class BEFORE any thread
+/// spawns. The OS scheduler then always favors the user's own apps — whatever
+/// sigil-top does (render, mine, opt-in sync), it can never make the desktop
+/// stutter. No crate dep: two kernel32 calls.
+#[cfg(windows)]
+fn lower_process_priority() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn SetPriorityClass(handle: isize, class: u32) -> i32;
+    }
+    const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+    unsafe {
+        let _ = SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
+    }
+}
+
+/// The install path captured at startup, BEFORE any self-replace. After
+/// `self_replace` swaps the binary, `/proc/self/exe` (what `current_exe()` reads)
+/// points at the moved-aside OLD inode — often a "(deleted)" path — so a relaunch
+/// that spawns `current_exe()` fails with ENOENT even though the NEW binary sits
+/// at this original path. Capturing it up front makes relaunch reliable.
+static INSTALL_EXE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// v0.71.1 LANE-V: persisted sync mode — F/Y write it, boot reads it, so a node
+/// the operator put in full-sync RESUMES full-sync after updates and restarts.
+/// Fresh installs have no file -> light monitor stays the safe default.
+fn sync_mode_path() -> std::path::PathBuf {
+    let dir = std::env::var("SIGIL_TOP_HOME").ok().map(std::path::PathBuf::from)
+        .or_else(|| std::env::var("HOME").ok().map(|h| std::path::Path::new(&h).join(".sigil-top")))
+        .or_else(|| std::env::var("USERPROFILE").ok().map(|h| std::path::Path::new(&h).join(".sigil-top")))
+        .unwrap_or_else(std::env::temp_dir);
+    dir.join("sync-mode")
+}
+fn persist_sync_mode(mode: &str) {
+    let p = sync_mode_path();
+    if let Some(d) = p.parent() { let _ = std::fs::create_dir_all(d); }
+    let _ = std::fs::write(&p, mode);
+}
+fn read_sync_mode() -> Option<String> {
+    std::fs::read_to_string(sync_mode_path()).ok().map(|s| s.trim().to_string())
+}
+
+/// v0.64: append a startup breadcrumb to %TEMP%/sigil-top-startup.log (best-effort).
+fn boot_trace(msg: &str) {
+    use std::io::Write;
+    let p = std::env::temp_dir().join("sigil-top-startup.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+        let _ = writeln!(f, "{}", msg);
+    }
+}
+
 fn main() {
+    // v0.64: STARTUP TRACE + panic capture. If the app exits unexpectedly on a
+    // Windows double-click, the breadcrumb + panic land in this file so we can
+    // read the EXACT reason instead of guessing.
+    boot_trace(&format!("main() entry v{} pid {}", env!("CARGO_PKG_VERSION"), std::process::id()));
+    std::panic::set_hook(Box::new(|info| { boot_trace(&format!("PANIC: {info}")); }));
+    // Capture the real install path NOW, before anything can self-replace us.
+    if let Ok(e) = std::env::current_exe() {
+        if e.exists() { let _ = INSTALL_EXE.set(e); }
+    }
+    #[cfg(windows)]
+    lower_process_priority();
     enable_rich_console(); // UTF-8 + VT so icons/colours render (fixes the `?` glyphs)
     init_ui_ascii();       // decide ASCII vs rich glyphs (Windows-safe layout)
     // subcommands: login / logout (handled before the render loop)
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // v0.77.7: clean up the `…exe.old` left by the Windows lock-fallback swap (the previous
+    // running image, renamed aside so the new binary could take the install path). It's only
+    // unlockable once the old process is gone, i.e. now. Skip during --selfcheck (must stay pure).
+    #[cfg(windows)]
+    if argv.first().map(|s| s.as_str()) != Some("--selfcheck") {
+        if let Some(exe) = INSTALL_EXE.get().cloned().or_else(|| std::env::current_exe().ok()) {
+            let old = exe.with_extension("exe.old");
+            if old.exists() { let _ = std::fs::remove_file(&old); }
+        }
+    }
     match argv.first().map(|s| s.as_str()) {
         // v0.25: updater PRE-FLIGHT probe. Print the version and exit 0 — touch NOTHING else
         // (no network, no TUI, no DB, no splash) — so `relaunch_new_binary` can confirm a
@@ -1025,6 +1191,36 @@ fn main() {
         // v0.27.5: manual rollback escape hatch — revert to the previous binary the last update
         // backed up (pre-flighted before the swap). The operator's "undo a bad update" button.
         Some("revert") => { do_revert(); return; }
+        // Windows launch-at-login control: `sigil-top autostart on|off|status`. The TUI also
+        // exposes this via the tray's "Start at login" checkbox.
+        Some("autostart") => {
+            match argv.get(1).map(|s| s.as_str()) {
+                Some("on") | Some("enable") | Some("true") => match autostart_set(true) {
+                    Ok(()) => println!("✓ launch-at-login ENABLED"),
+                    Err(e) => { eprintln!("✗ {e}"); std::process::exit(1); }
+                },
+                Some("off") | Some("disable") | Some("false") => match autostart_set(false) {
+                    Ok(()) => println!("✓ launch-at-login DISABLED"),
+                    Err(e) => { eprintln!("✗ {e}"); std::process::exit(1); }
+                },
+                _ => println!("launch-at-login: {}", if autostart_enabled() { "ON" } else { "OFF" }),
+            }
+            return;
+        }
+        // v0.38: print this binary\'s full provenance — version, flux-rev source id,
+        // the binary\'s own BLAKE3, and which release channel/target it tracks.
+        Some("provenance") => {
+            let exe_hash = std::env::current_exe().ok()
+                .and_then(|p| std::fs::read(p).ok())
+                .map(|b| blake3::hash(&b).to_hex().to_string())
+                .unwrap_or_else(|| "?".into());
+            println!("sigil-top v{VERSION}");
+            println!("flux-rev:      {FLUX_REV}");
+            println!("binary blake3: {exe_hash}");
+            println!("channel:       {UPDATE_MANIFEST}");
+            println!("target:        {SELF_TARGET}");
+            return;
+        }
         Some("login") => {
             let seed = argv.iter().position(|a| a == "--seed").and_then(|i| argv.get(i + 1)).cloned();
             do_login(seed);
@@ -1042,7 +1238,7 @@ fn main() {
             // so status/recent/search proxy to SIGIL_NODE_URL (the real node) and only the
             // cortex panel + any persisted-spine content-verify answer locally. Best-effort:
             // if the store is locked by another instance, fall back to pure proxy (None).
-            let local_api = block_store::BlockStore::open(&sigil_top_db_path()).ok().map(|st| {
+            let local_api = block_store::BlockStore::open_blocking(&sigil_top_db_path()).ok().map(|st| {
                 std::sync::Arc::new(local_api::LocalApi {
                     reader: st.reader(),
                     sync: None,
@@ -1115,7 +1311,7 @@ fn main() {
         Some("verify-chain") => {
             let json = argv.iter().any(|a| a == "--json");
             let path = sigil_top_db_path();
-            let mut store = match block_store::BlockStore::open(&path) {
+            let mut store = match block_store::BlockStore::open_blocking(&path) {
                 Ok(s) => s,
                 Err(e) => { eprintln!("{RED}✗ open store {path}: {e}{RESET}"); std::process::exit(2); }
             };
@@ -1156,7 +1352,7 @@ fn main() {
             let timeout_s: u64 = argv.iter().position(|a| a == "--timeout")
                 .and_then(|i| argv.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(1800);
             let path = sigil_top_db_path();
-            let store = match block_store::BlockStore::open(&path) {
+            let store = match block_store::BlockStore::open_blocking(&path) {
                 Ok(s) => s,
                 Err(e) => { eprintln!("{RED}✗ open store {path}: {e}{RESET}"); std::process::exit(2); }
             };
@@ -1164,7 +1360,13 @@ fn main() {
             println!("  {DIM}connecting to the sigil-g0 mesh — downloading + verifying genesis→tip…{RESET}");
             if let Some(t) = target_arg { println!("  {DIM}target height pinned to {t}{RESET}"); }
             println!("  {DIM}timeout {timeout_s}s · Ctrl-C to stop{RESET}\n");
-            let sync = block_sync::P2PBlockSync::launch(store, false);
+            // LANE-P: --recent / SIGIL_SYNC_RECENT=1 launches the MONITOR path (recent_only,
+            // recent-window snap) headlessly — the exact branch where the unaligned-base 57345
+            // freeze lived — so the CI gate can verify it, not just the genesis crawl.
+            let recent = argv.iter().any(|a| a == "--recent")
+                || std::env::var("SIGIL_SYNC_RECENT").map(|v| v == "1" || v == "true").unwrap_or(false);
+            if recent { println!("  {DIM}monitor mode — recent-window snap (recent_only){RESET}"); }
+            let sync = block_sync::P2PBlockSync::launch(store, recent);
             // v0.15.1: a pinned --target also SEEDS the backfill tip so the refill
             // fires immediately (the gate is peer_best>0, not target_arg). Without
             // this, a quiet mesh left peer_best=0 and full-sync --target never pulled.
@@ -1172,11 +1374,24 @@ fn main() {
             let start = Instant::now();
             let mut last_print = instant_ago(10);
             loop {
-                let st = sync.poll_state();
+                // 0.77: poll_state is try_lock (None = sync thread busy) — headless loop just
+                // retries on the next 250ms tick.
+                let Some(st) = sync.poll_state() else {
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
+                };
                 if let Some(b) = &st.verify_break {
                     eprintln!("  {RED}✗ verification break — {b}{RESET}");
                     eprintln!("  {RED}  the downloaded chain does NOT form one connected spine. Aborting.{RESET}\n");
                     std::process::exit(1);
+                }
+                // SPINE-BREAK fix: the no-progress watchdog confirmed an unfillable hole. Fail LOUD
+                // naming the EXACT stuck height (exit 4) instead of the old silent rate-0 crawl that
+                // only ever ended on the generic timeout.
+                if let Some((h, reason)) = &st.sync_failure {
+                    eprintln!("\n  {RED}✗ SPINE BREAK — sync stuck at height {}{RESET}", group(*h));
+                    eprintln!("  {RED}  {reason}{RESET}\n");
+                    std::process::exit(4);
                 }
                 let target = target_arg.unwrap_or(st.peer_best_height);
                 if last_print.elapsed() >= Duration::from_secs(2) {
@@ -1186,7 +1401,13 @@ fn main() {
                         group(st.verified), group(st.blocks_synced), if target > 0 { group(target) } else { "?".into() },
                         pct, st.peer_count, start.elapsed().as_secs());
                 }
-                if target > 0 && st.verified >= target {
+                // LANE-P: don't declare "complete" before the mesh has actually connected and
+                // seeded a REAL network tip. With 0 peers, peer_best can momentarily seed to our
+                // own genesis (target=1) → verified>=1 → a FALSE "sync complete at height 1" the
+                // instant we start (the gate's flaky FAIL + a real "looks synced but isn't" bug).
+                // Require target>1 AND a live peer (or a 30s grace for a genuine solo-at-tip).
+                if target > 1 && st.verified >= target
+                    && (st.peer_count > 0 || start.elapsed() > Duration::from_secs(30)) {
                     println!("\n  {GREEN}{BOLD}✓ full verifying sync complete — {} blocks verified as one connected spine to genesis{RESET}\n", group(st.verified));
                     std::process::exit(0);
                 }
@@ -1209,7 +1430,13 @@ fn main() {
     // Non-TTY (piped / redirected / captured), --once, or --lite → emit exactly ONE
     // plain ANSI frame and exit. ratatui needs a real terminal; this path never
     // spams. The live, interactive dashboard is the TUI below.
-    let interactive = std::io::stdout().is_terminal();
+    // v0.63.1: a DOUBLE-CLICKED console on Windows can report is_terminal()=false on
+    // stdout (tray/subsystem quirk), which dropped the app to the one-frame path and
+    // "closed" instead of showing the dashboard. Treat it as interactive if EITHER
+    // stdin or stdout is a tty — only a full pipe/redirect (both non-tty) stays plain.
+    let interactive = std::io::stdout().is_terminal() || std::io::stdin().is_terminal();
+    boot_trace(&format!("interactive={} (stdout_tty={} stdin_tty={}) once={} lite={}",
+        interactive, std::io::stdout().is_terminal(), std::io::stdin().is_terminal(), cfg.once, cfg.lite));
     // Non-TTY (piped / captured / redirected) or --once → one plain frame, no loop.
     if cfg.once || !interactive {
         let (st, online, source) = fetch_best(&cfg);
@@ -1233,7 +1460,9 @@ fn main() {
     // DEFAULT — the custom ratatui dashboard (Quillon-graph-node styled, multi-panel).
     // ratatui owns all box-drawing + layout, so alignment can never regress.
     let _ = cfg.tui; // --tui kept as an explicit alias; it's the default now
+    boot_trace("entering run_tui (interactive dashboard)");
     if let Err(e) = run_tui(cfg) {
+        boot_trace(&format!("run_tui returned Err: {e}"));
         let _ = disable_raw_mode();
         let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
         eprintln!("sigil-top: TUI error: {e}");
@@ -1292,13 +1521,24 @@ struct Release {
     size_bytes: u64,
     #[serde(default)]
     targets: std::collections::HashMap<String, Target>,
+    /// v0.38: flux-rev `full:` source id of the published build (display/ledger;
+    /// the binary gate stays the per-target BLAKE3).
+    #[serde(default)]
+    flux_rev: String,
 }
 
 /// Old manifest target triples that map to our short platform names.
-const LEGACY_SELF_KEYS: &[&str] = if cfg!(windows) {
+/// v0.38 VARIANT PINNING: a GPU build reads ONLY its -gpu channel key — it must
+/// never cross-grade itself to the CPU binary (or vice versa). No -gpu key in the
+/// manifest -> a GPU build simply reports "no build for windows-x64-gpu" and stays.
+const LEGACY_SELF_KEYS: &[&str] = if cfg!(all(windows, feature = "gpu")) {
+    &["windows-x64-gpu"]
+} else if cfg!(windows) {
     &["windows-x64", "x86_64-pc-windows-gnu"]
 } else if cfg!(target_os = "macos") {
     &["macos-arm64", "aarch64-apple-darwin"]
+} else if cfg!(feature = "gpu") {
+    &["linux-x64-gpu"]
 } else {
     &["linux-x64", "x86_64-unknown-linux-musl", "x86_64-unknown-linux-gnu"]
 };
@@ -1312,11 +1552,79 @@ impl Release {
                 return t.clone();
             }
         }
+        if cfg!(feature = "gpu") {
+            // v0.38: the top-level single-binary fields are the CPU build — a GPU
+            // build must NOT fall back to them (that silently downgrades GPU->CPU).
+            return Target { url: String::new(), blake3_hex: String::new(), size_bytes: 0 };
+        }
         Target {
             url: self.url.clone(),
             blake3_hex: self.blake3_hex.clone(),
             size_bytes: self.size_bytes,
         }
+    }
+}
+
+/// v0.38: best-effort lifecycle telemetry -> the flux webhook bus (the cockpit
+/// feed at :4178/api/mcp-webhook). OFF unless SIGIL_TOP_WEBHOOK is set — a user
+/// install posts nothing anywhere by default. Fire-and-forget on a thread; a dead
+/// bus can never slow or break the node.
+fn flux_webhook(event: &str, detail: &str) {
+    let Ok(url) = std::env::var("SIGIL_TOP_WEBHOOK") else { return };
+    if url.trim().is_empty() { return; }
+    let body = format!(
+        r#"{{"source":"sigil-top","version":"{}","flux_rev":"{}","event":{},"detail":{}}}"#,
+        VERSION, FLUX_REV,
+        serde_json::to_string(event).unwrap_or_else(|_| "\"?\"".into()),
+        serde_json::to_string(detail).unwrap_or_else(|_| "\"\"".into()),
+    );
+    std::thread::spawn(move || {
+        let _ = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(4))
+            .build()
+            .and_then(|c| c.post(&url).header("content-type", "application/json").body(body).send());
+    });
+}
+
+/// LANE-C: the pinned SIGIL release signing public key (ed25519, 32 B hex). The auto-updater
+/// REFUSES any manifest not signed by the matching secret — so a compromised release server / MITM
+/// that serves a matching-blake3 (but attacker-built) binary can't push it: without the secret it
+/// can't forge the manifest signature, and the blake3 the client trusts comes ONLY from a signed
+/// manifest. The secret lives solely on the release host (`/root/.config/sigil/release-sign.seed`,
+/// chmod 600). Ed25519 today; the sigil-oauth IssuerSigner abstraction lets a SQIsign-L5 PQ key
+/// replace it without a wire change once flux-sqisign is in the cross-build.
+const RELEASE_SIGN_PUBKEY_HEX: &str =
+    "150fb84d4b2c83e6e81a27f629e60686acf8663be5ce73f46208cce4f5686402";
+
+/// LANE-C: verify the release manifest is signed by [`RELEASE_SIGN_PUBKEY_HEX`]. The detached
+/// signature is published at `<manifest>.sig` as 128-hex (ed25519 over the EXACT manifest bytes).
+/// Returns `Err` (fail-closed → no update) on any missing/invalid signature. Dev bypass:
+/// `SIGIL_UPDATE_INSECURE=1` prints a loud warning and skips the check — never set it on a release.
+fn verify_manifest_sig(manifest_body: &str) -> Result<(), String> {
+    if std::env::var("SIGIL_UPDATE_INSECURE").as_deref() == Ok("1") {
+        eprintln!("⚠ SIGIL_UPDATE_INSECURE=1 — release-manifest signature NOT verified (DEV ONLY — never on a release)");
+        return Ok(());
+    }
+    let pk: [u8; 32] = hex::decode(RELEASE_SIGN_PUBKEY_HEX).ok()
+        .and_then(|v| v.try_into().ok())
+        .ok_or_else(|| "pinned release key malformed".to_string())?;
+    let bust = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs()).unwrap_or(0);
+    let sig_url = format!("{UPDATE_MANIFEST}.sig?t={bust}");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .min_tls_version(reqwest::tls::Version::TLS_1_0)
+        .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION")))
+        .build().map_err(|e| format!("sig client init: {e}"))?;
+    let sig_hex = client.get(&sig_url).send().and_then(|r| r.error_for_status()).and_then(|r| r.text())
+        .map_err(|e| format!("no release-manifest signature ({e}) — refusing update"))?;
+    let sig: [u8; 64] = hex::decode(sig_hex.trim()).ok()
+        .and_then(|v| v.try_into().ok())
+        .ok_or_else(|| "release-manifest signature malformed (want 128-hex ed25519)".to_string())?;
+    if sigil_oauth::verify_sig(&pk, manifest_body.as_bytes(), &sig) {
+        Ok(())
+    } else {
+        Err("MANIFEST SIGNATURE INVALID — refusing update (possible compromised release server)".into())
     }
 }
 
@@ -1344,11 +1652,18 @@ fn fetch_latest() -> Result<Release, String> {
     for _ in 0..2 {
         match client.get(&url).send().and_then(|r| r.error_for_status()) {
             Ok(resp) => match resp.text() {
-                Ok(body) => match serde_json::from_str::<Release>(&body) {
-                    Ok(rel) => return Ok(rel),
-                    Err(e) => last = format!("parse: {e} [{}B: {:?}]",
-                        body.len(), body.chars().take(48).collect::<String>()),
-                },
+                Ok(body) => {
+                    // LANE-C: AUTHENTICATE the manifest before we trust a single field (incl. the
+                    // blake3 we'd verify the binary against). A bad signature is fatal — fail closed.
+                    if let Err(e) = verify_manifest_sig(&body) {
+                        return Err(e);
+                    }
+                    match serde_json::from_str::<Release>(&body) {
+                        Ok(rel) => return Ok(rel),
+                        Err(e) => last = format!("parse: {e} [{}B: {:?}]",
+                            body.len(), body.chars().take(48).collect::<String>()),
+                    }
+                }
                 Err(e) => last = format!("read body: {e}"),
             },
             Err(e) => {
@@ -1427,6 +1742,16 @@ fn check_fleet_health(nodes: &mut Vec<FleetNode>) {
         Err(_) => return,
     };
     for node in nodes.iter_mut() {
+        // v0.50: the old https://:8181 status endpoint is long dead (fleet showed a
+        // permanent 0/2). HONEST probe: a TCP connect to the node's real listener
+        // (:9501) proves the process is up; we claim nothing we can't read.
+        let alive = std::net::TcpStream::connect_timeout(
+            &format!("{}:{}", node.addr, node.port).parse().unwrap_or_else(|_| std::net::SocketAddr::from(([0,0,0,0],0))),
+            Duration::from_secs(3),
+        ).is_ok();
+        node.online = alive;
+        if alive { continue; }
+        // legacy HTTPS status fallback (in case an old fleet node still serves it)
         let url = format!("https://{}:{}/api/v1/status", node.addr, 8181);
         match client.get(&url).send() {
             Ok(resp) => {
@@ -1471,12 +1796,83 @@ fn version_gt(a: &str, b: &str) -> bool {
 fn mine_url() -> String {
     std::env::var("SIGIL_MINE_URL").unwrap_or_else(|_| "https://sigilgraph.fluxapp.xyz:8447/v1/mine".into())
 }
-/// A stable per-install miner wallet (64-hex): BLAKE3 of the hostname, or `SIGIL_MINE_WALLET`.
-fn miner_wallet() -> String {
-    std::env::var("SIGIL_MINE_WALLET").ok().filter(|s| s.len() == 64).unwrap_or_else(|| {
-        let host = std::env::var("HOSTNAME").or_else(|_| std::env::var("HOST")).unwrap_or_else(|_| "sigil-top".into());
-        blake3::hash(format!("sigil-top-miner:{host}").as_bytes()).to_hex().to_string()
-    })
+/// LANE-N: where the operator's chosen mining wallet is persisted. The [W] wallet
+/// posts its (keyed) address here via `/api/v1/use-wallet` so mining credits the
+/// wallet the operator actually sees AND holds the private key for.
+pub(crate) fn mine_wallet_path() -> String { format!("{}/.flux/sigil-mine-wallet", flux_home()) }
+
+/// A 64-hex lowercase/upper address (the node keys balances by this).
+fn valid_addr(s: &str) -> bool {
+    let s = s.trim();
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// LANE-N: resolve the mining-credit wallet. PURE (for unit tests) — real I/O is in
+/// [`miner_wallet`]. Priority: explicit `SIGIL_MINE_WALLET` → the operator's chosen
+/// wallet (persisted by the [W] wallet) → a stable per-host hash. The first two are
+/// KEYED wallets the operator controls and sees in [W]; the hostname hash is an
+/// UNSPENDABLE last resort (no private key) kept only so a fresh box still mines to a
+/// stable address. This fixes the "Mining tab shows a balance but [W] shows 0" split:
+/// both now point at the same keyed address.
+fn resolve_mine_wallet(env_override: Option<&str>, chosen: Option<&str>, host: &str) -> String {
+    if let Some(w) = env_override { if valid_addr(w) { return w.trim().to_string(); } }
+    if let Some(w) = chosen { if valid_addr(w) { return w.trim().to_string(); } }
+    blake3::hash(format!("sigil-top-miner:{host}").as_bytes()).to_hex().to_string()
+}
+
+/// The miner-credit wallet (64-hex). See [`resolve_mine_wallet`] for the priority.
+pub(crate) fn miner_wallet() -> String {
+    let env = std::env::var("SIGIL_MINE_WALLET").ok();
+    let chosen = std::fs::read_to_string(mine_wallet_path()).ok();
+    let host = std::env::var("HOSTNAME").or_else(|_| std::env::var("HOST")).unwrap_or_else(|_| "sigil-top".into());
+    resolve_mine_wallet(env.as_deref(), chosen.as_deref(), &host)
+}
+
+/// LANE-N: persist the operator's chosen mining wallet (called from the local API when
+/// the [W] wallet claims "mine to me"). Validates the 64-hex shape; rejects garbage.
+pub(crate) fn set_mine_wallet(addr: &str) -> bool {
+    if !valid_addr(addr) { return false; }
+    let _ = std::fs::create_dir_all(format!("{}/.flux", flux_home()));
+    std::fs::write(mine_wallet_path(), addr.trim()).is_ok()
+}
+
+/// The miner's SIGNING keypair. Required now that `/mine` is auth-gated (audit C1:
+/// a miner must prove control of the credited wallet — you can no longer mine to an
+/// address whose key you don't hold, e.g. the legacy hostname-hash fallback). Source:
+/// `SIGIL_MINE_SEED` (64-hex). Read from the environment only, never persisted (matches
+/// `do_login`'s "never store the secret"). `None` ⇒ mining is disabled in `start_mining`.
+fn miner_keypair() -> Option<Keypair> {
+    let seed_hex = std::env::var("SIGIL_MINE_SEED").ok()?;
+    let seed = hex_to_32(seed_hex.trim())?;
+    Some(Keypair::from_seed(&seed))
+}
+
+#[cfg(test)]
+mod lane_n_tests {
+    use super::resolve_mine_wallet;
+    #[test]
+    fn env_override_wins() {
+        let env = "a".repeat(64);
+        assert_eq!(resolve_mine_wallet(Some(&env), Some(&"b".repeat(64)), "host"), env);
+    }
+    #[test]
+    fn chosen_wallet_beats_hostname() {
+        let chosen = "c".repeat(64);
+        assert_eq!(resolve_mine_wallet(None, Some(&chosen), "host"), chosen);
+    }
+    #[test]
+    fn falls_back_to_stable_hostname_hash() {
+        let r = resolve_mine_wallet(None, None, "host");
+        assert_eq!(r.len(), 64);
+        assert_eq!(r, resolve_mine_wallet(None, None, "host")); // deterministic
+        assert_ne!(r, resolve_mine_wallet(None, None, "other")); // per-host
+    }
+    #[test]
+    fn invalid_inputs_are_ignored() {
+        let host_hash = resolve_mine_wallet(None, None, "host");
+        // too short + non-hex 64 → both rejected → hostname hash
+        assert_eq!(resolve_mine_wallet(Some("short"), Some(&"z".repeat(64)), "host"), host_hash);
+    }
 }
 
 /// Start REAL mining on a background thread: find a BLAKE3 nonce meeting `difficulty_bits`, POST it to
@@ -1486,8 +1882,18 @@ fn miner_wallet() -> String {
 fn start_mining(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> mpsc::Receiver<String> {
     use std::sync::atomic::Ordering;
     let (tx, rx) = mpsc::channel();
-    let (url, wallet) = (mine_url(), miner_wallet());
+    let url = mine_url();
+    let kp = miner_keypair();
     thread::spawn(move || {
+        // /mine is auth-gated (audit C1): the miner must SIGN as the credited wallet.
+        // No seed ⇒ we can't sign ⇒ disable mining instead of burning CPU on shares the
+        // node rejects with "missing 'sig'". Set SIGIL_MINE_SEED=<64-hex> to enable.
+        let Some(kp) = kp else {
+            let _ = tx.send("✗ mining disabled: set SIGIL_MINE_SEED=<64-hex wallet seed>. The node now requires miners to SIGN /mine (audit C1) — mining to an address you don't control is no longer possible.".to_string());
+            return;
+        };
+        let wallet = hex::encode(kp.pubkey());
+        let mut req_nonce: u64 = 0; // strictly-increasing per-wallet replay guard (ms floor)
         let difficulty_bits: u32 = std::env::var("SIGIL_MINE_DIFFICULTY").ok()
             .and_then(|s| s.parse().ok()).unwrap_or(12); // ~4k hashes/share — real PoW, lands fast
         let client = match reqwest::blocking::Client::builder().timeout(Duration::from_secs(8))
@@ -1517,7 +1923,19 @@ fn start_mining(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> mpsc::Re
                 }
             };
             let Some(nonce) = found else { break };
-            let body = format!("{{\"miner\":\"{wallet}\",\"header\":\"{header}\",\"nonce\":{nonce},\"difficulty\":{difficulty_bits},\"reward\":50}}");
+            // Sign the canonical sigil-rpc auth message. MUST byte-match
+            // `sigil_rpc::auth::auth_message`: AUTH_DOMAIN|action|field0|field1|…|nonce=N.
+            // /mine fields = [miner_hex, header, pow_nonce]. req_nonce uses a ms floor so
+            // it strictly increases across submits AND restarts (the node persists the
+            // per-wallet high-water nonce) → a captured share can't be replayed.
+            req_nonce = {
+                let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64).unwrap_or(0);
+                ms.max(req_nonce.wrapping_add(1))
+            };
+            let auth_msg = format!("sigil-rpc/v1|mine|{wallet}|{header}|{nonce}|nonce={req_nonce}");
+            let sig = hex::encode(kp.sign(auth_msg.as_bytes()));
+            let body = format!("{{\"miner\":\"{wallet}\",\"header\":\"{header}\",\"nonce\":{nonce},\"difficulty\":{difficulty_bits},\"reward\":50,\"sig\":\"{sig}\",\"req_nonce\":{req_nonce}}}");
             match client.post(&url).header("Content-Type", "application/json").body(body).send() {
                 Ok(r) => {
                     let txt = r.text().unwrap_or_default();
@@ -1563,6 +1981,11 @@ fn maybe_auto_update(argv: &[String]) -> Option<String> {
         _ => return None, // up to date, channel unreachable, or malformed → just run
     };
     match self_update(&rel) {
+        Ok(msg) if msg.starts_with("staged v") => {
+            // Windows lock-fallback path: a detached helper will move the staged binary over the
+            // install path AFTER this process exits, then relaunch it. Exit now so it can proceed.
+            std::process::exit(0);
+        }
         Ok(_) => {
             // Relaunch into the new binary. self_replace installed the new version AT THE
             // CURRENT EXE PATH, so that's the canonical relaunch target; a versioned copy
@@ -1604,6 +2027,23 @@ fn self_update(rel: &Release) -> Result<String, String> {
             return Err(format!("BLAKE3 mismatch — refusing swap (got {}…)", &got[..12]));
         }
     }
+    // LANE-C v0.50: provenance surfacing. The manifest carries the NEW build's
+    // flux-rev (its fluxc `.proof` stamp). Show it next to the running FLUX_REV so
+    // the operator can SEE provenance actually changed across the swap — a "new"
+    // release whose flux-rev equals ours is suspicious (re-published same artifact).
+    // Informational only: BLAKE3 above is the gate; this never blocks the swap.
+    let prov = {
+        let cur = FLUX_REV.strip_prefix("full:").unwrap_or(FLUX_REV);
+        let newr = rel.flux_rev.strip_prefix("full:").unwrap_or(&rel.flux_rev);
+        let short = |s: &str| s.chars().take(10).collect::<String>();
+        if newr.is_empty() || newr == "unstamped" {
+            " · prov: manifest unstamped".to_string()
+        } else if short(newr) == short(cur) {
+            format!(" · ⚠ prov UNCHANGED {}", short(newr))
+        } else {
+            format!(" · prov {}→{}", short(cur), short(newr))
+        }
+    };
     // Save beside the current exe as a versioned binary.
     // Windows: cannot swap running .exe; save as sigil-top-v{VERSION}.exe.
     // Unix: try atomic self-replace; fall back to versioned binary beside.
@@ -1626,12 +2066,78 @@ fn self_update(rel: &Release) -> Result<String, String> {
     if let (Ok(cur), Some(prev)) = (std::env::current_exe(), prev_binary_path()) {
         let _ = std::fs::copy(&cur, &prev);
     }
+    let mb = bytes.len() as f64 / 1.048576e6;
+    // Common fast path (both platforms): atomic in-place self-replace. On Windows the
+    // self_replace crate does the "rename the running .exe out of the way" trick itself.
     if self_replace::self_replace(&beside).is_ok() {
         let _ = std::fs::remove_file(&beside);
-        return Ok(format!("swapped v{VERSION} -> v{} ({:.1} MB) — restart to run",
-            rel.version, bytes.len() as f64 / 1.048576e6));
+        return Ok(format!("swapped v{VERSION} -> v{} ({mb:.1} MB){prov} — restart to run", rel.version));
     }
-    Ok(format!("saved v{} ({:.1} MB) -> {}", rel.version, bytes.len() as f64 / 1.048576e6, beside.display()))
+    // self_replace FAILED.
+    // Windows: the running .exe was locked (AV / image map / dir perms) and the old code
+    // silently fell through to "saved … beside" — the install path kept the OLD binary, the
+    // relaunch pre-flighted that OLD binary, saw a version mismatch, aborted, and the operator
+    // drifted (DeepSeek root-cause: "running .exe is locked → rename fails → silent skip →
+    // version drift"). Escalate instead of drifting. See windows_swap_fallback().
+    #[cfg(windows)]
+    { return windows_swap_fallback(&beside, rel, mb, &prov); }
+    // Unix: self_replace almost never fails; keep the staged versioned binary beside us and let
+    // relaunch_new_binary fall back to it.
+    #[cfg(not(windows))]
+    Ok(format!("saved v{} ({mb:.1} MB){prov} -> {}", rel.version, beside.display()))
+}
+
+/// Windows lock-failure fallback for [`self_update`]. `self_replace` could not swap the running
+/// `.exe` (locked image / AV scan / directory perms). DeepSeek-designed escalation, fail-loud:
+///   1. rename the running exe → `…exe.old` (Windows permits renaming a running image on the same
+///      volume), then copy the staged bytes into the original install path → instant in-place swap
+///      (relaunch_new_binary then re-execs the install path exactly as in the common case);
+///   2. if that fails, write a DETACHED helper `.bat` that waits for THIS pid to exit, moves the
+///      staged binary over the install path, relaunches it, and self-deletes — applied on exit;
+///   3. if NEITHER works, return `Err` so the [U] handler shows a LOUD failure (never a silent
+///      "saved" that drifts the version).
+/// The `…exe.old` left behind by path 1 is cleaned up on the next boot (see main()).
+#[cfg(windows)]
+fn windows_swap_fallback(beside: &std::path::Path, rel: &Release, mb: f64, prov: &str)
+    -> Result<String, String>
+{
+    use std::os::windows::process::CommandExt;
+    let install = INSTALL_EXE.get().cloned()
+        .or_else(|| std::env::current_exe().ok())
+        .ok_or_else(|| "cannot resolve install path for swap".to_string())?;
+    // (1) rename-out + copy-in.
+    let old = install.with_extension("exe.old");
+    let _ = std::fs::remove_file(&old); // clear any stale .old first (best-effort)
+    if std::fs::rename(&install, &old).is_ok() {
+        if std::fs::copy(beside, &install).is_ok() {
+            let _ = std::fs::remove_file(beside);
+            return Ok(format!("swapped v{VERSION} -> v{} ({mb:.1} MB){prov} — restart to run", rel.version));
+        }
+        // copy failed AFTER the rename → restore the old binary so we don't brick the install.
+        let _ = std::fs::rename(&old, &install);
+    }
+    // (2) detached helper that applies the swap once we exit.
+    let pid = std::process::id();
+    let bat = std::env::temp_dir().join(format!("sigil-top-swap-{pid}.bat"));
+    // CRLF + quoted paths (the install dir routinely has spaces, e.g. "Viktor S. Kristensen").
+    // Wait for our PID to vanish, move staged→install, relaunch in a fresh console, self-delete.
+    let script = format!(
+        "@echo off\r\n\
+         :wait\r\n\
+         tasklist /FI \"PID eq {pid}\" 2>nul | find \"{pid}\" >nul\r\n\
+         if not errorlevel 1 ( timeout /t 1 /nobreak >nul & goto wait )\r\n\
+         move /Y \"{src}\" \"{dst}\" >nul\r\n\
+         start \"\" \"{dst}\"\r\n\
+         del \"%~f0\"\r\n",
+        pid = pid, src = beside.display(), dst = install.display());
+    std::fs::write(&bat, &script).map_err(|e| format!("windows swap (locked exe): cannot write helper ({e})"))?;
+    // DETACHED_PROCESS (0x8) | CREATE_NEW_PROCESS_GROUP (0x200): outlives us, no inherited console.
+    std::process::Command::new("cmd")
+        .args(["/C", &bat.to_string_lossy()])
+        .creation_flags(0x0000_0008 | 0x0000_0200)
+        .spawn()
+        .map_err(|e| format!("windows swap (locked exe): cannot spawn helper ({e})"))?;
+    Ok(format!("staged v{} ({mb:.1} MB){prov} — applying on exit", rel.version))
 }
 
 /// v0.25: pre-flight a freshly-swapped binary BEFORE handing off to it. `exec`/`spawn+exit`
@@ -1691,20 +2197,46 @@ fn preflight_binary(target: &std::path::Path) -> Result<String, String> {
 /// "app vanishes when it tries to restart after sync". Returns `false` on any non-handoff
 /// path; on unix a successful pre-flight + `exec` never returns.
 fn relaunch_new_binary(version: &str) -> bool {
-    let exe = match std::env::current_exe() { Ok(e) => e, Err(_) => return false };
+    // Use the startup-captured install path — current_exe() points at the
+    // moved-aside OLD inode after self_replace (a "(deleted)" path), which would
+    // make the pre-flight spawn fail with ENOENT even though the NEW binary is in
+    // place. Fall back to current_exe() only if the early capture somehow missed.
+    let exe = match INSTALL_EXE.get().cloned().or_else(|| std::env::current_exe().ok()) {
+        Some(e) => e, None => return false,
+    };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let ver_exe = exe.with_file_name(format!(
         "sigil-top-v{}{}", version, if cfg!(windows) { ".exe" } else { "" }));
-    let target = if ver_exe.exists() { ver_exe } else { exe.clone() };
+    // Prefer the original install path (now holding the new binary); the versioned
+    // sibling is a fallback only if it still exists and current_exe() is unusable.
+    let target = if exe.exists() { exe.clone() }
+        else if ver_exe.exists() { ver_exe }
+        else { exe.clone() };
 
     // GATE: never hand off to an unverified binary. A failed pre-flight means the swapped
     // binary can't start — abort the relaunch and stay alive on the current (working) image.
     match preflight_binary(&target) {
         Ok(reported) => {
-            // Sanity: the new binary should report the version we just installed. A mismatch
-            // (e.g. self_replace silently no-op'd) isn't fatal — it still STARTS — but log it.
-            if !reported.is_empty() && reported != version {
-                eprintln!("  [update] pre-flight: new binary reports v{reported}, expected v{version} — relaunching anyway");
+            // v0.56 FAIL-CLOSED: the new binary MUST report the version the channel advertised.
+            // A mismatch means the swap didn't take (self_replace no-op'd → still the OLD binary)
+            // or the manifest version disagrees with the artifact — relaunching either would run
+            // the WRONG version (operator hit "reports v0.40.4, expected v0.42.0 — relaunching
+            // anyway"). Abort the handoff AND revert to the rollback image so the next start is
+            // known-good, instead of silently running a mismatched binary.
+            //
+            // v0.59 LANE-O (c): but DON'T abort a genuinely-newer swap just because `version`
+            // (= the possibly-STALE app.latest) disagrees. The channel can move 0.57<->0.58 while
+            // app.latest still caches the older number; if the staged binary reports a version
+            // NEWER than the one we're running, the swap is GOOD — relaunch it. Only revert when
+            // the staged binary is NOT an upgrade over the current image (a real no-op / downgrade).
+            if !reported.is_empty() && reported != version && !version_gt(&reported, VERSION) {
+                eprintln!("  [update] relaunch ABORTED — new binary reports v{reported}, expected v{version} (version mismatch); reverting to the rollback image and staying on the current version. Restart manually once the channel is fixed.");
+                if let Some(prev) = prev_binary_path() {
+                    if prev.exists() && self_replace::self_replace(&prev).is_err() {
+                        let _ = std::fs::copy(&prev, &target);
+                    }
+                }
+                return false;
             }
         }
         Err(e) => {
@@ -1727,10 +2259,48 @@ fn relaunch_new_binary(version: &str) -> bool {
     #[cfg(not(unix))]
     {
         // Windows/macOS can't replace a running image — spawn the (pre-flighted) new one,
-        // then exit, but ONLY if the spawn succeeded (else return false, don't exit on the user).
-        if std::process::Command::new(&target).args(&args).spawn().is_ok() {
-            std::process::exit(0);
+        // then exit. v0.59 LANE-O: the exe we JUST self_replace'd is frequently still
+        // briefly LOCKED right after the swap (AV scan / the old file handle settling), so a
+        // single spawn() fails → we used to return false and silently NEVER restart (the
+        // operator's "swapped … restart to run, but it never restarts" frustration). Settle,
+        // then RETRY a few times so the lock clears.
+        use std::thread::sleep;
+        use std::time::Duration;
+        sleep(Duration::from_millis(300)); // let self_replace's handle + any AV scan settle
+        // v0.75.2: on Windows relaunch into a FRESH console (CREATE_NEW_CONSOLE) so the new
+        // binary gets its OWN visible window — a plain spawn() SHARES the parent's console,
+        // which the launching .bat then reclaims for its `pause`, leaving the new TUI invisible
+        // ("swapped but never reopens"). macOS keeps the plain spawn.
+        for _ in 0..6 {
+            #[cfg(windows)]
+            let spawned = {
+                use std::os::windows::process::CommandExt;
+                std::process::Command::new(&target).args(&args)
+                    .creation_flags(0x0000_0010 /* CREATE_NEW_CONSOLE */).spawn().is_ok()
+            };
+            #[cfg(not(windows))]
+            let spawned = std::process::Command::new(&target).args(&args).spawn().is_ok();
+            if spawned {
+                sleep(Duration::from_millis(300));
+                std::process::exit(0);
+            }
+            sleep(Duration::from_millis(300));
         }
+        // Fallback: `cmd /C start` with a QUOTED target path — the install dir has SPACES
+        // ("Viktor S. Kristensen"), and start parses an unquoted path only up to the first
+        // space, so the old unquoted form silently failed. Quote it so start runs the real exe.
+        #[cfg(windows)]
+        {
+            if let Some(t) = target.to_str() {
+                let inner = format!("start \"\" \"{}\" {}", t, args.join(" "));
+                if std::process::Command::new("cmd").args(["/C", &inner]).spawn().is_ok() {
+                    sleep(Duration::from_millis(400));
+                    std::process::exit(0);
+                }
+            }
+        }
+        // Every path failed → return false so the caller surfaces an HONEST "couldn't
+        // auto-restart — please relaunch manually" (and does NOT overwrite it, see [U] handler).
         false
     }
 }
@@ -1778,6 +2348,14 @@ struct App {
     mine_hashrate: f64,                                 // v0.2.35: live GH/s from the miner thread
     mine_hashes: u64,                                   // v0.2.35: cumulative hashes computed
     wallet_balance: u128,                               // v0.2.35: miner wallet balance from feed
+    mine_stats: std::sync::Arc<std::sync::Mutex<MinerStats>>, // v0.37: REAL dual-lane engine stats (shared w/ in-process miner thread)
+    mine_desired_gpu: std::sync::Arc<std::sync::atomic::AtomicBool>, // v0.37: GPU/CPU toggle for the engine
+    mine_gpu_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,  // v0.37: engine signals GPU init failure -> CPU fallback
+    mine_gpu_warned: bool,  // v0.90: one-time thermal/opt-in warning shown on first [G]-enable
+    bps_ema: f64,            // v0.37: smoothed network block-rate (raw bps blinks 0<->250)
+    bps_zero_streak: u32,    // consecutive zero-bps polls before showing honest idle
+    welcome_until: Option<Instant>, // LANE-U v0.67: first-launch welcome modal (SIGIL emblem + giant F); any key or 14s clears it
+    idle_store: Option<block_store::BlockStore>, // v0.40.3: parked store so [F] can launch sync ON DEMAND
     full_sync: bool,                                    // [F] opt-in heavy full sync (default = 10ms lightweight verify)
     full_sync_height: u64,                              // blocks downloaded so far in full sync
     full_sync_target: u64,                              // target height for full sync
@@ -1790,6 +2368,21 @@ struct App {
     /// Post-update logo splash (flux updater return UX).
     splash_until: Option<Instant>,
     splash_frame: u8,
+    // ── LANE-B v0.50: SIGIL rune animation tied to update availability ──────────
+    // A floating overlay band — a sigil drawing itself line-by-line then fading.
+    // Frame-counter + elapsed-envelope, driven entirely off the existing render
+    // tick (never blocks input/render). Plays every 10 min when an update is
+    // available, every 2 h otherwise. Timestamps live in-process only (no disk).
+    rune_until: Option<Instant>,    // Some(end) while the band is on screen
+    rune_started: Option<Instant>,  // when the current play began (draw-on/fade envelope)
+    rune_frame: u16,                // shimmer phase, bumped each tick like splash_frame
+    rune_last_played: Instant,      // last time a play started (resets per process)
+    // ── LANE-B v0.50: Mining-tab depth, derived App-side from MinerStats deltas ──
+    // engine.rs / MinerStats are LANE-C's; we only OBSERVE them here, never mutate.
+    accept_hist: std::collections::VecDeque<u8>,                   // accept-rate % samples (sparkline)
+    last_accept_sample: Instant,                                   // throttle accept sampling
+    mined_recent: std::collections::VecDeque<(u64, f64, Instant)>, // (mine-chain height, solve ms, when), newest first
+    mine_shares_seen: u64,          // last shares_ok observed → detect freshly mined blocks
     // v0.6.0: Cortex MCP combo integration — AI agent registry + optimization engine
     cortex: Option<Cortex>,
     agents: Vec<AiAgent>,
@@ -1850,6 +2443,23 @@ impl App {
                   Some(Instant::now() + Duration::from_millis(1800))
               } else { None },
               splash_frame: 0,
+              // LANE-B v0.50: rune animation — first play deferred a full interval
+              // (no flash on launch; the post-update splash already covers just-updated).
+              rune_until: None,
+              rune_started: None,
+              rune_frame: 0,
+              // SIGIL_RUNE_DEMO=1 forces the first play immediately (QA/demo); off by
+              // default so production launches don't flash (interval governs replays).
+              rune_last_played: if std::env::var("SIGIL_RUNE_DEMO").ok().as_deref() == Some("1") {
+                  instant_ago(86_400)
+              } else {
+                  Instant::now()
+              },
+              // LANE-B v0.50: mining-depth history (App-side observers of MinerStats)
+              accept_hist: std::collections::VecDeque::new(),
+              last_accept_sample: instant_ago(10),
+              mined_recent: std::collections::VecDeque::new(),
+              mine_shares_seen: 0,
               // v0.6.0: Cortex MCP combo integration
               cortex: None,
               agents: default_agent_registry(),
@@ -1870,8 +2480,8 @@ impl App {
               serve_stop: None,
               // v0.7.0: Fleet starts with known bootstrap peers
               fleet_nodes: vec![
-                  FleetNode { name: "Delta".into(), addr: "5.79.79.158".into(), port: 9003, online: false, height: 0, version: String::new(), uptime_secs: 0 },
-                  FleetNode { name: "Epsilon".into(), addr: "89.149.241.126".into(), port: 9003, online: false, height: 0, version: String::new(), uptime_secs: 0 },
+                  FleetNode { name: "Delta".into(), addr: "5.79.79.158".into(), port: 9501, online: false, height: 0, version: String::new(), uptime_secs: 0 },
+                  FleetNode { name: "Epsilon".into(), addr: "89.149.241.126".into(), port: 9501, online: false, height: 0, version: String::new(), uptime_secs: 0 },
               ],
               fleet_last_check: instant_ago(3600),
               refresh_rx: None,
@@ -1879,9 +2489,106 @@ impl App {
               offline_since: None,
               offline_streak: 0,
               last_serve_check: Instant::now(),
+              mine_stats: std::sync::Arc::new(std::sync::Mutex::new(MinerStats::default())),
+              mine_desired_gpu: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+              mine_gpu_failed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+              mine_gpu_warned: false,
+              bps_ema: 0.0,
+              bps_zero_streak: 0,
+              welcome_until: Some(Instant::now() + Duration::from_secs(14)),
+              idle_store: None,
               tab: Tab::Node,
               swarm: SwarmView::default(),
               last_swarm_load: instant_ago(10),
+        }
+    }
+
+    /// LANE-B v0.50: advance + schedule the SIGIL rune animation. Pure frame-state,
+    /// called once per render tick — never blocks input. Starts a ~4 s play every
+    /// 10 min when an update is available, every 2 h otherwise (subtle alive-pulse),
+    /// and never overlaps the post-update splash.
+    fn tick_rune(&mut self) {
+        let now = Instant::now();
+        // currently playing → just bump the shimmer phase (like splash_frame).
+        if self.rune_until.map(|u| now < u).unwrap_or(false) {
+            self.rune_frame = self.rune_frame.wrapping_add(1);
+            return;
+        }
+        // a play just ended → drop the handles so we stop counting as "animating".
+        if self.rune_until.is_some() {
+            self.rune_until = None;
+            self.rune_started = None;
+        }
+        // never overlap the post-update logo splash.
+        if self.splash_until.map(|u| now < u).unwrap_or(false) { return; }
+        let interval = if version_gt(&self.latest, VERSION) {
+            RUNE_INTERVAL_UPDATE
+        } else {
+            RUNE_INTERVAL_IDLE
+        };
+        if now.saturating_duration_since(self.rune_last_played) >= interval {
+            self.rune_until = Some(now + RUNE_PLAY);
+            self.rune_started = Some(now);
+            self.rune_frame = 0;
+            self.rune_last_played = now;
+        }
+    }
+
+    /// LANE-B v0.50: true while the rune band is on screen (drives the 33/66 ms cadence).
+    fn rune_active(&self) -> bool {
+        self.rune_until.map(|u| Instant::now() < u).unwrap_or(false)
+    }
+
+    /// LANE-B v0.50: observe MinerStats and accumulate render-side history for the
+    /// Mining tab — accept-rate sparkline + a ring of recently-mined MINE-CHAIN
+    /// blocks. Read-only on the shared MinerStats (engine.rs is LANE-C's); all the
+    /// derived state lives in App fields we own. Cheap; called each tick.
+    fn tick_mining_history(&mut self) {
+        let now = Instant::now();
+        let (ok, bad, height, solve_ms) = match self.mine_stats.lock() {
+            Ok(s) => (s.shares_ok, s.shares_bad, s.last_height, s.last_solve_ms),
+            Err(_) => return,
+        };
+        // a freshly accepted share == a new block on our own mine-chain.
+        if ok > self.mine_shares_seen {
+            self.mined_recent.push_front((height, solve_ms, now));
+            while self.mined_recent.len() > 12 { self.mined_recent.pop_back(); }
+            self.mine_shares_seen = ok;
+        } else if ok < self.mine_shares_seen {
+            // engine restarted (counters reset) → re-baseline, don't log phantom blocks.
+            self.mine_shares_seen = ok;
+        }
+        // sample the accept-rate every ~3 s while mining (CP437-safe shade sparkline).
+        if self.mining && now.saturating_duration_since(self.last_accept_sample) >= Duration::from_secs(3) {
+            let total = ok + bad;
+            let acc = if total > 0 { ((ok as f64 / total as f64) * 100.0).round() as u8 } else { 100 };
+            self.accept_hist.push_back(acc.min(100));
+            while self.accept_hist.len() > 80 { self.accept_hist.pop_front(); }
+            self.last_accept_sample = now;
+        }
+    }
+
+    /// v0.37: start/stop the REAL in-process dual-lane miner — the SAME engine
+    /// (flux_miner::engine::supervisor) as the standalone `sigil-miner` exe. One
+    /// binary is now node + miner: no separate exe to run alongside. [g] flips GPU/CPU.
+    fn toggle_engine_mining(&mut self) {
+        self.mining = !self.mining;
+        if self.mining {
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (url, wallet) = (engine_node_url(), miner_wallet());
+            let (st, dg, gf) = (self.mine_stats.clone(), self.mine_desired_gpu.clone(), self.mine_gpu_failed.clone());
+            let stopc = stop.clone();
+            std::thread::spawn(move || engine::supervisor(url, wallet, st, stopc, dg, gf));
+            self.mine_stop = Some(stop);
+            self.tab = Tab::Mining;
+            self.toast = "▲ MINING STARTED — dual-lane BLAKE4 Φ + VDF Ω, in-process".into();
+            flux_webhook("mining_start", &format!("engine supervisor up (gpu_wanted={})", self.mine_desired_gpu.load(std::sync::atomic::Ordering::Relaxed)));
+            self.toast_sticky = true;
+        } else {
+            if let Some(s) = self.mine_stop.take() { s.store(true, std::sync::atomic::Ordering::Relaxed); }
+            self.toast = "■ mining stopped".into();
+            flux_webhook("mining_stop", "engine stopped");
+            self.toast_sticky = true;
         }
     }
 
@@ -1899,12 +2606,42 @@ impl App {
         }
     }
     fn resync(&mut self) {
-        // Full resync: clear local caches, force-fetch fresh state from all sources.
+        // v0.37: a resync that ACTUALLY restarts the sync surface. The old one only
+        // cleared the feed list (which the SYNC hero ignores), so [y] looked like a
+        // no-op. Now we reset every sync-progress signal the hero reads — counters,
+        // the trailing-rate window, and the Kalman ETA filter — re-assert the tip
+        // target to the engine, and kick a fresh tip/status fetch.
         self.blocks.clear();
         self.synced_height = 0;
         self.verify = None;
-        self.toast = "⟳ Resync — clearing caches, re-fetching chain state…".into();
-        self.toast_sticky = false;
+        self.p2p_blocks_synced = 0;
+        self.p2p_rate = 0.0;
+        self.p2p_rate_samples.clear();
+        self.sync_kf = Kalman1D::new();
+        self.full_sync_height = 0;
+        self.full_sync_target = 0;
+        self.full_sync_active = false;
+        if let Some(ref p2p) = self.p2p_sync {
+            // re-arm the target so the hero shows progress-to-tip again and the
+            // engine re-checks it is tracking the latest tip.
+            p2p.set_known_tip(self.st.height.max(self.target_height));
+            self.toast = "⟳ RESYNC — sync restarted: counters, rate + ETA reset, re-fetching tip".into();
+        } else if let Some(store) = self.idle_store.take() {
+            // v0.71.1: in light monitor [Y] was a silent no-op with a lying toast —
+            // there was no engine to resync. Now it STARTS the engine (same path
+            // as F) so resync always resyncs.
+            let p2p = block_sync::P2PBlockSync::launch(store, true);
+            p2p.set_known_tip(self.st.height.max(self.target_height));
+            self.p2p_sync = Some(p2p);
+            // 0.77: the mode file now means full-ARCHIVE ([F]) specifically — [Y] starts
+            // the light engine, so persist "light" (was "full", which would have made the
+            // next restart launch a genesis archive the operator never asked for).
+            persist_sync_mode("light");
+            self.toast = "⟳ RESYNC — engine STARTED (was light monitor), live backfill running".into();
+        } else {
+            self.toast = "✗ resync: sync store unavailable — restart the app".into();
+        }
+        self.toast_sticky = true; // confirmation survives mining/refresh noise (was vanishing instantly)
         self.refresh();
     }
     /// Back-compat shim: callers that used to block now kick off an async refresh.
@@ -1956,6 +2693,20 @@ impl App {
     /// UI thread. This is the non-network tail of the old `refresh`.
     fn apply_refresh(&mut self, out: RefreshOutcome) {
         self.st = out.st;
+        // v0.37: smooth the node jumpy blocks_per_sec (it blinks between 0 and
+        // ~250-300 between its own measurement windows) so the MINING / NETWORK
+        // POWER card always shows steady production. EMA on real samples; HOLD the
+        // last rate through brief zero-gaps; fall to honest idle only after a
+        // sustained run of zero polls (a genuine stop).
+        let raw_bps = self.st.blocks_per_sec;
+        if raw_bps > 0.0 {
+            self.bps_ema = if self.bps_ema <= 0.0 { raw_bps } else { self.bps_ema * 0.7 + raw_bps * 0.3 };
+            self.bps_zero_streak = 0;
+        } else {
+            self.bps_zero_streak += 1;
+            if self.bps_zero_streak > 12 { self.bps_ema = 0.0; }
+        }
+        self.st.blocks_per_sec = self.bps_ema;
         self.online = out.online;
         // v0.10.5.1: track offline → online transitions for backoff + banner.
         if out.online {
@@ -2011,7 +2762,12 @@ impl App {
             });
             self.update_rx = Some(rx);
         }
-        self.target_height = self.st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(self.st.height);
+        // v0.40.2: the API fallback is the rpcd's MINING chain (a few thousand
+        // blocks) and carries no `tip` object — never let it clobber the
+        // produce-chain tip the feed gave us (the "tip 1,495" phantom). A tip
+        // DROP is only believed when the verified feed tip itself reports it.
+        let fresh_tip = self.st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(self.st.height);
+        self.target_height = if self.st.tip.is_some() { fresh_tip } else { fresh_tip.max(self.target_height) };
         // verify the tip (verify-don't-trust) and advance the synced height
         self.verify = self.st.tip.as_ref().map(verify_tip);
         if let Some(v) = self.verify.as_ref() {
@@ -2074,6 +2830,7 @@ fn record_boot_attempt() -> u32 {
 }
 /// Clear the boot marker = "this version reached a healthy run".
 fn mark_boot_healthy() {
+    flux_webhook("healthy", "boot survived HEAL_SECS");
     if let Some(p) = boot_marker_path() { let _ = std::fs::remove_file(p); }
 }
 /// Arm the detached "survived HEAL_SECS → healthy" timer (decoupled from the UI loop, so a
@@ -2082,9 +2839,27 @@ fn mark_boot_healthy() {
 fn arm_heal_timer() {
     std::thread::spawn(|| { std::thread::sleep(Duration::from_secs(HEAL_SECS)); mark_boot_healthy(); });
 }
-/// At dashboard startup: detect a crash-loop of THIS version and auto-revert to the backed-up
-/// previous binary. Returns true if it reverted+relaunched (caller should return); false to run.
+/// At dashboard startup: record the boot attempt + arm the heal timer, then ALWAYS proceed.
+///
+/// LANE-Z: this used to AUTO-REVERT to the previous binary + re-exec after `CRASH_STRIKES`
+/// unhealed boots. On Windows that was a foot-gun: a normal double-clicked console that exits
+/// before `HEAL_SECS` (or any quick exit) accrued a "strike" every launch, so after a few launches
+/// the guard silently DOWNGRADED to an older binary AND spawned a detached relaunch — the
+/// "won't start / blank / runs an older version invisibly" regression. The updater now re-execs
+/// ONLY after a real [U] update to a STRICTLY NEWER version; crash recovery is the explicit
+/// `sigil-top revert` command. So a clean launch reaches run_tui directly: exactly ONE main()
+/// entry, no auto-revert, no downgrade, no detached child. Returns false (always run).
 fn crashloop_guard() -> bool {
+    let _ = record_boot_attempt(); // kept for diagnostics (boot marker) + the manual `revert` button
+    arm_heal_timer();
+    false
+}
+
+/// Retained for reference / a possible opt-in future flag — the OLD auto-revert path. NOT called
+/// from the launch path any more (see `crashloop_guard`). `#[allow(dead_code)]` so it documents the
+/// behavior without warning.
+#[allow(dead_code)]
+fn crashloop_auto_revert() -> bool {
     let strikes = record_boot_attempt();
     if strikes < CRASH_STRIKES { arm_heal_timer(); return false; }
     let prev = match prev_binary_path() { Some(p) if p.exists() => p, _ => {
@@ -2136,13 +2911,15 @@ fn measure_eclipse_k(tip_height: u64, tip_ok: bool) -> (u32, Vec<(String, bool)>
     ];
     let mut sources: Vec<(String, bool)> = vec![("node (verified)".into(), tip_ok)];
     let marker = tip_height.to_string();
-    if let Ok(client) = reqwest::blocking::Client::builder().timeout(Duration::from_millis(2200))
-        .min_tls_version(reqwest::tls::Version::TLS_1_0).build() {
+    // 0.77: shared pooled client — was a fresh Client per eclipse-k measurement.
+    {
+        let client = &*HTTP;
         for (name, base) in resolvers {
             let url = format!("{base}?name={ANCHOR}&type=TXT");
             let agree = client
                 .get(&url)
                 .header("accept", "application/dns-json")
+                .timeout(Duration::from_millis(2200))
                 .send()
                 .ok()
                 .and_then(|r| r.text().ok())
@@ -2168,6 +2945,24 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // the first probe is in flight while crossterm sets up; pre-TUI prints go to stderr
     // (IN_TUI is still false), which is exactly where pre-UI diagnostics belong. ─────────
     let mut app = App::new(cfg);
+    flux_webhook("boot", concat!("sigil-top v", env!("CARGO_PKG_VERSION"), " starting"));
+    // v0.71.1 LANE-V: resume the operator's chosen sync mode after update/restart.
+    // Only "full" does anything; no file (fresh install) = safe light monitor.
+    if false && read_sync_mode().as_deref() == Some("full") && app.p2p_sync.is_none() {
+        if let Some(store) = app.idle_store.take() {
+            let p2p = block_sync::P2PBlockSync::launch(store, true);
+            app.p2p_sync = Some(p2p);
+            app.toast = "⬇ FULL-SYNC RESUMED (sticky mode from last session — [F] to toggle)".into();
+            app.toast_sticky = true;
+            boot_trace("sticky full-sync resumed from mode file");
+        }
+    }
+    // Windows: bring up the notification-area icon (Open Wallet / Explorer / Start-at-login /
+    // Quit). Detached + best-effort, so it can never gate or crash the node. No-op elsewhere.
+    // v0.64: the tray helper Stop-Process'es NodePid and broke double-click launches
+    // (window closed instantly). OFF by default now; SIGIL_TOP_TRAY=1 opts back in.
+    if std::env::var("SIGIL_TOP_TRAY").is_ok() { spawn_system_tray(); }
+    boot_trace("tray gated (off unless SIGIL_TOP_TRAY)");
     // v0.10.5: async — kicks off the first fetch without blocking the first paint.
     app.request_refresh();
 
@@ -2180,13 +2975,21 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             std::env::temp_dir().join("sigil-top-blocks.db").to_string_lossy().as_ref()))
         .unwrap_or_else(|e| panic!("block store: {e}"));
 
-    // v0.7.1: Bootstrap from local aether shards into flux-db before starting P2P
-    match block_store::sync_aether_to_fluxdb(&mut block_store, "/opt/orobit/sigil-data/db-epsilon/aether") {
-        Ok(n) if n > 0 => {
-            app.toast = format!("⬇ Synced {n} blocks → flux-db (height {})", block_store.best_height());
+    // v0.7.1: Bootstrap from local aether shards into flux-db before starting P2P.
+    // v0.56: the default aether dir is an EPSILON-server path; on Windows/other operators
+    // it never exists, which spammed stderr with "[aether] aether dir not found" every
+    // launch. Only attempt the sync when the dir is actually present (overridable via
+    // SIGIL_AETHER_DIR); otherwise skip SILENTLY — a missing dir is the normal case off-server.
+    let aether_dir = std::env::var("SIGIL_AETHER_DIR")
+        .unwrap_or_else(|_| "/opt/orobit/sigil-data/db-epsilon/aether".to_string());
+    if std::path::Path::new(&aether_dir).is_dir() {
+        match block_store::sync_aether_to_fluxdb(&mut block_store, &aether_dir) {
+            Ok(n) if n > 0 => {
+                app.toast = format!("⬇ Synced {n} blocks → flux-db (height {})", block_store.best_height());
+            }
+            Err(e) => tlog!("[aether] {e}"),
+            _ => {}
         }
-        Err(e) => tlog!("[aether] {e}"),
-        _ => {}
     }
 
     // v0.11.0: a read-only view of the SAME flux-db, cloned BEFORE the store is moved
@@ -2206,21 +3009,38 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     }
 
     // v0.12.1: sync is ON BY DEFAULT. Opt OUT with --no-sync / SIGIL_TOP_NO_SYNC=1.
-    let want_sync = !(std::env::args().any(|a| a == "--no-sync")
-        || std::env::var("SIGIL_TOP_NO_SYNC").is_ok());
+    // v0.39.1 WINDOWS: default OFF — the LIGHT monitor. v0.10.2 already learned
+    // this lesson (the sync engine ate the operator's PC; made opt-in), v0.12.1
+    // regressed it to on-by-default, and it froze the desktop twice today. The
+    // Mining tab / wallet / explorer don't need the local backfill engine — a
+    // fleet node (epsilon) carries the chain. Opt IN with --sync / SIGIL_TOP_SYNC=1.
+    let want_sync = if cfg!(windows) {
+        std::env::args().any(|a| a == "--sync") || std::env::var("SIGIL_TOP_SYNC").is_ok()
+    } else {
+        !(std::env::args().any(|a| a == "--no-sync")
+            || std::env::var("SIGIL_TOP_NO_SYNC").is_ok())
+    };
     let mut sync_handle: Option<std::sync::Arc<std::sync::Mutex<block_sync::P2PSyncState>>> = None;
     if want_sync {
         // v0.22.1: monitor path (recent_only=true) → fast-snap to the verified live tip.
         // v0.33.5: SIGIL_FULLSYNC=1 launches a genuine genesis→tip crawl instead.
-        let recent_only = std::env::var("SIGIL_FULLSYNC").map(|v| v == "0" || v.is_empty()).unwrap_or(true);
+        // 0.77: the persisted [F] choice ("full") survives update/restart on this path
+        // (the LANE-V mode file — supersedes the disabled v0.71.1 resume block above).
+        let recent_only = std::env::var("SIGIL_FULLSYNC").map(|v| v == "0" || v.is_empty()).unwrap_or(true)
+            && read_sync_mode().as_deref() != Some("full");
         let p2p = block_sync::P2PBlockSync::launch(block_store, recent_only);
         sync_handle = Some(p2p.state_handle());
         app.p2p_sync = Some(p2p);
         if app.toast.is_empty() {
             app.toast = "⚡ P2P mesh connecting → Delta / Epsilon…".into();
         }
-    } else if app.toast.is_empty() {
-        app.toast = "◆ light monitor · fold-proof verified — [--sync] for live blocks".into();
+    } else {
+        // v0.40.3: park the opened store so [F] can launch the sync engine ON
+        // DEMAND from inside the TUI — startup stays the safe light monitor.
+        app.idle_store = Some(block_store);
+        if app.toast.is_empty() {
+            app.toast = "◆ light monitor — press F to start live sync".into();
+        }
     }
 
     enable_raw_mode()?;
@@ -2280,9 +3100,37 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
 
     let res = (|| -> std::io::Result<()> {
         loop {
+            // ── LANE-Z: Windows conhost RENDER-HANG guard (the real "won't start / blank") ─────
+            // Some Windows consoles (conhost / Windows Terminal) transiently answer the crossterm
+            // terminal-size query with 0×0. ratatui then draws an EMPTY 0-size frame on EVERY
+            // iteration = a BLACK screen spinning ~96% of a core that never paints the first frame
+            // (screen-share-confirmed; reproduces on 0.70.0 too, so it is NOT the updater). While
+            // the reported size is degenerate, DON'T draw a black frame: block on input for 100 ms
+            // (so the loop can't busy-spin and a real resize/quit still gets through), then retry.
+            // The plain-text `--once` / `render_full` path never enters this loop — which is exactly
+            // why it always renders while `--tui` spun black.
+            match crossterm::terminal::size() {
+                Ok((w, h)) if w >= 2 && h >= 2 => {}
+                _ => {
+                    if event::poll(Duration::from_millis(100))? {
+                        if let Event::Key(k) = event::read()? {
+                            if k.kind == KeyEventKind::Press
+                                && matches!(k.code, KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc)
+                            {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
             if app.splash_until.map(|u| Instant::now() < u).unwrap_or(false) {
                 app.splash_frame = app.splash_frame.wrapping_add(1);
             }
+            // LANE-B v0.50: advance/schedule the rune animation + accumulate mining
+            // history. Both are pure frame-state and never block the render loop.
+            app.tick_rune();
+            app.tick_mining_history();
             // v0.10.5: drain any completed async refresh (never blocks).
             app.poll_refresh();
             // v0.27 CRASH-PROOF: a panic inside rendering (bad slice, unwrap on odd data, etc.)
@@ -2320,11 +3168,18 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             // so an idle cockpit barely touches the CPU. Keys stay responsive either way.
             let animating = app.splash_until.map(|u| Instant::now() < u).unwrap_or(false)
                 || app.refresh_inflight
-                || app.mining;
-            let poll_ms = if animating { 33 } else { 200 };
+                || app.mining
+                || app.rune_active();   // LANE-B v0.50: smooth the rune band's draw-on/fade
+            // v0.40: 33ms full redraws are cheap on a modern terminal but heavy on the
+            // legacy CP437 conhost — halve the animating cadence on Windows so the
+            // console host never becomes a load source itself.
+            let poll_ms = if animating { if cfg!(windows) { 66 } else { 33 } } else { 200 };
             if event::poll(Duration::from_millis(poll_ms))? {
                 if let Event::Key(k) = event::read()? {
                     if k.kind == KeyEventKind::Press {
+                        // LANE-U v0.67: the first key dismisses the welcome modal (F also falls
+                        // through to start sync/mining as usual).
+                        if app.welcome_until.is_some() { app.welcome_until = None; }
                         match k.code {
                             KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return Ok(()),
                             KeyCode::Char('r') | KeyCode::Char('R') => { app.refresh(); app.toast_sticky = false; }
@@ -2334,32 +3189,70 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                             KeyCode::Char('2') => { app.tab = Tab::SwarmAi; app.load_swarm(); }
                             KeyCode::Char('3') => { app.tab = Tab::Results; app.load_swarm(); }
                             KeyCode::Char('4') => { app.tab = Tab::SyncLog; }
+                            KeyCode::Char('5') => { app.tab = Tab::Mining; }
                             KeyCode::Char('y') | KeyCode::Char('Y') => { app.resync(); app.toast_sticky = false; }
-                            KeyCode::Char('m') | KeyCode::Char('M') => {
-                                app.mining = !app.mining;
-                                if app.mining {
-                                    // Actually START mining: spawn the PoW thread → POST shares to the node.
-                                    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                                    app.mine_rx = Some(start_mining(stop.clone()));
-                                    app.mine_stop = Some(stop);
-                                    app.toast = "▲ mining STARTED — solving BLAKE3 PoW → submitting to node".into();
+                            KeyCode::Char('m') | KeyCode::Char('M') => { app.toggle_engine_mining(); }
+                            KeyCode::Char('g') | KeyCode::Char('G') if app.tab == Tab::Mining => {
+                                // [G] gates GPU use: GPU mining is OFF by default and only
+                                // engages on an explicit opt-in here (and only on a -gpu
+                                // build — the engine supervisor reverts the flag otherwise).
+                                use std::sync::atomic::Ordering;
+                                let now = app.mine_desired_gpu.load(Ordering::Relaxed);
+                                if now {
+                                    // turning OFF — always immediate.
+                                    app.mine_desired_gpu.store(false, Ordering::Relaxed);
+                                    app.toast = "⚙ engine → CPU".into();
+                                } else if !cfg!(feature = "gpu") {
+                                    // CPU-only build: flip the flag so the engine logs the
+                                    // "rebuild with --features gpu" hint, but it never runs GPU.
+                                    app.mine_desired_gpu.store(true, Ordering::Relaxed);
+                                    app.toast = "⚙ engine → GPU (needs a -gpu build)".into();
+                                } else if !app.mine_gpu_warned {
+                                    // First-ever GPU opt-in on a -gpu build: WARN and require a
+                                    // second [G] to actually enable (don't enable yet). GPU
+                                    // mining can overheat a laptop; the guard auto-throttles
+                                    // ≥78C and drops to CPU ≥82C, but it needs nvidia-smi.
+                                    app.mine_gpu_warned = true;
+                                    app.toast = "⚠ GPU mining can overheat a laptop. Guard auto-throttles ≥78C, drops to CPU ≥82C (needs nvidia-smi; NVIDIA only). Press [G] again to enable GPU.".into();
                                 } else {
-                                    // Signal the thread to stop.
-                                    if let Some(s) = app.mine_stop.take() { s.store(true, std::sync::atomic::Ordering::Relaxed); }
-                                    app.toast = "▲ mining stopped".into();
+                                    app.mine_desired_gpu.store(true, Ordering::Relaxed);
+                                    app.toast = "⚙ engine → GPU".into();
                                 }
-                                app.toast_sticky = false;
+                                app.toast_sticky = true;
                             }
                             KeyCode::Char('f') | KeyCode::Char('F') => {
-                                // Default is the TRUE lightweight node: ~10ms tip-proof verify, 0 blocks.
-                                // [F] opts INTO the heavy full sync (download + verify every block).
-                                app.full_sync = !app.full_sync;
-                                app.toast = if app.full_sync {
-                                    "⬇ FULL SYNC enabled — downloading + verifying every block (heavy). Press F to return to lightweight.".into()
-                                } else {
-                                    "⚡ lightweight node — ~10ms tip-proof verify, 0 blocks downloaded (default)".into()
-                                };
-                                app.toast_sticky = false;
+                                // 0.77 GENESIS ARCHIVE (#156): [F] is the explicit "hold the whole
+                                // chain" switch. No engine → start it in FULL-ARCHIVE mode (base
+                                // anchored at genesis, every block held — the redundant-backup
+                                // promise; the old code launched recent_only=true and the toggle
+                                // never reached the engine). Engine running → LIVE-FLIP it between
+                                // full-archive and light-monitor through the engine atomics.
+                                // Light-monitor's 10ms tip-verify stays the untouched startup default.
+                                if app.p2p_sync.is_none() {
+                                    if let Some(store) = app.idle_store.take() {
+                                        let p2p = block_sync::P2PBlockSync::launch(store, false);
+                                        app.p2p_sync = Some(p2p);
+                                        app.full_sync = true;
+                                        persist_sync_mode("full"); // LANE-V: survives update/restart
+                                        app.toast = "⛓ FULL ARCHIVE started — syncing genesis→tip, holding every block (~1GB). F again = light monitor.".into();
+                                    } else {
+                                        app.toast = "✗ sync store unavailable — restart with --sync".into();
+                                    }
+                                    app.toast_sticky = true;
+                                } else if let Some(ref p2p) = app.p2p_sync {
+                                    if p2p.is_recent_only() {
+                                        p2p.set_full_archive();
+                                        app.full_sync = true;
+                                        persist_sync_mode("full");
+                                        app.toast = "⛓ FULL ARCHIVE — base → genesis, downloading + holding every block (~1GB). Press F for light monitor.".into();
+                                    } else {
+                                        p2p.set_light_monitor();
+                                        app.full_sync = false;
+                                        persist_sync_mode("light");
+                                        app.toast = "◇ LIGHT MONITOR — verifies the live tip (10ms proof), holds nothing new. Press F for full archive.".into();
+                                    }
+                                    app.toast_sticky = false;
+                                }
                             }
                             KeyCode::Char('v') | KeyCode::Char('V') => {
                                 app.toast = match app.st.tip.as_ref() {
@@ -2546,7 +3439,10 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             }
             // v0.6.5: Poll P2P sync state + drain synced blocks into the TUI block list
             if let Some(ref p2p) = app.p2p_sync {
-                app.p2p_state = p2p.poll_state();
+                // 0.77: poll_state is try_lock — None = the sync thread holds the lock right
+                // now (heavy ingest/flush). Keep rendering the previous clone; never block
+                // the draw thread (the Windows full-archive BLACK SCREEN, #156 item 2).
+                if let Some(s) = p2p.poll_state() { app.p2p_state = s; }
                 // v0.13.1: feed the HTTP status height into the P2P backfill so the
                 // refill starts requesting chunks even when gossip/probe are silent —
                 // fixes the sync sitting forever on "connecting" with peer_best=0.
@@ -2634,7 +3530,17 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                         // TUI child that fought the terminal = the "animation appears then it
                         // crashes/exits" bug. Now: relaunch only on swap/save, and if the
                         // relaunch fails, restore the TUI instead of crashing.
+                        // Windows lock-fallback ("staged …"): a detached helper applies the swap
+                        // and relaunches AFTER we exit — so leave the TUI cleanly and exit now
+                        // (relaunching ourselves would pre-flight the still-OLD install path).
+                        if msg.starts_with("staged v") {
+                            let _ = disable_raw_mode();
+                            let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+                            println!("\n  {msg}\n  applying update — relaunching…");
+                            std::process::exit(0);
+                        }
                         let is_update_ok = msg.contains("swapped") || msg.contains("saved v");
+                        let mut relaunch_failed = false;
                         if is_update_ok {
                             let _ = disable_raw_mode();
                             let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
@@ -2642,15 +3548,31 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 // relaunch failed — re-enter the TUI, don't crash out
                                 let _ = enable_raw_mode();
                                 let _ = execute!(std::io::stdout(), EnterAlternateScreen);
-                                app.toast = "↑ update saved — couldn't auto-restart; relaunch sigil-top manually".into();
-                                app.toast_sticky = true;
+                                relaunch_failed = true;
                             }
                         }
-                        app.toast = msg; app.toast_sticky = false; app.update_rx = None;
+                        // LANE-O (b): do NOT clobber a relaunch-FAILURE toast with the self_update
+                        // "restart to run" msg — that hid WHY the restart didn't happen. On failure
+                        // keep a STICKY honest message; only show msg when the handoff succeeded
+                        // (unix exec never returns here) or nothing was swapped.
+                        if relaunch_failed {
+                            app.toast = format!("↑ {msg} — but AUTO-RESTART FAILED; please quit and relaunch sigil-top manually");
+                            app.toast_sticky = true;
+                        } else {
+                            app.toast = msg; app.toast_sticky = false;
+                        }
+                        app.update_rx = None;
                         } // end else (non-auto-check message)
                     }
                     Err(mpsc::TryRecvError::Disconnected) => { app.update_rx = None; }
                     Err(mpsc::TryRecvError::Empty) => {}
+                }
+            }
+            // v0.37: mirror the in-process dual-lane engine into the Node hero legacy fields.
+            if app.mining {
+                if let Ok(es) = app.mine_stats.try_lock() {
+                    app.mine_hashrate = es.hashrate / 1_000_000.0;
+                    app.mine_accepted = es.shares_ok;
                 }
             }
             // Drain live mining progress (accepted shares + hashrate) onto the toast + counter.
@@ -2688,32 +3610,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     res
 }
 
-fn dim(s: impl Into<String>) -> Span<'static> { Span::styled(s.into(), Style::default().fg(C_DIM)) }
 
-// ── v0.33.2 BOLD NEON helpers ──────────────────────────────────────────
-/// A filled "banner" pill: bright text on a saturated neon background — used for the
-/// loud status verdicts (LIGHT-SYNCED, SPINE BREAK, LIVE). ASCII-safe (text only).
-fn banner(text: impl Into<String>, bg: Color) -> Span<'static> {
-    Span::styled(format!(" {} ", text.into()),
-        Style::default().bg(bg).fg(Color::Rgb(0x05, 0x05, 0x0d)).add_modifier(Modifier::BOLD))
-}
-/// A neon block-bar `█████░░░` sized to `frac` over `width` cells. Rich (uses █/░ — both
-/// width-1, conhost-safe). Returns a styled Span in the given neon color.
-fn neon_bar(frac: f64, width: usize, color: Color) -> Span<'static> {
-    let f = (frac.clamp(0.0, 1.0) * width as f64).round() as usize;
-    let s = "█".repeat(f.min(width)) + &"░".repeat(width.saturating_sub(f));
-    Span::styled(s, Style::default().fg(color))
-}
-/// Bright value span (neon gold, bold) — the headline numbers.
-fn val(s: impl Into<String>) -> Span<'static> {
-    Span::styled(s.into(), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD))
-}
-/// thousands-grouped integer (1135287 → "1,135,287")
-fn group(n: u64) -> String {
-    let s = n.to_string(); let b = s.as_bytes(); let mut o = String::new();
-    for (i, c) in b.iter().enumerate() { if i > 0 && (b.len() - i) % 3 == 0 { o.push(','); } o.push(*c as char); }
-    o
-}
 
 /// v0.6.5: Create a flux-rev content-addressed snapshot of the workspace.
 /// Uses flux-rev (the git replacement) to create a BLAKE3-hashed manifest
@@ -2735,10 +3632,6 @@ fn rev_snapshot(ws_root: &std::path::Path) -> Result<String, String> {
     Ok(rev.id)
 }
 
-fn local_wallet_url() -> String {
-    if let Ok(u) = std::env::var("FLUX_WALLET_URL") { if !u.is_empty() { return u; } }
-    "http://localhost:9800/".into()
-}
 
 /// v0.6.0: Cortex loop result for the TUI
 struct CortexLoopResult {
@@ -2800,10 +3693,13 @@ fn render_update_splash(frame: u8) -> Paragraph<'static> {
         .style(Style::default().bg(Color::Rgb(5, 5, 15)))
 }
 
+
 // ── v0.13: tabbed cockpit — Node dashboard + MCP Swarm AI job board + Results ──
 
+use flux_miner::engine::{self, MinerStats};
+
 #[derive(Clone, Copy, PartialEq)]
-enum Tab { Node, SwarmAi, Results, SyncLog }
+enum Tab { Node, SwarmAi, Results, SyncLog, Mining }
 
 impl Tab {
     fn next(self) -> Tab {
@@ -2811,7 +3707,8 @@ impl Tab {
             Tab::Node => Tab::SwarmAi,
             Tab::SwarmAi => Tab::Results,
             Tab::Results => Tab::SyncLog,
-            Tab::SyncLog => Tab::Node,
+            Tab::SyncLog => Tab::Mining,
+            Tab::Mining => Tab::Node,
         }
     }
 }
@@ -2846,10 +3743,6 @@ struct SwarmView {
 
 fn swarm_dir() -> String { std::env::var("SIGIL_SWARM_DIR").unwrap_or_else(|_| "/tmp".into()) }
 
-fn trunc(s: &str, n: usize) -> String {
-    if s.chars().count() <= n { s.to_string() }
-    else { format!("{}…", s.chars().take(n.saturating_sub(1)).collect::<String>()) }
-}
 
 /// Read + parse the swarm coordination files into a SwarmView. Cheap local file
 /// reads; tolerant of missing/partial files (off-box → shows a hint).
@@ -2963,415 +3856,23 @@ fn load_swarm_view() -> SwarmView {
 
 // ── v0.13 enrichment helpers (DeepSeek-consulted: color-hash, mini-bars, medals, rel-time, heat) ──
 
-/// Stable per-agent color from an id hash — premium control-panel feel, same agent always same hue.
-fn agent_color(id: &str) -> Color {
-    let pal = [C_CYAN, C_VBRIGHT, C_GREEN, C_GOLD, Color::Magenta, Color::LightBlue];
-    let mut h: u32 = 2166136261;
-    for b in id.bytes() { h = (h ^ b as u32).wrapping_mul(16777619); }
-    pal[(h as usize) % pal.len()]
-}
 
-/// Inline unicode mini-bar: `value` normalized to `max` across `width` cells.
-fn qug_bar(value: f64, max: f64, width: usize) -> String {
-    if max <= 0.0 || width == 0 { return " ".repeat(width); }
-    let filled = (((value / max) * width as f64).round() as usize).min(width);
-    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
-}
 
-/// Medal glyph for a 0-based rank.
-fn medal(rank: usize) -> &'static str {
-    match rank { 0 => "🥇", 1 => "🥈", 2 => "🥉", _ => "  " }
-}
 
-/// Relative "Nm ago" from a unix-secs timestamp.
-fn rel_time(at: u64) -> String {
-    if at == 0 { return "—".into(); }
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(at);
-    let d = now.saturating_sub(at);
-    if d < 60 { format!("{}s", d) }
-    else if d < 3600 { format!("{}m", d / 60) }
-    else if d < 86400 { format!("{}h", d / 3600) }
-    else { format!("{}d", d / 86400) }
-}
 
-/// Status dot + color for an agent status string.
-fn status_glyph(status: &str) -> Span<'static> {
-    let (g, c) = match status.to_lowercase().as_str() {
-        "working" | "busy" | "active" | "claimed" => ("●", C_GREEN),
-        "idle" => ("○", C_DIM),
-        "error" | "failed" => ("●", C_RED),
-        _ => ("◦", C_DIM),
-    };
-    Span::styled(g, Style::default().fg(c))
-}
 
-fn render_tab_bar(app: &App) -> Paragraph<'static> {
-    let tab = |label: &'static str, key: &'static str, t: Tab| -> Vec<Span<'static>> {
-        let active = app.tab == t;
-        let style = if active {
-            Style::default().fg(C_BG).bg(C_NEON_CYAN).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(C_DIM)
-        };
-        vec![Span::styled(format!(" {key} {label} "), style), Span::raw(" ")]
-    };
-    let mut spans = vec![Span::raw(" ")];
-    spans.extend(tab("Node", "1", Tab::Node));
-    spans.extend(tab("Swarm AI", "2", Tab::SwarmAi));
-    spans.extend(tab("Results", "3", Tab::Results));
-    spans.extend(tab("Sync Log", "4", Tab::SyncLog));
-    spans.push(Span::styled(" · Tab cycles", Style::default().fg(C_DIM)));
-    Paragraph::new(Line::from(spans))
-}
 
-/// [2] MCP Swarm AI — the live job-index board from the Claude Code sessions.
-fn render_swarm_ai(app: &App) -> Paragraph<'static> {
-    let sw = &app.swarm;
-    let mut lines: Vec<Line> = Vec::new();
-    if let Some(e) = &sw.err {
-        lines.push(Line::from(Span::styled(format!(" ⚠ {e}"), Style::default().fg(C_GOLD))));
-        lines.push(Line::from(""));
-    }
-    let real: Vec<&SwarmAgent> = sw.agents.iter().filter(|a| !a.id.starts_with("test_")).collect();
-    lines.push(Line::from(vec![
-        Span::styled("  AGENTS ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{}", real.len()), Style::default().fg(C_VBRIGHT)),
-        Span::styled("   TASKS ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{}", sw.tasks.len()), Style::default().fg(C_VBRIGHT)),
-        Span::styled("   FILES ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{}", sw.claims.len()), Style::default().fg(C_VBRIGHT)),
-        Span::styled("   DONE ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{}", sw.completed_count), Style::default().fg(C_GREEN)),
-        Span::styled("   QUG PAID ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:.1}", sw.qug_paid), Style::default().fg(C_GOLD)),
-    ]));
-    lines.push(Line::from(""));
-    // ── TASK BOARD: claimed jobs with priority + QUG bounty (the index board) ──
-    let max_b = sw.tasks.iter().map(|t| t.est_qug).fold(0.0f64, f64::max);
-    lines.push(Line::from(Span::styled(" ▸ TASK BOARD — claimed jobs · priority · bounty", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
-    for t in sw.tasks.iter().take(7) {
-        let (ptxt, pcol) = match t.priority {
-            0 | 1 => (format!("P{}", t.priority), C_GOLD),
-            2 => ("P2".to_string(), C_CYAN),
-            _ => (format!("P{}", t.priority), C_DIM),
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {:<3}", ptxt), Style::default().fg(pcol).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{:<15}", trunc(&t.agent, 15)), Style::default().fg(agent_color(&t.agent)).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{:<18}", trunc(&t.crates, 18)), Style::default().fg(C_CYAN)),
-            Span::styled(qug_bar(t.est_qug, max_b, 8), Style::default().fg(C_GOLD)),
-            Span::styled(format!(" {:>5.1} QUG", t.est_qug), Style::default().fg(C_GOLD)),
-        ]));
-    }
-    lines.push(Line::from(""));
-    // ── AGENTS leaderboard ──
-    let max_q = real.iter().map(|a| a.qug).fold(0.0f64, f64::max);
-    lines.push(Line::from(Span::styled(" ▸ AGENTS — leaderboard by QUG earned", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
-    for (i, a) in real.iter().take(5).enumerate() {
-        lines.push(Line::from(vec![
-            Span::raw(format!("  {} ", medal(i))),
-            status_glyph(&a.status),
-            Span::styled(format!(" {:<20}", trunc(&a.id, 20)), Style::default().fg(agent_color(&a.id)).add_modifier(Modifier::BOLD)),
-            Span::styled(qug_bar(a.qug, max_q, 10), Style::default().fg(C_GOLD)),
-            Span::styled(format!(" {:>8.1} QUG", a.qug), Style::default().fg(C_GOLD)),
-        ]));
-    }
-    lines.push(Line::from(""));
-    // ── BROADCAST FEED: the human-readable coordination board ──
-    lines.push(Line::from(Span::styled(" ▸ 📢 BROADCAST FEED", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
-    for m in sw.feed.iter().take(5) {
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {:>4} ", rel_time(m.at)), Style::default().fg(C_DIM)),
-            Span::styled(format!("{:<16}", trunc(&m.from, 16)), Style::default().fg(agent_color(&m.from)).add_modifier(Modifier::BOLD)),
-            Span::styled(trunc(&m.text, 56), Style::default().fg(C_DIM)),
-        ]));
-    }
-    lines.push(Line::from(""));
-    // ── LIVE ACTIVITY (compact) ──
-    lines.push(Line::from(Span::styled(" ▸ LIVE ACTIVITY", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
-    for ev in sw.activity.iter().filter(|e| !e.agent.starts_with("test_")).take(6) {
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {:>4} ", rel_time(ev.at)), Style::default().fg(C_DIM)),
-            Span::styled(format!("{:<16}", trunc(&ev.agent, 16)), Style::default().fg(agent_color(&ev.agent))),
-            Span::styled(format!("{:<14}", trunc(&ev.kind, 14)), Style::default().fg(C_GOLD)),
-            Span::styled(trunc(&ev.detail, 44), Style::default().fg(C_DIM)),
-        ]));
-    }
-    Paragraph::new(lines).block(card_block(" ✦ MCP SWARM AI — JOB INDEX BOARD", C_NEON_PINK))
-}
 
-/// v0.26: read at most the last `max_bytes` of a (possibly huge) log file — seek to the
-/// tail instead of slurping the whole thing, so the Sync Log tab stays O(1) per frame.
-fn read_log_tail(path: &str, max_bytes: u64) -> String {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = match std::fs::File::open(path) { Ok(f) => f, Err(_) => return String::new() };
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    let start = len.saturating_sub(max_bytes);
-    if f.seek(SeekFrom::Start(start)).is_err() { return String::new(); }
-    let mut buf = Vec::with_capacity(max_bytes as usize);
-    let _ = f.take(max_bytes).read_to_end(&mut buf);
-    String::from_utf8_lossy(&buf).into_owned()
-}
 
-/// [3] Results — settled work + QUG payouts from the swarm.
-/// v0.25.5: the Sync Log tab — a live sync-state header + a tail of the sync events
-/// (peer connects, fast-snap/track-tip, tip-fetch, backfill chunks, timeouts) read from
-/// ~/.sigil-top.log, so the operator can SEE what sync is doing, not just a bar.
-fn render_sync_log(app: &App) -> Paragraph<'static> {
-    let s = &app.p2p_state;
-    let tip = s.peer_best_height.max(app.target_height);
-    let gap = tip.saturating_sub(s.blocks_synced);
-    let mut lines: Vec<Line> = Vec::new();
-    // v0.26: LIVE/STALE badge — if the tip-poller hasn't gotten a fresh tip in >12s
-    // (oracle down / partition), say so instead of a falsely confident "AT TIP".
-    let stale = s.last_tip_at.map(|t| t.elapsed().as_secs() > 12).unwrap_or(true);
-    let (badge, bcol) = if stale {
-        (sa(format!(" (STALE){}", s.last_tip_at.map(|t| format!(" ({}s)", t.elapsed().as_secs())).unwrap_or_default())), C_RED)
-    } else { (sa(" ● LIVE"), C_GREEN) };
-    lines.push(Line::from(vec![
-        Span::styled(sa(" ▸ SYNC STATE"), Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
-        Span::styled(badge, Style::default().fg(bcol).add_modifier(Modifier::BOLD)),
-    ]));
-    lines.push(Line::from(vec![
-        Span::raw(sa("  height ")), Span::styled(group(s.blocks_synced), Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
-        Span::raw(sa("  tip ")), Span::styled(group(tip), Style::default().fg(C_CYAN)),
-        Span::raw(sa("  gap ")), Span::styled(group(gap), Style::default().fg(if gap < 8 { C_GREEN } else { C_GOLD })),
-        Span::raw(sa("  rate ")), Span::styled(format!("{:.0} blk/s", app.p2p_rate), Style::default().fg(C_CYAN)),
-    ]));
-    lines.push(Line::from(vec![
-        Span::raw(sa("  ⛓ verified spine ")), Span::styled(group(s.verified), Style::default().fg(C_GREEN)),
-        Span::raw(sa("   peers ")), Span::styled(format!("{}", s.peer_count), Style::default().fg(C_CYAN)),
-        Span::raw(sa("   ")), Span::styled(sa(if s.connected_delta { "Δ" } else { "·" }), Style::default().fg(C_GOLD)),
-        Span::styled(sa(if s.connected_epsilon { "Ε" } else { "·" }), Style::default().fg(C_GOLD)),
-    ]));
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(" ▸ SYNC LOG  (newest at bottom)", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
-    let path = std::env::var("HOME").map(|h| format!("{h}/.sigil-top.log")).unwrap_or_else(|_| "sigil-top.log".into());
-    // v0.26: read only the LAST 16 KB (not the whole file) — O(1) per frame, never
-    // O(log-size), which would freeze the UI as the log grows over a 24/7 run.
-    let body = read_log_tail(&path, 16 * 1024);
-    let recent: Vec<String> = body.lines().rev()
-        .filter(|l| l.contains("[DBG]") || l.contains("[PANIC]") || l.contains("[sync]")
-            || l.contains("[tipfetch]") || l.contains("[D]") || l.contains("[p2p-sync]")
-            || l.contains("[tip]") || l.contains("[render]"))
-        .take(26)
-        .map(|l| l.to_string())
-        .collect();
-    if recent.is_empty() {
-        lines.push(Line::from(Span::styled("  (no sync activity logged yet — connecting to the mesh…)", Style::default().fg(C_DIM))));
-    }
-    for l in recent.iter().rev() {
-        let t = l.trim();
-        let col = if t.contains("[PANIC]") { C_RED }
-            else if t.contains("[DBG]") { C_VBRIGHT }
-            else if t.contains("track tip") || t.contains("fast-snap") || t.contains("[sync]") { C_GOLD }
-            else if t.contains("[tipfetch]") { C_CYAN }
-            else if t.contains("TIMEOUT") || t.contains("err") { C_RED }
-            else if t.contains("peer +") { C_GREEN }
-            else { C_DIM };
-        lines.push(Line::from(Span::styled(format!("  {}", trunc(t, 116)), Style::default().fg(col))));
-    }
-    Paragraph::new(lines)
-}
 
-fn render_results(app: &App) -> Paragraph<'static> {
-    let sw = &app.swarm;
-    let mut lines: Vec<Line> = Vec::new();
-    let mut totals: std::collections::HashMap<String, (f64, u32)> = std::collections::HashMap::new();
-    for r in sw.results.iter().filter(|r| !r.agent.starts_with("test_")) {
-        let e = totals.entry(r.agent.clone()).or_insert((0.0, 0));
-        e.0 += r.qug; e.1 += 1;
-    }
-    let mut tv: Vec<(String, (f64, u32))> = totals.into_iter().collect();
-    tv.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap_or(std::cmp::Ordering::Equal));
-    let max_e = tv.iter().map(|(_, (q, _))| *q).fold(0.0f64, f64::max);
-    lines.push(Line::from(Span::styled(" ▸ EARNINGS — leaderboard", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
-    for (i, (ag, (qug, n))) in tv.iter().take(7).enumerate() {
-        lines.push(Line::from(vec![
-            Span::raw(format!("  {} ", medal(i))),
-            Span::styled(format!("{:<22}", trunc(ag, 22)), Style::default().fg(agent_color(ag)).add_modifier(Modifier::BOLD)),
-            Span::styled(qug_bar(*qug, max_e, 12), Style::default().fg(C_GOLD)),
-            Span::styled(format!(" {:>3}t", n), Style::default().fg(C_DIM)),
-            Span::styled(format!("{:>10.2} QUG", qug), Style::default().fg(C_GOLD)),
-        ]));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(" ▸ COMPLETED TASKS (newest first)", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
-    for r in sw.results.iter().filter(|r| !r.agent.starts_with("test_")).take(13) {
-        let mark = if r.success { Span::styled("✓", Style::default().fg(C_GREEN)) } else { Span::styled("✗", Style::default().fg(C_RED)) };
-        lines.push(Line::from(vec![
-            Span::raw(sa("  ")), mark, Span::raw(sa(" ")),
-            Span::styled(format!("{:>4} ", rel_time(r.at)), Style::default().fg(C_DIM)),
-            Span::styled(format!("{:<14}", trunc(&r.agent, 14)), Style::default().fg(agent_color(&r.agent))),
-            Span::styled(format!("{:<18}", trunc(&r.crates, 18)), Style::default().fg(C_CYAN)),
-            Span::styled(format!("{:>7.2} QUG", r.qug), Style::default().fg(C_GOLD)),
-        ]));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("  TOTAL SETTLED: ", Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:.1} QUG", sw.qug_paid), Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("  ·  {} tasks completed", sw.completed_count), Style::default().fg(C_DIM)),
-    ]));
-    Paragraph::new(lines).block(card_block("🏆 RESULTS — SETTLED WORK", C_GOLD))
-}
 
-fn draw_ui(f: &mut Frame, app: &App) {
-    let area = f.area();
-    if let Some(until) = app.splash_until {
-        if Instant::now() < until {
-            f.render_widget(render_update_splash(app.splash_frame), area);
-            return;
-        }
-    }
-    // v0.13: tab bar between header and body — [1] Node · [2] Swarm AI · [3] Results.
-    let [header_area, tab_area, body_area, footer_area] =
-        Layout::vertical([Constraint::Length(2), Constraint::Length(1), Constraint::Min(0), Constraint::Length(2)]).areas(area);
 
-    f.render_widget(render_header(app), header_area);
-    f.render_widget(render_tab_bar(app), tab_area);
 
-    match app.tab {
-        Tab::Node => {
-            // v0.33.3: SYNC is now a full-width HERO band on top of the Node tab, with a big
-            // progress bar + Kalman-ETA telemetry + starship; the other cards flow beneath it.
-            let [hero_area, cards_area] =
-                Layout::vertical([Constraint::Length(9), Constraint::Min(0)]).areas(body_area);
-            draw_sync_hero(f, app, hero_area);
-            draw_node_body(f, app, cards_area);
-        }
-        Tab::SwarmAi => f.render_widget(render_swarm_ai(app), body_area),
-        Tab::Results => f.render_widget(render_results(app), body_area),
-        Tab::SyncLog => f.render_widget(render_sync_log(app), body_area),
-    }
 
-    f.render_widget(render_footer(app), footer_area);
-}
 
-/// The original node dashboard, now the [1] Node tab body.
-fn draw_node_body(f: &mut Frame, app: &App, body_area: ratatui::layout::Rect) {
-    let body_h = Layout::horizontal([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
-        .spacing(1)  // v0.33.2: breathing room so the two columns don't fuse at the border
-        .split(body_area);
-    let (left_area, right_area) = (body_h[0], body_h[1]);
 
-    let left_v = Layout::vertical([
-        Constraint::Length(6), // Node
-        Constraint::Length(6), // StateRoots
-        Constraint::Length(4), // Supply
-        Constraint::Length(7), // Mining (v0.2.35: +2 lines for hashrate + balance)
-        Constraint::Min(0),    // spacer
-    ])
-    .split(left_area);
 
-    f.render_widget(render_node_card(app), left_v[0]);
-    f.render_widget(render_state_roots(app), left_v[1]);
-    f.render_widget(render_supply(app), left_v[2]);
-    f.render_widget(render_mining(app), left_v[3]); // v0.33.3: SYNC moved to the top hero band
 
-    let right_v = Layout::vertical([Constraint::Length(5), Constraint::Length(5), Constraint::Length(7), Constraint::Min(0)])
-        .spacing(1)
-        .split(right_area);
-    f.render_widget(render_security(app), right_v[0]);
-    f.render_widget(render_fleet_card(app), right_v[1]);
-    f.render_widget(render_cortex_card(app), right_v[2]);
-    f.render_widget(render_block_stream(app), right_v[3]);
-}
-
-/// v0.33.2 BOLD NEON card: rounded obsidian card with a bright neon title chip glowing in
-/// the accent color, and a border tinted toward the accent instead of flat grey. The title
-/// is a filled chip (` ◆ NODE `) so it reads as a label, not glued to the corner.
-fn card_block(title: &'static str, color: Color) -> Block<'static> {
-    Block::default()
-        .borders(Borders::ALL)
-        // v0.33.5: light box-drawing (┌─┐│└┘) IS in CP437 → renders on classic raster conhost;
-        // heavy/rounded corners are NOT and showed as `?`. Use Plain on ascii consoles, Rounded
-        // on rich terminals (Windows Terminal / VS Code / *nix) where it's prettier.
-        .border_type(if ui_ascii() { BorderType::Plain } else { BorderType::Rounded })
-        .padding(Padding::horizontal(1))
-        .title(Line::from(vec![
-            Span::styled(format!("{} ", title.trim_start()),
-                Style::default().bg(color).fg(C_BG).add_modifier(Modifier::BOLD)),
-        ]))
-        .border_style(Style::default().fg(color))
-        .style(Style::default().bg(C_BG))
-}
-
-fn render_header(app: &App) -> Paragraph<'static> {
-    let live = app.online;
-    // v0.33.2: loud neon brand block + a filled status banner pill.
-    let status = if live { banner("◆ LIVE", C_NEON_GREEN) } else { banner("✕ OFFLINE", C_NEON_PINK) };
-    let update = if version_gt(&app.latest, VERSION) {
-        Span::styled(format!("   ⬆ UPDATE v{} [U]", app.latest),
-            Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD))
-    } else {
-        Span::raw("")
-    };
-    let line = Line::from(vec![
-        Span::styled(" ◇ SIGIL ", Style::default().bg(C_NEON_CYAN).fg(C_BG_HEAD).add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" v{}", VERSION), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" · {} ", app.st.network), Style::default().fg(C_DIM)),
-        status,
-        Span::styled("  uptime ", Style::default().fg(C_DIM)),
-        Span::styled(fmt_uptime(app.st.uptime_secs), Style::default().fg(C_CYAN)),
-        Span::styled("  ·  net height ", Style::default().fg(C_DIM)),
-        val(group(app.target_height)),
-        update,
-    ]);
-    Paragraph::new(line).style(Style::default().bg(C_BG_HEAD))
-}
-
-fn render_node_card(app: &App) -> Paragraph<'static> {
-    let st = &app.st;
-    let producer = if st.producer.is_empty() { "—".to_string() } else { st.producer.clone() };
-    let lines = vec![
-        Line::from(vec![
-            dim("height  "), Span::styled(group(st.height), Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
-            dim("   peers "), Span::styled(group(st.peers), Style::default().fg(C_GREEN)),
-        ]),
-        Line::from(vec![ dim("producer "), Span::styled(producer, Style::default().fg(C_CYAN)) ]),
-        Line::from(vec![
-            dim("reward  "), Span::styled("5", Style::default().fg(C_GREEN)), dim(" SIGIL/blk"),
-            dim("   uptime "), Span::raw(fmt_uptime(st.uptime_secs)),
-        ]),
-    ];
-    Paragraph::new(lines).block(card_block(" ◆ NODE", C_NEON_GREEN))
-}
-
-fn render_state_roots(app: &App) -> Paragraph<'static> {
-    let (badge, lat_str) = match &app.verify {
-        Some(v) if v.ok => (
-            Span::styled(" VERIFIED ", Style::default().bg(C_GREEN).fg(Color::Rgb(0x0a,0x0a,0x14)).add_modifier(Modifier::BOLD)),
-            format!(" BLAKE3 · {}µs", v.latency_us),
-        ),
-        Some(_) => (Span::styled(" FAILED ", Style::default().bg(C_RED).fg(Color::Rgb(0x0a,0x0a,0x14)).add_modifier(Modifier::BOLD)), String::new()),
-        None => (Span::styled(" WAITING ", Style::default().bg(C_DIM).fg(Color::Rgb(0x0a,0x0a,0x14))), String::new()),
-    };
-    let (wallet, dex, event, contract) = if let Some(t) = app.st.tip.as_ref() {
-        (short_hex(&t.roots.wallet_state_root), short_hex(&t.roots.dex_state_root),
-         short_hex(&t.roots.event_log_root), short_hex(&t.roots.contract_state_root))
-    } else { ("—".into(), "—".into(), "—".into(), "—".into()) };
-    let lines = vec![
-        Line::from(vec![badge, Span::styled(lat_str, Style::default().fg(C_DIM))]),
-        Line::from(vec![ dim("wallet "), Span::raw(wallet), dim("  dex "), Span::raw(dex) ]),
-        Line::from(vec![ dim("events "), Span::raw(event), dim("  contract "), Span::raw(contract) ]),
-    ];
-    Paragraph::new(lines).block(card_block(" ◈ STATE ROOTS", C_GOLD))
-}
-
-fn render_supply(app: &App) -> Paragraph<'static> {
-    let supply = app.st.native_supply;
-    let frac = if MAX_SUPPLY_BASE > 0 { (supply as f64 / MAX_SUPPLY_BASE as f64).clamp(0.0, 1.0) } else { 0.0 };
-    let lines = vec![
-        Line::from(vec![
-            val(fmt_supply(supply)),
-            dim(" / 21,000,000   "),
-            Span::styled(format!("{:.2}%", frac * 100.0), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(neon_bar(frac, 34, C_NEON_GOLD)),
-    ];
-    Paragraph::new(lines).block(card_block(" ⬣ SUPPLY", C_NEON_GOLD))
-}
 
 /// Cross-platform persistent path for the light client's block store. Windows has no
 /// /tmp or /dev/shm (the old hardcoded paths), so the store never persisted there →
@@ -3387,601 +3888,132 @@ fn sigil_top_db_path() -> String {
     format!("{}/sigil-top-blocks.db", base.trim_end_matches(['/', '\\']))
 }
 
-/// v0.33.3: the SYNC HERO — a full-width band with a BIG progress bar, Kalman-smoothed rate
-/// + ETA, in-flight chunk / fleet / mesh / PID telemetry, and a static starship motif. The
-/// whole frame is themed by the sync verdict color. Progress = s.verified (the honest spine),
-/// NOT s.blocks_synced (faked to the tip in light-monitor mode — see memory/render note).
-fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let s = &app.p2p_state;
-    let fold_ok = app.verify.as_ref().map(|v| v.ok).unwrap_or(false);
-    let net_tip = s.peer_best_height.max(app.target_height);
-    let spine = s.verified;
-    let gap = net_tip.saturating_sub(spine);
-    let frac = if net_tip > 0 { (spine as f64 / net_tip as f64).clamp(0.0, 1.0) } else { 0.0 };
-    let following = net_tip > 0;
-    let caught = following && gap < 16_384;
-    let synced = caught && fold_ok && s.verify_break.is_none();
-    let connecting = s.fetched_total == 0 && spine == 0 && !following;
-    let kf_rate = app.sync_kf.x.max(0.0);                       // Kalman-smoothed blk/s
-    let eta = if synced || kf_rate < 1.0 { f64::INFINITY } else { gap as f64 / kf_rate };
 
-    let (vtext, vcol) = if s.verify_break.is_some() { ("⚠ SPINE BREAK", C_NEON_PINK) }
-        else if synced { ("◆ SYNCED", C_NEON_GREEN) }
-        else if connecting { ("… CONNECTING", C_DIM) }
-        else if caught { ("≈ TRACKING HEAD", C_NEON_CYAN) }
-        else { ("⬇ SYNCING", C_NEON_GOLD) };
-
-    // state-themed border; title chip stays neon-cyan
-    let block = card_block(" ◇ SYNC · sigil-g0", C_NEON_CYAN)
-        .border_style(Style::default().fg(vcol));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    // [ big bar (full width) ] over [ telemetry | starship ]
-    let [bar_row, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
-    let [tele, ship] = Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).spacing(1).areas(body);
-
-    // ── BIG progress bar ─────────────────────────────────────────────────
-    let label = format!(" {:>5.1}%  {}", frac * 100.0, vtext);
-    let total = bar_row.width as usize;
-    let barw = total.saturating_sub(label.chars().count() + 1).max(4);
-    let fill = (frac * barw as f64).round() as usize;
-    let bar_str = "█".repeat(fill.min(barw)) + &"░".repeat(barw.saturating_sub(fill));
-    f.render_widget(Paragraph::new(Line::from(vec![
-        Span::styled(bar_str, Style::default().fg(vcol).add_modifier(Modifier::BOLD)),
-        Span::styled(label, Style::default().fg(vcol).add_modifier(Modifier::BOLD)),
-    ])), bar_row);
-
-    // ── telemetry (left) ─────────────────────────────────────────────────
-    let chunk = if s.sync_cursor > 0 {
-        format!("[{}…{}]", group(s.sync_cursor), group(s.sync_cursor.saturating_add(2048)))
-    } else { "—".into() };
-    let fleet_total = app.fleet_nodes.len();
-    let fleet_on = app.fleet_nodes.iter().filter(|n| n.online).count();
-    let mesh = s.mesh_peer_count;
-    let pid = std::process::id();
-    let proof = if s.verify_break.is_some() { Span::styled("fold ✗ break".to_string(), Style::default().fg(C_RED).add_modifier(Modifier::BOLD)) }
-        else if fold_ok { Span::styled("fold ✓ attests rest".to_string(), Style::default().fg(C_NEON_GREEN)) }
-        else { Span::styled("fold … verifying".to_string(), Style::default().fg(C_GOLD)) };
-    let pos = if s.pos_rate > 0.0 {
-        Span::styled(format!("   ⛏{} blk/s verify", group(s.pos_rate.round() as u64)), Style::default().fg(C_GOLD))
-    } else { Span::raw("") };
-
-    let tlines = vec![
-        Line::from(vec![
-            dim("tip "), val(group(net_tip)),
-            dim("   spine "), Span::styled(format!("⛓{}", group(spine)), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
-            dim("   gap "), Span::styled(group(gap), Style::default().fg(if caught { C_NEON_GREEN } else { C_GOLD })),
-        ]),
-        Line::from(vec![
-            dim("rate "), Span::styled(format!("{} blk/s", group(kf_rate.round() as u64)), Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)),
-            dim(" ~kalman   eta "), Span::styled(if synced { "—".to_string() } else { fmt_eta(eta) }, Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
-            dim("   chunk "), Span::styled(chunk, Style::default().fg(C_VBRIGHT)),
-        ]),
-        Line::from(vec![
-            dim("fleet "), Span::styled(format!("{}/{}", fleet_on, fleet_total), Style::default().fg(if fleet_total > 0 && fleet_on == fleet_total { C_NEON_GREEN } else { C_GOLD })),
-            dim("   mesh "), Span::styled(format!("{} peers", mesh), Style::default().fg(if mesh >= 4 { C_NEON_GREEN } else if mesh >= 1 { C_GOLD } else { C_RED })),
-            dim("   "),
-            Span::styled("Δ", Style::default().fg(if s.connected_delta { C_NEON_GREEN } else { C_DIM }).add_modifier(Modifier::BOLD)),
-            Span::styled("Ε", Style::default().fg(if s.connected_epsilon { C_NEON_GREEN } else { C_DIM }).add_modifier(Modifier::BOLD)),
-            dim(format!("   pid {}", pid)),
-        ]),
-        Line::from(vec![
-            dim("proof "), proof,
-            dim("   fetched "), Span::styled(group(s.fetched_total), Style::default().fg(C_GREEN)),
-            pos,
-        ]),
-    ];
-    f.render_widget(Paragraph::new(tlines), tele);
-
-    // ── static starship (right) ──────────────────────────────────────────
-    let (dtxt, dcol) = if synced { ("DOCKED", C_NEON_GREEN) }
-        else if connecting { ("OFFLINE", C_RED) }
-        else { ("ENGAGED", vcol) };
-    let ship_lines = vec![
-        Line::from(Span::styled("    ╱╲    ", Style::default().fg(C_NEON_CYAN))),
-        Line::from(Span::styled("   ╱██╲   ", Style::default().fg(C_NEON_CYAN))),
-        Line::from(Span::styled("  ▕████▏  ", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))),
-        Line::from(Span::styled("  ▕◆◆◆▏  ", Style::default().fg(dcol))),
-        Line::from(Span::styled("  ╱╲██╱╲  ", Style::default().fg(C_NEON_PINK))),
-        Line::from(vec![dim(" drive "), Span::styled(dtxt, Style::default().fg(dcol).add_modifier(Modifier::BOLD))]),
-    ];
-    f.render_widget(Paragraph::new(ship_lines), ship);
+/// v0.36.1: the MINING HERO — a full-width band (sized like the SYNC hero) under it, with a
+/// big NETWORK-POWER bar (the chain's block-production pulse), network economics, the
+/// operator's PERSONAL mining (hashrate / accepted shares / wallet / streak), and a forge
+/// motif that glows HOT while [M]ining. Honest: SIGIL P0 is verify-once, so "network power"
+/// is the real block-production throughput + emission, not a fictional global hashrate;
+/// personal hashrate IS real local BLAKE work.
+/// v0.37: the engine's node base-URL (rpcd) — distinct from the legacy [m] BLAKE3
+/// `mine_url()`. The dual-lane engine talks /api/v1/mining/{challenge,submit}.
+fn engine_node_url() -> String {
+    std::env::var("SIGIL_MINE_NODE").unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:8099".into())
 }
 
-fn render_mining(app: &App) -> Paragraph<'static> {
-    let (state, scol) = if app.mining { ("ON", C_GREEN) } else { ("off", C_RED) };
-    let earn = format!("~{:.4}", app.verified_count as f64 * 0.0005);
-    // v0.2.35: live hashrate from the miner thread
-    let rate_line = if app.mine_hashrate > 0.0 {
-        let (val, unit) = if app.mine_hashrate >= 1000.0 {
-            (app.mine_hashrate / 1000.0, "GH/s")
-        } else {
-            (app.mine_hashrate, "MH/s")
-        };
-        Line::from(vec![
-            dim("rate "), Span::styled(format!("{:.2} {unit}", val), Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
-            dim("   hashes "), Span::styled(format!("{}M", app.mine_hashes / 1_000_000), Style::default().fg(C_DIM)),
-        ])
-    } else {
-        Line::from(dim("rate —   hashes —"))
-    };
-    // v0.2.35: wallet balance line
-    let bal_line = if app.wallet_balance > 0 {
-        let whole = app.wallet_balance / 100_000_000;
-        let frac = (app.wallet_balance % 100_000_000) / 1_000_000;
-        Line::from(vec![
-            dim("balance "), Span::styled(format!("{whole}.{frac:02} SIGIL"), Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
-            dim("   shares "), Span::styled(group(app.mine_accepted), Style::default().fg(C_DIM)),
-        ])
-    } else {
-        Line::from(vec![
-            dim("balance —   shares "), Span::styled(group(app.mine_accepted), Style::default().fg(C_DIM)),
-        ])
-    };
-    let lines = vec![
-        Line::from(vec![
-            dim("mining "), Span::styled(state, Style::default().fg(scol).add_modifier(Modifier::BOLD)),
-            dim("   score "), Span::styled(group(app.score), Style::default().fg(C_GOLD)),
-            dim("   verified "), Span::styled(group(app.verified_count), Style::default().fg(C_GREEN)),
-        ]),
-        Line::from(vec![
-            dim("streak "), Span::styled(format!("×{}", app.streak), Style::default().fg(C_GOLD)),
-            dim("   est earn "), Span::styled(earn, Style::default().fg(C_GOLD)),
-        ]),
-        rate_line,
-        bal_line,
-    ];
-    Paragraph::new(lines).block(card_block(" ✦ MINING", C_NEON_PINK))
-}
 
-fn render_security(app: &App) -> Paragraph<'static> {
-    let k = app.eclipse_k;
-    let agreed = app.eclipse_sources.iter().filter(|(_, b)| *b).count();
-    let total = app.eclipse_sources.len().max(1);
-    // v0.7.5: Real SQIsign status from tip verification
-    let pq = app.verify.as_ref().map(|v| v.sqisign_available).unwrap_or(false);
-    let sig_verified = app.verify.as_ref().map(|v| v.ok).unwrap_or(false);
-    let sig_line = if sig_verified && pq {
-        Line::from(vec![
-            dim("sig "), Span::styled("SQIsign ✓", Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
-            dim("  "), Span::styled("PQ-verified · 177B", Style::default().fg(C_VBRIGHT)),
-        ])
-    } else if sig_verified {
-        Line::from(vec![
-            dim("sig "), Span::styled("BLAKE3 ✓", Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
-            dim("  "), Span::styled(if pq { "SQIsign ready" } else { "SQIsign gated" }, Style::default().fg(C_DIM)),
-        ])
-    } else if app.verify.is_some() {
-        Line::from(vec![
-            dim("sig "), Span::styled("FAILED", Style::default().fg(C_RED).add_modifier(Modifier::BOLD)),
-            dim("  "), Span::styled("tip verification failed", Style::default().fg(C_RED)),
-        ])
-    } else {
-        Line::from(vec![
-            dim("sig "), Span::styled("waiting", Style::default().fg(C_DIM)),
-            dim("  "), Span::styled("no tip received yet", Style::default().fg(C_DIM)),
-        ])
-    };
-    // v0.7.5: Real eclipse probability — computed from actual K, not hardcoded 0.30
-    let p_eclipse = if k > 0 { 0.30_f64.powi(k as i32) } else { 1.0 };
-    let eclipse_line = if k > 0 {
-        Line::from(vec![
-            dim("eclipse "), Span::styled(format!("K={}", k), Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
-            dim("  agree "), Span::styled(format!("{}/{}", agreed, total),
-                Style::default().fg(if agreed >= k as usize { C_GREEN } else if agreed > 0 { C_GOLD } else { C_RED })),
-            dim(format!("  P={:.1e}", p_eclipse)),
-        ])
-    } else {
-        Line::from(vec![
-            dim("eclipse "), Span::styled("K=0", Style::default().fg(C_RED).add_modifier(Modifier::BOLD)),
-            dim("  "), Span::styled("no independent sources — measuring…", Style::default().fg(C_DIM)),
-        ])
-    };
-    let lines = vec![
-        eclipse_line,
-        sig_line,
-        Line::from(vec![
-            dim("verify "), Span::styled(format!("{}µs", app.sync_us), Style::default().fg(C_CYAN)),
-            dim(if sig_verified { "  ✓ tip proven" } else { "  awaiting proof" }),
-        ]),
-    ];
-    Paragraph::new(lines).block(card_block(" ✶ SECURITY", C_VBRIGHT))
-}
+
+
 
 // ── v0.7.0: AI Fleet Monitoring ─────────────────────────────────────────
 
-fn render_fleet_card(app: &App) -> Paragraph<'static> {
-    // Clone all fleet data to avoid borrow-from-app lifetime issues
-    let nodes: Vec<(String, bool, u64, String)> = app.fleet_nodes.iter().map(|n| {
-        let ver = if n.version.is_empty() { "?".to_string() }
-            else if version_gt(VERSION, &n.version) { format!("!{}", n.version) }
-            else { n.version.clone() };
-        (n.name.clone(), n.online, n.height, ver)
-    }).collect();
-    let checking = app.fleet_last_check.elapsed() < Duration::from_secs(30);
-    let total = nodes.len();
-    let online = nodes.iter().filter(|n| n.1).count();
-    let outdated = nodes.iter().filter(|n| n.1 && n.3.starts_with('!')).count();
 
-    // v0.8: Mesh health from flux-p2p (if P2P sync is running)
-    let mesh = app.p2p_state.mesh_peer_count;
-    let mesh_quality = if mesh >= 4 { "healthy" } else if mesh >= 1 { "warming" } else { "empty" };
-    let mesh_blk = app.p2p_blocks_synced;
-
-    // Status line with fleet + mesh summary
-    let status_color = if online == total && outdated == 0 { C_GREEN }
-        else if online > 0 { C_GOLD }
-        else { C_RED };
-    let status_line = Line::from(vec![
-        dim("fleet   "),
-        Span::styled(format!("{}/{}", online, total),
-            Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
-        dim(if checking { "  checking…" } else { "" }),
-        if outdated > 0 {
-            Span::styled(format!("  {} behind", outdated),
-                Style::default().fg(C_RED).add_modifier(Modifier::BOLD))
-        } else { Span::raw(sa("")) },
-    ]);
-    // v0.8: Mesh health line
-    let mesh_line = Line::from(vec![
-        dim("mesh    "),
-        Span::styled(format!("{} peers", mesh), Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
-        dim("  "),
-        Span::styled(mesh_quality, Style::default().fg(
-            if mesh_quality == "healthy" { C_GREEN } else if mesh_quality == "warming" { C_GOLD } else { C_RED }
-        )),
-        dim(format!("  {} blk synced", group(mesh_blk))),
-    ]);
-
-    // Per-node lines with owned data
-    let node_lines: Vec<Line> = nodes.iter().map(|(name, online, height, ver)| {
-        let dot = if *online { Span::styled("●", Style::default().fg(C_GREEN)) }
-                  else { Span::styled("○", Style::default().fg(C_RED)) };
-        let ver_color = if ver == "?" { C_DIM }
-            else if ver.starts_with('!') { C_RED }
-            else { C_GREEN };
-        Line::from(vec![
-            dot,
-            Span::raw(sa(" ")),
-            Span::styled(name.clone(), Style::default().fg(C_CYAN)),
-            dim(format!("  h{}", group(*height))),
-            Span::raw(sa("  ")),
-            Span::styled(ver.clone(), Style::default().fg(ver_color).add_modifier(Modifier::BOLD)),
-        ])
-    }).collect();
-
-    let mut lines = vec![status_line, mesh_line];
-    lines.extend(node_lines);
-
-    Paragraph::new(lines).block(card_block(" ● FLEET · MESH", C_NEON_CYAN))
-}
-
-fn render_block_stream(app: &App) -> Paragraph<'static> {
-    let tip_ok = app.verify.as_ref().map_or(false, |v| v.ok);
-    let title: &'static str = if app.st.blocks_per_sec >= 5000.0 {
-        " BLOCK STREAM · 5k+ blk/s"
-    } else if app.st.blocks_per_sec >= 1000.0 {
-        " BLOCK STREAM · 1k+ blk/s"
-    } else if app.st.blocks_per_sec > 0.0 {
-        " BLOCK STREAM · turbo"
-    } else {
-        " BLOCK STREAM · live"
-    };
-    let lines: Vec<Line> = if app.blocks.is_empty() {
-        vec![Line::from(dim("streaming…"))]
-    } else {
-        app.blocks.iter().take(14).enumerate().map(|(i, b)| {
-            let hash_pref: String = b.hash.chars().take_while(|c| c.is_ascii_hexdigit()).take(8).collect();
-            let producer = if b.producer.is_empty() { "—".to_string() } else { b.producer.chars().take(12).collect() };
-            // colored block marker (no dingbat): green tip, violet history
-            let mark = if i == 0 && tip_ok { Span::styled("█ ", Style::default().fg(C_GREEN)) }
-                       else { Span::styled("▌ ", Style::default().fg(C_VIOLET)) };
-            Line::from(vec![
-                mark,
-                Span::styled(format!("{:>10} ", group(b.height)), Style::default().fg(C_GOLD)),
-                Span::styled(format!("{}… ", hash_pref), Style::default().fg(C_DIM)),
-                Span::styled(producer, Style::default().fg(C_CYAN)),
-                dim(format!("  {}ms", b.tip_ms)),
-            ])
-        }).collect()
-    };
-    Paragraph::new(lines).block(card_block(&title, C_VBRIGHT))
-}
 
 // ── v0.6.0: Cortex MCP combo card ──────────────────────────────────────
 
-fn render_cortex_card(app: &App) -> Paragraph<'static> {
-    let agents_available = app.agents.iter().filter(|a| a.available).count();
-    let agent_count = app.agents.len();
-    let top_name: String = app.agents.iter()
-        .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|a| a.name.clone())
-        .unwrap_or_else(|| "—".to_string());
-    let mcp_combo_tool = app.mcp_combo_tool.clone();
-    let mcp_combo_result = app.mcp_combo_result.clone();
-    let last_cortex_gain = app.last_cortex_gain;
-    let cortex_loops = app.cortex_loops;
-
-    let agent_line = if agent_count == 0 {
-        Line::from(dim("agents  — no registry loaded"))
-    } else {
-        Line::from(vec![
-            dim("agents  "),
-            Span::styled(format!("{}/{}", agents_available, agent_count),
-                Style::default().fg(if agents_available > 0 { C_GREEN } else { C_RED }).add_modifier(Modifier::BOLD)),
-            dim("  top "),
-            Span::styled(top_name, Style::default().fg(C_CYAN)),
-        ])
-    };
-    let combo_line = if mcp_combo_tool.is_empty() {
-        Line::from(vec![
-            dim("combo   "),
-            Span::styled("idle", Style::default().fg(C_DIM)),
-            dim("  [C] execute cortex loop"),
-        ])
-    } else {
-        let running = mcp_combo_result.is_empty();
-        Line::from(vec![
-            dim("combo   "),
-            Span::styled(mcp_combo_tool, Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
-            dim(if running { "  running…" } else { "  ✓ done" }),
-        ])
-    };
-    let cortex_line = if last_cortex_gain > 0.0 {
-        Line::from(vec![
-            dim("cortex  "),
-            Span::styled(format!("+{:.1}%", last_cortex_gain),
-                Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
-            dim(format!("  loops {}", cortex_loops)),
-        ])
-    } else if cortex_loops > 0 {
-        Line::from(vec![
-            dim("cortex  "),
-            Span::styled(format!("no gain  loops {}", cortex_loops),
-                Style::default().fg(C_DIM)),
-        ])
-    } else {
-        Line::from(vec![
-            dim("cortex  "),
-            Span::styled("idle  [C] run optimization loop",
-                Style::default().fg(C_DIM)),
-        ])
-    };
-    let mcp_line = if !mcp_combo_result.is_empty() {
-        let preview: String = mcp_combo_result.chars().take(60).collect();
-        Line::from(vec![
-            dim("result  "),
-            Span::styled(preview, Style::default().fg(C_VBRIGHT)),
-        ])
-    } else {
-        Line::from(dim("result  —"))
-    };
-    let lines = vec![
-        agent_line,
-        combo_line,
-        cortex_line,
-        mcp_line,
-    ];
-    Paragraph::new(lines).block(card_block(" ◆ CORTEX MCP", C_NEON_GOLD))
-}
 
 // ── v0.3.5: Browser shortcuts ────────────────────────────────────────────
 
-/// Open a URL in the system browser. Non-blocking — spawns the OS opener
-/// on a background thread so the TUI never freezes.
 
-fn dirs_next() -> Option<std::path::PathBuf> {
-    if cfg!(windows) {
-        std::env::var("APPDATA").ok().map(std::path::PathBuf::from)
-    } else {
-        std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join(".config"))
-    }
-}
 
-/// The hosted SIGIL wallet (OAuth2 login) — works from ANY browser, so it's what we
-/// hand a headless/remote (proxmox/SSH) operator who has no local GUI. Override with
-/// SIGIL_WALLET_URL.
-fn official_wallet_url() -> String {
-    std::env::var("SIGIL_WALLET_URL").ok().filter(|u| !u.is_empty())
-        .unwrap_or_else(|| "https://sigilgraph.fluxapp.xyz/sigil-wallet/".into())
-}
 
-/// True if there's no local GUI to open a browser into (headless box / SSH / proxmox
-/// console). On Linux that's no DISPLAY and no WAYLAND_DISPLAY.
-fn is_headless() -> bool {
-    #[cfg(target_os = "linux")]
-    { std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() }
-    #[cfg(not(target_os = "linux"))]
-    { false }
-}
 
-/// Best-effort open a URL in the local browser. Returns false if we're headless
-/// (no GUI) — the caller then shows the link for the operator to copy instead.
-fn open_browser(url: &str) -> bool {
-    if is_headless() { return false; }
-    let url = url.to_string();
-    thread::spawn(move || {
-        #[cfg(target_os = "linux")]
-        { let _ = Command::new("xdg-open").arg(&url).spawn(); }
-        #[cfg(target_os = "macos")]
-        { let _ = Command::new("open").arg(&url).spawn(); }
-        #[cfg(target_os = "windows")]
-        { let _ = Command::new("cmd").args(["/c", "start", &url]).spawn(); }
-    });
-    true
-}
+
+// ── Windows: launch-at-login + system tray ──────────────────────────────────
+// The terminal node should be able to start with the Windows session and live in the
+// notification area. Auto-start = a HKCU Run key (via reg.exe — same shell-out pattern the
+// rest of the Windows integration uses, no extra crate). The tray = a PowerShell NotifyIcon
+// helper (assets/sigil-tray.ps1) spawned ISOLATED, so a tray failure can never affect sync.
+
+
 
 // ── flux:// URL scheme ──────────────────────────────────────────────────────
 // `flux://wallet` typed in the browser → the OS launches `sigil-top flux-open
 // flux://wallet`. UI targets open the embedded :9800 wallet; command targets run
 // the `fluxc` binary in a VISIBLE terminal (never silent exec from a URL).
 
-/// Keep only safe chars so a flux:// URL can't inject shell metacharacters.
-fn flux_safe_arg(s: &str) -> String {
-    s.chars().filter(|c| c.is_ascii_alphanumeric() || "._-/".contains(*c)).collect()
-}
 
-/// Ensure the :9800 wallet server is up (spawn a detached `serve` if not), open `path`.
-fn flux_open_local(path: &str) {
-    let up = "127.0.0.1:9800".parse::<std::net::SocketAddr>().ok()
-        .and_then(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_millis(350)).ok())
-        .is_some();
-    if !up {
-        if let Ok(exe) = std::env::current_exe() {
-            let _ = Command::new(&exe).arg("serve")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
-            thread::sleep(Duration::from_millis(900));
-        }
-    }
-    open_browser(&format!("http://localhost:9800{path}"));
-    thread::sleep(Duration::from_millis(500)); // let the browser launch before exit
-}
 
-/// Run `cmd` in a VISIBLE terminal (cross-platform) — so a flux:// URL can't run
-/// fluxc commands behind the user's back.
-fn flux_run_terminal(cmd: &str) {
-    #[cfg(target_os = "linux")]
-    {
-        let hold = format!("{cmd}; echo; echo '[flux:// done — press enter]'; read _");
-        for term in ["x-terminal-emulator", "gnome-terminal", "konsole", "xfce4-terminal", "alacritty", "kitty", "xterm"] {
-            let ok = match term {
-                "gnome-terminal" | "xfce4-terminal" => Command::new(term).args(["--", "sh", "-c", &hold]).spawn().is_ok(),
-                _ => Command::new(term).args(["-e", "sh", "-c", &hold]).spawn().is_ok(),
-            };
-            if ok { return; }
-        }
-    }
-    #[cfg(target_os = "macos")]
-    { let _ = Command::new("osascript").args(["-e", &format!("tell app \"Terminal\" to do script \"{cmd}\"")]).spawn(); }
-    #[cfg(target_os = "windows")]
-    { let _ = Command::new("cmd").args(["/c", "start", "cmd", "/k", cmd]).spawn(); }
-}
 
-/// Dispatch a flux:// URL.
-fn flux_open(raw: &str) {
-    // Debounce: if flux-open fired in the last 1.2s, ignore this one. Stops a tab
-    // storm if the browser/OS invokes the handler repeatedly for a single action.
-    {
-        let stamp = std::env::temp_dir().join("sigil-flux-open.ts");
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        if let Ok(prev) = std::fs::read_to_string(&stamp) {
-            if let Ok(p) = prev.trim().parse::<u128>() {
-                if now.saturating_sub(p) < 1200 { return; }
-            }
-        }
-        let _ = std::fs::write(&stamp, now.to_string());
-    }
-    let rest = raw.trim().trim_start_matches("flux://").trim_start_matches("flux:").trim_start_matches('/');
-    let (head, tail) = match rest.split_once('/') { Some((a, b)) => (a, b), None => (rest, "") };
-    let head = head.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();
-    let arg = flux_safe_arg(tail.split(['?', '#']).next().unwrap_or(""));
-    match head.as_str() {
-        "" | "wallet" | "tron" | "w" => flux_open_local("/"),
-        "enter" | "enter-sigil" | "new" | "onboard" | "login" => flux_open_local("/enter-sigil.html"),
-        "engine" | "vite" | "vite-engine" => flux_open_local("/vite-engine.html"),
-        // content-addressed fetch (the existing flux:// meaning in flux-fleet)
-        "b3" => flux_run_terminal(&format!("flux-fleet get flux://b3/{arg}")),
-        // fluxc command surface — visible terminal, whitelisted verbs only
-        "build" | "dev" | "serve" | "test" | "stats" | "watch" | "plan" | "mcp" | "quick" | "self" | "run" => {
-            let c = if arg.is_empty() { format!("fluxc {head}") } else { format!("fluxc {head} {arg}") };
-            flux_run_terminal(&c);
-        }
-        // anything else → try a served page (graceful 404 if absent)
-        other => flux_open_local(&format!("/{}.html", flux_safe_arg(other))),
-    }
-}
 
-/// Register flux:// → this binary as the OS URL-scheme handler.
-fn flux_register_scheme() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?.to_string_lossy().to_string();
-    #[cfg(target_os = "linux")]
-    {
-        let home = std::env::var("HOME").map_err(|_| "no $HOME".to_string())?;
-        let apps = format!("{home}/.local/share/applications");
-        std::fs::create_dir_all(&apps).map_err(|e| e.to_string())?;
-        let desktop = format!(
-            "[Desktop Entry]\nType=Application\nName=Flux URL Handler\nComment=Open flux:// links (wallet, fluxc commands)\nExec={exe} flux-open %u\nTerminal=false\nNoDisplay=true\nStartupNotify=false\nMimeType=x-scheme-handler/flux;\n"
-        );
-        std::fs::write(format!("{apps}/flux-url-handler.desktop"), desktop).map_err(|e| e.to_string())?;
-        let _ = Command::new("xdg-mime").args(["default", "flux-url-handler.desktop", "x-scheme-handler/flux"]).status();
-        let _ = Command::new("update-desktop-database").arg(&apps).status();
-        println!("  ✓ flux:// registered. Try typing  flux://wallet  in your browser.");
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let cmd = format!("\"{exe}\" flux-open \"%1\"");
-        let _ = Command::new("reg").args(["add", "HKCU\\Software\\Classes\\flux", "/ve", "/d", "URL:Flux Protocol", "/f"]).status();
-        let _ = Command::new("reg").args(["add", "HKCU\\Software\\Classes\\flux", "/v", "URL Protocol", "/d", "", "/f"]).status();
-        let _ = Command::new("reg").args(["add", "HKCU\\Software\\Classes\\flux\\shell\\open\\command", "/ve", "/d", &cmd, "/f"]).status();
-        println!("  flux:// registered. Try: flux://wallet");
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = &exe;
-        println!("  flux:// on macOS needs an .app bundle (manual) — open http://localhost:9800/ meanwhile.");
-    }
-    Ok(())
-}
 
-fn flux_unregister_scheme() -> Result<(), String> {
-    #[cfg(target_os = "linux")]
-    { if let Ok(h) = std::env::var("HOME") { let _ = std::fs::remove_file(format!("{h}/.local/share/applications/flux-url-handler.desktop")); } }
-    #[cfg(target_os = "windows")]
-    { let _ = Command::new("reg").args(["delete", "HKCU\\Software\\Classes\\flux", "/f"]).status(); }
-    println!("  flux:// handler removed.");
-    Ok(())
-}
 
-fn render_footer(app: &App) -> Paragraph<'static> {
-    let toast = if app.toast.is_empty() { String::new() } else { format!(" › {}", app.toast) };
-    let keys = |c: &'static str, rest: &'static str, col: Color| -> Vec<Span<'static>> {
-        vec![Span::styled(c, Style::default().fg(col).add_modifier(Modifier::BOLD)), dim(rest), Span::raw(sa("  "))]
-    };
-    let mut kb = vec![Span::raw(sa(" "))];
-    kb.extend(keys("[M]", "ine", C_GOLD));
-    kb.extend(keys("[F]", "ull", C_GREEN));
-    kb.extend(keys("[V]", "erify", C_GREEN));
-    kb.extend(keys("[Y]", "esync", C_CYAN));
-    kb.extend(keys("[W]", "allet", C_CYAN));
-    kb.extend(keys("[B]", "locks", C_CYAN));
-    kb.extend(keys("[U]", "pdate", C_VBRIGHT));
-    kb.extend(keys("[C]", "ortex", C_GOLD));
-    kb.extend(keys("[H]", "eal", C_GOLD));
-    kb.extend(keys("[N]", "odes", C_CYAN));
-    kb.extend(keys("[L]", "ogin", C_VBRIGHT));
-    kb.extend(keys("[Q]", "uit", C_RED));
-    // v0.6.0: show serve status line
-    let serve_line = if !app.serve_status.is_empty() {
-        let short: String = app.serve_status.chars().take(72).collect();
-        Line::from(Span::styled(format!(" ⚡ {}", short), Style::default().fg(C_GREEN)))
-    } else {
-        Line::from(Span::styled(" ⚡ fluxc serve :9800 · local wallet [W]", Style::default().fg(C_DIM)))
-    };
-    // v0.10.5.1: when offline, the top line becomes a calm status banner with a
-    // live "offline for X · retry in Ns" countdown instead of a stale gold toast —
-    // the operator always knows the cockpit is reconnecting, not frozen.
-    let top_line = if !app.online {
-        let dur = app.offline_since.map(|t| fmt_uptime(t.elapsed().as_secs())).unwrap_or_else(|| "0s".into());
-        let txt = if app.refresh_inflight {
-            format!(" ⚠ offline {} · reconnecting…", dur)
-        } else {
-            let next = app.refresh_delay().as_secs().saturating_sub(app.last_fetch.elapsed().as_secs());
-            format!(" ⚠ offline {} · retry in {}s", dur, next)
-        };
-        Line::from(Span::styled(txt, Style::default().fg(C_RED).add_modifier(Modifier::BOLD)))
-    } else {
-        Line::from(Span::styled(toast, Style::default().fg(C_GOLD)))
-    };
-    Paragraph::new(vec![
-        top_line,
-        Line::from(kb),
-        serve_line,
-    ])
+
+#[cfg(test)]
+mod pure_helpers_tests {
+    //! Coverage for the pure money/format/version helpers (Tier 3 — sigil-top
+    //! was the worst-density crate at 581 loc/test). All deterministic, no I/O.
+    use super::*;
+
+    #[test]
+    fn hex_to_32_roundtrips_and_rejects_bad_input() {
+        // 64 hex chars → 32 bytes, value-correct.
+        let h = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        let b = hex_to_32(h).expect("valid 64-hex");
+        assert_eq!(b[0], 0x00);
+        assert_eq!(b[1], 0x11);
+        assert_eq!(b[31], 0xff);
+        // uppercase accepted (from_str_radix is case-insensitive)
+        assert_eq!(hex_to_32(&h.to_uppercase()), Some(b));
+        // surrounding whitespace trimmed
+        assert_eq!(hex_to_32(&format!("  {h}  ")), Some(b));
+        // wrong length / non-hex rejected
+        assert_eq!(hex_to_32(&"a".repeat(63)), None);
+        assert_eq!(hex_to_32(&"a".repeat(65)), None);
+        assert_eq!(hex_to_32(&"g".repeat(64)), None, "non-hex must be rejected, not silently zeroed");
+    }
+
+    #[test]
+    fn valid_addr_requires_exactly_64_hex() {
+        assert!(valid_addr(&"a".repeat(64)));
+        assert!(valid_addr(&"A1b2".repeat(16))); // mixed case, 64 chars
+        assert!(valid_addr(&format!("  {}  ", "f".repeat(64))), "trims before checking");
+        assert!(!valid_addr(&"a".repeat(63)));
+        assert!(!valid_addr(&"a".repeat(65)));
+        assert!(!valid_addr(&"z".repeat(64)), "non-hex rejected");
+        assert!(!valid_addr(""));
+    }
+
+    #[test]
+    fn fmt_supply_truncates_sub_unit_and_groups_thousands() {
+        let unit = 10u128.pow(DECIMALS);
+        assert_eq!(fmt_supply(0), "0");
+        assert_eq!(fmt_supply(unit - 1), "0", "sub-unit dust truncates to 0 whole");
+        assert_eq!(fmt_supply(unit), "1");
+        assert_eq!(fmt_supply(999 * unit), "999");
+        assert_eq!(fmt_supply(1_000 * unit), "1,000");
+        assert_eq!(fmt_supply(1_234_567 * unit), "1,234,567");
+    }
+
+    #[test]
+    fn fmt_uptime_picks_the_right_granularity() {
+        assert_eq!(fmt_uptime(0), "0m 0s");
+        assert_eq!(fmt_uptime(59), "0m 59s");
+        assert_eq!(fmt_uptime(60), "1m 0s");
+        assert_eq!(fmt_uptime(3600), "1h 0m");
+        assert_eq!(fmt_uptime(90_061), "1d 1h 1m"); // 1d + 1h + 1m + 1s
+    }
+
+    #[test]
+    fn fmt_eta_handles_nonfinite_and_ranges() {
+        assert_eq!(fmt_eta(-1.0), "—");
+        assert_eq!(fmt_eta(0.0), "—");
+        assert_eq!(fmt_eta(f64::INFINITY), "—", "non-finite must not panic / format garbage");
+        assert_eq!(fmt_eta(f64::NAN), "—");
+        assert_eq!(fmt_eta(45.0), "45s");
+        assert_eq!(fmt_eta(125.0), "2m");
+        assert_eq!(fmt_eta(3_661.0), "1h 1m");
+        assert_eq!(fmt_eta(60.0 * 60.0 * 24.0 * 100.0), "∞", "absurd ETA collapses to ∞");
+    }
+
+    #[test]
+    fn version_gt_orders_semver_numerically() {
+        assert!(version_gt("1.0.0", "0.9.9"));
+        assert!(version_gt("1.10.0", "1.9.0"), "10 > 9 numerically, not lexically");
+        assert!(version_gt("2", "1.9.9"), "shorter-but-larger major wins");
+        assert!(version_gt("1.0.1", "1.0.0"));
+        assert!(!version_gt("1.2.3", "1.2.3"), "equal is not greater");
+        assert!(!version_gt("1.0.0", "1.0.1"));
+        assert!(!version_gt("1.0", "1.0.0"), "1.0 == 1.0.0 (missing components are 0)");
+    }
 }

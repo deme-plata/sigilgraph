@@ -1817,6 +1817,17 @@ pub(crate) fn set_mine_wallet(addr: &str) -> bool {
     std::fs::write(mine_wallet_path(), addr.trim()).is_ok()
 }
 
+/// The miner's SIGNING keypair. Required now that `/mine` is auth-gated (audit C1:
+/// a miner must prove control of the credited wallet — you can no longer mine to an
+/// address whose key you don't hold, e.g. the legacy hostname-hash fallback). Source:
+/// `SIGIL_MINE_SEED` (64-hex). Read from the environment only, never persisted (matches
+/// `do_login`'s "never store the secret"). `None` ⇒ mining is disabled in `start_mining`.
+fn miner_keypair() -> Option<Keypair> {
+    let seed_hex = std::env::var("SIGIL_MINE_SEED").ok()?;
+    let seed = hex_to_32(seed_hex.trim())?;
+    Some(Keypair::from_seed(&seed))
+}
+
 #[cfg(test)]
 mod lane_n_tests {
     use super::resolve_mine_wallet;
@@ -1852,8 +1863,18 @@ mod lane_n_tests {
 fn start_mining(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> mpsc::Receiver<String> {
     use std::sync::atomic::Ordering;
     let (tx, rx) = mpsc::channel();
-    let (url, wallet) = (mine_url(), miner_wallet());
+    let url = mine_url();
+    let kp = miner_keypair();
     thread::spawn(move || {
+        // /mine is auth-gated (audit C1): the miner must SIGN as the credited wallet.
+        // No seed ⇒ we can't sign ⇒ disable mining instead of burning CPU on shares the
+        // node rejects with "missing 'sig'". Set SIGIL_MINE_SEED=<64-hex> to enable.
+        let Some(kp) = kp else {
+            let _ = tx.send("✗ mining disabled: set SIGIL_MINE_SEED=<64-hex wallet seed>. The node now requires miners to SIGN /mine (audit C1) — mining to an address you don't control is no longer possible.".to_string());
+            return;
+        };
+        let wallet = hex::encode(kp.pubkey());
+        let mut req_nonce: u64 = 0; // strictly-increasing per-wallet replay guard (ms floor)
         let difficulty_bits: u32 = std::env::var("SIGIL_MINE_DIFFICULTY").ok()
             .and_then(|s| s.parse().ok()).unwrap_or(12); // ~4k hashes/share — real PoW, lands fast
         let client = match reqwest::blocking::Client::builder().timeout(Duration::from_secs(8))
@@ -1883,7 +1904,19 @@ fn start_mining(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> mpsc::Re
                 }
             };
             let Some(nonce) = found else { break };
-            let body = format!("{{\"miner\":\"{wallet}\",\"header\":\"{header}\",\"nonce\":{nonce},\"difficulty\":{difficulty_bits},\"reward\":50}}");
+            // Sign the canonical sigil-rpc auth message. MUST byte-match
+            // `sigil_rpc::auth::auth_message`: AUTH_DOMAIN|action|field0|field1|…|nonce=N.
+            // /mine fields = [miner_hex, header, pow_nonce]. req_nonce uses a ms floor so
+            // it strictly increases across submits AND restarts (the node persists the
+            // per-wallet high-water nonce) → a captured share can't be replayed.
+            req_nonce = {
+                let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64).unwrap_or(0);
+                ms.max(req_nonce.wrapping_add(1))
+            };
+            let auth_msg = format!("sigil-rpc/v1|mine|{wallet}|{header}|{nonce}|nonce={req_nonce}");
+            let sig = hex::encode(kp.sign(auth_msg.as_bytes()));
+            let body = format!("{{\"miner\":\"{wallet}\",\"header\":\"{header}\",\"nonce\":{nonce},\"difficulty\":{difficulty_bits},\"reward\":50,\"sig\":\"{sig}\",\"req_nonce\":{req_nonce}}}");
             match client.post(&url).header("Content-Type", "application/json").body(body).send() {
                 Ok(r) => {
                     let txt = r.text().unwrap_or_default();

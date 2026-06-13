@@ -60,23 +60,30 @@ fn height_key(h: u64) -> Vec<u8> {
 }
 
 impl BlockStore {
+    /// Open for the interactive TUI: returns IMMEDIATELY. A store that predates the
+    /// 'B' fast-open key migrates its index on a BACKGROUND thread (see
+    /// [`migrate_index`](Self::migrate_index)) so the dashboard paints at once
+    /// instead of hanging on a multi-GB scan. Under `cfg!(test)` migration is inline
+    /// so tests observe `best_height` synchronously.
     pub fn open(path: &str) -> Result<Self, String> {
+        Self::open_inner(path, false)
+    }
+
+    /// Open for headless tooling (verify / full-sync / explorer serve) that needs
+    /// `best_height` + the height index on return: the migration runs INLINE.
+    pub fn open_blocking(path: &str) -> Result<Self, String> {
+        Self::open_inner(path, true)
+    }
+
+    fn open_inner(path: &str, inline_migration: bool) -> Result<Self, String> {
         let db_path = PathBuf::from(path);
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
         }
-        let mut db = flux_db::Database::open(&db_path)?;
+        let db = flux_db::Database::open(&db_path)?;
 
-        // ── v0.35 (sync-starts-earlier, DeepSeek audit S1): O(1) open. ──────────────────
-        // The old open() ITERATED THE ENTIRE DB and bincode-deserialized every block just
-        // to learn best_height — measured in MINUTES on a multi-GB store, all spent BEFORE
-        // the sync thread could even spawn. Now best_(height,hash) persists under meta 'B'
-        // (written by every put path); when present we skip the scan entirely. Stores from
-        // before 'B' fall through to the legacy scan ONCE and write 'B' = self-migrating.
-        // Crash-staleness ('B' lags the final batch if we die between batch_put and the
-        // meta put) only ever UNDER-reports best_height by ≤1 batch and self-corrects on
-        // the next put — synced_to/verified_to (the consensus-relevant watermarks) have
-        // their own keys and are untouched by this.
+        // v0.35 fast open: best_(height,hash) persists under meta 'B'; when present we
+        // skip the scan entirely. Stores from before 'B' migrate ONCE (self-migrating).
         let mut best_height = 0u64;
         let mut best_hash_hex = String::new();
         let mut need_best_migration = true;
@@ -90,34 +97,29 @@ impl BlockStore {
             }
         }
         if need_best_migration {
-            // Legacy path: one full scan (old behavior), then persist 'B' so every
-            // subsequent open is O(1).
-            let mut have_index = false;
-            let mut blocks_idx: Vec<(u64, Vec<u8>)> = Vec::new(); // (height, hash bytes)
-            for (key, value) in db.iter() {
-                match key.first() {
-                    Some(&KEY_HINDEX) => { have_index = true; continue; }
-                    Some(&KEY_META) => continue,
-                    _ => {}
-                }
-                if let Ok(block) = bincode::deserialize::<StoredBlock>(&value) {
-                    if block.header.height >= best_height {
-                        best_height = block.header.height;
-                        best_hash_hex = block.hash_hex.clone();
-                    }
-                    blocks_idx.push((block.header.height, key));
-                }
+            // INSTANT-BOOT FIX. The legacy migration was a synchronous full-db scan
+            // (bincode-deserialize every block) that ran HERE, before the first TUI
+            // paint — minutes on a multi-GB store, an OOM-class RAM spike that lagged
+            // the whole machine, and because 'B' was only written AFTER the loop,
+            // closing mid-scan saved nothing so every launch re-scanned (= "5 minutes
+            // and it never gets faster"). Now it runs on a BACKGROUND thread over a
+            // cloned handle (flux_db::Database is Arc<RwLock> inside → the clone shares
+            // storage and writes are visible), checkpointing 'B' every CHECKPOINT
+            // blocks so an interrupt still leaves the next open O(1). open() returns at
+            // once; the light monitor paints immediately while the cache index rebuilds
+            // quietly. Inline only for headless tooling / tests (need best_height now).
+            if inline_migration || cfg!(test) {
+                let (h, hash) = Self::migrate_index(&db);
+                best_height = h;
+                best_hash_hex = hash;
+            } else {
+                let bg = db.clone();
+                let _ = std::thread::Builder::new()
+                    .name("sigil-blockstore-migrate".into())
+                    .spawn(move || {
+                        let _ = Self::migrate_index(&bg);
+                    });
             }
-            // Migrate a pre-index store (built before the height index existed) so it
-            // resumes instead of re-syncing from 0.
-            if !have_index && !blocks_idx.is_empty() {
-                for (h, hashk) in &blocks_idx {
-                    let _ = db.put(&height_key(*h), hashk);
-                }
-            }
-            let mut bv = best_height.to_be_bytes().to_vec();
-            bv.extend_from_slice(best_hash_hex.as_bytes());
-            let _ = db.put(&[KEY_META, b'B'], &bv);
         }
 
         let synced_to = db
@@ -138,6 +140,52 @@ impl BlockStore {
         let mut s = BlockStore { db, best_height, best_hash_hex, synced_to, verified_to, base: 0, genesis_hash };
         s.advance_synced(); // catch up the contiguous pointer to whatever's on disk
         Ok(s)
+    }
+
+    /// One-time index migration for a pre-'B' store. Rebuilds the height index and
+    /// persists best-(height,hash) under meta 'B', CHECKPOINTING every `CHECKPOINT`
+    /// blocks so an interrupted run still leaves the next open O(1) (the trap that
+    /// made boots permanently slow when the user closed mid-scan). `put` is `&self`
+    /// and `db.iter()` returns an owned snapshot, so this is safe to run on a cloned
+    /// handle off the main thread. Returns (best_height, best_hash_hex).
+    fn migrate_index(db: &flux_db::Database) -> (u64, String) {
+        const CHECKPOINT: u64 = 50_000;
+        let (mut best_height, mut best_hash_hex) = (0u64, String::new());
+        let mut have_index = false;
+        let mut pending: Vec<(Vec<u8>, Vec<u8>)> = Vec::new(); // (height_key, hash_key), flushed per checkpoint
+        let mut seen: u64 = 0;
+        let checkpoint = |db: &flux_db::Database, pending: &mut Vec<(Vec<u8>, Vec<u8>)>, h: u64, hash: &str| {
+            for (hk, hashk) in pending.drain(..) {
+                let _ = db.put(&hk, &hashk);
+            }
+            let mut bv = h.to_be_bytes().to_vec();
+            bv.extend_from_slice(hash.as_bytes());
+            let _ = db.put(&[KEY_META, b'B'], &bv);
+        };
+        for (key, value) in db.iter() {
+            match key.first() {
+                Some(&KEY_HINDEX) => { have_index = true; continue; }
+                Some(&KEY_META) => continue,
+                _ => {}
+            }
+            if let Ok(block) = bincode::deserialize::<StoredBlock>(&value) {
+                let h = block.header.height;
+                if h >= best_height {
+                    best_height = h;
+                    best_hash_hex = block.hash_hex.clone();
+                }
+                // Only rebuild the height index for a store that never had one.
+                if !have_index {
+                    pending.push((height_key(h), key));
+                }
+                seen += 1;
+                if seen % CHECKPOINT == 0 {
+                    checkpoint(db, &mut pending, best_height, &best_hash_hex);
+                }
+            }
+        }
+        checkpoint(db, &mut pending, best_height, &best_hash_hex);
+        (best_height, best_hash_hex)
     }
 
     /// v0.35: persist best_(height,hash) under meta 'B' — the key that makes open() O(1)

@@ -1227,7 +1227,7 @@ fn main() {
             // so status/recent/search proxy to SIGIL_NODE_URL (the real node) and only the
             // cortex panel + any persisted-spine content-verify answer locally. Best-effort:
             // if the store is locked by another instance, fall back to pure proxy (None).
-            let local_api = block_store::BlockStore::open(&sigil_top_db_path()).ok().map(|st| {
+            let local_api = block_store::BlockStore::open_blocking(&sigil_top_db_path()).ok().map(|st| {
                 std::sync::Arc::new(local_api::LocalApi {
                     reader: st.reader(),
                     sync: None,
@@ -1300,7 +1300,7 @@ fn main() {
         Some("verify-chain") => {
             let json = argv.iter().any(|a| a == "--json");
             let path = sigil_top_db_path();
-            let mut store = match block_store::BlockStore::open(&path) {
+            let mut store = match block_store::BlockStore::open_blocking(&path) {
                 Ok(s) => s,
                 Err(e) => { eprintln!("{RED}✗ open store {path}: {e}{RESET}"); std::process::exit(2); }
             };
@@ -1341,7 +1341,7 @@ fn main() {
             let timeout_s: u64 = argv.iter().position(|a| a == "--timeout")
                 .and_then(|i| argv.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(1800);
             let path = sigil_top_db_path();
-            let store = match block_store::BlockStore::open(&path) {
+            let store = match block_store::BlockStore::open_blocking(&path) {
                 Ok(s) => s,
                 Err(e) => { eprintln!("{RED}✗ open store {path}: {e}{RESET}"); std::process::exit(2); }
             };

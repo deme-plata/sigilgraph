@@ -1624,3 +1624,59 @@ mod wire_tests {
         assert!(zstd_decompress_body(&[]).is_none(), "empty rejected");
     }
 }
+
+#[cfg(test)]
+mod sync_math_tests {
+    //! Pure sync arithmetic + wire-tip extraction (Tier 3). A bug here makes the
+    //! fast-snap probe target the wrong height or fail to learn a peer's tip.
+    use super::{align_base, max_header_height, BackfillResp};
+
+    #[test]
+    fn align_base_snaps_below_h_and_clamps_to_floor() {
+        // chunk-aligned at/below h.
+        assert_eq!(align_base(10_000, 4_096, 0), 8_192, "2*4096");
+        assert_eq!(align_base(8_192, 4_096, 0), 8_192, "exact boundary stays");
+        assert_eq!(align_base(100, 4_096, 0), 0, "below one chunk floors to 0");
+        // sync_base floor wins when the alignment would go below it.
+        assert_eq!(align_base(100, 4_096, 500), 500, "clamped up to the servable floor");
+    }
+
+    #[test]
+    fn align_base_invariants_hold_over_a_sweep() {
+        for &chunk in &[1u64, 2, 1_024, 4_096] {
+            for h in [0u64, 1, 5_000, 1_000_000, u64::MAX / 2] {
+                for &base in &[0u64, 4_096, 10_000] {
+                    let a = align_base(h, chunk, base);
+                    assert!(a >= base, "never below the servable floor");
+                    // When the floor isn't binding, the result is chunk-aligned and ≤ h.
+                    if a > base {
+                        assert_eq!(a % chunk, 0, "must be chunk-aligned");
+                        assert!(a <= h, "must not jump past the requested height");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn max_header_height_reads_legacy_json_tip() {
+        // The legacy full-block JSON codec: max over the headers' heights.
+        let resp = BackfillResp {
+            blocks: vec![
+                serde_json::json!({"header": {"height": 12}}),
+                serde_json::json!({"header": {"height": 4_096_777}}),
+                serde_json::json!({"header": {"height": 5}}),
+            ],
+        };
+        let bytes = serde_json::to_vec(&resp).unwrap();
+        assert_eq!(max_header_height(&bytes), Some(4_096_777));
+    }
+
+    #[test]
+    fn max_header_height_is_none_on_empty_or_garbage() {
+        let empty = serde_json::to_vec(&BackfillResp { blocks: vec![] }).unwrap();
+        assert_eq!(max_header_height(&empty), None, "no headers → no tip");
+        assert_eq!(max_header_height(b"not a real wire payload"), None);
+        assert_eq!(max_header_height(b""), None);
+    }
+}

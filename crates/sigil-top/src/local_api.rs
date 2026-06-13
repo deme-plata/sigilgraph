@@ -251,3 +251,32 @@ fn rows_json(rows: &[BlockRow]) -> String {
     })).collect();
     serde_json::json!({ "results": results, "source": "sigil-top-local" }).to_string()
 }
+
+#[cfg(test)]
+mod query_parse_tests {
+    //! `/api/v1/search?q=…` + `/api/v1/use-wallet?address=…` parsing (Tier 3).
+    //! A bug corrupts the explorer query or the operator's wallet-claim address.
+    use super::{qparam, urldecode};
+
+    #[test]
+    fn urldecode_handles_plus_and_percent() {
+        assert_eq!(urldecode("a+b"), "a b");
+        assert_eq!(urldecode("hello%20world"), "hello world");
+        assert_eq!(urldecode("%41%42%43"), "ABC");
+        assert_eq!(urldecode("plain"), "plain");
+        // malformed escapes are passed through literally, never panic.
+        assert_eq!(urldecode("%zz"), "%zz");
+        assert_eq!(urldecode("100%"), "100%");
+        assert_eq!(urldecode("%4"), "%4");
+    }
+
+    #[test]
+    fn qparam_extracts_decodes_and_misses_cleanly() {
+        let q = "q=foo%20bar&address=deadbeef&flag";
+        assert_eq!(qparam(q, "q").as_deref(), Some("foo bar"), "value is url-decoded");
+        assert_eq!(qparam(q, "address").as_deref(), Some("deadbeef"));
+        assert_eq!(qparam(q, "flag").as_deref(), Some(""), "bare key → empty value");
+        assert_eq!(qparam(q, "missing"), None);
+        assert_eq!(qparam("", "q"), None);
+    }
+}

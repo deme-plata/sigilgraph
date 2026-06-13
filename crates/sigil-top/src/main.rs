@@ -3783,3 +3783,82 @@ fn engine_node_url() -> String {
 
 
 
+
+#[cfg(test)]
+mod pure_helpers_tests {
+    //! Coverage for the pure money/format/version helpers (Tier 3 — sigil-top
+    //! was the worst-density crate at 581 loc/test). All deterministic, no I/O.
+    use super::*;
+
+    #[test]
+    fn hex_to_32_roundtrips_and_rejects_bad_input() {
+        // 64 hex chars → 32 bytes, value-correct.
+        let h = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        let b = hex_to_32(h).expect("valid 64-hex");
+        assert_eq!(b[0], 0x00);
+        assert_eq!(b[1], 0x11);
+        assert_eq!(b[31], 0xff);
+        // uppercase accepted (from_str_radix is case-insensitive)
+        assert_eq!(hex_to_32(&h.to_uppercase()), Some(b));
+        // surrounding whitespace trimmed
+        assert_eq!(hex_to_32(&format!("  {h}  ")), Some(b));
+        // wrong length / non-hex rejected
+        assert_eq!(hex_to_32(&"a".repeat(63)), None);
+        assert_eq!(hex_to_32(&"a".repeat(65)), None);
+        assert_eq!(hex_to_32(&"g".repeat(64)), None, "non-hex must be rejected, not silently zeroed");
+    }
+
+    #[test]
+    fn valid_addr_requires_exactly_64_hex() {
+        assert!(valid_addr(&"a".repeat(64)));
+        assert!(valid_addr(&"A1b2".repeat(16))); // mixed case, 64 chars
+        assert!(valid_addr(&format!("  {}  ", "f".repeat(64))), "trims before checking");
+        assert!(!valid_addr(&"a".repeat(63)));
+        assert!(!valid_addr(&"a".repeat(65)));
+        assert!(!valid_addr(&"z".repeat(64)), "non-hex rejected");
+        assert!(!valid_addr(""));
+    }
+
+    #[test]
+    fn fmt_supply_truncates_sub_unit_and_groups_thousands() {
+        let unit = 10u128.pow(DECIMALS);
+        assert_eq!(fmt_supply(0), "0");
+        assert_eq!(fmt_supply(unit - 1), "0", "sub-unit dust truncates to 0 whole");
+        assert_eq!(fmt_supply(unit), "1");
+        assert_eq!(fmt_supply(999 * unit), "999");
+        assert_eq!(fmt_supply(1_000 * unit), "1,000");
+        assert_eq!(fmt_supply(1_234_567 * unit), "1,234,567");
+    }
+
+    #[test]
+    fn fmt_uptime_picks_the_right_granularity() {
+        assert_eq!(fmt_uptime(0), "0m 0s");
+        assert_eq!(fmt_uptime(59), "0m 59s");
+        assert_eq!(fmt_uptime(60), "1m 0s");
+        assert_eq!(fmt_uptime(3600), "1h 0m");
+        assert_eq!(fmt_uptime(90_061), "1d 1h 1m"); // 1d + 1h + 1m + 1s
+    }
+
+    #[test]
+    fn fmt_eta_handles_nonfinite_and_ranges() {
+        assert_eq!(fmt_eta(-1.0), "—");
+        assert_eq!(fmt_eta(0.0), "—");
+        assert_eq!(fmt_eta(f64::INFINITY), "—", "non-finite must not panic / format garbage");
+        assert_eq!(fmt_eta(f64::NAN), "—");
+        assert_eq!(fmt_eta(45.0), "45s");
+        assert_eq!(fmt_eta(125.0), "2m");
+        assert_eq!(fmt_eta(3_661.0), "1h 1m");
+        assert_eq!(fmt_eta(60.0 * 60.0 * 24.0 * 100.0), "∞", "absurd ETA collapses to ∞");
+    }
+
+    #[test]
+    fn version_gt_orders_semver_numerically() {
+        assert!(version_gt("1.0.0", "0.9.9"));
+        assert!(version_gt("1.10.0", "1.9.0"), "10 > 9 numerically, not lexically");
+        assert!(version_gt("2", "1.9.9"), "shorter-but-larger major wins");
+        assert!(version_gt("1.0.1", "1.0.0"));
+        assert!(!version_gt("1.2.3", "1.2.3"), "equal is not greater");
+        assert!(!version_gt("1.0.0", "1.0.1"));
+        assert!(!version_gt("1.0", "1.0.0"), "1.0 == 1.0.0 (missing components are 0)");
+    }
+}

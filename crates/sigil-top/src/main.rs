@@ -20,6 +20,7 @@
 mod block_store;
 mod block_sync;
 mod chain_verify; // v0.9.0: full verifying sync — spine continuity + precheck walk
+mod gap_sync;     // SPINE-BREAK fix: testable genesis-up contiguity engine + shared watchdog/classify
 mod serve;
 mod heroes;
 use heroes::*;
@@ -1170,6 +1171,16 @@ fn main() {
     init_ui_ascii();       // decide ASCII vs rich glyphs (Windows-safe layout)
     // subcommands: login / logout (handled before the render loop)
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // v0.77.7: clean up the `…exe.old` left by the Windows lock-fallback swap (the previous
+    // running image, renamed aside so the new binary could take the install path). It's only
+    // unlockable once the old process is gone, i.e. now. Skip during --selfcheck (must stay pure).
+    #[cfg(windows)]
+    if argv.first().map(|s| s.as_str()) != Some("--selfcheck") {
+        if let Some(exe) = INSTALL_EXE.get().cloned().or_else(|| std::env::current_exe().ok()) {
+            let old = exe.with_extension("exe.old");
+            if old.exists() { let _ = std::fs::remove_file(&old); }
+        }
+    }
     match argv.first().map(|s| s.as_str()) {
         // v0.25: updater PRE-FLIGHT probe. Print the version and exit 0 — touch NOTHING else
         // (no network, no TUI, no DB, no splash) — so `relaunch_new_binary` can confirm a
@@ -1373,6 +1384,14 @@ fn main() {
                     eprintln!("  {RED}✗ verification break — {b}{RESET}");
                     eprintln!("  {RED}  the downloaded chain does NOT form one connected spine. Aborting.{RESET}\n");
                     std::process::exit(1);
+                }
+                // SPINE-BREAK fix: the no-progress watchdog confirmed an unfillable hole. Fail LOUD
+                // naming the EXACT stuck height (exit 4) instead of the old silent rate-0 crawl that
+                // only ever ended on the generic timeout.
+                if let Some((h, reason)) = &st.sync_failure {
+                    eprintln!("\n  {RED}✗ SPINE BREAK — sync stuck at height {}{RESET}", group(*h));
+                    eprintln!("  {RED}  {reason}{RESET}\n");
+                    std::process::exit(4);
                 }
                 let target = target_arg.unwrap_or(st.peer_best_height);
                 if last_print.elapsed() >= Duration::from_secs(2) {
@@ -1962,6 +1981,11 @@ fn maybe_auto_update(argv: &[String]) -> Option<String> {
         _ => return None, // up to date, channel unreachable, or malformed → just run
     };
     match self_update(&rel) {
+        Ok(msg) if msg.starts_with("staged v") => {
+            // Windows lock-fallback path: a detached helper will move the staged binary over the
+            // install path AFTER this process exits, then relaunch it. Exit now so it can proceed.
+            std::process::exit(0);
+        }
         Ok(_) => {
             // Relaunch into the new binary. self_replace installed the new version AT THE
             // CURRENT EXE PATH, so that's the canonical relaunch target; a versioned copy
@@ -2042,12 +2066,78 @@ fn self_update(rel: &Release) -> Result<String, String> {
     if let (Ok(cur), Some(prev)) = (std::env::current_exe(), prev_binary_path()) {
         let _ = std::fs::copy(&cur, &prev);
     }
+    let mb = bytes.len() as f64 / 1.048576e6;
+    // Common fast path (both platforms): atomic in-place self-replace. On Windows the
+    // self_replace crate does the "rename the running .exe out of the way" trick itself.
     if self_replace::self_replace(&beside).is_ok() {
         let _ = std::fs::remove_file(&beside);
-        return Ok(format!("swapped v{VERSION} -> v{} ({:.1} MB){prov} — restart to run",
-            rel.version, bytes.len() as f64 / 1.048576e6));
+        return Ok(format!("swapped v{VERSION} -> v{} ({mb:.1} MB){prov} — restart to run", rel.version));
     }
-    Ok(format!("saved v{} ({:.1} MB){prov} -> {}", rel.version, bytes.len() as f64 / 1.048576e6, beside.display()))
+    // self_replace FAILED.
+    // Windows: the running .exe was locked (AV / image map / dir perms) and the old code
+    // silently fell through to "saved … beside" — the install path kept the OLD binary, the
+    // relaunch pre-flighted that OLD binary, saw a version mismatch, aborted, and the operator
+    // drifted (DeepSeek root-cause: "running .exe is locked → rename fails → silent skip →
+    // version drift"). Escalate instead of drifting. See windows_swap_fallback().
+    #[cfg(windows)]
+    { return windows_swap_fallback(&beside, rel, mb, &prov); }
+    // Unix: self_replace almost never fails; keep the staged versioned binary beside us and let
+    // relaunch_new_binary fall back to it.
+    #[cfg(not(windows))]
+    Ok(format!("saved v{} ({mb:.1} MB){prov} -> {}", rel.version, beside.display()))
+}
+
+/// Windows lock-failure fallback for [`self_update`]. `self_replace` could not swap the running
+/// `.exe` (locked image / AV scan / directory perms). DeepSeek-designed escalation, fail-loud:
+///   1. rename the running exe → `…exe.old` (Windows permits renaming a running image on the same
+///      volume), then copy the staged bytes into the original install path → instant in-place swap
+///      (relaunch_new_binary then re-execs the install path exactly as in the common case);
+///   2. if that fails, write a DETACHED helper `.bat` that waits for THIS pid to exit, moves the
+///      staged binary over the install path, relaunches it, and self-deletes — applied on exit;
+///   3. if NEITHER works, return `Err` so the [U] handler shows a LOUD failure (never a silent
+///      "saved" that drifts the version).
+/// The `…exe.old` left behind by path 1 is cleaned up on the next boot (see main()).
+#[cfg(windows)]
+fn windows_swap_fallback(beside: &std::path::Path, rel: &Release, mb: f64, prov: &str)
+    -> Result<String, String>
+{
+    use std::os::windows::process::CommandExt;
+    let install = INSTALL_EXE.get().cloned()
+        .or_else(|| std::env::current_exe().ok())
+        .ok_or_else(|| "cannot resolve install path for swap".to_string())?;
+    // (1) rename-out + copy-in.
+    let old = install.with_extension("exe.old");
+    let _ = std::fs::remove_file(&old); // clear any stale .old first (best-effort)
+    if std::fs::rename(&install, &old).is_ok() {
+        if std::fs::copy(beside, &install).is_ok() {
+            let _ = std::fs::remove_file(beside);
+            return Ok(format!("swapped v{VERSION} -> v{} ({mb:.1} MB){prov} — restart to run", rel.version));
+        }
+        // copy failed AFTER the rename → restore the old binary so we don't brick the install.
+        let _ = std::fs::rename(&old, &install);
+    }
+    // (2) detached helper that applies the swap once we exit.
+    let pid = std::process::id();
+    let bat = std::env::temp_dir().join(format!("sigil-top-swap-{pid}.bat"));
+    // CRLF + quoted paths (the install dir routinely has spaces, e.g. "Viktor S. Kristensen").
+    // Wait for our PID to vanish, move staged→install, relaunch in a fresh console, self-delete.
+    let script = format!(
+        "@echo off\r\n\
+         :wait\r\n\
+         tasklist /FI \"PID eq {pid}\" 2>nul | find \"{pid}\" >nul\r\n\
+         if not errorlevel 1 ( timeout /t 1 /nobreak >nul & goto wait )\r\n\
+         move /Y \"{src}\" \"{dst}\" >nul\r\n\
+         start \"\" \"{dst}\"\r\n\
+         del \"%~f0\"\r\n",
+        pid = pid, src = beside.display(), dst = install.display());
+    std::fs::write(&bat, &script).map_err(|e| format!("windows swap (locked exe): cannot write helper ({e})"))?;
+    // DETACHED_PROCESS (0x8) | CREATE_NEW_PROCESS_GROUP (0x200): outlives us, no inherited console.
+    std::process::Command::new("cmd")
+        .args(["/C", &bat.to_string_lossy()])
+        .creation_flags(0x0000_0008 | 0x0000_0200)
+        .spawn()
+        .map_err(|e| format!("windows swap (locked exe): cannot spawn helper ({e})"))?;
+    Ok(format!("staged v{} ({mb:.1} MB){prov} — applying on exit", rel.version))
 }
 
 /// v0.25: pre-flight a freshly-swapped binary BEFORE handing off to it. `exec`/`spawn+exit`
@@ -2261,6 +2351,7 @@ struct App {
     mine_stats: std::sync::Arc<std::sync::Mutex<MinerStats>>, // v0.37: REAL dual-lane engine stats (shared w/ in-process miner thread)
     mine_desired_gpu: std::sync::Arc<std::sync::atomic::AtomicBool>, // v0.37: GPU/CPU toggle for the engine
     mine_gpu_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,  // v0.37: engine signals GPU init failure -> CPU fallback
+    mine_gpu_warned: bool,  // v0.90: one-time thermal/opt-in warning shown on first [G]-enable
     bps_ema: f64,            // v0.37: smoothed network block-rate (raw bps blinks 0<->250)
     bps_zero_streak: u32,    // consecutive zero-bps polls before showing honest idle
     welcome_until: Option<Instant>, // LANE-U v0.67: first-launch welcome modal (SIGIL emblem + giant F); any key or 14s clears it
@@ -2401,6 +2492,7 @@ impl App {
               mine_stats: std::sync::Arc::new(std::sync::Mutex::new(MinerStats::default())),
               mine_desired_gpu: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
               mine_gpu_failed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+              mine_gpu_warned: false,
               bps_ema: 0.0,
               bps_zero_streak: 0,
               welcome_until: Some(Instant::now() + Duration::from_secs(14)),
@@ -3101,10 +3193,31 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                             KeyCode::Char('y') | KeyCode::Char('Y') => { app.resync(); app.toast_sticky = false; }
                             KeyCode::Char('m') | KeyCode::Char('M') => { app.toggle_engine_mining(); }
                             KeyCode::Char('g') | KeyCode::Char('G') if app.tab == Tab::Mining => {
+                                // [G] gates GPU use: GPU mining is OFF by default and only
+                                // engages on an explicit opt-in here (and only on a -gpu
+                                // build — the engine supervisor reverts the flag otherwise).
                                 use std::sync::atomic::Ordering;
                                 let now = app.mine_desired_gpu.load(Ordering::Relaxed);
-                                app.mine_desired_gpu.store(!now, Ordering::Relaxed);
-                                app.toast = if !now { "⚙ engine → GPU (needs a -gpu build)".into() } else { "⚙ engine → CPU".into() };
+                                if now {
+                                    // turning OFF — always immediate.
+                                    app.mine_desired_gpu.store(false, Ordering::Relaxed);
+                                    app.toast = "⚙ engine → CPU".into();
+                                } else if !cfg!(feature = "gpu") {
+                                    // CPU-only build: flip the flag so the engine logs the
+                                    // "rebuild with --features gpu" hint, but it never runs GPU.
+                                    app.mine_desired_gpu.store(true, Ordering::Relaxed);
+                                    app.toast = "⚙ engine → GPU (needs a -gpu build)".into();
+                                } else if !app.mine_gpu_warned {
+                                    // First-ever GPU opt-in on a -gpu build: WARN and require a
+                                    // second [G] to actually enable (don't enable yet). GPU
+                                    // mining can overheat a laptop; the guard auto-throttles
+                                    // ≥78C and drops to CPU ≥82C, but it needs nvidia-smi.
+                                    app.mine_gpu_warned = true;
+                                    app.toast = "⚠ GPU mining can overheat a laptop. Guard auto-throttles ≥78C, drops to CPU ≥82C (needs nvidia-smi; NVIDIA only). Press [G] again to enable GPU.".into();
+                                } else {
+                                    app.mine_desired_gpu.store(true, Ordering::Relaxed);
+                                    app.toast = "⚙ engine → GPU".into();
+                                }
                                 app.toast_sticky = true;
                             }
                             KeyCode::Char('f') | KeyCode::Char('F') => {
@@ -3417,6 +3530,15 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                         // TUI child that fought the terminal = the "animation appears then it
                         // crashes/exits" bug. Now: relaunch only on swap/save, and if the
                         // relaunch fails, restore the TUI instead of crashing.
+                        // Windows lock-fallback ("staged …"): a detached helper applies the swap
+                        // and relaunches AFTER we exit — so leave the TUI cleanly and exit now
+                        // (relaunching ourselves would pre-flight the still-OLD install path).
+                        if msg.starts_with("staged v") {
+                            let _ = disable_raw_mode();
+                            let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+                            println!("\n  {msg}\n  applying update — relaunching…");
+                            std::process::exit(0);
+                        }
                         let is_update_ok = msg.contains("swapped") || msg.contains("saved v");
                         let mut relaunch_failed = false;
                         if is_update_ok {

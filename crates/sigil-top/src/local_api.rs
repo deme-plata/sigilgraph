@@ -119,8 +119,10 @@ impl LocalApi {
         let s = self.sync_snapshot()?;
         let top = Self::local_top(&s);
         let cx = self.cortex.lock().ok().map(|g| g.clone()).unwrap_or_default();
-        let status = if s.verify_break.is_some() { "spine-break" }
+        let status = if s.verify_break.is_some() || s.sync_failure.is_some() { "spine-break" }
             else if s.running { "syncing" } else { "ready" };
+        // SPINE-BREAK fix: expose the watchdog's exact stuck height + reason to any API consumer.
+        let sync_failure = s.sync_failure.as_ref().map(|(h, r)| serde_json::json!({ "height": h, "reason": r }));
         let v = serde_json::json!({
             "source": "sigil-top-local",
             "network": self.network,
@@ -137,6 +139,7 @@ impl LocalApi {
             "mesh_peers": s.mesh_peer_count,
             "status": status,
             "verify_break": s.verify_break,
+            "sync_failure": sync_failure,
             "cortex": { "loops": cx.loops, "gain_pct": cx.last_gain_pct },
         });
         Some(v.to_string())

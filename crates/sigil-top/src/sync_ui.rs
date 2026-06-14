@@ -55,6 +55,12 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
         ("⚠ STALLED — nudging peer", C_NEON_PINK)
     } else { (vtext, vcol) };
 
+    // SPINE-BREAK fix: a CONFIRMED watchdog/fatal failure outranks every other headline —
+    // the operator must never miss it (this is what replaces the old silent ~499k rate-0).
+    let (vtext, vcol) = if s.sync_failure.is_some() {
+        ("✗ SPINE BREAK — STUCK", C_NEON_PINK)
+    } else { (vtext, vcol) };
+
     // state-themed border; title chip stays neon-cyan
     let block = card_block(" ◇ SYNC · sigil-g0", C_NEON_CYAN)
         .border_style(Style::default().fg(vcol));

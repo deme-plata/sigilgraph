@@ -456,6 +456,14 @@ pub struct P2PSyncState {
     /// post-genesis-reset gossip can't push the sync target above the real chain head. 0 until the
     /// first oracle answer.
     pub oracle_tip: u64,
+    /// SPINE-BREAK fix: a CONFIRMED, operator-visible sync failure = (stuck_height, reason).
+    /// Set LOUD by the no-progress watchdog (an unfillable hole at the contiguous frontier
+    /// while a higher block is already held) or immediately on a FATAL verify break
+    /// (parent-linkage / precheck / corrupt-hash). This is what makes the old "~499k SPINE
+    /// BREAK" stall NEVER a silent rate-0 again — `verify_break` only catches corruption,
+    /// `Missing` holes used to vanish; this names the EXACT stuck height instead. Distinct
+    /// from `stall_reason` (a soft, transient "retrying" hint that self-clears).
+    pub sync_failure: Option<(u64, String)>,
 }
 
 pub struct P2PBlockSync {
@@ -604,12 +612,11 @@ impl P2PBlockSync {
                                 let pb = s.peer_best_height;
                                 if pb > 0 && h < pb / 2 && pb - h > 100_000 {
                                     reset_streak += 1;
-                                    // LANE-S: fire IMMEDIATELY on an UNAMBIGUOUS reset (live tip < ¼
-                                    // of peer_best — a 4×+ drop is never a transient dip). The old
-                                    // 3-poll (~9s) wait is what left the phantom checkpoint (5M while
-                                    // tip was 394k = 13× below) up for "a LONG time". A milder ¼..½
-                                    // drop still needs the 3-poll confirm to avoid flapping.
-                                    if reset_streak >= 3 || h < pb / 4 {
+                                    // 0.95: never wipe authoritative local watermarks on a single
+                                    // oracle read. Even a 4x drop must repeat for three polls; the
+                                    // sync loop also waits for at least one mesh peer before applying
+                                    // the destructive store reset.
+                                    if reset_streak >= 3 {
                                         s.peer_best_height = h; // RESET to the live oracle tip
                                         // a chain reset invalidates the checkpoint/spine high-water
                                         // marks — they were verified against the OLD (now-dead) chain.
@@ -624,9 +631,9 @@ impl P2PBlockSync {
                                         persist = Some(h);
                                     }
                                 } else {
-                                    reset_streak = 0;
                                     s.oracle_tip = h; // the signed oracle anchor — gates gossip raises
                                     if h > s.peer_best_height {
+                                        reset_streak = 0;
                                         s.peer_best_height = h; persist = Some(h);
                                     } else if s.peer_best_height > h.saturating_add(SANE_LEAD) {
                                         // v0.59 ORACLE-AUTHORITATIVE: peer_best drifted ABOVE the signed
@@ -636,15 +643,21 @@ impl P2PBlockSync {
                                         // peer_best back to it + clamp the progress watermarks so the UI
                                         // can't chase a tip that doesn't exist, and clear the persisted
                                         // seed so a restart doesn't re-poison from disk.
-                                        s.peer_best_height = h;
-                                        s.blocks_synced = s.blocks_synced.min(h);
-                                        s.sync_height   = s.sync_height.min(h);
-                                        s.sync_total    = s.sync_total.min(h);
-                                        s.verified      = s.verified.min(h);
-                                        if s.base > h { s.base = h; }
-                                        s.reset_pending = true; // LANE-S: wipe the store too
-                                        clear_persisted_tip();
-                                        persist = Some(h);
+                                        reset_streak += 1;
+                                        if reset_streak >= 3 {
+                                            s.peer_best_height = h;
+                                            s.blocks_synced = s.blocks_synced.min(h);
+                                            s.sync_height   = s.sync_height.min(h);
+                                            s.sync_total    = s.sync_total.min(h);
+                                            s.verified      = s.verified.min(h);
+                                            if s.base > h { s.base = h; }
+                                            s.reset_pending = true; // LANE-S: wipe the store too
+                                            reset_streak = 0;
+                                            clear_persisted_tip();
+                                            persist = Some(h);
+                                        }
+                                    } else {
+                                        reset_streak = 0;
                                     }
                                 }
                             }
@@ -762,7 +775,7 @@ impl P2PBlockSync {
                 // v0.17.0: the TRUE network tip from the published sigil-tip-live.json (the
                 // /api/v1/status the monitor polls returns height=2 → snap never fired).
                 let (tip_tx, mut tip_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
-                let mut last_tip_fetch = Instant::now() - Duration::from_secs(60);
+                let mut last_tip_fetch = crate::instant_ago(60);
                 // v0.50 (LANE-A): RECENT-WINDOW PROBE-BEFORE-SNAP. A monitor resumed far below the
                 // tip crawls the middle history it doesn't need (the fold-proof attests it) because
                 // the fast-snap is gated on best_height (received), which only crawls forward at the
@@ -773,7 +786,7 @@ impl P2PBlockSync {
                 // unservable tip → 0 downloaded" regression (the reason the snap is best_height-gated).
                 let (recent_tx, mut recent_rx) =
                     tokio::sync::mpsc::unbounded_channel::<(u64, Option<Vec<u8>>)>();
-                let mut last_recent_probe = Instant::now() - Duration::from_secs(60);
+                let mut last_recent_probe = crate::instant_ago(60);
                 let mut recent_probe_inflight = false;
                 let mut inflight: usize = 0;                          // outstanding spawned requests
                 let mut assigned: std::collections::HashSet<u64> = std::collections::HashSet::new();
@@ -783,15 +796,28 @@ impl P2PBlockSync {
                 // serving empty for the head" symptom). Updated from every response.
                 let mut peer_top: HashMap<String, (u64, Instant)> = HashMap::new();
                 let mut rr: usize = 0;                                 // round-robin peer cursor
-                let mut last_state = Instant::now() - Duration::from_secs(1);
+                let mut last_state = crate::instant_ago(1);
                 let mut fetched_session: u64 = 0;                      // headers stored this session
-                let mut last_verify = Instant::now() - Duration::from_secs(2); // slow verify+flush timer
+                let mut last_verify = crate::instant_ago(2); // slow verify+flush timer
                 let mut last_synced_seen: u64 = resume_h;             // dynamic-base detector
                 let mut last_advance_t = Instant::now();
+                // SPINE-BREAK fix: VERIFIED-watermark watchdog. Tracks the last verified_to and
+                // when it last advanced; if it parks while a higher block is already held (a real
+                // hole), the shared `gap_sync::watchdog_verdict` declares a LOUD failure naming the
+                // exact stuck height — never the old silent rate-0 at ~499k.
+                let mut last_verified_seen: u64 = store.verified_to();
+                let mut last_verified_advance_t = Instant::now();
+                // How long the verified frontier may park (with a higher block held) before the
+                // watchdog fires loud. Generous enough for a slow WAN serve; env-tunable.
+                let watchdog_secs: u64 = std::env::var("SIGIL_SYNC_WATCHDOG_SECS").ok()
+                    .and_then(|s| s.parse().ok()).map(|n: u64| n.clamp(5, 600)).unwrap_or(45);
+                // One loud log per stall EPISODE (not every verify tick): true once announced,
+                // reset when the frontier recovers so a later stall announces again.
+                let mut failure_announced = false;
                 // v0.31 DEEP DEBUG: session counters + a periodic comprehensive [DBG] snapshot.
                 let (mut lead_n, mut timeout_n, mut empty_n, mut req_n): (u64, u64, u64, u64) = (0, 0, 0, 0);
                 let mut bytes_session: u64 = 0;
-                let mut last_dbg = Instant::now() - Duration::from_secs(5);
+                let mut last_dbg = crate::instant_ago(5);
                 let loop_start = Instant::now();
                 // v0.27 proof-of-useful-sync local accumulators
                 let mut pos_cursor: u64 = 0;
@@ -803,7 +829,7 @@ impl P2PBlockSync {
                 let mut pos_window_base: u64 = 0;
                 let mut ckpt_t = Instant::now();
                 let mut pos_bytes: Vec<u8> = Vec::new(); // v0.29.5 cached window-digest buffer for SIMD blake3
-                let mut last_probe = Instant::now() - Duration::from_secs(10); // pull-height probe timer
+                let mut last_probe = crate::instant_ago(10); // pull-height probe timer
                 // v0.15.2: far-behind monitor snaps to a recent window once peer_best is known.
                 const RECENT_WINDOW: u64 = 2_048;  // v0.21: pin the base just 1 chunk under the live tip
                 let mut snapped = false;
@@ -822,14 +848,18 @@ impl P2PBlockSync {
                     {
                         let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                         if s.reset_pending {
-                            s.reset_pending = false;
-                            drop(s);
-                            store.reset_watermarks();
-                            assigned.clear();
-                            last_synced_seen = 0;
-                            last_advance_t = Instant::now();
-                            snapped = false;
-                            crate::tlog!("[sync] CHAIN-RESET self-heal — block store watermarks wiped, re-syncing from the fresh genesis");
+                            if net.peer_count() == 0 {
+                                s.stall_reason = "chain reset pending, but peers=0 — waiting for mesh corroboration before wiping local watermarks".into();
+                            } else {
+                                s.reset_pending = false;
+                                drop(s);
+                                store.reset_watermarks();
+                                assigned.clear();
+                                last_synced_seen = 0;
+                                last_advance_t = Instant::now();
+                                snapped = false;
+                                crate::tlog!("[sync] CHAIN-RESET self-heal — block store watermarks wiped after repeated oracle reset + live mesh peer");
+                            }
                         }
                     }
 
@@ -1293,7 +1323,9 @@ impl P2PBlockSync {
                             // soon as ANY responds; duplicate replies are idempotent (store dedups by
                             // height). Look-ahead chunks (i>0) stay single-peer to avoid flooding.
                             const FRONTIER_REDUNDANCY: usize = 3;
-                            for i in 0..(max_inflight as u64) {
+                            let full_archive_mode = !recent_only_rt.load(Ordering::Relaxed);
+                            let refill_slots = if full_archive_mode { 1 } else { max_inflight as u64 };
+                            for i in 0..refill_slots {
                                 if inflight >= max_inflight { break; }
                                 // v0.57 LANE-L (the real 0 blk/s): request the FRONTIER (i==0) from
                                 // the EXACT synced_to, not the floor-aligned `frontier_chunk`. The
@@ -1309,7 +1341,15 @@ impl P2PBlockSync {
                                 let start = if i == 0 { store.synced_to() } else { frontier_chunk + i * CHUNK };
                                 if start >= peer_best { break; }          // past the tip
                                 if !assigned.insert(start) { continue; }  // already in flight
-                                let fanout = if i == 0 { FRONTIER_REDUNDANCY.min(healthy.len()).max(1) } else { 1 };
+                                let fanout = if i == 0 {
+                                    if full_archive_mode {
+                                        healthy.len().max(1)
+                                    } else {
+                                        FRONTIER_REDUNDANCY.min(healthy.len()).max(1)
+                                    }
+                                } else {
+                                    1
+                                };
                                 for k in 0..fanout {
                                     if inflight >= max_inflight { break; }
                                     let peer = healthy[(rr + k) % healthy.len()];
@@ -1349,7 +1389,16 @@ impl P2PBlockSync {
                         if now_synced > last_synced_seen {
                             last_synced_seen = now_synced;
                             last_advance_t = Instant::now();
-                        } else if store.best_height() > now_synced && last_advance_t.elapsed() >= Duration::from_secs(2) {
+                        } else if recent_only_rt.load(Ordering::Relaxed)
+                            && store.best_height() > now_synced && last_advance_t.elapsed() >= Duration::from_secs(2) {
+                            // SPINE-BREAK fix: the base-skip is a LIGHT-MONITOR-ONLY heuristic now.
+                            // In FULL-ARCHIVE mode (`!recent_only`) advancing `base` past a hole would
+                            // SILENTLY ABANDON blocks — exactly the corruption of the "hold every block"
+                            // promise that masked the ~499k stall. So in full-archive we do NOT skip:
+                            // the frontier request (i==0 from the exact `synced_to`) + the LANE-P
+                            // exact-height stall-breaker keep hammering the missing height genesis-up,
+                            // and if it's genuinely unfillable the verified-watermark watchdog below
+                            // surfaces a LOUD `sync_failure` naming it — never a silent base creep.
                             // v0.16: STABLE-SYNC gate. Only skip genuinely UNSERVABLE LOW history:
                             // advance base when a HIGHER block has actually been RECEIVED
                             // (best_height > frontier) yet the contiguous frontier won’t move — a
@@ -1384,7 +1433,8 @@ impl P2PBlockSync {
                         s.sync_cursor = now_synced;
                         s.sync_height = now_synced;
                         s.fetched_total = fetched_session;
-                        s.peer_count = net.peer_count();
+                        let peer_count_now = net.peer_count();
+                        s.peer_count = peer_count_now;
                         if now_synced > s.peer_best_height { s.peer_best_height = now_synced; }
                         // v0.22: a MONITOR displays the VERIFIED LIVE TIP, not the contiguous
                         // backfill frontier. The newest blocks aren't reliably range-served in
@@ -1405,7 +1455,9 @@ impl P2PBlockSync {
                         // Cleared the instant the contiguous frontier advances again.
                         let net_tip = s.peer_best_height;
                         let stalled_for = last_advance_t.elapsed();
-                        s.stall_reason = if net_tip > now_synced && stalled_for >= Duration::from_secs(6) {
+                        s.stall_reason = if peer_count_now == 0 && loop_start.elapsed() >= Duration::from_secs(6) {
+                            "no peers — mesh not grafted (bootstrap/dialing; no backfill peer available)".into()
+                        } else if net_tip > now_synced && stalled_for >= Duration::from_secs(6) {
                             format!("no advance {}s @ {} (gap {}) — retrying exact [{}..] from a rotating peer",
                                 stalled_for.as_secs(), now_synced, net_tip.saturating_sub(now_synced), now_synced)
                         } else {
@@ -1487,17 +1539,71 @@ impl P2PBlockSync {
                         // while lifting the verified-watermark ceiling to ~160k blk/s. The
                         // budget only binds during catch-up; steady-state verifies arrivals.
                         const VERIFY_BUDGET: u64 = 240_000;
-                        let report = crate::chain_verify::verify_to(&mut store, VERIFY_BUDGET);
-                        let vbreak = match &report.first_break {
-                            Some((h, crate::chain_verify::BreakReason::Missing)) if *h >= store.synced_to() => None,
-                            Some((_h, crate::chain_verify::BreakReason::Missing)) => None,
-                            Some((h, reason)) => Some(format!("h={h}: {reason}")),
-                            None => None,
-                        };
-                        let _ = store.flush();
-                        let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
-                        s.verified = report.verified_to;
-                        s.verify_break = vbreak;
+                        // SPINE-BREAK fix: run verify + classify + watchdog under catch_unwind so a
+                        // panic in the verify/store/flush path can NEVER poison the state mutex or
+                        // kill the sync thread (a dead thread = frozen TUI). On a caught panic we log
+                        // loud and continue; the next tick re-runs and the watchdog still surfaces a
+                        // real stall. (All lock sites already recover poison via `into_inner`, so
+                        // this is belt-and-suspenders for the thread itself.)
+                        let verify_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let report = crate::chain_verify::verify_to(&mut store, VERIFY_BUDGET);
+                            let class = crate::gap_sync::classify_break(&report);
+                            let _ = store.flush();
+
+                            // VERIFIED-watermark watchdog bookkeeping (drives the LOUD no-progress fail).
+                            let verified_now = report.verified_to;
+                            if verified_now > last_verified_seen {
+                                last_verified_seen = verified_now;
+                                last_verified_advance_t = Instant::now();
+                            }
+                            let frontier = store.synced_to();
+                            let best = store.best_height();
+                            let stalled = last_verified_advance_t.elapsed();
+
+                            let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                            s.verified = verified_now;
+                            match class {
+                                // Corruption (parent-linkage / precheck / corrupt-hash): surface
+                                // immediately + forever — retrying can't fix forged/inconsistent headers.
+                                crate::gap_sync::BreakClass::Fatal(h, reason) => {
+                                    s.verify_break = Some(format!("h={h}: {reason}"));
+                                    s.sync_failure = Some((h, reason.clone()));
+                                    if !failure_announced {
+                                        failure_announced = true;
+                                        crate::tlog!("[sync] ✗ SPINE BREAK (FATAL) at height {h}: {reason} — the downloaded chain does NOT form one connected spine");
+                                    }
+                                }
+                                // No corruption — but is the contiguous frontier WEDGED on an
+                                // unfillable hole (a higher block held, frontier parked)? The shared
+                                // `gap_sync::watchdog_verdict` decides; it deliberately ignores a merely
+                                // CLAIMED higher tip (lying-tip/eclipse) — only a really-RECEIVED higher
+                                // block proves a hole, so a quiet caught-up monitor never false-fires.
+                                crate::gap_sync::BreakClass::Clean
+                                | crate::gap_sync::BreakClass::NeedHeight(_) => {
+                                    s.verify_break = None;
+                                    match crate::gap_sync::watchdog_verdict(
+                                        frontier, best, stalled, Duration::from_secs(watchdog_secs),
+                                    ) {
+                                        Some(f) => {
+                                            if !failure_announced {
+                                                failure_announced = true;
+                                                crate::tlog!("[sync] ✗ SPINE BREAK (STALL) — {}", f.reason);
+                                            }
+                                            s.sync_failure = Some((f.height, f.reason));
+                                        }
+                                        None => {
+                                            // advancing, or genuinely caught up to what peers serve →
+                                            // clear any prior stall + re-arm the announcer.
+                                            s.sync_failure = None;
+                                            failure_announced = false;
+                                        }
+                                    }
+                                }
+                            }
+                        }));
+                        if verify_res.is_err() {
+                            crate::tlog!("[sync] ⚠ verify/watchdog tick PANICKED — recovered (sync thread alive, mutex un-poisoned); continuing");
+                        }
                         } // end if !genesis_reset
                     }
 

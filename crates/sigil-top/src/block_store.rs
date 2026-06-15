@@ -59,6 +59,10 @@ fn height_key(h: u64) -> Vec<u8> {
     k
 }
 
+fn short_hash_hex(hash: &str) -> &str {
+    &hash[..hash.len().min(16)]
+}
+
 impl BlockStore {
     /// Open for the interactive TUI: returns IMMEDIATELY. A store that predates the
     /// 'B' fast-open key migrates its index on a BACKGROUND thread (see
@@ -199,6 +203,48 @@ impl BlockStore {
     /// True if a block at `height` is stored (via the height index).
     pub fn has_height(&self, height: u64) -> bool {
         self.db.get(&height_key(height)).ok().flatten().is_some()
+    }
+
+    fn hash_at_index_height(&self, height: u64) -> Option<String> {
+        self.db
+            .get(&height_key(height))
+            .ok()
+            .flatten()
+            .and_then(|v| String::from_utf8(v).ok())
+    }
+
+    fn height_index_conflict(&self, height: u64, incoming_hash_hex: &str) -> Option<String> {
+        self.hash_at_index_height(height)
+            .filter(|existing| existing != incoming_hash_hex)
+    }
+
+    fn linkage_conflict(&self, height: u64, hash_hex: &str, parent_hash_hex: &str) -> Option<String> {
+        if height > self.base {
+            if let Some(parent) = self.get_stored_at_height(height - 1) {
+                if !parent.hash_hex.eq_ignore_ascii_case(parent_hash_hex) {
+                    return Some(format!(
+                        "parent h={} hash={} but incoming parent_hash={}",
+                        height - 1,
+                        short_hash_hex(&parent.hash_hex),
+                        short_hash_hex(parent_hash_hex)
+                    ));
+                }
+            }
+        }
+        if height <= self.synced_to {
+            if let Some(child) = self.get_stored_at_height(height.saturating_add(1)) {
+                let child_parent = hex::encode(child.header.parent_hash);
+                if !hash_hex.eq_ignore_ascii_case(&child_parent) {
+                    return Some(format!(
+                        "child h={} expects parent={} but incoming hash={}",
+                        height.saturating_add(1),
+                        short_hash_hex(&child_parent),
+                        short_hash_hex(hash_hex)
+                    ));
+                }
+            }
+        }
+        None
     }
 
     /// Advance the contiguous pointer over any consecutive heights present, persisting
@@ -343,6 +389,21 @@ impl BlockStore {
     pub fn put_block(&mut self, header: SigilBlockHeaderV0) -> Result<bool, String> {
         let hash = header.hash();
         let hash_hex = hex::encode(hash);
+        let height = header.height;
+
+        if let Some(existing) = self.height_index_conflict(height, &hash_hex) {
+            crate::tlog!(
+                "[store] rejected height-index fork overwrite at h={height}: existing={} incoming={}",
+                short_hash_hex(&existing),
+                short_hash_hex(&hash_hex)
+            );
+            return Ok(false);
+        }
+        let parent_hash_hex = hex::encode(header.parent_hash);
+        if let Some(reason) = self.linkage_conflict(height, &hash_hex, &parent_hash_hex) {
+            crate::tlog!("[store] rejected unlinked header at h={height}: {reason}");
+            return Ok(false);
+        }
 
         if self.db.get(hash_hex.as_bytes())?.is_some() {
             return Ok(false);
@@ -357,7 +418,6 @@ impl BlockStore {
                 .as_secs(),
         };
 
-        let height = block.header.height;
         let value = bincode::serialize(&block).map_err(|e| format!("serialize: {}", e))?;
         self.db.put(hash_hex.as_bytes(), &value)?;
         self.db.put(&height_key(height), hash_hex.as_bytes())?; // height index
@@ -379,6 +439,19 @@ impl BlockStore {
     pub fn put_block_fast(&mut self, header: SigilBlockHeaderV0) -> Result<(), String> {
         let hash_hex = hex::encode(header.hash());
         let height = header.height;
+        if let Some(existing) = self.height_index_conflict(height, &hash_hex) {
+            crate::tlog!(
+                "[store] rejected fast height-index fork overwrite at h={height}: existing={} incoming={}",
+                short_hash_hex(&existing),
+                short_hash_hex(&hash_hex)
+            );
+            return Ok(());
+        }
+        let parent_hash_hex = hex::encode(header.parent_hash);
+        if let Some(reason) = self.linkage_conflict(height, &hash_hex, &parent_hash_hex) {
+            crate::tlog!("[store] rejected fast unlinked header at h={height}: {reason}");
+            return Ok(());
+        }
         let block = StoredBlock { header, hash_hex: hash_hex.clone(), synced_at: 0 };
         let value = bincode::serialize(&block).map_err(|e| format!("serialize: {}", e))?;
         self.db.put(hash_hex.as_bytes(), &value)?;
@@ -410,18 +483,19 @@ impl BlockStore {
             .min(headers.len().max(1));
         let chunk_sz = headers.len().div_ceil(nthreads);
         // per-header (height, hash_hex, bincode(StoredBlock)) — computed in parallel.
-        let prepared: Vec<(u64, String, Vec<u8>)> = std::thread::scope(|s| {
+        let mut prepared: Vec<(u64, String, String, Vec<u8>)> = std::thread::scope(|s| {
             let mut handles = Vec::with_capacity(nthreads);
             for chunk in headers.chunks(chunk_sz) {
                 handles.push(s.spawn(move || {
                     let mut out = Vec::with_capacity(chunk.len());
                     for header in chunk {
                         let hash_hex = hex::encode(header.hash());
+                        let parent_hash_hex = hex::encode(header.parent_hash);
                         let block = StoredBlock {
                             header: header.clone(), hash_hex: hash_hex.clone(), synced_at: 0,
                         };
                         if let Ok(value) = bincode::serialize(&block) {
-                            out.push((block.header.height, hash_hex, value));
+                            out.push((block.header.height, hash_hex, parent_hash_hex, value));
                         }
                     }
                     out
@@ -429,14 +503,74 @@ impl BlockStore {
             }
             handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
         });
+        prepared.sort_by_key(|(height, _, _, _)| *height);
+        let batch_heights: std::collections::HashSet<u64> =
+            prepared.iter().map(|(height, _, _, _)| *height).collect();
         // Serial tail: assemble the (key, value) pairs + ONE batch_put (single WAL hold).
+        // Never let an overlapping/forked response rewrite the height index for a
+        // height we already mapped. The verifier assumes a height points to one stable
+        // spine; replacing h=N after h=N+1 has landed strands the parent-linkage walk.
         let mut owned: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(prepared.len() * 2);
         let mut max_h = self.best_height;
         let mut max_hash = self.best_hash_hex.clone();
-        for (height, hash_hex, value) in prepared {
+        let mut accepted = 0usize;
+        let mut conflicts = 0usize;
+        let mut first_conflict: Option<(u64, String, String)> = None;
+        let mut batch_seen: std::collections::HashMap<u64, String> =
+            std::collections::HashMap::with_capacity(prepared.len());
+        let mut accepted_hash_by_height: std::collections::HashMap<u64, String> =
+            std::collections::HashMap::with_capacity(headers.len());
+        for (height, hash_hex, parent_hash_hex, value) in prepared {
+            let conflict = batch_seen
+                .get(&height)
+                .filter(|existing| *existing != &hash_hex)
+                .cloned()
+                .or_else(|| self.height_index_conflict(height, &hash_hex));
+            if let Some(existing) = conflict {
+                conflicts += 1;
+                first_conflict.get_or_insert_with(|| (height, existing, hash_hex));
+                continue;
+            }
+            let mut link_conflict = None;
+            if height > self.base {
+                if let Some(parent_hash) = accepted_hash_by_height.get(&(height - 1)) {
+                    if !parent_hash.eq_ignore_ascii_case(&parent_hash_hex) {
+                        link_conflict = Some(format!(
+                            "batch parent h={} hash={} but incoming parent_hash={}",
+                            height - 1,
+                            short_hash_hex(parent_hash),
+                            short_hash_hex(&parent_hash_hex)
+                        ));
+                    }
+                } else if batch_heights.contains(&(height - 1)) {
+                    link_conflict = Some(format!("batch parent h={} was rejected or missing", height - 1));
+                } else if let Some(reason) = self.linkage_conflict(height, &hash_hex, &parent_hash_hex) {
+                    link_conflict = Some(reason);
+                }
+            } else if let Some(reason) = self.linkage_conflict(height, &hash_hex, &parent_hash_hex) {
+                link_conflict = Some(reason);
+            }
+            if let Some(reason) = link_conflict {
+                conflicts += 1;
+                first_conflict.get_or_insert_with(|| (height, reason, hash_hex));
+                continue;
+            }
+            batch_seen.entry(height).or_insert_with(|| hash_hex.clone());
+            accepted_hash_by_height.entry(height).or_insert_with(|| hash_hex.clone());
+            accepted += 1;
             owned.push((hash_hex.clone().into_bytes(), value));              // block by hash
             owned.push((height_key(height), hash_hex.clone().into_bytes())); // height index
             if height >= max_h { max_h = height; max_hash = hash_hex; }
+        }
+        if let Some((height, existing, incoming)) = first_conflict {
+            crate::tlog!(
+                "[store] rejected {conflicts} batch header conflict(s); first h={height}: detail={} incoming={}",
+                existing,
+                short_hash_hex(&incoming)
+            );
+        }
+        if owned.is_empty() {
+            return accepted;
         }
         let refs: Vec<(&[u8], &[u8])> = owned.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
         match self.db.batch_put(&refs) {
@@ -444,7 +578,7 @@ impl BlockStore {
                 self.best_height = max_h;
                 self.best_hash_hex = max_hash;
                 self.persist_best(); // v0.35: ONE meta put per batch keeps open() O(1)
-                headers.len()
+                accepted
             }
             Err(_) => 0,
         }
@@ -474,6 +608,14 @@ impl BlockStore {
 
     /// Store a block with just height + hash (light client — no full header needed).
     pub fn put_block_raw(&mut self, height: u64, hash_hex: &str) -> Result<bool, String> {
+        if let Some(existing) = self.height_index_conflict(height, hash_hex) {
+            crate::tlog!(
+                "[store] rejected raw height-index fork overwrite at h={height}: existing={} incoming={}",
+                short_hash_hex(&existing),
+                short_hash_hex(hash_hex)
+            );
+            return Ok(false);
+        }
         if self.db.get(hash_hex.as_bytes())?.is_some() {
             return Ok(false);
         }
@@ -822,6 +964,23 @@ mod tests {
         }
         let s2 = BlockStore::open(&p).unwrap();
         assert_eq!(s2.synced_to(), 8, "RESUMES from the persisted store, not 0");
+        let _ = std::fs::remove_dir_all(&p);
+    }
+
+    #[test]
+    fn height_index_rejects_conflicting_raw_overwrite() {
+        let p = tmp("height-conflict-raw");
+        let _ = std::fs::remove_dir_all(&p);
+        {
+            let mut s = BlockStore::open(&p).unwrap();
+            assert!(s.put_block_raw(8193, "canonical8193").unwrap());
+            assert!(!s.put_block_raw(8193, "fork8193").unwrap());
+            assert_eq!(
+                s.hash_at_index_height(8193).as_deref(),
+                Some("canonical8193"),
+                "a second hash for the same height must not replace the spine index"
+            );
+        }
         let _ = std::fs::remove_dir_all(&p);
     }
 

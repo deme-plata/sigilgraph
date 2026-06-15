@@ -300,7 +300,11 @@ mod tests {
         chain[3] = mk_header(3, [0xAB; 32]);
         {
             let mut s = BlockStore::open(&p).unwrap();
-            for hdr in &chain { s.put_block_fast(hdr.clone()).unwrap(); }
+            // Store the forged lookahead before its parent is present; this keeps
+            // verify_to's corruption test meaningful even though normal ingest now
+            // rejects an unlinked child once the parent is already known.
+            s.put_block_fast(chain[3].clone()).unwrap();
+            for hdr in &chain[..3] { s.put_block_fast(hdr.clone()).unwrap(); }
             s.advance();
             let rep = verify_to(&mut s, u64::MAX);
             assert_eq!(rep.verified_to, 3, "0,1,2 verify; 3 breaks the spine");
@@ -310,6 +314,64 @@ mod tests {
                 other => panic!("expected ParentMismatch at 3, got {other:?}"),
             }
             assert_eq!(s.verified_to(), 3);
+        }
+        let _ = std::fs::remove_dir_all(&p);
+    }
+
+    #[test]
+    fn batch_ingest_rejects_forked_duplicate_height_without_poisoning_spine() {
+        let p = tmp("fork-overwrite");
+        let _ = std::fs::remove_dir_all(&p);
+        let chain = mk_chain(6);
+        {
+            let mut s = BlockStore::open(&p).unwrap();
+            assert_eq!(s.put_blocks_batch(&chain), chain.len());
+            s.advance();
+            assert_eq!(s.synced_to(), 6);
+            let canonical_h2 = s.get_stored_at_height(2).unwrap().hash_hex;
+
+            // This header is internally consistent but belongs to a different fork.
+            // Older store code blindly rewrote height 2 -> fork hash, leaving height 3
+            // linked to the old height 2 and making verify_to stop forever at h=3/8194.
+            let fork_h2 = mk_header(2, [0xAB; 32]);
+            assert_ne!(hex::encode(fork_h2.hash()), canonical_h2);
+            assert_eq!(s.put_blocks_batch(&[fork_h2]), 0, "conflicting height is rejected");
+            assert_eq!(
+                s.get_stored_at_height(2).unwrap().hash_hex,
+                canonical_h2,
+                "height index still points at the first accepted spine block"
+            );
+
+            let rep = verify_to(&mut s, u64::MAX);
+            assert_eq!(rep.verified_to, 6);
+            assert!(rep.clean(), "forked duplicate did not poison the verified spine: {:?}", rep.first_break);
+        }
+        let _ = std::fs::remove_dir_all(&p);
+    }
+
+    #[test]
+    fn batch_ingest_rejects_child_that_does_not_link_to_stored_parent() {
+        let p = tmp("unlinked-child");
+        let _ = std::fs::remove_dir_all(&p);
+        let chain = mk_chain(4);
+        {
+            let mut s = BlockStore::open(&p).unwrap();
+            assert_eq!(s.put_blocks_batch(&chain[..3]), 3);
+            s.advance();
+            assert_eq!(s.synced_to(), 3);
+
+            // Mirrors the live h=8194 failure: parent h=2 is already stored, but
+            // the next header points to a different parent hash. It must be dropped
+            // at ingest instead of poisoning the verifier frontier.
+            let fork_child = mk_header(3, [0xCD; 32]);
+            assert_eq!(s.put_blocks_batch(&[fork_child]), 0);
+            assert!(!s.has_height(3), "bad child was not inserted at the frontier");
+
+            assert_eq!(s.put_blocks_batch(&chain[3..4]), 1);
+            s.advance();
+            let rep = verify_to(&mut s, u64::MAX);
+            assert_eq!(rep.verified_to, 4);
+            assert!(rep.clean(), "canonical child still syncs cleanly: {:?}", rep.first_break);
         }
         let _ = std::fs::remove_dir_all(&p);
     }

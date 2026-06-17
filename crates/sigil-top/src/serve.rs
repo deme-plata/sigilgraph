@@ -12,6 +12,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use crate::local_api::LocalApi;
+
 /// Start the embedded server on 127.0.0.1:port, serving static_dir.
 /// Returns a shutdown signal (set to true to stop the server).
 ///
@@ -21,6 +23,17 @@ use std::time::Duration;
 /// through to the embedded copies. We bind regardless; the dir is just an optional
 /// overlay for richer assets when present (e.g. on a server with the full dist).
 pub fn start(static_dir: &str, port: u16) -> Result<Arc<AtomicBool>, String> {
+    start_with_api(static_dir, port, None)
+}
+
+/// v0.11.0: like [`start`], but also serves the explorer's `/api/v1/*` from a LOCAL
+/// verified-spine view (blocks / status / aether-verify / cortex / peers) before
+/// proxying to the remote node. Pass `None` for the old pure-proxy behaviour.
+pub fn start_with_api(
+    static_dir: &str,
+    port: u16,
+    local_api: Option<Arc<LocalApi>>,
+) -> Result<Arc<AtomicBool>, String> {
     let dir = PathBuf::from(static_dir); // may not exist — embedded wallet still serves
     let listener =
         TcpListener::bind(format!("127.0.0.1:{port}")).map_err(|e| format!("bind :{port}: {e}"))?;
@@ -31,12 +44,17 @@ pub fn start(static_dir: &str, port: u16) -> Result<Arc<AtomicBool>, String> {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = stop.clone();
     thread::spawn(move || {
-        serve_loop(listener, dir, stop_clone);
+        serve_loop(listener, dir, stop_clone, local_api);
     });
     Ok(stop)
 }
 
-fn serve_loop(listener: TcpListener, dir: PathBuf, stop: Arc<AtomicBool>) {
+fn serve_loop(
+    listener: TcpListener,
+    dir: PathBuf,
+    stop: Arc<AtomicBool>,
+    local_api: Option<Arc<LocalApi>>,
+) {
     loop {
         if stop.load(Ordering::Relaxed) {
             return;
@@ -44,7 +62,8 @@ fn serve_loop(listener: TcpListener, dir: PathBuf, stop: Arc<AtomicBool>) {
         match listener.accept() {
             Ok((mut stream, _)) => {
                 let dir = dir.clone();
-                thread::spawn(move || handle_conn(&mut stream, &dir));
+                let api = local_api.clone();
+                thread::spawn(move || handle_conn(&mut stream, &dir, api.as_deref()));
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(50));
@@ -56,7 +75,7 @@ fn serve_loop(listener: TcpListener, dir: PathBuf, stop: Arc<AtomicBool>) {
     }
 }
 
-fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf) {
+fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Option<&LocalApi>) {
     let mut buf = [0u8; 4096];
     let n = match stream.read(&mut buf) {
         Ok(n) if n > 0 => n,
@@ -68,11 +87,24 @@ fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf) {
     let _method = parts.next().unwrap_or("GET");
     let path = parts.next().unwrap_or("/");
 
-    // /api/* → proxy to the SIGIL node (the "flux protocol" data path). The wallet,
-    // served from http://localhost:9800, hits same-origin /api/v1/... → we relay it
-    // to the node over std TCP. No CORS, no https→http mixed-content. Default node is
-    // the public sigil-rpcd; override with SIGIL_NODE_URL to point at a LOCAL node.
+    // /api/* → LOCAL-FIRST. If this node has a verified-spine view that can answer the
+    // request (blocks / status / aether-verify / cortex / peers), serve it locally
+    // (trust-minimised). Otherwise relay to the SIGIL node over std TCP — same-origin,
+    // no CORS / mixed-content. Default node is the public sigil-rpcd; override with
+    // SIGIL_NODE_URL to point at a LOCAL node.
     if path.starts_with("/api/") {
+        if let Some(api) = local_api {
+            if let Some(body) = api.handle(path) {
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+                return;
+            }
+        }
         let (status, body, ct) = proxy_api(path);
         let resp = format!(
             "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",

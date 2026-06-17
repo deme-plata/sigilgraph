@@ -246,7 +246,8 @@ const POOL_SCAL: PoolId = [0xC4; 32]; // SCAL/USDS
 const POOL_SIGIL: PoolId = [0xC5; 32]; // SIGIL(NATIVE)/USDS
 
 const OPERATOR: WalletId = [0xEE; 32];
-const MASTER: WalletId = [0xFF; 32];
+// Master dev-fee wallet (Viktor, 095b0e1f…3dd8) — 5% of mining coinbase + 0.3% DEX.
+const MASTER: WalletId = sigil_bank::DEV_MASTER_WALLET;
 // flux-nation demo citizen (funded + attested at bootstrap so the page's pay works)
 const CITIZEN: WalletId = [0x11; 32];
 const POWER_CO: WalletId = [0x9E; 32];
@@ -998,6 +999,31 @@ fn main() {
         eprintln!("follower mode: syncing the mining chain from peer {peer}");
         let fnode = Arc::clone(&node);
         thread::spawn(move || follow_peer(fnode, peer));
+    }
+    // Status writer: keep $SIGIL_STATUS_OUT fresh so the frontend (sigilgraph)
+    // reflects the LIVE chain. Without this the file froze (was stale since the
+    // writer was dropped from rpcd) and the site showed a stuck height forever.
+    // Atomic tmp+rename so the frontend never reads a half-written file.
+    if let Ok(out) = std::env::var("SIGIL_STATUS_OUT") {
+        eprintln!("status writer: refreshing {out} every 2s");
+        let snode = Arc::clone(&node);
+        thread::spawn(move || loop {
+            {
+                let n = snode.read().unwrap();
+                let json = format!(
+                    "{{\"status\":{{\"height\":{h},\"network_id\":\"sigil-g0\",\"peers\":1,\"supply\":\"{s}\",\"max_supply\":\"21000000\"}},\"tip\":{{\"height\":{h},\"hash\":\"{tip}\",\"roots\":{{}}}},\"blocks\":[]}}",
+                    h = n.block_height,
+                    s = n.state.native_supply(),
+                    tip = to_hex(&n.tip_hash),
+                );
+                drop(n);
+                let tmp = format!("{out}.tmp");
+                if std::fs::write(&tmp, json.as_bytes()).is_ok() {
+                    let _ = std::fs::rename(&tmp, &out);
+                }
+            }
+            thread::sleep(std::time::Duration::from_secs(2));
+        });
     }
     for stream in listener.incoming().flatten() {
         let n = Arc::clone(&node);

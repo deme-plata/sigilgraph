@@ -653,6 +653,9 @@ impl P2PBlockSync {
             turbo_continuity: BandwidthContinuity::default(),
             ..P2PSyncState::default()
         }));
+        // v2.0.0: the sync thread (spawned below) moves `state` in; keep a shared
+        // Arc clone for the returned struct so both observe the same Mutex.
+        let state_struct = state.clone();
         let new_blocks = Arc::new(Mutex::new(Vec::new()));
         let (stop_tx, stop_rx) = mpsc::channel();
 
@@ -1380,14 +1383,20 @@ impl P2PBlockSync {
                         && last_recent_probe.elapsed() >= RECENT_PROBE_EVERY
                     {
                         let now = Instant::now();
-                        let mut healthy: Vec<String> = net.connected_peers().into_iter()
+                        let mut healthy: Vec<_> = net.connected_peers().into_iter()
                             .filter(|p| peer_bench.get(&p.to_string()).map_or(true, |&u| now >= u))
                             .collect();
                         if healthy.is_empty() { healthy = net.connected_peers(); }
                         // Continuity X: prefer high-BW momentum peer for sustained download rate
-                        let best_peer = {
+                        let best_peer: Option<String> = {
+                            // select_best_peer wants &[PeerId]; healthy is peer-id strings, and
+                            // peer_momenta is unpopulated (update_for_continuity is called with
+                            // peer=None), so this preference is advisory and currently always None
+                            // → round-robin below is the live path. Parse to PeerId for the call,
+                            // map the result back to String to match the String peer flow.
                             let s = state.lock().unwrap_or_else(|e| e.into_inner());
-                            s.turbo_continuity.select_best_peer(&healthy)
+                            let pids: Vec<_> = healthy.iter().filter_map(|p| p.to_string().parse().ok()).collect();
+                            s.turbo_continuity.select_best_peer(&pids).map(|p| p.to_string())
                         };
                         if let Some(&peer) = healthy.first() {
                             last_recent_probe = Instant::now();
@@ -1464,13 +1473,14 @@ impl P2PBlockSync {
 
                     if peer_best > 0 {
                         let now = Instant::now();
-                        let mut healthy: Vec<String> = net.connected_peers().into_iter()
+                        let mut healthy: Vec<_> = net.connected_peers().into_iter()
                             .filter(|p| peer_bench.get(&p.to_string()).map_or(true, |&u| now >= u))
                             .collect();
                         // Turbo Sync X + continuity: bias to high-BW momentum peer for continuous high download bandwidth (no drops in rate)
                         let best_peer: Option<String> = {
                             let s = state.lock().unwrap_or_else(|e| e.into_inner());
-                            s.turbo_continuity.select_best_peer(&healthy)
+                            let pids: Vec<_> = healthy.iter().filter_map(|p| p.to_string().parse().ok()).collect();
+                            s.turbo_continuity.select_best_peer(&pids).map(|p| p.to_string())
                         };
                         // v0.17: HEALTHY-PEER FLOOR. With only ~4 peers a burst of timeouts
                         // could bench the WHOLE pool, collapsing the backfill to ~0 blk/s until
@@ -1553,7 +1563,7 @@ impl P2PBlockSync {
                                     let rate_factor = if pid_rate < 40.0 { 1.5 } else if pid_rate > 60.0 { 0.8 } else { 1.0 };
                                     let ch = if predicted > 10_000_000.0 { ((base_ch as f64) * rate_factor * 1.2) as u64 } else { (base_ch as f64 * rate_factor) as u64 };
                                     let eff_x = ((x as f64) * rate_factor).max(1.0).min(fanout as f64) as usize;
-                                    (ch, eff_x, bp)
+                                    (ch, eff_x, bp.map(|p| p.to_string()))
                                 };
                                 // Pace requests smoothly using PID rate for continuous high BW (smooth flow, no bursts that drop effective rate)
                                 // use PID rate vs target for proportional delay: if current low, shorter delay to catch up to high continuous rate
@@ -1572,7 +1582,7 @@ impl P2PBlockSync {
                                     }
                                     last_send += target_delay; // accumulate for steady continuous rate
                                     let peer = if k == 0 {
-                                        best_from_cont.clone().unwrap_or_else(|| healthy[(rr + k) % healthy.len()].clone())
+                                        best_from_cont.as_ref().and_then(|bs| healthy.iter().find(|p| p.to_string() == *bs).cloned()).unwrap_or_else(|| healthy[(rr + k) % healthy.len()].clone())
                                     } else {
                                         healthy[(rr + k) % healthy.len()].clone()
                                     };
@@ -1938,7 +1948,7 @@ impl P2PBlockSync {
             });
         });
 
-        P2PBlockSync { state, new_blocks, stop_tx: Some(stop_tx), recent_only, rebase_pending }
+        P2PBlockSync { state: state_struct, new_blocks, stop_tx: Some(stop_tx), recent_only, rebase_pending }
     }
 
     /// 0.77: `None` when the sync thread holds the lock RIGHT NOW (heavy ingest/flush) —

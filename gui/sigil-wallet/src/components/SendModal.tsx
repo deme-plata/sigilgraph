@@ -96,20 +96,34 @@ export default function SendModal({ isOpen, onClose, balance, walletAddress, onS
         throw new Error(signed.error || 'Signing failed — please re-unlock your wallet.');
       }
 
-      // 2) submit — P2P gossip first when peers exist, else HTTP fallback
+      // 2) submit. useLibP2P().submitTransaction → submitTransactionWithFallback,
+      // which tries P2P gossip and, when the mesh has 0 peers (the usual case for a
+      // browser wallet), AUTOMATICALLY HTTP-submits THIS already-signed tx to
+      // /api/v1/transactions/submit. So call it whenever the node object is ready —
+      // do NOT gate on peerCount.
+      //
+      // THE BUG this fixes: the old `p2pReady && peerCount > 0` gate meant every
+      // 0-peer send (i.e. almost every browser send) threw the user's signature
+      // away and dropped to qnkAPI.sendTransaction, which re-derives the mnemonic
+      // and pops a password modal that is "often not ready" → the send silently did
+      // nothing. The signed path needs no password and works at 0 peers.
+      // (verified live: /api/v1/transactions/submit returns 400 on empty body, i.e.
+      // the route EXISTS — it is not a 404.)
       setPhase('submitting');
       let txHash = ''; let peers = 0;
-      if (p2pReady && peerCount > 0) {
+      if (p2pReady) {
         const r = await submitTransaction(signed.transaction as SignedTransaction);
         if (r?.success) { txHash = r.txHash || ''; peers = r.peerCount || 0; }
-        else if (!canHttp()) throw new Error(r?.error || 'P2P broadcast reached 0 peers.');
+        else if (!canHttp()) throw new Error(r?.error || 'Network did not accept the transaction.');
       }
+      // Last resort, only if the node object itself is unavailable: the legacy
+      // mnemonic-signed HTTP path (/v1/transactions/send; may prompt for password).
       if (!txHash && canHttp()) {
         const h = await httpFallback(from, recipient, amt, memo.trim());
         if (!h.ok) throw new Error(h.error || 'Transaction was not accepted by the network.');
         txHash = h.txHash;
       }
-      if (!txHash) throw new Error('No P2P peers and HTTP fallback unavailable — try again in a moment.');
+      if (!txHash) throw new Error('Network did not accept the transaction — try again in a moment.');
 
       setResult({ txHash, peers });
       setPhase('success');

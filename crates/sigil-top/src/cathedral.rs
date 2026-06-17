@@ -93,6 +93,7 @@ impl Cathedral {
     /// In a fuller impl this would call the real DagKnight orderer over the
     /// collected headers and obtain a collective tip proof.
     pub fn close_and_certify(&mut self, tip: &TipProof) -> bool {
+        let vault_count = self.vaults.len();
         if let Some(v) = self.vaults.last_mut() {
             v.tip_proof = Some(tip.clone());
             // For now: certify if we have non-zero roots on at least one and a proof object.
@@ -103,7 +104,7 @@ impl Cathedral {
             v.divergence = 0; // DagKnight promise
             self.last_certified_height = v.end_height;
             self.last_divergence = 0;
-            self.total_vaults = self.vaults.len();
+            self.total_vaults = vault_count;
             v.certified
         } else {
             false

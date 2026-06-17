@@ -2,7 +2,7 @@
 name = "sigil-top"
 # sigil-top carries its OWN version cadence (the light client updates independently
 # of the workspace) — this is the "next version" the auto-updater ships.
-version = "0.95.0"
+version = "1.0.0-rc5"
 edition.workspace = true
 license.workspace = true
 description = "sigil-top — a SIGIL lightweight node + dual-mode (lite scorecard ↔ full dashboard) terminal monitor. v0.9.0 'Verifying Full Sync': downloads the chain genesis→tip over the sigil-g0 P2P mesh AND verifies it as one connected spine (per-header precheck + parent_hash linkage back to genesis), with a persisted verified_to watermark. New `full-sync` (headless sync-and-verify, exit 0 at tip) and `verify-chain` (re-verify the local store) subcommands; TUI surfaces the ⛓ verified-spine height + ⚠ spine-break alarm distinct from raw download progress."
@@ -39,6 +39,8 @@ sigil-oauth     = { path = "../sigil-oauth" }
 blake3       = "1"
 hex          = "0.4"
 bincode      = "1"
+# v0.34 TPS lane: parallel header precheck across cores (independent per header).
+rayon        = { workspace = true }
 # v0.33 zstd wire (decode side): PURE-RUST zstd decompressor — no C code, so the
 # Windows cross-build stays mingw-clean. Server compresses with the zstd crate.
 ruzstd       = "0.7"
@@ -60,6 +62,8 @@ flux-rev = { path = "../../../flux/crates/flux-rev" }
 # v0.7.6: content-addressed block backfill (BLAKE3, verify-don't-trust) — closes the
 # gossip-only "can't backfill history" gap. The real history-sync behind [F].
 flux-sync = { path = "../../../flux/crates/flux-sync" }
+# Turbo Sync X + invented BandwidthContinuity for continuous *high* download bandwidth
+flux-turbo-sync = { path = "../flux-turbo-sync" }
 
 # v0.2.35 L4-B: SQIsign post-quantum tip-proof flavor (gated, not yet enabled).
 [dev-dependencies]

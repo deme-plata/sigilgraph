@@ -998,12 +998,29 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
         // can be read server-side (no file-pasting). Appends the raw body to a log.
         ("POST", "/diag") => {
             use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/home/orobit/sigil-miner-diag.log")
-            {
-                let _ = writeln!(f, "{}", body);
+            // BOUNDED debug sink. This route is intentionally ungated (miners post
+            // diagnostics here pre-auth), so an anonymous caller could otherwise append
+            // unbounded data → disk-fill DoS (Epsilon /home runs tight). Nothing reads
+            // this file programmatically — it's a human debug tail — so a size-capped
+            // ring (truncate-and-restart when full) is the right shape. Per-POST body is
+            // clamped to DIAG_MAX_LINE; total file size to DIAG_MAX_FILE. Together these
+            // bound on-disk cost to a constant regardless of request volume.
+            const DIAG_MAX_LINE: usize = 4 * 1024;      // 4 KiB per POST
+            const DIAG_MAX_FILE: u64 = 1024 * 1024;     // 1 MiB total
+            const DIAG_PATH: &str = "/home/orobit/sigil-miner-diag.log";
+            // Clamp the body on a UTF-8 char boundary (≤ DIAG_MAX_LINE bytes).
+            let mut end = DIAG_MAX_LINE.min(body.len());
+            while end > 0 && !body.is_char_boundary(end) { end -= 1; }
+            let line = &body[..end];
+            // If the file is at/over the cap, reset it (truncate) instead of appending.
+            let over_cap = std::fs::metadata(DIAG_PATH).map(|m| m.len() >= DIAG_MAX_FILE).unwrap_or(false);
+            let opened = if over_cap {
+                std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(DIAG_PATH)
+            } else {
+                std::fs::OpenOptions::new().create(true).append(true).open(DIAG_PATH)
+            };
+            if let Ok(mut f) = opened {
+                let _ = writeln!(f, "{}", line);
             }
             ok("{\"ok\":true}".into())
         }

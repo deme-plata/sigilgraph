@@ -33,6 +33,9 @@ use tabs_ui::*;
 mod wallet_ui;  // LANE-U: wallet/browser/tray/scheme plumbing
 use wallet_ui::*;
 mod local_api;   // v0.11.0: serve the explorer /api/* from the LOCAL verified spine
+mod cathedral;     // CATHEDRAL DAGKNIGHT: vaulted 4-root + DagKnight finality view
+
+use crate::cathedral::Cathedral;
 
 use std::io::{IsTerminal, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -104,6 +107,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// thread (and elsewhere) smears the frame. Once the TUI starts we flip this and
 /// route those lines to a logfile instead, so the dashboard stays clean.
 pub(crate) static IN_TUI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LAST_PANIC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 pub(crate) fn log_line(s: String) {
     if IN_TUI.load(std::sync::atomic::Ordering::Relaxed) {
@@ -136,6 +140,34 @@ pub(crate) fn log_line(s: String) {
         }
     } else {
         eprintln!("{s}");
+    }
+}
+
+fn remember_panic(msg: String) {
+    let mut slot = LAST_PANIC.lock().unwrap_or_else(|e| e.into_inner());
+    *slot = Some(msg);
+}
+
+fn last_panic_line() -> String {
+    LAST_PANIC
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_else(|| "[PANIC] <panic hook did not run>".into())
+}
+
+fn release_channel_stale_msg(channel_version: &str) -> String {
+    format!(
+        "release channel is stale: channel v{} < this binary v{} — publish/re-sign sigil-top-latest.json",
+        channel_version, VERSION
+    )
+}
+
+fn release_channel_current_msg(channel_version: &str) -> String {
+    if version_gt(VERSION, channel_version) {
+        format!("⚠ {}", release_channel_stale_msg(channel_version))
+    } else {
+        format!("✓ up to date (v{VERSION}; channel v{channel_version}) — checked")
     }
 }
 
@@ -784,6 +816,8 @@ fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str) -> String
     // update line — compact + truthful: gold when this binary is behind, green when current
     if version_gt(&latest, VERSION) {
         o.push_str(&format!("    {GOLD}{BOLD}⬆ update{RESET} {GREEN}v{VERSION} → v{latest}{RESET}  {DIM}·{RESET} {GOLD}[U]{DIM} hot-swap via flux://{RESET}\n"));
+    } else if version_gt(VERSION, &latest) {
+        o.push_str(&format!("    {RED}{BOLD}⚠ channel stale{RESET} {DIM}served v{latest} < binary v{VERSION} · press [U] for details{RESET}\n"));
     } else {
         o.push_str(&format!("    {GREEN}✓ up to date{RESET} {DIM}v{VERSION}  ·{RESET} {GOLD}[U]{DIM} re-check via flux://{RESET}\n"));
     }
@@ -877,6 +911,8 @@ fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str) -> String
     let fold_h = st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(st.height);
     let fold_bps = (fold_h as f64 / 0.342) as u64;
     o.push_str(&row("throughput", &format!("{GOLD}⚡ {} blk/s{RESET} {DIM}effective · whole chain proven, grows with length{RESET}", group(fold_bps))));
+    // CATHEDRAL DAGKNIGHT (wired 2026-06-17) — module live, full vault ingest + tab in next slice
+    o.push_str(&row("cathedral", "vaults:0 (first wire) div:0 ✓ 4-roots+tip-proof+fluxc"));
     o.push_str(&row("crypto", &format!("{DIM}Ajtai/SIS · post-quantum · no trusted setup{RESET}")));
 
     o.push_str(&bottom());
@@ -1051,7 +1087,7 @@ fn enable_rich_console() {
 fn enable_rich_console() {}
 
 /// v0.33: Windows consoles render emoji-class glyphs (⛏ ⛓ ⬇ ▲ ●) at the WRONG
-/// cell width vs what `unicode-width` (ratatui's layout) assumes → every cell after
+/// cell width vs what `unicode-width` (ratatui's layout) assumes → every cell afte
 /// them shifts and the whole TUI "smears". ASCII mode swaps those for width-1 ASCII
 /// so layout is exact everywhere. Auto-on for Windows; `SIGIL_ASCII=0` forces it off,
 /// `SIGIL_ASCII=1` forces it on (e.g. a Linux box over a dumb terminal).
@@ -1104,7 +1140,7 @@ fn sa<S: Into<String>>(s: S) -> String {
 }
 
 /// v0.40: on Windows, drop to BELOW_NORMAL priority class BEFORE any thread
-/// spawns. The OS scheduler then always favors the user's own apps — whatever
+/// spawns. The OS scheduler then always favors the user's own apps — whateve
 /// sigil-top does (render, mine, opt-in sync), it can never make the desktop
 /// stutter. No crate dep: two kernel32 calls.
 #[cfg(windows)]
@@ -1120,7 +1156,7 @@ fn lower_process_priority() {
     }
 }
 
-/// The install path captured at startup, BEFORE any self-replace. After
+/// The install path captured at startup, BEFORE any self-replace. Afte
 /// `self_replace` swaps the binary, `/proc/self/exe` (what `current_exe()` reads)
 /// points at the moved-aside OLD inode — often a "(deleted)" path — so a relaunch
 /// that spawns `current_exe()` fails with ENOENT even though the NEW binary sits
@@ -1259,7 +1295,7 @@ fn main() {
             }
         }
         // flux:// URL handler. The OS invokes `sigil-top flux-open flux://wallet`
-        // when the user types flux://wallet in the browser → ensure the local server
+        // when the user types flux://wallet in the browser → ensure the local serve
         // is up, then open the mapped localhost page in the default browser.
         Some("flux-open") => {
             let url = argv.get(1).cloned().unwrap_or_default();
@@ -1301,7 +1337,15 @@ fn main() {
                         Err(e)  => { eprintln!("  {RED}✗ {e}{RESET}\n"); std::process::exit(1); }
                     }
                 }
-                Ok(rel) => { println!("  {GREEN}✓ already on the latest (v{VERSION}; channel: v{}){RESET}\n", rel.version); return; }
+                Ok(rel) => {
+                    let msg = release_channel_current_msg(&rel.version);
+                    if version_gt(VERSION, &rel.version) {
+                        println!("  {RED}⚠ {msg}{RESET}\n");
+                    } else {
+                        println!("  {GREEN}{msg}{RESET}\n");
+                    }
+                    return;
+                }
                 Err(e) => { eprintln!("  {RED}✗ update check: {e}{RESET}\n"); std::process::exit(1); }
             }
         }
@@ -1317,7 +1361,10 @@ fn main() {
             };
             let synced = store.synced_to();
             let t0 = Instant::now();
-            let report = chain_verify::verify_to(&mut store, u64::MAX);
+            // RC5 boot speedup: parallel-precheck verify (v0.34 lane) — contract-identical
+            // to verify_to (see chain_verify tests serial==parallel), ~Nx faster on the
+            // full-chain pass that dominated startup. This is the boot verify (u64::MAX).
+            let report = chain_verify::verify_to_parallel(&mut store, u64::MAX);
             let dt = t0.elapsed();
             // A `Missing` at/after the download frontier is the clean terminator, not a break.
             let real_break = match &report.first_break {
@@ -1402,7 +1449,7 @@ fn main() {
                         pct, st.peer_count, start.elapsed().as_secs());
                 }
                 // LANE-P: don't declare "complete" before the mesh has actually connected and
-                // seeded a REAL network tip. With 0 peers, peer_best can momentarily seed to our
+                // seeded a REAL network tip. With 0 peers, peer_best can momentarily seed to ou
                 // own genesis (target=1) → verified>=1 → a FALSE "sync complete at height 1" the
                 // instant we start (the gate's flaky FAIL + a real "looks synced but isn't" bug).
                 // Require target>1 AND a live peer (or a 30s grace for a genuine solo-at-tip).
@@ -1421,14 +1468,14 @@ fn main() {
         }
         _ => {}
     }
-    // v0.7.5: Auto-update is NON-BLOCKING. The old blocking call hung the splash
-    // screen for 30+ seconds on slow connections. Now we check the channel on a
-    // background thread during the first refresh cycle — TUI loads instantly.
-    // --no-update / SIGIL_TOP_NO_AUTOUPDATE=1 still opts out entirely.
+    // v0.95: the default interactive dashboard runs the pinned updater gate before
+    // entering raw-mode TUI so stale channels and bad signatures are visible instead
+    // of looking like "already latest". --once, pipes, and --lite stay side-effect
+    // free below; --no-update / SIGIL_TOP_NO_AUTOUPDATE=1 still opts out entirely.
     let mut cfg = parse_args();
-    cfg.initial_toast = None; // update check runs async in the TUI
+    cfg.initial_toast = None; // set after one-shot/lite exits; async checks keep banner fresh
     // Non-TTY (piped / redirected / captured), --once, or --lite → emit exactly ONE
-    // plain ANSI frame and exit. ratatui needs a real terminal; this path never
+    // plain ANSI frame and exit. ratatui needs a real terminal; this path neve
     // spams. The live, interactive dashboard is the TUI below.
     // v0.63.1: a DOUBLE-CLICKED console on Windows can report is_terminal()=false on
     // stdout (tray/subsystem quirk), which dropped the app to the one-frame path and
@@ -1457,6 +1504,7 @@ fn main() {
             std::thread::sleep(nap.max(Duration::from_millis(200)));
         }
     }
+    cfg.initial_toast = maybe_auto_update(&argv);
     // DEFAULT — the custom ratatui dashboard (Quillon-graph-node styled, multi-panel).
     // ratatui owns all box-drawing + layout, so alignment can never regress.
     let _ = cfg.tui; // --tui kept as an explicit alias; it's the default now
@@ -1566,7 +1614,7 @@ impl Release {
 }
 
 /// v0.38: best-effort lifecycle telemetry -> the flux webhook bus (the cockpit
-/// feed at :4178/api/mcp-webhook). OFF unless SIGIL_TOP_WEBHOOK is set — a user
+/// feed at :4178/api/mcp-webhook). OFF unless SIGIL_TOP_WEBHOOK is set — a use
 /// install posts nothing anywhere by default. Fire-and-forget on a thread; a dead
 /// bus can never slow or break the node.
 fn flux_webhook(event: &str, detail: &str) {
@@ -1586,7 +1634,7 @@ fn flux_webhook(event: &str, detail: &str) {
     });
 }
 
-/// LANE-C: the pinned SIGIL release signing public key (ed25519, 32 B hex). The auto-updater
+/// LANE-C: the pinned SIGIL release signing public key (ed25519, 32 B hex). The auto-update
 /// REFUSES any manifest not signed by the matching secret — so a compromised release server / MITM
 /// that serves a matching-blake3 (but attacker-built) binary can't push it: without the secret it
 /// can't forge the manifest signature, and the blake3 the client trusts comes ONLY from a signed
@@ -1717,7 +1765,7 @@ fn fetch_dns_anchor() -> String {
     if txt.is_empty() {
         return "✗ DNS anchor: _sigil-tip TXT record not published yet".into();
     }
-    // Structural-validate with sigil-dns-anchor
+    // Structural-validate with sigil-dns-ancho
     match sigil_dns_anchor::decode(&txt) {
         Ok(anchor) => format!(
             "✓ DNS anchor: {} @ height {} · key {}… (SQIsign sig present, verify pending)",
@@ -1743,7 +1791,7 @@ fn check_fleet_health(nodes: &mut Vec<FleetNode>) {
     };
     for node in nodes.iter_mut() {
         // v0.50: the old https://:8181 status endpoint is long dead (fleet showed a
-        // permanent 0/2). HONEST probe: a TCP connect to the node's real listener
+        // permanent 0/2). HONEST probe: a TCP connect to the node's real listene
         // (:9501) proves the process is up; we claim nothing we can't read.
         let alive = std::net::TcpStream::connect_timeout(
             &format!("{}:{}", node.addr, node.port).parse().unwrap_or_else(|_| std::net::SocketAddr::from(([0,0,0,0],0))),
@@ -1968,7 +2016,7 @@ fn leading_zero_bits(d: &[u8]) -> u32 {
 /// (i.e. the operator has *promoted* a release by writing the manifest — publishing a GitHub release
 /// alone does NOT advance the channel), download + BLAKE3-verify + hot-swap, then re-exec the new
 /// binary so the node is immediately running the chosen version. Returns an Option<String> toast
-/// for the TUI instead of eprintln! (which corrupts the alt-screen). Disable with `--no-update` or
+/// for the TUI instead of eprintln! (which corrupts the alt-screen). Disable with `--no-update` o
 /// `SIGIL_TOP_NO_AUTOUPDATE=1`.
 fn maybe_auto_update(argv: &[String]) -> Option<String> {
     if argv.iter().any(|a| a == "--no-update")
@@ -1978,7 +2026,12 @@ fn maybe_auto_update(argv: &[String]) -> Option<String> {
     }
     let rel = match fetch_latest() {
         Ok(r) if version_gt(&r.version, VERSION) => r,
-        _ => return None, // up to date, channel unreachable, or malformed → just run
+        Ok(r) if version_gt(VERSION, &r.version) => return Some(format!("⚠ {}", release_channel_stale_msg(&r.version))),
+        Ok(_) => return None,
+        Err(e) if e.contains("MANIFEST SIGNATURE INVALID") => {
+            return Some(format!("⚠ update channel signature invalid — {e}"));
+        }
+        Err(_) => return None, // channel unreachable/malformed → just run
     };
     match self_update(&rel) {
         Ok(msg) if msg.starts_with("staged v") => {
@@ -2076,7 +2129,7 @@ fn self_update(rel: &Release) -> Result<String, String> {
     // self_replace FAILED.
     // Windows: the running .exe was locked (AV / image map / dir perms) and the old code
     // silently fell through to "saved … beside" — the install path kept the OLD binary, the
-    // relaunch pre-flighted that OLD binary, saw a version mismatch, aborted, and the operator
+    // relaunch pre-flighted that OLD binary, saw a version mismatch, aborted, and the operato
     // drifted (DeepSeek root-cause: "running .exe is locked → rename fails → silent skip →
     // version drift"). Escalate instead of drifting. See windows_swap_fallback().
     #[cfg(windows)]
@@ -2367,10 +2420,15 @@ struct App {
     last_eclipse: Instant,
     /// Post-update logo splash (flux updater return UX).
     splash_until: Option<Instant>,
+
+    // === CATHEDRAL DAGKNIGHT (wired 2026-06-17) ===
+    /// Live vaulted DagKnight view. Ingested from tips/blocks after spine checks.
+    /// Surface: health_summary, last certified vault roots, divergence=0, flux proofs.
+    cathedral: Cathedral,
     splash_frame: u8,
     // ── LANE-B v0.50: SIGIL rune animation tied to update availability ──────────
     // A floating overlay band — a sigil drawing itself line-by-line then fading.
-    // Frame-counter + elapsed-envelope, driven entirely off the existing render
+    // Frame-counter + elapsed-envelope, driven entirely off the existing rende
     // tick (never blocks input/render). Plays every 10 min when an update is
     // available, every 2 h otherwise. Timestamps live in-process only (no disk).
     rune_until: Option<Instant>,    // Some(end) while the band is on screen
@@ -2408,6 +2466,9 @@ struct App {
     serve_status: String,
     // v0.7.0: embedded HTTP serve shutdown signal (no external process)
     serve_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    render_panic_streak: u8,
+    bad_size_streak: u16,
+    first_frame_logged: bool,
     // v0.10.5 "smooth cruise": refresh runs off the render thread. The worker's
     // result lands on refresh_rx; refresh_inflight stops duplicate workers piling up.
     refresh_rx: Option<mpsc::Receiver<RefreshOutcome>>,
@@ -2478,6 +2539,9 @@ impl App {
               sync_kf: Kalman1D::new(),
               serve_status: String::new(),
               serve_stop: None,
+              render_panic_streak: 0,
+              bad_size_streak: 0,
+              first_frame_logged: false,
               // v0.7.0: Fleet starts with known bootstrap peers
               fleet_nodes: vec![
                   FleetNode { name: "Delta".into(), addr: "5.79.79.158".into(), port: 9501, online: false, height: 0, version: String::new(), uptime_secs: 0 },
@@ -2491,6 +2555,8 @@ impl App {
               last_serve_check: Instant::now(),
               mine_stats: std::sync::Arc::new(std::sync::Mutex::new(MinerStats::default())),
               mine_desired_gpu: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+              // Cathedral DagKnight live view (first wire)
+              cathedral: Cathedral::new(),
               mine_gpu_failed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
               mine_gpu_warned: false,
               bps_ema: 0.0,
@@ -2673,7 +2739,7 @@ impl App {
         self.refresh_rx = Some(rx);
     }
 
-    /// v0.10.5: drain a completed refresh without ever blocking. Called once per
+    /// v0.10.5: drain a completed refresh without ever blocking. Called once pe
     /// render-loop iteration.
     fn poll_refresh(&mut self) {
         let Some(rx) = self.refresh_rx.as_ref() else { return };
@@ -2731,7 +2797,7 @@ impl App {
         self.refresh_inflight = false;
         // v0.7.8 (HONEST full sync): the old [F] equated full_sync_height with the
         // tip height and printed "complete: N verified" while storing ZERO blocks —
-        // a false claim (the DB stayed empty). Full sync now reports the REAL number
+        // a false claim (the DB stayed empty). Full sync now reports the REAL numbe
         // of blocks actually received + stored via the chain mesh (p2p block store).
         // It only says "complete" when stored blocks actually reach the target, and
         // shows the true count (0 until the node mesh serves history) otherwise.
@@ -2757,8 +2823,12 @@ impl App {
             self.last_update_check = Instant::now();
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
-                let ver = fetch_latest().map(|r| r.version).unwrap_or_default();
-                let _ = tx.send(format!("AUTO-CHECK:{ver}"));
+                let msg = match fetch_latest() {
+                    Ok(r) => format!("AUTO-CHECK:{}", r.version),
+                    Err(e) if e.contains("MANIFEST SIGNATURE INVALID") => format!("AUTO-CHECK-ERR:{e}"),
+                    Err(_) => "AUTO-CHECK:".into(),
+                };
+                let _ = tx.send(msg);
             });
             self.update_rx = Some(rx);
         }
@@ -2823,7 +2893,7 @@ fn record_boot_attempt() -> u32 {
         .as_deref().map(str::trim).and_then(|s| s.split_once(':'))
     {
         Some((ver, n)) if ver == VERSION => n.parse::<u32>().unwrap_or(0) + 1,
-        _ => 1, // fresh version / no marker / garbage → reset the counter
+        _ => 1, // fresh version / no marker / garbage → reset the counte
     };
     let _ = std::fs::write(&path, format!("{VERSION}:{strikes}"));
     strikes
@@ -2871,7 +2941,7 @@ fn crashloop_auto_revert() -> bool {
         mark_boot_healthy(); arm_heal_timer(); return false;
     }
     if self_replace::self_replace(&prev).is_err() { mark_boot_healthy(); return false; }
-    mark_boot_healthy(); // the reverted binary boots fresh under its own version counter
+    mark_boot_healthy(); // the reverted binary boots fresh under its own version counte
     let exe = match std::env::current_exe() { Ok(e) => e, Err(_) => return true };
     let args: Vec<String> = std::env::args().skip(1).collect();
     #[cfg(unix)]
@@ -2940,9 +3010,9 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
 
     // ── v0.35 (sync-starts-earlier, DeepSeek audit S4): the ENTIRE sync bootstrap runs
     // BEFORE the terminal is touched. It used to sit after raw-mode + alt-screen + panic-
-    // hook + Terminal::new, so the store open (formerly a full-db scan!), the aether
+    // hook + Terminal::new, so the store open (formerly a full-db scan!), the aethe
     // bootstrap and the P2P launch all waited on UI plumbing. Now the mesh is dialing and
-    // the first probe is in flight while crossterm sets up; pre-TUI prints go to stderr
+    // the first probe is in flight while crossterm sets up; pre-TUI prints go to stder
     // (IN_TUI is still false), which is exactly where pre-UI diagnostics belong. ─────────
     let mut app = App::new(cfg);
     flux_webhook("boot", concat!("sigil-top v", env!("CARGO_PKG_VERSION"), " starting"));
@@ -2966,14 +3036,85 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // v0.10.5: async — kicks off the first fetch without blocking the first paint.
     app.request_refresh();
 
+    // v0.12.1: sync is ON BY DEFAULT. Opt OUT with --no-sync / SIGIL_TOP_NO_SYNC=1.
+    // v0.39.1 WINDOWS: default OFF — the LIGHT monitor. v0.10.2 already learned
+    // this lesson (the sync engine ate the operator's PC; made opt-in), v0.12.1
+    // regressed it to on-by-default, and it froze the desktop twice today. The
+    // Mining tab / wallet / explorer don't need the local backfill engine — a
+    // fleet node (epsilon) carries the chain. Opt IN with --sync / SIGIL_TOP_SYNC=1.
+    let want_sync = if cfg!(windows) {
+        std::env::args().any(|a| a == "--sync") || std::env::var("SIGIL_TOP_SYNC").is_ok()
+    } else {
+        !(std::env::args().any(|a| a == "--no-sync")
+            || std::env::var("SIGIL_TOP_NO_SYNC").is_ok())
+    };
+
     // v0.7.22: cross-platform PERSISTENT store path. The old /tmp + /dev/shm paths
     // don't exist on Windows → the store never persisted → re-sync from 0 every launch
     // ("starts over on update"). Now a per-user dir (override with SIGIL_TOP_DB).
     let db_path = sigil_top_db_path();
-    let mut block_store = block_store::BlockStore::open(&db_path)
-        .or_else(|_| block_store::BlockStore::open(
-            std::env::temp_dir().join("sigil-top-blocks.db").to_string_lossy().as_ref()))
-        .unwrap_or_else(|e| panic!("block store: {e}"));
+    let oversized_primary = oversized_store_for_light_boot(&db_path, want_sync);
+    boot_trace(&format!("opening block store path={db_path} mode=nonblocking want_sync={want_sync}"));
+    let mut block_store = if let Some(bytes) = oversized_primary {
+        let volatile = std::env::temp_dir()
+            .join(format!("sigil-top-light-{}.db", std::process::id()));
+        let volatile_s = volatile.to_string_lossy().into_owned();
+        boot_trace(&format!(
+            "primary block store is {} bytes; skipping pre-frame open and using volatile {volatile_s}",
+            bytes
+        ));
+        match block_store::BlockStore::open(&volatile_s) {
+            Ok(s) => {
+                app.toast = format!(
+                    "⚠ local store is {} on disk; dashboard started on a fresh light store. Use --sync or SIGIL_TOP_FORCE_STORE=1 to reopen it.",
+                    human_bytes(bytes)
+                );
+                app.toast_sticky = true;
+                s
+            }
+            Err(e) => {
+                let msg = format!("volatile block store unavailable after skipping oversized primary: {e}");
+                boot_trace(&msg);
+                eprintln!("sigil-top: {msg}");
+                return Err(std::io::Error::new(std::io::ErrorKind::Other, msg));
+            }
+        }
+    } else {
+        match block_store::BlockStore::open(&db_path) {
+            Ok(s) => s,
+            Err(primary) => {
+                let temp_path = std::env::temp_dir().join("sigil-top-blocks.db");
+                match block_store::BlockStore::open(temp_path.to_string_lossy().as_ref()) {
+                    Ok(s) => {
+                        app.toast = format!("⚠ primary block store unavailable ({primary}); using temp store");
+                        app.toast_sticky = true;
+                        s
+                    }
+                    Err(temp_err) => {
+                        let volatile = std::env::temp_dir()
+                            .join(format!("sigil-top-blocks-volatile-{}.db", std::process::id()));
+                        match block_store::BlockStore::open(volatile.to_string_lossy().as_ref()) {
+                            Ok(s) => {
+                                app.toast = format!("⚠ block store fallback is volatile ({primary}; temp: {temp_err})");
+                                app.toast_sticky = true;
+                                s
+                            }
+                            Err(volatile_err) => {
+                                let msg = format!(
+                                    "block store unavailable: primary={primary}; temp={temp_err}; volatile={volatile_err}"
+                                );
+                                boot_trace(&msg);
+                                eprintln!("sigil-top: {msg}");
+                                return Err(std::io::Error::new(std::io::ErrorKind::Other, msg));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    boot_trace(&format!("block store opened best={} synced={} verified={}",
+        block_store.best_height(), block_store.synced_to(), block_store.verified_to()));
 
     // v0.7.1: Bootstrap from local aether shards into flux-db before starting P2P.
     // v0.56: the default aether dir is an EPSILON-server path; on Windows/other operators
@@ -3008,18 +3149,6 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
         });
     }
 
-    // v0.12.1: sync is ON BY DEFAULT. Opt OUT with --no-sync / SIGIL_TOP_NO_SYNC=1.
-    // v0.39.1 WINDOWS: default OFF — the LIGHT monitor. v0.10.2 already learned
-    // this lesson (the sync engine ate the operator's PC; made opt-in), v0.12.1
-    // regressed it to on-by-default, and it froze the desktop twice today. The
-    // Mining tab / wallet / explorer don't need the local backfill engine — a
-    // fleet node (epsilon) carries the chain. Opt IN with --sync / SIGIL_TOP_SYNC=1.
-    let want_sync = if cfg!(windows) {
-        std::env::args().any(|a| a == "--sync") || std::env::var("SIGIL_TOP_SYNC").is_ok()
-    } else {
-        !(std::env::args().any(|a| a == "--no-sync")
-            || std::env::var("SIGIL_TOP_NO_SYNC").is_ok())
-    };
     let mut sync_handle: Option<std::sync::Arc<std::sync::Mutex<block_sync::P2PSyncState>>> = None;
     if want_sync {
         // v0.22.1: monitor path (recent_only=true) → fast-snap to the verified live tip.
@@ -3066,7 +3195,9 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                 .or_else(|| info.payload().downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "<non-string panic>".into());
             let loc = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
-            log_line(format!("[PANIC] {msg} @ {loc}"));
+            let line = format!("[PANIC] {msg} @ {loc}");
+            remember_panic(line.clone());
+            log_line(line);
         }));
     }
 
@@ -3109,9 +3240,23 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             // (so the loop can't busy-spin and a real resize/quit still gets through), then retry.
             // The plain-text `--once` / `render_full` path never enters this loop — which is exactly
             // why it always renders while `--tui` spun black.
-            match crossterm::terminal::size() {
-                Ok((w, h)) if w >= 2 && h >= 2 => {}
-                _ => {
+            let size_now = crossterm::terminal::size();
+            match size_now {
+                Ok((w, h)) if w >= 2 && h >= 2 => {
+                    if app.bad_size_streak != 0 {
+                        boot_trace(&format!("terminal size recovered after {} bad reads: {w}x{h}", app.bad_size_streak));
+                    }
+                    app.bad_size_streak = 0;
+                }
+                other => {
+                    app.bad_size_streak = app.bad_size_streak.saturating_add(1);
+                    if app.bad_size_streak >= 20 {
+                        if app.bad_size_streak == 20 {
+                            let detail = format!("terminal size stayed degenerate for ~2s ({other:?}); forcing draw so failure is visible");
+                            boot_trace(&detail);
+                            log_line(format!("[render] {detail}"));
+                        }
+                    } else {
                     if event::poll(Duration::from_millis(100))? {
                         if let Event::Key(k) = event::read()? {
                             if k.kind == KeyEventKind::Press
@@ -3122,6 +3267,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                         }
                     }
                     continue;
+                    }
                 }
             }
             if app.splash_until.map(|u| Instant::now() < u).unwrap_or(false) {
@@ -3137,13 +3283,15 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             // used to unwind out of run_tui and EXIT the app ("crashes after 20s"). Catch it —
             // the panic hook logs [PANIC] with file:line — re-init the terminal and keep running;
             // the next frame redraws. The monitor must never die on a single bad render frame.
+            let mut frame_panicked = false;
             term.draw(|f| {
                 // Catch the panic AROUND draw_ui (the render code, which is the panic source) —
-                // term.draw itself still owns the closure so there's no borrow-escape. A render
+                // term.draw itself still owns the closure so there's no borrow-escape. A rende
                 // panic leaves a partial frame (harmless; the next frame redraws) instead of
                 // unwinding out of run_tui and killing the app.
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| draw_ui(f, &app))).is_err() {
-                    log_line("[render] frame panicked — caught, continuing".into());
+                    frame_panicked = true;
+                    log_line("[render] frame panicked — caught".into());
                 }
                 // v0.33 GLOBAL ASCII pass: on Windows (or SIGIL_ASCII=1) rewrite any remaining
                 // wide/emoji cell symbol to width-1 ASCII. Done on the buffer AFTER layout but
@@ -3162,6 +3310,36 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                     }
                 }
             })?;
+            if frame_panicked {
+                app.render_panic_streak = app.render_panic_streak.saturating_add(1);
+                let detail = last_panic_line();
+                boot_trace(&format!(
+                    "render panic streak {}/3: {detail}",
+                    app.render_panic_streak
+                ));
+                if app.render_panic_streak >= 3 {
+                    let _ = disable_raw_mode();
+                    let _ = execute!(term.backend_mut(), LeaveAlternateScreen);
+                    let _ = term.show_cursor();
+                    IN_TUI.store(false, std::sync::atomic::Ordering::Relaxed);
+                    eprintln!(
+                        "sigil-top: render failed 3 frames in a row; exiting cleanly instead of black-screening.\n  {detail}\n  startup log: {}",
+                        std::env::temp_dir().join("sigil-top-startup.log").display()
+                    );
+                    return Ok(());
+                }
+                continue;
+            } else if app.render_panic_streak != 0 {
+                boot_trace("render recovered after caught panic");
+                app.render_panic_streak = 0;
+            }
+            if !app.first_frame_logged {
+                match crossterm::terminal::size() {
+                    Ok((w, h)) => boot_trace(&format!("first frame drawn {w}x{h}")),
+                    Err(e) => boot_trace(&format!("first frame drawn (size unavailable: {e})")),
+                }
+                app.first_frame_logged = true;
+            }
             // v0.10.5 "smooth cruise": adaptive frame pacing. When something is
             // moving — splash animation, an in-flight refresh, or live mining — poll
             // at ~30 fps so motion is buttery. When parked, fall back to a calm 200 ms
@@ -3280,7 +3458,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                                     "update v{} failed: {e} — fallback: wget quillon.xyz/downloads/sigil-top-v{}-{SELF_TARGET}",
                                                     rel.version, rel.version),
                                             },
-                                            Ok(rel) => format!("✓ up to date (v{VERSION}; channel v{}) — checked", rel.version),
+                                            Ok(rel) => release_channel_current_msg(&rel.version),
                                             Err(e) => format!("⚠ update check: {e}"),
                                         };
                                         let _ = tx.send(msg);
@@ -3459,7 +3637,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                 // so it still shows true download speed.)
                 let now = std::time::Instant::now();
                 let rate_metric = app.p2p_state.blocks_synced.max(app.p2p_state.fetched_total);
-                // v0.31: a one-time CATCH-UP jump (synced snaps 0→~tip the instant the monitor
+                // v0.31: a one-time CATCH-UP jump (synced snaps 0→~tip the instant the monito
                 // reaches the head, or after a re-snap over a big gap) is NOT a sustained rate —
                 // it spiked the readout to ~1M blk/s then craters to 0 as the jump scrolls out of
                 // the 10s window (the "1M → 0" the user saw). If the metric leaps > CATCHUP_JUMP in
@@ -3517,7 +3695,11 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                     Ok(msg) => {
                         // v0.7.5: Silent auto-check — just update the banner version
                         if let Some(ver) = msg.strip_prefix("AUTO-CHECK:") {
-                            if version_gt(ver, VERSION) { app.latest = ver.to_string(); }
+                            if !ver.is_empty() { app.latest = ver.to_string(); }
+                            app.update_rx = None;
+                        } else if let Some(e) = msg.strip_prefix("AUTO-CHECK-ERR:") {
+                            app.toast = format!("⚠ update channel: {e}");
+                            app.toast_sticky = false;
                             app.update_rx = None;
                         } else {
                         // v0.7.0: Auto-restart after ANY successful update (swapped, saved, or downloaded).
@@ -3607,6 +3789,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     disable_raw_mode()?;
     execute!(term.backend_mut(), LeaveAlternateScreen)?;
     term.show_cursor()?;
+    IN_TUI.store(false, std::sync::atomic::Ordering::Relaxed);
     res
 }
 
@@ -3626,7 +3809,7 @@ fn rev_snapshot(ws_root: &std::path::Path) -> Result<String, String> {
         None,                      // parent
         genesis_id,
         VERSION,                   // workspace_version
-        "sigil-top-cortex",        // author
+        "sigil-top-cortex",        // autho
         &format!("sigil-top v{VERSION} cortex auto-snapshot"),
     ).map_err(|e| format!("flux-rev snapshot: {e}"))?;
     Ok(rev.id)
@@ -3886,6 +4069,76 @@ fn sigil_top_db_path() -> String {
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
     format!("{}/sigil-top-blocks.db", base.trim_end_matches(['/', '\\']))
+}
+
+fn light_boot_store_limit_bytes() -> u64 {
+    if let Ok(raw) = std::env::var("SIGIL_TOP_BOOT_STORE_LIMIT_MB") {
+        if let Ok(mb) = raw.trim().parse::<u64>() {
+            return if mb == 0 { u64::MAX } else { mb.saturating_mul(1024 * 1024) };
+        }
+    }
+    if cfg!(windows) { 512 * 1024 * 1024 } else { 1536 * 1024 * 1024 }
+}
+
+fn dir_size_capped(path: &str, cap: u64) -> std::io::Result<u64> {
+    let root = std::path::Path::new(path);
+    if !root.exists() {
+        return Ok(0);
+    }
+    let meta = fs::metadata(root)?;
+    if meta.is_file() {
+        return Ok(meta.len());
+    }
+    let mut total = 0u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let meta = entry.metadata()?;
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else {
+                total = total.saturating_add(meta.len());
+                if total > cap {
+                    return Ok(total);
+                }
+            }
+        }
+    }
+    Ok(total)
+}
+
+fn oversized_store_for_light_boot(path: &str, want_sync: bool) -> Option<u64> {
+    if want_sync || std::env::var("SIGIL_TOP_FORCE_STORE").is_ok() {
+        return None;
+    }
+    let cap = light_boot_store_limit_bytes();
+    if cap == u64::MAX {
+        return None;
+    }
+    match dir_size_capped(path, cap) {
+        Ok(bytes) if bytes > cap => Some(bytes),
+        Ok(_) => None,
+        Err(e) => {
+            boot_trace(&format!("store size preflight failed for {path}: {e}"));
+            None
+        }
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut n = bytes as f64;
+    let mut unit = 0usize;
+    while n >= 1024.0 && unit + 1 < UNITS.len() {
+        n /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{n:.1} {}", UNITS[unit])
+    }
 }
 
 

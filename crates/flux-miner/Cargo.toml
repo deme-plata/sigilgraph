@@ -2,7 +2,7 @@
 name = "flux-miner"
 # Independent version (like sigil-top) so the miner auto-updates on its own
 # cadence — bump this per miner release so the updater can deliver it.
-version = "0.1.11"
+version = "0.1.12"
 edition.workspace = true
 license.workspace = true
 description = "The dual-lane Flux miner: BLAKE4 proof-of-work (the POWER lane, Φ) + a Wesolowski VDF (the TIME lane, Ω). A valid block carries BOTH — power can't fake time, time can't fake power. Chain-agnostic; copies Quillon's standalone miner+node, Flux-native."
@@ -32,7 +32,15 @@ ratatui    = { version = "0.28", optional = true }
 crossterm  = { version = "0.28", optional = true }
 # GPU Lane-A (BLAKE4) search — ported from the QUG q-miner. OpenCL first (most
 # portable); CUDA/Vulkan are follow-ons. Needs an OpenCL runtime → off by default.
-opencl3    = { version = "0.9", optional = true }
+# `dynamic`: dlopen the OpenCL ICD (libOpenCL.so / OpenCL.dll) at RUNTIME via
+# libloading instead of linking `-lOpenCL`. This is what lets the
+# x86_64-pc-windows-gnu cross-build link with NO OpenCL import lib / SDK in the
+# mingw sysroot — the user just needs OpenCL.dll (shipped beside the exe, or the
+# GPU driver's copy in System32) present at run time. (`dynamic` is in opencl3's
+# default set for ≥0.10, but we name it explicitly so intent survives a default
+# change.) 0.10 is the first release with `dynamic`; chosen over 0.12 to minimise
+# API drift from the 0.9 call sites in src/gpu/mod.rs.
+opencl3    = { version = "0.10", features = ["dynamic"], optional = true }
 
 [features]
 # Default = the full miner (all bins build with a plain `fluxc build`). A NODE

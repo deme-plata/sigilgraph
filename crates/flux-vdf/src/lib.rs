@@ -182,6 +182,105 @@ impl ModSquaring {
         n |= BigUint::from(0xbf58476d1ce4e5b9u64) << 1500;
         Self { n }
     }
+
+    /// **Production VDF modulus (audit C10).** The RSA-2048 Factoring Challenge
+    /// number — a 2048-bit semiprime whose factorization is unknown to *anyone*
+    /// (the RSA-2048 challenge was never solved). Wesolowski's security needs a
+    /// group of UNKNOWN order; `bench_2048` is a published bit-pattern whose order
+    /// is computable, so its time-lane is forgeable (instant-mine / issuance
+    /// capture). This constant has no factorization any party holds — a
+    /// "nothing-up-my-sleeve" modulus with no trusted setup we run. The genus-2
+    /// class group (`genus2.rs`) is the eventual no-RSA replacement; the protocol
+    /// is identical, so this is a drop-in.
+    pub fn rsa2048() -> Self {
+        // RSA-2048 (decimal), RSA Laboratories Factoring Challenge.
+        const RSA2048_DEC: &[u8] = b"25195908475657893494027183240048398571429282126204\
+            03202777713783604366202070759555626401852588078440691829064124951508218929855914917618450280\
+            84891200728449926873928072877767359714183472702618963750149718246911650776133798590957000973\
+            30459748808428401797429100642458691817195118746121515172654632282216869987549182422433637259\
+            08514186546204357679842338718477444792073993423658482382428119816381501067481045166037730605\
+            62016196762561338441436038339044149526344321901146575444541784240209246165157233507787077498\
+            171257724679629263863563732899121548314381678998850404453640235273819513786365643912120103971\
+            22822120720357";
+        // strip the leading-whitespace from the multiline literal
+        let digits: Vec<u8> = RSA2048_DEC.iter().copied().filter(|b| b.is_ascii_digit()).collect();
+        let n = BigUint::parse_bytes(&digits, 10).expect("RSA-2048 decimal constant must parse");
+        Self { n }
+    }
+
+    /// The VDF group the production consensus path MUST use. Single switch point
+    /// for node + every miner (they must share one group). Currently `rsa2048()`.
+    pub fn production() -> Self {
+        Self::rsa2048()
+    }
+
+    /// **Fail-closed security self-check on the modulus (audit C10 / SENTINEL #1).**
+    /// A secure squaring-VDF needs `N` to be a large composite of *unknown* order:
+    /// a prime `N` has known order `N-1` (forgeable); a smooth / small-factored `N`
+    /// is factorable (order computable → forgeable). This rejects any modulus that
+    /// is too small, even, prime, or has a *findable* factor (trial division +
+    /// bounded Pollard-rho). Consequence: a mis-transcribed constant is either
+    /// still a hard composite (secure) or trips this and the node refuses to boot —
+    /// it can never *silently* weaken the time-lane. Callers should run this at
+    /// startup and `expect()` it on the production group.
+    pub fn assert_secure(&self) -> Result<(), String> {
+        let bits = self.n.bits();
+        if bits < 2048 {
+            return Err(format!("VDF modulus too small: {bits} bits (need >= 2048)"));
+        }
+        if self.n.is_even() {
+            return Err("VDF modulus is even (factor 2 → order known)".into());
+        }
+        // Must be COMPOSITE: a prime modulus has the fully-known order N-1.
+        if is_probable_prime(&self.n, 40) {
+            return Err("VDF modulus is prime — group order N-1 is known → VDF forgeable".into());
+        }
+        // No small factors: a smooth / unbalanced N is trivially factorable.
+        let mut p: u32 = 3;
+        while p < (1u32 << 16) {
+            if (&self.n % p).is_zero() {
+                return Err(format!("VDF modulus divisible by {p} → factorable, order computable"));
+            }
+            p += 2;
+        }
+        // Bounded Pollard-rho: a balanced ~2048-bit semiprime must NOT cough up a
+        // factor in this budget. If it does, the modulus is weak — refuse it.
+        if let Some(f) = pollard_rho_bounded(&self.n, 300_000) {
+            return Err(format!(
+                "VDF modulus factor found by Pollard-rho ({} bits) → weak group, refusing",
+                f.bits()
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Bounded Pollard-rho factor search. Returns a non-trivial factor of `n` if one
+/// is found within `max_iters` (signals a *weak* modulus for VDF use), else None.
+/// Brent's cycle variant; deterministic (fixed seed) so the check is reproducible.
+fn pollard_rho_bounded(n: &BigUint, max_iters: u64) -> Option<BigUint> {
+    if n.is_even() {
+        return Some(BigUint::from(2u32));
+    }
+    let one = BigUint::one();
+    let mut x = BigUint::from(2u32);
+    let mut y = BigUint::from(2u32);
+    let c = BigUint::from(1u32);
+    let two = BigUint::from(2u32);
+    let f = |v: &BigUint| -> BigUint { (v.modpow(&two, n) + &c) % n };
+    for _ in 0..max_iters {
+        x = f(&x);
+        y = f(&f(&y));
+        let d = if x >= y { &x - &y } else { &y - &x };
+        if d.is_zero() {
+            return None; // cycle closed with no factor in this budget
+        }
+        let g = d.gcd(n);
+        if g > one && &g < n {
+            return Some(g);
+        }
+    }
+    None
 }
 
 impl VdfGroup for ModSquaring {
@@ -252,6 +351,38 @@ mod tests {
         let mut bad_pi = proof;
         bad_pi.pi[0] ^= 0x02;
         assert!(!verify(&g, &x, &bad_pi), "forged proof must be rejected");
+    }
+
+    #[test]
+    fn production_modulus_passes_security_self_check() {
+        // C10: the production VDF group must be a 2048-bit composite of unknown
+        // order — bench_2048 is forbidden in production precisely because its
+        // structure is public.
+        let g = ModSquaring::production();
+        assert!(g.n.bits() >= 2048, "production modulus must be >= 2048 bits");
+        g.assert_secure().expect("RSA-2048 production modulus must pass the self-check");
+    }
+
+    #[test]
+    fn wesolowski_roundtrip_over_production_group() {
+        // The protocol is identical to bench_2048 — only N changed.
+        let g = ModSquaring::production();
+        let x = g.from_seed(&[3u8; 32]);
+        let proof = eval(&g, &x, 4_000);
+        assert!(verify(&g, &x, &proof), "honest VDF proof over RSA-2048 must verify");
+    }
+
+    #[test]
+    fn self_check_rejects_insecure_moduli() {
+        // even → factor 2 known
+        let even = ModSquaring::new((BigUint::one() << 2048) | (BigUint::one() << 4));
+        assert!(even.assert_secure().is_err(), "even modulus must be rejected");
+        // too small
+        let small = ModSquaring::new((BigUint::one() << 1024) | BigUint::one());
+        assert!(small.assert_secure().is_err(), "sub-2048-bit modulus must be rejected");
+        // a small odd factor (3 | N) → trivially factorable
+        let smooth = ModSquaring::new(BigUint::from(3u32) * ((BigUint::one() << 2047) | BigUint::one()));
+        assert!(smooth.assert_secure().is_err(), "modulus with small factor must be rejected");
     }
 
     #[test]

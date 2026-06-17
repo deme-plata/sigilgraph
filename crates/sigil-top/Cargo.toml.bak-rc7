@@ -1,0 +1,82 @@
+[package]
+name = "sigil-top"
+# sigil-top carries its OWN version cadence (the light client updates independently
+# of the workspace) — this is the "next version" the auto-updater ships.
+version = "1.0.0-rc5"
+edition.workspace = true
+license.workspace = true
+description = "sigil-top — a SIGIL lightweight node + dual-mode (lite scorecard ↔ full dashboard) terminal monitor. v0.9.0 'Verifying Full Sync': downloads the chain genesis→tip over the sigil-g0 P2P mesh AND verifies it as one connected spine (per-header precheck + parent_hash linkage back to genesis), with a persisted verified_to watermark. New `full-sync` (headless sync-and-verify, exit 0 at tip) and `verify-chain` (re-verify the local store) subcommands; TUI surfaces the ⛓ verified-spine height + ⚠ spine-break alarm distinct from raw download progress."
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+# v0.3.5: rustls + webpki-roots for ALL platforms. Bundles Mozilla CA certs in the
+# binary — no OS cert store dependency.
+reqwest    = { version = "0.12", features = ["blocking", "json", "rustls-tls-webpki-roots"], default-features = false }
+# v0.6.5: tokio runtime — required by flux-p2p's async NetworkManager for real block sync
+tokio      = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+futures    = "0.3"
+# v0.2: real TUI on the flux-cockpit foundation — alt-screen, flicker-free redraw,
+# interactive keys. ratatui owns the box-drawing so alignment can't regress.
+ratatui    = "0.28"
+# v0.37: the REAL dual-lane miner engine — sigil-top is now node + miner in ONE
+# binary (Mining tab [5]). client-only (no tui/market/node); gpu rides the feature.
+flux-miner = { path = "../flux-miner", default-features = false, features = ["client"] }
+crossterm  = "0.28"
+# v0.26 hardening #8: graceful SIGTERM/SIGINT — flush the verified-spine watermark +
+# restore the terminal before exit, so a supervisor restart never orphans the DB state.
+ctrlc      = "3.4"
+# L4-A: verify the REAL chain tip — reconstruct the canonical v0 tip-proof from the
+# node's live roots and verify it for sigil-g0 (~µs, 0 bytes downloaded).
+sigil-tip-proof = { path = "../sigil-tip-proof" }
+sigil-state     = { path = "../sigil-state" }
+sigil-net       = { path = "../sigil-net" }
+# Wallet login: OAuth2 (auth-code + PKCE), the wallet signs the auth request
+# (no password). DNS-anchored, post-quantum-ready.
+sigil-oauth     = { path = "../sigil-oauth" }
+# Auto-update "the flux way": BLAKE3 content-hash verify + cross-platform self-replace
+# (rename-self trick on Windows) so a running binary hot-swaps itself from the release channel.
+blake3       = "1"
+hex          = "0.4"
+bincode      = "1"
+# v0.34 TPS lane: parallel header precheck across cores (independent per header).
+rayon        = { workspace = true }
+# v0.33 zstd wire (decode side): PURE-RUST zstd decompressor — no C code, so the
+# Windows cross-build stays mingw-clean. Server compresses with the zstd crate.
+ruzstd       = "0.7"
+rmp-serde    = "1"
+self-replace = "1"
+sigil-dns-anchor = { path = "../sigil-dns-anchor" }
+# v0.6.5: Block sync — SIGIL header types + local block storage via flux-db
+sigil-header = { path = "../sigil-header" }
+flux-db = { path = "../../../flux/crates/flux-db" }
+
+# v0.6.0: Cortex MCP combos — Autonomous Continuous Optimization Engine + AI agent registry
+flux-cortex = { path = "../../../flux/crates/flux-cortex" }
+flux-graph = { path = "../../../flux/crates/flux-graph" }
+flux-optimize = { path = "../../../flux/crates/flux-optimize" }
+# v0.6.0: P2P mesh + swarm coordination + content-addressed version control
+flux-p2p = { path = "../../../flux/crates/flux-p2p" }
+flux-swarm-tools = { path = "../../../flux/crates/flux-swarm-tools" }
+flux-rev = { path = "../../../flux/crates/flux-rev" }
+# v0.7.6: content-addressed block backfill (BLAKE3, verify-don't-trust) — closes the
+# gossip-only "can't backfill history" gap. The real history-sync behind [F].
+flux-sync = { path = "../../../flux/crates/flux-sync" }
+# Turbo Sync X + invented BandwidthContinuity for continuous *high* download bandwidth
+flux-turbo-sync = { path = "../flux-turbo-sync" }
+
+# v0.2.35 L4-B: SQIsign post-quantum tip-proof flavor (gated, not yet enabled).
+[dev-dependencies]
+# Interop test only: encode with the SAME C-backed zstd the server uses, decode with
+# our pure-Rust ruzstd — proves the exact cross-implementation wire roundtrip.
+zstd = "0.13"
+
+# When activated, sigil-tip-proof links flux-sqisign and verify_tip() constructs
+# a TipProof::new_sqisign() for adversary-resistant tip verification.
+[features]
+gpu = ["flux-miner/gpu"]
+sqisign = []
+
+[[bin]]
+name = "sigil-top"
+path = "src/main.rs"

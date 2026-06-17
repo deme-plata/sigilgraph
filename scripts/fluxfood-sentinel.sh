@@ -31,7 +31,9 @@ fi
 
 RESULT=$(python3 -c "import json;print(json.load(open('$GATE_STATUS_JSON'))['result'])" 2>/dev/null)
 GATE_TS=$(python3 -c "import json;print(json.load(open('$GATE_STATUS_JSON'))['ts_unix'])" 2>/dev/null || echo 0)
+GATE_VER=$(python3 -c "import json;print(json.load(open('$GATE_STATUS_JSON')).get('version',''))" 2>/dev/null)
 MF_TS=$(stat -c %Y "$DOWNLOADS/sigil-top-latest.json" 2>/dev/null || echo 0)
+MF_VER=$(python3 -c "import json;print(json.load(open('$DOWNLOADS/sigil-top-latest.json')).get('version',''))" 2>/dev/null)
 
 if [ "$RESULT" = "RED" ]; then
   beacon "fluxfood-sentinel: latest release-gate run is RED"
@@ -41,6 +43,10 @@ fi
 if [ "$MF_TS" -gt $((GATE_TS + 120)) ]; then
   beacon "fluxfood-sentinel: sigil-top-latest.json changed WITHOUT a gate run — publish bypassed the release gate"
   echo "⚠ manifest newer than last gate run (gate bypassed?)"; exit 2
+fi
+if [ -n "$MF_VER" ] && [ -n "$GATE_VER" ] && [ "$MF_VER" != "$GATE_VER" ]; then
+  beacon "fluxfood-sentinel: live manifest version $MF_VER does not match latest GREEN gate version $GATE_VER"
+  echo "⚠ manifest version ($MF_VER) != gate version ($GATE_VER)"; exit 2
 fi
 echo "✓ sentinel healthy: gate=$RESULT, last run $(date -d @"$GATE_TS" '+%F %T' 2>/dev/null)"
 exit 0

@@ -99,19 +99,41 @@ pub struct SyncFailure {
 /// `best_height`  = store.best_height() (max height actually RECEIVED, incl. out-of-order).
 /// `stalled`      = how long the frontier has been parked.
 /// `threshold`    = how long to tolerate a parked frontier before declaring failure.
+/// `frontier_active` = peers keep serving the frontier RANGE but the headers won't splice
+/// (a conflicting/forked chunk the store rejects, or — pre-strict-ingest — an out-of-order
+/// squatter). v0.95: under strict downward-linkage ingest NOTHING stores above an unfillable
+/// hole, so `best_height` stays == `frontier` and the old `best > frontier` test goes blind —
+/// `frontier_active` is then the ONLY wedge signal, the difference between a loud named failure
+/// and a silent death on the generic timeout. Like `best > frontier`, it is REAL received
+/// evidence (data actually arrived), so a merely-CLAIMED higher tip (lying-tip/eclipse) — which
+/// delivers no bytes — never trips it.
 pub fn watchdog_verdict(
     frontier: u64,
     best_height: u64,
+    frontier_active: bool,
     stalled: Duration,
     threshold: Duration,
 ) -> Option<SyncFailure> {
-    if best_height > frontier && stalled >= threshold {
+    if stalled < threshold {
+        return None;
+    }
+    if best_height > frontier {
         Some(SyncFailure {
             height: frontier,
             reason: format!(
                 "no-progress watchdog: contiguous frontier stuck at height {frontier} for {}s while a \
                  higher block ({best_height}) is already held — an unfillable hole at {frontier} (no \
                  reachable peer serves it). NOT a silent stall.",
+                stalled.as_secs()
+            ),
+        })
+    } else if frontier_active {
+        Some(SyncFailure {
+            height: frontier,
+            reason: format!(
+                "no-progress watchdog: contiguous frontier WEDGED at height {frontier} for {}s — peers keep \
+                 serving the frontier range but the headers don't splice (conflicting/forked chunk, or an \
+                 out-of-order header that can't link to {frontier}). NOT a silent stall.",
                 stalled.as_secs()
             ),
         })
@@ -122,6 +144,8 @@ pub fn watchdog_verdict(
 
 /// Per-request span AND look-ahead stride. Matches the live loop's proven 4096.
 const CHUNK: u64 = 4096;
+// Turbo Sync X + continuity: in live path we override with BandwidthContinuity for dynamic high-BW chunks
+// to maintain continuous sustained download rate (no stalls, high throughput via PID/Kalman/momentum).
 /// Verify budget per step. verify_to resumes from `verified_to`, so cumulative cost is
 /// O(chain), not O(chain)·steps — a big number is fine.
 const VERIFY_BUDGET: u64 = 1_000_000;
@@ -142,6 +166,11 @@ pub struct GapSyncEngine<T: Transport> {
     /// Watchdog: contiguous frontier at the last advance, and consecutive no-advance ticks.
     last_frontier: u64,
     no_progress_ticks: u32,
+    /// v0.95: peers served the frontier RANGE during the current no-progress stall but the
+    /// headers didn't splice (forked chunk / unlinkable out-of-order header). Reset on advance.
+    /// This is the wedge signal the `best > frontier` test can't see once strict ingest stops
+    /// storing anything above an unfillable hole.
+    frontier_active: bool,
     /// Fire the watchdog after this many consecutive no-progress `step`s (tick == one step;
     /// deterministic, so the test needs no real time). The live loop uses a wall-clock
     /// threshold via the shared [`watchdog_verdict`].
@@ -163,6 +192,7 @@ impl<T: Transport> GapSyncEngine<T> {
             rr: 0,
             last_frontier,
             no_progress_ticks: 0,
+            frontier_active: false,
             watchdog_ticks: 20,
             failure: None,
         }
@@ -184,11 +214,18 @@ impl<T: Transport> GapSyncEngine<T> {
         // Soft upper bound only — a lying hint can RAISE this but never proves a height exists.
         self.peer_best = self.peer_best.max(self.transport.tip_hint());
 
-        self.fetch_round(max_inflight.max(1));
+        let frontier_received = self.fetch_round(max_inflight.max(1));
         self.store.advance();
 
         // Verify the newly-contiguous prefix and classify the stopping reason.
-        let report = chain_verify::verify_to(&mut self.store, VERIFY_BUDGET);
+        // RC5 boot-timing: log the parallel verify-pass delta so startup cost is visible.
+        let vt0 = std::time::Instant::now();
+        let report = chain_verify::verify_to_parallel(&mut self.store, VERIFY_BUDGET);
+        if report.checked > 0 {
+            let secs = vt0.elapsed().as_secs_f64().max(0.001);
+            crate::tlog!("[verify] parallel pass: checked {} → verified_to={} in {} ms ({:.0} blk/s)",
+                report.checked, report.verified_to, vt0.elapsed().as_millis(), report.checked as f64 / secs);
+        }
         match classify_break(&report) {
             BreakClass::Fatal(h, reason) => {
                 // A forged/inconsistent header can never be repaired — surface immediately.
@@ -204,12 +241,18 @@ impl<T: Transport> GapSyncEngine<T> {
         if frontier > self.last_frontier {
             self.last_frontier = frontier;
             self.no_progress_ticks = 0;
+            self.frontier_active = false; // real progress clears the wedge signal
         } else {
             self.no_progress_ticks = self.no_progress_ticks.saturating_add(1);
+            // The frontier range was served this tick but nothing spliced → wedge evidence.
+            if frontier_received {
+                self.frontier_active = true;
+            }
         }
         if let Some(f) = watchdog_verdict(
             frontier,
             self.store.best_height(),
+            self.frontier_active,
             Duration::from_secs(self.no_progress_ticks as u64),
             Duration::from_secs(self.watchdog_ticks as u64),
         ) {
@@ -224,10 +267,13 @@ impl<T: Transport> GapSyncEngine<T> {
     ///   3. look-ahead chunks ABOVE the frontier, bounded by the soft tip — so prefetch can
     ///      help but can NEVER race so far past an unfillable hole that the lead chunk starves
     ///      (the v0.10.0 / 499k frontier-stall root cause).
-    fn fetch_round(&mut self, max_inflight: usize) {
+    /// Returns whether the FRONTIER request (i==0, the next-needed chunk) actually received
+    /// headers this round — the wedge signal: data for the frontier arrived but (if the frontier
+    /// doesn't then advance) it couldn't splice. Look-ahead/repair hits don't count.
+    fn fetch_round(&mut self, max_inflight: usize) -> bool {
         let peers = self.transport.peers();
         if peers.is_empty() {
-            return;
+            return false;
         }
         let frontier = self.store.synced_to();
         let mut targets: Vec<u64> = Vec::with_capacity(max_inflight);
@@ -242,6 +288,7 @@ impl<T: Transport> GapSyncEngine<T> {
             h += CHUNK;
         }
 
+        let mut frontier_received = false;
         for (i, &start) in targets.iter().enumerate() {
             if self.store.has_height(start) {
                 continue;
@@ -262,10 +309,14 @@ impl<T: Transport> GapSyncEngine<T> {
                 }
             }
             self.rr = self.rr.wrapping_add(fanout.max(1));
+            if i == 0 && !got_any.is_empty() {
+                frontier_received = true; // the frontier range WAS served this round
+            }
             if !got_any.is_empty() {
                 self.store.put_blocks_batch(&got_any);
             }
         }
+        frontier_received
     }
 
     /// Find up to `budget` internal holes in `(synced_to, best_height]` and queue them for
@@ -430,15 +481,31 @@ mod tests {
 
     #[test]
     fn watchdog_fires_only_on_a_real_hole_not_a_lying_tip() {
-        // Caught up to what's served (best == frontier-1, i.e. best_height < frontier):
-        // a lying peer_best is irrelevant — NO failure.
-        assert_eq!(watchdog_verdict(100, 99, Duration::from_secs(999), Duration::from_secs(20)), None);
+        // Caught up to what's served (best == frontier-1, i.e. best_height < frontier) and NO
+        // frontier data arriving: a lying peer_best is irrelevant — NO failure.
+        assert_eq!(watchdog_verdict(100, 99, false, Duration::from_secs(999), Duration::from_secs(20)), None);
         // A higher block is HELD above the frontier (proof of a hole) + parked long enough → fire,
         // naming the exact frontier height.
-        let v = watchdog_verdict(499_000, 503_000, Duration::from_secs(30), Duration::from_secs(20));
+        let v = watchdog_verdict(499_000, 503_000, false, Duration::from_secs(30), Duration::from_secs(20));
         assert_eq!(v.as_ref().map(|f| f.height), Some(499_000));
         // Hole present but not parked long enough yet → hold (keep retrying, don't cry wolf).
-        assert_eq!(watchdog_verdict(499_000, 503_000, Duration::from_secs(5), Duration::from_secs(20)), None);
+        assert_eq!(watchdog_verdict(499_000, 503_000, false, Duration::from_secs(5), Duration::from_secs(20)), None);
+    }
+
+    #[test]
+    fn watchdog_fires_on_a_frontier_wedge_even_when_best_equals_frontier() {
+        // v0.95: strict ingest stores NOTHING above an unfillable hole, so best stays ==
+        // frontier — the best>frontier hole test is blind. With `frontier_active` (real frontier
+        // headers arriving that won't splice) + parked long enough, the wedge fires LOUD,
+        // naming the stuck frontier height. This is the case the live `permanent_hole` /
+        // `parent_mismatch` runs hit under strict downward-linkage.
+        let v = watchdog_verdict(12_345, 12_344, true, Duration::from_secs(30), Duration::from_secs(20));
+        assert_eq!(v.as_ref().map(|f| f.height), Some(12_345), "wedge names the stuck frontier");
+        assert!(v.as_ref().unwrap().reason.contains("WEDGED"), "reason marks it a wedge: {}", v.unwrap().reason);
+        // No frontier data arriving (caught-up tip / lying claim) → NEVER fire, even parked forever.
+        assert_eq!(watchdog_verdict(12_345, 12_345, false, Duration::from_secs(9_999), Duration::from_secs(20)), None);
+        // frontier_active but not parked long enough yet → hold.
+        assert_eq!(watchdog_verdict(12_345, 12_344, true, Duration::from_secs(5), Duration::from_secs(20)), None);
     }
 
     #[test]

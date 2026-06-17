@@ -24,9 +24,14 @@ use sigil_state::{
 pub mod onramp;
 pub mod verify;
 pub mod monitor;
+pub mod credit_line;
 pub use onramp::{apply_payment, credits_for, Payment, CENTS_PER_CREDIT};
 pub use verify::{verify_business, CvrRecord, MitidClaims, VerifyResult, VERIFY_COST};
 pub use monitor::{diff, monitor_check, watch_start, Change, CvrSnapshot, MONITOR_COST, WATCH_COST};
+pub use credit_line::{
+    advance, borrow_against_collateral, collateral_of, debt_of, liquidate, repay,
+    repay_and_release, LoanError, COLLAT, DEBT, DEFAULT_LTV_BPS, MAX_LTV_BPS, VAULT,
+};
 
 /// The MandatPilot credits token (distinct from NATIVE = [0;32]). 1 credit = 1 unit.
 pub const CREDITS: TokenId = *b"mandat-credits-v1-token-00000001";

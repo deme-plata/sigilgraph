@@ -844,13 +844,14 @@ dependencies = [
 
 [[package]]
 name = "cl3"
-version = "0.9.5"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b823f24e72fa0c68aa14a250ae1c0848e68d4ae188b71c3972343e45b46f8644"
+checksum = "5689467d49ac867f779cf6637a66695ed6190bbc810ba13efb0d6366c281edad"
 dependencies = [
+ "dlopen2",
  "libc",
  "opencl-sys",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1551,6 +1552,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "dlopen2"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e1297103d2bbaea85724fcee6294c2d50b1081f9ad47d0f6f6f61eda65315a6"
+dependencies = [
+ "dlopen2_derive",
+ "libc",
+ "once_cell",
+ "winapi",
+]
+
+[[package]]
+name = "dlopen2_derive"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fbbb781877580993a8707ec48672673ec7b81eeba04cfd2310bd28c08e47c8f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2014,7 +2038,7 @@ dependencies = [
 
 [[package]]
 name = "flux-miner"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2187,6 +2211,8 @@ dependencies = [
 name = "flux-sqisign"
 version = "0.27.0"
 dependencies = [
+ "blake3",
+ "ed25519-dalek",
  "flux-cache",
  "flux-db",
  "rand 0.8.6",
@@ -4574,18 +4600,18 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "opencl-sys"
-version = "0.2.9"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de15dd01496ae90c5799f5266184ab020082b4065800ff0b732f489371d0e5cf"
+checksum = "5ff82626c25901923bc3474911e5ca9b32593279323f90cc0eff5eb81cd39baa"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "opencl3"
-version = "0.9.5"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26ab4a90cb496f787d3934deb0c54fa9d65e7bed710c10071234aab0196fba04"
+checksum = "e762dc8e0b7535d1dd9912aa9c76f3749193b0dfd726eddc70d65b3bca416c7a"
 dependencies = [
  "cl3",
  "libc",
@@ -6485,7 +6511,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-top"
-version = "0.71.1"
+version = "1.0.0-rc7"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -6500,9 +6526,11 @@ dependencies = [
  "flux-rev",
  "flux-swarm-tools",
  "flux-sync",
+ "flux-turbo-sync",
  "futures",
  "hex",
  "ratatui",
+ "rayon",
  "reqwest",
  "rmp-serde",
  "ruzstd",

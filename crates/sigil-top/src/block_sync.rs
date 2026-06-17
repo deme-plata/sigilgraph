@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use super::block_store::BlockStore;
 use sigil_header::SigilBlockHeaderV0;
+use flux_turbo_sync::continuity::BandwidthContinuity;
 
 use std::sync::{Arc, Mutex, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -117,15 +118,110 @@ mod oracle_anchor_tests {
 
 fn zstd_decompress_body(body: &[u8]) -> Option<Vec<u8>> {
     use std::io::Read;
-    // v0.39: 64 MiB was 8x too generous — a real chunk is <= ~8 MB, and the worst-case
-    // burst is MAX_OUT x inflight slots DURING STARTUP (before the first frame). 12 MiB
-    // keeps full headroom while capping the burst ~6x lower.
-    const MAX_OUT: u64 = 12 * 1024 * 1024;
+    // v0.95 (SPINE hardening): RESTORE the 64 MiB cap. v0.39 cut it to 12 MiB on the
+    // assumption "a real chunk is <= ~8 MB" — that assumption is WRONG for SIGIL. Every
+    // SigilBlockHeaderV0 carries a `state_transition_proof: StarkProof` (opaque, verifier-
+    // defined bytes) + a Wesolowski VDF proof + two SQIsign sigs + the fluxc ProofBundle,
+    // so a mature header is ~8 KB (MEASURED: near-tip backfill chunks are ~2.33 MB zstd ≈
+    // ~32 MB raw for the responder's 4096-item cap). 12 MiB / 4096 ≈ 3 KB/header, so the
+    // 12 MiB cap fit only genesis-area stub-proof blocks — it SILENTLY stalled full-archive
+    // at the first height where blocks carry real STARK proofs (every chunk → >12 MiB →
+    // None → got=0 → the peer wrongly benched → frontier never advances). 64 MiB = the
+    // responder's 4096-item cap × 16 KiB/header headroom; still a real zstd-bomb guard
+    // (the streaming decoder bails at MAX_OUT+1, never allocating past it).
+    const MAX_OUT: u64 = 64 * 1024 * 1024;
     let mut dec = ruzstd::StreamingDecoder::new(body).ok()?;
     let mut out = Vec::new();
     dec.take(MAX_OUT + 1).read_to_end(&mut out).ok()?;
     if out.len() as u64 > MAX_OUT { return None; } // bomb guard
     Some(out)
+}
+
+/// v0.34 (gossip-zstd lane, port of q-miner's bandwidth discipline → the light node):
+/// transparently inflate ONE live-gossip frame off `/sigil/g0/blocks`.
+///
+/// Legacy frames are JSON objects, so byte 0 is `b'{'` (0x7B). A compressed frame is a
+/// single tag byte `b'Z'` (0x5A) followed by `zstd(json_bytes)`. The two are unambiguous
+/// — a JSON value never starts with `Z` — which makes this wire-compatible in BOTH
+/// directions during a rolling fleet upgrade: an un-upgraded producer only ever publishes
+/// `{…}` (passthrough), and an upgraded producer may publish `Z…` which any upgraded
+/// subscriber now inflates. The light node carries only the DECODE half (pure-Rust ruzstd,
+/// no C — the Windows cross-build stays mingw-clean); the producer compresses with the
+/// C-backed `zstd` crate it already links. Returns owned JSON bytes ready for
+/// `serde_json::from_slice`, borrowing the input untouched on the legacy path (zero-copy),
+/// or `None` on a malformed `Z` frame — the caller drops it exactly like any unparseable
+/// gossip message (benched peer, never a panic, never a zstd-bomb: see the 64 MiB cap).
+fn inflate_gossip_frame(data: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
+    match data.first() {
+        Some(&b'Z') => zstd_decompress_body(&data[1..]).map(std::borrow::Cow::Owned),
+        _ => Some(std::borrow::Cow::Borrowed(data)), // legacy JSON `{…}` — pass through untouched
+    }
+}
+
+#[cfg(test)]
+mod gossip_zstd_tests {
+    use super::inflate_gossip_frame;
+
+    /// A realistic gossiped SIGIL block envelope: the `header_json` carries the bulky
+    /// hex-encoded post-quantum payloads (STARK state-transition proof, Wesolowski VDF
+    /// proof, two SQIsign sigs) that dominate a mature header. Hex is a 16-symbol alphabet,
+    /// which is exactly what zstd eats for breakfast — so this is a fair (not rigged) sample.
+    fn sample_gossip_block() -> Vec<u8> {
+        let hx = |seed: u8, n: usize| -> String {
+            (0..n).map(|i| char::from(b"0123456789abcdef"[((seed as usize + i) * 7) & 15])).collect()
+        };
+        let header = serde_json::json!({
+            "height": 18_664_512u64,
+            "parent_hash": hx(1, 64),
+            "state_root": hx(2, 64),
+            "state_transition_proof": hx(3, 4096), // STARK proof — the big one
+            "vdf_proof": hx(4, 1024),
+            "sqisign_sig": hx(5, 584),
+            "sqisign_pk": hx(6, 258),
+            "fluxc_proof": hx(7, 512),
+            "timestamp": 1_779_867_000u64,
+            "bits": 0x1d00_ffffu32,
+        });
+        let envelope = serde_json::json!({
+            "t": "Block",
+            "height": 18_664_512u64,
+            "hash_hex": hx(9, 64),
+            "header_json": serde_json::to_string(&header).unwrap(),
+        });
+        serde_json::to_vec(&envelope).unwrap()
+    }
+
+    #[test]
+    fn legacy_json_passes_through_unchanged_and_zero_copy() {
+        let j = br#"{"t":"Block","height":42,"header_json":"{}"}"#;
+        let out = inflate_gossip_frame(j).expect("legacy JSON must pass through");
+        assert_eq!(&*out, &j[..]);
+        assert!(matches!(out, std::borrow::Cow::Borrowed(_)), "legacy path must not copy");
+    }
+
+    #[test]
+    fn zstd_frame_roundtrips_byte_exact_and_compresses() {
+        let json = sample_gossip_block();
+        // Producer side: compress with the SAME C-backed zstd the node links (dev-dep),
+        // level 1 — the proven-fast setting from the backfill lane.
+        let mut frame = vec![b'Z'];
+        frame.extend_from_slice(&zstd::encode_all(&json[..], 1).expect("zstd encode"));
+
+        let out = inflate_gossip_frame(&frame).expect("pure-Rust ruzstd must decode the C frame");
+        assert_eq!(&*out, &json[..], "decoded bytes must equal the producer's exact JSON");
+
+        let ratio = json.len() as f64 / frame.len() as f64;
+        // Conservative floor; the eprintln reports the real measured number to the test log.
+        assert!(ratio > 2.0, "expected real compression, got {:.2}x ({} -> {} B)", ratio, json.len(), frame.len());
+        eprintln!("[gossip-zstd] live block frame: {} B -> {} B  ({:.1}x smaller)", json.len(), frame.len(), ratio);
+    }
+
+    #[test]
+    fn malformed_z_frame_is_none_never_panics() {
+        assert!(inflate_gossip_frame(b"Z\xff\xff\xffnot-a-zstd-stream").is_none());
+        // A bare tag with no body is also just a drop, not a crash.
+        assert!(inflate_gossip_frame(b"Z").is_none());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -464,6 +560,8 @@ pub struct P2PSyncState {
     /// `Missing` holes used to vanish; this names the EXACT stuck height instead. Distinct
     /// from `stall_reason` (a soft, transient "retrying" hint that self-clears).
     pub sync_failure: Option<(u64, String)>,
+    // Turbo Sync X + invented Continuity for continuous high download bandwidth network
+    pub turbo_continuity: BandwidthContinuity,
 }
 
 pub struct P2PBlockSync {
@@ -551,7 +649,10 @@ impl P2PBlockSync {
         let rebase_pending = Arc::new(AtomicBool::new(false));
         let recent_only_rt = recent_only.clone();
         let rebase_pending_rt = rebase_pending.clone();
-        let state = Arc::new(Mutex::new(P2PSyncState::default()));
+        let state = Arc::new(Mutex::new(P2PSyncState {
+            turbo_continuity: BandwidthContinuity::default(),
+            ..P2PSyncState::default()
+        }));
         let new_blocks = Arc::new(Mutex::new(Vec::new()));
         let (stop_tx, stop_rx) = mpsc::channel();
 
@@ -722,6 +823,18 @@ impl P2PBlockSync {
                     s.blocks_synced = resume_h;
                     s.verified = store.verified_to(); // v0.9.0: resume the verified watermark too
                     s.light_mode = recent_only_rt.load(Ordering::Relaxed); // v0.57 (LANE-M): drives honest verified-vs-stored UI
+                    // v0.96 SUB-1s COLD START: seed peer_best from the on-disk tip cache in ALL
+                    // modes. The v0.32.5 eager seed (+ dedicated tip-poller) was gated behind
+                    // `recent_only_init`, so a FULL-ARCHIVE launch started with peer_best=0 — and
+                    // the frontier refill's `start >= peer_best` gate held OFF until the first
+                    // single-peer probe / CDN tip landed. That gap IS the "0 blk/s at start". One
+                    // microsecond disk read makes peer_best>0 from t=0, so the full-archive
+                    // frontier (which already fans out to ALL healthy peers) fires on the very
+                    // first iteration a peer is connected. Only ever RAISES; the live tip fetch +
+                    // probe correct it upward, and chain-reset detection drops a stale cache.
+                    if let Some(h) = read_persisted_tip() {
+                        if h > s.peer_best_height { s.peer_best_height = h; }
+                    }
                 }
 
                 // Subscribe to blocks — event-driven, no polling
@@ -753,6 +866,14 @@ impl P2PBlockSync {
                 // default; SIGIL_SYNC_INFLIGHT=1..16 to tune (raise on a beefy box).
                 let max_inflight: usize = std::env::var("SIGIL_SYNC_INFLIGHT").ok()
                     .and_then(|v| v.parse::<usize>().ok()).map(|n| n.clamp(1, 16)).unwrap_or(8);
+                // Turbo X continuity: boost inflight when high continuous BW (score and pid_rate) to sustain high download rate
+                let max_inflight = {
+                    let s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                    let score = s.turbo_continuity.continuity_score;
+                    let pid_r = s.turbo_continuity.pid.get_rate().max(5.0);
+                    let rate_boost = (pid_r / 50.0).max(0.5).min(2.0);
+                    ((max_inflight as f64) * (0.5 + score * 1.5) * rate_boost).max(2.0).min(16.0) as usize
+                };
                                                     // onto a stalled frontier and crater the rate.
                 // Look-ahead cap must be TIGHT: a large window lets next_start race far ahead of a
                 // stalled frontier, so all MAX_INFLIGHT slots get consumed by high-range chunks that
@@ -801,6 +922,16 @@ impl P2PBlockSync {
                 let mut last_verify = crate::instant_ago(2); // slow verify+flush timer
                 let mut last_synced_seen: u64 = resume_h;             // dynamic-base detector
                 let mut last_advance_t = Instant::now();
+                // v0.95 FRONTIER-WEDGE watchdog: count backfill chunks RECEIVED for the
+                // frontier range that did NOT advance `synced_to`. A genuine wedge (a forked
+                // chunk the store rejects, or an out-of-order squatter blocking the spine
+                // block at the frontier) keeps serving real bytes that never splice — but
+                // `best` stays == `frontier`, so the verified-watermark watchdog (which needs
+                // best>frontier to prove a hole) never fires and the run falls to the generic
+                // timeout. This counter IS the wedge evidence: it accrues only when frontier
+                // data actually arrives without progress, so it can't false-fire on a quiet
+                // caught-up monitor or a merely-claimed (lying) higher tip. Reset on advance.
+                let mut frontier_serves_since_advance: u32 = 0;
                 // SPINE-BREAK fix: VERIFIED-watermark watchdog. Tracks the last verified_to and
                 // when it last advanced; if it parks while a higher block is already held (a real
                 // hole), the shared `gap_sync::watchdog_verdict` declares a LOUD failure naming the
@@ -817,6 +948,8 @@ impl P2PBlockSync {
                 // v0.31 DEEP DEBUG: session counters + a periodic comprehensive [DBG] snapshot.
                 let (mut lead_n, mut timeout_n, mut empty_n, mut req_n): (u64, u64, u64, u64) = (0, 0, 0, 0);
                 let mut bytes_session: u64 = 0;
+                let mut last_rate_time = Instant::now();
+                let mut last_rate_bytes: u64 = 0;
                 let mut last_dbg = crate::instant_ago(5);
                 let loop_start = Instant::now();
                 // v0.27 proof-of-useful-sync local accumulators
@@ -904,7 +1037,15 @@ impl P2PBlockSync {
                     while gdrained < HEAD_SCAN_CAP {
                         let (_topic, data) = match block_rx.try_recv() { Ok(x) => x, Err(_) => break };
                         gdrained += 1;
-                        let v: serde_json::Value = match serde_json::from_slice(&data) {
+                        // v0.34: transparently inflate a `'Z'`-tagged zstd gossip frame
+                        // (legacy `{…}` JSON passes through zero-copy). Lets the light node
+                        // ingest compressed live gossip — ~14× less inbound wire once a
+                        // producer flips compression on, with no flag-day (mixed fleet ok).
+                        let inflated = match inflate_gossip_frame(&data) {
+                            Some(b) => b,
+                            None => continue, // malformed Z frame → drop like any bad gossip
+                        };
+                        let v: serde_json::Value = match serde_json::from_slice(&inflated) {
                             Ok(v) => v,
                             Err(_) => continue,
                         };
@@ -1003,6 +1144,7 @@ impl P2PBlockSync {
                     }
 
                     // ── DRAIN completed request results from the spawned tasks ───────────
+                    let mut last_backfill_time = Instant::now();
                     while let Ok((start, peer, bytes)) = done_rx.try_recv() {
                         inflight = inflight.saturating_sub(1);
                         assigned.remove(&start);
@@ -1011,7 +1153,17 @@ impl P2PBlockSync {
                                 peer_bench.remove(&peer);              // answered → healthy again
                                 let got = ingest_backfill_bytes(&b, &mut store);
                                 bytes_session += b.len() as u64;
-                                if got > 0 { lead_n += 1; } else { empty_n += 1; }
+                                if got > 0 {
+                                    lead_n += 1;
+                                    // Update continuity with real observed dt for accurate sustained high BW tracking (continuerlighed)
+                                    let now = Instant::now();
+                                    let dt = now.duration_since(last_backfill_time);
+                                    last_backfill_time = now;
+                                    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+                                    s.turbo_continuity.record_success(b.len() as u64, dt);
+                                    let chunk_rate = if dt.as_secs_f64() > 0.0 { (b.len() as f64 / dt.as_secs_f64()) * 8.0 } else { 0.0 };
+                                    s.turbo_continuity.update_for_continuity(chunk_rate, None, 0, 5);
+                                } else { empty_n += 1; }
                                 // v0.31.6: learn this peer's TOP. LEAD → its served max height;
                                 // EMPTY at the frontier → it's BEHIND `start`, so cap its known top
                                 // just below start. The refill uses this to stop sending the head to
@@ -1033,6 +1185,20 @@ impl P2PBlockSync {
                                     crate::tlog!("[D] {} start={start} got={got} h=[{mn}..{mx}] bytes={} synced={} inflight={inflight}", if got>0 {"LEAD"} else {"EMPTY"}, b.len(), store.synced_to());
                                 }
                                 fetched_session += got as u64;
+                                // v0.95 FRONTIER-WEDGE: count ONLY responses that delivered REAL
+                                // headers for the frontier range (start at/below the next-needed
+                                // chunk AND the body actually carried a header ≥ start) yet did not
+                                // advance. That is the wedge signature — a forked/unlinkable chunk
+                                // the store rejects (got==0 but bytes arrived). It deliberately
+                                // EXCLUDES an empty response (a caught-up tip or a lying claim with
+                                // no bytes), so the watchdog can't false-fire when we're simply done.
+                                // Cleared the instant `synced_to` advances (advance section below).
+                                if start <= store.synced_to() + CHUNK
+                                    && header_height_range(&b).map_or(false, |(_, mx)| mx >= start)
+                                {
+                                    frontier_serves_since_advance =
+                                        frontier_serves_since_advance.saturating_add(1);
+                                }
                                 // An EMPTY response over a still-needed range means this peer can't
                                 // serve that range (e.g. it pruned genesis / lacks early offsets).
                                 // Re-queue to the FRONT (retry promptly) AND bench this peer briefly
@@ -1095,7 +1261,16 @@ impl P2PBlockSync {
                     // on that peer's head — no responder change, no gossip dependency. Re-probed
                     // every PROBE_EVERY so peer_best tracks the tip and the refill self-sustains
                     // all the way to the true head (each reply also lands up to 8192 free headers).
-                    if last_probe.elapsed() >= PROBE_EVERY {
+                    // v0.96 SUB-1s COLD START — SMART RETRY: until the first headers land
+                    // (`fetched_session == 0`) probe FAST (200ms) and HEDGE across EVERY healthy
+                    // peer with a SHORT (1.2s) timeout. The first reply seeds peer_best AND lands
+                    // up to ~8192 free headers, so a single slow/dead peer (Delta going down, or a
+                    // peer wedged under the connection storm) can no longer hold the whole backfill
+                    // at "0 blk/s" for up to REQ_TIMEOUT(=10s). Once anything has landed, revert to
+                    // the cheap single-best-peer 500ms cadence with the tolerant 10s WAN timeout.
+                    let cold_start = fetched_session == 0;
+                    let probe_interval = if cold_start { Duration::from_millis(200) } else { PROBE_EVERY };
+                    if last_probe.elapsed() >= probe_interval {
                         let now = Instant::now();
                         let mut healthy: Vec<_> = net.connected_peers().into_iter()
                             .filter(|p| peer_bench.get(&p.to_string()).map_or(true, |&u| now >= u))
@@ -1106,45 +1281,45 @@ impl P2PBlockSync {
                         // peers are connected: if every peer is benched, fall back to the full
                         // set so the probe/refill keeps firing best-effort (bench is advisory).
                         if healthy.is_empty() { healthy = net.connected_peers(); }
-                        // v0.38.1: prefer a peer NOT known to be behind the frontier for the
-                        // open-ended probe. A behind peer answers EMPTY for [frontier, MAX], so
-                        // probing it wastes a round-trip AND seeds nothing useful into peer_best.
-                        // Pick a peer whose known top is at/above the frontier (or unknown — give
-                        // it a chance); fall back to healthy.first() so we never skip a probe.
-                        let probe_peer = {
-                            let fc = frontier_chunk;
-                            healthy.iter().find(|p| match peer_top.get(&p.to_string()) {
-                                Some(&(top, seen)) => top + CHUNK >= fc || now.duration_since(seen).as_secs() > 4,
-                                None => true,
-                            }).or_else(|| healthy.first()).copied()
-                        };
-                        if let Some(peer) = probe_peer {
+                        if !healthy.is_empty() {
                             // v0.35 (DeepSeek audit S5): stamp the timer ONLY when a probe is
-                            // actually SENT. It used to be stamped before the peer check, so
-                            // with 0 peers connected (the first loop ticks, pre-bootstrap) the
-                            // overdue first probe was BURNED and the real first probe waited an
-                            // extra PROBE_EVERY after the first PeerConnected. Now the probe
-                            // fires on the very next 10ms tick after a peer lands.
+                            // actually SENT (peers connected). Stamping before the peer check
+                            // BURNED the overdue first probe pre-bootstrap, delaying the real
+                            // first probe by an extra interval after the first PeerConnected.
                             last_probe = Instant::now();
                             // LANE-P v0.59 STALL-BREAKER: normally probe the floor-aligned
                             // frontier_chunk (cache-friendly look-ahead). But if the contiguous
                             // frontier hasn't advanced for a while, request the EXACT next-needed
-                            // height [synced_to..] from this (rotating) healthy peer — bypasses any
-                            // residual floor-alignment edge so the lead block lands and synced_to moves.
+                            // height [synced_to..] so the lead block lands and synced_to moves.
                             let probe_from = if last_advance_t.elapsed() >= Duration::from_secs(6) {
                                 store.synced_to()
                             } else {
                                 frontier_chunk
                             };
-                            let payload = serde_json::to_vec(
-                                &BackfillReq { from: probe_from, to: u64::MAX, headers_only: true, codec: 1 }
-                            ).unwrap();
-                            let n = net.clone();
-                            let tx = probe_tx.clone();
-                            tokio::spawn(async move {
-                                let r = tokio::time::timeout(REQ_TIMEOUT, n.send_request(peer, payload)).await;
-                                if let Ok(Ok(b)) = r { let _ = tx.send(b); }
-                            });
+                            // COLD → hedge across ALL healthy peers (first reply wins). WARM →
+                            // the single best non-behind peer (v0.38.1: a behind peer answers
+                            // EMPTY for [frontier, MAX], wasting a round-trip and seeding nothing).
+                            let targets: Vec<_> = if cold_start {
+                                healthy.clone()
+                            } else {
+                                let fc = frontier_chunk;
+                                healthy.iter().find(|p| match peer_top.get(&p.to_string()) {
+                                    Some(&(top, seen)) => top + CHUNK >= fc || now.duration_since(seen).as_secs() > 4,
+                                    None => true,
+                                }).or_else(|| healthy.first()).copied().into_iter().collect()
+                            };
+                            let probe_timeout = if cold_start { Duration::from_millis(1200) } else { REQ_TIMEOUT };
+                            for peer in targets {
+                                let payload = serde_json::to_vec(
+                                    &BackfillReq { from: probe_from, to: u64::MAX, headers_only: true, codec: 1 }
+                                ).unwrap();
+                                let n = net.clone();
+                                let tx = probe_tx.clone();
+                                tokio::spawn(async move {
+                                    let r = tokio::time::timeout(probe_timeout, n.send_request(peer, payload)).await;
+                                    if let Ok(Ok(b)) = r { let _ = tx.send(b); }
+                                });
+                            }
                         }
                     }
 
@@ -1205,10 +1380,15 @@ impl P2PBlockSync {
                         && last_recent_probe.elapsed() >= RECENT_PROBE_EVERY
                     {
                         let now = Instant::now();
-                        let mut healthy: Vec<_> = net.connected_peers().into_iter()
+                        let mut healthy: Vec<String> = net.connected_peers().into_iter()
                             .filter(|p| peer_bench.get(&p.to_string()).map_or(true, |&u| now >= u))
                             .collect();
                         if healthy.is_empty() { healthy = net.connected_peers(); }
+                        // Continuity X: prefer high-BW momentum peer for sustained download rate
+                        let best_peer = {
+                            let s = state.lock().unwrap_or_else(|e| e.into_inner());
+                            s.turbo_continuity.select_best_peer(&healthy)
+                        };
                         if let Some(&peer) = healthy.first() {
                             last_recent_probe = Instant::now();
                             recent_probe_inflight = true;
@@ -1284,9 +1464,14 @@ impl P2PBlockSync {
 
                     if peer_best > 0 {
                         let now = Instant::now();
-                        let mut healthy: Vec<_> = net.connected_peers().into_iter()
+                        let mut healthy: Vec<String> = net.connected_peers().into_iter()
                             .filter(|p| peer_bench.get(&p.to_string()).map_or(true, |&u| now >= u))
                             .collect();
+                        // Turbo Sync X + continuity: bias to high-BW momentum peer for continuous high download bandwidth (no drops in rate)
+                        let best_peer: Option<String> = {
+                            let s = state.lock().unwrap_or_else(|e| e.into_inner());
+                            s.turbo_continuity.select_best_peer(&healthy)
+                        };
                         // v0.17: HEALTHY-PEER FLOOR. With only ~4 peers a burst of timeouts
                         // could bench the WHOLE pool, collapsing the backfill to ~0 blk/s until
                         // benches expired — the erratic 57k/77k/127k progress. Never stall while
@@ -1350,11 +1535,49 @@ impl P2PBlockSync {
                                 } else {
                                     1
                                 };
-                                for k in 0..fanout {
+                                // Turbo Sync X + BandwidthContinuity (continuerlighed for continuous high download bandwidth):
+                                // compute once per batch using PID/Kalman/Momentum to choose dynamic chunk size and
+                                // boosted parallel (X) factor to keep the network pipe full at high sustained rate,
+                                // avoiding stalls and idle gaps.
+                                // Compute real observed bps from session for accurate PID/Kalman feedback (continuous high BW)
+                                let elapsed = loop_start.elapsed().as_secs_f64().max(0.1);
+                                let observed_bps = (bytes_session as f64 / elapsed) * 8.0; // rough to bps
+                                let (use_chunk, eff_fan, best_from_cont) = {
+                                    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+                                    // Use predicted_rate from Kalman for smarter chunk to maintain continuous high BW
+                                    let (c, x, bp, predicted) = s.turbo_continuity.update_for_continuity(
+                                        observed_bps, None, CHUNK as u64 * 1024, 12);
+                                    let pid_rate = s.turbo_continuity.pid.get_rate();
+                                    let base_ch = if c > 0 { (c / 1024) as u64 } else { CHUNK };
+                                    // Use pid_rate to boost chunk and fan for high continuous BW: if low, increase parallel to catch up, if high, sustain
+                                    let rate_factor = if pid_rate < 40.0 { 1.5 } else if pid_rate > 60.0 { 0.8 } else { 1.0 };
+                                    let ch = if predicted > 10_000_000.0 { ((base_ch as f64) * rate_factor * 1.2) as u64 } else { (base_ch as f64 * rate_factor) as u64 };
+                                    let eff_x = ((x as f64) * rate_factor).max(1.0).min(fanout as f64) as usize;
+                                    (ch, eff_x, bp)
+                                };
+                                // Pace requests smoothly using PID rate for continuous high BW (smooth flow, no bursts that drop effective rate)
+                                // use PID rate vs target for proportional delay: if current low, shorter delay to catch up to high continuous rate
+                                let (target_delay, mut last_send) = {
+                                    let s = state.lock().unwrap_or_else(|e| e.into_inner());
+                                    let pid_rate = s.turbo_continuity.pid.get_rate().max(1.0);
+                                    let target_rate = 50.0;
+                                    let delay_ms = (20.0 * (target_rate / pid_rate)) as u64; // base 20ms at 50/s, scaled
+                                    (Duration::from_millis(delay_ms.min(100).max(1)), Instant::now())
+                                };
+                                for k in 0..eff_fan {
                                     if inflight >= max_inflight { break; }
-                                    let peer = healthy[(rr + k) % healthy.len()];
+                                    let elapsed = last_send.elapsed();
+                                    if elapsed < target_delay {
+                                        tokio::time::sleep(target_delay - elapsed).await;
+                                    }
+                                    last_send += target_delay; // accumulate for steady continuous rate
+                                    let peer = if k == 0 {
+                                        best_from_cont.clone().unwrap_or_else(|| healthy[(rr + k) % healthy.len()].clone())
+                                    } else {
+                                        healthy[(rr + k) % healthy.len()].clone()
+                                    };
                                     let payload = serde_json::to_vec(
-                                        &BackfillReq { from: start, to: start + CHUNK, headers_only: true, codec: 1 }
+                                        &BackfillReq { from: start, to: start + use_chunk, headers_only: true, codec: 1 }
                                     ).unwrap();
                                     let n = net.clone();
                                     let tx = done_tx.clone();
@@ -1367,7 +1590,7 @@ impl P2PBlockSync {
                                         let _ = tx.send((start, peer_str, bytes));
                                     });
                                 }
-                                rr = rr.wrapping_add(fanout);
+                                rr = rr.wrapping_add(eff_fan);
                             }
                         }
                     }
@@ -1389,6 +1612,7 @@ impl P2PBlockSync {
                         if now_synced > last_synced_seen {
                             last_synced_seen = now_synced;
                             last_advance_t = Instant::now();
+                            frontier_serves_since_advance = 0; // v0.95: real progress clears wedge evidence
                         } else if recent_only_rt.load(Ordering::Relaxed)
                             && store.best_height() > now_synced && last_advance_t.elapsed() >= Duration::from_secs(2) {
                             // SPINE-BREAK fix: the base-skip is a LIGHT-MONITOR-ONLY heuristic now.
@@ -1464,6 +1688,17 @@ impl P2PBlockSync {
                             String::new()
                         };
                         s.last_message_at = Some(Instant::now());
+                        // Feed delta rate to continuity every state tick for PID to sustain continuous high BW (better than cumulative)
+                        let now_t = Instant::now();
+                        let dt = now_t.duration_since(last_rate_time).as_secs_f64().max(0.01);
+                        let delta_b = bytes_session.saturating_sub(last_rate_bytes);
+                        let rate_bps = (delta_b as f64 / dt) * 8.0;
+                        last_rate_time = now_t;
+                        last_rate_bytes = bytes_session;
+                        s.turbo_continuity.update_for_continuity(rate_bps, None, 0, 5);
+                        // also feed pid current rate for sustained to keep controller driving the continuous target
+                        let pid_rate_bps = s.turbo_continuity.pid.get_rate() * 1_000_000.0;
+                        s.turbo_continuity.update_for_continuity(pid_rate_bps, None, 0, 5);
                     }
 
                     // ── v0.31 DEEP DEBUG: comprehensive sync snapshot every 2s ──────────────
@@ -1484,11 +1719,21 @@ impl P2PBlockSync {
                         let gap = pbest.saturating_sub(synced_now);
                         let upt = loop_start.elapsed().as_secs().max(1);
                         let win = req_n.max(1);
+                        // Real rate feedback to continuity for sustained high BW (kontinuerlighed)
+                        let observed_bps = (bytes_session as f64 / upt as f64) * 8.0; // rough bps
+                        {
+                            let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                            // Update with observed to let PID/Kalman adjust for continuous high rate, no drops
+                            let _ = s.turbo_continuity.update_for_continuity(observed_bps, None, 0, 10);
+                        }
                         crate::tlog!(
-                            "[DBG] up={upt}s synced={synced_now} tip={pbest} gap={gap} | reqs={req_n} lead={lead_n}({:.0}%) empty={empty_n} timeout={timeout_n}({:.0}%) | inflight={inflight} assigned={} fetched={fetched_session} bytes={}MB | peers={peers}(mesh {mesh}, healthy {hpeers}) tip_age={tip_age}s base={}",
+                            "[DBG] up={upt}s synced={synced_now} tip={pbest} gap={gap} | reqs={req_n} lead={lead_n}({:.0}%) empty={empty_n} timeout={timeout_n}({:.0}%) | inflight={inflight} assigned={} fetched={fetched_session} bytes={}MB | peers={peers}(mesh {mesh}, healthy {hpeers}) tip_age={tip_age}s base={} | cont_score={:.2} sustained={:.1}MB/s pid_rate={:.1}",
                             lead_n as f64 / win as f64 * 100.0,
                             timeout_n as f64 / win as f64 * 100.0,
-                            assigned.len(), bytes_session / 1_048_576, store.base()
+                            assigned.len(), bytes_session / 1_048_576, store.base(),
+                            { let s = state_clone.lock().unwrap_or_else(|e| e.into_inner()); s.turbo_continuity.continuity_score },
+                            { let s = state_clone.lock().unwrap_or_else(|e| e.into_inner()); s.turbo_continuity.sustained_rate_bps / 1_000_000.0 },
+                            { let s = state_clone.lock().unwrap_or_else(|e| e.into_inner()); s.turbo_continuity.pid.get_rate() }
                         );
                     }
 
@@ -1546,7 +1791,13 @@ impl P2PBlockSync {
                         // real stall. (All lock sites already recover poison via `into_inner`, so
                         // this is belt-and-suspenders for the thread itself.)
                         let verify_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            let report = crate::chain_verify::verify_to(&mut store, VERIFY_BUDGET);
+                            let vt0 = std::time::Instant::now();
+                            let report = crate::chain_verify::verify_to_parallel(&mut store, VERIFY_BUDGET);
+                            if report.checked > 0 {
+                                let secs = vt0.elapsed().as_secs_f64().max(0.001);
+                                crate::tlog!("[verify] parallel pass: checked {} → verified_to={} in {} ms ({:.0} blk/s)",
+                                    report.checked, report.verified_to, vt0.elapsed().as_millis(), report.checked as f64 / secs);
+                            }
                             let class = crate::gap_sync::classify_break(&report);
                             let _ = store.flush();
 
@@ -1581,13 +1832,27 @@ impl P2PBlockSync {
                                 crate::gap_sync::BreakClass::Clean
                                 | crate::gap_sync::BreakClass::NeedHeight(_) => {
                                     s.verify_break = None;
+                                    // v0.95 FRONTIER-WEDGE: real frontier chunks keep arriving but
+                                    // won't splice (forked chunk the store rejects, or — pre-strict-
+                                    // ingest — an out-of-order squatter) → `best` stays == `frontier`,
+                                    // so the best>frontier hole test goes blind and the run would die
+                                    // on the generic timeout. `frontier_active` is the wedge proof (real
+                                    // headers received without advance); the shared watchdog_verdict
+                                    // turns it into a LOUD named failure (exit 4). Gated on peers>0 so a
+                                    // dead mesh shows the peers=0 stall_reason instead, and on real
+                                    // received bytes so a caught-up tip / lying claim never trips it.
+                                    const FRONTIER_WEDGE_SERVES: u32 = 4;
+                                    let frontier_active = s.peer_count > 0
+                                        && frontier_serves_since_advance >= FRONTIER_WEDGE_SERVES;
                                     match crate::gap_sync::watchdog_verdict(
-                                        frontier, best, stalled, Duration::from_secs(watchdog_secs),
+                                        frontier, best, frontier_active, stalled,
+                                        Duration::from_secs(watchdog_secs),
                                     ) {
                                         Some(f) => {
                                             if !failure_announced {
                                                 failure_announced = true;
-                                                crate::tlog!("[sync] ✗ SPINE BREAK (STALL) — {}", f.reason);
+                                                let kind = if best > frontier { "STALL" } else { "WEDGE" };
+                                                crate::tlog!("[sync] ✗ SPINE BREAK ({kind}) — {}", f.reason);
                                             }
                                             s.sync_failure = Some((f.height, f.reason));
                                         }
@@ -1728,6 +1993,43 @@ mod wire_tests {
 
         assert!(zstd_decompress_body(b"definitely not a zstd frame").is_none(), "garbage rejected");
         assert!(zstd_decompress_body(&[]).is_none(), "empty rejected");
+    }
+
+    /// v0.95 SPINE-hardening regression: a MATURE 4096-header chunk decompresses to ~32 MB
+    /// because every SigilBlockHeaderV0 carries a StarkProof + VDF proof + SQIsign sigs
+    /// (~8 KB/header). The v0.39 cap of 12 MiB silently rejected exactly this, returning
+    /// got=0 and stalling full-archive at the first real-proof height. This test pins a
+    /// ~32 MB chunk as DECOMPRESSIBLE so the cap can never be cut below a legit chunk again.
+    #[test]
+    fn mature_header_chunk_decompresses_above_the_old_12mib_cap() {
+        // ~32 MiB of header-shaped data: incompressible proof bytes (random-ish) so the
+        // frame stays large after zstd — this is the real wire profile, not a zero-bomb.
+        const RAW: usize = 32 * 1024 * 1024;
+        let mut body = Vec::with_capacity(RAW);
+        let mut x: u64 = 0x9E3779B97F4A7C15;
+        while body.len() < RAW {
+            x ^= x << 13; x ^= x >> 7; x ^= x << 17; // xorshift — incompressible-ish
+            body.extend_from_slice(&x.to_le_bytes());
+        }
+        body.truncate(RAW);
+        assert!(body.len() > 12 * 1024 * 1024, "fixture exceeds the broken v0.39 cap");
+
+        let z = zstd::encode_all(&body[..], 1).expect("C zstd encode (server side)");
+        let back = zstd_decompress_body(&z).expect(
+            "a real ~32 MB mature chunk MUST decompress under the 64 MiB cap (v0.39 regression)",
+        );
+        assert_eq!(back.len(), body.len(), "full chunk recovered, not cap-truncated");
+        assert_eq!(back, body, "byte-exact roundtrip of a mature-size chunk");
+    }
+
+    /// The bomb guard still fires: a tiny highly-compressible frame that decompresses past
+    /// the 64 MiB cap is rejected (None), never allocated in full.
+    #[test]
+    fn zstd_bomb_over_64mib_still_rejected() {
+        let bomb = vec![0u8; 80 * 1024 * 1024]; // 80 MiB of zeros → a few KB compressed
+        let z = zstd::encode_all(&bomb[..], 1).expect("encode bomb");
+        assert!(z.len() < 1024 * 1024, "bomb frame is tiny ({}B) but expands to 80 MiB", z.len());
+        assert!(zstd_decompress_body(&z).is_none(), "80 MiB > 64 MiB cap must be rejected");
     }
 }
 

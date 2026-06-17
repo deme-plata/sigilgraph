@@ -40,6 +40,8 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
     let connecting = s.fetched_total == 0 && spine == 0 && !following;
     let kf_rate = app.sync_kf.x.max(0.0);                       // Kalman-smoothed blk/s
     let eta = if synced || kf_rate < 1.0 { f64::INFINITY } else { gap as f64 / kf_rate };
+    // Turbo continuity score (invented for continuous high download bandwidth)
+    let cont = s.turbo_continuity.continuity_score * 100.0;
 
     let (vtext, vcol) = if light { ("◇ LIGHT MONITOR", C_NEON_CYAN) }
         else if s.verify_break.is_some() { ("⚠ SPINE BREAK", C_NEON_PINK) }
@@ -55,6 +57,12 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
         ("⚠ STALLED — nudging peer", C_NEON_PINK)
     } else { (vtext, vcol) };
 
+    // SPINE-BREAK fix: a CONFIRMED watchdog/fatal failure outranks every other headline —
+    // the operator must never miss it (this is what replaces the old silent ~499k rate-0).
+    let (vtext, vcol) = if s.sync_failure.is_some() {
+        ("✗ SPINE BREAK — STUCK", C_NEON_PINK)
+    } else { (vtext, vcol) };
+
     // state-themed border; title chip stays neon-cyan
     let block = card_block(" ◇ SYNC · sigil-g0", C_NEON_CYAN)
         .border_style(Style::default().fg(vcol));
@@ -66,7 +74,7 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
     let [tele, ship] = Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).spacing(1).areas(body);
 
     // ── BIG progress bar ─────────────────────────────────────────────────
-    let label = format!(" {:>5.1}%  {}", frac * 100.0, vtext);
+    let label = format!(" {:>5.1}%  {}  BW:{:.0}%", frac * 100.0, vtext, cont);
     let total = bar_row.width as usize;
     let barw = total.saturating_sub(label.chars().count() + 1).max(4);
     let fill = (frac * barw as f64).round() as usize;

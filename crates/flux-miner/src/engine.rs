@@ -10,6 +10,8 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "gpu")]
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -178,14 +180,24 @@ pub fn supervisor(
 ) {
     let mut cur: Option<bool> = None;
     let mut wstop = Arc::new(AtomicBool::new(false));
-    // LANE-C v0.50: thermal guard — while GPU mining, poll nvidia-smi every 10 s and
-    // force a CPU fallback at >=85C (a laptop operator hard-powered-off twice mining
-    // on GPU — Windows Kernel-Power 41). Spawned + fail-silent: no nvidia-smi → no
-    // guard, CPU path untouched. GPU builds only (CPU-only builds never go GPU-active).
+    // LANE-C: thermal-driven GPU throttle channel — extra inter-dispatch sleep, in
+    // microseconds, that the thermal watcher raises (and the GPU worker honours) to
+    // shed heat in the THROTTLE band before a hard DISABLE. 0 = full speed. Owned by
+    // the supervisor so it survives CPU<->GPU hot-switches. (gpu builds only — the
+    // CPU worker has no dispatch loop to throttle.)
+    #[cfg(feature = "gpu")]
+    let thermal_extra_us = Arc::new(AtomicU64::new(0));
+    // LANE-C v0.50 (tuned v0.90): thermal guard — while GPU mining, poll nvidia-smi
+    // every 10 s. On a DEGRADED LAPTOP (idles ~72C, hard-powers-off under sustained
+    // GPU load — Windows Kernel-Power 41) it THROTTLES at ≥78C (raises the
+    // inter-dispatch sleep) and hard-falls-back to CPU at ≥82C, BEFORE the hardware
+    // browns out. No auto-rearm: once it disables GPU the operator must re-press [G].
+    // Spawned + fail-silent: no nvidia-smi → no guard, CPU path untouched. GPU builds
+    // only (CPU-only builds never go GPU-active).
     #[cfg(feature = "gpu")]
     {
-        let (st, dg, gf, sp) = (stats.clone(), desired_gpu.clone(), gpu_failed.clone(), stop.clone());
-        thread::spawn(move || thermal_watch(st, dg, gf, sp));
+        let (st, gf, sp, es) = (stats.clone(), gpu_failed.clone(), stop.clone(), thermal_extra_us.clone());
+        thread::spawn(move || thermal_watch(st, gf, sp, es));
     }
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -222,7 +234,8 @@ pub fn supervisor(
                 #[cfg(feature = "gpu")]
                 {
                     let gf = gpu_failed.clone();
-                    thread::spawn(move || gpu_mining_loop(u, w, st, ws, gf));
+                    let es = thermal_extra_us.clone();
+                    thread::spawn(move || gpu_mining_loop(u, w, st, ws, gf, es));
                 }
             } else {
                 thread::spawn(move || mining_loop(u, w, st, ws));
@@ -241,6 +254,9 @@ pub fn gpu_mining_loop(
     stats: Arc<Mutex<MinerStats>>,
     stop: Arc<AtomicBool>,
     gpu_failed: Arc<AtomicBool>,
+    // LANE-C: thermal-throttle channel — extra inter-dispatch sleep in microseconds,
+    // raised by `thermal_watch` while in the THROTTLE band (≥78C). 0 = full speed.
+    thermal_extra_us: Arc<AtomicU64>,
 ) {
     use crate::client::build_header;
     // v0.37 STABILITY: this is usually the PRIMARY (display) GPU. A monopolizing
@@ -310,6 +326,14 @@ pub fn gpu_mining_loop(
                     // yield the GPU so it can still drive the display -> no freeze / TDR
                     if found.is_none() && !throttle.is_zero() {
                         thread::sleep(throttle);
+                    }
+                    // LANE-C thermal throttle: while in the [78,82)C band the watcher
+                    // raises this; sleeping between dispatches lowers the GPU duty
+                    // cycle (and so the temperature) WITHOUT dropping to CPU. Applied
+                    // every dispatch (incl. on a hit) so heat is shed promptly.
+                    let extra = thermal_extra_us.load(Ordering::Relaxed);
+                    if extra > 0 {
+                        thread::sleep(Duration::from_micros(extra));
                     }
                 }
                 Err(e) => {
@@ -381,62 +405,81 @@ pub fn gpu_mining_loop(
 #[cfg(any(feature = "gpu", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThermalAction {
-    /// Too hot — drop GPU mining to CPU now.
-    FallbackToCpu,
-    /// Sustained-cool after a thermal fallback — GPU is safe to use again.
-    AllowGpu,
     /// No change this sample.
     None,
+    /// Warm (in the [throttle, disable) band) — keep mining on GPU but slow the
+    /// dispatch loop by `sleep_us` microseconds per batch to shed heat. Hysteretic:
+    /// stays engaged until the temperature drops back below `unthrottle_c`.
+    Throttle { sleep_us: u64 },
+    /// Too hot (>= disable) — drop GPU mining to CPU now. NO auto-rearm: the operator
+    /// must re-enable GPU explicitly ([G]).
+    FallbackToCpu,
 }
 
-/// Deterministic thermal policy. Time is counted in *samples* (the watcher polls on
-/// a fixed cadence), so the decision is a pure function of the temperature stream —
-/// trivially unit-testable with a mock temp source, no clock or real GPU needed.
+/// Deterministic thermal policy with TWO bands tuned for a degraded laptop. The
+/// decision is a pure function of the temperature stream + a single hysteresis latch,
+/// so it is trivially unit-testable with a mock temp source — no clock or real GPU.
+///
+/// Bands (defaults): below `throttle_c` (78C) full speed; in `[throttle_c, disable_c)`
+/// (78–82C) THROTTLE (slow the dispatch loop to shed heat, keep mining on GPU); at or
+/// above `disable_c` (82C) hard-FALL-BACK to CPU. The throttle band is hysteretic:
+/// once engaged it stays engaged until the temperature drops back to `unthrottle_c`
+/// (74C). There is NO auto-rearm after a disable — re-enabling GPU is an explicit
+/// operator action ([G]) — so on a machine that hard-powers-off under load the guard
+/// errs toward staying on the safe (CPU) path.
 #[cfg(any(feature = "gpu", test))]
 #[derive(Debug, Clone)]
 pub struct ThermalGuard {
-    hot_c: f64,               // >= this → fall back (default 85C)
-    cool_c: f64,              // <= this counts as "cool" (default 70C)
-    cool_samples_needed: u32, // consecutive cool samples before re-allowing GPU
-    cool_streak: u32,
-    in_fallback: bool,        // true once WE forced a thermal fallback
+    throttle_c: f64,        // >= this (and < disable) → throttle GPU (default 78C)
+    disable_c: f64,         // >= this → CPU fallback (default 82C)
+    unthrottle_c: f64,      // <= this while throttling → stop throttling (default 74C)
+    throttle_sleep_ms: u64, // extra per-dispatch sleep while throttling (default 50ms)
+    throttling: bool,       // hysteresis latch for the throttle band
 }
 
 #[cfg(any(feature = "gpu", test))]
 impl ThermalGuard {
-    /// Production policy: hot 85C, cool 70C, 30 samples (= 5 min at the 10 s cadence).
-    pub fn new() -> Self { Self::with(85.0, 70.0, 30) }
+    /// Degraded-laptop policy: throttle 78C, disable 82C, un-throttle 74C, +50ms
+    /// per-dispatch sleep while throttling. The target idles ~72C and hard-powers-off
+    /// under sustained GPU load, so these sit well under the 85C the silicon would
+    /// otherwise tolerate — the guard backs off long before the hardware browns out.
+    pub fn new() -> Self { Self::with(78.0, 82.0, 74.0, 50) }
 
-    /// Construct with explicit thresholds (used by tests for short streaks).
-    pub fn with(hot_c: f64, cool_c: f64, cool_samples_needed: u32) -> Self {
-        ThermalGuard { hot_c, cool_c, cool_samples_needed, cool_streak: 0, in_fallback: false }
+    /// Construct with explicit thresholds (used by tests).
+    pub fn with(throttle_c: f64, disable_c: f64, unthrottle_c: f64, throttle_sleep_ms: u64) -> Self {
+        ThermalGuard { throttle_c, disable_c, unthrottle_c, throttle_sleep_ms, throttling: false }
     }
 
-    /// Whether the guard currently believes GPU is thermally disabled.
-    pub fn in_fallback(&self) -> bool { self.in_fallback }
+    /// Whether the guard is currently throttling the GPU (in the warm band).
+    pub fn is_throttling(&self) -> bool { self.throttling }
 
     /// Feed one temperature sample. `gpu_active` = is the engine GPU-mining right now.
     pub fn step(&mut self, temp_c: f64, gpu_active: bool) -> ThermalAction {
-        if temp_c >= self.hot_c {
-            self.cool_streak = 0;
-            if gpu_active && !self.in_fallback {
-                self.in_fallback = true;
-                return ThermalAction::FallbackToCpu;
-            }
+        // Nothing to police when not GPU-mining (CPU mode / CPU-only build): clear the
+        // latch so a later GPU re-enable starts fresh.
+        if !gpu_active {
+            self.throttling = false;
             return ThermalAction::None;
         }
-        if temp_c <= self.cool_c {
-            self.cool_streak = self.cool_streak.saturating_add(1);
-            if self.in_fallback && self.cool_streak >= self.cool_samples_needed {
-                self.in_fallback = false;
-                self.cool_streak = 0;
-                return ThermalAction::AllowGpu;
-            }
-        } else {
-            // between cool and hot — not sustained-cool, reset the streak.
-            self.cool_streak = 0;
+        // Hard ceiling first — drop to CPU immediately and clear the throttle latch.
+        if temp_c >= self.disable_c {
+            self.throttling = false;
+            return ThermalAction::FallbackToCpu;
         }
-        ThermalAction::None
+        if self.throttling {
+            // Stay throttled until we cool past the lower (hysteresis) threshold.
+            if temp_c <= self.unthrottle_c {
+                self.throttling = false;
+                ThermalAction::None
+            } else {
+                ThermalAction::Throttle { sleep_us: self.throttle_sleep_ms * 1000 }
+            }
+        } else if temp_c >= self.throttle_c {
+            self.throttling = true;
+            ThermalAction::Throttle { sleep_us: self.throttle_sleep_ms * 1000 }
+        } else {
+            ThermalAction::None
+        }
     }
 }
 
@@ -447,6 +490,9 @@ impl Default for ThermalGuard {
 
 /// Read GPU temperature (Celsius) via nvidia-smi. Returns None when nvidia-smi is
 /// absent or errors — the guard then simply does nothing (CPU path untouched).
+/// NOTE: this protects NVIDIA GPUs only. On an AMD/Intel laptop nvidia-smi is absent
+/// → no temperature → no guard; the one-time [G] warning says so, and such machines
+/// must rely on their own firmware thermal throttling (or simply not GPU-mine).
 #[cfg(feature = "gpu")]
 fn read_gpu_temp() -> Option<f64> {
     let out = std::process::Command::new("nvidia-smi")
@@ -462,16 +508,18 @@ fn read_gpu_temp() -> Option<f64> {
         .ok()
 }
 
-/// Background thermal watcher (GPU builds only). Polls every 10 s; on >=85C while
-/// GPU mining it raises `gpu_failed` (the supervisor consumes it → CPU) and logs the
-/// temp; after 5 min sustained <=70C it re-arms `desired_gpu` so the supervisor
-/// switches GPU back on. Fail-silent when nvidia-smi is unavailable.
+/// Background thermal watcher (GPU builds only). Polls every 10 s while GPU mining:
+/// in the 78–82C band it raises `thermal_extra_us` so the GPU worker slows its
+/// dispatch loop (sheds heat without leaving the GPU); at >=82C it raises `gpu_failed`
+/// (the supervisor consumes it → CPU, and clears `desired_gpu` so it stays there) and
+/// logs the temp. NO auto-rearm — the operator presses [G] to retry. Fail-silent when
+/// nvidia-smi is unavailable.
 #[cfg(feature = "gpu")]
 pub fn thermal_watch(
     stats: Arc<Mutex<MinerStats>>,
-    desired_gpu: Arc<AtomicBool>,
     gpu_failed: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
+    thermal_extra_us: Arc<AtomicU64>,
 ) {
     let mut guard = ThermalGuard::new();
     loop {
@@ -483,19 +531,31 @@ pub fn thermal_watch(
         let temp = match read_gpu_temp() { Some(t) => t, None => continue };
         let gpu_active = stats.lock().map(|s| s.mode == "GPU").unwrap_or(false);
         match guard.step(temp, gpu_active) {
+            ThermalAction::Throttle { sleep_us } => {
+                // Log only on the rising edge (entering the throttle band).
+                let prev = thermal_extra_us.swap(sleep_us, Ordering::Relaxed);
+                if prev == 0 {
+                    if let Ok(mut s) = stats.lock() {
+                        push_log(&mut s.log, format!("GPU {temp:.0}C — throttling to shed heat"));
+                    }
+                }
+            }
             ThermalAction::FallbackToCpu => {
+                thermal_extra_us.store(0, Ordering::Relaxed);
                 gpu_failed.store(true, Ordering::Relaxed);
                 if let Ok(mut s) = stats.lock() {
-                    push_log(&mut s.log, format!("GPU {temp:.0}C — thermal fallback to CPU"));
+                    push_log(&mut s.log, format!("GPU {temp:.0}C — thermal fallback to CPU (press [G] to retry)"));
                 }
             }
-            ThermalAction::AllowGpu => {
-                desired_gpu.store(true, Ordering::Relaxed);
-                if let Ok(mut s) = stats.lock() {
-                    push_log(&mut s.log, format!("GPU {temp:.0}C cool 5+ min — re-enabling GPU"));
+            ThermalAction::None => {
+                // Falling edge: back to full speed if we had been throttling.
+                let prev = thermal_extra_us.swap(0, Ordering::Relaxed);
+                if prev != 0 {
+                    if let Ok(mut s) = stats.lock() {
+                        push_log(&mut s.log, format!("GPU {temp:.0}C — cooled, full speed"));
+                    }
                 }
             }
-            ThermalAction::None => {}
         }
     }
 }
@@ -504,42 +564,50 @@ pub fn thermal_watch(
 mod thermal_tests {
     use super::{ThermalAction, ThermalGuard};
 
-    #[test]
-    fn hot_sample_falls_back_to_cpu_once() {
-        let mut g = ThermalGuard::with(85.0, 70.0, 3);
-        assert_eq!(g.step(72.0, true), ThermalAction::None);          // below hot → nothing
-        assert_eq!(g.step(87.0, true), ThermalAction::FallbackToCpu); // hot + GPU → fall back
-        assert!(g.in_fallback());
-        assert_eq!(g.step(90.0, true), ThermalAction::None);          // still hot → no repeat
+    // laptop-tuned guard for tests (same as ::new(), explicit for clarity).
+    fn guard() -> ThermalGuard { ThermalGuard::with(78.0, 82.0, 74.0, 50) }
+    fn sleep_us(a: ThermalAction) -> Option<u64> {
+        if let ThermalAction::Throttle { sleep_us } = a { Some(sleep_us) } else { None }
     }
 
     #[test]
-    fn no_fallback_when_gpu_inactive() {
-        let mut g = ThermalGuard::with(85.0, 70.0, 3);
+    fn hot_sample_falls_back_to_cpu() {
+        let mut g = guard();
+        assert_eq!(g.step(72.0, true), ThermalAction::None);          // idle band → nothing
+        assert_eq!(g.step(83.0, true), ThermalAction::FallbackToCpu); // >=82 + GPU → fall back
+        // still hot → keeps reporting fallback (idempotent; supervisor already on CPU)
+        assert_eq!(g.step(90.0, true), ThermalAction::FallbackToCpu);
+    }
+
+    #[test]
+    fn throttle_band_engages_and_releases_with_hysteresis() {
+        let mut g = guard();
+        assert_eq!(g.step(77.0, true), ThermalAction::None);        // below throttle
+        assert_eq!(sleep_us(g.step(79.0, true)), Some(50_000));     // >=78 → throttle
+        assert_eq!(sleep_us(g.step(81.0, true)), Some(50_000));     // still warm → still throttling
+        assert_eq!(sleep_us(g.step(75.0, true)), Some(50_000));     // 75 > 74 → hysteresis holds
+        assert_eq!(g.step(74.0, true), ThermalAction::None);        // <=74 → release
+        assert_eq!(g.step(76.0, true), ThermalAction::None);        // 76 < 78 → stays off
+        assert!(!g.is_throttling());
+    }
+
+    #[test]
+    fn disable_beats_throttle_and_clears_latch() {
+        let mut g = guard();
+        assert!(sleep_us(g.step(79.0, true)).is_some()); // throttling
+        assert_eq!(g.step(82.0, true), ThermalAction::FallbackToCpu); // disable wins, clears latch
+        assert!(!g.is_throttling());
+    }
+
+    #[test]
+    fn no_action_when_gpu_inactive() {
+        let mut g = guard();
         // hot but NOT GPU-mining (CPU mode / CPU-only build) → guard must not act.
         assert_eq!(g.step(95.0, false), ThermalAction::None);
-        assert!(!g.in_fallback());
-    }
-
-    #[test]
-    fn sustained_cool_re_enables_gpu_after_fallback() {
-        let mut g = ThermalGuard::with(85.0, 70.0, 3);
-        assert_eq!(g.step(88.0, true), ThermalAction::FallbackToCpu);
-        assert_eq!(g.step(65.0, false), ThermalAction::None);   // cool streak 1
-        assert_eq!(g.step(60.0, false), ThermalAction::None);   // streak 2
-        assert_eq!(g.step(58.0, false), ThermalAction::AllowGpu); // streak 3 → re-enable
-        assert!(!g.in_fallback());
-    }
-
-    #[test]
-    fn cool_streak_resets_on_a_warm_blip() {
-        let mut g = ThermalGuard::with(85.0, 70.0, 3);
-        assert_eq!(g.step(88.0, true), ThermalAction::FallbackToCpu);
-        assert_eq!(g.step(60.0, false), ThermalAction::None); // streak 1
-        assert_eq!(g.step(78.0, false), ThermalAction::None); // warm blip → reset
-        assert_eq!(g.step(60.0, false), ThermalAction::None); // streak 1 again
-        assert_eq!(g.step(60.0, false), ThermalAction::None); // streak 2
-        assert_eq!(g.step(60.0, false), ThermalAction::AllowGpu); // streak 3 → re-enable
-        assert!(!g.in_fallback());
+        assert!(!g.is_throttling());
+        // an inactive sample also clears any standing throttle latch.
+        assert!(sleep_us(g.step(79.0, true)).is_some());
+        assert_eq!(g.step(79.0, false), ThermalAction::None);
+        assert!(!g.is_throttling());
     }
 }

@@ -220,13 +220,29 @@ impl BlockStore {
 
     fn linkage_conflict(&self, height: u64, hash_hex: &str, parent_hash_hex: &str) -> Option<String> {
         if height > self.base {
-            if let Some(parent) = self.get_stored_at_height(height - 1) {
-                if !parent.hash_hex.eq_ignore_ascii_case(parent_hash_hex) {
+            match self.get_stored_at_height(height - 1) {
+                Some(parent) => {
+                    if !parent.hash_hex.eq_ignore_ascii_case(parent_hash_hex) {
+                        return Some(format!(
+                            "parent h={} hash={} but incoming parent_hash={}",
+                            height - 1,
+                            short_hash_hex(&parent.hash_hex),
+                            short_hash_hex(parent_hash_hex)
+                        ));
+                    }
+                }
+                // v0.95 STRICT DOWNWARD-LINKAGE: refuse a block whose parent isn't stored yet.
+                // This is the only ingest window with no parent to link against, and it was the
+                // frontier-wedge ROOT: an out-of-order "squatter" at H (stored before its parent)
+                // both blocked the canonical H via the height index AND rejected the canonical H-1
+                // via the child-linkage check below — non-deterministically wedging full-archive.
+                // Refusing it makes squatters impossible; a contiguous frontier chunk always has
+                // its parent present, so legitimate sync is unaffected (the chunk is re-fetched in
+                // order if it ever arrives early). Genesis-anchor `base` blocks are exempt above.
+                None => {
                     return Some(format!(
-                        "parent h={} hash={} but incoming parent_hash={}",
-                        height - 1,
-                        short_hash_hex(&parent.hash_hex),
-                        short_hash_hex(parent_hash_hex)
+                        "parent h={} not yet stored (strict downward-linkage: refusing out-of-order squatter)",
+                        height - 1
                     ));
                 }
             }
@@ -607,6 +623,25 @@ impl BlockStore {
     }
 
     /// Store a block with just height + hash (light client — no full header needed).
+    /// Test-only: insert a fully-formed StoredBlock bypassing ALL ingest guards (height-index
+    /// conflict + the v0.95 strict downward-linkage check). Strict ingest makes a parent-broken
+    /// block UNSTORABLE through any production path, so verifier-corruption tests — which must
+    /// place a deliberately-broken block in storage to prove `verify_to` still catches it as a
+    /// second line of defense — use this raw insert instead of `put_block_fast`.
+    #[cfg(test)]
+    pub(crate) fn force_insert_block(&mut self, header: SigilBlockHeaderV0) {
+        let hash_hex = hex::encode(header.hash());
+        let height = header.height;
+        let block = StoredBlock { header, hash_hex: hash_hex.clone(), synced_at: 0 };
+        let value = bincode::serialize(&block).expect("serialize");
+        self.db.put(hash_hex.as_bytes(), &value).expect("put block");
+        self.db.put(&height_key(height), hash_hex.as_bytes()).expect("put index");
+        if height >= self.best_height {
+            self.best_height = height;
+            self.best_hash_hex = hash_hex;
+        }
+    }
+
     pub fn put_block_raw(&mut self, height: u64, hash_hex: &str) -> Result<bool, String> {
         if let Some(existing) = self.height_index_conflict(height, hash_hex) {
             crate::tlog!(
@@ -964,6 +999,50 @@ mod tests {
         }
         let s2 = BlockStore::open(&p).unwrap();
         assert_eq!(s2.synced_to(), 8, "RESUMES from the persisted store, not 0");
+        let _ = std::fs::remove_dir_all(&p);
+    }
+
+    /// v0.95 REGRESSION: with base=1 (SIGIL's genesis-anchor, h=0 not backfill-servable) a
+    /// frontier chunk [1..N] under strict downward-linkage must store + advance — h=1 is the
+    /// exempt anchor (its parent h=0 is never served), h=2.. link upward. Guards against the
+    /// strict-ingest change self-stalling the live anchor (synced parked at 1).
+    #[test]
+    fn base1_anchor_chunk_stores_and_advances_under_strict_ingest() {
+        use sigil_header::*;
+        fn mk(height: u64, parent: BlockHash) -> SigilBlockHeaderV0 {
+            let nonce = SqiSignature::from_array([7u8; SQISIGN_L5_LEN]);
+            let mut hh = blake3::Hasher::new();
+            hh.update(&parent); hh.update(nonce.as_bytes());
+            let vdf_input: [u8; 32] = *hh.finalize().as_bytes();
+            let scheme = SigScheme::SqiSign5;
+            SigilBlockHeaderV0 {
+                version: HEADER_VERSION, network_id: NETWORK_ID, height, parent_hash: parent,
+                merge_parents: Vec::new(), timestamp_ms: 1000 + height, nonce_sqisign: nonce,
+                vdf_input, vdf_proof: WesolowskiProof { y: vec![], pi: vec![], t: 100 }, difficulty: 1,
+                wallet_state_root: [0u8;32], dex_state_root: [0u8;32], event_log_root: [0u8;32],
+                contract_state_root: [0u8;32],
+                state_transition_proof: StarkProof { bytes: vec![], public_inputs_hash: [0u8;32] },
+                txs_merkle_root: [0u8;32], tx_count: 0,
+                fluxc_artifact_proof: ProofBundle { artifact_blake3: [0u8;32], sqisign_sig: vec![], sqisign_pubkey: vec![], settle_tx: None },
+                sig_scheme: scheme, producer: [0u8;32],
+                producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
+            }
+        }
+        let p = tmp("base1-anchor");
+        let _ = std::fs::remove_dir_all(&p);
+        {
+            let mut s = BlockStore::open(&p).unwrap();
+            s.set_base(1);
+            assert_eq!(s.synced_to(), 1, "anchor base=1");
+            // Build h=0..9 linking; the mesh serves [1..9] (h=0 genesis never served).
+            let mut chain = Vec::new();
+            let mut parent = [0u8; 32];
+            for h in 0..10u64 { let hdr = mk(h, parent); parent = hdr.hash(); chain.push(hdr); }
+            let stored = s.put_blocks_batch(&chain[1..10]); // [1..9], parent h=0 absent
+            s.advance();
+            assert_eq!(stored, 9, "all 9 of [1..9] accept (h=1 anchor exempt, rest link)");
+            assert_eq!(s.synced_to(), 10, "frontier advances to 10, NOT parked at the anchor");
+        }
         let _ = std::fs::remove_dir_all(&p);
     }
 

@@ -100,6 +100,19 @@ json_get() { # json_get <file> <python-expr over d>
   python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(eval(sys.argv[2]))" "$1" "$3" 2>/dev/null
 }
 
+version_gt() { # version_gt <a> <b>  => true when dotted numeric a > b
+  python3 - "$1" "$2" <<'PY'
+import sys
+def parse(s):
+    return [int(p) if p.isdigit() else 0 for p in (s or "0").split(".")]
+a, b = parse(sys.argv[1]), parse(sys.argv[2])
+n = max(len(a), len(b))
+a += [0] * (n - len(a))
+b += [0] * (n - len(b))
+sys.exit(0 if a > b else 1)
+PY
+}
+
 # ── GATE 1: RUN-TEST ─────────────────────────────────────────────────────────
 # $1 = binary path, $2 = label. Returns 0 green.
 run_test() {
@@ -321,6 +334,7 @@ case "$MODE" in
     PREV_VER=$(json_get "$LIVE_MF" . "d['version']")
     say "candidate v$VER (live channel currently v$PREV_VER)"
     [ -f "$CAND.sig" ] || { bad_check "publish: $CAND.sig missing — sign-manifest.sh first"; verdict publish "$VER"; exit 1; }
+    version_gt "$VER" "$PREV_VER" || { bad_check "publish: candidate version v$VER is not newer than live channel v$PREV_VER"; verdict publish "$VER"; exit 1; }
 
     LBIN=$(mktemp "$SCRATCH_ROOT/rg-bin.XXXXXX")
     LURL=$(json_get "$CAND" . "d['targets']['linux-x64']['url']")
@@ -337,7 +351,11 @@ case "$MODE" in
     say "── flipping channel v$PREV_VER → v$VER (backup kept; auto-revert on GATE 3 RED) ──"
     cp -a "$LIVE_MF" "$LIVE_MF.gate-backup" 2>/dev/null
     cp -a "$LIVE_MF.sig" "$LIVE_MF.sig.gate-backup" 2>/dev/null
-    cp "$CAND" "$LIVE_MF" && cp "$CAND.sig" "$LIVE_MF.sig"
+    TMP_MF="$LIVE_MF.next.$$"
+    TMP_SIG="$LIVE_MF.sig.next.$$"
+    cp "$CAND" "$TMP_MF" && cp "$CAND.sig" "$TMP_SIG" \
+      && mv "$TMP_SIG" "$LIVE_MF.sig" \
+      && mv "$TMP_MF" "$LIVE_MF"
 
     if update_path "$PREV_BIN" "$VER" && [ ${#FAIL[@]} -eq 0 ]; then
       rm -f "$LIVE_MF.gate-backup" "$LIVE_MF.sig.gate-backup"

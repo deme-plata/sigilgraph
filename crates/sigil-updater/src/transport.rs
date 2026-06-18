@@ -28,7 +28,7 @@ use std::process::Command;
 
 use crate::announcement::{ReleaseAnnouncement, UpdaterError};
 use crate::apply::{apply_to_target, ApplyOutcome};
-use crate::verify::{verify_announcement, verify_binary_bytes, VerifyOk};
+use crate::verify::{verify_announcement_pinned, verify_binary_bytes, VerifyOk};
 
 /// What handling one release message produced. Granular variants so the
 /// caller can log helpfully without re-parsing.
@@ -123,9 +123,17 @@ where
 /// `current_version` is the version sigil-node is running now — anything <=
 /// that is skipped. Use `""` to apply everything (e.g. for tests / forced
 /// downgrades — but in production never do this).
+///
+/// `trusted_keys` is the genesis-pinned allowlist of release-author SQIsign
+/// pubkeys. The announcement's `sqisign_pubkey` MUST be on this list or the
+/// release is rejected as `VerifyFailed { UntrustedReleaseKey }` BEFORE the
+/// signature is even checked. An empty allowlist rejects everything (fails
+/// closed) — without this, anyone on the gossip topic can self-sign a
+/// malicious binary and achieve fleet-wide RCE.
 pub fn handle_release_message<F: BinaryFetcher>(
     data: &[u8],
     peer: Option<&str>,
+    trusted_keys: &[Vec<u8>],
     current_version: &str,
     target: &Path,
     fetcher: &F,
@@ -140,8 +148,8 @@ pub fn handle_release_message<F: BinaryFetcher>(
         }
     };
 
-    // 2. verify announcement (sig + format)
-    let verify = match verify_announcement(&announcement) {
+    // 2. verify announcement (PINNED key allowlist + sig + format)
+    let verify = match verify_announcement_pinned(&announcement, trusted_keys) {
         Ok(v) => v,
         Err(e) => {
             return Ok(HandledRelease::VerifyFailed {
@@ -207,7 +215,7 @@ mod tests {
     use super::*;
     use crate::announcement::ReleaseAnnouncement;
 
-    fn signed_announcement(version: &str, binary: &[u8]) -> (ReleaseAnnouncement, Vec<u8>) {
+    fn signed_announcement(version: &str, binary: &[u8]) -> (ReleaseAnnouncement, Vec<u8>, Vec<u8>) {
         let (sk, pk) = flux_sqisign::keygen();
         let mut a = ReleaseAnnouncement::unsigned(
             "sigil-node",
@@ -215,12 +223,12 @@ mod tests {
             "https://example.org/binary",
             binary,
             b"{}".to_vec(),
-            pk,
+            pk.clone(),
             0, 1024, 0, "transport-test",
         );
         a.sign(&sk).expect("sign");
         let bytes = serde_json::to_vec(&a).expect("ser");
-        (a, bytes)
+        (a, bytes, pk)
     }
 
     #[test]
@@ -252,7 +260,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("sigil-node");
         let fetch = ClosureFetcher(|_| Err("not used".into()));
-        let out = handle_release_message(b"definitely not json", None, "0.0.1", &target, &fetch).unwrap();
+        let out = handle_release_message(b"definitely not json", None, &[], "0.0.1", &target, &fetch).unwrap();
         assert!(matches!(out, HandledRelease::NotAnAnnouncement { .. }));
         assert!(!target.exists());
     }
@@ -261,13 +269,35 @@ mod tests {
     fn handle_release_skips_invalid_signature() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("sigil-node");
-        let (mut a, _bytes) = signed_announcement("0.0.2", b"some bytes");
+        let (mut a, _bytes, pk) = signed_announcement("0.0.2", b"some bytes");
         // tamper: bump version, leaving sig stale
         a.version = "9.9.9".into();
         let bytes = serde_json::to_vec(&a).unwrap();
+        let trusted = vec![pk];
         let fetch = ClosureFetcher(|_| Err("not used".into()));
-        let out = handle_release_message(&bytes, None, "0.0.1", &target, &fetch).unwrap();
+        let out = handle_release_message(&bytes, None, &trusted, "0.0.1", &target, &fetch).unwrap();
         assert!(matches!(out, HandledRelease::VerifyFailed { .. }));
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn handle_release_rejects_untrusted_key() {
+        // Attacker self-signs a perfectly valid announcement with their own
+        // keypair, but their pubkey isn't on the allowlist → rejected, and the
+        // binary is NEVER fetched (closure would panic if called).
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("sigil-node");
+        let (_a, bytes, _attacker_pk) = signed_announcement("9.9.9", b"malicious bytes");
+        let (_sk, honest_pk) = flux_sqisign::keygen();
+        let trusted = vec![honest_pk];
+        let fetch = ClosureFetcher(|_| panic!("must not fetch an untrusted release"));
+        let out = handle_release_message(&bytes, None, &trusted, "0.0.1", &target, &fetch).unwrap();
+        match out {
+            HandledRelease::VerifyFailed { error, .. } => {
+                assert!(matches!(error, UpdaterError::UntrustedReleaseKey { .. }));
+            }
+            other => panic!("expected VerifyFailed/UntrustedReleaseKey, got {:?}", other),
+        }
         assert!(!target.exists());
     }
 
@@ -275,9 +305,10 @@ mod tests {
     fn handle_release_skips_not_newer() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("sigil-node");
-        let (_a, bytes) = signed_announcement("0.0.1", b"some bytes");
+        let (_a, bytes, pk) = signed_announcement("0.0.1", b"some bytes");
+        let trusted = vec![pk];
         let fetch = ClosureFetcher(|_| Err("not used".into()));
-        let out = handle_release_message(&bytes, None, "0.0.1", &target, &fetch).unwrap();
+        let out = handle_release_message(&bytes, None, &trusted, "0.0.1", &target, &fetch).unwrap();
         assert!(matches!(out, HandledRelease::NotNewer { .. }));
         assert!(!target.exists());
     }
@@ -286,9 +317,10 @@ mod tests {
     fn handle_release_reports_fetch_failure() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("sigil-node");
-        let (_a, bytes) = signed_announcement("0.0.2", b"some bytes");
+        let (_a, bytes, pk) = signed_announcement("0.0.2", b"some bytes");
+        let trusted = vec![pk];
         let fetch = ClosureFetcher(|_| Err("simulated DNS fail".into()));
-        let out = handle_release_message(&bytes, None, "0.0.1", &target, &fetch).unwrap();
+        let out = handle_release_message(&bytes, None, &trusted, "0.0.1", &target, &fetch).unwrap();
         match out {
             HandledRelease::FetchFailed { url, error } => {
                 assert_eq!(url, "https://example.org/binary");
@@ -304,10 +336,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("sigil-node");
         let real_binary = b"the bytes the producer signed".to_vec();
-        let (_a, bytes) = signed_announcement("0.0.2", &real_binary);
+        let (_a, bytes, pk) = signed_announcement("0.0.2", &real_binary);
+        let trusted = vec![pk];
         // Fetcher returns DIFFERENT bytes than what was announced.
         let fetch = ClosureFetcher(|_| Ok(b"different bytes from the network!".to_vec()));
-        let out = handle_release_message(&bytes, None, "0.0.1", &target, &fetch).unwrap();
+        let out = handle_release_message(&bytes, None, &trusted, "0.0.1", &target, &fetch).unwrap();
         assert!(matches!(out, HandledRelease::BinaryHashMismatch { .. }));
         assert!(!target.exists(), "must not touch target on hash mismatch");
     }
@@ -317,10 +350,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("sigil-node");
         let binary = b"the real bytes".to_vec();
-        let (_a, ann_bytes) = signed_announcement("0.0.2", &binary);
+        let (_a, ann_bytes, pk) = signed_announcement("0.0.2", &binary);
+        let trusted = vec![pk];
         let binary_clone = binary.clone();
         let fetch = ClosureFetcher(move |_| Ok(binary_clone.clone()));
-        let out = handle_release_message(&ann_bytes, Some("test-peer"), "0.0.1", &target, &fetch).unwrap();
+        let out = handle_release_message(&ann_bytes, Some("test-peer"), &trusted, "0.0.1", &target, &fetch).unwrap();
         assert!(out.applied(), "expected Applied, got {:?}", out);
         assert!(target.exists());
         let installed = std::fs::read(&target).unwrap();

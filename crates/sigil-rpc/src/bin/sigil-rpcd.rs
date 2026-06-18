@@ -68,6 +68,11 @@ struct Node {
     /// flux-db handle for state persistence — the money (SigilState) + chain
     /// (height/tip/bits) are snapshotted here so they survive a restart.
     statedb: Option<flux_db::Database>,
+    /// Per-wallet highest accepted request nonce — the replay guard for the
+    /// authenticated mutating routes (a request's nonce must strictly exceed the
+    /// last one this wallet used). Persisted in the snapshot so replay protection
+    /// survives a restart. See `sigil_rpc::auth`.
+    auth_nonces: std::collections::HashMap<WalletId, u64>,
 }
 
 /// Persisted snapshot: the money + chain state (NOT students — VerifiedRegistry isn't
@@ -85,6 +90,10 @@ struct Snapshot {
     tokens: Vec<(String, TokenId)>,
     pools: Vec<(String, PoolId)>,
     citizens: Vec<WalletId>,
+    /// Per-wallet replay-nonce watermark (see Node.auth_nonces). `serde(default)`
+    /// so snapshots written before auth landed still load.
+    #[serde(default)]
+    auth_nonces: std::collections::HashMap<WalletId, u64>,
 }
 
 /// Write the current money+chain state to flux-db (bincode — handles u128 + tuple-key
@@ -95,6 +104,7 @@ fn persist(node: &Node) {
         state: node.state.clone(), height: node.height, block_height: node.block_height, tip_hash: node.tip_hash,
         bits: node.bits, retarget_anchor_ts: node.retarget_anchor_ts, retarget_anchor_height: node.retarget_anchor_height,
         tokens: node.tokens.clone(), pools: node.pools.clone(), citizens: node.citizens.clone(),
+        auth_nonces: node.auth_nonces.clone(),
     };
     if let Ok(bytes) = bincode::serialize(&snap) { let _ = db.put(b"snapshot", &bytes); }
 }
@@ -246,7 +256,8 @@ const POOL_SCAL: PoolId = [0xC4; 32]; // SCAL/USDS
 const POOL_SIGIL: PoolId = [0xC5; 32]; // SIGIL(NATIVE)/USDS
 
 const OPERATOR: WalletId = [0xEE; 32];
-const MASTER: WalletId = [0xFF; 32];
+// Master dev-fee wallet (Viktor, 095b0e1f…3dd8) — 5% of mining coinbase + 0.3% DEX.
+const MASTER: WalletId = sigil_bank::DEV_MASTER_WALLET;
 // flux-nation demo citizen (funded + attested at bootstrap so the page's pay works)
 const CITIZEN: WalletId = [0x11; 32];
 const POWER_CO: WalletId = [0x9E; 32];
@@ -368,6 +379,7 @@ fn bootstrap() -> Node {
             tip_hash: snap.tip_hash, bits: snap.bits,
             retarget_anchor_ts: snap.retarget_anchor_ts, retarget_anchor_height: snap.retarget_anchor_height,
             statedb,
+            auth_nonces: snap.auth_nonces,
         };
     }
     eprintln!("flux-db: no snapshot — seeding fresh genesis @ {state_path}");
@@ -428,7 +440,8 @@ fn bootstrap() -> Node {
     ];
     let tip_hash = *blake3::hash(b"sigil-g0/mining-genesis").as_bytes();
     let node = Node { state, height: 2, block_height: 0, students: VerifiedRegistry::new(), tokens, pools, citizens: vec![CITIZEN], history,
-        tip_hash, bits: mining_bits(), retarget_anchor_ts: now_ms(), retarget_anchor_height: 0, statedb };
+        tip_hash, bits: mining_bits(), retarget_anchor_ts: now_ms(), retarget_anchor_height: 0, statedb,
+        auth_nonces: std::collections::HashMap::new() };
     persist(&node); // write the genesis snapshot so the next boot restores
     node
 }
@@ -495,6 +508,48 @@ fn jstr<'a>(body: &'a str, key: &str) -> Option<&'a str> {
     let q1 = rest[rest.find(':')? + 1..].find('"')? + rest.find(':')? + 2;
     let q2 = rest[q1..].find('"')? + q1;
     Some(&rest[q1..q2])
+}
+
+/// Parse a 128-hex (64-byte) ed25519 wallet signature.
+fn hex64(s: &str) -> Option<[u8; 64]> {
+    let s = s.trim();
+    if s.len() != 128 { return None; }
+    let mut out = [0u8; 64];
+    for i in 0..64 {
+        out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Per-request wallet-signature gate for a mutating route (audit C2–C5/H8).
+/// `actor` is the wallet whose funds move; the caller must sign the canonical
+/// message (`sigil_rpc::auth::auth_message`) for `action`+`fields`+`req_nonce`
+/// with the actor wallet's ed25519 key and include `sig` (128-hex) + `req_nonce`
+/// in the body. Enforces a strictly-increasing per-wallet `req_nonce` so a
+/// captured request can't be replayed. Returns Err(reason); the route maps it to
+/// `bad(..)`. NOTE: the replay nonce field is `req_nonce`, NOT `nonce`, so it
+/// never collides with a route's own `nonce` (e.g. /mine's PoW nonce).
+///
+/// `SIGIL_RPC_NO_AUTH=1` bypasses the gate — local dev / client-migration ONLY,
+/// never on the public daemon.
+fn authorize(n: &mut Node, actor: &WalletId, action: &str, fields: &[String], body: &str) -> Result<(), String> {
+    if std::env::var("SIGIL_RPC_NO_AUTH").is_ok() {
+        return Ok(());
+    }
+    let sig_hex = jstr(body, "sig").ok_or("missing 'sig' (128-hex wallet signature)")?;
+    let sig = hex64(sig_hex).ok_or("'sig' must be 128-hex (64 bytes)")?;
+    let req_nonce = jnum(body, "req_nonce")
+        .ok_or("missing 'req_nonce' (must strictly increase per wallet — use a ms timestamp)")? as u64;
+    let last = n.auth_nonces.get(actor).copied().unwrap_or(0);
+    if req_nonce <= last {
+        return Err(format!("stale/replayed req_nonce {req_nonce} (last accepted {last})"));
+    }
+    let f: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
+    if !sigil_rpc::auth::verify_request(actor, action, &f, req_nonce, &sig) {
+        return Err("bad wallet signature (does not authorize this action for the actor wallet)".into());
+    }
+    n.auth_nonces.insert(*actor, req_nonce);
+    Ok(())
 }
 
 fn ok(body: String) -> String {
@@ -666,6 +721,10 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
             let to = jstr(body, "to").and_then(hex32).unwrap_or(OPERATOR);
             let id = token_id_for(&symbol);
             let mut n = node.write().unwrap();
+            // C5: the creator (`to`) must sign — was unauthenticated, so anyone
+            // could mint arbitrary supply of any token to any wallet.
+            if let Err(e) = authorize(&mut n, &to, "deploy_token",
+                &[symbol.clone(), supply.to_string(), to_hex(&to)], body) { return bad(&e); }
             if n.tokens.iter().any(|(s, _)| s.eq_ignore_ascii_case(&symbol)) { return bad("token symbol already deployed"); }
             let h = n.height;
             let cur = n.state.balance_of(&to, &id);
@@ -682,6 +741,10 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
             match (from, pool, amt_a, amt_b) {
                 (Some(from), Some(pool), Some(amt_a), Some(amt_b)) if amt_a > 0 && amt_b > 0 => {
                     let mut n = node.write().unwrap();
+                    // C3: `from` must sign — was unauthenticated, so anyone could
+                    // add liquidity FROM another wallet's balance.
+                    if let Err(e) = authorize(&mut n, &from, "add_liquidity",
+                        &[to_hex(&from), to_hex(&pool), amt_a.to_string(), amt_b.to_string()], body) { return bad(&e); }
                     let prev = match n.state.pool(&pool) { Some(p) => p.clone(), None => return bad("unknown pool") };
                     // proportional shares vs the limiting side (Uniswap-V2 model).
                     let s_a = amt_a.saturating_mul(prev.lp_shares) / prev.reserve_a.max(1);
@@ -751,6 +814,11 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
             match (from, pool, amount_in) {
                 (Some(from), Some(pool), Some(amount_in)) => {
                     let mut n = node.write().unwrap();
+                    // C3: `from` must sign — was unauthenticated, so anyone could
+                    // swap FROM another wallet's balance.
+                    let dir_s = match dir { SwapDirection::AtoB => "AtoB", SwapDirection::BtoA => "BtoA" };
+                    if let Err(e) = authorize(&mut n, &from, "swap",
+                        &[to_hex(&from), to_hex(&pool), dir_s.to_string(), amount_in.to_string(), min_out.to_string()], body) { return bad(&e); }
                     let h = n.height;
                     match execute_swap(&mut n.state, h, from, pool, dir, amount_in, min_out) {
                         Ok(r) => { n.height += 1; ingest(&mut n, "swap", format!("swap {amount_in} in → {} out", r.amount_out), &[from], "swap dex"); ok(format!("{{\"ok\":true,\"amount_out\":{},\"lp_fee\":{},\"protocol_fee\":{}}}", r.amount_out, r.fee, r.protocol_fee)) }
@@ -776,14 +844,24 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
         ("POST", "/mine") => {
             let miner = jstr(body, "miner").and_then(hex32);
             let header = jstr(body, "header").unwrap_or("sigil-block").to_string();
-            let nonce = jnum(body, "nonce").unwrap_or(0) as u64;
-            let difficulty = jnum(body, "difficulty").unwrap_or(0) as u32;
-            let reward = jnum(body, "reward").unwrap_or(50);
+            let pow_nonce = jnum(body, "nonce").unwrap_or(0) as u64;
             match miner {
                 Some(miner) => {
                     let mut n = node.write().unwrap();
+                    // C1 (the worst hole): `difficulty` and `reward` USED to be
+                    // caller-supplied — difficulty=0 made every PoW pass and an
+                    // arbitrary reward let one unauthenticated POST mint the whole
+                    // 21M cap. Now: the miner must SIGN (prove wallet control), the
+                    // difficulty is the live server target, and the reward is the
+                    // emission-schedule value. The req_nonce also blocks the replay
+                    // (the legacy /mine PoW is deterministic). Prefer /mining/submit
+                    // (dual-lane, tip-bound); this legacy lane is now at least safe.
+                    if let Err(e) = authorize(&mut n, &miner, "mine",
+                        &[to_hex(&miner), header.clone(), pow_nonce.to_string()], body) { return bad(&e); }
+                    let difficulty = n.bits;
+                    let reward = sigil_emission::block_reward(n.block_height);
                     let h = n.height;
-                    match submit_share(&mut n.state, h, miner, header.as_bytes(), nonce, difficulty, reward) {
+                    match submit_share(&mut n.state, h, miner, header.as_bytes(), pow_nonce, difficulty, reward) {
                         Ok(bal) => { n.height += 1; ingest(&mut n, "mine", format!("mine reward {reward} SIGIL"), &[miner], "mining block reward"); ok(format!("{{\"ok\":true,\"new_balance\":{}}}", bal)) }
                         Err(e) => bad(&e.to_string()),
                     }
@@ -878,6 +956,13 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str)
             match opw {
                 Some(opw) => {
                     let mut n = node.write().unwrap();
+                    // H8: the operator pool owner must sign — was unauthenticated,
+                    // so anyone could drain any funded wallet by naming it as the
+                    // `operator_pool` and themselves as the sole verifier. The
+                    // req_nonce also closes the double-credit replay the lib warns of.
+                    let vjoin = verifiers.iter().map(|w| to_hex(w)).collect::<Vec<_>>().join(",");
+                    if let Err(e) = authorize(&mut n, &opw, "credit",
+                        &[to_hex(&opw), pool_amount.to_string(), vjoin], body) { return bad(&e); }
                     let h = n.height;
                     match credit_light_verifiers(&mut n.state, h, opw, pool_amount, &verifiers) {
                         Ok(r) => { n.height += 1; ok(format!("{{\"ok\":true,\"per_verifier\":{},\"credited\":{},\"num_verifiers\":{}}}", r.per_verifier, r.credited, r.num_verifiers)) }
@@ -998,6 +1083,31 @@ fn main() {
         eprintln!("follower mode: syncing the mining chain from peer {peer}");
         let fnode = Arc::clone(&node);
         thread::spawn(move || follow_peer(fnode, peer));
+    }
+    // Status writer: keep $SIGIL_STATUS_OUT fresh so the frontend (sigilgraph)
+    // reflects the LIVE chain. Without this the file froze (was stale since the
+    // writer was dropped from rpcd) and the site showed a stuck height forever.
+    // Atomic tmp+rename so the frontend never reads a half-written file.
+    if let Ok(out) = std::env::var("SIGIL_STATUS_OUT") {
+        eprintln!("status writer: refreshing {out} every 2s");
+        let snode = Arc::clone(&node);
+        thread::spawn(move || loop {
+            {
+                let n = snode.read().unwrap();
+                let json = format!(
+                    "{{\"status\":{{\"height\":{h},\"network_id\":\"sigil-g0\",\"peers\":1,\"supply\":\"{s}\",\"max_supply\":\"21000000\"}},\"tip\":{{\"height\":{h},\"hash\":\"{tip}\",\"roots\":{{}}}},\"blocks\":[]}}",
+                    h = n.block_height,
+                    s = n.state.native_supply(),
+                    tip = to_hex(&n.tip_hash),
+                );
+                drop(n);
+                let tmp = format!("{out}.tmp");
+                if std::fs::write(&tmp, json.as_bytes()).is_ok() {
+                    let _ = std::fs::rename(&tmp, &out);
+                }
+            }
+            thread::sleep(std::time::Duration::from_secs(2));
+        });
     }
     for stream in listener.incoming().flatten() {
         let n = Arc::clone(&node);

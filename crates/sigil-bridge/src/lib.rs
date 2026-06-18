@@ -26,15 +26,17 @@ pub mod asset;
 pub mod ledger;
 pub mod ln;
 pub mod proof;
+pub mod withdraw;
 
 pub use aggregate::{fold_epoch_deposits, DepositRecord};
 
 pub use asset::BridgeAsset;
 pub use ledger::{AssetPeg, BridgeLedger, PegError};
 pub use ln::{LnError, LnProof};
-pub use proof::{dsha256, verify_merkle_inclusion, ProofError, SpvProof};
+pub use proof::{dsha256, parse_deposit_intent, verify_merkle_inclusion, DepositIntent, ProofError, SpvProof};
+pub use withdraw::WithdrawalRequest;
 
-/// Why a deposit was not minted.
+/// Why a deposit/withdrawal was rejected.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum BridgeError {
     #[error("proof verification failed: {0}")]
@@ -43,6 +45,14 @@ pub enum BridgeError {
     Peg(#[from] PegError),
     #[error("lightning proof failed: {0}")]
     Ln(#[from] LnError),
+    #[error("unsupported asset for SPV verification: {0:?} (only BTC has a real SPV PoW verifier — others must not be validated against Bitcoin headers)")]
+    UnsupportedAsset(BridgeAsset),
+    #[error("deposit proof already minted against (replay)")]
+    ReplayedDeposit,
+    #[error("withdrawal not authorized by the owner (bad signature)")]
+    UnauthorizedWithdrawal,
+    #[error("withdrawal already processed (replay)")]
+    ReplayedWithdrawal,
 }
 
 /// The receipt of a successful, proof-backed mint.
@@ -59,54 +69,114 @@ pub struct MintReceipt {
 /// collateral + mint the wrapped token under the peg chokepoint. The single
 /// entry point a node calls — verification is mandatory and first.
 ///
-/// `amount`/`recipient` are the deposit's value + SIGIL destination. Binding
-/// them to fields parsed out of `proof.tx_bytes` (so they can't be claimed
-/// independently of the proven tx) is the documented hardening lane; today the
-/// proof binds the *inclusion* of a specific tx and the mint is gated on it.
+/// Audit C9/H7 hardening (vs the old `(ledger, asset, amount, recipient, proof)`):
+/// - **amount + recipient are now BOUND to the proven tx** — read from the
+///   deposit memo inside `proof.tx_bytes` (which hashes to the proven, buried
+///   `tx_hash`), NOT taken as independent caller args. Closes the free-mint
+///   hole (prove a 1-sat tx → mint 21M to yourself).
+/// - **replay guard** — each proven `tx_hash` mints exactly once (spent-set).
+/// - **per-asset gate** — only BTC has a real SPV PoW verifier; ETH/ZEC/IRON are
+///   rejected rather than "validated" against Bitcoin headers.
+/// - **difficulty floor** — pass `min_pow_target` (the chain's `powLimit`) to
+///   reject regtest-easy forged headers; `None` skips the floor (tests only).
 pub fn process_deposit(
     ledger: &mut BridgeLedger,
     asset: BridgeAsset,
-    amount: u128,
-    recipient: impl Into<String>,
     proof: &SpvProof,
+    min_pow_target: Option<&[u8; 32]>,
 ) -> Result<MintReceipt, BridgeError> {
+    // 0. per-asset gate (H7): the SPV verifier is Bitcoin-PoW only.
+    if asset != BridgeAsset::Btc {
+        return Err(BridgeError::UnsupportedAsset(asset));
+    }
     // 1. cryptographic verification FIRST — no mint without a valid proof.
     proof.verify(asset.min_confirmations())?;
-    // 2. lock the proven collateral, then mint under the peg chokepoint.
-    ledger.lock(asset, amount)?;
-    ledger.mint(asset, amount)?;
-    Ok(MintReceipt { asset, amount, recipient: recipient.into(), supply_root: ledger.root() })
+    if let Some(floor) = min_pow_target {
+        proof.verify_difficulty_floor(floor)?;
+    }
+    // 2. amount + recipient are bound to the proven tx, not caller-claimed.
+    let intent = proof.deposit_intent()?;
+    // 3. replay guard: one mint per proven deposit.
+    if ledger.is_spent(&proof.tx_hash) {
+        return Err(BridgeError::ReplayedDeposit);
+    }
+    // 4. lock the proven collateral, then mint under the peg chokepoint.
+    ledger.lock(asset, intent.amount)?;
+    ledger.mint(asset, intent.amount)?;
+    ledger.mark_spent(proof.tx_hash);
+    Ok(MintReceipt {
+        asset,
+        amount: intent.amount,
+        recipient: hex::encode(intent.recipient),
+        supply_root: ledger.root(),
+    })
 }
 
-/// Withdraw: burn wrapped + release the collateral (source-chain payout happens
+/// Withdraw: verify the owner's signature, enforce idempotency, then burn
+/// wrapped + release the collateral (source-chain payout to `req.dest` happens
 /// off this call). Returns the post-burn supply root.
-pub fn process_withdrawal(ledger: &mut BridgeLedger, asset: BridgeAsset, amount: u128) -> Result<[u8; 32], BridgeError> {
-    ledger.burn(asset, amount)?;
-    ledger.unlock(asset, amount)?;
+///
+/// Audit C9: was `(ledger, asset, amount)` with NO authorization, owner, payout
+/// destination, or replay guard — anyone could drain locked collateral. Now a
+/// [`WithdrawalRequest`] must carry the owner's ed25519 signature over the exact
+/// `(asset, amount, owner, dest, nonce)`, and its deterministic id is recorded
+/// so the same authorization can't be processed twice.
+pub fn process_withdrawal(
+    ledger: &mut BridgeLedger,
+    req: &WithdrawalRequest,
+) -> Result<[u8; 32], BridgeError> {
+    if !req.verify() {
+        return Err(BridgeError::UnauthorizedWithdrawal);
+    }
+    let id = req.id();
+    if ledger.is_withdrawal_processed(&id) {
+        return Err(BridgeError::ReplayedWithdrawal);
+    }
+    ledger.burn(req.asset, req.amount)?;
+    ledger.unlock(req.asset, req.amount)?;
+    ledger.mark_withdrawal(id);
     Ok(ledger.root())
 }
 
 /// LIGHTNING deposit: verify the settled-invoice preimage, then lock + mint wBTC
 /// (instant — no on-chain confirmations). The fast rail; same peg chokepoint.
+/// C9: the `payment_hash` is now recorded in the spent-set so one settled
+/// invoice can't be replayed for repeated mints. (BOLT11-signature binding of
+/// amount + payee is the remaining documented hardening lane.)
 pub fn process_ln_deposit(
     ledger: &mut BridgeLedger,
     recipient: impl Into<String>,
     ln: &LnProof,
 ) -> Result<MintReceipt, BridgeError> {
     ln.verify()?; // SHA256(preimage) == payment_hash ⇒ paid
+    if ledger.is_spent(&ln.payment_hash) {
+        return Err(BridgeError::ReplayedDeposit);
+    }
     let amount = ln.amount_sats();
     ledger.lock(BridgeAsset::Btc, amount)?;
     ledger.mint(BridgeAsset::Btc, amount)?;
+    ledger.mark_spent(ln.payment_hash);
     Ok(MintReceipt { asset: BridgeAsset::Btc, amount, recipient: recipient.into(), supply_root: ledger.root() })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proof::{dsha256, header_meets_target};
+    use proof::{dsha256, header_meets_target, DEPOSIT_MAGIC};
     use sha2::{Digest, Sha256};
+    use sigil_oauth::Keypair;
 
     const EASY_NBITS: u32 = 0x207f_ffff;
+
+    /// Build a source-chain tx embedding the SIGIL deposit memo (magic ‖
+    /// amount-LE ‖ recipient) so `deposit_intent()` binds amount + recipient.
+    fn deposit_tx(amount: u128, recipient: [u8; 32]) -> Vec<u8> {
+        let mut v = b"src-chain-tx-prefix".to_vec();
+        v.extend_from_slice(DEPOSIT_MAGIC);
+        v.extend_from_slice(&amount.to_le_bytes());
+        v.extend_from_slice(&recipient);
+        v
+    }
     fn mine(prev: [u8; 32], merkle_root: [u8; 32]) -> [u8; 80] {
         let mut h = [0u8; 80];
         h[0] = 1;
@@ -152,31 +222,104 @@ mod tests {
     }
 
     #[test]
-    fn deposit_mints_only_with_a_valid_proof() {
+    fn deposit_mints_amount_and_recipient_bound_to_the_proof() {
         let mut ledger = BridgeLedger::new();
-        let proof = valid_proof_for(b"btc-deposit-tx-100k-sats", 6);
-        let receipt = process_deposit(&mut ledger, BridgeAsset::Btc, 100_000, "qnk_alice", &proof).unwrap();
+        let recipient = [0xAB; 32];
+        let proof = valid_proof_for(&deposit_tx(100_000, recipient), 6);
+        let receipt = process_deposit(&mut ledger, BridgeAsset::Btc, &proof, None).unwrap();
+        // amount + recipient came FROM the proven tx, not a caller arg.
         assert_eq!(receipt.amount, 100_000);
+        assert_eq!(receipt.recipient, hex::encode(recipient));
         assert_eq!(ledger.peg(BridgeAsset::Btc), AssetPeg { locked: 100_000, minted: 100_000 });
         assert!(ledger.peg_ok());
+        // C9: replaying the same proof is rejected — no double-mint.
+        assert!(matches!(
+            process_deposit(&mut ledger, BridgeAsset::Btc, &proof, None),
+            Err(BridgeError::ReplayedDeposit)
+        ));
+        assert_eq!(ledger.peg(BridgeAsset::Btc), AssetPeg { locked: 100_000, minted: 100_000 });
     }
 
     #[test]
     fn deposit_with_too_few_confirmations_is_rejected_no_mint() {
         let mut ledger = BridgeLedger::new();
-        let proof = valid_proof_for(b"btc-deposit", 2); // < 6 for BTC
-        let err = process_deposit(&mut ledger, BridgeAsset::Btc, 50_000, "qnk_bob", &proof).unwrap_err();
+        let proof = valid_proof_for(&deposit_tx(50_000, [1u8; 32]), 2); // < 6 for BTC
+        let err = process_deposit(&mut ledger, BridgeAsset::Btc, &proof, None).unwrap_err();
         assert!(matches!(err, BridgeError::Proof(ProofError::InsufficientConfirmations { .. })));
-        // nothing minted or locked
         assert_eq!(ledger.peg(BridgeAsset::Btc), AssetPeg::default());
     }
 
     #[test]
-    fn deposit_then_withdraw_roundtrip() {
+    fn deposit_without_memo_is_rejected() {
+        // A proof for a tx with NO SIGIL deposit memo can't bind an amount → no mint.
         let mut ledger = BridgeLedger::new();
-        let proof = valid_proof_for(b"zec-deposit", 10);
-        process_deposit(&mut ledger, BridgeAsset::Zec, 7_000, "qnk_carol", &proof).unwrap();
-        process_withdrawal(&mut ledger, BridgeAsset::Zec, 7_000).unwrap();
-        assert_eq!(ledger.peg(BridgeAsset::Zec), AssetPeg { locked: 0, minted: 0 });
+        let proof = valid_proof_for(b"btc-tx-with-no-sigil-memo", 6);
+        assert!(matches!(
+            process_deposit(&mut ledger, BridgeAsset::Btc, &proof, None),
+            Err(BridgeError::Proof(ProofError::NoDepositMemo))
+        ));
+        assert_eq!(ledger.peg(BridgeAsset::Btc), AssetPeg::default());
+    }
+
+    #[test]
+    fn non_btc_spv_deposit_is_rejected() {
+        // ETH/ZEC/IRON must NOT be "validated" against Bitcoin PoW headers (H7).
+        let mut ledger = BridgeLedger::new();
+        let proof = valid_proof_for(&deposit_tx(1_000, [3u8; 32]), 10);
+        assert!(matches!(
+            process_deposit(&mut ledger, BridgeAsset::Zec, &proof, None),
+            Err(BridgeError::UnsupportedAsset(BridgeAsset::Zec))
+        ));
+    }
+
+    #[test]
+    fn difficulty_floor_rejects_easy_headers() {
+        // With a strict floor (impossibly-hard target), the regtest-easy headers
+        // that pass bare verify() are rejected (H7: self-declared difficulty).
+        let mut ledger = BridgeLedger::new();
+        let proof = valid_proof_for(&deposit_tx(1_000, [5u8; 32]), 6);
+        let strict = [0u8; 32];
+        assert!(matches!(
+            process_deposit(&mut ledger, BridgeAsset::Btc, &proof, Some(&strict)),
+            Err(BridgeError::Proof(ProofError::DifficultyTooLow(_)))
+        ));
+    }
+
+    #[test]
+    fn deposit_then_signed_withdraw_roundtrip() {
+        let mut ledger = BridgeLedger::new();
+        let proof = valid_proof_for(&deposit_tx(7_000, [2u8; 32]), 6);
+        process_deposit(&mut ledger, BridgeAsset::Btc, &proof, None).unwrap();
+
+        let kp = Keypair::from_seed(&[8u8; 32]);
+        let mut req = WithdrawalRequest {
+            asset: BridgeAsset::Btc, amount: 7_000, owner: kp.pubkey(),
+            dest: "bc1qpayout".into(), nonce: 1, sig: [0u8; 64],
+        };
+        req.sig = kp.sign(&req.signing_bytes());
+        process_withdrawal(&mut ledger, &req).unwrap();
+        assert_eq!(ledger.peg(BridgeAsset::Btc), AssetPeg { locked: 0, minted: 0 });
+        // C9: the same signed request can't be processed twice.
+        assert!(matches!(
+            process_withdrawal(&mut ledger, &req),
+            Err(BridgeError::ReplayedWithdrawal)
+        ));
+    }
+
+    #[test]
+    fn unauthorized_withdrawal_is_rejected_collateral_untouched() {
+        let mut ledger = BridgeLedger::new();
+        let proof = valid_proof_for(&deposit_tx(5_000, [4u8; 32]), 6);
+        process_deposit(&mut ledger, BridgeAsset::Btc, &proof, None).unwrap();
+        // zero-sig request (no owner authorization) → rejected, peg untouched.
+        let req = WithdrawalRequest {
+            asset: BridgeAsset::Btc, amount: 5_000, owner: [9u8; 32],
+            dest: "x".into(), nonce: 1, sig: [0u8; 64],
+        };
+        assert!(matches!(
+            process_withdrawal(&mut ledger, &req),
+            Err(BridgeError::UnauthorizedWithdrawal)
+        ));
+        assert_eq!(ledger.peg(BridgeAsset::Btc), AssetPeg { locked: 5_000, minted: 5_000 });
     }
 }

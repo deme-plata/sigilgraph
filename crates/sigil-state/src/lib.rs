@@ -198,7 +198,15 @@ impl SigilState {
             // instead of O(state) rehash of every entry each block.
             wallet_state_root:   acc_to_root(self.wallet_acc),
             dex_state_root:      acc_to_root(self.pool_acc),
-            event_log_root:      acc_to_root(self.events_acc),
+            // The event log is an ORDERED, position-bound list, so its header
+            // root must stay a balanced binary Merkle root: that is what the
+            // (event, MerkleProof, header) inclusion proofs in sigil-events
+            // verify against. The multiset accumulator `events_acc` is
+            // order-independent and admits no position proof, so unlike the
+            // wallet/pool/contract roots above (set membership, O(1)-safe) it
+            // cannot back this root. `events_acc` is still maintained below so
+            // the bincode `Snapshot` layout in sigil-rpcd stays byte-stable.
+            event_log_root:      hash_event_log(&self.block_events),
             contract_state_root: acc_to_root(self.contract_acc),
         }
     }
@@ -273,8 +281,18 @@ impl SigilState {
         }
         // Track native-token supply incrementally (transfers net to zero; only
         // mints/burns move it). The cap is enforced at the commit chokepoint.
+        //
+        // SECURITY: use SATURATING (not wrapping) arithmetic. With wrapping, a
+        // crafted sequence of SetBalance mutations could push the running supply
+        // past u128::MAX and wrap it back below MAX_SUPPLY, so the once-at-end
+        // cap check (`native_supply > MAX_SUPPLY`) would pass while wallets hold
+        // astronomically more than 21M NATIVE. Saturating arithmetic can only
+        // ever pin the counter HIGH on overflow (and `old` never exceeds the
+        // supply in a consistent state, so the sub never underflows), so any
+        // state whose true native supply exceeds the cap leaves the counter
+        // above the cap too — the chokepoint reliably rejects it.
         if token == NATIVE {
-            self.native_supply = self.native_supply.wrapping_sub(old).wrapping_add(amount);
+            self.native_supply = self.native_supply.saturating_sub(old).saturating_add(amount);
         }
     }
 

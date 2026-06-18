@@ -12,6 +12,7 @@ sha2      = { workspace = true }
 thiserror = { workspace = true }
 hex       = { workspace = true }
 flux-fold = { path = "../flux-fold" }   # fold a whole epoch's deposits into one constant-size attestation
+sigil-oauth = { path = "../sigil-oauth" } # ed25519 verify_sig for signed withdrawal authorization (C9)
 
 [[bin]]
 name = "sigil-bridge-demo"

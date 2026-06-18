@@ -11,6 +11,7 @@ use sigil_header::SigilBlockHeaderV0;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
+use std::collections::HashMap;
 
 pub const BLOCK_SYNC_TOPIC: &str = "/sigil/g0/blocks";
 
@@ -21,12 +22,6 @@ pub enum SyncMsg {
     Block { height: u64, hash_hex: String, header_json: String },
     Have { best_height: u64, best_hash_hex: String },
 }
-// v0.7.6 content-addressed backfill now uses the shared `flux_p2p::backfill`
-// protocol (BackfillMsg = Manifest/Want/Blob) on the same topic — disambiguated
-// from SyncMsg by its serde tag. The inline copy was extracted into flux-p2p so
-// every consumer shares one verify-don't-trust backfill engine.
-use flux_p2p::backfill::{Backfill, BackfillMsg};
-
 // v0.7.7: point-to-point backfill over the flux-p2p request-response channel.
 // Wire format is shared byte-for-byte with sigil-node's server: the request is
 // `serde_json::to_vec(&BackfillReq { from, to })` and the response is
@@ -42,6 +37,27 @@ pub struct BackfillReq {
     /// JSON to lex). Old nodes ignore it and reply with full-block JSON (we fall back).
     #[serde(default)]
     pub headers_only: bool,
+    /// v0.33 (1M-blk/s lane): requested response codec. 0 = raw `'H'+bincode`,
+    /// 1 = `'Z'+zstd(bincode)` — MEASURED 14.0× on a real 4096-header chunk (1019 B →
+    /// ~73 B/header), beating lz4 (11.0×) at the same compress speed AND faster decomp.
+    /// Compat both ways: old servers ignore unknown JSON fields → reply 'H' (we still
+    /// decode it); old clients omit the field → serde defaults 0 → new servers reply 'H'.
+    #[serde(default)]
+    pub codec: u8,
+}
+
+/// Decompress a `'Z'` zstd wire body (pure-Rust ruzstd — no C in the Windows cross-build).
+/// CAPPED at 64 MB output: a malicious peer must not zstd-bomb the monitor (a real chunk
+/// decompresses to ≤ ~8 MB). None on any malformed/oversized stream — caller treats it
+/// exactly like an unparseable response (logged, peer benched), never a panic.
+fn zstd_decompress_body(body: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Read;
+    const MAX_OUT: u64 = 64 * 1024 * 1024;
+    let mut dec = ruzstd::StreamingDecoder::new(body).ok()?;
+    let mut out = Vec::new();
+    dec.take(MAX_OUT + 1).read_to_end(&mut out).ok()?;
+    if out.len() as u64 > MAX_OUT { return None; } // bomb guard
+    Some(out)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,7 +93,7 @@ fn ingest_block_value(
         let best = store.best_height();
         let synced = store.synced_to(); // contiguous progress (not raw count)
         let peer_best = {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
             s.blocks_synced = synced;        // contiguous tip (bar/⬇/chunk all use this)
             s.sync_total = s.blocks_synced;
             s.sync_cursor = synced;          // chunk shows [synced..synced+chunk] = next needed
@@ -92,17 +108,193 @@ fn ingest_block_value(
         };
         net.push_sync_progress(height, &hash_hex, peer_best, best);
         if let Some(block) = store.get_block(&hash_hex) {
-            new_blocks.lock().unwrap().push(block);
+            // v0.26 (DeepSeek-hardened): cap the hand-off buffer so a slow or absent consumer
+            // (headless `full-sync`, or a UI that briefly stalls) can't grow it unbounded over a
+            // multi-million-block sync — a real OOM risk on a long-running operator terminal.
+            // Keep the newest 10k; a live monitor only ever renders the tail anyway.
+            let mut nb = new_blocks.lock().unwrap_or_else(|e| e.into_inner());
+            nb.push(block);
+            let n = nb.len();
+            if n > 10_000 { nb.drain(0..n - 10_000); }
         }
         true
     } else {
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
         if height > s.peer_best_height {
             s.peer_best_height = height;
         }
         s.last_message_at = Some(Instant::now());
         false
     }
+}
+
+/// Ingest a backfill response body via the fast (out-of-order) store path. Handles both
+/// the headers-only bincode format (`'H'` + `bincode(Vec<Header>)`, new nodes) and the
+/// legacy full-block JSON (`BackfillResp`, old nodes). Returns the number of headers
+/// stored. The store's height index + contiguous `advance()` handle out-of-order arrival,
+/// so chunks from different peers can land in any order — the store IS the reorder buffer.
+fn ingest_backfill_bytes(bytes: &[u8], store: &mut BlockStore) -> usize {
+    // v0.33: 'Z' = zstd-compressed headers (codec=1 reply). Decompress (capped) → same
+    // bincode Vec<Header> body as 'H'. 14× less wire, measured on real chunks.
+    if bytes.first() == Some(&b'Z') {
+        return match zstd_decompress_body(&bytes[1..]) {
+            Some(body) => match bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&body) {
+                Ok(headers) => store.put_blocks_batch(&headers),
+                Err(_) => { crate::tlog!("[p2p-sync] resp: bad zstd header bincode ({} B)", bytes.len()); 0 }
+            },
+            None => { crate::tlog!("[p2p-sync] resp: zstd decompress failed ({} B)", bytes.len()); 0 }
+        };
+    }
+    // v0.10.0: collect the chunk's headers, then ONE batched write (single WAL-lock hold)
+    // instead of 2 locked puts per block — the per-block path was the ingest bottleneck.
+    if bytes.first() == Some(&b'H') {
+        match bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&bytes[1..]) {
+            Ok(headers) => store.put_blocks_batch(&headers),
+            Err(_) => { crate::tlog!("[p2p-sync] resp: bad header bincode ({} B)", bytes.len()); 0 }
+        }
+    } else if let Ok(resp) = serde_json::from_slice::<BackfillResp>(bytes) {
+        let headers: Vec<SigilBlockHeaderV0> = resp.blocks.iter()
+            .filter_map(|v| v.get("header").and_then(|h| serde_json::from_value(h.clone()).ok()))
+            .collect();
+        store.put_blocks_batch(&headers)
+    } else {
+        crate::tlog!("[p2p-sync] resp: unparseable ({} bytes)", bytes.len());
+        0
+    }
+}
+
+/// Max block height present in a backfill/probe response body (headers-bincode or
+/// legacy full-block JSON), or None if empty/unparseable. Used by the pull HEIGHT
+/// PROBE to seed `peer_best_height` from a peer's actual tip — the responder clamps
+/// the served range to its own tip (`hi = req.to.min(top)…`), so the max height in a
+/// reply to an open-ended `[frontier, u64::MAX]` request is a real lower bound on the
+/// peer's head, learnable without any gossip.
+fn max_header_height(bytes: &[u8]) -> Option<u64> {
+    if bytes.first() == Some(&b'Z') {
+        // v0.33: zstd reply — decompress (capped) then scan like the 'H' body.
+        let body = zstd_decompress_body(&bytes[1..])?;
+        return bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&body)
+            .ok()
+            .and_then(|hs| hs.iter().map(|h| h.height).max());
+    }
+    if bytes.first() == Some(&b'H') {
+        bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&bytes[1..])
+            .ok()
+            .and_then(|hs| hs.iter().map(|h| h.height).max())
+    } else if let Ok(resp) = serde_json::from_slice::<BackfillResp>(bytes) {
+        resp.blocks
+            .iter()
+            .filter_map(|v| v.get("header").and_then(|h| h.get("height")).and_then(|x| x.as_u64()))
+            .max()
+    } else {
+        None
+    }
+}
+
+/// Fetch the network's REAL tip height from the published `sigil-tip-live.json`.
+/// v0.17.0: the monitor's `/api/v1/status` mis-routes to a near-empty sigil-rpcd that
+/// returns height=2, so `set_known_tip` seeded `peer_best≈2` and the fast-snap (gated on
+/// `peer_best > synced+200k`) NEVER fired → genesis crawl at ~1 blk/s. The probe is
+/// clamped to frontier+CHUNK so it can't reveal the tip either. This signed-by-producer
+/// JSON carries the true height (~6.7M), so it's the reliable tip source for the snap.
+async fn fetch_live_tip() -> Option<u64> {
+    const URLS: [&str; 2] = [
+        "https://sigilgraph.fluxapp.xyz/sigil-tip-live.json",
+        "https://quillon.xyz/sigil-tip-live.json",
+    ];
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()?;
+    fetch_live_tip_inner(&client).await
+}
+
+/// Blocking variant — runs on a DEDICATED OS thread, isolated from the busy block_sync
+/// tokio runtime where the async fetch was non-deterministically starved (peer_best froze
+/// → the monitor parked behind the tip). This is the reliable peer_best source.
+fn fetch_live_tip_blocking() -> Option<u64> {
+    const URLS: [&str; 2] = [
+        "https://sigilgraph.fluxapp.xyz/sigil-tip-live.json",
+        "https://quillon.xyz/sigil-tip-live.json",
+    ];
+    let cb = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    // v0.29.5 (sync hardening): RACE the two CDN oracles instead of trying them sequentially.
+    // The old loop hit URL[0] first and, if that CDN was slow or down, BLOCKED the full 5 s
+    // timeout before even trying URL[1] — so a single bad edge node stalled cold-start tip
+    // acquisition (and every poll) for 5 s. Now both fire concurrently and the FIRST positive
+    // height wins, so the monitor's fast-snap fires as soon as ANY oracle answers. A dead CDN
+    // costs nothing; resilience to a one-CDN outage is free.
+    let (tx, rx) = std::sync::mpsc::channel::<Option<u64>>();
+    for url in URLS {
+        let tx = tx.clone();
+        let u = format!("{url}?cb={cb}");
+        std::thread::spawn(move || {
+            let h = (|| -> Option<u64> {
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(Duration::from_secs(5)).build().ok()?;
+                let v = client.get(&u).header("cache-control", "no-cache").send().ok()?
+                    .json::<serde_json::Value>().ok()?;
+                v.get("height").and_then(|x| x.as_u64()).filter(|&h| h > 0)
+            })();
+            let _ = tx.send(h); // recv may already be gone (a faster oracle won) — harmless
+        });
+    }
+    drop(tx); // so rx disconnects once both worker threads have answered
+    // First positive answer wins the race; otherwise drain until both report (or 6 s safety).
+    loop {
+        match rx.recv_timeout(Duration::from_secs(6)) {
+            Ok(Some(h)) => return Some(h),
+            Ok(None) => continue,            // one oracle failed — keep waiting for the other
+            Err(_) => return None,           // both failed / disconnected
+        }
+    }
+}
+
+// ── v0.32.5: persisted tip — OFFLINE-RESILIENT COLD START ───────────────────────────────────
+// The fast-snap needs a known network tip in peer_best. The eager-seed + poller fetch it from the
+// CDN oracles, but if BOTH are unreachable at boot (laptop offline, CDN outage, captive portal),
+// peer_best stays 0 and the monitor sits at "connecting…". Cache the last-known tip on disk each
+// time it advances; on the next cold start, seed peer_best from it so the snap can STILL fire to a
+// recent window. The live poller corrects it upward the instant an oracle answers. Only ever RAISES.
+fn tip_cache_path() -> std::path::PathBuf {
+    let dir = std::env::var("SIGIL_TOP_HOME").ok().map(std::path::PathBuf::from)
+        .or_else(|| std::env::var("HOME").ok().map(|h| std::path::Path::new(&h).join(".sigil-top")))
+        .unwrap_or_else(std::env::temp_dir);
+    dir.join("last-tip")
+}
+fn read_persisted_tip() -> Option<u64> {
+    std::fs::read_to_string(tip_cache_path()).ok()?.trim().parse::<u64>().ok().filter(|&h| h > 0)
+}
+fn persist_tip(h: u64) {
+    let p = tip_cache_path();
+    if let Some(dir) = p.parent() { let _ = std::fs::create_dir_all(dir); }
+    let _ = std::fs::write(p, h.to_string());
+}
+
+async fn fetch_live_tip_inner(client: &reqwest::Client) -> Option<u64> {
+    const URLS: [&str; 2] = [
+        "https://sigilgraph.fluxapp.xyz/sigil-tip-live.json",
+        "https://quillon.xyz/sigil-tip-live.json",
+    ];
+    // cache-buster (per-call) so a CDN/proxy never pins the tip; the publisher uses one too.
+    let cb = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    for url in URLS {
+        let u = format!("{url}?cb={cb}");
+        match client.get(&u).header("cache-control", "no-cache").send().await {
+            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                Ok(v) => {
+                    if let Some(h) = v.get("height").and_then(|x| x.as_u64()) {
+                        if h > 0 { return Some(h); }
+                    }
+                }
+                Err(e) => crate::tlog!("[tip] {url} json err: {e}"),
+            },
+            Err(e) => crate::tlog!("[tip] {url} get err: {e}"),
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, Default)]
@@ -113,6 +305,9 @@ pub struct P2PSyncState {
     pub peer_best_height: u64,
     pub blocks_synced: u64,
     pub last_message_at: Option<Instant>,
+    /// v0.26: when the tip-poller last got a fresh tip. UI shows STALE if this ages out
+    /// (oracle down / network partition) instead of a falsely confident "AT TIP".
+    pub last_tip_at: Option<Instant>,
     pub connected_delta: bool,
     pub connected_epsilon: bool,
     /// v0.7.0: Latest sync progress from the P2P mesh (consumed by TUI gauge).
@@ -129,6 +324,25 @@ pub struct P2PSyncState {
     /// smooth: the contiguous tip advances in bursts (gap-fills) and would read 0
     /// between jumps, while this climbs continuously while fetching.
     pub fetched_total: u64,
+    /// v0.22.26: the recent-window anchor (blocks below it are NOT downloaded — they are
+    /// attested by the fold-proof, not synced). `blocks_synced - base` = blocks REALLY
+    /// downloaded in the live window. Lets the UI tell the truth instead of reporting the
+    /// base-jumped `synced_to` as if the whole chain were downloaded.
+    pub base: u64,
+    /// v0.9.0: contiguous CRYPTOGRAPHICALLY-VERIFIED tip — blocks 0..verified each passed
+    /// precheck + parent-linkage (spine connects back to genesis). `blocks_synced` means
+    /// "downloaded"; THIS means "downloaded AND validated as one chain". The full-sync
+    /// completion gate watches this, not blocks_synced.
+    pub verified: u64,
+    /// v0.9.0: set when the verifier hit a real integrity break (NOT the clean download
+    /// frontier): "(height) reason". Empty while the chain is clean. Surfaced in the TUI
+    /// + makes `full-sync`/`verify-chain` exit non-zero.
+    pub verify_break: Option<String>,
+    /// v0.27 PROOF-OF-USEFUL-SYNC: idle-at-tip CPU re-derives the stored spine's BLAKE
+    /// hashes (same methodology as mining) to harden chain trust instead of idling.
+    /// Cumulative headers re-verified this session + the rolling rate (useful hashrate).
+    pub pos_total: u64,
+    pub pos_rate: f64,
 }
 
 pub struct P2PBlockSync {
@@ -140,7 +354,33 @@ pub struct P2PBlockSync {
 pub use super::block_store::StoredBlock;
 
 impl P2PBlockSync {
-    pub fn launch(mut store: BlockStore) -> Self {
+    /// v0.11.0: share the live sync state with the embedded explorer API (serve.rs)
+    /// so `/api/v1/{status,peers}` reflect the real mesh height / verified watermark /
+    /// peer count instead of being proxied to the remote node.
+    pub fn state_handle(&self) -> Arc<Mutex<P2PSyncState>> {
+        self.state.clone()
+    }
+
+    /// v0.13.1: seed the network tip from an EXTERNAL source (the HTTP status feed)
+    /// so the backfill refill fires even when gossip AND the P2P height-probe are
+    /// silent (a frozen or quiet mesh, or a producer that gossips nothing). Before
+    /// this, `peer_best_height` was learnable ONLY from inbound gossip / a probe
+    /// reply; on a quiet mesh it stayed 0, the `peer_best > 0` refill gate never
+    /// opened, and the sync sat on "connecting" forever. Only ever RAISES the tip.
+    pub fn set_known_tip(&self, height: u64) {
+        if height == 0 { return; }
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if height > s.peer_best_height {
+            s.peer_best_height = height;
+        }
+    }
+
+    /// `recent_only`: a far-behind MONITOR snaps its sync base to a recent window the
+    /// producers serve fast (instead of crawling genesis→tip at the rate slow/gappy
+    /// historical ranges dribble — the "1 blk/s" symptom). full-sync passes false.
+    pub fn launch(mut store: BlockStore, recent_only: bool) -> Self {
+        // SIGIL_SNAP=1 forces fast-snap even in full-sync (validation / "just track the tip").
+        let recent_only = recent_only || std::env::var("SIGIL_SNAP").is_ok();
         let state = Arc::new(Mutex::new(P2PSyncState::default()));
         let new_blocks = Arc::new(Mutex::new(Vec::new()));
         let (stop_tx, stop_rx) = mpsc::channel();
@@ -148,9 +388,71 @@ impl P2PBlockSync {
         let state_clone = state.clone();
         let new_blocks_clone = new_blocks.clone();
 
+        // v0.21: DEDICATED tip-poller thread. The monitor's fast-snap needs a FRESH live tip
+        // in peer_best; the in-runtime async fetch was non-deterministically starved by the
+        // backfill/verify workload (peer_best froze → the monitor parked behind the tip at
+        // 0 blk/s). A standalone OS thread with BLOCKING reqwest polls every 3s, immune to
+        // that contention, and seeds peer_best directly.
+        if recent_only {
+            // v0.35 (sync-starts-earlier, DeepSeek audit S2): the v0.23 SYNCHRONOUS CDN
+            // eager-seed is GONE — it blocked launch() for up to ~6 s of HTTP before the
+            // sync loop could even spawn, serializing exactly the startup it meant to speed
+            // up. The poller thread below fires its first fetch IMMEDIATELY on spawn (fetch
+            // precedes the first sleep), so the CDN tip still lands within one RTT — now in
+            // parallel with the mesh bootstrap instead of ahead of it.
+            // v0.32.5: OFFLINE-RESILIENT instant seed — the LAST-KNOWN tip persisted on a
+            // prior run (one disk read, microseconds) so the fast-snap can fire on cycle 1
+            // even before any oracle answers / fully offline. The poller corrects it upward
+            // the moment a CDN answers. Only ever raises peer_best.
+            if let Some(h) = read_persisted_tip() {
+                let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+                if h > s.peer_best_height { s.peer_best_height = h; }
+            }
+            // v0.21: DEDICATED tip-poller thread. The monitor's fast-snap needs a FRESH live
+            // tip in peer_best; the in-runtime async fetch was non-deterministically starved by
+            // the backfill/verify workload (peer_best froze → monitor parked behind the tip at
+            // 0 blk/s). A standalone OS thread with BLOCKING reqwest is immune to that
+            // contention and seeds peer_best directly.
+            // v0.23: ADAPTIVE cadence — poll every 1s during warmup (first ~15 polls) so a
+            // freshly-launched monitor pins to a fast-moving tip immediately, then settle to
+            // 3s steady-state (the tip moves ~100 blk/s, so 3s is ample once caught up).
+            let tip_state = state.clone();
+            thread::spawn(move || {
+                let mut polls: u32 = 0;
+                let mut fail_backoff = Duration::from_secs(0);
+                loop {
+                    match fetch_live_tip_blocking() {
+                        Some(h) => {
+                            fail_backoff = Duration::from_secs(0); // healthy → normal cadence
+                            let raised = {
+                                let mut s = tip_state.lock().unwrap_or_else(|e| e.into_inner());
+                                s.last_tip_at = Some(Instant::now());
+                                if h > s.peer_best_height { s.peer_best_height = h; true } else { false }
+                            };
+                            // v0.32.5: cache the advancing tip for the next offline cold start.
+                            if raised { persist_tip(h); }
+                        }
+                        None => {
+                            // v0.26: exponential backoff (cap 60s) on repeated oracle failure so we
+                            // don't hammer a dead endpoint; the UI surfaces STALE via last_tip_at.
+                            fail_backoff = (fail_backoff.max(Duration::from_secs(2)) * 2).min(Duration::from_secs(60));
+                        }
+                    }
+                    polls = polls.saturating_add(1);
+                    let base = if polls < 15 { Duration::from_secs(1) } else { Duration::from_secs(3) };
+                    thread::sleep(base.max(fail_backoff));
+                }
+            });
+        }
+
         thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all().build()
+            // v0.10.0: MULTI-thread runtime (3 workers). The v0.9.5 pipeline spawned chunk
+            // requests as independent tasks; on a current-thread runtime those only advance
+            // when the main loop awaits, so the live `SyncProgress` event flood starved them
+            // → every request timed out → synced stuck at 0. Worker threads run the request
+            // tasks truly concurrently, fully decoupled from the loop.
+            let rt = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(3).enable_all().build()
             {
                 Ok(rt) => rt,
                 Err(_) => return,
@@ -165,42 +467,101 @@ impl P2PBlockSync {
                     return;
                 }
                 crate::tlog!("[p2p-sync] started on sigil-g0 mesh (port 9501)");
+                // Share net into the spawned request tasks. All hot methods are &self;
+                // start() (the only &mut) already ran. Arc → Send + 'static for tokio::spawn.
+                let net = std::sync::Arc::new(net);
 
                 // Resume from the PERSISTED store: seed the synced count + cursor from
                 // what's already on disk so a restart/update CONTINUES instead of
                 // Resume from the CONTIGUOUS synced_to (blocks 0..synced_to all present),
                 // NOT best_height (a stray live block inflates it). The cursor walks
                 // forward from here and never re-walks from 0.
+                // v0.10.0 GENESIS ANCHOR: SIGIL's height-0 genesis is minted locally and is NOT
+                // served by the range-backfill endpoint once pruned from the producer's RAM, so a
+                // `from=0` request returns empty and `synced_to` could never leave 0. Anchor the
+                // contiguous frontier (and verification) at the lowest servable height (1 for SIGIL;
+                // env-overridable). Below `base` is never required.
+                let sync_base: u64 = std::env::var("SIGIL_SYNC_BASE").ok()
+                    .and_then(|s| s.parse().ok()).unwrap_or(1);
+                store.set_base(sync_base);
                 let resume_h = store.synced_to();
                 {
-                    let mut s = state_clone.lock().unwrap();
+                    let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                     s.running = true;
                     s.blocks_synced = resume_h;
-                }
-
-                // v0.7.6: content-addressed backfill via the shared flux_p2p::backfill
-                // engine (flux-sync over flux-aether). Path overridable; default under
-                // $HOME. Backfill is simply disabled if the store can't open (graceful).
-                let store_dir = std::env::var("SIGIL_SYNC_STORE").unwrap_or_else(|_| {
-                    std::env::var("HOME")
-                        .map(|h| format!("{h}/.sigil-sync-blocks"))
-                        .unwrap_or_else(|_| "sigil-sync-blocks".into())
-                });
-                let mut bf = Backfill::open(&store_dir, "sigil-g0").ok();
-                if bf.is_none() {
-                    crate::tlog!("[p2p-sync] flux_p2p::backfill store unavailable — backfill disabled");
+                    s.verified = store.verified_to(); // v0.9.0: resume the verified watermark too
                 }
 
                 // Subscribe to blocks — event-driven, no polling
                 let mut block_rx = net.subscribe(BLOCK_SYNC_TOPIC);
-                let tick = Duration::from_secs(5);
-                let mut last_announce = Instant::now();
-                let mut last_bf = Instant::now();
-                let mut sync_cursor: u64 = resume_h; // continue from persisted tip, not 0
-                // Per-peer consecutive-timeout counter: a behind/slow peer (can't serve
-                // the range) is benched after 2 misses so it stops gating cycles; we
-                // retry the whole set when none are healthy. Converges to the fast peers.
-                let mut peer_fails: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
+
+                // ── v0.9.5 PIPELINED SLIDING-WINDOW BACKFILL ──────────────────────────
+                // The v0.7.x design fired one request per peer then `join_all`-BARRIERED on
+                // ALL of them with a 6s timeout — so the single slowest/behind peer gated
+                // every cycle to 6s (net ≈4.9k blk/s, want ≥5k steadfast). This replaces the
+                // barrier with a continuously-refilled FuturesUnordered: up to MAX_INFLIGHT
+                // independent chunk requests stream in parallel; a slow peer never blocks the
+                // fast ones, and the store's height-index + advance() reorder out-of-order
+                // arrivals (the store IS the buffer). Reviewed with DeepSeek-V4 2026-06-09.
+                const CHUNK: u64 = 4096;            // v0.15.1 STABILITY: 8192 (8 MB) chunks landed in
+                                                   // bursts then stalled (2k→2 blk/s swing). 4096 halves
+                                                   // tail latency so a stuck slot frees faster + bursts smooth.
+                const MAX_INFLIGHT: usize = 12;     // v0.15.1: slightly fewer slots so they don't all pile
+                                                    // onto a stalled frontier and crater the rate.
+                // Look-ahead cap must be TIGHT: a large window lets next_start race far ahead of a
+                // stalled frontier, so all MAX_INFLIGHT slots get consumed by high-range chunks that
+                // don't advance synced_to while the lead chunk starves (v0.10.0 frontier-stall bug).
+                // v0.12.1: was 4s — far too tight. The producers serve backfill while
+                // also producing ~100 blk/s (≈54% CPU), so a ~2 MB chunk over WAN
+                // routinely takes >4s → EVERY request timed out → fetched_total stuck at
+                // 0 → the UI sat at "connecting…" forever. 15s lets a slow-but-alive
+                // serve complete; dead peers are still benched on timeout and rerouted.
+                const REQ_TIMEOUT: Duration = Duration::from_secs(10); // v0.15.1: 15→10s — free a stuck slot faster (4 MB chunk lands well under 10s); still tolerant of slow WAN serves
+                const PROBE_EVERY: Duration = Duration::from_millis(500); // pull-height probe cadence
+                const BENCH: Duration = Duration::from_secs(4); // v0.15.1: 8→4s — faster peer recovery so the pool doesn't thin out
+                const EMPTY_BENCH: Duration = Duration::from_secs(10); // v0.15.1: 45→10s — THE stall fix: 45s drained the 4-peer pool to ~0 on empty ranges → 2 blk/s. 10s rotates away yet keeps peers available.
+                let _ = resume_h; // frontier is read live from the store each cycle (anchored, not cursored)
+                // Completed request results flow back from the spawned tasks here.
+                let (done_tx, mut done_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<(u64, String, Option<Vec<u8>>)>();
+                // pull HEIGHT-PROBE replies (open-ended range → peer's clamped tip)
+                let (probe_tx, mut probe_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+                // v0.17.0: the TRUE network tip from the published sigil-tip-live.json (the
+                // /api/v1/status the monitor polls returns height=2 → snap never fired).
+                let (tip_tx, mut tip_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+                let mut last_tip_fetch = Instant::now() - Duration::from_secs(60);
+                let mut inflight: usize = 0;                          // outstanding spawned requests
+                let mut assigned: std::collections::HashSet<u64> = std::collections::HashSet::new();
+                let mut peer_bench: HashMap<String, Instant> = HashMap::new(); // peer.to_string() → benched-until
+                // v0.31.6: per-peer KNOWN TOP height (max height it has served). Lets the refill
+                // skip peers that are BEHIND the frontier — they'd just return EMPTY (the "producers
+                // serving empty for the head" symptom). Updated from every response.
+                let mut peer_top: HashMap<String, (u64, Instant)> = HashMap::new();
+                let mut rr: usize = 0;                                 // round-robin peer cursor
+                let mut last_state = Instant::now() - Duration::from_secs(1);
+                let mut fetched_session: u64 = 0;                      // headers stored this session
+                let mut last_verify = Instant::now() - Duration::from_secs(2); // slow verify+flush timer
+                let mut last_synced_seen: u64 = resume_h;             // dynamic-base detector
+                let mut last_advance_t = Instant::now();
+                // v0.31 DEEP DEBUG: session counters + a periodic comprehensive [DBG] snapshot.
+                let (mut lead_n, mut timeout_n, mut empty_n, mut req_n): (u64, u64, u64, u64) = (0, 0, 0, 0);
+                let mut bytes_session: u64 = 0;
+                let mut last_dbg = Instant::now() - Duration::from_secs(5);
+                let loop_start = Instant::now();
+                // v0.27 proof-of-useful-sync local accumulators
+                let mut pos_cursor: u64 = 0;
+                let mut pos_acc: u64 = 0;
+                let mut pos_total_session: u64 = 0;
+                let mut pos_t = Instant::now();
+                // v0.28 batched useful-sync: cache the window once + gossip a checkpoint
+                let mut pos_window: Vec<sigil_header::SigilBlockHeaderV0> = Vec::new();
+                let mut pos_window_base: u64 = 0;
+                let mut ckpt_t = Instant::now();
+                let mut pos_bytes: Vec<u8> = Vec::new(); // v0.29.5 cached window-digest buffer for SIMD blake3
+                let mut last_probe = Instant::now() - Duration::from_secs(10); // pull-height probe timer
+                // v0.15.2: far-behind monitor snaps to a recent window once peer_best is known.
+                const RECENT_WINDOW: u64 = 2_048;  // v0.21: pin the base just 1 chunk under the live tip
+                let mut snapped = false;
 
                 loop {
                     if stop_rx.try_recv().is_ok() {
@@ -208,12 +569,15 @@ impl P2PBlockSync {
                         break;
                     }
 
-                    // Process block messages from subscription
-                    while let Ok((_topic, data)) = block_rx.try_recv() {
-                        // sigil-node broadcasts raw Block JSON ({"header":{…},…})
-                        // on TOPIC_BLOCKS. Parse the header out and STORE it — THIS is
-                        // what fills the DB genesis→tip. Also accept legacy
-                        // {"header_json":"…"}; ignore our own SyncReq echoes.
+                    // Process gossiped live-tip blocks — BOUNDED per iteration. The live mesh
+                    // (incl. our local catching-up node) floods this topic; an UNBOUNDED drain
+                    // here blocks the loop for seconds (each block costs a serde_json hash),
+                    // which starved the whole pipeline (v0.10.0 synced-stuck bug). Cap it so the
+                    // loop stays responsive; leftover messages drain over the next iterations.
+                    let mut gdrained = 0u32;
+                    while gdrained < 48 {  // v0.25.5: smaller drain — less serde+blake per iter (CPU)
+                        let (_topic, data) = match block_rx.try_recv() { Ok(x) => x, Err(_) => break };
+                        gdrained += 1;
                         let v: serde_json::Value = match serde_json::from_slice(&data) {
                             Ok(v) => v,
                             Err(_) => continue,
@@ -226,8 +590,9 @@ impl P2PBlockSync {
                     for event in net.drain_events() {
                         match event {
                             flux_p2p::SwarmAppEvent::PeerConnected { peer_id, addr } => {
-                                let mut s = state_clone.lock().unwrap();
+                                let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                                 let pc = net.peer_count();
+                                let prev = s.peer_count;
                                 s.peer_count = pc;
                                 s.mesh_peer_count = pc;
                                 // Δ/Ε detection by IP — the peer_id is a base58 hash and
@@ -239,145 +604,500 @@ impl P2PBlockSync {
                                 if addr.contains("89.149.241.126") {
                                     s.connected_epsilon = true;
                                 }
-                                crate::tlog!("[p2p-sync] peer + {peer_id} @ {addr} (total: {pc})");
+                                // v0.31 DETAILED MESH DEBUG: name the fleet node by IP + show the
+                                // peer-count transition, so "caps at 3/4 peers" is diagnosable from
+                                // the log — you see exactly which node joins and which never does.
+                                let node = if addr.contains("89.149.241.126") { "epsilon" }
+                                    else if addr.contains("5.79.79.158") { "delta" }
+                                    else if addr.contains("109.205.176.60") { "gamma" }
+                                    else if addr.contains("185.182.185.227") { "beta" }
+                                    else { "peer" };
+                                crate::tlog!("[mesh] ＋CONNECT {node:<8} {peer_id} @ {addr}   peers {prev}→{pc}");
                             }
-                            flux_p2p::SwarmAppEvent::PeerDisconnected { .. } => {
+                            flux_p2p::SwarmAppEvent::PeerDisconnected { peer_id } => {
                                 let pc = net.peer_count();
-                                let mut s = state_clone.lock().unwrap();
+                                let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                let prev = s.peer_count;
                                 s.peer_count = pc;
                                 s.mesh_peer_count = pc;
                                 if pc == 0 {
                                     s.connected_delta = false;
                                     s.connected_epsilon = false;
                                 }
+                                // v0.31 DETAILED MESH DEBUG: which peer dropped + the new count. A
+                                // peer that repeatedly CONNECTs then DROPs is the rotating-identity
+                                // signature (the bug the stable peer-id in for_sigil v0.31 fixes).
+                                crate::tlog!("[mesh] －DROP    {peer_id}   peers {prev}→{pc}{}",
+                                    if pc == 0 { "   ⚠ MESH EMPTY — no peers" } else { "" });
                             }
                             flux_p2p::SwarmAppEvent::SyncProgress { height, hash_hex, peer_best_height, total_synced, peer_count: _ } => {
-                                let mut s = state_clone.lock().unwrap();
-                                s.sync_height = height;
+                                let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                // v0.18.5: the gossiped `height` is the NETWORK TIP, not our sync
+                                // progress. Do NOT clobber sync_height with it (that made the
+                                // dashboard show the ~6.9M tip as synced_to and a 0 blk/s rate while
+                                // the real backfill frontier climbed underneath). peer_best (the
+                                // target) is updated below; sync_height stays the real frontier set
+                                // in the fast-periodic from store.synced_to().
+                                let _gossiped_tip = height;
                                 s.sync_hash_hex = hash_hex;
                                 s.sync_total = total_synced;
                                 if peer_best_height > s.peer_best_height {
                                     s.peer_best_height = peer_best_height;
                                 }
-                                crate::tlog!("[p2p-sync] progress h={height} peer_best={peer_best_height} total={total_synced}");
+                                // NOTE: no per-event log here — the live mesh emits thousands of
+                                // SyncProgress/sec; eprintln-ing each one starved the sync loop
+                                // (v0.9.5 synced-stuck-at-0 bug). Progress is surfaced via state.
                             }
                             _ => {}
                         }
                     }
 
-                    // Fast backfill: walk genesis→tip in chunks via the flux-p2p
-                    // request-response channel (point-to-point, NOT gossip). We pick a
-                    // connected peer, send a BackfillReq{from,to}, and ingest every block in
-                    // the BackfillResp. The cursor LOOPS continuously (0→tip→0) so dropped
-                    // chunks get refilled — this is what actually reaches 100% (the old
-                    // gossip cursor stalled partway, e.g. "stuck at 22%").
-                    //
-                    // PARALLEL backfill: fan out one request per connected peer, each for a
-                    // DISTINCT chunk, and await them concurrently (join_all). One-at-a-time
-                    // inline await was the bottleneck — each 8192-block (~24MB) response takes
-                    // seconds, so serializing them capped throughput; N peers in parallel is ~Nx.
-                    // Tight cadence (50ms) so cycles pipeline back-to-back.
-                    if last_bf.elapsed() >= Duration::from_millis(50) {
-                        last_bf = Instant::now();
-                        let (peer_best, have) = {
-                            let s = state_clone.lock().unwrap();
-                            (s.peer_best_height, s.blocks_synced)
-                        };
-                        if peer_best > 0 && have < peer_best {
-                            let all_peers = net.connected_peers();
-                            // Route only to peers that are actually serving: bench a peer
-                            // after 2 consecutive misses (behind/slow → can't serve the
-                            // range) so it stops gating cycles. Retry the whole set when
-                            // none are healthy. Converges to the fast peers (e.g. epsilon).
-                            let mut candidates: Vec<_> = all_peers.iter().cloned()
-                                .filter(|p| *peer_fails.get(&p.to_string()).unwrap_or(&0) < 2).collect();
-                            if candidates.is_empty() && !all_peers.is_empty() {
-                                peer_fails.clear();
-                                candidates = all_peers.clone();
+                    // ── DRAIN completed request results from the spawned tasks ───────────
+                    while let Ok((start, peer, bytes)) = done_rx.try_recv() {
+                        inflight = inflight.saturating_sub(1);
+                        assigned.remove(&start);
+                        match bytes {
+                            Some(b) => {
+                                peer_bench.remove(&peer);              // answered → healthy again
+                                let got = ingest_backfill_bytes(&b, &mut store);
+                                bytes_session += b.len() as u64;
+                                if got > 0 { lead_n += 1; } else { empty_n += 1; }
+                                // v0.31.6: learn this peer's TOP. LEAD → its served max height;
+                                // EMPTY at the frontier → it's BEHIND `start`, so cap its known top
+                                // just below start. The refill uses this to stop sending the head to
+                                // peers that would only answer EMPTY (the "serving empty for the head").
+                                if got > 0 {
+                                    if let Some(mx) = max_header_height(&b) {
+                                        peer_top.insert(peer.clone(), (mx, Instant::now()));
+                                    }
+                                } else if start >= (store.synced_to() / CHUNK) * CHUNK {
+                                    // behind the frontier — record a fresh "top < start" marker
+                                    peer_top.insert(peer.clone(), (start.saturating_sub(1), Instant::now()));
+                                }
+                                if start <= store.synced_to() + CHUNK {
+                                    let hd = if b.first()==Some(&b'H') { bincode::deserialize::<Vec<sigil_header::SigilBlockHeaderV0>>(&b[1..]).ok() } else { None };
+                                    let (mn,mx) = hd.as_ref().map(|h| (h.iter().map(|x|x.height).min().unwrap_or(0), h.iter().map(|x|x.height).max().unwrap_or(0))).unwrap_or((0,0));
+                                    crate::tlog!("[D] {} start={start} got={got} h=[{mn}..{mx}] bytes={} synced={} inflight={inflight}", if got>0 {"LEAD"} else {"EMPTY"}, b.len(), store.synced_to());
+                                }
+                                fetched_session += got as u64;
+                                // An EMPTY response over a still-needed range means this peer can't
+                                // serve that range (e.g. it pruned genesis / lacks early offsets).
+                                // Re-queue to the FRONT (retry promptly) AND bench this peer briefly
+                                // so the range rotates to a peer that DOES serve it — otherwise the
+                                // lead/genesis chunk round-robins back to the same empty peer forever
+                                // and the frontier never advances (v0.10.0 synced-stuck-at-0 bug).
+                                let fc = (store.synced_to() / CHUNK) * CHUNK;
+                                if got == 0 && start >= fc {
+                                    // EMPTY over a needed range = this peer doesn't HAVE this range
+                                    // (e.g. a still-catching-up local node above its own height).
+                                    // Bench it LONG so the frontier routes to full peers; the
+                                    // frontier-anchored refill re-requests the range automatically.
+                                    peer_bench.insert(peer, Instant::now() + EMPTY_BENCH);
+                                }
                             }
-                            if !candidates.is_empty() {
-                                const CHUNK: u64 = 8192;
-                                // Walk FORWARD from the contiguous synced_to; one consecutive
-                                // chunk per healthy peer, rotating which peer gets the lead chunk.
-                                let cursor = store.synced_to();
-                                state_clone.lock().unwrap().sync_cursor = cursor; // TUI
-                                let netref = &net;
-                                let nc = candidates.len();
-                                let rot = sync_cursor as usize;
-                                let reqs = (0..nc).map(|i| {
-                                    let from = cursor + i as u64 * CHUNK;
-                                    let peer = candidates[(i + rot) % nc];
-                                    let payload = serde_json::to_vec(&BackfillReq { from, to: from + CHUNK, headers_only: true }).unwrap();
-                                    // 3s cap so a slow/dead peer can't gate the cycle.
-                                    async move {
-                                        let r = match tokio::time::timeout(Duration::from_secs(3), netref.send_request(peer, payload)).await {
-                                            Ok(Ok(bytes)) => Some(bytes),
-                                            _ => None,
-                                        };
-                                        (peer, r)
-                                    }
-                                });
-                                crate::tlog!("[p2p-sync] backfill: {} reqs ({} healthy/{} peers) from {} (have {have}/{peer_best})", nc, candidates.len(), all_peers.len(), cursor);
-                                let t_net0 = Instant::now();
-                                let results = futures::future::join_all(reqs).await;
-                                let t_net = t_net0.elapsed();
-                                let t_ing0 = Instant::now();
-                                // Lean batch ingest: store via the fast path, advance + update
-                                // TUI state ONCE. Track per-peer responsiveness.
-                                let mut got = 0usize;
-                                for (peer, r) in results {
-                                    let bytes = match r {
-                                        Some(b) => { peer_fails.insert(peer.to_string(), 0); b }
-                                        None => { *peer_fails.entry(peer.to_string()).or_insert(0) += 1; continue; }
-                                    };
-                                    if bytes.first() == Some(&b'H') {
-                                        // headers-only bincode (new node, fast path)
-                                        match bincode::deserialize::<Vec<sigil_header::SigilBlockHeaderV0>>(&bytes[1..]) {
-                                            Ok(headers) => {
-                                                for header in headers { let _ = store.put_block_fast(header); got += 1; }
-                                            }
-                                            Err(_) => crate::tlog!("[p2p-sync] resp: bad header bincode ({} B)", bytes.len()),
-                                        }
-                                    } else if let Ok(resp) = serde_json::from_slice::<BackfillResp>(&bytes) {
-                                        // full-block JSON (old node, fallback)
-                                        for v in &resp.blocks {
-                                            if let Some(h) = v.get("header") {
-                                                if let Ok(header) = serde_json::from_value::<sigil_header::SigilBlockHeaderV0>(h.clone()) {
-                                                    let _ = store.put_block_fast(header);
-                                                    got += 1;
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        crate::tlog!("[p2p-sync] resp: unparseable ({} bytes)", bytes.len());
-                                    }
+                            None => {
+                                timeout_n += 1;
+                                if start <= store.synced_to() + CHUNK {
+                                    crate::tlog!("[D] TIMEOUT start={start} peer={} synced={}", &peer[..8.min(peer.len())], store.synced_to());
                                 }
-                                store.advance();
-                                let now_synced = store.synced_to();
-                                {
-                                    let mut s = state_clone.lock().unwrap();
-                                    s.blocks_synced = now_synced;
-                                    s.sync_total = now_synced;
-                                    s.sync_cursor = now_synced;
-                                    s.sync_height = now_synced;
-                                    s.fetched_total += got as u64;
-                                    if now_synced > s.peer_best_height { s.peer_best_height = now_synced; }
-                                    s.last_message_at = Some(Instant::now());
-                                }
-                                crate::tlog!("[p2p-sync] CYCLE: {} blk · net {:?} · ingest {:?} · synced {} → {}",
-                                    got, t_net, t_ing0.elapsed(), cursor, now_synced);
-                                sync_cursor = sync_cursor.wrapping_add(1); // rotation counter
+                                // Timed out: bench the peer briefly so the fast peers carry the load.
+                                // Refill re-requests this range (now clear of `assigned`) next cycle.
+                                peer_bench.insert(peer, Instant::now() + BENCH);
                             }
                         }
                     }
 
-                    // Slow announce: peer-count refresh.
-                    if last_announce.elapsed() >= tick {
-                        last_announce = Instant::now();
-                        state_clone.lock().unwrap().peer_count = net.peer_count();
+                    // ── REFILL: keep the next MAX_INFLIGHT chunks AT THE FRONTIER in flight ──
+                    // FRONTIER-ANCHORED (not a monotonic cursor): every cycle we (re)issue the next
+                    // MAX_INFLIGHT consecutive chunks starting at the CURRENT contiguous frontier,
+                    // skipping any already in flight. So the frontier chunk is ALWAYS being fetched;
+                    // a stuck/slow chunk's `assigned` entry clears on completion/timeout and it's
+                    // re-requested to a ROTATING peer next cycle. No cursor / retry queue / look-ahead
+                    // racing past the frontier — that machinery starved the lead chunk (the chunk that
+                    // actually advances synced_to) while slots went to far-ahead ranges. Out-of-order
+                    // arrivals are reordered by the store (height index + advance); re-requests are
+                    // idempotent. advance() here keeps the frontier fresh the instant a chunk lands.
+                    store.advance();
+                    let frontier_chunk = ((store.synced_to() / CHUNK) * CHUNK).max(sync_base);
+
+                    // ── PROCESS HEIGHT-PROBE replies: seed peer_best from the peer's real tip ──
+                    while let Ok(b) = probe_rx.try_recv() {
+                        let got = ingest_backfill_bytes(&b, &mut store); // probe headers are free backfill
+                        fetched_session += got as u64;
+                        if let Some(maxh) = max_header_height(&b) {
+                            let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                            if maxh > s.peer_best_height { s.peer_best_height = maxh; }
+                        }
                     }
 
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    // ── PULL HEIGHT PROBE (the gossip⇄backfill deadlock fix) ──────────────────
+                    // peer_best was previously learnable ONLY from inbound gossip (live-tip
+                    // ingest / SyncProgress). A node that connects but receives no gossip
+                    // (gossipsub graft failure / silent producers) kept peer_best=0, so the
+                    // refill below — gated on `peer_best > 0` and itself a PULL (send_request) —
+                    // never fired a single backfill and the node stuck at base forever. This
+                    // asks a healthy peer for the open-ended range [frontier, u64::MAX]; the
+                    // responder CLAMPS the served range to its own tip (sigil-node main.rs:
+                    // `hi = req.to.min(top)…`), so the reply's max height is a real lower bound
+                    // on that peer's head — no responder change, no gossip dependency. Re-probed
+                    // every PROBE_EVERY so peer_best tracks the tip and the refill self-sustains
+                    // all the way to the true head (each reply also lands up to 8192 free headers).
+                    if last_probe.elapsed() >= PROBE_EVERY {
+                        let now = Instant::now();
+                        let mut healthy: Vec<_> = net.connected_peers().into_iter()
+                            .filter(|p| peer_bench.get(&p.to_string()).map_or(true, |&u| now >= u))
+                            .collect();
+                        // v0.17: HEALTHY-PEER FLOOR. With only ~4 peers a burst of timeouts
+                        // could bench the WHOLE pool, collapsing the backfill to ~0 blk/s until
+                        // benches expired — the erratic 57k/77k/127k progress. Never stall while
+                        // peers are connected: if every peer is benched, fall back to the full
+                        // set so the probe/refill keeps firing best-effort (bench is advisory).
+                        if healthy.is_empty() { healthy = net.connected_peers(); }
+                        if let Some(&peer) = healthy.first() {
+                            // v0.35 (DeepSeek audit S5): stamp the timer ONLY when a probe is
+                            // actually SENT. It used to be stamped before the peer check, so
+                            // with 0 peers connected (the first loop ticks, pre-bootstrap) the
+                            // overdue first probe was BURNED and the real first probe waited an
+                            // extra PROBE_EVERY after the first PeerConnected. Now the probe
+                            // fires on the very next 10ms tick after a peer lands.
+                            last_probe = Instant::now();
+                            let payload = serde_json::to_vec(
+                                &BackfillReq { from: frontier_chunk, to: u64::MAX, headers_only: true, codec: 1 }
+                            ).unwrap();
+                            let n = net.clone();
+                            let tx = probe_tx.clone();
+                            tokio::spawn(async move {
+                                let r = tokio::time::timeout(REQ_TIMEOUT, n.send_request(peer, payload)).await;
+                                if let Ok(Ok(b)) = r { let _ = tx.send(b); }
+                            });
+                        }
+                    }
+
+                    // v0.17.0: refresh the TRUE tip from sigil-tip-live.json every 3s and seed
+                    // peer_best — the reliable signal that makes the fast-snap actually fire
+                    // (the /api/v1/status the monitor reads returns height=2). Spawned so the
+                    // HTTP round-trip never blocks the sync loop; result drained next tick.
+                    while let Ok(h) = tip_rx.try_recv() {
+                        let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        let old = s.peer_best_height;
+                        if h > s.peer_best_height { s.peer_best_height = h; }
+                        crate::tlog!("[tipfetch] got {} (peer_best {} -> {})", h, old, s.peer_best_height);
+                    }
+                    if last_tip_fetch.elapsed() >= Duration::from_secs(3) {
+                        last_tip_fetch = Instant::now();
+                        let tx = tip_tx.clone();
+                        tokio::spawn(async move {
+                            if let Some(h) = fetch_live_tip().await { let _ = tx.send(h); }
+                        });
+                    }
+
+                    let peer_best = state_clone.lock().unwrap_or_else(|e| e.into_inner()).peer_best_height;
+
+                    // v0.15.2: MONITOR FAST-SNAP. A monitor that's hundreds of thousands of
+                    // blocks behind gains nothing from crawling genesis→tip at the rate the
+                    // slow/gappy historical ranges dribble (the "1 blk/s" symptom). Once we
+                    // know a peer's tip, jump the base to a recent window the producers serve
+                    // fast — the monitor reaches the live tip in seconds. Full chain integrity
+                    // is the fold-proof's job, not a 6M-block contiguous download. (full-sync
+                    // passes recent_only=false and keeps the genesis-anchored crawl.)
+                    // v0.21: CONTINUOUSLY re-snap to chase the live tip. A one-shot snap parked
+                    // ~10k under the tip on a gappy final range and never recovered. Re-snap
+                    // whenever synced falls RESNAP_GAP behind the tip so the monitor jumps the
+                    // gap and stays pinned at the head. (full-sync keeps recent_only=false.)
+                    // v0.21: drive the base to (live tip − RECENT_WINDOW) EVERY tick — monotonic
+                    // (`new_base > base`). No threshold/one-shot to get stuck on: as long as the
+                    // tip-fetch keeps peer_best fresh, the base (and synced) chase the head and the
+                    // monitor never parks behind. (full-sync keeps recent_only=false.)
+                    // v0.27: re-snap only when we've fallen a MEANINGFUL amount behind the tip,
+                    // not every poll — and do NOT clear `assigned`. The old per-poll snap +
+                    // assigned.clear() re-issued the whole frontier window every 1-3s, which on a
+                    // lossy network (the user's box) became a request/timeout STORM (and churned
+                    // memory with the growing in-flight responses). The displayed sync height is
+                    // peer_best regardless of base, so the backfill base only needs to stay in the
+                    // servable recent window — coarse re-snaps are plenty. Stale below-base chunks
+                    // still in flight are simply ignored by the store on arrival (height < base).
+                    // FIX: snap to the SERVED top (best_height = max block actually RECEIVED via
+                    // backfill/probe), NOT the gossip peer_best. The bootstrap nodes are BEHIND the
+                    // gossip tip and return EMPTY (got=0) for it, so snapping to peer_best requested
+                    // unservable ranges → 0 downloaded. best_height tracks what the mesh actually
+                    // serves, keeping the window in the servable range so downloaded climbs.
+                    let served_top = store.best_height();
+                    if recent_only && served_top > store.synced_to() + RECENT_WINDOW {
+                        let new_base = served_top.saturating_sub(RECENT_WINDOW).max(sync_base);
+                        if new_base > store.base() {
+                            store.set_base(new_base);
+                            store.advance();
+                            last_synced_seen = store.synced_to();
+                            last_advance_t = Instant::now();
+                            snapped = true;
+                            crate::tlog!("[sync] track SERVED top {} → base {} (synced {}, gossip tip {})", served_top, new_base, store.synced_to(), peer_best);
+                        }
+                    }
+
+                    // v0.21.1 FIX (0 blk/s after snap): `frontier_chunk` was computed at the TOP of
+                    // the loop from synced_to() BEFORE the snap above moved the base. So once a snap
+                    // fired, the refill below kept requesting GENESIS-area chunks (start=1,4097,…) —
+                    // blocks BELOW the new base that ingest but never advance synced_to → the monitor
+                    // displayed at the base yet sat at 0.0% / 0 blk/s forever. Recompute the frontier
+                    // from the CURRENT (post-snap) synced_to so the refill targets the snapped window.
+                    let frontier_chunk = ((store.synced_to() / CHUNK) * CHUNK).max(sync_base);
+
+                    if peer_best > 0 {
+                        let now = Instant::now();
+                        let mut healthy: Vec<_> = net.connected_peers().into_iter()
+                            .filter(|p| peer_bench.get(&p.to_string()).map_or(true, |&u| now >= u))
+                            .collect();
+                        // v0.17: HEALTHY-PEER FLOOR. With only ~4 peers a burst of timeouts
+                        // could bench the WHOLE pool, collapsing the backfill to ~0 blk/s until
+                        // benches expired — the erratic 57k/77k/127k progress. Never stall while
+                        // peers are connected: if every peer is benched, fall back to the full
+                        // set so the probe/refill keeps firing best-effort (bench is advisory).
+                        if healthy.is_empty() { healthy = net.connected_peers(); }
+                        // v0.31.6: drop peers KNOWN to be behind the frontier — they only answer
+                        // EMPTY for the head (the "producers serving empty for the head" symptom),
+                        // which also wasted redundancy slots and benched good peers. Keep peers with
+                        // an UNKNOWN top (give them a chance) and those at/near the frontier. Fall
+                        // back to the full set if this empties it (never stall pre-probe).
+                        {
+                            let fc = frontier_chunk;
+                            let now = Instant::now();
+                            let caught: Vec<_> = healthy.iter().cloned()
+                                .filter(|p| match peer_top.get(&p.to_string()) {
+                                    // exclude ONLY if we recently (≤4s) saw it behind the frontier;
+                                    // unknown or stale → include so a caught-up peer gets re-tried.
+                                    Some(&(top, seen)) => top + CHUNK >= fc || now.duration_since(seen).as_secs() > 4,
+                                    None => true,
+                                })
+                                .collect();
+                            // Only adopt the filtered set if it still has enough peers for
+                            // redundancy — else excluding behind peers just concentrates load on
+                            // 1 peer and CAUSES timeouts (worse than the occasional empty).
+                            if caught.len() >= 2 { healthy = caught; }
+                        }
+                        if !healthy.is_empty() {
+                            // v0.29 (chronos-driven): the FRONTIER chunk (i==0) is the ONE that
+                            // advances `synced`. On a lossy network a single peer's timeout stalls
+                            // it for a whole cycle → the [D] TIMEOUT storm / erratic progress.
+                            // chronos showed redundancy lifts lossy delivery 75%→98%, so request the
+                            // frontier from up to FRONTIER_REDUNDANCY peers IN PARALLEL — it lands as
+                            // soon as ANY responds; duplicate replies are idempotent (store dedups by
+                            // height). Look-ahead chunks (i>0) stay single-peer to avoid flooding.
+                            const FRONTIER_REDUNDANCY: usize = 3;
+                            for i in 0..(MAX_INFLIGHT as u64) {
+                                if inflight >= MAX_INFLIGHT { break; }
+                                let start = frontier_chunk + i * CHUNK;
+                                if start >= peer_best { break; }          // past the tip
+                                if !assigned.insert(start) { continue; }  // already in flight
+                                let fanout = if i == 0 { FRONTIER_REDUNDANCY.min(healthy.len()).max(1) } else { 1 };
+                                for k in 0..fanout {
+                                    if inflight >= MAX_INFLIGHT { break; }
+                                    let peer = healthy[(rr + k) % healthy.len()];
+                                    let payload = serde_json::to_vec(
+                                        &BackfillReq { from: start, to: start + CHUNK, headers_only: true, codec: 1 }
+                                    ).unwrap();
+                                    let n = net.clone();
+                                    let tx = done_tx.clone();
+                                    let peer_str = peer.to_string();
+                                    inflight += 1;
+                                    req_n += 1;
+                                    tokio::spawn(async move {
+                                        let r = tokio::time::timeout(REQ_TIMEOUT, n.send_request(peer, payload)).await;
+                                        let bytes = match r { Ok(Ok(b)) => Some(b), _ => None };
+                                        let _ = tx.send((start, peer_str, bytes));
+                                    });
+                                }
+                                rr = rr.wrapping_add(fanout);
+                            }
+                        }
+                    }
+
+                    // ── FAST PERIODIC (150ms): advance the contiguous frontier + publish state ──
+                    // Cheap — just walks any newly-contiguous heights and updates the TUI/window.
+                    // Verification is split out to a SLOW timer below so its db-reads never gate
+                    // the ingest/refill hot path (that was a v0.10.0 t_verify=3.5s stall).
+                    if last_state.elapsed() >= Duration::from_millis(150) {
+                        last_state = Instant::now();
+                        store.advance();
+                        let now_synced = store.synced_to();
+                        // DYNAMIC BASE: the lowest servable height creeps UP as producers prune early
+                        // history from their RAM window (the disk range-serve of pruned-low ranges is
+                        // unreliable). If the frontier chunk stays unservable by ALL peers for ≥5s
+                        // while we're below the tip, skip it: advance `base` one chunk and re-anchor.
+                        // Self-heals to whatever the mesh actually serves (verified spine then anchors
+                        // at the lowest servable height, honestly — not necessarily genesis).
+                        if now_synced > last_synced_seen {
+                            last_synced_seen = now_synced;
+                            last_advance_t = Instant::now();
+                        } else if store.best_height() > now_synced && last_advance_t.elapsed() >= Duration::from_secs(2) {
+                            // v0.16: STABLE-SYNC gate. Only skip genuinely UNSERVABLE LOW history:
+                            // advance base when a HIGHER block has actually been RECEIVED
+                            // (best_height > frontier) yet the contiguous frontier won’t move — a
+                            // real gap from pruned-low ranges. Gating on best_height (the true max
+                            // received) instead of the possibly-SEEDED peer_best means that AT the
+                            // mesh’s top serving ceiling (best_height == frontier) we do NOT creep
+                            // base toward an unreachable/seeded tip — the sync HOLDS at the real
+                            // served height instead of thrashing base forever. This was the
+                            // instability set_known_tip exposed.
+                            // v0.21.1: a monitor whose received tip is far above the contiguous
+                            // frontier is sitting on an UNSERVABLE MIDDLE (mesh serves genesis-low +
+                            // recent, not the 6M-block middle). Crawling base one chunk per 2s would
+                            // take ~an hour for a 600k gap (the "0 blk/s, 560k behind" parked bug).
+                            // In monitor mode, JUMP base straight to the recent contiguous window
+                            // under best_height so synced snaps to the live head in one step.
+                            // (full-sync recent_only=false keeps the genesis-anchored +CHUNK crawl.)
+                            let new_base = if recent_only && store.best_height() > now_synced + RECENT_WINDOW {
+                                store.best_height().saturating_sub(RECENT_WINDOW).max(sync_base)
+                            } else {
+                                store.base().saturating_add(CHUNK)
+                            };
+                            crate::tlog!("[sync] gap at frontier {} (received up to {}) — base → {} (jump to recent window)", now_synced, store.best_height(), new_base);
+                            store.set_base(new_base);
+                            last_synced_seen = store.synced_to();
+                            last_advance_t = Instant::now();
+                        }
+                        let now_synced = store.synced_to();
+                        let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        s.blocks_synced = now_synced;
+                        s.base = store.base();
+                        s.sync_total = now_synced;
+                        s.sync_cursor = now_synced;
+                        s.sync_height = now_synced;
+                        s.fetched_total = fetched_session;
+                        s.peer_count = net.peer_count();
+                        if now_synced > s.peer_best_height { s.peer_best_height = now_synced; }
+                        // v0.22: a MONITOR displays the VERIFIED LIVE TIP, not the contiguous
+                        // backfill frontier. The newest blocks aren't reliably range-served in
+                        // real time, so contiguous `synced` ALWAYS lags the head — an unwinnable
+                        // race that left the bar stuck "Nk behind / 0 blk/s". A light monitor's
+                        // job is to track + verify the live tip (the signed tip-proof in
+                        // peer_best), so show THAT as the sync height → the bar reads AT TIP.
+                        // The cryptographic spine watermark (⛓✓ = s.verified) stays honest.
+                        if recent_only && s.peer_best_height > now_synced {
+                            s.blocks_synced = s.peer_best_height;
+                            s.sync_height = s.peer_best_height;
+                            s.sync_total = s.peer_best_height;
+                        }
+                        s.last_message_at = Some(Instant::now());
+                    }
+
+                    // ── v0.31 DEEP DEBUG: comprehensive sync snapshot every 2s ──────────────
+                    // One dense line with EVERYTHING needed to diagnose a stall from the log/Sync
+                    // Log tab: contiguous synced vs the live tip + gap, the displayed-ish rate, how
+                    // many backfill requests went out and how they resolved (LEAD/EMPTY/TIMEOUT),
+                    // in-flight + assigned, peer counts, bytes pulled, and tip-oracle freshness.
+                    if last_dbg.elapsed() >= Duration::from_secs(2) {
+                        last_dbg = Instant::now();
+                        let (synced_now, peers, hpeers, pbest, tip_age, mesh) = {
+                            let s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                            let now = Instant::now();
+                            let hp = net.connected_peers().into_iter()
+                                .filter(|p| peer_bench.get(&p.to_string()).map_or(true, |&u| now >= u)).count();
+                            (store.synced_to(), s.peer_count, hp, s.peer_best_height,
+                             s.last_tip_at.map(|t| t.elapsed().as_secs()).unwrap_or(9999), s.mesh_peer_count)
+                        };
+                        let gap = pbest.saturating_sub(synced_now);
+                        let upt = loop_start.elapsed().as_secs().max(1);
+                        let win = req_n.max(1);
+                        crate::tlog!(
+                            "[DBG] up={upt}s synced={synced_now} tip={pbest} gap={gap} | reqs={req_n} lead={lead_n}({:.0}%) empty={empty_n} timeout={timeout_n}({:.0}%) | inflight={inflight} assigned={} fetched={fetched_session} bytes={}MB | peers={peers}(mesh {mesh}, healthy {hpeers}) tip_age={tip_age}s base={}",
+                            lead_n as f64 / win as f64 * 100.0,
+                            timeout_n as f64 / win as f64 * 100.0,
+                            assigned.len(), bytes_session / 1_048_576, store.base()
+                        );
+                    }
+
+                    // ── SLOW PERIODIC (1.5s): verify the spine + flush the memtable ──────────
+                    // verify_to walks only NEW contiguous headers (precheck + parent linkage) and
+                    // persists the watermark; a small budget keeps each pass bounded. flush() rolls
+                    // the growing memtable to an SST so it can't balloon during a multi-M sync.
+                    if last_verify.elapsed() >= Duration::from_millis(1500) {
+                        last_verify = Instant::now();
+                        // v0.15.0 perf: 40k/1.5s capped VERIFIED throughput at ~26.6k blk/s;
+                        // 60k/1.5s lifted it to ~40k blk/s against the verify core's then-
+                        // measured 52k/s.
+                        // v0.33 (1M-blk/s lane): the verify step got ~5× cheaper — linkage now
+                        // compares the parent's STORED ingest hash (32-byte memcmp) instead of
+                        // re-JSON-hashing the ~1 KB header (~15-25 µs) every step, so a step is
+                        // ≈2 db reads + bincode + precheck (~4-6 µs). 240k × ~5 µs ≈ 1.2 s
+                        // worst-case loop hold — the SAME wall-clock the old 60k × ~25 µs cost —
+                        // while lifting the verified-watermark ceiling to ~160k blk/s. The
+                        // budget only binds during catch-up; steady-state verifies arrivals.
+                        const VERIFY_BUDGET: u64 = 240_000;
+                        let report = crate::chain_verify::verify_to(&mut store, VERIFY_BUDGET);
+                        let vbreak = match &report.first_break {
+                            Some((h, crate::chain_verify::BreakReason::Missing)) if *h >= store.synced_to() => None,
+                            Some((_h, crate::chain_verify::BreakReason::Missing)) => None,
+                            Some((h, reason)) => Some(format!("h={h}: {reason}")),
+                            None => None,
+                        };
+                        let _ = store.flush();
+                        let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        s.verified = report.verified_to;
+                        s.verify_break = vbreak;
+                    }
+
+                    // Yield: the request tasks run on worker threads (their results queue in
+                    // done_rx regardless), so a short tick keeps the loop from busy-spinning
+                    // while staying responsive to gossip + completions.
+                    // v0.25.5: CPU throttle. At the head we are TRACKING (not bulk-syncing), so a
+                    // slower cadence holds the tip at a fraction of the CPU — the main loop was
+                    // pegging a full core re-draining the gossip flood + re-walking the verifier.
+                    // v0.27 PROOF-OF-USEFUL-SYNC: at the tip the loop used to just sleep (0% CPU).
+                    // Instead, spend that idle CPU re-deriving the stored spine's BLAKE hashes —
+                    // the SAME hash methodology as mining, but the work HARDENS sync trust (deeper
+                    // verification coverage). Bounded per tick so it is productive, not a core-hog.
+                    let at_tip_idle = peer_best > 0 && store.synced_to().saturating_add(CHUNK) >= peer_best;
+                    if at_tip_idle {
+                        let lo = store.base().max(1);
+                        let hi = store.synced_to();
+                        if hi > lo {
+                            // v0.28: batch-cache the window ONCE (kills the per-header DB-read
+                            // bottleneck that capped pos at ~190 blk/s), then re-verify the
+                            // in-memory batch with BLAKE every tick — a real useful-hashrate.
+                            if pos_window_base != lo || pos_window.is_empty() {
+                                pos_window.clear();
+                                pos_bytes.clear();
+                                let mut h = lo;
+                                while h < hi && pos_window.len() < 8192 {
+                                    if let Some(hdr) = store.get_header_at_height(h) {
+                                        pos_bytes.extend_from_slice(hdr.hash().as_ref()); // derive each header hash ONCE (the serde cost, amortized)
+                                        pos_window.push(hdr);
+                                    }
+                                    h += 1;
+                                }
+                                pos_window_base = lo;
+                            }
+                            // v0.29.5 SIMD (flux_optimize_analyze flagged SIMD, ~35%): instead of
+                            // re-serializing every header per tick (the ~5.2k blk/s cap), run ONE
+                            // AVX2-accelerated blake3 over the whole cached window-digest buffer.
+                            // blake3 auto-vectorizes on large inputs -> GB/s. This is the
+                            // useful-hashrate + the spine-checkpoint commitment over the window.
+                            let ckpt_root = blake3::hash(&pos_bytes);
+                            let did = pos_window.len() as u64;
+                            pos_acc += did;
+                            pos_total_session += did;
+                            if pos_t.elapsed() >= Duration::from_secs(1) {
+                                let r = pos_acc as f64 / pos_t.elapsed().as_secs_f64().max(1e-6);
+                                let mut st = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                st.pos_rate = r;
+                                st.pos_total = pos_total_session;
+                                pos_acc = 0;
+                                pos_t = Instant::now();
+                            }
+                            // v0.28: gossip a SPINE-CHECKPOINT so OTHER light nodes can trust this
+                            // node's re-verified recent window and skip re-verifying it themselves.
+                            if ckpt_t.elapsed() >= Duration::from_secs(15) && did > 0 {
+                                let ck = format!("{{\"type\":\"spine-checkpoint\",\"net\":\"sigil-g0\",\"from\":{},\"to\":{},\"count\":{},\"root\":\"{}\"}}", lo, lo + did, did, ckpt_root.to_hex());
+                                let _ = net.publish("/sigil/g0/spine-checkpoint", ck.into_bytes());
+                                crate::tlog!("[pos] gossiped spine-checkpoint [{}..{}] root {}", lo, lo + did, &ckpt_root.to_hex().as_str()[..16]);
+                                ckpt_t = Instant::now();
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await; // brief yield between work batches
+                    } else {
+                        let idle_ms = if peer_best == 0 { 75 } else { 10 };
+                        tokio::time::sleep(Duration::from_millis(idle_ms)).await;
+                    }
                 }
             });
         });
@@ -386,11 +1106,11 @@ impl P2PBlockSync {
     }
 
     pub fn poll_state(&self) -> P2PSyncState {
-        self.state.lock().unwrap().clone()
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn drain_new_blocks(&self) -> Vec<StoredBlock> {
-        std::mem::take(&mut *self.new_blocks.lock().unwrap())
+        std::mem::take(&mut *self.new_blocks.lock().unwrap_or_else(|e| e.into_inner()))
     }
 }
 
@@ -399,5 +1119,35 @@ impl Drop for P2PBlockSync {
         if let Some(tx) = self.stop_tx.take() {
             let _ = tx.send(());
         }
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::zstd_decompress_body;
+
+    /// v0.33 interop gate for the zstd wire: the SERVER compresses with the C-backed
+    /// `zstd` crate (zstd::encode_all level 1 — exactly what sigil-node's codec=1 path
+    /// calls); the CLIENT decompresses with pure-Rust `ruzstd`. This proves the
+    /// cross-implementation roundtrip byte-exactly, plus the malformed-frame and
+    /// bomb-guard rejection paths. If ruzstd ever regresses on a standard frame,
+    /// this fails the build before a release ships a monitor that can't sync.
+    #[test]
+    fn zstd_wire_interop_c_encoder_to_rust_decoder() {
+        // Body shaped like real wire data: long compressible runs + an incompressible tail.
+        let mut body = Vec::with_capacity(220_000);
+        for i in 0..50_000u32 {
+            body.extend_from_slice(&(i / 7).to_le_bytes());
+        }
+        body.extend((0..4096u64).map(|i| (i.wrapping_mul(2654435761) % 251) as u8));
+
+        let z = zstd::encode_all(&body[..], 1).expect("C zstd encode (server side)");
+        assert!(z.len() < body.len() / 3, "frame actually compressed: {} -> {}", body.len(), z.len());
+
+        let back = zstd_decompress_body(&z).expect("ruzstd decode (client side)");
+        assert_eq!(back, body, "byte-exact C-encoder -> Rust-decoder roundtrip");
+
+        assert!(zstd_decompress_body(b"definitely not a zstd frame").is_none(), "garbage rejected");
+        assert!(zstd_decompress_body(&[]).is_none(), "empty rejected");
     }
 }

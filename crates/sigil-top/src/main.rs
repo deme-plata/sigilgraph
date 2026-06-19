@@ -1496,16 +1496,20 @@ fn main() {
     // stdout (tray/subsystem quirk), which dropped the app to the one-frame path and
     // "closed" instead of showing the dashboard. Treat it as interactive if EITHER
     // stdin or stdout is a tty — only a full pipe/redirect (both non-tty) stays plain.
-    // v3: the default dashboard invocation ALWAYS runs the TUI — that's the whole point of
-    // launching sigil-top with no subcommand. is_terminal()/console detection is unreliable
-    // across launch methods (conhost / Windows Terminal / remote shells / double-click) and
-    // WAS the #1 "no TUI on Windows" bug, so it no longer GATES the decision — only the boot
-    // log. Headless is OPT-IN: `--once` or SIGIL_HEADLESS=1 (full-sync/serve are separate
-    // subcommands handled earlier). Terminal setup below is non-fatal, so even a console that
-    // rejects raw-mode/alt-screen still reaches the render loop instead of silent-exiting.
+    // v3: the #1 "no TUI on Windows" bug was is_terminal() returning false on a REAL console
+    // → headless → dashboard never opened. Run the TUI whenever a console is plausibly attached:
+    // is_terminal(stdout|stdin) OR win_has_console() (GetConsoleWindow != null on Windows) OR the
+    // SIGIL_TUI=1 escape hatch. A genuine no-console pipe (all false) cleanly goes headless — it
+    // CAN'T host an interactive TUI anyway. Headless also opt-in via --once / SIGIL_HEADLESS=1.
+    // Terminal setup below is non-fatal so a quirky console can't silent-exit before frame 1.
     let force_headless = std::env::var("SIGIL_HEADLESS").is_ok();
-    let interactive = !cfg.once && !force_headless;
-    boot_trace(&format!("interactive={} (stdout_tty={} stdin_tty={} win_console={} default_tui) once={} lite={}",
+    let interactive = !cfg.once && !force_headless && (
+        std::env::var("SIGIL_TUI").is_ok()
+        || std::io::stdout().is_terminal()
+        || std::io::stdin().is_terminal()
+        || win_has_console()
+    );
+    boot_trace(&format!("interactive={} (stdout_tty={} stdin_tty={} win_console={}) once={} lite={}",
         interactive, std::io::stdout().is_terminal(), std::io::stdin().is_terminal(), win_has_console(), cfg.once, cfg.lite));
     // Non-TTY (piped / captured / redirected) or --once → one plain frame, no loop.
     if cfg.once || !interactive {

@@ -483,7 +483,7 @@ impl SnapshotVerifier {
 pub(super) async fn pull_snapshot<P, F, Fut>(
     peers: &[P],
     send: F,
-    mut commit: impl FnMut(&[SkeletonRecord]),
+    mut commit: impl FnMut(u64, &str),
 ) -> Result<SnapshotVerified, SnapshotError>
 where
     P: Clone,
@@ -552,8 +552,8 @@ where
         }
         for rec in &page {
             verifier.push(rec)?; // contiguity + linkage + running BLAKE3 root
+            commit(rec.height, &hex::encode(rec.block_hash)); // launch()'s put_block_raw
         }
-        commit(&page); // page-batch append to the flat SkeletonStore (no per-key flux-db commit)
         done += page.len() as u64;
         // `page` dropped here → only one page ever resident (the OOM latch).
     }
@@ -603,6 +603,76 @@ mod lane_a_snapshot_tests {
         assert_eq!(ok.archive_root, root);
         assert_eq!(ok.records, 3);
         assert_eq!(ok.anchor_height, 2);
+    }
+
+    // RUNTIME end-to-end: drive the WHOLE client path — pull_snapshot's discover/stream/finalize
+    // loop + SnapshotVerifier + the commit-hook into the flat SkeletonStore — against a synthetic
+    // in-process codec=2 server (mock `send` answering 'P'/'S'/'F' by request codec). Proves the
+    // path RUNS (not just compiles) and measures end-to-end blk/s. SIGIL_SNAP_BENCH=N for a big run.
+    #[tokio::test]
+    async fn snapshot_pull_end_to_end_into_store() {
+        use std::sync::Arc;
+        let n: u64 = std::env::var("SIGIL_SNAP_BENCH").ok().and_then(|s| s.parse().ok()).unwrap_or(20_000);
+        // Linked spine: parent_hash[i] == block_hash[i-1] (u8 fill is self-consistent under wrap).
+        let recs: Arc<Vec<SkeletonRecord>> =
+            Arc::new((0..n).map(|i| rec(i, i as u8, i.wrapping_sub(1) as u8)).collect());
+        // archive_root = BLAKE3 over bincode(each record) — exactly what the verifier recomputes.
+        let mut hh = blake3::Hasher::new();
+        for r in recs.iter() { hh.update(&bincode::serialize(r).unwrap()); }
+        let root = *hh.finalize().as_bytes();
+        let hdr_b = Arc::new({ let mut b = vec![b'P']; b.extend_from_slice(&bincode::serialize(&header(0, n - 1, n)).unwrap()); b });
+        let tr_b = Arc::new({ let mut b = vec![b'F']; b.extend_from_slice(&bincode::serialize(
+            &SnapshotTrailer { archive_root: root, anchor_sig: vec![], fold_blob: vec![] }).unwrap()); b });
+        // Pre-serialize every 'S' page ONCE — a real server serves pre-encoded pages from disk;
+        // encoding per-request would charge the CLIENT bench for the mock's encode time.
+        const PAGE: u64 = 50_000;
+        let pages = {
+            let mut m: std::collections::HashMap<u64, Arc<Vec<u8>>> = std::collections::HashMap::new();
+            let mut from = 0u64;
+            while from < n {
+                let to = (from + PAGE).min(n);
+                let mut b = vec![b'S'];
+                b.extend_from_slice(&bincode::serialize(&recs[from as usize..to as usize].to_vec()).unwrap());
+                m.insert(from, Arc::new(b));
+                from += PAGE;
+            }
+            Arc::new(m)
+        };
+        // Synthetic codec=2 server: returns the pre-built 'P'/'S'/'F' bytes by request codec/from.
+        let send = {
+            let (pages, hdr_b, tr_b) = (pages.clone(), hdr_b.clone(), tr_b.clone());
+            move |_peer: (), req: Vec<u8>| {
+                let (pages, hdr_b, tr_b) = (pages.clone(), hdr_b.clone(), tr_b.clone());
+                async move {
+                    let j: serde_json::Value = serde_json::from_slice(&req).map_err(|e| e.to_string())?;
+                    match j["codec"].as_u64().unwrap_or(0) {
+                        3 => Ok::<Vec<u8>, String>((*hdr_b).clone()),
+                        2 => {
+                            let from = j["from"].as_u64().unwrap_or(0);
+                            pages.get(&from).map(|p| (**p).clone()).ok_or_else(|| format!("no page at {from}"))
+                        }
+                        4 => Ok((*tr_b).clone()),
+                        _ => Err("bad codec".to_string()),
+                    }
+                }
+            }
+        };
+        let tmp = std::env::temp_dir().join(format!("snap-e2e-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let mut skel = crate::block_sync::SkeletonStore::open(&tmp, 0).unwrap();
+        let peers = vec![()];
+        let t0 = std::time::Instant::now();
+        let v = super::pull_snapshot(&peers, send, |page| { let _ = skel.append(page); })
+            .await
+            .expect("pull_snapshot end-to-end");
+        let dt = t0.elapsed().as_secs_f64().max(1e-9);
+        assert_eq!(v.records, n as usize, "all records pulled");
+        assert_eq!(v.anchor_height, n - 1);
+        assert_eq!(v.archive_root, root, "client recomputed root == source root");
+        assert_eq!(skel.count(), n, "all records landed in the flat SkeletonStore");
+        eprintln!("[snap-pull-e2e] {} records pull→verify→flat-append in {:.4}s = {:.0} blk/s (full client path, in-proc codec=2)",
+            n, dt, n as f64 / dt);
+        let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]

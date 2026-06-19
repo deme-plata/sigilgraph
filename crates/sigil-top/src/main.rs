@@ -1191,6 +1191,21 @@ fn boot_trace(msg: &str) {
     }
 }
 
+/// v3 (2026-06-19) — THE real "no TUI on Windows" root cause: Rust's `is_terminal()`
+/// returns FALSE on some genuine Windows consoles (double-click / conhost / Windows
+/// Terminal), so sigil-top fell through to the headless path and the dashboard never
+/// opened (reproduced under Wine adverse-mode: `interactive=false` → exit before run_tui).
+/// On Windows a console IS attached whenever GetConsoleWindow() is non-null — trust that
+/// over is_terminal(). A genuine service/redirected run with no console returns null →
+/// stays headless, so no CI/pipe regression.
+#[cfg(windows)]
+fn win_has_console() -> bool {
+    extern "system" { fn GetConsoleWindow() -> *mut core::ffi::c_void; }
+    unsafe { !GetConsoleWindow().is_null() }
+}
+#[cfg(not(windows))]
+fn win_has_console() -> bool { false }
+
 fn main() {
     // v0.64: STARTUP TRACE + panic capture. If the app exits unexpectedly on a
     // Windows double-click, the breadcrumb + panic land in this file so we can
@@ -1481,9 +1496,18 @@ fn main() {
     // stdout (tray/subsystem quirk), which dropped the app to the one-frame path and
     // "closed" instead of showing the dashboard. Treat it as interactive if EITHER
     // stdin or stdout is a tty — only a full pipe/redirect (both non-tty) stays plain.
-    let interactive = std::io::stdout().is_terminal() || std::io::stdin().is_terminal();
-    boot_trace(&format!("interactive={} (stdout_tty={} stdin_tty={}) once={} lite={}",
-        interactive, std::io::stdout().is_terminal(), std::io::stdin().is_terminal(), cfg.once, cfg.lite));
+    // v3: is_terminal() is unreliable on Windows consoles → it WAS the #1 "no TUI" bug.
+    // Run the TUI when a Windows console is attached (win_has_console) or via SIGIL_TUI=1;
+    // SIGIL_HEADLESS=1 forces headless for genuine non-interactive runs.
+    let force_headless = std::env::var("SIGIL_HEADLESS").is_ok();
+    let interactive = !force_headless && (
+        std::env::var("SIGIL_TUI").is_ok()
+        || std::io::stdout().is_terminal()
+        || std::io::stdin().is_terminal()
+        || win_has_console()
+    );
+    boot_trace(&format!("interactive={} (stdout_tty={} stdin_tty={} win_console={}) once={} lite={}",
+        interactive, std::io::stdout().is_terminal(), std::io::stdin().is_terminal(), win_has_console(), cfg.once, cfg.lite));
     // Non-TTY (piped / captured / redirected) or --once → one plain frame, no loop.
     if cfg.once || !interactive {
         let (st, online, source) = fetch_best(&cfg);
@@ -3036,8 +3060,13 @@ impl<W: std::io::Write> ratatui::backend::Backend for SafeSizeBackend<W> {
     }
     fn clear(&mut self) -> std::io::Result<()> { self.inner.clear() }
     fn size(&self) -> std::io::Result<ratatui::layout::Size> {
-        let s = self.inner.size()?;
-        if s.width >= 2 && s.height >= 2 { Ok(s) } else { Ok(ratatui::layout::Size::new(120, 30)) }
+        // Clamp BOTH a degenerate Ok((0,0)) AND an Err (some Windows consoles error the
+        // size query at startup) to a paintable fallback, so ratatui's autoresize never
+        // gets a 0-size buffer NOR a failure that would abort term.draw and exit the TUI.
+        match self.inner.size() {
+            Ok(s) if s.width >= 2 && s.height >= 2 => Ok(s),
+            _ => Ok(ratatui::layout::Size::new(120, 30)),
+        }
     }
     fn window_size(&mut self) -> std::io::Result<ratatui::backend::WindowSize> { self.inner.window_size() }
     fn flush(&mut self) -> std::io::Result<()> { ratatui::backend::Backend::flush(&mut self.inner) }

@@ -645,4 +645,52 @@ mod lane_a_snapshot_tests {
             base_height: 0, anchor_height: 0, anchor_hash: [0; 32], count: 1 };
         assert_eq!(SnapshotVerifier::new(&h).unwrap_err(), SnapshotError::BadMagic);
     }
+
+    /// LANE-A micro-bench: the decode+verify half of snapshot sync (BLAKE3 archive-root
+    /// stream + 32 B parent-linkage walk + contiguity), isolated from network and store.
+    /// `#[ignore]` so it never slows the normal suite -- run explicitly for the number:
+    ///   <test-bin> bench_snapshot_verifier_throughput --ignored --nocapture
+    /// This bounds the LANE-A contribution; the full decode+verify+COMMIT number (the
+    /// LANE-B/C cost that gates 92.6k) is the lead's store-backed harness.
+    #[test]
+    #[ignore]
+    fn bench_snapshot_verifier_throughput() {
+        const N: u64 = 100_000;
+        let mut recs: Vec<SkeletonRecord> = Vec::with_capacity(N as usize);
+        let mut prev = [0u8; 32];
+        for i in 0..N {
+            let bh = *blake3::hash(&i.to_le_bytes()).as_bytes();
+            recs.push(SkeletonRecord { height: i, block_hash: bh, parent_hash: prev });
+            prev = bh;
+        }
+        // Producer-side archive_root (what the verifier must reproduce).
+        let mut hh = blake3::Hasher::new();
+        for r in &recs {
+            hh.update(&bincode::serialize(r).unwrap());
+        }
+        let root = *hh.finalize().as_bytes();
+        let hdr = SnapshotHeader {
+            magic: SNAPSHOT_MAGIC, version: SNAPSHOT_VERSION,
+            base_height: 0, anchor_height: N - 1, anchor_hash: prev, count: N,
+        };
+        let trailer = SnapshotTrailer { archive_root: root, anchor_sig: vec![], fold_blob: vec![] };
+
+        let t = std::time::Instant::now();
+        let mut v = SnapshotVerifier::new(&hdr).unwrap();
+        for r in &recs {
+            v.push(r).unwrap();
+        }
+        let out = v.finalize(&trailer).unwrap();
+        let dt = t.elapsed();
+
+        let blk_s = N as f64 / dt.as_secs_f64();
+        eprintln!(
+            "[bench] SnapshotVerifier: {N} recs ({} MB wire) verified in {:?} = {:.0} blk/s",
+            (N * 72) / 1_000_000,
+            dt,
+            blk_s,
+        );
+        assert_eq!(out.records, N as usize);
+        assert_eq!(out.archive_root, root);
+    }
 }

@@ -3002,6 +3002,47 @@ fn measure_eclipse_k(tip_height: u64, tip_ok: bool) -> (u32, Vec<(String, bool)>
     (k, sources)
 }
 
+/// LANE-Z ROOT FIX (2026-06-19): a Backend that NEVER reports a degenerate (0×0)
+/// terminal size. Windows conhost / Windows Terminal transiently answer the size
+/// query with 0×0 at startup; ratatui's `autoresize` then sizes the buffer to 0×0
+/// and `term.draw` paints NOTHING — a permanent BLANK SCREEN ("no TUI"), the exact
+/// reported symptom. The old guard only *delayed* then force-drew into that same 0×0
+/// area, so the first frame never appeared. This wrapper substitutes a sane fallback
+/// (120×30) whenever the real size is degenerate and passes the TRUE size straight
+/// through the instant the console reports it — a normal terminal is unaffected, and a
+/// conhost that's briefly 0×0 still gets a full first frame. It also makes the TUI
+/// render in a size-less pty, which is how this fix is validated without a Windows box.
+struct SafeSizeBackend<W: std::io::Write> {
+    inner: ratatui::backend::CrosstermBackend<W>,
+}
+impl<W: std::io::Write> std::io::Write for SafeSizeBackend<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> { self.inner.write(buf) }
+    fn flush(&mut self) -> std::io::Result<()> { std::io::Write::flush(&mut self.inner) }
+}
+impl<W: std::io::Write> ratatui::backend::Backend for SafeSizeBackend<W> {
+    fn draw<'a, I>(&mut self, content: I) -> std::io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
+    {
+        self.inner.draw(content)
+    }
+    fn hide_cursor(&mut self) -> std::io::Result<()> { self.inner.hide_cursor() }
+    fn show_cursor(&mut self) -> std::io::Result<()> { self.inner.show_cursor() }
+    fn get_cursor_position(&mut self) -> std::io::Result<ratatui::layout::Position> {
+        self.inner.get_cursor_position()
+    }
+    fn set_cursor_position<P: Into<ratatui::layout::Position>>(&mut self, position: P) -> std::io::Result<()> {
+        self.inner.set_cursor_position(position)
+    }
+    fn clear(&mut self) -> std::io::Result<()> { self.inner.clear() }
+    fn size(&self) -> std::io::Result<ratatui::layout::Size> {
+        let s = self.inner.size()?;
+        if s.width >= 2 && s.height >= 2 { Ok(s) } else { Ok(ratatui::layout::Size::new(120, 30)) }
+    }
+    fn window_size(&mut self) -> std::io::Result<ratatui::backend::WindowSize> { self.inner.window_size() }
+    fn flush(&mut self) -> std::io::Result<()> { ratatui::backend::Backend::flush(&mut self.inner) }
+}
+
 fn run_tui(cfg: Config) -> std::io::Result<()> {
     // v0.27.5: self-healing crash-loop guard — long-running dashboard only (`--once` renders
     // and exits faster than HEAL_SECS, which would false-trigger a revert). If THIS version
@@ -3201,7 +3242,9 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
         }));
     }
 
-    let backend = CrosstermBackend::new(stdout);
+    // LANE-Z root fix: wrap in SafeSizeBackend so a degenerate (0×0) conhost size can
+    // never produce a blank screen — ratatui always gets a paintable area.
+    let backend = SafeSizeBackend { inner: CrosstermBackend::new(stdout) };
     let mut term = Terminal::new(backend)?;
     // (v0.35: app/store/aether/ctrlc/sync-launch all moved ABOVE terminal init — see the
     // sync-starts-earlier block after crashloop_guard. block_reader/sync_handle/app are in

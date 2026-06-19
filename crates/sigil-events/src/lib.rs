@@ -275,6 +275,61 @@ impl SigilEvent {
     pub fn leaf_hash(&self) -> [u8; 32] {
         *blake3::hash(&self.encode()).as_bytes()
     }
+
+    /// Construct a HonorConferred event IFF it is well-formed AND the conferral quorum is met
+    /// (HonorPolicy). Returns None otherwise — the state-transition chokepoint MUST refuse to
+    /// emit it: no honor without the rule. Honor is earned by deeds (the citation), conferred by
+    /// quorum — never bought. See docs/SIGIL_NATION_v0.md.
+    #[allow(clippy::too_many_arguments)]
+    pub fn confer_honor(
+        order: SigilOrder,
+        rank: impl Into<String>,
+        recipient: WalletId,
+        citation: impl Into<String>,
+        conferred_by: WalletId,
+        approvals: usize,
+        operator_cosigned: bool,
+    ) -> Option<SigilEvent> {
+        let rank = rank.into();
+        if !HonorPolicy::valid_rank(&order, &rank) {
+            return None;
+        }
+        if !HonorPolicy::quorum_met(&order, approvals, operator_cosigned) {
+            return None;
+        }
+        Some(SigilEvent::HonorConferred { order, rank, recipient, citation: citation.into(), conferred_by })
+    }
+}
+
+/// Conferral policy for the Orders of the SIGIL Nation — PURE rules the chokepoint enforces
+/// before emitting a HonorConferred. They govern WHO may confer; the deed's worth is the
+/// citation + the quorum's judgment. "Honor over power": even the operator cannot solo-confer
+/// the Elephant.
+pub struct HonorPolicy;
+impl HonorPolicy {
+    /// Distinct authorized approvals required to confer an order.
+    pub fn quorum_required(order: &SigilOrder) -> usize {
+        match order {
+            SigilOrder::Ridderkorset => 1,
+            SigilOrder::Elefantordenen => 3, // a Maximus-tier honor needs a real quorum
+        }
+    }
+    /// Ridderkorset: operator OR ≥quorum bearers. Elefantordenen: operator AND ≥quorum
+    /// bearers — never solo, not even the operator (honor over power).
+    pub fn quorum_met(order: &SigilOrder, approvals: usize, operator_cosigned: bool) -> bool {
+        let need = Self::quorum_required(order);
+        match order {
+            SigilOrder::Ridderkorset => operator_cosigned || approvals >= need,
+            SigilOrder::Elefantordenen => operator_cosigned && approvals >= need,
+        }
+    }
+    /// Valid ranks per order. Ridderkorset ascends; the Elephant has no rank — it IS the rank.
+    pub fn valid_rank(order: &SigilOrder, rank: &str) -> bool {
+        match order {
+            SigilOrder::Ridderkorset => matches!(rank, "Ridder" | "Kommandør" | "Storkors"),
+            SigilOrder::Elefantordenen => rank.is_empty(),
+        }
+    }
 }
 
 /// Position-bound proof that a specific event is in a block's event log.

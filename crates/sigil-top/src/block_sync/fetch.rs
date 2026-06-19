@@ -254,66 +254,13 @@ mod lane_a_sched_tests {
 // elision/anchor trust bargain. Spec: docs/SIGIL_SKELETON_CODEC2_v0.md.
 // ─────────────────────────────────────────────────────────────────────────────
 
-use sigil_header::{BlockHash, SigilBlockHeaderV0};
-
-/// Snapshot magic — "SiGil SNapshot".
-pub(super) const SNAPSHOT_MAGIC: [u8; 4] = *b"SGSN";
-pub(super) const SNAPSHOT_VERSION: u16 = 1;
-
-/// One skeleton record on the snapshot wire (codec=2 'S'). 72 B fixed under bincode
-/// (one u64 + 2×[u8;32], no length prefixes). Drops the ~8 KB of PQ proofs AND the 4
-/// state roots; keeps exactly what the transport-structural verify needs.
-///
-/// The 4 state roots were REMOVED (B #416, DeepSeek-verified): they can't be made sound
-/// on the prefix. The fold is PoK over peer-supplied commitments (a flat, order-
-/// independent sum), so binding roots into the witness still lets a peer serve correct
-/// endpoints + FAKE interior `(block_hash‖roots)` pairs with algebraically-valid
-/// commitments, and roots don't chain like `parent_hash` so nothing pins them. CONTRACT:
-/// trusted state roots come ONLY from (i) the frontier's real 8 KB headers (where
-/// `block_hash = BLAKE3(full header)` IS recomputable and so commits to the roots), or
-/// (ii) the DNS anchor, which signs `(block_hash ‖ 4 roots ‖ height ‖ epoch)`. Any
-/// consumer needing prefix roots does an on-demand full-header fetch. So 72 B / ~113×.
-///
-/// `block_hash` (committed BLAKE3 of the FULL header) is REQUIRED — uncomputable from a
-/// skeleton: the linkage walk checks `rec[i].parent_hash == rec[i-1].block_hash`, and
-/// B's fold witness is `BLAKE3-XOF(… ‖ block_hash)`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(super) struct SkeletonRecord {
-    pub height: u64,
-    pub block_hash: BlockHash,  // committed BLAKE3 of the full header (identity + fold witness)
-    pub parent_hash: BlockHash, // selected-parent (spine) link
-}
-
-impl SkeletonRecord {
-    /// Producer / test side: derive a skeleton from a full header.
-    pub(super) fn from_header(h: &SigilBlockHeaderV0) -> Self {
-        Self { height: h.height, block_hash: h.hash(), parent_hash: h.parent_hash }
-    }
-}
-
-/// Framing prefix, sent before the record stream.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(super) struct SnapshotHeader {
-    pub magic: [u8; 4],
-    pub version: u16,
-    pub base_height: u64,       // first record height (genesis for a full prefix)
-    pub anchor_height: u64,     // last record height = the DNS-anchored trust point
-    pub anchor_hash: BlockHash, // the trusted tip hash at anchor_height
-    pub count: u64,             // records that follow
-}
-
-/// Trailer, sent after the record stream.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(super) struct SnapshotTrailer {
-    /// BLAKE3 over the canonical bincode of every record, in order.
-    pub archive_root: BlockHash,
-    /// Producer SQIsign over `(archive_root ‖ anchor_height ‖ anchor_hash)`. Opaque to
-    /// fetch.rs — LANE-B verifies it against the DNS-anchored producer pubkey.
-    pub anchor_sig: Vec<u8>,
-    /// Opaque `bincode(FoldCheckpoint)` — LANE-B's verify.rs decodes + flux_fold-verifies
-    /// it (M2). Empty when the snapshot ships without the optional fold attestation.
-    pub fold_blob: Vec<u8>,
-}
+// Wire types (SkeletonRecord / SnapshotHeader / SnapshotTrailer / SNAPSHOT_MAGIC /
+// SNAPSHOT_VERSION) live in sigil-header so the sigil-node SERVER shares ONE definition
+// with this CLIENT. Client-only logic (SnapshotVerifier / SnapshotVerified / SnapshotError
+// / pull_snapshot) stays below.
+use sigil_header::{
+    BlockHash, SkeletonRecord, SnapshotHeader, SnapshotTrailer, SNAPSHOT_MAGIC, SNAPSHOT_VERSION,
+};
 
 /// What the transport-structural verify proves; handed to LANE-B for the crypto finish.
 #[derive(Debug, Clone, PartialEq, Eq)]

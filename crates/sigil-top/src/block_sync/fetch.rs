@@ -89,6 +89,101 @@ pub(super) async fn fetch_live_tip_inner(client: &reqwest::Client) -> Option<u64
     None
 }
 
+/// Process-monotonic watermark of accepted anchor epochs (resets on restart — fine, a
+/// fresh process re-reads the current anchor). Rejects replay of a superseded-but-signed
+/// anchor within the freshness window.
+static ANCHOR_LAST_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The REAL backend for `dns_anchor_tip()` (LANE-A). Fetch the producer-signed `v=sigil1`
+/// anchor, verify it via `sigil_dns_anchor::verify_signed_anchor` (B's lane — SQIsign over
+/// block_hash‖roots‖height‖epoch), gate key_id + freshness + monotonic epoch, and return
+/// `(height, block_hash)`. Returns `None` on ANY failure (no source / legacy roots-only /
+/// wrong key / stale / future-dated / bad sig) so `dns_anchor_tip()` stays a no-op with zero
+/// regression until a real signed anchor is published. Blocking (sync) to match the
+/// `dns_anchor_tip()` signature; runs off the sync poll like `fetch_live_tip_blocking`.
+pub(super) fn fetch_verified_anchor_tip() -> Option<(u64, BlockHash)> {
+    use std::sync::atomic::Ordering;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    const EXPECTED_KEY_ID: &str = "d6214c8ddc0fca2b";
+    const MAX_ANCHOR_AGE_SECS: u64 = 24 * 3600; // reject anchors older than this
+    const FUTURE_SKEW_SECS: u64 = 300; // reject implausibly future-dated anchors
+
+    // Trust root = the producer pubkey, PINNED by the operator (fail-safe: no pin → None →
+    // no-op, NEVER a silently-fetched MITM-able key). SIGIL_ANCHOR_ALLOW_FETCH_PK=1 opts into
+    // fetching it from the DNS key record (dev/convenience only — a malicious mirror can serve
+    // a matching pk+tip pair). SECURITY TODO: compile the trust-root pk in once it's final.
+    let producer_pk: Vec<u8> = match std::env::var("SIGIL_ANCHOR_PK_HEX")
+        .ok()
+        .and_then(|h| hex::decode(h.trim()).ok())
+    {
+        Some(pk) => pk,
+        None if std::env::var("SIGIL_ANCHOR_ALLOW_FETCH_PK").as_deref() == Ok("1") => {
+            fetch_producer_pk()?
+        }
+        None => return None, // no pinned trust root → safe no-op
+    };
+
+    // Fetch the signed `v=sigil1` anchor text (HTTP mirror of the DNS TXT; env-overridable).
+    let url = std::env::var("SIGIL_ANCHOR_URL")
+        .unwrap_or_else(|_| "https://sigilgraph.fluxapp.xyz/sigil-tip-anchor.txt".into());
+    let txt = HTTP_BLOCKING
+        .get(&url)
+        .header("cache-control", "no-cache")
+        .send()
+        .ok()?
+        .text()
+        .ok()?;
+
+    let a = sigil_dns_anchor::decode(&txt).ok()?;
+    // Reject legacy roots-only records up front (no block_hash/epoch → can't anchor a fold).
+    let epoch = a.epoch?;
+    let bh_hex = a.block_hash_hex.as_deref()?;
+
+    // key_id must be the expected producer key (defense vs a different signer's record).
+    if a.key_id.as_str() != EXPECTED_KEY_ID {
+        return None;
+    }
+    // Monotonic replay guard (cheap; before the expensive verify). Only committed AFTER verify.
+    if epoch <= ANCHOR_LAST_EPOCH.load(Ordering::Relaxed) {
+        return None;
+    }
+    // Freshness: reject stale OR implausibly future-dated. The sig binds epoch, so a future
+    // date implies a buggy/compromised producer, not a peer — reject defensively.
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    if now.saturating_sub(epoch) > MAX_ANCHOR_AGE_SECS || epoch > now + FUTURE_SKEW_SECS {
+        return None;
+    }
+
+    // Cryptographic verify (SQIsign, sigil-dns-anchor — keeps sigil-top flux-sqisign-free).
+    if !sigil_dns_anchor::verify_signed_anchor(&a, &producer_pk).unwrap_or(false) {
+        return None;
+    }
+
+    // Decode the now-verified block_hash → [u8; 32].
+    let bh: BlockHash = hex::decode(bh_hex).ok()?.try_into().ok()?;
+    // Authoritative monotonic commit: atomic, race-free, and poison-free (only verified
+    // records reach here). If we lost a race to a higher epoch, reject this one.
+    let prev = ANCHOR_LAST_EPOCH.fetch_max(epoch, Ordering::AcqRel);
+    if epoch <= prev {
+        return None;
+    }
+    Some((a.height, bh))
+}
+
+/// Fetch the DNS-published producer pubkey (`sigil-anchor-key.json` → `producer_pk_hex`).
+fn fetch_producer_pk() -> Option<Vec<u8>> {
+    let url = std::env::var("SIGIL_ANCHOR_KEY_URL")
+        .unwrap_or_else(|_| "https://sigilgraph.fluxapp.xyz/sigil-anchor-key.json".into());
+    let v = HTTP_BLOCKING
+        .get(&url)
+        .header("cache-control", "no-cache")
+        .send()
+        .ok()?
+        .json::<serde_json::Value>()
+        .ok()?;
+    hex::decode(v.get("producer_pk_hex")?.as_str()?.trim()).ok()
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // LANE-A v3 sync sprint (rocky-sync-A) — windowed / multi-substream / adaptive
 // block-pack SCHEDULER policy.

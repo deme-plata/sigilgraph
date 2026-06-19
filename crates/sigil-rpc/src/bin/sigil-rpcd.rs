@@ -825,6 +825,10 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 Some(r) => r,
                 None => return bad("recipient (hex64) required"),
             };
+            let conferrer = match jstr(body, "conferrer").and_then(hex32) {
+                Some(c) => c,
+                None => return bad("conferrer (hex64, the signing authority) required"),
+            };
             let order = match jstr(body, "order") {
                 Some(o) if o == "Ridderkorset" || o == "Elefantordenen" => o.to_string(),
                 _ => return bad("order must be Ridderkorset or Elefantordenen"),
@@ -840,10 +844,11 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 return bad("invalid rank (Ridderkorset: Ridder|Kommandør|Storkors; Elefantordenen: none)");
             }
             let mut n = node.write().unwrap();
-            if let Err(e) = authorize(&mut n, &OPERATOR, "honor_confer", &[order.clone(), rank.clone(), to_hex(&recipient)], body) {
+            // The conferrer signs (honor over power — conferral is authorized, never anonymous).
+            if let Err(e) = authorize(&mut n, &conferrer, "honor_confer", &[order.clone(), rank.clone(), to_hex(&recipient)], body) {
                 return bad(&e);
             }
-            ingest(&mut n, "honor", format!("{order}|{rank}"), &[recipient], &citation);
+            ingest(&mut n, "honor", format!("{order}|{rank}"), &[recipient], &format!("{citation} | conferred by {}", to_hex(&conferrer)));
             n.height += 1;
             ok(format!("{{\"ok\":true,\"order\":\"{}\",\"rank\":\"{}\",\"recipient\":\"{}\"}}", order, rank, to_hex(&recipient)))
         }

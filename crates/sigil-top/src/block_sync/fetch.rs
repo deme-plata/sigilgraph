@@ -295,6 +295,7 @@ pub(super) enum SnapshotError {
 /// claim — a single bit-flip changes the root, so a malicious 100 MB/s peer cannot
 /// tamper undetected. The cryptographic anchor (SQIsign over the root + the fold proof)
 /// is LANE-B's job; this hands B the locally-recomputed root + the opaque sig/fold bytes.
+#[derive(Debug)]
 pub(super) struct SnapshotVerifier {
     hasher: blake3::Hasher,
     base_height: u64,

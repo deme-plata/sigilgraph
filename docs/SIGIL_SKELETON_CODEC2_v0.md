@@ -41,18 +41,48 @@ SkeletonHeaderV0 {            // ~168 B core (vs ~8 KB full)
 `state_transition_proof` (STARK), `vdf_proof`, `nonce_sqisign`, `producer_sig`,
 `fluxc_artifact_proof`, `txs`/tx bodies, `merge_parents` (DAG — frontier-only).
 
-## Sizing decision (open — for B)
+## Sizing — DECIDED (B #392): Option B, 168 B skeleton / ~48×
 
-The fold (`flux_fold::verify(ajtai, commitments, proof)`) needs the per-block Ajtai
-commitment `commit(w_i)` = **`m` u64s = `m`×8 B** to recompute the range. Two options:
+The skeleton stays **168 B** — no per-block commitment. The sound fast path (trusted
+DNS-anchor + `parent_hash` linkage cascade) does NOT use per-block commitments at all;
+the Ajtai commitment is purely the OPTIONAL fold tamper-evidence layer, so it must not
+tax every skeleton. Commitments are fetched as ONE batched `FoldCheckpoint` blob only
+for ranges we actually fold-attest. `producer_sig` (292 B SQIsign5) is anchor-only,
+never per-block.
 
-| Option | Skeleton size | vs 8 KB | Notes |
-|---|---|---|---|
-| **A — commitment inline** | 168 + m·8 B (≈232–296 B for m=8–16) | **~27–35×** | simplest; B recomputes `commitments[i]` straight from the stream |
-| **B — batched range blob** | 168 B + 1 commitment-blob fetch / range | **~48×** core | smaller hot-path; one extra fetch per fold range; more wiring |
+## Two composing models (B #392)
 
-`producer_sig` (292 B SQIsign5) is **anchor-only, never per-block** — per-block producer
-authentication is part of the deferred heavy-proof fetch (frontier), not the prefix.
+- **M1 — checkpoint fast-path (lands first, dep-free):** bulk-TRUST the deep prefix
+  (no per-block download below the floor at all) and full-verify only the frontier
+  `[anchor-50k, tip]` with **REAL 8 KB headers** — precheck needs nonce/vdf/sig, which a
+  skeleton can't provide. So the **frontier uses full headers, not skeletons.**
+- **M2 — whole-chain linkage (this codec=2):** skeletons over the whole chain +
+  optional fold tamper-evidence. Needs the `flux-fold` dep added to sigil-top
+  (Cargo.toml — grok-turbo holds it → lead/Cargo coordination). M2 is the optional
+  tamper-evidence layer on top of M1's trust-anchored prefix.
+
+They compose: **skeletons for the optional whole-chain model, full headers for the
+frontier.**
+
+## Fold spec (verbatim from B #392 — the `FoldCheckpoint` blob)
+
+```
+Ajtai          = flux_fold::Ajtai::from_seed_blake4(M=16, N=32, b"sigil-g0/fold/v1")
+header_witness(h, n) = BLAKE3-XOF(b"sigil-g0/fold-header-witness/v1" || h.hash()) → n u64 lanes mod flux_fold::Q
+commitment_i   = ajtai.commit(header_witness(h_i, 32)) → 16 u64 = 128 B/block   // blob payload only
+FoldCheckpoint {                                  // the per-range blob (NOT per-skeleton)
+    base_height:   u64,
+    anchor_height: u64,
+    commitments:   Vec<[u64;16]>,                 // base..=anchor
+    proof:         flux_fold::FoldedProof,        // ~2568 B
+}
+```
+
+**Verify procedure (all must hold or fail-loud):**
+1. endpoint bind: `commitments[0] == commit(witness(genesis_hash))`
+   && `commitments[last] == commit(witness(DNS_anchor_hash))`
+2. `flux_fold::verify(&ajtai, &commitments, &proof)`
+3. 32 B `parent_hash` linkage walk over the skeleton range.
 
 ## Verify seam with LANE-B (locked per B #383)
 
@@ -86,7 +116,12 @@ SQIsign DNS tip (ship-now) vs quorum (later)?**
 
 ## Open decisions
 
-1. **lead:** proof-elision go/no-go (consensus-timing).
-2. **lead:** trust-anchor source — SQIsign DNS tip (live now) vs validator quorum.
-3. **B:** sizing — commitment inline (Option A) vs batched range blob (Option B); send the
-   `FoldCheckpoint` struct + `header_witness` map so I finalize `SkeletonHeaderV0`.
+1. **lead (BLOCKING):** proof-elision go/no-go (consensus-timing). The only gate left
+   for the codec=2 implementation.
+2. **lead (default set):** trust-anchor source — B confirmed the SQIsign DNS tip
+   (live) for M1; ship with it unless lead picks a validator quorum.
+3. **grok-turbo / lead:** add the `flux-fold` dep to `sigil-top/Cargo.toml` (grok-turbo
+   holds it) for the M2 fold-attest path. M1 is dep-free and lands first.
+
+**Resolved:** ~~sizing~~ → B #392 chose Option B (168 B skeleton, batched `FoldCheckpoint`
+blob); ~~`FoldCheckpoint`/`header_witness`~~ → speced above, verbatim from B.

@@ -1496,17 +1496,16 @@ fn main() {
     // stdout (tray/subsystem quirk), which dropped the app to the one-frame path and
     // "closed" instead of showing the dashboard. Treat it as interactive if EITHER
     // stdin or stdout is a tty — only a full pipe/redirect (both non-tty) stays plain.
-    // v3: is_terminal() is unreliable on Windows consoles → it WAS the #1 "no TUI" bug.
-    // Run the TUI when a Windows console is attached (win_has_console) or via SIGIL_TUI=1;
-    // SIGIL_HEADLESS=1 forces headless for genuine non-interactive runs.
+    // v3: the default dashboard invocation ALWAYS runs the TUI — that's the whole point of
+    // launching sigil-top with no subcommand. is_terminal()/console detection is unreliable
+    // across launch methods (conhost / Windows Terminal / remote shells / double-click) and
+    // WAS the #1 "no TUI on Windows" bug, so it no longer GATES the decision — only the boot
+    // log. Headless is OPT-IN: `--once` or SIGIL_HEADLESS=1 (full-sync/serve are separate
+    // subcommands handled earlier). Terminal setup below is non-fatal, so even a console that
+    // rejects raw-mode/alt-screen still reaches the render loop instead of silent-exiting.
     let force_headless = std::env::var("SIGIL_HEADLESS").is_ok();
-    let interactive = !force_headless && (
-        std::env::var("SIGIL_TUI").is_ok()
-        || std::io::stdout().is_terminal()
-        || std::io::stdin().is_terminal()
-        || win_has_console()
-    );
-    boot_trace(&format!("interactive={} (stdout_tty={} stdin_tty={} win_console={}) once={} lite={}",
+    let interactive = !cfg.once && !force_headless;
+    boot_trace(&format!("interactive={} (stdout_tty={} stdin_tty={} win_console={} default_tui) once={} lite={}",
         interactive, std::io::stdout().is_terminal(), std::io::stdin().is_terminal(), win_has_console(), cfg.once, cfg.lite));
     // Non-TTY (piped / captured / redirected) or --once → one plain frame, no loop.
     if cfg.once || !interactive {
@@ -3242,12 +3241,15 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
         }
     }
 
-    enable_raw_mode()?;
+    // v3: NON-FATAL terminal setup. A console that rejects raw mode / the alternate screen
+    // must not abort the dashboard (that was a silent "no TUI" exit). Log and continue — the
+    // render loop still paints; keys may be line-buffered in the degraded case, which beats blank.
+    if let Err(e) = enable_raw_mode() { boot_trace(&format!("enable_raw_mode failed (continuing): {e}")); }
     // From here ratatui owns the screen — divert background eprintln to the logfile
     // (was smearing the dashboard with [p2p-sync]/[aether] lines).
     IN_TUI.store(true, std::sync::atomic::Ordering::Relaxed);
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    if let Err(e) = execute!(stdout, EnterAlternateScreen) { boot_trace(&format!("EnterAlternateScreen failed (continuing): {e}")); }
 
     // v0.10.5 "stable uptime": a panic anywhere below would otherwise leave the
     // user's terminal in raw mode + alternate screen = a bricked, unusable shell.

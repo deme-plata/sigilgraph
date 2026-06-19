@@ -38,9 +38,37 @@ pub type EventTag = u8;
 
 /// All on-chain events SIGIL emits per block. Order matches genesis §4. Add
 /// new variants AT THE END to preserve tag compatibility for indexers.
+/// The chivalric Orders of the SIGIL Nation (docs/SIGIL_NATION_v0.md). Soulbound honors —
+/// non-transferable, conferred by DEEDS, never bought; recorded permanently in this ledger.
+/// "What we do in life echoes in eternity" — on an immutable chain, literally.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "order")]
+pub enum SigilOrder {
+    /// ⚔️ Ridderkorset — the Knight's Cross. The working honor of the honorable doer
+    /// (ranks: Ridder → Kommandør → Storkors).
+    Ridderkorset,
+    /// 🐘 Elefantordenen — the Order of the Elephant. The supreme honor, rare, for a
+    /// Maximus-tier act of service or sacrifice. The elephant never forgets — like the ledger.
+    Elefantordenen,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum SigilEvent {
+    /// A chivalric Order of the SIGIL Nation conferred on a citizen — a SOULBOUND honor,
+    /// non-transferable, recorded permanently. Earned by deeds, never bought. Strength and honor.
+    HonorConferred {
+        /// The order conferred (Ridderkorset / Elefantordenen).
+        order: SigilOrder,
+        /// Rank within the order ("Ridder" / "Kommandør" / "Storkors"; empty for the Elephant).
+        rank: String,
+        /// The honored citizen — wallet/agent address.
+        recipient: WalletId,
+        /// The deed cited: what was done to earn it. Permanent on the record.
+        citation: String,
+        /// Who conferred it (operator, or a quorum-representing bearer).
+        conferred_by: WalletId,
+    },
     /// A wallet sent tokens to another wallet.
     Send {
         /// Sender wallet.
@@ -231,6 +259,7 @@ impl SigilEvent {
             SigilEvent::ValidatorJoined { .. } => 9,
             SigilEvent::ValidatorLeft   { .. } => 10,
             SigilEvent::ShieldedSend    { .. } => 11,
+            SigilEvent::HonorConferred  { .. } => 12,
         }
     }
 

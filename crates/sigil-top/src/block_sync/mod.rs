@@ -252,7 +252,11 @@ fn dns_anchor_tip() -> Option<(u64, sigil_header::BlockHash)> {
             }
         }
     }
-    None
+    // REAL anchor path (LANE-A, landed 4ba6884): fetch the producer-signed `v=sigil1`
+    // anchor → sigil_dns_anchor::verify_signed_anchor (SQIsign) + key_id + freshness +
+    // monotonic epoch. None until a real signed anchor is published (operator pins
+    // SIGIL_ANCHOR_PK_HEX) → zero regression; the dev-inject above covers the bench.
+    fetch::fetch_verified_anchor_tip()
 }
 
 impl P2PBlockSync {
@@ -669,7 +673,12 @@ impl P2PBlockSync {
                                 let n = net_c.clone();
                                 async move { n.send_request(peer, payload).await }
                             };
-                            match fetch::pull_snapshot(&peers, send, |h, hex| { let _ = store.put_block_raw(h, hex); }).await {
+                            // A's commit-hook flip: the verified skeleton prefix lands in the
+                            // flat append-only SkeletonStore (no per-key flux-db commit). base=0:
+                            // the producer serves a genesis-anchored prefix (header.base_height=0).
+                            let skel_dir = format!("{}-skeleton", std::env::var("SIGIL_TOP_DB").unwrap_or_else(|_| "sigil-top-blocks.db".to_string()));
+                            let mut skel = SkeletonStore::open(&skel_dir, 0).ok();
+                            match fetch::pull_snapshot(&peers, send, |page| { if let Some(s) = skel.as_mut() { let _ = s.append(page); } }).await {
                                 Ok(v) => match verify::fast_forward_to_anchored_checkpoint(
                                     &mut store, v.anchor_height, &v.anchor_hash, verify::DEFAULT_FRONTIER_WINDOW,
                                 ) {

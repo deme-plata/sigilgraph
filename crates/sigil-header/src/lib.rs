@@ -433,3 +433,61 @@ mod tests {
         assert_eq!(serde_json::to_vec(&clone).unwrap(), bytes);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Snapshot / checkpoint fast-sync WIRE TYPES (v3 sync sprint, LANE-A).
+//
+// Shared here so the CLIENT (sigil-top `block_sync::fetch`) and the SERVER (sigil-node
+// backfill responder) compile against ONE definition. Client-only logic
+// (SnapshotVerifier / pull_snapshot) stays in sigil-top. See
+// docs/SIGIL_SKELETON_CODEC2_v0.md + docs/SIGIL_SNAPSHOT_PULL_DESIGN_v0.md.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Snapshot magic — "SiGil SNapshot".
+pub const SNAPSHOT_MAGIC: [u8; 4] = *b"SGSN";
+/// Snapshot wire-format version.
+pub const SNAPSHOT_VERSION: u16 = 1;
+
+/// One skeleton record on the snapshot wire (codec=2 `'S'`). 72 B fixed under bincode
+/// (one u64 + 2×[u8;32]). Drops the ~8 KB of PQ proofs AND the 4 state roots — they can't
+/// be made sound on the prefix (B #416: the fold is PoK over peer-supplied commitments, a
+/// flat order-independent sum, and roots don't chain like `parent_hash`). Trusted roots
+/// come only from the frontier's real headers or the DNS anchor. `block_hash` (committed
+/// BLAKE3 of the FULL header) is REQUIRED: the linkage walk checks
+/// `rec[i].parent_hash == rec[i-1].block_hash` and B's fold witness is `f(block_hash)`.
+/// ~113× vs 8 KB.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkeletonRecord {
+    pub height: u64,
+    pub block_hash: BlockHash,
+    pub parent_hash: BlockHash,
+}
+
+impl SkeletonRecord {
+    /// Producer side (sigil-node responder) / tests: derive a skeleton from a full header.
+    pub fn from_header(h: &SigilBlockHeaderV0) -> Self {
+        Self { height: h.height, block_hash: h.hash(), parent_hash: h.parent_hash }
+    }
+}
+
+/// Snapshot framing prefix (codec=3 `'P'`), sent before the record stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotHeader {
+    pub magic: [u8; 4],
+    pub version: u16,
+    pub base_height: u64,
+    pub anchor_height: u64,
+    pub anchor_hash: BlockHash,
+    pub count: u64,
+}
+
+/// Snapshot trailer (codec=4 `'F'`), sent after the record stream. `archive_root` = BLAKE3
+/// over the canonical bincode of every `SkeletonRecord`, in order; `anchor_sig` = producer
+/// SQIsign over `(archive_root ‖ anchor_height ‖ anchor_hash ‖ epoch)`; `fold_blob` =
+/// opaque `bincode(FoldCheckpoint)` (LANE-B decodes — empty for the M1 path).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotTrailer {
+    pub archive_root: BlockHash,
+    pub anchor_sig: Vec<u8>,
+    pub fold_blob: Vec<u8>,
+}

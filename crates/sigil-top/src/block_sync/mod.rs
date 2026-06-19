@@ -229,6 +229,16 @@ pub struct P2PBlockSync {
 
 pub use super::block_store::StoredBlock;
 
+/// LANE-B fold fast-path dependency: the live DNS SQIsign anchor tip as (height, block_hash).
+/// STUB (returns None) — lands the fast-forward call site with ZERO regression (skipped until this
+/// returns a value). The real impl (NEXT) must, per B's #417 consumer contract: fetch the DNS TXT
+/// (`fetch_dns_anchor` + `sigil_dns_anchor::decode`), VERIFY the SQIsign sig over
+/// (block_hash‖4 roots‖height‖epoch), and REJECT stale anchors (monotonic epoch, age ≤ MAX) before
+/// returning Some — `fast_forward_to_anchored_checkpoint` trusts whatever this hands it.
+fn dns_anchor_tip() -> Option<(u64, sigil_header::BlockHash)> {
+    None
+}
+
 impl P2PBlockSync {
     /// v0.11.0: share the live sync state with the embedded explorer API (serve.rs)
     /// so `/api/v1/{status,peers}` reflect the real mesh height / verified watermark /
@@ -1433,6 +1443,19 @@ impl P2PBlockSync {
                             }
                         }
                         if !genesis_reset {
+                        // LANE-B prefix multiplier — trusted-checkpoint fast-forward (fail-loud,
+                        // idempotent per tick). No-op until dns_anchor_tip() returns a fresh,
+                        // SQIsign-verified (height,hash); verify_to_parallel below always guarantees
+                        // correctness, so this is zero-regression until dns_anchor_tip() is real.
+                        if let Some((anchor_h, anchor_hash)) = dns_anchor_tip() {
+                            match verify::fast_forward_to_anchored_checkpoint(
+                                &mut store, anchor_h, &anchor_hash, verify::DEFAULT_FRONTIER_WINDOW,
+                            ) {
+                                Ok(rep) => crate::tlog!("[sync] LANE-B fast-forward: trusted h={} bulk_below={} verified_to={} frontier_checked={}",
+                                    rep.trusted_height, rep.bulk_trusted_below, rep.verified_to, rep.frontier_checked),
+                                Err(e) => crate::tlog!("[sync] LANE-B fast-forward refused ({e}) — verify_to_parallel covers it"),
+                            }
+                        }
                         // v0.15.0 perf: 40k/1.5s capped VERIFIED throughput at ~26.6k blk/s;
                         // 60k/1.5s lifted it to ~40k blk/s against the verify core's then-
                         // measured 52k/s.

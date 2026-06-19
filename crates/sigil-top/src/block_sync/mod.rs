@@ -629,11 +629,40 @@ impl P2PBlockSync {
                 // v0.15.2: far-behind monitor snaps to a recent window once peer_best is known.
                 const RECENT_WINDOW: u64 = 2_048;  // v0.21: pin the base just 1 chunk under the live tip
                 let mut snapped = false;
+                let mut snapshot_attempted = false; // LANE-A snapshot-pull one-shot guard
 
                 loop {
                     if stop_rx.try_recv().is_ok() {
                         let _ = net.stop().await;
                         break;
+                    }
+
+                    // LANE-A snapshot-pull (one-shot, gated). No-op until dns_anchor_tip() is real
+                    // (SQIsign-verified + fresh). Bulk-pulls the verified skeleton prefix in codec=2
+                    // pages; on success commits skeletons (put_block_raw) + hands off via
+                    // fast_forward_to_anchored_checkpoint, then the frontier refill resumes from the
+                    // anchor. Err / no codec=2 server → the codec=1 crawl below covers it unchanged
+                    // (zero regression). SIGIL_SNAPSHOT=0 disables it.
+                    if !snapshot_attempted && dns_anchor_tip().is_some() {
+                        let snap_on = std::env::var("SIGIL_SNAPSHOT").map(|v| v != "0").unwrap_or(true);
+                        let peers = net.connected_peers();
+                        if snap_on && store.synced_to() <= sync_base && !peers.is_empty() {
+                            snapshot_attempted = true;
+                            let net_c = net.clone();
+                            let send = move |peer, payload: Vec<u8>| {
+                                let n = net_c.clone();
+                                async move { n.send_request(peer, payload).await }
+                            };
+                            match fetch::pull_snapshot(&peers, send, |h, hex| { let _ = store.put_block_raw(h, hex); }).await {
+                                Ok(v) => match verify::fast_forward_to_anchored_checkpoint(
+                                    &mut store, v.anchor_height, &v.anchor_hash, verify::DEFAULT_FRONTIER_WINDOW,
+                                ) {
+                                    Ok(_) => crate::tlog!("[sync] snapshot-pull OK: {} recs → anchor h={}", v.records, v.anchor_height),
+                                    Err(e) => crate::tlog!("[sync] snapshot-pull stored {} recs; fast-forward refused ({e})", v.records),
+                                },
+                                Err(_) => crate::tlog!("[sync] snapshot-pull failed — codec=1 crawl covers it"),
+                            }
+                        }
                     }
 
                     // LANE-S CHAIN-RESET SELF-HEAL: the tip-poller flagged a reset (the live tip

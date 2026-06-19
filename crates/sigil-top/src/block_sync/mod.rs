@@ -236,6 +236,19 @@ pub use super::block_store::StoredBlock;
 /// (block_hash‖4 roots‖height‖epoch), and REJECT stale anchors (monotonic epoch, age ≤ MAX) before
 /// returning Some — `fast_forward_to_anchored_checkpoint` trusts whatever this hands it.
 fn dns_anchor_tip() -> Option<(u64, sigil_header::BlockHash)> {
+    // DEV-ONLY bench source (interim, until A lands the real DNS+SQIsign-verify fetch): the live
+    // `_sigil-tip` DNS TXT is currently a dead template (A #449), so SIGIL_SNAPSHOT_ANCHOR=<height>:<hex32>
+    // lets us exercise the full snapshot-pull → fast_forward path + measure blk/s NOW. Unset → None
+    // (no-op, zero regression). NEVER trusts a network anchor without B's verify_signed_anchor (#417).
+    if let Ok(s) = std::env::var("SIGIL_SNAPSHOT_ANCHOR") {
+        if let Some((h, hx)) = s.split_once(':') {
+            if let (Ok(height), Ok(bytes)) = (h.parse::<u64>(), hex::decode(hx)) {
+                if let Ok(hash) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                    return Some((height, hash));
+                }
+            }
+        }
+    }
     None
 }
 

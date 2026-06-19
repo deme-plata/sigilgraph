@@ -795,6 +795,58 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 None => ok(format!("{{\"ok\":true,\"cid\":{},\"found\":false}}", js(&cid))),
             }
         }
+        // SIGIL Nation honours for a wallet — the SigilEvent::HonorConferred surface, stored as
+        // flux-history entries (kind="honor", addr=<recipient>, title="order|rank"). Returns a
+        // BARE JSON array [{order,rank}] — what the SIGIL honor Discord bot consumes for the
+        // 'vis medlemmer' badge. Strength and honor.
+        ("GET", "/honor") => {
+            let js = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into());
+            let w = query_get(query, "wallet").map(|s| s.to_lowercase());
+            let n = node.read().unwrap();
+            let items: Vec<String> = match (w.as_deref(), n.history.as_ref()) {
+                (Some(w), Some(h)) => h
+                    .by_tag("addr", w)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|e| e.kind == "honor")
+                    .map(|e| {
+                        let (order, rank) = e.title.split_once('|').unwrap_or((e.title.as_str(), ""));
+                        format!("{{\"order\":{},\"rank\":{}}}", js(order), js(rank))
+                    })
+                    .collect(),
+                _ => vec![],
+            };
+            ok(format!("[{}]", items.join(",")))
+        }
+        // Confer a SIGIL Order on a citizen — operator-authorized (honor over power: the
+        // conferrer signs). Validates the order + rank, then records an immutable honour entry.
+        ("POST", "/honor/confer") => {
+            let recipient = match jstr(body, "recipient").and_then(hex32) {
+                Some(r) => r,
+                None => return bad("recipient (hex64) required"),
+            };
+            let order = match jstr(body, "order") {
+                Some(o) if o == "Ridderkorset" || o == "Elefantordenen" => o.to_string(),
+                _ => return bad("order must be Ridderkorset or Elefantordenen"),
+            };
+            let rank = jstr(body, "rank").unwrap_or("").to_string();
+            let citation = jstr(body, "citation").unwrap_or("conferred by deed").to_string();
+            let rank_ok = match order.as_str() {
+                "Ridderkorset" => matches!(rank.as_str(), "Ridder" | "Kommandør" | "Storkors"),
+                "Elefantordenen" => rank.is_empty(),
+                _ => false,
+            };
+            if !rank_ok {
+                return bad("invalid rank (Ridderkorset: Ridder|Kommandør|Storkors; Elefantordenen: none)");
+            }
+            let mut n = node.write().unwrap();
+            if let Err(e) = authorize(&mut n, &OPERATOR, "honor_confer", &[order.clone(), rank.clone(), to_hex(&recipient)], body) {
+                return bad(&e);
+            }
+            ingest(&mut n, "honor", format!("{order}|{rank}"), &[recipient], &citation);
+            n.height += 1;
+            ok(format!("{{\"ok\":true,\"order\":\"{}\",\"rank\":\"{}\",\"recipient\":\"{}\"}}", order, rank, to_hex(&recipient)))
+        }
         ("GET", "/balance") => {
             let w = query_get(query, "wallet").and_then(hex32);
             let t = query_get(query, "token").and_then(hex32).unwrap_or(NATIVE);
@@ -1576,6 +1628,47 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             n.council.mark_executed(&id);
             persist(&n);
             ok(format!("{{\"ok\":true,\"id\":\"{}\",\"status\":\"executed\",\"amount\":{},\"to\":\"{}\"}}", id, p.amount, to_hex(&p.to)))
+        }
+
+        // ── plain wallet send: a signed native/token transfer between two wallets ──
+        // The SIGIL wallet posts the legacy `/api/v1/transactions/send` shape (mapped
+        // here to `/transactions/send`). The `from` wallet authorises with action
+        // "send" over the ordered fields [from_hex, to_hex, token, amount] — `amount`
+        // in BASE UNITS (SIGIL = 8 decimals), exactly as sigil-sign/auth.rs prescribe.
+        // Funds move through the same state chokepoint as /swap and /bank.
+        ("POST", "/transactions/send") | ("POST", "/send") => {
+            let from = match jstr(body, "from").and_then(hex32) { Some(w) => w, None => return bad("from must be 64-hex") };
+            let to   = match jstr(body, "to").and_then(hex32)   { Some(w) => w, None => return bad("to must be 64-hex") };
+            if from == to { return bad("cannot send to self"); }
+            let amount = match jnum(body, "amount") { Some(a) if a > 0 => a, _ => return bad("amount required (>0, base units)") };
+            let tok_s = jstr(body, "token").unwrap_or("SIGIL").to_string();
+            let mut n = node.write().unwrap();
+            // resolve symbol → token id: SIGIL/SGL/NATIVE → NATIVE; else registry symbol; else raw 64-hex; else native.
+            let token = if tok_s.eq_ignore_ascii_case("SIGIL") || tok_s.eq_ignore_ascii_case("SGL") || tok_s.eq_ignore_ascii_case("NATIVE") {
+                NATIVE
+            } else {
+                n.tokens.iter().find(|(s, _)| s.eq_ignore_ascii_case(&tok_s)).map(|(_, id)| *id)
+                    .or_else(|| hex32(&tok_s))
+                    .unwrap_or(NATIVE)
+            };
+            if let Err(e) = authorize(&mut n, &from, "send",
+                &[to_hex(&from), to_hex(&to), tok_s.clone(), amount.to_string()], body) { return bad(&e); }
+            let from_bal = n.state.balance_of(&from, &token);
+            if from_bal < amount { return bad(&format!("insufficient balance: have {from_bal}, need {amount}")); }
+            let to_bal = n.state.balance_of(&to, &token);
+            let h = n.height;
+            let muts = vec![
+                StateMutation::SetBalance { wallet: from, token, amount: from_bal - amount },
+                StateMutation::SetBalance { wallet: to,   token, amount: to_bal.saturating_add(amount) },
+            ];
+            if let Err(e) = commit_state_transition(&mut n.state, &StateTransition { at_height: h, mutations: muts }, h) {
+                return bad(&format!("send commit failed: {e:?}"));
+            }
+            n.height += 1;
+            ingest(&mut n, "send", format!("send {amount} {tok_s} -> {}", to_hex(&to)), &[from, to], "wallet send");
+            persist(&n);
+            ok(format!("{{\"ok\":true,\"from\":\"{}\",\"to\":\"{}\",\"amount\":{},\"token\":\"{}\",\"height\":{}}}",
+                to_hex(&from), to_hex(&to), amount, to_hex(&token), n.height))
         }
         _ => bad("unknown route"),
     }

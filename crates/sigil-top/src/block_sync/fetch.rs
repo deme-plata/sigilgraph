@@ -337,6 +337,7 @@ pub(super) enum SnapshotError {
     LinkageBreak { at: u64 }, // parent_hash != prev.block_hash
     RootMismatch,             // recomputed archive_root != trailer claim
     Encode,                   // canonical re-encode failed (unreachable for fixed struct)
+    BadHeader,                // 'P' header describes an inconsistent / oversized prefix
     Empty,
 }
 
@@ -418,6 +419,112 @@ impl SnapshotVerifier {
             records: self.seen as usize,
         })
     }
+}
+
+/// Pull + structurally-verify a snapshot of the historical prefix from `peers` over the
+/// flux-p2p request-response channel. `send` wraps `net.send_request` so fetch.rs needn't
+/// name `libp2p::PeerId` (sigil-top has no direct libp2p dep); launch() passes
+/// `|peer, body| net.send_request(peer, body)`. `commit(height, block_hash_hex)` is
+/// launch()'s `store.put_block_raw` seam — called per VERIFIED record so the skeletons
+/// land WITHOUT ever holding them all (the OOM latch: one page resident, dropped after
+/// commit). Returns the crypto-facts for LANE-B's fast_forward_to_anchored_checkpoint;
+/// `Err` → caller benches the peer + falls back to codec=1 (zero regression).
+///
+/// codec assignment (reuses the existing `BackfillReq.codec: u8` — NO struct change in
+/// mod.rs): `2` = skeleton page → `'S'`; `3` = snapshot header → `'P'`; `4` = fold+trailer
+/// → `'F'`. An old responder hits its default arm on codec ≥ 2 → serves `'H'`/`'Z'`/empty
+/// → not `'P'` → we treat it as "no snapshot here" and the caller downgrades. Graceful.
+///
+/// `'F'` body = `bincode(SnapshotTrailer)` with the `FoldCheckpoint` carried OPAQUE inside
+/// `trailer.fold_blob` — so this fn needs no flux-fold dep; LANE-B decodes the blob.
+pub(super) async fn pull_snapshot<P, F, Fut>(
+    peers: &[P],
+    send: F,
+    mut commit: impl FnMut(u64, &str),
+) -> Result<SnapshotVerified, SnapshotError>
+where
+    P: Clone,
+    F: Fn(P, Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, String>>,
+{
+    const PAGE: u64 = 50_000; // ~3.6 MB/page at 72 B (SIGIL_SNAP_PAGE)
+    const MAX_PAGE_RECS: usize = 100_000; // hard per-page guard (resource attack)
+    const MAX_SNAPSHOT_RECORDS: u64 = 50_000_000; // sane prefix bound (chain ~6.7M today)
+    const MAX_P_BYTES: usize = 4096; // 'P' is ~90 B fixed — cap a forged length prefix
+    const MAX_S_BYTES: usize = MAX_PAGE_RECS * 80 + 64; // ~8 MB — bounds Vec<SkeletonRecord> alloc
+    const MAX_F_BYTES: usize = 64 * 1024 * 1024; // trailer cap (M1 tiny; M2 fold_blob — B-chunked)
+    if peers.is_empty() {
+        return Err(SnapshotError::Empty);
+    }
+    let mk = |from: u64, to: u64, codec: u8| -> Result<Vec<u8>, SnapshotError> {
+        serde_json::to_vec(&super::BackfillReq { from, to, headers_only: true, codec })
+            .map_err(|_| SnapshotError::Encode)
+    };
+
+    // (a) DISCOVER + framing header (codec=3 → 'P'); the first peer that answers 'P' serves.
+    let mut server: Option<P> = None;
+    let mut header: Option<SnapshotHeader> = None;
+    for p in peers {
+        let body = mk(0, 0, 3)?;
+        if let Ok(resp) = send(p.clone(), body).await {
+            if resp.first() == Some(&b'P') && resp.len() <= MAX_P_BYTES {
+                if let Ok(h) = bincode::deserialize::<SnapshotHeader>(&resp[1..]) {
+                    server = Some(p.clone());
+                    header = Some(h);
+                    break;
+                }
+            }
+        }
+    }
+    let header = header.ok_or(SnapshotError::Empty)?; // no 'P' anywhere → caller downgrades
+    let server = server.ok_or(SnapshotError::Empty)?;
+    // The header must describe a sane CONTIGUOUS prefix — a lying `count` would otherwise
+    // loop the stream, and an inconsistent range lets a peer steer us off the real prefix.
+    if header.count == 0
+        || header.count > MAX_SNAPSHOT_RECORDS
+        || header.anchor_height < header.base_height
+        || header.count != header.anchor_height - header.base_height + 1
+    {
+        return Err(SnapshotError::BadHeader);
+    }
+    let mut verifier = SnapshotVerifier::new(&header)?; // BadMagic / BadVersion fail here
+
+    // (b) STREAM skeleton pages (codec=2 → 'S'), commit-as-you-stream, DROP each page.
+    let base = header.base_height;
+    let total = header.count;
+    let mut done: u64 = 0;
+    while done < total {
+        let from = base + done;
+        let to = (from + PAGE).min(base + total);
+        let resp = send(server.clone(), mk(from, to, 2)?)
+            .await
+            .map_err(|_| SnapshotError::Empty)?;
+        if resp.first() != Some(&b'S') || resp.len() > MAX_S_BYTES {
+            return Err(SnapshotError::Empty);
+        }
+        let page: Vec<SkeletonRecord> =
+            bincode::deserialize(&resp[1..]).map_err(|_| SnapshotError::Encode)?;
+        if page.is_empty() || page.len() > MAX_PAGE_RECS {
+            return Err(SnapshotError::Encode);
+        }
+        for rec in &page {
+            verifier.push(rec)?; // contiguity + linkage + running BLAKE3 root
+            commit(rec.height, &hex::encode(rec.block_hash)); // launch()'s put_block_raw
+        }
+        done += page.len() as u64;
+        // `page` dropped here → only one page ever resident (the OOM latch).
+    }
+
+    // (c) FOLD + TRAILER (codec=4 → 'F'); finalize RECOMPUTES the root vs the trailer claim.
+    let resp = send(server, mk(base, header.anchor_height, 4)?)
+        .await
+        .map_err(|_| SnapshotError::Empty)?;
+    if resp.first() != Some(&b'F') || resp.len() > MAX_F_BYTES {
+        return Err(SnapshotError::Empty);
+    }
+    let trailer: SnapshotTrailer =
+        bincode::deserialize(&resp[1..]).map_err(|_| SnapshotError::Encode)?;
+    verifier.finalize(&trailer)
 }
 
 #[cfg(test)]

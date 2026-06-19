@@ -230,3 +230,282 @@ mod lane_a_sched_tests {
         assert_eq!(adaptive_inflight(8, 0.0, 1.0, 50, 16), 2); // floor never drops below 2
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LANE-A v3 — SNAPSHOT / CHECKPOINT archive format (the rsync-speed prefix path).
+//
+// Operator data point: rsync Win→Epsilon sustains ~100 MB/s; block sync moves
+// ~1.18 MB/s (144 blk/s × 8 KB) — ~85× below the proven pipe. That gap is protocol
+// serialization (per-chunk req/resp RTT + small yamux windows + per-block verify
+// interleaved), NOT bandwidth. So the historical prefix is bulk-transferred as a
+// verified, content-addressed SNAPSHOT — one rsync-like stream, or a few large
+// flux-p2p FoldRange responses — verified stream-as-you-go, with per-block libp2p
+// reserved for the live frontier only. At 100 MB/s + 200 B skeletons that's ~500k
+// blk/s of transport headroom (5× the 100k goal); the ceiling then moves to
+// verify+commit (LANE-B/C).
+//
+// LANE SPLIT: fetch.rs (here) owns the FORMAT + the TRANSPORT-STRUCTURAL verify
+// (parse, BLAKE3-stream archive root, parent_hash linkage walk, height contiguity).
+// The CRYPTOGRAPHIC verify — the producer's SQIsign over the root + the flux_fold
+// range proof — is LANE-B's verify.rs (needs the producer pubkey + the flux-fold
+// dep, both M2-gated). fetch.rs carries those as OPAQUE bytes and hands them to B,
+// so this compiles TODAY on sigil-top's existing deps (blake3 + bincode + serde +
+// sigil-header). Dead-code until lead wires the snapshot path + rules on the
+// elision/anchor trust bargain. Spec: docs/SIGIL_SKELETON_CODEC2_v0.md.
+// ─────────────────────────────────────────────────────────────────────────────
+
+use sigil_header::{BlockHash, Root, SigilBlockHeaderV0};
+
+/// Snapshot magic — "SiGil SNapshot".
+pub(super) const SNAPSHOT_MAGIC: [u8; 4] = *b"SGSN";
+pub(super) const SNAPSHOT_VERSION: u16 = 1;
+
+/// One skeleton record on the snapshot wire (codec=2 'S'). 200 B fixed under bincode
+/// (one u64 + 6×[u8;32], no length prefixes). Drops the ~8 KB of PQ proofs
+/// (STARK/VDF/SQIsign/ProofBundle); keeps exactly what the transport-structural verify
+/// + B's fold witness need.
+///
+/// `block_hash` (the committed BLAKE3 of the FULL header) is REQUIRED — it can't be
+/// recomputed from a skeleton (the skeleton omits the proofs the hash covers): (a) the
+/// linkage walk checks `rec[i].parent_hash == rec[i-1].block_hash`; (b) B's fold
+/// witness is `BLAKE3-XOF(… ‖ h.hash())`, i.e. it consumes `block_hash` per block. So
+/// 200 B / ~41× vs 8 KB (the earlier 168 B / 48× estimate omitted `block_hash`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct SkeletonRecord {
+    pub height: u64,
+    pub block_hash: BlockHash,  // committed BLAKE3 of the full header (identity + fold witness)
+    pub parent_hash: BlockHash, // selected-parent (spine) link
+    pub wallet_state_root: Root,
+    pub dex_state_root: Root,
+    pub event_log_root: Root,
+    pub contract_state_root: Root,
+}
+
+impl SkeletonRecord {
+    /// Producer / test side: derive a skeleton from a full header.
+    pub(super) fn from_header(h: &SigilBlockHeaderV0) -> Self {
+        Self {
+            height: h.height,
+            block_hash: h.hash(),
+            parent_hash: h.parent_hash,
+            wallet_state_root: h.wallet_state_root,
+            dex_state_root: h.dex_state_root,
+            event_log_root: h.event_log_root,
+            contract_state_root: h.contract_state_root,
+        }
+    }
+}
+
+/// Framing prefix, sent before the record stream.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct SnapshotHeader {
+    pub magic: [u8; 4],
+    pub version: u16,
+    pub base_height: u64,       // first record height (genesis for a full prefix)
+    pub anchor_height: u64,     // last record height = the DNS-anchored trust point
+    pub anchor_hash: BlockHash, // the trusted tip hash at anchor_height
+    pub count: u64,             // records that follow
+}
+
+/// Trailer, sent after the record stream.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct SnapshotTrailer {
+    /// BLAKE3 over the canonical bincode of every record, in order.
+    pub archive_root: BlockHash,
+    /// Producer SQIsign over `(archive_root ‖ anchor_height ‖ anchor_hash)`. Opaque to
+    /// fetch.rs — LANE-B verifies it against the DNS-anchored producer pubkey.
+    pub anchor_sig: Vec<u8>,
+    /// Opaque `bincode(FoldCheckpoint)` — LANE-B's verify.rs decodes + flux_fold-verifies
+    /// it (M2). Empty when the snapshot ships without the optional fold attestation.
+    pub fold_blob: Vec<u8>,
+}
+
+/// What the transport-structural verify proves; handed to LANE-B for the crypto finish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SnapshotVerified {
+    pub base_height: u64,
+    pub anchor_height: u64,
+    pub anchor_hash: BlockHash,
+    pub archive_root: BlockHash, // RECOMPUTED locally, never the peer's claim
+    pub anchor_sig: Vec<u8>,     // → B verifies vs the DNS producer pubkey
+    pub fold_blob: Vec<u8>,      // → B flux_fold-verifies (M2)
+    pub records: usize,
+}
+
+/// Fail-loud rejection reasons (the peer is benched on any of these).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum SnapshotError {
+    BadMagic,
+    BadVersion(u16),
+    CountMismatch { expected: u64, got: usize },
+    NonContiguousHeight { at: u64, expected: u64 },
+    LinkageBreak { at: u64 }, // parent_hash != prev.block_hash
+    RootMismatch,             // recomputed archive_root != trailer claim
+    Encode,                   // canonical re-encode failed (unreachable for fixed struct)
+    Empty,
+}
+
+/// Streaming transport-structural verifier. Feed `new(header)`, then each record in
+/// order via `push`, then `finalize(trailer)`. It (1) BLAKE3-streams canonical record
+/// bytes into the archive root, (2) checks height contiguity, and (3) walks the
+/// parent_hash linkage. On finalize it RECOMPUTES the root and compares to the peer's
+/// claim — a single bit-flip changes the root, so a malicious 100 MB/s peer cannot
+/// tamper undetected. The cryptographic anchor (SQIsign over the root + the fold proof)
+/// is LANE-B's job; this hands B the locally-recomputed root + the opaque sig/fold bytes.
+pub(super) struct SnapshotVerifier {
+    hasher: blake3::Hasher,
+    base_height: u64,
+    anchor_height: u64,
+    anchor_hash: BlockHash,
+    expected_count: u64,
+    seen: u64,
+    prev_block_hash: Option<BlockHash>,
+}
+
+impl SnapshotVerifier {
+    pub(super) fn new(header: &SnapshotHeader) -> Result<Self, SnapshotError> {
+        if header.magic != SNAPSHOT_MAGIC {
+            return Err(SnapshotError::BadMagic);
+        }
+        if header.version != SNAPSHOT_VERSION {
+            return Err(SnapshotError::BadVersion(header.version));
+        }
+        Ok(Self {
+            hasher: blake3::Hasher::new(),
+            base_height: header.base_height,
+            anchor_height: header.anchor_height,
+            anchor_hash: header.anchor_hash,
+            expected_count: header.count,
+            seen: 0,
+            prev_block_hash: None,
+        })
+    }
+
+    /// Feed the next record (must arrive in height order). O(1): folds canonical bytes
+    /// into the running BLAKE3 root and checks contiguity + spine linkage.
+    pub(super) fn push(&mut self, rec: &SkeletonRecord) -> Result<(), SnapshotError> {
+        let expected_h = self.base_height + self.seen;
+        if rec.height != expected_h {
+            return Err(SnapshotError::NonContiguousHeight { at: rec.height, expected: expected_h });
+        }
+        if let Some(prev) = self.prev_block_hash {
+            if rec.parent_hash != prev {
+                return Err(SnapshotError::LinkageBreak { at: rec.height });
+            }
+        }
+        let bytes = bincode::serialize(rec).map_err(|_| SnapshotError::Encode)?;
+        self.hasher.update(&bytes);
+        self.prev_block_hash = Some(rec.block_hash);
+        self.seen += 1;
+        Ok(())
+    }
+
+    /// Finalize against the trailer: check count + recompute the root, return the proven
+    /// facts for LANE-B's cryptographic finish.
+    pub(super) fn finalize(self, trailer: &SnapshotTrailer) -> Result<SnapshotVerified, SnapshotError> {
+        if self.seen == 0 {
+            return Err(SnapshotError::Empty);
+        }
+        if self.seen != self.expected_count {
+            return Err(SnapshotError::CountMismatch { expected: self.expected_count, got: self.seen as usize });
+        }
+        let root: BlockHash = *self.hasher.finalize().as_bytes();
+        if root != trailer.archive_root {
+            return Err(SnapshotError::RootMismatch);
+        }
+        Ok(SnapshotVerified {
+            base_height: self.base_height,
+            anchor_height: self.anchor_height,
+            anchor_hash: self.anchor_hash,
+            archive_root: root,
+            anchor_sig: trailer.anchor_sig.clone(),
+            fold_blob: trailer.fold_blob.clone(),
+            records: self.seen as usize,
+        })
+    }
+}
+
+#[cfg(test)]
+mod lane_a_snapshot_tests {
+    use super::{
+        SkeletonRecord, SnapshotError, SnapshotHeader, SnapshotTrailer, SnapshotVerifier,
+        SNAPSHOT_MAGIC, SNAPSHOT_VERSION,
+    };
+
+    fn rec(h: u64, bh: u8, ph: u8) -> SkeletonRecord {
+        SkeletonRecord {
+            height: h,
+            block_hash: [bh; 32],
+            parent_hash: [ph; 32],
+            wallet_state_root: [0; 32],
+            dex_state_root: [0; 32],
+            event_log_root: [0; 32],
+            contract_state_root: [0; 32],
+        }
+    }
+
+    fn header(base: u64, anchor: u64, count: u64) -> SnapshotHeader {
+        SnapshotHeader { magic: SNAPSHOT_MAGIC, version: SNAPSHOT_VERSION,
+            base_height: base, anchor_height: anchor, anchor_hash: [anchor as u8; 32], count }
+    }
+
+    #[test]
+    fn skeleton_record_is_200_bytes_on_the_wire() {
+        assert_eq!(bincode::serialize(&rec(0, 1, 0)).unwrap().len(), 200);
+    }
+
+    #[test]
+    fn valid_snapshot_verifies_and_recomputes_its_own_root() {
+        let recs = [rec(0, 10, 0), rec(1, 11, 10), rec(2, 12, 11)]; // linked spine
+        let mut h = blake3::Hasher::new();
+        for r in &recs { h.update(&bincode::serialize(r).unwrap()); }
+        let root = *h.finalize().as_bytes();
+        let mut v = SnapshotVerifier::new(&header(0, 2, 3)).unwrap();
+        for r in &recs { v.push(r).unwrap(); }
+        let ok = v.finalize(&SnapshotTrailer { archive_root: root, anchor_sig: vec![], fold_blob: vec![] }).unwrap();
+        assert_eq!(ok.archive_root, root);
+        assert_eq!(ok.records, 3);
+        assert_eq!(ok.anchor_height, 2);
+    }
+
+    #[test]
+    fn linkage_break_is_rejected() {
+        let mut v = SnapshotVerifier::new(&header(0, 1, 2)).unwrap();
+        v.push(&rec(0, 10, 0)).unwrap();
+        // h1 claims parent=99 but prev block_hash was 10 → break
+        assert_eq!(v.push(&rec(1, 11, 99)).unwrap_err(), SnapshotError::LinkageBreak { at: 1 });
+    }
+
+    #[test]
+    fn noncontiguous_height_is_rejected() {
+        let mut v = SnapshotVerifier::new(&header(0, 5, 2)).unwrap();
+        v.push(&rec(0, 10, 0)).unwrap();
+        assert_eq!(v.push(&rec(2, 12, 10)).unwrap_err(),
+            SnapshotError::NonContiguousHeight { at: 2, expected: 1 });
+    }
+
+    #[test]
+    fn tampered_root_is_rejected() {
+        let mut v = SnapshotVerifier::new(&header(0, 0, 1)).unwrap();
+        v.push(&rec(0, 10, 0)).unwrap();
+        assert_eq!(
+            v.finalize(&SnapshotTrailer { archive_root: [0xff; 32], anchor_sig: vec![], fold_blob: vec![] }).unwrap_err(),
+            SnapshotError::RootMismatch
+        );
+    }
+
+    #[test]
+    fn count_mismatch_is_rejected() {
+        let mut v = SnapshotVerifier::new(&header(0, 2, 3)).unwrap(); // claims 3
+        v.push(&rec(0, 10, 0)).unwrap();
+        let err = v.finalize(&SnapshotTrailer { archive_root: [0; 32], anchor_sig: vec![], fold_blob: vec![] }).unwrap_err();
+        assert_eq!(err, SnapshotError::CountMismatch { expected: 3, got: 1 });
+    }
+
+    #[test]
+    fn bad_magic_rejected() {
+        let h = SnapshotHeader { magic: *b"XXXX", version: SNAPSHOT_VERSION,
+            base_height: 0, anchor_height: 0, anchor_hash: [0; 32], count: 1 };
+        assert_eq!(SnapshotVerifier::new(&h).unwrap_err(), SnapshotError::BadMagic);
+    }
+}

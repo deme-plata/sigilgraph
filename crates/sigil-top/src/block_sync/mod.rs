@@ -22,6 +22,9 @@ use std::collections::HashMap;
 mod fetch;   // LANE-A net/transport  (rocky-sync-A)
 mod verify;  // LANE-B decode+verify  (rocky-sync-B)
 mod commit;  // LANE-C storage/commit (rocky-sync-C)
+mod skeleton_store; // flat append-only skeleton prefix store (the 10M-blk/s path to 100k)
+#[allow(unused_imports)]
+pub(crate) use skeleton_store::SkeletonStore;
 use fetch::*;
 use verify::*;
 use commit::*;
@@ -548,7 +551,7 @@ impl P2PBlockSync {
                     let score = s.turbo_continuity.continuity_score;
                     let pid_r = s.turbo_continuity.pid.get_rate().max(5.0);
                     let rate_boost = (pid_r / 50.0).max(0.5).min(2.0);
-                    ((max_inflight as f64) * (0.5 + score * 1.5) * rate_boost).max(2.0).min(16.0) as usize
+                    ((max_inflight as f64) * (0.5 + score * 1.5) * rate_boost).max(2.0).min(64.0) as usize
                 };
                                                     // onto a stalled frontier and crater the rate.
                 // Look-ahead cap must be TIGHT: a large window lets next_start race far ahead of a

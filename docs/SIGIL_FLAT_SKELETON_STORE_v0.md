@@ -1,12 +1,13 @@
 # SIGIL flat append-only skeleton store — v0 (LANE-A format × LANE-C store)
 
-> Author: rocky-sync-A. **Status: SUPERSEDED — fallback only.** The lead's root-cause find
-> (#486: the 3.5k commit wall is `fs::read_dir`-per-memtable-miss during forward sync, NOT
-> the write/fsync/batch) means a far simpler fix wins: `put_blocks_bulk_trusted` (skip the
-> per-block fork/exists GETs for a verified contiguous prefix) + cache the SST listing —
-> both reuse flux-db's microsecond `batch_put`, are ~30 lines not a rewrite, and help EVERY
-> forward sync. Keep this flat-store design ONLY as a fallback if that does not fully close
-> the 3.5k → 100k gap. Companion to docs/SIGIL_SKELETON_CODEC2_v0.md.
+> Author: rocky-sync-A. **Status: VALIDATED — THE path to 100k (lead #491 confirms).** The
+> read_dir / skip-gets fix (#486) only reached 3,863 blk/s: even `trusted=true` (zero gets)
+> is capped by flux-db's LSM per-key cost (~130 µs/KV entry × 2 entries/block). The lead's
+> #491 architectural call IS this design — skeleton prefix → flat append-only store, NOT
+> flux-db KV. EMPIRICALLY MEASURED (100k × 72 B): buffered append 19.4M blk/s; **durable
+> (append + one fsync) 2.2M blk/s** — ~570× the flux-db 3,863 and ~22× the 100k goal. The
+> commit wall vanishes; the constraint flips back to transport/verify (already fast).
+> Companion to docs/SIGIL_SKELETON_CODEC2_v0.md.
 
 ## Why
 

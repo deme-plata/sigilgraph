@@ -693,4 +693,40 @@ mod lane_a_snapshot_tests {
         assert_eq!(out.records, N as usize);
         assert_eq!(out.archive_root, root);
     }
+
+    /// Proves the flat append-only skeleton-store ceiling that breaks the commit wall
+    /// (lead #491: flux-db KV bulk commit caps at ~3,863 blk/s; the prefix must NOT go
+    /// through KV). 72 B sequential records + ONE durable fsync (the 2-phase watermark cost).
+    /// `#[ignore]` — run for the number:
+    ///   <test-bin> bench_flat_append_skeleton_store --ignored --nocapture
+    /// In-tree + reproducible on the capped build, vs the standalone measurement (2.2M-10M).
+    /// This is the LANE-C store's target ceiling; LANE-A feeds it the raw 72 B records.
+    #[test]
+    #[ignore]
+    fn bench_flat_append_skeleton_store() {
+        use std::io::Write;
+        const N: u64 = 1_000_000;
+        let rec = [0u8; 72]; // a skeleton stride
+        let path = std::env::temp_dir().join("sigil_flat_skel_bench.dat");
+
+        let t = std::time::Instant::now();
+        {
+            let f = std::fs::File::create(&path).unwrap();
+            let mut w = std::io::BufWriter::with_capacity(4 << 20, f);
+            for _ in 0..N {
+                w.write_all(&rec).unwrap();
+            }
+            w.into_inner().unwrap().sync_all().unwrap(); // ONE fsync = the durable watermark
+        }
+        let dt = t.elapsed();
+        let blk_s = N as f64 / dt.as_secs_f64();
+        eprintln!(
+            "[bench] flat-append skeleton store: {N} recs ({} MB) durable in {:?} = {:.0} blk/s (vs flux-db KV 3,863)",
+            (N * 72) / 1_000_000,
+            dt,
+            blk_s,
+        );
+        let _ = std::fs::remove_file(&path);
+        assert!(blk_s > 1_000_000.0, "flat append must clear 1M blk/s, got {blk_s:.0}");
+    }
 }

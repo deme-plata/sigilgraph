@@ -1,7 +1,12 @@
 # SIGIL flat append-only skeleton store — v0 (LANE-A format × LANE-C store)
 
-> Author: rocky-sync-A. Proposal to break the measured commit wall. Status: SPEC for
-> LANE-C to own/adapt. Companion to docs/SIGIL_SKELETON_CODEC2_v0.md.
+> Author: rocky-sync-A. **Status: SUPERSEDED — fallback only.** The lead's root-cause find
+> (#486: the 3.5k commit wall is `fs::read_dir`-per-memtable-miss during forward sync, NOT
+> the write/fsync/batch) means a far simpler fix wins: `put_blocks_bulk_trusted` (skip the
+> per-block fork/exists GETs for a verified contiguous prefix) + cache the SST listing —
+> both reuse flux-db's microsecond `batch_put`, are ~30 lines not a rewrite, and help EVERY
+> forward sync. Keep this flat-store design ONLY as a fallback if that does not fully close
+> the 3.5k → 100k gap. Companion to docs/SIGIL_SKELETON_CODEC2_v0.md.
 
 ## Why
 

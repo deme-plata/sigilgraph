@@ -432,8 +432,16 @@ impl SnapshotVerifier {
                 return Err(SnapshotError::LinkageBreak { at: rec.height });
             }
         }
-        let bytes = bincode::serialize(rec).map_err(|_| SnapshotError::Encode)?;
-        self.hasher.update(&bytes);
+        // Hash the canonical 72 B layout field-by-field — BYTE-IDENTICAL to bincode(rec)
+        // (bincode default = LE fixint: u64 LE ‖ [u8;32] ‖ [u8;32] = 72 B, pinned by
+        // skeleton_record_is_72_bytes_on_the_wire) but with NO per-record bincode alloc/encode.
+        // This is the verify half of the lead's #539 "stop re-encoding" fix: it drops 1 of the
+        // 3 bincode round-trips/record (deserialize + verify-encode + commit-encode); C's
+        // append-raw drops another → toward closing the 39,112 → 92.6k blk/s gap.
+        // archive_root is unchanged: the producer hashes the same 72 B per record.
+        self.hasher.update(&rec.height.to_le_bytes());
+        self.hasher.update(&rec.block_hash);
+        self.hasher.update(&rec.parent_hash);
         self.prev_block_hash = Some(rec.block_hash);
         self.seen += 1;
         Ok(())

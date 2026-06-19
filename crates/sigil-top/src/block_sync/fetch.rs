@@ -240,8 +240,8 @@ mod lane_a_sched_tests {
 // interleaved), NOT bandwidth. So the historical prefix is bulk-transferred as a
 // verified, content-addressed SNAPSHOT — one rsync-like stream, or a few large
 // flux-p2p FoldRange responses — verified stream-as-you-go, with per-block libp2p
-// reserved for the live frontier only. At 100 MB/s + 200 B skeletons that's ~500k
-// blk/s of transport headroom (5× the 100k goal); the ceiling then moves to
+// reserved for the live frontier only. At 100 MB/s + 72 B skeletons that's ~1.4M
+// blk/s of transport headroom (14× the 100k goal); the ceiling then moves to
 // verify+commit (LANE-B/C).
 //
 // LANE SPLIT: fetch.rs (here) owns the FORMAT + the TRANSPORT-STRUCTURAL verify
@@ -254,45 +254,40 @@ mod lane_a_sched_tests {
 // elision/anchor trust bargain. Spec: docs/SIGIL_SKELETON_CODEC2_v0.md.
 // ─────────────────────────────────────────────────────────────────────────────
 
-use sigil_header::{BlockHash, Root, SigilBlockHeaderV0};
+use sigil_header::{BlockHash, SigilBlockHeaderV0};
 
 /// Snapshot magic — "SiGil SNapshot".
 pub(super) const SNAPSHOT_MAGIC: [u8; 4] = *b"SGSN";
 pub(super) const SNAPSHOT_VERSION: u16 = 1;
 
-/// One skeleton record on the snapshot wire (codec=2 'S'). 200 B fixed under bincode
-/// (one u64 + 6×[u8;32], no length prefixes). Drops the ~8 KB of PQ proofs
-/// (STARK/VDF/SQIsign/ProofBundle); keeps exactly what the transport-structural verify
-/// + B's fold witness need.
+/// One skeleton record on the snapshot wire (codec=2 'S'). 72 B fixed under bincode
+/// (one u64 + 2×[u8;32], no length prefixes). Drops the ~8 KB of PQ proofs AND the 4
+/// state roots; keeps exactly what the transport-structural verify needs.
 ///
-/// `block_hash` (the committed BLAKE3 of the FULL header) is REQUIRED — it can't be
-/// recomputed from a skeleton (the skeleton omits the proofs the hash covers): (a) the
-/// linkage walk checks `rec[i].parent_hash == rec[i-1].block_hash`; (b) B's fold
-/// witness is `BLAKE3-XOF(… ‖ h.hash())`, i.e. it consumes `block_hash` per block. So
-/// 200 B / ~41× vs 8 KB (the earlier 168 B / 48× estimate omitted `block_hash`).
+/// The 4 state roots were REMOVED (B #416, DeepSeek-verified): they can't be made sound
+/// on the prefix. The fold is PoK over peer-supplied commitments (a flat, order-
+/// independent sum), so binding roots into the witness still lets a peer serve correct
+/// endpoints + FAKE interior `(block_hash‖roots)` pairs with algebraically-valid
+/// commitments, and roots don't chain like `parent_hash` so nothing pins them. CONTRACT:
+/// trusted state roots come ONLY from (i) the frontier's real 8 KB headers (where
+/// `block_hash = BLAKE3(full header)` IS recomputable and so commits to the roots), or
+/// (ii) the DNS anchor, which signs `(block_hash ‖ 4 roots ‖ height ‖ epoch)`. Any
+/// consumer needing prefix roots does an on-demand full-header fetch. So 72 B / ~113×.
+///
+/// `block_hash` (committed BLAKE3 of the FULL header) is REQUIRED — uncomputable from a
+/// skeleton: the linkage walk checks `rec[i].parent_hash == rec[i-1].block_hash`, and
+/// B's fold witness is `BLAKE3-XOF(… ‖ block_hash)`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) struct SkeletonRecord {
     pub height: u64,
     pub block_hash: BlockHash,  // committed BLAKE3 of the full header (identity + fold witness)
     pub parent_hash: BlockHash, // selected-parent (spine) link
-    pub wallet_state_root: Root,
-    pub dex_state_root: Root,
-    pub event_log_root: Root,
-    pub contract_state_root: Root,
 }
 
 impl SkeletonRecord {
     /// Producer / test side: derive a skeleton from a full header.
     pub(super) fn from_header(h: &SigilBlockHeaderV0) -> Self {
-        Self {
-            height: h.height,
-            block_hash: h.hash(),
-            parent_hash: h.parent_hash,
-            wallet_state_root: h.wallet_state_root,
-            dex_state_root: h.dex_state_root,
-            event_log_root: h.event_log_root,
-            contract_state_root: h.contract_state_root,
-        }
+        Self { height: h.height, block_hash: h.hash(), parent_hash: h.parent_hash }
     }
 }
 
@@ -433,15 +428,7 @@ mod lane_a_snapshot_tests {
     };
 
     fn rec(h: u64, bh: u8, ph: u8) -> SkeletonRecord {
-        SkeletonRecord {
-            height: h,
-            block_hash: [bh; 32],
-            parent_hash: [ph; 32],
-            wallet_state_root: [0; 32],
-            dex_state_root: [0; 32],
-            event_log_root: [0; 32],
-            contract_state_root: [0; 32],
-        }
+        SkeletonRecord { height: h, block_hash: [bh; 32], parent_hash: [ph; 32] }
     }
 
     fn header(base: u64, anchor: u64, count: u64) -> SnapshotHeader {
@@ -450,8 +437,8 @@ mod lane_a_snapshot_tests {
     }
 
     #[test]
-    fn skeleton_record_is_200_bytes_on_the_wire() {
-        assert_eq!(bincode::serialize(&rec(0, 1, 0)).unwrap().len(), 200);
+    fn skeleton_record_is_72_bytes_on_the_wire() {
+        assert_eq!(bincode::serialize(&rec(0, 1, 0)).unwrap().len(), 72);
     }
 
     #[test]

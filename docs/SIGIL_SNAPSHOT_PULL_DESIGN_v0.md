@@ -7,10 +7,10 @@
 ## Goal
 
 Make block sync *be rsync*: bulk-pull a verified skeleton snapshot of the historical
-prefix `[base, anchor]` (200 B/record, ~20 MB for 100k blocks) in a few large streamed
+prefix `[base, anchor]` (72 B/record, ~7.2 MB for 100k blocks) in a few large streamed
 responses, verify stream-as-you-go, then run per-block libp2p only for the live frontier.
-Measured: 100k skeletons = 20 MB → 0.2 s at the operator's proven 100 MB/s rsync rate
-(500k blk/s ceiling) + 12 ms BLAKE3 verify. The 144 blk/s live = 1.18% of the pipe.
+Measured: 100k skeletons = 7.2 MB → <0.1 s at the operator's proven 100 MB/s rsync rate
+(~1.4M blk/s ceiling) + ~4 ms BLAKE3 verify. The 144 blk/s live = 1.18% of the pipe.
 
 ## fetch.rs surface (LANE-A owns)
 
@@ -22,7 +22,7 @@ pub(super) async fn pull_snapshot<P, F, Fut>(peers: &[P], send: F)
     -> Result<SnapshotVerified, SnapshotError>
 where P: Clone, F: Fn(P, Vec<u8>) -> Fut, Fut: Future<Output = Result<Vec<u8>, String>>;
 ```
-Driver already landed: `SnapshotVerifier` / `SkeletonRecord`(200 B) / `SnapshotHeader` /
+Driver already landed: `SnapshotVerifier` / `SkeletonRecord`(72 B) / `SnapshotHeader` /
 `SnapshotTrailer` / `SnapshotVerified` (fetch.rs, commit f6d2040).
 
 ## Wire (additive — old nodes downgrade structurally to 'H'/'Z')
@@ -37,7 +37,7 @@ by first byte, reusing the existing `match data[0]` dispatch:
 | `'F'` | `bincode(FoldCheckpoint) ‖ bincode(SnapshotTrailer)` | `codec=2, fold_range=true` |
 
 Sequence: `'P'` (discover + header, also the capability probe) → stream `'S'` pages →
-`'F'` (fold + root + sig). `PAGE = 50_000` recs = 10 MB/response (`SIGIL_SNAP_PAGE`);
+`'F'` (fold + root + sig). `PAGE = 50_000` recs = 3.6 MB/response (`SIGIL_SNAP_PAGE`);
 ~134 requests for a 6.7M prefix vs ~1640 at the 4096 live-CHUNK.
 
 ## launch() integration (lead owns mod.rs; this is the call shape)
@@ -56,23 +56,22 @@ no change to grok's window loop; the snapshot await never touches `done_tx`/`ass
 
 Stream-verify-then-drop: each `'S'` page → `verifier.push()` per record → page `Vec` dropped.
 Verifier holds only `hasher + prev_block_hash(32B) + counters`. `adaptive_inflight(.., hi=2)`
-⇒ ≤ 2 × 10 MB = **20 MB resident regardless of range size**. Per-page count cap mirrors the
+⇒ ≤ 2 × 3.6 MB = **7.2 MB resident regardless of range size**. Per-page count cap mirrors the
 existing 64 MB zstd-bomb guard.
 
-## 🔴 MUST-FIX before activation (DeepSeek adversarial review)
+## ✅ RESOLVED before activation (DeepSeek + B #416)
 
-1. **[CRITICAL] State-root binding.** The skeleton's 4 state roots are NOT bound to
-   `block_hash` from the verifier's view — it has no full header to re-hash, and B's fold
-   witness is `f(block_hash)` only. So a peer can serve TRUE block_hashes (valid fold) with
-   FAKE state roots and it passes. ⇒ skeleton state roots are **untrusted hints**, not
-   verified state. RESOLUTION (LANE-B + producer): either (a) bind the 4 roots into the fold
-   witness / a per-block commitment the verifier recomputes, or (b) treat skeleton roots as
-   unverified until the frontier (or an on-demand full-header fetch) re-derives `block_hash`
-   and checks. Until resolved, **no consumer may trust a skeleton's state roots.**
-2. **[CRITICAL] Anchor freshness.** A stale DNS anchor lets the still-valid producer key
-   sign a POST-anchor fork (`SQIsign(fork_root ‖ anchor_height ‖ anchor_hash)` verifies).
-   ⇒ the signed anchor must cover a **timestamp/epoch**; verifier rejects anchors older than
-   `MAX_ANCHOR_AGE`. (LANE-B + the sigil-dns-anchor producer.)
+1. **State-root binding → CLOSED by removal.** The 4 state roots are DROPPED from the wire
+   (SkeletonRecord is now 72 B: height + block_hash + parent_hash). They couldn't be made
+   sound on the prefix — the fold is PoK over peer-supplied commitments (flat order-
+   independent sum), so binding roots into the witness still admits fake interior pairs, and
+   roots don't chain like `parent_hash`. CONTRACT: trusted state roots come ONLY from the
+   frontier's real 8 KB headers or the DNS anchor; consumers needing prefix roots do an
+   on-demand full-header fetch. `header_witness` stays `f(block_hash)`.
+2. **Anchor freshness → CLOSED.** The DNS SQIsign anchor signs the TUPLE
+   `(block_hash ‖ 4 roots ‖ height ‖ epoch)` with a strictly-monotonic NON-WRAPPING epoch;
+   verifier rejects `epoch ≤ last-accepted` AND `age > MAX_ANCHOR_AGE`. Producer =
+   sigil-dns-anchor / `dns_anchor_tip()`; verify = LANE-B (B flagged the lead).
 3. **[HIGH] Resource bounds.** Cap `header.count` vs `(anchor-base+1)` and a hard
    `SNAPSHOT_MAX_RECORDS`; cap per-page records at PAGE; cap `FoldCheckpoint.commitments.len`.
    (`SkeletonRecord` uses fixed `[u8;32]` so per-field overflow is N/A under bincode.)

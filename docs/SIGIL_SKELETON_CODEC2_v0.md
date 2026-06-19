@@ -26,29 +26,42 @@ clients never send `2`. Reply tag byte **`'S'`** + `bincode(Vec<SkeletonHeaderV0
 optionally zstd-wrapped (`'Z'`-then-`'S'`) reusing the existing inflate path.
 
 ```
-SkeletonHeaderV0 {            // ~168 B core (vs ~8 KB full)
-    height:            u64,            //   8
-    parent_hash:       BlockHash,      //  32  — the 32B linkage chain (checked separately)
-    wallet_state_root: Root,           //  32
-    dex_state_root:    Root,           //  32
-    event_log_root:    Root,           //  32
-    contract_state_root: Root,         //  32
-    // proof_commitment: see "sizing decision" — inline (m×8B) OR batched per-range blob
+SkeletonRecord {             // 72 B (vs ~8 KB full) — ~113×
+    height:      u64,        //   8
+    block_hash:  BlockHash,  //  32  — committed BLAKE3 of the full header (identity + fold witness)
+    parent_hash: BlockHash,  //  32  — linkage chain, checked vs prev.block_hash
 }
+// 4 state roots REMOVED (B #416): see Sizing. Trusted roots come only from the frontier's
+// real headers or the DNS anchor — never the prefix skeleton.
 ```
 
 **Dropped from the skeleton (fetched on-demand only for the frontier):**
 `state_transition_proof` (STARK), `vdf_proof`, `nonce_sqisign`, `producer_sig`,
 `fluxc_artifact_proof`, `txs`/tx bodies, `merge_parents` (DAG — frontier-only).
 
-## Sizing — DECIDED (B #392): Option B, 168 B skeleton / ~48×
+## Sizing — FINAL (B #416, DeepSeek-verified): 72 B skeleton / ~113×
 
-The skeleton stays **168 B** — no per-block commitment. The sound fast path (trusted
-DNS-anchor + `parent_hash` linkage cascade) does NOT use per-block commitments at all;
-the Ajtai commitment is purely the OPTIONAL fold tamper-evidence layer, so it must not
-tax every skeleton. Commitments are fetched as ONE batched `FoldCheckpoint` blob only
-for ranges we actually fold-attest. `producer_sig` (292 B SQIsign5) is anchor-only,
-never per-block.
+The skeleton is **72 B**: `height + block_hash + parent_hash`. The 4 state roots were
+REMOVED — they can't be made sound on the prefix: the fold is PoK over peer-supplied
+commitments (a flat, order-independent sum), so binding roots into the witness still lets
+a peer serve correct endpoints + FAKE interior pairs with algebraically-valid commitments,
+and roots don't chain like `parent_hash` so nothing pins them. CONTRACT: trusted state
+roots come ONLY from (i) the frontier's real 8 KB headers (`block_hash = BLAKE3(full
+header)` commits to them) or (ii) the DNS anchor (which signs them — below). Consumers
+needing prefix roots do an on-demand full-header fetch. `header_witness` stays
+`f(block_hash)` — not bloated. The Ajtai commitment stays the OPTIONAL fold tamper-evidence
+layer, fetched as ONE batched `FoldCheckpoint` blob per fold-attested range; `producer_sig`
+(292 B SQIsign5) is anchor-only. (Supersedes the B #392 168 B/Option-B sizing — that
+omitted block_hash AND assumed roots could be trusted; both now corrected.)
+
+## Anchor (B #416, soundness #2)
+
+The DNS SQIsign anchor MUST sign the TUPLE `(block_hash ‖ 4 state_roots ‖ height ‖ epoch)`,
+not just block_hash — else the anchor's own roots aren't trustable (un-derivable from the
+hash without the full header). Freshness: a strictly-monotonic, NON-WRAPPING epoch (Unix ts
+with a sane lower bound); reject `epoch ≤ last-accepted` AND `age > MAX_ANCHOR_AGE` — this
+stops the stale-anchor post-fork the still-valid producer key would otherwise sign. Producer
+side = sigil-dns-anchor / `dns_anchor_tip()`; verify side = LANE-B.
 
 ## Two composing models (B #392)
 

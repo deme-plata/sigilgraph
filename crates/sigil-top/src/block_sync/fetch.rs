@@ -483,7 +483,7 @@ impl SnapshotVerifier {
 pub(super) async fn pull_snapshot<P, F, Fut>(
     peers: &[P],
     send: F,
-    mut commit: impl FnMut(u64, &str),
+    mut commit: impl FnMut(&[SkeletonRecord]),
 ) -> Result<SnapshotVerified, SnapshotError>
 where
     P: Clone,
@@ -552,8 +552,8 @@ where
         }
         for rec in &page {
             verifier.push(rec)?; // contiguity + linkage + running BLAKE3 root
-            commit(rec.height, &hex::encode(rec.block_hash)); // launch()'s put_block_raw
         }
+        commit(&page); // page-batch append to the flat SkeletonStore (no per-key flux-db commit)
         done += page.len() as u64;
         // `page` dropped here → only one page ever resident (the OOM latch).
     }

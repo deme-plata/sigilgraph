@@ -124,6 +124,30 @@ export async function signChallenge(
 }
 
 /**
+ * Sign a sigil-rpc/v1 request for sigil-rpcd's auth-gated money routes
+ * (/transactions/send, /swap, /credit/*, /bank/*).
+ *
+ * Canonical message — MUST byte-match `sigil_rpc::auth::auth_message`:
+ *   sigil-rpc/v1|<action>|<field0>|<field1>|...|nonce=<reqNonce>
+ *
+ * Signed with the wallet's ed25519 key (the same key whose pubkey IS the
+ * address). The daemon rebuilds this exact string and verifies it against the
+ * actor wallet via ed25519-dalek. Interop was checked byte-for-byte against the
+ * dalek reference signer (sigil-sign), so @noble signatures verify there.
+ * Returns the 128-hex (64-byte) signature for the request body `sig` field.
+ */
+export async function signSigilRpc(
+  privateKey: Uint8Array,
+  action: string,
+  fields: string[],
+  reqNonce: number
+): Promise<string> {
+  const message = `sigil-rpc/v1|${action}|${fields.join('|')}|nonce=${reqNonce}`;
+  const sig = await ed25519.sign(new TextEncoder().encode(message), privateKey);
+  return bytesToHex(sig);
+}
+
+/**
  * Generate complete authentication header for API request
  */
 export async function generateAuthHeader(

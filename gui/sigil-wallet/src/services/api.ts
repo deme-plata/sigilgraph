@@ -1410,7 +1410,7 @@ class QNarwhalKnightAPI {
 
     // Generate authentication header using Ed25519
     try {
-      const { keypairFromMnemonic, generateAuthHeader, walletSession } = await import('./walletAuth');
+      const { keypairFromMnemonic, walletSession, signSigilRpc } = await import('./walletAuth');
 
       // Get or create session
       let activeSession = walletSession.getSession();
@@ -1429,42 +1429,60 @@ class QNarwhalKnightAPI {
         console.log('⚠️ Session created with Ed25519 only (no persistent Dilithium5 keys)');
       }
 
-      // Use Ed25519 authentication for transaction
-      // (AEGIS-QL support omitted to avoid asking for password again)
-      const authHeader = await generateAuthHeader(
-        activeSession.privateKey,
-        activeSession.address,
-        '/api/v1/transactions/send'
-      );
-      console.log('ℹ️ Using Ed25519 authentication for transaction');
-
-      console.log('✅ Generated X-Wallet-Auth header for transaction');
-      console.log('🔍 X-Wallet-Auth header length:', authHeader.length);
-      console.log('🔍 X-Wallet-Auth header preview:', authHeader.substring(0, 100) + '...');
-
-      // Send transaction with authentication header
-      // Only include mnemonic if we just decrypted it (no session was active)
-      const requestBody: any = {
-        from: fromAddress,
-        to: to,
-        amount: fixedAmount,
-        memo: memo,
-        token_type: tokenType || 'SGL', // Default to SGL if not specified
-      };
-
-      // Only include mnemonic if we had to decrypt it
-      if (mnemonic) {
-        requestBody.mnemonic = mnemonic;
+      // ── sigil-rpcd signed send (sigil-rpc/v1 auth) ──
+      // sigil-rpcd does NOT read the X-Wallet-Auth header — it verifies a
+      // body-embedded ed25519 signature over a canonical message. The `from`
+      // wallet signs action "send" over [from_hex, to_hex, token, baseUnits];
+      // the daemon rebuilds the same string and moves the funds.
+      let priv: Uint8Array | undefined = activeSession?.privateKey;
+      if (!priv) {
+        if (!mnemonic) {
+          return {
+            success: false, data: null,
+            error: 'No signing key available. Please log in again with your recovery phrase.',
+            timestamp: new Date().toISOString(),
+          };
+        }
+        priv = (await keypairFromMnemonic(mnemonic)).privateKey;
       }
 
-      console.log('📤 Sending transaction with token_type:', requestBody.token_type);
+      // Wallets are "qnk" + 64-hex(ed25519 pubkey); the chain wants the 64-hex.
+      const from64 = (fromAddress || activeSession?.address || '').replace(/^qnk/i, '').toLowerCase();
+      const to64 = (to || '').replace(/^qnk/i, '').toLowerCase();
+      if (!/^[0-9a-f]{64}$/.test(from64)) {
+        return { success: false, data: null, error: 'Invalid sender wallet address.', timestamp: new Date().toISOString() };
+      }
+      if (!/^[0-9a-f]{64}$/.test(to64)) {
+        return { success: false, data: null, error: 'Invalid recipient address — paste a full qnk… or 64-hex SIGIL address.', timestamp: new Date().toISOString() };
+      }
+
+      // SIGIL native = 8 decimals (1 SIGIL = 1e8 base units). `amount` arrives in
+      // whole coins from the UI; sign and send the exact integer base units.
+      const tokenSym = (tokenType || 'SIGIL').toUpperCase();
+      const baseUnits = Math.round(amount * 1e8);
+      if (!Number.isFinite(baseUnits) || baseUnits <= 0) {
+        return { success: false, data: null, error: 'Amount is too small or invalid.', timestamp: new Date().toISOString() };
+      }
+      if (baseUnits > Number.MAX_SAFE_INTEGER) {
+        return { success: false, data: null, error: 'Amount is too large to send safely.', timestamp: new Date().toISOString() };
+      }
+
+      const reqNonce = Date.now();
+      const sig = await signSigilRpc(priv, 'send', [from64, to64, tokenSym, String(baseUnits)], reqNonce);
+
+      console.log('📤 [sigil-rpc] send', { from: from64.slice(0, 10), to: to64.slice(0, 10), baseUnits, token: tokenSym });
 
       return this.request<any>('/v1/transactions/send', {
         method: 'POST',
-        headers: {
-          'X-Wallet-Auth': authHeader,
-        },
-        body: JSON.stringify(requestBody),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from: from64,
+          to: to64,
+          amount: baseUnits,
+          token: tokenSym,
+          req_nonce: reqNonce,
+          sig,
+        }),
       });
     } catch (authError) {
       console.error('❌ Failed to generate authentication header:', authError);

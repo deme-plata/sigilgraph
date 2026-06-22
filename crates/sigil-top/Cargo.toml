@@ -2,7 +2,12 @@
 name = "sigil-top"
 # sigil-top carries its OWN version cadence (the light client updates independently
 # of the workspace) — this is the "next version" the auto-updater ships.
-version = "1.0.0-rc9"
+# v5.0.0: SIGIL GRAPH v5 — YouTube showcase build (live P2P sync + mining in node-top).
+# v6.0.0: NEVER-HANG block-store open — a foreign/older on-disk store format (e.g. a
+# v4.1-era store opened by v6) used to block forever at "opening block store"; the open
+# now runs under a watchdog timeout (SIGIL_TOP_OPEN_TIMEOUT_SECS, default 20s) and falls
+# back to a clean store instead of wedging the node.
+version = "6.0.5"
 edition.workspace = true
 license.workspace = true
 description = "sigil-top — a SIGIL lightweight node + dual-mode (lite scorecard ↔ full dashboard) terminal monitor. v0.9.0 'Verifying Full Sync': downloads the chain genesis→tip over the sigil-g0 P2P mesh AND verifies it as one connected spine (per-header precheck + parent_hash linkage back to genesis), with a persisted verified_to watermark. New `full-sync` (headless sync-and-verify, exit 0 at tip) and `verify-chain` (re-verify the local store) subcommands; TUI surfaces the ⛓ verified-spine height + ⚠ spine-break alarm distinct from raw download progress."
@@ -74,6 +79,7 @@ zstd = "0.13"
 # When activated, sigil-tip-proof links flux-sqisign and verify_tip() constructs
 # a TipProof::new_sqisign() for adversary-resistant tip verification.
 [features]
+default = ["gpu"]
 gpu = ["flux-miner/gpu"]
 sqisign = []
 

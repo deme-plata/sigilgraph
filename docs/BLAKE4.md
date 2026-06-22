@@ -194,6 +194,67 @@ SIMD batching** (the blake3 crate already gets ~31× via AVX-512; the scalar
 numbers above are the per-round curve, not the deployable ceiling). The deployed
 hash would be SIMD × a validated R.
 
+## 7⅗. Which reduced R is safe? — the diffusion measurement (2026-06-21)
+
+§7½ measured the *speed* of each round count but left the *security margin*
+unmeasured — "which `R` is sound enough is an empirical question the bench loop
+answers." This is that answer. `pow::blake4_avalanche(R, samples)` runs a
+strict-avalanche-criterion (SAC) probe: flip every input bit of many random
+`header‖nonce` inputs and measure (a) the **mean** fraction of the 256 output bits
+that change (ideal **0.5**) and (b) the **worst single-output-bit bias**
+`|P(flip)−0.5|` (ideal **0** — a biased output bit is a grind handle even when the
+mean looks fine). Gated `#[cfg(any(test, feature="bench"))]`, deterministic, no deps.
+Regression-locked by `pow::tests::avalanche_curve_quantifies_round_security_margin`.
+
+Measured (48 samples = 15,360 single-bit trials/round; R=7 also at 192 samples):
+
+| R | mean (→0.5) | max_bias (→0) | speed (§7½) | verdict |
+|---|---|---|---|---|
+| 1 | **0.366** | **0.200** | 2.92× | **BROKEN** — 37% diffusion, one output bit 0.20 off ideal |
+| 2 | 0.500 | 0.012 | ~1.5× | SAC **saturated** (zero margin above the floor) |
+| 3 | 0.500 | 0.012 | **1.81×** | ideal SAC + a 1-round cushion |
+| 4–6 | ≈0.500 | 0.011–0.014 | — | ideal (noise floor) |
+| 7 | 0.500 | 0.011 (0.007 @192) | 0.95× | BLAKE3, KAT-anchored |
+
+**Finding:** BLAKE3's `G` + message permutation reach **full strict-avalanche in
+just 2 rounds** — the diffusion *floor* is R=2. R=1 is provably unusable; the
+tempting 2.92× lever is exactly the broken one.
+
+**SAC is necessary, not sufficient.** It does not rule out the higher-order
+differential / algebraic-degree weaknesses that reduced-round BLAKE/ChaCha-family
+permutations are known to have (those attacks bite well above where avalanche
+saturates). So SAC sets a hard *floor*, not a green light.
+
+### The PoW grind-bias survey (2026-06-22)
+
+SAC probes the full 256-bit digest under arbitrary input flips — but a miner only
+ever reads the **64-bit target word** (`blake4_word`, compared to difficulty) and only
+moves by **nonce increment**. `pow::blake4_grind_bias(R, nonces)` measures soundness on
+exactly those two surfaces: the worst **target-word monobit bias** (is the difficulty
+surface uniform?) and the **consecutive-nonce avalanche** (are grind attempts
+independent, or do near-target words cluster?). Regression-locked by
+`pow::tests::grind_bias_survey_targets_the_pow_word`.
+
+Measured (16,384-nonce sweep/round; R=7 also at 65,536):
+
+| R | word_monobit_bias (→0) | nonce_step_avalanche (→0.5) | verdict |
+|---|---|---|---|
+| 1 | **0.500** | **0.075** | **DEGENERATE** — a target-word bit is *constant*; consecutive nonces change 7.5% of the word → near-wins cluster → trivial grind |
+| 2 | 0.010 | 0.500 | clean on both PoW surfaces |
+| 3–6 | 0.006–0.016 | 0.500–0.501 | clean |
+| 7 | 0.010 (0.006 @65k) | 0.500 | BLAKE3 |
+
+This is a **sharper kill of R=1** than SAC: not "weaker diffusion" (mean 0.366) but
+*degenerate on the exact surfaces a miner exploits* — a constant target-word bit and
+near-identical consecutive words. Both instruments converge: **the floor is R=2.**
+
+**Bottom line for promotion.** Two independent instruments now agree the reduced-R
+floor is R=2 and R=1 is unusable. The promotion candidate is **R=3** (~1.81×, one round
+above the floor on both SAC and the grind surfaces). What still gates moving
+`BLAKE4_ROUNDS` off 7: a **differential/linear cryptanalysis survey** (high-probability
+trails are the attack class neither SAC nor grind-bias captures) and a real-hardware
+GPU grind validation. Until then `BLAKE4_ROUNDS` stays at 7 — zero consensus change.
+
 ## 7¾. BLAKE4 on the GPU — Lane A → GPU (scaffold, 2026-06-08)
 
 The dual lanes map cleanly onto the two kinds of hardware, which is the third
@@ -238,9 +299,11 @@ VDF → submit → cap-enforced credit — works on real binaries.
 - **BLAKE4-turbo is a ceiling, not a product.** The 12.9 GH/s number is an
   *invertible* mix used only to measure the headroom. Don't quote turbo as a
   real rate.
-- **No reduced-round `R` is deployed yet.** The primitive + curve exist and are
-  validated; choosing the safe `R` needs a diffusion / preimage-margin analysis
-  (avalanche, reduced-round attack survey) before `BLAKE4_ROUNDS` moves off 7.
+- **No reduced-round `R` is deployed yet.** The primitive, speed curve, SAC AND the
+  PoW grind-bias survey now exist (§7⅗: two independent instruments agree the floor is
+  R=2, R=1 is degenerate, R=3 is the candidate). The remaining gate before
+  `BLAKE4_ROUNDS` moves off 7 is a differential/linear cryptanalysis survey + a
+  real-GPU grind validation — SAC and grind-bias are a floor, not a green light.
 - **`pow.rs` is scalar.** The per-round curve is honest but un-SIMD'd; the
   deployable rate is SIMD (blake3-crate-class) × the chosen R. SIMD is the
   flux-cortex/flux-optimize lever.
@@ -255,9 +318,11 @@ VDF → submit → cap-enforced credit — works on real binaries.
 - **BLAKE4-turbo is a ceiling, not a product.** The 12.9 GH/s number is an
   *invertible* mix used only to measure the headroom. Don't quote turbo as a
   real rate.
-- **No reduced-round `R` is deployed yet.** The primitive + curve exist and are
-  validated; choosing the safe `R` needs a diffusion / preimage-margin analysis
-  (avalanche, reduced-round attack survey) before `BLAKE4_ROUNDS` moves off 7.
+- **No reduced-round `R` is deployed yet.** The primitive, speed curve, SAC AND the
+  PoW grind-bias survey now exist (§7⅗: two independent instruments agree the floor is
+  R=2, R=1 is degenerate, R=3 is the candidate). The remaining gate before
+  `BLAKE4_ROUNDS` moves off 7 is a differential/linear cryptanalysis survey + a
+  real-GPU grind validation — SAC and grind-bias are a floor, not a green light.
 - **`pow.rs` is scalar.** The per-round curve is honest but un-SIMD'd; the
   deployable rate is SIMD (blake3-crate-class) × the chosen R. SIMD is the
   flux-cortex/flux-optimize lever.

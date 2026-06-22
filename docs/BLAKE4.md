@@ -275,12 +275,40 @@ sampled Δ is **not a proof** of differential security — a real promotion stil
 automated trail search (SAT/MILP, the tooling that broke reduced ChaCha/BLAKE) over the
 full difference space.
 
-**Bottom line for promotion.** THREE independent instruments — SAC, PoW grind-bias, and
-the differential screen — now agree: the reduced-R floor is **R=2**, R=1 is unusable on
-every surface, and **R=3** is the candidate (~1.81×, one round above the floor on all
-three). What still gates moving `BLAKE4_ROUNDS` off 7: an **exhaustive (automated)
-differential/linear trail search** and a **real-hardware GPU grind validation**. Until
-then `BLAKE4_ROUNDS` stays at 7 — zero consensus change.
+### The automated trail search — rigorous core (`diff_search`, 2026-06-22)
+
+The screen above is empirical (random Δ, measured diffusion). The *analytic* gate is a
+**differential trail search**, and `crates/flux-miner/src/diff_search.rs` builds its exact
+foundation. BLAKE4 is Add-Rotate-XOR: rotation and XOR pass an XOR-difference through
+deterministically, so the only nonlinear gate is modular addition, whose XOR-differential
+probability is given EXACTLY by **Lipmaa-Moriai (2001)**.
+
+- `xdp_add_weight(α,β,γ,n)` — exact weight (−log₂ prob) of `(α,β→γ)` through `+`.
+  **Brute-force-verified** against the exhaustive truth over *all* (α,β,γ) at n=6, and
+  **Monte-Carlo-verified at the real n=32** (modelled 2⁻ʷ == measured probability).
+- `best_xdp_add(α,β)` — the optimal (min-weight) output difference, proven equal to an
+  exhaustive γ-scan at n=8.
+- `g_best_trail(...)` + `min_active_g_weight()` — greedily compose the exact `xdp+` through
+  one BLAKE4 `G` (two adds + the rotate/XOR layer).
+
+**Result:** the cheapest a *single active* `G` can be is **weight 7** (an MSB message-bit
+difference). Monte-Carlo on the real `G` measured that trail at 2⁻⁶ vs the modelled 2⁻⁷ — ~1
+bit more probable than the greedy trail, the expected **differential-clustering** signature
+(several trails reach the same output diff). So: the per-add core is *exact*; composing it
+through `G` is *approximate* (~1 bit optimistic), the well-known trail-model caveat.
+
+**Why this corroborates R≥2.** One active `G` costs ~6–7 bits, and the §7⅗ screen shows the
+difference has activated the *whole state* (many G's) by R=2 — so the multi-round trail
+weight blows past the 64-bit PoW window within a couple of rounds. Consistent with the
+empirical "no trail at R≥2."
+
+**Bottom line for promotion.** Four lines of evidence — SAC, PoW grind-bias, the empirical
+differential screen, and the exact `xdp+` trail core — agree: floor **R=2**, R=1 unusable,
+**R=3** the candidate (~1.81×). What still gates moving `BLAKE4_ROUNDS` off 7: assembling
+the verified `xdp+` core into a **full multi-round active-G optimal search** (the
+active-G-count growth across the message permutation — a SAT/MILP job; the per-`G` unit and
+the exact addition model are now in-tree to build it on) plus a **real-GPU grind
+validation**. Until then `BLAKE4_ROUNDS` stays at 7 — zero consensus change.
 
 ## 7¾. BLAKE4 on the GPU — Lane A → GPU (scaffold, 2026-06-08)
 
@@ -326,12 +354,12 @@ VDF → submit → cap-enforced credit — works on real binaries.
 - **BLAKE4-turbo is a ceiling, not a product.** The 12.9 GH/s number is an
   *invertible* mix used only to measure the headroom. Don't quote turbo as a
   real rate.
-- **No reduced-round `R` is deployed yet.** The primitive, speed curve, and THREE
-  soundness instruments now exist (§7⅗: SAC + PoW grind-bias + a differential screen all
-  agree the floor is R=2, R=1 is degenerate, R=3 is the candidate). The remaining gate
-  before `BLAKE4_ROUNDS` moves off 7 is an **exhaustive (automated) differential/linear
-  trail search** + a real-GPU grind validation — the three screens are a floor, not a
-  green light (each samples, none is an exhaustive proof).
+- **No reduced-round `R` is deployed yet.** The primitive, speed curve, three empirical
+  soundness instruments AND the exact Lipmaa-Moriai `xdp+` trail core now exist (§7⅗: all
+  agree floor=R=2, R=1 degenerate, R=3 candidate). The remaining gate before `BLAKE4_ROUNDS`
+  moves off 7 is assembling the verified `xdp+` core into a **full multi-round active-G
+  optimal trail search** (a SAT/MILP job — the per-G unit + exact addition model are in-tree
+  now) + a real-GPU grind validation. The screens are a floor, not a green light.
 - **`pow.rs` is scalar.** The per-round curve is honest but un-SIMD'd; the
   deployable rate is SIMD (blake3-crate-class) × the chosen R. SIMD is the
   flux-cortex/flux-optimize lever.
@@ -346,12 +374,12 @@ VDF → submit → cap-enforced credit — works on real binaries.
 - **BLAKE4-turbo is a ceiling, not a product.** The 12.9 GH/s number is an
   *invertible* mix used only to measure the headroom. Don't quote turbo as a
   real rate.
-- **No reduced-round `R` is deployed yet.** The primitive, speed curve, and THREE
-  soundness instruments now exist (§7⅗: SAC + PoW grind-bias + a differential screen all
-  agree the floor is R=2, R=1 is degenerate, R=3 is the candidate). The remaining gate
-  before `BLAKE4_ROUNDS` moves off 7 is an **exhaustive (automated) differential/linear
-  trail search** + a real-GPU grind validation — the three screens are a floor, not a
-  green light (each samples, none is an exhaustive proof).
+- **No reduced-round `R` is deployed yet.** The primitive, speed curve, three empirical
+  soundness instruments AND the exact Lipmaa-Moriai `xdp+` trail core now exist (§7⅗: all
+  agree floor=R=2, R=1 degenerate, R=3 candidate). The remaining gate before `BLAKE4_ROUNDS`
+  moves off 7 is assembling the verified `xdp+` core into a **full multi-round active-G
+  optimal trail search** (a SAT/MILP job — the per-G unit + exact addition model are in-tree
+  now) + a real-GPU grind validation. The screens are a floor, not a green light.
 - **`pow.rs` is scalar.** The per-round curve is honest but un-SIMD'd; the
   deployable rate is SIMD (blake3-crate-class) × the chosen R. SIMD is the
   flux-cortex/flux-optimize lever.

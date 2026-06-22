@@ -9,5 +9,10 @@ description = "SIGIL DNS anchor — TipProof ⇄ TXT record codec. Encodes a SQI
 blake3 = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
+# #417 (LANE-B): the verify half lives HERE so sigil-top stays dep-clean (it only deps
+# sigil-dns-anchor + gets verify_signed_anchor transitively — no flux-sqisign in sigil-top,
+# no grok-turbo Cargo bump). base64 decodes the s= field; flux-sqisign verifies the L5 sig.
+base64 = "0.22"
+flux-sqisign = { path = "../../../flux/crates/flux-sqisign" }
 
 [dev-dependencies]

@@ -7,7 +7,7 @@
 // into flux-db, one block at a time via serde_json.
 
 use serde::{Deserialize, Serialize};
-use sigil_header::SigilBlockHeaderV0;
+use sigil_header::{SigilBlockHeaderV0, BlockHash};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +44,14 @@ pub struct BlockStore {
     /// genesis, so a different hash here means the persisted synced_to/verified_to are for a
     /// DEAD chain and must be wiped (see `note_genesis`). Empty until the anchor block is seen.
     genesis_hash: String,
+    /// v3 (LANE-C, for LANE-B's fold fast-path): the explicit FOLD ANCHOR — `(height, hash)` of
+    /// the checkpoint a fold-proof authorizes (hash = the DNS SQIsign tip hash B authenticates
+    /// against). Below this height the prefix is TRUSTED-not-downloaded, so `verified_to` may
+    /// legitimately exceed `synced_to` up to `fold_anchor.height`; at/above it `verified_to`
+    /// stays ≤ `synced_to` (the frontier IS downloaded + precheck'd). `None` = no fold anchor →
+    /// the strict `verified_to ≤ synced_to` clamp (today's behavior). Persisted under meta 'A' so
+    /// the clamp-relax survives a reopen (else verified_to would be clamped back down on restart).
+    fold_anchor: Option<(u64, BlockHash)>,
 }
 
 /// Key prefix bytes (block data is keyed by 64-char hex hash, never starts with these).
@@ -51,6 +59,7 @@ const KEY_HINDEX: u8 = 0x01; // 0x01 ++ height.to_be_bytes() -> hash_hex  (heigh
 const KEY_META: u8 = 0x02;   // 0x02'S' -> synced_to · 0x02'V' -> verified_to  (meta)
                              // 0x02'B' -> be(best_height) ++ best_hash_hex  (v0.35: O(1) open)
                              // 0x02'G' -> genesis-anchor hash hex            (LANE-S: reset key)
+                             // 0x02'A' -> be(fold_anchor_height) ++ 32B hash (v3 LANE-C: fold anchor)
 
 fn height_key(h: u64) -> Vec<u8> {
     let mut k = Vec::with_capacity(9);
@@ -77,6 +86,33 @@ impl BlockStore {
     /// `best_height` + the height index on return: the migration runs INLINE.
     pub fn open_blocking(path: &str) -> Result<Self, String> {
         Self::open_inner(path, true)
+    }
+
+    /// v6: open with a WATCHDOG TIMEOUT. A foreign / older on-disk format (e.g. a
+    /// v4.1-era store opened by a v5/v6 binary) can make the underlying
+    /// `flux_db::Database::open` block indefinitely — the node then sits forever at
+    /// "opening block store" with no progress and no error, so the caller's
+    /// fresh-store fallback (which only fires on `Err`) never engages. This runs the
+    /// open on a worker thread and gives up after `secs`, returning `Err` so the
+    /// caller falls back to a clean store instead of hanging the whole node. The
+    /// worker thread is left blocked (harmless: the process restarts onto the fresh
+    /// store). `flux_db::Database` is already `Send` (it is moved into the background
+    /// migrate thread), so `BlockStore` crosses the channel cleanly.
+    pub fn open_with_timeout(path: &str, secs: u64) -> Result<Self, String> {
+        let p = path.to_string();
+        let (tx, rx) = std::sync::mpsc::channel::<Result<Self, String>>();
+        std::thread::Builder::new()
+            .name("sigil-blockstore-open".into())
+            .spawn(move || {
+                let _ = tx.send(Self::open(&p));
+            })
+            .map_err(|e| format!("spawn open watchdog: {e}"))?;
+        match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+            Ok(r) => r,
+            Err(_) => Err(format!(
+                "open timed out after {secs}s (incompatible or locked store — falling back to a fresh store)"
+            )),
+        }
     }
 
     fn open_inner(path: &str, inline_migration: bool) -> Result<Self, String> {
@@ -130,18 +166,31 @@ impl BlockStore {
             .get(&[KEY_META, b'S']).ok().flatten()
             .and_then(|v| <[u8; 8]>::try_from(v.as_slice()).ok().map(u64::from_be_bytes))
             .unwrap_or(0);
+        // v3 (LANE-C): the persisted fold anchor (meta 'A' = be(height) ++ 32B hash) — loaded
+        // BEFORE the verified_to clamp so the clamp-relax it grants survives reopen.
+        let fold_anchor: Option<(u64, BlockHash)> = db
+            .get(&[KEY_META, b'A']).ok().flatten()
+            .filter(|v| v.len() == 40)
+            .and_then(|v| {
+                let h = u64::from_be_bytes(<[u8; 8]>::try_from(&v[..8]).ok()?);
+                let hash = <[u8; 32]>::try_from(&v[8..40]).ok()?;
+                Some((h, hash))
+            });
+        let fold_h = fold_anchor.map(|(h, _)| h).unwrap_or(0);
         let verified_to = db
             .get(&[KEY_META, b'V']).ok().flatten()
             .and_then(|v| <[u8; 8]>::try_from(v.as_slice()).ok().map(u64::from_be_bytes))
             .unwrap_or(0)
-            .min(synced_to); // never claim verified past what's downloaded
+            // never claim verified past what's downloaded OR fold-anchored (the fold prefix is
+            // trusted-not-downloaded, so verified_to may legitimately exceed synced_to up to the anchor).
+            .min(synced_to.max(fold_h));
 
         // LANE-S: the genesis-anchor hash the persisted watermarks belong to.
         let genesis_hash = db
             .get(&[KEY_META, b'G']).ok().flatten()
             .map(|v| String::from_utf8_lossy(&v).into_owned())
             .unwrap_or_default();
-        let mut s = BlockStore { db, best_height, best_hash_hex, synced_to, verified_to, base: 0, genesis_hash };
+        let mut s = BlockStore { db, best_height, best_hash_hex, synced_to, verified_to, base: 0, genesis_hash, fold_anchor };
         s.advance_synced(); // catch up the contiguous pointer to whatever's on disk
         Ok(s)
     }
@@ -324,12 +373,20 @@ impl BlockStore {
     /// isn't downloaded) and monotonic guard is the caller's job — the verifier only ever
     /// advances it. Cheap no-op if unchanged.
     pub fn set_verified_to(&mut self, h: u64) {
-        let h = h.min(self.synced_to);
+        // v3 (LANE-C): clamp to downloaded OR fold-anchored — below an active fold anchor the
+        // prefix is trusted-not-downloaded, so verified_to may exceed synced_to up to the anchor.
+        let h = h.min(self.synced_to.max(self.fold_anchor_height()));
         if h != self.verified_to {
             self.verified_to = h;
             let _ = self.db.put(&[KEY_META, b'V'], &self.verified_to.to_be_bytes());
         }
     }
+
+    /// v3 (LANE-C): the active fold anchor height (0 if none) — the ceiling verified_to may reach
+    /// without downloading every block below it.
+    pub fn fold_anchor_height(&self) -> u64 { self.fold_anchor.map(|(h, _)| h).unwrap_or(0) }
+    /// v3 (LANE-C): the active fold anchor `(height, hash)`, if any.
+    pub fn fold_anchor(&self) -> Option<(u64, BlockHash)> { self.fold_anchor }
 
     /// LANE-S: a chain reset (fresh genesis) invalidates EVERY watermark — they describe the
     /// OLD chain's blocks, which no longer exist on the network. Without this the persisted
@@ -344,9 +401,11 @@ impl BlockStore {
         self.best_hash_hex = String::new();
         self.base = 0;
         self.genesis_hash = String::new(); // LANE-S: forget the dead chain's genesis anchor
+        self.fold_anchor = None;           // v3 LANE-C: the dead chain's fold anchor is invalid too
         let _ = self.db.put(&[KEY_META, b'S'], &0u64.to_be_bytes());
         let _ = self.db.put(&[KEY_META, b'V'], &0u64.to_be_bytes());
         let _ = self.db.put(&[KEY_META, b'G'], b""); // clear the persisted genesis key
+        let _ = self.db.put(&[KEY_META, b'A'], b""); // v3: clear the persisted fold anchor
         self.persist_best(); // write best_height=0 under meta 'B'
     }
 
@@ -600,8 +659,176 @@ impl BlockStore {
         }
     }
 
+    /// v3 (LANE-C, the 100k bulk path): commit a VERIFIED, CONTIGUOUS, fold-proven prefix with
+    /// ZERO per-block gets. `put_blocks_batch` pays a guaranteed-miss `db.get` per block
+    /// (`height_index_conflict` + dupe-check) — the read_dir-per-miss that capped commit at ~3.3k
+    /// blk/s. Even with flux-db's SST-list cache that's still a lock + bloom probe per block; for a
+    /// prefix LANE-B's fold fast-path already authenticated against the signed anchor, those checks
+    /// are pure overhead. This goes straight to ONE `batch_put`: parallel hash+serialize, assemble
+    /// the (block-by-hash, height-index) pairs, single WAL-locked write, bump best.
+    ///
+    /// ⚠️ CALLER MUST GUARANTEE the headers are verified + contiguous + within the fold anchor —
+    /// it does NO fork / dup / linkage checking. Use ONLY for the trusted snapshot/skeleton prefix;
+    /// live gossip + the frontier still go through `put_blocks_batch` (which checks). Does NOT
+    /// advance the contiguous pointer — call [`Self::advance`] after. Returns blocks written.
+    pub fn put_blocks_bulk_trusted(&mut self, headers: &[SigilBlockHeaderV0]) -> usize {
+        if headers.is_empty() { return 0; }
+        let nthreads = std::thread::available_parallelism()
+            .map(|n| n.get()).unwrap_or(4)
+            .min(16)
+            .min(headers.len().max(1));
+        let chunk_sz = headers.len().div_ceil(nthreads);
+        // Parallel hash + bincode across cores (same as put_blocks_batch); only the batch_put serial.
+        let mut prepared: Vec<(u64, String, Vec<u8>)> = std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(nthreads);
+            for chunk in headers.chunks(chunk_sz) {
+                handles.push(s.spawn(move || {
+                    let mut out = Vec::with_capacity(chunk.len());
+                    for header in chunk {
+                        let hash_hex = hex::encode(header.hash());
+                        let block = StoredBlock { header: header.clone(), hash_hex: hash_hex.clone(), synced_at: 0 };
+                        if let Ok(value) = bincode::serialize(&block) {
+                            out.push((header.height, hash_hex, value));
+                        }
+                    }
+                    out
+                }));
+            }
+            handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+        });
+        prepared.sort_by_key(|(height, _, _)| *height);
+        let mut owned: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(prepared.len() * 2);
+        let mut max_h = self.best_height;
+        let mut max_hash = self.best_hash_hex.clone();
+        let n = prepared.len();
+        for (height, hash_hex, value) in prepared {
+            owned.push((hash_hex.clone().into_bytes(), value));              // block by hash
+            owned.push((height_key(height), hash_hex.clone().into_bytes())); // height index
+            if height >= max_h { max_h = height; max_hash = hash_hex; }
+        }
+        let refs: Vec<(&[u8], &[u8])> = owned.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+        match self.db.batch_put(&refs) {
+            Ok(()) => {
+                self.best_height = max_h;
+                self.best_hash_hex = max_hash;
+                self.persist_best();
+                n
+            }
+            Err(_) => 0,
+        }
+    }
+
+    /// v3 (LANE-C): durable trusted-bulk commit — `put_blocks_bulk_trusted` + the 2-phase atomic-tip
+    /// fsync (see `commit_batch_durable`). The fast path for the snapshot/skeleton prefix.
+    pub fn commit_bulk_trusted_durable(&mut self, headers: &[SigilBlockHeaderV0], fsync: bool) -> Result<usize, String> {
+        if headers.is_empty() { return Ok(0); }
+        let n = self.put_blocks_bulk_trusted(headers); // memtable+WAL, no per-block gets
+        if fsync { self.db.sync_wal()?; }              // blocks durable
+        self.advance_synced();                         // tip 'S' → WAL
+        if fsync { self.db.sync_wal()?; }              // tip durable after blocks
+        Ok(n)
+    }
+
     /// Advance the contiguous pointer over consecutive heights now present (one pass).
     pub fn advance(&mut self) { self.advance_synced(); }
+
+    // ── v3 (LANE-C): durable batched commit + bulk-load controls ─────────────────
+    //
+    // The sync-sprint commit path. `put_blocks_batch` lands a chunk in the memtable +
+    // WAL under one lock (no fsync, no compaction); these wrap it with explicit,
+    // power-loss-safe durability and the bulk-load levers, so a write-back ring can
+    // flush LARGE batches with a controlled fsync cadence instead of paying flux-db's
+    // implicit 64 MB auto-flush + synchronous compaction storm on the hot path.
+
+    /// v3 (LANE-C): enter/exit bulk-load mode. In bulk-load the underlying flux-db DEFERS
+    /// the synchronous post-flush compaction (the >20k-blk/s wall — a forward sync is
+    /// append-mostly, so leveled compaction mid-sync is near-pure write-amplification) and
+    /// flushes the memtable to SSTs far less often (bigger memtable). Call `compact_to_tip`
+    /// once the sync reaches the chain tip to fold the piled-up L0 SSTs down.
+    pub fn set_bulk_load(&self, on: bool) {
+        self.db.set_defer_compaction(on);
+        // Bulk-load grows the memtable so flux-db flushes to SSTs ~4× less often during the
+        // sync (each flush clones the memtable + lz4s it); restore 64 MiB for steady-state.
+        self.db.set_max_wal_bytes(if on { 256 * 1024 * 1024 } else { 64 * 1024 * 1024 });
+    }
+
+    /// v3 (LANE-C): fold the deferred L0 SST pile down — call ONCE at tip (not on the hot
+    /// path). Re-enables eager compaction first so steady-state live operation is normal.
+    pub fn compact_to_tip(&self) -> Result<(), String> {
+        self.db.set_defer_compaction(false);
+        self.db.compact()
+    }
+
+    /// v3 (LANE-C): fsync only the WAL — the cheap "one fsync per batch" durability point.
+    pub fn sync_wal(&self) -> Result<(), String> { self.db.sync_wal() }
+
+    /// v3 (LANE-C): durable batched commit — the seam where verified blocks become durable.
+    ///
+    /// Stores `headers` (parallel hash+serialize, ONE `batch_put`), then performs the
+    /// **2-phase atomic-tip** fsync (design reviewed by DeepSeek — page-cache writeback can
+    /// reorder, so a single fsync after a tip-last batch is only kill-9-safe, NOT power-safe):
+    ///   1. `put_blocks_batch` → block-by-hash + height-index + best('B') into WAL.
+    ///   2. `sync_wal` → those bytes are now durable on disk.
+    ///   3. `advance_synced` → writes the contiguous tip watermark 'S' into the WAL.
+    ///   4. `sync_wal` → the tip is durable AFTER the blocks it points at.
+    /// A crash before (3) loses only the progress marker (re-derived on open by re-scanning
+    /// present heights — `open` calls `advance_synced`); a crash between (3) and (4) cannot
+    /// persist a tip ahead of its blocks because (2) already forced the blocks durable. So
+    /// `synced_to` after recovery is NEVER greater than the set of blocks actually on disk.
+    /// `fsync=false` skips both syncs (kill-9-safe via the OS page cache, but not power-safe)
+    /// for throughput benchmarking / ephemeral runs. Returns blocks accepted.
+    pub fn commit_batch_durable(&mut self, headers: &[SigilBlockHeaderV0], fsync: bool) -> Result<usize, String> {
+        if headers.is_empty() { return Ok(0); }
+        let accepted = self.put_blocks_batch(headers); // phase 1: blocks+index+best → WAL
+        if fsync { self.db.sync_wal()?; }              // phase 2: blocks durable
+        self.advance_synced();                         // phase 3: tip 'S' → WAL
+        if fsync { self.db.sync_wal()?; }              // phase 4: tip durable AFTER blocks
+        Ok(accepted)
+    }
+
+    /// v3 (LANE-C, for LANE-B's fold fast-path): durable `verified_to` watermark write — the
+    /// crash-safe "set verified_to=C" B needs so a kill-9 between fold-accept and the frontier
+    /// commit can NEVER leave a verified watermark ahead of durably-anchored state (the
+    /// divergence=0 guarantee at the persistence layer). Same 2-phase fsync as
+    /// `commit_batch_durable`: (1) `sync_wal` forces the anchored blocks durable, (2) write the
+    /// 'V' watermark, (3) `sync_wal` forces 'V' durable AFTER its anchor. A crash before this
+    /// returns simply leaves `verified_to` un-advanced (re-verified on restart) — never ahead.
+    ///
+    /// `set_verified_to` clamps to `synced_to` (verified ≤ downloaded), which holds today. When
+    /// the fold fast-path lands and legitimately verifies a prefix WITHOUT downloading every
+    /// block, that clamp must be relaxed UNDER AN EXPLICIT FOLD ANCHOR — owned jointly with
+    /// LANE-B; do NOT relax it here unconditionally or a phantom watermark can outlive its data.
+    pub fn commit_verified_to_durable(&mut self, h: u64, fsync: bool) -> Result<(), String> {
+        if fsync { self.db.sync_wal()?; } // anchored blocks durable BEFORE the watermark
+        self.set_verified_to(h);          // writes meta 'V' (clamped to synced_to ∨ fold anchor)
+        if fsync { self.db.sync_wal()?; } // watermark durable AFTER its anchor
+        Ok(())
+    }
+
+    /// v3 (LANE-C, for LANE-B's fold fast-path — Option (b) per swarm msg 395): set the fold
+    /// anchor IN-MEMORY (immediately relaxing the `verified_to` clamp to ≤ max(height, synced_to))
+    /// and persist it under meta 'A' (no fsync — pair with `commit_fold_anchor_durable` for the
+    /// crash-safe path). B calls this BEFORE advancing verified_to to the fold floor, so the
+    /// clamp-relax is in effect first.
+    pub fn set_fold_anchor(&mut self, height: u64, hash: BlockHash) {
+        self.fold_anchor = Some((height, hash));
+        let mut v = height.to_be_bytes().to_vec();
+        v.extend_from_slice(&hash);
+        let _ = self.db.put(&[KEY_META, b'A'], &v);
+    }
+
+    /// v3 (LANE-C): DURABLE fold-anchor write — the crash-safe ordering B needs. The anchor is
+    /// fsync'd BEFORE any subsequent `commit_verified_to_durable`, so a kill-9 between fold-accept
+    /// and the verified_to write can NEVER leave a `verified_to` that exceeds `synced_to` without
+    /// a durable anchor to authorize it (which would be a phantom watermark over data we don't
+    /// hold). Flow: B calls `commit_fold_anchor_durable(h, hash, true)` → then
+    /// `commit_verified_to_durable(h, true)` → then frontier verify.
+    pub fn commit_fold_anchor_durable(&mut self, height: u64, hash: BlockHash, fsync: bool) -> Result<(), String> {
+        if fsync { self.db.sync_wal()?; } // any prior writes durable first
+        self.set_fold_anchor(height, hash); // writes meta 'A' to the WAL
+        if fsync { self.db.sync_wal()?; } // anchor durable BEFORE 'V' can reference it
+        Ok(())
+    }
 
     pub fn get_block(&self, hash_hex: &str) -> Option<StoredBlock> {
         self.db.get(hash_hex.as_bytes()).ok().flatten().and_then(|v| {

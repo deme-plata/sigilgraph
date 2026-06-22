@@ -443,7 +443,18 @@ impl ThermalGuard {
     /// per-dispatch sleep while throttling. The target idles ~72C and hard-powers-off
     /// under sustained GPU load, so these sit well under the 85C the silicon would
     /// otherwise tolerate — the guard backs off long before the hardware browns out.
-    pub fn new() -> Self { Self::with(78.0, 82.0, 74.0, 50) }
+    pub fn new() -> Self {
+        fn envf(k: &str, d: f64) -> f64 { std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d) }
+        fn envu(k: &str, d: u64) -> u64 { std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d) }
+        // v4.1: hardware-configurable thermal limits. Default = conservative laptop policy;
+        // a desktop card stable at 90C+ raises these via env to keep GPU mining engaged.
+        Self::with(
+            envf("SIGIL_GPU_TEMP_THROTTLE", 78.0),
+            envf("SIGIL_GPU_TEMP_DISABLE", 82.0),
+            envf("SIGIL_GPU_TEMP_UNTHROTTLE", 74.0),
+            envu("SIGIL_GPU_THROTTLE_MS", 50),
+        )
+    }
 
     /// Construct with explicit thresholds (used by tests).
     pub fn with(throttle_c: f64, disable_c: f64, unthrottle_c: f64, throttle_sleep_ms: u64) -> Self {

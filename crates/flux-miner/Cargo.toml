@@ -9,7 +9,7 @@ description = "The dual-lane Flux miner: BLAKE4 proof-of-work (the POWER lane, Î
 
 [dependencies]
 flux-vdf   = { workspace = true }
-blake3     = { workspace = true }
+blake3     = { workspace = true, features = ["rayon"] }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 anyhow     = { workspace = true }
@@ -75,3 +75,13 @@ required-features = ["node"]
 name = "sigil-miner"
 path = "src/bin/sigil-miner.rs"
 required-features = ["client", "tui"]
+
+[[bin]]
+name = "ajtai-gpu-kat"
+path = "src/bin/ajtai-gpu-kat.rs"
+required-features = ["gpu"]
+
+[[bin]]
+name = "chronos-fold-bench"
+path = "src/bin/chronos-fold-bench.rs"
+required-features = ["gpu", "market"]

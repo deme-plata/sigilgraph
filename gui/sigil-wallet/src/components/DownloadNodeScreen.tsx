@@ -4,6 +4,58 @@ import { Download, Server, Shield, Zap, Terminal, CheckCircle, Code, BookOpen, R
 export default function DownloadNodeScreen() {
   return (
     <div className="max-w-6xl mx-auto space-y-8">
+      {/* SIGIL Wallet — featured binary download (top of page) */}
+      <motion.div
+        className="relative overflow-hidden p-8 rounded-2xl border"
+        style={{
+          background: 'linear-gradient(135deg, rgba(139,92,246,0.22) 0%, rgba(251,191,36,0.12) 100%)',
+          borderColor: 'rgba(212,175,55,0.45)',
+          boxShadow: '0 0 30px rgba(139,92,246,0.18)',
+        }}
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+      >
+        <div className="absolute top-0 right-0 w-56 h-56 bg-violet-500/10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2" />
+        <div className="relative flex flex-col md:flex-row md:items-center gap-6">
+          <div className="flex-shrink-0 w-16 h-16 rounded-2xl flex items-center justify-center bg-gradient-to-br from-violet-400/40 to-amber-400/30">
+            <Wallet className="w-8 h-8 text-amber-300" />
+          </div>
+          <div className="flex-1">
+            <div className="flex items-center gap-3 mb-1">
+              <h2 className="text-2xl md:text-3xl font-bold bg-gradient-to-r from-amber-300 via-yellow-400 to-violet-300 bg-clip-text text-transparent">
+                SIGIL Wallet — Desktop
+              </h2>
+              <span className="px-3 py-1 bg-violet-500/30 text-violet-200 text-xs font-bold rounded-full uppercase">Native</span>
+            </div>
+            <p className="text-amber-100/80 mb-4 max-w-2xl">
+              Native desktop wallet (Rust + Slint): send &amp; receive SIGIL, multi-token balances,
+              Point-of-Sale, and built-in CPU/GPU mining. Connects to the live sigil-g0 network.
+            </p>
+            <div className="flex flex-col sm:flex-row gap-3">
+              <a
+                href="https://sigilgraph.quillon.xyz/downloads/slint-wallet-windows-x64.exe"
+                download="sigil-wallet-windows-x64.exe"
+                className="flex items-center justify-center gap-3 px-6 py-3 rounded-xl font-bold text-slate-900 bg-gradient-to-r from-amber-300 to-yellow-400 hover:shadow-lg hover:shadow-amber-400/40 transition-all"
+              >
+                <Monitor className="w-5 h-5" />
+                Windows x64 (.exe) · ~16 MB
+              </a>
+              <a
+                href="https://sigilgraph.quillon.xyz/downloads/slint-wallet-linux-x86_64"
+                download="sigil-wallet-linux-x86_64"
+                className="flex items-center justify-center gap-3 px-6 py-3 rounded-xl font-bold text-white bg-gradient-to-r from-violet-500 to-violet-600 hover:shadow-lg hover:shadow-violet-500/40 transition-all"
+              >
+                <Terminal className="w-5 h-5" />
+                Linux x86_64 · ~35 MB
+              </a>
+            </div>
+            <p className="text-xs text-amber-200/60 mt-3">
+              Prefer the browser wallet? It runs at <span className="font-mono text-amber-200">sigilgraph.quillon.xyz</span> — no install needed.
+            </p>
+          </div>
+        </div>
+      </motion.div>
+
       {/* Hero Section */}
       <motion.div
         className="text-center space-y-4"
@@ -500,8 +552,8 @@ Invoke-WebRequest -Uri https://sigilgraph.quillon.xyz/downloads/q-miner-gpu-wind
                 Download Wallet — Linux x64 (GPU + CPU Mining)
               </a>
               <a
-                href="https://sigilgraph.quillon.xyz/downloads/slint-wallet-gpu-windows-x64.exe"
-                download="slint-wallet-gpu-windows-x64.exe"
+                href="https://sigilgraph.quillon.xyz/downloads/slint-wallet-windows-x64.exe"
+                download="slint-wallet-windows-x64.exe"
                 className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-gradient-to-r from-violet-500 to-violet-500 rounded-xl font-bold text-white hover:shadow-lg hover:shadow-violet-500/50 transition-all"
               >
                 <Download className="w-5 h-5" />
@@ -525,7 +577,7 @@ chmod +x slint-wallet-linux-x86_64
               <div className="p-4 bg-black/30 rounded-xl border border-violet-400/30">
                 <p className="text-sm font-mono text-white mb-2">Windows:</p>
                 <pre className="text-xs text-white overflow-x-auto whitespace-pre-wrap">
-{`# Download slint-wallet-gpu-windows-x64.exe
+{`# Download slint-wallet-windows-x64.exe
 # Double-click to launch — no install needed
 # GPU mining auto-detects your graphics card`}
                 </pre>

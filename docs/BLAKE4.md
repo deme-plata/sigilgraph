@@ -302,6 +302,32 @@ difference has activated the *whole state* (many G's) by R=2 — so the multi-ro
 weight blows past the 64-bit PoW window within a couple of rounds. Consistent with the
 empirical "no trail at R≥2."
 
+#### Multi-round trail engine (`message_trail_weight` / `best_single_bit_trail`)
+
+The single-G core is now propagated through the **real** BLAKE4 round (the 8-G column+diagonal
+pattern + message permutation). With the chaining value identical (state difference 0), a
+message difference flows through every `G`, accumulating exact `xdp+` weight. The engine's
+wiring + probability are validated end-to-end (`round_engine_matches_real_round_mc`: the
+predicted output difference occurs on the *real* round at ~the modelled rate). Best greedy
+single-bit-message attack trail, by round count:
+
+| rounds | best greedy trail weight | vs 64-bit PoW window |
+|---|---|---|
+| 1 | 1 | trivially below (R=1 is broken anyway) |
+| 2 | **199** | **3.1× past** |
+| 3 | 803 | 12.5× past |
+
+(A column-start difference is far more expensive even at R=1 — e.g. weight 88 — because it
+feeds all four diagonal G's in the same round.)
+
+**⚠️ Read the semantics correctly.** Greedy takes the locally cheapest output difference at
+each add, so its weight is an **upper bound** on the optimal trail: "a trail no worse than this
+exists." It finds *attacks*; it does **not** prove their absence — a cleverer trail could be
+cheaper, so the weight-199 at R=2 is *suggestive corroboration* of the screens, **not** a
+security proof. The matching **lower bound** (proving no cheap trail exists) is exactly what the
+Matsui/SAT enumeration provides — the remaining escalation. What the engine shows *soundly* is
+the steep weight growth as the difference saturates the state (1 → 199 → 803).
+
 **Bottom line for promotion.** Four lines of evidence — SAC, PoW grind-bias, the empirical
 differential screen, and the exact `xdp+` trail core — agree: floor **R=2**, R=1 unusable,
 **R=3** the candidate (~1.81×). What still gates moving `BLAKE4_ROUNDS` off 7: assembling

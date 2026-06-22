@@ -15,6 +15,10 @@ use flux_vdf::{eval, verify, VdfGroup, VdfProof};
 pub mod client;
 /// BLAKE4 — the parameterized-round PoW hash (R=7 ≡ BLAKE3, R<7 = the speed lever).
 pub mod pow;
+/// Automated ARX differential trail search (Lipmaa-Moriai xdp+ + Matsui-style bound) — the
+/// rigorous gate behind pow's sampled differential screen. Research tooling; bench/test only.
+#[cfg(any(test, feature = "bench"))]
+pub mod diff_search;
 /// CPU/GPU hybrid mining — OpenCL BLAKE4 Lane-A search (ported from the QUG
 /// q-miner). Gated: needs the `gpu` feature + an OpenCL runtime (a GPU box).
 #[cfg(feature = "gpu")]

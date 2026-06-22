@@ -23,6 +23,8 @@ mod fetch;   // LANE-A net/transport  (rocky-sync-A)
 mod verify;  // LANE-B decode+verify  (rocky-sync-B)
 mod commit;  // LANE-C storage/commit (rocky-sync-C)
 mod skeleton_store; // flat append-only skeleton prefix store (the 10M-blk/s path to 100k)
+mod skel_flux; // ADOPT the native flux-db skeleton extension (flux_db::skeleton)
+mod archive; // PASS 2: background full-archive body backfill (trustless vs skeleton hashes)
 #[allow(unused_imports)]
 pub(crate) use skeleton_store::SkeletonStore;
 use fetch::*;
@@ -156,6 +158,10 @@ pub struct P2PSyncState {
     pub sync_total: u64,
     /// v0.7.6: blocks pulled via content-addressed backfill (flux-sync), verified.
     pub backfilled: u64,
+    /// v6.0.0 LANE-C turbo-commit: live durable-commit rate (blk/s) + bulk-load armed flag,
+    /// surfaced in the SYNC hero so the operator SEES the write-back ring working.
+    pub commit_rate: f64,
+    pub turbo_armed: bool,
     /// v0.7.11: the height the in-flight request-response backfill chunk starts at
     /// (the TUI shows the [from..from+chunk] range being fetched).
     pub sync_cursor: u64,
@@ -638,6 +644,14 @@ impl P2PBlockSync {
                 // v0.27 proof-of-useful-sync local accumulators
                 let mut pos_cursor: u64 = 0;
                 let mut pos_acc: u64 = 0;
+                // LANE-C STAGE-B: write-back commit ring — the durable-batch fast commit path.
+                // Replaces the per-chunk put_blocks_batch whose flux-db compaction storm is the
+                // >20k wall (commit.rs SEAM). arm() defers compaction in a deep gap; flush() is the
+                // write-through point before the cursor re-reads synced_to(); finish() folds once.
+                let mut commit_ring = commit::CommitBuffer::from_env();
+                let mut bulk_armed = false;
+                let mut last_committed: u64 = 0;
+                let mut last_commit_t = Instant::now();
                 let mut pos_total_session: u64 = 0;
                 let mut pos_t = Instant::now();
                 // v0.28 batched useful-sync: cache the window once + gossip a checkpoint
@@ -651,6 +665,18 @@ impl P2PBlockSync {
                 let mut snapped = false;
                 let mut snapshot_attempted = false; // LANE-A snapshot-pull one-shot guard
 
+                // PASS-2 (archive.rs) - persistent skeleton handle shared with the one-shot
+                // snapshot-pull commit-hook below, plus the deep-gap body-backfill reply channel.
+                // Dormant until pass-1 populates the skeleton (gated on dns_anchor_tip()); then it
+                // converges THIS node to a full archive in the background (#156), trustlessly: a
+                // fetched body is stored only if it hashes to the skeleton's committed block_hash.
+                let skel_dir = format!("{}-skeleton", std::env::var("SIGIL_TOP_DB").unwrap_or_else(|_| "sigil-top-blocks.db".to_string()));
+                let mut skel: Option<skel_flux::FluxSkeletonStore> = skel_flux::FluxSkeletonStore::open(&skel_dir, 0).ok();
+                let (pass2_tx, pass2_rx) = mpsc::channel::<(u64, Option<Vec<u8>>)>();
+                let mut pass2_inflight = false;
+                let mut last_pass2 = crate::instant_ago(10);
+                let pass2_env = std::env::var("SIGIL_PASS2").map(|v| v != "0").unwrap_or(true);
+
                 loop {
                     if stop_rx.try_recv().is_ok() {
                         let _ = net.stop().await;
@@ -663,7 +689,7 @@ impl P2PBlockSync {
                     // fast_forward_to_anchored_checkpoint, then the frontier refill resumes from the
                     // anchor. Err / no codec=2 server → the codec=1 crawl below covers it unchanged
                     // (zero regression). SIGIL_SNAPSHOT=0 disables it.
-                    if !snapshot_attempted && dns_anchor_tip().is_some() {
+                    if let (false, Some((va_h, va_hash))) = (snapshot_attempted, dns_anchor_tip()) {
                         let snap_on = std::env::var("SIGIL_SNAPSHOT").map(|v| v != "0").unwrap_or(true);
                         let peers = net.connected_peers();
                         if snap_on && store.synced_to() <= sync_base && !peers.is_empty() {
@@ -676,11 +702,10 @@ impl P2PBlockSync {
                             // A's commit-hook flip: the verified skeleton prefix lands in the
                             // flat append-only SkeletonStore (no per-key flux-db commit). base=0:
                             // the producer serves a genesis-anchored prefix (header.base_height=0).
-                            let skel_dir = format!("{}-skeleton", std::env::var("SIGIL_TOP_DB").unwrap_or_else(|_| "sigil-top-blocks.db".to_string()));
-                            let mut skel = SkeletonStore::open(&skel_dir, 0).ok();
-                            match fetch::pull_snapshot(&peers, send, |page| { if let Some(s) = skel.as_mut() { let _ = s.append(page); } }).await {
+                            // skel handle hoisted to outer loop scope (shared with PASS 2); reused here.
+                            match fetch::pull_snapshot(&peers, send, |page| { if let Some(s) = skel.as_mut() { let recs: Vec<skel_flux::SkelRec> = page.iter().cloned().map(skel_flux::SkelRec).collect(); let _ = s.append(&recs); } }).await {
                                 Ok(v) => match verify::fast_forward_to_anchored_checkpoint(
-                                    &mut store, v.anchor_height, &v.anchor_hash, verify::DEFAULT_FRONTIER_WINDOW,
+                                    &mut store, va_h, &va_hash, verify::DEFAULT_FRONTIER_WINDOW,
                                 ) {
                                     Ok(_) => crate::tlog!("[sync] snapshot-pull OK: {} recs → anchor h={}", v.records, v.anchor_height),
                                     Err(e) => crate::tlog!("[sync] snapshot-pull stored {} recs; fast-forward refused ({e})", v.records),
@@ -868,7 +893,9 @@ impl P2PBlockSync {
                         match bytes {
                             Some(b) => {
                                 peer_bench.remove(&peer);              // answered → healthy again
-                                let got = ingest_backfill_bytes(&b, &mut store);
+                                let headers = decode_verify_backfill(&b);
+                                let got = headers.len();
+                                commit_ring.push_slice(&mut store, &headers);
                                 bytes_session += b.len() as u64;
                                 if got > 0 {
                                     lead_n += 1;
@@ -953,6 +980,26 @@ impl P2PBlockSync {
                     // actually advances synced_to) while slots went to far-ahead ranges. Out-of-order
                     // arrivals are reordered by the store (height index + advance); re-requests are
                     // idempotent. advance() here keeps the frontier fresh the instant a chunk lands.
+                    // LANE-C write-through: drain the ring to durable storage BEFORE the frontier
+                    // cursor re-reads synced_to(), so buffered heights are never re-fetched.
+                    commit_ring.flush(&mut store);
+                    {
+                        let pb = state.lock().unwrap_or_else(|e| e.into_inner()).peer_best_height;
+                        let deep_gap = store.synced_to().saturating_add(CHUNK.saturating_mul(4)) < pb;
+                        if deep_gap && !bulk_armed { commit_ring.arm(&store); bulk_armed = true; }
+                        else if !deep_gap && bulk_armed { commit_ring.finish(&mut store); store.set_bulk_load(false); bulk_armed = false; }
+                    }
+                    // v6.0.0: publish the live durable-commit rate to the TUI (the ⚡ readout).
+                    {
+                        let committed_now = commit_ring.committed();
+                        let dt = last_commit_t.elapsed().as_secs_f64();
+                        if dt >= 0.5 {
+                            let rate = committed_now.saturating_sub(last_committed) as f64 / dt;
+                            last_committed = committed_now; last_commit_t = Instant::now();
+                            let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+                            s.commit_rate = rate; s.turbo_armed = bulk_armed;
+                        }
+                    }
                     store.advance();
                     let frontier_chunk = ((store.synced_to() / CHUNK) * CHUNK).max(sync_base);
 
@@ -1423,6 +1470,46 @@ impl P2PBlockSync {
                         // also feed pid current rate for sustained to keep controller driving the continuous target
                         let pid_rate_bps = s.turbo_continuity.pid.get_rate() * 1_000_000.0;
                         s.turbo_continuity.update_for_continuity(pid_rate_bps, None, 0, 5);
+                    }
+
+                    // ── PASS 2: background full-archive body-backfill (archive.rs) ──────────
+                    // Trustless convergence to a FULL archive (#156): walk the verified skeleton,
+                    // fetch the next missing body range, store a body ONLY if it hashes to the
+                    // skeleton's committed block_hash. Low-priority: single in-flight deep-gap
+                    // request, 500ms throttle, and a no-op until the skeleton has records (pass-1
+                    // landed) - so it never competes with the frontier during normal sync.
+                    if pass2_env && !recent_only_rt.load(Ordering::Relaxed) {
+                        while let Ok((gap_from, bytes)) = pass2_rx.try_recv() {
+                            pass2_inflight = false;
+                            if let (Some(b), Some(sk)) = (bytes, skel.as_mut()) {
+                                let bodies = decode_verify_backfill(&b);
+                                let (stored, rejected) = archive::ingest_bodies_verified(sk, &mut store, &bodies);
+                                if stored > 0 || rejected > 0 {
+                                    store.advance();
+                                    crate::tlog!("[pass2] gap@{} stored={} rejected={} archive={:.1}%",
+                                        gap_from, stored, rejected,
+                                        archive::archive_fraction(sk, &store, sync_base) * 100.0);
+                                }
+                            }
+                        }
+                        if !pass2_inflight && last_pass2.elapsed() >= Duration::from_millis(500) {
+                            last_pass2 = Instant::now();
+                            let gap = skel.as_ref().and_then(|sk| archive::next_body_gap(sk, &store, sync_base, CHUNK));
+                            if let Some((from, to)) = gap {
+                                if let Some(peer) = net.connected_peers().first().cloned() {
+                                    pass2_inflight = true;
+                                    let payload = serde_json::to_vec(
+                                        &BackfillReq { from, to, headers_only: true, codec: 1 }
+                                    ).unwrap();
+                                    let n = net.clone();
+                                    let tx = pass2_tx.clone();
+                                    tokio::spawn(async move {
+                                        let r = tokio::time::timeout(REQ_TIMEOUT, n.send_request(peer, payload)).await;
+                                        let _ = tx.send((from, r.ok().and_then(|x| x.ok())));
+                                    });
+                                }
+                            }
+                        }
                     }
 
                     // ── v0.31 DEEP DEBUG: comprehensive sync snapshot every 2s ──────────────

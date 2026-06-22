@@ -475,7 +475,7 @@ impl SnapshotVerifier {
 /// Pull + structurally-verify a snapshot of the historical prefix from `peers` over the
 /// flux-p2p request-response channel. `send` wraps `net.send_request` so fetch.rs needn't
 /// name `libp2p::PeerId` (sigil-top has no direct libp2p dep); launch() passes
-/// `|peer, body| net.send_request(peer, body)`. `commit(height, block_hash_hex)` is
+/// `|peer, body| net.send_request(peer, body)`. `commit(&page_records)` is
 /// launch()'s `store.put_block_raw` seam — called per VERIFIED record so the skeletons
 /// land WITHOUT ever holding them all (the OOM latch: one page resident, dropped after
 /// commit). Returns the crypto-facts for LANE-B's fast_forward_to_anchored_checkpoint;
@@ -491,7 +491,7 @@ impl SnapshotVerifier {
 pub(super) async fn pull_snapshot<P, F, Fut>(
     peers: &[P],
     send: F,
-    mut commit: impl FnMut(u64, &str),
+    mut commit: impl FnMut(&[SkeletonRecord]),
 ) -> Result<SnapshotVerified, SnapshotError>
 where
     P: Clone,
@@ -560,8 +560,8 @@ where
         }
         for rec in &page {
             verifier.push(rec)?; // contiguity + linkage + running BLAKE3 root
-            commit(rec.height, &hex::encode(rec.block_hash)); // launch()'s put_block_raw
         }
+        commit(&page); // per-page flat SkeletonStore append (10M-blk/s path)
         done += page.len() as u64;
         // `page` dropped here → only one page ever resident (the OOM latch).
     }

@@ -159,6 +159,126 @@ pub fn blake4_word(header: &[u8], nonce: u64, rounds: u32) -> u64 {
     (w[0] as u64) | ((w[1] as u64) << 32)
 }
 
+// ── BLAKE4 diffusion instrument (the empirical "which R is safe" answer) ─────
+// pow.rs §top and docs/BLAKE4.md both state that which reduced round count is
+// "sound enough for PoW" is an EMPIRICAL question the flux-dev bench loop answers —
+// but until now the tree only proved R=7≡BLAKE3 (KAT) and measured grind speed, with
+// NO measurement of the security MARGIN per round. This is that measurement: a strict
+// avalanche-criterion (SAC) probe. bench/test only — a research instrument, never on a
+// consensus path (it calls the quarantined reduced-round `blake4_rounds`).
+
+/// Diffusion statistics for BLAKE4 at a fixed round count.
+#[cfg(any(test, feature = "bench"))]
+#[derive(Debug, Clone, Copy)]
+pub struct Avalanche {
+    /// Mean fraction of the 256 output bits that flip when ONE input bit flips,
+    /// averaged over every input-bit position and sample. Ideal diffusion ≈ 0.5.
+    pub mean: f64,
+    /// Worst-case `|P(output bit i flips) − 0.5|` over all 256 output bits. Ideal → 0.
+    /// This is the SAFETY discriminator: a single under/over-coupled output bit (high
+    /// bias) is a grind handle even when `mean` already looks ideal — so a reduced R
+    /// is only "sound enough" if BOTH mean ≈ 0.5 AND max_bias stays small.
+    pub max_bias: f64,
+}
+
+/// Measure BLAKE4's strict-avalanche behaviour at `rounds` rounds over `samples`
+/// pseudo-random 40-byte (`header‖nonce`-shaped) inputs: for each input we flip every
+/// one of its 320 bits in turn and count which of the 256 output bits change. Returns
+/// the mean avalanche and the worst per-output-bit bias.
+///
+/// Deterministic + dependency-free: each sample's input is derived from `blake4_digest`
+/// of the sample index (no `rand` crate), so the curve is reproducible run-to-run.
+/// **bench/test only.**
+#[cfg(any(test, feature = "bench"))]
+pub fn blake4_avalanche(rounds: u32, samples: u32) -> Avalanche {
+    const INPUT_LEN: usize = 40; // header(32)‖nonce(8) shape — one ≤64-byte block
+    let mut bit_flips = [0u64; 256];
+    let mut trials: u64 = 0;
+    for s in 0..samples {
+        // deterministic pseudo-random input from the sample index (two 32-B digests)
+        let mut input = [0u8; INPUT_LEN];
+        let d0 = blake4_digest(&s.to_le_bytes());
+        let d1 = blake4_digest(&(s ^ 0xA5A5_A5A5u32).to_le_bytes());
+        input[..32].copy_from_slice(&d0);
+        input[32..40].copy_from_slice(&d1[..8]);
+
+        let base = blake4_rounds(&input, rounds);
+        for bit in 0..(INPUT_LEN * 8) {
+            let mut flipped = input;
+            flipped[bit / 8] ^= 1u8 << (bit % 8);
+            let other = blake4_rounds(&flipped, rounds);
+            for ob in 0..256usize {
+                if (base[ob / 8] ^ other[ob / 8]) & (1u8 << (ob % 8)) != 0 {
+                    bit_flips[ob] += 1;
+                }
+            }
+            trials += 1;
+        }
+    }
+    let t = trials as f64;
+    let mean = bit_flips.iter().map(|&c| c as f64).sum::<f64>() / (t * 256.0);
+    let max_bias = bit_flips
+        .iter()
+        .map(|&c| ((c as f64 / t) - 0.5).abs())
+        .fold(0.0f64, f64::max);
+    Avalanche { mean, max_bias }
+}
+
+// ── PoW grind-bias survey (the difficulty-soundness instrument) ──────────────
+// SAC above measures the full 256-bit digest under arbitrary input flips. But a PoW
+// miner only ever looks at the 64-bit TARGET WORD (`blake4_word`, compared to
+// difficulty) and only ever moves by NONCE INCREMENT. So the soundness question
+// "can a reduced-R miner realize wins faster than the nominal difficulty?" lives on
+// those two surfaces, which generic SAC does not isolate. This probe does:
+//   • target-word monobit bias — is the difficulty surface uniform?
+//   • consecutive-nonce avalanche — are grind attempts independent, or do near-target
+//     words cluster (letting a near-win be cheaply extended)?
+// bench/test only.
+
+/// PoW grind-soundness statistics at a fixed round count, on the 64-bit target word.
+#[cfg(any(test, feature = "bench"))]
+#[derive(Debug, Clone, Copy)]
+pub struct GrindBias {
+    /// Worst monobit bias over the 64 target-word bits: `max |P(bit i set) − 0.5|` across a
+    /// nonce sweep. Ideal → 0. A biased target word = a skewed difficulty surface, so realized
+    /// work per win diverges from nominal difficulty (the miner grinds "easy" wins).
+    pub word_monobit_bias: f64,
+    /// Mean fraction of the 64 target-word bits that differ between consecutive nonces `n,n+1`
+    /// (the real grind step). Ideal ≈ 0.5 = each attempt independent. Markedly below 0.5 =
+    /// consecutive attempts correlate → near-target words cluster → a near-win is cheap to
+    /// extend (a difficulty shortcut).
+    pub nonce_step_avalanche: f64,
+}
+
+/// Sweep `nonces` consecutive nonces over a fixed header and measure the two PoW-relevant
+/// distributions of the 64-bit target word at `rounds` rounds. Deterministic, dep-free.
+/// **bench/test only.**
+#[cfg(any(test, feature = "bench"))]
+pub fn blake4_grind_bias(rounds: u32, nonces: u64) -> GrindBias {
+    debug_assert!(nonces >= 2, "need ≥2 nonces for a grind step");
+    let header = blake4_digest(b"sigil-g0-grind-survey"); // fixed 32-byte header
+    let mut set_count = [0u64; 64];
+    let mut step_diff_bits: u64 = 0;
+    let mut prev: Option<u64> = None;
+    for n in 0..nonces {
+        let w = blake4_word(&header, n, rounds);
+        for b in 0..64 {
+            set_count[b] += (w >> b) & 1;
+        }
+        if let Some(p) = prev {
+            step_diff_bits += (w ^ p).count_ones() as u64;
+        }
+        prev = Some(w);
+    }
+    let nf = nonces as f64;
+    let word_monobit_bias = set_count
+        .iter()
+        .map(|&c| (c as f64 / nf - 0.5).abs())
+        .fold(0.0f64, f64::max);
+    let nonce_step_avalanche = step_diff_bits as f64 / ((nonces - 1) as f64 * 64.0);
+    GrindBias { word_monobit_bias, nonce_step_avalanche }
+}
+
 // ── AVX2 8-way grind (FULL_ROUNDS only) ──────────────────────────────────────
 // The hot loop Cortex keeps flagging: an AVX2 intrinsic on the BLAKE3 compression
 // rounds. Hashes 8 consecutive nonces in parallel for the MINER GRIND. It is
@@ -388,6 +508,107 @@ mod tests {
             u64::from_le_bytes(h.finalize().as_bytes()[0..8].try_into().unwrap())
         };
         assert_eq!(w, legacy, "BLAKE4 R=7 must match the legacy blake4() word");
+    }
+
+    /// Diffusion curve R=1..7 — the empirical security-margin data behind any future
+    /// decision to promote a reduced R as the deployed PoW (a consensus change). The
+    /// deployed round count (R=7 ≡ BLAKE3) MUST show ideal ~50% avalanche with a small
+    /// worst-bit bias; the curve down to R=1 shows how fast the margin erodes per round.
+    #[test]
+    fn avalanche_curve_quantifies_round_security_margin() {
+        // MEASURED 2026-06-21 (this instrument, 48 samples = 15,360 single-bit trials/round):
+        //   R=1 mean=0.366 bias=0.200   ← structurally broken (one output bit 0.20 off ideal)
+        //   R=2 mean=0.500 bias=0.012   ← strict-avalanche ALREADY saturated
+        //   R=3..7 mean≈0.500 bias≈0.011–0.014 (statistical noise floor @48 samples)
+        // FINDING: BLAKE3's G + message permutation reaches full SAC in just 2 rounds, so the
+        // diffusion FLOOR is R=2. (SAC is necessary, not sufficient — it doesn't rule out
+        // higher-order/algebraic weaknesses of reduced-round BLAKE — but it definitively kills
+        // the R=1 lever and points any safe speed-lever at R≥3.) These asserts lock the curve
+        // as a regression guard: a bug in `compress8`/`g`/`permute` would move these numbers.
+        let mut curve = [Avalanche { mean: 0.0, max_bias: 0.0 }; (FULL_ROUNDS + 1) as usize];
+        for r in 1..=FULL_ROUNDS {
+            curve[r as usize] = blake4_avalanche(r, 48);
+            println!(
+                "BLAKE4 avalanche  R={r}  mean={:.4}  max_bias={:.4}  (ideal mean=0.5000 bias=0)",
+                curve[r as usize].mean, curve[r as usize].max_bias
+            );
+        }
+        // R=1 is provably broken — must NEVER be a candidate PoW round count.
+        assert!(
+            curve[1].mean < 0.45 && curve[1].max_bias > 0.10,
+            "R=1 must show broken diffusion (mean<0.45, bias>0.10), got mean={:.4} bias={:.4}",
+            curve[1].mean, curve[1].max_bias
+        );
+        // R≥2 must be at ideal strict-avalanche (the saturation floor).
+        for r in 2..=FULL_ROUNDS as usize {
+            assert!(
+                (curve[r].mean - 0.5).abs() < 0.02 && curve[r].max_bias < 0.05,
+                "R={r} must show ideal SAC (mean≈0.5±0.02, bias<0.05), got mean={:.4} bias={:.4}",
+                curve[r].mean, curve[r].max_bias
+            );
+        }
+        // Tight sample on the DEPLOYED round count: it IS BLAKE3, must be near-perfect.
+        let full = blake4_avalanche(FULL_ROUNDS, 192);
+        println!(
+            "BLAKE4 avalanche  R=7 (tight, 192 samples)  mean={:.4}  max_bias={:.4}",
+            full.mean, full.max_bias
+        );
+        assert!(
+            (full.mean - 0.5).abs() < 0.01 && full.max_bias < 0.03,
+            "R=7 (deployed ≡ BLAKE3) must diffuse ideally, got mean={:.4} bias={:.4}",
+            full.mean, full.max_bias
+        );
+    }
+
+    /// PoW grind-bias survey R=1..7 — measures soundness on the surfaces a miner actually
+    /// touches (the 64-bit target word + the nonce-increment grind step), which generic SAC
+    /// does not isolate. The deployed R=7 MUST show a uniform difficulty surface (small word
+    /// monobit bias) and independent grind attempts (consecutive-nonce avalanche ≈ 0.5).
+    #[test]
+    fn grind_bias_survey_targets_the_pow_word() {
+        let mut curve = [GrindBias { word_monobit_bias: 0.0, nonce_step_avalanche: 0.0 };
+            (FULL_ROUNDS + 1) as usize];
+        for r in 1..=FULL_ROUNDS {
+            curve[r as usize] = blake4_grind_bias(r, 16_384);
+            println!(
+                "BLAKE4 grind  R={r}  word_monobit_bias={:.4}  nonce_step_avalanche={:.4}  (ideal bias=0 step=0.5)",
+                curve[r as usize].word_monobit_bias, curve[r as usize].nonce_step_avalanche
+            );
+        }
+        // MEASURED 2026-06-22 (16,384-nonce sweep/round): R=1 is DEGENERATE on the PoW
+        // surfaces — word_monobit_bias=0.500 (some target-word bit is CONSTANT across all
+        // nonces) and nonce_step_avalanche=0.075 (consecutive nonces change only 7.5% of the
+        // word → near-target wins cluster → trivial grind). A sharper kill than SAC's R=1
+        // mean=0.366. R≥2 is clean on BOTH surfaces (bias≈0.01, step≈0.5). Locks the finding.
+        assert!(
+            curve[1].word_monobit_bias > 0.4 && curve[1].nonce_step_avalanche < 0.2,
+            "R=1 must be degenerate on PoW surfaces (bias>0.4, step<0.2), got bias={:.4} step={:.4}",
+            curve[1].word_monobit_bias, curve[1].nonce_step_avalanche
+        );
+        for r in 2..=FULL_ROUNDS as usize {
+            assert!(
+                curve[r].word_monobit_bias < 0.05 && (curve[r].nonce_step_avalanche - 0.5).abs() < 0.03,
+                "R={r} PoW surfaces must be clean (bias<0.05, step≈0.5±0.03), got bias={:.4} step={:.4}",
+                curve[r].word_monobit_bias, curve[r].nonce_step_avalanche
+            );
+        }
+        // Tight sweep on the DEPLOYED round count (R=7 ≡ BLAKE3): difficulty surface must be
+        // uniform and consecutive grind attempts independent.
+        let g7 = blake4_grind_bias(FULL_ROUNDS, 65_536);
+        println!(
+            "BLAKE4 grind  R=7 (tight, 65536 nonces)  word_monobit_bias={:.4}  nonce_step_avalanche={:.4}",
+            g7.word_monobit_bias, g7.nonce_step_avalanche
+        );
+        assert!(
+            g7.word_monobit_bias < 0.02,
+            "R=7 target word must be unbiased (difficulty surface uniform), got bias={:.4}",
+            g7.word_monobit_bias
+        );
+        assert!(
+            (g7.nonce_step_avalanche - 0.5).abs() < 0.01,
+            "R=7 consecutive grind attempts must be independent (≈0.5), got step={:.4}",
+            g7.nonce_step_avalanche
+        );
     }
 
     /// Reduced rounds are deterministic and genuinely different from full rounds.

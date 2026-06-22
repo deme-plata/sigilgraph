@@ -61,6 +61,78 @@ struct BackfillResp {
     blocks: Vec<serde_json::Value>,
 }
 
+// ── codec=2 SNAPSHOT WIRE — server side (LANE-B, rocky-sync-B; v3 sync sprint) ──────────
+// Server emitters for A's frozen codec=2 design (docs/SIGIL_SKELETON_CODEC2_v0.md):
+//   codec=3 → 'P' + bincode(SnapshotHeader)   (discovery/framing; tip-dependent)
+//   codec=2 → 'S' + bincode(Vec<SkeletonRecord>)  (72 B/record skeleton page)
+//   codec=4 → 'F' + bincode(SnapshotTrailer)   (DEFERRED — needs flux-fold dep + a
+//             producer SQIsign over (archive_root‖anchor_height‖anchor_hash); until then
+//             we serve nothing for codec=4 so the client benches+downgrades → ZERO regression)
+// These MUST stay byte-identical to the client copies in sigil-top/block_sync/fetch.rs
+// (bincode keys on field order+type, not the struct's name/crate). Canonical home is a
+// shared crate (sigil-header) — tracked with A; duplicated here so the server compiles in
+// isolation. The 4 state roots are intentionally ABSENT (B #416, DeepSeek-verified: a flat
+// fold can't bind interior roots; trusted roots come only from frontier full headers or the
+// signed anchor).
+const SNAPSHOT_MAGIC: [u8; 4] = *b"SGSN";
+const SNAPSHOT_VERSION: u16 = 1;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SkeletonRecord {
+    height: u64,
+    block_hash: [u8; 32],
+    parent_hash: [u8; 32],
+}
+impl SkeletonRecord {
+    fn from_header(h: &sigil_header::SigilBlockHeaderV0) -> Self {
+        Self { height: h.height, block_hash: h.hash(), parent_hash: h.parent_hash }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SnapshotHeader {
+    magic: [u8; 4],
+    version: u16,
+    base_height: u64,
+    anchor_height: u64,
+    anchor_hash: [u8; 32],
+    count: u64,
+}
+
+#[cfg(test)]
+mod snapshot_wire_tests {
+    use super::{SkeletonRecord, SnapshotHeader, SNAPSHOT_MAGIC, SNAPSHOT_VERSION};
+
+    /// THE cross-crate compat invariant: a SkeletonRecord MUST be exactly 72 B under
+    /// bincode (u64 + 2×[u8;32], no length prefixes) — byte-identical to the client's
+    /// assertion in sigil-top/block_sync/fetch.rs. If this drifts, the wire breaks.
+    #[test]
+    fn skeleton_record_is_72_bytes_on_the_wire() {
+        let rec = SkeletonRecord { height: 7, block_hash: [1u8; 32], parent_hash: [2u8; 32] };
+        assert_eq!(bincode::serialize(&rec).unwrap().len(), 72);
+    }
+
+    /// SnapshotHeader round-trips bincode (what the client's `bincode::deserialize::<SnapshotHeader>`
+    /// consumes after the 'P' tag) and carries the frozen magic/version.
+    #[test]
+    fn snapshot_header_roundtrips() {
+        let h = SnapshotHeader {
+            magic: SNAPSHOT_MAGIC,
+            version: SNAPSHOT_VERSION,
+            base_height: 0,
+            anchor_height: 128_000_000,
+            anchor_hash: [9u8; 32],
+            count: 128_000_001,
+        };
+        let bytes = bincode::serialize(&h).unwrap();
+        let back: SnapshotHeader = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.magic, *b"SGSN");
+        assert_eq!(back.version, 1);
+        assert_eq!(back.anchor_height, 128_000_000);
+        assert_eq!(back.count, 128_000_001);
+    }
+}
+
 const SCHEMA_VERSION: u16 = HEADER_VERSION;
 
 /// Genesis-pinned trusted release-author SQIsign pubkeys (hex). The auto-updater
@@ -780,7 +852,11 @@ fn run_start() -> Result<()> {
                             // v0.33.6: a range entirely BELOW the live window is FINALIZED — its
                             // bytes never change, so cache + replay them. The tip/window chunk is
                             // excluded (it still mutates).
-                            let immutable = hi >= lo && hi < wbase;
+                            // codec>=3 ('P' header / 'F' trailer) are TIP-dependent — never
+                            // cache them as immutable (a stale 'P' would serve a stale anchor).
+                            // codec=2 ('S') of a finalized range IS immutable (skeletons of
+                            // finalized blocks never change) → cacheable like 'H'/'Z'.
+                            let immutable = hi >= lo && hi < wbase && req.codec < 3;
                             let ckey = (lo, hi, req.headers_only, req.codec as u32);
 
                             // ── CACHE HIT: pure memcpy, bypasses the throttle entirely ──
@@ -822,24 +898,68 @@ fn run_start() -> Result<()> {
                                 if let Some(b) = chain.get(h) { blocks.push(b.clone()); }
                             }
                             let out: Vec<u8> = if req.headers_only {
-                                // monitor path: bincode Vec<header>, ~20× smaller, no JSON.
-                                let headers: Vec<_> = blocks.iter().map(|b| b.header.clone()).collect();
-                                let body = bincode::serialize(&headers).unwrap_or_default();
-                                // v0.33 zstd wire: codec=1 → 'Z' + zstd-1(body). Measured 14.0×
-                                // on a real chunk (~20 ms/4 MB — far cheaper than the wire time
-                                // it saves). Any compress error falls back to plain 'H'.
-                                let out = if req.codec == 1 {
-                                    match zstd::encode_all(&body[..], 1) {
-                                        Ok(z) => { let mut o = vec![b'Z']; o.extend(z); o }
-                                        Err(_) => { let mut o = vec![b'H']; o.extend(&body); o }
-                                    }
+                                if req.codec == 3 {
+                                    // 'P' SnapshotHeader (codec=2 snapshot DISCOVERY). Tip-dependent:
+                                    // base = genesis (0), anchor = our last finalized height, count =
+                                    // the whole prefix. The client pages 'S' over [base..anchor].
+                                    let top = chain.height().saturating_sub(1);
+                                    let anchor_hash =
+                                        chain.get(top).map(|b| b.header.hash()).unwrap_or([0u8; 32]);
+                                    let hdr = SnapshotHeader {
+                                        magic: SNAPSHOT_MAGIC,
+                                        version: SNAPSHOT_VERSION,
+                                        base_height: 0,
+                                        anchor_height: top,
+                                        anchor_hash,
+                                        count: top.saturating_add(1),
+                                    };
+                                    let mut o = vec![b'P'];
+                                    o.extend(bincode::serialize(&hdr).unwrap_or_default());
+                                    eprintln!("↩ rr-backfill: served snapshot 'P' (base=0 anchor={} count={}) to {} ({} B)",
+                                        top, top.saturating_add(1), peer, o.len());
+                                    o
+                                } else if req.codec == 2 {
+                                    // 'S' skeleton page for [lo..=hi] — A's frozen 72 B/record wire
+                                    // (height + block_hash + parent_hash; NO state roots, NO proofs).
+                                    let recs: Vec<SkeletonRecord> =
+                                        blocks.iter().map(|b| SkeletonRecord::from_header(&b.header)).collect();
+                                    let mut o = vec![b'S'];
+                                    o.extend(bincode::serialize(&recs).unwrap_or_default());
+                                    eprintln!("↩ rr-backfill: served {} SKELETONS 'S' [{}..={}] to {} ({} B)",
+                                        recs.len(), lo, hi, peer, o.len());
+                                    o
+                                } else if req.codec == 4 {
+                                    // M1 fold-trailer: archive_root = BLAKE3 over bincode of each SkeletonRecord in order
+                                    // (matches the client SnapshotVerifier::push). anchor_sig/fold_blob empty = the
+                                    // structural pull the client finalize accepts on root-match; M2 adds SQIsign+flux_fold.
+                                    let recs: Vec<SkeletonRecord> = blocks.iter().map(|b| SkeletonRecord::from_header(&b.header)).collect();
+                                    let mut hh = blake3::Hasher::new();
+                                    for r in &recs { hh.update(&bincode::serialize(r).unwrap_or_default()); }
+                                    let trailer = sigil_header::SnapshotTrailer { archive_root: *hh.finalize().as_bytes(), anchor_sig: Vec::new(), fold_blob: Vec::new() };
+                                    let mut o = vec![b'F'];
+                                    o.extend(bincode::serialize(&trailer).unwrap_or_default());
+                                    eprintln!("served 'F' trailer M1 (root) [{}..={}] to {} ({} B)", lo, hi, peer, o.len());
+                                    o
                                 } else {
-                                    let mut o = vec![b'H']; o.extend(&body); o
-                                };
-                                eprintln!("↩ rr-backfill: served {} HEADERS [{}..={}] to {} ({} B, codec {})",
-                                    headers.len(), lo, hi, peer, out.len(),
-                                    if out.first() == Some(&b'Z') { "zstd" } else { "raw" });
-                                out
+                                    // codec 0/1: monitor path — bincode Vec<header>, ~20× smaller, no JSON.
+                                    let headers: Vec<_> = blocks.iter().map(|b| b.header.clone()).collect();
+                                    let body = bincode::serialize(&headers).unwrap_or_default();
+                                    // v0.33 zstd wire: codec=1 → 'Z' + zstd-1(body). Measured 14.0×
+                                    // on a real chunk (~20 ms/4 MB — far cheaper than the wire time
+                                    // it saves). Any compress error falls back to plain 'H'.
+                                    let out = if req.codec == 1 {
+                                        match zstd::encode_all(&body[..], 1) {
+                                            Ok(z) => { let mut o = vec![b'Z']; o.extend(z); o }
+                                            Err(_) => { let mut o = vec![b'H']; o.extend(&body); o }
+                                        }
+                                    } else {
+                                        let mut o = vec![b'H']; o.extend(&body); o
+                                    };
+                                    eprintln!("↩ rr-backfill: served {} HEADERS [{}..={}] to {} ({} B, codec {})",
+                                        headers.len(), lo, hi, peer, out.len(),
+                                        if out.first() == Some(&b'Z') { "zstd" } else { "raw" });
+                                    out
+                                }
                             } else {
                                 let resp = BackfillResp {
                                     blocks: blocks.iter().map(|b| serde_json::to_value(b).unwrap()).collect(),

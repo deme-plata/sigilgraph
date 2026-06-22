@@ -3088,6 +3088,25 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // the first probe is in flight while crossterm sets up; pre-TUI prints go to stder
     // (IN_TUI is still false), which is exactly where pre-UI diagnostics belong. ─────────
     let mut app = App::new(cfg);
+    // v4 AUTO-START: env-driven mining + full-sync (headless rigs, no keypress).
+    if std::env::var("SIGIL_AUTOMINE").is_ok() {
+        use std::sync::atomic::Ordering;
+        if cfg!(feature = "gpu") && std::env::var("SIGIL_MINE_CPU").is_err() {
+            app.mine_gpu_warned = true;
+            app.mine_desired_gpu.store(true, Ordering::Relaxed);
+        }
+        app.toggle_engine_mining();
+        boot_trace("AUTOMINE: engine started via SIGIL_AUTOMINE");
+    }
+    if std::env::var("SIGIL_AUTOFULLSYNC").is_ok() && app.p2p_sync.is_none() {
+        if let Some(store) = app.idle_store.take() {
+            let p2p = block_sync::P2PBlockSync::launch(store, false);
+            app.p2p_sync = Some(p2p);
+            app.full_sync = true;
+            persist_sync_mode("full");
+            boot_trace("AUTOFULLSYNC: full archive started");
+        }
+    }
     flux_webhook("boot", concat!("sigil-top v", env!("CARGO_PKG_VERSION"), " starting"));
     // v0.71.1 LANE-V: resume the operator's chosen sync mode after update/restart.
     // Only "full" does anything; no file (fresh install) = safe light monitor.
@@ -3153,11 +3172,18 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             }
         }
     } else {
-        match block_store::BlockStore::open(&db_path) {
+        // v6: a HANG opening the primary store (old/foreign on-disk format, e.g. a
+        // v4.1-era store met by v6) is no longer fatal — the watchdog converts it to
+        // an Err after SIGIL_TOP_OPEN_TIMEOUT_SECS (default 20) so we fall back to a
+        // clean store instead of sitting forever at "opening block store".
+        let open_timeout = std::env::var("SIGIL_TOP_OPEN_TIMEOUT_SECS")
+            .ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(20);
+        match block_store::BlockStore::open_with_timeout(&db_path, open_timeout) {
             Ok(s) => s,
             Err(primary) => {
+                boot_trace(&format!("primary store open failed/hung: {primary}"));
                 let temp_path = std::env::temp_dir().join("sigil-top-blocks.db");
-                match block_store::BlockStore::open(temp_path.to_string_lossy().as_ref()) {
+                match block_store::BlockStore::open_with_timeout(temp_path.to_string_lossy().as_ref(), open_timeout) {
                     Ok(s) => {
                         app.toast = format!("⚠ primary block store unavailable ({primary}); using temp store");
                         app.toast_sticky = true;
@@ -3166,7 +3192,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                     Err(temp_err) => {
                         let volatile = std::env::temp_dir()
                             .join(format!("sigil-top-blocks-volatile-{}.db", std::process::id()));
-                        match block_store::BlockStore::open(volatile.to_string_lossy().as_ref()) {
+                        match block_store::BlockStore::open_with_timeout(volatile.to_string_lossy().as_ref(), open_timeout) {
                             Ok(s) => {
                                 app.toast = format!("⚠ block store fallback is volatile ({primary}; temp: {temp_err})");
                                 app.toast_sticky = true;

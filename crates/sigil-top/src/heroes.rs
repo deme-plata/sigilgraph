@@ -213,7 +213,13 @@ pub(crate) fn render_node_card(app: &App) -> Paragraph<'static> {
     let lines = vec![
         Line::from(vec![
             dim("height  "), Span::styled(group(st.height), Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
-            dim("   peers "), Span::styled(group(st.peers), Style::default().fg(C_GREEN)),
+            dim("   peers "), Span::styled(group(st.peers), Style::default().fg(if st.peers > 0 { C_NEON_GREEN } else { C_RED }).add_modifier(Modifier::BOLD)),
+        ]),
+        // v5.0.0 camera tag: SIGIL's PoW is BLAKE4 (Viktor's fn) — unmistakable filled chip
+        // right under the height line. NEVER labeled BLAKE3 on screen.
+        Line::from(vec![
+            Span::styled(" BLAKE4 PoW ", Style::default().bg(C_NEON_PINK).fg(C_BG).add_modifier(Modifier::BOLD)),
+            dim("  "), Span::styled("⚡ succinct-sync", Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![ dim("producer "), Span::styled(producer, Style::default().fg(C_CYAN)) ]),
         Line::from(vec![
@@ -228,7 +234,7 @@ pub(crate) fn render_state_roots(app: &App) -> Paragraph<'static> {
     let (badge, lat_str) = match &app.verify {
         Some(v) if v.ok => (
             Span::styled(" VERIFIED ", Style::default().bg(C_GREEN).fg(Color::Rgb(0x0a,0x0a,0x14)).add_modifier(Modifier::BOLD)),
-            format!(" BLAKE3 · {}µs", v.latency_us),
+            format!(" BLAKE4 · {}µs", v.latency_us),
         ),
         Some(_) => (Span::styled(" FAILED ", Style::default().bg(C_RED).fg(Color::Rgb(0x0a,0x0a,0x14)).add_modifier(Modifier::BOLD)), String::new()),
         None => (Span::styled(" WAITING ", Style::default().bg(C_DIM).fg(Color::Rgb(0x0a,0x0a,0x14))), String::new()),
@@ -310,7 +316,7 @@ pub(crate) fn render_security(app: &App) -> Paragraph<'static> {
         ])
     } else if sig_verified {
         Line::from(vec![
-            dim("sig "), Span::styled("BLAKE3 ✓", Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
+            dim("sig "), Span::styled("BLAKE4 ✓", Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
             dim("  "), Span::styled(if pq { "SQIsign ready" } else { "SQIsign gated" }, Style::default().fg(C_DIM)),
         ])
     } else if app.verify.is_some() {

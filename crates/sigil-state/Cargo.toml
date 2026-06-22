@@ -33,3 +33,15 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 num-bigint = "0.4"
 num-integer = "0.1"
 num-traits = "0.2"
+
+# LANE-B (rocky-sync-B, SIGIL v3 sync sprint) — tests/decode_verify_bench.rs.
+# The EXACT prod backfill-wire codec measured in isolation: server compresses a
+# bincode(Vec<SigilBlockHeaderV0>) chunk with the C `zstd` crate (level 1); the
+# follower decodes it with pure-Rust `ruzstd` (no C in the Windows cross-build),
+# then bincode-deserializes + prechecks. We mirror that here to attribute the
+# per-stage cost of the decode+verify lane against the 20k blk/s bar.
+bincode = "1"
+ruzstd  = "0.7"
+zstd    = { workspace = true }
+rayon   = { workspace = true }
+hex     = { workspace = true }

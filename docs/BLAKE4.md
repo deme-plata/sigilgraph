@@ -248,12 +248,39 @@ This is a **sharper kill of R=1** than SAC: not "weaker diffusion" (mean 0.366) 
 *degenerate on the exact surfaces a miner exploits* — a constant target-word bit and
 near-identical consecutive words. Both instruments converge: **the floor is R=2.**
 
-**Bottom line for promotion.** Two independent instruments now agree the reduced-R
-floor is R=2 and R=1 is unusable. The promotion candidate is **R=3** (~1.81×, one round
-above the floor on both SAC and the grind surfaces). What still gates moving
-`BLAKE4_ROUNDS` off 7: a **differential/linear cryptanalysis survey** (high-probability
-trails are the attack class neither SAC nor grind-bias captures) and a real-hardware
-GPU grind validation. Until then `BLAKE4_ROUNDS` stays at 7 — zero consensus change.
+### The differential survey (2026-06-22)
+
+SAC measures *single-bit* input differences (averaged); grind-bias measures the
+*nonce-increment* difference. Neither reports a **low-weight multi-bit input difference
+that propagates quietly** — a differential *trail*, the classic ARX/BLAKE attack class.
+`pow::blake4_diff_bias(R, samples)` sweeps a Δ set (nonce single-bit + pseudo-random and
+rotation-aligned 2-bit) and reports the **worst-case (minimum) output-differential
+avalanche** over that set — ideal ≈ 0.5 for *every* Δ; a Δ whose avalanche collapses is a
+trail. Regression-locked by `pow::tests::differential_survey_finds_no_trail_at_full_rounds`.
+
+Measured (128 samples/Δ over ~160 Δ; R=7 also at 256):
+
+| R | min Δ-avalanche (→0.5) | worst Δ weight | verdict |
+|---|---|---|---|
+| 1 | **0.023** | 1 | **dominant trail** — a Δ produces ~2% output change |
+| 2–6 | 0.492–0.494 | 1–2 | no trail in the Δ set |
+| 7 | 0.495 (0.495 @256) | 1 | BLAKE3 |
+
+R=1's worst-case differential (0.023) is even starker than its SAC *mean* (0.366) — the
+*min* exposes the worst Δ, not the average. R≥2 is clean across single-bit AND multi-bit Δ.
+
+**⚠️ Honest scope:** this is a **sampled screen**, not an exhaustive differential trail
+search. It catches a *dominant* trail (and did, at R=1), but absence of a trail in ~160
+sampled Δ is **not a proof** of differential security — a real promotion still needs an
+automated trail search (SAT/MILP, the tooling that broke reduced ChaCha/BLAKE) over the
+full difference space.
+
+**Bottom line for promotion.** THREE independent instruments — SAC, PoW grind-bias, and
+the differential screen — now agree: the reduced-R floor is **R=2**, R=1 is unusable on
+every surface, and **R=3** is the candidate (~1.81×, one round above the floor on all
+three). What still gates moving `BLAKE4_ROUNDS` off 7: an **exhaustive (automated)
+differential/linear trail search** and a **real-hardware GPU grind validation**. Until
+then `BLAKE4_ROUNDS` stays at 7 — zero consensus change.
 
 ## 7¾. BLAKE4 on the GPU — Lane A → GPU (scaffold, 2026-06-08)
 
@@ -299,11 +326,12 @@ VDF → submit → cap-enforced credit — works on real binaries.
 - **BLAKE4-turbo is a ceiling, not a product.** The 12.9 GH/s number is an
   *invertible* mix used only to measure the headroom. Don't quote turbo as a
   real rate.
-- **No reduced-round `R` is deployed yet.** The primitive, speed curve, SAC AND the
-  PoW grind-bias survey now exist (§7⅗: two independent instruments agree the floor is
-  R=2, R=1 is degenerate, R=3 is the candidate). The remaining gate before
-  `BLAKE4_ROUNDS` moves off 7 is a differential/linear cryptanalysis survey + a
-  real-GPU grind validation — SAC and grind-bias are a floor, not a green light.
+- **No reduced-round `R` is deployed yet.** The primitive, speed curve, and THREE
+  soundness instruments now exist (§7⅗: SAC + PoW grind-bias + a differential screen all
+  agree the floor is R=2, R=1 is degenerate, R=3 is the candidate). The remaining gate
+  before `BLAKE4_ROUNDS` moves off 7 is an **exhaustive (automated) differential/linear
+  trail search** + a real-GPU grind validation — the three screens are a floor, not a
+  green light (each samples, none is an exhaustive proof).
 - **`pow.rs` is scalar.** The per-round curve is honest but un-SIMD'd; the
   deployable rate is SIMD (blake3-crate-class) × the chosen R. SIMD is the
   flux-cortex/flux-optimize lever.
@@ -318,11 +346,12 @@ VDF → submit → cap-enforced credit — works on real binaries.
 - **BLAKE4-turbo is a ceiling, not a product.** The 12.9 GH/s number is an
   *invertible* mix used only to measure the headroom. Don't quote turbo as a
   real rate.
-- **No reduced-round `R` is deployed yet.** The primitive, speed curve, SAC AND the
-  PoW grind-bias survey now exist (§7⅗: two independent instruments agree the floor is
-  R=2, R=1 is degenerate, R=3 is the candidate). The remaining gate before
-  `BLAKE4_ROUNDS` moves off 7 is a differential/linear cryptanalysis survey + a
-  real-GPU grind validation — SAC and grind-bias are a floor, not a green light.
+- **No reduced-round `R` is deployed yet.** The primitive, speed curve, and THREE
+  soundness instruments now exist (§7⅗: SAC + PoW grind-bias + a differential screen all
+  agree the floor is R=2, R=1 is degenerate, R=3 is the candidate). The remaining gate
+  before `BLAKE4_ROUNDS` moves off 7 is an **exhaustive (automated) differential/linear
+  trail search** + a real-GPU grind validation — the three screens are a floor, not a
+  green light (each samples, none is an exhaustive proof).
 - **`pow.rs` is scalar.** The per-round curve is honest but un-SIMD'd; the
   deployable rate is SIMD (blake3-crate-class) × the chosen R. SIMD is the
   flux-cortex/flux-optimize lever.

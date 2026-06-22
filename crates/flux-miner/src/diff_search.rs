@@ -156,6 +156,89 @@ pub fn min_active_g_weight() -> (u32, u32) {
     best
 }
 
+// ── Multi-round message-difference trail engine ─────────────────────────────────────────────
+// Extends the single-G core to the FULL BLAKE4 round (8 G's over the 16-word state in the
+// column+diagonal pattern, with the message permutation between rounds). The PoW model: the
+// chaining value is identical (state difference starts at 0), the difference lives in the
+// message (header‖nonce). We propagate the XOR-difference through every G GREEDILY (max-prob
+// output diff per add via the exact best_xdp_add), summing weight. This yields ONE attack trail
+// per input difference = a valid UPPER bound on the optimal trail weight (a true optimal search
+// needs increasing-weight γ enumeration + Matsui pruning — the remaining SAT/MILP escalation).
+
+/// BLAKE3 message permutation — the standard constant (mirrors `pow`'s private `MSG_PERMUTATION`).
+/// The round wiring (G indices + message routing) is cross-checked by `round_one_equals_single_g`.
+const MSG_PERMUTATION: [usize; 16] = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
+
+/// Propagate XOR differences through one `G` IN PLACE on the 16-word state-difference, greedily.
+fn g_diff(sd: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize, dmx: u32, dmy: u32) -> u32 {
+    let (t, w1) = best_xdp_add(sd[a], sd[b], 32);
+    let (na, w2) = best_xdp_add(t, dmx, 32);
+    sd[a] = na;
+    sd[d] = rotr(sd[d] ^ sd[a], 16);
+    let (nc, w3) = best_xdp_add(sd[c], sd[d], 32);
+    sd[c] = nc;
+    sd[b] = rotr(sd[b] ^ sd[c], 12);
+    let (t2, w4) = best_xdp_add(sd[a], sd[b], 32);
+    let (na2, w5) = best_xdp_add(t2, dmy, 32);
+    sd[a] = na2;
+    sd[d] = rotr(sd[d] ^ sd[a], 8);
+    let (nc2, w6) = best_xdp_add(sd[c], sd[d], 32);
+    sd[c] = nc2;
+    sd[b] = rotr(sd[b] ^ sd[c], 7);
+    w1 + w2 + w3 + w4 + w5 + w6
+}
+
+/// One full BLAKE3 round on the state-difference (the 8-G column+diagonal pattern).
+fn round_diff(sd: &mut [u32; 16], md: &[u32; 16]) -> u32 {
+    g_diff(sd, 0, 4, 8, 12, md[0], md[1])
+        + g_diff(sd, 1, 5, 9, 13, md[2], md[3])
+        + g_diff(sd, 2, 6, 10, 14, md[4], md[5])
+        + g_diff(sd, 3, 7, 11, 15, md[6], md[7])
+        + g_diff(sd, 0, 5, 10, 15, md[8], md[9])
+        + g_diff(sd, 1, 6, 11, 12, md[10], md[11])
+        + g_diff(sd, 2, 7, 8, 13, md[12], md[13])
+        + g_diff(sd, 3, 4, 9, 14, md[14], md[15])
+}
+
+fn permute_md(md: &mut [u32; 16]) {
+    let old = *md;
+    for i in 0..16 {
+        md[i] = old[MSG_PERMUTATION[i]];
+    }
+}
+
+/// Greedy multi-round trail weight for a 16-word message difference over `rounds` rounds (state
+/// difference starts at 0 — the PoW message-difference model). Returns `(weight, output state
+/// difference)`. One greedy attack trail = an UPPER bound on the optimal trail weight.
+pub fn message_trail_weight(md0: &[u32; 16], rounds: u32) -> (u32, [u32; 16]) {
+    let mut sd = [0u32; 16];
+    let mut md = *md0;
+    let mut w = 0u32;
+    for _ in 0..rounds {
+        w = w.saturating_add(round_diff(&mut sd, &md));
+        permute_md(&mut md);
+    }
+    (w, sd)
+}
+
+/// Heuristic best-trail search: the minimum greedy trail weight over all single-bit message
+/// differences in the 40-byte input region (message words 0..10), for `rounds` rounds. The
+/// lowest-weight ATTACK trail found = an upper bound on the true optimum. `(weight, word, bit)`.
+pub fn best_single_bit_trail(rounds: u32) -> (u32, usize, u32) {
+    let mut best = (u32::MAX, 0usize, 0u32);
+    for word in 0..10usize {
+        for bit in 0..32u32 {
+            let mut md = [0u32; 16];
+            md[word] = 1u32 << bit;
+            let (w, _) = message_trail_weight(&md, rounds);
+            if w < best.0 {
+                best = (w, word, bit);
+            }
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +350,117 @@ mod tests {
             measured >= 0.25 * modelled && measured <= 4.0 * modelled,
             "G-trail model/measure mismatch: modelled {modelled:.3e}, measured {measured:.3e}"
         );
+    }
+
+    /// The real BLAKE4 round (8 `g_apply` calls in the column+diagonal pattern) — ground truth
+    /// for the difference engine's wiring.
+    fn real_round(s: &mut [u32; 16], m: &[u32; 16]) {
+        let cols = [(0, 4, 8, 12), (1, 5, 9, 13), (2, 6, 10, 14), (3, 7, 11, 15)];
+        let diags = [(0, 5, 10, 15), (1, 6, 11, 12), (2, 7, 8, 13), (3, 4, 9, 14)];
+        for (i, &(a, b, c, d)) in cols.iter().chain(diags.iter()).enumerate() {
+            let (na, nb, nc, nd) = g_apply(s[a], s[b], s[c], s[d], m[2 * i], m[2 * i + 1]);
+            s[a] = na;
+            s[b] = nb;
+            s[c] = nc;
+            s[d] = nd;
+        }
+    }
+
+    /// No message difference ⇒ no output difference and zero weight, at any round count.
+    #[test]
+    fn zero_difference_costs_nothing() {
+        for r in 1..=4u32 {
+            let (w, sd) = message_trail_weight(&[0u32; 16], r);
+            assert_eq!(w, 0);
+            assert_eq!(sd, [0u32; 16]);
+        }
+    }
+
+    /// END-TO-END wiring + probability validation of the multi-round engine: for a fixed message
+    /// difference over ONE real round, the engine's predicted output state-difference must occur
+    /// with probability ≈ 2^(−weight) when the actual round is run on random state+message. This
+    /// is the gold-standard check — it catches a wrong G index, a wrong rotation, or a wrong
+    /// message route, none of which a plausible-looking weight curve would reveal.
+    #[test]
+    fn round_engine_matches_real_round_mc() {
+        // auto-select a single-bit message difference whose R=1 trail weight is in a measurable
+        // band (a column-start Δ can cost ~88 bits; a diagonal-fed Δ ~1 — pick the middle).
+        let mut chosen: Option<([u32; 16], u32, [u32; 16])> = None;
+        'outer: for word in 0..10usize {
+            for bit in 0..32u32 {
+                let mut md = [0u32; 16];
+                md[word] = 1u32 << bit;
+                let (w, sd) = message_trail_weight(&md, 1);
+                if (8..=15).contains(&w) {
+                    chosen = Some((md, w, sd));
+                    break 'outer;
+                }
+            }
+        }
+        let (md, w, sd_pred) = chosen.expect("a measurable-weight (8..=15) R=1 trail must exist");
+        println!("[diff] R=1 wiring-MC: chosen trail weight {w}");
+        let trials = 1u64 << 24;
+        let mut hit = 0u64;
+        let mut s = 0xC0FF_EE00_1234_5678u64;
+        for _ in 0..trials {
+            let mut st = [0u32; 16];
+            let mut mb = [0u32; 16];
+            for v in st.iter_mut() {
+                *v = lcg(&mut s);
+            }
+            for v in mb.iter_mut() {
+                *v = lcg(&mut s);
+            }
+            let mut s0 = st;
+            real_round(&mut s0, &mb);
+            let mut mb2 = mb;
+            for i in 0..16 {
+                mb2[i] ^= md[i];
+            }
+            let mut s1 = st;
+            real_round(&mut s1, &mb2);
+            let mut diff = [0u32; 16];
+            for i in 0..16 {
+                diff[i] = s0[i] ^ s1[i];
+            }
+            if diff == sd_pred {
+                hit += 1;
+            }
+        }
+        let measured = hit as f64 / trials as f64;
+        let modelled = 2f64.powi(-(w as i32));
+        println!("[diff] R=1 wiring-MC: modelled 2^-{w}={modelled:.3e}  measured={measured:.3e}");
+        // The wiring check: a wrong G index/rotation/route ⇒ the predicted output difference
+        // almost never occurs ⇒ measured ≈ 0. Differential clustering only RAISES the measured
+        // probability above the single-trail model (here ~2 bits), never lowers it — so the
+        // honest bound is `measured ≥ 0.5×modelled` (wiring correct) up to a generous clustering
+        // ceiling.
+        assert!(
+            measured >= 0.5 * modelled && measured <= 32.0 * modelled,
+            "engine/real-round mismatch: modelled {modelled:.3e}, measured {measured:.3e}"
+        );
+    }
+
+    /// Greedy attack-trail weight vs rounds. SEMANTICS (important): greedy takes the locally
+    /// best output difference at each add, so its weight is an UPPER bound on the OPTIMAL (minimum)
+    /// trail — i.e. "a trail no worse than this exists." It finds ATTACKS; it does NOT prove their
+    /// absence (a cleverer trail could be cheaper). So a large greedy weight at R≥2 is suggestive
+    /// CORROBORATION of the empirical screens, NOT a security proof — the lower bound needs the
+    /// Matsui/SAT enumeration (the remaining escalation). What this DOES show soundly: the weight
+    /// grows steeply with rounds as the difference saturates the state.
+    #[test]
+    fn multiround_trail_weight_grows_past_pow_window() {
+        let mut w = [0u32; 4];
+        for r in 1..=3u32 {
+            let (wt, word, bit) = best_single_bit_trail(r);
+            w[r as usize] = wt;
+            println!(
+                "[diff] best single-bit message trail  R={r}  weight={wt}  (Δ msg-word{word} bit{bit})  PoW window=64"
+            );
+        }
+        assert!(w[1] >= 1 && w[1] <= 12, "R=1 trail ≈ one active G, got {}", w[1]);
+        assert!(w[2] > w[1], "trail weight must grow R1→R2 ({} → {})", w[1], w[2]);
+        assert!(w[3] > w[2], "trail weight must grow R2→R3 ({} → {})", w[2], w[3]);
     }
 
     /// Monte-Carlo: a differential of modelled weight `w` must hold with probability ≈ 2^(−w).

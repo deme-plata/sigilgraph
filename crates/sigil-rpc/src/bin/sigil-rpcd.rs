@@ -18,7 +18,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 
@@ -267,6 +267,7 @@ fn apply_block(n: &mut Node, rec: &serde_json::Value, g: &ModSquaring) -> Result
     n.retarget_anchor_ts = now_ms();
     n.retarget_anchor_height = n.block_height;
     ingest(n, "mine", format!("synced block #{bh} reward {reward} (from peer)"), &[miner], "dual-lane blake4+vdf synced");
+    let _ = commit_state_transition(&mut n.state, &StateTransition { at_height: bh, mutations: vec![] }, bh); // clear per-block events (OOM fix)
     Ok(bh)
 }
 
@@ -483,7 +484,7 @@ fn bootstrap() -> Node {
         return Node {
             state: snap.state, height: snap.height, block_height: snap.block_height, students: VerifiedRegistry::new(),
             tokens, pools: snap.pools, citizens: snap.citizens, history,
-            tip_hash: snap.tip_hash, bits: snap.bits,
+            tip_hash: snap.tip_hash, bits: std::env::var("SIGIL_MINING_BLAKE4_BITS").ok().and_then(|s| s.parse().ok()).unwrap_or(snap.bits),
             retarget_anchor_ts: snap.retarget_anchor_ts, retarget_anchor_height: snap.retarget_anchor_height,
             statedb,
             auth_nonces: snap.auth_nonces,
@@ -1755,13 +1756,27 @@ fn main() {
     let listener = TcpListener::bind(&addr).expect("bind");
     eprintln!("sigil-rpcd listening on {addr} — thread-per-conn + RwLock (concurrent reads, serialized writes); pool USDS/wQUG, trader+operator funded");
 
-    // Background full-text index build: the port is already bound and serving the
-    // money/chain routes. We build the explorer search index off the hot path so a
-    // restart never blocks on re-tokenizing the whole history. The build reads under
-    // a SHARED read lock (balance/status readers stay responsive — only writers wait
-    // the few seconds it takes), then swaps the finished index in under a brief
-    // exclusive lock. `/readyz` flips true when search is live.
-    {
+    // Background full-text explorer index build.
+    //
+    // ⚠ 2026-06-22 (Rocky): this starved the live mining endpoint. The build below
+    // holds a SHARED read lock on `node` for the ENTIRE build_detached_index() —
+    // which on this store is ~124s (millions of ingested mining events bulk-loaded
+    // into a ~14.6 GB TF-IDF index). The old comment claimed "only writers wait",
+    // but that is FALSE: glibc's RwLock is writer-preferring, so the instant ONE
+    // writer queues — and `ingest()` takes node.write() on EVERY produced block — all
+    // NEW readers block behind it, INCLUDING the /api/v1/mining/challenge handler
+    // (node.read()). Miners then get "error sending request" / timeouts, and the
+    // 14.6 GB resident index is itself an OOM hazard next to the live Quillon node.
+    //
+    // Fix: the explorer's full-text search is NON-CRITICAL (mining events don't need
+    // to be full-text searchable; the explorer's recent/by-tag/by-height views read
+    // flux-db directly and are unaffected). Make the heavy index OPT-OUT via
+    // SIGIL_DISABLE_SEARCH=1 — when set, the money/chain/mining routes never build or
+    // hold it, so the challenge endpoint stays responsive and RSS stays low.
+    if std::env::var("SIGIL_DISABLE_SEARCH").is_ok() {
+        INDEX_READY.store(true, Ordering::Relaxed);
+        eprintln!("flux-history: explorer full-text index DISABLED (SIGIL_DISABLE_SEARCH=1) — mining/chain/balance routes unaffected; /search returns recent-only");
+    } else {
         let inode = Arc::clone(&node);
         thread::spawn(move || {
             let t0 = std::time::Instant::now();
@@ -1814,8 +1829,35 @@ fn main() {
             thread::sleep(std::time::Duration::from_secs(2));
         });
     }
+    // 2026-06-22 (Rocky): the accept loop USED to be an UNBOUNDED thread-per-connection
+    // spawn with the default ~2 MB stack. Under load — miner challenge/submit retries,
+    // status pollers, and any handler briefly blocked on the node RwLock — connection
+    // threads piled up into the THOUSANDS, and at ~2 MB of stack each that alone was
+    // 8–14 GB of resident memory → cgroup OOM → restart loop (the "mystery RSS spike"
+    // that wasn't a data structure at all — it was stack memory from leaked threads).
+    // Bound it two ways: (1) MAX_CONN in-flight cap — beyond it we shed the connection
+    // immediately (clients retry) instead of spawning a thread the box can't afford;
+    // (2) a small 512 KB stack per handler (they're shallow: parse request, take a brief
+    // lock, respond). Worst case is now ~MAX_CONN × 512 KB ≈ 200 MB, not 14 GB.
+    const MAX_CONN: usize = 384;
+    static INFLIGHT: AtomicUsize = AtomicUsize::new(0);
     for stream in listener.incoming().flatten() {
+        if INFLIGHT.load(Ordering::Relaxed) >= MAX_CONN {
+            drop(stream); // load-shed: better a dropped conn (client retries) than an OOM
+            continue;
+        }
+        INFLIGHT.fetch_add(1, Ordering::Relaxed);
         let n = Arc::clone(&node);
-        thread::spawn(move || handle(stream, &n));
+        let spawned = thread::Builder::new()
+            .name("sigil-conn".into())
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                // RAII guard: decrement the in-flight count on ANY exit (return or panic).
+                struct ConnGuard;
+                impl Drop for ConnGuard { fn drop(&mut self) { INFLIGHT.fetch_sub(1, Ordering::Relaxed); } }
+                let _g = ConnGuard;
+                handle(stream, &n);
+            });
+        if spawned.is_err() { INFLIGHT.fetch_sub(1, Ordering::Relaxed); }
     }
 }

@@ -355,15 +355,40 @@ constraint; UNSAT at W=63 proves the bound) — at the cost of an external-solve
 verified per-add enumerator + branch-and-bound + the toy proof are the foundation that search
 would be built on.
 
+#### SMT lower bound — z3 run (`tools/blake4_diff_z3.py`, 2026-06-22)
+
+The SAT/SMT path was built and run. `tools/blake4_diff_z3.py` encodes the trail in z3's
+bit-vector theory — the SAME round structure as the verified Rust engine, each modular addition a
+free output-difference variable under the Lipmaa-Moriai validity constraint, weight = popcount of
+the non-equal bits — and minimizes (or threshold-checks) the total. The encoding is **validated
+before use** (`tools/blake4_z3_validate.py`): z3's `valid`/`weight` == the brute-verified
+closed-form `xdp+` (exhaustive n=6 + 4000 random 32-bit triples).
+
+Results (z3 4.16, capped on Epsilon):
+
+| query | result |
+|---|---|
+| **R=1** minimize | **exact minimum = 1** (0.4 s) — matches the Rust engine; R=1 provably broken |
+| **R=2** minimize | did not converge in 20 min — **proven bounds [9, 2389]** (min ≥ 9 is sound) |
+| **R=2** "trail ≤ 64?" | **unknown** (15-min timeout) — neither a cheap trail found nor its absence proved |
+
+So R=1 is a *complete* proof; R=2 is partial — z3 proves the minimum is ≥ 9 and ≤ 199 (the greedy
+trail), but the *security-grade* claim (min > 64) is **not reached in tractable time**. This is the
+honest frontier: published BLAKE-class multi-round differential bounds are computed with
+cluster-scale dedicated SAT solvers (CryptoMiniSat + optimized cardinality) or MILP, not a 20-min
+z3 Optimize. The prover + validator are in-tree and reproducible; closing R=2 needs either a much
+larger solve, a dedicated SAT toolchain, or the convex-hull MILP model of `xdp+`.
+
 **Bottom line for promotion.** The evidence — SAC, PoW grind-bias, the empirical differential
 screen, the exact `xdp+` trail core, the greedy multi-round engine, AND a *verified Matsui
 lower-bound search* — all agree: floor **R=2**, R=1 unusable, **R=3** the candidate (~1.81×). The
 upper-bound side (find an attack) and the lower-bound machinery (prove none cheaper) both exist
-and are brute-verified. The ONE thing still between here and moving `BLAKE4_ROUNDS` off 7: running
-the lower-bound search at **full scale** — the 16-word, multi-round state over *every* message
-difference, proving the R-round minimum > 64 — which in practice means a **SAT/SMT-assisted**
-search (external solver) on top of this verified in-tree foundation, plus a **real-GPU grind
-validation**. Until that proof lands, `BLAKE4_ROUNDS` stays at 7 — zero consensus change.
+and are brute-verified — and the SAT/SMT path was built and **run** (validated z3 encoding; R=1
+minimum proved =1, R=2 proved ∈[9,199]). The ONE thing still between here and moving
+`BLAKE4_ROUNDS` off 7: pushing that lower bound to the **security grade** — proving the R=2 (or
+R=3) minimum > 64 over *every* message difference — which did **not** converge in a 20-min z3
+solve and needs a larger/dedicated SAT-MILP run, plus a **real-GPU grind validation**. Until that
+proof lands, `BLAKE4_ROUNDS` stays at 7 — zero consensus change.
 
 ## 7¾. BLAKE4 on the GPU — Lane A → GPU (scaffold, 2026-06-08)
 

@@ -157,13 +157,75 @@ impl BandwidthContinuity {
         self.continuity_score > 0.72 && self.sustained_rate_bps > TARGET_HIGH_BW_BPS * 0.6
     }
 
-    /// X improvement: select best peer for continuous high bandwidth (highest velocity * heat).
+    /// v2 — UCB1 peer selection for *continuous* high bandwidth (replaces greedy argmax).
+    ///
+    /// The old `select_best_peer` was pure exploit: argmax(velocity·heat). That tunnels
+    /// all load onto one peer and never re-tries a peer that had one slow chunk or is
+    /// brand-new (no momentum entry → score 0), starving the mesh and bottlenecking on a
+    /// single link — the opposite of "continuous high BW". This balances exploit (proven
+    /// velocity·heat·success) with a UCB exploration bonus that lifts under-sampled / new
+    /// peers, decays stale winners by recency, and penalises latency jitter (jitter = drops).
+    /// Returns up to `k` peers, best first, so callers can pull in parallel (Turbo Sync X).
+    pub fn select_best_peers(&self, candidates: &[PeerId], k: usize) -> Vec<PeerId> {
+        if candidates.is_empty() || k == 0 {
+            return Vec::new();
+        }
+        const UCB_C: f64 = 0.6; // exploration weight
+        const RECENCY_HALFLIFE_S: f64 = 30.0;
+        fn jitter_ms(samples: &[u32]) -> f64 {
+            if samples.len() < 2 {
+                return 0.0;
+            }
+            let n = samples.len() as f64;
+            let mean = samples.iter().map(|&s| s as f64).sum::<f64>() / n;
+            let var = samples.iter().map(|&s| (s as f64 - mean).powi(2)).sum::<f64>() / n;
+            var.sqrt()
+        }
+        // UCB total = sum of per-peer pull counts (blocks served), +1 smoothed.
+        let total_pulls: f64 = candidates
+            .iter()
+            .map(|c| self.peer_momenta.get(c).map_or(0, |p| p.blocks_served) as f64)
+            .sum::<f64>()
+            .max(1.0);
+        // Normalise exploit by the strongest candidate so it is comparable to the bonus.
+        let max_exploit = candidates
+            .iter()
+            .filter_map(|c| self.peer_momenta.get(c))
+            .map(|p| (p.bandwidth_velocity * p.cache_heat * p.success_rate.max(0.05)).max(0.0))
+            .fold(0.0_f64, f64::max)
+            .max(1e-9);
+        let mut scored: Vec<(f64, &PeerId)> = candidates
+            .iter()
+            .map(|id| {
+                let score = match self.peer_momenta.get(id) {
+                    // Never tried: +∞ so an untried arm is ALWAYS probed before any
+                    // scored peer (classic UCB1). A finite constant (e.g. 2.0) could be
+                    // beaten by a high-exploit, low-pull peer's bonus — caught in review.
+                    None => f64::INFINITY,
+                    Some(p) => {
+                        let exploit = (p.bandwidth_velocity * p.cache_heat * p.success_rate.max(0.05))
+                            .max(0.0)
+                            / max_exploit;
+                        let age = p.last_served_at.elapsed().as_secs_f64();
+                        let decay = 0.5_f64.powf(age / RECENCY_HALFLIFE_S);
+                        let jitter_pen = 1.0 / (1.0 + jitter_ms(&p.latency_samples) / 50.0);
+                        let pulls = (p.blocks_served as f64).max(1.0);
+                        let bonus = UCB_C * (total_pulls.ln() / pulls).sqrt();
+                        exploit * decay * jitter_pen + bonus
+                    }
+                };
+                // NaN can never win the sort — sink it.
+                let score = if score.is_nan() { f64::NEG_INFINITY } else { score };
+                (score, id)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.into_iter().take(k).map(|(_, id)| id.clone()).collect()
+    }
+
+    /// X improvement: best single peer for continuous high BW (UCB1; see [`Self::select_best_peers`]).
     pub fn select_best_peer(&self, candidates: &[PeerId]) -> Option<PeerId> {
-        candidates.iter().max_by(|a, b| {
-            let sa = self.peer_momenta.get(*a).map_or(0.0, |p| p.bandwidth_velocity * p.cache_heat);
-            let sb = self.peer_momenta.get(*b).map_or(0.0, |p| p.bandwidth_velocity * p.cache_heat);
-            sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
-        }).cloned()
+        self.select_best_peers(candidates, 1).into_iter().next()
     }
 
     /// Suggested delay between requests to sustain the PID target rate for continuous high BW (smooth, no bursts).

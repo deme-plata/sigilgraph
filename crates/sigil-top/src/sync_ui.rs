@@ -74,7 +74,8 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
     let [tele, ship] = Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).spacing(1).areas(body);
 
     // ── BIG progress bar ─────────────────────────────────────────────────
-    let label = format!(" {:>5.1}%  {}  BW:{:.0}%", frac * 100.0, vtext, cont);
+    let label = format!(" {:>5.1}%  {}  BW:{:.0}%{}", frac * 100.0, vtext, cont,
+        if s.commit_rate > 1.0 { format!("  ⚡{}/s commit", group(s.commit_rate.round() as u64)) } else { String::new() });
     let total = bar_row.width as usize;
     let barw = total.saturating_sub(label.chars().count() + 1).max(4);
     let fill = (frac * barw as f64).round() as usize;

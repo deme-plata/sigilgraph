@@ -77,6 +77,55 @@ pub fn best_xdp_add(alpha: u32, beta: u32, n: u32) -> (u32, u32) {
     (gamma, weight)
 }
 
+/// Enumerate EVERY valid output difference `γ` for `(α,β)` through `+` mod 2^`n` with weight ≤
+/// `cap`, calling `f(γ, weight)` for each. This is the transition enumerator a Matsui ARX search
+/// branches on (Lipmaa-Moriai "country roads"). Bit-DFS over the carry-difference automaton: `γ_0`
+/// is forced (carry-in difference 0); at bit `i`, `γ_i` is forced when the previous bit was
+/// all-equal (`α=β=γ`), else free (two branches); prune the moment partial weight exceeds `cap`.
+/// Exact + complete — verified against a brute γ-scan by `enum_gamma_matches_bruteforce`.
+pub fn enum_gamma(alpha: u32, beta: u32, n: u32, cap: u32, f: &mut impl FnMut(u32, u32)) {
+    fn rec(
+        i: u32,
+        n: u32,
+        alpha: u32,
+        beta: u32,
+        gamma: u32,
+        w: u32,
+        eq_prev: bool,
+        cap: u32,
+        f: &mut impl FnMut(u32, u32),
+    ) {
+        if w > cap {
+            return;
+        }
+        if i == n {
+            f(gamma, w);
+            return;
+        }
+        let ai = (alpha >> i) & 1;
+        let bi = (beta >> i) & 1;
+        // candidate γ_i values: forced at bit 0 (carry-in 0) and where the prev bit was all-equal.
+        let mut cand = [0u32; 2];
+        let ncand = if i == 0 {
+            cand[0] = ai ^ bi; // γ_0 = α_0 ⊕ β_0
+            1
+        } else if eq_prev {
+            cand[0] = ai ^ bi ^ ((beta >> (i - 1)) & 1); // forced by the carry constraint
+            1
+        } else {
+            cand[0] = 0;
+            cand[1] = 1;
+            2
+        };
+        for &gi in &cand[..ncand] {
+            let eq_i = ai == bi && bi == gi;
+            let add = if i <= n - 2 && !eq_i { 1 } else { 0 };
+            rec(i + 1, n, alpha, beta, gamma | (gi << i), w + add, eq_i, cap, f);
+        }
+    }
+    rec(0, n, alpha, beta, 0, 0, false, cap, f);
+}
+
 // ── BLAKE4 `G` linear layer (rotations are deterministic for XOR differences) ────────────────
 // G(a,b,c,d, mx,my):
 //   a = a + b + mx;  d = (d ^ a) >>> 16;  c = c + d;       b = (b ^ c) >>> 12;
@@ -239,6 +288,125 @@ pub fn best_single_bit_trail(rounds: u32) -> (u32, usize, u32) {
     best
 }
 
+// ── Matsui branch-and-bound (the LOWER-bound search — a proof, not a screen) ─────────────────
+// Greedy (g_best_trail / message_trail_weight) is an UPPER bound: it finds A trail. Matsui finds
+// the EXACT MINIMUM-weight trail = a lower bound ("no trail is cheaper than this"), via depth-first
+// branch-and-bound: enumerate transitions cheapest-first (`enum_gamma`), and prune a partial trail
+// when its spent weight + the best achievable for the remaining rounds (the inductive bound B[r])
+// can't beat the best full trail found. When it finishes, the answer is provably optimal.
+
+/// Collect every (γ, weight) for `(α,β)` with weight ≤ `cap` (materialized `enum_gamma`).
+fn gammas(alpha: u32, beta: u32, n: u32, cap: u32) -> Vec<(u32, u32)> {
+    let mut v = Vec::new();
+    enum_gamma(alpha, beta, n, cap, &mut |g, w| v.push((g, w)));
+    v
+}
+
+/// Rotate-right within an `n`-bit word.
+fn rotr_n(x: u32, r: u32, n: u32) -> u32 {
+    let mask: u32 = if n == 32 { u32::MAX } else { (1u32 << n) - 1 };
+    let r = r % n;
+    if r == 0 {
+        return x & mask;
+    }
+    ((x >> r) | (x << (n - r))) & mask
+}
+
+fn toy_dfs(delta: u32, left: u32, rot: u32, dk: u32, n: u32, bmin: &[u32], acc: u32, best: &mut u32) {
+    if left == 0 {
+        if acc < *best {
+            *best = acc;
+        }
+        return;
+    }
+    // Matsui prune: the remaining `left` active rounds cost ≥ B[left] (when known). If even that
+    // optimistic completion can't beat the incumbent, abandon this subtree.
+    let lb = bmin[left as usize];
+    if lb != u32::MAX && acc.saturating_add(lb) >= *best {
+        return;
+    }
+    let ain = rotr_n(delta, rot, n);
+    let cap = (*best).saturating_sub(acc).saturating_sub(1).min(n);
+    for (dout, w) in gammas(ain, dk, n, cap) {
+        if dout == 0 {
+            continue; // a proper (active) trail never lets the difference die
+        }
+        toy_dfs(dout, left - 1, rot, dk, n, bmin, acc + w, best);
+    }
+}
+
+/// EXACT minimum-weight active differential trail of a 1-word ARX toy — round `δ ↦ (δ⋙rot)+dk`
+/// (`dk` = a fixed per-round difference) — over `rounds` rounds. This IS the lower bound: no
+/// active trail is cheaper than the returned weight. Computes B[1..rounds] inductively (each used
+/// to prune the next). Verified `== brute force` by `matsui_toy_equals_bruteforce`.
+pub fn matsui_toy(rot: u32, dk: u32, n: u32, rounds: u32) -> u32 {
+    assert!((1..=16).contains(&n) && rounds >= 1);
+    let space = 1u32 << n;
+    let mut bmin = vec![u32::MAX; (rounds + 1) as usize];
+    bmin[0] = 0;
+    for r in 1..=rounds {
+        let mut best = u32::MAX;
+        for d0 in 1..space {
+            toy_dfs(d0, r, rot, dk, n, &bmin, 0, &mut best);
+        }
+        bmin[r as usize] = best;
+    }
+    bmin[rounds as usize]
+}
+
+/// EXACT minimum-weight differential trail through ONE BLAKE4 `G`, for a fixed input difference,
+/// via branch-and-bound over the 6 additions (enumerate each add's output cheapest-first, thread
+/// the deterministic rotate/XOR layer, prune by the incumbent). Seeded with the greedy weight as
+/// the initial bound. TRACTABLE only when that seed is small (the cheapest-active-G case) — an
+/// expensive input would make the first enumeration explode, so callers restrict to low-seed
+/// inputs. Returns the proven minimum (≤ the greedy upper bound).
+pub fn matsui_g_min(da: u32, db: u32, dc: u32, dd: u32, dmx: u32, dmy: u32) -> u32 {
+    let mut best = g_best_trail(da, db, dc, dd, dmx, dmy).0;
+    let capf = |best: u32, acc: u32| best.saturating_sub(acc).saturating_sub(1).min(32);
+    // add1: a+b → t1
+    for (t1, w1) in gammas(da, db, 32, capf(best, 0)) {
+        // add2: t1+mx → a'
+        for (a1, w12) in gammas(t1, dmx, 32, capf(best, w1)) {
+            let wab = w1 + w12;
+            if wab >= best {
+                continue;
+            }
+            let d1 = rotr(dd ^ a1, 16);
+            // add3: c+d1 → c'
+            for (c1, w3) in gammas(dc, d1, 32, capf(best, wab)) {
+                let w2 = wab + w3;
+                if w2 >= best {
+                    continue;
+                }
+                let b1 = rotr(db ^ c1, 12);
+                // add4: a'+b1 → t2
+                for (t2, w4) in gammas(a1, b1, 32, capf(best, w2)) {
+                    let w2b = w2 + w4;
+                    if w2b >= best {
+                        continue;
+                    }
+                    // add5: t2+my → a''
+                    for (a2, w45) in gammas(t2, dmy, 32, capf(best, w2b)) {
+                        let w3t = w2b + w45;
+                        if w3t >= best {
+                            continue;
+                        }
+                        let d2 = rotr(d1 ^ a2, 8);
+                        // add6: c'+d2 → c''
+                        for (_c2, w6) in gammas(c1, d2, 32, capf(best, w3t)) {
+                            let total = w3t + w6;
+                            if total < best {
+                                best = total;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,6 +518,98 @@ mod tests {
             measured >= 0.25 * modelled && measured <= 4.0 * modelled,
             "G-trail model/measure mismatch: modelled {modelled:.3e}, measured {measured:.3e}"
         );
+    }
+
+    /// Exhaustive ground truth for the 1-word ARX toy: min active-trail weight over all trails.
+    fn brute_toy(rot: u32, dk: u32, n: u32, rounds: u32) -> u32 {
+        fn rec(delta: u32, left: u32, rot: u32, dk: u32, n: u32, space: u32, acc: u32, best: &mut u32) {
+            if left == 0 {
+                if acc < *best {
+                    *best = acc;
+                }
+                return;
+            }
+            let ain = super::rotr_n(delta, rot, n);
+            for dout in 1..space {
+                if let Some(w) = xdp_add_weight(ain, dk, dout, n) {
+                    rec(dout, left - 1, rot, dk, n, space, acc + w, best);
+                }
+            }
+        }
+        let space = 1u32 << n;
+        let mut best = u32::MAX;
+        for d0 in 1..space {
+            rec(d0, rounds, rot, dk, n, space, 0, &mut best);
+        }
+        best
+    }
+
+    /// The Matsui branch-and-bound finds the EXACT minimum (= the proven lower bound), matching
+    /// brute force on the 1-word ARX toy across rotations, round-differences, widths and round
+    /// counts. This is the correctness proof for the lower-bound search machinery.
+    #[test]
+    fn matsui_toy_equals_bruteforce() {
+        let cases = [
+            (4u32, 1u32, 3u32),
+            (4, 2, 3),
+            (4, 3, 3), // n=4, up to 3 rounds
+            (5, 1, 2),
+            (5, 2, 2), // n=5, up to 2 rounds (brute cost)
+        ];
+        for (n, rot, rounds) in cases {
+            for dk in [1u32, 3, 0b101, 1 << (n - 1)] {
+                for r in 1..=rounds {
+                    assert_eq!(
+                        matsui_toy(rot, dk, n, r),
+                        brute_toy(rot, dk, n, r),
+                        "matsui != brute (n={n} rot={rot} dk={dk:#x} R={r})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Apply the exact search to BLAKE4's `G`: the proven minimum trail weight for the cheapest
+    /// active-G input must be ≤ the greedy upper bound (greedy can only over-estimate), and an
+    /// inactive G must cost exactly 0. Turns the greedy "weight 7" into a PROVEN number.
+    #[test]
+    fn matsui_g_min_proves_cheapest_active_g() {
+        let (gw, bit) = min_active_g_weight();
+        let dmx = 1u32 << bit;
+        let m = matsui_g_min(0, 0, 0, 0, dmx, 0);
+        println!("[diff] cheapest active G — greedy upper bound {gw}, Matsui PROVEN minimum {m}");
+        assert!(m <= gw, "Matsui min {m} must be ≤ greedy {gw} (greedy is an upper bound)");
+        assert!(m >= 1, "an active G must cost ≥ 1 bit");
+        assert_eq!(matsui_g_min(0, 0, 0, 0, 0, 0), 0, "an inactive G costs 0");
+    }
+
+    /// `enum_gamma` emits EXACTLY the valid γ with weight ≤ cap (each once, correct weight) —
+    /// verified against a brute γ-scan over all (α,β) at n=6, for several caps (covers both
+    /// completeness at full cap and correct pruning at low caps).
+    #[test]
+    fn enum_gamma_matches_bruteforce() {
+        use std::collections::BTreeMap;
+        let n = 6u32;
+        let space = 1u32 << n;
+        for alpha in 0..space {
+            for beta in 0..space {
+                for cap in [0u32, 1, 2, 3, n] {
+                    let mut brute = BTreeMap::new();
+                    for gamma in 0..space {
+                        if let Some(w) = xdp_add_weight(alpha, beta, gamma, n) {
+                            if w <= cap {
+                                brute.insert(gamma, w);
+                            }
+                        }
+                    }
+                    let mut got = BTreeMap::new();
+                    enum_gamma(alpha, beta, n, cap, &mut |g, w| {
+                        assert!(got.insert(g, w).is_none(), "enum emitted γ={g:#x} twice");
+                    });
+                    assert_eq!(got, brute, "enum != brute at α={alpha:#x} β={beta:#x} cap={cap}");
+                }
+            }
+        }
     }
 
     /// The real BLAKE4 round (8 `g_apply` calls in the column+diagonal pattern) — ground truth

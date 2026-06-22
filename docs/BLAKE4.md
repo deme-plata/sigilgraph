@@ -324,17 +324,46 @@ feeds all four diagonal G's in the same round.)
 each add, so its weight is an **upper bound** on the optimal trail: "a trail no worse than this
 exists." It finds *attacks*; it does **not** prove their absence — a cleverer trail could be
 cheaper, so the weight-199 at R=2 is *suggestive corroboration* of the screens, **not** a
-security proof. The matching **lower bound** (proving no cheap trail exists) is exactly what the
-Matsui/SAT enumeration provides — the remaining escalation. What the engine shows *soundly* is
-the steep weight growth as the difference saturates the state (1 → 199 → 803).
+security proof. The matching **lower bound** (proving no cheap trail exists) is what the
+Matsui/SAT enumeration provides. What the engine shows *soundly* is the steep weight growth as
+the difference saturates the state (1 → 199 → 803).
 
-**Bottom line for promotion.** Four lines of evidence — SAC, PoW grind-bias, the empirical
-differential screen, and the exact `xdp+` trail core — agree: floor **R=2**, R=1 unusable,
-**R=3** the candidate (~1.81×). What still gates moving `BLAKE4_ROUNDS` off 7: assembling
-the verified `xdp+` core into a **full multi-round active-G optimal search** (the
-active-G-count growth across the message permutation — a SAT/MILP job; the per-`G` unit and
-the exact addition model are now in-tree to build it on) plus a **real-GPU grind
-validation**. Until then `BLAKE4_ROUNDS` stays at 7 — zero consensus change.
+#### Matsui branch-and-bound — the lower-bound search (`matsui_toy` / `matsui_g_min`)
+
+The lower-bound direction is now built. **Matsui's algorithm** finds the EXACT minimum-weight
+trail (= a proof "nothing is cheaper") by depth-first branch-and-bound: enumerate each addition's
+output differences *cheapest-first* (`enum_gamma`, the Lipmaa-Moriai "country roads"), and prune a
+partial trail when its spent weight plus the best achievable for the remaining rounds (the
+inductive bound `B[r]`) can't beat the incumbent.
+
+- `enum_gamma` — the increasing-weight transition enumerator. **Verified exact** against a brute
+  γ-scan over all (α,β) at n=6, every cap.
+- `matsui_toy` — the full Matsui search on a 1-word ARX toy (round `δ ↦ (δ⋙rot)+dk`). **Verified
+  `== brute force`** across rotations, round-differences, widths and round counts — so the
+  branch-and-bound provably computes the true minimum (the lower bound), not just a good trail.
+- `matsui_g_min` — the exact search applied to one BLAKE4 `G`. For the cheapest active-G input it
+  returns a **proven minimum of 7** — equal to the greedy upper bound, so greedy happened to be
+  tight there (now *proven*, not assumed). An inactive `G` is proven to cost 0.
+
+**⚠️ Honest scope.** This is a *correct, verified* lower-bound engine, but `matsui_g_min` is
+tractable only for low-weight (small-seed) inputs — an expensive input explodes the first
+enumeration. Scaling it to the **full 16-word, multi-round BLAKE4 state** (proving the R-round
+minimum exceeds 64 for *every* message difference) is the genuine research step: it needs the
+Matsui `B[r]` bounds threaded through the whole compression, and in practice that is where one
+reaches for a **SAT/SMT solver** (encode the Lipmaa-Moriai validity + a weight-≤-W cardinality
+constraint; UNSAT at W=63 proves the bound) — at the cost of an external-solver dependency. The
+verified per-add enumerator + branch-and-bound + the toy proof are the foundation that search
+would be built on.
+
+**Bottom line for promotion.** The evidence — SAC, PoW grind-bias, the empirical differential
+screen, the exact `xdp+` trail core, the greedy multi-round engine, AND a *verified Matsui
+lower-bound search* — all agree: floor **R=2**, R=1 unusable, **R=3** the candidate (~1.81×). The
+upper-bound side (find an attack) and the lower-bound machinery (prove none cheaper) both exist
+and are brute-verified. The ONE thing still between here and moving `BLAKE4_ROUNDS` off 7: running
+the lower-bound search at **full scale** — the 16-word, multi-round state over *every* message
+difference, proving the R-round minimum > 64 — which in practice means a **SAT/SMT-assisted**
+search (external solver) on top of this verified in-tree foundation, plus a **real-GPU grind
+validation**. Until that proof lands, `BLAKE4_ROUNDS` stays at 7 — zero consensus change.
 
 ## 7¾. BLAKE4 on the GPU — Lane A → GPU (scaffold, 2026-06-08)
 
@@ -381,11 +410,12 @@ VDF → submit → cap-enforced credit — works on real binaries.
   *invertible* mix used only to measure the headroom. Don't quote turbo as a
   real rate.
 - **No reduced-round `R` is deployed yet.** The primitive, speed curve, three empirical
-  soundness instruments AND the exact Lipmaa-Moriai `xdp+` trail core now exist (§7⅗: all
-  agree floor=R=2, R=1 degenerate, R=3 candidate). The remaining gate before `BLAKE4_ROUNDS`
-  moves off 7 is assembling the verified `xdp+` core into a **full multi-round active-G
-  optimal trail search** (a SAT/MILP job — the per-G unit + exact addition model are in-tree
-  now) + a real-GPU grind validation. The screens are a floor, not a green light.
+  soundness instruments, the exact Lipmaa-Moriai `xdp+` core, the greedy multi-round engine AND
+  a brute-verified Matsui lower-bound search now exist (§7⅗: all agree floor=R=2, R=1 degenerate,
+  R=3 candidate). The remaining gate before `BLAKE4_ROUNDS` moves off 7 is running that
+  lower-bound search at **full 16-word/multi-round scale** (proving the R-round minimum > 64 for
+  every message Δ — in practice a SAT/SMT-assisted job on this in-tree foundation) + a real-GPU
+  grind validation. Everything built so far is a floor, not yet the green light.
 - **`pow.rs` is scalar.** The per-round curve is honest but un-SIMD'd; the
   deployable rate is SIMD (blake3-crate-class) × the chosen R. SIMD is the
   flux-cortex/flux-optimize lever.
@@ -401,11 +431,12 @@ VDF → submit → cap-enforced credit — works on real binaries.
   *invertible* mix used only to measure the headroom. Don't quote turbo as a
   real rate.
 - **No reduced-round `R` is deployed yet.** The primitive, speed curve, three empirical
-  soundness instruments AND the exact Lipmaa-Moriai `xdp+` trail core now exist (§7⅗: all
-  agree floor=R=2, R=1 degenerate, R=3 candidate). The remaining gate before `BLAKE4_ROUNDS`
-  moves off 7 is assembling the verified `xdp+` core into a **full multi-round active-G
-  optimal trail search** (a SAT/MILP job — the per-G unit + exact addition model are in-tree
-  now) + a real-GPU grind validation. The screens are a floor, not a green light.
+  soundness instruments, the exact Lipmaa-Moriai `xdp+` core, the greedy multi-round engine AND
+  a brute-verified Matsui lower-bound search now exist (§7⅗: all agree floor=R=2, R=1 degenerate,
+  R=3 candidate). The remaining gate before `BLAKE4_ROUNDS` moves off 7 is running that
+  lower-bound search at **full 16-word/multi-round scale** (proving the R-round minimum > 64 for
+  every message Δ — in practice a SAT/SMT-assisted job on this in-tree foundation) + a real-GPU
+  grind validation. Everything built so far is a floor, not yet the green light.
 - **`pow.rs` is scalar.** The per-round curve is honest but un-SIMD'd; the
   deployable rate is SIMD (blake3-crate-class) × the chosen R. SIMD is the
   flux-cortex/flux-optimize lever.

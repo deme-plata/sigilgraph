@@ -279,6 +279,94 @@ pub fn blake4_grind_bias(rounds: u32, nonces: u64) -> GrindBias {
     GrindBias { word_monobit_bias, nonce_step_avalanche }
 }
 
+// ── Differential survey (the trail instrument SAC + grind-bias miss) ─────────
+// SAC measures single-bit input differences (averaged); grind-bias measures the
+// nonce-increment difference. NEITHER reports a LOW-WEIGHT MULTI-BIT input difference
+// that propagates "quietly" — a differential TRAIL, the classic ARX/BLAKE attack class.
+// This probe sweeps a Δ set (nonce single-bit + pseudo-random 2-bit + rotation-aligned
+// 2-bit) and reports the WORST-CASE (minimum) output-differential avalanche over that
+// set: ideal ≈ 0.5 for every Δ; a Δ whose avalanche collapses is a trail. Statistically
+// clean (mean over 256 output bits, then min over Δ — tight, unlike a max-over-bits).
+// bench/test only.
+
+/// Worst-case differential diffusion at a fixed round count.
+#[cfg(any(test, feature = "bench"))]
+#[derive(Debug, Clone, Copy)]
+pub struct DiffBias {
+    /// `min` over the tested input differences Δ of the mean output-differential avalanche
+    /// (fraction of the 256 output bits that flip under Δ). Ideal ≈ 0.5. Markedly below 0.5
+    /// = a low-weight differential trail: some fixed Δ propagates with low output weight.
+    pub min_avalanche: f64,
+    /// Hamming weight of the Δ that achieved `min_avalanche` (1 = a single-bit Δ SAC averages
+    /// away; ≥2 = a multi-bit trail no other instrument here covers).
+    pub worst_delta_weight: u32,
+}
+
+/// Differential survey: sweep a deterministic set of input differences Δ and, per Δ, measure
+/// the mean output-differential avalanche over `samples` random inputs. Returns the worst
+/// (minimum) avalanche found and the weight of the Δ that caused it. **bench/test only.**
+#[cfg(any(test, feature = "bench"))]
+pub fn blake4_diff_bias(rounds: u32, samples: u32) -> DiffBias {
+    const INPUT_LEN: usize = 40;
+    const BITS: usize = INPUT_LEN * 8; // 320
+    let set_bit = |d: &mut [u8; INPUT_LEN], bit: usize| d[bit / 8] ^= 1u8 << (bit % 8);
+
+    // Δ set (40-byte masks): (1) nonce single-bit — the grind surface; (2) pseudo-random
+    // 2-bit; (3) rotation-aligned 2-bit i,(i+32) — mimics ARX carry/rotate alignment.
+    let mut deltas: Vec<[u8; INPUT_LEN]> = Vec::new();
+    for bit in (32 * 8)..(40 * 8) {
+        let mut d = [0u8; INPUT_LEN];
+        set_bit(&mut d, bit);
+        deltas.push(d);
+    }
+    for k in 0u32..64 {
+        let h = blake4_digest(&k.to_le_bytes());
+        let a = u16::from_le_bytes([h[0], h[1]]) as usize % BITS;
+        let b = u16::from_le_bytes([h[2], h[3]]) as usize % BITS;
+        if a != b {
+            let mut d = [0u8; INPUT_LEN];
+            set_bit(&mut d, a);
+            set_bit(&mut d, b);
+            deltas.push(d);
+        }
+    }
+    for i in (0..BITS).step_by(10) {
+        let mut d = [0u8; INPUT_LEN];
+        set_bit(&mut d, i);
+        set_bit(&mut d, (i + 32) % BITS);
+        deltas.push(d);
+    }
+
+    let mut min_avalanche = 1.0f64;
+    let mut worst_delta_weight = 0u32;
+    for d in &deltas {
+        let w = d.iter().map(|b| b.count_ones()).sum::<u32>();
+        let mut diff_bits: u64 = 0;
+        for s in 0..samples {
+            let mut x = [0u8; INPUT_LEN];
+            let g0 = blake4_digest(&s.to_le_bytes());
+            let g1 = blake4_digest(&(s ^ 0x5A5A_5A5Au32).to_le_bytes());
+            x[..32].copy_from_slice(&g0);
+            x[32..40].copy_from_slice(&g1[..8]);
+            let mut xd = x;
+            for i in 0..INPUT_LEN {
+                xd[i] ^= d[i];
+            }
+            let y0 = blake4_rounds(&x, rounds);
+            let y1 = blake4_rounds(&xd, rounds);
+            for i in 0..32 {
+                diff_bits += (y0[i] ^ y1[i]).count_ones() as u64;
+            }
+        }
+        let av = diff_bits as f64 / (samples as f64 * 256.0);
+        if av < min_avalanche {
+            min_avalanche = av;
+            worst_delta_weight = w;
+        }
+    }
+    DiffBias { min_avalanche, worst_delta_weight }
+}
+
 // ── AVX2 8-way grind (FULL_ROUNDS only) ──────────────────────────────────────
 // The hot loop Cortex keeps flagging: an AVX2 intrinsic on the BLAKE3 compression
 // rounds. Hashes 8 consecutive nonces in parallel for the MINER GRIND. It is
@@ -608,6 +696,53 @@ mod tests {
             (g7.nonce_step_avalanche - 0.5).abs() < 0.01,
             "R=7 consecutive grind attempts must be independent (≈0.5), got step={:.4}",
             g7.nonce_step_avalanche
+        );
+    }
+
+    /// Differential survey R=1..7 — the worst-case (min) output avalanche over a Δ set of
+    /// nonce single-bit + multi-bit patterns. This is the trail instrument SAC (single-bit
+    /// averaged) and grind-bias (nonce-step) miss. The deployed R=7 MUST have NO low-weight
+    /// trail (worst-case avalanche stays ≈0.5 for every Δ).
+    #[test]
+    fn differential_survey_finds_no_trail_at_full_rounds() {
+        let mut curve = [DiffBias { min_avalanche: 0.0, worst_delta_weight: 0 };
+            (FULL_ROUNDS + 1) as usize];
+        for r in 1..=FULL_ROUNDS {
+            curve[r as usize] = blake4_diff_bias(r, 128);
+            println!(
+                "BLAKE4 diff   R={r}  min_avalanche={:.4}  worst_Δweight={}  (ideal min=0.5000)",
+                curve[r as usize].min_avalanche, curve[r as usize].worst_delta_weight
+            );
+        }
+        // MEASURED 2026-06-22 (128 samples/Δ over ~160 Δ): R=1 has a DOMINANT trail —
+        // worst-case differential avalanche 0.023 (a Δ produces ~2% output change). R≥2 is
+        // clean across single-bit AND multi-bit Δ (worst-case ≈0.492–0.495 ≈ noise floor of a
+        // min over ~160 estimates). NOTE: this is a SAMPLED screen, not an exhaustive trail
+        // search — it catches a dominant trail (and does, at R=1) but absence here is NOT a
+        // proof of differential security. Locks the R=1-trail / R≥2-clean finding.
+        assert!(
+            curve[1].min_avalanche < 0.10,
+            "R=1 must expose a dominant differential trail (worst-case avalanche <0.10), got {:.4}",
+            curve[1].min_avalanche
+        );
+        for r in 2..=FULL_ROUNDS as usize {
+            assert!(
+                curve[r].min_avalanche > 0.45,
+                "R={r} must show no low-weight trail in the Δ set (worst-case >0.45), got {:.4}",
+                curve[r].min_avalanche
+            );
+        }
+        // Tight pass on the DEPLOYED round count: BLAKE3 has no usable low-weight differential,
+        // so the worst-case Δ in our set must still diffuse to ~half the output.
+        let d7 = blake4_diff_bias(FULL_ROUNDS, 256);
+        println!(
+            "BLAKE4 diff   R=7 (tight, 256 samples)  min_avalanche={:.4}  worst_Δweight={}",
+            d7.min_avalanche, d7.worst_delta_weight
+        );
+        assert!(
+            d7.min_avalanche > 0.45,
+            "R=7 must show NO low-weight differential trail (worst-case avalanche >0.45), got {:.4}",
+            d7.min_avalanche
         );
     }
 

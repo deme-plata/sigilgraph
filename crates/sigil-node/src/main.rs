@@ -934,7 +934,7 @@ fn run_start() -> Result<()> {
                                     // structural pull the client finalize accepts on root-match; M2 adds SQIsign+flux_fold.
                                     let recs: Vec<SkeletonRecord> = blocks.iter().map(|b| SkeletonRecord::from_header(&b.header)).collect();
                                     let mut hh = blake3::Hasher::new();
-                                    for r in &recs { hh.update(&bincode::serialize(r).unwrap_or_default()); }
+                                    { let _ga = chain.height().saturating_sub(1); let _gw = chain.window_base(); let mut fb: Vec<crate::block::Block> = Vec::new(); if _gw > 0 { fb.extend(chain_log.get_range(0, _gw.saturating_sub(1))); } for h2 in _gw..=_ga { if let Some(b2) = chain.get(h2) { fb.push(b2.clone()); } } for b2 in &fb { let r2 = SkeletonRecord::from_header(&b2.header); hh.update(&bincode::serialize(&r2).unwrap_or_default()); } }
                                     let trailer = sigil_header::SnapshotTrailer { archive_root: *hh.finalize().as_bytes(), anchor_sig: Vec::new(), fold_blob: Vec::new() };
                                     let mut o = vec![b'F'];
                                     o.extend(bincode::serialize(&trailer).unwrap_or_default());

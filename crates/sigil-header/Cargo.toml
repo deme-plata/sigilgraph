@@ -19,3 +19,8 @@ thiserror  = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# LANE 3 byte-identity proof (tests/byte_identity.rs): MUST match the exact encoder
+# sigil-top uses on the snapshot wire (`bincode = "1"` in crates/sigil-top/Cargo.toml,
+# resolves to 1.3.3 — default little-endian fixint). The proof is only sound if it
+# asserts against the *same* bincode that produces the on-wire bytes.
+bincode = "1"

@@ -52,6 +52,57 @@ pub struct BlockStore {
     /// the strict `verified_to ≤ synced_to` clamp (today's behavior). Persisted under meta 'A' so
     /// the clamp-relax survives a reopen (else verified_to would be clamped back down on restart).
     fold_anchor: Option<(u64, BlockHash)>,
+    /// THROUGHPUT_MASTER LANE 2: in-memory parent-hash / height-index cache for the checked batch
+    /// path. DARK by default (`SIGIL_COMMIT_PARENT_CACHE`). Holds the `hash_hex` of heights THIS
+    /// process committed so the checked path can (a) skip the guaranteed-miss `height_index_conflict`
+    /// `db.get` for heights strictly above `best_height` and (b) verify the batch-boundary parent
+    /// linkage from memory instead of `get_stored_at_height(h-1)`. Always falls back to disk on a
+    /// miss, so it can only ever DROP a redundant read — never change an accept/reject outcome.
+    link_cache: LinkCache,
+    /// THROUGHPUT_MASTER LANE 2: route `commit_bulk_trusted_durable` through flux-db's off-thread
+    /// sorted-SST builder + atomic ingest (LANE 1's `ingest_sorted_bodies`) instead of `batch_put`.
+    /// DARK by default (`SIGIL_DB_SST_INGEST`). Until the flux-db API lands it falls back to the
+    /// `batch_put` bulk path, so the flag is wirable + green without a hard dep on the unlanded seam.
+    sst_ingest: bool,
+}
+
+/// THROUGHPUT_MASTER LANE 2 — in-memory committed-height → hash_hex cache. Bounded ring (evict the
+/// lowest height past `cap`). It is a pure read-elision aid for the checked batch path: every lookup
+/// that misses falls through to flux-db, and the only heights it ever serves are ones we durably
+/// committed this run (so a hit is byte-for-byte what the disk index holds). Cleared on chain reset.
+struct LinkCache {
+    enabled: bool,
+    map: std::collections::BTreeMap<u64, String>,
+    cap: usize,
+}
+
+impl LinkCache {
+    fn new(enabled: bool) -> Self {
+        // ~128k entries ≈ a few large backfill batches of look-back, bounded so a genesis→tip sync
+        // never grows it without limit.
+        LinkCache { enabled, map: std::collections::BTreeMap::new(), cap: 131_072 }
+    }
+    fn from_env() -> Self {
+        Self::new(
+            std::env::var("SIGIL_COMMIT_PARENT_CACHE").ok()
+                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+                .unwrap_or(false),
+        )
+    }
+    /// Record a durably-committed (height, hash_hex). No-op when disabled.
+    fn record(&mut self, height: u64, hash_hex: &str) {
+        if !self.enabled { return; }
+        self.map.insert(height, hash_hex.to_string());
+        while self.map.len() > self.cap {
+            // BTreeMap keeps keys sorted → the first key is the lowest height; evict it.
+            if let Some(&lo) = self.map.keys().next() { self.map.remove(&lo); } else { break; }
+        }
+    }
+    /// The cached hash_hex for `height`, if we committed it this run. None when disabled.
+    fn get(&self, height: u64) -> Option<&String> {
+        if self.enabled { self.map.get(&height) } else { None }
+    }
+    fn clear(&mut self) { self.map.clear(); }
 }
 
 /// Key prefix bytes (block data is keyed by 64-char hex hash, never starts with these).
@@ -190,7 +241,12 @@ impl BlockStore {
             .get(&[KEY_META, b'G']).ok().flatten()
             .map(|v| String::from_utf8_lossy(&v).into_owned())
             .unwrap_or_default();
-        let mut s = BlockStore { db, best_height, best_hash_hex, synced_to, verified_to, base: 0, genesis_hash, fold_anchor };
+        let sst_ingest = std::env::var("SIGIL_DB_SST_INGEST").ok()
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false")).unwrap_or(false);
+        let mut s = BlockStore {
+            db, best_height, best_hash_hex, synced_to, verified_to, base: 0, genesis_hash, fold_anchor,
+            link_cache: LinkCache::from_env(), sst_ingest,
+        };
         s.advance_synced(); // catch up the contiguous pointer to whatever's on disk
         Ok(s)
     }
@@ -266,6 +322,38 @@ impl BlockStore {
         self.hash_at_index_height(height)
             .filter(|existing| existing != incoming_hash_hex)
     }
+
+    /// THROUGHPUT_MASTER LANE 2: cache-accelerated height-index conflict check. Outcome-IDENTICAL
+    /// to `height_index_conflict` (only ever DROPS a redundant `db.get`):
+    ///   • cache hit  → the cached hash IS the stored hash → compare in memory (no get).
+    ///   • cache miss but `height > best_height` → nothing was ever stored at/above the max stored
+    ///     height (within this batch, dup-at-height is caught by `batch_seen`), so the disk index is
+    ///     a guaranteed MISS → skip the get.
+    ///   • otherwise   → fall through to the disk index (`height ≤ best_height`, possibly a gap/fork).
+    /// When the cache is disabled this is exactly `height_index_conflict` (disk every time).
+    fn height_index_conflict_cached(&self, height: u64, incoming_hash_hex: &str) -> Option<String> {
+        if self.link_cache.enabled {
+            if let Some(existing) = self.link_cache.get(height) {
+                return (existing != incoming_hash_hex).then(|| existing.clone());
+            }
+            if height > self.best_height {
+                return None; // never stored at/above best_height → no disk conflict possible
+            }
+        }
+        self.height_index_conflict(height, incoming_hash_hex)
+    }
+
+    /// THROUGHPUT_MASTER LANE 2 (test/integration knob): toggle the in-memory parent-hash cache.
+    /// Production reads `SIGIL_COMMIT_PARENT_CACHE` at open; this lets a test exercise both paths
+    /// without env juggling. Clears the map when turned off so stale entries can't leak.
+    pub fn set_link_cache(&mut self, enabled: bool) {
+        self.link_cache.enabled = enabled;
+        if !enabled { self.link_cache.clear(); }
+    }
+
+    /// THROUGHPUT_MASTER LANE 2 (test/integration knob): toggle the flux-db SST-ingest path for
+    /// `commit_bulk_trusted_durable` (production reads `SIGIL_DB_SST_INGEST` at open).
+    pub fn set_sst_ingest(&mut self, enabled: bool) { self.sst_ingest = enabled; }
 
     fn linkage_conflict(&self, height: u64, hash_hex: &str, parent_hash_hex: &str) -> Option<String> {
         if height > self.base {
@@ -359,6 +447,7 @@ impl BlockStore {
         let _ = self.db.put(&[KEY_META, b'S'], &self.synced_to.to_be_bytes());
         self.verified_to = base;
         let _ = self.db.put(&[KEY_META, b'V'], &self.verified_to.to_be_bytes());
+        self.link_cache.clear(); // LANE 2: re-anchoring invalidates the committed-height cache
         self.advance_synced();
     }
 
@@ -402,6 +491,7 @@ impl BlockStore {
         self.base = 0;
         self.genesis_hash = String::new(); // LANE-S: forget the dead chain's genesis anchor
         self.fold_anchor = None;           // v3 LANE-C: the dead chain's fold anchor is invalid too
+        self.link_cache.clear();           // LANE 2: dead chain's height→hash entries are invalid
         let _ = self.db.put(&[KEY_META, b'S'], &0u64.to_be_bytes());
         let _ = self.db.put(&[KEY_META, b'V'], &0u64.to_be_bytes());
         let _ = self.db.put(&[KEY_META, b'G'], b""); // clear the persisted genesis key
@@ -595,12 +685,15 @@ impl BlockStore {
             std::collections::HashMap::with_capacity(prepared.len());
         let mut accepted_hash_by_height: std::collections::HashMap<u64, String> =
             std::collections::HashMap::with_capacity(headers.len());
+        // THROUGHPUT_MASTER LANE 2: heights accepted by THIS batch, recorded into the parent-hash
+        // cache only AFTER the batch_put commits (so the cache never claims an un-committed height).
+        let mut cache_updates: Vec<(u64, String)> = Vec::new();
         for (height, hash_hex, parent_hash_hex, value) in prepared {
             let conflict = batch_seen
                 .get(&height)
                 .filter(|existing| *existing != &hash_hex)
                 .cloned()
-                .or_else(|| self.height_index_conflict(height, &hash_hex));
+                .or_else(|| self.height_index_conflict_cached(height, &hash_hex));
             if let Some(existing) = conflict {
                 conflicts += 1;
                 first_conflict.get_or_insert_with(|| (height, existing, hash_hex));
@@ -619,6 +712,28 @@ impl BlockStore {
                     }
                 } else if batch_heights.contains(&(height - 1)) {
                     link_conflict = Some(format!("batch parent h={} was rejected or missing", height - 1));
+                } else if height > self.synced_to {
+                    // THROUGHPUT_MASTER LANE 2 — pure frontier: `linkage_conflict`'s child-check (h+1)
+                    // is a guaranteed no-op above `synced_to`, so a parent-cache hit is byte-identical
+                    // to the disk get (the cached hash IS the stored parent's hash). Drop the get on a
+                    // hit; on a miss fall through to disk (preserves the strict-downward squatter refusal).
+                    match self.link_cache.get(height - 1) {
+                        Some(cached_parent) => {
+                            if !cached_parent.eq_ignore_ascii_case(&parent_hash_hex) {
+                                link_conflict = Some(format!(
+                                    "cached parent h={} hash={} but incoming parent_hash={}",
+                                    height - 1,
+                                    short_hash_hex(cached_parent),
+                                    short_hash_hex(&parent_hash_hex)
+                                ));
+                            }
+                        }
+                        None => {
+                            if let Some(reason) = self.linkage_conflict(height, &hash_hex, &parent_hash_hex) {
+                                link_conflict = Some(reason);
+                            }
+                        }
+                    }
                 } else if let Some(reason) = self.linkage_conflict(height, &hash_hex, &parent_hash_hex) {
                     link_conflict = Some(reason);
                 }
@@ -633,6 +748,7 @@ impl BlockStore {
             batch_seen.entry(height).or_insert_with(|| hash_hex.clone());
             accepted_hash_by_height.entry(height).or_insert_with(|| hash_hex.clone());
             accepted += 1;
+            if self.link_cache.enabled { cache_updates.push((height, hash_hex.clone())); }
             owned.push((hash_hex.clone().into_bytes(), value));              // block by hash
             owned.push((height_key(height), hash_hex.clone().into_bytes())); // height index
             if height >= max_h { max_h = height; max_hash = hash_hex; }
@@ -653,6 +769,8 @@ impl BlockStore {
                 self.best_height = max_h;
                 self.best_hash_hex = max_hash;
                 self.persist_best(); // v0.35: ONE meta put per batch keeps open() O(1)
+                // LANE 2: now-durable heights enter the parent-hash cache (no-op if disabled).
+                for (h, hh) in cache_updates { self.link_cache.record(h, &hh); }
                 accepted
             }
             Err(_) => 0,
@@ -700,8 +818,10 @@ impl BlockStore {
         let mut owned: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(prepared.len() * 2);
         let mut max_h = self.best_height;
         let mut max_hash = self.best_hash_hex.clone();
+        let mut cache_updates: Vec<(u64, String)> = Vec::new();
         let n = prepared.len();
         for (height, hash_hex, value) in prepared {
+            if self.link_cache.enabled { cache_updates.push((height, hash_hex.clone())); }
             owned.push((hash_hex.clone().into_bytes(), value));              // block by hash
             owned.push((height_key(height), hash_hex.clone().into_bytes())); // height index
             if height >= max_h { max_h = height; max_hash = hash_hex; }
@@ -712,6 +832,9 @@ impl BlockStore {
                 self.best_height = max_h;
                 self.best_hash_hex = max_hash;
                 self.persist_best();
+                // LANE 2: feed the trusted prefix's tail into the cache so the first checked frontier
+                // batch links to it in memory (the trusted path itself does no linkage checks).
+                for (h, hh) in cache_updates { self.link_cache.record(h, &hh); }
                 n
             }
             Err(_) => 0,
@@ -722,11 +845,37 @@ impl BlockStore {
     /// fsync (see `commit_batch_durable`). The fast path for the snapshot/skeleton prefix.
     pub fn commit_bulk_trusted_durable(&mut self, headers: &[SigilBlockHeaderV0], fsync: bool) -> Result<usize, String> {
         if headers.is_empty() { return Ok(0); }
-        let n = self.put_blocks_bulk_trusted(headers); // memtable+WAL, no per-block gets
+        let n = if self.sst_ingest {
+            self.put_blocks_bulk_trusted_ingest(headers) // LANE 1 SST-ingest seam (falls back today)
+        } else {
+            self.put_blocks_bulk_trusted(headers)        // memtable+WAL, no per-block gets
+        };
         if fsync { self.db.sync_wal()?; }              // blocks durable
         self.advance_synced();                         // tip 'S' → WAL
         if fsync { self.db.sync_wal()?; }              // tip durable after blocks
         Ok(n)
+    }
+
+    /// THROUGHPUT_MASTER LANE 2 ⇄ LANE 1 SEAM: commit the verified contiguous prefix via flux-db's
+    /// off-thread sorted-SST builder + atomic ingest (`ingest_sorted_bodies`), skipping the
+    /// WAL+memtable+compaction path that caps `batch_put` at ~4k blk/s. Gated by `SIGIL_DB_SST_INGEST`
+    /// (`self.sst_ingest`), and only reachable from `commit_bulk_trusted_durable` — i.e. ONLY for the
+    /// fold/anchor-verified prefix the trusted route already guards.
+    ///
+    /// L1's `flux_db::Database::ingest_sorted_bodies` is not landed yet, so this currently FALLS BACK
+    /// to `put_blocks_bulk_trusted` — the flag is wirable and the build stays green without a hard dep
+    /// on the unlanded API. ACTIVATION (one site, when L1 lands the API): build the GLOBALLY-key-sorted
+    /// (block-by-hash, height-index) pairs for `headers`, call `self.db.ingest_sorted_bodies(&sorted)?`,
+    /// bump `best`, return n. The 2-phase fsync that makes the tip durable AFTER the bodies stays in
+    /// `commit_bulk_trusted_durable` (unchanged), so atomic ingest + tip-after-bodies together preserve
+    /// kill-9 crash-safety.
+    fn put_blocks_bulk_trusted_ingest(&mut self, headers: &[SigilBlockHeaderV0]) -> usize {
+        // TODO(LANE 1 seam): swap to `self.db.ingest_sorted_bodies(&sorted_kv)` once flux-db exposes it.
+        crate::tlog!(
+            "[store] SIGIL_DB_SST_INGEST set but flux-db ingest_sorted_bodies not yet wired — \
+             falling back to batch_put bulk path ({} blocks)", headers.len()
+        );
+        self.put_blocks_bulk_trusted(headers)
     }
 
     /// Advance the contiguous pointer over consecutive heights now present (one pass).

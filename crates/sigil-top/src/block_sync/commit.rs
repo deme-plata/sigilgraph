@@ -87,6 +87,13 @@ pub(super) struct CommitConfig {
     /// the caller must guarantee no fork/dup risk. SIGIL_COMMIT_TRUSTED (default OFF — the live
     /// gossip/frontier path must keep the fork+dup checks). The 100k snapshot/skeleton path sets it.
     pub trusted: bool,
+    /// THROUGHPUT_MASTER LANE 2: per-batch TRUSTED routing on the verified watermark. When on, a
+    /// flush whose MAX height ≤ `store.fold_anchor_height()` (the SQIsign-fold-anchored prefix) goes
+    /// through the trusted zero-get bulk commit; the frontier (> anchor) stays on the checked path.
+    /// Unlike `trusted` (which forces the WHOLE ring trusted), this is the DEFAULT-safe form — it
+    /// only trusts what the fold anchor cryptographically authorizes (invariant #2), so the live
+    /// frontier keeps its fork+dup checks. SIGIL_COMMIT_TRUSTED_PREFIX (default OFF — DARK).
+    pub trusted_prefix: bool,
 }
 
 #[allow(dead_code)]
@@ -100,6 +107,7 @@ impl CommitConfig {
             fsync: flag_env("SIGIL_COMMIT_FSYNC", true),
             bulk_load: flag_env("SIGIL_COMMIT_BULK", true),
             trusted: flag_env("SIGIL_COMMIT_TRUSTED", false),
+            trusted_prefix: flag_env("SIGIL_COMMIT_TRUSTED_PREFIX", false),
         }
     }
 }
@@ -149,9 +157,19 @@ impl CommitBuffer {
     /// so the fetch cursor never re-requests buffered-but-uncommitted heights.
     pub(super) fn flush(&mut self, store: &mut BlockStore) -> usize {
         if self.buf.is_empty() { return 0; }
-        // Trusted prefix → skip the per-block fork/dup gets entirely (the 100k fast path);
-        // otherwise the checked path (live gossip/frontier).
-        let result = if self.cfg.trusted {
+        // Route this batch trusted-vs-checked:
+        //   • `trusted` forces the WHOLE ring trusted (the explicit snapshot/skeleton path).
+        //   • `trusted_prefix` (THROUGHPUT_MASTER LANE 2, DEFAULT-safe) trusts ONLY a batch whose max
+        //     height is within the SQIsign-fold-anchored prefix (≤ fold_anchor_height); a batch that
+        //     reaches the frontier — or any batch when no fold anchor is set — stays on the CHECKED
+        //     path. A straddling batch routes checked (conservative; the snapshot path sends pure
+        //     prefix batches, so it doesn't straddle in practice).
+        // Trusted → skip the per-block fork/dup gets (the 100k fast path); checked = live/frontier.
+        let anchor = store.fold_anchor_height();
+        let max_h = self.buf.iter().map(|h| h.height).max().unwrap_or(0);
+        let use_trusted = self.cfg.trusted
+            || (self.cfg.trusted_prefix && anchor > 0 && max_h <= anchor);
+        let result = if use_trusted {
             store.commit_bulk_trusted_durable(&self.buf, self.cfg.fsync)
         } else {
             store.commit_batch_durable(&self.buf, self.cfg.fsync)
@@ -268,7 +286,7 @@ mod tests {
     }
 
     fn test_cfg() -> CommitConfig {
-        CommitConfig { batch_size: 2048, fsync: true, bulk_load: true, trusted: false }
+        CommitConfig { batch_size: 2048, fsync: true, bulk_load: true, trusted: false, trusted_prefix: false }
     }
 
     /// The ring buffers across pushes and flushes durable batches; every block survives a reopen
@@ -356,7 +374,7 @@ mod tests {
         {
             let mut store = BlockStore::open_blocking(&p).unwrap();
             store.set_base(1);
-            let mut ring = CommitBuffer::new(CommitConfig { batch_size: 2048, fsync: true, bulk_load: true, trusted: true });
+            let mut ring = CommitBuffer::new(CommitConfig { batch_size: 2048, fsync: true, bulk_load: true, trusted: true, trusted_prefix: false });
             ring.arm(&store);
             for slice in chain(5000).chunks(1000) { ring.push_slice(&mut store, slice); }
             ring.finish(&mut store);
@@ -468,9 +486,134 @@ mod tests {
         ring.finish(&mut store);
         let secs = t0.elapsed().as_secs_f64().max(1e-9);
         let rate = ring.committed() as f64 / secs;
-        eprintln!("[commit-bench] {} blocks committed in {:.3}s = {:.0} blk/s | batches={} fsync={} bulk={} trusted={} batch_size={}",
-            ring.committed(), secs, rate, ring.batches(), ring.cfg.fsync, ring.cfg.bulk_load, ring.cfg.trusted, ring.cfg.batch_size);
+        eprintln!("[commit-bench] {} blocks committed in {:.3}s = {:.0} blk/s | batches={} fsync={} bulk={} trusted={} trusted_prefix={} batch_size={}",
+            ring.committed(), secs, rate, ring.batches(), ring.cfg.fsync, ring.cfg.bulk_load, ring.cfg.trusted, ring.cfg.trusted_prefix, ring.cfg.batch_size);
         assert_eq!(store.synced_to(), n + 1);
+        let _ = std::fs::remove_dir_all(&p);
+    }
+
+    /// THROUGHPUT_MASTER LANE 2 — watermark-gated routing (`SIGIL_COMMIT_TRUSTED_PREFIX`): with a fold
+    /// anchor at C, the ring sends batches whose max height ≤ C through the TRUSTED zero-get bulk
+    /// commit and batches reaching the frontier (> C) through the CHECKED path — and the resulting
+    /// store is BYTE-IDENTICAL (divergence=0) to the all-checked reference. This is the §5 invariant
+    /// gate that must pass before the flag can ever be flipped default-on.
+    #[test]
+    fn trusted_prefix_routes_on_fold_anchor_matches_checked() {
+        let p_ref = tmp("tp-ref");
+        let p_tp = tmp("tp-on");
+        let _ = std::fs::remove_dir_all(&p_ref);
+        let _ = std::fs::remove_dir_all(&p_tp);
+        let headers = chain(5000);
+        // Reference: the all-checked path (trusted_prefix off).
+        {
+            let mut store = BlockStore::open_blocking(&p_ref).unwrap();
+            store.set_base(1);
+            let mut ring = CommitBuffer::new(test_cfg());
+            ring.arm(&store);
+            for slice in headers.chunks(1000) { ring.push_slice(&mut store, slice); }
+            ring.finish(&mut store);
+            assert_eq!(store.synced_to(), 5001);
+        }
+        // Trusted-prefix on, fold anchor at 3000 → [1..3000] routes trusted, [3001..5000] checked.
+        {
+            let mut store = BlockStore::open_blocking(&p_tp).unwrap();
+            store.set_base(1);
+            store.set_fold_anchor(3000, [0u8; 32]); // hash is a stand-in; routing reads height only
+            let cfg = CommitConfig { batch_size: 2048, fsync: true, bulk_load: true, trusted: false, trusted_prefix: true };
+            let mut ring = CommitBuffer::new(cfg);
+            ring.arm(&store);
+            for slice in headers.chunks(1000) { ring.push_slice(&mut store, slice); }
+            ring.finish(&mut store);
+            assert_eq!(store.synced_to(), 5001, "trusted-prefix routing stores the whole chain");
+        }
+        // Divergence=0: identical hash_hex at every height across the two routes, survives reopen.
+        let a = BlockStore::open_blocking(&p_ref).unwrap();
+        let b = BlockStore::open_blocking(&p_tp).unwrap();
+        assert_eq!(a.synced_to(), b.synced_to());
+        for h in 1..=5000 {
+            assert_eq!(
+                a.get_stored_at_height(h).map(|s| s.hash_hex),
+                b.get_stored_at_height(h).map(|s| s.hash_hex),
+                "height {h} diverged between checked and trusted-prefix routes"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&p_ref);
+        let _ = std::fs::remove_dir_all(&p_tp);
+    }
+
+    /// THROUGHPUT_MASTER LANE 2 — the in-memory parent-hash cache (`SIGIL_COMMIT_PARENT_CACHE`) is a
+    /// pure read-elision: with it ON, a forward batch sync stores the IDENTICAL chain as the disk-only
+    /// path (divergence=0), and a conflicting-hash fork at an already-mapped height is STILL rejected
+    /// (warm-cache hit returns the canonical hash; it can never overwrite the spine).
+    #[test]
+    fn link_cache_outcome_identical_and_fork_safe() {
+        let p_off = tmp("lc-off");
+        let p_on = tmp("lc-on");
+        let _ = std::fs::remove_dir_all(&p_off);
+        let _ = std::fs::remove_dir_all(&p_on);
+        let headers = chain(3000);
+        let sync = |path: &str, cache: bool| -> u64 {
+            let mut s = BlockStore::open_blocking(path).unwrap();
+            s.set_base(1);
+            s.set_link_cache(cache);
+            let mut acc = 0usize;
+            for slice in headers.chunks(1000) { acc += s.put_blocks_batch(slice); s.advance(); }
+            assert_eq!(acc, 3000, "all 3000 accepted (cache={cache})");
+            s.synced_to()
+        };
+        assert_eq!(sync(&p_off, false), 3001);
+        assert_eq!(sync(&p_on, true), 3001);
+        // Divergence=0 between disk-only and cache-accelerated routes.
+        let a = BlockStore::open_blocking(&p_off).unwrap();
+        let b = BlockStore::open_blocking(&p_on).unwrap();
+        for h in 1..=3000 {
+            assert_eq!(
+                a.get_stored_at_height(h).map(|s| s.hash_hex),
+                b.get_stored_at_height(h).map(|s| s.hash_hex),
+                "height {h} diverged with the parent-hash cache on"
+            );
+        }
+        // Warm-cache fork safety: commit [1..200] into a fresh store (cache now holds h=100's
+        // canonical hash), then a DIFFERENT header at h=100 must be rejected via the cache hit.
+        let p_fork = tmp("lc-fork");
+        let _ = std::fs::remove_dir_all(&p_fork);
+        {
+            let mut s = BlockStore::open_blocking(&p_fork).unwrap();
+            s.set_base(1);
+            s.set_link_cache(true);
+            assert_eq!(s.put_blocks_batch(&headers[..200]), 200);
+            s.advance();
+            let forky = mk(100, [0x42u8; 32]); // different parent → different hash at h=100
+            assert_eq!(
+                s.put_blocks_batch(std::slice::from_ref(&forky)), 0,
+                "warm-cache fork at an already-mapped height must be rejected"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&p_off);
+        let _ = std::fs::remove_dir_all(&p_on);
+        let _ = std::fs::remove_dir_all(&p_fork);
+    }
+
+    /// THROUGHPUT_MASTER LANE 2 ⇄ LANE 1 — the SST-ingest gate (`SIGIL_DB_SST_INGEST`) is DARK and
+    /// FALLS BACK to the batch_put bulk path until flux-db's `ingest_sorted_bodies` lands: with the
+    /// gate ON, `commit_bulk_trusted_durable` still stores the verified prefix durably and advances
+    /// the tip (no behavior change — the seam is wired, kill-9 durability via the 2-phase fsync
+    /// unchanged). Activating the real ingest call is a one-line swap in `put_blocks_bulk_trusted_ingest`.
+    #[test]
+    fn sst_ingest_gate_falls_back_and_stays_durable() {
+        let p = tmp("sst-ingest");
+        let _ = std::fs::remove_dir_all(&p);
+        {
+            let mut store = BlockStore::open_blocking(&p).unwrap();
+            store.set_base(1);
+            store.set_sst_ingest(true); // gate ON → put_blocks_bulk_trusted_ingest (fallback today)
+            let n = store.commit_bulk_trusted_durable(&chain(2000), true).unwrap();
+            assert_eq!(n, 2000, "SST-ingest gate (fallback) committed all 2000");
+            assert_eq!(store.synced_to(), 2001, "tip advanced under the gate");
+        }
+        let store = BlockStore::open_blocking(&p).unwrap();
+        assert_eq!(store.synced_to(), 2001, "durable across reopen with the gate on");
+        for h in 1..=2000 { assert!(store.has_height(h), "h={h} present"); }
         let _ = std::fs::remove_dir_all(&p);
     }
 }

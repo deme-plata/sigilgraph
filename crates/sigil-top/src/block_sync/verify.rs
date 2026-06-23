@@ -539,6 +539,40 @@ pub(super) fn fast_forward_to_anchored_checkpoint(
     })
 }
 
+/// 6.0.6 root-cause snapshot fast-forward. `pull_snapshot` already verified the skeleton
+/// (contiguity + parent linkage + recomputed root == trailer) AND bound `snap_anchor_hash` to
+/// the chain's true last record (fetch.rs finalize). This authenticates that verified anchor
+/// against the trust root (dns_anchor_tip's SQIsign/dev anchor) and, on match, BULK-TRUSTS the
+/// skeleton prefix by advancing the verified watermark to the floor (anchor - frontier_window).
+/// Bodies are NOT required here -- they backfill via PASS-2; the snapshot is skeleton-only, which
+/// is exactly why the main-store path of fast_forward_to_anchored_checkpoint could never authenticate it.
+pub(super) fn fast_forward_from_authenticated_snapshot(
+    store: &mut BlockStore,
+    snap_anchor_height: u64,
+    snap_anchor_hash: &BlockHash,
+    trusted_height: u64,
+    trusted_hash: &BlockHash,
+    frontier_window: u64,
+) -> Result<u64, FastForwardError> {
+    if snap_anchor_height != trusted_height || snap_anchor_hash != trusted_hash {
+        return Err(FastForwardError::AnchorMismatch {
+            height: trusted_height,
+            expected: hex::encode(trusted_hash),
+            found: hex::encode(snap_anchor_hash),
+        });
+    }
+    // Record the authenticated trusted checkpoint FIRST: set_verified_to clamps to
+    // max(synced_to, fold_anchor_height()). In a skeleton-only sync synced_to==0 (no bodies
+    // downloaded), so the fold anchor is what lets the verified watermark advance over the
+    // trusted prefix; bodies then backfill against this checkpoint via PASS-2.
+    store.set_fold_anchor(trusted_height, *trusted_hash);
+    let floor = trusted_height.saturating_sub(frontier_window).max(store.base());
+    if floor > store.verified_to() {
+        store.set_verified_to(floor);
+    }
+    Ok(store.verified_to())
+}
+
 #[cfg(test)]
 mod fast_path_tests {
     use super::*;
@@ -664,6 +698,25 @@ mod fast_path_tests {
         let err = fast_forward_to_anchored_checkpoint(&mut s, 9_999, &anchor_hash, 50)
             .expect_err("missing anchor block must be rejected");
         assert!(matches!(err, FastForwardError::AnchorBlockMissing { height: 9_999 }), "got {err:?}");
+        let _ = std::fs::remove_dir_all(&p);
+    }
+
+    #[test]
+    fn authenticated_snapshot_advances_watermark_and_rejects_forgery() {
+        let p = tmp("auth-snap");
+        let _ = std::fs::remove_dir_all(&p);
+        let mut s = BlockStore::open(&p).unwrap();
+        let anchor = 150u64; let win = 50u64; let anchor_hash = [7u8; 32];
+        // matching snapshot anchor == trust root -> bulk-trust to floor (anchor - win)
+        let vt = fast_forward_from_authenticated_snapshot(&mut s, anchor, &anchor_hash, anchor, &anchor_hash, win)
+            .expect("matching anchor authenticates");
+        assert_eq!(vt, anchor - win, "verified watermark advanced to the bulk-trust floor");
+        // forged snapshot anchor (hash != trust root) -> reject, watermark unchanged
+        let forged = [9u8; 32];
+        let err = fast_forward_from_authenticated_snapshot(&mut s, anchor, &forged, anchor, &anchor_hash, win)
+            .expect_err("a snapshot anchor != trust root must be rejected");
+        assert!(matches!(err, FastForwardError::AnchorMismatch { .. }), "got {err:?}");
+        assert_eq!(s.verified_to(), anchor - win, "watermark not changed by a rejected forgery");
         let _ = std::fs::remove_dir_all(&p);
     }
 

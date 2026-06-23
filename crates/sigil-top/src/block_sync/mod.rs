@@ -707,11 +707,11 @@ impl P2PBlockSync {
                             // straight to append_raw — no per-page Vec<SkelRec> clone, no re-encode
                             // (SkelRec::encode == wire 72B, proven sigil-header/tests/byte_identity.rs).
                             match fetch::pull_snapshot(&peers, send, |raw: &[u8]| { if let Some(s) = skel.as_mut() { let _ = s.append_raw(raw); } }).await {
-                                Ok(v) => match verify::fast_forward_to_anchored_checkpoint(
-                                    &mut store, va_h, &va_hash, verify::DEFAULT_FRONTIER_WINDOW,
+                                Ok(v) => match verify::fast_forward_from_authenticated_snapshot(
+                                    &mut store, v.anchor_height, &v.anchor_hash, va_h, &va_hash, verify::DEFAULT_FRONTIER_WINDOW,
                                 ) {
-                                    Ok(_) => crate::tlog!("[sync] snapshot-pull OK: {} recs → anchor h={}", v.records, v.anchor_height),
-                                    Err(e) => crate::tlog!("[sync] snapshot-pull stored {} recs; fast-forward refused ({e})", v.records),
+                                    Ok(vt) => crate::tlog!("[sync] snapshot-pull OK + ANCHOR-AUTHENTICATED: {} recs, anchor h={} == trust root -> verified_to={} (bodies via PASS-2)", v.records, v.anchor_height, vt),
+                                    Err(e) => crate::tlog!("[sync] snapshot-pull anchor auth refused ({e}) - crawl covers it"),
                                 },
                                 Err(_) => crate::tlog!("[sync] snapshot-pull failed — codec=1 crawl covers it"),
                             }

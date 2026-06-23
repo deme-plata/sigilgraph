@@ -381,6 +381,7 @@ pub(super) enum SnapshotError {
     Encode,                   // canonical re-encode failed (unreachable for fixed struct)
     BadHeader,                // 'P' header describes an inconsistent / oversized prefix
     Empty,
+    AnchorHashMismatch,       // header.anchor_hash != the actual last verified record's block_hash
 }
 
 /// Streaming transport-structural verifier. Feed `new(header)`, then each record in
@@ -459,6 +460,13 @@ impl SnapshotVerifier {
         let root: BlockHash = *self.hasher.finalize().as_bytes();
         if root != trailer.archive_root {
             return Err(SnapshotError::RootMismatch);
+        }
+        // SECURITY: bind the claimed anchor_hash to the ACTUAL last verified record's
+        // block_hash. Without this a peer could serve a self-consistent chain ending at Y
+        // while claiming anchor X; fast-forward would then authenticate X against the SQIsign
+        // trust root and bulk-trust a chain that does NOT end where the trust root says.
+        if self.prev_block_hash != Some(self.anchor_hash) {
+            return Err(SnapshotError::AnchorHashMismatch);
         }
         Ok(SnapshotVerified {
             base_height: self.base_height,
@@ -621,7 +629,7 @@ mod lane_a_snapshot_tests {
 
     #[test]
     fn valid_snapshot_verifies_and_recomputes_its_own_root() {
-        let recs = [rec(0, 10, 0), rec(1, 11, 10), rec(2, 12, 11)]; // linked spine
+        let recs = [rec(0, 0, 0), rec(1, 1, 0), rec(2, 2, 1)]; // linked spine; last block_hash == anchor_hash [2;32]
         let mut h = blake3::Hasher::new();
         for r in &recs { h.update(&bincode::serialize(r).unwrap()); }
         let root = *h.finalize().as_bytes();
@@ -631,6 +639,25 @@ mod lane_a_snapshot_tests {
         assert_eq!(ok.archive_root, root);
         assert_eq!(ok.records, 3);
         assert_eq!(ok.anchor_height, 2);
+    }
+
+    #[test]
+    fn anchor_hash_not_matching_last_record_is_rejected() {
+        // Self-consistent linked spine ending at block_hash [2;32], but the header claims a
+        // DIFFERENT anchor_hash ([9;32]) -> finalize must reject (else fast-forward would trust
+        // a chain that does not end at the trust-rooted anchor).
+        let recs = [rec(0, 0, 0), rec(1, 1, 0), rec(2, 2, 1)];
+        let mut h = blake3::Hasher::new();
+        for r in &recs { h.update(&bincode::serialize(r).unwrap()); }
+        let root = *h.finalize().as_bytes();
+        let mut hdr = header(0, 2, 3);
+        hdr.anchor_hash = [9u8; 32];
+        let mut v = SnapshotVerifier::new(&hdr).unwrap();
+        for r in &recs { v.push(r).unwrap(); }
+        assert_eq!(
+            v.finalize(&SnapshotTrailer { archive_root: root, anchor_sig: vec![], fold_blob: vec![] }).unwrap_err(),
+            SnapshotError::AnchorHashMismatch
+        );
     }
 
     // RUNTIME end-to-end: drive the WHOLE client path — pull_snapshot's discover/stream/finalize

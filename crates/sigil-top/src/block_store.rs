@@ -862,20 +862,68 @@ impl BlockStore {
     /// (`self.sst_ingest`), and only reachable from `commit_bulk_trusted_durable` — i.e. ONLY for the
     /// fold/anchor-verified prefix the trusted route already guards.
     ///
-    /// L1's `flux_db::Database::ingest_sorted_bodies` is not landed yet, so this currently FALLS BACK
-    /// to `put_blocks_bulk_trusted` — the flag is wirable and the build stays green without a hard dep
-    /// on the unlanded API. ACTIVATION (one site, when L1 lands the API): build the GLOBALLY-key-sorted
-    /// (block-by-hash, height-index) pairs for `headers`, call `self.db.ingest_sorted_bodies(&sorted)?`,
-    /// bump `best`, return n. The 2-phase fsync that makes the tip durable AFTER the bodies stays in
-    /// `commit_bulk_trusted_durable` (unchanged), so atomic ingest + tip-after-bodies together preserve
-    /// kill-9 crash-safety.
+    /// L1's `flux_db::Database::ingest_sorted_bodies` is now LANDED (flux 921352ea); this WIRES it:
+    /// build the globally-key-sorted (block-by-hash, height-index) pairs and call
+    /// `self.db.ingest_sorted_bodies(&owned)` (off-WAL SST build + atomic install); batch_put fallback
+    /// only on ingest error. The 2-phase tip-after-bodies fsync stays in `commit_bulk_trusted_durable`,
+    /// so atomic ingest + tip-after-bodies preserve kill-9 crash-safety.
     fn put_blocks_bulk_trusted_ingest(&mut self, headers: &[SigilBlockHeaderV0]) -> usize {
-        // TODO(LANE 1 seam): swap to `self.db.ingest_sorted_bodies(&sorted_kv)` once flux-db exposes it.
-        crate::tlog!(
-            "[store] SIGIL_DB_SST_INGEST set but flux-db ingest_sorted_bodies not yet wired — \
-             falling back to batch_put bulk path ({} blocks)", headers.len()
-        );
-        self.put_blocks_bulk_trusted(headers)
+        if headers.is_empty() { return 0; }
+        let nthreads = std::thread::available_parallelism()
+            .map(|n| n.get()).unwrap_or(4)
+            .min(16)
+            .min(headers.len().max(1));
+        let chunk_sz = headers.len().div_ceil(nthreads);
+        // Parallel hash + bincode across cores (identical to put_blocks_bulk_trusted); only the
+        // serial SST build/install runs on the commit thread.
+        let prepared: Vec<(u64, String, Vec<u8>)> = std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(nthreads);
+            for chunk in headers.chunks(chunk_sz) {
+                handles.push(s.spawn(move || {
+                    let mut out = Vec::with_capacity(chunk.len());
+                    for header in chunk {
+                        let hash_hex = hex::encode(header.hash());
+                        let block = StoredBlock { header: header.clone(), hash_hex: hash_hex.clone(), synced_at: 0 };
+                        if let Ok(value) = bincode::serialize(&block) {
+                            out.push((header.height, hash_hex, value));
+                        }
+                    }
+                    out
+                }));
+            }
+            handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+        });
+        let n = prepared.len();
+        let mut max_h = self.best_height;
+        let mut max_hash = self.best_hash_hex.clone();
+        let mut cache_updates: Vec<(u64, String)> = Vec::new();
+        // Build BOTH keyspaces, then GLOBALLY key-sort: flux-db's SST builder requires strictly
+        // key-sorted input (put_blocks_bulk_trusted sorts by height, which only batch_put tolerates).
+        let mut owned: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(n * 2);
+        for (height, hash_hex, value) in prepared {
+            if self.link_cache.enabled { cache_updates.push((height, hash_hex.clone())); }
+            owned.push((hash_hex.clone().into_bytes(), value));              // block by hash
+            owned.push((height_key(height), hash_hex.clone().into_bytes())); // height index
+            if height >= max_h { max_h = height; max_hash = hash_hex; }
+        }
+        owned.sort_by(|a, b| a.0.cmp(&b.0));
+        // LANE 1 atomic SST ingest: off-WAL sorted-SST build + atomic install (rename+fsync),
+        // skipping WAL+memtable+compaction. Atomic (ingest-or-nothing); the durable tip advance
+        // stays in commit_bulk_trusted_durable AFTER this returns -> kill-9 safe. On ingest error,
+        // fall back to the proven batch_put bulk path (zero regression; atomic ingest => no partial).
+        match self.db.ingest_sorted_bodies(&owned) {
+            Ok(()) => {
+                self.best_height = max_h;
+                self.best_hash_hex = max_hash;
+                self.persist_best();
+                for (h, hh) in cache_updates { self.link_cache.record(h, &hh); }
+                n
+            }
+            Err(e) => {
+                crate::tlog!("[store] SST ingest failed ({e}) - batch_put fallback ({} blocks)", headers.len());
+                self.put_blocks_bulk_trusted(headers)
+            }
+        }
     }
 
     /// Advance the contiguous pointer over consecutive heights now present (one pass).

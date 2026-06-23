@@ -544,6 +544,10 @@ where
     let base = header.base_height;
     let total = header.count;
     let mut done: u64 = 0;
+    // LANE 3 (THROUGHPUT_MASTER.md): the `page` Vec is REUSED across pages — allocated
+    // once, refilled per page — so streaming a 6.7M-block prefix doesn't realloc a fresh
+    // ~3.6 MB Vec every page. It backs the unchanged `commit(&page)` seam.
+    let mut page: Vec<SkeletonRecord> = Vec::new();
     while done < total {
         let from = base + done;
         let to = (from + PAGE).min(base + total);
@@ -553,17 +557,38 @@ where
         if resp.first() != Some(&b'S') || resp.len() > MAX_S_BYTES {
             return Err(SnapshotError::Empty);
         }
-        let page: Vec<SkeletonRecord> =
-            bincode::deserialize(&resp[1..]).map_err(|_| SnapshotError::Encode)?;
-        if page.is_empty() || page.len() > MAX_PAGE_RECS {
+        // LANE 3: ONE-PASS stride decode. `bincode(Vec<SkeletonRecord>)` is `u64 LE count
+        // ‖ N×72B` where each 72B record is `height_le8 ‖ block_hash32 ‖ parent_hash32`
+        // — proven BYTE-IDENTICAL to bincode::deserialize in
+        // sigil-header/tests/byte_identity.rs (one_pass_stride_parse_equals_bincode_deserialize).
+        // Walking the strides ourselves skips bincode's per-element Deserialize machinery
+        // AND lets the count-bound run BEFORE we reserve (no over-alloc from a forged
+        // length prefix). `body.len() != count*72` rejects trailing/short bytes exactly as
+        // bincode's all-bytes-consumed check did → identical acceptance semantics.
+        let buf = &resp[1..];
+        if buf.len() < 8 {
             return Err(SnapshotError::Encode);
         }
-        for rec in &page {
-            verifier.push(rec)?; // contiguity + linkage + running BLAKE3 root
+        let count = u64::from_le_bytes(buf[0..8].try_into().unwrap()) as usize;
+        let body = &buf[8..];
+        if count == 0 || count > MAX_PAGE_RECS || body.len() != count * 72 {
+            return Err(SnapshotError::Encode);
+        }
+        page.clear();
+        page.reserve(count);
+        for chunk in body.chunks_exact(72) {
+            let height = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
+            let mut block_hash = [0u8; 32];
+            block_hash.copy_from_slice(&chunk[8..40]);
+            let mut parent_hash = [0u8; 32];
+            parent_hash.copy_from_slice(&chunk[40..72]);
+            let rec = SkeletonRecord { height, block_hash, parent_hash };
+            verifier.push(&rec)?; // contiguity + linkage + running BLAKE3 root (raw fold)
+            page.push(rec);
         }
         commit(&page); // per-page flat SkeletonStore append (10M-blk/s path)
         done += page.len() as u64;
-        // `page` dropped here → only one page ever resident (the OOM latch).
+        // `page` retains capacity for the next page; only one page ever resident (OOM latch).
     }
 
     // (c) FOLD + TRAILER (codec=4 → 'F'); finalize RECOMPUTES the root vs the trailer claim.

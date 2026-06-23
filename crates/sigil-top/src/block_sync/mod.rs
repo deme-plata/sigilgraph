@@ -703,7 +703,10 @@ impl P2PBlockSync {
                             // flat append-only SkeletonStore (no per-key flux-db commit). base=0:
                             // the producer serves a genesis-anchored prefix (header.base_height=0).
                             // skel handle hoisted to outer loop scope (shared with PASS 2); reused here.
-                            match fetch::pull_snapshot(&peers, send, |page| { if let Some(s) = skel.as_mut() { let recs: Vec<skel_flux::SkelRec> = page.iter().cloned().map(skel_flux::SkelRec).collect(); let _ = s.append(&recs); } }).await {
+                            // LANE 3 raw-commit seam: pull_snapshot hands the RAW 72B page body
+                            // straight to append_raw — no per-page Vec<SkelRec> clone, no re-encode
+                            // (SkelRec::encode == wire 72B, proven sigil-header/tests/byte_identity.rs).
+                            match fetch::pull_snapshot(&peers, send, |raw: &[u8]| { if let Some(s) = skel.as_mut() { let _ = s.append_raw(raw); } }).await {
                                 Ok(v) => match verify::fast_forward_to_anchored_checkpoint(
                                     &mut store, va_h, &va_hash, verify::DEFAULT_FRONTIER_WINDOW,
                                 ) {

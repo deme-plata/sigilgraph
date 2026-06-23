@@ -480,6 +480,12 @@ mod tests {
         store.set_base(1);
         let mut ring = CommitBuffer::from_env();
         ring.arm(&store);
+        // THROUGHPUT_MASTER LANE 2: to bench the TRUSTED-PREFIX route, anchor the whole chain under a
+        // fold anchor at the tip so every batch (max height ≤ n ≤ anchor) routes through
+        // put_blocks_bulk_trusted. Without SIGIL_COMMIT_TRUSTED_PREFIX this is a no-op and the bench
+        // measures the checked path. (Hash is a stand-in — routing reads height only. One meta put,
+        // done before the timer.)
+        if ring.cfg.trusted_prefix { store.set_fold_anchor(n, [0u8; 32]); }
         let t0 = Instant::now();
         // Feed in 4096-block slices, mirroring the live backfill chunk size.
         for slice in headers.chunks(4096) { ring.push_slice(&mut store, slice); }

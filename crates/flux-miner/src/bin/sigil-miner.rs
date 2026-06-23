@@ -13,7 +13,6 @@
 //!
 //! Env: SIGIL_WALLET, SIGIL_MINE_URL.
 
-use std::collections::VecDeque;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,9 +33,8 @@ use ratatui::{
     Frame, Terminal,
 };
 
-use flux_miner::client::{solve, Endpoints, MinerClient, Submission};
+use flux_miner::engine::{format_hps, report_diag, supervisor, MinerStats};
 use flux_miner::{format_flux, format_omega};
-use flux_vdf::ModSquaring;
 
 /// Public dual-lane mining endpoint — sigil-rpcd's API port, reachable directly
 /// (firewall ACCEPTs :8099). Override with a positional arg or SIGIL_MINE_URL.
@@ -111,31 +109,12 @@ fn resolve_wallet(explicit: Option<String>) -> (String, String) {
     (w, format!("generated → {path}"))
 }
 
-/// Shared mining state, polled by the TUI/headless renderer.
-#[derive(Default)]
-struct Stats {
-    connected: bool,
-    last_err: Option<String>,
-    shares_ok: u64,
-    shares_bad: u64,
-    last_height: u64,
-    last_solve_ms: f64,
-    hashrate: f64, // Φ — BLAKE4 hashes/sec (Lane A)
-    vdf_rate: f64, // Ω — VDF turns/sec (Lane B)
-    vdf_t: u64,
-    balance: u128,
-    solve_hist: VecDeque<u64>, // recent solve ms (sparkline)
-    log: VecDeque<String>,     // recent share lines (newest first)
-    update_msg: Option<String>, // auto-updater status line
-    mode: String,              // live mining mode ("CPU" / "GPU"), owned by the supervisor
-}
-
 /// Auto-update loop (default-ON, sigil-top model): ~30 s after launch then every
 /// 4 h, poll the pinned-channel manifest; if a newer version is promoted, stage
 /// `<exe>.new` (swapped in on next launch by `swap_on_launch`). Surfaces status
 /// to the TUI footer. Opt out with `--no-update`.
 fn update_loop(
-    stats: Arc<Mutex<Stats>>,
+    stats: Arc<Mutex<MinerStats>>,
     stop: Arc<AtomicBool>,
     update_now: Arc<AtomicBool>,
     restart: Arc<AtomicBool>,
@@ -196,168 +175,6 @@ fn apply_and_restart() -> ! {
     std::process::exit(0);
 }
 
-/// Mining supervisor: owns the worker thread's lifecycle so the engine can be
-/// hot-switched at runtime (the `g` key flips `desired_gpu`). When the desired
-/// mode changes it signals the current worker to stop and starts the other, and
-/// writes the live mode into Stats so the TUI badge reflects reality.
-fn supervisor(
-    url: String,
-    wallet: String,
-    stats: Arc<Mutex<Stats>>,
-    stop: Arc<AtomicBool>,
-    desired_gpu: Arc<AtomicBool>,
-    gpu_failed: Arc<AtomicBool>,
-) {
-    let mut cur: Option<bool> = None;
-    let mut wstop = Arc::new(AtomicBool::new(false));
-    loop {
-        if stop.load(Ordering::Relaxed) {
-            wstop.store(true, Ordering::Relaxed);
-            return;
-        }
-        // GPU worker reported an init failure → fall back to CPU (it logged why).
-        if gpu_failed.swap(false, Ordering::Relaxed) {
-            desired_gpu.store(false, Ordering::Relaxed);
-            push_log(&mut stats.lock().unwrap().log, "↩ GPU unavailable — switched to CPU".into());
-        }
-        let mut want = desired_gpu.load(Ordering::Relaxed);
-        if want && !cfg!(feature = "gpu") {
-            // CPU-only build: can't switch to GPU — revert + tell the operator.
-            want = false;
-            desired_gpu.store(false, Ordering::Relaxed);
-            push_log(
-                &mut stats.lock().unwrap().log,
-                "⚠ GPU not in this build — rebuild with --features gpu".into(),
-            );
-        }
-        if cur != Some(want) {
-            wstop.store(true, Ordering::Relaxed); // stop the previous worker
-            wstop = Arc::new(AtomicBool::new(false));
-            cur = Some(want);
-            {
-                let m = if want { "GPU" } else { "CPU" };
-                let mut s = stats.lock().unwrap();
-                s.mode = m.into();
-                push_log(&mut s.log, format!("⚙ mining engine → {m}"));
-            }
-            let (u, w, st, ws) = (url.clone(), wallet.clone(), stats.clone(), wstop.clone());
-            if want {
-                #[cfg(feature = "gpu")]
-                {
-                    let gf = gpu_failed.clone();
-                    thread::spawn(move || gpu_mining_loop(u, w, st, ws, gf));
-                }
-            } else {
-                thread::spawn(move || mining_loop(u, w, st, ws));
-            }
-        }
-        thread::sleep(Duration::from_millis(200));
-    }
-}
-
-fn push_log(log: &mut VecDeque<String>, line: String) {
-    log.push_front(line);
-    while log.len() > 200 {
-        log.pop_back();
-    }
-}
-
-/// Classical hashrate ladder: H/s · kH/s · MH/s · GH/s · TH/s · PH/s · EH/s.
-fn format_hps(hps: f64) -> String {
-    const U: [&str; 7] = ["H/s", "kH/s", "MH/s", "GH/s", "TH/s", "PH/s", "EH/s"];
-    let mut v = hps;
-    let mut i = 0;
-    while v >= 1000.0 && i < U.len() - 1 {
-        v /= 1000.0;
-        i += 1;
-    }
-    format!("{v:.2} {}", U[i])
-}
-
-/// Best-effort: POST a GPU diagnostic to the node so it can be read server-side
-/// (no file-pasting). Single-lines the message.
-fn report_diag(url: &str, msg: &str) {
-    let body = format!("[sigil-miner v{VERSION}] {}", msg.replace('\n', " | "));
-    let _ = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .and_then(|c| c.post(format!("{url}/api/v1/diag")).body(body).send());
-}
-
-/// GET {url}/api/v1/balance?wallet=… → the NATIVE balance (flat-JSON pluck).
-fn fetch_balance(url: &str, wallet: &str) -> Option<u128> {
-    let u = format!("{url}/api/v1/balance?wallet={wallet}");
-    let txt = reqwest::blocking::get(&u).ok()?.text().ok()?;
-    let tail = txt.split("\"balance\":").nth(1)?;
-    let digits: String = tail.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
-    digits.parse().ok()
-}
-
-/// The mining engine: fetch challenge → dual-lane solve → submit → record.
-fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<Stats>>, stop: Arc<AtomicBool>) {
-    let g = ModSquaring::bench_2048(); // must match the node's group
-    let client = match MinerClient::new(Endpoints::standard(&url), wallet.clone()) {
-        Ok(c) => c,
-        Err(e) => {
-            stats.lock().unwrap().last_err = Some(format!("client init: {e}"));
-            return;
-        }
-    };
-    while !stop.load(Ordering::Relaxed) {
-        let c = match client.fetch_challenge() {
-            Ok(c) => c,
-            Err(e) => {
-                {
-                    let mut s = stats.lock().unwrap();
-                    s.connected = false;
-                    s.last_err = Some(format!("challenge: {e}"));
-                }
-                thread::sleep(Duration::from_secs(2));
-                continue;
-            }
-        };
-        let t0 = Instant::now();
-        let block = solve(&c, &wallet, &g); // Lane A nonce search + Lane B VDF
-        let dt = t0.elapsed().as_secs_f64().max(1e-9);
-        let hashes = block.nonce as f64 + 1.0; // nonces tried ≈ BLAKE4 work
-        let sub = Submission { height: c.height, wallet: wallet.clone(), block };
-        let res = client.submit(&sub);
-        {
-            let mut s = stats.lock().unwrap();
-            s.connected = true;
-            s.last_err = None;
-            s.vdf_t = c.vdf_t;
-            s.last_height = c.height;
-            s.last_solve_ms = dt * 1000.0;
-            s.hashrate = hashes / dt;
-            s.vdf_rate = c.vdf_t as f64 / dt;
-            s.solve_hist.push_back((dt * 1000.0) as u64);
-            while s.solve_hist.len() > 80 {
-                s.solve_hist.pop_front();
-            }
-            match res {
-                Ok(r) if r.accepted => {
-                    s.shares_ok += 1;
-                    push_log(&mut s.log, format!("✓ h={:<8} {:>6.0}ms  ACCEPTED", c.height, dt * 1000.0));
-                }
-                Ok(r) => {
-                    s.shares_bad += 1;
-                    push_log(&mut s.log, format!("✗ h={:<8} rejected: {}", c.height, r.reason.unwrap_or_default()));
-                }
-                Err(e) => {
-                    s.shares_bad += 1;
-                    s.connected = false;
-                    s.last_err = Some(format!("submit: {e}"));
-                    push_log(&mut s.log, format!("! h={:<8} submit error: {e}", c.height));
-                }
-            }
-        }
-        if let Some(b) = fetch_balance(&url, &wallet) {
-            stats.lock().unwrap().balance = b;
-        }
-    }
-}
-
 fn main() -> anyhow::Result<()> {
     flux_miner::updater::swap_on_launch(); // apply any update staged last run
     let args: Vec<String> = std::env::args().collect();
@@ -407,7 +224,7 @@ fn main() -> anyhow::Result<()> {
         report_diag(&url, &format!("START os={os} mode={mode} use_gpu={use_gpu} gpu_feature={gpu_feat}"));
     }
 
-    let stats = Arc::new(Mutex::new(Stats::default()));
+    let stats = Arc::new(Mutex::new(MinerStats::default()));
     stats.lock().unwrap().mode = mode.into();
     let stop = Arc::new(AtomicBool::new(false));
     let desired_gpu = Arc::new(AtomicBool::new(use_gpu && cfg!(feature = "gpu")));
@@ -448,7 +265,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Plain-output fallback (no TTY / CI / `--headless`).
-fn run_headless(stats: &Arc<Mutex<Stats>>, stop: &Arc<AtomicBool>, restart: &Arc<AtomicBool>) -> anyhow::Result<()> {
+fn run_headless(stats: &Arc<Mutex<MinerStats>>, stop: &Arc<AtomicBool>, restart: &Arc<AtomicBool>) -> anyhow::Result<()> {
     println!("  ⛏  SIGIL MINER v{VERSION} — dual-lane (BLAKE4 Φ + VDF Ω) — headless\n");
     let mut last_ok = 0u64;
     let mut last_update: Option<String> = None;
@@ -487,7 +304,7 @@ fn run_headless(stats: &Arc<Mutex<Stats>>, stop: &Arc<AtomicBool>, restart: &Arc
 }
 
 fn run_tui(
-    stats: &Arc<Mutex<Stats>>,
+    stats: &Arc<Mutex<MinerStats>>,
     stop: &Arc<AtomicBool>,
     url: &str,
     wallet: &str,
@@ -552,7 +369,7 @@ fn card(value: String, label: &str, color: Color) -> Paragraph<'static> {
     )
 }
 
-fn draw(f: &mut Frame, stats: &Arc<Mutex<Stats>>, url: &str, wallet: &str, start: Instant) {
+fn draw(f: &mut Frame, stats: &Arc<Mutex<MinerStats>>, url: &str, wallet: &str, start: Instant) {
     let s = stats.lock().unwrap();
     let mode = s.mode.clone();
     let area = f.area();
@@ -743,131 +560,5 @@ fn gpu_selftest_and_exit() -> ! {
     {
         println!("  built without GPU support — rebuild with:  --features gpu");
         std::process::exit(2);
-    }
-}
-
-/// `--gpu`: hybrid mining — GPU searches Lane A (BLAKE4), CPU does Lane B (VDF).
-/// Uses FULL_ROUNDS so shares pass the node's `verify_dual` (legacy blake4 == R7).
-#[cfg(feature = "gpu")]
-fn gpu_mining_loop(
-    url: String,
-    wallet: String,
-    stats: Arc<Mutex<Stats>>,
-    stop: Arc<AtomicBool>,
-    gpu_failed: Arc<AtomicBool>,
-) {
-    use flux_miner::client::build_header;
-    const BATCH: usize = 1 << 20; // 1M nonces per GPU dispatch
-
-    let gpu = match flux_miner::gpu::GpuBlake4::new() {
-        Ok(g) => g,
-        Err(e) => {
-            // Surface the full error (incl. the OpenCL build log) + signal the
-            // supervisor to fall back to CPU so the miner never silently stalls.
-            let msg = format!("GPU init failed: {e}");
-            {
-                let mut s = stats.lock().unwrap();
-                s.last_err = Some(msg.clone());
-                push_log(&mut s.log, format!("✗ {msg}"));
-            }
-            let _ = std::fs::write("sigil-miner-gpu.log", &msg);
-            report_diag(&url, &msg);
-            gpu_failed.store(true, Ordering::Relaxed);
-            return;
-        }
-    };
-    {
-        let mut s = stats.lock().unwrap();
-        push_log(&mut s.log, format!("GPU: {}", gpu.device_name));
-    }
-    let g = ModSquaring::bench_2048();
-    let rounds = flux_miner::pow::FULL_ROUNDS; // MUST match the node's verify_dual
-    let client = match MinerClient::new(Endpoints::standard(&url), wallet.clone()) {
-        Ok(c) => c,
-        Err(e) => {
-            stats.lock().unwrap().last_err = Some(format!("client init: {e}"));
-            return;
-        }
-    };
-
-    while !stop.load(Ordering::Relaxed) {
-        let c = match client.fetch_challenge() {
-            Ok(c) => c,
-            Err(e) => {
-                {
-                    let mut s = stats.lock().unwrap();
-                    s.connected = false;
-                    s.last_err = Some(format!("challenge: {e}"));
-                }
-                thread::sleep(Duration::from_secs(2));
-                continue;
-            }
-        };
-        let header = build_header(&c, &wallet);
-        let t0 = Instant::now();
-        let mut nonce_base = 0u64;
-        let mut found = None;
-        while found.is_none() && !stop.load(Ordering::Relaxed) {
-            match gpu.search(&header, c.blake4_target, rounds, nonce_base, BATCH) {
-                Ok(r) => {
-                    found = r;
-                    nonce_base = nonce_base.wrapping_add(BATCH as u64);
-                }
-                Err(e) => {
-                    // a search failure (not just init) → log it + fall back to CPU
-                    // instead of silently stalling.
-                    let msg = format!("GPU search failed: {e}");
-                    {
-                        let mut s = stats.lock().unwrap();
-                        s.last_err = Some(msg.clone());
-                        push_log(&mut s.log, format!("✗ {msg} — falling back to CPU"));
-                    }
-                    let _ = std::fs::write("sigil-miner-gpu.log", &msg);
-                    report_diag(&url, &msg);
-                    gpu_failed.store(true, Ordering::Relaxed);
-                    return;
-                }
-            }
-        }
-        let nonce = match found {
-            Some(n) => n,
-            None => continue,
-        };
-        let dt = t0.elapsed().as_secs_f64().max(1e-9);
-        let block = flux_miner::block_for_nonce(&header, nonce, &g, c.vdf_t); // Lane B on CPU
-        let sub = Submission { height: c.height, wallet: wallet.clone(), block };
-        let res = client.submit(&sub);
-        {
-            let mut s = stats.lock().unwrap();
-            s.connected = true;
-            s.last_err = None;
-            s.vdf_t = c.vdf_t;
-            s.last_height = c.height;
-            s.last_solve_ms = dt * 1000.0;
-            s.hashrate = nonce_base as f64 / dt; // GPU Lane-A rate
-            s.vdf_rate = c.vdf_t as f64 / dt;
-            s.solve_hist.push_back((dt * 1000.0) as u64);
-            while s.solve_hist.len() > 80 {
-                s.solve_hist.pop_front();
-            }
-            match res {
-                Ok(r) if r.accepted => {
-                    s.shares_ok += 1;
-                    push_log(&mut s.log, format!("✓ h={:<8} {:>6.0}ms  GPU ACCEPTED", c.height, dt * 1000.0));
-                }
-                Ok(r) => {
-                    s.shares_bad += 1;
-                    push_log(&mut s.log, format!("✗ h={:<8} rejected: {}", c.height, r.reason.unwrap_or_default()));
-                }
-                Err(e) => {
-                    s.shares_bad += 1;
-                    s.connected = false;
-                    push_log(&mut s.log, format!("! submit error: {e}"));
-                }
-            }
-        }
-        if let Some(b) = fetch_balance(&url, &wallet) {
-            stats.lock().unwrap().balance = b;
-        }
     }
 }

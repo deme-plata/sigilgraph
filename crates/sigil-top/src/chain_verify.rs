@@ -161,6 +161,111 @@ pub fn verify_to(store: &mut BlockStore, max_steps: u64) -> VerifyReport {
     VerifyReport { verified_to: h, checked, first_break }
 }
 
+/// v0.34 TPS lane — parallel-precheck verify walk. Same contract as
+/// [`verify_to`] (identical [`VerifyReport`] for any input), but the expensive
+/// per-header work is fanned across all cores.
+///
+/// Why this is sound AND faster: `precheck()` is a PURE function of a single
+/// header — schema/network/sig-length/nonce checks plus the
+/// `vdf_input == BLAKE3(parent_hash || nonce_sqisign)` binding (a BLAKE3 over
+/// ~324 bytes). It has no dependency on any other header, so all prechecks in
+/// a window run concurrently. Only the parent-linkage compare is order-
+/// dependent, and (since v0.33) it's a 32-byte equality against the stored
+/// hash — cheap and inherently sequential. So we:
+///   1. read a window of up to `max_steps` contiguous stored blocks,
+///   2. `par_iter` their prechecks across cores,
+///   3. walk the window in height order doing precheck-result then the cheap
+///      linkage compare, stopping at the FIRST failure — exactly the order
+///      `verify_to` would have hit it, so `first_break` is identical.
+///
+/// On a 48-core box the precheck stage is ~Nx cheaper, lifting the verify
+/// ceiling toward the 1M-blk/s lane target. Falsifiable via
+/// `bench_ingest_and_verify_throughput` (parallel vs serial on the same chain).
+pub fn verify_to_parallel(store: &mut BlockStore, max_steps: u64) -> VerifyReport {
+    use rayon::prelude::*;
+
+    let base = store.base();
+    let start = store.verified_to().max(base);
+
+    // (1) Read the contiguous window [start, start+max_steps) until the frontier.
+    let mut window: Vec<sigil_header::SigilBlockHeaderV0> = Vec::new();
+    let mut stored_hashes: Vec<String> = Vec::new();
+    let mut frontier_break: Option<(u64, BreakReason)> = None;
+    let mut h = start;
+    while (window.len() as u64) < max_steps {
+        match store.get_stored_at_height(h) {
+            Some(b) => {
+                window.push(b.header);
+                stored_hashes.push(b.hash_hex);
+                h += 1;
+            }
+            None => {
+                frontier_break = Some((h, BreakReason::Missing));
+                break;
+            }
+        }
+    }
+
+    if window.is_empty() {
+        return VerifyReport { verified_to: start, checked: 0, first_break: frontier_break };
+    }
+
+    // (2) Parallel precheck — the embarrassingly-parallel hot path.
+    let precheck_results: Vec<Option<BreakReason>> = window
+        .par_iter()
+        .map(|hdr| hdr.precheck().err().map(|e| BreakReason::Precheck(e.to_string())))
+        .collect();
+
+    // (3) Sequential linkage walk in height order — identical failure ordering
+    //     to verify_to (precheck-then-linkage at each height).
+    let mut parent_hash: Option<sigil_header::BlockHash> = if start == base {
+        None
+    } else {
+        store.get_stored_at_height(start - 1).and_then(|b| decode_hash_hex(&b.hash_hex))
+    };
+    let mut verified = start;
+    let mut checked = 0u64;
+    let mut first_break = None;
+
+    for (i, hdr) in window.iter().enumerate() {
+        let height = start + i as u64;
+        if let Some(reason) = &precheck_results[i] {
+            first_break = Some((height, reason.clone()));
+            break;
+        }
+        if let Some(expected) = parent_hash.as_ref() {
+            if hdr.parent_hash != *expected {
+                first_break = Some((height, BreakReason::ParentMismatch {
+                    height,
+                    expected: hex::encode(expected),
+                    found: hex::encode(hdr.parent_hash),
+                }));
+                break;
+            }
+        }
+        parent_hash = match decode_hash_hex(&stored_hashes[i]) {
+            Some(ph) => Some(ph),
+            None => {
+                first_break = Some((height, BreakReason::Precheck(
+                    format!("corrupt stored hash_hex at h={height}"))));
+                break;
+            }
+        };
+        verified = height + 1;
+        checked += 1;
+    }
+
+    // If the whole window verified cleanly, the stop reason is the frontier.
+    if first_break.is_none() {
+        first_break = frontier_break;
+    }
+
+    if verified > start {
+        store.set_verified_to(verified);
+    }
+    VerifyReport { verified_to: verified, checked, first_break }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +340,49 @@ mod tests {
     /// it at the measured 26-52k blk/s. This bench is the falsifiable gate for the
     /// 1M-blk/s lane: ingest and verify must EACH clear ≥200k blk/s here to make the
     /// end-to-end target plausible (wire is then the binding constraint).
+    /// v0.34: the parallel walk MUST be observationally identical to the serial
+    /// one — same verified_to, same checked, same first_break — on a clean chain
+    /// AND on a chain with a deliberate parent-linkage break. This is the safety
+    /// gate that lets the parallel path replace the serial one.
+    #[test]
+    fn parallel_verify_matches_serial() {
+        const N: u64 = 5_000;
+        // Clean chain.
+        let chain = mk_chain(N);
+        let pa = tmp("par-clean-a");
+        let pb = tmp("par-clean-b");
+        let _ = std::fs::remove_dir_all(&pa);
+        let _ = std::fs::remove_dir_all(&pb);
+        let mut sa = BlockStore::open(&pa).unwrap();
+        let mut sb = BlockStore::open(&pb).unwrap();
+        sa.put_blocks_batch(&chain); sa.advance();
+        sb.put_blocks_batch(&chain); sb.advance();
+        let serial = verify_to(&mut sa, u64::MAX);
+        let parallel = verify_to_parallel(&mut sb, u64::MAX);
+        assert_eq!(serial.verified_to, parallel.verified_to);
+        assert_eq!(serial.checked, parallel.checked);
+        assert_eq!(serial.first_break, parallel.first_break);
+        assert_eq!(parallel.verified_to, N);
+
+        // Broken chain: corrupt one header's parent_hash so linkage breaks at h=3000.
+        let mut broken = mk_chain(N);
+        broken[3000].parent_hash = [0xeeu8; 32]; // won't match stored hash of 2999
+        let pc = tmp("par-broken-a");
+        let pd = tmp("par-broken-b");
+        let _ = std::fs::remove_dir_all(&pc);
+        let _ = std::fs::remove_dir_all(&pd);
+        let mut sc = BlockStore::open(&pc).unwrap();
+        let mut sd = BlockStore::open(&pd).unwrap();
+        sc.put_blocks_batch(&broken); sc.advance();
+        sd.put_blocks_batch(&broken); sd.advance();
+        let serial_b = verify_to(&mut sc, u64::MAX);
+        let parallel_b = verify_to_parallel(&mut sd, u64::MAX);
+        assert_eq!(serial_b.verified_to, parallel_b.verified_to);
+        assert_eq!(serial_b.first_break, parallel_b.first_break);
+        // Both must stop exactly at the corrupted height.
+        assert!(matches!(parallel_b.first_break, Some((3000, BreakReason::ParentMismatch { .. }))));
+    }
+
     #[test]
     fn bench_ingest_and_verify_throughput() {
         const N: u64 = 20_000;
@@ -300,7 +448,12 @@ mod tests {
         chain[3] = mk_header(3, [0xAB; 32]);
         {
             let mut s = BlockStore::open(&p).unwrap();
-            for hdr in &chain { s.put_block_fast(hdr.clone()).unwrap(); }
+            for hdr in &chain[..3] { s.put_block_fast(hdr.clone()).unwrap(); }
+            // v0.95: strict downward-linkage ingest now REFUSES a parent-broken block via every
+            // production path, so force the forged lookahead straight into storage to keep
+            // exercising verify_to's defense-in-depth (it must still catch a corrupt spine even
+            // if one somehow lands).
+            s.force_insert_block(chain[3].clone());
             s.advance();
             let rep = verify_to(&mut s, u64::MAX);
             assert_eq!(rep.verified_to, 3, "0,1,2 verify; 3 breaks the spine");
@@ -310,6 +463,64 @@ mod tests {
                 other => panic!("expected ParentMismatch at 3, got {other:?}"),
             }
             assert_eq!(s.verified_to(), 3);
+        }
+        let _ = std::fs::remove_dir_all(&p);
+    }
+
+    #[test]
+    fn batch_ingest_rejects_forked_duplicate_height_without_poisoning_spine() {
+        let p = tmp("fork-overwrite");
+        let _ = std::fs::remove_dir_all(&p);
+        let chain = mk_chain(6);
+        {
+            let mut s = BlockStore::open(&p).unwrap();
+            assert_eq!(s.put_blocks_batch(&chain), chain.len());
+            s.advance();
+            assert_eq!(s.synced_to(), 6);
+            let canonical_h2 = s.get_stored_at_height(2).unwrap().hash_hex;
+
+            // This header is internally consistent but belongs to a different fork.
+            // Older store code blindly rewrote height 2 -> fork hash, leaving height 3
+            // linked to the old height 2 and making verify_to stop forever at h=3/8194.
+            let fork_h2 = mk_header(2, [0xAB; 32]);
+            assert_ne!(hex::encode(fork_h2.hash()), canonical_h2);
+            assert_eq!(s.put_blocks_batch(&[fork_h2]), 0, "conflicting height is rejected");
+            assert_eq!(
+                s.get_stored_at_height(2).unwrap().hash_hex,
+                canonical_h2,
+                "height index still points at the first accepted spine block"
+            );
+
+            let rep = verify_to(&mut s, u64::MAX);
+            assert_eq!(rep.verified_to, 6);
+            assert!(rep.clean(), "forked duplicate did not poison the verified spine: {:?}", rep.first_break);
+        }
+        let _ = std::fs::remove_dir_all(&p);
+    }
+
+    #[test]
+    fn batch_ingest_rejects_child_that_does_not_link_to_stored_parent() {
+        let p = tmp("unlinked-child");
+        let _ = std::fs::remove_dir_all(&p);
+        let chain = mk_chain(4);
+        {
+            let mut s = BlockStore::open(&p).unwrap();
+            assert_eq!(s.put_blocks_batch(&chain[..3]), 3);
+            s.advance();
+            assert_eq!(s.synced_to(), 3);
+
+            // Mirrors the live h=8194 failure: parent h=2 is already stored, but
+            // the next header points to a different parent hash. It must be dropped
+            // at ingest instead of poisoning the verifier frontier.
+            let fork_child = mk_header(3, [0xCD; 32]);
+            assert_eq!(s.put_blocks_batch(&[fork_child]), 0);
+            assert!(!s.has_height(3), "bad child was not inserted at the frontier");
+
+            assert_eq!(s.put_blocks_batch(&chain[3..4]), 1);
+            s.advance();
+            let rep = verify_to(&mut s, u64::MAX);
+            assert_eq!(rep.verified_to, 4);
+            assert!(rep.clean(), "canonical child still syncs cleanly: {:?}", rep.first_break);
         }
         let _ = std::fs::remove_dir_all(&p);
     }
@@ -332,6 +543,57 @@ mod tests {
             let rep = verify_to(&mut s, u64::MAX);
             assert_eq!(rep.verified_to, 2, "0,1 verify; 2 fails precheck");
             assert!(matches!(rep.first_break, Some((2, BreakReason::Precheck(_)))));
+        }
+        let _ = std::fs::remove_dir_all(&p);
+    }
+
+    /// REPRO (v0.95 frontier-wedge): a non-spine fork block can reach height H *before*
+    /// its parent H-1 is stored — the ONLY ingest window with no stored parent to link
+    /// against — via the open-ended probe ingesting out-of-order. The store must not let
+    /// that squatter (a) make `advance()` walk PAST a block that doesn't link to its
+    /// parent (silent spine corruption — `advance_synced` is has_height-only), nor (b)
+    /// permanently block the canonical spine block at H via height_index_conflict. This
+    /// drives the exact sequence behind the live `[store] rejected h=4098 detail=…03b437e0
+    /// incoming=…71536a9` stall and asserts the DESIRED (correct) outcome.
+    ///
+    /// ACCEPTANCE GATE (v0.95): with strict downward-linkage ingest the squatter at h=2 is
+    /// REFUSED at the door (its parent h=1 isn't stored yet), so it can neither block the
+    /// canonical h=2 (height index) nor reject the canonical h=1 (child-linkage check). Was
+    /// CONFIRMED-RED before the fix (failed at "canonical h=1 accepted: left 0 right 1").
+    #[test]
+    fn squatter_before_parent_must_not_wedge_or_corrupt_the_frontier() {
+        let p = tmp("squatter-wedge");
+        let _ = std::fs::remove_dir_all(&p);
+        let chain = mk_chain(6); // heights 0..5, each linking to the previous
+        {
+            let mut s = BlockStore::open(&p).unwrap();
+            assert_eq!(s.put_blocks_batch(&chain[0..1]), 1, "genesis h=0 lands");
+            s.advance();
+            assert_eq!(s.synced_to(), 1);
+
+            // Squatter at h=2 BEFORE its parent h=1 exists (no linkage check fires).
+            let squatter = mk_header(2, [0xAB; 32]);
+            assert_ne!(squatter.hash(), chain[2].hash(), "squatter is a different block");
+            let _ = s.put_blocks_batch(&[squatter]);
+
+            // The canonical parent h=1 then the canonical spine child h=2 arrive.
+            assert_eq!(s.put_blocks_batch(&chain[1..2]), 1, "canonical h=1 accepted");
+            let _ = s.put_blocks_batch(&chain[2..3]);
+            s.advance();
+
+            // DESIRED: h=2 indexes the SPINE block (the one whose parent_hash == stored h=1),
+            // never the squatter — and the contiguous frontier reflects a real spine.
+            assert_eq!(
+                s.get_stored_at_height(2).map(|b| b.hash_hex),
+                Some(hex::encode(chain[2].hash())),
+                "h=2 must index the spine block, not the squatter"
+            );
+
+            assert_eq!(s.put_blocks_batch(&chain[3..6]), 3, "rest of the spine lands");
+            s.advance();
+            let rep = verify_to(&mut s, u64::MAX);
+            assert_eq!(rep.verified_to, 6, "spine links to genesis, no wedge: {:?}", rep.first_break);
+            assert!(rep.clean(), "a squatter must not poison the verified spine: {:?}", rep.first_break);
         }
         let _ = std::fs::remove_dir_all(&p);
     }

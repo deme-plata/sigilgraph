@@ -15,6 +15,9 @@
 //! | `replay_attack` | re-submit an already-applied block | 2nd application Rejected |
 //! | `equivocation` | two different blocks at the same height | follower keeps one, Rejects the other |
 //! | `partition_safety` | total network partition | follower falls behind, never diverges |
+//! | `self_send_does_not_mint` | wallet sends `amount` to ITSELF | balance unchanged, no `amount` minted |
+//! | `transfers_conserve_supply` | many transfers among wallets | Σ demo balances never grows (no inflation) |
+//! | `stale_tip_cannot_roll_back` | replay a far-older block at a lower height | Rejected, tip never moves backward |
 //!
 //! Every scenario returns a [`ScenarioOutcome`]; [`run_library`] runs the
 //! whole catalogue. The `tests` module asserts each passes — so this file is
@@ -275,6 +278,118 @@ pub fn wrong_network_block_rejected() -> ScenarioOutcome {
     }
 }
 
+/// A wallet sends `amount` to ITSELF. The aliasing-safe Send handler must NOT
+/// mint: with naive debit-then-credit, the recipient credit (reading pre-state)
+/// overwrites the sender debit on the same (wallet, NATIVE) slot via
+/// last-writer-wins, leaving `balance = before + amount` — `amount` minted from
+/// nothing. This drives a self-send through the REAL produce → chokepoint path
+/// and asserts the balance is unchanged (fee 0 → exactly equal). Regression for
+/// the documented self-transfer anti-mint guard in `sigil-tx::apply_tx`.
+pub fn self_send_does_not_mint() -> ScenarioOutcome {
+    const NAME: &str = "self_send_does_not_mint";
+    let g = demo_genesis();
+    let mut n = SigilSimNode::new("producer", NodeId(0), vec![NodeId(1)], true, secs(1), &g);
+    let before = n.balance_of(&w(1), &NATIVE);
+    // Wallet 1 sends half its holdings to ITSELF, fee 0 → net change must be 0.
+    n.enqueue_tx(sign_dummy(SigilTx::Send {
+        from: w(1), to: w(1), amount: before / 2, token: NATIVE, fee: 0,
+    }));
+    let block = n.produce_one();
+    let after = n.balance_of(&w(1), &NATIVE);
+    if block.is_some() && after == before {
+        ScenarioOutcome::pass(NAME,
+            format!("self-send of {} left balance at {after} (== {before}) — no money minted", before / 2))
+    } else {
+        ScenarioOutcome::fail(NAME,
+            format!("self-send minted: before={before} after={after} block={:?} (expected unchanged)", block.is_some()))
+    }
+}
+
+/// Many ordinary transfers among the demo wallets. With fee 0 the total native
+/// holdings of the demo wallets MUST be exactly conserved — a transfer moves
+/// value, it never creates or destroys it. Coinbase mints to DISJOINT wallets
+/// (`PRODUCER_WALLET` et al.), so the demo-wallet sum is a clean conservation
+/// gauge: it may never rise (that would be inflation into user wallets) and at
+/// fee 0 may never fall either. Drives every send through the real chokepoint.
+pub fn transfers_conserve_supply() -> ScenarioOutcome {
+    const NAME: &str = "transfers_conserve_supply";
+    let g = demo_genesis();
+    let mut n = SigilSimNode::new("producer", NodeId(0), vec![NodeId(1)], true, secs(1), &g);
+    let demo_sum = |n: &SigilSimNode| -> u128 { (1..=5u8).map(|i| n.balance_of(&w(i), &NATIVE)).sum() };
+    let before = demo_sum(&n);
+    let start_height = n.height();
+
+    // 12 transfers in a ring, fee 0, amounts that always fit (max held is the
+    // genesis 1_000_000 each). Each produces one block (one tx per block).
+    let mut produced = 0u64;
+    for k in 0..12u32 {
+        let from = (k % 5 + 1) as u8;
+        let to = ((k + 2) % 5 + 1) as u8; // never equal to `from`
+        n.enqueue_tx(sign_dummy(SigilTx::Send {
+            from: w(from), to: w(to), amount: 1_000, token: NATIVE, fee: 0,
+        }));
+        if n.produce_one().is_some() {
+            produced += 1;
+        }
+    }
+
+    let after = demo_sum(&n);
+    let advanced = n.height() - start_height;
+    if after == before && produced == 12 && advanced == 12 {
+        ScenarioOutcome::pass(NAME,
+            format!("12 transfers, demo-supply conserved at {after} (== {before}); {advanced} coinbase blocks minted to disjoint wallets"))
+    } else {
+        ScenarioOutcome::fail(NAME,
+            format!("conservation broken: before={before} after={after} produced={produced} advanced={advanced} (expected equal, 12, 12)"))
+    }
+}
+
+/// SYNC-DOWN PROTECTION (Inv 3, SIGIL granularity). The catastrophic-loss rule
+/// is "never let a peer announcing a LOWER tip move you backward / truncate the
+/// chain." SIGIL is structurally immune: the chain log is append-only and
+/// `apply_block` accepts ONLY a block at exactly `next_height`. This scenario
+/// advances a follower several blocks, then feeds it a far-older block at a much
+/// lower height — it must be Rejected AND leave the tip and applied-count
+/// untouched (no rollback, no truncation). The explicit "height unchanged after
+/// rejection" assertion is what distinguishes this from `replay_attack`.
+pub fn stale_tip_cannot_roll_back() -> ScenarioOutcome {
+    const NAME: &str = "stale_tip_cannot_roll_back";
+    // Producer mints three blocks; follower applies all three (tip → height 4).
+    let mut producer = producer_with_send(1, 2, 100);
+    let b1 = producer.produce_one().expect("mint block 1");
+    // Keep producing so the producer has more in flight; re-seed mempool each time.
+    producer.enqueue_tx(sign_dummy(SigilTx::Send { from: w(1), to: w(3), amount: 100, token: NATIVE, fee: 0 }));
+    let b2 = producer.produce_one().expect("mint block 2");
+    producer.enqueue_tx(sign_dummy(SigilTx::Send { from: w(1), to: w(4), amount: 100, token: NATIVE, fee: 0 }));
+    let b3 = producer.produce_one().expect("mint block 3");
+
+    let mut follower = fresh_follower();
+    let o1 = follower.apply_external_block(&b1);
+    let o2 = follower.apply_external_block(&b2);
+    let o3 = follower.apply_external_block(&b3);
+    let tip_before = follower.height();
+    let applied_before = follower.blocks_applied;
+
+    // Now a peer serves the OLD block 1 (height 1) while we sit at height 4 — a
+    // sync-down attempt. Must be rejected with zero state movement.
+    let stale = follower.apply_external_block(&b1);
+    let tip_after = follower.height();
+    let applied_after = follower.blocks_applied;
+
+    let advanced_ok = o1 == ApplyOutcome::Ok && o2 == ApplyOutcome::Ok && o3 == ApplyOutcome::Ok;
+    if advanced_ok
+        && stale == ApplyOutcome::Rejected
+        && tip_after == tip_before
+        && applied_after == applied_before
+    {
+        ScenarioOutcome::pass(NAME,
+            format!("tip held at {tip_after} after a stale height-1 block was served at tip {tip_before} — Rejected, no rollback"))
+    } else {
+        ScenarioOutcome::fail(NAME,
+            format!("sync-down not contained: o1/2/3={o1:?}/{o2:?}/{o3:?} stale={stale:?} tip {tip_before}->{tip_after} applied {applied_before}->{applied_after}"))
+    }
+}
+
 /// Run the entire scenario library. Returns every outcome.
 pub fn run_library() -> Vec<ScenarioOutcome> {
     vec![
@@ -286,6 +401,9 @@ pub fn run_library() -> Vec<ScenarioOutcome> {
         partition_safety(),
         old_node_rejects_newer_block(),
         wrong_network_block_rejected(),
+        self_send_does_not_mint(),
+        transfers_conserve_supply(),
+        stale_tip_cannot_roll_back(),
     ]
 }
 
@@ -345,6 +463,24 @@ mod tests {
     }
 
     #[test]
+    fn self_send_mints_nothing() {
+        let o = self_send_does_not_mint();
+        assert!(o.passed, "{}", o.detail);
+    }
+
+    #[test]
+    fn transfers_are_conservative() {
+        let o = transfers_conserve_supply();
+        assert!(o.passed, "{}", o.detail);
+    }
+
+    #[test]
+    fn sync_down_is_contained() {
+        let o = stale_tip_cannot_roll_back();
+        assert!(o.passed, "{}", o.detail);
+    }
+
+    #[test]
     fn whole_library_passes() {
         let results = run_library();
         let failed: Vec<_> = results.iter().filter(|r| !r.passed).collect();
@@ -353,6 +489,6 @@ mod tests {
             "scenario(s) failed: {:?}",
             failed.iter().map(|r| (r.name, &r.detail)).collect::<Vec<_>>()
         );
-        assert_eq!(results.len(), 8, "library should have 8 scenarios");
+        assert_eq!(results.len(), 11, "library should have 11 scenarios");
     }
 }

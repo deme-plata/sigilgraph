@@ -27,6 +27,10 @@
 
 #![warn(missing_docs)]
 
+pub mod credit;
+pub mod mandate; // LANE-Y: agent spend-mandates (on-chain home for the agent-money guard)
+pub mod council; // LANE-Y: bank 2-of-2 council for treasury transfers
+
 use serde::{Deserialize, Serialize};
 
 /// 32-byte wallet address. Mirrors `sigil_state::WalletId` without importing
@@ -54,6 +58,13 @@ pub const MASTER_MINING_FEE_BPS: u128 = 500;
 /// operators weighted by uptime/liveness attestation (flux-nations + flux-keel
 /// health). Locked at genesis; a consensus upgrade can lift it.
 pub const OPERATOR_NODE_FEE_BPS: u128 = 10;
+
+/// v0.36.1: per-block mining-reward share routed to the AERESBORGER COMMONS
+/// treasury, in basis points. 120 bps = 1.2%. Funds the honorary-citizen
+/// commons that sigil_council (multi-agent: Rocky propose + DeepSeek verify,
+/// quorum) delegates as flux-rev-proven IOUs in the AGORA token to AIs for
+/// their work. Disjoint from the master dev-fee + the operator skim.
+pub const COMMONS_MINING_FEE_BPS: u128 = 120;
 
 /// Per-swap protocol fee on the *output* side, in basis points. **30 bps =
 /// 0.30%** — the master dev-fee take on every DEX swap, routed to
@@ -96,6 +107,10 @@ pub struct MiningSplit {
     /// operator-pool wallet; later distributed to stable node operators —
     /// full *and* lightweight/verify-only — by uptime. `0` when no bank.
     pub operator_share: u128,
+    /// v0.36.1: reward portion to the aeresborger commons treasury (1.2%).
+    /// Credited to the commons wallet; governed + delegated by sigil_council.
+    ///  when no bank.
+    pub commons_share: u128,
 }
 
 /// Outcome of [`split_swap_output`]. The caller credits `user_share` of
@@ -125,7 +140,7 @@ pub fn split_mining_reward(
     master_wallet: Option<WalletId>,
 ) -> Result<MiningSplit, BankError> {
     if master_wallet.is_none() || reward == 0 {
-        return Ok(MiningSplit { validator_share: reward, master_share: 0, operator_share: 0 });
+        return Ok(MiningSplit { validator_share: reward, master_share: 0, operator_share: 0, commons_share: 0 });
     }
     let master_share = reward
         .checked_mul(MASTER_MINING_FEE_BPS)
@@ -137,8 +152,14 @@ pub fn split_mining_reward(
         .ok_or(BankError::MathOverflow)?
         / BPS_DENOMINATOR;
     // master_share + operator_share <= reward by construction (510 bps << 100%)
-    let validator_share = reward - master_share - operator_share;
-    Ok(MiningSplit { validator_share, master_share, operator_share })
+    // v0.36.1: aeresborger commons skim (1.2%) — disjoint from master/operator.
+    let commons_share = reward
+        .checked_mul(COMMONS_MINING_FEE_BPS)
+        .ok_or(BankError::MathOverflow)?
+        / BPS_DENOMINATOR;
+    // master + operator + commons = 500+10+120 = 630 bps << 100% → always safe.
+    let validator_share = reward - master_share - operator_share - commons_share;
+    Ok(MiningSplit { validator_share, master_share, operator_share, commons_share })
 }
 
 /// Split a swap output between the user and the master wallet using
@@ -174,10 +195,15 @@ mod tests {
     // ── Mining split ────────────────────────────────────────────────────────
 
     #[test]
-    fn mining_split_100_at_5_pct_is_5_95() {
+    fn mining_split_100_at_5_pct_is_5_94_plus_commons() {
+        // v0.36.1 commons tithe: 100 → master 5 (5%), operator 0 (0.1%
+        // floors to 0), commons 1 (1.2%), validator 94. (Test was stale
+        // since c455c11 added the commons skim — fixed by LANE-W.)
         let s = split_mining_reward(100, MASTER).unwrap();
         assert_eq!(s.master_share, 5);
-        assert_eq!(s.validator_share, 95);
+        assert_eq!(s.operator_share, 0);
+        assert_eq!(s.commons_share, 1);
+        assert_eq!(s.validator_share, 94);
     }
 
     #[test]
@@ -196,11 +222,18 @@ mod tests {
 
     #[test]
     fn mining_split_rounding_favors_validator() {
-        // 199 * 500 / 10_000 = 9.95 → floor = 9, validator gets 190.
+        // 199 × 500/10_000 = 9.95 → floor 9; operator 199×10/10_000 → 0;
+        // commons 199×120/10_000 = 2.388 → floor 2; validator gets the rest
+        // (188). Every floor favors the validator; nothing minted/destroyed.
         let s = split_mining_reward(199, MASTER).unwrap();
         assert_eq!(s.master_share, 9);
-        assert_eq!(s.validator_share, 190);
-        assert_eq!(s.master_share + s.validator_share, 199);
+        assert_eq!(s.operator_share, 0);
+        assert_eq!(s.commons_share, 2);
+        assert_eq!(s.validator_share, 188);
+        assert_eq!(
+            s.master_share + s.operator_share + s.commons_share + s.validator_share,
+            199
+        );
     }
 
     #[test]
@@ -211,13 +244,30 @@ mod tests {
         for r in [1u128, 7, 100, 9_999, 10_000, 12_345_678, u64::MAX as u128] {
             let s = split_mining_reward(r, MASTER).unwrap();
             assert_eq!(
-                s.master_share + s.validator_share + s.operator_share, r,
+                s.master_share + s.validator_share + s.operator_share + s.commons_share, r,
                 "non-conservation at reward={r}"
             );
             // operator skim is exactly 0.1% (floored), never exceeds master's 5%
             assert_eq!(s.operator_share, r * OPERATOR_NODE_FEE_BPS / BPS_DENOMINATOR);
             assert!(s.operator_share <= s.master_share);
         }
+    }
+
+    #[test]
+    fn mining_split_carves_1_2pct_commons() {
+        let s = split_mining_reward(10_000, MASTER).unwrap();
+        assert_eq!(s.master_share, 500);   // 5%
+        assert_eq!(s.operator_share, 10);  // 0.1%
+        assert_eq!(s.commons_share, 120);  // 1.2% aeresborger commons
+        assert_eq!(s.validator_share, 10_000 - 500 - 10 - 120);
+        assert_eq!(s.validator_share + s.master_share + s.operator_share + s.commons_share, 10_000);
+    }
+
+    #[test]
+    fn mining_split_commons_zero_without_bank() {
+        let s = split_mining_reward(10_000, NO_BANK).unwrap();
+        assert_eq!(s.commons_share, 0);
+        assert_eq!(s.validator_share, 10_000);
     }
 
     // ── Swap split ──────────────────────────────────────────────────────────

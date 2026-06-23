@@ -480,6 +480,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bech32"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d86b93f97252c47b41663388e6d155714a9d0c398b99f1005cbc5f978b29f445"
+
+[[package]]
 name = "bincode"
 version = "1.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -512,6 +518,35 @@ name = "bit-vec"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "349f9b6a179ed607305526ca489b34ad0a41aed5f7980fa90eb03160b69598fb"
+
+[[package]]
+name = "bitcoin"
+version = "0.30.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39f50161c4b69a2c8fd7d5d7d8b58bb83900a7ba7080010014cca7a80fe56d1d"
+dependencies = [
+ "bech32",
+ "bitcoin-private",
+ "bitcoin_hashes",
+ "hex-conservative 0.2.2",
+ "hex_lit",
+ "secp256k1",
+]
+
+[[package]]
+name = "bitcoin-private"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73290177011694f38ec25e165d0387ab7ea749a4b81cd4c80dae5988229f7a57"
+
+[[package]]
+name = "bitcoin_hashes"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d7066118b13d4b20b23645932dfb3a81ce7e29f95726c2036fa33cd7b092501"
+dependencies = [
+ "bitcoin-private",
+]
 
 [[package]]
 name = "bitflags"
@@ -558,6 +593,7 @@ dependencies = [
  "cfg-if",
  "constant_time_eq",
  "cpufeatures 0.3.0",
+ "rayon-core",
 ]
 
 [[package]]
@@ -809,13 +845,14 @@ dependencies = [
 
 [[package]]
 name = "cl3"
-version = "0.9.5"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b823f24e72fa0c68aa14a250ae1c0848e68d4ae188b71c3972343e45b46f8644"
+checksum = "5689467d49ac867f779cf6637a66695ed6190bbc810ba13efb0d6366c281edad"
 dependencies = [
+ "dlopen2",
  "libc",
  "opencl-sys",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1516,6 +1553,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "dlopen2"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e1297103d2bbaea85724fcee6294c2d50b1081f9ad47d0f6f6f61eda65315a6"
+dependencies = [
+ "dlopen2_derive",
+ "libc",
+ "once_cell",
+ "winapi",
+]
+
+[[package]]
+name = "dlopen2_derive"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fbbb781877580993a8707ec48672673ec7b81eeba04cfd2310bd28c08e47c8f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1749,7 +1809,7 @@ checksum = "749cff877dc1af878a0b31a41dd221a753634401ea0ef2f87b62d3171522485a"
 
 [[package]]
 name = "flux-aether"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "blake3",
  "reed-solomon-erasure",
@@ -1758,7 +1818,7 @@ dependencies = [
 
 [[package]]
 name = "flux-ai"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "flux-graph",
  "serde",
@@ -1787,7 +1847,7 @@ dependencies = [
 
 [[package]]
 name = "flux-architect"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "flux-ai",
  "flux-graph",
@@ -1798,7 +1858,7 @@ dependencies = [
 
 [[package]]
 name = "flux-arxiv-latex"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -1807,7 +1867,7 @@ dependencies = [
 
 [[package]]
 name = "flux-cache"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -1827,7 +1887,7 @@ dependencies = [
 
 [[package]]
 name = "flux-chronos"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -1859,7 +1919,7 @@ dependencies = [
 
 [[package]]
 name = "flux-cortex"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "flux-architect",
  "flux-graph",
@@ -1870,7 +1930,7 @@ dependencies = [
 
 [[package]]
 name = "flux-db"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -1883,14 +1943,14 @@ dependencies = [
 
 [[package]]
 name = "flux-dev-gate"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "sigil-oauth",
 ]
 
 [[package]]
 name = "flux-fold"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "serde",
@@ -1906,7 +1966,7 @@ dependencies = [
 
 [[package]]
 name = "flux-graph"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "flux-cache",
  "serde",
@@ -1923,7 +1983,7 @@ dependencies = [
 
 [[package]]
 name = "flux-history"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "blake3",
  "flux-db",
@@ -1942,7 +2002,7 @@ dependencies = [
 
 [[package]]
 name = "flux-lattice-guard"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -1962,7 +2022,7 @@ dependencies = [
 
 [[package]]
 name = "flux-market"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -1979,7 +2039,7 @@ dependencies = [
 
 [[package]]
 name = "flux-miner"
-version = "0.1.10"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1998,7 +2058,7 @@ dependencies = [
 
 [[package]]
 name = "flux-nation"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "flux-sqisign",
@@ -2011,7 +2071,7 @@ dependencies = [
 
 [[package]]
 name = "flux-optimize"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "flux-graph",
  "serde",
@@ -2020,7 +2080,7 @@ dependencies = [
 
 [[package]]
 name = "flux-p2p"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2050,7 +2110,7 @@ dependencies = [
 
 [[package]]
 name = "flux-pool"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "flux-fold",
@@ -2067,7 +2127,7 @@ dependencies = [
 
 [[package]]
 name = "flux-rev"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "blake3",
  "flux-p2p",
@@ -2099,7 +2159,7 @@ dependencies = [
 
 [[package]]
 name = "flux-search"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "blake3",
  "parking_lot 0.12.5",
@@ -2150,8 +2210,10 @@ dependencies = [
 
 [[package]]
 name = "flux-sqisign"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
+ "blake3",
+ "ed25519-dalek",
  "flux-cache",
  "flux-db",
  "rand 0.8.6",
@@ -2170,7 +2232,7 @@ dependencies = [
 
 [[package]]
 name = "flux-swarm-tools"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2179,7 +2241,7 @@ dependencies = [
 
 [[package]]
 name = "flux-sync"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -2191,7 +2253,7 @@ dependencies = [
 
 [[package]]
 name = "flux-turbo-sync"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2216,11 +2278,11 @@ dependencies = [
 
 [[package]]
 name = "flux-uint"
-version = "0.27.0"
+version = "0.28.0"
 
 [[package]]
 name = "flux-vdf"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "hex",
@@ -2241,7 +2303,7 @@ dependencies = [
 
 [[package]]
 name = "flux-zk-stark"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -2735,10 +2797,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hex-conservative"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "212ab92002354b4819390025006c897e8140934349e8635c9b077f47b4dcbd20"
+
+[[package]]
+name = "hex-conservative"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fda06d18ac606267c40c04e41b9947729bf8b9efe74bd4e82b61a5f26a510b9f"
+dependencies = [
+ "arrayvec",
+]
+
+[[package]]
 name = "hex_fmt"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b07f60793ff0a4d9cef0f18e63b5357e06209987153a64648c972c1e5aff336f"
+
+[[package]]
+name = "hex_lit"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3011d1213f159867b13cfd6ac92d2cd5f1345762c63be3554e84092d85a50bbd"
 
 [[package]]
 name = "hexf-parse"
@@ -3908,6 +3991,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "lightning"
+version = "0.0.123"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd92d4aa159374be430c7590e169b4a6c0fb79018f5bc4ea1bffde536384db3"
+dependencies = [
+ "bitcoin",
+ "hex-conservative 0.1.2",
+]
+
+[[package]]
+name = "lightning-invoice"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26d07d01cf197bf2184b929b7dc94aa70d935aac6df896c256a3a9475b7e9d40"
+dependencies = [
+ "bech32",
+ "bitcoin",
+ "lightning",
+ "secp256k1",
+]
+
+[[package]]
 name = "linked-hash-map"
 version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4496,18 +4601,18 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "opencl-sys"
-version = "0.2.9"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de15dd01496ae90c5799f5266184ab020082b4065800ff0b732f489371d0e5cf"
+checksum = "5ff82626c25901923bc3474911e5ca9b32593279323f90cc0eff5eb81cd39baa"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "opencl3"
-version = "0.9.5"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26ab4a90cb496f787d3934deb0c54fa9d65e7bed710c10071234aab0196fba04"
+checksum = "e762dc8e0b7535d1dd9912aa9c76f3749193b0dfd726eddc70d65b3bca416c7a"
 dependencies = [
  "cl3",
  "libc",
@@ -5743,6 +5848,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "secp256k1"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25996b82292a7a57ed3508f052cfff8640d38d32018784acd714758b43da9c8f"
+dependencies = [
+ "bitcoin_hashes",
+ "secp256k1-sys",
+]
+
+[[package]]
+name = "secp256k1-sys"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4473013577ec77b4ee3668179ef1186df3146e2cf2d927bd200974c6fe60fd99"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "security-framework"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5958,7 +6082,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sigil-ballot"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "hex",
@@ -5966,8 +6090,9 @@ dependencies = [
 
 [[package]]
 name = "sigil-bank"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
+ "bincode 1.3.3",
  "serde",
  "thiserror 1.0.69",
 ]
@@ -5981,11 +6106,14 @@ dependencies = [
 
 [[package]]
 name = "sigil-bridge"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
+ "bitcoin_hashes",
  "blake3",
  "flux-fold",
  "hex",
+ "lightning-invoice",
+ "secp256k1",
  "serde",
  "sha2",
  "sigil-oauth",
@@ -5994,7 +6122,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-btc-miner"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "flux-pool",
  "sha2",
@@ -6002,12 +6130,13 @@ dependencies = [
 
 [[package]]
 name = "sigil-chronos"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
  "blake3",
  "flux-chronos",
+ "flux-db",
  "flux-fold",
  "flux-lattice-guard",
  "flux-p2p",
@@ -6031,7 +6160,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-citizenship"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "hex",
@@ -6040,8 +6169,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-commons"
+version = "5.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sigil-state",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "sigil-council"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "hex",
@@ -6049,7 +6188,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-dao-bridge"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "hex",
@@ -6065,7 +6204,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-dex"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6074,23 +6213,25 @@ dependencies = [
 
 [[package]]
 name = "sigil-dns-anchor"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
+ "base64",
  "blake3",
+ "flux-sqisign",
  "hex",
  "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "sigil-emission"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "sigil-state",
 ]
 
 [[package]]
 name = "sigil-events"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "serde",
@@ -6102,7 +6243,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-fees"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6110,7 +6251,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-handshake"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "flux-sqisign",
@@ -6123,7 +6264,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-header"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "hex",
@@ -6134,7 +6275,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-mandat"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "flux-uint",
@@ -6146,7 +6287,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-migrate"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "hex",
@@ -6157,7 +6298,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-mixer"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -6172,7 +6313,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-nation"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "hex",
@@ -6184,7 +6325,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-nation-chain"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "sigil-nation",
  "sigil-state",
@@ -6192,7 +6333,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-net"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6203,7 +6344,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-net-tor"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "anyhow",
  "arti-client",
@@ -6217,7 +6358,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-net-wg"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "base64",
  "blake3",
@@ -6231,7 +6372,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-node"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -6241,6 +6382,7 @@ dependencies = [
  "flux-db",
  "flux-p2p",
  "flux-search",
+ "flux-sqisign",
  "hex",
  "lz4",
  "rmp-serde",
@@ -6261,7 +6403,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-oauth"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -6275,7 +6417,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-oracle"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "sigil-state",
  "thiserror 1.0.69",
@@ -6283,7 +6425,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-rpc"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -6291,6 +6433,7 @@ dependencies = [
  "flux-history",
  "flux-miner",
  "flux-vdf",
+ "hex",
  "serde",
  "serde_json",
  "sigil-bank",
@@ -6303,7 +6446,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-scoring"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "parking_lot 0.12.5",
@@ -6314,7 +6457,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-sigverify"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "ed25519-dalek",
  "flux-sqisign",
@@ -6324,7 +6467,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-spawn"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "hex",
@@ -6335,26 +6478,31 @@ dependencies = [
 
 [[package]]
 name = "sigil-state"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
+ "bincode 1.3.3",
  "blake3",
  "ed25519-dalek",
  "flux-sqisign",
  "flux-zk-stark",
+ "hex",
  "num-bigint",
  "num-integer",
  "num-traits",
  "rand 0.8.6",
+ "rayon",
+ "ruzstd",
  "serde",
  "serde_json",
  "sigil-header",
  "thiserror 1.0.69",
  "tokio",
+ "zstd",
 ]
 
 [[package]]
 name = "sigil-tip-proof"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "base64",
  "blake3",
@@ -6371,7 +6519,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-top"
-version = "0.35.0"
+version = "6.0.5"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -6380,14 +6528,17 @@ dependencies = [
  "flux-cortex",
  "flux-db",
  "flux-graph",
+ "flux-miner",
  "flux-optimize",
  "flux-p2p",
  "flux-rev",
  "flux-swarm-tools",
  "flux-sync",
+ "flux-turbo-sync",
  "futures",
  "hex",
  "ratatui",
+ "rayon",
  "reqwest",
  "rmp-serde",
  "ruzstd",
@@ -6406,7 +6557,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-treasury"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "hex",
@@ -6414,11 +6565,11 @@ dependencies = [
 
 [[package]]
 name = "sigil-twomind"
-version = "0.0.10"
+version = "5.0.0"
 
 [[package]]
 name = "sigil-tx"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -6436,7 +6587,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-university"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "flux-sqisign",
@@ -6448,7 +6599,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-updater"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "flux-sqisign",
@@ -6463,7 +6614,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-usds"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "sigil-oracle",
  "sigil-state",
@@ -6472,11 +6623,12 @@ dependencies = [
 
 [[package]]
 name = "sigil-vm"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "blake3",
  "serde",
  "serde_json",
+ "sigil-dex",
  "sigil-state",
  "thiserror 1.0.69",
  "wasmi",
@@ -6888,7 +7040,7 @@ dependencies = [
 
 [[package]]
 name = "template-forge"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -9248,7 +9400,7 @@ dependencies = [
 
 [[package]]
 name = "zk-flux"
-version = "0.0.10"
+version = "5.0.0"
 dependencies = [
  "anyhow",
  "blake3",

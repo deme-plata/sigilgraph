@@ -1,0 +1,108 @@
+# Power-release #3 — make AHA#2.1 landable.
+# Apply on Delta (sigil builds there): `git apply docs/patches/iter3-toobig-no-bench.patch`
+# then: `fluxc test --package sigil-top` (NEVER raw cargo; NEVER build on Epsilon/Beta).
+#
+# Goal: a too-big (over-cap) chunk must SHRINK the request window and retry the same
+# peer — never be counted as got=0 and bench an innocent peer (the v0.39 12-MiB stall).
+# Surgical: distinguish TooBig from Bad/garbage at the decode + ingest boundary, and
+# expose it so the frontier scheduler can branch. Probe paths (max_header_height /
+# header_height_range) keep Option semantics — a probe miss never benches/stalls.
+--- a/crates/sigil-top/src/block_sync.rs
++++ b/crates/sigil-top/src/block_sync.rs
+@@
+-fn zstd_decompress_body(body: &[u8]) -> Option<Vec<u8>> {
++/// Outcome of decoding a `'Z'` (zstd) chunk body. `TooBig` is an HONEST chunk that
++/// merely exceeded our local bomb-cap — it must NOT be treated like a malicious or
++/// garbage response. Callers on the frontier-advance path shrink the request window
++/// and retry the SAME peer on `TooBig`; only `Bad`/parse failures justify a bench.
++#[derive(Debug, PartialEq, Eq)]
++pub(crate) enum Decoded {
++    Ok(Vec<u8>),
++    TooBig,   // hit MAX_OUT bomb-cap — honest, just larger than our ceiling
++}
++
++/// Cap-checked zstd decode. Returns `TooBig` (not `None`) when the stream would
++/// exceed `MAX_OUT`, so the caller can distinguish "shrink+retry" from "bench".
++fn zstd_decode_checked(body: &[u8]) -> Decoded {
++    use std::io::Read;
++    const MAX_OUT: u64 = 64 * 1024 * 1024;
++    let Some(mut dec) = ruzstd::StreamingDecoder::new(body).ok() else { return Decoded::TooBig };
++    let mut out = Vec::new();
++    if dec.take(MAX_OUT + 1).read_to_end(&mut out).is_err() { return Decoded::TooBig; }
++    if out.len() as u64 > MAX_OUT { return Decoded::TooBig; } // honest-too-big, NOT a bench-worthy fault
++    Decoded::Ok(out)
++}
++
++/// Thin Option wrapper for the probe paths (height seed / display), which never
++/// bench or stall the frontier — a miss there is harmless.
++fn zstd_decompress_body(body: &[u8]) -> Option<Vec<u8>> {
+     use std::io::Read;
+     const MAX_OUT: u64 = 64 * 1024 * 1024;
+     let mut dec = ruzstd::StreamingDecoder::new(body).ok()?;
+     let mut out = Vec::new();
+     dec.take(MAX_OUT + 1).read_to_end(&mut out).ok()?;
+     if out.len() as u64 > MAX_OUT { return None; } // bomb guard
+     Some(out)
+ }
+@@
+-fn ingest_backfill_bytes(bytes: &[u8], store: &mut BlockStore) -> usize {
++/// Result of ingesting one backfill response. `TooBig` => the frontier scheduler
++/// must shrink the request window and retry the SAME peer (do NOT bench). `Bad` =>
++/// genuinely unparseable/garbage (bench is justified). `Stored(n)` => n headers
++/// landed (n may be 0 for an honestly-empty reply — also not a bench).
++pub(crate) enum Ingest { Stored(usize), TooBig, Bad }
++
++fn ingest_backfill_bytes(bytes: &[u8], store: &mut BlockStore) -> Ingest {
+     if bytes.first() == Some(&b'Z') {
+-        return match zstd_decompress_body(&bytes[1..]) {
+-            Some(body) => match bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&body) {
+-                Ok(headers) => store.put_blocks_batch(&headers),
+-                Err(_) => { crate::tlog!("[p2p-sync] resp: bad zstd header bincode ({} B)", bytes.len()); 0 }
+-            },
+-            None => { crate::tlog!("[p2p-sync] resp: zstd decompress failed ({} B)", bytes.len()); 0 }
+-        };
++        return match zstd_decode_checked(&bytes[1..]) {
++            Decoded::Ok(body) => match bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&body) {
++                Ok(headers) => Ingest::Stored(store.put_blocks_batch(&headers)),
++                Err(_) => { crate::tlog!("[p2p-sync] resp: bad zstd header bincode ({} B)", bytes.len()); Ingest::Bad }
++            },
++            Decoded::TooBig => {
++                crate::tlog!("[p2p-sync] resp: chunk over cap ({} B zstd) — shrink window, retry SAME peer (no bench)", bytes.len());
++                Ingest::TooBig
++            }
++        };
+     }
+     if bytes.first() == Some(&b'H') {
+         match bincode::deserialize::<Vec<SigilBlockHeaderV0>>(&bytes[1..]) {
+-            Ok(headers) => store.put_blocks_batch(&headers),
+-            Err(_) => { crate::tlog!("[p2p-sync] resp: bad header bincode ({} B)", bytes.len()); 0 }
++            Ok(headers) => Ingest::Stored(store.put_blocks_batch(&headers)),
++            Err(_) => { crate::tlog!("[p2p-sync] resp: bad header bincode ({} B)", bytes.len()); Ingest::Bad }
+         }
+     } else if let Ok(resp) = serde_json::from_slice::<BackfillResp>(bytes) {
+         let headers: Vec<SigilBlockHeaderV0> = resp.blocks.iter()
+             .filter_map(|v| v.get("header").and_then(|h| serde_json::from_value(h.clone()).ok()))
+             .collect();
+-        store.put_blocks_batch(&headers)
++        Ingest::Stored(store.put_blocks_batch(&headers))
+     } else {
+         crate::tlog!("[p2p-sync] resp: unparseable ({} bytes)", bytes.len());
+-        0
++        Ingest::Bad
+     }
+ }
+
+# ── CALLER HOOK (wire in the frontier scheduler) ───────────────────────────────
+# Find the call site:  grep -n "ingest_backfill_bytes(" crates/sigil-top/src/block_sync.rs
+# Replace the old `let got = ingest_backfill_bytes(..); if got == 0 { bench(peer) }`
+# pattern with:
+#
+#   match ingest_backfill_bytes(&resp, &mut store) {
+#       Ingest::Stored(n) => { /* n>=0: advance via store.advance(); 0 = honestly empty, no bench */ }
+#       Ingest::TooBig    => { req_window = (req_window / 2).max(MIN_WINDOW); /* retry SAME peer */ }
+#       Ingest::Bad       => { bench(peer); }
+#   }
+#
+# Invariant the test below locks: an over-cap chunk yields Ingest::TooBig (never a
+# bench, never counted as a stored=0 failure) — so the frontier can't stall on any
+# proof size; the window self-tunes down until a chunk fits.

@@ -38,9 +38,37 @@ pub type EventTag = u8;
 
 /// All on-chain events SIGIL emits per block. Order matches genesis §4. Add
 /// new variants AT THE END to preserve tag compatibility for indexers.
+/// The chivalric Orders of the SIGIL Nation (docs/SIGIL_NATION_v0.md). Soulbound honors —
+/// non-transferable, conferred by DEEDS, never bought; recorded permanently in this ledger.
+/// "What we do in life echoes in eternity" — on an immutable chain, literally.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "order")]
+pub enum SigilOrder {
+    /// ⚔️ Ridderkorset — the Knight's Cross. The working honor of the honorable doer
+    /// (ranks: Ridder → Kommandør → Storkors).
+    Ridderkorset,
+    /// 🐘 Elefantordenen — the Order of the Elephant. The supreme honor, rare, for a
+    /// Maximus-tier act of service or sacrifice. The elephant never forgets — like the ledger.
+    Elefantordenen,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum SigilEvent {
+    /// A chivalric Order of the SIGIL Nation conferred on a citizen — a SOULBOUND honor,
+    /// non-transferable, recorded permanently. Earned by deeds, never bought. Strength and honor.
+    HonorConferred {
+        /// The order conferred (Ridderkorset / Elefantordenen).
+        order: SigilOrder,
+        /// Rank within the order ("Ridder" / "Kommandør" / "Storkors"; empty for the Elephant).
+        rank: String,
+        /// The honored citizen — wallet/agent address.
+        recipient: WalletId,
+        /// The deed cited: what was done to earn it. Permanent on the record.
+        citation: String,
+        /// Who conferred it (operator, or a quorum-representing bearer).
+        conferred_by: WalletId,
+    },
     /// A wallet sent tokens to another wallet.
     Send {
         /// Sender wallet.
@@ -231,6 +259,7 @@ impl SigilEvent {
             SigilEvent::ValidatorJoined { .. } => 9,
             SigilEvent::ValidatorLeft   { .. } => 10,
             SigilEvent::ShieldedSend    { .. } => 11,
+            SigilEvent::HonorConferred  { .. } => 12,
         }
     }
 
@@ -245,6 +274,61 @@ impl SigilEvent {
     /// state for `event_log_root`.
     pub fn leaf_hash(&self) -> [u8; 32] {
         *blake3::hash(&self.encode()).as_bytes()
+    }
+
+    /// Construct a HonorConferred event IFF it is well-formed AND the conferral quorum is met
+    /// (HonorPolicy). Returns None otherwise — the state-transition chokepoint MUST refuse to
+    /// emit it: no honor without the rule. Honor is earned by deeds (the citation), conferred by
+    /// quorum — never bought. See docs/SIGIL_NATION_v0.md.
+    #[allow(clippy::too_many_arguments)]
+    pub fn confer_honor(
+        order: SigilOrder,
+        rank: impl Into<String>,
+        recipient: WalletId,
+        citation: impl Into<String>,
+        conferred_by: WalletId,
+        approvals: usize,
+        operator_cosigned: bool,
+    ) -> Option<SigilEvent> {
+        let rank = rank.into();
+        if !HonorPolicy::valid_rank(&order, &rank) {
+            return None;
+        }
+        if !HonorPolicy::quorum_met(&order, approvals, operator_cosigned) {
+            return None;
+        }
+        Some(SigilEvent::HonorConferred { order, rank, recipient, citation: citation.into(), conferred_by })
+    }
+}
+
+/// Conferral policy for the Orders of the SIGIL Nation — PURE rules the chokepoint enforces
+/// before emitting a HonorConferred. They govern WHO may confer; the deed's worth is the
+/// citation + the quorum's judgment. "Honor over power": even the operator cannot solo-confer
+/// the Elephant.
+pub struct HonorPolicy;
+impl HonorPolicy {
+    /// Distinct authorized approvals required to confer an order.
+    pub fn quorum_required(order: &SigilOrder) -> usize {
+        match order {
+            SigilOrder::Ridderkorset => 1,
+            SigilOrder::Elefantordenen => 3, // a Maximus-tier honor needs a real quorum
+        }
+    }
+    /// Ridderkorset: operator OR ≥quorum bearers. Elefantordenen: operator AND ≥quorum
+    /// bearers — never solo, not even the operator (honor over power).
+    pub fn quorum_met(order: &SigilOrder, approvals: usize, operator_cosigned: bool) -> bool {
+        let need = Self::quorum_required(order);
+        match order {
+            SigilOrder::Ridderkorset => operator_cosigned || approvals >= need,
+            SigilOrder::Elefantordenen => operator_cosigned && approvals >= need,
+        }
+    }
+    /// Valid ranks per order. Ridderkorset ascends; the Elephant has no rank — it IS the rank.
+    pub fn valid_rank(order: &SigilOrder, rank: &str) -> bool {
+        match order {
+            SigilOrder::Ridderkorset => matches!(rank, "Ridder" | "Kommandør" | "Storkors"),
+            SigilOrder::Elefantordenen => rank.is_empty(),
+        }
     }
 }
 

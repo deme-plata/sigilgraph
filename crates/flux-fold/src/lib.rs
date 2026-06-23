@@ -170,7 +170,14 @@ fn challenge(commitments: &[Vec<u64>]) -> u64 {
 /// knows the witnesses; the commitments are public.
 pub fn fold(ajtai: &Ajtai, witnesses: &[Vec<u64>]) -> FoldedProof {
     let commitments: Vec<Vec<u64>> = witnesses.iter().map(|w| ajtai.commit(w)).collect();
-    let rho = challenge(&commitments);
+    fold_with_commitments(ajtai, witnesses, &commitments)
+}
+
+/// Fold given PRE-COMPUTED commitments (e.g. produced on a GPU via
+/// `ajtai_commit_batch`) - bit-identical to `fold`; offloads the heavy commit
+/// matvecs to hardware and keeps the cheap rho-combination on CPU.
+pub fn fold_with_commitments(ajtai: &Ajtai, witnesses: &[Vec<u64>], commitments: &[Vec<u64>]) -> FoldedProof {
+    let rho = challenge(commitments);
 
     // w* = Σ ρ^i w_i ; c* = Σ ρ^i c_i  (both mod q)
     let mut w_star = vec![0u64; ajtai.n];
@@ -293,4 +300,9 @@ mod tests {
         let coms_ok: Vec<Vec<u64>> = ws.iter().map(|w| ajtai.commit(w)).collect();
         assert!(!verify(&ajtai, &coms_ok, &bad), "a forged opening must be rejected");
     }
+}
+
+impl Ajtai {
+    /// Public m*n matrix A (row-major) - for offloading commit to a GPU.
+    pub fn matrix(&self) -> &[u64] { &self.a }
 }

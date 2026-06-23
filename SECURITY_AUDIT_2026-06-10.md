@@ -78,7 +78,8 @@ source under `sigil/crates/`, top findings re-verified by hand against the code.
   - **C4 `/onboard`** — still mints +100 NATIVE/+1000 USDS per call. Cold-start can't pre-auth; real fix = finite faucet-debit + per-IP rate-limit (separate change).
   - **`/nation/pay` + `/nation/eboks`** — demo routes on the hardcoded CITIZEN wallet (no key to sign with); left ungated, low value.
   - **C9 bridge** — not started.
-  - **Client impact:** the gate BREAKS existing clients (React wallet, sigil-miner `/mine`, scripts) until they sign requests. Signing contract is documented in `sigil-rpc/src/auth.rs`. Use `SIGIL_RPC_NO_AUTH=1` during migration. NOT yet deployed.
+  - **Client impact:** the gate BREAKS existing clients (React wallet, sigil-miner `/mine`, scripts) until they sign requests. Signing contract is documented in `sigil-rpc/src/auth.rs`. Use `SIGIL_RPC_NO_AUTH=1` during migration.
+  - **✅ DEPLOYED 2026-06-10 (enforcing) on prod sigil-rpcd :8099.** A 5-agent scoping pass (see `docs/AUTH_GATE_MIGRATION_PLAN.md`) verified the real client surface is tiny: the React wallet doesn't POST mutating routes (apiShim stubs them), miners use the **ungated** PoW-bound `/mining/submit` (not `/mine`), only `swarm-money-round.sh` (dev) hits a gated route — so the gate was deployed **enforcing** (no bypass) and broke nothing live. Verified: unsigned `/deploy_token|/mine|/credit|/swap` → `missing 'sig'`; reads + miner unaffected. Client-signing (apiShim.ts:555 + the one script) remains forward-looking, not enforcement-blocking. Rollback: `sigil-rpcd.PREGATE.bak` or `SIGIL_RPC_NO_AUTH=1`.
 
 ## Recommended fix order
 1. **C1** — delete/neuter caller `difficulty`+`reward` on `/mine` (derive reward from `block_reward`). One-liner, stops the live full-supply mint.

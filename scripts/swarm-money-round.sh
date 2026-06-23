@@ -16,7 +16,17 @@ B="${1:?ollama url, e.g. http://IP:PORT}"
 MODEL="${2:?model, e.g. qwen2.5:32b or deepseek-r1:14b}"
 N="${3:-6}"
 RPC="${4:-http://127.0.0.1:8099}"
-TRADER=1111111111111111111111111111111111111111111111111111111111111111
+# v0.36.1: the /swap auth gate requires the `from` wallet to SIGN each request,
+# so the trader must be a wallet we hold the key for — derive it from a seed and
+# onboard it (which funds it from the finite OPERATOR faucet). The old hardcoded
+# 0x11..11 wallet had no signable key. Override TRADER_SEED for a distinct trader.
+TRADER_SEED="${TRADER_SEED:-1111111111111111111111111111111111111111111111111111111111111111}"
+# Locate the reference signer (sigil-sign). Override with SIGIL_SIGN=/path.
+SIGN="${SIGIL_SIGN:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/../.target-shared/debug/sigil-sign}"
+[ -x "$SIGN" ] || SIGN=sigil-sign   # else expect it on PATH
+TRADER=$(curl -s "$RPC/onboard" -d "{\"seed\":\"$TRADER_SEED\"}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("wallet",""))')
+[ -n "$TRADER" ] || { echo "onboard failed (rate-limited or faucet empty) — set TRADER_SEED / check $RPC"; exit 1; }
+echo "trader (seed-derived, signed): $TRADER"
 POOL=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 USDS=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 WQUG=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -70,7 +80,11 @@ PY
   [ "$DIR" != "AtoB" ] && [ "$DIR" != "BtoA" ] && { echo "  GATE: bad dir"; continue; }
   HAVE=$([ "$DIR" = AtoB ] && echo $UB || echo $WB)
   [ "$HAVE" -lt "$AMT" ] && { echo "  GATE: low $DIR bal → flip AtoB 500"; DIR=AtoB; AMT=500; }
-  S=$(curl -s $RPC/swap -d "{\"from\":\"$TRADER\",\"pool\":\"$POOL\",\"dir\":\"$DIR\",\"amount_in\":$AMT,\"min_out\":1}")
+  # v0.36.1 auth gate: sign the swap as the trader (field order MUST match the
+  # server's authorize() call: from pool dir amount_in min_out). req_nonce = ms ts (monotonic).
+  NONCE=$(date +%s%3N)
+  SIGHEX=$("$SIGN" "$TRADER_SEED" "$NONCE" swap "$TRADER" "$POOL" "$DIR" "$AMT" 1 | python3 -c 'import sys,json;print(json.load(sys.stdin)["sig"])')
+  S=$(curl -s $RPC/swap -d "{\"from\":\"$TRADER\",\"pool\":\"$POOL\",\"dir\":\"$DIR\",\"amount_in\":$AMT,\"min_out\":1,\"req_nonce\":$NONCE,\"sig\":\"$SIGHEX\"}")
   echo "  on-chain: $S"
   if echo "$S" | grep -q '"ok":true'; then
     OK=$((OK+1)); VOL=$((VOL+AMT))

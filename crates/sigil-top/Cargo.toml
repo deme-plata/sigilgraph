@@ -2,7 +2,12 @@
 name = "sigil-top"
 # sigil-top carries its OWN version cadence (the light client updates independently
 # of the workspace) — this is the "next version" the auto-updater ships.
-version = "0.35.0"
+# v5.0.0: SIGIL GRAPH v5 — YouTube showcase build (live P2P sync + mining in node-top).
+# v6.0.0: NEVER-HANG block-store open — a foreign/older on-disk store format (e.g. a
+# v4.1-era store opened by v6) used to block forever at "opening block store"; the open
+# now runs under a watchdog timeout (SIGIL_TOP_OPEN_TIMEOUT_SECS, default 20s) and falls
+# back to a clean store instead of wedging the node.
+version = "6.0.5"
 edition.workspace = true
 license.workspace = true
 description = "sigil-top — a SIGIL lightweight node + dual-mode (lite scorecard ↔ full dashboard) terminal monitor. v0.9.0 'Verifying Full Sync': downloads the chain genesis→tip over the sigil-g0 P2P mesh AND verifies it as one connected spine (per-header precheck + parent_hash linkage back to genesis), with a persisted verified_to watermark. New `full-sync` (headless sync-and-verify, exit 0 at tip) and `verify-chain` (re-verify the local store) subcommands; TUI surfaces the ⛓ verified-spine height + ⚠ spine-break alarm distinct from raw download progress."
@@ -19,6 +24,9 @@ futures    = "0.3"
 # v0.2: real TUI on the flux-cockpit foundation — alt-screen, flicker-free redraw,
 # interactive keys. ratatui owns the box-drawing so alignment can't regress.
 ratatui    = "0.28"
+# v0.37: the REAL dual-lane miner engine — sigil-top is now node + miner in ONE
+# binary (Mining tab [5]). client-only (no tui/market/node); gpu rides the feature.
+flux-miner = { path = "../flux-miner", default-features = false, features = ["client"] }
 crossterm  = "0.28"
 # v0.26 hardening #8: graceful SIGTERM/SIGINT — flush the verified-spine watermark +
 # restore the terminal before exit, so a supervisor restart never orphans the DB state.
@@ -36,6 +44,8 @@ sigil-oauth     = { path = "../sigil-oauth" }
 blake3       = "1"
 hex          = "0.4"
 bincode      = "1"
+# v0.34 TPS lane: parallel header precheck across cores (independent per header).
+rayon        = { workspace = true }
 # v0.33 zstd wire (decode side): PURE-RUST zstd decompressor — no C code, so the
 # Windows cross-build stays mingw-clean. Server compresses with the zstd crate.
 ruzstd       = "0.7"
@@ -57,6 +67,8 @@ flux-rev = { path = "../../../flux/crates/flux-rev" }
 # v0.7.6: content-addressed block backfill (BLAKE3, verify-don't-trust) — closes the
 # gossip-only "can't backfill history" gap. The real history-sync behind [F].
 flux-sync = { path = "../../../flux/crates/flux-sync" }
+# Turbo Sync X + invented BandwidthContinuity for continuous *high* download bandwidth
+flux-turbo-sync = { path = "../flux-turbo-sync" }
 
 # v0.2.35 L4-B: SQIsign post-quantum tip-proof flavor (gated, not yet enabled).
 [dev-dependencies]
@@ -67,6 +79,8 @@ zstd = "0.13"
 # When activated, sigil-tip-proof links flux-sqisign and verify_tip() constructs
 # a TipProof::new_sqisign() for adversary-resistant tip verification.
 [features]
+default = ["gpu"]
+gpu = ["flux-miner/gpu"]
 sqisign = []
 
 [[bin]]

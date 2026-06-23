@@ -114,26 +114,26 @@
   </div>
 
   <div class="grid">
-    <!-- HMR Pulse -->
-    <div class="card">
-      <div class="card-title">⚡ HMR Pulse</div>
-      <div class="card-value" id="hmrCount">247</div>
-      <div class="card-sub">hot module replacements today</div>
+    <!-- LIVE block height (real testnet tip, ~6.2M advancing) -->
+    <div class="card" id="liveCard">
+      <div class="card-title">⬡ Block Height</div>
+      <div class="card-value" id="liveHeight">—</div>
+      <div class="card-sub">sigil-g0 testnet · live DAG tip</div>
       <div class="hmr-ribbon" id="hmrRibbon"></div>
     </div>
 
-    <!-- Build Stats -->
+    <!-- LIVE throughput (blocks/sec from height delta) -->
     <div class="card">
-      <div class="card-title">🏗️ Build</div>
-      <div class="card-value" id="buildTime">1.2<span style="font-size:18px">s</span></div>
-      <div class="card-sub">last build · cold 4.8s · cache 92%</div>
+      <div class="card-title">⚡ Throughput</div>
+      <div class="card-value" id="liveBps">—<span style="font-size:18px"> blk/s</span></div>
+      <div class="card-sub" id="liveBpsSub">DAG producer velocity</div>
     </div>
 
-    <!-- Bundle Size -->
+    <!-- LIVE producer -->
     <div class="card">
-      <div class="card-title">📦 Bundle</div>
-      <div class="card-value" id="bundleSize">184<span style="font-size:18px">KB</span></div>
-      <div class="card-sub">gzip · 47 chunks · +12KB Δ</div>
+      <div class="card-title">◈ Producer</div>
+      <div class="card-value" id="liveProd">—</div>
+      <div class="card-sub" id="liveProdSub">current block producer · sigil-node</div>
     </div>
 
     <!-- Component Tree -->
@@ -210,11 +210,36 @@
       bar.style.height=(15+Math.random()*45)+'px'; bar.style.animationDelay=(i*0.02)+'s'; ribbon.appendChild(bar); } }
   renderHMR(); setInterval(renderHMR,4000);
 
-  // Simulated live HMR counter
-  let hmr=247;
-  setInterval(()=>{ hmr+=Math.floor(Math.random()*3); document.getElementById('hmrCount').textContent=hmr;
-    document.getElementById('hmrCount').classList.remove('live-counter'); void document.getElementById('hmrCount').offsetWidth;
-    document.getElementById('hmrCount').classList.add('live-counter'); },3000);
+  // ── LIVE SIGIL testnet pulse (real data, not simulated) ──────────────────
+  // Pulls the real DAG tip from /sigil-recent-blocks.json (published by
+  // sigil-recent-blocks.service) and renders height + blocks/sec + producer.
+  var _prevH=null,_prevT=null,_pn={D:'Delta',E:'Epsilon',G:'Gamma',B:'Beta'};
+  async function sigilPulse(){
+    try{
+      var r=await fetch('/sigil-recent-blocks.json?cb='+Date.now(),{cache:'no-store'});
+      var j=await r.json(); var h=j.height, now=Date.now();
+      var hv=document.getElementById('liveHeight');
+      if(hv){ hv.textContent=Number(h).toLocaleString();
+        hv.classList.remove('live-counter'); void hv.offsetWidth; hv.classList.add('live-counter'); }
+      // blocks/sec from height delta over wall-clock
+      if(_prevH!=null && now>_prevT){
+        var bps=(h-_prevH)/((now-_prevT)/1000);
+        if(bps>=0 && bps<100000){ var be=document.getElementById('liveBps');
+          if(be) be.innerHTML=bps.toFixed(0)+'<span style="font-size:18px"> blk/s</span>'; }
+        // pulse the live card border on new blocks
+        if(h>_prevH){ var c=document.getElementById('liveCard');
+          if(c){ c.style.transition='box-shadow .2s'; c.style.boxShadow='0 0 26px rgba(0,224,198,.55)';
+            setTimeout(function(){ c.style.boxShadow=''; },420); } }
+      }
+      _prevH=h; _prevT=now;
+      var pr=(j.results&&j.results[0]&&j.results[0].prod)||'?';
+      var pe=document.getElementById('liveProd'); if(pe) pe.textContent=_pn[pr]||pr;
+      var ps=document.getElementById('liveProdSub'); if(ps) ps.textContent=(j.count||0)+' recent blocks · sigil-node';
+    }catch(e){
+      var hv=document.getElementById('liveHeight'); if(hv&&hv.textContent==='—') hv.textContent='offline';
+    }
+  }
+  sigilPulse(); setInterval(sigilPulse,2000);
 </script>
 </body>
 </html>

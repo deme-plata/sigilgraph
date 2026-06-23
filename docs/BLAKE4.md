@@ -194,6 +194,202 @@ SIMD batching** (the blake3 crate already gets ~31× via AVX-512; the scalar
 numbers above are the per-round curve, not the deployable ceiling). The deployed
 hash would be SIMD × a validated R.
 
+## 7⅗. Which reduced R is safe? — the diffusion measurement (2026-06-21)
+
+§7½ measured the *speed* of each round count but left the *security margin*
+unmeasured — "which `R` is sound enough is an empirical question the bench loop
+answers." This is that answer. `pow::blake4_avalanche(R, samples)` runs a
+strict-avalanche-criterion (SAC) probe: flip every input bit of many random
+`header‖nonce` inputs and measure (a) the **mean** fraction of the 256 output bits
+that change (ideal **0.5**) and (b) the **worst single-output-bit bias**
+`|P(flip)−0.5|` (ideal **0** — a biased output bit is a grind handle even when the
+mean looks fine). Gated `#[cfg(any(test, feature="bench"))]`, deterministic, no deps.
+Regression-locked by `pow::tests::avalanche_curve_quantifies_round_security_margin`.
+
+Measured (48 samples = 15,360 single-bit trials/round; R=7 also at 192 samples):
+
+| R | mean (→0.5) | max_bias (→0) | speed (§7½) | verdict |
+|---|---|---|---|---|
+| 1 | **0.366** | **0.200** | 2.92× | **BROKEN** — 37% diffusion, one output bit 0.20 off ideal |
+| 2 | 0.500 | 0.012 | ~1.5× | SAC **saturated** (zero margin above the floor) |
+| 3 | 0.500 | 0.012 | **1.81×** | ideal SAC + a 1-round cushion |
+| 4–6 | ≈0.500 | 0.011–0.014 | — | ideal (noise floor) |
+| 7 | 0.500 | 0.011 (0.007 @192) | 0.95× | BLAKE3, KAT-anchored |
+
+**Finding:** BLAKE3's `G` + message permutation reach **full strict-avalanche in
+just 2 rounds** — the diffusion *floor* is R=2. R=1 is provably unusable; the
+tempting 2.92× lever is exactly the broken one.
+
+**SAC is necessary, not sufficient.** It does not rule out the higher-order
+differential / algebraic-degree weaknesses that reduced-round BLAKE/ChaCha-family
+permutations are known to have (those attacks bite well above where avalanche
+saturates). So SAC sets a hard *floor*, not a green light.
+
+### The PoW grind-bias survey (2026-06-22)
+
+SAC probes the full 256-bit digest under arbitrary input flips — but a miner only
+ever reads the **64-bit target word** (`blake4_word`, compared to difficulty) and only
+moves by **nonce increment**. `pow::blake4_grind_bias(R, nonces)` measures soundness on
+exactly those two surfaces: the worst **target-word monobit bias** (is the difficulty
+surface uniform?) and the **consecutive-nonce avalanche** (are grind attempts
+independent, or do near-target words cluster?). Regression-locked by
+`pow::tests::grind_bias_survey_targets_the_pow_word`.
+
+Measured (16,384-nonce sweep/round; R=7 also at 65,536):
+
+| R | word_monobit_bias (→0) | nonce_step_avalanche (→0.5) | verdict |
+|---|---|---|---|
+| 1 | **0.500** | **0.075** | **DEGENERATE** — a target-word bit is *constant*; consecutive nonces change 7.5% of the word → near-wins cluster → trivial grind |
+| 2 | 0.010 | 0.500 | clean on both PoW surfaces |
+| 3–6 | 0.006–0.016 | 0.500–0.501 | clean |
+| 7 | 0.010 (0.006 @65k) | 0.500 | BLAKE3 |
+
+This is a **sharper kill of R=1** than SAC: not "weaker diffusion" (mean 0.366) but
+*degenerate on the exact surfaces a miner exploits* — a constant target-word bit and
+near-identical consecutive words. Both instruments converge: **the floor is R=2.**
+
+### The differential survey (2026-06-22)
+
+SAC measures *single-bit* input differences (averaged); grind-bias measures the
+*nonce-increment* difference. Neither reports a **low-weight multi-bit input difference
+that propagates quietly** — a differential *trail*, the classic ARX/BLAKE attack class.
+`pow::blake4_diff_bias(R, samples)` sweeps a Δ set (nonce single-bit + pseudo-random and
+rotation-aligned 2-bit) and reports the **worst-case (minimum) output-differential
+avalanche** over that set — ideal ≈ 0.5 for *every* Δ; a Δ whose avalanche collapses is a
+trail. Regression-locked by `pow::tests::differential_survey_finds_no_trail_at_full_rounds`.
+
+Measured (128 samples/Δ over ~160 Δ; R=7 also at 256):
+
+| R | min Δ-avalanche (→0.5) | worst Δ weight | verdict |
+|---|---|---|---|
+| 1 | **0.023** | 1 | **dominant trail** — a Δ produces ~2% output change |
+| 2–6 | 0.492–0.494 | 1–2 | no trail in the Δ set |
+| 7 | 0.495 (0.495 @256) | 1 | BLAKE3 |
+
+R=1's worst-case differential (0.023) is even starker than its SAC *mean* (0.366) — the
+*min* exposes the worst Δ, not the average. R≥2 is clean across single-bit AND multi-bit Δ.
+
+**⚠️ Honest scope:** this is a **sampled screen**, not an exhaustive differential trail
+search. It catches a *dominant* trail (and did, at R=1), but absence of a trail in ~160
+sampled Δ is **not a proof** of differential security — a real promotion still needs an
+automated trail search (SAT/MILP, the tooling that broke reduced ChaCha/BLAKE) over the
+full difference space.
+
+### The automated trail search — rigorous core (`diff_search`, 2026-06-22)
+
+The screen above is empirical (random Δ, measured diffusion). The *analytic* gate is a
+**differential trail search**, and `crates/flux-miner/src/diff_search.rs` builds its exact
+foundation. BLAKE4 is Add-Rotate-XOR: rotation and XOR pass an XOR-difference through
+deterministically, so the only nonlinear gate is modular addition, whose XOR-differential
+probability is given EXACTLY by **Lipmaa-Moriai (2001)**.
+
+- `xdp_add_weight(α,β,γ,n)` — exact weight (−log₂ prob) of `(α,β→γ)` through `+`.
+  **Brute-force-verified** against the exhaustive truth over *all* (α,β,γ) at n=6, and
+  **Monte-Carlo-verified at the real n=32** (modelled 2⁻ʷ == measured probability).
+- `best_xdp_add(α,β)` — the optimal (min-weight) output difference, proven equal to an
+  exhaustive γ-scan at n=8.
+- `g_best_trail(...)` + `min_active_g_weight()` — greedily compose the exact `xdp+` through
+  one BLAKE4 `G` (two adds + the rotate/XOR layer).
+
+**Result:** the cheapest a *single active* `G` can be is **weight 7** (an MSB message-bit
+difference). Monte-Carlo on the real `G` measured that trail at 2⁻⁶ vs the modelled 2⁻⁷ — ~1
+bit more probable than the greedy trail, the expected **differential-clustering** signature
+(several trails reach the same output diff). So: the per-add core is *exact*; composing it
+through `G` is *approximate* (~1 bit optimistic), the well-known trail-model caveat.
+
+**Why this corroborates R≥2.** One active `G` costs ~6–7 bits, and the §7⅗ screen shows the
+difference has activated the *whole state* (many G's) by R=2 — so the multi-round trail
+weight blows past the 64-bit PoW window within a couple of rounds. Consistent with the
+empirical "no trail at R≥2."
+
+#### Multi-round trail engine (`message_trail_weight` / `best_single_bit_trail`)
+
+The single-G core is now propagated through the **real** BLAKE4 round (the 8-G column+diagonal
+pattern + message permutation). With the chaining value identical (state difference 0), a
+message difference flows through every `G`, accumulating exact `xdp+` weight. The engine's
+wiring + probability are validated end-to-end (`round_engine_matches_real_round_mc`: the
+predicted output difference occurs on the *real* round at ~the modelled rate). Best greedy
+single-bit-message attack trail, by round count:
+
+| rounds | best greedy trail weight | vs 64-bit PoW window |
+|---|---|---|
+| 1 | 1 | trivially below (R=1 is broken anyway) |
+| 2 | **199** | **3.1× past** |
+| 3 | 803 | 12.5× past |
+
+(A column-start difference is far more expensive even at R=1 — e.g. weight 88 — because it
+feeds all four diagonal G's in the same round.)
+
+**⚠️ Read the semantics correctly.** Greedy takes the locally cheapest output difference at
+each add, so its weight is an **upper bound** on the optimal trail: "a trail no worse than this
+exists." It finds *attacks*; it does **not** prove their absence — a cleverer trail could be
+cheaper, so the weight-199 at R=2 is *suggestive corroboration* of the screens, **not** a
+security proof. The matching **lower bound** (proving no cheap trail exists) is what the
+Matsui/SAT enumeration provides. What the engine shows *soundly* is the steep weight growth as
+the difference saturates the state (1 → 199 → 803).
+
+#### Matsui branch-and-bound — the lower-bound search (`matsui_toy` / `matsui_g_min`)
+
+The lower-bound direction is now built. **Matsui's algorithm** finds the EXACT minimum-weight
+trail (= a proof "nothing is cheaper") by depth-first branch-and-bound: enumerate each addition's
+output differences *cheapest-first* (`enum_gamma`, the Lipmaa-Moriai "country roads"), and prune a
+partial trail when its spent weight plus the best achievable for the remaining rounds (the
+inductive bound `B[r]`) can't beat the incumbent.
+
+- `enum_gamma` — the increasing-weight transition enumerator. **Verified exact** against a brute
+  γ-scan over all (α,β) at n=6, every cap.
+- `matsui_toy` — the full Matsui search on a 1-word ARX toy (round `δ ↦ (δ⋙rot)+dk`). **Verified
+  `== brute force`** across rotations, round-differences, widths and round counts — so the
+  branch-and-bound provably computes the true minimum (the lower bound), not just a good trail.
+- `matsui_g_min` — the exact search applied to one BLAKE4 `G`. For the cheapest active-G input it
+  returns a **proven minimum of 7** — equal to the greedy upper bound, so greedy happened to be
+  tight there (now *proven*, not assumed). An inactive `G` is proven to cost 0.
+
+**⚠️ Honest scope.** This is a *correct, verified* lower-bound engine, but `matsui_g_min` is
+tractable only for low-weight (small-seed) inputs — an expensive input explodes the first
+enumeration. Scaling it to the **full 16-word, multi-round BLAKE4 state** (proving the R-round
+minimum exceeds 64 for *every* message difference) is the genuine research step: it needs the
+Matsui `B[r]` bounds threaded through the whole compression, and in practice that is where one
+reaches for a **SAT/SMT solver** (encode the Lipmaa-Moriai validity + a weight-≤-W cardinality
+constraint; UNSAT at W=63 proves the bound) — at the cost of an external-solver dependency. The
+verified per-add enumerator + branch-and-bound + the toy proof are the foundation that search
+would be built on.
+
+#### SMT lower bound — z3 run (`tools/blake4_diff_z3.py`, 2026-06-22)
+
+The SAT/SMT path was built and run. `tools/blake4_diff_z3.py` encodes the trail in z3's
+bit-vector theory — the SAME round structure as the verified Rust engine, each modular addition a
+free output-difference variable under the Lipmaa-Moriai validity constraint, weight = popcount of
+the non-equal bits — and minimizes (or threshold-checks) the total. The encoding is **validated
+before use** (`tools/blake4_z3_validate.py`): z3's `valid`/`weight` == the brute-verified
+closed-form `xdp+` (exhaustive n=6 + 4000 random 32-bit triples).
+
+Results (z3 4.16, capped on Epsilon):
+
+| query | result |
+|---|---|
+| **R=1** minimize | **exact minimum = 1** (0.4 s) — matches the Rust engine; R=1 provably broken |
+| **R=2** minimize | did not converge in 20 min — **proven bounds [9, 2389]** (min ≥ 9 is sound) |
+| **R=2** "trail ≤ 64?" | **unknown** (15-min timeout) — neither a cheap trail found nor its absence proved |
+
+So R=1 is a *complete* proof; R=2 is partial — z3 proves the minimum is ≥ 9 and ≤ 199 (the greedy
+trail), but the *security-grade* claim (min > 64) is **not reached in tractable time**. This is the
+honest frontier: published BLAKE-class multi-round differential bounds are computed with
+cluster-scale dedicated SAT solvers (CryptoMiniSat + optimized cardinality) or MILP, not a 20-min
+z3 Optimize. The prover + validator are in-tree and reproducible; closing R=2 needs either a much
+larger solve, a dedicated SAT toolchain, or the convex-hull MILP model of `xdp+`.
+
+**Bottom line for promotion.** The evidence — SAC, PoW grind-bias, the empirical differential
+screen, the exact `xdp+` trail core, the greedy multi-round engine, AND a *verified Matsui
+lower-bound search* — all agree: floor **R=2**, R=1 unusable, **R=3** the candidate (~1.81×). The
+upper-bound side (find an attack) and the lower-bound machinery (prove none cheaper) both exist
+and are brute-verified — and the SAT/SMT path was built and **run** (validated z3 encoding; R=1
+minimum proved =1, R=2 proved ∈[9,199]). The ONE thing still between here and moving
+`BLAKE4_ROUNDS` off 7: pushing that lower bound to the **security grade** — proving the R=2 (or
+R=3) minimum > 64 over *every* message difference — which did **not** converge in a 20-min z3
+solve and needs a larger/dedicated SAT-MILP run, plus a **real-GPU grind validation**. Until that
+proof lands, `BLAKE4_ROUNDS` stays at 7 — zero consensus change.
+
 ## 7¾. BLAKE4 on the GPU — Lane A → GPU (scaffold, 2026-06-08)
 
 The dual lanes map cleanly onto the two kinds of hardware, which is the third
@@ -238,9 +434,13 @@ VDF → submit → cap-enforced credit — works on real binaries.
 - **BLAKE4-turbo is a ceiling, not a product.** The 12.9 GH/s number is an
   *invertible* mix used only to measure the headroom. Don't quote turbo as a
   real rate.
-- **No reduced-round `R` is deployed yet.** The primitive + curve exist and are
-  validated; choosing the safe `R` needs a diffusion / preimage-margin analysis
-  (avalanche, reduced-round attack survey) before `BLAKE4_ROUNDS` moves off 7.
+- **No reduced-round `R` is deployed yet.** The primitive, speed curve, three empirical
+  soundness instruments, the exact Lipmaa-Moriai `xdp+` core, the greedy multi-round engine AND
+  a brute-verified Matsui lower-bound search now exist (§7⅗: all agree floor=R=2, R=1 degenerate,
+  R=3 candidate). The remaining gate before `BLAKE4_ROUNDS` moves off 7 is running that
+  lower-bound search at **full 16-word/multi-round scale** (proving the R-round minimum > 64 for
+  every message Δ — in practice a SAT/SMT-assisted job on this in-tree foundation) + a real-GPU
+  grind validation. Everything built so far is a floor, not yet the green light.
 - **`pow.rs` is scalar.** The per-round curve is honest but un-SIMD'd; the
   deployable rate is SIMD (blake3-crate-class) × the chosen R. SIMD is the
   flux-cortex/flux-optimize lever.
@@ -255,9 +455,13 @@ VDF → submit → cap-enforced credit — works on real binaries.
 - **BLAKE4-turbo is a ceiling, not a product.** The 12.9 GH/s number is an
   *invertible* mix used only to measure the headroom. Don't quote turbo as a
   real rate.
-- **No reduced-round `R` is deployed yet.** The primitive + curve exist and are
-  validated; choosing the safe `R` needs a diffusion / preimage-margin analysis
-  (avalanche, reduced-round attack survey) before `BLAKE4_ROUNDS` moves off 7.
+- **No reduced-round `R` is deployed yet.** The primitive, speed curve, three empirical
+  soundness instruments, the exact Lipmaa-Moriai `xdp+` core, the greedy multi-round engine AND
+  a brute-verified Matsui lower-bound search now exist (§7⅗: all agree floor=R=2, R=1 degenerate,
+  R=3 candidate). The remaining gate before `BLAKE4_ROUNDS` moves off 7 is running that
+  lower-bound search at **full 16-word/multi-round scale** (proving the R-round minimum > 64 for
+  every message Δ — in practice a SAT/SMT-assisted job on this in-tree foundation) + a real-GPU
+  grind validation. Everything built so far is a floor, not yet the green light.
 - **`pow.rs` is scalar.** The per-round curve is honest but un-SIMD'd; the
   deployable rate is SIMD (blake3-crate-class) × the chosen R. SIMD is the
   flux-cortex/flux-optimize lever.

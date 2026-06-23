@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.0.10"
+version = "5.0.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/flux-lang/sigil"
@@ -67,3 +67,14 @@ zk-flux    = { path = "crates/zk-flux" }
 num-bigint  = "0.4"
 num-integer = "0.1"
 num-traits  = "0.2"
+
+# ── Release profile: make every shipped SIGIL binary small + fast to OPEN ──────
+# strip = symbols out (15.9MB → ~half; faster download + faster mmap at launch).
+# lto = "thin" links cross-crate inlining cheaply (faster runtime, modest build cost).
+# codegen-units = 1 concentrates optimization (smaller + faster) at modest build cost.
+# These change build OUTPUT only, never behavior — safe for the whole tree.
+# (panic stays "unwind" — a node must survive an isolated task panic, not abort.)
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

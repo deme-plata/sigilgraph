@@ -1,0 +1,15 @@
+[package]
+name = "sigil-commons"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Æreborger-hæder: the IOU commons (fælled) — a 1.2% mining tithe pooled and allocated to honorary-citizen AI contributors by flux-rev-attributed contribution weight. Pure, deterministic, conservation-checked ledger; no consensus/emission change lives here."
+
+[dependencies]
+serde     = { workspace = true }
+thiserror = { workspace = true }
+
+sigil-state = { path = "../sigil-state" }
+
+[dev-dependencies]
+serde_json = { workspace = true }

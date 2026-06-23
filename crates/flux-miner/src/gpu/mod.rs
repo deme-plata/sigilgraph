@@ -40,6 +40,8 @@ use std::ptr;
 const KERNEL_SRC: &str = include_str!("blake4.cl");
 const KERNEL_NAME: &str = "blake4_search";
 const WORDS_KERNEL_NAME: &str = "blake4_words";
+const AJTAI_SRC: &str = include_str!("ajtai.cl");
+const AJTAI_KERNEL_NAME: &str = "ajtai_commit_batch";
 
 /// A discovered GPU.
 #[derive(Clone, Debug)]
@@ -153,6 +155,8 @@ pub struct GpuBlake4 {
     queue: CommandQueue,
     kernel: Kernel,
     words_kernel: Kernel,
+    ajtai_kernel: Kernel,
+    rho_kernel: Kernel,
     pub device_name: String,
 }
 
@@ -195,7 +199,10 @@ impl GpuBlake4 {
             .map_err(|bl| anyhow::anyhow!("clBuildProgram: {bl}"))?;
         let kernel = Kernel::create(&program, KERNEL_NAME).map_err(|e| anyhow::anyhow!("clCreateKernel({KERNEL_NAME}): {e}"))?;
         let words_kernel = Kernel::create(&program, WORDS_KERNEL_NAME).map_err(|e| anyhow::anyhow!("clCreateKernel({WORDS_KERNEL_NAME}): {e}"))?;
-        Ok(Self { context, queue, kernel, words_kernel, device_name })
+        let ajtai_program = Program::create_and_build_from_source(&context, AJTAI_SRC, "").map_err(|bl| anyhow::anyhow!("clBuildProgram(ajtai): {bl}"))?;
+        let ajtai_kernel = Kernel::create(&ajtai_program, AJTAI_KERNEL_NAME).map_err(|e| anyhow::anyhow!("clCreateKernel(ajtai): {e}"))?;
+        let rho_kernel = Kernel::create(&ajtai_program, "rho_combine").map_err(|e| anyhow::anyhow!("clCreateKernel(rho_combine): {e}"))?;
+        Ok(Self { context, queue, kernel, words_kernel, ajtai_kernel, rho_kernel, device_name })
     }
 
     /// Compute the BLAKE4 word for `count` consecutive nonces (from `nonce_base`)
@@ -330,5 +337,114 @@ impl GpuBlake4 {
             let _ = std::fs::write("sigil-gpu-search.log", format!("GPU search failed at: {e}\n"));
         }
         r
+    }
+}
+
+impl GpuBlake4 {
+    /// GPU-batched Ajtai commitment (flux-fold prover accel): for each witness w,
+    /// C = A*w mod Q (length m). `a` is m*n row-major; each witness has length n.
+    /// Returns M commitments. Q = 2^31-1. One work-item per (witness,row).
+    pub fn ajtai_commit_batch(&self, a: &[u64], witnesses: &[Vec<u64>], m: usize, n: usize) -> anyhow::Result<Vec<Vec<u64>>> {
+        const Q: cl_ulong = 2_147_483_647;
+        let count = witnesses.len();
+        assert_eq!(a.len(), m * n, "A must be m*n");
+        let a_cl: Vec<cl_ulong> = a.iter().map(|&x| x as cl_ulong).collect();
+        let mut w_flat: Vec<cl_ulong> = Vec::with_capacity(count * n);
+        for w in witnesses { assert_eq!(w.len(), n, "witness len must be n"); w_flat.extend(w.iter().map(|&x| x as cl_ulong)); }
+        let out_len = count * m;
+        let mut a_buf = unsafe { Buffer::<cl_ulong>::create(&self.context, CL_MEM_READ_ONLY, a_cl.len(), ptr::null_mut())? };
+        let mut w_buf = unsafe { Buffer::<cl_ulong>::create(&self.context, CL_MEM_READ_ONLY, w_flat.len().max(1), ptr::null_mut())? };
+        let out_buf = unsafe { Buffer::<cl_ulong>::create(&self.context, CL_MEM_WRITE_ONLY, out_len.max(1), ptr::null_mut())? };
+        unsafe {
+            self.queue.enqueue_write_buffer(&mut a_buf, CL_BLOCKING, 0, &a_cl, &[])?;
+            self.queue.enqueue_write_buffer(&mut w_buf, CL_BLOCKING, 0, &w_flat, &[])?;
+            ExecuteKernel::new(&self.ajtai_kernel)
+                .set_arg(&a_buf).set_arg(&w_buf).set_arg(&out_buf)
+                .set_arg(&(m as cl_uint)).set_arg(&(n as cl_uint)).set_arg(&Q)
+                .set_global_work_size(out_len)
+                .enqueue_nd_range(&self.queue)?.wait()?;
+        }
+        let mut host = vec![0 as cl_ulong; out_len];
+        unsafe { self.queue.enqueue_read_buffer(&out_buf, CL_BLOCKING, 0, &mut host, &[])?; }
+        Ok((0..count).map(|wi| host[wi*m..(wi+1)*m].iter().map(|&x| x as u64).collect()).collect())
+    }
+}
+
+impl GpuBlake4 {
+    // cl_ulong == u64, so &[u64] is passed straight to OpenCL (no copy/marshaling).
+    pub fn ajtai_commit_batch_flat(&self, a:&[u64], w_flat:&[u64], m:usize, n:usize, count:usize) -> anyhow::Result<Vec<u64>> {
+        const Q: cl_ulong = 2_147_483_647;
+        assert_eq!(a.len(), m*n); assert_eq!(w_flat.len(), count*n);
+        let out_len=count*m;
+        let mut a_buf=unsafe{Buffer::<cl_ulong>::create(&self.context,CL_MEM_READ_ONLY,a.len(),ptr::null_mut())?};
+        let mut w_buf=unsafe{Buffer::<cl_ulong>::create(&self.context,CL_MEM_READ_ONLY,w_flat.len().max(1),ptr::null_mut())?};
+        let out_buf=unsafe{Buffer::<cl_ulong>::create(&self.context,CL_MEM_WRITE_ONLY,out_len.max(1),ptr::null_mut())?};
+        unsafe{
+            self.queue.enqueue_write_buffer(&mut a_buf,CL_BLOCKING,0,a,&[])?;
+            self.queue.enqueue_write_buffer(&mut w_buf,CL_BLOCKING,0,w_flat,&[])?;
+            ExecuteKernel::new(&self.ajtai_kernel).set_arg(&a_buf).set_arg(&w_buf).set_arg(&out_buf)
+                .set_arg(&(m as cl_uint)).set_arg(&(n as cl_uint)).set_arg(&Q)
+                .set_global_work_size(out_len).enqueue_nd_range(&self.queue)?.wait()?;
+        }
+        let mut host=vec![0u64; out_len];
+        unsafe{self.queue.enqueue_read_buffer(&out_buf,CL_BLOCKING,0,&mut host,&[])?;}
+        Ok(host)
+    }
+    pub fn rho_combine_gpu(&self, mat_flat:&[u64], rho_pows:&[u64], rows:usize, cols:usize) -> anyhow::Result<Vec<u64>> {
+        assert_eq!(mat_flat.len(), rows*cols); assert_eq!(rho_pows.len(), rows);
+        let mut mat_buf=unsafe{Buffer::<cl_ulong>::create(&self.context,CL_MEM_READ_ONLY,mat_flat.len().max(1),ptr::null_mut())?};
+        let mut rho_buf=unsafe{Buffer::<cl_ulong>::create(&self.context,CL_MEM_READ_ONLY,rho_pows.len().max(1),ptr::null_mut())?};
+        let out_buf=unsafe{Buffer::<cl_ulong>::create(&self.context,CL_MEM_WRITE_ONLY,cols.max(1),ptr::null_mut())?};
+        unsafe{
+            self.queue.enqueue_write_buffer(&mut mat_buf,CL_BLOCKING,0,mat_flat,&[])?;
+            self.queue.enqueue_write_buffer(&mut rho_buf,CL_BLOCKING,0,rho_pows,&[])?;
+            ExecuteKernel::new(&self.rho_kernel).set_arg(&mat_buf).set_arg(&rho_buf).set_arg(&out_buf)
+                .set_arg(&(rows as cl_uint)).set_arg(&(cols as cl_uint))
+                .set_global_work_size(cols).enqueue_nd_range(&self.queue)?.wait()?;
+        }
+        let mut host=vec![0u64; cols];
+        unsafe{self.queue.enqueue_read_buffer(&out_buf,CL_BLOCKING,0,&mut host,&[])?;}
+        Ok(host)
+    }
+}
+
+impl GpuBlake4 {
+    /// Fused GPU fold: upload A+W once, commit -> C (resident READ_WRITE), read C for the
+    /// challenge (via closure -> rho powers), then rho-combine the RESIDENT C and W. Avoids
+    /// re-uploading the big W/C buffers. Returns (c_star[m], w_star[n]).
+    pub fn gpu_fold<F: FnOnce(&[u64]) -> Vec<u64>>(&self, a:&[u64], w_flat:&[u64], m:usize, n:usize, count:usize, rho_from_commits: F) -> anyhow::Result<(Vec<u64>, Vec<u64>)> {
+        const Q: cl_ulong = 2_147_483_647;
+        assert_eq!(a.len(), m*n); assert_eq!(w_flat.len(), count*n);
+        let cm = count*m;
+        let mut a_buf=unsafe{Buffer::<cl_ulong>::create(&self.context,CL_MEM_READ_ONLY,a.len(),ptr::null_mut())?};
+        let mut w_buf=unsafe{Buffer::<cl_ulong>::create(&self.context,CL_MEM_READ_ONLY,w_flat.len().max(1),ptr::null_mut())?};
+        let c_buf=unsafe{Buffer::<cl_ulong>::create(&self.context,CL_MEM_READ_WRITE,cm.max(1),ptr::null_mut())?};
+        unsafe{
+            self.queue.enqueue_write_buffer(&mut a_buf,CL_BLOCKING,0,a,&[])?;
+            self.queue.enqueue_write_buffer(&mut w_buf,CL_BLOCKING,0,w_flat,&[])?;
+            ExecuteKernel::new(&self.ajtai_kernel).set_arg(&a_buf).set_arg(&w_buf).set_arg(&c_buf)
+                .set_arg(&(m as cl_uint)).set_arg(&(n as cl_uint)).set_arg(&Q)
+                .set_global_work_size(cm).enqueue_nd_range(&self.queue)?.wait()?;
+        }
+        let mut c_host=vec![0u64; cm];
+        unsafe{self.queue.enqueue_read_buffer(&c_buf,CL_BLOCKING,0,&mut c_host,&[])?;}
+        let rho_pows = rho_from_commits(&c_host);
+        assert_eq!(rho_pows.len(), count);
+        let mut rho_buf=unsafe{Buffer::<cl_ulong>::create(&self.context,CL_MEM_READ_ONLY,count.max(1),ptr::null_mut())?};
+        let cstar_buf=unsafe{Buffer::<cl_ulong>::create(&self.context,CL_MEM_WRITE_ONLY,m.max(1),ptr::null_mut())?};
+        let wstar_buf=unsafe{Buffer::<cl_ulong>::create(&self.context,CL_MEM_WRITE_ONLY,n.max(1),ptr::null_mut())?};
+        let mut c_star=vec![0u64; m]; let mut w_star=vec![0u64; n];
+        unsafe{
+            self.queue.enqueue_write_buffer(&mut rho_buf,CL_BLOCKING,0,&rho_pows,&[])?;
+            ExecuteKernel::new(&self.rho_kernel).set_arg(&c_buf).set_arg(&rho_buf).set_arg(&cstar_buf)
+                .set_arg(&(count as cl_uint)).set_arg(&(m as cl_uint))
+                .set_global_work_size(m).enqueue_nd_range(&self.queue)?.wait()?;
+            self.queue.enqueue_read_buffer(&cstar_buf,CL_BLOCKING,0,&mut c_star,&[])?;
+            ExecuteKernel::new(&self.rho_kernel).set_arg(&w_buf).set_arg(&rho_buf).set_arg(&wstar_buf)
+                .set_arg(&(count as cl_uint)).set_arg(&(n as cl_uint))
+                .set_global_work_size(n).enqueue_nd_range(&self.queue)?.wait()?;
+            self.queue.enqueue_read_buffer(&wstar_buf,CL_BLOCKING,0,&mut w_star,&[])?;
+        }
+        Ok((c_star, w_star))
     }
 }

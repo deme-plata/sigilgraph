@@ -15,6 +15,7 @@ import MinerLoginPage from './components/MinerLoginPage';
 import POSMode from './components/POSMode';
 import { sseManager } from './services/sseManager';
 import IncomingMemoModal from './components/IncomingMemoModal';
+import SendModal from './components/SendModal';
 import './App.css';
 
 // Lazy-loaded screens — split into separate chunks, loaded on first navigation
@@ -910,12 +911,16 @@ function App() {
     localStorage.setItem('selectedToken', JSON.stringify(token));
   };
 
-  // Handle coin send click - navigate to transaction screen with pre-selected coin
+  // Mobile Send modal (SendModal.tsx) — replaces the full-screen send for the
+  // quick coin-send action; the full TransactionScreenV2 stays reachable via nav.
+  const [showSendModal, setShowSendModal] = useState(false);
+
+  // Handle coin send click - open the Send modal with the pre-selected coin
   const handleCoinSendClick = (coinSymbol: string) => {
     console.log('Coin send clicked:', coinSymbol);
-    setCurrentScreen('transactions');
-    // Store selected coin in localStorage for TransactionV2 to pick up
+    // Store selected coin in localStorage so the modal/TransactionV2 can pick it up
     localStorage.setItem('selectedCoinForSend', coinSymbol);
+    setShowSendModal(true);
   };
 
   return (
@@ -1037,6 +1042,15 @@ function App() {
     <IncomingMemoModal
       tx={incomingMemoTx}
       onClose={() => setIncomingMemoTx(null)}
+    />
+
+    {/* Mobile Send SGL modal — real signTransactionForP2P → libp2p submit path */}
+    <SendModal
+      isOpen={showSendModal}
+      onClose={() => setShowSendModal(false)}
+      balance={nodeData.balance}
+      walletAddress={localStorage.getItem('walletAddress') || ''}
+      onSent={() => setShowSendModal(false)}
     />
 
     {/* Global incoming call modal — rendered via portal directly into document.body

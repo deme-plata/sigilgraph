@@ -1,0 +1,10 @@
+import { chromium } from 'playwright-core';
+const url = process.argv[2];
+const out = process.argv[3] || '/home/storage/shots/out.png';
+const b = await chromium.launch({ headless: true, args:['--no-sandbox'] });
+const p = await b.newPage({ viewport:{ width:1280, height:900 }, deviceScaleFactor:2 });
+await p.goto(url, { waitUntil:'networkidle', timeout:30000 }).catch(()=>{});
+await p.waitForTimeout(1500);
+await p.screenshot({ path: out, fullPage: true });
+await b.close();
+console.log('shot ->', out);

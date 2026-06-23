@@ -9,3 +9,6 @@ pub mod peer_momentum;
 pub mod memory_limiter;
 pub mod orphan_rate_limiter;
 pub mod precompressed_storage;
+
+// Invented for sigil-top turbo sync X: continuous high download bandwidth ("continuerlighed")
+pub mod continuity;

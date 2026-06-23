@@ -227,6 +227,28 @@ export async function createBrowserNode(): Promise<Libp2p> {
   console.log(`📡 [LIBP2P] Network: ${NETWORK_ID}`)
   console.log(`📡 [LIBP2P] Protocol Version: ${PROTOCOL_VERSION}`)
 
+  // ── LANE-AB: dial the LIVE sigil-bridge, host-relative + with its CURRENT peer-id ──────────
+  // The bridge publishes its (now PERSISTED, stable) peer-id to /bridge-addr.json on BOTH web
+  // roots, so a wallet loaded from quillon.xyz OR sigilgraph.fluxapp.xyz fetches it same-origin
+  // and dials wss://<this-host>:9443/p2p/<id> → q-flux :9443 → bridge :9610 → /sigil/g0/blocks
+  // over gossipsub. Replaces the old hardcoded bootstrap (the Quillon node peer-id, which never
+  // matched the bridge → 0 connections). Falls back to the static list if the fetch fails.
+  let bridgeBootstrap: string[] = []
+  try {
+    const r = await fetch('/bridge-addr.json?t=' + Date.now(), { cache: 'no-store' })
+    if (r.ok) {
+      const j: any = await r.json()
+      const host = (typeof location !== 'undefined' && location.hostname) || 'sigilgraph.fluxapp.xyz'
+      if (j?.peer) {
+        bridgeBootstrap = [`/dns4/${host}/tcp/9443/wss/p2p/${j.peer}`]
+        console.log('🌉 [LIBP2P] live sigil-bridge bootstrap →', bridgeBootstrap[0])
+      }
+    }
+  } catch (e) {
+    console.warn('⚠️ [LIBP2P] /bridge-addr.json fetch failed — using static bootstrap', e)
+  }
+  const effectiveBootstrap = [...bridgeBootstrap, ...BOOTSTRAP_PEERS]
+
   // 🔐 v3.7.4: Initialize post-quantum cryptography
   console.log('🔐 [LIBP2P] Initializing post-quantum cryptography...')
   const pqStartTime = performance.now()
@@ -270,10 +292,15 @@ export async function createBrowserNode(): Promise<Libp2p> {
       // receive incoming connections from other browsers. Now browsers listen
       // on circuit relay through the bootstrap node, forming a real P2P mesh.
       addresses: {
-        // v10.3.0: Listen addresses empty initially — circuit relay is added
-        // AFTER connecting to bootstrap. Setting it here before connection
-        // causes a fatal "failed to listen" error.
-        listen: [],
+        // v0.9.1: Listen on circuit-relay + WebRTC for direct browser-to-browser.
+        //   - '/p2p-circuit': circuit-relay-v2 auto-discovers the bootstrap relay via
+        //     identify and makes a reservation, so other browsers can REACH us through
+        //     the relay (this is also the WebRTC signaling channel).
+        //   - '/webrtc': accept the upgrade to a DIRECT datachannel once signaled.
+        // Safe to set before the bootstrap connection because transportManager
+        // faultTolerance is NO_FATAL (below) — a not-yet-ready relay listen only
+        // logs a warning and is retried as relays are discovered, never crashes.
+        listen: ['/p2p-circuit', '/webrtc'],
         announce: [],
       },
 
@@ -298,7 +325,7 @@ export async function createBrowserNode(): Promise<Libp2p> {
       // Peer Discovery: Bootstrap nodes
       peerDiscovery: [
         bootstrap({
-          list: BOOTSTRAP_PEERS,
+          list: effectiveBootstrap, // LANE-AB: live sigil-bridge (host-relative) first, then statics
           timeout: CONNECTION_CONFIG.DIAL_TIMEOUT,
         }),
       ],
@@ -354,7 +381,12 @@ export async function createBrowserNode(): Promise<Libp2p> {
     logTor('info', 'Connecting to Tor bridge...')
     const dialStartTime = performance.now()
 
-    for (const peerAddr of BOOTSTRAP_PEERS) {
+    // LANE-AB: dial the LIVE sigil-bridge (fetched current peer-id, host-relative) FIRST, then
+    // the static fallbacks. This eager-dial loop used the hardcoded BOOTSTRAP_PEERS[0] (the old
+    // Quillon peer-id 12D3KooWFpbX…) → it REACHED the bridge but rejected it on an identity
+    // mismatch (got the bridge's real id) → 0 connections. effectiveBootstrap leads with the
+    // correct /dns4/<host>/tcp/9443/wss/p2p/<current-bridge-id>.
+    for (const peerAddr of effectiveBootstrap) {
       try {
         const ma = multiaddr(peerAddr)
         // Longer timeout for Tor connections (45s instead of 10s)

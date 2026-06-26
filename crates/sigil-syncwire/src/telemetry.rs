@@ -169,8 +169,18 @@ impl<C: Clock + 'static> TelemetryBus<C> {
         }
     }
 
-    /// The shared admission gate stages acquire from. Cheap `Arc` clone of the spine.
+    /// The shared admission gate stages acquire from (serve + fetch + commit + ingest).
+    /// Cheap `Arc` clone of the spine. This is the `Arc<dyn RateGate>` v7-supply's serve loop
+    /// and v7-ingest's `Pass2Sink::from_env_with_gate` consume — one bucket caps the whole
+    /// pipeline.
     pub fn gate(&self) -> Arc<dyn RateGate> {
+        self.spine.clone()
+    }
+
+    /// The CONCRETE shared spine handle. Needed by stages that record coordinated-omission
+    /// samples (`BackpressureSpine::record` is not on the `RateGate` trait — e.g. v7-ingest
+    /// wiring `record(Stage::Ingest, …)` inside its SST install). Same bucket as [`gate`].
+    pub fn spine(&self) -> Arc<BackpressureSpine<C>> {
         self.spine.clone()
     }
 
@@ -437,6 +447,17 @@ mod tests {
             bus.admit_rate() < TARGET_BLK_S,
             "high p99 under load must congest even with high throughput"
         );
+    }
+
+    #[test]
+    fn gate_and_spine_share_one_bucket() {
+        let (_clk, bus) = bus_vt(500);
+        // The dyn gate (serve/fetch admit) and the concrete spine (ingest record) are the
+        // same bucket: draining via the gate is visible through the concrete handle.
+        let gate = bus.gate();
+        let spine = bus.spine();
+        assert!(gate.admit(500));
+        assert!(!spine.try_acquire(1), "one bucket: gate drain must be seen by spine handle");
     }
 
     #[test]

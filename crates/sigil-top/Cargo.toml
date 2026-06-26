@@ -55,6 +55,8 @@ sigil-dns-anchor = { path = "../sigil-dns-anchor" }
 # v0.6.5: Block sync — SIGIL header types + local block storage via flux-db
 sigil-header = { path = "../sigil-header" }
 flux-db = { path = "../../../flux/crates/flux-db" }
+# V7-INGEST: shared backpressure spine (RateGate) + autotune knobs for the commit→DB sink.
+sigil-synctune = { path = "../sigil-synctune" }
 
 # v0.6.0: Cortex MCP combos — Autonomous Continuous Optimization Engine + AI agent registry
 flux-cortex = { path = "../../../flux/crates/flux-cortex" }

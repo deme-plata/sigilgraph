@@ -25,6 +25,7 @@ mod commit;  // LANE-C storage/commit (rocky-sync-C)
 mod skeleton_store; // flat append-only skeleton prefix store (the 10M-blk/s path to 100k)
 mod skel_flux; // ADOPT the native flux-db skeleton extension (flux_db::skeleton)
 mod archive; // PASS 2: background full-archive body backfill (trustless vs skeleton hashes)
+mod fast_forward; // V7-INGEST: PASS-2 body sink routed through LANE-1 SST-ingest (commit→DB fast-forward)
 #[allow(unused_imports)]
 pub(crate) use skeleton_store::SkeletonStore;
 use fetch::*;
@@ -676,6 +677,11 @@ impl P2PBlockSync {
                 let mut pass2_inflight = false;
                 let mut last_pass2 = crate::instant_ago(10);
                 let pass2_env = std::env::var("SIGIL_PASS2").map(|v| v != "0").unwrap_or(true);
+                // V7-INGEST: when SIGIL_DB_SST_INGEST is on, PASS-2 verified bodies commit via the
+                // LANE-1 SST-ingest fast path (~230k blk/s) instead of the ~4k batch_put WAL wall.
+                // None (flag off) → byte-identical legacy archive::ingest_bodies_verified path.
+                let mut pass2_sink: Option<fast_forward::Pass2Sink> =
+                    fast_forward::sst_ingest_active().then(fast_forward::Pass2Sink::from_env);
 
                 loop {
                     if stop_rx.try_recv().is_ok() {
@@ -1486,7 +1492,17 @@ impl P2PBlockSync {
                             pass2_inflight = false;
                             if let (Some(b), Some(sk)) = (bytes, skel.as_mut()) {
                                 let bodies = decode_verify_backfill(&b);
-                                let (stored, rejected) = archive::ingest_bodies_verified(sk, &mut store, &bodies);
+                                // V7-INGEST: route verified bodies through the SST-ingest sink when
+                                // SIGIL_DB_SST_INGEST is on; flush per reply so committed==fetched
+                                // before next_body_gap walks the gap (no re-fetch). Flag off →
+                                // byte-identical legacy per-chunk commit.
+                                let (stored, rejected) = match pass2_sink.as_mut() {
+                                    Some(sink) => {
+                                        let (st, rj) = sink.accept(sk, &mut store, &bodies);
+                                        (st + sink.flush(&mut store), rj)
+                                    }
+                                    None => archive::ingest_bodies_verified(sk, &mut store, &bodies),
+                                };
                                 if stored > 0 || rejected > 0 {
                                     store.advance();
                                     crate::tlog!("[pass2] gap@{} stored={} rejected={} archive={:.1}%",

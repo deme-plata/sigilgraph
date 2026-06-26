@@ -187,3 +187,44 @@ impl Default for CoLatency {
         Self::new()
     }
 }
+
+/// Stable stage indices so every lane uses the same id with [`BackpressureSpine::record`] /
+/// [`BackpressureSpine::p99_ns`]. Construct the spine with `Stage::COUNT` stages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum Stage {
+    Fetch = 0,
+    Verify = 1,
+    Commit = 2,
+    Ingest = 3,
+}
+impl Stage {
+    pub const COUNT: usize = 4;
+    pub fn idx(self) -> usize {
+        self as usize
+    }
+}
+
+/// Minimal admission interface the serve/ingest lanes code against, so they don't have to name
+/// the concrete clock type. `BackpressureSpine<C>` implements it; pass it around as
+/// `Arc<dyn RateGate>`. (sigil-serve's manifest references this by name.)
+pub trait RateGate: Send + Sync {
+    /// Admit `n` blocks if tokens are available now; returns true on success.
+    fn admit(&self, n: u32) -> bool;
+    /// Nanoseconds until `n` blocks would be admitted (0 = now).
+    fn admit_wait_nanos(&self, n: u32) -> u64;
+    /// Current admit rate (blocks/sec).
+    fn admit_rate(&self) -> u32;
+}
+
+impl<C: Clock> RateGate for BackpressureSpine<C> {
+    fn admit(&self, n: u32) -> bool {
+        self.try_acquire(n)
+    }
+    fn admit_wait_nanos(&self, n: u32) -> u64 {
+        self.wait_nanos(n)
+    }
+    fn admit_rate(&self) -> u32 {
+        self.rate()
+    }
+}

@@ -81,7 +81,7 @@ impl Clock for VirtualClock {
 pub const TARGET_BLK_S: u32 = 100_000;
 
 pub use autotune::{AutoTuneController, KnobSet, StageTelemetry};
-pub use backpressure::BackpressureSpine;
+pub use backpressure::{BackpressureSpine, CoLatency, RateGate, Stage};
 pub use sweep::{model_eval, recommend_config, Eval, Sweep};
 
 #[cfg(test)]
@@ -148,6 +148,18 @@ mod tests {
             c.step(&[tel(10_000.0, 900.0, 7, 4000, 1.0)]); // congested
         }
         assert!(c.knobs().window_depth < peak, "window should shrink when congested");
+    }
+
+    #[test]
+    fn rategate_as_trait_object() {
+        use crate::backpressure::{RateGate, Stage};
+        let clk = Arc::new(VirtualClock::new());
+        let sp: Arc<dyn RateGate> =
+            Arc::new(BackpressureSpine::new(clk, TARGET_BLK_S, 500, Stage::COUNT));
+        assert!(sp.admit(500)); // burst
+        assert!(!sp.admit(1)); // drained
+        assert_eq!(sp.admit_rate(), TARGET_BLK_S);
+        assert_eq!(Stage::Ingest.idx(), 3);
     }
 
     #[test]

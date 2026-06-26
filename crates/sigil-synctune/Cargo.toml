@@ -1,0 +1,14 @@
+[package]
+name = "sigil-synctune"
+version = "0.1.0"
+edition = "2021"
+description = "V7-AUTOTUNE: adaptive sync controller + global token-bucket backpressure spine for SIGIL 100k blk/s sync"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "sigil_synctune"
+path = "src/lib.rs"
+
+# Pure std on purpose: deterministic, virtual-time testable (flux-chronos discipline),
+# zero external deps so it cannot drag the workspace build or conflict with other lanes.
+[dependencies]

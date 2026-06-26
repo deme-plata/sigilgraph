@@ -105,16 +105,26 @@ pub fn fold_record(hasher: &mut blake3::Hasher, rec: &SkeletonRecord) {
 pub fn archive_root_range<S: BlockSkeletonSource + ?Sized>(src: &S, from: u64, to: u64) -> BlockHash {
     let mut h = blake3::Hasher::new();
     if to >= from {
-        let mut height = from;
+        // Scan in bounded chunks via skeleton_range (one sequential read per chunk
+        // on a disk source) instead of per-height — kills cold-start I/O thrash —
+        // while capping resident records at ~SCAN_CHUNK (≈3.6 MB) so a genesis-wide
+        // [0..=11M] root never materializes the whole chain.
+        const SCAN_CHUNK: u64 = 50_000;
+        let mut next = from;
         loop {
-            match src.skeleton_at(height) {
-                Some(rec) => fold_record(&mut h, &rec),
-                None => break,
-            }
-            if height == to {
+            let chunk_to = next.saturating_add(SCAN_CHUNK - 1).min(to);
+            let want = chunk_to - next + 1;
+            let recs = src.skeleton_range(next, chunk_to);
+            if recs.is_empty() {
                 break;
             }
-            height += 1;
+            for rec in &recs {
+                fold_record(&mut h, rec);
+            }
+            if (recs.len() as u64) < want || chunk_to == to {
+                break; // gap inside the chunk, or reached the end
+            }
+            next = chunk_to + 1;
         }
     }
     *h.finalize().as_bytes()
@@ -219,27 +229,41 @@ impl ArchiveRootCache {
 
     /// Extend the rolling hasher (and its checkpoints) forward to cover `[0..=to]`,
     /// reading any not-yet-folded records from `src`. Stops at the first gap.
+    ///
+    /// Reads in `interval`-sized batches via `skeleton_range` (one sequential read
+    /// per chunk on a disk source — no per-height I/O thrash on the cold warm-up),
+    /// folding each record and snapshotting a cloned hasher at every checkpoint
+    /// boundary. Memory stays bounded at one chunk (~3.6 MB at 50k×72 B).
     fn extend_to<S: BlockSkeletonSource + ?Sized>(&mut self, src: &S, to: u64) {
         let mut next = match self.fed_upto {
             Some(h) if h >= to => return,
-            Some(h) => h + 1,
+            Some(h) => h.saturating_add(1),
             None => 0,
         };
+        let chunk = self.interval.max(1);
         while next <= to {
-            match src.skeleton_at(next) {
-                Some(rec) => fold_record(&mut self.rolling, &rec),
-                None => break, // gap: don't fabricate; queries past the gap fall back
+            let chunk_to = next.saturating_add(chunk - 1).min(to);
+            let want = chunk_to - next + 1;
+            let recs = src.skeleton_range(next, chunk_to);
+            if recs.is_empty() {
+                break; // gap at `next`: don't fabricate; queries past it fall back
             }
-            self.fed_upto = Some(next);
-            // Snapshot AT the checkpoint boundary, immediately after folding it,
-            // before folding the next record — so the clone is exactly [0..=next].
-            if (next + 1) % self.interval == 0 {
-                self.checkpoints.push((next, self.rolling.clone()));
+            for rec in &recs {
+                fold_record(&mut self.rolling, rec);
+                self.fed_upto = Some(next);
+                // Snapshot AT the checkpoint boundary, immediately after folding it,
+                // before the next record — so the clone is exactly [0..=next].
+                if (next + 1) % self.interval == 0 {
+                    self.checkpoints.push((next, self.rolling.clone()));
+                }
+                if next == u64::MAX {
+                    return;
+                }
+                next += 1;
             }
-            if next == u64::MAX {
-                break;
+            if (recs.len() as u64) < want {
+                break; // short read ⇒ gap inside the chunk
             }
-            next += 1;
         }
     }
 
@@ -265,16 +289,12 @@ impl ArchiveRootCache {
             Some((ckpt_h, hasher)) => (hasher, ckpt_h + 1),
             None => (blake3::Hasher::new(), 0),
         };
-        let mut height = start;
-        while height <= to {
-            match src.skeleton_at(height) {
-                Some(rec) => fold_record(&mut hasher, &rec),
-                None => break,
+        // Tail is bounded by `interval` (checkpoints are that dense up to fed_upto,
+        // and skeleton_range stops at any gap), so this is one bounded batched read.
+        if to >= start {
+            for rec in src.skeleton_range(start, to) {
+                fold_record(&mut hasher, &rec);
             }
-            if height == to {
-                break;
-            }
-            height += 1;
         }
         *hasher.finalize().as_bytes()
     }
@@ -409,6 +429,34 @@ mod tests {
         // below the first checkpoint (no snapshot available → genesis fold)
         let low = 10_000u64;
         assert_eq!(cache.root_prefix(&chain, low), archive_root_range(&chain, 0, low));
+    }
+
+    /// A source that does NOT override `skeleton_range` (falls back to the trait's
+    /// per-height default). The batched `extend_to` / `archive_root_range` must
+    /// still produce identical roots through that default path.
+    #[test]
+    fn batched_paths_agree_via_default_skeleton_range() {
+        struct NoBatch(MemChain);
+        impl BlockSkeletonSource for NoBatch {
+            fn skeleton_at(&self, h: u64) -> Option<SkeletonRecord> {
+                self.0.skeleton_at(h)
+            }
+            fn tip(&self) -> u64 {
+                self.0.tip()
+            }
+            // intentionally NO skeleton_range override → uses trait default
+        }
+        let src = NoBatch(MemChain::new(120_001));
+        let oracle = MemChain::new(120_001);
+        let mut cache = ArchiveRootCache::with_interval(50_000);
+        for &anchor in &[0u64, 1, 49_999, 50_000, 99_999, 120_000] {
+            assert_eq!(
+                cache.root_prefix(&src, anchor),
+                client_root(&oracle, 0, anchor),
+                "default-skeleton_range cache root mismatch at {anchor}"
+            );
+            assert_eq!(archive_root_range(&src, 0, anchor), client_root(&oracle, 0, anchor));
+        }
     }
 
     /// trailer_for via the cache equals the stateless trailer for from==0.

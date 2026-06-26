@@ -97,4 +97,41 @@ fn main() {
         speedup
     );
     eprintln!("roots match: {}", r0 == r1);
+
+    // (C) cold-start I/O shape: count read OPERATIONS during a cold warm-up. On a
+    // disk source each skeleton_at is a point read (a syscall); each skeleton_range
+    // is ONE sequential read. Batched extend_to turns N point reads into N/interval
+    // range reads — that's the cold-start fix, independent of in-RAM timing.
+    struct Counting<'a> {
+        inner: &'a MemChain,
+        point_reads: std::cell::Cell<u64>,
+        range_reads: std::cell::Cell<u64>,
+    }
+    impl BlockSkeletonSource for Counting<'_> {
+        fn skeleton_at(&self, h: u64) -> Option<SkeletonRecord> {
+            self.point_reads.set(self.point_reads.get() + 1);
+            self.inner.skeleton_at(h)
+        }
+        fn tip(&self) -> u64 {
+            self.inner.tip()
+        }
+        fn skeleton_range(&self, from: u64, to: u64) -> Vec<SkeletonRecord> {
+            self.range_reads.set(self.range_reads.get() + 1);
+            self.inner.skeleton_range(from, to)
+        }
+    }
+    let counting = Counting {
+        inner: &chain,
+        point_reads: std::cell::Cell::new(0),
+        range_reads: std::cell::Cell::new(0),
+    };
+    let mut cold = ArchiveRootCache::with_interval(page);
+    let _ = cold.root_prefix(&counting, tip);
+    eprintln!(
+        "(C) cold warm-up over {n} records: {} range-reads, {} point-reads (per-height would be ~{} point-reads ⇒ {}x fewer read-ops)",
+        counting.range_reads.get(),
+        counting.point_reads.get(),
+        n,
+        n / counting.range_reads.get().max(1)
+    );
 }

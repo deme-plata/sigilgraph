@@ -1,0 +1,22 @@
+[package]
+name = "sigil-v7-gate"
+version = "0.1.0"
+edition = "2021"
+description = "V7-GATE: fast deterministic oracle + spine coordinated-omission pre-check for the sigil-top v7.0.0 100k-sustained acceptance gate"
+license = "MIT OR Apache-2.0"
+
+# Auto-membered via the root `crates/*` glob — no root Cargo.toml seam with sigil-v5-A.
+# Light deps on purpose: this is the FAST CI pre-check (builds in seconds, no live node,
+# no sigil-top heavy tree). The EMPIRICAL real-CPU confirmation lives in
+# crates/sigil-top/tests/sync_100k_e2e.rs; the real-transport confirmation in the
+# 2-node demo. Oracle GREEN is necessary, NOT sufficient — see src/lib.rs.
+[dependencies]
+sigil-synctune = { path = "../sigil-synctune" }
+
+[lib]
+name = "sigil_v7_gate"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sigil-v7-gate"
+path = "src/main.rs"

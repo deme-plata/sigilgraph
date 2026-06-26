@@ -52,16 +52,19 @@ pub struct StageTelemetry {
     pub loss_pct: f64,
 }
 
-/// One numeric knob under AIMD control with single-step anti-windup.
+/// One numeric knob under control: multiplicative-decrease when overdriven, otherwise a
+/// hill-climb that tracks the best-scoring value and *halves its probe step on regression*, so
+/// it converges ONTO a knee (e.g. the SST compaction sweet spot) instead of ratcheting past it.
 #[derive(Clone, Copy)]
 struct Aimd {
     value: f64,
     min: f64,
     max: f64,
-    ai: f64, // additive increase
+    ai: f64, // base additive-increase / initial probe step
     md: f64, // multiplicative decrease (0..1)
-    prev: f64,
-    prev_score: f64,
+    step: f64,
+    best: f64,
+    best_score: f64,
 }
 impl Aimd {
     fn new(value: f64, min: f64, max: f64, ai: f64, md: f64) -> Self {
@@ -71,25 +74,31 @@ impl Aimd {
             max,
             ai,
             md,
-            prev: value,
-            prev_score: f64::NEG_INFINITY,
+            step: ai,
+            best: value,
+            best_score: f64::NEG_INFINITY,
         }
     }
-    fn step(&mut self, congested: bool, score: f64) {
-        if congested {
-            // congestion response: multiplicative decrease (always shrink under load).
-            self.prev = self.value;
-            self.prev_score = score;
+    fn step(&mut self, back_off: bool, score: f64) {
+        if back_off {
+            // overdriving: multiplicative decrease, then re-anchor the hill-climb here.
             self.value = (self.value * self.md).max(self.min);
+            self.best = self.value;
+            self.best_score = score;
+            self.step = self.ai;
+            return;
+        }
+        if score >= self.best_score {
+            // improving (or flat): accept and keep probing upward at the current step.
+            self.best = self.value;
+            self.best_score = score;
+            self.value = (self.value + self.step).min(self.max);
         } else {
-            // anti-windup: if the last (increase) move actually hurt the score, undo it
-            // before increasing again — prevents runaway overshoot on the increase side.
-            if score + 1e-9 < self.prev_score {
-                self.value = self.prev;
-            }
-            self.prev = self.value;
-            self.prev_score = score;
-            self.value = (self.value + self.ai).min(self.max);
+            // regressed past a knee: fall back to the best value and halve the probe step
+            // so we converge onto the peak instead of overshooting it again.
+            self.value = self.best;
+            self.step = (self.step * 0.5).max(1.0);
+            self.value = (self.value + self.step).min(self.max);
         }
     }
 }
@@ -125,7 +134,7 @@ impl AutoTuneController {
         }
     }
 
-    /// Fold all stages into a scalar health score plus a congestion flag and the worst loss.
+    /// Fold all stages into a scalar health score plus a *back-off* flag and the worst loss.
     /// Throughput is the *bottleneck* (min) stage; p99 over budget and stalls are penalties.
     fn score(&self, stages: &[StageTelemetry]) -> (f64, bool, f64) {
         if stages.is_empty() {
@@ -141,21 +150,25 @@ impl AutoTuneController {
         let stall_penalty = 1.0 + stalls as f64;
         let score = throughput_ratio / (latency_penalty * stall_penalty);
 
-        let congested =
-            bottleneck < self.target * 0.95 || max_p99 > self.p99_budget_ms || stalls > 0;
-        (score, congested, max_loss)
+        // Back off (shrink) ONLY when we are overdriving — latency over budget or stalls.
+        // Being merely *below* the throughput target with healthy latency is NOT a reason to
+        // shrink; it means we have headroom and should push HARDER (additive increase). The
+        // earlier `bottleneck < target` clause made the controller shrink when it should grow,
+        // so it could never climb to target.
+        let overdriven = max_p99 > self.p99_budget_ms || stalls > 0;
+        (score, overdriven, max_loss)
     }
 
     /// One control tick: telemetry in, fresh knob setpoints out.
     pub fn step(&mut self, stages: &[StageTelemetry]) -> KnobSet {
         self.ticks += 1;
-        let (score, congested, max_loss) = self.score(stages);
+        let (score, overdriven, max_loss) = self.score(stages);
 
-        self.window.step(congested, score);
-        self.substream.step(congested, score);
-        self.rayon.step(congested, score);
-        self.sst_batch.step(congested, score);
-        self.ring.step(congested, score);
+        self.window.step(overdriven, score);
+        self.substream.step(overdriven, score);
+        self.rayon.step(overdriven, score);
+        self.sst_batch.step(overdriven, score);
+        self.ring.step(overdriven, score);
 
         // Empirically-derived serve-redundancy rule (flux-chronos sweep, 2026-06-26):
         //   redundancy=2 holds >=99.7% delivery up to 5% loss; escalate to 3 only above 5%.

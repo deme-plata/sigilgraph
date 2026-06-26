@@ -21,6 +21,7 @@
 
 pub mod autotune;
 pub mod backpressure;
+pub mod online;
 pub mod sweep;
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -82,6 +83,7 @@ pub const TARGET_BLK_S: u32 = 100_000;
 
 pub use autotune::{AutoTuneController, KnobSet, StageTelemetry};
 pub use backpressure::{BackpressureSpine, CoLatency, RateGate, Stage};
+pub use online::{OnlineTuner, RawStage};
 pub use sweep::{model_eval, recommend_config, Eval, Sweep};
 
 #[cfg(test)]

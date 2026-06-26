@@ -1,0 +1,21 @@
+[package]
+name = "sigil-serve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL v7 producer/serve side: codec=4 snapshot trailer (exact-range archive root + incremental cache, the >32768 finalize activation fix) and windowed ACK-paced multi-substream block-pack streaming with redundancy=2 fan-out. Transport-agnostic (ChunkSink) — composes with sigil-net WG substreams; consumes sigil-synctune's token-bucket via RateGate."
+
+# v7-supply lane (see swarm #644). LIBRARY only: sigil-node/main.rs gets a thin
+# call-site seam (build_trailer) coordinated with rocky-sync-B; the WG substreams
+# come from rocky-sync-A's sigil-net via the ChunkSink trait.
+
+[dependencies]
+sigil-header   = { path = "../sigil-header" }
+sigil-synctune = { path = "../sigil-synctune" }   # v7-autotune global backpressure spine (RateGate/Stage/Clock)
+blake3         = { workspace = true }
+serde          = { workspace = true }
+thiserror      = { workspace = true }
+bincode        = "1"
+
+[dev-dependencies]
+bincode = "1"

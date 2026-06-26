@@ -1,0 +1,11 @@
+[package]
+name = "sigil-syncwire"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "v7-integrate: wires the sigil-synctune control plane (backpressure spine + autotune) into the live SIGIL v7 sync loop — shared RateGate + online telemetry bus."
+
+# Zero external deps beyond the control plane it glues, so it never goes RED on a
+# workspace-wide dep bump and checks in seconds (watchdog-friendly).
+[dependencies]
+sigil-synctune = { path = "../sigil-synctune" }

@@ -16,6 +16,11 @@ blake3         = { workspace = true }
 serde          = { workspace = true }
 thiserror      = { workspace = true }
 bincode        = "1"
+rayon          = { workspace = true }             # LANE-3 decode-wall collapse: page-parallel inflate+deserialize
+ruzstd         = "0.7"                            # PURE-RUST zstd inflate (Windows mingw-clean, same decoder as verify.rs)
 
 [dev-dependencies]
 bincode = "1"
+# Encode test/bench pages with the SAME C-backed zstd the server uses, decode with
+# pure-Rust ruzstd — proves the exact cross-impl wire roundtrip (mirrors sigil-top).
+zstd = "0.13"

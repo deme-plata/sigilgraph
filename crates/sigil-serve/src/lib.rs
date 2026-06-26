@@ -20,8 +20,15 @@
 //! [`ChunkSink`] (rocky-sync-A), sigil-synctune token bucket as [`RateGate`]
 //! (viktor-v7-coord).
 
+pub mod decode;
 pub mod serve_pipeline;
 pub mod serve_stream;
+
+pub use decode::{
+    decode_skeleton_page, decode_skeleton_pages_parallel, decode_tagged_header_page,
+    decode_tagged_header_pages_parallel, decode_zstd_header_page,
+    decode_zstd_header_pages_parallel, inflate_zstd, DEFAULT_MAX_INFLATE,
+};
 
 pub use serve_pipeline::{
     archive_root_range, build_trailer, fold_record, skeleton_page, snapshot_header,

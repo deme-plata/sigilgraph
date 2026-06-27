@@ -58,7 +58,7 @@ struct BackfillReq {
 /// JSON values (each element = `serde_json::to_value(&Block)`).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct BackfillResp {
-    blocks: Vec<serde_json::Value>,
+    blocks: Vec<crate::block::Block>,
 }
 
 // ── codec=2 SNAPSHOT WIRE — server side (LANE-B, rocky-sync-B; v3 sync sprint) ──────────
@@ -641,7 +641,7 @@ fn run_start() -> Result<()> {
         // back into `pending` via `bf_rx` (the request is awaited off the select loop
         // in a spawned task so it never blocks production/drain).
         let mut pending: std::collections::BTreeMap<u64, crate::block::Block> = std::collections::BTreeMap::new();
-        let (bf_tx, mut bf_rx) = tokio::sync::mpsc::channel::<Vec<serde_json::Value>>(64);
+        let (bf_tx, mut bf_rx) = tokio::sync::mpsc::channel::<Vec<crate::block::Block>>(64);
         // Throttle gap requests so a sustained gap doesn't spawn a request task on
         // every received future block (fire at most every ~300ms).
         let mut last_req = std::time::Instant::now()
@@ -878,9 +878,9 @@ fn run_start() -> Result<()> {
                             // production; the requester re-asks on its own cadence. (Hits already
                             // returned above — they're free.)
                             if !req.headers_only {
-                                if last_full_serve.elapsed() < std::time::Duration::from_millis(120) {
+                                if last_full_serve.elapsed() < std::time::Duration::from_millis(3) {
                                     let empty = BackfillResp { blocks: Vec::new() };
-                                    mgr.respond(request_id, serde_json::to_vec(&empty).unwrap_or_default());
+                                    mgr.respond(request_id, bincode::serialize(&empty).unwrap_or_default());
                                     continue;
                                 }
                                 last_full_serve = std::time::Instant::now();
@@ -962,11 +962,11 @@ fn run_start() -> Result<()> {
                                 }
                             } else {
                                 let resp = BackfillResp {
-                                    blocks: blocks.iter().map(|b| serde_json::to_value(b).unwrap()).collect(),
+                                    blocks,
                                 };
                                 eprintln!("↩ rr-backfill: served {} blocks [{}..={}] to {}",
                                     resp.blocks.len(), lo, hi, peer);
-                                serde_json::to_vec(&resp).unwrap_or_default()
+                                bincode::serialize(&resp).unwrap_or_default()
                             };
                             // ── CACHE FILL (finalized ranges only), FIFO-capped ──
                             if immutable && !out.is_empty() {
@@ -1024,7 +1024,7 @@ fn run_start() -> Result<()> {
                                     if pending.len() < 200_000 {
                                         pending.entry(h).or_insert(block);
                                     }
-                                    if last_req.elapsed() >= std::time::Duration::from_millis(300) {
+                                    if last_req.elapsed() >= std::time::Duration::from_millis(15) {
                                         last_req = std::time::Instant::now();
                                         if let Some(peer) = mgr.connected_peers().into_iter().next() {
                                             let req = BackfillReq { from: expected, to: expected.saturating_add(8192), headers_only: false, codec: 0 };
@@ -1038,7 +1038,7 @@ fn run_start() -> Result<()> {
                                                     Err(_) => return,
                                                 };
                                                 if let Ok(bytes) = mgr2.send_request(peer, payload).await {
-                                                    if let Ok(resp) = serde_json::from_slice::<BackfillResp>(&bytes) {
+                                                    if let Ok(resp) = bincode::deserialize::<BackfillResp>(&bytes) {
                                                         let _ = bf_tx2.send(resp.blocks).await;
                                                     }
                                                 }
@@ -1172,7 +1172,7 @@ fn run_start() -> Result<()> {
                                     .unwrap_or(0);
                                 let expected = chain.height();
                                 if peer_h > expected
-                                    && last_req.elapsed() >= std::time::Duration::from_millis(300)
+                                    && last_req.elapsed() >= std::time::Duration::from_millis(15)
                                 {
                                     last_req = std::time::Instant::now();
                                     if let Some(peer) = mgr.connected_peers().into_iter().next() {
@@ -1189,7 +1189,7 @@ fn run_start() -> Result<()> {
                                         tokio::spawn(async move {
                                             if let Ok(payload) = serde_json::to_vec(&req) {
                                                 if let Ok(bytes) = mgr2.send_request(peer, payload).await {
-                                                    if let Ok(resp) = serde_json::from_slice::<BackfillResp>(&bytes) {
+                                                    if let Ok(resp) = bincode::deserialize::<BackfillResp>(&bytes) {
                                                         let _ = bf_tx2.send(resp.blocks).await;
                                                     }
                                                 }
@@ -1214,7 +1214,7 @@ fn run_start() -> Result<()> {
                     // same apply path the live-block branch uses.
                     if !diverged {
                         for v in vals {
-                            if let Ok(block) = serde_json::from_value::<crate::block::Block>(v) {
+                            if let Ok(block) = Ok::<crate::block::Block, ()>(v) {
                                 let h = block.header.height;
                                 if h >= chain.height() {
                                     pending.entry(h).or_insert(block);

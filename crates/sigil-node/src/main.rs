@@ -676,7 +676,38 @@ fn run_start() -> Result<()> {
         const SERVE_CACHE_CAP: usize = 2048; // ~2048 finalized chunks hot in RAM
         let (mut cache_hits, mut cache_miss): (u64, u64) = (0, 0);
         let mut last_cache_log = std::time::Instant::now();
+        // === request-ahead fetch pipeline (windowed backfill — overlaps fetch with apply) ===
+        let mut req_frontier: u64 = chain.height();
+        let mut net_tip: u64 = 0;
+        const FETCH_CHUNK: u64 = 8192;
+        const FETCH_MAX_AHEAD: u64 = 131_072; // keep ~16 ranges in flight ahead of the applied tip
         loop {
+            // Slide the window: fire consecutive range-requests until req_frontier is
+            // FETCH_MAX_AHEAD past the applied tip. Height-bounded => apply backpressures fetch.
+            // The existing `expected`-based requests below stay as gap-recovery; pending dedups.
+            if !produce && !diverged {
+                let tip = chain.height();
+                if tip > req_frontier { req_frontier = tip; }
+                while req_frontier < net_tip && req_frontier < tip + FETCH_MAX_AHEAD {
+                    if let Some(peer) = mgr.connected_peers().into_iter().next() {
+                        let from = req_frontier;
+                        let to = (from + FETCH_CHUNK).min(net_tip);
+                        let req = BackfillReq { from, to, headers_only: false, codec: 0 };
+                        let mgr2 = std::sync::Arc::clone(&mgr);
+                        let bf_tx2 = bf_tx.clone();
+                        tokio::spawn(async move {
+                            let blocks = if let Ok(payload) = serde_json::to_vec(&req) {
+                                match mgr2.send_request(peer, payload).await {
+                                    Ok(bytes) => bincode::deserialize::<BackfillResp>(&bytes).map(|r| r.blocks).unwrap_or_default(),
+                                    Err(_) => Vec::new(),
+                                }
+                            } else { Vec::new() };
+                            let _ = bf_tx2.send(blocks).await;
+                        });
+                        req_frontier += FETCH_CHUNK;
+                    } else { break; }
+                }
+            }
             tokio::select! {
                 _ = produce_tick.tick(), if produce => {
                     // Gate production on (a) having a peer and (b) a grace
@@ -878,11 +909,8 @@ fn run_start() -> Result<()> {
                             // production; the requester re-asks on its own cadence. (Hits already
                             // returned above — they're free.)
                             if !req.headers_only {
-                                if last_full_serve.elapsed() < std::time::Duration::from_millis(3) {
-                                    let empty = BackfillResp { blocks: Vec::new() };
-                                    mgr.respond(request_id, bincode::serialize(&empty).unwrap_or_default());
-                                    continue;
-                                }
+                                // serve throttle removed: client request-ahead window bounds
+                                // concurrent serves; finalized ranges are cache-served (memcpy).
                                 last_full_serve = std::time::Instant::now();
                             }
                             if immutable { cache_miss += 1; }
@@ -1021,6 +1049,7 @@ fn run_start() -> Result<()> {
                                     // missing range. send_request is async + awaits, so
                                     // we spawn it off the select loop and feed the answer
                                     // back through bf_rx — never blocking production/drain.
+                                    if h > net_tip { net_tip = h; }
                                     if pending.len() < 200_000 {
                                         pending.entry(h).or_insert(block);
                                     }
@@ -1171,6 +1200,7 @@ fn run_start() -> Result<()> {
                                     .and_then(|v| v.get("height").and_then(|x| x.as_u64()))
                                     .unwrap_or(0);
                                 let expected = chain.height();
+                                if peer_h > net_tip { net_tip = peer_h; }
                                 if peer_h > expected
                                     && last_req.elapsed() >= std::time::Duration::from_millis(15)
                                 {

@@ -78,3 +78,13 @@ num-traits  = "0.2"
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# Fast-iteration profile (added 2026-06-27): parallel codegen + no LTO + opt=1.
+# Compile sigil-top in ~19s vs ~96s for full --release. Use for the edit->build->measure
+# loop; ship + final throughput measurements still use --release (cgu=1, lto=thin, opt=3).
+#   flux-cargo-wrapper build -p sigil-top --profile release-fast
+[profile.release-fast]
+inherits = "release"
+opt-level = 1
+lto = false
+codegen-units = 256

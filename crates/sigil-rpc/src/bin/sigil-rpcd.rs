@@ -1207,6 +1207,11 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                     n.height += 1;
                     retarget(&mut n); // fix #2: adjust BLAKE4 difficulty from real block times
                     ingest(&mut n, "mine", format!("dual-lane block #{bh} reward {} (halving)", reward), &[miner], "dual-lane blake4+vdf");
+                    // Clear the per-block state-event buffer (OOM fix) — mirrors apply_block
+                    // which makes the identical call. The /mining/submit accept path was the
+                    // ONLY block-accepting path missing it, so per-block events accumulated
+                    // unbounded in SigilState as a self-mining mine-chain grew.
+                    let _ = commit_state_transition(&mut n.state, &StateTransition { at_height: bh, mutations: vec![] }, bh);
                     ok(format!("{{\"accepted\":true,\"reason\":null,\"block_height\":{},\"new_balance\":{}}}", bh, bal))
                 }
                 Err(e) => reject(e.to_string()),

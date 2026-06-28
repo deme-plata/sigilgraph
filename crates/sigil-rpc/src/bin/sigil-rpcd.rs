@@ -763,9 +763,12 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             let n = node.read().unwrap();
             let mut entries = match n.history.as_ref() {
                 None => vec![],
+                // BOUNDED: only the last `limit` of each kind — by_kind() (unbounded)
+                // materialized the ENTIRE mining history per poll -> multi-GB heap ->
+                // cgroup OOM -> restart loop that starved /mining/challenge.
                 Some(h) => match kind {
-                    "block" => h.by_kind("block").unwrap_or_default(),
-                    "tx" => { let mut v = h.by_kind("mine").unwrap_or_default(); v.extend(h.by_kind("swap").unwrap_or_default()); v }
+                    "block" => h.by_kind_recent("block", limit.max(1)).unwrap_or_default(),
+                    "tx" => { let mut v = h.by_kind_recent("mine", limit.max(1)).unwrap_or_default(); v.extend(h.by_kind_recent("swap", limit.max(1)).unwrap_or_default()); v }
                     _ => h.recent(limit.max(1)).unwrap_or_default(),
                 },
             };

@@ -18,9 +18,13 @@
 #![warn(missing_docs)]
 
 pub mod bitset;
+pub mod braid;
+pub mod present;
 pub mod view;
 
 pub use bitset::{BitfieldDag, BitfieldDagStats, VertexBitfield, VertexIndexMap};
+pub use braid::{Braid, BraidStats};
+pub use present::BraidPresentation;
 pub use sigil_header::BlockHash;
 pub use view::BlockView;
 

@@ -629,28 +629,7 @@ fn run_start() -> Result<()> {
         // SIGIL_DAG=1 REAL ordering: the braid is only constructed in dag_mode —
         // None ⇒ SIGIL_DAG=0 behavior-identical (design §3.1). Seeded from the
         // local chain's in-RAM window so the producer's own spine is known.
-        let mut braid: Option<Braid> = dag_mode.then(|| {
-            let cfg = BraidConfig::from_env();
-            eprintln!("🕸 braid config: final_depth={} max_window={} max_pending={} max_merge_parents={}",
-                cfg.final_depth, cfg.max_window, cfg.max_pending, cfg.max_merge_parents);
-            let mut b = Braid::new(cfg);
-            let mut seeded = 0usize;
-            for hh in chain.window_base()..chain.height() {
-                if let Some(blk) = chain.get(hh) {
-                    if matches!(b.insert(BlockView::from(&blk.header)), InsertOutcome::Inserted { .. }) {
-                        seeded += 1;
-                    }
-                }
-            }
-            if chain.window_base() > 0 {
-                // Pruned window base: the base block's parent is pre-window, so
-                // seeds park until backfill reaches genesis (v0 limitation).
-                eprintln!("⚠ braid seeded from a pruned window (base H={}) — pre-window ancestry unknown; \
-                    views park until backfill", chain.window_base());
-            }
-            eprintln!("🕸 braid seeded with {} local window blocks", seeded);
-            b
-        });
+        let mut braid: Option<Braid> = dag_mode.then(|| dag_seed_braid(&chain));
         // Full bodies awaiting/holding braid order, RAM-only + bounded (design
         // §3.1): evicted below finalized height after each drain, hard-capped.
         let dag_max_bodies: usize = std::env::var("SIGIL_DAG_MAX_BODIES").ok()
@@ -661,6 +640,10 @@ fn run_start() -> Result<()> {
         // already-applied), refused-below-final, structural rejects, apply fails.
         let (mut dag_ord_skipped, mut dag_below_final, mut dag_rejected, mut dag_apply_failed) =
             (0u64, 0u64, 0u64, 0u64);
+        // Wedge self-heal markers (see the Rejected arms): reject count and tip
+        // height at the last reseed — reseeds are progress-gated on the height.
+        let mut dag_last_reseed_rejects: u64 = 0;
+        let mut dag_last_reseed_height: u64 = 0;
         let mut produce_tick =
             tokio::time::interval(std::time::Duration::from_micros(produce_us.max(50)));
         produce_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1102,10 +1085,14 @@ fn run_start() -> Result<()> {
                                             while peer_tips.len() > 4 { peer_tips.pop_front(); }
                                         }
                                         InsertOutcome::MissingParents(_missing) => {
-                                            // Park the body; pull the ancestry gap with the
-                                            // EXISTING throttled rr-backfill shape (the gap
-                                            // path below) — responses land in bf_rx and feed
-                                            // the braid there, unparking this block.
+                                            // Park the body for the braid AND buffer it for the
+                                            // LINEAR contiguous applier (catch-up is linear; the
+                                            // braid re-anchors at the frontier via self-heal).
+                                            // Pull the ancestry gap with the EXISTING throttled
+                                            // rr-backfill shape — responses land in bf_rx.
+                                            if bheight >= chain.height() {
+                                                pending.entry(bheight).or_insert(block.clone());
+                                            }
                                             dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, block);
                                             if last_req.elapsed() >= std::time::Duration::from_millis(15) {
                                                 last_req = std::time::Instant::now();
@@ -1140,7 +1127,23 @@ fn run_start() -> Result<()> {
                                         }
                                         InsertOutcome::Rejected(r) => {
                                             dag_rejected += 1;
-                                            eprintln!("⚠ braid: reject from {} at H={}: {}", from, bheight, r);
+                                            if dag_rejected % 1000 == 1 {
+                                                eprintln!("⚠ braid: reject from {} at H={}: {} ({} total)", from, bheight, r, dag_rejected);
+                                            }
+                                            // Wedge self-heal: sustained rejects (e.g. pending
+                                            // overflow after a deep late-join) mean the braid
+                                            // lost the frontier — rebuild it base-anchored from
+                                            // the CURRENT window. Progress-gated: only after the
+                                            // linear catch-up has actually advanced the tip.
+                                            if dag_rejected.saturating_sub(dag_last_reseed_rejects) >= 5000
+                                                && chain.height() > dag_last_reseed_height
+                                            {
+                                                dag_last_reseed_rejects = dag_rejected;
+                                                dag_last_reseed_height = chain.height();
+                                                eprintln!("🕸 braid re-anchor after catch-up progress ({} rejects, tip H={})",
+                                                    dag_rejected, chain.height());
+                                                *br = dag_seed_braid(&chain);
+                                            }
                                             continue;
                                         }
                                     }
@@ -1368,23 +1371,49 @@ fn run_start() -> Result<()> {
                     // height, then drain `pending` contiguously into the chain via the
                     // same apply path the live-block branch uses.
                     if let Some(br) = braid.as_mut() {
-                        // SIGIL_DAG=1: backfilled blocks feed the braid (unparking
-                        // any waiters), then the drain applies newly finalized
-                        // spine blocks exactly like the live-gossip branch (§3.2).
+                        // SIGIL_DAG=1 catch-up is LINEAR, exactly like the proven
+                        // non-dag arm: buffer by height, contiguously apply through
+                        // the UNMODIFIED ChainTip::apply chokepoint. The braid is a
+                        // FRONTIER structure — it is fed opportunistically as blocks
+                        // apply, and the wedge self-heal re-anchors it at the new
+                        // window once catch-up makes progress. Pushing a deep gap
+                        // through the braid (pending cap 4096) is what wedged the
+                        // first braid-c smoke test — never again.
                         for block in vals {
                             if block.header.precheck().is_err() { continue; }
-                            let bhash = block.hash();
-                            match br.insert(BlockView::from(&block.header)) {
-                                InsertOutcome::Inserted { .. } | InsertOutcome::MissingParents(_) => {
-                                    dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, block);
-                                }
-                                InsertOutcome::Duplicate => {}
-                                InsertOutcome::BelowFinal { .. } => { dag_below_final += 1; }
-                                InsertOutcome::Rejected(r) => {
-                                    dag_rejected += 1;
-                                    eprintln!("⚠ braid: rr-backfill reject: {}", r);
-                                }
+                            let h = block.header.height;
+                            if h >= chain.height() {
+                                pending.entry(h).or_insert(block);
                             }
+                        }
+                        while let Some(b) = pending.remove(&chain.height()) {
+                            let bhash = b.hash();
+                            let view = BlockView::from(&b.header);
+                            let braw = serde_json::to_vec(&b).unwrap_or_default();
+                            match chain.apply(b.clone()) {
+                                Ok(_) => {
+                                    let _ = chain_log.append_bytes(&braw);
+                                    applied += 1;
+                                    backfilled += 1;
+                                    if matches!(br.insert(view), InsertOutcome::Inserted { .. }) {
+                                        dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, b);
+                                    }
+                                }
+                                Err(_) => { dag_apply_failed += 1; break; }
+                            }
+                        }
+                        // Wedge self-heal: after sustained rejects AND real catch-up
+                        // progress, rebuild the braid base-anchored at the current
+                        // window so it re-acquires the frontier. Progress-gated so a
+                        // stalled node cannot churn reseeds.
+                        if dag_rejected.saturating_sub(dag_last_reseed_rejects) >= 5000
+                            && chain.height() > dag_last_reseed_height
+                        {
+                            dag_last_reseed_rejects = dag_rejected;
+                            dag_last_reseed_height = chain.height();
+                            eprintln!("🕸 braid re-anchor after catch-up progress ({} rejects, tip H={})",
+                                dag_rejected, chain.height());
+                            *br = dag_seed_braid(&chain);
                         }
                         let (a, s, f) = dag_drain_apply(
                             br, &mut dag_bodies, &mut chain,
@@ -1944,6 +1973,49 @@ pub const MASTER_WALLET_GENESIS: [u8; 32] = [
 /// landed). The real genesis ceremony in P1+ will commit a network-wide
 /// chosen timestamp; this is the P0 placeholder so two nodes can chain.
 pub const GENESIS_TIMESTAMP_MS: u64 = 1_748_538_000_000;
+
+/// Build (or REBUILD — the wedge self-heal) a braid seeded from the local
+/// chain's in-RAM window. A pruned window (base > 0) anchors the braid at the
+/// oldest in-RAM block via `Braid::new_with_base` — trusted because this node
+/// applied it through the state chokepoint — so seeds chain cleanly instead
+/// of parking against unknown pre-window ancestry.
+fn dag_seed_braid(chain: &ChainTip) -> Braid {
+    let cfg = BraidConfig::from_env();
+    eprintln!("🕸 braid config: final_depth={} max_window={} max_pending={} max_merge_parents={}",
+        cfg.final_depth, cfg.max_window, cfg.max_pending, cfg.max_merge_parents);
+    let base_h = chain.window_base();
+    let (mut b, seed_from) = if base_h > 0 {
+        match chain.get(base_h) {
+            Some(base_blk) => {
+                let bv = BlockView::from(&base_blk.header);
+                eprintln!("🕸 braid base-anchored at H={} (pruned window; pre-window ancestry trusted-local)", base_h);
+                (Braid::new_with_base(cfg, bv.hash, bv.height), base_h + 1)
+            }
+            None => (Braid::new(cfg), base_h),
+        }
+    } else {
+        (Braid::new(cfg), 0)
+    };
+    let mut seeded = 0usize;
+    for hh in seed_from..chain.height() {
+        if let Some(blk) = chain.get(hh) {
+            let view = BlockView::from(&blk.header);
+            // Window blocks may carry merge edges to bodies this node never
+            // stored (the other strand, pre-catch-up). Those references are
+            // committed inside headers we applied through the chokepoint —
+            // anchor them as trusted history so the seed chains instead of
+            // cascading into the parked set.
+            for mp in &view.merge_parents {
+                b.anchor_trusted(*mp, view.height.saturating_sub(1));
+            }
+            if matches!(b.insert(view), InsertOutcome::Inserted { .. }) {
+                seeded += 1;
+            }
+        }
+    }
+    eprintln!("🕸 braid seeded with {} local window blocks", seeded);
+    b
+}
 
 /// SIGIL_DAG=1 drain step (design §3.2 step 4): pull the braid's newly
 /// finalized order and state-apply EXACTLY the blocks that extend the local

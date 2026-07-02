@@ -125,6 +125,34 @@ impl Braid {
         }
     }
 
+    /// New braid anchored at a trusted base block — for seeding from a PRUNED
+    /// local window, where the base's own ancestry is pre-window and
+    /// intentionally unknown. The base is recorded as already-emitted at its
+    /// height so descendants chain normally, but it is NOT part of the
+    /// emission order (never drained, absent from `order_hash`). Trust is the
+    /// caller's responsibility: the base must be a block the node itself
+    /// applied through the state chokepoint.
+    pub fn new_with_base(cfg: BraidConfig, base_hash: BlockHash, base_height: u64) -> Self {
+        let mut b = Self::new(cfg);
+        b.anchor_trusted(base_hash, base_height);
+        b
+    }
+
+    /// Record `hash` as trusted, already-emitted pre-frontier history at
+    /// `height` (same trust model as [`Braid::new_with_base`] — the caller
+    /// vouches, typically because the reference is committed inside a header
+    /// this node already applied through the state chokepoint). Used when
+    /// seeding from a window whose blocks carry merge edges to bodies that
+    /// were never stored locally (e.g. the other strand, pre-catch-up).
+    /// No-op if the hash is already known to the braid; never enters the
+    /// emission order.
+    pub fn anchor_trusted(&mut self, hash: BlockHash, height: u64) {
+        if self.recs.contains_key(&hash) || self.emitted_at.contains_key(&hash) {
+            return;
+        }
+        self.emitted_at.insert(hash, height);
+    }
+
     /// Insert a block view. Every input yields a structured outcome — never
     /// panics on foreign data. `newly_ready` counts views (this one plus any
     /// unparked pendings) that entered the ordering window as a result.
@@ -688,6 +716,39 @@ mod tests {
         assert_eq!(b.merge_tips(&h(3), 4), vec![h(2)]);
         // Cap respected.
         assert_eq!(b.merge_tips(&h(200), 1), vec![h(3)]);
+    }
+
+    #[test]
+    fn base_anchored_seed_chains_and_finalizes() {
+        // Pruned-window scenario: base at height 1000, its ancestry unknown.
+        let base = h(9);
+        let mut b = Braid::new_with_base(cfg(64), base, 1000);
+        // A 200-block suffix chaining from the base must insert cleanly...
+        let mut parent = base;
+        for i in 0..200u64 {
+            let hash = {
+                let mut x = [0u8; 32];
+                x[..8].copy_from_slice(&(i + 7).to_le_bytes());
+                x[31] = 0x5A;
+                x
+            };
+            match b.insert(v(hash, parent, vec![], 1001 + i, PA)) {
+                InsertOutcome::Inserted { .. } => {}
+                other => panic!("seed insert at H={} got {other:?}", 1001 + i),
+            }
+            parent = hash;
+        }
+        // ...finality advances past the base (tip 1200 − depth 64 = 1136)...
+        assert_eq!(b.finalized_height(), 1136);
+        // ...and the anchor itself is never emitted.
+        let drained = b.drain_ordered();
+        assert!(!drained.is_empty());
+        assert!(!drained.contains(&base));
+        // A block below the base with unknown ancestry parks, it does not wedge.
+        match b.insert(v(h(8), h(7), vec![], 900, PB)) {
+            InsertOutcome::MissingParents(_) | InsertOutcome::BelowFinal { .. } => {}
+            other => panic!("below-base insert got {other:?}"),
+        }
     }
 
     #[test]

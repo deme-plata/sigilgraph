@@ -1153,10 +1153,12 @@ fn run_start() -> Result<()> {
                                     if received % 200 == 0 {
                                         let secs = t_start.elapsed().as_secs_f64().max(1e-6);
                                         let st = br.stats();
-                                        eprintln!("🕸 braid: recv {} ({:.1}/s) · applied {} · ord-skipped {} · below-final {} · rejected {} · apply-fail {} · window {} pending {} final H={} tip H={} · {} txs ({:.0} TPS)",
+                                        let oh = br.order_hash();
+                                        eprintln!("🕸 braid: recv {} ({:.1}/s) · applied {} · ord-skipped {} · below-final {} · rejected {} · apply-fail {} · window {} pending {} final H={} tip H={} · order_hash {} · {} txs ({:.0} TPS)",
                                             received, received as f64 / secs, applied,
                                             dag_ord_skipped, dag_below_final, dag_rejected, dag_apply_failed,
                                             st.window, st.pending, st.finalized_height, chain.height(),
+                                            hex::encode(&oh[..8]),
                                             tx_total, tx_total as f64 / secs);
                                     }
                                     continue;
@@ -1960,8 +1962,18 @@ fn dag_drain_apply(
     chain: &mut ChainTip,
     persist: &mut dyn FnMut(&[u8]),
 ) -> (u64, u64, u64) {
+    // Cross-node divergence detector (opt-in, test meshes): log every
+    // finalized emission with its sequence index. Two nodes' ⛓ streams must
+    // be prefix-identical — the wire analogue of sim gate S1.
+    let order_log = std::env::var("SIGIL_DAG_ORDER_LOG").ok().as_deref() == Some("1");
     let (mut applied, mut skipped, mut failed) = (0u64, 0u64, 0u64);
-    for oh in braid.drain_ordered() {
+    let batch = braid.drain_ordered();
+    let mut ord_idx = braid.stats().emitted_total.saturating_sub(batch.len());
+    for oh in batch {
+        if order_log {
+            eprintln!("⛓ ord #{} {}", ord_idx, hex::encode(&oh[..12]));
+        }
+        ord_idx += 1;
         let Some(body) = dag_bodies.get(&oh) else {
             skipped += 1; // ordered, but body never stored / already evicted
             continue;

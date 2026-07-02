@@ -1,0 +1,11 @@
+[package]
+name = "sigil-dagknight"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Deterministic braid linearization over the committed SIGIL block DAG (parent_hash + merge_parents). NOT GHOSTDAG, NOT DagKnight-the-paper — see docs/SIGIL_DAGKNIGHT_LANE_v0.md §1."
+
+[dependencies]
+blake3 = { workspace = true }
+serde  = { workspace = true }
+sigil-header = { path = "../sigil-header" }

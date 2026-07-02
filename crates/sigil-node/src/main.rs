@@ -17,6 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 
+use sigil_dagknight::{BlockView, Braid, BraidConfig, InsertOutcome};
 use sigil_events::SigilEvent;
 use sigil_header::{
     BlockHash, ProofBundle, SigScheme, SigilBlockHeaderV0, SignatureBytes, SqiSignature,
@@ -622,8 +623,44 @@ fn run_start() -> Result<()> {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
         let mut peer_tips: std::collections::VecDeque<BlockHash> = std::collections::VecDeque::new();
         if dag_mode {
-            eprintln!("🕸 DAG mode — blocks merge peer tips as parents (DagKnight v0)");
+            eprintln!("🕸 DAG mode — real braid ordering: deterministic braid linearization v1 \
+                (NOT GHOSTDAG, NOT DagKnight-the-paper — docs/SIGIL_DAGKNIGHT_LANE_v0.md §1)");
         }
+        // SIGIL_DAG=1 REAL ordering: the braid is only constructed in dag_mode —
+        // None ⇒ SIGIL_DAG=0 behavior-identical (design §3.1). Seeded from the
+        // local chain's in-RAM window so the producer's own spine is known.
+        let mut braid: Option<Braid> = dag_mode.then(|| {
+            let cfg = BraidConfig::from_env();
+            eprintln!("🕸 braid config: final_depth={} max_window={} max_pending={} max_merge_parents={}",
+                cfg.final_depth, cfg.max_window, cfg.max_pending, cfg.max_merge_parents);
+            let mut b = Braid::new(cfg);
+            let mut seeded = 0usize;
+            for hh in chain.window_base()..chain.height() {
+                if let Some(blk) = chain.get(hh) {
+                    if matches!(b.insert(BlockView::from(&blk.header)), InsertOutcome::Inserted { .. }) {
+                        seeded += 1;
+                    }
+                }
+            }
+            if chain.window_base() > 0 {
+                // Pruned window base: the base block's parent is pre-window, so
+                // seeds park until backfill reaches genesis (v0 limitation).
+                eprintln!("⚠ braid seeded from a pruned window (base H={}) — pre-window ancestry unknown; \
+                    views park until backfill", chain.window_base());
+            }
+            eprintln!("🕸 braid seeded with {} local window blocks", seeded);
+            b
+        });
+        // Full bodies awaiting/holding braid order, RAM-only + bounded (design
+        // §3.1): evicted below finalized height after each drain, hard-capped.
+        let dag_max_bodies: usize = std::env::var("SIGIL_DAG_MAX_BODIES").ok()
+            .and_then(|v| v.trim().parse().ok()).unwrap_or(32_768);
+        let mut dag_bodies: std::collections::HashMap<BlockHash, crate::block::Block> =
+            std::collections::HashMap::new();
+        // v0 metrics: ordered-but-not-state-applied (off-spine / non-extending /
+        // already-applied), refused-below-final, structural rejects, apply fails.
+        let (mut dag_ord_skipped, mut dag_below_final, mut dag_rejected, mut dag_apply_failed) =
+            (0u64, 0u64, 0u64, 0u64);
         let mut produce_tick =
             tokio::time::interval(std::time::Duration::from_micros(produce_us.max(50)));
         produce_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -729,8 +766,14 @@ fn run_start() -> Result<()> {
                         eprintln!("🏭 grace elapsed — streaming blocks now");
                     }
                     if producing {
-                    let mp: Vec<BlockHash> =
-                        if dag_mode { peer_tips.iter().cloned().collect() } else { Vec::new() };
+                    // SIGIL_DAG=1: merge parents = real DAG tips from the braid
+                    // (own tip excluded, deterministic height-desc/hash-asc,
+                    // capped 4 — design §3.3). Braid None ⇒ legacy peer_tips.
+                    let mp: Vec<BlockHash> = match braid.as_ref() {
+                        Some(b) => b.merge_tips(&chain.parent_hash(), 4),
+                        None if dag_mode => peer_tips.iter().cloned().collect(),
+                        None => Vec::new(),
+                    };
                     // pull verify-once txs (already verified at mempool ingest)
                     let block_txs: Vec<SignedTx> =
                         if txgen > 0 { mempool.lock().unwrap().pull(txgen) } else { Vec::new() };
@@ -753,10 +796,19 @@ fn run_start() -> Result<()> {
                             let roots_json = serde_json::to_string(&header_roots).unwrap_or_else(|_| "null".into());
                             let tiphash = hex_full(&bhash);
                             let bytes = serde_json::to_vec(&block).unwrap_or_default();
+                            // SIGIL_DAG=1: capture view + body BEFORE apply moves
+                            // the block, so our own blocks enter the braid (§3.3).
+                            let dag_own: Option<(BlockView, crate::block::Block)> =
+                                braid.is_some().then(|| (BlockView::from(&block.header), block.clone()));
                             // advance our own tip first, then broadcast it
                             match chain.apply(block) {
                                 Ok(_) => {
                                     let _ = chain_log.append_bytes(&bytes); // durable, O(1)
+                                    if let (Some(br), Some((view, body))) = (braid.as_mut(), dag_own) {
+                                        let vh = view.hash;
+                                        let _ = br.insert(view); // own block joins the DAG
+                                        dag_store_body(&mut dag_bodies, dag_max_bodies, vh, body);
+                                    }
                                     produced += 1;
                                     produced_tx += block_txs.len() as u64;
                                     // per-block feed line for dag.html (stdout; the
@@ -1027,14 +1079,85 @@ fn run_start() -> Result<()> {
                                     Err(_) => continue,
                                 };
                                 received += 1;
-                                if dag_mode {
-                                    peer_tips.push_back(block.hash());
-                                    while peer_tips.len() > 4 { peer_tips.pop_front(); }
+                                if let Some(br) = braid.as_mut() {
+                                    // SIGIL_DAG=1 REAL path (design §3.2): precheck →
+                                    // braid.insert → park+backfill on missing parents →
+                                    // drain the finalized order and state-apply exactly
+                                    // the spine blocks that extend the local tip through
+                                    // the UNMODIFIED ChainTip::apply chokepoint.
                                     tx_total += block.header.tx_count as u64;
+                                    if let Err(e) = block.header.precheck() {
+                                        eprintln!("⚠ braid: precheck reject from {}: {}", from, e);
+                                        continue;
+                                    }
+                                    let bhash = block.hash();
+                                    let bheight = block.header.height;
+                                    if bheight > net_tip { net_tip = bheight; }
+                                    match br.insert(BlockView::from(&block.header)) {
+                                        InsertOutcome::Inserted { .. } => {
+                                            dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, block);
+                                            // legacy tips deque stays fed for one release
+                                            // (harmless; unused when braid is Some).
+                                            peer_tips.push_back(bhash);
+                                            while peer_tips.len() > 4 { peer_tips.pop_front(); }
+                                        }
+                                        InsertOutcome::MissingParents(_missing) => {
+                                            // Park the body; pull the ancestry gap with the
+                                            // EXISTING throttled rr-backfill shape (the gap
+                                            // path below) — responses land in bf_rx and feed
+                                            // the braid there, unparking this block.
+                                            dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, block);
+                                            if last_req.elapsed() >= std::time::Duration::from_millis(15) {
+                                                last_req = std::time::Instant::now();
+                                                if let Some(peer) = mgr.connected_peers().into_iter().next() {
+                                                    let req = BackfillReq {
+                                                        from: chain.height(),
+                                                        to: bheight.saturating_add(1),
+                                                        headers_only: false,
+                                                        codec: 0,
+                                                    };
+                                                    eprintln!("⇪ rr-backfill(braid): missing parents at H={} — requesting [{}..={}] from {}",
+                                                        bheight, req.from, req.to, peer);
+                                                    let mgr2 = std::sync::Arc::clone(&mgr);
+                                                    let bf_tx2 = bf_tx.clone();
+                                                    tokio::spawn(async move {
+                                                        if let Ok(payload) = serde_json::to_vec(&req) {
+                                                            if let Ok(bytes) = mgr2.send_request(peer, payload).await {
+                                                                if let Ok(resp) = bincode::deserialize::<BackfillResp>(&bytes) {
+                                                                    let _ = bf_tx2.send(resp.blocks).await;
+                                                                }
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        InsertOutcome::Duplicate => { continue; }
+                                        InsertOutcome::BelowFinal { .. } => {
+                                            dag_below_final += 1; // reorg-window guard held
+                                            continue;
+                                        }
+                                        InsertOutcome::Rejected(r) => {
+                                            dag_rejected += 1;
+                                            eprintln!("⚠ braid: reject from {} at H={}: {}", from, bheight, r);
+                                            continue;
+                                        }
+                                    }
+                                    let (a, s, f) = dag_drain_apply(
+                                        br, &mut dag_bodies, &mut chain,
+                                        &mut |braw| { let _ = chain_log.append_bytes(braw); });
+                                    applied += a;
+                                    dag_ord_skipped += s;
+                                    dag_apply_failed += f;
                                     if received % 200 == 0 {
                                         let secs = t_start.elapsed().as_secs_f64().max(1e-6);
-                                        eprintln!("🕸 merged {} peer blocks ({:.1}/s) · {} verify-once txs ({:.0} TPS) as DAG tips",
-                                            received, received as f64 / secs, tx_total, tx_total as f64 / secs);
+                                        let st = br.stats();
+                                        eprintln!("🕸 braid: recv {} ({:.1}/s) · applied {} · ord-skipped {} · below-final {} · rejected {} · apply-fail {} · window {} pending {} final H={} tip H={} · {} txs ({:.0} TPS)",
+                                            received, received as f64 / secs, applied,
+                                            dag_ord_skipped, dag_below_final, dag_rejected, dag_apply_failed,
+                                            st.window, st.pending, st.finalized_height, chain.height(),
+                                            tx_total, tx_total as f64 / secs);
                                     }
                                     continue;
                                 }
@@ -1242,7 +1365,33 @@ fn run_start() -> Result<()> {
                     // Point-to-point backfill response arrived: buffer each block by
                     // height, then drain `pending` contiguously into the chain via the
                     // same apply path the live-block branch uses.
-                    if !diverged {
+                    if let Some(br) = braid.as_mut() {
+                        // SIGIL_DAG=1: backfilled blocks feed the braid (unparking
+                        // any waiters), then the drain applies newly finalized
+                        // spine blocks exactly like the live-gossip branch (§3.2).
+                        for block in vals {
+                            if block.header.precheck().is_err() { continue; }
+                            let bhash = block.hash();
+                            match br.insert(BlockView::from(&block.header)) {
+                                InsertOutcome::Inserted { .. } | InsertOutcome::MissingParents(_) => {
+                                    dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, block);
+                                }
+                                InsertOutcome::Duplicate => {}
+                                InsertOutcome::BelowFinal { .. } => { dag_below_final += 1; }
+                                InsertOutcome::Rejected(r) => {
+                                    dag_rejected += 1;
+                                    eprintln!("⚠ braid: rr-backfill reject: {}", r);
+                                }
+                            }
+                        }
+                        let (a, s, f) = dag_drain_apply(
+                            br, &mut dag_bodies, &mut chain,
+                            &mut |braw| { let _ = chain_log.append_bytes(braw); });
+                        applied += a;
+                        backfilled += a;
+                        dag_ord_skipped += s;
+                        dag_apply_failed += f;
+                    } else if !diverged {
                         for v in vals {
                             if let Ok(block) = Ok::<crate::block::Block, ()>(v) {
                                 let h = block.header.height;
@@ -1793,6 +1942,74 @@ pub const MASTER_WALLET_GENESIS: [u8; 32] = [
 /// landed). The real genesis ceremony in P1+ will commit a network-wide
 /// chosen timestamp; this is the P0 placeholder so two nodes can chain.
 pub const GENESIS_TIMESTAMP_MS: u64 = 1_748_538_000_000;
+
+/// SIGIL_DAG=1 drain step (design §3.2 step 4): pull the braid's newly
+/// finalized order and state-apply EXACTLY the blocks that extend the local
+/// tip (`parent_hash == tip && height == next`) through the full, UNMODIFIED
+/// `ChainTip::apply` chokepoint (precheck → commit_state_transition →
+/// check_roots_match). Ordered blocks that are off-spine, non-extending, or
+/// already applied (the producer self-applies its own) are counted in
+/// `skipped` and NOT state-applied — v0 semantics per
+/// `docs/SIGIL_DAGKNIGHT_LANE_v0.md` §3.4. Applied blocks are handed to
+/// `persist` (the chain_log append path) exactly as the linear path does.
+/// Bodies below the braid's finalized height are evicted after the drain.
+/// Returns `(applied, skipped, failed)`.
+fn dag_drain_apply(
+    braid: &mut Braid,
+    dag_bodies: &mut std::collections::HashMap<BlockHash, crate::block::Block>,
+    chain: &mut ChainTip,
+    persist: &mut dyn FnMut(&[u8]),
+) -> (u64, u64, u64) {
+    let (mut applied, mut skipped, mut failed) = (0u64, 0u64, 0u64);
+    for oh in braid.drain_ordered() {
+        let Some(body) = dag_bodies.get(&oh) else {
+            skipped += 1; // ordered, but body never stored / already evicted
+            continue;
+        };
+        let extends = body.header.parent_hash == chain.parent_hash()
+            && body.header.height == chain.height();
+        if !extends {
+            skipped += 1; // ordered + committed, not state-applied (v0)
+            continue;
+        }
+        let braw = serde_json::to_vec(body).unwrap_or_default();
+        match chain.apply(body.clone()) {
+            Ok(()) => {
+                persist(&braw);
+                applied += 1;
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!("🔴 braid spine apply FAILED at H={} — {}", body.header.height, e);
+            }
+        }
+    }
+    let fin = braid.finalized_height();
+    dag_bodies.retain(|_, b| b.header.height >= fin);
+    (applied, skipped, failed)
+}
+
+/// Bounded insert into the SIGIL_DAG=1 body store. On overflow the
+/// lowest-height resident body is dropped first (approximation of the design's
+/// "lowest-height off-spine first" — the linear path's 200k `pending` cap is
+/// the precedent). O(n) scan only on overflow.
+fn dag_store_body(
+    dag_bodies: &mut std::collections::HashMap<BlockHash, crate::block::Block>,
+    cap: usize,
+    hash: BlockHash,
+    block: crate::block::Block,
+) {
+    if dag_bodies.len() >= cap && !dag_bodies.contains_key(&hash) {
+        if let Some(evict) = dag_bodies
+            .iter()
+            .min_by_key(|(h, b)| (b.header.height, **h))
+            .map(|(h, _)| *h)
+        {
+            dag_bodies.remove(&evict);
+        }
+    }
+    dag_bodies.insert(hash, block);
+}
 
 /// Mint an EMPTY block at the current tip — a no-tx block that just advances
 /// the chain. Used by the `start` producer loop to stream blocks across the
@@ -2452,5 +2669,72 @@ mod tests {
         assert!(chain.get(0).is_none(), "pruned genesis is gone from RAM");
         let tip_height = chain.height() - 1;
         assert!(chain.get(tip_height).is_some(), "the tip block stays resident in RAM");
+    }
+}
+
+#[cfg(test)]
+mod dag_wiring_tests {
+    //! S5b-lite (design §4): the SIGIL_DAG=1 spine-apply eligibility logic —
+    //! three consensus-valid blocks driven through a REAL `Braid` and the REAL
+    //! `ChainTip::apply` chokepoint, delivered in worst-case (children-first)
+    //! order. No node boot, no networking, no new dev-deps.
+    use super::*;
+
+    #[test]
+    fn braid_drain_applies_spine_blocks_in_order() {
+        // Build genesis + 2 successors on a scratch chain (the producer path).
+        let mut builder = ChainTip::new();
+        let g = build_genesis().expect("genesis");
+        let mut blocks = vec![g.clone()];
+        builder.apply(g).expect("apply genesis");
+        for _ in 0..2 {
+            let b = mint_next_block(&builder, vec![], &[]).expect("mint");
+            blocks.push(b.clone());
+            builder.apply(b).expect("apply");
+        }
+
+        // Follower: fresh chain + braid with final_depth 0 so every ordered
+        // block finalizes at the tip (the wiring under test, not finality lag).
+        let mut chain = ChainTip::new();
+        let mut braid = Braid::new(BraidConfig { final_depth: 0, ..BraidConfig::default() });
+        let mut dag_bodies = std::collections::HashMap::new();
+        let mut persisted: Vec<Vec<u8>> = Vec::new();
+        let (mut applied, mut skipped) = (0u64, 0u64);
+        // Worst-case arrival: children before parents (park → cascade unpark).
+        for b in blocks.iter().rev() {
+            let outcome = braid.insert(BlockView::from(&b.header));
+            assert!(
+                !matches!(outcome, InsertOutcome::Rejected(_)),
+                "unexpected reject: {outcome:?}"
+            );
+            dag_store_body(&mut dag_bodies, 32, b.hash(), b.clone());
+            let (a, s, f) = dag_drain_apply(&mut braid, &mut dag_bodies, &mut chain, &mut |braw| {
+                persisted.push(braw.to_vec());
+            });
+            applied += a;
+            skipped += s;
+            assert_eq!(f, 0, "no apply failures through the real chokepoint");
+        }
+
+        // All three landed IN SPINE ORDER through the unmodified apply path.
+        assert_eq!(applied, 3);
+        assert_eq!(skipped, 0, "every ordered block extended the tip");
+        assert_eq!(chain.height(), 3);
+        assert_eq!(chain.parent_hash(), blocks[2].hash(), "tip = last minted block");
+        assert_eq!(persisted.len(), 3, "each applied block hit the persist hook");
+        let persisted_heights: Vec<u64> = persisted
+            .iter()
+            .map(|raw| serde_json::from_slice::<crate::block::Block>(raw).unwrap().header.height)
+            .collect();
+        assert_eq!(persisted_heights, vec![0, 1, 2], "persisted in linearized order");
+
+        // Re-feeding an old block is refused (Duplicate or BelowFinal) and the
+        // chain is untouched — the reorg-window guard end-to-end.
+        let refeed = braid.insert(BlockView::from(&blocks[1].header));
+        assert!(
+            matches!(refeed, InsertOutcome::Duplicate | InsertOutcome::BelowFinal { .. }),
+            "old block must be refused: {refeed:?}"
+        );
+        assert_eq!(chain.height(), 3);
     }
 }

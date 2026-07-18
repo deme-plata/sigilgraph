@@ -26,6 +26,20 @@
 \definecolor{sigilgold}{HTML}{B7791F}
 \definecolor{sigilcyan}{HTML}{0E7490}
 \definecolor{ink}{HTML}{1A1428}
+\definecolor{slate}{HTML}{D7DCE1}
+
+\usepackage{tcolorbox}
+\tcbuselibrary{skins}
+% layman explainer box — same design system as the whitepaper
+\newcommand{\layman}[3]{% #1 accent color, #2 topic, #3 body
+\begin{tcolorbox}[enhanced,
+  interior style={left color=#1!9,right color=white},
+  colframe=#1!45!slate,boxrule=0.5pt,arc=3pt,
+  borderline west={2.5pt}{0pt}{#1},
+  left=9pt,right=9pt,top=7pt,bottom=7pt]
+{\scriptsize\textcolor{#1}{\textsc{in plain words}}\; — \;\textbf{\small #2}}\\[3pt]
+\small #3
+\end{tcolorbox}}
 
 \hypersetup{
   pdftitle={The Master Equation of SIGIL — a Conjectural Effective Action for a BlockDAG (v0.2)},
@@ -91,6 +105,14 @@ The claim it is \emph{not} yet entitled to make: that any mechanism has been der
 from the action. The $\mathcal{L}$'s are names with declared field content, awaiting
 explicit form.
 
+\layman{sigilviolet}{the one equation}{Picture the whole chain as a stretchy fabric
+floating in time. Every block is a stitch; every fork is a wrinkle. The equation above
+is a single sentence claiming the fabric always settles into its least-wrinkled shape —
+money flowing, miners mining, watchdogs watching, even the cryptography, each one dial
+on the same machine. We have \emph{not} proven the machine works this way. But designing
+\emph{as if} it does keeps every piece pulling in the same direction — and it hands us
+predictions we can actually test.}
+
 \section{The fields}
 
 \begin{center}
@@ -124,6 +146,12 @@ economy; empirical. \\
 \section{The correspondences}
 
 Each variation names one protocol component. ``Names,'' not ``yields'': see the abstract.
+
+\layman{sigilviolet}{``correspondence, not derivation''}{We are saying the protocol
+\emph{rhymes} with famous physics — not that we've done the mathematics forcing it to.
+Think of a city map drawn in pencil: genuinely useful for navigating, honest about
+being redrawable. Each pencil line gets inked only when a measurement makes it earn
+the ink — one already has (Prediction 7, the delivery law).}
 
 \subsection{$\delta\SSIGIL/\delta J^\mu = 0$ — conservation (the ledger)}
 
@@ -221,6 +249,13 @@ $\Sigma_{\mathrm{hash}}$: the fold collapsed whole-chain verification to a const
 check (2{,}568\,B; 342\,ms full verification at the 100k-block benchmark; 3\,$\mu$s
 live incremental tip check). The wall was a cryptographic choice, not a hardware limit —
 the one structural claim of this note that events have since borne out.
+
+\layman{sigilcyan}{the wall}{We assumed verification speed was a hardware problem —
+buy faster machines, verify faster. It turned out to be a \emph{choice-of-mathematics}
+problem: switch the proof system, and checking the whole chain becomes one
+constant-size receipt instead of a million re-computations. The wall didn't get
+climbed. It got deleted — exactly where the security term of the action said the
+pressure was.}
 
 \section{Predictions}
 

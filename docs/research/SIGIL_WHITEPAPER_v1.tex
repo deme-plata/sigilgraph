@@ -155,10 +155,14 @@ unusually honest account of what remains conjecture.
                   left=8pt,right=8pt,top=6pt,bottom=6pt]
 \small\textbf{\textcolor{sigilamber}{Security disclosure — read before interacting with
 the network.}} \texttt{sigil-g0} is a \emph{live experimental network}, not a production
-system. As of the 2026-06-10 audit, money-moving RPC routes on the laboratory deployment
-are \textbf{unauthenticated} (\texttt{sigil-oauth} is built but not wired), and the
-network runs accelerated test economics. Do not route significant value through SIGIL.
-Wiring authentication is a tracked gate for any status upgrade; see \S\ref{sec:honesty}.
+system, running accelerated test economics. Its RPC money routes \emph{are} authenticated
+— each spend/mint route requires the acting wallet's ed25519 signature plus a monotonic
+nonce (the 2026-06-10 audit's theft findings are fixed and enforcing). The residual money
+risk is not at the RPC edge but \textbf{deeper in the stack}: block-apply does not yet
+verify the producer's signature (consensus item H1), the VDF modulus is not yet
+adversary-hardened (C10), and the cross-chain bridge mint is unbounded (C9). These are
+tracked, named, and gated (\S\ref{sec:honesty}, and the hardening backlog). Do not route
+significant value through SIGIL until they close.
 \end{tcolorbox}
 
 \vspace{4pt}
@@ -549,10 +553,17 @@ verification of the live 29M fold has not yet been separately benchmarked.}
 
 The \emph{full fold verification} checks the folded proof of the entire chain prefix
 from scratch; the \emph{incremental tip check} verifies the latest tip against an
-already-verified fold state — cheap precisely because the heavy work is folded. Because
-the proof is constant-size, the chain length covered per unit of verification time
-grows with the chain; we deliberately do not quote that ratio as a throughput number.
-The founding claim was tip verification in
+already-verified fold state — cheap precisely because the heavy work is folded. The
+342\,ms figure is now a \measured{measured, reproducible number} (280--342\,ms across
+runs on a loaded 48-core host; run \texttt{fold-verify-bench} in \texttt{flux-fold} to
+reproduce), not the poster label it once was. One honest nuance the benchmark surfaces:
+the \emph{proof} is constant-size (2{,}568\,B, independent of chain length), but full
+verification is \emph{$O(M)$} — the verifier reads all $M$ commitments ($\sim$51\,MB at
+100k blocks), because \texttt{flux\_fold::verify} recomputes the random linear
+combination. Constant-size proof, not constant-cost verification; the incremental tip
+check is what makes the steady state cheap. Because the proof is constant-size, the chain
+length covered per unit of verification time grows with the chain; we deliberately do not
+quote that ratio as a throughput number. The founding claim was tip verification in
 $\le$10\,ms in a browser; the live incremental check beats it by three orders of
 magnitude, and the wall of \S\ref{sec:action} ceased to be the binding constraint. The
 precise security statement of the fold — the reduction to Ajtai/SIS with concrete
@@ -601,12 +612,18 @@ store (72\,B/record, two-phase durable, torn-tail safe) sustains $\sim$10M recor
 durable — $2600\times$ the general-purpose LSM write path ($\sim$130\,$\mu$s/KV
 $\approx$ 3.9k blocks/s). An in-process end-to-end harness (pull $\to$ stream-verify
 $\to$ commit at 2M records, roots matching) reaches 39k blocks/s. And yet the live sync
-number stayed at $\sim$800 blocks/s for five days — because the actual caps were a
+number sat at $\sim$800 blocks/s for five days — because the actual caps were a
 producer-side full-block serve throttle ($\le$1 per 120\,ms) and a serial
-request$\to$await$\to$apply fetch loop. The local pipeline was \emph{never the wall}.
-The lesson is now Rule 0 of the SIGIL skill and a methodological claim of this paper:
-\textbf{a fast microbenchmark next to a slow live number is a bug report about your
-understanding, not a victory}. Wire compression is measured at 14.0$\times$ (zstd
+request$\to$await$\to$apply fetch loop, \emph{not} the local pipeline. Once measured
+directly, both were removed: the serve throttle is gone (finalized ranges are
+cache-served by \texttt{memcpy}) and a request-ahead window (up to $\sim$16 ranges in
+flight, apply-backpressured) replaced the serial loop — \measured{live 2{,}322 $\to$
+10{,}853 blocks/s} on the running node. The lesson is now Rule 0 of the SIGIL skill and a
+methodological claim of this paper: \textbf{a fast microbenchmark next to a slow live
+number is a bug report about your understanding, not a victory} — and the fix is the one
+that moves the \emph{live} number, which this one did. (Snapshot-pull, a further
+$100\times$ path, is coded and byte-symmetric but stays gated off pending a published
+signed anchor; \S\ref{sec:honesty}.) Wire compression is measured at 14.0$\times$ (zstd
 backfill codec, 70.7\,B/header live) and 26.3$\times$ (gossip frames).
 
 \begin{figure}[htbp]
@@ -619,7 +636,7 @@ backfill codec, 70.7\,B/header live) and 26.3$\times$ (gossip frames).
 \node[tag,text=sigilcyan]  at (-6.6,3.38) {measured};
 \node[font=\scriptsize,anchor=west] at (-6.6,2.98)
   {delivery law $1{-}p^r$ · fold 2{,}568\,B / 342\,ms / 3\,$\mu$s · ML-KEM 115\,ms ·
-   zstd 14--26$\times$ · mining loop live};
+   zstd 14--26$\times$ · mining loop live · RPC auth (wallet-sig) · sync 10.8k blk/s};
 \node[band,fill=sigilblue!7]   (s) at (0,2.10) {};
 \node[tag,text=sigilblue]  at (-6.6,2.33) {simulation-gated};
 \node[font=\scriptsize,anchor=west] at (-6.6,1.93)
@@ -633,8 +650,8 @@ backfill codec, 70.7\,B/header live) and 26.3$\times$ (gossip frames).
 \node[band,fill=sigilamber!8]  (o) at (0,0.0) {};
 \node[tag,text=sigilamber] at (-6.6,0.23) {open theory};
 \node[font=\scriptsize,anchor=west] at (-6.6,-0.17)
-  {metric from reputation · Byzantine threshold · fold soundness ·
-   composition bound · lattice discretization};
+  {block-apply producer-sig (H1) · VDF modulus (C10) · bridge mint (C9) ·
+   Byzantine threshold · fold soundness · composition bound};
 \end{tikzpicture}
 \caption{\small\textbf{The evidence ladder.} Where every major claim of this paper
 currently sits. Items move \emph{up} the ladder only by measurement; the honesty
@@ -912,15 +929,21 @@ composition bound is open, as is the fold's concrete soundness reduction.
 
 \subsection{What's still pretend (engineering)}
 
-Snapshot-pull live activation awaits a pinned signed anchor on the fleet default; until
-then nodes fall through to the compatible crawl path. The unauthenticated RPC money
-routes are disclosed in the box on page 1 — restated here for the record: 2026-06-10
-audit, \texttt{sigil-oauth} built but unwired, tracked as a hard gate before any status
-upgrade beyond \emph{live experimental network}. The serve-throttle and serial-fetch
-caps of \S\ref{sec:sync} are identified but their fixes are staged behind the
-fetch-pipelining lane. Fresh-node sync has known walls that were each root-caused and
-patched (block-pack sizing, producer-key pinning, single-peer gap trust) but the class
-of them argues for the snapshot-pull path as the durable answer.
+The RPC edge is authenticated (per-request wallet signature + nonce; the audit's theft
+findings are fixed and enforcing), so the residual money risk is deeper: block-apply does
+not yet verify the producer signature (\textbf{H1} — the highest-severity open item; a
+height-gated fix is implemented and unit-tested on a branch, not yet deployed), the VDF
+runs over a fixed known-structure modulus (\textbf{C10}), and the cross-chain bridge mint
+is unbounded with no replay set (\textbf{C9}). These, plus the peer-handshake stub
+(\textbf{H2}), the follower's trust of peer-declared difficulty (\textbf{H3}), and keyless
+wire tip-proofs (\textbf{H4}), are enumerated with file:line and fix sketch in the
+hardening backlog (\texttt{docs/SIGIL\_HARDENING\_BACKLOG.md}) — that document is what the
+``open'' rung of Figure~\ref{fig:ladder} points at. Snapshot-pull live activation awaits a
+pinned signed anchor on the fleet default plus its M2 crypto (SQIsign + fold in the
+trailer); until then nodes fall through to the compatible crawl path. The serve-throttle
+and serial-fetch caps of \S\ref{sec:sync} were fixed (throttle removed, request-ahead
+window live); the remaining \texttt{sigil-top} adaptive multi-substream scheduler is coded
+but dark.
 
 \section{What would convince a skeptic}
 
@@ -1026,9 +1049,9 @@ harness); fit $1-p^r$; compare residuals \\
 Braid gates S1--S6, divergence $=0$ & \texttt{sigil-dagknight} sim gate, workspace
 commits \texttt{689730f} (gate, 34/34 tests) + \texttt{a97ba0e} (late-join) & run the
 \texttt{sigil-chronos} gate binaries; all six scenarios must report divergence $=0$ \\
-Fold: 2{,}568\,B proof, 342\,ms full verify & \texttt{flux-fold} via
-\texttt{sigil-top} & run the fold verification at the 100k-block benchmark
-configuration \\
+Fold: 2{,}568\,B proof, 280--342\,ms full verify & \texttt{flux-fold}
+\texttt{fold-verify-bench} bin & \texttt{fold-verify-bench 100000} (release);
+prints proof size + verify ms; note verify is $O(M)$ over the commitments \\
 3\,$\mu$s incremental tip check, 0 blocks downloaded & live \texttt{sigil-top}
 against \texttt{sigil-g0} & launch \texttt{sigil-top}; the tip-verify panel reports
 verify time and blocks downloaded \\

@@ -16,6 +16,9 @@ serde_json = { workspace = true }
 blake3     = { workspace = true }
 hex        = { workspace = true }
 thiserror  = { workspace = true }
+# H1: producer-signature verification on block apply (height-gated, dormant by
+# default). Ed25519Hot producers carry their pubkey as the 32-byte ValidatorId.
+ed25519-dalek = { version = "2.2" }
 
 [dev-dependencies]
 serde_json = { workspace = true }

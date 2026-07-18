@@ -303,7 +303,69 @@ impl SigilBlockHeaderV0 {
         }
         Ok(())
     }
+
+    /// Verify the producer's signature over the canonical [`signing_bytes`]
+    /// (H1 fix). This is the check that block-apply historically SKIPPED — the
+    /// producer wrote a zeroed `producer_sig` and no one verified it, so any peer
+    /// could forge a header the network applied. Fail-closed.
+    ///
+    /// Only the `Ed25519Hot` scheme is verifiable from the header alone: its
+    /// 32-byte `producer` ValidatorId **is** the ed25519 public key. `SqiSign5`
+    /// and `Dilithium5` carry larger public keys not present in the header, so
+    /// they require a validator registry / DNS anchor (a follow-on — see the
+    /// hardening backlog); until that lands they fail closed here.
+    pub fn verify_producer_sig(&self) -> Result<(), HeaderError> {
+        // Length must match the declared scheme before we touch crypto.
+        if self.producer_sig.0.len() != self.sig_scheme.expected_sig_len() {
+            return Err(HeaderError::SigLengthMismatch {
+                scheme: self.sig_scheme,
+                expected: self.sig_scheme.expected_sig_len(),
+                got: self.producer_sig.0.len(),
+            });
+        }
+        match self.sig_scheme {
+            SigScheme::Ed25519Hot => {
+                use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+                let vk = VerifyingKey::from_bytes(&self.producer)
+                    .map_err(|_| HeaderError::ProducerSigInvalid)?;
+                let sig_arr: [u8; 64] = self
+                    .producer_sig
+                    .0
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| HeaderError::ProducerSigInvalid)?;
+                let sig = Signature::from_bytes(&sig_arr);
+                vk.verify(&self.signing_bytes(), &sig)
+                    .map_err(|_| HeaderError::ProducerSigInvalid)
+            }
+            scheme @ (SigScheme::SqiSign5 | SigScheme::Dilithium5) => {
+                Err(HeaderError::ProducerPubkeyUnavailable { scheme })
+            }
+        }
+    }
+
+    /// Height-gated validation for block apply (the H1 upgrade). Below
+    /// [`H1_PRODUCER_SIG_ACTIVATION_HEIGHT`] this is `precheck()` only — exactly
+    /// the legacy behaviour, so every historical block still validates under the
+    /// rules that were live when it was produced. At/above the activation height
+    /// the producer signature MUST verify. The activation height is
+    /// [`u64::MAX`] by default (dormant): merging this code changes nothing on
+    /// the live chain until an operator schedules a real future height.
+    pub fn verify_at_height(&self, apply_height: u64) -> Result<(), HeaderError> {
+        self.precheck()?;
+        if apply_height >= H1_PRODUCER_SIG_ACTIVATION_HEIGHT {
+            self.verify_producer_sig()?;
+        }
+        Ok(())
+    }
 }
+
+/// Activation height for H1 (producer-signature verification on block apply).
+/// **Dormant by default** — `u64::MAX` means "never active", so this code is a
+/// pure no-op on the live chain until an operator sets it to a real future
+/// height (mainnet-safe upgrade: schedule ≥ current_height + a safe margin, and
+/// wire producer-side signing + a validator registry for the PQ schemes first).
+pub const H1_PRODUCER_SIG_ACTIVATION_HEIGHT: u64 = u64::MAX;
 
 /// Header-layer validation errors. Crypto-layer errors live in the relevant
 /// crates (flux-sqisign, flux-vdf, flux-zk-stark).
@@ -338,6 +400,17 @@ pub enum HeaderError {
         /// Length actually present on the wire.
         got: usize,
     },
+
+    /// The producer signature did not verify against the producer's public key
+    /// over the canonical signing bytes (H1). Forged or malleated header.
+    #[error("producer signature did not verify")]
+    ProducerSigInvalid,
+
+    /// The declared scheme's public key is not present in the header (SqiSign5 /
+    /// Dilithium5 carry larger keys), so the signature can't be verified without
+    /// a validator registry / DNS anchor — which is not yet wired (fail-closed).
+    #[error("producer pubkey unavailable for {scheme:?} — validator registry required")]
+    ProducerPubkeyUnavailable { scheme: SigScheme },
 }
 
 #[cfg(test)]
@@ -431,6 +504,84 @@ mod tests {
         let mut clone = h.clone();
         clone.producer_sig = SignatureBytes(Vec::new());
         assert_eq!(serde_json::to_vec(&clone).unwrap(), bytes);
+    }
+
+    /// Build a properly ed25519-signed Ed25519Hot header from a test seed.
+    fn signed_ed25519_header(seed: [u8; 32]) -> SigilBlockHeaderV0 {
+        use ed25519_dalek::{SigningKey, Signer};
+        let sk = SigningKey::from_bytes(&seed);
+        let mut h = fake_header();
+        h.sig_scheme = SigScheme::Ed25519Hot;
+        h.producer = sk.verifying_key().to_bytes(); // ValidatorId == ed25519 pubkey
+        h.producer_sig = SignatureBytes(vec![0u8; 64]); // placeholder before signing
+        let sig = sk.sign(&h.signing_bytes());          // signing_bytes zeroes the sig
+        h.producer_sig = SignatureBytes(sig.to_bytes().to_vec());
+        h
+    }
+
+    // ---- H1: producer-signature verification (height-gated) ----
+
+    #[test]
+    fn h1_valid_ed25519_producer_sig_verifies() {
+        let h = signed_ed25519_header([42u8; 32]);
+        assert!(h.verify_producer_sig().is_ok(), "honestly-signed header must verify");
+    }
+
+    #[test]
+    fn h1_tampered_sig_rejected() {
+        let mut h = signed_ed25519_header([42u8; 32]);
+        h.producer_sig.0[0] ^= 0x01;
+        assert!(matches!(h.verify_producer_sig(), Err(HeaderError::ProducerSigInvalid)));
+    }
+
+    #[test]
+    fn h1_wrong_producer_key_rejected() {
+        let mut h = signed_ed25519_header([42u8; 32]);
+        // swap in a different producer pubkey (attacker claims someone else's slot)
+        use ed25519_dalek::SigningKey;
+        h.producer = SigningKey::from_bytes(&[7u8; 32]).verifying_key().to_bytes();
+        assert!(matches!(h.verify_producer_sig(), Err(HeaderError::ProducerSigInvalid)));
+    }
+
+    #[test]
+    fn h1_forged_zero_sig_rejected() {
+        // The exact H1 attack: a header carrying the historical zeroed sig.
+        let mut h = signed_ed25519_header([42u8; 32]);
+        h.producer_sig = SignatureBytes(vec![0u8; 64]);
+        assert!(matches!(h.verify_producer_sig(), Err(HeaderError::ProducerSigInvalid)));
+    }
+
+    #[test]
+    fn h1_pq_scheme_needs_registry_fails_closed() {
+        let h = fake_header(); // SqiSign5, 292-byte zero sig
+        assert!(matches!(
+            h.verify_producer_sig(),
+            Err(HeaderError::ProducerPubkeyUnavailable { scheme: SigScheme::SqiSign5 })
+        ));
+    }
+
+    #[test]
+    fn h1_height_gate_below_activation_is_legacy() {
+        // Below activation, verify_at_height is precheck-only: even a zeroed sig
+        // (the legacy state) passes, so historical blocks still validate.
+        let mut h = fake_header();
+        h.producer_sig = SignatureBytes(vec![0u8; 292]);
+        assert!(h.verify_at_height(1).is_ok(), "pre-activation must be legacy/precheck-only");
+    }
+
+    #[test]
+    fn h1_height_gate_at_activation_enforces_sig() {
+        // AT/above activation (use u64::MAX as the activated height), the sig is
+        // enforced: a valid ed25519 header passes, a forged one is rejected.
+        let good = signed_ed25519_header([42u8; 32]);
+        assert!(good.verify_at_height(H1_PRODUCER_SIG_ACTIVATION_HEIGHT).is_ok());
+
+        let mut forged = signed_ed25519_header([42u8; 32]);
+        forged.producer_sig = SignatureBytes(vec![0u8; 64]);
+        assert!(matches!(
+            forged.verify_at_height(H1_PRODUCER_SIG_ACTIVATION_HEIGHT),
+            Err(HeaderError::ProducerSigInvalid)
+        ));
     }
 }
 

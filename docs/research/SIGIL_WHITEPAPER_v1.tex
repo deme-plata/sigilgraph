@@ -23,6 +23,7 @@
 \usepackage{tikz}
 \usetikzlibrary{positioning,arrows.meta}
 \usepackage{tcolorbox}
+\tcbuselibrary{skins}
 \usepackage{needspace}
 \usepackage{fancyhdr}
 \usepackage[colorlinks=true,linkcolor=sigilcyan,urlcolor=sigilcyan,citecolor=sigilcyan]{hyperref}
@@ -52,6 +53,17 @@
 \newcommand{\ckopen}{\makebox[1.4em][l]{$\square$}}
 \newcommand{\ckhalf}{\makebox[1.4em][l]{\tikz[baseline=0.05ex]{\draw[ink,line width=0.5pt] (0,0) rectangle (1.5ex,1.5ex);\fill[sigilcyan] (0.07ex,0.07ex) rectangle (0.75ex,1.43ex);}}}
 \newcommand{\ckdone}{\makebox[1.4em][l]{\rlap{\hspace{0.2em}\raisebox{0.15ex}{\textcolor{sigilcyan}{$\checkmark$}}}$\square$}}
+
+% layman explainer box — subtle house-palette gradient, one per major concept
+\newcommand{\layman}[3]{% #1 accent color, #2 topic, #3 body
+\begin{tcolorbox}[enhanced,
+  interior style={left color=#1!9,right color=white},
+  colframe=#1!45!slate,boxrule=0.5pt,arc=3pt,
+  borderline west={2.5pt}{0pt}{#1},
+  left=9pt,right=9pt,top=7pt,bottom=7pt]
+{\scriptsize\textcolor{#1}{\textsc{in plain words}}\; — \;\textbf{\small #2}}\\[3pt]
+\small #3
+\end{tcolorbox}}
 
 % metric card
 \newcommand{\metriccard}[2]{%
@@ -216,6 +228,14 @@ one variational principle:
 \end{equation}
 \end{tcolorbox}
 
+\layman{sigilviolet}{the one equation}{Picture the whole chain as a stretchy fabric
+floating in time. Every block is a stitch; every fork is a wrinkle. The equation above
+is a single sentence claiming the fabric always settles into its least-wrinkled shape —
+money flowing, miners mining, watchdogs watching, even the cryptography, each one dial
+on the same machine. We have \emph{not} proven the machine works this way (that's the
+honest part). But designing \emph{as if} it does keeps every piece of SIGIL pulling in
+the same direction — and it hands us predictions we can actually test.}
+
 \begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[
@@ -297,6 +317,13 @@ has been constructed, so the ``field equations'' below are \emph{correspondences
 between standard equations and shipped mechanisms, not consequences extracted from the
 action. Making even one of them a genuine derivation is the physics programme's headline
 open problem (\S\ref{sec:honesty}).
+
+\layman{sigilviolet}{``correspondence, not derivation''}{We are saying the protocol
+\emph{rhymes} with famous physics — not that we've done the mathematics forcing it to.
+Think of a city map drawn in pencil: genuinely useful for navigating, honest about
+being redrawable. Each pencil line gets inked only when a measurement makes it earn
+the ink. One line already has (\S\ref{sec:delivery}); the rest are queued on the
+scoreboard (\S\ref{sec:predictions}).}
 
 \paragraph{$\delta\SSIGIL/\delta J^\mu = 0$ — conservation (the ledger).}
 \begin{equation}
@@ -429,6 +456,12 @@ layer done properly: model, measurement, closed form, residual, and a provisioni
 operators actually use. (Standalone paper published at
 \url{https://quillon.xyz/downloads/sigil-top-delivery-law.pdf}.)
 
+\layman{sigilcyan}{the delivery law}{If a letter gets lost one time in ten, send three
+copies — the chance all three vanish is one in a thousand. That's the entire law:
+$1-p^r$. We didn't guess it; we ran 22 controlled storms of lost messages and the
+formula matched reality to within half a percentage point. The network now
+\emph{calculates} how many copies to send instead of hoping.}
+
 \subsection{The fold: succinct whole-chain verification \hfill \stM}\label{sec:fold}
 
 The $\Sigma_{\mathrm{hash}}$ leg materialized as \texttt{flux-fold}: an Ajtai/SIS-based
@@ -482,6 +515,13 @@ precise security statement of the fold — the reduction to Ajtai/SIS with concr
 parameters, and what a verifier is entitled to conclude from a 2{,}568\,B proof — is
 stated as a target, not yet a published proof (\S\ref{sec:honesty}).
 
+\layman{sigilcyan}{the fold}{Normally, auditing a blockchain means re-reading the whole
+book — millions of pages. The fold compresses the \emph{proof of having read it} into a
+note the size of a text message: 2{,}568 bytes, the same size whether the book has a
+hundred thousand pages or twenty-nine million. Checking the note takes a blink (342\,ms
+on our benchmark); after that, each new page costs three \emph{millionths} of a second.
+Your phone — honestly, a potato — can hold the chain to account.}
+
 \subsection{DagKnight braid convergence \hfill \stS}\label{sec:dagknight}
 
 The braid ordering layer (\texttt{sigil-dagknight} + \texttt{flux-topology}) passed a
@@ -501,6 +541,13 @@ network's producer flipped to the braid binary at height 17.52M (2026-07-02). In
 language of \S\ref{sec:action}: on every path tested, the topological invariants were
 conserved and the witness curvature stayed flat. Simulation convergence is encouraging
 evidence; it is not a safety or liveness proof (\S\ref{sec:consensus}).
+
+\layman{sigilblue}{the braid}{When several writers add pages at once, whose ordering
+wins? DagKnight braids the parallel pages into one agreed story — and we attacked our
+own braid six ways: dropped a third of the mail, shuffled what survived, had an author
+lie and withhold pages. Every copy of the story still came out \emph{byte-for-byte
+identical}. That's stress-test evidence, not a theorem; the theorem is on the to-do
+list, and we say so out loud.}
 
 \subsection{The sync ladder and the honest bottleneck}\label{sec:sync}
 
@@ -606,6 +653,13 @@ the crypto-agile \texttt{sig\_scheme} dispatch. State-root divergence and topolo
 divergence are \emph{independent} halt signals — two different variations of the same
 action.
 
+\layman{sigilcyan}{the four fingerprints}{Every block carries four fingerprints of the
+\emph{entire} ledger: balances, exchange pools, events, contracts. Every node
+recomputes all four from scratch and compares. If yours don't match, your node doesn't
+argue and doesn't guess — it stops serving and raises its hand (exit code 78, alarm
+fires). Our sister network once lost a user's funds \emph{silently}; SIGIL is built so
+that silent is structurally impossible.}
+
 \subsection{State: one chokepoint \hfill \stL}
 
 \path{sigil-state::commit_state_transition} is the only function that may mutate state;
@@ -641,6 +695,12 @@ analysis wholesale); reduced-round variants are an experimental, measured speed 
 $R=7$ unless a reduced round count is ever cryptanalytically validated. The TUI miner
 and the node share one verification function and one cap-enforced crediting chokepoint;
 the loop is proven live (first credited shares 0\,$\to$\,1250 on \texttt{sigil-g0}).
+
+\layman{sigilcyan}{proof of work $\times$ proof of time}{A valid share must show two
+different things: that you \emph{burned effort} (a hash puzzle) and that you
+\emph{genuinely waited} (a sequential timer that cannot be fast-forwarded — not even
+with a warehouse of GPUs). Effort can be bought in bulk; honest elapsed time cannot.
+A block needs both, which is why the two lanes are multiplied, not added.}
 
 \subsection{Privacy by default \hfill \stL}
 
@@ -704,6 +764,13 @@ statements (threshold theorem for the braid, fold soundness bound, joint-crypto
 composition model) is the protocol-theory half of the research programme, sequenced
 after the measured-law half precisely because the culture here is to measure first and
 formalize what survives.
+
+\layman{sigilamber}{where consensus honestly stands}{Today, one author writes and
+everyone else verifies — that's the truth of the current network, stated in the panel
+above. The machinery for many simultaneous authors exists and passed its stress tests,
+but ``passed tests'' and ``mathematically safe'' are different sentences, and this
+paper refuses to blur them. The scoreboard below tells you exactly which sentence each
+claim has earned so far.}
 
 \section{Predictions: the research scoreboard}\label{sec:predictions}
 

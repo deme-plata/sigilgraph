@@ -16,7 +16,13 @@ sigil-state = { path = "../sigil-state" }
 sigil-dex   = { path = "../sigil-dex" }
 sigil-bank  = { path = "../sigil-bank" }
 sigil-oauth = { path = "../sigil-oauth" }
+# University credential economy: the money-bridge module wires its pure spine
+# (award verify → points → settle → graduate) to the state chokepoint.
+sigil-university = { path = "../sigil-university" }
 sigil-emission = { path = "../sigil-emission" } # halving block-reward schedule (→21M)
+# WS2 proof-carrying /balance verifier: the TipProofFlavor::adversary_resistant()
+# gate that refuses a balance proof under the insecure Blake3Fingerprint flavor.
+sigil-tip-proof = { path = "../sigil-tip-proof", default-features = false }
 
 # Dual-lane mining gate for the sigil-rpcd /api/v1/mining/{challenge,submit}
 # endpoints. default-features = false keeps the keystone reqwest/market-free —

@@ -32,7 +32,7 @@ pub use acc::Accumulator;
 /// O(1)-in-n, 256-hash) per-update cost. Two structures, two jobs: accumulator
 /// for the committed root, SMT for the proofs a light client checks against it.
 pub mod smt;
-pub use smt::Smt;
+pub use smt::{Smt, MerkleProof, verify_proof};
 
 /// Decimal-string codec for `u128` — works around serde_json's lack of
 /// u128 wire support. Apply with `#[serde(with = "u128_str")]`.
@@ -74,6 +74,14 @@ pub type TokenId = [u8; 32];
 /// sigil-tx keeps its own local `NATIVE` const; both point at the same
 /// `[0u8; 32]` value — the wire format is the canonical sentinel.
 pub const NATIVE: TokenId = [0u8; 32];
+
+/// R0 replay-protection: reserved token id that stores each account's per-author
+/// batch nonce high-water. Held as a normal `(wallet, NONCE_TOKEN) -> nonce` balance
+/// so it rides `wallet_state_root` (all nodes agree, replay reproduces it) AND the
+/// snapshot for free, WITHOUT a struct-layout change (a map entry, not a new field —
+/// keeps rpcd's positional-bincode `Snapshot` decoding). Only `check_and_bump_nonce`
+/// may write it; the commit chokepoint rejects any `SetBalance` targeting it.
+pub const NONCE_TOKEN: TokenId = *b"SIGIL/batch-nonce/reserved/00000";
 
 /// Native SIGIL decimals (base units per whole coin = 10^this).
 pub const SIGIL_DECIMALS: u32 = 8;
@@ -211,6 +219,76 @@ impl SigilState {
         }
     }
 
+    // ---- Wallet SMT: inclusion-provable balances (STAR / Phase-3 swap) ----
+    //
+    // `roots().wallet_state_root` is today an additive multiset accumulator
+    // (`acc_to_root(wallet_acc)`): O(1), set-membership-safe, but it admits NO
+    // succinct single-balance inclusion proof — the same limitation the `roots()`
+    // doc calls out ("NOT a real SMT … Phase 3 replaces this with a true SMT …
+    // inclusion + non-membership proofs. The shape of StateRoots stays stable").
+    //
+    // These methods realize that swap on the READ path: build the true SMT over
+    // the live wallet map and serve proofs against ITS root. The remaining
+    // consensus step — committing this SMT root in the header (so a light client
+    // can trust the proof against the tip-attested root) — is a height-gated
+    // change left for operator sign-off (see docs/SIGIL_HARDENING_BACKLOG.md, and
+    // it is the H6-class root-structure fix). Built on demand here; production
+    // maintains it incrementally in `set_balance`.
+
+    /// Canonical SMT key for a `(wallet, token)` balance leaf: `wallet || token`.
+    pub fn wallet_smt_key(wallet: &WalletId, token: &TokenId) -> Vec<u8> {
+        let mut k = Vec::with_capacity(64);
+        k.extend_from_slice(wallet);
+        k.extend_from_slice(token);
+        k
+    }
+
+    /// Canonical SMT leaf VALUE bytes for a balance: the amount, little-endian.
+    /// A zero balance is represented as an ABSENT key (non-membership), matching
+    /// the wallet map, which never stores a zero (see `set_balance`).
+    pub fn wallet_smt_value(amount: u128) -> [u8; 16] {
+        amount.to_le_bytes()
+    }
+
+    /// Build the true wallet Sparse Merkle Tree over the live balance map. Every
+    /// non-zero `(wallet, token) → amount` becomes a leaf keyed by
+    /// `wallet_smt_key`, valued by `wallet_smt_value`. Deterministic: identical
+    /// on every node from identical state. O(state·256) — a read-path helper;
+    /// production maintains it incrementally.
+    pub fn wallet_smt(&self) -> Smt {
+        let mut smt = Smt::new();
+        for ((w, t), v) in &self.wallets {
+            // wallets never holds a zero (set_balance removes on zero), so every
+            // entry is a real inclusion leaf.
+            smt.update(&Self::wallet_smt_key(w, t), Some(&Self::wallet_smt_value(*v)));
+        }
+        smt
+    }
+
+    /// Root of the true wallet SMT — the inclusion-provable counterpart to the
+    /// accumulator `roots().wallet_state_root`. Committing THIS in the header is
+    /// the height-gated Phase-3 swap.
+    pub fn wallet_smt_root(&self) -> Root {
+        self.wallet_smt().root()
+    }
+
+    /// Produce an inclusion (or non-membership) proof for a wallet's balance of a
+    /// token. Returns `(balance, smt_root, proof)`. The proof verifies statelessly
+    /// against `smt_root` via [`smt::verify_proof`]; a light client additionally
+    /// checks `proof.leaf == blake3(amount.to_le_bytes())` for the claimed balance
+    /// (or `proof.leaf == [0;32]` proving a zero balance / absence). This is the
+    /// mechanism behind a proof-carrying `/balance` query.
+    pub fn prove_balance(
+        &self,
+        wallet: &WalletId,
+        token: &TokenId,
+    ) -> (u128, Root, smt::MerkleProof) {
+        let smt = self.wallet_smt();
+        let root = smt.root();
+        let proof = smt.prove(&Self::wallet_smt_key(wallet, token));
+        (self.balance_of(wallet, token), root, proof)
+    }
+
     /// Live total native SIGIL supply (base units). Always ≤ [`MAX_SUPPLY`] —
     /// `commit_state_transition` enforces the cap before sealing any block.
     pub fn native_supply(&self) -> u128 {
@@ -242,6 +320,26 @@ impl SigilState {
             .get(&(*wallet, *token))
             .copied()
             .unwrap_or(0)
+    }
+
+    /// R0: the author's batch replay-nonce high-water (0 if never set). Stored as a
+    /// reserved-token balance (see [`NONCE_TOKEN`]).
+    pub fn nonce_of(&self, author: &WalletId) -> u64 {
+        self.balance_of(author, &NONCE_TOKEN) as u64
+    }
+
+    /// R0 replay guard: accept `nonce` iff it STRICTLY exceeds the author's stored
+    /// high-water, then advance it. A replayed/stale/reordered batch is rejected at
+    /// CONSENSUS level (committed in `wallet_state_root`), not just by the ephemeral,
+    /// per-node, restart-fragile mempool seen-set. Home-shard-local under
+    /// `shard(author)`, so it is a Phase-A precheck at zero cross-shard cost in PRISM.
+    pub fn check_and_bump_nonce(&mut self, author: &WalletId, nonce: u64) -> Result<(), CommitError> {
+        let cur = self.nonce_of(author);
+        if nonce <= cur {
+            return Err(CommitError::NonceReplay { got: nonce, have: cur });
+        }
+        self.set_balance(*author, NONCE_TOKEN, nonce as u128);
+        Ok(())
     }
 
     /// Read-only pool lookup.
@@ -460,6 +558,16 @@ pub enum CommitError {
     /// invariant. Carries a freeform reason.
     #[error("invariant violation: {0}")]
     Invariant(String),
+
+    /// R0: a batch nonce did not strictly exceed the author's stored high-water — a
+    /// replayed (or stale/reordered) batch. The whole transition is rejected.
+    #[error("batch replay: nonce {got} <= stored high-water {have}")]
+    NonceReplay { got: u64, have: u64 },
+
+    /// R0: a mutation targeted the reserved [`NONCE_TOKEN`] slot. Only
+    /// `check_and_bump_nonce` may write it; a direct `SetBalance` is a forgery attempt.
+    #[error("reserved token: NONCE_TOKEN may not be written via SetBalance")]
+    ReservedToken,
 
     /// P5-C: A typed delta (SwapDelta / LpDelta / LpBurnDelta) carried a
     /// `pool_after` shape that contradicts what the math should produce —
@@ -771,6 +879,10 @@ pub fn commit_state_transition(
     for m in &transition.mutations {
         match m.clone() {
             StateMutation::SetBalance { wallet, token, amount } => {
+                // R0: nobody may forge a replay-nonce via a crafted balance write.
+                if token == NONCE_TOKEN {
+                    return Err(CommitError::ReservedToken);
+                }
                 state.set_balance(wallet, token, amount);
             }
             StateMutation::SetPool { pool, state: s } => {
@@ -1024,6 +1136,61 @@ mod tests {
         let roots = commit_state_transition(&mut s, &t, 1).unwrap();
         assert_ne!(roots.wallet_state_root, before);
         assert_eq!(s.balance_of(&[1u8; 32], &[0u8; 32]), 100);
+    }
+
+    /// WS2: proof-carrying balance. A wallet-SMT inclusion proof for a real
+    /// balance verifies against the SMT root and encodes the claimed amount;
+    /// tampering the amount, the proof, or the root all reject; an absent wallet
+    /// yields a verifiable NON-membership (zero-balance) proof.
+    #[test]
+    fn balance_inclusion_proof_roundtrips_and_rejects_tampering() {
+        let mut s = SigilState::new();
+        let alice = [1u8; 32];
+        let bob = [2u8; 32];
+        for (w, amt) in [(alice, 4200u128), (bob, 7u128)] {
+            let t = StateTransition {
+                at_height: 1,
+                mutations: vec![StateMutation::SetBalance { wallet: w, token: NATIVE, amount: amt }],
+            };
+            commit_state_transition(&mut s, &t, 1).unwrap();
+        }
+
+        // (1) honest inclusion proof verifies + encodes the balance.
+        let (bal, root, proof) = s.prove_balance(&alice, &NATIVE);
+        assert_eq!(bal, 4200);
+        assert!(verify_proof(&root, &proof), "honest inclusion proof must verify");
+        assert_eq!(
+            proof.leaf,
+            *blake3::hash(&SigilState::wallet_smt_value(4200)).as_bytes(),
+            "leaf must commit to the claimed balance"
+        );
+
+        // (2) a lying balance is detectable: the leaf does NOT match a wrong amount.
+        assert_ne!(
+            proof.leaf,
+            *blake3::hash(&SigilState::wallet_smt_value(9999)).as_bytes(),
+            "leaf must not match a balance the wallet does not hold"
+        );
+
+        // (3) tampering the proof rejects against the honest root.
+        let mut bad = proof.clone();
+        bad.siblings[0][0] ^= 0x01;
+        assert!(!verify_proof(&root, &bad), "tampered sibling must reject");
+
+        // (4) verifying against a wrong root rejects.
+        let mut wrong_root = root;
+        wrong_root[0] ^= 0xff;
+        assert!(!verify_proof(&wrong_root, &proof), "wrong root must reject");
+
+        // (5) an absent wallet: verifiable NON-membership (leaf == 0 == balance 0).
+        let carol = [9u8; 32];
+        let (cbal, croot, cproof) = s.prove_balance(&carol, &NATIVE);
+        assert_eq!(cbal, 0);
+        assert_eq!(cproof.leaf, [0u8; 32], "absent key proves the empty leaf");
+        assert!(verify_proof(&croot, &cproof), "non-membership proof must verify");
+
+        // (6) the SMT root is stable for the same state (determinism).
+        assert_eq!(s.wallet_smt_root(), root, "wallet SMT root is deterministic");
     }
 
     /// SOUNDNESS of the incremental accumulator: after thousands of random
@@ -1445,5 +1612,72 @@ mod tests {
         };
         let err = commit_state_transition(&mut s, &bogus, 1).unwrap_err();
         assert!(matches!(err, CommitError::DeltaInvariant(_)));
+    }
+}
+
+
+#[cfg(test)]
+mod r0_nonce_tests {
+    use super::*;
+
+    fn w(b: u8) -> WalletId { [b; 32] }
+
+    #[test]
+    fn nonce_of_defaults_to_zero() {
+        let st = SigilState::new();
+        assert_eq!(st.nonce_of(&w(1)), 0);
+    }
+
+    #[test]
+    fn strictly_increasing_accepted_replay_rejected() {
+        let mut st = SigilState::new();
+        let a = w(1);
+        assert!(st.check_and_bump_nonce(&a, 1).is_ok());
+        assert_eq!(st.nonce_of(&a), 1);
+        // replay of the SAME nonce -> rejected (the whole hole this closes).
+        assert!(matches!(st.check_and_bump_nonce(&a, 1), Err(CommitError::NonceReplay { got: 1, have: 1 })));
+        // a lower nonce -> rejected.
+        assert!(matches!(st.check_and_bump_nonce(&a, 0), Err(CommitError::NonceReplay { .. })));
+        // strictly-increasing (gaps allowed) -> accepted, advances the high-water.
+        assert!(st.check_and_bump_nonce(&a, 2).is_ok());
+        assert!(st.check_and_bump_nonce(&a, 9).is_ok());
+        assert_eq!(st.nonce_of(&a), 9);
+        // a value between old-and-new (reorder) -> rejected.
+        assert!(matches!(st.check_and_bump_nonce(&a, 5), Err(CommitError::NonceReplay { .. })));
+    }
+
+    #[test]
+    fn nonces_are_per_author_independent() {
+        let mut st = SigilState::new();
+        assert!(st.check_and_bump_nonce(&w(1), 3).is_ok());
+        assert!(st.check_and_bump_nonce(&w(2), 1).is_ok()); // author 2 unaffected by author 1
+        assert_eq!(st.nonce_of(&w(1)), 3);
+        assert_eq!(st.nonce_of(&w(2)), 1);
+    }
+
+    #[test]
+    fn nonce_is_committed_in_wallet_root_and_audit_consistent() {
+        let mut a = SigilState::new();
+        let root_empty = a.roots().wallet_state_root;
+        a.check_and_bump_nonce(&w(1), 7).unwrap();
+        let root_after = a.roots().wallet_state_root;
+        assert_ne!(root_empty, root_after, "nonce bump must move wallet_state_root");
+        // incremental acc must equal the from-scratch recompute (audit path, lib.rs:227).
+        assert_eq!(a.roots().wallet_state_root, a.wallet_root_recompute());
+        // determinism: an independent state reaching the same nonce reaches the same root.
+        let mut b = SigilState::new();
+        b.check_and_bump_nonce(&w(1), 7).unwrap();
+        assert_eq!(a.roots().wallet_state_root, b.roots().wallet_state_root);
+    }
+
+    #[test]
+    fn setbalance_cannot_forge_nonce() {
+        let mut st = SigilState::new();
+        let t = StateTransition {
+            at_height: 0,
+            mutations: vec![StateMutation::SetBalance { wallet: w(1), token: NONCE_TOKEN, amount: 999 }],
+        };
+        assert!(matches!(commit_state_transition(&mut st, &t, 0), Err(CommitError::ReservedToken)));
+        assert_eq!(st.nonce_of(&w(1)), 0, "the forged write must not have advanced the nonce");
     }
 }

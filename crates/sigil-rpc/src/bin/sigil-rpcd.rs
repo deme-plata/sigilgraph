@@ -105,6 +105,11 @@ struct Node {
     mandates: sigil_bank::mandate::MandateBook,
     /// LANE-Y bank 2-of-2 council (treasury transfers need two members). Own key (`bank_council`).
     council: sigil_bank::council::Council,
+    /// University credential economy (sigil-university port): point transcripts,
+    /// award-replay nonces, settled high-water-marks, graduations, tuition.
+    /// Persisted under its OWN flux-db key (`university`), additive like
+    /// `credit_vault`/`mandates` — NEVER inside `Snapshot` (positional bincode).
+    university: sigil_university::UniversityRegistry,
 }
 
 /// Persisted snapshot: the money + chain state (NOT students — VerifiedRegistry isn't
@@ -156,6 +161,8 @@ fn persist(node: &Node) {
     // LANE-Y: agent mandates + bank council each persist under their OWN additive key.
     if let Ok(bytes) = bincode::serialize(&node.mandates) { let _ = db.put(b"mandates", &bytes); }
     if let Ok(bytes) = bincode::serialize(&node.council) { let _ = db.put(b"bank_council", &bytes); }
+    // University: point ledgers + graduations persist under their OWN additive key.
+    if let Ok(bytes) = bincode::serialize(&node.university) { let _ = db.put(b"university", &bytes); }
 }
 /// Load a persisted snapshot, if one exists + decodes.
 fn load_snapshot(db: &flux_db::Database) -> Option<Snapshot> {
@@ -182,6 +189,14 @@ fn load_council(db: Option<&flux_db::Database>) -> sigil_bank::council::Council 
         .unwrap_or_default();
     c.seed(vec![MASTER, OPERATOR], 2); // idempotent — only seeds an empty roster
     c
+}
+/// University: load the persisted credential-economy registry (own key, see
+/// `persist`). Missing/undecodable → empty registry (a chain that predates the
+/// university port simply has no transcripts yet).
+fn load_university(db: Option<&flux_db::Database>) -> sigil_university::UniversityRegistry {
+    db.and_then(|d| d.get(b"university").ok().flatten())
+        .and_then(|b| bincode::deserialize(&b).ok())
+        .unwrap_or_default()
 }
 /// Persist an accepted dual-lane block under its mining height so peers can pull it
 /// (`GET /block?height=`) and INDEPENDENTLY re-verify the chain (verify-don't-trust).
@@ -475,6 +490,7 @@ fn bootstrap() -> Node {
             credit_vault.status().position_count, credit_vault.total_collateral, credit_vault.protocol_reserve);
         let mandates = load_mandates(statedb.as_ref());
         let council = load_council(statedb.as_ref());
+        let university = load_university(statedb.as_ref());
         eprintln!("flux-db: LANE-Y — {} mandate(s), council {}-of-{}",
             mandates.mandates.len(), council.threshold, council.members.len());
         let mut tokens = snap.tokens;
@@ -494,6 +510,7 @@ fn bootstrap() -> Node {
             credit_vault,
             mandates,
             council,
+            university,
         };
     }
     eprintln!("flux-db: no snapshot — seeding fresh genesis @ {state_path}");
@@ -506,6 +523,10 @@ fn bootstrap() -> Node {
     m.push(StateMutation::SetBalance { wallet: OPERATOR, token: NATIVE, amount: 2_000_000 });
     m.push(StateMutation::SetBalance { wallet: OPERATOR, token: USDS, amount: 5_000_000 });
     m.push(StateMutation::SetBalance { wallet: CITIZEN, token: NATIVE, amount: 1_000 });
+    // Bootstrap the university treasury so settlements + graduation bonuses can be
+    // paid before tuition inflows accrue. Funded with NATIVE (well under the 21M
+    // cap); thereafter it's topped up by tuition. (sigil_rpc::university bridge.)
+    m.push(StateMutation::SetBalance { wallet: sigil_rpc::university::UNIVERSITY_TREASURY, token: NATIVE, amount: 1_000_000 });
 
     // Fund the swarm traders: a stack of every token so they can hit any pool.
     for i in 0..TRADERS {
@@ -566,7 +587,8 @@ fn bootstrap() -> Node {
         genesis_ts_us, last_block_ts_us: genesis_ts_us, emission_carry: 0,
         credit_vault: sigil_bank::credit::CreditVault::new(),
         mandates: sigil_bank::mandate::MandateBook::default(),
-        council: { let mut c = sigil_bank::council::Council::default(); c.seed(vec![MASTER, OPERATOR], 2); c } };
+        council: { let mut c = sigil_bank::council::Council::default(); c.seed(vec![MASTER, OPERATOR], 2); c },
+        university: sigil_university::UniversityRegistry::new() };
     persist(&node); // write the genesis snapshot so the next boot restores
     node
 }
@@ -859,10 +881,28 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
         ("GET", "/balance") => {
             let w = query_get(query, "wallet").and_then(hex32);
             let t = query_get(query, "token").and_then(hex32).unwrap_or(NATIVE);
+            let want_proof = query_get(query, "proof").as_deref() == Some("1");
             match w {
                 Some(w) => {
                     let n = node.read().unwrap();
-                    ok(format!("{{\"ok\":true,\"balance\":{}}}", n.state.balance_of(&w, &t)))
+                    if want_proof {
+                        // Proof-carrying balance (WS2): a wallet-SMT inclusion (or
+                        // non-membership) proof against the SMT root. A light client
+                        // verifies proof against wallet_smt_root, checks the leaf
+                        // encodes the balance, and — once the SMT root is committed
+                        // in the header (height-gated) — trusts it against the
+                        // tip-attested root. See docs/SIGIL_HARDENING_BACKLOG.md.
+                        let (bal, root, proof) = n.state.prove_balance(&w, &t);
+                        let sibs: Vec<String> = proof.siblings.iter().map(|s| to_hex(s)).collect();
+                        ok(format!(
+                            "{{\"ok\":true,\"balance\":{},\"wallet\":\"{}\",\"token\":\"{}\",\"height\":{},\"wallet_smt_root\":\"{}\",\"proof\":{{\"key_hash\":\"{}\",\"leaf\":\"{}\",\"siblings\":[{}]}}}}",
+                            bal, to_hex(&w), to_hex(&t), n.height, to_hex(&root),
+                            to_hex(&proof.key_hash), to_hex(&proof.leaf),
+                            sibs.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(",")
+                        ))
+                    } else {
+                        ok(format!("{{\"ok\":true,\"balance\":{}}}", n.state.balance_of(&w, &t)))
+                    }
                 }
                 None => bad("wallet must be 64-hex"),
             }
@@ -1240,6 +1280,115 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                     }
                 }
                 None => bad("operator_pool must be 64-hex"),
+            }
+        }
+        // ── University credential economy (sigil-university port) ──────────────────
+        // Pure spine in `sigil-university`; the `sigil_rpc::university` bridge routes
+        // every payout through the state chokepoint as a TREASURY TRANSFER (tuition in,
+        // settlement/bonus out) — it NEVER mints, so the 21M cap is untouched and the
+        // treasury can only pay what it holds. Academic bookkeeping (who earned what)
+        // lives in `n.university`, persisted under its own flux-db key.
+        ("GET", "/university/status") => {
+            let n = node.read().unwrap();
+            let treasury = n.state.balance_of(&sigil_rpc::university::UNIVERSITY_TREASURY, &NATIVE);
+            ok(serde_json::json!({
+                "ok": true,
+                "enrolled": n.university.enrolled(),
+                "graduated": n.university.graduated.len(),
+                "treasury_wallet": to_hex(&sigil_rpc::university::UNIVERSITY_TREASURY),
+                "treasury_native": treasury.to_string(),
+                "tuition_per_year": sigil_university::TuitionPolicy::default().tuition_per_year().to_string(),
+                "academic_years": sigil_university::ACADEMIC_YEARS,
+                "micro_sigil_per_point": sigil_university::SettlementParams::default().micro_sigil_per_point.to_string(),
+            }).to_string())
+        }
+        ("GET", "/university/ledger") => {
+            let w = match query_get(query, "wallet").and_then(hex32) { Some(w) => w, None => return bad("wallet must be 64-hex") };
+            let n = node.read().unwrap();
+            let led = n.university.ledger_of(&w);
+            let by_year: Vec<serde_json::Value> = (1u8..=5).map(|y| serde_json::json!({
+                "year": y, "points": led.by_year.get(&y).copied().unwrap_or(0),
+            })).collect();
+            ok(serde_json::json!({
+                "ok": true, "wallet": to_hex(&w),
+                "by_year": by_year,
+                "lifetime_points": n.university.lifetime_points(&w),
+                "unsettled_points": n.university.unsettled_points(&w),
+                "graduated": n.university.is_graduated(&w),
+            }).to_string())
+        }
+        ("POST", "/university/tuition") => {
+            let student = match jstr(body, "student").and_then(hex32) { Some(w) => w, None => return bad("student must be 64-hex") };
+            let year = match jnum(body, "year") { Some(y) if (1..=5).contains(&y) => y as u8, _ => return bad("year must be 1..=5") };
+            let mut n = node.write().unwrap();
+            // the student pays tuition FROM their own wallet → they must sign.
+            if let Err(e) = authorize(&mut n, &student, "university_tuition", &[to_hex(&student), year.to_string()], body) { return bad(&e); }
+            let h = n.height;
+            let policy = sigil_university::TuitionPolicy::default();
+            let res = { let nm: &mut Node = &mut *n;
+                sigil_rpc::university::pay_tuition(&mut nm.state, h, &mut nm.university, student, &policy, year) };
+            match res {
+                Ok(amt) => { n.height += 1;
+                    ingest(&mut n, "university", format!("tuition yr{year}: {amt} SIGIL"), &[student], "university tuition payment");
+                    ok(serde_json::json!({"ok": true, "tuition_paid": amt.to_string(), "year": year}).to_string()) }
+                Err(e) => bad(&e.to_string()),
+            }
+        }
+        ("POST", "/university/award") => {
+            // body = a JSON SignedAward (award + SQIsign sig + pubkey).
+            let signed: sigil_university::SignedAward = match serde_json::from_str(body) {
+                Ok(s) => s, Err(e) => return bad(&format!("body must be a SignedAward JSON: {e}")),
+            };
+            let from = signed.award.from;
+            let mut n = node.write().unwrap();
+            // The awarding authority must control `from` (request-signed). v1 uses
+            // bare SQIsign verify_award (role-direction + point cap + year). The
+            // registrar-credential path (verify_award_credentialed — closes the
+            // self-declared-role Sybil hole) activates once a node registrar anchor
+            // is configured; see sigil_rpc::university::record_award.
+            if let Err(e) = authorize(&mut n, &from, "university_award", &[to_hex(&from), signed.award.nonce.to_string()], body) { return bad(&e); }
+            if let Err(e) = sigil_university::verify_award(&signed) { return bad(&format!("award invalid: {e}")); }
+            let (to, pts) = (signed.award.to, signed.award.points);
+            match n.university.record_award(&signed) {
+                Ok(total) => {
+                    ingest(&mut n, "university", format!("award {pts} pts → {}", to_hex(&to)), &[from, to], "university point award");
+                    ok(serde_json::json!({"ok": true, "recipient": to_hex(&to), "points": pts, "lifetime_total": total}).to_string()) }
+                Err(e) => bad(&e.to_string()),
+            }
+        }
+        ("POST", "/university/settle") => {
+            let agent = match jstr(body, "agent").and_then(hex32) { Some(w) => w, None => return bad("agent must be 64-hex") };
+            let mut n = node.write().unwrap();
+            // the agent claims their OWN earnings → they must sign.
+            if let Err(e) = authorize(&mut n, &agent, "university_settle", &[to_hex(&agent)], body) { return bad(&e); }
+            let h = n.height;
+            let params = sigil_university::SettlementParams::default();
+            let res = { let nm: &mut Node = &mut *n;
+                sigil_rpc::university::settle(&mut nm.state, h, &mut nm.university, agent, &params) };
+            match res {
+                Ok(s) => { if s.gross > 0 { n.height += 1;
+                        ingest(&mut n, "university", format!("settle → {} SIGIL (fee {})", s.to_agent, s.to_bank), &[agent], "university points settlement"); }
+                    ok(serde_json::json!({"ok": true, "gross": s.gross.to_string(), "to_agent": s.to_agent.to_string(), "to_bank": s.to_bank.to_string()}).to_string()) }
+                Err(e) => bad(&e.to_string()),
+            }
+        }
+        ("POST", "/university/graduate") => {
+            let student = match jstr(body, "student").and_then(hex32) { Some(w) => w, None => return bad("student must be 64-hex") };
+            let mut n = node.write().unwrap();
+            if let Err(e) = authorize(&mut n, &student, "university_graduate", &[to_hex(&student)], body) { return bad(&e); }
+            let h = n.height;
+            let reqs = sigil_university::DegreeRequirements::default();
+            let bonus = sigil_university::GraduationBonus::default();
+            let res = { let nm: &mut Node = &mut *n;
+                sigil_rpc::university::graduate(&mut nm.state, h, &mut nm.university, student, &reqs, &bonus) };
+            match res {
+                Ok(Some(out)) => { n.height += 1;
+                    ingest(&mut n, "university", format!("GRADUATED — {} SIGIL bonus + flux-developer spawn", out.bonus_sigil), &[student], "university graduation");
+                    ok(serde_json::json!({"ok": true, "graduated": true, "bonus_sigil": out.bonus_sigil.to_string(),
+                        "total_points": out.total_points, "spawn_flux_developer": out.spawn_flux_developer,
+                        "developer_agent_id": to_hex(&out.developer_agent_id)}).to_string()) }
+                Ok(None) => ok(serde_json::json!({"ok": true, "graduated": false, "reason": "requirements not met or already graduated"}).to_string()),
+                Err(e) => bad(&e.to_string()),
             }
         }
         // ── LANE-X collateral credit (QCREDIT port): lock SIGIL → mint CREDIT @50% LTV. ──

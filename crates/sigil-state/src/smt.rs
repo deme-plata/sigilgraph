@@ -145,7 +145,7 @@ impl Smt {
 /// plus the leaf value hash being proven. Verifies against a root WITHOUT the
 /// tree — this is what a 10ms light client checks (genesis §3). An
 /// all-zero `leaf` proves NON-membership (the key maps to an empty leaf).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MerkleProof {
     /// BLAKE3(key) — the path.
     pub key_hash: [u8; 32],

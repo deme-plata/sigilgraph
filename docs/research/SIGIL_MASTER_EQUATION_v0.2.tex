@@ -1,0 +1,293 @@
+% The Master Equation of SIGIL — companion note v0.2
+% LaTeX rendition of SIGIL_MASTER_EQUATION_v0.md (v0 2026-05-30, v0.1 addendum
+% 2026-05-31), corrected per the 2026-07-18 external review:
+%  - framed throughout as a CONJECTURAL EFFECTIVE ACTION (correspondences, not
+%    derivations)
+%  - PID stability discriminant corrected (K_p^2 >= 4 K_d K_i)
+%  - gauge-healing language fixed (re-synchronization dynamics, not a gauge
+%    transformation)
+%  - knot formulation fixed (braid closure -> link; invariants are one-way)
+%  - crypto composition stated per-property
+% Build: pdflatex x2.
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[margin=2.6cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage[colorlinks=true,linkcolor=sigilviolet,urlcolor=sigilcyan,citecolor=sigilviolet]{hyperref}
+\usepackage{xurl}
+
+\definecolor{sigilviolet}{HTML}{8B5CF6}
+\definecolor{sigilgold}{HTML}{B7791F}
+\definecolor{sigilcyan}{HTML}{0E7490}
+\definecolor{ink}{HTML}{1A1428}
+
+\hypersetup{
+  pdftitle={The Master Equation of SIGIL — a Conjectural Effective Action for a BlockDAG (v0.2)},
+  pdfauthor={bitknight.dipper688@passmail.net},
+  pdfsubject={Companion note to the SIGIL whitepaper v1.1; sigilgraph repo, branch feat/commons-tithe-routing-0.36.1},
+  pdfkeywords={SIGIL, BlockDAG, effective action, variational principle, knot theory, post-quantum}
+}
+
+\newcommand{\SSIGIL}{\mathcal{S}_{\mathrm{SIGIL}}}
+\newcommand{\pretend}[1]{\textcolor{sigilgold}{\textit{#1}}}
+
+\title{\textcolor{ink}{\LARGE The Master Equation of SIGIL}\\[5pt]
+\large A Conjectural Effective Action for a BlockDAG\\[4pt]
+\normalsize Companion note v0.2 · 2026-07-18 · supersedes v0/v0.1 (2026-05-30/31)}
+\author{\texttt{bitknight.dipper688@passmail.net}\\[2pt]
+\normalsize companion to \emph{SIGIL — The Variational Chain}, whitepaper v1.1}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+This note states the conjectural effective action that organizes the SIGIL protocol,
+defines its fields, maps each variation to a shipped or staged protocol component, and
+lists the falsifiable predictions the correspondence generates. \textbf{Its epistemic
+status is stated up front: this is a design principle and research programme, not
+accomplished mathematics.} The component Lagrangians are unspecified beyond their field
+content; no discretization of the BlockDAG into a lattice field theory has been
+constructed; each ``field equation'' below is a correspondence between a standard
+equation and a mechanism, adopted because it forces holistic design and yields testable
+predictions. One prediction generated under this discipline — the gossip delivery law —
+has completed the full arc from hypothesis to measured closed form. v0.2 incorporates
+corrections from external review: the PID stability discriminant, the gauge-healing
+language, the knot formulation, and the per-property statement of cryptographic
+composition.
+\end{abstract}
+
+\section{The equation}
+
+SIGIL's BlockDAG braid $\mathcal{G}$ — vertices are blocks, edges are causal links — is
+modeled as a Lorentzian 4-manifold. We conjecture its dynamics are organized by one
+variational principle:
+
+\begin{equation}
+\boxed{\;\delta \SSIGIL[g,\,A,\,\varphi,\,J,\,K,\,\Sigma] \;=\; 0\;}
+\end{equation}
+
+\begin{equation}
+\SSIGIL = \int_{\mathcal{G}} d^{4}\sigma\, \sqrt{|g|}\,
+\Bigl[
+\tfrac{1}{2\kappa}\bigl(R - 2\Lambda_{\mathrm{emission}}(\varphi)\bigr)
++ \mathcal{L}_{\mathrm{settle}}(J,g)
++ \mathcal{L}_{\mathrm{witness}}(A,g)
++ \mathcal{L}_{\mathrm{topo}}(K)
++ \mathcal{L}_{\mathrm{crypto}}(\Sigma,g)
+\Bigr]
+\end{equation}
+
+The claim this note is entitled to make: every SIGIL mechanism must identify which term
+it belongs to, and a proposed mechanism touching two or more terms is a design smell.
+The claim it is \emph{not} yet entitled to make: that any mechanism has been derived
+from the action. The $\mathcal{L}$'s are names with declared field content, awaiting
+explicit form.
+
+\section{The fields}
+
+\begin{center}
+\small
+\begin{tabular}{@{}llp{8.8cm}@{}}
+\toprule
+Symbol & Type & Protocol meaning \\
+\midrule
+$\mathcal{G}$ & Lorentzian 4-manifold & The BlockDAG braid; the fabric of the chain. \\
+$g_{\mu\nu}$ & metric tensor & Conjectured to be induced by agent-reputation density;
+reputation as curvature. \pretend{Heuristic — functional form unfit.} \\
+$R$ & Ricci scalar & Consensus tension; forks raise it, convergence minimizes it. \\
+$\Lambda_{\mathrm{emission}}(\varphi)$ & scalar field & The emission ``cosmological
+constant,'' PID-controlled toward target supply. \\
+$A_\mu$ & gauge connection & Witness attestations; $F = dA + A\wedge A$ is the
+witness-disagreement field. \\
+$J^\mu$ & conserved current & Settlement flow; $J^0$ value density, $J^i$ settlement
+current. \\
+$K$ & link (closed braid) & The link obtained by closing the DAG's braid over a bounded
+window; consensus-equivalent histories share its invariants. \\
+$\Sigma = (\Sigma_{\mathrm{iso}}, \Sigma_{\mathrm{lat}}, \Sigma_{\mathrm{hash}})$ &
+security connection & Three disjoint post-quantum hardness assumptions, one per layer
+they guard. \\
+$\kappa = 8\pi G_{\mathrm{agent}}$ & coupling & The gravitational constant of the agent
+economy; empirical. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{The correspondences}
+
+Each variation names one protocol component. ``Names,'' not ``yields'': see the abstract.
+
+\subsection{$\delta\SSIGIL/\delta J^\mu = 0$ — conservation (the ledger)}
+
+\begin{equation}
+\nabla_\mu J^\mu = 0 \;\Longleftrightarrow\;
+\partial_t \rho_{\mathrm{value}} + \nabla\!\cdot\!\mathbf{J}_{\mathrm{settle}}
+= S_{\mathrm{emission}}(\varphi)
+\end{equation}
+
+Value conservation with the emission source term. Implemented as the
+\texttt{commit\_state\_transition} chokepoint — the only code path permitted to mutate
+chain state — with per-delta conservation checks and the 21M cap as the integral form.
+
+\subsection{$\delta\SSIGIL/\delta\varphi = 0$ — Klein--Gordon emission (monetary policy)}
+
+\begin{equation}
+\ddot{\varphi} + 3H\dot{\varphi} + V'(\varphi) = 0,\qquad
+V(\varphi) = K_p\,e^2 + K_i\,e\!\!\int\! e\,dt + K_d\,(\dot e)^2
+\end{equation}
+
+The PID emission controller cast as a scalar field in a potential; Hubble friction is
+network expansion. The mapping is exact only for quadratic potentials — anti-windup,
+derivative filtering, and gain scheduling break the analogy and are deferred to
+higher-order correction terms. \textbf{Corrected stability condition (v0.2):} from the
+linearized characteristic equation $K_d s^2 + K_p s + K_i = 0$, the non-oscillatory
+(overdamped) condition is
+\begin{equation}
+K_p^2 \;\ge\; 4\,K_d K_i
+\end{equation}
+v0.1 stated $K_d^2 > 4K_pK_i$, interchanging the damping and inertia roles; a fresh
+derivation against the \emph{implemented} controller (which is not exactly this
+second-order plant) is part of the prediction's test protocol.
+
+\subsection{$\delta\SSIGIL/\delta K = 0$ — topological invariance (fork detection)}
+
+\begin{equation}
+\frac{d}{dt}\,V_K(q)\Big|_{\mathrm{consensus}} = 0
+\end{equation}
+
+where $K$ is the link obtained by closing the braid over a bounded window (v0.1's
+$K \in \pi_1(\mathcal{G})$ was a category error — a knot is not an element of the
+fundamental group). Valid consensus moves are Reidemeister moves; invariants are
+conserved; a fork that changes the braid changes the invariant. Two constraints bind the
+programme. \emph{Computational:} the Jones polynomial is \#P-hard in general, so the
+per-block commitment uses cheap invariants — linking number ($O(\mathrm{crossings})$) or
+the Alexander polynomial (polynomial-time via the Burau determinant) — over a bounded
+window, with Jones/Khovanov machinery reserved for rare deep-fork adjudication.
+\emph{Logical:} cheap invariants fingerprint, they do not classify. A differing invariant
+proves divergence; identical invariants do not prove identical histories. The topology
+commitment is a one-way tripwire that complements, never replaces, the state-root
+comparison.
+
+\subsection{$\delta\SSIGIL/\delta A^\mu = 0$ — Yang--Mills witnesses (divergence
+detection)}
+
+\begin{equation}
+\nabla_\nu F^{\mu\nu} = J^\mu_{\mathrm{witness}},\qquad F = dA + A\wedge A
+\end{equation}
+
+Diverging state-root tracks make the curvature $F$ locally non-zero; detection is the
+measurement of $|F|$ above threshold. \textbf{Corrected language (v0.2):} healing is
+\emph{re-synchronization dynamics} that drives $F$ back toward zero. It is not a gauge
+transformation — curvature is gauge-covariant, so a gauge transformation relabels the
+connection without repairing the underlying disagreement. In code: four state roots per
+header, independent recomputation at every node, self-halt on mismatch.
+
+\subsection{$\delta\SSIGIL/\delta\Sigma = 0$ — crypto-agility (the security floor)}
+
+Three disjoint post-quantum hardness families, each guarding the layer where its
+strengths bind: $\Sigma_{\mathrm{iso}}$ (isogeny — SQIsign L5; identity and provenance,
+sign once, 292\,B), $\Sigma_{\mathrm{lat}}$ (lattice — ML-DSA/ML-KEM; per-transaction
+and transport, fast batched verification), $\Sigma_{\mathrm{hash}}$ (FRI-STARK and the
+Ajtai/SIS fold; state and tip-proof, succinct whole-chain verification, no trusted
+setup). The variation yields the dispatch rule: retire a leg the instant its hardness
+margin drops; the others carry what they guard. \textbf{Composition, stated carefully
+(v0.2):} because the legs protect \emph{different} properties, the security of any single
+property is the floor of the primitives guarding \emph{that} property; an adversary
+targeting one property attacks one leg. The break-all-three bar applies only to forging a
+block's complete commitment stack as a coherent whole, and a formal joint security model
+is open work.
+
+\subsection{The constraint surface — the wall}
+
+$\SSIGIL$ admits a true extremum iff $\Gamma_{\mathrm{verify}} \ge
+\Gamma_{\mathrm{state}}$. Measured 2026-05-30 at $\sim$1840:1 against verification (a
+constrained saddle), resolved not by faster per-signature verification but by changing
+$\Sigma_{\mathrm{hash}}$: the fold collapsed whole-chain verification to a constant-size
+check (2{,}568\,B; 342\,ms full verification at the 100k-block benchmark; 3\,$\mu$s
+live incremental tip check). The wall was a cryptographic choice, not a hardware limit —
+the one structural claim of this note that events have since borne out.
+
+\section{Predictions}
+
+The correspondence earns its keep only by predicting. Status at v0.2:
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{7.2cm}lp{5.2cm}@{}}
+\toprule
+Prediction & Status & Test \\
+\midrule
+1. Fork survival $\propto \exp(-\Delta R\,\tau_{\mathrm{block}})$ & \pretend{open} &
+fork-survival statistics vs.\ producer reputation \\
+2. PID non-oscillatory iff $K_p^2 \ge 4K_dK_i$ (corrected) & \pretend{open} & derive
+against implemented controller; tune to critical value \\
+3. Bounded-window topology commitment detects order-tampering forks &
+partially met & braid gates: 16/16 permutations agree, 5/5 tamper rejected; header
+commitment staged \\
+4. The verification wall scales with $\Sigma$, not hardware & confirmed in kind & the
+fold moved the wall; SIMD did not \\
+5. Bulk/boundary duality (settlement throughput $\sim$ boundary entropy production) &
+\pretend{open} & compare vs.\ reputation-graph entropy \\
+6. Validator-departure entropy law (Hawking analogue) & \pretend{open} & tip-proof rate
+vs.\ validator-set entropy \\
+7. Gossip delivery follows $D(p,r)=1-p^r$ & \textbf{confirmed} & 22 seeded simulations,
+RMS 0.4\,pp; shipped as the $r{=}3$ provisioning default \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Prediction 7 is the template: hypothesis $\to$ seeded simulation campaign $\to$ closed
+form $\to$ residual $\to$ operator-facing rule $\to$ published paper. Predictions 1--6
+are held to that arc.
+
+\section{What's still pretend}
+
+In one place, so no reader has to hunt: (i) the action is conjectural — Lagrangians
+unspecified, no lattice discretization, correspondences not derivations; (ii) the
+reputation metric is a heuristic awaiting a fit to measured consensus drift; (iii) the
+tractable topology programme is a fingerprint, not a classifier, and the header
+commitment is staged; (iv) AdS/CFT on a discrete graph is analogy pending rigorous
+discretization; (v) the PID/Klein--Gordon mapping holds only for quadratic potentials;
+(vi) per-property crypto floors are design intent — the joint composition bound and the
+fold's concrete Ajtai/SIS soundness reduction are open; (vii) the 1840:1 saddle
+measurement was taken on one 48-core host — the saddle condition is hardware-agnostic,
+its scale is not.
+
+\section{Method}
+
+This note was produced under the project's measure-first discipline: the fields were
+chosen to match modules that already exist in the workspace (\texttt{flux-science}:
+Einstein--Hilbert, holographic, inflation, and quantum-gravity components; the
+\texttt{flux-topology} invariants; the fold), each correspondence was cross-checked
+against session measurements (settlement rates, state/verify throughput, the divergence
+event record), and every gap found in review was folded back into the text rather than
+argued away. The v0.2 corrections — discriminant, gauge language, knot formulation,
+composition statement — came from exactly that loop.
+
+\section*{References}
+
+\small
+\begin{itemize}[leftmargin=1.2em,itemsep=1pt]
+\item \emph{SIGIL — The Variational Chain}, whitepaper v1.1 (2026-07-18) —
+\url{https://quillon.xyz/downloads/SIGIL_WHITEPAPER_v1.pdf}
+\item \emph{A Closed-Form Delivery Law for Gossip Redundancy in the sigil-top Light
+Node} (2026-06-17) — \url{https://quillon.xyz/downloads/sigil-top-delivery-law.pdf}
+\item \emph{SIGIL $\times$ QTFT} (2026-05-30) — \texttt{SIGIL\_QTFT\_TOPOLOGY\_v0.md}
+\item The SQInstructor: a guide to SQIsign and the Deuring Correspondence —
+arXiv:2603.09899
+\item High-Throughput GPU Implementation of Dilithium — arXiv:2211.12265
+\item A Comparative Analysis of zk-SNARKs and zk-STARKs — arXiv:2512.10020
+\end{itemize}
+
+\vspace{0.8em}
+\noindent\textit{v0.2 — 2026-07-18. The chain is modeled as a 4-manifold with curvature.
+The equation is conjecture; its discipline, and one of its predictions, are not.}
+
+\end{document}

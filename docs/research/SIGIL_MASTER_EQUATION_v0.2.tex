@@ -99,7 +99,8 @@ explicit form.
 \toprule
 Symbol & Type & Protocol meaning \\
 \midrule
-$\mathcal{G}$ & Lorentzian 4-manifold & The BlockDAG braid; the fabric of the chain. \\
+$\mathcal{G}$ & Lorentzian 4-manifold & The discrete BlockDAG braid, conjecturally
+modeled as a Lorentzian 4-manifold; the fabric of the chain. \\
 $g_{\mu\nu}$ & metric tensor & Conjectured to be induced by agent-reputation density;
 reputation as curvature. \pretend{Heuristic — functional form unfit.} \\
 $R$ & Ricci scalar & Consensus tension; forks raise it, convergence minimizes it. \\
@@ -144,7 +145,11 @@ V(\varphi) = K_p\,e^2 + K_i\,e\!\!\int\! e\,dt + K_d\,(\dot e)^2
 \end{equation}
 
 The PID emission controller cast as a scalar field in a potential; Hubble friction is
-network expansion. The mapping is exact only for quadratic potentials — anti-windup,
+network expansion. The displayed $V$ is \emph{schematic}: $e$, $\int e\,dt$, and
+$\dot e$ are controller states, not functions of $\varphi$ alone, so $V$ is not an
+ordinary local potential — a faithful treatment introduces auxiliary fields (or defines
+$e(\varphi)$ explicitly). The mapping is exact only for quadratic potentials —
+anti-windup,
 derivative filtering, and gain scheduling break the analogy and are deferred to
 higher-order correction terms. \textbf{Corrected stability condition (v0.2):} from the
 linearized characteristic equation $K_d s^2 + K_p s + K_i = 0$, the non-oscillatory
@@ -165,8 +170,9 @@ second-order plant) is part of the prediction's test protocol.
 where $K$ is the link obtained by closing the braid over a bounded window (v0.1's
 $K \in \pi_1(\mathcal{G})$ was a category error — a knot is not an element of the
 fundamental group). Valid consensus moves are Reidemeister moves; invariants are
-conserved; a fork that changes the braid changes the invariant. Two constraints bind the
-programme. \emph{Computational:} the Jones polynomial is \#P-hard in general, so the
+conserved; a fork \emph{may} change the bounded-window invariant — when it does,
+divergence is proven, and equality of invariants never proves equality of histories. Two
+constraints bind the programme. \emph{Computational:} the Jones polynomial is \#P-hard in general, so the
 per-block commitment uses cheap invariants — linking number ($O(\mathrm{crossings})$) or
 the Alexander polynomial (polynomial-time via the Burau determinant) — over a bounded
 window, with Jones/Khovanov machinery reserved for rare deep-fork adjudication.
@@ -196,8 +202,8 @@ strengths bind: $\Sigma_{\mathrm{iso}}$ (isogeny — SQIsign L5; identity and pr
 sign once, 292\,B), $\Sigma_{\mathrm{lat}}$ (lattice — ML-DSA/ML-KEM; per-transaction
 and transport, fast batched verification), $\Sigma_{\mathrm{hash}}$ (FRI-STARK and the
 Ajtai/SIS fold; state and tip-proof, succinct whole-chain verification, no trusted
-setup). The variation yields the dispatch rule: retire a leg the instant its hardness
-margin drops; the others carry what they guard. \textbf{Composition, stated carefully
+setup). The correspondence motivates the dispatch rule: retire a leg the instant its
+hardness margin drops; the others carry what they guard. \textbf{Composition, stated carefully
 (v0.2):} because the legs protect \emph{different} properties, the security of any single
 property is the floor of the primitives guarding \emph{that} property; an adversary
 targeting one property attacks one leg. The break-all-three bar applies only to forging a
@@ -206,9 +212,11 @@ is open work.
 
 \subsection{The constraint surface — the wall}
 
-$\SSIGIL$ admits a true extremum iff $\Gamma_{\mathrm{verify}} \ge
-\Gamma_{\mathrm{state}}$. Measured 2026-05-30 at $\sim$1840:1 against verification (a
-constrained saddle), resolved not by faster per-signature verification but by changing
+SIGIL imposes the engineering feasibility condition $\Gamma_{\mathrm{verify}} \ge
+\Gamma_{\mathrm{state}}$; we call the boundary ``the wall.'' It is an operational
+constraint, not a proven condition for the existence of an action extremum. Measured
+2026-05-30 at $\sim$1840:1 against verification, resolved not by faster per-signature
+verification but by changing
 $\Sigma_{\mathrm{hash}}$: the fold collapsed whole-chain verification to a constant-size
 check (2{,}568\,B; 342\,ms full verification at the 100k-block benchmark; 3\,$\mu$s
 live incremental tip check). The wall was a cryptographic choice, not a hardware limit —

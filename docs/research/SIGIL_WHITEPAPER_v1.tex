@@ -61,8 +61,9 @@ analogy its keep is that SIGIL's programme is \emph{measured}: a closed-form gos
 delivery law $D(p,r)=1-p^{r}$ (RMS residual $0.4$\,pp against 22 seeded simulations), a
 constant-size whole-chain verification proof ($2{,}568$\,B regardless of chain length),
 byte-identical multi-producer braid convergence (divergence $=0$ across adversarial
-simulation gates), and live tip verification in $3\,\mu$s — beating the founding 10\,ms
-claim by three orders of magnitude. A live experimental network (\texttt{sigil-g0}) runs
+simulation gates), and live \emph{incremental} tip verification in $3\,\mu$s (a fresh
+verifier's full fold check is 342\,ms at the 100k-block benchmark) — the founding 10\,ms
+tip-check claim beaten by three orders of magnitude on the incremental path. A live experimental network (\texttt{sigil-g0}) runs
 at height $\sim$29M under accelerated laboratory economics. This paper presents the
 action, its correspondences, the measured laws, the architecture, and an unusually honest
 account of what remains conjecture.
@@ -95,9 +96,9 @@ three engineering claims. What v0 lacked — and what Quillon's own quantum-phys
 whitepaper demonstrated the value of — is a \emph{unifying theoretical object} from which
 the design follows, rather than a list of mechanisms.
 
-That object exists. It was derived in the SIGIL master-equation programme
-(2026-05-30/31) using the \texttt{flux-science} modules already in the workspace, and this
-edition finally puts it where it was always intended:\ first.
+That organizing object has now been proposed. It was developed in the SIGIL
+master-equation programme (2026-05-30/31) using the \texttt{flux-science} modules already
+in the workspace, and this edition finally puts it where it was always intended:\ first.
 
 Three cultural commitments carry over from v0 and bind everything below:
 
@@ -144,18 +145,20 @@ variational principle:
 \toprule
 Symbol & Type & Protocol meaning \\
 \midrule
-$\mathcal{G}$ & Lorentzian 4-manifold & The BlockDAG braid; the fabric of the chain. \\
-$g_{\mu\nu}$ & metric tensor & Induced by agent-reputation density. High-reputation
-producers bend the metric; consensus flows toward them. Reputation \emph{is} curvature. \\
+$\mathcal{G}$ & Lorentzian 4-manifold & The discrete BlockDAG braid, conjecturally
+modeled as a Lorentzian 4-manifold; the fabric of the chain. \\
+$g_{\mu\nu}$ & metric tensor & Conjectured (heuristic) to be induced by
+agent-reputation density: high-reputation producers bend the metric and consensus flows
+toward them — reputation as curvature. \\
 $R$ & Ricci scalar & Consensus tension. Forks raise $R$; convergent histories minimize it. \\
 $\Lambda_{\mathrm{emission}}(\varphi)$ & scalar field & The emission ``cosmological
 constant,'' PID-controlled toward target supply. \\
-$A_\mu$ & gauge connection & Witness attestations; the curvature 2-form $F=dA$ is the
-witness-disagreement field. \\
+$A_\mu$ & gauge connection & Witness attestations; the curvature 2-form
+$F = dA + A\wedge A$ is the witness-disagreement field. \\
 $J^\mu$ & conserved current & Settlement flow; $J^0$ is value density,
 $J^i$ the settlement current along edges. \\
-$K$ & knot in $\mathcal{G}$ & The braid topology; consensus-equivalent histories share its
-invariants. \\
+$K$ & link (closed braid) & The link obtained by closing the bounded-window braid;
+consensus-equivalent histories share its invariants. \\
 $\Sigma=(\Sigma_{\mathrm{iso}},\Sigma_{\mathrm{lat}},\Sigma_{\mathrm{hash}})$ &
 security connection & Three disjoint post-quantum hardness assumptions
 (\S\ref{sec:crypto}). \\
@@ -200,8 +203,11 @@ V(\varphi) = K_p\,e^2 + K_i\,e\!\!\int\! e\,dt + K_d\,(\dot e)^2
 \end{equation}
 The PID emission controller is \emph{cast as} a scalar field rolling in a potential; the
 Hubble friction term $3H\dot\varphi$ is network expansion (new blocks arriving).
-Inflationary cosmology as a mnemonic for economic policy. The mapping is exact only for
-quadratic potentials. Stability prediction, from the linearized characteristic equation
+Inflationary cosmology as a mnemonic for economic policy. The displayed $V$ is
+\emph{schematic}: $e$, $\int e\,dt$, and $\dot e$ are controller states, not functions of
+$\varphi$ alone, so $V$ is not an ordinary local potential — a faithful treatment
+introduces auxiliary fields (or defines $e(\varphi)$ explicitly). The mapping is exact
+only for quadratic potentials. Stability prediction, from the linearized characteristic equation
 $K_d s^2 + K_p s + K_i = 0$: the controller is non-oscillatory iff
 $K_p^2 \ge 4K_dK_i$ (\S\ref{sec:predictions}; this corrects the discriminant stated in
 the v0.1 master-equation note, which had the roles of $K_p$ and $K_d$ interchanged —
@@ -213,7 +219,8 @@ a fresh derivation against the implemented controller is part of the test).
 \end{equation}
 where $K$ is the link obtained by closing the DAG's braid over a bounded window. Valid
 consensus moves are Reidemeister moves on the braid; invariants are conserved. A fork
-that changes the braid changes the invariant. \textbf{Two honesty notes.}
+\emph{may} change the bounded-window invariant — when it does, divergence is proven;
+equality of invariants never proves equality of histories. \textbf{Two honesty notes.}
 \emph{Computational:} the Jones polynomial is \#P-hard in general — nobody runs ``Jones
 consensus at 10k blocks/s.'' SIGIL's tractable programme (QTFT lanes) commits a
 \emph{cheap} invariant per block over a bounded window — linking number
@@ -261,9 +268,9 @@ whole-chain succinct verification, no trusted setup \\
 \end{tabular}
 \end{center}
 
-Varying the action subject to the weakest-component constraint yields the dispatch rule:
-retire $\Sigma_i$ the instant its hardness margin drops; the other legs carry what they
-guard. \textbf{Composition, stated carefully:} because the three primitives protect
+The correspondence, taken with the weakest-component constraint, motivates the dispatch
+rule: retire $\Sigma_i$ the instant its hardness margin drops; the other legs carry what
+they guard. \textbf{Composition, stated carefully:} because the three primitives protect
 \emph{different layers}, the security of any \emph{single property} is the floor of the
 primitives guarding \emph{that} property — an adversary targeting, say, transaction
 forgery attacks the lattice leg alone and need not touch the others. The
@@ -276,9 +283,11 @@ is the fold (\S\ref{sec:fold}). The isogeny leg signs every release \texttt{.pro
 the DNS tip anchor.
 
 \paragraph{The constraint surface — the wall.}
-The action admits a true extremum iff verification keeps pace with state transition:
-$\Gamma_{\mathrm{verify}} \ge \Gamma_{\mathrm{state}}$. At the 2026-05-30 measurement the
-ratio was $\sim$1840:1 against verification — a constrained saddle. The resolution came
+SIGIL imposes the engineering feasibility condition
+$\Gamma_{\mathrm{verify}} \ge \Gamma_{\mathrm{state}}$; we call the boundary ``the
+wall.'' It is an operational constraint, not a proven condition for the existence of an
+action extremum. At the 2026-05-30 measurement the ratio was $\sim$1840:1 against
+verification. The resolution came
 exactly where the crypto term predicted: not faster per-signature verification but a
 change of $\Sigma_{\mathrm{hash}}$ collapsing whole-chain verification to $O(1)$
 (\S\ref{sec:fold}). \emph{The wall was a cryptographic choice, not a hardware limit} —
@@ -391,7 +400,7 @@ Every block header commits three independent classes of evidence:
 
 \begin{center}
 \small
-\begin{tabular}{@{}p{5.2cm}p{4.4cm}p{4.6cm}@{}}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{5.2cm}>{\raggedright\arraybackslash}p{4.4cm}>{\raggedright\arraybackslash}p{4.6cm}@{}}
 \toprule
 Commitment & Proves & Catches \\
 \midrule
@@ -477,7 +486,11 @@ claimed for the live deployment. \textbf{Fork choice:} DagKnight ordering over t
 the finalized prefix advances with the anchored fold checkpoint. \textbf{Finality:} a
 block is treated as final when covered by the fold; this is an operational rule, not yet
 a theorem — the fold's security reduction (Ajtai/SIS, concrete parameters) is a stated
-target. \textbf{Sybil resistance and validator admission:} dual-lane mining prices block
+target. Note the distinction: the fold proves the \emph{validity} of a selected prefix;
+it does not by itself prove that the prefix is \emph{canonical}. On the current
+single-producer \texttt{sigil-g0} network, canonicality comes from the signed anchor and
+producer trust; multi-producer finality remains open formal work.
+\textbf{Sybil resistance and validator admission:} dual-lane mining prices block
 production; the reputation layer (\texttt{sigil-scoring}) is staged and no
 reputation-based admission claim is made yet. \textbf{Status of evidence:} the six-gate
 adversarial simulation record of \S\ref{sec:dagknight} is exactly that — a reproducible
@@ -570,8 +583,10 @@ The v0 contract, updated with results:
 \item A real swap settles end-to-end with the event committed to the event-log root —
 \pretend{open} (DEX math and typed deltas shipped; mainnet event-root activation pending).
 \item A fresh node joins via tip-proof and answers verified balance queries without ever
-subscribing to the block topic, verify time $\le$10\,ms — \measured{met and exceeded}:
-3\,$\mu$s live, fold-backed, zero blocks downloaded.
+subscribing to the block topic, verify time $\le$10\,ms — \measured{partially met}: a
+fresh verifier's full fold verification is 342\,ms; subsequent incremental tip checks
+take 3\,$\mu$s with zero blocks downloaded. The complete verified balance-query
+demonstration remains to be published.
 \item A tampered node self-halts on root divergence, exit 78, operator alarm —
 \measured{mechanism live}; the staged public tamper-demo remains to be run as theater.
 \item A gossiped release upgrades all running nodes with SQIsign-verified binaries and no
@@ -581,7 +596,7 @@ field since v0.20.x).
 one frame — \pretend{open}, depends on (1).
 \end{enumerate}
 
-Two of five demonstrated, one partially, two open — stated plainly, which is exactly the
+One of five demonstrated, two partially, two open — stated plainly, which is exactly the
 posture this project's culture demands.
 
 \section*{References}

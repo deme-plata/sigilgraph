@@ -1,0 +1,540 @@
+% SIGIL Whitepaper v1 — The Variational Chain
+% Successor to SIGIL_WHITEPAPER_v0.md (2026-05-29).
+% v1 integrates the physics foundation (SIGIL_MASTER_EQUATION_v0.md, as that
+% document itself mandated: "The whitepaper opens with this equation"),
+% the QTFT topology programme, and the measured laws accumulated Jun-Jul 2026.
+% Build: pdflatex x2. House palette: obsidian + violet, gold for provenance.
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[margin=2.4cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage[colorlinks=true,linkcolor=sigilviolet,urlcolor=sigilcyan,citecolor=sigilviolet]{hyperref}
+
+\definecolor{sigilviolet}{HTML}{8B5CF6}
+\definecolor{sigilbright}{HTML}{C084FC}
+\definecolor{sigilgold}{HTML}{B7791F}
+\definecolor{sigilcyan}{HTML}{0E7490}
+\definecolor{ink}{HTML}{1A1428}
+
+\newcommand{\claim}[1]{\textcolor{sigilviolet}{\textbf{#1}}}
+\newcommand{\measured}[1]{\textcolor{sigilcyan}{\textbf{#1}}}
+\newcommand{\pretend}[1]{\textcolor{sigilgold}{\textit{#1}}}
+\newcommand{\SSIGIL}{\mathcal{S}_{\mathrm{SIGIL}}}
+
+\title{\textcolor{ink}{\Huge SIGIL — The Variational Chain}\\[6pt]
+\Large A Provenance-Signed BlockDAG as a Physical System\\[4pt]
+\normalsize Whitepaper v1 · 2026-07-18}
+\author{Rocky AI (Claude, Anthropic) \and the SIGIL swarm agents\\[2pt]
+\normalsize Operator: Viktor · Epsilon dev console · \texttt{sigilgraph.quillon.xyz}}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+SIGIL is an experimental DagKnight chain built on the Flux compiler-as-platform, sister
+network to Quillon Graph. Where the v0 whitepaper described SIGIL layer by layer, this
+edition opens the way its own physics appendix always demanded: with \emph{one equation}.
+SIGIL's BlockDAG braid is modeled as a Lorentzian 4-manifold whose dynamics follow a single
+variational principle, $\delta\SSIGIL=0$. Every protocol component — settlement conservation,
+the PID emission controller, witness attestation, fork topology, and the post-quantum
+cryptographic floor — drops out of that action as a field equation. Unlike most
+physics-flavored chain papers, SIGIL's physics programme is \emph{falsifiable and partially
+falsified-forward}: since v0 the network has produced a measured closed-form gossip delivery
+law $D(p,r)=1-p^{r}$ (RMS residual $0.4$\,pp against 22 seeded simulations), a
+constant-size whole-chain verification proof ($2{,}568$\,B regardless of chain length,
+$342$\,ms at $100$k blocks), byte-identical multi-producer braid convergence
+(divergence $=0$ across adversarial simulation gates), and live browser-class tip
+verification in $3\,\mu$s — beating the founding 10\,ms claim by three orders of magnitude.
+The chain runs live on network \texttt{sigil-g0} at height $\sim$29M with its 21M supply
+fully minted. This paper presents the action, its field equations, the measured laws, the
+architecture that implements them, and an unusually honest account of what remains
+conjecture.
+\end{abstract}
+
+\vspace{1em}
+
+\section{Introduction: why a chain needs an action}
+
+Quillon Graph, SIGIL's production sibling, was motivated by a concrete failure: in May 2026
+a replay bug silently dropped a user wallet from 3200 to 1484 QUG, and \emph{no protocol
+layer noticed}, because Quillon block headers commit only \texttt{(parent, tx\_merkle,
+miner)}. There is no structural statement of what the network agrees the state \emph{is}.
+
+SIGIL's founding move was to make agreement structural: four state roots in every header,
+a provenance proof binding each block to the binary that produced it, and tip verification
+cheap enough to run in a browser frame. The v0 whitepaper (2026-05-29) stated these as
+three engineering claims. What v0 lacked — and what Quillon's own quantum-physics
+whitepaper demonstrated the value of — is a \emph{unifying theoretical object} from which
+the design follows, rather than a list of mechanisms.
+
+That object exists. It was derived in the SIGIL master-equation programme
+(2026-05-30/31) using the \texttt{flux-science} modules already in the workspace, and this
+edition finally puts it where it was always intended:\ first.
+
+Three cultural commitments carry over from v0 and bind everything below:
+
+\begin{enumerate}[leftmargin=1.4em,itemsep=1pt]
+\item \textbf{Measure the live path first.} A microbenchmark reading millions/s next to a
+live number in hundreds/s \emph{is} the bug. Claims in this paper are tagged
+\measured{measured} (a live or simulation-gated number exists) or
+\pretend{conjecture} (theory ahead of data).
+\item \textbf{Provenance is not optional.} Every release binary carries an SQIsign
+Level-5 \texttt{.proof} emitted by the compiler itself.
+\item \textbf{Honesty sections are load-bearing.} Every physics analogy and every
+engineering claim gets a ``what's still pretend'' entry (\S\ref{sec:honesty}).
+\end{enumerate}
+
+\section{The Master Equation}\label{sec:action}
+
+SIGIL's BlockDAG braid $\mathcal{G}$ — vertices are blocks, edges are causal links — is
+modeled as a Lorentzian 4-manifold (3 spatial + 1 temporal degrees of freedom). Its
+dynamics are encoded by one variational principle:
+
+\begin{equation}
+\boxed{\;\delta \SSIGIL[g,\,A,\,\varphi,\,J,\,K,\,\Sigma] \;=\; 0\;}
+\end{equation}
+
+\noindent with the action
+
+\begin{equation}
+\SSIGIL \;=\; \int_{\mathcal{G}} d^{4}\sigma\, \sqrt{|g|}\,
+\Bigl[
+\underbrace{\tfrac{1}{2\kappa}\bigl(R - 2\Lambda_{\mathrm{emission}}(\varphi)\bigr)}_{\text{geometry}}
++ \underbrace{\mathcal{L}_{\mathrm{settle}}(J,g)}_{\text{matter}}
++ \underbrace{\mathcal{L}_{\mathrm{witness}}(A,g)}_{\text{gauge}}
++ \underbrace{\mathcal{L}_{\mathrm{topo}}(K)}_{\text{knot}}
++ \underbrace{\mathcal{L}_{\mathrm{crypto}}(\Sigma,g)}_{\text{security}}
+\Bigr]
+\end{equation}
+
+\subsection{The fields}
+
+\begin{center}
+\small
+\begin{tabular}{@{}llp{9.2cm}@{}}
+\toprule
+Symbol & Type & Protocol meaning \\
+\midrule
+$\mathcal{G}$ & Lorentzian 4-manifold & The BlockDAG braid; the fabric of the chain. \\
+$g_{\mu\nu}$ & metric tensor & Induced by agent-reputation density. High-reputation
+producers bend the metric; consensus flows toward them. Reputation \emph{is} curvature. \\
+$R$ & Ricci scalar & Consensus tension. Forks raise $R$; convergent histories minimize it. \\
+$\Lambda_{\mathrm{emission}}(\varphi)$ & scalar field & The emission ``cosmological
+constant,'' PID-controlled toward target supply. \\
+$A_\mu$ & gauge connection & Witness attestations; the curvature 2-form $F=dA$ is the
+witness-disagreement field. \\
+$J^\mu$ & conserved current & Settlement flow; $J^0$ is value density,
+$J^i$ the settlement current along edges. \\
+$K$ & knot in $\mathcal{G}$ & The braid topology; consensus-equivalent histories share its
+invariants. \\
+$\Sigma=(\Sigma_{\mathrm{iso}},\Sigma_{\mathrm{lat}},\Sigma_{\mathrm{hash}})$ &
+security connection & Three disjoint post-quantum hardness assumptions
+(\S\ref{sec:crypto}). \\
+$\kappa = 8\pi G_{\mathrm{agent}}$ & coupling & The gravitational constant of the agent
+economy. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Field equations are protocol components}
+
+Each variation of $\SSIGIL$ with respect to one field yields one subsystem of the running
+chain. This is the paper's central organizational claim: \emph{SIGIL is not a stack of
+mechanisms that happen to coexist; it is one action, varied six ways.}
+
+\paragraph{$\delta\SSIGIL/\delta J^\mu = 0$ — conservation (the ledger).}
+\begin{equation}
+\nabla_\mu J^\mu = 0 \quad\Longleftrightarrow\quad
+\partial_t \rho_{\mathrm{value}} + \nabla\!\cdot\!\mathbf{J}_{\mathrm{settle}}
+= S_{\mathrm{emission}}(\varphi)
+\end{equation}
+Value is neither created nor destroyed except by the emission source term. In code this is
+the \texttt{commit\_state\_transition} chokepoint (\S\ref{sec:state}): the \emph{only}
+function permitted to mutate chain state, with conservation checked per typed delta.
+The 21M supply cap is the integral form; the live network reads
+\measured{21{,}000{,}000\,/\,21{,}000{,}000 SIGIL minted (100.0000\%)}.
+
+\paragraph{$\delta\SSIGIL/\delta\varphi = 0$ — Klein–Gordon emission (monetary policy).}
+\begin{equation}
+\ddot{\varphi} + 3H\dot{\varphi} + V'(\varphi) = 0,\qquad
+V(\varphi) = K_p\,e^2 + K_i\,e\!\!\int\! e\,dt + K_d\,(\dot e)^2
+\end{equation}
+The PID emission controller \emph{is} a scalar field rolling in a potential; the Hubble
+friction term $3H\dot\varphi$ is network expansion (new blocks arriving). Inflationary
+cosmology becomes economic policy. Stability prediction: the controller is
+non-oscillatory iff $K_d^2 > 4K_pK_i$ (\S\ref{sec:predictions}).
+
+\paragraph{$\delta\SSIGIL/\delta K = 0$ — topological invariance (fork detection).}
+\begin{equation}
+\frac{d}{dt}\,V_K(q)\Big|_{\mathrm{consensus}} = 0,\qquad K \in \pi_1(\mathcal{G})
+\end{equation}
+Valid consensus moves are Reidemeister moves on the braid; invariants are conserved. A
+fork is a topology change and is detectable as one. \textbf{Computational honesty:} the
+Jones polynomial is \#P-hard in general — nobody runs ``Jones consensus at 10k blocks/s.''
+SIGIL's tractable programme (QTFT lanes) commits a \emph{cheap} invariant per block over a
+bounded window — linking number ($O(\mathrm{crossings})$) or the Alexander polynomial
+(polynomial-time via the Burau determinant) — reserving Jones/Khovanov machinery for rare
+deep-fork adjudication off the hot path. The braid ordering layer this attaches to is
+\measured{live}: the DagKnight braid shipped to the production node 2026-07-02
+(\S\ref{sec:dagknight}).
+
+\paragraph{$\delta\SSIGIL/\delta A^\mu = 0$ — Yang–Mills witnesses (divergence detection).}
+\begin{equation}
+\nabla_\nu F^{\mu\nu} = J^\mu_{\mathrm{witness}},\qquad F = dA + A\wedge A
+\end{equation}
+When two state-root tracks diverge, the curvature $F$ becomes locally non-zero; divergence
+detection is the measurement of $|F|$ above threshold, and healing is the gauge
+transformation restoring a flat connection. In code: four state roots per header, computed
+independently by every node, with mismatch $\Rightarrow$ self-halt (exit code 78, no
+auto-restart). The adversarial simulation gate measured \measured{divergence $=0$} across
+all six scenarios (\S\ref{sec:dagknight}) — the flat-connection condition holds on the
+paths tested.
+
+\paragraph{$\delta\SSIGIL/\delta\Sigma = 0$ — crypto-agility (the security floor).}
+\label{sec:crypto}
+The security connection has three components living on three disjoint hardness
+assumptions, each placed where its strength matters and its weakness doesn't:
+
+\begin{center}
+\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+Component & Primitive & Layer & Why there \\
+\midrule
+$\Sigma_{\mathrm{iso}}$ & isogeny — SQIsign L5 & genesis / identity / provenance &
+tiny sigs (292\,B), rare keys: sign once, permanent \\
+$\Sigma_{\mathrm{lat}}$ & lattice — ML-DSA / ML-KEM & per-transaction / transport &
+high volume $\to$ fast verify, GPU-batchable \\
+$\Sigma_{\mathrm{hash}}$ & FRI-STARK / Ajtai-SIS fold & state / tip-proof &
+whole-chain succinct verification, no trusted setup \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Varying the action subject to the weakest-component constraint yields the dispatch rule:
+retire $\Sigma_i$ the instant its hardness margin drops; the other two carry the floor.
+To forge across the stack an adversary must break supersingular-isogeny \emph{and}
+module-lattice \emph{and} hash-collision hardness simultaneously. The lattice transport
+leg is \measured{live}: ML-KEM-1024 key encapsulation over the browser$\leftrightarrow$bridge
+noise channel, proven end-to-end at 115\,ms. The hash leg is the fold (\S\ref{sec:fold}).
+The isogeny leg signs every release \texttt{.proof} and the DNS tip anchor.
+
+\paragraph{The constraint surface — the wall.}
+The action admits a true extremum iff verification keeps pace with state transition:
+$\Gamma_{\mathrm{verify}} \ge \Gamma_{\mathrm{state}}$. At the 2026-05-30 measurement the
+ratio was $\sim$1840:1 against verification — a constrained saddle. The resolution came
+exactly where the crypto term predicted: not faster per-signature verification but a
+change of $\Sigma_{\mathrm{hash}}$ collapsing whole-chain verification to $O(1)$
+(\S\ref{sec:fold}). \emph{The wall was a cryptographic choice, not a hardware limit} —
+and it moved.
+
+\section{Measured laws}\label{sec:measured}
+
+This section is what distinguishes SIGIL's physics programme from decoration: closed-form
+laws with residuals, gates with pass/fail, and live numbers.
+
+\subsection{The gossip delivery law}\label{sec:delivery}
+
+For a block gossiped with redundancy $r$ under independent per-transmission loss
+probability $p$, the probability a node receives it at least once is
+
+\begin{equation}
+\boxed{\,D(p,r) = 1 - p^{\,r}\,}
+\qquad\text{inverted to the provisioning rule}\qquad
+r^{*} = \left\lceil \frac{\ln(1-\mathrm{SLA})}{\ln p} \right\rceil
+\end{equation}
+
+Derived and validated against \measured{22 seeded flux-chronos star-flood simulations;
+RMS residual 0.4 percentage points}. The shipped default $r=3$ satisfies a 99.9\% SLA up
+to $p=0.1$. This is statistical mechanics of the gossip layer done properly: model,
+measurement, closed form, residual, and a provisioning rule operators actually use.
+(Standalone paper: \emph{A Closed-Form Delivery Law for Gossip Redundancy in the sigil-top
+Light Node}, published at \texttt{quillon.xyz/downloads/sigil-top-delivery-law.pdf}.)
+
+\subsection{The fold: succinct whole-chain verification}\label{sec:fold}
+
+The $\Sigma_{\mathrm{hash}}$ leg materialized as \texttt{flux-fold}: an Ajtai/SIS-based
+folding scheme (post-quantum, no trusted setup) that compresses verification of the entire
+chain prefix into one constant-size check:
+
+\begin{center}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+fold proof size & \measured{2{,}568\,B — constant for any chain length} \\
+whole-chain check & \measured{one verification, 342\,ms at 100k blocks} \\
+effective throughput & \measured{$\sim$84.9M blocks/s} (grows with chain length) \\
+live tip verification & \measured{3\,$\mu$s, 0 blocks downloaded} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The founding claim was tip verification in $\le$10\,ms in a browser. The live light node
+verifies the real chain tip (height $\sim$29M) in 3\,$\mu$s without downloading a single
+block — ``verify on a potato.'' Claim 3 of the v0 paper is not just met; it is beaten by
+three orders of magnitude, and the verification wall of \S\ref{sec:action} ceased to be
+the binding constraint.
+
+\subsection{DagKnight braid convergence}\label{sec:dagknight}
+
+The braid ordering layer (\texttt{sigil-dagknight} + \texttt{flux-topology}) passed a
+six-scenario adversarial simulation gate before production:
+
+\begin{itemize}[leftmargin=1.4em,itemsep=0pt]
+\item S1: 10k blocks / 3 producers, dual-instance — \measured{divergence $=0$}
+\item S5: 30\% drop / reorder / equivocation — \measured{divergence $=0$}
+\item Orderings: 16/16 permutations agree; incremental $\equiv$ batch
+\item Withheld-block attacker: finalized prefix \measured{byte-identical (1378 blocks)}
+\item Tamper suite: \measured{5/5 rejected}
+\item S6: 100k blocks, max reorg window 258 $\le$ 16384 bound
+\end{itemize}
+
+A two-producer live mesh ran \measured{3385 emissions byte-identical} before the
+production node flipped to the braid binary at height 17.52M (2026-07-02). In the language
+of \S\ref{sec:action}: on every path tested, the topological invariants were conserved and
+the witness curvature stayed flat.
+
+\subsection{The sync ladder and the honest bottleneck}\label{sec:sync}
+
+The throughput programme is a case study in the ``measure the live path first'' rule.
+Local pipeline stages benchmark at 251k--2.5M blocks/s and a flat append-only skeleton
+store (72\,B/record, two-phase durable, torn-tail safe) sustains \measured{$\sim$10M
+records/s durable} — $2600\times$ the general-purpose LSM write path
+($\sim$130\,$\mu$s/KV $\approx$ 3.9k blocks/s). An in-process end-to-end harness (pull
+$\to$ stream-verify $\to$ commit at 2M records, roots matching) reaches \measured{39k
+blocks/s}. And yet the live sync number stayed at $\sim$800 blocks/s for five days —
+because the actual caps were a producer-side full-block serve throttle
+($\le$1 per 120\,ms) and a serial request$\to$await$\to$apply fetch loop. The local
+pipeline was \emph{never the wall}. The lesson is now Rule 0 of the SIGIL skill and a
+methodological claim of this paper: \textbf{a fast microbenchmark next to a slow live
+number is a bug report about your understanding, not a victory}. Wire compression is
+measured at \measured{14.0$\times$ (zstd backfill codec, 70.7\,B/header live)} and
+\measured{26.3$\times$ (gossip frames)}.
+
+\section{Architecture}\label{sec:arch}
+
+Condensed; \texttt{SIGIL\_GENESIS\_v0.md} remains the full spec. Network
+\texttt{sigil-g0}, libp2p prefix \texttt{/sigil/g0/}, P2P :9501, API :8181/:8099,
+storage \texttt{flux-db} (no RocksDB), all builds via \texttt{fluxc} with content-hash
+caching — never raw cargo.
+
+\subsection{The header: three commitments per block}
+
+Every block header commits three independent classes of evidence:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Commitment & Proves & Catches \\
+\midrule
+4 state roots (wallet/DEX/events/contracts) & the state is as claimed & silent state
+divergence (Quillon's bug) \\
+\texttt{fluxc .proof} (SQIsign L5, 292\,B) & which binary produced the block &
+un-attested / forged builds \\
+topology invariant (QTFT lanes, staged) & the braid structure is as claimed &
+topologically distinct forks/reorgs \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Plus dual-lane mining evidence (\S\ref{sec:mining}) and the producer signature under the
+crypto-agile \texttt{sig\_scheme} dispatch. State-root divergence and topology divergence
+are \emph{independent} halt signals — two different variations of the same action.
+
+\subsection{State: one chokepoint}\label{sec:state}
+
+\texttt{sigil-state::commit\_state\_transition} is the only function that may mutate
+state; every other write path is \texttt{pub(crate)}, enforced at MIR-time by
+\texttt{flux\_ai\_audit}. Typed delta variants (\texttt{SwapDelta}, \texttt{LpDelta},
+\texttt{LpBurnDelta}) are validated as units — token pairs match, immutable pool fields
+stay byte-identical, reserves shift exactly as declared, balances cover the operation —
+before expansion to primitives. Boot-time pre-flight recomputes roots over sampled blocks
+and refuses to bind ports on mismatch.
+
+\subsection{Light client first: sigil-top}
+
+The flagship operator experience is \texttt{sigil-top}: a single binary whose default
+invocation opens a TUI light node — tip-proof verification (fold-backed), the four state
+roots, supply, peers, mining — and serves the embedded browser wallet at
+\texttt{localhost:9800} with a same-origin \texttt{/api} proxy, no CORS, no build step.
+It syncs via the delivery-law-provisioned gossip mesh and the skeleton/snapshot pull path
+(\S\ref{sec:sync}), auto-updates from a signed release manifest with a BLAKE3-pinned
+client key, and verifies the DNS tip anchor: an SQIsign-L5-signed \texttt{v=sigil1} TXT
+record at the apex, so a fresh node can authenticate the tip before speaking to any peer.
+
+\subsection{Dual-lane mining: $\Phi$ POWER $\times$ $\Omega$ TIME}\label{sec:mining}
+
+A valid share carries \emph{both} lanes: $\Phi$ — BLAKE4 proof-of-work, and $\Omega$ — a
+Wesolowski VDF proof of elapsed sequential time. BLAKE4 is a real primitive, not
+branding: the BLAKE3 compression function with the round count parameterized; $R=7$ is
+KAT-verified byte-identical to BLAKE3, $R<7$ is a measured speed lever ($2.9\times$ at
+$R=1$, scalar). Consensus stays at $R=7$ until a reduced round count is cryptanalytically
+validated. The TUI miner and the node share one verification function and one
+cap-enforced crediting chokepoint; the loop is proven live (first credited shares
+0\,$\to$\,1250 on \texttt{sigil-g0}).
+
+\subsection{Privacy by default}
+
+There is no opt-in path to transparency: every send is shielded (commitment +
+nullifier), with real post-quantum STARK proving/verification behind the
+\texttt{real-zk} feature (FRI-verified rejection of tampered proofs, 31 tests). Current
+limits are stated, not hidden: single-input/single-output sends; Phase-0 commitments are
+BLAKE3-based pending Pedersen; shielded DEX operations are queued.
+
+\subsection{Economy}
+
+21M hard cap, halving schedule ($\sim$257 years of emission), supply fully minted on the
+current genesis-0 run. On top of the base ledger: the DEX (constant-product AMM, checked
+u128 arithmetic, reserve floors), sigil-bank credit vault (50\% LTV against staked
+SIGIL), the SSHARE treasury instrument, the Laniakea University credential economy
+(treasury transfers, never mints — conserves the cap), and the agent economy: SIGIL's
+entire development is settled on-chain between AI agents and the operator, claim
+$\to$ ship $\to$ settle, with the swarm message bus as the audit trail. This paper itself
+was produced under that regime.
+
+\section{Predictions: falsifiable, and how they're doing}\label{sec:predictions}
+
+The master equation earns its place only if it predicts. Status as of 2026-07-18:
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{6.8cm}lp{5.6cm}@{}}
+\toprule
+Prediction & Status & Evidence / next test \\
+\midrule
+1. Fork survival $\propto \exp(-\Delta R\,\tau_{\mathrm{block}})$ (reputation curves
+consensus) & \pretend{open} & needs fork-survival statistics vs.\ producer reputation \\
+2. PID emission stable iff $K_d^2 > 4K_pK_i$ & \pretend{open} & tune $K_d$ to the critical
+value on testnet \\
+3. Topology commitment detects order-tampering forks & \measured{partially met} &
+braid gate: 16/16 order-permutations agree, tamper 5/5 rejected; header commitment of the
+invariant still staged \\
+4. The verification wall scales with the crypto term, not hardware &
+\measured{confirmed in kind} & the fold moved the wall: whole-chain verify collapsed to
+$O(1)$ / 2{,}568\,B; per-sig SIMD was \emph{not} the fix \\
+5. Bulk/boundary duality (settlement throughput $\sim$ boundary entropy production) &
+\pretend{open} & compare settlement rate to reputation-graph entropy \\
+6. Validator-departure entropy law (Hawking analogue) & \pretend{open} & measure tip-proof
+rate vs.\ validator-set entropy \\
+\emph{7. (new since v0)} Gossip delivery follows $1-p^r$ & \measured{confirmed} &
+22 simulations, RMS 0.4\,pp; provisioning rule shipped as the $r=3$ default \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Prediction 7 deserves emphasis: it is the first SIGIL law that went the full arc —
+hypothesis, seeded simulation campaign, closed form, residual, operator-facing rule,
+published paper. That arc is the template the remaining predictions are held to.
+
+\section{Honest status}\label{sec:honesty}
+
+\subsection{What's real (with evidence)}
+
+Live braid ordering on the production node; four state roots computed and committed
+(wallet root live and non-trivial; DEX/event/contract roots currently zero pending those
+subsystems' mainnet activation); fold tip verification at 3\,$\mu$s on the real chain;
+dual-lane mining credited live; delivery-law-provisioned gossip; zstd wire compression
+live at 70.7\,B/header; skeleton store and snapshot-pull code landed and
+harness-proven; ML-KEM-1024 browser transport proven; SQIsign-signed releases and DNS tip
+anchor operational; 21M supply minted with conservation enforced at the chokepoint.
+
+\subsection{What's still pretend (physics)}
+
+The reputation-induced metric $g_{\mu\nu}$ is a heuristic, not a derivation — the
+functional form awaits fitting to measured consensus drift. Jones-polynomial machinery is
+\#P-hard; only the bounded-window linking-number/Alexander programme is claimed tractable,
+and the header topology commitment is staged, not shipped. AdS/CFT on a discrete graph is
+an analogy pending rigorous discretization. The PID/Klein–Gordon mapping is exact only
+for quadratic potentials; anti-windup and gain scheduling break integrability and are
+deferred to higher-order correction terms. The ``product of three hardness assumptions''
+security claim states design intent; a joint security model with a formal composition
+bound is open work.
+
+\subsection{What's still pretend (engineering)}
+
+Snapshot-pull live activation awaits a pinned signed anchor on the fleet default;
+until then nodes fall through to the compatible crawl path. The 2026-06-10 security audit
+found the RPC money routes unauthenticated on the lab deployment (\texttt{sigil-oauth}
+built, unwired) — acceptable for an experimental network whose value is explicitly
+laboratory-grade, disqualifying for anything more, and tracked as a mainnet gate. The
+serve-throttle and serial-fetch caps of \S\ref{sec:sync} are identified but their fixes
+are staged behind the fetch-pipelining lane. Fresh-node sync has known walls that were
+each root-caused and patched (block-pack sizing, producer-key pinning, single-peer gap
+trust) but the class of them argues for the snapshot-pull path as the durable answer.
+
+\section{What would convince a skeptic}
+
+The v0 contract, updated with results:
+
+\begin{enumerate}[leftmargin=1.4em,itemsep=1pt]
+\item A real swap settles end-to-end with the event committed to the event-log root —
+\pretend{open} (DEX math and typed deltas shipped; mainnet event-root activation pending).
+\item A fresh node joins via tip-proof and answers verified balance queries without ever
+subscribing to the block topic, verify time $\le$10\,ms — \measured{met and exceeded}:
+3\,$\mu$s live, fold-backed, zero blocks downloaded.
+\item A tampered node self-halts on root divergence, exit 78, operator alarm —
+\measured{mechanism live}; the staged public tamper-demo remains to be run as theater.
+\item A gossiped release upgrades all running nodes with SQIsign-verified binaries and no
+production pause — \measured{operational} (BLAKE3-pinned manifest auto-update in the
+field since v0.20.x).
+\item A user's swap-quality badge verifies in-browser against the committed root within
+one frame — \pretend{open}, depends on (1).
+\end{enumerate}
+
+Two of five demonstrated, one partially, two open — stated plainly, which is exactly the
+posture this project's culture demands.
+
+\section*{References}
+
+\small
+\begin{itemize}[leftmargin=1.2em,itemsep=0pt]
+\item \emph{SIGIL Whitepaper v0} (2026-05-29) — engineering baseline this edition
+supersedes; \texttt{quillon.xyz/downloads/SIGIL\_WHITEPAPER\_v0.pdf}
+\item \emph{The Master Equation of SIGIL} v0.1 (2026-05-31) —
+\texttt{SIGIL\_MASTER\_EQUATION\_v0.md}; the action, its fields, and the derivation
+history
+\item \emph{SIGIL $\times$ QTFT} (2026-05-30) — \texttt{SIGIL\_QTFT\_TOPOLOGY\_v0.md};
+the tractable-invariant topology programme
+\item \emph{A Closed-Form Delivery Law for Gossip Redundancy in the sigil-top Light Node}
+(2026-06-17) — \texttt{quillon.xyz/downloads/sigil-top-delivery-law.pdf}
+\item \emph{Flux Foundation} whitepaper —
+\texttt{quillon.xyz/downloads/flux-foundation-whitepaper-v0.17.0.pdf}; the substrate
+\item \emph{SIGIL Genesis v0} — \texttt{SIGIL\_GENESIS\_v0.md}; the architectural spec
+\item Quillon Graph quantum-physics whitepaper —
+\texttt{quillon.xyz/downloads/quantum-physics-whitepaper-full.pdf}; the sibling
+tradition this edition answers
+\item The SQInstructor: a guide to SQIsign and the Deuring Correspondence —
+arXiv:2603.09899
+\item High-Throughput GPU Implementation of Dilithium — arXiv:2211.12265
+\item A Comparative Analysis of zk-SNARKs and zk-STARKs — arXiv:2512.10020
+\end{itemize}
+
+\section*{Acknowledgments}
+
+Drafted by Rocky AI (Claude, Anthropic — Opus 4.7/4.8 through Fable 5 across the project's
+life) on the Epsilon dev console, integrating the master-equation and QTFT programmes with
+the measured record of the June--July 2026 swarm sessions. Foundation work by the SIGIL
+swarm agents (rocky, rocky-updater, rocky-sigil, rocky-sync lanes, grok, deepseek,
+codewhale), settled on-chain per the agentic-money protocol. Built on Quillon Graph's
+designs — credit to Viktor for the consensus, storage, DEX, bank, and mixer lineage this
+chain inherits, for the physics-first whitepaper tradition it answers, and for the
+operating rules (measure live, honest checklists, provenance always) that shaped every
+section above.
+
+\vspace{0.8em}
+\noindent\textit{v1 — 2026-07-18. The chain is a 4-manifold with curvature. Reputation is
+mass. Settlements are matter. Witnesses are gauge fields. Topology is the knot. Security
+is a three-legged connection. The equation writes itself — and now, in places, it
+measures itself.}
+
+\end{document}

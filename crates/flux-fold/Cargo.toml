@@ -12,3 +12,7 @@ serde  = { workspace = true }
 [[bin]]
 name = "flux-fold"
 path = "src/bin/flux-fold.rs"
+
+[[bin]]
+name = "fold-verify-bench"
+path = "src/bin/fold-verify-bench.rs"

@@ -159,10 +159,12 @@ system, running accelerated test economics. Its RPC money routes \emph{are} auth
 — each spend/mint route requires the acting wallet's ed25519 signature plus a monotonic
 nonce (the 2026-06-10 audit's theft findings are fixed and enforcing). The residual money
 risk is not at the RPC edge but \textbf{deeper in the stack}: block-apply does not yet
-verify the producer's signature (consensus item H1), the VDF modulus is not yet
-adversary-hardened (C10), and the cross-chain bridge mint is unbounded (C9). These are
-tracked, named, and gated (\S\ref{sec:honesty}, and the hardening backlog). Do not route
-significant value through SIGIL until they close.
+enforce the producer's signature (consensus item H1 — a height-gated verifier is written
+and tested but dormant), the live VDF still runs over a forgeable fixed modulus while its
+trustless replacement sits unwired (C10), and peer-sync ingress is under-authenticated
+(a stub handshake H2, a follower that trusts peer-declared difficulty H3, keyless wire
+tip-proofs H4). These are tracked with file:line and fix status in the hardening backlog
+(\S\ref{sec:honesty}). Do not route significant value through SIGIL until they close.
 \end{tcolorbox}
 
 \vspace{4pt}
@@ -650,7 +652,7 @@ backfill codec, 70.7\,B/header live) and 26.3$\times$ (gossip frames).
 \node[band,fill=sigilamber!8]  (o) at (0,0.0) {};
 \node[tag,text=sigilamber] at (-6.6,0.23) {open theory};
 \node[font=\scriptsize,anchor=west] at (-6.6,-0.17)
-  {block-apply producer-sig (H1) · VDF modulus (C10) · bridge mint (C9) ·
+  {block-apply producer-sig (H1) · VDF modulus (C10) · peer-sync auth (H2/H3/H4) ·
    Byzantine threshold · fold soundness · composition bound};
 \end{tikzpicture}
 \caption{\small\textbf{The evidence ladder.} Where every major claim of this paper
@@ -930,15 +932,20 @@ composition bound is open, as is the fold's concrete soundness reduction.
 \subsection{What's still pretend (engineering)}
 
 The RPC edge is authenticated (per-request wallet signature + nonce; the audit's theft
-findings are fixed and enforcing), so the residual money risk is deeper: block-apply does
-not yet verify the producer signature (\textbf{H1} — the highest-severity open item; a
-height-gated fix is implemented and unit-tested on a branch, not yet deployed), the VDF
-runs over a fixed known-structure modulus (\textbf{C10}), and the cross-chain bridge mint
-is unbounded with no replay set (\textbf{C9}). These, plus the peer-handshake stub
-(\textbf{H2}), the follower's trust of peer-declared difficulty (\textbf{H3}), and keyless
-wire tip-proofs (\textbf{H4}), are enumerated with file:line and fix sketch in the
-hardening backlog (\texttt{docs/SIGIL\_HARDENING\_BACKLOG.md}) — that document is what the
-``open'' rung of Figure~\ref{fig:ladder} points at. Snapshot-pull live activation awaits a
+findings are fixed and enforcing), so the residual money risk is deeper. The
+highest-severity open item is \textbf{H1}: block-apply does not yet enforce the producer
+signature — a height-gated verifier is implemented and unit-tested on a branch but dormant,
+not deployed. Two more sit at the consensus-crypto layer with their fix half-built: the VDF
+still runs over a forgeable fixed modulus though a trustless replacement exists unwired
+(\textbf{C10}), and the state-layer replay-nonce primitive is committed + signed but not yet
+called on the live apply path (\textbf{H5}). Peer-sync ingress is under-authenticated: a
+length-only handshake stub (\textbf{H2}), a follower that trusts peer-declared difficulty
+(\textbf{H3}), and keyless wire tip-proofs (\textbf{H4}). Each carries a verdict
+(fixed / partial / open) with file:line in the hardening backlog
+(\texttt{docs/SIGIL\_HARDENING\_BACKLOG.md}) — that document, ground-truthed against the
+code rather than the stale audit, is what the ``open'' rung of Figure~\ref{fig:ladder}
+points at. (The audit's C9 bridge-mint and H6 event-root findings were re-verified as
+already fixed.) Snapshot-pull live activation awaits a
 pinned signed anchor on the fleet default plus its M2 crypto (SQIsign + fold in the
 trailer); until then nodes fall through to the compatible crawl path. The serve-throttle
 and serial-fetch caps of \S\ref{sec:sync} were fixed (throttle removed, request-ahead

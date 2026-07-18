@@ -70,15 +70,16 @@
 % running header
 \pagestyle{fancy}
 \fancyhf{}
+\fancyhfoffset{0pt}
 \renewcommand{\headrulewidth}{0.4pt}
-\renewcommand{\headrule}{\color{slate}\hrule width\headwidth height 0.4pt}
-\fancyhead[L]{\scriptsize\textcolor{gray}{SIGIL — The Variational Chain · whitepaper v1.1}}
+\renewcommand{\headrule}{{\color{slate}\hrule width\headwidth height 0.4pt}}
+\fancyhead[L]{\scriptsize\textcolor{gray}{SIGIL --- The Variational Chain \,$\cdot$\, whitepaper v1.1}}
 \fancyhead[R]{\scriptsize\textcolor{gray}{\thepage}}
 
 \hypersetup{
   pdftitle={SIGIL — The Variational Chain (Whitepaper v1.1)},
   pdfauthor={bitknight.dipper688@passmail.net},
-  pdfsubject={An experimental provenance-signed BlockDAG organized by a conjectural effective action; sigilgraph repo, branch feat/commons-tithe-routing-0.36.1, lineage 16f05a8; benchmark record June--July 2026},
+  pdfsubject={An experimental provenance-signed BlockDAG organized by a conjectural effective action; sigilgraph repo, branch feat/commons-tithe-routing-0.36.1, source d7906ff based on 16f05a8; benchmark record June--July 2026},
   pdfkeywords={SIGIL, BlockDAG, DagKnight, post-quantum, STARK, SQIsign, ML-KEM, fold, gossip delivery law}
 }
 
@@ -103,7 +104,7 @@
 {\normalsize Whitepaper v1.1 · 2026-07-18}\\[6pt]
 {\normalsize\texttt{bitknight.dipper688@passmail.net}}\\[2pt]
 {\small SIGIL / Flux Foundation · \texttt{sigilgraph.quillon.xyz}}\\[2pt]
-{\small source branch \texttt{feat/commons-tithe-routing-0.36.1} · lineage \texttt{16f05a8}}\\[6pt]
+{\small source \texttt{d7906ff} · based on \texttt{16f05a8} · branch \texttt{feat/commons-tithe-routing-0.36.1}}\\[6pt]
 {\small\textcolor{sigilamber}{\textbf{Live experimental network — not production ready.}}}
 \end{center}
 
@@ -112,7 +113,7 @@
 \noindent
 \metriccard{29M}{live chain height\\(\texttt{sigil-g0})}\hfill
 \metriccard{2{,}568\,B}{fold proof — constant\\for any chain length}\hfill
-\metriccard{3\,$\mu$s}{incremental tip check\\(fresh verify: 342\,ms)}\hfill
+\metriccard{3\,$\mu$s}{live incremental\\tip check (\texttt{sigil-g0})}\hfill
 \metriccard{0}{divergence across all\\adversarial sim gates}
 
 \vspace{10pt}
@@ -848,7 +849,7 @@ conjecture; the measurements are not.}
 \clearpage
 \appendix
 
-\section{Reproducibility}\label{app:meq}
+\section{Claim Provenance and Reproduction Guide}\label{app:meq}
 
 The master-equation companion note (\emph{The Master Equation of SIGIL — a Conjectural
 Effective Action}, v0.2) is published standalone at
@@ -866,9 +867,9 @@ All benchmarks and live readings were taken on the Epsilon-class development hos
 these workspaces). The live network is \texttt{sigil-g0} (single producer + verifying
 followers; accelerated laboratory economics). This document builds with
 \texttt{pdflatex} (two passes) from
-\texttt{sigil/docs/research/SIGIL\_WHITEPAPER\_v1.tex}; source lineage
-\texttt{16f05a8} $\to$ \texttt{4e71cd2} on branch
-\texttt{feat/commons-tithe-routing-0.36.1}.
+\texttt{sigil/docs/research/SIGIL\_WHITEPAPER\_v1.tex}; source \texttt{d7906ff}, based
+on \texttt{16f05a8}, branch \texttt{feat/commons-tithe-routing-0.36.1} (matching the
+cover and the PDF metadata).
 
 \subsection{Claim-by-claim provenance}
 

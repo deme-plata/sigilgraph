@@ -1,3 +1,9 @@
+# mold linker for native builds: sigil-top relink was 28.6s on default bfd
+# (link-bound, ~140 deps). rustflags flip the cargo fingerprint — one cold
+# rebuild for every agent after this lands (swarm msg id 759, 2026-07-18).
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
 # darwin cross via zig (no Apple SDK on this box). Lives in config so EVERY
 # builder (fluxc, cargo, the flux MCP) picks it up without env plumbing.
 [target.aarch64-apple-darwin]

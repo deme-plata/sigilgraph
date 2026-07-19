@@ -115,7 +115,12 @@
 
 \thispagestyle{empty}
 \begin{center}
-\includegraphics[width=2.4cm]{sigil-flat.png}\\[10pt]
+% The brand glyph is cyan-on-transparent (built for the obsidian theme); on white
+% paper it washes out, so seat it on a dark rounded badge where it reads clearly.
+\begin{tikzpicture}
+  \node[rounded corners=8pt, fill=ink, inner sep=10pt]
+       {\includegraphics[width=2.2cm]{sigil-flat.png}};
+\end{tikzpicture}\\[10pt]
 {\Huge\bfseries\textcolor{ink}{SIGIL — The Variational Chain}}\\[8pt]
 {\Large An Experimental Provenance-Signed BlockDAG\\Organized by a Conjectural Effective Action}\\[10pt]
 {\normalsize Whitepaper v1.1 · 2026-07-18}\\[6pt]

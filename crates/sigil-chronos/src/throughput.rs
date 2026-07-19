@@ -213,7 +213,7 @@ pub fn run_batch_auth(
                 to: authors[((ctr + j) % n_authors) as usize].2,
                 amount: 1, token: NATIVE, fee: 0,
             }).collect();
-            batches.push(AuthorizedBatch::sign_ed25519(ops, sk, pk));
+            batches.push(AuthorizedBatch::sign_ed25519(ops, ctr, sk, pk));
         }
 
         // verify ONE sig/batch + apply every op — parallel across cores (read state).

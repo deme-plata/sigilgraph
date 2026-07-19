@@ -532,6 +532,13 @@ pub struct Mempool {
     verified: std::collections::VecDeque<SignedTx>,
     seen: std::collections::HashSet<[u8; 32]>,
     verified_total: u64,
+    /// R1: the BATCH LANE — whole AuthorizedBatches awaiting inclusion, kept INTACT
+    /// so verifiers amortize one signature per batch. NEVER exploded into `verified`
+    /// (batch ops are bare SigilTx with no per-tx envelope).
+    batches: std::collections::VecDeque<AuthorizedBatch>,
+    /// Dedup keys (the signed auth message) for batches seen this mempool lifetime.
+    seen_batches: std::collections::HashSet<[u8; 32]>,
+    batch_ops_total: u64,
 }
 
 impl Mempool {
@@ -566,6 +573,43 @@ impl Mempool {
     pub fn is_empty(&self) -> bool { self.verified.is_empty() }
     /// Total signatures verified over this mempool's life (verify-once meter).
     pub fn verified_total(&self) -> u64 { self.verified_total }
+
+    /// R1: ingest an AuthorizedBatch. Verifies the ONE signature (sig + single-author
+    /// + R0 nonce binding) ONCE, dedups by the signed auth message, and enqueues the
+    /// batch INTACT. Returns the op count accepted. The consensus replay nonce is
+    /// enforced later, at apply, by `SigilState::check_and_bump_nonce`.
+    pub fn ingest_batch(&mut self, batch: AuthorizedBatch) -> Result<usize, TxApplyError> {
+        batch.verify()?;
+        let key = batch_auth_message(&batch.author, batch.nonce, &batch.ops);
+        if !self.seen_batches.insert(key) {
+            return Err(TxApplyError::DuplicateBatch);
+        }
+        let ops = batch.ops.len();
+        self.batch_ops_total += ops as u64;
+        self.batches.push_back(batch);
+        Ok(ops)
+    }
+
+    /// Pull whole batches for block inclusion, up to ~`max_ops` operations. Never
+    /// splits a batch (the signature covers the whole op set); always takes at least
+    /// one batch if any are pending.
+    pub fn pull_batches(&mut self, max_ops: usize) -> Vec<AuthorizedBatch> {
+        // Take whole batches until the op budget is MET (overshoot by at most one
+        // batch — a batch is never split, its signature covers the whole op set).
+        let mut out = Vec::new();
+        let mut ops = 0usize;
+        while let Some(front) = self.batches.front() {
+            ops += front.ops.len();
+            out.push(self.batches.pop_front().unwrap());
+            if ops >= max_ops { break; }
+        }
+        out
+    }
+
+    /// Batches awaiting inclusion.
+    pub fn batch_count(&self) -> usize { self.batches.len() }
+    /// Total ops across pending batches (the demand signal for the rate governor).
+    pub fn pending_batch_ops(&self) -> usize { self.batches.iter().map(|b| b.ops.len()).sum() }
 }
 
 // ── AuthorizedBatch — one signature authorizes N operations ──────────────────
@@ -577,6 +621,20 @@ pub fn batch_root(ops: &[SigilTx]) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(&(ops.len() as u64).to_le_bytes());
     for op in ops { h.update(&op.hash()); }
+    *h.finalize().as_bytes()
+}
+
+/// R0: the message an author signs to authorize a batch. Binds the author, a
+/// monotonic replay `nonce`, AND the exact op set (via [`batch_root`]). Changing any
+/// of the three invalidates the signature — closing the batch-replay hole a bare
+/// `batch_root` signature left open (a public batch could be rebroadcast + re-executed
+/// once the mempool's ephemeral seen-set cleared on restart).
+pub fn batch_auth_message(author: &WalletId, nonce: u64, ops: &[SigilTx]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"SIGIL/batch-auth/v1");
+    h.update(author);
+    h.update(&nonce.to_le_bytes());
+    h.update(&batch_root(ops));
     *h.finalize().as_bytes()
 }
 
@@ -596,6 +654,11 @@ pub fn batch_root(ops: &[SigilTx]) -> [u8; 32] {
 pub struct AuthorizedBatch {
     /// The single account authorizing every op in `ops`.
     pub author: WalletId,
+    /// R0: per-author monotonic replay nonce, BOUND into the signature via
+    /// [`batch_auth_message`]. Enforced at apply by `SigilState::check_and_bump_nonce`;
+    /// a rebroadcast batch with a changed nonce fails `verify()`, and the same
+    /// `(author, nonce)` is rejected as a replay by the state.
+    pub nonce: u64,
     /// Full scheme public key (bound: `author == BLAKE3(pubkey)`).
     pub pubkey: PubKeyBytes,
     /// Signature scheme.
@@ -609,15 +672,17 @@ pub struct AuthorizedBatch {
 impl AuthorizedBatch {
     /// Build an ed25519 hot-path authorized batch. All `ops` MUST be the
     /// author's own (caller's responsibility; [`Self::verify`] enforces it).
-    pub fn sign_ed25519(ops: Vec<SigilTx>, sk: &[u8; 32], pk: &[u8; 32]) -> Self {
+    pub fn sign_ed25519(ops: Vec<SigilTx>, nonce: u64, sk: &[u8; 32], pk: &[u8; 32]) -> Self {
         use ed25519_dalek::{Signer, SigningKey};
-        let root = batch_root(&ops);
-        let sig = SigningKey::from_bytes(sk).sign(&root).to_bytes().to_vec();
+        let author = wallet_id_from_pubkey(pk);
+        let msg = batch_auth_message(&author, nonce, &ops);
+        let sig = SigningKey::from_bytes(sk).sign(&msg).to_bytes().to_vec();
         Self {
-            author: wallet_id_from_pubkey(pk),
+            author,
             pubkey: PubKeyBytes(pk.to_vec()),
             sig_scheme: SigScheme::Ed25519Hot,
             sig: SignatureBytes(sig),
+            nonce,
             ops,
         }
     }
@@ -637,8 +702,9 @@ impl AuthorizedBatch {
         {
             return Err(TxApplyError::WalletBindingMismatch);
         }
-        // 3. ONE signature over the re-derived root (binds to this exact op set).
-        let root = batch_root(&self.ops);
+        // 3. ONE signature over the re-derived auth message (binds author + nonce +
+        //    this exact op set — closes the replay hole).
+        let root = batch_auth_message(&self.author, self.nonce, &self.ops);
         match self.sig_scheme {
             SigScheme::Ed25519Hot => {
                 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -734,6 +800,10 @@ pub enum TxApplyError {
     /// The signer wasn't the fee payer.
     #[error("signer != fee_payer: txs MUST be signed by their fee payer")]
     SignerNotPayer,
+
+    /// R1: this AuthorizedBatch is already in the mempool (dedup by signed auth message).
+    #[error("duplicate batch: already in the mempool")]
+    DuplicateBatch,
 
     /// Signature bytes were the wrong length for the declared scheme.
     #[error("sig length mismatch: scheme {scheme:?} expected {expected}, got {got}")]
@@ -1274,6 +1344,58 @@ pub fn batch_into_transition(
     StateTransition { at_height, mutations }
 }
 
+/// R2: apply a whole [`AuthorizedBatch`] to state — the primitive the producer
+/// mint and EVERY verifier call, so the one-signature-per-batch amortization
+/// reaches all of them. Verifies the ONE signature (author + R0 nonce binding),
+/// enforces the R0 consensus replay nonce, applies every op via the real
+/// [`apply_tx`] (which does zero signature work — the batch sig authorized them),
+/// and commits ONE transition. ATOMIC: on a replay or an op failure, state is
+/// unchanged and the author's nonce does not advance.
+pub fn apply_authorized_batch(
+    state: &mut sigil_state::SigilState,
+    batch: &AuthorizedBatch,
+    at_height: u64,
+) -> Result<sigil_state::StateRoots, sigil_state::CommitError> {
+    use sigil_state::CommitError;
+    // 1. the ONE signature + single-author + nonce binding.
+    batch
+        .verify()
+        .map_err(|e| CommitError::Invariant(format!("batch verify: {e}")))?;
+    // 2. consensus replay guard — READ the high-water first; mutate nothing until commit.
+    let cur = state.nonce_of(&batch.author);
+    if batch.nonce <= cur {
+        return Err(CommitError::NonceReplay { got: batch.nonce, have: cur });
+    }
+    // 3. compute every op's mutations via the real apply_tx (read-only on state).
+    let mut mutations = Vec::new();
+    for op in &batch.ops {
+        let signed = wrap_op(op.clone());
+        let r = apply_tx(state, &signed)
+            .map_err(|e| CommitError::Invariant(format!("apply op: {e}")))?;
+        mutations.extend(r.mutations);
+    }
+    // 4. commit the ops, THEN advance the nonce — so a commit failure leaves the
+    //    nonce untouched and the whole batch is cleanly retryable.
+    sigil_state::commit_state_transition(state, &StateTransition { at_height, mutations }, at_height)?;
+    state.check_and_bump_nonce(&batch.author, batch.nonce)?;
+    Ok(state.roots())
+}
+
+/// Wrap a bare (batch-authorized) op as a [`SignedTx`] for [`apply_tx`], which
+/// does ZERO signature work — the batch signature already authorized the op. The
+/// dummy signature is only length-checked by `precheck`.
+fn wrap_op(op: SigilTx) -> SignedTx {
+    let payer = op.fee_payer();
+    SignedTx {
+        tx: op,
+        from_pubkey: payer,
+        nonce: 0,
+        sig_scheme: SigScheme::Ed25519Hot,
+        sig: SignatureBytes(vec![0u8; SigScheme::Ed25519Hot.expected_sig_len()]),
+        pubkey: PubKeyBytes(Vec::new()),
+    }
+}
+
 // ── Constants ───────────────────────────────────────────────────────────────
 
 /// All-zero token ID = native SIGIL.
@@ -1401,7 +1523,7 @@ mod tests {
         let ops: Vec<SigilTx> = (1..=500u128).map(mk).collect();
 
         // valid batch of 500 ops, ONE signature → verifies.
-        let batch = AuthorizedBatch::sign_ed25519(ops.clone(), &sk, &pk);
+        let batch = AuthorizedBatch::sign_ed25519(ops.clone(), 1, &sk, &pk);
         assert_eq!(batch.len(), 500);
         batch.verify().expect("valid single-author batch must verify");
 
@@ -1420,7 +1542,7 @@ mod tests {
         let mut cross = ops.clone();
         cross.push(SigilTx::Send { from: other, to: author, amount: 1, token: NATIVE, fee: 1 });
         // (re-sign so the sig matches the new root; the author-binding check still fires)
-        let cross_batch = AuthorizedBatch::sign_ed25519(cross, &sk, &pk);
+        let cross_batch = AuthorizedBatch::sign_ed25519(cross, 1, &sk, &pk);
         assert!(matches!(cross_batch.verify(), Err(TxApplyError::SignerNotPayer)));
     }
 
@@ -1806,4 +1928,109 @@ mod tests {
         assert_eq!(s.balance_of(&bob, &NATIVE), 10);
     }
 
+}
+
+
+#[cfg(test)]
+mod r0_nonce_binding_tests {
+    use super::*;
+
+    #[test]
+    fn nonce_is_bound_to_the_signature() {
+        let (sk, pk, author) = ed25519_keygen();
+        let ops = vec![SigilTx::Send { from: author, to: [9u8; 32], amount: 1, token: NATIVE, fee: 0 }];
+        let batch = AuthorizedBatch::sign_ed25519(ops, 5, &sk, &pk);
+        batch.verify().expect("valid nonce-5 batch verifies");
+
+        // Rebroadcast with a bumped nonce but the OLD signature -> rejected (the hole).
+        let mut tampered = batch.clone();
+        tampered.nonce = 6;
+        assert!(matches!(tampered.verify(), Err(TxApplyError::SignatureInvalid)));
+
+        // A freshly-signed different nonce yields a DIFFERENT signature (distinct message).
+        let ops2 = vec![SigilTx::Send { from: author, to: [9u8; 32], amount: 1, token: NATIVE, fee: 0 }];
+        let b6 = AuthorizedBatch::sign_ed25519(ops2, 6, &sk, &pk);
+        assert_ne!(batch.sig, b6.sig, "the nonce must change the signed message");
+        b6.verify().expect("nonce-6 batch verifies");
+    }
+}
+
+
+#[cfg(test)]
+mod r1_mempool_tests {
+    use super::*;
+
+    #[test]
+    fn batch_lane_ingest_dedup_and_pull() {
+        let (sk, pk, author) = ed25519_keygen();
+        let ops = vec![SigilTx::Send { from: author, to: [9u8; 32], amount: 1, token: NATIVE, fee: 0 }];
+        let b = AuthorizedBatch::sign_ed25519(ops, 1, &sk, &pk);
+        let mut mp = Mempool::new();
+        assert_eq!(mp.ingest_batch(b.clone()).unwrap(), 1);
+        assert_eq!(mp.batch_count(), 1);
+        assert_eq!(mp.pending_batch_ops(), 1);
+        // dedup: the identical batch is rejected (not re-queued).
+        assert!(matches!(mp.ingest_batch(b.clone()), Err(TxApplyError::DuplicateBatch)));
+        assert_eq!(mp.batch_count(), 1);
+        // a batch with a tampered nonce fails verify() (R0 binding) — rejected.
+        let mut bad = b.clone();
+        bad.nonce = 999;
+        assert!(mp.ingest_batch(bad).is_err());
+        // pull takes the whole batch; lane drains.
+        let pulled = mp.pull_batches(10);
+        assert_eq!(pulled.len(), 1);
+        assert_eq!(mp.batch_count(), 0);
+    }
+
+    #[test]
+    fn pull_respects_op_budget_without_splitting() {
+        let (sk, pk, author) = ed25519_keygen();
+        let mut mp = Mempool::new();
+        for nonce in 1..=5u64 {
+            let ops: Vec<SigilTx> = (0..4).map(|j| SigilTx::Send { from: author, to: [j as u8; 32], amount: nonce as u128, token: NATIVE, fee: 0 }).collect();
+            mp.ingest_batch(AuthorizedBatch::sign_ed25519(ops, nonce, &sk, &pk)).unwrap();
+        }
+        // budget 6 ops: takes 2 full 4-op batches (>= budget after the 2nd), never a partial.
+        let pulled = mp.pull_batches(6);
+        assert_eq!(pulled.len(), 2);
+        assert!(pulled.iter().all(|b| b.ops.len() == 4));
+        assert_eq!(mp.batch_count(), 3);
+    }
+}
+
+
+#[cfg(test)]
+mod r2_apply_tests {
+    use super::*;
+
+    #[test]
+    fn apply_batch_changes_state_advances_nonce_atomically() {
+        let mut st = sigil_state::SigilState::new();
+        let (sk, pk, author) = ed25519_keygen();
+        // fund the author so the Send has balance to move.
+        sigil_state::commit_state_transition(
+            &mut st,
+            &StateTransition {
+                at_height: 0,
+                mutations: vec![sigil_state::StateMutation::SetBalance { wallet: author, token: NATIVE, amount: 1000 }],
+            },
+            0,
+        ).unwrap();
+        let root0 = st.roots().wallet_state_root;
+
+        let ops = vec![SigilTx::Send { from: author, to: [9u8; 32], amount: 10, token: NATIVE, fee: 0 }];
+        let batch = AuthorizedBatch::sign_ed25519(ops, 1, &sk, &pk);
+        let roots = apply_authorized_batch(&mut st, &batch, 1).expect("valid batch applies");
+        assert_ne!(root0, roots.wallet_state_root, "the batch must change wallet state");
+        assert_eq!(st.nonce_of(&author), 1, "nonce advances to the batch nonce");
+
+        // replay of the SAME batch: rejected atomically — state AND nonce unchanged.
+        let before = st.roots().wallet_state_root;
+        assert!(matches!(
+            apply_authorized_batch(&mut st, &batch, 2),
+            Err(sigil_state::CommitError::NonceReplay { .. })
+        ));
+        assert_eq!(st.roots().wallet_state_root, before, "replay must not change state");
+        assert_eq!(st.nonce_of(&author), 1, "replay must not advance the nonce");
+    }
 }

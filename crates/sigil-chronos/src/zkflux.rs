@@ -82,7 +82,7 @@ fn measure_ed25519_batch_verify(batches: u64, ops_per_batch: u64) -> (f64, u64) 
                 fee: 0,
             })
             .collect();
-        signed.push(AuthorizedBatch::sign_ed25519(ops, sk, pk));
+        signed.push(AuthorizedBatch::sign_ed25519(ops, ctr, sk, pk));
     }
 
     let chunk = signed.len().div_ceil(cores).max(1);

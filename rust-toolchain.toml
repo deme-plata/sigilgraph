@@ -1,0 +1,5 @@
+[toolchain]
+channel = "1.93.1"
+# Pins the contracted rustc frontend (FIP-0001). The MIR-drift CI test
+# (crates/flux-frontend/tests/mir_drift.rs) hard-asserts this same version;
+# bumping it is a deliberate contract change, not an incidental drift.

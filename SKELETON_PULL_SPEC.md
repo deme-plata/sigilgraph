@@ -37,3 +37,16 @@ is below.
 Fresh sigil-top + trusted anchor fast-syncs genesis->anchor via codec=2 skeleton pages,
 measured >> full-block ~39/s (thousands/s, cf fetch.rs:681). produce-tip/net height reflect tip;
 normal crawl anchor->tip after.
+
+## RESOLVED 2026-06-23 (skeleton-pull works — config, not code)
+Skeleton fast-sync confirmed WORKING on the box: codec=2 pull fills {SIGIL_TOP_DB}-skeleton
+(101M+ ~= 1.34M 72B records) while main store stays ~1.0K (no full-block crawl). Two config fixes:
+1. SIGIL_BOOTSTRAP_PEERS must use the CURRENT producer peer id (regenerates each reset-restart;
+   now 12D3KooWLe2fET4yVkFFkaNvUtr9nxGUp5sWzPzfjkqSnpx3XCJ6).
+2. DISABLE SIGIL_FEED_URL: the HTTP feed advances store.synced_to() past sync_base before the mesh
+   peer connects, so the snapshot-pull gate (mod.rs:689 synced_to()<=sync_base && !peers.is_empty())
+   is missed -> fell back to codec=1 full-block crawl. No feed -> pull fires.
+The manual SIGIL_SNAPSHOT_ANCHOR dev-inject (mod.rs:246) is trusted as-is — no signed-anchor needed
+for the dev/test path. STILL OPEN (separate, full-block followers only): the have=8194 rr-backfill
+frontier stall (main.rs:1173-1186) — gamma/beta without an anchor. That is the contiguous-frontier
+surgery Codex + slave-sigil-2 are on.

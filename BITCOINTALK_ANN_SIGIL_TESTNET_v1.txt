@@ -44,11 +44,19 @@ https://sigilgraph.fluxapp.xyz/downloads/sigil-top-latest.json
 
 Verify what you downloaded (this is the point of the whole project):
 [code]
-# 1. recompute BLAKE3 of the binary — must equal the manifest hash
-# 2. fetch the .proof and check BOTH signatures over the canonical record:
-https://sigilgraph.fluxapp.xyz/downloads/sigil-top-v0.77.6.proof
+# pinned self-consistent artifact + require-both hybrid proof (verified today):
+wget https://sigilgraph.fluxapp.xyz/downloads/sigil-top-v0.77.6
+wget https://sigilgraph.fluxapp.xyz/downloads/sigil-top-v0.77.6.proof
+
+# 1. recompute BLAKE3 of the binary — must equal the proof's artifact_hash:
+b3sum sigil-top-v0.77.6
+# => b80f09a390efab8191b8582c0603ffae6cadc505af01f158b6b5abbcaa573604
+# 2. that hash is the artifact_hash inside the .proof; then check BOTH sigs
+#    (sqisign 292 B + ed25519 64 B) over the canonical record. Single-leg = reject.
 [/code]
-[V: refresh version/proof filenames + manifest hash at posting.]
+[V: sigil-top-latest.json currently points at v6.0.6, which has no require-both
+proof yet — v0.77.6 is the pinned artifact+proof pair that verifies today. Re-cut
+a proof for the current release before posting, or keep this pin and say so.]
 
 Mining: dual-lane (hash-power lane × verifiable-delay lane), CPU is fine, GPU build available for the hash lane. Verified wallets (sign a domain-separated challenge — the wallet IS the public key) earn to themselves; unverified mining routes to the treasury. 1.2% of every reward routes to a commons pool under an M-of-N quorum.
 
@@ -69,7 +77,7 @@ The honesty section is load-bearing here — the whitepaper carries a boxed secu
 [item]Live tip: https://sigilgraph.fluxapp.xyz/sigil-tip-live.json[/item]
 [item]Downloads (content-addressed): https://sigilgraph.fluxapp.xyz/downloads/sigil-top-latest.json[/item]
 [item]Delivery-law paper (derivation + 22 seeded runs + residuals): https://quillon.xyz/downloads/sigil-top-delivery-law.pdf[/item]
-[item]Whitepaper v1 (the master equation, measured laws, honest-status ladder): [V: publish PDF + add URL][/item]
+[item]Whitepaper v1 (the master equation, measured laws, honest-status ladder): https://sigilgraph.fluxapp.xyz/downloads/sigil-whitepaper-v1.pdf[/item]
 [item]Source: https://github.com/deme-plata/sigilgraph [V: confirm repo visibility before posting][/item]
 [/list]
 

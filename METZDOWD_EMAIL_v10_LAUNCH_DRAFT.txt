@@ -294,15 +294,25 @@ Reproduce:
   curl https://sigilgraph.fluxapp.xyz/sigil-tip-live.json        (live tip)
   https://sigilgraph.fluxapp.xyz/downloads/sigil-top-latest.json (BLAKE3
       content-addressed manifest; Linux x86_64 + Windows x64)
+  https://sigilgraph.fluxapp.xyz/downloads/sigil-top-v0.77.6           (the
+      binary the proof below attests; generic name -- verified 200, 15,934,216 B)
   https://sigilgraph.fluxapp.xyz/downloads/sigil-top-v0.77.6.proof (LIVE
-      require-both SQIsign-L5 + Ed25519 hybrid proof; its artifact_hash equals
-      the manifest blake3 b80f09a3...3604 -- recompute BLAKE3 of the binary,
-      then check BOTH signatures over the canonical record; a stripped
-      single-leg bundle is rejected.)
+      require-both SQIsign-L5 + Ed25519 hybrid proof; sqisign_pubkey 129 B +
+      sqisign_sig 292 B + ed25519_pubkey 32 B + ed25519_sig 64 B. Recompute
+      BLAKE3 of the binary above -- it equals the proof's artifact_hash
+      b80f09a390efab8191b8582c0603ffae6cadc505af01f158b6b5abbcaa573604
+      (verified with b3sum) -- then check BOTH signatures over the canonical
+      record; a stripped single-leg bundle is rejected. NOTE: sigil-top-latest.json
+      currently points at a newer build (v6.0.6) that does NOT yet ship a
+      require-both proof; v0.77.6 is the pinned, self-consistent artifact+proof
+      pair to check today. [V: re-cut a require-both proof for the current
+      release before posting, or leave this v0.77.6 pin and say so.])
   https://quillon.xyz/downloads/sigil-top-delivery-law.pdf       (the delivery-
       law paper: derivation, 22 seeded runs, residuals)
+  https://quillon.xyz/downloads/sigil-whitepaper-v1.pdf          (the v1
+      whitepaper: the master equation, measured laws, honest-status ladder;
+      mirror at sigilgraph.fluxapp.xyz/downloads/sigil-whitepaper-v1.pdf)
   The browser node verifies the tip fingerprint in front of you.
-  [V: publish the v1 whitepaper PDF to downloads and add its URL here.]
 
 Reference machine + method: throughput and soak figures are single-box on the
 public testnet node; the SQIsign / ed25519 / zk-flux cost numbers come from the

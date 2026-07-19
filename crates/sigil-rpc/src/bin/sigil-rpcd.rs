@@ -227,6 +227,53 @@ fn fold_tip(prev_tip: &[u8; 32], bh: u64, blake4_hash: u64, nonce: u64, vdf: &fl
     *hh.finalize().as_bytes()
 }
 
+/// ── H7 drift telemetry (pre-activation observer; docs/H7_TS_GUARD_GO_NO_GO.md §1) ──
+/// Follower-side clock-skew observation: for every peer block APPLIED, record
+/// `drift_us = block_ts − local now` (positive = the peer stamped in OUR future —
+/// the direction H7 will bound). In-memory atomics ONLY — never a Snapshot field
+/// (bincode-positional trap); journald log lines are the durable week-long record.
+/// Backfill of historical blocks reads as huge negative drift — the H7-relevant
+/// signal is `max_us` (the most-future stamp ever seen) and `would_reject`.
+mod h7_telemetry {
+    use std::sync::atomic::{AtomicI64, AtomicU64, Ordering::Relaxed};
+    pub static APPLIED: AtomicU64 = AtomicU64::new(0);
+    pub static WOULD_REJECT: AtomicU64 = AtomicU64::new(0);
+    pub static LAST_US: AtomicI64 = AtomicI64::new(0);
+    pub static MIN_US: AtomicI64 = AtomicI64::new(i64::MAX);
+    pub static MAX_US: AtomicI64 = AtomicI64::new(i64::MIN);
+
+    pub fn record(height: u64, block_ts_us: u128, local_now_us: u128) {
+        let d = (block_ts_us as i128 - local_now_us as i128)
+            .clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+        let n = APPLIED.fetch_add(1, Relaxed) + 1;
+        LAST_US.store(d, Relaxed);
+        MIN_US.fetch_min(d, Relaxed);
+        MAX_US.fetch_max(d, Relaxed);
+        if !sigil_emission::ts_within_future_bound(block_ts_us, local_now_us) {
+            let w = WOULD_REJECT.fetch_add(1, Relaxed) + 1;
+            eprintln!("H7-TELEMETRY WOULD-REJECT block {height}: drift +{d} µs exceeds the {} µs bound ({w} total)",
+                sigil_emission::MAX_FUTURE_DRIFT_US);
+        }
+        if n % 500 == 0 {
+            eprintln!("H7-TELEMETRY applied={n} would_reject={} last={d}µs min={}µs max={}µs",
+                WOULD_REJECT.load(Relaxed), MIN_US.load(Relaxed), MAX_US.load(Relaxed));
+        }
+    }
+
+    /// JSON snapshot for GET /api/v1/telemetry.
+    pub fn json() -> String {
+        let n = APPLIED.load(Relaxed);
+        format!(
+            "{{\"ok\":true,\"h7\":{{\"applied\":{n},\"would_reject\":{},\"last_drift_us\":{},\"min_drift_us\":{},\"max_drift_us\":{},\"bound_us\":{},\"activation\":\"dormant (u64::MAX)\"}}}}",
+            WOULD_REJECT.load(Relaxed),
+            LAST_US.load(Relaxed),
+            if n == 0 { 0 } else { MIN_US.load(Relaxed) },
+            if n == 0 { 0 } else { MAX_US.load(Relaxed) },
+            sigil_emission::MAX_FUTURE_DRIFT_US,
+        )
+    }
+}
+
 /// Minimal std HTTP GET (host:port + path) → response body. For peer sync.
 fn http_get(host_port: &str, path: &str) -> Option<String> {
     let mut s = std::net::TcpStream::connect(host_port).ok()?;
@@ -255,7 +302,10 @@ fn apply_block(n: &mut Node, rec: &serde_json::Value, g: &ModSquaring) -> Result
     // before it can drive the emission integral below. A future-stamped block would
     // pull the emission curve forward; the producer path needs no guard (it stamps
     // its own now_us()). No live behavior change until an operator schedules H7.
-    sigil_emission::check_block_ts(bh, rec_ts, now_us()).map_err(|e| e.to_string())?;
+    let apply_now_us = now_us();
+    sigil_emission::check_block_ts(bh, rec_ts, apply_now_us).map_err(|e| e.to_string())?;
+    // Pre-activation drift observation (go/no-go prerequisite #1) — ungated, log-only.
+    h7_telemetry::record(bh, rec_ts, apply_now_us);
     let miner = hex32(&sub.wallet).ok_or("bad wallet")?;
     let c = Challenge { height: bh, vdf_input: mining_seed(&n.tip_hash, bh), blake4_target: target_from_bits(bits), vdf_t };
     if !check_submission(g, &c, &sub) { return Err(format!("block {bh}: dual-lane verify FAILED")); }
@@ -946,6 +996,9 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             }
             ok(format!("{{\"ok\":true,\"traders\":[{}]}}", items.join(",")))
         }
+        // H7 pre-activation drift telemetry (follower-side; empty stats on a producer,
+        // which never runs apply_block). See docs/H7_TS_GUARD_GO_NO_GO.md.
+        ("GET", "/telemetry") => ok(h7_telemetry::json()),
         ("GET", "/economy") => {
             let n = node.read().unwrap();
             ok(format!(

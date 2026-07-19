@@ -186,27 +186,66 @@ tip-proofs H4). These are tracked with file:line and fix status in the hardening
 table, the measurements, the architecture, the predictions scoreboard, and the closing
 checklist. Equations are set in black; color is reserved for results and status.}
 
-\section{Introduction: why a chain needs an action}
+\section{Introduction: why reinvent money, and why a chain needs an action}
 
-A blockchain is usually presented as a pile of mechanisms: a hash here, a signature
-there, a consensus rule, a fee market, an emission curve. Each part is justified on its
-own, and the whole is trusted because the parts individually check out. SIGIL — the
-experimental sister chain to Quillon Graph — is built on the opposite conviction: that a
-chain should follow from a single organizing object, the way a physical theory follows
-from an \emph{action}, and that agreement about state should be \emph{structural} —
-written into the object every node checks, not reassembled from conventions each node is
-merely trusted to honor.
+Money is the technology we are least allowed to get wrong and the one we most take on
+faith. Its supply is set by discretion, its settlement runs through intermediaries we are
+required to trust, and the record of who owns what is a private ledger we are shown, not
+one we can check. Bitcoin's founding insight was that the last property is not a law of
+nature: a network can agree on a shared ledger with no trusted keeper, and a supply no one
+can quietly inflate. That insight is now more than fifteen years proven — and more than
+fifteen years old, and the chains built on it each stopped short of the whole problem.
 
-The concrete expression of that conviction is to make \emph{what the network agrees the
-state is} a first-class, committed quantity. Every block header commits four state roots
-(wallet, dex, event log, contract storage); a provenance proof binds each block to the
-exact binary that produced it; and tip verification is cheap enough to run inside a
-browser frame. A node that drifts on any root diverges on the header and halts itself
-before it can serve a byte. Agreement stops being a matter of faith in a linear ledger
-and becomes a checkable property of the header itself.
+Bitcoin fixed the money and left the expressiveness: a capped, honest supply and an
+unforgeable ledger, but deliberately no contracts, no native exchange, no programmable
+economy — and, like every widely deployed chain, elliptic-curve signatures that a
+large-scale quantum computer would break. Ethereum fixed the expressiveness and loosened
+the guarantees: contracts, tokens, and on-chain exchange, but a header that commits no
+structural statement of what the world-state \emph{is} beyond a single root re-derived by
+re-execution, supply and provenance enforced by process rather than by primitive, and the
+same pre-quantum signatures underneath. Both share three deeper gaps: nothing makes state
+\emph{divergence} self-evident, nothing puts a \emph{post-quantum} floor under the whole
+stack, and nothing binds the \emph{running binary} to the source it was built from.
+SIGIL — the experimental sister chain to Quillon Graph — takes the obvious brief: keep
+what they got right (capped honest money, programmability), add what post-quantum
+cryptography and a self-signing compiler now make possible, and lose what they got wrong.
 
-The v0 whitepaper (2026-05-29) stated these as three engineering claims. What v0 lacked —
-and what Quillon's own quantum-physics whitepaper demonstrated the value of — is a
+Concretely, SIGIL is a chain where:
+
+\begin{itemize}[leftmargin=1.5em,itemsep=2.5pt,label=\textcolor{sigilcyan}{$\diamond$}]
+\item \textbf{Post-quantum runs from the floor up.} Every release binary carries a
+\emph{require-both} SQIsign Level-5 \emph{and} Ed25519 provenance proof (\textasciitilde356\,B,
+smaller than one Dilithium-5 signature); the whole chain folds to one constant-size
+Ajtai/SIS proof with no trusted setup; browser key material is ML-KEM-1024 / ML-DSA-87.
+\item \textbf{Agreement is structural.} Every header commits four state roots — wallet,
+DEX, event log, contract storage — and a node that drifts on any of them halts itself
+(exit 78) before it serves a byte. Divergence cannot hide.
+\item \textbf{The economy is programmable.} A contract VM, a constant-product AMM DEX
+($x\cdot y = k$), on-chain credit, and a Bitcoin bridge — each committing to its own state
+root, so the whole programmable economy is inside the structural guarantee, not bolted
+beside it.
+\item \textbf{It verifies on a potato.} A 2{,}568-byte whole-chain proof and a
+3\,$\mu$s browser tip-check; the light client downloads zero blocks to hold the tip to
+account.
+\item \textbf{The money stays honest.} Dual-lane mining (BLAKE-family PoW $\times$
+Wesolowski VDF), a 21M cap, time-based emission invariant under block cadence, and a
+fail-loud enforcer that halts the node at $\pm$2\% supply drift.
+\item \textbf{One static binary} is node, miner, light client, and wallet.
+\end{itemize}
+
+None of that is new as a \emph{list} — and a feature list is exactly what SIGIL is trying
+\emph{not} to be. A blockchain is usually presented as a pile of mechanisms: a hash here,
+a signature there, a consensus rule, an emission curve, each justified on its own and the
+whole trusted because the parts individually check out. SIGIL is built on the opposite
+conviction: that a chain should follow from a single organizing object, the way a physical
+theory follows from an \emph{action}, and that agreement about state should be
+\emph{structural} — written into the object every node checks, not reassembled from
+conventions each node is merely trusted to honor. That is why \emph{what the network agrees
+the state is} became a first-class, committed quantity (the four roots above): agreement
+stops being faith in a linear ledger and becomes a checkable property of the header itself.
+
+The v0 whitepaper (2026-05-29) stated these as engineering claims. What v0 lacked — and
+what Quillon's own quantum-physics whitepaper demonstrated the value of — is a
 \emph{unifying theoretical object} from which the design follows, rather than a list of
 mechanisms. That organizing object has now been proposed: a conjectural effective action
 $\delta\SSIGIL=0$ in which every protocol component — settlement conservation, emission

@@ -20,13 +20,21 @@ Topic title:
 
 [b][size=13pt]Why SIGIL[/size][/b]
 
-Most blockchains are a pile of mechanisms — a hash here, a signature there, a consensus rule, an emission curve — trusted because the parts individually check out. SIGIL is built on the opposite idea: [b]agreement should be structural[/b], written into the object every node checks, and [b]every artifact should prove its own origin[/b]. In one sentence: a chain you can hold to account from a phone, whose binaries you can prove were built by whom, from what source, with what compiler — offline, with no trusted server.
+Money is the one thing we're least allowed to get wrong and the one we most take on faith — discretionary supply, settlement through intermediaries, a ledger we're shown instead of one we can check. Bitcoin proved the last part isn't a law of nature. But the chains built on that insight each stopped short:
+
+[list]
+[*][b]Bitcoin[/b] fixed the money and left the expressiveness — capped honest supply, unforgeable ledger, but no contracts, no native exchange, and elliptic-curve signatures a quantum computer would break.
+[*][b]Ethereum[/b] fixed the expressiveness and loosened the guarantees — contracts and on-chain markets, but a header that makes no structural statement of what the world-state IS, supply and provenance enforced by process not primitive, and the same pre-quantum signatures underneath.
+[/list]
+
+Both share three gaps SIGIL exists to close: nothing makes state [b]divergence[/b] self-evident, nothing puts a [b]post-quantum[/b] floor under the whole stack, and nothing binds the [b]running binary[/b] to the source it was built from. The brief: keep what they got right (capped honest money, programmability), add what post-quantum crypto and a self-signing compiler make possible, lose what they got wrong.
 
 Here is what that buys you, and it is all live on the testnet today:
 
 [list]
 [*]🔐 [b]The compiler signs what it builds.[/b] Every release binary carries a post-quantum provenance proof emitted at build time — require-both [b]SQIsign Level 5 AND Ed25519[/b] over a canonical record binding the artifact hash, source hash, compiler version and builder identity. ~356 bytes total, smaller than a single Dilithium-5 signature (4,595 B). A stripped single-leg bundle is rejected, never downgraded. You verify the download yourself (walkthrough below) — that's the whole point.
 [*]📦 [b]Four state roots in every header[/b] (wallet / dex / event-log / contract). A node that drifts on any root diverges on the header and [b]halts itself[/b] (exit 78) before it serves a single byte. State divergence has nowhere to hide.
+[*]⚙️ [b]A programmable economy, inside the guarantee.[/b] A contract [b]VM[/b], a constant-product [b]AMM DEX[/b] (x·y=k), on-chain [b]credit[/b], and a [b]Bitcoin bridge[/b] — each committing to its own state root, so the whole economy lives under the structural guarantee instead of bolted beside it.
 [*]🔎 [b]One constant-size proof for the whole chain.[/b] The fold (Ajtai/SIS lattice commitments, no trusted setup): [b]2,568 bytes regardless of chain length[/b] — full verification 280–342 ms at the 100k-block benchmark, and a [b]3-microsecond[/b] incremental tip check running live on the ~29.9M-block network. Honest nuance: constant-size proof, not constant-cost verification — the incremental lane is what makes the steady state cheap.
 [*]💻 [b]One binary does everything, on a potato.[/b] sigil-top (Linux x86_64 + Windows x64) is a monitoring node, a light client, a dual-lane miner, and a wallet in a single static file. Default mode verifies the live tip fingerprint in ~3 µs with zero blocks downloaded. Opt-in full sync runs at a measured live 10,853 blocks/s.
 [*]📡 [b]A measured gossip law, not a guess.[/b] Delivery probability D(p,r) = 1 − p^r, validated against 22 seeded simulations (RMS residual 0.4 pp). The shipped redundancy r=3 clears a 99.9% delivery SLA at up to 10% packet loss — the network calculates its provisioning instead of hoping.

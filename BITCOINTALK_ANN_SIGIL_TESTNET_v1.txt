@@ -1,0 +1,86 @@
+[BITCOINTALK ANN POST — SIGIL testnet. BBCode, ready to paste into a new topic
+ in Announcements (Altcoins). Suggested topic title on the line below; the post
+ body starts after the ===== line. Lines marked [V] need re-confirming against
+ the shipping build before posting. Posting identity: bitknight (pseudonym rule
+ 2026-07-18) — do not post from an identity linkable to the operator.]
+
+Topic title:
+[ANN][TESTNET] SIGIL — post-quantum provenance chain | 2.5 KB whole-chain proof | one binary: node+miner+wallet | no premine, no sale, testnet only
+
+=====
+
+[size=20pt][b]SIGIL — a DagKnight chain where divergence cannot hide[/b][/size]
+[i]Live experimental testnet (sigil-g0) — NOT production. Accelerated laboratory economics. Testnet coins are worthless by design. No sale, no premine allocation to buyers, nothing to invest in. This is an engineering testnet looking for people who enjoy breaking things.[/i]
+
+[b]What it is[/b]
+
+SIGIL is an experimental chain built around one idea: agreement should be structural, not customary. Its production sibling lost a user balance to a silent replay bug in 2026 because headers committed only (parent, tx_merkle, miner) — no protocol layer could even notice the drift. SIGIL's answer:
+
+[list]
+[item][b]Four state roots in every header[/b] (wallet / dex / event-log / contract). A node that drifts on any root halts itself (exit 78) before it serves a single byte.[/item]
+[item][b]The compiler signs what it builds.[/b] Every release binary carries a post-quantum provenance proof emitted at build time: require-both SQIsign Level 5 [b]AND[/b] Ed25519 over a canonical record binding the artifact hash, source hash, compiler version and builder identity. ~356 bytes total — smaller than a single Dilithium-5 signature (4,595 B). A stripped single-leg bundle is rejected, never downgraded.[/item]
+[item][b]One constant-size proof for the whole chain.[/b] The fold (Ajtai/SIS lattice commitments, no trusted setup): 2,568 bytes regardless of chain length, full verification measured 280–342 ms at the 100k-block benchmark, and a 3-microsecond incremental tip check running live on the ~29M-block network. Honest nuance: constant-size proof, not constant-cost verification — full verify reads all commitments; the incremental lane is what makes the steady state cheap.[/item]
+[item][b]A measured gossip law, not a guess.[/b] Delivery probability D(p,r) = 1 − p^r, validated against 22 seeded deterministic simulations (RMS residual 0.4 pp). The shipped redundancy r=3 clears a 99.9% delivery SLA at up to 10% packet loss — the network calculates its provisioning instead of hoping.[/item]
+[item][b]Adversarially gated ordering.[/b] The DagKnight braid passed a six-scenario gate before the live producer flipped to it: divergence = 0 under 30% drop/reorder/equivocation, withheld-block attacker, 16/16 ordering permutations agree, tamper suite 5/5 rejected. Simulation evidence, not a theorem — we track which is which publicly.[/item]
+[item][b]Bitcoin-familiar economics.[/b] 21M cap, 4-year halvings — but time-based: block_reward = integral of the emission rate over the block interval, so the schedule is invariant under block cadence, and a compile-time assert proves the schedule sums exactly to the cap. Plus a runtime supply chokepoint and a fail-loud band enforcer that halts the node at ±2% drift between realized and target supply.[/item]
+[/list]
+
+[b]One binary, on a potato[/b]
+
+sigil-top is a single static binary (Linux x86_64 + Windows x64): monitoring node, light client, dual-lane miner (BLAKE3-family PoW × Wesolowski VDF — a valid share carries both), and wallet. Default mode is a light monitor that verifies the live tip fingerprint in ~3 µs with zero blocks downloaded. Opt-in full sync runs at a measured live 10,853 blocks/s. There is also a browser tip-check — the page recomputes the exact BLAKE3 tip fingerprint a native node commits, in front of you.
+
+[b]Try it (5 minutes)[/b]
+
+[code]
+# live network feed
+curl https://sigilgraph.fluxapp.xyz/sigil-status.json
+
+# download manifest (BLAKE3 content-addressed, Linux + Windows)
+https://sigilgraph.fluxapp.xyz/downloads/sigil-top-latest.json
+
+# then run it — TUI opens as a light monitor; [M] to mine, [L] to bind a wallet
+./sigil-top
+[/code]
+
+Verify what you downloaded (this is the point of the whole project):
+[code]
+# 1. recompute BLAKE3 of the binary — must equal the manifest hash
+# 2. fetch the .proof and check BOTH signatures over the canonical record:
+https://sigilgraph.fluxapp.xyz/downloads/sigil-top-v0.77.6.proof
+[/code]
+[V: refresh version/proof filenames + manifest hash at posting.]
+
+Mining: dual-lane (hash-power lane × verifiable-delay lane), CPU is fine, GPU build available for the hash lane. Verified wallets (sign a domain-separated challenge — the wallet IS the public key) earn to themselves; unverified mining routes to the treasury. 1.2% of every reward routes to a commons pool under an M-of-N quorum.
+
+[b]What we are NOT claiming[/b]
+
+The honesty section is load-bearing here — the whitepaper carries a boxed security disclosure and a public hardening backlog with file:line status, and this post repeats the short version:
+
+[list]
+[item]RPC money routes ARE authenticated (per-wallet ed25519 signature + nonce). The residual risk is deeper: block-apply does not yet enforce the producer's signature (verifier written + height-gated, dormant), the live VDF modulus is not yet the trustless one, and peer-sync ingress auth is mid-rollout (a real ed25519 verify-before-sync handshake with channel binding landed in log-only mode). Do not route real value through SIGIL. It's a testnet; it will be reset.[/item]
+[item]The multi-million-tx/s figures floating in our docs are state-transition wind-tunnel numbers, not network TPS, and are labeled as such everywhere.[/item]
+[item]The fold construction is ours and unpublished; its soundness reduction (Ajtai/SIS) is a target, not a published proof. Cryptanalysis is explicitly invited — that's half the reason this post exists.[/item]
+[/list]
+
+[b]Links[/b]
+
+[list]
+[item]Live status: https://sigilgraph.fluxapp.xyz/sigil-status.json[/item]
+[item]Live tip: https://sigilgraph.fluxapp.xyz/sigil-tip-live.json[/item]
+[item]Downloads (content-addressed): https://sigilgraph.fluxapp.xyz/downloads/sigil-top-latest.json[/item]
+[item]Delivery-law paper (derivation + 22 seeded runs + residuals): https://quillon.xyz/downloads/sigil-top-delivery-law.pdf[/item]
+[item]Whitepaper v1 (the master equation, measured laws, honest-status ladder): [V: publish PDF + add URL][/item]
+[item]Source: https://github.com/deme-plata/sigilgraph [V: confirm repo visibility before posting][/item]
+[/list]
+
+[b]FAQ[/b]
+
+[i]Is there a token sale / premine / airdrop?[/i] No, no, and no. Testnet. Coins are worthless by design and the chain will be reset.
+
+[i]Why announce a testnet at all?[/i] Because the interesting claims — the constant-size fold proof, the require-both PQ provenance, the delivery law — are exactly the kind that should be attacked by strangers before anything of value ever touches the chain. Break it and post how.
+
+[i]Windows?[/i] Yes, native x64 build in the same manifest, same .proof discipline. [V: confirm the Windows exe in the current manifest passes the wine-verify gate.]
+
+[i]Hardware?[/i] The light monitor runs on anything. Full sync + mining: any modern CPU; the chain's whole design brief is "hold the chain to account on a potato."
+
+— bitknight

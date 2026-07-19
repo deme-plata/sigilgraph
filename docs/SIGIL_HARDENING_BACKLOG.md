@@ -24,7 +24,7 @@ Alpha-Docker-tested and operator-approved (CLAUDE.md), and every validation chan
 | H5 state-layer nonce | **PARTIAL** | `check_and_bump_nonce` committed + signed, but zero callers in node/rpcd; legacy `SignedTx.nonce` still unchecked |
 | snapshot-pull M2 | **PARTIAL** | trailer serves M1 `archive_root`; `anchor_sig`/`fold_blob` still empty |
 | WS2 wallet_smt_root header commit | **PARTIAL** (read-path on branch) | proof-carrying `/balance` works; committing the SMT root in the header is the height-gated last inch |
-| H2 verify-before-sync handshake | **OPEN** | length-only stub, zero callers |
+| H2 verify-before-sync handshake | **PARTIAL** (real crypto + ingress gate on branch, log-only) | ed25519 verify fail-closed + sigil-node rr-backfill gate + channel binding; sigil-top attach + enforcement flip remain |
 | H3 follower trusts peer difficulty | **OPEN** | follower adopts peer `bits`/`vdf_t` (reward is safe; easy share accepted) |
 | H4 keyless wire tip-proofs | **OPEN** | always `Blake3Fingerprint`; no receiver-side verify; `new_sqisign` never on wire |
 
@@ -107,13 +107,19 @@ height-gated Phase-3 swap the `roots()` doc anticipates. **Fix = add the SMT roo
 
 ## OPEN (genuinely unaddressed)
 
-### H2 — verify-before-sync handshake  ⛔ OPEN
-`crates/sigil-handshake/src/handshake.rs:142` `verify_handshake` is a Phase-0 stub: schema/network/
-expiry/role gates are real, but the "signature" check is only `identity_sig.len() != 32` (`:165`) and
-signing is BLAKE3, explicitly "NOT cryptographic". **Zero callers workspace-wide** — it is not on
-sigil-node's sync ingress at all. **Fix = implement a real crypto handshake (peer identity +
-network-id-bound challenge + tip-proof challenge) and call it before accepting block-pack ranges.**
-Test gate: a peer with wrong network-id / bad identity refused before any block transfer.
+### H2 — verify-before-sync handshake  🟡 PARTIAL (real crypto + ingress gate on branch, log-only)
+**2026-07-19:** `verify_handshake` is REAL ed25519 over the canonical transcript, fail-closed
+(Blake3Stub → `StubRejected`, unwired PQ algs → `UnsupportedAlgorithm`); `sign_with_ed25519` binds
+the verifying key into the transcript. First live caller: `sigil-node/src/sync_auth.rs` gates the
+rr-backfill serve path — the node mints a 12h `ValidatorPeer` handshake at boot (key
+`<db_path>/handshake_ed25519.key`, sync-only, not a wallet key), attaches it to every outgoing
+`BackfillReq`, and the server verifies + caches sessions with **channel binding**
+(`session_pubkey` == the arriving libp2p peer id, so cross-peer replay fails inside the validity
+window). Rollout-safe: log-only default with authed/anon/refused telemetry;
+`SIGIL_HANDSHAKE_REQUIRE=1` refuses before any block transfer. 11/11 crate + 42/42 node tests.
+**Remaining:** sigil-top client-side attach (monitor authenticates as `McpAgent`), then the
+enforcement flip once fleet telemetry shows the followers authenticate. Test gate met in unit form
+(wrong network / bad identity / cross-peer replay refused when enforcing); repeat live after the flip.
 
 ### H3 — follower trusts peer-declared difficulty  ⛔ OPEN
 `sigil-rpcd.rs:249` (`apply_block`) reads `bits`/`vdf_t` straight from the peer's block JSON, builds

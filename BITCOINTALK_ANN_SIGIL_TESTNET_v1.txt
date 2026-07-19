@@ -12,7 +12,7 @@ Topic title:
 
 [center][img]https://fluxapp.xyz/icons/brand/sigil-flat.png[/img]
 [size=18pt][b]S I G I L[/b][/size]
-[size=12pt][b]A chain where divergence cannot hide — and every binary proves who built it.[/b][/size][/center]
+[size=12pt][b]A chain that makes state divergence explicit — and every official binary carries verifiable build provenance.[/b][/size][/center]
 
 [size=9pt][i]🧪 Live experimental testnet (sigil-g0). NOT production — accelerated laboratory economics, testnet coins are worthless by design, no sale, no premine to buyers, nothing to invest in. Testnet-first is deliberate: we harden in the open, in public, before a single coin of real value exists. This is an engineering testnet looking for people who enjoy breaking things.[/i][/size]
 
@@ -23,11 +23,11 @@ Topic title:
 Money is the one thing we're least allowed to get wrong and the one we most take on faith — discretionary supply, settlement through intermediaries, a ledger we're shown instead of one we can check. Bitcoin proved the last part isn't a law of nature. But the chains built on that insight each stopped short:
 
 [list]
-[*][b]Bitcoin[/b] fixed the money and left the expressiveness — capped honest supply, unforgeable ledger, but no contracts, no native exchange, and elliptic-curve signatures a quantum computer would break.
-[*][b]Ethereum[/b] fixed the expressiveness and loosened the guarantees — contracts and on-chain markets, but a header that makes no structural statement of what the world-state IS, supply and provenance enforced by process not primitive, and the same pre-quantum signatures underneath.
+[*][b]Bitcoin[/b] established capped, independently verifiable money, but deliberately limits general-purpose programmability; its header commits transactions rather than a dedicated state root, and secp256k1 is not post-quantum.
+[*][b]Ethereum[/b] established general-purpose programmable state and already commits state, transaction and receipt roots in every execution header — but it does not provide a fixed 21M monetary policy, a post-quantum signature floor, or protocol-level provenance for released client binaries.
 [/list]
 
-Both share three gaps SIGIL exists to close: nothing makes state [b]divergence[/b] self-evident, nothing puts a [b]post-quantum[/b] floor under the whole stack, and nothing binds the [b]running binary[/b] to the source it was built from. The brief: keep what they got right (capped honest money, programmability), add what post-quantum crypto and a self-signing compiler make possible, lose what they got wrong.
+SIGIL's distinction is the combination neither puts in the protocol: [b]four domain-separated state roots with fail-closed local enforcement[/b] (a node that drifts on any root halts itself before serving a byte), a [b]post-quantum signature floor[/b], [b]protocol-level provenance[/b] binding each released binary to its build, and a [b]time-normalized capped emission[/b]. Keep what Bitcoin and Ethereum got right — capped honest money, programmable state — and add what post-quantum cryptography and a self-signing compiler now make possible.
 
 Here is what that buys you, and it is all live on the testnet today:
 

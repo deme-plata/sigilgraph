@@ -199,13 +199,15 @@ fifteen years old, and the chains built on it each stopped short of the whole pr
 Bitcoin fixed the money and left the expressiveness: a capped, honest supply and an
 unforgeable ledger, but deliberately no contracts, no native exchange, no programmable
 economy — and, like every widely deployed chain, elliptic-curve signatures that a
-large-scale quantum computer would break. Ethereum fixed the expressiveness and loosened
-the guarantees: contracts, tokens, and on-chain exchange, but a header that commits no
-structural statement of what the world-state \emph{is} beyond a single root re-derived by
-re-execution, supply and provenance enforced by process rather than by primitive, and the
-same pre-quantum signatures underneath. Both share three deeper gaps: nothing makes state
-\emph{divergence} self-evident, nothing puts a \emph{post-quantum} floor under the whole
-stack, and nothing binds the \emph{running binary} to the source it was built from.
+large-scale quantum computer would break. Ethereum added general-purpose
+programmable state and \emph{already} commits state, transaction, and receipt roots in
+every execution header. What it does not provide is a node that must \emph{halt} on a
+root mismatch rather than continue, a fixed 21M-style monetary policy, a post-quantum
+floor under its signatures, or protocol-level provenance for its released client
+binaries. So SIGIL's distinction is not ``a chain with a state root'' — it is the
+\emph{combination} neither puts in the protocol: domain-separated roots with fail-closed
+local enforcement, a post-quantum signature floor, build provenance bound to every
+released binary, and time-normalized capped emission.
 SIGIL — the experimental sister chain to Quillon Graph — takes the obvious brief: keep
 what they got right (capped honest money, programmability), add what post-quantum
 cryptography and a self-signing compiler now make possible, and lose what they got wrong.

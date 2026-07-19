@@ -61,7 +61,7 @@ pub(super) fn ingest_bodies_verified(
             _ => rejected += 1, // missing skeleton entry OR hash != commitment → reject
         }
     }
-    let stored = if good.is_empty() { 0 } else { store.put_blocks_batch(&good) };
+    let stored = if good.is_empty() { 0 } else { store.put_blocks_bulk_trusted(&good) };
     (stored, rejected)
 }
 

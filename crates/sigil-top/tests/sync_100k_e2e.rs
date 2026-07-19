@@ -491,17 +491,22 @@ fn composed_sustained_pipeline() {
     }
 
     // ---- sustained rate over [warmup, total) — the VERDICT (DeepSeek §2/§4) ----
-    let first_window_intended = intended[warm_pages as usize];
+    // REAL steady-state wall: t0 = real finish of the LAST warmup page (the instant the
+    // measured window begins), t1 = last real finish. This excludes warmup AND is pure
+    // real elapsed (NOT the intended clock) — the honest drain rate of the pipeline.
+    let win_start = if warm_pages >= 1 {
+        finishes[(warm_pages - 1) as usize].1
+    } else {
+        finishes[0].1
+    };
     let last_finish = finishes.last().unwrap().1;
-    let window_blocks = sustain;
-    let sustained = rate(window_blocks, (last_finish - first_window_intended).as_secs_f64());
+    let sustained = rate(sustain, (last_finish - win_start).as_secs_f64());
 
     // ---- rolling 1s sub-window check: no second inside the window may dip below target ----
-    // Reconstruct per-page completion times relative to window start; bucket into 1s bins and
+    // Bucket per-page completion times (relative to the real window start) into 1s bins and
     // require each FULL bin to clear the bar. A burst that drains a buffer fails this.
     let mut worst_bin = f64::INFINITY;
     {
-        let win_start = first_window_intended;
         // (page_idx in window) -> finish offset secs
         let mut offs: Vec<f64> = finishes
             .iter()

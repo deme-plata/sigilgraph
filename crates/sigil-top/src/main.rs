@@ -362,10 +362,10 @@ static LAST_FEED_ERR: std::sync::Mutex<String> = std::sync::Mutex::new(String::n
 /// that then sat in TIME_WAIT — over a multi-hour genesis-archive sync that exhausted
 /// Windows' ephemeral ports (the "tip frozen / error sending request" bug, #156 item 3).
 /// Timeouts are set PER REQUEST (each call site keeps its old value); the TLS posture is
-/// the union of the old per-site builders (TLS_1_0 feeds + the invalid-cert fallback).
+/// the union of the old per-site builders (TLS_1_2 feeds + the invalid-cert fallback).
 static HTTP: std::sync::LazyLock<reqwest::blocking::Client> = std::sync::LazyLock::new(|| {
     reqwest::blocking::Client::builder()
-        .min_tls_version(reqwest::tls::Version::TLS_1_0)
+        .min_tls_version(reqwest::tls::Version::TLS_1_2)
         .danger_accept_invalid_certs(true)
         .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION")))
         .pool_max_idle_per_host(4)
@@ -1673,13 +1673,9 @@ const RELEASE_SIGN_PUBKEY_HEX: &str =
 
 /// LANE-C: verify the release manifest is signed by [`RELEASE_SIGN_PUBKEY_HEX`]. The detached
 /// signature is published at `<manifest>.sig` as 128-hex (ed25519 over the EXACT manifest bytes).
-/// Returns `Err` (fail-closed → no update) on any missing/invalid signature. Dev bypass:
-/// `SIGIL_UPDATE_INSECURE=1` prints a loud warning and skips the check — never set it on a release.
+/// Returns `Err` (fail-closed → no update) on any missing/invalid signature. No runtime bypass:
+/// this check always runs — there is no env var that skips it.
 fn verify_manifest_sig(manifest_body: &str) -> Result<(), String> {
-    if std::env::var("SIGIL_UPDATE_INSECURE").as_deref() == Ok("1") {
-        eprintln!("⚠ SIGIL_UPDATE_INSECURE=1 — release-manifest signature NOT verified (DEV ONLY — never on a release)");
-        return Ok(());
-    }
     let pk: [u8; 32] = hex::decode(RELEASE_SIGN_PUBKEY_HEX).ok()
         .and_then(|v| v.try_into().ok())
         .ok_or_else(|| "pinned release key malformed".to_string())?;
@@ -1688,7 +1684,7 @@ fn verify_manifest_sig(manifest_body: &str) -> Result<(), String> {
     let sig_url = format!("{UPDATE_MANIFEST}.sig?t={bust}");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(8))
-        .min_tls_version(reqwest::tls::Version::TLS_1_0)
+        .min_tls_version(reqwest::tls::Version::TLS_1_2)
         .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION")))
         .build().map_err(|e| format!("sig client init: {e}"))?;
     let sig_hex = client.get(&sig_url).send().and_then(|r| r.error_for_status()).and_then(|r| r.text())
@@ -1711,7 +1707,7 @@ fn fetch_latest() -> Result<Release, String> {
     // error (was `.ok()?` → blind "unreachable") — surface the real reason instead.
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(8))
-        .min_tls_version(reqwest::tls::Version::TLS_1_0)
+        .min_tls_version(reqwest::tls::Version::TLS_1_2)
         .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION")))
         .build().map_err(|e| format!("client init: {e}"))?;
     // Read the body as text + parse explicitly (reqwest's .json() Display hides the
@@ -1760,7 +1756,7 @@ fn fetch_dns_anchor() -> String {
     let url = format!("https://cloudflare-dns.com/dns-query?name={ANCHOR}&type=TXT");
     let client = match reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(5))
-        .min_tls_version(reqwest::tls::Version::TLS_1_0)
+        .min_tls_version(reqwest::tls::Version::TLS_1_2)
         .build()
     {
         Ok(c) => c,
@@ -1972,7 +1968,7 @@ fn start_mining(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> mpsc::Re
         let difficulty_bits: u32 = std::env::var("SIGIL_MINE_DIFFICULTY").ok()
             .and_then(|s| s.parse().ok()).unwrap_or(12); // ~4k hashes/share — real PoW, lands fast
         let client = match reqwest::blocking::Client::builder().timeout(Duration::from_secs(8))
-        .min_tls_version(reqwest::tls::Version::TLS_1_0).build() {
+        .min_tls_version(reqwest::tls::Version::TLS_1_2).build() {
             Ok(c) => c, Err(e) => { let _ = tx.send(format!("✗ miner init: {e}")); return; }
         };
         let _ = tx.send(format!("▲ mining → {url} · diff {difficulty_bits} bits · wallet {}…", &wallet[..8]));
@@ -2086,12 +2082,33 @@ fn maybe_auto_update(argv: &[String]) -> Option<String> {
     }
 }
 
+/// Fetch the bytes at `url` over HTTPS with a TLS 1.2 floor. Free-standing and
+/// self-contained by design: it takes only a URL, builds its own short-lived
+/// `reqwest` client, and touches no sigil-top state (no `App`, no wallet paths, no
+/// globals like [`HTTP`] or `LAST_FEED_ERR`) — so it's meant to be lifted as-is into
+/// a shared crate (e.g. a future `sigil-updater`) that other binaries can depend on
+/// too. Mirrors the client-builder pattern already used by `fetch_latest` /
+/// `self_update` (timeout + TLS floor + user-agent); a caller embedding this in a
+/// different crate should swap the user-agent literal for its own.
+fn fetch_binary_reqwest(url: &str) -> Result<Vec<u8>, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .min_tls_version(reqwest::tls::Version::TLS_1_2)
+        .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("client init: {e}"))?;
+    let resp = client.get(url).send().map_err(|e| format!("request failed: {e}"))?;
+    let resp = resp.error_for_status().map_err(|e| format!("HTTP status: {e}"))?;
+    let bytes = resp.bytes().map_err(|e| format!("read body: {e}"))?;
+    Ok(bytes.to_vec())
+}
+
 fn self_update(rel: &Release) -> Result<String, String> {
     let t = rel.for_self();
     if t.url.is_empty() { return Err(format!("manifest has no {SELF_TARGET} build")); }
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(120))
-        .min_tls_version(reqwest::tls::Version::TLS_1_0)
+        .min_tls_version(reqwest::tls::Version::TLS_1_2)
         .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION")))
         .build().map_err(|e| e.to_string())?;
     let bytes = client.get(&t.url).send().map_err(|e| e.to_string())?

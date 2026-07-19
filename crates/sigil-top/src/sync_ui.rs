@@ -39,6 +39,10 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
     let synced = caught && fold_ok && s.verify_break.is_none();
     let connecting = s.fetched_total == 0 && spine == 0 && !following;
     let kf_rate = app.sync_kf.x.max(0.0);                       // Kalman-smoothed blk/s
+    // v0.58: the kalman feed (app.p2p_rate) can read 0 mid-sync while the REAL contiguous
+    // commit rate (s.commit_rate = the shown ⚡/s commit) is live -> fall back to it so the
+    // panel never shows a false rate 0 blk/s during an ACTIVE sync (it looked dead).
+    let kf_rate = if kf_rate >= 1.0 { kf_rate } else { s.commit_rate.max(0.0) };
     let eta = if synced || kf_rate < 1.0 { f64::INFINITY } else { gap as f64 / kf_rate };
     // Turbo continuity score (invented for continuous high download bandwidth)
     let cont = s.turbo_continuity.continuity_score * 100.0;

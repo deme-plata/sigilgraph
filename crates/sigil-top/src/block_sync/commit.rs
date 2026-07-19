@@ -165,28 +165,44 @@ impl CommitBuffer {
         //     path. A straddling batch routes checked (conservative; the snapshot path sends pure
         //     prefix batches, so it doesn't straddle in practice).
         // Trusted → skip the per-block fork/dup gets (the 100k fast path); checked = live/frontier.
+        // v0.58 (10k-sync): CONTIGUITY-AWARE flush. Strict downward-linkage only accepts a run
+        // whose parent is already stored, so a parallel look-ahead chunk landing ABOVE the frontier
+        // was previously rejected + DROPPED here and re-fetched (measured ~74% waste). Instead:
+        // sort+dedup, commit ONLY the contiguous run from the frontier (`synced_to`), and RETAIN the
+        // out-of-order tail so it commits for free (one big jump) the moment the gap below it fills.
+        self.buf.sort_by_key(|h| h.height);
+        self.buf.dedup_by_key(|h| h.height);
+        let synced = store.synced_to();                               // next-needed height
+        let base_idx = self.buf.partition_point(|h| h.height < synced); // below frontier = already stored
+        let mut cut = base_idx;
+        let mut want = synced;
+        while cut < self.buf.len() && self.buf[cut].height == want { cut += 1; want += 1; }
+        let tail = self.buf.split_off(cut);                           // out-of-order remainder -> RETAIN
+        let run = self.buf.split_off(base_idx);                       // [synced..want) contiguous -> commit
+        self.buf = tail;
+        // Bound retained memory: if a gap never fills, drop the tail (it will be re-fetched).
+        const RETAIN_CAP: usize = 786_432;                            // ~8 chunks of 32768 headers
+        if self.buf.len() > RETAIN_CAP { self.buf.clear(); }
+        if run.is_empty() { return 0; }                              // frontier chunk not here yet
         let anchor = store.fold_anchor_height();
-        let max_h = self.buf.iter().map(|h| h.height).max().unwrap_or(0);
+        let max_h = run.last().map(|h| h.height).unwrap_or(0);
         let use_trusted = self.cfg.trusted
             || (self.cfg.trusted_prefix && anchor > 0 && max_h <= anchor);
         let result = if use_trusted {
-            store.commit_bulk_trusted_durable(&self.buf, self.cfg.fsync)
+            store.commit_bulk_trusted_durable(&run, self.cfg.fsync)
         } else {
-            store.commit_batch_durable(&self.buf, self.cfg.fsync)
+            store.commit_batch_durable(&run, self.cfg.fsync)
         };
         match result {
             Ok(n) => {
                 self.committed += n as u64;
                 self.batches += 1;
-                self.buf.clear();
                 n
             }
             Err(e) => {
-                // The blocks are NOT stored (commit_batch_durable advances the tip only after a
-                // successful batch_put), so dropping the buffer is safe — `synced_to` did not
-                // move and the source re-fetches the range. Never grow the buffer unbounded.
-                crate::tlog!("[commit] durable batch failed ({} blocks): {e}", self.buf.len());
-                self.buf.clear();
+                // Run NOT stored (tip advances only after a successful batch_put); the retained
+                // tail stays buffered and the source re-fetches the run. Bounded above by RETAIN_CAP.
+                crate::tlog!("[commit] durable batch failed ({} blocks): {e}", run.len());
                 0
             }
         }

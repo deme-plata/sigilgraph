@@ -550,7 +550,7 @@ impl P2PBlockSync {
                 #[allow(non_snake_case)]
                 let CHUNK: u64 = std::env::var("SIGIL_SYNC_CHUNK").ok()
                     .and_then(|v| v.parse::<u64>().ok())
-                    .map(|n| n.clamp(1024, 65_536)).unwrap_or(4096);
+                    .map(|n| n.clamp(1024, 65_536)).unwrap_or(10_000); // v6.5: 10k blocks/sync default (frontier-exact fix v0.57 makes large chunks safe)
                 // v0.39: was const 12 — at first boot (empty DB) all slots fire decode
                 // bursts at once, pre-TUI, which pressured small/busy machines hard. 8 by
                 // default; SIGIL_SYNC_INFLIGHT=1..16 to tune (raise on a beefy box).
@@ -898,7 +898,10 @@ impl P2PBlockSync {
                     let mut last_backfill_time = Instant::now();
                     while let Ok((start, peer, bytes)) = done_rx.try_recv() {
                         inflight = inflight.saturating_sub(1);
-                        assigned.remove(&start);
+                        // v0.58 (10k-sync): keep a successfully-fetched look-ahead range CLAIMED so the
+                        // frontier-anchored refill does not re-request it every cycle (~60% serve waste).
+                        // Cleared on a genuine miss (empty/timeout) below; pruned once the frontier passes.
+                        let mut fetched_ok = false;
                         match bytes {
                             Some(b) => {
                                 peer_bench.remove(&peer);              // answered → healthy again
@@ -907,6 +910,7 @@ impl P2PBlockSync {
                                 commit_ring.push_slice(&mut store, &headers);
                                 bytes_session += b.len() as u64;
                                 if got > 0 {
+                                    fetched_ok = true;
                                     lead_n += 1;
                                     // Update continuity with real observed dt for accurate sustained high BW tracking (continuerlighed)
                                     let now = Instant::now();
@@ -977,6 +981,8 @@ impl P2PBlockSync {
                                 peer_bench.insert(peer, Instant::now() + BENCH);
                             }
                         }
+                        // v0.58 (10k-sync): only a genuine miss frees the claim for re-request.
+                        if !fetched_ok { assigned.remove(&start); }
                     }
 
                     // ── REFILL: keep the next MAX_INFLIGHT chunks AT THE FRONTIER in flight ──
@@ -1289,7 +1295,14 @@ impl P2PBlockSync {
                             // height). Look-ahead chunks (i>0) stay single-peer to avoid flooding.
                             const FRONTIER_REDUNDANCY: usize = 3;
                             let full_archive_mode = !recent_only_rt.load(Ordering::Relaxed);
-                            let refill_slots = if full_archive_mode { 1 } else { max_inflight as u64 };
+                            // v0.58 (10k-sync fix): full-archive must PIPELINE look-ahead like recent-only.
+                            // The `1` cap (a v0.10.0 frontier-stall over-correction) serialized the frontier to
+                            // ONE server serve per round-trip -> inflight collapsed to 1, frontier parked at
+                            // 1+3*32768=98305. CommitBuffer.push_slice ACCUMULATES and commit_batch_durable
+                            // SORTS by height, so contiguous parallel look-ahead commits in ascending order
+                            // (strict-downward-linkage holds); i==0 (exact synced_to) is issued FIRST each
+                            // cycle with redundant fanout so the lead chunk always chains.
+                            let refill_slots = (max_inflight as u64).saturating_mul(3); // v0.58: scan wide so fetched-but-claimed look-ahead is skipped yet fresh ranges still fill inflight
                             for i in 0..refill_slots {
                                 if inflight >= max_inflight { break; }
                                 // v0.57 LANE-L (the real 0 blk/s): request the FRONTIER (i==0) from
@@ -1305,7 +1318,9 @@ impl P2PBlockSync {
                                 // overlap by height.
                                 let start = if i == 0 { store.synced_to() } else { frontier_chunk + i * CHUNK };
                                 if start >= peer_best { break; }          // past the tip
-                                if !assigned.insert(start) { continue; }  // already in flight
+                                // v0.58 (10k-sync): bound the look-ahead so claimed/retained memory stays bounded.
+                                if i > 0 && start > store.synced_to().saturating_add(CHUNK.saturating_mul(16)) { break; }
+                                if !assigned.insert(start) { continue; }  // in flight OR already fetched (claimed)
                                 let fanout = if i == 0 {
                                     if full_archive_mode {
                                         healthy.len().max(1)
@@ -1357,7 +1372,7 @@ impl P2PBlockSync {
                                         healthy[(rr + k) % healthy.len()].clone()
                                     };
                                     let payload = serde_json::to_vec(
-                                        &BackfillReq { from: start, to: start + use_chunk, headers_only: true, codec: 1 }
+                                        &BackfillReq { from: start, to: start + CHUNK, headers_only: true, codec: 1 } // v0.58: span==stride(CHUNK) so look-ahead TILES contiguous (was use_chunk -> gaps)
                                     ).unwrap();
                                     let n = net.clone();
                                     let tx = done_tx.clone();
@@ -1383,6 +1398,12 @@ impl P2PBlockSync {
                         last_state = Instant::now();
                         store.advance();
                         let now_synced = store.synced_to();
+                        // v0.58 (10k-sync): drop claims the frontier has passed (stored) — bounds `assigned`
+                        // and always lets the exact frontier chunk re-issue. Stall backstop: if the frontier
+                        // is wedged, clear ALL claims so any range dropped from the bounded retain buffer is
+                        // re-fetched (prevents a permanent gap).
+                        assigned.retain(|&s| s >= now_synced);
+                        if last_advance_t.elapsed() >= Duration::from_secs(6) { assigned.clear(); }
                         // DYNAMIC BASE: the lowest servable height creeps UP as producers prune early
                         // history from their RAM window (the disk range-serve of pruned-low ranges is
                         // unreliable). If the frontier chunk stays unservable by ALL peers for ≥5s

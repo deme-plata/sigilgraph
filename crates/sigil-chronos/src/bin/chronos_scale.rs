@@ -33,17 +33,28 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 fn dir_stats(dir: &Path) -> (u64, u64, u64) {
-    // (total_bytes, wal_bytes, sst_count)
-    let (mut total, mut wal, mut ssts) = (0u64, 0u64, 0u64);
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for e in rd.flatten() {
-            let len = e.metadata().map(|m| m.len()).unwrap_or(0);
-            total += len;
-            let name = e.file_name().to_string_lossy().to_string();
-            if name == "flux.wal" { wal = len; }
-            if name.ends_with(".sst") { ssts += 1; }
+    // (total_bytes, wal_bytes, sst_count). Recurses ONE level so sharded
+    // stores (data in shard-000..shard-NNN subdirs) are measured too — the
+    // old flat read_dir saw ~0 bytes in sharded mode, so CHRONOS_TARGET_BYTES
+    // never fired and the wal/sst CSV columns were wrong. `wal` is the SUM of
+    // every shard's flux.wal (single-store: the one top-level WAL, unchanged).
+    fn scan(dir: &Path, depth: u8, total: &mut u64, wal: &mut u64, ssts: &mut u64) {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let md = match e.metadata() { Ok(m) => m, Err(_) => continue };
+                if md.is_dir() {
+                    if depth > 0 { scan(&e.path(), depth - 1, total, wal, ssts); }
+                    continue;
+                }
+                *total += md.len();
+                let name = e.file_name().to_string_lossy().to_string();
+                if name == "flux.wal" { *wal += md.len(); }
+                if name.ends_with(".sst") { *ssts += 1; }
+            }
         }
     }
+    let (mut total, mut wal, mut ssts) = (0u64, 0u64, 0u64);
+    scan(dir, 1, &mut total, &mut wal, &mut ssts);
     (total, wal, ssts)
 }
 
@@ -73,7 +84,22 @@ fn main() {
         knob("CHRONOS_SYNC_EVERY").unwrap_or(0),
     );
     let batch_size = knob("CHRONOS_BATCH").unwrap_or(256).max(1) as usize;
-    let shards = knob("CHRONOS_SHARDS").unwrap_or(1).max(1) as usize;
+    // CHRONOS_SHARDS unset on an EXISTING sharded store must adopt the
+    // persisted count, not default to 1 — Database::open(root) on a sharded
+    // root would silently start a NEW single store beside the shards and
+    // resume writing at the marker height into it (same marker auto-detect
+    // chronos_verify uses; an explicit mismatching env still refuses loudly
+    // inside ShardedDb::open).
+    let shards = match knob("CHRONOS_SHARDS") {
+        Some(n) => n.max(1) as usize,
+        None if flux_db::shard::exists(&dir) => {
+            let n: usize = std::fs::read_to_string(dir.join("SHARDS")).ok()
+                .and_then(|s| s.trim().parse().ok()).unwrap_or(1);
+            eprintln!("chronos_scale: existing sharded store — adopting {} shards from SHARDS marker", n);
+            n
+        }
+        None => 1,
+    };
     // Store facade: 1 shard = the single Database (byte-identical legacy path);
     // >1 = flux_db::shard::ShardedDb (N parallel WAL/memtable pipelines).
     enum Store { One(flux_db::Database), Many(flux_db::shard::ShardedDb) }

@@ -14,14 +14,23 @@ Subject: SIGIL/Flux v1.0 -- require-both SQIsign+Ed25519 hybrid provenance (~356
 == What SIGIL is (the short version, before the crypto) ==
 
 SIGIL is a live experimental DagKnight chain (network sigil-g0, height ~29M
-under accelerated laboratory economics) whose organizing idea is that agreement
-should be structural, not customary. Its production sibling taught us why the
-hard way: in May 2026 a replay bug silently dropped a user wallet from 3200 to
-1484 units and NO protocol layer noticed, because its headers commit only
-(parent, tx_merkle, miner). SIGIL's founding move: four sparse-Merkle state
-roots in every header, a compiler-emitted post-quantum provenance proof binding
-each release binary to its build, and tip verification cheap enough that a
-browser frame -- or honestly, a potato -- can hold the chain to account.
+under accelerated laboratory economics) built on a simple conviction: money's
+ledger should be checkable rather than taken on faith, and every binary that
+runs the network should prove its own origin. Bitcoin proved a network can agree
+on a supply no one can quietly inflate -- but deliberately left out
+expressiveness, and, like every widely deployed chain, runs on elliptic-curve
+signatures a large quantum computer would break. Ethereum added the
+expressiveness and loosened the guarantees: it commits no structural statement
+of what the world-state IS beyond a single root re-derived by re-execution, and
+is pre-quantum underneath too. SIGIL's brief is to keep what they got right
+(capped honest money, programmability) and add what post-quantum cryptography
+and a self-signing compiler now make possible: four sparse-Merkle state roots in
+every header (a node that drifts on any of them halts itself before serving a
+byte), a compiler-emitted post-quantum provenance proof binding each release
+binary to its build, a programmable economy (a contract VM, a constant-product
+AMM DEX, on-chain credit, a Bitcoin bridge) riding inside that same structural
+guarantee, and tip verification cheap enough that a browser frame -- or honestly,
+a potato -- can hold the chain to account.
 
 This email leads with what is MEASURED, keeps simulation results labeled as
 simulation, and closes with what is still open. Three numbers set the tone, each

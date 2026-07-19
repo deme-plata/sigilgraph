@@ -10,7 +10,8 @@ Topic title:
 
 =====
 
-[center][size=18pt][b]⬡  S I G I L  ⬡[/b][/size]
+[center][img]https://fluxapp.xyz/icons/brand/sigil-flat.png[/img]
+[size=18pt][b]S I G I L[/b][/size]
 [size=12pt][b]A chain where divergence cannot hide — and every binary proves who built it.[/b][/size][/center]
 
 [size=9pt][i]🧪 Live experimental testnet (sigil-g0). NOT production — accelerated laboratory economics, testnet coins are worthless by design, no sale, no premine to buyers, nothing to invest in. Testnet-first is deliberate: we harden in the open, in public, before a single coin of real value exists. This is an engineering testnet looking for people who enjoy breaking things.[/i][/size]

@@ -50,6 +50,8 @@
 \newcommand{\stO}{\textcolor{sigilamber}{$\circ$}~{\scriptsize\textcolor{sigilamber}{\textsc{open}}}}
 \newcommand{\stC}{{\scriptsize\textcolor{gray}{$\triangle$~\textit{conjectural}}}}
 \newcommand{\stL}{\textcolor{sigilcyan}{$\bullet$}~{\scriptsize\textcolor{sigilcyan}{\textsc{live}}}}
+% inline "this is a measured, reproducible figure" emphasis
+\newcommand{\measured}[1]{\textcolor{sigilcyan}{\textbf{#1}}}
 
 % checklist glyphs
 \newcommand{\ckopen}{\makebox[1.4em][l]{$\square$}}
@@ -180,33 +182,42 @@ checklist. Equations are set in black; color is reserved for results and status.
 
 \section{Introduction: why a chain needs an action}
 
-Quillon Graph, SIGIL's production sibling, was motivated by a concrete failure: in May
-2026 a replay bug silently dropped a user wallet from 3200 to 1484 QUG, and \emph{no
-protocol layer noticed}, because Quillon block headers commit only \texttt{(parent,
-tx\_merkle, miner)}. There is no structural statement of what the network agrees the
-state \emph{is}.
+A blockchain is usually presented as a pile of mechanisms: a hash here, a signature
+there, a consensus rule, a fee market, an emission curve. Each part is justified on its
+own, and the whole is trusted because the parts individually check out. SIGIL — the
+experimental sister chain to Quillon Graph — is built on the opposite conviction: that a
+chain should follow from a single organizing object, the way a physical theory follows
+from an \emph{action}, and that agreement about state should be \emph{structural} —
+written into the object every node checks, not reassembled from conventions each node is
+merely trusted to honor.
 
-SIGIL's founding move was to make agreement structural: four state roots in every
-header, a provenance proof binding each block to the binary that produced it, and tip
-verification cheap enough to run in a browser frame. The v0 whitepaper (2026-05-29)
-stated these as three engineering claims. What v0 lacked — and what Quillon's own
-quantum-physics whitepaper demonstrated the value of — is a \emph{unifying theoretical
-object} from which the design follows, rather than a list of mechanisms.
+The concrete expression of that conviction is to make \emph{what the network agrees the
+state is} a first-class, committed quantity. Every block header commits four state roots
+(wallet, dex, event log, contract storage); a provenance proof binds each block to the
+exact binary that produced it; and tip verification is cheap enough to run inside a
+browser frame. A node that drifts on any root diverges on the header and halts itself
+before it can serve a byte. Agreement stops being a matter of faith in a linear ledger
+and becomes a checkable property of the header itself.
 
-That organizing object has now been proposed. It was developed in the SIGIL
-master-equation programme (2026-05-30/31) using the \texttt{flux-science} modules
-already in the workspace, and this edition finally puts it where it was always
-intended:\ first (full companion note published standalone; provenance of every
-measured claim: Appendix~\ref{app:meq}).
+The v0 whitepaper (2026-05-29) stated these as three engineering claims. What v0 lacked —
+and what Quillon's own quantum-physics whitepaper demonstrated the value of — is a
+\emph{unifying theoretical object} from which the design follows, rather than a list of
+mechanisms. That organizing object has now been proposed: a conjectural effective action
+$\delta\SSIGIL=0$ in which every protocol component — settlement conservation, emission
+control, witness attestation, fork topology, the post-quantum floor — corresponds to one
+field. It was developed in the SIGIL master-equation programme (2026-05-30/31) using the
+\texttt{flux-science} modules already in the workspace, and this edition finally puts it
+where it was always intended:\ first (full companion note published standalone; provenance
+of every measured claim: Appendix~\ref{app:meq}).
 
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{01-structural-agreement-dark.png}
 \caption{\small\textbf{Structural agreement.} Left: the old way — a linear ledger
-trusted on faith, its latest section silently crumbled, recorded state falling through
-the floor unnoticed (the incident of \S1). Right: SIGIL's answer — transparent blocks
-carrying luminous state-root structures, each sealed to the machine that produced it,
-their causal strands braiding down into one verified foundation. Color code as
+trusted on faith, with no structural statement of what state the network agrees on, so
+drift in its latest section can pass unnoticed. Right: SIGIL's answer — transparent
+blocks carrying luminous state-root structures, each sealed to the machine that produced
+it, their causal strands braiding down into one verified foundation. Color code as
 everywhere in this paper: cyan = measured and operational, violet = staged, amber =
 open or unfinished protection.}
 \label{fig:plate1}

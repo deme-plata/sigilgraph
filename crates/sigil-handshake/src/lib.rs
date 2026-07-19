@@ -26,9 +26,10 @@
 //!   7. **Expire** — at `expires_at_ms`, both sides drop session keys. Future
 //!      messages on the same `session_id` are rejected.
 //!
-//! Phase 0 (this commit) ships the wire shape + transcript-hash + stubbed
-//! `sign_with` / `verify_handshake` (BLAKE3 placeholder, NOT cryptographic).
-//! Phase 1 (`--features real-pq`) wires flux-sqisign for identity signatures.
+//! H2 (hardening): `sign_with_ed25519` / `verify_handshake` are REAL ed25519
+//! over the canonical transcript, fail-closed (the Blake3 stub is rejected,
+//! unwired PQ algs are rejected — never pretend-verified).
+//! Phase 1 (`--features real-pq`) upgrades identity sigs to flux-sqisign.
 //! Phase 2 adds X25519+Kyber hybrid KEM via curve25519-dalek + a kyber crate.
 
 pub mod handshake;

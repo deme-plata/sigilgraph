@@ -13,6 +13,7 @@ mod cli;
 mod snapshot;
 mod rate_governor;
 mod ingest;
+mod sync_auth;
 
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -55,6 +56,12 @@ struct BackfillReq {
     /// this field (serde_json skips unknown keys) and reply 'H'; clients decode both.
     #[serde(default)]
     codec: u8,
+    /// H2 verify-before-sync: the requester's signed session handshake
+    /// (ed25519 over the transcript, `session_pubkey` = requester's libp2p
+    /// peer-id string for channel binding). Old servers ignore the unknown
+    /// field; old clients omit it → `None`. See `sync_auth`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handshake: Option<sigil_handshake::EphemeralSessionHandshakeV0>,
 }
 
 /// Point-to-point backfill response: the requested block range serialized as
@@ -286,6 +293,18 @@ fn run_start() -> Result<()> {
     for p in &cfg.bootstrap_peers {
         eprintln!("                    - {}", p);
     }
+
+    // ── H2 verify-before-sync: node identity + signed handshake + serve gate ──
+    // One 12h ValidatorPeer handshake minted at startup, attached to every
+    // outgoing BackfillReq; the serve path admits peers via `sync_auth_gate`
+    // (log-only unless SIGIL_HANDSHAKE_REQUIRE=1). Wire-compatible both ways.
+    let hs_sk = sync_auth::load_or_create_identity(&cfg.db_path);
+    let sync_hs = std::sync::Arc::new(sync_auth::mint(&hs_sk, NETWORK_ID_STR, &local_peer_id, now_ms()));
+    let mut sync_auth_gate = sync_auth::SyncAuth::from_env(NETWORK_ID_STR);
+    eprintln!(
+        "   sync-auth:       H2 handshake minted (ValidatorPeer, 12h) · enforce={}",
+        sync_auth_gate.enforcing()
+    );
 
     // Tor-only without arti = hard error. The operator asked for Tor; they get Tor or a clear failure.
     #[cfg(not(feature = "arti"))]
@@ -739,7 +758,7 @@ fn run_start() -> Result<()> {
                     if let Some(peer) = mgr.connected_peers().into_iter().next() {
                         let from = req_frontier;
                         let to = (from + FETCH_CHUNK).min(net_tip);
-                        let req = BackfillReq { from, to, headers_only: false, codec: 0 };
+                        let req = BackfillReq { from, to, headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()) };
                         let mgr2 = std::sync::Arc::clone(&mgr);
                         let bf_tx2 = bf_tx.clone();
                         tokio::spawn(async move {
@@ -936,6 +955,15 @@ fn run_start() -> Result<()> {
                                 Ok(r) => r,
                                 Err(_) => continue,
                             };
+                            // H2: authenticate the requester BEFORE serving chain data.
+                            // Log-only by default (served + counted); SIGIL_HANDSHAKE_REQUIRE=1
+                            // refuses. A verified session is cached until handshake expiry.
+                            if let Err(refusal) = sync_auth_gate.admit(&peer.to_string(), req.handshake.as_ref(), now_ms()) {
+                                eprintln!("⛔ sync-auth: refused rr-backfill [{}..={}] from {} ({:?}) · authed={} anon={} refused={}",
+                                    req.from, req.to, peer, refusal,
+                                    sync_auth_gate.served_authed, sync_auth_gate.served_anon, sync_auth_gate.refused);
+                                continue;
+                            }
                             let top = chain.height().saturating_sub(1);
                             let lo = req.from;
                             // point-to-point ⇒ a bigger chunk is fine.
@@ -1138,6 +1166,7 @@ fn run_start() -> Result<()> {
                                                         to: bheight.saturating_add(1),
                                                         headers_only: false,
                                                         codec: 0,
+                                                        handshake: Some((*sync_hs).clone()),
                                                     };
                                                     eprintln!("⇪ rr-backfill(braid): missing parents at H={} — requesting [{}..={}] from {}",
                                                         bheight, req.from, req.to, peer);
@@ -1220,7 +1249,7 @@ fn run_start() -> Result<()> {
                                     if last_req.elapsed() >= std::time::Duration::from_millis(15) {
                                         last_req = std::time::Instant::now();
                                         if let Some(peer) = mgr.connected_peers().into_iter().next() {
-                                            let req = BackfillReq { from: expected, to: expected.saturating_add(8192), headers_only: false, codec: 0 };
+                                            let req = BackfillReq { from: expected, to: expected.saturating_add(8192), headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()) };
                                             eprintln!("⇪ rr-backfill: gap (have {}, saw {}) — requesting [{}..={}] from {}",
                                                 expected, h, req.from, req.to, peer);
                                             let mgr2 = std::sync::Arc::clone(&mgr);
@@ -1375,6 +1404,7 @@ fn run_start() -> Result<()> {
                                             to: expected.saturating_add(8192),
                                             headers_only: false,
                                             codec: 0, // node-to-node needs full blocks; raw JSON path
+                                            handshake: Some((*sync_hs).clone()),
                                         };
                                         eprintln!("⇪ rr-backfill: behind via peer-heights (have {}, net {}) — requesting [{}..={}]",
                                             expected, peer_h, req.from, req.to);

@@ -34,6 +34,7 @@ rmp-serde  = "1"   # MessagePack — compact AND self-describing, so it round-tr
 lz4        = "1"
 
 sigil-header  = { path = "../sigil-header" }
+sigil-handshake = { path = "../sigil-handshake" } # H2 verify-before-sync
 sigil-state   = { path = "../sigil-state" }
 sigil-events  = { path = "../sigil-events" }
 sigil-net       = { path = "../sigil-net" }

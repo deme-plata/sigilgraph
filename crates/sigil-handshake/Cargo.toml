@@ -31,6 +31,8 @@ serde_json = { workspace = true }
 blake3     = { workspace = true }
 hex        = { workspace = true }
 thiserror  = { workspace = true }
+# H2: real identity signatures (same pin as sigil-oauth; tree resolves 2.2.x).
+ed25519-dalek = { version = "2.2" }
 
 # Use sigil-state's WalletId so the identity attribution chain stays clean:
 # wallet (long-term) → agent_id (persona) → session_id (live terminal).

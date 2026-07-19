@@ -11,6 +11,8 @@ mod chain;
 mod chain_log;
 mod cli;
 mod snapshot;
+mod rate_governor;
+mod ingest;
 
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -558,6 +560,27 @@ fn run_start() -> Result<()> {
         let txgen: usize = std::env::var("SIGIL_TXGEN")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(0);
         let mempool: Arc<Mutex<Mempool>> = Arc::new(Mutex::new(Mempool::new()));
+        // R1: tx/batch INGEST BRIDGE — the first real user-tx path into the producer
+        // mempool (wallets / rpcd-forwarder / loadgen). Env-gated by SIGIL_API_PORT;
+        // shares the mempool Arc like the TXGEN feeder. Off unless set.
+        if let Some(api_port) = std::env::var("SIGIL_API_PORT").ok()
+            .and_then(|s| s.parse::<u16>().ok()).filter(|p| *p > 0)
+        {
+            crate::ingest::spawn(Arc::clone(&mempool), api_port);
+            eprintln!("\u{1f310} tx ingest API on :{api_port} — POST /tx, POST /batch, GET /mempool");
+        }
+        // ── adaptive block-rate governor (demand-responsive; SIGIL_RATE_ADAPTIVE=1) ──
+        // Idle -> SIGIL_RATE_MIN (heartbeat, no wasted empty blocks); mempool backlog
+        // raises the rate to bound tx-inclusion latency, clamped to SIGIL_RATE_MAX.
+        let mut rate_gov: Option<rate_governor::RateGovernor> = if produce
+            && std::env::var("SIGIL_RATE_ADAPTIVE").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
+        {
+            let cap = if txgen > 0 { txgen as f64 } else { 256.0 };
+            let g = rate_governor::RateGovernor::from_env(cap);
+            eprintln!("\u{1f39a} ADAPTIVE RATE governor ON — floor {:.0}/s · ceiling {:.0}/s · target latency {:.1}s · cap {:.0} tx/blk",
+                g.rate_min, g.rate_max, g.target_latency_s, g.tx_capacity);
+            Some(g)
+        } else { None };
         if txgen > 0 {
             eprintln!("💳 TXGEN — packing up to {txgen} verify-once ed25519 txs/block");
             let mp = Arc::clone(&mempool);
@@ -644,8 +667,12 @@ fn run_start() -> Result<()> {
         // height at the last reseed — reseeds are progress-gated on the height.
         let mut dag_last_reseed_rejects: u64 = 0;
         let mut dag_last_reseed_height: u64 = 0;
+        // Adaptive governor (if on) starts at its floor; else the fixed produce_us.
+        let initial_produce_us = rate_gov.as_ref()
+            .map(|g| (1_000_000.0 / g.rate_min) as u64)
+            .unwrap_or(produce_us);
         let mut produce_tick =
-            tokio::time::interval(std::time::Duration::from_micros(produce_us.max(50)));
+            tokio::time::interval(std::time::Duration::from_micros(initial_produce_us.max(50)));
         produce_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut produced: u64 = 0;
         let mut received: u64 = 0;
@@ -793,6 +820,15 @@ fn run_start() -> Result<()> {
                                         dag_store_body(&mut dag_bodies, dag_max_bodies, vh, body);
                                     }
                                     produced += 1;
+                                    // adaptive rate: retune the tick from mempool backlog every 16 blocks
+                                    if let Some(g) = rate_gov.as_mut() {
+                                        if produced % 16 == 0 {
+                                            let backlog = mempool.lock().unwrap().len();
+                                            let iv = g.update(backlog);
+                                            produce_tick = tokio::time::interval_at(tokio::time::Instant::now() + iv, iv);
+                                            produce_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                                        }
+                                    }
                                     produced_tx += block_txs.len() as u64;
                                     // per-block feed line for dag.html (stdout; the
                                     // dag-feed sidecar tails these into dag-blocks.json).

@@ -12,6 +12,19 @@
 //!   CHRONOS_VALUE_BYTES  (default 8192)
 //!   CHRONOS_SAMPLE_EVERY (default 100_000 blocks)
 //!
+//! flux-db tuning knobs (all optional; unset = engine defaults, i.e. the historical baseline):
+//!   CHRONOS_WAL_MAX_BYTES     max WAL size before flush cycle (Database::set_max_wal_bytes)
+//!   CHRONOS_BLOCK_CACHE_BYTES read block-cache capacity (Database::with_block_cache_capacity)
+//!   CHRONOS_DEFER_COMPACTION  1 = defer compaction during the write flood (set_defer_compaction)
+//!   CHRONOS_SYNC_EVERY        fsync the WAL every N blocks (0/unset = engine default cadence)
+//!   CHRONOS_SHARDS            ShardedDb shard count (default 1 = single store; measured
+//!                             idle-array: 1=171 MB/s, 4=441, 8=496 vs 646 raw — flux-db
+//!                             SHARDED-WRITER follow-up, audits 100.00% at every width)
+//!   CHRONOS_BATCH             put_many batch size (default 256; 1 = legacy per-entry put()
+//!                             path, kept for A/B rate benching). Measured on 8 KB blocks:
+//!                             put()=~168 MB/s ceiling vs put_many coalesced-WAL batching
+//!                             (one write+flush syscall per batch, lock taken once).
+//!
 //! Metrics CSV: <CHRONOS_DIR>/../metrics.csv
 //!   height,elapsed_s,blk_per_s,mb_per_s,dir_bytes,wal_bytes,sst_count,read_p50_us,read_p99_us
 
@@ -52,9 +65,52 @@ fn main() {
         let _ = writeln!(csv, "height,elapsed_s,blk_per_s,mb_per_s,dir_bytes,wal_bytes,sst_count,read_p50_us,read_p99_us");
     }
 
-    let db = flux_db::Database::open(&dir).expect("open flux-db");
+    let knob = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok());
+    let (wal_max, block_cache, defer_comp, sync_every) = (
+        knob("CHRONOS_WAL_MAX_BYTES"),
+        knob("CHRONOS_BLOCK_CACHE_BYTES"),
+        knob("CHRONOS_DEFER_COMPACTION").map(|v| v == 1).unwrap_or(false),
+        knob("CHRONOS_SYNC_EVERY").unwrap_or(0),
+    );
+    let batch_size = knob("CHRONOS_BATCH").unwrap_or(256).max(1) as usize;
+    let shards = knob("CHRONOS_SHARDS").unwrap_or(1).max(1) as usize;
+    // Store facade: 1 shard = the single Database (byte-identical legacy path);
+    // >1 = flux_db::shard::ShardedDb (N parallel WAL/memtable pipelines).
+    enum Store { One(flux_db::Database), Many(flux_db::shard::ShardedDb) }
+    impl Store {
+        fn put(&self, k: &[u8], v: &[u8]) -> Result<(), String> {
+            match self { Store::One(d) => d.put(k, v), Store::Many(d) => d.put(k, v) }
+        }
+        fn put_many(&self, e: &[(Vec<u8>, Vec<u8>)]) -> Result<(), String> {
+            match self { Store::One(d) => d.put_many(e), Store::Many(d) => d.put_many(e) }
+        }
+        fn get(&self, k: &[u8]) -> Result<Option<Vec<u8>>, String> {
+            match self { Store::One(d) => d.get(k), Store::Many(d) => d.get(k) }
+        }
+        fn sync_wal(&self) -> Result<(), String> {
+            match self { Store::One(d) => d.sync_wal(), Store::Many(d) => d.sync_wal() }
+        }
+    }
+    let db = if shards > 1 {
+        if block_cache.is_some() {
+            eprintln!("chronos_scale: CHRONOS_BLOCK_CACHE_BYTES is per-Database; not applied in sharded mode");
+        }
+        let d = flux_db::shard::ShardedDb::open(&dir, shards).expect("open sharded flux-db");
+        if let Some(w) = wal_max { d.set_max_wal_bytes(w); }
+        if defer_comp { d.set_defer_compaction(true); }
+        Store::Many(d)
+    } else {
+        let mut d = flux_db::Database::open(&dir).expect("open flux-db");
+        if let Some(bc) = block_cache { d = d.with_block_cache_capacity(bc as usize); }
+        if let Some(w) = wal_max { d.set_max_wal_bytes(w); }
+        if defer_comp { d.set_defer_compaction(true); }
+        Store::One(d)
+    };
     eprintln!("chronos_scale: dir={:?} target={} GiB value={} B sample_every={}",
         dir, target / (1024*1024*1024), value_bytes, sample_every);
+    eprintln!("chronos_scale: knobs wal_max={:?} block_cache={:?} defer_compaction={} sync_every={} batch={} shards={}",
+        wal_max, block_cache, defer_comp, sync_every, batch_size, shards);
+    let mut pending: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(batch_size);
 
     // deterministic chronos payload: blake3 keystream over the height — incompressible,
     // reproducible, and the key embeds a header-style (height, hash) identity.
@@ -87,11 +143,27 @@ fn main() {
             k.extend_from_slice(&seed.as_bytes()[..8]);
             k
         };
-        db.put(&key, &value).expect("put");
+        if batch_size <= 1 {
+            db.put(&key, &value).expect("put");
+        } else {
+            pending.push((key, value));
+            if pending.len() >= batch_size {
+                db.put_many(&pending).expect("put_many");
+                pending.clear();
+            }
+        }
         height += 1;
         window_blocks += 1;
+        if sync_every > 0 && height % sync_every == 0 {
+            if !pending.is_empty() { db.put_many(&pending).expect("put_many"); pending.clear(); }
+            let _ = db.sync_wal();
+        }
 
         if height % sample_every == 0 {
+            // Drain the batch BEFORE probing/marking: the read probes must see
+            // settled data, and the marker's durability barrier (sync_wal below)
+            // must cover every height it claims.
+            if !pending.is_empty() { db.put_many(&pending).expect("put_many"); pending.clear(); }
             let (total, wal, ssts) = dir_stats(&dir);
             // read-back probe: 64 random gets across the whole range
             let mut lat: Vec<u128> = Vec::with_capacity(64);
@@ -116,7 +188,26 @@ fn main() {
                 height, t0.elapsed().as_secs_f64(), bps, mbs, total, wal, ssts, p50, p99);
             let _ = writeln!(csv, "{line}");
             let _ = csv.flush();
-            let _ = std::fs::write(dir.parent().unwrap().join("height.marker"), height.to_string());
+            // MARKER-AFTER-FSYNC (task #10): the marker is the audit's upper
+            // bound — everything at or below it must be DURABLE. Buffered WAL
+            // writes die with the process (kill -9 chaos measured ~5.5% loss
+            // below the marker), so fsync the WAL BEFORE advancing the marker;
+            // and write the marker atomically (tmp + fsync + rename) so a
+            // crash mid-write can never leave a torn marker that would reset
+            // a multi-TB run to height 0.
+            match db.sync_wal() {
+                Err(e) => eprintln!("[scale] sync_wal before marker FAILED ({e}) — marker not advanced"),
+                Ok(()) => {
+                    let marker = dir.parent().unwrap().join("height.marker");
+                    let tmp_m = dir.parent().unwrap().join("height.marker.tmp");
+                    let res = std::fs::write(&tmp_m, height.to_string())
+                        .and_then(|_| std::fs::File::open(&tmp_m).and_then(|f| f.sync_all()))
+                        .and_then(|_| std::fs::rename(&tmp_m, &marker));
+                    if let Err(e) = res {
+                        eprintln!("[scale] marker write failed: {e}");
+                    }
+                }
+            }
             eprintln!("[scale] {line}");
             window_t = Instant::now();
             window_blocks = 0;

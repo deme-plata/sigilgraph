@@ -12,6 +12,10 @@ description = "SIGIL × flux-chronos — runs the REAL SIGIL chain logic (sigil-
 # This is the proof flux-chronos catches real SIGIL consensus bugs.
 
 [[bin]]
+name = "chronos_verify"
+path = "src/bin/chronos_verify.rs"
+
+[[bin]]
 name = "sigil-chronos-net"
 path = "src/bin/sigil-chronos-net.rs"
 
@@ -99,3 +103,7 @@ serde_json = { workspace = true }
 [[bin]]
 name = "chronos_virtual"
 path = "src/bin/chronos_virtual.rs"
+
+[[bin]]
+name = "sigil-batchsweep"
+path = "src/bin/sigil-batchsweep.rs"

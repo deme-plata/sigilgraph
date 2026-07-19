@@ -25,7 +25,7 @@ Alpha-Docker-tested and operator-approved (CLAUDE.md), and every validation chan
 | snapshot-pull M2 | **PARTIAL** | trailer serves M1 `archive_root`; `anchor_sig`/`fold_blob` still empty |
 | WS2 wallet_smt_root header commit | **PARTIAL** (read-path on branch) | proof-carrying `/balance` works; committing the SMT root in the header is the height-gated last inch |
 | H2 verify-before-sync handshake | **PARTIAL** (real crypto + ingress gate on branch, log-only) | ed25519 verify fail-closed + sigil-node rr-backfill gate + channel binding; sigil-top attach + enforcement flip remain |
-| H3 follower trusts peer difficulty | **OPEN** | follower adopts peer `bits`/`vdf_t` (reward is safe; easy share accepted) |
+| H3 follower trusts peer difficulty | **PARTIAL** (envelope check on branch, log-only) | absolute floor + ±2/block clamp reject the bits=4 easy share; exact chain-derived target is step ③ (needs verified in-block ts) |
 | H4 keyless wire tip-proofs | **OPEN** | always `Blake3Fingerprint`; no receiver-side verify; `new_sqisign` never on wire |
 
 ---
@@ -121,15 +121,19 @@ window). Rollout-safe: log-only default with authed/anon/refused telemetry;
 enforcement flip once fleet telemetry shows the followers authenticate. Test gate met in unit form
 (wrong network / bad identity / cross-peer replay refused when enforcing); repeat live after the flip.
 
-### H3 — follower trusts peer-declared difficulty  ⛔ OPEN
-`sigil-rpcd.rs:249` (`apply_block`) reads `bits`/`vdf_t` straight from the peer's block JSON, builds
-the `Challenge` with `target_from_bits(bits)` + that `vdf_t`, verifies the share against the
-**peer-declared** target, then adopts it (`:281` `n.bits = bits;`) — explicit in-code "trust boundary"
-(`:279`). Mitigation already present: the *reward* is independently recomputed (`:260`), so no
-over-credit — but a malicious producer serving `bits=4` still gets an easy share accepted. The
-self-mining `/mining/submit` path (`:1209`) is safe (server-derived target). **Fix = derive the
-required target from chain state on the follower path too, and reject shares below it.** Test gate: an
-under-difficulty peer share is not accepted on the follower path.
+### H3 — follower trusts peer-declared difficulty  🟡 PARTIAL (envelope check on branch, log-only)
+**2026-07-19:** `apply_block` now runs `check_difficulty_floor(n.bits, bits, min_blake4_bits())` before
+verifying the share. It enforces the chain's difficulty ENVELOPE: (a) an absolute floor
+`bits ≥ SIGIL_MIN_BLAKE4_BITS` (default 10), and (b) a per-block clamp — `bits` may not drop more than
+`RETARGET_MAX_STEP` (2) below the follower's last-accepted `n.bits`, because the producer only
+retargets once per `RETARGET_WINDOW` (16) blocks and by ≤2, so an honest single block never drops
+more than 2. Both bounds provably hold for honest blocks → enforcement cannot fork off the honest
+chain. This kills the named attack (a `bits=4` easy share is rejected). Rollout-safe: **log-only**
+(`H3_WOULD_REJECT` telemetry on `GET /api/v1/telemetry`) unless `SIGIL_DIFFICULTY_ENFORCE=1`. Pure
+checker `check_difficulty_floor`, 5/5 unit tests. **Remaining (step ③):** the EXACT required target
+is still not independently derived — that needs verified in-block timestamps + a replayable retarget
+rule (a consensus change). The envelope bounds the attack; it does not reconstruct the precise
+difficulty. The self-mining `/mining/submit` path was always safe (server-derived target).
 
 ### H4 — keyless wire tip-proofs  ⛔ OPEN
 `sigil-node/src/main.rs:1686,1750` always builds `TipProof::new_blake3`; the only `.verify()`

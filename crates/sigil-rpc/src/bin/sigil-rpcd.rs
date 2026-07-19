@@ -264,12 +264,15 @@ mod h7_telemetry {
     pub fn json() -> String {
         let n = APPLIED.load(Relaxed);
         format!(
-            "{{\"ok\":true,\"h7\":{{\"applied\":{n},\"would_reject\":{},\"last_drift_us\":{},\"min_drift_us\":{},\"max_drift_us\":{},\"bound_us\":{},\"activation\":\"dormant (u64::MAX)\"}}}}",
+            "{{\"ok\":true,\"h7\":{{\"applied\":{n},\"would_reject\":{},\"last_drift_us\":{},\"min_drift_us\":{},\"max_drift_us\":{},\"bound_us\":{},\"activation\":\"dormant (u64::MAX)\"}},\"h3\":{{\"would_reject\":{},\"min_bits\":{},\"enforcing\":{}}}}}",
             WOULD_REJECT.load(Relaxed),
             LAST_US.load(Relaxed),
             if n == 0 { 0 } else { MIN_US.load(Relaxed) },
             if n == 0 { 0 } else { MAX_US.load(Relaxed) },
             sigil_emission::MAX_FUTURE_DRIFT_US,
+            super::H3_WOULD_REJECT.load(Relaxed),
+            super::min_blake4_bits(),
+            super::difficulty_enforce(),
         )
     }
 }
@@ -294,6 +297,17 @@ fn apply_block(n: &mut Node, rec: &serde_json::Value, g: &ModSquaring) -> Result
         return Err(format!("block {bh}: prev_tip != my tip (fork/divergence)"));
     }
     let bits = rec["bits"].as_u64().unwrap_or(0) as u32;
+    // H3: reject a peer block whose declared difficulty falls below the chain
+    // envelope (absolute floor + per-block clamp vs our last-accepted `n.bits`).
+    // Log-only unless SIGIL_DIFFICULTY_ENFORCE=1 — a WOULD-REJECT is telemetry
+    // until an operator flips enforcement after observing the fleet.
+    if let Err(why) = check_difficulty_floor(n.bits, bits, min_blake4_bits()) {
+        let w = H3_WOULD_REJECT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if difficulty_enforce() {
+            return Err(format!("block {bh}: difficulty below envelope — {why}"));
+        }
+        eprintln!("H3-TELEMETRY WOULD-REJECT block {bh}: {why} (log-only; {w} total)");
+    }
     let vdf_t = rec["vdf_t"].as_u64().unwrap_or(0);
     let reward: u128 = rec["reward"].as_str().unwrap_or("0").parse().map_err(|_| "bad reward")?;
     let rec_ts: u128 = rec["ts"].as_str().unwrap_or("0").parse().unwrap_or(0);
@@ -451,6 +465,48 @@ fn mining_vdf_t() -> u64 {
 }
 /// BLAKE4 Lane-A target for a difficulty `bits`: target = u64::MAX >> bits.
 fn target_from_bits(bits: u32) -> u64 { u64::MAX >> bits.min(63) }
+
+// ── H3: follower difficulty ENVELOPE (verify-don't-trust the peer's `bits`) ──
+// The follower builds the PoW target from the block's DECLARED `bits`
+// (`target_from_bits(rec.bits)`). Unchecked, a malicious producer serving
+// `bits=4` gets a trivially-easy share accepted — the reward is safe (recomputed
+// independently, LANE-R) but an easy block still advances the chain, and a
+// follower that adopts `bits=4` then mines/serves at that difficulty. Fully
+// deriving the exact target needs verified in-block timestamps + a replayable
+// retarget rule (backlog step ③, a consensus change). Until then this enforces
+// the chain's difficulty ENVELOPE — enough to kill the named attack:
+//   (a) absolute floor: bits ≥ SIGIL_MIN_BLAKE4_BITS (default 10);
+//   (b) per-block clamp: bits can't drop more than RETARGET_MAX_STEP below the
+//       follower's LAST-ACCEPTED bits in one block — the producer only retargets
+//       once per RETARGET_WINDOW and by ≤2, so an honest single block never drops
+//       more than 2 (0 within a window, ≤2 at a boundary). Both bounds provably
+//       hold for honest blocks, so enforcement cannot fork off the honest chain.
+// Rollout-safe: LOG-ONLY (WOULD-REJECT telemetry) unless SIGIL_DIFFICULTY_ENFORCE=1.
+const RETARGET_MAX_STEP: i64 = 2;
+fn min_blake4_bits() -> u32 {
+    std::env::var("SIGIL_MIN_BLAKE4_BITS").ok().and_then(|s| s.parse().ok()).unwrap_or(10)
+}
+fn difficulty_enforce() -> bool {
+    std::env::var("SIGIL_DIFFICULTY_ENFORCE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+/// Pure envelope check: `Err(reason)` if `new_bits` is EASIER than the chain
+/// envelope allows given the follower's last-accepted `prev_bits`. Harder (higher
+/// bits) is always fine — more work, no over-credit, self-limiting.
+fn check_difficulty_floor(prev_bits: u32, new_bits: u32, min_bits: u32) -> Result<(), String> {
+    if new_bits < min_bits {
+        return Err(format!("bits {new_bits} < absolute floor {min_bits}"));
+    }
+    let easiest = (prev_bits as i64 - RETARGET_MAX_STEP).max(0) as u32;
+    if new_bits < easiest {
+        return Err(format!(
+            "bits {new_bits} drops >{RETARGET_MAX_STEP} below last-accepted {prev_bits} (envelope floor {easiest})"
+        ));
+    }
+    Ok(())
+}
+static H3_WOULD_REJECT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // ── Difficulty retarget (fix #2): adjust BLAKE4 `bits` from REAL block times ──
 const RETARGET_WINDOW: u64 = 16; // retarget every N accepted blocks
@@ -2074,5 +2130,50 @@ fn main() {
                 handle(stream, &n);
             });
         if spawned.is_err() { INFLIGHT.fetch_sub(1, Ordering::Relaxed); }
+    }
+}
+
+#[cfg(test)]
+mod h3_difficulty_tests {
+    use super::{check_difficulty_floor, RETARGET_MAX_STEP};
+
+    #[test]
+    fn rejects_below_absolute_floor() {
+        // The named attack: a producer serving bits=4 while the floor is 10.
+        assert!(check_difficulty_floor(16, 4, 10).is_err());
+        assert!(check_difficulty_floor(16, 9, 10).is_err());
+        // At/above the floor (and within the per-block clamp) passes.
+        assert!(check_difficulty_floor(10, 10, 10).is_ok());
+    }
+
+    #[test]
+    fn rejects_sudden_easy_drop_within_clamp() {
+        // An honest single block never drops more than RETARGET_MAX_STEP (2):
+        // 0 within a retarget window, <=2 at a boundary. Anything easier is rejected.
+        let min = 4; // isolate the per-block clamp from the absolute floor
+        assert!(check_difficulty_floor(20, 20 - RETARGET_MAX_STEP as u32, min).is_ok()); // exactly -2 ok
+        assert!(check_difficulty_floor(20, 20 - RETARGET_MAX_STEP as u32 - 1, min).is_err()); // -3 rejected
+    }
+
+    #[test]
+    fn harder_is_always_allowed() {
+        // Higher bits = more work, no over-credit — never rejected on the easy-side check.
+        assert!(check_difficulty_floor(16, 18, 10).is_ok());
+        assert!(check_difficulty_floor(16, 48, 10).is_ok());
+    }
+
+    #[test]
+    fn honest_steady_state_passes() {
+        // Constant difficulty within a window: prev == new, always ok above floor.
+        for b in [10u32, 16, 24, 32] {
+            assert!(check_difficulty_floor(b, b, 10).is_ok());
+        }
+    }
+
+    #[test]
+    fn low_prev_bits_does_not_underflow() {
+        // prev_bits below RETARGET_MAX_STEP must not panic (saturating floor at 0).
+        assert!(check_difficulty_floor(1, 1, 0).is_ok());
+        assert!(check_difficulty_floor(0, 0, 0).is_ok());
     }
 }

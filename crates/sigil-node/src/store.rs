@@ -145,7 +145,19 @@ impl BlockStore {
     /// Full); override with [`BlockStore::with_retention`].
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, String> {
         let path = path.into();
+        // Production WAL sizing (chronos-v035 storage-curve matrix, 2026-07-02):
+        // max_wal_bytes = 1 GiB measured +22% sustained write throughput and ~20x
+        // lower read p99 vs the 64 MiB engine default (fewer flush/compaction
+        // stalls; SST count stayed 5-8 vs 20 at 25 GiB). The cost is crash-recovery
+        // replay of up to 1 GiB WAL at open (clean shutdowns flush + truncate, so
+        // this only bites after a crash). SIGIL_WAL_MAX_BYTES overrides; 0 = engine
+        // default.
         let root = Database::open(&path)?;
+        let wal_max = std::env::var("SIGIL_WAL_MAX_BYTES").ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(1024 * 1024 * 1024);
+        root.set_max_wal_bytes(wal_max);
         let blocks = match root.cf("blocks") {
             Some(cf) => cf,
             None => root.create_cf("blocks")?,
@@ -178,6 +190,20 @@ impl BlockStore {
     pub fn put_block<T: Serialize>(&self, height: u64, block: &T) -> Result<(), String> {
         let bytes = rmp_serde::to_vec(block).map_err(|e| e.to_string())?;
         self.blocks.put(&Self::key(height), &bytes)
+    }
+
+    /// Persist MANY blocks in ONE batch: one lock + one coalesced WAL syscall for
+    /// the whole set (flux-db put_many), vs a put_block loop that pays 3 syscalls per
+    /// block. Use on the catch-up / backfill path where blocks arrive in runs.
+    /// MessagePack per block (same codec as put_block); order-independent.
+    pub fn put_blocks<T: Serialize>(&self, blocks: &[(u64, T)]) -> Result<(), String> {
+        if blocks.is_empty() { return Ok(()); }
+        let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(blocks.len());
+        for (height, block) in blocks {
+            let bytes = rmp_serde::to_vec(block).map_err(|e| e.to_string())?;
+            entries.push((Self::key(*height).to_vec(), bytes));
+        }
+        self.blocks.put_many(&entries)
     }
 
     /// Persist the witness-pruned core of a block at `height`.

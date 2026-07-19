@@ -101,7 +101,7 @@ The honesty section is load-bearing — the whitepaper carries a boxed security 
 [*]Downloads (content-addressed): https://sigilgraph.fluxapp.xyz/downloads/sigil-top-latest.json
 [*]Whitepaper v1 (the master equation, measured laws, honest-status ladder): https://sigilgraph.fluxapp.xyz/downloads/sigil-whitepaper-v1.pdf
 [*]Delivery-law paper (derivation + 22 seeded runs + residuals): https://quillon.xyz/downloads/sigil-top-delivery-law.pdf
-[*]Source: https://github.com/deme-plata/sigilgraph  [V: confirm repo visibility before posting]
+[*]Source: https://github.com/deme-plata/sigilgraph
 [/list]
 
 [hr]

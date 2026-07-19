@@ -49,6 +49,11 @@ pub mod onboard;
 /// Per-request wallet-signature authorization for the mutating RPC routes.
 pub mod auth;
 
+/// University credential economy: tuition / award / settle / graduate, bridged
+/// from the `sigil-university` spine to the state chokepoint (conservation-only,
+/// funded by a treasury — never mints).
+pub mod university;
+
 /// Result of a light-verifier credit batch.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct LightCreditResult {

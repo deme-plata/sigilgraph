@@ -17,6 +17,7 @@ description = "SIGIL University — agentic-money credential economy ported from
 serde = { workspace = true }
 blake3 = { workspace = true }
 hex = { workspace = true }
+thiserror = { workspace = true }
 flux-sqisign = { path = "../../../flux/crates/flux-sqisign" }
 # The registrar: sigil-oauth issues DNS-anchored role credentials
 # (university:professor / :auditor) that close the self-declared-role Sybil hole.
@@ -24,3 +25,4 @@ sigil-oauth = { path = "../sigil-oauth" }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+bincode = "1"

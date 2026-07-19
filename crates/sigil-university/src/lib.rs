@@ -39,6 +39,11 @@ pub use economics::{
     LIGHTWEIGHT_NODE_PROFIT_PER_YEAR_MICRO_SIGIL, TUITION_MULTIPLIER_BPS,
 };
 
+/// Persistable academic bookkeeping (point transcripts, replay nonces, settled
+/// high-water-marks, graduations, tuition). The stateful layer the chain holds.
+pub mod registry;
+pub use registry::{RegistryError, UniversityRegistry};
+
 /// 32-byte wallet/agent id — same shape as sigil-state `WalletId`.
 pub type AgentId = [u8; 32];
 

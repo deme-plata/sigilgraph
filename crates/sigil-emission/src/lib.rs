@@ -139,6 +139,75 @@ pub fn cumulative_emission_time(elapsed_secs: u64) -> u128 {
     cumulative_emission_time_const(elapsed_secs)
 }
 
+// ── H7: block-timestamp future-bound guard (height-gated, DORMANT) ──────────────────
+// Time-based emission makes the block timestamp a MONEY input: the reward is the
+// integral of the emission rate over [prev_ts, block_ts]. The producer stamps its own
+// local clock, but a follower applying a peer's block recomputes the reward from the
+// peer's STORED ts verbatim — without a bound, a producer stamping future timestamps
+// pulls the emission curve forward (capped at 21M, but it steals the schedule). This
+// guard rejects any block stamped beyond MAX_FUTURE_DRIFT_US ahead of the verifier's
+// clock. Backwards timestamps need no guard here: block_reward_time() already yields
+// 0 reward for ts ≤ prev_ts, so the past cannot mint.
+
+/// Maximum tolerated forward stamp, in µs (2 minutes). Bitcoin tolerates 2 hours;
+/// SIGIL producers are NTP-synced servers stamping µs, so 2 minutes is generous
+/// headroom for real skew while capping what a future-stamper can pull forward to
+/// ~2 minutes of emission (~10 SIGIL at epoch 0).
+pub const MAX_FUTURE_DRIFT_US: u128 = 120 * US_PER_SEC;
+
+/// Activation height for H7 (future-timestamp bound on block apply).
+/// **Dormant by default** — `u64::MAX` means "never active", so merging this code
+/// changes nothing on the live chain until an operator schedules a real future
+/// height (see `docs/H7_TS_GUARD_GO_NO_GO.md` for the activation prerequisites).
+pub const H7_TS_GUARD_ACTIVATION_HEIGHT: u64 = u64::MAX;
+
+/// H7 rejection: a block stamped in the verifier's future beyond the drift bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FutureTimestamp {
+    pub height: u64,
+    pub block_ts_us: u128,
+    pub local_now_us: u128,
+    /// How far past the bound: `block_ts_us − (local_now_us + MAX_FUTURE_DRIFT_US)`.
+    pub excess_us: u128,
+}
+
+impl core::fmt::Display for FutureTimestamp {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "block {} stamped {} µs beyond the future bound (ts {} vs local {} + {} drift)",
+            self.height, self.excess_us, self.block_ts_us, self.local_now_us, MAX_FUTURE_DRIFT_US
+        )
+    }
+}
+
+impl std::error::Error for FutureTimestamp {}
+
+/// Pure, ungated predicate: is `block_ts_us` within the future bound of the
+/// verifier's clock? Exposed separately so telemetry can observe drift before H7
+/// is ever activated.
+pub fn ts_within_future_bound(block_ts_us: u128, local_now_us: u128) -> bool {
+    block_ts_us <= local_now_us + MAX_FUTURE_DRIFT_US
+}
+
+/// The height-gated H7 check for the follower APPLY path. Below the activation
+/// height it is a no-op (every historical block still applies, exact legacy
+/// behaviour); at/above it rejects blocks stamped beyond the future bound.
+pub fn check_block_ts(height: u64, block_ts_us: u128, local_now_us: u128) -> Result<(), FutureTimestamp> {
+    if height < H7_TS_GUARD_ACTIVATION_HEIGHT {
+        return Ok(());
+    }
+    if ts_within_future_bound(block_ts_us, local_now_us) {
+        return Ok(());
+    }
+    Err(FutureTimestamp {
+        height,
+        block_ts_us,
+        local_now_us,
+        excess_us: block_ts_us - (local_now_us + MAX_FUTURE_DRIFT_US),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +322,42 @@ mod tests {
         let integral = ((MAX_SUPPLY / 2) * elapsed_us) / EMISSION_DENOM;
         assert_eq!(total, integral, "with the carry, summed rewards == the time integral EXACTLY");
         assert!(total < MAX_SUPPLY);
+    }
+
+    // ── H7 timestamp-guard gate (mirrors the H1 test discipline) ─────────────────────
+    const NOW: u128 = 1_782_517_293_832_369; // a real µs wall-clock instant
+
+    #[test]
+    fn h7_dormant_below_activation_is_a_noop() {
+        // Realistic live height + an absurdly future stamp: with the default
+        // u64::MAX activation the guard MUST pass — merging changes nothing live.
+        let far_future = NOW + 365 * 86_400 * US_PER_SEC; // a year ahead
+        assert!(check_block_ts(46_899, far_future, NOW).is_ok());
+        assert!(check_block_ts(H7_TS_GUARD_ACTIVATION_HEIGHT - 1, far_future, NOW).is_ok());
+    }
+
+    #[test]
+    fn h7_active_rejects_future_stamp_beyond_bound() {
+        let h = H7_TS_GUARD_ACTIVATION_HEIGHT; // at/above activation = enforced
+        let ts = NOW + MAX_FUTURE_DRIFT_US + 1;
+        let err = check_block_ts(h, ts, NOW).unwrap_err();
+        assert_eq!(err.excess_us, 1, "excess must measure past-the-bound exactly");
+        assert_eq!(err.height, h);
+    }
+
+    #[test]
+    fn h7_active_accepts_past_and_within_bound() {
+        let h = H7_TS_GUARD_ACTIVATION_HEIGHT;
+        assert!(check_block_ts(h, NOW - US_PER_SEC, NOW).is_ok(), "past stamps always pass");
+        assert!(check_block_ts(h, NOW, NOW).is_ok(), "exactly-now passes");
+        assert!(check_block_ts(h, NOW + MAX_FUTURE_DRIFT_US, NOW).is_ok(), "exact bound passes");
+        assert!(check_block_ts(h, NOW + MAX_FUTURE_DRIFT_US + 1, NOW).is_err(), "bound + 1 µs rejects");
+    }
+
+    #[test]
+    fn h7_predicate_is_ungated() {
+        // The pure predicate ignores the activation gate — usable for telemetry now.
+        assert!(ts_within_future_bound(NOW + MAX_FUTURE_DRIFT_US, NOW));
+        assert!(!ts_within_future_bound(NOW + MAX_FUTURE_DRIFT_US + 1, NOW));
     }
 }

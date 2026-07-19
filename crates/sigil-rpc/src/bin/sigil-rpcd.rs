@@ -251,6 +251,11 @@ fn apply_block(n: &mut Node, rec: &serde_json::Value, g: &ModSquaring) -> Result
     let reward: u128 = rec["reward"].as_str().unwrap_or("0").parse().map_err(|_| "bad reward")?;
     let rec_ts: u128 = rec["ts"].as_str().unwrap_or("0").parse().unwrap_or(0);
     let sub: Submission = serde_json::from_value(rec["submission"].clone()).map_err(|e| format!("bad submission: {e}"))?;
+    // H7 (DORMANT, activation u64::MAX): bound the PEER-stamped ts against OUR clock
+    // before it can drive the emission integral below. A future-stamped block would
+    // pull the emission curve forward; the producer path needs no guard (it stamps
+    // its own now_us()). No live behavior change until an operator schedules H7.
+    sigil_emission::check_block_ts(bh, rec_ts, now_us()).map_err(|e| e.to_string())?;
     let miner = hex32(&sub.wallet).ok_or("bad wallet")?;
     let c = Challenge { height: bh, vdf_input: mining_seed(&n.tip_hash, bh), blake4_target: target_from_bits(bits), vdf_t };
     if !check_submission(g, &c, &sub) { return Err(format!("block {bh}: dual-lane verify FAILED")); }

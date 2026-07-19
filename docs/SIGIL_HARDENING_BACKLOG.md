@@ -17,6 +17,7 @@ Alpha-Docker-tested and operator-approved (CLAUDE.md), and every validation chan
 | Item | Verdict | One-line |
 |---|---|---|
 | H1 block-apply producer-sig | **PARTIAL** (fix on branch, dormant) | verification implemented height-gated + dormant (WS4); needs producer-side signing + registry + soak before activation |
+| H7 future-ts bound on apply | **PARTIAL** (fix on branch, dormant) | LANE-R made block ts a money input; follower APPLY now bounds peer ts vs local clock, height-gated + dormant; see `docs/H7_TS_GUARD_GO_NO_GO.md` |
 | C9 bridge mint | **FIXED** | deposit/withdrawal/LN all bound + spent-set + owner-sig; 25 tests green |
 | H6 event_log_root | **FIXED** | positional binary Merkle both sides; inclusion roundtrip test green (audit premise stale) |
 | C10 VDF modulus | **PARTIAL** | trustless `production()`/`rsa2048()` built + `assert_secure`, but consensus still calls `bench_2048()` |

@@ -14,7 +14,26 @@ Topic title:
 [size=18pt][b]S I G I L[/b][/size]
 [size=12pt][b]A chain that makes state divergence explicit — and every official binary carries verifiable build provenance.[/b][/size][/center]
 
-[size=9pt][i]🧪 Live experimental testnet (sigil-g0). NOT production — accelerated laboratory economics, testnet coins are worthless by design, no sale, no premine to buyers, nothing to invest in. Testnet-first is deliberate: we harden in the open, in public, before a single coin of real value exists. This is an engineering testnet looking for people who enjoy breaking things.[/i][/size]
+[size=9pt][i]🧪 Live experimental testnet (sigil-g0). NOT production — accelerated laboratory economics, testnet coins are worthless by design, no sale, no premine, no allocation, nothing to invest in. Testnet-first is deliberate: we harden in the open, in public, before a single coin of real value exists. This is an engineering testnet looking for people who enjoy breaking things.[/i][/size]
+
+[hr]
+
+[b][size=13pt]Testnet at a glance[/size][/b]
+
+[list]
+[*][b]Network:[/b] sigil-g0 — experimental, resettable testnet.
+[*][b]Code lineage:[/b] a new experimental chain built on the Flux compiler-as-platform; sister network to Quillon Graph (not a rename of it, not a fork of its chain).
+[*][b]Model:[/b] account-based state over a DAG.
+[*][b]Consensus:[/b] DagKnight braid ordering; each block carries dual-lane proof-of-work (BLAKE-family) × a Wesolowski verifiable-delay function.
+[*][b]Target block time:[/b] ~5 s. [b]Finality:[/b] no formal finality proof yet — braid ordering is simulation-gated, not a theorem.
+[*][b]Live decentralization (the honest version):[/b] right now this is a [b]single-producer[/b] testnet — 1 block producer (the operator's node), 1 independent operator, minimal peers. Production is [b]permissioned[/b] today and the operator [b]can reset or rewrite the chain[/b]. A permissionless multi-producer mesh is the next milestone, and peer-sync authentication (below) is part of getting there. Do not mistake this for a decentralized network yet.
+[*][b]Current release:[/b] sigil-top v7.0.1 (Linux x86_64 + Windows x64). [V: cut ONE consistent release — binary + Windows + manifest + require-both proof + public keys + verifier + matching source tag/commit — before posting; version numbers below must all read v7.0.1.]
+[*][b]Supply:[/b] testnet-only 21M schedule (already fully emitted under accelerated economics); all balances reset before any mainnet.
+[*][b]Allocation:[/b] none — no premine, no team/treasury/founder allocation. Coins come only from mining. The treasury (where unverified mining routes) and the 1.2% commons quorum are currently operator-controlled on this single-operator testnet.
+[*][b]Audits:[/b] none yet. The novel cryptography (the fold, the hybrid provenance composition) is experimental and under open review.
+[*][b]License:[/b] MIT OR Apache-2.0.
+[*][b]Mainnet:[/b] the testnet resets before any mainnet; mainnet parameters are TBD.
+[/list]
 
 [hr]
 
@@ -32,10 +51,10 @@ SIGIL's distinction is the combination neither puts in the protocol: [b]four dom
 Here is what that buys you, and it is all live on the testnet today:
 
 [list]
-[*]🔐 [b]The compiler signs what it builds.[/b] Every release binary carries a post-quantum provenance proof emitted at build time — require-both [b]SQIsign Level 5 AND Ed25519[/b] over a canonical record binding the artifact hash, source hash, compiler version and builder identity. ~356 bytes total, smaller than a single Dilithium-5 signature (4,595 B). A stripped single-leg bundle is rejected, never downgraded. You verify the download yourself (walkthrough below) — that's the whole point.
+[*]🔐 [b]Every official binary carries verifiable build provenance.[/b] Each release carries a post-quantum proof — require-both [b]SQIsign Level 5 AND Ed25519[/b] over a canonical record binding the artifact hash, source hash, compiler version and builder wallet. ~356 bytes total, smaller than one Dilithium-5 signature (4,595 B); a stripped single-leg bundle is rejected. [b]Honest scope:[/b] this proves a specific key attested that artifact X was built from source Y with compiler Z — it does [i]not[/i] by itself prove the binary was faithfully produced from that source. Reproducible builds (an independent rebuild yielding the identical hash) are the goal and are not yet independently confirmed. You verify the artifact hash + both signatures yourself (walkthrough below).
 [*]📦 [b]Four state roots in every header[/b] (wallet / dex / event-log / contract). A node that drifts on any root diverges on the header and [b]halts itself[/b] (exit 78) before it serves a single byte. State divergence has nowhere to hide.
-[*]⚙️ [b]A programmable economy, inside the guarantee.[/b] A contract [b]VM[/b], a constant-product [b]AMM DEX[/b] (x·y=k), on-chain [b]credit[/b], and a [b]Bitcoin bridge[/b] — each committing to its own state root, so the whole economy lives under the structural guarantee instead of bolted beside it.
-[*]🔎 [b]One constant-size proof for the whole chain.[/b] The fold (Ajtai/SIS lattice commitments, no trusted setup): [b]2,568 bytes regardless of chain length[/b] — full verification 280–342 ms at the 100k-block benchmark, and a [b]3-microsecond[/b] incremental tip check running live on the ~29.9M-block network. Honest nuance: constant-size proof, not constant-cost verification — the incremental lane is what makes the steady state cheap.
+[*]⚙️ [b]A programmable economy, inside the guarantee.[/b] A contract [b]VM[/b], a constant-product [b]AMM DEX[/b] (x·y=k), on-chain [b]credit[/b] (collateralized, experimental), and a [b]Bitcoin bridge[/b] ([b]SPV[/b] — it verifies a Bitcoin SPV proof + PoW finality, not a custodian or federation) — each committing to its own state root, so the whole economy lives under the structural guarantee instead of bolted beside it.
+[*]🔎 [b]One constant-size proof for the whole chain.[/b] The fold (Ajtai/SIS lattice commitments, no trusted setup) compresses the chain prefix into [b]2,568 bytes regardless of length[/b]. One check attests the folded chain of per-block commitments back to genesis (header continuity + the committed roots) — [i]not[/i] every transaction, every signature, or the DAG ordering. Full fold verification is 280–342 ms at the 100k-block benchmark. The [b]3-µs tip check is a different, cheaper operation[/b]: it recomputes the exact BLAKE3 tip fingerprint a native node commits and compares it — an incremental check against an already-verified fold state, not a re-verification of the fold itself.
 [*]💻 [b]One binary does everything, on a potato.[/b] sigil-top (Linux x86_64 + Windows x64) is a monitoring node, a light client, a dual-lane miner, and a wallet in a single static file. Default mode verifies the live tip fingerprint in ~3 µs with zero blocks downloaded. Opt-in full sync runs at a measured live 10,853 blocks/s.
 [*]📡 [b]A measured gossip law, not a guess.[/b] Delivery probability D(p,r) = 1 − p^r, validated against 22 seeded simulations (RMS residual 0.4 pp). The shipped redundancy r=3 clears a 99.9% delivery SLA at up to 10% packet loss — the network calculates its provisioning instead of hoping.
 [*]🕸️ [b]Adversarially gated ordering.[/b] The DagKnight braid passed a six-scenario gate before the live producer adopted it: divergence = 0 under 30% drop/reorder/equivocation, a withheld-block attacker, 16/16 ordering permutations agree, tamper suite 5/5 rejected. Simulation evidence, not a theorem — and we label which is which.
@@ -47,6 +66,24 @@ Here is what that buys you, and it is all live on the testnet today:
 [b][size=13pt]The plan: testnet now, mainnet when it earns it[/size][/b]
 
 We are on testnet [b]on purpose[/b]. The claims above — a post-quantum provenance chain, a constant-size whole-chain proof, structural agreement — are exactly the kind that should be attacked by strangers before anything of value depends on them. So the road to a production mainnet is public and gated on closing a short, named list of hardening items (block-apply producer-signature enforcement, the trustless VDF modulus, peer-sync ingress authentication), each tracked with file:line status in an open backlog. When they close and the chain has soaked, mainnet follows. Until then: break it, and tell us how.
+
+[hr]
+
+[b][size=13pt]Break it — specific missions[/size][/b]
+
+Concrete things to try, in rough order of effort:
+
+[list]
+[*][b]Verify a binary[/b] — recompute the artifact BLAKE3 and check both provenance signatures (walkthrough below). Tell us if a hash or signature doesn't line up.
+[*][b]Run a node and compare roots[/b] — sync, then diff your four state roots against a peer's at the same height. Any mismatch that doesn't halt the node is a finding.
+[*][b]Corrupt local state and confirm fail-closed[/b] — tamper with your local DB and verify the node refuses to serve (exit 78) instead of propagating.
+[*][b]Mine for 30 minutes[/b] on a bound wallet and confirm rewards + the 1.2% commons split land as claimed.
+[*][b]Attack peer-sync auth[/b] — the verify-before-sync handshake is in log-only mode; try to feed a follower blocks it should refuse, and tell us what it accepts.
+[*][b]Test partition recovery[/b] — split a small local mesh, produce on both sides, rejoin, and report how (or whether) ordering reconciles.
+[*][b]Submit fold test vectors[/b] — feed the fold verifier crafted inputs and look for a proof it accepts that it shouldn't.
+[/list]
+
+Report findings at the GitHub repo issues (link below). Security-sensitive findings: open a minimal issue and we'll coordinate a private channel.
 
 [hr]
 
@@ -77,7 +114,7 @@ b3sum sigil-top-v0.77.6
 
 [b][size=13pt]Mining[/size][/b]
 
-Dual-lane: a hash-power lane (BLAKE3-family PoW) × a verifiable-delay lane (Wesolowski VDF) — a valid share carries both. CPU is fine; a GPU build is available for the hash lane. Verified wallets (sign a domain-separated challenge — the wallet IS the public key) earn to themselves; unverified mining routes to the treasury. 1.2% of every reward routes to a commons pool under an M-of-N quorum.
+Dual-lane: a hash-power lane (BLAKE3-family PoW) × a verifiable-delay lane (Wesolowski VDF) — a valid share carries both. CPU is fine; a GPU build is available for the hash lane. [b]Ownership-proven wallets[/b] (you sign a domain-separated challenge to bind the wallet — the wallet IS the public key, [i]no KYC[/i]) earn to themselves; unbound mining routes to the treasury. 1.2% of every reward routes to a commons pool under an M-of-N quorum (currently operator-held — see decentralization note above).
 
 [hr]
 

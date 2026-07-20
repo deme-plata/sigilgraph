@@ -553,26 +553,29 @@ impl P2PBlockSync {
                     .map(|n| n.clamp(1024, 65_536)).unwrap_or(10_000); // v6.5: 10k blocks/sync default (frontier-exact fix v0.57 makes large chunks safe)
                 // v0.39: was const 12 — at first boot (empty DB) all slots fire decode
                 // bursts at once, pre-TUI, which pressured small/busy machines hard. 8 by
-                // SIGIL_SYNC_INFLIGHT is a HARD FLOOR the operator sets (default 16; raise on a
-                // beefy box, e.g. 32/64; lower on a small one). Clamp 1..64. The continuity boost
-                // below only ever RAISES it — it can never drop below the requested floor. Default
-                // 16 measured ~2.8x the old pinned-5 genesis catch-up with empty=0/timeout=0.
-                let base_inflight: usize = std::env::var("SIGIL_SYNC_INFLIGHT").ok()
-                    .and_then(|v| v.parse::<usize>().ok()).map(|n| n.clamp(1, 64)).unwrap_or(16);
-                // Turbo X continuity: boost ABOVE the floor when BW is high (score + pid_rate).
-                // FLOOR FIX (2026-07-20): the boost is clamped to >= base_inflight, so a fresh
-                // sync is never pinned below the requested window. Previously rate_boost bottomed
-                // at 0.5 while pid_rate sat at its 5.0 floor, which HALVED the window and created a
-                // chicken-and-egg (low rate -> low boost -> small window -> low rate) that pinned
-                // genesis catch-up at ~5 inflight regardless of the box. Measured: opening the
-                // window from 5->10 raised sustained fetch bandwidth 6-16 MB/s -> 157 MB/s.
+                // default; SIGIL_SYNC_INFLIGHT=1..16 to tune (raise on a beefy box).
+                //
+                // 🚫 v7.0.6 REGRESSION REVERT (2026-07-20): v7.0.3 raised this to a HARD FLOOR
+                // of 16 for a ~2.8x speedup. That FLOOR re-triggered the v0.10.0 frontier-stall
+                // bug: with a single serving peer, ~16 slots claim look-ahead chunks up to
+                // synced_to+16*CHUNK and commit them AHEAD of the frontier, while the lead chunk
+                // (i==0 at exact synced_to) gets skipped once it's `assigned`-claimed-but-not-
+                // advancing — so synced_to PARKS, best>frontier, and the verified-watermark
+                // watchdog declares "SPINE BREAK — STUCK" (operator saw it wedge at h≈393,265).
+                // v7.0.2 synced all 30M to 100% in ~3h because the boost could bottom at 2,
+                // keeping the window small enough that the frontier was always fed. Restoring
+                // the v7.0.2 behavior EXACTLY. DO NOT raise the default floor again without
+                // first fixing frontier-chunk starvation in the refill loop (re-request the
+                // lead when synced_to hasn't advanced). Power users can still opt in via the env.
+                let max_inflight: usize = std::env::var("SIGIL_SYNC_INFLIGHT").ok()
+                    .and_then(|v| v.parse::<usize>().ok()).map(|n| n.clamp(1, 16)).unwrap_or(8);
+                // Turbo X continuity: boost inflight when high continuous BW (score and pid_rate) to sustain high download rate
                 let max_inflight = {
                     let s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                     let score = s.turbo_continuity.continuity_score;
                     let pid_r = s.turbo_continuity.pid.get_rate().max(5.0);
                     let rate_boost = (pid_r / 50.0).max(0.5).min(2.0);
-                    let boosted = (base_inflight as f64) * (0.5 + score * 1.5) * rate_boost;
-                    boosted.max(base_inflight as f64).min(64.0) as usize
+                    ((max_inflight as f64) * (0.5 + score * 1.5) * rate_boost).max(2.0).min(64.0) as usize
                 };
                                                     // onto a stalled frontier and crater the rate.
                 // Look-ahead cap must be TIGHT: a large window lets next_start race far ahead of a

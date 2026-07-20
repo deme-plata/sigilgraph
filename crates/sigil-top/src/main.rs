@@ -3162,6 +3162,8 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // don't exist on Windows → the store never persisted → re-sync from 0 every launch
     // ("starts over on update"). Now a per-user dir (override with SIGIL_TOP_DB).
     let db_path = sigil_top_db_path();
+    // v7.0.7: heal a store wedged by the v7.0.3–7.0.5 frontier-stall bug (one-time, marked).
+    heal_wedged_store_once(&db_path);
     let oversized_primary = oversized_store_for_light_boot(&db_path, want_sync);
     boot_trace(&format!("opening block store path={db_path} mode=nonblocking want_sync={want_sync}"));
     let mut block_store = if let Some(bytes) = oversized_primary {
@@ -4204,6 +4206,34 @@ fn sigil_top_db_path() -> String {
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
     format!("{}/sigil-top-blocks.db", base.trim_end_matches(['/', '\\']))
+}
+
+/// v7.0.7 ONE-TIME store heal. Stores built by the v7.0.3–7.0.5 sync FRONTIER-STALL bug
+/// wedge at a chunk boundary (a Fatal parent-linkage break — the operator's h≈393,265
+/// "SPINE BREAK — STUCK") and do NOT self-heal in place: the v7.0.6 fetch-ordering fix only
+/// prevents NEW wedges, it can't repair an already-corrupt on-disk chain. So on the FIRST
+/// launch of a build carrying this marker, delete the store once; the sync then rebuilds it
+/// clean with the fixed ordering (verified: a fresh sync crosses 393k with 0 breaks). A tiny
+/// `.healver` marker next to the store records that the heal ran, so later launches skip it
+/// (never a repeat wipe). A store that was already clean simply re-syncs once — a testnet-
+/// acceptable one-time cost, and the ONLY way to make "press U and it just works" true for
+/// every node already carrying a wedged store from the buggy releases.
+fn heal_wedged_store_once(path: &str) {
+    const HEAL_MARKER: &str = "frontier-stall-heal-v7.0.6";
+    let marker = format!("{path}.healver");
+    if std::fs::read_to_string(&marker).map(|s| s.trim() == HEAL_MARKER).unwrap_or(false) {
+        return; // already healed on a prior launch — leave the store alone
+    }
+    // The store may be a flux-db DIRECTORY or a file, plus WAL/SHM sidecars — clear them all.
+    let _ = std::fs::remove_dir_all(path);
+    let _ = std::fs::remove_file(path);
+    for sfx in ["-wal", "-shm", ".wal", ".shm"] {
+        let _ = std::fs::remove_file(format!("{path}{sfx}"));
+    }
+    let _ = std::fs::write(&marker, HEAL_MARKER);
+    boot_trace(&format!(
+        "v7.0.7 one-time heal: cleared possibly-wedged store {path} (v7.0.3 frontier-stall fix) — re-syncing from genesis"
+    ));
 }
 
 fn light_boot_store_limit_bytes() -> u64 {

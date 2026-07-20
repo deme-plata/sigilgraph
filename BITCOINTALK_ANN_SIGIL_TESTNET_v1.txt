@@ -20,7 +20,7 @@ Topic title:
 [*][b]Consensus:[/b] DagKnight braid ordering; each block carries dual-lane proof-of-work (BLAKE-family) × a Wesolowski verifiable-delay function.
 [*][b]Live cadence:[/b] accelerated laboratory mode, currently ~6 blocks/s. [b]Possible mainnet cadence:[/b] ~5 s, not finalized. [b]Finality:[/b] no formal finality proof yet — braid ordering is simulation-gated, not a theorem.
 [*][b]Live decentralization (the honest version):[/b] right now this is a [b]single-producer[/b] testnet — 1 block producer (the operator's node), 1 independent operator, minimal peers. Production is [b]permissioned[/b] and the operator [b]can reset or rewrite the chain[/b]. External miners submit dual-lane shares to that one producer; they do [b]not[/b] independently produce or order blocks today. A permissionless multi-producer mesh is the next milestone. Do not mistake this for a decentralized network yet.
-[*][b]Current release:[/b] sigil-top v7.0.10 (Linux x86_64 + Windows x64), source tag v7.0.10 — each binary ships with a require-both SQIsign-L5 + Ed25519 provenance proof, published builder keys, and a one-command verifier.
+[*][b]Current release:[/b] sigil-top v7.0.11 (Linux x86_64 + Windows x64), source tag v7.0.11 — each binary ships with a require-both SQIsign-L5 + Ed25519 provenance proof, published builder keys, and a one-command verifier.
 [*][b]Supply:[/b] testnet-only 21M schedule, already fully emitted under accelerated economics; all balances reset before any mainnet.
 [*][b]Allocation:[/b] none by design — no premine, no team/treasury/founder allocation; coins come only from mining. But because production is single-operator (above), the operator has necessarily controlled most of the emitted supply. The treasury (where unbound mining routes) and the 1.2% commons quorum are operator-held today.
 [*][b]Audits:[/b] none yet. The novel cryptography (the fold, the hybrid provenance composition) is experimental and under open review.
@@ -105,15 +105,15 @@ https://sigilgraph.fluxapp.xyz/downloads/sigil-top-latest.json
 
 [b]Verify what you downloaded[/b] (this is the point of the whole project):
 [code]# the current release + its require-both hybrid proof:
-wget https://sigilgraph.fluxapp.xyz/downloads/sigil-top-v7.0.10-linux-x64
-wget https://sigilgraph.fluxapp.xyz/downloads/sigil-top-v7.0.10-linux-x64.proof
+wget https://sigilgraph.fluxapp.xyz/downloads/sigil-top-v7.0.11-linux-x64
+wget https://sigilgraph.fluxapp.xyz/downloads/sigil-top-v7.0.11-linux-x64.proof
 
 # 1. recompute BLAKE3 of the binary — it must equal the manifest + the proof artifact_hash:
-b3sum sigil-top-v7.0.10-linux-x64
-# => c5f53fab74ad49ff45a0a6ad99afc298f12db46d4aeda47f9dc7bd20e24710af
+b3sum sigil-top-v7.0.11-linux-x64
+# => a626e613c6b5151fdfdd2d0b67a88ad80817cd1d8b81e98c11b8a7b5438d5cb5
 
 # 2. run the real verifier — checks the artifact BLAKE3 + BOTH signatures:
-fluxc verify-proof sigil-top-v7.0.10-linux-x64 sigil-top-v7.0.10-linux-x64.proof
+fluxc verify-proof sigil-top-v7.0.11-linux-x64 sigil-top-v7.0.11-linux-x64.proof
 #    → "✓ Verified provenance proof"
 
 # 3. CRITICAL — pin identity. A self-consistent proof with swapped keys is still a

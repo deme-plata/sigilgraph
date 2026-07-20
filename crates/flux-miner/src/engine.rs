@@ -286,9 +286,11 @@ pub fn gpu_mining_loop(
     // few ms between them so the driver can service the display. A dedicated rig
     // can raise the batch / disable the sleep via env.
     let batch: usize = std::env::var("SIGIL_GPU_BATCH").ok().and_then(|v| v.parse().ok())
-        .filter(|&b| b >= 4096).unwrap_or(1 << 18); // 256K default (was 1M)
+        .filter(|&b| b >= 4096).unwrap_or(1 << 24); // v7.0.8: 16M default — FULL GPU utilization
+        // (~30ms/dispatch, well under the ~2s WDDM TDR limit). Was 256K, which starved the card
+        // to ~40 MH/s. Lower SIGIL_GPU_BATCH only if a single display-GPU feels sluggish.
     let throttle = std::time::Duration::from_millis(
-        std::env::var("SIGIL_GPU_THROTTLE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(5),
+        std::env::var("SIGIL_GPU_THROTTLE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0), // v7.0.8: 0 (was 5ms — the sleep halved throughput; thermal_watch still throttles when hot)
     );
 
     let gpu = match crate::gpu::GpuBlake4::new() {

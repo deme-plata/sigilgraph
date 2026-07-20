@@ -155,9 +155,22 @@ pub struct GpuBlake4 {
     queue: CommandQueue,
     kernel: Kernel,
     words_kernel: Kernel,
-    ajtai_kernel: Kernel,
-    rho_kernel: Kernel,
+    // v7.0.8: OPTIONAL. The ajtai/rho kernels are used ONLY by the fold/KAT bench, never by
+    // mining (search()). A driver that can't build the ajtai program must NOT kill GPU mining —
+    // this was the regression that silently dropped GPU miners to CPU (26 MH/s) after the ajtai
+    // kernel was added. None here = ajtai bench unavailable, mining fully functional.
+    ajtai_kernel: Option<Kernel>,
+    rho_kernel: Option<Kernel>,
     pub device_name: String,
+}
+
+impl GpuBlake4 {
+    fn ajtai(&self) -> anyhow::Result<&Kernel> {
+        self.ajtai_kernel.as_ref().ok_or_else(|| anyhow::anyhow!("ajtai kernel unavailable on this GPU (mining is unaffected)"))
+    }
+    fn rho(&self) -> anyhow::Result<&Kernel> {
+        self.rho_kernel.as_ref().ok_or_else(|| anyhow::anyhow!("rho kernel unavailable on this GPU (mining is unaffected)"))
+    }
 }
 
 impl GpuBlake4 {
@@ -199,9 +212,13 @@ impl GpuBlake4 {
             .map_err(|bl| anyhow::anyhow!("clBuildProgram: {bl}"))?;
         let kernel = Kernel::create(&program, KERNEL_NAME).map_err(|e| anyhow::anyhow!("clCreateKernel({KERNEL_NAME}): {e}"))?;
         let words_kernel = Kernel::create(&program, WORDS_KERNEL_NAME).map_err(|e| anyhow::anyhow!("clCreateKernel({WORDS_KERNEL_NAME}): {e}"))?;
-        let ajtai_program = Program::create_and_build_from_source(&context, AJTAI_SRC, "").map_err(|bl| anyhow::anyhow!("clBuildProgram(ajtai): {bl}"))?;
-        let ajtai_kernel = Kernel::create(&ajtai_program, AJTAI_KERNEL_NAME).map_err(|e| anyhow::anyhow!("clCreateKernel(ajtai): {e}"))?;
-        let rho_kernel = Kernel::create(&ajtai_program, "rho_combine").map_err(|e| anyhow::anyhow!("clCreateKernel(rho_combine): {e}"))?;
+        // v7.0.8: AJTAI is BENCH-ONLY (fold/KAT), never on the mining path. Build it BEST-EFFORT
+        // so a driver that can't compile the ajtai program still yields a fully-working MINING GPU.
+        // Failing this used to abort the whole init → GPU miners silently dropped to CPU (26 MH/s).
+        let (ajtai_kernel, rho_kernel) = match Program::create_and_build_from_source(&context, AJTAI_SRC, "") {
+            Ok(p) => (Kernel::create(&p, AJTAI_KERNEL_NAME).ok(), Kernel::create(&p, "rho_combine").ok()),
+            Err(_) => (None, None),
+        };
         Ok(Self { context, queue, kernel, words_kernel, ajtai_kernel, rho_kernel, device_name })
     }
 
@@ -358,7 +375,7 @@ impl GpuBlake4 {
         unsafe {
             self.queue.enqueue_write_buffer(&mut a_buf, CL_BLOCKING, 0, &a_cl, &[])?;
             self.queue.enqueue_write_buffer(&mut w_buf, CL_BLOCKING, 0, &w_flat, &[])?;
-            ExecuteKernel::new(&self.ajtai_kernel)
+            ExecuteKernel::new(self.ajtai()?)
                 .set_arg(&a_buf).set_arg(&w_buf).set_arg(&out_buf)
                 .set_arg(&(m as cl_uint)).set_arg(&(n as cl_uint)).set_arg(&Q)
                 .set_global_work_size(out_len)
@@ -382,7 +399,7 @@ impl GpuBlake4 {
         unsafe{
             self.queue.enqueue_write_buffer(&mut a_buf,CL_BLOCKING,0,a,&[])?;
             self.queue.enqueue_write_buffer(&mut w_buf,CL_BLOCKING,0,w_flat,&[])?;
-            ExecuteKernel::new(&self.ajtai_kernel).set_arg(&a_buf).set_arg(&w_buf).set_arg(&out_buf)
+            ExecuteKernel::new(self.ajtai()?).set_arg(&a_buf).set_arg(&w_buf).set_arg(&out_buf)
                 .set_arg(&(m as cl_uint)).set_arg(&(n as cl_uint)).set_arg(&Q)
                 .set_global_work_size(out_len).enqueue_nd_range(&self.queue)?.wait()?;
         }
@@ -398,7 +415,7 @@ impl GpuBlake4 {
         unsafe{
             self.queue.enqueue_write_buffer(&mut mat_buf,CL_BLOCKING,0,mat_flat,&[])?;
             self.queue.enqueue_write_buffer(&mut rho_buf,CL_BLOCKING,0,rho_pows,&[])?;
-            ExecuteKernel::new(&self.rho_kernel).set_arg(&mat_buf).set_arg(&rho_buf).set_arg(&out_buf)
+            ExecuteKernel::new(self.rho()?).set_arg(&mat_buf).set_arg(&rho_buf).set_arg(&out_buf)
                 .set_arg(&(rows as cl_uint)).set_arg(&(cols as cl_uint))
                 .set_global_work_size(cols).enqueue_nd_range(&self.queue)?.wait()?;
         }
@@ -422,7 +439,7 @@ impl GpuBlake4 {
         unsafe{
             self.queue.enqueue_write_buffer(&mut a_buf,CL_BLOCKING,0,a,&[])?;
             self.queue.enqueue_write_buffer(&mut w_buf,CL_BLOCKING,0,w_flat,&[])?;
-            ExecuteKernel::new(&self.ajtai_kernel).set_arg(&a_buf).set_arg(&w_buf).set_arg(&c_buf)
+            ExecuteKernel::new(self.ajtai()?).set_arg(&a_buf).set_arg(&w_buf).set_arg(&c_buf)
                 .set_arg(&(m as cl_uint)).set_arg(&(n as cl_uint)).set_arg(&Q)
                 .set_global_work_size(cm).enqueue_nd_range(&self.queue)?.wait()?;
         }
@@ -436,11 +453,11 @@ impl GpuBlake4 {
         let mut c_star=vec![0u64; m]; let mut w_star=vec![0u64; n];
         unsafe{
             self.queue.enqueue_write_buffer(&mut rho_buf,CL_BLOCKING,0,&rho_pows,&[])?;
-            ExecuteKernel::new(&self.rho_kernel).set_arg(&c_buf).set_arg(&rho_buf).set_arg(&cstar_buf)
+            ExecuteKernel::new(self.rho()?).set_arg(&c_buf).set_arg(&rho_buf).set_arg(&cstar_buf)
                 .set_arg(&(count as cl_uint)).set_arg(&(m as cl_uint))
                 .set_global_work_size(m).enqueue_nd_range(&self.queue)?.wait()?;
             self.queue.enqueue_read_buffer(&cstar_buf,CL_BLOCKING,0,&mut c_star,&[])?;
-            ExecuteKernel::new(&self.rho_kernel).set_arg(&w_buf).set_arg(&rho_buf).set_arg(&wstar_buf)
+            ExecuteKernel::new(self.rho()?).set_arg(&w_buf).set_arg(&rho_buf).set_arg(&wstar_buf)
                 .set_arg(&(count as cl_uint)).set_arg(&(n as cl_uint))
                 .set_global_work_size(n).enqueue_nd_range(&self.queue)?.wait()?;
             self.queue.enqueue_read_buffer(&wstar_buf,CL_BLOCKING,0,&mut w_star,&[])?;

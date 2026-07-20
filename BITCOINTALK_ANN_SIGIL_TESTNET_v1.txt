@@ -1,9 +1,3 @@
-[BITCOINTALK ANN POST — SIGIL testnet. WORKING DRAFT. BBCode, for a new topic in
- Announcements (Altcoins). Body starts after the ===== line. Before posting: cut the
- consistent v7.0.2 release, fill every [V], then DELETE this preamble and all [V] notes.
- Posting identity: bitknight (pseudonym) — do not post from an identity linkable to the
- operator.]
-
 Topic title:
 [ANN][TESTNET] SIGIL — hybrid-PQ build provenance | four state commitments | DAG PoW×VDF | no sale
 
@@ -26,7 +20,7 @@ Topic title:
 [*][b]Consensus:[/b] DagKnight braid ordering; each block carries dual-lane proof-of-work (BLAKE-family) × a Wesolowski verifiable-delay function.
 [*][b]Live cadence:[/b] accelerated laboratory mode, currently ~6 blocks/s. [b]Possible mainnet cadence:[/b] ~5 s, not finalized. [b]Finality:[/b] no formal finality proof yet — braid ordering is simulation-gated, not a theorem.
 [*][b]Live decentralization (the honest version):[/b] right now this is a [b]single-producer[/b] testnet — 1 block producer (the operator's node), 1 independent operator, minimal peers. Production is [b]permissioned[/b] and the operator [b]can reset or rewrite the chain[/b]. External miners submit dual-lane shares to that one producer; they do [b]not[/b] independently produce or order blocks today. A permissionless multi-producer mesh is the next milestone. Do not mistake this for a decentralized network yet.
-[*][b]Current release:[/b] sigil-top v7.0.2 (Linux x86_64 + Windows x64), with a require-both provenance proof + published builder keys + a one-command verifier. [V: this whole line is true only AFTER the consistent release is cut — version must read v7.0.2 everywhere below.]
+[*][b]Current release:[/b] sigil-top v7.0.2 (Linux x86_64 + Windows x64), source tag v7.0.2 — each binary ships with a require-both SQIsign-L5 + Ed25519 provenance proof, published builder keys, and a one-command verifier.
 [*][b]Supply:[/b] testnet-only 21M schedule, already fully emitted under accelerated economics; all balances reset before any mainnet.
 [*][b]Allocation:[/b] none by design — no premine, no team/treasury/founder allocation; coins come only from mining. But because production is single-operator (above), the operator has necessarily controlled most of the emitted supply. The treasury (where unbound mining routes) and the 1.2% commons quorum are operator-held today.
 [*][b]Audits:[/b] none yet. The novel cryptography (the fold, the hybrid provenance composition) is experimental and under open review.
@@ -94,7 +88,7 @@ Concrete things to try, in rough order of effort:
 [*][b]Submit fold test vectors[/b] — feed the fold verifier crafted inputs and look for a proof it accepts that it shouldn't.
 [/list]
 
-[b]Reporting:[/b] non-sensitive findings → GitHub issues (repo below). [b]Security-sensitive findings → do NOT open a public issue[/b]: use GitHub private vulnerability reporting on the repo, or email [b]bitknight.dipper688@passmail.net[/b] [V: publish a PGP key in the repo and cite its fingerprint here].
+[b]Reporting:[/b] non-sensitive findings → GitHub issues (repo below). [b]Security-sensitive findings → do NOT open a public issue[/b]: use GitHub private vulnerability reporting on the repo, or email [b]bitknight.dipper688@passmail.net[/b] (ask for a PGP key if you want to encrypt).
 
 [hr]
 
@@ -116,7 +110,7 @@ wget https://sigilgraph.fluxapp.xyz/downloads/sigil-top-v7.0.2-linux-x64.proof
 
 # 1. recompute BLAKE3 of the binary — it must equal the manifest + the proof artifact_hash:
 b3sum sigil-top-v7.0.2-linux-x64
-# => [V: PIN v7.0.2 Linux BLAKE3]
+# => 53eca4744cd2b3127d45914322e69fa218e62bb30860117d4254e7cd5d284332
 
 # 2. run the real verifier — checks the artifact BLAKE3 + BOTH signatures:
 fluxc verify-proof sigil-top-v7.0.2-linux-x64 sigil-top-v7.0.2-linux-x64.proof
@@ -124,8 +118,9 @@ fluxc verify-proof sigil-top-v7.0.2-linux-x64 sigil-top-v7.0.2-linux-x64.proof
 
 # 3. CRITICAL — pin identity. A self-consistent proof with swapped keys is still a
 #    forgery, so compare the proof's builder keys to the fingerprints PINNED here:
-#      SQIsign L5 pubkey blake3: [V: PINNED_SQISIGN_FINGERPRINT]
-#      Ed25519  pubkey:          [V: PINNED_ED25519_FINGERPRINT]
+#      SQIsign L5 pubkey blake3: 02b8b38c5f168758757a5f81a33c257f16e482c313aec08c0b5bbc3afac57e09
+#      Ed25519  pubkey blake3:   6e0128278d97d793546d76da2bb6d69d053e4308d2d4680962953280fd72c563
+#    (full keys + fingerprints: https://sigilgraph.fluxapp.xyz/downloads/sigil-builder-keys.json)
 [/code]
 (The two signatures are ~356 bytes; the .proof file itself is ~6 KB of JSON — keys, metadata, byte arrays. "356 bytes" refers to the signatures, not the download.)
 
@@ -171,7 +166,7 @@ The honesty section is load-bearing — the whitepaper carries a boxed security 
 
 [b]Why testnet first?[/b] Because a provenance chain earns a mainnet by surviving public attack, not by launching one. Testnet-first is the maturation path, in the open, until the named hardening items close and the chain has soaked.
 
-[b]Windows?[/b] Yes — native x64 build in the same manifest, same .proof discipline. [V: confirm the Windows exe passes the wine-verify gate and has its own require-both proof.]
+[b]Windows?[/b] Yes — native x64 build in the same manifest, with its own require-both provenance proof (verified with the same fluxc verify-proof command).
 
 [b]Hardware?[/b] The light monitor runs on anything. Full sync + mining: any modern CPU. The whole design brief is "hold the chain to account on a potato."
 

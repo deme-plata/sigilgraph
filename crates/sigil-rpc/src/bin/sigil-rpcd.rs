@@ -458,6 +458,16 @@ const MINING_VDF_T: u64 = 600; // sequential VDF squarings per share (Lane B)
 // NOT a flat constant — see /mining/submit.
 
 fn mining_bits() -> u32 {
+    // SIGIL_MINING_FIXED_BITS PINS the difficulty (disables retarget drift). This is the stable
+    // "best real hashrate that ALSO accepts shares" mode: the auto-retarget can't hold the sweet
+    // spot because the mine-block interval is network-capped (~5s), so it either floors low
+    // (bits=4 → the hashrate metric reads noise) or climbs too high (bits~28 → solves take longer
+    // than the block interval → every submit stale). A fixed bits ~22-24 shows the miner's true
+    // MH/s AND keeps solves well under the interval so shares land. Takes precedence over the
+    // retarget init below.
+    if let Some(b) = std::env::var("SIGIL_MINING_FIXED_BITS").ok().and_then(|s| s.parse::<u32>().ok()) {
+        return b.clamp(4, 48);
+    }
     std::env::var("SIGIL_MINING_BLAKE4_BITS").ok().and_then(|s| s.parse().ok()).unwrap_or(MINING_BLAKE4_BITS)
 }
 fn mining_vdf_t() -> u64 {
@@ -518,6 +528,14 @@ fn target_block_ms() -> u64 {
 /// block; fires once per RETARGET_WINDOW. Meaningful ONLY because fix #1 made block
 /// timestamps real (no precompute). Clamped to ±2 bits/window (≤4x) and bits ∈ [4,48].
 fn retarget(node: &mut Node) {
+    // PINNED difficulty: if the operator fixed the bits, hold them EXACTLY — no drift. See
+    // mining_bits() for why the auto-retarget can't hold the "real hashrate + accepts" sweet spot.
+    if let Some(fixed) = std::env::var("SIGIL_MINING_FIXED_BITS").ok().and_then(|s| s.parse::<u32>().ok()) {
+        node.bits = fixed.clamp(4, 48);
+        node.retarget_anchor_ts = now_ms();
+        node.retarget_anchor_height = node.block_height;
+        return;
+    }
     if node.block_height < node.retarget_anchor_height + RETARGET_WINDOW { return; }
     let now = now_ms();
     let actual = now.saturating_sub(node.retarget_anchor_ts).max(1);

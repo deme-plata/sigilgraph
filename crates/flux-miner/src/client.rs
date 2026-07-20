@@ -22,6 +22,12 @@ pub struct Challenge {
     pub blake4_target: u64,
     /// Lane B difficulty: number of sequential VDF squarings required.
     pub vdf_t: u64,
+    /// v7.0.9-fix: TOTAL network hashrate the node measures by summing every active miner's
+    /// self-reported rate (each miner sends `&hps=` on the challenge fetch). Defaults to 0 so a
+    /// pre-fix node/client still parses. This is the ACCURATE total power — unlike a difficulty
+    /// estimate, which undercounts when the difficulty is pinned + submissions are throttled.
+    #[serde(default)]
+    pub net_hps: f64,
 }
 
 /// A solved share submitted back to the node.
@@ -127,8 +133,10 @@ impl MinerClient {
     }
 
     /// `GET {base}{challenge_path}?wallet=<wallet>` → [`Challenge`].
-    pub fn fetch_challenge(&self) -> anyhow::Result<Challenge> {
-        let url = format!("{}{}?wallet={}", self.endpoints.base_url, self.endpoints.challenge_path, self.wallet);
+    pub fn fetch_challenge(&self, hps: f64) -> anyhow::Result<Challenge> {
+        // v7.0.9-fix: report our measured hashrate so the node can SUM active miners into the
+        // true total network power (returned as Challenge.net_hps). `hps=0` on the first fetch.
+        let url = format!("{}{}?wallet={}&hps={:.0}", self.endpoints.base_url, self.endpoints.challenge_path, self.wallet, hps.max(0.0));
         let c = self.http.get(&url).send()?.error_for_status()?.json::<Challenge>()?;
         Ok(c)
     }
@@ -142,7 +150,7 @@ impl MinerClient {
 
     /// One full iteration: fetch → solve → submit. Returns the node's verdict.
     pub fn mine_one<G: VdfGroup>(&self, g: &G, stats: &mut MineStats) -> anyhow::Result<SubmitResult> {
-        let c = self.fetch_challenge()?;
+        let c = self.fetch_challenge(0.0)?;
         stats.challenges_fetched += 1;
         stats.last_height = c.height;
         let t = Instant::now();

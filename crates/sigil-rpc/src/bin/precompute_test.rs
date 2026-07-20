@@ -60,7 +60,7 @@ fn main() {
     let future_h = h0 + 1; // node is now at h0+1 after the honest accept
     let mut guessed_seed = [0u8; 32];
     guessed_seed[..8].copy_from_slice(&future_h.to_le_bytes()); // legacy height-only derivation
-    let forged = Challenge { height: future_h, vdf_input: guessed_seed, blake4_target: c.blake4_target, vdf_t: c.vdf_t };
+    let forged = Challenge { height: future_h, vdf_input: guessed_seed, blake4_target: c.blake4_target, vdf_t: c.vdf_t, net_hps: 0.0 };
     let pre_block = mine_dual(&build_header(&forged, &wallet), forged.blake4_target, forged.vdf_t, &g);
     let pre_sub = Submission { height: future_h, wallet: wallet.clone(), block: pre_block };
     let r = submit(&addr, &pre_sub);

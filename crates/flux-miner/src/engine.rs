@@ -59,9 +59,9 @@ pub fn update_net_power(s: &mut MinerStats, height: u64, bits: u32, tracker: &mu
         s.net_block_ms = if s.net_block_ms > 0.0 { s.net_block_ms * 0.7 + per_block_ms * 0.3 } else { per_block_ms };
     }
     if height > tracker.0 { *tracker = (height, std::time::Instant::now()); }
-    if s.net_block_ms > 0.0 && bits > 0 {
-        s.net_hps = 2f64.powi(bits as i32) / (s.net_block_ms / 1000.0);
-    }
+    // NOTE: net_hps (total power) is NOT computed here — the difficulty estimate
+    // (2^bits/block_interval) undercounts with pinned difficulty + throttled submits. The caller
+    // sets s.net_hps from Challenge.net_hps, which the node measures by SUMMING active miners' rates.
 }
 
 pub fn push_log(log: &mut VecDeque<String>, line: String) {
@@ -139,9 +139,10 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
     // re-poll) until the tip actually advances, so the miner emits one clean accepted
     // share per block instead of a storm of doomed submits.
     let mut last_spent_height: u64 = u64::MAX;
-    let mut net_tracker = (0u64, Instant::now()); // (last mine-tip seen, when it advanced) → network power
+    let mut net_tracker = (0u64, Instant::now()); // (last mine-tip seen, when it advanced) → block cadence
+    let mut prev_hps: f64 = 0.0; // our last measured Φ rate — reported so the node SUMS total power
     while !stop.load(Ordering::Relaxed) {
-        let c = match client.fetch_challenge() {
+        let c = match client.fetch_challenge(prev_hps) {
             Ok(c) => c,
             Err(e) => {
                 {
@@ -153,8 +154,9 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
                 continue;
             }
         };
-        // v7.0.8: track TOTAL network power (2^bits / block-interval) from every tip observation.
-        { let mut s = stats.lock().unwrap(); update_net_power(&mut s, c.height, c.blake4_target.leading_zeros(), &mut net_tracker); }
+        // v7.0.9: difficulty/block-cadence for the card, + TOTAL network power from the node (summed
+        // over all active miners' reported rates — accurate even with pinned difficulty + throttled submits).
+        { let mut s = stats.lock().unwrap(); update_net_power(&mut s, c.height, c.blake4_target.leading_zeros(), &mut net_tracker); s.net_hps = c.net_hps; }
         // Already submitted for this exact tip → the tip hasn't moved yet. Don't burn a
         // doomed stale share; wait briefly and re-check the tip.
         if c.height == last_spent_height {
@@ -165,6 +167,7 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
         let block = solve(&c, &wallet, &g); // Lane A nonce search + Lane B VDF
         let dt = t0.elapsed().as_secs_f64().max(1e-9);
         let hashes = block.nonce as f64 + 1.0; // nonces tried ≈ BLAKE4 work
+        prev_hps = hashes / dt; // report this on the next challenge fetch → node's total-power sum
         let sub = Submission { height: c.height, wallet: wallet.clone(), block };
         let res = client.submit(&sub);
         {
@@ -351,9 +354,10 @@ pub fn gpu_mining_loop(
     // MINER DISCIPLINE (v7.0.5): one share per height — see mining_loop. Same guard on
     // the GPU path so it doesn't flood stale submits when the tip hasn't advanced.
     let mut last_spent_height: u64 = u64::MAX;
-    let mut net_tracker = (0u64, Instant::now()); // (last mine-tip seen, when it advanced) → network power
+    let mut net_tracker = (0u64, Instant::now()); // (last mine-tip seen, when it advanced) → block cadence
+    let mut prev_hps: f64 = 0.0; // our last measured GPU Φ rate — reported so the node SUMS total power
     while !stop.load(Ordering::Relaxed) {
-        let c = match client.fetch_challenge() {
+        let c = match client.fetch_challenge(prev_hps) {
             Ok(c) => c,
             Err(e) => {
                 {
@@ -365,8 +369,8 @@ pub fn gpu_mining_loop(
                 continue;
             }
         };
-        // v7.0.8: track TOTAL network power (2^bits / block-interval) from every tip observation.
-        { let mut s = stats.lock().unwrap(); update_net_power(&mut s, c.height, c.blake4_target.leading_zeros(), &mut net_tracker); }
+        // v7.0.9: difficulty/block-cadence for the card, + TOTAL network power from the node (summed).
+        { let mut s = stats.lock().unwrap(); update_net_power(&mut s, c.height, c.blake4_target.leading_zeros(), &mut net_tracker); s.net_hps = c.net_hps; }
         if c.height == last_spent_height {
             thread::sleep(Duration::from_millis(250));
             continue;
@@ -425,6 +429,7 @@ pub fn gpu_mining_loop(
             s.last_height = c.height;
             s.last_solve_ms = dt * 1000.0;
             s.hashrate = nonce_base as f64 / dt; // GPU Lane-A rate
+            prev_hps = s.hashrate; // report on the next challenge fetch → node's total-power sum
             s.vdf_rate = c.vdf_t as f64 / dt;
             s.solve_hist.push_back((dt * 1000.0) as u64);
             while s.solve_hist.len() > 80 {

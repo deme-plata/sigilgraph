@@ -37,7 +37,7 @@ fn verify_block(rec: &Value, my_tip: &[u8; 32], g: &ModSquaring, genesis_ts: u12
     let reward: u128 = rec["reward"].as_str().unwrap_or("0").parse().unwrap_or(0);
     let rec_ts: u128 = rec["ts"].as_str().unwrap_or("0").parse().unwrap_or(0);
     let sub: Submission = serde_json::from_value(rec["submission"].clone()).map_err(|e| format!("block {bh}: bad submission ({e})"))?;
-    let c = Challenge { height: bh, vdf_input: mining_seed(my_tip, bh), blake4_target: target_from_bits(bits), vdf_t };
+    let c = Challenge { height: bh, vdf_input: mining_seed(my_tip, bh), blake4_target: target_from_bits(bits), vdf_t, net_hps: 0.0 };
     if !check_submission(g, &c, &sub) { return Err(format!("block {bh}: dual-lane verify FAILED (work/VDF/header)")); }
     // LANE-R: recompute the reward exactly as the producer/follower do — time-based from the
     // block's stored µs ts when genesis is anchored, else the legacy block-based schedule.

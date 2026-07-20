@@ -82,6 +82,11 @@ struct Node {
     /// In-memory (resets on restart, fine) — bounds the /onboard faucet against
     /// sybil drain. The faucet itself is finite (debits OPERATOR, see /onboard).
     onboard_rl: std::collections::HashMap<String, (u64, u32)>,
+    /// v7.0.9: live per-miner hashrate for TOTAL network power. wallet → (hps, last_ms). Each
+    /// miner reports `&hps=` on its challenge fetch; the sum over recently-active miners is the
+    /// real network power (difficulty-based estimates undercount under pinned diff + throttled
+    /// submits). Ephemeral (resets on restart, self-heals within ~1 challenge round).
+    miner_hps: std::collections::HashMap<WalletId, (f64, u64)>,
     /// LANE-R time-based emission anchor: the genesis block's timestamp (µs since the unix
     /// epoch). Set ONCE at genesis, persisted, never changed — emission halves on WALL-CLOCK
     /// time elapsed since this, not on block height. All nodes must agree on it.
@@ -321,7 +326,7 @@ fn apply_block(n: &mut Node, rec: &serde_json::Value, g: &ModSquaring) -> Result
     // Pre-activation drift observation (go/no-go prerequisite #1) — ungated, log-only.
     h7_telemetry::record(bh, rec_ts, apply_now_us);
     let miner = hex32(&sub.wallet).ok_or("bad wallet")?;
-    let c = Challenge { height: bh, vdf_input: mining_seed(&n.tip_hash, bh), blake4_target: target_from_bits(bits), vdf_t };
+    let c = Challenge { height: bh, vdf_input: mining_seed(&n.tip_hash, bh), blake4_target: target_from_bits(bits), vdf_t, net_hps: 0.0 };
     if !check_submission(g, &c, &sub) { return Err(format!("block {bh}: dual-lane verify FAILED")); }
     // LANE-R: recompute the reward the SAME way the producer did — time-based from the block's
     // stored µs ts when genesis is anchored, else the legacy block-based schedule. A follower
@@ -633,7 +638,7 @@ fn bootstrap() -> Node {
             retarget_anchor_ts: snap.retarget_anchor_ts, retarget_anchor_height: snap.retarget_anchor_height,
             statedb,
             auth_nonces: snap.auth_nonces,
-            onboard_rl: std::collections::HashMap::new(),
+            onboard_rl: std::collections::HashMap::new(), miner_hps: std::collections::HashMap::new(),
             genesis_ts_us: snap.genesis_ts_us, last_block_ts_us: snap.last_block_ts_us,
             emission_carry: snap.emission_carry,
             credit_vault,
@@ -712,7 +717,7 @@ fn bootstrap() -> Node {
         .and_then(|v| v.parse::<u128>().ok()).unwrap_or_else(now_us);
     let node = Node { state, height: 2, block_height: 0, students: VerifiedRegistry::new(), tokens, pools, citizens: vec![CITIZEN], history,
         tip_hash, bits: mining_bits(), retarget_anchor_ts: now_ms(), retarget_anchor_height: 0, statedb,
-        auth_nonces: std::collections::HashMap::new(), onboard_rl: std::collections::HashMap::new(),
+        auth_nonces: std::collections::HashMap::new(), onboard_rl: std::collections::HashMap::new(), miner_hps: std::collections::HashMap::new(),
         genesis_ts_us, last_block_ts_us: genesis_ts_us, emission_carry: 0,
         credit_vault: sigil_bank::credit::CreditVault::new(),
         mandates: sigil_bank::mandate::MandateBook::default(),
@@ -1299,7 +1304,18 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
         // cap-enforced money chokepoint. The wallet is bound into the header at
         // solve time, so a share can't be re-pointed to a different miner.
         ("GET", "/mining/challenge") => {
-            let n = node.read().unwrap();
+            let mut n = node.write().unwrap();
+            // v7.0.9: record this miner's self-reported Φ rate, prune >30s-idle miners, and SUM
+            // the rest = live TOTAL network power (accurate; difficulty estimates undercount).
+            let now = now_ms();
+            if let (Some(w), Some(hps)) = (
+                query_get(query, "wallet").and_then(hex32),
+                query_get(query, "hps").and_then(|s| s.parse::<f64>().ok()),
+            ) {
+                if hps.is_finite() && hps >= 0.0 { n.miner_hps.insert(w, (hps, now)); }
+            }
+            n.miner_hps.retain(|_, (_, t)| now.saturating_sub(*t) <= 30_000);
+            let net_hps: f64 = n.miner_hps.values().map(|(h, _)| *h).sum();
             let h = n.block_height; // mining-chain height (contiguous; emission-clean)
             // seed binds to the CURRENT tip → unpredictable until the prior block lands.
             let c = Challenge {
@@ -1307,6 +1323,7 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 vdf_input: mining_seed(&n.tip_hash, h),
                 blake4_target: target_from_bits(n.bits),
                 vdf_t: mining_vdf_t(),
+                net_hps,
             };
             ok(serde_json::to_string(&c).unwrap_or_else(|_| "{}".into()))
         }
@@ -1343,6 +1360,7 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 vdf_input: mining_seed(&n.tip_hash, bh),
                 blake4_target: target_from_bits(n.bits),
                 vdf_t: mining_vdf_t(),
+                net_hps: 0.0,
             };
             let g = ModSquaring::bench_2048();
             if !check_submission(&g, &c, &sub) {

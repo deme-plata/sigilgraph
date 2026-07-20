@@ -1397,16 +1397,11 @@ class QNarwhalKnightAPI {
       }
     }
 
-    // Fix: Ensure amount is sent as QNK value, not converted to smallest units
-    // If amount looks like it's been unit-converted (> 1,000,000), convert it back
-    // SGL uses 9 decimals (1 SGL = 1,000,000,000 base units)
-    let fixedAmount = amount;
-    if (amount > 1000000) {
-      console.warn(`⚠️ Detected unit conversion: ${amount} -> ${amount / 1000000000} QNK`);
-      fixedAmount = amount / 1000000000;
-    }
-
-    console.log('📤 Sending transaction:', { from: fromAddress, to, amount: fixedAmount, memo });
+    // v7.0.8: REMOVED the dangerous "if amount > 1_000_000 → divide by 1e9" heuristic. It
+    // silently mangled any legit send over 1,000,000 SIGIL (e.g. 2,000,000 → 0.002) and used
+    // the wrong 9-decimal scale (SIGIL is 8 decimals). The signed send below converts whole
+    // coins → base units correctly via Math.round(amount * 1e8). `amount` is passed through as-is.
+    console.log('📤 Sending transaction:', { from: fromAddress, to, amount, memo });
 
     // Generate authentication header using Ed25519
     try {

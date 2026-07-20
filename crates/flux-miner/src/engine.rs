@@ -41,6 +41,27 @@ pub struct MinerStats {
     pub log: VecDeque<String>,      // recent share lines (newest first)
     pub update_msg: Option<String>, // auto-updater status line
     pub mode: String,               // live mining mode ("CPU" / "GPU")
+    // v7.0.8 network metrics — estimated from the challenge difficulty + observed mine-tip rate.
+    pub net_hps: f64,      // TOTAL network hashrate ≈ 2^bits / block_interval (all miners combined)
+    pub net_bits: u32,     // current mine difficulty (bits)
+    pub net_block_ms: f64, // observed avg mine-block interval (ms)
+}
+
+/// Estimate TOTAL network power from the difficulty + observed block cadence:
+/// `network_hashrate ≈ difficulty / block_interval = 2^bits / T`. `tracker` = (last height
+/// seen, when it last advanced); persists across loop iterations. Called every challenge fetch
+/// so the tip cadence — hence the whole network's combined hashrate — is tracked live.
+pub fn update_net_power(s: &mut MinerStats, height: u64, bits: u32, tracker: &mut (u64, std::time::Instant)) {
+    s.net_bits = bits;
+    if height > tracker.0 && tracker.0 > 0 {
+        let dt = tracker.1.elapsed().as_secs_f64().max(0.001);
+        let per_block_ms = (dt / (height - tracker.0) as f64) * 1000.0;
+        s.net_block_ms = if s.net_block_ms > 0.0 { s.net_block_ms * 0.7 + per_block_ms * 0.3 } else { per_block_ms };
+    }
+    if height > tracker.0 { *tracker = (height, std::time::Instant::now()); }
+    if s.net_block_ms > 0.0 && bits > 0 {
+        s.net_hps = 2f64.powi(bits as i32) / (s.net_block_ms / 1000.0);
+    }
 }
 
 pub fn push_log(log: &mut VecDeque<String>, line: String) {
@@ -118,6 +139,7 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
     // re-poll) until the tip actually advances, so the miner emits one clean accepted
     // share per block instead of a storm of doomed submits.
     let mut last_spent_height: u64 = u64::MAX;
+    let mut net_tracker = (0u64, Instant::now()); // (last mine-tip seen, when it advanced) → network power
     while !stop.load(Ordering::Relaxed) {
         let c = match client.fetch_challenge() {
             Ok(c) => c,
@@ -131,6 +153,8 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
                 continue;
             }
         };
+        // v7.0.8: track TOTAL network power (2^bits / block-interval) from every tip observation.
+        { let mut s = stats.lock().unwrap(); update_net_power(&mut s, c.height, c.blake4_target.leading_zeros(), &mut net_tracker); }
         // Already submitted for this exact tip → the tip hasn't moved yet. Don't burn a
         // doomed stale share; wait briefly and re-check the tip.
         if c.height == last_spent_height {
@@ -327,6 +351,7 @@ pub fn gpu_mining_loop(
     // MINER DISCIPLINE (v7.0.5): one share per height — see mining_loop. Same guard on
     // the GPU path so it doesn't flood stale submits when the tip hasn't advanced.
     let mut last_spent_height: u64 = u64::MAX;
+    let mut net_tracker = (0u64, Instant::now()); // (last mine-tip seen, when it advanced) → network power
     while !stop.load(Ordering::Relaxed) {
         let c = match client.fetch_challenge() {
             Ok(c) => c,
@@ -340,6 +365,8 @@ pub fn gpu_mining_loop(
                 continue;
             }
         };
+        // v7.0.8: track TOTAL network power (2^bits / block-interval) from every tip observation.
+        { let mut s = stats.lock().unwrap(); update_net_power(&mut s, c.height, c.blake4_target.leading_zeros(), &mut net_tracker); }
         if c.height == last_spent_height {
             thread::sleep(Duration::from_millis(250));
             continue;

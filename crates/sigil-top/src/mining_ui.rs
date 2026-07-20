@@ -20,8 +20,8 @@ pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let [head, rates, tally, solverow, acctrow, body, hint] = Layout::vertical([
-        Constraint::Length(1), Constraint::Length(1), Constraint::Length(1),
+    let [head, rates, tally, netrow, solverow, acctrow, body, hint] = Layout::vertical([
+        Constraint::Length(1), Constraint::Length(1), Constraint::Length(1), Constraint::Length(1),
         Constraint::Length(1), Constraint::Length(1), Constraint::Min(0), Constraint::Length(1),
     ]).areas(inner);
 
@@ -57,6 +57,17 @@ pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
         dim("   mine-chain h "), Span::styled(group(s.last_height), Style::default().fg(C_VBRIGHT)),
         dim(" (egen kaede - ikke produce-tippen)"),
     ])), tally);
+
+    // v7.0.8: NETWORK row — total combined power of all miners + live difficulty + block cadence,
+    // and your slice of it. net_hps ≈ 2^bits / block_interval (estimated from the challenge).
+    let your_share = if s.net_hps > 1.0 { (s.hashrate / s.net_hps * 100.0).clamp(0.0, 100.0) } else { 0.0 };
+    f.render_widget(Paragraph::new(Line::from(vec![
+        dim(" ◈ network "), Span::styled(engine::format_hps(s.net_hps), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+        dim(" total power"),
+        dim("   difficulty "), Span::styled(format!("{} bits", s.net_bits), Style::default().fg(C_NEON_GOLD)),
+        dim("   block "), Span::styled(format!("{:.1}s", s.net_block_ms / 1000.0), Style::default().fg(C_VBRIGHT)),
+        dim("   your share "), Span::styled(format!("{your_share:.1}%"), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+    ])), netrow);
 
     // ── solve-time sparkline (last solve relative to the session max) ─────────
     let maxv = s.solve_hist.iter().copied().max().unwrap_or(1).max(1);

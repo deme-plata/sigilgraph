@@ -1397,7 +1397,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                   }}>
                     <div className="w-full h-full bg-gradient-to-b from-slate-900 via-cyan-950 to-slate-900 rounded-full flex items-center justify-center p-4">
                       <img
-                        src="/sigil-logo.png"
+                        src="https://sigilgraph.fluxapp.xyz/icons/brand/sigil-flat.png"
                         alt="SIGIL Logo"
                         className="w-full h-full object-contain"
                         style={{ filter: 'invert(1)' }}
@@ -1812,7 +1812,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
               <div className="flex items-center justify-between mb-6">
                 <div className="flex items-center gap-3">
                   <div className="w-12 h-12 rounded-full bg-gradient-to-br from-cyan-500/30 to-cyan-500/30 border border-cyan-500/50 flex items-center justify-center">
-                    <img src="/sigil-logo.png" alt="SIGIL" className="w-8 h-8" style={{ filter: 'invert(1)' }} />
+                    <img src="https://sigilgraph.fluxapp.xyz/icons/brand/sigil-flat.png" alt="SIGIL" className="w-8 h-8" style={{ filter: 'invert(1)' }} />
                   </div>
                   <div>
                     <h2 className="text-2xl font-bold bg-gradient-to-r from-cyan-400 to-cyan-500 bg-clip-text text-transparent">

@@ -254,7 +254,7 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
                   }}>
                     <div className="w-full h-full bg-gradient-to-b from-slate-900 via-purple-950 to-slate-900 rounded-full flex items-center justify-center p-1">
                       <img
-                        src="/sigil-logo.png"
+                        src="https://sigilgraph.fluxapp.xyz/icons/brand/sigil-flat.png"
                         alt="SIGIL Logo"
                         className="w-full h-full object-contain"
                         style={{ filter: 'invert(1)' }}

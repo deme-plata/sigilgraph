@@ -504,6 +504,27 @@ body.view-desktop .desktop{display:flex}
 <div id="p2p-pill" title="Open P2P Network" style="position:fixed;left:10px;bottom:10px;z-index:9999;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1;color:#21d4fd;background:rgba(4,8,12,.85);border:1px solid rgba(33,212,253,.35);border-radius:8px;padding:6px 9px;backdrop-filter:blur(6px);box-shadow:0 0 12px rgba(33,212,253,.25);cursor:pointer;user-select:none">🌐 P2P starting…</div>
 <script type="module" src="./sigil-tron-p2p.js?v=092"></script>
 <script type="module" src="./sigil-pq.mjs?v=1"></script> <!-- LANE-AD: ML-KEM-1024 hybrid session over the noise channel -->
+<!-- v7.0.9: signed-send signer. The [W] wallet is view-only, so a send is signed on demand from
+     the recovery phrase, EXACTLY like the full wallet: privkey=sha3_256(mnemonic), pub=ed25519(privkey),
+     address=hex(pub); sign the canonical `sigil-rpc/v1|send|<from>|<to>|<token>|<amount>|nonce=<n>`. -->
+<script type="module">
+  try {
+    const [ed, { sha3_256 }, { sha512 }] = await Promise.all([
+      import('https://esm.sh/@noble/ed25519@2.1.0'),
+      import('https://esm.sh/@noble/hashes@1.5.0/sha3'),
+      import('https://esm.sh/@noble/hashes@1.5.0/sha512'),
+    ]);
+    ed.etc.sha512Sync = (...m) => sha512(ed.etc.concatBytes(...m)); // @noble/ed25519 v2 needs this for sync sign
+    const hex = (u8) => Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join('');
+    window.sigilDeriveFrom = (mnemonic) => {
+      const priv = sha3_256(new TextEncoder().encode(String(mnemonic).trim()));
+      return { priv, address: hex(ed.getPublicKey(priv)) };
+    };
+    window.sigilSign = (priv, action, fields, reqNonce) =>
+      hex(ed.sign(new TextEncoder().encode(`sigil-rpc/v1|${action}|${fields.join('|')}|nonce=${reqNonce}`), priv));
+    window.sigilCryptoReady = true;
+  } catch (e) { console.error('signer load failed', e); window.sigilCryptoReady = false; }
+</script>
 
 <!-- v0.9.2: P2P Network modal (ported from the QUG quantum-wallet NetworkMapModal,
      reskinned to the SIGIL cyan theme). Vanilla-JS: reads window.SigilTronP2P +
@@ -744,14 +765,27 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     if(!/^\d+(\.\d{1,8})?$/.test(amtStr) || Number(amtStr)<=0){ sendStatus('Amount must be > 0 (max 8 decimals).', '#ff8a8a'); return; }
     // to base units (8 decimals) without float rounding
     var parts=amtStr.split('.'); var base=BigInt(parts[0]||'0')*100000000n + BigInt(((parts[1]||'')+'00000000').slice(0,8));
-    var from=(window.MINE_ADDR||window.ADDR||'');
+    var from=(window.MINE_ADDR||window.ADDR||'').toLowerCase();
+    if(!/^[0-9a-f]{64}$/.test(from)){ sendStatus('No wallet address loaded.', '#ff8a8a'); return; }
+    if(!window.sigilCryptoReady){ sendStatus('Signer still loading — try again in a moment.', '#fbbf24'); return; }
+    // v7.0.9: the node REQUIRES a signed send. This view wallet holds no key, so sign on demand
+    // from the recovery phrase (kept in memory for this session only — never stored to disk).
+    var mnemonic = window.__sigilMnemonic;
+    if(!mnemonic){
+      mnemonic = (prompt('Enter your recovery phrase to sign this send.\n(kept in memory for this session only — never saved)')||'').trim();
+      if(!mnemonic){ sendStatus('Send cancelled — recovery phrase required to sign.', '#fbbf24'); return; }
+    }
+    var kp; try{ kp=window.sigilDeriveFrom(mnemonic); }catch(e){ window.__sigilMnemonic=null; sendStatus('Could not derive a key from that phrase.', '#ff8a8a'); return; }
+    if(kp.address!==from){ window.__sigilMnemonic=null; sendStatus('That phrase does not match this wallet address.', '#ff8a8a'); return; }
+    window.__sigilMnemonic=mnemonic; // cache for the session so subsequent sends don't re-prompt
+    var reqNonce=Date.now();
+    var sig; try{ sig=window.sigilSign(kp.priv,'send',[from,to,'SIGIL',base.toString()],reqNonce); }catch(e){ sendStatus('Signing failed.', '#ff8a8a'); return; }
     sendStatus('Submitting…', '#6df3ff'); var btn=document.getElementById('sendGo'); if(btn)btn.disabled=true;
     try{
       var r=await fetch('/api/v1/send',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({from:from,to:to,amount:base.toString(),token:'native'})});
+        body:JSON.stringify({from:from,to:to,amount:Number(base),token:'SIGIL',sig:sig,req_nonce:reqNonce})});
       var j=null; try{ j=await r.json(); }catch(_){}
-      if(r.ok && j && j.ok){ sendStatus('✓ sent — tx '+((j.tx||j.hash||'').slice(0,16))+'…', '#00e0c6'); setTimeout(function(){ if(window.refresh)refresh(); }, 600); }
-      else if(r.status===404){ sendStatus('Send endpoint not yet wired on this node (rpcd /api/v1/send pending). Address saved; transfer once the route ships.', '#fbbf24'); }
+      if(r.ok && j && j.ok){ sendStatus('✓ sent — height '+(j.height!=null?j.height:''), '#00e0c6'); setTimeout(function(){ if(window.refresh)refresh(); }, 600); }
       else { sendStatus('✗ '+((j&&(j.error||j.message))||('HTTP '+r.status)), '#ff8a8a'); }
     }catch(e){ sendStatus('✗ network error — node unreachable.', '#ff8a8a'); }
     if(btn)btn.disabled=false;

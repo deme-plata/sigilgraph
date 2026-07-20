@@ -553,11 +553,12 @@ impl P2PBlockSync {
                     .map(|n| n.clamp(1024, 65_536)).unwrap_or(10_000); // v6.5: 10k blocks/sync default (frontier-exact fix v0.57 makes large chunks safe)
                 // v0.39: was const 12 — at first boot (empty DB) all slots fire decode
                 // bursts at once, pre-TUI, which pressured small/busy machines hard. 8 by
-                // SIGIL_SYNC_INFLIGHT is a HARD FLOOR the operator sets (default 8; raise on a
-                // beefy box, e.g. 32/64). Clamp 1..64. The continuity boost below only ever
-                // RAISES it — it can never drop below the requested floor.
+                // SIGIL_SYNC_INFLIGHT is a HARD FLOOR the operator sets (default 16; raise on a
+                // beefy box, e.g. 32/64; lower on a small one). Clamp 1..64. The continuity boost
+                // below only ever RAISES it — it can never drop below the requested floor. Default
+                // 16 measured ~2.8x the old pinned-5 genesis catch-up with empty=0/timeout=0.
                 let base_inflight: usize = std::env::var("SIGIL_SYNC_INFLIGHT").ok()
-                    .and_then(|v| v.parse::<usize>().ok()).map(|n| n.clamp(1, 64)).unwrap_or(8);
+                    .and_then(|v| v.parse::<usize>().ok()).map(|n| n.clamp(1, 64)).unwrap_or(16);
                 // Turbo X continuity: boost ABOVE the floor when BW is high (score + pid_rate).
                 // FLOOR FIX (2026-07-20): the boost is clamped to >= base_inflight, so a fresh
                 // sync is never pinned below the requested window. Previously rate_boost bottomed

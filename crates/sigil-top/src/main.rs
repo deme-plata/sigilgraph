@@ -922,7 +922,7 @@ fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str) -> String
         o.push_str(&format!("  {GREEN}● synced from verified live feed{RESET} {DIM}· no local node required — verify on a potato{RESET}\n"));
     }
     // keybar footer — real keybindings UI
-    o.push_str(&format!("  {GOLD}[M]{RESET}{DIM}ine{RESET}   {GREEN}[F]{RESET}{DIM}ull{RESET}  {GREEN}[V]{RESET}{DIM}erify{RESET}  {CYAN}[Y]{RESET}{DIM}esync{RESET}   {GOLD}[U]{RESET}{DIM}pdate{RESET}   {VBRIGHT}[L]{RESET}{DIM}ogin{RESET}   {DIM}[Q]uit{RESET}\n"));
+    o.push_str(&format!("  {GOLD}[M]{RESET}{DIM}ine{RESET}   {GREEN}[F]{RESET}{DIM}ull{RESET}  {GREEN}[V]{RESET}{DIM}erify{RESET}  {CYAN}[Y]{RESET}{DIM}esync{RESET}   {GOLD}[U]{RESET}{DIM}pdate{RESET}   {VBRIGHT}[L]{RESET}{DIM}ogin{RESET}   {CYAN}[T]{RESET}{DIM}stats{RESET}   {DIM}[Q]uit{RESET}\n"));
     o
 }
 
@@ -3616,6 +3616,20 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                     app.toast_sticky = false;
                                 } else {
                                     app.toast = format!("🔗 headless — open the wallet (OAuth2 login) in any browser:  {}", official_wallet_url()).into();
+                                    app.toast_sticky = true;
+                                }
+                            }
+                            KeyCode::Char('t') | KeyCode::Char('T') => {
+                                // Network-stats modal in the tron wallet UI — the SIGIL
+                                // equivalent of the Quillon graph dashboard stats. The
+                                // #stats deep-link auto-opens the modal on load; data is
+                                // same-origin via the :9800 /api proxy + feed JSON.
+                                let url = format!("{}#stats", local_wallet_url());
+                                if open_browser(&url) {
+                                    app.toast = format!("📊 network stats → {url}").into();
+                                    app.toast_sticky = false;
+                                } else {
+                                    app.toast = format!("🔗 headless — open the stats modal in any browser:  {}#stats", official_wallet_url()).into();
                                     app.toast_sticky = true;
                                 }
                             }

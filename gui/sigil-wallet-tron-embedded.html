@@ -150,7 +150,7 @@ body.view-desktop .desktop{display:flex}
   <div id="mineNotice" style="display:none;margin:8px 8px 0;border:1px solid rgba(251,191,36,.32);background:rgba(251,191,36,.06);border-radius:14px;padding:10px 12px;font-family:'JetBrains Mono';font-size:11px;color:var(--gold);line-height:1.5"></div>
   <div style="display:flex;gap:9px;justify-content:center;margin:12px 8px 2px;font-family:'JetBrains Mono';font-size:11px">
     <a href="flux://enter" style="color:var(--cyan);text-decoration:none;border:1px solid var(--line);background:rgba(33,212,253,.05);border-radius:999px;padding:5px 13px">＋ new wallet</a>
-    <a href="flux://stats" style="color:var(--teal);text-decoration:none;border:1px solid var(--line);background:rgba(0,224,198,.05);border-radius:999px;padding:5px 13px">◈ node stats</a>
+    <a href="#stats" onclick="window.openStats&&window.openStats();return false" style="color:var(--teal);text-decoration:none;border:1px solid var(--line);background:rgba(0,224,198,.05);border-radius:999px;padding:5px 13px">◈ node stats</a>
   </div>
   <div class="actions">
     <div class="act"><i class="lic" data-lucide="arrow-up-from-dot"></i><span class="t">Send</span></div>
@@ -176,6 +176,7 @@ body.view-desktop .desktop{display:flex}
     <div class="gright">
       <div class="net">grid online · H 18,742</div>
       <div class="pill" title="live mine-chain height" style="border-color:rgba(0,224,198,.4)"><i class="lic" data-lucide="box" style="width:14px;height:14px;filter:none"></i><b data-blockcount style="color:var(--teal)">H …</b></div>
+      <div class="pill" title="network stats (same set as the Quillon graph dashboard)" onclick="window.openStats&&window.openStats()" style="cursor:pointer"><i class="lic" data-lucide="activity" style="width:14px;height:14px;filter:none"></i><b>stats</b></div>
       <div class="pill"><i class="lic" data-lucide="wallet" style="width:14px;height:14px;filter:none"></i><b>14,302</b> SIGIL</div>
       <div class="agentbtn"><img class="markimg" src="https://sigilgraph.fluxapp.xyz/icons/brand/sigil-cyan.png?v=1780639379"><div class="at">Ask Flux</div></div>
       <div class="avatar">◈</div>
@@ -766,6 +767,119 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   document.getElementById('send-modal').addEventListener('click',function(e){ if(e.target===this) window.closeSend(); });
   window.addEventListener('keydown',function(e){ if(e.key==='Escape') window.closeSend(); });
   if(document.readyState!=='loading') wireSend(); else document.addEventListener('DOMContentLoaded',wireSend);
+})();
+</script>
+
+<!-- Network Stats modal — the SIGIL twin of the Quillon graph dashboard stats
+     (ExplorerScreen card grid + TopBar pills). Same section names, same
+     grouped layout, SIGIL data: feed /sigil-recent-blocks.json first
+     (status{height,network_id,peers,supply,max_supply} + tip{hash,roots}),
+     /api/v1/status + /api/v1/peers + /api/v1/mine-wallet via the :9800
+     same-origin proxy. Deep-link: #stats auto-opens (sigil-top [T]). -->
+<div id="stats-modal" style="display:none;position:fixed;inset:0;z-index:10002;background:rgba(2,5,9,.82);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:18px">
+  <div style="width:100%;max-width:760px;max-height:88vh;display:flex;flex-direction:column;background:linear-gradient(160deg,#06121c,#04080c);border:1px solid rgba(33,212,253,.32);border-radius:16px;box-shadow:0 0 60px rgba(33,212,253,.18);overflow:hidden;font-family:'Rajdhani',system-ui,sans-serif">
+    <div style="flex:none;display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid rgba(33,212,253,.18);background:rgba(8,16,24,.7)">
+      <div style="font-size:20px">📊</div>
+      <div style="flex:1">
+        <div style="font-family:'Orbitron';font-weight:700;letter-spacing:1px;color:#6df3ff;font-size:15px">◈ NETWORK STATS</div>
+        <div id="nsSub" style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8">loading…</div>
+      </div>
+      <button id="nsClose" style="background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:8px;width:30px;height:30px;cursor:pointer;font-size:15px">✕</button>
+    </div>
+    <div style="flex:none;display:flex;gap:1px;background:rgba(33,212,253,.12);border-bottom:1px solid rgba(33,212,253,.14)">
+      <div style="flex:1;text-align:center;padding:10px;background:#04080c"><div id="nsHeight" style="font-family:'JetBrains Mono';font-size:20px;font-weight:600;color:#21d4fd">…</div><div style="font-size:10px;color:#5a93a8;text-transform:uppercase;letter-spacing:.5px">Current Height</div></div>
+      <div style="flex:1;text-align:center;padding:10px;background:#04080c"><div id="nsPeers" style="font-family:'JetBrains Mono';font-size:20px;font-weight:600;color:#00e0c6">…</div><div style="font-size:10px;color:#5a93a8;text-transform:uppercase;letter-spacing:.5px">Active Peers</div></div>
+      <div style="flex:1;text-align:center;padding:10px;background:#04080c"><div id="nsBps" style="font-family:'JetBrains Mono';font-size:20px;font-weight:600;color:#a78bfa">…</div><div style="font-size:10px;color:#5a93a8;text-transform:uppercase;letter-spacing:.5px">Blocks / s</div></div>
+    </div>
+    <div id="nsBody" style="flex:1;overflow-y:auto;padding:14px 18px"></div>
+  </div>
+</div>
+<script>
+(function(){
+  'use strict';
+  var modal=document.getElementById('stats-modal');
+  var poll=null, lastH=null, lastT=0, bps='—';
+  function fmtInt(n){ n=Number(n); return isFinite(n)?n.toLocaleString('en-US'):'—'; }
+  function shortHex(h){ return (h&&h.length>18)?(h.slice(0,10)+'…'+h.slice(-6)):(h||'—'); }
+  function row(label,val,color){
+    return '<div style="display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid rgba(33,212,253,.07)">'
+      +'<span style="color:#5a93a8;font-size:13px">'+label+'</span>'
+      +'<span style="font-family:\'JetBrains Mono\';font-size:12px;color:'+(color||'#d7f4ff')+';text-align:right;overflow-wrap:anywhere">'+val+'</span></div>';
+  }
+  function section(title,color,rows){
+    return '<div style="margin-bottom:16px"><div style="font-family:\'JetBrains Mono\';font-size:11px;color:'+color+';text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">'+title+'</div>'+rows.join('')+'</div>';
+  }
+  function prettyRoot(k){ return k.replace(/_?(state_)?root$/,'').replace(/_/g,' ').trim()||k; }
+  async function j(url){ try{ var r=await fetch(url,{cache:'no-store'}); return r.ok?await r.json():null; }catch(e){ return null; } }
+  async function refresh(){
+    var feed=await j('/sigil-recent-blocks.json');
+    var st=(feed&&feed.status)||await j('/api/v1/status')||{};
+    var tip=(feed&&feed.tip)||{};
+    var peersApi=await j('/api/v1/peers');
+    var mw=await j('/api/v1/mine-wallet');
+    var height=tip.height||st.height||0;
+    var peers=(peersApi&&peersApi.peer_count!=null)?peersApi.peer_count:(st.peers||0);
+    var mesh=(peersApi&&peersApi.mesh_peers!=null)?peersApi.mesh_peers:(st.mesh_peers!=null?st.mesh_peers:'—');
+    var now=Date.now();
+    if(lastH!=null&&height>lastH&&now>lastT){ bps=((height-lastH)/((now-lastT)/1000)).toFixed(1); }
+    lastH=height; lastT=now;
+    document.getElementById('nsHeight').textContent=fmtInt(height);
+    document.getElementById('nsPeers').textContent=fmtInt(peers);
+    document.getElementById('nsBps').textContent=bps;
+    document.getElementById('nsSub').textContent='network '+(st.network_id||st.network||'sigil-g0')+' · verified live feed · '+new Date().toLocaleTimeString();
+    var supply=Number(st.supply||0), maxs=Number(st.max_supply||21000000);
+    var mintedPct=maxs>0?(supply/maxs*100):0;
+    var roots=tip.roots||{};
+    var rootRows=Object.keys(roots).length
+      ? Object.entries(roots).map(function(e){ return row(prettyRoot(e[0])+' root', shortHex(String(e[1])), '#c084fc'); })
+      : [row('state roots','— (tip not loaded)','#5a93a8')];
+    var blocks=(feed&&feed.blocks)||[];
+    var txs=blocks.reduce(function(a,b){ return a+(b.tx_count||0); },0);
+    document.getElementById('nsBody').innerHTML=
+      section('Core Network Metrics','#6df3ff',[
+        row('Current Height',fmtInt(height),'#21d4fd'),
+        row('Tip Hash',shortHex(tip.hash)),
+        row('Network',(st.network_id||st.network||'sigil-g0')),
+        row('Recent Blocks · Txs',fmtInt(blocks.length)+' · '+fmtInt(txs)),
+      ])+
+      section('Network Health & Peers','#00e0c6',[
+        row('Active Peers',fmtInt(peers),peers>0?'#00e0c6':'#ff8a8a'),
+        row('Mesh Peers',String(mesh)),
+        row('Network Health',peers>0?'● Healthy':'● Isolated',peers>0?'#00e0c6':'#ff8a8a'),
+        row('Sync Status',st.status||(height>0?'synced from verified feed':'—')),
+      ])+
+      section('Quantum & Security','#c084fc',
+        rootRows.concat([
+          row('Fold Proof','2,568 B constant ∀ chain len','#c084fc'),
+          row('Post-Quantum','Ajtai/SIS · no trusted setup','#c084fc'),
+        ]))+
+      section('Supply & Economics','#fbbf24',[
+        row('Total Supply',fmtInt(supply)+' SIGIL','#fbbf24'),
+        row('Max Supply',fmtInt(maxs)+' SIGIL (hard cap)'),
+        row('Minted',mintedPct.toFixed(4)+' %','#fbbf24'),
+        row('Remaining',fmtInt(Math.max(0,maxs-supply))+' SIGIL'),
+      ])+
+      section('Mining & Hashpower','#21d4fd',[
+        row('Mining Lane','BLAKE4 Φ + VDF Ω (dual-lane)'),
+        row('Mining Wallet',shortHex(mw&&mw.mining_wallet),'#00e0c6'),
+      ]);
+  }
+  window.openStats=function(){
+    modal.style.display='flex';
+    refresh();
+    if(!poll) poll=setInterval(refresh,4000);
+  };
+  window.closeStats=function(){
+    modal.style.display='none';
+    if(poll){ clearInterval(poll); poll=null; }
+    if(location.hash==='#stats') history.replaceState(null,'',location.pathname+location.search);
+  };
+  document.getElementById('nsClose').addEventListener('click',window.closeStats);
+  modal.addEventListener('click',function(e){ if(e.target===modal) window.closeStats(); });
+  window.addEventListener('keydown',function(e){ if(e.key==='Escape') window.closeStats(); });
+  function maybeOpen(){ if(location.hash==='#stats') window.openStats(); }
+  window.addEventListener('hashchange',maybeOpen);
+  if(document.readyState!=='loading') maybeOpen(); else document.addEventListener('DOMContentLoaded',maybeOpen);
 })();
 </script>
 </body></html>

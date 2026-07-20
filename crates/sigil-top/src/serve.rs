@@ -197,7 +197,12 @@ fn serve_file(dir: &PathBuf, safe: &str) -> (&'static str, Vec<u8>, &'static str
         }
     }
 
-    // 3. Built-in wallet — compiled into the binary
+    // 3. Built-in wallet — compiled into the binary. Carries the #stats
+    // network-stats modal (the Quillon-dashboard-equivalent stat set,
+    // deep-linked by sigil-top's [T] shortcut). NOTE: the flux wrapper
+    // cache keys only .rs sources, so an edit to the embedded HTML alone
+    // does NOT rebuild this unit — touch this file's content alongside
+    // any gui/sigil-wallet-tron-embedded.html change.
     if safe == "sigil-wallet-tron.html" || safe.ends_with("/sigil-wallet-tron.html") {
         let html = include_str!("../../../gui/sigil-wallet-tron-embedded.html");
         return ("200 OK", html.as_bytes().to_vec(), "text/html; charset=utf-8");

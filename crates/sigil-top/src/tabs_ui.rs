@@ -92,10 +92,8 @@ pub(crate) fn render_tab_bar(app: &App) -> Paragraph<'static> {
     };
     let mut spans = vec![Span::raw(" ")];
     spans.extend(tab("Node", "1", Tab::Node));
-    spans.extend(tab("Swarm AI", "2", Tab::SwarmAi));
-    spans.extend(tab("Results", "3", Tab::Results));
-    spans.extend(tab("Sync Log", "4", Tab::SyncLog));
-    spans.extend(tab("Mining", "5", Tab::Mining));
+    spans.extend(tab("Sync Log", "2", Tab::SyncLog));
+    spans.extend(tab("Mining", "3", Tab::Mining));
     spans.push(Span::styled(" · Tab cycles", Style::default().fg(C_DIM)));
     Paragraph::new(Line::from(spans))
 }
@@ -243,8 +241,6 @@ pub(crate) fn draw_ui(f: &mut Frame, app: &App) {
             draw_mining_hero(f, app, hero_mining);
             draw_node_body(f, app, cards_area);
         }
-        Tab::SwarmAi => f.render_widget(render_swarm_ai(app), body_area),
-        Tab::Results => f.render_widget(render_results(app), body_area),
         Tab::SyncLog => f.render_widget(render_sync_log(app), body_area),
         Tab::Mining => draw_mining_tab(f, app, body_area),
     }

@@ -3485,12 +3485,10 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                             KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return Ok(()),
                             KeyCode::Char('r') | KeyCode::Char('R') => { app.refresh(); app.toast_sticky = false; }
                             // v0.13: tab switching — Tab cycles, 1/2/3 jump
-                            KeyCode::Tab | KeyCode::BackTab => { app.tab = app.tab.next(); app.load_swarm(); }
+                            KeyCode::Tab | KeyCode::BackTab => { app.tab = app.tab.next(); }
                             KeyCode::Char('1') => { app.tab = Tab::Node; }
-                            KeyCode::Char('2') => { app.tab = Tab::SwarmAi; app.load_swarm(); }
-                            KeyCode::Char('3') => { app.tab = Tab::Results; app.load_swarm(); }
-                            KeyCode::Char('4') => { app.tab = Tab::SyncLog; }
-                            KeyCode::Char('5') => { app.tab = Tab::Mining; }
+                            KeyCode::Char('2') => { app.tab = Tab::SyncLog; }
+                            KeyCode::Char('3') => { app.tab = Tab::Mining; }
                             KeyCode::Char('y') | KeyCode::Char('Y') => { app.resync(); app.toast_sticky = false; }
                             KeyCode::Char('m') | KeyCode::Char('M') => { app.toggle_engine_mining(); }
                             KeyCode::Char('g') | KeyCode::Char('G') if app.tab == Tab::Mining => {
@@ -3728,11 +3726,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                 app.request_refresh();
             }
             // v0.13: keep the Swarm AI / Results board live (2s) while it's on screen.
-            if matches!(app.tab, Tab::SwarmAi | Tab::Results)
-                && app.last_swarm_load.elapsed() >= Duration::from_secs(2)
-            {
-                app.load_swarm();
-            }
+            // v7.0.13: Swarm AI / Results tabs removed — no periodic swarm reload needed.
             // v0.10.5.1: embedded-serve watchdog — if the :9800 wallet server died,
             // restart it so the local wallet/[W] never silently goes dark. Probe is
             // throttled to 15s and only blocks (briefly) in the rare dead case.
@@ -4019,14 +4013,12 @@ fn render_update_splash(frame: u8) -> Paragraph<'static> {
 use flux_miner::engine::{self, MinerStats};
 
 #[derive(Clone, Copy, PartialEq)]
-enum Tab { Node, SwarmAi, Results, SyncLog, Mining }
+enum Tab { Node, SyncLog, Mining }
 
 impl Tab {
     fn next(self) -> Tab {
         match self {
-            Tab::Node => Tab::SwarmAi,
-            Tab::SwarmAi => Tab::Results,
-            Tab::Results => Tab::SyncLog,
+            Tab::Node => Tab::SyncLog,
             Tab::SyncLog => Tab::Mining,
             Tab::Mining => Tab::Node,
         }

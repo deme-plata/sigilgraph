@@ -239,15 +239,29 @@ pub(crate) fn render_sync_log(app: &App) -> Paragraph<'static> {
     let (badge, bcol) = if stale {
         (sa(format!(" (STALE){}", s.last_tip_at.map(|t| format!(" ({}s)", t.elapsed().as_secs())).unwrap_or_default())), C_RED)
     } else { (sa(" ● LIVE"), C_GREEN) };
+    let pct = if tip > 0 { (s.blocks_synced as f64 / tip as f64 * 100.0).clamp(0.0, 100.0) } else { 0.0 };
     lines.push(Line::from(vec![
         Span::styled(sa(" ▸ SYNC STATE"), Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
         Span::styled(badge, Style::default().fg(bcol).add_modifier(Modifier::BOLD)),
+        Span::raw(sa("   ")), Span::styled(format!("{pct:5.1}%"), Style::default().fg(if pct >= 99.9 { C_GREEN } else { C_GOLD }).add_modifier(Modifier::BOLD)),
     ]));
+    // v7.0.13: a real progress bar so you can see position at a glance, not just the number.
+    let barw = 46usize;
+    let filled = ((pct / 100.0) * barw as f64).round() as usize;
+    let bar: String = std::iter::repeat('█').take(filled).chain(std::iter::repeat('░').take(barw.saturating_sub(filled))).collect();
+    lines.push(Line::from(vec![
+        Span::raw(sa("  ")), Span::styled(bar, Style::default().fg(if pct >= 99.9 { C_GREEN } else { C_CYAN })),
+    ]));
+    let eta = if app.p2p_rate >= 1.0 && gap > 0 {
+        let secs = gap as f64 / app.p2p_rate; let h = (secs / 3600.0) as u64; let m = ((secs % 3600.0) / 60.0) as u64;
+        if h > 0 { format!("{h}h {m}m") } else { format!("{m}m") }
+    } else if gap == 0 { "—".into() } else { "…".into() };
     lines.push(Line::from(vec![
         Span::raw(sa("  height ")), Span::styled(group(s.blocks_synced), Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
         Span::raw(sa("  tip ")), Span::styled(group(tip), Style::default().fg(C_CYAN)),
         Span::raw(sa("  gap ")), Span::styled(group(gap), Style::default().fg(if gap < 8 { C_GREEN } else { C_GOLD })),
         Span::raw(sa("  rate ")), Span::styled(format!("{:.0} blk/s", app.p2p_rate), Style::default().fg(C_CYAN)),
+        Span::raw(sa("  eta ")), Span::styled(sa(eta), Style::default().fg(C_DIM)),
     ]));
     // v0.57 (LANE-M): label honestly. In recent-window (light) mode `verified` is anchored at the
     // checkpoint base — a tip-proof, NOT a spine linked to genesis — so don't call it "verified
@@ -270,6 +284,18 @@ pub(crate) fn render_sync_log(app: &App) -> Paragraph<'static> {
         (sa("  mode ⛓ FULL ARCHIVE — genesis→tip, holds everything ([F] = light monitor)"), C_GOLD)
     };
     lines.push(Line::from(Span::styled(mlabel, Style::default().fg(mcol))));
+    // v7.0.13: say WHY it's stuck (or that it's healthy) up front, instead of burying it in the tail.
+    if let Some((h, reason)) = &s.sync_failure {
+        lines.push(Line::from(Span::styled(sa(format!("  ✗ SPINE BREAK — STUCK at h={h}: {}", trunc(reason, 88))), Style::default().fg(C_RED).add_modifier(Modifier::BOLD))));
+    } else if let Some(b) = &s.verify_break {
+        lines.push(Line::from(Span::styled(sa(format!("  ⚠ spine break: {}", trunc(b, 98))), Style::default().fg(C_RED))));
+    } else if !s.stall_reason.is_empty() {
+        lines.push(Line::from(Span::styled(sa(format!("  ⚠ stalled: {}", trunc(&s.stall_reason, 98))), Style::default().fg(C_GOLD))));
+    } else if gap < 8 && !stale {
+        lines.push(Line::from(Span::styled(sa("  ✓ healthy — at tip, spine advancing, no breaks"), Style::default().fg(C_GREEN))));
+    } else {
+        lines.push(Line::from(Span::styled(sa("  ⬇ syncing — spine advancing, no breaks detected"), Style::default().fg(C_CYAN))));
+    }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(" ▸ SYNC LOG  (newest at bottom)", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
     let path = std::env::var("HOME").map(|h| format!("{h}/.sigil-top.log")).unwrap_or_else(|_| "sigil-top.log".into());
@@ -280,7 +306,7 @@ pub(crate) fn render_sync_log(app: &App) -> Paragraph<'static> {
         .filter(|l| l.contains("[DBG]") || l.contains("[PANIC]") || l.contains("[sync]")
             || l.contains("[tipfetch]") || l.contains("[D]") || l.contains("[p2p-sync]")
             || l.contains("[tip]") || l.contains("[render]"))
-        .take(26)
+        .take(44)
         .map(|l| l.to_string())
         .collect();
     if recent.is_empty() {

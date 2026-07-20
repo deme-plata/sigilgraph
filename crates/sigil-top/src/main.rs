@@ -4242,7 +4242,13 @@ fn light_boot_store_limit_bytes() -> u64 {
             return if mb == 0 { u64::MAX } else { mb.saturating_mul(1024 * 1024) };
         }
     }
-    if cfg!(windows) { 512 * 1024 * 1024 } else { 1536 * 1024 * 1024 }
+    // v7.0.12: was 512 MiB (Windows) / 1.5 GiB (Linux) — FAR too low. A full-archive store is
+    // several GB, so it ALWAYS exceeded the cap → the dashboard booted on a throwaway VOLATILE
+    // store every launch → the sync NEVER persisted and re-synced from 0 on every update ("doesn't
+    // resume"). 64 GiB opens the REAL persistent store for any realistic archive; the 20s
+    // open-timeout still catches a genuinely-stuck open, and SIGIL_TOP_BOOT_STORE_LIMIT_MB=0
+    // disables the cap entirely.
+    64u64 * 1024 * 1024 * 1024
 }
 
 fn dir_size_capped(path: &str, cap: u64) -> std::io::Result<u64> {

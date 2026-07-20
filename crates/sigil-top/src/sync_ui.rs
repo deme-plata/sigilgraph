@@ -156,6 +156,42 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
             dim("   fetched "), Span::styled(group(s.fetched_total), Style::default().fg(C_GREEN)),
             pos,
         ]),
+        // v7.0.4: explicit DATA-INTEGRITY verdict — this node's OWN independent
+        // verification of everything it holds. Honest scope: header spine parent-linked
+        // back to genesis + the fold checkpoint + the tip fingerprint — NOT a full state
+        // re-execution (a light/verifying client does not recompute every balance).
+        {
+            let (itxt, icol) = if s.verify_break.is_some() {
+                (format!("⛓ INTEGRITY BROKEN — {}", s.verify_break.as_deref().unwrap_or("spine break")), C_RED)
+            } else if synced {
+                (format!("⛓ INTEGRITY VERIFIED — genesis→{} spine · fold ✓ · tip-fp ✓ (verified here, no trusted peer)", group(spine)), C_NEON_GREEN)
+            } else if fold_ok {
+                (format!("⛓ verifying integrity — spine {} / tip {} · fold ✓", group(spine), group(net_tip)), C_GOLD)
+            } else if light {
+                (format!("⛓ tip integrity — 10ms tip-proof {}", if fold_ok { "✓" } else { "…" }), C_NEON_CYAN)
+            } else {
+                (format!("⛓ verifying integrity — spine {} / tip {}", group(spine), group(net_tip)), C_DIM)
+            };
+            Line::from(vec![Span::styled(itxt, Style::default().fg(icol).add_modifier(Modifier::BOLD))])
+        },
+        // v7.0.4: NETWORK HEALTH gauge (Quillon k-parameter style, honest). SIGIL's
+        // DagKnight is parameterless, so rather than fake a DagKnight-k the client can't
+        // compute, this is the decentralization/health THIS node observes: connected
+        // peers + liveness. A single-producer testnet honestly reads CENTRALIZED — we do
+        // not paint decentralization that isn't there.
+        {
+            let live = kf_rate >= 1.0 || s.commit_rate >= 1.0 || (following && s.verify_break.is_none());
+            let obs = s.peer_count.max(mesh); // producers/peers this node actually sees
+            let (phase, pcol) = if obs >= 8 { ("DECENTRALIZED", C_NEON_GREEN) }
+                else if obs >= 3 { ("EMERGING", C_GOLD) }
+                else { ("CENTRALIZED · single-producer", C_NEON_PINK) };
+            Line::from(vec![
+                Span::styled("◈ NETWORK HEALTH ", Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+                Span::styled(phase, Style::default().fg(pcol).add_modifier(Modifier::BOLD)),
+                dim("   peers "), Span::styled(format!("{}", obs), Style::default().fg(if obs >= 1 { C_NEON_GREEN } else { C_RED })),
+                dim("   "), Span::styled(if live { "● live" } else { "○ stalled" }, Style::default().fg(if live { C_NEON_GREEN } else { C_RED }).add_modifier(Modifier::BOLD)),
+            ])
+        },
     ];
     f.render_widget(Paragraph::new(tlines), tele);
 

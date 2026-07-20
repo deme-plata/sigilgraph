@@ -238,7 +238,7 @@ pub(crate) fn draw_ui(f: &mut Frame, app: &App) {
             // v0.33.3: SYNC full-width HERO band on top; v0.36.1: an equally-large MINING hero
             // (network power + personal mining) right below it; the other cards flow beneath.
             let [hero_sync, hero_mining, cards_area] =
-                Layout::vertical([Constraint::Length(9), Constraint::Length(9), Constraint::Min(0)]).areas(body_area);
+                Layout::vertical([Constraint::Length(11), Constraint::Length(9), Constraint::Min(0)]).areas(body_area);
             draw_sync_hero(f, app, hero_sync);
             draw_mining_hero(f, app, hero_mining);
             draw_node_body(f, app, cards_area);
@@ -450,6 +450,7 @@ pub(crate) fn render_footer(app: &App) -> Paragraph<'static> {
     kb.extend(keys("[V]", "erify", C_GREEN));
     kb.extend(keys("[Y]", "esync", C_CYAN));
     kb.extend(keys("[W]", "allet", C_CYAN));
+    kb.extend(keys("[T]", "stats", C_CYAN));
     kb.extend(keys("[B]", "locks", C_CYAN));
     kb.extend(keys("[U]", "pdate", C_VBRIGHT));
     kb.extend(keys("[C]", "ortex", C_GOLD));

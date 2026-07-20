@@ -110,6 +110,14 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
             return;
         }
     };
+    // MINER DISCIPLINE (v7.0.5): exactly ONE share per height. Only one submission per
+    // mine-tip can ever be accepted (each accept IS the next block), so submitting more
+    // than one share for the same height just floods "stale height" rejects — which is
+    // exactly what trivial difficulty produces, since a solve finishes far faster than
+    // the ~3s tip cadence. Track the last height we've already spent and hold (cheap
+    // re-poll) until the tip actually advances, so the miner emits one clean accepted
+    // share per block instead of a storm of doomed submits.
+    let mut last_spent_height: u64 = u64::MAX;
     while !stop.load(Ordering::Relaxed) {
         let c = match client.fetch_challenge() {
             Ok(c) => c,
@@ -123,6 +131,12 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
                 continue;
             }
         };
+        // Already submitted for this exact tip → the tip hasn't moved yet. Don't burn a
+        // doomed stale share; wait briefly and re-check the tip.
+        if c.height == last_spent_height {
+            thread::sleep(Duration::from_millis(250));
+            continue;
+        }
         let t0 = Instant::now();
         let block = solve(&c, &wallet, &g); // Lane A nonce search + Lane B VDF
         let dt = t0.elapsed().as_secs_f64().max(1e-9);
@@ -145,11 +159,18 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
             match res {
                 Ok(r) if r.accepted => {
                     s.shares_ok += 1;
+                    last_spent_height = c.height; // don't resubmit — the tip advances now
                     push_log(&mut s.log, format!("✓ h={:<8} {:>6.0}ms  ACCEPTED", c.height, dt * 1000.0));
                 }
                 Ok(r) => {
                     s.shares_bad += 1;
-                    push_log(&mut s.log, format!("✗ h={:<8} rejected: {}", c.height, r.reason.unwrap_or_default()));
+                    let reason = r.reason.unwrap_or_default();
+                    // A stale/tip-moved reject means this height is gone — mark it spent so
+                    // we advance to the real tip instead of re-solving a dead height.
+                    if reason.contains("stale") || reason.contains("mineable tip") {
+                        last_spent_height = c.height;
+                    }
+                    push_log(&mut s.log, format!("✗ h={:<8} rejected: {}", c.height, reason));
                 }
                 Err(e) => {
                     s.shares_bad += 1;
@@ -301,6 +322,9 @@ pub fn gpu_mining_loop(
         }
     };
 
+    // MINER DISCIPLINE (v7.0.5): one share per height — see mining_loop. Same guard on
+    // the GPU path so it doesn't flood stale submits when the tip hasn't advanced.
+    let mut last_spent_height: u64 = u64::MAX;
     while !stop.load(Ordering::Relaxed) {
         let c = match client.fetch_challenge() {
             Ok(c) => c,
@@ -314,6 +338,10 @@ pub fn gpu_mining_loop(
                 continue;
             }
         };
+        if c.height == last_spent_height {
+            thread::sleep(Duration::from_millis(250));
+            continue;
+        }
         let header = build_header(&c, &wallet);
         let t0 = Instant::now();
         let mut nonce_base = 0u64;
@@ -376,11 +404,16 @@ pub fn gpu_mining_loop(
             match res {
                 Ok(r) if r.accepted => {
                     s.shares_ok += 1;
+                    last_spent_height = c.height;
                     push_log(&mut s.log, format!("✓ h={:<8} {:>6.0}ms  GPU ACCEPTED", c.height, dt * 1000.0));
                 }
                 Ok(r) => {
                     s.shares_bad += 1;
-                    push_log(&mut s.log, format!("✗ h={:<8} rejected: {}", c.height, r.reason.unwrap_or_default()));
+                    let reason = r.reason.unwrap_or_default();
+                    if reason.contains("stale") || reason.contains("mineable tip") {
+                        last_spent_height = c.height;
+                    }
+                    push_log(&mut s.log, format!("✗ h={:<8} rejected: {}", c.height, reason));
                 }
                 Err(e) => {
                     s.shares_bad += 1;

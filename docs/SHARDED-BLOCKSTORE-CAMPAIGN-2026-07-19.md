@@ -73,3 +73,27 @@ is lifted and a live profile shows the sync loop waiting on
 `commit_batch_durable`, ship the `Store` facade WITH the fetch pipeline and
 re-measure the deployed sync rate. Every prerequisite on the storage side is
 now built, audited, and rehearsed.
+
+## Addendum 2026-07-20 — throttle lift DEPLOYED LIVE + RULE-0 measure
+
+The trigger's condition #1 is now LIVE, not just landed: the branch binaries
+(serve throttle removed + immutable-range serve-cache + windowed request-ahead
+fetch, sigil-node/sigil-top release build of 2026-07-19 HEAD) were deployed to
+the sole producer (operator-approved restart 06:41; exact prior bytes kept at
+`target/release/sigil-node.bak-live-20260719`). Boot replay of the 30.2M-block
+chain took 7.8 min; production resumed with a byte-identical wallet state root;
+zero panics.
+
+**LIVE sync measure (fresh follower vs live producer, 3-min sustained):**
+
+| | blk/s |
+|---|---|
+| old live baseline (June, throttled serve + serial fetch) | 144 |
+| local smoke (2026-07-19, small chain, concurrent production) | ~1,360 |
+| **LIVE post-lift (2026-07-20, 2.76M blocks applied in 3 min)** | **15,348** |
+
+~107× the old live baseline. The producer minted uninterrupted while serving
+the full-rate backfill (serve-cache filling on first cold sweep). Next step
+for the Store-facade trigger (condition #2): profile WHERE the follower's
+15.3k/s loop waits — wire, verify, or commit — against the 251k–2.5M/s local
+commit-pipeline bench. If it waits on commit, the ShardedDb wiring fires.

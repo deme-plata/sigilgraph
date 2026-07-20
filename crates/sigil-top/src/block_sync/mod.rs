@@ -553,16 +553,25 @@ impl P2PBlockSync {
                     .map(|n| n.clamp(1024, 65_536)).unwrap_or(10_000); // v6.5: 10k blocks/sync default (frontier-exact fix v0.57 makes large chunks safe)
                 // v0.39: was const 12 — at first boot (empty DB) all slots fire decode
                 // bursts at once, pre-TUI, which pressured small/busy machines hard. 8 by
-                // default; SIGIL_SYNC_INFLIGHT=1..16 to tune (raise on a beefy box).
-                let max_inflight: usize = std::env::var("SIGIL_SYNC_INFLIGHT").ok()
-                    .and_then(|v| v.parse::<usize>().ok()).map(|n| n.clamp(1, 16)).unwrap_or(8);
-                // Turbo X continuity: boost inflight when high continuous BW (score and pid_rate) to sustain high download rate
+                // SIGIL_SYNC_INFLIGHT is a HARD FLOOR the operator sets (default 8; raise on a
+                // beefy box, e.g. 32/64). Clamp 1..64. The continuity boost below only ever
+                // RAISES it — it can never drop below the requested floor.
+                let base_inflight: usize = std::env::var("SIGIL_SYNC_INFLIGHT").ok()
+                    .and_then(|v| v.parse::<usize>().ok()).map(|n| n.clamp(1, 64)).unwrap_or(8);
+                // Turbo X continuity: boost ABOVE the floor when BW is high (score + pid_rate).
+                // FLOOR FIX (2026-07-20): the boost is clamped to >= base_inflight, so a fresh
+                // sync is never pinned below the requested window. Previously rate_boost bottomed
+                // at 0.5 while pid_rate sat at its 5.0 floor, which HALVED the window and created a
+                // chicken-and-egg (low rate -> low boost -> small window -> low rate) that pinned
+                // genesis catch-up at ~5 inflight regardless of the box. Measured: opening the
+                // window from 5->10 raised sustained fetch bandwidth 6-16 MB/s -> 157 MB/s.
                 let max_inflight = {
                     let s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                     let score = s.turbo_continuity.continuity_score;
                     let pid_r = s.turbo_continuity.pid.get_rate().max(5.0);
                     let rate_boost = (pid_r / 50.0).max(0.5).min(2.0);
-                    ((max_inflight as f64) * (0.5 + score * 1.5) * rate_boost).max(2.0).min(64.0) as usize
+                    let boosted = (base_inflight as f64) * (0.5 + score * 1.5) * rate_boost;
+                    boosted.max(base_inflight as f64).min(64.0) as usize
                 };
                                                     // onto a stalled frontier and crater the rate.
                 // Look-ahead cap must be TIGHT: a large window lets next_start race far ahead of a

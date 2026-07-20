@@ -84,8 +84,12 @@ fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Optio
     let req = String::from_utf8_lossy(&buf[..n]);
     let first_line = req.lines().next().unwrap_or("GET / HTTP/1.1");
     let mut parts = first_line.split_whitespace();
-    let _method = parts.next().unwrap_or("GET");
+    let method = parts.next().unwrap_or("GET").to_string();
     let path = parts.next().unwrap_or("/");
+    // v7.0.10-fix: capture the request body so POSTs (e.g. /api/v1/send) proxy correctly. The
+    // old proxy hardcoded GET + dropped the body, so every wallet Send hit the node as a GET →
+    // "unknown route". Body follows the blank line after the headers (small JSON, one read).
+    let req_body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
 
     // /api/* → LOCAL-FIRST. If this node has a verified-spine view that can answer the
     // request (blocks / status / aether-verify / cortex / peers), serve it locally
@@ -105,7 +109,7 @@ fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Optio
                 return;
             }
         }
-        let (status, body, ct) = proxy_api(path);
+        let (status, body, ct) = proxy_api(&method, path, &req_body);
         let resp = format!(
             "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
             body.len()
@@ -235,7 +239,7 @@ fn serve_file(dir: &PathBuf, safe: &str) -> (&'static str, Vec<u8>, &'static str
 /// Node = `SIGIL_NODE_URL` env (point at a LOCAL node), else the public sigil-rpcd.
 /// The node speaks plain HTTP, so this works from the http://localhost wallet with
 /// no CORS / mixed-content issues. sigil-rpcd strips `/api/v1` itself.
-fn proxy_api(path_and_query: &str) -> (&'static str, Vec<u8>, &'static str) {
+fn proxy_api(method: &str, path_and_query: &str, req_body: &str) -> (&'static str, Vec<u8>, &'static str) {
     let node = std::env::var("SIGIL_NODE_URL")
         .unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:8099".into());
     let hostport = node
@@ -259,8 +263,11 @@ fn proxy_api(path_and_query: &str) -> (&'static str, Vec<u8>, &'static str) {
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(6)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(6)));
+    // v7.0.10-fix: forward the REAL method + body (was hardcoded GET) so POST /api/v1/send etc.
+    // reach the node's POST routes instead of falling through to "unknown route".
     let req = format!(
-        "GET {path_and_query} HTTP/1.1\r\nHost: {host}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+        "{method} {path_and_query} HTTP/1.1\r\nHost: {host}\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{req_body}",
+        req_body.len()
     );
     if stream.write_all(req.as_bytes()).is_err() {
         return (

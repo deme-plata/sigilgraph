@@ -6,6 +6,9 @@ description = "SIGIL private transfers (P1): post-quantum shielded notes on Latt
 
 [dependencies]
 flux-lattice-guard = { path = "../../../flux/crates/flux-lattice-guard" }
+# Transparent, ceremony-free zk-STARK — no trusted setup (the reason it's the mainnet-
+# safe validity engine). Real library, actually invoked (unlike Quillon's dead dep).
+winterfell = "0.9"
 blake3 = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

@@ -26,6 +26,7 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 
 pub mod circuit;
+pub mod stark;
 pub mod ring;
 
 /// Errors surfaced by the shield prover/verifier.

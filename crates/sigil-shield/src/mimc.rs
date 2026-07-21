@@ -47,7 +47,7 @@ pub fn round_constants() -> [BaseElement; TRACE_LEN] {
     out
 }
 
-fn pow7(x: BaseElement) -> BaseElement {
+pub fn pow7(x: BaseElement) -> BaseElement {
     let x2 = x * x;
     let x4 = x2 * x2;
     x4 * x2 * x // x⁶ · x = x⁷
@@ -194,7 +194,7 @@ pub fn mimc_options() -> ProofOptions {
 
 /// Verifier accept threshold. 90-bit conjectured floor — reached with the options above on
 /// this trace; production pins both to ≥100 once the full path AIR sets the trace length.
-const ACCEPT_BITS: u32 = 90;
+pub const ACCEPT_BITS: u32 = 90;
 
 type Coin = DefaultRandomCoin<Blake3_256<BaseElement>>;
 

@@ -1474,12 +1474,16 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             };
             let eh = n.height;
             // POOL-SHARES: the block reward is split proportionally over this
-            // height's accepted shares; the winner's solve counts as a share and
-            // absorbs the integer remainder (exact conservation — see
-            // distribute_block_reward). Empty window (solo miner, or pool OFF)
-            // degrades to exactly the old winner-takes-all credit.
+            // height's accepted shares; the winner's solve is credited at its TRUE
+            // work-weight — one full-difficulty solve ≈ 2^ease share-grade solves —
+            // and absorbs the integer remainder (exact conservation — see
+            // distribute_block_reward). This keeps a share-less solo miner (old
+            // client) fairly paid when it wins: with weight 1 it would get
+            // ~1/(window+1) of its own block. Empty window (solo miner, or pool
+            // OFF) degrades to exactly the old winner-takes-all credit.
+            let winner_weight: u64 = 1u64 << n.share_ease.min(32);
             let mut window = n.share_window.clone();
-            *window.entry(miner).or_insert(0) += 1;
+            *window.entry(miner).or_insert(0) += winner_weight;
             match distribute_block_reward(&mut n.state, eh, miner, reward, &window) {
                 Ok((bal, _credited)) => {
                     n.share_window.clear();

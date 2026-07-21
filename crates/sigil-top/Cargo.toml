@@ -7,7 +7,7 @@ name = "sigil-top"
 # v4.1-era store opened by v6) used to block forever at "opening block store"; the open
 # now runs under a watchdog timeout (SIGIL_TOP_OPEN_TIMEOUT_SECS, default 20s) and falls
 # back to a clean store instead of wedging the node.
-version = "7.0.21"
+version = "7.0.22"
 edition.workspace = true
 license.workspace = true
 description = "sigil-top — a SIGIL lightweight node + dual-mode (lite scorecard ↔ full dashboard) terminal monitor. v0.9.0 'Verifying Full Sync': downloads the chain genesis→tip over the sigil-g0 P2P mesh AND verifies it as one connected spine (per-header precheck + parent_hash linkage back to genesis), with a persisted verified_to watermark. New `full-sync` (headless sync-and-verify, exit 0 at tip) and `verify-chain` (re-verify the local store) subcommands; TUI surfaces the ⛓ verified-spine height + ⚠ spine-break alarm distinct from raw download progress."

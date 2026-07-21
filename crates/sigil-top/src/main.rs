@@ -3226,9 +3226,13 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // console BLANK for up to a minute — which reads as a bricked node (the v7.0.16 incident).
     // Print a plain-stdout status first so the app is visibly alive during the open; the TUI's
     // alt-screen clears it on the first frame.
-    println!("\n  \u{25c7} SIGIL v{} — opening local block store…\n  (first run or a large store may take a moment; a wedged store auto-falls-back to a clean one)\n",
+    println!("\n  \u{25c7} SIGIL v{} — opening local block store…\n  (a large store may compact here for a few minutes; a wedged store auto-falls-back to a clean one)\n",
         env!("CARGO_PKG_VERSION"));
     let _ = std::io::Write::flush(&mut std::io::stdout());
+    // v7.0.19: flux-db compaction progress goes to raw stderr, which corrupts the TUI's
+    // alternate screen ("[flux-db] compact L1->L2 ..." painted over the dashboard). Quiet
+    // the chatter (errors still print) for this process before the store opens.
+    std::env::set_var("FLUX_DB_QUIET", "1");
     boot_trace(&format!("opening block store path={db_path} mode=nonblocking want_sync={want_sync}"));
     let mut block_store = if let Some(bytes) = oversized_primary {
         let volatile = std::env::temp_dir()
@@ -3259,8 +3263,14 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
         // v4.1-era store met by v6) is no longer fatal — the watchdog converts it to
         // an Err after SIGIL_TOP_OPEN_TIMEOUT_SECS (default 20) so we fall back to a
         // clean store instead of sitting forever at "opening block store".
+        // v7.0.19: 20s → 180s. A legitimate L1→L2 compaction on a grown store (measured:
+        // 1954 tables / 2.6 GiB on a real user store) takes well over 20s — the watchdog
+        // declared the open HUNG and silently fell back to an EMPTY temp store, which
+        // reads as "my sync reset to 0" (spine #1) while the real store sits abandoned on
+        // disk. The never-blank splash makes the wait visible, so a foreign/wedged store
+        // (the case 20s was for) still falls back — just three minutes later, correctly.
         let open_timeout = std::env::var("SIGIL_TOP_OPEN_TIMEOUT_SECS")
-            .ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(20);
+            .ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(180);
         match block_store::BlockStore::open_with_timeout(&db_path, open_timeout) {
             Ok(s) => s,
             Err(primary) => {

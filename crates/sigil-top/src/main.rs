@@ -3219,8 +3219,27 @@ fn open_store_with_fallbacks(db_path: &str, want_sync: bool) -> Result<(block_st
         // v6→v7.0.19: a HANG opening the primary (foreign format) falls back after the
         // watchdog; 180s default so a legitimate multi-minute compaction isn't mistaken
         // for a hang (the v7.0.19 "sync reset to 0" incident).
+        // v7.0.23 SIZE-AWARE: 180s was STILL too short once a real archive grew to ~14M
+        // blocks — the watchdog abandoned a multi-GB store mid-open and silently restarted
+        // the sync from genesis on an empty temp store (the operator's "spine reset to
+        // 240k" incident). A fixed timeout can never scale with store size, so: a LARGE
+        // store (>256 MB — hours of sync investment) is NEVER abandoned; we wait as long
+        // as it takes (the engine's "opening local block store — mesh already dialing"
+        // status + the dial-while-opening mesh make the wait visible and productive).
+        // The 180s fallback remains only for SMALL stores, where a foreign/corrupt hang
+        // is the likelier explanation and a re-sync is cheap.
         let open_timeout = std::env::var("SIGIL_TOP_OPEN_TIMEOUT_SECS")
-            .ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(180);
+            .ok().and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or_else(|| {
+                const BIG_STORE_BYTES: u64 = 256 * 1024 * 1024;
+                match dir_size_capped(db_path, BIG_STORE_BYTES) {
+                    Ok(bytes) if bytes > BIG_STORE_BYTES => {
+                        boot_trace(&format!("store is >{} bytes — open watchdog DISABLED (never abandon a big archive)", BIG_STORE_BYTES));
+                        u64::MAX / 4 // effectively: wait for the open, however long
+                    }
+                    _ => 180,
+                }
+            });
         match block_store::BlockStore::open_with_timeout(db_path, open_timeout) {
             Ok(s) => s,
             Err(primary) => {

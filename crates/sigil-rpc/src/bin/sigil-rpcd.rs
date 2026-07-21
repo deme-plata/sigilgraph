@@ -1437,16 +1437,18 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 // Same height/header/VDF binding, easier Lane-A target. Recorded
                 // into this height's payout window, credited when the block lands.
                 if share_target > 0 && check_submission_at(&g, &c, &sub, share_target) {
+                    // Caps first (a capped submit must not grow the dedup set),
+                    // then dedup, then count.
+                    if n.share_window.get(&miner).copied().unwrap_or(0) >= SHARE_WALLET_CAP {
+                        return reject("per-wallet share cap reached for this height".into());
+                    }
+                    if n.share_seen.len() >= SHARE_GLOBAL_CAP {
+                        return reject("share window full for this height".into());
+                    }
                     if !n.share_seen.insert((miner, sub.block.nonce)) {
                         return reject("duplicate share (nonce already credited this height)".into());
                     }
-                    if n.share_seen.len() > SHARE_GLOBAL_CAP {
-                        return reject("share window full for this height".into());
-                    }
                     let cnt = n.share_window.entry(miner).or_insert(0);
-                    if *cnt >= SHARE_WALLET_CAP {
-                        return reject("per-wallet share cap reached for this height".into());
-                    }
                     *cnt += 1;
                     let shares = *cnt;
                     return ok(format!(

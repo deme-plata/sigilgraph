@@ -115,6 +115,32 @@ pub fn mine_dual<G: VdfGroup>(header: &[u8], target: u64, vdf_t: u64, g: &G) -> 
     DualLaneBlock { header: header.to_vec(), nonce, blake4_hash, vdf }
 }
 
+/// POOL-SHARES: a bounded, RESUMABLE Lane-A search. Grinds at most `budget`
+/// nonces starting at `base`; on a hit returns the assembled block plus the next
+/// base to resume from, on a miss returns the advanced base. Pool mode needs
+/// this because one height yields MANY shares: each found share is submitted and
+/// the search continues from where it stopped (restarting at 0 would re-find the
+/// same nonce forever), and the budget keeps the loop responsive to tip changes.
+pub fn mine_dual_from<G: VdfGroup>(
+    header: &[u8],
+    target: u64,
+    vdf_t: u64,
+    g: &G,
+    base: u64,
+    budget: u64,
+) -> (Option<DualLaneBlock>, u64) {
+    let mut b = base;
+    while b.wrapping_sub(base) < budget {
+        let words = pow::blake4_words_x8(header, b);
+        if let Some(i) = words.iter().position(|&w| w <= target) {
+            let nonce = b.wrapping_add(i as u64);
+            return (Some(block_for_nonce(header, nonce, g, vdf_t)), nonce.wrapping_add(1));
+        }
+        b = b.wrapping_add(8);
+    }
+    (None, b)
+}
+
 /// Assemble a [`DualLaneBlock`] for an ALREADY-FOUND BLAKE4 nonce (e.g. one the
 /// GPU Lane-A search returned): recompute the BLAKE4 hash + run the VDF (Lane B)
 /// over it. The node's [`verify_dual`] re-checks both lanes with [`blake4`], so a

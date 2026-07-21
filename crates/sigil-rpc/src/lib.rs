@@ -295,6 +295,60 @@ pub fn credit_share(
     Ok(new_balance)
 }
 
+/// POOL-SHARES (v7.1.0): split one block `reward` proportionally over the
+/// height's accepted shares, crediting each cut through [`credit_share`] (the
+/// ONE cap-enforced money path, dev-fee/commons split applied per cut exactly
+/// as a solo block would be).
+///
+/// Conservation is EXACT: cuts are `reward * shares_i / total` in u128 with the
+/// integer-division remainder folded into the WINNER's cut, so `Σ cuts ==
+/// reward` always. The winner's winning solve must already be counted in
+/// `shares` by the caller (it is work like any other share), which also makes
+/// the zero-other-shares case degrade to today's solo payout: winner takes all.
+///
+/// A cut that the chokepoint rejects (21M-cap edge) is SKIPPED — under-minting
+/// near the cap is safe, over-minting never happens. Returns (winner's new
+/// balance if credited, number of wallets credited).
+pub fn distribute_block_reward(
+    state: &mut SigilState,
+    height: u64,
+    winner: WalletId,
+    reward: u128,
+    shares: &std::collections::HashMap<WalletId, u64>,
+) -> Result<(u128, usize), RpcError> {
+    let total: u128 = shares.values().map(|&c| c as u128).sum();
+    debug_assert!(shares.get(&winner).copied().unwrap_or(0) > 0, "winner's solve must be in the share window");
+    if total == 0 {
+        // Defensive: no shares recorded at all (caller bug) — solo semantics.
+        return credit_share(state, height, winner, reward).map(|b| (b, 1));
+    }
+    // Winner last: their cut absorbs the division remainder, and their returned
+    // balance is what the accept path reports back to the submitting miner.
+    let mut allocated: u128 = 0; // every computed non-winner cut, credited or not
+    let mut credited = 0usize;
+    for (w, &cnt) in shares.iter().filter(|(w, _)| **w != winner) {
+        let cut = reward
+            .checked_mul(cnt as u128)
+            .ok_or(RpcError::Overflow)?
+            / total;
+        if cut == 0 {
+            continue;
+        }
+        allocated += cut;
+        match credit_share(state, height, *w, cut) {
+            Ok(_) => credited += 1,
+            // Cap-edge: skip this cut rather than abort the block — nothing was
+            // minted for this wallet (credit_share is atomic per call), and the
+            // skipped cut stays UNMINTED (allocated still counts it, so it does
+            // NOT silently flow to the winner). Under-mint is safe; over-mint never.
+            Err(_) => {}
+        }
+    }
+    let winner_cut = reward - allocated.min(reward);
+    let bal = credit_share(state, height, winner, winner_cut)?;
+    Ok((bal, credited + 1))
+}
+
 /// Light-miner wallet credit (P1, balance-integrity-first). Viktor's policy:
 /// **even-split** of the **0.1% operator pool** among **distinct** verifiers,
 /// **batched** every N blocks. Because it is a pure transfer (operator pool →
@@ -497,6 +551,45 @@ mod tests {
         // 0.3% (30 bps) of the gross output
         let gross = r.amount_out + r.protocol_fee;
         assert_eq!(r.protocol_fee, gross * 30 / 10_000);
+    }
+
+    #[test]
+    fn pool_shares_distribute_proportionally_and_conserve() {
+        // No master wallet → every cut mints exactly its amount (no fee split),
+        // so supply arithmetic is directly checkable.
+        let mut s = SigilState::new();
+        let (a, b, c): (WalletId, WalletId, WalletId) = ([0xA1; 32], [0xB2; 32], [0xC3; 32]);
+        let mut shares = std::collections::HashMap::new();
+        shares.insert(a, 6u64); // winner (their winning solve is one of the 6)
+        shares.insert(b, 3u64);
+        shares.insert(c, 1u64);
+        let reward: u128 = 1_000_003; // NOT divisible by 10 → nonzero remainder
+        let (winner_bal, credited) = distribute_block_reward(&mut s, 1, a, reward, &shares).unwrap();
+        assert_eq!(credited, 3);
+        let (ba, bb, bc) = (
+            s.balance_of(&a, &NATIVE),
+            s.balance_of(&b, &NATIVE),
+            s.balance_of(&c, &NATIVE),
+        );
+        // exact conservation: Σ credits == reward, remainder folded into winner
+        assert_eq!(ba + bb + bc, reward, "distribution must conserve the reward exactly");
+        assert_eq!(bb, reward * 3 / 10, "proportional cut");
+        assert_eq!(bc, reward / 10, "proportional cut");
+        assert_eq!(ba, reward - bb - bc, "winner takes their cut + remainder");
+        assert_eq!(winner_bal, ba);
+    }
+
+    #[test]
+    fn pool_shares_solo_degenerates_to_winner_takes_all() {
+        // Only the winner's own solve in the window (no other miners submitted
+        // shares) → identical outcome to today's solo path.
+        let mut s = SigilState::new();
+        let w: WalletId = [0xD4; 32];
+        let mut shares = std::collections::HashMap::new();
+        shares.insert(w, 1u64);
+        let (bal, credited) = distribute_block_reward(&mut s, 1, w, 5_000, &shares).unwrap();
+        assert_eq!((bal, credited), (5_000, 1));
+        assert_eq!(s.balance_of(&w, &NATIVE), 5_000);
     }
 
     #[test]

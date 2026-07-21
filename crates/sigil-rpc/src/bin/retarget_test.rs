@@ -28,7 +28,7 @@ fn get_challenge(addr: &str, wallet: &str) -> Challenge {
 }
 fn submit(addr: &str, sub: &Submission) -> SubmitResult {
     serde_json::from_str(&http(addr, "POST", "/api/v1/mining/submit", Some(&serde_json::to_string(sub).unwrap())))
-        .unwrap_or(SubmitResult { accepted: false, reason: Some("unparsed".into()) })
+        .unwrap_or(SubmitResult { accepted: false, reason: Some("unparsed".into()), ..Default::default() })
 }
 
 fn main() {

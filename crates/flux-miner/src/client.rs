@@ -28,6 +28,14 @@ pub struct Challenge {
     /// estimate, which undercounts when the difficulty is pinned + submissions are throttled.
     #[serde(default)]
     pub net_hps: f64,
+    /// POOL-SHARES (v7.1.0): sub-difficulty share target — `blake4_target << ease`
+    /// bits easier than the block target. 0 = node runs solo mode (pre-pool node,
+    /// or pool disabled); a pool-aware miner then behaves exactly as before. When
+    /// >0 the miner submits every solve `<= share_target`; the node credits shares
+    /// proportionally when a full-difficulty solve lands the block. Defaults to 0
+    /// so both directions stay wire-compatible with pre-7.1 peers.
+    #[serde(default)]
+    pub share_target: u64,
 }
 
 /// A solved share submitted back to the node.
@@ -43,6 +51,11 @@ pub struct Submission {
 pub struct SubmitResult {
     pub accepted: bool,
     pub reason: Option<String>,
+    /// POOL-SHARES: true when this accept was a sub-difficulty SHARE (credited at
+    /// the next block's payout), false when it was the block itself. Defaults
+    /// false so a pre-7.1 node's reply parses as "block" — the solo semantics.
+    #[serde(default)]
+    pub share: bool,
 }
 
 /// Chain-agnostic endpoint config. Defaults match Quillon's `/api/v1/mining/*`.
@@ -86,6 +99,14 @@ pub fn solve<G: VdfGroup>(c: &Challenge, wallet: &str, g: &G) -> DualLaneBlock {
 /// The consensus gate a node applies to a submitted share — height match, header
 /// binding, then BOTH lanes verified. Shared by the mock node and a real node.
 pub fn check_submission<G: VdfGroup>(g: &G, c: &Challenge, sub: &Submission) -> bool {
+    check_submission_at(g, c, sub, c.blake4_target)
+}
+
+/// [`check_submission`] with an explicit Lane-A target — the ONE verification
+/// rule at two difficulties: the node calls this with `blake4_target` for the
+/// block gate and with `share_target` for the POOL-SHARES sub-difficulty gate,
+/// so a share is held to the identical height/header/VDF binding as a block.
+pub fn check_submission_at<G: VdfGroup>(g: &G, c: &Challenge, sub: &Submission, target: u64) -> bool {
     if sub.height != c.height {
         return false;
     }
@@ -98,7 +119,7 @@ pub fn check_submission<G: VdfGroup>(g: &G, c: &Challenge, sub: &Submission) -> 
     if sub.block.vdf.t != c.vdf_t {
         return false;
     }
-    verify_dual(g, &sub.block, c.blake4_target)
+    verify_dual(g, &sub.block, target)
 }
 
 /// Live mining stats (what `flux_miner_status` will surface).
@@ -211,6 +232,8 @@ mod tests {
             vdf_input: [3u8; 32],
             blake4_target: u64::MAX >> 12, // easy so the test is fast
             vdf_t: 800,
+            net_hps: 0.0,
+            share_target: 0,
         };
         let node_challenge = challenge.clone();
 
@@ -228,7 +251,7 @@ mod tests {
                     let _ = req.as_reader().read_to_string(&mut s);
                     let sub: Submission = serde_json::from_str(&s).unwrap();
                     verdict = check_submission(&g, &node_challenge, &sub);
-                    let r = SubmitResult { accepted: verdict, reason: None };
+                    let r = SubmitResult { accepted: verdict, reason: None, ..Default::default() };
                     let _ = req.respond(Response::from_string(serde_json::to_string(&r).unwrap()));
                     break;
                 }
@@ -256,7 +279,7 @@ mod core_tests {
 
     #[test]
     fn header_is_deterministic_and_binding() {
-        let c = Challenge { height: 42, vdf_input: [9u8; 32], blake4_target: 1, vdf_t: 1 };
+        let c = Challenge { height: 42, vdf_input: [9u8; 32], blake4_target: 1, vdf_t: 1, net_hps: 0.0, share_target: 0 };
         assert_eq!(build_header(&c, "alice"), build_header(&c, "alice"));
         assert_ne!(build_header(&c, "alice"), build_header(&c, "bob"));
         let mut c2 = c.clone();

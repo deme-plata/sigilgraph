@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use flux_vdf::ModSquaring;
 
-use crate::client::{solve, Endpoints, MinerClient, Submission};
+use crate::client::{build_header, solve, Endpoints, MinerClient, Submission};
 
 /// This build's version (the flux-miner crate version) — stamped into diagnostics.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -141,6 +141,21 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
     let mut last_spent_height: u64 = u64::MAX;
     let mut net_tracker = (0u64, Instant::now()); // (last mine-tip seen, when it advanced) → block cadence
     let mut prev_hps: f64 = 0.0; // our last measured Φ rate — reported so the node SUMS total power
+    // POOL-SHARES: resumable nonce cursor for the current height. In pool mode one
+    // height yields MANY shares, so the search must continue where it stopped —
+    // restarting at the same base would re-find already-credited nonces (the node
+    // dedups (wallet, nonce)). Seeded per height off the pid so a miner restart
+    // mid-height lands in fresh nonce space.
+    let mut pool_h: u64 = u64::MAX;
+    let mut pool_base: u64 = 0;
+    // POOL-SHARES: height at which the node said our share cap is reached — for
+    // the REST of that height we hunt the BLOCK target instead (full hashrate,
+    // no doomed share submits). Reset implicitly when the height moves on.
+    let mut pool_capped_h: u64 = u64::MAX;
+    /// Nonces per pool search slice — keeps each iteration ~a second on a typical
+    /// CPU so tip changes are noticed promptly (the challenge refetch between
+    /// slices is the tip probe).
+    const POOL_CPU_BUDGET: u64 = 4_000_000;
     while !stop.load(Ordering::Relaxed) {
         let c = match client.fetch_challenge(prev_hps) {
             Ok(c) => c,
@@ -157,17 +172,52 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
         // v7.0.9: difficulty/block-cadence for the card, + TOTAL network power from the node (summed
         // over all active miners' reported rates — accurate even with pinned difficulty + throttled submits).
         { let mut s = stats.lock().unwrap(); update_net_power(&mut s, c.height, c.blake4_target.leading_zeros(), &mut net_tracker); s.net_hps = c.net_hps; }
+        // POOL-SHARES: a 7.1+ node advertises a sub-difficulty share target
+        // (numerically LARGER = easier than the block target). Then we submit
+        // every share-grade solve and keep mining the SAME height — payout is
+        // proportional at the block, so there is no one-submit-per-height hold.
+        let pool = c.share_target > c.blake4_target;
         // Already submitted for this exact tip → the tip hasn't moved yet. Don't burn a
-        // doomed stale share; wait briefly and re-check the tip.
-        if c.height == last_spent_height {
+        // doomed stale share; wait briefly and re-check the tip. (Solo mode only.)
+        if !pool && c.height == last_spent_height {
             thread::sleep(Duration::from_millis(250));
             continue;
         }
         let t0 = Instant::now();
-        let block = solve(&c, &wallet, &g); // Lane A nonce search + Lane B VDF
-        let dt = t0.elapsed().as_secs_f64().max(1e-9);
-        let hashes = block.nonce as f64 + 1.0; // nonces tried ≈ BLAKE4 work
-        prev_hps = hashes / dt; // report this on the next challenge fetch → node's total-power sum
+        let (block, hashes, dt) = if pool {
+            if pool_h != c.height {
+                pool_h = c.height;
+                pool_base = ((std::process::id() as u64) << 32)
+                    ^ c.height.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            }
+            let header = build_header(&c, &wallet);
+            // Capped this height → hunt the full block target (shares are done).
+            let pool_target = if pool_capped_h == c.height { c.blake4_target } else { c.share_target };
+            let (found, next) =
+                crate::mine_dual_from(&header, pool_target, c.vdf_t, &g, pool_base, POOL_CPU_BUDGET);
+            let tried = next.wrapping_sub(pool_base).max(1);
+            pool_base = next;
+            let dt = t0.elapsed().as_secs_f64().max(1e-9);
+            prev_hps = tried as f64 / dt;
+            match found {
+                Some(b) => (b, tried as f64, dt),
+                None => {
+                    // Budget slice exhausted with no share — publish the rate and
+                    // loop straight back to the challenge fetch (the tip probe).
+                    let mut s = stats.lock().unwrap();
+                    s.connected = true;
+                    s.hashrate = prev_hps;
+                    s.last_height = c.height;
+                    continue;
+                }
+            }
+        } else {
+            let b = solve(&c, &wallet, &g); // Lane A nonce search + Lane B VDF
+            let h = b.nonce as f64 + 1.0; // nonces tried ≈ BLAKE4 work
+            let dt = t0.elapsed().as_secs_f64().max(1e-9);
+            prev_hps = h / dt; // report this on the next challenge fetch → node's total-power sum
+            (b, h, dt)
+        };
         let sub = Submission { height: c.height, wallet: wallet.clone(), block };
         let res = client.submit(&sub);
         {
@@ -184,10 +234,27 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
                 s.solve_hist.pop_front();
             }
             match res {
+                Ok(r) if r.accepted && r.share => {
+                    // POOL-SHARES: a sub-difficulty share is banked for this height's
+                    // payout — keep mining the SAME height (no spent-hold). Balance
+                    // only moves at the block payout, so poll it sparsely.
+                    s.shares_ok += 1;
+                    let poll_balance = s.shares_ok % 8 == 0;
+                    push_log(&mut s.log, format!("✓ h={:<8} {:>6.0}ms  SHARE banked", c.height, dt * 1000.0));
+                    drop(s);
+                    if poll_balance {
+                        if let Some(b) = fetch_balance(&url, &wallet) {
+                            stats.lock().unwrap().balance = b;
+                        }
+                    }
+                    write_miner_status(&stats.lock().unwrap(), &wallet);
+                    continue;
+                }
                 Ok(r) if r.accepted => {
                     s.shares_ok += 1;
                     last_spent_height = c.height; // don't resubmit — the tip advances now
-                    push_log(&mut s.log, format!("✓ h={:<8} {:>6.0}ms  ACCEPTED", c.height, dt * 1000.0));
+                    push_log(&mut s.log, format!("✓ h={:<8} {:>6.0}ms  {}", c.height, dt * 1000.0,
+                        if pool { "BLOCK — payout split over shares" } else { "ACCEPTED" }));
                 }
                 Ok(r) => {
                     s.shares_bad += 1;
@@ -196,6 +263,11 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
                     // we advance to the real tip instead of re-solving a dead height.
                     if reason.contains("stale") || reason.contains("mineable tip") {
                         last_spent_height = c.height;
+                    }
+                    // POOL-SHARES: cap reached → block-hunt for the rest of this
+                    // height instead of spamming doomed share submits.
+                    if reason.contains("share cap") || reason.contains("share window full") {
+                        pool_capped_h = c.height;
                     }
                     push_log(&mut s.log, format!("✗ h={:<8} rejected: {}", c.height, reason));
                 }
@@ -356,6 +428,12 @@ pub fn gpu_mining_loop(
     let mut last_spent_height: u64 = u64::MAX;
     let mut net_tracker = (0u64, Instant::now()); // (last mine-tip seen, when it advanced) → block cadence
     let mut prev_hps: f64 = 0.0; // our last measured GPU Φ rate — reported so the node SUMS total power
+    // POOL-SHARES: resumable per-height nonce cursor (see mining_loop) — the GPU
+    // search continues from here across shares so credited nonces aren't re-found.
+    let mut pool_h: u64 = u64::MAX;
+    let mut pool_base: u64 = 0;
+    // POOL-SHARES: cap reached this height → block-hunt (see mining_loop).
+    let mut pool_capped_h: u64 = u64::MAX;
     while !stop.load(Ordering::Relaxed) {
         let c = match client.fetch_challenge(prev_hps) {
             Ok(c) => c,
@@ -371,16 +449,30 @@ pub fn gpu_mining_loop(
         };
         // v7.0.9: difficulty/block-cadence for the card, + TOTAL network power from the node (summed).
         { let mut s = stats.lock().unwrap(); update_net_power(&mut s, c.height, c.blake4_target.leading_zeros(), &mut net_tracker); s.net_hps = c.net_hps; }
-        if c.height == last_spent_height {
+        // POOL-SHARES: share-grade target from a 7.1+ node → submit every share,
+        // keep mining the same height (no one-submit-per-height hold).
+        let pool = c.share_target > c.blake4_target;
+        let search_target = if pool && pool_capped_h != c.height { c.share_target } else { c.blake4_target };
+        if !pool && c.height == last_spent_height {
             thread::sleep(Duration::from_millis(250));
             continue;
         }
         let header = build_header(&c, &wallet);
         let t0 = Instant::now();
-        let mut nonce_base = 0u64;
+        let mut nonce_base = if pool {
+            if pool_h != c.height {
+                pool_h = c.height;
+                pool_base = ((std::process::id() as u64) << 32)
+                    ^ c.height.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            }
+            pool_base
+        } else {
+            0u64
+        };
+        let search_base = nonce_base;
         let mut found = None;
         while found.is_none() && !stop.load(Ordering::Relaxed) {
-            match gpu.search(&header, c.blake4_target, rounds, nonce_base, batch) {
+            match gpu.search(&header, search_target, rounds, nonce_base, batch) {
                 Ok(r) => {
                     found = r;
                     nonce_base = nonce_base.wrapping_add(batch as u64);
@@ -417,6 +509,11 @@ pub fn gpu_mining_loop(
             Some(n) => n,
             None => continue,
         };
+        if pool {
+            // Resume AFTER the found nonce: the tail of its batch gets re-scanned
+            // next slice (those nonces were never submitted → no dup rejects).
+            pool_base = nonce.wrapping_add(1);
+        }
         let dt = t0.elapsed().as_secs_f64().max(1e-9);
         let block = crate::block_for_nonce(&header, nonce, &g, c.vdf_t); // Lane B on CPU
         let sub = Submission { height: c.height, wallet: wallet.clone(), block };
@@ -428,7 +525,7 @@ pub fn gpu_mining_loop(
             s.vdf_t = c.vdf_t;
             s.last_height = c.height;
             s.last_solve_ms = dt * 1000.0;
-            s.hashrate = nonce_base as f64 / dt; // GPU Lane-A rate
+            s.hashrate = nonce_base.wrapping_sub(search_base) as f64 / dt; // GPU Lane-A rate (this slice)
             prev_hps = s.hashrate; // report on the next challenge fetch → node's total-power sum
             s.vdf_rate = c.vdf_t as f64 / dt;
             s.solve_hist.push_back((dt * 1000.0) as u64);
@@ -436,16 +533,37 @@ pub fn gpu_mining_loop(
                 s.solve_hist.pop_front();
             }
             match res {
+                Ok(r) if r.accepted && r.share => {
+                    // POOL-SHARES: banked for this height's payout — keep the GPU on
+                    // the SAME height, resuming from the advanced nonce cursor.
+                    // Balance only moves at the block payout → poll sparsely.
+                    s.shares_ok += 1;
+                    let poll_balance = s.shares_ok % 8 == 0;
+                    push_log(&mut s.log, format!("✓ h={:<8} {:>6.0}ms  GPU SHARE banked", c.height, dt * 1000.0));
+                    drop(s);
+                    if poll_balance {
+                        if let Some(b) = fetch_balance(&url, &wallet) {
+                            stats.lock().unwrap().balance = b;
+                        }
+                    }
+                    write_miner_status(&stats.lock().unwrap(), &wallet);
+                    continue;
+                }
                 Ok(r) if r.accepted => {
                     s.shares_ok += 1;
                     last_spent_height = c.height;
-                    push_log(&mut s.log, format!("✓ h={:<8} {:>6.0}ms  GPU ACCEPTED", c.height, dt * 1000.0));
+                    push_log(&mut s.log, format!("✓ h={:<8} {:>6.0}ms  {}", c.height, dt * 1000.0,
+                        if pool { "GPU BLOCK — payout split over shares" } else { "GPU ACCEPTED" }));
                 }
                 Ok(r) => {
                     s.shares_bad += 1;
                     let reason = r.reason.unwrap_or_default();
                     if reason.contains("stale") || reason.contains("mineable tip") {
                         last_spent_height = c.height;
+                    }
+                    // POOL-SHARES: cap reached → block-hunt for the rest of this height.
+                    if reason.contains("share cap") || reason.contains("share window full") {
+                        pool_capped_h = c.height;
                     }
                     push_log(&mut s.log, format!("✗ h={:<8} rejected: {}", c.height, reason));
                 }

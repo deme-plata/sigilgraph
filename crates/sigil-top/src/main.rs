@@ -2911,9 +2911,37 @@ impl App {
             if self.bps_zero_streak > 12 { self.bps_ema = 0.0; }
         }
         self.st.blocks_per_sec = self.bps_ema;
-        self.online = out.online;
+        // v7.0.24 MESH-ONLINE FIX: the online badge watched ONLY the HTTPS status feed —
+        // an AUXILIARY web endpoint. A node whose libp2p mesh is connected, syncing and
+        // mining is NOT offline (operator-reported: badge said "OFFLINE · net height 0"
+        // for hours while the same node synced 8M+ blocks and mined at ~900 MH/s — the
+        // feed's HTTPS path was blocked on the operator's side; the mesh was not). If the
+        // feed fails but the mesh is live, stay ONLINE: tip from gossip (peer_best), and
+        // say honestly that the feed is unreachable + why (the previously TUI-invisible
+        // last_feed_err self-diagnosis).
+        let mut online = out.online;
+        if !online {
+            if let Some(sync) = &self.p2p_sync {
+                let sh = sync.state_handle();
+                let (peers, peer_best) = {
+                    let s = sh.lock().unwrap_or_else(|e| e.into_inner());
+                    (s.peer_count, s.peer_best_height)
+                };
+                if peers > 0 && peer_best > 0 {
+                    online = true;
+                    self.st.height = self.st.height.max(peer_best);
+                    if !self.toast_sticky {
+                        let e = last_feed_err();
+                        self.toast = format!("◆ online via p2p mesh — status feed unreachable{}",
+                            if e.is_empty() { String::new() }
+                            else { format!(": {}", e.chars().take(90).collect::<String>()) });
+                    }
+                }
+            }
+        }
+        self.online = online;
         // v0.10.5.1: track offline → online transitions for backoff + banner.
-        if out.online {
+        if online {
             if self.offline_streak > 0 && !self.toast_sticky {
                 let was = self.offline_since.map(|t| fmt_uptime(t.elapsed().as_secs())).unwrap_or_default();
                 self.toast = format!("✓ reconnected after {} offline", was);

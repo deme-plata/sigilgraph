@@ -1,0 +1,15 @@
+[package]
+name = "sigil-shield"
+version = "0.1.0"
+edition = "2021"
+description = "SIGIL private transfers (P1): post-quantum shielded notes on LatticeGuard + lattice ring signatures, committed into the four state roots. See docs/SIGIL_PRIVACY_ARCHITECTURE_v0.md."
+
+[dependencies]
+flux-lattice-guard = { path = "../../../flux/crates/flux-lattice-guard" }
+blake3 = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+rand = { workspace = true }
+
+[features]
+default = []

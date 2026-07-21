@@ -26,7 +26,7 @@ use winterfell::{
     StarkDomain, Trace, TraceInfo, TracePolyTable, TraceTable, TransitionConstraintDegree,
 };
 
-use crate::mimc::{compress2, mimc_options, pow7, round_constants, ACCEPT_BITS, ROUNDS};
+use crate::mimc::{compress2, mimc_options, pow7, round_constants, ACCEPT_BITS};
 
 const SEG: usize = 64; // rows per Merkle level (ROUNDS + 1 boundary)
 

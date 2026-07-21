@@ -30,6 +30,7 @@ pub mod stark;
 pub mod notes;
 pub mod mimc;
 pub mod membership;
+pub mod transfer;
 pub mod ring;
 
 /// Errors surfaced by the shield prover/verifier.

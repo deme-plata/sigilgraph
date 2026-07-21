@@ -33,7 +33,11 @@ pub struct CortexSnapshot {
 
 /// Handle shared into the embedded HTTP server (serve.rs).
 pub struct LocalApi {
-    pub reader: BlockReader,
+    /// v7.0.21 (dial-while-opening): the block store now opens on a BACKGROUND thread so the
+    /// mesh can dial during a long compaction — the reader arrives when the open completes.
+    /// Until then every local-first answer returns `None`, which is the existing "proxy to
+    /// the remote node" fallback, so the explorer degrades gracefully instead of blocking.
+    pub reader: Arc<std::sync::OnceLock<BlockReader>>,
     /// Live mesh state — None when this process isn't syncing (pure light monitor).
     pub sync: Option<Arc<Mutex<P2PSyncState>>>,
     pub cortex: Arc<Mutex<CortexSnapshot>>,
@@ -155,10 +159,11 @@ impl LocalApi {
         // the network tip in light-monitor mode, so local_top() walks down from the tip and finds
         // nothing stored → "loading chain" forever despite a populated store. best_height is the
         // highest block we ACTUALLY hold; fall back to the sync-state top only if the store is empty.
-        let real_top = self.reader.best_height();
+        let reader = self.reader.get()?; // store still opening → proxy
+        let real_top = reader.best_height();
         let top = if real_top > 0 { real_top } else { self.sync_snapshot().map(|s| Self::local_top(&s)).unwrap_or(0) };
         if top == 0 { return None; }
-        let rows = self.reader.recent_from(top, limit);
+        let rows = reader.recent_from(top, limit);
         if rows.is_empty() {
             return None; // nothing local yet — proxy so the explorer isn't blank
         }
@@ -177,10 +182,11 @@ impl LocalApi {
         }
         // v0.57: anchor the recent-window scan at the REAL stored max (see `recent()`), not the
         // tip-faked sync-state top — otherwise the bounded scan never reaches a stored block.
-        let real_top = self.reader.best_height();
+        let reader = self.reader.get()?; // store still opening → proxy
+        let real_top = reader.best_height();
         let top = if real_top > 0 { real_top } else { self.sync_snapshot().map(|s| Self::local_top(&s)).unwrap_or(0) };
         if top == 0 { return None; }
-        let rows = self.reader.search(q.trim(), top);
+        let rows = reader.search(q.trim(), top);
         if rows.is_empty() {
             return None; // let the remote node try tx / address / full-text
         }
@@ -200,7 +206,7 @@ impl LocalApi {
             return None;
         }
         // Local content-address verify (verify-don't-trust): re-derive the block hash.
-        let row = self.reader.aether_verify(&cid)?;
+        let row = self.reader.get()?.aether_verify(&cid)?;
         Some(serde_json::json!({
             "found": true,
             "verified": row.verified,

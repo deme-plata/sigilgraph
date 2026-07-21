@@ -224,6 +224,20 @@ pub struct P2PSyncState {
     pub turbo_continuity: BandwidthContinuity,
 }
 
+/// v7.0.21: the background store-opener's payload — the opened store plus an optional
+/// operator-facing note (e.g. "primary store unavailable; using temp store").
+pub struct OpenedStore {
+    pub store: BlockStore,
+    pub note: Option<String>,
+}
+
+/// How `launch_src` receives its BlockStore: already opened (all legacy call sites),
+/// or arriving later from a background opener thread (dial-while-opening).
+enum StoreSource {
+    Ready(Box<BlockStore>),
+    Deferred(std::sync::mpsc::Receiver<OpenedStore>),
+}
+
 pub struct P2PBlockSync {
     state: Arc<Mutex<P2PSyncState>>,
     new_blocks: Arc<Mutex<Vec<StoredBlock>>>,
@@ -326,7 +340,20 @@ impl P2PBlockSync {
     /// `recent_only`: a far-behind MONITOR snaps its sync base to a recent window the
     /// producers serve fast (instead of crawling genesis→tip at the rate slow/gappy
     /// historical ranges dribble — the "1 blk/s" symptom). full-sync passes false.
-    pub fn launch(mut store: BlockStore, recent_only: bool) -> Self {
+    pub fn launch(store: BlockStore, recent_only: bool) -> Self {
+        Self::launch_src(StoreSource::Ready(Box::new(store)), recent_only)
+    }
+
+    /// v7.0.21 DIAL-WHILE-OPENING: launch the engine with a store that ARRIVES LATER.
+    /// The mesh (net start + eager bootstrap dials) comes up immediately; the engine
+    /// then blocks on `rx` for the opener thread's store. A grown store compacting at
+    /// open (measured: minutes) no longer holds the whole mesh at 0 peers — dials,
+    /// handshakes and gossip warm up during the open.
+    pub fn launch_deferred(rx: std::sync::mpsc::Receiver<OpenedStore>, recent_only: bool) -> Self {
+        Self::launch_src(StoreSource::Deferred(rx), recent_only)
+    }
+
+    fn launch_src(source: StoreSource, recent_only: bool) -> Self {
         // SIGIL_SNAP=1 forces fast-snap even in full-sync (validation / "just track the tip").
         let recent_only_init = recent_only || std::env::var("SIGIL_SNAP").is_ok();
         // 0.77 GENESIS ARCHIVE: the mode is LIVE-FLIPPABLE ([F] reaches a running engine
@@ -492,6 +519,38 @@ impl P2PBlockSync {
                 // Share net into the spawned request tasks. All hot methods are &self;
                 // start() (the only &mut) already ran. Arc → Send + 'static for tokio::spawn.
                 let net = std::sync::Arc::new(net);
+
+                // v7.0.21 DIAL-WHILE-OPENING: the mesh is up and the eager bootstrap dials
+                // are in flight — NOW wait for the store if it's still opening (a grown
+                // store can compact for minutes at open). Handshakes/gossip warm up in the
+                // background tokio workers while this future blocks; by the time a big
+                // store opens, peers are already connected instead of starting from zero.
+                let mut store = match source {
+                    StoreSource::Ready(s) => *s,
+                    StoreSource::Deferred(rx) => {
+                        {
+                            let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                            s.running = true;
+                            s.stall_reason = "opening local block store (a grown store may compact for minutes) — mesh already dialing".into();
+                        }
+                        match tokio::task::spawn_blocking(move || rx.recv()).await {
+                            Ok(Ok(opened)) => {
+                                let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                s.stall_reason = opened.note.clone().unwrap_or_default();
+                                crate::tlog!("[sync] store opened (deferred) best={} synced={} — engine proceeding",
+                                    opened.store.best_height(), opened.store.synced_to());
+                                opened.store
+                            }
+                            _ => {
+                                crate::tlog!("[sync] ✗ store opener failed/disconnected — sync engine cannot start");
+                                let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                s.running = false;
+                                s.stall_reason = "✗ block store unavailable — sync disabled (see ~/.sigil-top.log)".into();
+                                return;
+                            }
+                        }
+                    }
+                };
 
                 // Resume from the PERSISTED store: seed the synced count + cursor from
                 // what's already on disk so a restart/update CONTINUES instead of

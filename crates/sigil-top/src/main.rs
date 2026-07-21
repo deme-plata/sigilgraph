@@ -1291,7 +1291,11 @@ fn main() {
             // if the store is locked by another instance, fall back to pure proxy (None).
             let local_api = block_store::BlockStore::open_blocking(&sigil_top_db_path()).ok().map(|st| {
                 std::sync::Arc::new(local_api::LocalApi {
-                    reader: st.reader(),
+                    reader: {
+                        let c = std::sync::Arc::new(std::sync::OnceLock::new());
+                        let _ = c.set(st.reader());
+                        c
+                    },
                     sync: None,
                     cortex: std::sync::Arc::new(std::sync::Mutex::new(local_api::CortexSnapshot::default())),
                     network: "sigil-g0".into(),
@@ -2509,6 +2513,9 @@ struct App {
     bps_zero_streak: u32,    // consecutive zero-bps polls before showing honest idle
     welcome_until: Option<Instant>, // LANE-U v0.67: first-launch welcome modal (SIGIL emblem + giant F); any key or 14s clears it
     idle_store: Option<block_store::BlockStore>, // v0.40.3: parked store so [F] can launch sync ON DEMAND
+    /// v7.0.21: the background store-opener's channel when no engine auto-started —
+    /// [F]/[Y] poll it via `take_idle_store` (the store may still be opening/compacting).
+    idle_store_rx: Option<std::sync::mpsc::Receiver<block_sync::OpenedStore>>,
     full_sync: bool,                                    // [F] opt-in heavy full sync (default = 10ms lightweight verify)
     full_sync_height: u64,                              // blocks downloaded so far in full sync
     full_sync_target: u64,                              // target height for full sync
@@ -2663,6 +2670,7 @@ impl App {
               bps_zero_streak: 0,
               welcome_until: Some(Instant::now() + Duration::from_secs(14)),
               idle_store: None,
+              idle_store_rx: None,
               tab: Tab::Node,
               swarm: SwarmView::default(),
               last_swarm_load: instant_ago(10),
@@ -2771,6 +2779,36 @@ impl App {
             Duration::from_secs((base * mult).min(15))
         }
     }
+    /// v7.0.21: get the parked store for an on-demand engine launch ([F]/[Y]). The store
+    /// now opens on a background thread, so it may STILL be opening (compaction) — in
+    /// that case say so and return None; the operator retries in a moment. A dropped
+    /// channel (all open fallbacks failed) reports the store as unavailable.
+    fn take_idle_store(&mut self) -> Option<block_store::BlockStore> {
+        if let Some(s) = self.idle_store.take() { return Some(s); }
+        if let Some(rx) = &self.idle_store_rx {
+            match rx.try_recv() {
+                Ok(opened) => {
+                    self.idle_store_rx = None;
+                    if let Some(n) = opened.note {
+                        self.toast = n;
+                        self.toast_sticky = true;
+                    }
+                    return Some(opened.store);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.toast = "⏳ block store still opening (compaction) — press again in a moment".into();
+                    self.toast_sticky = false;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.idle_store_rx = None;
+                    self.toast = "✗ block store unavailable — see ~/.sigil-top.log".into();
+                    self.toast_sticky = true;
+                }
+            }
+        }
+        None
+    }
+
     fn resync(&mut self) {
         // v0.37: a resync that ACTUALLY restarts the sync surface. The old one only
         // cleared the feed list (which the SYNC hero ignores), so [y] looked like a
@@ -2792,7 +2830,7 @@ impl App {
             // engine re-checks it is tracking the latest tip.
             p2p.set_known_tip(self.st.height.max(self.target_height));
             self.toast = "⟳ RESYNC — sync restarted: counters, rate + ETA reset, re-fetching tip".into();
-        } else if let Some(store) = self.idle_store.take() {
+        } else if let Some(store) = self.take_idle_store() {
             // v0.71.1: in light monitor [Y] was a silent no-op with a lying toast —
             // there was no engine to resync. Now it STARTS the engine (same path
             // as F) so resync always resyncs.
@@ -3148,6 +3186,90 @@ impl<W: std::io::Write> ratatui::backend::Backend for SafeSizeBackend<W> {
     fn flush(&mut self) -> std::io::Result<()> { ratatui::backend::Backend::flush(&mut self.inner) }
 }
 
+/// v7.0.21 DIAL-WHILE-OPENING: the complete store-open ceremony (one-time heal marker,
+/// oversized light-boot check, primary→temp→volatile fallbacks, aether bootstrap),
+/// extracted from run_tui so it can run on a BACKGROUND thread while the mesh dials.
+/// Returns the opened store + an optional operator-facing note (the old sticky toasts).
+/// Err = every fallback failed (near-impossible: volatile is a fresh temp dir).
+fn open_store_with_fallbacks(db_path: &str, want_sync: bool) -> Result<(block_store::BlockStore, Option<String>), String> {
+    // v7.0.7: heal a store wedged by the v7.0.3–7.0.5 frontier-stall bug (one-time, marked).
+    heal_wedged_store_once(db_path);
+    let oversized_primary = oversized_store_for_light_boot(db_path, want_sync);
+    boot_trace(&format!("opening block store path={db_path} mode=background want_sync={want_sync}"));
+    let mut note: Option<String> = None;
+    let mut store = if let Some(bytes) = oversized_primary {
+        let volatile = std::env::temp_dir()
+            .join(format!("sigil-top-light-{}.db", std::process::id()));
+        let volatile_s = volatile.to_string_lossy().into_owned();
+        boot_trace(&format!(
+            "primary block store is {} bytes; skipping open and using volatile {volatile_s}",
+            bytes
+        ));
+        match block_store::BlockStore::open(&volatile_s) {
+            Ok(s) => {
+                note = Some(format!(
+                    "⚠ local store is {} on disk; dashboard started on a fresh light store. Use --sync or SIGIL_TOP_FORCE_STORE=1 to reopen it.",
+                    human_bytes(bytes)
+                ));
+                s
+            }
+            Err(e) => return Err(format!("volatile block store unavailable after skipping oversized primary: {e}")),
+        }
+    } else {
+        // v6→v7.0.19: a HANG opening the primary (foreign format) falls back after the
+        // watchdog; 180s default so a legitimate multi-minute compaction isn't mistaken
+        // for a hang (the v7.0.19 "sync reset to 0" incident).
+        let open_timeout = std::env::var("SIGIL_TOP_OPEN_TIMEOUT_SECS")
+            .ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(180);
+        match block_store::BlockStore::open_with_timeout(db_path, open_timeout) {
+            Ok(s) => s,
+            Err(primary) => {
+                boot_trace(&format!("primary store open failed/hung: {primary}"));
+                let temp_path = std::env::temp_dir().join("sigil-top-blocks.db");
+                match block_store::BlockStore::open_with_timeout(temp_path.to_string_lossy().as_ref(), open_timeout) {
+                    Ok(s) => {
+                        note = Some(format!("⚠ primary block store unavailable ({primary}); using temp store"));
+                        s
+                    }
+                    Err(temp_err) => {
+                        let volatile = std::env::temp_dir()
+                            .join(format!("sigil-top-blocks-volatile-{}.db", std::process::id()));
+                        match block_store::BlockStore::open_with_timeout(volatile.to_string_lossy().as_ref(), open_timeout) {
+                            Ok(s) => {
+                                note = Some(format!("⚠ block store fallback is volatile ({primary}; temp: {temp_err})"));
+                                s
+                            }
+                            Err(volatile_err) => {
+                                return Err(format!(
+                                    "block store unavailable: primary={primary}; temp={temp_err}; volatile={volatile_err}"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    boot_trace(&format!("block store opened best={} synced={} verified={}",
+        store.best_height(), store.synced_to(), store.verified_to()));
+
+    // v0.7.1/v0.56: aether shard bootstrap — Epsilon-server path, silently skipped elsewhere.
+    let aether_dir = std::env::var("SIGIL_AETHER_DIR")
+        .unwrap_or_else(|_| "/opt/orobit/sigil-data/db-epsilon/aether".to_string());
+    if std::path::Path::new(&aether_dir).is_dir() {
+        match block_store::sync_aether_to_fluxdb(&mut store, &aether_dir) {
+            Ok(n) if n > 0 => {
+                if note.is_none() {
+                    note = Some(format!("⬇ Synced {n} blocks → flux-db (height {})", store.best_height()));
+                }
+            }
+            Err(e) => tlog!("[aether] {e}"),
+            _ => {}
+        }
+    }
+    Ok((store, note))
+}
+
 fn run_tui(cfg: Config) -> std::io::Result<()> {
     // v0.27.5: self-healing crash-loop guard — long-running dashboard only (`--once` renders
     // and exits faster than HEAL_SECS, which would false-trigger a revert). If THIS version
@@ -3172,7 +3294,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
         boot_trace("AUTOMINE: engine started via SIGIL_AUTOMINE");
     }
     if std::env::var("SIGIL_AUTOFULLSYNC").is_ok() && app.p2p_sync.is_none() {
-        if let Some(store) = app.idle_store.take() {
+        if let Some(store) = app.take_idle_store() {
             let p2p = block_sync::P2PBlockSync::launch(store, false);
             app.p2p_sync = Some(p2p);
             app.full_sync = true;
@@ -3184,7 +3306,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // v0.71.1 LANE-V: resume the operator's chosen sync mode after update/restart.
     // Only "full" does anything; no file (fresh install) = safe light monitor.
     if false && read_sync_mode().as_deref() == Some("full") && app.p2p_sync.is_none() {
-        if let Some(store) = app.idle_store.take() {
+        if let Some(store) = app.take_idle_store() {
             let p2p = block_sync::P2PBlockSync::launch(store, true);
             app.p2p_sync = Some(p2p);
             app.toast = "⬇ FULL-SYNC RESUMED (sticky mode from last session — [F] to toggle)".into();
@@ -3218,117 +3340,41 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // don't exist on Windows → the store never persisted → re-sync from 0 every launch
     // ("starts over on update"). Now a per-user dir (override with SIGIL_TOP_DB).
     let db_path = sigil_top_db_path();
-    // v7.0.7: heal a store wedged by the v7.0.3–7.0.5 frontier-stall bug (one-time, marked).
-    heal_wedged_store_once(&db_path);
-    let oversized_primary = oversized_store_for_light_boot(&db_path, want_sync);
-    // v7.0.17 NEVER-BLANK: the store open + sync bootstrap run BEFORE the terminal is set up
-    // (the v0.35 "sync starts earlier" ordering), so a slow/wedged store used to leave the
-    // console BLANK for up to a minute — which reads as a bricked node (the v7.0.16 incident).
-    // Print a plain-stdout status first so the app is visibly alive during the open; the TUI's
-    // alt-screen clears it on the first frame.
-    println!("\n  \u{25c7} SIGIL v{} — opening local block store…\n  (a large store may compact here for a few minutes; a wedged store auto-falls-back to a clean one)\n",
+    // v7.0.17 NEVER-BLANK splash (instant now — the open no longer blocks this thread).
+    println!("\n  \u{25c7} SIGIL v{} — starting… (block store opens in the background; the mesh dials immediately)\n",
         env!("CARGO_PKG_VERSION"));
     let _ = std::io::Write::flush(&mut std::io::stdout());
     // v7.0.19: flux-db compaction progress goes to raw stderr, which corrupts the TUI's
     // alternate screen ("[flux-db] compact L1->L2 ..." painted over the dashboard). Quiet
     // the chatter (errors still print) for this process before the store opens.
     std::env::set_var("FLUX_DB_QUIET", "1");
-    boot_trace(&format!("opening block store path={db_path} mode=nonblocking want_sync={want_sync}"));
-    let mut block_store = if let Some(bytes) = oversized_primary {
-        let volatile = std::env::temp_dir()
-            .join(format!("sigil-top-light-{}.db", std::process::id()));
-        let volatile_s = volatile.to_string_lossy().into_owned();
-        boot_trace(&format!(
-            "primary block store is {} bytes; skipping pre-frame open and using volatile {volatile_s}",
-            bytes
-        ));
-        match block_store::BlockStore::open(&volatile_s) {
-            Ok(s) => {
-                app.toast = format!(
-                    "⚠ local store is {} on disk; dashboard started on a fresh light store. Use --sync or SIGIL_TOP_FORCE_STORE=1 to reopen it.",
-                    human_bytes(bytes)
-                );
-                app.toast_sticky = true;
-                s
-            }
-            Err(e) => {
-                let msg = format!("volatile block store unavailable after skipping oversized primary: {e}");
-                boot_trace(&msg);
-                eprintln!("sigil-top: {msg}");
-                return Err(std::io::Error::new(std::io::ErrorKind::Other, msg));
-            }
-        }
-    } else {
-        // v6: a HANG opening the primary store (old/foreign on-disk format, e.g. a
-        // v4.1-era store met by v6) is no longer fatal — the watchdog converts it to
-        // an Err after SIGIL_TOP_OPEN_TIMEOUT_SECS (default 20) so we fall back to a
-        // clean store instead of sitting forever at "opening block store".
-        // v7.0.19: 20s → 180s. A legitimate L1→L2 compaction on a grown store (measured:
-        // 1954 tables / 2.6 GiB on a real user store) takes well over 20s — the watchdog
-        // declared the open HUNG and silently fell back to an EMPTY temp store, which
-        // reads as "my sync reset to 0" (spine #1) while the real store sits abandoned on
-        // disk. The never-blank splash makes the wait visible, so a foreign/wedged store
-        // (the case 20s was for) still falls back — just three minutes later, correctly.
-        let open_timeout = std::env::var("SIGIL_TOP_OPEN_TIMEOUT_SECS")
-            .ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(180);
-        match block_store::BlockStore::open_with_timeout(&db_path, open_timeout) {
-            Ok(s) => s,
-            Err(primary) => {
-                boot_trace(&format!("primary store open failed/hung: {primary}"));
-                let temp_path = std::env::temp_dir().join("sigil-top-blocks.db");
-                match block_store::BlockStore::open_with_timeout(temp_path.to_string_lossy().as_ref(), open_timeout) {
-                    Ok(s) => {
-                        app.toast = format!("⚠ primary block store unavailable ({primary}); using temp store");
-                        app.toast_sticky = true;
-                        s
-                    }
-                    Err(temp_err) => {
-                        let volatile = std::env::temp_dir()
-                            .join(format!("sigil-top-blocks-volatile-{}.db", std::process::id()));
-                        match block_store::BlockStore::open_with_timeout(volatile.to_string_lossy().as_ref(), open_timeout) {
-                            Ok(s) => {
-                                app.toast = format!("⚠ block store fallback is volatile ({primary}; temp: {temp_err})");
-                                app.toast_sticky = true;
-                                s
-                            }
-                            Err(volatile_err) => {
-                                let msg = format!(
-                                    "block store unavailable: primary={primary}; temp={temp_err}; volatile={volatile_err}"
-                                );
-                                boot_trace(&msg);
-                                eprintln!("sigil-top: {msg}");
-                                return Err(std::io::Error::new(std::io::ErrorKind::Other, msg));
-                            }
-                        }
-                    }
+
+    // ── v7.0.21 DIAL-WHILE-OPENING ────────────────────────────────────────────────
+    // The store open (heal → fallbacks → aether) moves to a BACKGROUND thread; the
+    // sync engine launches IMMEDIATELY with a deferred store, so the mesh dials and
+    // handshakes during a long compaction instead of sitting at 0 peers for minutes
+    // (the v7.0.19 case: p2p couldn't start until a 2.6 GiB compaction finished).
+    // The explorer's local reader arrives via a OnceLock — until then it proxies.
+    let reader_cell: std::sync::Arc<std::sync::OnceLock<block_store::BlockReader>> =
+        std::sync::Arc::new(std::sync::OnceLock::new());
+    let (store_tx, store_rx) = std::sync::mpsc::channel::<block_sync::OpenedStore>();
+    {
+        let db_path = db_path.clone();
+        let cell = reader_cell.clone();
+        let _ = std::thread::Builder::new().name("sigil-store-open".into()).spawn(move || {
+            match open_store_with_fallbacks(&db_path, want_sync) {
+                Ok((store, note)) => {
+                    let _ = cell.set(store.reader());
+                    let _ = store_tx.send(block_sync::OpenedStore { store, note });
+                }
+                Err(e) => {
+                    // tx drops → the deferred engine / [F] helper surface "store unavailable".
+                    boot_trace(&format!("store open FAILED on all fallbacks: {e}"));
+                    eprintln!("sigil-top: {e}");
                 }
             }
-        }
-    };
-    boot_trace(&format!("block store opened best={} synced={} verified={}",
-        block_store.best_height(), block_store.synced_to(), block_store.verified_to()));
-
-    // v0.7.1: Bootstrap from local aether shards into flux-db before starting P2P.
-    // v0.56: the default aether dir is an EPSILON-server path; on Windows/other operators
-    // it never exists, which spammed stderr with "[aether] aether dir not found" every
-    // launch. Only attempt the sync when the dir is actually present (overridable via
-    // SIGIL_AETHER_DIR); otherwise skip SILENTLY — a missing dir is the normal case off-server.
-    let aether_dir = std::env::var("SIGIL_AETHER_DIR")
-        .unwrap_or_else(|_| "/opt/orobit/sigil-data/db-epsilon/aether".to_string());
-    if std::path::Path::new(&aether_dir).is_dir() {
-        match block_store::sync_aether_to_fluxdb(&mut block_store, &aether_dir) {
-            Ok(n) if n > 0 => {
-                app.toast = format!("⬇ Synced {n} blocks → flux-db (height {})", block_store.best_height());
-            }
-            Err(e) => tlog!("[aether] {e}"),
-            _ => {}
-        }
+        });
     }
-
-    // v0.11.0: a read-only view of the SAME flux-db, cloned BEFORE the store is moved
-    // into the sync thread. The embedded HTTP server uses it to answer the explorer's
-    // /api/v1/{recent,search,aether} from the local verified spine.
-    let block_reader = block_store.reader();
 
     // v0.26 hardening #8 (DeepSeek-reviewed): graceful SIGTERM/SIGINT — restore the
     // terminal (harmless no-op if Ctrl-C lands before raw mode) and exit cleanly; the
@@ -3342,23 +3388,27 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     }
 
     let mut sync_handle: Option<std::sync::Arc<std::sync::Mutex<block_sync::P2PSyncState>>> = None;
-    if want_sync {
+    // 0.77/v7.0.21: the persisted [F] choice ("full") now RESUMES on every platform —
+    // Windows defaulted want_sync=false, so an operator's full archive silently didn't
+    // restart after an update ("it doesn't resume") until they pressed F again.
+    let autostart_full = read_sync_mode().as_deref() == Some("full");
+    let autofullsync = std::env::var("SIGIL_AUTOFULLSYNC").is_ok();
+    if want_sync || autostart_full || autofullsync {
         // v0.22.1: monitor path (recent_only=true) → fast-snap to the verified live tip.
         // v0.33.5: SIGIL_FULLSYNC=1 launches a genuine genesis→tip crawl instead.
-        // 0.77: the persisted [F] choice ("full") survives update/restart on this path
-        // (the LANE-V mode file — supersedes the disabled v0.71.1 resume block above).
         let recent_only = std::env::var("SIGIL_FULLSYNC").map(|v| v == "0" || v.is_empty()).unwrap_or(true)
-            && read_sync_mode().as_deref() != Some("full");
-        let p2p = block_sync::P2PBlockSync::launch(block_store, recent_only);
+            && !autostart_full && !autofullsync;
+        let p2p = block_sync::P2PBlockSync::launch_deferred(store_rx, recent_only);
         sync_handle = Some(p2p.state_handle());
+        if !recent_only { app.full_sync = true; }
         app.p2p_sync = Some(p2p);
         if app.toast.is_empty() {
             app.toast = "⚡ P2P mesh connecting → Delta / Epsilon…".into();
         }
     } else {
-        // v0.40.3: park the opened store so [F] can launch the sync engine ON
-        // DEMAND from inside the TUI — startup stays the safe light monitor.
-        app.idle_store = Some(block_store);
+        // v0.40.3/v7.0.21: park the RECEIVER so [F] can launch the sync engine ON
+        // DEMAND — the store arrives from the opener thread (take_idle_store polls it).
+        app.idle_store_rx = Some(store_rx);
         if app.toast.is_empty() {
             app.toast = "◆ light monitor — press F to start live sync".into();
         }
@@ -3406,7 +3456,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
 
     // v0.11.0: local-first explorer API over the verified spine + cortex snapshot.
     let local_api = std::sync::Arc::new(local_api::LocalApi {
-        reader: block_reader,
+        reader: reader_cell.clone(),
         sync: sync_handle,
         cortex: app.cortex_shared.clone(),
         network: "sigil-g0".into(),
@@ -3602,7 +3652,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 // full-archive and light-monitor through the engine atomics.
                                 // Light-monitor's 10ms tip-verify stays the untouched startup default.
                                 if app.p2p_sync.is_none() {
-                                    if let Some(store) = app.idle_store.take() {
+                                    if let Some(store) = app.take_idle_store() {
                                         let p2p = block_sync::P2PBlockSync::launch(store, false);
                                         app.p2p_sync = Some(p2p);
                                         app.full_sync = true;

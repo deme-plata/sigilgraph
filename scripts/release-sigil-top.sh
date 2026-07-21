@@ -48,8 +48,13 @@ done
 LB3=$(b3sum "$S/sigil-top-v${VER}-linux-x64" | awk '{print $1}'); LSZ=$(stat -c %s "$S/sigil-top-v${VER}-linux-x64")
 WB3=$(b3sum "$S/sigil-top-v${VER}-windows-x64.exe" | awk '{print $1}'); WSZ=$(stat -c %s "$S/sigil-top-v${VER}-windows-x64.exe")
 
-echo "▸ 4/7 publish to $DL"
+echo "▸ 4/7 publish to $DL (+ legacy channel)"
 cp "$S"/sigil-top-v${VER}-* "$DL/"
+# LEGACY CHANNEL (2026-07-21): clients from the v7.0.1 era poll quillon.xyz/downloads/ —
+# that manifest went stale at v2.0.0 on Jun 17, so old nodes believed they were up to
+# date FOREVER. Every release publishes binaries+manifest+sig to BOTH roots now.
+LEGACY_DL="/home/orobit/q-narwhalknight/dist-final/downloads"
+cp "$S"/sigil-top-v${VER}-* "$LEGACY_DL/"
 
 echo "▸ 5/7 write + SIGN manifest (mandatory — updater fails closed without a valid .sig)"
 REV=$(git rev-parse --short HEAD)
@@ -70,6 +75,8 @@ cat > "$DL/sigil-top-latest.json" <<EOF
 }
 EOF
 bash scripts/sign-manifest.sh "$DL/sigil-top-latest.json"
+# legacy channel gets the identical signed manifest
+cp "$DL/sigil-top-latest.json" "$DL/sigil-top-latest.json.sig" "$LEGACY_DL/"
 
 echo "▸ 6/7 verify LIVE manifest+sig against pinned key"
 python3 - "$PINNED_PUB" <<'PY'

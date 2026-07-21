@@ -1145,6 +1145,17 @@ impl BlockStore {
 
     pub fn flush(&self) -> Result<(), String> { self.db.flush() }
 
+    /// v7.0.22: flush WITHOUT holding the calling thread. The engine's verify tick called
+    /// flush() inline — at 10k blk/s that's a fat memtable→SST write (1-4s measured) on the
+    /// apply loop every tick, the operator-visible periodic "rate 0". Same flush(), same
+    /// durability + fsync semantics — only the CALLING thread changes. Single-flight: a
+    /// flush already in progress makes this a no-op (the next tick retries).
+    pub fn flush_background(&self) {
+        if !self.db.flush_background() {
+            let _ = self.db.flush(); // OS refused a thread — old inline behavior
+        }
+    }
+
     pub fn summary(&self) -> BlockStoreSummary {
         BlockStoreSummary {
             total_blocks: self.count(),

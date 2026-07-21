@@ -3905,8 +3905,15 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                     }
                 }
                 app.p2p_rate_samples.push_back((now, rate_metric));
+                // v7.0.22: 10s → 30s trailing window. The storage engine legitimately pauses
+                // apply for a few seconds (memtable flush / bulk-mode compaction settle); a
+                // 10s window collapsed the readout to ~0 on every pause, which reads as
+                // FAULTY even though fetch continues and the blocks land in a burst right
+                // after. Over 30s a 3-5s breath is a ~10-15% dip — visible, honest, calm.
+                // A REAL stall still decays to 0 (and the STALLED/WEDGE headline + watchdog
+                // name it loudly long before the window empties).
                 while app.p2p_rate_samples.len() > 1
-                    && now.duration_since(app.p2p_rate_samples[0].0).as_secs_f64() > 10.0
+                    && now.duration_since(app.p2p_rate_samples[0].0).as_secs_f64() > 30.0
                 {
                     app.p2p_rate_samples.pop_front();
                 }

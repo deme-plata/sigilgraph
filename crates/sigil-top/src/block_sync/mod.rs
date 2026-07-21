@@ -1755,7 +1755,9 @@ impl P2PBlockSync {
                                     report.checked, report.verified_to, vt0.elapsed().as_millis(), report.checked as f64 / secs);
                             }
                             let class = crate::gap_sync::classify_break(&report);
-                            let _ = store.flush();
+                            // v7.0.22: background flush — the inline call held THIS apply
+                            // loop 1-4s per tick (measured), the periodic "rate 0" dip.
+                            store.flush_background();
 
                             // VERIFIED-watermark watchdog bookkeeping (drives the LOUD no-progress fail).
                             let verified_now = report.verified_to;

@@ -206,6 +206,158 @@ pub fn verify_mimc(
     winterfell::verify::<MimcAir, Blake3_256<BaseElement>, Coin>(proof, pub_inputs, &min)
 }
 
+// ── 2-to-1 compression (MiMC-Feistel) — the Merkle NODE hash ────────────────────────────
+//
+// A Merkle tree needs a 2-input → 1-output hash. From a Feistel network over the MiMC round
+// function we get a 2-element permutation (l,r) → (x,y); the compression is its first output.
+// Feistel round:  (x, y) ← ( y + (x + c_r)⁷ , x ).  Invertible, so the permutation is real;
+// truncating to `x` gives a fixed-input-length 2-to-1 compression, standard for Merkle nodes.
+
+/// Off-circuit reference for the node hash. Must match the in-circuit AIR exactly.
+pub fn compress2(left: BaseElement, right: BaseElement) -> BaseElement {
+    let c = round_constants();
+    let (mut x, mut y) = (left, right);
+    for &ci in c.iter().take(ROUNDS) {
+        let t = y + pow7(x + ci);
+        y = x;
+        x = t;
+    }
+    x
+}
+
+#[derive(Clone)]
+pub struct CompressPublicInputs {
+    pub parent: BaseElement,
+}
+impl ToElements<BaseElement> for CompressPublicInputs {
+    fn to_elements(&self) -> Vec<BaseElement> {
+        vec![self.parent]
+    }
+}
+
+/// AIR proving `parent == compress2(left, right)` with **left and right hidden** (witness).
+/// This is depth-1 ZK membership: prove a public node is the hash of two secret children.
+/// Chaining D of these up a path (with per-level sibling ordering) is full-depth membership.
+pub struct CompressAir {
+    context: AirContext<BaseElement>,
+    parent: BaseElement,
+}
+
+impl Air for CompressAir {
+    type BaseField = BaseElement;
+    type PublicInputs = CompressPublicInputs;
+    type GkrProof = ();
+    type GkrVerifier = ();
+
+    fn new(trace_info: TraceInfo, pub_inputs: CompressPublicInputs, options: ProofOptions) -> Self {
+        assert_eq!(2, trace_info.width());
+        // x' = y + (x+c)⁷  → degree 7 ;  y' = x  → degree 1.
+        let degrees = vec![
+            TransitionConstraintDegree::new(SBOX as usize),
+            TransitionConstraintDegree::new(1),
+        ];
+        CompressAir {
+            context: AirContext::new(trace_info, degrees, 1, options),
+            parent: pub_inputs.parent,
+        }
+    }
+
+    fn get_periodic_column_values(&self) -> Vec<Vec<BaseElement>> {
+        vec![round_constants().to_vec()]
+    }
+
+    fn evaluate_transition<E: FieldElement + From<Self::BaseField>>(
+        &self,
+        frame: &EvaluationFrame<E>,
+        periodic_values: &[E],
+        result: &mut [E],
+    ) {
+        let c = periodic_values[0];
+        let x = frame.current()[0];
+        let y = frame.current()[1];
+        let s = x + c;
+        let s2 = s * s;
+        let s4 = s2 * s2;
+        let sbox = s4 * s2 * s; // (x+c)⁷
+        result[0] = frame.next()[0] - (y + sbox); // x' = y + (x+c)⁷
+        result[1] = frame.next()[1] - x; // y' = x
+    }
+
+    fn get_assertions(&self) -> Vec<Assertion<Self::BaseField>> {
+        // Only the parent (column 0 after ROUNDS rounds) is public — left/right stay hidden.
+        vec![Assertion::single(0, ROUNDS, self.parent)]
+    }
+
+    fn context(&self) -> &AirContext<Self::BaseField> {
+        &self.context
+    }
+}
+
+pub struct CompressProver {
+    options: ProofOptions,
+}
+impl CompressProver {
+    pub fn new(options: ProofOptions) -> Self {
+        Self { options }
+    }
+}
+
+impl Prover for CompressProver {
+    type BaseField = BaseElement;
+    type Air = CompressAir;
+    type Trace = TraceTable<Self::BaseField>;
+    type HashFn = Blake3_256<Self::BaseField>;
+    type RandomCoin = DefaultRandomCoin<Self::HashFn>;
+    type TraceLde<E: FieldElement<BaseField = Self::BaseField>> = DefaultTraceLde<E, Self::HashFn>;
+    type ConstraintEvaluator<'a, E: FieldElement<BaseField = Self::BaseField>> =
+        DefaultConstraintEvaluator<'a, Self::Air, E>;
+
+    fn get_pub_inputs(&self, trace: &Self::Trace) -> CompressPublicInputs {
+        CompressPublicInputs { parent: trace.get(0, ROUNDS) }
+    }
+    fn options(&self) -> &ProofOptions {
+        &self.options
+    }
+    fn new_trace_lde<E: FieldElement<BaseField = Self::BaseField>>(
+        &self, trace_info: &TraceInfo, main_trace: &ColMatrix<Self::BaseField>, domain: &StarkDomain<Self::BaseField>,
+    ) -> (Self::TraceLde<E>, TracePolyTable<E>) {
+        DefaultTraceLde::new(trace_info, main_trace, domain)
+    }
+    fn new_evaluator<'a, E: FieldElement<BaseField = Self::BaseField>>(
+        &self, air: &'a Self::Air, aux: Option<AuxRandElements<E>>, cc: ConstraintCompositionCoefficients<E>,
+    ) -> Self::ConstraintEvaluator<'a, E> {
+        DefaultConstraintEvaluator::new(air, aux, cc)
+    }
+}
+
+/// Build the Feistel compression trace for inputs (left, right).
+pub fn build_compress_trace(left: BaseElement, right: BaseElement) -> TraceTable<BaseElement> {
+    let c = round_constants();
+    let mut trace = TraceTable::new(2, TRACE_LEN);
+    trace.fill(
+        |state| {
+            state[0] = left;
+            state[1] = right;
+        },
+        |step, state| {
+            if step < ROUNDS {
+                let t = state[1] + pow7(state[0] + c[step]);
+                state[1] = state[0];
+                state[0] = t;
+            }
+        },
+    );
+    trace
+}
+
+pub fn verify_compress(
+    proof: winterfell::Proof,
+    pub_inputs: CompressPublicInputs,
+) -> Result<(), winterfell::VerifierError> {
+    let min = winterfell::AcceptableOptions::MinConjecturedSecurity(ACCEPT_BITS);
+    winterfell::verify::<CompressAir, Blake3_256<BaseElement>, Coin>(proof, pub_inputs, &min)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,4 +401,30 @@ mod tests {
         };
         assert!(rejected, "SECURITY: a tampered MiMC proof must not verify");
     }
+
+    /// DEPTH-1 ZK MEMBERSHIP: prove a public parent node is compress2(left,right) with BOTH
+    /// children secret. Green ⇒ the in-circuit 2-to-1 hash equals the reference, hides the
+    /// children, and rejects a wrong parent + a tampered proof.
+    #[test]
+    fn in_circuit_compress_hides_children_and_rejects_tampering() {
+        let (l, r) = (BaseElement::new(0xA11CE), BaseElement::new(0xB0B));
+        let parent = compress2(l, r);
+        let trace = build_compress_trace(l, r);
+        assert_eq!(trace.get(0, ROUNDS), parent, "trace parent must equal reference compress2");
+
+        let proof = CompressProver::new(mimc_options()).prove(trace).expect("prove compress");
+        verify_compress(proof.clone(), CompressPublicInputs { parent }).expect("valid must verify");
+
+        assert!(verify_compress(proof.clone(), CompressPublicInputs { parent: parent + BaseElement::ONE }).is_err(),
+            "SECURITY: wrong parent must be rejected");
+
+        let mut bytes = proof.to_bytes();
+        let mid = bytes.len()/2; bytes[mid]^=0xFF;
+        let rejected = match winterfell::Proof::from_bytes(&bytes) {
+            Ok(p) => verify_compress(p, CompressPublicInputs { parent }).is_err(),
+            Err(_) => true,
+        };
+        assert!(rejected, "SECURITY: tampered compress proof must be rejected");
+    }
+
 }

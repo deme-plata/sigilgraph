@@ -451,6 +451,35 @@ impl BlockStore {
         self.advance_synced();
     }
 
+    /// v7.0.18 FRONTIER SELF-HEAL: distrust our own stored frontier seam. When honest
+    /// frontier chunks repeatedly arrive but refuse to splice (parent-hash mismatch against
+    /// what WE hold), the poisoned block is LOCAL — typically written by a bulk/skeleton
+    /// lane (`put_blocks_bulk_trusted` does no linkage checking) from a corrupt WAN page.
+    /// Roll the contiguous frontier back `back` heights and DROP the height index for
+    /// [new_frontier, old_frontier+70k] (one range tombstone; the 70k overhang covers any
+    /// bulk-page squatters above the seam, while leaving live-tip blocks alone). Bodies stay
+    /// (hash-keyed, harmless orphans); `put_block`/`put_blocks_batch` re-link on refetch.
+    /// Returns the new frontier.
+    pub fn rollback_frontier(&mut self, back: u64) -> u64 {
+        let old = self.synced_to;
+        let new = old.saturating_sub(back).max(self.base);
+        let hi_end = old.saturating_add(70_000);
+        // Per-key point deletes, NOT delete_range: flux-db range tombstones shadow
+        // FUTURE writes in the range too (is_covered ignores seq), so a refetched
+        // index entry would read back as absent and the heal would wedge at the
+        // rollback point (proven by rollback_frontier_heals_poisoned_seam under
+        // delete_range). A point tombstone is simply overwritten by the re-put.
+        for h in new..hi_end {
+            let _ = self.db.delete(&height_key(h));
+        }
+        self.synced_to = new;
+        let _ = self.db.put(&[KEY_META, b'S'], &new.to_be_bytes());
+        if self.verified_to > new { self.set_verified_to(new); }
+        self.link_cache.clear(); // the cache may hold the poisoned seam's hashes
+        let _ = self.db.flush();
+        new
+    }
+
     /// Contiguous synced count: blocks base..synced_to are all present (next needed = this).
     pub fn synced_to(&self) -> u64 { self.synced_to }
 
@@ -571,6 +600,15 @@ impl BlockStore {
         }
 
         if self.db.get(hash_hex.as_bytes())?.is_some() {
+            // v7.0.18: body already stored but the height index may be gone (a frontier
+            // rollback deletes ONLY the index). Re-link it so a refetch after self-heal
+            // can advance — the conflict/linkage checks above already passed for this
+            // (height, hash). Without this, re-ingest silently no-ops and the heal wedges.
+            if self.db.get(&height_key(height)).ok().flatten().is_none() {
+                self.db.put(&height_key(height), hash_hex.as_bytes())?;
+                self.advance_synced();
+                return Ok(true);
+            }
             return Ok(false);
         }
 
@@ -1427,6 +1465,66 @@ mod tests {
     }
 
     /// v0.95 REGRESSION: with base=1 (SIGIL's genesis-anchor, h=0 not backfill-servable) a
+    /// v7.0.18: a poisoned frontier seam (a bulk-lane block whose hash doesn't match the
+    /// honest chain — `put_blocks_bulk_trusted` does no linkage checks) wedges ingest
+    /// forever: every honest chunk rejects (index fork at the seam, parent-mismatch above).
+    /// `rollback_frontier` + refetch must fully heal it — including re-creating the height
+    /// index for blocks whose BODIES survived the rollback.
+    #[test]
+    fn rollback_frontier_heals_poisoned_seam() {
+        use sigil_header::*;
+        fn mk(height: u64, parent: BlockHash) -> SigilBlockHeaderV0 {
+            let nonce = SqiSignature::from_array([7u8; SQISIGN_L5_LEN]);
+            let mut hh = blake3::Hasher::new();
+            hh.update(&parent); hh.update(nonce.as_bytes());
+            let vdf_input: [u8; 32] = *hh.finalize().as_bytes();
+            let scheme = SigScheme::SqiSign5;
+            SigilBlockHeaderV0 {
+                version: HEADER_VERSION, network_id: NETWORK_ID, height, parent_hash: parent,
+                merge_parents: Vec::new(), timestamp_ms: 1000 + height, nonce_sqisign: nonce,
+                vdf_input, vdf_proof: WesolowskiProof { y: vec![], pi: vec![], t: 100 }, difficulty: 1,
+                wallet_state_root: [0u8;32], dex_state_root: [0u8;32], event_log_root: [0u8;32],
+                contract_state_root: [0u8;32],
+                state_transition_proof: StarkProof { bytes: vec![], public_inputs_hash: [0u8;32] },
+                txs_merkle_root: [0u8;32], tx_count: 0,
+                fluxc_artifact_proof: ProofBundle { artifact_blake3: [0u8;32], sqisign_sig: vec![], sqisign_pubkey: vec![], settle_tx: None },
+                sig_scheme: scheme, producer: [0u8;32],
+                producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
+            }
+        }
+        let p = tmp("rollback-heal");
+        let _ = std::fs::remove_dir_all(&p);
+        {
+            let mut s = BlockStore::open(&p).unwrap();
+            s.set_base(1);
+            // Honest chain h=0..19.
+            let mut chain = Vec::new();
+            let mut parent = [0u8; 32];
+            for h in 0..20u64 { let hdr = mk(h, parent); parent = hdr.hash(); chain.push(hdr); }
+            assert_eq!(s.put_blocks_batch(&chain[1..10]), 9);
+            s.advance();
+            assert_eq!(s.synced_to(), 10, "honest [1..9] stored");
+            // POISON the seam: bulk-style unlinked block at h=10 (garbage parent).
+            s.force_insert_block(mk(10, [0xAA; 32]));
+            s.advance();
+            assert_eq!(s.synced_to(), 11, "poison occupies h=10");
+            // Honest chunk [10..19] fully rejects against the poisoned seam → wedge.
+            let got = s.put_blocks_batch(&chain[10..20]);
+            s.advance();
+            assert_eq!(got, 0, "honest chunk rejected (index fork at 10, parent-mismatch above)");
+            assert_eq!(s.synced_to(), 11, "wedged");
+            // SELF-HEAL: roll back past the seam, then refetch clean.
+            let newf = s.rollback_frontier(4);
+            assert_eq!(newf, 7, "frontier rolled back below the seam");
+            assert_eq!(s.synced_to(), 7);
+            let got2 = s.put_blocks_batch(&chain[7..20]);
+            s.advance();
+            assert!(got2 >= 10, "refetched chunk accepted after heal (got {got2})");
+            assert_eq!(s.synced_to(), 20, "healed — frontier passes the poisoned seam");
+        }
+        let _ = std::fs::remove_dir_all(&p);
+    }
+
     /// frontier chunk [1..N] under strict downward-linkage must store + advance — h=1 is the
     /// exempt anchor (its parent h=0 is never served), h=2.. link upward. Guards against the
     /// strict-ingest change self-stalling the live anchor (synced parked at 1).

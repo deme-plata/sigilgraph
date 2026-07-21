@@ -505,6 +505,12 @@ impl P2PBlockSync {
                 // env-overridable). Below `base` is never required.
                 let sync_base: u64 = std::env::var("SIGIL_SYNC_BASE").ok()
                     .and_then(|s| s.parse().ok()).unwrap_or(1);
+                // v7.0.17 REVERTED the v7.0.15 rebase-on-launch: set_base() only (the pre-v7.0.15,
+                // known-good behavior). rebase()'s advance_synced walks has_height (a DB get PER
+                // height) from base on the boot path — on an existing multi-million-block store that
+                // is millions of disk gets, which stalled boot and blanked the screen (the v7.0.16
+                // "bricked node" incident). Snapped-watermark self-heal will be redone off the boot
+                // path (background/indexed), never with an O(N) walk before first frame.
                 store.set_base(sync_base);
                 let resume_h = store.synced_to();
                 {
@@ -635,6 +641,10 @@ impl P2PBlockSync {
                 // data actually arrives without progress, so it can't false-fire on a quiet
                 // caught-up monitor or a merely-claimed (lying) higher tip. Reset on advance.
                 let mut frontier_serves_since_advance: u32 = 0;
+                // v7.0.18 FRONTIER SELF-HEAL: bounded rollback-and-refetch attempts when honest
+                // frontier headers repeatedly refuse to splice (poisoned local seam). Reset on
+                // real advance; after MAX attempts the loud SPINE BREAK verdict stands.
+                let mut heal_attempts: u32 = 0;
                 // SPINE-BREAK fix: VERIFIED-watermark watchdog. Tracks the last verified_to and
                 // when it last advanced; if it parks while a higher block is already held (a real
                 // hole), the shared `gap_sync::watchdog_verdict` declares a LOUD failure naming the
@@ -976,7 +986,16 @@ impl P2PBlockSync {
                                 // lead/genesis chunk round-robins back to the same empty peer forever
                                 // and the frontier never advances (v0.10.0 synced-stuck-at-0 bug).
                                 let fc = (store.synced_to() / CHUNK) * CHUNK;
-                                if got == 0 && start >= fc {
+                                // v7.0.18: distinguish EMPTY (no headers — peer lacks the range)
+                                // from REJECTED (real headers arrived but OUR store refused to
+                                // splice them — a poisoned local seam). Benching the peer on a
+                                // reject punishes an honest peer for our own bad block; on a
+                                // single-peer mesh that starved sync completely (bench 10s →
+                                // re-request → reject → bench …). Rejects are the self-heal's
+                                // job; only a genuinely header-less reply benches the peer.
+                                let had_headers = header_height_range(&b)
+                                    .map_or(false, |(_, mx)| mx >= start);
+                                if got == 0 && start >= fc && !had_headers {
                                     // EMPTY over a needed range = this peer doesn't HAVE this range
                                     // (e.g. a still-catching-up local node above its own height).
                                     // Bench it LONG so the frontier routes to full peers; the
@@ -1667,6 +1686,7 @@ impl P2PBlockSync {
                         // loud and continue; the next tick re-runs and the watchdog still surfaces a
                         // real stall. (All lock sites already recover poison via `into_inner`, so
                         // this is belt-and-suspenders for the thread itself.)
+                        let mut heal_pending = false; // set by the self-heal arm inside the closure
                         let verify_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             let vt0 = std::time::Instant::now();
                             let report = crate::chain_verify::verify_to_parallel(&mut store, VERIFY_BUDGET);
@@ -1725,6 +1745,35 @@ impl P2PBlockSync {
                                         frontier, best, frontier_active, stalled,
                                         Duration::from_secs(watchdog_secs),
                                     ) {
+                                        // v7.0.14 LIGHT-MONITOR FALSE-BREAK FIX: in light-monitor
+                                        // mode the node HOLDS NOTHING and tracks the tip via the
+                                        // recent-window snap — there is no genesis-contiguous frontier
+                                        // to wedge. After [F] flips full-archive → light, the frontier
+                                        // is parked at the ABANDONED full-archive height (e.g. 8.97M);
+                                        // the wedge watchdog would false-fire "SPINE BREAK — STUCK"
+                                        // forever even while gap-to-tip is 25 and rate is 9 blk/s.
+                                        // Light-monitor health = gap-to-tip + rate (surfaced above),
+                                        // NOT this frontier watchdog. (A truly Fatal/corrupt-header
+                                        // break above still fires — only the frontier WEDGE is gated.)
+                                        Some(_) if s.light_mode => {
+                                            s.sync_failure = None;
+                                            failure_announced = false;
+                                        }
+                                        // v7.0.18 FRONTIER SELF-HEAL: real headers keep arriving for
+                                        // the frontier yet refuse to splice → the poisoned block is
+                                        // OURS (a bulk/skeleton lane wrote an unlinkable seam; that
+                                        // lane skips linkage checks). Fetching harder can never fix
+                                        // it — the live wedge showed 2M headers fetched at 6.5k blk/s
+                                        // with the spine parked. Roll OUR frontier back and refetch
+                                        // clean. Bounded: after MAX_HEALS the loud verdict stands.
+                                        Some(f) if frontier_active && heal_attempts < 3 => {
+                                            heal_attempts += 1;
+                                            let newf = store.rollback_frontier(4096);
+                                            crate::tlog!("[sync] 🔧 frontier WEDGE self-heal #{heal_attempts} — honest headers refuse to splice at h={frontier} ({}); rolled local frontier back to h={newf}, refetching clean", f.reason);
+                                            s.sync_failure = None;
+                                            failure_announced = false;
+                                            heal_pending = true;
+                                        }
                                         Some(f) => {
                                             if !failure_announced {
                                                 failure_announced = true;
@@ -1738,6 +1787,7 @@ impl P2PBlockSync {
                                             // clear any prior stall + re-arm the announcer.
                                             s.sync_failure = None;
                                             failure_announced = false;
+                                            heal_attempts = 0; // real progress re-arms the self-heal budget
                                         }
                                     }
                                 }
@@ -1745,6 +1795,19 @@ impl P2PBlockSync {
                         }));
                         if verify_res.is_err() {
                             crate::tlog!("[sync] ⚠ verify/watchdog tick PANICKED — recovered (sync thread alive, mutex un-poisoned); continuing");
+                        }
+                        if heal_pending {
+                            // v7.0.18: the self-heal rolled the store's frontier back — clear every
+                            // in-flight claim and bench so the refill re-requests from the NEW
+                            // frontier immediately, and re-arm the watchdog clocks so the heal gets
+                            // a full window to prove itself before the next verdict.
+                            assigned.clear();
+                            peer_bench.clear();
+                            frontier_serves_since_advance = 0;
+                            last_synced_seen = store.synced_to();
+                            last_advance_t = Instant::now();
+                            last_verified_seen = store.verified_to();
+                            last_verified_advance_t = Instant::now();
                         }
                         } // end if !genesis_reset
                     }

@@ -1337,6 +1337,62 @@ fn main() {
             println!("  {GREEN}done — {accepted} shares accepted{RESET}\n");
             return;
         }
+        // Headless CONTINUOUS dual-lane mining for rigs (Hive OS / systemd / CI) —
+        // the SAME in-process flux_miner::engine::supervisor the [5] Mining tab runs,
+        // but with no TTY. This is why "one binary = node + light client + wallet +
+        // miner": a rig runs `sigil-top mine-rig <wallet>` and needs no separate exe.
+        // GPU by default (the `gpu` feature); the engine falls back to CPU if OpenCL
+        // init fails. Runs until killed. Output matches the standalone sigil-miner's
+        // run_headless line so the Hive OS h-stats parser reads it unchanged.
+        //   sigil-top mine-rig [wallet-64hex] [node-url]
+        //   env: SIGIL_MINE_WALLET, SIGIL_MINE_NODE, SIGIL_MINE_CPU=1 (force CPU)
+        Some("mine-rig") => {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::sync::{Arc, Mutex};
+            let wallet = argv.get(1).cloned()
+                .or_else(|| std::env::var("SIGIL_MINE_WALLET").ok())
+                .unwrap_or_else(miner_wallet);
+            let url = argv.get(2).cloned()
+                .or_else(|| std::env::var("SIGIL_MINE_NODE").ok())
+                .unwrap_or_else(engine_node_url);
+            let want_gpu = cfg!(feature = "gpu") && std::env::var("SIGIL_MINE_CPU").is_err();
+            println!("\n  ▲ sigil-top mine-rig v{VERSION} — dual-lane (BLAKE4 Φ + VDF Ω) — headless");
+            println!("  wallet: {}…  node: {url}  requested: {}",
+                &wallet.chars().take(8).collect::<String>(), if want_gpu { "GPU" } else { "CPU" });
+            let stats = Arc::new(Mutex::new(flux_miner::engine::MinerStats::default()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let desired_gpu = Arc::new(AtomicBool::new(want_gpu));
+            let gpu_failed = Arc::new(AtomicBool::new(false));
+            {
+                let (u, w, s, st, dg, gf) = (url.clone(), wallet.clone(), stats.clone(),
+                    stop.clone(), desired_gpu.clone(), gpu_failed.clone());
+                std::thread::spawn(move || flux_miner::engine::supervisor(u, w, s, st, dg, gf));
+            }
+            // Emit a line whenever the accepted+rejected share count changes — the
+            // exact shape the Hive OS h-stats.sh parser reads.
+            let mut last = 0u64;
+            let mut last_update: Option<String> = None;
+            loop {
+                std::thread::sleep(Duration::from_millis(500));
+                let s = stats.lock().unwrap();
+                if s.update_msg != last_update {
+                    last_update = s.update_msg.clone();
+                    if let Some(u) = &last_update { println!("  [update] {u}"); }
+                }
+                if s.shares_ok + s.shares_bad != last {
+                    last = s.shares_ok + s.shares_bad;
+                    let line = s.log.front().cloned().unwrap_or_default();
+                    println!(
+                        "  [{}] {line}   [✓{} ✗{}]  {} (Φ {})  bal {} SIGIL",
+                        s.mode, s.shares_ok, s.shares_bad,
+                        flux_miner::engine::format_hps(s.hashrate), flux_miner::format_flux(s.hashrate),
+                        s.balance
+                    );
+                }
+                if stop.load(Ordering::Relaxed) { break; }
+            }
+            return;
+        }
         // Scriptable flux-way self-update — fetch the release channel, BLAKE3-verify, hot-swap.
         Some("--self-update") | Some("update") => {
             println!("\n  {DIM}checking flux release channel{RESET} {CYAN}{UPDATE_MANIFEST}{RESET}");
@@ -3165,6 +3221,14 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // v7.0.7: heal a store wedged by the v7.0.3–7.0.5 frontier-stall bug (one-time, marked).
     heal_wedged_store_once(&db_path);
     let oversized_primary = oversized_store_for_light_boot(&db_path, want_sync);
+    // v7.0.17 NEVER-BLANK: the store open + sync bootstrap run BEFORE the terminal is set up
+    // (the v0.35 "sync starts earlier" ordering), so a slow/wedged store used to leave the
+    // console BLANK for up to a minute — which reads as a bricked node (the v7.0.16 incident).
+    // Print a plain-stdout status first so the app is visibly alive during the open; the TUI's
+    // alt-screen clears it on the first frame.
+    println!("\n  \u{25c7} SIGIL v{} — opening local block store…\n  (first run or a large store may take a moment; a wedged store auto-falls-back to a clean one)\n",
+        env!("CARGO_PKG_VERSION"));
+    let _ = std::io::Write::flush(&mut std::io::stdout());
     boot_trace(&format!("opening block store path={db_path} mode=nonblocking want_sync={want_sync}"));
     let mut block_store = if let Some(bytes) = oversized_primary {
         let volatile = std::env::temp_dir()

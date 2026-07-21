@@ -26,12 +26,12 @@ use std::thread;
 /// `/readyz` reports it; the money/chain routes serve regardless.
 static INDEX_READY: AtomicBool = AtomicBool::new(false);
 
-use flux_miner::client::{check_submission, Challenge, Submission, SubmitResult};
+use flux_miner::client::{check_submission, check_submission_at, Challenge, Submission, SubmitResult};
 use flux_vdf::ModSquaring;
 use sigil_dex::SwapDirection;
 use sigil_rpc::nation;
 use sigil_rpc::onboard::{self, VerifiedRegistry};
-use sigil_rpc::{credit_light_verifiers, credit_share, execute_swap, submit_share};
+use sigil_rpc::{credit_light_verifiers, credit_share, distribute_block_reward, execute_swap, submit_share};
 use sigil_state::{
     commit_state_transition, PoolId, PoolState, SigilState, StateMutation, StateTransition,
     TokenId, WalletId, NATIVE,
@@ -115,6 +115,18 @@ struct Node {
     /// Persisted under its OWN flux-db key (`university`), additive like
     /// `credit_vault`/`mandates` — NEVER inside `Snapshot` (positional bincode).
     university: sigil_university::UniversityRegistry,
+    /// POOL-SHARES (v7.1.0): accepted sub-difficulty shares for the CURRENT mining
+    /// height, wallet → count. Distributed proportionally (winner absorbs the
+    /// remainder) when the height's block lands, then cleared. In-memory only —
+    /// a restart forfeits at most one block-interval of shares, never minted coin.
+    share_window: std::collections::HashMap<WalletId, u64>,
+    /// POOL-SHARES replay guard: (wallet, nonce) pairs already accepted this
+    /// height — a share can't be credited twice. Cleared with the window.
+    share_seen: std::collections::HashSet<(WalletId, u64)>,
+    /// POOL-SHARES ease: share_target = blake4_target << ease bits (≈2^ease
+    /// shares per block network-wide). From SIGIL_SHARE_EASE_BITS, 0 = pool OFF
+    /// (challenge advertises share_target=0, submits behave exactly pre-7.1).
+    share_ease: u32,
 }
 
 /// Persisted snapshot: the money + chain state (NOT students — VerifiedRegistry isn't
@@ -326,7 +338,7 @@ fn apply_block(n: &mut Node, rec: &serde_json::Value, g: &ModSquaring) -> Result
     // Pre-activation drift observation (go/no-go prerequisite #1) — ungated, log-only.
     h7_telemetry::record(bh, rec_ts, apply_now_us);
     let miner = hex32(&sub.wallet).ok_or("bad wallet")?;
-    let c = Challenge { height: bh, vdf_input: mining_seed(&n.tip_hash, bh), blake4_target: target_from_bits(bits), vdf_t, net_hps: 0.0 };
+    let c = Challenge { height: bh, vdf_input: mining_seed(&n.tip_hash, bh), blake4_target: target_from_bits(bits), vdf_t, net_hps: 0.0, share_target: 0 };
     if !check_submission(g, &c, &sub) { return Err(format!("block {bh}: dual-lane verify FAILED")); }
     // LANE-R: recompute the reward the SAME way the producer did — time-based from the block's
     // stored µs ts when genesis is anchored, else the legacy block-based schedule. A follower
@@ -480,6 +492,28 @@ fn mining_vdf_t() -> u64 {
 }
 /// BLAKE4 Lane-A target for a difficulty `bits`: target = u64::MAX >> bits.
 fn target_from_bits(bits: u32) -> u64 { u64::MAX >> bits.min(63) }
+
+/// POOL-SHARES ease (bits): share_target = blake4_target << ease, i.e. shares are
+/// 2^ease easier than blocks → ≈2^ease shares per block across the whole network.
+/// 0 disables pool mode entirely (solo semantics, pre-7.1 wire behavior).
+fn share_ease_bits() -> u32 {
+    std::env::var("SIGIL_SHARE_EASE_BITS").ok().and_then(|s| s.parse().ok()).unwrap_or(8)
+}
+
+/// The sub-difficulty share target for the current block difficulty, saturating
+/// safely: with ease ≥ bits every hash would qualify (share spam) — clamp so the
+/// share target is always at least 2× harder than trivial. Returns 0 (pool OFF)
+/// when ease is 0.
+fn share_target_from(bits: u32, ease: u32) -> u64 {
+    if ease == 0 { return 0; }
+    target_from_bits(bits.saturating_sub(ease).max(1))
+}
+
+/// POOL-SHARES per-wallet cap of accepted shares per height: bounds memory, the
+/// distribution loop, and what a single spammy rig can claim of one block.
+const SHARE_WALLET_CAP: u64 = 64;
+/// POOL-SHARES global cap of accepted shares per height (memory/verify bound).
+const SHARE_GLOBAL_CAP: usize = 4096;
 
 // ── H3: follower difficulty ENVELOPE (verify-don't-trust the peer's `bits`) ──
 // The follower builds the PoW target from the block's DECLARED `bits`
@@ -645,6 +679,9 @@ fn bootstrap() -> Node {
             mandates,
             council,
             university,
+            share_window: std::collections::HashMap::new(),
+            share_seen: std::collections::HashSet::new(),
+            share_ease: share_ease_bits(),
         };
     }
     eprintln!("flux-db: no snapshot — seeding fresh genesis @ {state_path}");
@@ -722,7 +759,10 @@ fn bootstrap() -> Node {
         credit_vault: sigil_bank::credit::CreditVault::new(),
         mandates: sigil_bank::mandate::MandateBook::default(),
         council: { let mut c = sigil_bank::council::Council::default(); c.seed(vec![MASTER, OPERATOR], 2); c },
-        university: sigil_university::UniversityRegistry::new() };
+        university: sigil_university::UniversityRegistry::new(),
+        share_window: std::collections::HashMap::new(),
+        share_seen: std::collections::HashSet::new(),
+        share_ease: share_ease_bits() };
     persist(&node); // write the genesis snapshot so the next boot restores
     node
 }
@@ -1324,8 +1364,35 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 blake4_target: target_from_bits(n.bits),
                 vdf_t: mining_vdf_t(),
                 net_hps,
+                share_target: share_target_from(n.bits, n.share_ease),
             };
             ok(serde_json::to_string(&c).unwrap_or_else(|_| "{}".into()))
+        }
+        // POOL-SHARES: per-miner live view — self-reported Φ rate (as summed into
+        // net_hps) + accepted shares in the CURRENT height's payout window. This
+        // is the "computing power of a single instance" surface, network-side.
+        ("GET", "/mining/miners") => {
+            let n = node.read().unwrap();
+            let now = now_ms();
+            let mut rows: Vec<String> = n.miner_hps.iter().map(|(w, (hps, t))| {
+                let wallet = to_hex(w);
+                let shares = n.share_window.get(w).copied().unwrap_or(0);
+                format!("{{\"wallet\":\"{}\",\"hps\":{},\"shares\":{},\"age_ms\":{}}}",
+                    wallet, hps, shares, now.saturating_sub(*t))
+            }).collect();
+            // wallets that have shares this height but no recent hps report
+            for (w, s) in n.share_window.iter() {
+                if !n.miner_hps.contains_key(w) {
+                    rows.push(format!("{{\"wallet\":\"{}\",\"hps\":0,\"shares\":{},\"age_ms\":null}}", to_hex(w), s));
+                }
+            }
+            ok(format!(
+                "{{\"height\":{},\"share_target\":{},\"window_shares\":{},\"miners\":[{}]}}",
+                n.block_height,
+                share_target_from(n.bits, n.share_ease),
+                n.share_window.values().sum::<u64>(),
+                rows.join(",")
+            ))
         }
         ("POST", "/mining/submit") => {
             let sub: Submission = match serde_json::from_str(body) {
@@ -1337,7 +1404,7 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 None => return bad("wallet must be 64-hex"),
             };
             let reject = |reason: String| {
-                let r = SubmitResult { accepted: false, reason: Some(reason) };
+                let r = SubmitResult { accepted: false, reason: Some(reason), ..Default::default() };
                 ok(serde_json::to_string(&r).unwrap_or_else(|_| "{}".into()))
             };
             // A follower node syncs from a peer and must NOT mint its own blocks (would fork).
@@ -1355,15 +1422,38 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             if sub.height != bh {
                 return reject(format!("stale height: submitted {} but the mineable tip is {}", sub.height, bh));
             }
+            let share_target = share_target_from(n.bits, n.share_ease);
             let c = Challenge {
                 height: bh,
                 vdf_input: mining_seed(&n.tip_hash, bh),
                 blake4_target: target_from_bits(n.bits),
                 vdf_t: mining_vdf_t(),
                 net_hps: 0.0,
+                share_target,
             };
             let g = ModSquaring::bench_2048();
             if !check_submission(&g, &c, &sub) {
+                // POOL-SHARES: not a block — is it a valid sub-difficulty SHARE?
+                // Same height/header/VDF binding, easier Lane-A target. Recorded
+                // into this height's payout window, credited when the block lands.
+                if share_target > 0 && check_submission_at(&g, &c, &sub, share_target) {
+                    if !n.share_seen.insert((miner, sub.block.nonce)) {
+                        return reject("duplicate share (nonce already credited this height)".into());
+                    }
+                    if n.share_seen.len() > SHARE_GLOBAL_CAP {
+                        return reject("share window full for this height".into());
+                    }
+                    let cnt = n.share_window.entry(miner).or_insert(0);
+                    if *cnt >= SHARE_WALLET_CAP {
+                        return reject("per-wallet share cap reached for this height".into());
+                    }
+                    *cnt += 1;
+                    let shares = *cnt;
+                    return ok(format!(
+                        "{{\"accepted\":true,\"reason\":null,\"share\":true,\"height\":{},\"shares_this_block\":{}}}",
+                        bh, shares
+                    ));
+                }
                 return reject("dual-lane verify / header mismatch (wrong tip, target, or VDF)".into());
             }
             // Verified on the current tip — credit the HALVING block reward on the MINING
@@ -1381,8 +1471,17 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 sigil_emission::block_reward_time(n.genesis_ts_us, n.last_block_ts_us, ts_us, n.emission_carry)
             };
             let eh = n.height;
-            match credit_share(&mut n.state, eh, miner, reward) {
-                Ok(bal) => {
+            // POOL-SHARES: the block reward is split proportionally over this
+            // height's accepted shares; the winner's solve counts as a share and
+            // absorbs the integer remainder (exact conservation — see
+            // distribute_block_reward). Empty window (solo miner, or pool OFF)
+            // degrades to exactly the old winner-takes-all credit.
+            let mut window = n.share_window.clone();
+            *window.entry(miner).or_insert(0) += 1;
+            match distribute_block_reward(&mut n.state, eh, miner, reward, &window) {
+                Ok((bal, _credited)) => {
+                    n.share_window.clear();
+                    n.share_seen.clear();
                     // fix #3 (VDF-chaining): fold the VDF OUTPUT into the tip → height bh+1's
                     // challenge depends on this block's VDF output (sequential timeline).
                     let prev_tip = n.tip_hash;
@@ -2041,6 +2140,15 @@ fn handle(mut stream: TcpStream, node: &RwLock<Node>) {
         })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| stream.peer_addr().map(|a| a.ip().to_string()).unwrap_or_else(|_| "unknown".into()));
+    // v0.0.8 HTTP MIRROR (2026-07-21): serve the auto-update channel + status feed over
+    // THIS plain-HTTP port. Operator networks with app-level HTTPS filtering blocked the
+    // updater/feed on :443 while mining submits to :8099 flowed fine — :8099 is the one
+    // path proven reachable from every rig, so the release artifacts are mirrored here.
+    // GET-only; filename-sanitized (last component, [A-Za-z0-9._-] only, no traversal).
+    if method == "GET" && (path.starts_with("/downloads/") || path == "/sigil-status.json") {
+        serve_static_mirror(&mut stream, path);
+        return;
+    }
     let resp = route(node, method, path, query, &body, &peer_ip);
     // Persist the money+chain snapshot after a SUCCESSFUL mutating request so a restart
     // restores balances/pools/height/tip instead of re-seeding genesis. Gating on the
@@ -2055,6 +2163,48 @@ fn handle(mut stream: TcpStream, node: &RwLock<Node>) {
 
 fn find_sub(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// v0.0.8: plain-HTTP mirror of the release channel (`/downloads/<file>`) and the status
+/// feed (`/sigil-status.json`) — see the call site in the connection handler. Reads from
+/// the SAME dirs the HTTPS domains serve, so the release script needs no extra step.
+fn serve_static_mirror(stream: &mut std::net::TcpStream, path: &str) {
+    use std::io::Write;
+    let file = if path == "/sigil-status.json" {
+        std::path::PathBuf::from(std::env::var("SIGIL_RPC_STATUS_FILE")
+            .unwrap_or_else(|_| "/home/orobit/q-narwhalknight/dist-fluxapp/sigil-status.json".into()))
+    } else {
+        let name = path.trim_start_matches("/downloads/");
+        let ok = !name.is_empty()
+            && name.len() < 128
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+            && !name.starts_with('.');
+        if !ok {
+            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            return;
+        }
+        std::path::PathBuf::from(std::env::var("SIGIL_RPC_DOWNLOADS_DIR")
+            .unwrap_or_else(|_| "/home/orobit/q-narwhalknight/dist-fluxapp/downloads".into()))
+            .join(name)
+    };
+    match std::fs::read(&file) {
+        Ok(bytes) => {
+            let ctype = if file.extension().and_then(|e| e.to_str()) == Some("json") {
+                "application/json"
+            } else {
+                "application/octet-stream"
+            };
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+                bytes.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&bytes);
+        }
+        Err(_) => {
+            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        }
+    }
 }
 
 fn main() {

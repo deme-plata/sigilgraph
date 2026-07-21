@@ -188,6 +188,17 @@ const LATEST: &str = VERSION; // ship cadence, not the 3-part Cargo version
 /// q-flux downloads dir — the SAME manifest `flux_release_check` reads. Fetched at
 /// startup (throttled) and on `[U]`, so the running binary discovers new releases live.
 const UPDATE_MANIFEST: &str = "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-latest.json";
+/// v7.0.26: release-channel BASES, tried in order. The plain-HTTP :8099 mirror is the
+/// escape hatch for operator networks that filter the app's HTTPS (:443) — mining
+/// submits prove :8099 reachable from every rig ("connect failed" on the updater while
+/// GPU shares flowed). manifest+sig+binaries are identical mirrors on all three.
+const CHANNEL_BASES: &[&str] = &[
+    "https://sigilgraph.fluxapp.xyz/downloads",
+    "https://quillon.xyz/downloads",
+    "http://sigilgraph.quillon.xyz:8099/downloads",
+];
+/// Which base the last successful manifest fetch used — binary downloads follow it.
+static ACTIVE_BASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// Which prebuilt this binary self-updates to (its per-OS entry in the manifest).
 const SELF_TARGET: &str = if cfg!(all(windows, feature = "gpu")) { "windows-x64-gpu" }
     else if cfg!(windows) { "windows-x64" }
@@ -445,7 +456,9 @@ fn fetch_best(cfg: &Config) -> (NodeStatus, bool, &'static str) {
     for url in [cfg.feed.as_str(),
                 "https://sigilgraph.fluxapp.xyz/sigil-status.json",
                 "https://quillon.xyz/sigil-status.json",
-                "https://sigilgraph.fluxapp.xyz/sigil-status.json"] {
+                // v7.0.26: plain-HTTP :8099 mirror — the port mining provably reaches
+                // on networks that filter the app's HTTPS (the OFFLINE-badge saga).
+                "http://sigilgraph.quillon.xyz:8099/sigil-status.json"] {
         if let Some((st, _b)) = fetch_feed(url) {
             LAST_FEED_H.store(st.height, std::sync::atomic::Ordering::Relaxed);
             return (st, true, "feed");
@@ -1735,13 +1748,13 @@ const RELEASE_SIGN_PUBKEY_HEX: &str =
 /// signature is published at `<manifest>.sig` as 128-hex (ed25519 over the EXACT manifest bytes).
 /// Returns `Err` (fail-closed → no update) on any missing/invalid signature. No runtime bypass:
 /// this check always runs — there is no env var that skips it.
-fn verify_manifest_sig(manifest_body: &str) -> Result<(), String> {
+fn verify_manifest_sig(base: &str, manifest_body: &str) -> Result<(), String> {
     let pk: [u8; 32] = hex::decode(RELEASE_SIGN_PUBKEY_HEX).ok()
         .and_then(|v| v.try_into().ok())
         .ok_or_else(|| "pinned release key malformed".to_string())?;
     let bust = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs()).unwrap_or(0);
-    let sig_url = format!("{UPDATE_MANIFEST}.sig?t={bust}");
+    let sig_url = format!("{base}/sigil-top-latest.json.sig?t={bust}");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(8))
         .min_tls_version(reqwest::tls::Version::TLS_1_2)
@@ -1778,17 +1791,21 @@ fn fetch_latest() -> Result<Release, String> {
     // cached manifest (q-flux / CDN / OS). A fresh ?t= each call bypasses every cache.
     let bust = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs()).unwrap_or(0);
-    let url = format!("{UPDATE_MANIFEST}?t={bust}");
     let mut last = String::from("no response");
+    // v7.0.26: try every channel base — HTTPS first, then the plain-HTTP :8099 mirror
+    // (filtered-network escape hatch). Signature is verified against the SAME base.
+    for (bi, base) in CHANNEL_BASES.iter().enumerate() {
+    let url = format!("{base}/sigil-top-latest.json?t={bust}");
     for _ in 0..2 {
         match client.get(&url).send().and_then(|r| r.error_for_status()) {
             Ok(resp) => match resp.text() {
                 Ok(body) => {
                     // LANE-C: AUTHENTICATE the manifest before we trust a single field (incl. the
                     // blake3 we'd verify the binary against). A bad signature is fatal — fail closed.
-                    if let Err(e) = verify_manifest_sig(&body) {
+                    if let Err(e) = verify_manifest_sig(base, &body) {
                         return Err(e);
                     }
+                    ACTIVE_BASE.store(bi, std::sync::atomic::Ordering::Relaxed);
                     match serde_json::from_str::<Release>(&body) {
                         Ok(rel) => return Ok(rel),
                         Err(e) => last = format!("parse: {e} [{}B: {:?}]",
@@ -1804,6 +1821,7 @@ fn fetch_latest() -> Result<Release, String> {
             }
         }
     }
+    } // CHANNEL_BASES — fall through to the next mirror (incl. the plain-HTTP :8099 one)
     Err(last)
 }
 
@@ -2164,8 +2182,18 @@ fn fetch_binary_reqwest(url: &str) -> Result<Vec<u8>, String> {
 }
 
 fn self_update(rel: &Release) -> Result<String, String> {
-    let t = rel.for_self();
+    let mut t = rel.for_self();
     if t.url.is_empty() { return Err(format!("manifest has no {SELF_TARGET} build")); }
+    // v7.0.26: download from the SAME base the manifest came from. The manifest's
+    // absolute URLs point at the HTTPS domain; on a filtered network only the
+    // plain-HTTP :8099 mirror is reachable, so rebase by filename (blake3 gate
+    // below authenticates the bytes regardless of transport).
+    let bi = ACTIVE_BASE.load(std::sync::atomic::Ordering::Relaxed);
+    if bi > 0 {
+        if let Some(name) = t.url.rsplit('/').next() {
+            t.url = format!("{}/{}", CHANNEL_BASES[bi.min(CHANNEL_BASES.len()-1)], name);
+        }
+    }
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(120))
         .min_tls_version(reqwest::tls::Version::TLS_1_2)

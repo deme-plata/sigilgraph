@@ -104,9 +104,6 @@ mod tests {
     /// If this test ever passes vacuously (verifier returns true for tampered input),
     /// SIGIL shielded transfers are theater — exactly the Quillon failure mode.
     #[test]
-    #[ignore = "BLOCKED on LANE-A: flux-lattice-guard completeness is broken — PROVE ok but \
-                VERIFY returns FALSE on a VALID proof (soundness/wrong-public works). Remove this \
-                #[ignore] once verifier.rs accepts honest proofs; then this gate MUST pass green."]
     fn real_proof_round_trips_and_rejects_tampering() {
         // Minimal-but-REAL circuit: prove knowledge of w s.t. w * w == pub[0].
         // (LANE-A replaces this with value-conservation + Merkle-membership + nullifier.)

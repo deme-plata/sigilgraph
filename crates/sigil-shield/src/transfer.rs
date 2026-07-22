@@ -16,15 +16,23 @@
 //! Nullifier        nf = compress2(spend_key, position)            (revealed on spend)
 //! Output note      cm_out = compress2(out_value, out_blinding)    (inserted into the tree)
 //!
+//! RANGE: every amount (input, fee, outputs) is bound `< 2^RANGE_BITS` so the field-arithmetic
+//! conservation proof equals INTEGER conservation — no output can be a wrapped "negative"
+//! (`range` module). At BUILD time `amounts_in_range` enforces the bound (closes the honest path
+//! + the test's rejection); the real zk RangeAir primitive lives in `range.rs`.
+//!
 //! ⚠️ SCOPE (honest, per the audit discipline — mirrors `stark.rs`): the three statements share
-//! the `value`/`spend_key` WITNESS at proving time. Folding them into a SINGLE monolithic AIR
-//! (so a verifier is bound to `conservation.balance[0] == the membered note's committed value`
-//! and `nf == compress2(sk, position of that same leaf)` in-circuit) is the final hardening —
-//! plus the RANGE CHECK (each amount < 2^64) that closes field-wrap "negative amount". Until
-//! those land, the cross-statement binding is enforced by the honest prover, not yet by the
-//! circuit; do not treat this as audited-final. What IS real here: every proof comes from
-//! winterfell (no wrapper, no zero-fill), each verifies + rejects tampering, and the nullifier
-//! set rejects replays.
+//! the `value`/`spend_key` WITNESS at proving time. Two hardenings remain, both the same shape —
+//! fold constraints into the conservation AIR so the VERIFIER (not just the prover) is bound:
+//!   1. VALUE + NULLIFIER BINDING: `conservation.balance[0] == the membered note's committed
+//!      value` and `nf == compress2(sk, that same leaf's position)` in-circuit.
+//!   2. PRIVATE RANGE: add the `range` bit-decomposition columns to the conservation AIR so each
+//!      HIDDEN `out` amount is range-checked in the SAME proof (a standalone RangeAir has the
+//!      amount PUBLIC, which would leak it — so it can't be bundled as-is). Until then range is
+//!      verifier-enforced only for a public amount; for hidden outputs it's a build-time check.
+//! Do not treat this as audited-final. What IS real: every proof comes from winterfell (no
+//! wrapper, no zero-fill), each verifies + rejects tampering, the nullifier set rejects replays,
+//! and out-of-range amounts are rejected.
 
 use winterfell::{
     crypto::{hashers::Blake3_256, DefaultRandomCoin},
@@ -244,6 +252,8 @@ pub enum TransferError {
     DoubleSpend(String),
     #[error("input note is not in the tree at the given index")]
     NotAMember,
+    #[error("amount {0} is out of range (must be < 2^{bits})", bits = crate::range::RANGE_BITS)]
+    OutOfRange(u64),
 }
 
 /// A completed shielded transfer, ready to gossip + apply. Carries ONLY public data — the
@@ -286,6 +296,21 @@ impl<'a> SpendWitness<'a> {
         Ok(())
     }
 
+    /// Every amount (input, fee, each output) must be `< 2^RANGE_BITS`. This is what makes the
+    /// field-arithmetic conservation proof equal INTEGER conservation: with ≤ CONS_LEN bounded
+    /// terms the integer sum stays `< p`, so no output can wrap the field into a "negative".
+    fn amounts_in_range(&self) -> Result<(), TransferError> {
+        for a in std::iter::once(self.note.value)
+            .chain(std::iter::once(self.fee))
+            .chain(self.outputs.iter().map(|o| o.value))
+        {
+            if !crate::range::in_range(a) {
+                return Err(TransferError::OutOfRange(a.as_int()));
+            }
+        }
+        Ok(())
+    }
+
     fn membership_path(&self) -> Result<MerklePath, TransferError> {
         // the leaf the tree holds at `index` MUST equal our note's commitment
         if self.tree.path(self.index).leaf != self.note.commitment() {
@@ -300,6 +325,7 @@ impl<'a> SpendWitness<'a> {
 /// membership proving; the membership statement is still enforced at verify time via the
 /// tree/construction (identical guarantee to the STARK — see the membership module's gate).
 pub fn prove_transfer(w: &SpendWitness) -> Result<ShieldedTransfer, TransferError> {
+    w.amounts_in_range()?; // no field-wrap "negative" amounts (closes the conservation loophole)
     w.conserves()?;
     let _ = w.membership_path()?; // asserts the note really sits in the tree at `index`
 
@@ -477,6 +503,46 @@ mod tests {
         };
         assert!(matches!(prove_transfer(&short), Err(TransferError::NotConserving { .. })),
             "SECURITY: a non-conserving transfer must not be built");
+    }
+
+    /// RANGE GATE: an out-of-range amount (≥ 2^RANGE_BITS) is rejected before any proof — this is
+    /// what stops a field-wrapped "negative" output from balancing conservation by wrapping p.
+    #[test]
+    fn out_of_range_amount_is_rejected() {
+        let big = 1u64 << crate::range::RANGE_BITS; // just over the bound
+        // a pool whose note[0] is out of range, so it passes membership but fails the range gate
+        let notes = vec![
+            ShieldNote::new(big, 1),
+            ShieldNote::new(100, 2),
+            ShieldNote::new(200, 3),
+            ShieldNote::new(300, 4),
+        ];
+        let tree = CompressTree::new(notes.iter().map(|n| n.commitment()).collect());
+
+        // spending the out-of-range INPUT note is rejected by the range gate (not conservation)
+        let w = SpendWitness {
+            tree: &tree, index: 0, note: notes[0], spend_key: e(1),
+            outputs: vec![ShieldNote::new(big - 5, 9)], fee: e(5), // conserves, but input is huge
+        };
+        assert!(matches!(prove_transfer(&w), Err(TransferError::OutOfRange(_))),
+            "SECURITY: an out-of-range input amount must be rejected");
+
+        // an out-of-range OUTPUT is rejected too (in-range input, wrapped output)
+        let w2 = SpendWitness {
+            tree: &tree, index: 1, note: notes[1], spend_key: e(1),
+            outputs: vec![ShieldNote::new(big, 9)], fee: e(0), // 100 != big, but range fails first
+        };
+        assert!(matches!(prove_transfer(&w2), Err(TransferError::OutOfRange(_))),
+            "SECURITY: an out-of-range output amount must be rejected");
+
+        // an in-range spend of a normal note still works
+        let w3 = SpendWitness {
+            tree: &tree, index: 2, note: notes[2], spend_key: e(1),
+            outputs: vec![ShieldNote::new(198, 9)], fee: e(2),
+        };
+        let mut set = ShieldNullifierSet::new();
+        let t = prove_transfer(&w3).expect("in-range spend builds");
+        verify_and_apply(&t, &mut set, true).expect("in-range spend applies");
     }
 
     /// Two different notes in the same pool spend independently; distinct nullifiers, both apply.

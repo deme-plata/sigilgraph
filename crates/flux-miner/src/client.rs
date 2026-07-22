@@ -136,6 +136,14 @@ pub struct MineStats {
 /// The HTTP mining client. Gated behind the `client` feature so a node that
 /// only needs the verification gate ([`check_submission`]) can depend on
 /// flux-miner without pulling in reqwest.
+/// POOL-DIAG: the version string reported to the node on every challenge fetch
+/// (`&v=`), so the pool's /mining/miners can tell which build a rig actually
+/// runs (the HiveOS installer keeps stale binaries — the node needs to see it).
+/// The embedding binary (sigil-top) sets this ONCE at startup to its own release
+/// version; unset it falls back to this engine crate's version. std-only, so it
+/// lives outside the `client` feature gate.
+pub static CLIENT_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 #[cfg(feature = "client")]
 pub struct MinerClient {
     pub endpoints: Endpoints,
@@ -157,7 +165,8 @@ impl MinerClient {
     pub fn fetch_challenge(&self, hps: f64) -> anyhow::Result<Challenge> {
         // v7.0.9-fix: report our measured hashrate so the node can SUM active miners into the
         // true total network power (returned as Challenge.net_hps). `hps=0` on the first fetch.
-        let url = format!("{}{}?wallet={}&hps={:.0}", self.endpoints.base_url, self.endpoints.challenge_path, self.wallet, hps.max(0.0));
+        let v = CLIENT_VERSION.get().map(String::as_str).unwrap_or(env!("CARGO_PKG_VERSION"));
+        let url = format!("{}{}?wallet={}&hps={:.0}&v={}", self.endpoints.base_url, self.endpoints.challenge_path, self.wallet, hps.max(0.0), v);
         let c = self.http.get(&url).send()?.error_for_status()?.json::<Challenge>()?;
         Ok(c)
     }

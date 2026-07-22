@@ -87,6 +87,18 @@ struct Node {
     /// real network power (difficulty-based estimates undercount under pinned diff + throttled
     /// submits). Ephemeral (resets on restart, self-heals within ~1 challenge round).
     miner_hps: std::collections::HashMap<WalletId, (f64, u64)>,
+    /// POOL-DIAG: miner-reported client version (`&v=` on the challenge fetch;
+    /// absent on pre-diag builds → the rig shows as "old" in /mining/miners).
+    /// Never pruned with the 30s hps retention — a rig's last-known build is
+    /// exactly what you want to see when it goes quiet.
+    miner_ver: std::collections::HashMap<WalletId, String>,
+    /// POOL-DIAG: submit-reject tallies since boot — per wallet, per reason, and
+    /// a ring of the most recent rejects. In-memory only (not part of the
+    /// persisted snapshot); exists because "a lot of rejections" was undiagnosable
+    /// server-side: the node dropped the reason on the floor after replying.
+    reject_by_wallet: std::collections::HashMap<WalletId, u64>,
+    reject_counts: std::collections::HashMap<&'static str, u64>,
+    recent_rejects: std::collections::VecDeque<String>,
     /// LANE-R time-based emission anchor: the genesis block's timestamp (µs since the unix
     /// epoch). Set ONCE at genesis, persisted, never changed — emission halves on WALL-CLOCK
     /// time elapsed since this, not on block height. All nodes must agree on it.
@@ -673,6 +685,10 @@ fn bootstrap() -> Node {
             statedb,
             auth_nonces: snap.auth_nonces,
             onboard_rl: std::collections::HashMap::new(), miner_hps: std::collections::HashMap::new(),
+            miner_ver: std::collections::HashMap::new(),
+            reject_by_wallet: std::collections::HashMap::new(),
+            reject_counts: std::collections::HashMap::new(),
+            recent_rejects: std::collections::VecDeque::new(),
             genesis_ts_us: snap.genesis_ts_us, last_block_ts_us: snap.last_block_ts_us,
             emission_carry: snap.emission_carry,
             credit_vault,
@@ -755,6 +771,10 @@ fn bootstrap() -> Node {
     let node = Node { state, height: 2, block_height: 0, students: VerifiedRegistry::new(), tokens, pools, citizens: vec![CITIZEN], history,
         tip_hash, bits: mining_bits(), retarget_anchor_ts: now_ms(), retarget_anchor_height: 0, statedb,
         auth_nonces: std::collections::HashMap::new(), onboard_rl: std::collections::HashMap::new(), miner_hps: std::collections::HashMap::new(),
+        miner_ver: std::collections::HashMap::new(),
+        reject_by_wallet: std::collections::HashMap::new(),
+        reject_counts: std::collections::HashMap::new(),
+        recent_rejects: std::collections::VecDeque::new(),
         genesis_ts_us, last_block_ts_us: genesis_ts_us, emission_carry: 0,
         credit_vault: sigil_bank::credit::CreditVault::new(),
         mandates: sigil_bank::mandate::MandateBook::default(),
@@ -871,6 +891,22 @@ fn authorize(n: &mut Node, actor: &WalletId, action: &str, fields: &[String], bo
     }
     n.auth_nonces.insert(*actor, req_nonce);
     Ok(())
+}
+
+/// POOL-DIAG: record a /mining/submit reject (who, why-category, detail) and
+/// build the reject response. Categories are fixed keys so /mining/miners can
+/// expose stable counters; the ring keeps the last 32 rejects verbatim.
+fn reject_diag(n: &mut Node, w: &WalletId, key: &'static str, reason: String) -> String {
+    *n.reject_by_wallet.entry(*w).or_insert(0) += 1;
+    *n.reject_counts.entry(key).or_insert(0) += 1;
+    n.recent_rejects.push_back(format!(
+        "{{\"ts_ms\":{},\"wallet\":\"{}\",\"key\":\"{}\",\"reason\":{}}}",
+        now_ms(), to_hex(w), key,
+        serde_json::to_string(&reason).unwrap_or_else(|_| "\"?\"".into())
+    ));
+    while n.recent_rejects.len() > 32 { n.recent_rejects.pop_front(); }
+    let r = SubmitResult { accepted: false, reason: Some(reason), ..Default::default() };
+    ok(serde_json::to_string(&r).unwrap_or_else(|_| "{}".into()))
 }
 
 fn ok(body: String) -> String {
@@ -1348,11 +1384,20 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             // v7.0.9: record this miner's self-reported Φ rate, prune >30s-idle miners, and SUM
             // the rest = live TOTAL network power (accurate; difficulty estimates undercount).
             let now = now_ms();
-            if let (Some(w), Some(hps)) = (
-                query_get(query, "wallet").and_then(hex32),
-                query_get(query, "hps").and_then(|s| s.parse::<f64>().ok()),
-            ) {
-                if hps.is_finite() && hps >= 0.0 { n.miner_hps.insert(w, (hps, now)); }
+            if let Some(w) = query_get(query, "wallet").and_then(hex32) {
+                if let Some(hps) = query_get(query, "hps").and_then(|s| s.parse::<f64>().ok()) {
+                    if hps.is_finite() && hps >= 0.0 { n.miner_hps.insert(w, (hps, now)); }
+                }
+                // POOL-DIAG: client build version (`&v=`). Sanitized + bounded so a
+                // hostile param can't bloat the map or smuggle JSON.
+                if let Some(v) = query_get(query, "v") {
+                    if !v.is_empty() && v.len() <= 24
+                        && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '+')
+                        && n.miner_ver.len() < 4096
+                    {
+                        n.miner_ver.insert(w, v.to_string());
+                    }
+                }
             }
             n.miner_hps.retain(|_, (_, t)| now.saturating_sub(*t) <= 30_000);
             let net_hps: f64 = n.miner_hps.values().map(|(h, _)| *h).sum();
@@ -1374,24 +1419,40 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
         ("GET", "/mining/miners") => {
             let n = node.read().unwrap();
             let now = now_ms();
+            // POOL-DIAG: `ver` = the build the rig REPORTS (absent = pre-diag client
+            // → almost certainly not pool-aware), `rejects` = submit rejects since
+            // node boot. A rig with hps>0, shares==0 and ver=="old" is the classic
+            // stale-HiveOS-install signature.
+            let ver_of = |w: &WalletId| -> String {
+                n.miner_ver.get(w).map(|v| format!("\"{v}\"")).unwrap_or_else(|| "\"old\"".into())
+            };
             let mut rows: Vec<String> = n.miner_hps.iter().map(|(w, (hps, t))| {
                 let wallet = to_hex(w);
                 let shares = n.share_window.get(w).copied().unwrap_or(0);
-                format!("{{\"wallet\":\"{}\",\"hps\":{},\"shares\":{},\"age_ms\":{}}}",
-                    wallet, hps, shares, now.saturating_sub(*t))
+                let rejects = n.reject_by_wallet.get(w).copied().unwrap_or(0);
+                format!("{{\"wallet\":\"{}\",\"hps\":{},\"shares\":{},\"rejects\":{},\"ver\":{},\"age_ms\":{}}}",
+                    wallet, hps, shares, rejects, ver_of(w), now.saturating_sub(*t))
             }).collect();
             // wallets that have shares this height but no recent hps report
             for (w, s) in n.share_window.iter() {
                 if !n.miner_hps.contains_key(w) {
-                    rows.push(format!("{{\"wallet\":\"{}\",\"hps\":0,\"shares\":{},\"age_ms\":null}}", to_hex(w), s));
+                    let rejects = n.reject_by_wallet.get(w).copied().unwrap_or(0);
+                    rows.push(format!("{{\"wallet\":\"{}\",\"hps\":0,\"shares\":{},\"rejects\":{},\"ver\":{},\"age_ms\":null}}",
+                        to_hex(w), s, rejects, ver_of(w)));
                 }
             }
+            let mut reject_counts: Vec<String> = n.reject_counts.iter()
+                .map(|(k, c)| format!("\"{k}\":{c}")).collect();
+            reject_counts.sort();
+            let recent: Vec<String> = n.recent_rejects.iter().cloned().collect();
             ok(format!(
-                "{{\"height\":{},\"share_target\":{},\"window_shares\":{},\"miners\":[{}]}}",
+                "{{\"height\":{},\"share_target\":{},\"window_shares\":{},\"miners\":[{}],\"reject_counts\":{{{}}},\"recent_rejects\":[{}]}}",
                 n.block_height,
                 share_target_from(n.bits, n.share_ease),
                 n.share_window.values().sum::<u64>(),
-                rows.join(",")
+                rows.join(","),
+                reject_counts.join(","),
+                recent.join(",")
             ))
         }
         ("POST", "/mining/submit") => {
@@ -1420,7 +1481,8 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             // right height its seed (BLAKE3(tip‖bh)) won't match unless it was built on
             // THIS tip — which is unknown until the prior block was accepted.
             if sub.height != bh {
-                return reject(format!("stale height: submitted {} but the mineable tip is {}", sub.height, bh));
+                return reject_diag(&mut n, &miner, "stale_height",
+                    format!("stale height: submitted {} but the mineable tip is {}", sub.height, bh));
             }
             let share_target = share_target_from(n.bits, n.share_ease);
             let c = Challenge {
@@ -1440,13 +1502,16 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                     // Caps first (a capped submit must not grow the dedup set),
                     // then dedup, then count.
                     if n.share_window.get(&miner).copied().unwrap_or(0) >= SHARE_WALLET_CAP {
-                        return reject("per-wallet share cap reached for this height".into());
+                        return reject_diag(&mut n, &miner, "wallet_cap",
+                            "per-wallet share cap reached for this height".into());
                     }
                     if n.share_seen.len() >= SHARE_GLOBAL_CAP {
-                        return reject("share window full for this height".into());
+                        return reject_diag(&mut n, &miner, "window_full",
+                            "share window full for this height".into());
                     }
                     if !n.share_seen.insert((miner, sub.block.nonce)) {
-                        return reject("duplicate share (nonce already credited this height)".into());
+                        return reject_diag(&mut n, &miner, "duplicate",
+                            "duplicate share (nonce already credited this height)".into());
                     }
                     let cnt = n.share_window.entry(miner).or_insert(0);
                     *cnt += 1;
@@ -1456,7 +1521,8 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                         bh, shares
                     ));
                 }
-                return reject("dual-lane verify / header mismatch (wrong tip, target, or VDF)".into());
+                return reject_diag(&mut n, &miner, "verify_mismatch",
+                    "dual-lane verify / header mismatch (wrong tip, target, or VDF)".into());
             }
             // Verified on the current tip — credit the HALVING block reward on the MINING
             // height (block_reward(bh) — swap volume no longer distorts emission). Schedule +
@@ -1509,7 +1575,7 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                     let _ = commit_state_transition(&mut n.state, &StateTransition { at_height: bh, mutations: vec![] }, bh);
                     ok(format!("{{\"accepted\":true,\"reason\":null,\"block_height\":{},\"new_balance\":{}}}", bh, bal))
                 }
-                Err(e) => reject(e.to_string()),
+                Err(e) => reject_diag(&mut n, &miner, "distribute_err", e.to_string()),
             }
         }
         ("POST", "/credit") => {

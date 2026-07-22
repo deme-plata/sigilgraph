@@ -33,6 +33,7 @@ pub mod membership;
 pub mod transfer;
 pub mod range;
 pub mod spend;
+pub mod spend_full;
 pub mod ring;
 
 /// Errors surfaced by the shield prover/verifier.

@@ -19,17 +19,19 @@
 //! conservation equals INTEGER conservation — no output can be a wrapped "negative" (`range`).
 //! `amounts_in_range` enforces it at build; the zk RangeAir primitive lives in `range.rs`.
 //!
-//! ⚠️ SCOPE (honest, per the audit discipline). Now VERIFIER-bound (via `SpendAir`): value ↔
-//! cm_in, and nullifier ↔ (spend_key, position). Still to fold into the SpendAir trace so the
-//! VERIFIER — not just the honest prover — is bound:
-//!   1. cm_in ↔ TREE: membership hides its leaf, so `cm_in == the membered leaf` is still a
-//!      build-time/tree check. Fold the Merkle path INTO the spend trace (leaf = cm_in witness).
+//! ⚠️ SCOPE (honest, per the audit discipline). VERIFIER-bound via the fully-folded
+//! `spend_full::SpendFullAir` (the production path, [`prove_transfer_full`]): value ↔ commitment,
+//! commitment ↔ TREE (the Merkle path is folded into the spend trace — the spent commitment is
+//! now HIDDEN, so spends are unlinkable), nullifier ↔ (spend_key, position), and position ↔ the
+//! membered leaf's index. The split `SpendAir` + tree-check path below remains for the debug
+//! harness (winterfell 0.9's debug degree-assert vs witness-dependent bit columns) and as the
+//! standalone primitive. Still open:
 //!   2. OUTPUT ↔ COMMITMENT + PRIVATE RANGE: bind each hidden `out` to its `cm_out` and add the
 //!      `range` bit-decomposition columns per output (a standalone RangeAir has the amount PUBLIC).
-//!   3. position ↔ leaf index (needs membership to expose the position).
 //! Do not treat this as audited-final. What IS real: every proof comes from winterfell (no
-//! wrapper, no zero-fill), each verifies + rejects tampering, value/nullifier binding is
-//! verifier-checked, the nullifier set rejects replays, and out-of-range amounts are rejected.
+//! wrapper, no zero-fill), each verifies + rejects tampering, value/nullifier/membership/position
+//! binding is verifier-checked on the full-fold path, the nullifier set rejects replays, and
+//! out-of-range amounts are rejected.
 
 use winterfell::{math::fields::f64::BaseElement, Prover};
 
@@ -39,6 +41,9 @@ use crate::membership::{
 };
 use crate::mimc::{compress2, mimc_options};
 use crate::spend::{build_spend_trace, verify_spend, SpendProver, SpendPublicInputs};
+use crate::spend_full::{
+    build_spend_full_trace, verify_spend_full, SpendFullProver, SpendFullPublicInputs,
+};
 
 // ── note model (all in the f64 field, so a note leaf feeds membership directly) ───────────
 
@@ -236,6 +241,74 @@ pub fn prove_transfer_with_membership(w: &SpendWitness) -> Result<ShieldedTransf
     Ok(t)
 }
 
+// ── the fully-folded transfer (production path) ───────────────────────────────────────────
+
+/// The PRODUCTION shielded transfer: ONE `spend_full::SpendFullAir` proof binds value-opening,
+/// conservation, membership, nullifier derivation, and position — with the spent note's
+/// commitment HIDDEN (it is the Merkle leaf inside the proof). Public data is only the
+/// anonymity-set root, the nullifier, the fee, and the new output commitments: an observer
+/// cannot tell WHICH note in the tree was spent (unlinkability the split path cannot offer,
+/// since it had to publish `cm_in` to compose the proofs).
+pub struct ShieldedTransferFull {
+    /// Anonymity-set root the hidden input note is proven to belong to (public).
+    pub root: BaseElement,
+    /// Revealed nullifier of the spent note (public; checked against the set).
+    pub nullifier: BaseElement,
+    /// The public transfer fee (bound into the proof).
+    pub fee: BaseElement,
+    /// Commitments of the newly created notes, to be appended to the tree.
+    pub output_commitments: Vec<BaseElement>,
+    /// The single fully-folded winterfell proof.
+    pub proof: winterfell::Proof,
+}
+
+/// Build a fully-folded shielded transfer. Requires the pool depth to satisfy `depth+1` a power
+/// of two (the folded trace is (depth+1)·64 rows — production trees use depth 15/31).
+pub fn prove_transfer_full(w: &SpendWitness) -> Result<ShieldedTransferFull, TransferError> {
+    w.amounts_in_range()?;
+    w.conserves()?;
+    let path = w.membership_path()?; // witness sanity: the leaf really is our commitment
+
+    let out_values: Vec<BaseElement> = w.outputs.iter().map(|o| o.value).collect();
+    let trace =
+        build_spend_full_trace(w.note.value, w.note.blinding, w.spend_key, w.fee, &out_values, &path);
+    let proof = SpendFullProver::new(mimc_options())
+        .prove(trace)
+        .map_err(|e| TransferError::Spend(format!("{e:?}")))?;
+
+    Ok(ShieldedTransferFull {
+        root: w.tree.root(),
+        nullifier: nullifier(w.spend_key, w.index as u64),
+        fee: w.fee,
+        output_commitments: w.outputs.iter().map(|o| o.commitment()).collect(),
+        proof,
+    })
+}
+
+/// Verify + apply a fully-folded transfer. `expected_root` is the verifier's OWN view of the
+/// anonymity-set root (consensus state) — a bundle claiming any other root is rejected outright,
+/// so a prover cannot verify against a tree of their invention. On success the nullifier is
+/// recorded spent and the output commitments are returned for appending to the tree.
+pub fn verify_and_apply_full(
+    t: &ShieldedTransferFull,
+    set: &mut ShieldNullifierSet,
+    expected_root: BaseElement,
+) -> Result<Vec<BaseElement>, TransferError> {
+    if t.root != expected_root {
+        return Err(TransferError::Membership(
+            "transfer root does not match the verifier's anonymity-set root".into(),
+        ));
+    }
+    verify_spend_full(
+        t.proof.clone(),
+        SpendFullPublicInputs { root: t.root, nf: t.nullifier, fee: t.fee },
+    )
+    .map_err(|e| TransferError::Spend(format!("{e:?}")))?;
+
+    set.spend(t.nullifier).map_err(TransferError::DoubleSpend)?;
+    Ok(t.output_commitments.clone())
+}
+
 /// Verify + apply a shielded transfer: check both proofs, reject a replayed nullifier, and on
 /// success record the nullifier as spent. Returns the output commitments to append to the tree.
 ///
@@ -277,6 +350,7 @@ pub fn verify_and_apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use winterfell::math::FieldElement;
 
     fn e(x: u64) -> BaseElement {
         BaseElement::new(x)
@@ -446,6 +520,78 @@ mod tests {
             verify_and_apply(&t, &mut set, true).expect("apply distinct spend");
         }
         assert_eq!(set.len(), 2, "two distinct nullifiers recorded");
+    }
+
+    /// THE PRODUCTION-PATH GATE: the fully-folded transfer end-to-end. ONE winterfell proof
+    /// carries membership+conservation+nullifier+position with the spent commitment hidden:
+    ///  (1) an honest full transfer verifies against the verifier's OWN root and applies;
+    ///  (2) REPLAY (same nullifier) is rejected;
+    ///  (3) a bundle claiming a DIFFERENT root than consensus is rejected outright;
+    ///  (4) a WRONG fee is rejected by the proof;
+    ///  (5) the bundle exposes NO note commitment — unlinkability by construction;
+    ///  (6) a note not in the tree cannot even build.
+    /// (Proving in debug is witness-dependent under winterfell 0.9's degree assert — this
+    /// witness proves green; see the membership module for the quirk.)
+    #[test]
+    fn end_to_end_full_fold_transfer_hides_note_and_applies() {
+        let (tree, notes) = sample_pool();
+        let idx = 3usize;
+        let note = notes[idx]; // value 130
+        let sk = e(0xC0FFEE);
+        let outputs = vec![ShieldNote::new(80, 111), ShieldNote::new(45, 222)];
+        let w = SpendWitness {
+            tree: &tree, index: idx, note, spend_key: sk,
+            outputs: outputs.clone(), fee: e(5),
+        };
+
+        // (1) honest full-fold transfer verifies + applies against the verifier's root
+        let t = prove_transfer_full(&w).expect("build full-fold transfer");
+        let mut set = ShieldNullifierSet::new();
+        let appended = verify_and_apply_full(&t, &mut set, tree.root())
+            .expect("honest full-fold transfer must apply");
+        assert_eq!(appended.len(), 2);
+        assert_eq!(appended[0], outputs[0].commitment());
+        assert!(set.contains(t.nullifier));
+
+        // (2) replay rejected
+        assert!(matches!(
+            verify_and_apply_full(&t, &mut set, tree.root()),
+            Err(TransferError::DoubleSpend(_))
+        ), "SECURITY: replaying a full-fold spend must be rejected");
+
+        // (3) a different consensus root is rejected before any proof math
+        let mut set2 = ShieldNullifierSet::new();
+        assert!(matches!(
+            verify_and_apply_full(&t, &mut set2, tree.root() + BaseElement::ONE),
+            Err(TransferError::Membership(_))
+        ), "SECURITY: a bundle for a foreign root must be rejected");
+
+        // (4) wrong fee rejected by the folded proof
+        let wrong_fee = ShieldedTransferFull {
+            root: t.root, nullifier: t.nullifier, fee: e(6),
+            output_commitments: t.output_commitments.clone(), proof: t.proof.clone(),
+        };
+        assert!(matches!(
+            verify_and_apply_full(&wrong_fee, &mut set2, tree.root()),
+            Err(TransferError::Spend(_))
+        ), "SECURITY: a fee the proof did not commit must be rejected");
+
+        // (5) unlinkability: nothing in the bundle equals ANY pool commitment
+        for n in &notes {
+            let cm = n.commitment();
+            assert_ne!(t.nullifier, cm, "bundle must not leak a commitment via nf");
+            assert!(!t.output_commitments.contains(&cm),
+                "bundle must not leak the spent note among outputs");
+        }
+
+        // (6) a note absent from the tree cannot build a full-fold transfer
+        let outsider = ShieldNote::new(130, 999999);
+        let bad = SpendWitness {
+            tree: &tree, index: idx, note: outsider, spend_key: sk,
+            outputs, fee: e(5),
+        };
+        assert!(matches!(prove_transfer_full(&bad), Err(TransferError::NotAMember)),
+            "SECURITY: a note absent from the tree must not spend");
     }
 
     /// The full end-to-end transfer INCLUDING the real membership STARK proof. IGNORED in debug

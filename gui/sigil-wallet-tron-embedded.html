@@ -31,6 +31,8 @@ body:not(.view-desktop){display:grid;place-items:center}
 .heroaddr{margin-top:9px;align-items:center;gap:7px;font-family:'JetBrains Mono';font-size:12px;color:var(--dim);cursor:pointer;border:1px solid var(--line);border-radius:999px;padding:5px 13px;transition:.2s;width:fit-content}
 .heroaddr:hover{color:var(--cyan-bright);border-color:rgba(33,212,253,.45);box-shadow:0 0 14px var(--glow)}
 .heroaddr .cpy{opacity:.65}
+.soon{opacity:.45}.soon:hover{opacity:.45}
+.soonchip{font-family:'JetBrains Mono';font-size:8.5px;letter-spacing:1px;text-transform:uppercase;color:var(--gold);border:1px solid rgba(251,191,36,.35);border-radius:999px;padding:1px 7px;margin-left:auto}
 .brand{font-family:'Orbitron';font-weight:800;letter-spacing:2px}.brand span{color:var(--cyan)}
 .net{font-family:'JetBrains Mono';font-size:10px;color:var(--teal);border:1px solid rgba(0,224,198,.35);border-radius:999px;padding:3px 9px;background:rgba(0,224,198,.08);white-space:nowrap}
 .net::before{content:'●';margin-right:5px;animation:blink 2s infinite}@keyframes blink{50%{opacity:.3}}
@@ -107,7 +109,7 @@ body.view-desktop .desktop{display:flex}
 .sidelogo{display:flex;flex-direction:column;align-items:center;gap:6px;margin:4px 0 18px}
 .sidelogo img{width:168px;height:168px;object-fit:contain;filter:drop-shadow(0 0 24px var(--glow))}
 .sidelogo .brand{font-family:'Orbitron';font-weight:900;font-size:26px;letter-spacing:6px;background:linear-gradient(90deg,var(--cyan-bright),var(--teal));-webkit-background-clip:text;background-clip:text;color:transparent}
-.sidecard{border:1px solid var(--line);border-radius:16px;padding:16px;background:linear-gradient(150deg,rgba(33,212,253,.12),transparent);position:relative;overflow:hidden}
+.sidecard{flex:none;border:1px solid var(--line);border-radius:16px;padding:16px;background:linear-gradient(150deg,rgba(33,212,253,.12),transparent);position:relative;overflow:hidden}
 .sidecard .l{font-family:'JetBrains Mono';font-size:10px;letter-spacing:2px;color:var(--dim);text-transform:uppercase}
 .sidecard .amt{font-size:28px;margin-top:5px}.sidecard .amt small{font-size:14px}
 .sidecard .d{font-family:'JetBrains Mono';font-size:12px;color:var(--teal);margin-top:3px}
@@ -149,7 +151,7 @@ body.view-desktop .desktop{display:flex}
   <div class="notch"></div>
   <div class="statusbar"><span>9:41</span><span>SIGIL·g0 · <b data-blockcount>H …</b></span><span>▮▮▮ 5G</span></div>
   <div class="phead"><img class="markimg" data-brand="flat" alt="SIGIL" style="width:78px;height:78px"><div class="brand">SIGIL<span>·</span>WALLET</div><button class="expand" onclick="setView('desktop')">⤢ desktop</button></div>
-  <div class="balance"><div class="lab"><span>total balance</span><span class="vbadge"><i data-lucide="badge-check"></i>verified</span></div><div class="amtbig amt" id="amt">14,302<small>.84 SIGIL</small></div><div class="sub">≈ <b>$18,594</b> · +4.2% today ▲</div></div>
+  <div class="balance"><div class="lab"><span>total balance</span><span class="vbadge"><i data-lucide="badge-check"></i>verified</span></div><div class="amtbig amt" id="amt">0<small>.00000000 SIGIL</small></div><div class="sub">connecting…</div></div>
   <div id="mineNotice" style="display:none;margin:8px 8px 0;border:1px solid rgba(251,191,36,.32);background:rgba(251,191,36,.06);border-radius:14px;padding:10px 12px;font-family:'JetBrains Mono';font-size:11px;color:var(--gold);line-height:1.5"></div>
   <div style="display:flex;gap:9px;justify-content:center;margin:12px 8px 2px;font-family:'JetBrains Mono';font-size:11px">
     <a href="flux://enter" style="color:var(--cyan);text-decoration:none;border:1px solid var(--line);background:rgba(33,212,253,.05);border-radius:999px;padding:5px 13px">＋ new wallet</a>
@@ -157,13 +159,13 @@ body.view-desktop .desktop{display:flex}
   </div>
   <div class="actions">
     <div class="act"><i class="lic" data-lucide="arrow-up-from-dot"></i><span class="t">Send</span></div>
-    <div class="act"><i class="lic" data-lucide="arrow-down-to-dot"></i><span class="t">Receive</span></div>
-    <div class="act"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div>
-    <div class="act"><i class="lic" data-lucide="pickaxe"></i><span class="t">Mine</span></div>
+    <div class="act" onclick="openReceive()"><i class="lic" data-lucide="arrow-down-to-dot"></i><span class="t">Receive</span></div>
+    <div class="act soon" title="DEX not live on sigil-g0 yet"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div>
+    <div class="act" onclick="openMine()"><i class="lic" data-lucide="pickaxe"></i><span class="t">Mine</span></div>
   </div>
-  <div class="sect" style="margin:18px 16px 8px"><span>Assets</span><span style="color:var(--cyan)">4 ▾</span></div>
+  <div class="sect" style="margin:18px 16px 8px"><span>Assets</span><span style="color:var(--cyan)" id="passetsN"></span></div>
   <div class="list" id="passets"></div>
-  <div class="nav"><div class="on"><i class="lic" data-lucide="wallet"></i>Wallet</div><div><i class="lic" data-lucide="arrow-left-right"></i>Swap</div><div><i class="lic" data-lucide="layers"></i>Stake</div><div><i class="lic" data-lucide="settings"></i>Settings</div></div>
+  <div class="nav"><div class="on"><i class="lic" data-lucide="wallet"></i>Wallet</div><div class="soon" title="DEX not live on sigil-g0 yet"><i class="lic" data-lucide="arrow-left-right"></i>Swap</div><div class="soon" title="staking not live on sigil-g0 yet"><i class="lic" data-lucide="layers"></i>Stake</div><div onclick="openSettings()" style="cursor:pointer"><i class="lic" data-lucide="settings"></i>Settings</div></div>
 </div>
 
 <div class="desktop">
@@ -179,7 +181,7 @@ body.view-desktop .desktop{display:flex}
     <div class="gright">
       <div class="net">grid online</div>
       <div class="pill" title="live mine-chain height · click for network stats" onclick="window.openStats&&window.openStats()" style="border-color:rgba(0,224,198,.4);cursor:pointer"><i class="lic" data-lucide="box" style="width:14px;height:14px;filter:none"></i><b data-blockcount style="color:var(--teal)">H …</b></div>
-      <div class="pill"><i class="lic" data-lucide="wallet" style="width:14px;height:14px;filter:none"></i><b>14,302</b> SIGIL</div>
+      <div class="pill"><i class="lic" data-lucide="wallet" style="width:14px;height:14px;filter:none"></i><b>0</b> SIGIL</div>
       <div class="avatar">◈</div>
       <button class="collapse" onclick="setView('phone')">⤡ phone</button>
     </div>
@@ -187,22 +189,22 @@ body.view-desktop .desktop{display:flex}
   <div class="dwrap">
     <div class="side">
       <div class="sidelogo"><img data-brand="cyan" alt="SIGIL"><div class="brand">SIGIL</div></div>
-      <div class="sidecard"><div class="l">portfolio value</div><div class="amtbig" style="font-size:30px">$18,594</div><div class="d">14,302.84 SIGIL · +4.2% ▲</div></div>
+      <div class="sidecard"><div class="l">wallet balance</div><div class="amtbig" style="font-size:30px">—</div><div class="d">connecting…</div></div>
       <div class="snav">
         <a class="on" id="navDash" onclick="showDash();return false" style="cursor:pointer"><i class="lic" data-lucide="layout-dashboard"></i>Dashboard</a>
-        <a><i class="lic" data-lucide="wallet"></i>Assets</a>
+        <a onclick="showAssets();return false" style="cursor:pointer"><i class="lic" data-lucide="wallet"></i>Assets</a>
         <a id="navActivity" onclick="showExplorer();return false" style="cursor:pointer"><i class="lic" data-lucide="receipt-text"></i>Activity</a>
         <div class="grp">Move</div>
         <a><i class="lic" data-lucide="arrow-up-from-dot"></i>Send</a>
-        <a><i class="lic" data-lucide="arrow-down-to-dot"></i>Receive</a>
-        <a><i class="lic" data-lucide="arrow-left-right"></i>Swap</a>
+        <a onclick="openReceive();return false" style="cursor:pointer"><i class="lic" data-lucide="arrow-down-to-dot"></i>Receive</a>
+        <a class="soon" title="DEX not live on sigil-g0 yet"><i class="lic" data-lucide="arrow-left-right"></i>Swap<span class="soonchip">soon</span></a>
         <div class="grp">Earn</div>
-        <a><i class="lic" data-lucide="layers"></i>Stake</a>
-        <a><i class="lic" data-lucide="pickaxe"></i>Mine</a>
+        <a class="soon" title="staking not live on sigil-g0 yet"><i class="lic" data-lucide="layers"></i>Stake<span class="soonchip">soon</span></a>
+        <a onclick="openMine();return false" style="cursor:pointer"><i class="lic" data-lucide="pickaxe"></i>Mine</a>
         <div class="grp">System</div>
         <a href="flux://stats"><i class="lic" data-lucide="activity"></i>Node stats</a>
         <a href="flux://enter"><i class="lic" data-lucide="user-plus"></i>New wallet</a>
-        <a><i class="lic" data-lucide="settings"></i>Settings</a>
+        <a onclick="openSettings();return false" style="cursor:pointer"><i class="lic" data-lucide="settings"></i>Settings</a>
       </div>
       <div class="sfoot">
         <div class="agentbtn" style="border-radius:14px"><img class="markimg" data-brand="cyan" alt="SIGIL"><div><div class="at">Ask Flux agent</div><div style="font-family:'JetBrains Mono';font-size:10px;color:var(--dim)">swap · send · explain</div></div></div>
@@ -211,34 +213,23 @@ body.view-desktop .desktop{display:flex}
     </div>
     <div class="dmain">
       <div class="dhero">
-        <div><div class="lab"><span>total balance</span><span class="vbadge"><i data-lucide="badge-check"></i>verified</span></div><div class="amtbig amt" id="damt">14,302<small>.84 SIGIL</small></div><div class="heroaddr" id="daddr" style="display:none" onclick="copyAddr()"></div></div>
+        <div><div class="lab"><span>total balance</span><span class="vbadge"><i data-lucide="badge-check"></i>verified</span></div><div class="amtbig amt" id="damt">0<small>.00000000 SIGIL</small></div><div class="heroaddr" id="daddr" style="display:none" onclick="copyAddr()"></div></div>
         <div class="dactions">
           <div class="act"><i class="lic" data-lucide="arrow-up-from-dot"></i><span class="t">Send</span></div>
-          <div class="act"><i class="lic" data-lucide="arrow-down-to-dot"></i><span class="t">Receive</span></div>
-          <div class="act"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div>
-          <div class="act"><i class="lic" data-lucide="pickaxe"></i><span class="t">Mine</span></div>
+          <div class="act" onclick="openReceive()"><i class="lic" data-lucide="arrow-down-to-dot"></i><span class="t">Receive</span></div>
+          <div class="act soon" title="DEX not live on sigil-g0 yet"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div>
+          <div class="act" onclick="openMine()"><i class="lic" data-lucide="pickaxe"></i><span class="t">Mine</span></div>
         </div>
       </div>
       <div class="dgrid">
         <div class="card">
-          <div class="sect" style="margin-bottom:12px"><span>Assets · 4 holdings</span><span style="color:var(--cyan)">$18,594</span></div>
+          <div class="sect" style="margin-bottom:12px"><span>Assets</span><span style="color:var(--cyan)" id="dassetsN"></span></div>
           <div class="dassets" id="dassets"></div>
         </div>
         <div style="display:flex;flex-direction:column;gap:20px">
-          <div class="card swap">
-            <div class="sect" style="margin-bottom:10px"><span>Quick swap</span></div>
-            <div class="leg"><span>You pay</span><span><b id="swIn">800</b> QUG</span></div>
-            <input type="range" id="swR" min="0" max="3142" value="800" oninput="swapCalc(this.value)">
-            <div style="font-family:'JetBrains Mono';font-size:11px;color:var(--dim);text-align:right">1 QUG = 0.92 SIGIL · fee 0.3%</div>
-            <div class="leg" style="margin-top:10px"><span>You receive</span></div>
-            <div class="out" id="swOut">734.16 <span style="font-size:16px;color:var(--dim)">SIGIL</span></div>
-            <button class="go" id="swGo">⇄ SWAP 800 QUG</button>
-          </div>
           <div class="card">
             <div class="sect" style="margin-bottom:8px"><span>Activity</span><a id="cardExplorer" onclick="showExplorer();return false" style="cursor:pointer;color:var(--cyan);text-decoration:none;font-size:11px;border:1px solid var(--line);border-radius:999px;padding:3px 10px">🔍 open explorer</a></div>
-            <div class="act-item"><div class="ai"><i class="lic" data-lucide="arrow-up-right"></i></div><div><div class="at">Sent</div><div class="as">to qnk…a91f · 2m</div></div><div class="av" style="color:var(--cyan)">−12.0</div></div>
-            <div class="act-item"><div class="ai"><i class="lic" data-lucide="arrow-down-left" style="color:var(--teal)"></i></div><div><div class="at">Received</div><div class="as">from qnk…7e02 · 1h</div></div><div class="av" style="color:var(--teal)">+40.0</div></div>
-            <div class="act-item"><div class="ai"><i class="lic" data-lucide="pickaxe"></i></div><div><div class="at">Mined</div><div class="as">block 18,740 · 3h</div></div><div class="av" style="color:var(--teal)">+5.0</div></div>
+            <div style="font-family:'JetBrains Mono';font-size:11px;color:var(--dim);padding:14px 2px">no activity on this wallet yet — mine or receive SIGIL, or open the explorer for chain history</div>
           </div>
         </div>
       </div>
@@ -343,13 +334,13 @@ body.view-desktop .desktop{display:flex}
     }
     // desktop gbar pill + sidecard + portfolio
     document.querySelectorAll('.pill b:not([data-blockcount])').forEach(el=>el.textContent=SIGIL_BAL.toLocaleString('en-US'));
-    const sc=document.querySelector('.sidecard .amtbig'); if(sc) sc.textContent='$'+(SIGIL_BAL*1.3).toLocaleString('en-US',{maximumFractionDigits:0});
-    const scd=document.querySelector('.sidecard .d'); if(scd) scd.innerHTML=SIGIL_BAL.toLocaleString('en-US',{maximumFractionDigits:2})+' SIGIL · '+SHORT;
+    const sc=document.querySelector('.sidecard .amtbig'); if(sc) sc.textContent=SIGIL_BAL.toLocaleString('en-US',{maximumFractionDigits:2});
+    const scd=document.querySelector('.sidecard .d'); if(scd) scd.textContent='SIGIL · '+SHORT;
+    document.querySelectorAll('#passetsN,#dassetsN').forEach(el=>el.textContent='1 asset');
     // address chip in the desktop top bar (replace the static net text once)
     const heroAddrEl=document.getElementById('daddr'); if(heroAddrEl){ heroAddrEl.style.display='inline-flex'; heroAddrEl.title='click to copy: '+ADDR; heroAddrEl.innerHTML='◈ '+SHORT+' <span class="cpy">⧉</span>'; }
     // (Activity opens the SIGIL Explorer IN the main content — see showExplorer.)
     // fresh wallet → no activity yet
-    document.querySelectorAll('.card .act-item').forEach((el,i)=>{ if(SIGIL_BAL===0) el.style.display='none'; });
     // LANE-Q: when the [W] session wallet differs from the wallet the node MINES to, surface
     // BOTH (so the operator SEES where the mined coins are) + a one-click "use my wallet".
     const mn=document.getElementById('mineNotice');
@@ -456,13 +447,7 @@ body.view-desktop .desktop{display:flex}
   }
   window.refresh=refresh;
 
-  const RATE=0.92,FEE=0.003,MAX=3142;
-  function swapCalc(q){q=+q;const out=q*RATE*(1-FEE);
-    document.getElementById('swIn').textContent=q.toLocaleString('en-US');
-    document.getElementById('swOut').innerHTML=out.toLocaleString('en-US',{maximumFractionDigits:2})+' <span style="font-size:16px;color:var(--dim)">SIGIL</span>';
-    document.getElementById('swGo').textContent='⇄ SWAP '+q.toLocaleString('en-US')+' QUG';
-    document.getElementById('swR').style.setProperty('--p',(q/MAX*100)+'%');}
-  window.setView=setView; window.swapCalc=swapCalc;
+  window.setView=setView;
 
   render();
   // LANE-AC: balance + tip over P2P, HTTP as FALLBACK.
@@ -815,6 +800,75 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   window.addEventListener('keydown',function(e){ if(e.key==='Escape') window.closeSend(); });
   if(document.readyState!=='loading') wireSend(); else document.addEventListener('DOMContentLoaded',wireSend);
 })();
+</script>
+
+<!-- RECEIVE / MINE / SETTINGS modals — same idiom as the send modal (vanilla, inline-styled). -->
+<div id="receive-modal" style="display:none;position:fixed;inset:0;z-index:10001;background:rgba(2,5,9,.82);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:18px">
+  <div style="width:100%;max-width:460px;background:linear-gradient(160deg,#06121c,#04080c);border:1px solid rgba(33,212,253,.32);border-radius:16px;box-shadow:0 0 60px rgba(33,212,253,.18);overflow:hidden;font-family:'Rajdhani',system-ui,sans-serif">
+    <div style="display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid rgba(33,212,253,.18);background:rgba(8,16,24,.7)">
+      <div style="font-size:20px">↘</div>
+      <div style="flex:1"><div style="font-family:'Orbitron';font-weight:700;letter-spacing:1px;color:#6df3ff;font-size:15px">RECEIVE SIGIL</div>
+        <div style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8">share this address — mining rewards and sends land here</div></div>
+      <button onclick="closeModal('receive-modal')" style="background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:8px;width:30px;height:30px;cursor:pointer;font-size:15px">✕</button>
+    </div>
+    <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px">
+      <div id="rcvAddr" style="background:rgba(4,8,12,.7);border:1px solid rgba(33,212,253,.22);border-radius:10px;color:#cfe9f2;font-family:'JetBrains Mono';font-size:12px;padding:12px;word-break:break-all;line-height:1.6"></div>
+      <button id="rcvCopy" onclick="copyReceive()" style="background:linear-gradient(90deg,rgba(33,212,253,.18),rgba(0,224,198,.14));border:1px solid rgba(33,212,253,.4);color:#6df3ff;border-radius:10px;padding:11px;cursor:pointer;font-family:'Orbitron';font-size:12px;letter-spacing:1px">⧉ COPY ADDRESS</button>
+    </div>
+  </div>
+</div>
+
+<div id="mine-modal" style="display:none;position:fixed;inset:0;z-index:10001;background:rgba(2,5,9,.82);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:18px">
+  <div style="width:100%;max-width:520px;background:linear-gradient(160deg,#06121c,#04080c);border:1px solid rgba(33,212,253,.32);border-radius:16px;box-shadow:0 0 60px rgba(33,212,253,.18);overflow:hidden;font-family:'Rajdhani',system-ui,sans-serif">
+    <div style="display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid rgba(33,212,253,.18);background:rgba(8,16,24,.7)">
+      <div style="font-size:20px">⛏</div>
+      <div style="flex:1"><div style="font-family:'Orbitron';font-weight:700;letter-spacing:1px;color:#6df3ff;font-size:15px">MINE SIGIL</div>
+        <div style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8">pool shares — every miner earns a proportional cut of each block</div></div>
+      <button onclick="closeModal('mine-modal')" style="background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:8px;width:30px;height:30px;cursor:pointer;font-size:15px">✕</button>
+    </div>
+    <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px;color:#cfe9f2">
+      <div style="font-size:14px;line-height:1.5">Run the miner on any box with the <b style="color:#6df3ff">sigil-top</b> binary — one command, credited to this wallet:</div>
+      <div id="mineCmd" style="background:rgba(4,8,12,.7);border:1px solid rgba(33,212,253,.22);border-radius:10px;color:#00e0c6;font-family:'JetBrains Mono';font-size:11.5px;padding:12px;word-break:break-all;line-height:1.6"></div>
+      <button onclick="copyMineCmd()" id="mineCopy" style="background:linear-gradient(90deg,rgba(33,212,253,.18),rgba(0,224,198,.14));border:1px solid rgba(33,212,253,.4);color:#6df3ff;border-radius:10px;padding:11px;cursor:pointer;font-family:'Orbitron';font-size:12px;letter-spacing:1px">⧉ COPY COMMAND</button>
+      <div style="font-family:'JetBrains Mono';font-size:10.5px;color:#5a93a8;line-height:1.6">GPU by default, CPU fallback with <b style="color:#8fb3c2">SIGIL_MINE_CPU=1</b> · dual-lane BLAKE4&nbsp;+&nbsp;VDF · sub-difficulty shares bank per height and each block's reward splits over the share window</div>
+    </div>
+  </div>
+</div>
+
+<div id="settings-modal" style="display:none;position:fixed;inset:0;z-index:10001;background:rgba(2,5,9,.82);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:18px">
+  <div style="width:100%;max-width:420px;background:linear-gradient(160deg,#06121c,#04080c);border:1px solid rgba(33,212,253,.32);border-radius:16px;box-shadow:0 0 60px rgba(33,212,253,.18);overflow:hidden;font-family:'Rajdhani',system-ui,sans-serif">
+    <div style="display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid rgba(33,212,253,.18);background:rgba(8,16,24,.7)">
+      <div style="font-size:20px">⚙</div>
+      <div style="flex:1"><div style="font-family:'Orbitron';font-weight:700;letter-spacing:1px;color:#6df3ff;font-size:15px">SETTINGS</div>
+        <div id="setAddr" style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8"></div></div>
+      <button onclick="closeModal('settings-modal')" style="background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:8px;width:30px;height:30px;cursor:pointer;font-size:15px">✕</button>
+    </div>
+    <div style="padding:16px 18px;display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;gap:9px">
+        <button onclick="setView('phone')" style="flex:1;background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:10px;padding:10px;cursor:pointer;font-family:'JetBrains Mono';font-size:11px">⤡ phone view</button>
+        <button onclick="setView('desktop')" style="flex:1;background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:10px;padding:10px;cursor:pointer;font-family:'JetBrains Mono';font-size:11px">⤢ desktop view</button>
+      </div>
+      <button onclick="sigilLogout()" style="background:rgba(255,122,60,.07);border:1px solid rgba(255,122,60,.35);color:#ff9a6c;border-radius:10px;padding:11px;cursor:pointer;font-family:'Orbitron';font-size:12px;letter-spacing:1px">⎋ LOG OUT / SWITCH WALLET</button>
+      <div style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8;line-height:1.5">log out clears this browser's wallet session (the on-chain wallet and its funds are untouched — re-enter with your recovery phrase)</div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Receive / Mine / Settings modal handlers (+ Assets scroll). Vanilla, same scope rules as send.
+function closeModal(id){ var m=document.getElementById(id); if(m)m.style.display='none'; }
+function _activeAddr(){ return ((window.MINE_ADDR||window.ADDR)||'').toLowerCase(); }
+function openReceive(){ var a=_activeAddr(); if(!a)return; document.getElementById('rcvAddr').textContent=a; document.getElementById('receive-modal').style.display='flex'; }
+function copyReceive(){ var a=_activeAddr(); if(a&&navigator.clipboard){ navigator.clipboard.writeText(a); var b=document.getElementById('rcvCopy'); var o=b.textContent; b.textContent='✓ COPIED'; setTimeout(function(){b.textContent=o;},1000); } }
+function openMine(){ var a=_activeAddr(); if(!a)return; document.getElementById('mineCmd').textContent='sigil-top mine-rig '+a; document.getElementById('mine-modal').style.display='flex'; }
+function copyMineCmd(){ var t=document.getElementById('mineCmd').textContent; if(t&&navigator.clipboard){ navigator.clipboard.writeText(t); var b=document.getElementById('mineCopy'); var o=b.textContent; b.textContent='✓ COPIED'; setTimeout(function(){b.textContent=o;},1000); } }
+function openSettings(){ var el=document.getElementById('setAddr'); var a=_activeAddr(); if(el)el.textContent=a?(a.slice(0,10)+'…'+a.slice(-8)):''; document.getElementById('settings-modal').style.display='flex'; }
+function sigilLogout(){ try{ localStorage.removeItem('sigil-wallet-address'); sessionStorage.removeItem('sigil-onboard-bounces'); }catch(e){} location.replace('enter-sigil.html'); }
+function showAssets(){ if(window.showDash)showDash(); var t=document.body.classList.contains('view-desktop')?'dassets':'passets'; var el=document.getElementById(t); if(el)el.scrollIntoView({behavior:'smooth',block:'center'}); }
+['receive-modal','mine-modal','settings-modal'].forEach(function(id){ var m=document.getElementById(id); if(m)m.addEventListener('click',function(e){ if(e.target===m) closeModal(id); }); });
+window.addEventListener('keydown',function(e){ if(e.key==='Escape'){ closeModal('receive-modal'); closeModal('mine-modal'); closeModal('settings-modal'); } });
+window.openReceive=openReceive; window.openMine=openMine; window.openSettings=openSettings; window.showAssets=showAssets;
+window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogout=sigilLogout; window.closeModal=closeModal;
 </script>
 
 <!-- Network Stats modal — the SIGIL twin of the Quillon graph dashboard stats

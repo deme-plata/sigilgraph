@@ -1,4 +1,4 @@
-% What the Chain Knows — The Philosophy of the SIGIL Graph, v0.1
+% What the Chain Knows — The Philosophy of the SIGIL Graph, v0.2
 % Companion paper to SIGIL whitepaper v1.1 ("SIGIL — The Variational Chain")
 % and the master-equation note v0.2. Same house design system (epistemic-status
 % pills, layman boxes, braid watermark). PHILOSOPHY, not a second whitepaper:
@@ -6,10 +6,15 @@
 % or an admitted gap. House rules enforced: multi-party claims written
 % future-conditional and graded staged/open; the full gap ledger consolidated
 % once (S10); mechanism first, philosopher second; signature quotes used once.
-% v0.1 (same day): external-review corrections applied and LOGGED (see the
+% v0.1 (same day): review corrections applied and LOGGED (see the
 % correction-log box after the legend) — two-axis evidence taxonomy, delivery
 % law regraded, fold cost stated in plain words, three absolutes narrowed, new
 % S9 "Who Defines What Counts as Proof?", honest-money claim narrowed.
+% v0.2 (same day, same review thread): two-axis language completed everywhere
+% (abstract/legend/S7/refs/close), phone claim retired (342ms = 48-core bench
+% host), ground-truth -> evidence-under-assumptions, seed claim narrowed,
+% exit-78 operational qualification (fail-stop as DoS surface), the review
+% itself accurately re-typed (AI-assisted critical, project-solicited).
 % Build: pdflatex x2.
 \documentclass[10pt,a4paper]{article}
 
@@ -78,11 +83,11 @@
 \fancyhfoffset{0pt}
 \renewcommand{\headrulewidth}{0.4pt}
 \renewcommand{\headrule}{{\color{slate}\hrule width\headwidth height 0.4pt}}
-\fancyhead[L]{\scriptsize\textcolor{gray}{What the Chain Knows --- the philosophy of the SIGIL graph \,$\cdot$\, v0.1}}
+\fancyhead[L]{\scriptsize\textcolor{gray}{What the Chain Knows --- the philosophy of the SIGIL graph \,$\cdot$\, v0.2}}
 \fancyhead[R]{\scriptsize\textcolor{gray}{\thepage}}
 
 \hypersetup{
-  pdftitle={What the Chain Knows — The Philosophy of the SIGIL Graph (v0.1)},
+  pdftitle={What the Chain Knows — The Philosophy of the SIGIL Graph (v0.2)},
   pdfauthor={bitknight.dipper688@passmail.net},
   pdfsubject={Philosophy companion to SIGIL whitepaper v1.1 — the SIGIL graph read as an epistemic instrument: typed evidence, structural agreement, the self-halting node, and the licensing of models},
   pdfkeywords={SIGIL, philosophy, epistemology, evidence, verification, provenance, honest money, variational principle}
@@ -111,7 +116,7 @@
 {\Huge\bfseries\textcolor{ink}{What the Chain Knows}}\\[8pt]
 {\Large The Philosophy of the SIGIL Graph}\\[6pt]
 {\normalsize A companion to \emph{SIGIL — The Variational Chain}, whitepaper v1.1}\\[10pt]
-{\normalsize v0.1 · 2026-07-22}\\[6pt]
+{\normalsize v0.2 · 2026-07-22}\\[6pt]
 {\normalsize\texttt{bitknight.dipper688@passmail.net}}\\[2pt]
 {\small SIGIL / Flux Foundation · \texttt{sigilgraph.quillon.xyz}}\\[14pt]
 \begin{minipage}{0.72\textwidth}
@@ -133,8 +138,9 @@ authoritative service when local verification fails. Its answer to the question
 \emph{how does a network know anything, rather than get told it?} is that knowledge
 is not accumulated confidence but structural checkability: claimed state committed
 into the block header, agreement established by independent recomputation rather
-than social practice; every claim carrying a typed evidence grade whose promotion
-happens only by measurement; evidence treated as asymmetric, so that a mismatch
+than social practice; every empirical claim carrying separate evidence and
+deployment coordinates, neither promotable by rhetoric alone; evidence treated as
+asymmetric, so that a mismatch
 proves divergence cheaply while a match proves only equality under the chosen
 commitment, projection, and assumptions; and integrity enforced by a node that halts
 (exit 78) rather than assert a state it cannot verify. On this reading the
@@ -160,14 +166,18 @@ the instrument.
 \noindent{\footnotesize The markers of whitepaper v1.1 bind this companion too:
 unmarked prose is description or argument, not empirical claim. Where this paper
 asserts a fact about the running system, the marker states what kind of fact it is.
-Technical claims cited here are quoted from the corpus listed in the references; this
-paper adds philosophy, not measurements.}
+The markers are retained for continuity with the corpus, but \S\ref{sec:typed}
+refines them into two axes — evidence grade and deployment grade — and this paper
+reads them that way throughout. Technical claims cited here are quoted from the
+corpus listed in the references; this paper adds philosophy, not measurements.}
 
 \vspace{4pt}
 \begin{tcolorbox}[colback=panelbg,colframe=slate,boxrule=0.6pt,arc=2pt,
                   left=9pt,right=9pt,top=7pt,bottom=7pt]
-\small\textbf{Correction log, v0 $\to$ v0.1} (same day; external review). Per house
-practice, v0's errors are preserved here, not silently amended. (i) v0 inherited
+\small\textbf{Correction log, v0 $\to$ v0.1 $\to$ v0.2} (same day; AI-assisted
+critical review, solicited by the project — accurately typed: \emph{not} a formally
+independent audit). Per house practice, earlier versions' errors are preserved
+here, not silently amended. (i) v0 inherited
 the whitepaper's flat five-marker scale and with it the grade \textsc{measured} for
 the delivery law; v0.1 splits the taxonomy into two axes and regrades the law
 \emph{derived $+$ simulation-validated} (\S\ref{sec:typed}). (ii) v0's abstract
@@ -180,7 +190,18 @@ committed'' — committed the exact conflation \S\ref{sec:structural} warns agai
 now: claimed state is committed, agreement is recomputed. (v) A tenth section
 (\S\ref{sec:whodefines}) names the meta-authority v0 left implicit, defines
 epistemic independence, and narrows the ``honest money'' claim to rule-bound
-accounting.
+accounting. \emph{v0.1 $\to$ v0.2:} (vi) the two-axis taxonomy is now applied
+everywhere, including this paper's own abstract and legend, which v0.1 had left
+on the flat scale; (vii) v0.1 still let a \emph{phone} check ``a
+hundred-thousand-block history in the time of a blink'' — the 342\,ms figure
+belongs to a loaded 48-core benchmark host, and phone performance is unmeasured;
+(viii) ``cryptographic ground truth'' softened to evidence under the scheme's
+stated assumptions, since the fold's soundness reduction is open; (ix) ``a seed
+value replaces an authority'' narrowed — a fixed seed buys reproducibility, not
+independent reproduction and not model--reality correspondence; (x) an
+operational qualification added to exit 78 (fail-stop is itself an attack
+surface); (xi) v0.1 called its review ``external,'' which typed the evidence
+wrong — corrected above.
 \end{tcolorbox}
 
 \section{The Ledger You Are Shown: Money as an Epistemic Problem}\label{sec:ledger}
@@ -391,7 +412,13 @@ undisguisable. The precise entitlement is therefore narrower than the whitepaper
 ``divergence cannot hide'': root divergence cannot pass \emph{silently through a
 compliant, independently recomputing node} — common-mode bugs, colluding or
 non-recomputing participants, and roots not yet activated all remain places where
-divergence can still hide. Second: with today's topology — one producer, verifying followers,
+divergence can still hide. And one operational qualification keeps the ethics from
+curdling into a vulnerability: the principle is refusal of \emph{authoritative
+service}, not reverence for process death. A mechanism that halts on mismatch is
+itself an attack surface — an adversary who can induce apparent divergence can
+induce mass shutdown — so a production node must preserve its fault evidence and
+its recovery paths without continuing to serve contested state. Refusing to
+testify falsely does not require forgetting what one saw. Second: with today's topology — one producer, verifying followers,
 few genuinely independent operators — ``independent recomputation at every node''
 describes an architecture more than a demography \stG. The halts are real, and
 mostly they are one household catching itself. Self-halt is necessary
@@ -597,7 +624,7 @@ shipped $r{=}3$ provisioning default with a stated robustness margin. One
 structural prediction was borne out in kind: the verification wall tracked the
 crypto term, not hardware. The rest of the physics is pencil, and the geometric
 heart of the picture sits explicitly on the pretend list. The conviction's entire
-current empirical standing is one measured law, one borne-out structural
+current empirical standing is one derived and simulation-validated law, one borne-out structural
 prediction, and a grammar that has actually vetoed designs. That is not much
 physics. It is, however, exactly what it claims to be — which is the point of the
 whole exercise.
@@ -641,7 +668,8 @@ Honesty requires printing the tier structure. The cheap path verifies headers an
 the fold; catching a divergent full node at the state layer still costs full
 recomputation — a full node's work. What the corpus builds is not a flat epistemic
 democracy but a two-tier proof economy in which even the cheapest participant
-holds cryptographic ground truth about \emph{validity}, while complete skepticism
+holds independently checkable cryptographic evidence of \emph{validity} under the
+scheme's stated assumptions, while complete skepticism
 still has a hardware price. And the ceiling, in the system's own words: what the
 cheapest verifier checks today terminates in a producer-signed anchor, because
 ``Today, one author writes and everyone else verifies — that's the truth of the
@@ -669,13 +697,14 @@ the corpus files it as a vow.
 \layman{sigilcyan}{the three-microsecond citizen}{What does it mean that a browser
 tab can refuse to believe a server? It changes who can afford to check. For as long
 as ledgers have existed, checking the record meant petitioning whoever kept it.
-When a phone can check a hundred-thousand-block history in the time of a blink —
-and \emph{decline} it on failure — the cost of organized distrust falls toward
-zero. The fine print matters twice: the full check costs work that grows with the
-chain (the proof is tiny; the checking is not — and the full live chain's check
-has not been timed yet), and what it proves is that the record is \emph{lawful},
-while the record still has one author. Read the fine print; the design's honesty
-lives there.}
+The benchmark host checked a hundred-thousand-block history in 342 milliseconds —
+and a verifier can \emph{decline} the record on failure — so the cost of organized
+distrust is falling toward zero. Whether an ordinary phone achieves comparable
+performance remains to be measured. The fine print matters twice more: the full
+check costs work that grows with the chain (the proof is tiny; the checking is
+not — and the full live chain's check has not been timed yet), and what it proves
+is that the record is \emph{lawful}, while the record still has one author. Read
+the fine print; the design's honesty lives there.}
 
 \section{Who Defines What Counts as Proof?}\label{sec:whodefines}
 
@@ -750,8 +779,11 @@ so it binds future selves.
 
 The reflexive turn runs through everything the project touches. Its science is
 seeded and deterministic — the delivery-law paper reproduces from a fixed seed, and
-its stance is that the experiment \emph{is} the proof: a seed value replaces an
-authority, don't-trust-verify applied to the project's own results. Its
+its stance is that the experiment \emph{is} the proof. Typed precisely: a fixed
+seed replaces ``trust our reported run'' with reproducibility — anyone can re-run
+the exact experiment — but it does not replace \emph{independent} reproduction,
+and it cannot establish that the simulator's model describes the live network.
+Don't-trust-verify, applied to the project's own results, within those limits. Its
 methodology, VarFlow, ends by turning the knife on itself with five numeric,
 pre-registered predictions and a mortality clause: ``Methodologies are themselves
 variational — they minimize an action over their own usefulness'' — the method
@@ -796,7 +828,7 @@ lane is presently purchasable & \stO \\
 schedule is design; the 257-year cadence has never run at production pace & \stS \\
 Peer-sync ingress under-authenticated (H2/H3/H4) & the network's listening, not
 just its speaking, still extends unearned trust & \stO \\
-Evidence ladder self-administered; quorum attestation honor-system & the
+Evidence grading self-administered; quorum attestation honor-system & the
 discipline disciplines the authors; nothing yet disciplines the discipline & \stO \\
 Meta-authority concentrated: grade promotion, compiler and release keys, upgrade
 heights, the definition of valid verification (\S\ref{sec:whodefines}) & who
@@ -811,7 +843,7 @@ confession doubles as credibility; the reader should price the interest in &
 The closing stance generalizes past SIGIL, which is what a philosophy is for. The
 lesson of this corpus is not that machines can know. It is that a system — or a
 person, or an institution — may hold its grand theory \emph{lightly} provided it
-holds its evidence ladder \emph{rigidly}: conviction about mechanisms is cheap;
+holds its evidence coordinates \emph{rigidly}: conviction about mechanisms is cheap;
 conviction about grades is everything. Separate the model from the discipline, and
 defend only the discipline to the death. SIGIL's chain is offered here not as
 proof that a network can know the truth — no mechanism in it can promise that —
@@ -833,7 +865,7 @@ instrument this paper reads;
 (2026-07-18) — the licensing grammar's home; correction log v0.1$\to$v0.2;
 \url{https://quillon.xyz/downloads/SIGIL_MASTER_EQUATION_v0.2.pdf}
 \item \emph{A Closed-Form Delivery Law for Gossip Redundancy in the sigil-top
-Light Node} (2026-06-16) — the completed measured-law arc;
+Light Node} (2026-06-16) — the completed derived-and-simulation-validated arc;
 \url{https://quillon.xyz/downloads/sigil-top-delivery-law.pdf}
 \item \emph{SIGIL Whitepaper v0} (2026-05-29) — the engineering baseline; the
 three cultural commitments;
@@ -854,7 +886,7 @@ constitutive employment of ideas
 \end{itemize}
 
 \vspace{0.8em}
-\noindent\textit{v0.1 — 2026-07-22. Claimed state is committed. Agreement is
+\noindent\textit{v0.2 — 2026-07-22. Claimed state is committed. Agreement is
 recomputed. Trust is itemized. Models are pencil; measurements are ink. The
 equation is conjecture; its discipline, and one of its predictions, are not.}
 

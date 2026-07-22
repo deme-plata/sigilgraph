@@ -1,11 +1,15 @@
-% What the Chain Knows — The Philosophy of the SIGIL Graph, v0
+% What the Chain Knows — The Philosophy of the SIGIL Graph, v0.1
 % Companion paper to SIGIL whitepaper v1.1 ("SIGIL — The Variational Chain")
 % and the master-equation note v0.2. Same house design system (epistemic-status
 % pills, layman boxes, braid watermark). PHILOSOPHY, not a second whitepaper:
-% nine argued positions, each earned by a shipped mechanism, a measured number,
+% ten argued positions, each earned by a shipped mechanism, a measured number,
 % or an admitted gap. House rules enforced: multi-party claims written
 % future-conditional and graded staged/open; the full gap ledger consolidated
-% once (S9); mechanism first, philosopher second; signature quotes used once.
+% once (S10); mechanism first, philosopher second; signature quotes used once.
+% v0.1 (same day): external-review corrections applied and LOGGED (see the
+% correction-log box after the legend) — two-axis evidence taxonomy, delivery
+% law regraded, fold cost stated in plain words, three absolutes narrowed, new
+% S9 "Who Defines What Counts as Proof?", honest-money claim narrowed.
 % Build: pdflatex x2.
 \documentclass[10pt,a4paper]{article}
 
@@ -74,11 +78,11 @@
 \fancyhfoffset{0pt}
 \renewcommand{\headrulewidth}{0.4pt}
 \renewcommand{\headrule}{{\color{slate}\hrule width\headwidth height 0.4pt}}
-\fancyhead[L]{\scriptsize\textcolor{gray}{What the Chain Knows --- the philosophy of the SIGIL graph \,$\cdot$\, v0}}
+\fancyhead[L]{\scriptsize\textcolor{gray}{What the Chain Knows --- the philosophy of the SIGIL graph \,$\cdot$\, v0.1}}
 \fancyhead[R]{\scriptsize\textcolor{gray}{\thepage}}
 
 \hypersetup{
-  pdftitle={What the Chain Knows — The Philosophy of the SIGIL Graph (v0)},
+  pdftitle={What the Chain Knows — The Philosophy of the SIGIL Graph (v0.1)},
   pdfauthor={bitknight.dipper688@passmail.net},
   pdfsubject={Philosophy companion to SIGIL whitepaper v1.1 — the SIGIL graph read as an epistemic instrument: typed evidence, structural agreement, the self-halting node, and the licensing of models},
   pdfkeywords={SIGIL, philosophy, epistemology, evidence, verification, provenance, honest money, variational principle}
@@ -107,7 +111,7 @@
 {\Huge\bfseries\textcolor{ink}{What the Chain Knows}}\\[8pt]
 {\Large The Philosophy of the SIGIL Graph}\\[6pt]
 {\normalsize A companion to \emph{SIGIL — The Variational Chain}, whitepaper v1.1}\\[10pt]
-{\normalsize v0 · 2026-07-22}\\[6pt]
+{\normalsize v0.1 · 2026-07-22}\\[6pt]
 {\normalsize\texttt{bitknight.dipper688@passmail.net}}\\[2pt]
 {\small SIGIL / Flux Foundation · \texttt{sigilgraph.quillon.xyz}}\\[14pt]
 \begin{minipage}{0.72\textwidth}
@@ -123,17 +127,21 @@
 \noindent
 This paper reads SIGIL not as a payments network but as an \emph{epistemic
 instrument}: a machine engineered to produce, grade, and — when it must — refuse
-knowledge. Its answer to the question \emph{how does a network know anything, rather
-than get told it?} is that knowledge is not accumulated confidence but structural
-checkability: agreement made a property of the block header rather than of social
-practice; every claim carrying a typed evidence grade whose promotion happens only by
-measurement; evidence treated as asymmetric, so that divergence is provable cheaply
-while sameness is never provable at all; and integrity enforced by a node that halts
+knowledge. The distilled claim: SIGIL does not manufacture truth; it makes protocol
+claims explicit, evidence-typed, and independently checkable — and refuses
+authoritative service when local verification fails. Its answer to the question
+\emph{how does a network know anything, rather than get told it?} is that knowledge
+is not accumulated confidence but structural checkability: claimed state committed
+into the block header, agreement established by independent recomputation rather
+than social practice; every claim carrying a typed evidence grade whose promotion
+happens only by measurement; evidence treated as asymmetric, so that a mismatch
+proves divergence cheaply while a match proves only equality under the chosen
+commitment, projection, and assumptions; and integrity enforced by a node that halts
 (exit 78) rather than assert a state it cannot verify. On this reading the
 ``what's still pretend'' sections of the SIGIL corpus are not disclaimers but
 falsificationism running in production, and the master equation is held strictly
 instrumentally — a map drawn in pencil, redrawable wherever measurement disagrees. The
-paper argues nine positions, each grounded in a shipped mechanism, a measured number,
+paper argues ten positions, each grounded in a shipped mechanism, a measured number,
 or an admitted gap. It practices the discipline it describes: its claims carry the
 same status markers as the whitepaper's, multi-party language is written in the
 future-conditional wherever the live network — today one producer and verifying
@@ -154,6 +162,26 @@ unmarked prose is description or argument, not empirical claim. Where this paper
 asserts a fact about the running system, the marker states what kind of fact it is.
 Technical claims cited here are quoted from the corpus listed in the references; this
 paper adds philosophy, not measurements.}
+
+\vspace{4pt}
+\begin{tcolorbox}[colback=panelbg,colframe=slate,boxrule=0.6pt,arc=2pt,
+                  left=9pt,right=9pt,top=7pt,bottom=7pt]
+\small\textbf{Correction log, v0 $\to$ v0.1} (same day; external review). Per house
+practice, v0's errors are preserved here, not silently amended. (i) v0 inherited
+the whitepaper's flat five-marker scale and with it the grade \textsc{measured} for
+the delivery law; v0.1 splits the taxonomy into two axes and regrades the law
+\emph{derived $+$ simulation-validated} (\S\ref{sec:typed}). (ii) v0's abstract
+claimed sameness is ``never provable at all''; narrowed to equality under the
+chosen commitment, projection, and assumptions. (iii) v0's \S\ref{sec:whoknows}
+layman box let a reader believe a phone verifies the whole live chain ``in a
+blink''; the $O(M)$ verification cost and the benchmark's scope are now stated in
+plain words. (iv) v0's closing line — ``Agreement is not assumed; it is
+committed'' — committed the exact conflation \S\ref{sec:structural} warns against;
+now: claimed state is committed, agreement is recomputed. (v) A tenth section
+(\S\ref{sec:whodefines}) names the meta-authority v0 left implicit, defines
+epistemic independence, and narrows the ``honest money'' claim to rule-bound
+accounting.
+\end{tcolorbox}
 
 \section{The Ledger You Are Shown: Money as an Epistemic Problem}\label{sec:ledger}
 
@@ -222,6 +250,24 @@ support the same proposition with the same subjective confidence; the ladder sti
 refuses to let them occupy the same rung, because the refusal is the point. It is a
 chain of custody for claims, in a project whose entire subject is chains of custody.
 
+Examined closely, though, the five markers flatten \emph{two independent axes} —
+and a paper about typed knowledge owes the type system a repair. \textsc{Measured}
+and \textsc{simulation} answer one question (\emph{how do you know?}: derived,
+simulated, benchmarked, live-measured); \textsc{staged} and \textsc{open} answer a
+different one (\emph{is it running?}: live, staged, dormant, absent). A single
+ladder conflates evidence grade with deployment grade, and the conflation bites on
+the corpus's proudest exhibit. The delivery law $D=1-p^r$ is \emph{derived} under
+an independence assumption and then validated in a simulator that \emph{implements
+that same assumption}; its honest coordinates are evidence
+\emph{derived~$+$~simulation-validated}, deployment \emph{live} (the $r{=}3$
+provisioning default ships). Promotion to \textsc{measured} would require live
+network delivery data, or an independently controlled experiment on a real lossy
+network — neither has been run. The regrade does not diminish the law; it types it
+correctly, which is the whole discipline. This paper adopts the two-axis
+refinement wherever it grades a claim, and — per the practice
+\S\ref{sec:falsification} describes — logs the correction instead of absorbing it
+silently.
+
 The cardinal sin, in this scheme, is not the lie but the \emph{category error}. The
 whitepaper's consensus section says it outright: ``\,`passed tests' and
 `mathematically safe' are different sentences, and this paper refuses to blur
@@ -271,7 +317,11 @@ the form ``the world-state is exactly this,'' uttered in a format whose falsity 
 participant can, in principle, demonstrate. Social consensus — everyone seems to
 agree, nobody has complained — is not knowledge; it is the absence of a specific
 kind of evidence. A committed root is different in kind: it is a hostage given to
-arithmetic.
+arithmetic. And precision matters about \emph{what} is committed, because v0 of
+this paper blurred it: a header does not commit agreement — it commits a
+producer's \emph{claimed} state. Agreement is the event that occurs when
+independent parties recompute the claim and match it. State is committed;
+agreement must be recomputed, every time, by someone other than the claimant.
 
 One layer down, the same epistemics repeats as the chokepoint doctrine:
 \texttt{commit\_state\_transition} is the only code path permitted to mutate chain
@@ -337,7 +387,11 @@ producer commits a wrong-but-well-formed header, every honest follower recompute
 the same roots from the same blocks and agrees — in unison — on a false canon. The
 tripwire fires on divergence between parties, not on divergence from reality; no
 mechanism can make a network's shared premises true, only its disagreements
-undisguisable. Second: with today's topology — one producer, verifying followers,
+undisguisable. The precise entitlement is therefore narrower than the whitepaper's
+``divergence cannot hide'': root divergence cannot pass \emph{silently through a
+compliant, independently recomputing node} — common-mode bugs, colluding or
+non-recomputing participants, and roots not yet activated all remain places where
+divergence can still hide. Second: with today's topology — one producer, verifying followers,
 few genuinely independent operators — ``independent recomputation at every node''
 describes an architecture more than a demography \stG. The halts are real, and
 mostly they are one household catching itself. Self-halt is necessary
@@ -374,7 +428,10 @@ for header commitment \stG{} precisely because the cheap invariant is honest abo
 its direction:
 ``a differing invariant proves divergence; identical invariants do not prove
 identical histories.'' Cheap invariants ``fingerprint, they do not classify'' —
-they are one-way tripwires. The deep machinery that could classify (the Jones
+they are one-way tripwires. The general form of the entitlement, stated once for
+the whole paper: a mismatch proves divergence; a match proves only equality under
+the chosen commitment, projection, and assumptions — never the complete identity
+of what was projected. The deep machinery that could classify (the Jones
 polynomial) is \#P-hard, and the QTFT note draws the conclusion as an ethics of
 promise-making: anyone promising Jones-polynomial consensus at production block
 rates ``is selling what complexity theory forbids.'' Intractability, on this view,
@@ -563,10 +620,16 @@ expensive. The political claim buried in SIGIL's cryptography is that the expens
 was contingent, and that when checking becomes cheaper than trusting, deference
 stops being rational and starts being a choice.
 
-The numbers carry the argument, so the numbers are the argument. A constant-size
+The numbers carry the argument, so the numbers are the argument — with their
+scopes attached, because the scopes are where the honesty lives. A constant-size
 2{,}568-byte proof covers the whole chain prefix; full verification of it ran at
-342\,ms on the benchmark host; the live incremental tip check on the running
-network measures 3\,$\mu$s, with zero blocks downloaded \stM. The whitepaper's
+342\,ms \emph{at the 100k-block benchmark}, and the corpus keeps the caveats in
+frame: the proof is constant-size but verification is $O(M)$ over the commitments
+(roughly 51\,MB read at that benchmark) — constant-size proof, not constant-cost
+verification — and full verification of the live 29M-block fold has not been
+separately benchmarked. The live incremental tip check on the running network
+measures 3\,$\mu$s \emph{against an already-verified fold state}, with zero blocks
+downloaded \stM. The whitepaper's
 gloss earns its one appearance here: ``Your phone — honestly, a potato — can hold
 the chain to account.'' First contact is engineered to the same standard: a fresh
 node authenticates a signed tip anchor before speaking to any peer, and event
@@ -604,12 +667,73 @@ live) \stG{} — a right whose enforcement is staged is a vow, not yet a fact, a
 the corpus files it as a vow.
 
 \layman{sigilcyan}{the three-microsecond citizen}{What does it mean that a browser
-tab can refuse to believe a server? It changes who can afford to check. For as long as
-ledgers have existed, checking the record meant petitioning whoever kept it. When
-a phone can verify the whole chain's proof in a blink — and \emph{decline} it on
-failure — the cost of organized distrust falls to almost nothing. The fine print
-matters: today the check proves the record is \emph{lawful}, and the record still
-has one author. Read both sentences; the design's honesty lives in the second.}
+tab can refuse to believe a server? It changes who can afford to check. For as long
+as ledgers have existed, checking the record meant petitioning whoever kept it.
+When a phone can check a hundred-thousand-block history in the time of a blink —
+and \emph{decline} it on failure — the cost of organized distrust falls toward
+zero. The fine print matters twice: the full check costs work that grows with the
+chain (the proof is tiny; the checking is not — and the full live chain's check
+has not been timed yet), and what it proves is that the record is \emph{lawful},
+while the record still has one author. Read the fine print; the design's honesty
+lives there.}
+
+\section{Who Defines What Counts as Proof?}\label{sec:whodefines}
+
+The gap ledger of this paper names the producer as the residual authority over
+\emph{canonicality}. But the deepest residual trust in any proof system sits one
+level higher, and v0 of this paper left it implicit: not who produces blocks, but
+who defines what counts as proof. Concretely, that authority is whoever controls
+the promotion of evidence grades; the compiler and the release keys; consensus
+upgrades and their activation heights; the definition of valid verification that
+every checker runs; and the custody of correction and incident records. Every
+mechanism this paper has praised — the ladder, the provenance proofs, the halt,
+the fold — is downstream of those definitions. \S\ref{sec:structural} argued that
+trust is itemized; this section itemizes the meta-level, where today every listed
+power resides in the same small collective \stO. The ledger names the producer;
+this section names the judge — and today they are the same household.
+
+Against that concentration the design tradition already practices one
+constitutional principle, and it deserves to be stated as constitution rather than
+as engineering: \emph{validation rules are height-gated — old blocks must always
+validate under the rules that governed them when they were created}. New rules
+take effect at announced activation heights; the auto-updater design gives every
+release a forward activation window in which it can be revoked before it ever
+governs a block. Read philosophically, this is a separation of powers across
+\emph{time}: today's authority may define tomorrow's proof, but it must not be
+able to rewrite what yesterday's evidence meant. Retroactive reinterpretation —
+re-validating history under rules its authors never agreed to — is the meta-level
+analogue of rewriting balances, and the tradition's height-gating forbids both
+for the same reason. It is the one check on the judge that is already in the
+architecture rather than the roadmap.
+
+The second repair this section owes is a definition the corpus gestures at but
+never states. \emph{Epistemic independence}: two verifications are independent
+only to the extent that they do not share a failure mode. Ten nodes run by one
+operator, compiled by one compiler, from one implementation, are not ten
+witnesses; they are one epistemic household with ten machines. Independence is
+counted over implementations, builders, operators, measurement rigs, and
+reproductions — not over processes. This gives the multi-producer future its
+honest metric in advance: what will matter, when that future is graded, is not
+node count but \emph{household count} — how many disjoint failure modes must err
+together before a false canon survives. By that metric the live network's
+independence today is approximately one \stL, and every plural noun in this paper
+about ``nodes agreeing'' should be read with that number attached.
+
+Finally, the narrowing this section performs on the corpus's most morally loaded
+phrase. What the 21M schedule, the conservation chokepoint, and the fail-loud
+supply enforcer deliver — \emph{if} the open items close — is precisely this:
+\textbf{transparent, rule-bound monetary accounting}. A supply whose every change
+is lawful, auditable, and committed in advance. That is the narrow, defensible
+sense of ``honest money,'' and it is the only sense this paper endorses.
+Predictability is not distributive justice: a perfectly rule-bound schedule says
+nothing, by itself, about who holds the supply, how fairly it was acquired, who
+governs the rules, or what the system costs the world outside it. Those are
+claims the corpus has not argued, and a paper about not asserting beyond one's
+evidence will not smuggle them in an adjective. The in-house reminder that the
+distinction is real sits in the origin hash itself: the genesis document's
+fair-launch table and its founding endowments (\S\ref{sec:falsification})
+coexist, permanently. Rule-bound accounting preserved that tension honestly. It
+did not adjudicate it — and could not have.
 
 \section{The Instrument Turned on Itself: Reflexivity, and This Paper's Own Grade}\label{sec:reflexive}
 
@@ -674,6 +798,9 @@ Peer-sync ingress under-authenticated (H2/H3/H4) & the network's listening, not
 just its speaking, still extends unearned trust & \stO \\
 Evidence ladder self-administered; quorum attestation honor-system & the
 discipline disciplines the authors; nothing yet disciplines the discipline & \stO \\
+Meta-authority concentrated: grade promotion, compiler and release keys, upgrade
+heights, the definition of valid verification (\S\ref{sec:whodefines}) & who
+defines proof is currently who produces it; epistemic household count $\approx$ 1 & \stO \\
 This paper: philosophy composed by project participants, in an advocacy genre &
 confession doubles as credibility; the reader should price the interest in &
 \stC \\
@@ -727,9 +854,8 @@ constitutive employment of ideas
 \end{itemize}
 
 \vspace{0.8em}
-\noindent\textit{v0 — 2026-07-22. Trust is not abolished; it is itemized.
-Agreement is not assumed; it is committed. Models are pencil; measurements are
-ink. The equation is conjecture; its discipline, and one of its predictions, are
-not.}
+\noindent\textit{v0.1 — 2026-07-22. Claimed state is committed. Agreement is
+recomputed. Trust is itemized. Models are pencil; measurements are ink. The
+equation is conjecture; its discipline, and one of its predictions, are not.}
 
 \end{document}

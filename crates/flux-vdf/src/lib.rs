@@ -255,6 +255,46 @@ impl ModSquaring {
     }
 }
 
+// ── C10: height-gated consensus VDF group selection ─────────────────────────
+/// Block height at/above which the consensus VDF group switches from the
+/// forgeable `bench_2048` benchmark modulus to the trustless [`ModSquaring::production`]
+/// (RSA-2048, unknown order). **DORMANT by default (`u64::MAX`)** — historical
+/// blocks were mined against `bench_2048`, so their proofs only verify under it;
+/// a live cutover therefore needs an operator to pin a real activation height on
+/// the node AND ship it to every miner (a coordinated upgrade — a miner still on
+/// `bench_2048` past the boundary produces shares the node rejects, and vice
+/// versa). Override for tests/staging via `SIGIL_VDF_ACTIVATION_HEIGHT`.
+pub const VDF_PRODUCTION_ACTIVATION_HEIGHT: u64 = u64::MAX;
+
+/// The active VDF cutover height: `SIGIL_VDF_ACTIVATION_HEIGHT` if set and
+/// parseable, else [`VDF_PRODUCTION_ACTIVATION_HEIGHT`] (dormant).
+pub fn vdf_activation_height() -> u64 {
+    std::env::var("SIGIL_VDF_ACTIVATION_HEIGHT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(VDF_PRODUCTION_ACTIVATION_HEIGHT)
+}
+
+/// Pure height→group selector against an explicit `activation` height. Below
+/// `activation` → `bench_2048`; at/above → `production`. Extracted so the choice
+/// is unit-testable without touching process env.
+pub fn group_for_height_with(height: u64, activation: u64) -> ModSquaring {
+    if height >= activation {
+        ModSquaring::production()
+    } else {
+        ModSquaring::bench_2048()
+    }
+}
+
+/// The consensus VDF group for a block at `height` — the SINGLE switch point the
+/// node and every miner MUST share. Reads the live activation height (dormant by
+/// default), so it returns `bench_2048` unchanged until an operator flips the
+/// cutover. Callers should key on the BLOCK's height (producer, followers, and
+/// miners all agree on that), never on wall-clock.
+pub fn group_for_height(height: u64) -> ModSquaring {
+    group_for_height_with(height, vdf_activation_height())
+}
+
 /// Bounded Pollard-rho factor search. Returns a non-trivial factor of `n` if one
 /// is found within `max_iters` (signals a *weak* modulus for VDF use), else None.
 /// Brent's cycle variant; deterministic (fixed seed) so the check is reproducible.
@@ -370,6 +410,35 @@ mod tests {
         let x = g.from_seed(&[3u8; 32]);
         let proof = eval(&g, &x, 4_000);
         assert!(verify(&g, &x, &proof), "honest VDF proof over RSA-2048 must verify");
+    }
+
+    #[test]
+    fn height_gate_selects_bench_below_and_production_at_or_above() {
+        // Dormant default: every height stays on bench_2048.
+        assert_eq!(group_for_height_with(0, u64::MAX).n, ModSquaring::bench_2048().n);
+        assert_eq!(group_for_height_with(u64::MAX - 1, u64::MAX).n, ModSquaring::bench_2048().n);
+        // With a real activation at H: below → bench, at/above → production.
+        let h = 1_000u64;
+        assert_eq!(group_for_height_with(h - 1, h).n, ModSquaring::bench_2048().n);
+        assert_eq!(group_for_height_with(h, h).n, ModSquaring::production().n);
+        assert_eq!(group_for_height_with(h + 1, h).n, ModSquaring::production().n);
+    }
+
+    #[test]
+    fn bench_forged_proof_is_rejected_under_production_group() {
+        // C10 core assertion: bench_2048's order is computable, so a proof made
+        // under it is worthless the moment the network moves to the production
+        // group — verifying a bench proof against production() must FAIL. This is
+        // exactly what the height gate enforces at the cutover boundary.
+        let bench = ModSquaring::bench_2048();
+        let prod = ModSquaring::production();
+        let x_b = bench.from_seed(&[7u8; 32]);
+        let proof = eval(&bench, &x_b, 2_000);
+        assert!(verify(&bench, &x_b, &proof), "honest bench proof verifies under bench");
+        // The same proof re-checked against the production group is rejected
+        // (different modulus → the reduced element does not match).
+        let x_p = prod.from_seed(&[7u8; 32]);
+        assert!(!verify(&prod, &x_p, &proof), "a bench-group proof must not verify under production");
     }
 
     #[test]

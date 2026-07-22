@@ -219,7 +219,7 @@ fn serve_file(dir: &PathBuf, safe: &str) -> (&'static str, Vec<u8>, &'static str
         return ("200 OK", html.as_bytes().to_vec(), "text/html; charset=utf-8");
     }
 
-    // 3c. Built-in SIGIL Explorer (flux-search/flux-db) — served here so the wallet's
+    // 3c. Built-in SIGIL Explorer (flux-search/flux-db, search-hit fetch-by-height 2026-07-22) — served here so the wallet's
     // Activity iframe is same-origin and its /api/v1/search hits the node proxy.
     if safe == "sigil-explorer.html" || safe.ends_with("/sigil-explorer.html") {
         let html = include_str!("../../../gui/sigil-explorer.html");

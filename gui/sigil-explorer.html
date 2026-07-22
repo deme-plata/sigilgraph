@@ -163,8 +163,13 @@ async function doSearch(force){
     var j=await resp.json();
     if(seq!==_searchSeq) return;
     (j.results||[]).forEach(function(x){
-      var bh=_heightFromTitle(x.title), blk=(bh!=null)?_seenByHeight(bh):null;
-      results.push({type:'flux',title:x.title||x.id||'result',sub:(x.snippet||x.id||'').slice(0,90),score:(x.score!=null?(+x.score).toFixed(2):''),sridx:(blk?window._sr.push(blk)-1:-1)});
+      var snip=String(x.snippet||''), sm=snip.match(/block (\d+) ([0-9a-f]{64})/);
+      var bh=sm?+sm[1]:_heightFromTitle(x.title), bhash=sm?sm[2]:null;
+      var blk=(bh!=null)?_seenByHeight(bh):null;
+      var title=(bh!=null)?('Block #'+bh):(x.title||x.id||'result');
+      var sub=(bh!=null)?String(x.title||snip).slice(0,90):(snip||x.id||'').slice(0,90);
+      if(results.some(function(r){return r.title===title;})) return;
+      results.push({type:'flux',title:title,sub:sub,score:(x.score!=null?(+x.score).toFixed(2):''),sridx:(blk?window._sr.push(blk)-1:-1),bh:bh,bhash:bhash});
     });
   }catch(e){}
   // 2) scan EVERY block we've shown (rolling 'seen' buffer) — survives the ~6s live window
@@ -185,6 +190,16 @@ async function doSearch(force){
 function _heightFromTitle(t){ if(!t)return null; var m=String(t).match(/#?(\d+)/); return m?+m[1]:null; }
 function openSearchHit(i){ closeSearchModal(); var b=(window._sr||[])[i]; if(b)openBlockModal(b); }
 window.openSearchHit=openSearchHit;
+async function openSearchFetch(h,hash){
+  closeSearchModal();
+  var b={h:h,hash:hash||null};
+  try{ var r=await fetch('/api/v1/block?height='+h,{cache:'no-store'}); var j=await r.json();
+    if(j&&j.height!=null){ b.reward=j.reward; b.bits=j.bits; b.prev_tip=j.prev_tip;
+      var sb=j.submission&&j.submission.block; if(sb&&sb.nonce!=null)b.nonce=sb.nonce; }
+  }catch(e){}
+  openBlockModal(b);
+}
+window.openSearchFetch=openSearchFetch;
 function openSearchModal(q,results){
   document.getElementById('scq').textContent=q||'…';
   document.getElementById('sccnt').textContent=results.length+' result'+(results.length===1?'':'s');
@@ -193,7 +208,7 @@ function openSearchModal(q,results){
     body.innerHTML='<div class="empty">No matches for "'+(q||'')+'" — try a block height, full/partial hash, or producer (delta/epsilon)</div>';
   }else{
     body.innerHTML=results.map(function(x){
-      var act=(x.sridx!=null&&x.sridx>=0)?' onclick="openSearchHit('+x.sridx+')"':' style="cursor:default"';
+      var act=(x.sridx!=null&&x.sridx>=0)?' onclick="openSearchHit('+x.sridx+')"':((x.bh!=null)?' onclick="openSearchFetch('+x.bh+','+(x.bhash?('\''+x.bhash+'\''):'null')+')"':' style="cursor:default"');
       return'<div class="sresult"'+act+'><span class="stype '+x.type+'">'+x.type+'</span><span class="stitle">'+x.title+'</span><span class="ssub">'+x.sub+'</span>'+(x.score?'<span class="sscore">'+x.score+'</span>':'')+'</div>';
     }).join('');
   }
@@ -390,6 +405,10 @@ function openBlockModal(i){
       row('Producer','<span class="badge badge-'+({D:'d',E:'e',G:'g',B:'b'}[b.prod]||'d')+'" style="font-size:11px">'+prodName+'</span>',false,'')+
       row('Block Hash',(b.hash||'—'),true,(b.hash&&b.hash.indexOf('…')<0)?b.hash:'')+
       (b.cid?row('Content-Addr','<span style="color:var(--violet)">flux://b3/'+b.cid.slice(0,24)+'…</span>',true,b.cid,verifyBtn):'')+
+      (b.reward!=null?row('Coinbase Reward',(Number(b.reward)/1e8).toFixed(8)+' SIGIL',true,''):'')+
+      (b.prev_tip?row('Prev Tip',b.prev_tip,true,b.prev_tip):'')+
+      (b.bits!=null?row('Difficulty','2^'+b.bits+' shifted target',true,''):'')+
+      (b.nonce!=null?row('Nonce',String(b.nonce),true,''):'')+
       (b.parents&&b.parents.length?row('Parent',(b.parents[0]||'—'),true,(b.parents[0]&&b.parents[0].indexOf('…')<0)?b.parents[0]:''):'')+
       (b.ts?row('Timestamp',when,true,''):'')+
       (b.content?row('Detail',b.content,false,''):'')+

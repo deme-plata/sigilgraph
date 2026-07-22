@@ -1,4 +1,4 @@
-% SIGIL Whitepaper v1.1 — redesigned edition ("scientific instrument, not
+% SIGIL Whitepaper v1.2 — redesigned edition ("scientific instrument, not
 % crypto brochure"). Design review 2026-07-18 applied: epistemic-status pill
 % system, three technical figures (equation map / fold flow / evidence
 % ladder), metric cards, consensus callout, skeptic checklist, braid
@@ -6,6 +6,14 @@
 % All precision-pass language (correspondences-not-derivations, corrected PID
 % discriminant, one-way invariants, wall-as-feasibility, validity-vs-
 % canonicality) preserved verbatim in substance.
+% v1.2 (2026-07-22): two-axis regrade adopted from the philosophy companion
+% ("What the Chain Knows" v0.2). The gossip delivery law is regraded from
+% MEASURED to DERIVED+SIM (new \stD marker): it is derived under an
+% independence assumption and validated in a simulator implementing that same
+% assumption; promotion to measured requires live-network delivery data.
+% Evidence-ladder figure, scoreboard row 7, and honesty section updated;
+% delivery-law reference date corrected 06-17 -> 06-16; revision note added
+% after the legend. No other claims changed.
 % Build: pdflatex x2.
 \documentclass[10pt,a4paper]{article}
 
@@ -46,6 +54,7 @@
 % status markers — used consistently in tables, lists, figures
 \newcommand{\stM}{\textcolor{sigilcyan}{$\bullet$}~{\scriptsize\textcolor{sigilcyan}{\textsc{measured}}}}
 \newcommand{\stS}{\textcolor{sigilblue}{$\odot$}~{\scriptsize\textcolor{sigilblue}{\textsc{simulation}}}}
+\newcommand{\stD}{\textcolor{sigilblue}{$\oplus$}~{\scriptsize\textcolor{sigilblue}{\textsc{derived+sim}}}}
 \newcommand{\stG}{\textcolor{sigilviolet}{$\diamond$}~{\scriptsize\textcolor{sigilviolet}{\textsc{staged}}}}
 \newcommand{\stO}{\textcolor{sigilamber}{$\circ$}~{\scriptsize\textcolor{sigilamber}{\textsc{open}}}}
 \newcommand{\stC}{{\scriptsize\textcolor{gray}{$\triangle$~\textit{conjectural}}}}
@@ -89,11 +98,11 @@
 \fancyhfoffset{0pt}
 \renewcommand{\headrulewidth}{0.4pt}
 \renewcommand{\headrule}{{\color{slate}\hrule width\headwidth height 0.4pt}}
-\fancyhead[L]{\scriptsize\textcolor{gray}{SIGIL --- The Variational Chain \,$\cdot$\, whitepaper v1.1}}
+\fancyhead[L]{\scriptsize\textcolor{gray}{SIGIL --- The Variational Chain \,$\cdot$\, whitepaper v1.2}}
 \fancyhead[R]{\scriptsize\textcolor{gray}{\thepage}}
 
 \hypersetup{
-  pdftitle={SIGIL — The Variational Chain (Whitepaper v1.1)},
+  pdftitle={SIGIL — The Variational Chain (Whitepaper v1.2)},
   pdfauthor={bitknight.dipper688@passmail.net},
   pdfsubject={An experimental provenance-signed BlockDAG organized by a conjectural effective action; sigilgraph repo, branch feat/commons-tithe-routing-0.36.1, source d7906ff based on 16f05a8; benchmark record June--July 2026},
   pdfkeywords={SIGIL, BlockDAG, DagKnight, post-quantum, STARK, SQIsign, ML-KEM, fold, gossip delivery law}
@@ -123,7 +132,7 @@
 \end{tikzpicture}\\[10pt]
 {\Huge\bfseries\textcolor{ink}{SIGIL — The Variational Chain}}\\[8pt]
 {\Large An Experimental Provenance-Signed BlockDAG\\Organized by a Conjectural Effective Action}\\[10pt]
-{\normalsize Whitepaper v1.1 · 2026-07-18}\\[6pt]
+{\normalsize Whitepaper v1.2 · 2026-07-22}\\[6pt]
 {\normalsize\texttt{bitknight.dipper688@passmail.net}}\\[2pt]
 {\small SIGIL / Flux Foundation · \texttt{sigilgraph.quillon.xyz}}\\[2pt]
 {\small source \texttt{d7906ff} · based on \texttt{16f05a8} · branch \texttt{feat/commons-tithe-routing-0.36.1}}\\[6pt]
@@ -149,10 +158,11 @@ every protocol component — settlement conservation, emission control, witness
 attestation, fork topology, the post-quantum floor — corresponding to one field. The
 correspondence is design discipline and research programme, not accomplished
 mathematics: Lagrangians are unspecified and the discrete-DAG-to-manifold construction
-is open (\S\ref{sec:action}). What earns the analogy its keep is measurement: a
-closed-form gossip delivery law $D(p,r)=1-p^{r}$ (RMS residual 0.4\,pp over 22 seeded
-simulations), a constant-size whole-chain proof, byte-identical multi-producer braid
-convergence, and 3\,$\mu$s live incremental tip verification. A live experimental
+is open (\S\ref{sec:action}). What earns the analogy its keep is evidence, graded: a
+closed-form gossip delivery law $D(p,r)=1-p^{r}$ (derived; RMS residual 0.4\,pp over
+22 seeded simulations — not yet live-measured), a constant-size whole-chain proof,
+byte-identical multi-producer braid convergence in simulation, and 3\,$\mu$s live
+incremental tip verification. A live experimental
 network runs at height $\sim$29M under accelerated laboratory economics. This paper
 presents the action, its correspondences, the measured laws, the architecture, and an
 unusually honest account of what remains conjecture.
@@ -180,11 +190,31 @@ tip-proofs H4). These are tracked with file:line and fix status in the hardening
 % epistemic-status legend
 \begin{center}
 \small
-\stM\quad\stS\quad\stG\quad\stO\quad\stC
+\stM\quad\stD\quad\stS\quad\stG\quad\stO\quad\stC
 \end{center}
 \noindent{\footnotesize These markers are used consistently throughout — in the field
 table, the measurements, the architecture, the predictions scoreboard, and the closing
-checklist. Equations are set in black; color is reserved for results and status.}
+checklist. Following the philosophy companion (\emph{What the Chain Knows} v0.2), the
+markers are read as two axes — evidence grade (derived / simulated / benchmarked /
+live-measured) and deployment grade (live / staged / dormant / absent) — and
+\textsc{derived+sim} names the coordinate a claim holds when it is mathematically
+derived and validated in seeded simulation but not yet measured on the live network.
+Equations are set in black; color is reserved for results and status.}
+
+\vspace{4pt}
+\begin{tcolorbox}[colback=panelbg,colframe=slate,boxrule=0.6pt,arc=2pt,
+                  left=8pt,right=8pt,top=6pt,bottom=6pt]
+\small\textbf{Revision note, v1.1 $\to$ v1.2} (2026-07-22). One regrade, logged
+rather than silently absorbed: v1.1 graded the gossip delivery law
+\textsc{measured}. That blurred two axes — the law is \emph{derived} under an
+independence assumption and \emph{validated in a simulator that implements the same
+assumption} (22 seeded runs, RMS 0.4\,pp), while its $r{=}3$ provisioning default is
+\emph{deployed live}. Its correct coordinate is \textsc{derived+sim}; promotion to
+\textsc{measured} requires live-network delivery data or an independently controlled
+experiment on a real lossy network, neither of which has been run. \S\ref{sec:delivery},
+the evidence ladder, and the predictions scoreboard now carry the corrected grade. No
+other claim changed.
+\end{tcolorbox}
 
 \section{Introduction: why reinvent money, and why a chain needs an action}
 
@@ -546,7 +576,7 @@ Figure~\ref{fig:foldflow}.}
 \label{fig:plate3}
 \end{figure}
 
-\subsection{The gossip delivery law \hfill \stM}\label{sec:delivery}
+\subsection{The gossip delivery law \hfill \stD}\label{sec:delivery}
 
 For a block gossiped with redundancy $r$ under independent per-transmission loss
 probability $p$, the probability a node receives it at least once is
@@ -557,18 +587,25 @@ probability $p$, the probability a node receives it at least once is
 r^{*} = \left\lceil \frac{\ln(1-\mathrm{SLA})}{\ln p} \right\rceil
 \end{equation}
 
-Derived and validated against 22 seeded flux-chronos star-flood simulations; RMS
-residual \textcolor{sigilcyan}{\textbf{0.4 percentage points}}. The shipped default
-$r=3$ satisfies a 99.9\% SLA up to $p=0.1$. This is statistical mechanics of the gossip
-layer done properly: model, measurement, closed form, residual, and a provisioning rule
-operators actually use. (Standalone paper published at
+Derived under an independent-loss assumption and validated against 22 seeded
+flux-chronos star-flood simulations; RMS residual
+\textcolor{sigilblue}{\textbf{0.4 percentage points}}. Graded precisely (v1.2): the
+validating simulator \emph{implements the same independence assumption the law
+derives from}, so the campaign confirms the derivation, not the physics of a real
+network — evidence \textsc{derived+sim}, deployment \emph{live} (the shipped default
+$r=3$ satisfies a 99.9\% SLA up to $p=0.1$). Promotion to \textsc{measured} requires
+live-network delivery data or an independently controlled lossy-network experiment.
+What the arc demonstrates in full is the discipline: model, simulation campaign,
+closed form, residual, and a provisioning rule operators actually use. (Standalone paper published at
 \url{https://quillon.xyz/downloads/sigil-top-delivery-law.pdf}.)
 
-\layman{sigilcyan}{the delivery law}{If a letter gets lost one time in ten, send three
+\layman{sigilblue}{the delivery law}{If a letter gets lost one time in ten, send three
 copies — the chance all three vanish is one in a thousand. That's the entire law:
-$1-p^r$. We didn't guess it; we ran 22 controlled storms of lost messages and the
-formula matched reality to within half a percentage point. The network now
-\emph{calculates} how many copies to send instead of hoping.}
+$1-p^r$. We didn't guess it; we ran 22 controlled, \emph{simulated} storms of lost
+messages and the formula matched the simulation to within half a percentage point.
+Honest fine print: the storm machine assumes losses are independent — the same
+assumption the formula is built on — so the real-network test is still ahead. The
+network already \emph{calculates} how many copies to send instead of hoping.}
 
 \subsection{The fold: succinct whole-chain verification \hfill \stM}\label{sec:fold}
 
@@ -695,13 +732,13 @@ backfill codec, 70.7\,B/header live) and 26.3$\times$ (gossip frames).
 \node[band,fill=sigilcyan!8]   (m) at (0,3.15) {};
 \node[tag,text=sigilcyan]  at (-6.6,3.38) {measured};
 \node[font=\scriptsize,anchor=west] at (-6.6,2.98)
-  {delivery law $1{-}p^r$ · fold 2{,}568\,B / 342\,ms / 3\,$\mu$s · ML-KEM 115\,ms ·
+  {fold 2{,}568\,B / 342\,ms / 3\,$\mu$s · ML-KEM 115\,ms ·
    zstd 14--26$\times$ · mining loop live · RPC auth (wallet-sig) · sync 10.8k blk/s};
 \node[band,fill=sigilblue!7]   (s) at (0,2.10) {};
 \node[tag,text=sigilblue]  at (-6.6,2.33) {simulation-gated};
 \node[font=\scriptsize,anchor=west] at (-6.6,1.93)
-  {braid divergence $=0$ (S1--S6, 16/16 orderings, tamper 5/5) · delivery-law
-   inputs (22 seeded chronos runs)};
+  {delivery law $1{-}p^r$ (derived; 22 seeded chronos runs, RMS 0.4\,pp; $r{=}3$
+   default live) · braid divergence $=0$ (S1--S6, 16/16 orderings, tamper 5/5)};
 \node[band,fill=sigilviolet!7] (g) at (0,1.05) {};
 \node[tag,text=sigilviolet] at (-6.6,1.28) {staged};
 \node[font=\scriptsize,anchor=west] at (-6.6,0.88)
@@ -948,16 +985,18 @@ reduction \\
 \stO & none yet & compare settlement rate to reputation-graph entropy \\
 6. Validator-departure entropy law (Hawking analogue) & \stO & none yet & tip-proof
 rate vs.\ validator-set entropy \\
-7. Gossip delivery follows $1-p^r$ \emph{(new since v0)} & \stM & 22 simulations, RMS
-0.4\,pp; shipped as the $r{=}3$ default & re-fit under correlated (non-independent)
-loss \\
+7. Gossip delivery follows $1-p^r$ \emph{(new since v0)} & \stD & 22 simulations, RMS
+0.4\,pp; shipped as the $r{=}3$ default & measure delivery on the live network;
+re-fit under correlated (non-independent) loss \\
 \bottomrule
 \end{tabularx}
 \end{center}
 
 Prediction 7 deserves emphasis: it is the first SIGIL law that went the full arc —
 hypothesis, seeded simulation campaign, closed form, residual, operator-facing rule,
-published paper. That arc is the template the remaining predictions are held to.
+published paper. That arc is the template the remaining predictions are held to. Its
+own remaining step — from \textsc{derived+sim} to \textsc{measured} — is live-network
+delivery data, and it is listed in its falsification column like everything else.
 
 \section{Honest status}\label{sec:honesty}
 
@@ -983,7 +1022,11 @@ linking-number/Alexander programme is claimed tractable, cheap invariants are on
 tripwires (they fingerprint, not classify), and the header topology commitment is
 staged, not shipped. AdS/CFT on a discrete graph is an analogy pending rigorous
 discretization. The PID/Klein–Gordon mapping is schematic (controller states are not
-local in $\varphi$) and exact only for quadratic potentials. The layered-hardness
+local in $\varphi$) and exact only for quadratic potentials. The delivery law — the
+programme's best result — is derived and simulation-validated, not live-measured: the
+validating simulator implements the same independence assumption the law derives
+from, so its 22-run campaign confirms the derivation, not a property of the real
+network (v1.2 regrade; revision note after the legend). The layered-hardness
 security design states intent per property; a joint security model with a formal
 composition bound is open, as is the fold's concrete soundness reduction.
 
@@ -1051,7 +1094,7 @@ deployment grade) and regrades the delivery law accordingly;
 \item \emph{SIGIL $\times$ QTFT} (2026-05-30) — \texttt{SIGIL\_QTFT\_TOPOLOGY\_v0.md};
 the tractable-invariant topology programme
 \item \emph{A Closed-Form Delivery Law for Gossip Redundancy in the sigil-top Light
-Node} (2026-06-17) — \url{https://quillon.xyz/downloads/sigil-top-delivery-law.pdf}
+Node} (2026-06-16) — \url{https://quillon.xyz/downloads/sigil-top-delivery-law.pdf}
 \item \emph{Flux Foundation} whitepaper — the substrate;
 \url{https://quillon.xyz/downloads/flux-foundation-whitepaper-v0.17.0.pdf}
 \item \emph{SIGIL Genesis v0} — \texttt{SIGIL\_GENESIS\_v0.md}; the architectural spec
@@ -1073,10 +1116,11 @@ inherits, the physics-first whitepaper tradition it answers, and the operating r
 (measure live, honest checklists, provenance always) that shaped every section above.
 
 \vspace{0.6em}
-\noindent\textit{v1.1 — 2026-07-18. The chain is modeled as a 4-manifold with
+\noindent\textit{v1.2 — 2026-07-22. The chain is modeled as a 4-manifold with
 curvature. Reputation is mass. Settlements are matter. Witnesses are gauge fields.
 Topology is the knot. Security is a three-legged connection. The equation is
-conjecture; the measurements are not.}
+conjecture; the measurements are not — and what is not yet a measurement now says
+so on its own label.}
 
 \clearpage
 \appendix

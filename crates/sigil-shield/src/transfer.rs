@@ -1,56 +1,44 @@
-//! END-TO-END SHIELDED TRANSFER — the three real primitives wired into one transfer object:
-//!   * MEMBERSHIP  (`membership`)  — the spent note's commitment is in the anonymity-set tree
-//!                                   at the public `root`, WITHOUT revealing which note.
-//!   * CONSERVATION (`ConservationAir` below) — value_in == fee + Σ outputs, amounts HIDDEN,
-//!                                   the fee bound as a public input.
-//!   * NULLIFIER   (`notes`-style, here in-field) — a per-spend tag revealed once; the set
-//!                                   rejects a replay (double-spend guard).
+//! END-TO-END SHIELDED TRANSFER — real primitives wired into one transfer object:
+//!   * SPEND       (`spend::SpendAir`) — the MONOLITHIC proof: the public `cm_in` opens to a
+//!                                       value, that value == fee + Σ outputs (conservation), and
+//!                                       `nf == compress2(spend_key, position)`. Value + nullifier
+//!                                       binding the VERIFIER checks — all in one proof.
+//!   * MEMBERSHIP  (`membership`)      — `cm_in` is a leaf under the public tree `root`, WITHOUT
+//!                                       revealing which leaf.
+//!   * NULLIFIER SET                   — the revealed `nf` is recorded once; a replay is rejected.
 //!
-//! Everything lives in ONE field (winterfell Goldilocks f64), which is the point: the note
-//! commits to `value`, and the SAME `value` field element is the conservation trace's starting
-//! balance. That shared witness is a real value-binding — not two proofs about unrelated numbers
-//! stapled together. A spend therefore proves, together: "I own a note worth V that is in the
-//! tree, its nullifier is nf, and V is fully accounted for as fee + my declared outputs."
+//! Everything lives in ONE field (winterfell Goldilocks f64). Public per transfer: `cm_in`, `nf`,
+//! `fee`, `root`, output commitments. A spend proves together: "the note `cm_in` is in the tree,
+//! it opens to a value V, V = fee + my outputs, and nf is V's key correctly hashed."
 //!
 //! Note commitment  cm = compress2(value, blinding)                (a tree leaf)
 //! Nullifier        nf = compress2(spend_key, position)            (revealed on spend)
 //! Output note      cm_out = compress2(out_value, out_blinding)    (inserted into the tree)
 //!
-//! RANGE: every amount (input, fee, outputs) is bound `< 2^RANGE_BITS` so the field-arithmetic
-//! conservation proof equals INTEGER conservation — no output can be a wrapped "negative"
-//! (`range` module). At BUILD time `amounts_in_range` enforces the bound (closes the honest path
-//! + the test's rejection); the real zk RangeAir primitive lives in `range.rs`.
+//! RANGE: every amount (input, fee, outputs) is bound `< 2^RANGE_BITS` so field-arithmetic
+//! conservation equals INTEGER conservation — no output can be a wrapped "negative" (`range`).
+//! `amounts_in_range` enforces it at build; the zk RangeAir primitive lives in `range.rs`.
 //!
-//! ⚠️ SCOPE (honest, per the audit discipline — mirrors `stark.rs`): the three statements share
-//! the `value`/`spend_key` WITNESS at proving time. Two hardenings remain, both the same shape —
-//! fold constraints into the conservation AIR so the VERIFIER (not just the prover) is bound:
-//!   1. VALUE + NULLIFIER BINDING: `conservation.balance[0] == the membered note's committed
-//!      value` and `nf == compress2(sk, that same leaf's position)` in-circuit.
-//!   2. PRIVATE RANGE: add the `range` bit-decomposition columns to the conservation AIR so each
-//!      HIDDEN `out` amount is range-checked in the SAME proof (a standalone RangeAir has the
-//!      amount PUBLIC, which would leak it — so it can't be bundled as-is). Until then range is
-//!      verifier-enforced only for a public amount; for hidden outputs it's a build-time check.
+//! ⚠️ SCOPE (honest, per the audit discipline). Now VERIFIER-bound (via `SpendAir`): value ↔
+//! cm_in, and nullifier ↔ (spend_key, position). Still to fold into the SpendAir trace so the
+//! VERIFIER — not just the honest prover — is bound:
+//!   1. cm_in ↔ TREE: membership hides its leaf, so `cm_in == the membered leaf` is still a
+//!      build-time/tree check. Fold the Merkle path INTO the spend trace (leaf = cm_in witness).
+//!   2. OUTPUT ↔ COMMITMENT + PRIVATE RANGE: bind each hidden `out` to its `cm_out` and add the
+//!      `range` bit-decomposition columns per output (a standalone RangeAir has the amount PUBLIC).
+//!   3. position ↔ leaf index (needs membership to expose the position).
 //! Do not treat this as audited-final. What IS real: every proof comes from winterfell (no
-//! wrapper, no zero-fill), each verifies + rejects tampering, the nullifier set rejects replays,
-//! and out-of-range amounts are rejected.
+//! wrapper, no zero-fill), each verifies + rejects tampering, value/nullifier binding is
+//! verifier-checked, the nullifier set rejects replays, and out-of-range amounts are rejected.
 
-use winterfell::{
-    crypto::{hashers::Blake3_256, DefaultRandomCoin},
-    math::{fields::f64::BaseElement, FieldElement, ToElements},
-    matrix::ColMatrix,
-    Air, AirContext, Assertion, AuxRandElements, ConstraintCompositionCoefficients,
-    DefaultConstraintEvaluator, DefaultTraceLde, EvaluationFrame, ProofOptions, Prover,
-    StarkDomain, TraceInfo, TracePolyTable, TraceTable, TransitionConstraintDegree,
-};
+use winterfell::{math::fields::f64::BaseElement, Prover};
 
 use crate::membership::{
     build_membership_trace, verify_membership, CompressTree, MembershipProver,
     MembershipPublicInputs, MerklePath,
 };
-use crate::mimc::{compress2, mimc_options, ACCEPT_BITS};
-
-/// A conservation trace is padded to this many rows so FRI security matches `mimc_options`.
-const CONS_LEN: usize = 64;
+use crate::mimc::{compress2, mimc_options};
+use crate::spend::{build_spend_trace, verify_spend, SpendProver, SpendPublicInputs};
 
 // ── note model (all in the f64 field, so a note leaf feeds membership directly) ───────────
 
@@ -76,133 +64,9 @@ pub fn nullifier(spend_key: BaseElement, position: u64) -> BaseElement {
     compress2(spend_key, BaseElement::new(position))
 }
 
-// ── conservation AIR (f64): running balance reaches 0; out[0] is the public fee ───────────
-
-#[derive(Clone)]
-pub struct ConservationPublicInputs {
-    pub fee: BaseElement,
-}
-impl ToElements<BaseElement> for ConservationPublicInputs {
-    fn to_elements(&self) -> Vec<BaseElement> {
-        vec![self.fee]
-    }
-}
-
-pub struct ConservationAir {
-    context: AirContext<BaseElement>,
-    fee: BaseElement,
-}
-
-impl Air for ConservationAir {
-    type BaseField = BaseElement;
-    type PublicInputs = ConservationPublicInputs;
-    type GkrProof = ();
-    type GkrVerifier = ();
-
-    fn new(trace_info: TraceInfo, pub_inputs: ConservationPublicInputs, options: ProofOptions) -> Self {
-        assert_eq!(2, trace_info.width());
-        // balance_next − (balance_cur − out_cur) = 0 → linear, degree 1.
-        let degrees = vec![TransitionConstraintDegree::new(1)];
-        ConservationAir {
-            context: AirContext::new(trace_info, degrees, 2, options),
-            fee: pub_inputs.fee,
-        }
-    }
-
-    fn evaluate_transition<E: FieldElement + From<Self::BaseField>>(
-        &self,
-        frame: &EvaluationFrame<E>,
-        _periodic: &[E],
-        result: &mut [E],
-    ) {
-        let balance = frame.current()[0];
-        let out = frame.current()[1];
-        result[0] = frame.next()[0] - (balance - out);
-    }
-
-    fn get_assertions(&self) -> Vec<Assertion<Self::BaseField>> {
-        let last = self.trace_length() - 1;
-        vec![
-            Assertion::single(0, last, BaseElement::ZERO), // balance fully consumed
-            Assertion::single(1, 0, self.fee),             // first subtraction is the public fee
-        ]
-    }
-
-    fn context(&self) -> &AirContext<Self::BaseField> {
-        &self.context
-    }
-}
-
-pub struct ConservationProver {
-    options: ProofOptions,
-}
-impl ConservationProver {
-    pub fn new(options: ProofOptions) -> Self {
-        Self { options }
-    }
-}
-impl Prover for ConservationProver {
-    type BaseField = BaseElement;
-    type Air = ConservationAir;
-    type Trace = TraceTable<Self::BaseField>;
-    type HashFn = Blake3_256<Self::BaseField>;
-    type RandomCoin = DefaultRandomCoin<Self::HashFn>;
-    type TraceLde<E: FieldElement<BaseField = Self::BaseField>> = DefaultTraceLde<E, Self::HashFn>;
-    type ConstraintEvaluator<'a, E: FieldElement<BaseField = Self::BaseField>> =
-        DefaultConstraintEvaluator<'a, Self::Air, E>;
-
-    fn get_pub_inputs(&self, trace: &Self::Trace) -> ConservationPublicInputs {
-        ConservationPublicInputs { fee: trace.get(1, 0) }
-    }
-    fn options(&self) -> &ProofOptions {
-        &self.options
-    }
-    fn new_trace_lde<E: FieldElement<BaseField = Self::BaseField>>(
-        &self, ti: &TraceInfo, mt: &ColMatrix<Self::BaseField>, dom: &StarkDomain<Self::BaseField>,
-    ) -> (Self::TraceLde<E>, TracePolyTable<E>) {
-        DefaultTraceLde::new(ti, mt, dom)
-    }
-    fn new_evaluator<'a, E: FieldElement<BaseField = Self::BaseField>>(
-        &self, air: &'a Self::Air, aux: Option<AuxRandElements<E>>, cc: ConstraintCompositionCoefficients<E>,
-    ) -> Self::ConstraintEvaluator<'a, E> {
-        DefaultConstraintEvaluator::new(air, aux, cc)
-    }
-}
-
-/// Build the conservation trace: start at `total_in`, subtract `[fee, out_values…]` per step
-/// until the balance hits 0 (padding subtractions are 0). Panics-in-debug / invalid-in-release
-/// unless Σ subtractions == total_in (winterfell validates the trace), so a caller MUST pass a
-/// conserving schedule.
-pub fn build_conservation_trace(total_in: BaseElement, fee: BaseElement, out_values: &[BaseElement]) -> TraceTable<BaseElement> {
-    let mut subs = Vec::with_capacity(CONS_LEN);
-    subs.push(fee);
-    subs.extend_from_slice(out_values);
-    assert!(subs.len() <= CONS_LEN, "too many outputs for one transfer trace");
-    subs.resize(CONS_LEN, BaseElement::ZERO);
-
-    let mut trace = TraceTable::new(2, CONS_LEN);
-    trace.fill(
-        |state| {
-            state[0] = total_in;
-            state[1] = subs[0];
-        },
-        |step, state| {
-            state[0] = state[0] - subs[step];
-            state[1] = if step + 1 < CONS_LEN { subs[step + 1] } else { BaseElement::ZERO };
-        },
-    );
-    trace
-}
-
-type Coin = DefaultRandomCoin<Blake3_256<BaseElement>>;
-
-pub fn verify_conservation(
-    proof: winterfell::Proof,
-    pub_inputs: ConservationPublicInputs,
-) -> Result<(), winterfell::VerifierError> {
-    let min = winterfell::AcceptableOptions::MinConjecturedSecurity(ACCEPT_BITS);
-    winterfell::verify::<ConservationAir, Blake3_256<BaseElement>, Coin>(proof, pub_inputs, &min)
-}
+// Value conservation is now proven by the monolithic `spend::SpendAir` (conservation + value
+// binding + nullifier derivation in ONE proof), so the transfer no longer builds a separate
+// conservation AIR — the binding it gives is what a split of proofs could not.
 
 // ── the persistent nullifier set (double-spend guard; folds into wallet_state_root) ───────
 
@@ -244,8 +108,8 @@ impl ShieldNullifierSet {
 pub enum TransferError {
     #[error("non-conserving transfer: inputs {inp} != fee+outputs {out}")]
     NotConserving { inp: u64, out: u64 },
-    #[error("conservation proof rejected: {0}")]
-    Conservation(String),
+    #[error("spend proof rejected: {0}")]
+    Spend(String),
     #[error("membership proof rejected: {0}")]
     Membership(String),
     #[error("double-spend: {0}")]
@@ -257,18 +121,24 @@ pub enum TransferError {
 }
 
 /// A completed shielded transfer, ready to gossip + apply. Carries ONLY public data — the
-/// input note, its position, the siblings, and the amounts are all hidden inside the proofs.
+/// input note's value/blinding, its position, the siblings, and the output amounts are all
+/// hidden inside the proofs.
 pub struct ShieldedTransfer {
     /// Anonymity-set root the input note is proven to belong to (public).
     pub root: BaseElement,
-    /// Revealed nullifier of the spent note (checked against the set).
+    /// The spent note's commitment (public). The spend proof binds it to the conserved value;
+    /// membership binds it to `root`.
+    pub cm_in: BaseElement,
+    /// Revealed nullifier of the spent note (public spend input + checked against the set).
     pub nullifier: BaseElement,
-    /// The public transfer fee (bound into the conservation proof).
+    /// The public transfer fee (bound into the spend proof).
     pub fee: BaseElement,
     /// Commitments of the newly created notes, to be appended to the tree.
     pub output_commitments: Vec<BaseElement>,
-    /// REAL winterfell proof of value conservation (in == fee + Σ outputs).
-    pub conservation_proof: winterfell::Proof,
+    /// REAL monolithic `spend::SpendAir` proof: `cm_in` opens to `value`, that value == fee + Σ
+    /// outputs (conservation), and `nullifier == compress2(spend_key, position)` — value + nullifier
+    /// binding the verifier checks, all in one proof.
+    pub spend_proof: winterfell::Proof,
     /// REAL winterfell proof that the spent note is in the tree at `root`. `None` only in the
     /// debug harness where winterfell 0.9's degree-check blocks membership PROVING (see the
     /// membership module) — production/release always carries `Some`.
@@ -320,27 +190,35 @@ impl<'a> SpendWitness<'a> {
     }
 }
 
-/// Build a shielded transfer WITHOUT the membership STARK proof (the conservation proof +
+/// Build a shielded transfer WITHOUT the membership STARK proof (the monolithic spend proof +
 /// nullifier + outputs are all real). Used where winterfell's debug degree-check blocks
-/// membership proving; the membership statement is still enforced at verify time via the
-/// tree/construction (identical guarantee to the STARK — see the membership module's gate).
+/// membership proving; the `cm_in ∈ root` statement is enforced at verify time via the
+/// tree/construction (see the membership module's gate).
 pub fn prove_transfer(w: &SpendWitness) -> Result<ShieldedTransfer, TransferError> {
     w.amounts_in_range()?; // no field-wrap "negative" amounts (closes the conservation loophole)
     w.conserves()?;
     let _ = w.membership_path()?; // asserts the note really sits in the tree at `index`
 
     let out_values: Vec<BaseElement> = w.outputs.iter().map(|o| o.value).collect();
-    let trace = build_conservation_trace(w.note.value, w.fee, &out_values);
-    let conservation_proof = ConservationProver::new(mimc_options())
+    let trace = build_spend_trace(
+        w.note.value,
+        w.note.blinding,
+        w.spend_key,
+        BaseElement::new(w.index as u64), // position == leaf index
+        w.fee,
+        &out_values,
+    );
+    let spend_proof = SpendProver::new(mimc_options())
         .prove(trace)
-        .map_err(|e| TransferError::Conservation(format!("{e:?}")))?;
+        .map_err(|e| TransferError::Spend(format!("{e:?}")))?;
 
     Ok(ShieldedTransfer {
         root: w.tree.root(),
+        cm_in: w.note.commitment(),
         nullifier: nullifier(w.spend_key, w.index as u64),
         fee: w.fee,
         output_commitments: w.outputs.iter().map(|o| o.commitment()).collect(),
-        conservation_proof,
+        spend_proof,
         membership_proof: None,
     })
 }
@@ -369,9 +247,13 @@ pub fn verify_and_apply(
     set: &mut ShieldNullifierSet,
     tree_membership_ok: bool,
 ) -> Result<Vec<BaseElement>, TransferError> {
-    // 1. value conservation (real winterfell verify)
-    verify_conservation(t.conservation_proof.clone(), ConservationPublicInputs { fee: t.fee })
-        .map_err(|e| TransferError::Conservation(format!("{e:?}")))?;
+    // 1. monolithic spend proof: cm_in opens to a value that conserves (== fee + Σ outputs), and
+    //    the nullifier is that value's key correctly hashed — value + nullifier binding, verified
+    verify_spend(
+        t.spend_proof.clone(),
+        SpendPublicInputs { cm_in: t.cm_in, nf: t.nullifier, fee: t.fee },
+    )
+    .map_err(|e| TransferError::Spend(format!("{e:?}")))?;
 
     // 2. membership: prefer the real zk proof; fall back to the construction guarantee in debug
     match &t.membership_proof {
@@ -454,21 +336,22 @@ mod tests {
             Err(TransferError::DoubleSpend(_))
         ), "SECURITY: replaying a spend must be rejected");
 
-        // (3) WRONG fee rejected by the conservation proof
+        // (3) WRONG fee rejected by the spend proof (fee is a public input to SpendAir)
         let mut wrong_fee = ShieldedTransfer {
             root: transfer.root,
-            nullifier: e(999), // fresh nullifier so we reach the conservation check
-            fee: e(6),         // proof was for fee 5
+            cm_in: transfer.cm_in,
+            nullifier: transfer.nullifier, // correct cm_in/nf so ONLY the fee is wrong
+            fee: e(6),                     // proof was for fee 5
             output_commitments: transfer.output_commitments.clone(),
-            conservation_proof: transfer.conservation_proof.clone(),
+            spend_proof: transfer.spend_proof.clone(),
             membership_proof: None,
         };
         let mut set2 = ShieldNullifierSet::new();
         assert!(matches!(
             verify_and_apply(&wrong_fee, &mut set2, true),
-            Err(TransferError::Conservation(_))
+            Err(TransferError::Spend(_))
         ), "SECURITY: a transfer must not verify against a fee it did not commit");
-        wrong_fee.fee = e(5); // sanity: with the right fee it would pass conservation
+        wrong_fee.fee = e(5); // sanity: with the right fee it verifies + applies
         assert!(verify_and_apply(&wrong_fee, &mut set2, true).is_ok());
 
         // (4) a note NOT in the tree is rejected at build time (membership)
@@ -480,21 +363,21 @@ mod tests {
         assert!(matches!(prove_transfer(&bad), Err(TransferError::NotAMember)),
             "SECURITY: a note absent from the tree must not spend");
 
-        // (5) a TAMPERED conservation proof is rejected
-        let mut bytes = transfer.conservation_proof.to_bytes();
+        // (5) a TAMPERED spend proof is rejected
+        let mut bytes = transfer.spend_proof.to_bytes();
         let mid = bytes.len() / 2; bytes[mid] ^= 0xFF;
         let tampered = ShieldedTransfer {
-            root: transfer.root, nullifier: e(1234), fee: e(5),
+            root: transfer.root, cm_in: transfer.cm_in, nullifier: transfer.nullifier, fee: e(5),
             output_commitments: transfer.output_commitments.clone(),
-            conservation_proof: winterfell::Proof::from_bytes(&bytes)
-                .unwrap_or_else(|_| transfer.conservation_proof.clone()),
+            spend_proof: winterfell::Proof::from_bytes(&bytes)
+                .unwrap_or_else(|_| transfer.spend_proof.clone()),
             membership_proof: None,
         };
         let mut set3 = ShieldNullifierSet::new();
         // either from_bytes already corrupted it (verify fails) or the flipped bytes fail verify
         let rejected = verify_and_apply(&tampered, &mut set3, true).is_err()
-            || bytes == transfer.conservation_proof.to_bytes();
-        assert!(rejected, "SECURITY: a tampered conservation proof must not verify");
+            || bytes == transfer.spend_proof.to_bytes();
+        assert!(rejected, "SECURITY: a tampered spend proof must not verify");
 
         // (6) a NON-conserving transfer cannot be built (inputs 130 != 5+80+40)
         let short = SpendWitness {

@@ -103,6 +103,10 @@ git tag -a "v${VER}" -m "sigil-top v${VER}" 2>/dev/null || echo "  (tag v${VER} 
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 git push origin "$BRANCH" "v${VER}"
 
+# refresh the code-provenance page the explorer's flux-rev tab iframes (post-tag so
+# the new release row appears; non-fatal — the page just lags one release on failure)
+bash scripts/gen-flux-versions.sh || echo "  (flux-versions refresh failed — non-fatal)"
+
 echo ""
 echo "✅ RELEASED sigil-top v${VER} — channel live, signed, tagged. Nodes pull it on next update check."
 echo "   linux   $LB3"

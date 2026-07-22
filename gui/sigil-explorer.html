@@ -235,7 +235,7 @@ async function load(){
     let r=await fetch('/api/v1/status',{cache:'no-store'}); let d=await r.json();
     // DAG feed height is authoritative for the headline (the live tip); status height
     // is a sub-counter. Fall back to status only if the feed is unavailable.
-    var height=(dag&&dag.height)||(d.height!=null?d.height:(d.data&&d.data.height))||0;
+    var height=(d.height!=null?d.height:(d.data&&d.data.height))||(dag&&dag.height)||0;
     var peers=(d.peers!=null?d.peers:(d.data&&d.data.peer_count))||0;
     var net=(dag&&dag.network)||d.network||(d.data&&d.data.network_id)||'sigil-g0';
     var status=d.status||(d.data&&d.data.status)||'producing';
@@ -262,11 +262,11 @@ async function load(){
   // rpcd mining-chain /api/v1/recent only if the feed is unavailable.
   try{
     var blocks=[];
-    if(dag&&dag.results&&dag.results.length){
-      blocks=dag.results.map(function(e){return{h:e.h,hash:e.hash,prod:e.prod,cid:e.cid,parents:e.parents,wallet_root:e.wallet_root,dex_root:e.dex_root,event_root:e.event_root,contract_root:e.contract_root,dag:true}});
-    } else {
-      let r=await fetch('/api/v1/recent?kind=block&limit=40',{cache:'no-store'}); let j=await r.json();
+    try{ let r=await fetch('/api/v1/recent?kind=mine&limit=40',{cache:'no-store'}); let j=await r.json();
       blocks=(j.results||[]).map(function(e){return{h:e.h,hash:e.hash,prod:e.prod,cid:e.cid,ts:e.ts,content:e.content,title:e.title}});
+    }catch(e){}
+    if(!blocks.length&&dag&&dag.results&&dag.results.length){
+      blocks=dag.results.map(function(e){return{h:e.h,hash:e.hash,prod:e.prod,cid:e.cid,parents:e.parents,wallet_root:e.wallet_root,dex_root:e.dex_root,event_root:e.event_root,contract_root:e.contract_root,dag:true}});
     }
     // Always include the GENESIS block (height 0) so it's findable + clickable even
     // though it's outside the recent-feed window. Fetched once from /sigil-tip.json.
@@ -430,7 +430,7 @@ function showTab(t){
   var bb=document.getElementById('tabbtn-blocks'), fb=document.getElementById('tabbtn-fluxrev');
   if(b) b.style.display = on?'none':'';
   if(f) f.style.display = on?'':'none';
-  if(on){ var fr=document.getElementById('fluxrevFrame'); if(fr && !fr.getAttribute('src')) fr.setAttribute('src', fr.getAttribute('data-src')); }
+  if(on){ var fr=document.getElementById('fluxrevFrame'); if(fr && !fr.getAttribute('src')) fr.setAttribute('src', fr.getAttribute('data-src')+'?v='+Date.now()); }
   function paint(el,active){ if(!el)return; el.style.borderColor=active?'var(--cyan)':'var(--line)'; el.style.background=active?'rgba(33,212,253,.12)':'transparent'; el.style.color=active?'var(--cyan)':'var(--dim)'; }
   paint(bb,!on); paint(fb,on);
 }

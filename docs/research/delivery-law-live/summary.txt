@@ -1,0 +1,16 @@
+RESULT r=1 trials=600 attempts=600 p_hat=0.00000 d_hat=1.00000 d_law=1.00000 residual_pp=+0.000
+RESULT r=2 trials=600 attempts=1200 p_hat=0.00000 d_hat=1.00000 d_law=1.00000 residual_pp=+0.000
+RESULT r=3 trials=600 attempts=1800 p_hat=0.00000 d_hat=1.00000 d_law=1.00000 residual_pp=+0.000
+RESULT r=1 trials=600 attempts=600 p_hat=0.00000 d_hat=1.00000 d_law=1.00000 residual_pp=+0.000
+RESULT r=2 trials=600 attempts=1200 p_hat=0.00000 d_hat=1.00000 d_law=1.00000 residual_pp=+0.000
+RESULT r=3 trials=600 attempts=1800 p_hat=0.00000 d_hat=1.00000 d_law=1.00000 residual_pp=+0.000
+RESULT r=1 trials=600 attempts=600 p_hat=0.05500 d_hat=0.94500 d_law=0.94500 residual_pp=+0.000
+RESULT r=2 trials=600 attempts=1200 p_hat=0.03667 d_hat=1.00000 d_law=0.99866 residual_pp=+0.134
+RESULT r=3 trials=600 attempts=1800 p_hat=0.05389 d_hat=1.00000 d_law=0.99984 residual_pp=+0.016
+RESULT r=1 trials=600 attempts=600 p_hat=0.87333 d_hat=0.12667 d_law=0.12667 residual_pp=-0.000
+RESULT r=2 trials=600 attempts=1200 p_hat=0.93583 d_hat=0.11667 d_law=0.12422 residual_pp=-0.755
+RESULT r=3 trials=600 attempts=1800 p_hat=0.94222 d_hat=0.13333 d_law=0.16351 residual_pp=-3.018
+RESULT r=1 trials=600 attempts=600 p_hat=0.51167 d_hat=0.48833 d_law=0.48833 residual_pp=+0.000
+RESULT r=2 trials=600 attempts=1200 p_hat=0.62000 d_hat=0.62833 d_law=0.61560 residual_pp=+1.273
+RESULT r=3 trials=600 attempts=1800 p_hat=0.58778 d_hat=0.81167 d_law=0.79693 residual_pp=+1.473
+SWEEP COMPLETE

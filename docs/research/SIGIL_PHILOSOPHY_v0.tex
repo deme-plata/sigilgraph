@@ -1,4 +1,4 @@
-% What the Chain Knows — The Philosophy of the SIGIL Graph, v0.2
+% What the Chain Knows — The Philosophy of the SIGIL Graph, v0.3
 % Companion paper to SIGIL whitepaper v1.1 ("SIGIL — The Variational Chain")
 % and the master-equation note v0.2. Same house design system (epistemic-status
 % pills, layman boxes, braid watermark). PHILOSOPHY, not a second whitepaper:
@@ -83,11 +83,11 @@
 \fancyhfoffset{0pt}
 \renewcommand{\headrulewidth}{0.4pt}
 \renewcommand{\headrule}{{\color{slate}\hrule width\headwidth height 0.4pt}}
-\fancyhead[L]{\scriptsize\textcolor{gray}{What the Chain Knows --- the philosophy of the SIGIL graph \,$\cdot$\, v0.2}}
+\fancyhead[L]{\scriptsize\textcolor{gray}{What the Chain Knows --- the philosophy of the SIGIL graph \,$\cdot$\, v0.3}}
 \fancyhead[R]{\scriptsize\textcolor{gray}{\thepage}}
 
 \hypersetup{
-  pdftitle={What the Chain Knows — The Philosophy of the SIGIL Graph (v0.2)},
+  pdftitle={What the Chain Knows — The Philosophy of the SIGIL Graph (v0.3)},
   pdfauthor={bitknight.dipper688@passmail.net},
   pdfsubject={Philosophy companion to SIGIL whitepaper v1.1 — the SIGIL graph read as an epistemic instrument: typed evidence, structural agreement, the self-halting node, and the licensing of models},
   pdfkeywords={SIGIL, philosophy, epistemology, evidence, verification, provenance, honest money, variational principle}
@@ -116,7 +116,7 @@
 {\Huge\bfseries\textcolor{ink}{What the Chain Knows}}\\[8pt]
 {\Large The Philosophy of the SIGIL Graph}\\[6pt]
 {\normalsize A companion to \emph{SIGIL — The Variational Chain}, whitepaper v1.1}\\[10pt]
-{\normalsize v0.2 · 2026-07-22}\\[6pt]
+{\normalsize v0.3 · 2026-07-22}\\[6pt]
 {\normalsize\texttt{bitknight.dipper688@passmail.net}}\\[2pt]
 {\small SIGIL / Flux Foundation · \texttt{sigilgraph.quillon.xyz}}\\[14pt]
 \begin{minipage}{0.72\textwidth}
@@ -201,7 +201,16 @@ value replaces an authority'' narrowed — a fixed seed buys reproducibility, no
 independent reproduction and not model--reality correspondence; (x) an
 operational qualification added to exit 78 (fail-stop is itself an attack
 surface); (xi) v0.1 called its review ``external,'' which typed the evidence
-wrong — corrected above.
+wrong — corrected above. \emph{v0.2 $\to$ v0.3 (same day) — not a correction but a
+promotion, typed as such:} (xii) the promotion experiment \S\ref{sec:typed} said
+had not been run \textbf{was then run} — a controlled real-lossy-network
+measurement of the shipped redundancy primitive (kernel netem, real TCP, 9{,}000
+trials); the delivery law is now graded \textsc{measured} within that experiment's
+stated scope, and whitepaper v1.3 carries the promotion with its record
+(\texttt{docs/research/delivery-law-live/}). The prose of \S\ref{sec:typed},
+\S\ref{sec:falsification}, and \S\ref{sec:conjecture} is updated to say so; the
+v0.2 sentences it supersedes are preserved in this log's item (i) and the git
+history.
 \end{tcolorbox}
 
 \section{The Ledger You Are Shown: Money as an Epistemic Problem}\label{sec:ledger}
@@ -281,10 +290,16 @@ the corpus's proudest exhibit. The delivery law $D=1-p^r$ is \emph{derived} unde
 an independence assumption and then validated in a simulator that \emph{implements
 that same assumption}; its honest coordinates are evidence
 \emph{derived~$+$~simulation-validated}, deployment \emph{live} (the $r{=}3$
-provisioning default ships). Promotion to \textsc{measured} would require live
-network delivery data, or an independently controlled experiment on a real lossy
-network — neither has been run. The regrade does not diminish the law; it types it
-correctly, which is the whole discipline. This paper adopts the two-axis
+provisioning default ships). Promotion to \textsc{measured} required live network
+delivery data, or an independently controlled experiment on a real lossy network —
+and the regrade had teeth: the experiment was run the same day this paper demanded
+it (kernel-induced loss on real transport, the shipped primitive, 9{,}000 trials;
+composition confirmed within-run to 1.5\,pp everywhere the transport functioned,
+with the collapse-regime deviation honestly recorded). The law now holds the
+coordinate \emph{measured}, within that experiment's stated scope — and the arc
+regrade~$\to$~demand~$\to$~experiment~$\to$~promotion is the taxonomy working as
+designed. The regrade did not diminish the law; it typed it correctly, and the
+correct type named its own missing experiment. This paper adopts the two-axis
 refinement wherever it grades a claim, and — per the practice
 \S\ref{sec:falsification} describes — logs the correction instead of absorbing it
 silently.
@@ -546,8 +561,10 @@ has earned: this is Popper as infrastructure rather than citation — conjecture
 published alongside the refutation they would accept, the demarcation criterion
 running as a table column. And the deflation must be performed immediately,
 before a hostile reader performs it less kindly: the confirmed empirical base is
-currently \emph{one} elementary law, whose validating simulator implements the very
-independence assumption the law derives from — near-tautological as physics — plus
+one elementary law — whose simulation campaign implemented the very independence
+assumption the law derives from, and which therefore had to earn its grade a second
+time on a real network stack, which as of v0.3 it has (kernel-loss experiment,
+within-run RMS 1.5\,pp; scope stated in the measurement record) — plus
 one structural prediction borne out in kind (the wall moved). Four of seven
 predictions still read ``none yet'' in their evidence column. What the arc validates so far is not a physics of
 chains; it is the \emph{discipline} — hypothesis, seeded campaign, closed form,
@@ -624,7 +641,8 @@ shipped $r{=}3$ provisioning default with a stated robustness margin. One
 structural prediction was borne out in kind: the verification wall tracked the
 crypto term, not hardware. The rest of the physics is pencil, and the geometric
 heart of the picture sits explicitly on the pretend list. The conviction's entire
-current empirical standing is one derived and simulation-validated law, one borne-out structural
+current empirical standing is one law measured on a real network within a stated
+scope, one borne-out structural
 prediction, and a grammar that has actually vetoed designs. That is not much
 physics. It is, however, exactly what it claims to be — which is the point of the
 whole exercise.
@@ -860,13 +878,15 @@ Everything else is commentary, in pencil.
 \begin{itemize}[leftmargin=1.2em,itemsep=1pt]
 \item \emph{SIGIL — The Variational Chain}, whitepaper v1.1 (2026-07-18) — the
 instrument this paper reads; v1.2 (2026-07-22) adopts this paper's two-axis
-regrade of the delivery law;
+regrade of the delivery law, and v1.3 (same day) carries its promotion to
+\textsc{measured};
 \url{https://quillon.xyz/downloads/SIGIL_WHITEPAPER_v1.pdf}
 \item \emph{The Master Equation of SIGIL — a Conjectural Effective Action}, v0.2
 (2026-07-18) — the licensing grammar's home; correction log v0.1$\to$v0.2;
 \url{https://quillon.xyz/downloads/SIGIL_MASTER_EQUATION_v0.2.pdf}
 \item \emph{A Closed-Form Delivery Law for Gossip Redundancy in the sigil-top
-Light Node} (2026-06-16) — the completed derived-and-simulation-validated arc;
+Light Node} (2026-06-16) — the measured-law arc (promoted to \textsc{measured} by
+the 2026-07-22 real-network experiment, \texttt{docs/research/delivery-law-live/});
 \url{https://quillon.xyz/downloads/sigil-top-delivery-law.pdf}
 \item \emph{SIGIL Whitepaper v0} (2026-05-29) — the engineering baseline; the
 three cultural commitments;
@@ -887,8 +907,9 @@ constitutive employment of ideas
 \end{itemize}
 
 \vspace{0.8em}
-\noindent\textit{v0.2 — 2026-07-22. Claimed state is committed. Agreement is
-recomputed. Trust is itemized. Models are pencil; measurements are ink. The
+\noindent\textit{v0.3 — 2026-07-22. Claimed state is committed. Agreement is
+recomputed. Trust is itemized. Models are pencil; measurements are ink — and one
+pencil line was inked today, by the experiment its own regrade demanded. The
 equation is conjecture; its discipline, and one of its predictions, are not.}
 
 \end{document}

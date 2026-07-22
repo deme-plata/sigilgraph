@@ -6,6 +6,14 @@
 % All precision-pass language (correspondences-not-derivations, corrected PID
 % discriminant, one-way invariants, wall-as-feasibility, validity-vs-
 % canonicality) preserved verbatim in substance.
+% v1.3 (2026-07-22, same day): the delivery law EARNED the promotion — the
+% controlled real-lossy-network experiment v1.2 demanded was run (netns/netem,
+% real flux-p2p/TCP, 9,000 trials / 18,000 attempts, 5 conditions incl. the
+% pre-registered Gilbert-Elliott burst condition). Composition confirmed
+% within-run RMS 1.50pp over the six informative cells; breakdown only at
+% transport collapse (p^~0.94, -3pp, predicted direction). Grade: MEASURED
+% (controlled real-network experiment; WAN live-mesh extension open). Record:
+% docs/research/delivery-law-live/MEASUREMENT.md.
 % v1.2 (2026-07-22): two-axis regrade adopted from the philosophy companion
 % ("What the Chain Knows" v0.2). The gossip delivery law is regraded from
 % MEASURED to DERIVED+SIM (new \stD marker): it is derived under an
@@ -98,11 +106,11 @@
 \fancyhfoffset{0pt}
 \renewcommand{\headrulewidth}{0.4pt}
 \renewcommand{\headrule}{{\color{slate}\hrule width\headwidth height 0.4pt}}
-\fancyhead[L]{\scriptsize\textcolor{gray}{SIGIL --- The Variational Chain \,$\cdot$\, whitepaper v1.2}}
+\fancyhead[L]{\scriptsize\textcolor{gray}{SIGIL --- The Variational Chain \,$\cdot$\, whitepaper v1.3}}
 \fancyhead[R]{\scriptsize\textcolor{gray}{\thepage}}
 
 \hypersetup{
-  pdftitle={SIGIL — The Variational Chain (Whitepaper v1.2)},
+  pdftitle={SIGIL — The Variational Chain (Whitepaper v1.3)},
   pdfauthor={bitknight.dipper688@passmail.net},
   pdfsubject={An experimental provenance-signed BlockDAG organized by a conjectural effective action; sigilgraph repo, branch feat/commons-tithe-routing-0.36.1, source d7906ff based on 16f05a8; benchmark record June--July 2026},
   pdfkeywords={SIGIL, BlockDAG, DagKnight, post-quantum, STARK, SQIsign, ML-KEM, fold, gossip delivery law}
@@ -132,7 +140,7 @@
 \end{tikzpicture}\\[10pt]
 {\Huge\bfseries\textcolor{ink}{SIGIL — The Variational Chain}}\\[8pt]
 {\Large An Experimental Provenance-Signed BlockDAG\\Organized by a Conjectural Effective Action}\\[10pt]
-{\normalsize Whitepaper v1.2 · 2026-07-22}\\[6pt]
+{\normalsize Whitepaper v1.3 · 2026-07-22}\\[6pt]
 {\normalsize\texttt{bitknight.dipper688@passmail.net}}\\[2pt]
 {\small SIGIL / Flux Foundation · \texttt{sigilgraph.quillon.xyz}}\\[2pt]
 {\small source \texttt{d7906ff} · based on \texttt{16f05a8} · branch \texttt{feat/commons-tithe-routing-0.36.1}}\\[6pt]
@@ -159,10 +167,10 @@ attestation, fork topology, the post-quantum floor — corresponding to one fiel
 correspondence is design discipline and research programme, not accomplished
 mathematics: Lagrangians are unspecified and the discrete-DAG-to-manifold construction
 is open (\S\ref{sec:action}). What earns the analogy its keep is evidence, graded: a
-closed-form gossip delivery law $D(p,r)=1-p^{r}$ (derived; RMS residual 0.4\,pp over
-22 seeded simulations — not yet live-measured), a constant-size whole-chain proof,
-byte-identical multi-producer braid convergence in simulation, and 3\,$\mu$s live
-incremental tip verification. A live experimental
+closed-form gossip delivery law $D(p,r)=1-p^{r}$ (derived; RMS 0.4\,pp over 22 seeded
+simulations; measured on a real lossy network at within-run RMS 1.50\,pp, v1.3), a
+constant-size whole-chain proof, byte-identical multi-producer braid convergence in
+simulation, and 3\,$\mu$s live incremental tip verification. A live experimental
 network runs at height $\sim$29M under accelerated laboratory economics. This paper
 presents the action, its correspondences, the measured laws, the architecture, and an
 unusually honest account of what remains conjecture.
@@ -213,7 +221,17 @@ assumption} (22 seeded runs, RMS 0.4\,pp), while its $r{=}3$ provisioning defaul
 \textsc{measured} requires live-network delivery data or an independently controlled
 experiment on a real lossy network, neither of which has been run. \S\ref{sec:delivery},
 the evidence ladder, and the predictions scoreboard now carry the corrected grade. No
-other claim changed.
+other claim changed. \emph{v1.2 $\to$ v1.3 (same day):} the demanded experiment was
+\textbf{run}. An independently controlled experiment on a real lossy network — the
+shipped flux-p2p request/response primitive over real TCP, 8 peers in network
+namespaces, kernel netem loss in both directions, 9{,}000 trials / 18{,}000 request
+attempts across five conditions including the pre-registered Gilbert--Elliott burst
+condition — measured $\hat p$ per run and tested the composition $D=1-\hat p^{\,r}$ at
+$r{=}2,3$. Within-run RMS residual \textbf{1.50\,pp} over the six informative cells;
+the only breakdown is at transport collapse ($\hat p\approx0.94$, $-3$\,pp, the
+predicted correlated-failure direction). The law is regraded \textsc{measured}
+(controlled real-network experiment; WAN live-mesh extension remains open). Full
+record and raw data: \texttt{docs/research/delivery-law-live/MEASUREMENT.md}.
 \end{tcolorbox}
 
 \section{Introduction: why reinvent money, and why a chain needs an action}
@@ -576,7 +594,7 @@ Figure~\ref{fig:foldflow}.}
 \label{fig:plate3}
 \end{figure}
 
-\subsection{The gossip delivery law \hfill \stD}\label{sec:delivery}
+\subsection{The gossip delivery law \hfill \stM}\label{sec:delivery}
 
 For a block gossiped with redundancy $r$ under independent per-transmission loss
 probability $p$, the probability a node receives it at least once is
@@ -588,24 +606,37 @@ r^{*} = \left\lceil \frac{\ln(1-\mathrm{SLA})}{\ln p} \right\rceil
 \end{equation}
 
 Derived under an independent-loss assumption and validated against 22 seeded
-flux-chronos star-flood simulations; RMS residual
-\textcolor{sigilblue}{\textbf{0.4 percentage points}}. Graded precisely (v1.2): the
-validating simulator \emph{implements the same independence assumption the law
-derives from}, so the campaign confirms the derivation, not the physics of a real
-network — evidence \textsc{derived+sim}, deployment \emph{live} (the shipped default
-$r=3$ satisfies a 99.9\% SLA up to $p=0.1$). Promotion to \textsc{measured} requires
-live-network delivery data or an independently controlled lossy-network experiment.
-What the arc demonstrates in full is the discipline: model, simulation campaign,
-closed form, residual, and a provisioning rule operators actually use. (Standalone paper published at
+flux-chronos star-flood simulations (RMS residual 0.4\,pp) — and, as of v1.3,
+\textbf{measured on a real lossy network}. The v1.2 regrade demanded an
+independently controlled experiment; it was run 2026-07-22: the shipped
+request/response primitive over real TCP against 8 real peers, kernel netem loss in
+both directions, 9{,}000 trials / 18{,}000 attempts, with $\hat p$ \emph{measured}
+per run (never assumed) and the composition tested at $r{=}2,3$. Within-run RMS
+residual \measured{1.50 percentage points} over the six informative cells. Two
+findings sharpen the law's meaning: (i) the law's $p$ lives at the \emph{request}
+level, not the packet level — TCP absorbs $\le$10\% packet loss entirely
+($\hat p = 0$ over 3{,}600 attempts), so operators must provision $r^{*}$ from
+measured request-failure rates; (ii) per-link Gilbert--Elliott burst loss does
+\emph{not} break cross-peer composition ($+1.3/{+}1.5$\,pp), while transport
+collapse ($\hat p\approx0.94$) pushes delivery below independence ($-3$\,pp) —
+both in the directions the limitations section anticipated. Evidence
+\textsc{measured} (controlled real-network experiment; WAN live-mesh extension
+open), deployment \emph{live} ($r=3$ default). Record:
+\texttt{docs/research/delivery-law-live/}. The arc now demonstrates the full
+discipline: model, simulation campaign, closed form, residual, provisioning rule,
+regrade under review, and the promotion experiment the regrade demanded. (Standalone paper published at
 \url{https://quillon.xyz/downloads/sigil-top-delivery-law.pdf}.)
 
-\layman{sigilblue}{the delivery law}{If a letter gets lost one time in ten, send three
+\layman{sigilcyan}{the delivery law}{If a letter gets lost one time in ten, send three
 copies — the chance all three vanish is one in a thousand. That's the entire law:
-$1-p^r$. We didn't guess it; we ran 22 controlled, \emph{simulated} storms of lost
-messages and the formula matched the simulation to within half a percentage point.
-Honest fine print: the storm machine assumes losses are independent — the same
-assumption the formula is built on — so the real-network test is still ahead. The
-network already \emph{calculates} how many copies to send instead of hoping.}
+$1-p^r$. We didn't guess it: 22 simulated storms matched it to half a percentage
+point, and then — because the simulation shared the formula's own assumption — we
+rebuilt the storm for real: real network stack, the kernel itself dropping packets,
+nine thousand deliveries counted. The formula held to within 1.5 percentage points
+everywhere the network still functioned, and we learned two honest things the
+simulation couldn't teach: losses that matter are lost \emph{requests}, not lost
+packets, and when the network truly collapses, three copies stop saving you. The
+network \emph{calculates} how many copies to send — from measured numbers.}
 
 \subsection{The fold: succinct whole-chain verification \hfill \stM}\label{sec:fold}
 
@@ -732,13 +763,14 @@ backfill codec, 70.7\,B/header live) and 26.3$\times$ (gossip frames).
 \node[band,fill=sigilcyan!8]   (m) at (0,3.15) {};
 \node[tag,text=sigilcyan]  at (-6.6,3.38) {measured};
 \node[font=\scriptsize,anchor=west] at (-6.6,2.98)
-  {fold 2{,}568\,B / 342\,ms / 3\,$\mu$s · ML-KEM 115\,ms ·
-   zstd 14--26$\times$ · mining loop live · RPC auth (wallet-sig) · sync 10.8k blk/s};
+  {delivery law $1{-}\hat p^r$ (netem experiment, RMS 1.50\,pp) · fold 2{,}568\,B /
+   342\,ms / 3\,$\mu$s · ML-KEM 115\,ms ·
+   zstd 14--26$\times$ · mining loop live · RPC auth · sync 10.8k blk/s};
 \node[band,fill=sigilblue!7]   (s) at (0,2.10) {};
 \node[tag,text=sigilblue]  at (-6.6,2.33) {simulation-gated};
 \node[font=\scriptsize,anchor=west] at (-6.6,1.93)
-  {delivery law $1{-}p^r$ (derived; 22 seeded chronos runs, RMS 0.4\,pp; $r{=}3$
-   default live) · braid divergence $=0$ (S1--S6, 16/16 orderings, tamper 5/5)};
+  {delivery-law simulation campaign (22 seeded chronos runs, RMS 0.4\,pp) ·
+   braid divergence $=0$ (S1--S6, 16/16 orderings, tamper 5/5)};
 \node[band,fill=sigilviolet!7] (g) at (0,1.05) {};
 \node[tag,text=sigilviolet] at (-6.6,1.28) {staged};
 \node[font=\scriptsize,anchor=west] at (-6.6,0.88)
@@ -985,18 +1017,21 @@ reduction \\
 \stO & none yet & compare settlement rate to reputation-graph entropy \\
 6. Validator-departure entropy law (Hawking analogue) & \stO & none yet & tip-proof
 rate vs.\ validator-set entropy \\
-7. Gossip delivery follows $1-p^r$ \emph{(new since v0)} & \stD & 22 simulations, RMS
-0.4\,pp; shipped as the $r{=}3$ default & measure delivery on the live network;
-re-fit under correlated (non-independent) loss \\
+7. Gossip delivery follows $1-p^r$ \emph{(new since v0)} & \stM & 22 simulations
+(RMS 0.4\,pp) $+$ real-network netem experiment: 9{,}000 trials, within-run RMS
+1.50\,pp, burst-loss condition run & extend to the WAN-scale live mesh; model the
+collapse regime ($\hat p{>}0.9$, $-3$\,pp) \\
 \bottomrule
 \end{tabularx}
 \end{center}
 
 Prediction 7 deserves emphasis: it is the first SIGIL law that went the full arc —
 hypothesis, seeded simulation campaign, closed form, residual, operator-facing rule,
-published paper. That arc is the template the remaining predictions are held to. Its
-own remaining step — from \textsc{derived+sim} to \textsc{measured} — is live-network
-delivery data, and it is listed in its falsification column like everything else.
+published paper — and, as of v1.3, the arc's final step: regraded under review to
+\textsc{derived+sim}, then promoted to \textsc{measured} by the exact experiment the
+regrade demanded, run the same day. The promotion produced new knowledge the
+simulation could not — where $p$ actually lives (requests, not packets), and where
+the law breaks (transport collapse) — which is the argument for the discipline.
 
 \section{Honest status}\label{sec:honesty}
 
@@ -1023,10 +1058,11 @@ tripwires (they fingerprint, not classify), and the header topology commitment i
 staged, not shipped. AdS/CFT on a discrete graph is an analogy pending rigorous
 discretization. The PID/Klein–Gordon mapping is schematic (controller states are not
 local in $\varphi$) and exact only for quadratic potentials. The delivery law — the
-programme's best result — is derived and simulation-validated, not live-measured: the
-validating simulator implements the same independence assumption the law derives
-from, so its 22-run campaign confirms the derivation, not a property of the real
-network (v1.2 regrade; revision note after the legend). The layered-hardness
+programme's best result — is now measured on a real lossy network (v1.3; netem
+experiment, within-run RMS 1.50\,pp), with the honest scope attached: a controlled
+single-host namespace lab with minimal real-protocol responders, not the WAN-scale
+live mesh, and the law is known to under-predict failure clustering at transport
+collapse ($-3$\,pp at $\hat p\approx0.94$). The layered-hardness
 security design states intent per property; a joint security model with a formal
 composition bound is open, as is the fold's concrete soundness reduction.
 
@@ -1086,10 +1122,11 @@ supersedes; \url{https://quillon.xyz/downloads/SIGIL_WHITEPAPER_v0.pdf}
 \item \emph{The Master Equation of SIGIL — a Conjectural Effective Action} v0.2
 (2026-07-18) — standalone companion note (claim provenance: Appendix~\ref{app:meq});
 \url{https://quillon.xyz/downloads/SIGIL_MASTER_EQUATION_v0.2.pdf}
-\item \emph{What the Chain Knows — The Philosophy of the SIGIL Graph} v0.2
+\item \emph{What the Chain Knows — The Philosophy of the SIGIL Graph} v0.3
 (2026-07-22) — philosophy companion: this chain read as an epistemic instrument;
 refines the epistemic-status markers into two axes (evidence grade $\times$
-deployment grade) and regrades the delivery law accordingly;
+deployment grade), regraded the delivery law, and demanded the promotion
+experiment v1.3 records;
 \url{https://quillon.xyz/downloads/SIGIL_PHILOSOPHY_v0.pdf}
 \item \emph{SIGIL $\times$ QTFT} (2026-05-30) — \texttt{SIGIL\_QTFT\_TOPOLOGY\_v0.md};
 the tractable-invariant topology programme

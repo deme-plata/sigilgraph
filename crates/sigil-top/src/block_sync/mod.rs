@@ -26,6 +26,7 @@ mod skeleton_store; // flat append-only skeleton prefix store (the 10M-blk/s pat
 mod skel_flux; // ADOPT the native flux-db skeleton extension (flux_db::skeleton)
 mod archive; // PASS 2: background full-archive body backfill (trustless vs skeleton hashes)
 mod fast_forward; // V7-INGEST: PASS-2 body sink routed through LANE-1 SST-ingest (commit→DB fast-forward)
+pub mod ledger; // ONE-CHAIN P2: persistent verified sync of the LEDGER header chain (rocky)
 #[allow(unused_imports)]
 pub(crate) use skeleton_store::SkeletonStore;
 use fetch::*;
@@ -354,6 +355,9 @@ impl P2PBlockSync {
     }
 
     fn launch_src(source: StoreSource, recent_only: bool) -> Self {
+        // ONE-CHAIN P2: mirror the LEDGER header chain alongside whatever this
+        // engine syncs — additive background thread, own store, never blocks.
+        ledger::ensure_running();
         // SIGIL_SNAP=1 forces fast-snap even in full-sync (validation / "just track the tip").
         let recent_only_init = recent_only || std::env::var("SIGIL_SNAP").is_ok();
         // 0.77 GENESIS ARCHIVE: the mode is LIVE-FLIPPABLE ([F] reaches a running engine

@@ -20,6 +20,7 @@ sigil-oauth = { path = "../sigil-oauth" }
 # (award verify → points → settle → graduate) to the state chokepoint.
 sigil-university = { path = "../sigil-university" }
 sigil-emission = { path = "../sigil-emission" } # halving block-reward schedule (→21M)
+sigil-header = { path = "../sigil-header" } # ONE-CHAIN P1: real SigilBlockHeaderV0 per ledger block
 # WS2 proof-carrying /balance verifier: the TipProofFlavor::adversary_resistant()
 # gate that refuses a balance proof under the insecure Blake3Fingerprint flavor.
 sigil-tip-proof = { path = "../sigil-tip-proof", default-features = false }

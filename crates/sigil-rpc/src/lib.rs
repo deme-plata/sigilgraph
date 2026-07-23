@@ -403,6 +403,80 @@ pub fn credit_light_verifiers(
     Ok(LightCreditResult { per_verifier: per, credited: total, num_verifiers: n })
 }
 
+// ── ONE-CHAIN Phase 1 (docs/SIGIL_ONE_CHAIN_SCOPE_v0.md §3) ────────────────────
+//
+// The mining ledger emits a real `SigilBlockHeaderV0` per accepted block. This is
+// READ-ONLY over state: it snapshots `state.roots()` AFTER the block's coinbase
+// committed through the chokepoint — it never mutates anything.
+//
+// Field honesty (what is real vs. pending Phase 4):
+//   * height/parent_hash    REAL — parent_hash = previous fold_tip (one hash chain).
+//   * nonce_sqisign         CARRIER — 292 bytes: dual-lane PoW nonce (LE u64) ‖
+//                           blake4_hash (LE u64) ‖ zeros. Committed + recoverable
+//                           against the stored block; P4 replaces with a real
+//                           SQIsign signature.
+//   * vdf_input             derived per the header rule BLAKE3(parent ‖ nonce_sqisign)
+//                           so `precheck()` holds; the MINING vdf seed lives in the
+//                           stored block record.
+//   * vdf_proof             REAL — the miner's Wesolowski proof (y/pi/t verbatim).
+//   * four state roots      REAL — live ledger state, evolves with every coinbase/send.
+//   * difficulty            REAL — the retargeted BLAKE4 bits.
+//   * producer              REAL — the winning miner's wallet (an ed25519 pubkey).
+//   * producer_sig          ZEROED (64 B, Ed25519Hot length) — P4 signs for real.
+//   * state_transition_proof / txs_merkle_root / fluxc_artifact_proof — empty until P4.
+#[allow(clippy::too_many_arguments)]
+pub fn build_ledger_header(
+    state: &SigilState,
+    height: u64,
+    parent_tip: [u8; 32],
+    miner: WalletId,
+    nonce: u64,
+    blake4_hash: u64,
+    vdf: &flux_vdf::VdfProof,
+    difficulty_bits: u32,
+    ts_us: u128,
+    tx_count: u32,
+) -> sigil_header::SigilBlockHeaderV0 {
+    use sigil_header::*;
+    let mut carrier = [0u8; SQISIGN_L5_LEN];
+    carrier[..8].copy_from_slice(&nonce.to_le_bytes());
+    carrier[8..16].copy_from_slice(&blake4_hash.to_le_bytes());
+    let nonce_sqisign = SqiSignature::from_array(carrier);
+    let mut h = blake3::Hasher::new();
+    h.update(&parent_tip);
+    h.update(nonce_sqisign.as_bytes());
+    let vdf_input = *h.finalize().as_bytes();
+    let roots = state.roots();
+    SigilBlockHeaderV0 {
+        version: HEADER_VERSION,
+        network_id: NETWORK_ID,
+        height,
+        parent_hash: parent_tip,
+        merge_parents: vec![],
+        timestamp_ms: (ts_us / 1000) as u64,
+        nonce_sqisign,
+        vdf_input,
+        vdf_proof: WesolowskiProof { y: vdf.y.clone(), pi: vdf.pi.clone(), t: vdf.t },
+        difficulty: difficulty_bits as u64,
+        wallet_state_root: roots.wallet_state_root,
+        dex_state_root: roots.dex_state_root,
+        event_log_root: roots.event_log_root,
+        contract_state_root: roots.contract_state_root,
+        state_transition_proof: StarkProof { bytes: vec![], public_inputs_hash: [0u8; 32] },
+        txs_merkle_root: [0u8; 32],
+        tx_count,
+        fluxc_artifact_proof: ProofBundle {
+            artifact_blake3: [0u8; 32],
+            sqisign_sig: vec![],
+            sqisign_pubkey: vec![],
+            settle_tx: None,
+        },
+        sig_scheme: SigScheme::Ed25519Hot,
+        producer: miner,
+        producer_sig: SignatureBytes(vec![0u8; 64]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -623,5 +697,43 @@ mod tests {
         let bal = credit_share(&mut s, 1, MINER, 1000).unwrap();
         assert_eq!(bal, 1000, "no master set → full reward to miner");
         assert_eq!(s.balance_of(&COMMONS_WALLET, &NATIVE), 0, "no commons carve without a bank");
+    }
+
+    // ── ONE-CHAIN P1: ledger headers ──────────────────────────────────────────
+    fn test_vdf() -> flux_vdf::VdfProof {
+        flux_vdf::VdfProof { y: vec![7u8; 32], pi: vec![9u8; 16], t: 64 }
+    }
+
+    #[test]
+    fn ledger_header_passes_precheck() {
+        let s = SigilState::new();
+        let hdr = build_ledger_header(&s, 1, [3u8; 32], MINER, 42, 777, &test_vdf(), 18, 1_784_000_000_000_000, 0);
+        hdr.precheck().expect("fresh ledger header must pass precheck");
+        assert_eq!(hdr.height, 1);
+        assert_eq!(hdr.parent_hash, [3u8; 32]);
+        assert_eq!(hdr.vdf_proof.t, 64);
+        // the nonce carrier is recoverable
+        let mut n = [0u8; 8];
+        n.copy_from_slice(&hdr.nonce_sqisign.as_bytes()[..8]);
+        assert_eq!(u64::from_le_bytes(n), 42);
+    }
+
+    #[test]
+    fn ledger_header_roots_track_state() {
+        let mut s = SigilState::new();
+        let h1 = build_ledger_header(&s, 1, [0u8; 32], MINER, 1, 1, &test_vdf(), 18, 1, 0);
+        credit_share(&mut s, 1, MINER, 1000).unwrap();
+        let h2 = build_ledger_header(&s, 2, [1u8; 32], MINER, 2, 2, &test_vdf(), 18, 2, 0);
+        assert_ne!(h1.wallet_state_root, h2.wallet_state_root,
+            "coinbase must move the committed wallet root — a frozen root is the spine bug we're killing");
+    }
+
+    #[test]
+    fn ledger_header_serde_roundtrip_stable_hash() {
+        let s = SigilState::new();
+        let hdr = build_ledger_header(&s, 5, [2u8; 32], MINER, 5, 5, &test_vdf(), 20, 99, 0);
+        let js = serde_json::to_string(&hdr).unwrap();
+        let back: sigil_header::SigilBlockHeaderV0 = serde_json::from_str(&js).unwrap();
+        assert_eq!(hdr.hash(), back.hash(), "header hash must survive the JSON store/serve roundtrip");
     }
 }

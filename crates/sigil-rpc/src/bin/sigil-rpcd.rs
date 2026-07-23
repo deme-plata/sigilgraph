@@ -251,6 +251,25 @@ fn store_block(node: &Node, bh: u64, sub: &Submission, reward: u128, prev_tip: [
     let _ = db.put(format!("block/{bh:020}").as_bytes(), rec.to_string().as_bytes());
 }
 
+/// ONE-CHAIN P1: emit the real `SigilBlockHeaderV0` for an accepted block —
+/// four state roots snapshot the ledger AFTER the coinbase committed, so the
+/// committed wallet root finally tracks real money (the spine's never did).
+/// READ-ONLY over state; additive beside `store_block`; called from BOTH the
+/// producer accept and the follower apply so the header chain is identical.
+fn emit_header(node: &Node, bh: u64, sub: &Submission, prev_tip: [u8; 32], ts_us: u128) {
+    let Some(db) = node.statedb.as_ref() else { return };
+    let Some(miner) = hex32(&sub.wallet) else { return };
+    let hdr = sigil_rpc::build_ledger_header(
+        &node.state, bh, prev_tip, miner,
+        sub.block.nonce, sub.block.blake4_hash, &sub.block.vdf,
+        node.bits, ts_us, 0,
+    );
+    if let Ok(js) = serde_json::to_string(&hdr) {
+        let _ = db.put(format!("header/{bh:020}").as_bytes(), js.as_bytes());
+        let _ = db.put(b"header/tip", bh.to_string().as_bytes());
+    }
+}
+
 /// The tip-fold (fix #3): tip_{h+1} = BLAKE3(domain ‖ prev_tip ‖ height ‖ blake4 ‖ nonce ‖
 /// BLAKE3(vdf)). Shared by the producer (on accept) and the follower (on apply) so both
 /// derive identical tips — the chain is deterministic.
@@ -379,6 +398,7 @@ fn apply_block(n: &mut Node, rec: &serde_json::Value, g: &ModSquaring) -> Result
     let prev_tip = n.tip_hash;
     n.tip_hash = new_tip;
     store_block(n, bh, &sub, reward, prev_tip, new_tip, rec_ts);
+    emit_header(n, bh, &sub, prev_tip, rec_ts); // ONE-CHAIN P1: real header, post-coinbase roots
     if n.genesis_ts_us != 0 { n.last_block_ts_us = rec_ts; n.emission_carry = new_carry; } // advance clock + carry
     n.block_height += 1;
     n.height += 1;
@@ -983,6 +1003,40 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 Some(bytes) => ok(String::from_utf8_lossy(&bytes).to_string()),
                 None => ok(format!("{{\"ok\":true,\"height\":{h},\"found\":false}}")),
             }
+        }
+        // ONE-CHAIN P1: real SigilBlockHeaderV0 per ledger block. `?height=N` for a
+        // specific header, no param → the tip header. Same verify-don't-trust deal
+        // as /block: peers pull + precheck + walk parent linkage independently.
+        ("GET", "/header") => {
+            let n = node.read().unwrap();
+            let Some(db) = n.statedb.as_ref() else { return ok("{\"ok\":false,\"error\":\"no state db\"}".into()) };
+            let h: Option<u64> = query_get(query, "height").and_then(|s| s.parse().ok());
+            let h = match h {
+                Some(h) => h,
+                None => match db.get(b"header/tip").ok().flatten()
+                    .and_then(|b| String::from_utf8(b).ok()).and_then(|s| s.parse().ok()) {
+                    Some(t) => t,
+                    None => return ok("{\"ok\":true,\"found\":false,\"note\":\"no headers yet — first block after this build mints one\"}".into()),
+                },
+            };
+            match db.get(format!("header/{h:020}").as_bytes()).ok().flatten() {
+                Some(bytes) => ok(String::from_utf8_lossy(&bytes).to_string()),
+                None => ok(format!("{{\"ok\":true,\"height\":{h},\"found\":false}}")),
+            }
+        }
+        // ONE-CHAIN P1: the ledger's OWN supply truth (scope doc §5 Q4 — the TUI's
+        // 21M/21M panel read the spine's display path; this is the real counter).
+        ("GET", "/supply") => {
+            let n = node.read().unwrap();
+            let minted = n.state.native_supply();
+            let max = sigil_state::MAX_SUPPLY;
+            let pct = (minted as f64) * 100.0 / (max as f64);
+            ok(format!(
+                "{{\"ok\":true,\"native_supply\":\"{minted}\",\"max_supply\":\"{max}\",\"pct\":{pct:.4},\"height\":{},\"emission\":\"{}\",\"genesis_ts_us\":\"{}\"}}",
+                n.height,
+                if n.genesis_ts_us == 0 { "block-based" } else { "time-based" },
+                n.genesis_ts_us
+            ))
         }
         // Readiness probe: true once the background search index is live. The
         // money/chain routes serve from boot regardless — this only gates search.
@@ -1604,6 +1658,7 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                     // decentralization step ①: persist the block (+ its µs ts) so PEERS can pull
                     // + recompute the SAME time-based reward.
                     store_block(&n, bh, &sub, reward, prev_tip, new_tip, ts_us);
+                    emit_header(&n, bh, &sub, prev_tip, ts_us); // ONE-CHAIN P1: real header, post-coinbase roots
                     n.last_block_ts_us = ts_us;   // advance the emission clock for the next block
                     n.emission_carry = new_carry; // commit the carried sub-unit remainder
                     n.block_height += 1;

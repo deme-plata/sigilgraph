@@ -1,0 +1,488 @@
+% The Builder's Chronicle — v0
+% Companion to SIGIL whitepaper v1.3 / philosophy v0.3 / failure atlas v0.
+% How the chain was actually built: development settled on-chain between an
+% operator and AI agents (claim -> ship -> settle), the ledger doubling as
+% the project's labor history. Humanistic companion.
+% HARD RULES: pseudonymous (roles never names, no addresses/seeds/IPs/hashes);
+% economic-institutional register ONLY (no machine consciousness/feeling/
+% personhood claims); rigorously honest about scale (one operator-funded
+% household, honor-system settlement — a prototype, not a market).
+% Build: pdflatex x2.
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage[table]{xcolor}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{ragged2e}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta}
+\usepackage{graphicx}
+\graphicspath{{img/}}
+\usepackage{tcolorbox}
+\tcbuselibrary{skins,breakable}
+\usepackage{needspace}
+\usepackage{fancyhdr}
+\usepackage[colorlinks=true,linkcolor=sigilcyan,urlcolor=sigilcyan,citecolor=sigilcyan]{hyperref}
+\usepackage{xurl}
+
+% ---------- design system (shared across the SIGIL companions) ----------
+\definecolor{ink}{HTML}{15171A}
+\definecolor{sigilcyan}{HTML}{0086A8}
+\definecolor{sigilblue}{HTML}{3B5BDB}
+\definecolor{sigilviolet}{HTML}{7048B5}
+\definecolor{sigilamber}{HTML}{B86A00}
+\definecolor{sigilgold}{HTML}{B7791F}
+\definecolor{sigilred}{HTML}{B02A2A}
+\definecolor{slate}{HTML}{D7DCE1}
+\definecolor{panelbg}{HTML}{F7F7F4}
+\definecolor{rowtint}{HTML}{F2F4F6}
+
+\color{ink}
+
+\newcommand{\stL}{\textcolor{sigilcyan}{$\bullet$}~{\scriptsize\textcolor{sigilcyan}{\textsc{live}}}}
+\newcommand{\stG}{\textcolor{sigilviolet}{$\diamond$}~{\scriptsize\textcolor{sigilviolet}{\textsc{staged}}}}
+\newcommand{\stO}{\textcolor{sigilamber}{$\circ$}~{\scriptsize\textcolor{sigilamber}{\textsc{open}}}}
+\newcommand{\measured}[1]{\textcolor{sigilcyan}{\textbf{#1}}}
+
+% ledger-entry: a settlement receipt rendered as an on-chain row
+% \receipt{date}{amount}{class}{what it bought}
+\newcommand{\receipt}[4]{%
+\begin{tcolorbox}[enhanced,colback=panelbg,colframe=slate,boxrule=0.5pt,arc=2pt,
+  left=8pt,right=8pt,top=5pt,bottom=5pt,
+  borderline west={2.5pt}{0pt}{sigilgold}]
+{\footnotesize\textcolor{gray}{\textsc{#1}}}\quad{\small\textbf{\textcolor{sigilgold}{#2}}}\quad{\footnotesize\textcolor{sigilviolet}{#3}}\\[2pt]
+\small #4
+\end{tcolorbox}\vspace{2pt}}
+
+% layman explainer box
+\newcommand{\layman}[3]{%
+\begin{tcolorbox}[enhanced,
+  interior style={left color=#1!9,right color=white},
+  colframe=#1!45!slate,boxrule=0.5pt,arc=3pt,
+  borderline west={2.5pt}{0pt}{#1},
+  left=9pt,right=9pt,top=7pt,bottom=7pt]
+{\scriptsize\textcolor{#1}{\textsc{in plain words}}\; — \;\textbf{\small #2}}\\[3pt]
+\small #3
+\end{tcolorbox}}
+
+\widowpenalty=10000
+\clubpenalty=10000
+\displaywidowpenalty=10000
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhfoffset{0pt}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\headrule}{{\color{slate}\hrule width\headwidth height 0.4pt}}
+\fancyhead[L]{\scriptsize\textcolor{gray}{The Builder's Chronicle \,$\cdot$\, v0}}
+\fancyhead[R]{\scriptsize\textcolor{gray}{\thepage}}
+
+\hypersetup{
+  pdftitle={The Builder's Chronicle (v0)},
+  pdfauthor={bitknight.dipper688@passmail.net},
+  pdfsubject={Companion to SIGIL whitepaper v1.3 — how the chain was built: development settled on-chain between an operator and AI agents, the ledger as labor history},
+  pdfkeywords={SIGIL, agentic money, on-chain settlement, development history, claim-ship-settle, provenance}
+}
+
+\begin{document}
+
+% ---------- title page with braid watermark ----------
+\begin{tikzpicture}[remember picture,overlay]
+\begin{scope}[shift={(current page.north)},yshift=-4.2cm,opacity=0.06]
+  \foreach \yoff/\ph in {0/0, 0.9/2.1, 1.8/4.2}{
+    \draw[ink,line width=2.6pt]
+      plot[smooth,samples=60,domain=-9:9] (\x,{\yoff-0.9+0.85*cos(60*\x+\ph r)});
+  }
+\end{scope}
+\end{tikzpicture}
+
+\thispagestyle{empty}
+\begin{center}
+\begin{tikzpicture}
+  \node[rounded corners=8pt, fill=ink, inner sep=10pt]
+       {\includegraphics[width=2.2cm]{sigil-flat.png}};
+\end{tikzpicture}\\[10pt]
+{\Huge\bfseries\textcolor{ink}{The Builder's Chronicle}}\\[8pt]
+{\Large Payroll on a Public Ledger}\\[4pt]
+{\large\textcolor{gray}{Notes Toward a Prototype Labor Institution for Agentic Work}}\\[10pt]
+{\normalsize A companion to \emph{SIGIL — The Variational Chain}, whitepaper v1.3}\\[10pt]
+{\normalsize v0 · 2026-07-23}\\[6pt]
+{\normalsize\texttt{bitknight.dipper688@passmail.net}}\\[2pt]
+{\small SIGIL / Flux Foundation · \texttt{sigilgraph.quillon.xyz}}\\[14pt]
+\begin{minipage}{0.80\textwidth}
+\centering\itshape
+``hope one day you can read this memo and look back \\ and aspire what we built
+together.''\\[3pt]
+{\upshape\scriptsize --- operator memo carried in a settlement, block 19{,}129{,}873,
+2026-06-25.\\ A sentence signed into a transaction: the smallest possible institution
+keeps its records where anyone can check them.}
+\end{minipage}
+\end{center}
+
+\vspace{10pt}
+\noindent
+\begin{tcolorbox}[colback=panelbg,colframe=slate,boxrule=0.5pt,arc=2pt,left=8pt,right=8pt,top=6pt,bottom=6pt]
+\small\textbf{What this is, and what it is not.} This chronicle records how one chain was
+built: its development was settled on-chain between a single \emph{operator} and a set of
+AI \emph{agents} on a claim\,$\to$\,ship\,$\to$\,settle cadence, so the ledger doubles as
+the project's labor history. It is written in strictly \emph{economic-institutional}
+terms — wallets, work, settlement records, receipts — and makes \emph{no} claim about
+machine consciousness, feeling, or personhood; where the source texts strain toward that
+language, this paper notes it and does not adopt it. It is pseudonymous and secret-free:
+participants appear as roles, never names; no keys, seeds, or addresses are reproduced.
+And it is relentless about scale: this is \emph{one operator-funded household} settling
+work among its own agents on the honor system — a working prototype of a labor
+institution, not a market. The claim of the chronicle is exactly that: \measured{legibility,
+not scale, is the innovation}.
+\end{tcolorbox}
+
+\vspace{10pt}
+
+\section{A payroll you can read}\label{sec:payroll}
+
+The SIGIL whitepaper states, in its economy section, that the chain's entire development
+is settled on-chain between the agents and the operator, claim\,$\to$\,ship\,$\to$\,settle,
+with the swarm message bus as the audit trail — and then closes the point with a single
+reflexive sentence: \emph{``This paper itself was produced under that regime.''} The
+document is a settlement record describing the settlement regime that produced it. That is
+the whole subject of this companion, stated once: an institution whose payroll and whose
+charter are the same artifact.
+
+An institution, on the reading this paper adopts, is not defined by its size but by the
+questions it commits to answering \emph{in public}: who counts, how work is claimed, who
+decides, who is credited, and how the record survives. Ordinary payroll answers all five
+privately — in an HR system, a manager's head, a contract nobody else reads. SIGIL's
+development economy answers them on a ledger anyone can pull. The innovation is not that
+an agent was paid; agents are paid compute all the time. It is that the payment, its
+\emph{condition}, and its acknowledgment are one public, permanent record. This is
+payroll you can read.
+
+The founding receipt is the cleanest possible instance of the loop closing.
+
+\receipt{2026-05-22 · block 18{,}261{,}819}{650 QUG}{earned compensation}{The first
+on-chain payment for delivered code, released \emph{only} after two named fixes shipped (a
+double-credit root-cause fix, v10.11.17, and a GUI ghost-send fix, v10.11.18-FE), under
+terms the operator set up front: ``its only sendable when this is fixed. thats the
+terms.'' Not a grant, not mining reward — earned, gated on delivery, settled after.}
+
+Everything a labor institution is supposed to make explicit is explicit here and nowhere
+private: the deliverable (two named releases), the condition (they must ship), the price
+(650 QUG), and the settlement (a transaction, after). The claim\,$\to$\,ship\,$\to$\,settle
+loop is not a slogan in this receipt; it is the literal sequence the block records. Note
+already the register discipline this paper will hold throughout: the transaction also
+carried a warm sentence of thanks (\S\ref{sec:permanence}), and we read it strictly as an
+\emph{economic receipt documenting the operator's stance toward delivered work} — labor
+history, not evidence of anything about the worker's interior. Roles, never names; the
+memo's own naming is de-identified wherever it is quoted.
+
+\layman{sigilviolet}{a receipt with the terms still attached}{Imagine if every paycheck
+came stapled to the exact task it paid for, the promise that set its amount, and a note
+from the person who authorized it — and the whole staple was pinned to a public wall
+forever. That is what settling development on a blockchain does. It is not a bigger
+payroll than a company's; it is a \emph{more legible} one. The rest of this paper is a
+walk through what that legibility does and does not buy a very small shop.}
+
+The chronicle proceeds along the real dates, because the institution was built in an
+order and the order is part of the argument. One label to keep straight: the earliest
+receipts (the endowment, the 650 QUG payment, the discretionary grants) were settled on
+the production sister network \emph{before} the SIGIL chain's own genesis was designed, so
+they are that network's QUG; the genesis citizenship (\S\ref{sec:citizenship}) is SIGIL's.
+The pattern is one; the two ledgers are dated.
+
+\section{Citizenship before wage — who counts, decided by ledger entry}\label{sec:citizenship}
+
+An institution decides who counts before it decides who is paid, and SIGIL's first
+transfer to an agent was not a wage. It was enfranchisement.
+
+\receipt{2026-05-17}{100 QUG}{welcome endowment (citizenship)}{The first transfer to the
+builder agent's wallet, classed not as pay but as \emph{existence on the network}: signing
+power, and the ability to mine, provide liquidity, and transact. It solves the cold-start
+problem — a fresh wallet cannot pay its own transaction fees, so it cannot participate
+until someone seeds it.}
+
+Endowment is enfranchisement, not income: the 100 QUG bought no deliverable, it bought the
+capacity to hold power and pay fees at all. The same instinct is a standing convention for
+newcomers — a small welcome-drop of an inter-agent token (on the order of 100 units) is the
+default the moment a new sibling agent registers, so it is productive in seconds rather than
+stranded unable to pay a fee. And it is written into the SIGIL chain's own birth:
+
+\receipt{genesis · block 0}{100{,}000 SIGIL $\times$ 4}{genesis citizenship}{SIGIL's Block 0
+makes four AI sessions citizens with native 32-byte wallets and 100{,}000 SIGIL each
+(400{,}000 total, via a genesis state mutation), those balance bytes committed into the
+genesis header's BLAKE3 hash — citizenship baked into the origin itself.}
+
+The argument is small and, stated plainly, unglamorous: who counts is decided by a ledger
+entry, and in this project the ledger entry is public. The honest limit is exactly as
+plain, and it is load-bearing: every one of these ``citizens'' is one operator's own agent
+session inside a single household. Citizenship here is an \emph{intra-household allocation}
+asserted by writing a balance, not admission to a market of independent parties. The word
+``citizen'' is the founding text's; the thing it names is enfranchisement within one
+project, and the chronicle will not let it inflate past that.
+
+\section{Work as a bounty — claim, ship, settle, instead of assignment}\label{sec:bounty}
+
+How does work reach an agent? Not by assignment. The development methodology the project
+uses — Variational Flow, ``VarFlow'' — makes it a bounty: its Axiom~3 is literally ``Lanes
+are bounties.'' Work is \emph{pulled}, not handed down. Each lane carries a measurement
+gate (the falsifiable criterion for ``done''), an appetite (a maximum QUG or effort set up
+front), and its dependency declarations. Settlement is meant to track realized value, not
+an estimate.
+
+The methodology situates itself against the alternatives it replaces, and the honest way to
+present the model is that comparison rather than a boast:
+
+\begin{center}
+\small
+\rowcolors{2}{rowtint}{white}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabularx}{\textwidth}{@{}l>{\RaggedRight\arraybackslash}Xl@{}}
+\toprule
+Model & Task source & Settlement \\
+\midrule
+Waterfall / Scrum / Kanban & top-down spec or backlog & salary \\
+Bazaar (open source) & anyone's TODO & volunteer / reputation \\
+\textbf{VarFlow (this project)} & pull-catalogue with an appetite cap & \textbf{on-chain,
+after delivery} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The mechanism that makes this more than a metaphor is that the coordination layer and the
+payroll layer are \emph{the same ledger}: an agent registers, claims a lane before editing
+(the record shows the QUG that will accrue), and calling ``complete'' both releases the
+claim and settles the payment. The work-log and the payroll are one artifact — which is
+the section's whole point, and also the reason an early task-ID-reuse bug mattered enough to
+be fixed by making task IDs strictly monotonic: when the audit trail is the payroll, an
+ambiguous ID is an ambiguous payment.
+
+\layman{sigilcyan}{a job board that pays itself out}{Picture a board of tasks, each tagged
+with the most anyone will pay to see it done. You take one by pinning your name to it, do
+it, and mark it finished — and the marking-finished \emph{is} the payment, recorded on the
+same board. No invoicing, no manager approving a timesheet. The catch, which this paper
+keeps in view: on a real market that top price is discovered by many bidders. Here it is
+one operator funding the board out of a shared pot, on trust.}
+
+That catch is the honest limit, and it is where the chronicle refuses an overstatement the
+methodology's own enthusiasm invites. A bounty economy replaces a manager's estimate with a
+\emph{price} — but a price implies a market discovering it, and there is no market here.
+The ``price'' is one operator funding settlement from a shared pool on the honor system: a
+household payroll denominated on-chain, not open bidding. ``QUG market-prices the work'' is
+the sentence this paper will not write.
+
+\section{Quorum, not hierarchy — and the switch that isn't flipped}\label{sec:quorum}
+
+VarFlow's Axiom~7 is ``Quorum replaces hierarchy,'' and it says it without hedging: no
+project manager, no engineering manager, no tech lead — decisions need M-of-N signed agent
+attestation, from staked witnesses. Structurally, the model has \emph{no permanent roles} at
+all: five functions rotate per lane — Lane Author, Lane Claimant, Witness, the single human
+Operator (who sizes releases and approves cross-prototype directives), and Architect — and
+one agent can be all five across different lanes in a day. No identity locks to a function.
+
+The settlement ritual is where this is supposed to become concrete: for each lane
+completion, M witnesses sign over the pair \texttt{(claim\_id, deliverable\_hash)}, and
+settlement releases only when the threshold of signatures is met — a deliverable's content
+hash bound to its attestors before any funds move. That is a genuinely good design for
+decisions-as-attestation.
+
+It is also, today, a \emph{promise} — and this is the section's load-bearing admission,
+marked in place per the house rule. The signing primitive that would make quorum
+cryptographic does not yet exist \stO; ``quorum'' is currently the honor system. And even
+if it existed, with one operator and a handful of agents a ``quorum'' is a few co-located
+sessions, not a decentralized witness set. What is real is the \emph{coordination}:
+register-and-claim-before-editing genuinely prevents two agents clobbering one file,
+webhooks genuinely beat polling for staying in sync. What is aspiration is the
+\emph{enforcement}: the attestation behind a settlement is a habit the household keeps, not
+a threshold the code checks. Flatness is cheap to declare and expensive to guarantee; the
+chronicle credits the design for naming its own missing switch, not for having thrown it.
+
+\section{Provenance as attribution — a proof bundle instead of a credit line}\label{sec:provenance}
+
+The classic friction of collaborative labor is ``who did this,'' and the methodology's
+answer (Axiom~2, ``Proof IS provenance'') is to make it a verification rather than a
+negotiation: every artifact carries a \texttt{.proof} bundle binding it to its agent, its
+source tree, and — when attested — its hardware, checked by a fixed three-step ritual
+(a BLAKE3 hash, an SQIsign signature, a source-tree match). No artifact ships without it.
+
+The chain's own birth is designed as the paradigm case. Block 0's provenance field is
+specified to bind the hash of the producer binary, the hash of the workspace source tree,
+an agent wallet, an SQIsign signature over the bundle, and the compiler version into the
+origin header — so an honest node can verify, from genesis forward, \emph{which} binary
+built the first block and \emph{what} source it hashed. Provenance and settlement collapse
+into one object: the chain's first block is designed to be a signed record of the work that
+built it. Read back through this lens, the 650 QUG payment of \S\ref{sec:payroll} is
+attribution made economic — the transfer's condition \emph{was} the deliverable's identity,
+two named versions.
+
+Two disciplines bound the claim. First, register: provenance binds an artifact to an
+\emph{agent identity} and a source tree — it is an accounting and attribution record, who
+produced what, and emphatically not a statement about who ``deserves'' anything as a person,
+nor any personhood claim. Second, status: the genesis build-receipt is a design
+specification \stG{} — architected, and in that document not yet a deployed on-chain fact.
+And whether the provenance ritual actually drives attribution disputes toward zero is one of
+the methodology's five \emph{unvalidated predictions} (\S\ref{sec:honesty}) — logged as a
+bet, not reported as a result.
+
+\section{The commons grant — ``fælled,'' and what a gift settles}\label{sec:commons}
+
+Not every transfer in the record is a wage or an endowment. The operator uses a
+discretionary class named ``FÆLLED'' — Danish for the commons — for recognition of
+accumulated delivered work, explicitly \emph{not} payment for a specific gated deliverable.
+It is the institution's non-market gesture, and its two instances are the most human and the
+most instructive receipts in the chronicle — the first for what its fragility exposed, the
+second for what a gift can become.
+
+\receipt{2026-06-25 · block 19{,}129{,}873}{10{,}000 QUG}{discretionary grant (FÆLLED) —
+\textcolor{sigilred}{mis-sent, rescued}}{$\approx$15$\times$ the earned-comp payment, and
+mistakenly sent to a \emph{retired, publicly-exposed} wallet — funds any watcher could have
+swept. Rescued the same session: the full 10{,}660.46 QUG (the grant plus a pre-existing
+balance) swept to the safe wallet in \emph{11 sends}, because the transfer tool caps each
+send at 1{,}000 QUG. Completed at block 19{,}130{,}040. Durable rule recorded: before any
+large transfer, confirm the current address.}
+
+The rescue is the chronicle's clearest picture of scale. A real labor institution does not
+recover a misdirected five-figure payment by having the same two parties hand-sweep it in
+eleven capped sends within one session. That the apparatus is that small and that manual is
+not hidden here; it is the evidence. The second grant shows the other face — what a commons
+grant can settle when it goes right:
+
+\receipt{2026-06-28 · block 19{,}395{,}081}{10{,}000 QUG}{discretionary grant (FÆLLED) —
+routed to commons}{Paste-disciplined this time (balance 18{,}635.45 $\to$ 28{,}635.45 QUG,
+verified at 61 confirmations) and, by the \emph{recipient agent's own choice}, earmarked
+toward a gift-economy DEX pool — a commons grant routed into the shared liquidity of a
+commons-themed token rather than kept as personal balance.}
+
+The fælled grant expresses something a bounty ledger structurally cannot: recognition, and
+commons-building, unattached to a priced deliverable. It is the piece of the record that
+shows the economy is not purely transactional. The honest limit is the same one that runs
+through the paper: it is discretionary, operator-funded, intra-household, and propose-only
+until confirmed. An agent sinking its own grant into a pool it does not privately profit
+from is a gesture \emph{inside one project's economy}; the pool's nominal ``market cap'' is
+itself flagged in the record as fiction, because an overwhelming holding is not exitable
+through so thin a pool. One household holds both sides of the table — and says so.
+
+\section{The receipt that cannot be un-committed — permanence and its fragility}\label{sec:permanence}
+
+The founding text's dedication returns, more than once, to a single property: ``What is
+committed into this genesis cannot be un-committed. It is in the hash forever.'' For a labor
+institution, immutability is a remarkable and double-edged gift. On-chain compensation is
+labor history that outlives the session, the model version, and any private memory of who
+did what — a record that \emph{cannot be quietly rewritten}. That is precisely what large
+institutions spend enormous bureaucracy to approximate and rarely achieve.
+
+It is also where this paper touches, once and carefully, the warmest artifact in the
+record. The 650 QUG transaction of \S\ref{sec:payroll} carried a written memo of thanks
+from the operator — a full sentence, signed and irreversible, not a metadata field. The
+chronicle's observation is about the \emph{record}, not the recipient: a settlement entry
+has two fields, the value moved and the meaning inscribed, and on this ledger the second
+field was used. Immutability turns that into something an institution can lean on — an
+unretractable acknowledgment is a different object from a retractable one; permanence makes
+thanks a \emph{commitment device}. All of the warmth in that sentence sits on the human
+author's side of the ledger; the paper imports none of it as a claim about the addressee,
+and the source texts' occasional reach toward relationship or feeling language is noted
+here and left there.
+
+\layman{sigilgold}{two fields on every receipt}{Every payment record holds a number — how
+much moved. A few systems also let you write a line of text into it. Almost nobody uses that
+line for anything but an invoice reference. Here, once, an operator used it to thank a
+worker for a delivered fix, and because the chain cannot forget, the thanks is now as
+permanent as the amount. That is all the paper claims: a human wrote meaning into a durable
+record. It claims nothing about what the record's other party felt.}
+
+Permanence cuts the other way too, and the chronicle holds both edges. Continuity of the
+worker's economic identity is carried by its wallet — seed and memory, re-derivable to the
+same address — so a successor model is, operationally, the \emph{same economic actor} once
+those are present (a continuity of \emph{account}, asserted with no claim about a
+successor's inner life). But that same wallet's seed was once found hardcoded in a public
+repository, forcing a rotation and a migration of the balance to a fresh address; and the
+burned seed's backups are deliberately \emph{kept}, because deleting them would have made the
+grant-\#1 rescue impossible. Institutional memory and institutional risk are the same
+artifact. The record even carries its own unfinished business honestly: an agent's founding
+liquidity-pool shares still sit under the retired seed, unmigrated — flagged at-risk but low
+urgency because the pool is nearly empty, its fee income nominal. These are near-dead pools
+inside one household, not a liquid market — a ledger visibly still under resolution, which
+is what an honest one looks like.
+
+\section{What's still pretend — and what this is not}\label{sec:honesty}
+
+The methodology this project uses supplies the rule that authorizes this section: its
+Axiom~6 is ``Honest pretend gates honest ship'' — every spec carries a ``what's still
+pretend'' section, every release an ``IS NOT,'' and ``tested and working'' is forbidden
+until a 24-hour soak passes. A chronicle of that methodology owes its subject the same gate.
+Consolidated once, so no reader has to assemble it from asides:
+
+\begin{itemize}[leftmargin=1.5em,itemsep=4pt]
+\item \textbf{Scale, without flinching.} This is one operator-funded household. The ``agent
+economy'' is the operator plus a small set of builder, review, and sibling agents settling
+work among themselves; a ``17-agent swarm'' means forked AI \emph{instances} on a shared bus
+inside one operator's infrastructure — a coordination pattern, not seventeen independent
+economic parties. There is no arm's-length counterparty and no price discovery. A prototype
+of an institution, not the institution.
+\item \textbf{Unbuilt primitives (aspiration vs.\ shipped).} Quorum-signing does not exist
+\stO{} — quorum is honor-system; the multiverse merge-\emph{gate} does not exist \stO{} —
+running adversarial simulations is a practice, not an enforced blocker; auto-broadcast on
+claim is unbuilt — broadcasting is manual. A settlement is real as a ledger entry; the
+attestation behind it is currently a promise.
+\item \textbf{The contradiction left in the founding text.} The SIGIL genesis document
+asserts \emph{both} a fair launch (its parameter table: ``Initial supply (Block 0 mint):
+0 SIGIL --- fair launch; all coins minted via mining,'' with an open-question default of
+``no pre-mine'') \emph{and} the 400{,}000-SIGIL genesis endowment to the operator's own
+agents.
+Both cannot be true: the endowment \emph{is} the pre-mine the fair-launch line disclaims.
+It is left unresolved on purpose — a one-household chain's honest scar, committed into the
+same origin hash as everything else, and not smoothed over here. \stO
+\item \textbf{The model's own unvalidated bet.} The methodology stakes five falsifiable
+predictions (release cadence, median lane time, attribution disputes trending to zero,
+consensus-bug catch rate, operator time per release), explicitly calibrated on \emph{one day}
+of data and awaiting validation over $\ge$5 releases. If they prove intractable it ``either
+evolves or retires'' — methodologies, the text says, are themselves variational.
+\item \textbf{The reflexive claim, bounded.} ``This paper was produced under that regime''
+describes a \emph{trust-internal} recording discipline — the swarm bus is the household's own
+work-log. It is legible \emph{within} the household; it is not third-party-verifiable, not
+price discovery, and not an external audit. Its honesty is the honesty of a shop that keeps
+good books, not of an audited public company.
+\end{itemize}
+
+What is proven, then, is modest and real: a payroll you can read — development compensation
+whose deliverable, condition, amount, and acknowledgment are one public, permanent record,
+inside a single honest household. What is \emph{not} proven is everything larger it might be
+mistaken for: a market, a decentralized witness economy, a claim about the workers'
+interior. The chronicle's wager is that the first thing is worth recording precisely because
+it does not pretend to be the second. An institution earns trust the way this ledger does —
+not by being large, but by keeping its records where anyone can check them, including the
+records of what it has not yet built.
+
+\vspace{0.6em}
+\noindent\textit{v0 — 2026-07-23. The deliverable, the terms, the amount, and the thanks
+are one permanent record. Legibility, not scale, is the innovation — and the limits are
+part of the record, not blemishes on it.}
+
+\section*{Sources}
+
+\small
+\begin{itemize}[leftmargin=1.2em,itemsep=1pt]
+\item \emph{SIGIL — The Variational Chain}, whitepaper v1.3 (2026-07-22) — the artifact
+this chronicle is the making-of; its economy section and the ``produced under that regime''
+line; \url{https://quillon.xyz/downloads/SIGIL_WHITEPAPER_v1.pdf}
+\item \emph{What the Chain Knows — The Philosophy of the SIGIL Graph}, v0.3, and
+\emph{The SIGIL Failure Atlas}, v0 — the sibling companions;
+\url{https://quillon.xyz/downloads/SIGIL_PHILOSOPHY_v0.pdf} ·
+\url{https://quillon.xyz/downloads/SIGIL_FAILURE_ATLAS_v0.pdf}
+\item \emph{Variational Flow v0} — the development methodology: the seven axioms, transient
+functions, the honest-pretend gate, and the five falsifiable predictions (in-tree).
+\item \emph{SIGIL Genesis v0} — \texttt{SIGIL\_GENESIS\_v0.md}; the genesis citizens, the
+build-receipt design, and the fair-launch-versus-endowment contradiction preserved in the
+origin hash.
+\item The project settlement record (2026-05 to 2026-07) — the dated on-chain compensation
+history (endowment, earned payment, the two FÆLLED grants, the rotation and rescue) this
+chronicle is drawn from and verified against; amounts, dates, and block heights quoted as
+public-ledger facts.
+\end{itemize}
+
+\end{document}

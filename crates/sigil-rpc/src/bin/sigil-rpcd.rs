@@ -259,14 +259,29 @@ fn store_block(node: &Node, bh: u64, sub: &Submission, reward: u128, prev_tip: [
 fn emit_header(node: &Node, bh: u64, sub: &Submission, prev_tip: [u8; 32], ts_us: u128) {
     let Some(db) = node.statedb.as_ref() else { return };
     let Some(miner) = hex32(&sub.wallet) else { return };
+    // P2a linkage: parent_hash = hash(previous HEADER) — Bitcoin-style self-linkage
+    // so a light client verifies the header chain from headers ALONE (chain_verify's
+    // contract). At the header floor (no prev header, incl. the P1→P2a transition:
+    // a prev header that itself doesn't link is treated as pre-floor) the parent is
+    // the fold prev_tip and `header/floor` records where the walkable chain starts.
+    let prev_hdr: Option<sigil_header::SigilBlockHeaderV0> = db
+        .get(format!("header/{:020}", bh.wrapping_sub(1)).as_bytes()).ok().flatten()
+        .and_then(|b| serde_json::from_slice(&b).ok());
+    let parent = match prev_hdr {
+        Some(ph) => ph.hash(),
+        None => { let _ = db.put(b"header/floor", bh.to_string().as_bytes()); prev_tip }
+    };
     let hdr = sigil_rpc::build_ledger_header(
-        &node.state, bh, prev_tip, miner,
+        &node.state, bh, parent, miner,
         sub.block.nonce, sub.block.blake4_hash, &sub.block.vdf,
         node.bits, ts_us, 0,
     );
     if let Ok(js) = serde_json::to_string(&hdr) {
         let _ = db.put(format!("header/{bh:020}").as_bytes(), js.as_bytes());
         let _ = db.put(b"header/tip", bh.to_string().as_bytes());
+        if db.get(b"header/floor").ok().flatten().is_none() {
+            let _ = db.put(b"header/floor", bh.to_string().as_bytes());
+        }
     }
 }
 
@@ -991,7 +1006,13 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             let n = node.read().unwrap();
             // LANE-R: expose genesis_ts_us so a standalone verifier (chain_verify) can recompute
             // the time-based reward (0 on a legacy block-based chain).
-            ok(format!("{{\"ok\":true,\"block_height\":{},\"height\":{},\"tip\":\"{}\",\"bits\":{},\"genesis_ts_us\":\"{}\"}}",
+            // P2a: header_floor/header_tip = the walkable real-header chain bounds.
+            let (hf, ht) = n.statedb.as_ref().map(|db| {
+                let rd = |k: &[u8]| db.get(k).ok().flatten()
+                    .and_then(|b| String::from_utf8(b).ok()).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                (rd(b"header/floor"), rd(b"header/tip"))
+            }).unwrap_or((0, 0));
+            ok(format!("{{\"ok\":true,\"block_height\":{},\"height\":{},\"tip\":\"{}\",\"bits\":{},\"genesis_ts_us\":\"{}\",\"header_floor\":{hf},\"header_tip\":{ht}}}",
                 n.block_height, n.height, hexs(&n.tip_hash), n.bits, n.genesis_ts_us))
         }
         ("GET", "/block") => {
@@ -1023,6 +1044,39 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 Some(bytes) => ok(String::from_utf8_lossy(&bytes).to_string()),
                 None => ok(format!("{{\"ok\":true,\"height\":{h},\"found\":false}}")),
             }
+        }
+        // ONE-CHAIN P2 (block_sync re-point): BATCH header pull so a light node
+        // syncs the whole header chain in ~200 round-trips instead of 110k.
+        // `?from=F&count=N` (N capped) → contiguous run starting at F; stops at
+        // the first gap (below header/floor or above tip — both normal edges).
+        // `floor`/`tip` ride along so the client can plan the walk in one call.
+        ("GET", "/headers") => {
+            let n = node.read().unwrap();
+            let Some(db) = n.statedb.as_ref() else { return ok("{\"ok\":false,\"error\":\"no state db\"}".into()) };
+            let read_u64 = |key: &[u8]| -> Option<u64> {
+                db.get(key).ok().flatten()
+                    .and_then(|b| String::from_utf8(b).ok()).and_then(|s| s.parse().ok())
+            };
+            let floor = read_u64(b"header/floor");
+            let tip = read_u64(b"header/tip");
+            let from: u64 = query_get(query, "from").and_then(|s| s.parse().ok())
+                .or(floor).unwrap_or(0);
+            let count: u64 = query_get(query, "count").and_then(|s| s.parse().ok())
+                .unwrap_or(256).min(512);
+            let mut headers: Vec<String> = Vec::new();
+            for h in from..from.saturating_add(count) {
+                match db.get(format!("header/{h:020}").as_bytes()).ok().flatten() {
+                    Some(bytes) => headers.push(String::from_utf8_lossy(&bytes).into_owned()),
+                    None => break,
+                }
+            }
+            let next = from + headers.len() as u64;
+            ok(format!(
+                "{{\"ok\":true,\"from\":{from},\"next\":{next},\"floor\":{},\"tip\":{},\"headers\":[{}]}}",
+                floor.map(|f| f.to_string()).unwrap_or_else(|| "null".into()),
+                tip.map(|t| t.to_string()).unwrap_or_else(|| "null".into()),
+                headers.join(",")
+            ))
         }
         // ONE-CHAIN P1: the ledger's OWN supply truth (scope doc §5 Q4 — the TUI's
         // 21M/21M panel read the spine's display path; this is the real counter).

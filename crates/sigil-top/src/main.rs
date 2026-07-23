@@ -20,6 +20,7 @@
 mod block_store;
 mod block_sync;
 mod chain_verify; // v0.9.0: full verifying sync — spine continuity + precheck walk
+mod ledger_verify; // ONE-CHAIN P2a: verify the MONEY chain's header spine + real /supply truth
 mod gap_sync;     // SPINE-BREAK fix: testable genesis-up contiguity engine + shared watchdog/classify
 mod serve;
 mod heroes;
@@ -907,11 +908,29 @@ fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str) -> String
         o.push_str(&row("contract", &short_root(&st.contract_root)));
     }
 
-    // economics — 21 M hard cap
+    // economics — 21 M hard cap. ONE-CHAIN P2a: the LEDGER's /supply is the truth
+    // (SigilState.native_supply behind the commit chokepoint). The old value came
+    // from the spine's display path and read "100% minted" — fiction. Feed value
+    // only as fallback while the ledger is unreachable.
     o.push_str(&mid_title("ECONOMICS  (21 M hard cap)"));
-    let frac = st.native_supply as f64 / MAX_SUPPLY_BASE as f64;
-    o.push_str(&row("supply", &format!("{GOLD}{}{RESET} {DIM}/ 21,000,000 SIGIL{RESET}", fmt_supply(st.native_supply))));
+    let ledger = ledger_verify::latest();
+    let (sup_base, sup_src) = match &ledger {
+        Some(li) => (li.supply_base, "ledger"),
+        None => (st.native_supply, "feed"),
+    };
+    let frac = sup_base as f64 / MAX_SUPPLY_BASE as f64;
+    o.push_str(&row("supply", &format!("{GOLD}{}{RESET} {DIM}/ 21,000,000 SIGIL · {sup_src}{RESET}", fmt_supply(sup_base))));
     o.push_str(&row("minted", &format!("{}  {GOLD}{:.4}%{RESET}", bar(frac, 30, GOLD), frac * 100.0)));
+    if let Some(li) = &ledger {
+        o.push_str(&row("chain", &format!("{DIM}mining ledger · height{RESET} {GOLD}{}{RESET}", li.height)));
+        let v = match (&li.break_note, li.header_tip) {
+            (Some(b), _) => format!("{}✗ {b}{RESET}", "\x1b[38;5;203m"),
+            (None, 0) => format!("{DIM}headers not minted yet (pre-P1 node){RESET}"),
+            (None, _) => format!("{GREEN}✓ headers #{}→#{} self-linked{RESET} {DIM}· {} walked{RESET}",
+                li.verified_floor, li.header_tip, li.checked),
+        };
+        o.push_str(&row("verify", &v));
+    }
 
     // flux-fold succinct sync capability
     o.push_str(&mid_title("SUCCINCT SYNC  (flux-fold · light node)"));
@@ -1225,6 +1244,10 @@ fn main() {
     // read the EXACT reason instead of guessing.
     boot_trace(&format!("main() entry v{} pid {}", env!("CARGO_PKG_VERSION"), std::process::id()));
     std::panic::set_hook(Box::new(|info| { boot_trace(&format!("PANIC: {info}")); }));
+    // POOL-DIAG: report THIS release's version on every challenge fetch (`&v=`),
+    // not the flux-miner engine-crate fallback — the pool's /mining/miners is how
+    // stale rig installs get spotted.
+    let _ = flux_miner::client::CLIENT_VERSION.set(VERSION.to_string());
     // Capture the real install path NOW, before anything can self-replace us.
     if let Ok(e) = std::env::current_exe() {
         if e.exists() { let _ = INSTALL_EXE.set(e); }
@@ -1586,6 +1609,11 @@ fn main() {
         interactive, std::io::stdout().is_terminal(), std::io::stdin().is_terminal(), win_has_console(), cfg.once, cfg.lite));
     // Non-TTY (piped / captured / redirected) or --once → one plain frame, no loop.
     if cfg.once || !interactive {
+        // P2a: prewarm the ledger refresher so the single frame carries the real
+        // supply + header-verify verdict instead of the feed fallback (the
+        // background thread otherwise races this one-and-only render).
+        let _ = ledger_verify::latest();
+        for _ in 0..40 { if ledger_verify::latest().is_some() { break; } thread::sleep(Duration::from_millis(250)); }
         let (st, online, source) = fetch_best(&cfg);
         let frame = if cfg.lite { render_lite(&st, online) } else { render_full(&st, online, &cfg.api, source) };
         print!("{frame}");

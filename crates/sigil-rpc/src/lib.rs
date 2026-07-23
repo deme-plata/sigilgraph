@@ -729,6 +729,18 @@ mod tests {
     }
 
     #[test]
+    fn ledger_header_chain_self_links() {
+        // P2a contract: header[h].parent_hash == header[h-1].hash() — the walk
+        // chain_verify/ledger_verify perform from headers alone.
+        let mut s = SigilState::new();
+        let h1 = build_ledger_header(&s, 1, [0u8; 32], MINER, 1, 1, &test_vdf(), 18, 1, 0);
+        credit_share(&mut s, 1, MINER, 500).unwrap();
+        let h2 = build_ledger_header(&s, 2, h1.hash(), MINER, 2, 2, &test_vdf(), 18, 2, 0);
+        assert_eq!(h2.parent_hash, h1.hash(), "header chain must self-link");
+        h2.precheck().expect("linked header still passes precheck");
+    }
+
+    #[test]
     fn ledger_header_serde_roundtrip_stable_hash() {
         let s = SigilState::new();
         let hdr = build_ledger_header(&s, 5, [2u8; 32], MINER, 5, 5, &test_vdf(), 20, 99, 0);

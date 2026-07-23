@@ -1,0 +1,707 @@
+% The SIGIL Failure Atlas — v0
+% Companion paper to whitepaper v1.3 and the philosophy companion v0.3.
+% A taxonomy of observed and induced failures across SIGIL and its lineage —
+% each entry: symptom, root cause, detection, guard, lesson — in the house
+% tradition of load-bearing honesty. Failure treated as the highest-grade
+% evidence a system produces about itself.
+% House rules: pseudonymous; no secrets (incident facts only); exact numbers
+% kept verbatim from the record; open items marked OPEN, not argued away.
+% Build: pdflatex x2.
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage[table]{xcolor}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{ragged2e}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta}
+\usepackage{graphicx}
+\graphicspath{{img/}}
+\usepackage{tcolorbox}
+\tcbuselibrary{skins,breakable}
+\usepackage{needspace}
+\usepackage{fancyhdr}
+\usepackage[colorlinks=true,linkcolor=sigilcyan,urlcolor=sigilcyan,citecolor=sigilcyan]{hyperref}
+\usepackage{xurl}
+
+% ---------- design system (shared with whitepaper v1.3 / philosophy v0.3) ----------
+\definecolor{ink}{HTML}{15171A}
+\definecolor{sigilcyan}{HTML}{0086A8}
+\definecolor{sigilblue}{HTML}{3B5BDB}
+\definecolor{sigilviolet}{HTML}{7048B5}
+\definecolor{sigilamber}{HTML}{B86A00}
+\definecolor{sigilred}{HTML}{B02A2A}
+\definecolor{slate}{HTML}{D7DCE1}
+\definecolor{panelbg}{HTML}{F7F7F4}
+\definecolor{rowtint}{HTML}{F2F4F6}
+
+\color{ink}
+
+% status markers
+\newcommand{\stM}{\textcolor{sigilcyan}{$\bullet$}~{\scriptsize\textcolor{sigilcyan}{\textsc{measured}}}}
+\newcommand{\stO}{\textcolor{sigilamber}{$\circ$}~{\scriptsize\textcolor{sigilamber}{\textsc{open}}}}
+\newcommand{\stL}{\textcolor{sigilcyan}{$\bullet$}~{\scriptsize\textcolor{sigilcyan}{\textsc{live}}}}
+\newcommand{\measured}[1]{\textcolor{sigilcyan}{\textbf{#1}}}
+% severity markers
+\newcommand{\svC}{{\scriptsize\textcolor{sigilred}{\textsc{catastrophic}}}}
+\newcommand{\svM}{{\scriptsize\textcolor{sigilamber}{\textsc{major}}}}
+\newcommand{\svMod}{{\scriptsize\textcolor{sigilblue}{\textsc{moderate}}}}
+\newcommand{\svMin}{{\scriptsize\textcolor{gray}{\textsc{minor}}}}
+% resolution markers
+\newcommand{\rsFixed}{{\scriptsize\textcolor{sigilcyan}{\textsc{guarded}}}}
+\newcommand{\rsPartial}{{\scriptsize\textcolor{sigilviolet}{\textsc{partially guarded}}}}
+\newcommand{\rsOpen}{{\scriptsize\textcolor{sigilamber}{\textsc{open}}}}
+
+% layman explainer box
+\newcommand{\layman}[3]{%
+\begin{tcolorbox}[enhanced,
+  interior style={left color=#1!9,right color=white},
+  colframe=#1!45!slate,boxrule=0.5pt,arc=3pt,
+  borderline west={2.5pt}{0pt}{#1},
+  left=9pt,right=9pt,top=7pt,bottom=7pt]
+{\scriptsize\textcolor{#1}{\textsc{in plain words}}\; — \;\textbf{\small #2}}\\[3pt]
+\small #3
+\end{tcolorbox}}
+
+% ---------- atlas entry ----------
+% \failentry{ID}{Name}{date · system}{severity}{resolution}{
+%   rows via \frow{label}{text} }
+\newcommand{\frow}[2]{{\footnotesize\textcolor{gray}{\textsc{#1}}}\;&\small #2\\}
+\newenvironment{failentry}[5]{%
+\begin{tcolorbox}[enhanced,breakable,colback=white,colframe=slate,boxrule=0.6pt,arc=2pt,
+  left=8pt,right=8pt,top=6pt,bottom=6pt,
+  borderline west={3pt}{0pt}{sigilamber!70!slate}]
+{\small\textbf{#1 · #2}\hfill{\footnotesize\textcolor{gray}{#3}}\quad#4\quad#5}\\[4pt]
+\begin{tabular}{@{}>{\raggedleft\arraybackslash}p{1.8cm}p{13.2cm}@{}}
+}{%
+\end{tabular}
+\end{tcolorbox}\vspace{2pt}}
+
+% widow/orphan discipline
+\widowpenalty=10000
+\clubpenalty=10000
+\displaywidowpenalty=10000
+
+% running header
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhfoffset{0pt}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\headrule}{{\color{slate}\hrule width\headwidth height 0.4pt}}
+\fancyhead[L]{\scriptsize\textcolor{gray}{The SIGIL Failure Atlas \,$\cdot$\, v0}}
+\fancyhead[R]{\scriptsize\textcolor{gray}{\thepage}}
+
+\hypersetup{
+  pdftitle={The SIGIL Failure Atlas (v0)},
+  pdfauthor={bitknight.dipper688@passmail.net},
+  pdfsubject={Companion to SIGIL whitepaper v1.3 — a taxonomy of observed and induced failures across SIGIL and its lineage, each with root cause, guard, and lesson},
+  pdfkeywords={SIGIL, failures, incidents, taxonomy, post-mortem, reliability, honest engineering}
+}
+
+\begin{document}
+
+% ---------- title page with braid watermark ----------
+\begin{tikzpicture}[remember picture,overlay]
+\begin{scope}[shift={(current page.north)},yshift=-4.2cm,opacity=0.06]
+  \foreach \yoff/\ph in {0/0, 0.9/2.1, 1.8/4.2}{
+    \draw[ink,line width=2.6pt]
+      plot[smooth,samples=60,domain=-9:9] (\x,{\yoff-0.9+0.85*cos(60*\x+\ph r)});
+  }
+\end{scope}
+\end{tikzpicture}
+
+\thispagestyle{empty}
+\begin{center}
+\begin{tikzpicture}
+  \node[rounded corners=8pt, fill=ink, inner sep=10pt]
+       {\includegraphics[width=2.2cm]{sigil-flat.png}};
+\end{tikzpicture}\\[10pt]
+{\Huge\bfseries\textcolor{ink}{The SIGIL Failure Atlas}}\\[8pt]
+{\Large How a Chain and Its Lineage Actually Broke}\\[6pt]
+{\normalsize A companion to \emph{SIGIL — The Variational Chain}, whitepaper v1.3}\\[10pt]
+{\normalsize v0 · 2026-07-23}\\[6pt]
+{\normalsize\texttt{bitknight.dipper688@passmail.net}}\\[2pt]
+{\small SIGIL / Flux Foundation · \texttt{sigilgraph.quillon.xyz}}\\[14pt]
+\begin{minipage}{0.74\textwidth}
+\centering\itshape
+``No silent corruption serving traffic. Ever.''\\[2pt]
+{\upshape\scriptsize --- the doctrine this atlas is the evidence for}
+\end{minipage}
+\end{center}
+
+\vspace{10pt}
+\noindent
+\begin{tcolorbox}[colback=panelbg,colframe=slate,boxrule=0.5pt,arc=2pt,left=8pt,right=8pt,top=6pt,bottom=6pt]
+\small\textbf{Scope \& method.} This atlas catalogues \measured{71} distinct failures
+observed or deliberately induced across SIGIL, its production sister network Quillon
+Graph, the Flux toolchain, and the four-node fleet, 2026-05 to 2026-07. Every entry is
+drawn from the project's own incident record — memory notebooks, the 2026-06-10 security
+audit, the hardening backlog, and the production-instability diagnosis — with numbers,
+heights, and file:line quoted verbatim so each is re-checkable. It is pseudonymous and
+secret-free: incident \emph{facts} are recorded (``a key was exposed''), never the
+secrets themselves. Open items are marked \rsOpen{} and not argued away. Failure here is
+not confessed; it is \emph{cited}, because in this project a failure is the highest-grade
+evidence a system produces about itself.
+\end{tcolorbox}
+
+\vspace{6pt}
+% severity strip
+\noindent
+\begin{minipage}[t]{0.32\textwidth}\begin{tcolorbox}[colback=panelbg,colframe=slate,boxrule=0.5pt,arc=2pt,halign=center]
+{\LARGE\bfseries\textcolor{sigilred}{15}}\\[2pt]{\scriptsize \textsc{catastrophic} — funds, consensus, or fleet at stake}\end{tcolorbox}\end{minipage}\hfill
+\begin{minipage}[t]{0.32\textwidth}\begin{tcolorbox}[colback=panelbg,colframe=slate,boxrule=0.5pt,arc=2pt,halign=center]
+{\LARGE\bfseries\textcolor{sigilamber}{44}}\\[2pt]{\scriptsize \textsc{major} — outage, corruption, or exploit class}\end{tcolorbox}\end{minipage}\hfill
+\begin{minipage}[t]{0.32\textwidth}\begin{tcolorbox}[colback=panelbg,colframe=slate,boxrule=0.5pt,arc=2pt,halign=center]
+{\LARGE\bfseries\textcolor{sigilblue}{12}}\\[2pt]{\scriptsize \textsc{moderate} — degraded, misleading, or latent}\end{tcolorbox}\end{minipage}
+
+\vspace{10pt}
+
+\section{Why a chain keeps an atlas of its own failures}
+
+Most systems bury their failures. The post-mortem is internal, the incident channel is
+private, and the public artifact — the whitepaper, the launch post — describes the system
+as designed, not as it broke. This atlas takes the opposite view, and it is the view the
+rest of the SIGIL corpus already commits to: that a design is a hypothesis, and its
+failures are the experiments that test it. The whitepaper's proudest mechanism, the
+four-state-root header that halts a node on divergence (exit code 78), exists because of
+a specific dated injury on the production sister network — a replay bug that silently
+dropped a wallet from 3200 to 1484 QUG with no protocol-layer signal. \emph{The
+architecture is a scar map.} You cannot read it honestly without the wounds.
+
+So this companion collects the wounds. It is not a security disclosure (that is the
+whitepaper's job, \S3.7 there) and not a roadmap. It is a \emph{taxonomy}: seventy-one
+failures sorted into the shapes they keep taking, so that the next one is recognizable
+before it is catastrophic. Three things make it worth reading rather than wallowing.
+First, the failures are \emph{real and cited} — every one carries the file, the number,
+the height it was found at. Second, they \emph{cluster}: ten classes cover all
+seventy-one, and a handful of deep patterns cover the classes. Third, and most
+important, the majority produced a \emph{structural guard} — a rule, an invariant, a
+default — that makes the whole class harder to re-enter. The atlas's real subject is
+that conversion: how a system turns its own failures into the shape of its defenses.
+
+\layman{sigilviolet}{a scar map, not a confession}{Every serious bridge, aircraft, and
+operating system is designed around a list of ways earlier ones failed. That list is not
+an embarrassment; it is the most valuable document the field owns. This paper is SIGIL's
+version — written down, numbered, and public, so the same mistake has to be a
+\emph{new} one to happen again.}
+
+\subsection{The taxonomy}
+
+Every failure in the record falls into one of ten classes. They are not equally
+dangerous, and they are not independent — the worst incidents are usually two classes
+stacked (a bad default that produces resource exhaustion; a stale state that hides a
+silent divergence). The classes, by count:
+
+\begin{center}
+\small
+\rowcolors{2}{rowtint}{white}
+\renewcommand{\arraystretch}{1.35}
+\begin{tabularx}{\textwidth}{@{}lr>{\RaggedRight\arraybackslash}X@{}}
+\toprule
+Class & \# & What goes wrong \\
+\midrule
+\textbf{Silent divergence} & 12 & Two honest parts compute different truths and nothing
+alarms. The class exit 78 exists to kill. \\
+\textbf{Protocol wedge} & 10 & An ingress path accepts what it should verify — a
+length-only check, an uncalled verifier, a trusted-but-forgeable field. \\
+\textbf{Stale state} & 9 & A cached, lagging, or reverted value is served or trusted as
+current — old binaries, old DBs, old flags, un-bumped nonces. \\
+\textbf{Resource exhaustion} & 8 & Memory or disk climbs unbounded; the OOM family. \\
+\textbf{Bad default} & 7 & A shipped default is wrong for the real environment — a cap
+below baseline, a terminal check false on real terminals. \\
+\textbf{Measurement} & 7 & The instrument lies: a microbenchmark, a dashboard, a unit,
+a green test that tested nothing. \\
+\textbf{Economic} & 6 & Value is created, doubled, or destroyed — phantom mints,
+double-spends, decimal drift. \\
+\textbf{Key management} & 6 & The trust root is wrong: no auth, a key taken from the
+attacker's own message, a secret in a public repo. \\
+\textbf{Toolchain} & 5 & The build or crypto substrate is subtly wrong — a poisoned
+cache, a benchmark modulus in production, a glibc ceiling. \\
+\textbf{Serialization panic} & 1 & A value no serializer expected crash-loops the node. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The rest of the atlas walks the classes that recur, features the most instructive
+incident in each as a full entry, and tabulates the others. It closes with the deep
+patterns beneath the classes (\S\ref{sec:patterns}), the guards the failures built
+(\S\ref{sec:guards}), and the exhibits still open (\S\ref{sec:open}).
+
+\section{Silent divergence — the class the architecture is built against}\label{sec:divergence}
+
+If SIGIL has an original sin it is designed to abolish, this is it: two compliant nodes,
+or two code paths in one node, arrive at different truths, and no signal fires. It is the
+most dangerous class because it is the quietest, and it is why the whitepaper makes
+agreement a committed, recomputed quantity rather than a social one.
+
+\begin{failentry}{SD-1}{Fresh nodes hold different funds — turbo-sync skips the DEX}{2026-07-16 · quillon}{\svC}{\rsOpen}
+\frow{symptom}{A P2P-synced fresh node and the authoritative node, at the \emph{same}
+height (\textasciitilde h20.72M), held different real balances: a \measured{69{,}028 QUG}
+native gap over the same 6425 wallets (balance roots \texttt{c2657388} vs
+\texttt{a6c8a1ff}); the fresh node had \measured{0} \texttt{dex\_}/\texttt{lp\_token}
+keys against the authoritative node's 140 / 26.}
+\frow{root cause}{The bulk \path{turbo_sync.rs} path never applied DEX/token/swap
+effects — swaps were replayed \emph{only} on the gossip path (\path{main.rs:13683}). Every
+fresh node bulk-syncs, so every fresh node missed DEX state. Compounded: the balance root
+hashed only \texttt{wallet\_balance\_*} keys — it was native-QUG-only, structurally
+\emph{blind} to the token/pool divergence it should have caught. The chain was not truly
+redundant for \textasciitilde5 months.}
+\frow{detection}{A deliberate two-node cross-check (read-only audit tool
+\texttt{a6912fa2}) — not an alarm. The guard that should have fired was the very root that
+was blind.}
+\frow{guard}{Fix direction (not fully shipped): unify bulk / gossip / replay into one
+idempotent total apply including DEX; a \emph{multi-asset} balance root; a signed state
+anchor; N-node soak proving ``kill the authoritative node $\to$ a fresh node syncs to an
+identical multi-asset root'' before arming a reject gate.}
+\frow{lesson}{Two code paths that both mutate state will diverge unless unified into one
+idempotent apply — and a state root that hashes only one asset class cannot detect the
+divergence it exists to guard.}
+\end{failentry}
+
+The purest instance of the class, because both halves are textbook: a second apply-path
+that silently disagreed with the first, \emph{and} a detector engineered to miss it. The
+whitepaper's four-root header is the general answer — but SD-1 is the reminder that a root
+only guards what it hashes. Two more from the same class, in brief. The
+\textbf{peerless self-certifying singleton} (2026-06-13, \svC): a production node that
+lost all peers kept producing and self-certifying blocks, bypassing the BFT quorum
+entirely — a quorum of one is not a quorum. The \textbf{Epsilon/Delta silent fork at
+\textasciitilde h18.48M} (2026-06-12, narrowed to 18{,}475{,}000--18{,}490{,}000 by
+block-hash bisection): the mesh sat fully de-meshed for weeks, every node solo-producing,
+each certain it was canonical. And the two \emph{aliasing mints} the SIGIL audit found —
+a native \texttt{Send} with \texttt{from==to} whose credit re-read pre-debit state and
+overwrote the debit (net gain = the amount), and \texttt{native\_supply} computed with
+\texttt{wrapping\_} arithmetic so the 21M cap was checked against a sum mod $2^{128}$ —
+are silent divergence in miniature, inside a single transaction.
+
+\layman{sigilcyan}{why ``it matches'' is the hard part}{Two calculators agreeing on
+2+2 is easy. Two computers, run by different people, independently agreeing on the exact
+balance of every wallet after twenty million transactions — and \emph{noticing the
+instant they don't} — is the whole problem of a blockchain. Most entries in this section
+are variations of the same discovery: the agreement was never as total as it looked, and
+the thing meant to notice was looking at the wrong half.}
+
+\section{Economic failures — value from nothing, and value into nothing}\label{sec:economic}
+
+Silent divergence is dangerous in general; when the divergent quantity is \emph{money},
+it is the whole game. Six incidents created, doubled, or destroyed value directly.
+
+\begin{failentry}{EC-1}{The \$58.5-trillion phantom swap-mint}{2026-07-02 · quillon}{\svC}{\rsPartial}
+\frow{symptom}{A single wallet (\texttt{4cf3b55e}) acquired a \measured{\$58.5-trillion}
+QUGUSD position through a swap that minted the output without conserving the input, the
+reconciler then treating the phantom balance as real.}
+\frow{root cause}{The swap-apply path and the balance reconciler did not enforce a
+conservation invariant across the swap: output credited, input not correspondingly
+debited, and no apply-layer check that total value in $=$ total value out. One of three
+open mint vectors (coinbase, CDP, bridge) the 2026-06-24 mint audit catalogued alongside
+a partial DEX-decimal issue.}
+\frow{guard}{Primary clawback \emph{executed} 2026-07-11 (the top abuser wallets swept
+\measured{58.60T $\to$ 3.79B} QUGUSD); a round-2 sweep of grey wallets is paused by the
+operator. The durable fix is still pending: an apply-layer conservation invariant on
+every state transition (the SIGIL chokepoint's per-delta conservation check is the sister
+design). The audit's finding — ``no apply-layer conservation invariant'' — is the general
+defect.}
+\frow{lesson}{Every money mutation needs a conservation check \emph{at the apply layer},
+not just at the API; a swap that credits without debiting is a mint with extra steps.}
+\end{failentry}
+
+\begin{failentry}{EC-2}{The mixer double-spend — max-wins drops the debit}{2026-06-27 · quillon}{\svC}{\rsFixed}
+\frow{symptom}{Two independent drains. Normal sends did not debit the sender (coins
+re-spendable forever); the quantum mixer allowed the same coins to be spent twice.}
+\frow{root cause}{Vector 1: \path{send_signed} built the transaction with an
+\emph{empty} signature, relying on an in-memory \texttt{trusted\_via\_auth} flag that does
+not propagate over P2P — so miners rejected the unsigned tx, it never landed in a block,
+and the sender was never debited. Vector 2: the mixer wrote balances directly (no
+block/consensus) via \path{save_wallet_balances}, a \emph{batch max-wins} write that skips
+any entry where existing $\ge$ new — so the sender's \emph{debit} (new $<$ old) was
+silently dropped while the recipient's credit landed; on the next RocksDB reload the
+spent coins reappeared. An infinite mint hiding inside a safety rule.}
+\frow{guard}{Client-side Ed25519 signing (\path{signTransferV72} reproduces the signable
+payload byte-for-byte); unsigned rejected unless an explicit escape flag is set. The
+mixer now persists \emph{both} legs with an \emph{authoritative} force-write
+(\path{save_wallet_balance_authoritative}, no max-wins) and requires an authenticated
+wallet.}
+\frow{lesson}{A max-wins write protects against stale \emph{overwrites} and, applied to a
+legitimate debit, becomes a mint — the safety rule and the exploit were the same line of
+code, read in two directions.}
+\end{failentry}
+
+EC-2 is the atlas's sharpest irony and the reason the sister chain's balance-integrity
+rules are non-negotiable: \path{save_wallet_balances} being max-wins is \emph{correct} —
+it is exactly how a replay bug once dropped a wallet 3200 $\to$ 1484 QUG and how the
+project swore never again — and it is precisely that correctness that ate the mixer's
+debit. The lesson is not ``max-wins is wrong''; it is that a debit is not an overwrite,
+and a persistence layer that cannot tell them apart will protect the wrong one. The class
+also holds the \textbf{gossip transaction-replay drain} (2026-07-02, \svC: a
+re-broadcast tx re-applied against the sender), \textbf{CULTURE zeroed by a decimal
+swap} (2026-06-28: a decimal-mismatch debit drove a token's balance store to 0 while its
+ledger stayed intact — value destroyed, not stolen), and the \textbf{Beta 29.6-billion
+re-fork} (\S\ref{sec:staleinfra}), where a backup node minted \measured{29{,}676{,}551{,}397}
+QUG — 1{,}413$\times$ the 21M cap — on an abandoned fork.
+
+\section{Trust roots — authenticating against the attacker's own message}\label{sec:trust}
+
+The protocol-wedge and key-management classes share one root confusion: mistaking
+\emph{integrity} (this wasn't corrupted in transit) for \emph{authenticity} (this came
+from who it claims to). Ten-plus incidents are variants. The SIGIL money daemon supplies
+the cleanest set, because they were found by audit before an attacker found them.
+
+\begin{failentry}{TR-1}{A public money daemon with zero authentication}{2026-06-10 · sigil}{\svC}{\rsFixed}
+\frow{symptom}{\path{sigil-rpcd} was exposed on public \texttt{:8099} with \emph{no}
+owner-signature check on any money route. The headline: \texttt{/mine} took a
+\emph{caller-supplied} difficulty (default 0 $\to$ all PoW passes) and reward, so one
+anonymous \texttt{curl} could mint up to the \measured{21M} cap to any wallet
+(\path{sigil-rpcd.rs:777-793}). \texttt{/swap} and \texttt{/add\_liquidity} spent any
+\texttt{from} wallet with no signature; \texttt{/onboard\{\}} was an unlimited
++100/+1000 faucet; \texttt{/deploy\_token} minted any uncapped token.}
+\frow{root cause}{\texttt{sigil-oauth} — real OAuth2/PKCE, Ed25519/SQIsign tokens,
+fails-closed on unknown algorithms — was \emph{fully built and never wired in}. The
+router gated nothing; CORS \texttt{*} on every response compounded it.}
+\frow{guard}{A wallet-signature gate (Ed25519 over a domain-separated canonical message
+with a per-wallet replay-nonce persisted in the snapshot) wired into every money route;
+\texttt{/mine} now derives reward and difficulty server-side. Deployed \emph{enforcing}
+2026-06-10, verified (unsigned \texttt{/mine|/swap|/credit|/deploy\_token} $\to$ ``missing
+sig''); 42/42 crate tests.}
+\frow{lesson}{A correct auth library that is never wired into the request path provides
+exactly zero protection; the whole fix was integration, not cryptography.}
+\end{failentry}
+
+\begin{failentry}{TR-2}{The updater that verified releases against the attacker's key}{2026-06-10 · sigil}{\svC}{\rsFixed}
+\frow{symptom}{The auto-updater verified a release's signature against
+\texttt{a.sqisign\_pubkey} — a field of the \emph{announcement itself}. No trusted-key
+allowlist existed, so anyone publishing on the release topic could push a self-signed
+malicious binary: fleet-wide remote code execution.}
+\frow{root cause}{Signature verification trusted the public key carried \emph{inside the
+same message being verified} — a valid signature over attacker-chosen bytes, with no root
+of trust anywhere.}
+\frow{guard}{\path{verify_announcement_pinned}: a pinned constant key plus an
+out-of-band allowlist; empty allowlist fails closed (auto-update off). Announcements
+whose key isn't allowlisted are rejected \emph{before} verification. 6/6 tests.}
+\frow{lesson}{Verifying a signature against a key supplied by the same object authenticates
+nothing — the trust anchor must be pinned out of band, or the ``signature'' is
+decoration.}
+\end{failentry}
+
+TR-1 and TR-2 are the same mistake at two layers, and the same mistake as the wire-level
+\textbf{keyless tip-proofs} (H4, \rsOpen): tip-proofs verified only by a keyless BLAKE3
+fingerprint whose own doc-comment reads ``any peer can fabricate one,'' while the real
+SQIsign verifier exists but is never called on the wire. Integrity, mistaken for
+authenticity, three times. The rest of the class is the SIGIL hardening backlog's
+consensus ingress: \textbf{block-apply verifies no producer signature} (H1, \svC,
+\rsPartial — a length-only precheck with \texttt{producer\_sig = vec![0u8;292]}; the
+height-gated verifier is written, tested, and \emph{dormant} at activation height
+\texttt{u64::MAX}); the \textbf{length-only sync handshake} (H2 — verification checked
+\texttt{identity\_sig.len()==32}, and nothing called it); the \textbf{follower that
+trusts peer-declared difficulty} (H3 — serve \texttt{bits=4}, the follower credits the
+full reward); and the \textbf{bridge mint unbound from its proof} (C9, \svC — an SPV
+proof established only that \emph{some} transaction existed while amount and recipient were
+caller-chosen, with no spent-set, so one proof mints unlimited wrapped assets N times).
+
+\layman{sigilamber}{a wax seal proves the letter is sealed, not who sealed it}{Half the
+worst bugs in this atlas are one confusion: checking that a message is intact is not the
+same as checking who it is from. A seal nobody can forge is worthless if the seal-maker
+is whoever sent the letter. The fix is always the same shape — decide \emph{in advance},
+out of band, whose seals you trust, and reject everyone else before you even look.}
+
+\section{Resource exhaustion — the OOM family}\label{sec:oom}
+
+Eight incidents are memory or disk climbing until something dies. They rarely corrupt
+state, but they take the node — and on a single-producer network, the node is the chain.
+
+\begin{failentry}{RX-1}{The unbounded prefix-scan OOM death-loop}{2026-06-23 · quillon}{\svM}{\rsFixed}
+\frow{symptom}{The production node climbed \measured{0 $\to$ \textasciitilde47 GB} anon-RSS
+in \measured{30--90 s}, hit the cgroup \texttt{MemoryMax} (46 G, bumped to 48 G), took
+\texttt{status=9/KILL} (``Memory cgroup out of memory''), \textasciitilde1 kill every 2.5
+minutes, restart count in the hundreds; users saw intermittent
+\texttt{ERR\_CONNECTION\_RESET} / 502.}
+\frow{root cause}{An unbounded RocksDB prefix scan materialized an entire key class into
+memory on a hot path — the working set exceeded any cap because it grew with the chain,
+not with the request.}
+\frow{guard}{Bound the scan; the incident also hardened the OOM posture (below). Diagnosis
+lives in the production-instability writeup.}
+\frow{lesson}{Any scan whose size grows with chain length, not request size, is an
+OOM waiting for the chain to get long enough.}
+\end{failentry}
+
+The class's most instructive member is not the biggest but the most \emph{misdiagnosed}:
+\textbf{jemalloc retention read as a leak} (2026-06-13) — RSS that looked like an
+unbounded leak was the allocator holding freed pages, fixed with a
+\texttt{\_RJEM\_MALLOC\_CONF} background-thread + decay env setting and \emph{no code
+change at all}. Chasing it as a leak would have burned days on the wrong layer. The
+others: the \textbf{Bracha-consensus instance leak} (2026-06-19, a 48h OOM freeze from
+consensus instances never reclaimed); the \textbf{mining-challenge $\times$ LWMA
+stampede} (2026-06-12, challenge regeneration triggering full-block fetches in a herd);
+the \textbf{producer $O(N^2)$ snapshot decay} (2026-06-08, a 1{,}075$\times$ OOM loop as
+snapshot cost grew quadratically); and — the one that crossed chains —
+\textbf{the release ceremony that filled the disk} (2026-07-21): a SIGIL rollout filled
+\texttt{/home} to 100\%, which crash-looped the \emph{Quillon} production node sharing the
+box until 250 G was freed. A neighbor's celebration is a resource attack.
+
+\section{Bad defaults and stale state — the config that was wrong for the world}\label{sec:staleinfra}
+
+Sixteen incidents (7 bad-default, 9 stale-state) share a shape: the code was arguably
+correct in the abstract and wrong for the actual environment, or served a value that used
+to be true. The single most expensive entry in the whole atlas is here.
+
+\begin{failentry}{BD-1}{The 1-GiB mesh wedge — an OOM cap below the baseline}{2026-06-24 · quillon}{\svC}{\rsFixed}
+\frow{symptom}{A months-long fleet de-mesh. The authoritative node's peer list was empty
+(0 libp2p peers), new nodes could not join, dialers saw \texttt{UnexpectedEof} /
+\texttt{BrokenPipe} right after the Noise handshake. Every node holding the 219 GB chain
+refused every other node.}
+\frow{root cause}{\path{libp2p::memory_connection_limits} was wired with a \measured{1
+GiB} \emph{default} cap (\path{unified_network_manager.rs:2128}), env unset on the fleet.
+That behaviour refuses \emph{every} new connection — inbound and outbound — with
+\texttt{ConnectionDenied\{MemoryUsageLimitExceeded\}} whenever process RSS exceeds the cap.
+Real steady-state RSS was \measured{5.5 GB}. The OOM-defence threshold sat \emph{below
+every real node's normal working set}, so it silently became a total connectivity block.}
+\frow{detection}{A controlled 2-node Docker experiment: a 1 MiB cap $\to$ 0 connections
+(dialer times out); raise it $\to$ \texttt{ConnectionEstablished} immediately. The wedge
+was invisible to every log because refusal was the designed behaviour.}
+\frow{guard}{Set the cap to 40 GiB fleet-wide (above baseline, below the 38 G MemoryMax);
+operating rule \texttt{Q\_P2P\_ONLY=1} with no HTTP sync fallback (HTTP only discovers
+height, transfers no blocks). A fresh Docker node then pulled real mainnet block-packs
+over the public interface.}
+\frow{lesson}{A safety threshold set below a process's normal working set does not degrade
+gracefully — it converts, silently, into a total denial of the thing it guards. Defaults
+must be validated against measured steady state.}
+\end{failentry}
+
+BD-1 is the atlas's paradigm case for ``measure the live path first,'' the sister rule of
+the philosophy companion: the cap was a \emph{reasonable-sounding number} (1 GiB of
+connection memory) that had never been checked against the 5.5 GB reality, and it cost
+the network its mesh for months while every node logged nothing wrong. The rest of the
+stale/default family is a catalogue of environment mismatches: the
+\textbf{\texttt{is\_terminal()} check false on real Windows consoles} (2026-06-19 — so
+the TUI never started; the fix was to \emph{always} run it), \textbf{the hardcoded
+\texttt{/root} DB path} that filled a 40 GB root partition when a relative
+\texttt{Q\_DB\_PATH} resolved off the big disk, \textbf{the bootstrap peer registered
+under its own peer-id} (2026-06-09, so the DHT never seeded and the mesh sat at 0 peers),
+the \textbf{two-target-dirs stale-binary publish} (2026-06-10, shipping an old binary
+from the wrong build dir), and \textbf{the stale global connlimit rule} that took
+\texttt{quillon.xyz} down (2026-06-20, an 80-connection cap on \texttt{:443} left over
+from an unrelated change). Each was correct somewhere; none was correct here.
+
+The class's most vivid stale-state incident is the \textbf{Beta 29.6-billion re-fork}
+(2026-06-30, \svM): a backup node re-diverged onto an abandoned phantom-mint fork and
+reported a supply of \measured{29{,}676{,}551{,}397} QUG — \measured{1{,}413$\times$} the
+21M cap — at height 19{,}478{,}848 (\textasciitilde82k blocks behind). Users briefly saw
+their wallet flicker through impossible balances (8M, 1B) because the staging subdomain
+\texttt{beta.quillon.xyz} was wired \emph{directly} to that node. The structural guard was
+already in place and held: the apex \texttt{quillon.xyz} reads the authoritative node
+only (failover to backups deliberately disabled 2026-06-11), so the forked values never
+reached production — the fix was to stop Beta, keep its fork DB for forensics, and resync
+a fresh DB from the authoritative chain. A staging endpoint wired straight to a node can
+leak a corrupt fork's balances; production endpoints must stay pinned to the authoritative
+node.
+
+\section{Measurement failures — when the instrument lies}\label{sec:measurement}
+
+Seven incidents are the instrument itself being wrong — and they are the class the
+project fears most, because a lying instrument corrupts every decision made from it. The
+paradigm gave the whole corpus its Rule 0.
+
+\begin{failentry}{MS-1}{The five-day 800-blk/s stall behind a 10-million-blk/s bench}{2026-07 · sigil}{\svM}{\rsFixed}
+\frow{symptom}{Live block-sync sat at \measured{\textasciitilde800 blocks/s} for
+\emph{five days} while the local commit pipeline microbenchmarked at
+\measured{10{,}000{,}000 blocks/s} durable and an in-process end-to-end harness reached
+\measured{39{,}112 blk/s}. Enormous effort went into the fast pipeline; the live number
+never moved.}
+\frow{root cause}{The real caps were elsewhere entirely: a producer-side full-block serve
+throttle ($\le$1 per 120 ms $\approx$ 8 serves/s) and a serial
+request$\to$await$\to$apply fetch loop (one range in flight). The local pipeline was never
+the bottleneck; the microbenchmark next to the live number \emph{was the bug report}.}
+\frow{guard}{Removed the throttle (finalized ranges cache-served by memcpy) and added a
+request-ahead window; the live number moved \measured{2{,}322 $\to$ 10{,}853 blocks/s}.
+The episode became Rule 0 of the SIGIL skill: measure the live path first; a fast
+microbench beside a slow live number is a bug in your understanding, not a victory.}
+\frow{lesson}{Optimizing a component you have not proven is the bottleneck is motion, not
+progress — and a benchmark that disagrees with production is measuring the wrong system.}
+\end{failentry}
+
+The class's other members are all instruments that quietly lied. The \textbf{0/0 green
+test trap} (2026-07-19): a test harness reported \texttt{0 passed / 0 failed} as success
+while a stale server ran a deleted executable — zero tests run reads identically to zero
+tests failed unless you gate on the verdict, not the failure count. The \textbf{lying
+dashboards} (2026-06-13): roughly 34 fixes chased against telemetry that was itself
+broken — \texttt{\_ms} fields carrying unix \emph{seconds}, metrics never seeded, phantom
+version numbers — producing fix-then-regression cycles until someone audited the
+instruments instead of the system. And, one class over but the same disease, the
+\textbf{delivery-law regrade} that this atlas's sibling documents celebrate: a law graded
+\emph{measured} whose validating simulator shared the law's own independence assumption —
+caught, regraded to derived+sim, and only promoted back to measured after a real
+netem experiment. The instrument was believed a little too early; the discipline caught
+it.
+
+\section{The patterns beneath the classes}\label{sec:patterns}
+
+Ten classes is still too many to hold in the head at the moment of writing code. Beneath
+them are a handful of deep shapes that generate most of the catalogue. These are the
+atlas's real payload — the things to check for before the class has a chance to form.
+
+\begin{enumerate}[leftmargin=1.5em,itemsep=5pt]
+\item \textbf{Built-but-not-wired.} The dominant shape. A correct primitive exists while
+the live path keeps calling the insecure or absent one. The zero-auth daemon (TR-1,
+\texttt{sigil-oauth} built, unwired), the forgeable VDF modulus (C10, trustless
+\texttt{rsa2048()} built, live callers still on \texttt{bench\_2048}), the replay nonce
+(H5, \path{check_and_bump_nonce} committed with \emph{zero callers}), the dormant
+producer-sig verifier (H1), the never-called SQIsign tip-proof (H4). \emph{The
+vulnerability was integration, never cryptography.} A fix that lands on a branch and
+never flips its activation switch is not a fix; it is a fix-shaped object.
+
+\item \textbf{Length-as-verification.} Type-checking a field's \emph{size} mistaken for
+validating its \emph{contents}: the length-only block precheck with a zeroed signature
+(H1), the handshake that checked \texttt{identity\_sig.len()==32} (H2). If your
+``verification'' would pass on a field of the right length filled with zeros, it verifies
+nothing.
+
+\item \textbf{Integrity mistaken for authenticity.} The trust-root confusion of
+\S\ref{sec:trust}: a key taken from the signed message (TR-2), a keyless fingerprint used
+as a trust anchor (H4). Intactness is not provenance.
+
+\item \textbf{Caller-chosen where proof-derived is required.} A consensus-critical value
+trusted from the request instead of derived from proven state: \texttt{/mine} difficulty
+and reward (TR-1), swap \texttt{from} (TR-1), bridge amount/recipient (C9), follower-
+trusted difficulty bits (H3), self-declared SPV difficulty (H7). The recurring fix is one
+sentence: \emph{derive it, don't accept it}.
+
+\item \textbf{Two paths, one state.} Any state reachable by two code paths will diverge
+unless the paths are one idempotent apply: turbo-sync vs gossip (SD-1), mixer-direct-write
+vs consensus (EC-2), bulk vs replay balances. The whitepaper's single
+\path{commit_state_transition} chokepoint is the structural answer — one door, or two
+truths.
+
+\item \textbf{The safety rule that became the exploit.} Max-wins persistence protecting
+against stale overwrites \emph{and} eating a legitimate debit (EC-2); an OOM cap
+protecting memory \emph{and} refusing all peers (BD-1). The most dangerous line is the one
+that is correct in the case you designed it for and catastrophic in the case you didn't.
+
+\item \textbf{The audit decays.} By the 2026-07-18 ground-truthing, one audit finding
+(H6) was already fixed and several (C9, C10, H5) were further along than the 2026-06-10
+audit claimed. A stale audit is itself a lying instrument (\S\ref{sec:measurement}). The
+house rule that fell out: \emph{when the audit and the code disagree, read the code}.
+\end{enumerate}
+
+\layman{sigilviolet}{seven things to check before you ship}{Almost every serious failure
+in this paper is one of seven questions someone didn't ask: Is the secure version actually
+the one that runs? Am I checking a thing's size when I mean its contents? Am I confusing
+``unbroken'' with ``genuine''? Am I trusting a number the sender chose? Can this data be
+written two ways? Is my safety rule safe in the case I \emph{didn't} imagine? And — is the
+report I'm trusting still true? The atlas exists so these become reflexes.}
+
+\section{What the failures built}\label{sec:guards}
+
+The atlas would be a misery if it ended at the catalogue. It does not, because most of
+these classes produced a \emph{structural} guard — not a patch, but a change to the shape
+of the system that makes the class harder to re-enter. This is the conversion the paper
+is really about.
+
+\begin{center}
+\small
+\rowcolors{2}{rowtint}{white}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{5.2cm}>{\RaggedRight\arraybackslash}X@{}}
+\toprule
+The failure & The structural guard it built \\
+\midrule
+Silent balance divergence (the founding 3200$\to$1484 injury) & Four committed state
+roots, independently recomputed, self-halt on mismatch (exit 78) — agreement made
+checkable, not social. \\
+turbo-sync skipped the DEX (SD-1) & The target invariant: one idempotent total apply, a
+\emph{multi-asset} root. \\
+Max-wins ate the mixer debit (EC-2) & The Balance Integrity Rules: max-wins for
+overwrites, authoritative force-write for real debits — the two are never the same path. \\
+Zero-auth money daemon (TR-1) & Every money route fails closed on a per-request
+wallet signature with a replay nonce; server derives consensus-critical values. \\
+Updater RCE from in-message key (TR-2) & Out-of-band pinned release keys, fail-closed on
+empty allowlist. \\
+The 1 GiB mesh wedge (BD-1) & ``Measure the live path first'' as an operating rule; caps
+validated against measured steady-state RSS. \\
+The five-day stall (MS-1) & Rule 0: a microbench beside a slow live number is a bug
+report; exactly one owner of the real end-to-end number. \\
+OOM death-loops (RX-*) & OOM-guard posture: negative \texttt{OOMScoreAdjust} on prod,
+capped \texttt{systemd-run} scopes for test workloads, allocator decay tuning. \\
+The audit decayed (\S\ref{sec:patterns}) & ``When the audit and the code disagree, read
+the code'' — findings ground-truthed against source before work. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The pattern of the pattern: a silent failure produces a \emph{loud} guard (exit 78, a
+fired alarm, a fail-closed default), and a measurement failure produces a
+\emph{methodological} guard (a rule about how to measure). The system does not merely
+patch; it raises its own floor. That is the only honest reason to keep an atlas — not to
+remember the wounds, but to keep the scar tissue load-bearing.
+
+\section{Still open — the exhibits without a guard yet}\label{sec:open}
+
+Honesty requires ending on the failures that are \emph{not} yet closed, graded as such,
+per the house rule that open items are marked and not argued away. These are live or
+dormant as of 2026-07-23.
+
+\begin{center}
+\small
+\rowcolors{2}{rowtint}{white}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{5.0cm}l>{\RaggedRight\arraybackslash}X@{}}
+\toprule
+Open exhibit & Status & What closes it \\
+\midrule
+H1 — block-apply verifies no producer signature & \rsPartial{} dormant & Producer-side
+signing ships; hot path to a fast scheme or validator registry; flip the activation
+height off \texttt{u64::MAX} after Alpha soak. \\
+C10 — VDF over a forgeable benchmark modulus & \rsPartial{} & Wire the trustless
+\texttt{rsa2048()} into \emph{every} verify + mining call site, height-gated with a
+coordinated miner upgrade. \\
+H4 — keyless wire tip-proofs & \rsOpen{} & Produce \emph{and} verify SQIsign tip-proofs on
+the wire; keep BLAKE3 integrity-only, never a trust root. \\
+H5 — replay nonce committed but uncalled & \rsPartial{} & Route the live apply through the
+signed-batch path so the nonce store actually gates. \\
+SD-1 — fresh nodes miss DEX state; native-only root & \rsOpen{} & One idempotent total
+apply including DEX; multi-asset root; signed anchor; N-node soak before arming the
+reject gate. \\
+EC-1 — phantom swap-mint; no apply-layer conservation & \rsPartial{} & Primary clawback
+done (2026-07-11); still needs the apply-layer conservation invariant on every transition
+(and the paused round-2 sweep). \\
+\texttt{/onboard} unlimited faucet mint & \rsOpen{} & Finite faucet-debit accounting +
+per-IP rate limit + decouple the state-persist from the call path. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Note the shape of the open list: it is dominated by \emph{built-but-not-wired} and
+\emph{caller-chosen} — the two deepest patterns of \S\ref{sec:patterns}, which is exactly
+why they are the last to close. The guards are designed; the switches are not yet flipped.
+On a single-producer experimental network that is a tolerable posture, stated plainly in
+the whitepaper's own security disclosure: do not route significant value through SIGIL
+until they close. This atlas is the itemized version of that sentence.
+
+\vspace{0.6em}
+\noindent\textit{v0 — 2026-07-23. A design is a hypothesis; its failures are the
+experiments. The scar map is the architecture. Seventy-one wounds, ten shapes, seven
+questions — and a system that turns each closed one into a floor it can no longer fall
+below.}
+
+\section*{Sources}
+
+\small
+\begin{itemize}[leftmargin=1.2em,itemsep=1pt]
+\item \emph{SIGIL — The Variational Chain}, whitepaper v1.3 (2026-07-22) — the design
+this atlas is the shadow of; \url{https://quillon.xyz/downloads/SIGIL_WHITEPAPER_v1.pdf}
+\item \emph{What the Chain Knows — The Philosophy of the SIGIL Graph}, v0.3 (2026-07-22) —
+the epistemology of honesty this atlas practices;
+\url{https://quillon.xyz/downloads/SIGIL_PHILOSOPHY_v0.pdf}
+\item \emph{SIGIL Security Audit} (2026-06-10) and \emph{SIGIL Hardening Backlog}
+(2026-07-18) — the C1--C10 / H1--H8 findings and their verdicts (in-tree).
+\item \emph{Quillon Production-Instability Diagnosis} (MASTER-DIAGNOSIS + addenda,
+2026-06-13/17) — the death-loop, singleton, silent-fork, and telemetry findings.
+\item The project incident memory (2026-05 to 2026-07) — the fleet, fork, mesh, OOM,
+double-spend, and toolchain records this atlas is drawn from and verified against.
+\end{itemize}
+
+\end{document}

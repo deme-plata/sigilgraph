@@ -139,6 +139,16 @@ struct Node {
     /// shares per block network-wide). From SIGIL_SHARE_EASE_BITS, 0 = pool OFF
     /// (challenge advertises share_target=0, submits behave exactly pre-7.1).
     share_ease: u32,
+    /// POOL-GRACE: the challenge the JUST-LANDED block was mined against. With
+    /// ~2s blocks, a share whose fetch→grind→submit round-trip straddles one
+    /// block boundary is normal, not hostile — measured 2026-07-22: stale_height
+    /// was 99.7% of all rejects (3093/3102). A submit for height-1 is verified
+    /// against THIS challenge and credited into the current window. In-memory
+    /// only; payout accounting, never a block.
+    prev_challenge: Option<Challenge>,
+    /// POOL-GRACE replay guard: the (wallet, nonce) set of the PREVIOUS height —
+    /// shares already credited (and paid) there must not re-credit via grace.
+    prev_share_seen: std::collections::HashSet<(WalletId, u64)>,
 }
 
 /// Persisted snapshot: the money + chain state (NOT students — VerifiedRegistry isn't
@@ -698,6 +708,8 @@ fn bootstrap() -> Node {
             share_window: std::collections::HashMap::new(),
             share_seen: std::collections::HashSet::new(),
             share_ease: share_ease_bits(),
+            prev_challenge: None,
+            prev_share_seen: std::collections::HashSet::new(),
         };
     }
     eprintln!("flux-db: no snapshot — seeding fresh genesis @ {state_path}");
@@ -782,7 +794,9 @@ fn bootstrap() -> Node {
         university: sigil_university::UniversityRegistry::new(),
         share_window: std::collections::HashMap::new(),
         share_seen: std::collections::HashSet::new(),
-        share_ease: share_ease_bits() };
+        share_ease: share_ease_bits(),
+        prev_challenge: None,
+        prev_share_seen: std::collections::HashSet::new() };
     persist(&node); // write the genesis snapshot so the next boot restores
     node
 }
@@ -891,6 +905,31 @@ fn authorize(n: &mut Node, actor: &WalletId, action: &str, fields: &[String], bo
     }
     n.auth_nonces.insert(*actor, req_nonce);
     Ok(())
+}
+
+/// POOL-SHARES: caps → dedup → credit one accepted share into the CURRENT
+/// height's payout window and build the response. Shared by the fresh path and
+/// the POOL-GRACE stale-by-one path (`stale` only flavors the response JSON).
+fn credit_pool_share(n: &mut Node, miner: &WalletId, nonce: u64, bh: u64, stale: bool) -> String {
+    if n.share_window.get(miner).copied().unwrap_or(0) >= SHARE_WALLET_CAP {
+        return reject_diag(n, miner, "wallet_cap",
+            "per-wallet share cap reached for this height".into());
+    }
+    if n.share_seen.len() >= SHARE_GLOBAL_CAP {
+        return reject_diag(n, miner, "window_full",
+            "share window full for this height".into());
+    }
+    if !n.share_seen.insert((*miner, nonce)) {
+        return reject_diag(n, miner, "duplicate",
+            "duplicate share (nonce already credited this height)".into());
+    }
+    let cnt = n.share_window.entry(*miner).or_insert(0);
+    *cnt += 1;
+    let shares = *cnt;
+    ok(format!(
+        "{{\"accepted\":true,\"reason\":null,\"share\":true,\"stale\":{},\"height\":{},\"shares_this_block\":{}}}",
+        stale, bh, shares
+    ))
 }
 
 /// POOL-DIAG: record a /mining/submit reject (who, why-category, detail) and
@@ -1481,6 +1520,23 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             // right height its seed (BLAKE3(tip‖bh)) won't match unless it was built on
             // THIS tip — which is unknown until the prior block was accepted.
             if sub.height != bh {
+                // POOL-GRACE (2026-07-22): with ~2s blocks a share that straddles ONE
+                // block boundary is normal miner latency, not hostility (stale_height
+                // was 99.7% of all rejects). Verify it against the prev height's OWN
+                // challenge (old tip/bits/ease — the work actually done) and credit it
+                // into the current window. Never a block; ≥2 stale still rejects.
+                if sub.height + 1 == bh {
+                    if let Some(pc) = n.prev_challenge.clone() {
+                        let pg = ModSquaring::bench_2048();
+                        if pc.height == sub.height
+                            && pc.share_target > 0
+                            && !n.prev_share_seen.contains(&(miner, sub.block.nonce))
+                            && check_submission_at(&pg, &pc, &sub, pc.share_target)
+                        {
+                            return credit_pool_share(&mut n, &miner, sub.block.nonce, bh, true);
+                        }
+                    }
+                }
                 return reject_diag(&mut n, &miner, "stale_height",
                     format!("stale height: submitted {} but the mineable tip is {}", sub.height, bh));
             }
@@ -1500,26 +1556,8 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 // into this height's payout window, credited when the block lands.
                 if share_target > 0 && check_submission_at(&g, &c, &sub, share_target) {
                     // Caps first (a capped submit must not grow the dedup set),
-                    // then dedup, then count.
-                    if n.share_window.get(&miner).copied().unwrap_or(0) >= SHARE_WALLET_CAP {
-                        return reject_diag(&mut n, &miner, "wallet_cap",
-                            "per-wallet share cap reached for this height".into());
-                    }
-                    if n.share_seen.len() >= SHARE_GLOBAL_CAP {
-                        return reject_diag(&mut n, &miner, "window_full",
-                            "share window full for this height".into());
-                    }
-                    if !n.share_seen.insert((miner, sub.block.nonce)) {
-                        return reject_diag(&mut n, &miner, "duplicate",
-                            "duplicate share (nonce already credited this height)".into());
-                    }
-                    let cnt = n.share_window.entry(miner).or_insert(0);
-                    *cnt += 1;
-                    let shares = *cnt;
-                    return ok(format!(
-                        "{{\"accepted\":true,\"reason\":null,\"share\":true,\"height\":{},\"shares_this_block\":{}}}",
-                        bh, shares
-                    ));
+                    // then dedup, then count — all inside credit_share.
+                    return credit_pool_share(&mut n, &miner, sub.block.nonce, bh, false);
                 }
                 return reject_diag(&mut n, &miner, "verify_mismatch",
                     "dual-lane verify / header mismatch (wrong tip, target, or VDF)".into());
@@ -1553,7 +1591,11 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             match distribute_block_reward(&mut n.state, eh, miner, reward, &window) {
                 Ok((bal, _credited)) => {
                     n.share_window.clear();
-                    n.share_seen.clear();
+                    // POOL-GRACE: keep this height's challenge + credited-nonce set so
+                    // in-flight shares for THIS (now previous) height still credit, and
+                    // already-paid ones can't replay through the grace path.
+                    n.prev_share_seen = std::mem::take(&mut n.share_seen);
+                    n.prev_challenge = Some(c.clone());
                     // fix #3 (VDF-chaining): fold the VDF OUTPUT into the tip → height bh+1's
                     // challenge depends on this block's VDF output (sequential timeline).
                     let prev_tip = n.tip_hash;

@@ -694,7 +694,20 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         <div style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8">available <b id="sendAvail" style="color:#00e0c6">0.00000000</b> SIGIL</div></div>
       <button id="sendClose" style="background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:8px;width:30px;height:30px;cursor:pointer;font-size:15px">✕</button>
     </div>
-    <div style="flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:14px">
+    <div id="sendReceipt" style="display:none;flex:1;overflow-y:auto;padding:18px;flex-direction:column;gap:11px;font-family:'Rajdhani',system-ui,sans-serif">
+      <div style="text-align:center;padding:6px 0 2px">
+        <div style="font-size:34px;color:#00e0c6;text-shadow:0 0 18px rgba(0,224,198,.6)">✓</div>
+        <div style="font-family:'Orbitron';font-weight:700;letter-spacing:1px;color:#00e0c6;font-size:15px;margin-top:2px">SENT</div>
+        <div id="rcAmt" style="font-family:'Orbitron';font-weight:900;font-size:26px;color:#6df3ff;margin-top:6px"></div>
+      </div>
+      <div id="rcRows" style="display:flex;flex-direction:column;gap:0"></div>
+      <div style="display:flex;gap:9px;margin-top:4px">
+        <button onclick="receiptCopyTx()" id="rcCopyBtn" style="flex:1;background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:10px;padding:10px;cursor:pointer;font-family:'JetBrains Mono';font-size:11px">⧉ copy txid</button>
+        <button onclick="receiptDone()" style="flex:1;background:linear-gradient(90deg,rgba(33,212,253,.18),rgba(0,224,198,.14));border:1px solid rgba(33,212,253,.4);color:#6df3ff;border-radius:10px;padding:10px;cursor:pointer;font-family:'Orbitron';font-size:11px;letter-spacing:1px">DONE</button>
+      </div>
+      <div style="font-family:'JetBrains Mono';font-size:9.5px;color:#5a93a8;text-align:center">recorded on the mining ledger — searchable in the explorer</div>
+    </div>
+    <div id="sendForm" style="flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:14px">
       <div>
         <label style="font-family:'JetBrains Mono';font-size:10px;letter-spacing:1px;color:#6df3ff;text-transform:uppercase">Recipient address</label>
         <input id="sendTo" placeholder="64-hex SIGIL address" autocomplete="off" spellcheck="false"
@@ -752,6 +765,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   window.sendMax=function(){
     try{ var raw=BigInt(window.SIGIL_RAW||'0'); document.getElementById('sendAmt').value=(Number(raw)/1e8).toFixed(8); }catch(e){}
   };
+  try{ if(!window.__sigilMnemonic){ var _pm=localStorage.getItem('sigil-wallet-mnemonic')||localStorage.getItem('sigil-wallet-seed'); if(_pm) window.__sigilMnemonic=_pm; } }catch(e){}
   window.openSend=function(){
     var m=document.getElementById('send-modal'); if(!m) return;
     try{ var raw=BigInt(window.SIGIL_RAW||'0'); var w=raw/100000000n, f=(raw%100000000n).toString().padStart(8,'0');
@@ -779,7 +793,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     }
     var kp; try{ kp=window.sigilDeriveFrom(mnemonic); }catch(e){ window.__sigilMnemonic=null; sendStatus('Could not derive a key from that phrase.', '#ff8a8a'); return; }
     if(kp.address!==from){ window.__sigilMnemonic=null; sendStatus('That phrase does not match this wallet address.', '#ff8a8a'); return; }
-    window.__sigilMnemonic=mnemonic; // cache for the session so subsequent sends don't re-prompt
+    window.__sigilMnemonic=mnemonic;
+    try{ localStorage.setItem('sigil-wallet-mnemonic', mnemonic); }catch(e){} // remembered — send is one-press from now on
     var reqNonce=Date.now();
     var sig; try{ sig=window.sigilSign(kp.priv,'send',[from,to,'SIGIL',base.toString()],reqNonce); }catch(e){ sendStatus('Signing failed.', '#ff8a8a'); return; }
     sendStatus('Submitting…', '#6df3ff'); var btn=document.getElementById('sendGo'); if(btn)btn.disabled=true;
@@ -787,10 +802,32 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       var r=await fetch('/api/v1/send',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({from:from,to:to,amount:Number(base),token:'SIGIL',sig:sig,req_nonce:reqNonce})});
       var j=null; try{ j=await r.json(); }catch(_){}
-      if(r.ok && j && j.ok){ sendStatus('✓ sent — height '+(j.height!=null?j.height:''), '#00e0c6'); setTimeout(function(){ if(window.refresh)refresh(); }, 600); }
+      if(r.ok && j && j.ok){ showReceipt(j, to, amtStr, from); setTimeout(function(){ if(window.refresh)refresh(); }, 600); }
       else { sendStatus('✗ '+((j&&(j.error||j.message))||('HTTP '+r.status)), '#ff8a8a'); }
     }catch(e){ sendStatus('✗ network error — node unreachable.', '#ff8a8a'); }
     if(btn)btn.disabled=false;
+  };
+  function _rcRow(l,v,mono){ return '<div style="display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid rgba(33,212,253,.09)"><span style="font-family:\'JetBrains Mono\';font-size:10px;letter-spacing:1px;color:#5a93a8;text-transform:uppercase">'+l+'</span><span style="font-family:\'JetBrains Mono\';font-size:11px;color:#cfe9f2;overflow-wrap:anywhere;text-align:right">'+v+'</span></div>'; }
+  window.__lastTxid='';
+  function showReceipt(j, to, amtStr, from){
+    window.__lastTxid=j.txid||'';
+    var short=function(a){ return a?(a.slice(0,10)+'…'+a.slice(-8)):'—'; };
+    document.getElementById('rcAmt').textContent=amtStr+' SIGIL';
+    document.getElementById('rcRows').innerHTML=
+      _rcRow('to','<span title="'+to+'">'+short(to)+'</span>')+
+      _rcRow('from','<span title="'+from+'">'+short(from)+'</span>')+
+      _rcRow('txid',(j.txid?'<span title="'+j.txid+'">'+short(j.txid)+'</span>':'—'))+
+      _rcRow('height',(j.height!=null?j.height:'—'))+
+      _rcRow('time',new Date(j.ts_ms||Date.now()).toLocaleString());
+    document.getElementById('sendForm').style.display='none';
+    var rc=document.getElementById('sendReceipt'); rc.style.display='flex';
+  }
+  window.receiptCopyTx=function(){ if(window.__lastTxid&&navigator.clipboard){ navigator.clipboard.writeText(window.__lastTxid); var b=document.getElementById('rcCopyBtn'); var o=b.textContent; b.textContent='✓ copied'; setTimeout(function(){b.textContent=o;},1000); } };
+  window.receiptDone=function(){
+    document.getElementById('sendReceipt').style.display='none';
+    document.getElementById('sendForm').style.display='flex';
+    var t=document.getElementById('sendTo'), a=document.getElementById('sendAmt'); if(t)t.value=''; if(a)a.value='';
+    sendStatus(''); window.closeSend();
   };
   // wire every Send action (phone + desktop hero + sidebar)
   function wireSend(){
@@ -3170,7 +3207,7 @@ function copyReceive(){ var a=_activeAddr(); if(a&&navigator.clipboard){ navigat
 function openMine(){ var a=_activeAddr(); if(!a)return; document.getElementById('mineCmd').textContent='sigil-top mine-rig '+a; document.getElementById('mine-modal').style.display='flex'; }
 function copyMineCmd(){ var t=document.getElementById('mineCmd').textContent; if(t&&navigator.clipboard){ navigator.clipboard.writeText(t); var b=document.getElementById('mineCopy'); var o=b.textContent; b.textContent='✓ COPIED'; setTimeout(function(){b.textContent=o;},1000); } }
 function openSettings(){ var el=document.getElementById('setAddr'); var a=_activeAddr(); if(el)el.textContent=a?(a.slice(0,10)+'…'+a.slice(-8)):''; document.getElementById('settings-modal').style.display='flex'; }
-function sigilLogout(){ try{ localStorage.removeItem('sigil-wallet-address'); sessionStorage.removeItem('sigil-onboard-bounces'); }catch(e){} location.replace('enter-sigil.html'); }
+function sigilLogout(){ try{ localStorage.removeItem('sigil-wallet-address'); localStorage.removeItem('sigil-wallet-mnemonic'); localStorage.removeItem('sigil-wallet-seed'); sessionStorage.removeItem('sigil-onboard-bounces'); }catch(e){} location.replace('enter-sigil.html'); }
 function showAssets(){ if(window.showDash)showDash(); var t=document.body.classList.contains('view-desktop')?'dassets':'passets'; var el=document.getElementById(t); if(el)el.scrollIntoView({behavior:'smooth',block:'center'}); }
 ['receive-modal','mine-modal','settings-modal'].forEach(function(id){ var m=document.getElementById(id); if(m)m.addEventListener('click',function(e){ if(e.target===m) closeModal(id); }); });
 window.addEventListener('keydown',function(e){ if(e.key==='Escape'){ closeModal('receive-modal'); closeModal('mine-modal'); closeModal('settings-modal'); } });

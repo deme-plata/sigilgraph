@@ -2302,8 +2302,14 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             n.height += 1;
             ingest(&mut n, "send", format!("send {amount} {tok_s} -> {}", to_hex(&to)), &[from, to], "wallet send");
             persist(&n);
-            ok(format!("{{\"ok\":true,\"from\":\"{}\",\"to\":\"{}\",\"amount\":{},\"token\":\"{}\",\"height\":{}}}",
-                to_hex(&from), to_hex(&to), amount, to_hex(&token), n.height))
+            // txid = BLAKE3 of the SAME canonical string the sender signed (incl. the
+            // strictly-increasing req_nonce) — deterministic, unique per send, and any
+            // party holding the request can recompute it. The wallet's receipt shows it.
+            let req_nonce = jnum(body, "req_nonce").unwrap_or(0);
+            let txid = blake3::hash(format!("sigil-rpc/v1|send|{}|{}|{}|{}|nonce={}",
+                to_hex(&from), to_hex(&to), tok_s, amount, req_nonce).as_bytes());
+            ok(format!("{{\"ok\":true,\"from\":\"{}\",\"to\":\"{}\",\"amount\":{},\"token\":\"{}\",\"height\":{},\"txid\":\"{}\",\"ts_ms\":{}}}",
+                to_hex(&from), to_hex(&to), amount, to_hex(&token), n.height, txid.to_hex(), now_ms()))
         }
         _ => bad("unknown route"),
     }

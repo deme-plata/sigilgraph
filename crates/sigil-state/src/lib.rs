@@ -1680,4 +1680,49 @@ mod r0_nonce_tests {
         assert!(matches!(commit_state_transition(&mut st, &t, 0), Err(CommitError::ReservedToken)));
         assert_eq!(st.nonce_of(&w(1)), 0, "the forged write must not have advanced the nonce");
     }
+
+    // ── MONEY-THROUGHPUT CEILING (one-chain decision, 2026-07-23) ─────────────
+    // The number that decides linear-vs-DAG: how fast can real money settle
+    // through the ONE chokepoint every design shares? A transfer = 1 tx = a
+    // 2-mutation transition (debit + credit) through commit_state_transition
+    // (cap check + O(1) accumulator roots). Whatever the block STRUCTURE, money
+    // TPS is bounded here. Run: `fluxc test -p sigil-state money_tps -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn money_tps_ceiling() {
+        use std::time::Instant;
+        let n_wallets = 10_000u64;
+        let mut st = SigilState::new();
+        // fund the wallets (setup, untimed)
+        for i in 0..n_wallets {
+            let mut wl = [0u8; 32]; wl[..8].copy_from_slice(&i.to_le_bytes());
+            st.set_balance(wl, NATIVE, 1_000_000_000);
+        }
+        let n_tx = 1_000_000u64;
+        let t0 = Instant::now();
+        for k in 0..n_tx {
+            let a = k % n_wallets;
+            let b = (k + 1) % n_wallets;
+            let mut wa = [0u8; 32]; wa[..8].copy_from_slice(&a.to_le_bytes());
+            let mut wb = [0u8; 32]; wb[..8].copy_from_slice(&b.to_le_bytes());
+            let (ba, bb) = (st.balance_of(&wa, &NATIVE), st.balance_of(&wb, &NATIVE));
+            let tr = StateTransition {
+                at_height: k,
+                mutations: vec![
+                    StateMutation::SetBalance { wallet: wa, token: NATIVE, amount: ba - 1 },
+                    StateMutation::SetBalance { wallet: wb, token: NATIVE, amount: bb + 1 },
+                ],
+            };
+            commit_state_transition(&mut st, &tr, k).unwrap();
+        }
+        let dt = t0.elapsed().as_secs_f64();
+        let tps = n_tx as f64 / dt;
+        eprintln!("\n╔═══════════════════════════════════════════════════════════╗");
+        eprintln!("║  MONEY SETTLEMENT CEILING (commit_state_transition)       ║");
+        eprintln!("║  {} transfers in {:.3}s  =  {:.0} tx/s               ", n_tx, dt, tps);
+        eprintln!("║  (2 balance mutations + cap check + O(1) roots per tx)    ║");
+        eprintln!("║  This is the money-TPS wall REGARDLESS of block structure ║");
+        eprintln!("╚═══════════════════════════════════════════════════════════╝\n");
+        assert!(tps > 0.0);
+    }
 }

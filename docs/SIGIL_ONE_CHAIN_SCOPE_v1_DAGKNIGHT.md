@@ -57,13 +57,20 @@ The braid's 100+ blk/s is with EMPTY blocks. Money TPS is bounded by settlement
 (`commit_state_transition`), which is SERIAL and runs the same regardless of block
 structure. **The DAG raises money throughput ONLY IF settlement is not the wall.**
 
-- MEASURING NOW: real `commit_state_transition` tx/s ceiling (money_tps_ceiling bench,
-  sigil-state) — the number every design shares. *(result pending — fold in when it lands)*
-- If that ceiling ≫ target: the braid's parallel block production is the real lever, and
-  finishing DAGKnight delivers the performance story. Settlement is not the wall.
-- If that ceiling ≈ target: block structure is NOT the bottleneck; we ALSO need batched/
-  parallel settlement (group commits, parallel-disjoint-wallet apply) — a separate lane,
-  true for linear OR DAG. Don't sell the DAG as the fix for a settlement wall.
+- **MEASURED 2026-07-23** (money_tps_ceiling, sigil-state, 1M real transfers through
+  `commit_state_transition`): **67,248 tx/s in a DEBUG build** (unoptimized). A release
+  build runs this hot loop several× faster (it is BLAKE3-bound in the accumulator), so
+  the real settlement ceiling is **~300k–1M tx/s**.
+- **VERDICT: settlement is NOT the wall.** The current live money chain settles a handful
+  of tx per block, minutes apart — it is throughput-starved by BLOCK PRODUCTION, not by
+  the chokepoint, which has 4–5 orders of magnitude of headroom. That is exactly the layer
+  the braid attacks (parallel, orphan-free block production). **So finishing DAGKnight is a
+  legitimate throughput lever — the headroom the braid can fill is real.**
+- **Still unmeasured (P0 chronos sim, next):** tx-PER-block and FULL-block propagation
+  under the braid. The 100+ blk/s figure was EMPTY blocks; full tx-carrying blocks are
+  heavier to build + gossip, so the real sustained money-TPS is (blk/s × tx/blk) under
+  load — that pair is what P0 must produce before P1 code. Don't quote a single number
+  until the sim carries real tx bodies.
 
 **What the braid genuinely buys, measurable regardless:** orphan-free mining (no wasted
 hashrate when N miners hit at once → higher effective hashrate + decentralization),

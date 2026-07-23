@@ -675,6 +675,26 @@ fn print_help() {
     );
 }
 
+/// ONE-CHAIN (v7.1.6): make status show THE chain, not the retiring spine.
+/// - When no spine engine is running, the ledger `/supply` height replaces the
+///   feed's 31.5M dyno counter (returned so the caller can also set target_height).
+/// - Uptime: the feed never carried one ("uptime 0m 0s forever") — fall back to
+///   THIS monitor's real process uptime whenever the feed gives none.
+/// Shared by the interactive loop (`apply_refresh`) and the headless `--once` frame.
+fn one_chain_view(st: &mut NodeStatus, spine_off: bool) -> Option<u64> {
+    let mut new_target = None;
+    if spine_off {
+        if let Some(li) = ledger_verify::latest() {
+            if li.height > 0 { st.height = li.height; new_target = Some(li.height); }
+        }
+    }
+    if st.uptime_secs == 0 {
+        static PROC_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        st.uptime_secs = PROC_START.get_or_init(Instant::now).elapsed().as_secs().max(1);
+    }
+    new_target
+}
+
 /// Minimal blocking HTTP GET — no http-client dependency.
 fn http_get(url: &str, timeout: Duration) -> Option<String> {
     let rest = url.strip_prefix("http://")?;
@@ -1614,7 +1634,8 @@ fn main() {
         // background thread otherwise races this one-and-only render).
         let _ = ledger_verify::latest();
         for _ in 0..40 { if ledger_verify::latest().is_some() { break; } thread::sleep(Duration::from_millis(250)); }
-        let (st, online, source) = fetch_best(&cfg);
+        let (mut st, online, source) = fetch_best(&cfg);
+        one_chain_view(&mut st, true); // headless monitor: no spine engine here
         let frame = if cfg.lite { render_lite(&st, online) } else { render_full(&st, online, &cfg.api, source) };
         print!("{frame}");
         let _ = std::io::stdout().flush();
@@ -3060,6 +3081,10 @@ impl App {
         // DROP is only believed when the verified feed tip itself reports it.
         let fresh_tip = self.st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(self.st.height);
         self.target_height = if self.st.tip.is_some() { fresh_tip } else { fresh_tip.max(self.target_height) };
+        // ONE-CHAIN (v7.1.6): show THE chain (ledger) height + a real uptime.
+        if let Some(h) = one_chain_view(&mut self.st, self.p2p_sync.is_none()) {
+            self.target_height = h;
+        }
         // verify the tip (verify-don't-trust) and advance the synced height
         self.verify = self.st.tip.as_ref().map(verify_tip);
         if let Some(v) = self.verify.as_ref() {
@@ -3496,7 +3521,14 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // restart after an update ("it doesn't resume") until they pressed F again.
     let autostart_full = read_sync_mode().as_deref() == Some("full");
     let autofullsync = std::env::var("SIGIL_AUTOFULLSYNC").is_ok();
-    if want_sync || autostart_full || autofullsync {
+    // ONE-CHAIN (v7.1.6): the LEDGER header mirror is the default sync — full
+    // floor→tip in ~1.4s. The SPINE monitor/backfill (31.5M empty dyno blocks,
+    // ~8 blk/s serve valve → a 78-DAY eta) no longer auto-starts: it is opt-in
+    // via SIGIL_SPINE_SYNC=1, a saved full-sync mode, or the explicit [F] key.
+    // The spine retires in P3 (docs/SIGIL_ONE_CHAIN_SCOPE_v0.md).
+    block_sync::ledger::ensure_running();
+    let spine_opt_in = std::env::var("SIGIL_SPINE_SYNC").map(|v| v == "1").unwrap_or(false);
+    if (want_sync && spine_opt_in) || autostart_full || autofullsync {
         // v0.22.1: monitor path (recent_only=true) → fast-snap to the verified live tip.
         // v0.33.5: SIGIL_FULLSYNC=1 launches a genuine genesis→tip crawl instead.
         let recent_only = std::env::var("SIGIL_FULLSYNC").map(|v| v == "0" || v.is_empty()).unwrap_or(true)
@@ -4642,6 +4674,21 @@ mod pure_helpers_tests {
         assert_eq!(fmt_uptime(60), "1m 0s");
         assert_eq!(fmt_uptime(3600), "1h 0m");
         assert_eq!(fmt_uptime(90_061), "1d 1h 1m"); // 1d + 1h + 1m + 1s
+    }
+
+    #[test]
+    fn one_chain_view_fills_uptime_and_holds_spine_height() {
+        // uptime always becomes real (>=1) when the feed gives 0
+        let mut st = NodeStatus { uptime_secs: 0, height: 31_780_000, ..Default::default() };
+        // spine ON (engine running): height untouched, no target override, uptime filled
+        let t = one_chain_view(&mut st, false);
+        assert_eq!(t, None, "spine-on must not override target from ledger");
+        assert_eq!(st.height, 31_780_000, "spine-on leaves the engine's own height");
+        assert!(st.uptime_secs >= 1, "uptime must never render 0m 0s forever");
+        // a non-zero feed uptime is respected, not clobbered
+        let mut st2 = NodeStatus { uptime_secs: 42, height: 5, ..Default::default() };
+        one_chain_view(&mut st2, false);
+        assert_eq!(st2.uptime_secs, 42);
     }
 
     #[test]

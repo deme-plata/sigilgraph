@@ -127,6 +127,12 @@ fn probe() {
     let timeout_ms: u64 = arg("--timeout-ms").map(|s| s.parse().unwrap()).unwrap_or(10_000);
     let settle_secs: u64 = arg("--settle-secs").map(|s| s.parse().unwrap()).unwrap_or(15);
     let out_path = arg("--out").expect("--out results.jsonl");
+    // Range plan: cycle requests through [base, base+window) in --span steps. For a
+    // live node, base must sit inside the range its chain log actually serves
+    // (finalized, below the tip) — requests beyond the served range go unanswered.
+    let base: u64 = arg("--base").map(|s| s.parse().unwrap()).unwrap_or(0);
+    let span: u64 = arg("--span").map(|s| s.parse().unwrap()).unwrap_or(8_192);
+    let window: u64 = arg("--window").map(|s| s.parse().unwrap()).unwrap_or(65_536);
 
     let peer_addrs: Vec<String> = peers_arg.split(',').map(|s| s.trim().to_string()).collect();
     let expect_peers = peer_addrs.len();
@@ -139,37 +145,63 @@ fn probe() {
     rt.block_on(async move {
         let mut config = flux_p2p::NetworkConfig::default();
         config.node_id = format!("dp-client-{}", std::process::id());
+        eprintln!(
+            "probe client peer_id={}",
+            flux_p2p::swarm::peer_id_string(&config.node_id)
+        );
         config.listen_addr = "/ip4/0.0.0.0/tcp/0".into();
         config.bootstrap_peers = peer_addrs;
         config.dagknight_enabled = false;
         config.sap_enabled = false;
         config.x_algo_enabled = false;
         config.entanglement_enabled = false;
-        config.gossipsub_topics = vec![flux_p2p::SIGIL_G0_BLOCKS_TOPIC.to_string()];
+        // Do NOT subscribe to the live block topic: against a producing node it is a
+        // multi-blk/s firehose into an event queue this probe never drains. The probe
+        // only exercises the request/response lane.
+        config.gossipsub_topics = vec!["/sigil/g0/dp-probe-quiet".to_string()];
         let mut mgr = flux_p2p::NetworkManager::new(config);
         mgr.start().await.expect("swarm start");
         let mgr = Arc::new(mgr);
 
-        // Wait for the mesh to connect (loss on the links makes this take a while).
+        // The peers we are ALLOWED to probe: exactly the /p2p/<id> set from --peers.
+        // On a live mesh, kad/identify discovery adds peers we never asked for —
+        // trials must never round-robin onto those.
+        let allowed: std::collections::HashSet<String> = mgr
+            .summary()
+            .bootstrap_peers
+            .iter()
+            .filter_map(|a| a.rsplit_once("/p2p/").map(|(_, id)| id.to_string()))
+            .collect();
+        // Wait for the target peers to connect (loss on the links makes this slow).
         let deadline = Instant::now() + Duration::from_secs(settle_secs.max(5));
-        loop {
-            let n = mgr.connected_peers().len();
-            if n >= expect_peers || Instant::now() > deadline {
-                eprintln!("connected {n}/{expect_peers} peers");
-                break;
+        let peers = loop {
+            let targets: Vec<_> = mgr
+                .connected_peers()
+                .into_iter()
+                .filter(|p| allowed.is_empty() || allowed.contains(&p.to_string()))
+                .collect();
+            if targets.len() >= expect_peers || Instant::now() > deadline {
+                eprintln!(
+                    "connected {}/{expect_peers} target peers ({} total incl. discovered)",
+                    targets.len(),
+                    mgr.connected_peers().len()
+                );
+                break targets;
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-        let peers = mgr.connected_peers();
+        };
         assert!(
-            peers.len() >= 2.max(r),
-            "need at least max(2, r) connected peers, have {}",
+            peers.len() >= r.max(1),
+            "need at least r={r} connected TARGET peers, have {}",
             peers.len()
         );
         let peers = Arc::new(peers);
 
         let sem = Arc::new(tokio::sync::Semaphore::new(concurrency));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TrialOut>();
+        // create the output file BEFORE the (slow, semaphore-gated) spawn loop so a
+        // killed run still leaves its partial records on disk
+        let mut out = std::io::BufWriter::new(std::fs::File::create(&out_path).expect("out file"));
 
         let n_peers = peers.len();
         for t in 0..trials {
@@ -182,10 +214,12 @@ fn probe() {
                 // round-robin window of r distinct peers, like block_sync's rotation
                 let chosen: Vec<_> =
                     (0..r).map(|k| peers2[(t as usize + k) % n_peers]).collect();
-                // mimic the shipped frontier request shape (server ignores content)
+                // mimic the shipped frontier request shape, cycling within the
+                // served range (see --base/--span/--window)
+                let from = base + (t * span) % window.max(span);
                 let req = BackfillReq {
-                    from: t * 32_768,
-                    to: t * 32_768 + 32_768,
+                    from,
+                    to: from + span,
                     headers_only: true,
                     codec: 1,
                 };
@@ -223,7 +257,6 @@ fn probe() {
         }
         drop(tx);
 
-        let mut out = std::io::BufWriter::new(std::fs::File::create(&out_path).expect("out file"));
         let (mut done, mut delivered_n, mut att_n, mut att_fail) = (0u64, 0u64, 0u64, 0u64);
         while let Some(trial) = rx.recv().await {
             delivered_n += trial.delivered as u64;

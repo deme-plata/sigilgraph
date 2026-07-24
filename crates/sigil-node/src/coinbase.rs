@@ -86,6 +86,64 @@ pub fn coinbase_for(
     (tr, roots)
 }
 
+/// Coinbase for an EXPLICIT reward amount (the adaptive-controller path). The
+/// producer computes `reward` from the stateful EmissionController and bakes the
+/// exact amount into the block body, so followers apply it verbatim and the
+/// root-match holds — determinism comes from the amount being IN the block, not
+/// a per-node recompute. Returns `(transition, post-apply roots)`.
+pub fn coinbase_for_reward(
+    state: &SigilState,
+    height: u64,
+    reward: u128,
+) -> (StateTransition, StateRoots) {
+    let producer = producer_wallet();
+    let mut mutations = Vec::new();
+    if reward > 0 {
+        let bal = state.balance_of(&producer, &NATIVE);
+        mutations.push(StateMutation::SetBalance {
+            wallet: producer,
+            token: NATIVE,
+            amount: bal.saturating_add(reward),
+        });
+    }
+    let tr = StateTransition { at_height: height, mutations };
+    let roots = roots_after(state, &tr, height);
+    (tr, roots)
+}
+
+// ── adaptive emission controller: live-reward lifecycle ─────────────────────
+use sigil_emission::controller::EmissionController;
+
+fn controller_path(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("emission-controller.json")
+}
+
+/// Load the persisted emission controller (the watermark survives restarts), or
+/// mint a fresh one anchored at `genesis_ts_secs`. `None` when adaptive emission
+/// is off (`SIGIL_EMISSION_ADAPTIVE` unset/0) — the caller then uses the pure
+/// height schedule.
+pub fn load_controller(dir: &std::path::Path, genesis_ts_secs: u64) -> Option<EmissionController> {
+    if std::env::var("SIGIL_EMISSION_ADAPTIVE").map(|v| v != "0").unwrap_or(false) == false {
+        return None;
+    }
+    let p = controller_path(dir);
+    if let Ok(bytes) = std::fs::read(&p) {
+        if let Some(c) = EmissionController::restore_from_bytes(&bytes) {
+            return Some(c);
+        }
+    }
+    Some(EmissionController::new(genesis_ts_secs))
+}
+
+/// Persist the controller watermark (best-effort; atomic via tmp+rename).
+pub fn save_controller(dir: &std::path::Path, c: &EmissionController) {
+    let p = controller_path(dir);
+    let tmp = p.with_extension("json.tmp");
+    if std::fs::write(&tmp, c.serialize_state()).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

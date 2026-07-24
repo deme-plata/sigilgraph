@@ -411,6 +411,15 @@ fn run_start() -> Result<()> {
         // GENESIS_TIMESTAMP_MS) so block 1+ can chain across nodes.
         let mut chain = ChainTip::new();
         let snap_dir = snapshot::snapshot_dir();
+        // ONE-CHAIN: the adaptive emission controller (opt-in SIGIL_EMISSION_ADAPTIVE=1).
+        // Persisted watermark survives restarts; genesis anchored at first run.
+        let emission_genesis_ts = std::env::var("SIGIL_GENESIS_TS").ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+        let mut emission = coinbase::load_controller(&snap_dir, emission_genesis_ts);
+        if emission.is_some() {
+            eprintln!("💠 adaptive emission controller LIVE — time-based halving + PID rate control (watermark persisted)");
+        }
         // Memory-bound persistence: an append-only on-disk block log. On boot we
         // STREAM-replay it (one block at a time → bounded RAM) to rebuild state +
         // the recent window; older blocks stay on disk. This replaced the
@@ -814,7 +823,15 @@ fn run_start() -> Result<()> {
                     // pull verify-once txs (already verified at mempool ingest)
                     let block_txs: Vec<SignedTx> =
                         if txgen > 0 { mempool.lock().unwrap().pull(txgen) } else { Vec::new() };
-                    match mint_next_block(&chain, mp, &block_txs) {
+                    // ONE-CHAIN: when the adaptive emission controller is live, IT
+                    // computes the reward (time-based + PID + rate) and we bake the
+                    // exact amount into the coinbase; else the pure height schedule.
+                    let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                    let reward_override: Option<u128> = emission.as_mut().map(|c| {
+                        let supply = chain.state_snapshot().native_supply();
+                        c.calculate_block_reward(now_secs, supply)
+                    });
+                    match mint_next_block(&chain, mp, &block_txs, reward_override) {
                         Ok(block) => {
                             let h = block.header.height;
                             let bhash = block.hash();
@@ -841,6 +858,15 @@ fn run_start() -> Result<()> {
                             match chain.apply(block) {
                                 Ok(_) => {
                                     let _ = chain_log.append_bytes(&bytes); // durable, O(1)
+                                    // ONE-CHAIN: advance the emission watermark by the
+                                    // amount ACTUALLY minted (the reward we baked), track
+                                    // the block for rate, and persist the watermark so a
+                                    // restart resumes emission instead of resetting it.
+                                    if let (Some(c), Some(r)) = (emission.as_mut(), reward_override) {
+                                        c.record_emission(r);
+                                        c.add_block(h, now_secs, now_secs);
+                                        if h % 32 == 0 { coinbase::save_controller(&snap_dir, c); }
+                                    }
                                     if let (Some(br), Some((view, body))) = (braid.as_mut(), dag_own) {
                                         let vh = view.hash;
                                         let _ = br.insert(view); // own block joins the DAG
@@ -2178,6 +2204,7 @@ fn mint_next_block(
     chain: &ChainTip,
     merge_parents: Vec<BlockHash>,
     txs: &[SignedTx],
+    reward_override: Option<u128>,
 ) -> Result<Block> {
     let height = chain.height();
     let parent = chain.parent_hash();
@@ -2196,7 +2223,12 @@ fn mint_next_block(
     let coinbase_on = std::env::var("SIGIL_COINBASE").map(|v| v != "0").unwrap_or(true);
     let (transition, roots) = if coinbase_on {
         let state = chain.state_snapshot();
-        coinbase::coinbase_for(&state, height, parent)
+        match reward_override {
+            // adaptive controller supplied the exact amount → bake it in
+            Some(r) => coinbase::coinbase_for_reward(&state, height, r),
+            // default: the pure height schedule
+            None => coinbase::coinbase_for(&state, height, parent),
+        }
     } else {
         (StateTransition { at_height: height, mutations: vec![] }, chain.roots())
     };
@@ -2856,7 +2888,7 @@ mod dag_wiring_tests {
         let mut blocks = vec![g.clone()];
         builder.apply(g).expect("apply genesis");
         for _ in 0..2 {
-            let b = mint_next_block(&builder, vec![], &[]).expect("mint");
+            let b = mint_next_block(&builder, vec![], &[], None).expect("mint");
             blocks.push(b.clone());
             builder.apply(b).expect("apply");
         }

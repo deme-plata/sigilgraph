@@ -135,6 +135,17 @@ struct Node {
     /// POOL-SHARES replay guard: (wallet, nonce) pairs already accepted this
     /// height — a share can't be credited twice. Cleared with the window.
     share_seen: std::collections::HashSet<(WalletId, u64)>,
+    /// VARDIFF (2026-07-24): per-wallet accepted-share COUNT this height — what
+    /// SHARE_WALLET_CAP bounds. Separate from `share_window`, which now holds
+    /// WEIGHTED share units (a share at ease_w counts 2^(share_ease-ease_w), so
+    /// payouts stay hashrate-proportional across mixed difficulties). In-memory,
+    /// cleared with the window.
+    share_count: std::collections::HashMap<WalletId, u64>,
+    /// VARDIFF: the share ease last ISSUED to each wallet on its challenge fetch.
+    /// Submits verify against what was advertised — a fresh hps report between
+    /// fetch and submit must not false-reject an in-flight share. Pruned with the
+    /// miner_hps 30s retention.
+    issued_ease: std::collections::HashMap<WalletId, u32>,
     /// POOL-SHARES ease: share_target = blake4_target << ease bits (≈2^ease
     /// shares per block network-wide). From SIGIL_SHARE_EASE_BITS, 0 = pool OFF
     /// (challenge advertises share_target=0, submits behave exactly pre-7.1).
@@ -566,6 +577,43 @@ fn share_target_from(bits: u32, ease: u32) -> u64 {
     target_from_bits(bits.saturating_sub(ease).max(1))
 }
 
+/// VARDIFF (2026-07-24): per-wallet share ease from the wallet's self-reported Φ
+/// rate — aim for ~SIGIL_VARDIFF_RATE shares/sec (default 0.5) per rig. Measured
+/// live before this: a 3 GH/s GPU at the global 16-bit share target found ~45k
+/// share-grade nonces/sec, hit SHARE_WALLET_CAP (64) instantly, and then burned
+/// the whole height on wallet_cap rejects + HTTP round-trips — effective fleet
+/// hashrate collapsed to ~1% of reported. Harder personal shares restore duty
+/// cycle; the weight at credit time (see [`share_weight`]) keeps payouts exactly
+/// hashrate-proportional. Unknown/idle wallets get the global (easiest) ease.
+/// SIGIL_VARDIFF=0 disables (everyone gets the global ease, weight 1 — pre-vardiff wire).
+fn vardiff_ease(n: &Node, w: &WalletId) -> u32 {
+    if n.share_ease == 0 { return 0; } // pool OFF
+    if std::env::var("SIGIL_VARDIFF").map(|v| v == "0").unwrap_or(false) { return n.share_ease; }
+    let hps = n.miner_hps.get(w).map(|(h, _)| *h).unwrap_or(0.0);
+    let rate: f64 = std::env::var("SIGIL_VARDIFF_RATE").ok()
+        .and_then(|s| s.parse().ok()).filter(|r: &f64| *r > 0.01).unwrap_or(0.5);
+    vardiff_ease_for(hps, rate, n.bits, n.share_ease)
+}
+
+/// The pure vardiff curve (testable without a [`Node`]).
+fn vardiff_ease_for(hps: f64, rate: f64, bits: u32, share_ease: u32) -> u32 {
+    if share_ease == 0 { return 0; }
+    if !(hps > 1.0) { return share_ease; } // unknown/idle → global (easiest)
+    // share difficulty (bits) that yields ~`rate` shares/sec at this wallet's hps
+    let wanted_bits = (hps / rate).log2().ceil().max(1.0) as u32;
+    // ease = how much EASIER than the block target; clamp inside [1, global ease]
+    // (never harder than one bit under the block target, never easier than global).
+    bits.saturating_sub(wanted_bits).clamp(1, share_ease)
+}
+
+/// VARDIFF payout weight: a share at `ease_w` costs 2^(share_ease-ease_w) times
+/// the hashes of a global-ease share, so it counts that many base share units in
+/// the window. A full block solve stays `1 << share_ease` units (winner_weight) —
+/// the two scales agree by construction.
+fn share_weight(share_ease: u32, ease_w: u32) -> u64 {
+    1u64 << share_ease.saturating_sub(ease_w).min(32)
+}
+
 /// POOL-SHARES per-wallet cap of accepted shares per height: bounds memory, the
 /// distribution loop, and what a single spammy rig can claim of one block.
 const SHARE_WALLET_CAP: u64 = 64;
@@ -741,6 +789,8 @@ fn bootstrap() -> Node {
             council,
             university,
             share_window: std::collections::HashMap::new(),
+            share_count: std::collections::HashMap::new(),
+            issued_ease: std::collections::HashMap::new(),
             share_seen: std::collections::HashSet::new(),
             share_ease: share_ease_bits(),
             prev_challenge: None,
@@ -828,6 +878,8 @@ fn bootstrap() -> Node {
         council: { let mut c = sigil_bank::council::Council::default(); c.seed(vec![MASTER, OPERATOR], 2); c },
         university: sigil_university::UniversityRegistry::new(),
         share_window: std::collections::HashMap::new(),
+        share_count: std::collections::HashMap::new(),
+        issued_ease: std::collections::HashMap::new(),
         share_seen: std::collections::HashSet::new(),
         share_ease: share_ease_bits(),
         prev_challenge: None,
@@ -945,8 +997,10 @@ fn authorize(n: &mut Node, actor: &WalletId, action: &str, fields: &[String], bo
 /// POOL-SHARES: caps → dedup → credit one accepted share into the CURRENT
 /// height's payout window and build the response. Shared by the fresh path and
 /// the POOL-GRACE stale-by-one path (`stale` only flavors the response JSON).
-fn credit_pool_share(n: &mut Node, miner: &WalletId, nonce: u64, bh: u64, stale: bool) -> String {
-    if n.share_window.get(miner).copied().unwrap_or(0) >= SHARE_WALLET_CAP {
+fn credit_pool_share(n: &mut Node, miner: &WalletId, nonce: u64, bh: u64, stale: bool, weight: u64) -> String {
+    // VARDIFF: the cap bounds accepted SUBMISSIONS (memory/verify), so it counts
+    // shares, not weighted units — a high-weight GPU share must not trip it early.
+    if n.share_count.get(miner).copied().unwrap_or(0) >= SHARE_WALLET_CAP {
         return reject_diag(n, miner, "wallet_cap",
             "per-wallet share cap reached for this height".into());
     }
@@ -958,8 +1012,9 @@ fn credit_pool_share(n: &mut Node, miner: &WalletId, nonce: u64, bh: u64, stale:
         return reject_diag(n, miner, "duplicate",
             "duplicate share (nonce already credited this height)".into());
     }
+    *n.share_count.entry(*miner).or_insert(0) += 1;
     let cnt = n.share_window.entry(*miner).or_insert(0);
-    *cnt += 1;
+    *cnt += weight.max(1);
     let shares = *cnt;
     ok(format!(
         "{{\"accepted\":true,\"reason\":null,\"share\":true,\"stale\":{},\"height\":{},\"shares_this_block\":{}}}",
@@ -1547,8 +1602,16 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 }
             }
             n.miner_hps.retain(|_, (_, t)| now.saturating_sub(*t) <= 30_000);
+            let live: std::collections::HashSet<WalletId> = n.miner_hps.keys().copied().collect();
+            n.issued_ease.retain(|w, _| live.contains(w));
             let net_hps: f64 = n.miner_hps.values().map(|(h, _)| *h).sum();
             let h = n.block_height; // mining-chain height (contiguous; emission-clean)
+            // VARDIFF: personal share target from this wallet's reported rate; the
+            // issued ease is recorded so the submit path verifies the SAME target.
+            let w_ease = match query_get(query, "wallet").and_then(hex32) {
+                Some(w) => { let e = vardiff_ease(&n, &w); n.issued_ease.insert(w, e); e }
+                None => n.share_ease,
+            };
             // seed binds to the CURRENT tip → unpredictable until the prior block lands.
             let c = Challenge {
                 height: h,
@@ -1556,7 +1619,7 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 blake4_target: target_from_bits(n.bits),
                 vdf_t: mining_vdf_t(),
                 net_hps,
-                share_target: share_target_from(n.bits, n.share_ease),
+                share_target: share_target_from(n.bits, w_ease),
             };
             ok(serde_json::to_string(&c).unwrap_or_else(|_| "{}".into()))
         }
@@ -1573,19 +1636,25 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             let ver_of = |w: &WalletId| -> String {
                 n.miner_ver.get(w).map(|v| format!("\"{v}\"")).unwrap_or_else(|| "\"old\"".into())
             };
+            // VARDIFF: "shares" = accepted submissions (what the cap bounds);
+            // "weight" = the wallet's weighted units in the payout window;
+            // "ease" = the share ease this wallet was last issued.
             let mut rows: Vec<String> = n.miner_hps.iter().map(|(w, (hps, t))| {
                 let wallet = to_hex(w);
-                let shares = n.share_window.get(w).copied().unwrap_or(0);
+                let shares = n.share_count.get(w).copied().unwrap_or(0);
+                let weight = n.share_window.get(w).copied().unwrap_or(0);
+                let ease = n.issued_ease.get(w).copied().unwrap_or(n.share_ease);
                 let rejects = n.reject_by_wallet.get(w).copied().unwrap_or(0);
-                format!("{{\"wallet\":\"{}\",\"hps\":{},\"shares\":{},\"rejects\":{},\"ver\":{},\"age_ms\":{}}}",
-                    wallet, hps, shares, rejects, ver_of(w), now.saturating_sub(*t))
+                format!("{{\"wallet\":\"{}\",\"hps\":{},\"shares\":{},\"weight\":{},\"ease\":{},\"rejects\":{},\"ver\":{},\"age_ms\":{}}}",
+                    wallet, hps, shares, weight, ease, rejects, ver_of(w), now.saturating_sub(*t))
             }).collect();
             // wallets that have shares this height but no recent hps report
-            for (w, s) in n.share_window.iter() {
+            for (w, s) in n.share_count.iter() {
                 if !n.miner_hps.contains_key(w) {
+                    let weight = n.share_window.get(w).copied().unwrap_or(0);
                     let rejects = n.reject_by_wallet.get(w).copied().unwrap_or(0);
-                    rows.push(format!("{{\"wallet\":\"{}\",\"hps\":0,\"shares\":{},\"rejects\":{},\"ver\":{},\"age_ms\":null}}",
-                        to_hex(w), s, rejects, ver_of(w)));
+                    rows.push(format!("{{\"wallet\":\"{}\",\"hps\":0,\"shares\":{},\"weight\":{},\"rejects\":{},\"ver\":{},\"age_ms\":null}}",
+                        to_hex(w), s, weight, rejects, ver_of(w)));
                 }
             }
             let mut reject_counts: Vec<String> = n.reject_counts.iter()
@@ -1636,19 +1705,29 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 if sub.height + 1 == bh {
                     if let Some(pc) = n.prev_challenge.clone() {
                         let pg = ModSquaring::bench_2048();
+                        // VARDIFF: verify the straddling share against the ease this
+                        // wallet was ISSUED (target rebuilt at the prev challenge's
+                        // bits — target_from_bits is `MAX >> bits`, so bits round-trips
+                        // via leading_zeros), and credit at the matching weight.
+                        let w_ease = n.issued_ease.get(&miner).copied().unwrap_or(n.share_ease);
+                        let pc_bits = pc.blake4_target.leading_zeros();
                         if pc.height == sub.height
                             && pc.share_target > 0
                             && !n.prev_share_seen.contains(&(miner, sub.block.nonce))
-                            && check_submission_at(&pg, &pc, &sub, pc.share_target)
+                            && check_submission_at(&pg, &pc, &sub, share_target_from(pc_bits, w_ease))
                         {
-                            return credit_pool_share(&mut n, &miner, sub.block.nonce, bh, true);
+                            let w = share_weight(n.share_ease, w_ease);
+                            return credit_pool_share(&mut n, &miner, sub.block.nonce, bh, true, w);
                         }
                     }
                 }
                 return reject_diag(&mut n, &miner, "stale_height",
                     format!("stale height: submitted {} but the mineable tip is {}", sub.height, bh));
             }
-            let share_target = share_target_from(n.bits, n.share_ease);
+            // VARDIFF: this wallet's shares verify against the ease it was ISSUED
+            // (live-computed fallback covers clients that never fetched a challenge).
+            let w_ease = n.issued_ease.get(&miner).copied().unwrap_or_else(|| vardiff_ease(&n, &miner));
+            let share_target = share_target_from(n.bits, w_ease);
             let c = Challenge {
                 height: bh,
                 vdf_input: mining_seed(&n.tip_hash, bh),
@@ -1665,7 +1744,8 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 if share_target > 0 && check_submission_at(&g, &c, &sub, share_target) {
                     // Caps first (a capped submit must not grow the dedup set),
                     // then dedup, then count — all inside credit_share.
-                    return credit_pool_share(&mut n, &miner, sub.block.nonce, bh, false);
+                    let w = share_weight(n.share_ease, w_ease);
+                    return credit_pool_share(&mut n, &miner, sub.block.nonce, bh, false, w);
                 }
                 return reject_diag(&mut n, &miner, "verify_mismatch",
                     "dual-lane verify / header mismatch (wrong tip, target, or VDF)".into());
@@ -1699,6 +1779,7 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             match distribute_block_reward(&mut n.state, eh, miner, reward, &window) {
                 Ok((bal, _credited)) => {
                     n.share_window.clear();
+                    n.share_count.clear(); // VARDIFF: per-wallet submission counts reset with the window
                     // POOL-GRACE: keep this height's challenge + credited-nonce set so
                     // in-flight shares for THIS (now previous) height still credit, and
                     // already-paid ones can't replay through the grace path.
@@ -2545,6 +2626,57 @@ fn main() {
                 handle(stream, &n);
             });
         if spawned.is_err() { INFLIGHT.fetch_sub(1, Ordering::Relaxed); }
+    }
+}
+
+#[cfg(test)]
+mod vardiff_tests {
+    use super::{share_target_from, share_weight, target_from_bits, vardiff_ease_for};
+
+    #[test]
+    fn idle_or_unknown_wallet_gets_global_ease() {
+        assert_eq!(vardiff_ease_for(0.0, 0.5, 24, 8), 8);
+        assert_eq!(vardiff_ease_for(1.0, 0.5, 24, 8), 8); // <=1 H/s → treat as unknown
+    }
+
+    #[test]
+    fn pool_off_stays_off() {
+        assert_eq!(vardiff_ease_for(3e9, 0.5, 24, 0), 0);
+    }
+
+    #[test]
+    fn slow_cpu_keeps_easy_shares_fast_gpu_gets_hard_shares() {
+        // 100 kH/s CPU at 0.5/s wants ~2^17.6 → 18 bits; bits=24 → ease 6 (inside [1,8]).
+        assert_eq!(vardiff_ease_for(100e3, 0.5, 24, 8), 6);
+        // 3 GH/s GPU wants ~2^32.5 → 33 bits ≥ bits → clamped to the hardest share (ease 1).
+        assert_eq!(vardiff_ease_for(3e9, 0.5, 24, 8), 1);
+        // 10 MH/s rig: wants ~2^24.3 → 25 bits ≥ 24 → also hardest.
+        assert_eq!(vardiff_ease_for(10e6, 0.5, 24, 8), 1);
+        // Deeper chain difficulty gives vardiff room: bits=35, 3 GH/s → 35-33=2.
+        assert_eq!(vardiff_ease_for(3e9, 0.5, 35, 8), 2);
+    }
+
+    #[test]
+    fn weight_matches_work_ratio() {
+        // A share at ease 1 costs 2^(8-1) the hashes of a global ease-8 share.
+        assert_eq!(share_weight(8, 8), 1);
+        assert_eq!(share_weight(8, 1), 128);
+        assert_eq!(share_weight(8, 6), 4);
+        // Never zero, never overflows past the 2^32 guard.
+        assert_eq!(share_weight(8, 9), 1); // ease above global saturates to weight 1
+        assert_eq!(share_weight(40, 0), 1u64 << 32);
+    }
+
+    #[test]
+    fn issued_target_roundtrips_through_leading_zeros() {
+        // The grace path rebuilds the prev challenge's bits via leading_zeros —
+        // must round-trip for every plausible bits value.
+        for bits in [10u32, 16, 24, 32, 40] {
+            assert_eq!(target_from_bits(bits).leading_zeros(), bits);
+            // and a personal target at that bits is strictly easier than the block
+            let t = share_target_from(bits, 1);
+            assert!(t > target_from_bits(bits));
+        }
     }
 }
 

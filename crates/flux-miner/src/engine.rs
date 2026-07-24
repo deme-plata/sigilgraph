@@ -141,6 +141,14 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
     let mut last_spent_height: u64 = u64::MAX;
     let mut net_tracker = (0u64, Instant::now()); // (last mine-tip seen, when it advanced) → block cadence
     let mut prev_hps: f64 = 0.0; // our last measured Φ rate — reported so the node SUMS total power
+    // HASHRATE WINDOW (2026-07-24): pool slices end on every share — a few ms at
+    // 16-bit shares — so per-slice rates are pure jitter (the "CPU hashrate keeps
+    // fluctuating" symptom). Accumulate work across slices and publish the
+    // EFFECTIVE rate (incl. VDF + submit round-trips) over ≥2 s windows; that is
+    // also what the node sums into net_hps, so total network power stops being
+    // inflated by burst-only slice rates.
+    let mut win_hashes: f64 = 0.0;
+    let mut win_t0 = Instant::now();
     // POOL-SHARES: resumable nonce cursor for the current height. In pool mode one
     // height yields MANY shares, so the search must continue where it stopped —
     // restarting at the same base would re-find already-credited nonces (the node
@@ -184,7 +192,7 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
             continue;
         }
         let t0 = Instant::now();
-        let (block, hashes, dt) = if pool {
+        let (block, _hashes, dt) = if pool {
             if pool_h != c.height {
                 pool_h = c.height;
                 pool_base = ((std::process::id() as u64) << 32)
@@ -198,7 +206,15 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
             let tried = next.wrapping_sub(pool_base).max(1);
             pool_base = next;
             let dt = t0.elapsed().as_secs_f64().max(1e-9);
-            prev_hps = tried as f64 / dt;
+            win_hashes += tried as f64;
+            let wdt = win_t0.elapsed().as_secs_f64();
+            if wdt >= 2.0 {
+                prev_hps = win_hashes / wdt;
+                win_hashes = 0.0;
+                win_t0 = Instant::now();
+            } else if prev_hps <= 0.0 {
+                prev_hps = tried as f64 / dt; // seed the first window with the slice rate
+            }
             match found {
                 Some(b) => (b, tried as f64, dt),
                 None => {
@@ -215,7 +231,15 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
             let b = solve(&c, &wallet, &g); // Lane A nonce search + Lane B VDF
             let h = b.nonce as f64 + 1.0; // nonces tried ≈ BLAKE4 work
             let dt = t0.elapsed().as_secs_f64().max(1e-9);
-            prev_hps = h / dt; // report this on the next challenge fetch → node's total-power sum
+            win_hashes += h;
+            let wdt = win_t0.elapsed().as_secs_f64();
+            if wdt >= 2.0 {
+                prev_hps = win_hashes / wdt;
+                win_hashes = 0.0;
+                win_t0 = Instant::now();
+            } else if prev_hps <= 0.0 {
+                prev_hps = h / dt;
+            }
             (b, h, dt)
         };
         let sub = Submission { height: c.height, wallet: wallet.clone(), block };
@@ -227,7 +251,7 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
             s.vdf_t = c.vdf_t;
             s.last_height = c.height;
             s.last_solve_ms = dt * 1000.0;
-            s.hashrate = hashes / dt;
+            s.hashrate = prev_hps; // windowed effective rate, not the per-slice burst
             s.vdf_rate = c.vdf_t as f64 / dt;
             s.solve_hist.push_back((dt * 1000.0) as u64);
             while s.solve_hist.len() > 80 {
@@ -309,8 +333,8 @@ pub fn supervisor(
     let thermal_extra_us = Arc::new(AtomicU64::new(0));
     // LANE-C v0.50 (tuned v0.90): thermal guard — while GPU mining, poll nvidia-smi
     // every 10 s. On a DEGRADED LAPTOP (idles ~72C, hard-powers-off under sustained
-    // GPU load — Windows Kernel-Power 41) it THROTTLES at ≥78C (raises the
-    // inter-dispatch sleep) and hard-falls-back to CPU at ≥82C, BEFORE the hardware
+    // GPU load — Windows Kernel-Power 41) it THROTTLES at ≥85C (default) (raises the
+    // inter-dispatch sleep) and hard-falls-back to CPU at ≥90C, BEFORE the hardware
     // browns out. No auto-rearm: once it disables GPU the operator must re-press [G].
     // Spawned + fail-silent: no nvidia-smi → no guard, CPU path untouched. GPU builds
     // only (CPU-only builds never go GPU-active).
@@ -375,7 +399,7 @@ pub fn gpu_mining_loop(
     stop: Arc<AtomicBool>,
     gpu_failed: Arc<AtomicBool>,
     // LANE-C: thermal-throttle channel — extra inter-dispatch sleep in microseconds,
-    // raised by `thermal_watch` while in the THROTTLE band (≥78C). 0 = full speed.
+    // raised by `thermal_watch` while in the THROTTLE band (≥85C default). 0 = full speed.
     thermal_extra_us: Arc<AtomicU64>,
 ) {
     use crate::client::build_header;
@@ -428,6 +452,14 @@ pub fn gpu_mining_loop(
     let mut last_spent_height: u64 = u64::MAX;
     let mut net_tracker = (0u64, Instant::now()); // (last mine-tip seen, when it advanced) → block cadence
     let mut prev_hps: f64 = 0.0; // our last measured GPU Φ rate — reported so the node SUMS total power
+    // HASHRATE WINDOW (2026-07-24): see mining_loop. On a pool a 16-bit share ends
+    // the slice after ONE dispatch, so the old per-slice number was the kernel
+    // burst rate (GH/s) while the node-visible effective rate — after thermal
+    // sleeps and submit/challenge round-trips — was 10-50× lower. Publish the
+    // ≥2 s windowed effective rate instead, updated inside the dispatch loop so
+    // long solo searches still tick live.
+    let mut win_hashes: f64 = 0.0;
+    let mut win_t0 = Instant::now();
     // POOL-SHARES: resumable per-height nonce cursor (see mining_loop) — the GPU
     // search continues from here across shares so credited nonces aren't re-found.
     let mut pool_h: u64 = u64::MAX;
@@ -476,11 +508,19 @@ pub fn gpu_mining_loop(
                 Ok(r) => {
                     found = r;
                     nonce_base = nonce_base.wrapping_add(batch as u64);
+                    win_hashes += batch as f64;
+                    let wdt = win_t0.elapsed().as_secs_f64();
+                    if wdt >= 2.0 {
+                        prev_hps = win_hashes / wdt;
+                        win_hashes = 0.0;
+                        win_t0 = Instant::now();
+                        stats.lock().unwrap().hashrate = prev_hps;
+                    }
                     // yield the GPU so it can still drive the display -> no freeze / TDR
                     if found.is_none() && !throttle.is_zero() {
                         thread::sleep(throttle);
                     }
-                    // LANE-C thermal throttle: while in the [78,82)C band the watcher
+                    // LANE-C thermal throttle: while in the throttle band the watcher
                     // raises this; sleeping between dispatches lowers the GPU duty
                     // cycle (and so the temperature) WITHOUT dropping to CPU. Applied
                     // every dispatch (incl. on a hit) so heat is shed promptly.
@@ -525,8 +565,13 @@ pub fn gpu_mining_loop(
             s.vdf_t = c.vdf_t;
             s.last_height = c.height;
             s.last_solve_ms = dt * 1000.0;
-            s.hashrate = nonce_base.wrapping_sub(search_base) as f64 / dt; // GPU Lane-A rate (this slice)
-            prev_hps = s.hashrate; // report on the next challenge fetch → node's total-power sum
+            // windowed effective GPU rate (falls back to the slice rate until the
+            // first 2 s window closes) — reported on the next challenge fetch so
+            // the node's total-power sum reflects work actually delivered.
+            if prev_hps <= 0.0 {
+                prev_hps = nonce_base.wrapping_sub(search_base) as f64 / dt;
+            }
+            s.hashrate = prev_hps;
             s.vdf_rate = c.vdf_t as f64 / dt;
             s.solve_hist.push_back((dt * 1000.0) as u64);
             while s.solve_hist.len() > 80 {
@@ -605,18 +650,18 @@ pub enum ThermalAction {
 /// decision is a pure function of the temperature stream + a single hysteresis latch,
 /// so it is trivially unit-testable with a mock temp source — no clock or real GPU.
 ///
-/// Bands (defaults): below `throttle_c` (78C) full speed; in `[throttle_c, disable_c)`
-/// (78–82C) THROTTLE (slow the dispatch loop to shed heat, keep mining on GPU); at or
-/// above `disable_c` (82C) hard-FALL-BACK to CPU. The throttle band is hysteretic:
+/// Bands (defaults): below `throttle_c` (85C) full speed; in `[throttle_c, disable_c)`
+/// (85–90C) THROTTLE (slow the dispatch loop to shed heat, keep mining on GPU); at or
+/// above `disable_c` (90C) hard-FALL-BACK to CPU. The throttle band is hysteretic:
 /// once engaged it stays engaged until the temperature drops back to `unthrottle_c`
-/// (74C). There is NO auto-rearm after a disable — re-enabling GPU is an explicit
+/// (80C). There is NO auto-rearm after a disable — re-enabling GPU is an explicit
 /// operator action ([G]) — so on a machine that hard-powers-off under load the guard
 /// errs toward staying on the safe (CPU) path.
 #[cfg(any(feature = "gpu", test))]
 #[derive(Debug, Clone)]
 pub struct ThermalGuard {
-    throttle_c: f64,        // >= this (and < disable) → throttle GPU (default 78C)
-    disable_c: f64,         // >= this → CPU fallback (default 82C)
+    throttle_c: f64,        // >= this (and < disable) → throttle GPU (default 85C)
+    disable_c: f64,         // >= this → CPU fallback (default 90C)
     unthrottle_c: f64,      // <= this while throttling → stop throttling (default 74C)
     throttle_sleep_ms: u64, // extra per-dispatch sleep while throttling (default 50ms)
     throttling: bool,       // hysteresis latch for the throttle band
@@ -624,20 +669,26 @@ pub struct ThermalGuard {
 
 #[cfg(any(feature = "gpu", test))]
 impl ThermalGuard {
-    /// Degraded-laptop policy: throttle 78C, disable 82C, un-throttle 74C, +50ms
-    /// per-dispatch sleep while throttling. The target idles ~72C and hard-powers-off
-    /// under sustained GPU load, so these sit well under the 85C the silicon would
-    /// otherwise tolerate — the guard backs off long before the hardware browns out.
+    /// Desktop-sane policy (2026-07-24): throttle 85C, disable 90C, un-throttle 80C,
+    /// +50ms per-dispatch sleep while throttling. The previous 78/82/74 defaults were
+    /// tuned for one degraded laptop and put every healthy desktop card (which runs
+    /// 75-83C mining flat-out) permanently in the throttle band — the "3 GH/s falls
+    /// to 150-300 MH/s" collapse. NVIDIA silicon self-throttles at ~91-95C, so 85/90
+    /// still backs off well before the hardware does. A fragile laptop LOWERS these
+    /// via env (SIGIL_GPU_TEMP_THROTTLE=78 SIGIL_GPU_TEMP_DISABLE=82 ...).
     pub fn new() -> Self {
         fn envf(k: &str, d: f64) -> f64 { std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d) }
         fn envu(k: &str, d: u64) -> u64 { std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d) }
-        // v4.1: hardware-configurable thermal limits. Default = conservative laptop policy;
-        // a desktop card stable at 90C+ raises these via env to keep GPU mining engaged.
+        // v4.1: hardware-configurable thermal limits via env.
+        // NOTE: the thermal sleep is SIGIL_GPU_THERMAL_SLEEP_MS — it used to read
+        // SIGIL_GPU_THROTTLE_MS, which COLLIDED with the static per-dispatch sleep
+        // in gpu_mining_loop (same var, default 0 there / 50 here), so softening the
+        // thermal throttle silently added a constant sleep to every cool dispatch.
         Self::with(
-            envf("SIGIL_GPU_TEMP_THROTTLE", 78.0),
-            envf("SIGIL_GPU_TEMP_DISABLE", 82.0),
-            envf("SIGIL_GPU_TEMP_UNTHROTTLE", 74.0),
-            envu("SIGIL_GPU_THROTTLE_MS", 50),
+            envf("SIGIL_GPU_TEMP_THROTTLE", 85.0),
+            envf("SIGIL_GPU_TEMP_DISABLE", 90.0),
+            envf("SIGIL_GPU_TEMP_UNTHROTTLE", 80.0),
+            envu("SIGIL_GPU_THERMAL_SLEEP_MS", 50),
         )
     }
 

@@ -579,6 +579,23 @@ cryptographic choice, not a hardware limit} — and it moved.
 This section is what distinguishes SIGIL's physics programme from decoration:
 closed-form laws with residuals, gates with pass/fail, and live numbers.
 
+\subsection{The method: Variational Flow \hfill \stL}\label{sec:varflow}
+
+Every law below was produced under one discipline. \textbf{VarFlow --- Variational Flow ---
+is SIGIL's change discipline.} A proposal names the single action term it varies,
+preregisters a numerical prediction and failure condition, measures the live path, grades
+evidence and deployment separately, and is then shipped, revised or rejected. Every accepted
+result must produce both an operational rule and the next experiment that could falsify it.
+VarFlow applies the same rule to itself: if its preregistered usefulness criteria fail, the
+methodology must evolve or retire.
+
+\layman{sigilcyan}{Why the results are graded, not just reported}{Anyone can post a
+benchmark. VarFlow forces the number to be \emph{predicted before it is measured}, with a
+line drawn in advance for what would count as failure --- so a result cannot be quietly
+reframed after the fact. The two-axis grade (how strong the evidence is, and whether it is
+actually deployed) is part of the method, not an afterthought; it is why nothing in this
+section can be read as more settled than it is.}
+
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{03-measured-laws-fold-dark.png}
@@ -1136,6 +1153,11 @@ structural guards they built; the scar map behind this design;
 built: development settled on-chain between the operator and its agents, the ledger as
 labor history; ``legibility, not scale, is the innovation'';
 \url{https://quillon.xyz/downloads/SIGIL_BUILDERS_CHRONICLE_v0.pdf}
+\item \emph{The Adversary's Companion} v0 (2026-07-24) — threat-model companion: the
+eight open and partially-guarded attack surfaces of this design read from the attacker's
+chair, each rooted in a hardening-backlog item with file:line; the security disclosure of
+\S\ref{sec:honesty} turned into graded attack trees;
+\url{https://quillon.xyz/downloads/SIGIL_ADVERSARYS_COMPANION_v0.pdf}
 \item \emph{SIGIL $\times$ QTFT} (2026-05-30) — \texttt{SIGIL\_QTFT\_TOPOLOGY\_v0.md};
 the tractable-invariant topology programme
 \item \emph{A Closed-Form Delivery Law for Gossip Redundancy in the sigil-top Light

@@ -206,7 +206,7 @@ body.view-desktop .desktop{display:flex}
     </div>
     <div class="pmenu" id="pmenu">
       <div class="phd"><div class="pav">◈</div><div style="min-width:0"><div style="font-weight:700;color:var(--text)">Operator</div><div id="pmAddr" style="font-family:'JetBrains Mono';font-size:10px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">sigil · g0</div></div></div>
-      <div class="mi" onclick="window.closeProfile();window.openResearch()"><span class="g"><i class="lic" data-lucide="layers" style="width:15px;height:15px"></i></span>Research Library<span class="chip">8 PAPERS</span></div>
+      <div class="mi" onclick="window.closeProfile();window.openResearch()"><span class="g"><i class="lic" data-lucide="layers" style="width:15px;height:15px"></i></span>Research Library<span class="chip">9 PAPERS</span></div>
       <div class="mi" onclick="window.closeProfile();window.showExplorer&&showExplorer()"><span class="g"><i class="lic" data-lucide="receipt-text" style="width:15px;height:15px"></i></span>Explorer · Activity</div>
       <div class="mi" onclick="window.closeProfile();window.openStats&&openStats()"><span class="g"><i class="lic" data-lucide="activity" style="width:15px;height:15px"></i></span>Network stats</div>
       <div class="mi" onclick="window.closeProfile();window.openMine&&openMine()"><span class="g"><i class="lic" data-lucide="pickaxe" style="width:15px;height:15px"></i></span>Mine SIGIL</div>
@@ -3403,12 +3403,13 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     {t:'The Philosophy of SIGIL v0.3',    s:10, c:'Philosophy', f:'SIGIL_PHILOSOPHY_v0.pdf',           d:'Why the chain refuses to lie: honest money narrowed to what the graph can actually promise, the epistemology of measured vs simulated, fail-stop as an ethical stance.'},
     {t:'The Failure Atlas v0',            s:9,  c:'Failures',   f:'SIGIL_FAILURE_ATLAS_v0.pdf',        d:'How SIGIL breaks: 71 incidents in 10 classes — fork sagas, OOM kills, the memlimit mesh wedge, transport collapse. Failure modes as first-class published knowledge.'},
     {t:"The Builder's Chronicle v0",      s:9,  c:'Labor',      f:'SIGIL_BUILDERS_CHRONICLE_v0.pdf',   d:'Payroll on a public ledger: claim → ship → settle between an operator and its agents, with on-chain receipts as footnotes. Legibility, not scale, is the innovation.'},
+    {t:"The Adversary's Companion v0",    s:9,  c:'Adversary',  f:'SIGIL_ADVERSARYS_COMPANION_v0.pdf', d:"Attacking SIGIL from the attacker's chair: 8 open and partially-guarded attack surfaces as graded trees, each rooted in a hardening-backlog item with file:line. Publishing the attack surface is the honest move."},
     {t:'The Master Equation v0.2',        s:8,  c:'Protocol',   f:'SIGIL_MASTER_EQUATION_v0.2.pdf',    d:'One equation for the graph: the unified formal statement tying fold weight, braid ordering and settlement into a single object, with its terms defended.'},
     {t:'The Delivery Law',                s:8,  c:'Measurement',f:'sigil-top-delivery-law.pdf',        d:'The measured law of block delivery under loss — demoted from measured to simulated in its own review, then earned back with a real netem experiment (RMS 1.50pp).'},
     {t:'Verify-Once Horizontal Scaling',  s:7,  c:'Measurement',f:'review-verify-once-horizontal-scaling-on-sigil.pdf', d:'Technical review: verify a block once, serve it many times — what horizontal read-scaling on SIGIL buys and what it cannot.'},
     {t:'SIGIL Whitepaper v0 (historical)',s:6,  c:'Protocol',   f:'SIGIL_WHITEPAPER_v0.pdf',           d:'The first whitepaper, kept for the record. Superseded by v1.3 — read it to see how much the chain had to unlearn.'}
   ];
-  var CATS=['All','Protocol','Philosophy','Failures','Labor','Measurement'];
+  var CATS=['All','Protocol','Philosophy','Failures','Labor','Adversary','Measurement'];
   var DL='https://quillon.xyz/downloads/';
   var cur='All';
   function scoreColor(s){ return s>=10?'var(--gold)':s>=9?'#21d4fd':s>=8?'#00e0c6':'#a78bfa'; }

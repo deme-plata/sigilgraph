@@ -1,0 +1,680 @@
+% The Adversary's Companion — v0
+% Fifth companion to SIGIL whitepaper v1.3 (after philosophy v0.3, failure atlas v0,
+% builder's chronicle v0). A threat model written from the attacker's chair: every
+% attack tree roots in a REAL, currently open or partially-guarded item with a file:line
+% citation. No fictional or speculative attacks. Publishing your own attack surface,
+% graded and dated, is the honest move — not a liability.
+% House rules: pseudonymous; secret-free (attack CLASSES + cited open items, never live
+% exploit payloads or secrets); exact numbers verbatim from the record; open items marked
+% OPEN, not argued away.
+% Build: pdflatex x2.
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage[table]{xcolor}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{ragged2e}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta}
+\usepackage{graphicx}
+\graphicspath{{img/}}
+\usepackage{tcolorbox}
+\tcbuselibrary{skins,breakable}
+\usepackage{needspace}
+\usepackage{fancyhdr}
+\usepackage[colorlinks=true,linkcolor=sigilcyan,urlcolor=sigilcyan,citecolor=sigilcyan]{hyperref}
+\usepackage{xurl}
+
+% ---------- design system (shared with whitepaper v1.3 / philosophy v0.3 / atlas v0) ----------
+\definecolor{ink}{HTML}{15171A}
+\definecolor{sigilcyan}{HTML}{0086A8}
+\definecolor{sigilblue}{HTML}{3B5BDB}
+\definecolor{sigilviolet}{HTML}{7048B5}
+\definecolor{sigilamber}{HTML}{B86A00}
+\definecolor{sigilred}{HTML}{B02A2A}
+\definecolor{slate}{HTML}{D7DCE1}
+\definecolor{panelbg}{HTML}{F7F7F4}
+\definecolor{rowtint}{HTML}{F2F4F6}
+
+\color{ink}
+
+% status markers
+\newcommand{\stM}{\textcolor{sigilcyan}{$\bullet$}~{\scriptsize\textcolor{sigilcyan}{\textsc{measured}}}}
+\newcommand{\stO}{\textcolor{sigilamber}{$\circ$}~{\scriptsize\textcolor{sigilamber}{\textsc{open}}}}
+\newcommand{\stL}{\textcolor{sigilcyan}{$\bullet$}~{\scriptsize\textcolor{sigilcyan}{\textsc{live}}}}
+\newcommand{\stS}{\textcolor{sigilblue}{$\odot$}~{\scriptsize\textcolor{sigilblue}{\textsc{simulated}}}}
+\newcommand{\stD}{\textcolor{sigilviolet}{$\diamond$}~{\scriptsize\textcolor{sigilviolet}{\textsc{dormant}}}}
+\newcommand{\stXL}{\textcolor{sigilred}{$\blacktriangle$}~{\scriptsize\textcolor{sigilred}{\textsc{exploit live}}}}
+\newcommand{\measured}[1]{\textcolor{sigilcyan}{\textbf{#1}}}
+% severity markers
+\newcommand{\svC}{{\scriptsize\textcolor{sigilred}{\textsc{catastrophic}}}}
+\newcommand{\svM}{{\scriptsize\textcolor{sigilamber}{\textsc{major}}}}
+\newcommand{\svMod}{{\scriptsize\textcolor{sigilblue}{\textsc{moderate}}}}
+\newcommand{\svMin}{{\scriptsize\textcolor{gray}{\textsc{minor}}}}
+% mitigation-status markers (repurposed from the atlas resolution markers)
+\newcommand{\mgGuard}{{\scriptsize\textcolor{sigilcyan}{\textsc{guarded}}}}
+\newcommand{\mgPartial}{{\scriptsize\textcolor{sigilviolet}{\textsc{partially guarded}}}}
+\newcommand{\mgOpen}{{\scriptsize\textcolor{sigilamber}{\textsc{open}}}}
+
+% layman explainer box
+\newcommand{\layman}[3]{%
+\begin{tcolorbox}[enhanced,
+  interior style={left color=#1!9,right color=white},
+  colframe=#1!45!slate,boxrule=0.5pt,arc=3pt,
+  borderline west={2.5pt}{0pt}{#1},
+  left=9pt,right=9pt,top=7pt,bottom=7pt]
+{\scriptsize\textcolor{#1}{\textsc{in plain words}}\; — \;\textbf{\small #2}}\\[3pt]
+\small #3
+\end{tcolorbox}}
+
+% ---------- attack entry ----------
+% \atkentry{ID}{Attacker goal}{root file:line}{severity}{mitigation status}{
+%   rows via \frow{label}{text} }
+\newcommand{\frow}[2]{{\footnotesize\textcolor{gray}{\textsc{#1}}}\;&\small #2\\}
+\newenvironment{atkentry}[5]{%
+\begin{tcolorbox}[enhanced,breakable,colback=white,colframe=slate,boxrule=0.6pt,arc=2pt,
+  left=8pt,right=8pt,top=6pt,bottom=6pt,
+  borderline west={3pt}{0pt}{sigilred!60!slate}]
+{\small\textbf{#1 · #2}\hfill{\footnotesize\textcolor{gray}{\texttt{#3}}}\quad#4\quad#5}\\[4pt]
+\begin{tabular}{@{}>{\raggedleft\arraybackslash}p{2.1cm}p{12.9cm}@{}}
+}{%
+\end{tabular}
+\end{tcolorbox}\vspace{2pt}}
+
+% widow/orphan discipline
+\widowpenalty=10000
+\clubpenalty=10000
+\displaywidowpenalty=10000
+
+% running header
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhfoffset{0pt}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\headrule}{{\color{slate}\hrule width\headwidth height 0.4pt}}
+\fancyhead[L]{\scriptsize\textcolor{gray}{The Adversary's Companion \,$\cdot$\, v0}}
+\fancyhead[R]{\scriptsize\textcolor{gray}{\thepage}}
+
+\hypersetup{
+  pdftitle={The Adversary's Companion (v0)},
+  pdfauthor={bitknight.dipper688@passmail.net},
+  pdfsubject={Companion to SIGIL whitepaper v1.3 — a threat model of the SIGIL graph written from the attacker's chair, every attack tree rooted in a real open item with file:line},
+  pdfkeywords={SIGIL, threat model, attack tree, security disclosure, consensus, VDF, tip-proof, honest engineering}
+}
+
+\begin{document}
+
+% ---------- title page with braid watermark ----------
+\begin{tikzpicture}[remember picture,overlay]
+\begin{scope}[shift={(current page.north)},yshift=-4.2cm,opacity=0.06]
+  \foreach \yoff/\ph in {0/0, 0.9/2.1, 1.8/4.2}{
+    \draw[ink,line width=2.6pt]
+      plot[smooth,samples=60,domain=-9:9] (\x,{\yoff-0.9+0.85*cos(60*\x+\ph r)});
+  }
+\end{scope}
+\end{tikzpicture}
+
+\thispagestyle{empty}
+\begin{center}
+\begin{tikzpicture}
+  \node[rounded corners=8pt, fill=ink, inner sep=10pt]
+       {\includegraphics[width=2.2cm]{sigil-flat.png}};
+\end{tikzpicture}\\[10pt]
+{\Huge\bfseries\textcolor{ink}{The Adversary's Companion}}\\[8pt]
+{\Large What the Open Items Buy You}\\[6pt]
+{\normalsize A companion to \emph{SIGIL — The Variational Chain}, whitepaper v1.3}\\[10pt]
+{\normalsize v0 · 2026-07-24}\\[6pt]
+{\normalsize\texttt{bitknight.dipper688@passmail.net}}\\[2pt]
+{\small SIGIL / Flux Foundation · \texttt{sigilgraph.quillon.xyz}}\\[14pt]
+\begin{minipage}{0.74\textwidth}
+\centering\itshape
+``An unmarked trust assumption is faith. A marked one is a debt.''\\[2pt]
+{\upshape\scriptsize --- and this paper is the invoice}
+\end{minipage}
+\end{center}
+
+\vspace{10pt}
+\noindent
+\begin{tcolorbox}[colback=panelbg,colframe=slate,boxrule=0.5pt,arc=2pt,left=8pt,right=8pt,top=6pt,bottom=6pt]
+\small\textbf{Scope \& disclosure.} This companion is a threat model of the SIGIL graph
+as it actually stands, written from the attacker's chair. It catalogues \measured{8}
+open or partially-guarded attack surfaces, each rooted in a specific item from the
+project's own \emph{hardening backlog} (2026-07-18, re-verified against live code) and
+security audit, with the exact \texttt{file:line} of the unguarded primitive quoted so
+each tree is re-checkable. It is pseudonymous and secret-free: it records attack
+\emph{classes} and the cited open items, never live exploit payloads or secrets. Every
+attack carries a severity and a mitigation status; nothing open is argued away. A threat
+model is a disclosure document — publishing the surface, graded and dated, is how a
+system becomes accountable to close it. \textbf{The umbrella caveat governs everything
+below: \texttt{sigil-g0} is a live \emph{experimental} network whose block-apply path is
+Phase-0 by design and does not yet enforce consensus cryptography. Do not route
+significant value through SIGIL until the items in \S\ref{sec:open} close.}
+\end{tcolorbox}
+
+\vspace{6pt}
+% severity strip
+\noindent
+\begin{minipage}[t]{0.32\textwidth}\begin{tcolorbox}[colback=panelbg,colframe=slate,boxrule=0.5pt,arc=2pt,halign=center]
+{\LARGE\bfseries\textcolor{sigilred}{1}}\\[2pt]{\scriptsize \textsc{catastrophic} — consensus or full-supply at stake}\end{tcolorbox}\end{minipage}\hfill
+\begin{minipage}[t]{0.32\textwidth}\begin{tcolorbox}[colback=panelbg,colframe=slate,boxrule=0.5pt,arc=2pt,halign=center]
+{\LARGE\bfseries\textcolor{sigilamber}{3}}\\[2pt]{\scriptsize \textsc{major} — history substitution, issuance, or sync poisoning}\end{tcolorbox}\end{minipage}\hfill
+\begin{minipage}[t]{0.32\textwidth}\begin{tcolorbox}[colback=panelbg,colframe=slate,boxrule=0.5pt,arc=2pt,halign=center]
+{\LARGE\bfseries\textcolor{sigilblue}{4}}\\[2pt]{\scriptsize \textsc{moderate} — replay, reward inflation, or light-client deception}\end{tcolorbox}\end{minipage}
+
+\vfill
+\noindent{\footnotesize\textcolor{gray}{Fifth companion to the SIGIL whitepaper.
+Cross-referenced with the philosophy companion (v0.3), the Failure Atlas (v0), and the
+Builder's Chronicle (v0). Sources and file:line anchors in \S\ref{sec:sources}.}}
+
+\clearpage
+
+% =====================================================================
+\section{The honest frame}
+\label{sec:frame}
+
+A chain's whitepaper argues that it is safe. Its threat model argues the opposite, on
+purpose, and the distance between the two is the real measure of the thing. This
+document is the opposite argument. It is written the way an attacker reads a system: not
+``what does it promise,'' but ``where does the promise not yet reach, and what does that
+gap buy me.''
+
+Three properties make this exercise honest rather than theatrical. First, every attack
+below is rooted in a \emph{real} item — a line of code that is verifiably unguarded, or a
+guard that is written but not yet enforcing — with the \texttt{file:line} quoted from the
+current tree. There are no invented cryptographic breaks and no speculative attacks with
+no anchor in the record. Second, each attack is graded twice: by severity (what it costs
+if it lands) and by mitigation status (\mgGuard{}, \mgPartial{}, \mgOpen{}), so a reader
+can tell a shipped defense from a dormant one at a glance. Third, the whole model sits
+under one load-bearing caveat, stated plainly so nothing below can be read out of context.
+
+\layman{sigilviolet}{Why a chain would publish its own attack list}{A silent weakness is
+still a weakness — it just has no deadline attached. Writing it down, with the exact code
+that is unguarded and how bad it would be, turns a vague risk into a debt the project owes
+and can be held to. The whitepaper already opens with a security disclosure telling people
+not to put real money in yet. This paper is that disclosure taken all the way down: the
+full itemized attack surface, so closing it is a public obligation, not a private hope.}
+
+\subsection*{The umbrella caveat}
+
+\texttt{sigil-g0} is a live \emph{experimental} network. Its block-apply path is Phase-0
+by design: the code comment at \texttt{sigil-node/chain.rs:84} reads ``Phase 0 omits crypto
+verification,'' and \texttt{precheck()} validates byte-\emph{lengths} only, not signatures,
+proof-of-work, or the verifiable-delay proof (\texttt{sigil-header:270-305},
+\texttt{chain.rs:86}, \texttt{sigil-chronos lib.rs:333}). The audit states the consequence
+in one sentence: \emph{``\texttt{sigil-g0} balances are not trust-bearing today.''} The
+whitepaper's own security box says it out loud — \emph{``block-apply does not yet enforce
+the producer's signature\ldots{} peer-sync ingress is under-authenticated\ldots{} Do not
+route significant value through SIGIL until they close.''}
+
+Every attack tree in \S\ref{sec:trees} is a \emph{specific} instance of this umbrella.
+That is deliberate: naming the eight concrete gaps is what turns ``not trust-bearing yet''
+from a disclaimer into a checklist.
+
+\subsection*{Where the boundary already holds}
+
+The honest frame cuts both ways: it must be as exact about what \emph{is} guarded as about
+what is not. The RPC edge — the money-touching HTTP surface an anonymous caller can reach
+on the public daemon — \emph{is} authenticated and enforcing. A per-request ed25519
+wallet-signature over a domain-separated canonical message, plus a per-wallet nonce replay
+store, gate every spend route (\texttt{authorize()} at
+\texttt{sigil-rpc/src/bin/sigil-rpcd.rs:682}); the 2026-06-10 audit's headline finding — an
+anonymous \texttt{curl} minting to the 21M cap through a difficulty-zero \texttt{/mine} —
+was fixed and deployed the same day. The residual risk is therefore \emph{not} at the
+edge. It is one layer down, in the consensus cryptography and the peer-sync ingress, which
+no external HTTP client touches but every gossiping peer does. This paper is about that
+layer.
+
+\subsection*{How claims are graded}
+
+SIGIL papers grade every empirical statement on two axes: an evidence grade (\stM{}
+measured on the live path, \stS{} shown in seeded simulation, or claimed-by-derivation)
+and a deployment grade (\stL{} live, \stD{} dormant/coded-but-not-active, or absent). A
+threat model inherits the discipline exactly. An attack reproduced in a controlled
+experiment is \stM{}; an attack that is the \emph{claimed consequence} of a cited, real,
+unguarded item — but has not been run end-to-end — is stated as such and never dressed up
+as demonstrated. A mitigation that exists as tested code behind an activation gate is
+\stD{} \mgPartial{}, never \stL{} \mgGuard{}. The cardinal sin here is the category error,
+not the overstatement: ``an attacker \emph{could}'' and ``an attacker \emph{did}'' are
+different sentences, and this paper refuses to blur them.
+
+% =====================================================================
+\section{How to read an attack tree}
+\label{sec:legend}
+
+Each entry in \S\ref{sec:trees} is one attack, in a fixed shape. The header carries the
+backlog ID, a one-line attacker goal, the \texttt{file:line} of the root primitive, a
+severity marker, and a mitigation-status marker. The body rows are always the same five:
+
+\begin{center}
+\small
+\begin{tabular}{@{}>{\raggedleft\arraybackslash}p{2.4cm}p{12.4cm}@{}}
+\toprule
+{\footnotesize\textcolor{gray}{\textsc{goal}}} & what money or consensus outcome the attacker achieves\\[2pt]
+{\footnotesize\textcolor{gray}{\textsc{preconditions}}} & the position, keys, or timing the attack requires\\[2pt]
+{\footnotesize\textcolor{gray}{\textsc{steps}}} & how the exploit actually runs, concretely\\[2pt]
+{\footnotesize\textcolor{gray}{\textsc{buys}}} & the blast radius — one wallet, the reward stream, a fork, the whole prefix\\[2pt]
+{\footnotesize\textcolor{gray}{\textsc{defense}}} & the guard's true status: what is built, what is dormant, what is missing, and the height-gate strategy for a safe cutover\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Severity: \svC{} (consensus or full-supply), \svM{} (history, issuance, or sync),
+\svMod{} (replay, reward inflation, light-client deception), \svMin{}. Mitigation:
+\mgGuard{} (shipped and enforcing), \mgPartial{} (primitive built, not wired or not
+enforcing), \mgOpen{} (genuinely unaddressed). Deployment/state: \stL{} the defense is
+live, \stD{} the defense is dormant, \stO{} open, and \stXL{} the \emph{exploit} itself is
+still live on the current path. The trees are ordered by severity, worst first.
+
+\layman{sigilcyan}{The pattern to watch for}{Read a few entries and one shape repeats: the
+\emph{fix usually already exists in the codebase} — written, unit-tested — but is switched
+off, waiting behind an activation height, or has no live caller. That is not an accident of
+this paper; it is the true shape of the surface, and \S\ref{sec:shape} names it. ``Built
+but not wired'' is a very different risk from ``nobody has thought about it,'' and a threat
+model earns its keep by telling them apart.}
+
+% =====================================================================
+\section{The attack trees}
+\label{sec:trees}
+
+\subsection{Consensus capture}
+
+\begin{atkentry}{H1}{Forge blocks the whole network applies}{sigil-header:270-305}{\svC}{\stD~\mgPartial}
+\frow{goal}{Inject arbitrary blocks that every follower applies — mint coinbase to
+attacker wallets, rewrite balances, or fork the chain. Full consensus capture.}
+\frow{preconditions}{A libp2p connection to a follower or producer, and the ability to
+gossip a block. \emph{No key} — the producer signature field is not verified, so it need
+not be valid.}
+\frow{steps}{(1) Craft a block with any \texttt{producer\_sig} bytes — all-zero matches
+what the honest producer already writes. (2) Pass \texttt{precheck()}, which validates
+byte-lengths only. (3) Gossip it; followers apply it because the apply path runs no
+producer-signature verification. (4) Embed a coinbase or \texttt{SetBalance} mutation
+crediting attacker wallets.}
+\frow{buys}{Everything — a single wallet up to the entire 21M cap, arbitrary forks,
+follower desync. This is the highest-severity item in the backlog.}
+\frow{defense}{\mgPartial{}, \stD{}. The verifier exists — \texttt{sigil-header::
+verify\_producer\_sig} / \texttt{verify\_at\_height}, 7 tests green — but it is
+height-gated at \texttt{H1\_PRODUCER\_SIG\_ACTIVATION\_HEIGHT = u64::MAX}, so it never
+fires. Activation is blocked on three real pieces of work, all wiring not building: the
+producer must actually sign (today it writes a zeroed sig); the hot path must move to
+\texttt{Ed25519Hot} or gain a validator registry for the post-quantum schemes; and an
+Alpha-Docker soak must pass. The activation height is the coordinated cutover: historical
+zero-sig blocks keep validating under the old rule, blocks at or above the gate require a
+real signature. See \texttt{docs/H1\_PRODUCER\_SIG\_GO\_NO\_GO.md}.}
+\end{atkentry}
+
+\layman{sigilred}{Why this one is the whole game}{On a finished chain, a block is only
+accepted if the right producer signed it. SIGIL has written that check and tested it — but
+left it switched off, because the producer isn't signing yet. Until both halves are on, a
+block with a blank signature is accepted, which means someone who can talk to a node can
+hand it a block that says whatever they want. This is exactly why the umbrella caveat says
+not to put real money in yet: it is not a subtle flaw, it is the front door, and the paper
+lists it first for that reason.}
+
+\subsection{History substitution \& issuance}
+
+\begin{atkentry}{M2}{Serve a malicious ``verified'' snapshot}{sigil-node/main.rs:1037}{\svM}{\stD~\mgPartial}
+\frow{goal}{Feed a fast-forwarding node an attacker-chosen historical prefix that it
+adopts as chain history without ever cryptographically verifying it.}
+\frow{preconditions}{A node performing snapshot-pull fast-forward, and a peer position to
+serve the snapshot. Latent today: snapshot-pull is gated off on the fleet default until a
+signed anchor is published — but the M2 crypto gap is exactly what blocks safe activation.}
+\frow{steps}{(1) Serve a snapshot whose skeleton records hash consistently — the attacker
+controls the \texttt{archive\_root} computation over its own records. (2) With
+\texttt{anchor\_sig} empty, nothing binds the snapshot to a trusted signer; with
+\texttt{fold\_blob} empty, no fold checkpoint authenticates the prefix's chain validity.
+(3) The fast-forwarding node adopts the attacker prefix.}
+\frow{buys}{Wholesale history substitution for a fast-forwarding node — the largest desync
+blast radius short of H1, because it rewrites the entire prefix, not one block.}
+\frow{defense}{\mgPartial{}. The M1 structural layer is real: \texttt{main.rs:1030} serves
+a genuine \texttt{archive\_root} (BLAKE3 over the ordered \texttt{SkeletonRecord}s, matching
+the client \texttt{SnapshotVerifier}). The M2 authentication is absent —
+\texttt{anchor\_sig} and \texttt{fold\_blob} are still empty (\texttt{:1037}), so
+fast-forward authenticates by hash only. Two pieces close it: (a) publish a real signed
+anchor — the operator pins the trust-root pubkey \texttt{SIGIL\_ANCHOR\_PK\_HEX} plus a
+DNS/URL; (b) fill the trailer with a SQIsign signature and a real \texttt{flux\_fold}
+checkpoint, and verify the fold on fast-forward. Because the feature is off until the
+anchor exists, this is not exploitable live yet — but it cannot be safely turned on until
+both land. Test gate: a wrong-signature snapshot rejected; a tampered prefix caught by
+fold-verify.}
+\end{atkentry}
+
+\begin{atkentry}{C10}{Instant-mine via a forgeable VDF modulus}{flux-vdf/src/lib.rs:179}{\svM}{\stXL~\mgPartial}
+\frow{goal}{Collapse the time-lane. Produce ``delayed'' verifiable-delay outputs instantly
+— capture issuance, out-run honest miners, and break the timing assumption the tip-bound
+challenge seed rests on.}
+\frow{preconditions}{Knowledge of the \texttt{bench\_2048} modulus's factorization — it is
+a benchmark modulus, so its factors are public or derivable — and a miner or
+block-producer role.}
+\frow{steps}{(1) Because the group order is known, compute the Wesolowski VDF output
+directly instead of by sequential squaring. (2) Submit zero-real-delay ``elapsed-time''
+proofs to \texttt{/mining/submit} or inside blocks. (3) Win the issuance race; the
+time-lane offers no independent rate limit.}
+\frow{buys}{Issuance capture — the mining reward stream and any timing-gated consensus. Not
+a full-supply mint on its own, but it composes with H1.}
+\frow{defense}{\mgPartial{}, and the exploit is still \stXL{}. The trustless replacement is
+built: \texttt{flux-vdf/src/lib.rs:195} adds \texttt{rsa2048()} — the RSA-2048
+Factoring-Challenge semiprime, unknown factorization, nothing-up-my-sleeve — plus
+\texttt{production()} and \texttt{assert\_secure()} (\texttt{:226}, which rejects
+small/even/prime/smooth $N$ and fails closed). But every live consensus and mining site
+still calls the forgeable \texttt{bench\_2048()}: \texttt{sigil-rpcd.rs:291} (follower
+apply), \texttt{:1215} (\texttt{/mining/submit}), and every miner
+(\texttt{flux-miner/src/engine.rs:105,294}, \texttt{client.rs:211,231}, the miner bins).
+The fix is to wire \texttt{production()} into every verify site, height-gated: pre-activation
+blocks were mined against \texttt{bench\_2048}, so a clean cutover needs a height boundary
+plus a coordinated miner upgrade. Small change, high blast radius — Alpha Docker first.
+Test gate: a \texttt{bench\_2048}-shortcut proof rejected under the production modulus; an
+honest proof verifies.}
+\end{atkentry}
+
+\begin{atkentry}{H2}{Feed sync from an unauthenticated peer}{sigil-node/src/sync\_auth.rs}{\svM}{\stD~\mgPartial}
+\frow{goal}{Pose as a legitimate validator peer, serve a fabricated or forked block history
+over the backfill path to a syncing node, and desync or poison its state.}
+\frow{preconditions}{A libp2p connection to a node that is backfilling or bootstrapping.
+While enforcement is off (the default), no valid handshake is needed.}
+\frow{steps}{(1) Connect to a syncing follower. (2) Answer its \texttt{BackfillReq} with
+attacker-chosen blocks; because the handshake gate is log-only by default, the
+unauthenticated serve is accepted and merely telemetry-flagged. (3) Combined with H1 or H3,
+deliver a fork the follower applies.}
+\frow{buys}{Follower desync or fork adoption on the sync path. The target is a bootstrapping
+or lagging node, not the steady-state producer.}
+\frow{defense}{\mgPartial{}. The crypto is real and on-branch: \texttt{verify\_handshake} is
+ed25519 over the canonical transcript, fail-closed (a Blake3 stub yields
+\texttt{StubRejected}, an unwired PQ algorithm \texttt{UnsupportedAlgorithm}). The node
+mints a 12-hour \texttt{ValidatorPeer} handshake at boot (key
+\texttt{<db\_path>/handshake\_ed25519.key}, sync-only, not a wallet key), attaches it to
+every outgoing \texttt{BackfillReq}, and the server verifies and caches sessions with
+\emph{channel binding} — the \texttt{session\_pubkey} must equal the arriving libp2p peer
+id, so a cross-peer replay fails inside the validity window. 11/11 crate and 42/42 node
+tests. It is \stD{} because the default is log-only (authed/anon/refused telemetry) to let
+the fleet migrate; \texttt{SIGIL\_HANDSHAKE\_REQUIRE=1} refuses before any block transfer.
+Remaining: the \texttt{sigil-top} client attach, then the enforcement flip once telemetry
+shows followers authenticate.}
+\end{atkentry}
+
+\subsection{Reward inflation, replay \& light-client deception}
+
+\begin{atkentry}{H3}{Claim full reward for an easy share}{sigil-rpcd.rs:150}{\svMod}{\stD~\mgPartial}
+\frow{goal}{Serve a block with a trivially-low difficulty, have the follower verify the
+cheap proof-of-work and credit full reward — mint reward for near-zero work.}
+\frow{preconditions}{A producer/peer role able to gossip a block with a chosen
+\texttt{bits} field; enforcement off (the default).}
+\frow{steps}{(1) Mine a block against an artificially low difficulty. (2) Declare the low
+\texttt{bits} in the block; the follower verifies the share against the \emph{declared}
+difficulty, not an independently reconstructed target. (3) Collect full reward for cheap
+work.}
+\frow{buys}{Reward inflation and mining-economics distortion; with H1, also a cheap route to
+producing accepted blocks. The self-mining \texttt{/mining/submit} path was always safe —
+its target is server-derived.}
+\frow{defense}{\mgPartial{}. \texttt{apply\_block} now runs \texttt{check\_difficulty\_floor}
+before verifying the share, enforcing the difficulty \emph{envelope}: an absolute floor
+(\texttt{bits} $\geq$ \texttt{SIGIL\_MIN\_BLAKE4\_BITS}, default 10 — which kills the named
+\texttt{bits=4} attack) and a per-block clamp (\texttt{bits} may not drop more than
+\texttt{RETARGET\_MAX\_STEP}, 2, below the last-accepted value, valid because the producer
+retargets only once per \texttt{RETARGET\_WINDOW} of 16 blocks and by at most 2). Both
+bounds provably hold for honest blocks, so enforcement cannot fork off the honest chain.
+Pure checker, 5/5 unit tests, telemetry \texttt{H3\_WOULD\_REJECT}; enforce with
+\texttt{SIGIL\_DIFFICULTY\_ENFORCE=1}. Honest residual: the envelope \emph{bounds} the
+attack but does not reconstruct the \emph{exact} required target — that needs verified
+in-block timestamps and a replayable retarget rule, a consensus change that depends on the
+H7 timestamp guard. The cheap-share attack is closed; a subtler in-envelope manipulation is
+not yet provably excluded.}
+\end{atkentry}
+
+\begin{atkentry}{H5}{Replay a signed transaction across blocks}{sigil-tx:18-20}{\svMod}{\stD~\mgPartial}
+\frow{goal}{Replay a victim's already-valid signed transaction in a later block,
+re-executing the transfer to drain the sender or double-credit a recipient.}
+\frow{preconditions}{Observe one valid signed transaction on the wire or in the mempool —
+no key needed, the attacker replays the victim's own signature — and a path to re-inject it
+into a later block.}
+\frow{steps}{(1) Capture a broadcast signed transaction. (2) Re-broadcast it after it is
+mined; the in-RAM mempool dedup does not span blocks or restarts. (3) The live apply path
+applies it again, because no persistent per-wallet nonce high-water is consulted.}
+\frow{buys}{Repeated unauthorized transfers, bounded by victim balance times replays — a
+single- or few-wallet blast radius, not the whole supply.}
+\frow{defense}{\mgPartial{}. The mechanism is sound and committed but has no live caller.
+\texttt{sigil-state::check\_and\_bump\_nonce} (\texttt{lib.rs:336}) stores a per-wallet
+high-water as a reserved \texttt{NONCE\_TOKEN} balance, so it rides the committed
+\texttt{wallet\_state\_root} and a forged \texttt{SetBalance} to \texttt{NONCE\_TOKEN} is
+rejected (\texttt{:882}, \texttt{ReservedToken}); \texttt{sigil-tx::apply\_signed\_batch}
+(\texttt{:1360}) folds the nonce into the signed digest and rejects \texttt{nonce <= stored}
+(\texttt{NonceReplay}). Both are tested. The gap: neither has any caller in
+\texttt{sigil-node} or \texttt{sigil-rpcd}, so the live money path never runs them, and the
+legacy \texttt{SignedTx.nonce} field is still neither signed nor checked. The fix is
+wiring — route the live apply path through \texttt{apply\_signed\_batch}, or call
+\texttt{check\_and\_bump\_nonce} in the RPC apply. Test gate: a replayed signed batch
+rejected at the live apply path.}
+\end{atkentry}
+
+\begin{atkentry}{H4}{Fabricate a wire tip-proof}{sigil-node/src/main.rs:1686}{\svMod}{\stO~\mgOpen}
+\frow{goal}{Feed a light client or peer a forged tip-proof asserting a false chain tip or
+balance state; the client trusts it and answers balance queries against attacker-chosen
+state.}
+\frow{preconditions}{The ability to gossip on \texttt{TOPIC\_TIP\_PROOFS} to a subscribing
+light client. No key required — the proof is a keyless BLAKE3 fingerprint.}
+\frow{steps}{(1) Fabricate a \texttt{Blake3Fingerprint} tip-proof over any tip or state you
+choose; nothing binds it to a key. (2) Publish it on the tip-proof topic. (3) A light client
+with no receiver-side verification accepts it as the chain tip and serves wrong balances.}
+\frow{buys}{Light-client and fresh-node deception — false balance queries, a false tip. It
+does not move consensus state on full nodes, but it undermines the whitepaper's headline
+fresh-node proof path.}
+\frow{defense}{\mgOpen{} — genuinely unaddressed, and this one is building, not merely
+wiring. The wire always builds \texttt{TipProof::new\_blake3}
+(\texttt{main.rs:1686,1750}); the only \texttt{.verify()} (\texttt{:1788}) is the producer's
+own dry-run self-check, not receiver ingress; \texttt{TOPIC\_TIP\_PROOFS} appears only in
+the publish direction (\texttt{:1877}) with no verifying subscriber. \texttt{SqiSignBlob}
+exists as a flavor (\texttt{sigil-tip-proof:52}) but \texttt{new\_sqisign} is never called
+for tip-proofs. The fix is to produce \emph{and} verify \texttt{SqiSignBlob} tip-proofs on
+the wire, keeping BLAKE3 as integrity-only and never a trust root — which is exactly the
+contract the WS2 \texttt{/balance} verifier already gates on via
+\texttt{adversary\_resistant()}. Test gate: a fabricated BLAKE3 tip-proof fails the
+adversary-resistant gate; a valid SQIsign tip-proof passes.}
+\end{atkentry}
+
+\begin{atkentry}{WS2}{Prove a balance against an uncommitted root}{sigil-state roots()}{\svMod}{\stD~\mgPartial}
+\frow{goal}{Serve a light client a \texttt{/balance?proof=1} response with a valid-looking
+inclusion proof against a balance state the chain tip does not actually commit to.}
+\frow{preconditions}{A light client relying on \texttt{/balance?proof=1}, and a node (or a
+machine-in-the-middle) serving the response.}
+\frow{steps}{(1) The client requests a proof-carrying balance. (2) The server returns an SMT
+inclusion proof, which the client checks against an SMT root — but no \emph{tip-attested}
+SMT root exists to bind that root to consensus. (3) A dishonest server presents a proof
+against an SMT root the real tip never committed to; the seam is the gap between ``the proof
+verifies'' and ``the root is the canonical committed root.''}
+\frow{buys}{Light-client balance deception — the same victim class as H4. The proof
+machinery is real; the anchoring is missing. Not a full-node consensus break.}
+\frow{defense}{\mgPartial{}. The read path is realized on-branch: \texttt{prove\_balance()},
+\texttt{/balance?proof=1}, and the \texttt{sigil-balance-verify} client gate on
+\texttt{TipProofFlavor::adversary\_resistant()}. But the committed \texttt{wallet\_state\_root}
+is still the additive accumulator, not the SMT the proof references — so the tip-proof does
+not yet attest the SMT root. The fix is the height-gated Phase-3 swap the \texttt{roots()}
+documentation already anticipates: add the SMT root to the header/roots, maintaining the SMT
+incrementally in \texttt{set\_balance}. It depends on H4 (SQIsign tip-proofs on the wire) to
+be end-to-end meaningful. Test gate: a light client trusts a \texttt{/balance?proof=1}
+response only after checking it against the tip-attested SMT root.}
+\end{atkentry}
+
+% =====================================================================
+\section{What we already attacked ourselves with}
+\label{sec:closed}
+
+A threat model that only lists open items reads as if the system had never been tested. It
+has — adversarially, on purpose, and the results are the other half of the honest picture.
+Before the DagKnight braid-ordering layer was allowed near the live network, it ran a
+six-scenario adversarial simulation gate; on any state divergence a node self-halts with
+\textbf{exit code 78} (no auto-restart, operator alarm) before it serves a single byte. All
+six report divergence \measured{= 0}:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lp{9.4cm}l@{}}
+\toprule
+\textsc{scenario} & \textsc{what it attacks} & \textsc{result}\\
+\midrule
+S1 & 10k blocks, 3 producers, dual-instance & \measured{divergence = 0}\\
+S5 & 30\% drop / reorder / equivocation & \measured{divergence = 0}\\
+Orderings & 16/16 permutations agree; incremental $\equiv$ batch & \measured{16/16}\\
+Withheld-block attacker & finalized prefix byte-identical & \measured{1378 blocks}\\
+Tamper suite & mutated blocks must be rejected & \measured{5/5 rejected}\\
+S6 & 100k blocks, maximum reorg window & \measured{258 $\leq$ 16384 bound}\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Corroborating live evidence: a two-producer mesh ran \measured{3385 emissions
+byte-identical} before the experimental network's producer flipped to the braid binary at
+height \measured{17.52M} (2026-07-02). The honesty caveat travels with the result:
+\emph{simulation convergence is encouraging evidence, not a safety or liveness proof} — the
+Byzantine-threshold theorem, the fold-soundness reduction, and the composition bound remain
+on the open-theory rung of the evidence ladder. What the gate demonstrates is narrower and
+real: across these adversaries, the ordering layer did not diverge, and where it might, it
+stops rather than lies.
+
+Three attack classes the audit once listed are now closed outright, and are recorded here so
+the reader does not mistake a stale finding for a live one — the current tree wins over the
+older audit on every disagreement:
+
+\begin{itemize}[leftmargin=1.4em,itemsep=2pt]
+\item \textbf{Bridge mint (C9) — \mgGuard{}.} \texttt{sigil-bridge/src/lib.rs}:
+\texttt{process\_deposit} (\texttt{:82}) binds amount and recipient to the proven
+transaction via \texttt{deposit\_intent()} (not caller arguments), enforces a spent-set,
+gates to BTC-only, and takes a PoW floor; \texttt{process\_withdrawal} (\texttt{:124})
+requires the owner's ed25519 signature plus an idempotent id; \texttt{process\_ln\_deposit}
+(\texttt{:146}) binds to a signed BOLT11 invoice plus spent-set. \measured{25 bridge tests}
+green. The audit's ``unbounded / no replay / no sig'' is stale.
+\item \textbf{Event-log root (H6) — \mgGuard{}.} \texttt{sigil-state::hash\_event\_log}
+(\texttt{lib.rs:1089}) builds a positional balanced binary Merkle tree;
+\texttt{sigil-events} builds the identical tree and its inclusion roundtrip is tested
+(\texttt{:527}), with tamper-rejection at \texttt{:546}. The audit's ``order-blind
+accumulator'' premise is factually stale. (Minor residual: event ordering is
+positional-but-producer-chosen, not independently constrained.)
+\item \textbf{RPC theft routes — \mgGuard{}.} The wallet-signature auth gate deployed
+enforcing on the production daemon 2026-06-10 closed the anonymous mint, the owner-less
+swap and liquidity spend, and the uncapped token deploy. The residual, disclosed in
+\S\ref{sec:open}: the \texttt{/onboard} faucet and two demo routes.
+\end{itemize}
+
+% =====================================================================
+\section{The shape of the surface}
+\label{sec:shape}
+
+Read the eight trees together and a single shape dominates. Of the eight, one is
+\mgOpen{} (H4), and \emph{seven are \mgPartial{}} — the defensive primitive is written and
+tested, but dormant, unwired, or enforcing only in log-only mode. This is the same shape the
+Failure Atlas found across seventy-one incidents, where ``built but not wired'' was the
+single largest failure class. A threat model earns its keep by naming that distinction
+precisely, because the two risks demand different responses. An \mgOpen{} item needs design
+and implementation; a \mgPartial{} item needs a decision, a soak, and an activation height.
+
+The recurring instrument is the \emph{height gate}. Every consensus-touching fix here —
+producer signatures (H1), the trustless VDF modulus (C10), the committed SMT root (WS2) —
+lands behind an activation height rather than as an immediate rule change. This is not
+timidity; it is the only way to change a validation rule on a live chain without orphaning
+the history that was produced under the old rule. Pre-activation blocks keep validating by
+the old rule, at-or-after blocks by the new one, and the boundary is a scheduled, revocable,
+coordinated cutover. The cost is that a written defense sits visibly dormant for a while —
+which is precisely the state this paper is built to disclose rather than hide.
+
+One residual is disclosed rather than closed, because closing it fights the cold-start
+problem head-on: the \texttt{/onboard} faucet still credits new wallets a fixed grant per
+call, which a caller with fresh addresses can farm. A new wallet cannot pre-authenticate —
+it has no funds and no history — so the honest fix is a finite, operator-funded faucet with
+a per-IP rate limit and a debit against a real reserve, not an unbounded mint. Until that
+ships, the faucet is a disclosed, bounded-value soft spot, not a silent one.
+
+\layman{sigilamber}{What ``partially guarded'' really costs}{Seven of the eight weaknesses
+already have their fix written and tested — it is just turned off. That is good news and a
+warning at once. Good, because closing them is mostly a matter of decisions and careful
+rollout, not invention. A warning, because a defense that is switched off protects nobody,
+and it is easy to feel safe looking at code that never runs. This paper's job is to keep the
+gap between ``the fix exists'' and ``the fix is on'' visible, dated, and owed.}
+
+% =====================================================================
+\section{Still open — the surface without a guard yet}
+\label{sec:open}
+
+The disclosure, consolidated. Nothing here is argued away; each row is the honest current
+status, worst first.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}llp{7.5cm}l@{}}
+\rowcolor{rowtint}
+\textsc{id} & \textsc{severity} & \textsc{attack surface} & \textsc{status}\\
+\midrule
+H1 & \svC & Block-apply does not enforce the producer signature (verifier dormant at \texttt{u64::MAX}) & \stD~\mgPartial\\
+M2 & \svM & Snapshot fast-forward has empty \texttt{anchor\_sig} / \texttt{fold\_blob} & \stD~\mgPartial\\
+C10 & \svM & Live VDF still runs over the forgeable \texttt{bench\_2048} modulus & \stXL~\mgPartial\\
+H2 & \svM & Verify-before-sync handshake enforcing in log-only mode & \stD~\mgPartial\\
+H3 & \svMod & Follower bounds but does not re-derive the exact difficulty target & \stD~\mgPartial\\
+H5 & \svMod & Nonce-replay primitive committed but has zero live callers & \stD~\mgPartial\\
+H4 & \svMod & Keyless wire tip-proofs; no receiver-side verification & \stO~\mgOpen\\
+WS2 & \svMod & SMT root not committed in the header, so \texttt{/balance} proofs are unanchored & \stD~\mgPartial\\
+\midrule
+--- & \svMin & \texttt{/onboard} faucet uncapped; two demo routes ungated & \stO~\mgOpen\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The umbrella over the whole table stands: \texttt{sigil-g0} is experimental and its
+balances are not trust-bearing until the consensus-crypto rows (H1, C10) and the
+peer-sync rows (H2, H3, H4, M2) close. That sentence is the debt this paper exists to keep
+on the books.
+
+% =====================================================================
+\section{Closing}
+\label{sec:closing}
+
+The distance between a whitepaper and its threat model is where a project's honesty lives.
+A system that only publishes its promises asks to be trusted; a system that publishes,
+grades, and dates its attack surface asks to be \emph{checked}, and gives the reader the
+file and line to do it with. Every attack in this companion is a specific instance of one
+disclosed sentence — that \texttt{sigil-g0} does not yet enforce its consensus cryptography
+— turned into an itemized, severity-ranked, mitigation-graded list. Seven of the eight
+surfaces already have their guard written and waiting behind an activation height; one is
+still open. None is hidden.
+
+That is the whole argument. An attack surface you can see is a roadmap; an attack surface
+you cannot is a liability. This paper chose the first on purpose.
+
+\vspace{8pt}
+\noindent\textit{v0 — 2026-07-24. The verifier is written; the gate is at \texttt{u64::MAX};
+the debt is on the ledger. A disclosed surface is a roadmap — a silent one is a liability.
+Publish the attacks, grade them, date them, and let the closing of them be owed in public.}
+
+% =====================================================================
+\section*{Sources}
+\label{sec:sources}
+\small
+\begin{itemize}[leftmargin=1.2em,itemsep=1pt]
+\item \emph{SIGIL Hardening Backlog}, 2026-07-18 — the ground-truth doc, every verdict
+re-verified against the live tree; the spine of this threat model.
+\texttt{docs/SIGIL\_HARDENING\_BACKLOG.md}.
+\item \emph{SIGIL Security Audit}, 2026-06-10 — the earlier six-agent audit; several
+findings since fixed (the backlog wins on any disagreement).
+\texttt{SECURITY\_AUDIT\_2026-06-10.md}.
+\item \emph{SIGIL — The Variational Chain}, whitepaper v1.3 (2026-07-22) — the design this
+threat model probes; its security-disclosure box and honesty section are the canonical
+open-item list. \url{https://quillon.xyz/downloads/SIGIL_WHITEPAPER_v1.pdf}.
+\item \emph{What the Chain Knows — The Philosophy of the SIGIL Graph}, v0.3 (2026-07-22) —
+the epistemology of honesty this paper's grading inherits.
+\url{https://quillon.xyz/downloads/SIGIL_PHILOSOPHY_v0.pdf}.
+\item \emph{The SIGIL Failure Atlas}, v0 (2026-07-23) — the sibling companion: 71 real
+failures in ten classes, where ``built but not wired'' is the same dominant shape found
+here. \url{https://quillon.xyz/downloads/SIGIL_FAILURE_ATLAS_v0.pdf}.
+\item \emph{The Builder's Chronicle}, v0 (2026-07-23) — the fourth companion: development
+settled on-chain as a prototype labor institution.
+\url{https://quillon.xyz/downloads/SIGIL_BUILDERS_CHRONICLE_v0.pdf}.
+\end{itemize}
+
+\end{document}

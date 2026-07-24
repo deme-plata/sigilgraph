@@ -21,6 +21,10 @@ use sigil_state::MAX_SUPPLY;
 /// fail-loud verifier rather than a drift-prone actuator). See [`breathing`].
 pub mod breathing;
 
+/// Quillon-ported adaptive emission controller (time-based halving + PID rate
+/// control + persisted watermark). Opt-in alternative to the pure height schedule.
+pub mod controller;
+
 /// Blocks per halving epoch.
 pub const HALVING_INTERVAL: u64 = 2_100_000;
 

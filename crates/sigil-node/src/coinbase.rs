@@ -114,4 +114,49 @@ mod tests {
         let (_, rb) = coinbase_for(&b, 5, [0u8; 32]);
         assert_eq!(ra.wallet_state_root, rb.wallet_state_root);
     }
+
+    /// CHRONOS GATE (the flux-way money-on-braid proof): N independent nodes
+    /// replay the SAME ordered sequence of coinbase blocks and must converge to
+    /// a byte-identical wallet_state_root + native_supply — divergence == 0.
+    /// This is what makes it SAFE to settle money over the braid's finalized
+    /// order: the order determines the money, uniquely, on every node.
+    #[test]
+    fn chronos_coinbase_replay_divergence_zero() {
+        const NODES: usize = 4;
+        const BLOCKS: u64 = 200;
+
+        // Producer builds the canonical order: coinbase transition per height.
+        let mut producer = SigilState::new();
+        let mut order: Vec<StateTransition> = Vec::new();
+        for h in 1..=BLOCKS {
+            let tr = coinbase_transition(&producer, h, producer_wallet());
+            // apply on the producer to advance its own state (as a real node does)
+            sigil_state::commit_state_transition(&mut producer, &tr, h).unwrap();
+            order.push(tr);
+        }
+
+        // N followers replay the identical order from genesis.
+        let mut roots = Vec::new();
+        let mut supplies = Vec::new();
+        for _ in 0..NODES {
+            let mut node = SigilState::new();
+            for (i, tr) in order.iter().enumerate() {
+                let h = (i as u64) + 1;
+                sigil_state::commit_state_transition(&mut node, tr, h).unwrap();
+            }
+            roots.push(node.roots().wallet_state_root);
+            supplies.push(node.native_supply());
+        }
+
+        // Divergence must be zero: every node agrees with the producer + each other.
+        let p_root = producer.roots().wallet_state_root;
+        let p_supply = producer.native_supply();
+        for i in 0..NODES {
+            assert_eq!(roots[i], p_root, "node {i} wallet_root diverged from producer");
+            assert_eq!(supplies[i], p_supply, "node {i} supply diverged from producer");
+        }
+        // and the emission is exactly the schedule sum (conservation)
+        let expected: u128 = (1..=BLOCKS).map(sigil_emission::block_reward).sum();
+        assert_eq!(p_supply, expected, "minted supply == Σ block_reward(h) — no phantom emission");
+    }
 }

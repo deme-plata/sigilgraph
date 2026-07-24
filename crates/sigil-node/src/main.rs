@@ -8,6 +8,7 @@
 
 mod block;
 mod chain;
+mod coinbase; // ONE-CHAIN step 1: braid mints REAL coinbase blocks (money enters the graph)
 mod chain_log;
 mod cli;
 mod snapshot;
@@ -782,10 +783,17 @@ fn run_start() -> Result<()> {
                     // forever (Phase 0 has no backfill). Once grace elapses,
                     // both advance from H=1 in lockstep.
                     let peers = mgr.summary().peer_count;
-                    if peers == 0 {
+                    // DEV: SIGIL_SOLO_MINT=1 lets a single node mint with no peer
+                    // (self-contained coinbase/chronos proofs). Off by default —
+                    // the peer+grace gate below is unchanged for real meshes.
+                    let solo = std::env::var("SIGIL_SOLO_MINT").map(|v| v == "1").unwrap_or(false);
+                    if solo && !producing {
+                        producing = true;
+                        eprintln!("🏭 SOLO_MINT — dev proof, minting without a peer");
+                    } else if peers == 0 && !solo {
                         first_peer_at = None;
                         producing = false;
-                    } else if first_peer_at.is_none() {
+                    } else if first_peer_at.is_none() && !solo {
                         first_peer_at = Some(std::time::Instant::now());
                         eprintln!("🤝 peer connected — minting block 1 in {}ms (mesh-graft grace)", grace_ms);
                     } else if !producing
@@ -2180,8 +2188,18 @@ fn mint_next_block(
     h.update(nonce.as_bytes());
     let vdf_input = *h.finalize().as_bytes();
 
-    let transition = StateTransition { at_height: height, mutations: vec![] };
-    let roots = chain.roots(); // empty transition ⇒ roots identical to parent
+    // ONE-CHAIN step 1: the braid mints a REAL coinbase — the producer credits
+    // itself block_reward(height) through the shared money chokepoint, so money
+    // now lives IN the graph (not a separate rpcd chain). The reward mutation is
+    // in the block body, so every follower re-applies it and the root-match check
+    // in ChainTip::apply passes. SIGIL_COINBASE=0 restores the empty-block dyno.
+    let coinbase_on = std::env::var("SIGIL_COINBASE").map(|v| v != "0").unwrap_or(true);
+    let (transition, roots) = if coinbase_on {
+        let state = chain.state_snapshot();
+        coinbase::coinbase_for(&state, height, parent)
+    } else {
+        (StateTransition { at_height: height, mutations: vec![] }, chain.roots())
+    };
     // Commit the verify-once txs: a sequential BLAKE3 root over their intent
     // hashes + the count. The signatures were verified ONCE at mempool ingest;
     // the producer-sig over this header binds the producer to this exact set.

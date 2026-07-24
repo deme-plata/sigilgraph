@@ -1,0 +1,26 @@
+[package]
+name = "sigil-api"
+version.workspace = true
+edition = "2021"
+
+# The braid node's money API — a proper axum surface (the Quillon q-api-server
+# pattern), annotated with flux-api's #[api] so OpenAPI + typed SDKs generate for
+# free. Replaces the hand-rolled sigil-rpcd HTTP once it serves the full surface.
+
+[dependencies]
+axum = { version = "0.7", features = ["json", "query"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+tower-http = { version = "0.5", features = ["cors", "trace", "timeout"] }
+hex = "0.4"
+blake3 = { workspace = true }
+
+sigil-state = { path = "../sigil-state" }
+sigil-tx = { path = "../sigil-tx" }
+sigil-emission = { path = "../sigil-emission" }
+
+# flux-api: annotate handlers with #[api(...)] → OpenAPI 3.1 + TS/Py/Rust/Go SDKs.
+flux-api = { path = "../../../flux/crates/flux-api" }
+flux-api-macros = { path = "../../../flux/crates/flux-api-macros" }
+inventory = "0.3"

@@ -574,6 +574,10 @@ impl Mempool {
     /// Total signatures verified over this mempool's life (verify-once meter).
     pub fn verified_total(&self) -> u64 { self.verified_total }
 
+    /// True if this tx hash has been seen (ingested) by this mempool — used by
+    /// the money API's `/v1/transactions/:hash` status route.
+    pub fn contains(&self, hash: &[u8; 32]) -> bool { self.seen.contains(hash) }
+
     /// R1: ingest an AuthorizedBatch. Verifies the ONE signature (sig + single-author
     /// + R0 nonce binding) ONCE, dedups by the signed auth message, and enqueues the
     /// batch INTACT. Returns the op count accepted. The consensus replay nonce is

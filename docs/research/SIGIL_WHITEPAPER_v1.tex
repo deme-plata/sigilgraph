@@ -880,6 +880,62 @@ argue and doesn't guess — it stops serving and raises its hand (exit code 78, 
 fires). Our sister network once lost a user's funds \emph{silently}; SIGIL is built so
 that silent is structurally impossible.}
 
+\subsection{Holding the project to account: commitment provenance \hfill \stG}
+
+The same discipline turns on the project itself. SIGIL signs its \emph{binaries} but,
+until recently, its \emph{promises} --- roadmap commitments, security disclosures, the
+``single-producer today'' admission, the reset-before-mainnet pledge --- carried no
+provenance at all. A community reader made the point sharply: a chain built to hold its
+ledger to account should be able to hold its own word to account, by the same means. It
+can, and it needs no new cryptographic primitive --- only careful composition, data
+availability, and an \emph{independent} witness.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.86\textwidth]{pro1.png}
+\caption{\small Two provenance gaps, one key. The signer that attests a binary attests
+the words around it; the unsealed, silently-editable promise gains the same require-both
+seal.}
+\end{figure}
+
+A \emph{Commitment Record} is a canonical, content-addressed statement --- atomic (one
+stable id per promise: \texttt{mainnet.reset-before-launch}, \texttt{allocation.none},
+\ldots), governance-signed with a keyset separate from the builder key, and hash-chained
+so no past record can be silently inserted, reordered, or deleted (a change of direction
+\emph{supersedes}, never erases). Its digest is anchored in the block's event-log root.
+But a single-producer, resettable chain cannot independently witness its own \emph{time}
+--- the same hand holds the promise key, the record chain, and the anchoring chain. The
+break in that circle is an external witness: each record head is Bitcoin-timestamped via
+OpenTimestamps, so the date is attested by an authority we do not control.
+
+\begin{figure}[h]
+\centering
+\includegraphics[height=0.40\textheight]{pro2.png}
+\caption{\small You cannot be your own witness. SIGIL proves \emph{inclusion}; Bitcoin
+proves the \emph{time}. The companion note \emph{The Word and the Ledger} is itself
+already Bitcoin-timestamped, receipt published beside it.}
+\end{figure}
+
+The construction is \textcolor{sigilviolet}{staged}, and honest about it: the event-log
+field is live but commitment emission is not yet exercised; the linear record chain
+plus widely-published, externally-witnessed heads is a starting shape, with a
+consistency-proven Merkle log the longer-term target. \emph{How a kept promise is shown:}
+fulfilling a commitment emits a new record with the same id, status \texttt{satisfied},
+citing the evidence (a commit hash, a release tag, a block height) --- itself
+Bitcoin-timestamped, so ``promised on date $A$, kept on date $B$, evidence $X$'' is
+mechanically checkable by anyone, forever. Full design, limits, and verification:
+\emph{The Word and the Ledger --- Verifiable Commitment Provenance} (companion note).
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.58\textwidth]{pro3.png}
+\caption{\small One vertical spine, all of it ours --- which is why this is a
+composition, not a research program: Flux compiler $\to$ content-addressing $\to$
+require-both signing $\to$ the braid / event-log root $\to$ the fold $\to$ a Commitment
+Record witnessed inside (seal) and outside (a Bitcoin receipt). Solid = live, dashed =
+staged.}
+\end{figure}
+
 \subsection{State: one chokepoint \hfill \stL}
 
 \path{sigil-state::commit_state_transition} is the only function that may mutate state;

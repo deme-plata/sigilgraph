@@ -431,6 +431,61 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "axum"
+version = "0.7.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edca88bc138befd0323b20752846e6587272d3b03b0343c8ea28a6f819e6e71f"
+dependencies = [
+ "async-trait",
+ "axum-core",
+ "bytes",
+ "futures-util",
+ "http 1.4.1",
+ "http-body 1.0.1",
+ "http-body-util",
+ "hyper 1.10.1",
+ "hyper-util",
+ "itoa",
+ "matchit",
+ "memchr",
+ "mime",
+ "percent-encoding",
+ "pin-project-lite",
+ "rustversion",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "serde_urlencoded",
+ "sync_wrapper",
+ "tokio",
+ "tower",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
+name = "axum-core"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09f2bd6146b97ae3359fa0cc6d6b376d9539582c7b4220f041a33ec24c226199"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "http 1.4.1",
+ "http-body 1.0.1",
+ "http-body-util",
+ "mime",
+ "pin-project-lite",
+ "rustversion",
+ "sync_wrapper",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
 name = "backtrace"
 version = "0.3.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1819,7 +1874,7 @@ checksum = "749cff877dc1af878a0b31a41dd221a753634401ea0ef2f87b62d3171522485a"
 
 [[package]]
 name = "flux-aether"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "blake3",
  "reed-solomon-erasure",
@@ -1828,7 +1883,7 @@ dependencies = [
 
 [[package]]
 name = "flux-ai"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "flux-graph",
  "serde",
@@ -1856,8 +1911,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "flux-api"
+version = "0.39.0"
+dependencies = [
+ "flux-api-macros",
+ "flux-graph",
+ "inventory",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "flux-api-macros"
+version = "0.39.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "flux-architect"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "flux-ai",
  "flux-graph",
@@ -1868,7 +1943,7 @@ dependencies = [
 
 [[package]]
 name = "flux-arxiv-latex"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -1877,7 +1952,7 @@ dependencies = [
 
 [[package]]
 name = "flux-cache"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -1897,7 +1972,7 @@ dependencies = [
 
 [[package]]
 name = "flux-chronos"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -1929,7 +2004,7 @@ dependencies = [
 
 [[package]]
 name = "flux-cortex"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "flux-architect",
  "flux-graph",
@@ -1940,7 +2015,7 @@ dependencies = [
 
 [[package]]
 name = "flux-db"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -1976,7 +2051,7 @@ dependencies = [
 
 [[package]]
 name = "flux-graph"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "flux-cache",
  "serde",
@@ -1993,7 +2068,7 @@ dependencies = [
 
 [[package]]
 name = "flux-history"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "blake3",
  "flux-db",
@@ -2012,7 +2087,7 @@ dependencies = [
 
 [[package]]
 name = "flux-lattice-guard"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -2032,7 +2107,7 @@ dependencies = [
 
 [[package]]
 name = "flux-market"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -2049,7 +2124,7 @@ dependencies = [
 
 [[package]]
 name = "flux-miner"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2081,7 +2156,7 @@ dependencies = [
 
 [[package]]
 name = "flux-optimize"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "flux-graph",
  "serde",
@@ -2090,7 +2165,7 @@ dependencies = [
 
 [[package]]
 name = "flux-p2p"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2137,7 +2212,7 @@ dependencies = [
 
 [[package]]
 name = "flux-rev"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "blake3",
  "flux-p2p",
@@ -2169,7 +2244,7 @@ dependencies = [
 
 [[package]]
 name = "flux-search"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "blake3",
  "parking_lot 0.12.5",
@@ -2220,7 +2295,7 @@ dependencies = [
 
 [[package]]
 name = "flux-sqisign"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -2242,7 +2317,7 @@ dependencies = [
 
 [[package]]
 name = "flux-swarm-tools"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2251,7 +2326,7 @@ dependencies = [
 
 [[package]]
 name = "flux-sync"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -2292,7 +2367,7 @@ dependencies = [
 
 [[package]]
 name = "flux-uint"
-version = "0.38.0"
+version = "0.39.0"
 
 [[package]]
 name = "flux-vdf"
@@ -2317,7 +2392,7 @@ dependencies = [
 
 [[package]]
 name = "flux-zk-stark"
-version = "0.38.0"
+version = "0.39.0"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -3042,6 +3117,7 @@ dependencies = [
  "http 1.4.1",
  "http-body 1.0.1",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -4147,6 +4223,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "matchit"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
+
+[[package]]
 name = "memchr"
 version = "2.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4187,6 +4269,12 @@ dependencies = [
  "objc",
  "paste",
 ]
+
+[[package]]
+name = "mime"
+version = "0.3.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "minimal-lexical"
@@ -5505,7 +5593,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower",
- "tower-http",
+ "tower-http 0.6.11",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -5984,6 +6072,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_path_to_error"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
+dependencies = [
+ "itoa",
+ "serde",
+ "serde_core",
+]
+
+[[package]]
 name = "serde_spanned"
 version = "0.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6093,6 +6192,25 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "sigil-api"
+version = "5.0.0"
+dependencies = [
+ "axum",
+ "blake3",
+ "flux-api",
+ "flux-api-macros",
+ "hex",
+ "inventory",
+ "serde",
+ "serde_json",
+ "sigil-emission",
+ "sigil-state",
+ "sigil-tx",
+ "tokio",
+ "tower-http 0.5.2",
+]
 
 [[package]]
 name = "sigil-ballot"
@@ -6416,6 +6534,7 @@ dependencies = [
  "rmp-serde",
  "serde",
  "serde_json",
+ "sigil-api",
  "sigil-chronos",
  "sigil-dagknight",
  "sigil-emission",
@@ -6591,7 +6710,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-top"
-version = "7.1.7"
+version = "7.1.8"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -8273,6 +8392,25 @@ dependencies = [
  "tokio",
  "tower-layer",
  "tower-service",
+ "tracing",
+]
+
+[[package]]
+name = "tower-http"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e9cd434a998747dd2c4276bc96ee2e0c7a2eadf3cae88e52be55a05fa9053f5"
+dependencies = [
+ "bitflags 2.11.1",
+ "bytes",
+ "http 1.4.1",
+ "http-body 1.0.1",
+ "http-body-util",
+ "pin-project-lite",
+ "tokio",
+ "tower-layer",
+ "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -8311,6 +8449,7 @@ version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
 dependencies = [
+ "log",
  "pin-project-lite",
  "tracing-attributes",
  "tracing-core",

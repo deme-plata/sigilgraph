@@ -829,11 +829,22 @@ fn run_start() -> Result<()> {
                         eprintln!("🏭 grace elapsed — streaming blocks now");
                     }
                     if producing {
-                    // SIGIL_DAG=1: merge parents = real DAG tips from the braid
-                    // (own tip excluded, deterministic height-desc/hash-asc,
-                    // capped 4 — design §3.3). Braid None ⇒ legacy peer_tips.
+                    // DAGKnight: mint on the FRONTIER (settled chain + pending selected
+                    // spine), not the settled chain — the settled chain advances only via
+                    // the finalized drain, so all nodes converge. Linear mode mints on chain.
+                    // Build the frontier FIRST: its tip (`frontier.parent_hash()`) is the
+                    // block's real spine parent, which is what merge_tips must exclude.
+                    let frontier_opt: Option<ChainTip> = braid.as_ref()
+                        .map(|br| dag_build_frontier(&chain, br, &dag_bodies));
+                    let mint_ref: &ChainTip = frontier_opt.as_ref().unwrap_or(&chain);
+                    // SIGIL_DAG=1: merge parents = real DAG tips from the braid, EXCLUDING
+                    // the spine parent (= the frontier tip we're building on). Excluding the
+                    // settled tip instead lets the frontier tip land in BOTH parent_hash and
+                    // merge_parents → braid rejects "merge parent duplicates spine parent",
+                    // the block never enters recs, the spine can't deepen, nothing finalizes.
+                    // (deterministic height-desc/hash-asc, capped 4 — design §3.3.)
                     let mp: Vec<BlockHash> = match braid.as_ref() {
-                        Some(b) => b.merge_tips(&chain.parent_hash(), 4),
+                        Some(b) => b.merge_tips(&mint_ref.parent_hash(), 4),
                         None if dag_mode => peer_tips.iter().cloned().collect(),
                         None => Vec::new(),
                     };
@@ -845,10 +856,10 @@ fn run_start() -> Result<()> {
                     // exact amount into the coinbase; else the pure height schedule.
                     let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
                     let reward_override: Option<u128> = emission.as_mut().map(|c| {
-                        let supply = chain.state_snapshot().native_supply();
+                        let supply = mint_ref.state_snapshot().native_supply();
                         c.calculate_block_reward(now_secs, supply)
                     });
-                    match mint_next_block(&chain, mp, &block_txs, reward_override) {
+                    match mint_next_block(mint_ref, mp, &block_txs, reward_override) {
                         Ok(block) => {
                             let h = block.header.height;
                             let bhash = block.hash();
@@ -871,28 +882,41 @@ fn run_start() -> Result<()> {
                             // the block, so our own blocks enter the braid (§3.3).
                             let dag_own: Option<(BlockView, crate::block::Block)> =
                                 braid.is_some().then(|| (BlockView::from(&block.header), block.clone()));
-                            // advance our own tip first, then broadcast it
-                            match chain.apply(block) {
-                                Ok(_) => {
-                                    let _ = chain_log.append_bytes(&bytes); // durable, O(1)
-                                    // publish the fresh state so the money API serves
-                                    // current balances (Quillon's wallet_balances mirror).
+                            // Settle: DAGKnight uses ONLY the finalized drain (so nodes
+                            // converge); linear mode self-applies. In DAG mode our own block
+                            // enters the braid like a peer's — it is NOT self-applied — and
+                            // the shared chain advances solely from `drain_ordered()`.
+                            let settled_ok: bool = if let Some(br) = braid.as_mut() {
+                                if let Some((view, body)) = dag_own {
+                                    let vh = view.hash;
+                                    let _ = br.insert(view); // own block joins the DAG
+                                    dag_store_body(&mut dag_bodies, dag_max_bodies, vh, body);
+                                }
+                                // the ONE settlement path — identical finalized order on every node
+                                let (a, s, f) = dag_drain_apply(br, &mut dag_bodies, &mut chain,
+                                    &mut |braw| { let _ = chain_log.append_bytes(braw); });
+                                applied += a; dag_ord_skipped += s; dag_apply_failed += f;
+                                true
+                            } else {
+                                match chain.apply(block) {
+                                    Ok(_) => { let _ = chain_log.append_bytes(&bytes); true }
+                                    Err(e) => { eprintln!("⚠ producer self-apply H={} failed: {}", h, e); false }
+                                }
+                            };
+                            if settled_ok {
+                                {
+                                    // publish the fresh SETTLED state so the money API serves
+                                    // current balances (converges across nodes via the drain).
                                     if let Some(ms) = money_state.as_ref() {
                                         if let Ok(mut w) = ms.write() { *w = chain.state_snapshot(); }
                                     }
-                                    // ONE-CHAIN: advance the emission watermark by the
-                                    // amount ACTUALLY minted (the reward we baked), track
-                                    // the block for rate, and persist the watermark so a
-                                    // restart resumes emission instead of resetting it.
+                                    // emission watermark: producer-local reward tracking (the
+                                    // SETTLED supply is chain.native_supply(), converged via the
+                                    // drain — this only feeds THIS node's future reward math).
                                     if let (Some(c), Some(r)) = (emission.as_mut(), reward_override) {
                                         c.record_emission(r);
                                         c.add_block(h, now_secs, now_secs);
                                         if h % 32 == 0 { coinbase::save_controller(&snap_dir, c); }
-                                    }
-                                    if let (Some(br), Some((view, body))) = (braid.as_mut(), dag_own) {
-                                        let vh = view.hash;
-                                        let _ = br.insert(view); // own block joins the DAG
-                                        dag_store_body(&mut dag_bodies, dag_max_bodies, vh, body);
                                     }
                                     produced += 1;
                                     // adaptive rate: retune the tick from mempool backlog every 16 blocks
@@ -963,7 +987,6 @@ fn run_start() -> Result<()> {
                                         }
                                     }
                                 }
-                                Err(e) => eprintln!("⚠ producer self-apply H={} failed: {}", h, e),
                             }
                         }
                         Err(e) => eprintln!("⚠ mint_next_block failed: {}", e),
@@ -2150,6 +2173,72 @@ fn dag_seed_braid(chain: &ChainTip) -> Braid {
 /// `persist` (the chain_log append path) exactly as the linear path does.
 /// Bodies below the braid's finalized height are evicted after the drain.
 /// Returns `(applied, skipped, failed)`.
+/// DAGKnight: build the speculative *frontier* the producer mints on — a clone of
+/// the settled chain with the braid's pending selected-spine suffix applied on top.
+/// The settled chain advances ONLY via the finalized `drain_ordered()` order (so every
+/// node converges); but a producer must build on a tip *ahead* of finality, and its
+/// coinbase roots must match what the drain will recompute — which they do, because the
+/// frontier applies the same selected-spine blocks the drain will. Rebuilt each tick →
+/// reorg-safe. Blocks below the settled tip won't extend the frontier and are skipped.
+fn dag_build_frontier(
+    chain: &ChainTip,
+    braid: &Braid,
+    dag_bodies: &std::collections::HashMap<BlockHash, crate::block::Block>,
+) -> ChainTip {
+    let mut frontier = chain.clone();
+    // Follow the braid's SELECTED SPINE — the `parent_hash` walk back from
+    // `selected_tip()` (max-height, min-hash). A greedy "first block that fits"
+    // walk fails to deepen: with two producers, height-N siblings are built on
+    // DIFFERENT height-(N-1) siblings, so a random height-1 pick has no matching
+    // height-2 child → the frontier caps one above the settled tip and every tick
+    // re-mints the same height forever (the DAG stays a flat bush, never clears
+    // final_depth, nothing finalizes). Walking the ONE selected spine gives a
+    // connected parent→child path, so the frontier reaches the selected tip and
+    // minting extends it by one → the spine deepens → finality advances.
+    let dbg = std::env::var("SIGIL_FRONTIER_DEBUG").ok().as_deref() == Some("1");
+    let Some(tip) = braid.selected_tip() else {
+        if dbg { let s = braid.stats(); eprintln!("🔬 frontier: selected_tip=None base={} window={} pending={} tips={} rejected={} dropped={}", frontier.height(), s.window, s.pending, s.tips, s.rejected, s.dropped); }
+        return frontier;
+    };
+    let tip_h = dag_bodies.get(&tip).map(|b| b.header.height as i64).unwrap_or(-1);
+    // Collect the spine bodies from the selected tip back down to (not including)
+    // the settled tip's height, then apply in ascending height order.
+    let base = frontier.height(); // first height the frontier still needs
+    let mut path: Vec<BlockHash> = Vec::new();
+    let mut cur = tip;
+    loop {
+        let Some(b) = dag_bodies.get(&cur) else { break };
+        if b.header.height < base { break; } // reached the settled region
+        path.push(cur);
+        cur = b.header.parent_hash;
+    }
+    let path_len = path.len();
+    path.reverse(); // ascending height, spine-connected
+    let mut applied_n = 0usize;
+    let mut fail_reason = "";
+    for oh in path {
+        let Some(b) = dag_bodies.get(&oh) else { fail_reason = "body-missing"; break };
+        if b.header.parent_hash == frontier.parent_hash() && b.header.height == frontier.height() {
+            if let Err(e) = frontier.apply(b.clone()) {
+                fail_reason = "apply-err";
+                if dbg { eprintln!("🔬 frontier apply-err at h={}: {}", b.header.height, e); }
+                break;
+            }
+            applied_n += 1;
+        } else {
+            fail_reason = "no-chain";
+            break; // spine block doesn't chain onto the frontier — stop cleanly
+        }
+    }
+    if dbg {
+        let s = braid.stats();
+        eprintln!("🔬 frontier: tip_h={} base={} path_len={} applied={} fail={} → frontier_h={} | window={} pending={} tips={} emitted={} fin_h={} rej={} drop={}",
+            tip_h, base, path_len, applied_n, fail_reason, frontier.height(),
+            s.window, s.pending, s.tips, s.emitted_total, s.finalized_height, s.rejected, s.dropped);
+    }
+    frontier
+}
+
 fn dag_drain_apply(
     braid: &mut Braid,
     dag_bodies: &mut std::collections::HashMap<BlockHash, crate::block::Block>,
@@ -2161,23 +2250,43 @@ fn dag_drain_apply(
     // be prefix-identical — the wire analogue of sim gate S1.
     let order_log = std::env::var("SIGIL_DAG_ORDER_LOG").ok().as_deref() == Some("1");
     let (mut applied, mut skipped, mut failed) = (0u64, 0u64, 0u64);
-    let batch = braid.drain_ordered();
-    let mut ord_idx = braid.stats().emitted_total.saturating_sub(batch.len());
-    for oh in batch {
+    // Advance the braid's frozen order + slide its retention window (side
+    // effects: emit/cleanup). The returned Kahn batch is NOT what we settle on
+    // — it interleaves sibling forks, and picking "first block that extends"
+    // out of it follows a DIFFERENT fork than `dag_build_frontier` (which walks
+    // `selected_tip`). When those two disagree at a fork the settled chain and
+    // the frontier stall on opposite branches. So settlement follows the SAME
+    // canonical spine as the frontier: the `selected_tip` parent-walk, applied
+    // only up to `finalized_height`. Deterministic per DAG ⇒ every node lands
+    // the identical settled chain.
+    let _ = braid.drain_ordered();
+    let fin = braid.finalized_height();
+    let base = chain.height();
+    // Walk the selected spine from the tip down, keeping the finalized band
+    // [base, fin]; then apply ascending so each block extends the settled tip.
+    let mut path: Vec<BlockHash> = Vec::new();
+    if let Some(tip) = braid.selected_tip() {
+        let mut cur = tip;
+        loop {
+            let Some(b) = dag_bodies.get(&cur) else { break };
+            let h = b.header.height;
+            if h < base { break; } // reached the already-settled region
+            if h <= fin { path.push(cur); } // only the finalized prefix settles
+            cur = b.header.parent_hash;
+        }
+    }
+    path.reverse();
+    let mut ord_idx = chain.height();
+    for oh in path {
+        let Some(body) = dag_bodies.get(&oh) else { skipped += 1; continue };
+        if body.header.parent_hash != chain.parent_hash() || body.header.height != chain.height() {
+            skipped += 1; // not spine-contiguous with the settled tip (transient)
+            continue;
+        }
         if order_log {
             eprintln!("⛓ ord #{} {}", ord_idx, hex::encode(&oh[..12]));
         }
         ord_idx += 1;
-        let Some(body) = dag_bodies.get(&oh) else {
-            skipped += 1; // ordered, but body never stored / already evicted
-            continue;
-        };
-        let extends = body.header.parent_hash == chain.parent_hash()
-            && body.header.height == chain.height();
-        if !extends {
-            skipped += 1; // ordered + committed, not state-applied (v0)
-            continue;
-        }
         let braw = serde_json::to_vec(body).unwrap_or_default();
         match chain.apply(body.clone()) {
             Ok(()) => {
@@ -2190,8 +2299,10 @@ fn dag_drain_apply(
             }
         }
     }
-    let fin = braid.finalized_height();
-    dag_bodies.retain(|_, b| b.header.height >= fin);
+    // Retain bodies from the settled tip upward (the frontier needs the pending
+    // spine suffix); anything below the new settled height is spent.
+    let keep = chain.height().saturating_sub(1);
+    dag_bodies.retain(|_, b| b.header.height >= keep);
     (applied, skipped, failed)
 }
 

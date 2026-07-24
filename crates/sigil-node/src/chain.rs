@@ -19,6 +19,12 @@ pub const WINDOW: usize = 8192;
 /// One node's view of the chain. Phase 0: linear, single-producer. RAM holds only the
 /// last `WINDOW` blocks (a sliding window) + the current state; `base_height` is the
 /// height of the oldest in-RAM block, so `height()` stays correct after pruning.
+///
+/// `Clone` (DAGKnight): the producer builds a throwaway *frontier* = clone of the
+/// settled chain + the braid's pending selected-spine suffix, to mint on a tip ahead
+/// of finality without mutating the settled chain. The settled chain advances ONLY
+/// via the finalized `drain_ordered()` order, so every node converges.
+#[derive(Clone)]
 pub struct ChainTip {
     state: SigilState,
     blocks: VecDeque<Block>,

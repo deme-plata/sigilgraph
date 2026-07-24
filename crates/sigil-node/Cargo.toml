@@ -37,6 +37,7 @@ sigil-header  = { path = "../sigil-header" }
 sigil-handshake = { path = "../sigil-handshake" } # H2 verify-before-sync
 sigil-state   = { path = "../sigil-state" }
 sigil-emission = { path = "../sigil-emission" } # ONE-CHAIN step 1: block reward for braid coinbase
+sigil-api = { path = "../sigil-api" }
 sigil-events  = { path = "../sigil-events" }
 sigil-net       = { path = "../sigil-net" }
 sigil-net-wg    = { path = "../sigil-net-wg" }

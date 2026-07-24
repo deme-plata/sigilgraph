@@ -598,6 +598,23 @@ fn run_start() -> Result<()> {
             crate::ingest::spawn(Arc::clone(&mempool), api_port);
             eprintln!("\u{1f310} tx ingest API on :{api_port} — POST /tx, POST /batch, GET /mempool");
         }
+
+        // ONE-CHAIN step 2: the PROPER money API (sigil-api, axum + flux-api SDKs)
+        // — balance / supply / signed-send / tx-status. Shares this producer's
+        // mempool + a published state snapshot. Supersedes rpcd; gated by
+        // SIGIL_MONEY_API=<addr> (e.g. 0.0.0.0:8181).
+        let money_state: Option<Arc<std::sync::RwLock<SigilState>>> =
+            std::env::var("SIGIL_MONEY_API").ok().filter(|s| !s.is_empty()).map(|addr| {
+                let shared = Arc::new(std::sync::RwLock::new(chain.state_snapshot()));
+                let app = sigil_api::AppState { mempool: Arc::clone(&mempool), state: Arc::clone(&shared) };
+                tokio::spawn(async move {
+                    if let Err(e) = sigil_api::serve(&addr, app).await {
+                        eprintln!("\u{26a0} sigil-api serve failed: {e}");
+                    }
+                });
+                eprintln!("\u{1f4b0} sigil-api money API on {} — /v1/{{balance,supply,transactions}}", std::env::var("SIGIL_MONEY_API").unwrap_or_default());
+                shared
+            });
         // ── adaptive block-rate governor (demand-responsive; SIGIL_RATE_ADAPTIVE=1) ──
         // Idle -> SIGIL_RATE_MIN (heartbeat, no wasted empty blocks); mempool backlog
         // raises the rate to bound tx-inclusion latency, clamped to SIGIL_RATE_MAX.
@@ -858,6 +875,11 @@ fn run_start() -> Result<()> {
                             match chain.apply(block) {
                                 Ok(_) => {
                                     let _ = chain_log.append_bytes(&bytes); // durable, O(1)
+                                    // publish the fresh state so the money API serves
+                                    // current balances (Quillon's wallet_balances mirror).
+                                    if let Some(ms) = money_state.as_ref() {
+                                        if let Ok(mut w) = ms.write() { *w = chain.state_snapshot(); }
+                                    }
                                     // ONE-CHAIN: advance the emission watermark by the
                                     // amount ACTUALLY minted (the reward we baked), track
                                     // the block for rate, and persist the watermark so a
@@ -2220,24 +2242,21 @@ fn mint_next_block(
     // now lives IN the graph (not a separate rpcd chain). The reward mutation is
     // in the block body, so every follower re-applies it and the root-match check
     // in ChainTip::apply passes. SIGIL_COINBASE=0 restores the empty-block dyno.
+    // ONE-CHAIN: the full block body = coinbase + user sends, applied in order
+    // against the evolving state. reward: SIGIL_COINBASE=0 → no coinbase; the
+    // adaptive controller (if live) supplies the exact amount; else the height
+    // schedule. Sends flow through apply_tx → real balance moves on the braid.
     let coinbase_on = std::env::var("SIGIL_COINBASE").map(|v| v != "0").unwrap_or(true);
-    let (transition, roots) = if coinbase_on {
-        let state = chain.state_snapshot();
-        match reward_override {
-            // adaptive controller supplied the exact amount → bake it in
-            Some(r) => coinbase::coinbase_for_reward(&state, height, r),
-            // default: the pure height schedule
-            None => coinbase::coinbase_for(&state, height, parent),
-        }
-    } else {
-        (StateTransition { at_height: height, mutations: vec![] }, chain.roots())
-    };
+    let state = chain.state_snapshot();
+    let reward = if coinbase_on { reward_override } else { Some(0u128) };
+    let (transition, roots, block_events, included_txs) =
+        coinbase::build_block_body(&state, height, reward, txs);
     // Commit the verify-once txs: a sequential BLAKE3 root over their intent
     // hashes + the count. The signatures were verified ONCE at mempool ingest;
     // the producer-sig over this header binds the producer to this exact set.
     let txs_root = {
         let mut th = blake3::Hasher::new();
-        for t in txs { th.update(&t.tx.hash()); }
+        for t in &included_txs { th.update(&t.tx.hash()); }
         *th.finalize().as_bytes()
     };
 
@@ -2261,7 +2280,7 @@ fn mint_next_block(
         contract_state_root: roots.contract_state_root,
         state_transition_proof: StarkProof { bytes: vec![], public_inputs_hash: [0u8; 32] },
         txs_merkle_root: txs_root,
-        tx_count: txs.len() as u32,
+        tx_count: included_txs.len() as u32,
         fluxc_artifact_proof: ProofBundle {
             artifact_blake3: [0u8; 32],
             sqisign_sig: vec![],
@@ -2272,7 +2291,7 @@ fn mint_next_block(
         producer: [0u8; 32],
         producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
     };
-    Ok(Block { header, transition, events: vec![] })
+    Ok(Block { header, transition, events: block_events })
 }
 
 /// Build block 0 — credits [`DEMO_WALLET`] with [`DEMO_INITIAL_BALANCE`]

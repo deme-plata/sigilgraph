@@ -15,6 +15,7 @@
 
 use sigil_header::BlockHash;
 use sigil_state::{SigilState, StateMutation, StateRoots, StateTransition, TokenId, WalletId};
+use sigil_tx::SignedTx;
 
 /// Native SIGIL token id (matches sigil_state::NATIVE).
 const NATIVE: TokenId = [0u8; 32];
@@ -111,6 +112,59 @@ pub fn coinbase_for_reward(
     (tr, roots)
 }
 
+/// Build the FULL block body: coinbase + user sends, applied in order against an
+/// evolving clone of state, so a later tx sees earlier txs' effects. Returns the
+/// accumulated `(transition, post-apply roots, typed events, included txs)`.
+///
+/// - `reward` = the coinbase amount (`Some(0)` = no coinbase; `None` = the pure
+///   height schedule). Baked into the block body → deterministic on followers.
+/// - Each send goes through `apply_tx` (which already emits the balance mutations
+///   AND the `PushEventHash` event commitments). An invalid tx (bad sig already
+///   filtered at ingest; here: insufficient balance / overflow) is SKIPPED, never
+///   included — the block only carries txs that cleanly applied.
+/// - `work.roots()` after the sequence == exactly what `ChainTip::apply` computes
+///   when it re-applies the accumulated transition, so the header roots match.
+pub fn build_block_body(
+    state: &SigilState,
+    height: u64,
+    reward: Option<u128>,
+    txs: &[SignedTx],
+) -> (StateTransition, StateRoots, Vec<sigil_events::SigilEvent>, Vec<SignedTx>) {
+    let producer = producer_wallet();
+    let mut work = state.clone();
+    let mut mutations: Vec<StateMutation> = Vec::new();
+    let mut events: Vec<sigil_events::SigilEvent> = Vec::new();
+    let mut included: Vec<SignedTx> = Vec::new();
+
+    // 1. coinbase first
+    let reward = reward.unwrap_or_else(|| sigil_emission::block_reward(height));
+    if reward > 0 {
+        let bal = work.balance_of(&producer, &NATIVE);
+        let cb = StateMutation::SetBalance {
+            wallet: producer, token: NATIVE, amount: bal.saturating_add(reward),
+        };
+        if sigil_state::commit_state_transition(
+            &mut work, &StateTransition { at_height: height, mutations: vec![cb.clone()] }, height,
+        ).is_ok() {
+            mutations.push(cb);
+        }
+    }
+
+    // 2. user sends, in order, against the evolving state
+    for tx in txs {
+        let Ok(res) = sigil_tx::apply_tx(&work, tx) else { continue };
+        if sigil_state::commit_state_transition(
+            &mut work, &StateTransition { at_height: height, mutations: res.mutations.clone() }, height,
+        ).is_ok() {
+            mutations.extend(res.mutations);
+            events.extend(res.events);
+            included.push(tx.clone());
+        }
+    }
+
+    (StateTransition { at_height: height, mutations }, work.roots(), events, included)
+}
+
 // ── adaptive emission controller: live-reward lifecycle ─────────────────────
 use sigil_emission::controller::EmissionController;
 
@@ -178,6 +232,45 @@ mod tests {
     /// a byte-identical wallet_state_root + native_supply — divergence == 0.
     /// This is what makes it SAFE to settle money over the braid's finalized
     /// order: the order determines the money, uniquely, on every node.
+    /// Step 2 gate: a real SEND applied in a braid block moves balances, and two
+    /// nodes building the same (coinbase + send) body reach identical roots.
+    #[test]
+    fn send_applies_in_block_and_is_deterministic() {
+        use sigil_tx::{ed25519_keygen, ed25519_sign_tx, SigilTx};
+        // fund a sender through the chokepoint
+        let (sk, pk, sender) = ed25519_keygen();
+        let recipient = [0x77u8; 32];
+        let mut base = SigilState::new();
+        sigil_state::commit_state_transition(
+            &mut base,
+            &StateTransition { at_height: 0, mutations: vec![
+                StateMutation::SetBalance { wallet: sender, token: NATIVE, amount: 1_000_000_000 },
+            ] }, 0,
+        ).unwrap();
+
+        let tx = ed25519_sign_tx(
+            SigilTx::Send { from: sender, to: recipient, amount: 250_000_000, token: NATIVE, fee: 1_000 },
+            &sk, &pk,
+        );
+
+        // build the block body (coinbase + the send) on two independent nodes
+        let (tr1, r1, ev1, inc1) = build_block_body(&base, 1, Some(0), &[tx.clone()]);
+        let (tr2, r2, _ev2, inc2) = build_block_body(&base, 1, Some(0), &[tx]);
+
+        assert_eq!(inc1.len(), 1, "the valid send is included");
+        assert_eq!(inc2.len(), 1);
+        assert_eq!(r1.wallet_state_root, r2.wallet_state_root, "two nodes → identical roots (deterministic)");
+        assert!(!ev1.is_empty(), "send emits typed events (Send+Receive)");
+
+        // apply on a node and check the money actually moved
+        let mut node = base.clone();
+        let computed = sigil_state::commit_state_transition(&mut node, &tr1, 1).unwrap();
+        assert_eq!(computed.wallet_state_root, r1.wallet_state_root, "predicted == applied roots");
+        assert_eq!(node.balance_of(&recipient, &NATIVE), 250_000_000, "recipient received the send");
+        assert_eq!(node.balance_of(&sender, &NATIVE), 1_000_000_000 - 250_000_000 - 1_000, "sender debited amount+fee");
+        let _ = tr2;
+    }
+
     #[test]
     fn chronos_coinbase_replay_divergence_zero() {
         const NODES: usize = 4;

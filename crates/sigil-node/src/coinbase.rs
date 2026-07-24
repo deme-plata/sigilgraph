@@ -271,6 +271,124 @@ mod tests {
         let _ = tr2;
     }
 
+    /// STEP 3 GATE — money settlement over a WEAVE (the flux-way chronos proof).
+    /// Two producers mint coinbase blocks; some heights fork (both produce), so
+    /// the braid must pick ONE selected-spine block per height. The property:
+    /// two nodes that receive the woven blocks in DIFFERENT gossip orders must
+    /// (a) linearize to the identical order (order_hash), and (b) settle to the
+    /// identical supply + wallet_root — with each height's reward counted EXACTLY
+    /// once (merged/off-spine blocks never double-emit).
+    #[test]
+    fn chronos_weave_divergence_zero_no_double_emission() {
+        use crate::block::Block;
+        use crate::chain::ChainTip;
+        use sigil_dagknight::{Braid, BraidConfig, BlockView, InsertOutcome};
+        use sigil_header::*;
+
+        const REWARD: u128 = 5_00000000;
+        let pa = [0xAAu8; 32];
+        let pb = [0xBBu8; 32];
+
+        // Build a real coinbase Block for an explicit producer (no env coupling).
+        fn mk(state: &SigilState, height: u64, parent: BlockHash, producer: WalletId,
+              merge_parents: Vec<BlockHash>) -> Block {
+            let bal = state.balance_of(&producer, &NATIVE);
+            let tr = StateTransition {
+                at_height: height,
+                mutations: vec![StateMutation::SetBalance {
+                    wallet: producer, token: NATIVE, amount: bal.saturating_add(REWARD),
+                }],
+            };
+            let roots = roots_after(state, &tr, height);
+            let nonce = SqiSignature::from_array([0u8; SQISIGN_L5_LEN]);
+            let mut hsh = blake3::Hasher::new();
+            hsh.update(&parent);
+            hsh.update(nonce.as_bytes());
+            let vdf_input = *hsh.finalize().as_bytes();
+            let header = SigilBlockHeaderV0 {
+                version: HEADER_VERSION, network_id: NETWORK_ID, height, parent_hash: parent,
+                merge_parents, timestamp_ms: 0, nonce_sqisign: nonce, vdf_input,
+                vdf_proof: WesolowskiProof { y: vec![], pi: vec![], t: 0 }, difficulty: 0,
+                wallet_state_root: roots.wallet_state_root, dex_state_root: roots.dex_state_root,
+                event_log_root: roots.event_log_root, contract_state_root: roots.contract_state_root,
+                state_transition_proof: StarkProof { bytes: vec![], public_inputs_hash: [0u8; 32] },
+                txs_merkle_root: [0u8; 32], tx_count: 0,
+                fluxc_artifact_proof: ProofBundle { artifact_blake3: [0u8; 32], sqisign_sig: vec![], sqisign_pubkey: vec![], settle_tx: None },
+                sig_scheme: SigScheme::SqiSign5, producer: [0u8; 32],
+                producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
+            };
+            Block { header, transition: tr, events: vec![] }
+        }
+
+        // Genesis parent (ChainTip::new tip). Build a woven set of candidate
+        // blocks: two forks at h0, a merge at h1, a fork at h1, a merge at h2.
+        let genesis = ChainTip::new().parent_hash();
+        let empty = SigilState::new();
+        let a0 = mk(&empty, 0, genesis, pa, vec![]);          // PA @0
+        let b0 = mk(&empty, 0, genesis, pb, vec![]);          // PB @0 (fork)
+        // spine @0 = the min-hash of {a0,b0}; both nodes agree. h1 extends it + merges the other.
+        let (spine0, other0) = if a0.hash() <= b0.hash() { (&a0, &b0) } else { (&b0, &a0) };
+        let s0 = spine0.hash();
+        // apply spine0 to a scratch chain to get the state h1 is minted against
+        let mut scratch = ChainTip::new();
+        scratch.apply(spine0.clone()).unwrap();
+        let a1 = mk(&scratch.state_snapshot(), 1, s0, pa, vec![other0.hash()]); // merges the off-spine fork
+        let b1 = mk(&scratch.state_snapshot(), 1, s0, pb, vec![]);              // another fork @1
+        let (spine1, _other1) = if a1.hash() <= b1.hash() { (&a1, &b1) } else { (&b1, &a1) };
+        scratch.apply(spine1.clone()).unwrap();
+        let a2 = mk(&scratch.state_snapshot(), 2, spine1.hash(), pa, vec![]);
+
+        let all = [&a0, &b0, &a1, &b1, &a2];
+        let by_hash: std::collections::HashMap<BlockHash, &Block> =
+            all.iter().map(|b| (b.hash(), *b)).collect();
+        let view = |b: &Block| BlockView::from(&b.header);
+        let cfg = || BraidConfig { final_depth: 2, max_window: 64, max_pending: 64, max_merge_parents: 4 };
+
+        // Two nodes, two DIFFERENT gossip arrival orders.
+        let order_x = [&a0, &b0, &a1, &b1, &a2];
+        let order_y = [&b0, &a0, &b1, &a1, &a2];
+        let mut settled = Vec::new();
+        let mut order_hashes = Vec::new();
+        for order in [order_x, order_y] {
+            let mut braid = Braid::new(cfg());
+            for b in order {
+                // some inserts may be MissingParents until the parent arrives; re-insert at end
+                let _ = braid.insert(view(b));
+            }
+            // ensure all landed (arrival-order independence): re-offer any missing
+            for b in all.iter() {
+                if !matches!(braid.insert(view(b)), InsertOutcome::Duplicate | InsertOutcome::Inserted { .. } | InsertOutcome::BelowFinal { .. }) {
+                    let _ = braid.insert(view(b));
+                }
+            }
+            let lin = braid.linearize();
+            order_hashes.push(braid.order_hash());
+            // Settle money: apply blocks in linearized order that EXTEND the tip
+            // (dag_drain_apply's v0 rule); off-spine/merged blocks are ordered but
+            // NOT state-applied → no double-emission.
+            let mut chain = ChainTip::new();
+            for oh in &lin {
+                if let Some(b) = by_hash.get(oh) {
+                    if b.header.parent_hash == chain.parent_hash() && b.header.height == chain.height() {
+                        let _ = chain.apply((*b).clone());
+                    }
+                }
+            }
+            let st = chain.state_snapshot();
+            settled.push((st.roots().wallet_state_root, st.native_supply()));
+        }
+
+        // (a) both nodes converge on the identical order despite different arrival
+        assert_eq!(order_hashes[0], order_hashes[1], "weave order_hash must converge across gossip orders");
+        // (b) both nodes settle to the identical wallet_root + supply
+        assert_eq!(settled[0], settled[1], "money must be identical on both nodes over the weave — divergence 0");
+        // (c) no double-emission: supply is the spine length × reward (h0,h1,h2 = 3),
+        // strictly less than all 5 candidate blocks × reward.
+        let supply = settled[0].1;
+        assert_eq!(supply, 3 * REWARD, "exactly the 3 spine heights minted — merged forks never double-emit");
+        assert!(supply < 5 * REWARD, "off-spine candidates did not pay coinbase");
+    }
+
     #[test]
     fn chronos_coinbase_replay_divergence_zero() {
         const NODES: usize = 4;

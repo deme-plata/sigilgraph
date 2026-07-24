@@ -83,7 +83,7 @@ python3 -c "import json,sys;print(json.dumps({'id':sys.argv[1],'kind':sys.argv[2
 for D in "$LEGACY_DL" "$UPPER_DL"; do mkdir -p "$D"; cp -r "$LEDGER_DIR/." "$D/" 2>/dev/null || true; done
 
 echo "✅ Commitment Record anchored:"
-echo "   id:      $ID  ($kind / $STATUS)"
+echo "   id:      $ID  ($KIND / $STATUS)"
 echo "   words:   $BYTES B · blake3 $BODY_HASH"
 echo "   record:  $REC_HASH   prev $PREV"
 echo "   verify:  $OTS verify $(basename "$REC").ots  (+ recompute body blake3, walk prev-chain)"

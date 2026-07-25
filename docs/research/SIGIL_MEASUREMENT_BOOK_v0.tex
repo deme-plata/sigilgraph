@@ -1,0 +1,711 @@
+% The Measurement Book — v0
+% Sixth companion to SIGIL whitepaper v1.3 (after philosophy v0.3, failure atlas v0,
+% builder's chronicle v0, adversary's companion v0). Every measured arc of the SIGIL
+% record in one place: method, numbers, residuals, and what each measurement ruled out.
+% House rules: pseudonymous; no secrets (no seeds, keys, tokens, or live exploit payloads);
+% exact numbers kept verbatim from the record; benchmark numbers keep their host;
+% open items marked OPEN, not argued away.
+% Build: pdflatex x2.
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage[table]{xcolor}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{ragged2e}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta}
+\usepackage{graphicx}
+\graphicspath{{img/}}
+\usepackage{tcolorbox}
+\tcbuselibrary{skins,breakable}
+\usepackage{needspace}
+\usepackage{fancyhdr}
+\usepackage[colorlinks=true,linkcolor=sigilcyan,urlcolor=sigilcyan,citecolor=sigilcyan]{hyperref}
+\usepackage{xurl}
+
+% ---------- design system (shared with whitepaper v1.3 / philosophy v0.3 / atlas v0) ----------
+\definecolor{ink}{HTML}{15171A}
+\definecolor{sigilcyan}{HTML}{0086A8}
+\definecolor{sigilblue}{HTML}{3B5BDB}
+\definecolor{sigilviolet}{HTML}{7048B5}
+\definecolor{sigilamber}{HTML}{B86A00}
+\definecolor{sigilred}{HTML}{B02A2A}
+\definecolor{slate}{HTML}{D7DCE1}
+\definecolor{panelbg}{HTML}{F7F7F4}
+\definecolor{rowtint}{HTML}{F2F4F6}
+
+\color{ink}
+
+% epistemic-status markers — the WHITEPAPER v1.3 set (two-axis reading; see §1)
+\newcommand{\stM}{\textcolor{sigilcyan}{$\bullet$}~{\scriptsize\textcolor{sigilcyan}{\textsc{measured}}}}
+\newcommand{\stS}{\textcolor{sigilblue}{$\odot$}~{\scriptsize\textcolor{sigilblue}{\textsc{simulation}}}}
+\newcommand{\stD}{\textcolor{sigilblue}{$\oplus$}~{\scriptsize\textcolor{sigilblue}{\textsc{derived+sim}}}}
+\newcommand{\stG}{\textcolor{sigilviolet}{$\diamond$}~{\scriptsize\textcolor{sigilviolet}{\textsc{staged}}}}
+\newcommand{\stO}{\textcolor{sigilamber}{$\circ$}~{\scriptsize\textcolor{sigilamber}{\textsc{open}}}}
+\newcommand{\stC}{{\scriptsize\textcolor{gray}{$\triangle$~\textit{conjectural}}}}
+\newcommand{\stL}{\textcolor{sigilcyan}{$\bullet$}~{\scriptsize\textcolor{sigilcyan}{\textsc{live}}}}
+\newcommand{\measured}[1]{\textcolor{sigilcyan}{\textbf{#1}}}
+
+% layman explainer box
+\newcommand{\layman}[3]{%
+\begin{tcolorbox}[enhanced,
+  interior style={left color=#1!9,right color=white},
+  colframe=#1!45!slate,boxrule=0.5pt,arc=3pt,
+  borderline west={2.5pt}{0pt}{#1},
+  left=9pt,right=9pt,top=7pt,bottom=7pt]
+{\scriptsize\textcolor{#1}{\textsc{in plain words}}\; — \;\textbf{\small #2}}\\[3pt]
+\small #3
+\end{tcolorbox}}
+
+% measurement-arc entry box
+% \mentry{ID}{Name}{date · system}{grade}{ rows via \frow{label}{text} }
+\newcommand{\frow}[2]{{\footnotesize\textcolor{gray}{\textsc{#1}}}\;&\small #2\\}
+\newenvironment{mentry}[4]{%
+\begin{tcolorbox}[enhanced,breakable,colback=white,colframe=slate,boxrule=0.6pt,arc=2pt,
+  left=8pt,right=8pt,top=6pt,bottom=6pt,
+  borderline west={3pt}{0pt}{sigilcyan!70!slate}]
+{\small\textbf{#1 · #2}\hfill{\footnotesize\textcolor{gray}{#3}}\quad#4}\\[4pt]
+\begin{tabular}{@{}>{\raggedleft\arraybackslash}p{1.8cm}p{13.2cm}@{}}
+}{%
+\end{tabular}
+\end{tcolorbox}\vspace{2pt}}
+
+% widow/orphan discipline
+\widowpenalty=10000
+\clubpenalty=10000
+\displaywidowpenalty=10000
+
+% running header
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhfoffset{0pt}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\headrule}{{\color{slate}\hrule width\headwidth height 0.4pt}}
+\fancyhead[L]{\scriptsize\textcolor{gray}{The Measurement Book \,$\cdot$\, v0}}
+\fancyhead[R]{\scriptsize\textcolor{gray}{\thepage}}
+
+\hypersetup{
+  pdftitle={The Measurement Book (v0)},
+  pdfauthor={bitknight.dipper688@passmail.net},
+  pdfsubject={Companion to SIGIL whitepaper v1.3 — the measured record},
+  pdfkeywords={SIGIL, measurement, benchmarks, delivery law, evidence grading, honest engineering}
+}
+
+\begin{document}
+
+% ---------- title page with braid watermark ----------
+\begin{tikzpicture}[remember picture,overlay]
+\begin{scope}[shift={(current page.north)},yshift=-4.2cm,opacity=0.06]
+  \foreach \yoff/\ph in {0/0, 0.9/2.1, 1.8/4.2}{
+    \draw[ink,line width=2.6pt]
+      plot[smooth,samples=60,domain=-9:9] (\x,{\yoff-0.9+0.85*cos(60*\x+\ph r)});
+  }
+\end{scope}
+\end{tikzpicture}
+
+\thispagestyle{empty}
+\begin{center}
+\begin{tikzpicture}
+  \node[rounded corners=8pt, fill=ink, inner sep=10pt]
+       {\includegraphics[width=2.2cm]{sigil-flat.png}};
+\end{tikzpicture}\\[10pt]
+{\Huge\bfseries\textcolor{ink}{The Measurement Book}}\\[8pt]
+{\Large Laws of the SIGIL Graph: the measured record}\\[6pt]
+{\normalsize A companion to \emph{SIGIL — The Variational Chain}, whitepaper v1.3}\\[10pt]
+{\normalsize v0 · 2026-07-24}\\[6pt]
+{\normalsize\texttt{bitknight.dipper688@passmail.net}}\\[2pt]
+{\small SIGIL / Flux Foundation · \texttt{sigilgraph.quillon.xyz}}\\[14pt]
+\begin{minipage}{0.74\textwidth}
+\centering\itshape
+``When you can measure what you are speaking about, and express it in numbers,
+you know something about it; when you cannot measure it \ldots{} your knowledge is of
+a meagre and unsatisfactory kind.''\\[2pt]
+{\upshape\scriptsize --- William Thomson, Lord Kelvin, 1883}
+\end{minipage}
+\end{center}
+
+\vspace{8pt}
+\begin{tcolorbox}[colback=panelbg,colframe=slate,boxrule=0.5pt,arc=3pt,left=10pt,right=10pt]
+\small
+\textbf{Scope \& method.} This book compiles every measurement arc in the SIGIL record
+into one document: what was measured, on what instrument, with what result, and ---
+just as load-bearing --- what each measurement \emph{ruled out}. Nothing here is new
+work; everything is sourced from benchmark logs, journal excerpts, commit messages, and
+the project's measurement notes, with exact numbers kept verbatim. Where the whitepaper's
+\S3 (\emph{Measured laws}) gives the summary, this book gives the method, the residual
+tables, and the failures of the instruments themselves. Two standing rules bind every page:
+\textbf{benchmark numbers keep their host} (a 48-core figure is never transplanted onto a
+phone), and a claim's \textbf{evidence grade travels with it} (see \S1). All measurements
+were taken on one operator-funded fleet --- a household-scale lab, not a public network;
+legibility, not scale, is what this record buys.
+\end{tcolorbox}
+
+\vspace{4pt}
+\begin{center}
+\begin{minipage}[t]{0.30\textwidth}\centering
+{\Large\bfseries 15}\\{\scriptsize\textsc{measurement arcs}}
+\end{minipage}%
+\begin{minipage}[t]{0.30\textwidth}\centering
+{\Large\bfseries 2}\\{\scriptsize\textsc{laws with residuals}\\[-1pt]\scriptsize (0.4\,pp sim · 1.50\,pp live)}
+\end{minipage}%
+\begin{minipage}[t]{0.30\textwidth}\centering
+{\Large\bfseries 5}\\{\scriptsize\textsc{parts: method · ladder · laws ·}\\[-1pt]\scriptsize\textsc{forensics · negatives}}
+\end{minipage}
+\end{center}
+
+\vspace{4pt}
+\begin{center}
+\small
+\stM\quad\stD\quad\stS\quad\stG\quad\stO\quad\stC
+\end{center}
+\noindent{\footnotesize Markers are read as two axes --- \emph{evidence grade} (derived /
+simulated / benchmarked / live-measured) and \emph{deployment grade} (live / staged /
+dormant / absent). \textsc{derived+sim} names the coordinate a claim holds when it is
+mathematically derived and validated in seeded simulation but not yet measured on a real
+network. Equations are set in black; color is reserved for results and status.}
+
+\clearpage
+
+% ==================================================================
+\section{Method: how this record grades itself}
+\label{sec:method}
+
+\noindent The SIGIL project's development methodology (Variational Flow) requires every
+claim to pass a falsifiable measurement gate before it is called done, and every measured
+number to carry two independent coordinates:
+
+\begin{itemize}[leftmargin=1.4em,itemsep=2pt]
+\item \textbf{Evidence grade} answers \emph{``how do you know?''} --- one of
+  \textsc{derived}, \textsc{simulated}, \textsc{benchmarked}, \textsc{live-measured}.
+\item \textbf{Deployment grade} answers \emph{``is it running?''} --- one of
+  \textsc{live}, \textsc{staged}, \textsc{dormant}, \textsc{absent}.
+\end{itemize}
+
+\noindent A single ladder conflates the two; the cardinal sin is the category error ---
+``passed tests'' and ``mathematically safe'' are different sentences. The canonical worked
+example is the delivery law itself (\S\ref{sec:law}): first graded \textsc{measured} on
+simulation evidence, then \emph{regraded} to \textsc{derived+sim} when review caught that
+the validating simulator shared the law's own independence assumption, and only promoted
+back to \textsc{measured} after a real-kernel network experiment. Regrades are logged, not
+silently absorbed.
+
+\subsection{Rule 0: measure the live path first}
+\label{sec:rule0}
+
+The single most expensive class of error in this record is the \emph{microbench beside a
+slow live number}. The sync ladder (\S\ref{sec:sync}) contains the canonical case: a flat
+store measured at $\sim$10{,}000{,}000 records/s durable while the live node synced at
+$\sim$800 blocks/s --- four orders of magnitude apart, and the gap was \emph{not} in any
+component that had been benchmarked. A fast component beside a slow system is a bug report,
+not a victory. Every arc in this book therefore states which rung of the
+microbench\,$\to$\,harness\,$\to$\,live ladder its numbers live on.
+
+\subsection{Instrument calibration: when the measuring tools lied}
+\label{sec:instruments}
+
+A measurement record is only as good as its instruments, and the instruments failed
+repeatedly. These are recorded as calibration hazards, since several ``results'' in
+earlier working notes were artifacts of them:
+
+\begin{itemize}[leftmargin=1.4em,itemsep=2pt]
+\item \textbf{The 0/0 test trap.} The build orchestrator's combined test tool reported
+  \emph{0 passed, 0 failed} when the test binary failed to compile --- readable as ``no
+  failures.'' A stale server process holding a deleted executable produced the same
+  signature. Rule: gate on an explicit verdict, never on \texttt{failed==0}.
+\item \textbf{Stale binaries.} \texttt{ls -t} on a shared \texttt{deps/} directory
+  selected a three-week-old test binary; the ``result'' measured old code. Fixed by a
+  tool that prints the exact fresh binary per target.
+\item \textbf{Swallowed filters.} The test runner silently dropped
+  \texttt{--\,--ignored <filter>} arguments, so an expensive benchmark that appeared to
+  run in 0\,s had in fact not run at all (fixed in commit \texttt{792272ec}).
+\item \textbf{Self-reporting caches.} A storage cache reported its own hit-rate as
+  victory while an independent probe measured 0.4\% of reads returning data. Latency
+  probes that time \texttt{get()} without asserting the value came back measure nothing.
+  Rule: any ``it's fast now'' claim must be paired with an independent correctness check
+  on the same artifact.
+\end{itemize}
+
+\layman{sigilcyan}{Why a book of numbers needs a chapter about broken rulers}{
+Before trusting any measurement in this book, the project had to learn --- the hard way ---
+that its own stopwatches and test tools sometimes reported success without doing the work.
+Each of those failures is listed here so a reader can check that the numbers that follow
+were taken after the instruments were fixed, not before.}
+
+% ==================================================================
+\section{Part II --- The performance ladder}
+\label{sec:ladder}
+
+\noindent The ladder runs microbench $\to$ in-process harness $\to$ live node. Each rung
+below carries its negative results, because the negative results are what directed the
+work: five of the six ``obvious'' optimizations measured as no-ops.
+
+\subsection{The sync ladder and the honest bottleneck}
+\label{sec:sync}
+
+\begin{mentry}{ARC-5}{Block-sync throughput, wall by wall}{2026-06-19 $\to$ 07, epsilon 48-core}{\stM}
+\frow{measured}{Durable commit throughput of the LSM key-value store:
+\measured{$\sim$3{,}863 blk/s} ceiling (fsync ON 3{,}268 / OFF 3{,}548; batch 4{,}096 vs
+16{,}384 identical). Root cost $\sim$130\,$\mu$s per KV entry inside \texttt{batch\_put}
+(WAL + memtable insert + SST flush). Bench:
+\texttt{SIGIL\_COMMIT\_BENCH=2000000 \ldots{} commit\_sink\_throughput}.}
+\frow{fix 1}{Flat append-only \texttt{SkeletonStore} (72-B records:
+height$\Vert$hash$\Vert$parent), offset $=(h-\mathrm{base})\cdot 72$, two-phase durable
+write, torn-tail truncate on open: \measured{$\sim$10{,}000{,}000 rec/s durable} ---
+2{,}600$\times$ the KV path (commit \texttt{615351c}, later consolidated as
+\texttt{flux\_db::skeleton}).}
+\frow{fix 2}{SST bulk-ingest engine (build sorted SST bytes, atomic
+tmp$\to$fsync$\to$rename install, skipping WAL/memtable/compaction):
+\measured{238{,}762 blk/s} release (debug 184{,}825) vs batched-KV 110k on the same
+host --- dark behind \texttt{SIGIL\_DB\_SST\_INGEST}.}
+\frow{harness}{Permanent in-process end-to-end harness (\texttt{SIGIL\_SNAP\_BENCH=N};
+snapshot pull + stream verifier + commit hook vs synthetic codec=2 server, 2M records,
+roots match): \measured{39{,}112 blk/s} (commit \texttt{f52373d}). Next wall identified:
+per-record bincode round-trips, $\sim$25\,$\mu$s/record.}
+\frow{live}{The live node sat at $\sim$800 blk/s for five days \emph{despite all of the
+above}. The actual caps were producer-side: a full-block serve throttle
+($\le$1 per 120\,ms) and a serial request$\to$await$\to$apply loop. Removing both
+(commit \texttt{91e4598}: memcpy cache-serve of finalized ranges + request-ahead window
+$\sim$16 ranges): \measured{2{,}322 $\to$ 10{,}853 blk/s} on the running node.
+Pre-sprint live WAN baseline: 96--144 blk/s. Idealized transport ceiling from the
+deterministic simulator: 92{,}600 blk/s.}
+\frow{ruled out}{Per-block GETs as the wall (trusted bulk $=+15\%$ only); the read-dir
+cache on a fresh DB (0 effect); fsync on/off ($\pm 8\%$); batch size (0); parallel
+hash/serialize (already saturated); the wire and the fold fast-path (never the wall);
+per-write fsync as the compaction cost (WAL has none --- the wall is synchronous leveled
+compaction, $\sim$10--20$\times$ write amplification).}
+\frow{open}{Snapshot-pull (the 100$\times$ path) is coded and byte-symmetric but gated
+OFF pending a published signed anchor. Sustained $\ge$92.6k live has never been
+demonstrated. \stG}
+\end{mentry}
+
+\subsection{Wire compression}
+
+\begin{mentry}{ARC-6}{zstd on the header wire}{2026-06-10, epsilon, live}{\stL}
+\frow{measured}{Candidates timed on a \emph{real} 4{,}096-header chunk dumped from the
+monitor DB (raw 1{,}019 B/header): lz4-1 $=10.95\times$ at 20\,ms;
+\measured{zstd-1 $=14.03\times$} at 20\,ms compress / 12\,ms decompress. Gossip lane, a
+realistic hex-proof header: \measured{26.3$\times$} (6{,}973$\to$265 B, 96.2\% saved).}
+\frow{live}{Deployed as backfill codec=1; live journal shows ``served 4097 HEADERS \ldots{}
+289771 B, codec zstd'' $=\measured{70.7}$ B/header to an off-box client. At that size a
+1\,Gbit link carries $\sim$1.7M headers/s --- the wire stopped being the sync bottleneck.
+Same-day verify fixes: stored-hash 32-byte compare verify \measured{84k blk/s under
+loadavg 65} (was 26--52k); parallel verify later $\approx$160k blk/s.}
+\frow{ruled out}{lz4 beating zstd at these chunk sizes (the operator's hunch, measured
+wrong); changing the header hash encoding as a monitor-side fix (the canonical-JSON hash
+\emph{is} block identity --- only a height-gated chain upgrade can touch it).}
+\frow{record}{Decompression bomb cap 64\,MB; client side pure-Rust decoder for
+Windows-clean cross builds; interop gate: C encoder $\to$ Rust decoder test.}
+\end{mentry}
+
+\subsection{Throughput ceilings: what the box can and cannot do}
+
+\begin{mentry}{ARC-11}{Verified-TPS ceilings, bench vs reality}{2026-05-30 $\to$ 07-04, 48-core + 4-node fleet}{\stM}
+\frow{live}{4-node verified-transaction TPS, direct transport:
+\measured{80{,}102 TPS} aggregate (epsilon 46{,}824 + delta 19{,}189 + gamma 5{,}371 +
+beta 8{,}718). Per box: ed25519 verify-once $\sim$800k sig/s; state fold free at 209M
+commits/s (not the wall).}
+\frow{bench vs real}{Batch authorization standalone: B$=1\to251$k, B$=4096\to$
+\measured{152M TPS/box} (190$\times$, state-fold-bound). The \emph{real} pipeline (apply +
+commit + 4 roots, 10k authors): B$=1\to12{,}352$; B$=1024\to$\measured{98{,}470 TPS},
+plateau $\sim$98k. The 152M does \textbf{not} survive contact with the real pipeline ---
+next walls are per-op apply ($\sim$4\,$\mu$s) and naive $O(\mathrm{state})$ root recompute.}
+\frow{zk tax}{ed25519 inside a STARK circuit: 363\,ms at $2^{14}$ scale vs 1.25\,$\mu$s
+native $\approx$ \measured{290{,}000$\times$}. Dilithium5 in-circuit 876{,}830 constraints
+(only 3.4$\times$ cheaper than ed25519's $\sim$3M). Proof aggregation gives an $O(1)$
+verifier --- a 64k-tx block via one 50\,KB proof in 0.06\,ms --- which is a light-client
+lever, \textbf{not} a throughput lever: the zk \emph{produce} ceiling measured
+$\sim$59--65k TPS, linear in trace length.}
+\frow{ladder}{TPS-ladder foundations (2026-07-04): per-tx signed 15{,}954; batch@64
+102{,}630 (degrades past 512); sequential full apply 108{,}696; sharded apply
+N$=16$/N$=64$ $=$ \measured{1{,}006{,}289 / 1{,}921{,}922 TPS} on one box (wind-tunnel,
+not live); replica validators \emph{anti}-scale 84k$\to$2.9k ($\sim 1/N$).}
+\frow{ruled out}{zk-STARKs as a throughput mechanism; replica validation as a scaling
+mechanism; hash speed as a state-root lever (the $O(1)$ accumulator made it moot).}
+\frow{open}{A soundness finding rode along: the authorized-batch path had no nonce ---
+replay after producer restart re-executes. A live soundness gap independent of TPS,
+tracked in the hardening backlog. \stO}
+\end{mentry}
+
+\subsection{The producer crawl}
+
+\begin{mentry}{ARC-12}{0.5 blk/s $\to$ 1{,}230 blk/s, live}{2026-06-08, epsilon}{\stL}
+\frow{measured}{Producer decayed to $\sim$0.5 blk/s at $\sim$27k blocks. Two $O(N^2)$
+leaks: (1) a full-chain JSON snapshot every 100 blocks --- deterministic replay at 25k
+blocks: old $=$ 250 saves / 389\,MB / 47.8\,s vs time-gated $=$ 1 save / 3.1\,MB / 0.4\,s
+(\measured{126$\times$}, growing with $N$); (2) a backfill-serve storm (513-block chunk
+re-broadcasts, 12$\times$ per 20\,s, $\sim$6k blk/s serialized, 84\% CPU). After both
+fixes: \measured{$\sim$1{,}229 blk/s} live (commit \texttt{e34ad15}).}
+\frow{negative}{A simulator-tuned drain-fast setting (250\,ms) lifted \emph{modeled}
+catch-up 14$\times$ --- and collapsed \emph{live} production to 0 blk/s at 82\% CPU with a
+single backfiller. Gossip-rebroadcast backfill is architecturally dead: serve load scales
+as rate$\times(N{+}1)$. The simulator modeled the timing race, not the gossip
+amplification. Validate tuning live before trusting the model.}
+\frow{fix}{Point-to-point request-response backfill (chunk $=1{,}024$; a 4{,}096-block
+$\sim$2\,MB response silently exceeded the $\sim$1\,MB protocol limit): fresh node closed a
+16k+ gap while the producer held $\sim$1{,}380 blk/s; 4-node mesh, 3 backfillers, 0
+divergence at $\sim$900 blk/s.}
+\frow{follow-ups}{Producer OOM (1{,}075 crash-loops) $\to$ memory-bound append-only
+\texttt{chain.log} with an 8{,}192-block RAM window: RAM plateau $\sim$35\,MB while the log
+exceeded 257\,MB; restart stream-recovered 102{,}548 blocks. Boot replay of a 52\,GB log
+costs $\sim$35\,min --- the motivation for snapshot boot. \stO}
+\end{mentry}
+
+\layman{sigilblue}{What the ladder teaches}{
+Making one part of a system a thousand times faster often changes nothing, because the
+slowness lives somewhere nobody benchmarked. The project measured its storage at ten
+million records per second while the real node crawled at eight hundred --- the fix that
+finally mattered was in how the \emph{serving} node queued its answers. That is why this
+book insists on saying, for every number, whether it was taken on a test bench or on the
+running machine.}
+
+% ==================================================================
+\section{Part III --- Physical laws}
+\label{sec:laws}
+
+\subsection{The delivery law: simulation}
+\label{sec:law}
+
+\begin{mentry}{ARC-1}{$D = 1-p^{r}$ under seeded simulation}{2026-06-16/17, deterministic simulator}{\stS}
+\frow{claim}{Unique-delivery fraction under star-flood gossip with redundancy $r$ and
+i.i.d.\ drop probability $p$ follows $D = 1-p^{r}$; provisioning inverse
+$r^{*} = \lceil \ln(1-\mathrm{SLA}) / \ln p \rceil$.}
+\frow{method}{22 seeded simulator runs (1 producer $\to N{-}1$ sinks), $N=4/8/16$,
+virtual time. Reference cell: 16 nodes, 200 msgs (3{,}000 expected deliveries), 50\,ms
+edge latency, seed 42.}
+\frow{result}{$r{=}1,p{=}0\to100.0\%$ (27\,ms wall); $r{=}1,p{=}0.3\to69.8\%$
+(2{,}094/3{,}000, byte-identical on re-run); $r{=}3,p{=}0.3\to97.4\%$;
+$r{=}5,p{=}0.3\to99.7\%$. \measured{RMS residual 0.4\,pp} (within 1 binomial $\sigma$).
+Shipped default $r{=}3$ holds 99\% delivery up to $p\le0.215$.}
+\frow{ruled out}{Node-count dependence ($N=4/8/16$ identical); nondeterminism (the exact
+same 2{,}094 messages delivered twice).}
+\frow{regrade}{Review caught that the simulator \emph{implements} the law's independence
+assumption --- circular validation. The claim was regraded \textsc{derived+sim} in
+whitepaper v1.2, which forced the promotion experiment below. The regrade is part of the
+record, not an embarrassment to be edited out.}
+\end{mentry}
+
+\subsection{The delivery law: promotion on a real network stack}
+
+\begin{mentry}{ARC-2}{netem promotion experiment}{2026-07-22, 8 netns peers, kernel netem}{\stM}
+\frow{method}{A dedicated probe crate speaking the real backfill request/response protocol
+(responses 70{,}700\,B $\approx$ one 1{,}000-header chunk at the live 70.7\,B/header). 8
+peers in Linux network namespaces on a private bridge, kernel netem loss both directions.
+Delivery $=$ at least one reply within the shipped 10\,s timeout. Conditions
+$\times\{r{=}1,2,3\}\times600$ trials: baseline 20\,ms; $+10\%$, $+25\%$, $+40\%$ i.i.d.\
+loss; Gilbert--Elliott burst loss ($\approx$30\% avg, mean burst $\approx$2.9 packets ---
+the pre-registered falsification condition). Totals \measured{9{,}000 trials / 18{,}000
+attempts}. $\hat p$ is measured per run, never assumed; $r{=}1$ cells are calibration.}
+\frow{result}{$+10\%$: $\hat p = 0.0000$ over 3{,}600 attempts --- TCP absorbs $\le$10\%
+packet loss entirely, so \emph{the law's $p$ lives at the request level, not the packet
+level}. $+25\%$: $\hat p = 0.055$, residuals $+0.13$\,pp ($r{=}2$) / $+0.02$\,pp ($r{=}3$).
+$+40\%$: $\hat p = 0.873\to0.942$, residuals $-0.76$ / $-3.02$\,pp (transport collapse,
+sub-independence in the predicted direction; the only cell $\approx 2.2\sigma$). Burst:
+$\hat p = 0.512$--$0.62$, residuals $+1.27$ / $+1.47$\,pp --- burst loss does \emph{not}
+break cross-peer composition. \measured{Within-run RMS 1.50\,pp} over the 6 informative
+cells; max $|$residual$|$ 3.02\,pp; binomial $1\sigma$ at $n{=}600$ is 0.9--2.0\,pp.
+Promotion to \textsc{measured} recorded in commit \texttt{73bac94}; whitepaper $\to$ v1.3.}
+\frow{ruled out}{Packet-level $p$ as the law's variable; burst loss breaking composition;
+$r{=}3$ as a safety mechanism at 40\% both-direction loss (nothing at the gossip layer
+is); per-peer product refinement materially beating the pooled law (peer $\hat p$ spread
+0.52--0.72 is second-order).}
+\frow{open}{WAN replication attempted 2026-07-23 and \textbf{blocked} --- two fleet boxes
+down, one decommissioned. The portable probe kit is staged. Namespaces are not a WAN;
+the promotion holds for a real kernel stack on one host. \stO}
+\end{mentry}
+
+\subsection{The fold: constant-size whole-chain verification}
+
+\begin{mentry}{ARC-4}{Fold proof size and verify cost}{2026-07-18 re-measured, 48-core (loaded)}{\stM}
+\frow{result}{Proof \measured{2{,}568\,B constant} for any chain length; full verify
+\measured{280--342\,ms} at 100k blocks; incremental tip check vs an already-verified fold
+state \measured{3\,$\mu$s}; live verifier downloads 0 blocks. In-sim variant: 392\,B
+constant for 20 vs 2{,}000 blocks of history; late-join run skipped 165 historical blocks,
+applied 20 live, divergence $=0$.}
+\frow{caveat}{Verification is $O(M)$ --- it reads all $M$ per-block commitments
+($\sim$51\,MB at 100k blocks). A constant-size \emph{proof} is not constant-cost
+\emph{verification}, and 342\,ms belongs to a loaded 48-core host --- it is not a phone
+number. Folding the commitment vector is the open v0.3 lane.}
+\frow{ruled out}{That the 342\,ms figure was documentation vaporware --- the hardening
+workstream re-ran the bench and it held (the whitepaper had \emph{understated} maturity).}
+\frow{open}{Full verify of the live $\sim$29M-block fold never separately benchmarked;
+the lattice-reduction security argument has no published concrete-parameter proof;
+in-sim snapshot adoption is modeled (producer clone), not peer-fetched. \stO}
+\end{mentry}
+
+\subsection{Mining physics: units, levers, and an anti-parallel proof}
+
+\begin{mentry}{ARC-14}{$\Phi$, $\Omega$, and the crypto benches}{2026-05-31 $\to$ 06-11, 48-core (loaded)}{\stM}
+\frow{hash}{Parallel-sound hash lane: \measured{155\,MH/s} on 48 cores (5\,MH/s on one,
+$\sim$31$\times$ scaling); invertible turbo variant (ceiling only) \measured{12.9\,GH/s}.
+Units locked: $1\,\Phi \equiv 1$\,EH/s, $1\,\mathrm{n}\Phi = 1$\,GH/s. The faster hash is
+an \measured{83$\times$} lever for \emph{mining} and $\sim$0$\times$ for \emph{state
+roots} --- the $O(1)$ accumulator made root hashing moot.}
+\frow{vdf}{2048-bit Wesolowski VDF: single-core \measured{116.4\,m$\Omega$}
+(116{,}374 turns/s); 48 parallel chains still $\sim$29.5\,m$\Omega$ \emph{each} --- more
+cores buy \textbf{zero} speedup for one VDF. That anti-parallel behavior is the measured
+result; the absolute m$\Omega$ figure is pure-Rust and host-bound. $T=10^{6}$ gives an
+8.6\,s delay.}
+\frow{pq}{ML-KEM-1024 hybrid channel (encapsulation over noise, HKDF + per-direction
+AEAD), browser$\leftrightarrow$bridge headless end-to-end: \measured{115\,ms}, shared key
+verified on both ends. Negative finding riding along: the wallet's pre-existing
+``PQ connection encrypter'' was \textbf{pretend} --- it never encrypted and never compared
+transcript hashes.}
+\frow{tip}{Browser-wasm tip check of the \emph{live} chain tip ($h=742{,}989$):
+\measured{0.10\,ms}, ok:true; tampered height or root byte flip $\to$ rejected. Honest
+gap: the fingerprint flavor is a corruption check, not forging-adversary-resistant ---
+the PQ-signature variant is blocked from wasm by a dependency. \stO}
+\frow{calibration}{A signature-size overclaim was caught by measurement: the PQ signature
+crate claimed Level-5 output while its keygen defaulted to Level 1 (148\,B); the fix
+produces the true 292\,B Level-5 signatures.}
+\end{mentry}
+
+\subsection{Braid convergence: from simulation gate to live byte-identity}
+
+\begin{mentry}{ARC-7}{DagKnight braid, three phases}{2026-07-02 $\to$ 07-24, sim + 2-node live}{\stM}
+\frow{sim gate}{Six adversarial scenarios, all green: 10k blocks / 3 producers,
+divergence $=0$; 30\% drop/reorder/equivocation, divergence $=0$; 16/16 orderings agree,
+incremental $\equiv$ batch; withheld-block attacker's finalized prefix byte-identical over
+1{,}378 blocks; 5/5 tampers rejected; 100k blocks, max reorg window 258 $\le$ 16{,}384
+bound. Graded \textsc{simulation} in the whitepaper --- correctly, as the next row shows.}
+\frow{settle}{Settlement throughput bench: 1M transfers through the state-commit path
+$=$ \measured{67{,}248 tx/s} in a DEBUG build (release estimated 300k--1M, hash-bound).
+Ruled out: settlement as the wall --- the live chain is block-production-starved, not
+settlement-bound.}
+\frow{live}{First live 2-node run: the weave was real (1{,}856/4{,}642 blocks carried
+merge parents) but \textbf{money diverged} --- supply 2{,}319{,}501{,}400{,}000 vs
+2{,}320{,}001{,}400{,}000 units across nodes; one node read the other producer's balance
+as 0. Root cause: settlement drained the \emph{local} tip, not the braid spine. Fix
+(commit \texttt{5d67d25}, three coupled bugs): both nodes byte-identical on supply and
+balances, staying identical across samples as supply grew 3.142T$\to$3.146T. Critical
+constant: finality depth 64 ($\sim$10\,s at 150\,ms blocks) $\gg$ gossip delay; depth 4
+wedged permanently. Coinbase gate: 4-node deterministic replay of 200 coinbase blocks
+$\to$ identical wallet root + supply, and supply $=\sum$rewards exactly; solo braid, 60
+blocks: producer balance $295.0 = 59\times5.0$ (emission lags one block).}
+\frow{open}{No safety/liveness proof --- ``deterministic braid linearization v1,'' not
+the published DAGKnight algorithm. Known P0: a reorg below the finalized line permanently
+wedges settlement (append-only tip, no rollback). Transactions-per-block and full-block
+propagation under the braid are unmeasured --- the 100+ blk/s figures were \emph{empty}
+blocks. \stO}
+\end{mentry}
+
+% ==================================================================
+\section{Part IV --- Diagnosis stories: measurement as forensics}
+\label{sec:forensics}
+
+\subsection{The propagation chain}
+
+\begin{mentry}{ARC-13}{Loopback bisection $\to$ WG proof $\to$ 10M-node flood}{2026-05-31 $\to$ 06-01}{\stM}
+\frow{bisect}{1 producer + 4 followers on loopback (\$0 experiment): only 1/4 followers
+received blocks; the producer showed 11 connect / 11 disconnect churn. Root cause: all
+followers derived \emph{one deterministic peer identity} from the same node-id string ---
+the transport deduplicated $N$ processes into one logical peer. Fix (pid-suffixed ids):
+4/4 followers, blocks\_applied $=60$ each, divergence $=0$. Each alternative was ruled out
+explicitly: idle-timeout (already 60\,s), NAT (reproduced on loopback), protocol mismatch
+(Identify matched), explicit disconnects (none in code).}
+\frow{2nd cause}{Gossip has no history: a late joiner received 114 blocks, applied 0,
+rejected 114 --- chained to a height it could never reach. A design gap, not a bug; it
+became the request-response backfill (\S\ref{sec:ladder}) and the fold late-join.}
+\frow{wg}{First cross-server transport proof over WireGuard: blocks\_applied $=50$,
+divergence $=0$, rejected $=0$; ping 0.585\,ms RTT; 1.24\,GiB transferred. The real bugs
+found were tooling (a stale journal peer-id; follower must graft first) plus one transport
+bug: the Tor stream's write path never flushed.}
+\frow{flood}{Deterministic flood simulator, uncapped: 100K nodes $\to$ 100.00\% delivery,
+124\,ms, 58\,MB; 1M nodes $\to$ 100.00\% (999{,}999/999{,}999), 1.44\,s, 520\,MB; 10M
+nodes $\to$ \measured{100.00\%, 23.9\,s, 5.2\,GB}, all deterministic. Ruled out: the
+``10M ceiling'' (an artifact of a 150\,s timeout, not the engine). \stS}
+\end{mentry}
+
+\subsection{The GPU hashrate collapse}
+
+\begin{mentry}{ARC-8}{3\,GH/s $\to$ 300\,MH/s, predicted and matched}{2026-07-24, live rig + code}{\stM}
+\frow{measured}{A GPU rig's rate collapsed from $\sim$3\,GH/s to 150--300\,MH/s. Reading
+the miner's thermal guard gave a quantitative prediction: throttle at $\ge$78\,°C adds
+50\,ms sleep per dispatch; default batch 16.7M nonces at $\sim$5.6\,ms kernel time
+$\Rightarrow$ $16.7\mathrm{M}/55.6\,\mathrm{ms} \approx 300$\,MH/s --- the live rig
+reported \measured{297\,MH/s}. Diagnosis by arithmetic, confirmed by telemetry.}
+\frow{secondary}{An env var was read twice with different defaults (dispatch sleep 0,
+thermal sleep 50); the ``CPU flicker'' was a measurement artifact (16-bit share target
+$\to$ millisecond timed slices, no smoothing); and the 64-shares-per-height wallet cap
+against a GPU producing $\sim$45k share-grade nonces/s cut the effective GPU duty cycle to
+$\sim$2--4\% (785 wallet-cap rejects live).}
+\frow{fix}{Commit \texttt{f34d06c}: thermal defaults raised to 85/90/80\,°C with the env
+split; hashrate windowed $\ge$2\,s; \emph{vardiff} (target $\sim$0.5 shares/s, credit
+weight $2^{\,\mathrm{share\_ease}-\mathrm{ease}_w}$). Deployed to the live pool: wallet-cap
+rejects \measured{933 $\to$ 0}; the GPU rig now mines 23-bit shares at weight 128.}
+\frow{ruled out}{A GPU/OpenCL bug; the pool; the share-accounting path.}
+\frow{open}{The miner-side fix reaches rigs only with the next signed release. \stG}
+\end{mentry}
+
+\subsection{Pool shares: two reject storms}
+
+\begin{mentry}{ARC-9/10}{12k rejects $\to$ 15; 99.7\% stale-height $\to$ 0}{2026-07-21 $\to$ 23, dev + live pool}{\stL}
+\frow{e2e}{Pool end-to-end on a dev node (eased difficulty, two CPU wallets, 64\,s):
+11 blocks, 497/466 shares banked, $\sim$2\% rejects; the miner that won \emph{zero} blocks
+still earned 91\% of the block-winner's balance --- proportional pay measured, not
+asserted. Conservation (including integer remainder) and solo-degeneration unit-tested
+(52/52).}
+\frow{lesson 1}{A fixed 150\,ms post-share sleep collapsed hashrate $\to$ blocks stalled
+$\to$ cap hit $\to$ \measured{12k-reject storm}; removing the sleep and switching
+cap$\to$block-hunt cut it to \measured{15 rejects} in the same test. A politeness delay
+became a denial-of-service against the miner itself.}
+\frow{lesson 2}{The winner's block solve must credit $1\ll\mathrm{ease}$ shares (true
+work weight); with the naive $+1$ a share-less pre-7.1 solo miner would earn
+$\sim$1/257 of its own blocks.}
+\frow{live 1}{Reject-reason counters built and hot-swapped into the live pool: all 3 rigs
+reported an old client version, 0 shares banked, \measured{100\% of 386 rejects $=$
+stale height} --- the rigs were solo-racing the pool. Control: a current client against
+the \emph{same} node banked 447 shares at $\sim$1\% rejects. Ruled out: pool bug, GPU
+share path.}
+\frow{live 2}{Deeper cut: stale-height was \measured{99.7\% of \emph{all} submit rejects
+(3{,}093/3{,}102)} --- at $\sim$2\,s blocks any boundary-straddling share dies. Fix:
+verify height$-1$ submits against the snapshotted previous challenge and credit them into
+the current window (replay-blocked). Validated live within 3 minutes: \measured{229
+shares credited, 0 stale-height, 1 benign duplicate}. Server-side only; no consensus
+change.}
+\frow{recipe}{The 30-second diagnostic that found it: run a known-good CPU miner against
+the live pool under a pty, then read per-wallet reject counters --- verify-mismatch
+present $=$ real bug; stale-only $=$ client version. \stM}
+\end{mentry}
+
+\subsection{The five-minute no-op build}
+
+\begin{mentry}{ARC-15}{Depinfo poison: 215.9\,s $\to$ 0.56\,s}{2026-07-21/22, build system}{\stM}
+\frow{measured}{``No-op'' builds of the chain workspace never no-oped: 215.9\,s for an
+unchanged crate; 166 dirty units / 359\,s for the fattest binary. Root cause: cache-restored
+units skipped the compiler, so a fingerprint dep-info file was never written; the build
+tool marked those units permanently stale --- \measured{19 poisoned roots cascading into
+147 downstream units}.}
+\frow{fix}{Capture, require, and materialize the dep-info blob on cache restore
+(self-healing: legacy entries miss once, then re-store complete). Measured heal:
+14.8\,s$\to$0.56\,s; 40.7$\to$2.50; 39.2$\to$6.58 (0 dirty); re-verified next day at
+\measured{1.0\,s} no-op.}
+\frow{ruled out}{Two long-held beliefs died under measurement: the compiler wrapper being
+hashed into unit identity (the ``two fingerprint universes'' story --- wrong), and the
+shared cache being empty (a symlink that a disk-usage probe reads as 0 --- 17\,GB behind
+it).}
+\frow{residual}{Known secondary taxes, measured and accepted: a release version bump
+mints new unit metadata (first 1--2 runs legitimately slow); check-family vs test-family
+profile hashes are distinct universes.}
+\end{mentry}
+
+% ==================================================================
+\section{Part V --- Negative results and open instruments}
+\label{sec:negatives}
+
+\subsection{An unresolved live datum}
+
+\begin{mentry}{ARC-3}{Live-producer serve flakiness}{2026-07-22/23, loopback vantage}{\stO}
+\frow{measured}{The live producer (chain $\approx$31.6M) served established clients
+continuously ($\approx$2.1\,MB/s, $\approx$95\% serve-cache hit) and bootstrapped one
+external fresh client from genesis --- yet probe clients were served on only $\approx$2 of
+$\approx$35 attempts ($\hat p \approx 0.94$ failure), and a fresh local client with a valid
+handshake got 0 serves and 0 peer-height gossip in 60\,s.}
+\frow{ruled out}{(journal-verified) Request shape; range keys (exact cache-key requests
+went unanswered); handshake enforcement (log-only); a stale binary (the running executable
+matched disk); gossip-firehose interference.}
+\frow{not ruled out}{Loopback-vs-public-interface vantage; event-queue contention on a
+busy producer; response-path loss to short-lived clients. \textbf{Not root-caused.} This
+entry exists because the record keeps its anomalies; the book would be lying by omission
+without it.}
+\end{mentry}
+
+\subsection{The ruled-out compendium}
+
+\noindent Collected from the arcs above --- the claims this record has \emph{killed},
+kept in one place so they stay dead:
+
+\begin{itemize}[leftmargin=1.4em,itemsep=2pt]
+\item \textbf{zk-STARKs as a throughput lever} --- 290{,}000$\times$ in-circuit tax;
+  produce ceiling $\sim$59--65k TPS. They buy light clients, not TPS.
+\item \textbf{Replica validation as scaling} --- measured \emph{anti}-scaling, $\sim 1/N$.
+\item \textbf{Gossip-rebroadcast backfill} --- collapsed live production to 0 blk/s with
+  one backfiller; architecturally dead.
+\item \textbf{The 152M TPS bench} --- 98k in the real pipeline. Standalone benches do not
+  survive contact with apply loops.
+\item \textbf{lz4 over zstd} for header chunks; \textbf{fsync/batch-size/per-block-GET
+  tuning} as sync levers; \textbf{node-count dependence} of the delivery law;
+  \textbf{packet-level $p$} as the law's variable; \textbf{the 10M-node sim ceiling}
+  (a timeout artifact); \textbf{hash speed as a state-root lever}.
+\end{itemize}
+
+\subsection{The pretend inventory}
+\label{sec:pretend}
+
+\noindent Standing items that are built or claimed but \emph{not} measured or not live,
+graded honestly (the Adversary's Companion reads this same list from the attacker's
+chair):
+
+\begin{itemize}[leftmargin=1.4em,itemsep=2pt]
+\item Snapshot-pull fast sync: coded, byte-symmetric, gated OFF pending a signed anchor. \stG
+\item SST bulk-ingest: measured 238k blk/s, dark behind its flag until divergence $=0$ on
+  the integrated tree. \stG
+\item Producer-signature enforcement: verifier written and unit-tested, dormant at an
+  unreachable activation height. \stG
+\item Full fold verify of the live $\sim$29M chain: never separately benchmarked. \stO
+\item Braid transactions-per-block and full-block propagation: unmeasured (live figures
+  were empty blocks). \stO
+\item WAN delivery-law replication: kit staged, fleet unavailable. \stO
+\item The wallet's legacy ``PQ connection encrypter'': pretend --- documented as such
+  until replaced. \stO
+\end{itemize}
+
+\layman{sigilamber}{Why publish the failures and the not-yets}{
+A benchmark that only reports victories is advertising. The project's rule is that a
+number is only trustworthy if you can also see the numbers that came out wrong, the
+optimizations that did nothing, and the list of things still unmeasured. This section is
+that list, kept current on purpose.}
+
+\subsection{Limitations of this record}
+
+\noindent Three limits bind everything above. \textbf{One lab:} every number was taken on
+one operator-funded fleet --- mostly one 48-core host --- by the people who built the
+system; there is no external replication and no independent auditor of the grading.
+\textbf{Hosts travel with numbers:} figures like 342\,ms, 155\,MH/s, and 10{,}853 blk/s
+are properties of specific loaded machines, not of the algorithms in the abstract.
+\textbf{Instruments were sometimes wrong:} \S\ref{sec:instruments} lists the cases we
+caught; the honest inference is that some were not caught. The mitigation is the method
+itself --- seeds, raw logs, and per-arc provenance sufficient for any reader to re-run
+what this book claims.
+
+\vspace{10pt}
+\noindent\textit{v0 --- 2026-07-24. A number without its method is a rumor; a method
+without its residuals is a brochure. This book is the project's answer to both.}
+
+% ==================================================================
+\section*{Sources}
+\label{sec:sources}
+\small
+\begin{itemize}[leftmargin=1.2em,itemsep=1pt]
+\item \emph{SIGIL --- The Variational Chain}, whitepaper v1.3 (2026-07-22) --- the canonical
+design; its \S3 \emph{Measured laws} is the summary this book expands.
+\url{https://quillon.xyz/downloads/SIGIL_WHITEPAPER_v1.pdf}.
+\item \emph{What the Chain Knows --- The Philosophy of the SIGIL Graph}, v0.3 (2026-07-22) ---
+the epistemology of honesty; defines the two-axis evidence grading this book applies.
+\url{https://quillon.xyz/downloads/SIGIL_PHILOSOPHY_v0.pdf}.
+\item \emph{The SIGIL Failure Atlas}, v0 (2026-07-23) --- 71 failures in ten classes; its
+measurement-failure class is \S\ref{sec:instruments}'s source material.
+\url{https://quillon.xyz/downloads/SIGIL_FAILURE_ATLAS_v0.pdf}.
+\item \emph{The Builder's Chronicle}, v0 (2026-07-23) --- development settled on-chain as a
+prototype labor institution.
+\url{https://quillon.xyz/downloads/SIGIL_BUILDERS_CHRONICLE_v0.pdf}.
+\item \emph{The Adversary's Companion}, v0 (2026-07-24) --- the threat model; reads
+\S\ref{sec:pretend} from the attacker's chair.
+\url{https://quillon.xyz/downloads/SIGIL_ADVERSARYS_COMPANION_v0.pdf}.
+\item \emph{The Gossip Delivery Law} (2026-06-17) --- the original simulation-campaign
+note. \url{https://quillon.xyz/downloads/sigil-top-delivery-law.pdf}.
+\item In-tree measurement records (no URL): the delivery-law live kit
+(\texttt{docs/research/delivery-law-live/}: \texttt{MEASUREMENT.md},
+\texttt{summary.txt}, \texttt{WAN-STATUS.md}, raw per-attempt \texttt{.jsonl.gz});
+\texttt{docs/THROUGHPUT\_MASTER.md}; \texttt{docs/SIGIL-TPS-LADDER.md};
+\texttt{docs/CHRONOS\_BENCHMARK.md}; \texttt{docs/SIGIL\_HARDENING\_BACKLOG.md}; and the
+project's dated working notes, from which all numbers above are quoted verbatim.
+\end{itemize}
+
+\end{document}

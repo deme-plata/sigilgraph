@@ -28,10 +28,31 @@ echo "▸ 1/7 bump version → $VER"
 sed -i "s/^version = \"[0-9.]*\"/version = \"$VER\"/" crates/sigil-top/Cargo.toml
 grep -q "^version = \"$VER\"" crates/sigil-top/Cargo.toml || { echo "✗ version bump failed"; exit 1; }
 
-echo "▸ 2/7 build linux + windows (release)"
-"$FLUXC" build --release -p sigil-top
-"$FLUXC" build --release -p sigil-top --target x86_64-pc-windows-gnu
-LBIN="target/release/sigil-top"; WBIN="target/x86_64-pc-windows-gnu/release/sigil-top.exe"
+# 2026-07-26: the two builds now run IN PARALLEL. They used to be serial for
+# ~100 s each (codegen-units=1 => one rustc, no intra-crate parallelism), so step 2
+# dominated the ~4 min release. Naive `&` does NOT work: a cross build writes its
+# host-side artifacts (proc macros, build scripts) into target/release/, so both
+# cargos fight over target/release/.cargo-lock. MEASURED, no-op pair:
+#   shared target/    19 s wall — 1x "Blocking waiting for file lock on artifact directory"
+#   separate dirs     12 s wall — 0x artifact-directory lock (only the brief package-cache one)
+# So the windows build gets its own CARGO_TARGET_DIR. One-time cost to establish it:
+# 181 s and 888 MB (measured); warm after that.
+# NOTE: two concurrent LTO links — give the wrapping systemd-run scope MemoryMax>=16G.
+WIN_TARGET_DIR="${WIN_TARGET_DIR:-/home/storage/sigil-target-win}"
+echo "▸ 2/7 build linux + windows (release, PARALLEL — windows in $WIN_TARGET_DIR)"
+T_BUILD=$SECONDS
+LLOG="/home/orobit/tmp/release-${VER}-build-linux.log"
+WLOG="/home/orobit/tmp/release-${VER}-build-windows.log"
+"$FLUXC" build --release -p sigil-top > "$LLOG" 2>&1 &
+LPID=$!
+CARGO_TARGET_DIR="$WIN_TARGET_DIR" "$FLUXC" build --release -p sigil-top --target x86_64-pc-windows-gnu > "$WLOG" 2>&1 &
+WPID=$!
+wait "$LPID" || { echo "✗ linux build failed:"; tail -25 "$LLOG"; exit 1; }
+wait "$WPID" || { echo "✗ windows build failed:"; tail -25 "$WLOG"; exit 1; }
+echo "  build wall clock: $((SECONDS-T_BUILD))s (serial baseline v7.1.9/v7.1.10: ~200s)"
+LBIN="target/release/sigil-top"; WBIN="$WIN_TARGET_DIR/x86_64-pc-windows-gnu/release/sigil-top.exe"
+[ -x "$LBIN" ] || { echo "✗ missing $LBIN"; exit 1; }
+[ -s "$WBIN" ] || { echo "✗ missing $WBIN"; exit 1; }
 "$LBIN" version 2>/dev/null | grep -q "v$VER" || { echo "✗ built binary is not v$VER"; exit 1; }
 
 echo "▸ 3/7 stage + sign (require-both) + verify"

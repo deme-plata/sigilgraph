@@ -1618,9 +1618,24 @@ fn main() {
     // SIGIL_TUI=1 escape hatch. A genuine no-console pipe (all false) cleanly goes headless — it
     // CAN'T host an interactive TUI anyway. Headless also opt-in via --once / SIGIL_HEADLESS=1.
     // Terminal setup below is non-fatal so a quirky console can't silent-exit before frame 1.
-    let force_headless = std::env::var("SIGIL_HEADLESS").is_ok();
+    // v7.1.10: these two used `.is_ok()` — PRESENCE, not value — so
+    // `SIGIL_HEADLESS=0` forced headless ON, the exact opposite of what it reads
+    // like, and contradicted the line above documenting `SIGIL_HEADLESS=1`. It
+    // cost a whole test cycle: a harness exported `SIGIL_HEADLESS=0` to mean
+    // "not headless" and silently measured the one-frame headless path instead of
+    // the TUI. Parse the value; treat 0/false/no/off/empty as OFF.
+    let env_flag = |k: &str| -> bool {
+        match std::env::var(k) {
+            Ok(v) => !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "" | "0" | "false" | "no" | "off"
+            ),
+            Err(_) => false,
+        }
+    };
+    let force_headless = env_flag("SIGIL_HEADLESS");
     let interactive = !cfg.once && !force_headless && (
-        std::env::var("SIGIL_TUI").is_ok()
+        env_flag("SIGIL_TUI")
         || std::io::stdout().is_terminal()
         || std::io::stdin().is_terminal()
         || win_has_console()
@@ -3398,6 +3413,49 @@ fn open_store_with_fallbacks(db_path: &str, want_sync: bool) -> Result<(block_st
     Ok((store, note))
 }
 
+// v7.1.10: probe the embedded wallet server and, if it is not answering, try to
+// (re)start it in-process. Returns true when :9800 is accepting connections.
+//
+// Why this exists: a FAILED initial start (port already held by a previous
+// instance — the classic case right after a self-update) left `serve_stop` as
+// None, and the watchdog below was gated on `is_some()`. So the port stayed dark
+// for the whole life of the process, [W] opened a browser tab at a refused port,
+// and the reason was invisible because `serve_status` is rendered nowhere. Both
+// the keypress paths and the watchdog now go through here.
+fn ensure_serve_up(app: &mut App) -> bool {
+    if wallet_server_alive() {
+        return true;
+    }
+    if let Some(old) = app.serve_stop.take() {
+        old.store(true, Ordering::Relaxed);
+    }
+    let serve_dir = std::env::var("FLUX_STATIC_DIR")
+        .unwrap_or_else(|_| "/home/orobit/q-narwhalknight/dist-fluxapp".into());
+    match serve::start(&serve_dir, wallet_ui::WALLET_PORT) {
+        Ok(stop) => {
+            app.serve_stop = Some(stop);
+            // Let the listener bind before we hand the URL to a browser.
+            for _ in 0..20 {
+                if wallet_server_alive() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            let ok = wallet_server_alive();
+            app.serve_status = if ok {
+                "serve :9800 ✓ (re)started on demand".into()
+            } else {
+                "serve :9800 started but not answering".into()
+            };
+            ok
+        }
+        Err(e) => {
+            app.serve_status = format!("serve: {e}");
+            false
+        }
+    }
+}
+
 fn run_tui(cfg: Config) -> std::io::Result<()> {
     // v0.27.5: self-healing crash-loop guard — long-running dashboard only (`--once` renders
     // and exits faster than HEAL_SECS, which would false-trigger a revert). If THIS version
@@ -3849,9 +3907,15 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                             KeyCode::Char('l') | KeyCode::Char('L') => {
                                 // v0.6.0: local wallet served by fluxc serve on :9800
                                 let wallet_url = local_wallet_url();
-                                app.toast = format!("🌐 Opening local wallet (private window) → {wallet_url}").into();
-                                open_browser_private(&wallet_url);
-                                app.toast_sticky = false;
+                                if ensure_serve_up(&mut app) {
+                                    app.toast = format!("🌐 Opening local wallet (private window) → {wallet_url}").into();
+                                    open_browser_private(&wallet_url);
+                                    app.toast_sticky = false;
+                                } else {
+                                    app.toast = format!("✗ local wallet server down ({}) — use the hosted wallet:  {}",
+                                        app.serve_status, official_wallet_url()).into();
+                                    app.toast_sticky = true;
+                                }
                             }
                             KeyCode::Char('d') | KeyCode::Char('D') => {
                                 // v0.3.1: fetch the real _sigil-tip DNS anchor via DoH,
@@ -3870,7 +3934,17 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 // (proxmox/SSH): no browser → show the HOSTED OAuth2 wallet link
                                 // to copy, since localhost:9800 isn't reachable there anyway.
                                 let local = local_wallet_url();
-                                if open_browser_private(&local) {
+                                // v7.1.10: never hand a browser a refused port. If the
+                                // embedded server is not answering, (re)start it and say
+                                // why when that fails — serve_status is rendered nowhere
+                                // else, so this toast is the only place it surfaces.
+                                if !ensure_serve_up(&mut app) {
+                                    app.toast = format!(
+                                        "✗ local wallet server down ({}) — use the hosted wallet:  {}",
+                                        app.serve_status, official_wallet_url()
+                                    ).into();
+                                    app.toast_sticky = true;
+                                } else if open_browser_private(&local) {
                                     app.toast = format!("🌐 wallet (private window) → {local}").into();
                                     app.toast_sticky = false;
                                 } else {
@@ -3884,7 +3958,10 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 // #stats deep-link auto-opens the modal on load; data is
                                 // same-origin via the :9800 /api proxy + feed JSON.
                                 let url = format!("{}#stats", local_wallet_url());
-                                if open_browser_private(&url) {
+                                if !ensure_serve_up(&mut app) {
+                                    app.toast = format!("✗ local wallet server down ({}) — stats need the :9800 server", app.serve_status).into();
+                                    app.toast_sticky = true;
+                                } else if open_browser_private(&url) {
                                     app.toast = format!("📊 network stats → {url}").into();
                                     app.toast_sticky = false;
                                 } else {
@@ -3989,20 +4066,12 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             // v0.10.5.1: embedded-serve watchdog — if the :9800 wallet server died,
             // restart it so the local wallet/[W] never silently goes dark. Probe is
             // throttled to 15s and only blocks (briefly) in the rare dead case.
-            if app.serve_stop.is_some() && app.last_serve_check.elapsed() >= Duration::from_secs(15) {
+            // v7.1.10: NO `serve_stop.is_some()` gate — that gate meant a failed
+            // INITIAL start could never be retried, leaving :9800 dark forever.
+            if app.last_serve_check.elapsed() >= Duration::from_secs(15) {
                 app.last_serve_check = Instant::now();
-                let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 9800));
-                let alive = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok();
-                if !alive {
-                    if let Some(old) = app.serve_stop.take() {
-                        old.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    let serve_dir = std::env::var("FLUX_STATIC_DIR")
-                        .unwrap_or_else(|_| "/home/orobit/q-narwhalknight/dist-fluxapp".into());
-                    match serve::start(&serve_dir, 9800) {
-                        Ok(stop) => { app.serve_stop = Some(stop); app.serve_status = "serve :9800 ✓ restarted by watchdog".into(); }
-                        Err(e) => { app.serve_status = format!("serve restart failed: {e}"); }
-                    }
+                if !wallet_server_alive() {
+                    ensure_serve_up(&mut app);
                 }
             }
             // v0.6.5: Poll P2P sync state + drain synced blocks into the TUI block list

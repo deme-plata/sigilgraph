@@ -49,6 +49,17 @@ pub(crate) fn open_browser(url: &str) -> bool {
     true
 }
 
+/// The port the embedded wallet server binds. Kept next to [`local_wallet_url`]
+/// so the probe and the URL can never drift apart.
+pub(crate) const WALLET_PORT: u16 = 9800;
+
+/// True if something is accepting connections on the local wallet port. Cheap
+/// (300 ms connect timeout) so it is safe on a keypress path.
+pub(crate) fn wallet_server_alive() -> bool {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], WALLET_PORT));
+    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+}
+
 /// Browsers we know how to put into private/incognito mode, in the order we try
 /// them. Each entry is `(binary, private-mode flag)`; a `spawn` of a missing
 /// binary fails with `ENOENT`, which is what makes this list a cheap probe.

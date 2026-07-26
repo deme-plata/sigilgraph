@@ -3849,8 +3849,8 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                             KeyCode::Char('l') | KeyCode::Char('L') => {
                                 // v0.6.0: local wallet served by fluxc serve on :9800
                                 let wallet_url = local_wallet_url();
-                                app.toast = format!("🌐 Opening local wallet → {wallet_url}").into();
-                                open_browser(&wallet_url);
+                                app.toast = format!("🌐 Opening local wallet (private window) → {wallet_url}").into();
+                                open_browser_private(&wallet_url);
                                 app.toast_sticky = false;
                             }
                             KeyCode::Char('d') | KeyCode::Char('D') => {
@@ -3870,8 +3870,8 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 // (proxmox/SSH): no browser → show the HOSTED OAuth2 wallet link
                                 // to copy, since localhost:9800 isn't reachable there anyway.
                                 let local = local_wallet_url();
-                                if open_browser(&local) {
-                                    app.toast = format!("🌐 wallet → {local}").into();
+                                if open_browser_private(&local) {
+                                    app.toast = format!("🌐 wallet (private window) → {local}").into();
                                     app.toast_sticky = false;
                                 } else {
                                     app.toast = format!("🔗 headless — open the wallet (OAuth2 login) in any browser:  {}", official_wallet_url()).into();
@@ -3884,7 +3884,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 // #stats deep-link auto-opens the modal on load; data is
                                 // same-origin via the :9800 /api proxy + feed JSON.
                                 let url = format!("{}#stats", local_wallet_url());
-                                if open_browser(&url) {
+                                if open_browser_private(&url) {
                                     app.toast = format!("📊 network stats → {url}").into();
                                     app.toast_sticky = false;
                                 } else {

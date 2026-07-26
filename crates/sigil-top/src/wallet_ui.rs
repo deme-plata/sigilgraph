@@ -49,6 +49,163 @@ pub(crate) fn open_browser(url: &str) -> bool {
     true
 }
 
+/// Browsers we know how to put into private/incognito mode, in the order we try
+/// them. Each entry is `(binary, private-mode flag)`; a `spawn` of a missing
+/// binary fails with `ENOENT`, which is what makes this list a cheap probe.
+#[cfg(target_os = "linux")]
+const PRIVATE_BROWSERS: &[(&str, &str)] = &[
+    ("firefox", "--private-window"),
+    ("firefox-esr", "--private-window"),
+    ("brave-browser", "--incognito"),
+    ("google-chrome", "--incognito"),
+    ("chromium", "--incognito"),
+    ("chromium-browser", "--incognito"),
+    ("microsoft-edge", "--inprivate"),
+    ("vivaldi", "--incognito"),
+];
+
+/// macOS: `open -na <app> --args <flag> <url>`. `open` exits non-zero when the
+/// app is not installed, so we can check `status()` instead of probing binaries.
+#[cfg(target_os = "macos")]
+const PRIVATE_BROWSERS_MAC: &[(&str, &str)] = &[
+    ("Firefox", "--private-window"),
+    ("Brave Browser", "--incognito"),
+    ("Google Chrome", "--incognito"),
+    ("Microsoft Edge", "--inprivate"),
+];
+
+#[cfg(target_os = "windows")]
+const PRIVATE_BROWSERS_WIN: &[(&str, &str)] = &[
+    ("chrome", "--incognito"),
+    ("msedge", "--inprivate"),
+    ("brave", "--incognito"),
+    ("firefox", "-private-window"),
+];
+
+/// Open a URL in a **private / incognito** window.
+///
+/// [`open_browser`] hands the URL to the desktop's default handler, which always
+/// reuses an ordinary window: logged-in session, saved cookies, entry in
+/// history. The wallet is a money surface, so `w` (and the other wallet-UI
+/// shortcuts) go through here instead — a private window starts from a clean
+/// cookie jar and leaves no logged-in wallet tab behind on a shared machine.
+///
+/// Best-effort by design: we try the known browsers in order and fall back to
+/// [`open_browser`] if none of them is installed, because an ordinary tab beats
+/// no tab. Overrides, for anyone whose browser we guess wrong:
+///
+/// * `SIGIL_BROWSER=<binary|path>` plus optional `SIGIL_BROWSER_PRIVATE_FLAG=<flag>`
+///   — try this first, ahead of the built-in list.
+/// * `SIGIL_BROWSER_PRIVATE=0` — opt out entirely and use the default handler.
+///
+/// Returns `false` only when there is no GUI at all (see [`is_headless`]), which
+/// keeps the same contract as [`open_browser`]: the caller prints a copyable
+/// link instead. A `true` return means "we had a display and tried", not "a
+/// window definitely appeared" — the default handler has never told us that
+/// either.
+pub(crate) fn open_browser_private(url: &str) -> bool {
+    if is_headless() {
+        return false;
+    }
+    if std::env::var("SIGIL_BROWSER_PRIVATE").as_deref() == Ok("0") {
+        return open_browser(url);
+    }
+    let url = url.to_string();
+    thread::spawn(move || {
+        // 1) Operator override, if set.
+        if let Ok(bin) = std::env::var("SIGIL_BROWSER") {
+            if !bin.trim().is_empty() {
+                let flag = std::env::var("SIGIL_BROWSER_PRIVATE_FLAG")
+                    .unwrap_or_else(|_| "--private-window".to_string());
+                let mut cmd = Command::new(bin.trim());
+                if !flag.trim().is_empty() {
+                    cmd.arg(flag.trim());
+                }
+                if cmd.arg(&url).spawn().is_ok() {
+                    return;
+                }
+            }
+        }
+        // 2) The user's ACTUAL default browser, in private mode, before our list
+        //    order gets an opinion. `xdg-settings` reports e.g. "firefox.desktop";
+        //    match its stem against the table so we pass the right flag.
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(out) = Command::new("xdg-settings")
+                .args(["get", "default-web-browser"])
+                .output()
+            {
+                let desktop = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
+                if !desktop.is_empty() {
+                    let stem = desktop.trim_end_matches(".desktop");
+                    if let Some((bin, flag)) = PRIVATE_BROWSERS
+                        .iter()
+                        .find(|(bin, _)| stem.contains(bin) || bin.contains(stem))
+                    {
+                        if Command::new(bin).arg(flag).arg(&url).spawn().is_ok() {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        // 3) Known browsers, private flag first.
+        #[cfg(target_os = "linux")]
+        {
+            for (bin, flag) in PRIVATE_BROWSERS {
+                if Command::new(bin).arg(flag).arg(&url).spawn().is_ok() {
+                    return;
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            for (app, flag) in PRIVATE_BROWSERS_MAC {
+                let ok = Command::new("open")
+                    .args(["-na", app, "--args", flag, &url])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if ok {
+                    return;
+                }
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            for (bin, flag) in PRIVATE_BROWSERS_WIN {
+                if Command::new(bin).arg(flag).arg(&url).spawn().is_ok() {
+                    return;
+                }
+            }
+            // Not on PATH is normal on Windows; let the shell resolve the app.
+            for (bin, flag) in PRIVATE_BROWSERS_WIN {
+                if Command::new("cmd")
+                    .args(["/c", "start", "", bin, flag, &url])
+                    .spawn()
+                    .is_ok()
+                {
+                    return;
+                }
+            }
+        }
+        // 4) Nothing recognised — an ordinary tab beats no tab.
+        #[cfg(target_os = "linux")]
+        {
+            let _ = Command::new("xdg-open").arg(&url).spawn();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = Command::new("open").arg(&url).spawn();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = Command::new("cmd").args(["/c", "start", "", &url]).spawn();
+        }
+    });
+    true
+}
+
 /// Enable/disable launch-at-login (Windows HKCU\…\Run). `Err` (no-op) on other platforms.
 #[cfg(windows)]
 pub(crate) fn autostart_set(enable: bool) -> Result<(), String> {
@@ -124,7 +281,7 @@ pub(crate) fn flux_open_local(path: &str) {
             thread::sleep(Duration::from_millis(900));
         }
     }
-    open_browser(&format!("http://localhost:9800{path}"));
+    open_browser_private(&format!("http://localhost:9800{path}"));
     thread::sleep(Duration::from_millis(500)); // let the browser launch before exit
 }
 

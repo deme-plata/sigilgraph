@@ -1,0 +1,308 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1.05in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{ragged2e}
+\usepackage{colortbl}
+\usepackage{tcolorbox}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\providecommand{\textcite}[1]{\cite{#1}}
+\definecolor{sigilcyan}{HTML}{0E7C86}
+\definecolor{sigilviolet}{HTML}{5B4B8A}
+\definecolor{sigilamber}{HTML}{B26B00}
+\definecolor{sigilred}{HTML}{A32020}
+\definecolor{sigilblue}{HTML}{1F4E79}
+\definecolor{sigilgreen}{HTML}{1E6F3C}
+\definecolor{slate}{HTML}{6B7280}
+\definecolor{panelbg}{HTML}{F6F7F9}
+\definecolor{rowtint}{HTML}{EEF2F5}
+\newcommand{\measured}[1]{\textcolor{sigilcyan}{\textbf{#1}}}
+\newcommand{\derivedv}[1]{\textcolor{sigilviolet}{\textbf{#1}}}
+\newcommand{\scen}[1]{\textcolor{sigilamber}{\textbf{#1}}}
+\newcommand{\stM}{\textcolor{sigilcyan}{$\bullet$}~{\scriptsize\textsc{measured}}}
+\newcommand{\stD}{\textcolor{sigilviolet}{$\oplus$}~{\scriptsize\textsc{derived}}}
+\newcommand{\stA}{\textcolor{sigilamber}{$\triangle$}~{\scriptsize\textsc{assumed}}}
+\newcommand{\stC}{\textcolor{sigilred}{$\diamond$}~{\scriptsize\textsc{scenario}}}
+\newcommand{\kpi}[3]{\begin{minipage}[t]{0.31\textwidth}\begin{tcolorbox}[colback=panelbg,colframe=slate,boxrule=0.5pt,arc=2pt,halign=center]{\large\bfseries\textcolor{#1}{#2}}\\[2pt]{\scriptsize #3}\end{tcolorbox}\end{minipage}}
+\newcommand{\brief}[3]{\begin{tcolorbox}[colback=panelbg,colframe=#1,boxrule=0.8pt,arc=2pt,title=\textbf{#2},coltitle=white,colbacktitle=#1]#3\end{tcolorbox}}
+\hypersetup{pdftitle={The Idle Machine},pdfsubject={Planet-scale build waste, measured locally and extrapolated honestly},pdfkeywords={build systems, green software, Jevons paradox, rebound effect, compiler, software energy, incremental compilation}}
+\title{\textbf{The Idle Machine}\\[6pt]\large What the World Spends Rebuilding What It Already Built\\[4pt]\normalsize\itshape A measured kernel, an honest extrapolation, and a top-three-compiler scenario}
+\author{The Flux Foundation\\\small model computed by \texttt{flux-arxiv-latex}, thermodynamic floor by \texttt{flux-science},\\\small related work drawn from a live arXiv sweep}
+\date{\today}
+
+\begin{document}
+\maketitle
+\vspace{-12pt}\noindent
+\kpi{sigilcyan}{216$\times$}{\textsc{measured} --- the redundant work removed from one real workspace}\hfill
+\kpi{sigilamber}{287{,}467}{\textsc{scenario} --- engineer-years returned per year at top-three share}\hfill
+\kpi{sigilred}{0.0132\%}{\textsc{scenario} --- that same scenario's share of ICT carbon: the headline we refuse}
+
+\vspace{6pt}
+
+\begin{abstract}\noindent
+The world runs a machine that produces nothing: it rebuilds software that has not changed. This paper measures that waste stream in one fully instrumented workspace, then extrapolates it in four numbered rungs --- every multiplier declared, printed and graded --- to the scenario the title invites: a build orchestrator with top-three share of the world's compiled builds. The measured kernel is a single bookkeeping defect: units restored from a content cache skipped the compiler and therefore never wrote their fingerprint file, so \measured{19} poisoned roots cascaded into \measured{147} downstream units and confirming that nothing had changed cost \measured{215.9\,s} instead of \measured{1.0\,s} --- a 216$\times$ removal of pure waste. Extrapolated at 20\% share, using laptop-class power rather than the 720\,W box we actually measured on, the recoverable stream is \scen{0.204\,TWh} and \scen{97{,}856\,t\,CO$_2$e} a year --- and here the paper deflates its own headline: that is \scen{0.0132\%} of ICT's carbon footprint and \scen{0.00070\%} of world electricity. As a climate intervention it is noise. What is not noise is time: \scen{287{,}467 engineer-years} returned every year, worth \scen{\$50.2\,bn} at the stated rate, and a correctness dividend on roughly \scen{157{,}500} defect-carrying releases annually. We then apply the Jevons rebound honestly: at full rebound the energy saving vanishes entirely while the time and correctness dividends survive intact, which is why those are the claims we make. Two findings cut against our own interest. The thermodynamic floor for deciding ``has anything changed?'' across the whole scenario is about \derivedv{one microjoule per year} for the entire planet --- we spend $\sim1.12\times10^{20}\times$ that --- so the waste is coordination, not physics. And the single largest planetary lever is not a new compiler but a \emph{default}: turning build caching on by default for the 70\% of projects that do not use it recovers \scen{0.609\,TWh}, \scen{3.0$\times$} the entire top-three scenario.
+\end{abstract}
+
+\section{Status of this claim}\label{sec:status}
+
+
+\brief{sigilred}{Read this before any number}{This paper has a \textsc{measured} kernel and a \textsc{scenario} shell, and the two must not be confused.\\[4pt]
+\textbf{Measured:} one workspace, one instrument, dated. A no-op build of 215.9\,s repaired to 1.0\,s; the heaviest binary at 359\,s across 166 units re-declared dirty; a 36\% unit-level cache hit rate afterwards.\\[4pt]
+\textbf{Scenario:} the orchestrator in question has, at the time of writing, no meaningful share of the world's builds. It is a version-0.39 project maintained by one operator and a fleet of automated agents. ``Top three'' is a \emph{multiplication we perform in public}, not a forecast, a roadmap, or a claim of adoption. Nothing in \S\ref{sec:scenario} should be read as a prediction.\\[4pt]
+\textbf{Why publish it anyway:} the unit economics --- kWh, hours and tonnes per engineer-year of redundant build work --- are share-independent. They are the reusable part. Any reader can replace our share, our population, or our power assumptions and recompute; the generator is a program, and \S\ref{sec:falsify} lists the six measurements that would refute us.}
+
+
+\section{What ``saving the world'' can and cannot mean here}\label{sec:frame}
+
+
+The ICT sector is responsible for roughly 2\% of global carbon emissions \textcite{arxiv2407_19901}, with data centres estimated at 1.1--1.5\% of world electricity in the earlier literature \textcite{arxiv1307_7037,arxiv2309_09241} and hyperscale facilities now measured directly at facility level \textcite{arxiv2606_05420}. Build and test compute is a slice of that slice. No compiler --- however widely adopted, however efficient --- is a climate intervention at the scale the phrase ``save the world'' implies, and this paper will not pretend otherwise. The field has already been burned once by exactly this move: highly visible language-energy rankings were causally misread by academics and industry leaders alike, a misreading that a careful causal model later had to undo \textcite{arxiv2410_05460}.
+
+
+What survives that deflation is still worth writing down. Three claims, in descending order of defensibility:
+
+
+\begin{enumerate}[leftmargin=1.5em,itemsep=3pt]
+\item \textbf{There is a measurable waste stream} --- machine time spent recomputing outputs that are already known --- and it can be removed without asking a single human to change their behaviour. That is rare among sustainability interventions, which usually require behaviour change and therefore suffer rebound \textcite{arxiv2506_14653}.
+\item \textbf{The dominant recovered resource is human, not electrical.} At 20\% share the scenario returns \scen{287{,}467 engineer-years} a year against \scen{97{,}856\,t\,CO$_2$e} --- and the carbon figure is 0.0132\% of ICT's footprint, i.e.\ indistinguishable from zero, while the time figure is 13.7\% of the affected engineers' working lives.
+\item \textbf{The same instrument that removes the waste removes a correctness risk}, and software is infrastructure whose failures are expensive at civilisational scale \textcite{arxiv2506_13821}. This is the dividend we would defend hardest and monetise least.
+\end{enumerate}
+
+
+\section{The waste stream, measured}\label{sec:kernel}
+
+
+\stM{} In one instrumented workspace, builds that should have been no-ops were not. Confirming that an unchanged crate was unchanged cost 215.9\,s. The heaviest binary cost 359\,s across 166 units re-declared dirty on every invocation. The cause was not compilation but bookkeeping: units restored from the content cache skipped the compiler, so the fingerprint dependency file was never written, and the build tool marked 19 roots permanently stale, cascading into 147 downstream units. After the repair --- capture, require and materialise that file on cache restore --- the same no-op measured 1.0\,s and the unit-level cache hit rate settled at 36\%.
+
+
+Two properties make this the right kernel for a planetary estimate. First, the removed work is \emph{provably useless}: its output was already known, which is why removing it changes nothing observable except the wait. Second, the failure mode is \emph{structural, not local} --- a dependency-tracking invariant, of exactly the kind the build-systems literature has been modelling for over a decade \textcite{arxiv1203_2704}, and adjacent to the reasons build durations are predictable at all \textcite{arxiv1712_06796} and why CI failures dominate developer frustration \textcite{arxiv2402_09651}. Nothing about it is peculiar to this project's language or domain, which is what licenses --- carefully --- the extrapolation that follows. On the machine the measurement was taken on, one redundant build dissipated 154{,}728 J.
+
+
+\section{The extrapolation ladder}\label{sec:ladder}
+
+
+Planetary numbers earn distrust because the multiplication is hidden. Here it is, one rung at a time, each with its own evidence grade. A reader who rejects rung 3 can stop at rung 2 and still keep everything above it.
+
+
+\begin{center}\small\rowcolors{2}{rowtint}{white}\begin{tabularx}{\textwidth}{@{}cXXXl@{}}\toprule
+Rung & What & Multiplier & Result & Grade \\\midrule
+0 & One redundant build, our workspace & --- & 214.9\,s wasted, 154{,}728 J on the measured box & \stM \\
+1 & One engineer-year & 9{,}200\,builds$\times$0.40 no-change & 14.3\,kWh + 82.8\,kWh CI $=$ 97.1\,kWh; 252\,h & \stD \\
+2 & One 1{,}000-engineer organisation & $\times$1{,}000 & 97\,MWh; 251{,}876\,h; \$23{,}928{,}178 & \stD \\
+3 & Addressable world population & 30\,M devs $\times$0.35 compiled & 10{,}500{,}000\,engineers & \stA \\
+4 & Top-three share & $\times$20\% & 0.204\,TWh; 97{,}856\,t\,CO$_2$e; 287{,}467\,engineer-years & \stC \\
+\bottomrule\end{tabularx}\end{center}
+
+
+\textbf{The assumptions, stated once.} \stA{} An engineer invokes the inner loop 40 times a day over 230 working days, of which 40\% are no-change invocations; a wait beyond ten seconds triggers a task switch with probability 0.35 costing 90\,s of recovery; CI consumes 2.0 machine-hours per engineer per day at 240\,W with a data-centre PUE of 1.5, of which 50\% is redundant; there are 30 million professional developers worldwide and 35\% of their work runs on ahead-of-time compiled or type-checked toolchains; the grid emits 480\,gCO$_2$/kWh and consumes 1.8\,L of water per kWh; an engineer costs \$95 an hour fully loaded.
+
+\textbf{One assumption is deliberately against us.} The local-loop power figure is 65\,W --- laptop class --- although the measurement itself was taken on a 720\,W server. Using our own instrument's power would multiply the local energy term by 11.1$\times$. We discount our own measurement because most of the world's inner loops do not run on 48-core machines, and because a scenario paper that inflates its own kernel deserves to be disbelieved.
+
+
+\section{The scenario: one, five, and twenty per cent}\label{sec:scenario}
+
+
+\stC{} ``Top three'' is read here as 20\% of the world's compiled build invocations. The one and five per cent rows are included because they are the only rows any real project reaches first, and because a claim that only works at the top of the table is not an argument.
+
+\begin{center}\footnotesize\rowcolors{2}{rowtint}{white}\begin{tabular}{lrrrrrrr}\toprule
+Share & Engineers & TWh/yr & t\,CO$_2$e/yr & ML water & Households & Eng-years/yr & Value/yr \\\midrule
+1\% & 105{,}000 & 0.010 & 4{,}893 & 18 & 2{,}912 & 14{,}373 & \$2.5\,bn \\
+5\% & 525{,}000 & 0.051 & 24{,}464 & 92 & 14{,}562 & 71{,}867 & \$12.6\,bn \\
+20\% & 2{,}100{,}000 & 0.204 & 97{,}856 & 367 & 58{,}247 & 287{,}467 & \$50.2\,bn \\
+\bottomrule\end{tabular}\end{center}
+
+
+\textbf{Now the deflation.} At the top row the recovered electricity is 0.204\,TWh --- \scen{0.00070\%} of world electricity consumption --- and the avoided carbon is 97{,}856\,t\,CO$_2$e, or \scen{0.0132\%} of ICT's estimated footprint and \scen{0.000264\%} of global emissions. Rounded to the precision anyone reports climate policy in, it is zero. Any paper that led with the tonnage would be innumerate, and the literature on software's energy footprint is explicit that estimates at this remove need their methodology stated before their totals \textcite{arxiv2506_09683,arxiv2407_11611}.
+
+\textbf{What the same row says about people.} 287{,}467 engineer-years returned annually, \$50.2\,bn at the stated rate, or 13.7\% of the working life of every engineer in scope. That is not a rounding error in anyone's units. It is, at the top row, the equivalent of hiring a mid-sized nation's software workforce and paying it nothing --- and it arrives without a single behavioural request, which is the property that makes it unusual.
+
+
+For completeness, the two figures a sustainability report would normally lead with: the same electricity carries \scen{367\,ML} of cooling water at the assumed 1.8\,L/kWh, and corresponds to the annual consumption of \scen{58{,}247} households at 3{,}500\,kWh each. Both are included because omitting them would look like selection, and both are subject to the same deflation: they are small, and \S\ref{sec:rebound} may erase them entirely.
+
+
+\section{The rebound, applied to ourselves}\label{sec:rebound}
+
+
+Efficiency gains in computing are routinely re-spent. The Jevons paradox has been given an explicit thermodynamic reading for cloud workloads \textcite{arxiv2411_11540}; the AI environmental debate has been analysed precisely as a rebound argument \textcite{arxiv2501_16548}; measured ML training footprints keep rising \emph{despite} per-unit efficiency gains, which is the rebound observed rather than theorised \textcite{arxiv2510_09022}; sustainable-HCI work argues rebound should be embraced in the model rather than apologised for afterwards \textcite{arxiv2506_14653}; and the materiality of the sector bounds what any efficiency story can deliver \textcite{arxiv2507_19287}. A build system that makes builds nearly free is a textbook candidate: cheaper builds invite more builds, larger matrices, more speculative CI.
+
+
+\stD{} So we apply it to our own headline. Let $\rho$ be the fraction of the recovered machine time immediately re-spent on additional build work.
+
+\begin{center}\small\rowcolors{2}{rowtint}{white}\begin{tabularx}{\textwidth}{@{}lrrrX@{}}\toprule
+$\rho$ & Net TWh/yr & Net t\,CO$_2$e/yr & Eng-years/yr & Verdict \\\midrule
+0\% & 0.204\,TWh & 97{,}856 & 287{,}467 & both stand \\
+50\% & 0.102\,TWh & 48{,}928 & 287{,}467 & both stand \\
+100\% & 0.000\,TWh & 0 & 287{,}467 & energy claim gone; time claim intact \\
+\bottomrule\end{tabularx}\end{center}
+
+
+\textbf{The asymmetry is the whole point.} At $\rho=1$ the energy dividend is exactly zero and the carbon claim disappears with it. The time dividend does not, because re-spending recovered \emph{human} attention on building more software is not a leak in the model --- it is the outcome the model exists to produce. Rebound destroys an energy argument and completes a productivity one. This is why the paper's load-bearing claims are time and correctness, and why the tonnage appears only to be dismissed. A reader who believes $\rho=1$ --- a defensible position on this literature --- loses nothing this paper actually argues.
+
+
+\section{The correctness dividend at scale}\label{sec:correct}
+
+
+\stC{} The same discipline that found the redundant work --- independent verification of what an instrument claims --- has a second output. In the companion paper the measured case was a storage layer that passed its entire unit suite while returning 0.4\% of reads, a suite carrying $\sim$0.001 bits of information about the property anyone cared about. Applying the same arithmetic at scenario scale: 20\% share implies roughly 3{,}150{,}000 releases a year at a team size of 8 and 12 releases per team per year, of which 157{,}500 carry a defect at the assumed 5\% rate. A suite with zero verification yield passes all of them; an independent correctness probe that catches the class 95\% of the time stops 149{,}625.
+
+
+We deliberately do not monetise that number. Escape costs for infrastructure software span orders of magnitude --- from a wasted afternoon to the historical failures catalogued in the formal-methods literature \textcite{arxiv2506_13821} --- and any single dollar figure would be the least defensible line in the paper. The flaky-test literature makes the mechanism concrete from the noise side: ambiguous signals interfere with automated assessment of changes at industrial scale \textcite{arxiv2602_03556}. A build system with top-three share would be the largest single deployment surface for that ambiguity in the world, which is an argument for humility about defaults, not a boast.
+
+
+\section{One microjoule per planet-year}\label{sec:floor}
+
+
+The redundant fraction has an unusual property: because its output is already known, the only physically necessary work is the \emph{decision} that nothing changed. Erasing a bit at $T=300$\,K costs at least $k_BT\ln2 = 2.87\times10^{-21}$\,J \textcite{arxiv1507_07450,arxiv2504_04284}. Comparing one digest per unit across a 170-unit workspace is $43520$ bits, so one such decision has a floor of $1.25\times10^{-16}$\,J. At 20\% share the scenario performs 7{,}728{,}000{,}000 such decisions a year, for a total thermodynamic floor of \derivedv{$9.66\times10^{-7}$\,J} --- about one microjoule, for the entire planet, for a year.
+
+
+\stD{} The same decisions actually consume $1.08\times10^{14}$\,J of local-loop electricity: a factor of $1.12\times10^{20}$ above the floor. The claim needs its scope stated precisely, or it is dishonest: this floor applies \emph{only} to the redundant fraction, where nothing is compiled and no new information is produced. Compiling changed code has a vastly higher and quite legitimate floor. But that is the point --- the waste stream is precisely the part of the bill that physics does not require, and it sits some twenty orders of magnitude above its own minimum. Whatever is expensive about building software, it is not the universe's opinion of the work.
+
+
+\section{The largest lever is a default, not a compiler}\label{sec:default}
+
+
+A large-scale study of 513{,}384 CI builds across 1{,}279 projects found that only 30\% adopt caching at all \textcite{arxiv2601_19146}. That is not a technology gap; it is a \emph{configuration} gap, and it is the most consequential number in this paper.
+
+\stC{} Apply our own CI term to the 70\% of projects that do not cache, across the whole addressable population rather than any one tool's share: \scen{0.609\,TWh} a year --- \scen{3.0$\times$} the entire top-three scenario in \S\ref{sec:scenario}, available today, from tools that already exist, with no adoption of anything we build.
+
+
+We report this because it is the finding a self-interested paper would omit. The lesson generalises past caching: the planetary footprint of a build tool is set less by its peak performance than by what it does when nobody configures it. A tool's defaults are its actual environmental policy. Green-software practice reaches the same conclusion from the field --- the wins that survive are the ones wired into how the system runs by default rather than left to intention \textcite{arxiv2601_09741}, alongside genuinely orthogonal levers such as carbon-aware scheduling and workload placement \textcite{arxiv2405_12582,arxiv2506_10990}, and the observation that ordinary performance bugs carry a carbon cost of their own \textcite{arxiv2401_01782}.
+
+
+\section{What a top-three compiler would owe}\label{sec:duties}
+
+
+If the scenario in \S\ref{sec:scenario} were ever real, the interesting consequence would not be the savings. It would be that the tool had become infrastructure, and infrastructure acquires duties. Stated as commitments a reader could later hold us to:
+
+
+\begin{enumerate}[leftmargin=1.5em,itemsep=3pt]
+\item \textbf{Determinism before speed.} Every performance claim paired with an independent correctness check on the same artifact. A cache that reports its own hit rate is not evidence; this project has the scar to prove it.
+\item \textbf{Cache on by default, and provably free when nothing changed.} The 70\% non-adoption figure is a design failure upstream of every user who did not configure it.
+\item \textbf{Signed, reproducible artifacts.} A build tool at scale is a supply-chain choke point; pipeline poisoning is a demonstrated attack class \textcite{arxiv2601_08995}, end-to-end reproducibility is achievable \textcite{arxiv2206_14606}, and signing's costs are exactly why adoption stalls \textcite{arxiv2510_04964,arxiv2409_05014}. At top-three share those costs stop being optional.
+\item \textbf{No telemetry rent.} Measurement of the tool must not require surveillance of its users. Everything in this paper was measured on the authors' own machines.
+\item \textbf{Published measurement, including the failures.} The instrument that lied is part of the record, not an embarrassment to be pruned from it.
+\item \textbf{Energy reporting with its methodology attached.} Per the state of the art, a total without a stated method is not a measurement \textcite{arxiv2506_09683,arxiv2407_11611} --- and LLM-assisted development is now itself a term in the same budget \textcite{arxiv2505_04521}, as is the cost of automated repair \textcite{arxiv2211_12104}.
+\end{enumerate}
+
+
+\section{What would have to be true}\label{sec:falsify}
+
+
+Six measurements would move this paper's numbers, and four of them could refute it outright. Each is stated as a gate someone could actually run.
+
+
+\begin{center}\small\rowcolors{2}{rowtint}{white}\begin{tabularx}{\textwidth}{@{}lXl@{}}\toprule
+\# & Gate & Effect if it fails \\\midrule
+1 & \textbf{The no-change fraction.} We assume 40\% of inner-loop invocations change nothing. Measure it on a real fleet by logging build inputs. & Linear: the entire local term scales with it. \\
+2 & \textbf{Per-build energy on real hardware.} Ours is one 720\,W box, discounted to 65\,W by assumption. Measure at the wall across representative laptops and CI runners \textcite{arxiv2407_11611}. & Linear, either direction; could move the energy claim by 10$\times$. \\
+3 & \textbf{The redundant CI share.} We assume 50\% of CI machine-time is recomputation. Instrument a large CI estate. & CI is the larger of the two energy terms. \\
+4 & \textbf{Generality of the defect.} Our kernel is one dependency-tracking bug. Sample other toolchains for equivalent no-op inflation. & If it is peculiar to us, rungs 3--4 collapse entirely. \\
+5 & \textbf{The rebound coefficient.} We report $\rho\in\{0,0.5,1\}$ rather than estimating it. Measure build volume before and after a large speedup. & At $\rho=1$ the energy claim is void by construction (\S\ref{sec:rebound}). \\
+6 & \textbf{Population and share.} 30\,M developers, 35\% compiled toolchains, 20\% share are all assumptions with no instrument behind them. & Rung 3 and 4 are scenario-grade for exactly this reason. \\
+\bottomrule\end{tabularx}\end{center}
+
+
+\textbf{What we do not claim.} Not that this is a climate intervention --- \S\ref{sec:scenario} computes it as noise. Not that the scenario share is achievable. Not that redundant build work is the largest waste stream in computing; training and inference are plainly larger and are being measured by others \textcite{arxiv2510_09022,arxiv2501_16548}. Not that removing waste is the same as building well. The claim is narrower and, we think, sturdier: there is a quantity of pure recomputation in the world, it is measurable from one honest instrument outward, most of it is a configuration failure rather than a technical limit, and the resource it wastes that no one gets back is time.
+
+
+\section{Related work}
+\noindent Retrieved by a live arXiv query at generation time; each entry is glossed with the opening claim of its own abstract, unedited.
+
+\begin{itemize}[leftmargin=1.3em,itemsep=2pt]
+\item \textcite{arxiv2407_19901} \emph{Carbon-Efficient Software Design and Development: A Systematic Literature Review} --- The ICT sector, responsible for 2\% of global carbon emissions, is under scrutiny calling for methodologies and tools to design and develop software in an environmentally sustainable-by-design manner.
+\item \textcite{arxiv1307_7037} \emph{Take a break: cloud scheduling optimized for real-time electricity pricing} --- Cloud computing revolutionised the industry with its elastic, on-demand approach to computational resources, but has lead to a tremendous impact on the environment.
+\item \textcite{arxiv2309_09241} \emph{Data Center-Enabled High Altitude Platforms: A Green Computing Alternative} --- Information technology organizations and companies are seeking greener alternatives to traditional terrestrial data centers to mitigate global warming and reduce carbon emissions.
+\item \textcite{arxiv2606_05420} \emph{Assessing the Carbon Emissions and Energy Consumption of U.S. Hyperscale Data Centers} --- The rapid proliferation of hyperscale data centers in the US, mainly driven by the adoption of artificial intelligence, has raised concerns about this industry's environmental footprint.
+\item \textcite{arxiv2506_09683} \emph{Calculating Software's Energy Use and Carbon Emissions: A Survey of the State of Art, Challenges, and the Way Ahead} --- The proliferation of software and AI comes with a hidden risk: its growing energy and carbon footprint.
+\item \textcite{arxiv2407_11611} \emph{Estimating the Energy Footprint of Software Systems: a Primer} --- In Green Software Development, quantifying the energy footprint of a software system is one of the most basic activities.
+\item \textcite{arxiv2410_05460} \emph{It's Not Easy Being Green: On the Energy Efficiency of Programming Languages} --- Does the choice of programming language affect energy consumption? Previous highly visible studies have established associations between certain programming languages and energy consumption.
+\item \textcite{arxiv2411_11540} \emph{The Jevons Paradox In Cloud Computing: A Thermodynamics Perspective} --- How do we explain the simultaneous growth in energy efficiency of cloud computing and its energy consumption? The Jevons paradox provides one perspective of this phenomenon.
+\item \textcite{arxiv2501_16548} \emph{From Efficiency Gains to Rebound Effects: The Problem of Jevons' Paradox in AI's Polarized Environmental Debate} --- As the climate crisis deepens, artificial intelligence has emerged as a contested force: some champion its potential to advance renewable energy, materials discovery, and large-scale emissions monitor.
+\item \textcite{arxiv2510_09022} \emph{The Environmental Impacts of Machine Learning Training Keep Rising Evidencing Rebound Effect} --- Recent Machine Learning approaches have shown increased performance on benchmarks but at the cost of escalating computational demands.
+\item \textcite{arxiv2506_14653} \emph{How Viable are Energy Savings in Smart Homes? A Call to Embrace Rebound Effects in Sustainable HCI} --- As part of global climate action, digital technologies are seen as a key enabler of energy efficiency savings.
+\item \textcite{arxiv2507_19287} \emph{The Case for Time-Shared Computing Resources} --- The environmental impact of Information and Communication Technologies continues to grow, driven notably by increasing usage, rebound effects, and emerging demands.
+\item \textcite{arxiv2601_19146} \emph{The Promise and Reality of Continuous Integration Caching: An Empirical Study of Travis CI Builds} --- Continuous Integration provides early feedback by automatically building software, but long build durations can hinder developer productivity.
+\item \textcite{arxiv2510_20041} \emph{The Cost of Downgrading Build Systems: A Case Study of Kubernetes} --- Since developers invoke the build system frequently, its performance can impact productivity.
+\item \textcite{arxiv1712_06796} \emph{Built to Last or Built Too Fast? Evaluating Prediction Models for Build Times} --- Automated builds are integral to Continuous Integration.
+\item \textcite{arxiv1203_2704} \emph{A model and framework for reliable build systems} --- Reliable and fast builds are essential for rapid turnaround during development and testing.
+\item \textcite{arxiv2402_09651} \emph{Practitioners' Challenges and Perceptions of CI Build Failure Predictions at Atlassian} --- Continuous Integration build failures could significantly impact the software development process and teams, such as delaying the release of new features and reducing developers' productivity.
+\item \textcite{arxiv2506_13821} \emph{Software is infrastructure: failures, successes, costs, and the case for formal verification} --- In this chapter we outline the role that software has in modern society, along with the staggering costs of poor software quality.
+\item \textcite{arxiv2602_03556} \emph{Flaky Tests in a Large Industrial Database Management System: An Empirical Study of Fixed Issue Reports for SAP HANA} --- Flaky tests yield different results when executed multiple times for the same version of the source code.
+\item \textcite{arxiv2601_08995} \emph{Build Code is Still Code: Finding the Antidote for Pipeline Poisoning} --- Open source C code underpins society's computing infrastructure.
+\item \textcite{arxiv2409_05014} \emph{Analyzing Challenges in Deployment of the SLSA Framework for Software Supply Chain Security} --- In 2023, Sonatype reported a 200\% increase in software supply chain attacks, including major build infrastructure attacks.
+\item \textcite{arxiv2510_04964} \emph{Why Software Signing (Still) Matters: Trust Boundaries in the Software Supply Chain} --- Software signing provides a formal mechanism for provenance by ensuring artifact integrity and verifying producer identity.
+\item \textcite{arxiv2206_14606} \emph{Building a Secure Software Supply Chain with GNU Guix} --- The software supply chain designates the series of steps taken to go from source code published by developers to executables running on users' computers.
+\item \textcite{arxiv2401_01782} \emph{Profiling the carbon footprint of performance bugs} --- Much debate nowadays is devoted to the impacts of modern information and communication technology on global carbon emissions.
+\item \textcite{arxiv2601_09741} \emph{Putting green software principles into practice} --- The need and theoretical methods for measuring and reducing CO2 emitted by computing systems are well understood, but real-world examples are still limited.
+\item \textcite{arxiv2405_12582} \emph{Carbon-aware Software Services} --- The significant carbon footprint of the ICT sector calls for methodologies to contain carbon emissions of running software.
+\item \textcite{arxiv2506_10990} \emph{On the Effectiveness of the 'Follow-the-Sun' Strategy in Mitigating the Carbon Footprint of AI in Cloud Instances} --- Follow-the-Sun is a theoretical computational model aimed at minimizing the carbon footprint of computer workloads.
+\item \textcite{arxiv2505_04521} \emph{Comparative Analysis of Carbon Footprint in Manual vs. LLM-Assisted Code Development} --- Large Language Models have significantly transformed software development.
+\item \textcite{arxiv2211_12104} \emph{Energy Consumption of Automated Program Repair} --- Automated program repair aims to automatize the process of repairing software bugs in order to reduce the cost of maintaining software programs.
+\item \textcite{arxiv2504_04284} \emph{Landauer-Limited Dissipation in Quantum-Flux-Parametron Logic} --- The Landauer limit is to irreversible logic what the Carnot cycle is to heat engines.
+\item \textcite{arxiv1507_07450} \emph{Reset and switch protocols at Landauer limit in a graphene buckled ribbon} --- Heat produced during a reset operation is meant to show a fundamental bound known as the Landauer limit.
+\end{itemize}
+
+
+\section*{Sources --- the measured record behind the kernel}
+\label{sec:sources}
+\small
+\begin{itemize}[leftmargin=1.2em,itemsep=1pt]
+\item \emph{The Legibility Dividend: An Executive Model of Verifiable Software Production}, v0 (2026-07-26) --- the immediate predecessor: the same kernel priced for one organisation, and the source of the Verification Information Yield instrument used in \S\ref{sec:correct}. \url{https://quillon.xyz/downloads/SIGIL_LEGIBILITY_DIVIDEND_v0.pdf}.
+\item \emph{The Measurement Book: Laws of the SIGIL Graph --- the measured record}, v0 (2026-07-25) --- ARC-15 is the build-latency arc measured in \S\ref{sec:kernel}; its Rule 0 is why this paper states which rung every number sits on. \url{https://quillon.xyz/downloads/SIGIL_MEASUREMENT_BOOK_v0.pdf}.
+\item \emph{The SIGIL Failure Atlas}, v0 (2026-07-23) --- the incident taxonomy, including the measurement class that contains the instrument which lied. \url{https://quillon.xyz/downloads/SIGIL_FAILURE_ATLAS_v0.pdf}.
+\item \emph{The Thermodynamic Ledger}, v0 (2026-07-24) --- the first paper in this computed-at-generation-time series; the Landauer treatment in \S\ref{sec:floor} follows its method. \url{https://quillon.xyz/downloads/SIGIL_THERMODYNAMIC_LEDGER_v0.pdf}.
+\item \emph{What the Chain Knows --- The Philosophy of the SIGIL Graph}, v0.3 (2026-07-22) --- the evidence-grading discipline this paper applies to its own extrapolation. \url{https://quillon.xyz/downloads/SIGIL_PHILOSOPHY_v0.pdf}.
+\end{itemize}
+
+
+\section{Reproducibility}
+This document is the output of a Rust binary in the Flux tree (\texttt{flux-arxiv-latex/}\allowbreak\texttt{src/bin/}\allowbreak\texttt{idle\_machine.rs}), built and run through the \texttt{fluxc} orchestrator. Every figure above is computed at generation time; the measured constants and the assumed multipliers are declared once, at the top of the program, as named variables in two clearly separated blocks. The Landauer floor uses \texttt{flux-science}'s CODATA Boltzmann constant ($k_B=1.38\times10^{-23}$\,J/K). The bibliography is generated from a live arXiv sweep parsed by the same crate. To disagree with this paper, change a variable and recompile: the argument is a program, and its conclusions are functions of inputs you can see. That is the only form in which a planetary extrapolation deserves to be published.
+
+
+\section{Coda: the machine that produces nothing}
+There is something absurd, and worth sitting with, about the scale of what has been described here. Every day, a very large number of extremely fast machines are asked a question to which the answer is already recorded, and they answer it slowly, by redoing the work. Physics charges about a microjoule a year for the whole planet's worth of that question. We pay it in gigawatt-hours and, far more expensively, in the attention of the people waiting.
+
+
+The temptation with a number like that is to make it a crusade. We have tried instead to make it legible, because the honest version is more useful than the heroic one: the carbon is noise, the rebound may eat the electricity entirely, and the largest available lever is not our compiler but a checkbox that most projects never tick. What is left when all of that is subtracted is still a real thing --- hundreds of thousands of engineer-years a year of human life spent watching a progress bar recompute a known answer, and a class of verification failure that the same discipline happens to catch on the way past.
+
+
+A compiler will not save the world. But a tool used by a large fraction of the world has one obligation it cannot delegate: to not waste what it is given. That is a smaller promise than the title of this paper implies, and it is the one we can keep --- and, unusually for a promise, one whose keeping is measurable by anyone who cares to rerun the program.
+
+
+\begin{thebibliography}{99}
+\bibitem{arxiv2407_19901} Ornela Danushi, Stefano Forti, Jacopo Soldani: \emph{Carbon-Efficient Software Design and Development: A Systematic Literature Review}. arXiv:2407.19901 (2024). \url{https://arxiv.org/abs/2407.19901}
+\bibitem{arxiv1307_7037} Drazen Lucanin, Ivona Brandic: \emph{Take a break: cloud scheduling optimized for real-time electricity pricing}. arXiv:1307.7037 (2013). \url{https://arxiv.org/abs/1307.7037}
+\bibitem{arxiv2309_09241} Wiem Abderrahim, Osama Amin, Basem Shihada: \emph{Data Center-Enabled High Altitude Platforms: A Green Computing Alternative}. arXiv:2309.09241 (2023). \url{https://arxiv.org/abs/2309.09241}
+\bibitem{arxiv2606_05420} Gianluca Guidi, Francesca Dominici, Tiziano Squartini, et al.: \emph{Assessing the Carbon Emissions and Energy Consumption of U.S. Hyperscale Data Centers}. arXiv:2606.05420 (2026). \url{https://arxiv.org/abs/2606.05420}
+\bibitem{arxiv2506_09683} Priyavanshi Pathania, Nikhil Bamby, Rohit Mehra, et al.: \emph{Calculating Software's Energy Use and Carbon Emissions: A Survey of the State of Art, Challenges, and the Way Ahead}. arXiv:2506.09683 (2025). \url{https://arxiv.org/abs/2506.09683}
+\bibitem{arxiv2407_11611} Fernando Castor: \emph{Estimating the Energy Footprint of Software Systems: a Primer}. arXiv:2407.11611 (2024). \url{https://arxiv.org/abs/2407.11611}
+\bibitem{arxiv2410_05460} Nicolas van Kempen, Hyuk-Je Kwon, Dung Tuan Nguyen, et al.: \emph{It's Not Easy Being Green: On the Energy Efficiency of Programming Languages}. arXiv:2410.05460 (2024). \url{https://arxiv.org/abs/2410.05460}
+\bibitem{arxiv2411_11540} Prateek Sharma: \emph{The Jevons Paradox In Cloud Computing: A Thermodynamics Perspective}. arXiv:2411.11540 (2024). \url{https://arxiv.org/abs/2411.11540}
+\bibitem{arxiv2501_16548} Alexandra Sasha Luccioni, Emma Strubell, Kate Crawford: \emph{From Efficiency Gains to Rebound Effects: The Problem of Jevons' Paradox in AI's Polarized Environmental Debate}. arXiv:2501.16548 (2025). \url{https://arxiv.org/abs/2501.16548}
+\bibitem{arxiv2510_09022} Clement Morand, Anne-Laure Ligozat, Aurelie Neveol: \emph{The Environmental Impacts of Machine Learning Training Keep Rising Evidencing Rebound Effect}. arXiv:2510.09022 (2025). \url{https://arxiv.org/abs/2510.09022}
+\bibitem{arxiv2506_14653} Christina Bremer, Harshit Gujral, Michelle Lin, et al.: \emph{How Viable are Energy Savings in Smart Homes? A Call to Embrace Rebound Effects in Sustainable HCI}. arXiv:2506.14653 (2025). \url{https://arxiv.org/abs/2506.14653}
+\bibitem{arxiv2507_19287} Pierre Jacquet, Adrien Luxey-Bitri: \emph{The Case for Time-Shared Computing Resources}. arXiv:2507.19287 (2025). \url{https://arxiv.org/abs/2507.19287}
+\bibitem{arxiv2601_19146} Taher A. Ghaleb, Daniel Alencar da Costa, Ying Zou: \emph{The Promise and Reality of Continuous Integration Caching: An Empirical Study of Travis CI Builds}. arXiv:2601.19146 (2026). \url{https://arxiv.org/abs/2601.19146}
+\bibitem{arxiv2510_20041} Gareema Ranjan, Mahmoud Alfadel, Gengyi Sun, et al.: \emph{The Cost of Downgrading Build Systems: A Case Study of Kubernetes}. arXiv:2510.20041 (2025). \url{https://arxiv.org/abs/2510.20041}
+\bibitem{arxiv1712_06796} Ekaba Bisong, Eric Tran, Olga Baysal: \emph{Built to Last or Built Too Fast? Evaluating Prediction Models for Build Times}. arXiv:1712.06796 (2017). \url{https://arxiv.org/abs/1712.06796}
+\bibitem{arxiv1203_2704} Derrick Coetzee, Anand Bhaskar, George Necula: \emph{A model and framework for reliable build systems}. arXiv:1203.2704 (2012). \url{https://arxiv.org/abs/1203.2704}
+\bibitem{arxiv2402_09651} Yang Hong, Chakkrit Tantithamthavorn, Jirat Pasuksmit, et al.: \emph{Practitioners' Challenges and Perceptions of CI Build Failure Predictions at Atlassian}. arXiv:2402.09651 (2024). \url{https://arxiv.org/abs/2402.09651}
+\bibitem{arxiv2506_13821} Giovanni Bernardi, Adrian Francalanza, Marco Peressotti, et al.: \emph{Software is infrastructure: failures, successes, costs, and the case for formal verification}. arXiv:2506.13821 (2025). \url{https://arxiv.org/abs/2506.13821}
+\bibitem{arxiv2602_03556} Alexander Berndt, Thomas Bach, Sebastian Baltes: \emph{Flaky Tests in a Large Industrial Database Management System: An Empirical Study of Fixed Issue Reports for SAP HANA}. arXiv:2602.03556 (2026). \url{https://arxiv.org/abs/2602.03556}
+\bibitem{arxiv2601_08995} Brent Pappas, Paul Gazzillo: \emph{Build Code is Still Code: Finding the Antidote for Pipeline Poisoning}. arXiv:2601.08995 (2026). \url{https://arxiv.org/abs/2601.08995}
+\bibitem{arxiv2409_05014} Mahzabin Tamanna, Sivana Hamer, Mindy Tran, et al.: \emph{Analyzing Challenges in Deployment of the SLSA Framework for Software Supply Chain Security}. arXiv:2409.05014 (2024). \url{https://arxiv.org/abs/2409.05014}
+\bibitem{arxiv2510_04964} Kelechi G. Kalu, James C. Davis: \emph{Why Software Signing (Still) Matters: Trust Boundaries in the Software Supply Chain}. arXiv:2510.04964 (2025). \url{https://arxiv.org/abs/2510.04964}
+\bibitem{arxiv2206_14606} Ludovic Courtes: \emph{Building a Secure Software Supply Chain with GNU Guix}. arXiv:2206.14606 (2022). \url{https://arxiv.org/abs/2206.14606}
+\bibitem{arxiv2401_01782} Iztok Fister, Dusan Fister, Vili Podgorelec, et al.: \emph{Profiling the carbon footprint of performance bugs}. arXiv:2401.01782 (2024). \url{https://arxiv.org/abs/2401.01782}
+\bibitem{arxiv2601_09741} James Uther: \emph{Putting green software principles into practice}. arXiv:2601.09741 (2026). \url{https://arxiv.org/abs/2601.09741}
+\bibitem{arxiv2405_12582} Stefano Forti, Jacopo Soldani, Antonio Brogi: \emph{Carbon-aware Software Services}. arXiv:2405.12582 (2024). \url{https://arxiv.org/abs/2405.12582}
+\bibitem{arxiv2506_10990} Roberto Vergallo, Luis Cruz, Alessio Errico, et al.: \emph{On the Effectiveness of the 'Follow-the-Sun' Strategy in Mitigating the Carbon Footprint of AI in Cloud Instances}. arXiv:2506.10990 (2025). \url{https://arxiv.org/abs/2506.10990}
+\bibitem{arxiv2505_04521} Kuen Sum Cheung, Mayuri Kaul, Gunel Jahangirova, et al.: \emph{Comparative Analysis of Carbon Footprint in Manual vs. LLM-Assisted Code Development}. arXiv:2505.04521 (2025). \url{https://arxiv.org/abs/2505.04521}
+\bibitem{arxiv2211_12104} Matias Martinez, Silverio Martinez-Fernandez, Xavier Franch: \emph{Energy Consumption of Automated Program Repair}. arXiv:2211.12104 (2022). \url{https://arxiv.org/abs/2211.12104}
+\bibitem{arxiv2504_04284} Quentin Herr: \emph{Landauer-Limited Dissipation in Quantum-Flux-Parametron Logic}. arXiv:2504.04284 (2025). \url{https://arxiv.org/abs/2504.04284}
+\bibitem{arxiv1507_07450} I. Neri, M. Lopez-Suarez, D. Chiuchiu, et al.: \emph{Reset and switch protocols at Landauer limit in a graphene buckled ribbon}. arXiv:1507.07450 (2015). \url{https://arxiv.org/abs/1507.07450}
+\end{thebibliography}
+
+\end{document}

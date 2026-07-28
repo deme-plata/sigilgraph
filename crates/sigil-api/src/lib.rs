@@ -26,13 +26,26 @@ use serde::{Deserialize, Serialize};
 use sigil_state::{SigilState, WalletId, MAX_SUPPLY, NATIVE};
 use sigil_tx::{Mempool, SignedTx};
 
+pub mod mining;
+use mining::{MiningBridge, SubmitOutcome};
+
 /// Shared braid state the API reads/writes. `state` is published by the producer
 /// after each block-apply (a consistent read snapshot); `mempool` is the same
-/// Arc the producer pulls txs from when it mints the next block.
+/// Arc the producer pulls txs from when it mints the next block; `mining` is the
+/// seam the producer publishes its frontier into and pops verified solves from.
 #[derive(Clone)]
 pub struct AppState {
     pub mempool: Arc<Mutex<Mempool>>,
     pub state: Arc<RwLock<SigilState>>,
+    pub mining: Arc<MiningBridge>,
+}
+
+impl AppState {
+    /// Build the shared state from the producer's mempool + state handles, with
+    /// a fresh mining bridge.
+    pub fn new(mempool: Arc<Mutex<Mempool>>, state: Arc<RwLock<SigilState>>) -> Self {
+        Self { mempool, state, mining: Arc::new(MiningBridge::new()) }
+    }
 }
 
 /// Uniform response envelope (Quillon `ApiResponse<T>`): every endpoint returns
@@ -61,7 +74,7 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
-fn hex32(s: &str) -> Option<WalletId> {
+pub(crate) fn hex32(s: &str) -> Option<WalletId> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     if s.len() != 64 { return None; }
     let mut out = [0u8; 32];
@@ -193,6 +206,85 @@ pub async fn tx_status(
     })
 }
 
+// ── mining on the braid ─────────────────────────────────────────────────────
+//
+// The same `flux-miner` challenge/submit contract `sigil-rpcd` serves, bound to
+// the braid frontier instead of a separate linear chain. An existing miner needs
+// only a new URL. Wire-compatible paths are mounted alongside the `/v1/` ones so
+// a rig configured for `/api/v1/mining/*` works unchanged.
+
+#[derive(Debug, Deserialize)]
+pub struct ChallengeQuery {
+    /// 64-hex miner wallet (canonical lowercase — the header commits to it).
+    pub wallet: Option<String>,
+    /// Self-reported Lane-A hashes/s; summed across live miners into `net_hps`.
+    pub hps: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MinersResponse {
+    pub height: Option<u64>,
+    pub net_hps: f64,
+    pub live_miners: usize,
+    pub blocks_accepted: u64,
+    pub shares_accepted: u64,
+    pub queued_solves: usize,
+    pub rejects: Vec<(String, u64)>,
+}
+
+#[flux_api_macros::api(GET, "/v1/mining/challenge", summary = "Dual-lane challenge bound to the braid frontier")]
+pub async fn mining_challenge(
+    State(st): State<AppState>,
+    Query(q): Query<ChallengeQuery>,
+) -> Json<ApiResponse<flux_miner::client::Challenge>> {
+    let wallet = q.wallet.as_deref().and_then(hex32);
+    if let Some(hps) = q.hps {
+        st.mining.report_hps(wallet, Some(hps), now_ms());
+    }
+    match st.mining.challenge_for(wallet, now_ms()) {
+        Some(c) => ApiResponse::ok(c),
+        None => ApiResponse::err(
+            "no mineable frontier — this node is not producing braid blocks yet",
+        ),
+    }
+}
+
+#[flux_api_macros::api(POST, "/v1/mining/submit", summary = "Submit a solved dual-lane share; a full solve mints a braid block")]
+pub async fn mining_submit(
+    State(st): State<AppState>,
+    Json(sub): Json<flux_miner::client::Submission>,
+) -> Json<ApiResponse<flux_miner::client::SubmitResult>> {
+    use flux_miner::client::SubmitResult;
+    let result = match st.mining.submit(&sub) {
+        SubmitOutcome::Block { .. } => {
+            SubmitResult { accepted: true, reason: None, share: false }
+        }
+        SubmitOutcome::Share { .. } => {
+            SubmitResult { accepted: true, reason: None, share: true }
+        }
+        SubmitOutcome::Rejected { kind, detail } => SubmitResult {
+            accepted: false,
+            reason: Some(format!("{}: {}", kind.as_str(), detail)),
+            share: false,
+        },
+    };
+    ApiResponse::ok(result)
+}
+
+#[flux_api_macros::api(GET, "/v1/mining/miners", summary = "Live mining power and accept/reject counters")]
+pub async fn mining_miners(State(st): State<AppState>) -> Json<ApiResponse<MinersResponse>> {
+    let (net_hps, live_miners, blocks, shares, rejects) = st.mining.stats(now_ms());
+    ApiResponse::ok(MinersResponse {
+        height: st.mining.tip().map(|t| t.height),
+        net_hps,
+        live_miners,
+        blocks_accepted: blocks,
+        shares_accepted: shares,
+        queued_solves: st.mining.queued_solves(),
+        rejects,
+    })
+}
+
 /// Build the money router with tower middleware tuned for a money workload
 /// (Quillon's stack: concurrency cap, timeout, permissive CORS, body limit).
 pub fn router(state: AppState) -> Router {
@@ -203,6 +295,14 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/supply", get(supply))
         .route("/v1/transactions", post(submit_transaction))
         .route("/v1/transactions/:hash", get(tx_status))
+        .route("/v1/mining/challenge", get(mining_challenge))
+        .route("/v1/mining/submit", post(mining_submit))
+        .route("/v1/mining/miners", get(mining_miners))
+        // Wire-compatible aliases: a rig pointed at the rpcd paths keeps working
+        // when its URL moves to the braid node.
+        .route("/api/v1/mining/challenge", get(mining_challenge))
+        .route("/api/v1/mining/submit", post(mining_submit))
+        .route("/api/v1/mining/miners", get(mining_miners))
         .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024))
         .layer(tower_http::timeout::TimeoutLayer::new(Duration::from_secs(30)))
         .layer(CorsLayer::permissive())
@@ -221,10 +321,10 @@ mod tests {
     use super::*;
 
     fn state() -> AppState {
-        AppState {
-            mempool: Arc::new(Mutex::new(Mempool::new())),
-            state: Arc::new(RwLock::new(SigilState::new())),
-        }
+        AppState::new(
+            Arc::new(Mutex::new(Mempool::new())),
+            Arc::new(RwLock::new(SigilState::new())),
+        )
     }
 
     /// Fund a wallet through the public chokepoint (the only external path).

@@ -130,7 +130,27 @@ pub fn build_block_body(
     reward: Option<u128>,
     txs: &[SignedTx],
 ) -> (StateTransition, StateRoots, Vec<sigil_events::SigilEvent>, Vec<SignedTx>) {
-    let producer = producer_wallet();
+    build_block_body_for(state, height, reward, txs, producer_wallet())
+}
+
+/// [`build_block_body`] with an EXPLICIT coinbase beneficiary — the mining path.
+/// When a braid block is minted for a verified dual-lane solve, the reward
+/// belongs to the miner who did the work, not to the node's configured producer
+/// wallet. The beneficiary is a consequence of the block body (a `SetBalance`
+/// mutation), so followers re-apply it verbatim and the root-match holds; and it
+/// is independently checkable, because the same wallet is committed in the
+/// header's `producer` field, which is what the proof-of-work binds to.
+///
+/// Pool payout note: with `SIGIL_SHARE_EASE_BITS=0` (the default) there are no
+/// sub-difficulty shares, so winner-takes-all is exactly correct. Proportional
+/// splitting over a share window lands with pool mode.
+pub fn build_block_body_for(
+    state: &SigilState,
+    height: u64,
+    reward: Option<u128>,
+    txs: &[SignedTx],
+    producer: WalletId,
+) -> (StateTransition, StateRoots, Vec<sigil_events::SigilEvent>, Vec<SignedTx>) {
     let mut work = state.clone();
     let mut mutations: Vec<StateMutation> = Vec::new();
     let mut events: Vec<sigil_events::SigilEvent> = Vec::new();

@@ -3,7 +3,11 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "5.0.0"
+# v5.1.0: mining on the braid — the dual-lane PoW gate (Φ BLAKE4 + Ω VDF) binds
+# to the braid frontier, so a braid block can be minted only for verified work
+# and the coinbase pays the miner who did it. Additive: without
+# SIGIL_MINING_GATED=1 production is unchanged.
+version = "5.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/flux-lang/sigil"

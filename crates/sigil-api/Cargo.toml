@@ -19,6 +19,16 @@ blake3 = { workspace = true }
 sigil-state = { path = "../sigil-state" }
 sigil-tx = { path = "../sigil-tx" }
 sigil-emission = { path = "../sigil-emission" }
+# P1 mining-onto-the-braid: the reqwest-free verification core (Challenge /
+# Submission / check_submission) — the same one gate sigil-rpcd uses, so every
+# existing miner speaks to the braid unchanged.
+# Declared by PATH, not `workspace = true`: the workspace entry does not set
+# `default-features`, and cargo then IGNORES a per-crate `default-features =
+# false` (it warns, then links the full default set — reqwest, ratatui, the
+# lot). Inheriting here would silently pull an HTTP client and a TUI into the
+# node's money API. The path form is the only one that actually holds the line.
+flux-miner = { path = "../flux-miner", default-features = false }
+flux-vdf = { workspace = true }
 
 # flux-api: annotate handlers with #[api(...)] → OpenAPI 3.1 + TS/Py/Rust/Go SDKs.
 flux-api = { path = "../../../flux/crates/flux-api" }

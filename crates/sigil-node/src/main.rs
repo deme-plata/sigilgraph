@@ -603,18 +603,36 @@ fn run_start() -> Result<()> {
         // — balance / supply / signed-send / tx-status. Shares this producer's
         // mempool + a published state snapshot. Supersedes rpcd; gated by
         // SIGIL_MONEY_API=<addr> (e.g. 0.0.0.0:8181).
+        // P1 mining-onto-the-braid: the bridge the producer publishes its frontier
+        // into and pops verified dual-lane solves from. Always constructed (cheap,
+        // inert without a producer); the API exposes it, and `SIGIL_MINING_GATED=1`
+        // makes block production wait on real work.
+        let mining_bridge = Arc::new(sigil_api::mining::MiningBridge::new());
         let money_state: Option<Arc<std::sync::RwLock<SigilState>>> =
             std::env::var("SIGIL_MONEY_API").ok().filter(|s| !s.is_empty()).map(|addr| {
                 let shared = Arc::new(std::sync::RwLock::new(chain.state_snapshot()));
-                let app = sigil_api::AppState { mempool: Arc::clone(&mempool), state: Arc::clone(&shared) };
+                let app = sigil_api::AppState {
+                    mempool: Arc::clone(&mempool),
+                    state: Arc::clone(&shared),
+                    mining: Arc::clone(&mining_bridge),
+                };
                 tokio::spawn(async move {
                     if let Err(e) = sigil_api::serve(&addr, app).await {
                         eprintln!("\u{26a0} sigil-api serve failed: {e}");
                     }
                 });
-                eprintln!("\u{1f4b0} sigil-api money API on {} — /v1/{{balance,supply,transactions}}", std::env::var("SIGIL_MONEY_API").unwrap_or_default());
+                eprintln!("\u{1f4b0} sigil-api money API on {} — /v1/{{balance,supply,transactions,mining/*}}", std::env::var("SIGIL_MONEY_API").unwrap_or_default());
                 shared
             });
+        // When gated, a braid block is minted ONLY for a verified dual-lane solve —
+        // the braid stops being a free-running dyno and starts costing power+time.
+        let mining_gated = std::env::var("SIGIL_MINING_GATED")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+        if mining_gated {
+            eprintln!("\u{26cf} MINING-GATED production — blocks mint only on a verified \
+                dual-lane solve (\u{03a6} BLAKE4 {} bits + \u{03a9} VDF t={})",
+                sigil_api::mining::blake4_bits(), sigil_api::mining::vdf_t());
+        }
         // ── adaptive block-rate governor (demand-responsive; SIGIL_RATE_ADAPTIVE=1) ──
         // Idle -> SIGIL_RATE_MIN (heartbeat, no wasted empty blocks); mempool backlog
         // raises the rate to bound tx-inclusion latency, clamped to SIGIL_RATE_MAX.
@@ -848,6 +866,23 @@ fn run_start() -> Result<()> {
                         None if dag_mode => peer_tips.iter().cloned().collect(),
                         None => Vec::new(),
                     };
+                    // P1: publish the frontier miners must bind their work to.
+                    // This is the parent THIS block will carry, so a solve issued
+                    // now is valid for exactly this block and no other.
+                    mining_bridge.publish_tip(mint_ref.height(), mint_ref.parent_hash());
+                    // Gated production: mint only when a verified solve is waiting,
+                    // and only if it was solved against the CURRENT frontier — a
+                    // solve for a parent we've since moved off is stale work.
+                    let solve: Option<sigil_api::mining::AcceptedSolve> = if mining_gated {
+                        match mining_bridge.take_solve() {
+                            Some(s) if s.parent_hash == mint_ref.parent_hash()
+                                    && s.height == mint_ref.height() => Some(s),
+                            Some(_) => continue,  // stale solve — drop, wait for work on this frontier
+                            None => continue,     // no work yet — the braid idles, as PoW should
+                        }
+                    } else {
+                        None
+                    };
                     // pull verify-once txs (already verified at mempool ingest)
                     let block_txs: Vec<SignedTx> =
                         if txgen > 0 { mempool.lock().unwrap().pull(txgen) } else { Vec::new() };
@@ -859,7 +894,7 @@ fn run_start() -> Result<()> {
                         let supply = mint_ref.state_snapshot().native_supply();
                         c.calculate_block_reward(now_secs, supply)
                     });
-                    match mint_next_block(mint_ref, mp, &block_txs, reward_override) {
+                    match mint_next_block(mint_ref, mp, &block_txs, reward_override, solve.as_ref()) {
                         Ok(block) => {
                             let h = block.header.height;
                             let bhash = block.hash();
@@ -2338,10 +2373,21 @@ fn mint_next_block(
     merge_parents: Vec<BlockHash>,
     txs: &[SignedTx],
     reward_override: Option<u128>,
+    solve: Option<&sigil_api::mining::AcceptedSolve>,
 ) -> Result<Block> {
     let height = chain.height();
     let parent = chain.parent_hash();
-    let nonce = SqiSignature::from_array([0u8; SQISIGN_L5_LEN]);
+    // P1 mining-onto-the-braid: when this block is minted for a verified
+    // dual-lane solve, the 292-byte nonce field carries the winning
+    // (nonce ‖ blake4_hash) — the same carrier layout the ledger header uses —
+    // and the real Wesolowski proof rides in `vdf_proof`. A follower rebuilds
+    // the challenge from (parent_hash, height, producer) and re-verifies BOTH
+    // lanes: `sigil_api::mining::verify_header_pow`. Without a solve the fields
+    // stay zeroed (the free-running dyno, unchanged).
+    let nonce = match solve {
+        Some(s) => SqiSignature::from_array(sigil_api::mining::pack_nonce_carrier(s.nonce, s.blake4_hash)),
+        None => SqiSignature::from_array([0u8; SQISIGN_L5_LEN]),
+    };
     // vdf_input MUST satisfy header.precheck: BLAKE3(parent || nonce.0).
     let mut h = blake3::Hasher::new();
     h.update(&parent);
@@ -2360,8 +2406,11 @@ fn mint_next_block(
     let coinbase_on = std::env::var("SIGIL_COINBASE").map(|v| v != "0").unwrap_or(true);
     let state = chain.state_snapshot();
     let reward = if coinbase_on { reward_override } else { Some(0u128) };
+    // Mined block → the reward belongs to the miner who solved it; otherwise the
+    // node's configured producer wallet.
+    let beneficiary = solve.map(|s| s.wallet).unwrap_or_else(coinbase::producer_wallet);
     let (transition, roots, block_events, included_txs) =
-        coinbase::build_block_body(&state, height, reward, txs);
+        coinbase::build_block_body_for(&state, height, reward, txs, beneficiary);
     // Commit the verify-once txs: a sequential BLAKE3 root over their intent
     // hashes + the count. The signatures were verified ONCE at mempool ingest;
     // the producer-sig over this header binds the producer to this exact set.
@@ -2383,8 +2432,11 @@ fn mint_next_block(
             .unwrap_or(0),
         nonce_sqisign: nonce,
         vdf_input,
-        vdf_proof: WesolowskiProof { y: vec![], pi: vec![], t: 0 },
-        difficulty: 0,
+        vdf_proof: match solve {
+            Some(s) => WesolowskiProof { y: s.vdf.y.clone(), pi: s.vdf.pi.clone(), t: s.vdf.t },
+            None => WesolowskiProof { y: vec![], pi: vec![], t: 0 },
+        },
+        difficulty: solve.map(|s| s.bits as u64).unwrap_or(0),
         wallet_state_root: roots.wallet_state_root,
         dex_state_root: roots.dex_state_root,
         event_log_root: roots.event_log_root,
@@ -2399,7 +2451,9 @@ fn mint_next_block(
             settle_tx: None,
         },
         sig_scheme: SigScheme::SqiSign5,
-        producer: [0u8; 32],
+        // The miner's wallet — the work is bound to it (the header the miner
+        // hashed commits to this exact wallet), so it can't be re-pointed.
+        producer: solve.map(|s| s.wallet).unwrap_or([0u8; 32]),
         producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
     };
     Ok(Block { header, transition, events: block_events })
@@ -3018,7 +3072,7 @@ mod dag_wiring_tests {
         let mut blocks = vec![g.clone()];
         builder.apply(g).expect("apply genesis");
         for _ in 0..2 {
-            let b = mint_next_block(&builder, vec![], &[], None).expect("mint");
+            let b = mint_next_block(&builder, vec![], &[], None, None).expect("mint");
             blocks.push(b.clone());
             builder.apply(b).expect("apply");
         }

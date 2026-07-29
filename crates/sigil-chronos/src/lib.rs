@@ -25,6 +25,7 @@
 
 #![warn(missing_docs)]
 
+pub mod boundary;
 pub mod driver;
 pub mod market;
 pub mod multiverse;
@@ -56,6 +57,44 @@ use sigil_tx::{apply_tx, batch_into_transition, SigilTx, SignedTx, NATIVE};
 /// Envelope payload tags. First byte of every `Envelope.payload`.
 const TAG_TX: u8 = 0;
 const TAG_BLOCK: u8 = 1;
+
+/// Byte layout of [`SimNode::snapshot`] for [`SigilSimNode`].
+///
+/// Named so that consumers — notably [`crate::boundary::settlement_view`] —
+/// can project out sub-views instead of hardcoding offsets. Any change to
+/// `snapshot()` must move these in lockstep; `snapshot_layout_is_stable`
+/// (in the boundary tests) pins the total length.
+pub mod snap {
+    /// `next_height: u64` LE.
+    pub const HEIGHT: std::ops::Range<usize> = 0..8;
+    /// `parent_hash: [u8; 32]` — order-DEPENDENT (block contents encode order).
+    pub const PARENT_HASH: std::ops::Range<usize> = 8..40;
+    /// `blocks_applied: u64` LE.
+    pub const BLOCKS_APPLIED: std::ops::Range<usize> = 40..48;
+    /// `divergence_count: u64` LE.
+    pub const DIVERGENCE_COUNT: std::ops::Range<usize> = 48..56;
+    /// `wallet_state_root` — order-INVARIANT for a commutative tx set.
+    pub const WALLET_ROOT: std::ops::Range<usize> = 56..88;
+    /// `dex_state_root`.
+    pub const DEX_ROOT: std::ops::Range<usize> = 88..120;
+    /// `event_log_root`.
+    ///
+    /// ⚠️ MEASURED 2026-07-29: this is **invariant at snapshot time**, and not
+    /// because ordering doesn't affect it — because it is a root over the
+    /// *currently-open* block's events, which `commit_state_transition` clears
+    /// on every commit (see `event_log_root_clears_after_commit` in
+    /// sigil-state). A snapshot taken between blocks therefore always sees the
+    /// empty-log root. It commits to nothing historical and is worthless as a
+    /// divergence signal here. Do not read agreement on this field as evidence
+    /// that two nodes saw the same event history.
+    pub const EVENT_ROOT: std::ops::Range<usize> = 120..152;
+    /// `contract_state_root`.
+    pub const CONTRACT_ROOT: std::ops::Range<usize> = 152..184;
+    /// `native_supply: u128` LE.
+    pub const NATIVE_SUPPLY: std::ops::Range<usize> = 184..200;
+    /// Total snapshot length.
+    pub const LEN: usize = 200;
+}
 
 /// The producer's own wallet — coinbase reward recipient. Distinct from the
 /// master (`0x99`) and the demo wallets (`0x01..0x05`) so coinbase mutations
@@ -530,16 +569,34 @@ impl SimNode for SigilSimNode {
     }
 
     fn snapshot(&self) -> Vec<u8> {
-        // Phase-0 snapshot: height + parent + per-counter. Full SigilState
-        // snapshot (for multiverse fork) lands when sigil-state grows a
-        // serde-stable dump; for the soak scenario we only need to compare
-        // heights + roots + counters across nodes, which the test reads
-        // directly off the live node.
+        // The snapshot MUST commit to the node's consensus-relevant state, not
+        // just its progress counters.
+        //
+        // WHY THIS MATTERS (2026-07-29): `flux_chronos::tourbillon` decides
+        // convergence by diffing these bytes across injection-order
+        // permutations. The original Phase-0 body emitted only
+        // height+parent+blocks_applied+divergence_count — no roots, no
+        // balances. Under that body a permutation that produced *completely
+        // different wallet balances* still snapshotted identically, so
+        // tourbillon would report `converged = true` on a genuine consensus
+        // divergence. That is the flux-db failure mode exactly: a green suite
+        // that never asserted the thing it claimed to protect.
+        //
+        // Including the four state roots makes divergence structurally
+        // impossible to hide (SIGIL claim #2). `native_supply` rides along so
+        // an order-dependent mint/burn shows up even in the pathological case
+        // where two different balance sets collide to the same root.
         let mut v = Vec::new();
         v.extend_from_slice(&self.next_height.to_le_bytes());
         v.extend_from_slice(&self.parent_hash);
         v.extend_from_slice(&self.blocks_applied.to_le_bytes());
         v.extend_from_slice(&self.divergence_count.to_le_bytes());
+        let r = self.state.roots();
+        v.extend_from_slice(&r.wallet_state_root);
+        v.extend_from_slice(&r.dex_state_root);
+        v.extend_from_slice(&r.event_log_root);
+        v.extend_from_slice(&r.contract_state_root);
+        v.extend_from_slice(&self.state.native_supply().to_le_bytes());
         v
     }
 

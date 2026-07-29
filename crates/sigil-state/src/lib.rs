@@ -295,6 +295,27 @@ impl SigilState {
         self.native_supply
     }
 
+    /// Independent O(state) recomputation of total native supply, summed
+    /// directly from the wallet map. The O(1) incremental [`Self::native_supply`]
+    /// must ALWAYS equal this.
+    ///
+    /// Companion to [`Self::wallet_root_recompute`] — identical audit shape: an
+    /// O(1) incremental value cross-checked against an O(state) ground truth.
+    /// It exists because the incremental counter is maintained with *saturating*
+    /// arithmetic in `set_balance` (deliberately, so overflow pins it HIGH and
+    /// the cap check stays conservative). Saturation means the counter can
+    /// legitimately disagree with the wallets it summarizes, and once it does,
+    /// `native_supply > MAX_SUPPLY` is no longer a statement about actual held
+    /// balances. This is the only way to detect that drift.
+    ///
+    /// Reads are always free; writes still go through [`commit_state_transition`].
+    pub fn native_supply_recompute(&self) -> u128 {
+        self.wallets
+            .iter()
+            .filter(|((_, token), _)| *token == NATIVE)
+            .fold(0u128, |acc, (_, v)| acc.saturating_add(*v))
+    }
+
     /// Recompute the wallet root FROM SCRATCH — O(state). The incremental
     /// `wallet_acc` that `roots()` returns in O(1) must always equal this. A
     /// node can call it on boot/audit to detect accumulator drift, and it is

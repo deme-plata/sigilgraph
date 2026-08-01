@@ -25,7 +25,7 @@
 //! with equality over every block once the tip has advanced `final_depth`
 //! past it.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use sigil_header::BlockHash;
 
@@ -77,6 +77,10 @@ pub struct Braid {
     frontier: BTreeSet<Key>,
     /// Parked views waiting on unknown parents.
     pending: HashMap<BlockHash, BlockView>,
+    /// Height → count over `pending`, so the lowest parked height is O(log n)
+    /// instead of an O(pending) scan on every `computed_final()` (which runs
+    /// per insert). Kept in lock-step with `pending` by `park`/`unpark_take`.
+    pending_heights: BTreeMap<u64, usize>,
     /// missing-parent hash → parked children awaiting it.
     waiters: HashMap<BlockHash, Vec<BlockHash>>,
     /// Emitted hash → height. Retention-pruned to `max_window` heights below
@@ -114,6 +118,7 @@ impl Braid {
             children: HashMap::new(),
             frontier: BTreeSet::new(),
             pending: HashMap::new(),
+            pending_heights: BTreeMap::new(),
             waiters: HashMap::new(),
             emitted_at: HashMap::new(),
             frozen: Vec::new(),
@@ -184,7 +189,7 @@ impl Braid {
                 for p in &missing {
                     self.waiters.entry(*p).or_default().push(view.hash);
                 }
-                self.pending.insert(view.hash, view);
+                self.park(view);
                 InsertOutcome::MissingParents(missing)
             }
             Accept::Bad(reason) => {
@@ -232,6 +237,41 @@ impl Braid {
     }
 
     /// Try to move a view into the active window. Requires all parents known.
+    /// Park a view, keeping the `pending_heights` index in lock-step.
+    fn park(&mut self, view: BlockView) {
+        let h = view.height;
+        if self.pending.insert(view.hash, view).is_none() {
+            *self.pending_heights.entry(h).or_insert(0) += 1;
+        }
+    }
+
+    /// Take a view out of the parked set, keeping the index in lock-step.
+    fn unpark_take(&mut self, hash: &BlockHash) -> Option<BlockView> {
+        let view = self.pending.remove(hash)?;
+        if let std::collections::btree_map::Entry::Occupied(mut e) =
+            self.pending_heights.entry(view.height)
+        {
+            *e.get_mut() -= 1;
+            if *e.get() == 0 {
+                e.remove();
+            }
+        }
+        Some(view)
+    }
+
+    /// Lowest height currently parked, if any.
+    fn pending_floor(&self) -> Option<u64> {
+        self.pending_heights.keys().next().copied()
+    }
+
+    /// Recompute the height index from `pending` (used after a bulk `retain`).
+    fn rebuild_pending_heights(&mut self) {
+        self.pending_heights.clear();
+        for v in self.pending.values() {
+            *self.pending_heights.entry(v.height).or_insert(0) += 1;
+        }
+    }
+
     fn try_accept(&mut self, view: &BlockView) -> Accept {
         let mut parents: Vec<BlockHash> = Vec::new();
         if view.height > 0 {
@@ -295,7 +335,7 @@ impl Braid {
             work.extend(kids);
         }
         while let Some(child) = work.pop_front() {
-            let Some(view) = self.pending.remove(&child) else {
+            let Some(view) = self.unpark_take(&child) else {
                 continue; // stale waiter entry
             };
             if let Some(f) = self.computed_final() {
@@ -316,7 +356,7 @@ impl Braid {
                     for p in &missing {
                         self.waiters.entry(*p).or_default().push(view.hash);
                     }
-                    self.pending.insert(view.hash, view);
+                    self.park(view);
                 }
                 Accept::Bad(_) | Accept::WindowFull => {
                     // Can't surface an outcome to the original caller anymore.
@@ -329,9 +369,34 @@ impl Braid {
 
     /// Finalized height as a hard `Option`: `None` until the selected tip has
     /// cleared `final_depth`.
+    ///
+    /// **Parked-set clamp (deadlock fix).** The tip-derived line alone is
+    /// computed only from RESIDENT records, so under out-of-order delivery a
+    /// complete high chain can drag finality past heights whose blocks are
+    /// still parked — and `cleanup` then destroys those parked views
+    /// permanently (they can never be re-inserted: `insert` refuses them
+    /// `BelowFinal`). Everything downstream of them is orphaned, the node
+    /// stalls with a large pending set, and its worklist cannot recover it.
+    /// Measured: P=6, k=1 stalled at 421/2400 blocks ordered.
+    ///
+    /// A height with a block still parked is by definition NOT ordered, so it
+    /// must not be frozen. We therefore hold the line strictly below the
+    /// lowest parked height.
+    ///
+    /// **Bounded, so it cannot be weaponised:** a peer that parks one bogus
+    /// low-height view must not stall finality forever. The clamp may never
+    /// pull the line more than `max_window` heights below the tip — past that
+    /// the parked view is outside the retention band anyway and is dropped by
+    /// the existing `cleanup` path.
     fn computed_final(&self) -> Option<u64> {
         let (tip_height, _, _) = self.selected_tip_key()?;
-        tip_height.checked_sub(self.cfg.final_depth)
+        let tip_line = tip_height.checked_sub(self.cfg.final_depth)?;
+        let Some(floor) = self.pending_floor() else {
+            return Some(tip_line);
+        };
+        let clamped = tip_line.min(floor.saturating_sub(1));
+        let hard_floor = tip_height.saturating_sub(self.cfg.max_window as u64);
+        Some(clamped.max(hard_floor).min(tip_line))
     }
 
     /// Selected tip key: max height, min-hash tie-break, over the window.
@@ -510,6 +575,9 @@ impl Braid {
         // Pendings at or below the finality line can never be accepted.
         let before = self.pending.len();
         self.pending.retain(|_, v| v.height > f);
+        if self.pending.len() != before {
+            self.rebuild_pending_heights();
+        }
         self.below_final_count += (before - self.pending.len()) as u64;
         for kids in self.waiters.values_mut() {
             kids.retain(|k| self.pending.contains_key(k));
@@ -550,12 +618,23 @@ impl Braid {
 
     /// Deduplicated, sorted worklist of parent hashes the parked views are
     /// waiting on — the caller's backfill queue.
+    ///
+    /// **Only ACTIONABLE hashes are returned.** A hash that is itself already
+    /// parked in `pending` is excluded: the braid already holds that block, so
+    /// re-inserting it returns [`InsertOutcome::Duplicate`] and the caller
+    /// makes no progress. Reporting those was worse than useless — it buried
+    /// the genuinely-unknown hashes among thousands of no-ops (measured: 1973
+    /// requested, 1972 of them already parked, so a backfill loop driven by
+    /// this list could never converge). Everything returned here is a block
+    /// the braid does not hold in any form, and supplying it will unpark work.
     pub fn missing_parents(&self) -> Vec<BlockHash> {
         let mut out: Vec<BlockHash> = self
             .waiters
             .iter()
             .filter(|(p, kids)| {
-                self.known_height(p).is_none() && kids.iter().any(|k| self.pending.contains_key(k))
+                self.known_height(p).is_none()
+                    && !self.pending.contains_key(*p)
+                    && kids.iter().any(|k| self.pending.contains_key(k))
             })
             .map(|(p, _)| *p)
             .collect();
@@ -890,6 +969,78 @@ mod tests {
         assert!(b.contains(&h(2)));
         assert_eq!(b.linearize(), vec![h(0), h(1), h(2)]);
         assert_eq!(b.stats().pending, 0);
+    }
+
+    /// REGRESSION: `missing_parents()` must never name a block the braid is
+    /// already holding in its own pending set. Re-inserting such a hash
+    /// returns `Duplicate`, so a caller driving a backfill loop off this
+    /// worklist makes no progress and spins forever. Measured in the wild at
+    /// P=6/k=1: 1973 hashes requested, 1972 of them already parked.
+    #[test]
+    fn missing_parents_reports_only_actionable_hashes() {
+        let mut b = Braid::new(cfg(64));
+        b.insert(genesis());
+
+        // Deliver a 3-deep chain in reverse: h(3) parks on h(2), h(2) parks
+        // on h(1). h(1) is the ONLY block the braid does not hold.
+        assert_eq!(
+            b.insert(v(h(3), h(2), vec![], 3, PA)),
+            InsertOutcome::MissingParents(vec![h(2)])
+        );
+        assert_eq!(
+            b.insert(v(h(2), h(1), vec![], 2, PA)),
+            InsertOutcome::MissingParents(vec![h(1)])
+        );
+        assert_eq!(b.stats().pending, 2);
+
+        // h(2) is parked, so naming it would be unactionable noise; only the
+        // genuinely-absent h(1) may be reported.
+        let work = b.missing_parents();
+        assert_eq!(work, vec![h(1)], "worklist must exclude already-parked h(2)");
+
+        // Every hash returned must actually make progress when supplied —
+        // that is what "actionable" means.
+        for hash in &work {
+            assert!(
+                !matches!(b.insert(v(*hash, h(0), vec![], 1, PA)), InsertOutcome::Duplicate),
+                "worklist named a hash the braid already holds"
+            );
+        }
+
+        // And supplying it drains the whole parked chain.
+        assert!(b.missing_parents().is_empty());
+        assert_eq!(b.stats().pending, 0);
+        assert_eq!(b.linearize(), vec![h(0), h(1), h(2), h(3)]);
+    }
+
+    /// The finality line must not freeze a height whose block is still parked
+    /// — `cleanup` would destroy that view permanently and every descendant
+    /// with it. Bounded by `max_window` so a single bogus low view cannot
+    /// stall finality forever.
+    #[test]
+    fn finality_does_not_outrun_the_parked_set() {
+        let mut b = Braid::new(cfg(4));
+        b.insert(genesis());
+        // A parked view at height 2 (its parent h(1) never arrives).
+        assert!(matches!(
+            b.insert(v(h(2), h(1), vec![], 2, PA)),
+            InsertOutcome::MissingParents(_)
+        ));
+        // Build a resident chain far above it off genesis.
+        let mut prev = h(0);
+        for n in 10u8..30 {
+            let view = v(h(n), prev, vec![], (n - 9) as u64, PB);
+            b.insert(view);
+            prev = h(n);
+        }
+        // Tip is well past final_depth=4, but height 2 is still parked, so the
+        // line must stay strictly below it rather than freezing over it.
+        assert!(
+            b.finalized_height() < 2,
+            "finality {} froze a height with a parked block",
+            b.finalized_height()
+        );
+        assert_eq!(b.stats().pending, 1, "the parked view must survive");
     }
 
     #[test]

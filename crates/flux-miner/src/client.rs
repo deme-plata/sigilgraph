@@ -144,6 +144,98 @@ pub struct MineStats {
 /// lives outside the `client` feature gate.
 pub static CLIENT_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+/// POOL / MULTI-RIG (2026-08-01): a stable per-PROCESS rig identity, reported to
+/// the pool as `&rig=` on every challenge fetch.
+///
+/// ## Why this exists
+///
+/// The pool keys every per-RIG quantity — the reported hashrate, the issued
+/// vardiff share ease, the client version, the per-height share cap — by WALLET.
+/// But a farm points N machines at ONE payout address, so those N rigs share one
+/// slot each and clobber one another. Measured live on `:8099` (2026-08-01, 14
+/// samples x 15s): one wallet reported two different client builds, flipping 5
+/// times; another swung its reported rate 3,249..7,233,438 h/s (2226x) between
+/// samples. Both are two machines behind one address, not one noisy machine.
+///
+/// The damage is not cosmetic: the pool derives a vardiff ease from whichever rig
+/// reported LAST, then verifies the OTHER rig's in-flight share against it. An
+/// ease swing of 8 -> 1 is a 2^7 = 128x harder target, so honest work — work the
+/// pool itself asked for — is rejected as `verify_mismatch`. A rig id lets the
+/// pool hold that state per machine instead.
+///
+/// ## Compatibility
+///
+/// PURELY ADDITIVE. The node reads named query keys, so a pool that does not know
+/// `rig` simply ignores it and the exchange is byte-identical to today's. That is
+/// deliberate: rigs are real hardware pointed at a real URL, and a change that can
+/// strand them is the one unacceptable outcome. This is safe to ship before the
+/// server half exists.
+///
+/// ## Value
+///
+/// Precedence: `SIGIL_RIG_ID` (operator-set — authoritative, and the right knob
+/// for a named farm) -> `<hostname>-<pid>` -> `rig-<pid>`. The pid keeps two
+/// miners on ONE host distinct; the hostname keeps two hosts distinct. Sanitised
+/// to the charset and 24-byte bound the pool already enforces on `&v=`, so a
+/// hostile or malformed value cannot smuggle JSON or bloat the pool's map.
+pub static RIG_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// This process's rig id — see [`RIG_ID`]. Resolved once, then stable for the
+/// process lifetime (the pool needs it stable to key state on).
+pub fn rig_id() -> &'static str {
+    RIG_ID.get_or_init(default_rig_id)
+}
+
+/// Keep only what the pool's `&v=` validator already accepts (ASCII
+/// alphanumeric, `.`, `-`, `+`), map everything else to `-`, and bound the
+/// length. Returns `None` for a value with no usable characters so the caller
+/// falls through to the next source rather than reporting an empty id.
+fn sanitize_rig_id(raw: &str) -> Option<String> {
+    let s: String = raw
+        .trim()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '+' { c } else { '-' })
+        .take(24)
+        .collect();
+    let s = s.trim_matches('-').to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+/// The host part of the default rig id, portable across the rigs we actually
+/// ship to: Linux/HiveOS (`HOSTNAME`, else `/etc/hostname`) and Windows
+/// (`COMPUTERNAME`, which is where sigil-top.exe runs).
+fn host_label() -> Option<String> {
+    for key in ["HOSTNAME", "COMPUTERNAME"] {
+        if let Ok(h) = std::env::var(key) {
+            if let Some(s) = sanitize_rig_id(&h) { return Some(s); }
+        }
+    }
+    std::fs::read_to_string("/etc/hostname").ok().and_then(|h| sanitize_rig_id(&h))
+}
+
+fn default_rig_id() -> String {
+    if let Ok(v) = std::env::var("SIGIL_RIG_ID") {
+        if let Some(s) = sanitize_rig_id(&v) { return s; }
+    }
+    let pid = std::process::id().to_string();
+    match host_label() {
+        Some(h) => {
+            // Budget the 24-byte bound so the PID ALWAYS survives. Truncating the
+            // joined string instead cuts exactly the wrong end: this box is
+            // `cs30067.seedhost.eu` (19 chars), so `<host>-<pid>` is 27 and naive
+            // truncation yielded "cs30067.seedhost.eu-2238" — pid amputated. Two
+            // miners on one host would then collide on ONE rig id, which is the
+            // wallet-keyed bug this whole change exists to fix, moved down a level.
+            // (Caught by `default_rig_id_distinguishes_processes_on_one_host`.)
+            let room = 24usize.saturating_sub(pid.len() + 1);
+            let host: String = h.chars().take(room).collect();
+            let host = host.trim_matches('-');
+            if host.is_empty() { format!("rig-{pid}") } else { format!("{host}-{pid}") }
+        }
+        None => format!("rig-{pid}"),
+    }
+}
+
 #[cfg(feature = "client")]
 pub struct MinerClient {
     pub endpoints: Endpoints,
@@ -166,7 +258,13 @@ impl MinerClient {
         // v7.0.9-fix: report our measured hashrate so the node can SUM active miners into the
         // true total network power (returned as Challenge.net_hps). `hps=0` on the first fetch.
         let v = CLIENT_VERSION.get().map(String::as_str).unwrap_or(env!("CARGO_PKG_VERSION"));
-        let url = format!("{}{}?wallet={}&hps={:.0}&v={}", self.endpoints.base_url, self.endpoints.challenge_path, self.wallet, hps.max(0.0), v);
+        // MULTI-RIG: identify THIS machine, not just the payout wallet — see [`RIG_ID`].
+        // Additive; a pool that does not read `rig` is unaffected.
+        let url = format!(
+            "{}{}?wallet={}&hps={:.0}&v={}&rig={}",
+            self.endpoints.base_url, self.endpoints.challenge_path,
+            self.wallet, hps.max(0.0), v, rig_id()
+        );
         let c = self.http.get(&url).send()?.error_for_status()?.json::<Challenge>()?;
         Ok(c)
     }
@@ -294,5 +392,57 @@ mod core_tests {
         let mut c2 = c.clone();
         c2.height = 43;
         assert_ne!(build_header(&c, "alice"), build_header(&c2, "alice"));
+    }
+
+    // ── MULTI-RIG rig-id (see [`RIG_ID`]) ────────────────────────────────────
+    // These are deliberately PURE (no `set_var`): the resolution order reads
+    // process-global env, and mutating it from a test races every other test in
+    // the binary. The sanitiser is where the safety properties live, so that is
+    // what is pinned; `rig_id()` itself is only checked for the invariants that
+    // hold regardless of environment.
+
+    #[test]
+    fn rig_id_sanitiser_enforces_the_pools_charset_and_bound() {
+        // The pool accepts [A-Za-z0-9.-+] and bounds length at 24; anything else
+        // must be neutralised rather than passed through.
+        assert_eq!(sanitize_rig_id("hive-rig-01"), Some("hive-rig-01".into()));
+        assert_eq!(sanitize_rig_id("  spaced  "), Some("spaced".into()));
+        // Quotes/braces are the smuggling risk — /mining/miners emits hand-rolled
+        // JSON, so a raw `"` in a rig id would break the document.
+        let dirty = sanitize_rig_id("a\"b{}c").expect("has usable chars");
+        assert!(!dirty.contains('"') && !dirty.contains('{') && !dirty.contains('}'));
+        // Bound holds for a long hostname.
+        let long = sanitize_rig_id(&"x".repeat(100)).expect("has usable chars");
+        assert!(long.len() <= 24, "rig id must respect the 24-byte bound, got {}", long.len());
+        // No usable characters -> None, so the caller falls through to the next
+        // source instead of reporting an empty id.
+        assert_eq!(sanitize_rig_id("   "), None);
+        assert_eq!(sanitize_rig_id("---"), None);
+    }
+
+    #[test]
+    fn rig_id_is_nonempty_stable_and_url_safe() {
+        let a = rig_id();
+        let b = rig_id();
+        // Stable: the pool keys per-rig state on this, so it must not move.
+        assert_eq!(a, b, "rig id must be stable for the process lifetime");
+        assert!(!a.is_empty(), "rig id must never be empty");
+        assert!(a.len() <= 24, "rig id must respect the 24-byte bound");
+        assert!(
+            a.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '+'),
+            "rig id must be URL-safe without escaping, got {a:?}"
+        );
+    }
+
+    #[test]
+    fn default_rig_id_distinguishes_processes_on_one_host() {
+        // The whole point of the pid suffix: two miners on ONE machine must not
+        // collapse into one pool identity (that is the wallet-keyed bug, moved
+        // down a level). Same host => id still carries this process's pid.
+        let id = default_rig_id();
+        assert!(
+            id.contains(&std::process::id().to_string()) || std::env::var("SIGIL_RIG_ID").is_ok(),
+            "default rig id must carry the pid unless explicitly overridden, got {id:?}"
+        );
     }
 }

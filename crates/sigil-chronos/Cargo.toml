@@ -12,6 +12,10 @@ description = "SIGIL × flux-chronos — runs the REAL SIGIL chain logic (sigil-
 # This is the proof flux-chronos catches real SIGIL consensus bugs.
 
 [[bin]]
+name = "sigil-boundary-soak"
+path = "src/bin/sigil-boundary-soak.rs"
+
+[[bin]]
 name = "chronos_verify"
 path = "src/bin/chronos_verify.rs"
 
@@ -92,6 +96,7 @@ sigil-events = { path = "../sigil-events" }
 sigil-tx     = { path = "../sigil-tx" }
 sigil-bank   = { path = "../sigil-bank" }
 sigil-tip-proof = { path = "../sigil-tip-proof" }
+sigil-dagknight = { path = "../sigil-dagknight" }
 sigil-dex    = { path = "../sigil-dex" }
 # Late-join catch-up: a fresh node verifies ONE constant-size fold proof of the
 # history prefix (BLAKE4 transparent setup) instead of replaying every block.

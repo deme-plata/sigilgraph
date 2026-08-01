@@ -1268,9 +1268,7 @@ fn run_start() -> Result<()> {
                                             // braid re-anchors at the frontier via self-heal).
                                             // Pull the ancestry gap with the EXISTING throttled
                                             // rr-backfill shape — responses land in bf_rx.
-                                            if bheight >= chain.height() {
-                                                pending.entry(bheight).or_insert(block.clone());
-                                            }
+                                            pending_insert(&mut pending, chain.height(), bheight, block.clone());
                                             dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, block);
                                             if last_req.elapsed() >= std::time::Duration::from_millis(15) {
                                                 last_req = std::time::Instant::now();
@@ -1357,9 +1355,7 @@ fn run_start() -> Result<()> {
                                     // we spawn it off the select loop and feed the answer
                                     // back through bf_rx — never blocking production/drain.
                                     if h > net_tip { net_tip = h; }
-                                    if pending.len() < 200_000 {
-                                        pending.entry(h).or_insert(block);
-                                    }
+                                    pending_insert(&mut pending, chain.height(), h, block);
                                     if last_req.elapsed() >= std::time::Duration::from_millis(15) {
                                         last_req = std::time::Instant::now();
                                         if let Some(peer) = mgr.connected_peers().into_iter().next() {
@@ -1562,9 +1558,7 @@ fn run_start() -> Result<()> {
                         for block in vals {
                             if block.header.precheck().is_err() { continue; }
                             let h = block.header.height;
-                            if h >= chain.height() {
-                                pending.entry(h).or_insert(block);
-                            }
+                            pending_insert(&mut pending, chain.height(), h, block);
                         }
                         while let Some(b) = pending.remove(&chain.height()) {
                             let bhash = b.hash();
@@ -1606,9 +1600,7 @@ fn run_start() -> Result<()> {
                         for v in vals {
                             if let Ok(block) = Ok::<crate::block::Block, ()>(v) {
                                 let h = block.header.height;
-                                if h >= chain.height() {
-                                    pending.entry(h).or_insert(block);
-                                }
+                                pending_insert(&mut pending, chain.height(), h, block);
                             }
                         }
                         // Apply every contiguous block we now have, starting at the tip.
@@ -2345,6 +2337,64 @@ fn dag_drain_apply(
 /// lowest-height resident body is dropped first (approximation of the design's
 /// "lowest-height off-spine first" — the linear path's 200k `pending` cap is
 /// the precedent). O(n) scan only on overflow.
+/// Hard cap on the height-keyed `pending` block buffer, and how far ahead of the
+/// local tip a gossiped block may be buffered at all.
+///
+/// **Why this exists (measured, 2026-08-01).** `pending` is a
+/// `BTreeMap<u64, Block>` fed from FOUR sites. Only the legacy linear path was
+/// capped (`if pending.len() < 200_000`); the **braid gossip path** and both
+/// backfill-response paths inserted with no bound beyond `h >= chain.height()`.
+/// The live node runs `SIGIL_DAG=1`, i.e. the uncapped path.
+///
+/// A `sigil-memwedge` chronos run measured the true cost at **2,803 bytes per
+/// buffered height** (header only — a full Block is larger). So a node that
+/// falls behind buffers the whole gap: 1M heights ≈ 2.6 GiB, 10M ≈ 26 GiB,
+/// against a `MemoryHigh` of 6 GiB. Crossing that line puts the process into
+/// kernel direct-reclaim throttling (measured on the wedged node: PSI memory
+/// `full avg300 = 97.17`, 1.93M throttle events, `pgscan_kswapd = 0` so ALL
+/// reclaim is synchronous) — which makes it apply blocks *slower*, which makes
+/// it fall *further* behind, which buffers *more*. That is the death spiral
+/// that wedged sigil-node three times.
+///
+/// The distance bound matters as much as the count bound: 200k heights of slack
+/// is still ~560 MiB. Blocks beyond the horizon are dropped, not buffered — the
+/// backfill requester will re-fetch them in order as the tip advances, which is
+/// the mechanism that is supposed to close a gap anyway.
+const PENDING_MAX_ENTRIES: usize = 32_768;
+const PENDING_MAX_AHEAD: u64 = 32_768;
+
+/// Buffer a gossiped/backfilled block by height, bounded in BOTH directions.
+/// Returns true if it was retained. Every `pending` insert must go through here.
+fn pending_insert(
+    pending: &mut std::collections::BTreeMap<u64, crate::block::Block>,
+    tip_height: u64,
+    height: u64,
+    block: crate::block::Block,
+) -> bool {
+    // Already settled — never buffer the past.
+    if height < tip_height {
+        return false;
+    }
+    // Beyond the horizon: dropping is correct. Ordered backfill will supply it.
+    if height.saturating_sub(tip_height) > PENDING_MAX_AHEAD {
+        return false;
+    }
+    if pending.len() >= PENDING_MAX_ENTRIES && !pending.contains_key(&height) {
+        // Full: keep the CLOSEST-to-tip work (that is what unblocks the applier)
+        // and evict the farthest-ahead entry, but only if the newcomer is nearer.
+        let farthest = match pending.keys().next_back().copied() {
+            Some(k) => k,
+            None => return false,
+        };
+        if height >= farthest {
+            return false;
+        }
+        pending.remove(&farthest);
+    }
+    pending.entry(height).or_insert(block);
+    true
+}
+
 fn dag_store_body(
     dag_bodies: &mut std::collections::HashMap<BlockHash, crate::block::Block>,
     cap: usize,

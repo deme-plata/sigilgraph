@@ -316,7 +316,10 @@ mod tests {
         let mut snap_bytes: u64 = 0;
         let mut snap_write_secs: f64 = 0.0;
         for _ in 1..500u64 {
-            let b = crate::mint_next_block(&chain, vec![], &[], None).expect("mint");
+            // 5th arg = `solve: Option<&AcceptedSolve>` — added by 44ae98e
+            // (mining on the braid). `None` = mint without a PoW solve, which is
+            // what this snapshot/replay-equivalence test wants.
+            let b = crate::mint_next_block(&chain, vec![], &[], None, None).expect("mint");
             log.append(&b).unwrap();
             chain.apply(b).expect("block applies");
             // snapshot at H=400 (tip header height 400, 401 blocks applied)

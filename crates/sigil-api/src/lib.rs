@@ -18,6 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::{Query, State},
+    http::StatusCode,
     routing::{get, post},
     Json, Router,
 };
@@ -236,16 +237,21 @@ pub struct MinersResponse {
 pub async fn mining_challenge(
     State(st): State<AppState>,
     Query(q): Query<ChallengeQuery>,
-) -> Json<ApiResponse<flux_miner::client::Challenge>> {
+) -> Result<Json<flux_miner::client::Challenge>, StatusCode> {
+    // WIRE-COMPAT (P1 fix): the shipping flux-miner client deserializes the
+    // response body DIRECTLY into `Challenge` (`client.rs` → `.json::<Challenge>()`),
+    // exactly as `sigil-rpcd` serves it. Wrapping it in the `ApiResponse` envelope
+    // made every miner silently fail to parse the reply and produce 0 shares while
+    // still registering as a live miner. Return the RAW `Challenge`, like rpcd.
     let wallet = q.wallet.as_deref().and_then(hex32);
     if let Some(hps) = q.hps {
         st.mining.report_hps(wallet, Some(hps), now_ms());
     }
     match st.mining.challenge_for(wallet, now_ms()) {
-        Some(c) => ApiResponse::ok(c),
-        None => ApiResponse::err(
-            "no mineable frontier — this node is not producing braid blocks yet",
-        ),
+        Some(c) => Ok(Json(c)),
+        // No mineable frontier yet → a real 503 so the client's `.error_for_status()?`
+        // retries cleanly instead of trying to parse an envelope as a Challenge.
+        None => Err(StatusCode::SERVICE_UNAVAILABLE),
     }
 }
 
@@ -253,7 +259,10 @@ pub async fn mining_challenge(
 pub async fn mining_submit(
     State(st): State<AppState>,
     Json(sub): Json<flux_miner::client::Submission>,
-) -> Json<ApiResponse<flux_miner::client::SubmitResult>> {
+) -> Json<flux_miner::client::SubmitResult> {
+    // WIRE-COMPAT (P1 fix): the client reads the response body as a raw
+    // `SubmitResult` (`client.rs` → `.json::<SubmitResult>()`), matching rpcd.
+    // No `ApiResponse` envelope here for the same reason as `mining_challenge`.
     use flux_miner::client::SubmitResult;
     let result = match st.mining.submit(&sub) {
         SubmitOutcome::Block { .. } => {
@@ -268,7 +277,7 @@ pub async fn mining_submit(
             share: false,
         },
     };
-    ApiResponse::ok(result)
+    Json(result)
 }
 
 #[flux_api_macros::api(GET, "/v1/mining/miners", summary = "Live mining power and accept/reject counters")]

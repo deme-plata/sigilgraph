@@ -1883,7 +1883,7 @@ checksum = "749cff877dc1af878a0b31a41dd221a753634401ea0ef2f87b62d3171522485a"
 
 [[package]]
 name = "flux-aether"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "reed-solomon-erasure",
@@ -1892,7 +1892,7 @@ dependencies = [
 
 [[package]]
 name = "flux-ai"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-graph",
  "serde",
@@ -1921,7 +1921,7 @@ dependencies = [
 
 [[package]]
 name = "flux-api"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-api-macros",
  "flux-graph",
@@ -1932,7 +1932,7 @@ dependencies = [
 
 [[package]]
 name = "flux-api-macros"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1941,7 +1941,7 @@ dependencies = [
 
 [[package]]
 name = "flux-architect"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-ai",
  "flux-graph",
@@ -1952,17 +1952,19 @@ dependencies = [
 
 [[package]]
 name = "flux-arxiv-latex"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
+ "flux-qwalk",
  "flux-science",
+ "flux-whitehole",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "flux-cache"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -1982,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "flux-chronos"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -2014,7 +2016,7 @@ dependencies = [
 
 [[package]]
 name = "flux-cortex"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-architect",
  "flux-graph",
@@ -2025,7 +2027,7 @@ dependencies = [
 
 [[package]]
 name = "flux-db"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -2038,14 +2040,14 @@ dependencies = [
 
 [[package]]
 name = "flux-dev-gate"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "sigil-oauth",
 ]
 
 [[package]]
 name = "flux-fold"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "serde",
@@ -2061,7 +2063,7 @@ dependencies = [
 
 [[package]]
 name = "flux-graph"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-cache",
  "serde",
@@ -2078,7 +2080,7 @@ dependencies = [
 
 [[package]]
 name = "flux-history"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "flux-db",
@@ -2097,7 +2099,7 @@ dependencies = [
 
 [[package]]
 name = "flux-lattice-guard"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -2117,7 +2119,7 @@ dependencies = [
 
 [[package]]
 name = "flux-market"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -2153,7 +2155,7 @@ dependencies = [
 
 [[package]]
 name = "flux-nation"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "flux-sqisign",
@@ -2166,7 +2168,7 @@ dependencies = [
 
 [[package]]
 name = "flux-optimize"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "flux-graph",
  "serde",
@@ -2175,7 +2177,7 @@ dependencies = [
 
 [[package]]
 name = "flux-p2p"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2205,11 +2207,18 @@ dependencies = [
 
 [[package]]
 name = "flux-pool"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "flux-fold",
  "serde",
+]
+
+[[package]]
+name = "flux-qwalk"
+version = "0.40.0"
+dependencies = [
+ "nalgebra",
 ]
 
 [[package]]
@@ -2222,7 +2231,7 @@ dependencies = [
 
 [[package]]
 name = "flux-rev"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "flux-p2p",
@@ -2254,7 +2263,7 @@ dependencies = [
 
 [[package]]
 name = "flux-science"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "nalgebra",
@@ -2267,7 +2276,7 @@ dependencies = [
 
 [[package]]
 name = "flux-search"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "parking_lot 0.12.5",
@@ -2318,7 +2327,7 @@ dependencies = [
 
 [[package]]
 name = "flux-sqisign"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -2340,7 +2349,7 @@ dependencies = [
 
 [[package]]
 name = "flux-swarm-tools"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2349,7 +2358,7 @@ dependencies = [
 
 [[package]]
 name = "flux-sync"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -2361,11 +2370,11 @@ dependencies = [
 
 [[package]]
 name = "flux-topology"
-version = "5.0.0"
+version = "5.1.0"
 
 [[package]]
 name = "flux-turbo-sync"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2390,11 +2399,11 @@ dependencies = [
 
 [[package]]
 name = "flux-uint"
-version = "0.39.0"
+version = "0.40.0"
 
 [[package]]
 name = "flux-vdf"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "hex",
@@ -2403,6 +2412,10 @@ dependencies = [
  "num-traits",
  "serde",
 ]
+
+[[package]]
+name = "flux-whitehole"
+version = "0.40.0"
 
 [[package]]
 name = "flux-workflow"
@@ -2415,7 +2428,7 @@ dependencies = [
 
 [[package]]
 name = "flux-zk-stark"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -6302,7 +6315,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sigil-api"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "axum",
  "blake3",
@@ -6323,7 +6336,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-ballot"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "hex",
@@ -6331,7 +6344,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-bank"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "bincode 1.3.3",
  "serde",
@@ -6347,7 +6360,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-bridge"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "bitcoin_hashes",
  "blake3",
@@ -6363,7 +6376,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-btc-miner"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "flux-pool",
  "sha2",
@@ -6371,7 +6384,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-chronos"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -6387,6 +6400,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sigil-bank",
+ "sigil-dagknight",
  "sigil-dex",
  "sigil-events",
  "sigil-header",
@@ -6401,7 +6415,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-citizenship"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "hex",
@@ -6411,7 +6425,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-commons"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6421,7 +6435,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-council"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "hex",
@@ -6429,7 +6443,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-dagknight"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "serde",
@@ -6438,7 +6452,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-dao-bridge"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "hex",
@@ -6454,7 +6468,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-dex"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6463,7 +6477,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-dns-anchor"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "base64",
  "blake3",
@@ -6474,7 +6488,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-emission"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6483,7 +6497,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-events"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "serde",
@@ -6495,7 +6509,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-fees"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6503,7 +6517,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-handshake"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -6517,7 +6531,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-header"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -6530,7 +6544,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-mandat"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "flux-uint",
@@ -6542,7 +6556,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-migrate"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "hex",
@@ -6553,7 +6567,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-mixer"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -6568,7 +6582,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-nation"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "hex",
@@ -6580,7 +6594,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-nation-chain"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "sigil-nation",
  "sigil-state",
@@ -6588,7 +6602,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-net"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6599,7 +6613,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-net-tor"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "arti-client",
@@ -6613,7 +6627,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-net-wg"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "base64",
  "blake3",
@@ -6627,7 +6641,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-node"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -6662,7 +6676,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-oauth"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -6676,7 +6690,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-oracle"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "sigil-state",
  "thiserror 1.0.69",
@@ -6684,7 +6698,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-rpc"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -6708,7 +6722,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-scoring"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "parking_lot 0.12.5",
@@ -6719,7 +6733,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-serve"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -6746,7 +6760,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-sigverify"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "ed25519-dalek",
  "flux-sqisign",
@@ -6756,7 +6770,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-spawn"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "hex",
@@ -6767,7 +6781,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-state"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -6802,7 +6816,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-tip-proof"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "base64",
  "blake3",
@@ -6819,7 +6833,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-top"
-version = "7.1.11"
+version = "7.1.13"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -6858,7 +6872,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-treasury"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "hex",
@@ -6866,11 +6880,11 @@ dependencies = [
 
 [[package]]
 name = "sigil-twomind"
-version = "5.0.0"
+version = "5.1.0"
 
 [[package]]
 name = "sigil-tx"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -6888,7 +6902,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-university"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -6902,7 +6916,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-updater"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "flux-sqisign",
@@ -6917,7 +6931,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-usds"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "sigil-oracle",
  "sigil-state",
@@ -6933,7 +6947,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-vm"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "blake3",
  "serde",
@@ -7363,7 +7377,7 @@ dependencies = [
 
 [[package]]
 name = "template-forge"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -9854,7 +9868,7 @@ dependencies = [
 
 [[package]]
 name = "zk-flux"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "blake3",

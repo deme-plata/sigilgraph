@@ -3456,4 +3456,18 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
   try{ window.lucide&&window.lucide.createIcons(); }catch(e){}
 })();
 </script>
+<script>
+/* #activity deep-link. sigil-top's [B] opens the LOCAL wallet here rather than
+   bouncing to the public fluxapp.xyz explorer: the Activity view is then
+   same-origin, so its /api/v1/search goes through the :9800 proxy and shows
+   THIS node's chain instead of the public node's. Same shape as #stats/#research. */
+(function(){
+  function maybeActivity(){
+    if(location.hash==='#activity' && window.showExplorer) window.showExplorer();
+  }
+  window.addEventListener('hashchange',maybeActivity);
+  if(document.readyState!=='loading') maybeActivity();
+  else document.addEventListener('DOMContentLoaded',maybeActivity);
+})();
+</script>
 </body></html>

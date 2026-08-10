@@ -3970,12 +3970,21 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 }
                             }
                             KeyCode::Char('b') | KeyCode::Char('B') => {
-                                let url = "https://sigilgraph.fluxapp.xyz/explorer/";
-                                if open_browser(url) {
-                                    app.toast = "🌐 Explorer opened in browser".into();
+                                // Recent activity — the Explorer/Activity view INSIDE the
+                                // local wallet, deep-linked via #activity and served from
+                                // this node's own :9800. Was: the public fluxapp.xyz
+                                // explorer, which is a different origin and shows the
+                                // PUBLIC node's chain — so on a local/private node [B]
+                                // showed someone else's blocks. Same pattern as [T].
+                                let url = format!("{}#activity", local_wallet_url());
+                                if !ensure_serve_up(&mut app) {
+                                    app.toast = format!("✗ local wallet server down ({}) — recent activity needs the :9800 server", app.serve_status).into();
+                                    app.toast_sticky = true;
+                                } else if open_browser_private(&url) {
+                                    app.toast = format!("📜 recent activity → {url}").into();
                                     app.toast_sticky = false;
                                 } else {
-                                    app.toast = format!("🔗 headless — open the explorer in any browser:  {url}").into();
+                                    app.toast = format!("🔗 headless — open recent activity in any browser:  {}#activity", official_wallet_url()).into();
                                     app.toast_sticky = true;
                                 }
                             }

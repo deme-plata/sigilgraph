@@ -447,7 +447,7 @@ pub(crate) fn render_footer(app: &App) -> Paragraph<'static> {
     kb.extend(keys("[Y]", "esync", C_CYAN));
     kb.extend(keys("[W]", "allet", C_CYAN));
     kb.extend(keys("[T]", "stats", C_CYAN));
-    kb.extend(keys("[B]", "locks", C_CYAN));
+    kb.extend(keys("[B]", "activity", C_CYAN));
     kb.extend(keys("[U]", "pdate", C_VBRIGHT));
     kb.extend(keys("[C]", "ortex", C_GOLD));
     kb.extend(keys("[H]", "eal", C_GOLD));

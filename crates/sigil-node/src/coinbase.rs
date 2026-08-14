@@ -185,6 +185,170 @@ pub fn build_block_body_for(
     (StateTransition { at_height: height, mutations }, work.roots(), events, included)
 }
 
+/// [`build_block_body_for`], but the coinbase is [`split_coinbase_mutations`]
+/// instead of a single flat `SetBalance` — real pool-share economics (dev-fee +
+/// commons split, proportional payout) instead of winner-takes-all-no-fee. This
+/// is the mining path: `winner` is who solved the block, `shares` is the full
+/// weight map for this height's window (winner's own weight already folded in
+/// by the caller). Degenerates to today's single-beneficiary behavior byte-for-
+/// byte whenever no master wallet is genesis-committed on this chain (the split
+/// then returns 100% to the credited wallet — see `split_mining_reward`), so
+/// this is safe to use for BOTH the mined-block case and the default
+/// free-running producer case (a one-entry shares map).
+pub fn build_block_body_for_shares(
+    state: &SigilState,
+    height: u64,
+    reward: Option<u128>,
+    txs: &[SignedTx],
+    winner: WalletId,
+    shares: &std::collections::HashMap<WalletId, u64>,
+) -> (StateTransition, StateRoots, Vec<sigil_events::SigilEvent>, Vec<SignedTx>) {
+    let reward = reward.unwrap_or_else(|| sigil_emission::block_reward(height));
+    let cb_mutations = split_coinbase_mutations(state, height, reward, winner, shares);
+
+    // Re-apply the coinbase mutations against a fresh evolving clone (mirrors
+    // build_block_body_for's pattern exactly) so txs see the post-coinbase
+    // balances, then run user sends in order on top.
+    let mut work = state.clone();
+    let mut mutations: Vec<StateMutation> = Vec::new();
+    let mut events: Vec<sigil_events::SigilEvent> = Vec::new();
+    let mut included: Vec<SignedTx> = Vec::new();
+
+    if !cb_mutations.is_empty() {
+        if sigil_state::commit_state_transition(
+            &mut work, &StateTransition { at_height: height, mutations: cb_mutations.clone() }, height,
+        ).is_ok() {
+            mutations.extend(cb_mutations);
+        }
+    }
+
+    for tx in txs {
+        let Ok(res) = sigil_tx::apply_tx(&work, tx) else { continue };
+        if sigil_state::commit_state_transition(
+            &mut work, &StateTransition { at_height: height, mutations: res.mutations.clone() }, height,
+        ).is_ok() {
+            mutations.extend(res.mutations);
+            events.extend(res.events);
+            included.push(tx.clone());
+        }
+    }
+
+    (StateTransition { at_height: height, mutations }, work.roots(), events, included)
+}
+
+/// Full pool-share coinbase: split `reward` proportionally over `shares`
+/// (wallet → weight, the winner's own solve already folded in by the
+/// caller), applying `sigil-bank`'s master/commons dev-fee split PER credited
+/// wallet — the exact economics `sigil-rpc::distribute_block_reward` uses for
+/// `sigil-rpcd`, ported here as a deterministic `Vec<StateMutation>` for block-
+/// body embedding (every follower replays the SAME mutations from the header,
+/// no local RPC-daemon bookkeeping needed) instead of committing straight to a
+/// live `SigilState`.
+///
+/// Degenerates to solo winner-takes-all when `shares` has exactly one entry
+/// (the mining bridge always includes the winner's own weight there) — so this
+/// is the ONE coinbase path for both cases; a share-less solve and a pool
+/// solve never drift apart because they're the same code.
+///
+/// Conservation is EXACT: every wallet's cut is computed against a RUNNING
+/// clone of state (each mutation committed immediately, so the next wallet's
+/// `balance_of` sees the prior credit — required because `SetBalance` is an
+/// absolute write, not a delta), the winner's cut absorbs the u128 integer-
+/// division remainder, and a cut that would push a wallet over the 21M cap is
+/// SKIPPED (under-mint is safe, over-mint never happens) — identical semantics
+/// to `distribute_block_reward`, just building mutations instead of applying
+/// them to a second, separate state.
+pub fn split_coinbase_mutations(
+    state: &SigilState,
+    height: u64,
+    reward: u128,
+    winner: WalletId,
+    shares: &std::collections::HashMap<WalletId, u64>,
+) -> Vec<StateMutation> {
+    let mut work = state.clone();
+    let mut mutations: Vec<StateMutation> = Vec::new();
+    if reward == 0 {
+        return mutations;
+    }
+
+    // One wallet's cut → mutations, applying the master/commons split exactly
+    // like `sigil_rpc::credit_share`: master's own cut is skipped when the
+    // credited wallet IS the master (self-mining keeps the full share), the
+    // commons tithe is taken whenever a master/bank exists regardless of who
+    // mines. Returns the amount actually allocated to `to` (0 if the cap
+    // rejected it — the caller must not silently redirect that to someone
+    // else, which is why this commits eagerly into `work` and returns).
+    let mut credit_one = |work: &mut SigilState, to: WalletId, cut: u128| -> u128 {
+        if cut == 0 {
+            return 0;
+        }
+        let master = work.master_wallet();
+        let Ok(split) = sigil_bank::split_mining_reward(cut, master) else {
+            return 0;
+        };
+        let master_credit = match master {
+            Some(m) if m != to => split.master_share,
+            _ => 0,
+        };
+        let commons_credit = if master.is_some() { split.commons_share } else { 0 };
+        let Some(to_credit) = cut.checked_sub(master_credit).and_then(|r| r.checked_sub(commons_credit)) else {
+            return 0;
+        };
+
+        let mut step: Vec<StateMutation> = Vec::with_capacity(3);
+        if to_credit > 0 {
+            let bal = work.balance_of(&to, &NATIVE);
+            let Some(new_bal) = bal.checked_add(to_credit) else { return 0 };
+            step.push(StateMutation::SetBalance { wallet: to, token: NATIVE, amount: new_bal });
+        }
+        if let (Some(m), true) = (master, master_credit > 0) {
+            let bal = work.balance_of(&m, &NATIVE);
+            let Some(new_bal) = bal.checked_add(master_credit) else { return 0 };
+            step.push(StateMutation::SetBalance { wallet: m, token: NATIVE, amount: new_bal });
+        }
+        if commons_credit > 0 {
+            let bal = work.balance_of(&sigil_bank::COMMONS_WALLET, &NATIVE);
+            let Some(new_bal) = bal.checked_add(commons_credit) else { return 0 };
+            step.push(StateMutation::SetBalance { wallet: sigil_bank::COMMONS_WALLET, token: NATIVE, amount: new_bal });
+        }
+        if step.is_empty() {
+            return 0;
+        }
+        // Commit eagerly so the NEXT wallet's balance_of() sees this credit —
+        // SetBalance is absolute, so two credits to the same wallet computed
+        // against a stale base would silently drop the first one.
+        if sigil_state::commit_state_transition(work, &StateTransition { at_height: height, mutations: step.clone() }, height).is_err() {
+            return 0; // 21M cap edge — skip this wallet's cut, under-mint stays safe
+        }
+        mutations.extend(step);
+        cut
+    };
+
+    let total: u128 = shares.values().map(|&c| c as u128).sum();
+    if total == 0 {
+        // Defensive: caller bug (empty shares) — solo semantics for the winner.
+        credit_one(&mut work, winner, reward);
+        return mutations;
+    }
+
+    let mut allocated: u128 = 0;
+    for (&w, &cnt) in shares.iter() {
+        if w == winner {
+            continue; // winner is credited last so it absorbs the remainder
+        }
+        let Some(cut) = reward.checked_mul(cnt as u128).map(|v| v / total) else { continue };
+        if cut == 0 {
+            continue;
+        }
+        allocated += cut; // counts the cut whether or not the cap accepted it —
+                           // an unmintable cut must not silently flow to the winner
+        credit_one(&mut work, w, cut);
+    }
+    let winner_cut = reward.saturating_sub(allocated.min(reward));
+    credit_one(&mut work, winner, winner_cut);
+    mutations
+}
+
 // ── adaptive emission controller: live-reward lifecycle ─────────────────────
 use sigil_emission::controller::EmissionController;
 
@@ -221,6 +385,132 @@ pub fn save_controller(dir: &std::path::Path, c: &EmissionController) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn set_master(st: &mut SigilState, master: WalletId) {
+        sigil_state::commit_state_transition(
+            st,
+            &StateTransition { at_height: 0, mutations: vec![StateMutation::SetMasterWallet { wallet: master }] },
+            0,
+        ).unwrap();
+    }
+
+    fn total_native_delta(before: &SigilState, after: &SigilState, wallets: &[WalletId]) -> u128 {
+        wallets.iter().map(|w| after.balance_of(w, &NATIVE) - before.balance_of(w, &NATIVE)).sum()
+    }
+
+    #[test]
+    fn split_coinbase_degenerates_to_full_reward_with_no_master() {
+        // No master wallet set: split_mining_reward returns 100% validator_share,
+        // so a one-wallet shares map must credit the FULL reward, byte-identical
+        // to the pre-pool-share coinbase path.
+        let st = SigilState::new();
+        let winner: WalletId = [0x42; 32];
+        let shares = std::collections::HashMap::from([(winner, 1u64)]);
+        let muts = split_coinbase_mutations(&st, 1, 1000, winner, &shares);
+        assert_eq!(muts.len(), 1, "no master => exactly one SetBalance, no fee splits");
+        match &muts[0] {
+            StateMutation::SetBalance { wallet, amount, .. } => {
+                assert_eq!(*wallet, winner);
+                assert_eq!(*amount, 1000, "full reward, no dev fee, when no master is set");
+            }
+            other => panic!("expected SetBalance, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_coinbase_takes_dev_fee_when_master_is_set() {
+        let mut st = SigilState::new();
+        let master: WalletId = [0x99; 32];
+        set_master(&mut st, master);
+        let winner: WalletId = [0x42; 32];
+        let shares = std::collections::HashMap::from([(winner, 1u64)]);
+        let reward = 100_000u128;
+        let muts = split_coinbase_mutations(&st, 1, reward, winner, &shares);
+
+        let mut after = st.clone();
+        sigil_state::commit_state_transition(&mut after, &StateTransition { at_height: 1, mutations: muts }, 1).unwrap();
+
+        // 5% dev fee (500 bps) + 1.2% commons (120 bps) + 0.1% operator pool (10 bps,
+        // folded into validator per credit_share's own accounting — no separate
+        // operator wallet here, matching sigil-rpc's model) taken from the winner.
+        let winner_bal = after.balance_of(&winner, &NATIVE);
+        let master_bal = after.balance_of(&master, &NATIVE);
+        let commons_bal = after.balance_of(&sigil_bank::COMMONS_WALLET, &NATIVE);
+        assert_eq!(master_bal, reward * 500 / 10_000, "master gets exactly the mining dev fee");
+        assert_eq!(commons_bal, reward * 120 / 10_000, "commons gets exactly the mining tithe");
+        assert!(winner_bal < reward, "winner does NOT get the full reward once a master exists");
+        // EXACT CONSERVATION: no unit created or destroyed by the split.
+        assert_eq!(
+            total_native_delta(&st, &after, &[winner, master, sigil_bank::COMMONS_WALLET]),
+            reward
+        );
+    }
+
+    #[test]
+    fn split_coinbase_self_mining_master_skips_its_own_fee_but_not_commons() {
+        let mut st = SigilState::new();
+        let master: WalletId = [0x99; 32];
+        set_master(&mut st, master);
+        // The master wallet mines its own block: it keeps its own cut (no
+        // fee-on-yourself), but the commons tithe is still taken — a
+        // network-wide carve independent of who mined.
+        let shares = std::collections::HashMap::from([(master, 1u64)]);
+        let reward = 100_000u128;
+        let muts = split_coinbase_mutations(&st, 1, reward, master, &shares);
+        let mut after = st.clone();
+        sigil_state::commit_state_transition(&mut after, &StateTransition { at_height: 1, mutations: muts }, 1).unwrap();
+        let commons_bal = after.balance_of(&sigil_bank::COMMONS_WALLET, &NATIVE);
+        assert_eq!(commons_bal, reward * 120 / 10_000, "commons tithe still applies to self-mined blocks");
+        assert_eq!(
+            total_native_delta(&st, &after, &[master, sigil_bank::COMMONS_WALLET]),
+            reward,
+            "master + commons must sum to exactly the reward (no double count, no leak)"
+        );
+    }
+
+    #[test]
+    fn split_coinbase_multi_wallet_proportional_exact_conservation() {
+        let mut st = SigilState::new();
+        let master: WalletId = [0x99; 32];
+        set_master(&mut st, master);
+        let winner: WalletId = [0x01; 32];
+        let other: WalletId = [0x02; 32];
+        // winner did 3x the work of `other` — proportional payout, winner absorbs
+        // the integer-division remainder.
+        let shares = std::collections::HashMap::from([(winner, 3u64), (other, 1u64)]);
+        let reward = 100_003u128; // deliberately not evenly divisible by 4
+        let muts = split_coinbase_mutations(&st, 1, reward, winner, &shares);
+        let mut after = st.clone();
+        sigil_state::commit_state_transition(&mut after, &StateTransition { at_height: 1, mutations: muts }, 1).unwrap();
+
+        let winner_bal = after.balance_of(&winner, &NATIVE);
+        let other_bal = after.balance_of(&other, &NATIVE);
+        let master_bal = after.balance_of(&master, &NATIVE);
+        let commons_bal = after.balance_of(&sigil_bank::COMMONS_WALLET, &NATIVE);
+        assert!(other_bal > 0, "the minority contributor must be paid something");
+        assert!(winner_bal > other_bal * 2, "winner's cut roughly tracks its 3x weight");
+        // EXACT CONSERVATION is the property that matters most: every unit of
+        // the reward is accounted for across all four wallets, nothing minted
+        // or destroyed by rounding.
+        assert_eq!(
+            total_native_delta(&st, &after, &[winner, other, master, sigil_bank::COMMONS_WALLET]),
+            reward
+        );
+    }
+
+    #[test]
+    fn build_block_body_for_shares_matches_legacy_path_when_no_master() {
+        // The critical regression-safety property: wiring pool-share mining in
+        // must NOT change behavior for the untouched default (no external miner,
+        // no master wallet) case. Same producer, same reward, same roots.
+        let st = SigilState::new();
+        let producer = producer_wallet();
+        let (legacy_tr, legacy_roots, ..) = build_block_body_for(&st, 1, None, &[], producer);
+        let shares = std::collections::HashMap::from([(producer, 1u64)]);
+        let (shares_tr, shares_roots, ..) = build_block_body_for_shares(&st, 1, None, &[], producer, &shares);
+        assert_eq!(legacy_tr.mutations, shares_tr.mutations, "identical mutations");
+        assert_eq!(legacy_roots.wallet_state_root, shares_roots.wallet_state_root, "identical roots");
+    }
 
     #[test]
     fn coinbase_credits_reward_and_moves_root() {

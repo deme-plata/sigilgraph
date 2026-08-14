@@ -37,6 +37,8 @@ sigil-header  = { path = "../sigil-header" }
 sigil-handshake = { path = "../sigil-handshake" } # H2 verify-before-sync
 sigil-state   = { path = "../sigil-state" }
 sigil-emission = { path = "../sigil-emission" } # ONE-CHAIN step 1: block reward for braid coinbase
+sigil-bank    = { path = "../sigil-bank" } # pool-share coinbase: master/commons dev-fee split
+flux-vdf      = { workspace = true } # test-only: constructing AcceptedSolve for the mint_next_block integration test
 sigil-api = { path = "../sigil-api" }
 sigil-events  = { path = "../sigil-events" }
 sigil-net       = { path = "../sigil-net" }

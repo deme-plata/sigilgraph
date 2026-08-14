@@ -27,7 +27,7 @@ use sigil_header::{
     BlockHash, ProofBundle, SigScheme, SigilBlockHeaderV0, SignatureBytes, SqiSignature,
     StarkProof, WesolowskiProof, HEADER_VERSION, NETWORK_ID, SQISIGN_L5_LEN,
 };
-use sigil_state::{SigilState, StateMutation, StateRoots, StateTransition};
+use sigil_state::{SigilState, StateMutation, StateRoots, StateTransition, WalletId};
 use sigil_tx::{apply_tx, ed25519_keygen, ed25519_sign_tx, Mempool, SignedTx, SigilTx};
 use std::sync::{Arc, Mutex};
 
@@ -891,7 +891,17 @@ fn run_start() -> Result<()> {
                             None => continue,     // no work yet — the braid idles, as PoW should
                         }
                     } else {
-                        None
+                        // Free-running (unchanged cadence, unchanged GHOSTDAG throughput):
+                        // opportunistically credit a solve that's ALREADY queued and matches
+                        // this exact frontier, but never wait for one — the braid must not
+                        // start blocking on PoW just because mining is now wired. take_solve()
+                        // pops destructively (no peek in MiningBridge), so a stale/mismatched
+                        // solve is discarded here — same accepted tradeoff the gated path
+                        // already makes on its `continue` branch, not a new loss. Anything
+                        // that doesn't match falls through to the producer-wallet default.
+                        mining_bridge.take_solve().filter(|s| {
+                            s.parent_hash == mint_ref.parent_hash() && s.height == mint_ref.height()
+                        })
                     };
                     // pull verify-once txs (already verified at mempool ingest)
                     let block_txs: Vec<SignedTx> =
@@ -2478,11 +2488,21 @@ fn mint_next_block(
     let coinbase_on = std::env::var("SIGIL_COINBASE").map(|v| v != "0").unwrap_or(true);
     let state = chain.state_snapshot();
     let reward = if coinbase_on { reward_override } else { Some(0u128) };
-    // Mined block → the reward belongs to the miner who solved it; otherwise the
-    // node's configured producer wallet.
-    let beneficiary = solve.map(|s| s.wallet).unwrap_or_else(coinbase::producer_wallet);
+    // Mined block → the reward is split over the verified solves for this
+    // height (pool-share economics: dev-fee + commons + proportional payout,
+    // winner absorbs the remainder); otherwise the node's configured producer
+    // wallet takes the whole thing (a one-entry "shares" map, which is exactly
+    // what the split degenerates to — no behavior change from before this was
+    // wired unless a master wallet is genesis-committed on this chain).
+    let (winner, shares): (WalletId, std::collections::HashMap<WalletId, u64>) = match solve {
+        Some(s) => (s.wallet, s.shares.clone()),
+        None => {
+            let w = coinbase::producer_wallet();
+            (w, std::collections::HashMap::from([(w, 1u64)]))
+        }
+    };
     let (transition, roots, block_events, included_txs) =
-        coinbase::build_block_body_for(&state, height, reward, txs, beneficiary);
+        coinbase::build_block_body_for_shares(&state, height, reward, txs, winner, &shares);
     // Commit the verify-once txs: a sequential BLAKE3 root over their intent
     // hashes + the count. The signatures were verified ONCE at mempool ingest;
     // the producer-sig over this header binds the producer to this exact set.
@@ -3016,6 +3036,50 @@ mod tests {
             mw,
             Some(MASTER_WALLET_GENESIS),
             "build_genesis must emit StateMutation::SetMasterWallet(MASTER_WALLET_GENESIS)"
+        );
+    }
+
+    /// END-TO-END: a real `mint_next_block()` call with a verified multi-wallet
+    /// solve actually credits the pool-share split, not just the isolated
+    /// `coinbase::split_coinbase_mutations` unit — proves the WIRING (the part
+    /// unique to this integration, since the math itself is unit-tested in
+    /// coinbase.rs) is correct: solve.shares reaches the minted block's coinbase,
+    /// and every credited wallet's balance is visible after `chain.apply()`.
+    #[test]
+    fn mint_next_block_credits_a_real_pool_share_solve() {
+        let mut chain = ChainTip::new();
+        chain.apply(build_genesis().unwrap()).expect("genesis applies");
+        let winner: WalletId = [0x11; 32];
+        let other: WalletId = [0x22; 32];
+        let shares = std::collections::HashMap::from([(winner, 3u64), (other, 1u64)]);
+        let solve = sigil_api::mining::AcceptedSolve {
+            wallet: winner,
+            height: chain.height(),
+            parent_hash: chain.parent_hash(),
+            nonce: 0,
+            blake4_hash: 0,
+            vdf: flux_vdf::VdfProof { y: vec![], pi: vec![], t: 0 },
+            bits: 16,
+            shares,
+        };
+        let reward = sigil_emission::block_reward(chain.height());
+        let block = mint_next_block(&chain, Vec::new(), &[], None, Some(&solve))
+            .expect("mint with a solve must succeed");
+        chain.apply(block).expect("minted block applies cleanly");
+
+        let state = chain.state_snapshot();
+        let winner_bal = state.balance_of(&winner, &sigil_state::NATIVE);
+        let other_bal = state.balance_of(&other, &sigil_state::NATIVE);
+        let master_bal = state.balance_of(&MASTER_WALLET_GENESIS, &sigil_state::NATIVE);
+        let commons_bal = state.balance_of(&sigil_bank::COMMONS_WALLET, &sigil_state::NATIVE);
+        assert!(other_bal > 0, "the minority contributor must be credited");
+        assert!(winner_bal > other_bal, "winner's 3x weight must pay more than other's 1x");
+        assert!(master_bal > 0, "genesis already commits a master wallet — the dev fee must apply");
+        assert!(commons_bal > 0, "the commons tithe must apply");
+        assert_eq!(
+            winner_bal + other_bal + master_bal + commons_bal,
+            reward,
+            "every unit of the block reward must land in exactly one of these four wallets"
         );
     }
 

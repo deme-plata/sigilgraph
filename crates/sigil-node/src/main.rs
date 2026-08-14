@@ -709,14 +709,24 @@ fn run_start() -> Result<()> {
         let dag_mode = std::env::var("SIGIL_DAG")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
         let mut peer_tips: std::collections::VecDeque<BlockHash> = std::collections::VecDeque::new();
-        if dag_mode {
-            eprintln!("🕸 DAG mode — real braid ordering: deterministic braid linearization v1 \
-                (NOT GHOSTDAG, NOT DagKnight-the-paper — docs/SIGIL_DAGKNIGHT_LANE_v0.md §1)");
-        }
         // SIGIL_DAG=1 REAL ordering: the braid is only constructed in dag_mode —
         // None ⇒ SIGIL_DAG=0 behavior-identical (design §3.1). Seeded from the
         // local chain's in-RAM window so the producer's own spine is known.
         let mut braid: Option<Braid> = dag_mode.then(|| dag_seed_braid(&chain));
+        if dag_mode {
+            // Honest, ACTUAL-state log line (was a hardcoded "v1, NOT GHOSTDAG"
+            // string regardless of config — fixed so it reports what the
+            // constructed braid is really running, per the crate's own
+            // honest-naming discipline).
+            if braid.as_ref().is_some_and(|b| b.is_ghostdag_active()) {
+                eprintln!("🕸 DAG mode — v2 GHOSTDAG-style k-cluster blue/red coloring ACTIVE \
+                    (SIGIL_DAG_GHOSTDAG_K set; still NOT DagKnight-the-paper — see \
+                    sigil-dagknight's ghostdag module doc for exact scope)");
+            } else {
+                eprintln!("🕸 DAG mode — real braid ordering: deterministic braid linearization v1 \
+                    (NOT GHOSTDAG, NOT DagKnight-the-paper — docs/SIGIL_DAGKNIGHT_LANE_v0.md §1)");
+            }
+        }
         // Full bodies awaiting/holding braid order, RAM-only + bounded (design
         // §3.1): evicted below finalized height after each drain, hard-capped.
         let dag_max_bodies: usize = std::env::var("SIGIL_DAG_MAX_BODIES").ok()
@@ -2153,8 +2163,9 @@ pub const GENESIS_TIMESTAMP_MS: u64 = 1_748_538_000_000;
 /// of parking against unknown pre-window ancestry.
 fn dag_seed_braid(chain: &ChainTip) -> Braid {
     let cfg = BraidConfig::from_env();
-    eprintln!("🕸 braid config: final_depth={} max_window={} max_pending={} max_merge_parents={}",
-        cfg.final_depth, cfg.max_window, cfg.max_pending, cfg.max_merge_parents);
+    eprintln!("🕸 braid config: final_depth={} max_window={} max_pending={} max_merge_parents={} ghostdag_k={}",
+        cfg.final_depth, cfg.max_window, cfg.max_pending, cfg.max_merge_parents,
+        cfg.ghostdag_k.map(|k| k.to_string()).unwrap_or_else(|| "off (v1)".to_string()));
     let base_h = chain.window_base();
     let (mut b, seed_from) = if base_h > 0 {
         match chain.get(base_h) {

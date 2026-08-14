@@ -362,7 +362,13 @@ mod tests {
         let by_hash: std::collections::HashMap<BlockHash, &Block> =
             all.iter().map(|b| (b.hash(), *b)).collect();
         let view = |b: &Block| BlockView::from(&b.header);
-        let cfg = || BraidConfig { final_depth: 2, max_window: 64, max_pending: 64, max_merge_parents: 4 };
+        let cfg = || BraidConfig {
+            final_depth: 2,
+            max_window: 64,
+            max_pending: 64,
+            max_merge_parents: 4,
+            ghostdag_k: None,
+        };
 
         // Two nodes, two DIFFERENT gossip arrival orders.
         let order_x = [&a0, &b0, &a1, &b1, &a2];

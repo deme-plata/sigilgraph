@@ -2767,9 +2767,13 @@ impl App {
               render_panic_streak: 0,
               bad_size_streak: 0,
               first_frame_logged: false,
-              // v0.7.0: Fleet starts with known bootstrap peers
+              // v0.7.0: Fleet starts with known bootstrap peers.
+              // Delta dropped 2026-08-14 -- confirmed permanently gone (same
+              // sweep that trimmed sigil-net::DEFAULT_BOOTSTRAP_PEERS down to
+              // just Epsilon). Showing a dead node here as "checking..."
+              // forever was its own small dishonesty on top of the real
+              // sync-stall bug this was found alongside.
               fleet_nodes: vec![
-                  FleetNode { name: "Delta".into(), addr: "5.79.79.158".into(), port: 9501, online: false, height: 0, version: String::new(), uptime_secs: 0 },
                   FleetNode { name: "Epsilon".into(), addr: "89.149.241.126".into(), port: 9501, online: false, height: 0, version: String::new(), uptime_secs: 0 },
               ],
               fleet_last_check: instant_ago(3600),

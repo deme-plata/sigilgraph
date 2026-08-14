@@ -89,11 +89,20 @@ pub const BOOTSTRAP_ENV: &str = "SIGIL_BOOTSTRAP_PEERS";
 
 /// Public seed nodes of the sigil-g0 testnet — so a FRESH node with no env syncs out-of-the-box.
 /// (The 4-box fleet listens on `0.0.0.0:9501`, publicly reachable.) Override with `SIGIL_BOOTSTRAP_PEERS`.
+// Delta/Gamma/Beta confirmed permanently gone 2026-08-14 (ping/nc timeout on
+// every port, not a firewall rule -- see CLAUDE.md's top-of-file note). They
+// used to sit here alongside Epsilon; a fresh sigil-top client would dial all
+// four, and while the three dead entries just wasted a connection attempt for
+// sigil-node (which mainly needs INBOUND reachability, not outbound
+// bootstrap), a LIGHT CLIENT syncing full-archive has no such luxury: if it
+// discovers some OTHER community peer via gossip before Epsilon answers, it
+// can end up meshed with a peer that structurally cannot serve full-archive
+// backfill at all (only sigil-node implements InboundRequest serving --
+// sigil-top is request-only) and stall forever on a real "mesh 1 peers"
+// reading that looks connected but can never advance. Epsilon is the only
+// entry until the fleet grows back.
 pub const DEFAULT_BOOTSTRAP_PEERS: &[&str] = &[
-    "/ip4/89.149.241.126/tcp/9501",  // Epsilon (producer)
-    "/ip4/5.79.79.158/tcp/9501",     // Delta
-    "/ip4/109.205.176.60/tcp/9501",  // Gamma
-    "/ip4/185.182.185.227/tcp/9501", // Beta
+    "/ip4/89.149.241.126/tcp/9501", // Epsilon (producer, the only live full node)
 ];
 
 /// Parse the comma-separated env var into a list of multiaddrs. Whitespace is trimmed, empty entries

@@ -224,11 +224,11 @@ pub fn submit_share(
 /// dual-lane BLAKE4 Φ + VDF Ω block (verified node-side by flux-miner's
 /// `check_submission`, then credited here). The verification rule differs per
 /// lane; the WRITE is identical and audited in exactly one place.
-/// The Æreborger commons treasury wallet — receives the 1.2% mining tithe
-/// (`sigil_bank::COMMONS_MINING_FEE_BPS`). The on-chain holding pool that the
-/// `sigil-commons` IOU layer allocates to honorary-citizen contributors at epoch
-/// close. A fixed protocol address (like the master/operator wallets).
-pub const COMMONS_WALLET: WalletId = [0xC0; 32];
+///
+/// [`COMMONS_WALLET`] (re-exported below) moved to `sigil_bank` 2026-08-14 —
+/// see its doc there — so sigil-node's pool-share coinbase and this crate's
+/// legacy path share ONE constant, not two copies that could drift.
+pub use sigil_bank::COMMONS_WALLET;
 
 pub fn credit_share(
     state: &mut SigilState,
@@ -475,6 +475,77 @@ pub fn build_ledger_header(
         producer: miner,
         producer_sig: SignatureBytes(vec![0u8; 64]),
     }
+}
+
+// ── Shared dual-lane mining math (moved from sigil-rpcd's binary 2026-08-14) ──
+//
+// Pure functions with no `Node`/binary-local state, so both `sigil-rpcd` (the
+// legacy money daemon) and `sigil-node` (the DagKnight braid chain, adopting
+// full pool-share mining the same day) share ONE copy of this math instead of
+// two copies drifting apart. Each caller keeps its own bookkeeping struct
+// (share windows, vardiff per-wallet ease, retarget anchors) and calls these
+// as the pure core.
+
+/// BLAKE4 Lane-A target for a difficulty `bits`: target = u64::MAX >> bits.
+pub fn target_from_bits(bits: u32) -> u64 {
+    u64::MAX >> bits.min(63)
+}
+
+/// The sub-difficulty share target for the current block difficulty, saturating
+/// safely: with ease ≥ bits every hash would qualify (share spam) — clamp so the
+/// share target is always at least 2× harder than trivial. Returns 0 (pool OFF)
+/// when ease is 0.
+pub fn share_target_from(bits: u32, ease: u32) -> u64 {
+    if ease == 0 {
+        return 0;
+    }
+    target_from_bits(bits.saturating_sub(ease).max(1))
+}
+
+/// The pure vardiff curve: per-wallet share ease from the wallet's self-reported
+/// Φ rate, aiming for ~`rate` shares/sec. `hps<=1.0` (unknown/idle wallet) gets
+/// the global (easiest) ease. See sigil-rpcd's `vardiff_ease` for the
+/// Node-bookkeeping wrapper each caller writes for itself (miner_hps map, env
+/// overrides) — this is the part that's identical everywhere.
+pub fn vardiff_ease_for(hps: f64, rate: f64, bits: u32, share_ease: u32) -> u32 {
+    if share_ease == 0 {
+        return 0;
+    }
+    if !(hps > 1.0) {
+        return share_ease;
+    }
+    let wanted_bits = (hps / rate).log2().ceil().max(1.0) as u32;
+    bits.saturating_sub(wanted_bits).clamp(1, share_ease)
+}
+
+/// VARDIFF payout weight: a share at `ease_w` costs 2^(share_ease-ease_w) times
+/// the hashes of a global-ease share, so it counts that many base share units in
+/// the window. A full block solve stays `1 << share_ease` units — the two scales
+/// agree by construction.
+pub fn share_weight(share_ease: u32, ease_w: u32) -> u64 {
+    1u64 << share_ease.saturating_sub(ease_w).min(32)
+}
+
+/// GRADE-BY-HASH: the ease a submitted share ACTUALLY earned, read off its
+/// Lane-A word instead of trusted from the pool's guess about the rig. Verify
+/// leniently (global ease), credit at the achieved ease — ease then carries
+/// ZERO payment authority, so a rig can neither be paid for work it did not do
+/// nor left unpaid for work it did. See sigil-rpcd's `achieved_ease` doc for the
+/// full incident writeup this fixed.
+pub fn achieved_ease(header: &[u8], nonce: u64, bits: u32, share_ease: u32) -> u32 {
+    let lz = flux_miner::blake4(header, nonce).leading_zeros();
+    bits.saturating_sub(lz).clamp(1, share_ease.max(1))
+}
+
+/// Per-height VDF challenge seed bound to the chain TIP: BLAKE3(tip ‖ height).
+/// Because `tip` folds the prior accepted block, the seed for height H is
+/// unknowable until H-1 lands — defeating precompute of future challenges.
+pub fn mining_seed(tip: &[u8; 32], height: u64) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"sigil-g0/mining-challenge/v1");
+    h.update(tip);
+    h.update(&height.to_le_bytes());
+    *h.finalize().as_bytes()
 }
 
 #[cfg(test)]

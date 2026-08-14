@@ -32,6 +32,9 @@ use sigil_dex::SwapDirection;
 use sigil_rpc::nation;
 use sigil_rpc::onboard::{self, VerifiedRegistry};
 use sigil_rpc::{credit_light_verifiers, credit_share, distribute_block_reward, execute_swap, submit_share};
+// Shared dual-lane mining math (moved to sigil-rpc lib 2026-08-14 so sigil-node's
+// new pool-share mining and this binary use ONE copy, not two drifting copies).
+use sigil_rpc::{achieved_ease, mining_seed, share_target_from, share_weight, target_from_bits, vardiff_ease_for};
 use sigil_state::{
     commit_state_transition, PoolId, PoolState, SigilState, StateMutation, StateTransition,
     TokenId, WalletId, NATIVE,
@@ -558,23 +561,11 @@ fn mining_bits() -> u32 {
 fn mining_vdf_t() -> u64 {
     std::env::var("SIGIL_MINING_VDF_T").ok().and_then(|s| s.parse().ok()).unwrap_or(MINING_VDF_T)
 }
-/// BLAKE4 Lane-A target for a difficulty `bits`: target = u64::MAX >> bits.
-fn target_from_bits(bits: u32) -> u64 { u64::MAX >> bits.min(63) }
-
 /// POOL-SHARES ease (bits): share_target = blake4_target << ease, i.e. shares are
 /// 2^ease easier than blocks → ≈2^ease shares per block across the whole network.
 /// 0 disables pool mode entirely (solo semantics, pre-7.1 wire behavior).
 fn share_ease_bits() -> u32 {
     std::env::var("SIGIL_SHARE_EASE_BITS").ok().and_then(|s| s.parse().ok()).unwrap_or(8)
-}
-
-/// The sub-difficulty share target for the current block difficulty, saturating
-/// safely: with ease ≥ bits every hash would qualify (share spam) — clamp so the
-/// share target is always at least 2× harder than trivial. Returns 0 (pool OFF)
-/// when ease is 0.
-fn share_target_from(bits: u32, ease: u32) -> u64 {
-    if ease == 0 { return 0; }
-    target_from_bits(bits.saturating_sub(ease).max(1))
 }
 
 /// VARDIFF (2026-07-24): per-wallet share ease from the wallet's self-reported Φ
@@ -593,25 +584,6 @@ fn vardiff_ease(n: &Node, w: &WalletId) -> u32 {
     let rate: f64 = std::env::var("SIGIL_VARDIFF_RATE").ok()
         .and_then(|s| s.parse().ok()).filter(|r: &f64| *r > 0.01).unwrap_or(0.5);
     vardiff_ease_for(hps, rate, n.bits, n.share_ease)
-}
-
-/// The pure vardiff curve (testable without a [`Node`]).
-fn vardiff_ease_for(hps: f64, rate: f64, bits: u32, share_ease: u32) -> u32 {
-    if share_ease == 0 { return 0; }
-    if !(hps > 1.0) { return share_ease; } // unknown/idle → global (easiest)
-    // share difficulty (bits) that yields ~`rate` shares/sec at this wallet's hps
-    let wanted_bits = (hps / rate).log2().ceil().max(1.0) as u32;
-    // ease = how much EASIER than the block target; clamp inside [1, global ease]
-    // (never harder than one bit under the block target, never easier than global).
-    bits.saturating_sub(wanted_bits).clamp(1, share_ease)
-}
-
-/// VARDIFF payout weight: a share at `ease_w` costs 2^(share_ease-ease_w) times
-/// the hashes of a global-ease share, so it counts that many base share units in
-/// the window. A full block solve stays `1 << share_ease` units (winner_weight) —
-/// the two scales agree by construction.
-fn share_weight(share_ease: u32, ease_w: u32) -> u64 {
-    1u64 << share_ease.saturating_sub(ease_w).min(32)
 }
 
 /// POOL-SHARES per-wallet cap of accepted shares per height: bounds memory, the
@@ -691,16 +663,6 @@ fn retarget(node: &mut Node) {
     node.bits = new_bits;
     node.retarget_anchor_ts = now;
     node.retarget_anchor_height = node.block_height;
-}
-/// Per-height VDF challenge seed bound to the chain TIP: BLAKE3(tip ‖ height).
-/// Because `tip` folds the prior accepted block, the seed for height H is
-/// unknowable until H-1 lands — defeating precompute of future challenges.
-fn mining_seed(tip: &[u8; 32], height: u64) -> [u8; 32] {
-    let mut h = blake3::Hasher::new();
-    h.update(b"sigil-g0/mining-challenge/v1");
-    h.update(tip);
-    h.update(&height.to_le_bytes());
-    *h.finalize().as_bytes()
 }
 
 /// Integer sqrt (initial LP shares = √(a·b), Uniswap-V2 style).
@@ -1705,18 +1667,20 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 if sub.height + 1 == bh {
                     if let Some(pc) = n.prev_challenge.clone() {
                         let pg = ModSquaring::bench_2048();
-                        // VARDIFF: verify the straddling share against the ease this
-                        // wallet was ISSUED (target rebuilt at the prev challenge's
-                        // bits — target_from_bits is `MAX >> bits`, so bits round-trips
-                        // via leading_zeros), and credit at the matching weight.
-                        let w_ease = n.issued_ease.get(&miner).copied().unwrap_or(n.share_ease);
+                        // VARDIFF BAND-AID: verify the straddling share at the GLOBAL
+                        // (easiest) ease, rebuilt at the prev challenge's bits —
+                        // target_from_bits is `MAX >> bits`, so bits round-trips via
+                        // leading_zeros. Same reasoning as the current-height path: the
+                        // per-wallet issued slot is raceable, so it must not gate an
+                        // accept. Credit is graded from the hash at those same bits.
                         let pc_bits = pc.blake4_target.leading_zeros();
                         if pc.height == sub.height
                             && pc.share_target > 0
                             && !n.prev_share_seen.contains(&(miner, sub.block.nonce))
-                            && check_submission_at(&pg, &pc, &sub, share_target_from(pc_bits, w_ease))
+                            && check_submission_at(&pg, &pc, &sub, share_target_from(pc_bits, n.share_ease))
                         {
-                            let w = share_weight(n.share_ease, w_ease);
+                            let earned = achieved_ease(&sub.block.header, sub.block.nonce, pc_bits, n.share_ease);
+                            let w = share_weight(n.share_ease, earned);
                             return credit_pool_share(&mut n, &miner, sub.block.nonce, bh, true, w);
                         }
                     }
@@ -1724,10 +1688,15 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 return reject_diag(&mut n, &miner, "stale_height",
                     format!("stale height: submitted {} but the mineable tip is {}", sub.height, bh));
             }
-            // VARDIFF: this wallet's shares verify against the ease it was ISSUED
-            // (live-computed fallback covers clients that never fetched a challenge).
-            let w_ease = n.issued_ease.get(&miner).copied().unwrap_or_else(|| vardiff_ease(&n, &miner));
-            let share_target = share_target_from(n.bits, w_ease);
+            // VARDIFF BAND-AID (2026-08-01): verify at the GLOBAL (easiest) ease,
+            // never at this wallet's `issued_ease` slot. That slot is overwritten by
+            // every challenge fetch — including fetches from OTHER rigs sharing the
+            // same payout wallet — so verifying against it rejected honest in-flight
+            // work whose only crime was being solved before the pool changed its mind.
+            // Payment does NOT get more lenient: the credit below grades the share by
+            // its actual hash (`achieved_ease`), so accepting generously cannot
+            // overpay. See [`achieved_ease`] for the live measurement.
+            let share_target = share_target_from(n.bits, n.share_ease);
             let c = Challenge {
                 height: bh,
                 vdf_input: mining_seed(&n.tip_hash, bh),
@@ -1744,7 +1713,12 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 if share_target > 0 && check_submission_at(&g, &c, &sub, share_target) {
                     // Caps first (a capped submit must not grow the dedup set),
                     // then dedup, then count — all inside credit_share.
-                    let w = share_weight(n.share_ease, w_ease);
+                    // VARDIFF BAND-AID: weight comes from the ease the hash ACTUALLY
+                    // achieved, not from the (raceable) issued slot — a rig that beat
+                    // a harder target is paid for the harder target, and a lenient
+                    // accept is worth exactly what it earned.
+                    let earned = achieved_ease(&sub.block.header, sub.block.nonce, n.bits, n.share_ease);
+                    let w = share_weight(n.share_ease, earned);
                     return credit_pool_share(&mut n, &miner, sub.block.nonce, bh, false, w);
                 }
                 return reject_diag(&mut n, &miner, "verify_mismatch",

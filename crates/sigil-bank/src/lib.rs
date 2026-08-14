@@ -66,6 +66,15 @@ pub const OPERATOR_NODE_FEE_BPS: u128 = 10;
 /// their work. Disjoint from the master dev-fee + the operator skim.
 pub const COMMONS_MINING_FEE_BPS: u128 = 120;
 
+/// The Æreborger commons treasury wallet — receives [`COMMONS_MINING_FEE_BPS`]
+/// of every mining coinbase. The on-chain holding pool that the sigil-commons
+/// IOU layer allocates to honorary-citizen contributors at epoch close. A
+/// fixed protocol address (like the master/operator wallets). Moved here
+/// 2026-08-14 from sigil-rpc (which re-exports it for backward compat) so
+/// sigil-node's pool-share coinbase and sigil-rpcd's legacy path use the SAME
+/// constant — money-adjacent addresses must never drift between two copies.
+pub const COMMONS_WALLET: WalletId = [0xC0; 32];
+
 /// Per-swap protocol fee on the *output* side, in basis points. **30 bps =
 /// 0.30%** — the master dev-fee take on every DEX swap, routed to
 /// [`DEV_MASTER_WALLET`]. This is taken from what the user *receives*, on top

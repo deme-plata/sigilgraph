@@ -4681,10 +4681,15 @@ fn human_bytes(bytes: u64) -> String {
 /// motif that glows HOT while [M]ining. Honest: SIGIL P0 is verify-once, so "network power"
 /// is the real block-production throughput + emission, not a fictional global hashrate;
 /// personal hashrate IS real local BLAKE work.
-/// v0.37: the engine's node base-URL (rpcd) — distinct from the legacy [m] BLAKE3
-/// `mine_url()`. The dual-lane engine talks /api/v1/mining/{challenge,submit}.
+/// v7.1.15: the engine's node base-URL — the braid (sigil-node), NOT the legacy
+/// sigil-rpcd chain. Same wire contract (`/api/v1/mining/{challenge,submit}`,
+/// `sigil-api::mining`'s wire-compatible aliases), so this is a URL-only change:
+/// a solved share now credits real pool-share mining ONTO the DagKnight/GHOSTDAG
+/// braid (dev-fee + commons split, proportional payout) instead of the separate
+/// rpcd chain. Override with SIGIL_MINE_NODE to point at rpcd (:8099) or
+/// anywhere else. Distinct from the legacy [m] BLAKE3 `mine_url()`.
 fn engine_node_url() -> String {
-    std::env::var("SIGIL_MINE_NODE").unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:8099".into())
+    std::env::var("SIGIL_MINE_NODE").unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:18181".into())
 }
 
 

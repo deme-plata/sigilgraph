@@ -268,6 +268,12 @@ struct NodeStatus {
     /// the feed doesn't carry it yet — non-breaking, always present.
     #[serde(default, alias = "balance")]
     wallet_balance: u128,
+    /// v7.1.13: the publisher's own freshness stamp (unix seconds). 0 when the
+    /// feed doesn't carry it. Used to refuse zombie mirrors: a feed can answer
+    /// HTTP 200 with WEEKS-old data (the dist-fluxapp copy froze 2026-07-27 and
+    /// every client worldwide trusted tip 33,598,726 for 13 days).
+    #[serde(default)]
+    updated: u64,
     /// v0.42: false while the node is (re)building its explorer full-text index in
     /// the background — money/chain data is live, only search is briefly empty.
     /// Absent on older nodes → defaults true (don't show a stale "indexing" badge).
@@ -454,6 +460,12 @@ fn fetch_best(cfg: &Config) -> (NodeStatus, bool, &'static str) {
     // JUMP 520k -> 3.5k -> 520k. A fallback drastically below the last feed height
     // is a different chain -> show an honest offline/retry instead of lying.
     static LAST_FEED_H: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    // v7.1.13: STALENESS GUARD. A mirror can answer HTTP 200 with a frozen file
+    // (dist-fluxapp's copy stopped updating 2026-07-27; it is FIRST in this list,
+    // so every client pinned its tip to 33,598,726 for 13 days). A feed whose own
+    // `updated` stamp is >15 min old loses to any fresh mirror; the freshest stale
+    // copy is still used when NOTHING is fresh (better an old tip than none).
+    let mut stale_best: Option<NodeStatus> = None;
     for url in [cfg.feed.as_str(),
                 "https://sigilgraph.fluxapp.xyz/sigil-status.json",
                 "https://quillon.xyz/sigil-status.json",
@@ -461,9 +473,23 @@ fn fetch_best(cfg: &Config) -> (NodeStatus, bool, &'static str) {
                 // on networks that filter the app's HTTPS (the OFFLINE-badge saga).
                 "http://sigilgraph.quillon.xyz:8099/sigil-status.json"] {
         if let Some((st, _b)) = fetch_feed(url) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if st.updated > 0 && now.saturating_sub(st.updated) > 900 {
+                if stale_best.as_ref().map(|b| st.updated > b.updated).unwrap_or(true) {
+                    stale_best = Some(st);
+                }
+                continue;
+            }
             LAST_FEED_H.store(st.height, std::sync::atomic::Ordering::Relaxed);
             return (st, true, "feed");
         }
+    }
+    if let Some(st) = stale_best {
+        LAST_FEED_H.store(st.height, std::sync::atomic::Ordering::Relaxed);
+        return (st, true, "feed-stale");
     }
     match fetch(&cfg.api) {
         Ok(s) => {

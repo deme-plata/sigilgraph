@@ -154,6 +154,10 @@ pub struct P2PSyncState {
     pub last_tip_at: Option<Instant>,
     pub connected_delta: bool,
     pub connected_epsilon: bool,
+    /// v7.1.13: count of failed outbound dials/handshakes this session. Non-zero
+    /// with peer_count==0 means "we ARE trying — the dials are being rejected"
+    /// (previously indistinguishable from not dialing at all).
+    pub dial_failures: u64,
     /// v0.7.0: Latest sync progress from the P2P mesh (consumed by TUI gauge).
     pub sync_height: u64,
     pub sync_hash_hex: String,
@@ -385,10 +389,13 @@ impl P2PBlockSync {
         // backfill/verify workload (peer_best froze → the monitor parked behind the tip at
         // 0 blk/s). A standalone OS thread with BLOCKING reqwest polls every 3s, immune to
         // that contention, and seeds peer_best directly.
-        // 0.77: the dedicated tip-poller spawn keeps gating on the LAUNCH-TIME mode (a
-        // full-archive launch flipped to light later still gets tips from the in-loop
-        // async fetch — just without the dedicated anti-starvation thread; acceptable).
-        if recent_only_init {
+        // 0.77: the dedicated tip-poller spawn gated on the LAUNCH-TIME mode (a
+        // full-archive launch relied on the in-loop async fetch — called "acceptable").
+        // v7.1.13: it was NOT acceptable — measured in the 2026-08-09 Windows stall, a
+        // FULL-ARCHIVE client's in-loop fetch starved and the displayed tip froze at a
+        // weeks-old value (33,598,726) while the real tip was 220k higher. The dedicated
+        // poller now runs in EVERY mode; it only ever raises peer_best.
+        if true {
             // v0.35 (sync-starts-earlier, DeepSeek audit S2): the v0.23 SYNCHRONOUS CDN
             // eager-seed is GONE — it blocked launch() for up to ~6 s of HTTP before the
             // sync loop could even spawn, serializing exactly the startup it meant to speed
@@ -975,6 +982,27 @@ impl P2PBlockSync {
                                 // NOTE: no per-event log here — the live mesh emits thousands of
                                 // SyncProgress/sec; eprintln-ing each one starved the sync loop
                                 // (v0.9.5 synced-stuck-at-0 bug). Progress is surfaced via state.
+                            }
+                            // v7.1.13: dial failures were INVISIBLE — flux-p2p logged them only
+                            // via `tracing` (no subscriber in the TUI), so a client whose every
+                            // bootstrap dial fails showed "mesh 0 peers" + "nudging peer" with
+                            // zero explanation, forever (the 2026-08-09 Windows stall). Name the
+                            // fleet node by IP and put the REASON in the log + stall line.
+                            flux_p2p::SwarmAppEvent::DialFailure { peer_id, error } => {
+                                let who = peer_id
+                                    .map(|p| p.to_string())
+                                    .unwrap_or_else(|| "?".into());
+                                let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                s.dial_failures = s.dial_failures.saturating_add(1);
+                                // Rate-limit: full line each failure is fine (dials back off
+                                // 3/6/12s), but keep the stall_reason to the newest.
+                                if s.peer_count == 0 {
+                                    s.stall_reason = format!("✗ dial failed: {error}");
+                                }
+                                crate::tlog!("[mesh] ✗DIAL-FAIL {who} — {error}");
+                            }
+                            flux_p2p::SwarmAppEvent::IncomingConnectionFailed { addr, error } => {
+                                crate::tlog!("[mesh] ✗INBOUND-FAIL {addr} — {error}");
                             }
                             _ => {}
                         }

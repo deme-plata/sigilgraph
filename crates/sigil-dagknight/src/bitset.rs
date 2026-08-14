@@ -93,6 +93,16 @@ impl VertexBitfield {
         }
     }
 
+    /// Bitwise AND-NOT (set difference: `self \ other`) with another bitfield.
+    /// Bits beyond `other`'s length are left untouched (nothing to remove).
+    #[inline]
+    pub fn subtract(&mut self, other: &VertexBitfield) {
+        let len = self.bits.len().min(other.bits.len());
+        for i in 0..len {
+            self.bits[i] &= !other.bits[i];
+        }
+    }
+
     /// Compute anticone: `active AND NOT(past) AND NOT(future)` with the
     /// self bit cleared — the set of vertices concurrent with `self_idx`.
     pub fn anticone(
@@ -414,6 +424,43 @@ impl BitfieldDag {
     /// Compute anticone size.
     pub fn anticone_size(&self, vertex_id: &BlockHash) -> Option<u32> {
         self.anticone(vertex_id).map(|bf| bf.count_ones())
+    }
+
+    /// Map set bits back to hashes via the index map, dropping any bit whose
+    /// vertex has since been recycled/removed (defensive; should not occur
+    /// for a bitfield derived from this same DAG's current state).
+    fn hashes_of_bits(&self, bf: &VertexBitfield) -> Vec<BlockHash> {
+        bf.iter_set_bits()
+            .filter_map(|idx| self.index_map.get_vertex(idx).copied())
+            .collect()
+    }
+
+    /// Anticone of `vertex_id` as hashes (the ghostdag lane's entry point —
+    /// avoids exposing `VertexBitfield`/index internals to callers outside
+    /// this module).
+    pub fn anticone_hashes(&self, vertex_id: &BlockHash) -> Option<Vec<BlockHash>> {
+        self.anticone(vertex_id).map(|bf| self.hashes_of_bits(&bf))
+    }
+
+    /// Transitive past (strict ancestors) of `vertex_id`, as hashes.
+    pub fn past_hashes(&self, vertex_id: &BlockHash) -> Option<Vec<BlockHash>> {
+        let idx = self.index_map.get_index(vertex_id)?;
+        let bf = self.past_sets.get(idx as usize)?;
+        Some(self.hashes_of_bits(bf))
+    }
+
+    /// `past(of) \ (past(minus) ∪ {minus})` — the GHOSTDAG mergeSet primitive:
+    /// ancestors of `of` that are not already covered by `minus`'s own past
+    /// (nor `minus` itself). `None` if either vertex is unknown.
+    pub fn past_diff_hashes(&self, of: &BlockHash, minus: &BlockHash) -> Option<Vec<BlockHash>> {
+        let idx_of = self.index_map.get_index(of)?;
+        let idx_minus = self.index_map.get_index(minus)?;
+        let mut diff = self.past_sets.get(idx_of as usize)?.clone();
+        if let Some(minus_past) = self.past_sets.get(idx_minus as usize) {
+            diff.subtract(minus_past);
+        }
+        diff.clear(idx_minus);
+        Some(self.hashes_of_bits(&diff))
     }
 
     /// Deterministic tie-break key for a vertex index:

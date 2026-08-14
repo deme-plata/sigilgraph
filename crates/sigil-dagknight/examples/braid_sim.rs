@@ -17,6 +17,7 @@ fn main() {
         sim::run_tamper_reject(0xDA64),
         sim::run_live_topology(0xDA65, 30, true),
         sim::run_window_bounds(0xDA66, 100_000),
+        sim::run_ghostdag_dual_instance(0xDA67, 3, 10_000, 4),
     ];
     let mut all = true;
     for r in &reports {
@@ -24,7 +25,7 @@ fn main() {
         all &= r.passed;
     }
     if all {
-        println!("braid_sim gate: PASS (6/6 scenarios)");
+        println!("braid_sim gate: PASS ({}/{} scenarios)", reports.len(), reports.len());
     } else {
         println!("braid_sim gate: FAIL");
         std::process::exit(1);

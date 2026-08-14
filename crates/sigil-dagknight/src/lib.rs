@@ -3,14 +3,20 @@
 //! **v1 implements DETERMINISTIC BRAID LINEARIZATION**: a topologically-guarded
 //! total order over the committed `parent_hash` / `merge_parents` block DAG,
 //! with a `(height, producer, hash)` tie-break and a fixed finality window.
+//! This remains the default (v1 is byte-identical whenever
+//! [`BraidConfig::ghostdag_k`] is unset).
 //!
-//! **It is NOT GHOSTDAG** (no blue score, no k-cluster, no
-//! selected-parent-by-blue-work) **and NOT DagKnight-the-paper** (no
-//! parameterless min-cut anticone bound). GHOSTDAG-style greedy k-cluster
-//! ordering is the scoped v2 upgrade; DagKnight-the-paper is future research
-//! and is not promised. Any release notes, science_summary text, or TUI
-//! strings sourced from this crate must reproduce these claims and nothing
-//! stronger. Binding statement: `docs/SIGIL_DAGKNIGHT_LANE_v0.md` §1.
+//! **v2 (opt-in, see [`ghostdag`]) implements real GHOSTDAG-style k-cluster
+//! blue/red coloring**: selected-parent-by-blue-score and a greedy admission
+//! test bounding each blue block's concurrent-block ("blue anticone") count
+//! by a fixed `k`. **It is still NOT DagKnight-the-paper** (no parameterless
+//! min-cut anticone bound — `k` is fixed, not derived from observed network
+//! delay) and does not yet use blue **work** (difficulty-weighted) for
+//! selection or finality — see the `ghostdag` module doc for the full,
+//! current honest-naming statement. Any release notes, science_summary text,
+//! or TUI strings sourced from this crate must reproduce these claims and
+//! nothing stronger. Binding statement: `docs/SIGIL_DAGKNIGHT_LANE_v0.md` §1
+//! (v1) and the `ghostdag` module doc (v2).
 //!
 //! The crate orders [`BlockView`]s only — no state, no transitions, no
 //! networking, no tokio. Bodies (full blocks) are a `sigil-node` concern.
@@ -19,12 +25,14 @@
 
 pub mod bitset;
 pub mod braid;
+pub mod ghostdag;
 pub mod present;
 pub mod sim;
 pub mod view;
 
 pub use bitset::{BitfieldDag, BitfieldDagStats, VertexBitfield, VertexIndexMap};
 pub use braid::{Braid, BraidStats};
+pub use ghostdag::{BlockGhostdagData, GhostdagStore};
 pub use present::BraidPresentation;
 pub use sim::BraidSimReport;
 pub use sigil_header::BlockHash;
@@ -49,6 +57,12 @@ pub struct BraidConfig {
     /// Headers carrying more merge parents than this are rejected. Default 4
     /// (env `SIGIL_DAG_MAX_MERGE_PARENTS`).
     pub max_merge_parents: usize,
+    /// GHOSTDAG-style v2 k-cluster bound. `None` (default) = v1 linearization
+    /// only, byte-identical to before this option existed. `Some(k)` opts a
+    /// braid into real blue/red coloring + blue-score tip selection — see
+    /// the [`crate::ghostdag`] module doc for exactly what that does and does
+    /// not claim. Env `SIGIL_DAG_GHOSTDAG_K` (unset or unparsable = `None`).
+    pub ghostdag_k: Option<u32>,
 }
 
 impl Default for BraidConfig {
@@ -58,6 +72,7 @@ impl Default for BraidConfig {
             max_window: 16_384,
             max_pending: 4_096,
             max_merge_parents: 4,
+            ghostdag_k: None,
         }
     }
 }
@@ -78,6 +93,9 @@ impl BraidConfig {
             max_window: get("SIGIL_DAG_MAX_WINDOW", d.max_window),
             max_pending: get("SIGIL_DAG_MAX_PENDING", d.max_pending),
             max_merge_parents: get("SIGIL_DAG_MAX_MERGE_PARENTS", d.max_merge_parents),
+            ghostdag_k: std::env::var("SIGIL_DAG_GHOSTDAG_K")
+                .ok()
+                .and_then(|v| v.trim().parse().ok()),
         }
     }
 }

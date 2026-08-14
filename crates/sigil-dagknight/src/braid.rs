@@ -30,6 +30,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use sigil_header::BlockHash;
 
 use crate::bitset::BitfieldDag;
+use crate::ghostdag::GhostdagStore;
 use crate::view::BlockView;
 use crate::{BraidConfig, InsertOutcome};
 
@@ -69,6 +70,10 @@ pub struct Braid {
     /// Lane-A substrate: kept in lock-step with `recs` (same membership, same
     /// cleanup cutoff). Provides O(1) causality + anticone for the v2 lane.
     dag: BitfieldDag,
+    /// v2 GHOSTDAG blue/red coloring store. `None` unless
+    /// `cfg.ghostdag_k.is_some()` — v1 behavior is completely unaffected
+    /// when this is `None` (see the `ghostdag` module doc).
+    ghostdag: Option<GhostdagStore>,
     /// Active window records, keyed by block hash.
     recs: HashMap<BlockHash, BlockRec>,
     /// known-parent → children within the window (spine + merge edges).
@@ -111,9 +116,11 @@ impl Braid {
     /// arriving before their ancestors are parked until backfill supplies
     /// them.
     pub fn new(cfg: BraidConfig) -> Self {
+        let ghostdag = cfg.ghostdag_k.map(GhostdagStore::new);
         Self {
             cfg,
             dag: BitfieldDag::new(),
+            ghostdag,
             recs: HashMap::new(),
             children: HashMap::new(),
             frontier: BTreeSet::new(),
@@ -306,6 +313,9 @@ impl Braid {
             .collect();
         self.dag
             .add_vertex(view.hash, &dag_parents, view.height, view.producer);
+        if let Some(store) = &mut self.ghostdag {
+            store.compute(&self.dag, view.hash, &dag_parents);
+        }
 
         let mut deps_unmet = 0usize;
         for p in &dag_parents {
@@ -389,7 +399,8 @@ impl Braid {
     /// the parked view is outside the retention band anyway and is dropped by
     /// the existing `cleanup` path.
     fn computed_final(&self) -> Option<u64> {
-        let (tip_height, _, _) = self.selected_tip_key()?;
+        let tip = self.selected_tip()?;
+        let tip_height = self.recs.get(&tip)?.view.height;
         let tip_line = tip_height.checked_sub(self.cfg.final_depth)?;
         let Some(floor) = self.pending_floor() else {
             return Some(tip_line);
@@ -418,14 +429,22 @@ impl Braid {
         best
     }
 
-    /// Selected tip: max height, min-hash tie-break.
+    /// Selected tip. v1 (no ghostdag): max height, min-hash tie-break. v2
+    /// (`cfg.ghostdag_k` set): max blue score, min-hash tie-break — see the
+    /// `ghostdag` module doc.
     pub fn selected_tip(&self) -> Option<BlockHash> {
-        self.selected_tip_key().map(|k| k.2)
+        if let Some(store) = &self.ghostdag {
+            store.select_tip(self.recs.keys())
+        } else {
+            self.selected_tip_key().map(|k| k.2)
+        }
     }
 
-    /// True iff `h` lies on the `parent_hash` walk back from the selected tip
+    /// True iff `h` lies on the selected chain back from the selected tip
     /// (within the resident window — blocks cleaned below the retention band
-    /// report `false`).
+    /// report `false`). v1 walks `view.parent`; v2 walks the GHOSTDAG
+    /// `selected_parent` pointer instead — the chain that actually reflects
+    /// blue-score-based selection.
     pub fn is_on_spine(&self, h: &BlockHash) -> bool {
         let Some(target) = self.recs.get(h) else {
             return false;
@@ -434,6 +453,32 @@ impl Braid {
         let Some(tip) = self.selected_tip() else {
             return false;
         };
+        if let Some(store) = &self.ghostdag {
+            let mut cur = tip;
+            loop {
+                if cur == *h {
+                    return true;
+                }
+                let Some(cur_height) = self
+                    .recs
+                    .get(&cur)
+                    .map(|r| r.view.height)
+                    .or_else(|| self.known_height(&cur))
+                else {
+                    return false;
+                };
+                if cur_height <= target_height {
+                    return false;
+                }
+                let Some(data) = store.get(&cur) else {
+                    return false;
+                };
+                let Some(next) = data.selected_parent else {
+                    return false;
+                };
+                cur = next;
+            }
+        }
         let mut cur = tip;
         loop {
             if cur == *h {
@@ -447,6 +492,30 @@ impl Braid {
             }
             cur = rec.view.parent;
         }
+    }
+
+    /// v2 blue score of `h` (0 in v1 mode, or if `h` is unknown to the
+    /// ghostdag store).
+    pub fn blue_score(&self, h: &BlockHash) -> u64 {
+        self.ghostdag.as_ref().map(|s| s.blue_score(h)).unwrap_or(0)
+    }
+
+    /// True iff v2 GHOSTDAG coloring is active for this braid
+    /// (`cfg.ghostdag_k.is_some()`).
+    pub fn is_ghostdag_active(&self) -> bool {
+        self.ghostdag.is_some()
+    }
+
+    /// v2 only: true iff `h` is colored BLUE relative to the current selected
+    /// tip. Always `false` in v1 mode (no coloring exists to query).
+    pub fn is_blue(&self, h: &BlockHash) -> bool {
+        let Some(store) = &self.ghostdag else {
+            return false;
+        };
+        let Some(tip) = self.selected_tip() else {
+            return false;
+        };
+        store.is_blue(&tip, h)
     }
 
     /// Current DAG tips (window blocks with no known children), minus
@@ -566,6 +635,15 @@ impl Braid {
         let cutoff = min_unemitted.map_or(keep_from, |m| keep_from.min(m));
         if cutoff > 0 {
             self.dag.cleanup_below_height(cutoff);
+            if let Some(store) = &mut self.ghostdag {
+                let removed: Vec<BlockHash> = self
+                    .recs
+                    .iter()
+                    .filter(|(_, r)| r.view.height < cutoff)
+                    .map(|(h, _)| *h)
+                    .collect();
+                store.forget(&removed);
+            }
             self.recs.retain(|_, r| r.view.height >= cutoff);
             self.children.retain(|p, _| self.recs.contains_key(p));
             for kids in self.children.values_mut() {

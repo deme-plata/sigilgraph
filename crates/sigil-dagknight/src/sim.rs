@@ -236,6 +236,7 @@ fn open_cfg(n: usize, final_depth: u64) -> BraidConfig {
         max_window: n + 64,
         max_pending: n + 64,
         max_merge_parents: 4,
+        ghostdag_k: None,
     }
 }
 
@@ -340,6 +341,88 @@ pub fn run_dual_instance(seed: u64, producers: u8, blocks: u64) -> BraidSimRepor
     }
 }
 
+// ─── S7: GHOSTDAG (v2) dual-instance agreement ──────────────────────────────
+
+/// S7 — the v2 analog of S1: the same generated DAG fed to two independent
+/// [`Braid`] instances (both with `ghostdag_k = Some(k)`) in two different
+/// arrival orders must agree on `linearize()`, `order_hash()`, the selected
+/// tip, AND — the v2-specific check S1 has no equivalent of — every block's
+/// `blue_score()`. v1's linearization is untouched by the ghostdag lane, so
+/// this scenario exists specifically to prove the NEW coloring/scoring is
+/// itself a pure function of the DAG, not of arrival order, at realistic
+/// scale (matches S1's scale: 3 producers, 10,000 blocks).
+pub fn run_ghostdag_dual_instance(seed: u64, producers: u8, blocks: u64, k: u32) -> BraidSimReport {
+    let mut rng = XorShift64::new(seed);
+    let gen = gen_braid(&mut rng, producers, blocks, false);
+    let n = gen.views.len();
+    let mut cfg = open_cfg(n, blocks + 1);
+    cfg.ghostdag_k = Some(k);
+    let mut checks = Checks::default();
+
+    let mut a = Braid::new(cfg.clone());
+    let mut bad_a = 0u64;
+    for v in &gen.views {
+        if !matches!(a.insert(v.clone()), InsertOutcome::Inserted { .. }) {
+            bad_a += 1;
+        }
+    }
+    checks.ok(bad_a == 0, format!("A: {bad_a} creation-order inserts not Inserted"));
+    checks.ok(a.is_ghostdag_active(), "A: ghostdag lane not active");
+
+    let mut order_b: Vec<usize> = (0..n).collect();
+    shuffle(&mut rng, &mut order_b);
+    let mut b = Braid::new(cfg);
+    let mut bad_b = 0u64;
+    for &i in &order_b {
+        match b.insert(gen.views[i].clone()) {
+            InsertOutcome::Inserted { .. } | InsertOutcome::MissingParents(_) => {}
+            _ => bad_b += 1,
+        }
+    }
+    checks.ok(bad_b == 0, format!("B: {bad_b} shuffled inserts rejected"));
+    checks.ok(
+        b.missing_parents().is_empty(),
+        "B: unresolved missing parents after full delivery",
+    );
+
+    let lin_a = a.linearize();
+    let lin_b = b.linearize();
+    let div = divergence_count(&lin_a, &lin_b);
+    checks.ok(lin_a.len() == n, "A: linearization does not cover the DAG");
+    checks.ok(div == 0, format!("linearizations diverge at {div} positions"));
+    let oh_a = a.order_hash();
+    checks.ok(oh_a == b.order_hash(), "order_hash mismatch between instances");
+    checks.ok(
+        a.selected_tip() == b.selected_tip(),
+        "selected tip (blue-score based) mismatch between instances",
+    );
+
+    // The v2-specific check: blue_score is a pure function of the DAG.
+    let mut blue_score_mismatches = 0u64;
+    for v in &gen.views {
+        if a.blue_score(&v.hash) != b.blue_score(&v.hash) {
+            blue_score_mismatches += 1;
+        }
+    }
+    checks.ok(
+        blue_score_mismatches == 0,
+        format!("{blue_score_mismatches} blocks have divergent blue_score across arrival orders"),
+    );
+
+    let passed = checks.passed();
+    BraidSimReport {
+        scenario: "S7 ghostdag dual-instance",
+        blocks: n as u64,
+        producers,
+        divergence: div + blue_score_mismatches,
+        order_hash_hex: hex32(&oh_a),
+        passed,
+        detail: checks.detail(format!(
+            "k={k} · 2 instances · 2 arrival orders · {n} blocks · linearization + blue_score fully agree"
+        )),
+    }
+}
+
 // ─── S2: permutation invariance + incremental==batch ────────────────────────
 
 /// S2 — `perms` seeded arrival permutations of one DAG must all agree on
@@ -361,6 +444,7 @@ pub fn run_permutation_invariance(seed: u64, perms: u32) -> BraidSimReport {
         max_window: n + ext_len as usize + 64,
         max_pending: n + 64,
         max_merge_parents: 4,
+        ghostdag_k: None,
     };
     let mut checks = Checks::default();
 

@@ -151,6 +151,7 @@ fn main() {
         max_window: 1 << 20,
         max_pending: 1 << 18,
         max_merge_parents: k.max(1),
+        ghostdag_k: None,
     };
     println!(
         "cfg: final_depth={} max_window={} max_pending={} max_merge_parents={}",

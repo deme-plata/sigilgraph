@@ -3,7 +3,7 @@ name = "sigil-dagknight"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Deterministic braid linearization over the committed SIGIL block DAG (parent_hash + merge_parents). NOT GHOSTDAG, NOT DagKnight-the-paper — see docs/SIGIL_DAGKNIGHT_LANE_v0.md §1."
+description = "Deterministic braid linearization (v1, default) over the committed SIGIL block DAG (parent_hash + merge_parents), plus opt-in v2 GHOSTDAG-style k-cluster blue/red coloring + blue-score tip selection (SIGIL_DAG_GHOSTDAG_K). Still NOT DagKnight-the-paper (k is fixed, not parameterless) and not yet blue-work-weighted — see docs/SIGIL_DAGKNIGHT_LANE_v0.md §1 and src/ghostdag.rs module doc."
 
 [dependencies]
 blake3 = { workspace = true }

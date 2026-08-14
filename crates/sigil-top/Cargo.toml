@@ -10,7 +10,12 @@ name = "sigil-top"
 # v7.1.15: [m] mining now points at sigil-node's real braid money API (:18181)
 # instead of the legacy sigil-rpcd chain (:8099) — a solved share now mines
 # and credits the actual DagKnight/GHOSTDAG chain, real pool-share economics.
-version = "7.1.15"
+# v7.1.16: default bootstrap peers trimmed to just Epsilon (Delta/Gamma/Beta
+# confirmed permanently gone) — fixes a real sync stall where a fresh client
+# could mesh with a non-serving community peer (any other sigil-top instance
+# structurally cannot serve full-archive backfill) and stall forever while
+# still reading "connected".
+version = "7.1.16"
 edition.workspace = true
 license.workspace = true
 description = "sigil-top — a SIGIL lightweight node + dual-mode (lite scorecard ↔ full dashboard) terminal monitor. v0.9.0 'Verifying Full Sync': downloads the chain genesis→tip over the sigil-g0 P2P mesh AND verifies it as one connected spine (per-header precheck + parent_hash linkage back to genesis), with a persisted verified_to watermark. New `full-sync` (headless sync-and-verify, exit 0 at tip) and `verify-chain` (re-verify the local store) subcommands; TUI surfaces the ⛓ verified-spine height + ⚠ spine-break alarm distinct from raw download progress."

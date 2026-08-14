@@ -1548,6 +1548,17 @@ fn run_start() -> Result<()> {
                                 eprintln!("📨 {} from {} — {}", topic, from, preview);
                             }
                         }
+                        // Named peer identity on connect/disconnect — previously only the
+                        // aggregate `peer_count` was ever logged, so there was no way to
+                        // tell a real distinct mesh peer apart from a stale/duplicate count
+                        // without reading someone else's logs. addr lets an operator map a
+                        // peer_id to a known box (e.g. an IP matching Gamma/Beta) at a glance.
+                        flux_p2p::SwarmAppEvent::PeerConnected { peer_id, addr } => {
+                            eprintln!("🔗 peer connected  {peer_id}  {addr}");
+                        }
+                        flux_p2p::SwarmAppEvent::PeerDisconnected { peer_id } => {
+                            eprintln!("🔌 peer disconnected  {peer_id}");
+                        }
                         _ => {}
                         }
                     }

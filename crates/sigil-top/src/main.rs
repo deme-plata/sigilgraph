@@ -3875,14 +3875,27 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 // full-archive and light-monitor through the engine atomics.
                                 // Light-monitor's 10ms tip-verify stays the untouched startup default.
                                 if app.p2p_sync.is_none() {
+                                    // BUG FIX (Viktor report, "sync doesnt work", v7.1.17):
+                                    // take_idle_store() ALREADY sets an accurate toast on
+                                    // both its None outcomes — "still opening (compaction)
+                                    // — press again in a moment" when the background opener
+                                    // thread just hasn't finished yet (the common case: a
+                                    // fresh launch, pressing F within the first few seconds,
+                                    // uptime 0m19s in the reported repro), or "unavailable —
+                                    // see ~/.sigil-top.log" when the opener genuinely failed.
+                                    // This branch used to UNCONDITIONALLY overwrite that with
+                                    // "restart with --sync" — wrong and misleading in the
+                                    // (much more common) transient case: the store was never
+                                    // unavailable, it just wasn't ready yet, and --sync isn't
+                                    // even required (F starts it on demand by design — see the
+                                    // idle_store_rx parking a few hundred lines up). Do NOT set
+                                    // a toast here; let take_idle_store's own message stand.
                                     if let Some(store) = app.take_idle_store() {
                                         let p2p = block_sync::P2PBlockSync::launch(store, false);
                                         app.p2p_sync = Some(p2p);
                                         app.full_sync = true;
                                         persist_sync_mode("full"); // LANE-V: survives update/restart
                                         app.toast = "⛓ FULL ARCHIVE started — syncing genesis→tip, holding every block (~1GB). F again = light monitor.".into();
-                                    } else {
-                                        app.toast = "✗ sync store unavailable — restart with --sync".into();
                                     }
                                     app.toast_sticky = true;
                                 } else if let Some(ref p2p) = app.p2p_sync {

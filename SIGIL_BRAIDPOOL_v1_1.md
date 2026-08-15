@@ -840,12 +840,68 @@ of it touches the producer loop or the deployed binary.
 - certificate verification;
 - recovery tests with producer loss.
 
-### Phase E — RS-coded availability
-- use in-tree Reed-Solomon;
-- reconstruction + re-encode check (**adopted from established prior art; do not label novel**);
-- deterministic peer repair;
-- compare bandwidth/CPU against replication;
-- document why coding wins for the measured SIGIL workload before making it the default.
+### Phase E — RS-coded availability — **SHIPPED 2026-08-15**, all in `sigil-narwhal-mempool`
+- Use in-tree Reed-Solomon. ✅ unchanged, still `flux-aether::rs_shard`/`rs_reassemble`
+  — but a REAL identity bug was fixed first: `dissemination.rs`'s `shard_batch`/
+  `reassemble_batch` were still keyed on `WorkerBatch`'s old Phase-0 bare digest,
+  not the canonical `BatchHeaderV1::batch_id()` that Phase A/C's `BatchSealer`/
+  `BatchStore` actually use. They now shard the `(header, batch)` PAIR together,
+  so reconstruction recovers both and can recompute `batch_id()` from what was
+  ACTUALLY reconstructed, not trust a separately-carried header.
+- Reconstruction + re-encode check (**adopted from established prior art —
+  Imitater, not claimed novel**). ✅ now genuinely wired to the real identity:
+  `reassemble_batch` checks `batch_id()` match AND independently re-derives
+  `tx_root` from the reconstructed transactions and compares against the
+  header's claimed root — two separate checks, so a bug breaking only one
+  wouldn't silently accept corrupt content. A test (`rejects_when_tx_root_disagrees_with_reconstructed_txs`)
+  constructs exactly that failure mode by hand and confirms it's caught.
+- Deterministic peer repair. ✅ new `repair.rs`: `repair_priority`/`next_repair_peer`
+  rank a batch's certificate signers via `BLAKE3(digest || validator)`, so
+  every node computes the SAME ask-order with no coordination, but the order
+  varies PER BATCH (repeated repairs spread load across signers instead of
+  always hammering whichever validator sorts first in some fixed list).
+  **Known gap, stated plainly:** the design doc's §3.5/§11 correction (from
+  the earlier Viktor review pass) binds `shard_index` into the signed ack so
+  a real deployment knows exactly which shard each signer holds. `types::BatchAck`
+  was never updated to that shape — still Phase-0/A's `{digest, validator,
+  sig}`. This module ranks "who to ask next," not "who holds shard i
+  specifically" — closing that gap is tracked follow-up work (a bigger,
+  separately-reviewable change to an already-shipped, already-tested signed
+  message), not done in this pass.
+- Compare bandwidth/CPU against replication. ✅ new `src/bin/dissemination_bench.rs`,
+  measuring the REAL `flux-aether` coder (not just the closed-form math
+  already in §3.3) on a 4096-tx batch (matching `SealPolicy::default()`'s
+  `target_txs`), across three committee sizes:
+
+  | n (validators) | k / parity | Bandwidth ratio (coded/replicated) | Encode | Decode | Total CPU |
+  |---:|---:|---:|---:|---:|---:|
+  | 4 | 2/2 | **0.667×** | 31.2 ms | 127.7 ms | 158.9 ms |
+  | 7 | 3/4 | **0.389×** | 31.0 ms | 113.4 ms | 144.3 ms |
+  | 10 | 4/6 | **0.278×** | 46.0 ms | 155.9 ms | 201.9 ms |
+
+- **Document why coding wins (or doesn't) for the measured SIGIL workload,
+  stated honestly rather than picking the flattering half:** bandwidth-wise,
+  coding wins clearly and increasingly at larger committee sizes — exactly
+  the shape the closed-form math predicted. **But the CPU cost is real and
+  large relative to SIGIL's own cadence**: 144-202ms of encode+decode for one
+  4096-tx batch, against an adaptive block rate of 8-60 blocks/s (16.7-125ms
+  per block) measured earlier this session. Doing this coding SYNCHRONOUSLY
+  in the block-production hot path, at the default `SealPolicy` batch size,
+  would very plausibly be a genuine THROUGHPUT BOTTLENECK, not a free
+  bandwidth win — the opposite of what a "10M TPS" pitch would want to hear,
+  and reported here anyway. This does not mean coding is wrong for SIGIL; it
+  means: (a) coding needs to run off the production hot path (a background
+  dispersal worker, not inline with minting), (b) smaller batches or a lower
+  `parity` reduce the CPU cost at the price of some bandwidth benefit, and
+  (c) Aptos's own rejection of coding for Quorum Store — cited honestly back
+  in the arXiv investigation — starts to look less like "they didn't need it"
+  and more like it may ALSO reflect a real CPU-cost tradeoff other teams hit,
+  not merely a load-balancing argument. None of this was measured before
+  Phase E; it's a genuinely new (if unglamorous) finding from actually running
+  the numbers instead of trusting the bandwidth math alone.
+
+65/65 crate tests green (up from 59). SIGIL chain confirmed still mining
+continuously immediately before and after this work.
 
 ### Phase F — BatchSetRoot sidecars
 - schema version/height gate;

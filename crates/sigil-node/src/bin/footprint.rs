@@ -127,6 +127,9 @@ fn realistic_block(height: u64) -> Block {
         sig_scheme: SigScheme::SqiSign5,
         producer: h32(height * 11 + 11),
         producer_sig: SignatureBytes(sig292(height * 11 + 12).as_bytes().to_vec()),
+        // Populated (not None) — this tool measures REALISTIC on-wire size,
+        // and QTFT topology_commitment rides along on every real block now.
+        topology_commitment: Some(h32(height * 11 + 13)),
     };
     Block { header, transition: StateTransition { at_height: height, mutations: vec![] }, events: vec![] }
 }

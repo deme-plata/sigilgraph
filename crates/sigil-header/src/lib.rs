@@ -237,7 +237,57 @@ pub struct SigilBlockHeaderV0 {
     /// Producer's signature over the *unsigned* header bytes (every field
     /// above, with `producer_sig` itself zeroed out for canonicalization).
     pub producer_sig: SignatureBytes,
+
+    // ── topology (QTFT) ────────────────────────────────────────────────────
+    /// BLAKE3, domain-tagged `SIGIL/QTFT/TOPOLOGY/V1`, over the exact
+    /// Alexander polynomial of the recent DAG braid (see
+    /// `SIGIL_QTFT_TOPOLOGY_v0.md`) — a real, exactly-computed topological
+    /// invariant of how recent blocks merge, distinct from the four state
+    /// roots (which prove the LEDGER state) and `fluxc_artifact_proof`
+    /// (which proves the SOFTWARE that sealed the block). `None` when no
+    /// braid context was available (genesis, linear/non-DAG mode, or too
+    /// close to genesis for a full window).
+    ///
+    /// **INFORMATIONAL ONLY as of this field's introduction.** Nothing in
+    /// `precheck()` or `verify_at_height()` inspects this field — a producer
+    /// omitting it, or computing it differently, does not currently affect
+    /// whether a block is accepted. It rides along, content-addressed and
+    /// signed (part of `signing_bytes()` like every other field), so its
+    /// history is tamper-evident from the moment it starts appearing, even
+    /// though nothing enforces it yet. See
+    /// [`TOPOLOGY_COMMITMENT_ACTIVATION_HEIGHT`] for how real enforcement
+    /// would be turned on later, mirroring the H1 pattern above.
+    ///
+    /// **`skip_serializing_if` is load-bearing, not cosmetic — this is the
+    /// fix for a real incident (2026-08-15).** `hash()` serializes the
+    /// ENTIRE struct; without this attribute, a `None` value still emits
+    /// `"topology_commitment":null` into the JSON, which changes the
+    /// re-derived hash of every ALREADY-MINTED historical block the instant
+    /// this field existed in the struct — even though `#[serde(default)]`
+    /// alone made *deserializing* old blocks compile-safe. In production
+    /// this silently broke the snapshot-boot tail-replay (every historical
+    /// block's re-hash mismatched what was recorded when it was minted,
+    /// rejecting the entire tail and forcing an ~9-hour full replay from
+    /// genesis instead of a few-second snapshot restore) before being
+    /// caught and rolled back. With `skip_serializing_if`, a `None` header
+    /// re-serializes byte-identically to a header from before this field
+    /// existed — `hash()` is stable for every block that predates it — and
+    /// only genuinely NEW blocks (minted with `Some(commitment)`) get a
+    /// different hash, which is correct and expected. See
+    /// `hash_is_unaffected_by_a_none_topology_commitment` for the
+    /// regression test this incident produced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology_commitment: Option<[u8; 32]>,
 }
+
+/// Activation height for real enforcement of `topology_commitment` (e.g.
+/// requiring it be present and independently recomputable, once a validator
+/// registry and multi-validator committee exist to make cross-checking it
+/// meaningful). **Dormant by default** — `u64::MAX` means "never active", so
+/// nothing in this crate currently checks the field against this height; it
+/// exists so a future enforcement pass has a named, mainnet-safe place to
+/// schedule a real height, mirroring [`H1_PRODUCER_SIG_ACTIVATION_HEIGHT`].
+pub const TOPOLOGY_COMMITMENT_ACTIVATION_HEIGHT: u64 = u64::MAX;
 
 impl SigilBlockHeaderV0 {
     /// Compute the canonical block hash — BLAKE3 over the deterministic
@@ -452,6 +502,7 @@ mod tests {
             sig_scheme: SigScheme::SqiSign5,
             producer: [0u8; 32],
             producer_sig: SignatureBytes(vec![0u8; 292]),
+            topology_commitment: None,
         }
     }
 
@@ -492,6 +543,43 @@ mod tests {
     fn hash_is_deterministic() {
         let h = fake_header();
         assert_eq!(h.hash(), h.hash());
+    }
+
+    // ── regression test for the 2026-08-15 snapshot-boot incident ──────────
+    // A None `topology_commitment` MUST be omitted from serialization, not
+    // emitted as `"topology_commitment":null` — otherwise hash() (which
+    // serializes the whole struct) silently changes for every block that
+    // was minted before this field existed, breaking the snapshot-boot tail
+    // replay (every historical block's re-derived hash stops matching what
+    // was recorded when it was minted) and forcing a full replay from
+    // genesis. This bug shipped once, live, and was caught + rolled back
+    // the same session — this test is what should have existed first.
+
+    #[test]
+    fn none_topology_commitment_is_omitted_from_serialization() {
+        let h = fake_header();
+        assert!(h.topology_commitment.is_none());
+        let json = serde_json::to_string(&h).unwrap();
+        assert!(
+            !json.contains("topology_commitment"),
+            "a None topology_commitment must not appear in the serialized bytes at all — \
+             if it does, hash() changes for every block minted before this field existed"
+        );
+    }
+
+    #[test]
+    fn some_topology_commitment_does_appear_and_changes_the_hash() {
+        // The opposite property: for a genuinely NEW block (Some(..)), the
+        // field is expected to be present and to change the hash — that's
+        // correct, not a bug. Only the None/historical case needs stability.
+        let mut h = fake_header();
+        h.topology_commitment = None;
+        let hash_none = h.hash();
+        h.topology_commitment = Some([9u8; 32]);
+        let hash_some = h.hash();
+        assert_ne!(hash_none, hash_some);
+        let json = serde_json::to_string(&h).unwrap();
+        assert!(json.contains("topology_commitment"), "a Some value must be present in the wire format");
     }
 
     #[test]

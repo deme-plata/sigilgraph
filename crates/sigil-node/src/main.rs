@@ -920,7 +920,8 @@ fn run_start() -> Result<()> {
                         let supply = mint_ref.state_snapshot().native_supply();
                         c.calculate_block_reward(now_secs, supply)
                     });
-                    match mint_next_block(mint_ref, mp, &block_txs, reward_override, solve.as_ref()) {
+                    let topology_commitment = compute_topology_commitment(braid.as_ref(), mint_ref.height());
+                    match mint_next_block(mint_ref, mp, &block_txs, reward_override, solve.as_ref(), topology_commitment) {
                         Ok(block) => {
                             let h = block.header.height;
                             let bhash = block.hash();
@@ -2140,6 +2141,8 @@ fn build_block_at(
         sig_scheme: SigScheme::SqiSign5,
         producer,
         producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
+        // build_block_at has no live Braid/DAG context — informational field.
+        topology_commitment: None,
     };
 
     Ok(Block { header, transition, events })
@@ -2472,6 +2475,46 @@ fn dag_store_body(
     dag_bodies.insert(hash, block);
 }
 
+/// How many recent, already-committed blocks the QTFT topology commitment
+/// windows over. Bounded, per SIGIL_QTFT_TOPOLOGY_v0.md's "the tractable
+/// core uses a CHEAP invariant over a bounded window" design — a full-DAG
+/// invariant is not what's computed here.
+const TOPOLOGY_COMMITMENT_WINDOW: u64 = 32;
+
+/// Compute the QTFT topology commitment for the block about to be minted at
+/// `next_height`: the exact Alexander polynomial (`flux_topology`) of the
+/// braid word (`sigil_dagknight::present::braid_word`, QTFT-1's own
+/// documented one-line bridge) over the bounded window of already-resident
+/// history `[next_height - TOPOLOGY_COMMITMENT_WINDOW, next_height - 1]`,
+/// hashed with domain separation. `None` when there's no live `Braid`
+/// (linear/non-DAG mode, `SIGIL_DAG=0`) or no prior window exists yet
+/// (genesis, `next_height == 0`).
+///
+/// **Honest note on what this actually computes on SIGIL today:** with a
+/// single producer, every block in every window shares one producer id, so
+/// `braid_word` always yields the empty word on 1 strand — the Alexander
+/// polynomial of the unknot, a fixed, non-informative value. This becomes a
+/// real, block-to-block-varying invariant the moment a second real producer
+/// joins the mesh. It is computed and committed now anyway so the field's
+/// history is tamper-evident (part of `signing_bytes()`) from the moment it
+/// starts appearing, not retroactively once it becomes interesting.
+fn compute_topology_commitment(braid: Option<&Braid>, next_height: u64) -> Option<[u8; 32]> {
+    let braid = braid?;
+    if next_height == 0 {
+        return None;
+    }
+    let to_height = next_height - 1;
+    let from_height = to_height.saturating_sub(TOPOLOGY_COMMITMENT_WINDOW.saturating_sub(1));
+    let bp = braid.braid_word(from_height, to_height);
+    let bw = flux_topology::BraidWord { strands: bp.strands, gens: bp.word };
+    let delta = flux_topology::alexander_poly(&bw);
+    let bytes = serde_json::to_vec(&delta).ok()?;
+    let mut h = blake3::Hasher::new();
+    h.update(b"SIGIL/QTFT/TOPOLOGY/V1");
+    h.update(&bytes);
+    Some(*h.finalize().as_bytes())
+}
+
 /// Mint an EMPTY block at the current tip — a no-tx block that just advances
 /// the chain. Used by the `start` producer loop to stream blocks across the
 /// network for cross-host throughput measurement. The transition is empty so
@@ -2483,6 +2526,7 @@ fn mint_next_block(
     txs: &[SignedTx],
     reward_override: Option<u128>,
     solve: Option<&sigil_api::mining::AcceptedSolve>,
+    topology_commitment: Option<[u8; 32]>,
 ) -> Result<Block> {
     let height = chain.height();
     let parent = chain.parent_hash();
@@ -2574,6 +2618,7 @@ fn mint_next_block(
         // hashed commits to this exact wallet), so it can't be re-pointed.
         producer: solve.map(|s| s.wallet).unwrap_or([0u8; 32]),
         producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
+        topology_commitment,
     };
     Ok(Block { header, transition, events: block_events })
 }
@@ -2682,6 +2727,8 @@ fn build_genesis() -> Result<Block> {
         producer,
         // SqiSign5 expects 292 bytes; precheck rejects anything else.
         producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
+        // Genesis has no prior window to commit to.
+        topology_commitment: None,
     };
 
     Ok(Block {
@@ -3090,7 +3137,7 @@ mod tests {
             shares,
         };
         let reward = sigil_emission::block_reward(chain.height());
-        let block = mint_next_block(&chain, Vec::new(), &[], None, Some(&solve))
+        let block = mint_next_block(&chain, Vec::new(), &[], None, Some(&solve), None)
             .expect("mint with a solve must succeed");
         chain.apply(block).expect("minted block applies cleanly");
 
@@ -3235,7 +3282,7 @@ mod dag_wiring_tests {
         let mut blocks = vec![g.clone()];
         builder.apply(g).expect("apply genesis");
         for _ in 0..2 {
-            let b = mint_next_block(&builder, vec![], &[], None, None).expect("mint");
+            let b = mint_next_block(&builder, vec![], &[], None, None, None).expect("mint");
             blocks.push(b.clone());
             builder.apply(b).expect("apply");
         }

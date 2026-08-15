@@ -626,6 +626,7 @@ mod tests {
                 fluxc_artifact_proof: ProofBundle { artifact_blake3: [0u8; 32], sqisign_sig: vec![], sqisign_pubkey: vec![], settle_tx: None },
                 sig_scheme: SigScheme::SqiSign5, producer: [0u8; 32],
                 producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
+                topology_commitment: None,
             };
             Block { header, transition: tr, events: vec![] }
         }

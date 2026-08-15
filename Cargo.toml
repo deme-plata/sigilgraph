@@ -69,6 +69,7 @@ flux-fold  = { path = "crates/flux-fold" }
 flux-miner = { path = "crates/flux-miner" }
 zk-flux    = { path = "crates/zk-flux" }
 sigil-dagknight = { path = "crates/sigil-dagknight" }
+flux-topology = { path = "crates/flux-topology" }
 num-bigint  = "0.4"
 num-integer = "0.1"
 num-traits  = "0.2"

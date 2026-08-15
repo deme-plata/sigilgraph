@@ -128,6 +128,7 @@ fn realistic_header(height: u64) -> sigil_header::SigilBlockHeaderV0 {
         sig_scheme: SigScheme::SqiSign5,
         producer: seed,
         producer_sig: SignatureBytes(vec![0x55; 292]),
+        topology_commitment: Some(seed),
     }
 }
 

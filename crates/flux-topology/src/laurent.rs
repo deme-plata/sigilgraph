@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct LaurentPoly {
     min_exp: i32,
     coeffs: Vec<i128>,

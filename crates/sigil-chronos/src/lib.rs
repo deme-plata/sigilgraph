@@ -26,6 +26,7 @@
 #![warn(missing_docs)]
 
 pub mod boundary;
+pub mod stall;
 pub mod driver;
 pub mod market;
 pub mod multiverse;
@@ -196,6 +197,8 @@ fn build_header(height: u64, parent_hash: BlockHash, roots: StateRoots) -> Sigil
         sig_scheme: SigScheme::SqiSign5,
         producer: [0u8; 32],
         producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
+        // No Braid in the deterministic sim's header path — informational field.
+        topology_commitment: None,
     }
 }
 
@@ -362,6 +365,24 @@ impl SigilSimNode {
     /// Queue a tx into the local mempool (producer pre-seed from the binary).
     pub fn enqueue_tx(&mut self, tx: SignedTx) {
         self.mempool.push_back(tx);
+    }
+
+    /// TEST/HARNESS ONLY — commit an **undeclared** mint straight through the
+    /// chokepoint: raise a wallet's NATIVE balance with no `MintReward` event.
+    ///
+    /// This is the phantom-mint fault the supply CAP cannot see (`SetBalance` is an
+    /// absolute write, and the total stays far under `MAX_SUPPLY`). It exists so the
+    /// boundary audit can be proven to DETECT something — a soak that cannot fail is
+    /// not evidence. See `boundary::check_crossing`.
+    pub fn inject_undeclared_mint(&mut self, amount: u128) {
+        let victim = PRODUCER_WALLET;
+        let inflated = self.state.balance_of(&victim, &NATIVE).saturating_add(amount);
+        let t = StateTransition {
+            at_height: self.next_height,
+            mutations: vec![StateMutation::SetBalance { wallet: victim, token: NATIVE, amount: inflated }],
+        };
+        commit_state_transition(&mut self.state, &t, self.next_height)
+            .expect("cap check accepts an undeclared mint — that is the point");
     }
 
     /// Current four roots.

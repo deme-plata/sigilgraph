@@ -88,6 +88,7 @@ pub(crate) fn __test_chain(n: u64) -> Vec<Block> {
                 sig_scheme: SigScheme::SqiSign5,
                 producer: [0u8; 32],
                 producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
+                topology_commitment: None,
             };
             Block {
                 header,

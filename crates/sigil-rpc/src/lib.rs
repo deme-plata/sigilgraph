@@ -474,6 +474,9 @@ pub fn build_ledger_header(
         sig_scheme: SigScheme::Ed25519Hot,
         producer: miner,
         producer_sig: SignatureBytes(vec![0u8; 64]),
+        // No live Braid context available at this call site (not the
+        // sigil-node producer loop) — informational field, safe to omit.
+        topology_commitment: None,
     }
 }
 

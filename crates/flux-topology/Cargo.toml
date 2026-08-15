@@ -6,3 +6,4 @@ license.workspace = true
 description = "flux-topology (QTFT-1) — real braid-closure invariants over plain Artin braid words: strand permutation, writhe, linking matrix, reduced Burau representation, and the exact Alexander polynomial (fraction-free Bareiss over Z[t,1/t]). Pure math, zero chain deps. Consumed by the sigil-dagknight lane, whose v1 is deterministic braid linearization — NOT GHOSTDAG, NOT DagKnight-the-paper. No Jones-polynomial heuristic anywhere: only invariants computed exactly."
 
 [dependencies]
+serde = { workspace = true }

@@ -107,10 +107,20 @@ pub const DEFAULT_BOOTSTRAP_PEERS: &[&str] = &[
 
 /// Parse the comma-separated env var into a list of multiaddrs. Whitespace is trimmed, empty entries
 /// skipped. When the var is UNSET, fall back to the public testnet seeds so a node syncs out-of-the-box.
+///
+/// An explicitly-SET-but-empty var (`SIGIL_BOOTSTRAP_PEERS=`) is honored as a real empty list, distinct
+/// from unset. This matters for Epsilon's own sigil-node: it's the sole producer and only needs INBOUND
+/// reachability, so it has nothing to dial — but DEFAULT_BOOTSTRAP_PEERS still needs to list Epsilon for
+/// light clients (sigil-top) discovering the network fresh. Before this distinction, Epsilon had no way
+/// to opt out and ended up in its own bootstrap list, self-dialing on the mesh-maintenance retry timer —
+/// observed live 2026-08-15: the self-connection drops and reconnects every ~70s (retry_interval churn),
+/// which resets sigil-node's peers-gate (`first_peer_at`) each time and can prevent the producer's
+/// 3s post-peer grace period from ever completing, stalling block production indefinitely even though
+/// the node looks "connected". `Environment=SIGIL_BOOTSTRAP_PEERS=` in the systemd unit now opts out.
 pub fn read_bootstrap_peers() -> Vec<String> {
     match std::env::var(BOOTSTRAP_ENV) {
-        Ok(s) if !s.trim().is_empty() => parse_bootstrap_list(&s),
-        _ => DEFAULT_BOOTSTRAP_PEERS.iter().map(|s| s.to_string()).collect(),
+        Ok(s) => parse_bootstrap_list(&s),
+        Err(_) => DEFAULT_BOOTSTRAP_PEERS.iter().map(|s| s.to_string()).collect(),
     }
 }
 

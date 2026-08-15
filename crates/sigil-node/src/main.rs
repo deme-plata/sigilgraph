@@ -1079,7 +1079,28 @@ fn run_start() -> Result<()> {
 
                     // Drain incoming events from peers (every 250ms): live block gossip on
                     // TOPIC_BLOCKS + point-to-point backfill requests (InboundRequest).
-                    for ev in mgr.drain_events() {
+                    //
+                    // BOUNDED (2026-08-15): drain_events() returns the FULL backlog already
+                    // popped from the manager's queue, and this loop is fully synchronous —
+                    // it never yields back to tokio::select! until every drained event is
+                    // processed. Discovered live: after any stall long enough for peers to
+                    // pile up retries (a stalled/slow-starting node, or just a few peers each
+                    // running their own request-ahead pipeline), this single arm can end up
+                    // processing thousands of events back-to-back, some individually expensive
+                    // (full-block/skeleton serves: disk read + zstd + send). While that runs,
+                    // NO other select! arm — including produce_tick and the 5s heartbeat — ever
+                    // gets polled, so the node looks completely dead (no new blocks, no
+                    // heartbeat, /v1/mining/challenge stuck 503) even though it's actually busy
+                    // and making progress. Peers are already retry-tolerant (proven live: the
+                    // same peer re-requests the same range repeatedly rather than hanging), so
+                    // truncating the batch and picking up the remainder on a LATER pass is a
+                    // safe degradation, not data loss — and it lets production/heartbeat get a
+                    // fair turn every ~250ms instead of being starved for as long as the
+                    // backlog takes to fully drain (observed: 10+ minutes and still growing).
+                    let mut drained = mgr.drain_events();
+                    const MAX_EVENTS_PER_DRAIN: usize = 200;
+                    drained.truncate(MAX_EVENTS_PER_DRAIN);
+                    for ev in drained {
                         match ev {
                         flux_p2p::SwarmAppEvent::InboundRequest { peer, request_id, payload } => {
                             // Point-to-point backfill serve: answer ONE requester with

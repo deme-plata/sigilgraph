@@ -1,0 +1,16 @@
+[package]
+name = "sigil-narwhal-mempool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Phase-0 Narwhal-style DAG mempool for SIGIL: sharded parallel-worker ingestion + batch-availability certification + erasure-coded batch dissemination (via flux-aether). Standalone and tested; NOT yet wired into sigil-node's producer loop. See SIGIL_NARWHAL_MEMPOOL_v0.md for the design and phased build plan."
+
+[dependencies]
+blake3        = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+parking_lot   = { workspace = true }
+ed25519-dalek = { version = "2.2", features = ["rand_core", "batch"] }
+sigil-tx      = { path = "../sigil-tx" }
+sigil-state   = { path = "../sigil-state" }
+flux-aether   = { path = "../../../flux/crates/flux-aether" }

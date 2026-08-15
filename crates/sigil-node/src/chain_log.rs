@@ -120,7 +120,16 @@ impl ChainLog {
                 let rec = u32::from_le_bytes(lb) as u64;
                 offsets.push(pos);
                 pos += 4 + rec;
-                if r.seek(SeekFrom::Start(pos)).is_err() {
+                // seek_relative (not seek(SeekFrom::Start)) — a BufReader's Seek impl
+                // unconditionally discards its internal buffer on every call, turning
+                // this scan into one raw unbuffered syscall PER RECORD (each pulling a
+                // fresh OS page just to read the next 4-byte length prefix). At tens of
+                // millions of records that's tens of millions of syscalls and hundreds
+                // of GB of redundant reads — the actual cause of a multi-hour open() on
+                // a large chain.log. seek_relative stays inside the buffer whenever the
+                // skip distance fits (always true here: records are ~hundreds of bytes,
+                // the buffer is 8 KB), so the common case costs no syscall at all.
+                if r.seek_relative(rec as i64).is_err() {
                     offsets.pop(); // torn record at the tail; drop it
                     break;
                 }

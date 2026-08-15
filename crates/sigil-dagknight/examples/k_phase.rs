@@ -209,6 +209,7 @@ fn run_cell(producers: usize, k: usize, delay: usize, rounds: usize, seed: u64) 
         max_pending: 1 << 18,
         max_merge_parents: k.max(1),
         ghostdag_k: None,
+        final_blue_depth: None,
     };
 
     let mut node_a = Braid::new_with_base(cfg.clone(), GENESIS, 0);

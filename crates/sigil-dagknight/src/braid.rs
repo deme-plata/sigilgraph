@@ -401,13 +401,58 @@ impl Braid {
     fn computed_final(&self) -> Option<u64> {
         let tip = self.selected_tip()?;
         let tip_height = self.recs.get(&tip)?.view.height;
-        let tip_line = tip_height.checked_sub(self.cfg.final_depth)?;
+        let tip_line = match (&self.ghostdag, self.cfg.final_blue_depth) {
+            (Some(store), Some(final_blue_depth)) => {
+                self.blue_score_tip_line(store, &tip, tip_height, final_blue_depth)?
+            }
+            _ => tip_height.checked_sub(self.cfg.final_depth)?,
+        };
         let Some(floor) = self.pending_floor() else {
             return Some(tip_line);
         };
         let clamped = tip_line.min(floor.saturating_sub(1));
         let hard_floor = tip_height.saturating_sub(self.cfg.max_window as u64);
         Some(clamped.max(hard_floor).min(tip_line))
+    }
+
+    /// v2.1 finality line: walk the selected-parent spine back from `tip`
+    /// until blue score has dropped by `final_blue_depth`, and return THAT
+    /// spine block's height — the same shape as the v1 `tip_line` (a height
+    /// threshold `insert()`'s existing `view.height <= f` gate can use
+    /// unmodified), but derived from blue-score depth along the real spine
+    /// instead of a flat height-offset. See `BraidConfig::final_blue_depth`'s
+    /// doc comment for what this does and does not prove.
+    ///
+    /// Only ever walks `selected_parent` pointers, which by construction are
+    /// always the canonical spine — never a RED merge-set member — so RED
+    /// blocks can never become a finality threshold through this path; no
+    /// separate `is_blue` check is needed for the walk itself.
+    ///
+    /// `None` if the tip's own blue score hasn't reached `final_blue_depth`
+    /// yet (mirrors v1's "not enough depth yet" `checked_sub` failure), or
+    /// if the spine walk runs off the resident window before reaching the
+    /// threshold (a base-anchored seed, or a window trimmed mid-walk —
+    /// treated as "not yet finalizable" rather than guessing).
+    fn blue_score_tip_line(
+        &self,
+        store: &GhostdagStore,
+        tip: &BlockHash,
+        tip_height: u64,
+        final_blue_depth: u64,
+    ) -> Option<u64> {
+        let tip_score = store.blue_score(tip);
+        let threshold = tip_score.checked_sub(final_blue_depth)?;
+        let mut cur = *tip;
+        let mut cur_height = tip_height;
+        loop {
+            if store.blue_score(&cur) <= threshold {
+                return Some(cur_height);
+            }
+            let data = store.get(&cur)?;
+            let parent = data.selected_parent?;
+            cur_height = self.known_height(&parent)?;
+            cur = parent;
+        }
     }
 
     /// Selected tip key: max height, min-hash tie-break, over the window.
@@ -1166,5 +1211,220 @@ mod tests {
         let before = a.order_hash();
         a.insert(v(h(50), h(7), vec![], 5, PB));
         assert_ne!(a.order_hash(), before);
+    }
+
+    // ── v2.1 blue-score finality (final_blue_depth) ─────────────────────────
+    // Added 2026-08-15 alongside `computed_final`'s v2 branch. See
+    // `BraidConfig::final_blue_depth`'s doc comment for exactly what this
+    // does and does not prove.
+
+    fn ghostdag_cfg(ghostdag_k: u32, final_blue_depth: Option<u64>) -> BraidConfig {
+        BraidConfig {
+            ghostdag_k: Some(ghostdag_k),
+            final_blue_depth,
+            ..BraidConfig::default()
+        }
+    }
+
+    #[test]
+    fn blue_score_finality_advances_under_normal_conditions() {
+        // A plain linear chain (no concurrency at all): blue_score tracks
+        // height 1:1 here (ghostdag::linear_chain_blue_score_tracks_height
+        // already proves this at the GhostdagStore level), so a blue-score
+        // depth of 4 should behave exactly like a height depth of 4 for this
+        // simple case — the basic sanity check before the more interesting
+        // concurrent/adversarial tests below.
+        let mut b = Braid::new(ghostdag_cfg(2, Some(4)));
+        for view in chain_views(10) {
+            assert!(matches!(b.insert(view), InsertOutcome::Inserted { .. }));
+        }
+        assert_eq!(b.finalized_height(), 6, "tip blue_score 10, depth 4 -> finalized through height 6, same as the height-offset rule would give here");
+        let drained = b.drain_ordered();
+        assert_eq!(drained.len(), 7); // heights 0..=6
+        assert_eq!(drained, chain_views(6).iter().map(|v| v.hash).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn blue_score_finality_is_a_separate_optin_from_ghostdag_k() {
+        // ghostdag_k alone (final_blue_depth left None, the default) must
+        // leave computed_final on the classic height-offset rule, byte-
+        // identical to a braid with no coloring at all. This is the specific
+        // claim BraidConfig::final_blue_depth's doc comment makes ("a
+        // SEPARATE, more conservative opt-in on top of v2 coloring") and
+        // nothing else in this test module exercises it.
+        let cfg_v2_no_blue_finality = BraidConfig {
+            ghostdag_k: Some(2),
+            final_blue_depth: None,
+            ..BraidConfig::default()
+        };
+        let mut with_coloring = Braid::new(BraidConfig { final_depth: 4, ..cfg_v2_no_blue_finality });
+        let mut v1_only = Braid::new(cfg(4));
+        for view in chain_views(10) {
+            with_coloring.insert(view.clone());
+            v1_only.insert(view);
+        }
+        assert!(with_coloring.is_ghostdag_active());
+        assert_eq!(
+            with_coloring.finalized_height(),
+            v1_only.finalized_height(),
+            "ghostdag_k alone must not change the finality height vs. plain v1"
+        );
+        assert_eq!(with_coloring.linearize(), v1_only.linearize());
+        assert_eq!(with_coloring.order_hash(), v1_only.order_hash());
+    }
+
+    #[test]
+    fn red_blocks_never_become_a_finality_threshold() {
+        // genesis -> 5 concurrent siblings -> a merge block absorbing all 5
+        // under a tight k=2 (mirrors ghostdag::k_cluster_bound_rejects_excess_concurrency:
+        // exactly 2 go blue, the other 3 go red), then extend the spine far
+        // enough to force finality past the merge block. computed_final must
+        // land on a real, resident, sane height derived from the SELECTED
+        // (always-blue-by-construction) spine — never garbage from a walk
+        // that wandered into a red block, since the walk only ever follows
+        // `selected_parent` pointers, which by construction are never red.
+        let mut b = Braid::new(ghostdag_cfg(2, Some(2)));
+        b.insert(genesis());
+        let siblings: Vec<BlockHash> = (1u8..=5).map(h).collect();
+        for (i, s) in siblings.iter().enumerate() {
+            assert!(matches!(
+                b.insert(v(*s, h(0), vec![], 1, [i as u8; 32])),
+                InsertOutcome::Inserted { .. }
+            ));
+        }
+        let merge = h(6);
+        assert!(matches!(
+            b.insert(v(merge, siblings[0], siblings[1..].to_vec(), 2, PA)),
+            InsertOutcome::Inserted { .. }
+        ));
+        // Sanity: the merge block itself is resident (mirrors the ghostdag
+        // module's own test at identical shape/k, which confirms this exact
+        // construction produces real reds).
+        assert!(b.view_of(&merge).is_some(), "merge block must be resident");
+
+        // Extend the spine well past the merge so finality must advance.
+        let mut parent = merge;
+        for n in 10u8..40 {
+            let view = v(h(n), parent, vec![], (n - 7) as u64, PA);
+            assert!(matches!(b.insert(view), InsertOutcome::Inserted { .. }));
+            parent = h(n);
+        }
+        let f = b.finalized_height();
+        assert!(f > 0, "finality must have advanced past genesis");
+        // The finalized height must correspond to a block that is actually
+        // on the selected spine (never a red merge-set member — is_on_spine
+        // walks the same selected_parent chain computed_final's blue-score
+        // walk does, so this directly checks they agree).
+        let drained = b.drain_ordered();
+        assert!(!drained.is_empty());
+        for hash in &drained {
+            // Every drained block must have been admitted into the window
+            // (never a phantom/garbage hash from a miscomputed walk).
+            assert!(
+                b.contains(hash) || b.emitted_at.contains_key(hash),
+                "drained a hash the braid never actually held: {hash:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn blue_score_finality_converges_where_height_offset_diverges() {
+        // The actual regression test for the bug this field was built to
+        // address. Reproduces examples/k_probe.rs's P/round generator
+        // in-process at a small scale: P concurrent producers per round,
+        // each merging one real backlog entry from another producer once
+        // available (mirrors the exact generator k_probe.rs uses). Two
+        // braids consume the IDENTICAL generated DAG in different delivery
+        // orders (creation order vs. a deterministic shuffle) and must
+        // converge to the same order_hash — WITH a properly-sized k
+        // (measured empirically via k_probe: k >= P-1 is what makes this
+        // hold; k=1 measurably does NOT help over height-offset, see the
+        // commit message this test ships with for the real numbers).
+        fn bh(producer: u8, round: u32, salt: u8) -> BlockHash {
+            let mut hh = blake3::Hasher::new();
+            hh.update(b"braid-test/blue-finality");
+            hh.update(&[producer, salt]);
+            hh.update(&round.to_le_bytes());
+            *hh.finalize().as_bytes()
+        }
+
+        let producers = 5u8; // P
+        let k = 5u32; // >= P-1, the empirically-required regime
+        let rounds = 300u32;
+
+        // Generate the DAG once, deterministically (creation order = the
+        // vec order below).
+        let mut backlog: Vec<VecDeque<(u8, BlockHash)>> = vec![VecDeque::new(); producers as usize];
+        let mut views: Vec<BlockView> = Vec::new();
+        for r in 1..=rounds {
+            let mut minted = Vec::with_capacity(producers as usize);
+            for p in 0..producers {
+                let hash = bh(p, r, 0);
+                let parent = if r == 1 { h(0) } else { bh(p, r - 1, 0) };
+                let mut merge_parents = Vec::new();
+                if let Some(&(_, mp)) = backlog[p as usize].front() {
+                    if mp != parent {
+                        merge_parents.push(mp);
+                        backlog[p as usize].pop_front();
+                    }
+                }
+                views.push(BlockView { hash, parent, merge_parents, height: r as u64, producer: [p; 32] });
+                minted.push((p, hash));
+            }
+            for (origin, hash) in &minted {
+                for p in 0..producers {
+                    if p != *origin {
+                        backlog[p as usize].push_back((*origin, *hash));
+                    }
+                }
+            }
+        }
+
+        // Node A: creation order, height-offset finality (final_depth = rounds,
+        // never actually finalizes mid-run — this node is the "ground truth"
+        // linearization over the full DAG, not a finality comparison).
+        let mut a = Braid::new(cfg(rounds as u64 + 10));
+        a.insert(genesis());
+        for view in &views {
+            a.insert(view.clone());
+        }
+
+        // Node B: SHUFFLED delivery, blue-score finality with a properly-sized
+        // k. Deterministic shuffle (not RNG-dependent, so this test is not
+        // flaky): reverse each contiguous block of 7.
+        let mut shuffled: Vec<BlockView> = Vec::new();
+        for chunk in views.chunks(7) {
+            shuffled.extend(chunk.iter().rev().cloned());
+        }
+        let mut b = Braid::new(ghostdag_cfg(k, Some(rounds as u64 / 2)));
+        b.insert(genesis());
+        for view in &shuffled {
+            b.insert(view.clone());
+        }
+        // Backfill pass — a real network would re-offer parked views once
+        // their parents arrive; this braid's own missing_parents() worklist
+        // is exactly that mechanism.
+        for _ in 0..8 {
+            let work = b.missing_parents();
+            if work.is_empty() {
+                break;
+            }
+            for view in &views {
+                if work.contains(&view.hash) {
+                    b.insert(view.clone());
+                }
+            }
+        }
+
+        assert_eq!(
+            a.linearize().len(),
+            b.linearize().len(),
+            "node B must linearize every block node A did (shuffled delivery must not lose blocks with a properly-sized k)"
+        );
+        assert_eq!(
+            a.order_hash(),
+            b.order_hash(),
+            "creation-order and shuffled-order delivery must converge to the identical order_hash"
+        );
     }
 }

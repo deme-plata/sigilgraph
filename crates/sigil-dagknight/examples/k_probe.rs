@@ -151,16 +151,26 @@ fn main() {
     // 2026-08-15 to verify the BraidConfig::default() final_depth bump
     // (64 -> 512) against this exact reproduction.
     let final_depth: u64 = env("KPROBE_FINAL_DEPTH", 64u64);
+    // KPROBE_GHOSTDAG=1 turns on v2 coloring (using the same `k` this probe
+    // already sweeps); KPROBE_FINAL_BLUE_DEPTH (unset by default = v1
+    // height-offset finality even with coloring on) opts into the v2.1
+    // blue-score finality rule under test — added 2026-08-15 to measure it
+    // against the exact adversarial scenario that exposed the original bug.
+    let use_ghostdag: bool = env("KPROBE_GHOSTDAG", 0u32) != 0;
+    let final_blue_depth: Option<u64> = std::env::var("KPROBE_FINAL_BLUE_DEPTH")
+        .ok()
+        .and_then(|v| v.trim().parse().ok());
     let cfg = BraidConfig {
         final_depth,
         max_window: 1 << 20,
         max_pending: 1 << 18,
         max_merge_parents: k.max(1),
-        ghostdag_k: None,
+        ghostdag_k: if use_ghostdag { Some(k as u32) } else { None },
+        final_blue_depth,
     };
     println!(
-        "cfg: final_depth={} max_window={} max_pending={} max_merge_parents={}",
-        cfg.final_depth, cfg.max_window, cfg.max_pending, cfg.max_merge_parents
+        "cfg: final_depth={} max_window={} max_pending={} max_merge_parents={} ghostdag_k={:?} final_blue_depth={:?}",
+        cfg.final_depth, cfg.max_window, cfg.max_pending, cfg.max_merge_parents, cfg.ghostdag_k, cfg.final_blue_depth
     );
 
     // ── node A: creation order ────────────────────────────────────────────

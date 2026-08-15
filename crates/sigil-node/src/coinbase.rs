@@ -659,6 +659,7 @@ mod tests {
             max_pending: 64,
             max_merge_parents: 4,
             ghostdag_k: None,
+            final_blue_depth: None,
         };
 
         // Two nodes, two DIFFERENT gossip arrival orders.

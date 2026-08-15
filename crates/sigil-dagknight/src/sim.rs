@@ -237,6 +237,7 @@ fn open_cfg(n: usize, final_depth: u64) -> BraidConfig {
         max_pending: n + 64,
         max_merge_parents: 4,
         ghostdag_k: None,
+        final_blue_depth: None,
     }
 }
 
@@ -445,6 +446,7 @@ pub fn run_permutation_invariance(seed: u64, perms: u32) -> BraidSimReport {
         max_pending: n + 64,
         max_merge_parents: 4,
         ghostdag_k: None,
+        final_blue_depth: None,
     };
     let mut checks = Checks::default();
 

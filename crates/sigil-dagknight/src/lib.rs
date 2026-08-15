@@ -80,6 +80,41 @@ pub struct BraidConfig {
     /// the [`crate::ghostdag`] module doc for exactly what that does and does
     /// not claim. Env `SIGIL_DAG_GHOSTDAG_K` (unset or unparsable = `None`).
     pub ghostdag_k: Option<u32>,
+    /// v2.1, opt-in separately from `ghostdag_k` (2026-08-15): finality
+    /// measured in **blue-score depth** instead of raw height-offset, for
+    /// braids with GHOSTDAG coloring active. `None` (default) = even with
+    /// `ghostdag_k` set, `computed_final` still uses the classic
+    /// height-offset rule (`final_depth`) — this is a SEPARATE, more
+    /// conservative opt-in on top of v2 coloring, not something v2 flips on
+    /// automatically. `Some(d)` switches `computed_final` to walk the
+    /// selected-parent spine back from the tip until blue score drops by
+    /// `d`, and uses THAT spine block's height as the finality line.
+    ///
+    /// **What this does and does not fix — read before enabling.** The
+    /// investigation that produced this field found that `final_depth`'s
+    /// plain height-offset rule breaks the instant network reordering
+    /// reaches the depth itself, for a structural reason: a block that
+    /// arrives late gets rejected `BelowFinal` at the DOOR — before the
+    /// GHOSTDAG coloring algorithm (which the crate's own
+    /// `coloring_is_order_invariant_across_two_valid_insertion_orders` test
+    /// already proves is arrival-order-invariant once a block is actually
+    /// let in) ever gets a chance to absorb it. Tying the SAME kind of
+    /// height-threshold to blue-score depth instead of a flat count is a
+    /// real improvement in ONE specific way: it correctly excludes RED
+    /// blocks from ever being treated as spine/finalized (the height rule
+    /// has no concept of red vs. blue at all), and it ties the threshold to
+    /// genuine absorbed DAG structure rather than an arbitrary wall-clock-ish
+    /// count. **It is NOT a proof that finality is now safe against
+    /// unbounded adversarial reordering** — that needs the actual GHOSTDAG/
+    /// PHANTOM/DagKnight safety argument (a block is irreversible once no
+    /// alternative chain respecting the same k-cluster bound could ever
+    /// exclude it from every future blue set — a "k+1 blue confirmations"
+    /// style anticone-majority argument, not a score-threshold), which this
+    /// field does not implement. See `examples/k_probe_bluefinal.rs` for the
+    /// measured, honest comparison against the height-offset rule at the
+    /// exact adversarial scenario that exposed the original bug. Env
+    /// `SIGIL_DAG_FINAL_BLUE_DEPTH` (unset or unparsable = `None`).
+    pub final_blue_depth: Option<u64>,
 }
 
 impl Default for BraidConfig {
@@ -90,6 +125,7 @@ impl Default for BraidConfig {
             max_pending: 4_096,
             max_merge_parents: 4,
             ghostdag_k: None,
+            final_blue_depth: None,
         }
     }
 }
@@ -111,6 +147,9 @@ impl BraidConfig {
             max_pending: get("SIGIL_DAG_MAX_PENDING", d.max_pending),
             max_merge_parents: get("SIGIL_DAG_MAX_MERGE_PARENTS", d.max_merge_parents),
             ghostdag_k: std::env::var("SIGIL_DAG_GHOSTDAG_K")
+                .ok()
+                .and_then(|v| v.trim().parse().ok()),
+            final_blue_depth: std::env::var("SIGIL_DAG_FINAL_BLUE_DEPTH")
                 .ok()
                 .and_then(|v| v.trim().parse().ok()),
         }

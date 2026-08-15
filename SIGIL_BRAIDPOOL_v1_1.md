@@ -26,10 +26,10 @@ The v0 design has the right architectural instinct: decouple transaction dissemi
 
 Before Phase 2, however, five items should be corrected:
 
-1. **Quorum math:** `2*f + 1` is safe only when the committee size is exactly `3*f + 1`. For arbitrary `n`, use `f = floor((n-1)/3)` and a quorum of `n-f` (or an equivalent threshold satisfying quorum intersection).
+1. **Quorum math:** `2*f + 1` is safe only when the committee size is exactly `3*f + 1`. For arbitrary `n`, use `f = floor((n-1)/3)` and a quorum of `n-f` — a **deliberately conservative** threshold, not the unique generalization of `2f+1`. The tight minimum satisfying quorum intersection (`2q-n > f`) is `q_min = floor((n+f)/2) + 1`, which is sometimes smaller than `n-f` (e.g. n=6,f=1: q_min=4, n-f=5). BraidPool uses `n-f` anyway because it's simpler and gives more honest data-availability holders, not because it's the only valid choice.
 2. **Digest-only blocks must not activate on a one-producer network.** A self-certified digest does not make the batch recoverable if the producer disappears. Keep transaction data inline until real data availability exists.
-3. **Erasure-code bandwidth wording:** with an `(f+1,n)` Reed-Solomon code, each shard is approximately `m/(f+1)`, not `m/n`. A first-order capacity calculation gives total initial dispersal near `3m` at `n=3f+1`, before proofs, retransmission, and retrieval; this is a design derivation, not a claim attributed to the companion paper.
-4. **Availability acknowledgements need stronger domain separation.** A signature must bind chain, epoch, worker, sequence, coding profile, batch digest, and shard commitment—not only the digest.
+3. **Erasure-code bandwidth wording:** with an `(f+1,n)` Reed-Solomon code, each shard is approximately `m/(f+1)`, not `m/n`. The EXACT initial-dispersal ratio, corrected 2026-08-15, is `n/k = (3f+1)/(f+1)`, not the earlier "~3m" approximation, which only holds asymptotically for large `f`. Concretely: n=4,f=1,k=2 → **2m**; n=7,f=2,k=3 → **2.33m**; n=10,f=3,k=4 → **2.5m**. This matters specifically for SIGIL's likely first real multi-validator deployment (small n), where "~3m" overstates the cost. This is a design derivation, not a claim attributed to the companion paper.
+4. **Availability acknowledgements need stronger domain separation.** A signature must bind chain, epoch, worker, sequence, coding profile, batch digest, and shard commitment—not only the digest. Specifically: sign `shard_index` and `shard_hash` INSIDE `BatchAckMessageV1` (not just `shard_root` at the batch level), so an ACK means precisely "validator V attests it holds shard i, hash H, under batch commitment R" — and independently recompute the expected shard index from the deterministic assignment during verification rather than trusting the transmitted field. Do both: sign it AND recompute it (§3.5, §11).
 5. **The system needs bounded queues, deterministic garbage collection, recovery, and anti-explosion logic before high-load claims are meaningful.**
 
 The proposed replacement design is called **BraidPool**: a braid-native availability layer that can switch between replicated and erasure-coded dissemination, commits large sets of batches through a `BatchSetRoot`, uses epoch-salted worker assignment, and keeps data-availability state separate from GHOSTDAG ordering state.
@@ -80,6 +80,14 @@ Examples:
 | 8 | 2 | 5 | 6 |
 
 For two conflicting certificates to be unable to intersect only in Byzantine signers, the two quorums must intersect in more than `f` members. `q=n-f` gives that property under the usual `n >= 3f+1` assumption.
+
+**`n-f` is a deliberately conservative choice, not the unique correct generalization**
+(corrected 2026-08-15). The exact minimum quorum satisfying `2q-n > f` is
+`q_min = floor((n+f)/2) + 1`, which is sometimes strictly smaller than `n-f` — e.g. at
+`n=6, f=1`: `q_min=4` but `n-f=5`. BraidPool uses `n-f` regardless: it's simpler to
+state, and a larger quorum means more independently-honest holders of the data at
+certification time, which is a real availability benefit `n-f` buys beyond the bare
+safety minimum — but that tradeoff should be stated, not implied to be free.
 
 ```rust
 pub fn max_byzantine(n: usize) -> usize {
@@ -158,11 +166,22 @@ For an `(k,n)` Reed-Solomon code over a batch of `m` bytes:
 shard_size ~= m/k
 ```
 
-If `k=f+1` and `n=3f+1`, a sender transmitting one shard to each validator sends, to first order:
+If `k=f+1` and `n=3f+1`, a sender transmitting one shard to each validator sends, EXACTLY
+(corrected 2026-08-15 — the earlier "~3m" was only the large-`f` asymptote, not the real
+ratio at small committee sizes):
 
 ```text
-n * m/k ~= 3m
+n * (m/k) = ((3f+1)/(f+1)) * m
 ```
+
+which only approaches `3m` for large `f`. For SIGIL's likely first real deployment sizes:
+
+| n | f | k=f+1 | (3f+1)/(f+1) |
+|---:|---:|---:|---:|
+| 4 | 1 | 2 | **2.00**m |
+| 7 | 2 | 3 | **2.33**m |
+| 10 | 3 | 4 | **2.50**m |
+| large | large | large | → 3.00m (asymptote only) |
 
 before Merkle proofs, signatures, headers, retransmission, and retrieval. This is a protocol-level derivation used for capacity planning; it is not a novelty claim.
 
@@ -212,6 +231,16 @@ Every consensus-relevant serialization must have golden-vector tests.
 
 ### 3.5 Acknowledgements must bind the entire availability statement
 
+**Corrected 2026-08-15: `shard_index` moved INSIDE the signed message, and `shard_hash`
+added.** The original draft left `shard_index` outside `BatchAckMessageV1` (only
+`shard_root`, the whole batch's commitment, was signed) — meaning the signature didn't
+actually attest to WHICH shard the validator holds, only that it holds *some* shard
+under that root. Moving `shard_index` and `shard_hash` inside the signed message makes
+an ACK mean something precise: "validator V attests it possesses shard `i`, whose hash
+is `H`, under batch commitment `R`." Verification does BOTH: check the signature over
+the field as transmitted, AND independently recompute the expected shard index from the
+deterministic per-validator assignment — never trust the transmitted index alone.
+
 ```rust
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BatchAckMessageV1 {
@@ -222,11 +251,14 @@ pub struct BatchAckMessageV1 {
     pub batch_id: [u8; 32],
     pub shard_root: [u8; 32],
     pub coding: CodingProfile,
+
+    // Moved inside the signed statement (was outside, in `BatchAck`, unsigned):
+    pub shard_index: u16,
+    pub shard_hash: [u8; 32],
 }
 
 pub struct BatchAck {
     pub validator: ValidatorId,
-    pub shard_index: u16,
     pub signature: ValidatorSignature,
 }
 ```
@@ -235,9 +267,11 @@ Validation must check:
 
 - signer is in the epoch committee;
 - one acknowledgement per validator;
-- assigned shard index is valid;
-- Merkle proof matches `shard_root`;
-- signature verifies over a domain-separated canonical message;
+- the SIGNED `shard_index` matches the deterministic assignment recomputed locally for
+  this validator — reject if the validator signed a shard it wasn't assigned;
+- `shard_hash` matches the actual bytes of that shard against `shard_root` (Merkle proof);
+- signature verifies over a domain-separated canonical message including `shard_index`
+  and `shard_hash`, not just `shard_root`;
 - acknowledgement belongs to the same epoch and chain;
 - quorum weight/count is sufficient.
 
@@ -488,11 +522,36 @@ This is explicitly **adopted prior art**, not an invention: the companion invest
 
 ## 11. Certificate format
 
+**Corrected 2026-08-15, structural consequence of §3.5's fix:** once `shard_index` and
+`shard_hash` live INSIDE the signed statement, a single `AvailabilityCertificateV1`
+covering many validators can no longer share ONE `BatchAckMessageV1` — different
+validators hold different shards, so each one signs a DIFFERENT `shard_index`/
+`shard_hash` pair. Split the batch-level fields (shared, unsigned-by-themselves) from
+the per-validator shard fields (carried per-ack, each independently verified as part of
+that validator's signature):
+
 ```rust
+/// The fields every ack for one batch shares. NOT signed on its own — each
+/// validator signs this concatenated with ITS OWN shard_index/shard_hash
+/// (see BatchAckMessageV1, §3.5); this struct exists so the certificate
+/// doesn't repeat the shared fields once per validator.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BatchStatementV1 {
+    pub chain_id: [u8; 32],
+    pub epoch: u64,
+    pub worker: WorkerId,
+    pub sequence: u64,
+    pub batch_id: [u8; 32],
+    pub shard_root: [u8; 32],
+    pub coding: CodingProfile,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AvailabilityCertificateV1 {
-    pub statement: BatchAckMessageV1,
+    pub statement: BatchStatementV1,
     pub signers: BitVec,
+    /// Each ack carries its OWN shard_index/shard_hash — different
+    /// validators hold different shards under the same batch commitment.
     pub acks: Vec<BatchAck>,
 }
 
@@ -504,7 +563,13 @@ impl AvailabilityCertificateV1 {
         ensure!(self.unique_signer_count() >= q, DaError::NoQuorum);
         self.verify_membership(committee)?;
         self.verify_unique_signers()?;
+        // Each ack's signature covers `statement` ++ its OWN shard_index/shard_hash —
+        // verify_all_signatures reconstructs that per-ack message, it does not check
+        // against one shared BatchAckMessageV1.
         self.verify_all_signatures()?;
+        // Recompute each ack's expected shard_index from the deterministic
+        // per-validator assignment and reject any ack whose SIGNED shard_index
+        // doesn't match — never trust the transmitted index alone (§3.5).
         self.verify_shard_assignments()?;
         Ok(())
     }

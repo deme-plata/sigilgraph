@@ -169,7 +169,13 @@ pub struct BatchCertificate {
 /// before accepting): `2f+1` is only safe when n is EXACTLY 3f+1. Two quorums
 /// of size q intersect in an honest node only if `2q > n+f`; for n NOT of that
 /// exact form (e.g. n=5,6,8,9,11,12) `2f+1` falls short and quorum
-/// intersection is not guaranteed. `n-f` is the general-n-safe threshold.
+/// intersection is not guaranteed. `n-f` is A safe threshold for general n —
+/// NOT the unique correct generalization of `2f+1` (refined 2026-08-15): the
+/// tight minimum satisfying `2q-n > f` is `q_min = floor((n+f)/2) + 1`, which
+/// is sometimes strictly smaller (e.g. n=6,f=1: q_min=4, n-f=5). `n-f` is a
+/// deliberately conservative choice — simpler to state, and it means more
+/// independently-honest holders of the data at certification time, a real
+/// availability benefit beyond the bare safety minimum, not a free one.
 /// Verified by brute-force check, n=1..64: `2f+1` fails at 7 of the first 12
 /// values tested. The crate's OWN test suite didn't catch this originally —
 /// its 3 quorum examples (n=4,7,10) are all exactly 3f+1, where n-f and 2f+1
@@ -275,10 +281,14 @@ approximately `m/k` bytes (a `(k, parity)` Reed-Solomon split, matching Imitater
   `~1/k`× the full batch — this is the number that matters for a validator's own storage
   and initial download.
 - **Total sender-side bytes for one batch** (dispersing all `k+parity` shards, one to
-  each peer): `~(k+parity)/k`× the batch size — e.g. Imitater's own `k=f+1, n=3f+1`
-  parameterization gives `~3`× the batch size for large `f`, MORE than the raw batch, not
-  less; the win is spreading that cost across `k+parity` separate outbound sends instead
-  of `n-1` full-size ones, and in the shard SIZE each recipient handles, not in total
+  each peer): `(k+parity)/k`× the batch size — EXACT, not asymptotic (refined
+  2026-08-15): Imitater's own `k=f+1, n=3f+1` parameterization gives `(3f+1)/(f+1)`×,
+  which is only `~3`× for LARGE `f` — at small committee sizes it's much less: n=4,f=1 →
+  **2.0**×; n=7,f=2 → **2.33**×; n=10,f=3 → **2.5**×, which matters specifically because
+  small-n is exactly where SIGIL's first real multi-validator deployment will sit. Either
+  way this is MORE than the raw batch, not less; the win is spreading that cost across
+  `k+parity` separate outbound sends instead of `n-1` full-size ones, and in the shard
+  SIZE each recipient handles, not in total
   bytes leaving the network. Full replication's comparable total is `(n-1)`× the batch
   size (one full copy per other validator) — so coding still reduces total network bytes
   moved whenever `(k+parity)/k < n-1`, which holds for any real validator count, but the
@@ -306,7 +316,7 @@ benchmark claims go wrong. Being explicit:
 | Layer | What limits it | SIGIL today | With this design |
 |---|---|---|---|
 | **Raw ingestion** (workers accepting + verifying signatures) | CPU cores × per-sig verify cost, fully parallel across workers | ~1 mutex, single-threaded | scales ~linearly with worker count + cores; a modern many-core box doing batched ed25519 verify can plausibly reach into the low millions of sigs/s in a synthetic benchmark — this is the number a "10M" headline usually means |
-| **Dissemination** (batches reliably reaching quorum) | network bandwidth, erasure-coding overhead | N/A (no batching) | erasure coding cuts required bandwidth per node by ~`(k+parity)/k`× vs. full replication; still fundamentally bounded by real network bandwidth, not free |
+| **Dissemination** (batches reliably reaching quorum) | network bandwidth, erasure-coding overhead | N/A (no batching) | erasure coding cuts the PER-NODE shard size ~`1/k`× vs. a full batch (§3.3 — corrected 2026-08-15, `(k+parity)/k` is total sender-side overhead, not a per-node reduction factor); still fundamentally bounded by real network bandwidth, not free |
 | **Chain-committed TPS** (txs actually finalized in blocks peers agree on) | block cadence × ops committed per block | `adaptive rate 8–60 blk/s × 256 tx/blk cap ≈ 15,360 tx/s ceiling, TODAY` | referencing batch digests instead of raw tx lists per block lets ONE block commit many batches (thousands of txs each) — this is what actually raises the *committed* number, not raw ingestion speed |
 
 **The honest claim**: a synthetic, worker-parallel, batched-verification ingestion

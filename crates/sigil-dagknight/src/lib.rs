@@ -44,8 +44,25 @@ pub use view::BlockView;
 #[derive(Debug, Clone)]
 pub struct BraidConfig {
     /// Finality window depth: once the selected tip is ≥ `final_depth` above
-    /// height *h*, the linearized prefix through *h* is frozen. Default 64
-    /// (env `SIGIL_DAG_FINAL_DEPTH`).
+    /// height *h*, the linearized prefix through *h* is frozen. Default 512
+    /// (env `SIGIL_DAG_FINAL_DEPTH`) — bumped from 64 on 2026-08-15.
+    ///
+    /// **Why 512, not 64:** `computed_final`'s height-offset finality rule
+    /// is only sound when the network's actual block-reordering never
+    /// exceeds `final_depth` (see that method's doc comment for the full
+    /// argument). Measured directly with `examples/k_probe.rs` (P=6
+    /// concurrent producers, k=1): under a REALISTIC bounded-reorder
+    /// delivery model, two independent nodes converge byte-for-byte up
+    /// through a reorder window of 32 — the exact same test starts
+    /// diverging at a reorder window of 64, i.e. right at the OLD
+    /// `final_depth`. 512 gives an 8× margin against that boundary — real
+    /// gossip reordering this network has ever measured is nowhere close
+    /// to it — while still finalizing in well under a minute at SIGIL's
+    /// measured adaptive block rate (8-60 blk/s). It does not make the rule
+    /// sound against literally UNBOUNDED adversarial reordering (no finite
+    /// depth can — see the module's `computed_final` doc comment); that
+    /// needs a structurally different, anticone-bounded finality rule
+    /// (tracked, not done here).
     pub final_depth: u64,
     /// Hard cap on active (non-finalized) views held in the window. Bitfield
     /// memory is O(window²/8) bytes, so this cap is load-bearing. Default
@@ -68,7 +85,7 @@ pub struct BraidConfig {
 impl Default for BraidConfig {
     fn default() -> Self {
         Self {
-            final_depth: 64,
+            final_depth: 512,
             max_window: 16_384,
             max_pending: 4_096,
             max_merge_parents: 4,

@@ -676,6 +676,30 @@ impl Braid {
         self.computed_final().unwrap_or(0)
     }
 
+    /// Early-warning signal for the finality clamp: how many heights of
+    /// safety margin remain between the finality line and the oldest block
+    /// still waiting on a missing parent, i.e. how close the node is to
+    /// permanently orphaning a legitimate but late-arriving block.
+    ///
+    /// `None` when nothing is pending (no danger — the finality clamp has
+    /// nothing it could orphan right now). `Some(0)` means the NEXT
+    /// finality advance will orphan the oldest pending block — this is the
+    /// moment a `BelowFinal` rejection becomes imminent, not yet an actual
+    /// loss. Callers (the node's own logging loop) should treat a small or
+    /// shrinking margin as a loud, actionable warning: it means observed
+    /// network reordering is approaching `final_depth`, the one condition
+    /// under which this braid's height-offset finality rule is unsound (see
+    /// `computed_final`'s doc comment for the full argument). Added
+    /// alongside the `final_depth` default bump (2026-08-15, the P=6 k=1
+    /// full-random-shuffle investigation) specifically so a real operator
+    /// gets advance notice instead of only silent `below_final` counts
+    /// after the fact.
+    pub fn finality_margin(&self) -> Option<u64> {
+        let floor = self.pending_floor()?;
+        let f = self.finalized_height();
+        Some(floor.saturating_sub(f).saturating_sub(1))
+    }
+
     /// Chained BLAKE3 over the full linearized order (`acc = BLAKE3(acc ‖
     /// block_hash)` from a zero accumulator) — the one-word divergence
     /// detector two nodes compare.
@@ -743,6 +767,7 @@ impl Braid {
             rejected: self.rejected_count,
             dropped: self.dropped_count,
             dag_memory_bytes: self.dag.stats().memory_bytes,
+            finality_margin: self.finality_margin(),
         }
     }
 
@@ -776,6 +801,10 @@ pub struct BraidStats {
     pub dropped: u64,
     /// Bytes held by the bitfield substrate.
     pub dag_memory_bytes: usize,
+    /// See [`Braid::finality_margin`] — early-warning distance to the next
+    /// possible orphaning of an already-pending block. `None` = nothing
+    /// pending, no danger.
+    pub finality_margin: Option<u64>,
 }
 
 #[cfg(test)]

@@ -88,6 +88,12 @@ struct BackfillResp {
 // signed anchor).
 const SNAPSHOT_MAGIC: [u8; 4] = *b"SGSN";
 const SNAPSHOT_VERSION: u16 = 1;
+/// Fail-loud threshold for `Braid::finality_margin()` — a quarter of the
+/// `BraidConfig::final_depth` default (512, bumped from 64 on 2026-08-15).
+/// Not derived from the live config automatically (the running braid's
+/// config isn't retained for later reads) — if `SIGIL_DAG_FINAL_DEPTH` is
+/// ever overridden away from the default, revisit this alongside it.
+const FINALITY_MARGIN_WARN_THRESHOLD: u64 = 128;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SkeletonRecord {
@@ -784,6 +790,13 @@ fn run_start() -> Result<()> {
         // gossip re-broadcast flood); heartbeat is gated to 5s below.
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
         let mut last_heartbeat = std::time::Instant::now();
+        // Fail-loud finality monitoring (2026-08-15, the P=6 k=1 investigation):
+        // `below_final` was already tracked in BraidStats but nothing ever
+        // surfaced it to an operator — a node could be silently orphaning
+        // legitimate blocks (reordering exceeding final_depth) with zero
+        // visible signal beyond a quietly-incrementing counter. Checked on the
+        // same 5s heartbeat cadence as everything else in this loop.
+        let mut last_below_final: u64 = 0;
         // Rate-limit EXPENSIVE full-block serves (≤1 per 120ms) so catch-up backfill
         // to behind followers can't saturate the single-threaded loop and starve block
         // production. Headers-only serves (cheap, for the monitor) are NOT throttled.
@@ -1082,6 +1095,44 @@ fn run_start() -> Result<()> {
                             eprintln!("⚠ publish peer-heights failed: {}", e);
                         }
                         eprintln!("⚡ heartbeat — peers={} started={}", sum.peer_count, sum.started);
+
+                        // Fail-loud finality monitoring — see `last_below_final`'s
+                        // doc comment above. `below_final` counts blocks the
+                        // finality clamp has PERMANENTLY refused (real, already
+                        // happened); `finality_margin` is the early-warning
+                        // signal for blocks already pending that are close to
+                        // suffering the same fate. Neither indicates active
+                        // danger on today's real, single-producer chain (there
+                        // is no second producer to reorder against), but this
+                        // is exactly the signal that needs to be loud the day
+                        // that stops being true.
+                        if let Some(br) = braid.as_ref() {
+                            let s = br.stats();
+                            if s.below_final > last_below_final {
+                                let newly_lost = s.below_final - last_below_final;
+                                eprintln!(
+                                    "🚨 FINALITY VIOLATION: {} block(s) just PERMANENTLY orphaned by the finality clamp \
+                                     (reordering exceeded final_depth) — total below_final={} finalized_height={}",
+                                    newly_lost, s.below_final, s.finalized_height
+                                );
+                            }
+                            last_below_final = s.below_final;
+                            if let Some(margin) = s.finality_margin {
+                                if margin == 0 {
+                                    eprintln!(
+                                        "🚨 finality margin EXHAUSTED — the next finality advance will orphan a pending block \
+                                         (pending={} finalized_height={})",
+                                        s.pending, s.finalized_height
+                                    );
+                                } else if margin < FINALITY_MARGIN_WARN_THRESHOLD {
+                                    eprintln!(
+                                        "⚠ finality margin low: {} heights of safety remain before a pending block is orphaned \
+                                         (pending={})",
+                                        margin, s.pending
+                                    );
+                                }
+                            }
+                        }
                     }
 
                     // Drain incoming events from peers (every 250ms): live block gossip on

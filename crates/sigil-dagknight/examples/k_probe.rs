@@ -146,8 +146,13 @@ fn main() {
         if n_edges > 0 { sum_reach as f64 / n_edges as f64 } else { 0.0 }
     );
 
+    // KPROBE_FINAL_DEPTH overrides the historical hardcoded 64 (kept as the
+    // default so old k_phase/k_probe results stay reproducible) — added
+    // 2026-08-15 to verify the BraidConfig::default() final_depth bump
+    // (64 -> 512) against this exact reproduction.
+    let final_depth: u64 = env("KPROBE_FINAL_DEPTH", 64u64);
     let cfg = BraidConfig {
-        final_depth: 64,
+        final_depth,
         max_window: 1 << 20,
         max_pending: 1 << 18,
         max_merge_parents: k.max(1),

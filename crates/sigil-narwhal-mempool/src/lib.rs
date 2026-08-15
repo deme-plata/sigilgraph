@@ -21,9 +21,19 @@
 //!   already-proven `flux-aether` Reed-Solomon coder, instead of full
 //!   per-peer replication. NOT claimed as novel — see
 //!   `SIGIL_NARWHAL_ARXIV_INVESTIGATION_v0.pdf`.
+//! - [`batch_set`] (BraidPool §12/§17, Phase F) — the `BatchSetRoot`
+//!   aggregation: one Merkle root over many `BatchRefV1`s, so a block body
+//!   can reference thousands of batches without its header growing.
+//! - [`body_mode`] (BraidPool §3.2, Phase F) — the activation gate deciding
+//!   whether a block may actually USE a batch-set-root body instead of
+//!   inline transactions. Standalone; NOT wired into `sigil-node`'s real
+//!   `BlockHeader` this pass — see that module's doc comment for why `n<4`
+//!   makes it unsafe today and what SIGIL's real, current answer is.
 
 pub mod backend;
+pub mod batch_set;
 pub mod batch_store;
+pub mod body_mode;
 pub mod canonical;
 pub mod dissemination;
 pub mod merkle;
@@ -33,7 +43,9 @@ pub mod types;
 pub mod worker;
 
 pub use backend::MempoolBackend;
+pub use batch_set::{batch_set_root, BatchRefV1, BatchSetV1};
 pub use batch_store::{BatchStore, BatchStoreMetrics};
+pub use body_mode::{activation_mode, sigil_current_body_mode, BodyMode, SIGIL_CURRENT_VALIDATOR_COUNT};
 pub use canonical::{BatchHeaderV1, CodingProfile, BATCH_HEADER_VERSION};
 pub use dissemination::{reassemble_batch, shard_batch, BatchShard};
 pub use merkle::merkle_root;

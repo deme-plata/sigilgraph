@@ -167,6 +167,22 @@ pub struct BatchCertificate {
 }
 
 impl BatchCertificate {
+    /// Domain-separated identity for the certificate itself (distinct from
+    /// `self.digest`, which identifies the BATCH the certificate is ABOUT).
+    /// Used by `BatchRefV1::certificate_hash` (Phase F, §12) so a block can
+    /// commit to "this exact quorum of acks proved availability," not just
+    /// "some certificate for this batch existed" — a certificate with a
+    /// DIFFERENT ack set for the same batch (e.g. after new acks arrive)
+    /// gets a different hash, so a block ref stays pinned to the specific
+    /// evidence that was actually verified when the block was produced.
+    pub fn hash(&self) -> [u8; 32] {
+        let bytes = crate::canonical::canonical_encode(self);
+        let mut h = blake3::Hasher::new();
+        h.update(b"SIGIL/CERTIFICATE/V1");
+        h.update(&bytes);
+        h.finalize().into()
+    }
+
     /// Does `acks` (deduped by validator) reach quorum for a validator set of
     /// size `n`? Every ack's `digest` must match `digest` — mixed-batch acks
     /// never count, even if the count would otherwise reach quorum.
@@ -297,6 +313,25 @@ mod tests {
         let mut tampered = ack.clone();
         tampered.digest = [2u8; 32];
         assert!(!tampered.verify(&pk), "changing the digest after signing must break verification");
+    }
+
+    #[test]
+    fn certificate_hash_changes_when_ack_set_changes() {
+        let digest = [3u8; 32];
+        let (sk1, pk1, _) = ed25519_keygen();
+        let (sk2, pk2, _) = ed25519_keygen();
+        let cert_a = BatchCertificate::try_certify(digest, vec![BatchAck::sign(digest, &sk1, &pk1)], 1).unwrap();
+        let cert_b = BatchCertificate::try_certify(
+            digest,
+            vec![BatchAck::sign(digest, &sk1, &pk1), BatchAck::sign(digest, &sk2, &pk2)],
+            1,
+        )
+        .unwrap();
+        assert_ne!(
+            cert_a.hash(), cert_b.hash(),
+            "a certificate's hash must reflect exactly which acks it holds, not just which batch it's about"
+        );
+        assert_ne!(cert_a.hash(), cert_a.digest, "certificate hash and the batch digest it's about must be distinct identities");
     }
 
     #[test]

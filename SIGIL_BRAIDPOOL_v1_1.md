@@ -903,10 +903,72 @@ of it touches the producer loop or the deployed binary.
 65/65 crate tests green (up from 59). SIGIL chain confirmed still mining
 continuously immediately before and after this work.
 
-### Phase F — BatchSetRoot sidecars
-- schema version/height gate;
-- full data-availability gate;
-- digest/reference block body only after DA tests pass.
+### Phase F — BatchSetRoot sidecars — **SHIPPED 2026-08-15**, all in `sigil-narwhal-mempool`
+
+- BatchSetRoot aggregation. ✅ new `batch_set.rs`: `BatchRefV1 { batch_id,
+  certificate_hash, worker, tx_count }` + `BatchSetV1 { refs: Vec<BatchRefV1> }`
+  + `batch_set_root()`, one Merkle root (reusing the same RFC6962-style
+  `merkle::merkle_root` Phase A already proved) over domain-separated
+  (`SIGIL/BATCHREF/V1`) per-ref leaf hashes. §12's actual claim — "a block can
+  commit to thousands of batches without its header growing" — is proven at
+  scale, not just by type signature: a test builds a 5000-ref set and confirms
+  the root stays one deterministic `[u8;32]` value.
+- Certificate identity for the ref. ✅ new `BatchCertificate::hash()` in
+  `types.rs`, domain-tagged `SIGIL/CERTIFICATE/V1`, distinct from
+  `BatchCertificate::digest` (which names the BATCH, not the certificate). A
+  `BatchRefV1::certificate_hash` pins a block to the EXACT quorum of acks that
+  was verified at production time — a later-arriving ack for the same batch
+  changes the certificate's hash, so an old ref stays tied to the evidence
+  that actually existed when the block was made, not to "some certificate,
+  eventually." Test `certificate_hash_changes_when_ack_set_changes` confirms
+  the hash moves when the ack set does and differs from `digest`.
+- Schema version/height gate. ✅ new `body_mode.rs`: `BodyMode` enum
+  (`InlineTransactions | AnchoredSidecar | CertifiedBatchRefs`) +
+  `activation_mode(validator_count, da_certified) -> BodyMode`. Two
+  independent conditions gate the real mode, matching this doc's own §3.2
+  correction: `validator_count < 4` ALWAYS forces `InlineTransactions`
+  regardless of what `da_certified` claims (test:
+  `below_four_validators_is_always_inline_regardless_of_da_certified` — even
+  a *claimed* true doesn't matter below the BFT floor); `validator_count >= 4`
+  without real certification falls back to `AnchoredSidecar` (full bytes still
+  travel with the block, just alongside a committed root) rather than jumping
+  straight to reference-only. No env var or flag can skip the gate — the two
+  booleans are its only inputs, and `validator_count` is a required parameter
+  the caller must supply from real state (SIGIL has no formal
+  validator-registry concept yet, so this module deliberately does not invent
+  one — wiring a real source is separate follow-up).
+- Full data-availability gate. ✅ same function — `da_certified` must be
+  genuinely true (real per-batch certification having actually happened), not
+  inferred from committee size alone.
+- Digest/reference block body only after DA tests pass. ✅ **and not
+  attempted this pass, by design.** `body_mode::SIGIL_CURRENT_VALIDATOR_COUNT
+  = 1` is the honest, current, named answer for this chain — Delta/Gamma/Beta
+  are all confirmed permanently gone (2026-08-14), so SIGIL is a genuine
+  single-producer network today. A dedicated test,
+  `sigil_today_is_inline_transactions_full_stop`, asserts
+  `activation_mode(SIGIL_CURRENT_VALIDATOR_COUNT, false) == InlineTransactions`
+  — i.e. this module's own conclusion about SIGIL, encoded as a test that
+  would fail loudly the moment that stops being true without a deliberate,
+  reviewed bump to the constant.
+
+**What this phase explicitly did NOT do, stated plainly (same caution
+pattern as Phase B's original deferred-wiring communication):** none of this
+touches `sigil-node`'s actual `BlockHeader`/block body. `batch_set_root()`
+and `BodyMode` are standalone, tested crate machinery — proven correct and
+proven inert (gated to `InlineTransactions`) at SIGIL's real `n=1` — not a
+live block-schema change. Wiring a `BatchSetRoot` field into the real,
+mining, committed block header is a separate, consensus-critical,
+independently-reviewable change that needs its own height-gate per this
+doc's own mainnet-safety discipline (borrowed a level early from
+`CLAUDE.md`'s "old blocks must always validate the same way" rule) — it
+remains explicitly out of scope until real multi-validator infrastructure
+exists (Phase D) and someone deliberately decides to do it.
+
+77/77 crate tests green (up from 65: +6 `batch_set`, +5 `body_mode`, +1
+`types::certificate_hash_changes_when_ack_set_changes`). SIGIL chain confirmed
+still mining continuously immediately before (height 49,481) and after
+(height 50,484) this work, unaffected since none of it touches the producer
+loop or the deployed binary.
 
 ### Phase G — fairness / anti-MEV experiments
 - record visibility metadata;

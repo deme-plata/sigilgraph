@@ -834,11 +834,68 @@ Benchmark certificate verification separately for each signature mode.
 continuously immediately before and after this work, unaffected since none
 of it touches the producer loop or the deployed binary.
 
-### Phase D — multi-node availability testnet
-- require committee `n>=4`;
-- replicated availability first;
-- certificate verification;
-- recovery tests with producer loss.
+### Phase D — multi-node availability testnet — **SIMULATION SHIPPED 2026-08-15, real multi-machine deployment STILL BLOCKED**
+
+Stated as plainly as possible, because this phase's title literally promises
+something the other half doesn't deliver: SIGIL still has no second machine
+to run a real second validator on. Delta, Gamma, and Beta are all confirmed
+permanently gone (CLAUDE.md, 2026-08-14). What shipped is a deterministic,
+**in-process simulation** of the four bullet points below — real crypto,
+real quorum math, zero real network. It answers "does the protocol logic
+work at n>=4 at all?" (previously untestable — SIGIL has only ever run at
+n=1). It does not and cannot answer "does it work over a real network,
+against real latency, against a real Byzantine validator?" That second
+question stays open until real infrastructure exists.
+
+- Require committee `n>=4`. ✅ (simulated) new `availability_testnet.rs`:
+  `SimCommittee::new(n)` builds `n` real Ed25519-keyed `SimValidator`s
+  in-process. Tests run at `n=4`.
+- Replicated availability first. ✅ (simulated) `disseminate_replicated`
+  pushes a FULL batch copy to every committee member (no coding — matches
+  the phase's own ordering: replicated before Phase E's Reed-Solomon path).
+  `disseminate_to` simulates partial/imperfect dissemination for the
+  below-quorum test.
+- Certificate verification. ✅ (simulated), and it surfaced a real,
+  previously-undocumented finding: `BatchCertificate::try_certify` does
+  **not** itself check ack signatures — it only checks digest match and
+  dedups by validator identity. Signature verification is the CALLER's job.
+  As of this session `try_certify` has **no production call site anywhere**
+  (only this module and `types.rs`'s own tests call it), so this contract
+  was previously unenforced at any real use point. Proven two ways: a test
+  hand-constructs an ack with a real validator identity and digest but a
+  signature from the WRONG key, and shows `try_certify` alone accepts it;
+  `SimCommittee::collect_verified_acks` is the documented CORRECT pattern
+  (verify each ack against its claimed signer's own pubkey before it ever
+  reaches `try_certify`), and a second test confirms every ack it returns
+  independently verifies. Whoever eventually wires `try_certify` into a real
+  network path (necessarily post-Phase-D, once real peers exist) MUST route
+  through a `collect_verified_acks`-shaped gate, not call it on raw
+  network input.
+- Recovery tests with producer loss. ✅ (simulated) — the concrete scenario:
+  disseminate to all 4, certify (quorum met), then `remove_validator` the
+  producer entirely (keys, replica store, gone). The surviving 3 members
+  still (a) independently reach quorum and re-certify, and (b) can serve
+  the full batch to a brand-new joining validator that was never part of
+  the original committee — demonstrating the actual point of replicated
+  availability: the data's survival never depended on any single validator,
+  including whichever one happened to produce it.
+- Below-quorum honesty check (not in the original bullet list, added because
+  it's the natural adversarial-conditions counterpart to the recovery test):
+  dissemination reaching only 2 of 4 validators correctly FAILS to certify
+  (`quorum_threshold(4) == 3`), and reaching exactly 3 succeeds — the
+  boundary is exact, not approximate.
+
+91/91 crate tests green (up from 84: +7 `availability_testnet`). SIGIL chain
+confirmed still mining continuously immediately before (height 70,150) and
+after (height 70,377) this work, unaffected since none of it touches the
+producer loop or the deployed binary.
+
+**What remains genuinely open for Phase D:** a real multi-machine deployment
+— actual `sigil-node` processes, actual sockets, actual network partitions,
+actual adversarial timing — the moment a second machine becomes available
+(a rented box, a revived Delta, anything). This module's five scenarios are
+exactly the ones a real integration test against real nodes should
+reproduce first.
 
 ### Phase E — RS-coded availability — **SHIPPED 2026-08-15**, all in `sigil-narwhal-mempool`
 - Use in-tree Reed-Solomon. ✅ unchanged, still `flux-aether::rs_shard`/`rs_reassemble`

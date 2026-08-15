@@ -37,7 +37,16 @@
 //!   measurement of validator-index tie-break bias vs a content-hash
 //!   tie-break. Explicitly NOT a Tilikum/MRV/Themis/Aequitas implementation
 //!   — see that module's doc comment.
+//! - [`availability_testnet`] (design doc's Phase D plan) — a deterministic,
+//!   in-process SIMULATION of an `n>=4` validator committee: replicated
+//!   dissemination, real quorum certificate assembly/rejection, and
+//!   recovery after simulated producer loss. NOT a live multi-node network
+//!   (SIGIL remains a real `n=1` single-producer chain today) — see that
+//!   module's doc comment for exactly what it does and does not prove, and
+//!   for a real finding about `BatchCertificate::try_certify`'s calling
+//!   contract this work surfaced.
 
+pub mod availability_testnet;
 pub mod backend;
 pub mod batch_set;
 pub mod batch_store;
@@ -52,6 +61,7 @@ pub mod sealer;
 pub mod types;
 pub mod worker;
 
+pub use availability_testnet::{SimCommittee, SimValidator};
 pub use backend::MempoolBackend;
 pub use batch_set::{batch_set_root, BatchRefV1, BatchSetV1};
 pub use batch_store::{BatchStore, BatchStoreMetrics};

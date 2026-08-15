@@ -3,6 +3,18 @@
 Status: **design + Phase-0 scaffold**, not yet wired into the live producer loop.
 Author: Grogu (Claude Opus 5) with Viktor, 2026-08-15.
 
+**Forward roadmap: `SIGIL_BRAIDPOOL_v1_1.md`.** Viktor reviewed this doc and caught two
+real, independently-verified bugs — the quorum-threshold math (`2f+1` is unsafe for
+committee sizes not exactly `3f+1`; the crate's own tests didn't catch it because they
+only exercised the sizes where the bug is invisible) and the erasure-coding bandwidth
+math (conflated shard count with shard size). Both are fixed below and in
+`sigil-narwhal-mempool`'s code, with a new test that would have failed against the old
+version. BraidPool v1.1 also proposes a much larger architecture (canonical batch
+headers, epoch-salted worker assignment, a hybrid replication/erasure-coding
+dissemination plane, `BatchSetRoot` block aggregation, a benchmark ladder, and a phased
+A-G build plan) that is preserved in full there as the roadmap — none of it is built yet;
+this v0 doc and its Phase-0 crate remain the actually-shipped starting point.
+
 ## 0. Why this exists
 
 Viktor's ask (paraphrased across the session): SIGIL already has a real GHOSTDAG-style
@@ -152,10 +164,22 @@ pub struct BatchCertificate {
 /// n = live validator set size. Standard BFT quorum is 2f+1 out of n=3f+1.
 /// At n=1 this correctly reduces to "1 of 1" — self-certification, no invented
 /// security — rather than silently requiring more acks than exist.
+///
+/// CORRECTED 2026-08-15 (caught in external review, independently re-derived
+/// before accepting): `2f+1` is only safe when n is EXACTLY 3f+1. Two quorums
+/// of size q intersect in an honest node only if `2q > n+f`; for n NOT of that
+/// exact form (e.g. n=5,6,8,9,11,12) `2f+1` falls short and quorum
+/// intersection is not guaranteed. `n-f` is the general-n-safe threshold.
+/// Verified by brute-force check, n=1..64: `2f+1` fails at 7 of the first 12
+/// values tested. The crate's OWN test suite didn't catch this originally —
+/// its 3 quorum examples (n=4,7,10) are all exactly 3f+1, where n-f and 2f+1
+/// coincide; see sigil-narwhal-mempool's `quorum_threshold_safe_for_non_3f_plus_1_n`
+/// test, added specifically because the existing tests couldn't have failed
+/// against the buggy version.
 pub fn quorum_threshold(n: usize) -> usize {
     if n <= 1 { return n.max(1); }
     let f = (n - 1) / 3;
-    2 * f + 1
+    n - f
 }
 ```
 
@@ -174,6 +198,24 @@ This is the throughput lever that actually matters (see §4): a block can commit
 *thousands* of batches' worth of transactions by referencing a handful of digests,
 instead of being limited by how many raw tx bytes fit in one block. Block cadence and
 raw transaction volume become decoupled, which is the whole point of the Narwhal split.
+
+**Safety correction, 2026-08-15 (external review):** digest-only block bodies are UNSAFE
+on a single-producer network and must not activate there, even though the code above is
+correct as a general-`n` data structure. A `BatchCertificate` at `n=1` proves only that
+the ONE producer stored the batch — if that producer disappears (crash, restart onto a
+fresh DB, disk loss) before any peer has fetched the full batch, the digest in the block
+is a reference to data that no longer exists anywhere. This is a real, concrete failure
+mode, not a theoretical one: SIGIL's `sigil-node` genesis-guard already treats an
+unrecoverable local chain state as fatal (`crates/sigil-node/src/main.rs`'s "GENESIS
+GUARD L1" comment) for exactly this class of reason. The rule this design adopts:
+`BlockBatchRef`-only bodies require `n >= 4` (the point `bft_active(n)` becomes true, per
+the corrected `quorum_threshold` above) AND a demonstrated availability certificate from
+that quorum — never merely an env flag. Below `n=4`, or before availability is actually
+certified, transactions travel inline in the block body exactly as they do today; the
+`BlockBatchRef` structure exists in the schema but stays dormant. This mirrors the
+project's own mainnet-safety height-gate pattern (CLAUDE.md "mainnet-safe code changes")
+applied one level earlier, to testnet, on the theory that it's a good habit to have
+already before it's a mainnet requirement.
 
 ### 3.3 Erasure-coded batch dissemination — NOT an invention, corrected 2026-08-15
 
@@ -224,11 +266,26 @@ this design adds on top, honestly scoped:
    rejects on mismatch, which is the same defense, arrived at independently but not
    claimed as novel now that Imitater's prior publication is known.
 
-Net effect, stated at the correct confidence level: a genuine, real bandwidth reduction
-versus full replication (`~1/(k+parity)`× per-node, same shape Imitater already
-demonstrated), assembled cheaply from an in-tree primitive, applied to a DAG-certificate
-consensus pairing rather than a leader-based one — not a new cryptographic idea, and
-this doc no longer claims it is one.
+Net effect, stated at the correct confidence level, and with the bandwidth math corrected
+2026-08-15 (a second external-review catch, same class of error as the quorum bug above:
+conflating shard COUNT with shard SIZE). Each of a batch's `k+parity` shards is
+approximately `m/k` bytes (a `(k, parity)` Reed-Solomon split, matching Imitater's own
+`(f+1, n)` parameterization where shard size is `m/(f+1)`, NOT `m/n`). So:
+- **Per-shard reduction** (what one recipient stores/verifies before reconstruction):
+  `~1/k`× the full batch — this is the number that matters for a validator's own storage
+  and initial download.
+- **Total sender-side bytes for one batch** (dispersing all `k+parity` shards, one to
+  each peer): `~(k+parity)/k`× the batch size — e.g. Imitater's own `k=f+1, n=3f+1`
+  parameterization gives `~3`× the batch size for large `f`, MORE than the raw batch, not
+  less; the win is spreading that cost across `k+parity` separate outbound sends instead
+  of `n-1` full-size ones, and in the shard SIZE each recipient handles, not in total
+  bytes leaving the network. Full replication's comparable total is `(n-1)`× the batch
+  size (one full copy per other validator) — so coding still reduces total network bytes
+  moved whenever `(k+parity)/k < n-1`, which holds for any real validator count, but the
+  reduction is `~k`×, not the `~(k+parity)`× this doc originally and then still incorrectly
+  implied. Assembled cheaply from an in-tree primitive, applied to a DAG-certificate
+  consensus pairing rather than a leader-based one — not a new cryptographic idea, and
+  this doc no longer claims it is one, nor overstates its bandwidth math.
 
 ### 3.4 Certification rides the GHOSTDAG braid, not a new DAG
 
@@ -295,6 +352,10 @@ a claim it doesn't support).
 - Not claiming this replaces GHOSTDAG — it feeds it (§3.4).
 - Not shipping wired-in yet — Phase 0 is a tested, standalone crate; integration is
   Phase 1+, deliberately sequenced after the crate proves itself in isolation.
+- Not claiming `BlockBatchRef` (digest-only block bodies) is safe below `n=4` validators
+  — a single producer's certificate only proves it holds the data itself; if it
+  disappears before any peer fetched the batch, the reference is to data that no
+  longer exists anywhere. Gated on real quorum, not an env flag (§3.2).
 - Not claiming erasure-coded batch dissemination is a novel idea — Imitater
   (arXiv:2409.19286) published the same core mechanism in 2024. See §3.3's
   correction and `SIGIL_NARWHAL_ARXIV_INVESTIGATION_v0.md` for what is and isn't

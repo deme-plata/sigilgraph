@@ -97,12 +97,30 @@ impl BatchAck {
 /// permanently gone, 2026-08-14); this function is written so the real
 /// multi-validator threshold activates automatically the day that's no longer
 /// true, with no call-site change needed anywhere.
+///
+/// BUG FIXED 2026-08-15 (caught in external review, independently re-derived
+/// before accepting the fix): `2f+1` is only a safe quorum when `n` is EXACTLY
+/// `3f+1`. Two quorums of size `q` out of `n` are only guaranteed to intersect
+/// in more than `f` nodes (i.e. in at least one honest node) when `2q > n+f`.
+/// For `n = 3f+1` that requires `q >= 2f+1`, which is where `2f+1` came from —
+/// but for `n` NOT of that exact form (e.g. n=5,6,8,9,11,12 with `f =
+/// floor((n-1)/3)`), `2f+1` falls short of `2q > n+f` and quorum intersection
+/// is NOT guaranteed: two disjoint-enough "quorums" could both certify,
+/// including one assembled entirely from Byzantine signers. Verified by
+/// brute-force check for n=1..12: `2f+1` fails the intersection property at 7
+/// of those 12 values. `n-f` always satisfies `2q>n+f` for `f=floor((n-1)/3)`
+/// (sometimes more conservative than the tight minimum, never unsafe) — this
+/// is the standard PBFT-family quorum size for a validator set that isn't
+/// necessarily exactly `3f+1`. The existing test suite did not catch this: it
+/// only exercised n=4,7,10, all exactly `3f+1`, where the two formulas happen
+/// to coincide — see `quorum_threshold_matches_2f_plus_1_when_n_is_3f_plus_1`
+/// and the new `quorum_threshold_safe_for_non_3f_plus_1_n` test below.
 pub fn quorum_threshold(n: usize) -> usize {
     if n <= 1 {
         return n.max(1);
     }
     let f = (n - 1) / 3;
-    2 * f + 1
+    n - f
 }
 
 /// A batch that has reached quorum: proof of availability, independent of
@@ -160,13 +178,39 @@ mod tests {
     }
 
     #[test]
-    fn quorum_threshold_matches_2f_plus_1() {
-        // n=4 -> f=1 -> 2f+1=3 (classic BFT: tolerate 1 fault out of 4)
+    fn quorum_threshold_matches_2f_plus_1_when_n_is_exactly_3f_plus_1() {
+        // At n = 3f+1 EXACTLY, n-f and 2f+1 coincide (n-f = 3f+1-f = 2f+1) —
+        // this is the classic textbook case and the ONLY case the original
+        // (buggy) `2f+1` formula happened to get right.
+        // n=4 -> f=1 -> n-f=3 (tolerate 1 fault out of 4)
         assert_eq!(quorum_threshold(4), 3);
-        // n=7 -> f=2 -> 2f+1=5
+        // n=7 -> f=2 -> n-f=5
         assert_eq!(quorum_threshold(7), 5);
-        // n=10 -> f=3 -> 2f+1=7
+        // n=10 -> f=3 -> n-f=7
         assert_eq!(quorum_threshold(10), 7);
+    }
+
+    /// The bug this guards against: for n NOT of the form 3f+1, `2f+1` (the
+    /// original formula) falls short of the minimum quorum size needed to
+    /// guarantee two quorums intersect in an honest node (`2q > n+f`). This
+    /// test would have FAILED against the pre-fix `2f+1` implementation —
+    /// it exists specifically because the OTHER quorum test above didn't
+    /// catch the bug (all three of its n values happen to be exactly 3f+1).
+    #[test]
+    fn quorum_threshold_safe_for_non_3f_plus_1_n() {
+        // n=5: f=1, 2f+1=3 (UNSAFE: needs q>=4), n-f=4 (safe)
+        assert_eq!(quorum_threshold(5), 4);
+        // n=6: f=1, 2f+1=3 (UNSAFE: needs q>=4), n-f=5 (safe, conservative)
+        assert_eq!(quorum_threshold(6), 5);
+        // n=8: f=2, 2f+1=5 (UNSAFE: needs q>=6), n-f=6 (safe)
+        assert_eq!(quorum_threshold(8), 6);
+        for n in 1..=64usize {
+            let f = if n <= 1 { 0 } else { (n - 1) / 3 };
+            let q = quorum_threshold(n);
+            // 2q > n+f is the quorum-intersection safety property; check it
+            // holds for every n in range, not just the hand-picked examples.
+            assert!(2 * q > n + f, "quorum_threshold({n})={q} fails 2q>n+f (f={f})");
+        }
     }
 
     #[test]

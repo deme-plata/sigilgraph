@@ -622,6 +622,7 @@ mod fast_path_tests {
             sig_scheme: scheme,
             producer: [0u8; 32],
             producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
+            topology_commitment: None,
         }
     }
 

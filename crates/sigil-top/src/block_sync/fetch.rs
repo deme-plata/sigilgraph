@@ -44,10 +44,20 @@ pub(super) fn fetch_live_tip_blocking() -> Option<u64> {
         let tx = tx.clone();
         let u = format!("{url}?cb={cb}");
         std::thread::spawn(move || {
+            // v7.1.19: errors here were previously swallowed entirely (`.ok()?` with no
+            // logging at all) — a real diagnostic gap found live 2026-08-15 while tracing
+            // why a client sat at tip_age=9999s (oracle never confirmed) with zero visible
+            // cause in the Sync Log. Now every failure is at least tlog'd once.
             let h = (|| -> Option<u64> {
                 // 0.77: shared pooled client — was a fresh Client per racer thread per poll.
-                let v = HTTP_BLOCKING.get(&u).header("cache-control", "no-cache").send().ok()?
-                    .json::<serde_json::Value>().ok()?;
+                let resp = match HTTP_BLOCKING.get(&u).header("cache-control", "no-cache").send() {
+                    Ok(r) => r,
+                    Err(e) => { crate::tlog!("[tipfetch] request failed for {u}: {e}"); return None; }
+                };
+                let v = match resp.json::<serde_json::Value>() {
+                    Ok(v) => v,
+                    Err(e) => { crate::tlog!("[tipfetch] bad JSON from {u}: {e}"); return None; }
+                };
                 v.get("height").and_then(|x| x.as_u64()).filter(|&h| h > 0)
             })();
             let _ = tx.send(h); // recv may already be gone (a faster oracle won) — harmless

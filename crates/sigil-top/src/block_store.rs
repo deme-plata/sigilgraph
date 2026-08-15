@@ -1501,6 +1501,7 @@ mod tests {
                 fluxc_artifact_proof: ProofBundle { artifact_blake3: [0u8;32], sqisign_sig: vec![], sqisign_pubkey: vec![], settle_tx: None },
                 sig_scheme: scheme, producer: [0u8;32],
                 producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
+                topology_commitment: None,
             }
         }
         let p = tmp("rollback-heal");
@@ -1559,6 +1560,7 @@ mod tests {
                 fluxc_artifact_proof: ProofBundle { artifact_blake3: [0u8;32], sqisign_sig: vec![], sqisign_pubkey: vec![], settle_tx: None },
                 sig_scheme: scheme, producer: [0u8;32],
                 producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
+                topology_commitment: None,
             }
         }
         let p = tmp("base1-anchor");

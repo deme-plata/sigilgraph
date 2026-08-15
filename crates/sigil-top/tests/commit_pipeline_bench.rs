@@ -172,6 +172,7 @@ fn mk_header(height: u64, parent_hash: BlockHash, pad: usize) -> SigilBlockHeade
         sig_scheme: scheme,
         producer: [0u8; 32],
         producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
+        topology_commitment: None,
     }
 }
 

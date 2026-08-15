@@ -147,6 +147,22 @@ pub struct P2PSyncState {
     pub peer_count: u32,
     pub mesh_peer_count: u32,
     pub peer_best_height: u64,
+    /// v7.1.19 fix: has `peer_best_height` EVER been confirmed by a live oracle
+    /// answer this session? A cold-start seed from the on-disk `last-tip` cache
+    /// (`read_persisted_tip`, offline-resilience) sets `peer_best_height`
+    /// directly with ZERO validation — it's an unverified guess, not a
+    /// live-confirmed value. The reset-detection loop below normally requires
+    /// 3 CONSECUTIVE oracle polls to disagree with `peer_best_height` before
+    /// correcting it (deliberately conservative, to avoid one flaky reading
+    /// overriding a value the oracle itself vouched for moments ago). That
+    /// conservatism is wrong for a disk-cache seed, which has never been
+    /// vouched for by anything — it should be corrected on the FIRST oracle
+    /// answer, not the third. Root-caused live 2026-08-15: a stale pre-
+    /// genesis-reset cache (tens of millions on a chain now ~350K tall) froze
+    /// `peer_best_height` there for 90+ minutes because 3-in-a-row never
+    /// coincided with whatever made the operator's session unstable enough
+    /// to lose consecutive-poll continuity.
+    pub peer_best_oracle_confirmed: bool,
     pub blocks_synced: u64,
     pub last_message_at: Option<Instant>,
     /// v0.26: when the tip-poller last got a fresh tip. UI shows STALE if this ages out
@@ -439,7 +455,29 @@ impl P2PBlockSync {
                                 let mut s = tip_state.lock().unwrap_or_else(|e| e.into_inner());
                                 s.last_tip_at = Some(Instant::now());
                                 let pb = s.peer_best_height;
-                                if pb > 0 && h < pb / 2 && pb - h > 100_000 {
+                                // v7.1.19 fix: a `peer_best_height` that's still just the raw
+                                // disk-cache cold-start seed (never oracle-confirmed) gets NO
+                                // benefit of the doubt — adopt the FIRST oracle answer outright,
+                                // instead of requiring the same 3-consecutive-poll streak a
+                                // previously-verified value would deserve. See the field's doc
+                                // comment on `P2PSyncState::peer_best_oracle_confirmed`.
+                                if !s.peer_best_oracle_confirmed && pb != h {
+                                    crate::tlog!(
+                                        "[tipfetch] first oracle confirmation this session — adopting {} over unverified seed {}",
+                                        h, pb
+                                    );
+                                    s.peer_best_height = h;
+                                    s.peer_best_oracle_confirmed = true;
+                                    s.blocks_synced = s.blocks_synced.min(h);
+                                    s.sync_height   = s.sync_height.min(h);
+                                    s.sync_total    = s.sync_total.min(h);
+                                    s.verified      = s.verified.min(h);
+                                    if s.base > h { s.base = h; }
+                                    if pb > h { s.reset_pending = true; } // was ABOVE truth — wipe the poisoned store
+                                    reset_streak = 0;
+                                    clear_persisted_tip();
+                                    persist = Some(h);
+                                } else if pb > 0 && h < pb / 2 && pb - h > 100_000 {
                                     reset_streak += 1;
                                     // 0.95: never wipe authoritative local watermarks on a single
                                     // oracle read. Even a 4x drop must repeat for three polls; the
@@ -447,6 +485,7 @@ impl P2PBlockSync {
                                     // the destructive store reset.
                                     if reset_streak >= 3 {
                                         s.peer_best_height = h; // RESET to the live oracle tip
+                                        s.peer_best_oracle_confirmed = true;
                                         // a chain reset invalidates the checkpoint/spine high-water
                                         // marks — they were verified against the OLD (now-dead) chain.
                                         s.blocks_synced = s.blocks_synced.min(h);
@@ -463,7 +502,9 @@ impl P2PBlockSync {
                                     s.oracle_tip = h; // the signed oracle anchor — gates gossip raises
                                     if h > s.peer_best_height {
                                         reset_streak = 0;
-                                        s.peer_best_height = h; persist = Some(h);
+                                        s.peer_best_height = h;
+                                        s.peer_best_oracle_confirmed = true;
+                                        persist = Some(h);
                                     } else if s.peer_best_height > h.saturating_add(SANE_LEAD) {
                                         // v0.59 ORACLE-AUTHORITATIVE: peer_best drifted ABOVE the signed
                                         // oracle by more than a sane lead — a phantom gossip claim (the
@@ -475,6 +516,7 @@ impl P2PBlockSync {
                                         reset_streak += 1;
                                         if reset_streak >= 3 {
                                             s.peer_best_height = h;
+                                            s.peer_best_oracle_confirmed = true;
                                             s.blocks_synced = s.blocks_synced.min(h);
                                             s.sync_height   = s.sync_height.min(h);
                                             s.sync_total    = s.sync_total.min(h);

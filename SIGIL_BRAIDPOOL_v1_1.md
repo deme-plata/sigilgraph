@@ -970,9 +970,63 @@ still mining continuously immediately before (height 49,481) and after
 (height 50,484) this work, unaffected since none of it touches the producer
 loop or the deployed binary.
 
-### Phase G — fairness / anti-MEV experiments
-- record visibility metadata;
-- test Tilikum/MRV-like ordering separately.
+### Phase G — fairness / anti-MEV experiments — **SHIPPED 2026-08-15**, all in `sigil-narwhal-mempool`
+
+- Record visibility metadata. ✅ new `order_meta.rs`: `BatchOrderMetaV1
+  { creator, epoch, sequence, first_seen_round, tx_root }`, matching §15's
+  field list exactly with one honest substitution — `creator` is `WorkerId`,
+  not the spec's `ValidatorId`, because SIGIL's mempool layer has no
+  validator-registry concept yet (same gap `body_mode::activation_mode`
+  already names). `from_header()` derives everything except
+  `first_seen_round` (necessarily local — when THIS node saw the batch)
+  straight from the already-committed `BatchHeaderV1`. This module makes no
+  ordering decision; it only records data.
+- Test Tilikum/MRV-like ordering **separately** (§15's own word, followed
+  literally). ✅ new `fair_order_experiment.rs` — deliberately scoped
+  narrow, and its own doc comment says so twice over: this is **not** an
+  implementation of Tilikum, MRV, Themis, or Aequitas. Those use
+  causal-history cliques and cross-validator Byzantine agreement on arrival
+  order; this module has neither. What it actually does: measures ONE
+  specific, previously-just-asserted bias mechanism — same-round ties broken
+  by validator/worker index — against ONE narrow mitigation — same-round
+  ties broken by batch content (`tx_root`) instead. `first_seen_round`
+  always dominates in both schemes (visibility ordering is preserved); only
+  the within-round tie-break differs.
+- **Measured, not just asserted** — `fair_order_bias_bench` (8 workers,
+  2000 tied cohorts, one batch per worker per cohort, run on this box):
+
+  | Scheme | Tie-break key | Worker win-rate spread | Verdict |
+  |---|---|---|---|
+  | Naive index tiebreak (the §15-warned-about baseline) | `creator.0` ascending | worker 0: **100.0%** (2000/2000), all others: 0.0% | total identity capture — exactly the bias the doc predicted, now measured rather than assumed |
+  | Content tiebreak | `tx_root` ascending | 11.6%–13.7% across 8 workers (uniform = 12.5%) | no worker systematically wins; spread matches random content, not identity |
+
+  Backed by tests, not just the printed bench: `naive_tiebreak_always_favors_the_lowest_creator_index`
+  asserts worker 0 wins ALL 50 sampled cohorts (not "usually" — every time, by
+  construction of the naive sort key); `content_tiebreak_winner_is_not_determined_by_creator_index`
+  swaps which creator holds which `tx_root` between two runs and shows the WIN
+  follows the content, not the identity attached to it; `content_tiebreak_distributes_wins_roughly_evenly_across_workers`
+  runs 2000 cohorts and bounds every worker's win count to 100-450 (loose, to
+  avoid flaking, but tight enough to catch a gross skew like the naive
+  scheme's).
+- **What this explicitly does NOT claim, stated as plainly as Phase E's CPU-cost
+  finding was:** removing identity from a same-round tie-break is not a
+  Byzantine-robust fairness guarantee. A real adversary controls their own
+  batch's transaction ordering and could, in principle, grind for a favorable
+  `tx_root` — this experiment does not measure or defend against that, and
+  says so in its own doc comment and bench output. The actual published
+  protocols this doc names (Tilikum, MRV, Themis, Aequitas) exist specifically
+  to close that gap via richer, cross-validator constructions; evaluating
+  those properly remains the real "separately" work §15 calls for, not
+  something 84 unit tests in one crate can stand in for.
+- **Not wired into anything.** Neither `order_meta` nor `fair_order_experiment`
+  is called from `MempoolBackend`, `BatchSealer`, or anywhere in `sigil-node`
+  — same standalone-and-inert pattern as every prior phase's out-of-scope
+  pieces.
+
+84/84 crate tests green (up from 77: +3 `order_meta`, +4 `fair_order_experiment`).
+SIGIL chain confirmed still mining continuously immediately before (height
+56,334) and after (height 56,726) this work, unaffected since none of it
+touches the producer loop or the deployed binary.
 
 ---
 

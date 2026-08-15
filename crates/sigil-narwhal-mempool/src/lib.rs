@@ -29,6 +29,14 @@
 //!   inline transactions. Standalone; NOT wired into `sigil-node`'s real
 //!   `BlockHeader` this pass — see that module's doc comment for why `n<4`
 //!   makes it unsafe today and what SIGIL's real, current answer is.
+//! - [`order_meta`] (BraidPool §15, Phase G) — authenticated visibility
+//!   metadata a fairness layer could use later, without changing the
+//!   availability protocol. Records data only; makes no ordering decision.
+//! - [`fair_order_experiment`] (BraidPool §15, Phase G) — the "evaluate
+//!   Tilikum-style approaches separately" half: a narrow, honestly-scoped
+//!   measurement of validator-index tie-break bias vs a content-hash
+//!   tie-break. Explicitly NOT a Tilikum/MRV/Themis/Aequitas implementation
+//!   — see that module's doc comment.
 
 pub mod backend;
 pub mod batch_set;
@@ -36,7 +44,9 @@ pub mod batch_store;
 pub mod body_mode;
 pub mod canonical;
 pub mod dissemination;
+pub mod fair_order_experiment;
 pub mod merkle;
+pub mod order_meta;
 pub mod repair;
 pub mod sealer;
 pub mod types;
@@ -48,7 +58,9 @@ pub use batch_store::{BatchStore, BatchStoreMetrics};
 pub use body_mode::{activation_mode, sigil_current_body_mode, BodyMode, SIGIL_CURRENT_VALIDATOR_COUNT};
 pub use canonical::{BatchHeaderV1, CodingProfile, BATCH_HEADER_VERSION};
 pub use dissemination::{reassemble_batch, shard_batch, BatchShard};
+pub use fair_order_experiment::{order_content_tiebreak, order_naive_index_tiebreak, synthetic_tie_cohort};
 pub use merkle::merkle_root;
+pub use order_meta::BatchOrderMetaV1;
 pub use repair::{next_repair_peer, repair_priority};
 pub use sealer::{BatchSealer, SealPolicy};
 pub use types::{quorum_threshold, BatchAck, BatchCertificate, BlockBatchRef, WorkerBatch, WorkerId};

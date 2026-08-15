@@ -15,15 +15,16 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use sigil_tx::{AuthorizedBatch, Mempool, SignedTx};
+use sigil_narwhal_mempool::MempoolBackend;
+use sigil_tx::{AuthorizedBatch, SignedTx};
 
 const MAX_BODY: usize = 8 * 1024 * 1024; // 8 MiB request cap
 
 /// Spawn the ingest server on `port`, sharing the producer's mempool. Runs on its
 /// own OS thread (like the TXGEN feeder) so a slow client never stalls production.
-pub fn spawn(mempool: Arc<Mutex<Mempool>>, port: u16) {
+pub fn spawn(mempool: Arc<MempoolBackend>, port: u16) {
     let _ = std::thread::Builder::new()
         .name("sigil-ingest".into())
         .spawn(move || {
@@ -42,7 +43,7 @@ pub fn spawn(mempool: Arc<Mutex<Mempool>>, port: u16) {
         });
 }
 
-fn handle(stream: &mut TcpStream, mempool: &Arc<Mutex<Mempool>>) -> std::io::Result<()> {
+fn handle(stream: &mut TcpStream, mempool: &Arc<MempoolBackend>) -> std::io::Result<()> {
     stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok();
     let mut buf = Vec::new();
     let mut tmp = [0u8; 8192];
@@ -75,23 +76,22 @@ fn handle(stream: &mut TcpStream, mempool: &Arc<Mutex<Mempool>>) -> std::io::Res
     Ok(())
 }
 
-fn route(method: &str, path: &str, body: &str, mempool: &Arc<Mutex<Mempool>>) -> String {
+fn route(method: &str, path: &str, body: &str, mempool: &Arc<MempoolBackend>) -> String {
     // strip any query string
     let path = path.split('?').next().unwrap_or(path);
     match (method, path) {
         ("GET", "/health") => r#"{"ok":true,"service":"sigil-ingest"}"#.to_string(),
         ("GET", "/mempool") => {
-            let g = mempool.lock().unwrap();
             format!(
                 r#"{{"ok":true,"txs":{},"batches":{},"batch_ops":{}}}"#,
-                g.len(),
-                g.batch_count(),
-                g.pending_batch_ops()
+                mempool.len(),
+                mempool.batch_count(),
+                mempool.pending_batch_ops()
             )
         }
         ("POST", "/tx") => match serde_json::from_str::<SignedTx>(body) {
             Ok(tx) => {
-                let r = mempool.lock().unwrap().ingest(vec![tx]);
+                let r = mempool.ingest(vec![tx]);
                 format!(
                     r#"{{"ok":true,"accepted":{},"invalid":{},"dupe":{}}}"#,
                     r.accepted, r.invalid, r.dupe
@@ -100,7 +100,7 @@ fn route(method: &str, path: &str, body: &str, mempool: &Arc<Mutex<Mempool>>) ->
             Err(e) => err(&format!("bad SignedTx JSON: {e}")),
         },
         ("POST", "/batch") => match serde_json::from_str::<AuthorizedBatch>(body) {
-            Ok(batch) => match mempool.lock().unwrap().ingest_batch(batch) {
+            Ok(batch) => match mempool.ingest_batch(batch) {
                 Ok(ops) => format!(r#"{{"ok":true,"accepted_ops":{ops}}}"#),
                 Err(e) => err(&format!("batch rejected: {e}")),
             },
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn route_batch_ingest_status_and_dedup() {
-        let mp = Arc::new(Mutex::new(Mempool::new()));
+        let mp = Arc::new(MempoolBackend::legacy());
         assert!(route("GET", "/health", "", &mp).contains("sigil-ingest"));
 
         let (sk, pk, author) = ed25519_keygen();

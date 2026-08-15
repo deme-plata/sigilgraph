@@ -13,7 +13,7 @@
 //!   * tower middleware tuned for money: concurrency cap, timeout, CORS, body limit,
 //!   * reads (`balance`, `supply`) are open; mutations require a valid signature.
 
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -24,19 +24,24 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use sigil_narwhal_mempool::MempoolBackend;
 use sigil_state::{SigilState, WalletId, MAX_SUPPLY, NATIVE};
-use sigil_tx::{Mempool, SignedTx};
+use sigil_tx::SignedTx;
 
 pub mod mining;
 use mining::{MiningBridge, SubmitOutcome};
 
 /// Shared braid state the API reads/writes. `state` is published by the producer
-/// after each block-apply (a consistent read snapshot); `mempool` is the same
-/// Arc the producer pulls txs from when it mints the next block; `mining` is the
+/// after each block-apply (a consistent read snapshot); `mempool` is the SAME
+/// `Arc<MempoolBackend>` the producer pulls txs from when it mints the next
+/// block — not a coincidence of construction, but the whole point of
+/// `MempoolBackend` existing (SIGIL_BRAIDPOOL_v1_1.md Phase B): both crates
+/// holding the SAME handle makes it structurally impossible for a transaction
+/// accepted here to land somewhere the producer never looks. `mining` is the
 /// seam the producer publishes its frontier into and pops verified solves from.
 #[derive(Clone)]
 pub struct AppState {
-    pub mempool: Arc<Mutex<Mempool>>,
+    pub mempool: Arc<MempoolBackend>,
     pub state: Arc<RwLock<SigilState>>,
     pub mining: Arc<MiningBridge>,
 }
@@ -44,7 +49,7 @@ pub struct AppState {
 impl AppState {
     /// Build the shared state from the producer's mempool + state handles, with
     /// a fresh mining bridge.
-    pub fn new(mempool: Arc<Mutex<Mempool>>, state: Arc<RwLock<SigilState>>) -> Self {
+    pub fn new(mempool: Arc<MempoolBackend>, state: Arc<RwLock<SigilState>>) -> Self {
         Self { mempool, state, mining: Arc::new(MiningBridge::new()) }
     }
 }
@@ -177,13 +182,10 @@ pub async fn submit_transaction(
         return ApiResponse::err(format!("signature invalid: {e:?}"));
     }
     // Ingest into the shared mempool → the producer pulls it into the next block.
-    let accepted = match st.mempool.lock() {
-        Ok(mut mp) => {
-            let res = mp.ingest(vec![tx]);
-            res.accepted > 0
-        }
-        Err(_) => return ApiResponse::err("mempool unavailable"),
-    };
+    // `MempoolBackend::ingest` handles its own internal locking (and dispatches
+    // to whichever tx backend SIGIL_BRAIDPOOL selected) — no Mutex to poison
+    // handle here at this call site.
+    let accepted = st.mempool.ingest(vec![tx]).accepted > 0;
     ApiResponse::ok(SubmitResponse {
         tx_hash,
         accepted,
@@ -200,7 +202,7 @@ pub async fn tx_status(
     let Some(h) = hex32(&hash) else {
         return ApiResponse::err("hash must be 64-hex");
     };
-    let in_pool = st.mempool.lock().map(|mp| mp.contains(&h)).unwrap_or(false);
+    let in_pool = st.mempool.contains(&h);
     ApiResponse::ok(TxStatusResponse {
         tx_hash: hash,
         status: if in_pool { "mempool".into() } else { "unknown".into() },
@@ -331,7 +333,7 @@ mod tests {
 
     fn state() -> AppState {
         AppState::new(
-            Arc::new(Mutex::new(Mempool::new())),
+            Arc::new(MempoolBackend::legacy()),
             Arc::new(RwLock::new(SigilState::new())),
         )
     }

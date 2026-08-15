@@ -22,12 +22,14 @@
 //!   per-peer replication. NOT claimed as novel — see
 //!   `SIGIL_NARWHAL_ARXIV_INVESTIGATION_v0.pdf`.
 
+pub mod backend;
 pub mod canonical;
 pub mod dissemination;
 pub mod merkle;
 pub mod types;
 pub mod worker;
 
+pub use backend::MempoolBackend;
 pub use canonical::{BatchHeaderV1, CodingProfile, BATCH_HEADER_VERSION};
 pub use dissemination::{reassemble_batch, shard_batch, BatchShard};
 pub use merkle::merkle_root;

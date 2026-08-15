@@ -19,6 +19,11 @@ blake3 = { workspace = true }
 sigil-state = { path = "../sigil-state" }
 sigil-tx = { path = "../sigil-tx" }
 sigil-emission = { path = "../sigil-emission" }
+# Backend-aware mempool handle (SIGIL_BRAIDPOOL_v1_1.md Phase B): AppState
+# holds the SAME Arc<MempoolBackend> sigil-node's producer loop holds, so
+# there is no seam where a real transaction submitted here could land in a
+# mempool the producer never pulls from.
+sigil-narwhal-mempool = { path = "../sigil-narwhal-mempool" }
 # P1 mining-onto-the-braid: the reqwest-free verification core (Challenge /
 # Submission / check_submission) — the same one gate sigil-rpcd uses, so every
 # existing miner speaks to the braid unchanged.

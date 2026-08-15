@@ -28,7 +28,8 @@ use sigil_header::{
     StarkProof, WesolowskiProof, HEADER_VERSION, NETWORK_ID, SQISIGN_L5_LEN,
 };
 use sigil_state::{SigilState, StateMutation, StateRoots, StateTransition, WalletId};
-use sigil_tx::{apply_tx, ed25519_keygen, ed25519_sign_tx, Mempool, SignedTx, SigilTx};
+use sigil_narwhal_mempool::MempoolBackend;
+use sigil_tx::{apply_tx, ed25519_keygen, ed25519_sign_tx, SignedTx, SigilTx};
 use std::sync::{Arc, Mutex};
 
 use crate::block::Block;
@@ -588,7 +589,12 @@ fn run_start() -> Result<()> {
         // count+root into the header. N=0 (default) keeps empty-block behaviour.
         let txgen: usize = std::env::var("SIGIL_TXGEN")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-        let mempool: Arc<Mutex<Mempool>> = Arc::new(Mutex::new(Mempool::new()));
+        // SIGIL_BRAIDPOOL_v1_1.md Phase B: MempoolBackend is the ONE mempool
+        // handle this node and sigil-api's money API both hold (see its doc
+        // comment for the correctness hazard that requires this). Defaults
+        // to the legacy single-mutex backend unless SIGIL_BRAIDPOOL=1 —
+        // byte-for-byte the same behavior as before this type existed.
+        let mempool: Arc<MempoolBackend> = Arc::new(MempoolBackend::from_env());
         // R1: tx/batch INGEST BRIDGE — the first real user-tx path into the producer
         // mempool (wallets / rpcd-forwarder / loadgen). Env-gated by SIGIL_API_PORT;
         // shares the mempool Arc like the TXGEN feeder. Off unless set.
@@ -665,8 +671,8 @@ fn run_start() -> Result<()> {
                 loop {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                     let need = {
-                        let g = mp.lock().unwrap();
-                        if g.len() >= target { 0 } else { target - g.len() }
+                        let len = mp.len();
+                        if len >= target { 0 } else { target - len }
                     };
                     if need == 0 { continue; }
                     // SIGN in parallel across cores — disjoint amount ranges keep
@@ -697,7 +703,7 @@ fn run_start() -> Result<()> {
                     });
                     amount += need as u128;
                     // ingest VERIFIES once, batch×parallel (the wall we are measuring)
-                    mp.lock().unwrap().ingest(batch);
+                    mp.ingest(batch);
                 }
             });
         }
@@ -905,7 +911,7 @@ fn run_start() -> Result<()> {
                     };
                     // pull verify-once txs (already verified at mempool ingest)
                     let block_txs: Vec<SignedTx> =
-                        if txgen > 0 { mempool.lock().unwrap().pull(txgen) } else { Vec::new() };
+                        if txgen > 0 { mempool.pull(txgen) } else { Vec::new() };
                     // ONE-CHAIN: when the adaptive emission controller is live, IT
                     // computes the reward (time-based + PID + rate) and we bake the
                     // exact amount into the coinbase; else the pure height schedule.
@@ -977,7 +983,7 @@ fn run_start() -> Result<()> {
                                     // adaptive rate: retune the tick from mempool backlog every 16 blocks
                                     if let Some(g) = rate_gov.as_mut() {
                                         if produced % 16 == 0 {
-                                            let backlog = mempool.lock().unwrap().len();
+                                            let backlog = mempool.len();
                                             let iv = g.update(backlog);
                                             produce_tick = tokio::time::interval_at(tokio::time::Instant::now() + iv, iv);
                                             produce_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

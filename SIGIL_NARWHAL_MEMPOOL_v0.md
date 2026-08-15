@@ -14,10 +14,17 @@ explicitly to fix what Quillon got wrong, so it should get a REAL one — and Vi
 for an *invented upgrade* beyond stock Narwhal, aimed at an extremely high throughput
 ceiling ("like 10m tps").
 
-This doc is honest about what "10M TPS" can and can't mean here (§4), then lays out an
-architecture that is a genuine advance on Narwhal for THIS codebase specifically (§3),
-and a phased build plan that ships something real now without destabilizing the producer
-loop that was just fixed this session (§5).
+**Update, same day:** §3.3's original draft claimed an "invented" erasure-coded batch
+dissemination scheme. A literature check (requested by Viktor, written up in
+`SIGIL_NARWHAL_ARXIV_INVESTIGATION_v0.md`) found that claim was wrong — a 2024 paper,
+Imitater (arXiv:2409.19286), already does almost exactly this. §3.3 below is corrected
+in place rather than rewritten from scratch, so the correction is visible, not memory-holed.
+
+This doc is honest about what "10M TPS" can and can't mean here (§4), lays out an
+architecture assembled for THIS codebase specifically (§3) — some of it genuinely new for
+SIGIL's own mempool even where the underlying technique is not new to the field, per §3.3's
+correction — and a phased build plan that ships something real now without destabilizing
+the producer loop that was just fixed this session (§5).
 
 ## 1. What Narwhal actually is (so the "upgrade" claim is checkable)
 
@@ -168,37 +175,60 @@ This is the throughput lever that actually matters (see §4): a block can commit
 instead of being limited by how many raw tx bytes fit in one block. Block cadence and
 raw transaction volume become decoupled, which is the whole point of the Narwhal split.
 
-### 3.3 The invented upgrade: erasure-coded batch dissemination
+### 3.3 Erasure-coded batch dissemination — NOT an invention, corrected 2026-08-15
 
-Stock Narwhal broadcasts each **full batch** to every worker on every validator — at N
-validators that's N-1 full copies leaving each worker, every batch. SIGIL already has a
-real, tested Reed-Solomon erasure coder in-tree (`flux-aether::rs_shard` /
-`rs_reassemble`, used today for chain snapshot durability — "lose up to N-K shards and
-still reconstruct byte-identical"). Reusing it for batch dissemination is a genuine,
-buildable advance, not a hand-wave:
+**This section originally claimed erasure-coded batch dissemination as an "invented
+upgrade." That claim was wrong and has been corrected after actually checking the
+literature** (see `SIGIL_NARWHAL_ARXIV_INVESTIGATION_v0.md` for the full research
+writeup). The honest picture:
 
-- Encode each batch into `k` data + `parity` parity shards:
-  `let (orig_len, shards) = rs_shard(&batch_bytes, k, parity);`
-- Send ONE shard to each of the `k+parity` peers, instead of the full batch to
-  everyone. Per-sender bandwidth for a batch drops from `O(N × batch_size)` to
-  `O(batch_size)` total (one shard-worth per peer, and shards sum to ~the original
-  size across all peers) — the same fan-out economics that make erasure-coded
-  storage systems (and later Narwhal variants like "Quorum Store" / EC-augmented
-  DAG mempools) beat naive full-replication at scale.
-- Any peer holding `≥k` shards (its own + gossiped ones, or fetched on demand)
-  reconstructs the full batch locally: `rs_reassemble(orig_len, k, parity, shards)`.
-  A validator does **not** need the full batch to ack availability of a *shard* —
-  acking "I hold shard i of digest D" is still a valid availability signal, and the
-  quorum certificate can require k-reconstructibility rather than N full copies.
-- This composes cleanly with the existing GHOSTDAG braid's own pruned-window model
-  (`braid base-anchored at H=...`) — old batches age out of the erasure-coded set
-  the same way old blocks already age out of the braid's local window.
+- **Imitater** (Zeng, Li, Fu, Liu, Jiang — arXiv:2409.19286, Sep 2024, rev. Apr 2025)
+  already does almost exactly this: encode each microblock with `(f+1, n)` Reed-Solomon
+  into `n = 3f+1` chunks, disperse one Merkle-proof-carrying chunk per node, collect
+  `2f+1` signed acks into an **Availability Certificate** — the same shape as the
+  `BatchCertificate` below, published a year before this doc. Imitater targets
+  HotStuff-family leader-based BFT rather than a Narwhal/Bullshark DAG-certificate
+  base, and adds a re-encode-and-compare integrity check this design did not originally
+  include (§ below now does).
+- Erasure-coded propagation is separately well-proven at the **block** layer: Solana's
+  **Turbine** and Monad's **RaptorCast** both erasure-code block data for leader→validator
+  fanout, and Ethereum's **danksharding / Data Availability Sampling** (Ethereum
+  Foundation roadmap; see arXiv:2407.18085 for a DAS design analysis) uses Reed-Solomon
+  for the same "prove availability without needing the whole blob" property, at yet
+  another layer (blob data, not mempool batches).
+- **Aptos's own team explicitly evaluated and rejected erasure coding for Quorum
+  Store** (their Narwhal-derived shared mempool) — their stated reasoning: it "would
+  only add complexity and yield no benefits in terms of load balancing," because
+  Quorum Store's symmetric full-broadcast already balances load evenly across
+  validators. That is a real, considered counter-argument from a production team, not
+  an oversight to route around quietly.
 
-Net effect: the same `k`-of-`k+parity` durability guarantee Narwhal gets from full
-replication, at roughly `1/(k+parity)` the per-node bandwidth cost of sending the whole
-batch to everyone. This is the piece that's genuinely SIGIL-specific — it exists because
-`flux-aether` already exists in this workspace, not because it's a standard Narwhal
-feature.
+**What's actually left, once the honest baseline is Imitater rather than nothing:**
+Aptos's rejection is about *load-balancing symmetry* (full replication is already
+fair, since every validator does the same work) — a different axis from *total
+bandwidth*, where `k`-of-`(k+parity)` sharding is still a real reduction versus full
+replication regardless of fairness. Imitater already proves that axis works. What
+this design adds on top, honestly scoped:
+1. Reuses `flux-aether::rs_shard`/`rs_reassemble` — an already-built, already-tested
+   Reed-Solomon coder in THIS workspace (built for chain-snapshot durability) — instead
+   of writing a new coder, which is a real engineering economy specific to this
+   codebase, not a research contribution.
+2. Pairs erasure-coded dispersal with a **Narwhal/Bullshark-family DAG certificate
+   layer** (§3.4, riding the GHOSTDAG braid already shipped this session) rather than
+   Imitater's HotStuff-style leader-based BFT — a combination I could not find already
+   published, though the search was not exhaustive enough to call that a confirmed gap
+   rather than a search miss.
+3. Imitater's re-encode-and-compare integrity check (decode, then re-encode, then
+   compare the Merkle root) is adopted here too — `dissemination.rs`'s
+   `reassemble_batch` already re-derives the digest from reconstructed bytes and
+   rejects on mismatch, which is the same defense, arrived at independently but not
+   claimed as novel now that Imitater's prior publication is known.
+
+Net effect, stated at the correct confidence level: a genuine, real bandwidth reduction
+versus full replication (`~1/(k+parity)`× per-node, same shape Imitater already
+demonstrated), assembled cheaply from an in-tree primitive, applied to a DAG-certificate
+consensus pairing rather than a leader-based one — not a new cryptographic idea, and
+this doc no longer claims it is one.
 
 ### 3.4 Certification rides the GHOSTDAG braid, not a new DAG
 
@@ -265,3 +295,7 @@ a claim it doesn't support).
 - Not claiming this replaces GHOSTDAG — it feeds it (§3.4).
 - Not shipping wired-in yet — Phase 0 is a tested, standalone crate; integration is
   Phase 1+, deliberately sequenced after the crate proves itself in isolation.
+- Not claiming erasure-coded batch dissemination is a novel idea — Imitater
+  (arXiv:2409.19286) published the same core mechanism in 2024. See §3.3's
+  correction and `SIGIL_NARWHAL_ARXIV_INVESTIGATION_v0.md` for what is and isn't
+  actually new here once that's accounted for.

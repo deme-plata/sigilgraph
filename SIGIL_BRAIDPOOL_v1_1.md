@@ -745,9 +745,21 @@ Benchmark certificate verification separately for each signature mode.
   untouched. 43/43 crate tests green; SIGIL mainnet-genesis-reset chain mining
   confirmed still healthy immediately before and after this work.
 
-### Phase B — sharded mempool behind flag — **PARTIALLY SHIPPED 2026-08-15**: benchmarked, NOT wired live
-- `SIGIL_BRAIDPOOL=1` — **not implemented as a live producer-loop flag this pass.**
-  Investigating the wiring surfaced a real correctness hazard first:
+### Phase B — sharded mempool behind flag — **FULLY SHIPPED 2026-08-15**: benchmarked AND wired live
+- `SIGIL_BRAIDPOOL=1` — **now a real, deployed producer-loop flag.** The
+  correctness hazard noted below was closed in a follow-up same-day commit
+  (`7f80f9b`, `sigil_narwhal_mempool::MempoolBackend`) rather than left
+  deferred: `sigil_api::AppState` and `sigil-node`'s producer loop now hold
+  the exact same `Arc<MempoolBackend>`, so there is structurally no seam left
+  where the two could diverge onto different mempools. Deployed live to
+  Epsilon with the same care as the mining-stall fix earlier this session:
+  both crates' full test suites green pre-deploy (sigil-api 11/11, sigil-node
+  53/53, sigil-narwhal-mempool 47/47), binary backed up before swap, verified
+  post-deploy that `SIGIL_BRAIDPOOL` is unset in the live unit (legacy
+  backend active — this deploy shipped the escape hatch, not a behavior
+  change) and that mining, the money API, and the ingest routes all still
+  work exactly as before. The hazard investigation itself is preserved below
+  unedited, since it's the reasoning that led to `MempoolBackend` existing:
   `sigil_api::AppState` (the money API's `/v1/transactions` handler) and
   `sigil-node/main.rs`'s block-body `pull()` call share ONE `Arc<Mutex<Mempool>>`
   today. If only the `main.rs` pull/TXGEN call site swapped to `ShardedMempool`
@@ -790,11 +802,37 @@ Benchmark certificate verification separately for each signature mode.
   benchmark).
 - no block schema change: ✅ — nothing about block structure touched this pass.
 
-### Phase C — local batches
-- batch construction;
-- batch store;
-- batch metrics;
-- still inline transactions in blocks.
+### Phase C — local batches — **SHIPPED 2026-08-15**, all in `sigil-narwhal-mempool`
+- Batch construction. ✅ new `sealer.rs`: `BatchSealer` accumulates pulled txs
+  per worker and seals a `(BatchHeaderV1, WorkerBatch)` pair once a
+  `SealPolicy` threshold fires (`target_bytes` / `target_txs` / `max_latency`,
+  OR'd — whichever fires first). Sealing moment is explicitly a LOCAL
+  decision (§8: "deterministic by local policy, not consensus") — two nodes
+  sealing the same pending txs at different wall-clock moments just produce
+  two different (still individually valid) batches; nothing about
+  correctness depends on sealing being synchronized. Each sealer keeps its
+  own monotonic `sequence` counter and chains each new batch's `previous`
+  field to its own last `batch_id`, so a worker's batches form a real local
+  chain, not just an unordered set. `force=true` seals whatever's pending
+  regardless of policy (e.g. on shutdown), so nothing queued is silently lost.
+- Batch store. ✅ new `batch_store.rs`: `BatchStore`, sealed batches keyed by
+  `batch_id`, `insert`/`get`/`contains`/`remove`, `&self`-only (RwLock
+  inside) matching the rest of the crate's shared-handle style.
+- Batch metrics. ✅ `BatchStoreMetrics { sealed_total, bytes_total,
+  live_count }` — `sealed_total`/`bytes_total` are lifetime counters (never
+  decremented by `remove`, so they answer "how much work has this store
+  done" separately from "how much is live right now"). Plain atomics, not
+  wired to a real metrics exporter yet — §23's Prometheus-style names are the
+  target shape for whenever this is actually deployed, not faked here.
+- Still inline transactions in blocks. ✅ none of this touches
+  `sigil-node`'s block body — `BlockBatchRef`-referenced bodies stay Phase F,
+  gated on real multi-validator availability per the design doc's §3.2
+  safety correction (a single producer's own certificate doesn't make a
+  batch recoverable if the producer disappears).
+
+59/59 crate tests green (up from 47); SIGIL chain confirmed still mining
+continuously immediately before and after this work, unaffected since none
+of it touches the producer loop or the deployed binary.
 
 ### Phase D — multi-node availability testnet
 - require committee `n>=4`;

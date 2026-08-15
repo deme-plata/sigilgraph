@@ -23,15 +23,19 @@
 //!   `SIGIL_NARWHAL_ARXIV_INVESTIGATION_v0.pdf`.
 
 pub mod backend;
+pub mod batch_store;
 pub mod canonical;
 pub mod dissemination;
 pub mod merkle;
+pub mod sealer;
 pub mod types;
 pub mod worker;
 
 pub use backend::MempoolBackend;
+pub use batch_store::{BatchStore, BatchStoreMetrics};
 pub use canonical::{BatchHeaderV1, CodingProfile, BATCH_HEADER_VERSION};
 pub use dissemination::{reassemble_batch, shard_batch, BatchShard};
 pub use merkle::merkle_root;
+pub use sealer::{BatchSealer, SealPolicy};
 pub use types::{quorum_threshold, BatchAck, BatchCertificate, BlockBatchRef, WorkerBatch, WorkerId};
 pub use worker::{BoundedIngestResult, MempoolWorker, ShardedMempool, WorkerLimits};

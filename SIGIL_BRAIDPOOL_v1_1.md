@@ -720,13 +720,30 @@ Benchmark certificate verification separately for each signature mode.
 
 ## 17. Phase plan
 
-### Phase A — correctness scaffold
-- Replace quorum math.
-- Canonical batch header + domain-separated IDs.
-- Bounded worker queues.
-- Epoch-salted worker assignment.
-- Golden serialization vectors.
-- No producer behavior change.
+### Phase A — correctness scaffold — **SHIPPED 2026-08-15**, all in `sigil-narwhal-mempool`
+- Replace quorum math. ✅ `quorum_threshold` fixed to `n-f` (commit `466cc93`).
+- Canonical batch header + domain-separated IDs. ✅ `canonical.rs`: `BatchHeaderV1`,
+  `BATCH_HEADER_VERSION`, `batch_id()` = `BLAKE3("SIGIL/BATCH/V1" || canonical_encode(header))`.
+  `WorkerBatch::canonical_header(...)` wires it up; the old bare `digest()` stays for
+  `dissemination.rs`'s existing round-trip, explicitly marked superseded.
+- Bounded worker queues. ✅ `worker.rs`: `WorkerLimits { max_txs, max_bytes,
+  per_wallet_max_txs }`, enforced BEFORE signature verification (§14's DoS-resistance
+  point), returns a distinct `BoundedIngestResult.rejected_capacity` rather than folding
+  capacity rejections into `invalid`. Per-wallet slots are reserved optimistically during
+  the dedup pass and released again if verification then rejects the tx (an invalid
+  signature must not permanently burn a wallet's own quota).
+- Epoch-salted worker assignment. ✅ `worker.rs`: `epoch_salted_index()` =
+  `BLAKE3("SIGIL/WORKER/V1" || epoch_seed || wallet) mod worker_count`, `ShardedMempool`
+  holds the seed behind a `RwLock` with `rotate_epoch()`; already-queued txs are NOT
+  reshuffled by a rotation (only routing for future `ingest()` calls changes).
+- Golden serialization vectors. ✅ `merkle.rs` and `canonical.rs` each pin one hex-encoded
+  BLAKE3 value for a fixed input; both were confirmed to actually FAIL against a
+  tampered value before being left in their real, passing state (not just written and
+  trusted).
+- No producer behavior change. ✅ None of this is wired into `sigil-node`'s producer
+  loop — the mining-stall fix that shipped hours earlier this same session stays
+  untouched. 43/43 crate tests green; SIGIL mainnet-genesis-reset chain mining
+  confirmed still healthy immediately before and after this work.
 
 ### Phase B — sharded mempool behind flag
 - `SIGIL_BRAIDPOOL=1`

@@ -28,10 +28,44 @@ impl WorkerBatch {
         Self { worker, round, txs }
     }
 
-    /// BLAKE3 over the canonical encoding — the identity a certificate/ack refers to.
+    /// BLAKE3 over `(worker, round, txs)` — the Phase-0 identity scheme, kept
+    /// for `dissemination.rs`'s existing shard/reassemble round-trip. NOT
+    /// domain-separated and doesn't carry chain/epoch/sequence context —
+    /// superseded by [`Self::canonical_header`] (Phase A,
+    /// SIGIL_BRAIDPOOL_v1_1.md §3.4) wherever a real sealing context (a
+    /// chain id, an epoch, a sequence number) is actually available. Left
+    /// as-is rather than forced to fake those fields with placeholder values
+    /// — that context doesn't exist yet in this crate (it's Phase C's
+    /// "local batches", not Phase A's).
     pub fn digest(&self) -> [u8; 32] {
         let bytes = self.encode();
         blake3::hash(&bytes).into()
+    }
+
+    /// Build the Phase-A canonical header (`crate::canonical::BatchHeaderV1`)
+    /// for this batch, given the sealing context this type doesn't itself
+    /// carry. `tx_root` is a REAL Merkle root over each tx's own canonical
+    /// hash (`crate::merkle::merkle_root`), not a bare concatenation hash —
+    /// see canonical.rs's doc comment for why that distinction matters
+    /// (reordering detection, no leaf/node hash collision).
+    pub fn canonical_header(
+        &self,
+        chain_id: [u8; 32],
+        epoch: u64,
+        sequence: u64,
+        previous: Option<[u8; 32]>,
+    ) -> crate::canonical::BatchHeaderV1 {
+        let tx_hashes: Vec<[u8; 32]> = self.txs.iter().map(|t| t.tx.hash()).collect();
+        let uncompressed_len = self.encode().len() as u32;
+        crate::canonical::BatchHeaderV1::new_replicated(
+            chain_id,
+            epoch,
+            self.worker,
+            sequence,
+            previous,
+            &tx_hashes,
+            uncompressed_len,
+        )
     }
 
     fn encode(&self) -> Vec<u8> {
@@ -220,6 +254,30 @@ mod tests {
         assert_eq!(b1.digest(), b2.digest(), "same content -> same digest");
         let b3 = WorkerBatch::new(WorkerId(0), 2, b1.txs.clone()); // different round
         assert_ne!(b1.digest(), b3.digest(), "different round -> different digest");
+    }
+
+    #[test]
+    fn canonical_header_matches_worker_batch_content() {
+        let b = WorkerBatch::new(WorkerId(2), 1, vec![dummy_tx(0), dummy_tx(1)]);
+        let h = b.canonical_header([5u8; 32], 3, 10, None);
+        assert_eq!(h.worker, WorkerId(2), "header must carry the batch's actual worker id");
+        assert_eq!(h.tx_count, 2);
+        let expected_root = crate::merkle::merkle_root(
+            &b.txs.iter().map(|t| t.tx.hash()).collect::<Vec<_>>(),
+        );
+        assert_eq!(h.tx_root, expected_root, "canonical_header must use a REAL Merkle root, not WorkerBatch::digest()'s bare hash");
+    }
+
+    #[test]
+    fn canonical_header_id_differs_from_legacy_digest() {
+        // The two identity schemes are deliberately different (see the doc
+        // comment on WorkerBatch::digest) — this pins that they don't
+        // accidentally collide, which would be confusing if anyone ever
+        // compared the two.
+        let b = WorkerBatch::new(WorkerId(0), 1, vec![dummy_tx(0)]);
+        let legacy = b.digest();
+        let canonical = b.canonical_header([0u8; 32], 0, 0, None).batch_id();
+        assert_ne!(legacy, canonical);
     }
 
     #[test]

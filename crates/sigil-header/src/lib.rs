@@ -258,26 +258,63 @@ pub struct SigilBlockHeaderV0 {
     /// [`TOPOLOGY_COMMITMENT_ACTIVATION_HEIGHT`] for how real enforcement
     /// would be turned on later, mirroring the H1 pattern above.
     ///
-    /// **`skip_serializing_if` is load-bearing, not cosmetic — this is the
-    /// fix for a real incident (2026-08-15).** `hash()` serializes the
-    /// ENTIRE struct; without this attribute, a `None` value still emits
-    /// `"topology_commitment":null` into the JSON, which changes the
-    /// re-derived hash of every ALREADY-MINTED historical block the instant
-    /// this field existed in the struct — even though `#[serde(default)]`
-    /// alone made *deserializing* old blocks compile-safe. In production
-    /// this silently broke the snapshot-boot tail-replay (every historical
-    /// block's re-hash mismatched what was recorded when it was minted,
-    /// rejecting the entire tail and forcing an ~9-hour full replay from
-    /// genesis instead of a few-second snapshot restore) before being
-    /// caught and rolled back. With `skip_serializing_if`, a `None` header
-    /// re-serializes byte-identically to a header from before this field
-    /// existed — `hash()` is stable for every block that predates it — and
-    /// only genuinely NEW blocks (minted with `Some(commitment)`) get a
-    /// different hash, which is correct and expected. See
-    /// `hash_is_unaffected_by_a_none_topology_commitment` for the
-    /// regression test this incident produced.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// **Second real incident on this exact field, same day (2026-08-15) —
+    /// read this before touching the attributes below.** The FIRST incident
+    /// (see `hash()`'s doc comment) was fixed with
+    /// `#[serde(skip_serializing_if = "Option::is_none")]`, which restored
+    /// JSON hash-stability for historical blocks — but `SigilBlockHeaderV0`
+    /// is ALSO `bincode`-serialized throughout this codebase (`StoredBlock`
+    /// in sigil-top, `BackfillResp`/`Vec<SigilBlockHeaderV0>` in
+    /// sigil-node's own block-serving path). `bincode` is NOT
+    /// self-describing — every field is a fixed sequence of encode/decode
+    /// calls with no keys to skip by name. `skip_serializing_if` still
+    /// fired during bincode ENCODE (omitting the Option's bytes entirely
+    /// for `None`), but bincode DECODE has no way to know a field was
+    /// skipped — it just reads the next bytes as if a normal
+    /// `Option<[u8;32]>` tag+payload were there, silently misinterpreting
+    /// whatever field actually came next in the buffer. Confirmed with a
+    /// live round-trip test: decoding either errored (`InvalidTagEncoding`)
+    /// or, worse, silently returned a structurally-valid but COMPLETELY
+    /// WRONG header. This would have corrupted every bincode-served block
+    /// or header for the ~99% of the chain minted before this field
+    /// existed (`None`) the moment it reached production.
+    ///
+    /// **The fix: `skip_serializing_if` is REMOVED from the struct
+    /// annotation entirely** (bincode must never see field-skipping — it
+    /// always gets the plain, uniform `Option` encoding). Hash-stability
+    /// for `None` historical blocks is instead handled EXPLICITLY inside
+    /// `hash()`/`signing_bytes()` via string-level surgery on their own
+    /// JSON output (strip the exact `,"topology_commitment":null`
+    /// substring when the field is `None`) — hash-stability is now a
+    /// property of those two methods specifically, not of this struct's
+    /// general-purpose (de)serialization, so nothing else that
+    /// JSON-or-bincode-serializes a header needs to reason about it. See
+    /// `hash_is_unaffected_by_a_none_topology_commitment` (JSON stability)
+    /// and `bincode_roundtrips_correctly_for_none_and_some` (the bincode
+    /// regression this second incident produced).
+    #[serde(default)]
     pub topology_commitment: Option<[u8; 32]>,
+}
+
+/// The exact JSON fragment `serde_json` emits for a `None`
+/// `topology_commitment` with plain `#[serde(default)]` (no
+/// `skip_serializing_if`) — `topology_commitment` is a fixed, known field
+/// name, so a substring removal is safe and unambiguous, and doesn't depend
+/// on the field's position within the struct.
+const NULL_TOPOLOGY_COMMITMENT_JSON_FRAGMENT: &str = ",\"topology_commitment\":null";
+
+/// Strip [`NULL_TOPOLOGY_COMMITMENT_JSON_FRAGMENT`] from `json`, used by
+/// `hash()`/`signing_bytes()` to keep their OWN canonical bytes stable for
+/// historical (`None`) blocks without affecting this struct's real
+/// `Serialize` impl (which must stay `skip_serializing_if`-free for bincode
+/// correctness — see the field's doc comment above).
+fn strip_null_topology_commitment_for_hashing(mut json: Vec<u8>) -> Vec<u8> {
+    if let Ok(s) = std::str::from_utf8(&json) {
+        if let Some(pos) = s.find(NULL_TOPOLOGY_COMMITMENT_JSON_FRAGMENT) {
+            json.drain(pos..pos + NULL_TOPOLOGY_COMMITMENT_JSON_FRAGMENT.len());
+        }
+    }
+    json
 }
 
 /// Activation height for real enforcement of `topology_commitment` (e.g.
@@ -298,6 +335,11 @@ impl SigilBlockHeaderV0 {
         // because every dep is already pinned to serde_json. P1 swaps in
         // bincode for ~3× size reduction.
         if let Ok(bytes) = serde_json::to_vec(self) {
+            let bytes = if self.topology_commitment.is_none() {
+                strip_null_topology_commitment_for_hashing(bytes)
+            } else {
+                bytes
+            };
             hasher.update(&bytes);
         }
         *hasher.finalize().as_bytes()
@@ -310,7 +352,12 @@ impl SigilBlockHeaderV0 {
     pub fn signing_bytes(&self) -> Vec<u8> {
         let mut clone = self.clone();
         clone.producer_sig = SignatureBytes(Vec::new());
-        serde_json::to_vec(&clone).unwrap_or_default()
+        let bytes = serde_json::to_vec(&clone).unwrap_or_default();
+        if clone.topology_commitment.is_none() {
+            strip_null_topology_commitment_for_hashing(bytes)
+        } else {
+            bytes
+        }
     }
 
     /// Cheap pre-validation that catches obvious schema breakage before any
@@ -556,14 +603,28 @@ mod tests {
     // the same session — this test is what should have existed first.
 
     #[test]
-    fn none_topology_commitment_is_omitted_from_serialization() {
+    fn none_topology_commitment_appears_in_plain_serialize_but_not_in_hash_bytes() {
+        // Plain Serialize (what bincode/generic JSON callers see) must ALWAYS
+        // include the field, `null` or not — that uniformity is exactly what
+        // fixes the second incident's bincode corruption. Only hash()'s own
+        // canonical bytes strip it, for the FIRST incident's JSON
+        // hash-stability property. Two different guarantees, two different
+        // code paths — this test pins both at once so they can't drift back
+        // into either bug silently.
         let h = fake_header();
         assert!(h.topology_commitment.is_none());
         let json = serde_json::to_string(&h).unwrap();
         assert!(
-            !json.contains("topology_commitment"),
-            "a None topology_commitment must not appear in the serialized bytes at all — \
-             if it does, hash() changes for every block minted before this field existed"
+            json.contains("topology_commitment"),
+            "plain Serialize must ALWAYS include the field (even as null) — omitting it here is \
+             what broke bincode round-tripping in the 2026-08-15 incident"
+        );
+        let hash_bytes = strip_null_topology_commitment_for_hashing(serde_json::to_vec(&h).unwrap());
+        let hash_json = std::str::from_utf8(&hash_bytes).unwrap();
+        assert!(
+            !hash_json.contains("topology_commitment"),
+            "hash()'s OWN canonical bytes must omit a None field, or hash() changes for every \
+             block minted before this field existed (the FIRST 2026-08-15 incident)"
         );
     }
 
@@ -583,15 +644,40 @@ mod tests {
     }
 
     #[test]
+    fn bincode_roundtrips_correctly_for_none_and_some() {
+        // Regression test for the SECOND 2026-08-15 incident: skip_serializing_if
+        // broke bincode round-tripping for every header with topology_commitment
+        // == None (i.e. every block minted before this field existed) — bincode
+        // is not self-describing, so an encoder that omits bytes for a skipped
+        // field leaves the decoder silently misaligned reading everything after
+        // it. A Vec<Header> (exactly what sigil-node's headers-only backfill
+        // serve path sends) with a None header followed by a Some header is the
+        // sharpest reproduction: any misalignment corrupts BOTH entries.
+        let mut none_h = fake_header();
+        none_h.topology_commitment = None;
+        let mut some_h = fake_header();
+        some_h.topology_commitment = Some([9u8; 32]);
+        let v = vec![none_h.clone(), some_h.clone()];
+        let bytes = bincode::serialize(&v).expect("bincode encode must succeed");
+        let back: Vec<SigilBlockHeaderV0> = bincode::deserialize(&bytes).expect("bincode decode must succeed, not misalign");
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0], none_h, "the None-topology header must round-trip byte-for-byte");
+        assert_eq!(back[1], some_h, "the header AFTER a None-topology header must not be corrupted by it");
+    }
+
+    #[test]
     fn signing_bytes_excludes_producer_sig() {
         let h = fake_header();
         let bytes = h.signing_bytes();
         // Should not contain the producer's sig bytes pattern (all 0u8).
         // Since producer_sig.0 is all zero, this is a weak check; just verify
-        // signing_bytes deserializes back with empty sig.
+        // signing_bytes deserializes back with empty sig. fake_header() has
+        // topology_commitment: None, so signing_bytes()'s own null-stripping
+        // (same as hash(), see its doc comment) applies here too.
         let mut clone = h.clone();
         clone.producer_sig = SignatureBytes(Vec::new());
-        assert_eq!(serde_json::to_vec(&clone).unwrap(), bytes);
+        let expected = strip_null_topology_commitment_for_hashing(serde_json::to_vec(&clone).unwrap());
+        assert_eq!(expected, bytes);
     }
 
     /// Build a properly ed25519-signed Ed25519Hot header from a test seed.

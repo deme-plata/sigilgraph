@@ -91,7 +91,14 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
 
     // ── telemetry (left) ─────────────────────────────────────────────────
     let chunk = if s.sync_cursor > 0 {
-        format!("[{}…{}]", group(s.sync_cursor), group(s.sync_cursor.saturating_add(2048)))
+        // Plain ASCII ".." instead of the Unicode ellipsis "…": on a terminal
+        // without full glyph coverage (see this screen's own "glyph test /
+        // install a Nerd Font" hint below), "…" can render as a bare "." —
+        // which then reads as part of the adjacent number, e.g.
+        // "36,113,830.36,115,878" (looks like one garbled figure instead of
+        // a range). ".." never depends on font coverage. Reported live by
+        // Viktor 2026-08-15.
+        format!("[{}..{}]", group(s.sync_cursor), group(s.sync_cursor.saturating_add(2048)))
     } else { "—".into() };
     let fleet_total = app.fleet_nodes.len();
     let fleet_on = app.fleet_nodes.iter().filter(|n| n.online).count();

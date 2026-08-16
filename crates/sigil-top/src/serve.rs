@@ -238,19 +238,34 @@ fn serve_file(dir: &PathBuf, safe: &str) -> (&'static str, Vec<u8>, &'static str
 }
 
 /// Proxy a `GET /api/...` to the SIGIL node over std TCP and relay its JSON body.
-/// Node = `SIGIL_NODE_URL` env (point at a LOCAL node), else the public sigil-rpcd.
+/// Node = `SIGIL_NODE_URL` env (point at a LOCAL node), else the live braid API.
 /// The node speaks plain HTTP, so this works from the http://localhost wallet with
-/// no CORS / mixed-content issues. sigil-rpcd strips `/api/v1` itself.
+/// no CORS / mixed-content issues.
+///
+/// ⚠️ BUG FIX (2026-08-16): this defaulted to `:8099` (sigil-rpcd) — dead since
+/// 2026-08-15, frozen at height 325651. `engine_node_url()` (the mining default,
+/// a few hundred lines away) already correctly points at `:18181` (the live
+/// sigil-api braid money API, same host). This function — everything the wallet's
+/// balance/status/send/search calls go through — never got the same fix, so the
+/// wallet kept silently showing pre-reset-era balances from the dead chain with
+/// no visible error. Operator-reported live: wallet showed 6,211 SIGIL from the
+/// wallet's session cache (refresh() deliberately never regresses on a null
+/// fetch, so an old good value sticks around forever if new fetches quietly
+/// fail) while the server-verified balance for that exact address was 0 on the
+/// live chain. sigil-api aliases /api/v1/balance + /api/v1/supply (this same
+/// session, sigil-api/src/lib.rs) so this port actually serves what the wallet
+/// asks for now — status/recent/search/send are NOT yet ported (separate,
+/// larger follow-up: sigil-api has no transaction-history indexing yet).
 fn proxy_api(method: &str, path_and_query: &str, req_body: &str) -> (&'static str, Vec<u8>, &'static str) {
     let node = std::env::var("SIGIL_NODE_URL")
-        .unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:8099".into());
+        .unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:18181".into());
     let hostport = node
         .trim_start_matches("http://")
         .trim_start_matches("https://");
     let hostport = hostport.split('/').next().unwrap_or(hostport);
     let (host, port) = match hostport.rsplit_once(':') {
-        Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(8099)),
-        None => (hostport.to_string(), 8099),
+        Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(18181)),
+        None => (hostport.to_string(), 18181),
     };
 
     let mut stream = match std::net::TcpStream::connect((host.as_str(), port)) {

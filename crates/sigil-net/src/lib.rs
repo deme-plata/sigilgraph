@@ -103,6 +103,19 @@ pub const BOOTSTRAP_ENV: &str = "SIGIL_BOOTSTRAP_PEERS";
 // entry until the fleet grows back.
 pub const DEFAULT_BOOTSTRAP_PEERS: &[&str] = &[
     "/ip4/89.149.241.126/tcp/9501", // Epsilon (producer, the only live full node)
+    // Firewall-friendly fallback: `sigil-relay853.service` on Epsilon is a
+    // plain `socat` TCP forward, :853 -> localhost:9501 — same libp2p
+    // endpoint, different port. Some client networks block outbound 9501
+    // specifically (an unassigned high port looks unusual to a firewall)
+    // while allowing 853 (registered for DNS-over-TLS, reads as "normal"
+    // traffic) straight through. Since libp2p's Noise/Yamux handshake runs
+    // fine over any raw TCP stream regardless of port, socat's dumb byte
+    // forward is transparent to it — this just gives a stock client a second
+    // dial target with no extra configuration. Operator-reported live
+    // 2026-08-16: a client behind such a firewall sat at "mesh 0 peers" for
+    // 10+ minutes on :9501 alone with no way to self-heal (nothing to dial),
+    // while :853 was independently confirmed reachable and forwarding.
+    "/ip4/89.149.241.126/tcp/853",
 ];
 
 /// Parse the comma-separated env var into a list of multiaddrs. Whitespace is trimmed, empty entries

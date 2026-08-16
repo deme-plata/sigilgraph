@@ -314,6 +314,23 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/mining/challenge", get(mining_challenge))
         .route("/api/v1/mining/submit", post(mining_submit))
         .route("/api/v1/mining/miners", get(mining_miners))
+        // Wallet-compatible aliases (2026-08-16): sigil-top's embedded wallet
+        // (gui/sigil-wallet-tron-embedded.html) calls these exact /api/v1/...
+        // paths same-origin through its proxy, which defaults to rpcd
+        // (SIGIL_NODE_URL unset -> :8099) — dead since 2026-08-15, frozen at
+        // height 325651, while this braid has been live and growing the whole
+        // time. The wallet was showing stale/wrong balance and transaction
+        // data with no visible error (operator-reported live). fetchBal()'s
+        // parser already handles EITHER response shape defensively
+        // (`j.balance` for rpcd's flat body, `j.data.balance` for this API's
+        // wrapped ApiResponse envelope), so no client-side change is needed —
+        // only routing the request here actually reaches live data. Only
+        // balance is aliased in this pass (the specific complaint); a real
+        // /api/v1/status + /api/v1/recent + /api/v1/search port (transaction
+        // history needs indexing this API doesn't have yet) is separate,
+        // larger follow-up work, not done here.
+        .route("/api/v1/balance", get(balance))
+        .route("/api/v1/supply", get(supply))
         .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024))
         .layer(tower_http::timeout::TimeoutLayer::new(Duration::from_secs(30)))
         .layer(CorsLayer::permissive())

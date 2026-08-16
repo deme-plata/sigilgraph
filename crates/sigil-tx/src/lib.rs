@@ -848,6 +848,31 @@ pub enum TxApplyError {
     #[error("invalid swap token: in_token not in pool")]
     InvalidSwapToken,
 
+    /// `LpWithdraw` tried to burn more LP shares than the caller owns.
+    ///
+    /// Before the per-wallet LP ledger existed, `LpWithdraw` checked only that
+    /// the caller could pay the flat fee and then burned shares straight out of
+    /// the POOL TOTAL — so any wallet could withdraw a pool it never deposited
+    /// into. Proven drainable end-to-end with real ed25519 keys in commit
+    /// 86e7094 (`MALLORY` deposits nothing, withdraws the entire reserve).
+    /// This is the error that PoC now hits.
+    #[error("insufficient LP shares: wallet owns {have} in this pool, tried to burn {need}")]
+    InsufficientLpShares {
+        /// LP shares the wallet actually owns in this pool.
+        have: u128,
+        /// LP shares the tx tried to burn.
+        need: u128,
+    },
+
+    /// A pool's `token_a`/`token_b` collides with that pool's own derived LP
+    /// share token id. Astronomically improbable by accident (it needs a BLAKE3
+    /// preimage), so it is treated as hostile: allowing it would alias the LP
+    /// ledger slot onto a reserve-token slot and let one `SetBalance` silently
+    /// overwrite the other — the same multi-mutation aliasing class the
+    /// deposit/withdraw handlers already defend against for NATIVE.
+    #[error("pool token collides with the pool's own LP share token id")]
+    LpTokenCollision,
+
     /// AMM math (sigil-dex) raised a guard. Carries the underlying variant.
     #[error("dex error: {0}")]
     Dex(#[from] sigil_dex::DexError),
@@ -1118,10 +1143,12 @@ pub fn apply_tx(state: &SigilState, signed: &SignedTx) -> Result<ApplyResult, Tx
             // the pool's (token_a, token_b, fee_bps). On subsequent deposits
             // we verify the tx mirrors them — mismatch is loud.
             //
-            // Per-wallet LP-share credit ledger is a deferred P5 follow-up
-            // (open question #3 in the P5 scope doc) — for now the event
-            // records the `shares_received` so a future ledger sweep can
-            // reconstruct it. Pool total_shares does advance.
+            // The per-wallet LP-share credit ledger is NO LONGER deferred: the
+            // minted shares are credited to `from` as a balance under
+            // `lp_token_id(pool)`, and `LpWithdraw` requires+debits that balance.
+            // While it WAS deferred, `LpWithdraw` burned straight out of the
+            // pool total, which made every pool drainable by a wallet that had
+            // never deposited (PoC 86e7094).
 
             // Pool-shape check FIRST — caller's clarity about which pool they're
             // hitting is the prerequisite for everything else; balance checks
@@ -1198,6 +1225,23 @@ pub fn apply_tx(state: &SigilState, signed: &SignedTx) -> Result<ApplyResult, Tx
             let shares_received = outcome.shares_minted;
             let pool_after = pool_state_from_dex(&prev_pool, &outcome.pool_after)?;
 
+            // LP OWNERSHIP: credit the minted shares to the depositor. This is
+            // the ledger `LpWithdraw` checks against; without it the pool total
+            // was the ONLY record of shares and anyone could burn against it.
+            //
+            // The LP slot is a distinct (wallet, token) pair by domain
+            // separation, so it cannot alias NATIVE/token_a/token_b and needs no
+            // final_* merging like the reserve sides above — but a pool whose
+            // own token equals its LP token id would break that, so reject it.
+            let lp_tok = lp_token_id(pool);
+            if *token_a == lp_tok || *token_b == lp_tok {
+                return Err(TxApplyError::LpTokenCollision);
+            }
+            let final_lp = state
+                .balance_of(from, &lp_tok)
+                .checked_add(shares_received)
+                .ok_or(TxApplyError::Overflow)?;
+
             // Emit one SetBalance per unique slot. NATIVE comes from
             // final_native; token_a/token_b only get written if they're
             // distinct from NATIVE (otherwise final_native already captures
@@ -1215,6 +1259,9 @@ pub fn apply_tx(state: &SigilState, signed: &SignedTx) -> Result<ApplyResult, Tx
                     wallet: *from, token: *token_b, amount: final_b,
                 });
             }
+            out.mutations.push(StateMutation::SetBalance {
+                wallet: *from, token: lp_tok, amount: final_lp,
+            });
             out.mutations.push(StateMutation::SetPool { pool: *pool, state: pool_after });
 
             let evt = SigilEvent::LpDeposited {
@@ -1231,6 +1278,24 @@ pub fn apply_tx(state: &SigilState, signed: &SignedTx) -> Result<ApplyResult, Tx
                     have: from_native, need: *fee,
                 });
             }
+
+            // LP OWNERSHIP GATE — the fix for the drain (PoC 86e7094).
+            //
+            // This check is what stops a wallet burning shares it never had.
+            // It runs BEFORE the AMM math so a thief gets `InsufficientLpShares`
+            // (the true reason) rather than a downstream dex error, and so no
+            // payout is computed for a burn that was never authorised.
+            let lp_tok = lp_token_id(pool);
+            if prev_pool.token_a == lp_tok || prev_pool.token_b == lp_tok {
+                return Err(TxApplyError::LpTokenCollision);
+            }
+            let lp_owned = state.balance_of(from, &lp_tok);
+            if lp_owned < *shares {
+                return Err(TxApplyError::InsufficientLpShares {
+                    have: lp_owned, need: *shares,
+                });
+            }
+            let final_lp = lp_owned - *shares; // checked by the guard above
 
             let dex_in = dex_pool_from_state(&prev_pool);
             let outcome = sigil_dex::remove_liquidity(&dex_in, *shares)?;
@@ -1280,6 +1345,11 @@ pub fn apply_tx(state: &SigilState, signed: &SignedTx) -> Result<ApplyResult, Tx
                     wallet: *from, token: prev_pool.token_b, amount: final_b,
                 });
             }
+            // Debit the burned shares from the withdrawer's LP ledger, so the
+            // per-wallet total tracks the pool total the burn just reduced.
+            out.mutations.push(StateMutation::SetBalance {
+                wallet: *from, token: lp_tok, amount: final_lp,
+            });
             out.mutations.push(StateMutation::SetPool { pool: *pool, state: pool_after });
 
             let evt = SigilEvent::LpWithdrawn {
@@ -1404,6 +1474,39 @@ fn wrap_op(op: SigilTx) -> SignedTx {
 
 /// All-zero token ID = native SIGIL.
 pub const NATIVE: TokenId = [0u8; 32];
+
+/// Domain-separation tag for LP-share token ids. Distinct from every other
+/// BLAKE3 use in the tx layer so an LP slot can never be confused with a
+/// deployed token, a wallet, or a pool id.
+const LP_SHARE_DOMAIN: &[u8] = b"sigil-tx/lp-share/v1";
+
+/// The [`TokenId`] under which a pool's LP shares are held, per wallet.
+///
+/// ## Why LP shares are a TOKEN and not a new state map
+///
+/// `SigilState` already stores balances as `(WalletId, TokenId) -> u128` —
+/// multi-token by construction — and `wallet_acc` already folds every one of
+/// those entries into `wallet_state_root` in O(1). Deriving an LP token id per
+/// pool therefore gives per-wallet LP accounting with:
+///   * **no new state map**, so no new root and no schema bump;
+///   * **no new `StateMutation` variant**, so the chokepoint and any future
+///     STARK circuit see ordinary `SetBalance`es they already know how to
+///     verify and conserve;
+///   * **no change to `sigil-state` at all** — the fix lands entirely in the
+///     tx layer.
+///
+/// It also matches how production AMMs model this (Uniswap LP positions are
+/// themselves ERC-20 tokens), which makes LP positions transferable by the
+/// ordinary `Send` path for free rather than needing a bespoke transfer tx.
+///
+/// The output is a BLAKE3 hash, so it cannot equal [`NATIVE`] (`[0u8; 32]`)
+/// short of a preimage break, and two distinct pools cannot share an LP token.
+pub fn lp_token_id(pool: &PoolId) -> TokenId {
+    let mut h = blake3::Hasher::new();
+    h.update(LP_SHARE_DOMAIN);
+    h.update(pool);
+    *h.finalize().as_bytes()
+}
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
@@ -1880,6 +1983,183 @@ mod tests {
         assert_eq!(pool.lp_shares, 1_000);
         assert_eq!(s.balance_of(&alice, &NATIVE), 0);
         assert_eq!(s.balance_of(&alice, &other_token), 0);
+    }
+
+    /// Amount of each side alice puts into the test pool. Comfortably above
+    /// `sigil_dex::MIN_RESERVE` (1_000) so a PARTIAL withdraw still clears the
+    /// DEX-004 reserve floor — a full drain is floor-exempt, a partial one is
+    /// not, so a 1_000-unit pool cannot exercise the partial-withdraw path.
+    const LP_SEED: u128 = 10_000;
+
+    /// Seed a pool funded ENTIRELY by `alice`, and return its id + the shares
+    /// she was credited. Shared by the LP-ownership tests below.
+    fn seed_pool_funded_by_alice(
+        s: &mut SigilState,
+        alice: WalletId,
+        other_token: TokenId,
+    ) -> (PoolId, u128) {
+        let pool_id: PoolId = [9u8; 32];
+        fund(s, alice, LP_SEED + 1); // + the deposit fee
+        let seed = StateTransition {
+            at_height: 0,
+            mutations: vec![StateMutation::SetBalance {
+                wallet: alice, token: other_token, amount: LP_SEED,
+            }],
+        };
+        commit_state_transition(s, &seed, 0).unwrap();
+
+        let signed = dummy_signed(SigilTx::LpDeposit {
+            from: alice, pool: pool_id,
+            token_a: NATIVE, token_b: other_token,
+            amt_a: LP_SEED, amt_b: LP_SEED, fee_bps: 30, fee: 1,
+        });
+        let result = apply_tx(s, &signed).unwrap();
+        let t = batch_into_transition([result], 1);
+        commit_state_transition(s, &t, 1).unwrap();
+        let shares = s.balance_of(&alice, &lp_token_id(&pool_id));
+        (pool_id, shares)
+    }
+
+    /// THE DRAIN, as a unit regression. Mirrors examples/lp_ownership_poc.rs
+    /// (which uses real ed25519 keys) so the fix is covered by `fluxc test`
+    /// and not only by running the example by hand.
+    ///
+    /// Before the per-wallet LP ledger, `LpWithdraw` checked only that the
+    /// caller could pay the flat fee and then burned straight out of the pool
+    /// TOTAL — so mallory, who never deposited, drained the whole pool.
+    #[test]
+    fn lp_withdraw_by_non_depositor_is_rejected() {
+        let mut s = SigilState::new();
+        let alice: WalletId = [1u8; 32];
+        let mallory: WalletId = [2u8; 32];
+        let other_token: TokenId = [7u8; 32];
+        let (pool_id, alice_shares) = seed_pool_funded_by_alice(&mut s, alice, other_token);
+        assert!(alice_shares > 0, "alice must hold the LP shares she funded");
+
+        // Mallory can pay the fee — that used to be the ONLY requirement.
+        fund(&mut s, mallory, 1_000);
+        assert_eq!(s.balance_of(&mallory, &lp_token_id(&pool_id)), 0);
+
+        let pool_before = s.pool(&pool_id).expect("pool").clone();
+        let steal = dummy_signed(SigilTx::LpWithdraw {
+            from: mallory, pool: pool_id, shares: pool_before.lp_shares, fee: 10,
+        });
+        assert!(matches!(
+            apply_tx(&s, &steal),
+            Err(TxApplyError::InsufficientLpShares { have: 0, .. })
+        ), "a wallet that never deposited must not be able to burn pool shares");
+
+        // And nothing moved.
+        let pool_after = s.pool(&pool_id).expect("pool");
+        assert_eq!(pool_after.reserve_a, pool_before.reserve_a);
+        assert_eq!(pool_after.reserve_b, pool_before.reserve_b);
+        assert_eq!(pool_after.lp_shares, pool_before.lp_shares);
+        assert_eq!(s.balance_of(&mallory, &other_token), 0);
+    }
+
+    /// The other half of the gate: the fix must not strand a REAL provider.
+    /// Alice funded the pool, so she can withdraw and gets her reserves back,
+    /// and her LP ledger zeroes out.
+    #[test]
+    fn lp_withdraw_by_real_depositor_still_works() {
+        let mut s = SigilState::new();
+        let alice: WalletId = [1u8; 32];
+        let other_token: TokenId = [7u8; 32];
+        let (pool_id, alice_shares) = seed_pool_funded_by_alice(&mut s, alice, other_token);
+
+        // She spent everything funding the pool; give her the withdraw fee.
+        fund(&mut s, alice, 10);
+        let signed = dummy_signed(SigilTx::LpWithdraw {
+            from: alice, pool: pool_id, shares: alice_shares, fee: 10,
+        });
+        let result = apply_tx(&s, &signed).expect("the real provider must be able to withdraw");
+        let t = batch_into_transition([result], 2);
+        commit_state_transition(&mut s, &t, 2).unwrap();
+
+        assert_eq!(s.balance_of(&alice, &lp_token_id(&pool_id)), 0, "LP ledger debited");
+        assert_eq!(s.pool(&pool_id).expect("pool").lp_shares, 0, "pool total debited");
+        // Her liquidity came back (she is the only provider, so she gets it all).
+        assert_eq!(s.balance_of(&alice, &other_token), LP_SEED);
+        assert_eq!(s.balance_of(&alice, &NATIVE), LP_SEED);
+    }
+
+    /// Over-withdrawing by a genuine provider is rejected at exactly the
+    /// boundary, and a partial withdraw leaves the remainder owned.
+    #[test]
+    fn lp_withdraw_is_bounded_by_owned_shares() {
+        let mut s = SigilState::new();
+        let alice: WalletId = [1u8; 32];
+        let other_token: TokenId = [7u8; 32];
+        let (pool_id, alice_shares) = seed_pool_funded_by_alice(&mut s, alice, other_token);
+        fund(&mut s, alice, 100);
+
+        // One share more than she owns → rejected.
+        let too_much = dummy_signed(SigilTx::LpWithdraw {
+            from: alice, pool: pool_id, shares: alice_shares + 1, fee: 10,
+        });
+        assert!(matches!(
+            apply_tx(&s, &too_much),
+            Err(TxApplyError::InsufficientLpShares { .. })
+        ));
+
+        // Exactly half → accepted, and half remains owned.
+        let half = alice_shares / 2;
+        let signed = dummy_signed(SigilTx::LpWithdraw {
+            from: alice, pool: pool_id, shares: half, fee: 10,
+        });
+        let result = apply_tx(&s, &signed).expect("partial withdraw is legitimate");
+        let t = batch_into_transition([result], 2);
+        commit_state_transition(&mut s, &t, 2).unwrap();
+        assert_eq!(s.balance_of(&alice, &lp_token_id(&pool_id)), alice_shares - half);
+        assert_eq!(s.pool(&pool_id).expect("pool").lp_shares, alice_shares - half);
+    }
+
+    /// LP share accounting must be per-POOL, not per-wallet-global: shares in
+    /// pool A must not authorise a withdraw from pool B.
+    #[test]
+    fn lp_shares_do_not_cross_pools() {
+        let mut s = SigilState::new();
+        let alice: WalletId = [1u8; 32];
+        let other_token: TokenId = [7u8; 32];
+        let (pool_a, alice_shares) = seed_pool_funded_by_alice(&mut s, alice, other_token);
+        assert!(alice_shares > 0);
+
+        // A second, independent pool that alice has NOT funded.
+        let pool_b: PoolId = [11u8; 32];
+        let seed = StateTransition {
+            at_height: 2,
+            mutations: vec![StateMutation::SetPool {
+                pool: pool_b,
+                state: PoolState {
+                    token_a: NATIVE, token_b: other_token,
+                    reserve_a: 5_000, reserve_b: 5_000,
+                    lp_shares: 5_000, fee_bps: 30, accrued_fees: 0,
+                },
+            }],
+        };
+        commit_state_transition(&mut s, &seed, 2).unwrap();
+        fund(&mut s, alice, 100);
+
+        assert_ne!(lp_token_id(&pool_a), lp_token_id(&pool_b), "pools get distinct LP tokens");
+        assert_eq!(s.balance_of(&alice, &lp_token_id(&pool_b)), 0);
+
+        let cross = dummy_signed(SigilTx::LpWithdraw {
+            from: alice, pool: pool_b, shares: alice_shares, fee: 10,
+        });
+        assert!(matches!(
+            apply_tx(&s, &cross),
+            Err(TxApplyError::InsufficientLpShares { have: 0, .. })
+        ), "pool-A shares must not authorise a pool-B withdraw");
+    }
+
+    /// The LP token id must be domain-separated from NATIVE and stable.
+    #[test]
+    fn lp_token_id_is_domain_separated() {
+        let pool: PoolId = [9u8; 32];
+        assert_ne!(lp_token_id(&pool), NATIVE, "LP token must never be NATIVE");
+        assert_ne!(lp_token_id(&pool), pool, "LP token must not be the pool id itself");
+        assert_eq!(lp_token_id(&pool), lp_token_id(&pool), "deterministic");
+        assert_ne!(lp_token_id(&pool), lp_token_id(&[8u8; 32]), "distinct per pool");
     }
 
     #[test]

@@ -76,6 +76,19 @@ name = "sigil-miner"
 path = "src/bin/sigil-miner.rs"
 required-features = ["client", "tui"]
 
+# The folded-proof light node. It imports flux_fold + flux_market, BOTH of which
+# ride the `market` feature — but it was the ONE bin with no [[bin]] stanza, so
+# cargo auto-discovered it UNGATED and tried to build it even with `market` off
+# (which is how sigil-rpc and sigil-api both depend on this crate:
+# default-features = false). Result: 6 E0432/E0433s on every default build, and
+# `flux_combo package=flux-miner` reporting "0 suites executed" — which reads as
+# "no tests exist" when it actually means "the build died before any test ran".
+# The lib + verification core were always fine; only this wrapper was mis-declared.
+[[bin]]
+name = "flux-light-node"
+path = "src/bin/flux-light-node.rs"
+required-features = ["market"]
+
 [[bin]]
 name = "ajtai-gpu-kat"
 path = "src/bin/ajtai-gpu-kat.rs"

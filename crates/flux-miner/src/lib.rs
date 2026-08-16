@@ -154,14 +154,67 @@ pub fn block_for_nonce<G: VdfGroup>(header: &[u8], nonce: u64, g: &G, vdf_t: u64
     DualLaneBlock { header: header.to_vec(), nonce, blake4_hash, vdf }
 }
 
+/// Is the STRICT Lane-A binding on? See [`verify_dual`].
+///
+/// Staged behind `SIGIL_STRICT_LANE_A=1` (read once) so the LIVE pool's accept
+/// behaviour is byte-identical until the operator/T1 opens the gate. Read once
+/// into a `LazyLock` because `verify_dual` is on the per-submission hot path and
+/// a `var()` syscall per share would be a measurable tax.
+static STRICT_LANE_A: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    std::env::var("SIGIL_STRICT_LANE_A").map(|v| v == "1").unwrap_or(false)
+});
+
 /// Verify a dual-lane block: BOTH the BLAKE4 PoW (`<= target`) AND the VDF proof
 /// must check out. This is the consensus rule a node enforces.
+///
+/// ## Lane-A forgery (the gap this closes)
+///
+/// Historically this bounded the *recomputed* hash by the target and, separately,
+/// bounded the *claimed* `blake4_hash` by the target — but never tied the two
+/// together. So a genuinely-mined nonce paired with ANY under-target word (`0` is
+/// the trivial choice) passed the gate, and that **forged word is what
+/// `fold_tip` writes permanently into the header** as the block's proof-of-work.
+/// The claimed word is consensus-visible state, so a forged one corrupts the tip
+/// chain even though the nonce behind it was honest work.
+///
+/// The fix is the equality below. It was applied on the braid path at the caller
+/// (`sigil-api::mining::lane_a_word_is_honest`, commit 44ae98e) but NOT in this
+/// shared gate, which is what `sigil-rpcd` (the live pool) and `chain_verify`
+/// both route through.
+///
+/// **Honest rigs are unaffected by construction:** [`block_for_nonce`] — and
+/// therefore [`mine_dual`] and [`mine_dual_from`], i.e. every path a stock rig
+/// can produce a share through — sets `blake4_hash = blake4(header, nonce)`. The
+/// equality already holds for them, so enabling the flag cannot change their
+/// accept rate. See the `strict_lane_a_*` tests.
 pub fn verify_dual<G: VdfGroup>(g: &G, block: &DualLaneBlock, target: u64) -> bool {
+    verify_dual_with(g, block, target, *STRICT_LANE_A)
+}
+
+/// [`verify_dual`] with the Lane-A strictness passed explicitly instead of read
+/// from the environment. Exists so both policies are testable deterministically
+/// in ONE process (the env-backed `LazyLock` resolves once and cannot be toggled
+/// between tests) and so a caller that has already decided the policy — e.g. a
+/// staged rollout, or a replay tool re-verifying historical blocks under the
+/// rules that were live at the time — can state it explicitly.
+pub fn verify_dual_with<G: VdfGroup>(
+    g: &G,
+    block: &DualLaneBlock,
+    target: u64,
+    strict_lane_a: bool,
+) -> bool {
     // Lane A: re-hash the claimed nonce.
-    if blake4(&block.header, block.nonce) > target {
+    let recomputed = blake4(&block.header, block.nonce);
+    if recomputed > target {
         return false;
     }
     if block.blake4_hash > target {
+        return false;
+    }
+    // Lane A (strict): the CLAIMED word must BE the recomputed word. Without this
+    // the two checks above are independent and a forged-but-under-target word
+    // rides into the header alongside an honest nonce.
+    if strict_lane_a && block.blake4_hash != recomputed {
         return false;
     }
     // Lane B: re-derive the seed and verify the VDF in O(1).
@@ -194,6 +247,95 @@ mod tests {
         let mut bad_b = block;
         bad_b.vdf.y[0] ^= 1;
         assert!(!verify_dual(&g, &bad_b, target), "tampered VDF must fail");
+    }
+
+    /// SLICE 2 — the forgery the weak gate lets through, and the fix.
+    ///
+    /// An HONEST nonce (real Lane-A work, real VDF) paired with a FORGED Lane-A
+    /// word of `0`: under-target, so the old independent-bounds gate accepts it,
+    /// and `fold_tip` then writes that `0` into the header as the block's PoW.
+    #[test]
+    fn strict_lane_a_blocks_forged_word_but_legacy_accepts_it() {
+        let g = ModSquaring::bench_2048();
+        let header = b"sigil-g0-lane-a-forgery";
+        let target = u64::MAX >> 12;
+        let honest = mine_dual(header, target, 2_000, &g);
+
+        // Forge ONLY the claimed word; nonce + VDF stay genuine.
+        let mut forged = honest.clone();
+        forged.blake4_hash = 0;
+        assert_ne!(
+            forged.blake4_hash,
+            blake4(&forged.header, forged.nonce),
+            "precondition: the claimed word is not the real one"
+        );
+
+        assert!(
+            verify_dual_with(&g, &forged, target, false),
+            "LEGACY (strict=false): the forged word is accepted — this is the live-pool weakness"
+        );
+        assert!(
+            !verify_dual_with(&g, &forged, target, true),
+            "STRICT (strict=true): the forged word must be rejected"
+        );
+    }
+
+    /// The go/no-go safety property: every share a stock rig can produce already
+    /// satisfies the equality, so turning the flag ON cannot change its accept
+    /// rate. Covers BOTH miner entry points (`mine_dual` and the pool-mode
+    /// `mine_dual_from` / `block_for_nonce` GPU path).
+    #[test]
+    fn strict_lane_a_is_a_noop_for_honest_miners() {
+        let g = ModSquaring::bench_2048();
+        let target = u64::MAX >> 10;
+
+        for i in 0..8u64 {
+            let header = format!("sigil-g0-honest-{i}").into_bytes();
+
+            // Path 1: the plain solve loop.
+            let b = mine_dual(&header, target, 1_000, &g);
+            assert_eq!(
+                b.blake4_hash,
+                blake4(&b.header, b.nonce),
+                "mine_dual must report the recomputed word"
+            );
+            assert!(verify_dual_with(&g, &b, target, false));
+            assert!(
+                verify_dual_with(&g, &b, target, true),
+                "honest mine_dual share must still verify under STRICT"
+            );
+
+            // Path 2: pool mode — resumable search, then the GPU-style assembler.
+            if let (Some(pb), _) = mine_dual_from(&header, target, 1_000, &g, 0, 100_000) {
+                assert_eq!(pb.blake4_hash, blake4(&pb.header, pb.nonce));
+                assert!(
+                    verify_dual_with(&g, &pb, target, true),
+                    "honest mine_dual_from share must still verify under STRICT"
+                );
+                let rebuilt = block_for_nonce(&header, pb.nonce, &g, 1_000);
+                assert!(
+                    verify_dual_with(&g, &rebuilt, target, true),
+                    "block_for_nonce (GPU half) must still verify under STRICT"
+                );
+            }
+        }
+    }
+
+    /// STRICT must not weaken anything: the pre-existing tamper cases still fail.
+    #[test]
+    fn strict_lane_a_still_rejects_tampered_lanes() {
+        let g = ModSquaring::bench_2048();
+        let header = b"sigil-g0-strict-tamper";
+        let target = u64::MAX >> 12;
+        let block = mine_dual(header, target, 2_000, &g);
+
+        let mut bad_a = block.clone();
+        bad_a.nonce ^= 1;
+        assert!(!verify_dual_with(&g, &bad_a, target, true), "tampered nonce");
+
+        let mut bad_b = block;
+        bad_b.vdf.y[0] ^= 1;
+        assert!(!verify_dual_with(&g, &bad_b, target, true), "tampered VDF");
     }
 
     #[test]

@@ -1772,19 +1772,52 @@ impl P2PBlockSync {
                         // every few minutes (the "4 peers but 3.1M gap" churn). So only key the
                         // genesis when `base` is the genuine genesis anchor (≤1). In light mode the
                         // oracle-tip-drop heuristic + sane_raise already handle testnet resets.
+                        //
+                        // ⚠️ REGRESSION FIX #2 (2026-08-16): `base_g <= 1` was ALSO the only gate
+                        // for even ATTEMPTING this check — which is a chicken-and-egg trap for a
+                        // full-sync client whose `base` already crept forward under a chain that
+                        // has SINCE died. Such a client can never satisfy `base_g <= 1` again (base
+                        // doesn't move backward on its own), so it can never re-examine genesis and
+                        // never self-heals — it just sits re-requesting a chunk range from the dead
+                        // chain forever. Operator-reported live 2026-08-16: a sigil-top synced
+                        // ~36M blocks against the pre-reset chain, then the network reset to a fresh
+                        // genesis at height 687K+; the client stayed stuck showing
+                        // "chunk [36,113,830..36,115,878]" — a range that will never exist on the
+                        // new chain — because `base` (36M+something) never got back down to ≤1 to
+                        // even trigger the check that would have caught this.
+                        //
+                        // Fix: check the FIXED genesis-anchor height (1) instead of wherever `base`
+                        // currently sits. Height 1 never moves, so this is a strictly more general
+                        // form of the same comparison the code above already documents as sound for
+                        // full-sync mode — a no-op for a healthy client (base is already 1 there, so
+                        // this examines the exact same block as before) and now ALSO correct for a
+                        // stale one. `has_height(GENESIS_ANCHOR_HEIGHT)` guards the light/recent-
+                        // window case exactly as `has_height(base_g)` did before: a client that
+                        // legitimately never downloaded genesis just no-ops here, unchanged.
+                        const GENESIS_ANCHOR_HEIGHT: u64 = 1;
                         let base_g = store.base();
                         let mut genesis_reset = false;
-                        if base_g <= 1 && store.has_height(base_g) {
-                            if let Some(hdr) = store.get_header_at_height(base_g) {
+                        if store.has_height(GENESIS_ANCHOR_HEIGHT) {
+                            if let Some(hdr) = store.get_header_at_height(GENESIS_ANCHOR_HEIGHT) {
                                 if store.note_genesis(&hex::encode(hdr.hash())) {
                                     genesis_reset = true;
-                                    crate::tlog!("[sync] LANE-S: genesis CHANGED at base {base_g} → wiped stale watermarks, self-healing to the fresh chain");
+                                    crate::tlog!("[sync] LANE-S: genesis CHANGED (checked at height {GENESIS_ANCHOR_HEIGHT}, local base was {base_g}) → wiped stale watermarks, self-healing to the fresh chain");
                                     clear_persisted_tip(); // LANE-S (b): drop the pre-reset cached tip
                                     let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                                     s.peer_best_height = 0;
                                     s.verified = 0;
                                     s.blocks_synced = 0;
                                     s.reset_pending = false; // the wipe is done in-line here
+                                    drop(s);
+                                    // reset_watermarks() (inside note_genesis) zeroes `base` along
+                                    // with everything else, but nothing else in this reset path was
+                                    // re-establishing the genesis anchor `set_base`'s own doc comment
+                                    // says to set "once after open, before sync" — a live reset IS
+                                    // that same "before sync" moment again. Without this, `base`
+                                    // stays 0 (SIGIL's true height-0 genesis, which isn't
+                                    // backfill-servable per the comment at `set_base`'s definition)
+                                    // instead of 1, the actual anchor full-sync mode expects.
+                                    store.set_base(GENESIS_ANCHOR_HEIGHT);
                                 }
                             }
                         }

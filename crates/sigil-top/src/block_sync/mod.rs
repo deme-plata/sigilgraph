@@ -1821,6 +1821,50 @@ impl P2PBlockSync {
                                 }
                             }
                         }
+                        // ── LANE-S v2 (2026-08-16): block-content-independent fallback ─────────
+                        // The check above depends on `has_height(GENESIS_ANCHOR_HEIGHT)` — a
+                        // client whose local store no longer separately retains the
+                        // genesis-adjacent block (entirely plausible after syncing tens of
+                        // millions of blocks under a chain that's since died — nothing in this
+                        // codebase guarantees height 1 survives that) silently no-ops there and
+                        // never resets. Operator-reported live 2026-08-16: v7.1.22 (which shipped
+                        // the fix above) did NOT resolve the stall even once "mesh 1 peers" was
+                        // confirmed live — proving that fix alone is insufficient for this client.
+                        //
+                        // This is a strictly more general check that needs no locally-stored
+                        // block at all: compare our claimed progress directly against what a LIVE,
+                        // currently-connected peer is reporting RIGHT NOW. An honest peer cannot
+                        // report a height dramatically LOWER than what we supposedly already
+                        // verified — if it does, our local state describes a chain that no longer
+                        // exists, full stop, independent of which specific blocks we still hold.
+                        // Requires an oracle-CONFIRMED reading (not a raw disk-cache seed) and a
+                        // generous 1000-block margin so this can never fire on ordinary lag.
+                        if !genesis_reset {
+                            let (peer_confirmed, peer_reported) = {
+                                let s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                (s.peer_best_oracle_confirmed, s.peer_best_height)
+                            };
+                            if peer_confirmed && peer_reported > 0
+                                && base_g > peer_reported.saturating_add(1000)
+                            {
+                                crate::tlog!(
+                                    "[sync] LANE-S v2: local base {base_g} is impossibly far above \
+                                     the live peer's confirmed height {peer_reported} → stale \
+                                     post-reset state, wiping (content-independent path)"
+                                );
+                                store.reset_watermarks();
+                                store.set_base(GENESIS_ANCHOR_HEIGHT);
+                                clear_persisted_tip();
+                                let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                s.peer_best_height = peer_reported; // keep what we just learned, don't zero it
+                                s.peer_best_oracle_confirmed = true;
+                                s.verified = 0;
+                                s.blocks_synced = 0;
+                                s.reset_pending = false;
+                                drop(s);
+                                genesis_reset = true; // reuse the flag: also skips LANE-B this tick
+                            }
+                        }
                         if !genesis_reset {
                         // LANE-B prefix multiplier — trusted-checkpoint fast-forward (fail-loud,
                         // idempotent per tick). No-op until dns_anchor_tip() returns a fresh,

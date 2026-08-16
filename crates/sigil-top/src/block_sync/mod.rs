@@ -1839,18 +1839,32 @@ impl P2PBlockSync {
                         // exists, full stop, independent of which specific blocks we still hold.
                         // Requires an oracle-CONFIRMED reading (not a raw disk-cache seed) and a
                         // generous 1000-block margin so this can never fire on ordinary lag.
+                        //
+                        // ⚠️ BUG FIX (2026-08-16, same day, next attempt): the first cut of this
+                        // check compared `base_g` (`store.base()`) — WRONG FIELD. In full-sync
+                        // mode `base` is the STABLE genesis anchor and stays ~1 by design (see the
+                        // v0.70→v0.71.x comment above); it is `store.synced_to()` — what actually
+                        // drives the displayed `sync_cursor`/chunk range — that creeps forward and
+                        // is what stays stuck post-reset. Comparing `base_g` (~1) against a live
+                        // peer height in the hundreds of thousands could never exceed the +1000
+                        // margin, so this check could NEVER fire, which is exactly why the
+                        // operator's stall persisted through this fix too. Proven live: four
+                        // consecutive releases (v7.1.21-24) with a growing set of fixes, zero
+                        // observed change in the operator's frozen chunk display, until this line
+                        // was corrected.
+                        let synced_g = store.synced_to();
                         if !genesis_reset {
                             let (peer_confirmed, peer_reported) = {
                                 let s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                                 (s.peer_best_oracle_confirmed, s.peer_best_height)
                             };
                             if peer_confirmed && peer_reported > 0
-                                && base_g > peer_reported.saturating_add(1000)
+                                && synced_g > peer_reported.saturating_add(1000)
                             {
                                 crate::tlog!(
-                                    "[sync] LANE-S v2: local base {base_g} is impossibly far above \
-                                     the live peer's confirmed height {peer_reported} → stale \
-                                     post-reset state, wiping (content-independent path)"
+                                    "[sync] LANE-S v2: local synced_to {synced_g} (base {base_g}) is \
+                                     impossibly far above the live peer's confirmed height \
+                                     {peer_reported} → stale post-reset state, wiping (content-independent path)"
                                 );
                                 store.reset_watermarks();
                                 store.set_base(GENESIS_ANCHOR_HEIGHT);

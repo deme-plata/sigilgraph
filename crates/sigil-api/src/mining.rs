@@ -263,11 +263,21 @@ pub enum SubmitOutcome {
 #[derive(Default)]
 pub struct MiningBridge {
     tip: RwLock<Option<MiningTip>>,
+    /// Bounded history of recently-published tips, newest last. Lets `submit()`
+    /// verify a submission that arrived after the frontier already moved on
+    /// against the tip it was ACTUALLY solved for, instead of only the current
+    /// one. See [`credit_window`] for why this exists.
+    recent_tips: Mutex<VecDeque<MiningTip>>,
     solved: Mutex<VecDeque<AcceptedSolve>>,
     /// Share weights for the height currently being worked.
     shares: Mutex<HashMap<WalletId, u64>>,
-    /// `(wallet, nonce)` already credited at the current height — replay guard.
-    seen: Mutex<HashSet<(WalletId, u64)>>,
+    /// `(wallet, nonce, height)` already credited — replay guard. Keyed by
+    /// height too (not just wallet+nonce) since [`credit_window`] means
+    /// "already credited" now spans multiple heights, not just the current
+    /// one; pruned by height on every tip advance instead of wiped wholesale,
+    /// or a submission for an older-but-still-in-window height could be
+    /// replayed for a second credit once the current height's entries clear.
+    seen: Mutex<HashSet<(WalletId, u64, u64)>>,
     /// Self-reported Lane-A rate per miner: `(hashes/s, last_report_ms)`.
     hps: Mutex<HashMap<WalletId, (f64, u64)>>,
     rejects: Mutex<HashMap<&'static str, u64>>,
@@ -283,6 +293,29 @@ const SOLVE_QUEUE_CAP: usize = 8;
 /// Miners are pruned from the rate table after this long without a challenge
 /// fetch, so `net_hps` reflects live power only.
 const HPS_IDLE_MS: u64 = 30_000;
+
+/// How many blocks behind the current frontier a submission may still be
+/// credited (`SIGIL_MINING_CREDIT_WINDOW`, default 20). Operator-directed
+/// 2026-08-16: with this braid producing a block every ~16-125ms, a solve
+/// that traveled a real internet round-trip (network latency + HTTP overhead)
+/// is very often "stale" by the exact-match standard before it even arrives —
+/// measured live: 93.8% of the entire supply had gone to the node's
+/// placeholder producer wallet because real miner submissions almost never
+/// won the exact-height race. 20 blocks still isn't much wall-clock at this
+/// cadence (roughly 320ms-2.5s depending on the adaptive rate), which is why
+/// the default leans toward "enough to matter" over "as wide as possible" —
+/// tune via env if that turns out to be too tight or too loose in practice.
+pub fn credit_window() -> u64 {
+    std::env::var("SIGIL_MINING_CREDIT_WINDOW").ok().and_then(|s| s.parse().ok()).unwrap_or(20)
+}
+
+/// Capacity of the recent-tips ring — must comfortably exceed [`credit_window`]
+/// or a submission within the intended window could already have aged out of
+/// the history that would let it verify. Some slack on top of the configured
+/// window, floored so a pathologically small window still gets a sane buffer.
+fn recent_tips_capacity() -> usize {
+    (credit_window() as usize).saturating_add(16).max(32)
+}
 
 impl MiningBridge {
     pub fn new() -> Self {
@@ -302,17 +335,41 @@ impl MiningBridge {
             }
         };
         if let Ok(mut w) = self.tip.write() {
-            *w = Some(new);
+            *w = Some(new.clone());
         }
         if advanced {
+            // Prune replay entries whose height has aged OUT of the credit
+            // window (they can never be submitted again anyway — submit()
+            // itself would reject them as stale), instead of wiping the whole
+            // set. A blanket clear on every advance would forget an
+            // in-window height's entries the moment a NEWER block lands,
+            // reopening the replay hole the widened credit window exists to
+            // close.
+            let floor = height.saturating_sub(credit_window());
             if let Ok(mut s) = self.seen.lock() {
-                s.clear();
+                s.retain(|&(_, _, h)| h >= floor);
+            }
+            if let Ok(mut h) = self.recent_tips.lock() {
+                h.push_back(new);
+                let cap = recent_tips_capacity();
+                while h.len() > cap {
+                    h.pop_front();
+                }
             }
         }
     }
 
     pub fn tip(&self) -> Option<MiningTip> {
         self.tip.read().ok().and_then(|t| t.clone())
+    }
+
+    /// The tip that was live at `height`, if it's still within the recent-tips
+    /// history — the challenge a submission for that height was actually
+    /// solved against. `None` means either the height is ahead of the current
+    /// frontier (not a real challenge yet) or old enough to have aged out of
+    /// the bounded history (genuinely too stale, not just "a couple behind").
+    fn tip_at(&self, height: u64) -> Option<MiningTip> {
+        self.recent_tips.lock().ok()?.iter().find(|t| t.height == height).cloned()
     }
 
     /// Record a miner's self-reported Lane-A rate and return the live network
@@ -400,19 +457,55 @@ impl MiningBridge {
             };
         }
 
-        if sub.height != tip.height {
+        // vtip: the tip this submission's work was ACTUALLY solved against —
+        // the current frontier for an exact-height submission, or a recent
+        // one from history for a submission that arrived a few blocks late.
+        // `historical` marks the latter so the branches below know to skip
+        // the partial-share pool (which belongs to the CURRENT height only —
+        // mixing a stale win into it would credit the wrong height's pool)
+        // and to build a solo shares map instead, same shape
+        // `mint_next_block`'s producer-wallet fallback already uses.
+        //
+        // ⚠️ WIDENED (2026-08-16, operator-directed): this used to require
+        // sub.height == tip.height EXACTLY. At this braid's block cadence
+        // (~16-125ms/block) that meant almost no real internet-connected
+        // miner could ever land a submission before the frontier moved past
+        // it — measured live: 93.8% of the entire supply had gone to the
+        // node's placeholder wallet, not to any real miner. See
+        // [`credit_window`] for the tunable and its reasoning.
+        let (vtip, historical) = if sub.height == tip.height {
+            (tip.clone(), false)
+        } else if sub.height < tip.height && tip.height - sub.height <= credit_window() {
+            match self.tip_at(sub.height) {
+                Some(t) => (t, true),
+                None => {
+                    self.count_reject(RejectKind::StaleHeight);
+                    return SubmitOutcome::Rejected {
+                        kind: RejectKind::StaleHeight,
+                        detail: format!(
+                            "height {} is within the credit window but its challenge \
+                             already aged out of history — genuinely too stale",
+                            sub.height
+                        ),
+                    };
+                }
+            }
+        } else {
             self.count_reject(RejectKind::StaleHeight);
             return SubmitOutcome::Rejected {
                 kind: RejectKind::StaleHeight,
                 detail: format!(
-                    "stale height: submitted {} but the mineable frontier is {}",
-                    sub.height, tip.height
+                    "stale height: submitted {} but the mineable frontier is {} \
+                     (outside the {}-block credit window)",
+                    sub.height, tip.height, credit_window()
                 ),
             };
-        }
+        };
 
-        // Replay guard before any verification work is banked.
-        let key = (wallet, sub.block.nonce);
+        // Replay guard before any verification work is banked. Keyed by
+        // height now (not just wallet+nonce) — see the `seen` field doc for
+        // why: "already credited" now spans the whole credit window.
+        let key = (wallet, sub.block.nonce, sub.height);
         {
             let Ok(mut seen) = self.seen.lock() else {
                 return SubmitOutcome::Rejected {
@@ -439,14 +532,19 @@ impl MiningBridge {
         // "verify leniently" principle `sigil_rpc::achieved_ease` documents
         // (see the note on `vardiff_ease_for` above for why the other half of
         // that fix, crediting by achieved ease, is not ported yet).
+        //
+        // Built from `vtip` — the tip this submission was ACTUALLY solved
+        // against (current, or a recent one from history) — not always the
+        // live `tip`, or a historical submission would verify against a
+        // challenge it was never solved for and always fail.
         let ease = share_ease_bits();
         let c = Challenge {
-            height: tip.height,
-            vdf_input: mining_seed(&tip.parent_hash, tip.height),
-            blake4_target: target_from_bits(tip.bits),
-            vdf_t: tip.vdf_t,
+            height: vtip.height,
+            vdf_input: mining_seed(&vtip.parent_hash, vtip.height),
+            blake4_target: target_from_bits(vtip.bits),
+            vdf_t: vtip.vdf_t,
             net_hps: 0.0,
-            share_target: share_target_from(tip.bits, ease),
+            share_target: share_target_from(vtip.bits, ease),
         };
         let g = ModSquaring::bench_2048();
 
@@ -456,17 +554,27 @@ impl MiningBridge {
             lane_a_word_is_honest(&sub.block.header, sub.block.nonce, sub.block.blake4_hash);
 
         if honest_word && check_submission_at(&g, &c, sub, c.blake4_target) {
+            // The current height's partial-share pool belongs to the CURRENT
+            // height only — a historical win must not fold into it (that
+            // pool already moved on) or be cleared out from under whoever's
+            // still working the live height. Solo credit instead, same shape
+            // `mint_next_block`'s producer-wallet fallback already uses.
             let weight: u64 = 1u64 << ease.min(32);
-            let mut shares = self.shares.lock().map(|m| m.clone()).unwrap_or_default();
-            *shares.entry(wallet).or_insert(0) += weight;
+            let shares = if historical {
+                HashMap::from([(wallet, weight)])
+            } else {
+                let mut shares = self.shares.lock().map(|m| m.clone()).unwrap_or_default();
+                *shares.entry(wallet).or_insert(0) += weight;
+                shares
+            };
             let solve = AcceptedSolve {
                 wallet,
-                height: tip.height,
-                parent_hash: tip.parent_hash,
+                height: vtip.height,
+                parent_hash: vtip.parent_hash,
                 nonce: sub.block.nonce,
                 blake4_hash: sub.block.blake4_hash,
                 vdf: sub.block.vdf.clone(),
-                bits: tip.bits,
+                bits: vtip.bits,
                 shares,
             };
             if let Ok(mut q) = self.solved.lock() {
@@ -475,16 +583,22 @@ impl MiningBridge {
                 }
                 q.push_back(solve);
             }
-            if let Ok(mut m) = self.shares.lock() {
-                m.clear();
+            if !historical {
+                if let Ok(mut m) = self.shares.lock() {
+                    m.clear();
+                }
             }
             if let Ok(mut n) = self.accepted_blocks.lock() {
                 *n += 1;
             }
-            return SubmitOutcome::Block { height: tip.height };
+            return SubmitOutcome::Block { height: vtip.height };
         }
 
-        if honest_word && c.share_target > 0 && check_submission_at(&g, &c, sub, c.share_target) {
+        // Partial shares are scoped to the CURRENT height's pool only — a
+        // historical near-miss either wins the full block above or is
+        // rejected below; it never enters a share pool for a height that's
+        // already moved on.
+        if !historical && honest_word && c.share_target > 0 && check_submission_at(&g, &c, sub, c.share_target) {
             let weight = 1u64;
             if let Ok(mut m) = self.shares.lock() {
                 *m.entry(wallet).or_insert(0) += weight;
@@ -648,19 +762,71 @@ mod tests {
         let c = b.challenge_for(Some(wallet), 0).unwrap();
         let sub = solve_for(&c, &wallet);
 
-        // replay of an accepted solve
+        // replay of an accepted solve — rejected regardless of the credit
+        // window, at the SAME height or any later one (seen is keyed by
+        // height now, but this exact (wallet, nonce, height) triple was
+        // already inserted and is still within the window's retention).
         assert!(matches!(b.submit(&sub), SubmitOutcome::Block { .. }));
         assert!(matches!(
             b.submit(&sub),
             SubmitOutcome::Rejected { kind: RejectKind::Duplicate, .. }
         ));
-
-        // work for a height that is no longer the frontier
         b.publish_tip(6, [0x43u8; 32]);
-        assert!(matches!(
-            b.submit(&sub),
-            SubmitOutcome::Rejected { kind: RejectKind::StaleHeight, .. }
-        ));
+        assert!(
+            matches!(b.submit(&sub), SubmitOutcome::Rejected { kind: RejectKind::Duplicate, .. }),
+            "the SAME solve replayed after the frontier moves must still be a duplicate, not credited twice"
+        );
+    }
+
+    #[test]
+    fn a_fresh_near_miss_within_the_credit_window_still_wins() {
+        // The actual point of the 2026-08-16 widening: a DIFFERENT (fresh
+        // nonce) solve for a height a few blocks behind the current frontier
+        // must still be credited, not discarded — this is what "93.8% of
+        // supply went to the placeholder wallet" was actually fixing.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let wallet: WalletId = [0x11u8; 32];
+        let b = bridge_at(5, [0x42u8; 32]);
+        let c = b.challenge_for(Some(wallet), 0).unwrap();
+        let sub = solve_for(&c, &wallet); // solved against height 5's real challenge
+
+        // Frontier moves on 3 times before this submission arrives — well
+        // within the default 20-block credit_window().
+        b.publish_tip(6, [0x43u8; 32]);
+        b.publish_tip(7, [0x44u8; 32]);
+        b.publish_tip(8, [0x45u8; 32]);
+
+        match b.submit(&sub) {
+            SubmitOutcome::Block { height } => assert_eq!(height, 5, "credited AT the height it was solved for"),
+            other => panic!("a near-miss within the credit window must still win, got {other:?}"),
+        }
+        let got = b.take_solve().expect("the producer finds the near-miss solve waiting");
+        assert_eq!(got.wallet, wallet, "the real miner is credited, not the producer-wallet fallback");
+    }
+
+    #[test]
+    fn a_solve_outside_the_credit_window_is_genuinely_stale() {
+        // The widening has a real edge, not an unbounded amnesty: once a
+        // height falls out of BOTH the window and the retained history, it
+        // must still reject — this is what stops the replay/DoS surface a
+        // truly unlimited window would open.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SIGIL_MINING_CREDIT_WINDOW", "2");
+        let wallet: WalletId = [0x22u8; 32];
+        let b = bridge_at(5, [0x42u8; 32]);
+        let c = b.challenge_for(Some(wallet), 0).unwrap();
+        let sub = solve_for(&c, &wallet);
+
+        // 4 blocks later, window is 2 -> outside it.
+        for (h, p) in [(6, 0x43u8), (7, 0x44), (8, 0x45), (9, 0x46)] {
+            b.publish_tip(h, [p; 32]);
+        }
+        assert!(
+            matches!(b.submit(&sub), SubmitOutcome::Rejected { kind: RejectKind::StaleHeight, .. }),
+            "4 blocks behind must reject when the configured window is only 2"
+        );
+
+        std::env::remove_var("SIGIL_MINING_CREDIT_WINDOW");
     }
 
     #[test]

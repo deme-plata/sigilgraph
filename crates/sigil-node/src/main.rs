@@ -899,27 +899,56 @@ fn run_start() -> Result<()> {
                     // This is the parent THIS block will carry, so a solve issued
                     // now is valid for exactly this block and no other.
                     mining_bridge.publish_tip(mint_ref.height(), mint_ref.parent_hash());
-                    // Gated production: mint only when a verified solve is waiting,
-                    // and only if it was solved against the CURRENT frontier — a
-                    // solve for a parent we've since moved off is stale work.
+                    // Gated production: mint only when a verified solve is waiting.
+                    // An EXACT match (this frontier) embeds real PoW into the header,
+                    // same as always. A NEAR-MISS (already verified by
+                    // MiningBridge::submit() against the historical challenge it was
+                    // actually solved for, within its credit window) still credits
+                    // the real miner's wallet — but its nonce/blake4_hash/vdf are NOT
+                    // embedded, because they were computed against a DIFFERENT parent
+                    // than the one this block actually carries; embedding them would
+                    // make the header's claimed PoW fail re-verification for every
+                    // follower. Zeroed exactly like the "no solve" path — this block's
+                    // PoW fields end up identical either way, only WHO gets paid
+                    // changes. See sigil_api::mining::credit_window() for why this
+                    // widening exists: measured live, 93.8% of supply had gone to the
+                    // producer-wallet fallback because almost no real submission could
+                    // win the EXACT-height race at this braid's block cadence.
+                    let near_miss_credit = |s: sigil_api::mining::AcceptedSolve| {
+                        sigil_api::mining::AcceptedSolve {
+                            nonce: 0,
+                            blake4_hash: 0,
+                            vdf: flux_vdf::VdfProof { y: vec![], pi: vec![], t: 0 },
+                            ..s
+                        }
+                    };
                     let solve: Option<sigil_api::mining::AcceptedSolve> = if mining_gated {
                         match mining_bridge.take_solve() {
                             Some(s) if s.parent_hash == mint_ref.parent_hash()
                                     && s.height == mint_ref.height() => Some(s),
-                            Some(_) => continue,  // stale solve — drop, wait for work on this frontier
+                            Some(s) if mint_ref.height().saturating_sub(s.height)
+                                    <= sigil_api::mining::credit_window() => Some(near_miss_credit(s)),
+                            Some(_) => continue,  // outside the credit window — drop, wait for work on this frontier
                             None => continue,     // no work yet — the braid idles, as PoW should
                         }
                     } else {
                         // Free-running (unchanged cadence, unchanged GHOSTDAG throughput):
-                        // opportunistically credit a solve that's ALREADY queued and matches
-                        // this exact frontier, but never wait for one — the braid must not
-                        // start blocking on PoW just because mining is now wired. take_solve()
-                        // pops destructively (no peek in MiningBridge), so a stale/mismatched
-                        // solve is discarded here — same accepted tradeoff the gated path
-                        // already makes on its `continue` branch, not a new loss. Anything
-                        // that doesn't match falls through to the producer-wallet default.
-                        mining_bridge.take_solve().filter(|s| {
-                            s.parent_hash == mint_ref.parent_hash() && s.height == mint_ref.height()
+                        // opportunistically credit a solve that's ALREADY queued —
+                        // exact match or a near-miss within the credit window — but
+                        // never wait for one. take_solve() pops destructively (no peek
+                        // in MiningBridge), so a genuinely-too-stale solve is discarded
+                        // here — same accepted tradeoff the gated path's `continue`
+                        // branch makes, not a new loss. Anything that doesn't qualify
+                        // falls through to the producer-wallet default.
+                        mining_bridge.take_solve().and_then(|s| {
+                            if s.parent_hash == mint_ref.parent_hash() && s.height == mint_ref.height() {
+                                Some(s)
+                            } else if mint_ref.height().saturating_sub(s.height)
+                                    <= sigil_api::mining::credit_window() {
+                                Some(near_miss_credit(s))
+                            } else {
+                                None
+                            }
                         })
                     };
                     // pull verify-once txs (already verified at mempool ingest)

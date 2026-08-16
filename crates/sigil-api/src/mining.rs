@@ -65,9 +65,60 @@ pub fn vdf_t() -> u64 {
 
 /// Sub-difficulty share ease in bits (`SIGIL_SHARE_EASE_BITS`). Default 0 =
 /// **solo semantics**: only full-difficulty solves are accepted, exactly the
-/// pre-pool wire behaviour. Set >0 to run the braid as a pool.
+/// pre-pool wire behaviour. Set >0 to run the braid as a pool. This is the
+/// per-wallet CEILING vardiff is allowed to issue — see [`vardiff_ease_for`].
 pub fn share_ease_bits() -> u32 {
     std::env::var("SIGIL_SHARE_EASE_BITS").ok().and_then(|s| s.parse().ok()).unwrap_or(0)
+}
+
+/// Target shares/sec each miner should land once vardiff is active
+/// (`SIGIL_VARDIFF_RATE`, default 0.5 — same convention `sigil_rpc` already
+/// uses for its pool, so an operator tuning one tunes both the same way).
+pub fn vardiff_rate() -> f64 {
+    std::env::var("SIGIL_VARDIFF_RATE").ok().and_then(|s| s.parse().ok()).unwrap_or(0.5)
+}
+
+/// Per-wallet share ease from a wallet's self-reported Φ (Lane-A) rate, aiming
+/// for ~[`vardiff_rate`] shares/sec instead of handing every wallet the same
+/// flat ceiling regardless of hashrate. Ported from `sigil_rpc::vardiff_ease_for`
+/// (that fix shipped 2026-07-24, commit f34d06c, and is unit-tested there) —
+/// duplicated here rather than adding `sigil-rpc` as a dependency, because that
+/// crate pulls sigil-dex/sigil-bank/sigil-oauth/flux-db/flux-history into this
+/// money API's graph for four pure functions; same "path a lean crate, don't
+/// swallow a heavy one" call this file already makes for `flux-miner` above.
+///
+/// `hps<=1.0` (unknown/idle wallet — nothing reported yet) gets the flat
+/// `share_ease` ceiling, i.e. today's behaviour: safe default for a rig that
+/// hasn't spoken yet.
+///
+/// **What this does NOT yet fix:** crediting still weighs every accepted share
+/// as `1` regardless of the ease it was issued at (unchanged below in
+/// `submit()`) — porting `sigil_rpc::achieved_ease`/`share_weight` (grade the
+/// share by what its hash actually achieved, not what the pool guessed at
+/// issue-time) needs the same live-measurement loop that fix took multiple
+/// correction rounds to get right on rpcd (see swarm bus msgs #20/#23/#24,
+/// 2026-08-01) — deliberately left as a follow-up rather than ported blind
+/// with no compiler and no live pool to test against.
+fn vardiff_ease_for(hps: f64, rate: f64, bits: u32, share_ease: u32) -> u32 {
+    if share_ease == 0 {
+        return 0;
+    }
+    if !(hps > 1.0) {
+        return share_ease;
+    }
+    let wanted_bits = (hps / rate).log2().ceil().max(1.0) as u32;
+    bits.saturating_sub(wanted_bits).clamp(1, share_ease)
+}
+
+/// Lane-A share target for `bits` eased by `ease`: `0` (accept only full
+/// difficulty) when `ease` is `0`, else the target at `bits - ease` (floored
+/// at 1 bit so an aggressive ease can never hand out a target that accepts
+/// everything). Ported from `sigil_rpc::share_target_from`.
+fn share_target_from(bits: u32, ease: u32) -> u64 {
+    if ease == 0 {
+        return 0;
+    }
+    target_from_bits(bits.saturating_sub(ease).max(1))
 }
 
 /// The 292-byte `nonce_sqisign` carrier layout shared with
@@ -277,20 +328,38 @@ impl MiningBridge {
         m.values().map(|(r, _)| *r).sum()
     }
 
+    /// This wallet's own last-reported Lane-A rate, or `0.0` if it has never
+    /// reported (or its report aged out — [`report_hps`] already prunes idle
+    /// entries on every call, so a stale wallet reads back as unknown, which
+    /// [`vardiff_ease_for`] treats as "give it the safe flat ceiling").
+    fn hps_for(&self, wallet: Option<WalletId>) -> f64 {
+        let Some(w) = wallet else { return 0.0 };
+        self.hps.lock().ok().and_then(|m| m.get(&w).map(|(r, _)| *r)).unwrap_or(0.0)
+    }
+
     /// Build the challenge for `wallet` against the current frontier. `None`
     /// when the producer has not published a frontier yet (node still booting,
     /// or not a producer).
+    ///
+    /// The issued `share_target` is per-wallet vardiff, not a flat global
+    /// ease: a wallet that has told us its own rate gets a target aimed at
+    /// [`vardiff_rate`] shares/sec for THAT rate, capped by the operator's
+    /// [`share_ease_bits`] ceiling. Before this, every wallet — a phone doing
+    /// a few KH/s and a desktop GPU doing tens of MH/s alike — was issued the
+    /// exact same target, so whichever end of that range the flat ease didn't
+    /// suit went long stretches with nothing accepted at all.
     pub fn challenge_for(&self, wallet: Option<WalletId>, now_ms: u64) -> Option<Challenge> {
         let tip = self.tip()?;
         let net_hps = self.report_hps(wallet, None, now_ms);
-        let ease = share_ease_bits();
+        let my_hps = self.hps_for(wallet);
+        let ease = vardiff_ease_for(my_hps, vardiff_rate(), tip.bits, share_ease_bits());
         Some(Challenge {
             height: tip.height,
             vdf_input: mining_seed(&tip.parent_hash, tip.height),
             blake4_target: target_from_bits(tip.bits),
             vdf_t: tip.vdf_t,
             net_hps,
-            share_target: if ease == 0 { 0 } else { target_from_bits(tip.bits.saturating_sub(ease)) },
+            share_target: share_target_from(tip.bits, ease),
         })
     }
 
@@ -360,6 +429,16 @@ impl MiningBridge {
             }
         }
 
+        // Verify against the GLOBAL ceiling, not this wallet's specific
+        // per-wallet-issued ease: hps can have moved between when this wallet
+        // fetched its challenge and when it submits, and re-deriving the
+        // narrower per-wallet target here would reject an honest submission
+        // over a race the miner didn't cause. The global ceiling is the
+        // widest target any wallet could legitimately have been issued, so
+        // verifying against it is the lenient, race-free bound — same
+        // "verify leniently" principle `sigil_rpc::achieved_ease` documents
+        // (see the note on `vardiff_ease_for` above for why the other half of
+        // that fix, crediting by achieved ease, is not ported yet).
         let ease = share_ease_bits();
         let c = Challenge {
             height: tip.height,
@@ -367,7 +446,7 @@ impl MiningBridge {
             blake4_target: target_from_bits(tip.bits),
             vdf_t: tip.vdf_t,
             net_hps: 0.0,
-            share_target: if ease == 0 { 0 } else { target_from_bits(tip.bits.saturating_sub(ease)) },
+            share_target: share_target_from(tip.bits, ease),
         };
         let g = ModSquaring::bench_2048();
 
@@ -465,6 +544,18 @@ mod tests {
     use super::*;
     use flux_miner::client::solve;
 
+    /// `bridge_at` (and this module's other env-touching tests) mutate
+    /// PROCESS-WIDE `SIGIL_*` env vars — but `cargo test` runs tests in
+    /// parallel threads by default, so without serialization two tests can
+    /// interleave: one resets `SIGIL_SHARE_EASE_BITS` to `0` while another is
+    /// mid-assertion expecting it to still be `8`. Every test that touches
+    /// these vars (directly or via `bridge_at`) must hold this lock for the
+    /// duration. Caught 2026-08-16 by
+    /// `a_reporting_gpu_gets_an_easier_target_than_an_unknown_wallet` flaking
+    /// under `cargo test`'s default parallelism — not a logic bug, a missing
+    /// guard around genuinely shared mutable state.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
     fn tiny_bits() -> u32 {
         4
     }
@@ -487,6 +578,7 @@ mod tests {
 
     #[test]
     fn challenge_binds_to_the_frontier_parent() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let parent_a = [0x11u8; 32];
         let parent_b = [0x22u8; 32];
         let b = bridge_at(7, parent_a);
@@ -503,6 +595,7 @@ mod tests {
 
     #[test]
     fn valid_solve_is_accepted_and_queued_for_the_producer() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let wallet: WalletId = [0xABu8; 32];
         let b = bridge_at(3, [0x99u8; 32]);
         let c = b.challenge_for(Some(wallet), 0).unwrap();
@@ -520,6 +613,7 @@ mod tests {
     fn a_mined_header_is_reverifiable_by_a_follower() {
         // The whole point: a follower holding ONLY the header can rebuild the
         // challenge and check both lanes.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let wallet: WalletId = [0x5Au8; 32];
         let parent = [0x77u8; 32];
         let b = bridge_at(11, parent);
@@ -548,6 +642,7 @@ mod tests {
 
     #[test]
     fn stale_height_and_replay_are_rejected() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let wallet: WalletId = [0x0Fu8; 32];
         let b = bridge_at(5, [0x42u8; 32]);
         let c = b.challenge_for(Some(wallet), 0).unwrap();
@@ -570,6 +665,7 @@ mod tests {
 
     #[test]
     fn non_canonical_wallet_is_rejected_with_a_fixable_reason() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let wallet: WalletId = [0xC3u8; 32];
         let b = bridge_at(2, [0x01u8; 32]);
         let c = b.challenge_for(Some(wallet), 0).unwrap();
@@ -587,6 +683,7 @@ mod tests {
 
     #[test]
     fn garbage_is_rejected_without_consuming_the_replay_slot() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let wallet: WalletId = [0x7Eu8; 32];
         let b = bridge_at(4, [0x55u8; 32]);
         let c = b.challenge_for(Some(wallet), 0).unwrap();
@@ -625,6 +722,7 @@ mod tests {
 
     #[test]
     fn net_hps_sums_live_miners_and_prunes_idle_ones() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let b = bridge_at(1, [0u8; 32]);
         b.report_hps(Some([1u8; 32]), Some(1000.0), 0);
         b.report_hps(Some([2u8; 32]), Some(500.0), 0);
@@ -634,5 +732,70 @@ mod tests {
         let later = HPS_IDLE_MS + 1;
         b.report_hps(Some([1u8; 32]), Some(1000.0), later);
         assert_eq!(b.challenge_for(None, later).unwrap().net_hps, 1000.0);
+    }
+
+    // ── vardiff (2026-08-16 port from sigil_rpc::vardiff_ease_for) ─────────
+    //
+    // Same assertions as sigil-rpc's own test of this formula (same input,
+    // same expected output) — since the body here is a straight port, this
+    // is a self-check that the port is byte-for-byte the proven formula, not
+    // a from-scratch reimplementation that merely looks similar.
+
+    #[test]
+    fn vardiff_formula_matches_the_proven_sigil_rpc_vectors() {
+        assert_eq!(vardiff_ease_for(0.0, 0.5, 24, 8), 8);
+        assert_eq!(vardiff_ease_for(1.0, 0.5, 24, 8), 8); // <=1 H/s -> unknown -> flat ceiling
+        assert_eq!(vardiff_ease_for(3e9, 0.5, 24, 0), 0); // ceiling 0 -> always 0 (solo semantics)
+        assert_eq!(vardiff_ease_for(100e3, 0.5, 24, 8), 6);
+        assert_eq!(vardiff_ease_for(3e9, 0.5, 24, 8), 1);
+        assert_eq!(vardiff_ease_for(10e6, 0.5, 24, 8), 1);
+        assert_eq!(vardiff_ease_for(3e9, 0.5, 35, 8), 2);
+    }
+
+    #[test]
+    fn a_reporting_gpu_gets_an_easier_target_than_an_unknown_wallet() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // bridge_at() itself pins SIGIL_SHARE_EASE_BITS=0 (its "trivial and
+        // deterministic" default) — override AFTER constructing the bridge,
+        // not before, or bridge_at's own set_var clobbers ours right back to 0.
+        let b = bridge_at(1, [0u8; 32]);
+        std::env::set_var("SIGIL_SHARE_EASE_BITS", "8");
+        std::env::set_var("SIGIL_VARDIFF_RATE", "0.5");
+        let gpu: WalletId = [0xAAu8; 32];
+        let unknown: WalletId = [0xBBu8; 32];
+
+        // GPU has told us it does 100 MH/s; the unknown wallet has never
+        // reported anything.
+        b.report_hps(Some(gpu), Some(100_000_000.0), 0);
+
+        let gpu_target = b.challenge_for(Some(gpu), 0).unwrap().share_target;
+        let unknown_target = b.challenge_for(Some(unknown), 0).unwrap().share_target;
+
+        // A SMALLER target is a HARDER target (fewer hashes clear the bar).
+        // Before this fix both were issued the exact same flat share_target
+        // regardless of hps — this assertion is what "per-wallet vardiff"
+        // means and would fail against the old flat-ease code.
+        assert!(
+            gpu_target < unknown_target,
+            "a rig reporting real hashrate should get a target scaled to it \
+             (harder / smaller), not the same flat ceiling as an unknown wallet: \
+             gpu_target={gpu_target} unknown_target={unknown_target}"
+        );
+
+        std::env::remove_var("SIGIL_SHARE_EASE_BITS");
+        std::env::remove_var("SIGIL_VARDIFF_RATE");
+    }
+
+    #[test]
+    fn solo_semantics_are_unchanged_when_share_ease_bits_is_zero() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Default operator config (SIGIL_SHARE_EASE_BITS unset -> 0): vardiff
+        // must be a no-op and share_target must stay 0 for every wallet,
+        // exactly the pre-vardiff wire behaviour this module documents.
+        let b = bridge_at(1, [0u8; 32]);
+        let gpu: WalletId = [0xCCu8; 32];
+        b.report_hps(Some(gpu), Some(500_000_000.0), 0);
+        assert_eq!(b.challenge_for(Some(gpu), 0).unwrap().share_target, 0);
+        assert_eq!(b.challenge_for(None, 0).unwrap().share_target, 0);
     }
 }

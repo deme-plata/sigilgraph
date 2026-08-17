@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { createPortal } from 'react-dom';
 import LoginScreen from './components/LoginScreen';
 import Dashboard from './components/Dashboard';
-import DexScreen from './components/DexScreen';
+import SigilDexScreen from './components/SigilDexScreen';
 import AIChatScreen from './components/AIChatScreen';
 import ChatScreen from './components/ChatScreen';
 import Navigation from './components/Navigation';
@@ -996,9 +996,9 @@ function App() {
               <div style={{ display: currentScreen === 'dashboard' ? 'block' : 'none' }}>
                 <Dashboard key="dashboard-stable" onNavigateToSend={handleCoinSendClick} liveBalance={nodeData.balance} onNavigateToChat={() => setCurrentScreen('chat')} />
               </div>
-              {/* v2.3.12-beta: Keep DexScreen mounted to preserve swap state */}
+              {/* Keep SigilDexScreen mounted to preserve swap state */}
               <div style={{ display: currentScreen === 'dex' ? 'block' : 'none' }}>
-                <DexScreen isActive={currentScreen === 'dex'} />
+                <SigilDexScreen isActive={currentScreen === 'dex'} />
               </div>
               {/* Keep ChatScreen mounted to preserve call/meeting state */}
               <div style={{ display: currentScreen === 'chat' ? 'block' : 'none', height: '100%' }}>

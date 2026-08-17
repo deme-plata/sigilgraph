@@ -3288,6 +3288,97 @@ class QNarwhalKnightAPI {
   async getNetworkEvents(): Promise<ApiResponse<any[]>> {
     return this.request<any[]>('/v1/calendar/network-events');
   }
+
+  // ── SIGIL-native DEX (sigil-rpcd's own /pools /tokens /balance /swap
+  // /add_liquidity — NOT the Quillon q-api-server DEX surface the rest of
+  // this file targets). sigil-rpcd strips a leading "/api/v1", so these
+  // paths ride the same `${baseURL}${endpoint}` convention as every other
+  // request() call here. Swap math + settlement are live (sigil-dex ->
+  // sigil-state::commit_state_transition); see SigilDexScreen.tsx for the
+  // client-side quote preview that mirrors sigil-dex's exact formula. */
+
+  async sigilDexPools(): Promise<ApiResponse<any>> {
+    return this.request<any>('/v1/pools');
+  }
+
+  async sigilDexTokens(): Promise<ApiResponse<any>> {
+    return this.request<any>('/v1/tokens');
+  }
+
+  async sigilDexBalance(wallet: string, token: string): Promise<ApiResponse<any>> {
+    const w = (wallet || '').replace(/^qnk/i, '').toLowerCase();
+    const t = (token || '').replace(/^qnk/i, '').toLowerCase();
+    return this.request<any>(`/v1/balance?wallet=${w}&token=${t}`);
+  }
+
+  /** Resolve the signing keypair the same way sendTransaction() does — active
+   * session, or decrypt the stored mnemonic (MetaMask auto-password, else the
+   * password modal). Throws instead of returning an ApiResponse-shaped early
+   * exit, since sigilDexSwap/sigilDexAddLiquidity callers want plain try/catch. */
+  private async resolveSigilSigningKeypair(): Promise<{ privateKey: Uint8Array; address: string }> {
+    const session = walletSession.getSession();
+    if (session) {
+      return { privateKey: session.privateKey, address: session.address };
+    }
+    const encryptedMnemonic = localStorage.getItem('walletEncryptedMnemonic');
+    if (!encryptedMnemonic) {
+      throw new Error('Wallet seed not found. Please log in again with your mnemonic phrase.');
+    }
+    let mnemonic = '';
+    const metamaskPw = sessionStorage.getItem('metamaskAutoPassword');
+    if (metamaskPw) {
+      try {
+        mnemonic = await recoverMnemonic(metamaskPw);
+      } catch {
+        // fall through to the modal path below
+      }
+    }
+    if (!mnemonic) {
+      const { getGlobalPasswordRequester } = await import('../contexts/SessionTimeoutContext');
+      const passwordRequester = getGlobalPasswordRequester();
+      const actualRequester = passwordRequester || await waitForPasswordPrompt(3000);
+      if (!actualRequester) {
+        throw new Error('Password modal not ready. Please refresh the page and try again.');
+      }
+      mnemonic = await actualRequester();
+    }
+    const keyPair = await keypairFromMnemonic(mnemonic);
+    walletSession.setSession(keyPair.privateKey, keyPair.address, mnemonic);
+    return { privateKey: keyPair.privateKey, address: keyPair.address };
+  }
+
+  /** SIGIL-native swap — signed sigil-rpc/v1 POST /swap. `pool` is the 64-hex
+   * pool id from sigilDexPools(); `dir` picks which side of the pool is "in".
+   * Amounts are base units (whole coins × 10^8 — this app's SIGIL convention,
+   * see sendTransaction()'s baseUnits comment). */
+  async sigilDexSwap(pool: string, dir: 'AtoB' | 'BtoA', amountIn: number, minOut: number): Promise<ApiResponse<any>> {
+    const { privateKey, address } = await this.resolveSigilSigningKeypair();
+    const { signSigilRpc } = await import('./walletAuth');
+    const from64 = address.replace(/^qnk/i, '').toLowerCase();
+    const pool64 = (pool || '').replace(/^qnk/i, '').toLowerCase();
+    const reqNonce = Date.now();
+    const sig = await signSigilRpc(privateKey, 'swap', [from64, pool64, dir, String(amountIn), String(minOut)], reqNonce);
+    return this.request<any>('/v1/swap', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: from64, pool: pool64, dir, amount_in: amountIn, min_out: minOut, req_nonce: reqNonce, sig }),
+    });
+  }
+
+  /** SIGIL-native add-liquidity — signed sigil-rpc/v1 POST /add_liquidity. */
+  async sigilDexAddLiquidity(pool: string, amountA: number, amountB: number): Promise<ApiResponse<any>> {
+    const { privateKey, address } = await this.resolveSigilSigningKeypair();
+    const { signSigilRpc } = await import('./walletAuth');
+    const from64 = address.replace(/^qnk/i, '').toLowerCase();
+    const pool64 = (pool || '').replace(/^qnk/i, '').toLowerCase();
+    const reqNonce = Date.now();
+    const sig = await signSigilRpc(privateKey, 'add_liquidity', [from64, pool64, String(amountA), String(amountB)], reqNonce);
+    return this.request<any>('/v1/add_liquidity', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: from64, pool: pool64, amount_a: amountA, amount_b: amountB, req_nonce: reqNonce, sig }),
+    });
+  }
 }
 
 // QNO Staking interfaces

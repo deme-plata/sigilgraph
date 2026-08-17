@@ -31,6 +31,14 @@ sigil-header = { path = "../sigil-header" }
 # (SigningKey::generate); the live verify path (VerifyingKey::verify) doesn't
 # need it, same as every other Ed25519Hot verifier in this workspace.
 ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+# eth.rs: read-only USDC balance lookups via a public Ethereum RPC (this
+# box's own reth node is mid-sync — Execution stage far behind Headers, not
+# yet usable for reads). This is the one deliberate exception to this crate's
+# usual "no HTTP client" rule (see flux-miner's own comment below for why
+# that rule exists) — `ureq` is a genuinely minimal, BLOCKING client (no
+# async runtime, no default-feature bundle) used for exactly one occasional,
+# low-volume, read-only outbound call, not a general HTTP stack.
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 
 # Backend-aware mempool handle (SIGIL_BRAIDPOOL_v1_1.md Phase B): AppState
 # holds the SAME Arc<MempoolBackend> sigil-node's producer loop holds, so

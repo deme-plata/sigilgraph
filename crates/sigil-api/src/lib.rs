@@ -34,6 +34,8 @@ use mining::{MiningBridge, SubmitOutcome};
 pub mod send;
 use send::SendBridge;
 
+pub mod eth;
+
 /// Shared braid state the API reads/writes. `state` is published by the producer
 /// after each block-apply (a consistent read snapshot); `mempool` is the SAME
 /// `Arc<MempoolBackend>` the producer pulls txs from when it mints the next
@@ -264,6 +266,53 @@ pub async fn send_handler(
     }
 }
 
+/// `?address=0x...` — a 20-byte hex EVM address, NOT a SIGIL wallet address.
+/// Different curve, different derivation; there is no relationship between
+/// the two, so this is a separate address a caller pastes in (e.g. their
+/// MetaMask address), not anything derivable from a SIGIL keypair.
+/// `?chain=ethereum|polygon` — optional, defaults to `ethereum`.
+#[derive(Debug, Deserialize)]
+pub struct UsdcBalanceQuery {
+    pub address: String,
+    pub chain: Option<String>,
+}
+
+/// Read-only USDC balance lookup, on Ethereum mainnet or Polygon PoS — see
+/// `eth` module docs for the "why a public RPC, not our own reth node"
+/// story. Runs the blocking `ureq` call on a `spawn_blocking` thread so a
+/// slow/unreachable public endpoint can never stall the axum runtime this
+/// crate's money endpoints share.
+#[flux_api_macros::api(GET, "/v1/eth/usdc", summary = "Read-only USDC balance for an EVM address on Ethereum or Polygon (via public RPC)")]
+pub async fn eth_usdc_handler(Query(q): Query<UsdcBalanceQuery>) -> Json<serde_json::Value> {
+    let chain_str = q.chain.unwrap_or_default();
+    let Some(chain) = eth::Chain::parse(&chain_str) else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": format!("unsupported chain \"{chain_str}\" — try \"ethereum\" or \"polygon\""),
+        }));
+    };
+    let address = q.address;
+    match tokio::task::spawn_blocking(move || eth::usdc_balance_raw(&address, chain)).await {
+        Ok(Ok(raw)) => Json(serde_json::json!({
+            "ok": true,
+            "chain": chain_str_canonical(chain),
+            "symbol": "USDC",
+            "decimals": 6,
+            "balance_raw": raw.to_string(),
+            "balance": eth::format_usdc(raw),
+        })),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("internal: {e}") })),
+    }
+}
+
+fn chain_str_canonical(chain: eth::Chain) -> &'static str {
+    match chain {
+        eth::Chain::Ethereum => "ethereum",
+        eth::Chain::Polygon => "polygon",
+    }
+}
+
 // ── mining on the braid ─────────────────────────────────────────────────────
 //
 // The same `flux-miner` challenge/submit contract `sigil-rpcd` serves, bound to
@@ -362,6 +411,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/transactions", post(submit_transaction))
         .route("/v1/transactions/:hash", get(tx_status))
         .route("/v1/send", post(send_handler))
+        .route("/v1/eth/usdc", get(eth_usdc_handler))
         .route("/v1/mining/challenge", get(mining_challenge))
         .route("/v1/mining/submit", post(mining_submit))
         .route("/v1/mining/miners", get(mining_miners))
@@ -393,6 +443,7 @@ pub fn router(state: AppState) -> Router {
         // 404'd, and serve.rs's proxy (see its own fix) was masking that 404
         // as a fake "200 OK" with an unparseable body.
         .route("/api/v1/send", post(send_handler))
+        .route("/api/v1/eth/usdc", get(eth_usdc_handler))
         .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024))
         .layer(tower_http::timeout::TimeoutLayer::new(Duration::from_secs(30)))
         .layer(CorsLayer::permissive())

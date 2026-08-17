@@ -177,12 +177,12 @@ body.view-desktop .desktop{display:flex}
   <div class="actions">
     <div class="act"><i class="lic" data-lucide="arrow-up-from-dot"></i><span class="t">Send</span></div>
     <div class="act" onclick="openReceive()"><i class="lic" data-lucide="arrow-down-to-dot"></i><span class="t">Receive</span></div>
-    <div class="act soon" title="DEX not live on sigil-g0 yet"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div>
+    <div class="act" onclick="openSwap()"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div>
     <div class="act" onclick="openMine()"><i class="lic" data-lucide="pickaxe"></i><span class="t">Mine</span></div>
   </div>
   <div class="sect" style="margin:18px 16px 8px"><span>Assets</span><span style="color:var(--cyan)" id="passetsN"></span></div>
   <div class="list" id="passets"></div>
-  <div class="nav"><div class="on"><i class="lic" data-lucide="wallet"></i>Wallet</div><div class="soon" title="DEX not live on sigil-g0 yet"><i class="lic" data-lucide="arrow-left-right"></i>Swap</div><div class="soon" title="staking not live on sigil-g0 yet"><i class="lic" data-lucide="layers"></i>Stake</div><div onclick="openSettings()" style="cursor:pointer"><i class="lic" data-lucide="settings"></i>Settings</div></div>
+  <div class="nav"><div class="on"><i class="lic" data-lucide="wallet"></i>Wallet</div><div onclick="window.openSwap&&openSwap()" style="cursor:pointer"><i class="lic" data-lucide="arrow-left-right"></i>Swap</div><div class="soon" title="staking not live on sigil-g0 yet"><i class="lic" data-lucide="layers"></i>Stake</div><div onclick="openSettings()" style="cursor:pointer"><i class="lic" data-lucide="settings"></i>Settings</div></div>
 </div>
 
 <div class="desktop">
@@ -226,7 +226,7 @@ body.view-desktop .desktop{display:flex}
         <div class="grp">Move</div>
         <a><i class="lic" data-lucide="arrow-up-from-dot"></i>Send</a>
         <a onclick="openReceive();return false" style="cursor:pointer"><i class="lic" data-lucide="arrow-down-to-dot"></i>Receive</a>
-        <a class="soon" title="DEX not live on sigil-g0 yet"><i class="lic" data-lucide="arrow-left-right"></i>Swap<span class="soonchip">soon</span></a>
+        <a onclick="openSwap();return false" style="cursor:pointer"><i class="lic" data-lucide="arrow-left-right"></i>Swap</a>
         <div class="grp">Earn</div>
         <a class="soon" title="staking not live on sigil-g0 yet"><i class="lic" data-lucide="layers"></i>Stake<span class="soonchip">soon</span></a>
         <a onclick="openMine();return false" style="cursor:pointer"><i class="lic" data-lucide="pickaxe"></i>Mine</a>
@@ -247,7 +247,7 @@ body.view-desktop .desktop{display:flex}
         <div class="dactions">
           <div class="act"><i class="lic" data-lucide="arrow-up-from-dot"></i><span class="t">Send</span></div>
           <div class="act" onclick="openReceive()"><i class="lic" data-lucide="arrow-down-to-dot"></i><span class="t">Receive</span></div>
-          <div class="act soon" title="DEX not live on sigil-g0 yet"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div>
+          <div class="act" onclick="openSwap()"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div>
           <div class="act" onclick="openMine()"><i class="lic" data-lucide="pickaxe"></i><span class="t">Mine</span></div>
         </div>
       </div>
@@ -870,6 +870,195 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   document.getElementById('send-modal').addEventListener('click',function(e){ if(e.target===this) window.closeSend(); });
   window.addEventListener('keydown',function(e){ if(e.key==='Escape') window.closeSend(); });
   if(document.readyState!=='loading') wireSend(); else document.addEventListener('DOMContentLoaded',wireSend);
+})();
+</script>
+
+<!-- SWAP modal — live sigil-g0 DEX (sigil-rpcd's real /pools /swap, constant-product AMM).
+     Same idiom + same on-demand recovery-phrase signing as the send modal above. The quote
+     mirrors sigil-dex::swap() + sigil-bank::split_swap_output() EXACTLY (pool.fee_bps LP fee,
+     fixed 30bps/0.30% master cut taken from the output) so what's shown is what settles. -->
+<div id="swap-modal" style="display:none;position:fixed;inset:0;z-index:10001;background:rgba(2,5,9,.82);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:18px">
+  <div style="width:100%;max-width:460px;max-height:88vh;display:flex;flex-direction:column;background:linear-gradient(160deg,#06121c,#04080c);border:1px solid rgba(33,212,253,.32);border-radius:16px;box-shadow:0 0 60px rgba(33,212,253,.18);overflow:hidden;font-family:'Rajdhani',system-ui,sans-serif">
+    <div style="flex:none;display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid rgba(33,212,253,.18);background:rgba(8,16,24,.7)">
+      <div style="font-size:20px">⇄</div>
+      <div style="flex:1"><div style="font-family:'Orbitron';font-weight:700;letter-spacing:1px;color:#6df3ff;font-size:15px">SWAP</div>
+        <div style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8">sigil-g0 · constant-product AMM · live</div></div>
+      <button id="swapClose" style="background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:8px;width:30px;height:30px;cursor:pointer;font-size:15px">✕</button>
+    </div>
+    <div id="swapReceipt" style="display:none;flex:1;overflow-y:auto;padding:18px;flex-direction:column;gap:11px;font-family:'Rajdhani',system-ui,sans-serif">
+      <div style="text-align:center;padding:6px 0 2px">
+        <div style="font-size:34px;color:#00e0c6;text-shadow:0 0 18px rgba(0,224,198,.6)">✓</div>
+        <div style="font-family:'Orbitron';font-weight:700;letter-spacing:1px;color:#00e0c6;font-size:15px;margin-top:2px">SWAPPED</div>
+        <div id="swRcAmt" style="font-family:'Orbitron';font-weight:900;font-size:22px;color:#6df3ff;margin-top:6px"></div>
+      </div>
+      <div id="swRcRows" style="display:flex;flex-direction:column;gap:0"></div>
+      <button onclick="swapReceiptDone()" style="background:linear-gradient(90deg,rgba(33,212,253,.18),rgba(0,224,198,.14));border:1px solid rgba(33,212,253,.4);color:#6df3ff;border-radius:10px;padding:11px;cursor:pointer;font-family:'Orbitron';font-size:11px;letter-spacing:1px">DONE</button>
+      <div style="font-family:'JetBrains Mono';font-size:9.5px;color:#5a93a8;text-align:center">settled via sigil-state::commit_state_transition — searchable in the explorer</div>
+    </div>
+    <div id="swapForm" style="flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:12px">
+      <div>
+        <label style="font-family:'JetBrains Mono';font-size:10px;letter-spacing:1px;color:#6df3ff;text-transform:uppercase">Pool</label>
+        <select id="swapPool" onchange="swapPoolChanged()" style="width:100%;margin-top:6px;background:rgba(4,8,12,.7);border:1px solid rgba(33,212,253,.22);border-radius:10px;color:#cfe9f2;font-family:'JetBrains Mono';font-size:12px;padding:11px 12px;outline:none"></select>
+      </div>
+      <div style="background:rgba(4,8,12,.55);border:1px solid rgba(33,212,253,.16);border-radius:12px;padding:11px 12px">
+        <div style="display:flex;justify-content:space-between;font-family:'JetBrains Mono';font-size:10px;color:#5a93a8;text-transform:uppercase;letter-spacing:1px"><span>From</span><span id="swapFromBal">balance —</span></div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+          <span id="swapFromSym" style="font-family:'Rajdhani';font-weight:700;color:#cfe9f2;width:64px"></span>
+          <input id="swapAmt" type="text" inputmode="decimal" placeholder="0.0" oninput="swapRecalc()" style="flex:1;background:transparent;border:0;text-align:right;color:#cfe9f2;font-family:'Orbitron';font-size:18px;outline:none">
+        </div>
+      </div>
+      <div style="display:flex;justify-content:center;margin:-6px 0">
+        <button onclick="swapFlip()" title="flip direction" style="background:rgba(33,212,253,.1);border:1px solid rgba(33,212,253,.35);color:#6df3ff;border-radius:999px;width:32px;height:32px;cursor:pointer;font-size:14px">⇅</button>
+      </div>
+      <div style="background:rgba(4,8,12,.55);border:1px solid rgba(33,212,253,.16);border-radius:12px;padding:11px 12px">
+        <div style="display:flex;justify-content:space-between;font-family:'JetBrains Mono';font-size:10px;color:#5a93a8;text-transform:uppercase;letter-spacing:1px"><span>To (estimated)</span><span id="swapToBal">balance —</span></div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+          <span id="swapToSym" style="font-family:'Rajdhani';font-weight:700;color:#cfe9f2;width:64px"></span>
+          <span id="swapOut" style="flex:1;text-align:right;color:#00e0c6;font-family:'Orbitron';font-size:18px">0.0</span>
+        </div>
+      </div>
+      <div id="swapMeta" style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8;line-height:1.7"></div>
+      <button id="swapGo" onclick="doSwap()" style="border:1px solid rgba(33,212,253,.45);background:linear-gradient(90deg,rgba(33,212,253,.2),rgba(0,224,198,.13));color:#6df3ff;font-family:'Orbitron';font-weight:700;font-size:14px;letter-spacing:1px;padding:13px;border-radius:11px;cursor:pointer">⇄ SWAP</button>
+      <div id="swapMsg" style="font-family:'JetBrains Mono';font-size:11px;color:#8fb3c2;min-height:14px"></div>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  var SWAP_MASTER_FEE_BPS=30n;
+  window.__swapPools=[];
+  window.__swapDir='AtoB';
+  function fmt8(n){ return (Number(n)/1e8).toLocaleString(undefined,{maximumFractionDigits:6}); }
+  function ammQuote(reserveIn,reserveOut,amountIn,feeBps){
+    if(amountIn<=0n||reserveIn<=0n||reserveOut<=0n) return 0n;
+    var feeComplement=10000n-BigInt(feeBps);
+    var amountInWithFee=amountIn*feeComplement;
+    var num=amountInWithFee*reserveOut;
+    var den=reserveIn*10000n+amountInWithFee;
+    return num/den;
+  }
+  function splitMasterFee(amountOut){
+    var masterShare=(amountOut*SWAP_MASTER_FEE_BPS)/10000n;
+    return {userShare:amountOut-masterShare, masterShare:masterShare};
+  }
+  function currentPool(){
+    var sel=document.getElementById('swapPool'); if(!sel) return null;
+    var id=sel.value; return window.__swapPools.find(function(p){return p.id===id;})||null;
+  }
+  function legs(){
+    var p=currentPool(); if(!p) return null;
+    return window.__swapDir==='AtoB'
+      ? {symIn:p.sym_a, symOut:p.sym_b, reserveIn:BigInt(Math.trunc(p.reserve_a)), reserveOut:BigInt(Math.trunc(p.reserve_b)), feeBps:p.fee_bps}
+      : {symIn:p.sym_b, symOut:p.sym_a, reserveIn:BigInt(Math.trunc(p.reserve_b)), reserveOut:BigInt(Math.trunc(p.reserve_a)), feeBps:p.fee_bps};
+  }
+  window.swapFlip=function(){ window.__swapDir=window.__swapDir==='AtoB'?'BtoA':'AtoB'; swapRenderLegs(); swapRecalc(); };
+  window.swapPoolChanged=function(){ window.__swapDir='AtoB'; swapRenderLegs(); swapRecalc(); };
+  function swapRenderLegs(){
+    var L=legs(); if(!L) return;
+    document.getElementById('swapFromSym').textContent=L.symIn;
+    document.getElementById('swapToSym').textContent=L.symOut;
+    swapRefreshBalances();
+  }
+  async function swapRefreshBalances(){
+    var addr=(window.MINE_ADDR||window.ADDR||'').toLowerCase();
+    var p=currentPool(); if(!p) return;
+    if(!addr){ document.getElementById('swapFromBal').textContent='balance —'; document.getElementById('swapToBal').textContent='balance —'; return; }
+    try{
+      var tIn = window.__swapDir==='AtoB'?p.token_a:p.token_b;
+      var tOut = window.__swapDir==='AtoB'?p.token_b:p.token_a;
+      var rIn=await fetch('/api/v1/balance?wallet='+addr+'&token='+tIn+'&cb='+Date.now(),{cache:'no-store'});
+      var jIn=await rIn.json();
+      document.getElementById('swapFromBal').textContent='balance '+fmt8(jIn.balance||0);
+      var rOut=await fetch('/api/v1/balance?wallet='+addr+'&token='+tOut+'&cb='+Date.now(),{cache:'no-store'});
+      var jOut=await rOut.json();
+      document.getElementById('swapToBal').textContent='balance '+fmt8(jOut.balance||0);
+    }catch(e){}
+  }
+  window.swapRecalc=function(){
+    var L=legs(); var msgEl=document.getElementById('swapMeta'); var out=document.getElementById('swapOut'); var go=document.getElementById('swapGo');
+    if(!L){ out.textContent='0.0'; msgEl.textContent=''; if(go)go.disabled=true; return; }
+    var amtStr=(document.getElementById('swapAmt').value||'').trim();
+    if(!/^\d+(\.\d{1,8})?$/.test(amtStr)||Number(amtStr)<=0){ out.textContent='0.0'; msgEl.textContent=''; if(go)go.disabled=true; return; }
+    var parts=amtStr.split('.'); var amountIn=BigInt(parts[0]||'0')*100000000n+BigInt(((parts[1]||'')+'00000000').slice(0,8));
+    var grossOut=ammQuote(L.reserveIn,L.reserveOut,amountIn,L.feeBps);
+    if(grossOut<=0n){ out.textContent='0.0'; msgEl.textContent='amount too small for this pool'; if(go)go.disabled=true; return; }
+    var split=splitMasterFee(grossOut);
+    out.textContent=fmt8(split.userShare)+' '+L.symOut;
+    var midPrice=Number(L.reserveOut)/Math.max(Number(L.reserveIn),1);
+    var execPrice=Number(grossOut)/Number(amountIn);
+    var impact=midPrice>0?Math.max(0,(1-execPrice/midPrice)*100):0;
+    msgEl.innerHTML='price impact <b style="color:'+(impact>5?'#fbbf24':'#8fb3c2')+'">'+impact.toFixed(3)+'%</b> · LP fee '+(L.feeBps/100).toFixed(2)+'% + protocol 0.30% (taken from output)';
+    window.__swapQuote={amountIn:amountIn, minOut:(split.userShare*99n)/100n, grossOut:grossOut, userShare:split.userShare}; // 1% default slippage floor
+    if(go)go.disabled=false;
+  };
+  window.openSwap=async function(){
+    var m=document.getElementById('swap-modal'); if(!m) return;
+    document.getElementById('swapForm').style.display='flex';
+    document.getElementById('swapReceipt').style.display='none';
+    var msgEl=document.getElementById('swapMsg'); msgEl.textContent=''; msgEl.style.color='#8fb3c2';
+    document.getElementById('swapAmt').value='';
+    m.style.display='flex';
+    try{
+      var r=await fetch('/api/v1/pools?cb='+Date.now(),{cache:'no-store'});
+      var j=await r.json();
+      window.__swapPools=(j&&j.pools)||[];
+      var sel=document.getElementById('swapPool');
+      sel.innerHTML=window.__swapPools.map(function(p){return '<option value="'+p.id+'">'+p.sym_a+' / '+p.sym_b+'</option>';}).join('');
+      window.__swapDir='AtoB';
+      swapRenderLegs(); swapRecalc();
+    }catch(e){ msgEl.textContent='✗ could not reach the node for live pools.'; msgEl.style.color='#ff8a8a'; }
+  };
+  window.closeSwap=function(){ var m=document.getElementById('swap-modal'); if(m)m.style.display='none'; };
+  window.doSwap=async function(){
+    var q=window.__swapQuote; var L=legs(); if(!q||!L) return;
+    var from=(window.MINE_ADDR||window.ADDR||'').toLowerCase();
+    var pool=currentPool(); if(!pool||!from) return;
+    var msgEl=document.getElementById('swapMsg'); msgEl.style.color='#8fb3c2';
+    if(!window.sigilCryptoReady){ msgEl.textContent='Signer still loading — try again in a moment.'; return; }
+    var mnemonic=window.__sigilMnemonic;
+    if(!mnemonic){
+      mnemonic=(prompt('Enter your recovery phrase to sign this swap.\n(kept in memory for this session only — never saved)')||'').trim();
+      if(!mnemonic){ msgEl.textContent='Swap cancelled — recovery phrase required to sign.'; msgEl.style.color='#fbbf24'; return; }
+    }
+    var kp; try{ kp=window.sigilDeriveFrom(mnemonic); }catch(e){ window.__sigilMnemonic=null; msgEl.textContent='Could not derive a key from that phrase.'; msgEl.style.color='#ff8a8a'; return; }
+    if(kp.address!==from){ window.__sigilMnemonic=null; msgEl.textContent='That phrase does not match this wallet address.'; msgEl.style.color='#ff8a8a'; return; }
+    window.__sigilMnemonic=mnemonic;
+    try{ localStorage.setItem('sigil-wallet-mnemonic', mnemonic); }catch(e){}
+    var reqNonce=Date.now();
+    var dir=window.__swapDir;
+    var sig; try{ sig=window.sigilSign(kp.priv,'swap',[from,pool.id,dir,q.amountIn.toString(),q.minOut.toString()],reqNonce); }catch(e){ msgEl.textContent='Signing failed.'; msgEl.style.color='#ff8a8a'; return; }
+    msgEl.textContent='Submitting…'; msgEl.style.color='#6df3ff';
+    var go=document.getElementById('swapGo'); if(go)go.disabled=true;
+    try{
+      var r=await fetch('/api/v1/swap',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({from:from,pool:pool.id,dir:dir,amount_in:Number(q.amountIn),min_out:Number(q.minOut),req_nonce:reqNonce,sig:sig})});
+      var j=null; try{ j=await r.json(); }catch(_){}
+      if(r.ok && j && j.ok){ swapShowReceipt(j,L,q); setTimeout(function(){ if(window.refresh)refresh(); },600); }
+      else { msgEl.textContent='✗ '+((j&&(j.error||j.message))||('HTTP '+r.status)); msgEl.style.color='#ff8a8a'; }
+    }catch(e){ msgEl.textContent='✗ network error — node unreachable.'; msgEl.style.color='#ff8a8a'; }
+    if(go)go.disabled=false;
+  };
+  function _swRow(l,v){ return '<div style="display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid rgba(33,212,253,.09)"><span style="font-family:\'JetBrains Mono\';font-size:10px;letter-spacing:1px;color:#5a93a8;text-transform:uppercase">'+l+'</span><span style="font-family:\'JetBrains Mono\';font-size:11px;color:#cfe9f2;overflow-wrap:anywhere;text-align:right">'+v+'</span></div>'; }
+  function swapShowReceipt(j,L,q){
+    var outAmt=(j.amount_out!=null?j.amount_out:Number(q.userShare));
+    document.getElementById('swRcAmt').textContent=fmt8(outAmt)+' '+L.symOut;
+    document.getElementById('swRcRows').innerHTML=
+      _swRow('pool', L.symIn+' → '+L.symOut)+
+      _swRow('lp fee', j.lp_fee!=null?fmt8(j.lp_fee):'—')+
+      _swRow('protocol fee', j.protocol_fee!=null?fmt8(j.protocol_fee):'—')+
+      _swRow('time', new Date().toLocaleString());
+    document.getElementById('swapForm').style.display='none';
+    document.getElementById('swapReceipt').style.display='flex';
+  }
+  window.swapReceiptDone=function(){
+    document.getElementById('swapReceipt').style.display='none';
+    document.getElementById('swapForm').style.display='flex';
+    document.getElementById('swapAmt').value='';
+    window.closeSwap();
+  };
+  document.getElementById('swapClose').addEventListener('click', window.closeSwap);
+  document.getElementById('swap-modal').addEventListener('click', function(e){ if(e.target===this) window.closeSwap(); });
+  window.addEventListener('keydown',function(e){ if(e.key==='Escape') window.closeSwap&&window.closeSwap(); });
 })();
 </script>
 

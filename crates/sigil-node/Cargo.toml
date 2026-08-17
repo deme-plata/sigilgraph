@@ -21,6 +21,9 @@ serde      = { workspace = true }
 serde_json = { workspace = true }
 blake3     = { workspace = true }
 hex        = { workspace = true }
+# chronos_send_throughput.rs: signs real SendBridge submissions with real
+# ed25519 keypairs (deterministic seeds — no rand_core feature needed here).
+ed25519-dalek = { version = "2.2" }
 anyhow     = { workspace = true }
 tokio      = { workspace = true }
 bincode    = "1"

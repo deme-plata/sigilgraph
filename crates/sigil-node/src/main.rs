@@ -752,6 +752,14 @@ fn run_start() -> Result<()> {
             .and_then(|v| v.trim().parse().ok()).unwrap_or(32_768);
         let mut dag_bodies: std::collections::HashMap<BlockHash, crate::block::Block> =
             std::collections::HashMap::new();
+        // v7.1.29: which SendBridge-pending tx hashes each of OUR OWN minted
+        // candidates carries, keyed by that candidate's own block hash — lets
+        // `dag_drain_apply` retire a pending send the instant its containing
+        // candidate is confirmed on the settled spine, and leave it untouched
+        // (still pending, still retried next tick) if that candidate orphans.
+        // Bounded the same way `dag_bodies` is; see `prune_mint_hash_tracking`.
+        let mut mint_hash_to_tx_hashes: std::collections::HashMap<BlockHash, Vec<[u8; 32]>> =
+            std::collections::HashMap::new();
         // v0 metrics: ordered-but-not-state-applied (off-spine / non-extending /
         // already-applied), refused-below-final, structural rejects, apply fails.
         let (mut dag_ord_skipped, mut dag_below_final, mut dag_rejected, mut dag_apply_failed) =
@@ -964,10 +972,22 @@ fn run_start() -> Result<()> {
                     // docs). Unlike the mempool pull, this drain is unconditional:
                     // a real send must never depend on the SIGIL_TXGEN load-gen
                     // flag being set.
+                    // v7.1.29: SNAPSHOT, not drain. This braid mints several competing
+                    // candidate blocks at the SAME height before settlement picks a
+                    // winner (measured live: 3 candidates at h=1109490 racing off the
+                    // same parent) — a destructive drain hands a pending send to
+                    // whichever candidate happens to be minting at that instant, and
+                    // if THAT candidate is the one that gets orphaned, the send is
+                    // gone forever with no retry, even though it was never rejected.
+                    // `snapshot_for_mint` instead re-embeds every still-pending send
+                    // into EVERY candidate until `SendBridge::confirm_applied` (called
+                    // only once a candidate is confirmed on the SETTLED spine, see
+                    // below) retires it — so it doesn't matter which candidate wins,
+                    // the send rides along on all of them until one actually lands.
                     let block_txs: Vec<SignedTx> = {
                         let mut v: Vec<SignedTx> =
                             if txgen > 0 { mempool.pull(txgen) } else { Vec::new() };
-                        v.extend(send_bridge.drain());
+                        v.extend(send_bridge.snapshot_for_mint());
                         v
                     };
                     // ONE-CHAIN: when the adaptive emission controller is live, IT
@@ -980,7 +1000,7 @@ fn run_start() -> Result<()> {
                     });
                     let topology_commitment = compute_topology_commitment(braid.as_ref(), mint_ref.height());
                     match mint_next_block(mint_ref, mp, &block_txs, reward_override, solve.as_ref(), topology_commitment) {
-                        Ok(block) => {
+                        Ok((block, minted_tx_hashes)) => {
                             let h = block.header.height;
                             let bhash = block.hash();
                             let parent = block.header.parent_hash;
@@ -1011,15 +1031,36 @@ fn run_start() -> Result<()> {
                                     let vh = view.hash;
                                     let _ = br.insert(view); // own block joins the DAG
                                     dag_store_body(&mut dag_bodies, dag_max_bodies, vh, body);
+                                    // Remember what THIS specific candidate carries, keyed by
+                                    // its own hash — dag_drain_apply looks this up ONLY for the
+                                    // candidate(s) that actually land on the settled spine, so
+                                    // an orphaned sibling's entry just goes stale (pruned below)
+                                    // and its sends stay pending for the next mint attempt.
+                                    if !minted_tx_hashes.is_empty() {
+                                        mint_hash_to_tx_hashes.insert(vh, minted_tx_hashes);
+                                    }
+                                    if mint_hash_to_tx_hashes.len() > MINT_HASH_TRACKING_CAP {
+                                        prune_mint_hash_tracking(&mut mint_hash_to_tx_hashes, &dag_bodies);
+                                    }
                                 }
                                 // the ONE settlement path — identical finalized order on every node
                                 let (a, s, f) = dag_drain_apply(br, &mut dag_bodies, &mut chain,
-                                    &mut |braw| { let _ = chain_log.append_bytes(braw); });
+                                    &mut |braw| { let _ = chain_log.append_bytes(braw); },
+                                    &send_bridge, &mut mint_hash_to_tx_hashes);
                                 applied += a; dag_ord_skipped += s; dag_apply_failed += f;
                                 true
                             } else {
                                 match chain.apply(block) {
-                                    Ok(_) => { let _ = chain_log.append_bytes(&bytes); true }
+                                    Ok(_) => {
+                                        let _ = chain_log.append_bytes(&bytes);
+                                        // Linear mode applies its own block synchronously, right
+                                        // here — no candidate-racing, so no lookup needed: these
+                                        // ARE the hashes that just landed.
+                                        if !minted_tx_hashes.is_empty() {
+                                            send_bridge.confirm_applied(&minted_tx_hashes);
+                                        }
+                                        true
+                                    }
                                     Err(e) => { eprintln!("⚠ producer self-apply H={} failed: {}", h, e); false }
                                 }
                             };
@@ -1470,7 +1511,8 @@ fn run_start() -> Result<()> {
                                     }
                                     let (a, s, f) = dag_drain_apply(
                                         br, &mut dag_bodies, &mut chain,
-                                        &mut |braw| { let _ = chain_log.append_bytes(braw); });
+                                        &mut |braw| { let _ = chain_log.append_bytes(braw); },
+                                        &send_bridge, &mut mint_hash_to_tx_hashes);
                                     applied += a;
                                     dag_ord_skipped += s;
                                     dag_apply_failed += f;
@@ -1746,7 +1788,8 @@ fn run_start() -> Result<()> {
                         }
                         let (a, s, f) = dag_drain_apply(
                             br, &mut dag_bodies, &mut chain,
-                            &mut |braw| { let _ = chain_log.append_bytes(braw); });
+                            &mut |braw| { let _ = chain_log.append_bytes(braw); },
+                            &send_bridge, &mut mint_hash_to_tx_hashes);
                         applied += a;
                         backfilled += a;
                         dag_ord_skipped += s;
@@ -2429,6 +2472,8 @@ fn dag_drain_apply(
     dag_bodies: &mut std::collections::HashMap<BlockHash, crate::block::Block>,
     chain: &mut ChainTip,
     persist: &mut dyn FnMut(&[u8]),
+    send_bridge: &sigil_api::send::SendBridge,
+    mint_hash_to_tx_hashes: &mut std::collections::HashMap<BlockHash, Vec<[u8; 32]>>,
 ) -> (u64, u64, u64) {
     // Cross-node divergence detector (opt-in, test meshes): log every
     // finalized emission with its sequence index. Two nodes' ⛓ streams must
@@ -2477,6 +2522,14 @@ fn dag_drain_apply(
             Ok(()) => {
                 persist(&braw);
                 applied += 1;
+                // THIS candidate — and no other same-height sibling — just landed on
+                // the settled spine. Retire exactly the sends it carried; anything
+                // still in SendBridge's pending map (including sends that rode along
+                // on an orphaned sibling of this same height) stays pending and rides
+                // the next mint attempt.
+                if let Some(hashes) = mint_hash_to_tx_hashes.remove(&oh) {
+                    send_bridge.confirm_applied(&hashes);
+                }
             }
             Err(e) => {
                 failed += 1;
@@ -2571,6 +2624,27 @@ fn dag_store_body(
     dag_bodies.insert(hash, block);
 }
 
+/// Bound on `mint_hash_to_tx_hashes` — same order of magnitude as `dag_bodies`'
+/// default cap (32,768). In practice this map stays tiny (only OUR OWN
+/// candidates that carried at least one pending send get an entry at all,
+/// and every entry is removed the moment its candidate is either confirmed
+/// or falls out of `dag_bodies`), so this cap is a backstop against a
+/// pathological run of never-confirmed candidates, not a normal-path limit.
+const MINT_HASH_TRACKING_CAP: usize = 32_768;
+
+/// Drop tracking entries for candidates `dag_bodies` no longer even holds —
+/// those candidates are long orphaned (evicted below the finalized window),
+/// so they will never be looked up by `dag_drain_apply` again. Their tx
+/// hashes are NOT lost: they were never removed from `SendBridge`'s pending
+/// map, so they simply keep riding along on every future mint attempt via
+/// `snapshot_for_mint` until one lands.
+fn prune_mint_hash_tracking(
+    mint_hash_to_tx_hashes: &mut std::collections::HashMap<BlockHash, Vec<[u8; 32]>>,
+    dag_bodies: &std::collections::HashMap<BlockHash, crate::block::Block>,
+) {
+    mint_hash_to_tx_hashes.retain(|h, _| dag_bodies.contains_key(h));
+}
+
 /// How many recent, already-committed blocks the QTFT topology commitment
 /// windows over. Bounded, per SIGIL_QTFT_TOPOLOGY_v0.md's "the tractable
 /// core uses a CHEAP invariant over a bounded window" design — a full-DAG
@@ -2623,7 +2697,7 @@ fn mint_next_block(
     reward_override: Option<u128>,
     solve: Option<&sigil_api::mining::AcceptedSolve>,
     topology_commitment: Option<[u8; 32]>,
-) -> Result<Block> {
+) -> Result<(Block, Vec<[u8; 32]>)> {
     let height = chain.height();
     let parent = chain.parent_hash();
     // P1 mining-onto-the-braid: when this block is minted for a verified
@@ -2716,7 +2790,15 @@ fn mint_next_block(
         producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
         topology_commitment,
     };
-    Ok(Block { header, transition, events: block_events })
+    // Hashes of the txs that actually made it into `transition` (a STRICT
+    // subset of the `txs` argument — build_block_body_for_shares silently
+    // skips anything that failed apply_tx/commit_state_transition, e.g.
+    // insufficient balance). The caller needs this list to know which
+    // SendBridge-pending sends to retire ONLY once THIS candidate is
+    // confirmed on the settled spine — not at mint time, when it's still
+    // just one of possibly several competing candidates at this height.
+    let included_tx_hashes: Vec<[u8; 32]> = included_txs.iter().map(|t| t.tx.hash()).collect();
+    Ok((Block { header, transition, events: block_events }, included_tx_hashes))
 }
 
 /// Build block 0 — credits [`DEMO_WALLET`] with [`DEMO_INITIAL_BALANCE`]
@@ -3233,7 +3315,7 @@ mod tests {
             shares,
         };
         let reward = sigil_emission::block_reward(chain.height());
-        let block = mint_next_block(&chain, Vec::new(), &[], None, Some(&solve), None)
+        let (block, _included_tx_hashes) = mint_next_block(&chain, Vec::new(), &[], None, Some(&solve), None)
             .expect("mint with a solve must succeed");
         chain.apply(block).expect("minted block applies cleanly");
 
@@ -3378,7 +3460,7 @@ mod dag_wiring_tests {
         let mut blocks = vec![g.clone()];
         builder.apply(g).expect("apply genesis");
         for _ in 0..2 {
-            let b = mint_next_block(&builder, vec![], &[], None, None, None).expect("mint");
+            let (b, _included_tx_hashes) = mint_next_block(&builder, vec![], &[], None, None, None).expect("mint");
             blocks.push(b.clone());
             builder.apply(b).expect("apply");
         }
@@ -3388,6 +3470,8 @@ mod dag_wiring_tests {
         let mut chain = ChainTip::new();
         let mut braid = Braid::new(BraidConfig { final_depth: 0, ..BraidConfig::default() });
         let mut dag_bodies = std::collections::HashMap::new();
+        let mut mint_hash_to_tx_hashes = std::collections::HashMap::new();
+        let send_bridge = sigil_api::send::SendBridge::new();
         let mut persisted: Vec<Vec<u8>> = Vec::new();
         let (mut applied, mut skipped) = (0u64, 0u64);
         // Worst-case arrival: children before parents (park → cascade unpark).
@@ -3400,7 +3484,7 @@ mod dag_wiring_tests {
             dag_store_body(&mut dag_bodies, 32, b.hash(), b.clone());
             let (a, s, f) = dag_drain_apply(&mut braid, &mut dag_bodies, &mut chain, &mut |braw| {
                 persisted.push(braw.to_vec());
-            });
+            }, &send_bridge, &mut mint_hash_to_tx_hashes);
             applied += a;
             skipped += s;
             assert_eq!(f, 0, "no apply failures through the real chokepoint");

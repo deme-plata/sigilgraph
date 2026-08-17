@@ -9,5 +9,12 @@
 //! bin `use sigil_node::store::BlockStore`.
 
 pub mod store;
+/// Also declared `mod coinbase;` in `main.rs` — compiles as two independent
+/// copies (bin crate + lib crate), same source file. Safe because `coinbase.rs`
+/// has zero `crate::`-relative deps on anything main.rs-private (checked: only
+/// imports external crates). Exposed here so `chronos_send_throughput` (and any
+/// future chronos bin) can drive real blocks through the real money chokepoint
+/// without duplicating `build_block_body_for_shares`.
+pub mod coinbase;
 
 pub use store::{BlockStore, PrunedHeader, RetentionMode};

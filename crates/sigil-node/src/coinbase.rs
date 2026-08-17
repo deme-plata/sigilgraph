@@ -223,13 +223,28 @@ pub fn build_block_body_for_shares(
     }
 
     for tx in txs {
-        let Ok(res) = sigil_tx::apply_tx(&work, tx) else { continue };
-        if sigil_state::commit_state_transition(
+        let res = match sigil_tx::apply_tx(&work, tx) {
+            Ok(res) => res,
+            Err(e) => {
+                // Fail LOUD, not silent: a dropped tx used to vanish with zero trace,
+                // which is exactly how the send-endpoint's "queued but never lands"
+                // symptom went undiagnosed. tx.hash() is cheap and lets an operator
+                // correlate this against the txid their wallet displayed.
+                eprintln!("✗ tx dropped at h={height} (apply_tx: {e:?}) hash={}", hex::encode(tx.tx.hash()));
+                continue;
+            }
+        };
+        match sigil_state::commit_state_transition(
             &mut work, &StateTransition { at_height: height, mutations: res.mutations.clone() }, height,
-        ).is_ok() {
-            mutations.extend(res.mutations);
-            events.extend(res.events);
-            included.push(tx.clone());
+        ) {
+            Ok(_) => {
+                mutations.extend(res.mutations);
+                events.extend(res.events);
+                included.push(tx.clone());
+            }
+            Err(e) => {
+                eprintln!("✗ tx dropped at h={height} (commit_state_transition: {e:?}) hash={}", hex::encode(tx.tx.hash()));
+            }
         }
     }
 

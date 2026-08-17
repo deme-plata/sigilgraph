@@ -319,7 +319,7 @@ mod tests {
             // 5th arg = `solve: Option<&AcceptedSolve>` — added by 44ae98e
             // (mining on the braid). `None` = mint without a PoW solve, which is
             // what this snapshot/replay-equivalence test wants.
-            let b = crate::mint_next_block(&chain, vec![], &[], None, None, None).expect("mint");
+            let (b, _included_tx_hashes) = crate::mint_next_block(&chain, vec![], &[], None, None, None).expect("mint");
             log.append(&b).unwrap();
             chain.apply(b).expect("block applies");
             // snapshot at H=400 (tip header height 400, 401 blocks applied)

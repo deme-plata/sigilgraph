@@ -14,29 +14,63 @@
 //! `window.sigilSign` already uses (`gui/sigil-wallet-tron-embedded.html`) —
 //! and `submit` verifies exactly that.
 //!
-//! Queueing (rather than routing through `Mempool::ingest`, which insists on
-//! a `SigilTx::hash()` signature) also means a send lands in the VERY NEXT
-//! block the producer mints — one mutex-guarded drain per tick, no
-//! re-verification, no mempool-wide lock contention. That's the whole
-//! "highest performance" ask: the fastest a send can possibly land is the
-//! producer's own block cadence, and this puts it exactly there.
+//! ## Why this is a confirm-on-settle pending pool, not a pop-once queue
+//!
+//! SIGIL's braid mints SEVERAL competing candidate blocks at the same height
+//! before settlement (`dag_drain_apply`, in `sigil-node`) picks a winner —
+//! measured live: three candidates at one height, racing off the same
+//! parent, only one of which became part of the settled spine. A `.drain()`
+//! that removes a pending send the instant it's handed to ONE candidate
+//! loses that send forever the moment that specific candidate is the one
+//! that orphans — even though nothing ever rejected it. (This is exactly
+//! what happened to the first real send tested against this endpoint: a
+//! real txid came back, the tx was genuinely computed and embedded in a
+//! real block, and it still never landed, because that block wasn't the one
+//! the DAG kept.)
+//!
+//! So `snapshot_for_mint` is non-destructive: every still-pending send rides
+//! along on EVERY candidate the producer mints, at every height, until
+//! `confirm_applied` retires it — which the caller (`sigil-node`) invokes
+//! ONLY for the tx hashes actually carried by whichever specific candidate
+//! is confirmed on the settled spine, never for an orphaned sibling. A send
+//! that will never succeed (insufficient balance forever, e.g.) doesn't
+//! retry forever either — `MAX_ATTEMPTS`/`MAX_AGE` give up and log loudly.
+//!
+//! This is also the fast path for real throughput: every pending send is
+//! embedded in EVERY candidate at the current tick (tens of candidates/sec
+//! at this braid's cadence), so the expected time-to-land is one settled
+//! block, not one lucky draw — no added latency from retry backoff, no
+//! round-trip HTTP re-submission, just riding the producer's own cadence.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sigil_header::{PubKeyBytes, SigScheme, SignatureBytes};
 use sigil_state::{WalletId, NATIVE};
 use sigil_tx::{SigilTx, SignedTx};
 
-struct Queued {
+/// Give up on a pending send after this many mint attempts (a fresh
+/// candidate is minted roughly every producer tick, tens of ms — this is a
+/// generous multi-second budget, not a hair-trigger) — OR `MAX_AGE`,
+/// whichever comes first. A send that can never land (e.g. balance that
+/// will never cover it) must not retry forever.
+const MAX_ATTEMPTS: u32 = 2_000;
+const MAX_AGE: Duration = Duration::from_secs(60);
+
+struct Pending {
     tx: SigilTx,
+    attempts: u32,
+    first_seen: Instant,
 }
 
-/// Authenticated, not-yet-minted sends, plus the per-wallet replay guard.
-#[derive(Default)]
+/// Authenticated, not-yet-confirmed sends, plus the per-wallet replay guard.
+/// Keyed by `SigilTx::hash()` — content-addressed, so resubmitting the exact
+/// same (from,to,amount,token) while it's already pending is a safe no-op
+/// rather than a duplicate entry.
 pub struct SendBridge {
-    queue: Mutex<VecDeque<Queued>>,
+    pending: Mutex<HashMap<[u8; 32], Pending>>,
     /// Last-accepted `req_nonce` per sender. The wallet sends `Date.now()`
     /// (milliseconds) as the nonce, so "strictly greater than last accepted"
     /// is both the replay guard and a free per-wallet ordering check — no
@@ -44,7 +78,13 @@ pub struct SendBridge {
     nonce_watermark: Mutex<HashMap<WalletId, u64>>,
 }
 
-/// Why a submitted send was rejected before ever reaching the queue.
+impl Default for SendBridge {
+    fn default() -> Self {
+        Self { pending: Mutex::new(HashMap::new()), nonce_watermark: Mutex::new(HashMap::new()) }
+    }
+}
+
+/// Why a submitted send was rejected before ever reaching the pending pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendError {
     BadFromAddress,
@@ -80,13 +120,25 @@ fn hex32(s: &str) -> Option<WalletId> {
     Some(out)
 }
 
+fn to_signed(tx: SigilTx) -> SignedTx {
+    let payer = tx.fee_payer();
+    SignedTx {
+        tx,
+        from_pubkey: payer,
+        nonce: 0,
+        sig_scheme: SigScheme::Ed25519Hot,
+        sig: SignatureBytes(vec![0u8; SigScheme::Ed25519Hot.expected_sig_len()]),
+        pubkey: PubKeyBytes(Vec::new()),
+    }
+}
+
 impl SendBridge {
     pub fn new() -> Self { Self::default() }
 
-    /// Authenticate a wallet's send request and, on success, queue it for
-    /// the next block. Returns the `SigilTx` hash (the block-level tx id the
+    /// Authenticate a wallet's send request and, on success, add it to the
+    /// pending pool. Returns the `SigilTx` hash (the block-level tx id the
     /// wallet's receipt/status views key on) so the caller can ack it back
-    /// immediately — the tx is queued, not yet mined, when this returns.
+    /// immediately — the tx is pending, not yet settled, when this returns.
     ///
     /// `from_hex`/`to_hex` are re-used VERBATIM (not re-encoded from the
     /// parsed bytes) when rebuilding the signed message: casing must match
@@ -136,37 +188,56 @@ impl SendBridge {
 
         let tx = SigilTx::Send { from, to, amount, token: NATIVE, fee: 0 };
         let tx_hash = tx.hash();
-        self.queue.lock().unwrap().push_back(Queued { tx });
+        self.pending.lock().unwrap().entry(tx_hash).or_insert_with(|| Pending {
+            tx,
+            attempts: 0,
+            first_seen: Instant::now(),
+        });
         Ok(tx_hash)
     }
 
-    /// Drain everything queued — called once per producer tick, mirroring
-    /// `MiningBridge::take_solve`. Each becomes a `SignedTx` with a
-    /// placeholder Ed25519Hot signature (`apply_tx` only calls `precheck`,
-    /// which checks sig LENGTH and the `from_pubkey == fee_payer()` binding —
-    /// both satisfied here — never the actual signature; real authentication
-    /// already happened in `submit`).
-    pub fn drain(&self) -> Vec<SignedTx> {
-        self.queue
-            .lock()
-            .unwrap()
-            .drain(..)
-            .map(|q| {
-                let payer = q.tx.fee_payer();
-                SignedTx {
-                    tx: q.tx,
-                    from_pubkey: payer,
-                    nonce: 0,
-                    sig_scheme: SigScheme::Ed25519Hot,
-                    sig: SignatureBytes(vec![0u8; SigScheme::Ed25519Hot.expected_sig_len()]),
-                    pubkey: PubKeyBytes(Vec::new()),
-                }
-            })
-            .collect()
+    /// Snapshot every still-pending send for the producer's CURRENT mint
+    /// attempt — called once per candidate block, NOT once per settled
+    /// height (see module docs for why this must not be destructive).
+    /// Each becomes a `SignedTx` with a placeholder Ed25519Hot signature
+    /// (`apply_tx` only calls `precheck`, which checks sig LENGTH and the
+    /// `from_pubkey == fee_payer()` binding — both satisfied here — never
+    /// the actual signature; real authentication already happened in
+    /// `submit`). Entries that have exhausted their retry budget are
+    /// dropped here (and logged) rather than embedded again.
+    pub fn snapshot_for_mint(&self) -> Vec<SignedTx> {
+        let mut guard = self.pending.lock().unwrap();
+        let mut out = Vec::with_capacity(guard.len());
+        guard.retain(|hash, p| {
+            if p.attempts >= MAX_ATTEMPTS || p.first_seen.elapsed() >= MAX_AGE {
+                eprintln!(
+                    "✗ send gave up after {} attempts / {:.1}s (still not landed — likely stuck on \
+                     insufficient balance) hash={}",
+                    p.attempts, p.first_seen.elapsed().as_secs_f64(), hex::encode(hash)
+                );
+                return false;
+            }
+            p.attempts += 1;
+            out.push(to_signed(p.tx.clone()));
+            true
+        });
+        out
+    }
+
+    /// Retire the given tx hashes — called by the producer ONLY for hashes
+    /// carried by a candidate that's been confirmed on the settled spine.
+    /// Anything not in `hashes` (including sends that rode along on an
+    /// orphaned sibling of the same height) stays pending for the next tick.
+    pub fn confirm_applied(&self, hashes: &[[u8; 32]]) {
+        if hashes.is_empty() { return; }
+        let mut guard = self.pending.lock().unwrap();
+        for h in hashes {
+            guard.remove(h);
+        }
     }
 
     pub fn pending_len(&self) -> usize {
-        self.queue.lock().unwrap().len()
+        self.pending.lock().unwrap().len()
     }
 }
 
@@ -187,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn a_correctly_signed_send_is_accepted_and_queued() {
+    fn a_correctly_signed_send_is_accepted_and_pending() {
         let (sk, from) = signer();
         let from_hex = hex::encode(from);
         let to_hex = "22".repeat(32);
@@ -197,11 +268,11 @@ mod tests {
         let hash = bridge.submit(&from_hex, &to_hex, 1_000, "SIGIL", &sig, 1).unwrap();
         assert_eq!(bridge.pending_len(), 1);
 
-        let drained = bridge.drain();
-        assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].tx.hash(), hash);
-        assert!(drained[0].precheck().is_ok(), "placeholder-signed tx must pass precheck");
-        match &drained[0].tx {
+        let snap = bridge.snapshot_for_mint();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].tx.hash(), hash);
+        assert!(snap[0].precheck().is_ok(), "placeholder-signed tx must pass precheck");
+        match &snap[0].tx {
             SigilTx::Send { from: f, to: t, amount, token, fee } => {
                 assert_eq!(*f, from);
                 assert_eq!(hex::encode(t), to_hex);
@@ -211,7 +282,70 @@ mod tests {
             }
             other => panic!("expected Send, got {other:?}"),
         }
-        assert_eq!(bridge.pending_len(), 0, "drain must empty the queue");
+        // NOT destructive: still pending after a snapshot.
+        assert_eq!(bridge.pending_len(), 1);
+    }
+
+    #[test]
+    fn snapshot_keeps_offering_a_send_across_many_mint_attempts() {
+        let (sk, from) = signer();
+        let from_hex = hex::encode(from);
+        let to_hex = "88".repeat(32);
+        let sig = sign_send(&sk, &from_hex, &to_hex, 1, 1);
+        let bridge = SendBridge::new();
+        let hash = bridge.submit(&from_hex, &to_hex, 1, "SIGIL", &sig, 1).unwrap();
+
+        // Simulates several competing candidates minting before ANY of them
+        // gets confirmed — the exact scenario that lost the first real send.
+        for _ in 0..5 {
+            let snap = bridge.snapshot_for_mint();
+            assert_eq!(snap.len(), 1, "must keep being offered until confirmed");
+            assert_eq!(snap[0].tx.hash(), hash);
+        }
+        assert_eq!(bridge.pending_len(), 1, "still pending — nothing has confirmed it yet");
+    }
+
+    #[test]
+    fn confirm_applied_retires_only_the_named_hashes() {
+        let (sk1, from1) = signer();
+        let (sk2, from2) = signer();
+        let to_hex = "99".repeat(32);
+        let from1_hex = hex::encode(from1);
+        let from2_hex = hex::encode(from2);
+        let sig1 = sign_send(&sk1, &from1_hex, &to_hex, 10, 1);
+        let sig2 = sign_send(&sk2, &from2_hex, &to_hex, 20, 1);
+
+        let bridge = SendBridge::new();
+        let h1 = bridge.submit(&from1_hex, &to_hex, 10, "SIGIL", &sig1, 1).unwrap();
+        let h2 = bridge.submit(&from2_hex, &to_hex, 20, "SIGIL", &sig2, 1).unwrap();
+        assert_eq!(bridge.pending_len(), 2);
+
+        // Simulates: candidate carrying h1 got orphaned (never confirmed);
+        // a LATER candidate carrying only h2 is the one that actually landed.
+        bridge.confirm_applied(&[h2]);
+        assert_eq!(bridge.pending_len(), 1, "only h2 should be retired");
+
+        let snap = bridge.snapshot_for_mint();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].tx.hash(), h1, "h1 must still be pending and still offered");
+    }
+
+    #[test]
+    fn a_send_that_never_lands_gives_up_after_the_attempt_budget() {
+        let (sk, from) = signer();
+        let from_hex = hex::encode(from);
+        let to_hex = "aa".repeat(32);
+        let sig = sign_send(&sk, &from_hex, &to_hex, 1, 1);
+        let bridge = SendBridge::new();
+        bridge.submit(&from_hex, &to_hex, 1, "SIGIL", &sig, 1).unwrap();
+
+        // The entry is legitimately OFFERED MAX_ATTEMPTS times (attempts 0..MAX_ATTEMPTS-1
+        // all pass the `>=` check before incrementing) — it's the (MAX_ATTEMPTS+1)th call
+        // that finally sees attempts==MAX_ATTEMPTS and gives up.
+        for _ in 0..=MAX_ATTEMPTS {
+            bridge.snapshot_for_mint();
+        }
+        assert_eq!(bridge.pending_len(), 0, "must give up, not retry forever");
     }
 
     #[test]
@@ -273,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_amount_is_rejected_before_touching_the_queue() {
+    fn zero_amount_is_rejected_before_touching_the_pending_pool() {
         let (sk, from) = signer();
         let from_hex = hex::encode(from);
         let to_hex = "66".repeat(32);

@@ -135,6 +135,66 @@ pub(crate) fn draw_welcome_modal(f: &mut Frame, area: Rect) {
     );
 }
 
+/// v7.1.28: live WAL-replay progress while the block store opens — a floating overlay
+/// (same pattern as the welcome modal / rune band above) so a large archive shows REAL
+/// movement instead of the old static "still opening (compaction) — press again" toast,
+/// which looked identical whether the open was 1% or 99% done. Draws only while
+/// `app.open_progress` reports work actually in flight (`total > 0` and not yet
+/// finished) — a fresh/small store with no WAL to replay opens instantly and this never
+/// flashes at all.
+pub(crate) fn draw_store_open_overlay(f: &mut Frame, app: &App, area: Rect) {
+    let (consumed, total, finished) = app.open_progress.snapshot();
+    if finished || total == 0 {
+        return;
+    }
+    let pct = ((consumed as f64 / total as f64) * 100.0).clamp(0.0, 100.0);
+    let w: u16 = 56.min(area.width.saturating_sub(2));
+    let h: u16 = 5.min(area.height.saturating_sub(2));
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height.saturating_sub(h) / 2;
+    let modal = Rect { x, y, width: w, height: h };
+    f.render_widget(Clear, modal); // punch a hole over the dashboard, same as the welcome modal
+
+    let card = card_block(" \u{23f3} OPENING BLOCK STORE", C_NEON_GOLD)
+        .border_style(Style::default().fg(C_NEON_GOLD))
+        .style(Style::default().bg(C_BG));
+    let inner = card.inner(modal);
+    f.render_widget(card, modal);
+
+    let [label_area, gauge_area, hint_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            sa(&format!(
+                "replaying write-ahead log \u{2014} {} / {}",
+                human_bytes(consumed),
+                human_bytes(total)
+            )),
+            Style::default().fg(C_DIM),
+        ))),
+        label_area,
+    );
+    f.render_widget(
+        Gauge::default()
+            .gauge_style(Style::default().fg(C_NEON_GOLD).bg(C_BG))
+            .ratio(pct / 100.0)
+            .label(format!("{pct:.0}%")),
+        gauge_area,
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            sa("large archives take real time \u{2014} the mesh is already dialing in the background"),
+            Style::default().fg(C_DIM),
+        ))),
+        hint_area,
+    );
+}
+
 /// The original node dashboard, now the [1] Node tab body.
 pub(crate) fn draw_node_body(f: &mut Frame, app: &App, body_area: ratatui::layout::Rect) {
     let body_h = Layout::horizontal([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])

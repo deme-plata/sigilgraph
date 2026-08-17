@@ -31,6 +31,9 @@ use sigil_tx::SignedTx;
 pub mod mining;
 use mining::{MiningBridge, SubmitOutcome};
 
+pub mod send;
+use send::SendBridge;
+
 /// Shared braid state the API reads/writes. `state` is published by the producer
 /// after each block-apply (a consistent read snapshot); `mempool` is the SAME
 /// `Arc<MempoolBackend>` the producer pulls txs from when it mints the next
@@ -44,13 +47,16 @@ pub struct AppState {
     pub mempool: Arc<MempoolBackend>,
     pub state: Arc<RwLock<SigilState>>,
     pub mining: Arc<MiningBridge>,
+    /// The wallet-authenticated send queue — see `send` module docs. The
+    /// producer drains it once per tick, same shape as `mining`.
+    pub send: Arc<SendBridge>,
 }
 
 impl AppState {
     /// Build the shared state from the producer's mempool + state handles, with
     /// a fresh mining bridge.
     pub fn new(mempool: Arc<MempoolBackend>, state: Arc<RwLock<SigilState>>) -> Self {
-        Self { mempool, state, mining: Arc::new(MiningBridge::new()) }
+        Self { mempool, state, mining: Arc::new(MiningBridge::new()), send: Arc::new(SendBridge::new()) }
     }
 }
 
@@ -119,6 +125,26 @@ pub struct SubmitResponse {
     pub tx_hash: String,
     pub accepted: bool,
     pub note: String,
+}
+
+/// Body for `POST /v1/send` — the wallet's lightweight signed-send request
+/// (`gui/sigil-wallet-tron-embedded.html`'s `doSend`). NOT a `SignedTx`: the
+/// wallet signs a stable RPC message (see `send` module docs), not
+/// `SigilTx::hash()`, so this is its own shape, verified by `SendBridge`.
+#[derive(Debug, Deserialize)]
+pub struct SendRequest {
+    /// 64-hex sender address (== the sender's raw Ed25519 pubkey bytes).
+    pub from: String,
+    /// 64-hex recipient address.
+    pub to: String,
+    /// Amount in base units (8 decimals).
+    pub amount: u128,
+    /// Must be `"SIGIL"` — only the native token is accepted on this route.
+    pub token: String,
+    /// 128-hex Ed25519 signature over the canonical RPC message.
+    pub sig: String,
+    /// Client-chosen strictly-increasing nonce (the wallet uses `Date.now()`).
+    pub req_nonce: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -207,6 +233,35 @@ pub async fn tx_status(
         tx_hash: hash,
         status: if in_pool { "mempool".into() } else { "unknown".into() },
     })
+}
+
+/// The wallet-friendly signed-send endpoint. Deliberately returns a FLAT
+/// JSON body (`{ok,txid,height,ts_ms}` / `{ok,error}`), not the generic
+/// `ApiResponse<T>` envelope (whose payload nests under `.data`) — the
+/// wallet's `doSend`/`showReceipt` read `j.txid`/`j.height`/`j.ts_ms`/
+/// `j.error` directly off the top-level response object.
+///
+/// Authentication + queueing happen in `SendBridge::submit` (see its docs
+/// for why this isn't routed through `Mempool::ingest`/`SignedTx::
+/// verify_signature`). Height is always `null` here: this handler returns
+/// the instant a send is authenticated and queued, before the producer has
+/// minted the block that includes it — same "accepted, not yet final"
+/// semantics `submit_transaction`'s mempool-ingest already has.
+#[flux_api_macros::api(POST, "/v1/send", summary = "Wallet-signed native SIGIL send (verify + queue for the next block)")]
+pub async fn send_handler(
+    State(st): State<AppState>,
+    Json(req): Json<SendRequest>,
+) -> Json<serde_json::Value> {
+    match st.send.submit(&req.from, &req.to, req.amount, &req.token, &req.sig, req.req_nonce) {
+        Ok(tx_hash) => Json(serde_json::json!({
+            "ok": true,
+            "txid": hex::encode(tx_hash),
+            "height": null,
+            "ts_ms": now_ms(),
+            "note": "queued for the next braid block",
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
 }
 
 // ── mining on the braid ─────────────────────────────────────────────────────
@@ -306,6 +361,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/supply", get(supply))
         .route("/v1/transactions", post(submit_transaction))
         .route("/v1/transactions/:hash", get(tx_status))
+        .route("/v1/send", post(send_handler))
         .route("/v1/mining/challenge", get(mining_challenge))
         .route("/v1/mining/submit", post(mining_submit))
         .route("/v1/mining/miners", get(mining_miners))
@@ -331,6 +387,12 @@ pub fn router(state: AppState) -> Router {
         // larger follow-up work, not done here.
         .route("/api/v1/balance", get(balance))
         .route("/api/v1/supply", get(supply))
+        // The wallet's `doSend` posts here directly (gui/sigil-wallet-tron-
+        // embedded.html) — this is the fix for the "HTTP 200 send feature
+        // doesn't work" report: the route didn't exist before, so every send
+        // 404'd, and serve.rs's proxy (see its own fix) was masking that 404
+        // as a fake "200 OK" with an unparseable body.
+        .route("/api/v1/send", post(send_handler))
         .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024))
         .layer(tower_http::timeout::TimeoutLayer::new(Duration::from_secs(30)))
         .layer(CorsLayer::permissive())

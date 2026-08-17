@@ -620,6 +620,12 @@ fn run_start() -> Result<()> {
         // inert without a producer); the API exposes it, and `SIGIL_MINING_GATED=1`
         // makes block production wait on real work.
         let mining_bridge = Arc::new(sigil_api::mining::MiningBridge::new());
+        // Wallet-authenticated send queue — the producer drains it into every
+        // block's tx set unconditionally (see the `block_txs` build below),
+        // same "always constructed, inert without traffic" shape as
+        // `mining_bridge`. See `sigil_api::send` module docs for why this is
+        // a bridge instead of routing through `Mempool::ingest`.
+        let send_bridge = Arc::new(sigil_api::send::SendBridge::new());
         let money_state: Option<Arc<std::sync::RwLock<SigilState>>> =
             std::env::var("SIGIL_MONEY_API").ok().filter(|s| !s.is_empty()).map(|addr| {
                 let shared = Arc::new(std::sync::RwLock::new(chain.state_snapshot()));
@@ -627,6 +633,7 @@ fn run_start() -> Result<()> {
                     mempool: Arc::clone(&mempool),
                     state: Arc::clone(&shared),
                     mining: Arc::clone(&mining_bridge),
+                    send: Arc::clone(&send_bridge),
                 };
                 tokio::spawn(async move {
                     if let Err(e) = sigil_api::serve(&addr, app).await {
@@ -951,9 +958,18 @@ fn run_start() -> Result<()> {
                             }
                         })
                     };
-                    // pull verify-once txs (already verified at mempool ingest)
-                    let block_txs: Vec<SignedTx> =
-                        if txgen > 0 { mempool.pull(txgen) } else { Vec::new() };
+                    // pull verify-once txs (already verified at mempool ingest),
+                    // plus every wallet-authenticated send queued since the last
+                    // tick (verified in `SendBridge::submit`, not here — see its
+                    // docs). Unlike the mempool pull, this drain is unconditional:
+                    // a real send must never depend on the SIGIL_TXGEN load-gen
+                    // flag being set.
+                    let block_txs: Vec<SignedTx> = {
+                        let mut v: Vec<SignedTx> =
+                            if txgen > 0 { mempool.pull(txgen) } else { Vec::new() };
+                        v.extend(send_bridge.drain());
+                        v
+                    };
                     // ONE-CHAIN: when the adaptive emission controller is live, IT
                     // computes the reward (time-based + PID + rate) and we bake the
                     // exact amount into the coinbase; else the pure height schedule.

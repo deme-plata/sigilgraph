@@ -256,7 +256,7 @@ fn serve_file(dir: &PathBuf, safe: &str) -> (&'static str, Vec<u8>, &'static str
 /// session, sigil-api/src/lib.rs) so this port actually serves what the wallet
 /// asks for now — status/recent/search/send are NOT yet ported (separate,
 /// larger follow-up: sigil-api has no transaction-history indexing yet).
-fn proxy_api(method: &str, path_and_query: &str, req_body: &str) -> (&'static str, Vec<u8>, &'static str) {
+fn proxy_api(method: &str, path_and_query: &str, req_body: &str) -> (String, Vec<u8>, &'static str) {
     let node = std::env::var("SIGIL_NODE_URL")
         .unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:18181".into());
     let hostport = node
@@ -272,7 +272,7 @@ fn proxy_api(method: &str, path_and_query: &str, req_body: &str) -> (&'static st
         Ok(s) => s,
         Err(e) => {
             return (
-                "502 Bad Gateway",
+                "502 Bad Gateway".to_string(),
                 format!("{{\"error\":\"node unreachable: {e}\"}}").into_bytes(),
                 "application/json",
             )
@@ -288,19 +288,39 @@ fn proxy_api(method: &str, path_and_query: &str, req_body: &str) -> (&'static st
     );
     if stream.write_all(req.as_bytes()).is_err() {
         return (
-            "502 Bad Gateway",
+            "502 Bad Gateway".to_string(),
             b"{\"error\":\"node write failed\"}".to_vec(),
             "application/json",
         );
     }
     let mut raw = Vec::new();
     let _ = stream.read_to_end(&mut raw);
+    let header_end = raw.windows(4).position(|w| w == b"\r\n\r\n");
+    // Relay the UPSTREAM's real status line ("200 OK", "404 Not Found", ...)
+    // instead of hardcoding success. Previously this always returned "200 OK"
+    // regardless of what the node actually answered, so a real 404 (e.g. a
+    // route that didn't exist yet, like /api/v1/send before it was added)
+    // reached the browser as a fake 200 with an unparseable body — the wallet
+    // saw `HTTP 200` in its error banner while the request had actually
+    // failed. Parsed from the head, not assumed.
+    let status = {
+        let head = match header_end {
+            Some(i) => &raw[..i],
+            None => raw.as_slice(),
+        };
+        String::from_utf8_lossy(head)
+            .lines()
+            .next()
+            .and_then(|line| line.splitn(2, ' ').nth(1))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "502 Bad Gateway".to_string())
+    };
     // split off the HTTP headers; relay the body (sigil-rpcd sends Content-Length + close)
-    let body = match raw.windows(4).position(|w| w == b"\r\n\r\n") {
+    let body = match header_end {
         Some(i) => raw[i + 4..].to_vec(),
         None => raw,
     };
-    ("200 OK", body, "application/json")
+    (status, body, "application/json")
 }
 
 fn content_type(path: &str) -> &'static str {

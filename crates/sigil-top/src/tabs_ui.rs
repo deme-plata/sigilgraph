@@ -260,6 +260,11 @@ pub(crate) fn draw_ui(f: &mut Frame, app: &App) {
     if app.welcome_until.map(|u| Instant::now() < u).unwrap_or(false) {
         draw_welcome_modal(f, area);
     }
+
+    // v7.1.28: live block-store-open progress — floats above everything else, same as
+    // the welcome modal, but self-gates (draw_store_open_overlay returns immediately
+    // once the open finishes or if there was never a WAL to replay).
+    draw_store_open_overlay(f, app, area);
 }
 
 pub(crate) fn render_fleet_card(app: &App) -> Paragraph<'static> {

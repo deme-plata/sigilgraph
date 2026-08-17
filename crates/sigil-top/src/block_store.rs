@@ -10,6 +10,48 @@ use serde::{Deserialize, Serialize};
 use sigil_header::{SigilBlockHeaderV0, BlockHash};
 use std::path::PathBuf;
 
+/// Live progress for a store that's still opening. WAL replay is the one open-time
+/// cost that actually scales with store size (see `flux_db::Database::open_with_progress`
+/// — measured ~330 MB/s, so a multi-GB WAL genuinely takes real seconds, not a stall).
+/// `total == 0` means "not started yet / no WAL to replay" — render that as indeterminate,
+/// not as "0 of 0 bytes done". Shareable: created before the opener thread spawns, polled
+/// by the TUI's render loop every frame regardless of keypresses.
+#[derive(Default)]
+pub struct OpenProgress {
+    consumed: std::sync::atomic::AtomicU64,
+    total: std::sync::atomic::AtomicU64,
+    finished: std::sync::atomic::AtomicBool,
+}
+
+impl OpenProgress {
+    pub fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::default())
+    }
+
+    /// `(bytes_consumed, total_bytes, finished)`. `finished` flips true once the WAL
+    /// replay (if any) completes — a caller showing a gauge should treat `finished`
+    /// as authoritative over a stale `consumed == total` read (the store may still be
+    /// doing fast, non-progress-reported work like the SST-listing pass after replay).
+    pub fn snapshot(&self) -> (u64, u64, bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (self.consumed.load(Relaxed), self.total.load(Relaxed), self.finished.load(Relaxed))
+    }
+
+    fn set(&self, consumed: u64, total: u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.consumed.store(consumed, Relaxed);
+        self.total.store(total, Relaxed);
+    }
+
+    /// `pub` (not `pub(crate)`): `open_store_with_fallbacks` (sigil-top's main.rs) calls
+    /// this directly on paths that never touch `open_with_timeout_and_progress` at all —
+    /// the light-boot/oversized-store shortcut opens a fresh volatile store near-instantly
+    /// and would otherwise leave `finished` permanently false, stranding the UI's gauge.
+    pub fn mark_finished(&self) {
+        self.finished.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredBlock {
     pub header: SigilBlockHeaderV0,
@@ -130,13 +172,13 @@ impl BlockStore {
     /// instead of hanging on a multi-GB scan. Under `cfg!(test)` migration is inline
     /// so tests observe `best_height` synchronously.
     pub fn open(path: &str) -> Result<Self, String> {
-        Self::open_inner(path, false)
+        Self::open_inner(path, false, None)
     }
 
     /// Open for headless tooling (verify / full-sync / explorer serve) that needs
     /// `best_height` + the height index on return: the migration runs INLINE.
     pub fn open_blocking(path: &str) -> Result<Self, String> {
-        Self::open_inner(path, true)
+        Self::open_inner(path, true, None)
     }
 
     /// v6: open with a WATCHDOG TIMEOUT. A foreign / older on-disk format (e.g. a
@@ -150,12 +192,27 @@ impl BlockStore {
     /// store). `flux_db::Database` is already `Send` (it is moved into the background
     /// migrate thread), so `BlockStore` crosses the channel cleanly.
     pub fn open_with_timeout(path: &str, secs: u64) -> Result<Self, String> {
+        Self::open_with_timeout_and_progress(path, secs, None)
+    }
+
+    /// Same as [`Self::open_with_timeout`], but reports live WAL-replay progress into
+    /// `progress` (if given) while the open runs on its watchdog thread — the caller
+    /// can poll `progress.snapshot()` from a render loop without waiting on `rx`.
+    pub fn open_with_timeout_and_progress(
+        path: &str,
+        secs: u64,
+        progress: Option<std::sync::Arc<OpenProgress>>,
+    ) -> Result<Self, String> {
         let p = path.to_string();
         let (tx, rx) = std::sync::mpsc::channel::<Result<Self, String>>();
         std::thread::Builder::new()
             .name("sigil-blockstore-open".into())
             .spawn(move || {
-                let _ = tx.send(Self::open(&p));
+                let r = Self::open_inner(&p, false, progress.as_ref());
+                if let Some(pr) = &progress {
+                    pr.mark_finished();
+                }
+                let _ = tx.send(r);
             })
             .map_err(|e| format!("spawn open watchdog: {e}"))?;
         match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
@@ -166,12 +223,18 @@ impl BlockStore {
         }
     }
 
-    fn open_inner(path: &str, inline_migration: bool) -> Result<Self, String> {
+    fn open_inner(path: &str, inline_migration: bool, progress: Option<&std::sync::Arc<OpenProgress>>) -> Result<Self, String> {
         let db_path = PathBuf::from(path);
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
         }
-        let db = flux_db::Database::open(&db_path)?;
+        let db = match progress {
+            Some(pr) => {
+                let pr = pr.clone();
+                flux_db::Database::open_with_progress(&db_path, move |consumed, total| pr.set(consumed, total))?
+            }
+            None => flux_db::Database::open(&db_path)?,
+        };
 
         // v0.35 fast open: best_(height,hash) persists under meta 'B'; when present we
         // skip the scan entirely. Stores from before 'B' migrate ONCE (self-migrating).

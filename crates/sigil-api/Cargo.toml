@@ -19,6 +19,19 @@ blake3 = { workspace = true }
 sigil-state = { path = "../sigil-state" }
 sigil-tx = { path = "../sigil-tx" }
 sigil-emission = { path = "../sigil-emission" }
+# send.rs: SignedTx's sig-scheme wrapper types (SigScheme/SignatureBytes/
+# PubKeyBytes) live here; sigil-tx doesn't re-export them.
+sigil-header = { path = "../sigil-header" }
+# send.rs: verifies the wallet's own ed25519 `sigil-rpc/v1` RPC-auth
+# signature (the SAME scheme flux-miner's challenge/submit flow already
+# trusts) — NOT SignedTx::verify_signature (that expects a signature over
+# tx.hash(), which the lightweight wallet signer doesn't produce). Same
+# version pin as sigil-tx/sigil-header to keep verifying keys byte-compatible.
+# `rand_core` feature: only needed by this crate's own send.rs tests
+# (SigningKey::generate); the live verify path (VerifyingKey::verify) doesn't
+# need it, same as every other Ed25519Hot verifier in this workspace.
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+
 # Backend-aware mempool handle (SIGIL_BRAIDPOOL_v1_1.md Phase B): AppState
 # holds the SAME Arc<MempoolBackend> sigil-node's producer loop holds, so
 # there is no seam where a real transaction submitted here could land in a
@@ -39,3 +52,6 @@ flux-vdf = { workspace = true }
 flux-api = { path = "../../../flux/crates/flux-api" }
 flux-api-macros = { path = "../../../flux/crates/flux-api-macros" }
 inventory = "0.3"
+
+[dev-dependencies]
+rand = { workspace = true }

@@ -83,7 +83,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Gauge, Padding, Paragraph},
     Frame, Terminal,
 };
 
@@ -2634,6 +2634,12 @@ struct App {
     /// v7.0.21: the background store-opener's channel when no engine auto-started —
     /// [F]/[Y] poll it via `take_idle_store` (the store may still be opening/compacting).
     idle_store_rx: Option<std::sync::mpsc::Receiver<block_sync::OpenedStore>>,
+    /// Live WAL-replay progress for the background store open — set unconditionally at
+    /// startup (before the opener thread spawns) so the render loop can show a real
+    /// gauge instead of the old static "still opening (compaction) — press again" toast.
+    /// `finished` flips true the instant the open resolves either way (success or the
+    /// fallback chain exhausting), independent of whether `[F]`/`[Y]` has been pressed.
+    open_progress: std::sync::Arc<block_store::OpenProgress>,
     full_sync: bool,                                    // [F] opt-in heavy full sync (default = 10ms lightweight verify)
     full_sync_height: u64,                              // blocks downloaded so far in full sync
     full_sync_target: u64,                              // target height for full sync
@@ -2793,6 +2799,7 @@ impl App {
               welcome_until: Some(Instant::now() + Duration::from_secs(14)),
               idle_store: None,
               idle_store_rx: None,
+              open_progress: block_store::OpenProgress::new(),
               tab: Tab::Node,
               swarm: SwarmView::default(),
               last_swarm_load: instant_ago(10),
@@ -2918,7 +2925,18 @@ impl App {
                     return Some(opened.store);
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    self.toast = "⏳ block store still opening (compaction) — press again in a moment".into();
+                    // v7.1.28: same live numbers the floating gauge shows (draw_store_open_overlay),
+                    // so a keypress-driven toast and the passive overlay never disagree.
+                    let (consumed, total, _finished) = self.open_progress.snapshot();
+                    self.toast = if total > 0 {
+                        let pct = ((consumed as f64 / total as f64) * 100.0).clamp(0.0, 100.0);
+                        format!(
+                            "⏳ block store still opening ({pct:.0}% — {} / {}) — press again in a moment",
+                            human_bytes(consumed), human_bytes(total)
+                        )
+                    } else {
+                        "⏳ block store still opening — press again in a moment".into()
+                    };
                     self.toast_sticky = false;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -3345,7 +3363,25 @@ impl<W: std::io::Write> ratatui::backend::Backend for SafeSizeBackend<W> {
 /// extracted from run_tui so it can run on a BACKGROUND thread while the mesh dials.
 /// Returns the opened store + an optional operator-facing note (the old sticky toasts).
 /// Err = every fallback failed (near-impossible: volatile is a fresh temp dir).
-fn open_store_with_fallbacks(db_path: &str, want_sync: bool) -> Result<(block_store::BlockStore, Option<String>), String> {
+fn open_store_with_fallbacks(
+    db_path: &str,
+    want_sync: bool,
+    progress: std::sync::Arc<block_store::OpenProgress>,
+) -> Result<(block_store::BlockStore, Option<String>), String> {
+    // Guarantee `finished` flips on EVERY exit path (Ok, an early Err, or the fallthrough
+    // Ok at the bottom) without threading a mark_finished() call into each of this
+    // function's several `return`s — the light-boot/oversized-store shortcut in particular
+    // never touches `open_with_timeout_and_progress` at all, so nothing else would mark it.
+    let result = open_store_with_fallbacks_inner(db_path, want_sync, progress.clone());
+    progress.mark_finished();
+    result
+}
+
+fn open_store_with_fallbacks_inner(
+    db_path: &str,
+    want_sync: bool,
+    progress: std::sync::Arc<block_store::OpenProgress>,
+) -> Result<(block_store::BlockStore, Option<String>), String> {
     // v7.0.7: heal a store wedged by the v7.0.3–7.0.5 frontier-stall bug (one-time, marked).
     heal_wedged_store_once(db_path);
     let oversized_primary = oversized_store_for_light_boot(db_path, want_sync);
@@ -3394,7 +3430,7 @@ fn open_store_with_fallbacks(db_path: &str, want_sync: bool) -> Result<(block_st
                     _ => 180,
                 }
             });
-        match block_store::BlockStore::open_with_timeout(db_path, open_timeout) {
+        match block_store::BlockStore::open_with_timeout_and_progress(db_path, open_timeout, Some(progress.clone())) {
             Ok(s) => s,
             Err(primary) => {
                 boot_trace(&format!("primary store open failed/hung: {primary}"));
@@ -3577,8 +3613,9 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     {
         let db_path = db_path.clone();
         let cell = reader_cell.clone();
+        let progress = app.open_progress.clone();
         let _ = std::thread::Builder::new().name("sigil-store-open".into()).spawn(move || {
-            match open_store_with_fallbacks(&db_path, want_sync) {
+            match open_store_with_fallbacks(&db_path, want_sync, progress) {
                 Ok((store, note)) => {
                     let _ = cell.set(store.reader());
                     let _ = store_tx.send(block_sync::OpenedStore { store, note });

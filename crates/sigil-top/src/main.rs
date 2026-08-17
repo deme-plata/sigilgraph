@@ -3985,15 +3985,20 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 }
                             }
                             KeyCode::Char('l') | KeyCode::Char('L') => {
-                                // v0.6.0: local wallet served by fluxc serve on :9800
-                                let wallet_url = local_wallet_url();
-                                if ensure_serve_up(&mut app) {
-                                    app.toast = format!("🌐 Opening local wallet (private window) → {wallet_url}").into();
-                                    open_browser_private(&wallet_url);
+                                // v7.1.30: [L]/[W] now open the HOSTED React/Vite/TS wallet
+                                // (official_wallet_url(), the app with the live Swap page)
+                                // directly — no dependency on the local :9800 embedded server
+                                // or the block store being open. The old local-server path
+                                // opened the single-file Tron wallet instead; that page still
+                                // exists (served at :9800 for headless/offline use and by [T]/
+                                // [B]'s #stats/#activity deep links, which it alone supports)
+                                // but is no longer what [L]/[W] launch by default.
+                                let url = official_wallet_url();
+                                if open_browser_private(&url) {
+                                    app.toast = format!("🌐 wallet (private window) → {url}").into();
                                     app.toast_sticky = false;
                                 } else {
-                                    app.toast = format!("✗ local wallet server down ({}) — use the hosted wallet:  {}",
-                                        app.serve_status, official_wallet_url()).into();
+                                    app.toast = format!("🔗 headless — open the wallet in any browser:  {url}").into();
                                     app.toast_sticky = true;
                                 }
                             }
@@ -4010,25 +4015,14 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 app.update_rx = Some(rx);
                             }
                             KeyCode::Char('w') | KeyCode::Char('W') => {
-                                // GUI box: open the local wallet (fluxc serve :9800). Headless
-                                // (proxmox/SSH): no browser → show the HOSTED OAuth2 wallet link
-                                // to copy, since localhost:9800 isn't reachable there anyway.
-                                let local = local_wallet_url();
-                                // v7.1.10: never hand a browser a refused port. If the
-                                // embedded server is not answering, (re)start it and say
-                                // why when that fails — serve_status is rendered nowhere
-                                // else, so this toast is the only place it surfaces.
-                                if !ensure_serve_up(&mut app) {
-                                    app.toast = format!(
-                                        "✗ local wallet server down ({}) — use the hosted wallet:  {}",
-                                        app.serve_status, official_wallet_url()
-                                    ).into();
-                                    app.toast_sticky = true;
-                                } else if open_browser_private(&local) {
-                                    app.toast = format!("🌐 wallet (private window) → {local}").into();
+                                // v7.1.30: see the [L] handler's comment — [W] opens the same
+                                // hosted React/Vite/TS wallet now, same reasoning.
+                                let url = official_wallet_url();
+                                if open_browser_private(&url) {
+                                    app.toast = format!("🌐 wallet (private window) → {url}").into();
                                     app.toast_sticky = false;
                                 } else {
-                                    app.toast = format!("🔗 headless — open the wallet (OAuth2 login) in any browser:  {}", official_wallet_url()).into();
+                                    app.toast = format!("🔗 headless — open the wallet in any browser:  {url}").into();
                                     app.toast_sticky = true;
                                 }
                             }

@@ -204,6 +204,8 @@ impl BlockStore {
         progress: Option<std::sync::Arc<OpenProgress>>,
     ) -> Result<Self, String> {
         let p = path.to_string();
+        // Kept by the caller-side poll loop below (the thread gets its own clone).
+        let watch_progress = progress.clone();
         let (tx, rx) = std::sync::mpsc::channel::<Result<Self, String>>();
         std::thread::Builder::new()
             .name("sigil-blockstore-open".into())
@@ -215,11 +217,53 @@ impl BlockStore {
                 let _ = tx.send(r);
             })
             .map_err(|e| format!("spawn open watchdog: {e}"))?;
-        match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
-            Ok(r) => r,
-            Err(_) => Err(format!(
-                "open timed out after {secs}s (incompatible or locked store — falling back to a fresh store)"
-            )),
+
+        // v7.1.30: STALL-aware wait, not a single flat recv_timeout. The `secs` deadline
+        // is still the outer backstop, but for a big store the caller passes an
+        // effectively-infinite `secs` (see main.rs's BIG_STORE_BYTES branch — "never
+        // abandon hours of real sync investment"). That made a genuinely FROZEN open
+        // (corrupt/incompatible on-disk format, or another sigil-top holding the file
+        // lock) indistinguishable from a slow-but-working one: both just sat at
+        // "OPENING BLOCK STORE" forever, no error, no recovery (the 2026-08-17 Windows
+        // report — user confirmed the progress bar was flat-frozen, not just slow).
+        // Fix: poll `progress` in short slices and track when `consumed` last actually
+        // moved. A real replay keeps advancing and keeps resetting the stall clock, so
+        // it is NEVER abandoned no matter how long it legitimately takes. A stuck open
+        // (consumed frozen, whether at 0 or mid-replay) trips STALL_LIMIT and bails to
+        // the caller's fallback store — the exact protection `secs` was supposed to give
+        // but couldn't once big stores set it to "wait forever."
+        const POLL: std::time::Duration = std::time::Duration::from_secs(5);
+        const STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(45);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        let mut last_consumed = 0u64;
+        let mut last_moved_at = std::time::Instant::now();
+        loop {
+            match rx.recv_timeout(POLL) {
+                Ok(r) => return r,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("open watchdog thread died unexpectedly".into());
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let now = std::time::Instant::now();
+                    if now >= deadline {
+                        return Err(format!(
+                            "open timed out after {secs}s (incompatible or locked store — falling back to a fresh store)"
+                        ));
+                    }
+                    if let Some(pr) = &watch_progress {
+                        let (consumed, _total, _finished) = pr.snapshot();
+                        if consumed != last_consumed {
+                            last_consumed = consumed;
+                            last_moved_at = now;
+                        } else if now.duration_since(last_moved_at) >= STALL_LIMIT {
+                            return Err(format!(
+                                "open stalled — no progress for {}s (corrupt/incompatible store, or another sigil-top process holding the file lock — falling back to a fresh store)",
+                                STALL_LIMIT.as_secs()
+                            ));
+                        }
+                    }
+                }
+            }
         }
     }
 

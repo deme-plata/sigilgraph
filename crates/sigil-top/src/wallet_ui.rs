@@ -16,16 +16,17 @@ pub(crate) fn dirs_next() -> Option<std::path::PathBuf> {
     }
 }
 
-/// The hosted SIGIL wallet — works from ANY browser, so it's what we hand a
-/// headless/remote (proxmox/SSH) operator who has no local GUI. Override with
-/// SIGIL_WALLET_URL. Must be the `fluxapp.xyz` APEX, not `sigilgraph.fluxapp.xyz`
-/// (that subdomain is a thin gate page whose own /api hits :8091, not sigil-rpcd —
-/// its swap/balance/pool calls silently fail there). And must be the Tron wallet
-/// page (`sigil-wallet-tron.html`, this crate's `[W]`-embedded UI), not the old
-/// `/sigil-wallet/` React tree, which is a separate/legacy build.
+/// The hosted SIGIL wallet — the React/Vite/TS app (`gui/sigil-wallet/`), which is
+/// the wallet [L]/[W] open (2026-08-17, operator preference over this crate's
+/// single-file embedded Tron wallet, which is now only reachable via the local
+/// :9800 server, [T]'s #stats deep link, and [B]'s #activity deep link). Override
+/// with SIGIL_WALLET_URL. Must be the `fluxapp.xyz` APEX, not
+/// `sigilgraph.fluxapp.xyz` (that subdomain is a thin gate page whose own /api
+/// hits :8091, not sigil-rpcd — its swap/balance/pool calls silently fail there;
+/// see q-flux.toml's own routing comments).
 pub(crate) fn official_wallet_url() -> String {
     std::env::var("SIGIL_WALLET_URL").ok().filter(|u| !u.is_empty())
-        .unwrap_or_else(|| "https://fluxapp.xyz/sigil-wallet-tron.html".into())
+        .unwrap_or_else(|| "https://fluxapp.xyz/sigil-wallet/".into())
 }
 
 /// True if there's no local GUI to open a browser into (headless box / SSH / proxmox

@@ -2118,7 +2118,18 @@ impl P2PBlockSync {
                     if at_tip_idle {
                         let lo = store.base().max(1);
                         let hi = store.synced_to();
-                        if hi > lo {
+                        // v7.1.33 (grogu-sync-perf): ROOT-CAUSE gate, not just a bound. synced_to
+                        // can be near peer_best the INSTANT a LANE-S trust-jump fires, long before
+                        // [lo, hi] has any real stored data (a fresh reset: verified_to resets to 0
+                        // in reset_watermarks() and only advances via genuine sequential download+
+                        // verify — unlike synced_to, it can't be trust-jumped). Require verified_to
+                        // to have gotten past `lo` before even trying the scan below: that's the
+                        // actual signal that [lo, ..] has real content worth hashing, not just a
+                        // number that happens to be close to the peer's claimed tip. The ATTEMPT_CAP
+                        // bound inside the scan (below) stays as defense-in-depth for whatever this
+                        // gate doesn't catch, not the primary fix anymore.
+                        let has_real_data_near_lo = store.verified_to() > lo;
+                        if hi > lo && has_real_data_near_lo {
                             // v0.28: batch-cache the window ONCE (kills the per-header DB-read
                             // bottleneck that capped pos at ~190 blk/s), then re-verify the
                             // in-memory batch with BLAKE every tick — a real useful-hashrate.
@@ -2146,8 +2157,22 @@ impl P2PBlockSync {
                                 pos_bytes.clear();
                                 let mut h = lo;
                                 const MISS_CAP: u32 = 200;
+                                // v7.1.33 (grogu-sync-perf): the consecutive-miss cap alone left a
+                                // gap — live-measured a 36s tick STILL happening under
+                                // SIGIL_SYNC_INFLIGHT=16 (more concurrent backfill => hits scattered
+                                // sparsely-but-often-enough through the range to keep resetting the
+                                // miss streak below MISS_CAP without ever tripping it, so the walk
+                                // still ran most of the way to `hi`). Bound total attempts too,
+                                // independent of the hit/miss pattern — worst case is now ATTEMPT_CAP
+                                // DB gets no matter how the hits are distributed. A capped-out window
+                                // is used as-is (whatever was found) rather than treated as "empty
+                                // and retry" — this only shrinks how much of a huge/sparse range gets
+                                // hashed per tick, it never blocks.
+                                const ATTEMPT_CAP: u64 = 2_000; // defense-in-depth now that has_real_data_near_lo gates the common case
                                 let mut consecutive_misses: u32 = 0;
-                                while h < hi && pos_window.len() < 8192 {
+                                let mut attempts: u64 = 0;
+                                while h < hi && pos_window.len() < 8192 && attempts < ATTEMPT_CAP {
+                                    attempts += 1;
                                     if let Some(hdr) = store.get_header_at_height(h) {
                                         pos_bytes.extend_from_slice(hdr.hash().as_ref()); // derive each header hash ONCE (the serde cost, amortized)
                                         pos_window.push(hdr);

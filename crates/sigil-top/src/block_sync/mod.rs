@@ -1051,8 +1051,43 @@ impl P2PBlockSync {
                     }
 
                     // ── DRAIN completed request results from the spawned tasks ───────────
+                    // v7.1.31 (LANE-3 codec-wall wiring): drain everything try_recv() has
+                    // ready RIGHT NOW (same non-blocking semantics as before — no new wait),
+                    // then decode+precheck the whole batch in PARALLEL across pages BEFORE
+                    // the sequential per-item bookkeeping below. Before this, each response's
+                    // inflate+bincode-deserialize (decode_verify_backfill) ran one at a time on
+                    // this single loop thread even when N chunks landed in the same tick — the
+                    // exact "client codec wall" sigil-serve::decode measured at 50,499 blk/s
+                    // sequential / 287,960 blk/s rayon-parallel-across-pages (2026-06-27) but
+                    // never wired past its own bench (its own doc comment: "verify.rs adopts
+                    // these via a thin call-site seam" — this is that seam). All per-item side
+                    // effects (bench/commit/stats/tlog) still run sequentially, in original
+                    // arrival order, exactly as before — only the CPU-bound decode is batched.
                     let mut last_backfill_time = Instant::now();
-                    while let Ok((start, peer, bytes)) = done_rx.try_recv() {
+                    let mut drained: Vec<(u64, String, Option<Vec<u8>>)> = Vec::new();
+                    while let Ok(item) = done_rx.try_recv() {
+                        drained.push(item);
+                    }
+                    let batch_n = drained.len();
+                    let decode_t0 = Instant::now();
+                    let decoded: Vec<Option<Vec<SigilBlockHeaderV0>>> = {
+                        use rayon::prelude::*;
+                        drained
+                            .par_iter()
+                            .map(|(_, _, bytes)| bytes.as_ref().map(|b| decode_verify_backfill(b)))
+                            .collect()
+                    };
+                    // Observability for the parallel-decode seam: only logs when the batch is
+                    // actually >1 (the case that benefits from rayon fan-out — a batch of 1 is a
+                    // no-op either way). Answers "is this seam doing anything on THIS peer/network
+                    // right now" without adding noise to the common single-chunk case. Per sigil
+                    // skill RULE 0: this is live-path visibility, not a claimed benchmark.
+                    if batch_n > 1 {
+                        crate::tlog!("[LANE3] batched decode: {batch_n} pages in {} ms", decode_t0.elapsed().as_millis());
+                    }
+                    for ((start, peer, bytes), headers_precomputed) in
+                        drained.into_iter().zip(decoded.into_iter())
+                    {
                         inflight = inflight.saturating_sub(1);
                         // v0.58 (10k-sync): keep a successfully-fetched look-ahead range CLAIMED so the
                         // frontier-anchored refill does not re-request it every cycle (~60% serve waste).
@@ -1061,7 +1096,7 @@ impl P2PBlockSync {
                         match bytes {
                             Some(b) => {
                                 peer_bench.remove(&peer);              // answered → healthy again
-                                let headers = decode_verify_backfill(&b);
+                                let headers = headers_precomputed.unwrap_or_default();
                                 let got = headers.len();
                                 commit_ring.push_slice(&mut store, &headers);
                                 bytes_session += b.len() as u64;

@@ -795,6 +795,10 @@ impl P2PBlockSync {
                 let mut pos_window_base: u64 = 0;
                 let mut ckpt_t = Instant::now();
                 let mut pos_bytes: Vec<u8> = Vec::new(); // v0.29.5 cached window-digest buffer for SIMD blake3
+                // v7.1.32 (grogu-sync-perf): last time the idle useful-hashrate scan came up
+                // completely empty (found 0 real headers in [lo, hi]). Backs off re-scanning a
+                // known-sparse range every single tick — see the MISS_CAP comment below.
+                let mut pos_scan_empty_since: Option<Instant> = None;
                 let mut last_probe = crate::instant_ago(10); // pull-height probe timer
                 // v0.15.2: far-behind monitor snaps to a recent window once peer_best is known.
                 const RECENT_WINDOW: u64 = 2_048;  // v0.21: pin the base just 1 chunk under the live tip
@@ -833,6 +837,7 @@ impl P2PBlockSync {
                 let mut pass2_chunk: u64 = CHUNK.min(2048);
 
                 loop {
+                    let tick_t0 = Instant::now();
                     if stop_rx.try_recv().is_ok() {
                         let _ = net.stop().await;
                         break;
@@ -2117,18 +2122,45 @@ impl P2PBlockSync {
                             // v0.28: batch-cache the window ONCE (kills the per-header DB-read
                             // bottleneck that capped pos at ~190 blk/s), then re-verify the
                             // in-memory batch with BLAKE every tick — a real useful-hashrate.
-                            if pos_window_base != lo || pos_window.is_empty() {
+                            //
+                            // v7.1.32 (grogu-sync-perf, closing the "sync goes silent 60s+" finding,
+                            // swarm msg #72): `at_tip_idle` goes true the INSTANT synced_to is near
+                            // peer_best, which a LANE-S v2 trust-jump makes true IMMEDIATELY — long
+                            // before [lo, hi] has any actually-stored headers (a fresh-reset node has
+                            // base≈1, synced_to≈peer_best, nothing downloaded in between yet).
+                            // Unbounded, this loop walked the ENTIRE [lo, hi] range one DB get at a
+                            // time hunting for 8192 hits that don't exist — live-measured at up to
+                            // ~35s of the WHOLE sync loop blocked (refill/drain/everything) for a
+                            // SINGLE tick on this shared box (DB gets under real concurrent load
+                            // measured ~3.5ms each here, not the sub-µs a quiet box would give — so
+                            // even the original 4096-miss bound cost ~14s). Two bounds now: (1) a
+                            // much smaller per-tick miss cap so one attempt is cheap even under
+                            // contention, (2) a 3s backoff after an all-empty attempt so a known-
+                            // sparse range isn't immediately re-hammered next tick. Neither changes
+                            // behavior once real data exists (a hit resets the miss streak; any hit
+                            // clears the backoff via pos_window no longer being empty).
+                            let scan_due = pos_scan_empty_since
+                                .map_or(true, |t| t.elapsed() >= Duration::from_secs(3));
+                            if (pos_window_base != lo || pos_window.is_empty()) && scan_due {
                                 pos_window.clear();
                                 pos_bytes.clear();
                                 let mut h = lo;
+                                const MISS_CAP: u32 = 200;
+                                let mut consecutive_misses: u32 = 0;
                                 while h < hi && pos_window.len() < 8192 {
                                     if let Some(hdr) = store.get_header_at_height(h) {
                                         pos_bytes.extend_from_slice(hdr.hash().as_ref()); // derive each header hash ONCE (the serde cost, amortized)
                                         pos_window.push(hdr);
+                                        consecutive_misses = 0;
+                                    } else {
+                                        consecutive_misses += 1;
+                                        if consecutive_misses >= MISS_CAP { break; }
                                     }
                                     h += 1;
                                 }
                                 pos_window_base = lo;
+                                pos_scan_empty_since =
+                                    if pos_window.is_empty() { Some(Instant::now()) } else { None };
                             }
                             // v0.29.5 SIMD (flux_optimize_analyze flagged SIMD, ~35%): instead of
                             // re-serializing every header per tick (the ~5.2k blk/s cap), run ONE
@@ -2156,9 +2188,23 @@ impl P2PBlockSync {
                                 ckpt_t = Instant::now();
                             }
                         }
+                        // v7.1.32 (grogu-sync-perf): permanent slow-tick guard. This single tick
+                        // body does everything (gossip drain, tipfetch, refill, LANE-S, the idle
+                        // scan above) synchronously — a real live stall here measured up to ~35s
+                        // for ONE tick before this session's fixes (see the MISS_CAP comment
+                        // above), and was completely invisible until independently instrumented.
+                        // A generous 500ms threshold (normal ticks are single-digit ms) means this
+                        // never fires in healthy operation but catches the NEXT unbounded-scan-
+                        // shaped bug immediately instead of needing another debugging session.
+                        if tick_t0.elapsed() >= Duration::from_millis(500) {
+                            crate::tlog!("[sync] ⚠ SLOW TICK: {} ms (idle-branch) — sync loop was blocked this long, nothing else could progress", tick_t0.elapsed().as_millis());
+                        }
                         tokio::time::sleep(Duration::from_millis(10)).await; // brief yield between work batches
                     } else {
                         let idle_ms = if peer_best == 0 { 75 } else { 10 };
+                        if tick_t0.elapsed() >= Duration::from_millis(500) {
+                            crate::tlog!("[sync] ⚠ SLOW TICK: {} ms (backfill-branch) — sync loop was blocked this long, nothing else could progress", tick_t0.elapsed().as_millis());
+                        }
                         tokio::time::sleep(Duration::from_millis(idle_ms)).await;
                     }
                 }

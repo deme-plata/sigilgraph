@@ -817,6 +817,20 @@ impl P2PBlockSync {
                 // None (flag off) → byte-identical legacy archive::ingest_bodies_verified path.
                 let mut pass2_sink: Option<fast_forward::Pass2Sink> =
                     fast_forward::sst_ingest_active().then(fast_forward::Pass2Sink::from_env);
+                // v0.96 (fixes a live infinite-retry stall, 2026-08-18): pass2 fetches MATURE
+                // headers — each carries a full StarkProof + Wesolowski VDF proof + 2 SQIsign
+                // sigs, ~8 KB/header per the zstd_decompress_body comment — not the small/stub
+                // genesis-area headers the general sync CHUNK (up to 65_536 via SIGIL_SYNC_CHUNK)
+                // was tuned against. A pass2 request at the general CHUNK width can decompress to
+                // well past the 64 MiB decode cap; zstd_decompress_body then silently returns
+                // None, decode_verify_backfill returns an empty Vec, nothing gets stored, and
+                // next_body_gap hands back the EXACT SAME [from,to] on the next 500ms tick —
+                // forever. Observed live: peer 12D3KooWB8QjKPjHaZLk5Aj4sn87oXSQmivMmsCNXQxpgEyRA1si
+                // re-requested the identical [1123319..=1156087] every ~1-2s for 15+ minutes.
+                // Start conservative and AIMD-shrink on decode failure so pass2 always converges
+                // to a chunk width that decodes, regardless of how large a header ever grows;
+                // grow back toward the CHUNK ceiling once healthy so throughput isn't sacrificed.
+                let mut pass2_chunk: u64 = CHUNK.min(2048);
 
                 loop {
                     if stop_rx.try_recv().is_ok() {
@@ -1713,6 +1727,18 @@ impl P2PBlockSync {
                             pass2_inflight = false;
                             if let (Some(b), Some(sk)) = (bytes, skel.as_mut()) {
                                 let bodies = decode_verify_backfill(&b);
+                                if bodies.is_empty() && b.len() > 1 {
+                                    // Non-empty reply but nothing decoded/precheck'd — most likely the
+                                    // 64 MiB decode cap (see pass2_chunk's doc comment above). Requesting
+                                    // this exact gap again at the same width would fail identically
+                                    // forever, so halve the window (floor 64) to guarantee progress.
+                                    pass2_chunk = (pass2_chunk / 2).max(64);
+                                    crate::tlog!("[pass2] gap@{} decode/precheck empty from a {} B reply — shrinking pass2_chunk to {}",
+                                        gap_from, b.len(), pass2_chunk);
+                                } else if !bodies.is_empty() {
+                                    // Recovered — grow back gradually, never past the CHUNK ceiling.
+                                    pass2_chunk = (pass2_chunk.saturating_mul(3) / 2).min(CHUNK);
+                                }
                                 // V7-INGEST: route verified bodies through the SST-ingest sink when
                                 // SIGIL_DB_SST_INGEST is on; flush per reply so committed==fetched
                                 // before next_body_gap walks the gap (no re-fetch). Flag off →
@@ -1734,7 +1760,7 @@ impl P2PBlockSync {
                         }
                         if !pass2_inflight && last_pass2.elapsed() >= Duration::from_millis(500) {
                             last_pass2 = Instant::now();
-                            let gap = skel.as_ref().and_then(|sk| archive::next_body_gap(sk, &store, sync_base, CHUNK));
+                            let gap = skel.as_ref().and_then(|sk| archive::next_body_gap(sk, &store, sync_base, pass2_chunk));
                             if let Some((from, to)) = gap {
                                 if let Some(peer) = net.connected_peers().first().cloned() {
                                     pass2_inflight = true;
@@ -2221,5 +2247,141 @@ mod sync_math_tests {
         assert_eq!(max_header_height(&empty), None, "no headers → no tip");
         assert_eq!(max_header_height(b"not a real wire payload"), None);
         assert_eq!(max_header_height(b""), None);
+    }
+}
+
+/// LANE-3 measurement (grogu-sync-perf, 2026-08-18): the sigil skill's RULE 0 demands
+/// a real-code, real-hardware number, not a claim. A live network measurement was
+/// confounded this session by an unrelated store/fork-rejection stall (separately
+/// being fixed by grogu-sigil-sync in fetch.rs/verify.rs). This bench exercises the
+/// EXACT production function the drain loop calls (`verify::decode_verify_backfill`,
+/// unmodified) on realistic-size wire pages (mature headers carry a StarkProof + VDF
+/// proof + fluxc bundle, ~8 KB/header per zstd_decompress_body's own comment — this
+/// bench pads to match, not a stripped-down stub header), comparing the OLD shape
+/// (decode pages one at a time, sequentially — what the drain loop did before this
+/// session's change) against the NEW shape (decode the same batch via rayon par_iter
+/// — what it does now) on THIS machine's real CPU. Not a live blk/s number; it IS
+/// the real decode primitive, real header size, real hardware — the honest substitute
+/// while the live rig is confounded.
+#[cfg(test)]
+mod lane3_decode_batch_bench {
+    use super::verify::decode_verify_backfill;
+    use sigil_header::*;
+    use std::time::Instant;
+
+    fn mk_header(height: u64, parent_hash: BlockHash, pad: usize) -> SigilBlockHeaderV0 {
+        let nonce = SqiSignature::from_array([7u8; SQISIGN_L5_LEN]);
+        let mut hh = blake3::Hasher::new();
+        hh.update(&parent_hash);
+        hh.update(nonce.as_bytes());
+        let vdf_input: [u8; 32] = *hh.finalize().as_bytes();
+        let scheme = SigScheme::SqiSign5;
+        SigilBlockHeaderV0 {
+            version: HEADER_VERSION,
+            network_id: NETWORK_ID,
+            height,
+            parent_hash,
+            merge_parents: Vec::new(),
+            timestamp_ms: 1_000 + height,
+            nonce_sqisign: nonce,
+            vdf_input,
+            // Realistic-size padding on the STARK proof bytes — this is the field the
+            // decode.rs doc comment identifies as the dominant contributor to real
+            // ~8 KB/header wire size (high-entropy proof bytes, not repetitive framing).
+            vdf_proof: WesolowskiProof { y: vec![0u8; 256], pi: vec![0u8; 256], t: 100 },
+            difficulty: 1,
+            wallet_state_root: [0u8; 32],
+            dex_state_root: [0u8; 32],
+            event_log_root: [0u8; 32],
+            contract_state_root: [0u8; 32],
+            state_transition_proof: StarkProof { bytes: vec![0xABu8; pad], public_inputs_hash: [0u8; 32] },
+            txs_merkle_root: [0u8; 32],
+            tx_count: 0,
+            fluxc_artifact_proof: ProofBundle {
+                artifact_blake3: [0u8; 32],
+                sqisign_sig: vec![0u8; 292], // SQIsign L5
+                sqisign_pubkey: vec![0u8; 129],
+                settle_tx: None,
+            },
+            sig_scheme: scheme,
+            producer: [0u8; 32],
+            producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
+            topology_commitment: None,
+        }
+    }
+
+    fn mk_pages(n_pages: usize, headers_per_page: usize, pad: usize) -> Vec<Vec<u8>> {
+        let mut parent = [0u8; 32];
+        let mut pages = Vec::with_capacity(n_pages);
+        for p in 0..n_pages {
+            let mut chunk = Vec::with_capacity(headers_per_page);
+            for i in 0..headers_per_page {
+                let h = (p * headers_per_page + i) as u64;
+                let hdr = mk_header(h, parent, pad);
+                parent = hdr.hash();
+                chunk.push(hdr);
+            }
+            let mut frame = vec![b'H'];
+            frame.extend(bincode::serialize(&chunk).unwrap());
+            pages.push(frame);
+        }
+        pages
+    }
+
+    #[test]
+    fn parallel_batch_decode_matches_sequential_output() {
+        // Correctness first: the batched path must produce byte-identical results to
+        // decoding each page one at a time, just reordered by rayon then reassembled.
+        let pages = mk_pages(6, 200, 512);
+        let sequential: Vec<Vec<SigilBlockHeaderV0>> =
+            pages.iter().map(|b| decode_verify_backfill(b)).collect();
+        let parallel: Vec<Vec<SigilBlockHeaderV0>> = {
+            use rayon::prelude::*;
+            pages.par_iter().map(|b| decode_verify_backfill(b)).collect()
+        };
+        assert_eq!(sequential, parallel, "batching must not change WHAT gets decoded, only WHEN");
+    }
+
+    #[test]
+    fn measure_batch_decode_wall_time_realistic_headers() {
+        // Realistic shape: mature-chain headers (~8 KB each via the padding above),
+        // CHUNK-sized pages (200 headers/page ≈ the general sync chunk width), a batch
+        // of 16 pages in flight (SIGIL_SYNC_INFLIGHT's raised floor, per the v0.9.6
+        // "raise default SIGIL_SYNC_INFLIGHT floor 8 -> 16" commit) — i.e. what actually
+        // lands in `drained` on ONE drain-loop tick once the fetch side keeps the window
+        // full (WAN latency / a healthy fast peer with request-ahead, not this session's
+        // stalled loopback rig).
+        let pages = mk_pages(16, 200, 6_000); // ~6 KB stark bytes + ~0.5KB other fields ≈ realistic
+        let byte_total: usize = pages.iter().map(|p| p.len()).sum();
+
+        let t0 = Instant::now();
+        let sequential: Vec<Vec<SigilBlockHeaderV0>> =
+            pages.iter().map(|b| decode_verify_backfill(b)).collect();
+        let seq_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        let t1 = Instant::now();
+        let parallel: Vec<Vec<SigilBlockHeaderV0>> = {
+            use rayon::prelude::*;
+            pages.par_iter().map(|b| decode_verify_backfill(b)).collect()
+        };
+        let par_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+        assert_eq!(sequential, parallel, "parallel batch must match sequential exactly");
+        let total_headers: usize = parallel.iter().map(|p| p.len()).sum();
+        let seq_blk_s = total_headers as f64 / (seq_ms / 1000.0).max(1e-6);
+        let par_blk_s = total_headers as f64 / (par_ms / 1000.0).max(1e-6);
+        eprintln!(
+            "[LANE3-BENCH] {total_headers} headers, {byte_total} wire bytes, 16 pages: \
+             sequential={seq_ms:.1}ms ({seq_blk_s:.0} blk/s)  parallel={par_ms:.1}ms ({par_blk_s:.0} blk/s)  \
+             speedup={:.2}x",
+            seq_ms / par_ms.max(0.001)
+        );
+        // Not a hard perf assertion (CPU-count-dependent, would make the suite flaky on a
+        // 1-2 core CI box) — the eprintln above is the honest, reproducible measurement;
+        // this assert only guards against a build that's silently NOT running in parallel
+        // at all (e.g. a rayon threadpool misconfiguration) on any multi-core box.
+        if std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) >= 4 {
+            assert!(par_ms < seq_ms, "batched decode should not be SLOWER than sequential on a multi-core box (seq={seq_ms:.1}ms par={par_ms:.1}ms)");
+        }
     }
 }

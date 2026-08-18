@@ -1259,7 +1259,19 @@ impl BlockStore {
     /// flush already in progress makes this a no-op (the next tick retries).
     pub fn flush_background(&self) {
         if !self.db.flush_background() {
+            // v7.1.34 (grogu-sync-perf): this fallback was completely silent — `let _ =
+            // db.flush()` with no counter, no log. It only fires when the OS refuses to
+            // spawn the background flush thread (thread/process pressure), and it's the
+            // SAME operation already measured (see the doc comment above) at 1-4s inline
+            // on a QUIET box — under real contention it could cost much more, and this
+            // runs on the sync loop's own tick. Investigating a live "sync loop goes
+            // silent" report (swarm msg #78-80) where this fallback is one of the leading
+            // suspects; there was no way to confirm whether it was even firing. Log it so
+            // that question has a real answer next time, instead of another round of
+            // ad-hoc instrumentation.
+            let t0 = std::time::Instant::now();
             let _ = self.db.flush(); // OS refused a thread — old inline behavior
+            crate::tlog!("[store] ⚠ flush_background: thread spawn refused, fell back to inline flush ({} ms)", t0.elapsed().as_millis());
         }
     }
 

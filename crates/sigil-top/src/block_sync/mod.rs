@@ -869,10 +869,21 @@ impl P2PBlockSync {
                     // fast_forward_to_anchored_checkpoint, then the frontier refill resumes from the
                     // anchor. Err / no codec=2 server → the codec=1 crawl below covers it unchanged
                     // (zero regression). SIGIL_SNAPSHOT=0 disables it.
-                    if let (false, Some((va_h, va_hash))) = (snapshot_attempted, dns_anchor_tip()) {
-                        let snap_on = std::env::var("SIGIL_SNAPSHOT").map(|v| v != "0").unwrap_or(true);
-                        let peers = net.connected_peers();
-                        if snap_on && store.synced_to() <= sync_base && !peers.is_empty() {
+                    //
+                    // v7.1.37 fix: dns_anchor_tip() burns the anchor's epoch as "used" (its internal
+                    // monotonic anti-replay guard) the instant it verifies successfully, REGARDLESS of
+                    // whether this gate goes on to act on it. A static, once-published anchor's epoch
+                    // never increases, so if the FIRST successful verify happened before any peer had
+                    // connected (peers.is_empty() still true on a fresh node's early ticks), the anchor
+                    // was permanently spent on a no-op — every later tick saw the SAME epoch rejected as
+                    // a replay of itself, and snapshot-pull could never fire for the rest of the
+                    // process's life. Fix: check the cheap peers/sync_base/env gate FIRST and only call
+                    // dns_anchor_tip() (which may consume the one-shot epoch) once it can actually be
+                    // acted on this tick.
+                    let snap_on = std::env::var("SIGIL_SNAPSHOT").map(|v| v != "0").unwrap_or(true);
+                    let peers = net.connected_peers();
+                    if !snapshot_attempted && snap_on && store.synced_to() <= sync_base && !peers.is_empty() {
+                        if let Some((va_h, va_hash)) = dns_anchor_tip() {
                             snapshot_attempted = true;
                             let net_c = net.clone();
                             let send = move |peer, payload: Vec<u8>| {
@@ -893,7 +904,7 @@ impl P2PBlockSync {
                                     Ok(vt) => crate::tlog!("[sync] snapshot-pull OK + ANCHOR-AUTHENTICATED: {} recs, anchor h={} == trust root -> verified_to={} (bodies via PASS-2)", v.records, v.anchor_height, vt),
                                     Err(e) => crate::tlog!("[sync] snapshot-pull anchor auth refused ({e}) - crawl covers it"),
                                 },
-                                Err(_) => crate::tlog!("[sync] snapshot-pull failed — codec=1 crawl covers it"),
+                                Err(e) => crate::tlog!("[sync] snapshot-pull failed ({e:?}) — codec=1 crawl covers it"),
                             }
                         }
                     }
@@ -2017,13 +2028,27 @@ impl P2PBlockSync {
                         // idempotent per tick). No-op until dns_anchor_tip() returns a fresh,
                         // SQIsign-verified (height,hash); verify_to_parallel below always guarantees
                         // correctness, so this is zero-regression until dns_anchor_tip() is real.
-                        if let Some((anchor_h, anchor_hash)) = dns_anchor_tip() {
-                            match verify::fast_forward_to_anchored_checkpoint(
-                                &mut store, anchor_h, &anchor_hash, verify::DEFAULT_FRONTIER_WINDOW,
-                            ) {
-                                Ok(rep) => crate::tlog!("[sync] LANE-B fast-forward: trusted h={} bulk_below={} verified_to={} frontier_checked={}",
-                                    rep.trusted_height, rep.bulk_trusted_below, rep.verified_to, rep.frontier_checked),
-                                Err(e) => crate::tlog!("[sync] LANE-B fast-forward refused ({e}) — verify_to_parallel covers it"),
+                        //
+                        // v7.1.37 fix: dns_anchor_tip()'s epoch is a GLOBAL one-shot resource shared
+                        // with LANE-A (snapshot-pull) — whichever lane calls it first burns the epoch
+                        // for both, even on a doomed attempt. LANE-B ran unconditionally every tick and
+                        // fired on tick 1 before any peer had even connected, immediately failing
+                        // ("anchor block not stored — cannot authenticate checkpoint", true for ANY
+                        // fresh node since the anchor references a height far beyond genesis) and
+                        // permanently starving LANE-A — the lane actually suited to a fresh sync — of
+                        // its one real chance. Defer to LANE-A's window: only let LANE-B spend the
+                        // anchor once LANE-A has already had its shot (snapshot_attempted) or can no
+                        // longer apply (synced_to has moved past sync_base, its own fresh-node gate).
+                        let lane_a_window_closed = snapshot_attempted || store.synced_to() > sync_base;
+                        if lane_a_window_closed {
+                            if let Some((anchor_h, anchor_hash)) = dns_anchor_tip() {
+                                match verify::fast_forward_to_anchored_checkpoint(
+                                    &mut store, anchor_h, &anchor_hash, verify::DEFAULT_FRONTIER_WINDOW,
+                                ) {
+                                    Ok(rep) => crate::tlog!("[sync] LANE-B fast-forward: trusted h={} bulk_below={} verified_to={} frontier_checked={}",
+                                        rep.trusted_height, rep.bulk_trusted_below, rep.verified_to, rep.frontier_checked),
+                                    Err(e) => crate::tlog!("[sync] LANE-B fast-forward refused ({e}) — verify_to_parallel covers it"),
+                                }
                             }
                         }
                         // v0.15.0 perf: 40k/1.5s capped VERIFIED throughput at ~26.6k blk/s;

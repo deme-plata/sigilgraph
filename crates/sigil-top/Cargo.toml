@@ -15,10 +15,10 @@ name = "sigil-top"
 # could mesh with a non-serving community peer (any other sigil-top instance
 # structurally cannot serve full-archive backfill) and stall forever while
 # still reading "connected".
-# v7.1.39: unified Codex wallet UI across Activity and every transaction modal,
-# plus the global DEX market ribbon. This version bump advances the signed
-# release channel so existing v7.1.38 installs also receive the UI update.
-version = "7.1.39"
+# v7.1.40: Activity gains the SIGIL-native adaptive emission controller card
+# and live analytics modal, derived from the chain's verified supply and the
+# published sigil-emission consensus constants.
+version = "7.1.41"
 edition.workspace = true
 license.workspace = true
 description = "sigil-top — a SIGIL lightweight node + dual-mode (lite scorecard ↔ full dashboard) terminal monitor. v0.9.0 'Verifying Full Sync': downloads the chain genesis→tip over the sigil-g0 P2P mesh AND verifies it as one connected spine (per-header precheck + parent_hash linkage back to genesis), with a persisted verified_to watermark. New `full-sync` (headless sync-and-verify, exit 0 at tip) and `verify-chain` (re-verify the local store) subcommands; TUI surfaces the ⛓ verified-spine height + ⚠ spine-break alarm distinct from raw download progress."

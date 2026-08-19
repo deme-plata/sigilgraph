@@ -22,8 +22,12 @@ description = "SIGIL bank layer — protocol-fee policy (master wallet, mining +
 #     captures the full eventual design.
 
 [dependencies]
-serde     = { workspace = true }
-thiserror = { workspace = true }
+serde        = { workspace = true }
+thiserror    = { workspace = true }
+# T6: fold_events (mandate.rs) reconstructs MandateBook from the chain's own
+# SigilEvent log — still no I/O, no state borrow, just a pure fold over
+# events the caller already has.
+sigil-events = { path = "../sigil-events" }
 
 [dev-dependencies]
 # credit-vault persistence contract test: bincode round-trip (what flux-db

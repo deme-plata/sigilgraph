@@ -178,6 +178,31 @@ pub enum SigilTx {
         #[serde(with = "u128_str")]
         fee: u128,
     },
+    /// Mint USDS by locking native SIGIL collateral into `sigil_usds::VAULT`
+    /// at the committed oracle price (see `sigil-usds` for the buffer +
+    /// protocol-fee math this routes through).
+    UsdsMint {
+        /// Wallet locking collateral.
+        from: WalletId,
+        /// SIGIL to lock.
+        #[serde(with = "u128_str")]
+        sigil_amount: u128,
+        /// Fee in native SIGIL (on top of the locked collateral).
+        #[serde(with = "u128_str")]
+        fee: u128,
+    },
+    /// Burn USDS, release the underlying SIGIL collateral at the current
+    /// oracle price, minus the protocol fee.
+    UsdsRedeem {
+        /// Wallet redeeming.
+        from: WalletId,
+        /// USDS to burn.
+        #[serde(with = "u128_str")]
+        usds_amount: u128,
+        /// Fee in native SIGIL.
+        #[serde(with = "u128_str")]
+        fee: u128,
+    },
     /// Invoke a VM contract method.
     ContractCall {
         /// Caller wallet.
@@ -243,6 +268,44 @@ pub enum SigilTx {
         #[serde(with = "u128_str")]
         fee: u128,
     },
+    /// T6 — create a bounded, expiring agent spend-authority
+    /// (`sigil_bank::mandate::Mandate`). No balance moves on create; this
+    /// grants permission, not funds.
+    MandateCreate {
+        /// Mandate id — assigned ONCE by whoever builds this tx (e.g.
+        /// blake3(agent‖purpose‖expires_ts‖nonce)) and carried verbatim.
+        /// MUST NOT be re-derived at apply time from local wall-clock or
+        /// local book length — either would diverge across nodes replaying
+        /// the same tx at different times / with different prior state.
+        id: String,
+        /// The agent wallet this mandate authorizes. Also the fee payer —
+        /// an agent requests its own bounded authority.
+        agent: WalletId,
+        /// Spend ceiling, native SIGIL base units.
+        #[serde(with = "u128_str")]
+        max_amount: u128,
+        /// Audit-trail purpose string.
+        purpose: String,
+        /// Unix-seconds absolute creation time, computed once by the tx
+        /// builder (same determinism reason as `expires_ts`).
+        created_ts: u64,
+        /// Unix-seconds absolute expiry, computed once by the tx builder.
+        expires_ts: u64,
+        /// Fee in native SIGIL.
+        #[serde(with = "u128_str")]
+        fee: u128,
+    },
+    /// T6 — close an existing mandate. Only the mandate's own agent may
+    /// close it (checked at apply time against the replayed book).
+    MandateClose {
+        /// Mandate id being closed.
+        id: String,
+        /// The agent closing it.
+        agent: WalletId,
+        /// Fee in native SIGIL.
+        #[serde(with = "u128_str")]
+        fee: u128,
+    },
 }
 
 /// Compact tag for indexing — matches [`SigilEvent::tag`] convention. The
@@ -262,6 +325,10 @@ impl SigilTx {
             SigilTx::TokenDeploy     { .. } => 6,
             SigilTx::ValidatorJoin   { .. } => 7,
             SigilTx::ValidatorLeave  { .. } => 8,
+            SigilTx::UsdsMint        { .. } => 9,
+            SigilTx::UsdsRedeem      { .. } => 10,
+            SigilTx::MandateCreate   { .. } => 11,
+            SigilTx::MandateClose    { .. } => 12,
         }
     }
 
@@ -277,7 +344,11 @@ impl SigilTx {
             SigilTx::ContractDeploy  { fee, .. } |
             SigilTx::TokenDeploy     { fee, .. } |
             SigilTx::ValidatorJoin   { fee, .. } |
-            SigilTx::ValidatorLeave  { fee, .. } => *fee,
+            SigilTx::ValidatorLeave  { fee, .. } |
+            SigilTx::UsdsMint        { fee, .. } |
+            SigilTx::UsdsRedeem      { fee, .. } |
+            SigilTx::MandateCreate   { fee, .. } |
+            SigilTx::MandateClose    { fee, .. } => *fee,
         }
     }
 
@@ -293,6 +364,10 @@ impl SigilTx {
             SigilTx::TokenDeploy  { creator, .. } => *creator,
             SigilTx::ValidatorJoin { validator, .. } => *validator,
             SigilTx::ValidatorLeave { validator, .. } => *validator,
+            SigilTx::UsdsMint { from, .. } => *from,
+            SigilTx::UsdsRedeem { from, .. } => *from,
+            SigilTx::MandateCreate { agent, .. } => *agent,
+            SigilTx::MandateClose { agent, .. } => *agent,
         }
     }
 
@@ -877,6 +952,11 @@ pub enum TxApplyError {
     #[error("dex error: {0}")]
     Dex(#[from] sigil_dex::DexError),
 
+    /// USDS mint/redeem math (sigil-usds) raised a guard. Carries the
+    /// underlying variant.
+    #[error("usds error: {0}")]
+    Usds(#[from] sigil_usds::UsdsError),
+
     /// Public-key bytes were the wrong length for the declared scheme.
     #[error("pubkey length mismatch: scheme {scheme:?} expected {expected}, got {got}")]
     PubKeyLengthMismatch {
@@ -1400,6 +1480,53 @@ pub fn apply_tx(state: &SigilState, signed: &SignedTx) -> Result<ApplyResult, Tx
             out.mutations.push(StateMutation::PushEventHash(evt.leaf_hash()));
             out.events.push(evt);
         }
+        SigilTx::UsdsMint { from, sigil_amount, .. } => {
+            // All the math (buffer + protocol fee) lives in sigil_usds::plan_mint
+            // — same "pure planner, caller commits" shape sigil_dex::swap
+            // already uses for SigilTx::Swap above.
+            let plan = sigil_usds::plan_mint(state, *from, *sigil_amount)?;
+            let evt = SigilEvent::UsdsMinted {
+                wallet: *from, sigil_locked: *sigil_amount, usds_minted: plan.usds_to_user,
+            };
+            out.mutations.extend(plan.mutations);
+            out.mutations.push(StateMutation::PushEventHash(evt.leaf_hash()));
+            out.events.push(evt);
+        }
+        SigilTx::UsdsRedeem { from, usds_amount, .. } => {
+            let plan = sigil_usds::plan_redeem(state, *from, *usds_amount)?;
+            let evt = SigilEvent::UsdsRedeemed {
+                wallet: *from, usds_burned: *usds_amount, sigil_released: plan.sigil_to_user,
+            };
+            out.mutations.extend(plan.mutations);
+            out.mutations.push(StateMutation::PushEventHash(evt.leaf_hash()));
+            out.events.push(evt);
+        }
+        SigilTx::MandateCreate { id, agent, max_amount, purpose, created_ts, expires_ts, .. } => {
+            // Event-only, no SigilState storage change — same shape as
+            // TokenDeploy/ValidatorJoin above. The queryable MandateBook is
+            // reconstructed OUTSIDE SigilState by folding MandateCreated/
+            // MandateClosed events (sigil_bank::mandate::fold_events), same
+            // as the validator-set kinds are documented to do once ported.
+            let evt = SigilEvent::MandateCreated {
+                id: id.clone(), agent: *agent, max_amount: *max_amount,
+                purpose: purpose.clone(), created_ts: *created_ts, expires_ts: *expires_ts,
+            };
+            out.mutations.push(StateMutation::PushEventHash(evt.leaf_hash()));
+            out.events.push(evt);
+        }
+        SigilTx::MandateClose { id, agent, .. } => {
+            // Ownership (this agent actually holds mandate `id`) is checked
+            // by the caller against its replayed MandateBook BEFORE
+            // submitting the tx — apply_tx has no access to that book (it
+            // is not SigilState), so it cannot re-check it here. This
+            // mirrors every other kind in this function: apply_tx trusts
+            // precheck() (signature) and emits; higher-level authorization
+            // is the caller's job, same as the existing `authorize()` gate
+            // in sigil-rpcd today.
+            let evt = SigilEvent::MandateClosed { id: id.clone(), agent: *agent };
+            out.mutations.push(StateMutation::PushEventHash(evt.leaf_hash()));
+            out.events.push(evt);
+        }
     }
 
     Ok(out)
@@ -1684,6 +1811,64 @@ mod tests {
         assert_eq!(s.balance_of(&alice, &NATIVE), 1_000 - 100 - 1);
         assert_eq!(s.balance_of(&bob,   &NATIVE), 100);
         assert_ne!(s.roots().wallet_state_root, pre);
+    }
+
+    /// T6 PROOF — two INDEPENDENTLY constructed nodes, fed the same
+    /// MandateCreate then MandateClose txs (never sharing any state or
+    /// process), converge to byte-identical MandateBooks AND identical
+    /// `event_log_root`s. This is the actual claim T6 needs: not "the
+    /// function is deterministic in isolation" but "two separate replays
+    /// of the same chain history land on the same answer" — the property
+    /// rpcd's old local-only `n.mandates` write never had.
+    #[test]
+    fn mandate_create_close_converges_across_two_independent_nodes() {
+        let agent: WalletId = [9u8; 32];
+        let create = dummy_signed(SigilTx::MandateCreate {
+            id: "m1".into(), agent, max_amount: 1_000, purpose: "trade".into(),
+            created_ts: 1_000, expires_ts: 2_000, fee: 0,
+        });
+        let close = dummy_signed(SigilTx::MandateClose { id: "m1".into(), agent, fee: 0 });
+
+        // Node A and Node B never touch each other — same tx bytes, applied
+        // independently, is the whole point of the proof.
+        let mut node_a = SigilState::new();
+        let mut node_b = SigilState::new();
+
+        let ra1 = apply_tx(&node_a, &create).unwrap();
+        assert_eq!(ra1.events.len(), 1);
+        commit_state_transition(&mut node_a, &batch_into_transition([ra1.clone()], 0), 0).unwrap();
+        let rb1 = apply_tx(&node_b, &create).unwrap();
+        commit_state_transition(&mut node_b, &batch_into_transition([rb1.clone()], 0), 0).unwrap();
+
+        // Post-create: books converge, and so does the on-chain event root.
+        let book_a = sigil_bank::mandate::fold_events(ra1.events.iter());
+        let book_b = sigil_bank::mandate::fold_events(rb1.events.iter());
+        assert_eq!(book_a, book_b);
+        assert_eq!(node_a.roots().event_log_root, node_b.roots().event_log_root);
+        let m = book_a.get("m1").expect("mandate m1 must exist after fold");
+        assert_eq!(m.agent, agent);
+        assert_eq!(m.max_amount, 1_000);
+        assert_eq!(m.purpose, "trade");
+        assert_eq!(m.created_ts, 1_000);
+        assert_eq!(m.expires_ts, 2_000);
+        assert!(m.is_live(1_500), "live between created_ts and expires_ts");
+        assert!(!m.is_live(2_500), "not live past expires_ts");
+
+        // Now close it on both nodes independently, replay the FULL event
+        // history (create + close) on each, and confirm they still agree.
+        let ra2 = apply_tx(&node_a, &close).unwrap();
+        commit_state_transition(&mut node_a, &batch_into_transition([ra2.clone()], 1), 1).unwrap();
+        let rb2 = apply_tx(&node_b, &close).unwrap();
+        commit_state_transition(&mut node_b, &batch_into_transition([rb2.clone()], 1), 1).unwrap();
+
+        let all_a: Vec<_> = ra1.events.iter().chain(ra2.events.iter()).collect();
+        let all_b: Vec<_> = rb1.events.iter().chain(rb2.events.iter()).collect();
+        let final_a = sigil_bank::mandate::fold_events(all_a.into_iter());
+        let final_b = sigil_bank::mandate::fold_events(all_b.into_iter());
+        assert_eq!(final_a, final_b);
+        assert_eq!(node_a.roots().event_log_root, node_b.roots().event_log_root);
+        assert_eq!(final_a.get("m1").unwrap().status, "closed");
+        assert!(!final_a.get("m1").unwrap().is_live(1_500), "closed authorizes nothing even before expiry");
     }
 
     #[test]

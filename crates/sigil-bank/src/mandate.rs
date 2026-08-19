@@ -13,9 +13,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::WalletId;
+use sigil_events::SigilEvent;
 
 /// A bounded, expiring spend authority granted to an agent wallet.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mandate {
     pub id: String,
     pub agent: WalletId,
@@ -39,7 +40,7 @@ impl Mandate {
 }
 
 /// The persisted set of mandates (own flux-db key, additive — same pattern as the credit vault).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MandateBook {
     pub mandates: Vec<Mandate>,
 }
@@ -115,6 +116,50 @@ impl MandateBook {
         m.spent = new_spent;
         Ok(m.max_amount - new_spent)
     }
+
+    /// Apply one already-decided `MandateCreated`/`MandateClosed` event
+    /// (from the chain's own event log) — the T6 chain-native counterpart
+    /// to `create`/`close` above. Unlike `create`, this takes NO local
+    /// `now`: every field comes from the event verbatim, so two nodes
+    /// folding the same event sequence always land on byte-identical
+    /// books, regardless of when each one happens to run the fold.
+    /// Non-mandate events are ignored (this book only cares about its own
+    /// two event kinds, same filtering every other fold-style consumer of
+    /// a shared event log does).
+    pub fn apply_event(&mut self, event: &SigilEvent) {
+        match event {
+            SigilEvent::MandateCreated { id, agent, max_amount, purpose, created_ts, expires_ts } => {
+                self.mandates.push(Mandate {
+                    id: id.clone(),
+                    agent: *agent,
+                    max_amount: *max_amount,
+                    spent: 0,
+                    purpose: purpose.clone(),
+                    created_ts: *created_ts,
+                    expires_ts: *expires_ts,
+                    status: "active".into(),
+                });
+            }
+            SigilEvent::MandateClosed { id, .. } => {
+                self.close(id);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Reconstruct a `MandateBook` from scratch by folding an ordered event
+/// sequence — the replay path any node (rpcd included, once it stops
+/// writing straight to its own local book) uses to derive the SAME book
+/// every other node derives from the SAME chain history. Order matters
+/// (a Close before its Create is a no-op close, same as `MandateBook::close`
+/// on an unknown id today); callers must pass events in chain order.
+pub fn fold_events<'a>(events: impl IntoIterator<Item = &'a SigilEvent>) -> MandateBook {
+    let mut book = MandateBook::default();
+    for e in events {
+        book.apply_event(e);
+    }
+    book
 }
 
 #[cfg(test)]

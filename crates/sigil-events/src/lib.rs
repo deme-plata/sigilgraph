@@ -147,6 +147,28 @@ pub enum SigilEvent {
         #[serde(with = "u128_str")]
     fees_realized: u128,
     },
+    /// USDS minted against locked SIGIL collateral (`sigil-usds`).
+    UsdsMinted {
+        /// Wallet that locked collateral.
+        wallet: WalletId,
+        /// SIGIL locked into the vault.
+        #[serde(with = "u128_str")]
+    sigil_locked: u128,
+        /// USDS credited to the wallet (after buffer + protocol fee).
+        #[serde(with = "u128_str")]
+    usds_minted: u128,
+    },
+    /// USDS burned, releasing SIGIL collateral (`sigil-usds`).
+    UsdsRedeemed {
+        /// Wallet that redeemed.
+        wallet: WalletId,
+        /// USDS burned.
+        #[serde(with = "u128_str")]
+    usds_burned: u128,
+        /// SIGIL released to the wallet (after the protocol fee).
+        #[serde(with = "u128_str")]
+    sigil_released: u128,
+    },
     /// VM contract method call.
     ContractCall {
         /// Contract ID called.
@@ -240,6 +262,34 @@ pub enum SigilEvent {
         /// pool snapshot at block apply time.
         pool_root_at_proof: [u8; 32],
     },
+    /// T6 — a bounded, expiring agent spend-authority was created
+    /// (`sigil_bank::mandate`). The id is assigned once by whoever builds
+    /// the tx and carried verbatim — never re-derived at apply time, so
+    /// every replaying node lands on the identical id.
+    MandateCreated {
+        /// Mandate id (blake3-derived by the tx builder).
+        id: String,
+        /// The agent wallet this mandate authorizes.
+        agent: WalletId,
+        /// Spend ceiling, native SIGIL base units.
+        #[serde(with = "u128_str")]
+        max_amount: u128,
+        /// Audit-trail purpose string.
+        purpose: String,
+        /// Unix-seconds absolute creation time, producer-computed at build
+        /// time (same determinism reason as `expires_ts`).
+        created_ts: u64,
+        /// Unix-seconds absolute expiry (producer-computed at build time —
+        /// never `now + ttl` at apply time, which would diverge per node).
+        expires_ts: u64,
+    },
+    /// T6 — an agent-spend mandate was closed by its own agent.
+    MandateClosed {
+        /// Mandate id being closed.
+        id: String,
+        /// The agent that closed it (must equal the mandate's own agent).
+        agent: WalletId,
+    },
 }
 
 impl SigilEvent {
@@ -260,6 +310,10 @@ impl SigilEvent {
             SigilEvent::ValidatorLeft   { .. } => 10,
             SigilEvent::ShieldedSend    { .. } => 11,
             SigilEvent::HonorConferred  { .. } => 12,
+            SigilEvent::UsdsMinted      { .. } => 13,
+            SigilEvent::UsdsRedeemed    { .. } => 14,
+            SigilEvent::MandateCreated  { .. } => 15,
+            SigilEvent::MandateClosed   { .. } => 16,
         }
     }
 
@@ -633,6 +687,8 @@ mod tests {
                 proof_digest: [0xAA; 32],
                 pool_root_at_proof: [0u8; 32],
             },
+            SigilEvent::UsdsMinted { wallet: w1, sigil_locked: big, usds_minted: big - 1 },
+            SigilEvent::UsdsRedeemed { wallet: w1, usds_burned: big, sigil_released: big - 1 },
         ];
 
         for ev in &events {

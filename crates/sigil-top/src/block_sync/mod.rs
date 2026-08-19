@@ -280,7 +280,7 @@ pub use super::block_store::StoredBlock;
 /// (`fetch_dns_anchor` + `sigil_dns_anchor::decode`), VERIFY the SQIsign sig over
 /// (block_hash‖4 roots‖height‖epoch), and REJECT stale anchors (monotonic epoch, age ≤ MAX) before
 /// returning Some — `fast_forward_to_anchored_checkpoint` trusts whatever this hands it.
-fn dns_anchor_tip() -> Option<(u64, sigil_header::BlockHash)> {
+async fn dns_anchor_tip() -> Option<(u64, sigil_header::BlockHash)> {
     // DEV-ONLY bench source (interim, until A lands the real DNS+SQIsign-verify fetch): the live
     // `_sigil-tip` DNS TXT is currently a dead template (A #449), so SIGIL_SNAPSHOT_ANCHOR=<height>:<hex32>
     // lets us exercise the full snapshot-pull → fast_forward path + measure blk/s NOW. Unset → None
@@ -298,7 +298,27 @@ fn dns_anchor_tip() -> Option<(u64, sigil_header::BlockHash)> {
     // anchor → sigil_dns_anchor::verify_signed_anchor (SQIsign) + key_id + freshness +
     // monotonic epoch. None until a real signed anchor is published (operator pins
     // SIGIL_ANCHOR_PK_HEX) → zero regression; the dev-inject above covers the bench.
-    fetch::fetch_verified_anchor_tip()
+    //
+    // v7.1.39 (grogu-sync-perf, 2026-08-19) — THE root cause of "0 peers forever" /
+    // snapshot-pull never firing, root-caused live via a full swarm-event trace: this
+    // function used to call `fetch::fetch_verified_anchor_tip()` (a SYNCHRONOUS reqwest
+    // ::blocking HTTP call) directly, inline, from THIS async fn while it was still a
+    // plain `fn` invoked straight from the block_sync tokio task. A blocking reqwest
+    // client builds+tears down its own internal mini tokio runtime per call; doing that
+    // from a thread that is ALREADY a tokio worker panics ("Cannot drop a runtime in a
+    // context where blocking is not allowed"), and since this call runs the instant the
+    // FIRST peer connects (the LANE-A gate below fires on !peers.is_empty()), the whole
+    // p2p sync task died silently on `tokio::spawn`'s un-awaited JoinHandle — visible only
+    // via `boot_trace()` (main.rs, /tmp/sigil-top-startup.log), NEVER on stdout/stderr,
+    // which is why it went undiagnosed all session despite extensive tlog! diagnostics
+    // (those were ALSO silently dropped in headless mode until the separate IN_TUI fix
+    // above — two independently-invisible bugs stacked on the exact same code path).
+    // Fix: run the blocking HTTP fetch on tokio's dedicated blocking-pool thread via
+    // spawn_blocking (the standard, sanctioned way to call blocking code from async Rust
+    // — the same pattern the tip-poller's `fetch_live_tip_blocking()` already uses via a
+    // plain `thread::spawn`, just via tokio's pool instead of a raw OS thread since this
+    // caller is already inside the runtime). No behavior change to the fetch itself.
+    tokio::task::spawn_blocking(fetch::fetch_verified_anchor_tip).await.ok().flatten()
 }
 
 impl P2PBlockSync {
@@ -883,7 +903,7 @@ impl P2PBlockSync {
                     let snap_on = std::env::var("SIGIL_SNAPSHOT").map(|v| v != "0").unwrap_or(true);
                     let peers = net.connected_peers();
                     if !snapshot_attempted && snap_on && store.synced_to() <= sync_base && !peers.is_empty() {
-                        if let Some((va_h, va_hash)) = dns_anchor_tip() {
+                        if let Some((va_h, va_hash)) = dns_anchor_tip().await {
                             snapshot_attempted = true;
                             let net_c = net.clone();
                             let send = move |peer, payload: Vec<u8>| {
@@ -2041,7 +2061,7 @@ impl P2PBlockSync {
                         // longer apply (synced_to has moved past sync_base, its own fresh-node gate).
                         let lane_a_window_closed = snapshot_attempted || store.synced_to() > sync_base;
                         if lane_a_window_closed {
-                            if let Some((anchor_h, anchor_hash)) = dns_anchor_tip() {
+                            if let Some((anchor_h, anchor_hash)) = dns_anchor_tip().await {
                                 match verify::fast_forward_to_anchored_checkpoint(
                                     &mut store, anchor_h, &anchor_hash, verify::DEFAULT_FRONTIER_WINDOW,
                                 ) {

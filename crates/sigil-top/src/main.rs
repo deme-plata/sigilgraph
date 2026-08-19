@@ -111,6 +111,23 @@ pub(crate) static IN_TUI: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 static LAST_PANIC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 pub(crate) fn log_line(s: String) {
+    // v7.1.39 (grogu-sync-perf, 2026-08-19): `full-sync` and every other headless
+    // subcommand NEVER call run_tui(), so IN_TUI stays false for their entire
+    // lifetime — which means EVERY crate::tlog!() call anywhere in the sync/fetch
+    // code ([snap-diag], [mesh] DIAL-FAIL, [anchor], [sync] snapshot-pull, VCATCH,
+    // etc.) was a silent no-op in the one mode most suited to reproducible testing
+    // (headless full-sync, CI gates). Root-caused live: a fresh full-sync repro run
+    // showed 0 peers for 85s straight with ZERO diagnostic output anywhere, even
+    // though extensive tlog! diagnostics were added earlier this session specifically
+    // to explain exactly this kind of stall. Fix: outside the TUI, tlog! lines are
+    // harmless on stderr (nothing owns the terminal) — print them directly, same as
+    // the pre-TUI eprintln convention documented at run_tui's top ("pre-TUI prints go
+    // to stderr — exactly where pre-UI diagnostics belong"). Zero behavior change
+    // inside the TUI (still routes to the logfile only, unsmeared).
+    if !IN_TUI.load(std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("{s}");
+        return;
+    }
     if IN_TUI.load(std::sync::atomic::Ordering::Relaxed) {
         let p = std::env::var("HOME")
             .map(|h| format!("{h}/.sigil-top.log"))
@@ -4015,11 +4032,16 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 app.update_rx = Some(rx);
                             }
                             KeyCode::Char('w') | KeyCode::Char('W') => {
-                                // v7.1.30: see the [L] handler's comment — [W] opens the same
-                                // hosted React/Vite/TS wallet now, same reasoning.
-                                let url = official_wallet_url();
-                                if open_browser_private(&url) {
-                                    app.toast = format!("🌐 wallet (private window) → {url}").into();
+                                // [W] is the node-local wallet: bring up the embedded server
+                                // first, then open its compiled-in UI. Keep this URL exact so
+                                // SIGIL_WALLET_URL/FLUX_WALLET_URL cannot redirect the shortcut
+                                // to the hosted wallet; [L] remains the explicit hosted option.
+                                let url = format!("http://localhost:{}/", wallet_ui::WALLET_PORT);
+                                if !ensure_serve_up(&mut app) {
+                                    app.toast = format!("✗ local wallet server down ({})", app.serve_status).into();
+                                    app.toast_sticky = true;
+                                } else if open_browser_private(&url) {
+                                    app.toast = format!("◆ local wallet → {url}").into();
                                     app.toast_sticky = false;
                                 } else {
                                     app.toast = format!("🔗 headless — open the wallet in any browser:  {url}").into();

@@ -35,6 +35,15 @@ mod wallet_ui;  // LANE-U: wallet/browser/tray/scheme plumbing
 use wallet_ui::*;
 mod local_api;   // v0.11.0: serve the explorer /api/* from the LOCAL verified spine
 mod cathedral;     // CATHEDRAL DAGKNIGHT: vaulted 4-root + DagKnight finality view
+// v7.1.40 (grogu-sync-perf, 2026-08-19): PRODUCER-MODE Phase 1 — inert scaffolding only.
+// `cathedral.rs`'s own doc comment already anticipated this: "Real flux-narwhal-core /
+// flux-consensus linearizer can be dropped in the run_dagknight_linearize slot later
+// without changing the surface." This module is that drop-in, ported (not yet — Phase 2)
+// from sigil-node's main.rs. Behind the `producer` Cargo feature (off by default) AND a
+// runtime double-gate (SIGIL_TOP_PRODUCER env, checked in main() below) so a shipped
+// producer-capable binary still defaults to today's light-client-only behavior.
+#[cfg(feature = "producer")]
+mod producer;
 
 use crate::cathedral::Cathedral;
 
@@ -1307,6 +1316,16 @@ fn main() {
     // read the EXACT reason instead of guessing.
     boot_trace(&format!("main() entry v{} pid {}", env!("CARGO_PKG_VERSION"), std::process::id()));
     std::panic::set_hook(Box::new(|info| { boot_trace(&format!("PANIC: {info}")); }));
+    // v7.1.40 producer-mode Phase 1: wire the runtime double-gate end-to-end now, while
+    // it's still guaranteed inert (both functions hardcode `false` until Phase 3/5), so
+    // the gate's presence and its boot-trace visibility are proven before anything real
+    // depends on them. A `producer`-feature binary run WITHOUT either env var behaves
+    // identically to today's shipping light client — this line changes nothing yet.
+    #[cfg(feature = "producer")]
+    boot_trace(&format!(
+        "producer-mode gates: SIGIL_TOP_PRODUCER→{} SIGIL_TOP_PRODUCE→{} (both inert, Phase 1)",
+        producer::producer_mode_enabled(), producer::should_produce()
+    ));
     // POOL-DIAG: report THIS release's version on every challenge fetch (`&v=`),
     // not the flux-miner engine-crate fallback — the pool's /mining/miners is how
     // stale rig installs get spotted.

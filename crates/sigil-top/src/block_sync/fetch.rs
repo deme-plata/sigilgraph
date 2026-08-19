@@ -114,7 +114,13 @@ static ANCHOR_LAST_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 pub(super) fn fetch_verified_anchor_tip() -> Option<(u64, BlockHash)> {
     use std::sync::atomic::Ordering;
     use std::time::{SystemTime, UNIX_EPOCH};
-    const EXPECTED_KEY_ID: &str = "d6214c8ddc0fca2b";
+    // v7.1.36 (grogu-sync-perf, 2026-08-19, operator-approved): NEW trust root. The old key
+    // (d6214c8ddc0fca2b) had its private half confirmed lost — only the pubkey survived at
+    // dist-fluxapp/sigil-anchor-key.json, its own anchor stale (h=6,455,733, predates the
+    // 2026-06-22 genesis reset), and nothing on Epsilon could sign with it. Minted fresh via
+    // sigil-dns-anchor/examples/mint_anchor.rs (self-verified before publish; private key
+    // never left disk, written 0600, never printed to any log/transcript).
+    const EXPECTED_KEY_ID: &str = "3c075722c49f8fe1";
     const MAX_ANCHOR_AGE_SECS: u64 = 24 * 3600; // reject anchors older than this
     const FUTURE_SKEW_SECS: u64 = 300; // reject implausibly future-dated anchors
 
@@ -144,28 +150,35 @@ pub(super) fn fetch_verified_anchor_tip() -> Option<(u64, BlockHash)> {
         .text()
         .ok()?;
 
-    let a = sigil_dns_anchor::decode(&txt).ok()?;
+    let a = match sigil_dns_anchor::decode(&txt) {
+        Ok(a) => a,
+        Err(e) => { crate::tlog!("[anchor] decode failed: {e} (txt len={})", txt.len()); return None; }
+    };
     // Reject legacy roots-only records up front (no block_hash/epoch → can't anchor a fold).
-    let epoch = a.epoch?;
-    let bh_hex = a.block_hash_hex.as_deref()?;
+    let epoch = match a.epoch { Some(e) => e, None => { crate::tlog!("[anchor] no epoch field"); return None; } };
+    let bh_hex = match a.block_hash_hex.as_deref() { Some(h) => h, None => { crate::tlog!("[anchor] no block_hash field"); return None; } };
 
     // key_id must be the expected producer key (defense vs a different signer's record).
     if a.key_id.as_str() != EXPECTED_KEY_ID {
+        crate::tlog!("[anchor] key_id mismatch: got {} expected {EXPECTED_KEY_ID}", a.key_id);
         return None;
     }
     // Monotonic replay guard (cheap; before the expensive verify). Only committed AFTER verify.
     if epoch <= ANCHOR_LAST_EPOCH.load(Ordering::Relaxed) {
+        crate::tlog!("[anchor] epoch {} <= last {}", epoch, ANCHOR_LAST_EPOCH.load(Ordering::Relaxed));
         return None;
     }
     // Freshness: reject stale OR implausibly future-dated. The sig binds epoch, so a future
     // date implies a buggy/compromised producer, not a peer — reject defensively.
     let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
     if now.saturating_sub(epoch) > MAX_ANCHOR_AGE_SECS || epoch > now + FUTURE_SKEW_SECS {
+        crate::tlog!("[anchor] freshness reject: now={now} epoch={epoch}");
         return None;
     }
 
     // Cryptographic verify (SQIsign, sigil-dns-anchor — keeps sigil-top flux-sqisign-free).
     if !sigil_dns_anchor::verify_signed_anchor(&a, &producer_pk).unwrap_or(false) {
+        crate::tlog!("[anchor] signature verify FAILED (pk len={})", producer_pk.len());
         return None;
     }
 

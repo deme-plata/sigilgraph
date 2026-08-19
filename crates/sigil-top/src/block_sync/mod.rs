@@ -1161,12 +1161,38 @@ impl P2PBlockSync {
                     }
                     let batch_n = drained.len();
                     let decode_t0 = Instant::now();
-                    let decoded: Vec<Option<Vec<SigilBlockHeaderV0>>> = {
-                        use rayon::prelude::*;
-                        drained
-                            .par_iter()
-                            .map(|(_, _, bytes)| bytes.as_ref().map(|b| decode_verify_backfill(b)))
-                            .collect()
+                    // v7.1.40 (grogu-sync-perf, 2026-08-19): this rayon `.par_iter()` call is
+                    // genuinely synchronous CPU-bound work with no `.await` inside it — it runs
+                    // straight on whichever tokio worker thread reaches it, blocking that thread
+                    // (and everything else scheduled on it: gossip drain, DBG prints, the next
+                    // tick's timer) for however long rayon takes to finish. Measured live on a
+                    // heavily-loaded box tonight: 9,506 ms for just 5 pages (vs this exact
+                    // function's own ~148k blk/s baseline on a quiet box) — rayon's global pool
+                    // was itself starved by other processes on the machine, and because this call
+                    // wasn't yielding, the WHOLE sync loop froze for the same duration (see memory
+                    // project_sigil_sync_index_vs_body_gap for the full trail). Moving it onto
+                    // tokio's blocking-pool via `spawn_blocking` doesn't make rayon itself faster
+                    // under contention, but it stops a slow decode from freezing everything ELSE
+                    // in the loop — network dials, gossip, DBG/verify ticks keep running on the
+                    // actual async workers while this one blocking-pool thread waits. `drained` is
+                    // moved in and handed back unchanged (nothing else in the loop reads it until
+                    // the zip below), so this is a pure isolation change, not a logic change.
+                    let (drained, decoded): (
+                        Vec<(u64, String, Option<Vec<u8>>)>,
+                        Vec<Option<Vec<SigilBlockHeaderV0>>>,
+                    ) = if batch_n > 0 {
+                        tokio::task::spawn_blocking(move || {
+                            use rayon::prelude::*;
+                            let decoded = drained
+                                .par_iter()
+                                .map(|(_, _, bytes)| bytes.as_ref().map(|b| decode_verify_backfill(b)))
+                                .collect();
+                            (drained, decoded)
+                        })
+                        .await
+                        .unwrap_or((Vec::new(), Vec::new()))
+                    } else {
+                        (drained, Vec::new())
                     };
                     // Observability for the parallel-decode seam: only logs when the batch is
                     // actually >1 (the case that benefits from rayon fan-out — a batch of 1 is a

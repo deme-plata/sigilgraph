@@ -39,6 +39,33 @@ use sigil_state::{
     commit_state_transition, PoolId, PoolState, SigilState, StateMutation, StateTransition,
     TokenId, WalletId, NATIVE,
 };
+// T6: /mandate/create + /mandate/close go through the real SigilTx chokepoint
+// (apply_tx → commit_state_transition) instead of writing sigil_bank::mandate
+// directly. `authorize()` above is still the real auth gate (a signature over
+// the HTTP request body, already verified before we get here) — the SignedTx
+// built below is a shape-only wrapper so apply_tx has something to match on;
+// apply_tx's own precheck() does not re-verify signatures in Phase 0.
+use sigil_header::{PubKeyBytes, SigScheme, SignatureBytes, SQISIGN_L5_LEN};
+use sigil_tx::{apply_tx, batch_into_transition, SigilTx, SignedTx};
+
+/// Shape-only `SignedTx` wrapper for a tx whose caller was already
+/// authenticated by `authorize()` above (a real signature over the HTTP
+/// request, checked before this is ever built). `apply_tx` only calls
+/// `precheck()` (sig length + signer==fee_payer), never `verify_signature()`,
+/// so a correctly-sized placeholder signature is sufficient and never
+/// mistaken for a verified one — same pattern sigil-tx's own test suite
+/// uses (`dummy_signed`).
+fn shape_only_signed(tx: SigilTx) -> SignedTx {
+    let from_pubkey = tx.fee_payer();
+    SignedTx {
+        tx,
+        from_pubkey,
+        nonce: 0,
+        sig_scheme: SigScheme::SqiSign5,
+        sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
+        pubkey: PubKeyBytes(Vec::new()),
+    }
+}
 
 /// The live SIGIL DEX economy. Beyond raw state, the daemon tracks the token +
 /// pool registries (so the swarm + dashboard can enumerate them), the verified-
@@ -2228,10 +2255,32 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             // the agent signs — a mandate is the agent's own bounded spend authority
             if let Err(e) = authorize(&mut n, &agent, "mandate_create",
                 &[to_hex(&agent), max_amount.to_string(), purpose.clone(), ttl_secs.to_string()], body) { return bad(&e); }
+            // id/created_ts/expires_ts computed ONCE, here, by rpcd (still the
+            // sole authority for this action) — then carried verbatim in the
+            // tx, same rule the T6 chain-native tx types require: never
+            // re-derive from local wall-clock at apply time.
             let now = now_ms() / 1000;
             let id = format!("mn-{}", &to_hex(blake3::hash(format!("{}|{}|{}", to_hex(&agent), now, n.mandates.mandates.len()).as_bytes()).as_bytes())[..12]);
-            let m = n.mandates.create(id, agent, max_amount, purpose, ttl_secs, now);
+            let expires_ts = now.saturating_add(ttl_secs);
+            let tx = SigilTx::MandateCreate {
+                id: id.clone(), agent, max_amount, purpose: purpose.clone(),
+                created_ts: now, expires_ts, fee: 0,
+            };
+            let result = match apply_tx(&n.state, &shape_only_signed(tx)) {
+                Ok(r) => r,
+                Err(e) => return bad(&format!("mandate tx rejected: {e}")),
+            };
+            let h = n.height;
+            if let Err(e) = commit_state_transition(&mut n.state, &batch_into_transition([result.clone()], h), h) {
+                return bad(&format!("mandate commit failed: {e:?}"));
+            }
+            n.height += 1;
+            // Fold the just-committed event into the live, queryable book —
+            // the same `fold_events` replay path a fresh node would use, run
+            // incrementally here instead of from scratch every request.
+            for evt in &result.events { n.mandates.apply_event(evt); }
             persist(&n);
+            let m = n.mandates.get(&id).expect("just-applied mandate must be present").clone();
             ok(format!("{{\"ok\":true,\"id\":\"{}\",\"agent\":\"{}\",\"max_amount\":{},\"expires_ts\":{},\"purpose\":{}}}",
                 m.id, to_hex(&agent), m.max_amount, m.expires_ts, serde_json::to_string(&m.purpose).unwrap_or_else(|_| "\"\"".into())))
         }
@@ -2250,7 +2299,17 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             let mut n = node.write().unwrap();
             match n.mandates.get(&id) { Some(m) if m.agent == agent => {}, Some(_) => return bad("not your mandate"), None => return bad("mandate not found") }
             if let Err(e) = authorize(&mut n, &agent, "mandate_close", &[id.clone(), to_hex(&agent)], body) { return bad(&e); }
-            n.mandates.close(&id);
+            let tx = SigilTx::MandateClose { id: id.clone(), agent, fee: 0 };
+            let result = match apply_tx(&n.state, &shape_only_signed(tx)) {
+                Ok(r) => r,
+                Err(e) => return bad(&format!("mandate close tx rejected: {e}")),
+            };
+            let h = n.height;
+            if let Err(e) = commit_state_transition(&mut n.state, &batch_into_transition([result.clone()], h), h) {
+                return bad(&format!("mandate close commit failed: {e:?}"));
+            }
+            n.height += 1;
+            for evt in &result.events { n.mandates.apply_event(evt); }
             persist(&n);
             ok(format!("{{\"ok\":true,\"id\":\"{}\",\"status\":\"closed\"}}", id))
         }

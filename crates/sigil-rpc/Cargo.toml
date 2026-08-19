@@ -16,6 +16,10 @@ sigil-state = { path = "../sigil-state" }
 sigil-dex   = { path = "../sigil-dex" }
 sigil-bank  = { path = "../sigil-bank" }
 sigil-oauth = { path = "../sigil-oauth" }
+# T6: /mandate/create + /mandate/close build a real SigilTx::MandateCreate/
+# MandateClose and apply it through the same apply_tx/commit_state_transition
+# chokepoint every other tx uses, instead of writing the local book directly.
+sigil-tx    = { path = "../sigil-tx" }
 # University credential economy: the money-bridge module wires its pure spine
 # (award verify → points → settle → graduate) to the state chokepoint.
 sigil-university = { path = "../sigil-university" }

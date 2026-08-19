@@ -821,6 +821,26 @@ impl P2PBlockSync {
                 // None (flag off) → byte-identical legacy archive::ingest_bodies_verified path.
                 let mut pass2_sink: Option<fast_forward::Pass2Sink> =
                     fast_forward::sst_ingest_active().then(fast_forward::Pass2Sink::from_env);
+                // v7.1.35 (grogu-sync-perf): VCATCH — a skeleton/anchor-INDEPENDENT fallback body
+                // backfill. Root cause (swarm msg #85-87, saved to memory
+                // project_sigil_sync_index_vs_body_gap_2026_08_18): `synced_to` advances via
+                // `has_height()` (block_store.rs) which checks ONLY the height->hash index, not the
+                // full body — so a LANE-S trust-jump (or any bulk index write) races `synced_to`
+                // forward while `verified_to` (which needs the real body via `get_stored_at_height`)
+                // stays stuck at genesis. PASS2 is the intended fix but is dormant until pass-1
+                // populates the skeleton, which is gated on `dns_anchor_tip()` — confirmed live
+                // (2026-08-18) that no signed anchor is published anywhere, including production, so
+                // pass2 has never actually run. VCATCH does the same job pass2 would (fetch the
+                // missing body range) WITHOUT any skeleton/anchor dependency: it just requests
+                // [verified_to, verified_to+CHUNK) directly. `verify_to_parallel` (chain_verify.rs)
+                // does its OWN full cryptographic verification once the data lands via the normal
+                // commit path, so this needs no skeleton-hash cross-check — it only has to get real
+                // bytes onto disk where the existing verifier can find them. Single in-flight,
+                // low-priority (does not compete with the frontier refill above), full-archive only.
+                let (vcatch_tx, vcatch_rx) = mpsc::channel::<(u64, Option<Vec<u8>>)>();
+                let mut vcatch_inflight = false;
+                let mut last_vcatch = crate::instant_ago(10);
+                let vcatch_env = std::env::var("SIGIL_VCATCH").map(|v| v != "0").unwrap_or(true);
                 // v0.96 (fixes a live infinite-retry stall, 2026-08-18): pass2 fetches MATURE
                 // headers — each carries a full StarkProof + Wesolowski VDF proof + 2 SQIsign
                 // sigs, ~8 KB/header per the zstd_decompress_body comment — not the small/stub
@@ -1777,6 +1797,53 @@ impl P2PBlockSync {
                                     tokio::spawn(async move {
                                         let r = tokio::time::timeout(REQ_TIMEOUT, n.send_request(peer, payload)).await;
                                         let _ = tx.send((from, r.ok().and_then(|x| x.ok())));
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    // ── VCATCH: skeleton/anchor-independent body backfill (see decl comment) ──
+                    if vcatch_env && !recent_only_rt.load(Ordering::Relaxed) {
+                        while let Ok((gap_from, bytes)) = vcatch_rx.try_recv() {
+                            vcatch_inflight = false;
+                            if let Some(b) = bytes {
+                                let headers = decode_verify_backfill(&b);
+                                let got = headers.len();
+                                if got > 0 {
+                                    // NOT commit_ring.push_slice: that path treats anything below
+                                    // store.synced_to() as "already stored" and silently drops it
+                                    // (commit.rs:175-186, correct for the classic frontier-advancing
+                                    // case) — but synced_to is exactly the inflated, index-only
+                                    // watermark this mechanism exists to work AROUND, so every
+                                    // VCATCH page landed below it and was discarded (measured live:
+                                    // "got=10001 headers" every 500ms, verified_to never moved).
+                                    // put_blocks_batch writes directly, no synced_to-relative skip.
+                                    let stored = store.put_blocks_batch(&headers);
+                                    store.advance();
+                                    crate::tlog!("[vcatch] gap@{} got={} stored={} verified_to={} synced_to={}",
+                                        gap_from, got, stored, store.verified_to(), store.synced_to());
+                                }
+                            }
+                        }
+                        if !vcatch_inflight && last_vcatch.elapsed() >= Duration::from_millis(500) {
+                            last_vcatch = Instant::now();
+                            let v = store.verified_to().max(store.base());
+                            let s = store.synced_to();
+                            // Only reach past the synced frontier, and only when there's a REAL gap
+                            // worth a request (avoids spamming a 1-block gap every 500ms at the tip).
+                            if s > v.saturating_add(CHUNK / 4) {
+                                if let Some(peer) = net.connected_peers().first().cloned() {
+                                    vcatch_inflight = true;
+                                    let to = (v + CHUNK).min(s);
+                                    let payload = serde_json::to_vec(
+                                        &BackfillReq { from: v, to, headers_only: true, codec: 1 }
+                                    ).unwrap();
+                                    let n = net.clone();
+                                    let tx = vcatch_tx.clone();
+                                    tokio::spawn(async move {
+                                        let r = tokio::time::timeout(REQ_TIMEOUT, n.send_request(peer, payload)).await;
+                                        let _ = tx.send((v, r.ok().and_then(|x| x.ok())));
                                     });
                                 }
                             }

@@ -573,8 +573,29 @@ impl P2PBlockSync {
             // when the main loop awaits, so the live `SyncProgress` event flood starved them
             // → every request timed out → synced stuck at 0. Worker threads run the request
             // tasks truly concurrently, fully decoupled from the loop.
+            //
+            // v7.1.39 (grogu-sync-perf, 2026-08-19): investigated a stall found live tonight —
+            // sync freezes for extended periods, `inflight` requests never resolve despite a
+            // 10s REQ_TIMEOUT, no panic. Initially suspected worker-thread starvation (several
+            // sections do genuinely synchronous CPU-bound work inline — rayon `.par_iter()`
+            // decode, blake3 hashing, the durable commit flush — none `spawn_blocking`'d, and
+            // with only 3 workers a couple of those back-to-back could starve everything else,
+            // the same failure class the v0.10.0 comment above already describes). Tested
+            // directly by bumping to 16 workers live: **no change** — ruled out. Sequential
+            // checkpoint instrumentation (temp, reverted) then caught the real cause in the
+            // act: a single rayon-parallel decode of just 5 pages took 9,506 ms — vs the same
+            // function's own measured baseline earlier this session (hundreds of thousands of
+            // headers/sec). That is box-wide CPU starvation (load ~19, swap 100% full from
+            // several concurrent sessions + an auto-triggered build), not a code bug — see
+            // memory project_sigil_sync_index_vs_body_gap for the full trail. Left this knob in
+            // anyway: it's a safe, env-gated, zero-risk-when-unset tunable in the codebase's
+            // established pattern (SIGIL_SYNC_INFLIGHT, SIGIL_COMMIT_BATCH, …), and more workers
+            // is still a reasonable lever for genuine (non-external) contention even though it
+            // didn't move tonight's specific symptom. Default unchanged (3).
+            let worker_threads: usize = std::env::var("SIGIL_SYNC_WORKER_THREADS")
+                .ok().and_then(|v| v.parse().ok()).map(|n: usize| n.clamp(2, 32)).unwrap_or(3);
             let rt = match tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(3).enable_all().build()
+                .worker_threads(worker_threads).enable_all().build()
             {
                 Ok(rt) => rt,
                 Err(_) => return,

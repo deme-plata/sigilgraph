@@ -535,6 +535,18 @@ where
     const MAX_P_BYTES: usize = 4096; // 'P' is ~90 B fixed — cap a forged length prefix
     const MAX_S_BYTES: usize = MAX_PAGE_RECS * 80 + 64; // ~8 MB — bounds Vec<SkeletonRecord> alloc
     const MAX_F_BYTES: usize = 64 * 1024 * 1024; // trailer cap (M1 tiny; M2 fold_blob — B-chunked)
+    // v7.1.37 (grogu-sync-perf, 2026-08-19, operator-approved): NONE of the three request
+    // sites here ever had a timeout — `send(...).await` with no wrapper, unlike every other
+    // request in this codebase (the classic refill loop wraps every send in
+    // `tokio::time::timeout(REQ_TIMEOUT, ...)`). Live-diagnosed: 'P' discovery and the first
+    // 'S' page both succeeded fast (202ms for 2.36MB), then the whole pull hung for the rest
+    // of an 85s test with zero further progress and zero error — a later page (or the 'F'
+    // trailer, which the server computes by re-hashing the ENTIRE archive range on every
+    // request) never answered, and there was nothing to time it out. A single slow/stuck
+    // page silently hung the WHOLE snapshot-pull attempt instead of failing fast into the
+    // codec=1 crawl fallback it exists to be safe to fall back to.
+    const SNAP_REQ_TIMEOUT: Duration = Duration::from_secs(20);
+    crate::tlog!("[snap-diag] pull_snapshot entered, peers.len()={}", peers.len());
     if peers.is_empty() {
         return Err(SnapshotError::Empty);
     }
@@ -548,9 +560,19 @@ where
     let mut header: Option<SnapshotHeader> = None;
     for p in peers {
         let body = mk(0, 0, 3)?;
-        if let Ok(resp) = send(p.clone(), body).await {
-            if resp.first() == Some(&b'P') && resp.len() <= MAX_P_BYTES {
-                if let Ok(h) = bincode::deserialize::<SnapshotHeader>(&resp[1..]) {
+        match tokio::time::timeout(SNAP_REQ_TIMEOUT, send(p.clone(), body)).await {
+            Err(_) => crate::tlog!("[snap-diag] 'P' request TIMED OUT after {SNAP_REQ_TIMEOUT:?}"),
+            Ok(Err(e)) => crate::tlog!("[snap-diag] 'P' request failed (transport): {e}"),
+            Ok(Ok(resp)) => {
+                if resp.first() != Some(&b'P') {
+                    crate::tlog!("[snap-diag] 'P' request answered but tag={:?} len={} (not 'P') — first 16B: {:?}",
+                        resp.first().map(|b| *b as char), resp.len(), &resp[..resp.len().min(16)]);
+                } else if resp.len() > MAX_P_BYTES {
+                    crate::tlog!("[snap-diag] 'P' response too large: {} > {MAX_P_BYTES}", resp.len());
+                } else if let Err(e) = bincode::deserialize::<SnapshotHeader>(&resp[1..]) {
+                    crate::tlog!("[snap-diag] 'P' header bincode decode failed: {e}");
+                } else if let Ok(h) = bincode::deserialize::<SnapshotHeader>(&resp[1..]) {
+                    crate::tlog!("[snap-diag] 'P' discovered OK: base={} anchor={} count={}", h.base_height, h.anchor_height, h.count);
                     server = Some(p.clone());
                     header = Some(h);
                     break;
@@ -578,11 +600,19 @@ where
     while done < total {
         let from = base + done;
         let to = (from + PAGE).min(base + total);
-        let resp = send(server.clone(), mk(from, to, 2)?)
-            .await
-            .map_err(|_| SnapshotError::Empty)?;
+        let page_t0 = std::time::Instant::now();
+        let resp = match tokio::time::timeout(SNAP_REQ_TIMEOUT, send(server.clone(), mk(from, to, 2)?)).await {
+            Err(_) => { crate::tlog!("[snap-diag] 'S' page [{from}..{to}) TIMED OUT after {SNAP_REQ_TIMEOUT:?}"); return Err(SnapshotError::Empty); }
+            Ok(Err(e)) => { crate::tlog!("[snap-diag] 'S' page [{from}..{to}) transport failed after {} ms: {e}", page_t0.elapsed().as_millis()); return Err(SnapshotError::Empty); }
+            Ok(Ok(r)) => r,
+        };
         if resp.first() != Some(&b'S') || resp.len() > MAX_S_BYTES {
+            crate::tlog!("[snap-diag] 'S' page [{from}..{to}) bad response: tag={:?} len={} (took {} ms)",
+                resp.first().map(|b| *b as char), resp.len(), page_t0.elapsed().as_millis());
             return Err(SnapshotError::Empty);
+        }
+        if done == 0 {
+            crate::tlog!("[snap-diag] 'S' first page [{from}..{to}) OK in {} ms, {} B", page_t0.elapsed().as_millis(), resp.len());
         }
         // LANE 3: ONE-PASS over the raw page body — ZERO record materialization. The 'S'
         // payload `bincode(Vec<SkeletonRecord>)` is `u64 LE count ‖ N×72B`, each 72B record
@@ -618,15 +648,32 @@ where
     }
 
     // (c) FOLD + TRAILER (codec=4 → 'F'); finalize RECOMPUTES the root vs the trailer claim.
-    let resp = send(server, mk(base, header.anchor_height, 4)?)
-        .await
-        .map_err(|_| SnapshotError::Empty)?;
+    let f_t0 = std::time::Instant::now();
+    crate::tlog!("[snap-diag] all {done} 'S' records streamed OK, requesting 'F' trailer...");
+    // 'F' gets a longer budget than 'P'/'S': the current server implementation recomputes
+    // the archive root by re-hashing every record in [base, anchor] on EVERY request (no
+    // caching), so for a multi-million-block chain this is genuinely the heaviest single
+    // request in the whole protocol, not a hang — give it real room before giving up.
+    const SNAP_F_TIMEOUT: Duration = Duration::from_secs(90);
+    let resp = match tokio::time::timeout(SNAP_F_TIMEOUT, send(server, mk(base, header.anchor_height, 4)?)).await {
+        Err(_) => { crate::tlog!("[snap-diag] 'F' request TIMED OUT after {SNAP_F_TIMEOUT:?}"); return Err(SnapshotError::Empty); }
+        Ok(Err(e)) => { crate::tlog!("[snap-diag] 'F' request failed after {} ms: {e}", f_t0.elapsed().as_millis()); return Err(SnapshotError::Empty); }
+        Ok(Ok(r)) => r,
+    };
     if resp.first() != Some(&b'F') || resp.len() > MAX_F_BYTES {
+        crate::tlog!("[snap-diag] 'F' bad response: tag={:?} len={} (took {} ms)",
+            resp.first().map(|b| *b as char), resp.len(), f_t0.elapsed().as_millis());
         return Err(SnapshotError::Empty);
     }
-    let trailer: SnapshotTrailer =
-        bincode::deserialize(&resp[1..]).map_err(|_| SnapshotError::Encode)?;
-    verifier.finalize(&trailer)
+    crate::tlog!("[snap-diag] 'F' received OK in {} ms, {} B", f_t0.elapsed().as_millis(), resp.len());
+    let trailer: SnapshotTrailer = match bincode::deserialize(&resp[1..]) {
+        Ok(t) => t,
+        Err(e) => { crate::tlog!("[snap-diag] 'F' trailer bincode decode failed: {e}"); return Err(SnapshotError::Encode); }
+    };
+    match verifier.finalize(&trailer) {
+        Ok(v) => { crate::tlog!("[snap-diag] finalize OK: {} records verified", v.records); Ok(v) }
+        Err(e) => { crate::tlog!("[snap-diag] finalize FAILED: {e:?}"); Err(e) }
+    }
 }
 
 #[cfg(test)]

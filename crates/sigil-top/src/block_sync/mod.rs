@@ -1202,6 +1202,21 @@ impl P2PBlockSync {
                     if batch_n > 1 {
                         crate::tlog!("[LANE3] batched decode: {batch_n} pages in {} ms", decode_t0.elapsed().as_millis());
                     }
+                    // v7.1.40 (grogu-sync-perf, 2026-08-19): accumulate this tick's headers here
+                    // instead of calling `commit_ring.push_slice()` inline per item (below) — the
+                    // SECOND synchronous, unisolated call measured live tonight (9.3s for one
+                    // durable commit+fsync). One combined push_slice, wrapped in spawn_blocking,
+                    // runs once after this loop (see below) instead of once per item, so a slow
+                    // commit can no longer freeze the whole tick. `headers` isn't read again after
+                    // `.len()` in the arm below, so accumulating instead of pushing immediately is
+                    // a pure reordering: flush() sorts+dedups by height regardless of push order,
+                    // so this doesn't change WHAT gets committed. It DOES mean `store.synced_to()`
+                    // reads elsewhere in this same loop iteration (diagnostics + the frontier-wedge
+                    // heuristic below) see this tick's PRE-batch watermark rather than a
+                    // mid-batch-advanced one — display/heuristic staleness only, not a correctness
+                    // change (the actual commit is still exactly the same headers, sorted+deduped
+                    // the same way, before the loop below re-reads synced_to for real work).
+                    let mut pending_headers: Vec<SigilBlockHeaderV0> = Vec::new();
                     for ((start, peer, bytes), headers_precomputed) in
                         drained.into_iter().zip(decoded.into_iter())
                     {
@@ -1215,7 +1230,7 @@ impl P2PBlockSync {
                                 peer_bench.remove(&peer);              // answered → healthy again
                                 let headers = headers_precomputed.unwrap_or_default();
                                 let got = headers.len();
-                                commit_ring.push_slice(&mut store, &headers);
+                                pending_headers.extend(headers);
                                 bytes_session += b.len() as u64;
                                 if got > 0 {
                                     fetched_ok = true;
@@ -1314,7 +1329,24 @@ impl P2PBlockSync {
                     // idempotent. advance() here keeps the frontier fresh the instant a chunk lands.
                     // LANE-C write-through: drain the ring to durable storage BEFORE the frontier
                     // cursor re-reads synced_to(), so buffered heights are never re-fetched.
-                    commit_ring.flush(&mut store);
+                    //
+                    // v7.1.40 (grogu-sync-perf, 2026-08-19): both the deferred push (this tick's
+                    // accumulated `pending_headers`, see above) and this flush are synchronous,
+                    // durable-commit-and-fsync work — measured live at 9.3s for one call under
+                    // heavy box contention, previously freezing the ENTIRE loop (network dials,
+                    // gossip, DBG/verify ticks) for that whole duration since it ran inline on the
+                    // tokio worker thread. `spawn_blocking` moves it to tokio's dedicated blocking
+                    // pool: other async work on this runtime keeps progressing while a slow commit
+                    // finishes. `store`/`commit_ring` are moved in and back out — nothing else
+                    // reads or writes them while this is in flight (this is the only await point
+                    // in the whole tick that touches either), so this is a pure isolation change.
+                    let (rs, rc) = tokio::task::spawn_blocking(move || {
+                        commit_ring.push_slice(&mut store, &pending_headers);
+                        commit_ring.flush(&mut store);
+                        (store, commit_ring)
+                    }).await.unwrap();
+                    store = rs;
+                    commit_ring = rc;
                     {
                         let pb = state.lock().unwrap_or_else(|e| e.into_inner()).peer_best_height;
                         let deep_gap = store.synced_to().saturating_add(CHUNK.saturating_mul(4)) < pb;

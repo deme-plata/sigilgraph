@@ -529,7 +529,16 @@ where
     F: Fn(P, Vec<u8>) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<u8>, String>>,
 {
-    const PAGE: u64 = 50_000; // ~3.6 MB/page at 72 B (SIGIL_SNAP_PAGE)
+    // v7.1.38 (grogu-sync-perf, 2026-08-19): was 50_000, but the server's default
+    // SIGIL_SERVE_HEADERS_CAP (sigil-node/main.rs) is 32_768 -- every 'S' page request
+    // silently got clamped server-side to ~32.7k records instead of the 50k asked for.
+    // The client already handles a short page correctly (advances `done` by the ACTUAL
+    // count received, not the requested size), so this was never a correctness bug --
+    // just ~53% more round trips than the design intended. Matching PAGE to the server's
+    // real ceiling removes the wasted over-asking. Pure client-side constant; zero
+    // live-producer risk; does not change wire format or server behavior.
+    const PAGE: u64 = 32_768; // ~2.36 MB/page at 72 B — matches server's default served cap
+
     const MAX_PAGE_RECS: usize = 100_000; // hard per-page guard (resource attack)
     const MAX_SNAPSHOT_RECORDS: u64 = 50_000_000; // sane prefix bound (chain ~6.7M today)
     const MAX_P_BYTES: usize = 4096; // 'P' is ~90 B fixed — cap a forged length prefix

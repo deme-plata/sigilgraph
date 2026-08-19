@@ -306,6 +306,67 @@ pub enum SigilTx {
         #[serde(with = "u128_str")]
         fee: u128,
     },
+    /// T6 — a council member files a treasury-transfer proposal (auto-
+    /// approves it as approval #1). No balance moves here.
+    BankPropose {
+        /// Proposal id — assigned once by the tx builder, carried verbatim.
+        id: String,
+        /// Treasury wallet the transfer would debit.
+        from: WalletId,
+        /// Recipient wallet.
+        to: WalletId,
+        /// Token to transfer. All-zero = native SIGIL.
+        token: TokenId,
+        /// Amount in the token's base units.
+        #[serde(with = "u128_str")]
+        amount: u128,
+        /// The proposing council member — also the fee payer (counts as
+        /// approval #1, same as `Council::propose` already does).
+        proposer: WalletId,
+        /// Unix-seconds absolute creation time, computed once by the tx
+        /// builder.
+        created_ts: u64,
+        /// Fee in native SIGIL.
+        #[serde(with = "u128_str")]
+        fee: u128,
+    },
+    /// T6 — a council member approves an existing proposal. No balance
+    /// moves here either — whether this reaches threshold is a caller-side
+    /// question (the caller holds the replayed Council); if it does, the
+    /// caller separately builds a `BankExecute`.
+    BankApprove {
+        /// Proposal id being approved.
+        id: String,
+        /// The approving council member.
+        approver: WalletId,
+        /// Fee in native SIGIL.
+        #[serde(with = "u128_str")]
+        fee: u128,
+    },
+    /// T6 — execute a treasury transfer whose proposal just reached the
+    /// council's approval threshold. Unlike Propose/Approve, this DOES move
+    /// money — validated the same way `Send` is (balance-sufficiency
+    /// checked here, aliasing-safe).
+    BankExecute {
+        /// Proposal id that reached threshold.
+        id: String,
+        /// Treasury wallet to debit.
+        from: WalletId,
+        /// Recipient wallet to credit.
+        to: WalletId,
+        /// Token to move. All-zero = native SIGIL.
+        token: TokenId,
+        /// Amount to move, in the token's base units.
+        #[serde(with = "u128_str")]
+        amount: u128,
+        /// Whichever council member's approval tipped this proposal over
+        /// threshold — a treasury-mandated transfer has no single natural
+        /// signer, so this is the closest honest fee payer.
+        executor: WalletId,
+        /// Fee in native SIGIL.
+        #[serde(with = "u128_str")]
+        fee: u128,
+    },
 }
 
 /// Compact tag for indexing — matches [`SigilEvent::tag`] convention. The
@@ -329,6 +390,9 @@ impl SigilTx {
             SigilTx::UsdsRedeem      { .. } => 10,
             SigilTx::MandateCreate   { .. } => 11,
             SigilTx::MandateClose    { .. } => 12,
+            SigilTx::BankPropose     { .. } => 13,
+            SigilTx::BankApprove     { .. } => 14,
+            SigilTx::BankExecute     { .. } => 15,
         }
     }
 
@@ -348,7 +412,10 @@ impl SigilTx {
             SigilTx::UsdsMint        { fee, .. } |
             SigilTx::UsdsRedeem      { fee, .. } |
             SigilTx::MandateCreate   { fee, .. } |
-            SigilTx::MandateClose    { fee, .. } => *fee,
+            SigilTx::MandateClose    { fee, .. } |
+            SigilTx::BankPropose     { fee, .. } |
+            SigilTx::BankApprove     { fee, .. } |
+            SigilTx::BankExecute     { fee, .. } => *fee,
         }
     }
 
@@ -368,6 +435,9 @@ impl SigilTx {
             SigilTx::UsdsRedeem { from, .. } => *from,
             SigilTx::MandateCreate { agent, .. } => *agent,
             SigilTx::MandateClose { agent, .. } => *agent,
+            SigilTx::BankPropose { proposer, .. } => *proposer,
+            SigilTx::BankApprove { approver, .. } => *approver,
+            SigilTx::BankExecute { executor, .. } => *executor,
         }
     }
 
@@ -1527,6 +1597,50 @@ pub fn apply_tx(state: &SigilState, signed: &SignedTx) -> Result<ApplyResult, Tx
             out.mutations.push(StateMutation::PushEventHash(evt.leaf_hash()));
             out.events.push(evt);
         }
+        SigilTx::BankPropose { id, from, to, token, amount, proposer, created_ts, .. } => {
+            // Event-only, same reasoning as MandateCreate: the replayed
+            // Council (not SigilState) is where "does this exist / who has
+            // approved" lives — apply_tx just records the fact it happened.
+            let evt = SigilEvent::BankProposed {
+                id: id.clone(), from: *from, to: *to, token: *token, amount: *amount,
+                proposer: *proposer, created_ts: *created_ts,
+            };
+            out.mutations.push(StateMutation::PushEventHash(evt.leaf_hash()));
+            out.events.push(evt);
+        }
+        SigilTx::BankApprove { id, approver, .. } => {
+            // Event-only — see BankPropose. Whether this reaches threshold
+            // is the caller's question, not apply_tx's.
+            let evt = SigilEvent::BankApproved { id: id.clone(), approver: *approver };
+            out.mutations.push(StateMutation::PushEventHash(evt.leaf_hash()));
+            out.events.push(evt);
+        }
+        SigilTx::BankExecute { id, from, to, token, amount, .. } => {
+            // Real balance movement — same aliasing-safe shape as `Send`
+            // (single unique-slot debit when from==to, so a degenerate
+            // self-transfer nets to zero instead of minting `amount`), but
+            // without Send's native-fee bookkeeping: the CURRENT live
+            // behavior this replaces (sigil-rpcd's /bank/approve execute
+            // step) never charged one either — `fee` on this variant is
+            // reserved for a future policy, not enforced here.
+            let from_bal = state.balance_of(from, token);
+            if from_bal < *amount {
+                return Err(TxApplyError::InsufficientBalance { have: from_bal, need: *amount });
+            }
+            if from == to {
+                // Debit and credit cancel on the same slot — no-op transfer,
+                // net zero, matches Send's self-send handling.
+            } else {
+                let new_from = from_bal - *amount;
+                let to_bal = state.balance_of(to, token);
+                let new_to = to_bal.checked_add(*amount).ok_or(TxApplyError::Overflow)?;
+                out.mutations.push(StateMutation::SetBalance { wallet: *from, token: *token, amount: new_from });
+                out.mutations.push(StateMutation::SetBalance { wallet: *to, token: *token, amount: new_to });
+            }
+            let evt = SigilEvent::BankExecuted { id: id.clone(), from: *from, to: *to, token: *token, amount: *amount };
+            out.mutations.push(StateMutation::PushEventHash(evt.leaf_hash()));
+            out.events.push(evt);
+        }
     }
 
     Ok(out)
@@ -1869,6 +1983,103 @@ mod tests {
         assert_eq!(node_a.roots().event_log_root, node_b.roots().event_log_root);
         assert_eq!(final_a.get("m1").unwrap().status, "closed");
         assert!(!final_a.get("m1").unwrap().is_live(1_500), "closed authorizes nothing even before expiry");
+    }
+
+    /// T6 PROOF (bank council) — propose, first approval (not yet at
+    /// threshold), second approval (reaches 2-of-2, so the caller also
+    /// submits BankExecute — same two-step shape rpcd's handler uses: one
+    /// apply for the approval event, a second for the resulting transfer).
+    /// Run independently on two nodes that never share state; assert both
+    /// the replayed Council AND the actual moved balances converge.
+    #[test]
+    fn bank_propose_approve_execute_converges_across_two_independent_nodes() {
+        let treasury: WalletId = [4u8; 32];
+        let m1: WalletId = [5u8; 32];
+        let m2: WalletId = [6u8; 32];
+        let recipient: WalletId = [7u8; 32];
+
+        let propose = dummy_signed(SigilTx::BankPropose {
+            id: "p1".into(), from: treasury, to: recipient, token: NATIVE, amount: 300,
+            proposer: m1, created_ts: 1_000, fee: 0,
+        });
+        let approve1 = dummy_signed(SigilTx::BankApprove { id: "p1".into(), approver: m1, fee: 0 });
+        let approve2 = dummy_signed(SigilTx::BankApprove { id: "p1".into(), approver: m2, fee: 0 });
+        let execute = dummy_signed(SigilTx::BankExecute {
+            id: "p1".into(), from: treasury, to: recipient, token: NATIVE, amount: 300,
+            executor: m2, fee: 0,
+        });
+
+        let mut node_a = SigilState::new();
+        let mut node_b = SigilState::new();
+        fund(&mut node_a, treasury, 1_000);
+        fund(&mut node_b, treasury, 1_000);
+
+        let mut events_a = Vec::new();
+        let mut events_b = Vec::new();
+        let mut h_a = 1u64;
+        let mut h_b = 1u64;
+        for tx in [&propose, &approve1] {
+            let ra = apply_tx(&node_a, tx).unwrap();
+            commit_state_transition(&mut node_a, &batch_into_transition([ra.clone()], h_a), h_a).unwrap();
+            events_a.extend(ra.events);
+            h_a += 1;
+            let rb = apply_tx(&node_b, tx).unwrap();
+            commit_state_transition(&mut node_b, &batch_into_transition([rb.clone()], h_b), h_b).unwrap();
+            events_b.extend(rb.events);
+            h_b += 1;
+        }
+
+        // Each node independently checks ITS OWN replayed Council for
+        // threshold — same check rpcd's handler performs after approve2.
+        let mut council_a = sigil_bank::council::fold_events(events_a.iter());
+        council_a.seed(vec![m1, m2], 2);
+        let ready_a = council_a.approve("p1", m2).unwrap();
+        assert!(ready_a, "second approval must reach 2-of-2");
+
+        // Now apply approve2 + execute for real on both nodes.
+        for tx in [&approve2, &execute] {
+            let ra = apply_tx(&node_a, tx).unwrap();
+            commit_state_transition(&mut node_a, &batch_into_transition([ra.clone()], h_a), h_a).unwrap();
+            events_a.extend(ra.events);
+            h_a += 1;
+            let rb = apply_tx(&node_b, tx).unwrap();
+            commit_state_transition(&mut node_b, &batch_into_transition([rb.clone()], h_b), h_b).unwrap();
+            events_b.extend(rb.events);
+            h_b += 1;
+        }
+
+        let mut final_a = sigil_bank::council::fold_events(events_a.iter());
+        let mut final_b = sigil_bank::council::fold_events(events_b.iter());
+        final_a.seed(vec![m1, m2], 2);
+        final_b.seed(vec![m1, m2], 2);
+        assert_eq!(final_a, final_b);
+        assert_eq!(final_a.get("p1").unwrap().status, "executed");
+        assert_eq!(final_a.get("p1").unwrap().approvals.len(), 2);
+
+        // The money side converges too — not just the paperwork.
+        assert_eq!(node_a.balance_of(&treasury, &NATIVE), 700);
+        assert_eq!(node_a.balance_of(&recipient, &NATIVE), 300);
+        assert_eq!(node_b.balance_of(&treasury, &NATIVE), 700);
+        assert_eq!(node_b.balance_of(&recipient, &NATIVE), 300);
+        assert_eq!(node_a.roots().wallet_state_root, node_b.roots().wallet_state_root);
+    }
+
+    /// A degenerate proposal where `from == to` must net to zero, not mint
+    /// `amount` — same aliasing class Send/LpDeposit already guard against.
+    #[test]
+    fn bank_execute_self_transfer_does_not_mint() {
+        let treasury: WalletId = [4u8; 32];
+        let mut s = SigilState::new();
+        fund(&mut s, treasury, 1_000);
+        let tx = dummy_signed(SigilTx::BankExecute {
+            id: "p2".into(), from: treasury, to: treasury, token: NATIVE, amount: 400,
+            executor: [6u8; 32], fee: 0,
+        });
+        let result = apply_tx(&s, &tx).unwrap();
+        assert!(result.mutations.iter().all(|m| !matches!(m, StateMutation::SetBalance { .. })),
+            "self-transfer must emit no SetBalance at all, not a cancelling pair");
+        commit_state_transition(&mut s, &batch_into_transition([result], 1), 1).unwrap();
+        assert_eq!(s.balance_of(&treasury, &NATIVE), 1_000, "unchanged — no mint, no burn");
     }
 
     #[test]

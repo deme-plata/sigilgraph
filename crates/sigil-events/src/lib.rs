@@ -290,6 +290,53 @@ pub enum SigilEvent {
         /// The agent that closed it (must equal the mandate's own agent).
         agent: WalletId,
     },
+    /// T6 — a council member filed a treasury-transfer proposal (and
+    /// auto-approved it, per `sigil_bank::council::Council::propose`).
+    BankProposed {
+        /// Proposal id (blake3-derived by the tx builder).
+        id: String,
+        /// Treasury wallet the transfer debits.
+        from: WalletId,
+        /// Recipient wallet.
+        to: WalletId,
+        /// Token to transfer. All-zero = native SIGIL.
+        token: TokenId,
+        /// Amount in the token's base units.
+        #[serde(with = "u128_str")]
+        amount: u128,
+        /// The proposing council member (counts as approval #1).
+        proposer: WalletId,
+        /// Unix-seconds, producer-computed at build time.
+        created_ts: u64,
+    },
+    /// T6 — a council member approved an existing proposal. Whether this
+    /// tips the proposal over threshold is NOT decided here (this event
+    /// carries no money) — the caller checks its own replayed Council and,
+    /// if threshold is reached, emits a separate `BankExecuted`.
+    BankApproved {
+        /// Proposal id being approved.
+        id: String,
+        /// The approving council member.
+        approver: WalletId,
+    },
+    /// T6 — a treasury transfer actually executed because its proposal
+    /// reached the council's approval threshold. Unlike `BankProposed`/
+    /// `BankApproved`, this DOES move money — the SigilTx::BankExecute that
+    /// produces it also emits the matching SetBalance mutations, same
+    /// pattern as `Send`.
+    BankExecuted {
+        /// Proposal id that reached threshold.
+        id: String,
+        /// Treasury wallet debited.
+        from: WalletId,
+        /// Recipient wallet credited.
+        to: WalletId,
+        /// Token moved. All-zero = native SIGIL.
+        token: TokenId,
+        /// Amount moved, in the token's base units.
+        #[serde(with = "u128_str")]
+        amount: u128,
+    },
 }
 
 impl SigilEvent {
@@ -314,6 +361,9 @@ impl SigilEvent {
             SigilEvent::UsdsRedeemed    { .. } => 14,
             SigilEvent::MandateCreated  { .. } => 15,
             SigilEvent::MandateClosed   { .. } => 16,
+            SigilEvent::BankProposed    { .. } => 17,
+            SigilEvent::BankApproved    { .. } => 18,
+            SigilEvent::BankExecuted    { .. } => 19,
         }
     }
 

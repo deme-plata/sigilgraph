@@ -2339,13 +2339,25 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             if !n.council.is_member(&proposer) { return bad("proposer is not a council member"); }
             if let Err(e) = authorize(&mut n, &proposer, "bank_propose",
                 &[to_hex(&from), to_hex(&to), to_hex(&token), amount.to_string()], body) { return bad(&e); }
+            // id/created_ts computed ONCE, here, by rpcd (still the sole
+            // authority for this action) — then carried verbatim in the tx,
+            // same determinism rule as T6's other chain-native tx types.
             let now = now_ms() / 1000;
             let id = format!("pr-{}", &to_hex(blake3::hash(format!("{}|{}|{}", to_hex(&to), amount, now).as_bytes()).as_bytes())[..12]);
-            match n.council.propose(id, from, to, token, amount, proposer, now) {
-                Ok(p) => { let id = p.id.clone(); let ap = p.approvals.len(); let th = n.council.threshold; persist(&n);
-                    ok(format!("{{\"ok\":true,\"id\":\"{}\",\"approvals\":{},\"threshold\":{},\"status\":\"pending\"}}", id, ap, th)) }
-                Err(e) => bad(&e),
+            let tx = SigilTx::BankPropose { id: id.clone(), from, to, token, amount, proposer, created_ts: now, fee: 0 };
+            let result = match apply_tx(&n.state, &shape_only_signed(tx)) {
+                Ok(r) => r,
+                Err(e) => return bad(&format!("bank propose tx rejected: {e}")),
+            };
+            let h = n.height;
+            if let Err(e) = commit_state_transition(&mut n.state, &batch_into_transition([result.clone()], h), h) {
+                return bad(&format!("bank propose commit failed: {e:?}"));
             }
+            n.height += 1;
+            for evt in &result.events { n.council.apply_event(evt); }
+            persist(&n);
+            let p = n.council.get(&id).expect("just-applied proposal must be present");
+            ok(format!("{{\"ok\":true,\"id\":\"{}\",\"approvals\":{},\"threshold\":{},\"status\":\"pending\"}}", p.id, p.approvals.len(), n.council.threshold))
         }
         ("POST", "/bank/approve") => {
             let id = jstr(body, "id").unwrap_or("").to_string();
@@ -2353,28 +2365,64 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
             let mut n = node.write().unwrap();
             if !n.council.is_member(&approver) { return bad("approver is not a council member"); }
             if let Err(e) = authorize(&mut n, &approver, "bank_approve", &[id.clone(), to_hex(&approver)], body) { return bad(&e); }
-            let ready = match n.council.approve(&id, approver) { Ok(r) => r, Err(e) => return bad(&e) };
+            // Pre-flight the same checks Council::approve() used to make
+            // inline, BEFORE building the tx — apply_event silently no-ops
+            // on an unknown/non-pending id (same "apply_tx trusts the
+            // caller" contract as MandateClose), so an invalid approve must
+            // still get a clear error, not a misleading "pending" reply.
+            match n.council.get(&id) {
+                None => return bad("proposal not found"),
+                Some(p) if p.status != "pending" => return bad(&format!("proposal {id} is {}", p.status)),
+                _ => {}
+            }
+            let tx = SigilTx::BankApprove { id: id.clone(), approver, fee: 0 };
+            let result = match apply_tx(&n.state, &shape_only_signed(tx)) {
+                Ok(r) => r,
+                Err(e) => return bad(&format!("bank approve tx rejected: {e}")),
+            };
+            let h = n.height;
+            if let Err(e) = commit_state_transition(&mut n.state, &batch_into_transition([result.clone()], h), h) {
+                return bad(&format!("bank approve commit failed: {e:?}"));
+            }
+            n.height += 1;
+            for evt in &result.events { n.council.apply_event(evt); }
+
+            let (ready, cnt, th) = {
+                let p = n.council.get(&id).expect("just-approved proposal must be present");
+                (p.approvals.len() >= n.council.threshold, p.approvals.len(), n.council.threshold)
+            };
             if !ready {
-                let cnt = n.council.get(&id).map(|p| p.approvals.len()).unwrap_or(0);
-                let th = n.council.threshold;
                 persist(&n);
                 return ok(format!("{{\"ok\":true,\"id\":\"{}\",\"approvals\":{},\"threshold\":{},\"status\":\"pending\"}}", id, cnt, th));
             }
-            // 2-of-2 reached → execute the transfer through the state chokepoint
+
+            // 2-of-2 reached → execute through the SAME chokepoint every
+            // other tx uses, via a real SigilTx::BankExecute (balance
+            // sufficiency is checked INSIDE apply_tx now, not inline here).
+            //
+            // NOTE: the approve above (the 2nd approval, tipping threshold)
+            // is already committed to n.state + folded into n.council in
+            // memory by this point — if execute fails below (e.g. the
+            // treasury is short), that approval must still be persisted so
+            // a restart doesn't lose it and force a 3rd approve. Found live
+            // while testing this change: the ORIGINAL handler had the same
+            // gap (approve()'d in memory, no persist() before the balance-
+            // check's early return) — fixing it here rather than carrying
+            // it forward, since it's a one-line addition with no behavior
+            // change to the success path.
             let p = n.council.get(&id).cloned().unwrap();
-            let from_bal = n.state.balance_of(&p.from, &p.token);
-            if from_bal < p.amount { return bad("insufficient treasury balance for the approved transfer"); }
-            let to_bal = n.state.balance_of(&p.to, &p.token);
-            let muts = vec![
-                StateMutation::SetBalance { wallet: p.from, token: p.token, amount: from_bal - p.amount },
-                StateMutation::SetBalance { wallet: p.to,   token: p.token, amount: to_bal + p.amount },
-            ];
-            let h = n.height;
-            if let Err(e) = commit_state_transition(&mut n.state, &StateTransition { at_height: h, mutations: muts }, h) {
-                return bad(&format!("transfer commit failed: {e:?}"));
+            let exec_tx = SigilTx::BankExecute { id: id.clone(), from: p.from, to: p.to, token: p.token, amount: p.amount, executor: approver, fee: 0 };
+            let exec_result = match apply_tx(&n.state, &shape_only_signed(exec_tx)) {
+                Ok(r) => r,
+                Err(e) => { persist(&n); return bad(&format!("bank execute rejected: {e}")); }
+            };
+            let h2 = n.height;
+            if let Err(e) = commit_state_transition(&mut n.state, &batch_into_transition([exec_result.clone()], h2), h2) {
+                persist(&n);
+                return bad(&format!("bank execute commit failed: {e:?}"));
             }
             n.height += 1;
-            n.council.mark_executed(&id);
+            for evt in &exec_result.events { n.council.apply_event(evt); }
             persist(&n);
             ok(format!("{{\"ok\":true,\"id\":\"{}\",\"status\":\"executed\",\"amount\":{},\"to\":\"{}\"}}", id, p.amount, to_hex(&p.to)))
         }

@@ -11,13 +11,14 @@
 use serde::{Deserialize, Serialize};
 
 use crate::WalletId;
+use sigil_events::SigilEvent;
 
 /// 32-byte token id — mirrors `sigil_state::TokenId` without importing sigil-state (same
 /// one-way-dep rule as [`crate::WalletId`]).
 pub type TokenId = [u8; 32];
 
 /// A pending (or executed) treasury transfer awaiting council approval.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Proposal {
     pub id: String,
     pub from: WalletId,
@@ -32,7 +33,7 @@ pub struct Proposal {
 }
 
 /// The bank council roster + threshold + the proposal book (persisted in its own flux-db key).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Council {
     pub members: Vec<WalletId>,
     pub threshold: usize,
@@ -120,6 +121,57 @@ impl Council {
             p.status = "executed".into();
         }
     }
+
+    /// Apply one already-decided `BankProposed`/`BankApproved`/`BankExecuted`
+    /// event (from the chain's own event log) — the T6 chain-native
+    /// counterpart to `propose`/`approve`/`mark_executed` above. Every field
+    /// comes from the event verbatim (no local `now`, no re-derived id), so
+    /// two nodes folding the same event sequence land on byte-identical
+    /// proposal books. Does NOT touch `members`/`threshold` — the roster is
+    /// a governance-config concern seeded once at bootstrap, not part of
+    /// the tx-replay stream (same split `seed()` vs `propose`/`approve`
+    /// already draws). Non-bank events are ignored.
+    pub fn apply_event(&mut self, event: &SigilEvent) {
+        match event {
+            SigilEvent::BankProposed { id, from, to, token, amount, proposer, created_ts } => {
+                self.proposals.push(Proposal {
+                    id: id.clone(),
+                    from: *from,
+                    to: *to,
+                    token: *token,
+                    amount: *amount,
+                    approvals: vec![*proposer],
+                    status: "pending".into(),
+                    created_ts: *created_ts,
+                });
+            }
+            SigilEvent::BankApproved { id, approver } => {
+                if let Some(p) = self.proposals.iter_mut().find(|p| &p.id == id) {
+                    if p.status == "pending" && !p.approvals.contains(approver) {
+                        p.approvals.push(*approver);
+                    }
+                }
+            }
+            SigilEvent::BankExecuted { id, .. } => {
+                self.mark_executed(id);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Reconstruct a `Council`'s proposal book from scratch by folding an
+/// ordered event sequence — the replay path any node uses to derive the
+/// SAME proposals every other node derives from the SAME chain history.
+/// Callers that need the roster/threshold too must `seed()` the result
+/// separately (see `apply_event`'s doc). Order matters — pass events in
+/// chain order.
+pub fn fold_events<'a>(events: impl IntoIterator<Item = &'a SigilEvent>) -> Council {
+    let mut c = Council::default();
+    for e in events {
+        c.apply_event(e);
+    }
+    c
 }
 
 #[cfg(test)]

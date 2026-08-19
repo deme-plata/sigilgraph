@@ -15,7 +15,10 @@ name = "sigil-top"
 # could mesh with a non-serving community peer (any other sigil-top instance
 # structurally cannot serve full-archive backfill) and stall forever while
 # still reading "connected".
-version = "7.1.38"
+# v7.1.39: unified Codex wallet UI across Activity and every transaction modal,
+# plus the global DEX market ribbon. This version bump advances the signed
+# release channel so existing v7.1.38 installs also receive the UI update.
+version = "7.1.39"
 edition.workspace = true
 license.workspace = true
 description = "sigil-top — a SIGIL lightweight node + dual-mode (lite scorecard ↔ full dashboard) terminal monitor. v0.9.0 'Verifying Full Sync': downloads the chain genesis→tip over the sigil-g0 P2P mesh AND verifies it as one connected spine (per-header precheck + parent_hash linkage back to genesis), with a persisted verified_to watermark. New `full-sync` (headless sync-and-verify, exit 0 at tip) and `verify-chain` (re-verify the local store) subcommands; TUI surfaces the ⛓ verified-spine height + ⚠ spine-break alarm distinct from raw download progress."
@@ -80,6 +83,24 @@ flux-sync = { path = "../../../flux/crates/flux-sync" }
 # Turbo Sync X + invented BandwidthContinuity for continuous *high* download bandwidth
 flux-turbo-sync = { path = "../flux-turbo-sync" }
 
+# v7.1.40 (grogu-sync-perf, 2026-08-19): PRODUCER-MODE Phase 0 (operator-approved plan,
+# unified sigil-top binary for a real 2nd Epsilon-mesh node). These are OPTIONAL,
+# feature-gated deps for a future `producer` build mode that ports sigil-node's block-
+# production/DagKnight-ordering logic into sigil-top — this commit adds ONLY the
+# dependency graph (no application code changes), to prove it compiles clean for
+# Windows before any porting work starts. sigil-node itself is untouched/read-only
+# reference material; the live Epsilon producer is not affected by this in any way.
+sigil-dagknight = { workspace = true, optional = true }
+sigil-api = { path = "../sigil-api", optional = true }
+sigil-emission = { path = "../sigil-emission", optional = true }
+sigil-handshake = { path = "../sigil-handshake", optional = true }
+sigil-narwhal-mempool = { path = "../sigil-narwhal-mempool", optional = true }
+flux-topology = { path = "../flux-topology", optional = true }
+sigil-tx = { path = "../sigil-tx", optional = true }
+sigil-bank = { path = "../sigil-bank", optional = true }
+sigil-events = { path = "../sigil-events", optional = true }
+ed25519-dalek = { version = "2.2", optional = true }
+
 # v0.2.35 L4-B: SQIsign post-quantum tip-proof flavor (gated, not yet enabled).
 [dev-dependencies]
 # Interop test only: encode with the SAME C-backed zstd the server uses, decode with
@@ -92,6 +113,14 @@ zstd = "0.13"
 default = ["gpu"]
 gpu = ["flux-miner/gpu"]
 sqisign = []
+# v7.1.40: producer-mode Phase 0 — dependency graph only, no application code yet.
+# Off by default; `fluxc build -p sigil-top --features producer` opts in. See the
+# dependency block above for why each crate is here.
+producer = [
+    "dep:sigil-dagknight", "dep:sigil-api", "dep:sigil-emission",
+    "dep:sigil-handshake", "dep:sigil-narwhal-mempool", "dep:flux-topology",
+    "dep:sigil-tx", "dep:sigil-bank", "dep:sigil-events", "dep:ed25519-dalek",
+]
 
 [[bin]]
 name = "sigil-top"

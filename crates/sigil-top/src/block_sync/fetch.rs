@@ -642,6 +642,18 @@ where
         if count == 0 || count > MAX_PAGE_RECS || body.len() != count * 72 {
             return Err(SnapshotError::Encode);
         }
+        // v7.1.39 diagnostic (orchestrator msg #130, zero-risk client-side step before touching
+        // the live producer): log the REQUESTED range next to the ACTUAL first/last record height
+        // this page's bytes contain, decisively distinguishing "client asked for the wrong range"
+        // from "server/cache returned the wrong bytes for a correctly-requested range" — the two
+        // remaining candidate explanations for NonContiguousHeight{at:1, expected:253864} neither
+        // of us could rule out from logs alone (see swarm bus msgs #119-129).
+        let first_h = body.get(0..8).map(|b| u64::from_le_bytes(b.try_into().unwrap()));
+        let last_h = if count > 0 {
+            body.get((count - 1) * 72..(count - 1) * 72 + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+        } else { None };
+        crate::tlog!("[snap-diag] 'S' page requested=[{from}..{to}) count={count} actual_heights=[{:?}..{:?}]",
+            first_h, last_h);
         for chunk in body.chunks_exact(72) {
             let height = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
             let mut block_hash = [0u8; 32];

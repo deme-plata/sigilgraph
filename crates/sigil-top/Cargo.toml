@@ -18,7 +18,7 @@ name = "sigil-top"
 # v7.1.40: Activity gains the SIGIL-native adaptive emission controller card
 # and live analytics modal, derived from the chain's verified supply and the
 # published sigil-emission consensus constants.
-version = "7.1.42"
+version = "7.1.43"
 edition.workspace = true
 license.workspace = true
 description = "sigil-top — a SIGIL lightweight node + dual-mode (lite scorecard ↔ full dashboard) terminal monitor. v0.9.0 'Verifying Full Sync': downloads the chain genesis→tip over the sigil-g0 P2P mesh AND verifies it as one connected spine (per-header precheck + parent_hash linkage back to genesis), with a persisted verified_to watermark. New `full-sync` (headless sync-and-verify, exit 0 at tip) and `verify-chain` (re-verify the local store) subcommands; TUI surfaces the ⛓ verified-spine height + ⚠ spine-break alarm distinct from raw download progress."
@@ -100,6 +100,13 @@ sigil-tx = { path = "../sigil-tx", optional = true }
 sigil-bank = { path = "../sigil-bank", optional = true }
 sigil-events = { path = "../sigil-events", optional = true }
 ed25519-dalek = { version = "2.2", optional = true }
+# 2026-08-20 (Phase 2): depend on sigil-node's LIBRARY surface directly rather than
+# hand-porting a duplicate of its Block type / durable chain-log store / coinbase
+# logic. Single source of truth — sigil-top and sigil-node share the exact same
+# code for these pieces, so they can never silently drift apart. sigil-node stays
+# a normal binary crate too (this dependency only pulls its lib target); the live
+# Epsilon producer binary itself is unaffected by sigil-top depending on it.
+sigil-node = { path = "../sigil-node", optional = true }
 
 # v0.2.35 L4-B: SQIsign post-quantum tip-proof flavor (gated, not yet enabled).
 [dev-dependencies]
@@ -120,6 +127,7 @@ producer = [
     "dep:sigil-dagknight", "dep:sigil-api", "dep:sigil-emission",
     "dep:sigil-handshake", "dep:sigil-narwhal-mempool", "dep:flux-topology",
     "dep:sigil-tx", "dep:sigil-bank", "dep:sigil-events", "dep:ed25519-dalek",
+    "dep:sigil-node",
 ]
 
 [[bin]]

@@ -3380,9 +3380,12 @@ name = "flux-arxiv-latex"
 version = "0.40.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "flux-qwalk",
  "flux-science",
+ "flux-topology",
  "flux-whitehole",
+ "hex",
  "serde",
  "serde_json",
 ]
@@ -8350,6 +8353,7 @@ dependencies = [
  "flux-api",
  "flux-api-macros",
  "flux-miner",
+ "flux-search",
  "flux-vdf",
  "hex",
  "inventory",
@@ -8725,6 +8729,8 @@ dependencies = [
  "sigil-tx",
  "sigil-updater",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "zstd",
 ]
 
@@ -8902,7 +8908,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-top"
-version = "7.1.42"
+version = "7.1.43"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -8940,6 +8946,7 @@ dependencies = [
  "sigil-header",
  "sigil-narwhal-mempool",
  "sigil-net",
+ "sigil-node",
  "sigil-oauth",
  "sigil-state",
  "sigil-synctune",

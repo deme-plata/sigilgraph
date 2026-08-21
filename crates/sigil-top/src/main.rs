@@ -105,7 +105,6 @@ use flux_graph::WorkspaceGraph;
 use flux_optimize::OptimizationPreset;
 // v0.6.0: P2P mesh, swarm coordination, content-addressed version control
 use flux_p2p::NetworkManager;
-use flux_swarm_tools::{Activity, ActivityKind, ActivityLog, with_locked};
 use flux_rev::{Store, snapshot, Genesis};
 
 // v0.11.0: combined release — explorer local-spine /api (rocky-explorer) +
@@ -4118,13 +4117,6 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 app.toast = "🧠 Cortex loop running…".into();
                                 app.toast_sticky = true;
                                 app.mcp_combo_tool = "flux_cortex_loop".into();
-                                // Log via swarm-tools activity (best-effort)
-                                let _log = ActivityLog::default();
-                                let _ = _log.record(&Activity::new(
-                                    "sigil-top",
-                                    ActivityKind::Custom("cortex_start".into()),
-                                    format!("Cortex MCP combo v{VERSION}"),
-                                ));
                                 match run_cortex_loop() {
                                     Ok(s) => {
                                         app.cortex_loops += 1;
@@ -4144,11 +4136,6 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                             Err(_) => String::new(),
                                         };
                                         app.mcp_combo_result = format!("✓ Cortex loop #{}: {:.2}% gain{}", app.cortex_loops, app.last_cortex_gain, rev_note);
-                                        let _ = _log.record(&Activity::new(
-                                            "sigil-top",
-                                            ActivityKind::Custom("cortex_complete".into()),
-                                            app.mcp_combo_result.clone(),
-                                        ));
                                     }
                                     Err(e) => {
                                         app.mcp_combo_result = format!("✗ Cortex: {e}");

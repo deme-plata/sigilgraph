@@ -99,10 +99,21 @@ pub const BOOTSTRAP_ENV: &str = "SIGIL_BOOTSTRAP_PEERS";
 // can end up meshed with a peer that structurally cannot serve full-archive
 // backfill at all (only sigil-node implements InboundRequest serving --
 // sigil-top is request-only) and stall forever on a real "mesh 1 peers"
-// reading that looks connected but can never advance. Epsilon is the only
-// entry until the fleet grows back.
+// reading that looks connected but can never advance. Epsilon was the only
+// entry until the fleet grew back.
+//
+// 2026-08-21: added happysrv — a genuine second `sigil-node` full producer
+// (not a sigil-top light client, so it's safe by the same "only real
+// full nodes belong here" rule above), confirmed dual-producing and
+// meshed with Epsilon since 2026-08-20. This also gives a full-archive
+// client somewhere to fall back to if Epsilon is mid-restart (a client
+// with only Epsilon in its address book has no fallback peer when
+// Epsilon briefly drops for a deploy — observed live 2026-08-20/21: an
+// operator's full-archive sync got stuck mid-chunk-fetch across two
+// Epsilon restarts with nothing else to dial). No :853-style firewall
+// fallback exists on happysrv yet — just the plain 9501 entry for now.
 pub const DEFAULT_BOOTSTRAP_PEERS: &[&str] = &[
-    "/ip4/89.149.241.126/tcp/9501", // Epsilon (producer, the only live full node)
+    "/ip4/89.149.241.126/tcp/9501", // Epsilon (producer, sigil-g0 genesis node)
     // Firewall-friendly fallback: `sigil-relay853.service` on Epsilon is a
     // plain `socat` TCP forward, :853 -> localhost:9501 — same libp2p
     // endpoint, different port. Some client networks block outbound 9501
@@ -116,6 +127,7 @@ pub const DEFAULT_BOOTSTRAP_PEERS: &[&str] = &[
     // 10+ minutes on :9501 alone with no way to self-heal (nothing to dial),
     // while :853 was independently confirmed reachable and forwarding.
     "/ip4/89.149.241.126/tcp/853",
+    "/ip4/159.195.108.96/tcp/9501", // happysrv (second producer, confirmed reachable, no firewall block on 9501)
 ];
 
 /// Parse the comma-separated env var into a list of multiaddrs. Whitespace is trimmed, empty entries

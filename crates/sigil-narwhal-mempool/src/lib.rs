@@ -45,6 +45,14 @@
 //!   module's doc comment for exactly what it does and does not prove, and
 //!   for a real finding about `BatchCertificate::try_certify`'s calling
 //!   contract this work surfaced.
+//! - [`shard_ack`] (BraidPool §3.5/§11, follow-up tracked by Phase E) — binds
+//!   `shard_index`/`shard_hash` INSIDE a validator's signed ack (the
+//!   Reed-Solomon-path counterpart to `types::BatchAck`, which only signs a
+//!   whole-batch digest and can't distinguish "holds shard i" from "holds
+//!   something"), plus the deterministic per-batch validator->shard
+//!   assignment a verifier recomputes rather than trusts. Closes the exact
+//!   gap `dissemination.rs`'s Phase E doc comment names. Standalone; not
+//!   wired into `sigil-node`/`sigil-api`.
 
 pub mod availability_testnet;
 pub mod backend;
@@ -58,6 +66,7 @@ pub mod merkle;
 pub mod order_meta;
 pub mod repair;
 pub mod sealer;
+pub mod shard_ack;
 pub mod types;
 pub mod worker;
 
@@ -73,5 +82,6 @@ pub use merkle::merkle_root;
 pub use order_meta::BatchOrderMetaV1;
 pub use repair::{next_repair_peer, repair_priority};
 pub use sealer::{BatchSealer, SealPolicy};
+pub use shard_ack::{expected_shard_index, AvailabilityCertificateV1, BatchAckV1, BatchStatementV1};
 pub use types::{quorum_threshold, BatchAck, BatchCertificate, BlockBatchRef, WorkerBatch, WorkerId};
 pub use worker::{BoundedIngestResult, MempoolWorker, ShardedMempool, WorkerLimits};

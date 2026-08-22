@@ -209,6 +209,52 @@ impl AvailabilityCertificateV1 {
             None
         }
     }
+
+    /// Same certification logic as [`Self::try_certify`], but on rejection
+    /// returns WHY each dropped ack was dropped instead of a bare `None` —
+    /// for callers assembling diagnostics (logs, an eventual RPC surface)
+    /// rather than just gating on success/failure. Does not (yet) distinguish
+    /// `DaError::NoQuorum` at the ack level — that's a property of the whole
+    /// set, not any one ack — so a caller sees "quorum wasn't reached" via
+    /// `Err`'s own presence when `per_ack_rejections` is non-empty but still
+    /// below quorum, or an empty rejection list with quorum still unmet
+    /// (every ack was fine, there just weren't enough of them).
+    pub fn try_certify_detailed(
+        statement: BatchStatementV1,
+        acks: Vec<BatchAckV1>,
+        n: usize,
+        shard_count: usize,
+        pk_for: impl Fn(&WalletId) -> Option<[u8; 32]>,
+    ) -> Result<Self, Vec<(WalletId, crate::errors::DaError)>> {
+        use crate::errors::DaError;
+        let mut seen = std::collections::HashSet::new();
+        let mut valid = Vec::new();
+        let mut rejections = Vec::new();
+        for a in acks {
+            if !seen.insert(a.validator) {
+                rejections.push((a.validator, DaError::DuplicateSigner));
+                continue;
+            }
+            let Some(pk) = pk_for(&a.validator) else {
+                rejections.push((a.validator, DaError::NotMember));
+                continue;
+            };
+            if !a.verify_signature(&statement, &pk) {
+                rejections.push((a.validator, DaError::SignatureInvalid));
+                continue;
+            }
+            if !a.verify_assigned(&statement, &pk, shard_count) {
+                rejections.push((a.validator, DaError::ShardMismatch));
+                continue;
+            }
+            valid.push(a);
+        }
+        if valid.len() >= quorum_threshold(n) {
+            Ok(Self { statement, acks: valid })
+        } else {
+            Err(rejections)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -454,5 +500,60 @@ mod tests {
             AvailabilityCertificateV1::try_certify(st, vec![ack1, ack2], 1, shard_count, |w| pks.get(w).copied())
                 .unwrap();
         assert_ne!(cert_a.hash(), cert_b.hash(), "a certificate's hash must reflect exactly which acks it holds");
+    }
+
+    #[test]
+    fn try_certify_detailed_names_the_real_rejection_reason() {
+        use crate::errors::DaError;
+        let batch_id = [13u8; 32];
+        let st = statement(batch_id);
+        let shard_count = 12;
+
+        // A non-member: real signature, but pk_for can't resolve it.
+        let (sk, pk, wallet) = sigil_tx::ed25519_keygen();
+        let idx = expected_shard_index(&wallet, &batch_id, shard_count);
+        let non_member_ack = BatchAckV1::sign(&st, idx, [1u8; 32], &sk, &pk);
+
+        let err = AvailabilityCertificateV1::try_certify_detailed(st, vec![non_member_ack], 1, shard_count, |_| None)
+            .unwrap_err();
+        assert_eq!(err, vec![(wallet, DaError::NotMember)]);
+    }
+
+    #[test]
+    fn try_certify_detailed_succeeds_the_same_as_try_certify() {
+        let batch_id = [14u8; 32];
+        let st = statement(batch_id);
+        let shard_count = 12;
+        let (sk, pk, wallet) = sigil_tx::ed25519_keygen();
+        let idx = expected_shard_index(&wallet, &batch_id, shard_count);
+        let ack = BatchAckV1::sign(&st, idx, [1u8; 32], &sk, &pk);
+        let mut pks = std::collections::HashMap::new();
+        pks.insert(wallet, pk);
+
+        let ok = AvailabilityCertificateV1::try_certify_detailed(st.clone(), vec![ack.clone()], 1, shard_count, |w| {
+            pks.get(w).copied()
+        })
+        .expect("n=1 quorum of 1 must certify");
+        let also_ok = AvailabilityCertificateV1::try_certify(st, vec![ack], 1, shard_count, |w| pks.get(w).copied())
+            .expect("try_certify must agree");
+        assert_eq!(ok.hash(), also_ok.hash());
+    }
+
+    #[test]
+    fn try_certify_detailed_reports_shard_mismatch() {
+        use crate::errors::DaError;
+        let batch_id = [15u8; 32];
+        let st = statement(batch_id);
+        let shard_count = 12;
+        let (sk, pk, wallet) = sigil_tx::ed25519_keygen();
+        let real_index = expected_shard_index(&wallet, &batch_id, shard_count);
+        let wrong_index = if real_index == 0 { 1 } else { 0 };
+        let ack = BatchAckV1::sign(&st, wrong_index, [1u8; 32], &sk, &pk);
+        let mut pks = std::collections::HashMap::new();
+        pks.insert(wallet, pk);
+
+        let err = AvailabilityCertificateV1::try_certify_detailed(st, vec![ack], 1, shard_count, |w| pks.get(w).copied())
+            .unwrap_err();
+        assert_eq!(err, vec![(wallet, DaError::ShardMismatch)]);
     }
 }

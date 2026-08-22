@@ -9,7 +9,7 @@
 //!
 //! Usage: fair_order_bias_bench [worker_count] [cohorts]
 
-use sigil_narwhal_mempool::fair_order_experiment::{order_content_tiebreak, order_naive_index_tiebreak, synthetic_tie_cohort};
+use sigil_braidpool::fair_order_experiment::{order_content_tiebreak, order_naive_index_tiebreak, synthetic_tie_cohort};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

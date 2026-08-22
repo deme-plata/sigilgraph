@@ -1,6 +1,6 @@
 //! mempool_bench — Phase B (SIGIL_BRAIDPOOL_v1_1.md §17): a real, measured
 //! head-to-head between `sigil_tx::Mempool` (today's single global mutex) and
-//! `sigil_narwhal_mempool::ShardedMempool` (Phase A) under equivalent
+//! `sigil_braidpool::ShardedMempool` (Phase A) under equivalent
 //! synthetic load.
 //!
 //! Deliberately NOT wired into `sigil-node`'s producer loop. Investigating the
@@ -29,7 +29,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use sigil_narwhal_mempool::ShardedMempool;
+use sigil_braidpool::ShardedMempool;
 use sigil_tx::{ed25519_keygen, ed25519_sign_tx, Mempool as LegacyMempool, SigilTx, SignedTx};
 
 fn make_txs(n: usize) -> Vec<SignedTx> {

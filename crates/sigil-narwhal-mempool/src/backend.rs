@@ -18,7 +18,7 @@ use std::sync::Mutex;
 
 use sigil_tx::{batch_auth_message, AuthorizedBatch, SignedTx, TxApplyError};
 
-use crate::worker::{BoundedIngestResult, ShardedMempool};
+use sigil_braidpool::worker::{BoundedIngestResult, ShardedMempool};
 
 /// The plain-tx ingestion path — the ONLY thing `SIGIL_BRAIDPOOL` actually
 /// switches. The batch lane below is deliberately NOT part of this choice:

@@ -18,10 +18,10 @@
 
 use std::collections::HashSet;
 
-use sigil_narwhal_mempool::availability_testnet::SimCommittee;
-use sigil_narwhal_mempool::sealer::{BatchSealer, SealPolicy};
-use sigil_narwhal_mempool::types::{quorum_threshold, WorkerId};
-use sigil_narwhal_mempool::worker::ShardedMempool;
+use sigil_braidpool::availability_testnet::SimCommittee;
+use sigil_braidpool::batch::{BatchSealer, SealPolicy};
+use sigil_braidpool::types::{quorum_threshold, WorkerId};
+use sigil_braidpool::worker::ShardedMempool;
 use sigil_tx::{ed25519_keygen, ed25519_sign_tx, SigilTx};
 
 struct XorShift64(u64);

@@ -3,14 +3,9 @@ name = "sigil-narwhal-mempool"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Phase-0 Narwhal-style DAG mempool for SIGIL: sharded parallel-worker ingestion + batch-availability certification + erasure-coded batch dissemination (via flux-aether). Standalone and tested; NOT yet wired into sigil-node's producer loop. See SIGIL_NARWHAL_MEMPOOL_v0.md for the design and phased build plan."
+description = "Backward-compatible re-export shim over sigil-braidpool (the real crate, see SIGIL_BRAIDPOOL_v1_1.md §22). All BraidPool implementation work moved there; this crate keeps sigil-node/sigil-api/sigil-top's existing `sigil_narwhal_mempool::...` imports working unchanged. Also owns MempoolBackend (backend.rs) — the shared mempool handle sigil-node's producer loop and sigil-api's money API both hold."
 
 [dependencies]
-blake3        = { workspace = true }
-serde         = { workspace = true }
-serde_json    = { workspace = true }
-parking_lot   = { workspace = true }
-ed25519-dalek = { version = "2.2", features = ["rand_core", "batch"] }
-sigil-tx      = { path = "../sigil-tx" }
-sigil-state   = { path = "../sigil-state" }
-flux-aether   = { path = "../../../flux/crates/flux-aether" }
+sigil-braidpool = { path = "../sigil-braidpool" }
+sigil-tx        = { path = "../sigil-tx" }
+sigil-state     = { path = "../sigil-state" }

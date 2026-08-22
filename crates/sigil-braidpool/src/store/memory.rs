@@ -84,7 +84,7 @@ impl BatchStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sealer::{BatchSealer, SealPolicy};
+    use crate::batch::{BatchSealer, SealPolicy};
     use crate::types::WorkerId;
     use sigil_tx::{ed25519_keygen, ed25519_sign_tx, SigilTx};
     use std::time::Duration;

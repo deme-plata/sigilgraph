@@ -15,7 +15,7 @@
 
 use std::time::Instant;
 
-use sigil_narwhal_mempool::{
+use sigil_braidpool::{
     dissemination::{reassemble_batch, shard_batch},
     types::{WorkerBatch, WorkerId},
 };

@@ -1,0 +1,16 @@
+[package]
+name = "sigil-braidpool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL BraidPool: the Narwhal-style DAG mempool implementation (SIGIL_BRAIDPOOL_v1_1.md §22's crate layout). Sharded parallel-worker ingestion, batch-availability certification (whole-batch and shard-bound), erasure-coded + replicated dissemination (via flux-aether), BatchSetRoot aggregation, and the deficit-round-robin pull scheduler. Standalone and tested; NOT yet wired into sigil-node's producer loop. Formerly sigil-narwhal-mempool, which now re-exports this crate for backward compatibility."
+
+[dependencies]
+blake3        = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+parking_lot   = { workspace = true }
+ed25519-dalek = { version = "2.2", features = ["rand_core", "batch"] }
+sigil-tx      = { path = "../sigil-tx" }
+sigil-state   = { path = "../sigil-state" }
+flux-aether   = { path = "../../../flux/crates/flux-aether" }

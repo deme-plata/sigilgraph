@@ -3308,7 +3308,7 @@ checksum = "749cff877dc1af878a0b31a41dd221a753634401ea0ef2f87b62d3171522485a"
 
 [[package]]
 name = "flux-aether"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "blake3",
  "reed-solomon-erasure",
@@ -3317,7 +3317,7 @@ dependencies = [
 
 [[package]]
 name = "flux-ai"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "flux-graph",
  "serde",
@@ -3346,7 +3346,7 @@ dependencies = [
 
 [[package]]
 name = "flux-api"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "flux-api-macros",
  "flux-graph",
@@ -3357,7 +3357,7 @@ dependencies = [
 
 [[package]]
 name = "flux-api-macros"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3366,7 +3366,7 @@ dependencies = [
 
 [[package]]
 name = "flux-architect"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "flux-ai",
  "flux-graph",
@@ -3377,7 +3377,7 @@ dependencies = [
 
 [[package]]
 name = "flux-arxiv-latex"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3392,7 +3392,7 @@ dependencies = [
 
 [[package]]
 name = "flux-cache"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -3412,7 +3412,7 @@ dependencies = [
 
 [[package]]
 name = "flux-chronos"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -3444,7 +3444,7 @@ dependencies = [
 
 [[package]]
 name = "flux-cortex"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "flux-architect",
  "flux-graph",
@@ -3455,7 +3455,7 @@ dependencies = [
 
 [[package]]
 name = "flux-db"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -3491,7 +3491,7 @@ dependencies = [
 
 [[package]]
 name = "flux-graph"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "flux-cache",
  "serde",
@@ -3508,7 +3508,7 @@ dependencies = [
 
 [[package]]
 name = "flux-history"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "blake3",
  "flux-db",
@@ -3527,7 +3527,7 @@ dependencies = [
 
 [[package]]
 name = "flux-lattice-guard"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -3547,7 +3547,7 @@ dependencies = [
 
 [[package]]
 name = "flux-market"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -3596,7 +3596,7 @@ dependencies = [
 
 [[package]]
 name = "flux-optimize"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "flux-graph",
  "serde",
@@ -3605,7 +3605,7 @@ dependencies = [
 
 [[package]]
 name = "flux-p2p"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -3641,7 +3641,7 @@ dependencies = [
 
 [[package]]
 name = "flux-qwalk"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "nalgebra",
 ]
@@ -3656,7 +3656,7 @@ dependencies = [
 
 [[package]]
 name = "flux-rev"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "blake3",
  "flux-p2p",
@@ -3688,7 +3688,7 @@ dependencies = [
 
 [[package]]
 name = "flux-science"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "blake3",
  "nalgebra",
@@ -3701,7 +3701,7 @@ dependencies = [
 
 [[package]]
 name = "flux-search"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "blake3",
  "parking_lot 0.12.5",
@@ -3752,7 +3752,7 @@ dependencies = [
 
 [[package]]
 name = "flux-sqisign"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -3774,7 +3774,7 @@ dependencies = [
 
 [[package]]
 name = "flux-sync"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -3818,7 +3818,7 @@ dependencies = [
 
 [[package]]
 name = "flux-uint"
-version = "0.40.0"
+version = "0.41.0"
 
 [[package]]
 name = "flux-vdf"
@@ -3834,7 +3834,7 @@ dependencies = [
 
 [[package]]
 name = "flux-whitehole"
-version = "0.40.0"
+version = "0.41.0"
 
 [[package]]
 name = "flux-workflow"
@@ -3847,7 +3847,7 @@ dependencies = [
 
 [[package]]
 name = "flux-zk-stark"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -8348,6 +8348,7 @@ dependencies = [
  "rand 0.8.6",
  "serde",
  "serde_json",
+ "sigil-dagknight",
  "sigil-emission",
  "sigil-header",
  "sigil-narwhal-mempool",
@@ -8383,6 +8384,20 @@ name = "sigil-book"
 version = "0.1.0"
 dependencies = [
  "flux-arxiv-latex",
+]
+
+[[package]]
+name = "sigil-braidpool"
+version = "5.1.1"
+dependencies = [
+ "blake3",
+ "ed25519-dalek",
+ "flux-aether",
+ "parking_lot 0.12.5",
+ "serde",
+ "serde_json",
+ "sigil-state",
+ "sigil-tx",
 ]
 
 [[package]]
@@ -8611,12 +8626,7 @@ dependencies = [
 name = "sigil-narwhal-mempool"
 version = "5.1.1"
 dependencies = [
- "blake3",
- "ed25519-dalek",
- "flux-aether",
- "parking_lot 0.12.5",
- "serde",
- "serde_json",
+ "sigil-braidpool",
  "sigil-state",
  "sigil-tx",
 ]
@@ -8896,7 +8906,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-top"
-version = "7.1.48"
+version = "7.1.49"
 dependencies = [
  "bincode 1.3.3",
  "blake3",

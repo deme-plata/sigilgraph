@@ -10,7 +10,13 @@ flux-lattice-guard = { path = "../../../flux/crates/flux-lattice-guard" }
 # safe validity engine). Real library, actually invoked (unlike Quillon's dead dep).
 winterfell = "0.9"
 blake3 = { workspace = true }
+# Note ciphertexts: X25519 + BLAKE3-KDF + ChaCha20-Poly1305 sealed boxes, forward-secret
+# per message. Explicitly NOT flux-kyberkem, whose own docs record that it returns
+# all-zero shared secrets.
+flux-swarm-secret = { path = "../../../flux/crates/flux-swarm-secret" }
+hex = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 rand = { workspace = true }
 

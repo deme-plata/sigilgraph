@@ -32,6 +32,9 @@ pub mod notes;
 /// tree that consensus and the production circuit share. See the module docs for why
 /// `notes` (Rescue) and `sigil-mixer` (BLAKE3) are NOT the canonical shape.
 pub mod note_v1;
+/// Note ciphertexts — the side channel that makes RECEIVING a shielded payment
+/// possible. Safe only because notes are owner-bound; see the module docs.
+pub mod note_cipher;
 pub mod mimc;
 pub mod membership;
 pub mod transfer;

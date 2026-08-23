@@ -101,6 +101,13 @@ impl ShieldedAccount {
         compress2(self.spend_key(), BaseElement::new(position))
     }
 
+    /// This account's full shielded ADDRESS: the circuit key plus the encryption key a
+    /// payer seals the note ciphertext to. This is what a user shares to get paid.
+    pub fn address(&self, seed: &[u8; 32]) -> crate::note_cipher::ShieldedAddress {
+        let enc = crate::note_cipher::enc_identity_from_seed(seed);
+        crate::note_cipher::ShieldedAddress::new(self.public_key(), &enc.public_hex())
+    }
+
     /// This account's PUBLIC key — the address others bind notes to when paying it.
     ///
     /// Safe to publish: `compress2` is one-way, so it never exposes the spend key. This
@@ -112,11 +119,17 @@ impl ShieldedAccount {
 }
 
 /// One note this wallet believes it owns.
+///
+/// The blinding is stored rather than re-derived, because a RECEIVED note's blinding was
+/// chosen by the sender and cannot be regenerated from our seed. Self-created notes still
+/// derive theirs deterministically; `index` records which derivation produced it, and is
+/// `None` for a received note.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OwnedNote {
-    /// Derivation index — which blinding this note uses.
-    pub index: u64,
+    /// Derivation index for a self-created note; `None` when received from someone else.
+    pub index: Option<u64>,
     pub value: u64,
+    pub blinding: BaseElement,
     /// Leaf position in the pool, once the note has actually landed on chain.
     pub position: Option<u64>,
     pub spent: bool,
@@ -138,11 +151,58 @@ impl NoteStore {
     }
 
     /// Record a note this wallet is about to create, returning its derivation index.
-    pub fn allocate(&mut self, value: u64) -> u64 {
+    pub fn allocate_with(&mut self, account: &ShieldedAccount, value: u64) -> u64 {
         let index = self.next_index;
         self.next_index += 1;
-        self.notes.push(OwnedNote { index, value, position: None, spent: false });
+        let blinding = account.blinding(index);
+        self.notes.push(OwnedNote {
+            index: Some(index),
+            value,
+            blinding,
+            position: None,
+            spent: false,
+        });
         index
+    }
+
+    /// Record a note RECEIVED from someone else, whose blinding came out of a ciphertext.
+    ///
+    /// Deduplicates on `(value, blinding)`: a wallet re-scans the chain routinely and must
+    /// not book the same payment twice.
+    pub fn receive(&mut self, value: u64, blinding: BaseElement) -> bool {
+        if self.notes.iter().any(|n| n.value == value && n.blinding == blinding) {
+            return false;
+        }
+        self.notes.push(OwnedNote {
+            index: None,
+            value,
+            blinding,
+            position: None,
+            spent: false,
+        });
+        true
+    }
+
+    /// Scan a batch of published ciphertexts for notes addressed to us, recording each one
+    /// we can open. Returns how many NEW notes were found.
+    ///
+    /// Trial decryption is the whole mechanism: the AEAD tag fails for everyone else, so a
+    /// successful open IS the ownership proof. Nothing marks a ciphertext as ours, which
+    /// is why an observer cannot tell who was paid.
+    pub fn scan_ciphertexts(
+        &mut self,
+        enc_id: &flux_swarm_secret::SecretIdentity,
+        ciphertexts: &[crate::note_cipher::NoteCiphertext],
+    ) -> usize {
+        let mut found = 0;
+        for ct in ciphertexts {
+            if let Ok(pt) = crate::note_cipher::try_open_note(ct, enc_id) {
+                if self.receive(pt.value, pt.blinding) {
+                    found += 1;
+                }
+            }
+        }
+        found
     }
 
     /// Locate this wallet's notes in the on-chain commitment list and record their leaf
@@ -159,7 +219,11 @@ impl NoteStore {
     ) -> usize {
         let mut found = 0;
         for n in self.notes.iter_mut().filter(|n| n.position.is_none()) {
-            let Ok(note) = account.note(n.index, n.value) else { continue };
+            let note = Note {
+                value: BaseElement::new(n.value),
+                blinding: n.blinding,
+                spend_key: account.spend_key(),
+            };
             let cm = to_wire(note.commitment());
             if let Some(pos) = pool_commitments.iter().position(|c| *c == cm) {
                 n.position = Some(pos as u64);
@@ -224,6 +288,13 @@ pub struct SpendBundle {
     /// them. Outputs paid to someone else are not tracked here — this wallet cannot spend
     /// them and has no business holding their preimages.
     pub out_indices: Vec<u64>,
+    /// Per-output `(value, blinding)`, in the same order as `cm_outs`.
+    ///
+    /// The sender needs these to seal a note ciphertext to each recipient — a payment the
+    /// recipient cannot open is value burned. Returning them is not a leak: the sender
+    /// chose these values, and owner binding means knowing them confers no ability to
+    /// spend the note.
+    pub out_preimages: Vec<(u64, BaseElement)>,
 }
 
 /// Errors from building a spend.
@@ -274,7 +345,7 @@ pub fn build_spend(
     let owned = store
         .notes
         .iter()
-        .find(|n| n.index == note_index && !n.spent)
+        .find(|n| n.index == Some(note_index) && !n.spent)
         .cloned()
         .ok_or(SpendBuildError::NoSuitableNote { needed: public_value })?;
     let position = owned.position.ok_or(SpendBuildError::NoteNotOnChain)?;
@@ -285,7 +356,11 @@ pub fn build_spend(
         return Err(SpendBuildError::NonConserving { expected, got: sum });
     }
 
-    let note = account.note(owned.index, owned.value)?;
+    let note = Note {
+        value: BaseElement::new(owned.value),
+        blinding: owned.blinding,
+        spend_key: account.spend_key(),
+    };
 
     // Rebuild the tree the chain is anchored on and confirm our note really sits where we
     // think it does. Proving against a mismatched position yields an unverifiable proof
@@ -305,16 +380,18 @@ pub fn build_spend(
     let mine = account.public_key();
     let mut outs = [(BaseElement::ZERO, BaseElement::ZERO, BaseElement::ZERO); N_OUTS];
     let mut out_indices = Vec::new();
+    let mut out_preimages = Vec::with_capacity(N_OUTS);
     for (i, (v, recipient)) in outs_spec.iter().enumerate() {
-        let idx = store.allocate(*v);
+        let idx = store.allocate_with(account, *v);
         let blinding = account.blinding(idx);
         if *recipient == mine {
             out_indices.push(idx);
         } else {
-            // Not ours — drop the placeholder we just allocated so `balance()` does not
-            // count value we cannot spend.
-            store.notes.retain(|n| n.index != idx);
+            // Not ours — drop the placeholder so `balance()` does not count value we
+            // cannot spend. The preimage is still returned so the caller can seal it.
+            store.notes.retain(|n| n.index != Some(idx));
         }
+        out_preimages.push((*v, blinding));
         outs[i] = (BaseElement::new(*v), blinding, *recipient);
     }
 
@@ -342,6 +419,7 @@ pub fn build_spend(
         public_value: public_value as u128,
         proof: proof.to_bytes(),
         out_indices,
+        out_preimages,
     })
 }
 
@@ -352,7 +430,7 @@ pub fn shield_note(
     store: &mut NoteStore,
     value: u64,
 ) -> Result<(u64, [u8; 32]), NoteError> {
-    let index = store.allocate(value);
+    let index = store.allocate_with(account, value);
     let note = account.note(index, value)?;
     Ok((index, to_wire(note.commitment())))
 }
@@ -364,6 +442,8 @@ mod tests {
     use crate::spend_full_v4::{verify_spend_full_v4, SpendFullV4PublicInputs};
 
     const CAPACITY: usize = 1 << 15;
+
+    fn to_field(e: BaseElement) -> BaseElement { e }
 
     fn padded(cms: &[[u8; 32]]) -> Vec<[u8; 32]> {
         let mut v = cms.to_vec();
@@ -409,7 +489,7 @@ mod tests {
         let (_i, their_cm) = shield_note(&theirs, &mut their_store, 500).unwrap();
 
         let mut my_store = NoteStore::new();
-        my_store.allocate(500); // I know a 500 exists; I do not know its blinding
+        my_store.allocate_with(&mine, 500); // I know a 500 exists; I do not know its blinding
         let pool = padded(&[their_cm]);
         assert_eq!(
             my_store.scan_owned(&mine, &pool),
@@ -489,6 +569,131 @@ mod tests {
             bob_cm,
             compress2(compress2(BaseElement::new(50), me.blinding(bundle.out_indices[0])), me.public_key()),
             "the note paid to Bob must not be bound to our key"
+        );
+    }
+
+    /// THE RECEIVING GATE — the property that made "shielded payments" false until now.
+    ///
+    /// Alice pays Bob. Bob has never seen the note, cannot read its commitment, and knows
+    /// nothing but his own keys. He must be able to (1) discover it by trial-decryption,
+    /// (2) locate it in the pool, and (3) SPEND it. Step 3 is the one that matters: a
+    /// wallet that can see a payment but not spend it has not received anything.
+    ///
+    /// This also pins the security half — Alice CREATED the note and knows its full
+    /// preimage, yet cannot spend it, because the leaf binds Bob's key. Before owner
+    /// binding both of them could have spent it, with different nullifiers.
+    #[test]
+    fn alice_pays_bob_and_bob_can_spend_it() {
+        use crate::note_cipher::{enc_identity_from_seed, seal_note, NotePlaintext};
+
+        let alice_seed = [0xA1u8; 32];
+        let bob_seed = [0xB0u8; 32];
+        let alice = ShieldedAccount::from_seed(alice_seed);
+        let bob = ShieldedAccount::from_seed(bob_seed);
+        let bob_enc = enc_identity_from_seed(&bob_seed);
+        let bob_addr = bob.address(&bob_seed);
+
+        // Alice shields 100 and finds her note.
+        let mut alice_store = NoteStore::new();
+        let (idx, cm) = shield_note(&alice, &mut alice_store, 100).unwrap();
+        let pool0 = padded(&[cm]);
+        assert_eq!(alice_store.scan_owned(&alice, &pool0), 1);
+
+        // Alice pays Bob 50, keeps 47 as change, 3 fee.
+        let bundle = build_spend(
+            &alice, &mut alice_store, &pool0, idx, 3,
+            &[(50, bob_addr.shield_key().unwrap()), (47, alice.public_key())],
+        )
+        .expect("alice builds the payment");
+
+        // She seals the note preimage to Bob and publishes it with the tx.
+        // Output 0 went to Bob; the bundle hands back exactly what must be sealed.
+        let (bob_value, bob_blinding) = bundle.out_preimages[0];
+        assert_eq!(bob_value, 50);
+        let ct = seal_note(
+            &NotePlaintext { value: bob_value, blinding: bob_blinding },
+            &bob_addr,
+        )
+        .expect("seal to bob");
+
+        // The chain now holds Alice's original note plus the two outputs.
+        let pool1 = padded(&[cm, bundle.cm_outs[0], bundle.cm_outs[1]]);
+
+        // ── Bob's side: he knows only his seed. ──
+        let mut bob_store = NoteStore::new();
+        assert_eq!(
+            bob_store.scan_ciphertexts(&bob_enc, &[ct.clone()]),
+            1,
+            "Bob must discover the payment by trial-decryption alone"
+        );
+        assert_eq!(
+            bob_store.scan_owned(&bob, &pool1),
+            1,
+            "and locate it in the pool — proving the commitment really is bound to HIS key"
+        );
+        assert_eq!(bob_store.balance(), 50, "Bob's spendable balance is the payment");
+
+        // (3) Bob SPENDS it — the step that makes this a real receipt.
+        let bobs_note_index = bob_store.notes[0].index;
+        assert!(bobs_note_index.is_none(), "a received note has no derivation index");
+        let received = bob_store.notes[0].clone();
+        let note = Note {
+            value: BaseElement::new(received.value),
+            blinding: received.blinding,
+            spend_key: bob.spend_key(),
+        };
+        let position = received.position.expect("located");
+        let leaves: Vec<BaseElement> = pool1
+            .iter()
+            .enumerate()
+            .map(|(i, c)| from_wire(c).unwrap_or_else(|_| padding_leaf(i as u64)))
+            .collect();
+        let tree = ShieldedPoolTree::new(leaves).unwrap();
+        let path = tree.path(position as usize);
+        let me = bob.public_key();
+        let outs = [(BaseElement::new(20), bob.blinding(0), me),
+                    (BaseElement::new(25), bob.blinding(1), me)];
+        let trace = crate::spend_full_v4::build_spend_full_v4_trace(
+            note.value, note.blinding, note.spend_key, BaseElement::new(5), &outs, &path,
+        );
+        let proof = crate::spend_full_v4::SpendFullV4Prover::new(mimc_options())
+            .prove(trace)
+            .expect("bob must be able to prove a spend of the note he received");
+        crate::spend_full_v4::verify_spend_full_v4(
+            proof,
+            crate::spend_full_v4::SpendFullV4PublicInputs {
+                root: tree.root(),
+                nf: to_field(note.nullifier(position)),
+                fee: BaseElement::new(5),
+                cm_outs: [compress2(compress2(outs[0].0, outs[0].1), me),
+                          compress2(compress2(outs[1].0, outs[1].1), me)],
+            },
+        )
+        .expect("SECURITY: Bob must be able to SPEND a note he only received");
+
+        // ── and the security half: Alice cannot spend what she paid away. ──
+        let alice_trace = crate::spend_full_v4::build_v4_trace_unchecked(
+            note.value, note.blinding, alice.spend_key(), BaseElement::new(5), &outs, &path,
+        );
+        let alice_verdict = match std::panic::catch_unwind(|| {
+            crate::spend_full_v4::SpendFullV4Prover::new(mimc_options()).prove(alice_trace)
+        }) {
+            Err(_) | Ok(Err(_)) => Err(()),
+            Ok(Ok(p)) => crate::spend_full_v4::verify_spend_full_v4(
+                p,
+                crate::spend_full_v4::SpendFullV4PublicInputs {
+                    root: tree.root(),
+                    nf: compress2(alice.spend_key(), BaseElement::new(position)),
+                    fee: BaseElement::new(5),
+                    cm_outs: [compress2(compress2(outs[0].0, outs[0].1), me),
+                              compress2(compress2(outs[1].0, outs[1].1), me)],
+                },
+            ).map_err(|_| ()),
+        };
+        assert!(
+            alice_verdict.is_err(),
+            "SECURITY: the SENDER knows the full preimage and must still not be able to \
+             spend the note she paid away"
         );
     }
 

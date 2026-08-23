@@ -330,6 +330,96 @@ pub fn pool_root_wire(leaves: &[[u8; 32]]) -> [u8; 32] {
     }
 }
 
+/// APPEND-ONLY INCREMENTAL TREE — O(depth) per append, O(depth) to read the root.
+///
+/// `sparse_pool_root` is O(real notes): fine at a few thousand, fatal beyond. Chronos
+/// measured 33 ms at 16,384 notes, and coinbase shielding would push the pool past a
+/// million within days — ~2 SECONDS per block, on the producer's critical path.
+///
+/// A note tree is append-only, so the whole left side is immutable once written. This
+/// keeps only the FRONTIER — one node per level, the left sibling still waiting for a
+/// partner — which is all an append can possibly affect. Everything left of it is already
+/// hashed into those nodes; everything right of it is padding whose subtree roots are
+/// precomputed. Cost stops depending on how full the pool is.
+///
+/// I deferred this twice, on the grounds that a wrong incremental root is a consensus
+/// split. That risk is real and the answer to it is
+/// [`tests::incremental_matches_sparse_at_every_size`], which checks agreement at EVERY
+/// count up to a full tree rather than at a few convenient sizes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IncrementalTree {
+    /// `frontier[k]` = a pending left node at level `k`, waiting for its right sibling.
+    frontier: Vec<Option<BaseElement>>,
+    count: usize,
+}
+
+impl IncrementalTree {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.count
+    }
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Append one leaf. Carries up exactly like binary increment: a level with a pending
+    /// left node combines and carries; an empty level parks the value and stops.
+    pub fn append(&mut self, leaf: BaseElement) {
+        let mut cur = leaf;
+        let mut level = 0usize;
+        loop {
+            if self.frontier.len() <= level {
+                self.frontier.push(None);
+            }
+            match self.frontier[level].take() {
+                None => {
+                    self.frontier[level] = Some(cur);
+                    break;
+                }
+                Some(left) => {
+                    cur = compress2(left, cur);
+                    level += 1;
+                }
+            }
+        }
+        self.count += 1;
+    }
+
+    /// The root for a tree of `capacity` leaves, the rest padding.
+    ///
+    /// Climbs once per level. At each level the accumulated subtree is either the RIGHT
+    /// sibling of a pending frontier node, or — when no node is pending — the LEFT sibling
+    /// of a padding subtree, because append-only means real content is always leftmost.
+    /// Starting from the padding leaf makes the empty case fall out for free: with nothing
+    /// appended it folds padding into padding all the way up.
+    pub fn root(&self, capacity: usize) -> BaseElement {
+        assert!(capacity.is_power_of_two() && capacity >= 2);
+        assert!(self.count <= capacity, "pool overflow: {} > {capacity}", self.count);
+        let pads = padding_subtree_roots();
+        let depth = capacity.trailing_zeros() as usize;
+        // EXACTLY FULL is its own case: the final carry deposits the finished root at
+        // `frontier[depth]`, one level above everything the climb below inspects. Missing
+        // it produced a root that was correct at all 64 other occupancies and wrong at the
+        // 65th — which is why the gate checks every count rather than a sample.
+        if self.count == capacity {
+            if let Some(Some(root)) = self.frontier.get(depth) {
+                return *root;
+            }
+        }
+        let mut node = pads[0];
+        for k in 0..depth {
+            node = match self.frontier.get(k).copied().flatten() {
+                Some(left) => compress2(left, node),
+                None => compress2(node, pads[k]),
+            };
+        }
+        node
+    }
+}
+
 /// [`sparse_pool_root`] over wire-encoded real notes. The consensus entry point.
 pub fn sparse_pool_root_wire(notes: &[[u8; 32]], capacity: usize) -> [u8; 32] {
     let elems: Vec<BaseElement> = notes
@@ -496,6 +586,46 @@ mod tests {
         assert_ne!(a.nullifier(0), b.nullifier(0), "different key ⇒ different nullifier");
         assert_ne!(a.nullifier(0), a.nullifier(1), "different position ⇒ different nullifier");
         assert_eq!(a.nullifier(7), a.nullifier(7), "deterministic");
+    }
+
+    /// THE INCREMENTAL GATE. The incremental root must equal the sparse root at EVERY
+    /// count, not at a few convenient sizes — an off-by-one at one occupancy is a
+    /// consensus split that appears exactly once and is unreproducible afterwards.
+    #[test]
+    fn incremental_matches_sparse_at_every_size() {
+        const CAP: usize = 64;
+        let mut inc = IncrementalTree::new();
+        let mut leaves: Vec<BaseElement> = Vec::new();
+
+        // empty first
+        assert_eq!(inc.root(CAP), sparse_pool_root(&leaves, CAP), "empty tree");
+
+        for n in 1..=CAP {
+            let leaf = Note::new(1_000 + n as u64, 7 * n as u64 + 1, 3).unwrap().commitment();
+            inc.append(leaf);
+            leaves.push(leaf);
+            assert_eq!(
+                inc.root(CAP),
+                sparse_pool_root(&leaves, CAP),
+                "SECURITY: incremental root diverged from sparse at n={n} — the chain and \
+                 the prover would disagree and no honest spend could verify"
+            );
+            assert_eq!(inc.len(), n);
+        }
+    }
+
+    /// It must also agree at a realistic depth, where the frontier is deep.
+    #[test]
+    fn incremental_matches_sparse_at_pool_depth() {
+        const CAP: usize = 1 << 15;
+        let mut inc = IncrementalTree::new();
+        let mut leaves: Vec<BaseElement> = Vec::new();
+        for n in 0..300usize {
+            let leaf = Note::new(1_000 + n as u64, 31 * n as u64 + 5, 9).unwrap().commitment();
+            inc.append(leaf);
+            leaves.push(leaf);
+        }
+        assert_eq!(inc.root(CAP), sparse_pool_root(&leaves, CAP), "at depth 15 with 300 notes");
     }
 
     /// THE EQUIVALENCE GATE for the sparse root.

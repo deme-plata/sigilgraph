@@ -42,6 +42,9 @@ pub mod throughput;
 pub mod turbosync;
 pub mod transport;
 pub mod zkflux;
+/// Shielded pool at scale: per-block anchor cost, and a measured value-correlation
+/// adversary — privacy as a number rather than an argument.
+pub mod shielded_pool;
 
 use serde::{Deserialize, Serialize};
 

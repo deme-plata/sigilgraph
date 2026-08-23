@@ -207,13 +207,81 @@ impl ShieldedPoolTree {
     }
 }
 
-/// A deterministic filler leaf for padding a pool to a power of two.
+/// The filler leaf for padding a pool to a power of two.
 ///
-/// Distinct from any real commitment with overwhelming probability, and — unlike a zero
-/// leaf — not a value an attacker can produce a preimage for by choosing `value = 0`,
-/// `blinding = 0`.
-pub fn padding_leaf(index: u64) -> BaseElement {
-    compress2(BaseElement::new(u64::MAX - 1), BaseElement::new(index))
+/// # Why a single CONSTANT rather than an index-dependent value
+///
+/// It was `compress2(MAX-1, index)` — different per slot. That is safe but it made every
+/// padding subtree distinct, which forces a full `2^DEPTH` tree rebuild for every root:
+/// chronos measured 107 ms per block, dominated by padding the producer recomputes forever.
+///
+/// One constant makes every all-padding subtree at a given level IDENTICAL, so their roots
+/// can be precomputed once per level ([`padding_subtree_roots`]) and the tree built over
+/// only the real prefix — O(notes + depth) instead of O(capacity).
+///
+/// Still not zero, and that distinction matters: a zero leaf is a value an attacker could
+/// hit by choosing `value = 0, blinding = 0`, letting them "prove membership" of a note
+/// nobody inserted. Matching THIS constant instead requires a preimage of `compress2`,
+/// which is the same assumption the commitments already rest on.
+pub fn padding_leaf(_index: u64) -> BaseElement {
+    padding_constant()
+}
+
+/// The single padding value. Domain-separated so it cannot collide with a note commitment
+/// derived from any plausible `(value, blinding)` pair.
+pub fn padding_constant() -> BaseElement {
+    compress2(BaseElement::new(u64::MAX - 1), BaseElement::new(0x5349_4749_4C5F_5041))
+}
+
+/// Root of a fully-padded subtree at each level: `[0] = the padding leaf`, `[k] = root of a
+/// 2^k-leaf all-padding subtree`. Computed once; the whole point of the constant.
+fn padding_subtree_roots() -> &'static [BaseElement] {
+    use std::sync::OnceLock;
+    static ROOTS: OnceLock<Vec<BaseElement>> = OnceLock::new();
+    ROOTS.get_or_init(|| {
+        let mut v = vec![padding_constant()];
+        for k in 1..=40 {
+            let prev = v[k - 1];
+            v.push(compress2(prev, prev));
+        }
+        v
+    })
+}
+
+/// The anonymity-set root over `leaves` (the real notes only), padded to `capacity`.
+///
+/// Builds only over the real prefix and splices in precomputed padding subtree roots, so a
+/// pool holding `n` notes costs O(n + depth) rather than O(capacity). Returns the identical
+/// root a full build would produce — [`tests::sparse_root_matches_full_build`] is what
+/// makes that a fact rather than an intention, because a root that differs from what the
+/// CIRCUIT computes is a total, silent outage.
+pub fn sparse_pool_root(leaves: &[BaseElement], capacity: usize) -> BaseElement {
+    assert!(capacity.is_power_of_two() && capacity >= 2);
+    assert!(leaves.len() <= capacity);
+    let pads = padding_subtree_roots();
+    // level 0 = the real prefix; everything past it is padding.
+    let mut level: Vec<BaseElement> = leaves.to_vec();
+    let mut width = capacity;
+    let mut k = 0usize; // current level index
+    while width > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        let mut i = 0;
+        while i < level.len() {
+            let l = level[i];
+            // the right sibling is either real, or the all-padding subtree root at level k
+            let r = if i + 1 < level.len() { level[i + 1] } else { pads[k] };
+            next.push(compress2(l, r));
+            i += 2;
+        }
+        level = next;
+        width /= 2;
+        k += 1;
+        if level.is_empty() {
+            // no real notes at all — the whole tree is padding
+            return pads[k + (width.trailing_zeros() as usize)];
+        }
+    }
+    level[0]
 }
 
 // ── wire-level bridge for consensus (sigil-state calls these) ───────────────────────
@@ -223,8 +291,24 @@ pub fn padding_leaf(index: u64) -> BaseElement {
 // only sanctioned crossing between the wire shape and the field shape.
 
 /// [`padding_leaf`] in the wire encoding.
+///
+/// MEMOISED. Padding leaves are a pure function of the index and never change, but a naive
+/// pool-root rebuild recomputes all `2^DEPTH - notes` of them every time — at depth 15 with
+/// a nearly-empty pool that is ~32,767 `compress2` calls (63 MiMC rounds each) of pure
+/// waste on the producer's critical path. Chronos measured the cost at 107 ms per block and
+/// falling as the pool filled, which is the signature of padding dominating: fewer pads,
+/// less work. The cache turns that into a one-time table.
 pub fn padding_leaf_wire(index: u64) -> [u8; 32] {
-    to_wire(padding_leaf(index))
+    use std::sync::OnceLock;
+    /// Enough for depth 15. A larger pool falls through to computing on demand rather
+    /// than silently returning a wrong leaf.
+    const CACHED: usize = 1 << 15;
+    static TABLE: OnceLock<Vec<[u8; 32]>> = OnceLock::new();
+    let t = TABLE.get_or_init(|| (0..CACHED as u64).map(|i| to_wire(padding_leaf(i))).collect());
+    match t.get(index as usize) {
+        Some(v) => *v,
+        None => to_wire(padding_leaf(index)),
+    }
 }
 
 /// The anonymity-set root over wire-encoded leaves, as the circuit computes it.
@@ -244,6 +328,15 @@ pub fn pool_root_wire(leaves: &[[u8; 32]]) -> [u8; 32] {
         // return a value no spend can match rather than panicking inside consensus.
         Err(_) => [0xFFu8; 32],
     }
+}
+
+/// [`sparse_pool_root`] over wire-encoded real notes. The consensus entry point.
+pub fn sparse_pool_root_wire(notes: &[[u8; 32]], capacity: usize) -> [u8; 32] {
+    let elems: Vec<BaseElement> = notes
+        .iter()
+        .map(|l| from_wire(l).unwrap_or_else(|_| padding_constant()))
+        .collect();
+    to_wire(sparse_pool_root(&elems, capacity))
 }
 
 /// Errors from wire-level spend verification.
@@ -403,6 +496,50 @@ mod tests {
         assert_ne!(a.nullifier(0), b.nullifier(0), "different key ⇒ different nullifier");
         assert_ne!(a.nullifier(0), a.nullifier(1), "different position ⇒ different nullifier");
         assert_eq!(a.nullifier(7), a.nullifier(7), "deterministic");
+    }
+
+    /// THE EQUIVALENCE GATE for the sparse root.
+    ///
+    /// `sparse_pool_root` must return EXACTLY what a full build returns. If it ever
+    /// differs, every honest proof still verifies against the prover's tree and fails
+    /// against the chain's — a total outage with no error message pointing anywhere useful.
+    /// Checked across pool occupancies including the awkward ones: empty, one, odd counts,
+    /// and exactly full.
+    #[test]
+    fn sparse_root_matches_full_build() {
+        const CAP: usize = 256;
+        for n in [0usize, 1, 2, 3, 7, 8, 9, 100, 255, 256] {
+            let leaves: Vec<BaseElement> = (0..n)
+                .map(|i| Note::new(1_000 + i as u64, 7 * i as u64 + 1, 3).unwrap().commitment())
+                .collect();
+
+            // full build: real notes then explicit padding, exactly as before
+            let mut full = leaves.clone();
+            for i in full.len()..CAP {
+                full.push(padding_leaf(i as u64));
+            }
+            let full_root = ShieldedPoolTree::new(full).expect("full").root();
+
+            let sparse = sparse_pool_root(&leaves, CAP);
+            assert_eq!(
+                sparse, full_root,
+                "SECURITY: sparse root diverged from the full build at n={n} — the chain and \
+                 the prover would compute different anchors and NO honest spend could verify"
+            );
+        }
+    }
+
+    /// The padding constant must not be zero, and must not be reachable from a plausible
+    /// note. A padding value an attacker can produce is a membership forgery.
+    #[test]
+    fn padding_constant_is_not_forgeable_by_a_trivial_note() {
+        let pad = padding_constant();
+        assert_ne!(pad, BaseElement::ZERO, "a zero pad is trivially forgeable");
+        for (v, b) in [(0u64, 0u64), (0, 1), (1, 0), (1, 1), (1_000, 0)] {
+            let n = Note::new(v, b, 0).unwrap();
+            assert_ne!(n.commitment(), pad, "note ({v},{b}) collided with the padding value");
+            assert_ne!(n.inner_commitment(), pad);
+        }
     }
 
     /// A pool must refuse shapes the AIR cannot prove, rather than failing later at proving.

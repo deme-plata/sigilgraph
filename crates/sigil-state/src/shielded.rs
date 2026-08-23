@@ -245,9 +245,14 @@ impl ShieldedPool {
     ///
     /// Delegates to `sigil-shield` rather than reimplementing the tree here — duplicating
     /// the circuit's hash in this crate is exactly the divergence PV-1 exists to prevent.
+    /// Cost note: O(real notes + depth), NOT O(capacity). It builds over the real prefix
+    /// and splices in precomputed all-padding subtree roots. Chronos measured the naive
+    /// full-capacity rebuild at 107 ms per touching block on the producer's critical path,
+    /// which is what motivated this; `sparse_pool_root` is proven to return the identical
+    /// root a full build would (`sigil_shield::note_v1::tests::sparse_root_matches_full_build`),
+    /// because a root that differs from the circuit's is a silent, total outage.
     pub fn current_root(&self) -> [u8; 32] {
-        let leaves = self.padded_leaves(sigil_shield::note_v1::padding_leaf_wire);
-        sigil_shield::note_v1::pool_root_wire(&leaves)
+        sigil_shield::note_v1::sparse_pool_root_wire(&self.notes, POOL_CAPACITY)
     }
 
     /// Has this nullifier been spent?

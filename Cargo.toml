@@ -7,7 +7,11 @@ resolver = "2"
 # to the braid frontier, so a braid block can be minted only for verified work
 # and the coinbase pays the miner who did it. Additive: without
 # SIGIL_MINING_GATED=1 production is unchanged.
-version = "5.1.0"
+# v5.1.1 (2026-08-19): take_creditable_solve mining-reward-queue fix (deployed
+# live to Epsilon) + backfill request/response error-visibility logging
+# (isolated-server only, not yet deployed) from tonight's deep-catchup
+# freeze investigation.
+version = "5.1.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/flux-lang/sigil"
@@ -81,7 +85,26 @@ num-traits  = "0.2"
 # These change build OUTPUT only, never behavior — safe for the whole tree.
 # (panic stays "unwind" — a node must survive an isolated task panic, not abort.)
 [profile.release]
-strip = true
+# 2026-08-23: was `strip = true`, which removed the SYMBOL TABLE as well as
+# debug info — so every shipped binary, including the live block producer, was
+# permanently unprofileable. `perf record` on the production node returned raw
+# addresses like 0x7e9f52 and nothing else.
+#
+# That cost a full day: the producer was minting ~5 blocks/MINUTE against an
+# 8 blocks/SECOND floor, and each candidate cause had to be eliminated by
+# inference from log rates instead of read off a profile — memory (16min flat,
+# no leak), the O(n^2) frontier (path_len=1 throughout), peer starvation (10
+# peers, backlog 0), inline backfill serving (no correlation: 30 serves -> 2
+# blocks, 50 serves -> 3). Five theories died on contact with data, and the
+# actual hot path stayed invisible: 36.6% of all CPU sits in libc
+# memcmp/memmove/malloc with no attributable caller.
+#
+# `strip = "debuginfo"` keeps the symbol table (function names resolve, perf
+# works, panics get real backtraces) while still dropping the large DWARF
+# sections — so binaries stay close to the stripped size the original comment
+# was protecting. A production node you cannot profile is a production node
+# whose failures you can only guess at.
+strip = "debuginfo"
 lto = "thin"
 codegen-units = 1
 

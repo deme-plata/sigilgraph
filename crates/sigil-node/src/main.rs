@@ -1040,6 +1040,44 @@ fn run_start() -> Result<()> {
         let mut last_expensive_serve = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(1)).unwrap_or_else(std::time::Instant::now);
         let mut expensive_throttled: u64 = 0;
+        // BATTERIES-INCLUDED SELF-PROFILE (2026-08-23). The producer was minting
+        // ~5 blocks/MINUTE against an 8 blocks/SECOND floor and NOTHING in the
+        // node could say why. `perf` on the live process returned bare addresses
+        // (the release profile stripped the symbol table), so five candidate
+        // causes had to be eliminated one at a time by inferring from log rates
+        // over hours — memory, the frontier walk, peer starvation, backfill
+        // serving — and the real hot path stayed invisible.
+        //
+        // A node should not need an external profiler, a symbol table, or an SSH
+        // session to say where its own tick went. These accumulate real
+        // per-phase wall-clock inside the mint loop and print a breakdown every
+        // few seconds, always on, no configuration. If minting is slow, the node
+        // now TELLS you which phase owns the time.
+        // OPT-IN, DEFAULT OFF (2026-08-23). This instrumentation produced the
+        // finding that finally explained the producer's collapse — measured
+        // 9.8s of a 10s window, 13.1s of 13s, 12.2s of 12s spent in INLINE
+        // BACKFILL SERVING, with ZERO mint ticks executed. That is the root
+        // cause of ~5 blocks/min against a 37 blocks/s target.
+        //
+        // But the always-on version STOPPED BLOCK PRODUCTION when deployed
+        // (0 blk/60s vs 17 before; rolled back). The ServeTimer guard runs its
+        // Drop on every request path including the throttled early-`continue`
+        // ones, and on a loop already saturated by serving that made the
+        // contention worse. So it is gated: the diagnostic stays available and
+        // costs nothing unless explicitly asked for.
+        //
+        //   SIGIL_MINT_PROFILE=1   → per-phase mint-tick breakdown every 10s
+        //
+        // Do NOT flip this on a healthy production producer without watching
+        // block rate; it is a diagnostic for a node that is ALREADY sick.
+        let mint_profile: bool =
+            std::env::var("SIGIL_MINT_PROFILE").ok().as_deref() == Some("1");
+        let mut ph_frontier_us: u64 = 0;
+        let mut ph_mint_us: u64 = 0;
+        let mut ph_drain_us: u64 = 0;
+        let ph_serve_us = std::sync::atomic::AtomicU64::new(0);
+        let mut ph_ticks: u64 = 0;
+        let mut last_phase_log = std::time::Instant::now();
         // PER-PEER expensive-serve clock. See the throttle's doc comment at its
         // check site: a single GLOBAL slot let one runaway peer starve every
         // other node's backfill. Bounded: pruned to the most recent peers so a
@@ -1137,8 +1175,11 @@ fn run_start() -> Result<()> {
                     // the finalized drain, so all nodes converge. Linear mode mints on chain.
                     // Build the frontier FIRST: its tip (`frontier.parent_hash()`) is the
                     // block's real spine parent, which is what merge_tips must exclude.
+                    let _t_frontier = std::time::Instant::now(); // cheap; only READ when profiling
                     let frontier_opt: Option<ChainTip> = braid.as_ref()
                         .map(|br| dag_build_frontier(&chain, br, &dag_bodies));
+                    ph_frontier_us += _t_frontier.elapsed().as_micros() as u64;
+                    ph_ticks += 1;
                     let mint_ref: &ChainTip = frontier_opt.as_ref().unwrap_or(&chain);
                     // SIGIL_DAG=1: merge parents = real DAG tips from the braid, EXCLUDING
                     // the spine parent (= the frontier tip we're building on). Excluding the
@@ -1289,10 +1330,12 @@ fn run_start() -> Result<()> {
                                     }
                                 }
                                 // the ONE settlement path — identical finalized order on every node
+                                let _t_drain = std::time::Instant::now();
                                 let (a, s, f) = dag_drain_apply(br, &mut dag_bodies, &mut chain,
                                     &mut |braw| { let _ = chain_log.append_bytes(braw); },
                                     &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge, &mut mint_hash_to_tx_hashes);
                                 applied += a; dag_ord_skipped += s; dag_apply_failed += f;
+                                ph_drain_us += _t_drain.elapsed().as_micros() as u64;
                                 true
                             } else {
                                 match chain.apply(block) {
@@ -1501,6 +1544,15 @@ fn run_start() -> Result<()> {
                     for ev in drained {
                         match ev {
                         flux_p2p::SwarmAppEvent::InboundRequest { peer, request_id, payload } => {
+                            // Serving runs INLINE in this loop, so its cost is
+                            // stolen directly from block production. Measured here
+                            // so the breakdown below can prove or refute that,
+                            // instead of it being argued from log rates.
+                            let _serve_guard = if mint_profile {
+                                Some(ServeTimer { start: std::time::Instant::now(), acc: &ph_serve_us })
+                            } else {
+                                None
+                            };
                             // Point-to-point backfill serve: answer ONE requester with
                             // the requested block range straight from our chain. No
                             // gossipsub re-broadcast — the response goes only to `peer`.
@@ -1787,6 +1839,20 @@ fn run_start() -> Result<()> {
                                 }
                                 if last_hot_cache_log.elapsed() >= std::time::Duration::from_secs(5) {
                                     let hot_tot = (hot_hits + hot_miss).max(1);
+                                    if mint_profile && last_phase_log.elapsed() >= std::time::Duration::from_secs(10) {
+                                        let secs = last_phase_log.elapsed().as_secs_f64().max(0.001);
+                                        let t = ph_ticks.max(1);
+                                        let serve_us_now = ph_serve_us.load(std::sync::atomic::Ordering::Relaxed);
+                                        eprintln!("⏱ mint-tick self-profile (per tick avg over {} ticks / {:.0}s): frontier {:.1}ms · settle-drain {:.1}ms · inline-serve {:.1}ms — serve is {:.0}% of this loop's measured time",
+                                            ph_ticks, secs,
+                                            ph_frontier_us as f64 / t as f64 / 1000.0,
+                                            ph_drain_us as f64 / t as f64 / 1000.0,
+                                            serve_us_now as f64 / t as f64 / 1000.0,
+                                            serve_us_now as f64 * 100.0 / (ph_frontier_us + ph_drain_us + serve_us_now).max(1) as f64);
+                                        ph_frontier_us = 0; ph_drain_us = 0; ph_ticks = 0;
+                                        ph_serve_us.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        last_phase_log = std::time::Instant::now();
+                                    }
                                     eprintln!("⚡ hot-cache: {} hits / {} miss ({:.0}% hit) · {} chunks RAM · ttl={}ms · {} expensive-throttled",
                                         hot_hits, hot_miss, hot_hits as f64 * 100.0 / hot_tot as f64, hot_cache.len(), hot_cache_ttl.as_millis(), expensive_throttled);
                                     last_hot_cache_log = std::time::Instant::now();
@@ -2993,6 +3059,22 @@ fn dag_seed_braid(chain: &ChainTip) -> Braid {
 /// minutes, all while the host still had 25 GiB free. A cache budget derived
 /// from the ceiling the kernel will actually enforce is the difference between
 /// "sized for this machine" and "sized for the machine the developer had".
+/// Accumulates elapsed time into a counter when dropped — so a phase that has
+/// many early-`continue` exit paths (like the serve arm) is still measured
+/// correctly on every path, including the throttled ones.
+struct ServeTimer<'a> {
+    start: std::time::Instant,
+    acc: &'a std::sync::atomic::AtomicU64,
+}
+impl Drop for ServeTimer<'_> {
+    fn drop(&mut self) {
+        self.acc.fetch_add(
+            self.start.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
 fn detect_memory_ceiling_bytes() -> usize {
     // cgroup v2: the effective high/max for this process's cgroup.
     for f in ["/sys/fs/cgroup/memory.high", "/sys/fs/cgroup/memory.max"] {

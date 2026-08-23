@@ -244,6 +244,17 @@ pub struct P2PSyncState {
     pub sync_failure: Option<(u64, String)>,
     // Turbo Sync X + invented Continuity for continuous high download bandwidth network
     pub turbo_continuity: BandwidthContinuity,
+    /// 2026-08-23 (grogu-sync-card-visibility): self-heal attempts used out of the
+    /// bounded MAX_HEALS budget (currently 3) — surfaced so the Node tab shows the
+    /// countdown instead of the failure only appearing, unexplained, once the
+    /// budget is exhausted. Resets to 0 whenever real progress re-arms it.
+    pub heal_attempts: u32,
+    /// True while the frontier request is running in adaptive-narrow mode (single
+    /// block instead of the full CHUNK, because the frontier has been stalled
+    /// past the connection-churn threshold — see the `frontier_want_narrow`
+    /// site). Lets the Node tab say "compensating for a bad connection" instead
+    /// of just looking slow.
+    pub frontier_narrow: bool,
 }
 
 /// v7.0.21: the background store-opener's payload — the opened store plus an optional
@@ -866,6 +877,10 @@ impl P2PBlockSync {
                 let mut bytes_session: u64 = 0;
                 let mut last_rate_time = Instant::now();
                 let mut last_rate_bytes: u64 = 0;
+                // Wire-liveness horizon: when bytes LAST arrived, not whether they
+                // arrived in the current 150ms tick.
+                let mut last_delivery_bytes: u64 = 0;
+                let mut last_delivery_at: Instant = Instant::now();
                 let mut last_dbg = crate::instant_ago(5);
                 let loop_start = Instant::now();
                 // v0.27 proof-of-useful-sync local accumulators
@@ -1807,8 +1822,34 @@ impl P2PBlockSync {
                                     } else {
                                         healthy[(rr + k) % healthy.len()].clone()
                                     };
+                                    // 2026-08-23 (grogu-adaptive-frontier-width): proven live — a
+                                    // connection that drops and reconnects every 10-30s (real,
+                                    // observed churn, not a code bug) gives an in-flight multi-MB
+                                    // CHUNK request (headers_only, but still ~2048 headers ≈
+                                    // hundreds of KB zstd) a real chance of losing the race against
+                                    // the next drop, every single time, for the SAME height — the
+                                    // watchdog then correctly reports "unfillable hole" because
+                                    // from this connection's perspective it genuinely never
+                                    // completes. A single block is a few hundred bytes; it very
+                                    // likely fits inside even a short-lived connection window that
+                                    // a full CHUNK cannot. Only the FRONTIER request (i==0 — the
+                                    // one that actually advances `synced_to`) shrinks, and only
+                                    // once it's been stalled longer than the observed churn period
+                                    // (12s, comfortably inside the measured 10-30s cycle) — a
+                                    // healthy connection never trips this, so the normal wide/fast
+                                    // path is unaffected. Reverts to full width automatically the
+                                    // moment real progress resumes (`last_advance_t` resets on
+                                    // advance elsewhere in this loop), so this is self-tuning, not
+                                    // a permanent slowdown.
+                                    let frontier_want_narrow = i == 0
+                                        && last_advance_t.elapsed() >= Duration::from_secs(12);
+                                    if i == 0 {
+                                        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+                                        s.frontier_narrow = frontier_want_narrow;
+                                    }
+                                    let req_to = if frontier_want_narrow { start.saturating_add(1) } else { start + CHUNK };
                                     let payload = serde_json::to_vec(
-                                        &BackfillReq { from: start, to: start + CHUNK, headers_only: true, codec: 1 } // v0.58: span==stride(CHUNK) so look-ahead TILES contiguous (was use_chunk -> gaps)
+                                        &BackfillReq { from: start, to: req_to, headers_only: true, codec: 1 } // v0.58: span==stride(CHUNK) so look-ahead TILES contiguous (was use_chunk -> gaps)
                                     ).unwrap();
                                     let n = net.clone();
                                     let tx = done_tx.clone();
@@ -1944,7 +1985,22 @@ impl P2PBlockSync {
                         // say so instead of crying stall. (Same distinction as
                         // `sigil_sync::SyncStore::is_wire_idle`: genuinely idle vs momentarily
                         // quiet while verification catches up.)
-                        let wire_delivering = bytes_session > last_rate_bytes;
+                        // FIX OF MY OWN FIX (2026-08-23). The first version tested
+                        // `bytes_session > last_rate_bytes`, and `last_rate_bytes` is
+                        // reset on EVERY 150ms state tick — so it demanded bytes within
+                        // the last 150ms. Backfill replies are chunky (a ~1.5 MB response
+                        // every few hundred ms), so most ticks legitimately see zero new
+                        // bytes, the flag went false, and the 6s stall check fired anyway.
+                        // The operator still saw "STALLED" on 7.1.59 while syncing at
+                        // ~1,700 blk/s (spine 1 -> 552,772 in 5m24s).
+                        //
+                        // Compare against the SAME horizon the stall check uses: if any
+                        // bytes have landed within the stall window, the wire is working.
+                        if bytes_session > last_delivery_bytes {
+                            last_delivery_bytes = bytes_session;
+                            last_delivery_at = Instant::now();
+                        }
+                        let wire_delivering = last_delivery_at.elapsed() < Duration::from_secs(6);
                         s.stall_reason = if peer_count_now == 0 && loop_start.elapsed() >= Duration::from_secs(6) {
                             "no peers — mesh not grafted (bootstrap/dialing; no backfill peer available)".into()
                         } else if wire_delivering {
@@ -2401,6 +2457,7 @@ impl P2PBlockSync {
                                             let newf = store.rollback_frontier(4096);
                                             crate::tlog!("[sync] 🔧 frontier WEDGE self-heal #{heal_attempts} — honest headers refuse to splice at h={frontier} ({}); rolled local frontier back to h={newf}, refetching clean", f.reason);
                                             s.sync_failure = None;
+                                            s.heal_attempts = heal_attempts;
                                             failure_announced = false;
                                             heal_pending = true;
                                         }
@@ -2411,6 +2468,7 @@ impl P2PBlockSync {
                                                 crate::tlog!("[sync] ✗ SPINE BREAK ({kind}) — {}", f.reason);
                                             }
                                             s.sync_failure = Some((f.height, f.reason));
+                                            s.heal_attempts = heal_attempts;
                                         }
                                         None => {
                                             // advancing, or genuinely caught up to what peers serve →
@@ -2418,6 +2476,7 @@ impl P2PBlockSync {
                                             s.sync_failure = None;
                                             failure_announced = false;
                                             heal_attempts = 0; // real progress re-arms the self-heal budget
+                                            s.heal_attempts = 0;
                                         }
                                     }
                                 }

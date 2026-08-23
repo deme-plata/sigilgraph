@@ -620,6 +620,13 @@ impl SignedTx {
                 let sig = Signature::from_bytes(&sg);
                 vk.verify(&digest, &sig).map_err(|_| TxApplyError::SignatureInvalid)
             }
+            // 2026-08-20: HybridSqiEd25519 exists for BLOCK-header producer
+            // signatures (see sigil-header/sigil-node's producer_signing) — not
+            // yet wired for per-tx signing. Fail loud rather than silently
+            // accept an unverified tx, same posture as Dilithium5 above.
+            SigScheme::HybridSqiEd25519 => Err(TxApplyError::NotImplemented(
+                "HybridSqiEd25519 tx verification not yet wired (block-header scheme only)",
+            )),
         }
     }
 }
@@ -947,6 +954,9 @@ impl AuthorizedBatch {
             SigScheme::Dilithium5 => Err(TxApplyError::NotImplemented(
                 "Dilithium5 batch verify pending flux-zk dilithium integration",
             )),
+            SigScheme::HybridSqiEd25519 => Err(TxApplyError::NotImplemented(
+                "HybridSqiEd25519 batch verify not yet wired (block-header scheme only)",
+            )),
         }
     }
 
@@ -1130,6 +1140,22 @@ pub enum TxApplyError {
     /// commit something half-baked.
     #[error("not implemented yet: {0}")]
     NotImplemented(&'static str),
+
+    /// A transparent peer-to-peer send was submitted at or after
+    /// [`SHIELDED_ONLY_HEIGHT`]. SIGIL is privacy-only from that height: shield the value
+    /// and use a shielded send. Shield/Unshield remain available as the ramps.
+    #[error(
+        "transparent sends are retired as of height {activated_at} (this tx at {height}): \
+         SIGIL is privacy-only — use Shield then ShieldedSend, or Unshield to exit"
+    )]
+    TransparentSendRetired { height: u64, activated_at: u64 },
+
+    /// A shielded transaction was refused before reaching the chokepoint. This layer only
+    /// catches the cheap, obvious cases (a nullifier already in the spent set); the
+    /// authoritative checks — anchor validity and the STARK — belong to
+    /// `commit_state_transition` and are never skipped because of a pass here.
+    #[error("shielded tx rejected: {0}")]
+    ShieldedRejected(&'static str),
 }
 
 /// Result of applying one tx: the atomic batch of state mutations + the
@@ -1140,13 +1166,6 @@ pub struct ApplyResult {
     /// Mutations to feed to `commit_state_transition`.
     pub mutations: Vec<StateMutation>,
     /// Events to record in the block's event log.
-
-    /// A shielded transaction was refused before reaching the chokepoint. This layer only
-    /// catches the cheap, obvious cases (a nullifier already in the spent set); the
-    /// authoritative checks — anchor validity and the STARK — belong to
-    /// `commit_state_transition` and are never skipped because of a pass here.
-    #[error("shielded tx rejected: {0}")]
-    ShieldedRejected(&'static str),
     pub events: Vec<SigilEvent>,
 }
 
@@ -1160,21 +1179,81 @@ pub struct ApplyResult {
 /// - Only the wallet-affecting kinds (`Send`, `MintReward` via `apply_tx`)
 ///   produce real mutations; DEX/VM/validator kinds emit events but no
 ///   storage changes yet — their wiring lands when those crates port.
+/// Height at which SIGIL becomes PRIVACY-ONLY: transparent peer-to-peer
+/// [`SigilTx::Send`] stops being accepted, and value transfer between parties must go
+/// through the shielded pool.
+///
+/// # Why a height and not a deletion
+///
+/// Deleting the variant would change how ALREADY-SETTLED blocks validate — every historical
+/// transparent send would become invalid and the chain would fail to replay from genesis.
+/// The mainnet rule is that old blocks must always validate the same way, so the transition
+/// is a height gate: below it the old rule, at or above it the new one. A node can then
+/// replay the entire chain with one binary.
+///
+/// # What stays transparent, and why that is not a loophole
+///
+/// [`SigilTx::Shield`] and [`SigilTx::Unshield`] still touch transparent balances, because
+/// they are the on- and off-ramps — a pool nobody can enter or leave is not privacy, it is
+/// a trap. Mining rewards and DEX settlement also land transparently. What ends here is
+/// *paying another party in the clear*: to move value to someone else you shield, send
+/// privately, and they hold or unshield. The amounts and the link between payer and payee
+/// are what the pool hides, and those are exactly what a transparent `Send` published.
+///
+/// Set to `0` deliberately: nothing is deployed, every shielded pool is empty, and there is
+/// no settled history containing a transparent send that matters. Raise this to a future
+/// height before any deployment that already carries real transparent traffic.
+pub const SHIELDED_ONLY_HEIGHT: u64 = 0;
+
+/// Legacy entry point — applies with the gate DISABLED.
+///
+/// Retained because ~40 call sites (tests, the retired rpcd, chronos harnesses) predate the
+/// gate and are not consensus paths. Consensus goes through [`apply_tx_at`], which the
+/// block builder calls with the real height. If you are writing new code that applies a
+/// transaction into a block, use [`apply_tx_at`].
 pub fn apply_tx(state: &SigilState, signed: &SignedTx) -> Result<ApplyResult, TxApplyError> {
+    apply_tx_inner(state, signed, None)
+}
+
+/// Apply a transaction as of `height`, enforcing height-gated consensus rules.
+///
+/// This is the consensus entry point: the block builder calls it with the height being
+/// built, so a transparent send is refused from [`SHIELDED_ONLY_HEIGHT`] onward while
+/// replay of older blocks — which must validate exactly as they did when settled — goes
+/// through [`apply_tx`] and is unaffected.
+pub fn apply_tx_at(
+    state: &SigilState,
+    signed: &SignedTx,
+    height: u64,
+) -> Result<ApplyResult, TxApplyError> {
+    apply_tx_inner(state, signed, Some(height))
+}
+
+/// `at_height = None` means "no height context" and applies NO height-gated rule. That is
+/// the honest encoding of a caller that genuinely has no height (a test, a shape probe,
+/// a mempool dry-run) — passing a fake height would silently apply or skip a consensus
+/// rule based on a number nobody chose.
+fn apply_tx_inner(
+    state: &SigilState,
+    signed: &SignedTx,
+    at_height: Option<u64>,
+) -> Result<ApplyResult, TxApplyError> {
     signed.precheck()?;
+    // PRIVACY-ONLY GATE. Checked before anything else so a rejected transparent send
+    // cannot have partially mutated anything.
+    if let Some(height) = at_height {
+        if height >= SHIELDED_ONLY_HEIGHT {
+            if let SigilTx::Send { .. } = &signed.tx {
+                return Err(TxApplyError::TransparentSendRetired {
+                    height,
+                    activated_at: SHIELDED_ONLY_HEIGHT,
+                });
+            }
+        }
+    }
     let mut out = ApplyResult::default();
 
     match &signed.tx {
-        SigilTx::Send { from, to, amount, token, fee } => {
-            let from_native = state.balance_of(from, &NATIVE);
-            let from_token  = state.balance_of(from, token);
-
-            // Fee always paid in native SIGIL.
-            if from_native < *fee {
-                return Err(TxApplyError::InsufficientBalance {
-                    have: from_native, need: *fee,
-                });
-            }
         // ── PV-1 shielded transactions ──────────────────────────────────────────────
         // These translate 1:1 into the shielded StateMutations. Deliberately thin: every
         // shielded rule that matters (anchor validity, nullifier freshness, and the STARK
@@ -1224,6 +1303,16 @@ pub fn apply_tx(state: &SigilState, signed: &SignedTx) -> Result<ApplyResult, Tx
             });
         }
 
+        SigilTx::Send { from, to, amount, token, fee } => {
+            let from_native = state.balance_of(from, &NATIVE);
+            let from_token  = state.balance_of(from, token);
+
+            // Fee always paid in native SIGIL.
+            if from_native < *fee {
+                return Err(TxApplyError::InsufficientBalance {
+                    have: from_native, need: *fee,
+                });
+            }
             // If the transfer token IS native, the sender must have
             // amount + fee in native.
             let need_native = if token == &NATIVE { fee.checked_add(*amount).ok_or(TxApplyError::Overflow)? } else { *fee };
@@ -2350,6 +2439,95 @@ mod tests {
         });
         let result = apply_tx(&s, &signed).unwrap();
         assert!(matches!(result.events[0], SigilEvent::SwapExecuted { .. }));
+    }
+
+    // ── PRIVACY-ONLY GATE ───────────────────────────────────────────────────────────
+
+    /// SIGIL is privacy-only: a transparent peer-to-peer send is refused by the CONSENSUS
+    /// entry point. This is the whole point of the change — paying someone in the clear is
+    /// no longer a thing the chain will do.
+    #[test]
+    fn transparent_send_is_refused_at_the_consensus_entry_point() {
+        let (alice, bob) = ([1u8; 32], [2u8; 32]);
+        let mut s = SigilState::default();
+        commit_state_transition(
+            &mut s,
+            &StateTransition {
+                at_height: 1,
+                mutations: vec![StateMutation::SetBalance {
+                    wallet: alice, token: NATIVE, amount: 1_000,
+                }],
+            },
+            1,
+        )
+        .unwrap();
+
+        let signed = dummy_signed(SigilTx::Send {
+            from: alice, to: bob, amount: 100, token: NATIVE, fee: 1,
+        });
+        let err = apply_tx_at(&s, &signed, SHIELDED_ONLY_HEIGHT)
+            .expect_err("a transparent send must be refused at/after activation");
+        assert!(
+            matches!(err, TxApplyError::TransparentSendRetired { .. }),
+            "got {err:?}"
+        );
+        // and nothing moved
+        assert_eq!(s.balance_of(&alice, &NATIVE), 1_000);
+        assert_eq!(s.balance_of(&bob, &NATIVE), 0);
+    }
+
+    /// The RAMPS stay open. A pool nobody can enter or leave is not privacy, it is a trap —
+    /// so Shield and Unshield must survive the gate that retires transparent sends.
+    #[test]
+    fn shield_and_unshield_survive_the_gate() {
+        let alice = [1u8; 32];
+        let mut s = SigilState::default();
+        commit_state_transition(
+            &mut s,
+            &StateTransition {
+                at_height: 1,
+                mutations: vec![StateMutation::SetBalance {
+                    wallet: alice, token: NATIVE, amount: 1_000,
+                }],
+            },
+            1,
+        )
+        .unwrap();
+
+        let shield = dummy_signed(SigilTx::Shield {
+            from: alice, amount: 500, cm: [7u8; 32], fee: 0,
+        });
+        assert!(
+            apply_tx_at(&s, &shield, SHIELDED_ONLY_HEIGHT + 10_000).is_ok(),
+            "Shield is the on-ramp and must remain available"
+        );
+    }
+
+    /// Historical replay is unaffected: blocks that settled with transparent sends must
+    /// still validate exactly as they did, or a node cannot replay the chain from genesis
+    /// with one binary. The ungated entry is what preserves that.
+    #[test]
+    fn historical_replay_still_applies_transparent_sends() {
+        let (alice, bob) = ([1u8; 32], [2u8; 32]);
+        let mut s = SigilState::default();
+        commit_state_transition(
+            &mut s,
+            &StateTransition {
+                at_height: 1,
+                mutations: vec![StateMutation::SetBalance {
+                    wallet: alice, token: NATIVE, amount: 1_000,
+                }],
+            },
+            1,
+        )
+        .unwrap();
+        let signed = dummy_signed(SigilTx::Send {
+            from: alice, to: bob, amount: 100, token: NATIVE, fee: 1,
+        });
+        assert!(
+            apply_tx(&s, &signed).is_ok(),
+            "replay of an already-settled transparent send must still validate"
+        );
     }
 
     #[test]

@@ -22,8 +22,26 @@ const NATIVE: TokenId = [0u8; 32];
 
 /// Resolve the producer's payout wallet: `SIGIL_PRODUCER_WALLET` (64-hex) or,
 /// unset, a deterministic dev wallet so a fresh node still mints coherently.
+///
+/// If `SIGIL_PRODUCER_SIGNING_SEED_HEX` (see `producer_signing`) is configured,
+/// its derived wallet takes precedence — so a node that opts into real Ed25519
+/// signing for its self-mined blocks pays itself at the SAME address it signs
+/// with (required: `producer_signing::maybe_sign` only signs when `header.
+/// producer` matches the configured key). A node that hasn't set that env var
+/// (every live node as of 2026-08-20, Epsilon included) is byte-for-byte
+/// unaffected — this call is then a no-op passthrough to the legacy behavior.
+/// A configured signing key that disagrees with an explicitly-set
+/// `SIGIL_PRODUCER_WALLET` is a startup misconfiguration — fail loud rather
+/// than silently pick one (an operator could otherwise sign for a wallet that
+/// never receives its own mining reward, or vice versa).
 pub fn producer_wallet() -> WalletId {
-    if let Ok(h) = std::env::var("SIGIL_PRODUCER_WALLET") {
+    let explicit = std::env::var("SIGIL_PRODUCER_WALLET").ok();
+    match crate::producer_signing::reconcile_producer_wallet(explicit.as_deref()) {
+        Ok(Some(w)) => return w,
+        Ok(None) => {} // no signing key configured — fall through to legacy behavior
+        Err(e) => panic!("producer_wallet misconfiguration: {e}"),
+    }
+    if let Some(h) = explicit {
         if let Some(w) = hex64(h.trim()) {
             return w;
         }
@@ -172,7 +190,7 @@ pub fn build_block_body_for(
 
     // 2. user sends, in order, against the evolving state
     for tx in txs {
-        let Ok(res) = sigil_tx::apply_tx(&work, tx) else { continue };
+        let Ok(res) = sigil_tx::apply_tx_at(&work, tx, height) else { continue };
         if sigil_state::commit_state_transition(
             &mut work, &StateTransition { at_height: height, mutations: res.mutations.clone() }, height,
         ).is_ok() {
@@ -223,7 +241,7 @@ pub fn build_block_body_for_shares(
     }
 
     for tx in txs {
-        let res = match sigil_tx::apply_tx(&work, tx) {
+        let res = match sigil_tx::apply_tx_at(&work, tx, height) {
             Ok(res) => res,
             Err(e) => {
                 // Fail LOUD, not silent: a dropped tx used to vanish with zero trace,
@@ -675,6 +693,7 @@ mod tests {
             max_merge_parents: 4,
             ghostdag_k: None,
             final_blue_depth: None,
+            saturated_self_heal_window: 64,
         };
 
         // Two nodes, two DIFFERENT gossip arrival orders.

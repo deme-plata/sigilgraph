@@ -354,6 +354,20 @@ pub async fn send_handler(
     State(st): State<AppState>,
     Json(req): Json<SendRequest>,
 ) -> Json<serde_json::Value> {
+    // PRIVACY-ONLY (2026-08-23): transparent peer-to-peer sends are retired at
+    // `sigil_tx::SHIELDED_ONLY_HEIGHT`. Refuse here with a usable explanation rather than
+    // queueing a transaction the producer will reject at mint — a caller who gets `ok:true`
+    // and never sees their money land has no way to find out why.
+    if sigil_tx::SHIELDED_ONLY_HEIGHT == 0 {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "SIGIL is privacy-only: transparent sends are retired. \
+                      Use POST /v1/shield to move value into the shielded pool, then \
+                      POST /v1/shielded_send to pay privately, and POST /v1/unshield to exit.",
+            "retired_at_height": sigil_tx::SHIELDED_ONLY_HEIGHT,
+            "use_instead": ["/v1/shield", "/v1/shielded_send", "/v1/unshield"],
+        }));
+    }
     match st.send.submit(&req.from, &req.to, req.amount, &req.token, &req.sig, req.req_nonce) {
         Ok(tx_hash) => Json(serde_json::json!({
             "ok": true,

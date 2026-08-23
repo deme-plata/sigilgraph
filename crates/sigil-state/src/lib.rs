@@ -85,6 +85,29 @@ pub const NATIVE: TokenId = [0u8; 32];
 /// may write it; the commit chokepoint rejects any `SetBalance` targeting it.
 pub const NONCE_TOKEN: TokenId = *b"SIGIL/batch-nonce/reserved/00000";
 
+/// Domain tag for [`derive_pool_id`] — kept distinct from `sigil_tx`'s
+/// `LP_SHARE_DOMAIN` (a different derived id, over the pool id, not a token
+/// pair) so the two hashes can never collide even if their raw inputs did.
+const POOL_ID_DOMAIN: &[u8] = b"sigil-state/pool-id/v1";
+
+/// Canonical, deterministic pool id for a (token, token, fee_bps) triple —
+/// order-independent (the two token ids are sorted before hashing) so the
+/// same trading pair always maps to the same pool regardless of which side a
+/// caller happens to call "a" vs "b". This is what lets `POST
+/// /v1/add_liquidity` DERIVE the pool a deposit belongs to from the token
+/// pair + fee tier instead of trusting a caller-supplied id (a client with
+/// no chain history could otherwise coin an id that collides with, or
+/// deliberately targets the wrong entry for, an existing pool).
+pub fn derive_pool_id(token_x: &TokenId, token_y: &TokenId, fee_bps: u16) -> PoolId {
+    let (lo, hi) = if token_x <= token_y { (token_x, token_y) } else { (token_y, token_x) };
+    let mut h = blake3::Hasher::new();
+    h.update(POOL_ID_DOMAIN);
+    h.update(lo);
+    h.update(hi);
+    h.update(&fee_bps.to_le_bytes());
+    *h.finalize().as_bytes()
+}
+
 /// Native SIGIL decimals (base units per whole coin = 10^this).
 pub const SIGIL_DECIMALS: u32 = 8;
 
@@ -173,12 +196,30 @@ pub struct SigilState {
     /// Incremental multiset accumulator over the event log.
     /// O(1) per `push_event_hash`, reset on `clear_block_events`.
     pub(crate) events_acc: [u64; 4],
-}
 
+    // ── PV-1 shielded pool ──────────────────────────────────────────────────
+    //
+    // ⚠️ MUST STAY LAST, AND MUST KEEP `#[serde(default)]`.
+    //
+    // Snapshots are written with `rmp_serde::to_vec`, which encodes a struct as a
+    // POSITIONAL ARRAY (verified: first byte 0x92 = fixarray). Field order is therefore
+    // load-bearing across versions. Inserting this field mid-struct — as it originally
+    // was — shifts every later field by one when an OLD snapshot is loaded, so
+    // `wallet_acc`, `native_supply` and the accumulators would each be read from the
+    // wrong slot: silent balance and supply corruption on the first restart after
+    // upgrade, with no error to point at.
+    //
+    // Appended last plus `#[serde(default)]`, serde fills it from `Default` when the
+    // stored array is one element short, so a pre-shielded snapshot loads with an empty
+    // pool and every other field lands where it belongs. Any FUTURE field must also be
+    // appended after this one, never inserted above it.
     /// Shielded-pool state: note commitments, spent nullifiers, and the value locked in
     /// the private domain. `native_supply + shielded.value_locked()` is the quantity the
     /// 21M cap governs — see [`shielded`] for the two-domain value model.
+    #[serde(default)]
     pub(crate) shielded: shielded::ShieldedPool,
+}
+
 /// The four state roots produced at the end of a block. These go into the
 /// header verbatim. See [`sigil_header::SigilBlockHeaderV0`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,6 +383,12 @@ impl SigilState {
 
     /// Read-only balance lookup. Reads are always free; writes go through
     /// [`commit_state_transition`].
+    /// Read-only view of the shielded pool. Mutation is only possible through
+    /// [`commit_state_transition`], like every other part of state.
+    pub fn shielded(&self) -> &shielded::ShieldedPool {
+        &self.shielded
+    }
+
     pub fn balance_of(&self, wallet: &WalletId, token: &TokenId) -> u128 {
         self.wallets
             .get(&(*wallet, *token))
@@ -365,12 +412,6 @@ impl SigilState {
         if nonce <= cur {
             return Err(CommitError::NonceReplay { got: nonce, have: cur });
         }
-    /// Read-only view of the shielded pool. Mutation is only possible through
-    /// [`commit_state_transition`], like every other part of state.
-    pub fn shielded(&self) -> &shielded::ShieldedPool {
-        &self.shielded
-    }
-
         self.set_balance(*author, NONCE_TOKEN, nonce as u128);
         Ok(())
     }
@@ -378,6 +419,13 @@ impl SigilState {
     /// Read-only pool lookup.
     pub fn pool(&self, pool: &PoolId) -> Option<&PoolState> {
         self.pools.get(pool)
+    }
+
+    /// Read-only listing of every pool — for a `/pools` discovery endpoint.
+    /// Reads are always free; writes still go only through
+    /// [`commit_state_transition`].
+    pub fn pools_iter(&self) -> impl Iterator<Item = (&PoolId, &PoolState)> {
+        self.pools.iter()
     }
 
     /// Read-only contract slot lookup.
@@ -492,36 +540,6 @@ pub enum StateMutation {
     /// Set a contract storage slot.
     SetContractSlot { contract: ContractId, slot: SlotId, value: [u8; 32] },
 
-    /// P5-C: typed delta for a DEX swap. Carries enough context for the
-    /// chokepoint to verify the k-invariant + balance conservation as one
-    /// unit before expanding into [`SetBalance`] + [`SetPool`] primitives.
-    /// Reduces the wire surface a producer has to set explicitly (no need
-    /// to compute the two SetBalance calls + the SetPool — the chokepoint
-    /// does it from the delta), and makes "this is a swap" legible to
-    /// future audit / STARK-proof generation.
-    SwapDelta {
-        from: WalletId,
-        pool: PoolId,
-        in_token: TokenId,
-        #[serde(with = "u128_str")]
-        in_amt: u128,
-        out_token: TokenId,
-        #[serde(with = "u128_str")]
-        out_amt: u128,
-        #[serde(with = "u128_str")]
-        fee: u128,
-        /// Pool snapshot after the swap. The chokepoint verifies this
-        /// against the math: reserves shifted by exactly (in_amt, -out_amt)
-        /// on the right sides, and `reserve_a × reserve_b` did not shrink
-        /// (the k-invariant — fees compound into reserves so k must grow
-        /// or stay equal).
-        pool_after: PoolState,
-    },
-
-    /// P5-C: typed delta for an LP deposit. Carries the amounts deposited
-    /// plus the resulting `shares_minted` so the chokepoint can verify
-    /// `pool_after.lp_shares == prev.lp_shares + shares_minted` and refuse
-    /// share-creation that doesn't conserve.
     /// PV-1: move value from a transparent wallet into the shielded pool.
     ///
     /// Debits `amount` from `(from, NATIVE)` and appends `cm` as a note commitment worth
@@ -580,6 +598,36 @@ pub enum StateMutation {
         proof: Vec<u8>,
     },
 
+    /// P5-C: typed delta for a DEX swap. Carries enough context for the
+    /// chokepoint to verify the k-invariant + balance conservation as one
+    /// unit before expanding into [`SetBalance`] + [`SetPool`] primitives.
+    /// Reduces the wire surface a producer has to set explicitly (no need
+    /// to compute the two SetBalance calls + the SetPool — the chokepoint
+    /// does it from the delta), and makes "this is a swap" legible to
+    /// future audit / STARK-proof generation.
+    SwapDelta {
+        from: WalletId,
+        pool: PoolId,
+        in_token: TokenId,
+        #[serde(with = "u128_str")]
+        in_amt: u128,
+        out_token: TokenId,
+        #[serde(with = "u128_str")]
+        out_amt: u128,
+        #[serde(with = "u128_str")]
+        fee: u128,
+        /// Pool snapshot after the swap. The chokepoint verifies this
+        /// against the math: reserves shifted by exactly (in_amt, -out_amt)
+        /// on the right sides, and `reserve_a × reserve_b` did not shrink
+        /// (the k-invariant — fees compound into reserves so k must grow
+        /// or stay equal).
+        pool_after: PoolState,
+    },
+
+    /// P5-C: typed delta for an LP deposit. Carries the amounts deposited
+    /// plus the resulting `shares_minted` so the chokepoint can verify
+    /// `pool_after.lp_shares == prev.lp_shares + shares_minted` and refuse
+    /// share-creation that doesn't conserve.
     LpDelta {
         from: WalletId,
         pool: PoolId,
@@ -639,6 +687,20 @@ pub enum CommitError {
     #[error("height mismatch in commit: expected {expected}, got {got}")]
     WrongHeight { expected: u64, got: u64 },
 
+    /// A shielded-pool rule was violated (double-spend, pool full, unshield overdraw).
+    #[error("shielded: {0}")]
+    Shielded(#[from] shielded::ShieldedError),
+
+    /// The spend proved membership against a root this pool never had. Accepting an
+    /// unknown anchor would let a prover fabricate a tree containing a note of any value.
+    #[error("shielded: unknown anchor {0:02x?}", anchor)]
+    UnknownAnchor { anchor: [u8; 32] },
+
+    /// The shielded-spend STARK did not verify. The mutation is refused outright — this
+    /// is the fail-closed path that PV-0 established must never be able to fall through.
+    #[error("shielded: spend proof rejected: {reason}")]
+    ShieldedProofRejected { reason: String },
+
     /// The transition's post-state native supply would exceed the hard 21M cap
     /// ([`MAX_SUPPLY`]). The whole block is rejected — no path may inflate past
     /// 21,000,000 SIGIL. This is the consensus teeth behind the compile-time cap.
@@ -668,20 +730,6 @@ pub enum CommitError {
     /// the producer is buggy or malicious.
     #[error("delta math invariant failed: {0}")]
     DeltaInvariant(String),
-
-    /// A shielded-pool rule was violated (double-spend, pool full, unshield overdraw).
-    #[error("shielded: {0}")]
-    Shielded(#[from] shielded::ShieldedError),
-
-    /// The spend proved membership against a root this pool never had. Accepting an
-    /// unknown anchor would let a prover fabricate a tree containing a note of any value.
-    #[error("shielded: unknown anchor {0:02x?}", anchor)]
-    UnknownAnchor { anchor: [u8; 32] },
-
-    /// The shielded-spend STARK did not verify. The mutation is refused outright — this
-    /// is the fail-closed path that PV-0 established must never be able to fall through.
-    #[error("shielded: spend proof rejected: {reason}")]
-    ShieldedProofRejected { reason: String },
 
     /// P5-C: a typed delta references a pool that doesn't exist yet. Pool
     /// creation goes through LpDelta on a fresh PoolId — never SwapDelta
@@ -999,36 +1047,6 @@ pub fn commit_state_transition(
             StateMutation::SetContractSlot { contract, slot, value } => {
                 state.set_contract_slot(contract, slot, value);
             }
-            StateMutation::SwapDelta {
-                from, pool, in_token, in_amt, out_token, out_amt, fee, pool_after,
-            } => {
-                apply_swap_delta(
-                    state, from, pool, in_token, in_amt, out_token, out_amt, fee, pool_after,
-                )?;
-            }
-            StateMutation::LpDelta {
-                from, pool, amt_a, amt_b, shares_minted, fee, pool_after,
-            } => {
-                apply_lp_delta(
-                    state, from, pool, amt_a, amt_b, shares_minted, fee, pool_after,
-                )?;
-            }
-            StateMutation::LpBurnDelta {
-                from, pool, shares_burned, amt_a_out, amt_b_out, fee, pool_after,
-            } => {
-                apply_lp_burn_delta(
-                    state, from, pool, shares_burned, amt_a_out, amt_b_out, fee, pool_after,
-                )?;
-            }
-            StateMutation::SetMasterWallet { wallet } => {
-                if state.master_wallet.is_some() {
-                    return Err(CommitError::MasterWalletAlreadySet);
-                }
-                state.set_master_wallet(wallet);
-            }
-        }
-    }
-    // HARD SUPPLY CAP — the consensus teeth behind the compile-time MAX_SUPPLY.
 
             // ── PV-1 shielded pool ───────────────────────────────────────────────────
             StateMutation::Shield { from, amount, cm } => {
@@ -1109,6 +1127,36 @@ pub fn commit_state_transition(
                 state.set_balance(to, NATIVE, next);
                 state.shielded.remember_anchor_dirty();
             }
+            StateMutation::SwapDelta {
+                from, pool, in_token, in_amt, out_token, out_amt, fee, pool_after,
+            } => {
+                apply_swap_delta(
+                    state, from, pool, in_token, in_amt, out_token, out_amt, fee, pool_after,
+                )?;
+            }
+            StateMutation::LpDelta {
+                from, pool, amt_a, amt_b, shares_minted, fee, pool_after,
+            } => {
+                apply_lp_delta(
+                    state, from, pool, amt_a, amt_b, shares_minted, fee, pool_after,
+                )?;
+            }
+            StateMutation::LpBurnDelta {
+                from, pool, shares_burned, amt_a_out, amt_b_out, fee, pool_after,
+            } => {
+                apply_lp_burn_delta(
+                    state, from, pool, shares_burned, amt_a_out, amt_b_out, fee, pool_after,
+                )?;
+            }
+            StateMutation::SetMasterWallet { wallet } => {
+                if state.master_wallet.is_some() {
+                    return Err(CommitError::MasterWalletAlreadySet);
+                }
+                state.set_master_wallet(wallet);
+            }
+        }
+    }
+    // HARD SUPPLY CAP — the consensus teeth behind the compile-time MAX_SUPPLY.
     // Transfers net to zero supply; only a mint/coinbase/over-funded-genesis can
     // trip this. A violating block is rejected outright — 21M can never inflate.
     // PV-1: shielding moves value OUT of `native_supply` and into the pool, so the cap
@@ -1318,6 +1366,25 @@ mod tests {
         let r1 = s.roots();
         let r2 = s.roots();
         assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn derive_pool_id_is_order_independent() {
+        let a: TokenId = [1u8; 32];
+        let b: TokenId = [2u8; 32];
+        assert_eq!(derive_pool_id(&a, &b, 30), derive_pool_id(&b, &a, 30),
+            "the same pair must map to the same pool regardless of which side is named first");
+    }
+
+    #[test]
+    fn derive_pool_id_varies_with_fee_and_pair() {
+        let a: TokenId = [1u8; 32];
+        let b: TokenId = [2u8; 32];
+        let c: TokenId = [3u8; 32];
+        assert_ne!(derive_pool_id(&a, &b, 30), derive_pool_id(&a, &b, 100),
+            "different fee tiers must be different pools");
+        assert_ne!(derive_pool_id(&a, &b, 30), derive_pool_id(&a, &c, 30),
+            "different token pairs must be different pools");
     }
 
     #[test]

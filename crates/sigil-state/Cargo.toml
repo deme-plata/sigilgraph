@@ -30,6 +30,8 @@ sigil-shield = { path = "../sigil-shield" }
 winterfell = "0.9"
 # the node persists state with MessagePack; the round-trip test uses the same codec.
 rmp-serde = "1"
+# zz_snapshot_compat.rs: reshape an encoded snapshot to the PRE-shielded layout.
+rmpv = "1"
 serde_json = { workspace = true }
 # stargate_500m.rs / sig_wall.rs / sig_agg.rs — measure the REAL wall
 # (signature verification) next to state-commitment throughput.

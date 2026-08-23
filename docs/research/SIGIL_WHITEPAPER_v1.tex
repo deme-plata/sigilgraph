@@ -291,8 +291,20 @@ conviction: that a chain should follow from a single organizing object, the way 
 theory follows from an \emph{action}, and that agreement about state should be
 \emph{structural} — written into the object every node checks, not reassembled from
 conventions each node is merely trusted to honor. That is why \emph{what the network agrees
-the state is} became a first-class, committed quantity (the four roots above): agreement
-stops being faith in a linear ledger and becomes a checkable property of the header itself.
+the state is} was made a first-class, committed quantity (the four roots above): the aim is
+that agreement stops being faith in a linear ledger and becomes a checkable property of the
+header itself.
+
+That aim is, at the time of writing, about a quarter delivered, and it would be dishonest to
+state it as accomplished. The header \emph{schema} carries all four roots and the settlement
+leg genuinely enforces conservation at the chokepoint; but on mainnet only
+\texttt{wallet\_state\_root} is populated, while the DEX, event-log and contract roots ship
+all-zero, and the STARK attestation binding the roots to the transition is not yet produced.
+A node today can therefore check far less of the header than this design intends. The
+commitment is structural in \emph{shape} --- the fields exist, the chokepoint is real, and
+nothing needs redesigning to fill them --- but a reader should take the paragraph above as a
+statement of what the object is \emph{for}, not a description of what it currently proves.
+\S\ref{sec:honesty} grades this gap directly.
 
 The v0 whitepaper (2026-05-29) stated these as engineering claims. What v0 lacked — and
 what Quillon's own quantum-physics whitepaper demonstrated the value of — is a
@@ -332,6 +344,77 @@ engineering claim gets a ``what's still pretend'' entry (\S\ref{sec:honesty}).
 \end{enumerate}
 
 \section{The Master Equation}\label{sec:action}
+
+\subsection{Where this shape comes from}\label{sec:action-primer}
+
+A reader who has not met an action before should know that the equation on the next page
+is not decoration, and not an analogy chosen for flattery. It is a specific piece of
+machinery, and physics has used it for three centuries because it does one thing
+extremely well: it lets you write down \emph{what a system is} once, and then derive
+\emph{everything the system does} from it.
+
+The oldest version is Fermat's: light travelling between two points takes the path that
+minimises travel time. You do not need a rule for mirrors and a separate rule for lenses
+and a third for water; you need one scalar quantity and the instruction \emph{make it
+stationary}. Lagrange and Hamilton generalised this into the form still used today. You
+write a single number $S$ — the action — as an integral over the whole history of the
+system, and the physical history is the one where $S$ does not change to first order
+under small variations: $\delta S = 0$. Newton's laws, Maxwell's equations, general
+relativity and the Standard Model are all recoverable this way. The differences between
+those theories are differences in \emph{what you put inside the integral}.
+
+That is the whole trick, and it is the reason this document reaches for it. Each term
+below is a named piece of physics, borrowed for its \emph{structure}:
+
+\begin{itemize}\itemsep2pt
+  \item $\tfrac{1}{2\kappa}(R - 2\Lambda)$ is the Einstein--Hilbert term of general
+        relativity. $R$ is curvature — how much the fabric bends — and $\Lambda$ is a
+        cosmological constant, a uniform tension. In SIGIL the braid's geometry plays
+        the role of the fabric, and emission plays the role of $\Lambda$.
+  \item $\mathcal{L}_{\mathrm{settle}}(J,g)$ has the shape of a matter term: a current
+        $J$ coupled to the geometry. In physics $J$ is charge or mass flow; here it is
+        value settling through the chain.
+  \item $\mathcal{L}_{\mathrm{witness}}(A,g)$ is gauge-field shaped — $A$ is a
+        connection, the same object that carries electromagnetism in Maxwell's theory
+        and the strong and weak forces in Yang--Mills. A connection is what tells you
+        how to compare things at different points. Witnessing is exactly that: agreeing
+        what two nodes are looking at.
+  \item $\mathcal{L}_{\mathrm{topo}}(K)$ is a topological term, in the family of
+        Chern--Simons terms. These are unusual: they do not care about distances at all,
+        only about how things are connected. A DAG's fork structure is precisely a
+        question about connectivity, not distance.
+  \item $\mathcal{L}_{\mathrm{crypto}}(\Sigma,g)$ has no clean physical ancestor. It is
+        the term where the analogy stops being borrowed and starts being ours.
+\end{itemize}
+
+\paragraph{On string theory, stated carefully.} String theory is the usual reference
+point for ``one action generating an entire world,'' and two of its habits genuinely
+inform the construction here. The first is the \emph{effective action}: rather than
+claiming to describe the microscopic truth, you write the action that reproduces the
+behaviour you can actually observe at the scale you care about, and you say so. The
+second is that a low-dimensional object's dynamics can be organised by an action defined
+over the surface it sweeps out — a worldsheet — which is the move being imitated when a
+DAG of discrete blocks is treated as a smooth 4-manifold.
+
+What is \emph{not} claimed: SIGIL is not a string theory, contains no strings, and
+derives nothing from one. There are no extra dimensions, no supersymmetry, no
+quantisation. Borrowing the variational method from physics no more makes this physics
+than using a balance sheet makes a company a bank. The honest description is that the
+action is a \emph{design discipline} — it forces every subsystem to be expressed in one
+common language, so that a change to emission and a change to consensus can be compared
+rather than merely coexisting — plus a source of falsifiable predictions
+(\S\ref{sec:action}). Where those predictions have been tested, the results are graded
+in this document; where they have not, they are marked open. The equation earns its
+place by being checkable, not by being impressive.
+
+\layman{sigilamber}{what an action is, in one paragraph}{Physics has a habit worth
+stealing. Instead of writing one rule for each thing that can happen, you write a single
+number that scores an entire history of the system, and then say: reality is whichever
+history scores best. That one line gives you falling apples, orbiting planets and radio
+waves, depending only on what you put in the score. SIGIL borrows the habit, not the
+physics — we are scoring chains, not planets — and the reason to bother is that it makes
+the pieces argue with each other in a shared language instead of being bolted together
+and hoped over.}
 
 SIGIL's BlockDAG braid $\mathcal{G}$ — vertices are blocks, edges are causal links — is
 modeled as a Lorentzian 4-manifold (3 spatial + 1 temporal degrees of freedom). We
@@ -400,6 +483,140 @@ awaiting derivation or empirical fit.}
 \label{fig:eqmap}
 \end{figure}
 
+\subsection{Quantum theory, string theory, and what SIGIL actually borrows}
+\label{sec:physics-deeper}
+
+The previous section explained the \emph{shape} of an action. This one goes through the
+physics by name, because a reader who knows the subject deserves to see exactly where the
+correspondence is load-bearing, where it is suggestive, and where it is nothing more than
+shared vocabulary. The programme's own discipline applies: each claim below is graded, and
+most of them are graded down.
+
+\paragraph{First, a disclaimer that removes a common confusion.}
+SIGIL is post-quantum, and post-quantum cryptography is \emph{not} quantum physics. SQIsign,
+ML-KEM and the hash-based assumptions are ordinary classical mathematics chosen because no
+efficient \emph{quantum algorithm} is known against them --- they resist a quantum
+adversary, they do not use quantum mechanics. Nothing in this chain is in superposition,
+nothing is entangled, and no qubit is involved anywhere. A reader who came here expecting
+quantum computation should stop at this paragraph; the interesting content is the classical
+field theory that follows. \stC
+
+\paragraph{Least action, and why it is a design constraint rather than a metaphor.}
+Hamilton's principle says a physical history is a stationary point of the action. The
+practical consequence — the one this project actually uses — is that once you commit to a
+single $\mathcal{S}$, you \emph{lose the freedom to patch}. In a feature-list protocol, an
+awkward case is fixed by adding a rule. Under a variational principle you cannot: any change
+must enter as a term in the Lagrangian, and every term interacts with every other through
+the same equations of motion. That is uncomfortable, and it is the point. A design that
+resists local patching is one where inconsistencies surface as contradictions rather than
+accumulating as special cases. \stC
+
+\paragraph{General relativity: curvature, and the one honest use of $g_{\mu\nu}$.}
+The Einstein--Hilbert term $\tfrac{1}{2\kappa}(R-2\Lambda)$ says geometry is dynamical: mass
+tells space how to curve, curvature tells mass how to move. The SIGIL conjecture is that
+agent reputation plays the role of mass-energy, so consensus preferentially flows toward
+high-reputation producers the way a test particle falls toward a mass. This is a
+\emph{heuristic with the functional form unspecified} --- we have no metric, no stress tensor,
+and no fit to measured consensus drift. It is the weakest correspondence in the paper and is
+marked accordingly wherever it appears. \stC
+
+\paragraph{Gauge theory: the witness field is the one term that is genuinely structural.}
+In Yang--Mills, a connection $A_\mu$ tells you how to compare a quantity at one point with
+a quantity at another, and the curvature $F = dA + A \wedge A$ measures the failure of that
+comparison to be path-independent: carry a vector around a loop, and if it comes back
+rotated, the field strength is non-zero. Two nodes disagreeing about state is
+\emph{precisely} this failure --- transport a claim about the ledger around a loop of
+witnesses and see whether it returns unchanged. The four state roots are the concrete
+instrument: a non-zero ``curvature'' is a root mismatch, and it is detectable rather than
+inferred. The correspondence is exact in spirit and \emph{partially built} in practice
+(\S\ref{sec:honesty}). \stG
+
+\paragraph{Topological field theory: why the $K$ term is not decorative.}
+Chern--Simons theory is the unusual corner of physics where the action depends on
+\emph{connectivity alone} --- stretch or bend the space and the answer does not change.
+Its observables are knot invariants, most famously the Jones polynomial, and Witten's
+result is that expectation values of Wilson loops in Chern--Simons theory \emph{compute}
+those invariants. A BlockDAG's fork structure is exactly a connectivity question and not a
+distance question, which is why a topological term belongs here at all.
+
+The obstacle is complexity, and it is fatal rather than inconvenient: evaluating the Jones
+polynomial is $\#P$-hard, so no node can compute it per block. Only the bounded-window
+linking-number and Alexander-polynomial programme is claimed tractable, and the cheap
+invariants we can afford are \emph{one-way tripwires} --- they fingerprint a braid, they do
+not classify it. Two consensus-equivalent histories share their invariants; two histories
+sharing invariants are not thereby equivalent. That asymmetry is why $K$ remains designed
+rather than shipped. \stC
+
+\paragraph{String theory, stated at its actual strength.}
+Three habits are borrowed, and none of them require strings to exist.
+
+\emph{The effective action.} String theory taught a generation of physicists to stop
+demanding a microscopically complete description and instead write the action that
+reproduces observed behaviour at the scale of interest, saying so explicitly. That posture
+is the honest framing for every claim in \S\ref{sec:action} and is the reason the word
+``conjectural'' appears in the definition itself.
+
+\emph{The worldsheet.} A string's dynamics are organised by an action integrated over the
+two-dimensional surface it sweeps out, not over the one-dimensional object. Treating a
+discrete DAG of blocks as a smooth manifold and integrating over it is the same move:
+promote the object to the surface its history traces. Whether that promotion is legitimate
+here is exactly the open question --- a rigorous discretisation of the BlockDAG into a
+lattice field theory has \emph{not} been constructed, and until it is, $\int_{\mathcal{G}}
+d^4\sigma$ is notation rather than a defined integral.
+
+\emph{Holography.} AdS/CFT relates a gravitational theory in a bulk volume to a field theory
+on its boundary: the interior is reconstructible from the surface. The tempting reading is
+that a chain's whole history (bulk) is reconstructible from its tip commitments (boundary),
+and the fold --- which verifies an entire chain from a succinct object --- looks like exactly
+that. We resist the reading. The duality is a precise statement about specific spacetimes
+with a specific symmetry algebra, and a discrete graph has neither. The resemblance is
+suggestive and is not evidence. \stC
+
+\paragraph{Klein--Gordon and the emission controller.}
+$\Lambda_{\mathrm{emission}}(\varphi)$ is written as a scalar field because emission control
+is a scalar dynamical quantity with a restoring force toward a target. The mapping to a
+Klein--Gordon field is schematic and known to be imperfect in a specific, stateable way: a
+PID controller's integral term is a memory of the whole trajectory, and is therefore
+\emph{not local in $\varphi$}, whereas a Klein--Gordon Lagrangian is. The correspondence is
+exact only in the quadratic-potential, memoryless limit. The controller itself is live and
+running in production; the field-theoretic reading of it is not. \stL/\stC
+
+\begin{center}
+\small
+\rowcolors{2}{rowtint}{white}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabularx}{\textwidth}{@{}l>{\RaggedRight\arraybackslash}X l@{}}
+\toprule
+Physics & What SIGIL takes from it & Strength \\
+\midrule
+Hamilton's principle & One object generates the whole design; no local patching &
+  \emph{method, load-bearing} \\
+Yang--Mills & Disagreement as curvature; roots as the instrument &
+  \emph{structural, partly built} \\
+General relativity & Reputation as curvature; emission as $\Lambda$ &
+  \emph{heuristic, unfitted} \\
+Chern--Simons & Fork topology as a connectivity invariant &
+  \emph{blocked by $\#P$-hardness} \\
+String theory & Effective action; worldsheet promotion &
+  \emph{posture and notation only} \\
+AdS/CFT & Bulk history from boundary commitments &
+  \emph{resemblance, explicitly not claimed} \\
+Quantum mechanics & \textbf{nothing} --- post-quantum $\neq$ quantum &
+  \emph{not applicable} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\layman{sigilviolet}{is this real physics or borrowed words?}{Both, in different places, and
+the table above says which is which. The genuinely useful borrowing is the \emph{method}:
+write one object that generates everything, and lose the ability to paper over an awkward
+case with a special rule. The most defensible correspondence is disagreement-as-curvature,
+because it comes with an instrument --- the four state roots --- rather than only a picture.
+The weakest are the gravitational and holographic readings, which are analogies we have not
+earned. And the one people expect to be here is absent: there is no quantum mechanics in
+SIGIL at all. Post-quantum cryptography means maths a quantum computer cannot break, not
+maths that uses one.}
+
 \subsection{The fields}
 
 \begin{center}
@@ -417,14 +634,26 @@ high-reputation producers bend the metric, consensus flows toward them — reput
 curvature. & \stC \\
 $R$ & Consensus tension; forks raise it, convergent histories minimize it. & \stC \\
 $\Lambda_{\mathrm{emission}}(\varphi)$ & The emission ``cosmological constant,''
-PID-controlled toward target supply. & \stC \\
+PID-controlled toward target supply. The adaptive emission controller runs in
+production (\texttt{SIGIL\_EMISSION\_ADAPTIVE=1}); reading it as a $\Lambda$ term is
+the conjectural part. & \stL/\stC \\
 $A_\mu$ & Witness attestations; the curvature 2-form $F = dA + A\wedge A$ is the
-witness-disagreement field. State-root divergence check is live. & \stL \\
-$J^\mu$ & Settlement flow; conservation enforced at the state chokepoint. & \stL \\
+witness-disagreement field. Partially landed: of the four state roots only
+\texttt{wallet\_state\_root} is populated on mainnet --- \texttt{dex}, \texttt{event\_log}
+and \texttt{contract} roots are all-zero --- and the cross-node divergence detector is
+opt-in (\texttt{SIGIL\_DAG\_ORDER\_LOG}) and not enabled in production. & \stG \\
+$J^\mu$ & Settlement flow; conservation enforced at the state chokepoint. The
+strongest correspondence in this table: \texttt{sigil-state} checks every leg with
+\texttt{checked\_add}/\texttt{checked\_sub} and re-derives the $k$-invariant
+independently at the chokepoint, rejecting non-conserving deltas. & \stL \\
 $K$ & The link obtained by closing the bounded-window braid; consensus-equivalent
-histories share its invariants. Header commitment staged. & \stG \\
+histories share its invariants. Designed only: there is no $K$ field in the block header
+and no link-invariant implementation in the tree. & \stC \\
 $\Sigma$ & Three disjoint post-quantum hardness assumptions, one per layer guarded
-(\S\ref{sec:crypto}). & \stL \\
+(\S\ref{sec:crypto}). Two of three legs are live --- SQIsign-L5 (carried in the header as
+\texttt{nonce\_sqisign}) and the BLAKE3/BLAKE4 hash assumption. The Dilithium5 producer
+leg is implemented but dormant: \texttt{SIGIL\_PRODUCER\_SIGNING\_SEED\_HEX} is unset in
+production, so blocks ship unsigned by that leg. & \stG \\
 $\kappa$ & The gravitational constant of the agent economy; empirical. & \stC \\
 \bottomrule
 \end{tabularx}

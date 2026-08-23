@@ -145,6 +145,23 @@ impl ShieldedBridge {
         Self::default()
     }
 
+    /// Queue a shielded-address registration.
+    ///
+    /// After this lands, block rewards for `wallet` are minted directly into the pool
+    /// instead of crediting a transparent balance. This is the mechanism that grows the
+    /// anonymity set without asking anyone to change what they do — a miner registers once
+    /// and every subsequent reward is a pool note.
+    pub fn submit_register(
+        &self,
+        wallet: &str,
+        pk_shield: &str,
+        fee: u128,
+    ) -> Result<[u8; 32], ShieldedSubmitError> {
+        let w = hex32(wallet, "wallet")?;
+        let pk = hex32(pk_shield, "pk_shield")?;
+        Ok(self.enqueue(SigilTx::RegisterShieldedAddress { wallet: w, pk_shield: pk, fee }, None))
+    }
+
     /// Queue a transparent → shielded deposit.
     ///
     /// Wallet-authenticated: the caller must own `from`, and the signature is checked the
@@ -371,6 +388,15 @@ impl ShieldedBridge {
 }
 
 // ── request shapes ──────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct RegisterRequest {
+    pub wallet: String,
+    /// Hex of the wire-encoded shielded public key (`ShieldedAccount::public_key`).
+    pub pk_shield: String,
+    #[serde(default, with = "sigil_state::u128_str")]
+    pub fee: u128,
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ShieldRequest {

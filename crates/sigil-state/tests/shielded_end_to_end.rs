@@ -507,3 +507,51 @@ fn an_entire_accumulated_balance_can_be_shielded() {
     assert_eq!(state.shielded().value_locked(), REAL_BALANCE, "all of it is private");
     assert_eq!(state.shielded().len(), parts.len());
 }
+
+/// THE POOL-GROWTH PATH: a miner registers once, and its rewards become pool notes.
+///
+/// This is the mechanism that grows the anonymity set without persuading anyone to change
+/// their behaviour, so the properties worth pinning are that it is opt-in (an unregistered
+/// wallet is untouched) and that a registered miner's reward really lands in the pool
+/// rather than a transparent balance.
+#[test]
+fn a_registered_miner_is_paid_into_the_pool() {
+    use sigil_shield::note_v1::coinbase_commitment_wire;
+
+    const MINER: [u8; 32] = [0x77; 32];
+    const UNREGISTERED: [u8; 32] = [0x88; 32];
+    let acct = sigil_shield::wallet::ShieldedAccount::from_seed([0x77; 32]);
+    let pk = to_wire(acct.public_key());
+
+    let mut state = SigilState::default();
+    apply(&mut state, 1, vec![StateMutation::RegisterShieldedAddress { wallet: MINER, pk_shield: pk }])
+        .expect("registration");
+    assert_eq!(state.shielded().shielded_address(&MINER), Some(pk));
+    assert_eq!(
+        state.shielded().shielded_address(&UNREGISTERED),
+        None,
+        "registration must be per-wallet and opt-in"
+    );
+
+    // A block reward for the registered miner.
+    let reward: u128 = 201_881_165; // a real, non-round reward from the live chain
+    let cm = coinbase_commitment_wire(2, &pk, reward).expect("in range");
+    apply(&mut state, 2, vec![StateMutation::ShieldedCoinbase { pk_shield: pk, amount: reward, cm }])
+        .expect("shielded coinbase");
+
+    assert_eq!(state.shielded().len(), 1, "ONE note per reward — no denomination split");
+    assert_eq!(state.shielded().value_locked(), reward, "the reward is in the pool");
+    assert_eq!(
+        state.balance_of(&MINER, &NATIVE),
+        0,
+        "and NOT in a transparent balance — that is the whole point"
+    );
+
+    // The miner can recompute its own note from public data alone: no ciphertext needed.
+    let recomputed = coinbase_commitment_wire(2, &pk, reward).unwrap();
+    assert_eq!(
+        state.shielded().note_at(0),
+        Some(recomputed),
+        "the miner must be able to FIND its reward from (height, pk) with no side channel"
+    );
+}

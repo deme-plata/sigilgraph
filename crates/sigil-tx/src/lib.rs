@@ -101,6 +101,22 @@ fn pool_state_from_dex(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum SigilTx {
+    /// PV-1: publish this wallet's shielded public key.
+    ///
+    /// One transparent, wallet-signed transaction that redirects future block rewards for
+    /// this wallet into the shielded pool. Wallet-authenticated (unlike a shielded send)
+    /// because it names a wallet and only its owner may redirect its income.
+    ///
+    /// The key is public by nature — `compress2` is one-way, so publishing it never
+    /// exposes the spend key. It does reveal an intent to receive privately, which is
+    /// unavoidable: someone has to be told where to pay.
+    RegisterShieldedAddress {
+        wallet: WalletId,
+        pk_shield: [u8; 32],
+        #[serde(with = "sigil_state::u128_str")]
+        fee: u128,
+    },
+
     /// PV-1: move value from a transparent wallet into the shielded pool.
     ///
     /// The only public numbers are the depositor and the amount — necessarily so, since
@@ -441,6 +457,7 @@ impl SigilTx {
             SigilTx::BankPropose     { .. } => 13,
             SigilTx::BankApprove     { .. } => 14,
             SigilTx::BankExecute     { .. } => 15,
+            SigilTx::RegisterShieldedAddress { .. } => 19,
             SigilTx::Shield          { .. } => 16,
             SigilTx::ShieldedSend    { .. } => 17,
             SigilTx::Unshield        { .. } => 18,
@@ -451,6 +468,7 @@ impl SigilTx {
     /// without case-matching the enum at every call site.
     pub fn fee(&self) -> u128 {
         match self {
+            SigilTx::RegisterShieldedAddress { fee, .. } |
             SigilTx::Shield          { fee, .. } |
             SigilTx::ShieldedSend    { fee, .. } |
             SigilTx::Unshield        { fee, .. } |
@@ -485,6 +503,7 @@ impl SigilTx {
     /// exists to break.
     pub fn fee_payer(&self) -> WalletId {
         match self {
+            SigilTx::RegisterShieldedAddress { wallet, .. } => *wallet,
             SigilTx::Shield { from, .. } => *from,
             SigilTx::ShieldedSend { .. } | SigilTx::Unshield { .. } => [0u8; 32],
             SigilTx::Send         { from, .. } => *from,
@@ -1260,6 +1279,21 @@ fn apply_tx_inner(
         // itself) is enforced by `commit_state_transition`, not here. Duplicating those
         // checks at this layer would create a second place they could drift or be skipped
         // — and this layer's checks are not the ones that gate the money.
+        SigilTx::RegisterShieldedAddress { wallet, pk_shield, fee } => {
+            let have = state.balance_of(wallet, &NATIVE);
+            if have < *fee {
+                return Err(TxApplyError::InsufficientBalance { have, need: *fee });
+            }
+            // Re-registration is allowed on purpose: a user who loses a seed must be able
+            // to redirect future income without abandoning the wallet. Only rewards from
+            // this point forward are affected — notes already minted stay bound to the old
+            // key, which is a property of the notes, not a policy choice.
+            out.mutations.push(StateMutation::RegisterShieldedAddress {
+                wallet: *wallet,
+                pk_shield: *pk_shield,
+            });
+        }
+
         SigilTx::Shield { from, amount, cm, fee } => {
             let have = state.balance_of(from, &NATIVE);
             let need = amount.checked_add(*fee).ok_or(TxApplyError::Overflow)?;

@@ -380,6 +380,25 @@ pub async fn send_handler(
     }
 }
 
+/// Publish a wallet's shielded key, so its block rewards are paid into the pool.
+///
+/// The single highest-leverage call for the network's privacy: a miner registers once and
+/// every subsequent reward becomes a pool note owned by them, which is what grows the
+/// anonymity set without persuading anyone to change their behaviour.
+#[flux_api_macros::api(POST, "/v1/shielded/register", summary = "Register a shielded address so block rewards are paid privately")]
+pub async fn shielded_register_handler(
+    State(st): State<AppState>,
+    Json(req): Json<shielded::RegisterRequest>,
+) -> Json<serde_json::Value> {
+    match st.shielded.submit_register(&req.wallet, &req.pk_shield, req.fee) {
+        Ok(h) => Json(serde_json::json!({
+            "ok": true, "txid": hex::encode(h), "ts_ms": now_ms(),
+            "note": "queued; once it lands, block rewards for this wallet mint as shielded notes",
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
 /// Move value from a transparent wallet into the shielded pool.
 ///
 /// The caller computes `cm = compress2(amount, blinding)` locally and keeps the blinding —
@@ -1100,6 +1119,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/transactions", post(submit_transaction))
         .route("/v1/transactions/:hash", get(tx_status))
         .route("/v1/send", post(send_handler))
+        .route("/v1/shielded/register", post(shielded_register_handler))
         .route("/v1/shield", post(shield_handler))
         .route("/v1/shielded_send", post(shielded_send_handler))
         .route("/v1/unshield", post(unshield_handler))

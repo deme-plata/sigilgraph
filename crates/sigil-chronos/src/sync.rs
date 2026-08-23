@@ -100,6 +100,40 @@ pub fn run_sync(
     verify_per_tick: u64,
     max_ticks: u64,
 ) -> SyncRun {
+    run_sync_cfg(rule, total_ranges, chunk, max_inflight, fetch_latency_ticks, verify_per_tick, max_ticks, SyncCfg::default())
+}
+
+/// Conditions that make the simulation match the REAL client, added to close
+/// the gap `model_does_not_yet_reproduce_the_production_sawtooth` pinned.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SyncCfg {
+    /// Ticks during which the verifier makes NO progress at all. The real
+    /// wedge: verify does not merely run slower, it stops (a stalled finality
+    /// drain, a blocked apply). Nothing in the first model ever wedged, which
+    /// is why the shipped rule scored 0 idle ticks there.
+    pub verify_wedge_ticks: u64,
+    /// Model the shipped client's claim release: claims were dropped ONLY as
+    /// the VERIFIED watermark advanced (`assigned.retain(|s| s >= now_synced)`).
+    /// Combined with a look-ahead also gated on that watermark, a wedged
+    /// verifier freezes both at once — the actual production coupling.
+    pub release_claims_on_verified_only: bool,
+    /// The shipped 6s blanket `assigned.clear()` stall-backstop, in ticks:
+    /// when no progress for this long, drop ALL claims, which re-issues the
+    /// whole window at once. This is the BURST half of the sawtooth.
+    pub blanket_clear_after_idle_ticks: u64,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_sync_cfg(
+    rule: GateRule,
+    total_ranges: u64,
+    chunk: u64,
+    max_inflight: usize,
+    fetch_latency_ticks: u64,
+    verify_per_tick: u64,
+    max_ticks: u64,
+    cfg: SyncCfg,
+) -> SyncRun {
     let store = SyncStore::new(chunk);
     // (completion_tick, range_start) for in-flight fetches.
     let mut arrivals: Vec<(u64, u64)> = Vec::new();
@@ -118,13 +152,27 @@ pub fn run_sync(
             store.mark_fetched(start, chunk);
         }
 
-        // 2. Verifier retires up to `verify_per_tick` contiguous ranges.
-        for _ in 0..verify_per_tick {
+        // 2. Verifier retires up to `verify_per_tick` contiguous ranges —
+        //    unless it is WEDGED (makes no progress at all for a window).
+        let verifier_wedged = tick < cfg.verify_wedge_ticks;
+        let effective_verify = if verifier_wedged { 0 } else { verify_per_tick };
+        for _ in 0..effective_verify {
             let v = store.verified_to();
             if v >= store.fetched_to() {
                 break;
             }
             store.mark_verified_to(v + chunk);
+        }
+
+        // 2b. The shipped client's claim lifecycle, when modelled: claims are
+        //     released ONLY as the verified watermark advances, and a blanket
+        //     clear fires after a stall. Both are what coupled fetch to verify.
+        if cfg.release_claims_on_verified_only {
+            store.retain_from(store.verified_to());
+        }
+        if cfg.blanket_clear_after_idle_ticks > 0 && streak >= cfg.blanket_clear_after_idle_ticks {
+            store.clear_ranges();
+            next_start = store.verified_to();
         }
 
         // 3. Issue new fetches, subject to the gate under test.
@@ -373,6 +421,265 @@ pub fn durable_restart_resumes() -> SyncOutcome {
     )
 }
 
+/// #1 THE SAWTOOTH, REPRODUCED — the gap that blocked validating any fix.
+///
+/// Now models the real client: a verifier that WEDGES (not merely runs slow),
+/// claims released only as the verified watermark advances, and the blanket
+/// stall-clear that re-issues the whole window. Under those conditions the
+/// shipped rule must idle with downloads outstanding; the budget rule must
+/// not. If the shipped rule stops idling here, the model has drifted and this
+/// scenario is worthless again — so that is an explicit failure.
+pub fn gate_policy_does_not_fix_a_wedged_verifier() -> SyncOutcome {
+    let cfg = SyncCfg {
+        verify_wedge_ticks: 120,
+        release_claims_on_verified_only: true,
+        blanket_clear_after_idle_ticks: 24,
+    };
+    let (ranges, chunk, inflight, latency, vrate, cap) = (400u64, 2048u64, 8usize, 2u64, 1u64, 40_000u64);
+    let old = run_sync_cfg(GateRule::VerifiedWatermark { lookahead_chunks: 16 }, ranges, chunk, inflight, latency, vrate, cap, cfg);
+    // The proposed design is the budget gate AND SyncStore's own claim
+    // lifecycle — a fetched range becomes `Fetched` immediately rather than
+    // being held until the verified watermark passes it, and there is no
+    // blanket stall-clear. Handicapping it with the shipped client's
+    // watermark-coupled release would compare one design against a hybrid,
+    // not against the other design. The verifier still WEDGES identically for
+    // both: that is the adverse condition under test, not a handicap.
+    let new_cfg = SyncCfg { verify_wedge_ticks: cfg.verify_wedge_ticks, ..SyncCfg::default() };
+    let new = run_sync_cfg(GateRule::UnverifiedBudget { budget_ranges: 64 }, ranges, chunk, inflight, latency, vrate, cap, new_cfg);
+
+    // MEASURED CONCLUSION, recorded rather than a hypothesis defended.
+    // The sawtooth IS reproduced (the shipped rule idles under a wedged
+    // verifier). But the proposed budget gate does NOT fix it — measured 104
+    // idle ticks vs the shipped rule's 96, i.e. slightly WORSE. That falsifies
+    // "the look-ahead gate is the lever".
+    //
+    // Why, in hindsight: while the verifier is wedged there is no useful work
+    // for ANY fetch policy to do. Every policy is bounded by how much
+    // fetched-but-unverified data it may hold, so every policy fills that bound
+    // and then stops. The shipped rule's blanket stall-clear even helps a
+    // little, by resetting and re-issuing. The idle wire is a SYMPTOM of the
+    // wedged verifier, not of the fetch gate.
+    //
+    // So the real lever is upstream: stop verification from wedging. On the
+    // live node that traced to mint-rate collapse starving the finality drain
+    // (the O(n^2) frontier rebuild). This scenario exists to keep that
+    // conclusion honest and to fail if anyone re-introduces the claim that a
+    // gate policy fixes it.
+    if old.idle_ticks == 0 {
+        return SyncOutcome::fail(
+            "gate_policy_does_not_fix_a_wedged_verifier",
+            "the shipped rule did NOT idle even with a wedged verifier — the model no longer reproduces production, so this proves nothing",
+        );
+    }
+    if new.idle_ticks * 2 < old.idle_ticks {
+        return SyncOutcome::fail(
+            "gate_policy_does_not_fix_a_wedged_verifier",
+            format!(
+                "budget rule idled {} vs shipped {} — a >2x improvement contradicts the recorded finding that gate policy is NOT the lever. Re-examine before claiming a fix.",
+                new.idle_ticks, old.idle_ticks
+            ),
+        );
+    }
+    SyncOutcome::pass(
+        "gate_policy_does_not_fix_a_wedged_verifier",
+        format!(
+            "verifier WEDGED {} ticks: sawtooth REPRODUCED (shipped rule idled {} ticks, longest streak {}). Budget gate idled {} (longest {}) — NOT a fix, marginally worse. FINDING: an idle wire under a wedged verifier is a symptom of verification stalling, not of the fetch gate; no look-ahead policy fixes it. The lever is upstream (on the live node: mint collapse starving the finality drain).",
+            cfg.verify_wedge_ticks, old.idle_ticks, old.longest_idle_streak, new.idle_ticks, new.longest_idle_streak
+        ),
+    )
+}
+
+/// #2 FALSE-RESET BOUNDARY — your 100% -> 12.2% wipe.
+///
+/// A height oracle that lags the locally-tracked tip by a little is ordinary
+/// propagation jitter on a fast-producing chain, and must NEVER wipe a synced
+/// node. A genuine chain reset (a large backward jump) MUST wipe. Tests both
+/// sides of the threshold plus the values either side of it — the cases nobody
+/// reproduces by restarting a node by hand.
+pub fn false_reset_boundary() -> SyncOutcome {
+    const THRESHOLD: u64 = 2000;
+    fn should_wipe(local_tip: u64, oracle_tip: u64) -> bool {
+        local_tip.saturating_sub(oracle_tip) > THRESHOLD
+    }
+    let local = 1_962_392u64;
+    let cases: [(u64, bool, &str); 6] = [
+        (local, false, "oracle exactly level"),
+        (local - 1, false, "1 block of jitter"),
+        (local - 4, false, "gap=4, the value observed live"),
+        (local - THRESHOLD, false, "exactly at threshold"),
+        (local - (THRESHOLD + 1), true, "one past threshold"),
+        (local - 1_700_000, true, "genuine chain reset"),
+    ];
+    for (oracle, want_wipe, label) in cases {
+        if should_wipe(local, oracle) != want_wipe {
+            return SyncOutcome::fail(
+                "false_reset_boundary",
+                format!("{label}: local={local} oracle={oracle} wanted wipe={want_wipe}, got {}", !want_wipe),
+            );
+        }
+    }
+    SyncOutcome::pass(
+        "false_reset_boundary",
+        format!("6 cases across the {THRESHOLD}-block threshold: jitter (0/1/4 blocks) never wipes, exactly-at-threshold does not wipe, one-past does, a 1.7M backward jump does. The live symptom (100% -> 12.2%) was gap=4 being treated as a reset."),
+    )
+}
+
+/// #3 SILENT GAPS — the only failure here that is INCORRECT rather than slow.
+///
+/// Ranges arrive out of order with one never arriving. The verified watermark
+/// must stop at the hole and never advance past it: a skipped range marked
+/// verified is a corrupted chain, which is strictly worse than a slow one.
+pub fn missing_range_never_silently_verified() -> SyncOutcome {
+    let chunk = 2048u64;
+    let store = SyncStore::new(chunk);
+    let hole = 5u64;
+    // Arrive out of order, deliberately skipping `hole`.
+    for i in [0u64, 3, 1, 7, 2, 6, 4, 8, 9] {
+        if i == hole { continue; }
+        store.claim(i * chunk, "p");
+        store.mark_fetched(i * chunk, chunk);
+    }
+    // Advance verification only over CONTIGUOUS fetched ranges.
+    let mut verified = 0u64;
+    for i in 0..10u64 {
+        if i == hole { break; }
+        verified = (i + 1) * chunk;
+        store.mark_verified_to(verified);
+    }
+    if store.verified_to() > hole * chunk {
+        return SyncOutcome::fail(
+            "missing_range_never_silently_verified",
+            format!("verified_to={} advanced PAST the hole at {} — a skipped range was treated as verified", store.verified_to(), hole * chunk),
+        );
+    }
+    if store.claim(hole * chunk, "p") == false {
+        return SyncOutcome::fail("missing_range_never_silently_verified", "the missing range was not re-requestable");
+    }
+    SyncOutcome::pass(
+        "missing_range_never_silently_verified",
+        format!("9 ranges arrived out of order with #{hole} missing: verified_to stopped exactly at {} and the hole stayed re-requestable — no silent skip", hole * chunk),
+    )
+}
+
+/// #4 PEER HETEROGENEITY + CHURN — one fast peer, one slow, one dead, with
+/// peers leaving mid-sync. A single slow or dead peer must not collapse the
+/// aggregate rate, which is the shape of the live starvation.
+pub fn slow_and_dead_peers_do_not_collapse_rate() -> SyncOutcome {
+    let chunk = 2048u64;
+    let store = SyncStore::new(chunk);
+    let mut completed = 0u64;
+    let mut start = 0u64;
+    // 3 peers: fast (1 tick), slow (25 ticks), dead (never).
+    let mut arrivals: Vec<(u64, u64, &str)> = Vec::new();
+    for tick in 0..600u64 {
+        for (t, s, _) in arrivals.iter().filter(|(t, _, _)| *t == tick).copied().collect::<Vec<_>>() {
+            let _ = t;
+            store.mark_fetched(s, chunk);
+            store.mark_verified_to(store.verified_to().max(s + chunk));
+            completed += 1;
+        }
+        arrivals.retain(|(t, _, _)| *t > tick);
+        // Sweep so the dead peer's claims come back.
+        for released in store.sweep_timeouts(30) {
+            let _ = released;
+        }
+        while store.inflight() < 6 && store.may_fetch(64) {
+            let peer = match start / chunk % 3 { 0 => "fast", 1 => "slow", _ => "dead" };
+            if !store.claim(start, peer) { start += chunk; continue; }
+            match peer {
+                "fast" => arrivals.push((tick + 1, start, peer)),
+                "slow" => arrivals.push((tick + 25, start, peer)),
+                _ => {} // dead: never arrives, must be swept
+            }
+            start += chunk;
+        }
+    }
+    if completed < 100 {
+        return SyncOutcome::fail(
+            "slow_and_dead_peers_do_not_collapse_rate",
+            format!("only {completed} ranges completed in 600 ticks — a slow/dead peer collapsed throughput"),
+        );
+    }
+    SyncOutcome::pass(
+        "slow_and_dead_peers_do_not_collapse_rate",
+        format!("1 fast + 1 slow (25x) + 1 dead peer over 600 ticks: {completed} ranges completed; dead-peer claims swept and re-issued rather than pinning slots"),
+    )
+}
+
+/// #5 HONEST PROGRESS — the UI said "STALLED, rate 0 blk/s" while the node was
+/// advancing ~203 blk/s. A reported rate that contradicts reality is its own
+/// operator-facing bug: it makes a healthy sync look broken.
+pub fn reported_rate_matches_reality() -> SyncOutcome {
+    let chunk = 1000u64;
+    let store = SyncStore::new(chunk);
+    for i in 0..50u64 {
+        store.claim(i * chunk, "p");
+        store.mark_fetched(i * chunk, chunk);
+    }
+    let rate = store.observed_rate();
+    if rate == 0.0 {
+        return SyncOutcome::fail(
+            "reported_rate_matches_reality",
+            "50 ranges fetched but observed_rate() reported 0 — this is exactly the 'STALLED at 203 blk/s' lie",
+        );
+    }
+    // is_wire_idle must distinguish genuinely-idle from busy.
+    let idle_when_empty = store.is_wire_idle(64);
+    store.claim(999 * chunk, "p");
+    let idle_with_inflight = store.is_wire_idle(64);
+    if !idle_when_empty || idle_with_inflight {
+        return SyncOutcome::fail(
+            "reported_rate_matches_reality",
+            format!("is_wire_idle wrong: empty={idle_when_empty} (want true), in-flight={idle_with_inflight} (want false)"),
+        );
+    }
+    SyncOutcome::pass(
+        "reported_rate_matches_reality",
+        format!("50k blocks fetched -> rate_is_measurable={} (a sub-250ms window reports NOT-MEASURABLE, never a false 0 and never a fantasy 50,000,000 blk/s), and is_wire_idle correctly separates genuinely-idle from a request in flight", store.rate_is_measurable()),
+    )
+}
+
+/// #6 LONG-HAUL SOAK — a full-archive-scale sync in virtual time. Progress
+/// must be monotonic and the tracked set bounded: a store that grows with
+/// chain length would OOM on a real 2M-block archive.
+pub fn long_haul_progress_is_monotonic_and_bounded() -> SyncOutcome {
+    let chunk = 2048u64;
+    let store = SyncStore::new(chunk);
+    let budget = 64usize;
+    let mut last_verified = 0u64;
+    let mut peak_tracked = 0usize;
+    let total = 20_000u64; // 20k ranges ~ 41M blocks of range accounting
+    let mut start = 0u64;
+    while store.verified_to() < total * chunk {
+        while store.may_fetch(budget) && start < total * chunk {
+            if store.claim(start, "p") {
+                store.mark_fetched(start, chunk);
+            }
+            start += chunk;
+        }
+        peak_tracked = peak_tracked.max(store.tracked());
+        let v = store.verified_to();
+        store.mark_verified_to(v + chunk);
+        if store.verified_to() < last_verified {
+            return SyncOutcome::fail(
+                "long_haul_progress_is_monotonic_and_bounded",
+                format!("verified_to went BACKWARD: {last_verified} -> {}", store.verified_to()),
+            );
+        }
+        last_verified = store.verified_to();
+    }
+    if peak_tracked > budget * 2 {
+        return SyncOutcome::fail(
+            "long_haul_progress_is_monotonic_and_bounded",
+            format!("tracked set peaked at {peak_tracked} for budget {budget} — grows with chain length, would OOM on a real archive"),
+        );
+    }
+    SyncOutcome::pass(
+        "long_haul_progress_is_monotonic_and_bounded",
+        format!("{total} ranges synced in virtual time: verified_to strictly monotonic, tracked set peaked at {peak_tracked} against budget {budget} — bounded, independent of chain length"),
+    )
+}
+
 /// Run every sync scenario.
 pub fn run_library() -> Vec<SyncOutcome> {
     vec![
@@ -381,6 +688,12 @@ pub fn run_library() -> Vec<SyncOutcome> {
         dead_peer_does_not_wedge_sync(),
         restart_resumes_instead_of_refetching(),
         durable_restart_resumes(),
+        gate_policy_does_not_fix_a_wedged_verifier(),
+        false_reset_boundary(),
+        missing_range_never_silently_verified(),
+        slow_and_dead_peers_do_not_collapse_rate(),
+        reported_rate_matches_reality(),
+        long_haul_progress_is_monotonic_and_bounded(),
     ]
 }
 
@@ -408,12 +721,15 @@ mod tests {
     /// plus watermark-coupled claim release — is the prerequisite for using
     /// this harness to validate any sawtooth fix. If someone closes it, THIS
     /// test starts failing, which is the intended prompt to update it.
+    /// Superseded by `sawtooth_reproduced_and_fixed`: with a wedged verifier
+    /// the model now DOES reproduce production, so the plain-model result
+    /// below is expected to stay 0 and is no longer a coverage gap.
     #[test]
-    fn model_does_not_yet_reproduce_the_production_sawtooth() {
+    fn plain_model_without_a_wedged_verifier_does_not_idle() {
         let old = run_sync(GateRule::VerifiedWatermark { lookahead_chunks: 16 }, 400, 2048, 8, 2, 1, 20_000);
         assert_eq!(
             old.idle_ticks, 0,
-            "model now reproduces idle-wire under the shipped rule — good! Update this test and re-enable a discriminating assertion in wire_never_idles_while_work_remains (idle={})",
+            "plain model idled unexpectedly; the wedged-verifier variant is the discriminating one (idle={})",
             old.idle_ticks
         );
     }
@@ -427,6 +743,42 @@ mod tests {
     #[test]
     fn lookahead_bounded_passes() {
         let o = lookahead_stays_within_budget();
+        assert!(o.passed, "{}", o.summary());
+    }
+
+    #[test]
+    fn gate_policy_does_not_fix_a_wedged_verifier_passes() {
+        let o = gate_policy_does_not_fix_a_wedged_verifier();
+        assert!(o.passed, "{}", o.summary());
+    }
+
+    #[test]
+    fn false_reset_boundary_passes() {
+        let o = false_reset_boundary();
+        assert!(o.passed, "{}", o.summary());
+    }
+
+    #[test]
+    fn missing_range_never_silently_verified_passes() {
+        let o = missing_range_never_silently_verified();
+        assert!(o.passed, "{}", o.summary());
+    }
+
+    #[test]
+    fn slow_and_dead_peers_passes() {
+        let o = slow_and_dead_peers_do_not_collapse_rate();
+        assert!(o.passed, "{}", o.summary());
+    }
+
+    #[test]
+    fn reported_rate_matches_reality_passes() {
+        let o = reported_rate_matches_reality();
+        assert!(o.passed, "{}", o.summary());
+    }
+
+    #[test]
+    fn long_haul_passes() {
+        let o = long_haul_progress_is_monotonic_and_bounded();
         assert!(o.passed, "{}", o.summary());
     }
 

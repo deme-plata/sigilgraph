@@ -302,11 +302,35 @@ impl SyncStore {
 
     /// Blocks/sec fetched over the session.
     pub fn observed_rate(&self) -> f64 {
-        let secs = (now_ms().saturating_sub(self.started_ms)) as f64 / 1000.0;
-        if secs <= 0.0 {
-            return 0.0;
+        let blocks = self.fetched_blocks.load(Ordering::Relaxed);
+        if blocks == 0 {
+            return 0.0; // genuinely nothing fetched — an honest zero
         }
-        self.fetched_blocks.load(Ordering::Relaxed) as f64 / secs
+        // FOUND BY CHRONOS (`reported_rate_matches_reality`): the first version
+        // divided by whole milliseconds and hard-returned 0.0 when under 1ms had
+        // elapsed — so it reported "0 blk/s" while blocks were demonstrably
+        // moving. That is precisely the lie the live TUI told the operator
+        // ("STALLED — rate 0 blk/s" while the node advanced ~203 blk/s). Floor
+        // the window at the clock's own resolution instead: an imprecise rate is
+        // honest, a zero is not.
+        // A 1ms floor turns a zero into a nonsense 50,000,000 blk/s (measured).
+        // Neither is honest. Below a minimum sampling window there is simply not
+        // enough data to state a rate, so say so with None-like semantics: the
+        // caller renders "—", which is what the UI should show while measuring,
+        // instead of inventing either 0 or a fantasy number.
+        const MIN_WINDOW_MS: u64 = 250;
+        let elapsed_ms = now_ms().saturating_sub(self.started_ms);
+        if elapsed_ms < MIN_WINDOW_MS {
+            return f64::NAN; // "not enough data yet" — never rendered as 0
+        }
+        blocks as f64 / (elapsed_ms as f64 / 1000.0)
+    }
+
+    /// Is `observed_rate` meaningful yet? `false` means the UI must render
+    /// "measuring…" / "—", NOT "0 blk/s". The live TUI's "STALLED — rate 0
+    /// blk/s" while advancing ~203 blk/s is what conflating these produces.
+    pub fn rate_is_measurable(&self) -> bool {
+        !self.observed_rate().is_nan()
     }
 
     /// Seconds to reach `tip` at the current rate, `None` if not yet moving.

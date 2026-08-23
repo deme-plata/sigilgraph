@@ -35,6 +35,9 @@ pub mod note_v1;
 /// Note ciphertexts — the side channel that makes RECEIVING a shielded payment
 /// possible. Safe only because notes are owner-bound; see the module docs.
 pub mod note_cipher;
+/// Viewing keys and selective disclosure: confidential by default, provable on demand —
+/// what regulated users actually need.
+pub mod viewing;
 pub mod mimc;
 pub mod membership;
 pub mod transfer;

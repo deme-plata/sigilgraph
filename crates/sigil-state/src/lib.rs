@@ -23,6 +23,8 @@
 /// per-touched-leaf updates. Standalone + fully tested; `roots()` wiring is
 /// a follow-up patch (see SIGIL_STARGATE_INCREMENTAL_ROOTS.md).
 pub mod acc;
+/// Shielded-pool consensus state: note commitments + nullifier set (PV-1).
+pub mod shielded;
 pub use acc::Accumulator;
 
 /// Sparse Merkle Tree — the COMPLEMENT to `acc`. Where `acc` (LtHash multiset)
@@ -173,6 +175,10 @@ pub struct SigilState {
     pub(crate) events_acc: [u64; 4],
 }
 
+    /// Shielded-pool state: note commitments, spent nullifiers, and the value locked in
+    /// the private domain. `native_supply + shielded.value_locked()` is the quantity the
+    /// 21M cap governs — see [`shielded`] for the two-domain value model.
+    pub(crate) shielded: shielded::ShieldedPool,
 /// The four state roots produced at the end of a block. These go into the
 /// header verbatim. See [`sigil_header::SigilBlockHeaderV0`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -359,6 +365,12 @@ impl SigilState {
         if nonce <= cur {
             return Err(CommitError::NonceReplay { got: nonce, have: cur });
         }
+    /// Read-only view of the shielded pool. Mutation is only possible through
+    /// [`commit_state_transition`], like every other part of state.
+    pub fn shielded(&self) -> &shielded::ShieldedPool {
+        &self.shielded
+    }
+
         self.set_balance(*author, NONCE_TOKEN, nonce as u128);
         Ok(())
     }
@@ -510,6 +522,64 @@ pub enum StateMutation {
     /// plus the resulting `shares_minted` so the chokepoint can verify
     /// `pool_after.lp_shares == prev.lp_shares + shares_minted` and refuse
     /// share-creation that doesn't conserve.
+    /// PV-1: move value from a transparent wallet into the shielded pool.
+    ///
+    /// Debits `amount` from `(from, NATIVE)` and appends `cm` as a note commitment worth
+    /// that amount. Supply is unchanged in aggregate — value crosses domains, it is not
+    /// created or destroyed, and `ShieldedPool::value_locked` records the crossing.
+    Shield {
+        from: WalletId,
+        #[serde(with = "u128_str")]
+        amount: u128,
+        /// `compress2(amount, blinding)` — the note the depositor can later spend.
+        cm: [u8; 32],
+    },
+
+    /// PV-1: a shielded-to-shielded spend. Amounts stay hidden.
+    ///
+    /// The chokepoint enforces the *state* half of the rules — the nullifier is fresh and
+    /// the output commitments are appended. The *arithmetic* half (this note existed, it
+    /// was worth what was spent, outputs are bound to the conserved amounts and in range)
+    /// is what the STARK proof establishes, and it must be verified BEFORE this mutation
+    /// is constructed. See the `ShieldedSpend` handling in
+    /// [`commit_state_transition`] for why this crate does not verify it here.
+    ShieldedSpend {
+        /// The anonymity-set root this spend proves membership against. Must be a root
+        /// the pool actually held (see `ShieldedPool::is_known_anchor`) — accepting an
+        /// arbitrary root would let a prover invent a tree containing a note of any value.
+        anchor: [u8; 32],
+        /// Revealed spend tag; membership in the nullifier set means already-spent.
+        nullifier: [u8; 32],
+        /// New note commitments to append, in order.
+        cm_outs: Vec<[u8; 32]>,
+        /// The public fee, credited to the master wallet.
+        #[serde(with = "u128_str")]
+        fee: u128,
+        /// The winterfell STARK proving value opening, conservation, membership,
+        /// nullifier derivation, position binding, output↔commitment binding, and the
+        /// per-output range bound. Verified by the chokepoint — never trusted.
+        proof: Vec<u8>,
+    },
+
+    /// PV-1: move value out of the shielded pool into a transparent wallet.
+    ///
+    /// An unshield is a shielded spend whose PUBLIC value is credited to a transparent
+    /// wallet instead of to the master fee account, so it carries the same proof and is
+    /// verified the same way. It must: without a proof binding `(nullifier, amount)` to a
+    /// real note in the anchored tree, anyone could name any nullifier and any amount and
+    /// drain the pool — the value check alone only bounds the theft by the pool's size.
+    ///
+    /// `amount` occupies the circuit's public-fee slot; `cm_outs` are the change notes.
+    Unshield {
+        to: WalletId,
+        #[serde(with = "u128_str")]
+        amount: u128,
+        anchor: [u8; 32],
+        nullifier: [u8; 32],
+        cm_outs: Vec<[u8; 32]>,
+        proof: Vec<u8>,
+    },
+
     LpDelta {
         from: WalletId,
         pool: PoolId,
@@ -598,6 +668,20 @@ pub enum CommitError {
     /// the producer is buggy or malicious.
     #[error("delta math invariant failed: {0}")]
     DeltaInvariant(String),
+
+    /// A shielded-pool rule was violated (double-spend, pool full, unshield overdraw).
+    #[error("shielded: {0}")]
+    Shielded(#[from] shielded::ShieldedError),
+
+    /// The spend proved membership against a root this pool never had. Accepting an
+    /// unknown anchor would let a prover fabricate a tree containing a note of any value.
+    #[error("shielded: unknown anchor {0:02x?}", anchor)]
+    UnknownAnchor { anchor: [u8; 32] },
+
+    /// The shielded-spend STARK did not verify. The mutation is refused outright — this
+    /// is the fail-closed path that PV-0 established must never be able to fall through.
+    #[error("shielded: spend proof rejected: {reason}")]
+    ShieldedProofRejected { reason: String },
 
     /// P5-C: a typed delta references a pool that doesn't exist yet. Pool
     /// creation goes through LpDelta on a fresh PoolId — never SwapDelta
@@ -945,10 +1029,104 @@ pub fn commit_state_transition(
         }
     }
     // HARD SUPPLY CAP — the consensus teeth behind the compile-time MAX_SUPPLY.
+
+            // ── PV-1 shielded pool ───────────────────────────────────────────────────
+            StateMutation::Shield { from, amount, cm } => {
+                // Debit transparent, lock the value, append the note. Aggregate supply is
+                // unchanged: the value crosses domains rather than being created.
+                let bal = state.balance_of(&from, &NATIVE);
+                let after = bal
+                    .checked_sub(amount)
+                    .ok_or_else(|| CommitError::DeltaInvariant(format!(
+                        "shield: wallet holds {bal} but tried to shield {amount}"
+                    )))?;
+                state.shielded.lock_value(amount)?;
+                state.shielded.append_note(cm)?;
+                state.set_balance(from, NATIVE, after);
+                state.shielded.remember_anchor_dirty();
+            }
+
+            StateMutation::ShieldedSpend { anchor, nullifier, cm_outs, fee, proof } => {
+                // 1. The anchor must be a root this pool genuinely had.
+                if !state.shielded.is_known_anchor(&anchor) {
+                    return Err(CommitError::UnknownAnchor { anchor });
+                }
+                // 2. Freshness BEFORE proof work — a replay is cheap to reject.
+                if state.shielded.is_spent(&nullifier) {
+                    return Err(CommitError::Shielded(
+                        shielded::ShieldedError::NullifierAlreadySpent(nullifier),
+                    ));
+                }
+                // 3. The arithmetic half. This is the step that makes the hidden amounts
+                //    safe: it proves the note existed, was worth what was spent, and that
+                //    every output commitment is bound to an in-range conserved amount.
+                //    Verified here, in the chokepoint, so no caller can skip it.
+                shielded::verify_spend_proof(&anchor, &nullifier, fee, &cm_outs, &proof)
+                    .map_err(|e| CommitError::ShieldedProofRejected { reason: e.to_string() })?;
+                // 4. Only now mutate.
+                state.shielded.spend_nullifier(nullifier)?;
+                for cm in &cm_outs {
+                    state.shielded.append_note(*cm)?;
+                }
+                // The fee leaves the shielded domain and is credited transparently.
+                if fee > 0 {
+                    state.shielded.unlock_value(fee)?;
+                    if let Some(master) = state.master_wallet {
+                        let cur = state.balance_of(&master, &NATIVE);
+                        let next = cur
+                            .checked_add(fee)
+                            .ok_or_else(|| CommitError::DeltaOverflow)?;
+                        state.set_balance(master, NATIVE, next);
+                    }
+                }
+                state.shielded.remember_anchor_dirty();
+            }
+
+            StateMutation::Unshield { to, amount, anchor, nullifier, cm_outs, proof } => {
+                if !state.shielded.is_known_anchor(&anchor) {
+                    return Err(CommitError::UnknownAnchor { anchor });
+                }
+                if state.shielded.is_spent(&nullifier) {
+                    return Err(CommitError::Shielded(
+                        shielded::ShieldedError::NullifierAlreadySpent(nullifier),
+                    ));
+                }
+                // The SAME proof a shielded spend uses, with `amount` in the public-value
+                // slot. This is what ties the withdrawal to a note the caller actually
+                // owns; `unlock_value`'s overdraw check alone would only cap the theft at
+                // the pool's balance, not prevent it.
+                shielded::verify_spend_proof(&anchor, &nullifier, amount, &cm_outs, &proof)
+                    .map_err(|e| CommitError::ShieldedProofRejected { reason: e.to_string() })?;
+                state.shielded.unlock_value(amount)?;
+                state.shielded.spend_nullifier(nullifier)?;
+                for cm in &cm_outs {
+                    state.shielded.append_note(*cm)?;
+                }
+                let cur = state.balance_of(&to, &NATIVE);
+                let next = cur
+                    .checked_add(amount)
+                    .ok_or_else(|| CommitError::DeltaOverflow)?;
+                state.set_balance(to, NATIVE, next);
+                state.shielded.remember_anchor_dirty();
+            }
     // Transfers net to zero supply; only a mint/coinbase/over-funded-genesis can
     // trip this. A violating block is rejected outright — 21M can never inflate.
-    if state.native_supply > MAX_SUPPLY {
-        return Err(CommitError::SupplyCapExceeded { supply: state.native_supply, cap: MAX_SUPPLY });
+    // PV-1: shielding moves value OUT of `native_supply` and into the pool, so the cap
+    // must govern the sum across both domains. Checking `native_supply` alone would let
+    // total issuance drift upward every time value was shielded — a shield would read as
+    // a burn, freeing headroom under the cap that was never actually returned.
+    let total_issued = state
+        .native_supply
+        .checked_add(state.shielded.value_locked())
+        .ok_or_else(|| CommitError::Invariant("supply accounting overflow".into()))?;
+    if total_issued > MAX_SUPPLY {
+        return Err(CommitError::SupplyCapExceeded { supply: total_issued, cap: MAX_SUPPLY });
+    }
+
+    // Publish the new anonymity-set root so spends built against it can be mined. Done
+    // once per transition rather than per mutation: it rebuilds the full pool tree.
+    if state.shielded.anchors_dirty() {
+        state.shielded.refresh_anchor();
     }
 
     let roots = state.roots();

@@ -368,16 +368,27 @@ mod tests {
         assert!(verify_transfer(proof.clone(), TransferPublicInputs { fee: e(4) }).is_err(),
             "SECURITY: a transfer must not verify against a fee it did not commit");
 
-        // (3) a NON-conserving schedule cannot yield a valid proof. In debug builds
-        // winterfell's prove() VALIDATES the trace and panics on a bad one; in release it
-        // produces an invalid proof the verifier rejects. Either way, proving must not succeed.
+        // (3) a NON-conserving schedule cannot yield a VERIFYING proof.
+        //
+        // The security property is about the VERIFIER, not the prover. In debug builds
+        // winterfell's prove() validates the trace and panics; in release it happily
+        // returns a proof that does not verify. An earlier version of this test asserted
+        // only that proving fails, so it passed in debug and FAILED in release against
+        // code that was actually sound — it never asked the question it named. Check the
+        // verdict, and accept either refusal path.
+        let mut bad = vec![e(0); 128]; bad[0]=e(3); bad[1]=e(50); bad[2]=e(48); // Σ=101≠100
         let bad_out = std::panic::catch_unwind(|| {
-            let mut bad = vec![e(0); 128]; bad[0]=e(3); bad[1]=e(50); bad[2]=e(48); // Σ=101≠100
             let bad_trace = build_transfer_trace(total_in, &bad);
             ShieldTransferProver::new(spike_options()).prove(bad_trace)
         });
-        let non_conserving_ok = match bad_out { Ok(Ok(_)) => false, _ => true };
-        assert!(non_conserving_ok, "SECURITY: a non-conserving transfer must not produce a valid proof");
+        let non_conserving_rejected = match bad_out {
+            // refused at proving (debug-style trace validation)
+            Err(_) | Ok(Err(_)) => true,
+            // proof produced — the verifier must throw it out
+            Ok(Ok(bad_proof)) => verify_transfer(bad_proof, TransferPublicInputs { fee: e(3) }).is_err(),
+        };
+        assert!(non_conserving_rejected,
+            "SECURITY: a non-conserving transfer must not produce a proof that VERIFIES");
 
         // (4) tampered proof bytes rejected
         let mut bytes = proof.to_bytes();

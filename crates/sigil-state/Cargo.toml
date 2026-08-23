@@ -18,8 +18,18 @@ blake3     = { workspace = true }
 thiserror  = { workspace = true }
 
 sigil-header = { path = "../sigil-header" }
+# The chokepoint VERIFIES shielded-spend proofs itself rather than trusting a caller-
+# supplied "already verified" flag. PV-0 (2026-08-19) found sigil-mixer's verify stub
+# returning Ok(()) unconditionally, and the recorded danger was precisely that wiring it
+# into this chokepoint would make a stub look like a passing verification. A direct
+# dependency makes that unrepresentable: there is no injection point to stub.
+sigil-shield = { path = "../sigil-shield" }
 
 [dev-dependencies]
+# shielded_end_to_end.rs drives a REAL prover through the chokepoint.
+winterfell = "0.9"
+# the node persists state with MessagePack; the round-trip test uses the same codec.
+rmp-serde = "1"
 serde_json = { workspace = true }
 # stargate_500m.rs / sig_wall.rs / sig_agg.rs — measure the REAL wall
 # (signature verification) next to state-commitment throughput.

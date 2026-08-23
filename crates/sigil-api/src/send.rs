@@ -120,7 +120,7 @@ fn hex32(s: &str) -> Option<WalletId> {
     Some(out)
 }
 
-fn to_signed(tx: SigilTx) -> SignedTx {
+pub(crate) fn to_signed(tx: SigilTx) -> SignedTx {
     let payer = tx.fee_payer();
     SignedTx {
         tx,

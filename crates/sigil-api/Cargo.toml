@@ -18,6 +18,8 @@ blake3 = { workspace = true }
 
 sigil-state = { path = "../sigil-state" }
 sigil-tx = { path = "../sigil-tx" }
+# Door-level shielded-proof precheck (a DoS guard; the chokepoint is the authority).
+sigil-shield = { path = "../sigil-shield" }
 sigil-emission = { path = "../sigil-emission" }
 # send.rs: SignedTx's sig-scheme wrapper types (SigScheme/SignatureBytes/
 # PubKeyBytes) live here; sigil-tx doesn't re-export them.

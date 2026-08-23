@@ -9,8 +9,8 @@
 //!    full reward goes to the validator and no master share is emitted.
 //!
 //! 2. **DEX swaps**: when a swap completes, [`split_swap_output`] takes the
-//!    user's `amount_out` and carves off [`MASTER_SWAP_FEE_BPS`] (5 bps =
-//!    0.05% of the output) for the master wallet, returning the user share +
+//!    user's `amount_out` and carves off [`MASTER_SWAP_FEE_BPS`] (30 bps =
+//!    0.3% of the output) for the master wallet, returning the user share +
 //!    master share. The user receives slightly less of the output token; the
 //!    LP fee (30 bps default, compounded into the reserves) is unchanged.
 //!    If `master_wallet` is `None`, the user receives the full `amount_out`.
@@ -80,6 +80,13 @@ pub const COMMONS_WALLET: WalletId = [0xC0; 32];
 /// [`DEV_MASTER_WALLET`]. This is taken from what the user *receives*, on top
 /// of the LP fee (30 bps default) that compounds into the pool reserves — so a
 /// swap pays 0.3% to LPs (pool) and 0.3% to the dev account.
+///
+/// Authoritative per Viktor's directive of 2026-06-09 ("5% of all mining
+/// coinbase and 0.3% fee on dex"), pinned by
+/// [`tests::rate_constants_match_user_directive`]. Two stale artifacts used to
+/// contradict it and were corrected on 2026-08-23 rather than the constant:
+/// this module's header said "5 bps", and `sigil-tx`'s swap test asserted a
+/// 1/2000 bound. Neither was the directive; both have been brought in line.
 pub const MASTER_SWAP_FEE_BPS: u128 = 30;
 
 /// Master dev-fee wallet (Viktor) — SIGIL address

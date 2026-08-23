@@ -28,13 +28,22 @@ use rand::SeedableRng;
 pub mod circuit;
 pub mod stark;
 pub mod notes;
+/// PV-1 canonical note shape — the single definition of commitment / nullifier / pool
+/// tree that consensus and the production circuit share. See the module docs for why
+/// `notes` (Rescue) and `sigil-mixer` (BLAKE3) are NOT the canonical shape.
+pub mod note_v1;
 pub mod mimc;
 pub mod membership;
 pub mod transfer;
 pub mod range;
 pub mod spend;
 pub mod spend_full;
+/// Output-bound fully-folded spend — closes the mint vector left open by `spend_full`
+/// (hidden output values were never tied to the commitments consensus inserts).
+pub mod spend_full_v2;
 pub mod ring;
+/// Shielded wallet: key derivation, own-note tracking, and spend proving.
+pub mod wallet;
 
 /// Errors surfaced by the shield prover/verifier.
 #[derive(Debug, thiserror::Error)]

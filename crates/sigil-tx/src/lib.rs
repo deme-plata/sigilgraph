@@ -101,6 +101,54 @@ fn pool_state_from_dex(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum SigilTx {
+    /// PV-1: move value from a transparent wallet into the shielded pool.
+    ///
+    /// The only public numbers are the depositor and the amount — necessarily so, since
+    /// the value is leaving a transparent balance. What stays private is everything
+    /// afterwards: once the note is in the pool, subsequent spends reveal neither amounts
+    /// nor which note is being consumed.
+    Shield {
+        from: WalletId,
+        #[serde(with = "sigil_state::u128_str")]
+        amount: u128,
+        /// `compress2(amount, blinding)` — the note the depositor can later spend.
+        cm: [u8; 32],
+        #[serde(with = "sigil_state::u128_str")]
+        fee: u128,
+    },
+
+    /// PV-1: a shielded-to-shielded transfer. Amounts and linkage stay private.
+    ///
+    /// Carries no `from`, no `to`, and no amount — that is the point. The STARK proves
+    /// the spender owned a note in the anchored tree, that its value equals the fee plus
+    /// the outputs, and that each output commitment is bound to an in-range share of that
+    /// value. The chokepoint verifies the proof before any state moves.
+    ShieldedSend {
+        anchor: [u8; 32],
+        nullifier: [u8; 32],
+        cm_outs: Vec<[u8; 32]>,
+        #[serde(with = "sigil_state::u128_str")]
+        fee: u128,
+        proof: Vec<u8>,
+    },
+
+    /// PV-1: move value out of the shielded pool to a transparent wallet.
+    ///
+    /// Proof-carrying, exactly like [`SigilTx::ShieldedSend`] — the withdrawn `amount`
+    /// sits in the circuit's public-value slot, so the STARK proves the caller owned a
+    /// note worth it. Without that, naming a nullifier would be enough to drain the pool.
+    Unshield {
+        to: WalletId,
+        #[serde(with = "sigil_state::u128_str")]
+        amount: u128,
+        anchor: [u8; 32],
+        nullifier: [u8; 32],
+        cm_outs: Vec<[u8; 32]>,
+        proof: Vec<u8>,
+        #[serde(with = "sigil_state::u128_str")]
+        fee: u128,
+    },
+
     /// Move tokens from one wallet to another.
     Send {
         /// Sender wallet.
@@ -393,6 +441,9 @@ impl SigilTx {
             SigilTx::BankPropose     { .. } => 13,
             SigilTx::BankApprove     { .. } => 14,
             SigilTx::BankExecute     { .. } => 15,
+            SigilTx::Shield          { .. } => 16,
+            SigilTx::ShieldedSend    { .. } => 17,
+            SigilTx::Unshield        { .. } => 18,
         }
     }
 
@@ -400,6 +451,9 @@ impl SigilTx {
     /// without case-matching the enum at every call site.
     pub fn fee(&self) -> u128 {
         match self {
+            SigilTx::Shield          { fee, .. } |
+            SigilTx::ShieldedSend    { fee, .. } |
+            SigilTx::Unshield        { fee, .. } |
             SigilTx::Send            { fee, .. } |
             SigilTx::Swap            { fee, .. } |
             SigilTx::LpDeposit       { fee, .. } |
@@ -420,8 +474,19 @@ impl SigilTx {
     }
 
     /// Wallet that pays the fee. Always the natural author of the tx.
+    /// # Shielded transactions
+    ///
+    /// [`SigilTx::ShieldedSend`] and [`SigilTx::Unshield`] have NO transparent payer —
+    /// that is the entire point of them. Their fee is paid out of the shielded value the
+    /// STARK proves the spender owned, and authorization comes from that proof rather
+    /// than from a wallet signature. They report the null wallet, and
+    /// [`SignedTx::precheck`] exempts them from the signer-equals-payer rule accordingly.
+    /// Forcing a real wallet here would reintroduce exactly the linkage the shielded pool
+    /// exists to break.
     pub fn fee_payer(&self) -> WalletId {
         match self {
+            SigilTx::Shield { from, .. } => *from,
+            SigilTx::ShieldedSend { .. } | SigilTx::Unshield { .. } => [0u8; 32],
             SigilTx::Send         { from, .. } => *from,
             SigilTx::Swap         { from, .. } => *from,
             SigilTx::LpDeposit    { from, .. } => *from,
@@ -484,6 +549,16 @@ impl SignedTx {
     /// Cheap pre-validation: scheme/sig-length sanity, sender == fee_payer.
     /// Does NOT verify the actual signature (deferred to flux-eternal-cypher).
     pub fn precheck(&self) -> Result<(), TxApplyError> {
+        // Shielded spends carry NEITHER a transparent payer NOR a wallet signature:
+        // authorization is the STARK, which `commit_state_transition` verifies. Every
+        // check below assumes a signing wallet, so they are skipped rather than fed a
+        // dummy key — requiring a signature would force each shielded send to name a
+        // wallet, recreating the linkage the pool exists to break. This is safe because
+        // it defers to a strictly stronger check that cannot be bypassed, not because
+        // the transaction is unauthenticated.
+        if matches!(self.tx, SigilTx::ShieldedSend { .. } | SigilTx::Unshield { .. }) {
+            return Ok(());
+        }
         if self.sig.0.len() != self.sig_scheme.expected_sig_len() {
             return Err(TxApplyError::SigLengthMismatch {
                 scheme: self.sig_scheme,
@@ -1065,6 +1140,13 @@ pub struct ApplyResult {
     /// Mutations to feed to `commit_state_transition`.
     pub mutations: Vec<StateMutation>,
     /// Events to record in the block's event log.
+
+    /// A shielded transaction was refused before reaching the chokepoint. This layer only
+    /// catches the cheap, obvious cases (a nullifier already in the spent set); the
+    /// authoritative checks — anchor validity and the STARK — belong to
+    /// `commit_state_transition` and are never skipped because of a pass here.
+    #[error("shielded tx rejected: {0}")]
+    ShieldedRejected(&'static str),
     pub events: Vec<SigilEvent>,
 }
 
@@ -1093,6 +1175,55 @@ pub fn apply_tx(state: &SigilState, signed: &SignedTx) -> Result<ApplyResult, Tx
                     have: from_native, need: *fee,
                 });
             }
+        // ── PV-1 shielded transactions ──────────────────────────────────────────────
+        // These translate 1:1 into the shielded StateMutations. Deliberately thin: every
+        // shielded rule that matters (anchor validity, nullifier freshness, and the STARK
+        // itself) is enforced by `commit_state_transition`, not here. Duplicating those
+        // checks at this layer would create a second place they could drift or be skipped
+        // — and this layer's checks are not the ones that gate the money.
+        SigilTx::Shield { from, amount, cm, fee } => {
+            let have = state.balance_of(from, &NATIVE);
+            let need = amount.checked_add(*fee).ok_or(TxApplyError::Overflow)?;
+            if have < need {
+                return Err(TxApplyError::InsufficientBalance { have, need });
+            }
+            out.mutations.push(StateMutation::Shield {
+                from: *from,
+                amount: *amount,
+                cm: *cm,
+            });
+        }
+
+        SigilTx::ShieldedSend { anchor, nullifier, cm_outs, fee, proof } => {
+            // Reject an already-spent nullifier early so an obvious replay does not cost
+            // a STARK verification. The chokepoint re-checks — this is an optimization,
+            // never the guarantee.
+            if state.shielded().is_spent(nullifier) {
+                return Err(TxApplyError::ShieldedRejected("nullifier already spent"));
+            }
+            out.mutations.push(StateMutation::ShieldedSpend {
+                anchor: *anchor,
+                nullifier: *nullifier,
+                cm_outs: cm_outs.clone(),
+                fee: *fee,
+                proof: proof.clone(),
+            });
+        }
+
+        SigilTx::Unshield { to, amount, anchor, nullifier, cm_outs, proof, fee: _ } => {
+            if state.shielded().is_spent(nullifier) {
+                return Err(TxApplyError::ShieldedRejected("nullifier already spent"));
+            }
+            out.mutations.push(StateMutation::Unshield {
+                to: *to,
+                amount: *amount,
+                anchor: *anchor,
+                nullifier: *nullifier,
+                cm_outs: cm_outs.clone(),
+                proof: proof.clone(),
+            });
+        }
+
             // If the transfer token IS native, the sender must have
             // amount + fee in native.
             let need_native = if token == &NATIVE { fee.checked_add(*amount).ok_or(TxApplyError::Overflow)? } else { *fee };
@@ -2222,7 +2353,7 @@ mod tests {
     }
 
     #[test]
-    fn swap_credits_master_wallet_5_bps_of_output() {
+    fn swap_credits_master_wallet_at_the_directive_rate() {
         // Install master wallet at genesis. Run a swap large enough that
         // amount_out * 5 / 10_000 rounds to a non-zero master share. Verify
         // the master receives that share, the user receives the rest, and
@@ -2283,9 +2414,17 @@ mod tests {
             },
             "alice + master must equal AMM amount_out (no leak)"
         );
-        // 5 bps ≈ 1/2000 — verify master got at most 1/2000 + 1 floor of the total.
+        // 30 bps = 0.3% ≈ 1/333 of the output, per Viktor's 2026-06-09 directive
+        // (pinned by sigil_bank::tests::rate_constants_match_user_directive).
+        // This bound previously read 1/2000 (5 bps) and had been failing against
+        // correct code since the rate was set — the test was stale, not the constant.
         let total_out = alice_out + master_out;
-        assert!(master_out <= total_out / 2_000 + 1);
+        let expected = total_out * sigil_bank::MASTER_SWAP_FEE_BPS / sigil_bank::BPS_DENOMINATOR;
+        assert!(
+            master_out <= expected + 1,
+            "master share {master_out} exceeds {} bps of {total_out}",
+            sigil_bank::MASTER_SWAP_FEE_BPS
+        );
     }
 
     #[test]

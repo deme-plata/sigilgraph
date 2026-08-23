@@ -41,6 +41,9 @@ pub mod spend_full;
 /// Output-bound fully-folded spend — closes the mint vector left open by `spend_full`
 /// (hidden output values were never tied to the commitments consensus inserts).
 pub mod spend_full_v2;
+/// Owner-bound spend — closes v2's missing-ownership flaw (anyone knowing
+/// `(value, blinding)` could spend, with a different nullifier each time).
+pub mod spend_full_v3;
 pub mod ring;
 /// Shielded wallet: key derivation, own-note tracking, and spend proving.
 pub mod wallet;

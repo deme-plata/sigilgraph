@@ -78,8 +78,8 @@ fn current_snapshot_round_trips() {
         &StateTransition {
             at_height: 1,
             mutations: vec![
-                StateMutation::SetBalance { wallet: ALICE, token: NATIVE, amount: 7 },
-                StateMutation::Shield { from: ALICE, amount: 7, cm: [9u8; 32] },
+                StateMutation::SetBalance { wallet: ALICE, token: NATIVE, amount: 1_000 },
+                StateMutation::Shield { from: ALICE, amount: 1_000, cm: [9u8; 32] },
             ],
         },
         1,
@@ -89,7 +89,7 @@ fn current_snapshot_round_trips() {
     let bytes = rmp_serde::to_vec(&state).expect("encode");
     let back: SigilState = rmp_serde::from_slice(&bytes).expect("decode");
     assert_eq!(back.shielded().len(), 1, "the note must survive");
-    assert_eq!(back.shielded().value_locked(), 7);
+    assert_eq!(back.shielded().value_locked(), 1_000);
     assert_eq!(back.roots(), state.roots());
 }
 

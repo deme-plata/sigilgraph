@@ -1050,6 +1050,14 @@ pub fn commit_state_transition(
 
             // ── PV-1 shielded pool ───────────────────────────────────────────────────
             StateMutation::Shield { from, amount, cm } => {
+                // RAMP DENOMINATION. The transparent side of a ramp names a wallet and an
+                // amount, so an unusual amount links the two sides without touching any
+                // proof. Standard denominations turn an amount into a bucket.
+                if !shielded::is_denomination(amount) {
+                    return Err(CommitError::Shielded(
+                        shielded::ShieldedError::NotADenomination { amount },
+                    ));
+                }
                 // Debit transparent, lock the value, append the note. Aggregate supply is
                 // unchanged: the value crosses domains rather than being created.
                 let bal = state.balance_of(&from, &NATIVE);
@@ -1065,6 +1073,15 @@ pub fn commit_state_transition(
             }
 
             StateMutation::ShieldedSpend { anchor, nullifier, cm_outs, fee, proof } => {
+                // FIXED FEE. A freely-chosen fee is public and therefore a fingerprint:
+                // amounts stay hidden while the fee quietly identifies the sender. One
+                // mandatory value makes it carry no information.
+                if fee != shielded::SHIELDED_FEE {
+                    return Err(CommitError::Shielded(shielded::ShieldedError::WrongFee {
+                        expected: shielded::SHIELDED_FEE,
+                        got: fee,
+                    }));
+                }
                 // 1. The anchor must be a root this pool genuinely had.
                 if !state.shielded.is_known_anchor(&anchor) {
                     return Err(CommitError::UnknownAnchor { anchor });
@@ -1101,6 +1118,13 @@ pub fn commit_state_transition(
             }
 
             StateMutation::Unshield { to, amount, anchor, nullifier, cm_outs, proof } => {
+                // Same ramp rule as Shield — the exit is the other half of the
+                // correlation attack and has to be equally coarse.
+                if !shielded::is_denomination(amount) {
+                    return Err(CommitError::Shielded(
+                        shielded::ShieldedError::NotADenomination { amount },
+                    ));
+                }
                 if !state.shielded.is_known_anchor(&anchor) {
                     return Err(CommitError::UnknownAnchor { anchor });
                 }

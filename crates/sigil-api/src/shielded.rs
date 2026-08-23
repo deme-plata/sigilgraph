@@ -50,6 +50,10 @@ pub enum ShieldedSubmitError {
     BadHex(&'static str),
     BadLength { field: &'static str, expected: usize, got: usize },
     ZeroAmount,
+    /// Not a permitted ramp denomination — see `sigil_state::shielded::DENOMINATIONS`.
+    NotADenomination { amount: u128, suggestion: Option<Vec<u128>> },
+    /// A shielded send must pay exactly the fixed fee.
+    WrongFee { expected: u128, got: u128 },
     /// The proof did not verify against the supplied public inputs.
     ProofRejected(String),
     /// This nullifier is already queued — a duplicate submission, not a double-spend
@@ -67,6 +71,21 @@ impl ShieldedSubmitError {
                 format!("{field} must be {expected} bytes, got {got}")
             }
             Self::ZeroAmount => "amount must be > 0".into(),
+            Self::NotADenomination { amount, suggestion } => match suggestion {
+                Some(parts) => format!(
+                    "{amount} is not a standard ramp denomination (a distinctive amount can be \
+                     correlated across the transparent boundary). Split it: {parts:?}"
+                ),
+                None => format!(
+                    "{amount} is not a standard ramp denomination and cannot be expressed as \
+                     a sum of them — use a multiple of {}",
+                    sigil_state::shielded::DENOMINATIONS[0]
+                ),
+            },
+            Self::WrongFee { expected, got } => format!(
+                "shielded sends must pay exactly {expected} (got {got}) — a chosen fee is a \
+                 fingerprint that identifies the sender"
+            ),
             Self::ProofRejected(e) => format!("proof rejected: {e}"),
             Self::AlreadyQueued => "a transaction spending this note is already queued".into(),
             Self::WrongOutputCount { expected, got } => {
@@ -74,6 +93,20 @@ impl ShieldedSubmitError {
             }
         }
     }
+}
+
+/// Reject a ramp amount that is not a standard denomination, suggesting a split.
+///
+/// The chokepoint enforces this too; refusing here means the caller gets an actionable
+/// error instead of a transaction that vanishes at mint.
+fn check_denomination(amount: u128) -> Result<(), ShieldedSubmitError> {
+    if sigil_state::shielded::is_denomination(amount) {
+        return Ok(());
+    }
+    Err(ShieldedSubmitError::NotADenomination {
+        amount,
+        suggestion: sigil_state::shielded::decompose(amount),
+    })
 }
 
 /// Decode a 32-byte hex field.
@@ -116,6 +149,7 @@ impl ShieldedBridge {
         if amount == 0 {
             return Err(ShieldedSubmitError::ZeroAmount);
         }
+        check_denomination(amount)?;
         let from = hex32(from, "from")?;
         let cm = hex32(cm, "cm")?;
         let tx = SigilTx::Shield { from, amount, cm, fee };
@@ -131,6 +165,12 @@ impl ShieldedBridge {
         fee: u128,
         proof: Vec<u8>,
     ) -> Result<[u8; 32], ShieldedSubmitError> {
+        if fee != sigil_state::shielded::SHIELDED_FEE {
+            return Err(ShieldedSubmitError::WrongFee {
+                expected: sigil_state::shielded::SHIELDED_FEE,
+                got: fee,
+            });
+        }
         let anchor_b = hex32(anchor, "anchor")?;
         let nf = hex32(nullifier, "nullifier")?;
         let outs = self.decode_outs(cm_outs)?;
@@ -162,6 +202,7 @@ impl ShieldedBridge {
         if amount == 0 {
             return Err(ShieldedSubmitError::ZeroAmount);
         }
+        check_denomination(amount)?;
         let to_b = hex32(to, "to")?;
         let anchor_b = hex32(anchor, "anchor")?;
         let nf = hex32(nullifier, "nullifier")?;
@@ -328,11 +369,11 @@ mod tests {
             ShieldedSubmitError::ZeroAmount
         );
         assert!(matches!(
-            b.submit_shield("zz", 1, &"11".repeat(32), 0).unwrap_err(),
+            b.submit_shield("zz", 1_000, &"11".repeat(32), 0).unwrap_err(),
             ShieldedSubmitError::BadHex("from")
         ));
         assert!(matches!(
-            b.submit_shield(&"aa".repeat(32), 1, "beef", 0).unwrap_err(),
+            b.submit_shield(&"aa".repeat(32), 1_000, "beef", 0).unwrap_err(),
             ShieldedSubmitError::BadLength { field: "cm", .. }
         ));
     }
@@ -340,7 +381,7 @@ mod tests {
     #[test]
     fn shield_enqueues_and_retires() {
         let b = ShieldedBridge::new();
-        let h = b.submit_shield(&"aa".repeat(32), 100, &"bb".repeat(32), 1).expect("queued");
+        let h = b.submit_shield(&"aa".repeat(32), 10_000, &"bb".repeat(32), 1).expect("queued");
         assert_eq!(b.pending_len(), 1);
         assert_eq!(b.snapshot_for_mint().len(), 1, "re-embedded until confirmed");
         assert_eq!(b.pending_len(), 1, "snapshot must NOT be destructive");
@@ -354,7 +395,7 @@ mod tests {
         let b = ShieldedBridge::new();
         let outs = vec!["11".repeat(32), "22".repeat(32)];
         let err = b
-            .submit_shielded_send(&"aa".repeat(32), &"bb".repeat(32), &outs, 1, vec![0u8; 64])
+            .submit_shielded_send(&"aa".repeat(32), &"bb".repeat(32), &outs, sigil_state::shielded::SHIELDED_FEE, vec![0u8; 64])
             .unwrap_err();
         assert!(matches!(err, ShieldedSubmitError::ProofRejected(_)), "got {err:?}");
         assert_eq!(b.pending_len(), 0, "nothing may be queued on a bad proof");
@@ -368,7 +409,7 @@ mod tests {
                 &"aa".repeat(32),
                 &"bb".repeat(32),
                 &["11".repeat(32)],
-                1,
+                sigil_state::shielded::SHIELDED_FEE,
                 vec![0u8; 64],
             )
             .unwrap_err();

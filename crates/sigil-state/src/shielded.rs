@@ -47,6 +47,85 @@ pub const POOL_DEPTH: usize = 15;
 /// Maximum notes the pool can hold at [`POOL_DEPTH`].
 pub const POOL_CAPACITY: usize = 1 << POOL_DEPTH;
 
+// ── PRIVACY PARAMETERS ──────────────────────────────────────────────────────────────
+//
+// Two structural leaks survive the cryptography, and both are closed by protocol rule
+// rather than by better proofs. Neither needs a height gate: `Shield`, `ShieldedSpend` and
+// `Unshield` have never appeared in a settled block, so there is no history whose
+// validation these could change.
+
+/// The ONE fee every shielded send must pay.
+///
+/// A freely-chosen fee is a fingerprint. If Alice always pays 1337 and Bob always pays
+/// 9000, their transactions are trivially separable inside the anonymity set — the amounts
+/// are hidden but the *fee* is public, and a distinctive fee identifies the sender as
+/// effectively as a signature would. One mandatory value means the fee carries zero bits
+/// about who sent the transaction.
+///
+/// The cost is that there is no fee market and therefore no fee-based priority. That is
+/// the correct trade for a privacy chain: a fee market is an auction in which the bid is
+/// public, and a public bid is an identifier.
+pub const SHIELDED_FEE: u128 = 1_000;
+
+/// Allowed shield / unshield amounts.
+///
+/// The ramps are transparent by nature — moving value between the transparent and shielded
+/// domains necessarily names a wallet and an amount. That makes VALUE CORRELATION the
+/// cheapest attack on this whole design: shield exactly 7,431,902 and unshield exactly
+/// 7,431,902 an hour later, and an observer links the two without touching a single proof.
+///
+/// A coarse ladder collapses that. With everyone shielding the same handful of round
+/// numbers, an amount identifies a bucket rather than a person, and someone moving an
+/// unusual sum must split it across several ramp operations — which is exactly the
+/// behaviour that makes correlation expensive.
+///
+/// 1/2/5 x powers of ten, so any amount can be composed from a few entries.
+pub const DENOMINATIONS: &[u128] = &[
+    1_000,
+    2_000,
+    5_000,
+    10_000,
+    20_000,
+    50_000,
+    100_000,
+    200_000,
+    500_000,
+    1_000_000,
+    2_000_000,
+    5_000_000,
+    10_000_000,
+    20_000_000,
+    50_000_000,
+    100_000_000,
+    200_000_000,
+    500_000_000,
+    1_000_000_000,
+];
+
+/// Is `amount` one of the permitted ramp denominations?
+pub fn is_denomination(amount: u128) -> bool {
+    DENOMINATIONS.binary_search(&amount).is_ok()
+}
+
+/// The largest denomination not exceeding `amount` — for a wallet splitting a payment
+/// into legal ramp operations.
+pub fn largest_denomination_at_most(amount: u128) -> Option<u128> {
+    DENOMINATIONS.iter().rev().copied().find(|d| *d <= amount)
+}
+
+/// Decompose `amount` into permitted denominations, greedily. Returns `None` if the
+/// remainder cannot be expressed (i.e. `amount` is not a multiple of the smallest one).
+pub fn decompose(amount: u128) -> Option<Vec<u128>> {
+    let mut left = amount;
+    let mut out = Vec::new();
+    while left > 0 {
+        let d = largest_denomination_at_most(left)?;
+        out.push(d);
+        left -= d;
+    }
+    Some(out)
+}
+
 /// Errors from shielded-state transitions.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ShieldedError {
@@ -60,6 +139,16 @@ pub enum ShieldedError {
     ValueOverflow,
     #[error("spend proof rejected: {0}")]
     ProofRejected(String),
+    #[error(
+        "shielded send must pay exactly the fixed fee {expected} (got {got}) — a chosen fee \
+         is a fingerprint that identifies the sender"
+    )]
+    WrongFee { expected: u128, got: u128 },
+    #[error(
+        "{amount} is not a permitted ramp denomination — shield/unshield in standard \
+         amounts so values cannot be correlated across the transparent boundary"
+    )]
+    NotADenomination { amount: u128 },
 }
 
 /// The shielded pool: append-only note commitments plus the spent-nullifier set.

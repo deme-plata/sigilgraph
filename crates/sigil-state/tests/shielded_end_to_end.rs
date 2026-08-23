@@ -12,7 +12,7 @@
 use sigil_shield::mimc::{compress2, mimc_options};
 use sigil_shield::note_v1::{padding_leaf, to_wire, Note, ShieldedPoolTree};
 use sigil_shield::spend_full_v4::{build_spend_full_v4_trace, SpendFullV4Prover, N_OUTS};
-use sigil_state::shielded::POOL_CAPACITY;
+use sigil_state::shielded::{POOL_CAPACITY, SHIELDED_FEE};
 use sigil_state::{
     commit_state_transition, CommitError, SigilState, StateMutation, StateTransition, NATIVE,
 };
@@ -117,14 +117,14 @@ fn prove_spend(
 /// THE HAPPY PATH: a real proof, verified by the chokepoint, mutating real state.
 #[test]
 fn shield_then_spend_is_accepted_and_mutates_state() {
-    let (mut state, note, position, anchor) = shielded_fixture(100, 4242, 0xDEAD);
+    let (mut state, note, position, anchor) = shielded_fixture(10_000, 4242, 0xDEAD);
 
     // The pool's own root must equal the one the prover builds — if these ever diverge,
     // no honest spend can ever verify.
     assert_eq!(anchor, to_wire(prover_pool(&note).root()), "pool root must match prover's");
 
-    let fee = e(3);
-    let outs = [(e(50), e(777)), (e(47), e(888))];
+    let fee = e(SHIELDED_FEE as u64);
+    let outs = [(e(5_000), e(777)), (e(4_000), e(888))];
     let (proof, nf, cm_outs) = prove_spend(&note, position, fee, &outs);
 
     apply(
@@ -134,7 +134,7 @@ fn shield_then_spend_is_accepted_and_mutates_state() {
             anchor,
             nullifier: nf,
             cm_outs: cm_outs.clone(),
-            fee: 3,
+            fee: SHIELDED_FEE,
             proof,
         }],
     )
@@ -144,12 +144,12 @@ fn shield_then_spend_is_accepted_and_mutates_state() {
     assert_eq!(state.shielded().len(), 3, "one input note + two new outputs");
     assert_eq!(
         state.balance_of(&MASTER, &NATIVE),
-        3,
+        SHIELDED_FEE,
         "the public fee must be credited transparently"
     );
     assert_eq!(
         state.shielded().value_locked(),
-        97,
+        10_000 - SHIELDED_FEE,
         "the fee left the shielded domain; the rest stays locked"
     );
 }
@@ -158,16 +158,16 @@ fn shield_then_spend_is_accepted_and_mutates_state() {
 /// proof is genuinely valid — validity is not freshness.
 #[test]
 fn replaying_a_nullifier_is_refused() {
-    let (mut state, note, position, anchor) = shielded_fixture(100, 4242, 0xDEAD);
-    let fee = e(3);
-    let outs = [(e(50), e(777)), (e(47), e(888))];
+    let (mut state, note, position, anchor) = shielded_fixture(10_000, 4242, 0xDEAD);
+    let fee = e(SHIELDED_FEE as u64);
+    let outs = [(e(5_000), e(777)), (e(4_000), e(888))];
     let (proof, nf, cm_outs) = prove_spend(&note, position, fee, &outs);
 
     let spend = |p: Vec<u8>| StateMutation::ShieldedSpend {
         anchor,
         nullifier: nf,
         cm_outs: cm_outs.clone(),
-        fee: 3,
+        fee: SHIELDED_FEE,
         proof: p,
     };
 
@@ -190,9 +190,9 @@ fn replaying_a_nullifier_is_refused() {
 /// a note of any value. The chokepoint must refuse the anchor before it even proves.
 #[test]
 fn unknown_anchor_is_refused() {
-    let (mut state, note, position, _anchor) = shielded_fixture(100, 4242, 0xDEAD);
-    let fee = e(3);
-    let outs = [(e(50), e(777)), (e(47), e(888))];
+    let (mut state, note, position, _anchor) = shielded_fixture(10_000, 4242, 0xDEAD);
+    let fee = e(SHIELDED_FEE as u64);
+    let outs = [(e(5_000), e(777)), (e(4_000), e(888))];
     let (proof, nf, cm_outs) = prove_spend(&note, position, fee, &outs);
 
     let err = apply(
@@ -202,7 +202,7 @@ fn unknown_anchor_is_refused() {
             anchor: [0xAB; 32], // a root this pool never had
             nullifier: nf,
             cm_outs,
-            fee: 3,
+            fee: SHIELDED_FEE,
             proof,
         }],
     )
@@ -214,9 +214,9 @@ fn unknown_anchor_is_refused() {
 /// TAMPERED PROOF: flipping a byte must not survive verification.
 #[test]
 fn tampered_proof_is_refused() {
-    let (mut state, note, position, anchor) = shielded_fixture(100, 4242, 0xDEAD);
-    let fee = e(3);
-    let outs = [(e(50), e(777)), (e(47), e(888))];
+    let (mut state, note, position, anchor) = shielded_fixture(10_000, 4242, 0xDEAD);
+    let fee = e(SHIELDED_FEE as u64);
+    let outs = [(e(5_000), e(777)), (e(4_000), e(888))];
     let (mut proof, nf, cm_outs) = prove_spend(&note, position, fee, &outs);
 
     let mid = proof.len() / 2;
@@ -225,7 +225,7 @@ fn tampered_proof_is_refused() {
     let err = apply(
         &mut state,
         3,
-        vec![StateMutation::ShieldedSpend { anchor, nullifier: nf, cm_outs, fee: 3, proof }],
+        vec![StateMutation::ShieldedSpend { anchor, nullifier: nf, cm_outs, fee: SHIELDED_FEE, proof }],
     )
     .expect_err("SECURITY: a tampered proof must be refused");
     assert!(
@@ -240,16 +240,16 @@ fn tampered_proof_is_refused() {
 /// v2 circuit exists, checked here at the layer that actually moves money.
 #[test]
 fn inflated_output_commitments_are_refused_at_the_chokepoint() {
-    let (mut state, note, position, anchor) = shielded_fixture(100, 4242, 0xDEAD);
-    let fee = e(3);
-    let honest = [(e(50), e(777)), (e(47), e(888))];
+    let (mut state, note, position, anchor) = shielded_fixture(10_000, 4242, 0xDEAD);
+    let fee = e(SHIELDED_FEE as u64);
+    let honest = [(e(5_000), e(777)), (e(4_000), e(888))];
     let (proof, nf, _real) = prove_spend(&note, position, fee, &honest);
 
     // Claim notes worth 10× what was actually conserved.
     let me = note.owner_pk();
     let inflated = vec![
-        to_wire(compress2(compress2(e(500), e(777)), me)),
-        to_wire(compress2(compress2(e(470), e(888)), me)),
+        to_wire(compress2(compress2(e(50_000), e(777)), me)),
+        to_wire(compress2(compress2(e(40_000), e(888)), me)),
     ];
 
     let err = apply(
@@ -259,7 +259,7 @@ fn inflated_output_commitments_are_refused_at_the_chokepoint() {
             anchor,
             nullifier: nf,
             cm_outs: inflated,
-            fee: 3,
+            fee: SHIELDED_FEE,
             proof,
         }],
     )
@@ -278,13 +278,13 @@ fn inflated_output_commitments_are_refused_at_the_chokepoint() {
 /// only caps the theft at the pool's size, it does not prevent it.
 #[test]
 fn unproven_unshield_is_refused() {
-    let (mut state, _note, _pos, anchor) = shielded_fixture(100, 4242, 0xDEAD);
+    let (mut state, _note, _pos, anchor) = shielded_fixture(10_000, 4242, 0xDEAD);
     let err = apply(
         &mut state,
         3,
         vec![StateMutation::Unshield {
             to: ALICE,
-            amount: 50,
+            amount: 10_000,
             anchor,
             nullifier: [0x5A; 32], // a nullifier for no note the caller owns
             cm_outs: vec![[0u8; 32], [0u8; 32]],
@@ -294,16 +294,16 @@ fn unproven_unshield_is_refused() {
     .expect_err("SECURITY: an unshield without a valid proof must be refused");
     assert!(matches!(err, CommitError::ShieldedProofRejected { .. }), "got {err:?}");
     assert_eq!(state.balance_of(&ALICE, &NATIVE), 0, "no credit on a refused unshield");
-    assert_eq!(state.shielded().value_locked(), 100, "pool must be untouched");
+    assert_eq!(state.shielded().value_locked(), 10_000, "pool must be untouched");
 }
 
 /// AN HONEST UNSHIELD round-trips: value leaves the pool and lands transparently.
 #[test]
 fn proven_unshield_returns_value_transparently() {
-    let (mut state, note, position, anchor) = shielded_fixture(100, 4242, 0xDEAD);
+    let (mut state, note, position, anchor) = shielded_fixture(10_000, 4242, 0xDEAD);
 
     // Withdraw 100 publicly, with two zero-value change notes.
-    let amount = e(100);
+    let amount = e(10_000);
     let outs = [(e(0), e(777)), (e(0), e(888))];
     let (proof, nf, cm_outs) = prove_spend(&note, position, amount, &outs);
 
@@ -312,7 +312,7 @@ fn proven_unshield_returns_value_transparently() {
         3,
         vec![StateMutation::Unshield {
             to: ALICE,
-            amount: 100,
+            amount: 10_000,
             anchor,
             nullifier: nf,
             cm_outs,
@@ -321,7 +321,7 @@ fn proven_unshield_returns_value_transparently() {
     )
     .expect("an honest, proven unshield must be accepted");
 
-    assert_eq!(state.balance_of(&ALICE, &NATIVE), 100, "value returned transparently");
+    assert_eq!(state.balance_of(&ALICE, &NATIVE), 10_000, "value returned transparently");
     assert_eq!(state.shielded().value_locked(), 0, "pool drained of that note's value");
     assert!(state.shielded().is_spent(&nf), "nullifier consumed");
 }
@@ -329,9 +329,9 @@ fn proven_unshield_returns_value_transparently() {
 /// An unshield may never return more than the pool holds, even with a valid proof shape.
 #[test]
 fn unshield_cannot_overdraw_the_pool() {
-    let (mut state, note, position, anchor) = shielded_fixture(100, 4242, 0xDEAD);
+    let (mut state, note, position, anchor) = shielded_fixture(10_000, 4242, 0xDEAD);
     // Prove a spend of the real note, then claim a LARGER withdrawal than it was worth.
-    let amount = e(100);
+    let amount = e(10_000);
     let outs = [(e(0), e(777)), (e(0), e(888))];
     let (proof, nf, cm_outs) = prove_spend(&note, position, amount, &outs);
 
@@ -340,7 +340,7 @@ fn unshield_cannot_overdraw_the_pool() {
         3,
         vec![StateMutation::Unshield {
             to: ALICE,
-            amount: 1_000, // the proof commits to 100, not 1000
+            amount: 1_000_000, // a legal denomination, but the proof commits to 10_000
             anchor,
             nullifier: nf,
             cm_outs,
@@ -366,7 +366,7 @@ fn unshield_cannot_overdraw_the_pool() {
 /// restored anchor, which is the only proof that the restored pool is actually usable.
 #[test]
 fn shielded_pool_survives_the_snapshot_round_trip() {
-    let (state, note, position, anchor) = shielded_fixture(100, 4242, 0xDEAD);
+    let (state, note, position, anchor) = shielded_fixture(10_000, 4242, 0xDEAD);
 
     let bytes = rmp_serde::to_vec(&state).expect("snapshot encode");
     let mut restored: SigilState = rmp_serde::from_slice(&bytes).expect("snapshot decode");
@@ -384,14 +384,76 @@ fn shielded_pool_survives_the_snapshot_round_trip() {
     assert_eq!(b.current_root(), a.current_root(), "the recomputed root must match");
 
     // The restored pool must be USABLE, not merely equal: prove a real spend against it.
-    let fee = e(3);
-    let outs = [(e(50), e(777)), (e(47), e(888))];
+    let fee = e(SHIELDED_FEE as u64);
+    let outs = [(e(5_000), e(777)), (e(4_000), e(888))];
     let (proof, nf, cm_outs) = prove_spend(&note, position, fee, &outs);
     apply(
         &mut restored,
         3,
-        vec![StateMutation::ShieldedSpend { anchor, nullifier: nf, cm_outs, fee: 3, proof }],
+        vec![StateMutation::ShieldedSpend { anchor, nullifier: nf, cm_outs, fee: SHIELDED_FEE, proof }],
     )
     .expect("a spend must still verify against a restored anchor");
     assert!(restored.shielded().is_spent(&nf));
+}
+
+/// PRIVACY RULE: the fee is fixed, because a chosen fee is a fingerprint.
+///
+/// Amounts are hidden but the fee is public. If senders picked their own, a distinctive
+/// value would identify them inside the anonymity set as reliably as a signature — the
+/// crowd would be full of people wearing name tags.
+#[test]
+fn a_nonstandard_fee_is_refused() {
+    let (mut state, note, position, anchor) = shielded_fixture(10_000, 4242, 0xDEAD);
+    let odd = e(1_337); // distinctive, therefore identifying
+    let outs = [(e(5_000), e(777)), (e(3_663), e(888))]; // still conserving
+    let (proof, nf, cm_outs) = prove_spend(&note, position, odd, &outs);
+
+    let err = apply(
+        &mut state,
+        3,
+        vec![StateMutation::ShieldedSpend { anchor, nullifier: nf, cm_outs, fee: 1_337, proof }],
+    )
+    .expect_err("SECURITY: a chosen fee is a fingerprint and must be refused");
+    assert!(matches!(err, CommitError::Shielded(_)), "got {err:?}");
+    assert!(!state.shielded().is_spent(&nf), "a refused spend must not burn the nullifier");
+}
+
+/// PRIVACY RULE: ramps must use standard denominations.
+///
+/// The transparent side of a ramp names a wallet AND an amount, so shielding 7_431_902 and
+/// unshielding 7_431_902 links the two without touching a single proof. This is the
+/// cheapest attack on the whole design, and a coarse ladder is what defeats it.
+#[test]
+fn an_unusual_shield_amount_is_refused() {
+    let mut state = SigilState::default();
+    apply(
+        &mut state,
+        1,
+        vec![StateMutation::SetBalance { wallet: ALICE, token: NATIVE, amount: 10_000_000 }],
+    )
+    .unwrap();
+
+    let err = apply(
+        &mut state,
+        2,
+        vec![StateMutation::Shield { from: ALICE, amount: 7_431_902, cm: [1u8; 32] }],
+    )
+    .expect_err("SECURITY: a correlatable amount must be refused at the ramp");
+    assert!(matches!(err, CommitError::Shielded(_)), "got {err:?}");
+    assert_eq!(state.shielded().len(), 0, "nothing may enter the pool");
+    assert_eq!(state.balance_of(&ALICE, &NATIVE), 10_000_000, "and nothing was debited");
+
+    // The same value IS shieldable when split into legal denominations.
+    let parts = sigil_state::shielded::decompose(7_431_000).expect("decomposable");
+    assert!(!parts.is_empty());
+    assert_eq!(parts.iter().sum::<u128>(), 7_431_000);
+    for (i, amt) in parts.iter().enumerate() {
+        apply(
+            &mut state,
+            3 + i as u64,
+            vec![StateMutation::Shield { from: ALICE, amount: *amt, cm: [(i as u8) + 2; 32] }],
+        )
+        .unwrap_or_else(|e| panic!("denomination {amt} must be accepted: {e}"));
+    }
+    assert_eq!(state.shielded().value_locked(), 7_431_000);
 }

@@ -413,6 +413,21 @@ impl BlockStore {
     }
 
     /// True if a block at `height` is stored (via the height index).
+    /// A shared handle to the underlying database.
+    ///
+    /// `flux_db::Database` is `Arc<RwLock<..>>` inside, so the clone shares
+    /// storage and writes through it are visible here (the same property the
+    /// background index migration already relies on). Exposed so
+    /// `sigil_sync::SyncStore` can persist which ranges are fetched-but-not-
+    /// yet-verified: this store already persists the synced_to/verified_to
+    /// WATERMARKS (meta 'S'/'V'), but not the in-progress claim set, so a
+    /// restart re-downloaded everything above the verified spine. Measured
+    /// live 2026-08-23: a node that had fetched to the tip came back at spine
+    /// 240,000 and re-requested ~1.72M blocks.
+    pub fn db_handle(&self) -> flux_db::Database {
+        self.db.clone()
+    }
+
     pub fn has_height(&self, height: u64) -> bool {
         self.db.get(&height_key(height)).ok().flatten().is_some()
     }

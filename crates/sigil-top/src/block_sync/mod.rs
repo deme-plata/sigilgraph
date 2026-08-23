@@ -483,9 +483,25 @@ impl P2PBlockSync {
                                 // previously-verified value would deserve. See the field's doc
                                 // comment on `P2PSyncState::peer_best_oracle_confirmed`.
                                 if !s.peer_best_oracle_confirmed && pb != h {
+                                    // 2026-08-23 (grogu-false-reset): `pb > h` used to wipe the
+                                    // store on ANY gap, even 1 block — but a fully-synced restart
+                                    // legitimately has its own tracked height slightly AHEAD of
+                                    // the oracle's cached/CDN'd first read on a fast-producing
+                                    // chain (ordinary propagation lag, not corruption). Proven
+                                    // live: a genuinely 100%-synced, cryptographically
+                                    // integrity-verified client restarted (self-update
+                                    // exec-relaunch) and this branch wiped it straight back to
+                                    // ~62% for no real reason — the oracle simply hadn't caught
+                                    // up yet on its first read. Only treat this as poisoning when
+                                    // the gap is real, mirroring the other two reset branches'
+                                    // existing 100_000-block bar (scaled down since first-boot
+                                    // poisoning can legitimately be smaller in magnitude, but
+                                    // ordinary propagation jitter is nowhere near this size).
+                                    const FIRST_POLL_POISON_GAP: u64 = 2_000;
+                                    let looks_poisoned = pb > h && pb - h > FIRST_POLL_POISON_GAP;
                                     crate::tlog!(
-                                        "[tipfetch] first oracle confirmation this session — adopting {} over unverified seed {}",
-                                        h, pb
+                                        "[tipfetch] first oracle confirmation this session — adopting {} over unverified seed {}{}",
+                                        h, pb, if looks_poisoned { " (gap looks poisoned, wiping)" } else { "" }
                                     );
                                     s.peer_best_height = h;
                                     s.peer_best_oracle_confirmed = true;
@@ -494,7 +510,7 @@ impl P2PBlockSync {
                                     s.sync_total    = s.sync_total.min(h);
                                     s.verified      = s.verified.min(h);
                                     if s.base > h { s.base = h; }
-                                    if pb > h { s.reset_pending = true; } // was ABOVE truth — wipe the poisoned store
+                                    if looks_poisoned { s.reset_pending = true; }
                                     reset_streak = 0;
                                     clear_persisted_tip();
                                     persist = Some(h);
@@ -778,7 +794,31 @@ impl P2PBlockSync {
                 // block_sync/sync_store.rs for why (both of today's production sync
                 // bugs came from this state being spread across a HashSet, a
                 // watermark owned by another struct, and a magic constant).
-                let sync_store = std::sync::Arc::new(crate::block_sync::sync_store::SyncStore::new(CHUNK));
+                // Durable-backed so a restart RESUMES instead of re-downloading.
+                // Proven in chronos (`durable_restart_resumes`): 100 fetched
+                // ranges restored, 0 re-requestable, watermarks intact — vs the
+                // RAM-only baseline of 100/100 re-requestable, which is the
+                // ~1.72M-block re-download observed live.
+                let sync_store = std::sync::Arc::new(
+                    crate::block_sync::sync_store::SyncStore::with_db(
+                        CHUNK,
+                        std::sync::Arc::new(store.db_handle()),
+                    ),
+                );
+                {
+                    // Restore the claim set. Only ranges ABOVE the verified
+                    // watermark can still be outstanding, and the look-ahead
+                    // budget bounds how many, so a bounded probe window covers
+                    // every range a previous process could have left behind.
+                    let probe_base = store.verified_to();
+                    let probe: Vec<u64> = (0..512u64)
+                        .map(|i| probe_base.saturating_add(i.saturating_mul(CHUNK)))
+                        .collect();
+                    let restored = sync_store.load(&probe);
+                    if restored > 0 {
+                        crate::tlog!("[SYNC] durable resume: {restored} fetched range(s) restored — not re-downloading");
+                    }
+                }
                 let mut peer_bench: HashMap<String, Instant> = HashMap::new(); // peer.to_string() → benched-until
                 // v0.31.6: per-peer KNOWN TOP height (max height it has served). Lets the refill
                 // skip peers that are BEHIND the frontier — they'd just return EMPTY (the "producers

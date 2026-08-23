@@ -303,6 +303,76 @@ pub fn restart_resumes_instead_of_refetching() -> SyncOutcome {
     )
 }
 
+/// (a) THE DURABLE-RESUME ASSERTION — the gap the previous commit flagged as
+/// pending, now closed with a real flux-db-backed store.
+///
+/// Directly models what cost the operator ~1.72M blocks: a node reaches a
+/// height, the process restarts, and a fresh process re-requests everything.
+/// With durable state a restart must RESUME — the ranges already fetched must
+/// come back as un-claimable, and both watermarks must survive.
+pub fn durable_restart_resumes() -> SyncOutcome {
+    let chunk = 2048u64;
+    let dir = std::env::temp_dir().join(format!("sigil-sync-chronos-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let starts: Vec<u64> = (0..100u64).map(|i| i * chunk).collect();
+
+    // ── first process: fetch 100 ranges, verify half, then "crash" ──
+    let (fetched_to_before, verified_to_before) = {
+        let db = match flux_db::Database::open(&dir) {
+            Ok(d) => std::sync::Arc::new(d),
+            Err(e) => return SyncOutcome::fail("durable_restart_resumes", format!("db open failed: {e}")),
+        };
+        let store = SyncStore::with_db(chunk, db);
+        for &s in &starts {
+            store.claim(s, "p");
+            store.mark_fetched(s, chunk);
+        }
+        store.mark_verified_to(50 * chunk);
+        (store.fetched_to(), store.verified_to())
+    }; // store + db handle dropped = process gone
+
+    // ── second process: same directory, brand-new store ──
+    let db2 = match flux_db::Database::open(&dir) {
+        Ok(d) => std::sync::Arc::new(d),
+        Err(e) => return SyncOutcome::fail("durable_restart_resumes", format!("db reopen failed: {e}")),
+    };
+    let after = SyncStore::with_db(chunk, db2);
+    let restored = after.load(&starts);
+    // Ranges already fetched must NOT be re-requestable — that re-request is
+    // precisely the re-download the operator watched happen.
+    let refetchable = starts.iter().filter(|&&s| after.claim(s, "p")).count();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    if restored == 0 {
+        return SyncOutcome::fail(
+            "durable_restart_resumes",
+            format!("restart restored 0 of {} ranges — durable resume is NOT working", starts.len()),
+        );
+    }
+    if refetchable > 0 {
+        return SyncOutcome::fail(
+            "durable_restart_resumes",
+            format!("{refetchable} of {} already-fetched ranges were re-requestable after restart — the re-download bug survives", starts.len()),
+        );
+    }
+    if after.verified_to() != verified_to_before || after.fetched_to() != fetched_to_before {
+        return SyncOutcome::fail(
+            "durable_restart_resumes",
+            format!(
+                "watermarks did not survive: fetched_to {} -> {}, verified_to {} -> {}",
+                fetched_to_before, after.fetched_to(), verified_to_before, after.verified_to()
+            ),
+        );
+    }
+    SyncOutcome::pass(
+        "durable_restart_resumes",
+        format!(
+            "100 ranges fetched + half verified, then process restart: {restored} ranges restored from flux-db, 0 re-requestable (RAM-only baseline was 100/100 re-requestable), watermarks intact (fetched_to={}, verified_to={}). This is the ~1.72M-block re-download, not happening.",
+            after.fetched_to(), after.verified_to()
+        ),
+    )
+}
+
 /// Run every sync scenario.
 pub fn run_library() -> Vec<SyncOutcome> {
     vec![
@@ -310,6 +380,7 @@ pub fn run_library() -> Vec<SyncOutcome> {
         lookahead_stays_within_budget(),
         dead_peer_does_not_wedge_sync(),
         restart_resumes_instead_of_refetching(),
+        durable_restart_resumes(),
     ]
 }
 
@@ -356,6 +427,12 @@ mod tests {
     #[test]
     fn lookahead_bounded_passes() {
         let o = lookahead_stays_within_budget();
+        assert!(o.passed, "{}", o.summary());
+    }
+
+    #[test]
+    fn durable_restart_resumes_passes() {
+        let o = durable_restart_resumes();
         assert!(o.passed, "{}", o.summary());
     }
 

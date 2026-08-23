@@ -8449,6 +8449,7 @@ dependencies = [
  "sigil-events",
  "sigil-header",
  "sigil-state",
+ "sigil-sync",
  "sigil-tip-proof",
  "sigil-tx",
  "tokio",
@@ -8879,6 +8880,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-sync"
+version = "5.1.1"
+dependencies = [
+ "flux-db",
+]
+
+[[package]]
 name = "sigil-synctune"
 version = "0.1.0"
 
@@ -8908,7 +8916,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-top"
-version = "7.1.51"
+version = "7.1.52"
 dependencies = [
  "bincode 1.3.3",
  "blake3",
@@ -8948,6 +8956,7 @@ dependencies = [
  "sigil-node",
  "sigil-oauth",
  "sigil-state",
+ "sigil-sync",
  "sigil-synctune",
  "sigil-tip-proof",
  "sigil-tx",

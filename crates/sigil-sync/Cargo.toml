@@ -1,0 +1,9 @@
+[package]
+name = "sigil-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL sync state: the single source of truth for backfill range lifecycle and the fetched/verified watermarks. Extracted from sigil-top (a binary-only crate, therefore untestable from sigil-chronos) so the deterministic chronos harness can drive the REAL sync-state logic instead of a re-modelled copy."
+
+[dependencies]
+flux-db = { path = "../../../flux/crates/flux-db" }

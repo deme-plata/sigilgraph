@@ -26,7 +26,7 @@ mod skeleton_store; // flat append-only skeleton prefix store (the 10M-blk/s pat
 mod skel_flux; // ADOPT the native flux-db skeleton extension (flux_db::skeleton)
 mod archive; // PASS 2: background full-archive body backfill (trustless vs skeleton hashes)
 mod fast_forward; // V7-INGEST: PASS-2 body sink routed through LANE-1 SST-ingest (commit→DB fast-forward)
-pub mod sync_store; // SINGLE SOURCE OF TRUTH for range lifecycle + the two watermarks
+pub use sigil_sync as sync_store; // extracted to its own lib crate so sigil-chronos can drive it
 pub mod ledger; // ONE-CHAIN P2: persistent verified sync of the LEDGER header chain (rocky)
 #[allow(unused_imports)]
 pub(crate) use skeleton_store::SkeletonStore;
@@ -773,7 +773,12 @@ impl P2PBlockSync {
                 let mut last_recent_probe = crate::instant_ago(60);
                 let mut recent_probe_inflight = false;
                 let mut inflight: usize = 0;                          // outstanding spawned requests
-                let mut assigned: std::collections::HashSet<u64> = std::collections::HashSet::new();
+                // 2026-08-23: the `assigned` HashSet is replaced by SyncStore — the
+                // single owner of range lifecycle + the two watermarks. See
+                // block_sync/sync_store.rs for why (both of today's production sync
+                // bugs came from this state being spread across a HashSet, a
+                // watermark owned by another struct, and a magic constant).
+                let sync_store = std::sync::Arc::new(crate::block_sync::sync_store::SyncStore::new(CHUNK));
                 let mut peer_bench: HashMap<String, Instant> = HashMap::new(); // peer.to_string() → benched-until
                 // v0.31.6: per-peer KNOWN TOP height (max height it has served). Lets the refill
                 // skip peers that are BEHIND the frontier — they'd just return EMPTY (the "producers
@@ -965,7 +970,7 @@ impl P2PBlockSync {
                                 s.reset_pending = false;
                                 drop(s);
                                 store.reset_watermarks();
-                                assigned.clear();
+                                sync_store.clear_ranges();
                                 last_synced_seen = 0;
                                 last_advance_t = Instant::now();
                                 snapped = false;
@@ -982,7 +987,7 @@ impl P2PBlockSync {
                     // them as out-of-order arrivals when it reaches them.
                     if rebase_pending_rt.swap(false, Ordering::Relaxed) {
                         store.rebase(sync_base);
-                        assigned.clear();      // stale recent-window frontier reqs are useless now
+                        sync_store.clear_ranges();      // stale recent-window frontier reqs are useless now
                         snapped = false;
                         last_synced_seen = store.synced_to();
                         last_advance_t = Instant::now();
@@ -1315,7 +1320,14 @@ impl P2PBlockSync {
                             }
                         }
                         // v0.58 (10k-sync): only a genuine miss frees the claim for re-request.
-                        if !fetched_ok { assigned.remove(&start); }
+                        if !fetched_ok {
+                            sync_store.release(start);
+                        } else {
+                            // Successful fetch: record it so the range stops costing an
+                            // in-flight slot but still counts against the
+                            // fetched-but-unverified BUDGET (the real backpressure signal).
+                            sync_store.mark_fetched(start, CHUNK);
+                        }
                     }
 
                     // ── REFILL: keep the next MAX_INFLIGHT chunks AT THE FRONTIER in flight ──
@@ -1485,7 +1497,7 @@ impl P2PBlockSync {
                                 let old = store.synced_to();
                                 store.set_base(rbase);
                                 store.advance();
-                                assigned.clear(); // stale frontier reqs are useless after the jump
+                                sync_store.clear_ranges(); // stale frontier reqs are useless after the jump
                                 last_synced_seen = store.synced_to();
                                 last_advance_t = Instant::now();
                                 snapped = true;
@@ -1689,11 +1701,18 @@ impl P2PBlockSync {
                                 // slower than fetch, any finite cap is eventually reached. Raise
                                 // SIGIL_SYNC_LOOKAHEAD_CHUNKS further (or fix verify throughput) if
                                 // the wire still goes idle.
-                                let lookahead_chunks: u64 = std::env::var("SIGIL_SYNC_LOOKAHEAD_CHUNKS")
-                                    .ok().and_then(|v| v.parse::<u64>().ok())
+                                // THE FIX, at the root rather than by raising a constant: bound
+                                // look-ahead by how much FETCHED-BUT-UNVERIFIED work is actually
+                                // outstanding, not by a multiple of the VERIFIED watermark that
+                                // fetch cannot influence. A slow verify stage now applies
+                                // proportional backpressure — verify one range, one slot frees,
+                                // fetch resumes immediately — instead of driving the wire to zero
+                                // and then bursting the whole window back at once.
+                                let lookahead_budget: usize = std::env::var("SIGIL_SYNC_LOOKAHEAD_CHUNKS")
+                                    .ok().and_then(|v| v.parse::<usize>().ok())
                                     .map(|n| n.clamp(4, 4096)).unwrap_or(64);
-                                if i > 0 && start > store.synced_to().saturating_add(CHUNK.saturating_mul(lookahead_chunks)) { break; }
-                                if !assigned.insert(start) { continue; }  // in flight OR already fetched (claimed)
+                                if i > 0 && !sync_store.may_fetch(lookahead_budget) { break; }
+                                if !sync_store.claim(start, "pending") { continue; }  // in flight OR already fetched (claimed)
                                 let fanout = if i == 0 {
                                     if full_archive_mode {
                                         healthy.len().max(1)
@@ -1775,8 +1794,20 @@ impl P2PBlockSync {
                         // and always lets the exact frontier chunk re-issue. Stall backstop: if the frontier
                         // is wedged, clear ALL claims so any range dropped from the bounded retain buffer is
                         // re-fetched (prevents a permanent gap).
-                        assigned.retain(|&s| s >= now_synced);
-                        if last_advance_t.elapsed() >= Duration::from_secs(6) { assigned.clear(); }
+                        // Verified frontier moved: free every range below it. This is the
+                        // transition that used to be the ONLY release path, and it was gated
+                        // on the SAME watermark as the look-ahead cap — so when verify
+                        // stalled, claims froze AND look-ahead blocked together (the
+                        // sawtooth). SyncStore keeps them separate.
+                        sync_store.mark_verified_to(now_synced);
+                        sync_store.retain_from(now_synced);
+                        // Timed-out claims are swept by age rather than by a blanket clear:
+                        // the old 6s `assigned.clear()` re-issued the WHOLE window at once,
+                        // which is the burst half of the sawtooth.
+                        for released in sync_store.sweep_timeouts(REQ_TIMEOUT.as_millis() as u64 * 2) {
+                            let _ = released;
+                        }
+                        if last_advance_t.elapsed() >= Duration::from_secs(6) { sync_store.clear_ranges(); }
                         // DYNAMIC BASE: the lowest servable height creeps UP as producers prune early
                         // history from their RAM window (the disk range-serve of pruned-low ranges is
                         // unreliable). If the frontier chunk stays unservable by ALL peers for ≥5s
@@ -2013,7 +2044,7 @@ impl P2PBlockSync {
                             "[DBG] up={upt}s synced={synced_now} tip={pbest} gap={gap} | reqs={req_n} lead={lead_n}({:.0}%) empty={empty_n} timeout={timeout_n}({:.0}%) | inflight={inflight} assigned={} fetched={fetched_session} bytes={}MB | peers={peers}(mesh {mesh}, healthy {hpeers}) tip_age={tip_age}s base={} | cont_score={:.2} sustained={:.1}MB/s pid_rate={:.1}",
                             lead_n as f64 / win as f64 * 100.0,
                             timeout_n as f64 / win as f64 * 100.0,
-                            assigned.len(), bytes_session / 1_048_576, store.base(),
+                            sync_store.tracked(), bytes_session / 1_048_576, store.base(),
                             { let s = state_clone.lock().unwrap_or_else(|e| e.into_inner()); s.turbo_continuity.continuity_score },
                             { let s = state_clone.lock().unwrap_or_else(|e| e.into_inner()); s.turbo_continuity.sustained_rate_bps / 1_000_000.0 },
                             { let s = state_clone.lock().unwrap_or_else(|e| e.into_inner()); s.turbo_continuity.pid.get_rate() }
@@ -2308,7 +2339,7 @@ impl P2PBlockSync {
                             // in-flight claim and bench so the refill re-requests from the NEW
                             // frontier immediately, and re-arm the watchdog clocks so the heal gets
                             // a full window to prove itself before the next verdict.
-                            assigned.clear();
+                            sync_store.clear_ranges();
                             peer_bench.clear();
                             frontier_serves_since_advance = 0;
                             last_synced_seen = store.synced_to();

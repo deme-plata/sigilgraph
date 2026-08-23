@@ -196,6 +196,19 @@ impl SyncStore {
         self.persist_watermarks();
     }
 
+    /// Drop claims the verified frontier has passed. Mirrors the loop's old
+    /// `assigned.retain(|&s| s >= now_synced)` so the swap is
+    /// behavior-preserving at that call site.
+    pub fn retain_from(&self, now_synced: u64) {
+        self.write().ranges.retain(|&start, _| start >= now_synced);
+    }
+
+    /// Ranges tracked at all (in-flight + fetched-unverified) — the direct
+    /// replacement for `assigned.len()` in the debug line.
+    pub fn tracked(&self) -> usize {
+        self.read().ranges.len()
+    }
+
     /// Forget all range state (a chain jump / base snap made it meaningless).
     /// Watermarks are preserved — they describe the chain, not the claims.
     pub fn clear_ranges(&self) {
@@ -230,7 +243,26 @@ impl SyncStore {
     /// `start > synced_to() + CHUNK*16` — which coupled fetch to a watermark
     /// fetch cannot influence.
     pub fn may_fetch(&self, budget_ranges: usize) -> bool {
-        self.unverified_ranges() < budget_ranges
+        self.outstanding() < budget_ranges
+    }
+
+    /// Work that is already committed to but not yet verified: in-flight
+    /// requests PLUS fetched-but-unverified ranges.
+    ///
+    /// FOUND BY CHRONOS, 2026-08-23, before this reached production. The first
+    /// version of `may_fetch` counted only `Fetched`. In-flight requests are
+    /// future unverified work, so with `max_inflight` requests outstanding the
+    /// budget overshot by up to that many (measured: 67 against a budget of
+    /// 64), which hard-blocked fetch until verify drained back under — then
+    /// burst. That is the very block-drain-burst sawtooth this store exists to
+    /// remove, recreated inside the fix. Counting both states keeps the gate
+    /// smooth: it never overshoots, so it never has to hard-block.
+    pub fn outstanding(&self) -> usize {
+        self.read()
+            .ranges
+            .values()
+            .filter(|s| matches!(s, RangeState::InFlight { .. } | RangeState::Fetched { .. }))
+            .count()
     }
 
     /// Sweep `InFlight` ranges older than `timeout_ms` back to unclaimed, so a

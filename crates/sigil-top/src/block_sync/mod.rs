@@ -26,6 +26,7 @@ mod skeleton_store; // flat append-only skeleton prefix store (the 10M-blk/s pat
 mod skel_flux; // ADOPT the native flux-db skeleton extension (flux_db::skeleton)
 mod archive; // PASS 2: background full-archive body backfill (trustless vs skeleton hashes)
 mod fast_forward; // V7-INGEST: PASS-2 body sink routed through LANE-1 SST-ingest (commit→DB fast-forward)
+pub mod sync_store; // SINGLE SOURCE OF TRUTH for range lifecycle + the two watermarks
 pub mod ledger; // ONE-CHAIN P2: persistent verified sync of the LEDGER header chain (rocky)
 #[allow(unused_imports)]
 pub(crate) use skeleton_store::SkeletonStore;
@@ -1668,7 +1669,30 @@ impl P2PBlockSync {
                                 let start = if i == 0 { store.synced_to() } else { frontier_chunk + i * CHUNK };
                                 if start >= peer_best { break; }          // past the tip
                                 // v0.58 (10k-sync): bound the look-ahead so claimed/retained memory stays bounded.
-                                if i > 0 && start > store.synced_to().saturating_add(CHUNK.saturating_mul(16)) { break; }
+                                // 2026-08-23 — THE SAWTOOTH ("continuous download stops, waits at
+                                // zero blocks, resumes"). This cap is measured from `synced_to`,
+                                // the VERIFIED frontier — not from what has been fetched. Verify
+                                // is the slower stage on a full-archive sync (operator's live node:
+                                // ~1.5M blocks fetched vs ~537k verified), so once fetch runs a
+                                // window ahead, EVERY look-ahead slot trips this `break`, no
+                                // requests are issued at all, inflight drains to 0, and the wire
+                                // goes completely idle until verification catches up. Then it
+                                // bursts again. That sawtooth is exactly the instability reported.
+                                //
+                                // Fetched ranges are committed DURABLY (commit_batch_durable), not
+                                // pinned in RAM, so a deep look-ahead costs disk, not memory — the
+                                // original "keep claimed/retained memory bounded" reason for a
+                                // tight 16 does not apply to the durable path. Default raised to 64
+                                // chunks and made tunable so the pipe can stay full across a slow
+                                // verify stage. HONEST LIMIT: this lengthens the runway, it does not
+                                // make fetch infinitely decoupled — if verify is persistently
+                                // slower than fetch, any finite cap is eventually reached. Raise
+                                // SIGIL_SYNC_LOOKAHEAD_CHUNKS further (or fix verify throughput) if
+                                // the wire still goes idle.
+                                let lookahead_chunks: u64 = std::env::var("SIGIL_SYNC_LOOKAHEAD_CHUNKS")
+                                    .ok().and_then(|v| v.parse::<u64>().ok())
+                                    .map(|n| n.clamp(4, 4096)).unwrap_or(64);
+                                if i > 0 && start > store.synced_to().saturating_add(CHUNK.saturating_mul(lookahead_chunks)) { break; }
                                 if !assigned.insert(start) { continue; }  // in flight OR already fetched (claimed)
                                 let fanout = if i == 0 {
                                     if full_archive_mode {

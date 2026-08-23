@@ -18,7 +18,7 @@ name = "sigil-top"
 # v7.1.40: Activity gains the SIGIL-native adaptive emission controller card
 # and live analytics modal, derived from the chain's verified supply and the
 # published sigil-emission consensus constants.
-version = "7.1.64"
+version = "7.1.65"
 edition.workspace = true
 license.workspace = true
 description = "sigil-top — a SIGIL lightweight node + dual-mode (lite scorecard ↔ full dashboard) terminal monitor. v0.9.0 'Verifying Full Sync': downloads the chain genesis→tip over the sigil-g0 P2P mesh AND verifies it as one connected spine (per-header precheck + parent_hash linkage back to genesis), with a persisted verified_to watermark. New `full-sync` (headless sync-and-verify, exit 0 at tip) and `verify-chain` (re-verify the local store) subcommands; TUI surfaces the ⛓ verified-spine height + ⚠ spine-break alarm distinct from raw download progress."
@@ -107,6 +107,10 @@ ed25519-dalek = { version = "2.2", optional = true }
 # a normal binary crate too (this dependency only pulls its lib target); the live
 # Epsilon producer binary itself is unaffected by sigil-top depending on it.
 sigil-node = { path = "../sigil-node", optional = true }
+# 2026-08-23 (Phase 3/5 producer loop, `producer/run.rs`): mint_next_block's Result
+# type is anyhow::Result — sigil-top itself doesn't use anyhow anywhere outside the
+# producer feature, so this stays optional and producer-only, same as sigil-node above.
+anyhow = { workspace = true, optional = true }
 
 # v0.2.35 L4-B: SQIsign post-quantum tip-proof flavor (gated, not yet enabled).
 [dev-dependencies]
@@ -127,7 +131,7 @@ producer = [
     "dep:sigil-dagknight", "dep:sigil-api", "dep:sigil-emission",
     "dep:sigil-handshake", "dep:sigil-narwhal-mempool", "dep:flux-topology",
     "dep:sigil-tx", "dep:sigil-bank", "dep:sigil-events", "dep:ed25519-dalek",
-    "dep:sigil-node",
+    "dep:sigil-node", "dep:anyhow",
 ]
 
 [[bin]]

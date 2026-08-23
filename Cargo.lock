@@ -8451,6 +8451,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-calendar"
+version = "5.1.1"
+dependencies = [
+ "blake3",
+ "flux-db",
+ "hex",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sigil-oauth",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "sigil-chronos"
 version = "5.1.1"
 dependencies = [
@@ -8613,6 +8628,25 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "sigil-mail"
+version = "5.1.1"
+dependencies = [
+ "anyhow",
+ "base64",
+ "blake3",
+ "flux-db",
+ "hex",
+ "hickory-resolver",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sigil-oauth",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -8952,7 +8986,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-top"
-version = "7.1.69"
+version = "7.1.70"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -8980,6 +9014,7 @@ dependencies = [
  "self-replace",
  "serde",
  "serde_json",
+ "sha3 0.10.9",
  "sigil-api",
  "sigil-bank",
  "sigil-dagknight",
@@ -8992,6 +9027,7 @@ dependencies = [
  "sigil-net",
  "sigil-node",
  "sigil-oauth",
+ "sigil-shield",
  "sigil-state",
  "sigil-sync",
  "sigil-synctune",

@@ -18,7 +18,7 @@ name = "sigil-top"
 # v7.1.40: Activity gains the SIGIL-native adaptive emission controller card
 # and live analytics modal, derived from the chain's verified supply and the
 # published sigil-emission consensus constants.
-version = "7.1.69"
+version = "7.1.70"
 edition.workspace = true
 license.workspace = true
 description = "sigil-top — a SIGIL lightweight node + dual-mode (lite scorecard ↔ full dashboard) terminal monitor. v0.9.0 'Verifying Full Sync': downloads the chain genesis→tip over the sigil-g0 P2P mesh AND verifies it as one connected spine (per-header precheck + parent_hash linkage back to genesis), with a persisted verified_to watermark. New `full-sync` (headless sync-and-verify, exit 0 at tip) and `verify-chain` (re-verify the local store) subcommands; TUI surfaces the ⛓ verified-spine height + ⚠ spine-break alarm distinct from raw download progress."
@@ -100,6 +100,15 @@ sigil-tx = { path = "../sigil-tx", optional = true }
 sigil-bank = { path = "../sigil-bank", optional = true }
 sigil-events = { path = "../sigil-events", optional = true }
 ed25519-dalek = { version = "2.2", optional = true }
+# 2026-08-24 (mine-rig auto-registration): `mine-rig --seed` derives BOTH the wallet's
+# signing key (sha3_256(seed), matching the browser wallet's own derivation) and its
+# shield spend key (ShieldedAccount::from_seed — same root seed, different domain-
+# separated hash, so knowing one reveals nothing about the other) from one seed, then
+# self-registers for shielded mining before the mining loop starts. Default-on (see
+# [features] below) because privacy-by-default is the product's own stated design —
+# see the whitepaper's "no opt-in path to transparency" line — not an edge feature.
+sigil-shield = { path = "../sigil-shield", optional = true }
+sha3 = { workspace = true, optional = true }
 # 2026-08-20 (Phase 2): depend on sigil-node's LIBRARY surface directly rather than
 # hand-porting a duplicate of its Block type / durable chain-log store / coinbase
 # logic. Single source of truth — sigil-top and sigil-node share the exact same
@@ -121,9 +130,15 @@ zstd = "0.13"
 # When activated, sigil-tip-proof links flux-sqisign and verify_tip() constructs
 # a TipProof::new_sqisign() for adversary-resistant tip verification.
 [features]
-default = ["gpu"]
+default = ["gpu", "shield-register"]
 gpu = ["flux-miner/gpu"]
 sqisign = []
+# 2026-08-24: `mine-rig --seed`'s auto-registration path. Default-on — see the
+# sigil-shield dependency comment above for why. Split from `producer` (which pulls
+# the much heavier sigil-node/DagKnight graph) so a build that only needs this stays
+# comparatively light; still toggleable if build time ever matters more than this
+# being on by default: `--no-default-features --features gpu`.
+shield-register = ["dep:sigil-shield", "dep:sha3", "dep:ed25519-dalek"]
 # v7.1.40: producer-mode Phase 0 — dependency graph only, no application code yet.
 # Off by default; `fluxc build -p sigil-top --features producer` opts in. See the
 # dependency block above for why each crate is here.

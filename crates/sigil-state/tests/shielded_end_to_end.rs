@@ -11,9 +11,7 @@
 
 use sigil_shield::mimc::{compress2, mimc_options};
 use sigil_shield::note_v1::{padding_leaf, to_wire, Note, ShieldedPoolTree};
-use sigil_shield::spend_full_v2::{
-    build_spend_full_v2_trace, SpendFullV2Prover, N_OUTS,
-};
+use sigil_shield::spend_full_v4::{build_spend_full_v4_trace, SpendFullV4Prover, N_OUTS};
 use sigil_state::shielded::POOL_CAPACITY;
 use sigil_state::{
     commit_state_transition, CommitError, SigilState, StateMutation, StateTransition, NATIVE,
@@ -98,14 +96,21 @@ fn prove_spend(
 ) -> (Vec<u8>, [u8; 32], Vec<[u8; 32]>) {
     let pool = prover_pool(note);
     let path = pool.path(position);
+    // Change notes go back to the spender: bind them to the spender's own key. An
+    // un-owned output would be spendable by anyone who learned its preimage.
+    let me = note.owner_pk();
+    let bound: [(BaseElement, BaseElement, BaseElement); N_OUTS] =
+        [(outs[0].0, outs[0].1, me), (outs[1].0, outs[1].1, me)];
     let trace =
-        build_spend_full_v2_trace(note.value, note.blinding, note.spend_key, fee, outs, &path);
-    let proof = SpendFullV2Prover::new(mimc_options())
+        build_spend_full_v4_trace(note.value, note.blinding, note.spend_key, fee, &bound, &path);
+    let proof = SpendFullV4Prover::new(mimc_options())
         .prove(trace)
         .expect("prover must produce a proof for an honest witness");
     let nf = to_wire(note.nullifier(position as u64));
-    let cm_outs: Vec<[u8; 32]> =
-        outs.iter().map(|(v, b)| to_wire(compress2(*v, *b))).collect();
+    let cm_outs: Vec<[u8; 32]> = bound
+        .iter()
+        .map(|(v, b, pk)| to_wire(compress2(compress2(*v, *b), *pk)))
+        .collect();
     (proof.to_bytes(), nf, cm_outs)
 }
 
@@ -230,7 +235,7 @@ fn tampered_proof_is_refused() {
 }
 
 /// THE MINT VECTOR, at the chokepoint. The spend is honest and the proof is real, but the
-/// mutation claims commitments to inflated outputs. `spend_full_v2` binds `cm_out` to the
+/// mutation claims commitments to inflated outputs. `spend_full_v4` binds `cm_out` to the
 /// conserved amount in-circuit, so the verifier must refuse — this is the whole reason the
 /// v2 circuit exists, checked here at the layer that actually moves money.
 #[test]
@@ -241,9 +246,10 @@ fn inflated_output_commitments_are_refused_at_the_chokepoint() {
     let (proof, nf, _real) = prove_spend(&note, position, fee, &honest);
 
     // Claim notes worth 10× what was actually conserved.
+    let me = note.owner_pk();
     let inflated = vec![
-        to_wire(compress2(e(500), e(777))),
-        to_wire(compress2(e(470), e(888))),
+        to_wire(compress2(compress2(e(500), e(777)), me)),
+        to_wire(compress2(compress2(e(470), e(888)), me)),
     ];
 
     let err = apply(

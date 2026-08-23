@@ -97,13 +97,31 @@ impl Note {
         })
     }
 
-    /// `cm = compress2(value, blinding)` — the hidden Merkle leaf.
+    /// The owner's public key: `pk = compress2(spend_key, PK_DOMAIN)`.
     ///
-    /// This is byte-for-byte the computation `spend_full` performs in segment 0 of its
-    /// trace, which is what makes an off-circuit tree built from these leaves agree with
-    /// an in-circuit membership proof.
-    pub fn commitment(&self) -> BaseElement {
+    /// One-way, so publishing `pk` never exposes the spend key.
+    pub fn owner_pk(&self) -> BaseElement {
+        compress2(self.spend_key, BaseElement::new(crate::spend_full_v4::PK_DOMAIN))
+    }
+
+    /// The value commitment `compress2(value, blinding)` — the inner half of the leaf.
+    pub fn inner_commitment(&self) -> BaseElement {
         compress2(self.value, self.blinding)
+    }
+
+    /// `cm = compress2(compress2(value, blinding), pk)` — the hidden, OWNER-BOUND leaf.
+    ///
+    /// The owner binding is not decoration. Before it, a commitment was just
+    /// `compress2(value, blinding)`, so anyone who learned that pair could spend the note
+    /// — each with a different nullifier, which the spent-set cannot catch. Demonstrated
+    /// against the old circuit before this was changed. Binding `pk` in means a spender
+    /// must also exhibit the matching secret, which is what makes it safe to hand a
+    /// recipient `(value, blinding)` at all.
+    ///
+    /// Byte-for-byte what `spend_full_v4` computes, which is what makes an off-circuit
+    /// tree agree with an in-circuit membership proof.
+    pub fn commitment(&self) -> BaseElement {
+        compress2(self.inner_commitment(), self.owner_pk())
     }
 
     /// `nf = compress2(spend_key, position)` — revealed on spend, unlinkable to the note.
@@ -255,7 +273,7 @@ pub fn verify_spend_wire(
     cm_outs: &[[u8; 32]],
     proof: &[u8],
 ) -> Result<(), WireVerifyError> {
-    use crate::spend_full_v2::{verify_spend_full_v2, SpendFullV2PublicInputs, N_OUTS};
+    use crate::spend_full_v4::{verify_spend_full_v4, SpendFullV4PublicInputs, N_OUTS};
 
     if cm_outs.len() != N_OUTS {
         return Err(WireVerifyError::WrongOutputCount { expected: N_OUTS, got: cm_outs.len() });
@@ -273,15 +291,16 @@ pub fn verify_spend_wire(
     }
 
     let p = winterfell::Proof::from_bytes(proof).map_err(|_| WireVerifyError::MalformedProof)?;
-    verify_spend_full_v2(p, SpendFullV2PublicInputs { root, nf, fee: fee_e, cm_outs: outs })
+    verify_spend_full_v4(p, SpendFullV4PublicInputs { root, nf, fee: fee_e, cm_outs: outs })
         .map_err(|e| WireVerifyError::VerifierRejected(format!("{e:?}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spend_full::{
-        build_spend_full_trace, verify_spend_full, SpendFullProver, SpendFullPublicInputs,
+    use crate::spend_full_v4::{
+        build_spend_full_v4_trace, verify_spend_full_v4, SpendFullV4Prover,
+        SpendFullV4PublicInputs,
     };
     use crate::mimc::mimc_options;
     use winterfell::Prover;
@@ -313,12 +332,13 @@ mod tests {
 
         // Spend 100 as fee 3 + outputs 50 + 47.
         let fee = e(3);
-        let outs = vec![e(50), e(47)];
+        let me = spender.owner_pk();
+        let outs = [(e(50), e(777), me), (e(47), e(888), me)];
         let path = pool.path(position);
         assert_eq!(path.leaf, spender.commitment(), "path leaf must be our commitment");
 
         let nf = spender.nullifier(position as u64);
-        let trace = build_spend_full_trace(
+        let trace = build_spend_full_v4_trace(
             spender.value,
             spender.blinding,
             spender.spend_key,
@@ -326,13 +346,17 @@ mod tests {
             &outs,
             &path,
         );
-        let proof = SpendFullProver::new(mimc_options())
+        let proof = SpendFullV4Prover::new(mimc_options())
             .prove(trace)
             .expect("production circuit must prove a well-formed spend");
 
-        verify_spend_full(
+        let cm_outs = [
+            compress2(compress2(e(50), e(777)), me),
+            compress2(compress2(e(47), e(888)), me),
+        ];
+        verify_spend_full_v4(
             proof,
-            SpendFullPublicInputs { root: pool.root(), nf, fee },
+            SpendFullV4PublicInputs { root: pool.root(), nf, fee, cm_outs },
         )
         .expect("SECURITY: off-circuit note shape must verify against the in-circuit AIR");
     }
@@ -370,7 +394,12 @@ mod tests {
 
         let a = Note::new(5, 6, 0xAAAA).unwrap();
         let b = Note::new(5, 6, 0xBBBB).unwrap();
-        assert_eq!(a.commitment(), b.commitment(), "commitment ignores spend_key");
+        assert_eq!(a.inner_commitment(), b.inner_commitment(), "value commitment ignores the key");
+        assert_ne!(
+            a.commitment(), b.commitment(),
+            "SECURITY: the LEAF must bind the owner — identical (value, blinding) under \
+             different keys must be different notes, or either holder could spend both"
+        );
         assert_ne!(a.nullifier(0), b.nullifier(0), "different key ⇒ different nullifier");
         assert_ne!(a.nullifier(0), a.nullifier(1), "different position ⇒ different nullifier");
         assert_eq!(a.nullifier(7), a.nullifier(7), "deterministic");

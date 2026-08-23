@@ -1,4 +1,28 @@
-//! OWNER-BOUND SPEND — closes the missing-ownership flaw in `spend_full_v3` (2026-08-23).
+//! FULLY OWNER-BOUND SPEND — inputs AND outputs (2026-08-23).
+//!
+//! `spend_full_v3` bound the INPUT note to an owner but left outputs as
+//! `compress2(out_value, blinding)` — un-owned, exactly the shape whose flaw v3 was
+//! written to fix. Every change note, and every note sent to someone else, therefore
+//! inherited it: anyone learning `(value, blinding)` could spend, each with a different
+//! nullifier. Migrating the wallet onto v3 would have relocated the bug, not removed it.
+//!
+//! v4 makes an output commitment owner-bound too:
+//!
+//! ```text
+//!   inner_out = compress2(out_value, out_blinding)
+//!   cm_out    = compress2(inner_out, pk_recipient)
+//! ```
+//!
+//! `pk_recipient` is a HIDDEN witness, not a public input. Publishing it would bind the
+//! note correctly but name the recipient on chain, which defeats the purpose — amounts
+//! private, payment graph legible. Keeping it in-circuit costs one extra lane per output
+//! and keeps the recipient unlinkable.
+//!
+//! A sender may set a `pk_recipient` the recipient does not control; that only makes the
+//! note unspendable, harming the sender's own intent, and is not a chain safety property.
+//!
+//! (v3 header follows.)
+//! OWNER-BOUND SPEND — closes the missing-ownership flaw in `spend_full_v2` (2026-08-23).
 //!
 //! # The flaw this exists to fix
 //!
@@ -116,7 +140,7 @@ use crate::spend_full::path_position;
 const SEG: usize = 64;
 
 /// Outputs per spend. Fixed so the trace width is a compile-time constant; a spend with
-/// fewer real outputs pads with zero-value notes (see [`build_spend_full_v3_trace`]).
+/// fewer real outputs pads with zero-value notes (see [`build_spend_full_v4_trace`]).
 pub const N_OUTS: usize = 2;
 
 /// Per-amount range bound. See the module docs for why this must satisfy
@@ -136,28 +160,32 @@ const COL_IY: usize = 11;  // inner lane y
 const COL_HP: usize = 12;  // pk, held constant
 const COL_PX: usize = 13;  // pk lane x
 const COL_PY: usize = 14;  // pk lane y
-/// Columns per output: hv, ox, oy, rem, bit.
-const COLS_PER_OUT: usize = 5;
+/// Columns per output: hv, rem, bit, iox, ioy, hio, hpo, oox, ooy.
+const COLS_PER_OUT: usize = 9;
 /// Total trace width.
 pub const WIDTH: usize = BASE_COLS + COLS_PER_OUT * N_OUTS;
 
-const fn col_hv(i: usize) -> usize { BASE_COLS + COLS_PER_OUT * i }
-const fn col_ox(i: usize) -> usize { BASE_COLS + COLS_PER_OUT * i + 1 }
-const fn col_oy(i: usize) -> usize { BASE_COLS + COLS_PER_OUT * i + 2 }
-const fn col_rem(i: usize) -> usize { BASE_COLS + COLS_PER_OUT * i + 3 }
-const fn col_bit(i: usize) -> usize { BASE_COLS + COLS_PER_OUT * i + 4 }
+const fn col_hv(i: usize) -> usize { BASE_COLS + COLS_PER_OUT * i }      // out value, held
+const fn col_rem(i: usize) -> usize { BASE_COLS + COLS_PER_OUT * i + 1 } // range remainder
+const fn col_bit(i: usize) -> usize { BASE_COLS + COLS_PER_OUT * i + 2 } // range bit
+const fn col_iox(i: usize) -> usize { BASE_COLS + COLS_PER_OUT * i + 3 } // inner lane x
+const fn col_ioy(i: usize) -> usize { BASE_COLS + COLS_PER_OUT * i + 4 } // inner lane y
+const fn col_hio(i: usize) -> usize { BASE_COLS + COLS_PER_OUT * i + 5 } // inner_out, held
+const fn col_hpo(i: usize) -> usize { BASE_COLS + COLS_PER_OUT * i + 6 } // recipient pk, held
+const fn col_oox(i: usize) -> usize { BASE_COLS + COLS_PER_OUT * i + 7 } // outer lane x
+const fn col_ooy(i: usize) -> usize { BASE_COLS + COLS_PER_OUT * i + 8 } // outer lane y
 
 /// What a v2 spend reveals: the anonymity-set root, the nullifier, the fee, and the output
 /// commitments. The output VALUES stay hidden; only their commitments are public, because
 /// consensus must insert those into the note tree.
 #[derive(Clone)]
-pub struct SpendFullV3PublicInputs {
+pub struct SpendFullV4PublicInputs {
     pub root: BaseElement,
     pub nf: BaseElement,
     pub fee: BaseElement,
     pub cm_outs: [BaseElement; N_OUTS],
 }
-impl ToElements<BaseElement> for SpendFullV3PublicInputs {
+impl ToElements<BaseElement> for SpendFullV4PublicInputs {
     fn to_elements(&self) -> Vec<BaseElement> {
         let mut v = vec![self.root, self.nf, self.fee];
         v.extend_from_slice(&self.cm_outs);
@@ -165,7 +193,7 @@ impl ToElements<BaseElement> for SpendFullV3PublicInputs {
     }
 }
 
-pub struct SpendFullV3Air {
+pub struct SpendFullV4Air {
     context: AirContext<BaseElement>,
     root: BaseElement,
     nf: BaseElement,
@@ -174,13 +202,13 @@ pub struct SpendFullV3Air {
     trace_len: usize,
 }
 
-impl Air for SpendFullV3Air {
+impl Air for SpendFullV4Air {
     type BaseField = BaseElement;
-    type PublicInputs = SpendFullV3PublicInputs;
+    type PublicInputs = SpendFullV4PublicInputs;
     type GkrProof = ();
     type GkrVerifier = ();
 
-    fn new(trace_info: TraceInfo, pub_inputs: SpendFullV3PublicInputs, options: ProofOptions) -> Self {
+    fn new(trace_info: TraceInfo, pub_inputs: SpendFullV4PublicInputs, options: ProofOptions) -> Self {
         assert_eq!(WIDTH, trace_info.width());
         let trace_len = trace_info.length();
         // Degrees are UPPER BOUNDS, matching spend_full's rationale: winterfell 0.9's
@@ -214,16 +242,23 @@ impl Air for SpendFullV3Air {
         ];
         for _ in 0..N_OUTS {
             degrees.push(TransitionConstraintDegree::new(1));                          // hv constant
-            degrees.push(TransitionConstraintDegree::with_cycles(7, vec![SEG]));       // ox Feistel
-            degrees.push(TransitionConstraintDegree::new(1));                          // oy' = ox
-            degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // first·(ox−hv)
+            degrees.push(TransitionConstraintDegree::with_cycles(7, vec![SEG]));       // iox Feistel
+            degrees.push(TransitionConstraintDegree::new(1));                          // ioy' = iox
+            degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // first·(iox−hv)
             degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // osel·(out−hv)
+            degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // selr·(iox−hio)
+            degrees.push(TransitionConstraintDegree::new(1));                          // hio constant
+            degrees.push(TransitionConstraintDegree::new(1));                          // hpo constant
+            degrees.push(TransitionConstraintDegree::with_cycles(7, vec![SEG]));       // oox Feistel
+            degrees.push(TransitionConstraintDegree::new(1));                          // ooy' = oox
+            degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // first·(oox−hio)
+            degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // first·(ooy−hpo)
             degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // rsel·shift
             degrees.push(TransitionConstraintDegree::new(2));                          // bit boolean
             degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // first·(rem−hv)
         }
         let num_assertions = 5 + 2 * N_OUTS;
-        SpendFullV3Air {
+        SpendFullV4Air {
             context: AirContext::new(trace_info, degrees, num_assertions, options),
             root: pub_inputs.root,
             nf: pub_inputs.nf,
@@ -346,37 +381,48 @@ impl Air for SpendFullV3Air {
 
         // ── output side: the new bindings ────────────────────────────────────────────
         for i in 0..N_OUTS {
-            let base = 22 + 8 * i;
+            let base = 22 + 15 * i;
             let osel = periodic[6 + i];
 
             let hv = frame.current()[col_hv(i)];
-            let ox = frame.current()[col_ox(i)];
-            let oy = frame.current()[col_oy(i)];
             let rem = frame.current()[col_rem(i)];
             let rbit = frame.current()[col_bit(i)];
+            let iox = frame.current()[col_iox(i)];
+            let ioy = frame.current()[col_ioy(i)];
+            let hio = frame.current()[col_hio(i)];
+            let hpo = frame.current()[col_hpo(i)];
+            let oox = frame.current()[col_oox(i)];
+            let ooy = frame.current()[col_ooy(i)];
 
-            // hv is the binding pivot: constant across the trace so the same witness value
-            // can be tied to three different rows' worth of constraints.
+            // hv is the binding pivot: constant, so one witness value ties to the
+            // conservation lane, the commitment lane and the range decomposition alike.
             result[base] = frame.next()[col_hv(i)] - hv;
 
-            // cm_out_i = compress2(out_value_i, out_blinding_i), computed in-circuit.
-            let ot = ox + c;
-            let ot2 = ot * ot;
-            result[base + 1] = frame.next()[col_ox(i)] - (oy + ot2 * ot2 * ot2 * ot);
-            result[base + 2] = frame.next()[col_oy(i)] - ox;
-
-            // BINDING 1: the commitment lane's left input IS the held value.
-            result[base + 3] = first * (ox - hv);
-            // BINDING 2: the value subtracted in the conservation lane at row i+1 IS the
-            // held value. This is what stops a spender committing to amounts other than
-            // the ones that balanced.
+            // inner_out_i = compress2(out_value_i, out_blinding_i)
+            let it = iox + c;
+            let it2 = it * it;
+            result[base + 1] = frame.next()[col_iox(i)] - (ioy + it2 * it2 * it2 * it);
+            result[base + 2] = frame.next()[col_ioy(i)] - iox;
+            result[base + 3] = first * (iox - hv);
+            // the value subtracted in the conservation lane at row i+1 IS the held value
             result[base + 4] = osel * (out - hv);
+            result[base + 5] = selr * (iox - hio);
 
-            // RANGE: LSB-first shift, rem' = (rem − bit)/2, gated to the first RANGE_BITS rows.
-            result[base + 5] = rsel * (rem - rbit - two * frame.next()[col_rem(i)]);
-            result[base + 6] = rbit * (rbit - one);
-            // BINDING 3: the decomposition starts at the held value.
-            result[base + 7] = first * (rem - hv);
+            // cm_out_i = compress2(inner_out_i, pk_recipient_i) — the OWNER BINDING for
+            // outputs. `hpo` stays a hidden witness so the recipient is never named.
+            result[base + 6] = frame.next()[col_hio(i)] - hio;
+            result[base + 7] = frame.next()[col_hpo(i)] - hpo;
+            let pt = oox + c;
+            let pt2 = pt * pt;
+            result[base + 8] = frame.next()[col_oox(i)] - (ooy + pt2 * pt2 * pt2 * pt);
+            result[base + 9] = frame.next()[col_ooy(i)] - oox;
+            result[base + 10] = first * (oox - hio);
+            result[base + 11] = first * (ooy - hpo);
+
+            // RANGE: LSB-first shift, gated to the first RANGE_BITS rows.
+            result[base + 12] = rsel * (rem - rbit - two * frame.next()[col_rem(i)]);
+            result[base + 13] = rbit * (rbit - one);
+            result[base + 14] = first * (rem - hv);
         }
     }
 
@@ -391,7 +437,7 @@ impl Air for SpendFullV3Air {
         ];
         for i in 0..N_OUTS {
             // the in-circuit output commitment equals the public one
-            a.push(Assertion::single(col_ox(i), ROUNDS, self.cm_outs[i]));
+            a.push(Assertion::single(col_oox(i), ROUNDS, self.cm_outs[i]));
             // the range decomposition is exhausted ⇒ value < 2^RANGE_BITS
             a.push(Assertion::single(col_rem(i), RANGE_BITS, BaseElement::ZERO));
         }
@@ -403,17 +449,17 @@ impl Air for SpendFullV3Air {
     }
 }
 
-pub struct SpendFullV3Prover {
+pub struct SpendFullV4Prover {
     options: ProofOptions,
 }
-impl SpendFullV3Prover {
+impl SpendFullV4Prover {
     pub fn new(options: ProofOptions) -> Self {
         Self { options }
     }
 }
-impl Prover for SpendFullV3Prover {
+impl Prover for SpendFullV4Prover {
     type BaseField = BaseElement;
-    type Air = SpendFullV3Air;
+    type Air = SpendFullV4Air;
     type Trace = TraceTable<Self::BaseField>;
     type HashFn = Blake3_256<Self::BaseField>;
     type RandomCoin = DefaultRandomCoin<Self::HashFn>;
@@ -421,12 +467,12 @@ impl Prover for SpendFullV3Prover {
     type ConstraintEvaluator<'a, E: FieldElement<BaseField = Self::BaseField>> =
         DefaultConstraintEvaluator<'a, Self::Air, E>;
 
-    fn get_pub_inputs(&self, trace: &Self::Trace) -> SpendFullV3PublicInputs {
+    fn get_pub_inputs(&self, trace: &Self::Trace) -> SpendFullV4PublicInputs {
         let mut cm_outs = [BaseElement::ZERO; N_OUTS];
         for (i, slot) in cm_outs.iter_mut().enumerate() {
-            *slot = trace.get(col_ox(i), ROUNDS);
+            *slot = trace.get(col_oox(i), ROUNDS);
         }
-        SpendFullV3PublicInputs {
+        SpendFullV4PublicInputs {
             root: trace.get(2, trace.length() - 1),
             nf: trace.get(6, ROUNDS),
             fee: trace.get(1, 0),
@@ -450,40 +496,41 @@ impl Prover for SpendFullV3Prover {
 
 /// Build an output-bound spend trace.
 ///
-/// `outs` is `[(value, blinding); N_OUTS]`. A spend with fewer real outputs passes
-/// zero-value notes for the remainder — those still produce a real commitment, which the
-/// caller may simply not insert into the tree.
+/// `outs` is `[(value, blinding, recipient_pk); N_OUTS]`. `recipient_pk` is the owner key
+/// the output note is bound to — a spender's OWN pk for change, the payee's for a
+/// transfer. It stays a hidden witness, so the recipient is never named on chain. A spend
+/// with fewer real outputs passes zero-value notes for the remainder.
 ///
 /// Requires a conserving witness (`value == fee + Σ out_values`) and every amount within
 /// `2^RANGE_BITS`; both are checked here so a malformed witness fails loudly at build
 /// rather than producing a proof the verifier will silently reject.
-pub fn build_spend_full_v3_trace(
+pub fn build_spend_full_v4_trace(
     value: BaseElement,
     blinding: BaseElement,
     spend_key: BaseElement,
     fee: BaseElement,
-    outs: &[(BaseElement, BaseElement); N_OUTS],
+    outs: &[(BaseElement, BaseElement, BaseElement); N_OUTS],
     path: &MerklePath,
 ) -> TraceTable<BaseElement> {
     let depth = path.siblings.len();
     let len = (depth + 1) * SEG;
     assert!(
         len.is_power_of_two(),
-        "spend_full_v3 requires depth+1 a power of two (depth 1, 3, 7, 15, …); got depth {depth}"
+        "spend_full_v4 requires depth+1 a power of two (depth 1, 3, 7, 15, …); got depth {depth}"
     );
     assert!(len > RANGE_BITS, "trace must be longer than the range decomposition");
 
     // Conservation and range are the prover's obligations; fail loudly rather than emitting
     // a proof that cannot verify.
     let bound = 1u128 << RANGE_BITS;
-    let sum: u128 = outs.iter().map(|(v, _)| v.as_int() as u128).sum::<u128>() + fee.as_int() as u128;
+    let sum: u128 = outs.iter().map(|(v, _, _)| v.as_int() as u128).sum::<u128>() + fee.as_int() as u128;
     assert_eq!(
         sum,
         value.as_int() as u128,
         "non-conserving witness: fee + Σ outputs must equal the note value"
     );
     assert!((fee.as_int() as u128) < bound, "fee exceeds the range bound");
-    for (v, _) in outs.iter() {
+    for (v, _, _) in outs.iter() {
         assert!((v.as_int() as u128) < bound, "output value exceeds the range bound");
     }
 
@@ -492,7 +539,7 @@ pub fn build_spend_full_v3_trace(
 
     let mut subs = Vec::with_capacity(len);
     subs.push(fee);
-    subs.extend(outs.iter().map(|(v, _)| *v));
+    subs.extend(outs.iter().map(|(v, _, _)| *v));
     assert!(subs.len() <= len, "too many outputs for one spend trace");
     subs.resize(len, BaseElement::ZERO);
 
@@ -521,12 +568,17 @@ pub fn build_spend_full_v3_trace(
             state[COL_PX] = spend_key;
             state[COL_PY] = BaseElement::new(PK_DOMAIN);
             for i in 0..N_OUTS {
-                let (ov, ob) = outs[i];
+                let (ov, ob, opk) = outs[i];
+                let inner_out = compress2(ov, ob);
                 state[col_hv(i)] = ov;
-                state[col_ox(i)] = ov;
-                state[col_oy(i)] = ob;
                 state[col_rem(i)] = ov;
                 state[col_bit(i)] = BaseElement::new(ov.as_int() & 1);
+                state[col_iox(i)] = ov;
+                state[col_ioy(i)] = ob;
+                state[col_hio(i)] = inner_out;
+                state[col_hpo(i)] = opk;
+                state[col_oox(i)] = inner_out;
+                state[col_ooy(i)] = opk;
             }
         },
         |step, state| {
@@ -565,11 +617,14 @@ pub fn build_spend_full_v3_trace(
             state[COL_PX] = pt;
 
             for i in 0..N_OUTS {
-                // hv stays put — it is the pivot every output binding refers to.
-                // output-commitment lane feistels unconditionally (only row ROUNDS asserted)
-                let ot = state[col_oy(i)] + pow7(state[col_ox(i)] + c[posr]);
-                state[col_oy(i)] = state[col_ox(i)];
-                state[col_ox(i)] = ot;
+                // hv / hio / hpo stay put — they are the pivots the bindings refer to.
+                // Both output lanes feistel unconditionally (only row ROUNDS is asserted).
+                let it = state[col_ioy(i)] + pow7(state[col_iox(i)] + c[posr]);
+                state[col_ioy(i)] = state[col_iox(i)];
+                state[col_iox(i)] = it;
+                let ot = state[col_ooy(i)] + pow7(state[col_oox(i)] + c[posr]);
+                state[col_ooy(i)] = state[col_oox(i)];
+                state[col_oox(i)] = ot;
 
                 // range: peel the low bit and halve, then hold at zero
                 let cur = state[col_rem(i)].as_int();
@@ -583,7 +638,7 @@ pub fn build_spend_full_v3_trace(
 }
 
 /// Test-only trace builder that SKIPS the prover-obligation assertions in
-/// [`build_spend_full_v3_trace`].
+/// [`build_spend_full_v4_trace`].
 ///
 /// Those assertions protect an honest caller from emitting a doomed proof, but they are
 /// Rust, not cryptography — a real attacker writes their own prover and never runs them.
@@ -591,12 +646,12 @@ pub fn build_spend_full_v3_trace(
 /// prover exactly what an attacker would. Everything below this point is identical to the
 /// checked builder.
 #[cfg(test)]
-pub(crate) fn build_v3_trace_unchecked(
+pub(crate) fn build_v4_trace_unchecked(
     value: BaseElement,
     blinding: BaseElement,
     spend_key: BaseElement,
     fee: BaseElement,
-    outs: &[(BaseElement, BaseElement); N_OUTS],
+    outs: &[(BaseElement, BaseElement, BaseElement); N_OUTS],
     path: &MerklePath,
 ) -> TraceTable<BaseElement> {
     let depth = path.siblings.len();
@@ -606,7 +661,7 @@ pub(crate) fn build_v3_trace_unchecked(
 
     let mut subs = Vec::with_capacity(len);
     subs.push(fee);
-    subs.extend(outs.iter().map(|(v, _)| *v));
+    subs.extend(outs.iter().map(|(v, _, _)| *v));
     subs.resize(len, BaseElement::ZERO);
 
     let sibs = path.siblings.clone();
@@ -634,12 +689,17 @@ pub(crate) fn build_v3_trace_unchecked(
             state[COL_PX] = spend_key;
             state[COL_PY] = BaseElement::new(PK_DOMAIN);
             for i in 0..N_OUTS {
-                let (ov, ob) = outs[i];
+                let (ov, ob, opk) = outs[i];
+                let inner_out = compress2(ov, ob);
                 state[col_hv(i)] = ov;
-                state[col_ox(i)] = ov;
-                state[col_oy(i)] = ob;
                 state[col_rem(i)] = ov;
                 state[col_bit(i)] = BaseElement::new(ov.as_int() & 1);
+                state[col_iox(i)] = ov;
+                state[col_ioy(i)] = ob;
+                state[col_hio(i)] = inner_out;
+                state[col_hpo(i)] = opk;
+                state[col_oox(i)] = inner_out;
+                state[col_ooy(i)] = opk;
             }
         },
         |step, state| {
@@ -675,9 +735,12 @@ pub(crate) fn build_v3_trace_unchecked(
             state[COL_PY] = state[COL_PX];
             state[COL_PX] = pt;
             for i in 0..N_OUTS {
-                let ot = state[col_oy(i)] + pow7(state[col_ox(i)] + c[posr]);
-                state[col_oy(i)] = state[col_ox(i)];
-                state[col_ox(i)] = ot;
+                let it = state[col_ioy(i)] + pow7(state[col_iox(i)] + c[posr]);
+                state[col_ioy(i)] = state[col_iox(i)];
+                state[col_iox(i)] = it;
+                let ot = state[col_ooy(i)] + pow7(state[col_oox(i)] + c[posr]);
+                state[col_ooy(i)] = state[col_oox(i)];
+                state[col_oox(i)] = ot;
                 let cur = state[col_rem(i)].as_int();
                 let next = if step < RANGE_BITS { cur >> 1 } else { 0 };
                 state[col_rem(i)] = BaseElement::new(next);
@@ -690,12 +753,12 @@ pub(crate) fn build_v3_trace_unchecked(
 
 type Coin = DefaultRandomCoin<Blake3_256<BaseElement>>;
 
-pub fn verify_spend_full_v3(
+pub fn verify_spend_full_v4(
     proof: winterfell::Proof,
-    pub_inputs: SpendFullV3PublicInputs,
+    pub_inputs: SpendFullV4PublicInputs,
 ) -> Result<(), winterfell::VerifierError> {
     let min = winterfell::AcceptableOptions::MinConjecturedSecurity(ACCEPT_BITS);
-    winterfell::verify::<SpendFullV3Air, Blake3_256<BaseElement>, Coin>(proof, pub_inputs, &min)
+    winterfell::verify::<SpendFullV4Air, Blake3_256<BaseElement>, Coin>(proof, pub_inputs, &min)
 }
 
 #[cfg(test)]
@@ -704,16 +767,15 @@ mod tests {
     use crate::mimc::mimc_options;
 
     fn e(v: u64) -> BaseElement { BaseElement::new(v) }
-
-    /// The owner-bound note shape, computed off-circuit.
-    fn owner_pk(sk: BaseElement) -> BaseElement {
-        compress2(sk, BaseElement::new(PK_DOMAIN))
-    }
+    fn pk_of(sk: BaseElement) -> BaseElement { compress2(sk, BaseElement::new(PK_DOMAIN)) }
     fn leaf(value: BaseElement, blinding: BaseElement, sk: BaseElement) -> BaseElement {
-        compress2(compress2(value, blinding), owner_pk(sk))
+        compress2(compress2(value, blinding), pk_of(sk))
+    }
+    /// The owner-bound output commitment, off-circuit.
+    fn cm_out(v: BaseElement, b: BaseElement, pk: BaseElement) -> BaseElement {
+        compress2(compress2(v, b), pk)
     }
 
-    /// Build a depth-3 pool holding one owner-bound note at index 3.
     fn pool_with(value: BaseElement, blinding: BaseElement, sk: BaseElement)
         -> (crate::membership::CompressTree, usize)
     {
@@ -724,131 +786,129 @@ mod tests {
         (crate::membership::CompressTree::new(leaves), position)
     }
 
-    /// THE V3 GATE: an owner-bound spend proves and verifies.
+    /// THE V4 GATE: a spend whose outputs are bound to a RECIPIENT's key verifies, and
+    /// the recipient key never appears in the public inputs.
     #[test]
-    fn owner_bound_spend_verifies() {
+    fn owner_bound_outputs_verify_without_naming_the_recipient() {
         let (value, blinding, sk) = (e(100), e(4242), e(0xDEAD));
+        let bob = pk_of(e(0xB0B));
+        let me = pk_of(sk);
         let (tree, pos) = pool_with(value, blinding, sk);
         let path = tree.path(pos);
         let fee = e(3);
-        let outs = [(e(50), e(777)), (e(47), e(888))];
+        // 50 to Bob, 47 back to myself as change.
+        let outs = [(e(50), e(777), bob), (e(47), e(888), me)];
 
-        let trace = build_spend_full_v3_trace(value, blinding, sk, fee, &outs, &path);
-        let proof = SpendFullV3Prover::new(mimc_options()).prove(trace).expect("prove");
-        let cm_outs = [compress2(outs[0].0, outs[0].1), compress2(outs[1].0, outs[1].1)];
-        verify_spend_full_v3(
-            proof,
-            SpendFullV3PublicInputs {
-                root: tree.root(),
-                nf: compress2(sk, BaseElement::new(pos as u64)),
-                fee,
-                cm_outs,
-            },
-        )
-        .expect("an honest owner-bound spend must verify");
+        let trace = build_spend_full_v4_trace(value, blinding, sk, fee, &outs, &path);
+        let proof = SpendFullV4Prover::new(mimc_options()).prove(trace).expect("prove");
+        let pub_in = SpendFullV4PublicInputs {
+            root: tree.root(),
+            nf: compress2(sk, BaseElement::new(pos as u64)),
+            fee,
+            cm_outs: [cm_out(e(50), e(777), bob), cm_out(e(47), e(888), me)],
+        };
+        // The recipient key is nowhere in what the verifier is handed.
+        assert!(!pub_in.to_elements().contains(&bob), "recipient pk must stay hidden");
+        verify_spend_full_v4(proof, pub_in).expect("an honest owner-bound spend must verify");
     }
 
-    /// THE FLAW THIS MODULE EXISTS TO CLOSE.
-    ///
-    /// Mallory knows `(value, blinding)` — exactly what a note ciphertext would hand a
-    /// recipient — but not the owner's `sk`. Under v2 she produced a VERIFYING proof with
-    /// her own nullifier, so the spent-set never saw a repeat and the note was spendable
-    /// twice. Here she must fail: the leaf commits to the owner's `pk`, and her key
-    /// derives a different one, so her climb cannot reach the real root.
+    /// A foreign key still cannot spend a known note (v3's property, preserved).
     #[test]
     fn a_foreign_key_cannot_spend_a_known_note() {
         let (value, blinding, owner_sk) = (e(100), e(4242), e(0xDEAD));
-        let mallory_sk = e(0xBBBB);
+        let mallory = e(0xBBBB);
         let (tree, pos) = pool_with(value, blinding, owner_sk);
         let path = tree.path(pos);
-        let fee = e(3);
-        let outs = [(e(50), e(777)), (e(47), e(888))];
-
-        // Mallory builds the best trace she can from what she knows.
-        let trace = build_v3_trace_unchecked(value, blinding, mallory_sk, fee, &outs, &path);
-        let cm_outs = [compress2(outs[0].0, outs[0].1), compress2(outs[1].0, outs[1].1)];
-        let nf = compress2(mallory_sk, BaseElement::new(pos as u64));
-
+        let mpk = pk_of(mallory);
+        let outs = [(e(50), e(777), mpk), (e(47), e(888), mpk)];
+        let trace = build_v4_trace_unchecked(value, blinding, mallory, e(3), &outs, &path);
         let verdict = match std::panic::catch_unwind(|| {
-            SpendFullV3Prover::new(mimc_options()).prove(trace)
+            SpendFullV4Prover::new(mimc_options()).prove(trace)
         }) {
-            Err(_) | Ok(Err(_)) => { println!("REFUSED-AT: proving"); Err(()) }
-            Ok(Ok(p)) => { println!("REFUSED-AT: verifier (proof was produced)"); verify_spend_full_v3(
-                p,
-                SpendFullV3PublicInputs { root: tree.root(), nf, fee, cm_outs },
-            )
-            .map_err(|_| ()) }
+            Err(_) | Ok(Err(_)) => Err(()),
+            Ok(Ok(p)) => verify_spend_full_v4(p, SpendFullV4PublicInputs {
+                root: tree.root(),
+                nf: compress2(mallory, BaseElement::new(pos as u64)),
+                fee: e(3),
+                cm_outs: [cm_out(e(50), e(777), mpk), cm_out(e(47), e(888), mpk)],
+            }).map_err(|_| ()),
         };
+        assert!(verdict.is_err(), "SECURITY: (value, blinding) must not be enough to spend");
+    }
+
+    /// THE REASON V4 EXISTS: an output commitment that is NOT owner-bound must be
+    /// rejected. Under v3 `compress2(out_value, blinding)` was the accepted shape, so a
+    /// change note was spendable by anyone who learned its preimage. Here the verifier
+    /// must refuse that shape outright.
+    #[test]
+    fn unowned_output_commitment_is_rejected() {
+        let (value, blinding, sk) = (e(100), e(4242), e(0xDEAD));
+        let me = pk_of(sk);
+        let (tree, pos) = pool_with(value, blinding, sk);
+        let path = tree.path(pos);
+        let outs = [(e(50), e(777), me), (e(47), e(888), me)];
+        let trace = build_spend_full_v4_trace(value, blinding, sk, e(3), &outs, &path);
+        let proof = SpendFullV4Prover::new(mimc_options()).prove(trace).expect("prove");
+        // v3-shaped (un-owned) output commitments
+        let v3_shape = [compress2(e(50), e(777)), compress2(e(47), e(888))];
         assert!(
-            verdict.is_err(),
-            "SECURITY: knowing (value, blinding) must NOT be enough to spend — this is the \
-             double-spend that made note ciphertexts unsafe"
+            verify_spend_full_v4(proof, SpendFullV4PublicInputs {
+                root: tree.root(),
+                nf: compress2(sk, BaseElement::new(pos as u64)),
+                fee: e(3),
+                cm_outs: v3_shape,
+            }).is_err(),
+            "SECURITY: an un-owned output commitment must not verify — that shape is \
+             spendable by anyone who learns its preimage"
         );
     }
 
-    /// The owner keeps every v2 guarantee: inflated output commitments still rejected.
+    /// Inflated output commitments still rejected (v2's property, preserved).
     #[test]
     fn inflated_output_commitment_still_rejected() {
         let (value, blinding, sk) = (e(100), e(4242), e(0xDEAD));
+        let me = pk_of(sk);
         let (tree, pos) = pool_with(value, blinding, sk);
         let path = tree.path(pos);
-        let honest = [(e(50), e(777)), (e(47), e(888))];
-        let trace = build_spend_full_v3_trace(value, blinding, sk, e(3), &honest, &path);
-        let proof = SpendFullV3Prover::new(mimc_options()).prove(trace).expect("prove");
-        let inflated = [compress2(e(500), e(777)), compress2(e(470), e(888))];
+        let outs = [(e(50), e(777), me), (e(47), e(888), me)];
+        let trace = build_spend_full_v4_trace(value, blinding, sk, e(3), &outs, &path);
+        let proof = SpendFullV4Prover::new(mimc_options()).prove(trace).expect("prove");
         assert!(
-            verify_spend_full_v3(
-                proof,
-                SpendFullV3PublicInputs {
-                    root: tree.root(),
-                    nf: compress2(sk, BaseElement::new(pos as u64)),
-                    fee: e(3),
-                    cm_outs: inflated,
-                },
-            )
-            .is_err(),
-            "SECURITY: output binding must survive the v3 restructure"
+            verify_spend_full_v4(proof, SpendFullV4PublicInputs {
+                root: tree.root(),
+                nf: compress2(sk, BaseElement::new(pos as u64)),
+                fee: e(3),
+                cm_outs: [cm_out(e(500), e(777), me), cm_out(e(470), e(888), me)],
+            }).is_err(),
+            "SECURITY: output value binding must survive the v4 restructure"
         );
     }
 
-    /// A wrong root is still rejected — membership did not regress.
+    /// Membership and the build-time guards did not regress.
     #[test]
-    fn wrong_root_still_rejected() {
+    fn root_conservation_and_range_still_enforced() {
         let (value, blinding, sk) = (e(100), e(4242), e(0xDEAD));
+        let me = pk_of(sk);
         let (tree, pos) = pool_with(value, blinding, sk);
         let path = tree.path(pos);
-        let outs = [(e(50), e(777)), (e(47), e(888))];
-        let trace = build_spend_full_v3_trace(value, blinding, sk, e(3), &outs, &path);
-        let proof = SpendFullV3Prover::new(mimc_options()).prove(trace).expect("prove");
-        let cm_outs = [compress2(outs[0].0, outs[0].1), compress2(outs[1].0, outs[1].1)];
-        assert!(
-            verify_spend_full_v3(
-                proof,
-                SpendFullV3PublicInputs {
-                    root: e(0xBADC0FFEE),
-                    nf: compress2(sk, BaseElement::new(pos as u64)),
-                    fee: e(3),
-                    cm_outs,
-                },
-            )
-            .is_err(),
-            "SECURITY: membership must still bind to the real root"
-        );
-    }
+        let outs = [(e(50), e(777), me), (e(47), e(888), me)];
+        let trace = build_spend_full_v4_trace(value, blinding, sk, e(3), &outs, &path);
+        let proof = SpendFullV4Prover::new(mimc_options()).prove(trace).expect("prove");
+        assert!(verify_spend_full_v4(proof, SpendFullV4PublicInputs {
+            root: e(0xBADC0FFEE),
+            nf: compress2(sk, BaseElement::new(pos as u64)),
+            fee: e(3),
+            cm_outs: [cm_out(e(50), e(777), me), cm_out(e(47), e(888), me)],
+        }).is_err(), "wrong root must be rejected");
 
-    /// Non-conserving and out-of-range witnesses are still refused at build.
-    #[test]
-    fn conservation_and_range_still_enforced_at_build() {
-        let (value, blinding, sk) = (e(100), e(4242), e(0xDEAD));
-        let (tree, pos) = pool_with(value, blinding, sk);
-        let path = tree.path(pos);
         assert!(std::panic::catch_unwind(|| {
-            build_spend_full_v3_trace(value, blinding, sk, e(3), &[(e(50), e(777)), (e(48), e(888))], &path)
+            build_spend_full_v4_trace(value, blinding, sk, e(3),
+                &[(e(50), e(777), me), (e(48), e(888), me)], &path)
         }).is_err(), "non-conserving must be refused");
         let over = BaseElement::new(1u64 << RANGE_BITS);
         assert!(std::panic::catch_unwind(|| {
-            build_spend_full_v3_trace(value, blinding, sk, e(3), &[(over, e(777)), (e(0), e(888))], &path)
+            build_spend_full_v4_trace(value, blinding, sk, e(3),
+                &[(over, e(777), me), (e(0), e(888), me)], &path)
         }).is_err(), "out-of-range must be refused");
-        let _ = pos;
     }
 }

@@ -183,7 +183,7 @@ impl ShieldedBridge {
     }
 
     fn decode_outs(&self, cm_outs: &[String]) -> Result<Vec<[u8; 32]>, ShieldedSubmitError> {
-        let expected = sigil_shield::spend_full_v2::N_OUTS;
+        let expected = sigil_shield::spend_full_v4::N_OUTS;
         if cm_outs.len() != expected {
             return Err(ShieldedSubmitError::WrongOutputCount { expected, got: cm_outs.len() });
         }

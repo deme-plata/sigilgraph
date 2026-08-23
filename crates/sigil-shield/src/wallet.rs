@@ -40,9 +40,7 @@ use winterfell::Prover;
 
 use crate::mimc::{compress2, mimc_options};
 use crate::note_v1::{from_wire, to_wire, Note, NoteError, ShieldedPoolTree, RANGE_BITS};
-use crate::spend_full_v2::{
-    build_spend_full_v2_trace, SpendFullV2Prover, N_OUTS,
-};
+use crate::spend_full_v4::{build_spend_full_v4_trace, SpendFullV4Prover, N_OUTS, PK_DOMAIN};
 
 /// Reduce 32 bytes to a Goldilocks element, rejecting nothing (always canonical).
 ///
@@ -101,6 +99,15 @@ impl ShieldedAccount {
     /// The nullifier revealed when spending the note at leaf `position`.
     pub fn nullifier_at(&self, position: u64) -> BaseElement {
         compress2(self.spend_key(), BaseElement::new(position))
+    }
+
+    /// This account's PUBLIC key — the address others bind notes to when paying it.
+    ///
+    /// Safe to publish: `compress2` is one-way, so it never exposes the spend key. This
+    /// is what a sender needs (and all they need) to create a note only this account can
+    /// spend.
+    pub fn public_key(&self) -> BaseElement {
+        compress2(self.spend_key(), BaseElement::new(PK_DOMAIN))
     }
 }
 
@@ -213,7 +220,9 @@ pub struct SpendBundle {
     /// unshield — the circuit treats them identically.
     pub public_value: u128,
     pub proof: Vec<u8>,
-    /// Derivation indices of the change notes, so the caller can record them.
+    /// Derivation indices of the outputs bound to THIS account, so the caller can record
+    /// them. Outputs paid to someone else are not tracked here — this wallet cannot spend
+    /// them and has no business holding their preimages.
     pub out_indices: Vec<u64>,
 }
 
@@ -241,6 +250,10 @@ pub enum SpendBuildError {
 /// padded view will produce a proof that cannot verify. `out_values` must total
 /// `note.value - public_value` exactly; the circuit enforces this and would reject
 /// otherwise, but failing here gives a legible error instead of an opaque rejection.
+///
+/// Each output is `(value, recipient_pk)`. Pass [`ShieldedAccount::public_key`] for change
+/// you keep, or the payee's public key to pay someone. The recipient key is bound
+/// in-circuit as a hidden witness, so paying someone does not name them on chain.
 #[allow(clippy::too_many_arguments)]
 pub fn build_spend(
     account: &ShieldedAccount,
@@ -248,14 +261,15 @@ pub fn build_spend(
     pool_commitments: &[[u8; 32]],
     note_index: u64,
     public_value: u64,
-    out_values: &[u64],
+    outs_spec: &[(u64, BaseElement)],
 ) -> Result<SpendBundle, SpendBuildError> {
-    if out_values.len() != N_OUTS {
+    if outs_spec.len() != N_OUTS {
         return Err(SpendBuildError::WrongOutputCount {
             expected: N_OUTS,
-            got: out_values.len(),
+            got: outs_spec.len(),
         });
     }
+    let out_values: Vec<u64> = outs_spec.iter().map(|(v, _)| *v).collect();
 
     let owned = store
         .notes
@@ -286,17 +300,26 @@ pub fn build_spend(
         return Err(SpendBuildError::PositionMismatch);
     }
 
-    // Allocate change notes and derive their blindings.
-    let mut outs = [(BaseElement::ZERO, BaseElement::ZERO); N_OUTS];
-    let mut out_indices = Vec::with_capacity(N_OUTS);
-    for (i, v) in out_values.iter().enumerate() {
+    // Allocate outputs and derive their blindings. Only outputs bound to THIS account go
+    // into the note store: a note paid to someone else is not ours to track or spend.
+    let mine = account.public_key();
+    let mut outs = [(BaseElement::ZERO, BaseElement::ZERO, BaseElement::ZERO); N_OUTS];
+    let mut out_indices = Vec::new();
+    for (i, (v, recipient)) in outs_spec.iter().enumerate() {
         let idx = store.allocate(*v);
-        out_indices.push(idx);
-        outs[i] = (BaseElement::new(*v), account.blinding(idx));
+        let blinding = account.blinding(idx);
+        if *recipient == mine {
+            out_indices.push(idx);
+        } else {
+            // Not ours — drop the placeholder we just allocated so `balance()` does not
+            // count value we cannot spend.
+            store.notes.retain(|n| n.index != idx);
+        }
+        outs[i] = (BaseElement::new(*v), blinding, *recipient);
     }
 
     let path = tree.path(position as usize);
-    let trace = build_spend_full_v2_trace(
+    let trace = build_spend_full_v4_trace(
         note.value,
         note.blinding,
         note.spend_key,
@@ -304,14 +327,18 @@ pub fn build_spend(
         &outs,
         &path,
     );
-    let proof = SpendFullV2Prover::new(mimc_options())
+    let proof = SpendFullV4Prover::new(mimc_options())
         .prove(trace)
         .expect("a conserving, in-range witness must prove");
 
     Ok(SpendBundle {
         anchor: to_wire(tree.root()),
         nullifier: to_wire(note.nullifier(position)),
-        cm_outs: outs.iter().map(|(v, b)| to_wire(compress2(*v, *b))).collect(),
+        // the OWNER-BOUND output commitment: compress2(compress2(value, blinding), pk)
+        cm_outs: outs
+            .iter()
+            .map(|(v, b, pk)| to_wire(compress2(compress2(*v, *b), *pk)))
+            .collect(),
         public_value: public_value as u128,
         proof: proof.to_bytes(),
         out_indices,
@@ -334,7 +361,7 @@ pub fn shield_note(
 mod tests {
     use super::*;
     use crate::note_v1::padding_leaf;
-    use crate::spend_full_v2::{verify_spend_full_v2, SpendFullV2PublicInputs};
+    use crate::spend_full_v4::{verify_spend_full_v4, SpendFullV4PublicInputs};
 
     const CAPACITY: usize = 1 << 15;
 
@@ -416,7 +443,8 @@ mod tests {
         assert_eq!(store.scan_owned(&acct, &pool), 1);
 
         // Spend 100 as fee 3 + change 50 + 47.
-        let bundle = build_spend(&acct, &mut store, &pool, index, 3, &[50, 47])
+        let me = acct.public_key();
+        let bundle = build_spend(&acct, &mut store, &pool, index, 3, &[(50, me), (47, me)])
             .expect("wallet must build a spend");
 
         let root = from_wire(&bundle.anchor).unwrap();
@@ -426,13 +454,42 @@ mod tests {
             from_wire(&bundle.cm_outs[1]).unwrap(),
         ];
         let proof = winterfell::Proof::from_bytes(&bundle.proof).expect("decode");
-        verify_spend_full_v2(
+        verify_spend_full_v4(
             proof,
-            SpendFullV2PublicInputs { root, nf, fee: BaseElement::new(3), cm_outs },
+            SpendFullV4PublicInputs { root, nf, fee: BaseElement::new(3), cm_outs },
         )
         .expect("SECURITY: a wallet-built spend must verify under the production circuit");
 
         assert_eq!(bundle.out_indices.len(), 2, "change notes recorded for tracking");
+    }
+
+    /// Paying a THIRD PARTY: the note goes to them, and this wallet must not count it as
+    /// spendable balance. Tracking it would report money we cannot spend — and, before
+    /// owner binding, we actually COULD have spent it, which was the bug.
+    #[test]
+    fn a_note_paid_to_someone_else_is_not_our_balance() {
+        let me = ShieldedAccount::from_seed([42u8; 32]);
+        let bob = ShieldedAccount::from_seed([0xB0u8; 32]);
+        let mut store = NoteStore::new();
+        let (index, cm) = shield_note(&me, &mut store, 100).unwrap();
+        let pool = padded(&[cm]);
+        store.scan_owned(&me, &pool);
+        assert_eq!(store.balance(), 100);
+
+        // 50 to Bob, 47 back to me, fee 3.
+        let bundle = build_spend(
+            &me, &mut store, &pool, index, 3,
+            &[(50, bob.public_key()), (47, me.public_key())],
+        ).expect("build");
+        assert_eq!(bundle.out_indices.len(), 1, "only OUR output is tracked");
+
+        // Bob's commitment must be bound to Bob, not to us.
+        let bob_cm = from_wire(&bundle.cm_outs[0]).unwrap();
+        assert_ne!(
+            bob_cm,
+            compress2(compress2(BaseElement::new(50), me.blinding(bundle.out_indices[0])), me.public_key()),
+            "the note paid to Bob must not be bound to our key"
+        );
     }
 
     #[test]
@@ -442,7 +499,8 @@ mod tests {
         let (index, cm) = shield_note(&acct, &mut store, 100).unwrap();
         let pool = padded(&[cm]);
         store.scan_owned(&acct, &pool);
-        let err = build_spend(&acct, &mut store, &pool, index, 3, &[50, 48])
+        let me = acct.public_key();
+        let err = build_spend(&acct, &mut store, &pool, index, 3, &[(50, me), (48, me)])
             .expect_err("a non-conserving spend must be refused");
         assert_eq!(err, SpendBuildError::NonConserving { expected: 97, got: 98 });
     }

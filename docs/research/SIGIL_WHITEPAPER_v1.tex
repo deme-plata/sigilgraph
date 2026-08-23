@@ -1037,9 +1037,32 @@ sections (\S\ref{sec:honesty}) enumerate what would move each one.}
 \section{Architecture}\label{sec:arch}
 
 Condensed; \texttt{SIGIL\_GENESIS\_v0.md} remains the full spec. Network
-\texttt{sigil-g0}, libp2p prefix \texttt{/sigil/g0/}, P2P :9501, API :8181/:8099,
-storage \texttt{flux-db} (no RocksDB), all builds via \texttt{fluxc} with content-hash
-caching — never raw cargo.
+\texttt{sigil-g0}, libp2p prefix \texttt{/sigil/g0/}, P2P :9501, storage
+\texttt{flux-db} (no RocksDB), all builds via \texttt{fluxc} with content-hash caching —
+never raw cargo.
+
+\paragraph{The money API is the braid itself.}
+Earlier editions described a separate \texttt{sigil-rpcd} daemon on :8099. That daemon is
+\textbf{retired} (stopped and disabled 2026-08-17, permanently). It maintained its own
+parallel \texttt{SigilState} that was never wired to the settlement chokepoint, and the two
+ledgers had materially diverged by the time it was switched off --- 190{,}330 SIGIL of
+reported supply against the braid's 3{,}952{,}150, a factor of twenty. Its numbers were not
+a lagging view of the chain; they were a different chain.
+
+What replaced it is \texttt{sigil-api}, and the distinction is the architectural point
+rather than a port change: it is \emph{embedded in the \texttt{sigil-node} binary} and
+reads and writes the real \texttt{SigilState} through
+\texttt{commit\_state\_transition}. There is no second state to drift. Balances, supply,
+sends, pools, swaps and mining all resolve against the same DagKnight braid ordering the
+consensus layer settles (live in production since 2026-07-02), so a number the API returns
+and a number the chain believes are the same number by construction, not by
+reconciliation. It listens on :18181 and is annotated with
+\texttt{flux\_api\_macros::api}, which generates the OpenAPI surface and typed SDKs from
+the route definitions.
+
+The lesson is worth stating plainly because it is the failure this whole architecture is
+organized against: a money API that keeps its own copy of state will eventually disagree
+with the chain, and it will do so silently.
 
 \begin{figure}[htbp]
 \centering
@@ -1541,7 +1564,8 @@ exercise the wallet connection; timing logged end-to-end \\
 zstd wire: 14.0$\times$ backfill (70.7\,B/header live), 26.3$\times$ gossip &
 codec=1 backfill + gossip frame lanes & compare wire byte counters against the lz4
 baseline on real headers \\
-Mining loop live (shares 0\,$\to$\,1250) & \texttt{sigil-rpcd} challenge/submit +
+Mining loop live (shares 0\,$\to$\,1250) & \texttt{sigil-api}
+\texttt{/v1/mining/\{challenge,submit\}} (embedded in \texttt{sigil-node}) +
 \texttt{sigil-miner} & mine against the public endpoint; credited balance is the
 evidence \\
 Live height / supply readings & \texttt{sigil-g0} node & any \texttt{sigil-top}

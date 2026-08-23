@@ -13,8 +13,10 @@
 //!   * tower middleware tuned for money: concurrency cap, timeout, CORS, body limit,
 //!   * reads (`balance`, `supply`) are open; mutations require a valid signature.
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use flux_search::{SearchEngine, SearchQuery};
 
 use axum::{
     extract::{Query, State},
@@ -34,7 +36,24 @@ use mining::{MiningBridge, SubmitOutcome};
 pub mod send;
 use send::SendBridge;
 
+pub mod bridge;
+use bridge::BridgeBridge;
+
+pub mod usds_bridge;
+use usds_bridge::UsdsBridgeBridge;
+
+pub mod dex;
+use dex::DexBridge;
+
+pub mod usds;
+use usds::UsdsBridge;
+
 pub mod eth;
+
+pub mod dagknight;
+/// PV-1 private transfers: shield / shielded-send / unshield.
+pub mod shielded;
+use dagknight::DagSnapshotBridge;
 
 /// Shared braid state the API reads/writes. `state` is published by the producer
 /// after each block-apply (a consistent read snapshot); `mempool` is the SAME
@@ -52,13 +71,55 @@ pub struct AppState {
     /// The wallet-authenticated send queue — see `send` module docs. The
     /// producer drains it once per tick, same shape as `mining`.
     pub send: Arc<SendBridge>,
+    /// The shielded-transaction queue — private transfers. Same drain contract as
+    /// `send`; see the `shielded` module docs for why its spends carry no signature.
+    pub shielded: Arc<shielded::ShieldedBridge>,
+    /// The SIGIL <-> Polygon lock/unlock bridge — see `bridge` module docs.
+    /// Same "always constructed, inert without traffic" shape; drained by
+    /// the producer alongside `send`.
+    pub bridge: Arc<BridgeBridge>,
+    /// The wallet-authenticated swap / add-liquidity / remove-liquidity
+    /// queue — see `dex` module docs. Same shape as `send`/`bridge`; drained
+    /// by the producer alongside them.
+    pub dex: Arc<DexBridge>,
+    /// The wallet-authenticated USDS mint/redeem queue — see `usds` module
+    /// docs. Same shape as `dex`; drained by the producer alongside it.
+    pub usds: Arc<UsdsBridge>,
+    /// The USDS <-> Polygon lock/unlock bridge — see `usds_bridge` module
+    /// docs. A separate instance from `bridge` (which does native SIGIL),
+    /// its own vault/admin/relayer, drained by the producer alongside it.
+    pub usds_bridge: Arc<UsdsBridgeBridge>,
+    /// Real wallet/transaction/block search (2026-08-20) — populated by
+    /// sigil-node's `search_index` background task, which tails `ChainLog`
+    /// independently of block-application (see that module's doc comment for
+    /// why: it's a reader of the already-durable log, never coupled to the
+    /// consensus-sensitive apply path). `Mutex`, not `RwLock`: `SearchEngine`
+    /// isn't internally synchronized and `search()` takes `&mut self` even
+    /// for a read (it caches), so a read-lock wouldn't be enough anyway.
+    pub search: Arc<Mutex<SearchEngine>>,
+    /// Read-only, periodically-refreshed GHOSTDAG snapshot for the DagKnight
+    /// visualization — see `dagknight` module docs for why `Braid` itself is
+    /// never locked or shared directly.
+    pub dagknight: Arc<DagSnapshotBridge>,
 }
 
 impl AppState {
     /// Build the shared state from the producer's mempool + state handles, with
-    /// a fresh mining bridge.
+    /// a fresh mining bridge and an unconfigured (inert) money bridge.
     pub fn new(mempool: Arc<MempoolBackend>, state: Arc<RwLock<SigilState>>) -> Self {
-        Self { mempool, state, mining: Arc::new(MiningBridge::new()), send: Arc::new(SendBridge::new()) }
+        Self {
+            mempool,
+            state,
+            mining: Arc::new(MiningBridge::new()),
+            send: Arc::new(SendBridge::new()),
+            shielded: Arc::new(shielded::ShieldedBridge::new()),
+            bridge: Arc::new(BridgeBridge::new(None, None)),
+            dex: Arc::new(DexBridge::new()),
+            usds: Arc::new(UsdsBridge::new()),
+            usds_bridge: Arc::new(UsdsBridgeBridge::new(None, None)),
+            search: Arc::new(Mutex::new(SearchEngine::new())),
+            dagknight: Arc::new(DagSnapshotBridge::new()),
+        }
     }
 }
 
@@ -88,7 +149,9 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
-pub(crate) fn hex32(s: &str) -> Option<WalletId> {
+/// Public: `sigil-node` uses this to parse `SIGIL_BRIDGE_ADMIN_WALLET`/
+/// `SIGIL_BRIDGE_RELAYER_WALLET` env vars into `WalletId`s at startup.
+pub fn hex32(s: &str) -> Option<WalletId> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     if s.len() != 64 { return None; }
     let mut out = [0u8; 32];
@@ -187,6 +250,43 @@ pub async fn balance(
     })
 }
 
+/// Query params for `/v1/search`. `mode=literal` (default) does an exact
+/// substring match — the right mode for pasting a hash/address, and the
+/// wallet's search bar's main use case. `mode=fuzzy` runs flux-search's real
+/// TF-IDF/ranked search for free-text queries ("mint reward", "swap events").
+#[derive(Debug, Deserialize)]
+pub struct SearchQueryParams {
+    pub q: String,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub page: Option<usize>,
+    #[serde(default)]
+    pub per_page: Option<usize>,
+}
+
+#[flux_api_macros::api(GET, "/v1/search", summary = "Search indexed blocks by address/hash (literal) or free text (fuzzy)")]
+pub async fn search_handler(
+    State(st): State<AppState>,
+    Query(q): Query<SearchQueryParams>,
+) -> Json<ApiResponse<flux_search::SearchResponse>> {
+    if q.q.trim().is_empty() {
+        return ApiResponse::err("q must not be empty");
+    }
+    let page = q.page.unwrap_or(1);
+    let per_page = q.per_page.unwrap_or(10);
+    let fuzzy = q.mode.as_deref() == Some("fuzzy");
+    let Ok(mut engine) = st.search.lock() else {
+        return ApiResponse::err("search index unavailable");
+    };
+    let resp = if fuzzy {
+        engine.search(SearchQuery { q: q.q, page, per_page, ..Default::default() })
+    } else {
+        engine.literal_search(&q.q, page, per_page, false)
+    };
+    ApiResponse::ok(resp)
+}
+
 #[flux_api_macros::api(GET, "/v1/supply", summary = "Native supply + 21M cap progress")]
 pub async fn supply(State(st): State<AppState>) -> Json<ApiResponse<SupplyResponse>> {
     let minted = st.state.read().map(|s| s.native_supply()).unwrap_or(0);
@@ -266,6 +366,86 @@ pub async fn send_handler(
     }
 }
 
+/// Move value from a transparent wallet into the shielded pool.
+///
+/// The caller computes `cm = compress2(amount, blinding)` locally and keeps the blinding —
+/// the server never sees it, which is exactly what makes the resulting note private.
+#[flux_api_macros::api(POST, "/v1/shield", summary = "Deposit transparent SIGIL into the shielded pool")]
+pub async fn shield_handler(
+    State(st): State<AppState>,
+    Json(req): Json<shielded::ShieldRequest>,
+) -> Json<serde_json::Value> {
+    match st.shielded.submit_shield(&req.from, req.amount, &req.cm, req.fee) {
+        Ok(h) => Json(serde_json::json!({
+            "ok": true, "txid": hex::encode(h), "ts_ms": now_ms(),
+            "note": "queued for the next braid block",
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
+/// A shielded → shielded transfer. Carries no sender, no recipient, and no amount.
+#[flux_api_macros::api(POST, "/v1/shielded_send", summary = "Private shielded-to-shielded transfer (amounts hidden)")]
+pub async fn shielded_send_handler(
+    State(st): State<AppState>,
+    Json(req): Json<shielded::ShieldedSendRequest>,
+) -> Json<serde_json::Value> {
+    let proof = match hex::decode(req.proof.trim_start_matches("0x")) {
+        Ok(p) => p,
+        Err(_) => return Json(serde_json::json!({ "ok": false, "error": "proof must be hex" })),
+    };
+    match st.shielded.submit_shielded_send(&req.anchor, &req.nullifier, &req.cm_outs, req.fee, proof) {
+        Ok(h) => Json(serde_json::json!({
+            "ok": true, "txid": hex::encode(h), "ts_ms": now_ms(),
+            "note": "queued for the next braid block",
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
+/// Move value out of the shielded pool to a transparent wallet.
+#[flux_api_macros::api(POST, "/v1/unshield", summary = "Withdraw from the shielded pool to a transparent wallet")]
+pub async fn unshield_handler(
+    State(st): State<AppState>,
+    Json(req): Json<shielded::UnshieldRequest>,
+) -> Json<serde_json::Value> {
+    let proof = match hex::decode(req.proof.trim_start_matches("0x")) {
+        Ok(p) => p,
+        Err(_) => return Json(serde_json::json!({ "ok": false, "error": "proof must be hex" })),
+    };
+    match st.shielded.submit_unshield(
+        &req.to, req.amount, &req.anchor, &req.nullifier, &req.cm_outs, proof, req.fee,
+    ) {
+        Ok(h) => Json(serde_json::json!({
+            "ok": true, "txid": hex::encode(h), "ts_ms": now_ms(),
+            "note": "queued for the next braid block",
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
+/// The current anonymity-set root plus the pool's public counters.
+///
+/// A wallet needs the anchor to build a spend proof, and the note list to find its own
+/// notes — note ownership is not discoverable server-side, so the wallet trial-decrypts
+/// locally against commitments it fetches here.
+#[flux_api_macros::api(GET, "/v1/shielded/anchor", summary = "Current shielded-pool anchor and note count")]
+pub async fn shielded_anchor_handler(State(st): State<AppState>) -> Json<serde_json::Value> {
+    let guard = match st.state.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let pool = guard.shielded();
+    Json(serde_json::json!({
+        "ok": true,
+        "anchor": hex::encode(pool.current_root()),
+        "notes": pool.len(),
+        "nullifiers": pool.nullifier_count(),
+        "value_locked": pool.value_locked().to_string(),
+        "ts_ms": now_ms(),
+    }))
+}
+
 /// `?address=0x...` — a 20-byte hex EVM address, NOT a SIGIL wallet address.
 /// Different curve, different derivation; there is no relationship between
 /// the two, so this is a separate address a caller pastes in (e.g. their
@@ -311,6 +491,495 @@ fn chain_str_canonical(chain: eth::Chain) -> &'static str {
         eth::Chain::Ethereum => "ethereum",
         eth::Chain::Polygon => "polygon",
     }
+}
+
+// ── the SIGIL <-> Polygon bridge ────────────────────────────────────────────
+// See `bridge` module docs for the full trust-model writeup. Every mutating
+// route here returns the SAME flat-JSON shape as `send_handler` (not the
+// `ApiResponse<T>` envelope) so a caller only ever needs `j.ok`/`j.error`
+// plus whatever data field is relevant — consistent with the one other
+// wallet-signed mutation route this crate already ships.
+
+#[derive(Debug, Deserialize)]
+pub struct BridgeLockRequest {
+    pub from: String,
+    pub amount: u128,
+    pub dest_polygon_address: String,
+    pub sig: String,
+    pub req_nonce: u64,
+}
+
+#[flux_api_macros::api(POST, "/v1/bridge/lock", summary = "Wallet-signed: lock native SIGIL into the bridge vault for minting on Polygon")]
+pub async fn bridge_lock_handler(
+    State(st): State<AppState>,
+    Json(req): Json<BridgeLockRequest>,
+) -> Json<serde_json::Value> {
+    match st.bridge.submit_lock(&req.from, req.amount, &req.dest_polygon_address, &req.sig, req.req_nonce) {
+        Ok(rec) => Json(serde_json::json!({
+            "ok": true,
+            "lock_id": rec.id,
+            "tx_hash": rec.tx_hash,
+            "vault": bridge::BridgeBridge::vault_hex(),
+            "note": "queued for the next braid block — the relayer mints on Polygon once this settles",
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LocksSinceQuery {
+    #[serde(default)]
+    pub since: u64,
+}
+
+#[flux_api_macros::api(GET, "/v1/bridge/locks", summary = "Gap-free feed of vault locks for the relayer to poll (?since=<lock_id>)")]
+pub async fn bridge_locks_handler(
+    State(st): State<AppState>,
+    Query(q): Query<LocksSinceQuery>,
+) -> Json<ApiResponse<Vec<bridge::LockRecord>>> {
+    ApiResponse::ok(st.bridge.locks_since(q.since))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BridgeUnlockRequest {
+    pub relayer: String,
+    pub to: String,
+    pub amount: u128,
+    pub polygon_burn_tx: String,
+    pub sig: String,
+    pub req_nonce: u64,
+}
+
+#[flux_api_macros::api(POST, "/v1/bridge/unlock", summary = "Relayer-signed: release SIGIL from the vault against a verified Polygon burn")]
+pub async fn bridge_unlock_handler(
+    State(st): State<AppState>,
+    Json(req): Json<BridgeUnlockRequest>,
+) -> Json<serde_json::Value> {
+    match st.bridge.submit_unlock(&req.relayer, &req.to, req.amount, &req.polygon_burn_tx, &req.sig, req.req_nonce) {
+        Ok(hash) => Json(serde_json::json!({
+            "ok": true,
+            "tx_hash": hex::encode(hash),
+            "note": "queued for the next braid block",
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BridgePauseRequest {
+    pub admin: String,
+    pub paused: bool,
+    pub sig: String,
+    pub req_nonce: u64,
+}
+
+#[flux_api_macros::api(POST, "/v1/bridge/pause", summary = "Admin-signed: freeze or unfreeze the bridge (lock + unlock both blocked while paused)")]
+pub async fn bridge_pause_handler(
+    State(st): State<AppState>,
+    Json(req): Json<BridgePauseRequest>,
+) -> Json<serde_json::Value> {
+    match st.bridge.set_paused(&req.admin, req.paused, &req.sig, req.req_nonce) {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "paused": req.paused })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BridgeRotateRelayerRequest {
+    pub admin: String,
+    pub new_relayer: String,
+    pub sig: String,
+    pub req_nonce: u64,
+}
+
+#[flux_api_macros::api(POST, "/v1/bridge/rotate_relayer", summary = "Admin-signed: replace the relayer wallet authorized to unlock funds")]
+pub async fn bridge_rotate_relayer_handler(
+    State(st): State<AppState>,
+    Json(req): Json<BridgeRotateRelayerRequest>,
+) -> Json<serde_json::Value> {
+    match st.bridge.rotate_relayer(&req.admin, &req.new_relayer, &req.sig, req.req_nonce) {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "relayer": req.new_relayer })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct BridgeStatusResponse {
+    pub vault: String,
+    pub vault_balance: String,
+    pub relayer: Option<String>,
+    pub admin: Option<String>,
+    pub paused: bool,
+    pub lock_count: usize,
+}
+
+#[flux_api_macros::api(GET, "/v1/bridge/status", summary = "Bridge vault balance, relayer/admin wallets, paused state")]
+pub async fn bridge_status_handler(State(st): State<AppState>) -> Json<ApiResponse<BridgeStatusResponse>> {
+    let vault = bridge::BRIDGE_VAULT_WALLET;
+    let vault_balance = st.state.read().map(|s| s.balance_of(&vault, &NATIVE)).unwrap_or(0);
+    ApiResponse::ok(BridgeStatusResponse {
+        vault: bridge::BridgeBridge::vault_hex(),
+        vault_balance: vault_balance.to_string(),
+        relayer: st.bridge.relayer_hex(),
+        admin: st.bridge.admin_hex(),
+        paused: st.bridge.is_paused(),
+        lock_count: st.bridge.lock_count(),
+    })
+}
+
+// ── DEX: swap / add-liquidity / remove-liquidity ────────────────────────────
+// Same three routes `sigil-rpcd` served (`/pools /swap /add_liquidity`) — but
+// against the REAL braid state (`SigilState::pools`), through the real
+// `commit_state_transition` chokepoint, not `sigil-rpcd`'s disconnected,
+// long-stale copy. See `dex` module docs for the auth + queueing shape.
+
+/// There is no persistent token-ticker registry on chain yet — `TokenDeploy`
+/// only emits an event, it doesn't leave a queryable `TokenId -> ticker`
+/// mapping behind (a real follow-on, not invented here). `sym_a`/`sym_b` are
+/// therefore best-effort display strings for the wallet's pool picker:
+/// `"SIGIL"` for the native token, otherwise the token id's first 8 hex
+/// characters — honestly a placeholder, not a real symbol lookup.
+fn display_symbol(token: &sigil_state::TokenId) -> String {
+    if *token == NATIVE {
+        "SIGIL".to_string()
+    } else {
+        hex::encode(token)[..8].to_uppercase()
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct PoolSummary {
+    pub id: String,
+    pub token_a: String,
+    pub token_b: String,
+    pub sym_a: String,
+    pub sym_b: String,
+    pub reserve_a: String,
+    pub reserve_b: String,
+    pub lp_shares: String,
+    pub fee_bps: u16,
+}
+
+/// Flat `{ok, pools:[...]}` — NOT the generic `ApiResponse<T>` envelope
+/// (whose payload nests under `.data`). The wallet's already-shipped
+/// `openSwap()` reads `j.pools` directly off the top-level response
+/// (`gui/sigil-wallet-tron-embedded.html`), same reasoning `send_handler`
+/// documents for why its own money-moving route breaks the envelope
+/// convention: match the client that already exists rather than force a
+/// UI change for a shape that isn't actually more consistent, just newer.
+#[flux_api_macros::api(GET, "/v1/pools", summary = "List every live DEX pool (reserves, LP shares, fee tier)")]
+pub async fn pools_handler(State(st): State<AppState>) -> Json<serde_json::Value> {
+    let pools: Vec<PoolSummary> = st.state.read().map(|s| {
+        s.pools_iter()
+            .map(|(id, p)| PoolSummary {
+                id: hex::encode(id),
+                token_a: hex::encode(p.token_a),
+                token_b: hex::encode(p.token_b),
+                sym_a: display_symbol(&p.token_a),
+                sym_b: display_symbol(&p.token_b),
+                reserve_a: p.reserve_a.to_string(),
+                reserve_b: p.reserve_b.to_string(),
+                lp_shares: p.lp_shares.to_string(),
+                fee_bps: p.fee_bps,
+            })
+            .collect()
+    }).unwrap_or_default();
+    Json(serde_json::json!({ "ok": true, "pools": pools }))
+}
+
+/// Body for `POST /v1/swap` — the EXACT shape the wallet already ships
+/// (`gui/sigil-wallet-tron-embedded.html`'s `doSwap`, field-for-field
+/// identical to what `sigil-rpcd` accepted, so the existing UI needed no
+/// signing-logic changes to point at the real chain): `dir` is `"AtoB"` or
+/// `"BtoA"` — which side of the pool is being sold — not a raw token id.
+#[derive(Debug, Deserialize)]
+pub struct SwapRequest {
+    pub from: String,
+    pub pool: String,
+    pub dir: String,
+    pub amount_in: u128,
+    pub min_out: u128,
+    pub sig: String,
+    pub req_nonce: u64,
+}
+
+#[flux_api_macros::api(POST, "/v1/swap", summary = "Wallet-signed: swap one token for another through a real DEX pool")]
+pub async fn swap_handler(
+    State(st): State<AppState>,
+    Json(req): Json<SwapRequest>,
+) -> Json<serde_json::Value> {
+    let Some(pool_id) = hex32(&req.pool) else {
+        return Json(serde_json::json!({ "ok": false, "error": "pool must be a 64-hex pool id" }));
+    };
+    // Resolve `dir` -> the actual input token from the LIVE pool, before
+    // authenticating — the signed message carries `dir` literally (see
+    // `dex` module docs), so this resolution never needs to be trusted, only
+    // used to build the tx once the signature over `dir` itself checks out.
+    let Some(pool) = st.state.read().ok().and_then(|s| s.pool(&pool_id).cloned()) else {
+        return Json(serde_json::json!({ "ok": false, "error": "no such pool" }));
+    };
+    let in_token = match req.dir.as_str() {
+        "AtoB" => pool.token_a,
+        "BtoA" => pool.token_b,
+        _ => return Json(serde_json::json!({ "ok": false, "error": "dir must be \"AtoB\" or \"BtoA\"" })),
+    };
+    match st.dex.submit_swap(&req.from, &req.pool, &req.dir, in_token, req.amount_in, req.min_out, &req.sig, req.req_nonce) {
+        Ok(tx_hash) => Json(serde_json::json!({
+            "ok": true,
+            "tx_hash": hex::encode(tx_hash),
+            "note": "queued for the next braid block",
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddLiquidityRequest {
+    pub from: String,
+    pub token_a: String,
+    pub token_b: String,
+    pub amt_a: u128,
+    pub amt_b: u128,
+    /// Basis points, e.g. `30` = 0.30%. Locked in on a pool's first deposit
+    /// (see `SigilTx::LpDeposit` docs); ignored-but-must-match on later ones
+    /// since the pool id is derived FROM this value.
+    pub fee_bps: u16,
+    pub sig: String,
+    pub req_nonce: u64,
+}
+
+#[flux_api_macros::api(POST, "/v1/add_liquidity", summary = "Wallet-signed: deposit a token pair into a real DEX pool, receive LP shares")]
+pub async fn add_liquidity_handler(
+    State(st): State<AppState>,
+    Json(req): Json<AddLiquidityRequest>,
+) -> Json<serde_json::Value> {
+    match st.dex.submit_lp_deposit(
+        &req.from, &req.token_a, &req.token_b, req.amt_a, req.amt_b, req.fee_bps, &req.sig, req.req_nonce,
+    ) {
+        Ok((tx_hash, pool)) => Json(serde_json::json!({
+            "ok": true,
+            "tx_hash": hex::encode(tx_hash),
+            "pool": hex::encode(pool),
+            "note": "queued for the next braid block",
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemoveLiquidityRequest {
+    pub from: String,
+    pub pool: String,
+    pub shares: u128,
+    pub sig: String,
+    pub req_nonce: u64,
+}
+
+#[flux_api_macros::api(POST, "/v1/remove_liquidity", summary = "Wallet-signed: burn LP shares, withdraw the underlying token pair")]
+pub async fn remove_liquidity_handler(
+    State(st): State<AppState>,
+    Json(req): Json<RemoveLiquidityRequest>,
+) -> Json<serde_json::Value> {
+    match st.dex.submit_lp_withdraw(&req.from, &req.pool, req.shares, &req.sig, req.req_nonce) {
+        Ok(tx_hash) => Json(serde_json::json!({
+            "ok": true,
+            "tx_hash": hex::encode(tx_hash),
+            "note": "queued for the next braid block",
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
+// ── USDS: SIGIL's native $-pegged stablecoin ────────────────────────────────
+// See `sigil_usds` crate docs for the full mechanism (105% collateral buffer
+// + the same protocol fee DEX swaps pay). Mint/redeem authenticate + queue
+// here, exactly like `dex`; the actual math runs once inside `apply_tx` when
+// the queued tx is applied — this layer adds no new consensus logic.
+
+#[derive(Debug, Serialize)]
+pub struct UsdsStatusResponse {
+    /// Committed oracle price (USD×1e8 per SIGIL). `"0"` if never set.
+    pub price: String,
+    /// SIGIL currently locked in the collateral vault.
+    pub vault_sigil: String,
+    /// Total USDS in circulation.
+    pub usds_supply: String,
+}
+
+#[flux_api_macros::api(GET, "/v1/usds/status", summary = "USDS oracle price, vault collateral, and circulating supply")]
+pub async fn usds_status_handler(State(st): State<AppState>) -> Json<ApiResponse<UsdsStatusResponse>> {
+    let (price, vault_sigil, usds_supply) = st.state.read().map(|s| {
+        (
+            sigil_oracle::read_price(&s).to_string(),
+            s.balance_of(&sigil_usds::VAULT, &NATIVE).to_string(),
+            s.balance_of(&sigil_usds::VAULT, &sigil_usds::USDS).to_string(),
+        )
+    }).unwrap_or_else(|_| ("0".into(), "0".into(), "0".into()));
+    // NOTE: `usds_supply` above reads the VAULT's own USDS balance (always
+    // 0 — the vault never holds USDS, only the SIGIL backing it); circulating
+    // supply is the sum over every OTHER holder, which this crate has no
+    // index over yet. Report price + vault collateral now (both real,
+    // useful); supply is a real follow-up once an index exists, not faked
+    // here in the meantime.
+    ApiResponse::ok(UsdsStatusResponse { price, vault_sigil, usds_supply })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UsdsMintRequest {
+    pub from: String,
+    pub sigil_amount: u128,
+    pub sig: String,
+    pub req_nonce: u64,
+}
+
+#[flux_api_macros::api(POST, "/v1/usds/mint", summary = "Wallet-signed: lock SIGIL collateral, mint USDS")]
+pub async fn usds_mint_handler(
+    State(st): State<AppState>,
+    Json(req): Json<UsdsMintRequest>,
+) -> Json<serde_json::Value> {
+    match st.usds.submit_mint(&req.from, req.sigil_amount, &req.sig, req.req_nonce) {
+        Ok(tx_hash) => Json(serde_json::json!({
+            "ok": true,
+            "tx_hash": hex::encode(tx_hash),
+            "note": "queued for the next braid block",
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UsdsRedeemRequest {
+    pub from: String,
+    pub usds_amount: u128,
+    pub sig: String,
+    pub req_nonce: u64,
+}
+
+#[flux_api_macros::api(POST, "/v1/usds/redeem", summary = "Wallet-signed: burn USDS, release SIGIL collateral")]
+pub async fn usds_redeem_handler(
+    State(st): State<AppState>,
+    Json(req): Json<UsdsRedeemRequest>,
+) -> Json<serde_json::Value> {
+    match st.usds.submit_redeem(&req.from, req.usds_amount, &req.sig, req.req_nonce) {
+        Ok(tx_hash) => Json(serde_json::json!({
+            "ok": true,
+            "tx_hash": hex::encode(tx_hash),
+            "note": "queued for the next braid block",
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
+// ── the USDS <-> Polygon bridge ─────────────────────────────────────────────
+// A second instance of the SAME lock/unlock pattern `bridge.rs` already
+// proved live — see `usds_bridge` module docs for why it's a separate
+// vault/admin/relayer instead of a generalized "any token" bridge. Every
+// mutating route here returns the same flat-JSON shape `bridge_lock_handler`
+// etc. already use.
+
+#[derive(Debug, Deserialize)]
+pub struct UsdsBridgeLockRequest {
+    pub from: String,
+    pub amount: u128,
+    pub dest_polygon_address: String,
+    pub sig: String,
+    pub req_nonce: u64,
+}
+
+#[flux_api_macros::api(POST, "/v1/usds_bridge/lock", summary = "Wallet-signed: lock USDS into the bridge vault for minting on Polygon")]
+pub async fn usds_bridge_lock_handler(
+    State(st): State<AppState>,
+    Json(req): Json<UsdsBridgeLockRequest>,
+) -> Json<serde_json::Value> {
+    match st.usds_bridge.submit_lock(&req.from, req.amount, &req.dest_polygon_address, &req.sig, req.req_nonce) {
+        Ok(rec) => Json(serde_json::json!({
+            "ok": true,
+            "lock_id": rec.id,
+            "tx_hash": rec.tx_hash,
+            "vault": usds_bridge::UsdsBridgeBridge::vault_hex(),
+            "note": "queued for the next braid block — the relayer mints on Polygon once this settles",
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
+#[flux_api_macros::api(GET, "/v1/usds_bridge/locks", summary = "Gap-free feed of USDS vault locks for the relayer to poll (?since=<lock_id>)")]
+pub async fn usds_bridge_locks_handler(
+    State(st): State<AppState>,
+    Query(q): Query<LocksSinceQuery>,
+) -> Json<ApiResponse<Vec<usds_bridge::UsdsLockRecord>>> {
+    ApiResponse::ok(st.usds_bridge.locks_since(q.since))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UsdsBridgeUnlockRequest {
+    pub relayer: String,
+    pub to: String,
+    pub amount: u128,
+    pub polygon_burn_tx: String,
+    pub sig: String,
+    pub req_nonce: u64,
+}
+
+#[flux_api_macros::api(POST, "/v1/usds_bridge/unlock", summary = "Relayer-signed: release USDS from the vault against a verified Polygon burn")]
+pub async fn usds_bridge_unlock_handler(
+    State(st): State<AppState>,
+    Json(req): Json<UsdsBridgeUnlockRequest>,
+) -> Json<serde_json::Value> {
+    match st.usds_bridge.submit_unlock(&req.relayer, &req.to, req.amount, &req.polygon_burn_tx, &req.sig, req.req_nonce) {
+        Ok(hash) => Json(serde_json::json!({
+            "ok": true,
+            "tx_hash": hex::encode(hash),
+            "note": "queued for the next braid block",
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
+#[flux_api_macros::api(POST, "/v1/usds_bridge/pause", summary = "Admin-signed: freeze or unfreeze the USDS bridge")]
+pub async fn usds_bridge_pause_handler(
+    State(st): State<AppState>,
+    Json(req): Json<BridgePauseRequest>,
+) -> Json<serde_json::Value> {
+    match st.usds_bridge.set_paused(&req.admin, req.paused, &req.sig, req.req_nonce) {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "paused": req.paused })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
+#[flux_api_macros::api(POST, "/v1/usds_bridge/rotate_relayer", summary = "Admin-signed: replace the USDS bridge's relayer wallet")]
+pub async fn usds_bridge_rotate_relayer_handler(
+    State(st): State<AppState>,
+    Json(req): Json<BridgeRotateRelayerRequest>,
+) -> Json<serde_json::Value> {
+    match st.usds_bridge.rotate_relayer(&req.admin, &req.new_relayer, &req.sig, req.req_nonce) {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "relayer": req.new_relayer })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct UsdsBridgeStatusResponse {
+    pub vault: String,
+    pub vault_balance: String,
+    pub relayer: Option<String>,
+    pub admin: Option<String>,
+    pub paused: bool,
+    pub lock_count: usize,
+}
+
+#[flux_api_macros::api(GET, "/v1/usds_bridge/status", summary = "USDS bridge vault balance, relayer/admin wallets, paused state")]
+pub async fn usds_bridge_status_handler(State(st): State<AppState>) -> Json<ApiResponse<UsdsBridgeStatusResponse>> {
+    let vault = usds_bridge::USDS_BRIDGE_VAULT_WALLET;
+    let vault_balance = st.state.read().map(|s| s.balance_of(&vault, &sigil_usds::USDS)).unwrap_or(0);
+    ApiResponse::ok(UsdsBridgeStatusResponse {
+        vault: usds_bridge::UsdsBridgeBridge::vault_hex(),
+        vault_balance: vault_balance.to_string(),
+        relayer: st.usds_bridge.relayer_hex(),
+        admin: st.usds_bridge.admin_hex(),
+        paused: st.usds_bridge.is_paused(),
+        lock_count: st.usds_bridge.lock_count(),
+    })
 }
 
 // ── mining on the braid ─────────────────────────────────────────────────────
@@ -386,6 +1055,11 @@ pub async fn mining_submit(
     Json(result)
 }
 
+#[flux_api_macros::api(GET, "/v1/dagknight/recent", summary = "Recent finalized blocks with v2 GHOSTDAG blue/red coloring, for the DagKnight visualization")]
+pub async fn dagknight_recent(State(st): State<AppState>) -> Json<ApiResponse<dagknight::DagSnapshot>> {
+    ApiResponse::ok(st.dagknight.get())
+}
+
 #[flux_api_macros::api(GET, "/v1/mining/miners", summary = "Live mining power and accept/reject counters")]
 pub async fn mining_miners(State(st): State<AppState>) -> Json<ApiResponse<MinersResponse>> {
     let (net_hps, live_miners, blocks, shares, rejects) = st.mining.stats(now_ms());
@@ -406,20 +1080,46 @@ pub fn router(state: AppState) -> Router {
     use tower_http::cors::CorsLayer;
     Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/search", get(search_handler))
         .route("/v1/balance", get(balance))
         .route("/v1/supply", get(supply))
         .route("/v1/transactions", post(submit_transaction))
         .route("/v1/transactions/:hash", get(tx_status))
         .route("/v1/send", post(send_handler))
+        .route("/v1/shield", post(shield_handler))
+        .route("/v1/shielded_send", post(shielded_send_handler))
+        .route("/v1/unshield", post(unshield_handler))
+        .route("/v1/shielded/anchor", get(shielded_anchor_handler))
         .route("/v1/eth/usdc", get(eth_usdc_handler))
         .route("/v1/mining/challenge", get(mining_challenge))
         .route("/v1/mining/submit", post(mining_submit))
         .route("/v1/mining/miners", get(mining_miners))
+        .route("/v1/dagknight/recent", get(dagknight_recent))
+        .route("/v1/bridge/lock", post(bridge_lock_handler))
+        .route("/v1/bridge/locks", get(bridge_locks_handler))
+        .route("/v1/bridge/unlock", post(bridge_unlock_handler))
+        .route("/v1/bridge/pause", post(bridge_pause_handler))
+        .route("/v1/bridge/rotate_relayer", post(bridge_rotate_relayer_handler))
+        .route("/v1/bridge/status", get(bridge_status_handler))
+        .route("/v1/pools", get(pools_handler))
+        .route("/v1/swap", post(swap_handler))
+        .route("/v1/add_liquidity", post(add_liquidity_handler))
+        .route("/v1/remove_liquidity", post(remove_liquidity_handler))
+        .route("/v1/usds/status", get(usds_status_handler))
+        .route("/v1/usds/mint", post(usds_mint_handler))
+        .route("/v1/usds/redeem", post(usds_redeem_handler))
+        .route("/v1/usds_bridge/lock", post(usds_bridge_lock_handler))
+        .route("/v1/usds_bridge/locks", get(usds_bridge_locks_handler))
+        .route("/v1/usds_bridge/unlock", post(usds_bridge_unlock_handler))
+        .route("/v1/usds_bridge/pause", post(usds_bridge_pause_handler))
+        .route("/v1/usds_bridge/rotate_relayer", post(usds_bridge_rotate_relayer_handler))
+        .route("/v1/usds_bridge/status", get(usds_bridge_status_handler))
         // Wire-compatible aliases: a rig pointed at the rpcd paths keeps working
         // when its URL moves to the braid node.
         .route("/api/v1/mining/challenge", get(mining_challenge))
         .route("/api/v1/mining/submit", post(mining_submit))
         .route("/api/v1/mining/miners", get(mining_miners))
+        .route("/api/v1/dagknight/recent", get(dagknight_recent))
         // Wallet-compatible aliases (2026-08-16): sigil-top's embedded wallet
         // (gui/sigil-wallet-tron-embedded.html) calls these exact /api/v1/...
         // paths same-origin through its proxy, which defaults to rpcd
@@ -432,9 +1132,11 @@ pub fn router(state: AppState) -> Router {
         // wrapped ApiResponse envelope), so no client-side change is needed —
         // only routing the request here actually reaches live data. Only
         // balance is aliased in this pass (the specific complaint); a real
-        // /api/v1/status + /api/v1/recent + /api/v1/search port (transaction
-        // history needs indexing this API doesn't have yet) is separate,
-        // larger follow-up work, not done here.
+        // /api/v1/status + /api/v1/recent port is separate, larger follow-up
+        // work, not done here. /api/v1/search WAS the other half of that
+        // gap — it's done now (2026-08-20): real indexing via
+        // sigil-node's search_index.rs, tailing ChainLog in the background.
+        .route("/api/v1/search", get(search_handler))
         .route("/api/v1/balance", get(balance))
         .route("/api/v1/supply", get(supply))
         // The wallet's `doSend` posts here directly (gui/sigil-wallet-tron-
@@ -444,6 +1146,19 @@ pub fn router(state: AppState) -> Router {
         // as a fake "200 OK" with an unparseable body.
         .route("/api/v1/send", post(send_handler))
         .route("/api/v1/eth/usdc", get(eth_usdc_handler))
+        .route("/api/v1/pools", get(pools_handler))
+        .route("/api/v1/swap", post(swap_handler))
+        .route("/api/v1/add_liquidity", post(add_liquidity_handler))
+        .route("/api/v1/remove_liquidity", post(remove_liquidity_handler))
+        .route("/api/v1/usds/status", get(usds_status_handler))
+        .route("/api/v1/usds/mint", post(usds_mint_handler))
+        .route("/api/v1/usds/redeem", post(usds_redeem_handler))
+        .route("/api/v1/usds_bridge/lock", post(usds_bridge_lock_handler))
+        .route("/api/v1/usds_bridge/locks", get(usds_bridge_locks_handler))
+        .route("/api/v1/usds_bridge/unlock", post(usds_bridge_unlock_handler))
+        .route("/api/v1/usds_bridge/pause", post(usds_bridge_pause_handler))
+        .route("/api/v1/usds_bridge/rotate_relayer", post(usds_bridge_rotate_relayer_handler))
+        .route("/api/v1/usds_bridge/status", get(usds_bridge_status_handler))
         .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024))
         .layer(tower_http::timeout::TimeoutLayer::new(Duration::from_secs(30)))
         .layer(CorsLayer::permissive())

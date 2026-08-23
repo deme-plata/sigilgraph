@@ -669,6 +669,9 @@ fn run_start() -> Result<()> {
         // `mining_bridge`. See `sigil_api::send` module docs for why this is
         // a bridge instead of routing through `Mempool::ingest`.
         let send_bridge = Arc::new(sigil_api::send::SendBridge::new());
+        // PV-1 private transfers. Drained on the same contract as `send_bridge`:
+        // re-embedded into every candidate, retired only when one lands on the spine.
+        let shielded_bridge = Arc::new(sigil_api::shielded::ShieldedBridge::new());
         // SIGIL <-> Polygon bridge — admin/relayer are real SIGIL wallet
         // addresses (32-byte Ed25519 pubkeys), NOT Polygon/EVM addresses;
         // configured via env so no key material is ever hardcoded in source.
@@ -709,6 +712,7 @@ fn run_start() -> Result<()> {
                     state: Arc::clone(&shared),
                     mining: Arc::clone(&mining_bridge),
                     send: Arc::clone(&send_bridge),
+                    shielded: Arc::clone(&shielded_bridge),
                     bridge: Arc::clone(&bridge_bridge),
                     dex: Arc::clone(&dex_bridge),
                     usds: Arc::clone(&usds_bridge),
@@ -1270,6 +1274,7 @@ fn run_start() -> Result<()> {
                         let mut v: Vec<SignedTx> =
                             if txgen > 0 { mempool.pull(txgen) } else { Vec::new() };
                         v.extend(send_bridge.snapshot_for_mint());
+                        v.extend(shielded_bridge.snapshot_for_mint());
                         v.extend(bridge_bridge.snapshot_for_mint());
                         v.extend(dex_bridge.snapshot_for_mint());
                         v.extend(usds_bridge.snapshot_for_mint());
@@ -1346,6 +1351,7 @@ fn run_start() -> Result<()> {
                                         // ARE the hashes that just landed.
                                         if !minted_tx_hashes.is_empty() {
                                             send_bridge.confirm_applied(&minted_tx_hashes);
+                                            shielded_bridge.confirm_applied(&minted_tx_hashes);
                                             bridge_bridge.confirm_applied(&minted_tx_hashes);
                                             dex_bridge.confirm_applied(&minted_tx_hashes);
                                             usds_bridge.confirm_applied(&minted_tx_hashes);
@@ -2942,7 +2948,20 @@ fn near_miss_credit(s: sigil_api::mining::AcceptedSolve) -> sigil_api::mining::A
 
 /// How many entries `take_creditable_solve` will pop-and-check in a single tick before
 /// giving up. See that function's doc for why this exists.
-const SOLVE_SCAN_MAX: u32 = 64;
+///
+/// 2026-08-23 (grogu-mining-balance-instant): raised 64 → 512 (matching `SOLVE_QUEUE_CAP`,
+/// so a fully-saturated queue can be entirely drained in one pass). Live-measured on
+/// Epsilon: `queued_solves` was PERMANENTLY PINNED at exactly 512 (the queue cap) for the
+/// whole observation window while `shares_accepted` climbed at ~45-50/s from 4 live
+/// miners — arrival rate vastly exceeded the old 64-per-tick drain rate, so the queue
+/// stayed full and every new accepted share silently evicted the oldest still-unpaid one
+/// (FIFO overflow). That's a real, ongoing loss of already-verified mining credit, not a
+/// display bug — confirmed live by an operator whose real, funded wallet balance never
+/// rose despite active mining. Scanning is cheap (no I/O, just VecDeque pops + integer
+/// compares), so 512 costs negligible tick time; it does NOT change any verification or
+/// acceptance rule, only how many already-accepted entries get checked for payout per
+/// round.
+const SOLVE_SCAN_MAX: u32 = 512;
 
 /// v7.1.41 (grogu-sync-perf, 2026-08-19, operator-directed — "all mining rewards should
 /// go to miners"): `MiningBridge::take_solve()` pops exactly ONE FIFO entry per call, with

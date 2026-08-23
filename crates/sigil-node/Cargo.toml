@@ -26,6 +26,12 @@ hex        = { workspace = true }
 ed25519-dalek = { version = "2.2" }
 anyhow     = { workspace = true }
 tokio      = { workspace = true }
+# 2026-08-20: RUST_LOG was inert for this binary — no subscriber was ever installed,
+# so every tracing::{info,debug,warn}! call in dependencies (flux-p2p's gossipsub
+# mesh/graft/prune diagnostics included) was silently dropped regardless of the env
+# var, on every node including Epsilon. Wired up in main() to actually see it.
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bincode    = "1"
 # v0.33 zstd wire (encode side): codec=1 backfill replies as 'Z'+zstd-1. Measured 14.0×
 # on real header chunks. Server is linux-only, so the C-backed zstd crate is fine here
@@ -38,6 +44,7 @@ lz4        = "1"
 
 sigil-header  = { path = "../sigil-header" }
 sigil-handshake = { path = "../sigil-handshake" } # H2 verify-before-sync
+sigil-shield = { path = "../sigil-shield" }
 sigil-state   = { path = "../sigil-state" }
 sigil-emission = { path = "../sigil-emission" } # ONE-CHAIN step 1: block reward for braid coinbase
 sigil-bank    = { path = "../sigil-bank" } # pool-share coinbase: master/commons dev-fee split

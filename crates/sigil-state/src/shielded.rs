@@ -40,6 +40,8 @@ use std::collections::{BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
+use crate::WalletId;
+
 /// Tree depth for the shielded pool. `DEPTH + 1` must be a power of two because the
 /// spend AIR's trace length is `(DEPTH+1)·64`; 15 gives a 32,768-note anonymity set.
 pub const POOL_DEPTH: usize = 15;
@@ -193,6 +195,25 @@ pub struct ShieldedPool {
     /// serving a stale cached value.
     #[serde(skip)]
     pub(crate) anchors_dirty: bool,
+
+    // ── APPEND AFTER THIS LINE ONLY ─────────────────────────────────────────
+    // Same positional-encoding rule as `SigilState::shielded`: rmp_serde writes structs
+    // as arrays, so a field inserted above shifts every later one when an older snapshot
+    // is read. New fields go last, with `#[serde(default)]`.
+    /// Wallets that have published a shielded public key, so value destined for them can
+    /// be minted straight into the pool instead of landing transparently.
+    ///
+    /// Registration is one transparent transaction and is permanent-by-default: it is how
+    /// a miner says "pay me privately from now on". A wallet that never registers keeps
+    /// receiving transparent rewards, so this cannot break an existing miner.
+    #[serde(default)]
+    pub(crate) addresses: std::collections::BTreeMap<WalletId, [u8; 32]>,
+
+    /// Derived index over `notes`, rebuilt on demand. `serde(skip)` because it is a cache:
+    /// persisting it would create a second copy of the truth that could drift from
+    /// `notes`, which is exactly the class of bug that killed `sigil-rpcd`.
+    #[serde(skip)]
+    pub(crate) tree: Option<sigil_shield::note_v1::IncrementalTree>,
 }
 
 /// How many historical roots stay spendable. At one root per block this is a ~256-block
@@ -252,9 +273,36 @@ impl ShieldedPool {
     /// An incremental append-only root is the known optimization and is NOT done yet,
     /// because a wrong incremental root is a consensus split.
     pub(crate) fn refresh_anchor(&mut self) {
-        let root = self.current_root();
+        let root = self.current_root_fast();
         self.push_anchor(root);
         self.anchors_dirty = false;
+    }
+
+    /// The shielded key a wallet has published, if any.
+    pub fn shielded_address(&self, wallet: &WalletId) -> Option<[u8; 32]> {
+        self.addresses.get(wallet).copied()
+    }
+
+    pub fn registered_addresses(&self) -> usize {
+        self.addresses.len()
+    }
+
+    /// Publish a wallet's shielded key. Re-registering replaces it — a user who loses a
+    /// seed must be able to redirect future income without abandoning the wallet.
+    pub(crate) fn set_address(&mut self, wallet: WalletId, pk: [u8; 32]) {
+        self.addresses.insert(wallet, pk);
+    }
+
+    /// The incremental tree over `notes`, rebuilt if this pool was just deserialized.
+    fn tree_mut(&mut self) -> &mut sigil_shield::note_v1::IncrementalTree {
+        if self.tree.is_none() {
+            let mut t = sigil_shield::note_v1::IncrementalTree::new();
+            for cm in &self.notes {
+                t.append(sigil_shield::note_v1::from_wire(cm).unwrap_or_default());
+            }
+            self.tree = Some(t);
+        }
+        self.tree.as_mut().unwrap()
     }
 
     /// The current anonymity-set root, as the circuit computes it.
@@ -269,6 +317,16 @@ impl ShieldedPool {
     /// because a root that differs from the circuit's is a silent, total outage.
     pub fn current_root(&self) -> [u8; 32] {
         sigil_shield::note_v1::sparse_pool_root_wire(&self.notes, POOL_CAPACITY)
+    }
+
+    /// The same root via the incremental tree — O(depth) rather than O(notes).
+    ///
+    /// Proven equal to [`current_root`] by `sigil_shield::note_v1::tests::
+    /// incremental_matches_sparse_at_every_size`, and re-checked here against live pool
+    /// contents by `incremental_root_agrees_with_sparse`.
+    pub(crate) fn current_root_fast(&mut self) -> [u8; 32] {
+        let t = self.tree_mut();
+        sigil_shield::note_v1::to_wire(t.root(POOL_CAPACITY))
     }
 
     /// Has this nullifier been spent?
@@ -308,6 +366,9 @@ impl ShieldedPool {
             return Err(ShieldedError::PoolFull);
         }
         let position = self.notes.len();
+        // keep the incremental index in step with the source of truth
+        let leaf = sigil_shield::note_v1::from_wire(&cm).unwrap_or_default();
+        self.tree_mut().append(leaf);
         self.notes.push(cm);
         Ok(position)
     }

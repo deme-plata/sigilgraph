@@ -540,6 +540,18 @@ pub enum StateMutation {
     /// Set a contract storage slot.
     SetContractSlot { contract: ContractId, slot: SlotId, value: [u8; 32] },
 
+    /// PV-1: publish a wallet's shielded public key.
+    ///
+    /// One transparent transaction that redirects a wallet's future income into the pool:
+    /// after it, block rewards for this wallet are minted as shielded notes instead of a
+    /// transparent balance. A wallet that never registers keeps receiving transparent
+    /// rewards, so this cannot break an existing miner.
+    ///
+    /// The key is PUBLIC by nature — `compress2` is one-way, so publishing it never
+    /// exposes the spend key. What it does expose is that this wallet intends to receive
+    /// privately, which is unavoidable: someone has to be told where to send.
+    RegisterShieldedAddress { wallet: WalletId, pk_shield: [u8; 32] },
+
     /// PV-1: move value from a transparent wallet into the shielded pool.
     ///
     /// Debits `amount` from `(from, NATIVE)` and appends `cm` as a note commitment worth
@@ -550,6 +562,33 @@ pub enum StateMutation {
         #[serde(with = "u128_str")]
         amount: u128,
         /// `compress2(amount, blinding)` — the note the depositor can later spend.
+        cm: [u8; 32],
+    },
+
+    /// PV-1: mint a block reward DIRECTLY into the shielded pool.
+    ///
+    /// Distinct from [`Shield`](StateMutation::Shield) in two ways that matter:
+    ///
+    /// It has no transparent source — the value is newly emitted, so nothing is debited
+    /// and `native_supply` is untouched; the reward enters the shielded domain instead of
+    /// the transparent one. The 21M cap still governs, because it is checked against
+    /// `native_supply + value_locked`.
+    ///
+    /// And it is EXEMPT from the denomination rule, deliberately. Denominations exist to
+    /// stop shield/unshield value correlation across the transparent boundary, and a
+    /// coinbase has no transparent side to correlate with: the reward amount is already
+    /// public and already bound to its block. Forcing the ladder on it measured 11.9 notes
+    /// per block instead of 1 — a twelve-fold cost in pool capacity and proving work for
+    /// zero privacy gain.
+    ShieldedCoinbase {
+        /// Recipient's shielded key, from the registry. Recorded so a verifier can
+        /// recompute the commitment.
+        pk_shield: [u8; 32],
+        #[serde(with = "u128_str")]
+        amount: u128,
+        /// `compress2(compress2(amount, blinding), pk_shield)`, with the blinding derived
+        /// deterministically from `(height, pk_shield)` so the miner can recompute and
+        /// spend it without any ciphertext being published.
         cm: [u8; 32],
     },
 
@@ -1049,6 +1088,10 @@ pub fn commit_state_transition(
             }
 
             // ── PV-1 shielded pool ───────────────────────────────────────────────────
+            StateMutation::RegisterShieldedAddress { wallet, pk_shield } => {
+                state.shielded.set_address(wallet, pk_shield);
+            }
+
             StateMutation::Shield { from, amount, cm } => {
                 // RAMP DENOMINATION. The transparent side of a ramp names a wallet and an
                 // amount, so an unusual amount links the two sides without touching any
@@ -1069,6 +1112,15 @@ pub fn commit_state_transition(
                 state.shielded.lock_value(amount)?;
                 state.shielded.append_note(cm)?;
                 state.set_balance(from, NATIVE, after);
+                state.shielded.remember_anchor_dirty();
+            }
+
+            StateMutation::ShieldedCoinbase { pk_shield: _, amount, cm } => {
+                // Newly emitted value: nothing is debited, and it enters the shielded
+                // domain rather than the transparent one. No denomination check — see the
+                // variant's docs for why that is a deliberate exemption rather than a gap.
+                state.shielded.lock_value(amount)?;
+                state.shielded.append_note(cm)?;
                 state.shielded.remember_anchor_dirty();
             }
 

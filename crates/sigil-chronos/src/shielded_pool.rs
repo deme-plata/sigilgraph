@@ -24,8 +24,10 @@ use std::time::Instant;
 use sigil_shield::note_v1::{padding_leaf_wire, to_wire, Note};
 use sigil_state::shielded::{is_denomination, DENOMINATIONS, POOL_CAPACITY, POOL_DEPTH};
 use sigil_state::{
-    commit_state_transition, SigilState, StateMutation, StateTransition, NATIVE,
+    commit_state_transition, SigilState, StateMutation, StateTransition, WalletId, NATIVE,
 };
+use sigil_shield::mimc::compress2;
+use winterfell::math::fields::f64::BaseElement;
 
 /// A deterministic pseudo-random stream. `Math.random` equivalents are banned in
 /// reproducible harnesses for the obvious reason.
@@ -233,6 +235,101 @@ pub fn amount_bucket_sizes(events: &[u128]) -> Vec<usize> {
     sizes
 }
 
+/// What shielded mining rewards actually produce, run as a simulated chain.
+#[derive(Debug, Clone)]
+pub struct CoinbaseFillResult {
+    pub blocks: usize,
+    pub miners: usize,
+    pub notes: usize,
+    pub value_locked: u128,
+    /// Per-block anchor cost at the END of the run — the number that decides whether this
+    /// is sustainable on the producer's critical path.
+    pub final_anchor_ms: f64,
+    /// Distinct owners holding notes. THIS is the anonymity set; note count alone is
+    /// meaningless if one entity owns everything.
+    pub distinct_owners: usize,
+}
+
+/// Simulate `blocks` blocks of shielded coinbase across `miners` independent producers.
+///
+/// Rewards vary per block, as they do on a real chain, so the run exercises the
+/// denomination-exemption path rather than a tidy round number.
+pub fn simulate_coinbase_fill(blocks: usize, miners: usize, seed: u64) -> CoinbaseFillResult {
+    let mut rng = Rng::new(seed);
+    let mut state = SigilState::default();
+
+    // Each miner registers a shielded key once.
+    let keys: Vec<(WalletId, [u8; 32])> = (0..miners)
+        .map(|i| {
+            let w = [i as u8 + 1; 32];
+            let sk = BaseElement::new(0xA000 + i as u64);
+            let pk = to_wire(compress2(sk, BaseElement::new(sigil_shield::spend_full_v4::PK_DOMAIN)));
+            (w, pk)
+        })
+        .collect();
+    commit_state_transition(
+        &mut state,
+        &StateTransition {
+            at_height: 1,
+            mutations: keys
+                .iter()
+                .map(|(w, pk)| StateMutation::RegisterShieldedAddress { wallet: *w, pk_shield: *pk })
+                .collect(),
+        },
+        1,
+    )
+    .expect("registration");
+
+    let mut owners: std::collections::BTreeSet<[u8; 32]> = Default::default();
+    for b in 0..blocks {
+        let h = 2 + b as u64;
+        let (_, pk) = keys[(rng.next() as usize) % miners];
+        // realistic, non-round reward
+        let reward = 200_000_000u128 + (rng.next() % 5_000_000) as u128;
+        let cm = sigil_shield::note_v1::coinbase_commitment_wire(h, &pk, reward)
+            .expect("reward within range");
+        commit_state_transition(
+            &mut state,
+            &StateTransition {
+                at_height: h,
+                mutations: vec![StateMutation::ShieldedCoinbase { pk_shield: pk, amount: reward, cm }],
+            },
+            h,
+        )
+        .expect("shielded coinbase must commit");
+        owners.insert(pk);
+    }
+
+    // Measure what PRODUCTION pays, not what is convenient to call. `current_root()` is
+    // the sparse O(notes) reference; the producer goes through `commit_state_transition`,
+    // which calls `refresh_anchor` -> `current_root_fast` (the incremental tree). Timing
+    // the reference instead would have reported linear growth and called it flat.
+    let h = 2 + blocks as u64;
+    let (_, pk) = keys[0];
+    let reward = 200_000_001u128;
+    let cm = sigil_shield::note_v1::coinbase_commitment_wire(h, &pk, reward).unwrap();
+    let t0 = Instant::now();
+    commit_state_transition(
+        &mut state,
+        &StateTransition {
+            at_height: h,
+            mutations: vec![StateMutation::ShieldedCoinbase { pk_shield: pk, amount: reward, cm }],
+        },
+        h,
+    )
+    .expect("final block");
+    let final_anchor_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    CoinbaseFillResult {
+        blocks,
+        miners,
+        notes: state.shielded().len(),
+        value_locked: state.shielded().value_locked(),
+        final_anchor_ms,
+        distinct_owners: owners.len(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,6 +438,65 @@ mod tests {
             sizes[0] < 2,
             "PRIVACY: a bucket of one means that user is fully identified by amount alone, \
              regardless of the cryptography"
+        );
+    }
+}
+
+#[cfg(test)]
+mod coinbase_tests {
+    use super::*;
+
+    /// THE POINT OF SHIELDED COINBASE: one note per block, many independent owners, and a
+    /// per-block cost that does not grow with the pool.
+    #[test]
+    fn shielded_coinbase_fills_the_pool_with_independent_owners() {
+        let r = simulate_coinbase_fill(2_000, 8, 0xC0FFEE);
+        println!("\n  SHIELDED COINBASE — {} blocks, {} miners", r.blocks, r.miners);
+        println!("  ────────────────────────────────────────");
+        println!("  notes minted        : {}", r.notes);
+        println!("  distinct owners     : {}  <- THE anonymity set", r.distinct_owners);
+        println!("  value locked        : {}", r.value_locked);
+        println!("  final anchor cost   : {:.2} ms", r.final_anchor_ms);
+
+        assert_eq!(
+            r.notes, r.blocks + 1, // +1 for the measured final block
+            "ONE note per block — the denomination exemption is what buys this; forcing the \
+             ladder measured 11.9 notes per block for zero privacy gain"
+        );
+        assert_eq!(
+            r.distinct_owners, r.miners,
+            "every registered miner must own notes — otherwise the pool is one entity's \
+             notes wearing different hats, and the anonymity set is 1"
+        );
+        assert!(r.value_locked > 0);
+    }
+
+    /// The cost must be flat in pool size, or shielded coinbase eventually stalls the
+    /// producer. This is the property the incremental tree exists to provide.
+    #[test]
+    fn per_block_cost_stays_flat_as_the_pool_grows() {
+        let small = simulate_coinbase_fill(200, 4, 1);
+        let large = simulate_coinbase_fill(4_000, 4, 1);
+        println!(
+            "\n  anchor cost: {} notes -> {:.2} ms   |   {} notes -> {:.2} ms",
+            small.notes, small.final_anchor_ms, large.notes, large.final_anchor_ms
+        );
+        // 20x the notes must not cost anywhere near 20x the time. A linear result means
+        // the incremental tree is NOT on the path being measured, which is exactly the
+        // mistake this assertion exists to catch.
+        let growth = large.final_anchor_ms / small.final_anchor_ms.max(0.001);
+        println!("  growth factor for 20x the notes: {growth:.1}x  (linear would be ~20x)");
+        assert!(
+            growth < 5.0,
+            "per-block cost grew {growth:.1}x for 20x the notes — that is linear, so the \
+             incremental tree is not on the production path and the pool will stall as it \
+             fills"
+        );
+        assert!(
+            large.final_anchor_ms < 50.0,
+            "per-block cost {:.1} ms at {} notes would eat the block budget",
+            large.final_anchor_ms,
+            large.notes
         );
     }
 }

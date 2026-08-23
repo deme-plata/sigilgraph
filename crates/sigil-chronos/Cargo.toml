@@ -96,6 +96,7 @@ sigil-events = { path = "../sigil-events" }
 sigil-tx     = { path = "../sigil-tx" }
 # shielded_pool.rs: fill the pool to capacity and measure what real usage would cost.
 sigil-shield = { path = "../sigil-shield" }
+winterfell = "0.9"
 sigil-bank   = { path = "../sigil-bank" }
 sigil-tip-proof = { path = "../sigil-tip-proof" }
 sigil-dagknight = { path = "../sigil-dagknight" }

@@ -420,6 +420,38 @@ impl IncrementalTree {
     }
 }
 
+/// The blinding for a block reward paid into the shielded pool.
+///
+/// PUBLICLY DERIVABLE, and that is correct here rather than a weakness. A blinding hides
+/// the amount by preventing brute-force over a small value space — but a coinbase amount
+/// is already public and already bound to its block, so there is nothing left to hide at
+/// creation. Making it derivable buys the property that matters: the miner can recompute
+/// its own note from `(height, pk)` alone and spend it, with NO ciphertext published and
+/// no registration beyond the one-time key.
+///
+/// Anonymity for a coinbase note therefore arrives at SPEND time, not mint time. Everyone
+/// can see which leaf is whose reward; nobody can see which leaf a later spend consumed,
+/// because the nullifier does not name it. That is the same trade Zcash makes for shielded
+/// coinbase, and it is the reason this fills a pool without any coordination.
+pub fn coinbase_blinding(height: u64, pk_shield: BaseElement) -> BaseElement {
+    compress2(compress2(BaseElement::new(height), pk_shield), BaseElement::new(0x5349_4749_4C5F_4342))
+}
+
+/// The commitment a shielded block reward mints, and what a miner recomputes to find it.
+pub fn coinbase_commitment(height: u64, pk_shield: BaseElement, amount: u64) -> BaseElement {
+    let blinding = coinbase_blinding(height, pk_shield);
+    compress2(compress2(BaseElement::new(amount), blinding), pk_shield)
+}
+
+/// Wire-level form for consensus.
+pub fn coinbase_commitment_wire(height: u64, pk_shield: &[u8; 32], amount: u128) -> Option<[u8; 32]> {
+    let pk = from_wire(pk_shield).ok()?;
+    if amount >= (1u128 << RANGE_BITS) {
+        return None;
+    }
+    Some(to_wire(coinbase_commitment(height, pk, amount as u64)))
+}
+
 /// [`sparse_pool_root`] over wire-encoded real notes. The consensus entry point.
 pub fn sparse_pool_root_wire(notes: &[[u8; 32]], capacity: usize) -> [u8; 32] {
     let elems: Vec<BaseElement> = notes

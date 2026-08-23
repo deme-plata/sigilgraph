@@ -177,9 +177,32 @@ pub fn build_block_body_for(
     // 1. coinbase first
     let reward = reward.unwrap_or_else(|| sigil_emission::block_reward(height));
     if reward > 0 {
-        let bal = work.balance_of(&producer, &NATIVE);
-        let cb = StateMutation::SetBalance {
-            wallet: producer, token: NATIVE, amount: bal.saturating_add(reward),
+        // SHIELDED COINBASE (2026-08-23). If this producer has published a shielded key,
+        // the reward is minted straight into the pool instead of landing transparently.
+        //
+        // This is the only mechanism that grows the anonymity set without asking anyone to
+        // change what they do: every miner who registers once becomes a pool participant
+        // at block rate, with independently-funded notes — which is the difference between
+        // a crowd and one entity's notes wearing different hats.
+        //
+        // Falls back to the transparent credit when the producer has NOT registered, so an
+        // existing miner is never broken by this.
+        let cb = match work.shielded().shielded_address(&producer) {
+            Some(pk) => match sigil_shield::note_v1::coinbase_commitment_wire(height, &pk, reward) {
+                Some(cm) => StateMutation::ShieldedCoinbase { pk_shield: pk, amount: reward, cm },
+                // An unrepresentable reward (past the circuit's range bound) must not
+                // silently vanish — pay it transparently rather than mint nothing.
+                None => StateMutation::SetBalance {
+                    wallet: producer,
+                    token: NATIVE,
+                    amount: work.balance_of(&producer, &NATIVE).saturating_add(reward),
+                },
+            },
+            None => StateMutation::SetBalance {
+                wallet: producer,
+                token: NATIVE,
+                amount: work.balance_of(&producer, &NATIVE).saturating_add(reward),
+            },
         };
         if sigil_state::commit_state_transition(
             &mut work, &StateTransition { at_height: height, mutations: vec![cb.clone()] }, height,

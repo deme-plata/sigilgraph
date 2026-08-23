@@ -15,6 +15,8 @@ mod snapshot;
 mod rate_governor;
 mod ingest;
 mod sync_auth;
+mod search_index;
+mod producer_signing;
 
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -194,6 +196,17 @@ fn trusted_release_keys() -> Vec<Vec<u8>> {
 }
 
 fn main() -> ExitCode {
+    // 2026-08-20: without this, RUST_LOG was completely inert for this binary — no
+    // tracing subscriber was ever installed, so every tracing::{info,debug,warn}!
+    // call anywhere in the dependency graph (flux-p2p's gossipsub mesh/graft/prune
+    // diagnostics included) was silently dropped, on every node including Epsilon.
+    // Purely additive: respects RUST_LOG exactly like eprintln! output already did
+    // NOT respect it (application logging here uses hardcoded eprintln!, unaffected).
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
+
     let args: Vec<String> = std::env::args().collect();
 
     // v0.36.1 snapshot subcommands, dispatched here ahead of Cli::parse —
@@ -473,7 +486,15 @@ fn run_start() -> Result<()> {
                     // Continuity gate: the snapshot's tip block must BE the chain.log
                     // block at the same height — rejects snapshots from a diverged
                     // chain or a truncated/rewritten log before any state is trusted.
-                    let log_tip_hash = chain_log.get(snap.snapshot_height).map(|b| b.hash());
+                    //
+                    // 2026-08-20: `get_by_height` (verifies the real height field),
+                    // not `get` (trusts array-position == height, which `open()`'s
+                    // startup scan doesn't actually guarantee — see its doc comment
+                    // in chain_log.rs). Was `chain_log.get(...)` — that mismatch is
+                    // exactly what caused every single restart to report a false
+                    // "doesn't match" and fall back to a full replay, even though
+                    // the snapshot was never actually corrupt or diverged.
+                    let log_tip_hash = chain_log.get_by_height(snap.snapshot_height).map(|b| b.hash());
                     if snap.tip_block_hash() != log_tip_hash {
                         eprintln!("⚠ snapshot tip @H={} does not match chain.log at that height — falling back to full replay",
                             snap.snapshot_height);
@@ -485,7 +506,15 @@ fn run_start() -> Result<()> {
                             if restored.apply(b).is_ok() { tail_applied += 1; }
                         }) {
                             Ok(tail_read) => {
-                                if restored.height() == chain_log.height() {
+                                // 2026-08-20 (part 2 of the same bug): `chain_log.height()`
+                                // is the raw ON-DISK RECORD COUNT, which carries the exact
+                                // same +1077 historical anomaly as the lookup above — it is
+                                // NOT reliably "real tip height + 1" post-restart. Compare
+                                // against `tip_real_height()` (reads the last record's own
+                                // `header.height` field) instead, so a healthy snapshot boot
+                                // isn't rejected by a unit mismatch (count vs. real height).
+                                let log_next_height = chain_log.tip_real_height().map(|h| h + 1);
+                                if Some(restored.height()) == log_next_height {
                                     chain = restored;
                                     booted_from_snapshot = true;
                                     eprintln!("⚡ snapshot boot: H={} + tail {} blocks ({:.1}s) → resuming at H={} (window base {})",
@@ -496,8 +525,8 @@ fn run_start() -> Result<()> {
                                     // Producing from here would append diverging heights to the
                                     // live log (the 2026-06-10 corruption mode) — full replay
                                     // instead, which hits the L2 guard if truly incompatible.
-                                    eprintln!("⚠ snapshot boot incomplete: chain H={} vs log {} (tail read {}, applied {}) — falling back to full replay",
-                                        restored.height(), chain_log.height(), tail_read, tail_applied);
+                                    eprintln!("⚠ snapshot boot incomplete: chain H={} vs log real-tip-next {:?} (tail read {}, applied {}) — falling back to full replay",
+                                        restored.height(), log_next_height, tail_read, tail_applied);
                                 }
                             }
                             Err(e) => eprintln!("⚠ snapshot tail replay failed: {} — falling back to full replay", e),
@@ -619,6 +648,20 @@ fn run_start() -> Result<()> {
         // into and pops verified dual-lane solves from. Always constructed (cheap,
         // inert without a producer); the API exposes it, and `SIGIL_MINING_GATED=1`
         // makes block production wait on real work.
+        // Real wallet/transaction/block search (2026-08-20, operator-directed).
+        // Loads whatever was already indexed as of last shutdown (fast — no
+        // full replay needed on every restart) and spawns a background
+        // catch-up + poll task. See search_index.rs's module doc for why this
+        // tails ChainLog instead of hooking block-apply directly: it's a
+        // completely separate reader of the same durable log, so it can never
+        // affect (or be affected by) the actual consensus/settlement code.
+        let search_engine: Arc<Mutex<flux_search::SearchEngine>> =
+            Arc::new(Mutex::new(search_index::load_or_new(&snap_dir)));
+        search_index::spawn_indexer(
+            snap_dir.clone(),
+            Arc::clone(&search_engine),
+            std::time::Duration::from_secs(5),
+        );
         let mining_bridge = Arc::new(sigil_api::mining::MiningBridge::new());
         // Wallet-authenticated send queue — the producer drains it into every
         // block's tx set unconditionally (see the `block_txs` build below),
@@ -626,6 +669,38 @@ fn run_start() -> Result<()> {
         // `mining_bridge`. See `sigil_api::send` module docs for why this is
         // a bridge instead of routing through `Mempool::ingest`.
         let send_bridge = Arc::new(sigil_api::send::SendBridge::new());
+        // SIGIL <-> Polygon bridge — admin/relayer are real SIGIL wallet
+        // addresses (32-byte Ed25519 pubkeys), NOT Polygon/EVM addresses;
+        // configured via env so no key material is ever hardcoded in source.
+        // `admin_wallet` can only pause/rotate, never unlock — see bridge
+        // module docs for why that split is deliberate. Absent env vars
+        // leave the bridge inert (submit_lock/unlock/pause all reject)
+        // rather than defaulting to some implicit trusted address.
+        let bridge_bridge = Arc::new(sigil_api::bridge::BridgeBridge::new(
+            std::env::var("SIGIL_BRIDGE_ADMIN_WALLET").ok().as_deref().and_then(sigil_api::hex32),
+            std::env::var("SIGIL_BRIDGE_RELAYER_WALLET").ok().as_deref().and_then(sigil_api::hex32),
+        ));
+        // Wallet-authenticated swap / add-liquidity / remove-liquidity queue —
+        // same "always constructed, inert without traffic" shape as
+        // `send_bridge`/`bridge_bridge`. See `sigil_api::dex` module docs.
+        let dex_bridge = Arc::new(sigil_api::dex::DexBridge::new());
+        // Wallet-authenticated USDS mint/redeem queue — same shape as
+        // `dex_bridge`. See `sigil_api::usds` / `sigil_usds` module docs.
+        let usds_bridge = Arc::new(sigil_api::usds::UsdsBridge::new());
+        // USDS <-> Polygon bridge — a SEPARATE instance from `bridge_bridge`
+        // (native SIGIL), its own vault/admin/relayer, its own env vars, on
+        // purpose (see `sigil_api::usds_bridge` module docs for why the two
+        // bridges must never share a trust boundary).
+        let usds_polygon_bridge = Arc::new(sigil_api::usds_bridge::UsdsBridgeBridge::new(
+            std::env::var("SIGIL_USDS_BRIDGE_ADMIN_WALLET").ok().as_deref().and_then(sigil_api::hex32),
+            std::env::var("SIGIL_USDS_BRIDGE_RELAYER_WALLET").ok().as_deref().and_then(sigil_api::hex32),
+        ));
+        // Read-only GHOSTDAG snapshot for the DagKnight visualization — see
+        // sigil_api::dagknight module docs. `braid` (below, once dag_mode is
+        // on) is never locked; only the periodic copy written here is.
+        // Always constructed, inert until the dag-snapshot tick starts
+        // writing (dag_mode off ⇒ stays at its zero-value default forever).
+        let dag_snapshot_bridge = Arc::new(sigil_api::dagknight::DagSnapshotBridge::new());
         let money_state: Option<Arc<std::sync::RwLock<SigilState>>> =
             std::env::var("SIGIL_MONEY_API").ok().filter(|s| !s.is_empty()).map(|addr| {
                 let shared = Arc::new(std::sync::RwLock::new(chain.state_snapshot()));
@@ -634,13 +709,25 @@ fn run_start() -> Result<()> {
                     state: Arc::clone(&shared),
                     mining: Arc::clone(&mining_bridge),
                     send: Arc::clone(&send_bridge),
+                    bridge: Arc::clone(&bridge_bridge),
+                    dex: Arc::clone(&dex_bridge),
+                    usds: Arc::clone(&usds_bridge),
+                    usds_bridge: Arc::clone(&usds_polygon_bridge),
+                    search: Arc::clone(&search_engine),
+                    dagknight: Arc::clone(&dag_snapshot_bridge),
                 };
                 tokio::spawn(async move {
                     if let Err(e) = sigil_api::serve(&addr, app).await {
                         eprintln!("\u{26a0} sigil-api serve failed: {e}");
                     }
                 });
-                eprintln!("\u{1f4b0} sigil-api money API on {} — /v1/{{balance,supply,transactions,mining/*}}", std::env::var("SIGIL_MONEY_API").unwrap_or_default());
+                eprintln!("\u{1f4b0} sigil-api money API on {} — /v1/{{balance,supply,transactions,mining/*,bridge/*,pools,swap,add_liquidity,remove_liquidity,usds/*,usds_bridge/*}}", std::env::var("SIGIL_MONEY_API").unwrap_or_default());
+                eprintln!("\u{1f309} usds bridge: admin={} relayer={}",
+                    usds_polygon_bridge.admin_hex().unwrap_or_else(|| "UNSET".into()),
+                    usds_polygon_bridge.relayer_hex().unwrap_or_else(|| "UNSET (locks will be rejected)".into()));
+                eprintln!("\u{1f309} bridge: admin={} relayer={}",
+                    bridge_bridge.admin_hex().unwrap_or_else(|| "UNSET".into()),
+                    bridge_bridge.relayer_hex().unwrap_or_else(|| "UNSET (locks will be rejected)".into()));
                 shared
             });
         // When gated, a braid block is minted ONLY for a verified dual-lane solve —
@@ -732,6 +819,36 @@ fn run_start() -> Result<()> {
         // None ⇒ SIGIL_DAG=0 behavior-identical (design §3.1). Seeded from the
         // local chain's in-RAM window so the producer's own spine is known.
         let mut braid: Option<Braid> = dag_mode.then(|| dag_seed_braid(&chain));
+        // QTFT-2: receipt-side topology-commitment verification. Default is
+        // OBSERVE ONLY (recompute + count + loudly log a genuine mismatch,
+        // never refuse the block) — this is deliberately NOT gated by
+        // sigil-header::TOPOLOGY_COMMITMENT_ACTIVATION_HEIGHT, which its own
+        // doc comment reserves for a LATER, more formal multi-validator-
+        // committee enforcement mechanism this does not presume to be. An
+        // operator opts a SPECIFIC node into actually refusing mismatching
+        // blocks with SIGIL_TOPOLOGY_ENFORCE=1 — e.g. once >1 real producer
+        // makes the invariant non-degenerate and the operator wants to prove
+        // rejection works before considering fleet-wide enforcement.
+        let topology_enforce = std::env::var("SIGIL_TOPOLOGY_ENFORCE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+        if dag_mode {
+            eprintln!("🧶 QTFT topology verification: {} (SIGIL_TOPOLOGY_ENFORCE={})",
+                if topology_enforce { "ENFORCING (rejects mismatches)" } else { "observe-only (logs mismatches, never rejects)" },
+                if topology_enforce { "1" } else { "0" });
+        }
+        let mut topology_stats = TopologyStats::default();
+        // Blocks admitted live via THIS gossipsub path since boot — the
+        // verifier requires a full window's worth of these before ever
+        // comparing, so a fresh boot / recent snapshot restore can never look
+        // like a peer mismatch just because OUR own window isn't populated
+        // yet (see verify_topology_on_receipt's doc comment).
+        let mut live_blocks_witnessed: u64 = 0;
+        // QTFT Path C (SIGIL_QTFT_TOPOLOGY_v0.md's "knot-routing in p2p" idea,
+        // scoped to what's real today): backfill requests currently pick an
+        // arbitrary connected peer. This tracks which peer has actually been
+        // relaying which producer's strand, so a gap for a SPECIFIC producer
+        // can prefer a peer topologically close to it. See PeerProducerAffinity.
+        let mut peer_affinity = PeerProducerAffinity::default();
         if dag_mode {
             // Honest, ACTUAL-state log line (was a hardcoded "v1, NOT GHOSTDAG"
             // string regardless of config — fixed so it reports what the
@@ -764,6 +881,10 @@ fn run_start() -> Result<()> {
         // already-applied), refused-below-final, structural rejects, apply fails.
         let (mut dag_ord_skipped, mut dag_below_final, mut dag_rejected, mut dag_apply_failed) =
             (0u64, 0u64, 0u64, 0u64);
+        // 2026-08-19 (deep-catchup freeze fix): counts "missing parents" gossip
+        // rejections so the request-log print below can be rate-limited by count,
+        // not just by the 15ms request-throttle — see the print site for why.
+        let mut dag_missing_parents_logged: u64 = 0;
         // Wedge self-heal markers (see the Rejected arms): reject count and tip
         // height at the last reseed — reseeds are progress-gated on the height.
         let mut dag_last_reseed_rejects: u64 = 0;
@@ -775,6 +896,12 @@ fn run_start() -> Result<()> {
         let mut produce_tick =
             tokio::time::interval(std::time::Duration::from_micros(initial_produce_us.max(50)));
         produce_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // DagKnight visualization: copy the last 200 finalized blocks + their
+        // GHOSTDAG coloring out of `braid` every 5s. Cheap in-memory copy on
+        // this same single-threaded loop — never a lock on `braid` itself,
+        // see sigil_api::dagknight module docs.
+        let mut dag_snapshot_tick = tokio::time::interval(std::time::Duration::from_secs(5));
+        dag_snapshot_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut produced: u64 = 0;
         let mut received: u64 = 0;
         let mut applied: u64 = 0;
@@ -794,6 +921,21 @@ fn run_start() -> Result<()> {
         // every received future block (fire at most every ~300ms).
         let mut last_req = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(10)).unwrap_or_else(std::time::Instant::now);
+        // 2026-08-20 (happysrv OOM investigation, part 2): the 15ms request-RATE
+        // throttle alone still let up to ~66 gap-backfill fetches/sec spawn
+        // concurrently — each one fetches its full (now-bounded, FETCH_CHUNK-size)
+        // response into memory BEFORE the bounded `bf_tx` channel's backpressure
+        // can apply (that only throttles the .send() into the channel, which
+        // happens AFTER the network fetch + deserialize already cost real
+        // memory). A deeply-behind node kept climbing straight to the 8G cgroup
+        // cap and OOM-killing within ~40s even with each individual request
+        // capped — confirmed live (memory graph: ~2G→8.19G in 40s). This
+        // semaphore hard-caps how many gap-backfill fetches can be truly
+        // in-flight at once, regardless of how fast new "missing parents"
+        // events arrive; a permit is held for the lifetime of the spawned
+        // task and released automatically (RAII) whether it succeeds, errors,
+        // or times out — no separate reset path to get stuck.
+        let gap_fetch_permits = std::sync::Arc::new(tokio::sync::Semaphore::new(3));
         let mut backfilled: u64 = 0;
         if produce {
             eprintln!("🏭 PRODUCER mode — target {:.0} blocks/s ({}µs tick, feed every {}) on {}",
@@ -831,6 +973,45 @@ fn run_start() -> Result<()> {
         const SERVE_CACHE_CAP: usize = 2048; // ~2048 finalized chunks hot in RAM
         let (mut cache_hits, mut cache_miss): (u64, u64) = (0, 0);
         let mut last_cache_log = std::time::Instant::now();
+        // 2026-08-22 (root cause of the multi-hour production stall, found live):
+        // the cache above only covers IMMUTABLE ranges (hi < window_base) — a
+        // request whose `hi` sits near the live tip is NEVER cacheable, so a
+        // peer re-requesting the exact same near-tip range (proven live: the
+        // same peer, ~2×/s, identical [lo..=hi] with hi six blocks behind the
+        // real tip) forces a full disk read + zstd compress EVERY time, INLINE
+        // in the same synchronous loop that drives block production — measured
+        // live via the 5s heartbeat firing every 43-69s instead of on schedule.
+        // This is safe to cache too, just with a short TTL instead of forever:
+        // `hi` is always clamped to `chain.height()-1` (see below), so every
+        // height in a served range is already durably committed on THIS node
+        // by the time it's served — its content can never retroactively change
+        // — the only thing that goes stale is whether a NEWER, wider range has
+        // since become available, and a genuinely newer request has a
+        // different `hi` and therefore a different key, so it always falls
+        // through to a fresh read regardless of this cache. An identical
+        // repeat within the TTL — the exact retry-storm pattern that caused
+        // the live stall — now gets a cheap hit instead of redoing the work.
+        let mut hot_cache: std::collections::HashMap<(u64, u64, bool, u32), (std::sync::Arc<Vec<u8>>, std::time::Instant)> =
+            std::collections::HashMap::new();
+        let mut hot_cache_order: std::collections::VecDeque<(u64, u64, bool, u32)> =
+            std::collections::VecDeque::new();
+        const HOT_CACHE_CAP: usize = 256;
+        let hot_cache_ttl = std::time::Duration::from_millis(
+            std::env::var("SIGIL_SERVE_HOT_TTL_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(750),
+        );
+        let (mut hot_hits, mut hot_miss): (u64, u64) = (0, 0);
+        let mut last_hot_cache_log = std::time::Instant::now();
+        // Hard ceiling on expensive (cache-miss) backfill compute — see the
+        // throttle's own doc comment at its check site below.
+        let mut last_expensive_serve = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1)).unwrap_or_else(std::time::Instant::now);
+        let mut expensive_throttled: u64 = 0;
+        // PER-PEER expensive-serve clock. See the throttle's doc comment at its
+        // check site: a single GLOBAL slot let one runaway peer starve every
+        // other node's backfill. Bounded: pruned to the most recent peers so a
+        // churn of peer ids can't grow this without limit.
+        let mut last_expensive_by_peer: std::collections::HashMap<String, std::time::Instant> =
+            std::collections::HashMap::new();
         // === request-ahead fetch pipeline (windowed backfill — overlaps fetch with apply) ===
         let mut req_frontier: u64 = chain.height();
         let mut net_tip: u64 = 0;
@@ -851,12 +1032,38 @@ fn run_start() -> Result<()> {
                         let mgr2 = std::sync::Arc::clone(&mgr);
                         let bf_tx2 = bf_tx.clone();
                         tokio::spawn(async move {
-                            let blocks = if let Ok(payload) = serde_json::to_vec(&req) {
-                                match mgr2.send_request(peer, payload).await {
-                                    Ok(bytes) => bincode::deserialize::<BackfillResp>(&bytes).map(|r| r.blocks).unwrap_or_default(),
-                                    Err(_) => Vec::new(),
+                            // 2026-08-19 (deep-catchup stall investigation): every failure
+                            // branch here used to be silent (`unwrap_or_default()` /
+                            // `Err(_) => Vec::new()`), so a genuinely stuck request-ahead
+                            // slot (send_request timeout/error, a malformed response, or an
+                            // honestly-empty response body) was indistinguishable from "no
+                            // work yet" — this is exactly what made a real, reproducible
+                            // permanent sync stall look silent for hours. Log every branch
+                            // that isn't a clean non-empty success.
+                            let blocks = match serde_json::to_vec(&req) {
+                                Ok(payload) => match mgr2.send_request(peer, payload).await {
+                                    Ok(bytes) => match bincode::deserialize::<BackfillResp>(&bytes) {
+                                        Ok(r) => {
+                                            if r.blocks.is_empty() {
+                                                eprintln!("⚠ rr-backfill(windowed): peer {peer} returned an EMPTY response for [{from}..={to}) — request-ahead slot stuck");
+                                            }
+                                            r.blocks
+                                        }
+                                        Err(e) => {
+                                            eprintln!("⚠ rr-backfill(windowed): decode failed for [{from}..={to}) from {peer}: {e}");
+                                            Vec::new()
+                                        }
+                                    },
+                                    Err(e) => {
+                                        eprintln!("⚠ rr-backfill(windowed): send_request failed for [{from}..={to}) to {peer}: {e}");
+                                        Vec::new()
+                                    }
+                                },
+                                Err(e) => {
+                                    eprintln!("⚠ rr-backfill(windowed): request serialize failed: {e}");
+                                    Vec::new()
                                 }
-                            } else { Vec::new() };
+                            };
                             let _ = bf_tx2.send(blocks).await;
                         });
                         req_frontier += FETCH_CHUNK;
@@ -929,42 +1136,42 @@ fn run_start() -> Result<()> {
                     // widening exists: measured live, 93.8% of supply had gone to the
                     // producer-wallet fallback because almost no real submission could
                     // win the EXACT-height race at this braid's block cadence.
-                    let near_miss_credit = |s: sigil_api::mining::AcceptedSolve| {
-                        sigil_api::mining::AcceptedSolve {
-                            nonce: 0,
-                            blake4_hash: 0,
-                            vdf: flux_vdf::VdfProof { y: vec![], pi: vec![], t: 0 },
-                            ..s
-                        }
-                    };
+                    // v7.1.41 (grogu-sync-perf, 2026-08-19, operator-directed — "all mining
+                    // rewards should go to miners"): take_solve() pops exactly ONE FIFO
+                    // entry. Under real multi-miner load, valid solves arrive faster than
+                    // one-per-tick can examine them, so a single stale pop discarded the
+                    // WHOLE tick's chance to credit anyone — fresher solves sitting right
+                    // behind it in the queue just kept aging while they waited their turn,
+                    // and by the time their turn came they'd often gone stale too. Measured
+                    // live, this session: a fresh wallet mined 2 dual-lane-verified,
+                    // API-"ACCEPTED" solves from a real remote miner; `queued_solves` grew
+                    // steadily (5→7→8+) over the following minute while total network
+                    // supply kept climbing (proving other mints WERE happening) and the
+                    // wallet's own balance stayed at exactly 0 the whole time — the classic
+                    // symptom this exact comment thread already diagnosed once before (see
+                    // `credit_window`'s doc: "93.8% of supply had gone to the producer-
+                    // wallet fallback"). Widening `credit_window` alone doesn't fix this
+                    // half of the problem: with arrival-rate > one-per-tick drain-rate and a
+                    // strict FIFO, sufncient backlog age-out happens regardless of how wide
+                    // the window is. Fix: scan up to SOLVE_SCAN_MAX entries in ONE tick
+                    // instead of giving up after the first stale pop — lets a tick catch up
+                    // through a backlog instead of decaying it one entry at a time. Bounded
+                    // (not unbounded) so a pathological backlog still can't stall block
+                    // production indefinitely; anything scanned past and found stale is
+                    // discarded exactly as before (no requeue — same accepted tradeoff,
+                    // just now applied to up to SOLVE_SCAN_MAX candidates instead of 1).
                     let solve: Option<sigil_api::mining::AcceptedSolve> = if mining_gated {
-                        match mining_bridge.take_solve() {
-                            Some(s) if s.parent_hash == mint_ref.parent_hash()
-                                    && s.height == mint_ref.height() => Some(s),
-                            Some(s) if mint_ref.height().saturating_sub(s.height)
-                                    <= sigil_api::mining::credit_window() => Some(near_miss_credit(s)),
-                            Some(_) => continue,  // outside the credit window — drop, wait for work on this frontier
-                            None => continue,     // no work yet — the braid idles, as PoW should
+                        match take_creditable_solve(&mining_bridge, mint_ref.parent_hash(), mint_ref.height()) {
+                            Some(s) => Some(s),
+                            None => continue, // no creditable work this tick — the braid idles, as PoW should
                         }
                     } else {
                         // Free-running (unchanged cadence, unchanged GHOSTDAG throughput):
                         // opportunistically credit a solve that's ALREADY queued —
                         // exact match or a near-miss within the credit window — but
-                        // never wait for one. take_solve() pops destructively (no peek
-                        // in MiningBridge), so a genuinely-too-stale solve is discarded
-                        // here — same accepted tradeoff the gated path's `continue`
-                        // branch makes, not a new loss. Anything that doesn't qualify
+                        // never wait for one. Anything that doesn't qualify after scanning
                         // falls through to the producer-wallet default.
-                        mining_bridge.take_solve().and_then(|s| {
-                            if s.parent_hash == mint_ref.parent_hash() && s.height == mint_ref.height() {
-                                Some(s)
-                            } else if mint_ref.height().saturating_sub(s.height)
-                                    <= sigil_api::mining::credit_window() {
-                                Some(near_miss_credit(s))
-                            } else {
-                                None
-                            }
-                        })
+                        take_creditable_solve(&mining_bridge, mint_ref.parent_hash(), mint_ref.height())
                     };
                     // pull verify-once txs (already verified at mempool ingest),
                     // plus every wallet-authenticated send queued since the last
@@ -988,6 +1195,10 @@ fn run_start() -> Result<()> {
                         let mut v: Vec<SignedTx> =
                             if txgen > 0 { mempool.pull(txgen) } else { Vec::new() };
                         v.extend(send_bridge.snapshot_for_mint());
+                        v.extend(bridge_bridge.snapshot_for_mint());
+                        v.extend(dex_bridge.snapshot_for_mint());
+                        v.extend(usds_bridge.snapshot_for_mint());
+                        v.extend(usds_polygon_bridge.snapshot_for_mint());
                         v
                     };
                     // ONE-CHAIN: when the adaptive emission controller is live, IT
@@ -1046,7 +1257,7 @@ fn run_start() -> Result<()> {
                                 // the ONE settlement path — identical finalized order on every node
                                 let (a, s, f) = dag_drain_apply(br, &mut dag_bodies, &mut chain,
                                     &mut |braw| { let _ = chain_log.append_bytes(braw); },
-                                    &send_bridge, &mut mint_hash_to_tx_hashes);
+                                    &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge, &mut mint_hash_to_tx_hashes);
                                 applied += a; dag_ord_skipped += s; dag_apply_failed += f;
                                 true
                             } else {
@@ -1058,6 +1269,10 @@ fn run_start() -> Result<()> {
                                         // ARE the hashes that just landed.
                                         if !minted_tx_hashes.is_empty() {
                                             send_bridge.confirm_applied(&minted_tx_hashes);
+                                            bridge_bridge.confirm_applied(&minted_tx_hashes);
+                                            dex_bridge.confirm_applied(&minted_tx_hashes);
+                                            usds_bridge.confirm_applied(&minted_tx_hashes);
+                                            usds_polygon_bridge.confirm_applied(&minted_tx_hashes);
                                         }
                                         true
                                     }
@@ -1152,6 +1367,11 @@ fn run_start() -> Result<()> {
                         }
                         Err(e) => eprintln!("⚠ mint_next_block failed: {}", e),
                     }
+                    }
+                }
+                _ = dag_snapshot_tick.tick() => {
+                    if let Some(br) = braid.as_ref() {
+                        dag_snapshot_bridge.update(br.recent_summary(200), br.ghostdag_k());
                     }
                 }
                 _ = tokio::signal::ctrl_c() => {
@@ -1302,6 +1522,25 @@ fn run_start() -> Result<()> {
                                     continue;
                                 }
                             }
+                            // ── HOT CACHE HIT: same idea, short-TTL, covers near-tip ranges
+                            // the long-lived cache above deliberately excludes. codec>=3 ('P'
+                            // snapshot header / 'F' fold trailer) stays excluded — those encode
+                            // the CURRENT anchor/tip, not just [lo,hi], so a stale copy would
+                            // lie about the anchor. Everything else in [lo,hi] is already
+                            // durably committed on this node (hi is clamped to chain.height()-1
+                            // above) so a short-lived exact-range replay is always correct, not
+                            // just fast.
+                            let hot_eligible = !immutable && hi >= lo && req.codec < 3;
+                            if hot_eligible {
+                                if let Some((blob, at)) = hot_cache.get(&ckey) {
+                                    if at.elapsed() < hot_cache_ttl {
+                                        hot_hits += 1;
+                                        mgr.respond(request_id, blob.as_ref().clone());
+                                        continue;
+                                    }
+                                }
+                                hot_miss += 1;
+                            }
 
                             // Throttle costly full-block MISSES so catch-up backfill can't starve
                             // production; the requester re-asks on its own cadence. (Hits already
@@ -1313,12 +1552,91 @@ fn run_start() -> Result<()> {
                             }
                             if immutable { cache_miss += 1; }
 
+                            // 2026-08-22 (root cause of the multi-hour production stall, found
+                            // live): a headers-only serve was assumed cheap enough to never need
+                            // throttling — true for a genuinely cached range, but this point in
+                            // the code is reached ONLY on a cache MISS from both caches above, and
+                            // a miss here means a real disk read (`get_range_by_height`) plus
+                            // serialize plus zstd compress of up to `serve_cap` headers (~32k),
+                            // running INLINE in the same synchronous loop that drives block
+                            // production. Proven live: a single peer retrying an uncacheable
+                            // near-tip range ~2×/s alone stalled the 5s heartbeat out to 43-69s.
+                            // The hot cache above cuts most of that traffic, but under sustained
+                            // pressure from one or more aggressive/retrying peers, misses still
+                            // pile up faster than they can safely be serviced inline. Cap the
+                            // worst case directly, the same way the (now-vestigial) full-block
+                            // throttle above was originally meant to: at most one expensive
+                            // compute per `throttle` interval, GLOBALLY, across every peer and
+                            // every codec. A request that arrives inside the window is dropped,
+                            // not queued or blocked — safe, because every caller here already
+                            // retries on its own cadence (documented at the top of this arm), so
+                            // dropping is a bounded delay, never data loss. This is a hard ceiling
+                            // on how much wall-clock time backfill-serving can ever take from
+                            // block production, independent of how many peers are asking or how
+                            // often they retry.
+                            let expensive_throttle = std::time::Duration::from_millis(
+                                std::env::var("SIGIL_SERVE_EXPENSIVE_THROTTLE_MS").ok()
+                                    .and_then(|v| v.parse::<u64>().ok()).unwrap_or(120),
+                            );
+                            // 2026-08-23 — ROOT CAUSE OF "NODES DON'T SYNC ANY MORE", found
+                            // live on the production producer: the throttle above was GLOBAL
+                            // (one slot per interval shared by every peer). Measured on
+                            // Epsilon: ONE peer retrying the same uncacheable near-tip range
+                            // accounted for 102 of 116 requests in 3 minutes and consumed the
+                            // budget, so a genuinely-syncing archive node got ~1 served range
+                            // per minute and its remaining requests were DROPPED (159
+                            // expensive-throttled in one window) — reported by the client as
+                            // "STALLED, rate 0 blk/s, fetched 0" against a 1.77M-block gap.
+                            // The mitigation was punishing the innocent: a runaway peer and a
+                            // healthy syncing node competed for the same single slot, and the
+                            // runaway (asking ~2x/s) won essentially every time.
+                            //
+                            // Fix: throttle PER PEER. A peer that hammers now throttles only
+                            // ITSELF, at exactly the same rate as before, while every other
+                            // peer keeps its own independent budget. The protection this
+                            // throttle exists for is preserved — the guarded work is still
+                            // bounded per peer per interval — but it is no longer a
+                            // single point of contention that one bad actor can monopolize.
+                            // A global backstop remains below so N peers can't sum to an
+                            // unbounded inline cost.
+                            let peer_key = peer.to_string();
+                            if last_expensive_by_peer
+                                .get(&peer_key)
+                                .is_some_and(|t| t.elapsed() < expensive_throttle)
+                            {
+                                expensive_throttled += 1;
+                                continue;
+                            }
+                            // Global backstop: far looser than the per-peer interval, so many
+                            // honest peers are all served promptly, but the total inline cost
+                            // per unit time still has a hard ceiling.
+                            let global_floor = expensive_throttle / 8;
+                            if last_expensive_serve.elapsed() < global_floor {
+                                expensive_throttled += 1;
+                                continue;
+                            }
+                            let now_inst = std::time::Instant::now();
+                            last_expensive_serve = now_inst;
+                            last_expensive_by_peer.insert(peer_key, now_inst);
+                            // Keep the per-peer map bounded regardless of peer churn.
+                            if last_expensive_by_peer.len() > 512 {
+                                last_expensive_by_peer
+                                    .retain(|_, t| t.elapsed() < std::time::Duration::from_secs(300));
+                            }
+
                             // Gather the range: disk portion via ONE sequential read
                             // (chain_log.get_range), recent portion from the in-RAM window.
                             let mut blocks: Vec<crate::block::Block> = Vec::new();
                             if lo < wbase {
                                 let disk_hi = hi.min(wbase.saturating_sub(1));
-                                blocks.extend(chain_log.get_range(lo, disk_hi));
+                                // 2026-08-21: get_range_by_height, not get_range — the raw
+                                // offsets-indexed version silently returns zero blocks for a
+                                // range that genuinely exists on disk once a node's offsets
+                                // array has drifted from real height (see chain_log.rs doc
+                                // comments). Confirmed live: this exact call site answered a
+                                // real peer's request with 0 headers for a range the node's
+                                // own sync had already passed.
+                                blocks.extend(chain_log.get_range_by_height(lo, disk_hi));
                             }
                             for h in lo.max(wbase)..=hi {
                                 if let Some(b) = chain.get(h) { blocks.push(b.clone()); }
@@ -1360,7 +1678,7 @@ fn run_start() -> Result<()> {
                                     // structural pull the client finalize accepts on root-match; M2 adds SQIsign+flux_fold.
                                     let recs: Vec<SkeletonRecord> = blocks.iter().map(|b| SkeletonRecord::from_header(&b.header)).collect();
                                     let mut hh = blake3::Hasher::new();
-                                    { let _ga = chain.height().saturating_sub(1); let _gw = chain.window_base(); let mut fb: Vec<crate::block::Block> = Vec::new(); if _gw > 0 { fb.extend(chain_log.get_range(0, _gw.saturating_sub(1))); } for h2 in _gw..=_ga { if let Some(b2) = chain.get(h2) { fb.push(b2.clone()); } } for b2 in &fb { let r2 = SkeletonRecord::from_header(&b2.header); hh.update(&bincode::serialize(&r2).unwrap_or_default()); } }
+                                    { let _ga = chain.height().saturating_sub(1); let _gw = chain.window_base(); let mut fb: Vec<crate::block::Block> = Vec::new(); if _gw > 0 { fb.extend(chain_log.get_range_by_height(0, _gw.saturating_sub(1))); } for h2 in _gw..=_ga { if let Some(b2) = chain.get(h2) { fb.push(b2.clone()); } } for b2 in &fb { let r2 = SkeletonRecord::from_header(&b2.header); hh.update(&bincode::serialize(&r2).unwrap_or_default()); } }
                                     let trailer = sigil_header::SnapshotTrailer { archive_root: *hh.finalize().as_bytes(), anchor_sig: Vec::new(), fold_blob: Vec::new() };
                                     let mut o = vec![b'F'];
                                     o.extend(bincode::serialize(&trailer).unwrap_or_default());
@@ -1402,6 +1720,20 @@ fn run_start() -> Result<()> {
                                     if let Some(k) = serve_cache_order.pop_front() { serve_cache.remove(&k); }
                                 }
                             }
+                            // ── HOT CACHE FILL (near-tip ranges), short-TTL + FIFO-capped ──
+                            if hot_eligible && !out.is_empty() {
+                                hot_cache.insert(ckey, (std::sync::Arc::new(out.clone()), std::time::Instant::now()));
+                                hot_cache_order.push_back(ckey);
+                                while hot_cache_order.len() > HOT_CACHE_CAP {
+                                    if let Some(k) = hot_cache_order.pop_front() { hot_cache.remove(&k); }
+                                }
+                                if last_hot_cache_log.elapsed() >= std::time::Duration::from_secs(5) {
+                                    let hot_tot = (hot_hits + hot_miss).max(1);
+                                    eprintln!("⚡ hot-cache: {} hits / {} miss ({:.0}% hit) · {} chunks RAM · ttl={}ms · {} expensive-throttled",
+                                        hot_hits, hot_miss, hot_hits as f64 * 100.0 / hot_tot as f64, hot_cache.len(), hot_cache_ttl.as_millis(), expensive_throttled);
+                                    last_hot_cache_log = std::time::Instant::now();
+                                }
+                            }
                             mgr.respond(request_id, out);
                         }
                         flux_p2p::SwarmAppEvent::GossipsubMessage {
@@ -1432,13 +1764,73 @@ fn run_start() -> Result<()> {
                                     // the spine blocks that extend the local tip through
                                     // the UNMODIFIED ChainTip::apply chokepoint.
                                     tx_total += block.header.tx_count as u64;
-                                    if let Err(e) = block.header.precheck() {
+                                    // 2026-08-20: verify_at_height — real Ed25519Hot
+                                    // signature check once activated, no-op otherwise.
+                                    // Early/cheap reject only (ChainTip::apply below
+                                    // remains the authoritative chokepoint either way) —
+                                    // just avoids wasting braid/DAG bookkeeping on a
+                                    // block that would be rejected downstream anyway.
+                                    if let Err(e) = block.header.verify_at_height(block.header.height) {
                                         eprintln!("⚠ braid: precheck reject from {}: {}", from, e);
                                         continue;
                                     }
                                     let bhash = block.hash();
                                     let bheight = block.header.height;
+                                    let block_producer = block.header.producer;
                                     if bheight > net_tip { net_tip = bheight; }
+                                    // QTFT Path C (SIGIL-level v1): note which peer relayed which
+                                    // producer's strand, so a later gap for THAT producer can
+                                    // prefer a peer topologically close to it (has actually been
+                                    // carrying that strand) over an arbitrary connected peer.
+                                    peer_affinity.record(from.clone(), block_producer, bheight);
+                                    // QTFT-2: verify BEFORE insert — the window this block's
+                                    // topology_commitment covers is `[height-32, height-1]`,
+                                    // strictly ancestors, so it never includes `block` itself;
+                                    // checking pre-insert vs post-insert is equivalent, and
+                                    // pre-insert lets a genuine mismatch still gate admission
+                                    // in enforce mode (the braid has no "undo" once inserted).
+                                    let topo_verdict = verify_topology_on_receipt(
+                                        br,
+                                        bheight,
+                                        block.header.topology_commitment,
+                                        live_blocks_witnessed,
+                                    );
+                                    live_blocks_witnessed = live_blocks_witnessed.saturating_add(1);
+                                    topology_stats.record(topo_verdict);
+                                    match topo_verdict {
+                                        TopoVerdict::Mismatch => {
+                                            eprintln!(
+                                                "🧶⚠ QTFT topology MISMATCH at height {bheight} from {from} — \
+                                                 producer's committed window doesn't match what we recompute \
+                                                 over the same window (totals: {}/{}/{}/{}/{} match/mismatch/insufficient/nowindow/incomplete)",
+                                                topology_stats.matched, topology_stats.mismatched,
+                                                topology_stats.insufficient_history, topology_stats.no_window_yet,
+                                                topology_stats.window_incomplete,
+                                            );
+                                            if topology_enforce {
+                                                eprintln!("🧶🚫 QTFT: REJECTING block {bheight} from {from} (SIGIL_TOPOLOGY_ENFORCE=1)");
+                                                continue;
+                                            }
+                                        }
+                                        TopoVerdict::InsufficientHistory if !topology_stats.logged_insufficient_once => {
+                                            topology_stats.logged_insufficient_once = true;
+                                            eprintln!(
+                                                "🧶 QTFT topology check: not yet verifying (need {} live blocks witnessed \
+                                                 locally before comparing; have {live_blocks_witnessed}) — one-time notice, \
+                                                 will start comparing once history fills in",
+                                                TOPOLOGY_COMMITMENT_WINDOW + TOPOLOGY_VERIFY_HISTORY_MARGIN,
+                                            );
+                                        }
+                                        TopoVerdict::WindowIncomplete if !topology_stats.logged_incomplete_once => {
+                                            topology_stats.logged_incomplete_once = true;
+                                            eprintln!(
+                                                "🧶 QTFT topology check: window has a residency gap at height {bheight} \
+                                                 (likely bulk-backfill catch-up racing eviction) — skipping comparison for \
+                                                 this block rather than risking a false accusation; one-time notice",
+                                            );
+                                        }
+                                        _ => {}
+                                    }
                                     match br.insert(BlockView::from(&block.header)) {
                                         InsertOutcome::Inserted { .. } => {
                                             dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, block);
@@ -1457,27 +1849,72 @@ fn run_start() -> Result<()> {
                                             dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, block);
                                             if last_req.elapsed() >= std::time::Duration::from_millis(15) {
                                                 last_req = std::time::Instant::now();
-                                                if let Some(peer) = mgr.connected_peers().into_iter().next() {
+                                                // QTFT Path C: prefer a peer we've actually seen relay
+                                                // THIS block's producer strand recently, over an
+                                                // arbitrary connected peer — that peer is more likely to
+                                                // hold the missing ancestry we're gapped on. Falls back to
+                                                // "first connected" (today's behavior) when we have no
+                                                // affinity signal for anyone yet.
+                                                let connected = mgr.connected_peers();
+                                                if let Some(peer) = peer_affinity.best_for(&connected, Some(block_producer)) {
+                                                    // 2026-08-20 (happysrv OOM investigation): this used
+                                                    // to request [chain.height()..=bheight+1] UNCAPPED —
+                                                    // when a fresh/reconnecting node is deeply behind (a
+                                                    // 334,460-block gap was observed live), that's ONE
+                                                    // request for a third of a million FULL blocks
+                                                    // (headers_only: false), which OOM-killed a node
+                                                    // capped at 8G. Cap the range to the same chunk size
+                                                    // the windowed fetch pipeline already uses
+                                                    // (`FETCH_CHUNK`, defined above in this fn) — a deep
+                                                    // gap now closes incrementally over many requests
+                                                    // instead of one unbounded one.
+                                                    let req_to = chain.height()
+                                                        .saturating_add(FETCH_CHUNK)
+                                                        .min(bheight.saturating_add(1));
                                                     let req = BackfillReq {
                                                         from: chain.height(),
-                                                        to: bheight.saturating_add(1),
+                                                        to: req_to,
                                                         headers_only: false,
                                                         codec: 0,
                                                         handshake: Some((*sync_hs).clone()),
                                                     };
-                                                    eprintln!("⇪ rr-backfill(braid): missing parents at H={} — requesting [{}..={}] from {}",
-                                                        bheight, req.from, req.to, peer);
-                                                    let mgr2 = std::sync::Arc::clone(&mgr);
-                                                    let bf_tx2 = bf_tx.clone();
-                                                    tokio::spawn(async move {
-                                                        if let Ok(payload) = serde_json::to_vec(&req) {
-                                                            if let Ok(bytes) = mgr2.send_request(peer, payload).await {
-                                                                if let Ok(resp) = bincode::deserialize::<BackfillResp>(&bytes) {
-                                                                    let _ = bf_tx2.send(resp.blocks).await;
+                                                    // 2026-08-19 (deep-catchup freeze investigation): this used to fire
+                                                    // unconditionally every time the 15ms request-throttle allowed a
+                                                    // new request through — up to ~66/s, continuously, for the ENTIRE
+                                                    // duration of a deep catch-up (which can be minutes). strace on a
+                                                    // frozen node showed 74% of all syscall time in futex (lock
+                                                     // contention) and 5,069 write() calls in 8 seconds — Rust's
+                                                    // stdout is internally mutex-protected, so many threads each
+                                                    // hitting eprintln! at a high combined rate is a real livelock
+                                                    // mechanism, not just noisy logs. Gate this one to roughly 1/sec
+                                                    // (same spirit as the `dag_rejected % 1000` throttle just below
+                                                    // for the sibling reject-path print) — still enough to see catch-up
+                                                    // is progressing, far too little to contend a lock.
+                                                    dag_missing_parents_logged += 1;
+                                                    if dag_missing_parents_logged % 64 == 1 {
+                                                        eprintln!("⇪ rr-backfill(braid): missing parents at H={} — requesting [{}..={}] from {} ({} such requests so far)",
+                                                            bheight, req.from, req.to, peer, dag_missing_parents_logged);
+                                                    }
+                                                    // Bounded concurrency (see gap_fetch_permits' doc
+                                                    // above): if all permits are held, skip firing this
+                                                    // tick rather than pile on another in-flight fetch —
+                                                    // the 15ms rate-throttle above will let us try again
+                                                    // shortly, and a permit frees up as soon as any
+                                                    // in-flight fetch completes.
+                                                    if let Ok(permit) = std::sync::Arc::clone(&gap_fetch_permits).try_acquire_owned() {
+                                                        let mgr2 = std::sync::Arc::clone(&mgr);
+                                                        let bf_tx2 = bf_tx.clone();
+                                                        tokio::spawn(async move {
+                                                            let _permit = permit; // held until this task ends
+                                                            if let Ok(payload) = serde_json::to_vec(&req) {
+                                                                if let Ok(bytes) = mgr2.send_request(peer, payload).await {
+                                                                    if let Ok(resp) = bincode::deserialize::<BackfillResp>(&bytes) {
+                                                                        let _ = bf_tx2.send(resp.blocks).await;
+                                                                    }
                                                                 }
                                                             }
-                                                        }
-                                                    });
+                                                        });
+                                                    }
                                                 }
                                             }
                                             continue;
@@ -1512,7 +1949,7 @@ fn run_start() -> Result<()> {
                                     let (a, s, f) = dag_drain_apply(
                                         br, &mut dag_bodies, &mut chain,
                                         &mut |braw| { let _ = chain_log.append_bytes(braw); },
-                                        &send_bridge, &mut mint_hash_to_tx_hashes);
+                                        &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge, &mut mint_hash_to_tx_hashes);
                                     applied += a;
                                     dag_ord_skipped += s;
                                     dag_apply_failed += f;
@@ -1706,13 +2143,29 @@ fn run_start() -> Result<()> {
                                             expected, peer_h, req.from, req.to);
                                         let mgr2 = std::sync::Arc::clone(&mgr);
                                         let bf_tx2 = bf_tx.clone();
+                                        let (req_from, req_to) = (req.from, req.to);
                                         tokio::spawn(async move {
-                                            if let Ok(payload) = serde_json::to_vec(&req) {
-                                                if let Ok(bytes) = mgr2.send_request(peer, payload).await {
-                                                    if let Ok(resp) = bincode::deserialize::<BackfillResp>(&bytes) {
-                                                        let _ = bf_tx2.send(resp.blocks).await;
-                                                    }
-                                                }
+                                            // 2026-08-19 (deep-catchup stall investigation): same
+                                            // silent-failure gap as the windowed pipeline above —
+                                            // every `if let Ok(...)` here dropped the request on
+                                            // the floor with zero trace on any failure, which is
+                                            // why a permanently-repeating, permanently-unanswered
+                                            // request for the same range was invisible until read
+                                            // by hand from the source.
+                                            match serde_json::to_vec(&req) {
+                                                Ok(payload) => match mgr2.send_request(peer, payload).await {
+                                                    Ok(bytes) => match bincode::deserialize::<BackfillResp>(&bytes) {
+                                                        Ok(resp) => {
+                                                            if resp.blocks.is_empty() {
+                                                                eprintln!("⚠ rr-backfill(peer-heights): peer {peer} returned an EMPTY response for [{req_from}..={req_to}) — the repeating-request-no-progress symptom");
+                                                            }
+                                                            let _ = bf_tx2.send(resp.blocks).await;
+                                                        }
+                                                        Err(e) => eprintln!("⚠ rr-backfill(peer-heights): decode failed for [{req_from}..={req_to}) from {peer}: {e}"),
+                                                    },
+                                                    Err(e) => eprintln!("⚠ rr-backfill(peer-heights): send_request failed for [{req_from}..={req_to}) to {peer}: {e}"),
+                                                },
+                                                Err(e) => eprintln!("⚠ rr-backfill(peer-heights): request serialize failed: {e}"),
                                             }
                                         });
                                     }
@@ -1753,7 +2206,9 @@ fn run_start() -> Result<()> {
                         // through the braid (pending cap 4096) is what wedged the
                         // first braid-c smoke test — never again.
                         for block in vals {
-                            if block.header.precheck().is_err() { continue; }
+                            // 2026-08-20: verify_at_height — same early/cheap upgrade
+                            // as the braid-arm precheck above.
+                            if block.header.verify_at_height(block.header.height).is_err() { continue; }
                             let h = block.header.height;
                             pending_insert(&mut pending, chain.height(), h, block);
                         }
@@ -1789,7 +2244,7 @@ fn run_start() -> Result<()> {
                         let (a, s, f) = dag_drain_apply(
                             br, &mut dag_bodies, &mut chain,
                             &mut |braw| { let _ = chain_log.append_bytes(braw); },
-                            &send_bridge, &mut mint_hash_to_tx_hashes);
+                            &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge, &mut mint_hash_to_tx_hashes);
                         applied += a;
                         backfilled += a;
                         dag_ord_skipped += s;
@@ -2346,6 +2801,66 @@ pub const MASTER_WALLET_GENESIS: [u8; 32] = [
 /// chosen timestamp; this is the P0 placeholder so two nodes can chain.
 pub const GENESIS_TIMESTAMP_MS: u64 = 1_748_538_000_000;
 
+/// A near-miss solve (verified against a HISTORICAL frontier, not the current one) still
+/// credits the real miner's wallet, but its nonce/blake4_hash/vdf must NOT be embedded in
+/// the block header — they were computed against a DIFFERENT parent than the one this
+/// block actually carries, and embedding them would make the header's claimed PoW fail
+/// re-verification for every follower. Zeroed exactly like the "no solve" path — the
+/// block's PoW fields end up identical either way; only WHO gets paid changes.
+fn near_miss_credit(s: sigil_api::mining::AcceptedSolve) -> sigil_api::mining::AcceptedSolve {
+    sigil_api::mining::AcceptedSolve {
+        nonce: 0,
+        blake4_hash: 0,
+        vdf: flux_vdf::VdfProof { y: vec![], pi: vec![], t: 0 },
+        ..s
+    }
+}
+
+/// How many entries `take_creditable_solve` will pop-and-check in a single tick before
+/// giving up. See that function's doc for why this exists.
+const SOLVE_SCAN_MAX: u32 = 64;
+
+/// v7.1.41 (grogu-sync-perf, 2026-08-19, operator-directed — "all mining rewards should
+/// go to miners"): `MiningBridge::take_solve()` pops exactly ONE FIFO entry per call, with
+/// no peek. Under real multi-miner load, valid solves arrive faster than one-per-tick can
+/// examine them, so a single stale pop used to discard the WHOLE tick's chance to credit
+/// anyone — fresher solves sitting right behind it in the queue just kept aging while they
+/// waited their turn, and by the time their turn came they'd often gone stale too.
+///
+/// Measured live this session: a fresh wallet mined 2 dual-lane-verified, API-"ACCEPTED"
+/// solves from a real remote miner; `queued_solves` grew steadily (5→7→8+) over the
+/// following minute while total network supply kept climbing (proving other mints WERE
+/// happening) and the wallet's own balance stayed at exactly 0 the whole time — the same
+/// symptom already diagnosed once before (see `sigil_api::mining::credit_window`'s doc:
+/// "93.8% of supply had gone to the producer-wallet fallback"). Widening `credit_window`
+/// alone doesn't fix this half of the problem: with arrival-rate > one-per-tick
+/// drain-rate and a strict FIFO, sufficient backlog age-out happens regardless of how wide
+/// the window is.
+///
+/// Fix: scan up to [`SOLVE_SCAN_MAX`] entries in ONE tick instead of giving up after the
+/// first stale pop — lets a tick catch up through a backlog instead of decaying it one
+/// entry at a time. Bounded (not unbounded) so a pathological backlog still can't stall
+/// block production for an unbounded time; anything scanned past and found stale is
+/// discarded exactly as before (no requeue — same accepted tradeoff as pre-fix, just now
+/// applied to up to [`SOLVE_SCAN_MAX`] candidates per tick instead of only 1).
+fn take_creditable_solve(
+    mining_bridge: &sigil_api::mining::MiningBridge,
+    parent_hash: BlockHash,
+    height: u64,
+) -> Option<sigil_api::mining::AcceptedSolve> {
+    for _ in 0..SOLVE_SCAN_MAX {
+        match mining_bridge.take_solve() {
+            Some(s) if s.parent_hash == parent_hash && s.height == height => return Some(s),
+            Some(s) if height.saturating_sub(s.height) <= sigil_api::mining::credit_window() => {
+                return Some(near_miss_credit(s));
+            }
+            Some(_) => continue, // stale — drop it, keep scanning THIS tick
+            None => return None, // queue empty
+        }
+    }
+    None // scanned the cap without finding a creditable solve
+}
+
 /// Build (or REBUILD — the wedge self-heal) a braid seeded from the local
 /// chain's in-RAM window. A pruned window (base > 0) anchors the braid at the
 /// oldest in-RAM block via `Braid::new_with_base` — trusted because this node
@@ -2473,6 +2988,10 @@ fn dag_drain_apply(
     chain: &mut ChainTip,
     persist: &mut dyn FnMut(&[u8]),
     send_bridge: &sigil_api::send::SendBridge,
+    bridge_bridge: &sigil_api::bridge::BridgeBridge,
+    dex_bridge: &sigil_api::dex::DexBridge,
+    usds_bridge: &sigil_api::usds::UsdsBridge,
+    usds_polygon_bridge: &sigil_api::usds_bridge::UsdsBridgeBridge,
     mint_hash_to_tx_hashes: &mut std::collections::HashMap<BlockHash, Vec<[u8; 32]>>,
 ) -> (u64, u64, u64) {
     // Cross-node divergence detector (opt-in, test meshes): log every
@@ -2529,6 +3048,10 @@ fn dag_drain_apply(
                 // the next mint attempt.
                 if let Some(hashes) = mint_hash_to_tx_hashes.remove(&oh) {
                     send_bridge.confirm_applied(&hashes);
+                    bridge_bridge.confirm_applied(&hashes);
+                    dex_bridge.confirm_applied(&hashes);
+                    usds_bridge.confirm_applied(&hashes);
+                    usds_polygon_bridge.confirm_applied(&hashes);
                 }
             }
             Err(e) => {
@@ -2676,13 +3199,242 @@ fn compute_topology_commitment(braid: Option<&Braid>, next_height: u64) -> Optio
     let to_height = next_height - 1;
     let from_height = to_height.saturating_sub(TOPOLOGY_COMMITMENT_WINDOW.saturating_sub(1));
     let bp = braid.braid_word(from_height, to_height);
-    let bw = flux_topology::BraidWord { strands: bp.strands, gens: bp.word };
+    if !window_is_complete(&bp, from_height, to_height) {
+        // 2026-08-20: real incident — a node whose window was populated via
+        // bulk backfill (not one-at-a-time live gossip) can have a window
+        // that's in-range but not fully resident (eviction racing catch-up).
+        // Committing over a partial window would silently produce a
+        // different value than a node with the full window — refuse rather
+        // than emit a value nobody else could reproduce. See
+        // `verify_topology_on_receipt` for the matching receiver-side guard.
+        return None;
+    }
+    let bw = flux_topology::BraidWord { strands: bp.strands, gens: bp.word.clone() };
     let delta = flux_topology::alexander_poly(&bw);
-    let bytes = serde_json::to_vec(&delta).ok()?;
+    topology_commit_hash(&delta, bp.strands, &bp.word, &bp.producers)
+}
+
+/// Is every height in `[from_height, to_height]` actually resident in the
+/// braid state `bp` was extracted from? `braid_word` silently skips
+/// non-resident blocks (present.rs's own module doc) rather than erroring,
+/// so an incomplete window looks exactly like a valid, smaller one unless
+/// checked explicitly — this is that check.
+fn window_is_complete(bp: &sigil_dagknight::present::BraidPresentation, from_height: u64, to_height: u64) -> bool {
+    if from_height > to_height {
+        return true; // empty window, vacuously complete
+    }
+    let expected = (to_height - from_height + 1) as usize;
+    bp.heights_resident == expected
+}
+
+/// 2026-08-20: the Alexander polynomial ALONE is not a collision-resistant
+/// commitment — it's a well-established fact in knot theory that distinct
+/// braids/knots can share the same Δ(t) (the Kinoshita–Terasaka knot and the
+/// unknot both have Δ=1; Alexander is a coarse invariant, not designed to
+/// resist an adversary hunting for a collision the way BLAKE3 is). A
+/// dishonest producer wouldn't need to break BLAKE3 to hide a divergent
+/// window — only find some OTHER window that happens to share the same Δ.
+///
+/// Fix: bind the commitment to the EXACT canonical braid presentation
+/// (strands, word, producer ranking), not just its polynomial image.
+/// `braid_word` is already proven deterministic regardless of arrival order
+/// (present.rs's `braid_word_deterministic_across_arrival_orders` test), so
+/// hashing it directly costs nothing in determinism — the Alexander
+/// polynomial is kept alongside it for what it actually adds (a real
+/// topological classification of the window, useful for future
+/// routing/viz/legibility work), while the ACTUAL security property now
+/// rests on BLAKE3 over the exact structural data, the same footing every
+/// other commitment in this header already stands on.
+fn topology_commit_hash(
+    delta: &flux_topology::LaurentPoly,
+    strands: u32,
+    word: &[i32],
+    producers: &[[u8; 32]],
+) -> Option<[u8; 32]> {
+    let poly_bytes = serde_json::to_vec(delta).ok()?;
     let mut h = blake3::Hasher::new();
     h.update(b"SIGIL/QTFT/TOPOLOGY/V1");
-    h.update(&bytes);
+    h.update(b"|poly|");
+    h.update(&poly_bytes);
+    h.update(b"|strands|");
+    h.update(&strands.to_le_bytes());
+    h.update(b"|word|");
+    for g in word {
+        h.update(&g.to_le_bytes());
+    }
+    h.update(b"|producers|");
+    for p in producers {
+        h.update(p);
+    }
     Some(*h.finalize().as_bytes())
+}
+
+/// Extra live blocks (beyond the raw `TOPOLOGY_COMMITMENT_WINDOW`) this node
+/// must have personally witnessed via the gossipsub live-block path before
+/// `verify_topology_on_receipt` will compare anything. Pure slack against
+/// off-by-one boundary effects right at the window edge; not load-bearing.
+const TOPOLOGY_VERIFY_HISTORY_MARGIN: u64 = 8;
+
+/// QTFT-2 receipt-side outcome. `InsufficientHistory`, `NoWindowYet`, and
+/// `WindowIncomplete` are all "nothing to compare" — distinguished only for
+/// logging/telemetry, and NEVER treated as a mismatch (a node with too
+/// little, or too gappy, local history has no basis to accuse an honest
+/// peer). `WindowIncomplete` was added 2026-08-19/20 after a real incident:
+/// a node that catches up via bulk backfill (not one-at-a-time live gossip)
+/// reached `InsufficientHistory`'s live-witness threshold while its DAG
+/// window for the checked heights was still gappy (eviction racing the
+/// catch-up), and every single check came back Mismatch — 100% failure rate
+/// from the first eligible block, on a chain independently confirmed healthy
+/// (no state-root divergence, clean apply). `blocks_witnessed_live` alone
+/// was not a sufficient proxy for "my window is trustworthy"; this adds the
+/// direct check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TopoVerdict {
+    Match,
+    Mismatch,
+    InsufficientHistory,
+    NoWindowYet,
+    WindowIncomplete,
+}
+
+/// Running counters for `verify_topology_on_receipt`, surfaced in logs (and
+/// available to wire into `/v1/status` later if useful). `logged_insufficient_once`
+/// keeps the boot-time "still filling in history" notice to a single line
+/// instead of one per block during the fill-in period; `logged_incomplete_once`
+/// does the same for the window-gap case.
+#[derive(Debug, Default)]
+struct TopologyStats {
+    matched: u64,
+    mismatched: u64,
+    insufficient_history: u64,
+    no_window_yet: u64,
+    window_incomplete: u64,
+    logged_insufficient_once: bool,
+    logged_incomplete_once: bool,
+}
+
+impl TopologyStats {
+    fn record(&mut self, v: TopoVerdict) {
+        match v {
+            TopoVerdict::Match => self.matched += 1,
+            TopoVerdict::Mismatch => self.mismatched += 1,
+            TopoVerdict::InsufficientHistory => self.insufficient_history += 1,
+            TopoVerdict::NoWindowYet => self.no_window_yet += 1,
+            TopoVerdict::WindowIncomplete => self.window_incomplete += 1,
+        }
+    }
+}
+
+/// Bound on `PeerProducerAffinity::seen` — a soft preference hint, not
+/// correctness-critical state, so eviction on overflow doesn't need to be
+/// precise (see `record`).
+const PEER_AFFINITY_CAP: usize = 4096;
+
+/// QTFT Path C, SIGIL-level v1 (see `SIGIL_QTFT_TOPOLOGY_v0.md`'s "knot-
+/// routing in p2p" idea). The doc's original framing was a generic scoring
+/// hook inside `flux-p2p` itself; that would mean teaching a chain-agnostic
+/// transport crate about producers/braids, which conflicts with its own
+/// "zero chain deps" boundary (mirroring `flux-topology`'s). This delivers
+/// the real behavioral win at the layer that actually has both the p2p peer
+/// list AND the braid/producer context: `sigil-node`.
+///
+/// The idea: strands that have recently crossed (merged) in the braid are
+/// "topologically adjacent" — a peer relaying one is plausibly tracking the
+/// other too. Concretely: remember which peer most recently delivered a
+/// LIVE block from which producer, and when backfilling a gap for a known
+/// producer, prefer a peer with a recent sighting of that exact producer
+/// over an arbitrary connected peer.
+#[derive(Default)]
+struct PeerProducerAffinity {
+    /// (peer, producer) → height of the most recent live block we saw that
+    /// peer relay from that producer.
+    seen: std::collections::HashMap<(flux_p2p::PeerId, [u8; 32]), u64>,
+}
+
+impl PeerProducerAffinity {
+    fn record(&mut self, peer: flux_p2p::PeerId, producer: [u8; 32], height: u64) {
+        let key = (peer, producer);
+        if self.seen.len() >= PEER_AFFINITY_CAP && !self.seen.contains_key(&key) {
+            // Soft bound: drop an arbitrary entry rather than track proper
+            // LRU order — this only ever biases a peer preference, it never
+            // gates correctness, so an imprecise evict is fine.
+            if let Some(k) = self.seen.keys().next().copied() {
+                self.seen.remove(&k);
+            }
+        }
+        self.seen
+            .entry(key)
+            .and_modify(|h| *h = (*h).max(height))
+            .or_insert(height);
+    }
+
+    /// Prefer a connected peer with a recent sighting of `producer`;
+    /// otherwise fall back to the first connected peer (today's behavior).
+    fn best_for(&self, connected: &[flux_p2p::PeerId], producer: Option<[u8; 32]>) -> Option<flux_p2p::PeerId> {
+        if let Some(p) = producer {
+            let mut best: Option<(flux_p2p::PeerId, u64)> = None;
+            for peer in connected {
+                if let Some(&h) = self.seen.get(&(*peer, p)) {
+                    if best.map(|(_, bh)| h > bh).unwrap_or(true) {
+                        best = Some((*peer, h));
+                    }
+                }
+            }
+            if let Some((peer, _)) = best {
+                return Some(peer);
+            }
+        }
+        connected.first().copied()
+    }
+}
+
+/// QTFT-2: recompute the topology commitment a peer's block SHOULD carry —
+/// using the exact same windowed Alexander-polynomial algorithm the producer
+/// used at mint time (`compute_topology_commitment`) — and compare it to
+/// what the block actually claims.
+///
+/// Called BEFORE the block is admitted to the braid (see call site), over
+/// the window `[height-32, height-1]`: strictly this block's ANCESTORS, so
+/// it is well-defined whether or not `block` itself has been inserted yet.
+///
+/// Deliberately refuses to render a verdict until this node has personally
+/// witnessed (via the live gossipsub path — never via bulk backfill/snapshot
+/// restore, which could hand it a partial or differently-sourced window)
+/// at least `TOPOLOGY_COMMITMENT_WINDOW + TOPOLOGY_VERIFY_HISTORY_MARGIN`
+/// blocks since boot. Below that threshold this node's own window may be
+/// incomplete relative to what the producer saw, which would manufacture
+/// false mismatches against perfectly honest peers — so it reports
+/// `InsufficientHistory` instead of guessing.
+fn verify_topology_on_receipt(
+    braid: &Braid,
+    height: u64,
+    claimed: Option<[u8; 32]>,
+    blocks_witnessed_live: u64,
+) -> TopoVerdict {
+    if height == 0 {
+        return TopoVerdict::NoWindowYet;
+    }
+    if blocks_witnessed_live < TOPOLOGY_COMMITMENT_WINDOW + TOPOLOGY_VERIFY_HISTORY_MARGIN {
+        return TopoVerdict::InsufficientHistory;
+    }
+    // Check window completeness directly rather than trusting
+    // `blocks_witnessed_live` as a proxy for it — a node that caught up via
+    // bulk backfill can cross the live-witness threshold while its window
+    // for THESE heights still has eviction gaps (see TopoVerdict's doc).
+    let to_height = height - 1;
+    let from_height = to_height.saturating_sub(TOPOLOGY_COMMITMENT_WINDOW.saturating_sub(1));
+    let bp = braid.braid_word(from_height, to_height);
+    if !window_is_complete(&bp, from_height, to_height) {
+        return TopoVerdict::WindowIncomplete;
+    }
+    let bw = flux_topology::BraidWord { strands: bp.strands, gens: bp.word.clone() };
+    let delta = flux_topology::alexander_poly(&bw);
+    let expected = topology_commit_hash(&delta, bp.strands, &bp.word, &bp.producers);
+    if expected == claimed {
+        TopoVerdict::Match
+    } else {
+        TopoVerdict::Mismatch
+    }
 }
 
 /// Mint an EMPTY block at the current tip — a no-tx block that just advances
@@ -2753,7 +3505,7 @@ fn mint_next_block(
         *th.finalize().as_bytes()
     };
 
-    let header = SigilBlockHeaderV0 {
+    let mut header = SigilBlockHeaderV0 {
         version: HEADER_VERSION,
         network_id: NETWORK_ID,
         height,
@@ -2784,12 +3536,49 @@ fn mint_next_block(
             settle_tx: None,
         },
         sig_scheme: SigScheme::SqiSign5,
-        // The miner's wallet — the work is bound to it (the header the miner
-        // hashed commits to this exact wallet), so it can't be re-pointed.
-        producer: solve.map(|s| s.wallet).unwrap_or([0u8; 32]),
+        producer: match solve {
+            // The miner's wallet — the work is bound to it (the header the
+            // miner hashed commits to this exact wallet), so it can't be
+            // re-pointed. Untouched by producer-signing: repointing this
+            // would invalidate the PoW solution.
+            Some(s) => s.wallet,
+            // No solve (the empty-block dyno / self-mined path) — this field
+            // was always an unused `[0u8;32]` placeholder here (nothing
+            // hashed against it). Real post-quantum SQIsign5 signing costs
+            // ~1.16s (measured) — far too slow for every block — so it only
+            // runs on periodic checkpoint heights (see `producer_signing::
+            // HYBRID_CHECKPOINT_INTERVAL`); every other self-mined block uses
+            // the fast Ed25519-only identity. Deciding this HERE (not just at
+            // the signing call below) matters: if `producer` pointed at the
+            // hybrid identity on a non-checkpoint block, the Ed25519-only
+            // signer below would see a mismatch and skip too, leaving the
+            // block silently unsigned. Falls to `[0u8;32]` — unchanged legacy
+            // behavior — when nothing's opted in.
+            None => {
+                if crate::producer_signing::is_hybrid_checkpoint(height) {
+                    crate::producer_signing::configured_hybrid_producer_wallet()
+                        .or_else(crate::producer_signing::configured_signing_wallet)
+                        .unwrap_or([0u8; 32])
+                } else {
+                    crate::producer_signing::configured_signing_wallet().unwrap_or([0u8; 32])
+                }
+            }
+        },
         producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
         topology_commitment,
     };
+    // Real signature if (and only if) the operator opted in AND this is the
+    // self-mined path with a matching producer wallet — see
+    // `producer_signing`'s module doc. Hybrid (SQIsign5+Ed25519, real
+    // post-quantum protection) only attempted on checkpoint heights — see the
+    // `producer:` field comment above for why the gate has to be consistent
+    // between the two. Each function is independently a no-op (byte-for-byte
+    // unchanged header) unless its own env vars AND the producer match are
+    // both right, so calling both in sequence is safe either way.
+    if crate::producer_signing::is_hybrid_checkpoint(height) {
+        crate::producer_signing::maybe_sign_hybrid(&mut header);
+    }
+    crate::producer_signing::maybe_sign(&mut header);
     // Hashes of the txs that actually made it into `transition` (a STRICT
     // subset of the `txs` argument — build_block_body_for_shares silently
     // skips anything that failed apply_tx/commit_state_transition, e.g.
@@ -3402,6 +4191,40 @@ mod tests {
     }
 
     #[test]
+    fn self_mined_block_is_really_signed_and_verifies_at_activation() {
+        // The full, REAL path Epsilon runs once SIGIL_PRODUCER_SIGNING_SEED_HEX
+        // is configured: mint_next_block (production code, solve=None — the
+        // self-mined/no-external-miner path) → the resulting header must
+        // carry a genuine Ed25519 signature that verify_at_height() accepts
+        // AT the real activation height (H1_PRODUCER_SIG_ACTIVATION_HEIGHT).
+        // Not a unit test of the crypto in isolation — this exercises the
+        // exact function the live node calls.
+        let _guard = crate::producer_signing::locked();
+        let seed = [42u8; 32];
+        std::env::set_var("SIGIL_PRODUCER_SIGNING_SEED_HEX", hex::encode(seed));
+
+        let mut chain = ChainTip::new();
+        chain.apply(build_genesis().unwrap()).unwrap();
+
+        let (block, _included) = mint_next_block(&chain, vec![], &[], None, None, None)
+            .expect("self-mined block should mint");
+
+        assert_eq!(block.header.sig_scheme, SigScheme::Ed25519Hot, "self-mined + configured key => real scheme");
+        assert_ne!(block.header.producer, [0u8; 32], "producer must be the configured wallet, not the old placeholder");
+        block.header.verify_producer_sig().expect("mint_next_block's signature must actually verify");
+        block
+            .header
+            .verify_at_height(sigil_header::H1_PRODUCER_SIG_ACTIVATION_HEIGHT)
+            .expect("must pass verify_at_height at the real, configured activation height");
+
+        // And it applies cleanly through the real chain, same as any block.
+        chain.apply(block).expect("signed self-mined block applies normally");
+        assert_eq!(chain.height(), 2);
+
+        std::env::remove_var("SIGIL_PRODUCER_SIGNING_SEED_HEX");
+    }
+
+    #[test]
     fn build_block_at_rejects_at_wrong_parent() {
         // Building a block 1 over a parent_hash that doesn't match the chain's
         // genesis tip → chain.apply rejects (parent_hash mismatch).
@@ -3472,6 +4295,10 @@ mod dag_wiring_tests {
         let mut dag_bodies = std::collections::HashMap::new();
         let mut mint_hash_to_tx_hashes = std::collections::HashMap::new();
         let send_bridge = sigil_api::send::SendBridge::new();
+        let bridge_bridge = sigil_api::bridge::BridgeBridge::new(None, None);
+        let dex_bridge = sigil_api::dex::DexBridge::new();
+        let usds_bridge = sigil_api::usds::UsdsBridge::new();
+        let usds_polygon_bridge = sigil_api::usds_bridge::UsdsBridgeBridge::new(None, None);
         let mut persisted: Vec<Vec<u8>> = Vec::new();
         let (mut applied, mut skipped) = (0u64, 0u64);
         // Worst-case arrival: children before parents (park → cascade unpark).
@@ -3484,7 +4311,7 @@ mod dag_wiring_tests {
             dag_store_body(&mut dag_bodies, 32, b.hash(), b.clone());
             let (a, s, f) = dag_drain_apply(&mut braid, &mut dag_bodies, &mut chain, &mut |braw| {
                 persisted.push(braw.to_vec());
-            }, &send_bridge, &mut mint_hash_to_tx_hashes);
+            }, &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge, &mut mint_hash_to_tx_hashes);
             applied += a;
             skipped += s;
             assert_eq!(f, 0, "no apply failures through the real chokepoint");
@@ -3510,5 +4337,249 @@ mod dag_wiring_tests {
             "old block must be refused: {refeed:?}"
         );
         assert_eq!(chain.height(), 3);
+    }
+
+    // ── QTFT-2: receipt-side topology verification ──────────────────────────
+
+    /// Synthetic deterministic hash for a test height (offset by 1 so height
+    /// 0's hash never collides with the all-zero genesis parent).
+    fn qtft_test_hash(n: u64) -> BlockHash {
+        let mut b = [0u8; 32];
+        b[0..8].copy_from_slice(&(n + 1).to_le_bytes());
+        b
+    }
+
+    const QTFT_PA: [u8; 32] = [0xAA; 32];
+    const QTFT_PB: [u8; 32] = [0xBB; 32];
+    const QTFT_PC: [u8; 32] = [0xCC; 32];
+
+    /// A 3-producer synthetic braid — deliberately 3, not 2: with only 2
+    /// strands the arrangement is always already-adjacent (see
+    /// `sigil_dagknight::present`'s own `adjacent_strand_merge_yields_no_crossing`
+    /// test), so a 2-producer braid word is ALWAYS empty no matter how many
+    /// blocks merge — the invariant only ever varies with ≥3 real producers.
+    /// Round-robins PA/PB/PC as producer and merges 2-back (a different
+    /// strand two-thirds of the time) to generate real crossings throughout.
+    fn qtft_test_views(n: u64) -> Vec<BlockView> {
+        (0..n)
+            .map(|height| {
+                let producer = match height % 3 {
+                    0 => QTFT_PA,
+                    1 => QTFT_PB,
+                    _ => QTFT_PC,
+                };
+                let parent = if height == 0 { [0u8; 32] } else { qtft_test_hash(height - 1) };
+                let merge_parents = if height >= 2 { vec![qtft_test_hash(height - 2)] } else { vec![] };
+                BlockView {
+                    hash: qtft_test_hash(height),
+                    parent,
+                    merge_parents,
+                    height,
+                    producer,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn topology_verify_matches_honest_producer_once_history_is_sufficient() {
+        let n = TOPOLOGY_COMMITMENT_WINDOW + TOPOLOGY_VERIFY_HISTORY_MARGIN + 10;
+        let views = qtft_test_views(n);
+
+        // "Sender": mirrors real mint-time order exactly — compute the
+        // commitment for height h over ancestors ONLY, THEN insert h's own
+        // view (so later heights' windows can see it as an ancestor).
+        let mut sender = Braid::new(BraidConfig::default());
+        let mut claimed: Vec<Option<[u8; 32]>> = Vec::with_capacity(n as usize);
+        for (h, view) in views.iter().enumerate() {
+            claimed.push(compute_topology_commitment(Some(&sender), h as u64));
+            assert!(!matches!(sender.insert(view.clone()), InsertOutcome::Rejected(_)));
+        }
+
+        // "Receiver": a completely independent Braid, fed the identical
+        // views in the identical order, exercising the exact call sequence
+        // production code uses (verify BEFORE insert).
+        let mut receiver = Braid::new(BraidConfig::default());
+        let mut witnessed = 0u64;
+        let threshold = TOPOLOGY_COMMITMENT_WINDOW + TOPOLOGY_VERIFY_HISTORY_MARGIN;
+        let mut saw_a_real_crossing = false;
+        for (h, view) in views.iter().enumerate() {
+            let verdict = verify_topology_on_receipt(&receiver, h as u64, claimed[h], witnessed);
+            match h as u64 {
+                0 => assert_eq!(verdict, TopoVerdict::NoWindowYet, "genesis has no window"),
+                h if h < threshold => assert_eq!(
+                    verdict, TopoVerdict::InsufficientHistory,
+                    "height {h}: receiver hasn't witnessed a full window yet"
+                ),
+                h => assert_eq!(
+                    verdict, TopoVerdict::Match,
+                    "height {h}: identical append order must recompute identically"
+                ),
+            }
+            witnessed += 1;
+            assert!(!matches!(receiver.insert(view.clone()), InsertOutcome::Rejected(_)));
+        }
+        // Sanity: with 3 real producers merging across strands, at least one
+        // window's commitment must differ from height 1's (i.e. the field
+        // genuinely varies — not silently degenerate the way a 2-producer
+        // braid always is).
+        for h in (threshold as usize)..(n as usize) {
+            if claimed[h] != claimed[threshold as usize] {
+                saw_a_real_crossing = true;
+                break;
+            }
+        }
+        assert!(saw_a_real_crossing, "3-producer braid must produce a non-constant topology commitment somewhere in the window");
+    }
+
+    #[test]
+    fn topology_verify_catches_a_genuinely_tampered_commitment() {
+        let n = TOPOLOGY_COMMITMENT_WINDOW + TOPOLOGY_VERIFY_HISTORY_MARGIN + 5;
+        let views = qtft_test_views(n);
+
+        let mut sender = Braid::new(BraidConfig::default());
+        let mut claimed: Vec<Option<[u8; 32]>> = Vec::with_capacity(n as usize);
+        for (h, view) in views.iter().enumerate() {
+            claimed.push(compute_topology_commitment(Some(&sender), h as u64));
+            assert!(!matches!(sender.insert(view.clone()), InsertOutcome::Rejected(_)));
+        }
+
+        // Tamper with the LAST block's claimed commitment — simulating a
+        // dishonest or buggy peer whose header doesn't match its own braid.
+        let tamper_height = (n - 1) as usize;
+        let tampered = match claimed[tamper_height] {
+            Some(mut bytes) => { bytes[0] ^= 0xFF; Some(bytes) }
+            None => Some([0x99u8; 32]),
+        };
+        claimed[tamper_height] = tampered;
+
+        let mut receiver = Braid::new(BraidConfig::default());
+        let mut witnessed = 0u64;
+        let mut last_verdict = TopoVerdict::NoWindowYet;
+        for (h, view) in views.iter().enumerate() {
+            last_verdict = verify_topology_on_receipt(&receiver, h as u64, claimed[h], witnessed);
+            witnessed += 1;
+            assert!(!matches!(receiver.insert(view.clone()), InsertOutcome::Rejected(_)));
+        }
+        assert_eq!(last_verdict, TopoVerdict::Mismatch, "a genuinely tampered commitment must be caught");
+    }
+
+    #[test]
+    fn topology_commit_hash_distinguishes_braids_that_share_an_alexander_polynomial() {
+        // Both windows below have Alexander polynomial Δ=1 — the unknot's
+        // value. `flux_topology`'s own KAT tests already establish this for
+        // BOTH cases independently: `kat_unknot_sigma1_n2_delta_is_1` proves
+        // a single crossing on 2 strands closes to the unknot, and
+        // `kat_sigma1_sigma2_unknot_closure` proves σ1σ2 on 3 strands ALSO
+        // closes to the unknot — same Δ, different strand count AND word.
+        // (NOTE: the truly EMPTY word on 2 strands is NOT a third example of
+        // this — it closes to a 2-component UNLINK, Δ=0, not the unknot; an
+        // earlier version of this test wrongly assumed otherwise and the
+        // premise assertion below caught it immediately.) A commitment over
+        // the polynomial alone could not tell the two real examples below
+        // apart — which is exactly the collision gap this hash construction
+        // exists to close. Prove it actually does.
+        let two_strand = flux_topology::BraidWord::new(2, vec![1]);
+        let delta_two_strand = flux_topology::alexander_poly(&two_strand);
+        let non_trivial = flux_topology::BraidWord::new(3, vec![1, 2]);
+        let delta_non_trivial = flux_topology::alexander_poly(&non_trivial);
+        assert_eq!(delta_two_strand, delta_non_trivial, "test premise: both must share Δ=1");
+
+        let producers_2 = [[0xAAu8; 32], [0xBBu8; 32]];
+        let producers_3 = [[0xAAu8; 32], [0xBBu8; 32], [0xCCu8; 32]];
+        let c1 = topology_commit_hash(&delta_two_strand, two_strand.strands, &two_strand.gens, &producers_2);
+        let c2 = topology_commit_hash(&delta_non_trivial, non_trivial.strands, &non_trivial.gens, &producers_3);
+        assert_ne!(
+            c1, c2,
+            "two distinct braid presentations sharing an Alexander polynomial must still commit differently"
+        );
+
+        // Sanity: the SAME presentation must still commit identically
+        // (determinism, not just difference-sensitivity).
+        let c1_again = topology_commit_hash(&delta_two_strand, two_strand.strands, &two_strand.gens, &producers_2);
+        assert_eq!(c1, c1_again, "identical input must hash identically");
+    }
+
+    #[test]
+    fn topology_verify_never_flags_insufficient_history_as_a_mismatch() {
+        // Below the witnessed-history threshold, verify_topology_on_receipt
+        // must NEVER return Mismatch even when handed a wildly wrong claim —
+        // an honest peer must never be accused because OUR local history is
+        // thin (fresh boot / recent snapshot restore).
+        let braid = Braid::new(BraidConfig::default());
+        let verdict = verify_topology_on_receipt(&braid, 5, Some([0xEEu8; 32]), 0);
+        assert_eq!(verdict, TopoVerdict::InsufficientHistory);
+    }
+
+    #[test]
+    fn topology_verify_never_flags_a_gappy_window_as_a_mismatch() {
+        // Real incident (2026-08-20, happysrv): a node that caught up via
+        // bulk backfill crossed the InsufficientHistory threshold while its
+        // window for the checked heights was NOT fully resident (a gap from
+        // eviction racing the catch-up) — and every single check came back
+        // Mismatch, on a chain independently confirmed healthy. Reproduce
+        // the gap directly: seed a braid anchored at height 100 (so heights
+        // below 100 are simply never resident — no view, no data), insert
+        // views only from height 101 onward, then check at a height whose
+        // 32-block window reaches back into the un-seeded range.
+        let base_height = 100u64;
+        let base_hash = qtft_test_hash(base_height);
+        let mut braid = Braid::new_with_base(BraidConfig::default(), base_hash, base_height);
+
+        // 3 producers so the word isn't trivially degenerate (see the other
+        // QTFT tests' note on why 2 strands can't test this meaningfully).
+        for height in (base_height + 1)..=(base_height + 20) {
+            let producer = match height % 3 {
+                0 => QTFT_PA,
+                1 => QTFT_PB,
+                _ => QTFT_PC,
+            };
+            let parent = qtft_test_hash(height - 1);
+            let view = BlockView {
+                hash: qtft_test_hash(height),
+                parent,
+                merge_parents: vec![],
+                height,
+                producer,
+            };
+            assert!(!matches!(braid.insert(view), InsertOutcome::Rejected(_)));
+        }
+
+        // Check at height 110: window = [110-32, 109] = [78, 109]. Heights
+        // 78..=100 were never seeded — a real, unavoidable gap. Plenty of
+        // "live blocks witnessed" so InsufficientHistory doesn't mask it —
+        // this must be caught by the completeness check specifically.
+        let witnessed = TOPOLOGY_COMMITMENT_WINDOW + TOPOLOGY_VERIFY_HISTORY_MARGIN + 100;
+        let verdict = verify_topology_on_receipt(&braid, 110, Some([0xEEu8; 32]), witnessed);
+        assert_eq!(
+            verdict, TopoVerdict::WindowIncomplete,
+            "a gappy window must never be reported as Match or Mismatch — only as incomplete"
+        );
+
+        // Sanity: a height whose FULL window is inside the seeded range
+        // (e.g. height 120: window [88,119]... still touches the gap since
+        // base is 100). Use a height deep enough that the whole 32-block
+        // window is past the seed point.
+        let deep_height = base_height + TOPOLOGY_COMMITMENT_WINDOW + 5;
+        for height in (base_height + 21)..=deep_height {
+            let producer = match height % 3 {
+                0 => QTFT_PA,
+                1 => QTFT_PB,
+                _ => QTFT_PC,
+            };
+            let view = BlockView {
+                hash: qtft_test_hash(height),
+                parent: qtft_test_hash(height - 1),
+                merge_parents: vec![],
+                height,
+                producer,
+            };
+            assert!(!matches!(braid.insert(view), InsertOutcome::Rejected(_)));
+        }
+        let verdict2 = verify_topology_on_receipt(&braid, deep_height, Some([0xEEu8; 32]), witnessed);
+        // This one's window is fully resident, so it CAN render a real
+        // verdict now — it'll be Mismatch (claimed value is a dummy), which
+        // is the correct, expected outcome once completeness is satisfied.
+        assert_eq!(verdict2, TopoVerdict::Mismatch, "a complete window with a wrong claim IS a real mismatch");
     }
 }

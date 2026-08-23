@@ -830,6 +830,10 @@ impl P2PBlockSync {
                 let mut last_verify = crate::instant_ago(2); // slow verify+flush timer
                 let mut last_synced_seen: u64 = resume_h;             // dynamic-base detector
                 let mut last_advance_t = Instant::now();
+                // 2026-08-23 (grogu-lane-s-v2-false-positive): consecutive-tick counter for the
+                // LANE-S v2 "synced_to impossibly above the connected peer" check below — see
+                // its own comment for why a single-tick trigger was a proven-live false positive.
+                let mut lane_s_v2_streak: u32 = 0;
                 // v0.95 FRONTIER-WEDGE watchdog: count backfill chunks RECEIVED for the
                 // frontier range that did NOT advance `synced_to`. A genuine wedge (a forked
                 // chunk the store rejects, or an out-of-order squatter blocking the spine
@@ -1924,8 +1928,28 @@ impl P2PBlockSync {
                         // Cleared the instant the contiguous frontier advances again.
                         let net_tip = s.peer_best_height;
                         let stalled_for = last_advance_t.elapsed();
+                        // 2026-08-23 — THE "STALLED at 1,100 blk/s" LIE, reported live by the
+                        // operator three times. `stalled_for` measures ONLY how long the
+                        // CONTIGUOUS verified frontier has been still; it never asked whether
+                        // the wire was busy. During a healthy archive sync the frontier
+                        // advances in bursts (it waits on one chunk while many others are in
+                        // flight), so any pause >6s printed "⚠ STALLED — nudging peer" while
+                        // the producer log showed that same node walking 170,002 -> 260,000,
+                        // ~1,100 blk/s, monotonic, zero gaps. A healthy node that looks broken
+                        // costs operator trust and provokes exactly the restarts that DO lose
+                        // progress.
+                        //
+                        // A stall means: the frontier is not moving AND nothing is arriving.
+                        // If bytes landed since the last state tick, this node is working —
+                        // say so instead of crying stall. (Same distinction as
+                        // `sigil_sync::SyncStore::is_wire_idle`: genuinely idle vs momentarily
+                        // quiet while verification catches up.)
+                        let wire_delivering = bytes_session > last_rate_bytes;
                         s.stall_reason = if peer_count_now == 0 && loop_start.elapsed() >= Duration::from_secs(6) {
                             "no peers — mesh not grafted (bootstrap/dialing; no backfill peer available)".into()
+                        } else if wire_delivering {
+                            // Downloading right now: never a stall, whatever the frontier does.
+                            String::new()
                         } else if net_tip > now_synced && stalled_for >= Duration::from_secs(6) {
                             format!("no advance {}s @ {} (gap {}) — retrying exact [{}..] from a rotating peer",
                                 stalled_for.as_secs(), now_synced, net_tip.saturating_sub(now_synced), now_synced)
@@ -2196,13 +2220,40 @@ impl P2PBlockSync {
                                 let s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                                 (s.peer_best_oracle_confirmed, s.peer_best_height)
                             };
+                            // 2026-08-23 (grogu-lane-s-v2-false-positive): proven live — a
+                            // client with only 1 connected peer (mesh dropped from 2→1, exactly
+                            // the scenario the operator hit) reads `peer_reported` from WHATEVER
+                            // peer happens to be connected. If that one peer is a lagging
+                            // follower (not the producer) rather than the best-known peer, its
+                            // reported height can legitimately sit below OUR already-correct,
+                            // already-verified `synced_to` — that's the follower being behind,
+                            // not us being stale. The old 1000-block margin, checked on a SINGLE
+                            // tick with no persistence requirement, treated that completely
+                            // normal situation as "impossibly far above a live peer" and wiped a
+                            // 100%-synced, cryptographically-verified store back down. Two
+                            // changes, mirroring the fix already applied to the oracle-based
+                            // reset branch: (1) require a much larger, genuinely-impossible gap
+                            // (50,000 blocks — a single lagging-but-honest peer will never be
+                            // this far behind a chain producing low tens of blocks/sec; a value
+                            // in the hundreds of thousands, the old testnet-reset signature,
+                            // clears this easily); (2) require the condition to hold for 3
+                            // consecutive ticks, not one, so a single transient bad peer report
+                            // can't trigger a destructive wipe by itself — matching the
+                            // discipline every OTHER reset branch in this file already uses.
+                            const LANE_S_V2_MARGIN: u64 = 50_000;
                             if peer_confirmed && peer_reported > 0
-                                && synced_g > peer_reported.saturating_add(1000)
+                                && synced_g > peer_reported.saturating_add(LANE_S_V2_MARGIN)
                             {
+                                lane_s_v2_streak += 1;
+                            } else {
+                                lane_s_v2_streak = 0;
+                            }
+                            if lane_s_v2_streak >= 3 {
                                 crate::tlog!(
                                     "[sync] LANE-S v2: local synced_to {synced_g} (base {base_g}) is \
                                      impossibly far above the live peer's confirmed height \
-                                     {peer_reported} → stale post-reset state, wiping (content-independent path)"
+                                     {peer_reported} for 3 consecutive checks → stale post-reset state, \
+                                     wiping (content-independent path)"
                                 );
                                 store.reset_watermarks();
                                 store.set_base(GENESIS_ANCHOR_HEIGHT);
@@ -2215,6 +2266,7 @@ impl P2PBlockSync {
                                 s.reset_pending = false;
                                 drop(s);
                                 genesis_reset = true; // reuse the flag: also skips LANE-B this tick
+                                lane_s_v2_streak = 0;
                             }
                         }
                         if !genesis_reset {

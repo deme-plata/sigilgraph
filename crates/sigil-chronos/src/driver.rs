@@ -25,6 +25,28 @@ fn now_micros() -> u64 {
 /// Topic blocks gossip on. Matches `sigil-net`'s `TOPIC_BLOCKS`.
 pub const TOPIC_BLOCKS: &str = "/sigil/g0/blocks";
 
+/// A [`SimNode`] this driver can drive over a real transport.
+///
+/// The driver needs two things beyond `SimNode`: whether the node produces on
+/// a cadence (vs. reacting only to arrivals), and which topic its published
+/// payloads belong on. `SigilSimNode` publishes blocks; `braidpool`'s node
+/// publishes availability traffic on its own topic — same driver loop, same
+/// wire, different chain layer.
+pub trait DrivableNode: SimNode {
+    /// Does this node mint/emit on the `block_time_ms` cadence?
+    fn drives_on_cadence(&self) -> bool;
+    /// Topic this node's published envelopes go out on.
+    fn publish_topic(&self) -> &str {
+        TOPIC_BLOCKS
+    }
+}
+
+impl DrivableNode for SigilSimNode {
+    fn drives_on_cadence(&self) -> bool {
+        self.is_producer()
+    }
+}
+
 /// Run `node` over `transport` for `run_secs` wall-clock seconds.
 ///
 /// - Producers mint one block per `block_time_ms` (gated on ≥1 peer being up
@@ -36,11 +58,23 @@ pub const TOPIC_BLOCKS: &str = "/sigil/g0/blocks";
 /// Returns the node so the caller can read final counters (blocks_applied,
 /// divergence_count, …).
 pub fn run<T: Transport>(
-    mut node: SigilSimNode,
-    mut transport: T,
+    node: SigilSimNode,
+    transport: T,
     block_time_ms: u64,
     run_secs: u64,
 ) -> SigilSimNode {
+    run_node(node, transport, block_time_ms, run_secs)
+}
+
+/// The generic driver loop. Identical behavior to [`run`], for any
+/// [`DrivableNode`] — the seam that lets `braidpool`'s availability node
+/// cross the same real wire the chain node does.
+pub fn run_node<N: DrivableNode, T: Transport>(
+    mut node: N,
+    mut transport: T,
+    block_time_ms: u64,
+    run_secs: u64,
+) -> N {
     let start = Instant::now();
     let mut last_produce = Instant::now();
     let poll_interval = Duration::from_millis((block_time_ms / 4).max(50));
@@ -68,7 +102,7 @@ pub fn run<T: Transport>(
         //    is up) OR whenever something arrived; followers step on arrival.
         let peer_up = transport.peer_count() > 0;
         let produce_due =
-            node.is_producer() && peer_up && last_produce.elapsed().as_millis() as u64 >= block_time_ms;
+            node.drives_on_cadence() && peer_up && last_produce.elapsed().as_millis() as u64 >= block_time_ms;
 
         if !incoming.is_empty() || produce_due {
             let result = node.step(now_micros(), &incoming);
@@ -79,7 +113,7 @@ pub fn run<T: Transport>(
             for env in result.publish {
                 let id = *blake3::hash(&env.payload).as_bytes();
                 if seen.insert(id) {
-                    transport.publish(TOPIC_BLOCKS, env.payload);
+                    transport.publish(node.publish_topic(), env.payload);
                 }
             }
             for ev in result.events {

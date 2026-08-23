@@ -97,6 +97,10 @@ sigil-tx     = { path = "../sigil-tx" }
 sigil-bank   = { path = "../sigil-bank" }
 sigil-tip-proof = { path = "../sigil-tip-proof" }
 sigil-dagknight = { path = "../sigil-dagknight" }
+# CHRONOS × BraidPool: the availability layer (sharded ingest, DRR scheduler,
+# shard-bound acks, RS dissemination, repair) under the real sim + real p2p.
+sigil-braidpool = { path = "../sigil-braidpool" }
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 sigil-dex    = { path = "../sigil-dex" }
 # Late-join catch-up: a fresh node verifies ONE constant-size fold proof of the
 # history prefix (BLAKE4 transparent setup) instead of replaying every block.
@@ -112,3 +116,7 @@ path = "src/bin/chronos_virtual.rs"
 [[bin]]
 name = "sigil-batchsweep"
 path = "src/bin/sigil-batchsweep.rs"
+
+[[bin]]
+name = "sigil-braidpool-chronos"
+path = "src/bin/sigil-braidpool-chronos.rs"

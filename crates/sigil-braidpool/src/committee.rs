@@ -77,6 +77,12 @@ impl Committee {
         self.members.iter().find(|(w, _)| w == wallet).map(|(_, pk)| *pk)
     }
 
+    /// Iterate `(wallet, pubkey)` for every member — a disperser needs to
+    /// address each member in turn, not just resolve one by wallet.
+    pub fn members_iter(&self) -> impl Iterator<Item = (WalletId, [u8; 32])> + '_ {
+        self.members.iter().copied()
+    }
+
     pub fn bft_active(&self) -> bool {
         bft_active(self.len())
     }

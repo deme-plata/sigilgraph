@@ -232,6 +232,11 @@ impl ShardedMempool {
 
     pub fn worker_count(&self) -> usize { self.workers.len() }
 
+    /// Borrow every worker shard — the scheduler (`crate::scheduler`) needs
+    /// per-worker `BatchSource`s, which means direct access to the shards
+    /// rather than going through `pull`'s own built-in fair-share loop.
+    pub fn workers(&self) -> &[MempoolWorker] { &self.workers }
+
     pub fn epoch_seed(&self) -> [u8; 32] { *self.epoch_seed.read() }
 
     /// Rotate to a new routing salt. Existing queued txs stay exactly where

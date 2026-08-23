@@ -28,7 +28,12 @@ use crate::types::WorkerBatch;
 /// One peer's slice of an erasure-coded batch. `index` identifies which of
 /// the `k + parity` shards this is — needed at reconstruction time since
 /// shards can arrive out of order or with some missing.
-#[derive(Debug, Clone)]
+///
+/// `Serialize`/`Deserialize` because a shard is a WIRE object: dissemination
+/// means actually sending it to a peer. Added when `sigil-chronos`'s
+/// braidpool scenarios started moving real shards across both the simulated
+/// network and real flux-p2p gossipsub.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BatchShard {
     pub digest: [u8; 32],
     pub index: usize,

@@ -34,6 +34,7 @@ pub mod property;
 pub mod scaling;
 pub mod snapshot_cadence;
 pub mod backfill;
+pub mod braidpool;
 pub mod backfill_catchup;
 pub mod scenarios;
 pub mod throughput;

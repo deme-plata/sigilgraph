@@ -970,7 +970,42 @@ fn run_start() -> Result<()> {
             std::collections::HashMap::new();
         let mut serve_cache_order: std::collections::VecDeque<(u64, u64, bool, u32)> =
             std::collections::VecDeque::new();
-        const SERVE_CACHE_CAP: usize = 2048; // ~2048 finalized chunks hot in RAM
+        // 2026-08-23 — WHY THIS IS BYTES AND NOT A COUNT, and why it is derived
+        // rather than configured.
+        //
+        // These caches were capped by ENTRY COUNT (2048 / 256). An entry is a
+        // whole serialized+compressed serve response, and those are NOT small:
+        // measured over 482 real responses on this producer, mean 0.9 MB,
+        // median 0.3 MB, max 3.3 MB. So "2048 chunks" was really ~1.8 GB
+        // typical and ~6.8 GB worst case — two constants that LOOK like a
+        // memory bound while bounding nothing.
+        //
+        // What that cost, live: an archive-syncing peer requests big 32k-header
+        // chunks, every one is cached at max size, the process crossed its
+        // cgroup MemoryHigh (11 GiB), and the kernel parked it in
+        // uninterruptible sleep (`mem_cgroup_handle_over_high`). Result: block
+        // production stopped dead, 174 inbound connections sat unaccepted, and
+        // every client saw `peers 0`. It looked like a sync bug for hours; it
+        // was the cache.
+        //
+        // OUT OF THE BOX: the budget is derived from THIS process's actual
+        // memory ceiling (cgroup v2/v1 limit, else system RAM), so a small VPS
+        // and a 64 GB box both get something sane with no operator action and
+        // no env var. 8% of the ceiling, clamped to [64 MiB, 2 GiB] — big
+        // enough to serve a real archive sync, far too small to threaten the
+        // limit. SIGIL_SERVE_CACHE_BYTES overrides it for anyone who wants to.
+        let serve_cache_budget: usize = std::env::var("SIGIL_SERVE_CACHE_BYTES")
+            .ok().and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or_else(|| {
+                let ceiling = detect_memory_ceiling_bytes();
+                ((ceiling / 100) * 8).clamp(64 * 1024 * 1024, 2 * 1024 * 1024 * 1024)
+            });
+        // The hot cache holds near-tip retries; it needs far less room.
+        let hot_cache_budget: usize = (serve_cache_budget / 8).max(16 * 1024 * 1024);
+        eprintln!("\u{1f9e0} serve caches: {} MiB finalized + {} MiB hot (auto-sized from a {} MiB memory ceiling; override SIGIL_SERVE_CACHE_BYTES)",
+            serve_cache_budget / 1048576, hot_cache_budget / 1048576, detect_memory_ceiling_bytes() / 1048576);
+        let mut serve_cache_bytes: usize = 0;
+        let mut hot_cache_bytes: usize = 0;
         let (mut cache_hits, mut cache_miss): (u64, u64) = (0, 0);
         let mut last_cache_log = std::time::Instant::now();
         // 2026-08-22 (root cause of the multi-hour production stall, found live):
@@ -995,7 +1030,6 @@ fn run_start() -> Result<()> {
             std::collections::HashMap::new();
         let mut hot_cache_order: std::collections::VecDeque<(u64, u64, bool, u32)> =
             std::collections::VecDeque::new();
-        const HOT_CACHE_CAP: usize = 256;
         let hot_cache_ttl = std::time::Duration::from_millis(
             std::env::var("SIGIL_SERVE_HOT_TTL_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(750),
         );
@@ -1714,18 +1748,42 @@ fn run_start() -> Result<()> {
                             };
                             // ── CACHE FILL (finalized ranges only), FIFO-capped ──
                             if immutable && !out.is_empty() {
-                                serve_cache.insert(ckey, std::sync::Arc::new(out.clone()));
+                                // Evict by BYTES, not by entry count — the entries are
+                                // 0.3-3.3 MB each, so a count cap bounds nothing.
+                                let sz = out.len();
+                                if let Some(prev) = serve_cache.insert(ckey, std::sync::Arc::new(out.clone())) {
+                                    serve_cache_bytes = serve_cache_bytes.saturating_sub(prev.len());
+                                }
                                 serve_cache_order.push_back(ckey);
-                                while serve_cache_order.len() > SERVE_CACHE_CAP {
-                                    if let Some(k) = serve_cache_order.pop_front() { serve_cache.remove(&k); }
+                                serve_cache_bytes = serve_cache_bytes.saturating_add(sz);
+                                while serve_cache_bytes > serve_cache_budget {
+                                    match serve_cache_order.pop_front() {
+                                        Some(k) => {
+                                            if let Some(v) = serve_cache.remove(&k) {
+                                                serve_cache_bytes = serve_cache_bytes.saturating_sub(v.len());
+                                            }
+                                        }
+                                        None => break, // nothing left to evict
+                                    }
                                 }
                             }
                             // ── HOT CACHE FILL (near-tip ranges), short-TTL + FIFO-capped ──
                             if hot_eligible && !out.is_empty() {
-                                hot_cache.insert(ckey, (std::sync::Arc::new(out.clone()), std::time::Instant::now()));
+                                let sz = out.len();
+                                if let Some((prev, _)) = hot_cache.insert(ckey, (std::sync::Arc::new(out.clone()), std::time::Instant::now())) {
+                                    hot_cache_bytes = hot_cache_bytes.saturating_sub(prev.len());
+                                }
                                 hot_cache_order.push_back(ckey);
-                                while hot_cache_order.len() > HOT_CACHE_CAP {
-                                    if let Some(k) = hot_cache_order.pop_front() { hot_cache.remove(&k); }
+                                hot_cache_bytes = hot_cache_bytes.saturating_add(sz);
+                                while hot_cache_bytes > hot_cache_budget {
+                                    match hot_cache_order.pop_front() {
+                                        Some(k) => {
+                                            if let Some((v, _)) = hot_cache.remove(&k) {
+                                                hot_cache_bytes = hot_cache_bytes.saturating_sub(v.len());
+                                            }
+                                        }
+                                        None => break,
+                                    }
                                 }
                                 if last_hot_cache_log.elapsed() >= std::time::Duration::from_secs(5) {
                                     let hot_tot = (hot_hits + hot_miss).max(1);
@@ -2923,6 +2981,55 @@ fn dag_seed_braid(chain: &ChainTip) -> Braid {
 /// coinbase roots must match what the drain will recompute — which they do, because the
 /// frontier applies the same selected-spine blocks the drain will. Rebuilt each tick →
 /// reorg-safe. Blocks below the settled tip won't extend the frontier and are skipped.
+/// This process's real memory ceiling, in bytes — cgroup v2, then v1, then
+/// total system RAM as the fallback.
+///
+/// Exists so the serve caches size themselves OUT OF THE BOX. The producer runs
+/// under a systemd cgroup with `MemoryHigh`/`MemoryMax`, and exceeding
+/// `MemoryHigh` does not merely slow it down: the kernel parks the process in
+/// UNINTERRUPTIBLE SLEEP (`mem_cgroup_handle_over_high`). Observed live
+/// 2026-08-23 — block production stopped, 174 inbound connections went
+/// unaccepted, every client reported `peers 0`, and nothing was logged for
+/// minutes, all while the host still had 25 GiB free. A cache budget derived
+/// from the ceiling the kernel will actually enforce is the difference between
+/// "sized for this machine" and "sized for the machine the developer had".
+fn detect_memory_ceiling_bytes() -> usize {
+    // cgroup v2: the effective high/max for this process's cgroup.
+    for f in ["/sys/fs/cgroup/memory.high", "/sys/fs/cgroup/memory.max"] {
+        if let Ok(txt) = std::fs::read_to_string(f) {
+            let t = txt.trim();
+            if t != "max" {
+                if let Ok(v) = t.parse::<usize>() {
+                    if v > 0 {
+                        return v;
+                    }
+                }
+            }
+        }
+    }
+    // cgroup v1.
+    if let Ok(txt) = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes") {
+        if let Ok(v) = txt.trim().parse::<usize>() {
+            // v1 reports an enormous sentinel when unlimited; ignore that.
+            if v > 0 && v < (1 << 62) {
+                return v;
+            }
+        }
+    }
+    // No cgroup limit: fall back to total system RAM.
+    if let Ok(txt) = std::fs::read_to_string("/proc/meminfo") {
+        for line in txt.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                if let Some(kb) = rest.split_whitespace().next().and_then(|v| v.parse::<usize>().ok()) {
+                    return kb.saturating_mul(1024);
+                }
+            }
+        }
+    }
+    // Last resort: assume a modest box rather than a generous one.
+    2 * 1024 * 1024 * 1024
+}
+
 fn dag_build_frontier(
     chain: &ChainTip,
     braid: &Braid,

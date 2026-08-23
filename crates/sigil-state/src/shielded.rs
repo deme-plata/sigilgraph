@@ -79,27 +79,43 @@ pub const SHIELDED_FEE: u128 = 1_000;
 /// unusual sum must split it across several ramp operations — which is exactly the
 /// behaviour that makes correlation expensive.
 ///
-/// 1/2/5 x powers of ten, so any amount can be composed from a few entries.
+/// 1/2/5 x powers of ten, from 1 up to 10^15 (the 21M cap is 2.1x10^15 raw).
+///
+/// # Why it reaches both extremes
+///
+/// The first version ran 10^3..10^9 and was simply wrong: chosen without checking it
+/// against a real balance on this chain. The master wallet holds 19,930,436,350,512 raw,
+/// which at a 10^9 ceiling is **19,930 separate shield operations** — not a privacy
+/// trade-off, just a broken feature.
+///
+/// The bottom matters as much as the top. Stopping at 10^3 leaves a remainder that can
+/// never enter the pool: that same balance is not a multiple of 1,000 (it ends in 512), so
+/// 512 raw would be permanently stranded in the transparent domain. Including 1/2/5 means
+/// EVERY integer amount decomposes exactly, and a wallet can move its whole balance rather
+/// than "almost all of it".
+///
+/// Cost of the wide range: more buckets means fewer users per bucket, which is a real
+/// privacy cost and is measured rather than assumed — see the chronos
+/// `denominations_measurably_defeat_value_correlation` scenario. The small tail is less
+/// damaging than it looks, because odd balances are universal: everyone's remainder
+/// produces small-denomination notes, so those buckets fill from the whole population.
 pub const DENOMINATIONS: &[u128] = &[
-    1_000,
-    2_000,
-    5_000,
-    10_000,
-    20_000,
-    50_000,
-    100_000,
-    200_000,
-    500_000,
-    1_000_000,
-    2_000_000,
-    5_000_000,
-    10_000_000,
-    20_000_000,
-    50_000_000,
-    100_000_000,
-    200_000_000,
-    500_000_000,
-    1_000_000_000,
+    1, 2, 5,
+    10, 20, 50,
+    100, 200, 500,
+    1_000, 2_000, 5_000,
+    10_000, 20_000, 50_000,
+    100_000, 200_000, 500_000,
+    1_000_000, 2_000_000, 5_000_000,
+    10_000_000, 20_000_000, 50_000_000,
+    100_000_000, 200_000_000, 500_000_000,
+    1_000_000_000, 2_000_000_000, 5_000_000_000,
+    10_000_000_000, 20_000_000_000, 50_000_000_000,
+    100_000_000_000, 200_000_000_000, 500_000_000_000,
+    1_000_000_000_000, 2_000_000_000_000, 5_000_000_000_000,
+    10_000_000_000_000, 20_000_000_000_000, 50_000_000_000_000,
+    100_000_000_000_000, 200_000_000_000_000, 500_000_000_000_000,
+    1_000_000_000_000_000, 2_000_000_000_000_000, 5_000_000_000_000_000,
 ];
 
 /// Is `amount` one of the permitted ramp denominations?

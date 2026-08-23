@@ -95,6 +95,16 @@ impl ShieldedSubmitError {
     }
 }
 
+/// How to move `amount` into (or out of) the pool: the exact denominations to use.
+///
+/// Exhaustive by construction — the ladder includes 1, so every integer amount decomposes
+/// with no stranded remainder. A wallet calls this, derives one note per part, and submits
+/// them together.
+pub fn plan_shield(amount: u128) -> Result<Vec<u128>, ShieldedSubmitError> {
+    sigil_state::shielded::decompose(amount)
+        .ok_or(ShieldedSubmitError::NotADenomination { amount, suggestion: None })
+}
+
 /// Reject a ramp amount that is not a standard denomination, suggesting a split.
 ///
 /// The chokepoint enforces this too; refusing here means the caller gets an actionable
@@ -154,6 +164,47 @@ impl ShieldedBridge {
         let cm = hex32(cm, "cm")?;
         let tx = SigilTx::Shield { from, amount, cm, fee };
         Ok(self.enqueue(tx, None))
+    }
+
+    /// Shield an ARBITRARY amount by splitting it into legal denominations.
+    ///
+    /// Denominations are a consensus rule, but making the user perform the split is a
+    /// usability failure dressed up as a security feature: a wallet holding
+    /// 19,930,436,350,512 raw should not have to issue twenty-one requests to move its own
+    /// balance. The split happens here, the caller makes one call, and each part is a
+    /// separate note — which is what the privacy rule actually wanted anyway.
+    ///
+    /// `notes` supplies one commitment per part, in the order [`plan_shield`] returns. The
+    /// caller derives them (only it knows the blindings), so this cannot be done for it.
+    pub fn submit_shield_split(
+        &self,
+        from: &str,
+        parts: &[(u128, String)],
+        fee: u128,
+    ) -> Result<Vec<[u8; 32]>, ShieldedSubmitError> {
+        if parts.is_empty() {
+            return Err(ShieldedSubmitError::ZeroAmount);
+        }
+        let from_b = hex32(from, "from")?;
+        // Validate EVERY part before enqueuing any, so a bad tail cannot leave a
+        // half-shielded balance queued.
+        let mut prepared = Vec::with_capacity(parts.len());
+        for (amount, cm) in parts {
+            if *amount == 0 {
+                return Err(ShieldedSubmitError::ZeroAmount);
+            }
+            check_denomination(*amount)?;
+            prepared.push((*amount, hex32(cm, "cm")?));
+        }
+        Ok(prepared
+            .into_iter()
+            .enumerate()
+            .map(|(i, (amount, cm))| {
+                // the fee is charged once, on the first part
+                let f = if i == 0 { fee } else { 0 };
+                self.enqueue(SigilTx::Shield { from: from_b, amount, cm, fee: f }, None)
+            })
+            .collect())
     }
 
     /// Queue a shielded → shielded transfer. No signature: the proof authorizes it.

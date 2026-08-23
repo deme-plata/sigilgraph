@@ -457,3 +457,53 @@ fn an_unusual_shield_amount_is_refused() {
     }
     assert_eq!(state.shielded().value_locked(), 7_431_000);
 }
+
+/// A REAL accumulated balance must be movable in full.
+///
+/// The first denomination ladder ran 10^3..10^9 and was chosen without ever checking it
+/// against a balance on this chain. The master wallet holds 19,930,436,350,512 raw, which
+/// at that ceiling needed 19,930 shield operations — and, because the balance is not a
+/// multiple of 1,000, left 512 raw permanently stranded in the transparent domain. That is
+/// not a privacy trade-off, it is a broken feature. This pins the fix.
+#[test]
+fn an_entire_accumulated_balance_can_be_shielded() {
+    use sigil_state::shielded::decompose;
+    const REAL_BALANCE: u128 = 19_930_436_350_512; // the live master wallet, to the unit
+
+    let parts = decompose(REAL_BALANCE).expect("every integer amount must decompose");
+    assert_eq!(
+        parts.iter().sum::<u128>(),
+        REAL_BALANCE,
+        "SECURITY/UX: the decomposition must be EXACT — a stranded remainder is value the \
+         owner can never make private"
+    );
+    assert!(
+        parts.len() <= 32,
+        "moving a whole balance must be practical, got {} operations",
+        parts.len()
+    );
+
+    // And it actually lands, through the real chokepoint.
+    let mut state = SigilState::default();
+    apply(
+        &mut state,
+        1,
+        vec![StateMutation::SetBalance { wallet: ALICE, token: NATIVE, amount: REAL_BALANCE }],
+    )
+    .unwrap();
+
+    let muts: Vec<StateMutation> = parts
+        .iter()
+        .enumerate()
+        .map(|(i, amount)| StateMutation::Shield {
+            from: ALICE,
+            amount: *amount,
+            cm: to_wire(Note::new(*amount as u64, 1_000 + i as u64, 7).unwrap().commitment()),
+        })
+        .collect();
+    apply(&mut state, 2, muts).expect("the whole balance must shield");
+
+    assert_eq!(state.balance_of(&ALICE, &NATIVE), 0, "nothing left behind — no dust");
+    assert_eq!(state.shielded().value_locked(), REAL_BALANCE, "all of it is private");
+    assert_eq!(state.shielded().len(), parts.len());
+}

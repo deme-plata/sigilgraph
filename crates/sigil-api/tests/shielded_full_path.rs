@@ -29,8 +29,22 @@ use sigil_state::{
 };
 use sigil_tx::apply_tx;
 
-const ALICE: [u8; 32] = [0xA1; 32];
 const MASTER: [u8; 32] = [0x11; 32];
+
+/// A real keypair, since `ShieldedBridge::submit_shield`/`submit_register` are
+/// wallet-signed as of 2026-08-23 — a fixed dummy address (the old `const ALICE`) has
+/// no matching private key to sign with.
+fn alice_keypair() -> (ed25519_dalek::SigningKey, [u8; 32]) {
+    let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let addr = sk.verifying_key().to_bytes();
+    (sk, addr)
+}
+
+fn sign_shield(sk: &ed25519_dalek::SigningKey, from: &str, amount: u128, cm: &str, fee: u128, nonce: u64) -> String {
+    use ed25519_dalek::Signer;
+    let msg = format!("sigil-rpc/v1|shield|{from}|{amount}|{cm}|{fee}|nonce={nonce}");
+    hex::encode(sk.sign(msg.as_bytes()).to_bytes())
+}
 
 /// Run one producer round: drain the bridge, apply each tx, commit the batch.
 /// Returns the tx hashes that landed, mirroring what the producer feeds `confirm_applied`.
@@ -64,6 +78,7 @@ fn pool_view(state: &SigilState) -> Vec<[u8; 32]> {
 fn full_production_path_shield_then_private_payment() {
     let seed = [0x5Eu8; 32];
     let alice = ShieldedAccount::from_seed(seed);
+    let (alice_sk, alice_addr) = alice_keypair();
     let bridge = ShieldedBridge::new();
     let mut state = SigilState::default();
     let mut store = NoteStore::new();
@@ -75,19 +90,22 @@ fn full_production_path_shield_then_private_payment() {
             at_height: 1,
             mutations: vec![
                 StateMutation::SetMasterWallet { wallet: MASTER },
-                StateMutation::SetBalance { wallet: ALICE, token: NATIVE, amount: 10_000 },
+                StateMutation::SetBalance { wallet: alice_addr, token: NATIVE, amount: 10_000 },
             ],
         },
         1,
     )
     .expect("genesis");
-    assert_eq!(state.balance_of(&ALICE, &NATIVE), 10_000);
+    assert_eq!(state.balance_of(&alice_addr, &NATIVE), 10_000);
 
     // ── 1. SHIELD: the wallet derives a note, the API queues the deposit ─────────────
     let (note_index, cm) = shield_note(&alice, &mut store, 10_000).expect("derive note");
+    let from_hex = hex::encode(alice_addr);
+    let cm_hex = hex::encode(cm);
+    let sig = sign_shield(&alice_sk, &from_hex, 10_000, &cm_hex, 0, 1);
     let shield_hash = bridge
-        .submit_shield(&hex::encode(ALICE), 10_000, &hex::encode(cm), 0)
-        .expect("the API must accept a well-formed shield");
+        .submit_shield(&from_hex, 10_000, &cm_hex, 0, &sig, 1)
+        .expect("the API must accept a well-formed, correctly-signed shield");
     assert_eq!(bridge.pending_len(), 1);
 
     // ── 2. the producer mints it ────────────────────────────────────────────────────
@@ -96,7 +114,7 @@ fn full_production_path_shield_then_private_payment() {
     bridge.confirm_applied(&landed);
     assert_eq!(bridge.pending_len(), 0, "a landed tx must be retired");
 
-    assert_eq!(state.balance_of(&ALICE, &NATIVE), 0, "value left the transparent domain");
+    assert_eq!(state.balance_of(&alice_addr, &NATIVE), 0, "value left the transparent domain");
     assert_eq!(state.shielded().value_locked(), 10_000, "and entered the shielded one");
     assert_eq!(state.shielded().len(), 1);
 
@@ -111,7 +129,7 @@ fn full_production_path_shield_then_private_payment() {
         &alice,
         &mut store,
         &pool,
-        note_index,
+        note_index as usize,
         SHIELDED_FEE as u64,
         &[(5_000, bob.public_key()), (4_000, alice.public_key())],
     )
@@ -124,7 +142,20 @@ fn full_production_path_shield_then_private_payment() {
         "the wallet's anchor must be a root the chain published"
     );
 
-    // ── 5. submit through the API and mint it ───────────────────────────────────────
+    // ── 5. seal Bob's output and submit through the API, ciphertext and all ──────────
+    //
+    // Output 0 is Bob's per the `outs_spec` order above; `out_preimages` hands back
+    // exactly the (value, blinding) a sender must seal for a recipient to ever find the
+    // payment. Alice's own change (output 1) needs no ciphertext — she already knows it.
+    let bob_enc = sigil_shield::note_cipher::enc_identity_from_seed(&[0xB0; 32]);
+    let bob_addr = bob.address(&[0xB0; 32]);
+    let (bob_value, bob_blinding) = bundle.out_preimages[0];
+    let bob_ct = sigil_shield::note_cipher::seal_note(
+        &sigil_shield::note_cipher::NotePlaintext { value: bob_value, blinding: bob_blinding },
+        &bob_addr,
+    )
+    .expect("seal to bob");
+
     let send_hash = bridge
         .submit_shielded_send(
             &hex::encode(bundle.anchor),
@@ -132,6 +163,7 @@ fn full_production_path_shield_then_private_payment() {
             &bundle.cm_outs.iter().map(hex::encode).collect::<Vec<_>>(),
             SHIELDED_FEE,
             bundle.proof.clone(),
+            &[Some(bob_ct.0.clone()), None],
         )
         .expect("the API must accept a valid shielded send");
 
@@ -162,6 +194,30 @@ fn full_production_path_shield_then_private_payment() {
                   alice.public_key()),
         "PRIVACY: the note must be bound to Bob, not to the sender"
     );
+
+    // ── 7. THE POINT OF THIS FEATURE: Bob, who was told nothing out of band, discovers
+    // and locates the payment purely from what the production API now publishes. ──────
+    let ciphertexts: Vec<sigil_shield::note_cipher::NoteCiphertext> = state
+        .shielded()
+        .ciphertexts()
+        .iter()
+        .filter_map(|c| c.clone())
+        .map(sigil_shield::note_cipher::NoteCiphertext)
+        .collect();
+    let mut bob_store = NoteStore::new();
+    assert_eq!(
+        bob_store.scan_ciphertexts(&bob_enc, &ciphertexts),
+        1,
+        "Bob must discover exactly his payment by trial-decrypting the chain's published \
+         ciphertexts, with nothing communicated to him out of band"
+    );
+    assert_eq!(
+        bob_store.scan_owned(&bob, &pool_after),
+        1,
+        "and locate it at its real leaf position — proving the commitment really is bound \
+         to his key, not just that some ciphertext happened to open"
+    );
+    assert_eq!(bob_store.balance(), 5_000, "Bob's spendable balance is exactly the payment");
 }
 
 /// A REPLAY submitted twice must be refused, and must not corrupt state.
@@ -169,6 +225,7 @@ fn full_production_path_shield_then_private_payment() {
 fn replayed_shielded_send_is_refused_on_the_production_path() {
     let seed = [0x11u8; 32];
     let alice = ShieldedAccount::from_seed(seed);
+    let (alice_sk, alice_addr) = alice_keypair();
     let bridge = ShieldedBridge::new();
     let mut state = SigilState::default();
     let mut store = NoteStore::new();
@@ -179,7 +236,7 @@ fn replayed_shielded_send_is_refused_on_the_production_path() {
             at_height: 1,
             mutations: vec![
                 StateMutation::SetMasterWallet { wallet: MASTER },
-                StateMutation::SetBalance { wallet: ALICE, token: NATIVE, amount: 10_000 },
+                StateMutation::SetBalance { wallet: alice_addr, token: NATIVE, amount: 10_000 },
             ],
         },
         1,
@@ -187,28 +244,31 @@ fn replayed_shielded_send_is_refused_on_the_production_path() {
     .unwrap();
 
     let (idx, cm) = shield_note(&alice, &mut store, 10_000).unwrap();
-    bridge.submit_shield(&hex::encode(ALICE), 10_000, &hex::encode(cm), 0).unwrap();
+    let from_hex = hex::encode(alice_addr);
+    let cm_hex = hex::encode(cm);
+    let sig = sign_shield(&alice_sk, &from_hex, 10_000, &cm_hex, 0, 1);
+    bridge.submit_shield(&from_hex, 10_000, &cm_hex, 0, &sig, 1).unwrap();
     let h = producer_round(&mut state, &bridge, 2).unwrap();
     bridge.confirm_applied(&h);
 
     let pool = pool_view(&state);
     store.scan_owned(&alice, &pool);
     let me = alice.public_key();
-    let bundle = build_spend(&alice, &mut store, &pool, idx, SHIELDED_FEE as u64, &[(5_000, me), (4_000, me)]).unwrap();
+    let bundle = build_spend(&alice, &mut store, &pool, idx as usize, SHIELDED_FEE as u64, &[(5_000, me), (4_000, me)]).unwrap();
 
     let args = (
         hex::encode(bundle.anchor),
         hex::encode(bundle.nullifier),
         bundle.cm_outs.iter().map(hex::encode).collect::<Vec<_>>(),
     );
-    bridge.submit_shielded_send(&args.0, &args.1, &args.2, SHIELDED_FEE, bundle.proof.clone()).unwrap();
+    bridge.submit_shielded_send(&args.0, &args.1, &args.2, SHIELDED_FEE, bundle.proof.clone(), &[]).unwrap();
     let h = producer_round(&mut state, &bridge, 3).unwrap();
     bridge.confirm_applied(&h);
     let locked_after_first = state.shielded().value_locked();
 
     // Re-submit the identical, still-valid proof.
     let resubmitted =
-        bridge.submit_shielded_send(&args.0, &args.1, &args.2, SHIELDED_FEE, bundle.proof.clone());
+        bridge.submit_shielded_send(&args.0, &args.1, &args.2, SHIELDED_FEE, bundle.proof.clone(), &[]);
     if resubmitted.is_ok() {
         // If the door let it through, the chokepoint MUST refuse it.
         let batch = bridge.snapshot_for_mint();
@@ -242,6 +302,9 @@ fn replayed_shielded_send_is_refused_on_the_production_path() {
 /// If these ever diverge, no honest spend can verify — a silent, total outage.
 #[test]
 fn chain_pool_view_matches_what_a_prover_builds() {
+    // Direct state mutations — bypasses ShieldedBridge/the signed-API layer entirely, so
+    // no keypair is needed here; any fixed wallet id is fine.
+    const ALICE: [u8; 32] = [0xA1; 32];
     let alice = ShieldedAccount::from_seed([7u8; 32]);
     let mut state = SigilState::default();
     let mut store = NoteStore::new();

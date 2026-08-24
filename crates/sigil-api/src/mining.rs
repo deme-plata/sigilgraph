@@ -63,10 +63,32 @@ pub fn vdf_t() -> u64 {
     std::env::var("SIGIL_MINING_VDF_T").ok().and_then(|s| s.parse().ok()).unwrap_or(600)
 }
 
+/// Lane-B sequential work REQUIRED for a POOL SHARE (`SIGIL_SHARE_VDF_T`,
+/// default 8 squarings) — deliberately far smaller than [`vdf_t`] (600).
+///
+/// 2026-08-20: before this existed, every share was held to the full block
+/// `vdf_t`, same as `check_submission_at`'s doc describes for the anti-forgery
+/// binding. That's correct for the ANTI-FORGERY property (a share still can't
+/// claim a t=0 instant proof), but VDF turns are strictly sequential and cost
+/// the SAME wall-clock time regardless of the miner's raw hash rate — CPU or
+/// GPU, 5 MH/s or 500 MH/s. Once VARDIFF pushes the hash target easy enough
+/// that a nonce is found in microseconds (the whole point of vardiff), the
+/// fixed VDF cost becomes the ENTIRE cycle time, and every miner converges to
+/// the same VDF-bound share rate no matter how much faster its hardware is —
+/// confirmed live 2026-08-20: an RTX 2080 (previously ~500 MH/s) and a CPU
+/// (previously ~50 MH/s) both collapsed to within the same order of
+/// magnitude once vardiff drove difficulty down to the point where VDF, not
+/// hashing, dominated. 8 squarings still proves genuine sequential work (not
+/// instant, not free) while being cheap enough that hash power differentiates
+/// miners again instead of everyone flatlining at the VDF floor.
+pub fn share_vdf_t() -> u64 {
+    std::env::var("SIGIL_SHARE_VDF_T").ok().and_then(|s| s.parse().ok()).unwrap_or(8)
+}
+
 /// Sub-difficulty share ease in bits (`SIGIL_SHARE_EASE_BITS`). Default 0 =
 /// **solo semantics**: only full-difficulty solves are accepted, exactly the
 /// pre-pool wire behaviour. Set >0 to run the braid as a pool. This is the
-/// per-wallet CEILING vardiff is allowed to issue — see [`vardiff_ease_for`].
+/// per-wallet CEILING vardiff is allowed to issue — see [`share_target_for`].
 pub fn share_ease_bits() -> u32 {
     std::env::var("SIGIL_SHARE_EASE_BITS").ok().and_then(|s| s.parse().ok()).unwrap_or(0)
 }
@@ -78,36 +100,86 @@ pub fn vardiff_rate() -> f64 {
     std::env::var("SIGIL_VARDIFF_RATE").ok().and_then(|s| s.parse().ok()).unwrap_or(0.5)
 }
 
-/// Per-wallet share ease from a wallet's self-reported Φ (Lane-A) rate, aiming
-/// for ~[`vardiff_rate`] shares/sec instead of handing every wallet the same
-/// flat ceiling regardless of hashrate. Ported from `sigil_rpc::vardiff_ease_for`
-/// (that fix shipped 2026-07-24, commit f34d06c, and is unit-tested there) —
-/// duplicated here rather than adding `sigil-rpc` as a dependency, because that
-/// crate pulls sigil-dex/sigil-bank/sigil-oauth/flux-db/flux-history into this
-/// money API's graph for four pure functions; same "path a lean crate, don't
-/// swallow a heavy one" call this file already makes for `flux-miner` above.
+/// Per-wallet share target from a wallet's self-reported Φ (Lane-A) rate,
+/// aiming for ~[`vardiff_rate`] shares/sec instead of handing every wallet the
+/// same flat ceiling regardless of hashrate.
 ///
-/// `hps<=1.0` (unknown/idle wallet — nothing reported yet) gets the flat
-/// `share_ease` ceiling, i.e. today's behaviour: safe default for a rig that
-/// hasn't spoken yet.
+/// This used to be a bits-*relative-to-the-block-target* "ease" (ported from
+/// `sigil_rpc::vardiff_ease_for`, commit f34d06c): `share_target =
+/// target_from_bits(bits - ease)`, which structurally can only ever make the
+/// share target EASIER than the block target — `ease` is subtracted, never
+/// added, and is clamped at a floor of 1. That is fine as long as the
+/// operator's `bits` tracks real network hashrate, but at a low/static
+/// `blake4_bits` (Epsilon runs the default 16) any wallet reporting more than
+/// ~33 kH/s already wants a share difficulty *harder* than the block itself
+/// to land only [`vardiff_rate`] hits/sec — impossible to express as a
+/// subtraction from `bits`, so the old code saturated to the hardest value it
+/// COULD express (`ease = 1`) for every hps above that point. A 33 kH/s CPU
+/// and a 5 MH/s+ GPU/CPU therefore got the *identical* share target, so the
+/// faster one landed shares ~150x too often instead of converging on the
+/// 0.5/sec design rate, drowning the pool in submissions relative to what
+/// blocks could actually absorb.
+///
+/// Fixed 2026-08-21 (operator-reported: "excellent mining stats" regressed to
+/// "totally wasted" — CPU effective rate down to ~5 kH/s against a previously
+/// measured ~50 MH/s raw baseline). Confirmed live before this fix: a wallet
+/// reporting 5,000,000 H/s to Epsilon was issued `ease=1` (bits=15, i.e.
+/// barely easier than the 16-bit block target) — this function now returns
+/// the share TARGET directly (not a bits-relative ease), computed from
+/// `hps`/`rate` as an absolute difficulty.
+///
+/// ⚠️ CORRECTED same day, hours later (operator-reported: hashrate got WORSE
+/// after this fix shipped, down to ~3.68 kH/s): the first version of this fix
+/// let the computed target go all the way up to (and past) `bits` — i.e. as
+/// hard as, or harder than, the real block target — for any wallet doing
+/// more than ~33 kH/s. That broke a load-bearing invariant the CLIENT depends
+/// on: `flux_miner::engine::mining_loop` decides pool-vs-solo mode purely
+/// from `share_target > blake4_target` (see `engine.rs`'s `let pool = ...`
+/// line). Once a share target stops being strictly easier than the block
+/// target, the client silently falls back to SOLO discipline — find one
+/// block-level hit, submit it, then sleep/poll until the tip advances — which
+/// is fine at sub-second block cadence but catastrophic at the ~27s cadence
+/// this braid had at the time (itself inflated by an unrelated concurrent
+/// incident), leaving the miner almost completely idle between submissions.
+/// So the share target must NEVER reach `bits` — capped at `bits - 1`, the
+/// hardest difficulty that still keeps the client in pool mode. Above the
+/// crossover this makes `share_target_for` numerically equivalent to the
+/// original ported `vardiff_ease_for` (ease=1, i.e. bits-1) — that saturation
+/// was never actually the bug; it's the correct, unavoidable answer given
+/// this invariant. The real, still-standing win from this function over the
+/// original is only in the band between the operator ceiling and `bits-1`,
+/// where it derives the target from `hps`/`rate` directly instead of via an
+/// integer "ease" delta.
+///
+/// `hps<=1.0` (unknown/idle wallet — nothing reported yet) still gets the
+/// flat, easy ceiling (`bits - share_ease`, floored at 1 bit): safe default
+/// for a rig that hasn't spoken yet.
 ///
 /// **What this does NOT yet fix:** crediting still weighs every accepted share
-/// as `1` regardless of the ease it was issued at (unchanged below in
+/// as `1` regardless of the target it was issued at (unchanged below in
 /// `submit()`) — porting `sigil_rpc::achieved_ease`/`share_weight` (grade the
 /// share by what its hash actually achieved, not what the pool guessed at
 /// issue-time) needs the same live-measurement loop that fix took multiple
 /// correction rounds to get right on rpcd (see swarm bus msgs #20/#23/#24,
 /// 2026-08-01) — deliberately left as a follow-up rather than ported blind
 /// with no compiler and no live pool to test against.
-fn vardiff_ease_for(hps: f64, rate: f64, bits: u32, share_ease: u32) -> u32 {
+fn share_target_for(hps: f64, rate: f64, bits: u32, share_ease: u32) -> u64 {
     if share_ease == 0 {
-        return 0;
+        return 0; // solo semantics: pool disabled
     }
-    if !(hps > 1.0) {
-        return share_ease;
-    }
-    let wanted_bits = (hps / rate).log2().ceil().max(1.0) as u32;
-    bits.saturating_sub(wanted_bits).clamp(1, share_ease)
+    let ceiling_bits = bits.saturating_sub(share_ease).max(1); // easiest allowed
+    // Hardest a share may EVER be: strictly easier than the block target, or
+    // the client's own `share_target > blake4_target` pool-detection breaks.
+    let hardest_bits = bits.saturating_sub(1).max(1);
+    let share_bits = if hps > 1.0 {
+        let wanted_bits = (hps / rate).log2().ceil().max(1.0) as u32;
+        // Never easier than the operator ceiling, and NEVER as hard as (or
+        // harder than) the block target — clamp at `hardest_bits`.
+        wanted_bits.max(ceiling_bits).min(hardest_bits)
+    } else {
+        ceiling_bits
+    };
+    target_from_bits(share_bits.min(63))
 }
 
 /// Lane-A share target for `bits` eased by `ease`: `0` (accept only full
@@ -184,6 +256,7 @@ pub fn verify_header_pow(
         vdf_t: required_vdf_t,
         net_hps: 0.0,
         share_target: 0,
+        share_vdf_t: 0, // full-block verification only; no pool share involved here
     };
     let block = DualLaneBlock {
         header: build_header(&c, &hex::encode(producer)),
@@ -271,24 +344,77 @@ pub struct MiningBridge {
     solved: Mutex<VecDeque<AcceptedSolve>>,
     /// Share weights for the height currently being worked.
     shares: Mutex<HashMap<WalletId, u64>>,
-    /// `(wallet, nonce, height)` already credited — replay guard. Keyed by
-    /// height too (not just wallet+nonce) since [`credit_window`] means
-    /// "already credited" now spans multiple heights, not just the current
-    /// one; pruned by height on every tip advance instead of wiped wholesale,
-    /// or a submission for an older-but-still-in-window height could be
-    /// replayed for a second credit once the current height's entries clear.
-    seen: Mutex<HashSet<(WalletId, u64, u64)>>,
-    /// Self-reported Lane-A rate per miner: `(hashes/s, last_report_ms)`.
-    hps: Mutex<HashMap<WalletId, (f64, u64)>>,
+    /// `(wallet, nonce)` already credited, indexed BY HEIGHT — replay guard.
+    /// Keyed by height (not a flat `(wallet, nonce, height)` set) since
+    /// [`credit_window`] means "already credited" now spans multiple
+    /// heights, not just the current one; pruned by height on every tip
+    /// advance instead of wiped wholesale, or a submission for an
+    /// older-but-still-in-window height could be replayed for a second
+    /// credit once the current height's entries clear.
+    ///
+    /// 2026-08-21/22 (the "production crawled to ~1 block/30s" incident):
+    /// was a flat `HashSet<(WalletId, u64, u64)>`, pruned via
+    /// `.retain(|&(_,_,h)| h >= floor)` on every advance — an O(total
+    /// entries) scan REGARDLESS of how many actually aged out. Under real
+    /// submission volume this became the dominant cost (measured live via
+    /// `perf`: 32%+ of all CPU in raw `memcmp`), and — because
+    /// `publish_tip()` runs inline in the SAME producer tick that's trying
+    /// to advance the frontier — a slow retain() directly stalled block
+    /// production itself, which widened the real-time span of the (height-
+    /// bounded) credit window, which grew the set further: a genuine
+    /// vicious cycle. Indexing by height first makes eviction O(number of
+    /// height KEYS being dropped) — bounded by `credit_window` (default 20)
+    /// regardless of how many submissions are nested under each height —
+    /// instead of O(everything currently in the window).
+    seen: Mutex<HashMap<u64, HashSet<(WalletId, u64)>>>,
+    /// Self-reported Lane-A rate per (wallet, rig): `(hashes/s, last_report_ms)`.
+    ///
+    /// 2026-08-24 (MULTI-RIG fix): was keyed by `WalletId` alone. Two physical
+    /// rigs mining to the same payout wallet each called `report_hps` with
+    /// their own rate, and the second call's `m.insert(w, ...)` silently
+    /// overwrote the first — `net_hps` (the network-total display) only ever
+    /// reflected whichever rig reported most recently, not the sum. Confirmed
+    /// live: operator's two rigs measured 1 GH/s+ combined, the pool's
+    /// `/mining/miners` showed ~453 MH/s. `flux_miner::client::rig_id()`
+    /// already exists client-side (this same session, uncommitted) and sends
+    /// `&rig=` on every challenge fetch specifically to fix this — this map
+    /// is the server half that was still missing to actually use it. Keying
+    /// by `(WalletId, String)` with the rig id defaulting to `""` when a
+    /// client doesn't send one preserves today's (degraded but not broken)
+    /// clobbering behavior for pre-fix miners — purely additive, no client is
+    /// worse off than before.
+    hps: Mutex<HashMap<(WalletId, String), (f64, u64)>>,
     rejects: Mutex<HashMap<&'static str, u64>>,
     accepted_blocks: Mutex<u64>,
     accepted_shares: Mutex<u64>,
 }
 
-/// Depth of the solve queue. A producer mints one block per solve, so a deep
-/// queue would let a burst of solves mint a burst of blocks against a stale
-/// parent. Small on purpose.
-const SOLVE_QUEUE_CAP: usize = 8;
+/// Depth of the solve queue.
+///
+/// **Was `8`, raised 2026-08-18.** The original doc comment here worried that
+/// a deep queue would "let a burst of solves mint a burst of blocks against a
+/// stale parent" — but that isn't how the consumer (`sigil-node`'s producer
+/// loop, `main.rs`) actually works: it calls [`MiningBridge::take_solve`]
+/// **at most once per tick** and checks the popped solve against the CURRENT
+/// mint target before using it (exact match mints with real PoW, a near-miss
+/// within [`credit_window`] still credits via `near_miss_credit`, anything
+/// older just `continue`s/`None`s and is discarded). So queue depth can never
+/// cause more than one block to mint per tick, and a stale entry is safely
+/// dropped the moment it's popped — a deeper queue costs a little memory
+/// (`AcceptedSolve` is small) and nothing else.
+///
+/// The `8` cap turned out to actively hurt payouts: under real host
+/// contention (this box also runs Quillon production + an Ethereum node, all
+/// competing for the same cores the sequential VDF step needs), block
+/// production can stall for tens of seconds while a fast miner finds several
+/// solves per second — FIFO eviction was silently dropping already-verified,
+/// still-within-`credit_window` solves before the producer ever got to them,
+/// so miners went uncredited despite doing real, accepted work. Confirmed
+/// live 2026-08-17: `queued_solves` pinned at exactly `8` for ~15 minutes
+/// while `blocks_accepted` kept climbing and `shares_accepted` stayed at `0`.
+/// Sized generously against that failure mode instead of tightly against a
+/// risk the consumer already closes.
+const SOLVE_QUEUE_CAP: usize = 512;
 
 /// Miners are pruned from the rate table after this long without a challenge
 /// fetch, so `net_hps` reflects live power only.
@@ -347,7 +473,9 @@ impl MiningBridge {
             // close.
             let floor = height.saturating_sub(credit_window());
             if let Ok(mut s) = self.seen.lock() {
-                s.retain(|&(_, _, h)| h >= floor);
+                // O(height keys dropped), not O(total submissions in the
+                // window) — see the field's doc comment.
+                s.retain(|&h, _| h >= floor);
             }
             if let Ok(mut h) = self.recent_tips.lock() {
                 h.push_back(new);
@@ -372,26 +500,50 @@ impl MiningBridge {
         self.recent_tips.lock().ok()?.iter().find(|t| t.height == height).cloned()
     }
 
-    /// Record a miner's self-reported Lane-A rate and return the live network
-    /// total (sum over miners that fetched a challenge in the last 30s).
-    pub fn report_hps(&self, wallet: Option<WalletId>, hps: Option<f64>, now_ms: u64) -> f64 {
+    /// Record one (wallet, rig)'s self-reported Lane-A rate and return the
+    /// live network total (sum over every rig that fetched a challenge in
+    /// the last 30s, across every wallet). `rig` defaults to `""` when the
+    /// caller (an old client, or a bare wallet-only request) doesn't supply
+    /// one — see the [`Self::hps`] field doc for why that's a safe default.
+    pub fn report_hps(&self, wallet: Option<WalletId>, rig: Option<String>, hps: Option<f64>, now_ms: u64) -> f64 {
         let Ok(mut m) = self.hps.lock() else { return 0.0 };
         if let (Some(w), Some(r)) = (wallet, hps) {
             if r.is_finite() && r >= 0.0 {
-                m.insert(w, (r, now_ms));
+                m.insert((w, rig.unwrap_or_default()), (r, now_ms));
             }
         }
         m.retain(|_, (_, t)| now_ms.saturating_sub(*t) <= HPS_IDLE_MS);
         m.values().map(|(r, _)| *r).sum()
     }
 
-    /// This wallet's own last-reported Lane-A rate, or `0.0` if it has never
-    /// reported (or its report aged out — [`report_hps`] already prunes idle
-    /// entries on every call, so a stale wallet reads back as unknown, which
-    /// [`vardiff_ease_for`] treats as "give it the safe flat ceiling").
-    fn hps_for(&self, wallet: Option<WalletId>) -> f64 {
+    /// This ONE (wallet, rig)'s own last-reported Lane-A rate, or `0.0` if it
+    /// has never reported (or aged out). This is what vardiff must use to
+    /// size a share target for the rig that's actually asking — summing
+    /// across a wallet's OTHER rigs here would issue every rig a target
+    /// calibrated for the wallet's combined rate, so a wallet running two
+    /// identical rigs would have each one individually undershoot the
+    /// intended shares/sec by ~2x. See [`Self::hps_for_wallet_total`] for the
+    /// (deliberately different) summed view a human dashboard wants.
+    fn hps_for_rig(&self, wallet: Option<WalletId>, rig: Option<&str>) -> f64 {
         let Some(w) = wallet else { return 0.0 };
-        self.hps.lock().ok().and_then(|m| m.get(&w).map(|(r, _)| *r)).unwrap_or(0.0)
+        let key = (w, rig.unwrap_or("").to_string());
+        self.hps.lock().ok().and_then(|m| m.get(&key).map(|(r, _)| *r)).unwrap_or(0.0)
+    }
+
+    /// This wallet's TOTAL self-reported rate, summed across every rig
+    /// mining to it. `0.0` if the wallet has no live (unexpired) report from
+    /// any rig.
+    ///
+    /// `pub` since 2026-08-23: the `/mining/miners` endpoint needs this for
+    /// its optional `?wallet=` readback (the wallet UI's "my hashrate"
+    /// pill) — see [`super::mining_miners`]. Deliberately SUMMED across rigs
+    /// (unlike [`Self::hps_for_rig`]): a human checking their own dashboard
+    /// wants their whole farm's contribution, not one arbitrary rig's.
+    pub fn hps_for_wallet_total(&self, wallet: Option<WalletId>) -> f64 {
+        let Some(w) = wallet else { return 0.0 };
+        self.hps.lock().ok().map(|m| {
+            m.iter().filter(|((mw, _), _)| *mw == w).map(|(_, (r, _))| *r).sum()
+        }).unwrap_or(0.0)
     }
 
     /// Build the challenge for `wallet` against the current frontier. `None`
@@ -405,18 +557,21 @@ impl MiningBridge {
     /// a few KH/s and a desktop GPU doing tens of MH/s alike — was issued the
     /// exact same target, so whichever end of that range the flat ease didn't
     /// suit went long stretches with nothing accepted at all.
-    pub fn challenge_for(&self, wallet: Option<WalletId>, now_ms: u64) -> Option<Challenge> {
+    pub fn challenge_for(&self, wallet: Option<WalletId>, rig: Option<String>, now_ms: u64) -> Option<Challenge> {
         let tip = self.tip()?;
-        let net_hps = self.report_hps(wallet, None, now_ms);
-        let my_hps = self.hps_for(wallet);
-        let ease = vardiff_ease_for(my_hps, vardiff_rate(), tip.bits, share_ease_bits());
+        let net_hps = self.report_hps(wallet, rig.clone(), None, now_ms);
+        // THIS rig's own rate, not the wallet's combined total — see
+        // `hps_for_rig`'s doc for why vardiff must not sum across rigs here.
+        let my_hps = self.hps_for_rig(wallet, rig.as_deref());
+        let share_target = share_target_for(my_hps, vardiff_rate(), tip.bits, share_ease_bits());
         Some(Challenge {
             height: tip.height,
             vdf_input: mining_seed(&tip.parent_hash, tip.height),
             blake4_target: target_from_bits(tip.bits),
             vdf_t: tip.vdf_t,
             net_hps,
-            share_target: share_target_from(tip.bits, ease),
+            share_target,
+            share_vdf_t: share_vdf_t(),
         })
     }
 
@@ -505,7 +660,7 @@ impl MiningBridge {
         // Replay guard before any verification work is banked. Keyed by
         // height now (not just wallet+nonce) — see the `seen` field doc for
         // why: "already credited" now spans the whole credit window.
-        let key = (wallet, sub.block.nonce, sub.height);
+        let key = (wallet, sub.block.nonce);
         {
             let Ok(mut seen) = self.seen.lock() else {
                 return SubmitOutcome::Rejected {
@@ -513,7 +668,7 @@ impl MiningBridge {
                     detail: "replay set unavailable".into(),
                 };
             };
-            if !seen.insert(key) {
+            if !seen.entry(sub.height).or_default().insert(key) {
                 self.count_reject(RejectKind::Duplicate);
                 return SubmitOutcome::Rejected {
                     kind: RejectKind::Duplicate,
@@ -545,6 +700,7 @@ impl MiningBridge {
             vdf_t: vtip.vdf_t,
             net_hps: 0.0,
             share_target: share_target_from(vtip.bits, ease),
+            share_vdf_t: share_vdf_t(),
         };
         let g = ModSquaring::bench_2048();
 
@@ -553,7 +709,7 @@ impl MiningBridge {
         let honest_word =
             lane_a_word_is_honest(&sub.block.header, sub.block.nonce, sub.block.blake4_hash);
 
-        if honest_word && check_submission_at(&g, &c, sub, c.blake4_target) {
+        if honest_word && check_submission_at(&g, &c, sub, c.blake4_target, c.vdf_t) {
             // The current height's partial-share pool belongs to the CURRENT
             // height only — a historical win must not fold into it (that
             // pool already moved on) or be cleared out from under whoever's
@@ -598,7 +754,7 @@ impl MiningBridge {
         // historical near-miss either wins the full block above or is
         // rejected below; it never enters a share pool for a height that's
         // already moved on.
-        if !historical && honest_word && c.share_target > 0 && check_submission_at(&g, &c, sub, c.share_target) {
+        if !historical && honest_word && c.share_target > 0 && check_submission_at(&g, &c, sub, c.share_target, c.share_vdf_t) {
             let weight = 1u64;
             if let Ok(mut m) = self.shares.lock() {
                 *m.entry(wallet).or_insert(0) += weight;
@@ -611,7 +767,9 @@ impl MiningBridge {
 
         // Not work: release the replay slot so an honest retry isn't locked out.
         if let Ok(mut seen) = self.seen.lock() {
-            seen.remove(&key);
+            if let Some(at_height) = seen.get_mut(&sub.height) {
+                at_height.remove(&key);
+            }
         }
         self.count_reject(RejectKind::VerifyMismatch);
         SubmitOutcome::Rejected {
@@ -631,6 +789,12 @@ impl MiningBridge {
     }
 
     /// Snapshot for the miners endpoint: `(net_hps, live_miners, blocks, shares, rejects)`.
+    ///
+    /// `live_miners` counts live (wallet, rig) entries — i.e. live RIGS, not
+    /// distinct wallets. Two rigs on one wallet now correctly count as 2,
+    /// which is what actually answers "how many miners are hashing right
+    /// now" (the multi-rig fix's whole point); a pre-fix client with no rig
+    /// id still counts as 1 per wallet, same as before.
     pub fn stats(&self, now_ms: u64) -> (f64, usize, u64, u64, Vec<(String, u64)>) {
         let (net_hps, live) = self
             .hps
@@ -696,14 +860,14 @@ mod tests {
         let parent_a = [0x11u8; 32];
         let parent_b = [0x22u8; 32];
         let b = bridge_at(7, parent_a);
-        let c1 = b.challenge_for(None, 0).unwrap();
+        let c1 = b.challenge_for(None, None, 0).unwrap();
         assert_eq!(c1.height, 7);
         assert_eq!(c1.vdf_input, mining_seed(&parent_a, 7));
 
         // A different frontier parent at the same height is different work —
         // this is what stops precompute against a fork that never wins.
         b.publish_tip(7, parent_b);
-        let c2 = b.challenge_for(None, 0).unwrap();
+        let c2 = b.challenge_for(None, None, 0).unwrap();
         assert_ne!(c1.vdf_input, c2.vdf_input);
     }
 
@@ -712,7 +876,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let wallet: WalletId = [0xABu8; 32];
         let b = bridge_at(3, [0x99u8; 32]);
-        let c = b.challenge_for(Some(wallet), 0).unwrap();
+        let c = b.challenge_for(Some(wallet), None, 0).unwrap();
         let sub = solve_for(&c, &wallet);
 
         assert_eq!(b.submit(&sub), SubmitOutcome::Block { height: 3 });
@@ -731,7 +895,7 @@ mod tests {
         let wallet: WalletId = [0x5Au8; 32];
         let parent = [0x77u8; 32];
         let b = bridge_at(11, parent);
-        let c = b.challenge_for(Some(wallet), 0).unwrap();
+        let c = b.challenge_for(Some(wallet), None, 0).unwrap();
         let sub = solve_for(&c, &wallet);
         assert!(matches!(b.submit(&sub), SubmitOutcome::Block { .. }));
         let s = b.take_solve().unwrap();
@@ -759,7 +923,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let wallet: WalletId = [0x0Fu8; 32];
         let b = bridge_at(5, [0x42u8; 32]);
-        let c = b.challenge_for(Some(wallet), 0).unwrap();
+        let c = b.challenge_for(Some(wallet), None, 0).unwrap();
         let sub = solve_for(&c, &wallet);
 
         // replay of an accepted solve — rejected regardless of the credit
@@ -779,6 +943,45 @@ mod tests {
     }
 
     #[test]
+    fn seen_is_pruned_by_height_key_not_left_to_grow_unbounded() {
+        // 2026-08-21/22 (the "production crawled to ~1 block/30s" incident):
+        // `seen` used to be pruned with a flat retain() that had to visit
+        // every entry regardless of how many actually aged out — an O(total
+        // submissions in the window) cost on every single tip advance, which
+        // under real load became the dominant CPU cost (measured live via
+        // perf: 32%+ in raw memcmp) and directly stalled block production
+        // (publish_tip runs inline in the producer's own tick). Now indexed
+        // by height first, so eviction only ever touches the height KEYS
+        // being dropped. This test proves the height-keyed map actually
+        // shrinks on prune — not just that duplicate-detection still works
+        // (already covered by stale_height_and_replay_are_rejected above).
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let b = bridge_at(1, [0x00u8; 32]);
+        // Submit one real solve at each of several early heights so `seen`
+        // accumulates real height-keyed entries to prune.
+        for h in 1..=5u64 {
+            let wallet: WalletId = [h as u8; 32];
+            let c = b.challenge_for(Some(wallet), None, 0).unwrap();
+            let sub = solve_for(&c, &wallet);
+            assert!(matches!(b.submit(&sub), SubmitOutcome::Block { .. }));
+            b.publish_tip(h + 1, [(h + 1) as u8; 32]);
+        }
+        let before = b.seen.lock().unwrap().len();
+        assert!(before >= 5, "expected at least the 5 submitted heights still tracked, got {before}");
+
+        // Advance far past credit_window() (default 20) so every one of
+        // those early heights ages fully out.
+        b.publish_tip(1 + credit_window() + 50, [0xEEu8; 32]);
+        let after = b.seen.lock().unwrap().len();
+        assert!(
+            after < before,
+            "seen must actually shrink once heights age out of the credit window \
+             (before={before}, after={after}) — a map that never shrinks is the \
+             exact unbounded-growth bug this fix closes"
+        );
+    }
+
+    #[test]
     fn a_fresh_near_miss_within_the_credit_window_still_wins() {
         // The actual point of the 2026-08-16 widening: a DIFFERENT (fresh
         // nonce) solve for a height a few blocks behind the current frontier
@@ -787,7 +990,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let wallet: WalletId = [0x11u8; 32];
         let b = bridge_at(5, [0x42u8; 32]);
-        let c = b.challenge_for(Some(wallet), 0).unwrap();
+        let c = b.challenge_for(Some(wallet), None, 0).unwrap();
         let sub = solve_for(&c, &wallet); // solved against height 5's real challenge
 
         // Frontier moves on 3 times before this submission arrives — well
@@ -814,7 +1017,7 @@ mod tests {
         std::env::set_var("SIGIL_MINING_CREDIT_WINDOW", "2");
         let wallet: WalletId = [0x22u8; 32];
         let b = bridge_at(5, [0x42u8; 32]);
-        let c = b.challenge_for(Some(wallet), 0).unwrap();
+        let c = b.challenge_for(Some(wallet), None, 0).unwrap();
         let sub = solve_for(&c, &wallet);
 
         // 4 blocks later, window is 2 -> outside it.
@@ -834,7 +1037,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let wallet: WalletId = [0xC3u8; 32];
         let b = bridge_at(2, [0x01u8; 32]);
-        let c = b.challenge_for(Some(wallet), 0).unwrap();
+        let c = b.challenge_for(Some(wallet), None, 0).unwrap();
         let mut sub = solve_for(&c, &wallet);
         sub.wallet = hex::encode(wallet).to_uppercase();
 
@@ -852,7 +1055,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let wallet: WalletId = [0x7Eu8; 32];
         let b = bridge_at(4, [0x55u8; 32]);
-        let c = b.challenge_for(Some(wallet), 0).unwrap();
+        let c = b.challenge_for(Some(wallet), None, 0).unwrap();
         let good = solve_for(&c, &wallet);
 
         // same nonce, broken proof
@@ -869,7 +1072,7 @@ mod tests {
     #[test]
     fn no_frontier_means_no_mining() {
         let b = MiningBridge::new();
-        assert!(b.challenge_for(None, 0).is_none());
+        assert!(b.challenge_for(None, None, 0).is_none());
         let sub = Submission {
             height: 0,
             wallet: hex::encode([0u8; 32]),
@@ -890,32 +1093,195 @@ mod tests {
     fn net_hps_sums_live_miners_and_prunes_idle_ones() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let b = bridge_at(1, [0u8; 32]);
-        b.report_hps(Some([1u8; 32]), Some(1000.0), 0);
-        b.report_hps(Some([2u8; 32]), Some(500.0), 0);
-        assert_eq!(b.challenge_for(None, 0).unwrap().net_hps, 1500.0);
+        b.report_hps(Some([1u8; 32]), None, Some(1000.0), 0);
+        b.report_hps(Some([2u8; 32]), None, Some(500.0), 0);
+        assert_eq!(b.challenge_for(None, None, 0).unwrap().net_hps, 1500.0);
 
         // one keeps reporting, the other goes silent past the idle window
         let later = HPS_IDLE_MS + 1;
-        b.report_hps(Some([1u8; 32]), Some(1000.0), later);
-        assert_eq!(b.challenge_for(None, later).unwrap().net_hps, 1000.0);
+        b.report_hps(Some([1u8; 32]), None, Some(1000.0), later);
+        assert_eq!(b.challenge_for(None, None, later).unwrap().net_hps, 1000.0);
     }
 
-    // ── vardiff (2026-08-16 port from sigil_rpc::vardiff_ease_for) ─────────
+    /// THE MULTI-RIG GATE (2026-08-24). Two DIFFERENT rigs mining to the SAME
+    /// wallet must both count toward `net_hps` — this is the exact bug the
+    /// operator hit live (two rigs at 1 GH/s+ combined, pool showed ~450
+    /// MH/s). The second half of this test (same rig id reporting twice)
+    /// demonstrates the OLD, still-intentional clobbering behavior a repeat
+    /// report from the SAME rig must have (a rig re-polling isn't a second
+    /// rig) — proving the fix is keyed on rig identity, not just "never
+    /// overwrite anything".
+    #[test]
+    fn two_rigs_on_one_wallet_both_count_toward_net_hps() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let b = bridge_at(1, [0u8; 32]);
+        let wallet = [7u8; 32];
+
+        // Two distinct rigs, same wallet, same instant.
+        b.report_hps(Some(wallet), Some("rig-a".into()), Some(600_000_000.0), 0);
+        b.report_hps(Some(wallet), Some("rig-b".into()), Some(500_000_000.0), 0);
+        assert_eq!(
+            b.challenge_for(Some(wallet), None, 0).unwrap().net_hps,
+            1_100_000_000.0,
+            "SECURITY/CORRECTNESS: two distinct rigs on one wallet must SUM, not clobber \
+             each other — this is the exact live-reported bug (1 GH/s+ real, ~450 MH/s shown)"
+        );
+
+        // The wallet's OWN total (the human-facing 'my hashrate' readback) must also
+        // reflect both rigs, not just whichever reported last.
+        assert_eq!(b.hps_for_wallet_total(Some(wallet)), 1_100_000_000.0);
+
+        // But vardiff issued to ONE rig must be sized to THAT rig's own rate, not the
+        // wallet's combined total — else each rig is calibrated for 2x its real speed
+        // and undershoots the intended shares/sec. Check this directly against the
+        // per-rig/per-wallet accessors (not via `share_target`, which saturates at
+        // this fixture's tiny test difficulty and would hide the distinction).
+        assert_eq!(
+            b.hps_for_rig(Some(wallet), Some("rig-a")), 600_000_000.0,
+            "rig-a's OWN rate must read back as its own 600 MH/s report"
+        );
+        assert_eq!(
+            b.hps_for_rig(Some(wallet), Some("rig-b")), 500_000_000.0,
+            "rig-b's OWN rate must read back as its own 500 MH/s report, independent of rig-a"
+        );
+        assert_ne!(
+            b.hps_for_rig(Some(wallet), Some("rig-a")),
+            b.hps_for_wallet_total(Some(wallet)),
+            "SECURITY/CORRECTNESS: a single rig's own rate must not silently equal the \
+             wallet's combined total, or vardiff calibration for that rig regresses to \
+             double its real speed"
+        );
+
+        // A REPEAT report from the SAME rig id is a re-poll, not a new rig — it must
+        // still replace (not add to) that rig's own entry.
+        b.report_hps(Some(wallet), Some("rig-a".into()), Some(650_000_000.0), 1);
+        assert_eq!(
+            b.challenge_for(Some(wallet), None, 1).unwrap().net_hps,
+            1_150_000_000.0, // 650 (updated rig-a) + 500 (rig-b, still live)
+            "a repeat report from the SAME rig id must UPDATE that rig's entry, not add a third"
+        );
+    }
+
+    // ── vardiff (2026-08-16 port from sigil_rpc::vardiff_ease_for; 2026-08-21
+    //    two-pass fix — see `share_target_for`'s doc comment for the full
+    //    story, including the SECOND correction after the first pass shipped
+    //    a live regression) ──────────────────────────────────────────────
     //
-    // Same assertions as sigil-rpc's own test of this formula (same input,
-    // same expected output) — since the body here is a straight port, this
-    // is a self-check that the port is byte-for-byte the proven formula, not
-    // a from-scratch reimplementation that merely looks similar.
+    // Cases below the operator ceiling / below `bits-1` match the original
+    // ported formula's vectors exactly. Above that, the target is now
+    // deliberately clamped at `bits-1` (numerically identical to the
+    // original ease=1 saturation) — proven load-bearing, not a bug: the
+    // client's pool-vs-solo detection is `share_target > blake4_target`,
+    // so anything at or past `bits` silently reverts the miner to
+    // solo-mode discipline.
 
     #[test]
-    fn vardiff_formula_matches_the_proven_sigil_rpc_vectors() {
-        assert_eq!(vardiff_ease_for(0.0, 0.5, 24, 8), 8);
-        assert_eq!(vardiff_ease_for(1.0, 0.5, 24, 8), 8); // <=1 H/s -> unknown -> flat ceiling
-        assert_eq!(vardiff_ease_for(3e9, 0.5, 24, 0), 0); // ceiling 0 -> always 0 (solo semantics)
-        assert_eq!(vardiff_ease_for(100e3, 0.5, 24, 8), 6);
-        assert_eq!(vardiff_ease_for(3e9, 0.5, 24, 8), 1);
-        assert_eq!(vardiff_ease_for(10e6, 0.5, 24, 8), 1);
-        assert_eq!(vardiff_ease_for(3e9, 0.5, 35, 8), 2);
+    fn share_target_formula_matches_unsaturated_region_of_the_proven_vectors() {
+        // Unaffected: same target either side of the fix.
+        assert_eq!(share_target_for(0.0, 0.5, 24, 8), target_from_bits(16)); // unknown -> ceiling
+        assert_eq!(share_target_for(1.0, 0.5, 24, 8), target_from_bits(16)); // <=1 H/s -> ceiling
+        assert_eq!(share_target_for(3e9, 0.5, 24, 0), 0); // ceiling 0 -> always 0 (solo semantics)
+        assert_eq!(share_target_for(100e3, 0.5, 24, 8), target_from_bits(18)); // below crossover
+        assert_eq!(share_target_for(3e9, 0.5, 35, 8), target_from_bits(33)); // below crossover
+    }
+
+    #[test]
+    fn share_target_never_reaches_the_block_target_no_matter_how_high_hps_goes() {
+        // The load-bearing invariant: `flux_miner::engine::mining_loop`
+        // decides pool-vs-solo purely from `share_target > blake4_target`.
+        // A first version of this fix let `share_bits` grow past `bits`
+        // for any hps above ~33 kH/s at bits=16, which made share_target
+        // <= blake4_target and silently dropped real miners into solo
+        // mode — catastrophic at slow block cadence (operator-reported:
+        // hashrate fell further, to ~3.68 kH/s, AFTER that "fix" shipped).
+        // This must hold for every hps, however absurd.
+        let bits = 16;
+        let blake4_target = target_from_bits(bits);
+        for hps in [10e3, 33e3, 100e3, 10e6, 3e9, 1e15] {
+            let t = share_target_for(hps, 0.5, bits, 8);
+            assert!(
+                t > blake4_target,
+                "hps={hps} produced share_target={t} <= blake4_target={blake4_target} — \
+                 this flips the client into solo mode"
+            );
+        }
+        // And it must saturate at the SAME hardest value for every hps past
+        // the crossover (bits-1) — proven correct, not a regression: there
+        // is no share target harder than bits-1 that still satisfies the
+        // invariant above, so every sufficiently fast miner necessarily
+        // converges on the same floor.
+        let t_10e6 = share_target_for(10e6, 0.5, bits, 8);
+        let t_3e9 = share_target_for(3e9, 0.5, bits, 8);
+        assert_eq!(t_10e6, target_from_bits(bits - 1));
+        assert_eq!(t_3e9, target_from_bits(bits - 1));
+        assert_eq!(t_10e6, t_3e9);
+    }
+
+    #[test]
+    fn share_target_never_falls_below_the_operator_ceiling() {
+        // No hps, however small, should be issued something EASIER than the
+        // flat ceiling — that direction of the formula was never broken and
+        // must stay pinned.
+        for hps in [2.0, 10.0, 1_000.0, 32_000.0] {
+            let t = share_target_for(hps, 0.5, 16, 8);
+            assert!(t <= target_from_bits(8), "hps={hps} got an easier-than-ceiling target");
+        }
+    }
+
+    /// THE 2026-08-24 FIX, proven before deploying it as a config change.
+    ///
+    /// `share_target_never_reaches_the_block_target_no_matter_how_high_hps_goes`
+    /// (above) already proves — and pins as CORRECT, not a bug — that at
+    /// `bits=16` every wallet above ~33 kH/s saturates at the SAME `bits-1`
+    /// floor. That saturation is unavoidable at bits=16 given the pool/solo
+    /// invariant; it isn't wrong, the INPUT was just too small for today's
+    /// real hashrates (an RTX 2080-class GPU is comfortably 100-1000x past
+    /// the crossover). This test proves the actual fix — raising BOTH
+    /// `blake4_bits` (for headroom at the hard end) AND `share_ease_bits` by
+    /// the SAME amount (so the easy floor for a brand-new/slow/idle miner
+    /// stays at the identical absolute difficulty it is today) — restores
+    /// real differentiation across the whole realistic range, from a slow
+    /// CPU up through a generously-estimated multi-GPU rig, with nobody
+    /// clamped to the same floor as everyone else.
+    #[test]
+    fn raising_bits_and_ease_together_restores_headroom_without_moving_the_easy_floor() {
+        const NEW_BITS: u32 = 40;
+        const NEW_EASE: u32 = 32; // bits - ease = 8, unchanged from today's live 16-8=8
+        let rate = 0.5; // SIGIL_VARDIFF_RATE default, unchanged by this fix
+
+        // The easy floor for an idle/brand-new wallet is BYTE-IDENTICAL to
+        // today's live config (16 bits, ease 8) — nobody who could barely
+        // land a share before gets locked out by this change.
+        assert_eq!(
+            share_target_for(0.0, rate, NEW_BITS, NEW_EASE),
+            share_target_for(0.0, rate, 16, 8),
+            "the easy floor for an unreporting wallet must not move"
+        );
+
+        // The realistic range: Viktor's own CURRENTLY-DEFLATED self-report
+        // (4.77 MH/s, itself an artifact of the bits=16 clamp — see the
+        // module-level incident note) through a deliberately generous
+        // multi-GPU estimate (100 GH/s), none of it may hit the bits-1=39
+        // ceiling — hitting it would mean this fix didn't move the crossover
+        // far enough for real hardware.
+        let hardest = target_from_bits(NEW_BITS - 1);
+        for hps in [4.77e6, 70e6, 563e6, 5e9, 100e9] {
+            let t = share_target_for(hps, rate, NEW_BITS, NEW_EASE);
+            assert_ne!(
+                t, hardest,
+                "hps={hps} still saturates at the new ceiling — {NEW_BITS} needs to go higher"
+            );
+        }
+
+        // And the invariant the OTHER two tests exist to guard is still
+        // upheld at the new bits value: share_target must stay strictly
+        // easier than the real block target for every hps, however absurd,
+        // or the client silently falls back to solo mode.
+        let blake4_target = target_from_bits(NEW_BITS);
+        for hps in [10e3, 33e3, 100e3, 10e6, 3e9, 1e15] {
+            let t = share_target_for(hps, rate, NEW_BITS, NEW_EASE);
+            assert!(t > blake4_target, "hps={hps} produced share_target={t} <= blake4_target={blake4_target}");
+        }
     }
 
     #[test]
@@ -932,10 +1298,10 @@ mod tests {
 
         // GPU has told us it does 100 MH/s; the unknown wallet has never
         // reported anything.
-        b.report_hps(Some(gpu), Some(100_000_000.0), 0);
+        b.report_hps(Some(gpu), None, Some(100_000_000.0), 0);
 
-        let gpu_target = b.challenge_for(Some(gpu), 0).unwrap().share_target;
-        let unknown_target = b.challenge_for(Some(unknown), 0).unwrap().share_target;
+        let gpu_target = b.challenge_for(Some(gpu), None, 0).unwrap().share_target;
+        let unknown_target = b.challenge_for(Some(unknown), None, 0).unwrap().share_target;
 
         // A SMALLER target is a HARDER target (fewer hashes clear the bar).
         // Before this fix both were issued the exact same flat share_target
@@ -960,8 +1326,78 @@ mod tests {
         // exactly the pre-vardiff wire behaviour this module documents.
         let b = bridge_at(1, [0u8; 32]);
         let gpu: WalletId = [0xCCu8; 32];
-        b.report_hps(Some(gpu), Some(500_000_000.0), 0);
-        assert_eq!(b.challenge_for(Some(gpu), 0).unwrap().share_target, 0);
-        assert_eq!(b.challenge_for(None, 0).unwrap().share_target, 0);
+        b.report_hps(Some(gpu), None, Some(500_000_000.0), 0);
+        assert_eq!(b.challenge_for(Some(gpu), None, 0).unwrap().share_target, 0);
+        assert_eq!(b.challenge_for(None, None, 0).unwrap().share_target, 0);
+    }
+
+    // ── the 2026-08-19 stuck-behind-a-stale-solve fix ───────────────────────
+    //
+    // sigil-node's producer loop popped exactly ONE solve off this queue per
+    // tick (`take_solve()`). If that one popped solve was stale, the tick
+    // discarded it and checked NOTHING else — even when a fresher, perfectly
+    // creditable solve was queued right behind it. Under real multi-miner
+    // load with the braid's 16-125ms cadence this let queue backlog build up
+    // and starve real miners of credit (live symptom: `queued_solves` growing
+    // 5->7->8+ while the wallet's own balance stayed at exactly 0). The fix
+    // (`take_creditable_solve` in sigil-node) scans forward past stale
+    // entries instead of stopping at the first one. This test proves the
+    // underlying MiningBridge queue actually supports that scan — i.e. that a
+    // fresh solve queued behind a now-stale one is still reachable, just not
+    // to a caller that only ever pops once — which is the property the fix
+    // depends on.
+    #[test]
+    fn a_fresh_solve_queued_behind_a_now_stale_one_is_still_reachable_by_scanning() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let stale_wallet: WalletId = [0x33u8; 32];
+        let fresh_wallet: WalletId = [0x44u8; 32];
+        let b = bridge_at(5, [0x42u8; 32]);
+
+        // A solve for height 5, valid and queued at submit time.
+        let c = b.challenge_for(Some(stale_wallet), None, 0).unwrap();
+        let stale_sub = solve_for(&c, &stale_wallet);
+        assert!(matches!(b.submit(&stale_sub), SubmitOutcome::Block { height: 5 }));
+
+        // The frontier races far ahead (25 blocks — beyond the default
+        // 20-block credit_window()) WITHOUT the producer ever draining the
+        // queue, exactly like a backlog building up under load. The queued
+        // solve above is now stale relative to the new tip, but it is still
+        // sitting at the FRONT of the FIFO queue — nobody has popped it yet.
+        let mut parent = [0x42u8; 32];
+        for h in 6..=30u64 {
+            parent[0] = h as u8;
+            b.publish_tip(h, parent);
+        }
+        assert!(30u64.saturating_sub(5) > credit_window(), "test setup must actually exceed the window");
+
+        // A fresh solve lands for the CURRENT height and queues in behind
+        // the stale one (FIFO: push_back).
+        let c2 = b.challenge_for(Some(fresh_wallet), None, 0).unwrap();
+        let fresh_sub = solve_for(&c2, &fresh_wallet);
+        assert!(matches!(b.submit(&fresh_sub), SubmitOutcome::Block { height: 30 }));
+
+        // A single take_solve() call — the OLD producer's entire per-tick
+        // budget — surfaces the stale entry first. This is exactly the
+        // queue state the live bug hit: a caller that discards this pop as
+        // uncreditable and stops (the old code) would report "no creditable
+        // work this tick", even though a fresh, perfectly good solve is
+        // sitting right behind it.
+        let first = b.take_solve().expect("the stale solve is still queued");
+        assert_eq!(first.wallet, stale_wallet);
+        assert!(
+            30u64.saturating_sub(first.height) > credit_window(),
+            "confirm this popped entry really is outside the credit window"
+        );
+
+        // The fix's whole premise: keep popping (bounded) instead of
+        // stopping. The fresh solve was never lost — only queued behind the
+        // stale one — and a second pop reaches it intact.
+        let second = b.take_solve().expect("the fresh solve is reachable behind the stale one");
+        assert_eq!(
+            second.wallet, fresh_wallet,
+            "the fresh, creditable solve was not lost — just queued behind the stale one, \
+             and scanning past the stale front entry (not stopping at it) reaches it"
+        );
+        assert_eq!(second.height, 30);
     }
 }

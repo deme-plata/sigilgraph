@@ -390,7 +390,9 @@ pub async fn shielded_register_handler(
     State(st): State<AppState>,
     Json(req): Json<shielded::RegisterRequest>,
 ) -> Json<serde_json::Value> {
-    match st.shielded.submit_register(&req.wallet, &req.pk_shield, req.fee) {
+    match st.shielded.submit_register(
+        &req.wallet, &req.pk_shield, &req.pk_encrypt, req.fee, &req.sig, req.req_nonce,
+    ) {
         Ok(h) => Json(serde_json::json!({
             "ok": true, "txid": hex::encode(h), "ts_ms": now_ms(),
             "note": "queued; once it lands, block rewards for this wallet mint as shielded notes",
@@ -408,7 +410,7 @@ pub async fn shield_handler(
     State(st): State<AppState>,
     Json(req): Json<shielded::ShieldRequest>,
 ) -> Json<serde_json::Value> {
-    match st.shielded.submit_shield(&req.from, req.amount, &req.cm, req.fee) {
+    match st.shielded.submit_shield(&req.from, req.amount, &req.cm, req.fee, &req.sig, req.req_nonce) {
         Ok(h) => Json(serde_json::json!({
             "ok": true, "txid": hex::encode(h), "ts_ms": now_ms(),
             "note": "queued for the next braid block",
@@ -427,7 +429,9 @@ pub async fn shielded_send_handler(
         Ok(p) => p,
         Err(_) => return Json(serde_json::json!({ "ok": false, "error": "proof must be hex" })),
     };
-    match st.shielded.submit_shielded_send(&req.anchor, &req.nullifier, &req.cm_outs, req.fee, proof) {
+    match st.shielded.submit_shielded_send(
+        &req.anchor, &req.nullifier, &req.cm_outs, req.fee, proof, &req.note_ciphertexts,
+    ) {
         Ok(h) => Json(serde_json::json!({
             "ok": true, "txid": hex::encode(h), "ts_ms": now_ms(),
             "note": "queued for the next braid block",
@@ -475,6 +479,74 @@ pub async fn shielded_anchor_handler(State(st): State<AppState>) -> Json<serde_j
         "notes": pool.len(),
         "nullifiers": pool.nullifier_count(),
         "value_locked": pool.value_locked().to_string(),
+        "ts_ms": now_ms(),
+    }))
+}
+
+/// The real (unpadded) note commitments, in leaf order.
+///
+/// 2026-08-23: `shielded_anchor_handler`'s own doc comment already promised this ("the
+/// wallet ... fetches [the note list] here") but only ever returned a COUNT — no wallet
+/// or mining client could actually locate its notes or build a spend's inclusion path
+/// without the real commitments. This closes that gap. Padding is intentionally NOT sent:
+/// it is deterministically derivable client-side from
+/// `sigil_shield::note_v1::padding_leaf_wire` (same formula this server uses), so shipping
+/// it would just be ~1MB of bytes the client can already compute for free.
+/// 2026-08-24: also returns `ciphertexts`, positionally aligned with `leaves` — the
+/// piece that turns "here are the commitments" into "here is what you can actually
+/// trial-decrypt to find yours". Before this, a wallet could locate notes it created
+/// itself but had no way to discover a payment someone else sent it; the commitments
+/// alone carry no ciphertext, so this endpoint had nothing to hand back for a received
+/// note until `note_ciphertexts` existed to store one.
+#[flux_api_macros::api(GET, "/v1/shielded/leaves", summary = "Real (unpadded) note commitments plus delivery ciphertexts, for wallet/miner note discovery and spend proving")]
+pub async fn shielded_leaves_handler(State(st): State<AppState>) -> Json<serde_json::Value> {
+    let guard = match st.state.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let pool = guard.shielded();
+    Json(serde_json::json!({
+        "ok": true,
+        "leaves": pool.notes().iter().map(hex::encode).collect::<Vec<_>>(),
+        "ciphertexts": pool.ciphertexts(),
+        "capacity": sigil_state::shielded::POOL_CAPACITY,
+        "ts_ms": now_ms(),
+    }))
+}
+
+/// `?wallet=<64-hex>` — the shielded address a payer needs to pay this wallet
+/// privately: the circuit key (`pk_shield`, what a note commitment binds to) and the
+/// delivery key (`pk_encrypt`, what a note ciphertext is sealed to). Both are public by
+/// design — see `sigil_shield::note_cipher`'s module docs on why publishing them costs
+/// nothing (they are one-way / cannot be used to spend or decrypt anyone else's notes).
+#[derive(Debug, Deserialize)]
+pub struct ShieldedAddressQuery {
+    pub wallet: String,
+}
+
+#[flux_api_macros::api(GET, "/v1/shielded/address", summary = "Look up a wallet's published shielded address (pk_shield + pk_encrypt) so it can be paid privately")]
+pub async fn shielded_address_handler(
+    State(st): State<AppState>,
+    Query(q): Query<ShieldedAddressQuery>,
+) -> Json<serde_json::Value> {
+    let Some(wallet) = hex32(&q.wallet) else {
+        return Json(serde_json::json!({ "ok": false, "error": "wallet must be 64-hex" }));
+    };
+    let guard = match st.state.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let pool = guard.shielded();
+    let Some(pk_shield) = pool.shielded_address(&wallet) else {
+        return Json(serde_json::json!({
+            "ok": false, "error": "wallet has not registered a shielded address",
+        }));
+    };
+    Json(serde_json::json!({
+        "ok": true,
+        "wallet": hex::encode(wallet),
+        "pk_shield": hex::encode(pk_shield),
+        "pk_encrypt": pool.encrypt_key(&wallet).map(hex::encode),
         "ts_ms": now_ms(),
     }))
 }
@@ -1028,6 +1100,16 @@ pub struct ChallengeQuery {
     pub wallet: Option<String>,
     /// Self-reported Lane-A hashes/s; summed across live miners into `net_hps`.
     pub hps: Option<f64>,
+    /// 2026-08-24 (MULTI-RIG fix): identifies THIS physical rig, distinct
+    /// from the payout wallet — `flux_miner::client::rig_id()` already sends
+    /// this on every fetch. Without it, two rigs mining to one wallet
+    /// silently clobbered each other's hashrate report (see
+    /// `MiningBridge::hps` field doc). `#[serde(default)]` + `Option` so an
+    /// old client that doesn't send `&rig=` still parses exactly as before —
+    /// it just falls back to the pre-fix per-wallet clobbering, not broken,
+    /// only not-yet-improved.
+    #[serde(default)]
+    pub rig: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1039,6 +1121,18 @@ pub struct MinersResponse {
     pub shares_accepted: u64,
     pub queued_solves: usize,
     pub rejects: Vec<(String, u64)>,
+    /// This caller's own last-reported Lane-A rate — `0.0` unless `?wallet=`
+    /// was passed and that wallet has an unexpired self-report (see
+    /// [`mining::MiningBridge::hps_for_wallet_total`]). 2026-08-23: the wallet UI's "my
+    /// hashrate" topbar pill was reading this off a per-miner array this
+    /// endpoint never returned; this is that missing per-wallet readback.
+    pub my_hps: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MinersQuery {
+    /// 64-hex wallet to look up `my_hps` for. Omit for the aggregate-only view.
+    pub wallet: Option<String>,
 }
 
 #[flux_api_macros::api(GET, "/v1/mining/challenge", summary = "Dual-lane challenge bound to the braid frontier")]
@@ -1052,10 +1146,20 @@ pub async fn mining_challenge(
     // made every miner silently fail to parse the reply and produce 0 shares while
     // still registering as a live miner. Return the RAW `Challenge`, like rpcd.
     let wallet = q.wallet.as_deref().and_then(hex32);
+    // Bound + sanitize defensively even though the shipping client already
+    // does this (`flux_miner::client::sanitize_rig_id`) — an untrusted caller
+    // could send an oversized/adversarial string, and this becomes a HashMap
+    // key held for up to HPS_IDLE_MS, so don't trust the wire blindly.
+    let rig = q.rig.as_deref().map(|r| {
+        r.chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+            .take(24)
+            .collect::<String>()
+    }).filter(|r| !r.is_empty());
     if let Some(hps) = q.hps {
-        st.mining.report_hps(wallet, Some(hps), now_ms());
+        st.mining.report_hps(wallet, rig.clone(), Some(hps), now_ms());
     }
-    match st.mining.challenge_for(wallet, now_ms()) {
+    match st.mining.challenge_for(wallet, rig, now_ms()) {
         Some(c) => Ok(Json(c)),
         // No mineable frontier yet → a real 503 so the client's `.error_for_status()?`
         // retries cleanly instead of trying to parse an envelope as a Challenge.
@@ -1094,8 +1198,12 @@ pub async fn dagknight_recent(State(st): State<AppState>) -> Json<ApiResponse<da
 }
 
 #[flux_api_macros::api(GET, "/v1/mining/miners", summary = "Live mining power and accept/reject counters")]
-pub async fn mining_miners(State(st): State<AppState>) -> Json<ApiResponse<MinersResponse>> {
+pub async fn mining_miners(
+    State(st): State<AppState>,
+    Query(q): Query<MinersQuery>,
+) -> Json<ApiResponse<MinersResponse>> {
     let (net_hps, live_miners, blocks, shares, rejects) = st.mining.stats(now_ms());
+    let wallet = q.wallet.as_deref().and_then(hex32);
     ApiResponse::ok(MinersResponse {
         height: st.mining.tip().map(|t| t.height),
         net_hps,
@@ -1104,6 +1212,7 @@ pub async fn mining_miners(State(st): State<AppState>) -> Json<ApiResponse<Miner
         shares_accepted: shares,
         queued_solves: st.mining.queued_solves(),
         rejects,
+        my_hps: st.mining.hps_for_wallet_total(wallet),
     })
 }
 
@@ -1124,6 +1233,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/shielded_send", post(shielded_send_handler))
         .route("/v1/unshield", post(unshield_handler))
         .route("/v1/shielded/anchor", get(shielded_anchor_handler))
+        .route("/v1/shielded/leaves", get(shielded_leaves_handler))
+        .route("/v1/shielded/address", get(shielded_address_handler))
         .route("/v1/eth/usdc", get(eth_usdc_handler))
         .route("/v1/mining/challenge", get(mining_challenge))
         .route("/v1/mining/submit", post(mining_submit))

@@ -21,9 +21,15 @@ sigil-tx = { path = "../sigil-tx" }
 # Door-level shielded-proof precheck (a DoS guard; the chokepoint is the authority).
 sigil-shield = { path = "../sigil-shield" }
 sigil-emission = { path = "../sigil-emission" }
+# usds.rs / the /v1/usds/* routes: VAULT/USDS token ids + the oracle price
+# read for the status endpoint. The actual mint/redeem MATH is never called
+# directly from this crate — that only ever happens inside sigil-tx::apply_tx.
+sigil-usds = { path = "../sigil-usds" }
+sigil-oracle = { path = "../sigil-oracle" }
 # send.rs: SignedTx's sig-scheme wrapper types (SigScheme/SignatureBytes/
 # PubKeyBytes) live here; sigil-tx doesn't re-export them.
 sigil-header = { path = "../sigil-header" }
+sigil-dagknight = { path = "../sigil-dagknight" }
 # send.rs: verifies the wallet's own ed25519 `sigil-rpc/v1` RPC-auth
 # signature (the SAME scheme flux-miner's challenge/submit flow already
 # trusts) — NOT SignedTx::verify_signature (that expects a signature over
@@ -62,6 +68,10 @@ flux-vdf = { workspace = true }
 flux-api = { path = "../../../flux/crates/flux-api" }
 flux-api-macros = { path = "../../../flux/crates/flux-api-macros" }
 inventory = "0.3"
+# search.rs: /v1/search — the real wallet/tx/block search engine (2026-08-20).
+# Query only; the indexer that populates it lives in sigil-node (search_index.rs),
+# which is the crate that actually owns Block/ChainLog.
+flux-search = { path = "../../../flux/crates/flux-search" }
 
 [dev-dependencies]
 rand = { workspace = true }

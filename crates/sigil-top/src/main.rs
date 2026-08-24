@@ -18,7 +18,9 @@
 //!   sigil-top --api URL       point at a remote node status endpoint
 
 mod block_store;
-mod block_sync;
+// pub(crate) (2026-08-23): producer::run reaches block_sync::verify::inflate_gossip_frame
+// through this path — everything else stays exactly as private as before.
+pub(crate) mod block_sync;
 mod chain_verify; // v0.9.0: full verifying sync — spine continuity + precheck walk
 mod ledger_verify; // ONE-CHAIN P2a: verify the MONEY chain's header spine + real /supply truth
 mod gap_sync;     // SPINE-BREAK fix: testable genesis-up contiguity engine + shared watchdog/classify
@@ -44,6 +46,11 @@ mod cathedral;     // CATHEDRAL DAGKNIGHT: vaulted 4-root + DagKnight finality v
 // producer-capable binary still defaults to today's light-client-only behavior.
 #[cfg(feature = "producer")]
 mod producer;
+
+// `mine-rig --seed`'s auto-registration for shielded mining. Default-on (see the
+// crate's Cargo.toml `shield-register` feature comment).
+#[cfg(feature = "shield-register")]
+mod shield_setup;
 
 use crate::cathedral::Cathedral;
 
@@ -1467,15 +1474,64 @@ fn main() {
         // run_headless line so the Hive OS h-stats parser reads it unchanged.
         //   sigil-top mine-rig [wallet-64hex] [node-url]
         //   env: SIGIL_MINE_WALLET, SIGIL_MINE_NODE, SIGIL_MINE_CPU=1 (force CPU)
+        //   env: SIGIL_MINE_SEED — 2026-08-24, the "no opt-in" privacy path. When set,
+        //   the wallet address is DERIVED from this seed (overriding SIGIL_MINE_WALLET
+        //   / the positional wallet arg — a rig can't mine to a different wallet than
+        //   the one it just proved ownership of), and this rig self-registers for
+        //   shielded mining before the loop starts: every reward from here on mints as
+        //   a private note instead of a transparent credit. A bare wallet address (no
+        //   seed) still works exactly as before — nobody who was already mining is
+        //   broken by this.
         Some("mine-rig") => {
             use std::sync::atomic::{AtomicBool, Ordering};
             use std::sync::{Arc, Mutex};
-            let wallet = argv.get(1).cloned()
-                .or_else(|| std::env::var("SIGIL_MINE_WALLET").ok())
-                .unwrap_or_else(miner_wallet);
             let url = argv.get(2).cloned()
                 .or_else(|| std::env::var("SIGIL_MINE_NODE").ok())
                 .unwrap_or_else(engine_node_url);
+            #[cfg(feature = "shield-register")]
+            let seed_material = std::env::var("SIGIL_MINE_SEED").ok();
+            #[cfg(not(feature = "shield-register"))]
+            let seed_material: Option<String> = None;
+            let fallback_wallet = || {
+                argv.get(1).cloned()
+                    .or_else(|| std::env::var("SIGIL_MINE_WALLET").ok())
+                    .unwrap_or_else(miner_wallet)
+            };
+            let wallet = if let Some(seed) = seed_material.as_deref() {
+                #[cfg(feature = "shield-register")]
+                {
+                    match shield_setup::wallet_signing_key(seed) {
+                        Some(sk) => {
+                            let derived = hex::encode(sk.verifying_key().to_bytes());
+                            println!("  🔐 SIGIL_MINE_SEED set — mining wallet derived: {}…", &derived.chars().take(8).collect::<String>());
+                            match shield_setup::register_for_shielded_mining(&url, seed) {
+                                shield_setup::RegisterOutcome::Registered { wallet_hex, txid } => {
+                                    println!("  ✓ registered {}… for shielded mining (tx {}…) — rewards from here on mint privately",
+                                        &wallet_hex.chars().take(8).collect::<String>(), &txid.chars().take(10).collect::<String>());
+                                }
+                                shield_setup::RegisterOutcome::Failed { wallet_hex, reason } => {
+                                    println!("  ⚠ shielded registration failed for {}…: {reason} — mining continues, but rewards stay transparent until this succeeds",
+                                        &wallet_hex.chars().take(8).collect::<String>());
+                                }
+                                shield_setup::RegisterOutcome::BadSeed => unreachable!("just parsed above"),
+                            }
+                            derived
+                        }
+                        None => {
+                            // Same format SIGIL_MINE_SEED already requires for [M]ine
+                            // (main.rs's miner_keypair()) — a malformed value here would
+                            // otherwise silently fall through to an unrelated wallet,
+                            // which is worse than refusing to guess.
+                            println!("  ⚠ SIGIL_MINE_SEED is set but isn't a valid 64-hex seed — ignoring it, mining to the address instead");
+                            fallback_wallet()
+                        }
+                    }
+                }
+                #[cfg(not(feature = "shield-register"))]
+                { let _ = seed; fallback_wallet() }
+            } else {
+                fallback_wallet()
+            };
             let want_gpu = cfg!(feature = "gpu") && std::env::var("SIGIL_MINE_CPU").is_err();
             println!("\n  ▲ sigil-top mine-rig v{VERSION} — dual-lane (BLAKE4 Φ + VDF Ω) — headless");
             println!("  wallet: {}…  node: {url}  requested: {}",
@@ -2167,6 +2223,25 @@ fn start_mining(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> mpsc::Re
             return;
         };
         let wallet = hex::encode(kp.pubkey());
+        // 2026-08-24: SIGIL_MINE_SEED is ALREADY required to reach this point (audit
+        // C1, above) — so this is genuinely "out of the box": nobody who can already
+        // use [M]ine has anything new to configure to also get shielded rewards.
+        #[cfg(feature = "shield-register")]
+        if let Ok(seed_hex) = std::env::var("SIGIL_MINE_SEED") {
+            // Registration lives on the dual-lane money API (same base `mine-rig`
+            // uses), not `url` above (that's `/mine`, the legacy single-lane path
+            // this function itself POSTs shares to) — the two are different services.
+            match shield_setup::register_for_shielded_mining(&engine_node_url(), &seed_hex) {
+                shield_setup::RegisterOutcome::Registered { wallet_hex, txid } => {
+                    let _ = tx.send(format!("🔐 registered {}… for shielded mining (tx {}…)",
+                        &wallet_hex.chars().take(8).collect::<String>(), &txid.chars().take(10).collect::<String>()));
+                }
+                shield_setup::RegisterOutcome::Failed { reason, .. } => {
+                    let _ = tx.send(format!("⚠ shielded registration failed: {reason} — mining continues transparently"));
+                }
+                shield_setup::RegisterOutcome::BadSeed => {} // already validated by miner_keypair() above; unreachable
+            }
+        }
         let mut req_nonce: u64 = 0; // strictly-increasing per-wallet replay guard (ms floor)
         let difficulty_bits: u32 = std::env::var("SIGIL_MINE_DIFFICULTY").ok()
             .and_then(|s| s.parse().ok()).unwrap_or(12); // ~4k hashes/share — real PoW, lands fast
@@ -4062,7 +4137,13 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                     app.toast = format!("◆ local wallet → {url}").into();
                                     app.toast_sticky = false;
                                 } else {
-                                    app.toast = format!("🔗 headless — open the wallet in any browser:  {url}").into();
+                                    // Headless (SSH/terminal-only): localhost:9800 only means
+                                    // something on THIS box, so handing it out is a dead link on
+                                    // any other device. Give a link that actually works elsewhere —
+                                    // see wallet_ui::headless_wallet_view_url's doc comment for why
+                                    // this carries no secret and is safe to print/copy anywhere.
+                                    let fallback = wallet_ui::headless_wallet_view_url();
+                                    app.toast = format!("🔗 headless — open your wallet from any device:  {fallback}").into();
                                     app.toast_sticky = true;
                                 }
                             }
@@ -4646,21 +4727,50 @@ fn sigil_top_db_path() -> String {
     format!("{}/sigil-top-blocks.db", base.trim_end_matches(['/', '\\']))
 }
 
-/// v7.0.7 ONE-TIME store heal. Stores built by the v7.0.3–7.0.5 sync FRONTIER-STALL bug
-/// wedge at a chunk boundary (a Fatal parent-linkage break — the operator's h≈393,265
-/// "SPINE BREAK — STUCK") and do NOT self-heal in place: the v7.0.6 fetch-ordering fix only
-/// prevents NEW wedges, it can't repair an already-corrupt on-disk chain. So on the FIRST
-/// launch of a build carrying this marker, delete the store once; the sync then rebuilds it
-/// clean with the fixed ordering (verified: a fresh sync crosses 393k with 0 breaks). A tiny
-/// `.healver` marker next to the store records that the heal ran, so later launches skip it
-/// (never a repeat wipe). A store that was already clean simply re-syncs once — a testnet-
-/// acceptable one-time cost, and the ONLY way to make "press U and it just works" true for
-/// every node already carrying a wedged store from the buggy releases.
+/// v7.0.7 ONE-TIME store heal, RE-ARMED 2026-08-24 (see below). Stores built by the
+/// v7.0.3–7.0.5 sync FRONTIER-STALL bug wedge at a chunk boundary (a Fatal parent-linkage
+/// break — the operator's h≈393,265 "SPINE BREAK — STUCK") and do NOT self-heal in place:
+/// a later fetch-ordering fix only prevents NEW wedges, it can't repair an already-corrupt
+/// on-disk chain. So on the FIRST launch of a build carrying a given `HEAL_MARKER`, delete
+/// the store once; the sync then rebuilds it clean. A tiny `.healver` marker next to the
+/// store records that THIS marker's heal ran, so later launches skip it (never a repeat
+/// wipe for the same marker). A store that was already clean simply re-syncs once — a
+/// testnet-acceptable one-time cost, and the ONLY way to make "press U and it just works"
+/// true for every node already carrying a wedged store.
+///
+/// **RE-ARMED 2026-08-24** (bumped `v7.1.49` → `v7.1.75`): the marker is a ONE-SHOT per
+/// exact string, not a permanent "this class of bug can never recur" guarantee — any store
+/// that already consumed the v7.1.49 heal (i.e. every node that's launched at least once
+/// since that release) is now IMMUNE to a repeat wipe even if it picks up a NEW wedge from
+/// a DIFFERENT bug, because `heal_wedged_store_once` only compares the marker file's
+/// content to the CURRENT constant. Confirmed this actually happened: live-reproduced on
+/// Epsilon (2026-08-24) against a shared root-owned store that HAD already been healed
+/// under the old marker — a background reconciliation pass hit hundreds of consecutive
+/// `[store] rejected height-index fork overwrite` entries in the h≈1.6–2.0M range (two
+/// completely different, uncorrelated hashes for the same height, `existing=` vs
+/// `incoming=`), with the sync frontier frozen and the live fetch loop timing out on 71%
+/// of requests — the exact "SPINE BREAK — STUCK" signature, just at a different height and
+/// from whichever of the many uncommitted skeleton/backfill passes (see
+/// `project_sigil_sync_index_vs_body_gap_2026_08_18` memory — VCATCH v1/v2, the
+/// height-1-index-conflict finding, several NOT-yet-fully-landed attempts) wrote a
+/// conflicting entry into that store at some point after v7.1.49 shipped. The store's own
+/// conflict-rejection logic (`block_store.rs::put_blocks_batch` — correctly refusing to
+/// let ANY later response silently overwrite an already-indexed height, which is real
+/// anti-fork protection) cannot distinguish "a malicious/forked peer" from "our own local
+/// store wrote something wrong, once, from an in-development code path" — so once a bad
+/// entry lands, by ANY mechanism, ever, the spine wedges at that exact height PERMANENTLY
+/// and no amount of retrying a healthy, honest peer can ever recover it. This is NOT a fix
+/// for whatever wrote the bad entry in the first place (that remains open — the skeleton/
+/// backfill code has had multiple actively-evolving, sometimes-uncommitted-and-broken
+/// attempts across the v7.1.30–v7.1.74 range; see the memory file above for the specifics
+/// not yet fully closed) — it is the same "clear the landmine" recovery this project has
+/// already shipped once, re-armed so it fires again for stores that picked up NEW damage
+/// since the last time.
 fn heal_wedged_store_once(path: &str) {
-    const HEAL_MARKER: &str = "frontier-stall-heal-v7.0.6";
+    const HEAL_MARKER: &str = "frontier-stall-heal-v7.1.75";
     let marker = format!("{path}.healver");
     if std::fs::read_to_string(&marker).map(|s| s.trim() == HEAL_MARKER).unwrap_or(false) {
-        return; // already healed on a prior launch — leave the store alone
+        return; // already healed under THIS marker on a prior launch — leave the store alone
     }
     // The store may be a flux-db DIRECTORY or a file, plus WAL/SHM sidecars — clear them all.
     let _ = std::fs::remove_dir_all(path);
@@ -4670,7 +4780,7 @@ fn heal_wedged_store_once(path: &str) {
     }
     let _ = std::fs::write(&marker, HEAL_MARKER);
     boot_trace(&format!(
-        "v7.0.7 one-time heal: cleared possibly-wedged store {path} (v7.0.3 frontier-stall fix) — re-syncing from genesis"
+        "v7.1.75 one-time heal: cleared possibly-wedged store {path} (re-armed frontier-stall heal) — re-syncing from genesis"
     ));
 }
 

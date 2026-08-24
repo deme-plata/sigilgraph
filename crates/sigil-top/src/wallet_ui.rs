@@ -8,6 +8,43 @@ pub(crate) fn local_wallet_url() -> String {
     "http://localhost:9800/".into()
 }
 
+/// Headless fallback for [W]. `http://localhost:9800/` (what [W] shows when it
+/// can't open a browser) is meaningless off this box — a copy-paste into a
+/// browser on any OTHER machine just points that machine at itself. That's
+/// the literal Linux/SSH-terminal bug: the message technically appears, but
+/// the link it gives never works remotely (operator report, 2026-08-19).
+///
+/// Point at the SAME tron wallet UI, hosted publicly, with this node's
+/// mining address pre-filled via `?addr=` — the wallet page's own gate
+/// (`gui/sigil-wallet-tron-embedded.html`, ~line 290) already treats a valid
+/// `?addr=` as "view this address", no login step, before falling back to
+/// its localStorage-remembered wallet. That link now works from ANY device,
+/// ANY browser, the moment it's opened.
+///
+/// This carries NO secret. `?addr=` is [`crate::miner_wallet`]'s PUBLIC
+/// address — never a private key or recovery phrase. This app never lets a
+/// signing key leave the browser that generated it (checked: the wallet
+/// mnemonic lives only in that browser's `localStorage`, and this Rust
+/// process never touches it at all — `SIGIL_MINE_SEED`, if set, is a
+/// SEPARATE mining-auth signing key, deliberately env-only/never-persisted,
+/// and is NOT threaded into this URL). So Send/Bridge/Swap on the far end
+/// still prompt for the recovery phrase on demand, exactly like every other
+/// flow in this wallet already does — this link only pre-authenticates the
+/// READ side (balance, mining status, activity), which needs no secret at
+/// all to be correct and safe to hand out.
+pub(crate) fn headless_wallet_view_url() -> String {
+    // 2026-08-20: was fluxapp.xyz — that apex's q-flux vhost proxies /v1 (and
+    // /api/v1) to the dead sigil-rpcd (:8099), confirmed live (curl returns
+    // 502 Bad Gateway on /v1/balance). This wallet page fetches same-origin
+    // (const NODE=''), so opening it from fluxapp.xyz silently shows a wrong
+    // balance rather than erroring loudly — exactly what an operator hit.
+    // sigilgraph.org's vhost is the one proxying to the real sigil-api
+    // (:18181); confirmed live (real balance returned, not a 502/404).
+    let base = std::env::var("SIGIL_TRON_WALLET_URL").ok().filter(|u| !u.is_empty())
+        .unwrap_or_else(|| "https://sigilgraph.org/sigil-wallet-tron-embedded.html".into());
+    format!("{base}?addr={}", crate::miner_wallet())
+}
+
 pub(crate) fn dirs_next() -> Option<std::path::PathBuf> {
     if cfg!(windows) {
         std::env::var("APPDATA").ok().map(std::path::PathBuf::from)

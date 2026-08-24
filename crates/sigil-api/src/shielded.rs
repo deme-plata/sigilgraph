@@ -35,10 +35,32 @@ use sigil_tx::{SigilTx, SignedTx};
 
 use crate::send::to_signed;
 
-/// Retry budget per shielded tx, mirroring `send`.
-const MAX_ATTEMPTS: u32 = 60;
+/// Retry budget per shielded tx.
+///
+/// 2026-08-24: was 60/120s, inherited from `send`'s ORIGINAL constants before this
+/// chain's DAGKnight braid had a real finality window. `dag_drain_apply`
+/// (`sigil-node/src/dag.rs`) only state-applies blocks once they cross
+/// `BraidConfig::final_depth` (512, bumped from 64 on 2026-08-15) — measured live
+/// against the real producer at ~3.5s/block, that is **~30 minutes** between a
+/// candidate being proposed and it ever being eligible to settle. A tx riding on
+/// fresh, not-yet-finalized candidates for only 120s gives up ~15x faster than the
+/// chain could ever land it — it is not possible for ANY shielded tx to succeed
+/// under the old constant, not a rare/edge failure.
+///
+/// Confirmed by direct live reproduction: submitted a real `RegisterShieldedAddress`
+/// against the production API, watched its exact tx hash in the live log —
+/// `✗ shielded tx gave up after 19 attempts / 122.3s hash=9a9fe445...` — while
+/// `finalized_height` was still ~488 blocks behind where that tx's candidate was
+/// proposed. This is why the shielded-mining-reward feature has never actually
+/// landed a single note on the live chain since it shipped.
+///
+/// 40 minutes gives real margin over the ~30-minute measured floor (reorg/backlog
+/// variance, not just the happy path). `MAX_ATTEMPTS` raised so it can't become the
+/// new accidental limiter — the actual retry cadence is roughly one per candidate
+/// mint, so 512 attempts covers the whole final_depth window with room to spare.
+const MAX_ATTEMPTS: u32 = 600;
 /// How long a shielded tx may stay pending before it is dropped.
-const MAX_AGE: Duration = Duration::from_secs(120);
+const MAX_AGE: Duration = Duration::from_secs(2_400);
 
 struct Pending {
     tx: SigilTx,
@@ -642,6 +664,42 @@ pub struct UnshieldRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// THE ROOT-CAUSE GATE for the "registration never lands" bug (2026-08-24).
+    ///
+    /// Measured live against the real production DAGKnight braid, not estimated:
+    /// `final_depth=512` at this chain's real ~3.5s block time puts finality
+    /// ~500 blocks / ~29 minutes behind a freshly-proposed candidate
+    /// (`dag_drain_apply` in `sigil-node/src/dag.rs` only state-applies blocks
+    /// once they cross that threshold). A pending shielded tx that gives up
+    /// before a candidate carrying it could ever reach that threshold can
+    /// mathematically never land — reproduced live: a real registration gave up
+    /// at "19 attempts / 122.3s" while `finalized_height` was still ~488 blocks
+    /// behind where that tx's candidate was proposed.
+    ///
+    /// This pins the fix at the type level: if `MAX_AGE` or `MAX_ATTEMPTS` ever
+    /// regress below the real finality floor again (e.g. someone "cleans up" the
+    /// constant back toward `send`'s original 60s without re-deriving it), this
+    /// test catches it before it ships, rather than silently reintroducing a bug
+    /// that took a live reproduction to find the first time.
+    #[test]
+    fn retry_budget_exceeds_the_real_finality_floor() {
+        const MEASURED_FINAL_DEPTH: u64 = 512;
+        const MEASURED_BLOCK_SECS: u64 = 4; // ~3.5s measured live, rounded up for margin
+        let finality_floor = Duration::from_secs(MEASURED_FINAL_DEPTH * MEASURED_BLOCK_SECS);
+        assert!(
+            MAX_AGE > finality_floor,
+            "MAX_AGE ({MAX_AGE:?}) must exceed the real finality floor ({finality_floor:?}) \
+             or NO shielded tx can ever land — see the 2026-08-24 root-cause writeup"
+        );
+        // Attempts accumulate roughly once per candidate mint (one per block, not
+        // per drain tick) — must comfortably cover the same window MAX_AGE does.
+        assert!(
+            (MAX_ATTEMPTS as u64) >= MEASURED_FINAL_DEPTH,
+            "MAX_ATTEMPTS ({MAX_ATTEMPTS}) must cover at least one full final_depth \
+             window ({MEASURED_FINAL_DEPTH}) of candidate-mint attempts"
+        );
+    }
 
     fn signer() -> (ed25519_dalek::SigningKey, String) {
         let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);

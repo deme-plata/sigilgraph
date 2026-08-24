@@ -238,10 +238,15 @@ pub struct WedgeScaleResult {
     /// later trusted-path conflict. MUST be 0 — this is what the fix guarantees.
     pub honest_entries_corrupted: u64,
     /// Case A: the trusted path landed FIRST (planting a value), then the honest/
-    /// checked path tried to write the correct value for the same height. This is
-    /// the KNOWN, still-open, order-dependent limitation the module docs above
-    /// describe (the fix stops the trusted path from causing NEW poisoning; it
-    /// does not retroactively un-poison a height the trusted path got to first).
+    /// checked path tried to write the correct value for the same height. The raw
+    /// `BlockStore` write API deliberately does NOT self-heal this — see the module
+    /// docs above. CLOSED one layer up as of 2026-08-24: `BlockStore::rollback_frontier`
+    /// (already live, already wired into the sync watchdog) recovers this case for
+    /// real, proven end-to-end in `sigil-block-store`'s own
+    /// `put_blocks_bulk_trusted_poison_self_heals_via_rollback_frontier` test — real
+    /// poison via the real trusted-bulk path, real recovery via the real rollback
+    /// call, composed in one test. This counter still records how often case A fires
+    /// in this scenario; it is not a count of unresolved wedges.
     pub trusted_then_honest_conflict_cases: u64,
     /// Of the untouched heights — no conflict ever injected there — how many
     /// ended up with the WRONG hash indexed (i.e. contamination that leaked in
@@ -327,11 +332,12 @@ pub fn wedge_conflicts_stay_local_at_scale(
             }
             parent = honest_hash; // honest survived untouched — chain continues normally
         } else {
-            // CASE A — trusted first (plants), honest second. Known open limitation:
-            // the checked path correctly refuses to silently overwrite what's
-            // already indexed — see the module docs on why this is a SEPARATE,
-            // still-unclosed problem from the one this fix addresses. Recorded as
-            // its own count, not conflated with the case-B corruption count above.
+            // CASE A — trusted first (plants), honest second. The raw store API
+            // correctly refuses to silently overwrite what's already indexed — by
+            // design, arrival order must never decide a conflict here. Recovery for
+            // this case lives one layer up (`rollback_frontier`, already live and
+            // proven — see the module docs above), not in this raw write path.
+            // Recorded as its own count, not conflated with the case-B count above.
             store.put_blocks_bulk_trusted(&[conflicting]);
             let accepted = store.put_block(honest.clone()).expect("honest put attempt");
             if !accepted {
@@ -370,9 +376,11 @@ mod scale_tests {
     /// height-index disagreements, not one anecdote. Two things must both hold:
     /// the fix's own guarantee (zero corrupted honest entries) AND the new
     /// question only a scale run can ask (zero contamination of untouched
-    /// heights). The known case-A limitation is asserted PRESENT (if it went to
-    /// zero, the scenario stopped exercising that path and would be worthless as
-    /// a regression guard for it), not absent.
+    /// heights). Case A is asserted PRESENT (if it went to zero, the scenario
+    /// stopped exercising that path and would be worthless as a regression guard
+    /// for it) — its raw refusal is correct and permanent by design; the recovery
+    /// for it is `rollback_frontier`, proven separately, not by this counter going
+    /// to zero.
     #[test]
     fn wedge_conflicts_stay_local_at_scale_gate() {
         let r = wedge_conflicts_stay_local_at_scale(5_000, 7, 0xC0FFEE);

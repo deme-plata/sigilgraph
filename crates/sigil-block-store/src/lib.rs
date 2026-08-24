@@ -1822,6 +1822,97 @@ mod tests {
         let _ = std::fs::remove_dir_all(&p);
     }
 
+    /// CLOSES THE REMAINING GAP (2026-08-24): the test above proves a REAL
+    /// `put_blocks_bulk_trusted` poison wedges the checked path forever — full stop, no
+    /// recovery attempted. A separate test (`rollback_frontier_heals_poisoned_seam`) proves
+    /// `rollback_frontier` heals a wedge — but plants its poison with `force_insert_block`,
+    /// a test-only stand-in. Neither test alone proves the thing that actually matters: does
+    /// the REAL poisoning path heal via the REAL recovery path? This one drives both, back
+    /// to back, with zero production-code changes needed — both mechanisms already exist,
+    /// already ship, and this is simply the missing proof that they compose.
+    ///
+    /// Why this is safe by construction, not by luck: `rollback_frontier` never inspects
+    /// which of two conflicting hashes is "right". It discards trust in a whole height range
+    /// and forces EVERYTHING in it — the poison included, if re-served — back through the
+    /// same linkage-checked ingest path every other block uses. Arrival order decides
+    /// nothing about what survives; only parent-hash linkage back to the trusted spine does.
+    /// An adversary who lands first gains nothing: their data still has to pass the identical
+    /// check an honest peer's does. This is exactly why widening the raw conflict guard
+    /// itself (e.g. "let a later write win") was rejected as a fix direction — it would have
+    /// made arrival order load-bearing, which is the one property this mechanism is designed
+    /// to never depend on. `rollback_frontier` is already wired live into the sync
+    /// watchdog (`block_sync/mod.rs`'s `Some(f) if frontier_active && heal_attempts < 3`
+    /// arm, bounded to 3 attempts, budget re-armed by real progress) — this test is the
+    /// missing unit-level proof that what it calls actually closes the loop end to end.
+    #[test]
+    fn put_blocks_bulk_trusted_poison_self_heals_via_rollback_frontier() {
+        use sigil_header::*;
+        fn mk(height: u64, parent: BlockHash) -> SigilBlockHeaderV0 {
+            let nonce = SqiSignature::from_array([7u8; SQISIGN_L5_LEN]);
+            let mut hh = blake3::Hasher::new();
+            hh.update(&parent); hh.update(nonce.as_bytes());
+            let vdf_input: [u8; 32] = *hh.finalize().as_bytes();
+            let scheme = SigScheme::SqiSign5;
+            SigilBlockHeaderV0 {
+                version: HEADER_VERSION, network_id: NETWORK_ID, height, parent_hash: parent,
+                merge_parents: Vec::new(), timestamp_ms: 1000 + height, nonce_sqisign: nonce,
+                vdf_input, vdf_proof: WesolowskiProof { y: vec![], pi: vec![], t: 100 }, difficulty: 1,
+                wallet_state_root: [0u8;32], dex_state_root: [0u8;32], event_log_root: [0u8;32],
+                contract_state_root: [0u8;32],
+                state_transition_proof: StarkProof { bytes: vec![], public_inputs_hash: [0u8;32] },
+                txs_merkle_root: [0u8;32], tx_count: 0,
+                fluxc_artifact_proof: ProofBundle { artifact_blake3: [0u8;32], sqisign_sig: vec![], sqisign_pubkey: vec![], settle_tx: None },
+                sig_scheme: scheme, producer: [0u8;32],
+                producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
+                topology_commitment: None,
+            }
+        }
+        let p = tmp("bulk-trusted-poison-self-heals");
+        let _ = std::fs::remove_dir_all(&p);
+        {
+            let mut s = BlockStore::open(&p).unwrap();
+            s.set_base(1);
+            let mut chain = Vec::new();
+            let mut parent = [0u8; 32];
+            for h in 0..20u64 { let hdr = mk(h, parent); parent = hdr.hash(); chain.push(hdr); }
+            assert_eq!(s.put_blocks_batch(&chain[1..10]), 9);
+            s.advance();
+            assert_eq!(s.synced_to(), 10, "honest [1..9] via the CHECKED path");
+
+            // REAL poisoning path: the trusted bulk lane disagrees with the honest chain at h=10.
+            let skeleton_disagreement = mk(10, [0xAA; 32]);
+            let n = s.put_blocks_bulk_trusted(std::slice::from_ref(&skeleton_disagreement));
+            assert_eq!(n, 1, "trusted bulk write lands unopposed (no conflict check by design)");
+            s.advance();
+            assert_eq!(s.synced_to(), 11, "poison occupies h=10");
+
+            // Confirms the wedge, same as the sibling test — the honest chunk is refused.
+            let got = s.put_blocks_batch(&chain[10..20]);
+            s.advance();
+            assert_eq!(got, 0, "honest chunk refused against the real poison — wedged");
+            assert_eq!(s.synced_to(), 11);
+
+            // REAL recovery path: the same call the live watchdog makes on a frontier wedge.
+            let newf = s.rollback_frontier(4);
+            assert_eq!(newf, 7, "frontier rolled back below the seam");
+            assert_eq!(s.synced_to(), 7);
+
+            // The honest data — untouched this whole time, only the local INDEX was distrusted —
+            // now lands clean through the exact same checked, linkage-verified path as always.
+            let got2 = s.put_blocks_batch(&chain[7..20]);
+            s.advance();
+            assert!(got2 >= 10, "refetch accepted after heal (got {got2})");
+            assert_eq!(s.synced_to(), 20, "SELF-HEALED end to end: real poison, real recovery");
+            assert_eq!(
+                s.hash_at_index_height(10).as_deref(),
+                Some(hex::encode(chain[10].hash())).as_deref(),
+                "h=10 now holds the HONEST hash, not the poison — verification decided this, \
+                 not arrival order"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&p);
+    }
+
     /// THE FIX, proven in the direction it actually protects: an honest, checked write lands
     /// FIRST (the realistic case — the live frontier/checked path reaches a height before a
     /// stale trusted/skeleton source's view of that same height arrives). Before 2026-08-24,

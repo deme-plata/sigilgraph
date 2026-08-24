@@ -105,6 +105,10 @@ sigil-dagknight = { path = "../sigil-dagknight" }
 sigil-braidpool = { path = "../sigil-braidpool" }
 # The REAL sync-state logic, driven by the deterministic sync scenarios.
 sigil-sync = { path = "../sigil-sync" }
+# The REAL local block-store height-index conflict logic (extracted from sigil-top,
+# a binary-only crate, 2026-08-24) — closes wedge_writer_gap.rs's original gap.
+sigil-block-store = { path = "../sigil-block-store" }
+hex = { workspace = true }
 ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 sigil-dex    = { path = "../sigil-dex" }
 # Late-join catch-up: a fresh node verifies ONE constant-size fold proof of the

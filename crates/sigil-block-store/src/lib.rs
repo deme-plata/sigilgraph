@@ -106,6 +106,20 @@ pub struct BlockStore {
     /// DARK by default (`SIGIL_DB_SST_INGEST`). Until the flux-db API lands it falls back to the
     /// `batch_put` bulk path, so the flag is wirable + green without a hard dep on the unlanded seam.
     sst_ingest: bool,
+    /// Diagnostic sink for reject/fallback events (fork-overwrite rejections, SST-ingest
+    /// fallback, etc). Extracted from `sigil-top` — a binary-only crate whose own `tlog!`
+    /// macro (writes to the TUI-visible log file) can't be linked into a library. Defaults
+    /// to a no-op so a bare `sigil-block-store` user (tests, `sigil-chronos`) sees nothing;
+    /// `sigil-top` wires this to `tlog!` right after construction via [`set_logger`](Self::set_logger)
+    /// so the on-disk behavior is byte-for-byte what it was before extraction.
+    logger: LogFn,
+}
+
+/// A diagnostic-message sink. See [`BlockStore::set_logger`].
+pub type LogFn = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
+fn noop_logger() -> LogFn {
+    std::sync::Arc::new(|_: &str| {})
 }
 
 /// THROUGHPUT_MASTER LANE 2 — in-memory committed-height → hash_hex cache. Bounded ring (evict the
@@ -352,10 +366,22 @@ impl BlockStore {
             .map(|v| v != "0" && !v.eq_ignore_ascii_case("false")).unwrap_or(false);
         let mut s = BlockStore {
             db, best_height, best_hash_hex, synced_to, verified_to, base: 0, genesis_hash, fold_anchor,
-            link_cache: LinkCache::from_env(), sst_ingest,
+            link_cache: LinkCache::from_env(), sst_ingest, logger: noop_logger(),
         };
         s.advance_synced(); // catch up the contiguous pointer to whatever's on disk
         Ok(s)
+    }
+
+    /// Route this store's diagnostic messages (reject/fallback events) through `f`
+    /// instead of the default no-op. `sigil-top` calls this immediately after every
+    /// `open*` with a closure that forwards to its own `tlog!` — see the field doc
+    /// on [`BlockStore`]'s `logger`.
+    pub fn set_logger(&mut self, f: impl Fn(&str) + Send + Sync + 'static) {
+        self.logger = std::sync::Arc::new(f);
+    }
+
+    fn log(&self, msg: impl AsRef<str>) {
+        (self.logger)(msg.as_ref());
     }
 
     /// One-time index migration for a pre-'B' store. Rebuilds the height index and
@@ -708,16 +734,16 @@ impl BlockStore {
         let height = header.height;
 
         if let Some(existing) = self.height_index_conflict(height, &hash_hex) {
-            crate::tlog!(
+            self.log(format!(
                 "[store] rejected height-index fork overwrite at h={height}: existing={} incoming={}",
                 short_hash_hex(&existing),
                 short_hash_hex(&hash_hex)
-            );
+            ));
             return Ok(false);
         }
         let parent_hash_hex = hex::encode(header.parent_hash);
         if let Some(reason) = self.linkage_conflict(height, &hash_hex, &parent_hash_hex) {
-            crate::tlog!("[store] rejected unlinked header at h={height}: {reason}");
+            self.log(format!("[store] rejected unlinked header at h={height}: {reason}"));
             return Ok(false);
         }
 
@@ -765,16 +791,16 @@ impl BlockStore {
         let hash_hex = hex::encode(header.hash());
         let height = header.height;
         if let Some(existing) = self.height_index_conflict(height, &hash_hex) {
-            crate::tlog!(
+            self.log(format!(
                 "[store] rejected fast height-index fork overwrite at h={height}: existing={} incoming={}",
                 short_hash_hex(&existing),
                 short_hash_hex(&hash_hex)
-            );
+            ));
             return Ok(());
         }
         let parent_hash_hex = hex::encode(header.parent_hash);
         if let Some(reason) = self.linkage_conflict(height, &hash_hex, &parent_hash_hex) {
-            crate::tlog!("[store] rejected fast unlinked header at h={height}: {reason}");
+            self.log(format!("[store] rejected fast unlinked header at h={height}: {reason}"));
             return Ok(());
         }
         let block = StoredBlock { header, hash_hex: hash_hex.clone(), synced_at: 0 };
@@ -914,11 +940,11 @@ impl BlockStore {
             if height >= max_h { max_h = height; max_hash = hash_hex; }
         }
         if let Some((height, existing, incoming)) = first_conflict {
-            crate::tlog!(
+            self.log(format!(
                 "[store] rejected {conflicts} batch header conflict(s); first h={height}: detail={} incoming={}",
                 existing,
                 short_hash_hex(&incoming)
-            );
+            ));
         }
         if owned.is_empty() {
             return accepted;
@@ -1021,13 +1047,13 @@ impl BlockStore {
             accepted += 1;
         }
         if let Some((height, existing, incoming)) = first_conflict {
-            crate::tlog!(
+            self.log(format!(
                 "[store] rejected {conflicts} trusted-bulk height-index conflict(s); first h={height}: \
                  existing={} incoming={} — a skeleton/snapshot source disagreed with an already-indexed \
                  height; skipped rather than silently overwritten (would have wedged the spine)",
                 short_hash_hex(&existing),
                 short_hash_hex(&incoming)
-            );
+            ));
         }
         if owned.is_empty() {
             return accepted;
@@ -1126,7 +1152,7 @@ impl BlockStore {
                 n
             }
             Err(e) => {
-                crate::tlog!("[store] SST ingest failed ({e}) - batch_put fallback ({} blocks)", headers.len());
+                self.log(format!("[store] SST ingest failed ({e}) - batch_put fallback ({} blocks)", headers.len()));
                 self.put_blocks_bulk_trusted(headers)
             }
         }
@@ -1258,8 +1284,16 @@ impl BlockStore {
     /// block UNSTORABLE through any production path, so verifier-corruption tests — which must
     /// place a deliberately-broken block in storage to prove `verify_to` still catches it as a
     /// second line of defense — use this raw insert instead of `put_block_fast`.
-    #[cfg(test)]
-    pub(crate) fn force_insert_block(&mut self, header: SigilBlockHeaderV0) {
+    ///
+    /// `pub`, not `#[cfg(test)] pub(crate)` (2026-08-24 extraction from `sigil-top`): `#[cfg(test)]`
+    /// is per-crate — it would compile out of the normal library artifact `sigil-top`'s own tests
+    /// link against, so its test suites (`chain_verify.rs`, `block_sync/verify.rs`) could no longer
+    /// see it at all. Always-compiled and `pub` is the same tradeoff `OpenProgress::mark_finished`
+    /// already makes above for the identical cross-crate-test reason — dangerous-if-misused, but a
+    /// production caller has no reason to ever reach for it, and hiding it behind a feature flag
+    /// buys safety Cargo's feature-unification would silently defeat for anyone testing this crate
+    /// alongside `sigil-top` in the same build graph anyway.
+    pub fn force_insert_block(&mut self, header: SigilBlockHeaderV0) {
         let hash_hex = hex::encode(header.hash());
         let height = header.height;
         let block = StoredBlock { header, hash_hex: hash_hex.clone(), synced_at: 0 };
@@ -1274,11 +1308,11 @@ impl BlockStore {
 
     pub fn put_block_raw(&mut self, height: u64, hash_hex: &str) -> Result<bool, String> {
         if let Some(existing) = self.height_index_conflict(height, hash_hex) {
-            crate::tlog!(
+            self.log(format!(
                 "[store] rejected raw height-index fork overwrite at h={height}: existing={} incoming={}",
                 short_hash_hex(&existing),
                 short_hash_hex(hash_hex)
-            );
+            ));
             return Ok(false);
         }
         if self.db.get(hash_hex.as_bytes())?.is_some() {
@@ -1332,7 +1366,7 @@ impl BlockStore {
             // ad-hoc instrumentation.
             let t0 = std::time::Instant::now();
             let _ = self.db.flush(); // OS refused a thread — old inline behavior
-            crate::tlog!("[store] ⚠ flush_background: thread spawn refused, fell back to inline flush ({} ms)", t0.elapsed().as_millis());
+            self.log(format!("[store] ⚠ flush_background: thread spawn refused, fell back to inline flush ({} ms)", t0.elapsed().as_millis()));
         }
     }
 

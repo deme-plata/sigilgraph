@@ -1,0 +1,15 @@
+[package]
+name = "sigil-block-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL local block storage: the height-keyed on-disk index (flux-db backed) sigil-top uses to track downloaded headers during sync. Extracted from sigil-top (a binary-only crate, therefore untestable from sigil-chronos) so the deterministic chronos harness can drive the REAL height-index conflict logic instead of a re-modelled copy — same reason sigil-sync was extracted for the range-lifecycle half of sync."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sigil-header = { path = "../sigil-header" }
+flux-db = { path = "../../../flux/crates/flux-db" }
+hex = { workspace = true }
+bincode = "1"
+blake3 = { workspace = true }

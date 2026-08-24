@@ -17,7 +17,13 @@
 //!   sigil-top --interval 5    set refresh seconds
 //!   sigil-top --api URL       point at a remote node status endpoint
 
-mod block_store;
+// 2026-08-24: extracted to the `sigil-block-store` library crate so `sigil-chronos`
+// (a deterministic test harness that cannot import a binary-only crate) can drive the
+// real height-index conflict logic instead of a re-modelled copy — same reason
+// `sigil-sync` was extracted earlier. `block_store::X` below now resolves via the
+// `use sigil_block_store as block_store;` alias so every existing call site in this
+// crate is unchanged; only this module declaration and that alias line differ.
+use sigil_block_store as block_store;
 // pub(crate) (2026-08-23): producer::run reaches block_sync::verify::inflate_gossip_frame
 // through this path — everything else stays exactly as private as before.
 pub(crate) mod block_sync;

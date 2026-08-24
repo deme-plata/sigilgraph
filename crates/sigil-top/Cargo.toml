@@ -66,6 +66,11 @@ sigil-dns-anchor = { path = "../sigil-dns-anchor" }
 # v0.6.5: Block sync — SIGIL header types + local block storage via flux-db
 sigil-header = { path = "../sigil-header" }
 flux-db = { path = "../../../flux/crates/flux-db" }
+# 2026-08-24: local block storage, extracted to its own crate so sigil-chronos (which
+# cannot import a binary-only crate) can drive the REAL height-index conflict logic.
+# `use sigil_block_store as block_store;` in main.rs keeps every existing call site
+# (`block_store::BlockStore`, `crate::block_store::...`) resolving unchanged.
+sigil-block-store = { path = "../sigil-block-store" }
 # V7-INGEST: shared backpressure spine (RateGate) + autotune knobs for the commit→DB sink.
 sigil-synctune = { path = "../sigil-synctune" }
 sigil-sync = { path = "../sigil-sync" }

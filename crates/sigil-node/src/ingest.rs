@@ -106,15 +106,15 @@ fn route(
         }
         ("POST", "/tx") => match serde_json::from_str::<SignedTx>(body) {
             Ok(tx) => {
-                let id = tx.tx.hash();
                 let r = mempool.ingest(vec![tx]);
                 // Only hand off what the mempool actually accepted as new —
                 // an invalid or duplicate submission has nothing to relay.
                 if r.accepted > 0 {
-                    let _ = dandelion_tx.send(crate::dandelion_relay::Cmd::Originate {
-                        id,
-                        bytes: body.as_bytes().to_vec(),
-                    });
+                    if let Some((id, bytes)) = crate::dandelion_relay::wrap(
+                        crate::dandelion_relay::RelayedTx::Legacy(body.as_bytes().to_vec()),
+                    ) {
+                        let _ = dandelion_tx.send(crate::dandelion_relay::Cmd::Originate { id, bytes });
+                    }
                 }
                 format!(
                     r#"{{"ok":true,"accepted":{},"invalid":{},"dupe":{}}}"#,
@@ -210,9 +210,18 @@ mod tests {
         let cmd = drx.try_recv().expect("dandelion actor must receive an Originate cmd");
         match cmd {
             crate::dandelion_relay::Cmd::Originate { id, bytes } => {
-                assert_eq!(id, tx.tx.hash(), "relayed id must match the tx's real hash");
+                let expected = crate::dandelion_relay::wrap(
+                    crate::dandelion_relay::RelayedTx::Legacy(body.as_bytes().to_vec()),
+                ).expect("wrap must succeed for a well-formed tx body");
+                assert_eq!(id, expected.0, "relayed id must match what wrap() derives from the same bytes");
+                assert_eq!(bytes, expected.1, "relayed bytes must be exactly what wrap() produced");
+                let relayed: crate::dandelion_relay::RelayedTx =
+                    bincode::deserialize(&bytes).expect("relayed bytes must decode as RelayedTx");
+                let crate::dandelion_relay::RelayedTx::Legacy(tx_json) = relayed else {
+                    panic!("expected RelayedTx::Legacy for the ingest.rs path")
+                };
                 let round_tripped: SignedTx =
-                    serde_json::from_slice(&bytes).expect("relayed bytes must round-trip as the same SignedTx");
+                    serde_json::from_slice(&tx_json).expect("relayed bytes must round-trip as the same SignedTx");
                 assert_eq!(round_tripped.tx.hash(), tx.tx.hash());
             }
             _ => panic!("expected Cmd::Originate"),

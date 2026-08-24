@@ -28,7 +28,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use sigil_state::WalletId;
 use sigil_tx::{SigilTx, SignedTx};
 
 use crate::send::to_signed;
@@ -61,6 +63,22 @@ pub enum ShieldedSubmitError {
     AlreadyQueued,
     /// Wrong number of output commitments for the circuit's fixed arity.
     WrongOutputCount { expected: usize, got: usize },
+    /// The signature does not verify against the named wallet's own key.
+    ///
+    /// 2026-08-23: `Shield` and `RegisterShieldedAddress` both name a wallet whose
+    /// transparent balance or future income the tx redirects — exactly the property
+    /// this module's own doc comment says is "wallet-authenticated like an ordinary
+    /// send." It was not; nothing here ever checked a signature, so anyone who knew a
+    /// wallet's address could drain its transparent balance into a note only they
+    /// control, or hijack its future mining rewards. This is the fix.
+    SignatureInvalid,
+    /// This wallet's nonce has already been used or superseded — replay protection,
+    /// same mechanism `SendBridge` already uses.
+    ReplayedNonce,
+    /// `note_ciphertexts` was neither empty (no delivery attached) nor one entry per
+    /// output — a length that fits neither shape means the positional alignment with
+    /// `cm_outs` cannot be trusted.
+    WrongCiphertextCount { expected: usize, got: usize },
 }
 
 impl ShieldedSubmitError {
@@ -91,8 +109,32 @@ impl ShieldedSubmitError {
             Self::WrongOutputCount { expected, got } => {
                 format!("expected {expected} output commitments, got {got}")
             }
+            Self::SignatureInvalid => {
+                "signature does not verify against the named wallet's own key".into()
+            }
+            Self::ReplayedNonce => "nonce already used — sign with a higher nonce".into(),
+            Self::WrongCiphertextCount { expected, got } => format!(
+                "note_ciphertexts must be empty or have exactly {expected} entries (one per \
+                 output), got {got}"
+            ),
         }
     }
+}
+
+/// Verify `sig_hex` (128-hex Ed25519) over `msg`, signed by `wallet`'s own key — the
+/// SAME canonical-message + verify pattern `SendBridge::submit` uses, so a wallet that
+/// already knows how to sign a send can sign these with the same primitive.
+fn verify_wallet_sig(
+    wallet: &[u8; 32],
+    msg: &str,
+    sig_hex: &str,
+) -> Result<(), ShieldedSubmitError> {
+    let sig_hex_trimmed = sig_hex.strip_prefix("0x").unwrap_or(sig_hex);
+    let sig_bytes = hex::decode(sig_hex_trimmed).map_err(|_| ShieldedSubmitError::SignatureInvalid)?;
+    let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| ShieldedSubmitError::SignatureInvalid)?;
+    let vk = VerifyingKey::from_bytes(wallet).map_err(|_| ShieldedSubmitError::SignatureInvalid)?;
+    let sig = Signature::from_bytes(&sig_arr);
+    vk.verify(msg.as_bytes(), &sig).map_err(|_| ShieldedSubmitError::SignatureInvalid)
 }
 
 /// How to move `amount` into (or out of) the pool: the exact denominations to use.
@@ -131,6 +173,19 @@ fn hex32(s: &str, field: &'static str) -> Result<[u8; 32], ShieldedSubmitError> 
     Ok(out)
 }
 
+/// One shielded-pool operation, carrying exactly what its HTTP handler
+/// received. Lets a caller (sigil-node's Dandelion relay, see
+/// `dandelion_relay.rs`) hand a peer the SAME request a wallet would have
+/// sent, so the peer's own `submit_*` independently re-verifies it — this
+/// crate never has to know what "Dandelion" or "gossip" even are.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum ShieldedOp {
+    Register(RegisterRequest),
+    Shield(ShieldRequest),
+    ShieldedSend(ShieldedSendRequest),
+    Unshield(UnshieldRequest),
+}
+
 /// The pending pool of shielded transactions.
 #[derive(Default)]
 pub struct ShieldedBridge {
@@ -138,11 +193,48 @@ pub struct ShieldedBridge {
     /// Nullifiers already represented in the queue, so a duplicate submission does not
     /// occupy two slots and waste two verifications per block.
     queued_nullifiers: Mutex<HashMap<[u8; 32], [u8; 32]>>,
+    /// Replay protection for `Shield` and `RegisterShieldedAddress` — same mechanism
+    /// `SendBridge::nonce_watermark` uses. A separate namespace from `SendBridge`'s is
+    /// fine: the canonical message each verifies includes its own action name, so a
+    /// signature valid for one action never verifies for another regardless of nonce
+    /// bookkeeping.
+    nonce_watermark: Mutex<HashMap<WalletId, u64>>,
+    /// Fired on every successful submit, after the op is already queued
+    /// locally — this crate's ONLY coupling point to P2P relay. `None` (the
+    /// default) is a complete no-op, so every existing caller (tests, any
+    /// caller that never wires this) is unaffected.
+    relay_hook: Mutex<Option<Box<dyn Fn([u8; 32], ShieldedOp) + Send + Sync>>>,
 }
 
 impl ShieldedBridge {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Wire a hook to be called `(id, op)` after every successful submit —
+    /// e.g. sigil-node's Dandelion relay, to propagate the op to peers.
+    /// Purely additive: the op is already queued locally before this fires,
+    /// so a hook that never runs (or fails) costs nothing but relay reach.
+    pub fn set_relay_hook(&self, hook: impl Fn([u8; 32], ShieldedOp) + Send + Sync + 'static) {
+        *self.relay_hook.lock().unwrap() = Some(Box::new(hook));
+    }
+
+    fn fire_relay_hook(&self, id: [u8; 32], op: ShieldedOp) {
+        if let Some(hook) = self.relay_hook.lock().unwrap().as_ref() {
+            hook(id, op);
+        }
+    }
+
+    /// Check-and-advance this wallet's nonce watermark. Shared by every signed
+    /// submission below so replay protection can't drift between them.
+    fn check_nonce(&self, wallet: &WalletId, req_nonce: u64) -> Result<(), ShieldedSubmitError> {
+        let mut wm = self.nonce_watermark.lock().unwrap();
+        let last = wm.get(wallet).copied().unwrap_or(0);
+        if req_nonce <= last {
+            return Err(ShieldedSubmitError::ReplayedNonce);
+        }
+        wm.insert(*wallet, req_nonce);
+        Ok(())
     }
 
     /// Queue a shielded-address registration.
@@ -151,36 +243,83 @@ impl ShieldedBridge {
     /// instead of crediting a transparent balance. This is the mechanism that grows the
     /// anonymity set without asking anyone to change what they do — a miner registers once
     /// and every subsequent reward is a pool note.
+    ///
+    /// Wallet-authenticated as of 2026-08-23: `sig` must verify against `wallet`'s own
+    /// key over `sigil-rpc/v1|shield-register|{wallet}|{pk_shield}|{pk_encrypt}|{fee}|nonce={req_nonce}`
+    /// — the same canonical-message pattern `SendBridge::submit` uses. Before this fix
+    /// NOTHING checked that the caller owned `wallet`: anyone who knew any miner's
+    /// address could redirect that miner's future block rewards to a shield key of
+    /// their own choosing.
+    ///
+    /// `pk_encrypt` (added 2026-08-24, hex X25519 key) is folded into the SAME signed
+    /// message rather than accepted separately: without binding it to the signature, an
+    /// attacker could not redirect the shield key, but COULD still swap in their own
+    /// encryption key on an otherwise-honest registration and silently intercept every
+    /// future note ciphertext sealed to this wallet.
     pub fn submit_register(
         &self,
         wallet: &str,
         pk_shield: &str,
+        pk_encrypt: &str,
         fee: u128,
+        sig: &str,
+        req_nonce: u64,
     ) -> Result<[u8; 32], ShieldedSubmitError> {
         let w = hex32(wallet, "wallet")?;
         let pk = hex32(pk_shield, "pk_shield")?;
-        Ok(self.enqueue(SigilTx::RegisterShieldedAddress { wallet: w, pk_shield: pk, fee }, None))
+        let pk_enc = hex32(pk_encrypt, "pk_encrypt")?;
+        let msg = format!(
+            "sigil-rpc/v1|shield-register|{wallet}|{pk_shield}|{pk_encrypt}|{fee}|nonce={req_nonce}"
+        );
+        verify_wallet_sig(&w, &msg, sig)?;
+        self.check_nonce(&w, req_nonce)?;
+        let id = self.enqueue(
+            SigilTx::RegisterShieldedAddress { wallet: w, pk_shield: pk, pk_encrypt: Some(pk_enc), fee },
+            None,
+        );
+        self.fire_relay_hook(id, ShieldedOp::Register(RegisterRequest {
+            wallet: wallet.to_string(), pk_shield: pk_shield.to_string(),
+            pk_encrypt: pk_encrypt.to_string(), fee, sig: sig.to_string(), req_nonce,
+        }));
+        Ok(id)
     }
 
     /// Queue a transparent → shielded deposit.
     ///
-    /// Wallet-authenticated: the caller must own `from`, and the signature is checked the
-    /// same way an ordinary send's is, by the producer's apply path.
+    /// Wallet-authenticated as of 2026-08-23: `sig` must verify against `from`'s own key
+    /// over `sigil-rpc/v1|shield|{from}|{amount}|{cm}|{fee}|nonce={req_nonce}`. Before this
+    /// fix this function's own doc comment claimed the signature was "checked the same way
+    /// an ordinary send's is, by the producer's apply path" — it was not; `apply_tx`'s
+    /// `Shield` arm only ever checked `from` had a sufficient balance, never that the
+    /// caller owned `from`. Anyone who knew any wallet's address could drain its
+    /// transparent balance into a note only they control. This is the actual fix that
+    /// comment was describing.
     pub fn submit_shield(
         &self,
         from: &str,
         amount: u128,
         cm: &str,
         fee: u128,
+        sig: &str,
+        req_nonce: u64,
     ) -> Result<[u8; 32], ShieldedSubmitError> {
         if amount == 0 {
             return Err(ShieldedSubmitError::ZeroAmount);
         }
         check_denomination(amount)?;
-        let from = hex32(from, "from")?;
-        let cm = hex32(cm, "cm")?;
-        let tx = SigilTx::Shield { from, amount, cm, fee };
-        Ok(self.enqueue(tx, None))
+        let from_b = hex32(from, "from")?;
+        let cm_b = hex32(cm, "cm")?;
+        // Cheap shape validation above, signature/replay checks last — same door-guard
+        // ordering the rest of this module already uses (see module docs).
+        let msg = format!("sigil-rpc/v1|shield|{from}|{amount}|{cm}|{fee}|nonce={req_nonce}");
+        verify_wallet_sig(&from_b, &msg, sig)?;
+        self.check_nonce(&from_b, req_nonce)?;
+        let tx = SigilTx::Shield { from: from_b, amount, cm: cm_b, fee };
+        let id = self.enqueue(tx, None);
+        self.fire_relay_hook(id, ShieldedOp::Shield(ShieldRequest {
+            from: from.to_string(), amount, cm: cm.to_string(), fee, sig: sig.to_string(), req_nonce,
+        }));
+        Ok(id)
     }
 
     /// Shield an ARBITRARY amount by splitting it into legal denominations.
@@ -193,16 +332,33 @@ impl ShieldedBridge {
     ///
     /// `notes` supplies one commitment per part, in the order [`plan_shield`] returns. The
     /// caller derives them (only it knows the blindings), so this cannot be done for it.
+    ///
+    /// Wallet-authenticated as of 2026-08-23, same fix as [`Self::submit_shield`]: `sig`
+    /// must verify against `from`'s own key over
+    /// `sigil-rpc/v1|shield-split|{from}|{amount0}|{cm0}|{amount1}|{cm1}|...|{fee}|nonce={req_nonce}`.
+    #[allow(clippy::too_many_arguments)]
     pub fn submit_shield_split(
         &self,
         from: &str,
         parts: &[(u128, String)],
         fee: u128,
+        sig: &str,
+        req_nonce: u64,
     ) -> Result<Vec<[u8; 32]>, ShieldedSubmitError> {
         if parts.is_empty() {
             return Err(ShieldedSubmitError::ZeroAmount);
         }
         let from_b = hex32(from, "from")?;
+        let mut msg = format!("sigil-rpc/v1|shield-split|{from}");
+        for (amount, cm) in parts {
+            msg.push('|');
+            msg.push_str(&amount.to_string());
+            msg.push('|');
+            msg.push_str(cm);
+        }
+        msg.push_str(&format!("|{fee}|nonce={req_nonce}"));
+        verify_wallet_sig(&from_b, &msg, sig)?;
+        self.check_nonce(&from_b, req_nonce)?;
         // Validate EVERY part before enqueuing any, so a bad tail cannot leave a
         // half-shielded balance queued.
         let mut prepared = Vec::with_capacity(parts.len());
@@ -225,6 +381,13 @@ impl ShieldedBridge {
     }
 
     /// Queue a shielded → shielded transfer. No signature: the proof authorizes it.
+    ///
+    /// `note_ciphertexts` (added 2026-08-24) carries a `sigil_shield::note_cipher`
+    /// delivery ciphertext per output, same order as `cm_outs` — pass an empty slice
+    /// for "no delivery attached to any output" or one entry per output (any of which
+    /// may itself be absent, e.g. for a self-change output the sender already knows).
+    /// Not part of the proof's public inputs: it rides on the transaction purely so the
+    /// recipient's wallet can discover the payment without an out-of-band channel.
     pub fn submit_shielded_send(
         &self,
         anchor: &str,
@@ -232,6 +395,7 @@ impl ShieldedBridge {
         cm_outs: &[String],
         fee: u128,
         proof: Vec<u8>,
+        note_ciphertexts: &[Option<String>],
     ) -> Result<[u8; 32], ShieldedSubmitError> {
         if fee != sigil_state::shielded::SHIELDED_FEE {
             return Err(ShieldedSubmitError::WrongFee {
@@ -242,17 +406,30 @@ impl ShieldedBridge {
         let anchor_b = hex32(anchor, "anchor")?;
         let nf = hex32(nullifier, "nullifier")?;
         let outs = self.decode_outs(cm_outs)?;
+        if !note_ciphertexts.is_empty() && note_ciphertexts.len() != outs.len() {
+            return Err(ShieldedSubmitError::WrongCiphertextCount {
+                expected: outs.len(),
+                got: note_ciphertexts.len(),
+            });
+        }
         self.reject_if_queued(&nf)?;
         self.precheck_proof(&anchor_b, &nf, fee, &outs, &proof)?;
 
+        let proof_hex = hex::encode(&proof);
         let tx = SigilTx::ShieldedSend {
             anchor: anchor_b,
             nullifier: nf,
             cm_outs: outs,
             fee,
             proof,
+            note_ciphertexts: note_ciphertexts.to_vec(),
         };
-        Ok(self.enqueue(tx, Some(nf)))
+        let id = self.enqueue(tx, Some(nf));
+        self.fire_relay_hook(id, ShieldedOp::ShieldedSend(ShieldedSendRequest {
+            anchor: anchor.to_string(), nullifier: nullifier.to_string(), cm_outs: cm_outs.to_vec(),
+            fee, proof: proof_hex, note_ciphertexts: note_ciphertexts.to_vec(),
+        }));
+        Ok(id)
     }
 
     /// Queue a shielded → transparent withdrawal. Proof-carrying for the same reason a
@@ -279,6 +456,7 @@ impl ShieldedBridge {
         // The withdrawn amount sits in the circuit's public-value slot.
         self.precheck_proof(&anchor_b, &nf, amount, &outs, &proof)?;
 
+        let proof_hex = hex::encode(&proof);
         let tx = SigilTx::Unshield {
             to: to_b,
             amount,
@@ -288,7 +466,12 @@ impl ShieldedBridge {
             proof,
             fee,
         };
-        Ok(self.enqueue(tx, Some(nf)))
+        let id = self.enqueue(tx, Some(nf));
+        self.fire_relay_hook(id, ShieldedOp::Unshield(UnshieldRequest {
+            to: to.to_string(), amount, anchor: anchor.to_string(), nullifier: nullifier.to_string(),
+            cm_outs: cm_outs.to_vec(), proof: proof_hex, fee,
+        }));
+        Ok(id)
     }
 
     fn decode_outs(&self, cm_outs: &[String]) -> Result<Vec<[u8; 32]>, ShieldedSubmitError> {
@@ -394,8 +577,18 @@ pub struct RegisterRequest {
     pub wallet: String,
     /// Hex of the wire-encoded shielded public key (`ShieldedAccount::public_key`).
     pub pk_shield: String,
+    /// Hex X25519 note-delivery key (`ShieldedAccount::address`'s `pk_enc`). Required:
+    /// a registration with no delivery key can still receive privately, but nothing
+    /// could ever tell that wallet a payment landed — it would have to be told out of
+    /// band, which is the exact gap this whole feature closes.
+    pub pk_encrypt: String,
     #[serde(default, with = "sigil_state::u128_str")]
     pub fee: u128,
+    /// 128-hex Ed25519 signature over
+    /// `sigil-rpc/v1|shield-register|{wallet}|{pk_shield}|{pk_encrypt}|{fee}|nonce={req_nonce}`.
+    pub sig: String,
+    /// Client-chosen strictly-increasing nonce, same convention as `/v1/send`.
+    pub req_nonce: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -408,6 +601,11 @@ pub struct ShieldRequest {
     pub cm: String,
     #[serde(default, with = "sigil_state::u128_str")]
     pub fee: u128,
+    /// 128-hex Ed25519 signature over
+    /// `sigil-rpc/v1|shield|{from}|{amount}|{cm}|{fee}|nonce={req_nonce}`.
+    pub sig: String,
+    /// Client-chosen strictly-increasing nonce, same convention as `/v1/send`.
+    pub req_nonce: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -419,6 +617,13 @@ pub struct ShieldedSendRequest {
     pub fee: u128,
     /// Hex-encoded winterfell proof.
     pub proof: String,
+    /// Per-output `sigil_shield::note_cipher::NoteCiphertext` JSON, same order as
+    /// `cm_outs`. Pass `[]` for no delivery attached to any output, or one entry per
+    /// output (`null` for an output the recipient will discover another way, e.g. the
+    /// sender's own change). This is what lets a recipient who was never told anything
+    /// out of band still discover a payment by trial-decryption.
+    #[serde(default)]
+    pub note_ciphertexts: Vec<Option<String>>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -438,32 +643,145 @@ pub struct UnshieldRequest {
 mod tests {
     use super::*;
 
+    fn signer() -> (ed25519_dalek::SigningKey, String) {
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let addr = hex::encode(sk.verifying_key().to_bytes());
+        (sk, addr)
+    }
+
+    fn sign_shield(sk: &ed25519_dalek::SigningKey, from: &str, amount: u128, cm: &str, fee: u128, nonce: u64) -> String {
+        use ed25519_dalek::Signer;
+        let msg = format!("sigil-rpc/v1|shield|{from}|{amount}|{cm}|{fee}|nonce={nonce}");
+        hex::encode(sk.sign(msg.as_bytes()).to_bytes())
+    }
+
+    fn sign_register(
+        sk: &ed25519_dalek::SigningKey,
+        wallet: &str,
+        pk_shield: &str,
+        pk_encrypt: &str,
+        fee: u128,
+        nonce: u64,
+    ) -> String {
+        use ed25519_dalek::Signer;
+        let msg = format!(
+            "sigil-rpc/v1|shield-register|{wallet}|{pk_shield}|{pk_encrypt}|{fee}|nonce={nonce}"
+        );
+        hex::encode(sk.sign(msg.as_bytes()).to_bytes())
+    }
+
     #[test]
     fn shield_rejects_zero_and_bad_hex() {
         let b = ShieldedBridge::new();
         assert_eq!(
-            b.submit_shield("aa", 0, "bb", 0).unwrap_err(),
+            b.submit_shield("aa", 0, "bb", 0, "", 1).unwrap_err(),
             ShieldedSubmitError::ZeroAmount
         );
         assert!(matches!(
-            b.submit_shield("zz", 1_000, &"11".repeat(32), 0).unwrap_err(),
+            b.submit_shield("zz", 1_000, &"11".repeat(32), 0, "", 1).unwrap_err(),
             ShieldedSubmitError::BadHex("from")
         ));
         assert!(matches!(
-            b.submit_shield(&"aa".repeat(32), 1_000, "beef", 0).unwrap_err(),
+            b.submit_shield(&"aa".repeat(32), 1_000, "beef", 0, "", 1).unwrap_err(),
             ShieldedSubmitError::BadLength { field: "cm", .. }
         ));
+    }
+
+    /// THE FIX, pinned directly: naming someone else's wallet without their signature
+    /// must be refused, not silently accepted. Before 2026-08-23 this test would have
+    /// FAILED to compile as a rejection — the old `submit_shield` had no signature
+    /// parameter to get wrong, which was the entire vulnerability.
+    #[test]
+    fn shield_refuses_an_unsigned_or_wrongly_signed_request() {
+        let b = ShieldedBridge::new();
+        let (_owner_sk, owner) = signer();
+        let (attacker_sk, _attacker) = signer();
+        // No signature at all.
+        assert_eq!(
+            b.submit_shield(&owner, 10_000, &"bb".repeat(32), 1, "", 1).unwrap_err(),
+            ShieldedSubmitError::SignatureInvalid
+        );
+        // Signed by someone who is NOT the named wallet — the actual attack this fix
+        // closes: knowing `owner`'s address is not the same as owning it.
+        let forged = sign_shield(&attacker_sk, &owner, 10_000, &"bb".repeat(32), 1, 1);
+        assert_eq!(
+            b.submit_shield(&owner, 10_000, &"bb".repeat(32), 1, &forged, 1).unwrap_err(),
+            ShieldedSubmitError::SignatureInvalid
+        );
     }
 
     #[test]
     fn shield_enqueues_and_retires() {
         let b = ShieldedBridge::new();
-        let h = b.submit_shield(&"aa".repeat(32), 10_000, &"bb".repeat(32), 1).expect("queued");
+        let (sk, from) = signer();
+        let cm = "bb".repeat(32);
+        let sig = sign_shield(&sk, &from, 10_000, &cm, 1, 1);
+        let h = b.submit_shield(&from, 10_000, &cm, 1, &sig, 1).expect("queued");
         assert_eq!(b.pending_len(), 1);
         assert_eq!(b.snapshot_for_mint().len(), 1, "re-embedded until confirmed");
         assert_eq!(b.pending_len(), 1, "snapshot must NOT be destructive");
         b.confirm_applied(&[h]);
         assert_eq!(b.pending_len(), 0);
+    }
+
+    #[test]
+    fn shield_replayed_nonce_is_refused() {
+        let b = ShieldedBridge::new();
+        let (sk, from) = signer();
+        let cm = "bb".repeat(32);
+        let sig = sign_shield(&sk, &from, 10_000, &cm, 1, 5);
+        b.submit_shield(&from, 10_000, &cm, 1, &sig, 5).expect("first use of nonce 5");
+        // Same nonce again, even with a validly re-signed message, must be refused.
+        let sig2 = sign_shield(&sk, &from, 10_000, &cm, 1, 5);
+        assert_eq!(
+            b.submit_shield(&from, 10_000, &cm, 1, &sig2, 5).unwrap_err(),
+            ShieldedSubmitError::ReplayedNonce
+        );
+    }
+
+    /// Same vulnerability class as `shield`, same fix: registering redirects a wallet's
+    /// FUTURE income, so only that wallet's own key may do it.
+    #[test]
+    fn register_refuses_an_unowned_wallet() {
+        let b = ShieldedBridge::new();
+        let (_owner_sk, owner) = signer();
+        let (attacker_sk, _attacker) = signer();
+        let pk_shield = "cc".repeat(32);
+        let pk_encrypt = "dd".repeat(32);
+        let forged = sign_register(&attacker_sk, &owner, &pk_shield, &pk_encrypt, 0, 1);
+        assert_eq!(
+            b.submit_register(&owner, &pk_shield, &pk_encrypt, 0, &forged, 1).unwrap_err(),
+            ShieldedSubmitError::SignatureInvalid,
+            "an attacker must not be able to redirect someone else's future mining rewards"
+        );
+    }
+
+    /// Swapping in a different `pk_encrypt` on an otherwise-owner-signed request must be
+    /// refused too — this is the delivery-key hijack the message-binding fix closes.
+    #[test]
+    fn register_refuses_a_swapped_encryption_key() {
+        let b = ShieldedBridge::new();
+        let (owner_sk, owner) = signer();
+        let pk_shield = "cc".repeat(32);
+        let honest_pk_encrypt = "dd".repeat(32);
+        let sig = sign_register(&owner_sk, &owner, &pk_shield, &honest_pk_encrypt, 0, 1);
+        let swapped_pk_encrypt = "ee".repeat(32);
+        assert_eq!(
+            b.submit_register(&owner, &pk_shield, &swapped_pk_encrypt, 0, &sig, 1).unwrap_err(),
+            ShieldedSubmitError::SignatureInvalid,
+            "SECURITY: a signature over one encryption key must not authorize a different one"
+        );
+    }
+
+    #[test]
+    fn register_accepts_a_correctly_signed_request() {
+        let b = ShieldedBridge::new();
+        let (sk, wallet) = signer();
+        let pk_shield = "cc".repeat(32);
+        let pk_encrypt = "dd".repeat(32);
+        let sig = sign_register(&sk, &wallet, &pk_shield, &pk_encrypt, 0, 1);
+        b.submit_register(&wallet, &pk_shield, &pk_encrypt, 0, &sig, 1)
+            .expect("owner-signed, must succeed");
     }
 
     /// A garbage proof must never reach the queue — that is the DoS guard's whole job.
@@ -472,7 +790,10 @@ mod tests {
         let b = ShieldedBridge::new();
         let outs = vec!["11".repeat(32), "22".repeat(32)];
         let err = b
-            .submit_shielded_send(&"aa".repeat(32), &"bb".repeat(32), &outs, sigil_state::shielded::SHIELDED_FEE, vec![0u8; 64])
+            .submit_shielded_send(
+                &"aa".repeat(32), &"bb".repeat(32), &outs,
+                sigil_state::shielded::SHIELDED_FEE, vec![0u8; 64], &[],
+            )
             .unwrap_err();
         assert!(matches!(err, ShieldedSubmitError::ProofRejected(_)), "got {err:?}");
         assert_eq!(b.pending_len(), 0, "nothing may be queued on a bad proof");
@@ -488,8 +809,75 @@ mod tests {
                 &["11".repeat(32)],
                 sigil_state::shielded::SHIELDED_FEE,
                 vec![0u8; 64],
+                &[],
             )
             .unwrap_err();
         assert!(matches!(err, ShieldedSubmitError::WrongOutputCount { .. }), "got {err:?}");
+    }
+
+    /// A ciphertext count that matches neither "none attached" nor "one per output"
+    /// must be refused before the proof is even checked — a DoS-cheap door rejection.
+    #[test]
+    fn mismatched_ciphertext_count_is_rejected() {
+        let b = ShieldedBridge::new();
+        let outs = vec!["11".repeat(32), "22".repeat(32)];
+        let err = b
+            .submit_shielded_send(
+                &"aa".repeat(32), &"bb".repeat(32), &outs,
+                sigil_state::shielded::SHIELDED_FEE, vec![0u8; 64],
+                &[Some("only-one".to_string())],
+            )
+            .unwrap_err();
+        assert_eq!(err, ShieldedSubmitError::WrongCiphertextCount { expected: 2, got: 1 });
+    }
+
+    /// THE RELAY HOOK, pinned directly: a successful submit must fire it with the
+    /// SAME id it returned and a `ShieldedOp` carrying exactly what a peer's own
+    /// `submit_shield` would need to independently re-verify — this is the whole
+    /// point of the hook (see `dandelion_relay.rs`'s module docs for why relaying
+    /// the ORIGINAL request, not a pre-verified claim, is the safe design).
+    #[test]
+    fn successful_submit_fires_the_relay_hook_with_a_matching_op() {
+        use std::sync::{Arc, Mutex};
+        let b = ShieldedBridge::new();
+        let captured: Arc<Mutex<Option<([u8; 32], ShieldedOp)>>> = Arc::new(Mutex::new(None));
+        let captured2 = Arc::clone(&captured);
+        b.set_relay_hook(move |id, op| {
+            *captured2.lock().unwrap() = Some((id, op));
+        });
+
+        let (sk, from) = signer();
+        let cm = "cc".repeat(32);
+        let sig = sign_shield(&sk, &from, 5_000, &cm, 2, 9);
+        let h = b.submit_shield(&from, 5_000, &cm, 2, &sig, 9).expect("queued");
+
+        let (id, op) = captured.lock().unwrap().take().expect("relay hook must fire on success");
+        assert_eq!(id, h, "hook id must match the submit's own returned id");
+        match op {
+            ShieldedOp::Shield(r) => {
+                assert_eq!(r.from, from);
+                assert_eq!(r.amount, 5_000);
+                assert_eq!(r.cm, cm);
+                assert_eq!(r.fee, 2);
+                assert_eq!(r.sig, sig);
+                assert_eq!(r.req_nonce, 9);
+            }
+            other => panic!("expected ShieldedOp::Shield, got {other:?}"),
+        }
+    }
+
+    /// A failed submit (bad signature) must NOT fire the hook — nothing was
+    /// accepted, so there is nothing to relay.
+    #[test]
+    fn rejected_submit_does_not_fire_the_relay_hook() {
+        use std::sync::{Arc, Mutex};
+        let b = ShieldedBridge::new();
+        let fired = Arc::new(Mutex::new(false));
+        let fired2 = Arc::clone(&fired);
+        b.set_relay_hook(move |_id, _op| { *fired2.lock().unwrap() = true; });
+
+        let (_sk, from) = signer();
+        let _ = b.submit_shield(&from, 5_000, &"dd".repeat(32), 0, "", 1); // no signature -> refused
+        assert!(!*fired.lock().unwrap(), "hook must not fire for a rejected submit");
     }
 }

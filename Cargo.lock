@@ -8986,7 +8986,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-top"
-version = "7.1.70"
+version = "7.1.71"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",

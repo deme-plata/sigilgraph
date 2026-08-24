@@ -44,7 +44,15 @@ use sigil_net_wg::{CliWgBackend, WgBackend, WgInterface, WgPeer, WgPublicKey};
 /// / `10.77.0.0/24` setup on purpose (see module docs).
 pub const IFACE: &str = "sigil0";
 const SUBNET_PREFIX: &str = "10.99.0";
-const LISTEN_PORT: u16 = 51821; // sigilwg0 already holds 51820's neighbor 51821... actually distinct: see below.
+// 2026-08-24: FIRST live deploy used 51821 here, which collided with the
+// pre-existing sigilwg0 interface's own listen port (51820=wg0, 51821=
+// sigilwg0 — confirmed via `wg show sigilwg0`) and made every `wg-quick up`
+// fail with "RTNETLINK answers: Address already in use" on the address-add
+// step. Reproduced standalone (bypassing sigil-node entirely) and confirmed
+// the fix: an otherwise-identical config on 51822 brings the interface up
+// cleanly end-to-end. Picked one port further out to leave room if more
+// legacy interfaces show up later.
+const LISTEN_PORT: u16 = 51822;
 
 /// Point-to-point key-exchange message (same channel as Dandelion's
 /// `StemWireMsg` — bincode, tried as a fallback after that fails to parse).

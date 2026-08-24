@@ -28,6 +28,24 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
     // spine bar, which legitimately advances from genesis.
     let snap_mode = !light && s.light_mode;
     let gap = net_tip.saturating_sub(spine);
+    // 2026-08-23 (grogu-finality-gap-clarity): `gap` above compares the verified spine
+    // against the RAW frontier tip — but sigil-g0's DagKnight/GHOSTDAG consensus holds
+    // the newest ~512 blocks in a probation window before they're finalized
+    // (`BraidConfig::final_depth`, sigil-node/src/main.rs — bumped 64→512 on 2026-08-15).
+    // The server itself won't serve past its own finalized height. So a perfectly
+    // healthy, fully-caught-up client STILL shows a ~512 gap forever against the raw
+    // tip — not stuck, just honestly reflecting blocks nobody on the network has
+    // settled yet. Root-caused live 2026-08-23 against Epsilon's own frontier
+    // telemetry (`tip_h` vs `fin_h`): the delta was exactly 512, an exact match, and
+    // an operator flagged the persistent ~500 gap as confusing before this was found.
+    // `settled_gap` estimates the gap against the FINALIZED tip instead — this is
+    // what should read near-zero once truly caught up. It's an ESTIMATE (the client
+    // has no live wire-protocol field for the real finalized height yet, only this
+    // documented default), so it can drift if the operator changes final_depth, but
+    // it's far more honest than comparing against a tip that's permanently ~512 ahead.
+    const FINAL_DEPTH_ESTIMATE: u64 = 512;
+    let settled_tip = net_tip.saturating_sub(FINAL_DEPTH_ESTIMATE);
+    let settled_gap = settled_tip.saturating_sub(spine);
     let following = net_tip > 0;
     let caught = following && gap < 16_384;
     let frac = if net_tip > 0 { (spine as f64 / net_tip as f64).clamp(0.0, 1.0) } else { 0.0 };
@@ -57,8 +75,18 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
     // LANE-P v0.59: never a silent 0 blk/s — when the sync engine reports a PARKED frontier
     // (stall_reason set), the hero headline says STALLED (full reason lives in the state /
     // Sync Log) instead of a quiet "SYNCING" that looks broken.
+    //
+    // 2026-08-23 (grogu-stall-color-honesty): this used C_NEON_PINK — the SAME bright
+    // alarm color as the genuine "SPINE BREAK — STUCK" state below. A routine, usually
+    // self-recovering nudge (fires every time the connection hiccups, which is often —
+    // real, ongoing network churn between clients and the server) was visually
+    // indistinguishable from an actual stuck/broken sync. Flagged live by an operator
+    // watching a client cycle STALLED→resume→STALLED 5-10 times in 4 minutes while
+    // genuinely still making progress: "looks very unstable" even though it wasn't.
+    // Gold (the same color SYNCING already uses) reserves the alarm color for the one
+    // state that actually needs it.
     let (vtext, vcol) = if !s.stall_reason.is_empty() && !synced && !light {
-        ("⚠ STALLED — nudging peer", C_NEON_PINK)
+        ("⚠ STALLED — nudging peer", C_NEON_GOLD)
     } else { (vtext, vcol) };
 
     // SPINE-BREAK fix: a CONFIRMED watchdog/fatal failure outranks every other headline —
@@ -130,11 +158,39 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
             ])
         } else {
             // 0.77 (#156): the explicit [F] archive — genesis→tip, holding everything.
+            // 2026-08-23 (grogu-sync-card-visibility): also show the raw FETCH frontier
+            // (s.blocks_synced — downloaded, not yet verified) whenever it has run ahead
+            // of the verified spine by a visible margin. Without this the operator only
+            // sees the slow cryptographic-verify number and reads a large lag as "data
+            // lost", when in fact the bytes are already on disk and verification is just
+            // behind (see the SESSION HANDOFF memory — this exact confusion cost hours).
+            let fetch_frontier = s.blocks_synced;
+            let fetch_ahead = fetch_frontier.saturating_sub(spine);
             Line::from(vec![
                 Span::styled("⛓ FULL ARCHIVE ", Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD)),
                 dim("tip "), val(group(net_tip)),
                 dim("   spine "), Span::styled(format!("⛓{}", group(spine)), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
-                dim("   gap "), Span::styled(group(gap), Style::default().fg(if caught { C_NEON_GREEN } else { C_GOLD })),
+                // settled_gap (vs the finalized tip) is the primary number — it's the
+                // one that should read near-zero once truly caught up (raw tip minus
+                // spine, vs the still-settling raw frontier, permanently sits ~512 by
+                // design — see the const comment above). No secondary "(N unsettled)"
+                // annotation here: this line is already at the ~57-column budget of an
+                // 80-col terminal (the tmux test pane, and plausibly many real
+                // terminals — Windows cmd.exe defaults to 80 too) and ratatui clips
+                // rather than wraps, so a tacked-on annotation silently vanished in
+                // testing. `tip` and `spine` are both still shown on this same line for
+                // anyone who wants to compute the raw delta themselves.
+                //
+                // 2026-08-24: label changed from "gap" to "settled" — an operator read
+                // literal tip-minus-spine off this same line (e.g. 2,068,882 - 2,068,371
+                // = 511) and asked why the displayed number said 0. It wasn't wrong, just
+                // unlabeled: this has always been settled_gap, not the raw subtraction.
+                // The bare word "gap" invites exactly that mental math; "settled" points
+                // at what's actually being measured without adding a column.
+                dim("   settled "), Span::styled(group(settled_gap), Style::default().fg(if settled_gap < 16 { C_NEON_GREEN } else { C_GOLD })),
+                if fetch_ahead > 1_000 {
+                    Span::styled(format!("   fetched-to {} (+{} unverified)", group(fetch_frontier), group(fetch_ahead)), Style::default().fg(C_GOLD))
+                } else { Span::raw("") },
             ])
         },
         if light {
@@ -162,6 +218,20 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
             dim("proof "), proof,
             dim("   fetched "), Span::styled(group(s.fetched_total), Style::default().fg(C_GREEN)),
             pos,
+            // 2026-08-23 (grogu-sync-card-visibility): self-heal budget — a bounded,
+            // silent counter (MAX_HEALS=3) that only ever surfaced as an UNEXPLAINED
+            // "SPINE BREAK — STUCK" once exhausted. Showing "heal N/3" while it's in
+            // use turns that into a countdown instead of a surprise.
+            if s.heal_attempts > 0 {
+                Span::styled(format!("   🔧 heal {}/3", s.heal_attempts), Style::default().fg(if s.heal_attempts >= 3 { C_NEON_PINK } else { C_GOLD }).add_modifier(Modifier::BOLD))
+            } else { Span::raw("") },
+            // v7.1.57: adaptive frontier width — narrows the in-flight request to a
+            // single block once the connection-churn threshold trips, to fit inside a
+            // short-lived connection window. Surfaced so a slower-looking frontier
+            // reads as "compensating", not "broken".
+            if s.frontier_narrow {
+                Span::styled("   ⚡ narrow-mode (compensating for connection instability)", Style::default().fg(C_NEON_CYAN))
+            } else { Span::raw("") },
         ]),
         // v7.0.4: explicit DATA-INTEGRITY verdict — this node's OWN independent
         // verification of everything it holds. Honest scope: header spine parent-linked
@@ -184,14 +254,23 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
         // v7.0.4: NETWORK HEALTH gauge (Quillon k-parameter style, honest). SIGIL's
         // DagKnight is parameterless, so rather than fake a DagKnight-k the client can't
         // compute, this is the decentralization/health THIS node observes: connected
-        // peers + liveness. A single-producer testnet honestly reads CENTRALIZED — we do
-        // not paint decentralization that isn't there.
+        // peers + liveness. Not a real network-wide DECENTRALIZED reading.
+        //
+        // 2026-08-23 (grogu-honest-network-health): `obs` is this node's OWN local peer
+        // count, NOT a count of distinct block producers — the header schema carries no
+        // producer identity the light client can durably tally (the "prod" tag exists
+        // only in sigil-node's own live gossip JSON, not in SigilBlockHeaderV0). The old
+        // label asserted "single-producer" outright whenever obs<3 — flagged live by an
+        // operator whose node showed exactly that label while they knew the network
+        // actually had two producers: this node simply wasn't well-connected, which says
+        // nothing about how many producers exist. Labels now describe local peer
+        // visibility only, never a specific producer-count claim the client can't back.
         {
             let live = kf_rate >= 1.0 || s.commit_rate >= 1.0 || (following && s.verify_break.is_none());
-            let obs = s.peer_count.max(mesh); // producers/peers this node actually sees
-            let (phase, pcol) = if obs >= 8 { ("DECENTRALIZED", C_NEON_GREEN) }
-                else if obs >= 3 { ("EMERGING", C_GOLD) }
-                else { ("CENTRALIZED · single-producer", C_NEON_PINK) };
+            let obs = s.peer_count.max(mesh); // THIS node's own connected peers, not network-wide producer count
+            let (phase, pcol) = if obs >= 8 { ("WIDE MESH", C_NEON_GREEN) }
+                else if obs >= 3 { ("GROWING MESH", C_GOLD) }
+                else { ("LOW PEER VISIBILITY", C_NEON_PINK) };
             Line::from(vec![
                 Span::styled("◈ NETWORK HEALTH ", Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
                 Span::styled(phase, Style::default().fg(pcol).add_modifier(Modifier::BOLD)),
@@ -305,7 +384,18 @@ pub(crate) fn render_sync_log(app: &App) -> Paragraph<'static> {
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(" ▸ SYNC LOG  (newest at bottom)", Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD))));
-    let path = std::env::var("HOME").map(|h| format!("{h}/.sigil-top.log")).unwrap_or_else(|_| "sigil-top.log".into());
+    // 2026-08-23 (grogu-windows-synclog-path): native Windows (cmd.exe/PowerShell,
+    // not Git Bash) has no `HOME` env var — this used to fall straight through to a
+    // bare relative "sigil-top.log" (cwd), while the actual writer (main.rs's tlog!)
+    // already falls back to `%TEMP%\sigil-top.log`. Result: the Sync Log tab read a
+    // file that was never written, so it showed "no sync activity logged yet" FOREVER
+    // even while sync was genuinely running (confirmed live: a Windows client at 7.8%,
+    // 1094 blk/s, still showed the empty placeholder). Mirror main.rs's HOME→TEMP
+    // fallback exactly so both sides agree on the same path.
+    let path = std::env::var("HOME")
+        .map(|h| format!("{h}/.sigil-top.log"))
+        .or_else(|_| std::env::var("TEMP").map(|t| format!("{t}\\sigil-top.log")))
+        .unwrap_or_else(|_| "sigil-top.log".into());
     // v0.26: read only the LAST 16 KB (not the whole file) — O(1) per frame, never
     // O(log-size), which would freeze the UI as the log grows over a 24/7 run.
     let body = read_log_tail(&path, 16 * 1024);

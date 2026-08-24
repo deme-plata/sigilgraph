@@ -1,0 +1,12 @@
+[package]
+name = "sigil-dandelion"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Dandelion++ transaction-propagation privacy: stem-phase relay before gossip fluff, so an observer of the P2P mesh cannot link a transaction to its originating IP. Ported from Quillon's q-dandelion (crates/q-dandelion), with epoch-based stem-successor selection instead of per-message reselection. Pure protocol state machine — no network/async coupling; the caller supplies peers and drives Actions over its own transport (flux-p2p unicast for stem, gossipsub for fluff)."
+
+[dependencies]
+rand = { workspace = true }
+
+[dev-dependencies]
+rand_distr = { workspace = true }

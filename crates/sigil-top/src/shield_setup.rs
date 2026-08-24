@@ -101,7 +101,14 @@ pub fn register_for_shielded_mining(node_url: &str, seed_hex: &str) -> RegisterO
         "req_nonce": req_nonce,
     });
 
-    let url = format!("{}/api/v1/shielded/register", node_url.trim_end_matches('/'));
+    // 2026-08-24: was "/api/v1/shielded/register" — sigil-api mirrors most routes
+    // under both /v1/* and /api/v1/*, but the shielded endpoints were never added to
+    // that mirror list (confirmed: /v1/shielded/register is live, /api/v1/shielded/
+    // register 404s). Every SIGIL_MINE_SEED registration attempt since this feature
+    // shipped (v7.1.74) silently failed at this URL and fell through to "mining
+    // continues, but rewards stay transparent" — caught live while testing a real
+    // end-to-end shielded send against the production API.
+    let url = format!("{}/v1/shielded/register", node_url.trim_end_matches('/'));
     let client = match reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()

@@ -24,7 +24,12 @@ const MAX_BODY: usize = 8 * 1024 * 1024; // 8 MiB request cap
 
 /// Spawn the ingest server on `port`, sharing the producer's mempool. Runs on its
 /// own OS thread (like the TXGEN feeder) so a slow client never stalls production.
-pub fn spawn(mempool: Arc<MempoolBackend>, port: u16) {
+///
+/// `dandelion_tx` hands off every locally-submitted transaction to the Dandelion++
+/// relay actor (dandelion_relay.rs) so it enters the network via a stem-phase
+/// relay instead of a raw broadcast — a plain `UnboundedSender::send` is
+/// synchronous and works fine from this non-async thread.
+pub fn spawn(mempool: Arc<MempoolBackend>, dandelion_tx: crate::dandelion_relay::Sender, port: u16) {
     let _ = std::thread::Builder::new()
         .name("sigil-ingest".into())
         .spawn(move || {
@@ -37,13 +42,17 @@ pub fn spawn(mempool: Arc<MempoolBackend>, port: u16) {
             };
             for conn in listener.incoming() {
                 if let Ok(mut stream) = conn {
-                    let _ = handle(&mut stream, &mempool);
+                    let _ = handle(&mut stream, &mempool, &dandelion_tx);
                 }
             }
         });
 }
 
-fn handle(stream: &mut TcpStream, mempool: &Arc<MempoolBackend>) -> std::io::Result<()> {
+fn handle(
+    stream: &mut TcpStream,
+    mempool: &Arc<MempoolBackend>,
+    dandelion_tx: &crate::dandelion_relay::Sender,
+) -> std::io::Result<()> {
     stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok();
     let mut buf = Vec::new();
     let mut tmp = [0u8; 8192];
@@ -66,7 +75,7 @@ fn handle(stream: &mut TcpStream, mempool: &Arc<MempoolBackend>) -> std::io::Res
     let text = String::from_utf8_lossy(&buf);
     let (method, path) = request_line(&text);
     let body = text.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
-    let resp = route(method, path, body, mempool);
+    let resp = route(method, path, body, mempool, dandelion_tx);
     let out = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         resp.len(),
@@ -76,7 +85,13 @@ fn handle(stream: &mut TcpStream, mempool: &Arc<MempoolBackend>) -> std::io::Res
     Ok(())
 }
 
-fn route(method: &str, path: &str, body: &str, mempool: &Arc<MempoolBackend>) -> String {
+fn route(
+    method: &str,
+    path: &str,
+    body: &str,
+    mempool: &Arc<MempoolBackend>,
+    dandelion_tx: &crate::dandelion_relay::Sender,
+) -> String {
     // strip any query string
     let path = path.split('?').next().unwrap_or(path);
     match (method, path) {
@@ -91,7 +106,16 @@ fn route(method: &str, path: &str, body: &str, mempool: &Arc<MempoolBackend>) ->
         }
         ("POST", "/tx") => match serde_json::from_str::<SignedTx>(body) {
             Ok(tx) => {
+                let id = tx.tx.hash();
                 let r = mempool.ingest(vec![tx]);
+                // Only hand off what the mempool actually accepted as new —
+                // an invalid or duplicate submission has nothing to relay.
+                if r.accepted > 0 {
+                    let _ = dandelion_tx.send(crate::dandelion_relay::Cmd::Originate {
+                        id,
+                        bytes: body.as_bytes().to_vec(),
+                    });
+                }
                 format!(
                     r#"{{"ok":true,"accepted":{},"invalid":{},"dupe":{}}}"#,
                     r.accepted, r.invalid, r.dupe
@@ -136,22 +160,62 @@ mod tests {
     use super::*;
     use sigil_tx::{ed25519_keygen, AuthorizedBatch, SigilTx, NATIVE};
 
+    fn dandelion_channel() -> crate::dandelion_relay::Sender {
+        tokio::sync::mpsc::unbounded_channel().0
+    }
+
     #[test]
     fn route_batch_ingest_status_and_dedup() {
         let mp = Arc::new(MempoolBackend::legacy());
-        assert!(route("GET", "/health", "", &mp).contains("sigil-ingest"));
+        let dtx = dandelion_channel();
+        assert!(route("GET", "/health", "", &mp, &dtx).contains("sigil-ingest"));
 
         let (sk, pk, author) = ed25519_keygen();
         let ops = vec![SigilTx::Send { from: author, to: [9u8; 32], amount: 1, token: NATIVE, fee: 0 }];
         let batch = AuthorizedBatch::sign_ed25519(ops, 1, &sk, &pk);
         let body = serde_json::to_string(&batch).unwrap();
 
-        let r = route("POST", "/batch", &body, &mp);
+        let r = route("POST", "/batch", &body, &mp, &dtx);
         assert!(r.contains("\"ok\":true") && r.contains("accepted_ops"), "ingest: {r}");
-        assert!(route("GET", "/mempool", "", &mp).contains("\"batches\":1"));
+        assert!(route("GET", "/mempool", "", &mp, &dtx).contains("\"batches\":1"));
         // replay of the same batch is rejected at ingest.
-        assert!(route("POST", "/batch", &body, &mp).contains("duplicate batch"));
+        assert!(route("POST", "/batch", &body, &mp, &dtx).contains("duplicate batch"));
         // malformed body is rejected, not panicked.
-        assert!(route("POST", "/batch", "{garbage", &mp).contains("bad AuthorizedBatch"));
+        assert!(route("POST", "/batch", "{garbage", &mp, &dtx).contains("bad AuthorizedBatch"));
+    }
+
+    /// A single-tx POST /tx must both accept into the mempool AND hand the
+    /// transaction off to the Dandelion++ relay actor — this is the actual
+    /// tx-gossip wiring point, so prove the Cmd arrives, not just that the
+    /// HTTP response looks right.
+    #[test]
+    fn accepted_tx_is_handed_to_the_dandelion_relay() {
+        use sigil_tx::ed25519_sign_tx;
+
+        let mp = Arc::new(MempoolBackend::legacy());
+        let (dtx, mut drx) = tokio::sync::mpsc::unbounded_channel();
+
+        let (sk, pk, author) = ed25519_keygen();
+        let tx = ed25519_sign_tx(
+            SigilTx::Send { from: author, to: [9u8; 32], amount: 1, token: NATIVE, fee: 0 },
+            &sk,
+            &pk,
+        );
+        let body = serde_json::to_string(&tx).unwrap();
+
+        let r = route("POST", "/tx", &body, &mp, &dtx);
+        assert!(r.contains("\"accepted\":1"), "ingest: {r}");
+        assert_eq!(mp.len(), 1, "the mempool must hold the accepted tx");
+
+        let cmd = drx.try_recv().expect("dandelion actor must receive an Originate cmd");
+        match cmd {
+            crate::dandelion_relay::Cmd::Originate { id, bytes } => {
+                assert_eq!(id, tx.tx.hash(), "relayed id must match the tx's real hash");
+                let round_tripped: SignedTx =
+                    serde_json::from_slice(&bytes).expect("relayed bytes must round-trip as the same SignedTx");
+                assert_eq!(round_tripped.tx.hash(), tx.tx.hash());
+            }
+            _ => panic!("expected Cmd::Originate"),
+        }
     }
 }

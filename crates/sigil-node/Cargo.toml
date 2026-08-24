@@ -60,6 +60,9 @@ sigil-tip-proof = { path = "../sigil-tip-proof" }
 # sigil-api's money API both hold (see sigil-narwhal-mempool::MempoolBackend's
 # doc comment for the correctness hazard this closes).
 sigil-narwhal-mempool = { path = "../sigil-narwhal-mempool" }
+# Dandelion++ tx-gossip privacy relay — see dandelion_relay.rs for the wiring.
+sigil-dandelion = { path = "../sigil-dandelion" }
+rand            = { workspace = true }
 # SIGIL_DAG=1 real ordering: deterministic braid linearization (NOT GHOSTDAG,
 # NOT DagKnight-the-paper — docs/SIGIL_DAGKNIGHT_LANE_v0.md §1).
 sigil-dagknight = { workspace = true }

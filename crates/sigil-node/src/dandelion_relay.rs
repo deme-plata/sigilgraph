@@ -164,6 +164,7 @@ pub fn spawn(mgr: Arc<NetworkManager>, mempool: Arc<MempoolBackend>, shielded: A
                     // when it first entered stem on THIS node.
                     for id in router.tick(Instant::now()) {
                         if let Some(bytes) = pending_bytes.remove(&id) {
+                            eprintln!("⏱ dandelion: failsafe force-fluff {}… (stem stalled 30s+)", &hex::encode(id)[..8]);
                             fluff(&mgr, &mempool, &shielded, bytes).await;
                         }
                     }
@@ -185,6 +186,7 @@ async fn act(
 ) {
     match action {
         Action::RelayStem { to, hops, bytes } => {
+            eprintln!("🌿 dandelion: stem {}… → {to} (hop {hops})", &hex::encode(id)[..8]);
             let wire = StemWireMsg { id, hops, tx_bytes: bytes.clone() };
             let Ok(payload) = bincode::serialize(&wire) else { return };
             pending_bytes.insert(id, bytes);
@@ -199,10 +201,13 @@ async fn act(
             });
         }
         Action::Fluff { bytes } => {
+            eprintln!("🌸 dandelion: fluff {}…", &hex::encode(id)[..8]);
             pending_bytes.remove(&id);
             fluff(mgr, mempool, shielded, bytes).await;
         }
-        Action::Drop => {}
+        Action::Drop => {
+            eprintln!("🔁 dandelion: drop {}… (already seen)", &hex::encode(id)[..8]);
+        }
     }
 }
 

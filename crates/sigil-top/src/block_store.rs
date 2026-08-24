@@ -946,9 +946,27 @@ impl BlockStore {
     /// the (block-by-hash, height-index) pairs, single WAL-locked write, bump best.
     ///
     /// ⚠️ CALLER MUST GUARANTEE the headers are verified + contiguous + within the fold anchor —
-    /// it does NO fork / dup / linkage checking. Use ONLY for the trusted snapshot/skeleton prefix;
-    /// live gossip + the frontier still go through `put_blocks_batch` (which checks). Does NOT
-    /// advance the contiguous pointer — call [`Self::advance`] after. Returns blocks written.
+    /// it does NO linkage checking (the caller's fold/anchor proof already covers that). Use ONLY
+    /// for the trusted snapshot/skeleton prefix; live gossip + the frontier still go through
+    /// `put_blocks_batch` (which additionally checks linkage). Does NOT advance the contiguous
+    /// pointer — call [`Self::advance`] after. Returns blocks written.
+    ///
+    /// **2026-08-24: DOES check the height-index, unlike before.** This function used to write
+    /// unconditionally, on the theory that a "trusted" prefix can't disagree with itself. It can
+    /// disagree with what's ALREADY indexed, though — if the caller's skeleton/snapshot data is
+    /// ever stale or built from a different anchor than a height that's already landed (e.g. via
+    /// the live frontier, or an earlier trusted commit), the old unconditional write silently
+    /// planted a second, different hash for that height. `put_block`/`put_blocks_batch` (correctly)
+    /// refuse to ever let a later response overwrite an indexed height — so once this path planted
+    /// a disagreeing entry, EVERY future honest write to that height was refused forever, and the
+    /// spine wedged permanently ("SPINE BREAK — STUCK", operator-hit at h≈393k, h≈2.01M, h≈1.6M
+    /// across separate incidents — different heights each time, which is the signature of a general
+    /// mechanism rather than a fixed spot). Proven directly against this exact function (not a
+    /// stand-in) by `put_blocks_bulk_trusted_plants_the_poison_the_checked_paths_then_refuse`.
+    /// The check uses the CACHED variant, so it costs nothing extra for this function's actual
+    /// use case (loading a fresh, empty trusted prefix — every height is above `best_height`, the
+    /// cheapest branch, zero disk reads) and only does real work when a height might genuinely
+    /// already be occupied, which is precisely when the work is needed.
     pub fn put_blocks_bulk_trusted(&mut self, headers: &[SigilBlockHeaderV0]) -> usize {
         if headers.is_empty() { return 0; }
         let nthreads = std::thread::available_parallelism()
@@ -979,12 +997,40 @@ impl BlockStore {
         let mut max_h = self.best_height;
         let mut max_hash = self.best_hash_hex.clone();
         let mut cache_updates: Vec<(u64, String)> = Vec::new();
-        let n = prepared.len();
+        let mut batch_seen: std::collections::HashMap<u64, String> =
+            std::collections::HashMap::with_capacity(prepared.len());
+        let mut accepted = 0usize;
+        let mut conflicts = 0usize;
+        let mut first_conflict: Option<(u64, String, String)> = None;
         for (height, hash_hex, value) in prepared {
+            let conflict = batch_seen
+                .get(&height)
+                .filter(|existing| *existing != &hash_hex)
+                .cloned()
+                .or_else(|| self.height_index_conflict_cached(height, &hash_hex));
+            if let Some(existing) = conflict {
+                conflicts += 1;
+                first_conflict.get_or_insert_with(|| (height, existing, hash_hex));
+                continue;
+            }
+            batch_seen.entry(height).or_insert_with(|| hash_hex.clone());
             if self.link_cache.enabled { cache_updates.push((height, hash_hex.clone())); }
             owned.push((hash_hex.clone().into_bytes(), value));              // block by hash
             owned.push((height_key(height), hash_hex.clone().into_bytes())); // height index
             if height >= max_h { max_h = height; max_hash = hash_hex; }
+            accepted += 1;
+        }
+        if let Some((height, existing, incoming)) = first_conflict {
+            crate::tlog!(
+                "[store] rejected {conflicts} trusted-bulk height-index conflict(s); first h={height}: \
+                 existing={} incoming={} — a skeleton/snapshot source disagreed with an already-indexed \
+                 height; skipped rather than silently overwritten (would have wedged the spine)",
+                short_hash_hex(&existing),
+                short_hash_hex(&incoming)
+            );
+        }
+        if owned.is_empty() {
+            return accepted;
         }
         let refs: Vec<(&[u8], &[u8])> = owned.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
         match self.db.batch_put(&refs) {
@@ -995,7 +1041,7 @@ impl BlockStore {
                 // LANE 2: feed the trusted prefix's tail into the cache so the first checked frontier
                 // batch links to it in memory (the trusted path itself does no linkage checks).
                 for (h, hh) in cache_updates { self.link_cache.record(h, &hh); }
-                n
+                accepted
             }
             Err(_) => 0,
         }
@@ -1667,6 +1713,138 @@ mod tests {
             s.advance();
             assert!(got2 >= 10, "refetched chunk accepted after heal (got {got2})");
             assert_eq!(s.synced_to(), 20, "healed — frontier passes the poisoned seam");
+        }
+        let _ = std::fs::remove_dir_all(&p);
+    }
+
+    /// MECHANISM PROOF (2026-08-24): the test above proves the WEDGE using
+    /// `force_insert_block`, a test-only helper that stands in for "some bulk lane wrote an
+    /// unchecked entry" without exercising the real lane. This test closes that gap: it
+    /// calls the REAL `put_blocks_bulk_trusted` — the only production code path with zero
+    /// conflict/linkage checking (see its doc comment: "does NO fork / dup / linkage
+    /// checking") — and confirms it, not a stand-in, is what plants a poisoned seam that the
+    /// checked paths then refuse to pass forever.
+    #[test]
+    fn put_blocks_bulk_trusted_plants_the_poison_the_checked_paths_then_refuse() {
+        use sigil_header::*;
+        fn mk(height: u64, parent: BlockHash) -> SigilBlockHeaderV0 {
+            let nonce = SqiSignature::from_array([7u8; SQISIGN_L5_LEN]);
+            let mut hh = blake3::Hasher::new();
+            hh.update(&parent); hh.update(nonce.as_bytes());
+            let vdf_input: [u8; 32] = *hh.finalize().as_bytes();
+            let scheme = SigScheme::SqiSign5;
+            SigilBlockHeaderV0 {
+                version: HEADER_VERSION, network_id: NETWORK_ID, height, parent_hash: parent,
+                merge_parents: Vec::new(), timestamp_ms: 1000 + height, nonce_sqisign: nonce,
+                vdf_input, vdf_proof: WesolowskiProof { y: vec![], pi: vec![], t: 100 }, difficulty: 1,
+                wallet_state_root: [0u8;32], dex_state_root: [0u8;32], event_log_root: [0u8;32],
+                contract_state_root: [0u8;32],
+                state_transition_proof: StarkProof { bytes: vec![], public_inputs_hash: [0u8;32] },
+                txs_merkle_root: [0u8;32], tx_count: 0,
+                fluxc_artifact_proof: ProofBundle { artifact_blake3: [0u8;32], sqisign_sig: vec![], sqisign_pubkey: vec![], settle_tx: None },
+                sig_scheme: scheme, producer: [0u8;32],
+                producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
+                topology_commitment: None,
+            }
+        }
+        let p = tmp("bulk-trusted-poison");
+        let _ = std::fs::remove_dir_all(&p);
+        {
+            let mut s = BlockStore::open(&p).unwrap();
+            s.set_base(1);
+            // Honest chain h=0..19, correctly linked.
+            let mut chain = Vec::new();
+            let mut parent = [0u8; 32];
+            for h in 0..20u64 { let hdr = mk(h, parent); parent = hdr.hash(); chain.push(hdr); }
+            assert_eq!(s.put_blocks_batch(&chain[1..10]), 9);
+            s.advance();
+            assert_eq!(s.synced_to(), 10, "honest [1..9] stored via the CHECKED path");
+
+            // A "trusted skeleton" disagreeing with the honest chain at h=10 — same height,
+            // garbage parent, different hash than chain[10]. This is exactly what PASS2's
+            // `ingest_bodies_verified` would hand to `put_blocks_bulk_trusted` if its local
+            // skeleton store ever disagreed with what a live peer serves for this height —
+            // NOT a hypothetical, `put_blocks_bulk_trusted` is real production code, called
+            // unconditionally on every sync (`pass2_env`/`vcatch_env` default true).
+            let skeleton_disagreement = mk(10, [0xAA; 32]);
+            let n = s.put_blocks_bulk_trusted(std::slice::from_ref(&skeleton_disagreement));
+            assert_eq!(n, 1, "the trusted bulk path writes with ZERO conflict check — this is the bug");
+            s.advance();
+            assert_eq!(s.synced_to(), 11, "the unchecked write occupies h=10 unopposed");
+
+            // The HONEST, correctly-linked chunk for the same range now hits the checked
+            // path and is refused — permanently, for every height from the seam onward —
+            // because put_blocks_batch (correctly) sees a different hash already indexed.
+            let got = s.put_blocks_batch(&chain[10..20]);
+            s.advance();
+            assert_eq!(
+                got, 0,
+                "SECURITY-ADJACENT: the checked path must refuse a conflicting height, but that \
+                 correctness is exactly what turns the trusted path's unchecked write into a \
+                 PERMANENT wedge — no amount of honest re-serving from a good peer can pass it"
+            );
+            assert_eq!(s.synced_to(), 11, "wedged at the exact height the trusted path poisoned");
+        }
+        let _ = std::fs::remove_dir_all(&p);
+    }
+
+    /// THE FIX, proven in the direction it actually protects: an honest, checked write lands
+    /// FIRST (the realistic case — the live frontier/checked path reaches a height before a
+    /// stale trusted/skeleton source's view of that same height arrives). Before 2026-08-24,
+    /// `put_blocks_bulk_trusted` would have silently overwritten it with disagreeing data —
+    /// corrupting an already-correct entry, not just losing a race. After the fix, the
+    /// conflicting trusted-bulk write is skipped and logged instead.
+    #[test]
+    fn put_blocks_bulk_trusted_no_longer_overwrites_an_already_indexed_height() {
+        use sigil_header::*;
+        fn mk(height: u64, parent: BlockHash, salt: u8) -> SigilBlockHeaderV0 {
+            let nonce = SqiSignature::from_array([salt; SQISIGN_L5_LEN]);
+            let mut hh = blake3::Hasher::new();
+            hh.update(&parent); hh.update(nonce.as_bytes());
+            let vdf_input: [u8; 32] = *hh.finalize().as_bytes();
+            let scheme = SigScheme::SqiSign5;
+            SigilBlockHeaderV0 {
+                version: HEADER_VERSION, network_id: NETWORK_ID, height, parent_hash: parent,
+                merge_parents: Vec::new(), timestamp_ms: 1000 + height, nonce_sqisign: nonce,
+                vdf_input, vdf_proof: WesolowskiProof { y: vec![], pi: vec![], t: 100 }, difficulty: 1,
+                wallet_state_root: [0u8;32], dex_state_root: [0u8;32], event_log_root: [0u8;32],
+                contract_state_root: [0u8;32],
+                state_transition_proof: StarkProof { bytes: vec![], public_inputs_hash: [0u8;32] },
+                txs_merkle_root: [0u8;32], tx_count: 0,
+                fluxc_artifact_proof: ProofBundle { artifact_blake3: [0u8;32], sqisign_sig: vec![], sqisign_pubkey: vec![], settle_tx: None },
+                sig_scheme: scheme, producer: [0u8;32],
+                producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
+                topology_commitment: None,
+            }
+        }
+        let p = tmp("bulk-trusted-no-clobber");
+        let _ = std::fs::remove_dir_all(&p);
+        {
+            let mut s = BlockStore::open(&p).unwrap();
+            s.set_base(1);
+            // h=1 is the strict-downward-linkage anchor exception (its parent h=0 is never
+            // served/stored) — the same exemption `base1_anchor_chunk_stores_and_advances_
+            // under_strict_ingest` relies on, used here so the honest write needs no chain
+            // build-up to land.
+            let honest = mk(1, [0x11; 32], 1);
+            assert_eq!(s.put_blocks_batch(std::slice::from_ref(&honest)), 1, "honest entry lands first");
+            let honest_hash = hex::encode(honest.hash());
+            assert_eq!(s.hash_at_index_height(1).as_deref(), Some(honest_hash.as_str()));
+
+            // A disagreeing "trusted" view of the SAME height arrives later (e.g. a stale
+            // skeleton/snapshot built from a different anchor).
+            let stale_skeleton = mk(1, [0x22; 32], 2);
+            let stale_hash = hex::encode(stale_skeleton.hash());
+            assert_ne!(honest_hash, stale_hash, "must actually be a different block for this to test anything");
+            let n = s.put_blocks_bulk_trusted(std::slice::from_ref(&stale_skeleton));
+
+            assert_eq!(n, 0, "FIX: the conflicting trusted write must be skipped, not accepted");
+            assert_eq!(
+                s.hash_at_index_height(1).as_deref(),
+                Some(honest_hash.as_str()),
+                "SECURITY: the already-indexed honest height must survive untouched — a stale \
+                 trusted source must never silently overwrite a real, already-landed block"
+            );
         }
         let _ = std::fs::remove_dir_all(&p);
     }

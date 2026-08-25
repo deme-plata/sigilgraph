@@ -1127,6 +1127,65 @@ class QNarwhalKnightAPI {
     }
   }
 
+  // 2026-08-25: the REAL peer mesh, not a browser-isolated guess at it —
+  // `sigil-api`'s `/v1/network/topology`, backed by the node's own
+  // `flux_p2p::NetworkManager`. This is what the "Peers" network map draws
+  // from now instead of `node.getConnections()` (this browser tab's own,
+  // much sparser, libp2p connections).
+  async getNetworkTopology(): Promise<{
+    success: boolean;
+    self_node_id: string;
+    listen_addr: string;
+    started: boolean;
+    peer_count: number;
+    mesh_quality: string;
+    estimated_drop_rate: number;
+    avg_block_latency_ms: number;
+    blocks_received: number;
+    messages_processed: number;
+    fan_out: number;
+    topics: string[];
+    peers: Array<{
+      peer_id: string;
+      multiaddr: string;
+      connected_since_ms: number;
+      last_seen_ms: number;
+      protocols: string[];
+      agent_version: string;
+    }>;
+    peer_heights: Record<string, number>;
+  }> {
+    try {
+      const response = await fetch(`${this.baseURL}/v1/network/topology`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const envelope = await response.json();
+      const data = envelope.data ?? {};
+      return {
+        success: !!envelope.ok,
+        self_node_id: data.self_node_id ?? '',
+        listen_addr: data.listen_addr ?? '',
+        started: !!data.started,
+        peer_count: data.peer_count ?? 0,
+        mesh_quality: data.mesh_quality ?? 'unknown',
+        estimated_drop_rate: data.estimated_drop_rate ?? 0,
+        avg_block_latency_ms: data.avg_block_latency_ms ?? 0,
+        blocks_received: data.blocks_received ?? 0,
+        messages_processed: data.messages_processed ?? 0,
+        fan_out: data.fan_out ?? 0,
+        topics: data.topics ?? [],
+        peers: data.peers ?? [],
+        peer_heights: data.peer_heights ?? {},
+      };
+    } catch (error) {
+      console.error('[API] getNetworkTopology failed:', error);
+      return {
+        success: false, self_node_id: '', listen_addr: '', started: false, peer_count: 0,
+        mesh_quality: 'unknown', estimated_drop_rate: 0, avg_block_latency_ms: 0,
+        blocks_received: 0, messages_processed: 0, fan_out: 0, topics: [], peers: [], peer_heights: {},
+      };
+    }
+  }
+
   // 2026-08-25: real per-(wallet,rig) miner list, including CPU/GPU kind —
   // `sigil-api`'s `/v1/mining/miners` (same `{ok,data,ts}` envelope as
   // above). Deliberately does NOT invent blocks_found/rewards_earned/source

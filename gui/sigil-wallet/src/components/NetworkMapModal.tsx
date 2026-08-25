@@ -33,6 +33,7 @@ interface LocalPQStatus {
   };
 }
 import { BrowserResonanceVisualization } from './BrowserResonanceVisualization';
+import { qnkAPI } from '../services/api';
 
 interface PeerInfo {
   id: string;
@@ -410,6 +411,13 @@ export default function NetworkMapModal({ isOpen, onClose, peers: peerCount, blo
   const [knownBrowserPeers, setKnownBrowserPeers] = useState<KnownBrowserPeer[]>([]);
   // v3.5.8: View mode toggle - classic network map vs quantum resonance visualization
   const [viewMode, setViewMode] = useState<'classic' | 'quantum'>('classic');
+  // 2026-08-25: real mesh data from sigil-api's /v1/network/topology (the
+  // node's OWN connections), as opposed to this browser tab's isolated
+  // libp2p view. `dataSource` drives a small honesty badge — a browser tab
+  // with no real peers of its own should never look like a healthy 8-peer
+  // mesh just because the real node has one.
+  const [realTopology, setRealTopology] = useState<Awaited<ReturnType<typeof qnkAPI.getNetworkTopology>> | null>(null);
+  const [dataSource, setDataSource] = useState<'real' | 'browser' | 'none'>('none');
   const containerRef = useRef<HTMLDivElement>(null);
   const pingTimeouts = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -461,13 +469,53 @@ export default function NetworkMapModal({ isOpen, onClose, peers: peerCount, blo
     }).filter(Boolean);
   }, []);
 
+  // 2026-08-25: fetch the REAL mesh from sigil-api — the node's actual
+  // connections, not this browser tab's own (much sparser) libp2p peers.
+  // Independent of `node`/`isReady`: this is a plain HTTP call to the
+  // server, unrelated to whether the browser's own in-page libp2p node has
+  // come up. On success it fully replaces `peerList` with the real peers,
+  // mapped into the same shape the existing map/table already render —
+  // zero changes needed to the visualization itself, only its data source.
+  const fetchRealTopology = useCallback(async () => {
+    const result = await qnkAPI.getNetworkTopology();
+    if (!result.success || result.peer_count === 0) {
+      return false;
+    }
+    setRealTopology(result);
+    const mapped: PeerInfo[] = result.peers.map((p) => ({
+      id: p.peer_id,
+      shortId: `${p.peer_id.substring(0, 6)}...`,
+      address: p.multiaddr,
+      latency: 0, // the server doesn't measure per-peer RTT today; map/table both treat 0 as "unknown", not "0ms"
+      status: 'open',
+      direction: 'outbound',
+      isTor: p.multiaddr.includes('.onion') || p.multiaddr.includes('/onion'),
+      isBootstrap: false,
+      isBrowser: false,
+      connectedAt: p.connected_since_ms || Date.now(),
+      protocols: p.protocols ?? [],
+    }));
+    setPeerList(mapped);
+    setDataSource('real');
+    setIsLoading(false);
+    return true;
+  }, []);
+
   // Fetch real peer data
   const fetchPeerData = useCallback(async () => {
+    // Real server data always wins when it's available — a browser tab's own
+    // libp2p connections are a fallback for when the API can't be reached,
+    // not a substitute for the real network view.
+    const gotReal = await fetchRealTopology();
+    if (gotReal) return;
+
     if (!node || !isReady) {
       setIsLoading(false);
+      if (dataSource !== 'real') setDataSource('none');
       return;
     }
 
+    setDataSource('browser');
     setIsRefreshing(true);
 
     try {
@@ -523,7 +571,7 @@ export default function NetworkMapModal({ isOpen, onClose, peers: peerCount, blo
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, [node, isReady, bootstrapPeerIds]);
+  }, [node, isReady, bootstrapPeerIds, fetchRealTopology, dataSource]);
 
   // Listen for connection events
   useEffect(() => {
@@ -854,6 +902,30 @@ export default function NetworkMapModal({ isOpen, onClose, peers: peerCount, blo
 
               {/* Global Stats */}
               <div className="flex items-center gap-4">
+                {/* 2026-08-25: honesty badge — a browser tab with zero peers of
+                    its own must never LOOK like a healthy mesh just because the
+                    real node has one. This is the one place that distinction is
+                    visible at a glance. */}
+                <div
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${
+                    dataSource === 'real'
+                      ? 'bg-violet-500/15 text-violet-300 border border-violet-500/30'
+                      : dataSource === 'browser'
+                      ? 'bg-yellow-500/15 text-yellow-300 border border-yellow-500/30'
+                      : 'bg-slate-700/50 text-gray-400 border border-slate-600/30'
+                  }`}
+                  title={
+                    dataSource === 'real'
+                      ? 'Showing the real sigil-g0 node\'s actual connections (sigil-api /v1/network/topology)'
+                      : dataSource === 'browser'
+                      ? 'Real network data unavailable — showing this browser tab\'s own isolated libp2p peers instead'
+                      : 'No peer data yet'
+                  }
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full ${dataSource === 'real' ? 'bg-violet-400 animate-pulse' : dataSource === 'browser' ? 'bg-yellow-400' : 'bg-gray-500'}`} />
+                  {dataSource === 'real' ? 'Live network' : dataSource === 'browser' ? 'Browser-only view' : 'No data'}
+                </div>
+
                 <div className="flex items-center gap-6 px-4 py-2 bg-slate-800/50 rounded-lg border border-amber-500/20">
                   <div className="text-center">
                     <div className="text-xs text-gray-400">Blocks</div>
@@ -869,6 +941,25 @@ export default function NetworkMapModal({ isOpen, onClose, peers: peerCount, blo
                     <div className="text-xs text-gray-400">Peers</div>
                     <div className="text-lg font-bold text-violet-300">{peerList.length}</div>
                   </div>
+                  {realTopology && (
+                    <>
+                      <div className="w-px h-8 bg-amber-500/20" />
+                      <div className="text-center" title="How well the gossip mesh is propagating blocks/transactions right now">
+                        <div className="text-xs text-gray-400">Mesh</div>
+                        <div className={`text-lg font-bold capitalize ${
+                          realTopology.mesh_quality === 'healthy' ? 'text-violet-300' :
+                          realTopology.mesh_quality === 'warming' ? 'text-yellow-300' : 'text-gray-400'
+                        }`}>
+                          {realTopology.mesh_quality}
+                        </div>
+                      </div>
+                      <div className="w-px h-8 bg-amber-500/20" />
+                      <div className="text-center" title="Gossip fan-out — how many peers each message is relayed to">
+                        <div className="text-xs text-gray-400">Fan-out</div>
+                        <div className="text-lg font-bold text-amber-300">{realTopology.fan_out}</div>
+                      </div>
+                    </>
+                  )}
                   <div className="w-px h-8 bg-amber-500/20" />
                   <div className="text-center" title={`Discovered via gossipsub: ${knownBrowserPeers.length} browsers | Directly connected: ${peerList.filter(p => p.isBrowser).length}`}>
                     <div className="text-xs text-gray-400 flex items-center gap-1">
@@ -1188,7 +1279,7 @@ export default function NetworkMapModal({ isOpen, onClose, peers: peerCount, blo
                     );
                   })}
 
-                  <CentralNode position={centerPosition} peerId={peerId} isTorBrowser={isTorBrowser} />
+                  <CentralNode position={centerPosition} peerId={dataSource === 'real' ? realTopology?.self_node_id ?? peerId : peerId} isTorBrowser={isTorBrowser} />
                 </svg>
                     )}
                   </div>

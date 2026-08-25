@@ -122,7 +122,13 @@ pub fn write_miner_status(s: &MinerStats, wallet: &str) {
 }
 
 /// The CPU mining engine: fetch challenge → dual-lane solve → submit → record.
-pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, stop: Arc<AtomicBool>) {
+///
+/// `thread_idx` disambiguates the nonce lane when multiple `mining_loop`
+/// instances run concurrently in the same process (see [`spawn_cpu_workers`])
+/// — without it, N threads mining the same height would all derive the exact
+/// same `pool_base` (seeded only from the process id + height) and redundantly
+/// search the identical nonce range instead of N disjoint ranges.
+pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, stop: Arc<AtomicBool>, thread_idx: u64) {
     let g = ModSquaring::bench_2048(); // must match the node's group
     let client = match MinerClient::new(Endpoints::standard(&url), wallet.clone()) {
         Ok(c) => c,
@@ -165,7 +171,7 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
     /// slices is the tip probe).
     const POOL_CPU_BUDGET: u64 = 4_000_000;
     while !stop.load(Ordering::Relaxed) {
-        let c = match client.fetch_challenge(prev_hps) {
+        let c = match client.fetch_challenge(prev_hps, "cpu") {
             Ok(c) => c,
             Err(e) => {
                 {
@@ -195,14 +201,19 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
         let (block, _hashes, dt) = if pool {
             if pool_h != c.height {
                 pool_h = c.height;
+                // Disjoint per-thread lane: XOR in thread_idx-derived entropy
+                // so concurrent workers in the same process don't redundantly
+                // search the same nonce range.
                 pool_base = ((std::process::id() as u64) << 32)
-                    ^ c.height.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                    ^ c.height.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    ^ thread_idx.wrapping_mul(0xBF58_476D_1CE4_E5B9).rotate_left(21);
             }
             let header = build_header(&c, &wallet);
             // Capped this height → hunt the full block target (shares are done).
             let pool_target = if pool_capped_h == c.height { c.blake4_target } else { c.share_target };
-            let (found, next) =
-                crate::mine_dual_from(&header, pool_target, c.vdf_t, &g, pool_base, POOL_CPU_BUDGET);
+            let (found, next) = crate::mine_dual_from(
+                &header, pool_target, c.blake4_target, c.share_vdf_t, c.vdf_t, &g, pool_base, POOL_CPU_BUDGET,
+            );
             let tried = next.wrapping_sub(pool_base).max(1);
             pool_base = next;
             let dt = t0.elapsed().as_secs_f64().max(1e-9);
@@ -248,11 +259,15 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
             let mut s = stats.lock().unwrap();
             s.connected = true;
             s.last_err = None;
-            s.vdf_t = c.vdf_t;
+            // The actual depth USED for this submission — for a pool share
+            // that's normally share_vdf_t, not the block's c.vdf_t (see
+            // mine_dual_from's grading), so read it back off the assembled
+            // block rather than assuming the block-level constant.
+            s.vdf_t = sub.block.vdf.t;
             s.last_height = c.height;
             s.last_solve_ms = dt * 1000.0;
             s.hashrate = prev_hps; // windowed effective rate, not the per-slice burst
-            s.vdf_rate = c.vdf_t as f64 / dt;
+            s.vdf_rate = sub.block.vdf.t as f64 / dt;
             s.solve_hist.push_back((dt * 1000.0) as u64);
             while s.solve_hist.len() > 80 {
                 s.solve_hist.pop_front();
@@ -307,6 +322,77 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
             stats.lock().unwrap().balance = b;
         }
         write_miner_status(&stats.lock().unwrap(), &wallet);
+    }
+}
+
+/// Spawn N CPU [`mining_loop`] workers and continuously aggregate their
+/// individual hashrate/shares into `agg` — the single stats struct the
+/// caller (TUI or headless `mine-rig`) actually displays.
+///
+/// 2026-08-21 (operator-reported: CPU mining stuck far below the historical
+/// baseline even after the server-side vardiff fix — real numbers, real CPU,
+/// but only using ONE thread the whole time). `mining_loop` was always
+/// single-threaded regardless of how many cores were available — on a modern
+/// multi-core box that caps CPU mining at a small fraction of real capacity
+/// no matter how fast the difficulty math is. This is the fix: run N workers
+/// concurrently, each with its own disjoint nonce lane (via `thread_idx`) and
+/// its own LOCAL `MinerStats` so their per-iteration writes never race each
+/// other, then sum the N locals into `agg` on a timer.
+///
+/// Why not have all N workers write directly into one shared `MinerStats`?
+/// Each `mining_loop` iteration does a plain overwrite (`s.hashrate =
+/// prev_hps`), not an accumulation — N threads sharing one struct would just
+/// show whichever thread wrote most recently, silently hiding (N-1)/N of the
+/// real throughput instead of summing it.
+///
+/// Thread count: `SIGIL_MINE_THREADS` env, default = all available cores.
+pub fn spawn_cpu_workers(url: String, wallet: String, agg: Arc<Mutex<MinerStats>>, stop: Arc<AtomicBool>) {
+    let n = std::env::var("SIGIL_MINE_THREADS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| thread::available_parallelism().map(|p| p.get()).unwrap_or(1));
+    let workers: Vec<Arc<Mutex<MinerStats>>> =
+        (0..n).map(|_| Arc::new(Mutex::new(MinerStats::default()))).collect();
+    for (i, w_stats) in workers.iter().enumerate() {
+        let (u, w, s, st) = (url.clone(), wallet.clone(), w_stats.clone(), stop.clone());
+        thread::spawn(move || mining_loop(u, w, s, st, i as u64));
+    }
+    while !stop.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(300));
+        let (mut hashrate, mut vdf_rate) = (0.0, 0.0);
+        let (mut shares_ok, mut shares_bad) = (0u64, 0u64);
+        let (mut connected, mut balance, mut last_height, mut vdf_t) = (false, 0u128, 0u64, 0u64);
+        let (mut newest_log, mut last_err, mut net_hps) = (None, None, 0.0f64);
+        for w in &workers {
+            let s = w.lock().unwrap();
+            hashrate += s.hashrate;
+            vdf_rate += s.vdf_rate;
+            shares_ok += s.shares_ok;
+            shares_bad += s.shares_bad;
+            connected |= s.connected;
+            balance = balance.max(s.balance);
+            last_height = last_height.max(s.last_height);
+            vdf_t = vdf_t.max(s.vdf_t);
+            if s.net_hps > net_hps { net_hps = s.net_hps; }
+            if let Some(l) = s.log.front() { newest_log = Some(l.clone()); }
+            if last_err.is_none() { last_err = s.last_err.clone(); }
+        }
+        let mut a = agg.lock().unwrap();
+        a.hashrate = hashrate;
+        a.vdf_rate = vdf_rate;
+        a.shares_ok = shares_ok;
+        a.shares_bad = shares_bad;
+        a.connected = connected;
+        a.balance = balance;
+        a.last_height = last_height;
+        a.vdf_t = vdf_t;
+        a.net_hps = net_hps;
+        a.mode = format!("CPU×{n}");
+        a.last_err = last_err;
+        if newest_log.is_some() && newest_log != a.log.front().cloned() {
+            push_log(&mut a.log, newest_log.unwrap());
+        }
     }
 }
 
@@ -382,7 +468,7 @@ pub fn supervisor(
                     thread::spawn(move || gpu_mining_loop(u, w, st, ws, gf, es));
                 }
             } else {
-                thread::spawn(move || mining_loop(u, w, st, ws));
+                thread::spawn(move || spawn_cpu_workers(u, w, st, ws));
             }
         }
         thread::sleep(Duration::from_millis(200));
@@ -467,7 +553,7 @@ pub fn gpu_mining_loop(
     // POOL-SHARES: cap reached this height → block-hunt (see mining_loop).
     let mut pool_capped_h: u64 = u64::MAX;
     while !stop.load(Ordering::Relaxed) {
-        let c = match client.fetch_challenge(prev_hps) {
+        let c = match client.fetch_challenge(prev_hps, "gpu") {
             Ok(c) => c,
             Err(e) => {
                 {
@@ -555,14 +641,22 @@ pub fn gpu_mining_loop(
             pool_base = nonce.wrapping_add(1);
         }
         let dt = t0.elapsed().as_secs_f64().max(1e-9);
-        let block = crate::block_for_nonce(&header, nonce, &g, c.vdf_t); // Lane B on CPU
+        // 2026-08-20 (the VDF-bound hashrate-collapse fix): grade this hit
+        // against the REAL block target before choosing the VDF depth — a
+        // rare lucky find that also clears the harder blake4_target gets the
+        // full block-level VDF (so it can actually be submitted as a block);
+        // an ordinary share gets the much smaller share_vdf_t. See
+        // Challenge::share_vdf_t's doc / mine_dual_from's sibling comment.
+        let hit_word = crate::blake4(&header, nonce);
+        let this_vdf_t = if hit_word <= c.blake4_target { c.vdf_t } else { c.share_vdf_t };
+        let block = crate::block_for_nonce(&header, nonce, &g, this_vdf_t); // Lane B on CPU
         let sub = Submission { height: c.height, wallet: wallet.clone(), block };
         let res = client.submit(&sub);
         {
             let mut s = stats.lock().unwrap();
             s.connected = true;
             s.last_err = None;
-            s.vdf_t = c.vdf_t;
+            s.vdf_t = this_vdf_t;
             s.last_height = c.height;
             s.last_solve_ms = dt * 1000.0;
             // windowed effective GPU rate (falls back to the slice rate until the
@@ -572,7 +666,7 @@ pub fn gpu_mining_loop(
                 prev_hps = nonce_base.wrapping_sub(search_base) as f64 / dt;
             }
             s.hashrate = prev_hps;
-            s.vdf_rate = c.vdf_t as f64 / dt;
+            s.vdf_rate = this_vdf_t as f64 / dt;
             s.solve_hist.push_back((dt * 1000.0) as u64);
             while s.solve_hist.len() > 80 {
                 s.solve_hist.pop_front();

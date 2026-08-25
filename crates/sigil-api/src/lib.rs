@@ -31,7 +31,12 @@ use sigil_state::{SigilState, WalletId, MAX_SUPPLY, NATIVE};
 use sigil_tx::SignedTx;
 
 pub mod mining;
-use mining::{MiningBridge, SubmitOutcome};
+use mining::{MinerKind, MiningBridge, SubmitOutcome};
+
+/// Durable hashrate/miner-count time series backing the wallet's Network
+/// Power modal timeframe selector (24h/7d/30d/1y/all) — see module docs.
+pub mod mining_history;
+use mining_history::MiningHistoryStore;
 
 pub mod send;
 use send::SendBridge;
@@ -101,6 +106,10 @@ pub struct AppState {
     /// visualization — see `dagknight` module docs for why `Braid` itself is
     /// never locked or shared directly.
     pub dagknight: Arc<DagSnapshotBridge>,
+    /// Durable hashrate/miner-count time series — see `mining_history`
+    /// module docs. Populated by `mining_history::spawn_sampler`, which
+    /// polls `mining` on a timer; never written from a request handler.
+    pub history: Arc<MiningHistoryStore>,
 }
 
 impl AppState {
@@ -119,6 +128,11 @@ impl AppState {
             usds_bridge: Arc::new(UsdsBridgeBridge::new(None, None)),
             search: Arc::new(Mutex::new(SearchEngine::new())),
             dagknight: Arc::new(DagSnapshotBridge::new()),
+            // Ephemeral (temp-dir) store — fine for tests/callers that don't
+            // hand in a real snapshot dir. Production construction (main.rs)
+            // builds `AppState` via struct literal with a real on-disk path
+            // instead of calling this constructor.
+            history: Arc::new(MiningHistoryStore::open_ephemeral()),
         }
     }
 }
@@ -1110,6 +1124,12 @@ pub struct ChallengeQuery {
     /// only not-yet-improved.
     #[serde(default)]
     pub rig: Option<String>,
+    /// 2026-08-25 (CPU/GPU miner list): `"cpu"` or `"gpu"`, sent by
+    /// `flux_miner::client::fetch_challenge`. `#[serde(default)]` + `Option`,
+    /// same backward-compat shape as `rig` — an old client omitting this
+    /// just reports as `MinerKind::Unknown`, never fails to parse.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1127,12 +1147,41 @@ pub struct MinersResponse {
     /// hashrate" topbar pill was reading this off a per-miner array this
     /// endpoint never returned; this is that missing per-wallet readback.
     pub my_hps: f64,
+    /// 2026-08-25 (SIGIL Network Power modal): the real per-(wallet, rig)
+    /// list — address, rig id, rate, staleness, CPU/GPU kind. See
+    /// `mining::MiningBridge::miners_snapshot` doc for why this deliberately
+    /// omits blocks-found/rewards-earned/source columns a Quillon port would
+    /// otherwise fabricate.
+    pub miners: Vec<mining::MinerEntry>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct MinersQuery {
     /// 64-hex wallet to look up `my_hps` for. Omit for the aggregate-only view.
     pub wallet: Option<String>,
+}
+
+/// `?range=24h|7d|30d|1y|all` — see `mining_history::HistoryRange`. Missing
+/// or unrecognized defaults to `24h` (the original Quillon modal's only
+/// option), same permissive-default shape as the rest of this API.
+#[derive(Debug, Deserialize)]
+pub struct HistoryQuery {
+    pub range: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HistoryResponse {
+    pub history: Vec<mining_history::HistoryPoint>,
+}
+
+#[flux_api_macros::api(GET, "/v1/mining/hashrate/history", summary = "Durable historical network hashrate/miner-count series (24h/7d/30d/1y/all)")]
+pub async fn mining_hashrate_history(
+    State(st): State<AppState>,
+    Query(q): Query<HistoryQuery>,
+) -> Json<ApiResponse<HistoryResponse>> {
+    let range = mining_history::HistoryRange::parse(q.range.as_deref().unwrap_or("24h"));
+    let history = st.history.query_range(range, now_ms() / 1000);
+    ApiResponse::ok(HistoryResponse { history })
 }
 
 #[flux_api_macros::api(GET, "/v1/mining/challenge", summary = "Dual-lane challenge bound to the braid frontier")]
@@ -1157,7 +1206,8 @@ pub async fn mining_challenge(
             .collect::<String>()
     }).filter(|r| !r.is_empty());
     if let Some(hps) = q.hps {
-        st.mining.report_hps(wallet, rig.clone(), Some(hps), now_ms());
+        let kind = MinerKind::parse(q.kind.as_deref());
+        st.mining.report_hps_kind(wallet, rig.clone(), Some(hps), kind, now_ms());
     }
     match st.mining.challenge_for(wallet, rig, now_ms()) {
         Some(c) => Ok(Json(c)),
@@ -1213,6 +1263,7 @@ pub async fn mining_miners(
         queued_solves: st.mining.queued_solves(),
         rejects,
         my_hps: st.mining.hps_for_wallet_total(wallet),
+        miners: st.mining.miners_snapshot(now_ms()),
     })
 }
 
@@ -1239,6 +1290,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/mining/challenge", get(mining_challenge))
         .route("/v1/mining/submit", post(mining_submit))
         .route("/v1/mining/miners", get(mining_miners))
+        .route("/v1/mining/hashrate/history", get(mining_hashrate_history))
         .route("/v1/dagknight/recent", get(dagknight_recent))
         .route("/v1/bridge/lock", post(bridge_lock_handler))
         .route("/v1/bridge/locks", get(bridge_locks_handler))
@@ -1264,6 +1316,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/mining/challenge", get(mining_challenge))
         .route("/api/v1/mining/submit", post(mining_submit))
         .route("/api/v1/mining/miners", get(mining_miners))
+        .route("/api/v1/mining/hashrate/history", get(mining_hashrate_history))
         .route("/api/v1/dagknight/recent", get(dagknight_recent))
         // Wallet-compatible aliases (2026-08-16): sigil-top's embedded wallet
         // (gui/sigil-wallet-tron-embedded.html) calls these exact /api/v1/...

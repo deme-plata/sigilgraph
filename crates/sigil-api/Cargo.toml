@@ -68,6 +68,10 @@ flux-vdf = { workspace = true }
 flux-api = { path = "../../../flux/crates/flux-api" }
 flux-api-macros = { path = "../../../flux/crates/flux-api-macros" }
 inventory = "0.3"
+# mining_history.rs: durable hashrate/miner-count time series backing the
+# wallet's Network Power modal timeframe selector (24h/7d/30d/1y/all).
+# Same dependency path depth sigil-node/sigil-block-store already use.
+flux-db = { path = "../../../flux/crates/flux-db" }
 # search.rs: /v1/search — the real wallet/tx/block search engine (2026-08-20).
 # Query only; the indexer that populates it lives in sigil-node (search_index.rs),
 # which is the crate that actually owns Block/ChainLog.

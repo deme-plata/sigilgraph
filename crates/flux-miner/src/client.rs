@@ -36,6 +36,23 @@ pub struct Challenge {
     /// so both directions stay wire-compatible with pre-7.1 peers.
     #[serde(default)]
     pub share_target: u64,
+    /// 2026-08-20 (the VDF-bound hashrate-collapse fix): sequential VDF turns
+    /// REQUIRED for a share-grade submission — deliberately much smaller than
+    /// `vdf_t` (the block's depth). Before this field existed, a share was
+    /// held to the SAME `vdf_t` as a full block (see `check_submission_at`'s
+    /// doc) — fine for anti-forgery, but once VARDIFF pushes the hash target
+    /// easy enough that a nonce is found in microseconds, the fixed, purely-
+    /// sequential VDF cost (identical on every CPU/GPU regardless of raw hash
+    /// power) becomes the entire cycle time. Every miner — 5 MH/s or 500
+    /// MH/s — converges to the same VDF-bound share rate, and hashrate stops
+    /// differentiating anyone. A separate, much smaller `share_vdf_t` still
+    /// proves genuine sequential work per share (can't be forged with a t=0
+    /// instant proof) without VDF dominating a cycle that's supposed to be
+    /// dominated by the hash search. 0 when `share_target` is also 0 (solo
+    /// mode; unused). Defaults 0 on deserialize so a pre-fix peer still
+    /// parses this wire format.
+    #[serde(default)]
+    pub share_vdf_t: u64,
 }
 
 /// A solved share submitted back to the node.
@@ -99,14 +116,27 @@ pub fn solve<G: VdfGroup>(c: &Challenge, wallet: &str, g: &G) -> DualLaneBlock {
 /// The consensus gate a node applies to a submitted share — height match, header
 /// binding, then BOTH lanes verified. Shared by the mock node and a real node.
 pub fn check_submission<G: VdfGroup>(g: &G, c: &Challenge, sub: &Submission) -> bool {
-    check_submission_at(g, c, sub, c.blake4_target)
+    check_submission_at(g, c, sub, c.blake4_target, c.vdf_t)
 }
 
-/// [`check_submission`] with an explicit Lane-A target — the ONE verification
-/// rule at two difficulties: the node calls this with `blake4_target` for the
-/// block gate and with `share_target` for the POOL-SHARES sub-difficulty gate,
-/// so a share is held to the identical height/header/VDF binding as a block.
-pub fn check_submission_at<G: VdfGroup>(g: &G, c: &Challenge, sub: &Submission, target: u64) -> bool {
+/// [`check_submission`] with an explicit Lane-A target AND the Lane-B depth
+/// required for THAT target — the ONE verification rule at two difficulties:
+/// the node calls this with `(blake4_target, vdf_t)` for the block gate and
+/// with `(share_target, share_vdf_t)` for the POOL-SHARES sub-difficulty
+/// gate, so a share is held to the identical height/header/VDF-BINDING as a
+/// block, just at a shallower REQUIRED depth (2026-08-20: was always
+/// `c.vdf_t` regardless of `target` — fine for the block gate, but it meant
+/// every pool share paid the full block's fixed sequential VDF cost even
+/// though the hash target was trivially easy, capping every miner's
+/// effective rate at the same hardware-independent VDF-bound ceiling
+/// regardless of raw hash power; see `Challenge::share_vdf_t`'s doc).
+pub fn check_submission_at<G: VdfGroup>(
+    g: &G,
+    c: &Challenge,
+    sub: &Submission,
+    target: u64,
+    required_vdf_t: u64,
+) -> bool {
     if sub.height != c.height {
         return false;
     }
@@ -115,8 +145,11 @@ pub fn check_submission_at<G: VdfGroup>(g: &G, c: &Challenge, sub: &Submission, 
     }
     // Enforce the REQUIRED sequential work (Lane B time): without this, a t=1 (instant)
     // VDF proof would verify as "a valid VDF" and bypass the time lane entirely. The proof
-    // must commit to exactly the challenge's vdf_t squarings.
-    if sub.block.vdf.t != c.vdf_t {
+    // must commit to exactly the REQUIRED depth for this target — the block's `vdf_t` when
+    // checking against `blake4_target`, the (much smaller) `share_vdf_t` when checking
+    // against `share_target`. A share cannot claim the block's depth to "upgrade" itself —
+    // the caller decides which target/depth PAIR it's checking, never a mismatched pair.
+    if sub.block.vdf.t != required_vdf_t {
         return false;
     }
     verify_dual(g, &sub.block, target)
@@ -254,16 +287,23 @@ impl MinerClient {
     }
 
     /// `GET {base}{challenge_path}?wallet=<wallet>` → [`Challenge`].
-    pub fn fetch_challenge(&self, hps: f64) -> anyhow::Result<Challenge> {
+    ///
+    /// `kind` is `"cpu"` or `"gpu"` — the caller always knows unambiguously
+    /// which lane it is (a process runs either `mining_loop` or
+    /// `gpu_mining_loop`, never both), so this is a plain string, not a
+    /// hardware probe. Additive: a pool that doesn't read `&kind=` is
+    /// unaffected, and the server treats a missing/unrecognized value as
+    /// `MinerKind::Unknown` — same backward-compat shape as `&rig=`.
+    pub fn fetch_challenge(&self, hps: f64, kind: &str) -> anyhow::Result<Challenge> {
         // v7.0.9-fix: report our measured hashrate so the node can SUM active miners into the
         // true total network power (returned as Challenge.net_hps). `hps=0` on the first fetch.
         let v = CLIENT_VERSION.get().map(String::as_str).unwrap_or(env!("CARGO_PKG_VERSION"));
         // MULTI-RIG: identify THIS machine, not just the payout wallet — see [`RIG_ID`].
         // Additive; a pool that does not read `rig` is unaffected.
         let url = format!(
-            "{}{}?wallet={}&hps={:.0}&v={}&rig={}",
+            "{}{}?wallet={}&hps={:.0}&v={}&rig={}&kind={}",
             self.endpoints.base_url, self.endpoints.challenge_path,
-            self.wallet, hps.max(0.0), v, rig_id()
+            self.wallet, hps.max(0.0), v, rig_id(), kind
         );
         let c = self.http.get(&url).send()?.error_for_status()?.json::<Challenge>()?;
         Ok(c)
@@ -278,7 +318,10 @@ impl MinerClient {
 
     /// One full iteration: fetch → solve → submit. Returns the node's verdict.
     pub fn mine_one<G: VdfGroup>(&self, g: &G, stats: &mut MineStats) -> anyhow::Result<SubmitResult> {
-        let c = self.fetch_challenge(0.0)?;
+        // Generic single-shot helper, not the production CPU/GPU loops
+        // (`engine.rs`'s `mining_loop`/`gpu_mining_loop`) — genuinely doesn't
+        // know which hardware it's running on, so reports honestly as such.
+        let c = self.fetch_challenge(0.0, "unknown")?;
         stats.challenges_fetched += 1;
         stats.last_height = c.height;
         let t = Instant::now();
@@ -341,6 +384,7 @@ mod tests {
             vdf_t: 800,
             net_hps: 0.0,
             share_target: 0,
+            share_vdf_t: 0, // solo mode (share_target == 0); unused
         };
         let node_challenge = challenge.clone();
 
@@ -386,7 +430,7 @@ mod core_tests {
 
     #[test]
     fn header_is_deterministic_and_binding() {
-        let c = Challenge { height: 42, vdf_input: [9u8; 32], blake4_target: 1, vdf_t: 1, net_hps: 0.0, share_target: 0 };
+        let c = Challenge { height: 42, vdf_input: [9u8; 32], blake4_target: 1, vdf_t: 1, net_hps: 0.0, share_target: 0, share_vdf_t: 0 };
         assert_eq!(build_header(&c, "alice"), build_header(&c, "alice"));
         assert_ne!(build_header(&c, "alice"), build_header(&c, "bob"));
         let mut c2 = c.clone();

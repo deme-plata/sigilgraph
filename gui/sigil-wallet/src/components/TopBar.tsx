@@ -10,6 +10,7 @@ import NetworkMapModal from './NetworkMapModal';
 import ThemeChooserModal from './ThemeChooserModal';
 import MinerLinkModal from './MinerLinkModal';
 import PapersLibraryModal from './PapersLibraryModal';
+import NetworkPowerModal from './NetworkPowerModal';
 import { useMinerLink } from '../hooks/useMinerLink';
 import { sseManager } from '../services/sseManager';
 
@@ -318,6 +319,9 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   const [recentInboxItems, setRecentInboxItems] = useState<any[]>([]);
   const walletAddr = useMemo(() => localStorage.getItem('walletAddress') || '', []);
   const [showMinerLinkModal, setShowMinerLinkModal] = useState(false);
+  // 2026-08-25: the Network Power modal, opened from the "Net Power" / "Miners"
+  // badges below — same trigger points Quillon's TopBar uses for its version.
+  const [showNetworkPowerModal, setShowNetworkPowerModal] = useState(false);
   const [showPapersLibrary, setShowPapersLibrary] = useState(false);
   const [showTaxModal, setShowTaxModal] = useState(false);
   const minerLink = useMinerLink(walletAddr || null);
@@ -1006,19 +1010,24 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
     return () => clearInterval(interval);
   }, [walletAddr]);
 
-  // Network power + miners — same source as MiningDashboard (/api/v1/network/supply)
+  // Network power + miners — sigil-api's real mining aggregate.
+  // 2026-08-25: this used to call Quillon's `/api/v1/network/supply`, which
+  // doesn't exist on sigil-api at all (silently failed every 15s, which is
+  // why these badges always showed "—"). `/v1/mining/miners` is the real
+  // route (see sigil_api::mining_miners), wrapped in the `{ok,data,ts}`
+  // envelope every sigil-api endpoint uses.
   useEffect(() => {
     const fetchNetworkPower = async () => {
       try {
-        const res = await fetch('/api/v1/network/supply');
+        const res = await fetch('/api/v1/mining/miners');
         if (!res.ok) return;
-        const d = await res.json();
-        const data = d?.data ?? d;
+        const envelope = await res.json();
+        const data = envelope?.data ?? {};
         // Only update if non-zero (don't clobber a good value with a stale 0)
-        if (typeof data?.network_hashrate === 'number' && data.network_hashrate > 0)
-          setNetworkHashrate(data.network_hashrate);
-        if (typeof data?.connected_miners === 'number' && data.connected_miners > 0)
-          setNetworkMiners(data.connected_miners);
+        if (typeof data?.net_hps === 'number' && data.net_hps > 0)
+          setNetworkHashrate(data.net_hps);
+        if (typeof data?.live_miners === 'number' && data.live_miners > 0)
+          setNetworkMiners(data.live_miners);
       } catch {}
     };
     fetchNetworkPower();
@@ -1569,12 +1578,16 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
               <span className="text-amber-400/50 text-[9px] font-semibold uppercase tracking-wider">Peers</span>
             </motion.button>
 
-            {/* Network power — always visible */}
-            <motion.div
-              className="flex flex-col items-center px-3 py-1 rounded-xl min-w-[72px]"
+            {/* Network power — always visible, click opens NetworkPowerModal */}
+            <motion.button
+              type="button"
+              onClick={() => setShowNetworkPowerModal(true)}
+              whileHover={{ scale: 1.06 }}
+              whileTap={{ scale: 0.94 }}
+              className="flex flex-col items-center px-3 py-1 rounded-xl min-w-[72px] cursor-pointer"
               style={{ background: 'rgba(139,92,246,0.1)', border: '1px solid rgba(139,92,246,0.28)' }}
               animate={{ borderColor: networkHashrate > 0 ? 'rgba(139,92,246,0.45)' : 'rgba(139,92,246,0.2)' }}
-              title="Total Network Mining Power"
+              title="Total Network Mining Power — click for history"
             >
               <span className="flex items-center gap-1 text-violet-200 text-sm font-bold leading-tight">
                 <motion.span animate={{ scale: [1, 1.15, 1] }} transition={{ duration: 1.8, repeat: Infinity }}>
@@ -1583,21 +1596,25 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                 {networkHashrate > 0 ? formatHashrate(networkHashrate) : '—'}
               </span>
               <span className="text-violet-400/50 text-[9px] font-semibold uppercase tracking-wider">Net Power</span>
-            </motion.div>
+            </motion.button>
 
-            {/* Miners count — always visible */}
-            <motion.div
-              className="flex flex-col items-center px-3 py-1 rounded-xl min-w-[60px]"
+            {/* Miners count — always visible, click opens the same modal */}
+            <motion.button
+              type="button"
+              onClick={() => setShowNetworkPowerModal(true)}
+              whileHover={{ scale: 1.06 }}
+              whileTap={{ scale: 0.94 }}
+              className="flex flex-col items-center px-3 py-1 rounded-xl min-w-[60px] cursor-pointer"
               style={{ background: 'rgba(249,115,22,0.08)', border: '1px solid rgba(249,115,22,0.25)' }}
               animate={{ borderColor: networkMiners > 0 ? 'rgba(249,115,22,0.4)' : 'rgba(249,115,22,0.18)' }}
-              title="Active Miners on Network"
+              title="Active Miners on Network — click for history"
             >
               <span className="flex items-center gap-1 text-orange-200 text-sm font-bold leading-tight">
                 <Pickaxe className="w-3 h-3 text-orange-400" />
                 {networkMiners > 0 ? networkMiners.toLocaleString() : '—'}
               </span>
               <span className="text-orange-400/50 text-[9px] font-semibold uppercase tracking-wider">Miners</span>
-            </motion.div>
+            </motion.button>
 
             {/* Personal hashrate — only when active, click to manage */}
             {personalHashrate > 0 && (
@@ -2565,6 +2582,14 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
         isOpen={showMinerLinkModal}
         onClose={() => setShowMinerLinkModal(false)}
         minerLink={minerLink}
+      />
+
+      {/* Network Power Modal — opened from the "Net Power"/"Miners" badges above */}
+      <NetworkPowerModal
+        isOpen={showNetworkPowerModal}
+        onClose={() => setShowNetworkPowerModal(false)}
+        networkHashRate={networkHashrate}
+        connectedMiners={networkMiners}
       />
 
       {/* Research Library Modal — 78 whitepapers organized by category */}

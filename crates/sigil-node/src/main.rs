@@ -704,6 +704,18 @@ fn run_start() -> Result<()> {
         // Always constructed, inert until the dag-snapshot tick starts
         // writing (dag_mode off ⇒ stays at its zero-value default forever).
         let dag_snapshot_bridge = Arc::new(sigil_api::dagknight::DagSnapshotBridge::new());
+        // Durable hashrate/miner-count time series for the wallet's Network
+        // Power modal (24h/7d/30d/1y/all) — see
+        // sigil_api::mining_history module docs. Lives in its own subdir of
+        // the same snapshot directory search_index already uses; opening it
+        // is cheap (flux-db, same as sigil-block-store) and always
+        // succeeds/creates-on-first-run, so this is unconditional (not
+        // gated on SIGIL_MONEY_API) the same way mining_bridge is — the
+        // sampler itself only ever runs once the money API is up, below.
+        let mining_history_store = Arc::new(
+            sigil_api::mining_history::MiningHistoryStore::open(snap_dir.join("mining-history"))
+                .expect("open mining history store"),
+        );
         let money_state: Option<Arc<std::sync::RwLock<SigilState>>> =
             std::env::var("SIGIL_MONEY_API").ok().filter(|s| !s.is_empty()).map(|addr| {
                 let shared = Arc::new(std::sync::RwLock::new(chain.state_snapshot()));
@@ -719,7 +731,17 @@ fn run_start() -> Result<()> {
                     usds_bridge: Arc::clone(&usds_polygon_bridge),
                     search: Arc::clone(&search_engine),
                     dagknight: Arc::clone(&dag_snapshot_bridge),
+                    history: Arc::clone(&mining_history_store),
                 };
+                // Samples the live mining aggregate once/minute into the
+                // durable store above. Same "reader of already-published
+                // state, never touches consensus" shape as search_index's
+                // indexer — see sigil_api::mining_history::spawn_sampler doc.
+                sigil_api::mining_history::spawn_sampler(
+                    Arc::clone(&mining_bridge),
+                    Arc::clone(&mining_history_store),
+                    std::time::Duration::from_secs(60),
+                );
                 tokio::spawn(async move {
                     if let Err(e) = sigil_api::serve(&addr, app).await {
                         eprintln!("\u{26a0} sigil-api serve failed: {e}");

@@ -1108,42 +1108,53 @@ class QNarwhalKnightAPI {
     return this.request<WalletMiningStats>(`/v1/mining/stats/${encodeURIComponent(walletAddress)}`);
   }
 
-  // v10.3.0: Get hashrate history for Network Power Modal
-  async getHashrateHistory(): Promise<{ success: boolean; history: Array<{ hashrate: number; miners: number; timestamp: number }> }> {
+  // 2026-08-25: durable hashrate/miner-count history for the Network Power
+  // Modal's timeframe selector — `sigil-api`'s `mining_history` module (real
+  // flux-db-backed rollup storage, not a 24h-only localStorage cache).
+  // `range` is one of '24h' | '7d' | '30d' | '1y' | 'all'; server default is
+  // '24h'. sigil-api wraps every response in `{ok, data, error, ts}` (NOT
+  // Quillon's bare `{success, ...}`) — unwrap that here so callers keep the
+  // simple `{success, history}` shape the modal already expects.
+  async getHashrateHistory(range: string = '24h'): Promise<{ success: boolean; history: Array<{ hashrate: number; miners: number; timestamp: number }> }> {
     try {
-      const response = await fetch(`${this.baseURL}/v1/mining/hashrate/history`);
+      const response = await fetch(`${this.baseURL}/v1/mining/hashrate/history?range=${encodeURIComponent(range)}`);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await response.json();
-      return data;
+      const envelope = await response.json();
+      return { success: !!envelope.ok, history: envelope.data?.history ?? [] };
     } catch (error) {
       console.error('[API] getHashrateHistory failed:', error);
       return { success: false, history: [] };
     }
   }
 
-  // v10.3.0: Get full network miner list for Network Power Modal
+  // 2026-08-25: real per-(wallet,rig) miner list, including CPU/GPU kind —
+  // `sigil-api`'s `/v1/mining/miners` (same `{ok,data,ts}` envelope as
+  // above). Deliberately does NOT invent blocks_found/rewards_earned/source
+  // fields Quillon's endpoint has — `MiningBridge` has no per-miner
+  // bookkeeping for those, only network-wide aggregates.
   async getNetworkMiners(): Promise<{
     success: boolean;
     total_miners: number;
     total_hashrate: number;
     miners: Array<{
-      address: string;
-      worker_id: string;
-      worker_name: string | null;
+      wallet: string;
+      rig: string;
       hash_rate: number;
-      blocks_found: number;
-      total_solutions: number;
-      rewards_earned: string;
       last_seen_secs_ago: number;
-      source: string;
-      peer_miner_count?: number;
+      kind: 'cpu' | 'gpu' | 'unknown';
     }>;
   }> {
     try {
       const response = await fetch(`${this.baseURL}/v1/mining/miners`);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await response.json();
-      return data;
+      const envelope = await response.json();
+      const data = envelope.data ?? {};
+      return {
+        success: !!envelope.ok,
+        total_miners: data.live_miners ?? 0,
+        total_hashrate: data.net_hps ?? 0,
+        miners: data.miners ?? [],
+      };
     } catch (error) {
       console.error('[API] getNetworkMiners failed:', error);
       return { success: false, total_miners: 0, total_hashrate: 0, miners: [] };

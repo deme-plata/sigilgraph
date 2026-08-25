@@ -33,7 +33,52 @@ use std::sync::{Mutex, RwLock};
 use flux_miner::client::{build_header, check_submission_at, Challenge, Submission};
 use flux_miner::{blake4, verify_dual, DualLaneBlock};
 use flux_vdf::{ModSquaring, VdfProof};
+use serde::{Deserialize, Serialize};
 use sigil_state::WalletId;
+
+/// What kind of hardware a (wallet, rig) reported itself as mining with, sent
+/// on `/v1/mining/challenge` as `&kind=cpu|gpu` alongside the existing
+/// `&rig=` id (see `flux_miner::client::fetch_challenge`, which knows this
+/// unambiguously — it's compiled as either the CPU or the GPU mining loop,
+/// never both at once for a given process). `Unknown` is the default for any
+/// client older than this field, or one that sends an unrecognized value —
+/// backward-compatible the same way the `rig` field is: an old client is
+/// simply not-yet-improved, never broken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MinerKind {
+    Cpu,
+    Gpu,
+    #[default]
+    Unknown,
+}
+
+impl MinerKind {
+    pub fn parse(s: Option<&str>) -> Self {
+        match s.map(|s| s.to_ascii_lowercase()) {
+            Some(ref s) if s == "cpu" => MinerKind::Cpu,
+            Some(ref s) if s == "gpu" => MinerKind::Gpu,
+            _ => MinerKind::Unknown,
+        }
+    }
+}
+
+/// One live (wallet, rig)'s self-reported rate + hardware kind, as served by
+/// the miner list (left of the graph in the Network Power modal). Every
+/// field here is real, currently-tracked state — `MiningBridge` has no
+/// per-miner blocks-found/rewards-earned bookkeeping (only network-wide
+/// aggregates, see [`MiningBridge::stats`]), so this deliberately does not
+/// invent those columns the way a naive Quillon port would.
+#[derive(Debug, Clone, Serialize)]
+pub struct MinerEntry {
+    /// 64-hex wallet address.
+    pub wallet: String,
+    /// Rig id (`""` for a pre-multi-rig-fix client — see the `hps` field doc).
+    pub rig: String,
+    pub hash_rate: f64,
+    pub last_seen_secs_ago: u64,
+    pub kind: MinerKind,
+}
 
 /// Domain-separated per-height challenge seed, bound to the frontier parent:
 /// `BLAKE3(domain ‖ parent ‖ height)`. Because `parent` is the hash of the block
@@ -474,7 +519,11 @@ pub struct MiningBridge {
     /// client doesn't send one preserves today's (degraded but not broken)
     /// clobbering behavior for pre-fix miners — purely additive, no client is
     /// worse off than before.
-    hps: Mutex<HashMap<(WalletId, String), (f64, u64)>>,
+    /// 2026-08-25 (CPU/GPU miner list): the value tuple gained a third
+    /// [`MinerKind`] slot alongside `(hashes/s, last_report_ms)`. Same
+    /// backward-compat shape as the multi-rig fix above — a client that
+    /// doesn't send `&kind=` just reports `MinerKind::Unknown`, never breaks.
+    hps: Mutex<HashMap<(WalletId, String), (f64, u64, MinerKind)>>,
     rejects: Mutex<HashMap<&'static str, u64>>,
     accepted_blocks: Mutex<u64>,
     accepted_shares: Mutex<u64>,
@@ -668,14 +717,37 @@ impl MiningBridge {
     /// caller (an old client, or a bare wallet-only request) doesn't supply
     /// one — see the [`Self::hps`] field doc for why that's a safe default.
     pub fn report_hps(&self, wallet: Option<WalletId>, rig: Option<String>, hps: Option<f64>, now_ms: u64) -> f64 {
+        // Kept as the exact original 4-arg signature — every pre-existing
+        // caller (tests, `challenge_for`'s internal sum-without-inserting
+        // call) keeps working unchanged. `MinerKind::Unknown` here is a
+        // no-op default: it's only ever written when `hps` is `Some`, so
+        // this only fires for a caller that genuinely doesn't know the kind.
+        // The real CPU/GPU-reporting path is [`Self::report_hps_kind`].
+        self.report_hps_kind(wallet, rig, hps, MinerKind::Unknown, now_ms)
+    }
+
+    /// Same contract as [`Self::report_hps`], plus the reported hardware
+    /// kind — used by the one real ingestion path, `mining_challenge`'s
+    /// handler (`lib.rs`), which has an actual `&kind=` to thread through.
+    /// A `kind` is only ever stored alongside a genuine `hps` report (same
+    /// gate as the rate itself) — a bare probe call never overwrites a
+    /// miner's last-known kind with `Unknown`.
+    pub fn report_hps_kind(
+        &self,
+        wallet: Option<WalletId>,
+        rig: Option<String>,
+        hps: Option<f64>,
+        kind: MinerKind,
+        now_ms: u64,
+    ) -> f64 {
         let Ok(mut m) = self.hps.lock() else { return 0.0 };
         if let (Some(w), Some(r)) = (wallet, hps) {
             if r.is_finite() && r >= 0.0 {
-                m.insert((w, rig.unwrap_or_default()), (r, now_ms));
+                m.insert((w, rig.unwrap_or_default()), (r, now_ms, kind));
             }
         }
-        m.retain(|_, (_, t)| now_ms.saturating_sub(*t) <= HPS_IDLE_MS);
-        m.values().map(|(r, _)| *r).sum()
+        m.retain(|_, (_, t, _)| now_ms.saturating_sub(*t) <= HPS_IDLE_MS);
+        m.values().map(|(r, _, _)| *r).sum()
     }
 
     /// This ONE (wallet, rig)'s own last-reported Lane-A rate, or `0.0` if it
@@ -689,7 +761,7 @@ impl MiningBridge {
     fn hps_for_rig(&self, wallet: Option<WalletId>, rig: Option<&str>) -> f64 {
         let Some(w) = wallet else { return 0.0 };
         let key = (w, rig.unwrap_or("").to_string());
-        self.hps.lock().ok().and_then(|m| m.get(&key).map(|(r, _)| *r)).unwrap_or(0.0)
+        self.hps.lock().ok().and_then(|m| m.get(&key).map(|(r, _, _)| *r)).unwrap_or(0.0)
     }
 
     /// This wallet's TOTAL self-reported rate, summed across every rig
@@ -704,8 +776,36 @@ impl MiningBridge {
     pub fn hps_for_wallet_total(&self, wallet: Option<WalletId>) -> f64 {
         let Some(w) = wallet else { return 0.0 };
         self.hps.lock().ok().map(|m| {
-            m.iter().filter(|((mw, _), _)| *mw == w).map(|(_, (r, _))| *r).sum()
+            m.iter().filter(|((mw, _), _)| *mw == w).map(|(_, (r, _, _))| *r).sum()
         }).unwrap_or(0.0)
+    }
+
+    /// Real per-miner list for the Network Power modal's miner panel: every
+    /// live (unexpired) `(wallet, rig)` entry, with its self-reported rate,
+    /// staleness, and hardware kind. Sorted by hash rate descending (the
+    /// same default sort the frontend's rank badges assume). Deliberately
+    /// does not invent `blocks_found`/`rewards_earned`/`source` columns a
+    /// naive Quillon port would show — `MiningBridge` has no per-miner
+    /// bookkeeping for those (only network-wide aggregates in [`Self::stats`]).
+    pub fn miners_snapshot(&self, now_ms: u64) -> Vec<MinerEntry> {
+        let mut out: Vec<MinerEntry> = self
+            .hps
+            .lock()
+            .map(|m| {
+                m.iter()
+                    .filter(|(_, (_, t, _))| now_ms.saturating_sub(*t) <= HPS_IDLE_MS)
+                    .map(|((wallet, rig), (rate, t, kind))| MinerEntry {
+                        wallet: hex::encode(wallet),
+                        rig: rig.clone(),
+                        hash_rate: *rate,
+                        last_seen_secs_ago: now_ms.saturating_sub(*t) / 1000,
+                        kind: *kind,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort_by(|a, b| b.hash_rate.partial_cmp(&a.hash_rate).unwrap_or(std::cmp::Ordering::Equal));
+        out
     }
 
     /// Build the challenge for `wallet` against the current frontier. `None`
@@ -975,8 +1075,8 @@ impl MiningBridge {
             .lock()
             .map(|m| {
                 let live: Vec<_> =
-                    m.values().filter(|(_, t)| now_ms.saturating_sub(*t) <= HPS_IDLE_MS).collect();
-                (live.iter().map(|(r, _)| *r).sum::<f64>(), live.len())
+                    m.values().filter(|(_, t, _)| now_ms.saturating_sub(*t) <= HPS_IDLE_MS).collect();
+                (live.iter().map(|(r, _, _)| *r).sum::<f64>(), live.len())
             })
             .unwrap_or((0.0, 0));
         let blocks = self.accepted_blocks.lock().map(|n| *n).unwrap_or(0);
@@ -1036,6 +1136,45 @@ mod tests {
         let g = ModSquaring::bench_2048();
         let block = solve(c, &hex::encode(wallet), &g);
         Submission { height: c.height, wallet: hex::encode(wallet), block }
+    }
+
+    /// 2026-08-25 (CPU/GPU miner list): proves the kind reported on
+    /// `/v1/mining/challenge` actually survives into the per-miner list the
+    /// Network Power modal renders — the thing the whole feature is for.
+    #[test]
+    fn miners_snapshot_reports_the_correct_hardware_kind_per_rig() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let b = MiningBridge::new();
+        let wallet: WalletId = [0x42u8; 32];
+        b.report_hps_kind(Some(wallet), Some("rig-cpu".into()), Some(1_000_000.0), MinerKind::Cpu, 0);
+        b.report_hps_kind(Some(wallet), Some("rig-gpu".into()), Some(500_000_000.0), MinerKind::Gpu, 0);
+        // An unreported/old-client rig defaults to Unknown, never crashes or
+        // gets silently dropped.
+        b.report_hps_kind(Some(wallet), Some("rig-old".into()), Some(50_000.0), MinerKind::Unknown, 0);
+
+        let snap = b.miners_snapshot(0);
+        assert_eq!(snap.len(), 3);
+        let by_rig = |rig: &str| snap.iter().find(|m| m.rig == rig).unwrap();
+        assert_eq!(by_rig("rig-cpu").kind, MinerKind::Cpu);
+        assert_eq!(by_rig("rig-gpu").kind, MinerKind::Gpu);
+        assert_eq!(by_rig("rig-old").kind, MinerKind::Unknown);
+        // Sorted by hash rate descending — the GPU rig must lead.
+        assert_eq!(snap[0].rig, "rig-gpu");
+
+        // A bare probe call (hps=None, as challenge_for's internal sum does)
+        // must never clobber an already-known kind with Unknown.
+        b.report_hps(Some(wallet), Some("rig-cpu".into()), None, 0);
+        assert_eq!(b.miners_snapshot(0).iter().find(|m| m.rig == "rig-cpu").unwrap().kind, MinerKind::Cpu);
+    }
+
+    #[test]
+    fn minerkind_parse_is_case_insensitive_and_defaults_to_unknown() {
+        assert_eq!(MinerKind::parse(Some("cpu")), MinerKind::Cpu);
+        assert_eq!(MinerKind::parse(Some("CPU")), MinerKind::Cpu);
+        assert_eq!(MinerKind::parse(Some("gpu")), MinerKind::Gpu);
+        assert_eq!(MinerKind::parse(Some("GPU")), MinerKind::Gpu);
+        assert_eq!(MinerKind::parse(Some("phone")), MinerKind::Unknown);
+        assert_eq!(MinerKind::parse(None), MinerKind::Unknown);
     }
 
     #[test]

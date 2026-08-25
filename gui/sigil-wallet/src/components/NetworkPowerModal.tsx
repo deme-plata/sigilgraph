@@ -1,11 +1,20 @@
-// NetworkPowerModal.tsx — v10.3.15
+// NetworkPowerModal.tsx — SIGIL edition
 // Full-screen slide-in modal showing miner list + hashrate history + radial power ring.
-// Opened by clicking the "Network Hash Rate" card in MiningDashboard.
-// History cached in localStorage to survive node restarts.
+// Opened from the "Network power" / "Miners" badges in the global TopBar.
+//
+// 2026-08-25: history now comes from sigil-api's durable flux-db-backed
+// mining_history store (raw 1-min samples for 48h, hourly rollups for 60d,
+// daily rollups forever) instead of a 24h-only localStorage cache — the
+// timeframe selector below (24h/7d/30d/1y/all) is a real server-side query,
+// not a client-side illusion. The miner list is also real: SIGIL's
+// MiningBridge only tracks (wallet, rig) → (rate, last-seen, cpu/gpu), so
+// this deliberately shows only those fields instead of inventing
+// blocks-found/rewards-earned/source columns the way a naive Quillon port
+// would.
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Search, TrendingUp, Users, Activity, Zap, Award, Clock } from 'lucide-react';
+import { X, Search, TrendingUp, Users, Activity, Zap, Award, Clock, Cpu, MonitorSmartphone } from 'lucide-react';
 import { qnkAPI } from '../services/api';
 
 // ──────────────────────────────────────────────────────────────
@@ -19,17 +28,14 @@ interface NetworkPowerModalProps {
   connectedMiners: number;
 }
 
+type MinerKind = 'cpu' | 'gpu' | 'unknown';
+
 interface ServerMiner {
-  address: string;
-  worker_id: string;
-  worker_name: string | null;
+  wallet: string;
+  rig: string;
   hash_rate: number;
-  blocks_found: number;
-  total_solutions: number;
-  rewards_earned: string;
   last_seen_secs_ago: number;
-  source: string;
-  peer_miner_count?: number;
+  kind: MinerKind;
 }
 
 interface HashrateHistoryPoint {
@@ -38,15 +44,21 @@ interface HashrateHistoryPoint {
   timestamp: number;
 }
 
-type SortKey = 'hash_rate' | 'blocks_found' | 'last_seen_secs_ago';
+type SortKey = 'hash_rate' | 'last_seen_secs_ago';
 type SortDir = 'asc' | 'desc';
+type TimeRange = '24h' | '7d' | '30d' | '1y' | 'all';
 
 // ──────────────────────────────────────────────────────────────
 // Constants
 // ──────────────────────────────────────────────────────────────
 
-const HISTORY_CACHE_KEY = 'qnk_hashrate_history_v2';
-const HISTORY_CACHE_TTL = 86400; // 24h in seconds
+const RANGE_OPTIONS: { key: TimeRange; label: string }[] = [
+  { key: '24h', label: '24H' },
+  { key: '7d', label: '7D' },
+  { key: '30d', label: '30D' },
+  { key: '1y', label: '1Y' },
+  { key: 'all', label: 'ALL' },
+];
 
 // ──────────────────────────────────────────────────────────────
 // Helpers
@@ -72,46 +84,21 @@ function secsAgo(secs: number): string {
   return `${Math.floor(secs / 86400)}d ago`;
 }
 
-function loadCachedHistory(): HashrateHistoryPoint[] {
-  try {
-    const raw = localStorage.getItem(HISTORY_CACHE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as HashrateHistoryPoint[];
-    const cutoff = Math.floor(Date.now() / 1000) - HISTORY_CACHE_TTL;
-    return parsed.filter((p) => p.timestamp >= cutoff);
-  } catch {
-    return [];
-  }
-}
-
-function saveCachedHistory(data: HashrateHistoryPoint[]) {
-  try {
-    localStorage.setItem(HISTORY_CACHE_KEY, JSON.stringify(data));
-  } catch {
-    // Quota exceeded — ignore
-  }
-}
-
-function mergeHistory(
-  cached: HashrateHistoryPoint[],
-  fresh: HashrateHistoryPoint[]
-): HashrateHistoryPoint[] {
-  const seen = new Set<number>();
-  const merged: HashrateHistoryPoint[] = [];
-  for (const p of [...cached, ...fresh]) {
-    // Round timestamp to nearest 60s to deduplicate
-    const bucket = Math.round(p.timestamp / 60) * 60;
-    if (!seen.has(bucket)) {
-      seen.add(bucket);
-      merged.push(p);
-    }
-  }
-  merged.sort((a, b) => a.timestamp - b.timestamp);
-  const cutoff = Math.floor(Date.now() / 1000) - HISTORY_CACHE_TTL;
-  return merged.filter((p) => p.timestamp >= cutoff);
-}
-
 const RANK_BADGE = ['text-yellow-400', 'text-gray-300', 'text-amber-600'];
+
+function kindLabel(kind: MinerKind): string {
+  if (kind === 'cpu') return 'CPU';
+  if (kind === 'gpu') return 'GPU';
+  return '?';
+}
+
+function kindBadgeClass(kind: MinerKind): string {
+  switch (kind) {
+    case 'cpu': return 'bg-quantum-cyan/20 text-quantum-cyan';
+    case 'gpu': return 'bg-violet-500/20 text-violet-400';
+    default: return 'bg-white/10 text-gray-500';
+  }
+}
 
 // ──────────────────────────────────────────────────────────────
 // Main Chart (hashrate + miners line chart)
@@ -276,7 +263,7 @@ function drawMainChart(
 // Radial Power Ring chart (24h by hour — Times-magazine quality)
 // ──────────────────────────────────────────────────────────────
 
-function drawRadialChart(canvas: HTMLCanvasElement, data: HashrateHistoryPoint[]) {
+function drawRadialChart(canvas: HTMLCanvasElement, data: HashrateHistoryPoint[], windowLabel: string) {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
@@ -409,7 +396,7 @@ function drawRadialChart(canvas: HTMLCanvasElement, data: HashrateHistoryPoint[]
   // "24h pattern" label
   ctx.font = `${Math.round(innerR * 0.12)}px sans-serif`;
   ctx.fillStyle = 'rgba(148,163,184,0.4)';
-  ctx.fillText('24h pattern', cx, cy + innerR * 0.52);
+  ctx.fillText(`${windowLabel} pattern`, cx, cy + innerR * 0.52);
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -425,7 +412,9 @@ export default function NetworkPowerModal({
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('hash_rate');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
-  const [historyData, setHistoryData] = useState<HashrateHistoryPoint[]>(() => loadCachedHistory());
+  const [range, setRange] = useState<TimeRange>('24h');
+  const [historyData, setHistoryData] = useState<HashrateHistoryPoint[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [serverMiners, setServerMiners] = useState<ServerMiner[]>([]);
   const [totalMinerCount, setTotalMinerCount] = useState(0);
   const [activeTab, setActiveTab] = useState<'timeline' | 'ring'>('timeline');
@@ -438,18 +427,20 @@ export default function NetworkPowerModal({
 
   useEffect(() => { historyRef.current = historyData; }, [historyData]);
 
-  const fetchHistory = useCallback(async () => {
+  // 2026-08-25: the server now owns durable history (flux-db rollups), so
+  // this just replaces `historyData` with whatever the selected range
+  // returns — no client-side merge/dedup needed, that job moved server-side.
+  const fetchHistory = useCallback(async (r: TimeRange) => {
+    setHistoryLoading(true);
     try {
-      const res = await qnkAPI.getHashrateHistory();
-      if (res.success && res.history) {
-        setHistoryData((prev) => {
-          const merged = mergeHistory(prev, res.history);
-          saveCachedHistory(merged);
-          return merged;
-        });
+      const res = await qnkAPI.getHashrateHistory(r);
+      if (res.success) {
+        setHistoryData(res.history);
       }
     } catch (err) {
       console.error('[NetworkPowerModal] Failed to fetch hashrate history:', err);
+    } finally {
+      setHistoryLoading(false);
     }
   }, []);
 
@@ -465,14 +456,21 @@ export default function NetworkPowerModal({
     }
   }, []);
 
+  // Refetch history whenever the modal opens OR the selected range changes.
   useEffect(() => {
     if (!isOpen) return;
-    fetchHistory();
+    fetchHistory(range);
+  }, [isOpen, range, fetchHistory]);
+
+  // Miner list + a light auto-refresh of the CURRENT range while open (new
+  // samples land server-side every 60s).
+  useEffect(() => {
+    if (!isOpen) return;
     fetchMiners();
-    const hi = setInterval(fetchHistory, 60_000);
+    const hi = setInterval(() => fetchHistory(range), 60_000);
     const mi = setInterval(fetchMiners, 30_000);
     return () => { clearInterval(hi); clearInterval(mi); };
-  }, [isOpen, fetchHistory, fetchMiners]);
+  }, [isOpen, range, fetchHistory, fetchMiners]);
 
   // Derived stats
   const stats = useMemo(() => {
@@ -488,22 +486,18 @@ export default function NetworkPowerModal({
     return { avg, peak, peakMiners, growth, coverage };
   }, [historyData]);
 
+  const rangeLabel = RANGE_OPTIONS.find((o) => o.key === range)?.label ?? range;
+
   // Sorted miner list
   const sortedMiners = useMemo(() => {
     let arr = [...serverMiners];
     if (search) {
       const q = search.toLowerCase();
-      arr = arr.filter(
-        (m) =>
-          m.address.toLowerCase().includes(q) ||
-          (m.worker_name && m.worker_name.toLowerCase().includes(q)) ||
-          m.worker_id.toLowerCase().includes(q)
-      );
+      arr = arr.filter((m) => m.wallet.toLowerCase().includes(q) || m.rig.toLowerCase().includes(q));
     }
     arr.sort((a, b) => {
       let cmp = 0;
       if (sortKey === 'hash_rate') cmp = a.hash_rate - b.hash_rate;
-      else if (sortKey === 'blocks_found') cmp = a.blocks_found - b.blocks_found;
       else cmp = b.last_seen_secs_ago - a.last_seen_secs_ago;
       return sortDir === 'desc' ? -cmp : cmp;
     });
@@ -530,9 +524,9 @@ export default function NetworkPowerModal({
   // Draw ring chart (static — no animation needed)
   useEffect(() => {
     if (activeTab === 'ring' && ringCanvasRef.current) {
-      drawRadialChart(ringCanvasRef.current, historyRef.current);
+      drawRadialChart(ringCanvasRef.current, historyRef.current, rangeLabel);
     }
-  }, [activeTab, historyData]);
+  }, [activeTab, historyData, rangeLabel]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -551,15 +545,6 @@ export default function NetworkPowerModal({
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [isOpen, onClose]);
-
-  const sourceBadge = (source: string) => {
-    switch (source) {
-      case 'local': return 'bg-quantum-green/20 text-quantum-green';
-      case 'p2p':   return 'bg-quantum-cyan/20 text-quantum-cyan';
-      case 'peer':  return 'bg-quantum-purple/20 text-quantum-purple';
-      default:      return 'bg-white/10 text-gray-400';
-    }
-  };
 
   return (
     <AnimatePresence>
@@ -591,31 +576,48 @@ export default function NetworkPowerModal({
                     {connectedMiners} miners
                   </span>
                 )}
-                {historyData.length > 0 && (
-                  <span className="text-[10px] text-gray-600 ml-1">
-                    {historyData.length} samples cached
-                  </span>
+                {historyLoading && (
+                  <span className="text-[10px] text-gray-600 ml-1">loading…</span>
                 )}
               </div>
-              <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-white/10 transition-colors">
-                <X className="w-5 h-5 text-gray-400" />
-              </button>
+              <div className="flex items-center gap-3">
+                {/* Timeframe selector — durable server-side history, not a
+                    24h-only client cache. See mining_history module docs. */}
+                <div className="flex items-center gap-0.5 bg-white/5 border border-white/8 rounded-lg p-0.5">
+                  {RANGE_OPTIONS.map((o) => (
+                    <button
+                      key={o.key}
+                      onClick={() => setRange(o.key)}
+                      className={`px-2.5 py-1 rounded-md text-[10px] font-semibold font-mono transition-colors ${
+                        range === o.key
+                          ? 'bg-quantum-cyan/20 text-quantum-cyan'
+                          : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'
+                      }`}
+                    >
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+                <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-white/10 transition-colors">
+                  <X className="w-5 h-5 text-gray-400" />
+                </button>
+              </div>
             </div>
 
             {/* ── Stats bar ── */}
             {stats && (
               <div className="flex items-center gap-px border-b border-white/5 flex-shrink-0 bg-white/[0.015]">
                 {[
-                  { icon: <Zap className="w-3.5 h-3.5" />, label: 'Peak 24h', value: fmtHash(stats.peak), color: 'text-purple-400' },
-                  { icon: <Activity className="w-3.5 h-3.5" />, label: 'Avg 24h', value: fmtHash(stats.avg), color: 'text-violet-400' },
+                  { icon: <Zap className="w-3.5 h-3.5" />, label: `Peak ${rangeLabel}`, value: fmtHash(stats.peak), color: 'text-purple-400' },
+                  { icon: <Activity className="w-3.5 h-3.5" />, label: `Avg ${rangeLabel}`, value: fmtHash(stats.avg), color: 'text-violet-400' },
                   { icon: <Users className="w-3.5 h-3.5" />, label: 'Peak Miners', value: `${stats.peakMiners}`, color: 'text-violet-400' },
                   {
                     icon: <TrendingUp className="w-3.5 h-3.5" />,
-                    label: '24h Change',
+                    label: `${rangeLabel} Change`,
                     value: `${stats.growth >= 0 ? '+' : ''}${stats.growth?.toFixed(1)}%`,
                     color: stats.growth >= 0 ? 'text-violet-400' : 'text-red-400',
                   },
-                  { icon: <Clock className="w-3.5 h-3.5" />, label: 'History', value: `${Math.round(stats.coverage)} min`, color: 'text-purple-400' },
+                  { icon: <Clock className="w-3.5 h-3.5" />, label: 'Samples', value: `${Math.round(stats.coverage)}`, color: 'text-purple-400' },
                   { icon: <Award className="w-3.5 h-3.5" />, label: 'Current', value: fmtHash(networkHashRate), color: 'text-yellow-400' },
                 ].map((s, i) => (
                   <div key={i} className="flex-1 flex items-center gap-2 px-4 py-2.5">
@@ -650,19 +652,18 @@ export default function NetworkPowerModal({
                       type="text"
                       value={search}
                       onChange={(e) => setSearch(e.target.value)}
-                      placeholder="Filter by address or worker…"
+                      placeholder="Filter by wallet or rig…"
                       className="w-full pl-8 pr-3 py-1.5 bg-white/5 border border-white/8 rounded-lg text-xs text-white placeholder-gray-600 focus:outline-none focus:border-quantum-cyan/40"
                     />
                   </div>
                 </div>
 
-                <div className="grid grid-cols-[36px_1fr_90px_58px_60px_42px] gap-0.5 px-4 pb-1 text-[9px] text-gray-600 uppercase tracking-wider select-none flex-shrink-0">
+                <div className="grid grid-cols-[36px_1fr_82px_60px_46px] gap-0.5 px-4 pb-1 text-[9px] text-gray-600 uppercase tracking-wider select-none flex-shrink-0">
                   <span>#</span>
                   <span>Miner</span>
                   <button onClick={() => handleSort('hash_rate')} className="text-left hover:text-gray-400">Hash{sortArrow('hash_rate')}</button>
-                  <button onClick={() => handleSort('blocks_found')} className="text-left hover:text-gray-400">Blk{sortArrow('blocks_found')}</button>
                   <button onClick={() => handleSort('last_seen_secs_ago')} className="text-left hover:text-gray-400">Seen{sortArrow('last_seen_secs_ago')}</button>
-                  <span>Src</span>
+                  <span>HW</span>
                 </div>
 
                 <div className="flex-1 overflow-y-auto min-h-0 px-2">
@@ -673,25 +674,28 @@ export default function NetworkPowerModal({
                   ) : (
                     sortedMiners.map((miner, idx) => (
                       <div
-                        key={`${miner.address}-${miner.worker_id}`}
-                        className="grid grid-cols-[36px_1fr_90px_58px_60px_42px] gap-0.5 items-center px-2 py-1.5 rounded-md hover:bg-white/[0.04] transition-colors text-xs"
+                        key={`${miner.wallet}-${miner.rig}`}
+                        className="grid grid-cols-[36px_1fr_82px_60px_46px] gap-0.5 items-center px-2 py-1.5 rounded-md hover:bg-white/[0.04] transition-colors text-xs"
                       >
                         <span className={`font-mono font-bold text-[10px] ${idx < 3 ? RANK_BADGE[idx] : 'text-gray-600'}`}>
                           {idx < 3 ? ['1st','2nd','3rd'][idx] : `#${idx+1}`}
                         </span>
                         <div className="flex flex-col truncate">
-                          <span className="text-gray-300 font-mono truncate text-[10px]" title={miner.address}>
-                            {truncAddr(miner.address)}
+                          <span className="text-gray-300 font-mono truncate text-[10px]" title={miner.wallet}>
+                            {truncAddr(miner.wallet)}
                           </span>
-                          {miner.worker_name && (
-                            <span className="text-[9px] text-gray-600 truncate">{miner.worker_name}</span>
+                          {miner.rig && (
+                            <span className="text-[9px] text-gray-600 truncate">{miner.rig}</span>
                           )}
                         </div>
                         <span className="text-purple-400 font-mono text-[10px]">{fmtHash(miner.hash_rate)}</span>
-                        <span className="text-gray-500 font-mono text-[10px]">{miner.blocks_found}</span>
                         <span className="text-gray-600 font-mono text-[9px]">{secsAgo(miner.last_seen_secs_ago)}</span>
-                        <span className={`text-[8px] px-1 py-0.5 rounded text-center ${sourceBadge(miner.source)}`}>
-                          {miner.source}
+                        <span
+                          className={`flex items-center justify-center gap-0.5 text-[8px] px-1 py-0.5 rounded ${kindBadgeClass(miner.kind)}`}
+                          title={miner.kind === 'unknown' ? 'Hardware not reported (older miner client)' : undefined}
+                        >
+                          {miner.kind === 'gpu' ? <MonitorSmartphone className="w-2.5 h-2.5" /> : <Cpu className="w-2.5 h-2.5" />}
+                          {kindLabel(miner.kind)}
                         </span>
                       </div>
                     ))
@@ -723,7 +727,7 @@ export default function NetworkPowerModal({
                     }`}
                   >
                     <Activity className="w-3.5 h-3.5" />
-                    24h Power Ring
+                    Power Ring
                   </button>
                   <div className="ml-auto flex items-center gap-3 text-[10px]">
                     {activeTab === 'timeline' && (
@@ -733,7 +737,7 @@ export default function NetworkPowerModal({
                       </>
                     )}
                     {activeTab === 'ring' && (
-                      <span className="text-gray-600">Hourly hashrate distribution — brighter = more power</span>
+                      <span className="text-gray-600">Hourly distribution across the {rangeLabel} window — brighter = more power</span>
                     )}
                   </div>
                 </div>
@@ -759,17 +763,17 @@ export default function NetworkPowerModal({
                           <div className="text-sm font-bold text-purple-400 font-mono">
                             {stats ? fmtHash(stats.peak) : '--'}
                           </div>
-                          <div className="text-[9px] text-gray-600 mt-0.5">last 24h</div>
+                          <div className="text-[9px] text-gray-600 mt-0.5">last {rangeLabel}</div>
                         </div>
                         <div className="bg-white/[0.025] border border-white/[0.06] rounded-xl p-3">
                           <div className="text-[9px] text-gray-600 uppercase tracking-wider mb-1.5">Avg Hashrate</div>
                           <div className="text-sm font-bold text-violet-400 font-mono">
                             {stats ? fmtHash(stats.avg) : '--'}
                           </div>
-                          <div className="text-[9px] text-gray-600 mt-0.5">24h average</div>
+                          <div className="text-[9px] text-gray-600 mt-0.5">{rangeLabel} average</div>
                         </div>
                         <div className="bg-white/[0.025] border border-white/[0.06] rounded-xl p-3">
-                          <div className="text-[9px] text-gray-600 uppercase tracking-wider mb-1.5">24h Trend</div>
+                          <div className="text-[9px] text-gray-600 uppercase tracking-wider mb-1.5">{rangeLabel} Trend</div>
                           <div className={`text-sm font-bold font-mono ${stats && stats.growth >= 0 ? 'text-violet-400' : 'text-red-400'}`}>
                             {stats ? `${stats.growth >= 0 ? '+' : ''}${stats.growth?.toFixed(1)}%` : '--'}
                           </div>

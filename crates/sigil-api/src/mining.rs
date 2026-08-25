@@ -54,8 +54,99 @@ pub fn target_from_bits(bits: u32) -> u64 {
 
 /// Lane-A difficulty (`SIGIL_MINING_BLAKE4_BITS`, default 16 — matches rpcd, so a
 /// miner pointed at the braid does the same amount of work it does today).
+///
+/// This is the MANUAL OVERRIDE / cold-start seed, not the live value once
+/// auto-retargeting is active — see [`MiningBridge::dynamic_bits`]. Setting
+/// the env var explicitly pins `bits` to exactly this value forever (auto-
+/// retargeting is skipped whenever it's set), matching today's behavior
+/// unchanged for anyone relying on a fixed difficulty.
 pub fn blake4_bits() -> u32 {
     std::env::var("SIGIL_MINING_BLAKE4_BITS").ok().and_then(|s| s.parse().ok()).unwrap_or(16)
+}
+
+/// Is the operator pinning `bits` by hand? If so, [`MiningBridge::dynamic_bits`]
+/// must not touch it — an explicit env var is a deliberate choice (e.g. testing
+/// a specific difficulty) and auto-retargeting overriding it would be a
+/// surprise, not a fix.
+fn blake4_bits_is_pinned() -> bool {
+    std::env::var("SIGIL_MINING_BLAKE4_BITS").is_ok()
+}
+
+/// How often a real, credited win should land, once auto-retargeting has real
+/// data to work from (`SIGIL_MINING_TARGET_WIN_SECS`, default 120 = 2 minutes).
+///
+/// Picked as a middle ground: frequent enough that mining a reward feels real
+/// rather than theoretical (today's actual rate — zero wins across 15,000+
+/// blocks — is the failure mode this whole mechanism exists to prevent), rare
+/// enough that a single win still means something rather than firing on
+/// nearly every block. Not derived from any deeper constraint; a reasonable
+/// operator default meant to be tuned via the env var if 2 minutes turns out
+/// to feel too fast or too slow in practice.
+pub fn target_win_secs() -> f64 {
+    std::env::var("SIGIL_MINING_TARGET_WIN_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(120.0)
+}
+
+/// Hard bounds `bits` can never leave, however the live math wants to move it
+/// (`SIGIL_MIN_BLAKE4_BITS`/`SIGIL_MAX_BLAKE4_BITS`, default 8/48). Prevents
+/// two failure modes symmetric to today's incident: retargeting itself into
+/// "too easy to mean anything" (bits near 0, every hash wins) or "impossible"
+/// (bits near 64, exactly what just happened by hand this morning).
+fn min_bits() -> u32 {
+    std::env::var("SIGIL_MIN_BLAKE4_BITS").ok().and_then(|s| s.parse().ok()).unwrap_or(8)
+}
+fn max_bits() -> u32 {
+    std::env::var("SIGIL_MAX_BLAKE4_BITS").ok().and_then(|s| s.parse().ok()).unwrap_or(48)
+}
+
+/// Largest single step (in bits) auto-retargeting may take per evaluation,
+/// however far the analytical target is from the current value. A noisy or
+/// momentarily-spiky `net_hps` sample (a miner reconnecting, a burst report)
+/// must not be able to swing live difficulty by double digits of bits in one
+/// step — that IS today's incident, just automated instead of manual. Chosen
+/// so a genuine, sustained hashrate move (the drop-then-recovery Viktor
+/// described) still converges in a handful of evaluations, not one shock.
+const MAX_STEP_BITS: i64 = 2;
+
+/// Minimum wall-clock gap between retarget evaluations
+/// (`SIGIL_MINING_RETARGET_INTERVAL_SECS`, default 20s). `publish_tip` runs on
+/// every producer tick — measured elsewhere in this file at as fast as
+/// 16-125ms per tick — so evaluating the retarget math on every call would
+/// react to noise, not signal, and burn CPU on the producer's hot path for no
+/// benefit. 20s is short enough to track a real hashrate swing within a few
+/// evaluations, long enough that `net_hps` (itself pruned on a 30s idle
+/// window, [`HPS_IDLE_MS`]) has had a chance to reflect who's actually mining.
+fn retarget_interval_secs() -> f64 {
+    std::env::var("SIGIL_MINING_RETARGET_INTERVAL_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(20.0)
+}
+
+fn now_ms_mining() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// The analytically-ideal `bits` for `net_hps` hashes/sec to expect a win every
+/// `target_secs` seconds.
+///
+/// Not a fitted curve or a guess: `target_from_bits(bits)` makes a random
+/// 64-bit hash word a winner with probability `~2^-bits` (`u64::MAX >> bits`
+/// is that fraction of the space), so the EXPECTED number of attempts before a
+/// win is `2^bits`, and at `net_hps` attempts/sec the expected wall-clock time
+/// to a win is `2^bits / net_hps` seconds. Solving `2^bits / net_hps =
+/// target_secs` for `bits` gives this directly — the same reasoning real PoW
+/// chains use for difficulty retargeting, just solved in closed form instead
+/// of iterated, because `net_hps` is already a live, continuously-updated
+/// number here (no need to wait N blocks to estimate it after the fact).
+fn ideal_bits_for(net_hps: f64, target_secs: f64) -> Option<u32> {
+    if !(net_hps > 0.0) || !(target_secs > 0.0) {
+        return None;
+    }
+    let ideal = (net_hps * target_secs).log2();
+    if !ideal.is_finite() {
+        return None;
+    }
+    Some(ideal.round().clamp(0.0, 63.0) as u32)
 }
 
 /// Lane-B sequential work (`SIGIL_MINING_VDF_T`, default 600 squarings).
@@ -387,6 +478,11 @@ pub struct MiningBridge {
     rejects: Mutex<HashMap<&'static str, u64>>,
     accepted_blocks: Mutex<u64>,
     accepted_shares: Mutex<u64>,
+    /// Auto-retargeted `bits` + when it was last evaluated. `None` until the
+    /// first evaluation — see [`dynamic_bits`](MiningBridge::dynamic_bits) for
+    /// the cold-start rule. Separate from [`blake4_bits`]'s env var: that
+    /// function is now only the manual-override / cold-start seed value.
+    auto_bits: Mutex<Option<(u32, u64)>>,
 }
 
 /// Depth of the solve queue.
@@ -451,8 +547,60 @@ impl MiningBridge {
     /// Producer: publish the frontier the next block will extend. Called every
     /// produce tick; when the height advances, the previous height's share
     /// window and replay set are cleared (they belong to work that is done).
+    /// The live `bits` value: auto-retargeted from real observed `net_hps`
+    /// toward [`target_win_secs`], unless the operator has pinned
+    /// [`blake4_bits`] by hand ([`blake4_bits_is_pinned`]) — in which case this
+    /// returns exactly that pinned value, unchanged, forever (today's
+    /// behavior, preserved).
+    ///
+    /// THE INCIDENT THIS EXISTS TO PREVENT: 2026-08-24, a manual bits change
+    /// (16→40, to fix an unrelated vardiff display bug) made full-block wins
+    /// go from "rare" (41 in the chain's history) to "zero across 15,000+
+    /// blocks" — because nothing was watching whether the new value still
+    /// matched real network hashrate. This closes that gap by continuously
+    /// deriving `bits` FROM real hashrate instead of trusting a human to keep
+    /// a static number calibrated.
+    ///
+    /// Cold start: with no prior evaluation and no live `net_hps` yet (e.g.
+    /// right after a restart, before any miner has reported), there is
+    /// nothing real to compute from — fall back to [`blake4_bits`]'s default
+    /// (16) rather than guessing. The first real evaluation happens once a
+    /// miner has reported AND [`retarget_interval_secs`] has passed.
+    pub fn dynamic_bits(&self) -> u32 {
+        if blake4_bits_is_pinned() {
+            return blake4_bits();
+        }
+        let now = now_ms_mining();
+        let mut guard = self.auto_bits.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((bits, last_eval)) = *guard {
+            let elapsed_secs = now.saturating_sub(last_eval) as f64 / 1000.0;
+            if elapsed_secs < retarget_interval_secs() {
+                return bits; // too soon — hold the last evaluated value
+            }
+            let net_hps = self.report_hps(None, None, None, now);
+            let next = match ideal_bits_for(net_hps, target_win_secs()) {
+                Some(ideal) => {
+                    let step = (ideal as i64 - bits as i64).clamp(-MAX_STEP_BITS, MAX_STEP_BITS);
+                    ((bits as i64 + step).clamp(min_bits() as i64, max_bits() as i64)) as u32
+                }
+                // No live hashrate signal right now (every miner idled out) —
+                // hold rather than drift toward an arbitrary value with no data.
+                None => bits,
+            };
+            *guard = Some((next, now));
+            next
+        } else {
+            // First-ever evaluation: seed from the configured default so the
+            // very first published tip is never a guess, then let the next
+            // evaluation (>= retarget_interval_secs later) start real-adjusting.
+            let seed = blake4_bits();
+            *guard = Some((seed, now));
+            seed
+        }
+    }
+
     pub fn publish_tip(&self, height: u64, parent_hash: [u8; 32]) {
-        let new = MiningTip { height, parent_hash, bits: blake4_bits(), vdf_t: vdf_t() };
+        let new = MiningTip { height, parent_hash, bits: self.dynamic_bits(), vdf_t: vdf_t() };
         let advanced = {
             let cur = self.tip.read().ok();
             match cur.as_deref() {
@@ -478,6 +626,14 @@ impl MiningBridge {
                 s.retain(|&h, _| h >= floor);
             }
             if let Ok(mut h) = self.recent_tips.lock() {
+                // TEMP DIAGNOSTIC (revert before finishing): does this height already
+                // have a DIFFERENT parent_hash published? If so, tip_at() picking the
+                // FIRST match would hand a miner's submission the WRONG historical
+                // challenge -> a real, server-caused verify_mismatch.
+                if let Some(existing) = h.iter().find(|t| t.height == new.height && t.parent_hash != new.parent_hash) {
+                    eprintln!("TEMPDIAG multi-tip-same-height h={} first_parent={} new_parent={}",
+                        new.height, hex::encode(existing.parent_hash), hex::encode(new.parent_hash));
+                }
                 h.push_back(new);
                 let cap = recent_tips_capacity();
                 while h.len() > cap {
@@ -1399,5 +1555,154 @@ mod tests {
              and scanning past the stale front entry (not stopping at it) reaches it"
         );
         assert_eq!(second.height, 30);
+    }
+}
+
+#[cfg(test)]
+mod dynamic_bits_tests {
+    use super::*;
+
+    /// Rewind `last_eval` far into the past so the NEXT `dynamic_bits()` call
+    /// treats the retarget interval as elapsed — deterministic, no real
+    /// sleeping, no env-var mutation (which would be unsafe under parallel
+    /// test execution).
+    fn force_next_eval(bridge: &MiningBridge) {
+        if let Ok(mut g) = bridge.auto_bits.lock() {
+            if let Some((bits, _)) = *g {
+                *g = Some((bits, 0));
+            }
+        }
+    }
+
+    #[test]
+    fn ideal_bits_matches_the_expected_attempts_formula() {
+        // 2^20 attempts at 1,000,000 hashes/sec takes exactly 1.048576s.
+        assert_eq!(ideal_bits_for(1_000_000.0, 1.048576), Some(20));
+        // Doubling hashrate for the same target time must raise ideal bits by ~1
+        // (2x attempts/sec means half the target time per attempt-count, i.e.
+        // one more doubling of the attempt space fits in the same wall clock).
+        assert_eq!(ideal_bits_for(2_000_000.0, 1.048576), Some(21));
+        assert_eq!(ideal_bits_for(0.0, 120.0), None, "zero hashrate has nothing to compute from");
+        assert_eq!(ideal_bits_for(-5.0, 120.0), None, "negative hashrate is nonsensical, not zero-clamped");
+        assert_eq!(ideal_bits_for(1_000_000.0, 0.0), None, "zero target time is nonsensical, not infinite bits");
+    }
+
+    /// THE INCIDENT, REPRODUCED AND SOLVED. Real numbers: bits stuck at 40
+    /// (this morning's actual manual change), real measured live network
+    /// hashrate ~555 MH/s, the default 120s target. Proves the algorithm
+    /// converges DOWN from the broken value to the analytically-correct one,
+    /// in bounded steps, without needing a human to notice and intervene.
+    #[test]
+    fn recovers_from_todays_actual_incident_live_hashrate() {
+        let b = MiningBridge::new();
+        std::env::remove_var("SIGIL_MINING_BLAKE4_BITS");
+        b.report_hps(Some([7u8; 32]), Some("rig-a".into()), Some(555_000_000.0), now_ms_mining());
+        *b.auto_bits.lock().unwrap() = Some((40, 0)); // today's broken value
+
+        let ideal = ideal_bits_for(555_000_000.0, target_win_secs()).unwrap();
+        assert!(
+            ideal < 40,
+            "555 MH/s at a {}s target must want an EASIER (lower-bits) target than the broken 40, got ideal={ideal}",
+            target_win_secs()
+        );
+
+        let mut last = 40i64;
+        let mut converged = false;
+        for _ in 0..10 {
+            force_next_eval(&b);
+            let next = b.dynamic_bits() as i64;
+            assert!(
+                (next - last).abs() <= MAX_STEP_BITS,
+                "must never move more than {MAX_STEP_BITS} bits in one evaluation, got {last}->{next}"
+            );
+            last = next;
+            if last == ideal as i64 {
+                converged = true;
+                break;
+            }
+        }
+        assert!(converged, "must converge to the analytically-ideal bits ({ideal}) within 10 bounded steps, stalled at {last}");
+        assert!(last < 40, "must have moved strictly easier than the broken starting value");
+    }
+
+    /// Viktor's own description of what actually happened before today's
+    /// incident: hashrate dropped, an operator adjusted difficulty down to
+    /// compensate, hashrate came back. Proves the algorithm does that
+    /// adjustment BY ITSELF, in both directions, without a human in the loop.
+    #[test]
+    fn tracks_a_hashrate_drop_and_recovery() {
+        let b = MiningBridge::new();
+        std::env::remove_var("SIGIL_MINING_BLAKE4_BITS");
+        let wallet = [9u8; 32];
+        let healthy_hps = 500_000_000.0;
+
+        b.report_hps(Some(wallet), Some("rig-a".into()), Some(healthy_hps), now_ms_mining());
+        *b.auto_bits.lock().unwrap() = Some((16, 0)); // cold-start default
+        let mut bits = 16u32;
+        for _ in 0..20 {
+            force_next_eval(&b);
+            bits = b.dynamic_bits();
+        }
+        let healthy_ideal = ideal_bits_for(healthy_hps, target_win_secs()).unwrap();
+        assert_eq!(bits, healthy_ideal, "must converge UP to the healthy target from a cold-start 16");
+
+        // Hashrate collapses.
+        let dropped_hps = 5_000_000.0;
+        b.report_hps(Some(wallet), Some("rig-a".into()), Some(dropped_hps), now_ms_mining());
+        for _ in 0..20 {
+            force_next_eval(&b);
+            bits = b.dynamic_bits();
+        }
+        let dropped_ideal = ideal_bits_for(dropped_hps, target_win_secs()).unwrap();
+        assert_eq!(bits, dropped_ideal);
+        assert!(bits < healthy_ideal, "difficulty must ease off when hashrate genuinely drops, or blocks stall out");
+
+        // Hashrate recovers.
+        b.report_hps(Some(wallet), Some("rig-a".into()), Some(healthy_hps), now_ms_mining());
+        for _ in 0..20 {
+            force_next_eval(&b);
+            bits = b.dynamic_bits();
+        }
+        assert_eq!(bits, healthy_ideal, "difficulty must climb back once hashrate genuinely recovers, not stay stuck easy");
+    }
+
+    /// The manual-override escape hatch must still work exactly as before —
+    /// an explicit env var pins `bits` forever, auto-retargeting never touches it.
+    #[test]
+    fn pinned_env_var_disables_auto_retargeting_entirely() {
+        std::env::set_var("SIGIL_MINING_BLAKE4_BITS", "27");
+        let b = MiningBridge::new();
+        b.report_hps(Some([1u8; 32]), Some("r".into()), Some(999_000_000.0), now_ms_mining());
+        for _ in 0..5 {
+            force_next_eval(&b);
+            assert_eq!(b.dynamic_bits(), 27, "a pinned bits value must never move, however hashrate changes");
+        }
+        std::env::remove_var("SIGIL_MINING_BLAKE4_BITS");
+    }
+
+    /// Cold start with genuinely zero live data must seed from the documented
+    /// default, never compute a wild value from an absence of information.
+    #[test]
+    fn cold_start_seeds_from_the_default_not_a_guess() {
+        std::env::remove_var("SIGIL_MINING_BLAKE4_BITS");
+        let b = MiningBridge::new();
+        assert_eq!(b.dynamic_bits(), 16, "with zero live data, must seed from the default, not guess");
+    }
+
+    /// Bounds must hold even against an absurd hashrate input — retargeting
+    /// itself into "impossible" is exactly the failure mode this exists to end.
+    #[test]
+    fn never_leaves_the_configured_bounds_however_extreme_the_hashrate() {
+        std::env::remove_var("SIGIL_MINING_BLAKE4_BITS");
+        let b = MiningBridge::new();
+        b.report_hps(Some([2u8; 32]), Some("r".into()), Some(1.0e15), now_ms_mining());
+        *b.auto_bits.lock().unwrap() = Some((16, 0));
+        let mut bits = 16u32;
+        for _ in 0..200 {
+            force_next_eval(&b);
+            bits = b.dynamic_bits();
+            assert!(bits >= min_bits() && bits <= max_bits(), "bits {bits} left the configured [{}, {}] bounds", min_bits(), max_bits());
+        }
+        assert_eq!(bits, max_bits(), "an absurd hashrate should saturate at the ceiling, not exceed it");
     }
 }

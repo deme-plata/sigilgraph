@@ -56,6 +56,20 @@ const REQ_TIMEOUT: Duration = Duration::from_secs(30);
 const PEER_WAIT_TRIES: u32 = 20;
 const PEER_WAIT_STEP: Duration = Duration::from_millis(500);
 
+/// 2026-08-25 (root-caused live): sigil-node's own backfill handler runs a
+/// per-peer + global throttle on EXPENSIVE (full-block) serves —
+/// `SIGIL_SERVE_EXPENSIVE_THROTTLE_MS`, 120ms default — and a throttled
+/// request is silently DROPPED, never queued (see main.rs's comment at that
+/// throttle: "safe, because every caller here already retries on its own
+/// cadence"). This module was not retrying at all, so any drop — whether
+/// from this peer's own throttle window or from cross-peer contention on the
+/// shared global floor, both real and observed live on a busy producer —
+/// looked identical to a genuine network failure and aborted sync entirely.
+/// `RETRY_BACKOFF` is comfortably above the 120ms default throttle window so
+/// a retry lands outside it even under load.
+const CHUNK_RETRIES: u32 = 6;
+const RETRY_BACKOFF: Duration = Duration::from_millis(400);
+
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
     let s = s.trim();
     if s.is_empty() || s.len() % 2 != 0 {
@@ -114,6 +128,71 @@ async fn fetch_snapshot(url: &str) -> Option<ChainTip> {
     Some(snap.restore())
 }
 
+/// Fetch one `[from..=to]` chunk, retrying up to `CHUNK_RETRIES` times with
+/// `RETRY_BACKOFF` between attempts. A retry re-reads the peer list each time
+/// (not just the request) since the set of connected peers can change between
+/// attempts. Returns `None` only once every retry has failed — at that point
+/// this really does look like a broken peer or a dead network, not a throttle
+/// drop the caller was supposed to shrug off.
+async fn fetch_chunk_with_retry(
+    net: &flux_p2p::NetworkManager,
+    from: u64,
+    to: u64,
+    applied_so_far: u64,
+) -> Option<Vec<Block>> {
+    let payload = match serde_json::to_vec(&BackfillReq { from, to, headers_only: false, codec: 0 }) {
+        Ok(p) => p,
+        Err(e) => {
+            // A local serialization failure is not a network hiccup — retrying
+            // it would just fail the same way every time.
+            crate::tlog!("[producer-sync] ⚠ encode BackfillReq [{from}..{to}] failed: {e} — refusing to start ({applied_so_far} blocks were replayed before this)");
+            return None;
+        }
+    };
+
+    for attempt in 1..=CHUNK_RETRIES {
+        let peer = match net.connected_peers().first().cloned() {
+            Some(p) => p,
+            None => {
+                crate::tlog!("[producer-sync] ⚠ tail replay: no connected peers (attempt {attempt}/{CHUNK_RETRIES}) at height={from}");
+                tokio::time::sleep(RETRY_BACKOFF).await;
+                continue;
+            }
+        };
+
+        let outcome = tokio::time::timeout(REQ_TIMEOUT, net.send_request(peer, payload.clone())).await;
+        match outcome {
+            Ok(Ok(bytes)) => match bincode::deserialize::<FullBackfillResp>(&bytes) {
+                Ok(r) => return Some(r.blocks),
+                Err(e) => {
+                    crate::tlog!(
+                        "[producer-sync] ⚠ decode BackfillResp [{from}..{to}] failed (attempt {attempt}/{CHUNK_RETRIES}): {e} — \
+                         likely the server's per-peer/global expensive-serve throttle dropped this request; retrying"
+                    );
+                }
+            },
+            Ok(Err(e)) => {
+                crate::tlog!("[producer-sync] ⚠ request [{from}..{to}] failed (attempt {attempt}/{CHUNK_RETRIES}): {e} — retrying");
+            }
+            Err(_) => {
+                crate::tlog!(
+                    "[producer-sync] ⚠ request [{from}..{to}] timed out (attempt {attempt}/{CHUNK_RETRIES}) — \
+                     likely the server's per-peer/global expensive-serve throttle dropped this request; retrying"
+                );
+            }
+        }
+        if attempt < CHUNK_RETRIES {
+            tokio::time::sleep(RETRY_BACKOFF).await;
+        }
+    }
+
+    crate::tlog!(
+        "[producer-sync] ⚠ request [{from}..{to}] failed after {CHUNK_RETRIES} attempts — refusing to start \
+         ({applied_so_far} blocks were replayed before this)"
+    );
+    None
+}
+
 /// Tail-replay from `chain.height()` up to whatever the connected mesh has, fetching
 /// FULL blocks (not headers) and applying each one in order. `net` must already be
 /// started. Returns the count of blocks applied (0 is a valid, successful "already
@@ -148,38 +227,10 @@ async fn tail_replay(net: &flux_p2p::NetworkManager, chain: &mut ChainTip) -> Op
     loop {
         let from = chain.height();
         let to = from + TAIL_CHUNK - 1;
-        let payload = match serde_json::to_vec(&BackfillReq { from, to, headers_only: false, codec: 0 }) {
-            Ok(p) => p,
-            Err(e) => {
-                crate::tlog!("[producer-sync] ⚠ encode BackfillReq [{from}..{to}] failed: {e} — refusing to start ({applied} blocks were replayed before this)");
-                return None;
-            }
-        };
-        let peer = match net.connected_peers().first().cloned() {
-            Some(p) => p,
-            None => {
-                crate::tlog!("[producer-sync] ⚠ tail replay: lost all peers mid-sync at height={from} — refusing to start ({applied} blocks were replayed before this)");
-                return None;
-            }
-        };
 
-        let outcome = tokio::time::timeout(REQ_TIMEOUT, net.send_request(peer, payload)).await;
-        let blocks: Vec<Block> = match outcome {
-            Ok(Ok(bytes)) => match bincode::deserialize::<FullBackfillResp>(&bytes) {
-                Ok(r) => r.blocks,
-                Err(e) => {
-                    crate::tlog!("[producer-sync] ⚠ decode BackfillResp [{from}..{to}] failed: {e} — refusing to start ({applied} blocks were replayed before this, height={from} of an unknown-but-higher real tip)");
-                    return None;
-                }
-            },
-            Ok(Err(e)) => {
-                crate::tlog!("[producer-sync] ⚠ request [{from}..{to}] failed: {e} — refusing to start ({applied} blocks were replayed before this)");
-                return None;
-            }
-            Err(_) => {
-                crate::tlog!("[producer-sync] ⚠ request [{from}..{to}] timed out — refusing to start ({applied} blocks were replayed before this)");
-                return None;
-            }
+        let blocks = match fetch_chunk_with_retry(net, from, to, applied).await {
+            Some(b) => b,
+            None => return None,
         };
 
         if blocks.is_empty() {

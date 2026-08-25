@@ -1,0 +1,16 @@
+[package]
+name = "sigil-finality"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Phase 1 of SIGIL True Instant Finality (docs/research/SIGIL_INSTANT_FINALITY_v0.tex): FinalityVote/FinalityCertificate types, Ed25519 sign/verify (same scheme + style as sigil-node::producer_signing), and quorum/certificate assembly reusing sigil-braidpool::committee's existing bft_active/max_byzantine/availability_quorum math (not reimplemented). Pure library code, zero consensus effect — nothing here is wired into Braid::insert() or any live sync/production path. That wiring is Phase 3, explicitly out of scope (see the design doc's phased plan)."
+
+[dependencies]
+blake3 = { workspace = true }
+serde = { workspace = true }
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+sigil-header = { path = "../sigil-header" }
+sigil-braidpool = { path = "../sigil-braidpool" }
+
+[dev-dependencies]
+rand = { workspace = true }

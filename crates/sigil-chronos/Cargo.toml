@@ -100,6 +100,10 @@ winterfell = "0.9"
 sigil-bank   = { path = "../sigil-bank" }
 sigil-tip-proof = { path = "../sigil-tip-proof" }
 sigil-dagknight = { path = "../sigil-dagknight" }
+# finality_gadget.rs: drives Phase 1 of SIGIL True Instant Finality
+# (docs/research/SIGIL_INSTANT_FINALITY_v0.tex) — pure library code, zero
+# consensus effect, see sigil-finality's own crate doc.
+sigil-finality = { path = "../sigil-finality" }
 # CHRONOS × BraidPool: the availability layer (sharded ingest, DRR scheduler,
 # shard-bound acks, RS dissemination, repair) under the real sim + real p2p.
 sigil-braidpool = { path = "../sigil-braidpool" }

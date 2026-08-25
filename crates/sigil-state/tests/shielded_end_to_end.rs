@@ -136,6 +136,7 @@ fn shield_then_spend_is_accepted_and_mutates_state() {
             cm_outs: cm_outs.clone(),
             fee: SHIELDED_FEE,
             proof,
+            note_ciphertexts: vec![],
         }],
     )
     .expect("an honest shielded spend must be accepted");
@@ -169,6 +170,7 @@ fn replaying_a_nullifier_is_refused() {
         cm_outs: cm_outs.clone(),
         fee: SHIELDED_FEE,
         proof: p,
+        note_ciphertexts: vec![],
     };
 
     apply(&mut state, 3, vec![spend(proof.clone())]).expect("first spend ok");
@@ -204,6 +206,7 @@ fn unknown_anchor_is_refused() {
             cm_outs,
             fee: SHIELDED_FEE,
             proof,
+            note_ciphertexts: vec![],
         }],
     )
     .expect_err("SECURITY: an unknown anchor must be refused");
@@ -225,7 +228,7 @@ fn tampered_proof_is_refused() {
     let err = apply(
         &mut state,
         3,
-        vec![StateMutation::ShieldedSpend { anchor, nullifier: nf, cm_outs, fee: SHIELDED_FEE, proof }],
+        vec![StateMutation::ShieldedSpend { anchor, nullifier: nf, cm_outs, fee: SHIELDED_FEE, proof, note_ciphertexts: vec![] }],
     )
     .expect_err("SECURITY: a tampered proof must be refused");
     assert!(
@@ -261,6 +264,7 @@ fn inflated_output_commitments_are_refused_at_the_chokepoint() {
             cm_outs: inflated,
             fee: SHIELDED_FEE,
             proof,
+            note_ciphertexts: vec![],
         }],
     )
     .expect_err("SECURITY: inflated output commitments must be refused — this is a mint vector");
@@ -390,7 +394,7 @@ fn shielded_pool_survives_the_snapshot_round_trip() {
     apply(
         &mut restored,
         3,
-        vec![StateMutation::ShieldedSpend { anchor, nullifier: nf, cm_outs, fee: SHIELDED_FEE, proof }],
+        vec![StateMutation::ShieldedSpend { anchor, nullifier: nf, cm_outs, fee: SHIELDED_FEE, proof, note_ciphertexts: vec![] }],
     )
     .expect("a spend must still verify against a restored anchor");
     assert!(restored.shielded().is_spent(&nf));
@@ -411,7 +415,7 @@ fn a_nonstandard_fee_is_refused() {
     let err = apply(
         &mut state,
         3,
-        vec![StateMutation::ShieldedSpend { anchor, nullifier: nf, cm_outs, fee: 1_337, proof }],
+        vec![StateMutation::ShieldedSpend { anchor, nullifier: nf, cm_outs, fee: 1_337, proof, note_ciphertexts: vec![] }],
     )
     .expect_err("SECURITY: a chosen fee is a fingerprint and must be refused");
     assert!(matches!(err, CommitError::Shielded(_)), "got {err:?}");
@@ -524,7 +528,7 @@ fn a_registered_miner_is_paid_into_the_pool() {
     let pk = to_wire(acct.public_key());
 
     let mut state = SigilState::default();
-    apply(&mut state, 1, vec![StateMutation::RegisterShieldedAddress { wallet: MINER, pk_shield: pk }])
+    apply(&mut state, 1, vec![StateMutation::RegisterShieldedAddress { wallet: MINER, pk_shield: pk, pk_encrypt: None }])
         .expect("registration");
     assert_eq!(state.shielded().shielded_address(&MINER), Some(pk));
     assert_eq!(
@@ -554,4 +558,68 @@ fn a_registered_miner_is_paid_into_the_pool() {
         Some(recomputed),
         "the miner must be able to FIND its reward from (height, pk) with no side channel"
     );
+}
+
+/// REPLAY: the live 2026-08-24/25 incident, at the chokepoint directly. `Shield` carries
+/// no nullifier — unlike `ShieldedSend`/`Unshield`, which are proven safe against exactly
+/// this above (`replaying_a_nullifier_is_refused`) — so nothing stopped the identical
+/// signed `Shield{from, amount, cm, fee}` from landing a second time at a later height,
+/// which is precisely what `sigil-api`'s pending-pool retry queue produces: it re-embeds
+/// a not-yet-confirmed tx into every new candidate block until `confirm_applied` fires,
+/// tens of minutes (hundreds of blocks) later. Live, this produced 513 duplicate
+/// applications of a single 100-unit deposit before the retry queue's own age/attempt
+/// cap finally gave up. This test is the two-heights minimal case that mechanism reduces
+/// to: the SAME `StateMutation::Shield` landing at height 2 and again at height 3.
+#[test]
+fn replaying_a_shield_at_a_later_height_is_refused_not_double_applied() {
+    let mut state = SigilState::default();
+    apply(
+        &mut state,
+        1,
+        vec![StateMutation::SetBalance { wallet: ALICE, token: NATIVE, amount: 100_000 }],
+    )
+    .expect("fixture funding");
+
+    let cm = [0x42; 32];
+    let shield = || StateMutation::Shield { from: ALICE, amount: 100, cm };
+
+    // First landing — the honest, original application. Must behave exactly like any
+    // other Shield (see `shielded_fixture`'s own assertions).
+    apply(&mut state, 2, vec![shield()]).expect("the first application must succeed");
+    assert_eq!(state.balance_of(&ALICE, &NATIVE), 100_000 - 100, "debited once");
+    assert_eq!(state.shielded().value_locked(), 100, "locked once");
+    assert_eq!(state.shielded().len(), 1, "one note");
+
+    // Second landing at a LATER height: the exact same signed transaction, riding a
+    // different, honestly-minted candidate block — not a different sender, not a forged
+    // proof, just the producer's own retry queue re-embedding the identical payload.
+    let err = apply(&mut state, 3, vec![shield()])
+        .expect_err("SECURITY: a replayed Shield must be refused, not re-applied");
+    assert!(
+        matches!(
+            err,
+            CommitError::Shielded(sigil_state::shielded::ShieldedError::DuplicateCommitment(c))
+                if c == cm
+        ),
+        "expected DuplicateCommitment({cm:02x?}), got {err:?}"
+    );
+
+    // THE ACTUAL BUG, pinned directly: state after the refused replay must be identical
+    // to state after just the first, honest application. This also pins the mutation
+    // ORDER inside the `Shield` arm — `append_note` (the fallible, now-duplicate-checked
+    // call) must run BEFORE `lock_value`, or a rejected replay would still leave
+    // `value_locked` incremented (the 21M supply-cap accounting silently drifting
+    // upward on every refused replay attempt, forever, even though nothing was actually
+    // debited or minted).
+    assert_eq!(
+        state.balance_of(&ALICE, &NATIVE),
+        100_000 - 100,
+        "a refused replay must not debit a second time"
+    );
+    assert_eq!(
+        state.shielded().value_locked(),
+        100,
+        "a refused replay must not phantom-inflate locked value"
+    );
+    assert_eq!(state.shielded().len(), 1, "a refused replay must not mint a second note");
 }

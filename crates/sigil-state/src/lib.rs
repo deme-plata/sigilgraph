@@ -550,7 +550,15 @@ pub enum StateMutation {
     /// The key is PUBLIC by nature — `compress2` is one-way, so publishing it never
     /// exposes the spend key. What it does expose is that this wallet intends to receive
     /// privately, which is unavoidable: someone has to be told where to send.
-    RegisterShieldedAddress { wallet: WalletId, pk_shield: [u8; 32] },
+    RegisterShieldedAddress {
+        wallet: WalletId,
+        pk_shield: [u8; 32],
+        /// The X25519 note-delivery key (`pk_enc`), added alongside `pk_shield` so
+        /// senders can seal a ciphertext this wallet can trial-decrypt. `#[serde(default)]`
+        /// keeps this readable against any snapshot written before delivery existed.
+        #[serde(default)]
+        pk_encrypt: Option<[u8; 32]>,
+    },
 
     /// PV-1: move value from a transparent wallet into the shielded pool.
     ///
@@ -616,6 +624,15 @@ pub enum StateMutation {
         /// nullifier derivation, position binding, output↔commitment binding, and the
         /// per-output range bound. Verified by the chokepoint — never trusted.
         proof: Vec<u8>,
+        /// Per-output delivery ciphertext (`sigil_shield::note_cipher::NoteCiphertext`
+        /// JSON), same order as `cm_outs`. `None`/absent means the sender did not attach
+        /// one for that output (e.g. their own change note, whose preimage they already
+        /// hold). NOT a proof input — the STARK does not see this — purely auxiliary
+        /// data riding on the transaction so the recipient's wallet can discover the
+        /// payment without an out-of-band channel. `#[serde(default)]` so a
+        /// pre-delivery snapshot still deserializes.
+        #[serde(default)]
+        note_ciphertexts: Vec<Option<String>>,
     },
 
     /// PV-1: move value out of the shielded pool into a transparent wallet.
@@ -1088,8 +1105,11 @@ pub fn commit_state_transition(
             }
 
             // ── PV-1 shielded pool ───────────────────────────────────────────────────
-            StateMutation::RegisterShieldedAddress { wallet, pk_shield } => {
+            StateMutation::RegisterShieldedAddress { wallet, pk_shield, pk_encrypt } => {
                 state.shielded.set_address(wallet, pk_shield);
+                if let Some(pk_enc) = pk_encrypt {
+                    state.shielded.set_encrypt_key(wallet, pk_enc);
+                }
             }
 
             StateMutation::Shield { from, amount, cm } => {
@@ -1109,8 +1129,20 @@ pub fn commit_state_transition(
                     .ok_or_else(|| CommitError::DeltaInvariant(format!(
                         "shield: wallet holds {bal} but tried to shield {amount}"
                     )))?;
-                state.shielded.lock_value(amount)?;
+                // `append_note` FIRST, deliberately, and before any mutation in this arm
+                // (2026-08-25). It is the only fallible call a REPLAYED `Shield` can now
+                // hit (`DuplicateCommitment` — see that error's docs), and a `Shield` has
+                // no nullifier check to reject the replay earlier the way `Unshield` and
+                // `ShieldedSpend` do. Ordering it last (as it was) meant `lock_value` had
+                // already incremented `value_locked` — the accounting the 21M supply cap
+                // is checked against — before the rejection, so every replayed attempt
+                // would leave a phantom locked-value increment behind even though nothing
+                // was actually debited or minted. Doing the fallible append first means a
+                // rejection (duplicate commitment, or the pre-existing pool-full case)
+                // leaves state completely untouched, matching every other refused
+                // mutation in this function.
                 state.shielded.append_note(cm)?;
+                state.shielded.lock_value(amount)?;
                 state.set_balance(from, NATIVE, after);
                 state.shielded.remember_anchor_dirty();
             }
@@ -1124,7 +1156,7 @@ pub fn commit_state_transition(
                 state.shielded.remember_anchor_dirty();
             }
 
-            StateMutation::ShieldedSpend { anchor, nullifier, cm_outs, fee, proof } => {
+            StateMutation::ShieldedSpend { anchor, nullifier, cm_outs, fee, proof, note_ciphertexts } => {
                 // FIXED FEE. A freely-chosen fee is public and therefore a fingerprint:
                 // amounts stay hidden while the fee quietly identifies the sender. One
                 // mandatory value makes it carry no information.
@@ -1152,8 +1184,9 @@ pub fn commit_state_transition(
                     .map_err(|e| CommitError::ShieldedProofRejected { reason: e.to_string() })?;
                 // 4. Only now mutate.
                 state.shielded.spend_nullifier(nullifier)?;
-                for cm in &cm_outs {
-                    state.shielded.append_note(*cm)?;
+                for (i, cm) in cm_outs.iter().enumerate() {
+                    let ct = note_ciphertexts.get(i).cloned().flatten();
+                    state.shielded.append_note_with_delivery(*cm, ct)?;
                 }
                 // The fee leaves the shielded domain and is credited transparently.
                 if fee > 0 {

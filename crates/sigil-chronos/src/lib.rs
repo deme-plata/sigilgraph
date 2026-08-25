@@ -45,6 +45,17 @@ pub mod zkflux;
 /// Shielded pool at scale: per-block anchor cost, and a measured value-correlation
 /// adversary — privacy as a number rather than an argument.
 pub mod shielded_pool;
+/// Honest coverage note on the block_store wedge bug (chronos cannot drive it
+/// today — binary-only crate + wrong sim-node shape) plus a real, passing
+/// scenario for the adjacent question this crate CAN test: does state-layer
+/// divergence detection have the same one-shot blind spot the heal marker did.
+pub mod wedge_writer_gap;
+/// SIGIL True Instant Finality, Phase 1 (docs/research/SIGIL_INSTANT_FINALITY_v0.tex):
+/// drives the real `sigil-finality` quorum/certificate assembler through the
+/// design doc's own adversarial scenario list — normal quorum, <=f/>f offline,
+/// equivocation, and a replay of the exact deep-reorder mechanism that forced
+/// `BraidConfig::final_depth` 64->512.
+pub mod finality_gadget;
 
 use serde::{Deserialize, Serialize};
 

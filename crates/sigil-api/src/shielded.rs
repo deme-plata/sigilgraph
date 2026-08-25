@@ -938,4 +938,115 @@ mod tests {
         let _ = b.submit_shield(&from, 5_000, &"dd".repeat(32), 0, "", 1); // no signature -> refused
         assert!(!*fired.lock().unwrap(), "hook must not fire for a rejected submit");
     }
+
+    /// THE LIVE INCIDENT (2026-08-24/25), reproduced through the REAL retry/re-embed
+    /// queue AND the REAL state chokepoint — neither mocked. `snapshot_for_mint` keeps
+    /// re-including a not-yet-confirmed `Shield` in every new candidate block until
+    /// `confirm_applied` fires, and that only happens once ONE containing block crosses
+    /// this chain's real finality depth (~512 blocks / ~30 minutes at the measured live
+    /// block rate — see `MAX_AGE`'s doc comment above). A single producer with no
+    /// competing candidates mints one new, distinct, immutable block per tick, so dozens
+    /// to hundreds of separate blocks can each independently carry the IDENTICAL Shield
+    /// payload before the first one is ever confirmed. This test drives exactly that
+    /// shape: submit once, call `snapshot_for_mint` twice (two producer ticks before
+    /// confirmation), and apply each resulting candidate's tx through the real
+    /// `sigil-tx`/`sigil-state` chokepoint at consecutive heights, matching what
+    /// `dag_drain_apply` does when it walks the settled spine. Live, this exact
+    /// mechanism produced 513 duplicate applications of one 100-unit test deposit before
+    /// `MAX_ATTEMPTS`/`MAX_AGE` finally gave up.
+    #[test]
+    fn the_retry_queue_re_embeds_but_the_chokepoint_refuses_the_replay() {
+        use sigil_state::{
+            commit_state_transition, CommitError, SigilState, StateMutation, StateTransition,
+            NATIVE,
+        };
+
+        let bridge = ShieldedBridge::new();
+        let (sk, from) = signer();
+        let cm = "cc".repeat(32);
+        let sig = sign_shield(&sk, &from, 100, &cm, 0, 1);
+        bridge.submit_shield(&from, 100, &cm, 0, &sig, 1).expect("queued");
+
+        // Funded WELL beyond the single 100-unit shield amount — deliberately, so that a
+        // second (buggy, pre-fix) application would have had every OTHER opportunity to
+        // succeed. If the wallet held only exactly 100, a naive test would "pass" even
+        // with the underlying bug still present, because the second application would be
+        // refused by ordinary insufficient-balance accounting rather than by the replay
+        // guard this test exists to pin — which proves nothing about the actual fix. The
+        // live incident's wallet clearly had headroom for this too: it sustained 513
+        // consecutive 100-unit debits.
+        let wallet_id: [u8; 32] = hex::decode(&from).unwrap().try_into().unwrap();
+        let mut state = SigilState::default();
+        commit_state_transition(
+            &mut state,
+            &StateTransition {
+                at_height: 1,
+                mutations: vec![StateMutation::SetBalance {
+                    wallet: wallet_id,
+                    token: NATIVE,
+                    amount: 100_000,
+                }],
+            },
+            1,
+        )
+        .expect("fixture funding");
+
+        // TICK 1: the producer's first candidate — mints, embeds the still-pending tx.
+        let candidate_1 = bridge.snapshot_for_mint();
+        assert_eq!(candidate_1.len(), 1, "one pending tx to embed");
+        // TICK 2, BEFORE confirmation: a SECOND, entirely separate candidate — the
+        // producer's very next tick, built on top of candidate 1 before candidate 1's
+        // own inclusion has come anywhere near crossing final_depth. Same tx, still
+        // pending, re-embedded verbatim.
+        let candidate_2 = bridge.snapshot_for_mint();
+        assert_eq!(candidate_2.len(), 1, "same tx, still not confirmed, embedded again");
+        assert_eq!(
+            candidate_1[0].tx.hash(),
+            candidate_2[0].tx.hash(),
+            "both candidates carry the IDENTICAL payload — this is the re-embed, not two \
+             distinct user actions"
+        );
+
+        let apply_one = |state: &mut SigilState, height: u64, signed: &SignedTx| {
+            let result = sigil_tx::apply_tx_at(state, signed, height).expect("precheck+plan");
+            commit_state_transition(
+                state,
+                &StateTransition { at_height: height, mutations: result.mutations },
+                height,
+            )
+        };
+
+        // HEIGHT 2: candidate 1's block lands first — the honest, original application.
+        apply_one(&mut state, 2, &candidate_1[0]).expect("the first landing must succeed");
+        assert_eq!(state.balance_of(&wallet_id, &NATIVE), 99_900, "debited once");
+        assert_eq!(state.shielded().value_locked(), 100, "locked once");
+        assert_eq!(state.shielded().len(), 1, "one note");
+
+        // HEIGHT 3: candidate 2's block — a SEPARATE, already-minted, honestly-produced
+        // block from the producer's very next tick — lands next. THE BUG: before the
+        // fix, this succeeded too — the wallet has ample balance for a second 100-unit
+        // debit (that's the whole point of funding it at 100_000), so nothing but the
+        // replay guard itself can be what refuses this.
+        let err = apply_one(&mut state, 3, &candidate_2[0])
+            .expect_err("SECURITY: the retry-queue's re-embedded copy must be refused");
+        assert!(
+            matches!(
+                err,
+                CommitError::Shielded(sigil_state::shielded::ShieldedError::DuplicateCommitment(_))
+            ),
+            "expected DuplicateCommitment, got {err:?}"
+        );
+        assert_eq!(state.balance_of(&wallet_id, &NATIVE), 99_900, "no phantom second debit");
+        assert_eq!(state.shielded().value_locked(), 100, "no phantom locked-value inflation");
+        assert_eq!(state.shielded().len(), 1, "no duplicate note");
+
+        // THE OTHER HALF OF THE FIX (`dag.rs`'s `confirm_applied` wiring, 2026-08-24):
+        // once candidate 1 actually lands, the queue must stop offering the tx at all —
+        // without this, tick 3+ would keep re-embedding it forever (bounded only by
+        // MAX_ATTEMPTS/MAX_AGE), manufacturing more doomed candidates for no reason even
+        // though the chokepoint fix above already stops them from landing.
+        bridge.confirm_applied(&[candidate_1[0].tx.hash()]);
+        assert_eq!(bridge.pending_len(), 0, "a confirmed tx must leave the retry queue");
+        assert_eq!(bridge.snapshot_for_mint().len(), 0, "nothing left to re-embed");
+    }
 }

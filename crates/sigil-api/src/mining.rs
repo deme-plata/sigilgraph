@@ -979,22 +979,32 @@ impl MiningBridge {
     }
 }
 
+/// `bridge_at` (and every test module's other env-touching tests) mutate
+/// PROCESS-WIDE `SIGIL_*` env vars — but `cargo test` runs tests in parallel
+/// threads by default, so without serialization two tests can interleave:
+/// one resets `SIGIL_SHARE_EASE_BITS` to `0` while another is mid-assertion
+/// expecting it to still be `8`. Every test that touches these vars
+/// (directly or via `bridge_at`) must hold this lock for the duration.
+/// Caught 2026-08-16 by
+/// `a_reporting_gpu_gets_an_easier_target_than_an_unknown_wallet` flaking
+/// under `cargo test`'s default parallelism — not a logic bug, a missing
+/// guard around genuinely shared mutable state.
+///
+/// 2026-08-25: hoisted from inside `mod tests` to file scope so `mod
+/// dynamic_bits_tests` (a later, separate test module that also mutates
+/// `SIGIL_MINING_BLAKE4_BITS`) can share the SAME lock. Two different
+/// `Mutex`es each guarding "the process environment" would not have
+/// serialized anything — the whole point is one lock per genuinely-shared
+/// resource. `dynamic_bits_tests` had exactly this bug: it mutated the env
+/// var with no lock at all, and flaked under the full suite's parallelism
+/// while passing every time it happened to run alone.
+#[cfg(test)]
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use flux_miner::client::solve;
-
-    /// `bridge_at` (and this module's other env-touching tests) mutate
-    /// PROCESS-WIDE `SIGIL_*` env vars — but `cargo test` runs tests in
-    /// parallel threads by default, so without serialization two tests can
-    /// interleave: one resets `SIGIL_SHARE_EASE_BITS` to `0` while another is
-    /// mid-assertion expecting it to still be `8`. Every test that touches
-    /// these vars (directly or via `bridge_at`) must hold this lock for the
-    /// duration. Caught 2026-08-16 by
-    /// `a_reporting_gpu_gets_an_easier_target_than_an_unknown_wallet` flaking
-    /// under `cargo test`'s default parallelism — not a logic bug, a missing
-    /// guard around genuinely shared mutable state.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn tiny_bits() -> u32 {
         4
@@ -1644,6 +1654,7 @@ mod dynamic_bits_tests {
     /// in bounded steps, without needing a human to notice and intervene.
     #[test]
     fn recovers_from_todays_actual_incident_live_hashrate() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let b = MiningBridge::new();
         std::env::remove_var("SIGIL_MINING_BLAKE4_BITS");
         b.report_hps(Some([7u8; 32]), Some("rig-a".into()), Some(555_000_000.0), now_ms_mining());
@@ -1681,6 +1692,7 @@ mod dynamic_bits_tests {
     /// adjustment BY ITSELF, in both directions, without a human in the loop.
     #[test]
     fn tracks_a_hashrate_drop_and_recovery() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let b = MiningBridge::new();
         std::env::remove_var("SIGIL_MINING_BLAKE4_BITS");
         let wallet = [9u8; 32];
@@ -1720,6 +1732,7 @@ mod dynamic_bits_tests {
     /// an explicit env var pins `bits` forever, auto-retargeting never touches it.
     #[test]
     fn pinned_env_var_disables_auto_retargeting_entirely() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("SIGIL_MINING_BLAKE4_BITS", "27");
         let b = MiningBridge::new();
         b.report_hps(Some([1u8; 32]), Some("r".into()), Some(999_000_000.0), now_ms_mining());
@@ -1734,6 +1747,7 @@ mod dynamic_bits_tests {
     /// default, never compute a wild value from an absence of information.
     #[test]
     fn cold_start_seeds_from_the_default_not_a_guess() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("SIGIL_MINING_BLAKE4_BITS");
         let b = MiningBridge::new();
         assert_eq!(b.dynamic_bits(), 16, "with zero live data, must seed from the default, not guess");
@@ -1743,6 +1757,7 @@ mod dynamic_bits_tests {
     /// itself into "impossible" is exactly the failure mode this exists to end.
     #[test]
     fn never_leaves_the_configured_bounds_however_extreme_the_hashrate() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("SIGIL_MINING_BLAKE4_BITS");
         let b = MiningBridge::new();
         b.report_hps(Some([2u8; 32]), Some("r".into()), Some(1.0e15), now_ms_mining());

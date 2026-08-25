@@ -117,8 +117,21 @@ async fn fetch_snapshot(url: &str) -> Option<ChainTip> {
 /// Tail-replay from `chain.height()` up to whatever the connected mesh has, fetching
 /// FULL blocks (not headers) and applying each one in order. `net` must already be
 /// started. Returns the count of blocks applied (0 is a valid, successful "already
-/// at tip" outcome), or `None` if replay could not even get started (no peers ever
-/// connected).
+/// at tip" outcome) ONLY when the server told us it has nothing more to serve — i.e.
+/// we are genuinely caught up. `None` on EVERY other exit — no peers, a lost
+/// connection mid-sync, a malformed/undecodable response, a request timeout, a block
+/// that fails to apply, or three consecutive rounds with no progress.
+///
+/// 2026-08-25 (live-test finding): the first version of this function returned
+/// `Some(applied)` — "success" — on every one of those error paths too, just with
+/// whatever partial height replay happened to reach. Caught live: a real snapshot +
+/// tail-replay run hit a mid-stream decode error after only 4,096 of the real ~85,000
+/// missing blocks and the caller went on to start producing anyway, from a height
+/// tens of thousands of blocks behind the actual tip — exactly the "silent fork by
+/// construction" this module's own top-level doc warns against. A stall/error partway
+/// through is not a lesser form of success; it is indistinguishable from "the peer or
+/// the network broke," and `sync_chain`'s caller must refuse to start on it exactly as
+/// it would refuse on a snapshot fetch failure.
 async fn tail_replay(net: &flux_p2p::NetworkManager, chain: &mut ChainTip) -> Option<u64> {
     let mut waited = 0u32;
     while net.connected_peers().is_empty() && waited < PEER_WAIT_TRIES {
@@ -138,15 +151,15 @@ async fn tail_replay(net: &flux_p2p::NetworkManager, chain: &mut ChainTip) -> Op
         let payload = match serde_json::to_vec(&BackfillReq { from, to, headers_only: false, codec: 0 }) {
             Ok(p) => p,
             Err(e) => {
-                crate::tlog!("[producer-sync] ⚠ encode BackfillReq [{from}..{to}] failed: {e}");
-                return Some(applied);
+                crate::tlog!("[producer-sync] ⚠ encode BackfillReq [{from}..{to}] failed: {e} — refusing to start ({applied} blocks were replayed before this)");
+                return None;
             }
         };
         let peer = match net.connected_peers().first().cloned() {
             Some(p) => p,
             None => {
-                crate::tlog!("[producer-sync] ⚠ tail replay: lost all peers mid-sync at height={from}");
-                return Some(applied);
+                crate::tlog!("[producer-sync] ⚠ tail replay: lost all peers mid-sync at height={from} — refusing to start ({applied} blocks were replayed before this)");
+                return None;
             }
         };
 
@@ -155,17 +168,17 @@ async fn tail_replay(net: &flux_p2p::NetworkManager, chain: &mut ChainTip) -> Op
             Ok(Ok(bytes)) => match bincode::deserialize::<FullBackfillResp>(&bytes) {
                 Ok(r) => r.blocks,
                 Err(e) => {
-                    crate::tlog!("[producer-sync] ⚠ decode BackfillResp [{from}..{to}] failed: {e} — stopping");
-                    return Some(applied);
+                    crate::tlog!("[producer-sync] ⚠ decode BackfillResp [{from}..{to}] failed: {e} — refusing to start ({applied} blocks were replayed before this, height={from} of an unknown-but-higher real tip)");
+                    return None;
                 }
             },
             Ok(Err(e)) => {
-                crate::tlog!("[producer-sync] ⚠ request [{from}..{to}] failed: {e} — stopping");
-                return Some(applied);
+                crate::tlog!("[producer-sync] ⚠ request [{from}..{to}] failed: {e} — refusing to start ({applied} blocks were replayed before this)");
+                return None;
             }
             Err(_) => {
-                crate::tlog!("[producer-sync] ⚠ request [{from}..{to}] timed out — stopping");
-                return Some(applied);
+                crate::tlog!("[producer-sync] ⚠ request [{from}..{to}] timed out — refusing to start ({applied} blocks were replayed before this)");
+                return None;
             }
         };
 
@@ -187,17 +200,17 @@ async fn tail_replay(net: &flux_p2p::NetworkManager, chain: &mut ChainTip) -> Op
                 }
                 Err(e) => {
                     crate::tlog!(
-                        "[producer-sync] ⚠ apply block h={h} failed: {e} — stopping replay at height={}",
+                        "[producer-sync] ⚠ apply block h={h} failed: {e} — refusing to start (stopped at height={}, {applied} blocks replayed before this)",
                         chain.height()
                     );
-                    return Some(applied);
+                    return None;
                 }
             }
         }
         stall_rounds = if made_progress { 0 } else { stall_rounds + 1 };
         if stall_rounds >= 3 {
-            crate::tlog!("[producer-sync] ⚠ no progress for 3 consecutive rounds — stopping replay");
-            return Some(applied);
+            crate::tlog!("[producer-sync] ⚠ no progress for 3 consecutive rounds — refusing to start ({applied} blocks were replayed before this)");
+            return None;
         }
     }
 }

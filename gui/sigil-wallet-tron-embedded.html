@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#08100d"><meta name="color-scheme" content="dark">
 <title>SIGIL Wallet</title>
 <link rel="icon" type="image/png" sizes="32x32" href="https://sigilgraph.fluxapp.xyz/icons/brand/favicon-32.png?v=1780639379">
 <link rel="icon" type="image/png" sizes="192x192" href="https://sigilgraph.fluxapp.xyz/icons/brand/favicon-192.png?v=1780639379">
@@ -55,6 +56,14 @@ body:not(.view-desktop){display:grid;place-items:center}
 
 /* PHONE */
 .phone{position:relative;z-index:2;width:390px;height:820px;border-radius:42px;background:linear-gradient(180deg,#08121a,#050a0f);border:1px solid var(--line);box-shadow:0 0 0 2px rgba(0,0,0,.6),0 0 60px rgba(33,212,253,.18);padding:14px;overflow:hidden;display:flex;flex-direction:column}
+/* 2026-08-23: .phone's own overflow:hidden clips ALL content to a fixed
+   frame with no way to reach anything past the fold (Assets/Bridge/Nav were
+   simply unreachable on a real phone — reported live). Everything between
+   the pinned header (notch/statusbar/phead) and the pinned bottom .nav now
+   lives in .pscroll, a flex child that actually shrinks (min-height:0 is
+   required for a column-flex child to scroll instead of overflowing its
+   parent) and scrolls on its own — header and nav stay put. */
+.pscroll{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;display:flex;flex-direction:column}
 .notch{position:absolute;top:14px;left:50%;transform:translateX(-50%);width:120px;height:24px;background:#04080c;border-radius:0 0 16px 16px;border:1px solid var(--line);border-top:none;z-index:5}
 .statusbar{display:flex;justify-content:space-between;align-items:center;font-family:'JetBrains Mono';font-size:11px;color:var(--dim);padding:4px 10px 10px}.statusbar b{color:var(--cyan)}
 .phead{display:flex;align-items:center;gap:10px;padding:6px 6px 14px}.phead .brand{font-size:15px}
@@ -160,7 +169,9 @@ body.view-desktop .desktop{display:flex}
 .act-item .ai{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;border:1px solid var(--line)}.act-item .ai .lic{width:16px;height:16px;filter:none}
 .act-item .at{font-size:14px;font-weight:600}.act-item .as{font-family:'JetBrains Mono';font-size:11px;color:var(--dim)}.act-item .av{margin-left:auto;font-family:'JetBrains Mono';font-size:13px;font-weight:600}
 .caption{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:3;font-family:'JetBrains Mono';font-size:11px;color:var(--dim);letter-spacing:1px}.caption b{color:var(--cyan)}
-</style></head>
+</style>
+<link rel="stylesheet" href="/sigil-wallet-codex.css?v=20260819-1">
+</head>
 <body>
 <div class="scene"><div class="aurora"><i></i><i></i><i></i></div></div>
 
@@ -168,21 +179,40 @@ body.view-desktop .desktop{display:flex}
   <div class="notch"></div>
   <div class="statusbar"><span>9:41</span><span>SIGIL·g0 · <b data-blockcount>H …</b></span><span>▮▮▮ 5G</span></div>
   <div class="phead"><img class="markimg" data-brand="flat" alt="SIGIL" style="width:78px;height:78px"><div class="brand">SIGIL<span>·</span>WALLET</div><button class="expand" onclick="setView('desktop')">⤢ desktop</button></div>
+  <div class="pscroll">
+  <div class="dex-ticker dex-ticker-global" aria-label="Open live DEX markets" role="button" tabindex="0" onclick="openSwap()" onkeydown="if(event.key==='Enter'||event.key===' '){openSwap();event.preventDefault()}">
+    <div class="dex-ticker-label"><span>DEX</span><small>markets</small></div>
+    <div class="dex-ticker-window"><div class="dex-ticker-track" data-dex-ticker-track><span class="dex-ticker-loading">loading token pairs…</span></div></div>
+  </div>
   <div class="balance"><div class="lab"><span>total balance</span><span class="vbadge"><i data-lucide="badge-check"></i>verified</span></div><div class="amtbig amt" id="amt">0<small>.00000000 SIGIL</small></div><div class="sub">connecting…</div></div>
   <div id="mineNotice" style="display:none;margin:8px 8px 0;border:1px solid rgba(251,191,36,.32);background:rgba(251,191,36,.06);border-radius:14px;padding:10px 12px;font-family:'JetBrains Mono';font-size:11px;color:var(--gold);line-height:1.5"></div>
-  <div style="display:flex;gap:9px;justify-content:center;margin:12px 8px 2px;font-family:'JetBrains Mono';font-size:11px">
+  <div style="display:flex;gap:9px;flex-wrap:wrap;justify-content:center;margin:12px 8px 2px;font-family:'JetBrains Mono';font-size:11px">
     <a href="flux://enter" style="color:var(--cyan);text-decoration:none;border:1px solid var(--line);background:rgba(33,212,253,.05);border-radius:999px;padding:5px 13px">＋ new wallet</a>
     <a href="#stats" onclick="window.openStats&&window.openStats();return false" style="color:var(--teal);text-decoration:none;border:1px solid var(--line);background:rgba(0,224,198,.05);border-radius:999px;padding:5px 13px">◈ node stats</a>
+    <a href="#power" onclick="window.openPower&&window.openPower();return false" style="color:var(--gold);text-decoration:none;border:1px solid var(--line);background:rgba(251,191,36,.05);border-radius:999px;padding:5px 13px">⚡ network power</a>
   </div>
   <div class="actions">
-    <div class="act"><i class="lic" data-lucide="arrow-up-from-dot"></i><span class="t">Send</span></div>
+    <div class="act" onclick="openSend()"><i class="lic" data-lucide="arrow-up-from-dot"></i><span class="t">Send</span></div>
     <div class="act" onclick="openReceive()"><i class="lic" data-lucide="arrow-down-to-dot"></i><span class="t">Receive</span></div>
     <div class="act" onclick="openSwap()"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div>
     <div class="act" onclick="openMine()"><i class="lic" data-lucide="pickaxe"></i><span class="t">Mine</span></div>
   </div>
   <div class="sect" style="margin:18px 16px 8px"><span>Assets</span><span style="color:var(--cyan)" id="passetsN"></span></div>
   <div class="list" id="passets"></div>
-  <div class="nav"><div class="on"><i class="lic" data-lucide="wallet"></i>Wallet</div><div onclick="window.openSwap&&openSwap()" style="cursor:pointer"><i class="lic" data-lucide="arrow-left-right"></i>Swap</div><div class="soon" title="staking not live on sigil-g0 yet"><i class="lic" data-lucide="layers"></i>Stake</div><div onclick="openSettings()" style="cursor:pointer"><i class="lic" data-lucide="settings"></i>Settings</div></div>
+  <div class="sect" style="margin:18px 16px 8px"><span>🌉 Polygon Bridge</span></div>
+  <div style="margin:0 16px 16px;background:rgba(4,8,12,.55);border:1px solid rgba(33,212,253,.16);border-radius:14px;padding:12px">
+    <div style="font-family:'JetBrains Mono';font-size:10.5px;color:var(--dim);padding:0 0 10px;line-height:1.5">Wrapped SIGIL on Polygon mainnet — real bridge, real contract, nothing locked/minted yet so every address correctly reads 0 today.</div>
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <input id="polyAddrPhone" placeholder="0x… your Polygon address" style="flex:1;min-width:0;background:rgba(4,8,12,.7);border:1px solid rgba(33,212,253,.22);border-radius:8px;color:#cfe9f2;font-family:'JetBrains Mono';font-size:12px;padding:9px 10px;outline:none">
+      <button onclick="window.polyBridgeUseMetaMask('polyAddrPhone')" title="autofill from MetaMask" style="flex:none;background:rgba(33,212,253,.1);border:1px solid rgba(33,212,253,.35);color:#6df3ff;border-radius:8px;padding:0 12px;cursor:pointer;font-size:15px">🦊</button>
+    </div>
+    <button onclick="window.polyBridgeCheck('polyAddrPhone')" style="width:100%;border:1px solid rgba(33,212,253,.45);background:linear-gradient(90deg,rgba(33,212,253,.2),rgba(0,224,198,.13));color:#6df3ff;font-family:'Orbitron';font-weight:700;font-size:11px;letter-spacing:1px;padding:10px;border-radius:8px;cursor:pointer;margin-bottom:10px">CHECK BALANCE</button>
+    <div style="display:flex;align-items:baseline;gap:8px"><span id="polyAddrPhone_out" style="font-family:'Orbitron';font-weight:900;font-size:20px;color:#00e0c6">—</span><span style="font-family:'JetBrains Mono';font-size:10.5px;color:var(--dim)">SIGIL (wrapped)</span></div>
+    <div id="polyAddrPhone_status" style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8;margin-top:6px;line-height:1.5"></div>
+    <button onclick="window.openBridgeFrom('polyAddrPhone')" style="width:100%;margin-top:10px;border:1px solid rgba(0,224,198,.4);background:rgba(0,224,198,.08);color:#00e0c6;font-family:'Orbitron';font-weight:700;font-size:10.5px;letter-spacing:1px;padding:9px;border-radius:8px;cursor:pointer">🌉 BRIDGE MINED SIGIL HERE</button>
+  </div>
+  </div>
+  <div class="nav"><div class="on"><i class="lic" data-lucide="wallet"></i>Wallet</div><div onclick="window.showExplorer&&showExplorer()" style="cursor:pointer"><i class="lic" data-lucide="receipt-text"></i>Activity</div><div onclick="window.openSwap&&openSwap()" style="cursor:pointer"><i class="lic" data-lucide="arrow-left-right"></i>Swap</div><div onclick="openSettings()" style="cursor:pointer"><i class="lic" data-lucide="settings"></i>Settings</div></div>
 </div>
 
 <div class="desktop">
@@ -198,7 +228,8 @@ body.view-desktop .desktop{display:flex}
     <div class="gright">
       <div class="net">grid online</div>
       <div class="pill" title="live mine-chain height · click for network stats" onclick="window.openStats&&window.openStats()" style="border-color:rgba(0,224,198,.4);cursor:pointer"><i class="lic" data-lucide="box" style="width:14px;height:14px;filter:none"></i><b data-blockcount style="color:var(--teal)">H …</b></div>
-      <div class="pill" title="network hashrate — every miner in the live pool window"><i class="lic" data-lucide="activity" style="width:14px;height:14px;filter:none"></i><b data-nethps>…</b></div>
+      <div class="pill" title="network hashrate — click for the Network Power graph" onclick="window.openPower&&window.openPower()" style="border-color:rgba(251,191,36,.4);cursor:pointer"><i class="lic" data-lucide="activity" style="width:14px;height:14px;filter:none"></i><b data-nethps>…</b></div>
+      <div class="pill" title="live miners — wallets with an unexpired hashrate report in the pool window"><i class="lic" data-lucide="users" style="width:14px;height:14px;filter:none"></i><b data-peercount>…</b></div>
       <div class="pill" id="myHpsPill" style="display:none" title="your live hashrate (this wallet)"><i class="lic" data-lucide="pickaxe" style="width:14px;height:14px;filter:none"></i><b data-myhps style="color:var(--gold)">…</b></div>
       <div class="pill"><i class="lic" data-lucide="wallet" style="width:14px;height:14px;filter:none"></i><b data-balance>0</b> SIGIL</div>
       <div class="avatar" id="profileBtn" title="profile · quick links" onclick="window.toggleProfile&&window.toggleProfile(event)">◈</div>
@@ -209,6 +240,7 @@ body.view-desktop .desktop{display:flex}
       <div class="mi" onclick="window.closeProfile();window.openResearch()"><span class="g"><i class="lic" data-lucide="layers" style="width:15px;height:15px"></i></span>Research Library<span class="chip">14 PAPERS</span></div>
       <div class="mi" onclick="window.closeProfile();window.showExplorer&&showExplorer()"><span class="g"><i class="lic" data-lucide="receipt-text" style="width:15px;height:15px"></i></span>Explorer · Activity</div>
       <div class="mi" onclick="window.closeProfile();window.openStats&&openStats()"><span class="g"><i class="lic" data-lucide="activity" style="width:15px;height:15px"></i></span>Network stats</div>
+      <div class="mi" onclick="window.closeProfile();window.openPower&&openPower()"><span class="g"><i class="lic" data-lucide="activity" style="width:15px;height:15px"></i></span>Network Power</div>
       <div class="mi" onclick="window.closeProfile();window.openMine&&openMine()"><span class="g"><i class="lic" data-lucide="pickaxe" style="width:15px;height:15px"></i></span>Mine SIGIL</div>
       <div class="mi" onclick="window.closeProfile();window.openReceive&&openReceive()"><span class="g"><i class="lic" data-lucide="arrow-down-to-dot" style="width:15px;height:15px"></i></span>Receive · address</div>
       <div class="sep"></div>
@@ -217,6 +249,10 @@ body.view-desktop .desktop{display:flex}
       <div class="mi" onclick="window.closeProfile();window.openSettings&&openSettings()"><span class="g"><i class="lic" data-lucide="settings" style="width:15px;height:15px"></i></span>Settings</div>
     </div>
   </div>
+  <div class="dex-ticker dex-ticker-global" aria-label="Open live DEX markets" role="button" tabindex="0" onclick="openSwap()" onkeydown="if(event.key==='Enter'||event.key===' '){openSwap();event.preventDefault()}">
+    <div class="dex-ticker-label"><span>DEX markets</span><small>click to trade</small></div>
+    <div class="dex-ticker-window"><div class="dex-ticker-track" data-dex-ticker-track><span class="dex-ticker-loading">loading token pairs…</span></div></div>
+  </div>
   <div class="dwrap">
     <div class="side">
       <div class="snav">
@@ -224,7 +260,7 @@ body.view-desktop .desktop{display:flex}
         <a onclick="showAssets();return false" style="cursor:pointer"><i class="lic" data-lucide="wallet"></i>Assets</a>
         <a id="navActivity" onclick="showExplorer();return false" style="cursor:pointer"><i class="lic" data-lucide="receipt-text"></i>Activity</a>
         <div class="grp">Move</div>
-        <a><i class="lic" data-lucide="arrow-up-from-dot"></i>Send</a>
+        <a onclick="openSend();return false" style="cursor:pointer"><i class="lic" data-lucide="arrow-up-from-dot"></i>Send</a>
         <a onclick="openReceive();return false" style="cursor:pointer"><i class="lic" data-lucide="arrow-down-to-dot"></i>Receive</a>
         <a onclick="openSwap();return false" style="cursor:pointer"><i class="lic" data-lucide="arrow-left-right"></i>Swap</a>
         <div class="grp">Earn</div>
@@ -245,7 +281,7 @@ body.view-desktop .desktop{display:flex}
       <div class="dhero">
         <div><div class="lab"><span>total balance</span><span class="vbadge"><i data-lucide="badge-check"></i>verified</span></div><div class="amtbig amt" id="damt">0<small>.00000000 SIGIL</small></div><div class="heroaddr" id="daddr" style="display:none" onclick="copyAddr()"></div></div>
         <div class="dactions">
-          <div class="act"><i class="lic" data-lucide="arrow-up-from-dot"></i><span class="t">Send</span></div>
+          <div class="act" onclick="openSend()"><i class="lic" data-lucide="arrow-up-from-dot"></i><span class="t">Send</span></div>
           <div class="act" onclick="openReceive()"><i class="lic" data-lucide="arrow-down-to-dot"></i><span class="t">Receive</span></div>
           <div class="act" onclick="openSwap()"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div>
           <div class="act" onclick="openMine()"><i class="lic" data-lucide="pickaxe"></i><span class="t">Mine</span></div>
@@ -261,10 +297,22 @@ body.view-desktop .desktop{display:flex}
             <div class="sect" style="margin-bottom:8px"><span>Activity</span><a id="cardExplorer" onclick="showExplorer();return false" style="cursor:pointer;color:var(--cyan);text-decoration:none;font-size:11px;border:1px solid var(--line);border-radius:999px;padding:3px 10px">🔍 open explorer</a></div>
             <div style="font-family:'JetBrains Mono';font-size:11px;color:var(--dim);padding:14px 2px">no activity on this wallet yet — mine or receive SIGIL, or open the explorer for chain history</div>
           </div>
+          <div class="card" id="polyBridgeCard">
+            <div class="sect" style="margin-bottom:8px"><span>🌉 Polygon Bridge</span><a href="https://polygonscan.com/token/0xc224602C32F5c7f68d3Ef002aE4C99e4C7Df25B7" target="_blank" rel="noreferrer" style="cursor:pointer;color:var(--cyan);text-decoration:none;font-size:11px;border:1px solid var(--line);border-radius:999px;padding:3px 10px">↗ contract</a></div>
+            <div style="font-family:'JetBrains Mono';font-size:10.5px;color:var(--dim);padding:0 2px 10px;line-height:1.5">Wrapped SIGIL (ERC-20), 1:1 bridged from sigil-g0. Real bridge, real contract, live on Polygon mainnet — but nothing has been locked/minted through it yet, so every address correctly reads 0 today.</div>
+            <div style="display:flex;gap:8px;margin-bottom:8px">
+              <input id="polyAddrDesk" placeholder="0x… your Polygon address" style="flex:1;min-width:0;background:rgba(4,8,12,.7);border:1px solid rgba(33,212,253,.22);border-radius:8px;color:#cfe9f2;font-family:'JetBrains Mono';font-size:12px;padding:9px 10px;outline:none">
+              <button onclick="window.polyBridgeUseMetaMask('polyAddrDesk')" title="autofill from MetaMask" style="flex:none;background:rgba(33,212,253,.1);border:1px solid rgba(33,212,253,.35);color:#6df3ff;border-radius:8px;padding:0 12px;cursor:pointer;font-size:15px">🦊</button>
+            </div>
+            <button onclick="window.polyBridgeCheck('polyAddrDesk')" style="width:100%;border:1px solid rgba(33,212,253,.45);background:linear-gradient(90deg,rgba(33,212,253,.2),rgba(0,224,198,.13));color:#6df3ff;font-family:'Orbitron';font-weight:700;font-size:11px;letter-spacing:1px;padding:10px;border-radius:8px;cursor:pointer;margin-bottom:10px">CHECK BALANCE</button>
+            <div style="display:flex;align-items:baseline;gap:8px"><span id="polyAddrDesk_out" style="font-family:'Orbitron';font-weight:900;font-size:20px;color:#00e0c6">—</span><span style="font-family:'JetBrains Mono';font-size:10.5px;color:var(--dim)">SIGIL (wrapped, Polygon)</span></div>
+            <div id="polyAddrDesk_status" style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8;margin-top:6px;line-height:1.5"></div>
+            <button onclick="window.openBridgeFrom('polyAddrDesk')" style="width:100%;margin-top:10px;border:1px solid rgba(0,224,198,.4);background:rgba(0,224,198,.08);color:#00e0c6;font-family:'Orbitron';font-weight:700;font-size:10.5px;letter-spacing:1px;padding:9px;border-radius:8px;cursor:pointer">🌉 BRIDGE MINED SIGIL HERE</button>
+          </div>
         </div>
       </div>
       <!-- in-app SIGIL explorer (flux-search/aether), loaded in main content -->
-      <div class="exbar" id="exBar"><button class="exback" onclick="showDash()">‹ Wallet</button><span style="font-family:'JetBrains Mono';font-size:12px;color:var(--cyan)">◈ SIGIL Explorer</span></div>
+      <div class="exbar" id="exBar"><button class="exback" onclick="showDash()">‹ Wallet</button><div class="exbar-title"><span>Activity</span><small>verified chain history</small></div><div class="exbar-live">● live</div></div>
       <iframe id="exView" title="SIGIL Explorer" style="display:none;position:absolute;top:46px;left:0;right:0;bottom:0;width:100%;height:calc(100% - 46px);border:0;background:var(--bg);z-index:5"></iframe>
     </div>
   </div>
@@ -273,7 +321,18 @@ body.view-desktop .desktop{display:flex}
 <div class="caption">SIGIL Wallet · <b>cyan grid</b> · <b>⤢ expand → fullscreen</b></div>
 <script>
   function setView(v){document.body.classList.toggle('view-desktop',v==='desktop');try{localStorage.setItem('sigil-view',v)}catch(e){}render();}
-  if(location.search.includes('desktop')||(()=>{try{return localStorage.getItem('sigil-view')}catch(e){return null}})()==='desktop')document.body.classList.add('view-desktop');
+  // 2026-08-23: pick a view for a visitor who's never chosen one — an explicit
+  // ?desktop/?phone param or a saved choice (once you've used the ⤢ toggle)
+  // still wins outright; only a genuinely first-time, unparameterized visit
+  // falls through to window.innerWidth, matching the width the desktop
+  // layout itself needs (.desktop needs >=720px to not squeeze, see the
+  // @media(max-width:820px) rule) so a phone/narrow-window visitor lands on
+  // the phone card instead of a cramped desktop one, and vice versa.
+  var _stored=(()=>{try{return localStorage.getItem('sigil-view')}catch(e){return null}})();
+  var _wantDesktop = location.search.includes('desktop')
+    || (_stored==='desktop' && !location.search.includes('phone'))
+    || (_stored===null && !location.search.includes('phone') && window.innerWidth>=900);
+  if(_wantDesktop)document.body.classList.add('view-desktop');
 
   // ── wallet gate: need a derived address (set by enter-sigil.html) or onboard ──
   const _qp=new URLSearchParams(location.search);
@@ -321,8 +380,12 @@ body.view-desktop .desktop{display:flex}
   // proxy (served by sigil-top at localhost:9800; on the web it falls back gracefully).
   const EX_URL='/sigil-explorer.html';
   function showExplorer(){
+    if(!document.body.classList.contains('view-desktop')){
+      document.body.classList.add('view-desktop');
+      try{localStorage.setItem('sigil-view','desktop')}catch(e){}
+    }
     const f=document.getElementById('exView'), bar=document.getElementById('exBar');
-    if(f && !f.getAttribute('src')) f.setAttribute('src', EX_URL + (ADDR?('?q='+encodeURIComponent(ADDR)):''));
+    if(f && !f.getAttribute('src')) f.setAttribute('src', EX_URL + (ADDR?('?wallet='+encodeURIComponent(ADDR)+'&embed=wallet'):''));
     if(f) f.style.display='block';
     if(bar) bar.classList.add('show');
     document.querySelectorAll('.snav a').forEach(a=>a.classList.remove('on'));
@@ -472,19 +535,28 @@ body.view-desktop .desktop{display:flex}
       // balances live. The sigil-node DAG spine is internal telemetry and is
       // deliberately NOT surfaced here (two visible chains confused everyone).
       var mj=null;
-      try{ const mr=await fetch(NODE+API_BASE+'/mining/miners',{cache:'no-store'}); mj=await mr.json(); }catch(e){}
+      // 2026-08-23: pass ?wallet= so the API can hand back OUR OWN reported hashrate
+      // (my_hps) alongside the aggregate — see sigil-api's mining_miners handler.
+      var me=((MINE_ADDR||ADDR)||'').toLowerCase();
+      var minersUrl=NODE+API_BASE+'/mining/miners'+(me?('?wallet='+me):'');
+      try{ const mr=await fetch(minersUrl,{cache:'no-store'}); const raw=await mr.json();
+        // 2026-08-23: this endpoint wraps its payload in {ok,data:{...}} — a plain
+        // `mj.height`/`mj.miners` read (the old rpcd wire shape) silently found
+        // nothing on EVERY field, which is why network power/peer count/my
+        // hashrate all showed as zero even though the node had real live data.
+        mj=(raw&&raw.ok&&raw.data)?raw.data:null;
+      }catch(e){}
       var h=(mj&&mj.height)||0;
       if(!h){ try{ const r=await fetch(NODE+'/api/v1/status',{cache:'no-store'}); const j=await r.json(); h=(j&&j.height)||0; }catch(e){} }
       if(h){ BLOCK_H=Number(h); paintBlockCounter(); }
-      var me=((MINE_ADDR||ADDR)||'').toLowerCase(), my=0, net=0;
-      ((mj&&mj.miners)||[]).forEach(function(m){ var hp=Number(m.hps)||0; net+=hp; if((m.wallet||'').toLowerCase()===me) my=hp; });
-      paintHps(net,my);
+      paintHps((mj&&mj.net_hps)||0, (mj&&mj.my_hps)||0, (mj&&mj.live_miners)||0);
     }catch(e){}
   }
   function fmtHps(h){ if(!h)return '0 H/s'; if(h>=1e9)return (h/1e9).toFixed(2)+' GH/s'; if(h>=1e6)return (h/1e6).toFixed(1)+' MH/s'; if(h>=1e3)return (h/1e3).toFixed(1)+' kH/s'; return Math.round(h)+' H/s'; }
-  function paintHps(net,my){
+  function paintHps(net,my,peers){
     document.querySelectorAll('[data-nethps]').forEach(el=>el.textContent='⚡ '+fmtHps(net));
     document.querySelectorAll('[data-myhps]').forEach(el=>el.textContent='⛏ '+fmtHps(my));
+    document.querySelectorAll('[data-peercount]').forEach(el=>el.textContent='👥 '+peers);
     var p=document.getElementById('myHpsPill'); if(p) p.style.display=my>0?'':'none';
   }
   function paintBlockCounter(){
@@ -534,7 +606,7 @@ window.lucide={createIcons:render};render();})();</script>
      Standalone bundle reusing the React-SPA libp2p stack. Auto-starts; the page still
      works HTTP-only if this fails to load. Pill shows live peer/browser-mesh status. -->
 <div id="p2p-pill" title="Open P2P Network" style="position:fixed;left:10px;bottom:10px;z-index:9999;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1;color:#21d4fd;background:rgba(4,8,12,.85);border:1px solid rgba(33,212,253,.35);border-radius:8px;padding:6px 9px;backdrop-filter:blur(6px);box-shadow:0 0 12px rgba(33,212,253,.25);cursor:pointer;user-select:none">🌐 P2P starting…</div>
-<script type="module" src="./sigil-tron-p2p.js?v=092"></script>
+<script type="module" src="./sigil-tron-p2p.js?v=093"></script>
 <script type="module" src="./sigil-pq.mjs?v=1"></script> <!-- LANE-AD: ML-KEM-1024 hybrid session over the noise channel -->
 <!-- v7.0.9: signed-send signer. The [W] wallet is view-only, so a send is signed on demand from
      the recovery phrase, EXACTLY like the full wallet: privkey=sha3_256(mnemonic), pub=ed25519(privkey),
@@ -704,8 +776,8 @@ async function wRun(q){
       if(hit&&!rows.some(function(r){return r.h===b.h;})) rows.push({type:'live',h:b.h,t:'Block #'+b.h,d:'producer '+(pn[(b.prod||'').toLowerCase()]||b.prod||'?')+' · b3:'+(b.hash||'').slice(0,18)+'…',q:String(b.h)});
     });
   }catch(e){}
-  try{ var sr=await fetch('/api/v1/search?q='+encodeURIComponent(q),{cache:'no-store'}); var sj=await sr.json();
-    (sj.results||[]).forEach(function(x){ var m=String(x.title||'').match(/#?(\d+)/); var h=m?+m[1]:null;
+  try{ var sr=await fetch('/api/v1/search?q='+encodeURIComponent(q)+'&mode=fuzzy&per_page=7',{cache:'no-store'}); var sj=await sr.json();
+    ((sj.data&&sj.data.results)||[]).forEach(function(x){ var m=String(x.title||'').match(/#?(\d+)/); var h=m?+m[1]:null;
       if(!rows.some(function(r){return r.h===h;})) rows.push({type:'flux',h:h,t:x.title||'result',d:(x.snippet||'').slice(0,58),q:(h!=null?String(h):q)});
     });
   }catch(e){}
@@ -893,6 +965,10 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         <div style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8">sigil-g0 · constant-product AMM · live</div></div>
       <button id="swapClose" style="background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:8px;width:30px;height:30px;cursor:pointer;font-size:15px">✕</button>
     </div>
+    <div class="dex-ticker" aria-label="Live DEX token markets">
+      <div class="dex-ticker-label"><span>DEX</span><small>live markets</small></div>
+      <div class="dex-ticker-window"><div class="dex-ticker-track" id="swapTickerTrack" data-dex-ticker-track><span class="dex-ticker-loading">loading token pairs…</span></div></div>
+    </div>
     <div id="swapReceipt" style="display:none;flex:1;overflow-y:auto;padding:18px;flex-direction:column;gap:11px;font-family:'Rajdhani',system-ui,sans-serif">
       <div style="text-align:center;padding:6px 0 2px">
         <div style="font-size:34px;color:#00e0c6;text-shadow:0 0 18px rgba(0,224,198,.6)">✓</div>
@@ -933,9 +1009,61 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
 </div>
 <script>
 (function(){
+  // 2026-08-18: repointed from sigil-rpcd's disconnected, stale-ledger
+  // /pools /swap /balance (the generic '/api' proxy this page's OTHER
+  // fetches still correctly use) to sigil-api — the REAL braid's money API,
+  // through the real commit_state_transition chokepoint. Override with
+  // window.SIGIL_DEX_API before this script runs (e.g. a local dev node) —
+  // defaults to the public braid node's money-API port.
+  // 2026-08-19: that "public braid node's money-API port" was a PLAIN-HTTP
+  // absolute URL (host:18181). This page is always loaded over HTTPS (every
+  // vhost that serves it — fluxapp.xyz, sigilgraph.fluxapp.xyz,
+  // sigilgraph.quillon.xyz — is TLS-only in q-flux.toml), so every browser
+  // silently mixed-content-blocks an https page fetching http://... — the
+  // pools/balance/swap fetch below NEVER actually ran; it always fell into
+  // .catch(), which is why the Pool dropdown had zero options no matter what
+  // pools existed. sigilgraph.org already reverse-proxies /v1 to this exact
+  // same real backend (127.0.0.1:18181, see its q-flux.toml vhost) over a
+  // real HTTPS cert, WITH `Access-Control-Allow-Origin: *` already set on
+  // every response including POST preflights — verified live 2026-08-19 — so
+  // this is HTTPS-safe from any of this page's origins with no server change
+  // needed. NOTE: fixing this makes the fetch actually run, but /v1/pools
+  // was independently verified to return `{"pools":[]}` right now — SigilState
+  // genuinely has zero DEX pools created yet on sigil-g0, a real-chain/
+  // liquidity-bootstrap fact, not a frontend bug. The dropdown will start
+  // populating itself the moment a pool is actually created.
+  var DEX_API = window.SIGIL_DEX_API || 'https://sigilgraph.org';
   var SWAP_MASTER_FEE_BPS=30n;
   window.__swapPools=[];
   window.__swapDir='AtoB';
+  function swapEsc(s){ return String(s||'').replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+  function swapRenderTicker(){
+    var tracks=document.querySelectorAll('[data-dex-ticker-track]'); if(!tracks.length)return;
+    var pairs=(window.__swapPools||[]).map(function(p){
+      return {pair:String(p.sym_a||'TOKEN')+'/'+String(p.sym_b||'TOKEN'),fee:Number(p.fee_bps||0),live:true};
+    });
+    // Keep the ribbon useful while an older braid node lacks /v1/pools. These
+    // are the wallet's registered market symbols; live reserves replace them
+    // automatically as soon as the pool discovery endpoint is available.
+    if(!pairs.length) pairs=[
+      {pair:'SIGIL/USDT',fee:0,live:false},
+      {pair:'SIGIL/USDS',fee:30,live:false},
+      {pair:'USDS/wQUG',fee:30,live:false},
+      {pair:'CLAI/USDS',fee:30,live:false},
+      {pair:'PACI/USDS',fee:30,live:false},
+      {pair:'SCAL/USDS',fee:30,live:false}
+    ];
+    var loop=pairs.length>1?pairs.concat(pairs):pairs.concat(pairs,pairs,pairs);
+    var markup=loop.map(function(p){return '<span class="dex-pair"><b>'+swapEsc(p.pair)+'</b><i'+(p.live?'':' class="is-listed"')+'>'+(p.live?'● live':'listed')+'</i>'+(p.fee?'<em>'+swapEsc((p.fee/100).toFixed(2))+'% fee</em>':'')+'</span>';}).join('');
+    tracks.forEach(function(track){ track.innerHTML=markup; track.classList.toggle('is-static',pairs.length===1); });
+  }
+  swapRenderTicker();
+  fetch(DEX_API+'/v1/pools?cb='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(j){
+    window.__swapPools=(j&&j.pools)||[];
+    var sel=document.getElementById('swapPool');
+    if(sel) sel.innerHTML=window.__swapPools.map(function(p){return '<option value="'+p.id+'">'+p.sym_a+' / '+p.sym_b+'</option>';}).join('');
+    swapRenderTicker();
+  }).catch(function(){ swapRenderTicker(); });
   function fmt8(n){ return (Number(n)/1e8).toLocaleString(undefined,{maximumFractionDigits:6}); }
   function ammQuote(reserveIn,reserveOut,amountIn,feeBps){
     if(amountIn<=0n||reserveIn<=0n||reserveOut<=0n) return 0n;
@@ -974,12 +1102,14 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     try{
       var tIn = window.__swapDir==='AtoB'?p.token_a:p.token_b;
       var tOut = window.__swapDir==='AtoB'?p.token_b:p.token_a;
-      var rIn=await fetch('/api/v1/balance?wallet='+addr+'&token='+tIn+'&cb='+Date.now(),{cache:'no-store'});
+      // sigil-api's /v1/balance returns the standard {ok,data:{balance},ts}
+      // envelope (not sigil-rpcd's flat {ok,balance}) — read jIn.data.balance.
+      var rIn=await fetch(DEX_API+'/v1/balance?wallet='+addr+'&token='+tIn+'&cb='+Date.now(),{cache:'no-store'});
       var jIn=await rIn.json();
-      document.getElementById('swapFromBal').textContent='balance '+fmt8(jIn.balance||0);
-      var rOut=await fetch('/api/v1/balance?wallet='+addr+'&token='+tOut+'&cb='+Date.now(),{cache:'no-store'});
+      document.getElementById('swapFromBal').textContent='balance '+fmt8((jIn.data&&jIn.data.balance)||0);
+      var rOut=await fetch(DEX_API+'/v1/balance?wallet='+addr+'&token='+tOut+'&cb='+Date.now(),{cache:'no-store'});
       var jOut=await rOut.json();
-      document.getElementById('swapToBal').textContent='balance '+fmt8(jOut.balance||0);
+      document.getElementById('swapToBal').textContent='balance '+fmt8((jOut.data&&jOut.data.balance)||0);
     }catch(e){}
   }
   window.swapRecalc=function(){
@@ -1005,13 +1135,15 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     document.getElementById('swapReceipt').style.display='none';
     var msgEl=document.getElementById('swapMsg'); msgEl.textContent=''; msgEl.style.color='#8fb3c2';
     document.getElementById('swapAmt').value='';
+    swapRenderTicker();
     m.style.display='flex';
     try{
-      var r=await fetch('/api/v1/pools?cb='+Date.now(),{cache:'no-store'});
+      var r=await fetch(DEX_API+'/v1/pools?cb='+Date.now(),{cache:'no-store'});
       var j=await r.json();
       window.__swapPools=(j&&j.pools)||[];
       var sel=document.getElementById('swapPool');
       sel.innerHTML=window.__swapPools.map(function(p){return '<option value="'+p.id+'">'+p.sym_a+' / '+p.sym_b+'</option>';}).join('');
+      swapRenderTicker();
       window.__swapDir='AtoB';
       swapRenderLegs(); swapRecalc();
     }catch(e){ msgEl.textContent='✗ could not reach the node for live pools.'; msgEl.style.color='#ff8a8a'; }
@@ -1038,7 +1170,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     msgEl.textContent='Submitting…'; msgEl.style.color='#6df3ff';
     var go=document.getElementById('swapGo'); if(go)go.disabled=true;
     try{
-      var r=await fetch('/api/v1/swap',{method:'POST',headers:{'Content-Type':'application/json'},
+      var r=await fetch(DEX_API+'/v1/swap',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({from:from,pool:pool.id,dir:dir,amount_in:Number(q.amountIn),min_out:Number(q.minOut),req_nonce:reqNonce,sig:sig})});
       var j=null; try{ j=await r.json(); }catch(_){}
       if(r.ok && j && j.ok){ swapShowReceipt(j,L,q); setTimeout(function(){ if(window.refresh)refresh(); },600); }
@@ -1067,6 +1199,247 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   document.getElementById('swapClose').addEventListener('click', window.closeSwap);
   document.getElementById('swap-modal').addEventListener('click', function(e){ if(e.target===this) window.closeSwap(); });
   window.addEventListener('keydown',function(e){ if(e.key==='Escape') window.closeSwap&&window.closeSwap(); });
+  // 'u' — jump straight to Swap, one keystroke instead of hunting the nav.
+  // Same input-focus guard the existing '/' search shortcut uses (line
+  // ~711): never fire while the user is typing (a recovery phrase, an
+  // amount, a search query) into ANY field, not just #wsearch.
+  document.addEventListener('keydown',function(e){
+    if(e.key!=='u'&&e.key!=='U') return;
+    var el=document.activeElement, tag=el&&el.tagName;
+    if(tag==='INPUT'||tag==='TEXTAREA'||(el&&el.isContentEditable)) return;
+    if(e.metaKey||e.ctrlKey||e.altKey) return;
+    e.preventDefault();
+    window.openSwap&&window.openSwap();
+  });
+})();
+</script>
+
+<!-- 2026-08-19: Polygon bridge balance card (desktop dashboard + phone view above).
+     Read-only ERC-20 balanceOf() against the REAL wrapped-SIGIL contract deployed on
+     Polygon mainnet (verified live: symbol()="SIGIL", decimals()=18) — same selector,
+     same public keyless RPC fallback list, as sigil-api's own crates/sigil-api/src/eth.rs
+     (kept in sync deliberately: those are the two endpoints that crate already trusts).
+     Pure client-side fetch — no backend involved, no API key needed or exposed (a
+     balanceOf read needs no auth), so this works identically whether opened via
+     sigil-top's localhost:9800 or any other static host of this file. MetaMask is
+     OPTIONAL — "🦊" just autofills the address field via eth_requestAccounts; typing
+     any 0x… address works with no wallet extension at all. -->
+<script>
+(function(){
+  var WSIGIL_CONTRACT = '0xc224602C32F5c7f68d3Ef002aE4C99e4C7Df25B7'; // Polygon mainnet, chain 137
+  var WSIGIL_DECIMALS = 18;
+  // Same order/endpoints as sigil-api's Chain::Polygon public_fallbacks().
+  var POLY_RPCS = ['https://polygon-bor-rpc.publicnode.com', 'https://1rpc.io/matic'];
+  var SELECTOR_BALANCE_OF = '0x70a08231';
+
+  function padAddr(addr){ return addr.toLowerCase().replace(/^0x/, '').padStart(64, '0'); }
+
+  async function polyBalanceOf(addr){
+    var data = SELECTOR_BALANCE_OF + padAddr(addr);
+    var lastErr = null;
+    for (var i = 0; i < POLY_RPCS.length; i++){
+      try{
+        var r = await fetch(POLY_RPCS[i], {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call',
+            params: [{ to: WSIGIL_CONTRACT, data: data }, 'latest'] }),
+        });
+        var j = await r.json();
+        if (j.error) throw new Error(j.error.message || 'RPC error');
+        var raw = BigInt(j.result || '0x0');
+        return Number(raw) / Math.pow(10, WSIGIL_DECIMALS);
+      } catch (e) { lastErr = e; }
+    }
+    throw lastErr || new Error('every Polygon RPC endpoint failed');
+  }
+
+  window.polyBridgeCheck = async function(inputId){
+    var input = document.getElementById(inputId);
+    var out = document.getElementById(inputId + '_out');
+    var status = document.getElementById(inputId + '_status');
+    if (!input || !out || !status) return;
+    var addr = (input.value || '').trim();
+    if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) {
+      status.textContent = 'Enter a valid Polygon address (0x… 40 hex chars).';
+      status.style.color = '#ff6b6b';
+      return;
+    }
+    status.textContent = 'Checking Polygon mainnet…';
+    status.style.color = '#5a93a8';
+    try {
+      var bal = await polyBalanceOf(addr);
+      out.textContent = bal.toLocaleString(undefined, { maximumFractionDigits: 6 });
+      status.textContent = bal === 0
+        ? 'Real on-chain read — 0 is correct: no SIGIL has been bridged to this address yet.'
+        : 'Live balanceOf() read from Polygon mainnet, just now.';
+      status.style.color = '#5a93a8';
+    } catch (e) {
+      out.textContent = '—';
+      status.textContent = 'Could not reach a Polygon RPC — try again in a moment.';
+      status.style.color = '#ff6b6b';
+    }
+  };
+
+  window.polyBridgeUseMetaMask = async function(inputId){
+    try {
+      var eth = window.ethereum;
+      if (!eth) { alert('MetaMask (or another injected wallet) was not detected in this browser.'); return; }
+      var accts = await eth.request({ method: 'eth_requestAccounts' });
+      if (accts && accts[0]) {
+        var input = document.getElementById(inputId);
+        if (input) { input.value = accts[0]; window.polyBridgeCheck(inputId); }
+      }
+    } catch (e) { /* user rejected the connection, or no provider — leave the field as-is */ }
+  };
+
+  // Opens the BRIDGE modal (defined below) pre-filled with whatever address
+  // is already sitting in the balance-check field, so "check my balance" ->
+  // "bridge some SIGIL there" is a one-click handoff between the two cards.
+  window.openBridgeFrom = function(inputId){
+    var src = document.getElementById(inputId);
+    var dest = document.getElementById('bridgeDest');
+    if (src && dest && src.value.trim()) dest.value = src.value.trim();
+    window.openBridge && window.openBridge();
+  };
+})();
+</script>
+
+<!-- 2026-08-19: BRIDGE TO POLYGON modal — same wallet-signed-mutation idiom as
+     the SEND modal above (recovery-phrase-on-demand signing, sigil-rpc/v1
+     message format), posting to the REAL /v1/bridge/lock route
+     (crates/sigil-api/src/bridge.rs::submit_lock). This is the "mine
+     natively, then bridge to Polygon" step: it locks already-mined native
+     SIGIL into the chain's bridge vault; the running sigil-bridge-relayer
+     service (confirmed live 2026-08-19, actively polling Polygon) mints the
+     same amount as wrapped SIGIL to the destination address once the lock
+     settles. That mint is NOT instant and NOT reversible from here — this
+     modal only submits the lock, it does not wait for or confirm the mint,
+     so the copy below says so plainly instead of implying otherwise. -->
+<div id="bridge-modal" style="display:none;position:fixed;inset:0;z-index:10001;background:rgba(2,5,9,.82);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:18px">
+  <div style="width:100%;max-width:460px;max-height:88vh;display:flex;flex-direction:column;background:linear-gradient(160deg,#06121c,#04080c);border:1px solid rgba(33,212,253,.32);border-radius:16px;box-shadow:0 0 60px rgba(33,212,253,.18);overflow:hidden;font-family:'Rajdhani',system-ui,sans-serif">
+    <div style="flex:none;display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid rgba(33,212,253,.18);background:rgba(8,16,24,.7)">
+      <div style="font-size:20px">🌉</div>
+      <div style="flex:1"><div style="font-family:'Orbitron';font-weight:700;letter-spacing:1px;color:#6df3ff;font-size:15px">BRIDGE TO POLYGON</div>
+        <div style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8">available <b id="bridgeAvail" style="color:#00e0c6">0.00000000</b> SIGIL · locks into the vault, relayer mints on Polygon</div></div>
+      <button id="bridgeClose" style="background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:8px;width:30px;height:30px;cursor:pointer;font-size:15px">✕</button>
+    </div>
+    <div id="bridgeReceipt" style="display:none;flex:1;overflow-y:auto;padding:18px;flex-direction:column;gap:11px;font-family:'Rajdhani',system-ui,sans-serif">
+      <div style="text-align:center;padding:6px 0 2px">
+        <div style="font-size:34px;color:#00e0c6;text-shadow:0 0 18px rgba(0,224,198,.6)">✓</div>
+        <div style="font-family:'Orbitron';font-weight:700;letter-spacing:1px;color:#00e0c6;font-size:15px;margin-top:2px">LOCKED — QUEUED FOR MINT</div>
+        <div id="bcAmt" style="font-family:'Orbitron';font-weight:900;font-size:26px;color:#6df3ff;margin-top:6px"></div>
+      </div>
+      <div id="bcRows" style="display:flex;flex-direction:column;gap:0"></div>
+      <div style="font-family:'JetBrains Mono';font-size:10px;color:#fbbf24;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.25);border-radius:9px;padding:9px 10px;line-height:1.5">The lock is submitted, not the mint. The relayer mints wrapped SIGIL to your Polygon address once it sees this settle — check back with the "🌉 Polygon Bridge" balance card in a few minutes, not instantly.</div>
+      <button onclick="bridgeReceiptDone()" style="background:linear-gradient(90deg,rgba(33,212,253,.18),rgba(0,224,198,.14));border:1px solid rgba(33,212,253,.4);color:#6df3ff;border-radius:10px;padding:11px;cursor:pointer;font-family:'Orbitron';font-size:11px;letter-spacing:1px">DONE</button>
+    </div>
+    <div id="bridgeForm" style="flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:14px">
+      <div style="font-family:'JetBrains Mono';font-size:10.5px;color:var(--dim);line-height:1.5">Locks native SIGIL you've already mined into the chain's bridge vault. This is real and not instantly reversible — the relayer mints the same amount as wrapped SIGIL to the address below once it settles.</div>
+      <div>
+        <label style="font-family:'JetBrains Mono';font-size:10px;letter-spacing:1px;color:#6df3ff;text-transform:uppercase">Destination — Polygon address</label>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <input id="bridgeDest" placeholder="0x… 40-hex Polygon address" autocomplete="off" spellcheck="false"
+            style="flex:1;min-width:0;background:rgba(4,8,12,.7);border:1px solid rgba(33,212,253,.22);border-radius:10px;color:#cfe9f2;font-family:'JetBrains Mono';font-size:12px;padding:11px 12px;outline:none">
+          <button onclick="bridgeUseMetaMask()" title="autofill from MetaMask" style="flex:none;background:rgba(33,212,253,.1);border:1px solid rgba(33,212,253,.35);color:#6df3ff;border-radius:10px;padding:0 14px;cursor:pointer;font-size:15px">🦊</button>
+        </div>
+      </div>
+      <div>
+        <label style="font-family:'JetBrains Mono';font-size:10px;letter-spacing:1px;color:#6df3ff;text-transform:uppercase">Amount (SIGIL)</label>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <input id="bridgeAmt" type="text" inputmode="decimal" placeholder="0.00000000"
+            style="flex:1;background:rgba(4,8,12,.7);border:1px solid rgba(33,212,253,.22);border-radius:10px;color:#cfe9f2;font-family:'Orbitron';font-size:18px;padding:10px 12px;outline:none">
+          <button onclick="bridgeMax()" style="background:rgba(0,224,198,.1);border:1px solid rgba(0,224,198,.4);color:#00e0c6;border-radius:10px;padding:0 14px;font-family:'Rajdhani';font-weight:700;cursor:pointer">MAX</button>
+        </div>
+      </div>
+      <button id="bridgeGo" onclick="doBridgeLock()" style="border:1px solid rgba(33,212,253,.45);background:linear-gradient(90deg,rgba(33,212,253,.2),rgba(0,224,198,.13));color:#6df3ff;font-family:'Orbitron';font-weight:700;font-size:14px;letter-spacing:1px;padding:13px;border-radius:11px;cursor:pointer">🌉 LOCK &amp; BRIDGE</button>
+      <div id="bridgeMsg" style="font-family:'JetBrains Mono';font-size:11px;color:#8fb3c2;min-height:14px"></div>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  function bridgeStatus(msg,color){ var e=document.getElementById('bridgeMsg'); if(e){ e.textContent=msg; e.style.color=color||'#8fb3c2'; } }
+  window.openBridge=function(){
+    var m=document.getElementById('bridge-modal'); if(!m) return;
+    try{ var raw=BigInt(window.SIGIL_RAW||'0'); var w=raw/100000000n, f=(raw%100000000n).toString().padStart(8,'0');
+      document.getElementById('bridgeAvail').textContent=w.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')+'.'+f; }catch(e){}
+    bridgeStatus(''); document.getElementById('bridgeForm').style.display='flex'; document.getElementById('bridgeReceipt').style.display='none';
+    m.style.display='flex';
+    setTimeout(function(){ var d=document.getElementById('bridgeDest'); if(d && !d.value) d.focus(); }, 30);
+  };
+  window.closeBridge=function(){ var m=document.getElementById('bridge-modal'); if(m)m.style.display='none'; };
+  window.bridgeMax=function(){
+    try{ var raw=BigInt(window.SIGIL_RAW||'0'); var w=raw/100000000n, f=(raw%100000000n).toString().padStart(8,'0');
+      document.getElementById('bridgeAmt').value=w.toString()+'.'+f; }catch(e){}
+  };
+  window.bridgeUseMetaMask=async function(){
+    try{
+      var eth=window.ethereum;
+      if(!eth){ alert('MetaMask (or another injected wallet) was not detected in this browser.'); return; }
+      var accts=await eth.request({method:'eth_requestAccounts'});
+      if(accts && accts[0]) document.getElementById('bridgeDest').value=accts[0];
+    }catch(e){ /* user rejected — leave the field as-is */ }
+  };
+  window.doBridgeLock=async function(){
+    var dest=(document.getElementById('bridgeDest').value||'').trim();
+    var destNorm=dest.toLowerCase().replace(/^0x/,'');
+    if(!/^[0-9a-f]{40}$/.test(destNorm)){ bridgeStatus('Destination must be a valid Polygon address (0x… 40 hex chars).', '#ff8a8a'); return; }
+    var amtStr=(document.getElementById('bridgeAmt').value||'').trim();
+    if(!/^\d+(\.\d{1,8})?$/.test(amtStr) || Number(amtStr)<=0){ bridgeStatus('Amount must be > 0 (max 8 decimals).', '#ff8a8a'); return; }
+    var parts=amtStr.split('.'); var base=BigInt(parts[0]||'0')*100000000n + BigInt(((parts[1]||'')+'00000000').slice(0,8));
+    var from=(window.MINE_ADDR||window.ADDR||'').toLowerCase();
+    if(!/^[0-9a-f]{64}$/.test(from)){ bridgeStatus('No wallet address loaded.', '#ff8a8a'); return; }
+    if(!window.sigilCryptoReady){ bridgeStatus('Signer still loading — try again in a moment.', '#fbbf24'); return; }
+    var mnemonic=window.__sigilMnemonic;
+    if(!mnemonic){
+      mnemonic=(prompt('Enter your recovery phrase to sign this bridge lock.\n(kept in memory for this session only — never saved)')||'').trim();
+      if(!mnemonic){ bridgeStatus('Bridge cancelled — recovery phrase required to sign.', '#fbbf24'); return; }
+    }
+    var kp; try{ kp=window.sigilDeriveFrom(mnemonic); }catch(e){ window.__sigilMnemonic=null; bridgeStatus('Could not derive a key from that phrase.', '#ff8a8a'); return; }
+    if(kp.address!==from){ window.__sigilMnemonic=null; bridgeStatus('That phrase does not match this wallet address.', '#ff8a8a'); return; }
+    window.__sigilMnemonic=mnemonic;
+    try{ localStorage.setItem('sigil-wallet-mnemonic', mnemonic); }catch(e){}
+    var reqNonce=Date.now();
+    // Message shape MUST byte-match bridge.rs::submit_lock:
+    // sigil-rpc/v1|bridge_lock|{from}|{amount}|{dest}|nonce={req_nonce}
+    var sig; try{ sig=window.sigilSign(kp.priv,'bridge_lock',[from,base.toString(),dest],reqNonce); }catch(e){ bridgeStatus('Signing failed.', '#ff8a8a'); return; }
+    bridgeStatus('Submitting…', '#6df3ff'); var btn=document.getElementById('bridgeGo'); if(btn)btn.disabled=true;
+    try{
+      // NOT /api/v1/bridge/lock — sigil-api only ever registered this route bare at
+      // /v1/bridge/lock (crates/sigil-api/src/lib.rs), unlike every other mutation
+      // route here which has an /api/v1/ mirror. Confirmed live 2026-08-19: the
+      // /api/ prefix returns a real HTTP 404 with a genuine 42-SIGIL balance behind
+      // it. serve.rs now proxies bare /v1/* too (same fix, other half).
+      var r=await fetch('/v1/bridge/lock',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({from:from,amount:Number(base),dest_polygon_address:dest,sig:sig,req_nonce:reqNonce})});
+      var j=null; try{ j=await r.json(); }catch(_){}
+      if(r.ok && j && j.ok){ bridgeShowReceipt(j, dest, amtStr, from); setTimeout(function(){ if(window.refresh)refresh(); }, 600); }
+      else { bridgeStatus('✗ '+((j&&(j.error||j.message))||('HTTP '+r.status)), '#ff8a8a'); }
+    }catch(e){ bridgeStatus('✗ network error — node unreachable.', '#ff8a8a'); }
+    if(btn)btn.disabled=false;
+  };
+  function _bcRow(l,v){ return '<div style="display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid rgba(33,212,253,.09)"><span style="font-family:\'JetBrains Mono\';font-size:10px;letter-spacing:1px;color:#5a93a8;text-transform:uppercase">'+l+'</span><span style="font-family:\'JetBrains Mono\';font-size:11px;color:#cfe9f2;overflow-wrap:anywhere;text-align:right">'+v+'</span></div>'; }
+  function bridgeShowReceipt(j, dest, amtStr, from){
+    var short=function(a){ return a?(a.slice(0,10)+'…'+a.slice(-8)):'—'; };
+    document.getElementById('bcAmt').textContent=amtStr+' SIGIL';
+    document.getElementById('bcRows').innerHTML=
+      _bcRow('destination (polygon)','<span title="'+dest+'">'+short(dest)+'</span>')+
+      _bcRow('from (sigil)','<span title="'+from+'">'+short(from)+'</span>')+
+      _bcRow('lock id',(j.lock_id!=null?j.lock_id:'—'))+
+      _bcRow('lock tx',(j.tx_hash?'<span title="'+j.tx_hash+'">'+short(j.tx_hash)+'</span>':'—'))+
+      _bcRow('vault',(j.vault?'<span title="'+j.vault+'">'+short(j.vault)+'</span>':'—'));
+    document.getElementById('bridgeForm').style.display='none';
+    document.getElementById('bridgeReceipt').style.display='flex';
+  }
+  window.bridgeReceiptDone=function(){
+    document.getElementById('bridgeReceipt').style.display='none';
+    document.getElementById('bridgeForm').style.display='flex';
+    var d=document.getElementById('bridgeDest'), a=document.getElementById('bridgeAmt'); if(d)d.value=''; if(a)a.value='';
+    bridgeStatus(''); window.closeBridge();
+  };
+  document.getElementById('bridgeClose').addEventListener('click', window.closeBridge);
+  document.getElementById('bridge-modal').addEventListener('click', function(e){ if(e.target===this) window.closeBridge(); });
 })();
 </script>
 
@@ -3555,6 +3928,193 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
 })();
 </script>
 
+<!-- 2026-08-25: Network Power modal — durable multi-timeframe (24h/7d/30d/1y/all)
+     hashrate-history graph + CPU/GPU-tagged live miner list. Backend is
+     crates/sigil-api/src/mining_history.rs (a flux-db 3-tier time-series store:
+     1-min raw samples kept 48h, hourly rollups kept 60 days, daily rollups kept
+     forever, filled by a background sampler that polls mining stats every 60s)
+     — GET /v1/mining/hashrate/history?range=<24h|7d|30d|1y|all> and the new
+     `kind` field ("cpu"/"gpu"/"unknown") on GET /v1/mining/miners. This is the
+     SIGIL analog of Quillon Graph's Network Power modal, except durable
+     server-side instead of a 24h localStorage cache. Same idiom as the
+     Network Stats / Research Library modals just above: self-contained IIFE,
+     inline-styled (no new CSS classes needed — .rl-chip is the existing
+     research-library filter-chip class, reused here for the range selector;
+     .act-item/.ai/.at/.as/.av is an existing but previously-unused
+     activity-row rule, reused for the miner list rows), GET-only, polled.
+     Uses bare /v1/* (NOT /api/v1/*) per the API_BASE comment far above this
+     file: sigil-top's own :9800 server forwards bare /v1/* to the real node
+     exactly like /api/* (serve.rs, added 2026-08-19), and sigilgraph.org (the
+     [W]-headless fallback host) ONLY understands bare /v1/* — /api/v1/* silently
+     200s that host's index.html instead of hitting the backend. So bare /v1/*
+     is the one prefix that is correct on both of the two real URLs this page
+     is served from. Deep-link #power, same pattern as #stats/#research above. -->
+<div id="power-modal" style="display:none;position:fixed;inset:0;z-index:10004;background:rgba(2,5,9,.82);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:18px">
+  <div style="width:100%;max-width:780px;max-height:88vh;display:flex;flex-direction:column;background:linear-gradient(160deg,#06121c,#04080c);border:1px solid rgba(33,212,253,.32);border-radius:16px;box-shadow:0 0 60px rgba(33,212,253,.18);overflow:hidden;font-family:'Rajdhani',system-ui,sans-serif">
+    <div style="flex:none;display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid rgba(33,212,253,.18);background:rgba(8,16,24,.7)">
+      <div style="font-size:20px">⚡</div>
+      <div style="flex:1">
+        <div style="font-family:'Orbitron';font-weight:700;letter-spacing:1px;color:#6df3ff;font-size:15px">◈ NETWORK POWER</div>
+        <div id="npSub" style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8">loading…</div>
+      </div>
+      <button id="npClose" style="background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:8px;width:30px;height:30px;cursor:pointer;font-size:15px">✕</button>
+    </div>
+    <div style="flex:none;display:flex;gap:1px;background:rgba(33,212,253,.12);border-bottom:1px solid rgba(33,212,253,.14)">
+      <div style="flex:1;text-align:center;padding:10px;background:#04080c"><div id="npCur" style="font-family:'JetBrains Mono';font-size:18px;font-weight:600;color:#21d4fd">…</div><div style="font-size:10px;color:#5a93a8;text-transform:uppercase;letter-spacing:.5px">Current</div></div>
+      <div style="flex:1;text-align:center;padding:10px;background:#04080c"><div id="npPeak" style="font-family:'JetBrains Mono';font-size:18px;font-weight:600;color:#fbbf24" title="peak hashrate in this window">…</div><div style="font-size:10px;color:#5a93a8;text-transform:uppercase;letter-spacing:.5px">Peak</div></div>
+      <div style="flex:1;text-align:center;padding:10px;background:#04080c"><div id="npAvg" style="font-family:'JetBrains Mono';font-size:18px;font-weight:600;color:#00e0c6" title="average hashrate in this window">…</div><div style="font-size:10px;color:#5a93a8;text-transform:uppercase;letter-spacing:.5px">Average</div></div>
+    </div>
+    <div id="npChips" style="flex:none;display:flex;gap:8px;flex-wrap:wrap;padding:12px 18px;border-bottom:1px solid rgba(33,212,253,.14)"></div>
+    <div style="flex:none;padding:14px 18px 4px">
+      <canvas id="npCanvas" style="width:100%;height:180px;display:block"></canvas>
+      <div style="display:flex;gap:16px;margin-top:6px;font-family:'JetBrains Mono';font-size:10px;color:#5a93a8">
+        <span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#21d4fd;margin-right:5px;vertical-align:middle"></span>network hashrate</span>
+        <span><span style="display:inline-block;width:9px;height:2px;background:#fbbf24;margin-right:5px;vertical-align:middle"></span>live miners (dashed, own scale)</span>
+      </div>
+    </div>
+    <div style="flex:none;display:flex;align-items:center;justify-content:space-between;padding:14px 18px 6px">
+      <div class="sect" style="margin:0"><span>Live Miners</span></div>
+      <span id="npMinersN" style="font-family:'JetBrains Mono';font-size:10px;color:var(--cyan)">…</span>
+    </div>
+    <div id="npMiners" style="flex:1;overflow-y:auto;padding:0 18px 14px"></div>
+  </div>
+</div>
+<script>
+(function(){
+  'use strict';
+  var modal=document.getElementById('power-modal');
+  if(!modal) return;
+  var RANGES=['24h','7d','30d','1y','all'];
+  var RLABEL={'24h':'24H','7d':'7D','30d':'30D','1y':'1Y','all':'ALL'};
+  var cur='24h';
+  var poll=null;
+  var hist=[];
+  var canvas=document.getElementById('npCanvas');
+
+  function shortHex(h){ return (h&&h.length>14)?(h.slice(0,8)+'…'+h.slice(-6)):(h||'—'); }
+  function kindBadge(k){
+    var c = k==='gpu' ? '#fbbf24' : k==='cpu' ? '#00e0c6' : '#5f8390';
+    var bg = k==='gpu' ? 'rgba(251,191,36,.1)' : k==='cpu' ? 'rgba(0,224,198,.1)' : 'rgba(95,131,144,.14)';
+    var label = k==='gpu' ? 'GPU' : k==='cpu' ? 'CPU' : '?';
+    return '<span style="font-family:\'JetBrains Mono\';font-size:9px;letter-spacing:.5px;color:'+c+';background:'+bg+';border:1px solid '+c+'55;border-radius:999px;padding:1px 7px;text-transform:uppercase">'+label+'</span>';
+  }
+  function chips(){
+    var el=document.getElementById('npChips'); if(!el) return;
+    el.innerHTML=RANGES.map(function(r){
+      return '<button class="rl-chip'+(r===cur?' on':'')+'" data-nprange="'+r+'">'+RLABEL[r]+'</button>';
+    }).join('');
+    Array.prototype.forEach.call(el.querySelectorAll('[data-nprange]'),function(b){
+      b.onclick=function(){ var v=b.getAttribute('data-nprange'); if(v===cur)return; cur=v; chips(); loadHistory(); };
+    });
+  }
+  function timeLabel(ts){
+    var d=new Date(ts*1000);
+    if(cur==='24h') return d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
+    if(cur==='7d'||cur==='30d') return d.toLocaleDateString('en-US',{month:'short',day:'numeric'});
+    return d.toLocaleDateString('en-US',{month:'short',year:'2-digit'});
+  }
+  function drawGraph(){
+    if(!canvas) return;
+    var dpr=window.devicePixelRatio||1;
+    var w=canvas.clientWidth||600, h=canvas.clientHeight||180;
+    canvas.width=Math.max(1,Math.round(w*dpr)); canvas.height=Math.max(1,Math.round(h*dpr));
+    var ctx=canvas.getContext('2d');
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    ctx.clearRect(0,0,w,h);
+    if(!hist.length){
+      ctx.fillStyle='#5a93a8'; ctx.font='12px "JetBrains Mono",monospace'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText('gathering history for this window — the sampler records every 60s',w/2,h/2-7);
+      ctx.fillText('rollups (hourly/daily) fill in as the chain runs longer',w/2,h/2+11);
+      return;
+    }
+    var padL=54,padR=12,padT=10,padB=20;
+    var plotW=Math.max(1,w-padL-padR), plotH=Math.max(1,h-padT-padB);
+    var maxHr=0, maxMiners=1;
+    hist.forEach(function(p){ var v=Math.max(0,p.hashrate||0); if(v>maxHr)maxHr=v; var m=p.miners||0; if(m>maxMiners)maxMiners=m; });
+    if(maxHr<=0) maxHr=1;
+    ctx.strokeStyle='rgba(33,212,253,.14)'; ctx.lineWidth=1;
+    ctx.fillStyle='#5a93a8'; ctx.font='10px "JetBrains Mono",monospace'; ctx.textAlign='right'; ctx.textBaseline='middle';
+    for(var g=0; g<=3; g++){
+      var y=padT+plotH*(g/3);
+      ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(w-padR,y); ctx.stroke();
+      ctx.fillText(fmtHps(maxHr*(1-g/3)),padL-8,y);
+    }
+    function xAt(i){ return padL + (hist.length>1 ? plotW*(i/(hist.length-1)) : plotW/2); }
+    function yAt(v){ return padT + plotH*(1-(Math.max(0,v)/maxHr)); }
+    ctx.beginPath();
+    hist.forEach(function(p,i){ var x=xAt(i), y=yAt(p.hashrate); if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); });
+    ctx.lineTo(xAt(hist.length-1),padT+plotH); ctx.lineTo(xAt(0),padT+plotH); ctx.closePath();
+    var grad=ctx.createLinearGradient(0,padT,0,padT+plotH);
+    grad.addColorStop(0,'rgba(33,212,253,.35)'); grad.addColorStop(1,'rgba(33,212,253,.02)');
+    ctx.fillStyle=grad; ctx.fill();
+    ctx.beginPath();
+    hist.forEach(function(p,i){ var x=xAt(i), y=yAt(p.hashrate); if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); });
+    ctx.strokeStyle='#21d4fd'; ctx.lineWidth=1.6; ctx.shadowColor='rgba(33,212,253,.55)'; ctx.shadowBlur=6; ctx.stroke(); ctx.shadowBlur=0;
+    ctx.beginPath();
+    hist.forEach(function(p,i){ var x=xAt(i), y=padT+plotH*(1-((p.miners||0)/maxMiners)); if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); });
+    ctx.setLineDash([3,3]); ctx.strokeStyle='rgba(251,191,36,.8)'; ctx.lineWidth=1.2; ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle='#5a93a8'; ctx.font='10px "JetBrains Mono",monospace'; ctx.textBaseline='top';
+    var ticks=hist.length>1 ? [0,Math.floor((hist.length-1)/2),hist.length-1] : [0];
+    ticks.forEach(function(i,k){
+      ctx.textAlign = ticks.length===1 ? 'center' : (k===0?'left':(k===ticks.length-1?'right':'center'));
+      ctx.fillText(timeLabel(hist[i].timestamp),xAt(i),padT+plotH+6);
+    });
+  }
+  async function j(url){ try{ var r=await fetch(url,{cache:'no-store'}); return r.ok?await r.json():null; }catch(e){ return null; } }
+  async function loadHistory(){
+    var raw=await j('/v1/mining/hashrate/history?range='+cur);
+    hist=(raw&&raw.ok&&raw.data&&Array.isArray(raw.data.history))?raw.data.history:[];
+    drawGraph();
+    var last=hist.length?Math.max(0,hist[hist.length-1].hashrate||0):0;
+    var peak=hist.length?Math.max.apply(null,hist.map(function(p){return Math.max(0,p.hashrate||0);})):0;
+    var avg=hist.length?hist.reduce(function(a,p){return a+Math.max(0,p.hashrate||0);},0)/hist.length:0;
+    var elc=document.getElementById('npCur'); if(elc) elc.textContent=fmtHps(last);
+    var elp=document.getElementById('npPeak'); if(elp) elp.textContent=fmtHps(peak);
+    var ela=document.getElementById('npAvg'); if(ela) ela.textContent=fmtHps(avg);
+    var sub=document.getElementById('npSub');
+    if(sub) sub.textContent = hist.length ? (hist.length+' samples · '+RLABEL[cur]+' window · durable history via sigil-api') : ('no samples yet for '+RLABEL[cur]+' · sampler records every 60s');
+  }
+  async function loadMiners(){
+    var raw=await j('/v1/mining/miners');
+    var d=(raw&&raw.ok&&raw.data)?raw.data:null;
+    var list=(d&&Array.isArray(d.miners))?d.miners.slice():[];
+    list.sort(function(a,b){ return (b.hash_rate||0)-(a.hash_rate||0); });
+    var n=document.getElementById('npMinersN'); if(n) n.textContent=list.length+' live';
+    var el=document.getElementById('npMiners'); if(!el) return;
+    if(!list.length){ el.innerHTML='<div style="font-family:\'JetBrains Mono\';font-size:11px;color:#5a93a8;padding:10px 2px">no live miners reporting right now</div>'; return; }
+    el.innerHTML=list.map(function(m){
+      var icon = m.kind==='gpu' ? '🖥' : (m.kind==='cpu' ? '⛏' : '❓');
+      var seen = m.last_seen_secs_ago!=null ? (m.last_seen_secs_ago+'s ago') : '—';
+      return '<div class="act-item">'
+        +'<div class="ai" style="font-size:14px">'+icon+'</div>'
+        +'<div style="min-width:0;flex:1"><div class="at" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(m.rig||'rig')+'</div>'
+        +'<div class="as">'+shortHex(m.wallet)+' · seen '+seen+'</div></div>'
+        +'<div style="flex:none;display:flex;align-items:center;gap:8px">'+kindBadge(m.kind)+'<span class="av">'+fmtHps(m.hash_rate||0)+'</span></div>'
+        +'</div>';
+    }).join('');
+  }
+  function refreshAll(){ loadHistory(); loadMiners(); }
+  window.openPower=function(){
+    modal.style.display='flex';
+    chips();
+    refreshAll();
+    if(!poll) poll=setInterval(refreshAll,20000);
+  };
+  window.closePower=function(){
+    modal.style.display='none';
+    if(poll){ clearInterval(poll); poll=null; }
+    if(location.hash==='#power') history.replaceState(null,'',location.pathname+location.search);
+  };
+  document.getElementById('npClose').addEventListener('click',window.closePower);
+  modal.addEventListener('click',function(e){ if(e.target===modal) window.closePower(); });
+  window.addEventListener('keydown',function(e){ if(e.key==='Escape') window.closePower(); });
+  window.addEventListener('resize',function(){ if(modal.style.display!=='none') drawGraph(); });
+  function maybeOpen(){ if(location.hash==='#power') window.openPower(); }
+  window.addEventListener('hashchange',maybeOpen);
+  if(document.readyState!=='loading') maybeOpen(); else document.addEventListener('DOMContentLoaded',maybeOpen);
+})();
+</script>
+
 <!-- ══ RESEARCH LIBRARY ══ -->
 <div id="research-modal" style="display:none;position:fixed;inset:0;z-index:10003;background:rgba(2,5,9,.82);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:18px">
   <div style="width:100%;max-width:820px;max-height:88vh;display:flex;flex-direction:column;background:linear-gradient(160deg,#06121c,#04080c);border:1px solid rgba(33,212,253,.32);border-radius:16px;box-shadow:0 0 60px rgba(33,212,253,.18);overflow:hidden;font-family:'Rajdhani',system-ui,sans-serif">
@@ -3596,7 +4156,7 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
 
   /* ── research library ── */
   var PAPERS=[
-    {t:'SIGIL Whitepaper v1.3',           s:10, c:'Protocol',   f:'SIGIL_WHITEPAPER_v1.pdf',           d:'The canonical paper: fold consensus, the braid, honest-money vows, two-axis evidence grading, delivery law, hardening backlog. Everything else is a companion to this.'},
+    {t:'SIGIL Whitepaper v1.4',           s:10, c:'Protocol',   f:'SIGIL_WHITEPAPER_v1.pdf',           d:'The canonical paper: fold consensus, the braid, honest-money vows, two-axis evidence grading, delivery law, hardening backlog. Everything else is a companion to this.'},
     {t:'The Philosophy of SIGIL v0.3',    s:10, c:'Philosophy', f:'SIGIL_PHILOSOPHY_v0.pdf',           d:'Why the chain refuses to lie: honest money narrowed to what the graph can actually promise, the epistemology of measured vs simulated, fail-stop as an ethical stance.'},
     {t:'The Failure Atlas v0',            s:9,  c:'Failures',   f:'SIGIL_FAILURE_ATLAS_v0.pdf',        d:'How SIGIL breaks: 71 incidents in 10 classes — fork sagas, OOM kills, the memlimit mesh wedge, transport collapse. Failure modes as first-class published knowledge.'},
     {t:"The Builder's Chronicle v0",      s:9,  c:'Labor',      f:'SIGIL_BUILDERS_CHRONICLE_v0.pdf',   d:'Payroll on a public ledger: claim → ship → settle between an operator and its agents, with on-chain receipts as footnotes. Legibility, not scale, is the innovation.'},
@@ -3609,7 +4169,7 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     {t:'The Master Equation v0.2',        s:8,  c:'Protocol',   f:'SIGIL_MASTER_EQUATION_v0.2.pdf',    d:'One equation for the graph: the unified formal statement tying fold weight, braid ordering and settlement into a single object, with its terms defended.'},
     {t:'The Delivery Law',                s:8,  c:'Measurement',f:'sigil-top-delivery-law.pdf',        d:'The measured law of block delivery under loss — demoted from measured to simulated in its own review, then earned back with a real netem experiment (RMS 1.50pp).'},
     {t:'Verify-Once Horizontal Scaling',  s:7,  c:'Measurement',f:'review-verify-once-horizontal-scaling-on-sigil.pdf', d:'Technical review: verify a block once, serve it many times — what horizontal read-scaling on SIGIL buys and what it cannot.'},
-    {t:'SIGIL Whitepaper v0 (historical)',s:6,  c:'Protocol',   f:'SIGIL_WHITEPAPER_v0.pdf',           d:'The first whitepaper, kept for the record. Superseded by v1.3 — read it to see how much the chain had to unlearn.'}
+    {t:'SIGIL Whitepaper v0 (historical)',s:6,  c:'Protocol',   f:'SIGIL_WHITEPAPER_v0.pdf',           d:'The first whitepaper, kept for the record. Superseded by v1.4 — read it to see how much the chain had to unlearn.'}
   ];
   var CATS=['All','Protocol','Philosophy','Failures','Labor','Adversary','Physics','Measurement','Business','Impact'];
   var DL='https://quillon.xyz/downloads/';

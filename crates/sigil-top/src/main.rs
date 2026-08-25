@@ -1722,6 +1722,32 @@ fn main() {
         }
         _ => {}
     }
+    // 2026-08-24 (sync-then-produce bridge, operator-directed: "work on unifiyhing
+    // the sigil top node so that i can produce blocks and actual is a real node ...
+    // every user downloading sigil top wil be full node operator"). This is the
+    // ACTUAL start of the producer loop — `producer::run::maybe_start` existed,
+    // fully tested, since Phase 3/5 (2026-08-23) but was never called from here, so
+    // no real `sigil-top` binary ever produced a block no matter what env vars were
+    // set. Hard no-op unless the operator has explicitly set BOTH
+    // `SIGIL_TOP_PRODUCER=1` AND `SIGIL_TOP_PRODUCE=1` (see
+    // `producer::producer_mode_enabled`/`producer::should_produce`) — every other
+    // launch of `sigil-top` (the vast majority: plain light-client wallet use) is
+    // byte-for-byte unaffected. The returned handle MUST be kept alive for the rest
+    // of `main()` (dropping it signals the background loop to stop — see
+    // `ProducerLoopHandle`'s `Drop` impl) so it is bound here, before the
+    // once/interactive dispatch below, and never re-bound to `_`.
+    #[cfg(feature = "producer")]
+    let _producer_handle = {
+        let tick_ms: u64 = std::env::var("SIGIL_TOP_PRODUCE_TICK_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(500);
+        let handle = producer::run::maybe_start(Duration::from_millis(tick_ms));
+        if handle.is_some() {
+            boot_trace("producer-mode: sync-then-produce bootstrap starting (see [producer]/[producer-sync] log lines)");
+        }
+        handle
+    };
     // v0.95: the default interactive dashboard runs the pinned updater gate before
     // entering raw-mode TUI so stale channels and bad signatures are visible instead
     // of looking like "already latest". --once, pipes, and --lite stay side-effect
@@ -2144,13 +2170,30 @@ fn valid_addr(s: &str) -> bool {
 }
 
 /// LANE-N: resolve the mining-credit wallet. PURE (for unit tests) — real I/O is in
-/// [`miner_wallet`]. Priority: explicit `SIGIL_MINE_WALLET` → the operator's chosen
-/// wallet (persisted by the [W] wallet) → a stable per-host hash. The first two are
-/// KEYED wallets the operator controls and sees in [W]; the hostname hash is an
-/// UNSPENDABLE last resort (no private key) kept only so a fresh box still mines to a
-/// stable address. This fixes the "Mining tab shows a balance but [W] shows 0" split:
-/// both now point at the same keyed address.
-fn resolve_mine_wallet(env_override: Option<&str>, chosen: Option<&str>, host: &str) -> String {
+/// [`miner_wallet`]. Priority: the `SIGIL_MINE_SEED`-derived address (if a seed is
+/// set, this IS what's actually mining — see below) → explicit `SIGIL_MINE_WALLET` →
+/// the operator's chosen wallet (persisted by the [W] wallet) → a stable per-host
+/// hash. All but the last are KEYED wallets the operator controls; the hostname hash
+/// is an UNSPENDABLE last resort (no private key) kept only so a fresh box still
+/// mines to a stable address.
+///
+/// 2026-08-25: `seed_derived` was missing entirely, which reopened the exact split
+/// this function's own doc comment says it fixes. `SIGIL_MINE_SEED` (required by
+/// `miner_keypair()` for `[M]ine`, and by `mine-rig --seed`'s shielded-mining
+/// auto-registration) is the address ACTUALLY receiving mining credit whenever it's
+/// set — but this function never looked at it, so `[W]` would show `SIGIL_MINE_WALLET`
+/// (if set, usually stale/unrelated), the persisted "chosen" file, or the unspendable
+/// hostname hash: none of which is the seed's real address. Real rewards landed on the
+/// seed wallet the whole time; `[W]` was just watching a different, uncredited one.
+/// The seed derivation is unambiguous and provably correct (the private key is right
+/// there), so it now outranks everything else.
+fn resolve_mine_wallet(
+    seed_derived: Option<&str>,
+    env_override: Option<&str>,
+    chosen: Option<&str>,
+    host: &str,
+) -> String {
+    if let Some(w) = seed_derived { if valid_addr(w) { return w.trim().to_string(); } }
     if let Some(w) = env_override { if valid_addr(w) { return w.trim().to_string(); } }
     if let Some(w) = chosen { if valid_addr(w) { return w.trim().to_string(); } }
     blake3::hash(format!("sigil-top-miner:{host}").as_bytes()).to_hex().to_string()
@@ -2158,10 +2201,11 @@ fn resolve_mine_wallet(env_override: Option<&str>, chosen: Option<&str>, host: &
 
 /// The miner-credit wallet (64-hex). See [`resolve_mine_wallet`] for the priority.
 pub(crate) fn miner_wallet() -> String {
+    let seed_derived = miner_keypair().map(|kp| kp.pubkey_hex());
     let env = std::env::var("SIGIL_MINE_WALLET").ok();
     let chosen = std::fs::read_to_string(mine_wallet_path()).ok();
     let host = std::env::var("HOSTNAME").or_else(|_| std::env::var("HOST")).unwrap_or_else(|_| "sigil-top".into());
-    resolve_mine_wallet(env.as_deref(), chosen.as_deref(), &host)
+    resolve_mine_wallet(seed_derived.as_deref(), env.as_deref(), chosen.as_deref(), &host)
 }
 
 /// LANE-N: persist the operator's chosen mining wallet (called from the local API when
@@ -2187,27 +2231,43 @@ fn miner_keypair() -> Option<Keypair> {
 mod lane_n_tests {
     use super::resolve_mine_wallet;
     #[test]
-    fn env_override_wins() {
+    fn seed_derived_beats_everything_else() {
+        // 2026-08-25: the whole point of the fix — a wallet mining via SIGIL_MINE_SEED
+        // must see [W] resolve to that SAME address, never a stale env var or a
+        // previously-chosen wallet from before the seed was set.
+        let seed_addr = "d".repeat(64);
         let env = "a".repeat(64);
-        assert_eq!(resolve_mine_wallet(Some(&env), Some(&"b".repeat(64)), "host"), env);
+        let chosen = "b".repeat(64);
+        assert_eq!(
+            resolve_mine_wallet(Some(&seed_addr), Some(&env), Some(&chosen), "host"),
+            seed_addr
+        );
+    }
+    #[test]
+    fn env_override_wins_when_no_seed() {
+        let env = "a".repeat(64);
+        assert_eq!(resolve_mine_wallet(None, Some(&env), Some(&"b".repeat(64)), "host"), env);
     }
     #[test]
     fn chosen_wallet_beats_hostname() {
         let chosen = "c".repeat(64);
-        assert_eq!(resolve_mine_wallet(None, Some(&chosen), "host"), chosen);
+        assert_eq!(resolve_mine_wallet(None, None, Some(&chosen), "host"), chosen);
     }
     #[test]
     fn falls_back_to_stable_hostname_hash() {
-        let r = resolve_mine_wallet(None, None, "host");
+        let r = resolve_mine_wallet(None, None, None, "host");
         assert_eq!(r.len(), 64);
-        assert_eq!(r, resolve_mine_wallet(None, None, "host")); // deterministic
-        assert_ne!(r, resolve_mine_wallet(None, None, "other")); // per-host
+        assert_eq!(r, resolve_mine_wallet(None, None, None, "host")); // deterministic
+        assert_ne!(r, resolve_mine_wallet(None, None, None, "other")); // per-host
     }
     #[test]
     fn invalid_inputs_are_ignored() {
-        let host_hash = resolve_mine_wallet(None, None, "host");
+        let host_hash = resolve_mine_wallet(None, None, None, "host");
         // too short + non-hex 64 → both rejected → hostname hash
-        assert_eq!(resolve_mine_wallet(Some("short"), Some(&"z".repeat(64)), "host"), host_hash);
+        assert_eq!(
+            resolve_mine_wallet(None, Some("short"), Some(&"z".repeat(64)), "host"),
+            host_hash
+        );
     }
 }
 

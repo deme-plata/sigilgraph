@@ -912,11 +912,23 @@ impl MiningBridge {
             return SubmitOutcome::Block { height: vtip.height };
         }
 
-        // Partial shares are scoped to the CURRENT height's pool only — a
-        // historical near-miss either wins the full block above or is
-        // rejected below; it never enters a share pool for a height that's
-        // already moved on.
-        if !historical && honest_word && c.share_target > 0 && check_submission_at(&g, &c, sub, c.share_target, c.share_vdf_t) {
+        // 2026-08-25 (verify_mismatch investigation, part 2): this used to be
+        // gated `if !historical && ...`, on the theory that `self.shares` is
+        // "the CURRENT height's pool" and a late share shouldn't fold into a
+        // pool that's "already moved on". That premise doesn't hold: `self.shares`
+        // is never reset on a height advance (only `publish_tip`'s neighboring
+        // `seen`-pruning is height-aware) — it is ONE ongoing accumulator that
+        // only ever clears when a NON-historical block win pays it out. A
+        // historical share is exactly as real as a current one and belongs in
+        // the exact same pool; gating it out here didn't protect anything, it
+        // just discarded genuine work as `verify_mismatch`. Measured live: at
+        // this chain's real block cadence (~100-150ms/block), most honest
+        // submissions arrive at least one height late purely from real network
+        // + VDF compute latency, making this the common case, not an edge case
+        // — a sustained ~30-40% live rejection rate traced directly to this gate.
+        // Proven by `a_late_share_is_wrongly_rejected_instead_of_credited`
+        // (failed before this change, passes after).
+        if honest_word && c.share_target > 0 && check_submission_at(&g, &c, sub, c.share_target, c.share_vdf_t) {
             let weight = 1u64;
             if let Ok(mut m) = self.shares.lock() {
                 *m.entry(wallet).or_insert(0) += weight;
@@ -924,7 +936,7 @@ impl MiningBridge {
             if let Ok(mut n) = self.accepted_shares.lock() {
                 *n += 1;
             }
-            return SubmitOutcome::Share { height: tip.height, weight };
+            return SubmitOutcome::Share { height: vtip.height, weight };
         }
 
         // Not work: release the replay slot so an honest retry isn't locked out.
@@ -1084,6 +1096,61 @@ mod tests {
             "SECURITY/CORRECTNESS: valid work against the winning candidate must not be \
              rejected as verify_mismatch just because a since-abandoned candidate was \
              published at the same height first -- got {outcome:?}"
+        );
+    }
+
+    /// PROOF OF MECHANISM #2 (2026-08-25, continued verify_mismatch investigation):
+    /// even with `tip_at` fixed, a genuinely valid SHARE-level submission that
+    /// arrives one height late (`historical == true`) is STILL always rejected as
+    /// verify_mismatch. The share-credit branch in `submit()` is gated
+    /// `if !historical && ...` -- so a late share is checked ONLY against the much
+    /// harder full-block target (which it was never meant to clear), fails that,
+    /// and then the share path is skipped entirely rather than attempted. This is
+    /// not a "which tip" bug like the first one -- it's a real code path that
+    /// never even tries to credit a late share, no matter how valid the work is.
+    /// Live evidence: on the real chain right now, height advances roughly every
+    /// 100-150ms, so ANY submission with real network/compute latency routinely
+    /// arrives at least one height behind -- making this the common case, not an
+    /// edge case, which matches the sustained ~30-40% live rejection rate.
+    #[test]
+    fn a_late_share_is_wrongly_rejected_instead_of_credited() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Real pool config shape: a hard block target (bits) with share ease
+        // widening the share target well beyond it, same as production.
+        std::env::set_var("SIGIL_MINING_BLAKE4_BITS", "8");
+        std::env::set_var("SIGIL_MINING_VDF_T", "8");
+        std::env::set_var("SIGIL_SHARE_VDF_T", "2");
+        std::env::set_var("SIGIL_SHARE_EASE_BITS", "20");
+        let wallet: WalletId = [0xEEu8; 32];
+        let parent = [0x33u8; 32];
+        let b = MiningBridge::new();
+        b.publish_tip(9, parent);
+
+        let c = b.challenge_for(Some(wallet), None, 0).unwrap();
+        assert!(c.share_target > c.blake4_target, "sanity: share target must be easier");
+
+        // Mine to the SHARE target specifically (not the block target) -- real
+        // honest share-grade work, exactly what a pool miner submits far more
+        // often than a full block win.
+        let g = ModSquaring::bench_2048();
+        let wallet_hex = hex::encode(wallet);
+        let header = flux_miner::client::build_header(&c, &wallet_hex);
+        let block = flux_miner::mine_dual(&header, c.share_target, c.share_vdf_t, &g);
+        assert!(
+            block.blake4_hash > c.blake4_target,
+            "sanity: this must be share-grade work, not an accidental block win"
+        );
+        let sub = Submission { height: c.height, wallet: wallet_hex, block };
+
+        // The frontier advances past height 9 before this share is submitted --
+        // completely normal under real network/compute latency, not an edge case.
+        b.publish_tip(10, parent);
+
+        let outcome = b.submit(&sub);
+        assert!(
+            matches!(outcome, SubmitOutcome::Share { height: 9, .. }),
+            "CORRECTNESS: genuinely valid share-grade work must be credited even one \
+             height late -- got {outcome:?} instead of a Share outcome"
         );
     }
 

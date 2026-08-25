@@ -128,7 +128,14 @@ pub fn write_miner_status(s: &MinerStats, wallet: &str) {
 /// — without it, N threads mining the same height would all derive the exact
 /// same `pool_base` (seeded only from the process id + height) and redundantly
 /// search the identical nonce range instead of N disjoint ranges.
-pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, stop: Arc<AtomicBool>, thread_idx: u64) {
+pub fn mining_loop(
+    url: String,
+    wallet: String,
+    stats: Arc<Mutex<MinerStats>>,
+    stop: Arc<AtomicBool>,
+    thread_idx: u64,
+    combined_hps: Arc<Mutex<f64>>,
+) {
     let g = ModSquaring::bench_2048(); // must match the node's group
     let client = match MinerClient::new(Endpoints::standard(&url), wallet.clone()) {
         Ok(c) => c,
@@ -171,7 +178,23 @@ pub fn mining_loop(url: String, wallet: String, stats: Arc<Mutex<MinerStats>>, s
     /// slices is the tip probe).
     const POOL_CPU_BUDGET: u64 = 4_000_000;
     while !stop.load(Ordering::Relaxed) {
-        let c = match client.fetch_challenge(prev_hps, "cpu") {
+        // 2026-08-25 (multi-thread hashrate undercount): report the WHOLE
+        // rig's combined rate, not this one thread's fragment. The node
+        // stores exactly one hps value per (wallet, rig) — every thread
+        // here shares the same rig_id (see fetch_challenge's doc comment),
+        // so N threads each reporting their own ~1/N rate just means
+        // whichever thread's fetch lands last silently overwrites the
+        // other N-1 threads' work, undercounting real power by ~Nx. This
+        // is exactly the aggregation spawn_cpu_workers already does for
+        // the LOCAL display (`agg`) — `combined_hps` is that same sum,
+        // shared here so the NODE sees the true total too, same as the
+        // TUI already does. Falls back to this thread's own rate only
+        // before the first aggregation tick has run (startup).
+        let report_hps = {
+            let c = *combined_hps.lock().unwrap_or_else(|e| e.into_inner());
+            if c > 0.0 { c } else { prev_hps }
+        };
+        let c = match client.fetch_challenge(report_hps, "cpu") {
             Ok(c) => c,
             Err(e) => {
                 {
@@ -354,9 +377,14 @@ pub fn spawn_cpu_workers(url: String, wallet: String, agg: Arc<Mutex<MinerStats>
         .unwrap_or_else(|| thread::available_parallelism().map(|p| p.get()).unwrap_or(1));
     let workers: Vec<Arc<Mutex<MinerStats>>> =
         (0..n).map(|_| Arc::new(Mutex::new(MinerStats::default()))).collect();
+    // Shared with every worker so each one reports the RIG's combined rate to
+    // the node instead of its own 1/N fragment — see mining_loop's doc note
+    // at its fetch_challenge call. Updated below on the same 300ms tick that
+    // already sums the workers for the local `agg` display.
+    let combined_hps = Arc::new(Mutex::new(0.0f64));
     for (i, w_stats) in workers.iter().enumerate() {
-        let (u, w, s, st) = (url.clone(), wallet.clone(), w_stats.clone(), stop.clone());
-        thread::spawn(move || mining_loop(u, w, s, st, i as u64));
+        let (u, w, s, st, ch) = (url.clone(), wallet.clone(), w_stats.clone(), stop.clone(), combined_hps.clone());
+        thread::spawn(move || mining_loop(u, w, s, st, i as u64, ch));
     }
     while !stop.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_millis(300));
@@ -378,6 +406,7 @@ pub fn spawn_cpu_workers(url: String, wallet: String, agg: Arc<Mutex<MinerStats>
             if let Some(l) = s.log.front() { newest_log = Some(l.clone()); }
             if last_err.is_none() { last_err = s.last_err.clone(); }
         }
+        *combined_hps.lock().unwrap_or_else(|e| e.into_inner()) = hashrate;
         let mut a = agg.lock().unwrap();
         a.hashrate = hashrate;
         a.vdf_rate = vdf_rate;

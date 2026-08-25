@@ -75,6 +75,36 @@ fn handle(
     let text = String::from_utf8_lossy(&buf);
     let (method, path) = request_line(&text);
     let body = text.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+
+    // GET /snapshot: raw binary (the state-snapshot.bin file, BLAKE3+SQIsign-
+    // signed — see sigil_node::snapshot's module docs), not JSON, so this
+    // bypasses route()'s fixed JSON content-type below. Used by sigil-top's
+    // producer bootstrap (crate::producer::run's sync-then-produce path) to
+    // fetch a full-state starting point instead of a from-genesis replay.
+    if method == "GET" && path.split('?').next() == Some("/snapshot") {
+        let snap_path = crate::snapshot::state_snapshot_path(&crate::snapshot::snapshot_dir());
+        return match std::fs::read(&snap_path) {
+            Ok(bytes) => {
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    bytes.len()
+                );
+                stream.write_all(head.as_bytes())?;
+                stream.write_all(&bytes)?;
+                Ok(())
+            }
+            Err(_) => {
+                let msg = err("no snapshot available on this node yet");
+                let out = format!(
+                    "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    msg.len(), msg
+                );
+                stream.write_all(out.as_bytes())?;
+                Ok(())
+            }
+        };
+    }
+
     let resp = route(method, path, body, mempool, dandelion_tx);
     let out = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",

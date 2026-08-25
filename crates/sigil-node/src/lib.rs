@@ -37,5 +37,21 @@ pub mod frontier;
 pub mod block;
 pub mod chain_log;
 
+/// 2026-08-23 (grogu-producer-unification Phase 2): same dual-declaration pattern as
+/// `coinbase`/`producer_signing` above. Zero `crate::`-relative deps other than
+/// `crate::block::Block` (already shared the same way), so exposing `build_genesis()`
+/// here is what lets `sigil-top`'s `producer` feature mint the network's REAL genesis
+/// instead of a hand-ported duplicate.
+pub mod genesis;
+pub mod mint;
+pub mod dag;
+
+/// 2026-08-24 (sync-then-produce bridge): same dual-declaration pattern as the
+/// modules above. Depends only on `crate::block::Block` + `crate::chain::ChainTip`,
+/// both already exposed, so this is safe by the same test. Exposed so `sigil-top`'s
+/// `producer` feature can verify + restore a real signed snapshot fetched from a
+/// running node instead of always starting from a fresh local genesis.
+pub mod snapshot;
+
 pub use store::{BlockStore, PrunedHeader, RetentionMode};
 pub use block::Block;

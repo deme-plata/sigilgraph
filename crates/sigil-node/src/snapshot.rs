@@ -221,6 +221,25 @@ pub fn save_state(snap: &StateSnapshot, dir: &Path) -> std::io::Result<u64> {
 /// the full-replay path (never trusts a bad snapshot).
 pub fn load_state(dir: &Path) -> Option<StateSnapshot> {
     let bytes = std::fs::read(state_snapshot_path(dir)).ok()?;
+    verify_snapshot_bytes(&bytes, load_sq_pubkey(dir).as_deref())
+}
+
+/// The verification core of [`load_state`], factored out so a REMOTE caller
+/// (sigil-top's producer bootstrap — see its module docs) can apply the exact
+/// same corruption/authenticity/consistency checks to bytes fetched over the
+/// network, not just a local file. Zero duplication: `load_state` itself now
+/// just reads the file and calls this.
+///
+/// `expected_pk`: `Some(pk)` requires the embedded signer key to equal it
+/// exactly (the on-disk-restart case: "this must be MY OWN prior signature").
+/// `None` skips that specific check — the signature still has to verify
+/// against ITS OWN embedded key and the BLAKE3 sum still has to match, so
+/// transit corruption is still caught, but accepting an unpinned signer is a
+/// TRUST decision the caller is making, not a proof of who signed it. A
+/// caller pulling a snapshot from an untrusted/unauthenticated peer for the
+/// first time should pass an operator-pinned `Some(pk)` here too, exactly
+/// like the local-restart case — see sigil-top's `SIGIL_SNAPSHOT_SIGNER_PK_HEX`.
+pub fn verify_snapshot_bytes(bytes: &[u8], expected_pk: Option<&[u8]>) -> Option<StateSnapshot> {
     // v2 layout: [32 sum][u16 siglen][sig][u16 pklen][pk][payload]
     if bytes.len() < 36 {
         return None;
@@ -244,13 +263,15 @@ pub fn load_state(dir: &Path) -> Option<StateSnapshot> {
     if blake3::hash(payload).as_bytes() != sum {
         return None;
     }
-    // 2) authentication (v0.36.1): the embedded signer pk MUST be THIS node's key
-    //    (else an attacker re-signs a tampered payload with their own key), AND
-    //    the SQIsign signature over the sum must verify. Any failure → None →
-    //    boot falls back to the (source-of-truth) full chain-log replay.
-    match load_sq_pubkey(dir) {
-        Some(expected_pk) if expected_pk.as_slice() == pk => {}
-        _ => return None,
+    // 2) authentication (v0.36.1): if the caller supplied an expected signer
+    //    key, the embedded pk MUST equal it (else an attacker re-signs a
+    //    tampered payload with their own key) — and the SQIsign signature
+    //    over the sum must verify regardless. Any failure → None → caller
+    //    falls back to its own source-of-truth replay path.
+    if let Some(expected) = expected_pk {
+        if expected != pk {
+            return None;
+        }
     }
     match flux_sqisign::verify(sum, sig, pk) {
         Ok(true) => {}

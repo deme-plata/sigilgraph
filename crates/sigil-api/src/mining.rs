@@ -626,14 +626,6 @@ impl MiningBridge {
                 s.retain(|&h, _| h >= floor);
             }
             if let Ok(mut h) = self.recent_tips.lock() {
-                // TEMP DIAGNOSTIC (revert before finishing): does this height already
-                // have a DIFFERENT parent_hash published? If so, tip_at() picking the
-                // FIRST match would hand a miner's submission the WRONG historical
-                // challenge -> a real, server-caused verify_mismatch.
-                if let Some(existing) = h.iter().find(|t| t.height == new.height && t.parent_hash != new.parent_hash) {
-                    eprintln!("TEMPDIAG multi-tip-same-height h={} first_parent={} new_parent={}",
-                        new.height, hex::encode(existing.parent_hash), hex::encode(new.parent_hash));
-                }
                 h.push_back(new);
                 let cap = recent_tips_capacity();
                 while h.len() > cap {
@@ -653,7 +645,21 @@ impl MiningBridge {
     /// frontier (not a real challenge yet) or old enough to have aged out of
     /// the bounded history (genuinely too stale, not just "a couple behind").
     fn tip_at(&self, height: u64) -> Option<MiningTip> {
-        self.recent_tips.lock().ok()?.iter().find(|t| t.height == height).cloned()
+        // 2026-08-25 (verify_mismatch root cause): `recent_tips` can hold MORE THAN
+        // ONE entry for the same height -- `publish_tip` appends whenever the
+        // frontier's tentative parent at that height changes, which happens
+        // routinely while a height is still inside the final_depth probation
+        // window (the braid re-electing its next candidate before committing to
+        // it). Searching front-to-back (oldest first) returned whichever candidate
+        // was proposed FIRST, which is exactly the one most likely to have been
+        // abandoned once something else won. The entry that matters is the LAST
+        // one published at that height -- the one live at the moment the frontier
+        // actually advanced past it, which is definitionally the one every later
+        // height's parent_hash chains back to. Searching newest-first (`.rev()`)
+        // fixes this: proven by `tip_at_returns_the_abandoned_candidate_not_the_one_that_won`,
+        // which failed before this change (valid work against the winning candidate
+        // was rejected as verify_mismatch) and passes after it.
+        self.recent_tips.lock().ok()?.iter().rev().find(|t| t.height == height).cloned()
     }
 
     /// Record one (wallet, rig)'s self-reported Lane-A rate and return the
@@ -1025,6 +1031,50 @@ mod tests {
         b.publish_tip(7, parent_b);
         let c2 = b.challenge_for(None, None, 0).unwrap();
         assert_ne!(c1.vdf_input, c2.vdf_input);
+    }
+
+    /// PROOF OF MECHANISM (2026-08-25, verify_mismatch investigation): `recent_tips`
+    /// can receive MORE THAN ONE entry for the same height -- `publish_tip` appends
+    /// whenever `advanced` is true, which fires on ANY parent_hash change even if the
+    /// height doesn't move (the frontier re-electing its tentative next candidate
+    /// before it's finalized, which the braid does constantly -- see the 512-block
+    /// `final_depth` probation window). `tip_at()` then does `.find()`, returning the
+    /// FIRST (oldest) matching entry -- the ABANDONED candidate, not whichever one
+    /// actually got built on and became real history. A miner who solved against the
+    /// candidate that WON gets verified against the one that LOST, and fails for a
+    /// reason that has nothing to do with their work being wrong.
+    #[test]
+    fn tip_at_returns_the_abandoned_candidate_not_the_one_that_won() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let wallet: WalletId = [0xCDu8; 32];
+        let parent_abandoned = [0x11u8; 32];
+        let parent_won = [0x22u8; 32];
+
+        let b = bridge_at(7, parent_abandoned);
+        // The frontier re-picks its height-7 candidate before moving on -- same
+        // height, different parent. This is the "advanced" branch firing on a
+        // parent_hash change alone (height unchanged).
+        b.publish_tip(7, parent_won);
+        // Miner solves against whichever challenge is live AT THE TIME -- the one
+        // that just won the re-pick.
+        let c = b.challenge_for(Some(wallet), None, 0).unwrap();
+        assert_eq!(c.vdf_input, mining_seed(&parent_won, 7), "sanity: challenge_for tracks the live tip");
+        let sub = solve_for(&c, &wallet);
+
+        // Chain advances past height 7 (the height-7 submission is now "behind
+        // the frontier" and must go through tip_at(), not the exact-match path).
+        b.publish_tip(8, parent_won);
+
+        // The work was valid -- solved against the parent that actually won and
+        // that height 8 actually extends. It must be accepted.
+        let outcome = b.submit(&sub);
+        assert_eq!(
+            outcome,
+            SubmitOutcome::Block { height: 7 },
+            "SECURITY/CORRECTNESS: valid work against the winning candidate must not be \
+             rejected as verify_mismatch just because a since-abandoned candidate was \
+             published at the same height first -- got {outcome:?}"
+        );
     }
 
     #[test]

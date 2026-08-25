@@ -4962,7 +4962,26 @@ fn human_bytes(bytes: u64) -> String {
 /// rpcd chain. Override with SIGIL_MINE_NODE to point at rpcd (:8099) or
 /// anywhere else. Distinct from the legacy [m] BLAKE3 `mine_url()`.
 fn engine_node_url() -> String {
-    std::env::var("SIGIL_MINE_NODE").unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:18181".into())
+    // An explicit operator choice always wins — never override it, producer mode or not.
+    if let Ok(v) = std::env::var("SIGIL_MINE_NODE") {
+        return v;
+    }
+    // 2026-08-25 (local-mining-API work, operator-directed: "let a miner mine against
+    // their OWN locally-running node instead of always hitting the central Epsilon
+    // node"): when this process's own producer mode has a local mining API ACTUALLY up
+    // (not merely requested — see `producer::mining_api::local_mining_api_is_up`'s doc
+    // for what "up" means: a confirmed TCP accept, not just the env vars being set),
+    // prefer it. `local_mining_api_is_up()` is a single relaxed atomic load, so this is
+    // safe to call from a hot per-frame render path (the Mining tab). In every build
+    // without the `producer` feature — the overwhelming majority of users — this branch
+    // doesn't exist at all, and in a `producer`-feature build where the local server was
+    // never started (no env vars, or sync/bind failed), the flag is false and this falls
+    // through exactly as before: byte-identical default behavior either way.
+    #[cfg(feature = "producer")]
+    if producer::mining_api::local_mining_api_is_up() {
+        return producer::mining_api::local_mining_api_url();
+    }
+    "http://sigilgraph.quillon.xyz:18181".into()
 }
 
 

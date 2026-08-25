@@ -110,6 +110,11 @@ pub struct AppState {
     /// module docs. Populated by `mining_history::spawn_sampler`, which
     /// polls `mining` on a timer; never written from a request handler.
     pub history: Arc<MiningHistoryStore>,
+    /// The libp2p network manager — for the real-peer network map (`/v1/network/topology`).
+    /// `None` in tests/lightweight construction (`AppState::new`); production
+    /// (main.rs) always sets it. The handler reports a clean "unavailable"
+    /// response rather than panicking when it's absent.
+    pub network: Option<Arc<flux_p2p::NetworkManager>>,
 }
 
 impl AppState {
@@ -133,6 +138,7 @@ impl AppState {
             // builds `AppState` via struct literal with a real on-disk path
             // instead of calling this constructor.
             history: Arc::new(MiningHistoryStore::open_ephemeral()),
+            network: None,
         }
     }
 }
@@ -1247,6 +1253,60 @@ pub async fn dagknight_recent(State(st): State<AppState>) -> Json<ApiResponse<da
     ApiResponse::ok(st.dagknight.get())
 }
 
+/// What the "Peers" network-map modal renders: this node's own identity +
+/// mesh-health aggregate (from `NetworkManager::summary()`) plus the real,
+/// individual connected peers (from `connected_peer_infos()`) — everything a
+/// caller needs to draw a real hub-and-spoke map of the ACTUAL sigil-g0
+/// connections this node has, not a browser-isolated guess at the network.
+#[derive(Debug, Serialize)]
+pub struct NetworkTopologyResponse {
+    pub self_node_id: String,
+    pub listen_addr: String,
+    pub started: bool,
+    pub peer_count: u32,
+    pub dagknight_round: u64,
+    pub mesh_quality: String,
+    pub estimated_drop_rate: f64,
+    pub avg_block_latency_ms: f64,
+    pub blocks_received: u64,
+    pub messages_processed: u64,
+    pub fan_out: u32,
+    pub topics: Vec<String>,
+    pub bootstrap_peers: Vec<String>,
+    /// Real connected peers — multiaddr, connected-since, protocols, agent
+    /// version. This is the actual list the map draws nodes from.
+    pub peers: Vec<flux_p2p::swarm::PeerInfo>,
+    /// Each peer's last-known chain height, keyed by peer_id — lets the map
+    /// color a peer by how caught-up it is instead of just "connected: yes".
+    pub peer_heights: std::collections::HashMap<String, u64>,
+}
+
+#[flux_api_macros::api(GET, "/v1/network/topology", summary = "Real peer connections + mesh health, for the network map UI")]
+pub async fn network_topology(State(st): State<AppState>) -> Json<ApiResponse<NetworkTopologyResponse>> {
+    let Some(net) = st.network.as_ref() else {
+        return ApiResponse::err("network manager not available on this node");
+    };
+    let summary = net.summary();
+    let health = summary.mesh_health.unwrap_or_default();
+    ApiResponse::ok(NetworkTopologyResponse {
+        self_node_id: summary.node_id,
+        listen_addr: summary.listen_addr,
+        started: summary.started,
+        peer_count: summary.peer_count,
+        dagknight_round: summary.dagknight_round,
+        mesh_quality: health.quality,
+        estimated_drop_rate: health.estimated_drop_rate,
+        avg_block_latency_ms: health.avg_block_latency_ms,
+        blocks_received: health.blocks_received,
+        messages_processed: health.messages_processed,
+        fan_out: health.fan_out,
+        topics: summary.topics,
+        bootstrap_peers: summary.bootstrap_peers,
+        peers: net.connected_peer_infos(),
+        peer_heights: health.peer_heights,
+    })
+}
+
 #[flux_api_macros::api(GET, "/v1/mining/miners", summary = "Live mining power and accept/reject counters")]
 pub async fn mining_miners(
     State(st): State<AppState>,
@@ -1292,6 +1352,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/mining/miners", get(mining_miners))
         .route("/v1/mining/hashrate/history", get(mining_hashrate_history))
         .route("/v1/dagknight/recent", get(dagknight_recent))
+        .route("/v1/network/topology", get(network_topology))
         .route("/v1/bridge/lock", post(bridge_lock_handler))
         .route("/v1/bridge/locks", get(bridge_locks_handler))
         .route("/v1/bridge/unlock", post(bridge_unlock_handler))

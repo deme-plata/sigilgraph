@@ -131,6 +131,12 @@ anyhow = { workspace = true, optional = true }
 # Interop test only: encode with the SAME C-backed zstd the server uses, decode with
 # our pure-Rust ruzstd — proves the exact cross-implementation wire roundtrip.
 zstd = "0.13"
+# 2026-08-25 (local-mining-API test): `producer::run`'s offline end-to-end test needs a
+# real `VdfGroup` impl to actually solve a `Challenge` via `flux_miner::client::solve` —
+# `ModSquaring::bench_2048()` is the SAME group `sigil-api::mining` verifies against
+# (`crates/sigil-api/src/mining.rs`), so a solve produced here genuinely passes real
+# verification, not a mocked one. Test-only: never linked into the shipped binary.
+flux-vdf = { path = "../flux-vdf" }
 
 # When activated, sigil-tip-proof links flux-sqisign and verify_tip() constructs
 # a TipProof::new_sqisign() for adversary-resistant tip verification.

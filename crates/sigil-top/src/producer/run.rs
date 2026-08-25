@@ -26,12 +26,13 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::Result;
 use sigil_dagknight::{BlockView, Braid};
 use sigil_header::BlockHash;
+use sigil_narwhal_mempool::MempoolBackend;
 use sigil_tx::SignedTx;
 
 use sigil_node::block::Block;
@@ -41,6 +42,7 @@ use sigil_node::dag::{
     dag_store_body,
 };
 use sigil_node::mint::mint_next_block;
+use sigil_node::solve_credit::take_creditable_solve;
 
 /// Bound on the local producer's own DAG body cache — same reasoning/order of
 /// magnitude as sigil-node's `MINT_HASH_TRACKING_CAP`; this is a solo/small mesh
@@ -55,12 +57,15 @@ pub struct ProducerState {
     pub braid: Braid,
     pub dag_bodies: HashMap<BlockHash, Block>,
     mint_hash_to_tx_hashes: HashMap<BlockHash, Vec<[u8; 32]>>,
-    send_bridge: sigil_api::send::SendBridge,
-    bridge_bridge: sigil_api::bridge::BridgeBridge,
-    dex_bridge: sigil_api::dex::DexBridge,
-    usds_bridge: sigil_api::usds::UsdsBridge,
-    usds_polygon_bridge: sigil_api::usds_bridge::UsdsBridgeBridge,
-    shielded_bridge: sigil_api::shielded::ShieldedBridge,
+    /// The SAME `sigil_api::AppState` a local mining/money HTTP server (see
+    /// `producer::mining_api`) is started with, when one is running — `mining`/`send`/
+    /// `bridge`/`dex`/`usds`/`usds_bridge`/`shielded` here are the exact Arc handles the
+    /// router reads and writes through, not copies. `AppState` derives `Clone` (cheap —
+    /// every field is an `Arc`), so a caller wanting to hand the router its own copy of
+    /// these handles just clones `api`, as [`super::mining_api::spawn_local_mining_api`]
+    /// does. `state` (the published `SigilState` snapshot money-API reads balances from)
+    /// is refreshed after every settled tick — see the write in [`Self::tick`].
+    pub api: sigil_api::AppState,
 }
 
 /// What one `tick()` accomplished — logged by the loop wrapper, asserted on by tests.
@@ -89,18 +94,20 @@ impl ProducerState {
     /// the braid from `chain`'s own local window — see `dag_seed_braid`'s doc.
     pub fn new(chain: ChainTip) -> Self {
         let braid = dag_seed_braid(&chain);
-        Self {
-            chain,
-            braid,
-            dag_bodies: HashMap::new(),
-            mint_hash_to_tx_hashes: HashMap::new(),
-            send_bridge: sigil_api::send::SendBridge::new(),
-            bridge_bridge: sigil_api::bridge::BridgeBridge::new(None, None),
-            dex_bridge: sigil_api::dex::DexBridge::new(),
-            usds_bridge: sigil_api::usds::UsdsBridge::new(),
-            usds_polygon_bridge: sigil_api::usds_bridge::UsdsBridgeBridge::new(None, None),
-            shielded_bridge: sigil_api::shielded::ShieldedBridge::new(),
-        }
+        // A local, empty mempool: this loop's `txs` come from the money bridges'
+        // `snapshot_for_mint()` below (send/bridge/dex/usds/shielded), the same as
+        // `sigil-node`'s own producer — nothing here ever pulls from `mempool` today, so
+        // `legacy()` (no env-driven backend selection) keeps this deterministic and free
+        // of any dependency on the process's environment beyond the two producer gates
+        // already checked in `producer::mod`. `AppState` still needs a real handle
+        // because `sigil_api::router`'s `/v1/transactions` route requires one to exist,
+        // even though nothing here drains it — see `mining_api.rs`'s module doc.
+        let mempool: Arc<MempoolBackend> = Arc::new(MempoolBackend::legacy());
+        // Published SETTLED state, refreshed after every tick (see `Self::tick`) —
+        // mirrors `sigil-node`'s own `money_state` snapshot-on-settle pattern exactly.
+        let state = Arc::new(RwLock::new(chain.state_snapshot()));
+        let api = sigil_api::AppState::new(mempool, state);
+        Self { chain, braid, dag_bodies: HashMap::new(), mint_hash_to_tx_hashes: HashMap::new(), api }
     }
 
     /// One producer tick, in the same order `sigil-node`'s real loop runs it:
@@ -115,24 +122,39 @@ impl ProducerState {
         let merge_parents = self.braid.merge_tips(&frontier.parent_hash(), 4);
         let topology_commitment = compute_topology_commitment(Some(&self.braid), frontier.height());
 
+        // Publish the frontier a local miner's next challenge binds to — see
+        // `mining_api` module docs. A solve issued now is valid for exactly the block
+        // this tick is about to mint and no other, same contract `sigil-node`'s own
+        // producer publishes under (`mining_bridge.publish_tip`, main.rs). Always
+        // called, even when no local mining API is running — cheap (a couple of
+        // atomics inside `MiningBridge`), and harmless if nobody's listening.
+        self.api.mining.publish_tip(frontier.height(), frontier.parent_hash());
+        // Opportunistically credit whatever's already queued — an exact match for
+        // THIS frontier, or a near-miss within the credit window — never wait for one
+        // (free-running cadence, unchanged if no local miner is running). Reuses the
+        // EXACT scan/credit decision `sigil-node`'s own producer tunes live — see
+        // `sigil_node::solve_credit`'s doc for the money-loss bug this was tuned
+        // against; a hand-rolled copy here would risk silently drifting from it.
+        let solve = take_creditable_solve(&self.api.mining, frontier.parent_hash(), frontier.height());
+
         // Real submissions this instance has authenticated (wallet-signed, via
-        // whatever surface exposes SendBridge::submit etc. to callers — not wired
-        // yet, so these are empty in practice until a Phase 4 submit endpoint
-        // exists). Calling snapshot_for_mint here now, even though it's always
-        // empty today, proves the wiring is correct and means a future submit
-        // endpoint is a pure addition — no change needed here.
+        // whatever surface exposes SendBridge::submit etc. to callers — reachable
+        // today only through a local mining/money API server, if one is running; see
+        // `mining_api` module docs). Calling snapshot_for_mint here always, even when
+        // no such server is running (so these stay empty), keeps this loop identical
+        // to before this module gained an `api` field in that case.
         let txs: Vec<SignedTx> = {
-            let mut v = self.send_bridge.snapshot_for_mint();
-            v.extend(self.bridge_bridge.snapshot_for_mint());
-            v.extend(self.dex_bridge.snapshot_for_mint());
-            v.extend(self.usds_bridge.snapshot_for_mint());
-            v.extend(self.usds_polygon_bridge.snapshot_for_mint());
-            v.extend(self.shielded_bridge.snapshot_for_mint());
+            let mut v = self.api.send.snapshot_for_mint();
+            v.extend(self.api.bridge.snapshot_for_mint());
+            v.extend(self.api.dex.snapshot_for_mint());
+            v.extend(self.api.usds.snapshot_for_mint());
+            v.extend(self.api.usds_bridge.snapshot_for_mint());
+            v.extend(self.api.shielded.snapshot_for_mint());
             v
         };
 
         let (block, minted_tx_hashes) =
-            mint_next_block(&frontier, merge_parents, &txs, None, None, topology_commitment)?;
+            mint_next_block(&frontier, merge_parents, &txs, None, solve.as_ref(), topology_commitment)?;
         let minted_height = block.header.height;
         // Same wire shape sigil-node's own TOPIC_BLOCKS publisher uses (plain
         // serde_json::to_vec — confirmed by reading its actual publish call
@@ -156,14 +178,23 @@ impl ProducerState {
             &mut self.dag_bodies,
             &mut self.chain,
             persist,
-            &self.send_bridge,
-            &self.bridge_bridge,
-            &self.dex_bridge,
-            &self.usds_bridge,
-            &self.usds_polygon_bridge,
-            &self.shielded_bridge,
+            &self.api.send,
+            &self.api.bridge,
+            &self.api.dex,
+            &self.api.usds,
+            &self.api.usds_bridge,
+            &self.api.shielded,
             &mut self.mint_hash_to_tx_hashes,
         );
+
+        // Publish the fresh SETTLED state so a local money/mining API (if running)
+        // serves current balances — mirrors `sigil-node`'s own `money_state` refresh
+        // (main.rs, "publish the fresh SETTLED state" comment) exactly. Unconditional
+        // (not gated on `applied > 0`): cheap relative to a tick, and simpler to reason
+        // about than trying to skip it on ticks that settled nothing.
+        if let Ok(mut w) = self.api.state.write() {
+            *w = self.chain.state_snapshot();
+        }
 
         Ok(TickOutcome { minted_height, applied, skipped, failed, settled_height: self.chain.height(), minted_block_bytes })
     }
@@ -286,6 +317,15 @@ fn spawn_networked_loop(chain: ChainTip, tick_interval: Duration) -> ProducerLoo
             let mut block_rx = net.subscribe(sigil_net::TOPIC_BLOCKS);
             let net = Arc::new(net);
             let mut state = ProducerState::new(chain);
+            // Local mining HTTP API — 2026-08-25, operator-directed ("let a miner mine
+            // against their OWN locally-running node"). Shares `state.api` by clone
+            // (cheap — every field is an Arc), so a share submitted here lands in the
+            // EXACT MiningBridge this tick loop publishes tips into and drains solves
+            // from, above. See `mining_api` module docs for the full design + the
+            // two-gate reasoning (this only ever runs once BOTH SIGIL_TOP_PRODUCER=1
+            // AND SIGIL_TOP_PRODUCE=1 are set — `maybe_start`'s existing contract,
+            // unchanged by this addition).
+            super::mining_api::spawn_local_mining_api(state.api.clone());
             crate::tlog!("[producer] networked loop started — publishing candidates to {}", sigil_net::TOPIC_BLOCKS);
 
             const INGEST_CAP: u32 = 64; // bounded per tick — mirrors the light client's own gossip-flood discipline
@@ -392,6 +432,12 @@ fn sync_chain_blocking() -> Option<ChainTip> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `tests` nests one level deeper than `run.rs`'s own top-level functions (which
+    // reach `mining_api` via a single `super::`, since THEIR `super` is `producer`
+    // directly) — from inside `tests`, `super` is `producer::run`, so `mining_api`
+    // needs the extra hop. `super::super::mint` a few lines below is the same pattern,
+    // already established in this file before this test was added.
+    use super::super::mining_api;
 
     fn genesis_chain() -> ChainTip {
         let mut chain = ChainTip::new();
@@ -486,6 +532,138 @@ mod tests {
             "A and B settled DIFFERENT heights — a real fork, not just a race");
         assert_eq!(a.chain.parent_hash(), b.chain.parent_hash(),
             "A and B settled the same height but DIFFERENT blocks — a real fork");
+    }
+
+    /// LIVE, OFFLINE, end-to-end proof of the local mining API (2026-08-25): a
+    /// producer with no network attached, its local mining HTTP server, a REAL `GET
+    /// /v1/mining/challenge`, a REAL `flux_miner::client::solve`, a REAL `POST
+    /// /v1/mining/submit`, and a REAL minted+settled block crediting the miner's
+    /// wallet — against the genuine `sigil_api::router` and the genuine
+    /// `MiningBridge`/`mint_next_block`/`solve_credit::take_creditable_solve`
+    /// chokepoints. Nothing here is mocked or hand-simulated.
+    ///
+    /// Deliberately does NOT go through `maybe_start()` (the real sync-from-a-running-
+    /// node + real sigil-g0 mesh join + real block-publish path) — see `mining_api.rs`'s
+    /// module doc for why: this process becoming a real second producer on the live
+    /// network is a separate, higher-stakes step this session's task explicitly did not
+    /// authorize (mirrors the existing `#[ignore]`d `manual_observe_live_networked_run`
+    /// test below, which required its own explicit operator go-ahead). This test proves
+    /// the NEW code — the local server plus `tick()`'s mining wiring — end-to-end
+    /// without touching Epsilon or the live mesh at all.
+    #[test]
+    fn local_mining_api_credits_a_real_solve_into_a_minted_block() {
+        std::env::set_var("SIGIL_DAG_FINAL_DEPTH", "2");
+        // Trivial-but-real difficulty: a genuine nonce search + a genuine (short)
+        // sequential VDF, not a rigged always-pass check. Fast enough for a unit test.
+        std::env::set_var("SIGIL_MINING_BLAKE4_BITS", "8");
+        std::env::set_var("SIGIL_MINING_VDF_T", "4");
+
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        rt.block_on(async move {
+            let addr = mining_api::local_mining_api_addr();
+            // Regression check FIRST, before anything spawns anything: with nothing
+            // having called `spawn_local_mining_api` yet, the port must be unbound and
+            // the flag other code (`engine_node_url()`) reads must read false. A real
+            // TCP connect attempt is the honest check — it proves the OS has no
+            // listener there, not just that this module's own bookkeeping agrees.
+            assert!(
+                tokio::net::TcpStream::connect(&addr).await.is_err(),
+                "port {addr} must be unbound before spawn_local_mining_api is ever called"
+            );
+            assert!(!mining_api::local_mining_api_is_up());
+
+            let mut state = ProducerState::new(genesis_chain());
+            mining_api::spawn_local_mining_api(state.api.clone());
+
+            // ProducerState.tick() needs &mut self, so the ticking thread takes
+            // exclusive ownership of `state` from here on — the HTTP server never
+            // touches ProducerState directly, only its own clone of the Arc-shared
+            // `api` handles, so this isn't a lock, just a move.
+            let stop = Arc::new(AtomicBool::new(false));
+            let stop2 = Arc::clone(&stop);
+            let ticker = std::thread::spawn(move || {
+                while !stop2.load(Ordering::Relaxed) {
+                    let _ = state.tick(&mut |_| {});
+                    std::thread::sleep(Duration::from_millis(15));
+                }
+            });
+
+            let mut up = false;
+            for _ in 0..80 {
+                if tokio::net::TcpStream::connect(&addr).await.is_ok() { up = true; break; }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            assert!(up, "local mining API never came up on {addr}");
+            assert!(mining_api::local_mining_api_is_up());
+
+            let wallet = "ab".repeat(32); // 64-hex, canonical lowercase
+            let base = mining_api::local_mining_api_url();
+            let client = reqwest::Client::new();
+
+            // Wait for a real challenge — needs at least one tick's publish_tip().
+            let mut challenge: Option<flux_miner::client::Challenge> = None;
+            for _ in 0..100 {
+                if let Ok(r) = client.get(format!("{base}/v1/mining/challenge?wallet={wallet}")).send().await {
+                    if r.status().is_success() {
+                        if let Ok(c) = r.json::<flux_miner::client::Challenge>().await {
+                            challenge = Some(c);
+                            break;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+            let challenge = challenge.expect("never got a real challenge from the local mining API");
+
+            // The SAME group sigil-api::mining verifies against (ModSquaring::bench_2048)
+            // — a solve produced here genuinely passes real verification, not a mock.
+            let g = flux_vdf::ModSquaring::bench_2048();
+            let block = flux_miner::client::solve(&challenge, &wallet, &g);
+            let submission = flux_miner::client::Submission {
+                height: challenge.height,
+                wallet: wallet.clone(),
+                block,
+            };
+            let submit_resp = client
+                .post(format!("{base}/v1/mining/submit"))
+                .json(&submission)
+                .send()
+                .await
+                .expect("submit request");
+            let result: flux_miner::client::SubmitResult =
+                submit_resp.json().await.expect("submit response body");
+            assert!(result.accepted, "real solve was rejected: {:?}", result.reason);
+
+            // Give the ticker time to pick the queued solve up (take_creditable_solve)
+            // and mint + settle a block that embeds it, then poll the REAL /v1/balance
+            // route — proving credit through the whole pipeline, not just acceptance.
+            let mut credited_raw: Option<String> = None;
+            for _ in 0..200 {
+                if let Ok(r) = client.get(format!("{base}/v1/balance?wallet={wallet}")).send().await {
+                    if let Ok(v) = r.json::<serde_json::Value>().await {
+                        if let Some(bal) = v.get("data").and_then(|d| d.get("balance")).and_then(|b| b.as_str()) {
+                            if bal != "0" {
+                                credited_raw = Some(bal.to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+
+            stop.store(true, Ordering::Relaxed);
+            ticker.join().expect("ticker thread panicked");
+            std::env::remove_var("SIGIL_DAG_FINAL_DEPTH");
+            std::env::remove_var("SIGIL_MINING_BLAKE4_BITS");
+            std::env::remove_var("SIGIL_MINING_VDF_T");
+
+            assert!(
+                credited_raw.is_some(),
+                "wallet balance never rose above 0 — the solve was accepted but never \
+                 credited into a settled block"
+            );
+        });
     }
 
     /// `maybe_start` must be a hard no-op unless BOTH env vars are set — this is

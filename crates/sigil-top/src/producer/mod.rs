@@ -16,12 +16,17 @@
 //!   1. compile-time — the `producer` Cargo feature (this file only exists when it's on).
 //!   2. run-time — `SIGIL_TOP_PRODUCER=1` AND `SIGIL_TOP_PRODUCE=1` (both required —
 //!      see [`producer_mode_enabled`]/[`should_produce`]/[`run::maybe_start`]).
-//! A THIRD, structural gate on top of those two: [`run`]'s loop mints and settles
-//! against its own LOCAL braid only — it never broadcasts to the network or accepts
-//! peer gossip. So even an instance with both env vars set is invisible to the real
-//! sigil-g0 mesh; it's a fully offline proof the minting pipeline works, not a
-//! second producer joining the live network. That's the deliberately-deferred next
-//! step — see [`run`]'s module doc for why.
+//! CORRECTION (2026-08-25): the paragraph that used to stand here claimed a third,
+//! structural gate — that [`run`]'s loop only ever mints/settles against its own
+//! LOCAL braid and never broadcasts, making even a fully-enabled instance invisible
+//! to the real sigil-g0 mesh. That stopped being true on 2026-08-24, when
+//! [`run::maybe_start`] was wired to [`sync`]'s real snapshot+tail-replay bootstrap
+//! and [`run`]'s `spawn_networked_loop` (a REAL `flux_p2p::NetworkManager` that
+//! subscribes to and publishes on `sigil_net::TOPIC_BLOCKS`) — this doc simply never
+//! got updated to say so. As of today, `maybe_start()` with BOTH env vars set really
+//! does sync from a real running node and join sigil-g0 as a real second producer;
+//! there is currently no separate compile-time-safe "local-only, never touches the
+//! network" mode. `run`'s own module doc has the accurate, detailed version of this.
 //!
 //! Module layout — status per module, not "planned":
 //!   - [`block`]    — DONE. Real re-export of `sigil_node::Block` (header +
@@ -41,10 +46,27 @@
 //!                    turned out to already take its state as explicit parameters
 //!                    rather than closing over `main.rs`'s local event-loop state,
 //!                    so this was a pure relocation, not a rewrite.
-//!   - [`run`]      — DONE, Phase 3/5 (2026-08-23, operator-directed: "let's do
-//!                    this"). The actual loop: seed → (frontier → mint → insert →
-//!                    drain-apply) on repeat. Local-mint-only — see the gate #3 note
-//!                    above and `run`'s own module doc for exactly what's deferred.
+//!   - [`sync`]     — DONE (2026-08-24). Snapshot bootstrap + P2P tail replay
+//!                    against a real running node — what makes [`run::maybe_start`]
+//!                    mint on top of the REAL chain instead of a fresh local genesis.
+//!                    Refuses (returns `None`) rather than falling back to a fresh
+//!                    genesis on any failure — see its own module doc.
+//!   - [`run`]      — DONE, Phase 3/5 (2026-08-23) + sync-then-produce + real network
+//!                    join (2026-08-24, operator-directed: "let's do this" / "every
+//!                    user downloading sigil top will be full node operator"). The
+//!                    actual loop: sync → (frontier → mint → insert → drain-apply) on
+//!                    repeat, publishing candidates to the real sigil-g0 mesh.
+//!   - [`mining_api`] — DONE (2026-08-25, operator-directed: "let a miner mine
+//!                    against their OWN locally-running node instead of always
+//!                    hitting the central Epsilon node"). Starts a real local
+//!                    `sigil-api` HTTP server (`sigil_api::router`, unmodified) once
+//!                    [`run::maybe_start`] is actually running, sharing the SAME
+//!                    `MiningBridge`/money-bridge Arcs [`run::ProducerState::tick`]
+//!                    drains and publishes tips into — closing the gap the earlier
+//!                    version of this file's module doc called "the deliberately-
+//!                    deferred next step": until this, nothing in this module ever
+//!                    listened on an HTTP port, so a miner pointed at a local
+//!                    producer had nothing to talk to.
 //!
 //! Verified this session: `fluxc check -p sigil-top --features producer` and
 //! `fluxc test -p sigil-top --features producer` both clean. The default (no
@@ -55,6 +77,7 @@ pub mod block;
 pub mod chain_log;
 pub mod coinbase;
 pub mod dag;
+pub mod mining_api;
 pub mod mint;
 pub mod run;
 pub mod sync;

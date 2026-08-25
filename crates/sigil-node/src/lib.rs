@@ -53,5 +53,13 @@ pub mod dag;
 /// running node instead of always starting from a fresh local genesis.
 pub mod snapshot;
 
+/// 2026-08-25 (local-mining-API work): same dual-declaration pattern as the modules
+/// above. Zero `crate::`-relative deps (only `sigil_api`/`sigil_header`/`flux_vdf`), so
+/// exposing it here is safe by the same test. Exposed so `sigil-top`'s `producer` feature
+/// credits a queued mining solve through the EXACT same tuned decision this node's own
+/// live producer uses (see `solve_credit.rs`'s doc comment for the live money-loss bug
+/// this logic was tuned against) instead of a hand-ported duplicate that could drift.
+pub mod solve_credit;
+
 pub use store::{BlockStore, PrunedHeader, RetentionMode};
 pub use block::Block;

@@ -1126,7 +1126,16 @@ fn write_session(id: &str) {
 fn clear_session() { let _ = std::fs::remove_file(session_path()); }
 
 fn hex_to_32(h: &str) -> Option<[u8; 32]> {
+    // 2026-08-25: shield_setup.rs's seed_bytes() (used by headless `mine-rig`) strips
+    // an optional 0x/0X prefix before decoding and its doc comment claims this function
+    // matches that behavior -- it didn't. A SIGIL_MINE_SEED carrying a 0x prefix decoded
+    // fine for headless mining but made miner_keypair() (interactive [M]ine/[W], the ONLY
+    // caller of this function) silently return None, dropping straight through
+    // resolve_mine_wallet()'s seed-priority to an unrelated fallback wallet -- for both
+    // display AND actual mining credit. Real bug, not a display-only one: headless mined
+    // (and credited) correctly the whole time; interactive mined to the wrong address.
     let h = h.trim();
+    let h = h.strip_prefix("0x").or_else(|| h.strip_prefix("0X")).unwrap_or(h);
     if h.len() != 64 { return None; }
     let mut o = [0u8; 32];
     for i in 0..32 { o[i] = u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).ok()?; }
@@ -4195,7 +4204,19 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 // first, then open its compiled-in UI. Keep this URL exact so
                                 // SIGIL_WALLET_URL/FLUX_WALLET_URL cannot redirect the shortcut
                                 // to the hosted wallet; [L] remains the explicit hosted option.
-                                let url = format!("http://localhost:{}/", wallet_ui::WALLET_PORT);
+                                //
+                                // 2026-08-25: was missing `?addr=`, unlike the headless fallback
+                                // below (headless_wallet_view_url) which already does this. The
+                                // page's ADDR (the header "yours" pill, driven by ?addr= or else
+                                // localStorage['sigil-wallet-address'] from an earlier, unrelated
+                                // onboarding visit) is a SEPARATE identity from MINE_ADDR (the
+                                // balance number, seed-derived, already correct). Without ?addr=
+                                // here, a browser tab with any prior onboarding history keeps
+                                // showing that stale/unrelated address next to the correct
+                                // balance — "the balance is right but it's a different wallet."
+                                // Passing the real mining address explicitly overrides whatever
+                                // is cached, same as the headless link already does.
+                                let url = format!("http://localhost:{}/?addr={}", wallet_ui::WALLET_PORT, miner_wallet());
                                 if !ensure_serve_up(&mut app) {
                                     app.toast = format!("✗ local wallet server down ({})", app.serve_status).into();
                                     app.toast_sticky = true;
@@ -5000,6 +5021,13 @@ mod pure_helpers_tests {
         assert_eq!(hex_to_32(&h.to_uppercase()), Some(b));
         // surrounding whitespace trimmed
         assert_eq!(hex_to_32(&format!("  {h}  ")), Some(b));
+        // 2026-08-25: an 0x/0X-prefixed seed must decode identically -- mine-rig's
+        // seed_bytes() (shield_setup.rs) already stripped this prefix; this function
+        // silently didn't, so a prefixed SIGIL_MINE_SEED mined headless correctly but
+        // fell through to an unrelated fallback wallet for [M]ine/[W].
+        assert_eq!(hex_to_32(&format!("0x{h}")), Some(b));
+        assert_eq!(hex_to_32(&format!("0X{h}")), Some(b));
+        assert_eq!(hex_to_32(&format!("  0x{h}  ")), Some(b));
         // wrong length / non-hex rejected
         assert_eq!(hex_to_32(&"a".repeat(63)), None);
         assert_eq!(hex_to_32(&"a".repeat(65)), None);

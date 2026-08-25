@@ -8367,6 +8367,7 @@ dependencies = [
  "flux-api-macros",
  "flux-db",
  "flux-miner",
+ "flux-p2p",
  "flux-search",
  "flux-vdf",
  "hex",
@@ -8504,6 +8505,7 @@ dependencies = [
  "sigil-dagknight",
  "sigil-dex",
  "sigil-events",
+ "sigil-finality",
  "sigil-header",
  "sigil-shield",
  "sigil-state",
@@ -8625,6 +8627,18 @@ version = "5.1.1"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "sigil-finality"
+version = "5.1.1"
+dependencies = [
+ "blake3",
+ "ed25519-dalek",
+ "rand 0.8.6",
+ "serde",
+ "sigil-braidpool",
+ "sigil-header",
 ]
 
 [[package]]
@@ -9012,7 +9026,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-top"
-version = "7.1.81"
+version = "7.1.82"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -9030,6 +9044,7 @@ dependencies = [
  "flux-sync",
  "flux-topology",
  "flux-turbo-sync",
+ "flux-vdf",
  "futures",
  "hex",
  "ratatui",

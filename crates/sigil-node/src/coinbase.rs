@@ -189,7 +189,12 @@ pub fn build_block_body_for(
         // existing miner is never broken by this.
         let cb = match work.shielded().shielded_address(&producer) {
             Some(pk) => match sigil_shield::note_v1::coinbase_commitment_wire(height, &pk, reward) {
-                Some(cm) => StateMutation::ShieldedCoinbase { pk_shield: pk, amount: reward, cm },
+                Some(cm) => StateMutation::ShieldedCoinbase {
+                    pk_shield: pk,
+                    amount: reward,
+                    cm,
+                    ct: seal_coinbase_note(&work, &producer, &pk, reward, height),
+                },
                 // An unrepresentable reward (past the circuit's range bound) must not
                 // silently vanish — pay it transparently rather than mint nothing.
                 None => StateMutation::SetBalance {
@@ -367,7 +372,12 @@ pub fn split_coinbase_mutations(
             // the shielded circuit's representable range.
             let shielded = work.shielded().shielded_address(&to).and_then(|pk| {
                 sigil_shield::note_v1::coinbase_commitment_wire(height, &pk, to_credit)
-                    .map(|cm| StateMutation::ShieldedCoinbase { pk_shield: pk, amount: to_credit, cm })
+                    .map(|cm| StateMutation::ShieldedCoinbase {
+                        pk_shield: pk,
+                        amount: to_credit,
+                        cm,
+                        ct: seal_coinbase_note(work, &to, &pk, to_credit, height),
+                    })
             });
             let mutation = match shielded {
                 Some(m) => m,
@@ -1015,3 +1025,28 @@ mod tests {
         );
     }
 }
+
+/// Seal a coinbase note's `(value, blinding)` for its recipient, so the wallet can find
+/// it by trial-decryption instead of scanning every block body.
+///
+/// Returns `None` when the wallet published a shield key but no delivery key (older
+/// registrations), or if sealing fails. The note is still minted in that case — it is
+/// simply as undiscoverable as it was before, never lost.
+fn seal_coinbase_note(
+    work: &SigilState,
+    to: &WalletId,
+    pk_shield_wire: &[u8; 32],
+    amount: u128,
+    height: u64,
+) -> Option<String> {
+    let enc = work.shielded().encrypt_key(to)?;
+    let pk = sigil_shield::note_v1::from_wire(pk_shield_wire).ok()?;
+    let value = u64::try_from(amount).ok()?;
+    let pt = sigil_shield::note_cipher::NotePlaintext {
+        value,
+        blinding: sigil_shield::note_v1::coinbase_blinding(height, pk),
+    };
+    let addr = sigil_shield::note_cipher::ShieldedAddress::new(pk, &hex::encode(enc));
+    sigil_shield::note_cipher::seal_note(&pt, &addr).ok().map(|c| c.0)
+}
+

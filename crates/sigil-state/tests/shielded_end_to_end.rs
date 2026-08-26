@@ -540,7 +540,7 @@ fn a_registered_miner_is_paid_into_the_pool() {
     // A block reward for the registered miner.
     let reward: u128 = 201_881_165; // a real, non-round reward from the live chain
     let cm = coinbase_commitment_wire(2, &pk, reward).expect("in range");
-    apply(&mut state, 2, vec![StateMutation::ShieldedCoinbase { pk_shield: pk, amount: reward, cm }])
+    apply(&mut state, 2, vec![StateMutation::ShieldedCoinbase { pk_shield: pk, amount: reward, cm, ct: None }])
         .expect("shielded coinbase");
 
     assert_eq!(state.shielded().len(), 1, "ONE note per reward — no denomination split");
@@ -622,4 +622,80 @@ fn replaying_a_shield_at_a_later_height_is_refused_not_double_applied() {
         "a refused replay must not phantom-inflate locked value"
     );
     assert_eq!(state.shielded().len(), 1, "a refused replay must not mint a second note");
+}
+
+/// THE DISCOVERY GATE — a miner must be able to find its own shielded reward.
+///
+/// The test above asserts a miner "can recompute its own note from public data alone",
+/// and hands `reward` straight to `coinbase_commitment_wire`. That is the assumption that
+/// broke live on 2026-08-26: a real wallet does NOT know the amount. The commitment binds
+/// `(height, pk_shield, amount)`, and the only record of `amount` was inside historical
+/// block bodies — so with every note carrying no ciphertext (measured: 15,047 of 15,047)
+/// and the apply path discarding `pk_shield`, a registered miner's rewards were real,
+/// locked in the pool, and locatable only by scanning 2.24M blocks. An operator hit it as
+/// "I mine and my balance never moves".
+///
+/// This asserts the fix from the WALLET's side, knowing only its own seed: open the
+/// delivery ciphertext, recover `(value, blinding)`, and confirm the recovered value
+/// reproduces the exact leaf sitting in the pool.
+#[test]
+fn a_miner_can_open_its_shielded_reward_knowing_only_its_seed() {
+    const MINER: [u8; 32] = [0x99; 32];
+    let seed = [0x99u8; 32];
+
+    // Both keys come from the one seed a miner already backs up.
+    let acct = sigil_shield::wallet::ShieldedAccount::from_seed(seed);
+    let pk = to_wire(acct.public_key());
+    let enc_id = sigil_shield::note_cipher::enc_identity_from_seed(&seed);
+    let mut pk_enc = [0u8; 32];
+    pk_enc.copy_from_slice(&hex::decode(enc_id.public_hex()).expect("hex"));
+
+    let mut state = SigilState::default();
+    apply(&mut state, 1, vec![StateMutation::RegisterShieldedAddress {
+        wallet: MINER, pk_shield: pk, pk_encrypt: Some(pk_enc),
+    }]).expect("registration");
+
+    // Mint a reward exactly the way coinbase.rs now does: commitment + sealed delivery.
+    let height = 2u64;
+    let reward: u128 = 201_881_165;
+    let cm = sigil_shield::note_v1::coinbase_commitment_wire(height, &pk, reward).expect("in range");
+    let pk_field = sigil_shield::note_v1::from_wire(&pk).expect("pk");
+    let pt = sigil_shield::note_cipher::NotePlaintext {
+        value: reward as u64,
+        blinding: sigil_shield::note_v1::coinbase_blinding(height, pk_field),
+    };
+    let addr = sigil_shield::note_cipher::ShieldedAddress::new(pk_field, &enc_id.public_hex());
+    let ct = sigil_shield::note_cipher::seal_note(&pt, &addr).expect("seal").0;
+    apply(&mut state, height, vec![StateMutation::ShieldedCoinbase {
+        pk_shield: pk, amount: reward, cm, ct: Some(ct),
+    }]).expect("shielded coinbase");
+
+    // The ciphertext is stored in lockstep with the commitment.
+    assert_eq!(state.shielded().len(), 1);
+    let stored_ct = state.shielded().ciphertexts()[0].clone()
+        .expect("a coinbase note must now carry a delivery ciphertext");
+
+    // ── the wallet's side: it knows ONLY its seed ──
+    let opened = sigil_shield::note_cipher::try_open_note(
+        &sigil_shield::note_cipher::NoteCiphertext(stored_ct),
+        &enc_id,
+    ).expect("the recipient must be able to open its own note");
+
+    assert_eq!(opened.value as u128, reward, "the wallet learns the amount it was paid");
+
+    // And the recovered value reproduces the exact leaf — so it can be spent, not just seen.
+    let rederived = sigil_shield::note_v1::coinbase_commitment_wire(height, &pk, opened.value as u128).expect("in range");
+    assert_eq!(
+        state.shielded().note_at(0), Some(rederived),
+        "the opened note must reproduce the leaf in the pool"
+    );
+
+    // A DIFFERENT wallet's identity must not open it — the AEAD tag is the only gate.
+    let stranger = sigil_shield::note_cipher::enc_identity_from_seed(&[0x11u8; 32]);
+    let ct2 = state.shielded().ciphertexts()[0].clone().unwrap();
+    assert!(
+        sigil_shield::note_cipher::try_open_note(
+            &sigil_shield::note_cipher::NoteCiphertext(ct2), &stranger).is_err(),
+        "a note must not open for anyone but its recipient"
+    );
 }

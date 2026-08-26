@@ -292,7 +292,7 @@ pub fn simulate_coinbase_fill(blocks: usize, miners: usize, seed: u64) -> Coinba
             &mut state,
             &StateTransition {
                 at_height: h,
-                mutations: vec![StateMutation::ShieldedCoinbase { pk_shield: pk, amount: reward, cm }],
+                mutations: vec![StateMutation::ShieldedCoinbase { pk_shield: pk, amount: reward, cm, ct: None }],
             },
             h,
         )
@@ -313,7 +313,7 @@ pub fn simulate_coinbase_fill(blocks: usize, miners: usize, seed: u64) -> Coinba
         &mut state,
         &StateTransition {
             at_height: h,
-            mutations: vec![StateMutation::ShieldedCoinbase { pk_shield: pk, amount: reward, cm }],
+            mutations: vec![StateMutation::ShieldedCoinbase { pk_shield: pk, amount: reward, cm, ct: None }],
         },
         h,
     )
@@ -459,6 +459,7 @@ pub fn simulate_realistic_mining_pool(
                         pk_shield: m.pk_shield,
                         amount: reward,
                         cm,
+                        ct: None,
                     }],
                 },
                 h,

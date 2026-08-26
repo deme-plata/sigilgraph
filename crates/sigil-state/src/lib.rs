@@ -598,6 +598,30 @@ pub enum StateMutation {
         /// deterministically from `(height, pk_shield)` so the miner can recompute and
         /// spend it without any ciphertext being published.
         cm: [u8; 32],
+        /// Sealed `(value, blinding)` for the recipient — the same delivery envelope
+        /// `ShieldedSpend` outputs carry.
+        ///
+        /// WHY THIS HAD TO EXIST (live money bug, 2026-08-26): the deterministic blinding
+        /// above means a miner CAN recompute their note "without any ciphertext" — but
+        /// only if they already know `(height, amount)`, and the only place that pair
+        /// exists is inside historical block bodies. Measured on the live chain: 15,047
+        /// notes, every single one with no ciphertext, and the apply path discarding
+        /// `pk_shield` so no index could answer it either. Net effect, reported by an
+        /// operator: register a wallet, mine, and the balance never moves — the rewards
+        /// were real and locked in the pool, but nothing could locate them short of
+        /// scanning 2.24M blocks. A wallet cannot do that; trial-decrypting a ciphertext
+        /// it can.
+        ///
+        /// Leaks nothing new: `pk_shield` and `amount` are already public in this
+        /// mutation, and `coinbase_blinding`'s own doc records that a coinbase note is
+        /// attributable at MINT time by design, private only at SPEND time. This makes
+        /// discovery practical, not the note more visible.
+        ///
+        /// `Option` + `skip_serializing_if` so a `None` serializes byte-identically to
+        /// every block minted before this field existed — historical bodies, and the
+        /// roots computed over them, are untouched.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ct: Option<String>,
     },
 
     /// PV-1: a shielded-to-shielded spend. Amounts stay hidden.
@@ -1147,12 +1171,14 @@ pub fn commit_state_transition(
                 state.shielded.remember_anchor_dirty();
             }
 
-            StateMutation::ShieldedCoinbase { pk_shield: _, amount, cm } => {
+            StateMutation::ShieldedCoinbase { pk_shield: _, amount, cm, ct } => {
                 // Newly emitted value: nothing is debited, and it enters the shielded
                 // domain rather than the transparent one. No denomination check — see the
                 // variant's docs for why that is a deliberate exemption rather than a gap.
                 state.shielded.lock_value(amount)?;
-                state.shielded.append_note(cm)?;
+                // Keep the delivery envelope alongside the commitment so a wallet can
+                // find this note by trial-decryption instead of a full chain scan.
+                state.shielded.append_note_with_delivery(cm, ct)?;
                 state.shielded.remember_anchor_dirty();
             }
 

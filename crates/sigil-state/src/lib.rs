@@ -1192,12 +1192,17 @@ pub fn commit_state_transition(
                         got: fee,
                     }));
                 }
-                // 1. The anchor must be a root this pool genuinely had.
-                if !state.shielded.is_known_anchor(&anchor) {
+                // 1. The anchor must be a root this pool genuinely had — in the rolling
+                //    window, or as the sealed final root of an earlier epoch. It also
+                //    tells us WHICH generation was proven against, which step 2 needs.
+                let Some(spend_epoch) = state.shielded.epoch_of_anchor(&anchor) else {
                     return Err(CommitError::UnknownAnchor { anchor });
-                }
-                // 2. Freshness BEFORE proof work — a replay is cheap to reject.
-                if state.shielded.is_spent(&nullifier) {
+                };
+                // 2. Freshness BEFORE proof work — a replay is cheap to reject. Scoped to
+                //    the anchor's epoch: the circuit binds `nf` to an in-tree position, so
+                //    the same raw nullifier can belong to two different notes in two
+                //    different generations, and judging them the same would freeze one.
+                if state.shielded.is_spent_in_epoch(spend_epoch, &nullifier) {
                     return Err(CommitError::Shielded(
                         shielded::ShieldedError::NullifierAlreadySpent(nullifier),
                     ));
@@ -1209,7 +1214,7 @@ pub fn commit_state_transition(
                 shielded::verify_spend_proof(&anchor, &nullifier, fee, &cm_outs, &proof)
                     .map_err(|e| CommitError::ShieldedProofRejected { reason: e.to_string() })?;
                 // 4. Only now mutate.
-                state.shielded.spend_nullifier(nullifier)?;
+                state.shielded.spend_nullifier_in_epoch(spend_epoch, nullifier)?;
                 for (i, cm) in cm_outs.iter().enumerate() {
                     let ct = note_ciphertexts.get(i).cloned().flatten();
                     state.shielded.append_note_with_delivery(*cm, ct)?;
@@ -1236,10 +1241,12 @@ pub fn commit_state_transition(
                         shielded::ShieldedError::NotADenomination { amount },
                     ));
                 }
-                if !state.shielded.is_known_anchor(&anchor) {
+                // Same epoch scoping as `ShieldedSpend` — the anchor names the
+                // generation, and the nullifier is only meaningful within it.
+                let Some(spend_epoch) = state.shielded.epoch_of_anchor(&anchor) else {
                     return Err(CommitError::UnknownAnchor { anchor });
-                }
-                if state.shielded.is_spent(&nullifier) {
+                };
+                if state.shielded.is_spent_in_epoch(spend_epoch, &nullifier) {
                     return Err(CommitError::Shielded(
                         shielded::ShieldedError::NullifierAlreadySpent(nullifier),
                     ));
@@ -1251,7 +1258,7 @@ pub fn commit_state_transition(
                 shielded::verify_spend_proof(&anchor, &nullifier, amount, &cm_outs, &proof)
                     .map_err(|e| CommitError::ShieldedProofRejected { reason: e.to_string() })?;
                 state.shielded.unlock_value(amount)?;
-                state.shielded.spend_nullifier(nullifier)?;
+                state.shielded.spend_nullifier_in_epoch(spend_epoch, nullifier)?;
                 for cm in &cm_outs {
                     state.shielded.append_note(*cm)?;
                 }

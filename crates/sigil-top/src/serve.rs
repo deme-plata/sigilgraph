@@ -96,7 +96,18 @@ fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Optio
     // (trust-minimised). Otherwise relay to the SIGIL node over std TCP — same-origin,
     // no CORS / mixed-content. Default node is the public sigil-rpcd; override with
     // SIGIL_NODE_URL to point at a LOCAL node.
-    if path.starts_with("/api/") {
+    // 2026-08-19: also proxy bare /v1/* the same way. sigil-api mounts MOST routes
+    // under both /v1/* and /api/v1/* (see its own route table), but the native SIGIL
+    // bridge (/v1/bridge/lock etc., bridge.rs::submit_lock) was only ever registered
+    // at the bare /v1/ prefix — no /api/v1/ mirror exists for it. The wallet's Bridge
+    // modal called /api/v1/bridge/lock (matching every OTHER mutation route in this
+    // app) and got a real HTTP 404 back, live (operator-reported: pressed Lock &
+    // Bridge on a real 42-SIGIL balance, saw "✗ HTTP 404"). Fixing this by fixing the
+    // ONE modal to call /v1/bridge/lock wouldn't be enough by itself — serve.rs never
+    // proxied bare /v1/* at all before this line, so that path would 404 right here
+    // regardless of what sigil-api registers. This is the actual fix: forward /v1/*
+    // through the exact same LOCAL-FIRST → proxy_api path /api/* already gets.
+    if path.starts_with("/api/") || path.starts_with("/v1/") {
         if let Some(api) = local_api {
             if let Some(body) = api.handle(path) {
                 let resp = format!(
@@ -201,7 +212,15 @@ fn serve_file(dir: &PathBuf, safe: &str) -> (&'static str, Vec<u8>, &'static str
         }
     }
 
-    // 3. Built-in wallet — compiled into the binary. Carries the #stats
+    // 3. Built-in wallet visual layer. Keep this beside the embedded HTML so a
+    // downloaded sigil-top has the complete Codex UI without a filesystem
+    // overlay or network request.
+    if safe == "sigil-wallet-codex.css" || safe.ends_with("/sigil-wallet-codex.css") {
+        let css = include_str!("../../../gui/sigil-wallet-codex.css");
+        return ("200 OK", css.as_bytes().to_vec(), "text/css; charset=utf-8");
+    }
+
+    // 3a. Built-in wallet — compiled into the binary. Carries the #stats
     // network-stats modal (the Quillon-dashboard-equivalent stat set,
     // deep-linked by sigil-top's [T] shortcut), the #activity deep-link
     // ([B]), which opens the Explorer/Activity view same-origin so its
@@ -234,6 +253,39 @@ fn serve_file(dir: &PathBuf, safe: &str) -> (&'static str, Vec<u8>, &'static str
     if safe == "vite-engine.html" || safe.ends_with("/vite-engine.html") {
         let html = include_str!("../../../gui/vite-engine-embedded.html");
         return ("200 OK", html.as_bytes().to_vec(), "text/html; charset=utf-8");
+    }
+
+    // 5. 2026-08-23: the tron wallet's js-libp2p bundle was the ONE asset the
+    // "OUT-OF-THE-BOX" promise above (module doc, line ~20) didn't actually
+    // keep — it was only ever read from `static_dir` (step 1) with no embedded
+    // fallback, unlike every other asset the tron page needs. On any machine
+    // without a manually-deployed `dist-fluxapp` tree (a plain downloaded
+    // sigil-top — which is the normal case for an end user, NOT just Epsilon),
+    // `<script src="./sigil-tron-p2p.js">` 404'd, the P2P script never even
+    // started executing, and the P2P modal was permanently stuck showing its
+    // static "starting libp2p… / 0 Connections / dialing bootstrap…"
+    // placeholder — indistinguishable from a real connection failure, which is
+    // exactly what made the earlier location.hostname/wss fix (real, but only
+    // reachable once this file loads at all) look like it hadn't worked.
+    // Rebuild source: gui/sigil-wallet, `vite build --config vite.tron-p2p.config.ts`.
+    if safe == "sigil-tron-p2p.js" || safe.ends_with("/sigil-tron-p2p.js") {
+        let js = include_str!("../../../gui/sigil-wallet/dist-tron-p2p/sigil-tron-p2p.js");
+        return ("200 OK", js.as_bytes().to_vec(), "text/javascript; charset=utf-8");
+    }
+
+    // 6. 2026-08-26: same class of bug as item 5 above (sigil-tron-p2p.js) —
+    // the private-send WASM prover was only ever read from `static_dir`
+    // (step 1), no embedded fallback, so a plain downloaded sigil-top with no
+    // manually-deployed dist tree would 404 loading it and "Pay another
+    // wallet privately" would silently never work for a normal end user.
+    // The wallet HTML imports these via a relative `./wasm/...` path.
+    if safe == "wasm/sigil_shield.js" || safe.ends_with("/wasm/sigil_shield.js") {
+        let js = include_str!("../../../gui/wasm/sigil_shield.js");
+        return ("200 OK", js.as_bytes().to_vec(), "text/javascript; charset=utf-8");
+    }
+    if safe == "wasm/sigil_shield_bg.wasm" || safe.ends_with("/wasm/sigil_shield_bg.wasm") {
+        let wasm = include_bytes!("../../../gui/wasm/sigil_shield_bg.wasm");
+        return ("200 OK", wasm.to_vec(), "application/wasm");
     }
 
     ("404 Not Found", b"404 Not Found\n".to_vec(), "text/plain")

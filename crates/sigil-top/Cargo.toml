@@ -18,7 +18,13 @@ name = "sigil-top"
 # v7.1.40: Activity gains the SIGIL-native adaptive emission controller card
 # and live analytics modal, derived from the chain's verified supply and the
 # published sigil-emission consensus constants.
-version = "7.1.85"
+# v7.1.86: local-only Shield/Send/Swap/Bridge fast path (mine_local_api.rs) — when
+# SIGIL_MINE_SEED is configured, the wallet opened via [W] on this SAME box completes
+# these with ZERO prompts (real local signing + real local note construction/proving),
+# falling straight through to the existing recovery-phrase flow on any failure. Does
+# NOT change sigilgraph.org's behavior — that's a different process with no such
+# endpoint and no access to this box's secret.
+version = "7.1.86"
 edition.workspace = true
 license.workspace = true
 description = "sigil-top — a SIGIL lightweight node + dual-mode (lite scorecard ↔ full dashboard) terminal monitor. v0.9.0 'Verifying Full Sync': downloads the chain genesis→tip over the sigil-g0 P2P mesh AND verifies it as one connected spine (per-header precheck + parent_hash linkage back to genesis), with a persisted verified_to watermark. New `full-sync` (headless sync-and-verify, exit 0 at tip) and `verify-chain` (re-verify the local store) subcommands; TUI surfaces the ⛓ verified-spine height + ⚠ spine-break alarm distinct from raw download progress."
@@ -114,6 +120,15 @@ ed25519-dalek = { version = "2.2", optional = true }
 # see the whitepaper's "no opt-in path to transparency" line — not an edge feature.
 sigil-shield = { path = "../sigil-shield", optional = true }
 sha3 = { workspace = true, optional = true }
+# 2026-08-26 (mine_local_api.rs's native Shield/PrivateSend fast path): sigil-shield's
+# public API (ShieldedAccount::blinding/note/public_key, Note::commitment, build_spend's
+# out_preimages, note_cipher's NotePlaintext) is typed in terms of
+# winterfell::math::fields::f64::BaseElement — sigil-shield doesn't re-export it, so
+# naming that type here needs the same crate in our own dependency graph. MUST track
+# sigil-shield's own pin ("0.9") exactly — this is one workspace Cargo.lock, so cargo
+# unifies both edges onto the identical resolved version; a mismatched major/minor would
+# make sigil-shield's BaseElement and this crate's BaseElement two DIFFERENT types.
+winterfell = { version = "0.9", optional = true }
 # 2026-08-20 (Phase 2): depend on sigil-node's LIBRARY surface directly rather than
 # hand-porting a duplicate of its Block type / durable chain-log store / coinbase
 # logic. Single source of truth — sigil-top and sigil-node share the exact same
@@ -149,7 +164,7 @@ sqisign = []
 # the much heavier sigil-node/DagKnight graph) so a build that only needs this stays
 # comparatively light; still toggleable if build time ever matters more than this
 # being on by default: `--no-default-features --features gpu`.
-shield-register = ["dep:sigil-shield", "dep:sha3", "dep:ed25519-dalek"]
+shield-register = ["dep:sigil-shield", "dep:sha3", "dep:ed25519-dalek", "dep:winterfell"]
 # v7.1.40: producer-mode Phase 0 — dependency graph only, no application code yet.
 # Off by default; `fluxc build -p sigil-top --features producer` opts in. See the
 # dependency block above for why each crate is here.

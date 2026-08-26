@@ -13,6 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::local_api::LocalApi;
+use crate::mine_local_api;
 
 /// Start the embedded server on 127.0.0.1:port, serving static_dir.
 /// Returns a shutdown signal (set to true to stop the server).
@@ -90,6 +91,28 @@ fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Optio
     // old proxy hardcoded GET + dropped the body, so every wallet Send hit the node as a GET →
     // "unknown route". Body follows the blank line after the headers (small JSON, one read).
     let req_body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+
+    // 2026-08-26: LOCAL-ONLY fast-path signing/shield endpoints — pressing Shield/Send/
+    // Swap/Bridge from THIS box's own wallet (opened via [W], localhost:9800) completes
+    // with ZERO prompts when SIGIL_MINE_SEED is configured, the exact same secret this
+    // process already uses to mine. Checked BEFORE the generic /api/`/v1 dispatch below
+    // for two reasons: (1) these are POST mutations carrying a JSON body `LocalApi::
+    // handle()` was never built to see — it only ever answers a bare path+query, GET-
+    // style (see its own module docs); (2) the response crosses this box's own trust
+    // boundary only and must NEVER be forwarded to a remote node the way `proxy_api`
+    // below would. See `mine_local_api.rs`'s module docs for the full design and the
+    // secret-never-leaves-the-process invariant.
+    if method == "POST" && mine_local_api::is_local_path(path) {
+        let (status, resp_body) = mine_local_api::handle(path, &req_body);
+        let resp = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+            resp_body.len()
+        );
+        let _ = stream.write_all(resp.as_bytes());
+        let _ = stream.write_all(resp_body.as_bytes());
+        let _ = stream.flush();
+        return;
+    }
 
     // /api/* → LOCAL-FIRST. If this node has a verified-spine view that can answer the
     // request (blocks / status / aether-verify / cortex / peers), serve it locally

@@ -1101,6 +1101,34 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     var parts=amtStr.split('.'); var base=BigInt(parts[0]||'0')*100000000n + BigInt(((parts[1]||'')+'00000000').slice(0,8));
     var from=(window.MINE_ADDR||window.ADDR||'').toLowerCase();
     if(!/^[0-9a-f]{64}$/.test(from)){ sendStatus('No wallet address loaded.', '#ff8a8a'); return; }
+
+    // FAST PATH (2026-08-26): if THIS box has SIGIL_MINE_SEED configured (the wallet was
+    // opened via sigil-top's own [W], localhost:9800 — the SAME process that already
+    // mines with that seed), sigil-top's embedded server can build + sign the ENTIRE
+    // shield deposit itself — real note construction, real signature, real submission —
+    // with ZERO prompt and nothing typed. Strictly additive: on ANY failure (no local
+    // seed configured, this page loaded from a remote host like sigilgraph.org which has
+    // no such endpoint, a malformed amount) it falls straight through to the existing
+    // recovery-phrase flow below, unchanged. See sigil-top's src/mine_local_api.rs.
+    var fastShieldBtn=document.getElementById('sendGo');
+    try{
+      if(fastShieldBtn)fastShieldBtn.disabled=true;
+      sendStatus('Shielding locally…', '#6df3ff');
+      var ffr=await fetch('/api/v1/mine-shield',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({amount:base.toString()})});
+      if(ffr.ok){
+        var ffj=null; try{ ffj=await ffr.json(); }catch(_){}
+        if(ffj && ffj.ok && Array.isArray(ffj.landed) && ffj.landed.length){
+          var fastLanded=ffj.landed.map(function(p){ noteRecord(from,p.index,p.value); return {txid:p.txid, value:p.value}; });
+          showReceipt(fastLanded, amtStr, from, ffj.warning);
+          setTimeout(function(){ if(window.refresh)refresh(); }, 600);
+          if(fastShieldBtn)fastShieldBtn.disabled=false;
+          return;
+        }
+      }
+    }catch(e){ /* local endpoint unreachable/absent — fall through to the manual flow below */ }
+    if(fastShieldBtn)fastShieldBtn.disabled=false;
+    sendStatus('');
+
     if(!window.sigilCryptoReady || !window.__sigilShield){ sendStatus('Signer still loading — try again in a moment.', '#fbbf24'); return; }
     var mnemonic = window.__sigilMnemonic;
     if(!mnemonic){
@@ -1249,6 +1277,41 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
 
     var from=(window.MINE_ADDR||window.ADDR||'').toLowerCase();
     if(!/^[0-9a-f]{64}$/.test(from)){ privMsg('No wallet address loaded.', '#ff8a8a'); return; }
+
+    // FAST PATH (2026-08-26): same idea as doShield()'s fast path above — try
+    // sigil-top's own local endpoint first, which re-derives the seed and re-proves the
+    // REAL zk-STARK natively (the same crate the WASM module below is compiled from), so
+    // when SIGIL_MINE_SEED is configured this needs no recovery phrase and doesn't even
+    // have to wait for the WASM prover to load. It can only spend a note THIS local
+    // endpoint already knows about (the ones this wallet's own localStorage lists via
+    // myNotes(), passed along below) — a note shielded manually before this feature
+    // existed may not be visible to it, which is fine: that just falls through to the
+    // manual flow beneath, exactly like every other failure here.
+    var fastPrivBtn=document.getElementById('privGo');
+    try{
+      if(fastPrivBtn)fastPrivBtn.disabled=true;
+      privMsg('Building the private spend locally…', '#6df3ff');
+      var candNotes=myNotes(from).filter(function(n){ return !n.spent; }).map(function(n){ return {index:n.index, value:String(n.value)}; });
+      var ffr=await fetch('/api/v1/mine-send-private',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({recipient_pk_shield:recipient.pk_shield, recipient_pk_encrypt:recipient.pk_encrypt, amount:amountRaw.toString(), notes:candNotes})});
+      if(ffr.ok){
+        var ffj=null; try{ ffj=await ffr.json(); }catch(_){}
+        if(ffj && ffj.ok && ffj.txid!==undefined){
+          var fastUpdated=myNotes(from);
+          for(var fk=0;fk<fastUpdated.length;fk++){ if(fastUpdated[fk].index===ffj.spent_index){ fastUpdated[fk].spent=true; } }
+          if(ffj.change_index!==null && ffj.change_index!==undefined){
+            fastUpdated.push({index:ffj.change_index, value:Number(ffj.change_value), ts:Date.now()});
+          }
+          saveMyNotes(from, fastUpdated);
+          privMsg('✓ sent '+amtStr+' SIGIL privately — txid '+(ffj.txid?String(ffj.txid).slice(0,10)+'…':'(queued)')+'. Lands once the DAG finalizes (check the explorer).', '#00e0c6');
+          var fastAmtEl=document.getElementById('privAmt'); if(fastAmtEl) fastAmtEl.value='';
+          if(fastPrivBtn)fastPrivBtn.disabled=false;
+          return;
+        }
+      }
+    }catch(e){ /* local endpoint unreachable/absent — fall through to the manual flow below */ }
+    if(fastPrivBtn)fastPrivBtn.disabled=false;
+    privMsg('');
 
     var wasm;
     try{ wasm = window.sigilShieldWasm || await window.sigilShieldWasmReady; }
@@ -1533,11 +1596,45 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     }catch(e){ msgEl.textContent='✗ could not reach the node for live pools.'; msgEl.style.color='#ff8a8a'; }
   };
   window.closeSwap=function(){ var m=document.getElementById('swap-modal'); if(m)m.style.display='none'; };
+  async function submitSwapSigned(from,pool,dir,q,L,reqNonce,sig,msgEl){
+    msgEl.textContent='Submitting…'; msgEl.style.color='#6df3ff';
+    var go=document.getElementById('swapGo'); if(go)go.disabled=true;
+    try{
+      var r=await fetch(DEX_API+'/v1/swap',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({from:from,pool:pool.id,dir:dir,amount_in:Number(q.amountIn),min_out:Number(q.minOut),req_nonce:reqNonce,sig:sig})});
+      var j=null; try{ j=await r.json(); }catch(_){}
+      if(r.ok && j && j.ok){ swapShowReceipt(j,L,q); setTimeout(function(){ if(window.refresh)refresh(); },600); }
+      else { msgEl.textContent='✗ '+((j&&(j.error||j.message))||('HTTP '+r.status)); msgEl.style.color='#ff8a8a'; }
+    }catch(e){ msgEl.textContent='✗ network error — node unreachable.'; msgEl.style.color='#ff8a8a'; }
+    if(go)go.disabled=false;
+  }
+  // FAST PATH (2026-08-26): try sigil-top's own local /api/v1/mine-sign first — if this
+  // box mines (SIGIL_MINE_SEED configured), it signs the canonical swap message with
+  // ZERO prompt, exactly matching window.sigilSign()'s own message format
+  // ("sigil-rpc/v1|swap|...|nonce=..."). Any failure (no seed, remote host with no such
+  // endpoint, a signed-as address that doesn't match this wallet) returns false so the
+  // caller falls straight through to the manual recovery-phrase flow, unchanged.
+  async function trySwapFastPath(from,pool,dir,q,L,reqNonce,msgEl){
+    try{
+      var fields=[from,pool.id,dir,q.amountIn.toString(),q.minOut.toString()];
+      var fr=await fetch('/api/v1/mine-sign',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({action:'swap', fields:fields, nonce:reqNonce})});
+      if(!fr.ok) return false;
+      var fj=null; try{ fj=await fr.json(); }catch(_){ return false; }
+      if(!fj || !fj.ok || fj.address!==from || !fj.signature) return false;
+      await submitSwapSigned(from,pool,dir,q,L,reqNonce,fj.signature,msgEl);
+      return true;
+    }catch(e){ return false; }
+  }
   window.doSwap=async function(){
     var q=window.__swapQuote; var L=legs(); if(!q||!L) return;
     var from=(window.MINE_ADDR||window.ADDR||'').toLowerCase();
     var pool=currentPool(); if(!pool||!from) return;
     var msgEl=document.getElementById('swapMsg'); msgEl.style.color='#8fb3c2';
+
+    var fastNonce=Date.now();
+    if(await trySwapFastPath(from,pool,window.__swapDir,q,L,fastNonce,msgEl)) return;
+
     if(!window.sigilCryptoReady){ msgEl.textContent='Signer still loading — try again in a moment.'; return; }
     var mnemonic=window.__sigilMnemonic;
     if(!mnemonic){
@@ -1551,16 +1648,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     var reqNonce=Date.now();
     var dir=window.__swapDir;
     var sig; try{ sig=window.sigilSign(kp.priv,'swap',[from,pool.id,dir,q.amountIn.toString(),q.minOut.toString()],reqNonce); }catch(e){ msgEl.textContent='Signing failed.'; msgEl.style.color='#ff8a8a'; return; }
-    msgEl.textContent='Submitting…'; msgEl.style.color='#6df3ff';
-    var go=document.getElementById('swapGo'); if(go)go.disabled=true;
-    try{
-      var r=await fetch(DEX_API+'/v1/swap',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({from:from,pool:pool.id,dir:dir,amount_in:Number(q.amountIn),min_out:Number(q.minOut),req_nonce:reqNonce,sig:sig})});
-      var j=null; try{ j=await r.json(); }catch(_){}
-      if(r.ok && j && j.ok){ swapShowReceipt(j,L,q); setTimeout(function(){ if(window.refresh)refresh(); },600); }
-      else { msgEl.textContent='✗ '+((j&&(j.error||j.message))||('HTTP '+r.status)); msgEl.style.color='#ff8a8a'; }
-    }catch(e){ msgEl.textContent='✗ network error — node unreachable.'; msgEl.style.color='#ff8a8a'; }
-    if(go)go.disabled=false;
+    await submitSwapSigned(from,pool,dir,q,L,reqNonce,sig,msgEl);
   };
   function _swRow(l,v){ return '<div style="display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid rgba(33,212,253,.09)"><span style="font-family:\'JetBrains Mono\';font-size:10px;letter-spacing:1px;color:#5a93a8;text-transform:uppercase">'+l+'</span><span style="font-family:\'JetBrains Mono\';font-size:11px;color:#cfe9f2;overflow-wrap:anywhere;text-align:right">'+v+'</span></div>'; }
   function swapShowReceipt(j,L,q){
@@ -1765,29 +1853,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       if(accts && accts[0]) document.getElementById('bridgeDest').value=accts[0];
     }catch(e){ /* user rejected — leave the field as-is */ }
   };
-  window.doBridgeLock=async function(){
-    var dest=(document.getElementById('bridgeDest').value||'').trim();
-    var destNorm=dest.toLowerCase().replace(/^0x/,'');
-    if(!/^[0-9a-f]{40}$/.test(destNorm)){ bridgeStatus('Destination must be a valid Polygon address (0x… 40 hex chars).', '#ff8a8a'); return; }
-    var amtStr=(document.getElementById('bridgeAmt').value||'').trim();
-    if(!/^\d+(\.\d{1,8})?$/.test(amtStr) || Number(amtStr)<=0){ bridgeStatus('Amount must be > 0 (max 8 decimals).', '#ff8a8a'); return; }
-    var parts=amtStr.split('.'); var base=BigInt(parts[0]||'0')*100000000n + BigInt(((parts[1]||'')+'00000000').slice(0,8));
-    var from=(window.MINE_ADDR||window.ADDR||'').toLowerCase();
-    if(!/^[0-9a-f]{64}$/.test(from)){ bridgeStatus('No wallet address loaded.', '#ff8a8a'); return; }
-    if(!window.sigilCryptoReady){ bridgeStatus('Signer still loading — try again in a moment.', '#fbbf24'); return; }
-    var mnemonic=window.__sigilMnemonic;
-    if(!mnemonic){
-      mnemonic=(prompt('Enter your recovery phrase (or 64-hex mining seed) to sign this bridge lock.\n(kept in memory for this session only — never saved)')||'').trim();
-      if(!mnemonic){ bridgeStatus('Bridge cancelled — recovery phrase required to sign.', '#fbbf24'); return; }
-    }
-    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ window.__sigilMnemonic=null; bridgeStatus('Could not derive a key from that phrase.', '#ff8a8a'); return; }
-    if(kp.address!==from){ window.__sigilMnemonic=null; bridgeStatus('That phrase does not match this wallet address.', '#ff8a8a'); return; }
-    window.__sigilMnemonic=mnemonic;
-    try{ localStorage.setItem('sigil-wallet-mnemonic', mnemonic); }catch(e){}
-    var reqNonce=Date.now();
-    // Message shape MUST byte-match bridge.rs::submit_lock:
-    // sigil-rpc/v1|bridge_lock|{from}|{amount}|{dest}|nonce={req_nonce}
-    var sig; try{ sig=window.sigilSign(kp.priv,'bridge_lock',[from,base.toString(),dest],reqNonce); }catch(e){ bridgeStatus('Signing failed.', '#ff8a8a'); return; }
+  async function submitBridgeLockSigned(from,base,dest,amtStr,reqNonce,sig){
     bridgeStatus('Submitting…', '#6df3ff'); var btn=document.getElementById('bridgeGo'); if(btn)btn.disabled=true;
     try{
       // NOT /api/v1/bridge/lock — sigil-api only ever registered this route bare at
@@ -1802,6 +1868,51 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       else { bridgeStatus('✗ '+((j&&(j.error||j.message))||('HTTP '+r.status)), '#ff8a8a'); }
     }catch(e){ bridgeStatus('✗ network error — node unreachable.', '#ff8a8a'); }
     if(btn)btn.disabled=false;
+  }
+  // FAST PATH (2026-08-26): same local-signing idea as Swap's trySwapFastPath above —
+  // ask sigil-top's own local /api/v1/mine-sign to sign the SAME canonical bridge_lock
+  // message (byte-identical to what window.sigilSign builds), zero prompt when this box
+  // mines. Any failure falls straight through to the manual recovery-phrase flow below.
+  async function tryBridgeFastPath(from,base,dest,amtStr,reqNonce){
+    try{
+      // Message shape MUST byte-match bridge.rs::submit_lock:
+      // sigil-rpc/v1|bridge_lock|{from}|{amount}|{dest}|nonce={req_nonce}
+      var fields=[from,base.toString(),dest];
+      var fr=await fetch('/api/v1/mine-sign',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({action:'bridge_lock', fields:fields, nonce:reqNonce})});
+      if(!fr.ok) return false;
+      var fj=null; try{ fj=await fr.json(); }catch(_){ return false; }
+      if(!fj || !fj.ok || fj.address!==from || !fj.signature) return false;
+      await submitBridgeLockSigned(from,base,dest,amtStr,reqNonce,fj.signature);
+      return true;
+    }catch(e){ return false; }
+  }
+  window.doBridgeLock=async function(){
+    var dest=(document.getElementById('bridgeDest').value||'').trim();
+    var destNorm=dest.toLowerCase().replace(/^0x/,'');
+    if(!/^[0-9a-f]{40}$/.test(destNorm)){ bridgeStatus('Destination must be a valid Polygon address (0x… 40 hex chars).', '#ff8a8a'); return; }
+    var amtStr=(document.getElementById('bridgeAmt').value||'').trim();
+    if(!/^\d+(\.\d{1,8})?$/.test(amtStr) || Number(amtStr)<=0){ bridgeStatus('Amount must be > 0 (max 8 decimals).', '#ff8a8a'); return; }
+    var parts=amtStr.split('.'); var base=BigInt(parts[0]||'0')*100000000n + BigInt(((parts[1]||'')+'00000000').slice(0,8));
+    var from=(window.MINE_ADDR||window.ADDR||'').toLowerCase();
+    if(!/^[0-9a-f]{64}$/.test(from)){ bridgeStatus('No wallet address loaded.', '#ff8a8a'); return; }
+
+    var fastNonce=Date.now();
+    if(await tryBridgeFastPath(from,base,dest,amtStr,fastNonce)) return;
+
+    if(!window.sigilCryptoReady){ bridgeStatus('Signer still loading — try again in a moment.', '#fbbf24'); return; }
+    var mnemonic=window.__sigilMnemonic;
+    if(!mnemonic){
+      mnemonic=(prompt('Enter your recovery phrase (or 64-hex mining seed) to sign this bridge lock.\n(kept in memory for this session only — never saved)')||'').trim();
+      if(!mnemonic){ bridgeStatus('Bridge cancelled — recovery phrase required to sign.', '#fbbf24'); return; }
+    }
+    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ window.__sigilMnemonic=null; bridgeStatus('Could not derive a key from that phrase.', '#ff8a8a'); return; }
+    if(kp.address!==from){ window.__sigilMnemonic=null; bridgeStatus('That phrase does not match this wallet address.', '#ff8a8a'); return; }
+    window.__sigilMnemonic=mnemonic;
+    try{ localStorage.setItem('sigil-wallet-mnemonic', mnemonic); }catch(e){}
+    var reqNonce=Date.now();
+    var sig; try{ sig=window.sigilSign(kp.priv,'bridge_lock',[from,base.toString(),dest],reqNonce); }catch(e){ bridgeStatus('Signing failed.', '#ff8a8a'); return; }
+    await submitBridgeLockSigned(from,base,dest,amtStr,reqNonce,sig);
   };
   function _bcRow(l,v){ return '<div style="display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid rgba(33,212,253,.09)"><span style="font-family:\'JetBrains Mono\';font-size:10px;letter-spacing:1px;color:#5a93a8;text-transform:uppercase">'+l+'</span><span style="font-family:\'JetBrains Mono\';font-size:11px;color:#cfe9f2;overflow-wrap:anywhere;text-align:right">'+v+'</span></div>'; }
   function bridgeShowReceipt(j, dest, amtStr, from){

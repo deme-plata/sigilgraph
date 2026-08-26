@@ -43,6 +43,14 @@ mod wallet_ui;  // LANE-U: wallet/browser/tray/scheme plumbing
 use wallet_ui::*;
 mod local_api;   // v0.11.0: serve the explorer /api/* from the LOCAL verified spine
 mod cathedral;     // CATHEDRAL DAGKNIGHT: vaulted 4-root + DagKnight finality view
+// 2026-08-26: local-only signing/shield endpoints for the embedded wallet server, so a
+// wallet opened via [W] (localhost:9800, same box as SIGIL_MINE_SEED) can Shield/Send/
+// Swap/Bridge with ZERO prompts. `mine-sign` (Swap/Bridge) is unconditional — it only
+// ever needs sigil_oauth::Keypair, already a non-optional dep. `mine-shield` and
+// `mine-send-private` need sigil-shield's real note-construction/proving math and are
+// internally gated on the `shield-register` feature (default-on), same as
+// `shield_setup` above. See the module's own doc comment for the full design.
+mod mine_local_api;
 // v7.1.40 (grogu-sync-perf, 2026-08-19): PRODUCER-MODE Phase 1 — inert scaffolding only.
 // `cathedral.rs`'s own doc comment already anticipated this: "Real flux-narwhal-core /
 // flux-consensus linearizer can be dropped in the run_dagknight_linearize slot later
@@ -1110,7 +1118,7 @@ fn render_lite(st: &NodeStatus, online: bool) -> String {
 
 // ─── wallet login (sigil-oauth: OAuth2 PKCE, wallet signs — no password) ─────
 
-fn flux_home() -> String { std::env::var("HOME").unwrap_or_else(|_| "/root".into()) }
+pub(crate) fn flux_home() -> String { std::env::var("HOME").unwrap_or_else(|_| "/root".into()) }
 fn session_path() -> String { format!("{}/.flux/sigil-session.json", flux_home()) }
 
 fn read_session() -> Option<String> {
@@ -2225,15 +2233,29 @@ pub(crate) fn set_mine_wallet(addr: &str) -> bool {
     std::fs::write(mine_wallet_path(), addr.trim()).is_ok()
 }
 
+/// The raw 32-byte `SIGIL_MINE_SEED`, parsed once. `None` if unset/malformed.
+///
+/// `pub(crate)` so `mine_local_api.rs` can derive the SAME shielded-account key
+/// [`miner_keypair`] derives its Ed25519 signing key from — one seed, two independent,
+/// domain-separated derivations (see `shield_setup.rs`'s module docs for why that's safe).
+/// Extracted out of `miner_keypair` below specifically so there is exactly ONE place that
+/// parses this env var for the interactive/local-API paths — `shield_setup.rs` still
+/// carries its own separate `seed_bytes` for the headless `mine-rig` CLI path, and that
+/// duplication is exactly the class of bug (a 0x-prefix handling mismatch) documented on
+/// `hex_to_32`'s own comment; this function exists so `mine_local_api.rs` doesn't grow a
+/// THIRD copy with its own edge cases.
+pub(crate) fn miner_seed() -> Option<[u8; 32]> {
+    let seed_hex = std::env::var("SIGIL_MINE_SEED").ok()?;
+    hex_to_32(seed_hex.trim())
+}
+
 /// The miner's SIGNING keypair. Required now that `/mine` is auth-gated (audit C1:
 /// a miner must prove control of the credited wallet — you can no longer mine to an
 /// address whose key you don't hold, e.g. the legacy hostname-hash fallback). Source:
 /// `SIGIL_MINE_SEED` (64-hex). Read from the environment only, never persisted (matches
 /// `do_login`'s "never store the secret"). `None` ⇒ mining is disabled in `start_mining`.
-fn miner_keypair() -> Option<Keypair> {
-    let seed_hex = std::env::var("SIGIL_MINE_SEED").ok()?;
-    let seed = hex_to_32(seed_hex.trim())?;
-    Some(Keypair::from_seed(&seed))
+pub(crate) fn miner_keypair() -> Option<Keypair> {
+    miner_seed().map(|seed| Keypair::from_seed(&seed))
 }
 
 #[cfg(test)]
@@ -4961,7 +4983,7 @@ fn human_bytes(bytes: u64) -> String {
 /// braid (dev-fee + commons split, proportional payout) instead of the separate
 /// rpcd chain. Override with SIGIL_MINE_NODE to point at rpcd (:8099) or
 /// anywhere else. Distinct from the legacy [m] BLAKE3 `mine_url()`.
-fn engine_node_url() -> String {
+pub(crate) fn engine_node_url() -> String {
     // An explicit operator choice always wins — never override it, producer mode or not.
     if let Ok(v) = std::env::var("SIGIL_MINE_NODE") {
         return v;

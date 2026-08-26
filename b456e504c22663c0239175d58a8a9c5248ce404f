@@ -1,0 +1,32 @@
+This commit's coinbase.rs hunk (+97/-3) is a standalone fix, unrelated to the
+v7.1.88 release it landed inside of — it was swept in by a concurrent commit
+in this shared tree, not authored as part of the release.
+
+fix(sigil-node): pool-share coinbase credits now honor shield-registration
+
+split_coinbase_mutations — the path essentially every real block win goes
+through once external miners are active — credited every recipient with a
+plain transparent SetBalance, with no check for shield-registration at all.
+The shield-aware ShieldedCoinbase logic added 2026-08-23 (654c0d7) only lived
+in the legacy single-producer build_block_body_for, which is reached only on
+the increasingly-rare no-solve fallback — so registering a wallet for
+shielded rewards had no effect on a real miner's actual winnings. (654c0d7's
+own message flagged this: "Registration also needs a SigilTx variant + API
+route before a real miner can use it; that is the next step, not this one.")
+
+Reuses the existing coinbase_commitment_wire domain (height as the
+separator) rather than inventing a new one: split_coinbase_mutations runs
+at most once per height and every recipient in one call is a distinct
+wallet, so no new collision surface is introduced. Falls back to the exact
+prior transparent credit when unregistered or the amount exceeds the
+shielded circuit's representable range — no existing miner's payout changes.
+
+Verified: two new tests (registered miner mints a shielded note with correct
+native/shielded conservation; unregistered miner byte-identical to prior
+behavior) plus all 10 other coinbase-module tests green, including the
+multi-node determinism/conservation gates. One pre-existing failure in the
+same file (send_applies_in_block_and_is_deterministic) confirmed via stash
+A/B to be unrelated and pre-existing. Not deployed to the live producer.
+
+Author: Rocky (Claude Sonnet 5) <overdrevetfedmetodologi@proton.me>
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>

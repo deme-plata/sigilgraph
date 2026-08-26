@@ -45,6 +45,32 @@ pub(crate) fn headless_wallet_view_url() -> String {
     format!("{base}?addr={}", crate::miner_wallet())
 }
 
+/// When `SIGIL_MINE_SEED` is set, the LOCAL `:9800` server — not the remote
+/// `sigilgraph.org` fallback above — can sign Send/Shield/Swap/Bridge with
+/// zero recovery-phrase prompts (see main.rs's zero-prompt wiring, 2026-08-26).
+/// A headless (SSH, no DISPLAY) session can still reach that exact server:
+/// `:9800` binds `127.0.0.1` only, deliberately, because it holds a signing
+/// key — so the way in is an SSH local port-forward, never exposing the port
+/// itself. Returns `None` when no seed is configured: there would be nothing
+/// zero-prompt to tunnel to, and offering the tunnel would just relocate the
+/// same recovery-phrase prompt to a different browser tab.
+pub(crate) fn ssh_tunnel_hint() -> Option<String> {
+    crate::miner_seed()?;
+    let user = std::env::var("USER").ok()
+        .or_else(|| std::env::var("LOGNAME").ok())
+        .unwrap_or_else(|| "<user>".into());
+    // SSH_CONNECTION = "<client ip> <client port> <server ip> <server port>" —
+    // the 3rd field is the address THIS session was actually reached through,
+    // more reliable than guessing a hostname.
+    let host = std::env::var("SSH_CONNECTION").ok()
+        .and_then(|s| s.split_whitespace().nth(2).map(str::to_string))
+        .unwrap_or_else(|| "<this-machine>".into());
+    Some(format!(
+        "zero-prompt signing is running locally — from your OWN device: ssh -L 9800:localhost:9800 {user}@{host}  then open http://localhost:9800/?addr={}",
+        crate::miner_wallet()
+    ))
+}
+
 pub(crate) fn dirs_next() -> Option<std::path::PathBuf> {
     if cfg!(windows) {
         std::env::var("APPDATA").ok().map(std::path::PathBuf::from)

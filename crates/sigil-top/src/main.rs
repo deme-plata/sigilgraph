@@ -4259,8 +4259,17 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                     // any other device. Give a link that actually works elsewhere —
                                     // see wallet_ui::headless_wallet_view_url's doc comment for why
                                     // this carries no secret and is safe to print/copy anywhere.
+                                    //
+                                    // 2026-08-26: that remote link is seedless by design, so it
+                                    // still prompts for the recovery phrase on every Send — the
+                                    // zero-prompt server (SIGIL_MINE_SEED-backed :9800) never went
+                                    // away, headless just never pointed at it. Offer the tunnel
+                                    // that actually reaches it, alongside the remote fallback.
                                     let fallback = wallet_ui::headless_wallet_view_url();
-                                    app.toast = format!("🔗 headless — open your wallet from any device:  {fallback}").into();
+                                    app.toast = match wallet_ui::ssh_tunnel_hint() {
+                                        Some(hint) => format!("🔐 {hint}\n🔗 or, prompted: {fallback}").into(),
+                                        None => format!("🔗 headless — open your wallet from any device:  {fallback}").into(),
+                                    };
                                     app.toast_sticky = true;
                                 }
                             }

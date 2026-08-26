@@ -358,11 +358,23 @@ impl DoneRange {
     }
     /// Blocks per second for this range alone. The number that makes a row interesting:
     /// it says which peer is actually fast, not just which one answered.
-    fn rate(&self) -> f64 {
-        if self.wait_ms == 0 { return 0.0; }
-        self.blocks() as f64 / (self.wait_ms as f64 / 1000.0)
+    ///
+    /// Returns `None` below [`RATE_FLOOR_MS`]. A range that "completed" in 22 ms did not
+    /// move 10,000 blocks over the wire in 22 ms — it was a duplicate or cache-served
+    /// reply, and dividing by that interval produces a headline like "peak 454,545 blk/s"
+    /// that is pure arithmetic artifact. Reporting nothing is honest; reporting half a
+    /// million blk/s teaches the operator to distrust the whole panel.
+    fn rate(&self) -> Option<f64> {
+        (self.wait_ms >= RATE_FLOOR_MS)
+            .then(|| self.blocks() as f64 / (self.wait_ms as f64 / 1000.0))
     }
 }
+
+/// Below this, a completion interval is too short to be a real transfer measurement.
+///
+/// 10,000 blocks in 36 ms would be 277,000 blk/s — three orders of magnitude past anything
+/// this wire does. Such rows are duplicate/cached replies, so their "rate" is meaningless.
+const RATE_FLOOR_MS: u64 = 250;
 
 /// How long a completed range stays on screen.
 const DONE_RETAIN: Duration = Duration::from_secs(150);
@@ -589,7 +601,10 @@ pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
                 done.iter().filter(|d| now.duration_since(d.at) <= DONE_RETAIN).collect();
             if !fresh.is_empty() {
                 let total_blocks: u64 = fresh.iter().map(|d| d.blocks()).sum();
-                let best = fresh.iter().map(|d| d.rate()).fold(0.0_f64, f64::max);
+                let best = fresh.iter().filter_map(|d| d.rate()).fold(0.0_f64, f64::max);
+                // How many rows were too fast to measure — usually the duplicate-reply
+                // signature, which is worth surfacing rather than hiding.
+                let instant = fresh.iter().filter(|d| d.rate().is_none()).count();
                 lines.push(Line::from(vec![
                     Span::styled(" ✔ COMPLETED", Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
                     dim(&format!(" — last {}s: ", DONE_RETAIN.as_secs())),
@@ -597,14 +612,30 @@ pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
                     dim(" ranges  "),
                     Span::styled(group(total_blocks), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
                     dim(" blocks  peak "),
-                    Span::styled(format!("{:.0} blk/s", best), Style::default().fg(C_GOLD)),
+                    Span::styled(
+                        if best > 0.0 { format!("{best:.0} blk/s") } else { "—".into() },
+                        Style::default().fg(C_GOLD),
+                    ),
+                    dim(if instant > 0 { "  instant " } else { "" }),
+                    Span::styled(
+                        if instant > 0 { format!("{instant}") } else { String::new() },
+                        Style::default().fg(C_NEON_PINK),
+                    ),
+                    dim(if instant > 0 { " (cached/dup — not measurable)" } else { "" }),
                 ]));
                 for d in fresh.iter().take(left.saturating_sub(1)) {
                     let age = now.duration_since(d.at).as_secs();
                     let rate = d.rate();
-                    let rcol = if rate >= 1000.0 { C_NEON_GREEN }
-                        else if rate >= 100.0 { C_GOLD }
-                        else { C_DIM };
+                    let rcol = match rate {
+                        Some(r) if r >= 1000.0 => C_NEON_GREEN,
+                        Some(r) if r >= 100.0 => C_GOLD,
+                        Some(_) => C_DIM,
+                        None => C_NEON_PINK,
+                    };
+                    let rate_txt = match rate {
+                        Some(r) => format!("{r:.0}"),
+                        None => "inst".to_string(),
+                    };
                     // Fade the marker with age so the eye lands on what just happened.
                     let mark_col = if age < 10 { C_NEON_GREEN } else if age < 45 { C_GOLD } else { C_DIM };
                     let peer = if d.peer.is_empty() { "—".to_string() }
@@ -617,7 +648,7 @@ pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
                         Span::styled(format!("{:<11}", fmt_age(d.wait_ms)), Style::default().fg(C_DIM)),
                         Span::styled(format!("{:<12}", if d.verified { "⛓ verified" } else { "✔ done" }), Style::default().fg(mark_col)),
                         Span::styled(format!("{peer:<18}"), Style::default().fg(C_DIM)),
-                        Span::styled(format!("{rate:>9.0} "), Style::default().fg(rcol)),
+                        Span::styled(format!("{rate_txt:>9} "), Style::default().fg(rcol)),
                         Span::styled(format!("{:>8}", format!("{age}s ago")), Style::default().fg(C_DIM)),
                     ]));
                 }

@@ -2011,7 +2011,29 @@ impl P2PBlockSync {
                         for released in sync_store.sweep_timeouts(REQ_TIMEOUT.as_millis() as u64 * 2) {
                             let _ = released;
                         }
-                        if last_advance_t.elapsed() >= Duration::from_secs(6) { sync_store.clear_ranges(); }
+                        // 2026-08-27: this WAS `if last_advance_t.elapsed() >= 6s {
+                        // sync_store.clear_ranges(); }` — a blanket wipe of every tracked
+                        // range, contradicting the comment three lines above it that says
+                        // the blanket clear "re-issued the WHOLE window at once, which is
+                        // the burst half of the sawtooth" and had been replaced by
+                        // `sweep_timeouts`. It had not been removed, only commented around.
+                        //
+                        // `clear_ranges()` drops FETCHED ranges too, not just in-flight
+                        // claims — so every 6 seconds that verify failed to advance, blocks
+                        // that had ALREADY been downloaded and staged were thrown away and
+                        // requested again, from the same frontier, forever. Operator-visible
+                        // once the queue table started retaining completions: 58 ranges and
+                        // 580,000 blocks "completed" in 150 s against 2,779 blocks actually
+                        // fetched, with `42,697..52,697` re-requested six times.
+                        //
+                        // This does NOT fix whatever stalls verification — it stops that
+                        // stall from turning into an unbounded re-download storm. Only
+                        // in-flight claims older than 6 s are released now; staged data is
+                        // never discarded, because a downloaded block is downloaded whether
+                        // or not the verifier is currently stuck.
+                        for released in sync_store.sweep_timeouts(6_000) {
+                            let _ = released;
+                        }
                         // DYNAMIC BASE: the lowest servable height creeps UP as producers prune early
                         // history from their RAM window (the disk range-serve of pruned-low ranges is
                         // unreliable). If the frontier chunk stays unservable by ALL peers for ≥5s

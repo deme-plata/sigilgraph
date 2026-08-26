@@ -79,17 +79,26 @@ pub(crate) fn dirs_next() -> Option<std::path::PathBuf> {
     }
 }
 
-/// The hosted SIGIL wallet — the React/Vite/TS app (`gui/sigil-wallet/`), which is
-/// the wallet [L]/[W] open (2026-08-17, operator preference over this crate's
-/// single-file embedded Tron wallet, which is now only reachable via the local
-/// :9800 server, [T]'s #stats deep link, and [B]'s #activity deep link). Override
-/// with SIGIL_WALLET_URL. Must be the `fluxapp.xyz` APEX, not
-/// `sigilgraph.fluxapp.xyz` (that subdomain is a thin gate page whose own /api
-/// hits :8091, not sigil-rpcd — its swap/balance/pool calls silently fail there;
-/// see q-flux.toml's own routing comments).
+/// The hosted SIGIL wallet that [L]/[W] open. Override with SIGIL_WALLET_URL.
+///
+/// 2026-08-26: repointed off `fluxapp.xyz` to `sigilgraph.org` — operator
+/// instruction ("we are using sigilgraph.org not fluxapp"), and the routing
+/// backs it up. `fluxapp.xyz`'s q-flux vhost still proxies BOTH `/api` and
+/// `/v1` to the long-dead sigil-rpcd (`127.0.0.1:8099`); confirmed live this
+/// session, every one of those paths returns 502 Bad Gateway. The wallet page
+/// fetches same-origin (`const NODE=''`), so served from that apex its balance,
+/// mining and activity panels all fail. `sigilgraph.org` is the vhost proxying
+/// to the real `sigil-api` (`:18181`) — verified live returning real JSON.
+///
+/// Target the Tron page directly rather than `/sigil-wallet/`: on fluxapp that
+/// path was only ever a redirect stub INTO `sigil-wallet-tron.html`, and on
+/// sigilgraph.org it has no file at all (spa_fallback serves the landing page,
+/// 3.7 KB of the wrong HTML). This is the same file `headless_wallet_view_url`
+/// already uses, so [L]/[W]/[T]/[B] now all land on ONE wallet — the one that
+/// actually carries the Recent Activity modal.
 pub(crate) fn official_wallet_url() -> String {
     std::env::var("SIGIL_WALLET_URL").ok().filter(|u| !u.is_empty())
-        .unwrap_or_else(|| "https://fluxapp.xyz/sigil-wallet/".into())
+        .unwrap_or_else(|| "https://sigilgraph.org/sigil-wallet-tron-embedded.html".into())
 }
 
 /// True if there's no local GUI to open a browser into (headless box / SSH / proxmox

@@ -755,7 +755,32 @@ impl P2PBlockSync {
                 // first fixing frontier-chunk starvation in the refill loop (re-request the
                 // lead when synced_to hasn't advanced). Power users can still opt in via the env.
                 let max_inflight: usize = std::env::var("SIGIL_SYNC_INFLIGHT").ok()
-                    .and_then(|v| v.parse::<usize>().ok()).map(|n| n.clamp(1, 16)).unwrap_or(8);
+                    .and_then(|v| v.parse::<usize>().ok()).map(|n| n.clamp(1, 16)).unwrap_or(16);
+                // 2026-08-26 (rocky-win): default raised 8 -> 16, deliberately overriding the
+                // v7.0.6 revert note ABOVE. That note is now stale, and here is why, because
+                // re-raising this was explicitly forbidden without a reason:
+                //   1. The starvation it describes was a property of the OLD cursor/retry-queue
+                //      refill. v0.58 replaced that with the FRONTIER-ANCHORED refill (see the
+                //      REFILL comment below): every cycle re-issues the next MAX_INFLIGHT chunks
+                //      starting AT the current contiguous frontier, and the frontier slot (i==0)
+                //      is exempt from the look-ahead budget (`if i > 0 && !may_fetch(..)`). The
+                //      lead chunk can no longer be crowded out by far-ahead ranges.
+                //   2. A dead frontier request now always frees its claim (`sync_store.release`
+                //      on any non-fetched outcome, including timeout), so the lead is re-issued
+                //      to a rotating peer next cycle instead of parking forever.
+                //   3. grogu-adaptive-frontier-width (2026-08-23) narrows the frontier request
+                //      after 12s of no advance, so even a churning link makes progress.
+                //   4. The wedge an operator hit at h~393,265 - and the 5h41m wedge measured on
+                //      a Windows archive node 2026-08-26 - were caused by the OPEN-ENDED height
+                //      probe, not by slot count: the reply grew with the tip until no reply could
+                //      ever be delivered. That is fixed separately (see the probe bound above).
+                // MEASURED, same node, same peer: 16 slots sustained ~5,800 blk/s through bulk
+                // sync; 4 slots was markedly slower. Most users double-click the exe and never
+                // set an env var, so the DEFAULT has to be the good value - that is the whole
+                // point of this change.
+                // Still clamped to 16: `SIGIL_SYNC_INFLIGHT=48` resolves to 16, not 48. The
+                // Turbo X multiplier below can lift the EFFECTIVE count to 64 under sustained
+                // high bandwidth; that ceiling is unchanged.
                 // Turbo X continuity: boost inflight when high continuous BW (score and pid_rate) to sustain high download rate
                 let max_inflight = {
                     let s = state_clone.lock().unwrap_or_else(|e| e.into_inner());

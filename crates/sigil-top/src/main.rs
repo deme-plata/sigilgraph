@@ -895,7 +895,8 @@ fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str) -> String
     let mut o = String::new();
     // Live update signal from the flux release channel (one-shot; falls back to LATEST).
     let latest = fetch_latest().map(|r| r.version).unwrap_or_else(|_| LATEST.to_string());
-    let net = if st.network.is_empty() { "sigil-g0" } else { &st.network };
+    let build_net = build_network_id();
+    let net = if st.network.is_empty() { build_net.as_str() } else { &st.network };
     let dot = if online { format!("{GREEN}●{RESET}") } else { format!("{RED}●{RESET}") };
     let state = if online { format!("{GREEN}LIVE{RESET}") } else { format!("{RED}OFFLINE{RESET}") };
 
@@ -1098,7 +1099,8 @@ fn char_cols(c: char) -> usize {
 }
 
 fn render_lite(st: &NodeStatus, online: bool) -> String {
-    let net = if st.network.is_empty() { "sigil-g0" } else { &st.network };
+    let build_net = build_network_id();
+    let net = if st.network.is_empty() { build_net.as_str() } else { &st.network };
     let dot = if online { format!("{GREEN}●{RESET}") } else { format!("{RED}●{RESET}") };
     let frac = st.native_supply as f64 / MAX_SUPPLY_BASE as f64;
     // L4-A: lite scorecard carries the verify verdict — the whole point of a light client.
@@ -1445,7 +1447,7 @@ fn main() {
                     },
                     sync: None,
                     cortex: std::sync::Arc::new(std::sync::Mutex::new(local_api::CortexSnapshot::default())),
-                    network: "sigil-g0".into(),
+                    network: build_network_id(),
                 })
             });
             match serve::start_with_api(&serve_dir, port, local_api) {
@@ -3611,6 +3613,7 @@ fn open_store_with_fallbacks_inner(
     progress: std::sync::Arc<block_store::OpenProgress>,
 ) -> Result<(block_store::BlockStore, Option<String>), String> {
     // v7.0.7: heal a store wedged by the v7.0.3–7.0.5 frontier-stall bug (one-time, marked).
+    reset_store_on_network_change(db_path);
     heal_wedged_store_once(db_path);
     let oversized_primary = oversized_store_for_light_boot(db_path, want_sync);
     boot_trace(&format!("opening block store path={db_path} mode=background want_sync={want_sync}"));
@@ -3963,7 +3966,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
         reader: reader_cell.clone(),
         sync: sync_handle,
         cortex: app.cortex_shared.clone(),
-        network: "sigil-g0".into(),
+        network: build_network_id(),
     });
 
     // v0.7.0: Start embedded HTTP server (no external process needed)
@@ -4882,6 +4885,78 @@ fn sigil_top_db_path() -> String {
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
     format!("{}/sigil-top-blocks.db", base.trim_end_matches(['/', '\\']))
+}
+
+/// PERMANENT self-heal: a store belonging to a DIFFERENT CHAIN is cleared automatically.
+///
+/// # The failure this ends
+///
+/// Every header carries `sigil_header::NETWORK_ID`, and `precheck` refuses any header
+/// whose id is not the one this binary was built with. When the network was cut over from
+/// `sigil-g0` to `sigil-g1`, every existing client woke up holding a database full of
+/// perfectly valid `sigil-g0` blocks and started rejecting **its own block 0**:
+///
+/// ```text
+///   ⛓ INTEGRITY BROKEN — h=0: precheck failed:
+///      wrong network id: expected [..115,45,103,49..] ("sigil-g1"),
+///                             got [..115,45,103,48..] ("sigil-g0")
+///   ✗ SPINE BREAK — STUCK   0.0%   rate 0 blk/s   eta —
+/// ```
+///
+/// That is a permanent deadlock, and nothing in the sync loop can escape it: retrying an
+/// honest peer harder cannot make a g0 block legal on g1, so the progress bar sits at 0.0%
+/// forever. The user's only recourse was to know, unprompted, to delete a database file
+/// they were never told about.
+///
+/// # Why this one is unconditional, unlike [`heal_wedged_store_once`]
+///
+/// That heal is a ONE-SHOT keyed to a marker string, because "this store might be wedged"
+/// is a guess and wiping a healthy archive is expensive. A network-id mismatch is not a
+/// guess — it is a proof. Blocks from another chain can never become valid here no matter
+/// how long we wait, so clearing them is provably the only recovery, and it should work
+/// every time it is needed rather than once per hand-bumped constant. This makes reset
+/// work out of the box, permanently, for every future genesis change.
+///
+/// The chain a store belongs to is recorded in a `.netid` sidecar written on first launch.
+/// A store with no sidecar predates this check and cannot be attributed to any chain, so
+/// it is cleared once and re-synced — the same cost as the cutover already imposed.
+/// The chain id this binary was COMPILED for, as text.
+///
+/// The TUI used to hard-code `"sigil-g0"` as its placeholder, so after the cutover it
+/// cheerfully displayed `sigil-g0` while refusing every g0 block for not being g1 — the
+/// header contradicting the error two lines below it. A label that can disagree with the
+/// binary is worse than no label.
+fn build_network_id() -> String {
+    String::from_utf8_lossy(&sigil_header::NETWORK_ID).trim().to_string()
+}
+
+fn reset_store_on_network_change(path: &str) {
+    let current = String::from_utf8_lossy(&sigil_header::NETWORK_ID).trim().to_string();
+    let netid_path = format!("{path}.netid");
+    let reason = match std::fs::read_to_string(&netid_path) {
+        // Same chain — leave the archive completely alone. This is the normal path and it
+        // must stay cheap: one small file read per launch.
+        Ok(prev) if prev.trim() == current => return,
+        Ok(prev) => format!("network changed: store holds '{}', this build is '{current}'", prev.trim()),
+        Err(_) => format!("store predates the network-id marker; cannot prove it is '{current}'"),
+    };
+    // A store that does not exist yet needs no wipe — just record the chain it will hold.
+    let exists = std::path::Path::new(path).exists();
+    if exists {
+        eprintln!(
+            "  ⛓ RESET: {reason} — clearing the local chain store and re-syncing from genesis."
+        );
+        let _ = std::fs::remove_dir_all(path);
+        let _ = std::fs::remove_file(path);
+        for sfx in ["-wal", "-shm", ".wal", ".shm"] {
+            let _ = std::fs::remove_file(format!("{path}{sfx}"));
+        }
+        // The one-shot heal marker refers to a store that no longer exists. Dropping it
+        // keeps the two mechanisms from disagreeing about what is on disk.
+        let _ = std::fs::remove_file(format!("{path}.healver"));
+    }
+    let _ = std::fs::write(&netid_path, &current);
+    boot_trace(&format!("network-id reset: {reason} (store existed: {exists}) — now on '{current}'"));
 }
 
 /// v7.0.7 ONE-TIME store heal, RE-ARMED 2026-08-24 (see below). Stores built by the

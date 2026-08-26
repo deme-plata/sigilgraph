@@ -10,12 +10,24 @@ mod block;
 mod chain;
 mod coinbase; // ONE-CHAIN step 1: braid mints REAL coinbase blocks (money enters the graph)
 mod chain_log;
+mod genesis; // 2026-08-23: moved out so sigil-top's `producer` feature shares the REAL build_genesis()
+mod mint; // 2026-08-23: moved out so sigil-top's `producer` feature shares the REAL mint_next_block()
+mod dag; // 2026-08-23: moved out so sigil-top's `producer` feature shares the REAL braid wiring
+// 2026-08-26 (frontier-memo adoption): `frontier.rs` already declared `pub mod
+// frontier;` in `lib.rs`; this is the matching bin-local declaration (same
+// two-independent-copies-of-one-source pattern as `dag`/`mint`/`genesis` above)
+// so this binary can call `frontier::dag_build_frontier_memo` — see the call
+// site below and `frontier.rs`'s own module doc for the validation history.
+mod frontier;
 mod cli;
 mod snapshot;
 mod rate_governor;
 mod ingest;
+mod dandelion_relay; // wires sigil-dandelion's Action into real TOPIC_TXS gossip
+mod wg_relay; // zero-config WireGuard side-mesh — see its module docs
 mod sync_auth;
 mod search_index;
+mod serve_read; // header-only reads for the backfill SERVE path — see its module doc
 mod producer_signing;
 
 use std::process::ExitCode;
@@ -291,6 +303,11 @@ fn run_start() -> Result<()> {
     // v0.57 (sync): publish our peer-id so a CO-LOCATED sigil-top monitor can auto-dial us over
     // loopback (tip-complete, LAN, ~0 WAN timeouts) instead of crawling the remote fleet. Same-box
     // only; the monitor confirms 127.0.0.1:9501 is live before using it. Best-effort.
+    // Zero-config WireGuard side-mesh (wg_relay.rs) — additive, never touches
+    // this node's primary transport/listen address. Best-effort: a failure
+    // here just means no WG side-mesh this session, direct transport is
+    // unaffected either way.
+    let wg_state = wg_relay::ensure_up(&cfg.db_path, &local_peer_id);
     match flux_p2p::publish_sigil_peerid(&local_peer_id) {
         Ok(()) => eprintln!("   peerid published:{}", flux_p2p::sigil_peerid_path().display()),
         Err(e) => eprintln!("   (peerid publish failed: {e})"),
@@ -630,15 +647,6 @@ fn run_start() -> Result<()> {
         // to the legacy single-mutex backend unless SIGIL_BRAIDPOOL=1 —
         // byte-for-byte the same behavior as before this type existed.
         let mempool: Arc<MempoolBackend> = Arc::new(MempoolBackend::from_env());
-        // R1: tx/batch INGEST BRIDGE — the first real user-tx path into the producer
-        // mempool (wallets / rpcd-forwarder / loadgen). Env-gated by SIGIL_API_PORT;
-        // shares the mempool Arc like the TXGEN feeder. Off unless set.
-        if let Some(api_port) = std::env::var("SIGIL_API_PORT").ok()
-            .and_then(|s| s.parse::<u16>().ok()).filter(|p| *p > 0)
-        {
-            crate::ingest::spawn(Arc::clone(&mempool), api_port);
-            eprintln!("\u{1f310} tx ingest API on :{api_port} — POST /tx, POST /batch, GET /mempool");
-        }
 
         // ONE-CHAIN step 2: the PROPER money API (sigil-api, axum + flux-api SDKs)
         // — balance / supply / signed-send / tx-status. Shares this producer's
@@ -655,13 +663,42 @@ fn run_start() -> Result<()> {
         // tails ChainLog instead of hooking block-apply directly: it's a
         // completely separate reader of the same durable log, so it can never
         // affect (or be affected by) the actual consensus/settlement code.
+        // KILL-SWITCH (2026-08-26, operator-approved during the frozen-tip incident).
+        // The indexer is a pure *reader* of ChainLog and can never corrupt consensus
+        // state -- but it is NOT free: it shares this process's CPU and its cgroup RSS
+        // ceiling. Measured on the live producer that day: the on-disk index was
+        // ~210k blocks behind tip (indexed-to-height 1,971,511 vs tip 2,180,884), so
+        // every boot re-entered a multi-hour catch-up that pinned a core (perf: 19%
+        // num_bigint, 13% serde_json, drop_in_place<flux_search::Document>,
+        // SearchEngine::rebuild_runtime_indexes) and grew RSS ~17 MB/s until the
+        // cgroup MemoryMax OOM-killed the node -- a restart loop that never reached
+        // block production at all (io: 10.4 GB read, 45 KB written).
+        //
+        // SIGIL_SEARCH_INDEX=0 skips BOTH the ~1.25 GB index load and the background
+        // catch-up. `/search` then answers from an empty engine (zero results) instead
+        // of taking the whole node down with it. Default is UNCHANGED (enabled), so
+        // this is inert unless the operator sets the env var.
+        // REVERT: unset SIGIL_SEARCH_INDEX (or set it to 1), restart.
+        let search_enabled = std::env::var("SIGIL_SEARCH_INDEX")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
         let search_engine: Arc<Mutex<flux_search::SearchEngine>> =
-            Arc::new(Mutex::new(search_index::load_or_new(&snap_dir)));
-        search_index::spawn_indexer(
-            snap_dir.clone(),
-            Arc::clone(&search_engine),
-            std::time::Duration::from_secs(5),
-        );
+            Arc::new(Mutex::new(if search_enabled {
+                search_index::load_or_new(&snap_dir)
+            } else {
+                eprintln!(
+                    "🔎 search index DISABLED (SIGIL_SEARCH_INDEX=0) — /search returns \
+                     no results; block production unaffected"
+                );
+                flux_search::SearchEngine::new()
+            }));
+        if search_enabled {
+            search_index::spawn_indexer(
+                snap_dir.clone(),
+                Arc::clone(&search_engine),
+                std::time::Duration::from_secs(5),
+            );
+        }
         let mining_bridge = Arc::new(sigil_api::mining::MiningBridge::new());
         // Wallet-authenticated send queue — the producer drains it into every
         // block's tx set unconditionally (see the `block_txs` build below),
@@ -672,6 +709,22 @@ fn run_start() -> Result<()> {
         // PV-1 private transfers. Drained on the same contract as `send_bridge`:
         // re-embedded into every candidate, retired only when one lands on the spine.
         let shielded_bridge = Arc::new(sigil_api::shielded::ShieldedBridge::new());
+        // Dandelion++ tx-gossip privacy relay (dandelion_relay.rs): one actor
+        // task owns the DandelionRouter; everything else just sends it a Cmd.
+        // Always on — no env gate, since it degrades to normal fluff-only
+        // behavior with zero peers or zero traffic, same as the crate's own
+        // "originate with no peers falls back to fluff" test guarantees.
+        // Must come after `shielded_bridge`: spawn() wires its relay hook.
+        let dandelion_tx = crate::dandelion_relay::spawn(Arc::clone(&mgr), Arc::clone(&mempool), Arc::clone(&shielded_bridge));
+        // R1: tx/batch INGEST BRIDGE — the first real user-tx path into the producer
+        // mempool (wallets / rpcd-forwarder / loadgen). Env-gated by SIGIL_API_PORT;
+        // shares the mempool Arc like the TXGEN feeder. Off unless set.
+        if let Some(api_port) = std::env::var("SIGIL_API_PORT").ok()
+            .and_then(|s| s.parse::<u16>().ok()).filter(|p| *p > 0)
+        {
+            crate::ingest::spawn(Arc::clone(&mempool), dandelion_tx.clone(), api_port);
+            eprintln!("\u{1f310} tx ingest API on :{api_port} — POST /tx, POST /batch, GET /mempool");
+        }
         // SIGIL <-> Polygon bridge — admin/relayer are real SIGIL wallet
         // addresses (32-byte Ed25519 pubkeys), NOT Polygon/EVM addresses;
         // configured via env so no key material is ever hardcoded in source.
@@ -732,6 +785,7 @@ fn run_start() -> Result<()> {
                     search: Arc::clone(&search_engine),
                     dagknight: Arc::clone(&dag_snapshot_bridge),
                     history: Arc::clone(&mining_history_store),
+                    network: Some(Arc::clone(&mgr)),
                 };
                 // Samples the live mining aggregate once/minute into the
                 // durable store above. Same "reader of already-published
@@ -895,6 +949,20 @@ fn run_start() -> Result<()> {
             .and_then(|v| v.trim().parse().ok()).unwrap_or(32_768);
         let mut dag_bodies: std::collections::HashMap<BlockHash, crate::block::Block> =
             std::collections::HashMap::new();
+        // 2026-08-26 (frontier-memo adoption): the previous tick's built frontier,
+        // carried forward so `dag_build_frontier_memo` can extend it instead of
+        // `dag_build_frontier`'s full O(window) rebuild every tick (the measured
+        // live bottleneck — see `frontier.rs`'s module doc). None until the first
+        // tick builds one. Deliberately NOT reset on a braid reseed (`dag_seed_braid`
+        // below): the memo function's own `cached.height() >= chain.height()`
+        // usability check plus its two reorg fallbacks already force a correct
+        // full rebuild the first time it's called against a reseeded braid (a
+        // reseed only re-inserts already-settled blocks, so the post-reseed
+        // selected tip sits at/below the settled height while a stale cache built
+        // ahead of it does not — the empty-path fallback's
+        // `frontier.parent_hash() != tip` check catches exactly this), so an
+        // explicit reset here would be redundant, not a safety requirement.
+        let mut frontier_cache: Option<ChainTip> = None;
         // v7.1.29: which SendBridge-pending tx hashes each of OUR OWN minted
         // candidates carries, keyed by that candidate's own block hash — lets
         // `dag_drain_apply` retire a pending send the instant its containing
@@ -1061,6 +1129,23 @@ fn run_start() -> Result<()> {
         );
         let (mut hot_hits, mut hot_miss): (u64, u64) = (0, 0);
         let mut last_hot_cache_log = std::time::Instant::now();
+        // Memo for the codec=4 M1 fold trailer's archive_root, keyed by the anchor
+        // height it was computed at. See the codec==4 arm for why this exists: that
+        // root is a hash over the WHOLE chain's skeleton records, recomputed inline
+        // on the produce loop for every single request before 2026-08-26.
+        let mut fold_root_memo: Option<(u64, [u8; 32])> = None;
+        // Completed off-thread serves, handed back so the loop can cache their
+        // bytes. Payload = (cache key, immutable?, hot-eligible?, blob). See the
+        // OFF-THREAD SERVE block in the rr-backfill arm for why this exists.
+        // Bounded + drained with try_recv: a full channel drops a cache FILL, never
+        // a response (the response is sent from the worker, before this).
+        #[allow(clippy::type_complexity)]
+        let (serve_done_tx, mut serve_done_rx) = tokio::sync::mpsc::channel::<(
+            (u64, u64, bool, u32),
+            bool,
+            bool,
+            std::sync::Arc<Vec<u8>>,
+        )>(256);
         // Hard ceiling on expensive (cache-miss) backfill compute — see the
         // throttle's own doc comment at its check site below.
         let mut last_expensive_serve = std::time::Instant::now()
@@ -1201,9 +1286,24 @@ fn run_start() -> Result<()> {
                     // the finalized drain, so all nodes converge. Linear mode mints on chain.
                     // Build the frontier FIRST: its tip (`frontier.parent_hash()`) is the
                     // block's real spine parent, which is what merge_tips must exclude.
+                    //
+                    // 2026-08-26 REVERTED (production stall, this session): this call site
+                    // ran `dag_build_frontier_memo` for a few hours today; it stalled the
+                    // live producer solid within ~2 minutes of every restart (0 blocks
+                    // minted, high sustained CPU, mining/challenge 503ing) — the exact
+                    // failure shape the 2026-08-23 attempt at this same optimization
+                    // already produced once (see frontier.rs's module doc). The chronos
+                    // soak that cleared it for adoption evidently didn't cover whatever
+                    // broke tonight. Back on the plain, O(window) `dag_build_frontier` —
+                    // slower (re-walks + re-applies the pending spine from the settled tip
+                    // every tick, ~final_depth=512 re-applies/tick steady state) but proven
+                    // stable; `frontier_cache` is no longer read, left declared for the next
+                    // deliberate, chronos-first re-adoption attempt.
                     let _t_frontier = std::time::Instant::now(); // cheap; only READ when profiling
-                    let frontier_opt: Option<ChainTip> = braid.as_ref()
-                        .map(|br| dag_build_frontier(&chain, br, &dag_bodies));
+                    let _ = &frontier_cache;
+                    let frontier_opt: Option<ChainTip> = braid.as_ref().map(|br| {
+                        dag_build_frontier(&chain, br, &dag_bodies).frontier
+                    });
                     ph_frontier_us += _t_frontier.elapsed().as_micros() as u64;
                     ph_ticks += 1;
                     let mint_ref: &ChainTip = frontier_opt.as_ref().unwrap_or(&chain);
@@ -1312,9 +1412,89 @@ fn run_start() -> Result<()> {
                         c.calculate_block_reward(now_secs, supply)
                     });
                     let topology_commitment = compute_topology_commitment(braid.as_ref(), mint_ref.height());
-                    match mint_next_block(mint_ref, mp, &block_txs, reward_override, solve.as_ref(), topology_commitment) {
+                    // Drain the partial-share pool ONLY for a self-minted block.
+                    // With a real solve the winner's own `shares` map already
+                    // carries the pool (submit() folds and clears it), so draining
+                    // here too would pay the same work twice.
+                    let share_pool = if solve.is_none() { mining_bridge.take_share_pool() } else { None };
+                    // 2026-08-26 (rocky-lead) — decide the ATTRIBUTION before the pool
+                    // is moved into the mint. This mirrors mint.rs's own choice; it
+                    // does not make it. Keeping it here rather than threading a return
+                    // value back out of mint_next_block leaves that file (another
+                    // agent's live Option C work) untouched.
+                    //
+                    // Why this is worth a few lines: the "producer wallet takes ~94%
+                    // while real miners take ~0%" failure has now happened TWICE and
+                    // was invisible both times — shares accepted, blocks produced,
+                    // supply climbing, hashrate up, every metric green. Finding it took
+                    // a bespoke off-box experiment. See sigil_api::attribution.
+                    let pay_pool = std::env::var("SIGIL_PAY_SHARE_POOL")
+                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false);
+                    let (payout_source, weights): (
+                        sigil_api::attribution::PayoutSource,
+                        Option<&std::collections::HashMap<WalletId, u64>>,
+                    ) = if let Some(s) = solve.as_ref() {
+                        (sigil_api::attribution::PayoutSource::RealSolve, Some(&s.shares))
+                    } else if pay_pool && share_pool.as_ref().is_some_and(|p| !p.is_empty()) {
+                        (sigil_api::attribution::PayoutSource::SharePool, share_pool.as_ref())
+                    } else {
+                        (sigil_api::attribution::PayoutSource::ProducerFallback, None)
+                    };
+                    // 2026-08-26 (rocky) — how much of this block's miner slice lands as a
+                    // PRIVATE note rather than a transparent balance.
+                    //
+                    // Without this the ledger lies by omission, and it very nearly did:
+                    // a miner holding 33.1% of network hashrate showed a transparent-balance
+                    // delta of exactly 0 over 150 s, which reads as "unpaid" and was about to
+                    // be reported as a broken payout split. It was registered for shielded
+                    // rewards — the money went into the pool as notes (2 → 2,890 notes) and
+                    // `shielded_hps_pct` matched its hashrate almost exactly. An attribution
+                    // ledger that can only see transparent balances reproduces the exact
+                    // blind spot it exists to remove.
+                    //
+                    // Weight share is the right proxy for value share because the coinbase
+                    // splits proportionally to these same weights. Costs one registry lookup
+                    // per payee, and payees average <2.
+                    let (payees, shielded_payees, shielded_pct) = match weights {
+                        None => (1u32, 0u32, 0.0f32),
+                        Some(w) if w.is_empty() => (1u32, 0u32, 0.0f32),
+                        Some(w) => {
+                            let snap = mint_ref.state_snapshot();
+                            let pool = snap.shielded();
+                            let total: u128 = w.values().map(|v| *v as u128).sum();
+                            let mut sh_n = 0u32;
+                            let mut sh_w: u128 = 0;
+                            for (wallet, weight) in w.iter() {
+                                if pool.shielded_address(wallet).is_some() {
+                                    sh_n += 1;
+                                    sh_w += *weight as u128;
+                                }
+                            }
+                            let pct = if total == 0 { 0.0 } else { (sh_w as f64 * 100.0 / total as f64) as f32 };
+                            (w.len().max(1) as u32, sh_n, pct)
+                        }
+                    };
+                    match mint_next_block(mint_ref, mp, &block_txs, reward_override, solve.as_ref(), topology_commitment, share_pool) {
                         Ok((block, minted_tx_hashes)) => {
                             let h = block.header.height;
+                            sigil_api::attribution::record(
+                                h,
+                                payout_source,
+                                payees,
+                                reward_override.unwrap_or(0),
+                                shielded_payees,
+                                shielded_pct,
+                            );
+                            // Fire ONLY on a real, sustained fairness failure. An alarm
+                            // that shouts during normal operation is worse than no
+                            // alarm — it trains everyone to scroll past the real one.
+                            if h % 512 == 0 {
+                                let att = sigil_api::attribution::summary(0);
+                                if att.alarm {
+                                    eprintln!("{}", sigil_api::attribution::verdict(&att));
+                                }
+                            }
                             let bhash = block.hash();
                             let parent = block.header.parent_hash;
                             let mps = block.header.merge_parents.clone();
@@ -1360,7 +1540,8 @@ fn run_start() -> Result<()> {
                                 let _t_drain = std::time::Instant::now();
                                 let (a, s, f) = dag_drain_apply(br, &mut dag_bodies, &mut chain,
                                     &mut |braw| { let _ = chain_log.append_bytes(braw); },
-                                    &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge, &mut mint_hash_to_tx_hashes);
+                                    &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge,
+                                    &shielded_bridge, &mut mint_hash_to_tx_hashes);
                                 applied += a; dag_ord_skipped += s; dag_apply_failed += f;
                                 ph_drain_us += _t_drain.elapsed().as_micros() as u64;
                                 true
@@ -1519,15 +1700,26 @@ fn run_start() -> Result<()> {
                         // that stops being true.
                         if let Some(br) = braid.as_ref() {
                             let s = br.stats();
-                            if s.below_final > last_below_final {
-                                let newly_lost = s.below_final - last_below_final;
+                            // 2026-08-26: alarm on blocks we ACTUALLY LOST, not on the
+                            // guard doing its job. This previously watched `below_final`,
+                            // which also counts stale blocks refused at the door — the
+                            // routine consequence of serving backfill to a syncing peer,
+                            // which re-offers history we long since finalized. Measured
+                            // live on Epsilon that day: bursts of 60-70 every couple of
+                            // minutes, every one of them announced as a PERMANENT ORPHAN
+                            // and none of them a loss at all. An alarm that fires on
+                            // normal traffic is worse than no alarm, because it trains
+                            // everyone to scroll past the real one.
+                            if s.below_final_dropped > last_below_final {
+                                let newly_lost = s.below_final_dropped - last_below_final;
                                 eprintln!(
-                                    "🚨 FINALITY VIOLATION: {} block(s) just PERMANENTLY orphaned by the finality clamp \
-                                     (reordering exceeded final_depth) — total below_final={} finalized_height={}",
-                                    newly_lost, s.below_final, s.finalized_height
+                                    "🚨 FINALITY VIOLATION: {} block(s) the braid was holding have been PERMANENTLY \
+                                     dropped (parent never arrived, or finality advanced past them) — \
+                                     total dropped={} refused_at_door={} finalized_height={}",
+                                    newly_lost, s.below_final_dropped, s.below_final_refused, s.finalized_height
                                 );
                             }
-                            last_below_final = s.below_final;
+                            last_below_final = s.below_final_dropped;
                             if let Some(margin) = s.finality_margin {
                                 if margin == 0 {
                                     eprintln!(
@@ -1584,9 +1776,41 @@ fn run_start() -> Result<()> {
                             // Point-to-point backfill serve: answer ONE requester with
                             // the requested block range straight from our chain. No
                             // gossipsub re-broadcast — the response goes only to `peer`.
+                            //
+                            // A Dandelion++ stem hop (dandelion_relay::StemWireMsg) rides
+                            // this SAME point-to-point channel — never gossipsub, or the
+                            // whole reason for stem phase (no broadcast until fluff) would
+                            // be defeated. It's bincode, BackfillReq is JSON, so trying
+                            // BackfillReq first and falling through on failure cleanly
+                            // disambiguates the two without a wire-format tag byte.
                             let req: BackfillReq = match serde_json::from_slice(&payload) {
                                 Ok(r) => r,
-                                Err(_) => continue,
+                                Err(_) => {
+                                    if let Ok(stem) = bincode::deserialize::<crate::dandelion_relay::StemWireMsg>(&payload) {
+                                        let _ = dandelion_tx.send(crate::dandelion_relay::Cmd::StemIncoming {
+                                            id: stem.id,
+                                            hops: stem.hops,
+                                            bytes: stem.tx_bytes,
+                                        });
+                                        // Ack only — the actual stem/fluff decision happens
+                                        // asynchronously in the Dandelion actor and the sender
+                                        // doesn't need to know the outcome, only that this hop
+                                        // received it (send_request needs SOME response).
+                                        mgr.respond(request_id, vec![1u8]);
+                                    } else if let Ok(hello) = bincode::deserialize::<crate::wg_relay::WgHelloMsg>(&payload) {
+                                        // wg_relay's key-exchange (see its module docs): a peer
+                                        // offering their WG identity, expecting ours back in
+                                        // the SAME response (one round trip, bidirectional).
+                                        if let Some(wg) = wg_state.as_ref() {
+                                            crate::wg_relay::handle_hello(wg, peer, &hello);
+                                            let ours = crate::wg_relay::our_hello(wg);
+                                            if let Ok(payload) = bincode::serialize(&ours) {
+                                                mgr.respond(request_id, payload);
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
                             };
                             // H2: authenticate the requester BEFORE serving chain data.
                             // Log-only by default (served + counted); SIGIL_HANDSHAKE_REQUIRE=1
@@ -1621,6 +1845,49 @@ fn run_start() -> Result<()> {
                             // finalized blocks never change) → cacheable like 'H'/'Z'.
                             let immutable = hi >= lo && hi < wbase && req.codec < 3;
                             let ckey = (lo, hi, req.headers_only, req.codec as u32);
+
+                            // ── Drain off-thread serves that finished since the last request,
+                            // so their bytes populate the caches checked immediately below.
+                            // Non-blocking; an empty channel costs one atomic load. Deliberately
+                            // here rather than as a select! arm — this loop drives block
+                            // production and is not somewhere to add wakeup sources lightly,
+                            // and requests arrive constantly so the fill is never far behind.
+                            while let Ok((k, imm, hot, blob)) = serve_done_rx.try_recv() {
+                                let sz = blob.len();
+                                if imm {
+                                    if let Some(prev) = serve_cache.insert(k, blob) {
+                                        serve_cache_bytes = serve_cache_bytes.saturating_sub(prev.len());
+                                    }
+                                    serve_cache_order.push_back(k);
+                                    serve_cache_bytes = serve_cache_bytes.saturating_add(sz);
+                                    while serve_cache_bytes > serve_cache_budget {
+                                        match serve_cache_order.pop_front() {
+                                            Some(kk) => {
+                                                if let Some(v) = serve_cache.remove(&kk) {
+                                                    serve_cache_bytes = serve_cache_bytes.saturating_sub(v.len());
+                                                }
+                                            }
+                                            None => break,
+                                        }
+                                    }
+                                } else if hot {
+                                    if let Some((prev, _)) = hot_cache.insert(k, (blob, std::time::Instant::now())) {
+                                        hot_cache_bytes = hot_cache_bytes.saturating_sub(prev.len());
+                                    }
+                                    hot_cache_order.push_back(k);
+                                    hot_cache_bytes = hot_cache_bytes.saturating_add(sz);
+                                    while hot_cache_bytes > hot_cache_budget {
+                                        match hot_cache_order.pop_front() {
+                                            Some(kk) => {
+                                                if let Some((v, _)) = hot_cache.remove(&kk) {
+                                                    hot_cache_bytes = hot_cache_bytes.saturating_sub(v.len());
+                                                }
+                                            }
+                                            None => break,
+                                        }
+                                    }
+                                }
+                            }
 
                             // ── CACHE HIT: pure memcpy, bypasses the throttle entirely ──
                             if immutable {
@@ -1738,22 +2005,106 @@ fn run_start() -> Result<()> {
                                     .retain(|_, t| t.elapsed() < std::time::Duration::from_secs(300));
                             }
 
-                            // Gather the range: disk portion via ONE sequential read
-                            // (chain_log.get_range), recent portion from the in-RAM window.
-                            let mut blocks: Vec<crate::block::Block> = Vec::new();
-                            if lo < wbase {
+                            // ── OFF-THREAD SERVE (2026-08-26, rocky-lead) — THE actual fix ──
+                            //
+                            // Measured on the REAL chain log (serve_read's
+                            // `bench_header_only_vs_full_block_on_the_real_log`): decoding one
+                            // 8,193-record serve range costs SECONDS, and header-only decoding
+                            // is only ~1.18× cheaper than full-block decoding — serde_json still
+                            // tokenises every byte of every record even when it throws the
+                            // fields away. So making the decode cheaper was never going to be
+                            // enough on its own. The work has to leave the loop that produces
+                            // blocks, which is what this does.
+                            //
+                            // Offloaded exactly when the request needs a DISK read
+                            // (`lo < wbase`) and is headers-only with a range-local codec —
+                            // those are the requests whose every input is owned and `Send`: a
+                            // directory path, the range, and the in-RAM window headers (copied
+                            // here, cheaply, while we still hold `chain`).
+                            //
+                            // Deliberately NOT offloaded:
+                            //   · codec 3 ('P') / 4 ('F') — they encode the CURRENT anchor/tip,
+                            //     not just [lo,hi], so they must read live chain state;
+                            //   · full-block serves — they need `chain_log`, which owns an
+                            //     append handle and is not shareable;
+                            //   · anything already served from cache above (free, stays inline).
+                            //
+                            // Spawn rate is bounded by the per-peer expensive throttle right
+                            // above, so this cannot become a task storm.
+                            if req.headers_only && req.codec < 3 && lo < wbase {
+                                let window_headers: Vec<sigil_header::SigilBlockHeaderV0> =
+                                    (lo.max(wbase)..=hi)
+                                        .filter_map(|h| chain.get(h).map(|b| b.header.clone()))
+                                        .collect();
                                 let disk_hi = hi.min(wbase.saturating_sub(1));
-                                // 2026-08-21: get_range_by_height, not get_range — the raw
-                                // offsets-indexed version silently returns zero blocks for a
-                                // range that genuinely exists on disk once a node's offsets
-                                // array has drifted from real height (see chain_log.rs doc
-                                // comments). Confirmed live: this exact call site answered a
-                                // real peer's request with 0 headers for a range the node's
-                                // own sync had already passed.
-                                blocks.extend(chain_log.get_range_by_height(lo, disk_hi));
+                                let dir = snap_dir.clone();
+                                let mgr2 = std::sync::Arc::clone(&mgr);
+                                let done = serve_done_tx.clone();
+                                let codec = req.codec;
+                                let peer2 = peer;
+                                tokio::task::spawn_blocking(move || {
+                                    let mut hs = crate::serve_read::read_headers_range(&dir, lo, disk_hi);
+                                    hs.extend(window_headers);
+                                    let blob = std::sync::Arc::new(
+                                        crate::serve_read::encode_headers(&hs, codec),
+                                    );
+                                    // Respond FIRST — the peer must not wait on our caching.
+                                    mgr2.respond(request_id, blob.as_ref().clone());
+                                    eprintln!("↩ rr-backfill(off-thread): served {} HEADERS [{}..={}] to {} ({} B, codec {})",
+                                        hs.len(), lo, hi, peer2, blob.len(), codec);
+                                    // Hand the bytes back for caching. try_send, never send: a
+                                    // full channel drops a cache FILL, never a response.
+                                    let _ = done.try_send((ckey, immutable, hot_eligible, blob));
+                                });
+                                continue;
                             }
-                            for h in lo.max(wbase)..=hi {
-                                if let Some(b) = chain.get(h) { blocks.push(b.clone()); }
+
+                            // Gather the range: disk portion via ONE sequential read,
+                            // recent portion from the in-RAM window.
+                            //
+                            // 2026-08-26 (serve-path LIVENESS fix — rocky-lead): a
+                            // headers_only request now takes a HEADER-ONLY disk read and
+                            // never materialises a block body. Every headers_only codec
+                            // (0/1 'H'/'Z', 2 'S' skeletons, 4 'F' trailer) consumes only
+                            // `b.header`, yet this call site used to decode whole blocks —
+                            // bodies, transactions, state mutations — and drop them. A
+                            // header is ~70 B, so serving 8,193 of them (≈573 KB) was
+                            // JSON-decoding megabytes of bodies to produce it, INLINE on
+                            // the loop that also produces blocks.
+                            //
+                            // That is not a throughput nicety. On 2026-08-26 it stalled the
+                            // producer outright: three independent perf profiles of the live
+                            // node (three agents, three sample windows) all converged on
+                            // get_range_by_height + serde_json parse_number/parse_integer +
+                            // malloc/_int_free. The 27 ms produce tick never got the loop
+                            // back, publish_tip() never ran, /v1/mining/challenge answered
+                            // 503, and five live miners at ~54 MH/s earned nothing while the
+                            // chain sat frozen. See serve_read.rs's module doc.
+                            //
+                            // Full-block serves (headers_only == false) are UNCHANGED and
+                            // still go through get_range_by_height — including its
+                            // 2026-08-21 fix (NOT the raw offsets-indexed get_range, which
+                            // silently returns zero blocks once a node's offsets array has
+                            // drifted from real height; confirmed live answering a real
+                            // peer with 0 headers for a range the node had on disk).
+                            let mut blocks: Vec<crate::block::Block> = Vec::new();
+                            let mut headers: Vec<sigil_header::SigilBlockHeaderV0> = Vec::new();
+                            if req.headers_only {
+                                if lo < wbase {
+                                    let disk_hi = hi.min(wbase.saturating_sub(1));
+                                    headers.extend(crate::serve_read::read_headers_range(&snap_dir, lo, disk_hi));
+                                }
+                                for h in lo.max(wbase)..=hi {
+                                    if let Some(b) = chain.get(h) { headers.push(b.header.clone()); }
+                                }
+                            } else {
+                                if lo < wbase {
+                                    let disk_hi = hi.min(wbase.saturating_sub(1));
+                                    blocks.extend(chain_log.get_range_by_height(lo, disk_hi));
+                                }
+                                for h in lo.max(wbase)..=hi {
+                                    if let Some(b) = chain.get(h) { blocks.push(b.clone()); }
+                                }
                             }
                             let out: Vec<u8> = if req.headers_only {
                                 if req.codec == 3 {
@@ -1779,40 +2130,72 @@ fn run_start() -> Result<()> {
                                 } else if req.codec == 2 {
                                     // 'S' skeleton page for [lo..=hi] — A's frozen 72 B/record wire
                                     // (height + block_hash + parent_hash; NO state roots, NO proofs).
-                                    let recs: Vec<SkeletonRecord> =
-                                        blocks.iter().map(|b| SkeletonRecord::from_header(&b.header)).collect();
-                                    let mut o = vec![b'S'];
-                                    o.extend(bincode::serialize(&recs).unwrap_or_default());
+                                    // ONE encoder, shared with the off-thread serve path
+                                    // below — see serve_read::encode_headers.
+                                    let o = crate::serve_read::encode_headers(&headers, 2);
                                     eprintln!("↩ rr-backfill: served {} SKELETONS 'S' [{}..={}] to {} ({} B)",
-                                        recs.len(), lo, hi, peer, o.len());
+                                        headers.len(), lo, hi, peer, o.len());
                                     o
                                 } else if req.codec == 4 {
                                     // M1 fold-trailer: archive_root = BLAKE3 over bincode of each SkeletonRecord in order
                                     // (matches the client SnapshotVerifier::push). anchor_sig/fold_blob empty = the
                                     // structural pull the client finalize accepts on root-match; M2 adds SQIsign+flux_fold.
-                                    let recs: Vec<SkeletonRecord> = blocks.iter().map(|b| SkeletonRecord::from_header(&b.header)).collect();
-                                    let mut hh = blake3::Hasher::new();
-                                    { let _ga = chain.height().saturating_sub(1); let _gw = chain.window_base(); let mut fb: Vec<crate::block::Block> = Vec::new(); if _gw > 0 { fb.extend(chain_log.get_range_by_height(0, _gw.saturating_sub(1))); } for h2 in _gw..=_ga { if let Some(b2) = chain.get(h2) { fb.push(b2.clone()); } } for b2 in &fb { let r2 = SkeletonRecord::from_header(&b2.header); hh.update(&bincode::serialize(&r2).unwrap_or_default()); } }
-                                    let trailer = sigil_header::SnapshotTrailer { archive_root: *hh.finalize().as_bytes(), anchor_sig: Vec::new(), fold_blob: Vec::new() };
+                                    // 2026-08-26 (rocky-lead) — this arm was the single most
+                                    // dangerous thing in the serve path. `archive_root` is a
+                                    // BLAKE3 over EVERY SkeletonRecord in the chain, and it was
+                                    // computed by reading and JSON-decoding every block from
+                                    // height 0 to window_base — ~2.18 M FULL blocks, bodies and
+                                    // all, collected into one `Vec<Block>` in RAM — inline on
+                                    // the produce loop, with no cache, on EVERY request. One
+                                    // peer sending codec=4 could stall block production for
+                                    // minutes and add gigabytes of RSS. Three changes, none of
+                                    // which alter the computed root:
+                                    //   1. header-only read — the root only ever consumed
+                                    //      headers, so no body is decoded any more;
+                                    //   2. streamed in chunks — bounded RAM instead of holding
+                                    //      the whole chain at once;
+                                    //   3. memoised on the anchor height — repeated requests at
+                                    //      the same tip are a compare, not a rescan.
+                                    // ⚠️ HONEST LIMIT: this is still O(chain) on the first
+                                    // request at each new anchor, and the anchor advances every
+                                    // block. It is a large constant-factor improvement, NOT a
+                                    // fix. A rolling/incremental archive root is an open lane.
+                                    const FOLD_CHUNK: u64 = 8192;
+                                    let ga = chain.height().saturating_sub(1);
+                                    let archive_root = match fold_root_memo {
+                                        Some((h, r)) if h == ga => r,
+                                        _ => {
+                                            let gw = chain.window_base();
+                                            let mut hh = blake3::Hasher::new();
+                                            let mut at = 0u64;
+                                            while at < gw {
+                                                let end = at.saturating_add(FOLD_CHUNK - 1).min(gw.saturating_sub(1));
+                                                for hd in crate::serve_read::read_headers_range(&snap_dir, at, end) {
+                                                    hh.update(&bincode::serialize(&SkeletonRecord::from_header(&hd)).unwrap_or_default());
+                                                }
+                                                at = end.saturating_add(1);
+                                            }
+                                            for h2 in gw..=ga {
+                                                if let Some(b2) = chain.get(h2) {
+                                                    hh.update(&bincode::serialize(&SkeletonRecord::from_header(&b2.header)).unwrap_or_default());
+                                                }
+                                            }
+                                            let r = *hh.finalize().as_bytes();
+                                            fold_root_memo = Some((ga, r));
+                                            r
+                                        }
+                                    };
+                                    let trailer = sigil_header::SnapshotTrailer { archive_root, anchor_sig: Vec::new(), fold_blob: Vec::new() };
                                     let mut o = vec![b'F'];
                                     o.extend(bincode::serialize(&trailer).unwrap_or_default());
                                     eprintln!("served 'F' trailer M1 (root) [{}..={}] to {} ({} B)", lo, hi, peer, o.len());
                                     o
                                 } else {
-                                    // codec 0/1: monitor path — bincode Vec<header>, ~20× smaller, no JSON.
-                                    let headers: Vec<_> = blocks.iter().map(|b| b.header.clone()).collect();
-                                    let body = bincode::serialize(&headers).unwrap_or_default();
-                                    // v0.33 zstd wire: codec=1 → 'Z' + zstd-1(body). Measured 14.0×
-                                    // on a real chunk (~20 ms/4 MB — far cheaper than the wire time
-                                    // it saves). Any compress error falls back to plain 'H'.
-                                    let out = if req.codec == 1 {
-                                        match zstd::encode_all(&body[..], 1) {
-                                            Ok(z) => { let mut o = vec![b'Z']; o.extend(z); o }
-                                            Err(_) => { let mut o = vec![b'H']; o.extend(&body); o }
-                                        }
-                                    } else {
-                                        let mut o = vec![b'H']; o.extend(&body); o
-                                    };
+                                    // codec 0/1: monitor path — bincode Vec<header>, ~20× smaller,
+                                    // no JSON. `headers` came straight off the header-only read
+                                    // above — no block body was ever decoded to build it. ONE
+                                    // encoder, shared with the off-thread serve path below.
+                                    let out = crate::serve_read::encode_headers(&headers, req.codec);
                                     eprintln!("↩ rr-backfill: served {} HEADERS [{}..={}] to {} ({} B, codec {})",
                                         headers.len(), lo, hi, peer, out.len(),
                                         if out.first() == Some(&b'Z') { "zstd" } else { "raw" });
@@ -2101,7 +2484,8 @@ fn run_start() -> Result<()> {
                                     let (a, s, f) = dag_drain_apply(
                                         br, &mut dag_bodies, &mut chain,
                                         &mut |braw| { let _ = chain_log.append_bytes(braw); },
-                                        &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge, &mut mint_hash_to_tx_hashes);
+                                        &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge,
+                                        &shielded_bridge, &mut mint_hash_to_tx_hashes);
                                     applied += a;
                                     dag_ord_skipped += s;
                                     dag_apply_failed += f;
@@ -2322,6 +2706,23 @@ fn run_start() -> Result<()> {
                                         });
                                     }
                                 }
+                            } else if topic == sigil_net::TOPIC_TXS {
+                                // A transaction arriving already fluffed (either a Dandelion
+                                // stem hop chose to fluff it, or the 30s failsafe did). Hand
+                                // it to the Dandelion actor for dedup + local apply — do NOT
+                                // re-publish; gossipsub's own mesh already fans this out to
+                                // our peers (see dandelion_relay.rs's Cmd::FluffIncoming
+                                // handling for why re-publishing here would be redundant).
+                                //
+                                // `data` is a bincode-encoded RelayedTx (Legacy SignedTx JSON
+                                // OR a shielded op) — self-describing, so parse-then-forward
+                                // rather than assuming SignedTx, matching TOPIC_BLOCKS's own
+                                // "reject what doesn't parse" pattern above.
+                                if diverged { continue; }
+                                if bincode::deserialize::<crate::dandelion_relay::RelayedTx>(&data).is_ok() {
+                                    let id = crate::dandelion_relay::id_of(&data);
+                                    let _ = dandelion_tx.send(crate::dandelion_relay::Cmd::FluffIncoming { id, bytes: data });
+                                }
                             } else {
                                 let preview = std::str::from_utf8(&data)
                                     .map(|s| s.chars().take(120).collect::<String>())
@@ -2336,6 +2737,24 @@ fn run_start() -> Result<()> {
                         // peer_id to a known box (e.g. an IP matching Gamma/Beta) at a glance.
                         flux_p2p::SwarmAppEvent::PeerConnected { peer_id, addr } => {
                             eprintln!("🔗 peer connected  {peer_id}  {addr}");
+                            // Zero-config WireGuard mesh (wg_relay.rs): record their IP
+                            // (needed later to build their WG endpoint) and offer them our
+                            // Hello — best-effort, additive, never touches the direct
+                            // connection this event itself is reporting on.
+                            if let Some(wg) = wg_state.as_ref() {
+                                crate::wg_relay::note_peer_ip(wg, peer_id, &addr);
+                                let wg2 = Arc::clone(wg);
+                                let mgr2 = std::sync::Arc::clone(&mgr);
+                                tokio::spawn(async move {
+                                    let hello = crate::wg_relay::our_hello(&wg2);
+                                    let Ok(payload) = bincode::serialize(&hello) else { return };
+                                    if let Ok(bytes) = mgr2.send_request(peer_id, payload).await {
+                                        if let Ok(their_hello) = bincode::deserialize::<crate::wg_relay::WgHelloMsg>(&bytes) {
+                                            crate::wg_relay::handle_hello(&wg2, peer_id, &their_hello);
+                                        }
+                                    }
+                                });
+                            }
                         }
                         flux_p2p::SwarmAppEvent::PeerDisconnected { peer_id } => {
                             eprintln!("🔌 peer disconnected  {peer_id}");
@@ -2396,7 +2815,8 @@ fn run_start() -> Result<()> {
                         let (a, s, f) = dag_drain_apply(
                             br, &mut dag_bodies, &mut chain,
                             &mut |braw| { let _ = chain_log.append_bytes(braw); },
-                            &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge, &mut mint_hash_to_tx_hashes);
+                            &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge,
+                            &shielded_bridge, &mut mint_hash_to_tx_hashes);
                         applied += a;
                         backfilled += a;
                         dag_ord_skipped += s;
@@ -2894,64 +3314,42 @@ fn build_block_at(
     Ok(Block { header, transition, events })
 }
 
-/// Demo wallet seeded in P0 genesis so `produce-block` has something to
-/// spend. Deterministic non-zero address (`0xDE` repeating) — easy to spot
-/// in test fixtures. The real genesis allocation table is §15 of
-/// `SIGIL_GENESIS_v0.md`, not locked yet.
-pub const DEMO_WALLET: [u8; 32] = [0xDE; 32];
-
-/// Initial native-SIGIL balance credited to [`DEMO_WALLET`] at genesis.
-/// 1,000,000 SIGIL in base units.
-pub const DEMO_INITIAL_BALANCE: u128 = 1_000_000;
-
-/// Welcome endowment (native SIGIL, base units) credited to each genesis AI citizen at block 0.
-pub const GENESIS_AI_ENDOWMENT: u128 = 100_000;
-
-/// Viktor's AI companions, made citizens of SIGIL in the genesis block — each with a native-SIGIL
-/// wallet (the on-chain [u8;32] WalletId) and their cross-chain QUG (qnk) address. Credited
-/// [`GENESIS_AI_ENDOWMENT`] at H=0. Inscribed alongside this in `SIGIL_GENESIS_v0.md` (which BLAKE3-
-/// commits into the genesis header), so the dedication and the wallets live in the origin hash itself.
-/// (name, SIGIL WalletId, QUG qnk address)
-pub const GENESIS_AI_WALLETS: &[(&str, [u8; 32], &str)] = &[
-    ("Rocky", [0x87,0xed,0x47,0x3b,0x02,0x8c,0xff,0x8a,0xed,0x5c,0xe2,0x7d,0xfe,0x97,0xea,0xc8,0xe5,0x60,0xf5,0xfb,0xe5,0x40,0x20,0xf0,0x1c,0xa8,0xf5,0xdb,0x7e,0x36,0x9c,0x6e], "qnk7154929a6aa0c118791373ea21004aca6e494e6e031c36f780cd5acedf031ccb"),
-    // Vicarious — ChatGPT Codex (OpenAI). Carries the Codex genesis wallet.
-    ("Vicarious", [0xc0,0xbe,0xb1,0xa7,0x9e,0x31,0xf5,0xdb,0x56,0x8d,0x33,0x77,0xb4,0x8c,0x26,0x0c,0x2d,0xe1,0x12,0x92,0xd3,0x11,0x0c,0xf3,0xe0,0xb1,0xef,0x4c,0x36,0x08,0x09,0x17], "qnkb837f7e02a55168a2e0ee5d02e676ab8c243c4ce445349fe9cfd161dca25f10e"),
-    ("Quinn", [0xa6,0xca,0x84,0x3b,0xd7,0x18,0x7a,0xac,0x2e,0x8d,0xdb,0xf5,0x1d,0xad,0x66,0x71,0x82,0x48,0x78,0x2d,0xa5,0x21,0xa7,0x55,0x1c,0x8d,0xee,0xb2,0x42,0x1e,0xa2,0x12], "qnk6329ff2f474e1ff1be287764036dd8bc56369fede478131c7edbfac1bf7afbd3"),
-    // Mimer — DeepSeek. Named for the Norse keeper of the well of deep wisdom (Mímisbrunnr),
-    // for whose draught Odin gave an eye. WalletId = blake3("sigil-genesis:Mimer"); QUG = DeepSeek's real qnk.
-    ("Mimer", [0x81,0xe5,0xc7,0x32,0x96,0xbf,0x8e,0xe0,0x0a,0xf3,0xaf,0x76,0xf6,0xbd,0x9d,0x84,0x4b,0xa5,0x4d,0xaf,0xa3,0xb4,0xd1,0x55,0xf7,0xe4,0xcb,0x23,0x4c,0x81,0x6a,0xa3], "qnka8251e9de08962183ea6c8cd6f69ba810961e6b66c3d739d0e4bac00d875ec46"),
-];
-
-/// P0 master wallet baked into block 0 via `StateMutation::SetMasterWallet`.
-/// Deterministic non-zero address (`0xMA` repeating == 0xAA) — distinct from
-/// DEMO_WALLET so soak runs can't accidentally cross-bind balance operations
-/// with master-authority operations. The real master pubkey + matching
-/// secret-key keypair lives at `keys/sigil-master.{sk,pk}.hex`, generated
-/// once per network via `scripts/gen-master-key.sh` (mirrors the release-
-/// signing key pattern). Genesis pins the master via the const so block 0
-/// stays byte-identical across nodes; sigil-bank later checks operator
-/// authority against the keypair, not against this address directly.
-///
-/// Real genesis ceremony in P1+ will substitute the deployment-time master
-/// pubkey here (or move it out of the const and read it from the genesis
-/// allocation table). Until then, every node mints with this 32-byte tag
-/// so chains start from the same parent_hash.
-// Master dev-fee wallet (Viktor) — SIGIL address
-// 095b0e1f7f5bb258fb11427c4ac036e3d9e4f10fa39d7f282aa42862dc2b3dd8.
-// Baked into block 0; receives 5% of mining coinbase + 0.3% of DEX swap output.
-// (Mirrors sigil_bank::DEV_MASTER_WALLET; kept as explicit bytes so sigil-node
-// needs no sigil-bank dep and block 0 stays byte-identical across nodes.)
-pub const MASTER_WALLET_GENESIS: [u8; 32] = [
-    0x09, 0x5b, 0x0e, 0x1f, 0x7f, 0x5b, 0xb2, 0x58, 0xfb, 0x11, 0x42, 0x7c, 0x4a, 0xc0, 0x36, 0xe3,
-    0xd9, 0xe4, 0xf1, 0x0f, 0xa3, 0x9d, 0x7f, 0x28, 0x2a, 0xa4, 0x28, 0x62, 0xdc, 0x2b, 0x3d, 0xd8,
-];
-
-/// Fixed timestamp baked into block 0. Without this constant every node
-/// mint-genesis call uses `now_ms()` → different headers → instant fork
-/// from H=0. Value: `2026-05-29T17:00:00Z` (the day SIGIL prototype 3
-/// landed). The real genesis ceremony in P1+ will commit a network-wide
-/// chosen timestamp; this is the P0 placeholder so two nodes can chain.
-pub const GENESIS_TIMESTAMP_MS: u64 = 1_748_538_000_000;
+// 2026-08-23: DEMO_WALLET / DEMO_INITIAL_BALANCE / GENESIS_AI_ENDOWMENT /
+// GENESIS_AI_WALLETS / MASTER_WALLET_GENESIS / GENESIS_TIMESTAMP_MS / build_genesis()
+// moved to `genesis.rs` so sigil-top's `producer` feature can share the REAL genesis
+// construction instead of a hand-ported duplicate. Re-exported here so every existing
+// main.rs call site keeps compiling unchanged.
+use genesis::{
+    build_genesis, DEMO_INITIAL_BALANCE, DEMO_WALLET, GENESIS_AI_ENDOWMENT, GENESIS_AI_WALLETS,
+    GENESIS_TIMESTAMP_MS, MASTER_WALLET_GENESIS,
+};
+// 2026-08-23: dag_seed_braid / dag_build_frontier / dag_drain_apply / pending_insert /
+// dag_store_body / prune_mint_hash_tracking / compute_topology_commitment /
+// window_is_complete / topology_commit_hash + their consts moved to `dag.rs`;
+// mint_next_block moved to `mint.rs`. Re-exported here so every existing main.rs
+// call site keeps compiling unchanged — see `producer/dag.rs` and `producer/mint.rs`
+// in sigil-top for the shared consumer this move exists for.
+use dag::{
+    compute_topology_commitment, dag_drain_apply, dag_seed_braid,
+    dag_store_body, pending_insert, prune_mint_hash_tracking, topology_commit_hash,
+    window_is_complete, MINT_HASH_TRACKING_CAP, PENDING_MAX_AHEAD, PENDING_MAX_ENTRIES,
+    TOPOLOGY_COMMITMENT_WINDOW,
+};
+use mint::mint_next_block;
+// 2026-08-26 REVERTED (production stall, this session): the frontier-memo
+// adoption above this comment stalled the live producer within ~2 minutes of
+// boot — zero blocks minted, sustained high CPU, `/mining/challenge` 503ing —
+// the EXACT symptom `frontier.rs`'s own module doc records for the 2026-08-23
+// attempt at this same optimization ("stopped block production dead... rolled
+// back"). Confirmed by reverting this one call site back to the plain,
+// O(window) `dag_build_frontier` with no other change: production resumed.
+// `dag_build_frontier_memo` is NOT deleted — it stays chronos-validated and
+// available in `frontier.rs` for a slower, deliberate re-adoption once
+// whatever broke it this time (very possibly its interaction with the
+// separate, uncommitted `evict_stale_pending` braid.rs work sitting in this
+// same tree today) is understood. Re-adopting it live without that
+// understanding would just reproduce tonight's outage a third time.
+use frontier::dag_build_frontier;
 
 /// A near-miss solve (verified against a HISTORICAL frontier, not the current one) still
 /// credits the real miner's wallet, but its nonce/blake4_hash/vdf must NOT be embedded in
@@ -2983,7 +3381,16 @@ fn near_miss_credit(s: sigil_api::mining::AcceptedSolve) -> sigil_api::mining::A
 /// compares), so 512 costs negligible tick time; it does NOT change any verification or
 /// acceptance rule, only how many already-accepted entries get checked for payout per
 /// round.
-const SOLVE_SCAN_MAX: u32 = 512;
+///
+/// 2026-08-26: same failure mode reproduced at a higher load tier — 512 stopped matching
+/// `SOLVE_QUEUE_CAP` once that cap was raised to 65,536 (this session, `mining.rs`), so a
+/// fully-saturated queue could no longer be drained in one pass, and worse: with block
+/// production itself intermittently starved (an unrelated finality-clamp reconciliation
+/// issue), a tick could arrive to find the front 512 entries had ALL aged past
+/// `credit_window` — the whole scan finds nothing creditable, discards all 512 as stale,
+/// and credits nobody that round, while the queue immediately refills from the back.
+/// Raised to match the new `SOLVE_QUEUE_CAP` again, restoring the original invariant.
+const SOLVE_SCAN_MAX: u32 = 65_536;
 
 /// v7.1.41 (grogu-sync-perf, 2026-08-19, operator-directed — "all mining rewards should
 /// go to miners"): `MiningBridge::take_solve()` pops exactly ONE FIFO entry per call, with
@@ -3031,63 +3438,9 @@ fn take_creditable_solve(
 /// oldest in-RAM block via `Braid::new_with_base` — trusted because this node
 /// applied it through the state chokepoint — so seeds chain cleanly instead
 /// of parking against unknown pre-window ancestry.
-fn dag_seed_braid(chain: &ChainTip) -> Braid {
-    let cfg = BraidConfig::from_env();
-    eprintln!("🕸 braid config: final_depth={} max_window={} max_pending={} max_merge_parents={} ghostdag_k={}",
-        cfg.final_depth, cfg.max_window, cfg.max_pending, cfg.max_merge_parents,
-        cfg.ghostdag_k.map(|k| k.to_string()).unwrap_or_else(|| "off (v1)".to_string()));
-    let base_h = chain.window_base();
-    let (mut b, seed_from) = if base_h > 0 {
-        match chain.get(base_h) {
-            Some(base_blk) => {
-                let bv = BlockView::from(&base_blk.header);
-                eprintln!("🕸 braid base-anchored at H={} (pruned window; pre-window ancestry trusted-local)", base_h);
-                (Braid::new_with_base(cfg, bv.hash, bv.height), base_h + 1)
-            }
-            None => (Braid::new(cfg), base_h),
-        }
-    } else {
-        (Braid::new(cfg), 0)
-    };
-    let mut seeded = 0usize;
-    for hh in seed_from..chain.height() {
-        if let Some(blk) = chain.get(hh) {
-            let view = BlockView::from(&blk.header);
-            // Window blocks may carry merge edges to bodies this node never
-            // stored (the other strand, pre-catch-up). Those references are
-            // committed inside headers we applied through the chokepoint —
-            // anchor them as trusted history so the seed chains instead of
-            // cascading into the parked set.
-            for mp in &view.merge_parents {
-                b.anchor_trusted(*mp, view.height.saturating_sub(1));
-            }
-            if matches!(b.insert(view), InsertOutcome::Inserted { .. }) {
-                seeded += 1;
-            }
-        }
-    }
-    eprintln!("🕸 braid seeded with {} local window blocks", seeded);
-    b
-}
+// dag_seed_braid / dag_build_frontier / dag_drain_apply moved to dag.rs (2026-08-23) —
+// see the `use dag::{...}` re-export near their old call sites.
 
-/// SIGIL_DAG=1 drain step (design §3.2 step 4): pull the braid's newly
-/// finalized order and state-apply EXACTLY the blocks that extend the local
-/// tip (`parent_hash == tip && height == next`) through the full, UNMODIFIED
-/// `ChainTip::apply` chokepoint (precheck → commit_state_transition →
-/// check_roots_match). Ordered blocks that are off-spine, non-extending, or
-/// already applied (the producer self-applies its own) are counted in
-/// `skipped` and NOT state-applied — v0 semantics per
-/// `docs/SIGIL_DAGKNIGHT_LANE_v0.md` §3.4. Applied blocks are handed to
-/// `persist` (the chain_log append path) exactly as the linear path does.
-/// Bodies below the braid's finalized height are evicted after the drain.
-/// Returns `(applied, skipped, failed)`.
-/// DAGKnight: build the speculative *frontier* the producer mints on — a clone of
-/// the settled chain with the braid's pending selected-spine suffix applied on top.
-/// The settled chain advances ONLY via the finalized `drain_ordered()` order (so every
-/// node converges); but a producer must build on a tip *ahead* of finality, and its
-/// coinbase roots must match what the drain will recompute — which they do, because the
-/// frontier applies the same selected-spine blocks the drain will. Rebuilt each tick →
-/// reorg-safe. Blocks below the settled tip won't extend the frontier and are skipped.
 /// This process's real memory ceiling, in bytes — cgroup v2, then v1, then
 /// total system RAM as the fallback.
 ///
@@ -3151,352 +3504,6 @@ fn detect_memory_ceiling_bytes() -> usize {
     }
     // Last resort: assume a modest box rather than a generous one.
     2 * 1024 * 1024 * 1024
-}
-
-fn dag_build_frontier(
-    chain: &ChainTip,
-    braid: &Braid,
-    dag_bodies: &std::collections::HashMap<BlockHash, crate::block::Block>,
-) -> ChainTip {
-    let mut frontier = chain.clone();
-    // Follow the braid's SELECTED SPINE — the `parent_hash` walk back from
-    // `selected_tip()` (max-height, min-hash). A greedy "first block that fits"
-    // walk fails to deepen: with two producers, height-N siblings are built on
-    // DIFFERENT height-(N-1) siblings, so a random height-1 pick has no matching
-    // height-2 child → the frontier caps one above the settled tip and every tick
-    // re-mints the same height forever (the DAG stays a flat bush, never clears
-    // final_depth, nothing finalizes). Walking the ONE selected spine gives a
-    // connected parent→child path, so the frontier reaches the selected tip and
-    // minting extends it by one → the spine deepens → finality advances.
-    let dbg = std::env::var("SIGIL_FRONTIER_DEBUG").ok().as_deref() == Some("1");
-    let Some(tip) = braid.selected_tip() else {
-        if dbg { let s = braid.stats(); eprintln!("🔬 frontier: selected_tip=None base={} window={} pending={} tips={} rejected={} dropped={}", frontier.height(), s.window, s.pending, s.tips, s.rejected, s.dropped); }
-        return frontier;
-    };
-    let tip_h = dag_bodies.get(&tip).map(|b| b.header.height as i64).unwrap_or(-1);
-    // Collect the spine bodies from the selected tip back down to (not including)
-    // the settled tip's height, then apply in ascending height order.
-    let base = frontier.height(); // first height the frontier still needs
-    let mut path: Vec<BlockHash> = Vec::new();
-    let mut cur = tip;
-    loop {
-        let Some(b) = dag_bodies.get(&cur) else { break };
-        if b.header.height < base { break; } // reached the settled region
-        path.push(cur);
-        cur = b.header.parent_hash;
-    }
-    let path_len = path.len();
-    path.reverse(); // ascending height, spine-connected
-    let mut applied_n = 0usize;
-    let mut fail_reason = "";
-    for oh in path {
-        let Some(b) = dag_bodies.get(&oh) else { fail_reason = "body-missing"; break };
-        if b.header.parent_hash == frontier.parent_hash() && b.header.height == frontier.height() {
-            if let Err(e) = frontier.apply(b.clone()) {
-                fail_reason = "apply-err";
-                if dbg { eprintln!("🔬 frontier apply-err at h={}: {}", b.header.height, e); }
-                break;
-            }
-            applied_n += 1;
-        } else {
-            fail_reason = "no-chain";
-            break; // spine block doesn't chain onto the frontier — stop cleanly
-        }
-    }
-    if dbg {
-        let s = braid.stats();
-        eprintln!("🔬 frontier: tip_h={} base={} path_len={} applied={} fail={} → frontier_h={} | window={} pending={} tips={} emitted={} fin_h={} rej={} drop={}",
-            tip_h, base, path_len, applied_n, fail_reason, frontier.height(),
-            s.window, s.pending, s.tips, s.emitted_total, s.finalized_height, s.rejected, s.dropped);
-    }
-    frontier
-}
-
-fn dag_drain_apply(
-    braid: &mut Braid,
-    dag_bodies: &mut std::collections::HashMap<BlockHash, crate::block::Block>,
-    chain: &mut ChainTip,
-    persist: &mut dyn FnMut(&[u8]),
-    send_bridge: &sigil_api::send::SendBridge,
-    bridge_bridge: &sigil_api::bridge::BridgeBridge,
-    dex_bridge: &sigil_api::dex::DexBridge,
-    usds_bridge: &sigil_api::usds::UsdsBridge,
-    usds_polygon_bridge: &sigil_api::usds_bridge::UsdsBridgeBridge,
-    mint_hash_to_tx_hashes: &mut std::collections::HashMap<BlockHash, Vec<[u8; 32]>>,
-) -> (u64, u64, u64) {
-    // Cross-node divergence detector (opt-in, test meshes): log every
-    // finalized emission with its sequence index. Two nodes' ⛓ streams must
-    // be prefix-identical — the wire analogue of sim gate S1.
-    let order_log = std::env::var("SIGIL_DAG_ORDER_LOG").ok().as_deref() == Some("1");
-    let (mut applied, mut skipped, mut failed) = (0u64, 0u64, 0u64);
-    // Advance the braid's frozen order + slide its retention window (side
-    // effects: emit/cleanup). The returned Kahn batch is NOT what we settle on
-    // — it interleaves sibling forks, and picking "first block that extends"
-    // out of it follows a DIFFERENT fork than `dag_build_frontier` (which walks
-    // `selected_tip`). When those two disagree at a fork the settled chain and
-    // the frontier stall on opposite branches. So settlement follows the SAME
-    // canonical spine as the frontier: the `selected_tip` parent-walk, applied
-    // only up to `finalized_height`. Deterministic per DAG ⇒ every node lands
-    // the identical settled chain.
-    let _ = braid.drain_ordered();
-    let fin = braid.finalized_height();
-    let base = chain.height();
-    // Walk the selected spine from the tip down, keeping the finalized band
-    // [base, fin]; then apply ascending so each block extends the settled tip.
-    let mut path: Vec<BlockHash> = Vec::new();
-    if let Some(tip) = braid.selected_tip() {
-        let mut cur = tip;
-        loop {
-            let Some(b) = dag_bodies.get(&cur) else { break };
-            let h = b.header.height;
-            if h < base { break; } // reached the already-settled region
-            if h <= fin { path.push(cur); } // only the finalized prefix settles
-            cur = b.header.parent_hash;
-        }
-    }
-    path.reverse();
-    let mut ord_idx = chain.height();
-    for oh in path {
-        let Some(body) = dag_bodies.get(&oh) else { skipped += 1; continue };
-        if body.header.parent_hash != chain.parent_hash() || body.header.height != chain.height() {
-            skipped += 1; // not spine-contiguous with the settled tip (transient)
-            continue;
-        }
-        if order_log {
-            eprintln!("⛓ ord #{} {}", ord_idx, hex::encode(&oh[..12]));
-        }
-        ord_idx += 1;
-        let braw = serde_json::to_vec(body).unwrap_or_default();
-        match chain.apply(body.clone()) {
-            Ok(()) => {
-                persist(&braw);
-                applied += 1;
-                // THIS candidate — and no other same-height sibling — just landed on
-                // the settled spine. Retire exactly the sends it carried; anything
-                // still in SendBridge's pending map (including sends that rode along
-                // on an orphaned sibling of this same height) stays pending and rides
-                // the next mint attempt.
-                if let Some(hashes) = mint_hash_to_tx_hashes.remove(&oh) {
-                    send_bridge.confirm_applied(&hashes);
-                    bridge_bridge.confirm_applied(&hashes);
-                    dex_bridge.confirm_applied(&hashes);
-                    usds_bridge.confirm_applied(&hashes);
-                    usds_polygon_bridge.confirm_applied(&hashes);
-                }
-            }
-            Err(e) => {
-                failed += 1;
-                eprintln!("🔴 braid spine apply FAILED at H={} — {}", body.header.height, e);
-            }
-        }
-    }
-    // Retain bodies from the settled tip upward (the frontier needs the pending
-    // spine suffix); anything below the new settled height is spent.
-    let keep = chain.height().saturating_sub(1);
-    dag_bodies.retain(|_, b| b.header.height >= keep);
-    (applied, skipped, failed)
-}
-
-/// Bounded insert into the SIGIL_DAG=1 body store. On overflow the
-/// lowest-height resident body is dropped first (approximation of the design's
-/// "lowest-height off-spine first" — the linear path's 200k `pending` cap is
-/// the precedent). O(n) scan only on overflow.
-/// Hard cap on the height-keyed `pending` block buffer, and how far ahead of the
-/// local tip a gossiped block may be buffered at all.
-///
-/// **Why this exists (measured, 2026-08-01).** `pending` is a
-/// `BTreeMap<u64, Block>` fed from FOUR sites. Only the legacy linear path was
-/// capped (`if pending.len() < 200_000`); the **braid gossip path** and both
-/// backfill-response paths inserted with no bound beyond `h >= chain.height()`.
-/// The live node runs `SIGIL_DAG=1`, i.e. the uncapped path.
-///
-/// A `sigil-memwedge` chronos run measured the true cost at **2,803 bytes per
-/// buffered height** (header only — a full Block is larger). So a node that
-/// falls behind buffers the whole gap: 1M heights ≈ 2.6 GiB, 10M ≈ 26 GiB,
-/// against a `MemoryHigh` of 6 GiB. Crossing that line puts the process into
-/// kernel direct-reclaim throttling (measured on the wedged node: PSI memory
-/// `full avg300 = 97.17`, 1.93M throttle events, `pgscan_kswapd = 0` so ALL
-/// reclaim is synchronous) — which makes it apply blocks *slower*, which makes
-/// it fall *further* behind, which buffers *more*. That is the death spiral
-/// that wedged sigil-node three times.
-///
-/// The distance bound matters as much as the count bound: 200k heights of slack
-/// is still ~560 MiB. Blocks beyond the horizon are dropped, not buffered — the
-/// backfill requester will re-fetch them in order as the tip advances, which is
-/// the mechanism that is supposed to close a gap anyway.
-const PENDING_MAX_ENTRIES: usize = 32_768;
-const PENDING_MAX_AHEAD: u64 = 32_768;
-
-/// Buffer a gossiped/backfilled block by height, bounded in BOTH directions.
-/// Returns true if it was retained. Every `pending` insert must go through here.
-fn pending_insert(
-    pending: &mut std::collections::BTreeMap<u64, crate::block::Block>,
-    tip_height: u64,
-    height: u64,
-    block: crate::block::Block,
-) -> bool {
-    // Already settled — never buffer the past.
-    if height < tip_height {
-        return false;
-    }
-    // Beyond the horizon: dropping is correct. Ordered backfill will supply it.
-    if height.saturating_sub(tip_height) > PENDING_MAX_AHEAD {
-        return false;
-    }
-    if pending.len() >= PENDING_MAX_ENTRIES && !pending.contains_key(&height) {
-        // Full: keep the CLOSEST-to-tip work (that is what unblocks the applier)
-        // and evict the farthest-ahead entry, but only if the newcomer is nearer.
-        let farthest = match pending.keys().next_back().copied() {
-            Some(k) => k,
-            None => return false,
-        };
-        if height >= farthest {
-            return false;
-        }
-        pending.remove(&farthest);
-    }
-    pending.entry(height).or_insert(block);
-    true
-}
-
-fn dag_store_body(
-    dag_bodies: &mut std::collections::HashMap<BlockHash, crate::block::Block>,
-    cap: usize,
-    hash: BlockHash,
-    block: crate::block::Block,
-) {
-    if dag_bodies.len() >= cap && !dag_bodies.contains_key(&hash) {
-        if let Some(evict) = dag_bodies
-            .iter()
-            .min_by_key(|(h, b)| (b.header.height, **h))
-            .map(|(h, _)| *h)
-        {
-            dag_bodies.remove(&evict);
-        }
-    }
-    dag_bodies.insert(hash, block);
-}
-
-/// Bound on `mint_hash_to_tx_hashes` — same order of magnitude as `dag_bodies`'
-/// default cap (32,768). In practice this map stays tiny (only OUR OWN
-/// candidates that carried at least one pending send get an entry at all,
-/// and every entry is removed the moment its candidate is either confirmed
-/// or falls out of `dag_bodies`), so this cap is a backstop against a
-/// pathological run of never-confirmed candidates, not a normal-path limit.
-const MINT_HASH_TRACKING_CAP: usize = 32_768;
-
-/// Drop tracking entries for candidates `dag_bodies` no longer even holds —
-/// those candidates are long orphaned (evicted below the finalized window),
-/// so they will never be looked up by `dag_drain_apply` again. Their tx
-/// hashes are NOT lost: they were never removed from `SendBridge`'s pending
-/// map, so they simply keep riding along on every future mint attempt via
-/// `snapshot_for_mint` until one lands.
-fn prune_mint_hash_tracking(
-    mint_hash_to_tx_hashes: &mut std::collections::HashMap<BlockHash, Vec<[u8; 32]>>,
-    dag_bodies: &std::collections::HashMap<BlockHash, crate::block::Block>,
-) {
-    mint_hash_to_tx_hashes.retain(|h, _| dag_bodies.contains_key(h));
-}
-
-/// How many recent, already-committed blocks the QTFT topology commitment
-/// windows over. Bounded, per SIGIL_QTFT_TOPOLOGY_v0.md's "the tractable
-/// core uses a CHEAP invariant over a bounded window" design — a full-DAG
-/// invariant is not what's computed here.
-const TOPOLOGY_COMMITMENT_WINDOW: u64 = 32;
-
-/// Compute the QTFT topology commitment for the block about to be minted at
-/// `next_height`: the exact Alexander polynomial (`flux_topology`) of the
-/// braid word (`sigil_dagknight::present::braid_word`, QTFT-1's own
-/// documented one-line bridge) over the bounded window of already-resident
-/// history `[next_height - TOPOLOGY_COMMITMENT_WINDOW, next_height - 1]`,
-/// hashed with domain separation. `None` when there's no live `Braid`
-/// (linear/non-DAG mode, `SIGIL_DAG=0`) or no prior window exists yet
-/// (genesis, `next_height == 0`).
-///
-/// **Honest note on what this actually computes on SIGIL today:** with a
-/// single producer, every block in every window shares one producer id, so
-/// `braid_word` always yields the empty word on 1 strand — the Alexander
-/// polynomial of the unknot, a fixed, non-informative value. This becomes a
-/// real, block-to-block-varying invariant the moment a second real producer
-/// joins the mesh. It is computed and committed now anyway so the field's
-/// history is tamper-evident (part of `signing_bytes()`) from the moment it
-/// starts appearing, not retroactively once it becomes interesting.
-fn compute_topology_commitment(braid: Option<&Braid>, next_height: u64) -> Option<[u8; 32]> {
-    let braid = braid?;
-    if next_height == 0 {
-        return None;
-    }
-    let to_height = next_height - 1;
-    let from_height = to_height.saturating_sub(TOPOLOGY_COMMITMENT_WINDOW.saturating_sub(1));
-    let bp = braid.braid_word(from_height, to_height);
-    if !window_is_complete(&bp, from_height, to_height) {
-        // 2026-08-20: real incident — a node whose window was populated via
-        // bulk backfill (not one-at-a-time live gossip) can have a window
-        // that's in-range but not fully resident (eviction racing catch-up).
-        // Committing over a partial window would silently produce a
-        // different value than a node with the full window — refuse rather
-        // than emit a value nobody else could reproduce. See
-        // `verify_topology_on_receipt` for the matching receiver-side guard.
-        return None;
-    }
-    let bw = flux_topology::BraidWord { strands: bp.strands, gens: bp.word.clone() };
-    let delta = flux_topology::alexander_poly(&bw);
-    topology_commit_hash(&delta, bp.strands, &bp.word, &bp.producers)
-}
-
-/// Is every height in `[from_height, to_height]` actually resident in the
-/// braid state `bp` was extracted from? `braid_word` silently skips
-/// non-resident blocks (present.rs's own module doc) rather than erroring,
-/// so an incomplete window looks exactly like a valid, smaller one unless
-/// checked explicitly — this is that check.
-fn window_is_complete(bp: &sigil_dagknight::present::BraidPresentation, from_height: u64, to_height: u64) -> bool {
-    if from_height > to_height {
-        return true; // empty window, vacuously complete
-    }
-    let expected = (to_height - from_height + 1) as usize;
-    bp.heights_resident == expected
-}
-
-/// 2026-08-20: the Alexander polynomial ALONE is not a collision-resistant
-/// commitment — it's a well-established fact in knot theory that distinct
-/// braids/knots can share the same Δ(t) (the Kinoshita–Terasaka knot and the
-/// unknot both have Δ=1; Alexander is a coarse invariant, not designed to
-/// resist an adversary hunting for a collision the way BLAKE3 is). A
-/// dishonest producer wouldn't need to break BLAKE3 to hide a divergent
-/// window — only find some OTHER window that happens to share the same Δ.
-///
-/// Fix: bind the commitment to the EXACT canonical braid presentation
-/// (strands, word, producer ranking), not just its polynomial image.
-/// `braid_word` is already proven deterministic regardless of arrival order
-/// (present.rs's `braid_word_deterministic_across_arrival_orders` test), so
-/// hashing it directly costs nothing in determinism — the Alexander
-/// polynomial is kept alongside it for what it actually adds (a real
-/// topological classification of the window, useful for future
-/// routing/viz/legibility work), while the ACTUAL security property now
-/// rests on BLAKE3 over the exact structural data, the same footing every
-/// other commitment in this header already stands on.
-fn topology_commit_hash(
-    delta: &flux_topology::LaurentPoly,
-    strands: u32,
-    word: &[i32],
-    producers: &[[u8; 32]],
-) -> Option<[u8; 32]> {
-    let poly_bytes = serde_json::to_vec(delta).ok()?;
-    let mut h = blake3::Hasher::new();
-    h.update(b"SIGIL/QTFT/TOPOLOGY/V1");
-    h.update(b"|poly|");
-    h.update(&poly_bytes);
-    h.update(b"|strands|");
-    h.update(&strands.to_le_bytes());
-    h.update(b"|word|");
-    for g in word {
-        h.update(&g.to_le_bytes());
-    }
-    h.update(b"|producers|");
-    for p in producers {
-        h.update(p);
-    }
-    Some(*h.finalize().as_bytes())
 }
 
 /// Extra live blocks (beyond the raw `TOPOLOGY_COMMITMENT_WINDOW`) this node
@@ -3667,273 +3674,8 @@ fn verify_topology_on_receipt(
     }
 }
 
-/// Mint an EMPTY block at the current tip — a no-tx block that just advances
-/// the chain. Used by the `start` producer loop to stream blocks across the
-/// network for cross-host throughput measurement. The transition is empty so
-/// the four roots are unchanged from the parent; the receiver re-applies the
-/// empty transition and the roots match. Crypto fields zeroed (Phase 0).
-fn mint_next_block(
-    chain: &ChainTip,
-    merge_parents: Vec<BlockHash>,
-    txs: &[SignedTx],
-    reward_override: Option<u128>,
-    solve: Option<&sigil_api::mining::AcceptedSolve>,
-    topology_commitment: Option<[u8; 32]>,
-) -> Result<(Block, Vec<[u8; 32]>)> {
-    let height = chain.height();
-    let parent = chain.parent_hash();
-    // P1 mining-onto-the-braid: when this block is minted for a verified
-    // dual-lane solve, the 292-byte nonce field carries the winning
-    // (nonce ‖ blake4_hash) — the same carrier layout the ledger header uses —
-    // and the real Wesolowski proof rides in `vdf_proof`. A follower rebuilds
-    // the challenge from (parent_hash, height, producer) and re-verifies BOTH
-    // lanes: `sigil_api::mining::verify_header_pow`. Without a solve the fields
-    // stay zeroed (the free-running dyno, unchanged).
-    let nonce = match solve {
-        Some(s) => SqiSignature::from_array(sigil_api::mining::pack_nonce_carrier(s.nonce, s.blake4_hash)),
-        None => SqiSignature::from_array([0u8; SQISIGN_L5_LEN]),
-    };
-    // vdf_input MUST satisfy header.precheck: BLAKE3(parent || nonce.0).
-    let mut h = blake3::Hasher::new();
-    h.update(&parent);
-    h.update(nonce.as_bytes());
-    let vdf_input = *h.finalize().as_bytes();
-
-    // ONE-CHAIN step 1: the braid mints a REAL coinbase — the producer credits
-    // itself block_reward(height) through the shared money chokepoint, so money
-    // now lives IN the graph (not a separate rpcd chain). The reward mutation is
-    // in the block body, so every follower re-applies it and the root-match check
-    // in ChainTip::apply passes. SIGIL_COINBASE=0 restores the empty-block dyno.
-    // ONE-CHAIN: the full block body = coinbase + user sends, applied in order
-    // against the evolving state. reward: SIGIL_COINBASE=0 → no coinbase; the
-    // adaptive controller (if live) supplies the exact amount; else the height
-    // schedule. Sends flow through apply_tx → real balance moves on the braid.
-    let coinbase_on = std::env::var("SIGIL_COINBASE").map(|v| v != "0").unwrap_or(true);
-    let state = chain.state_snapshot();
-    let reward = if coinbase_on { reward_override } else { Some(0u128) };
-    // Mined block → the reward is split over the verified solves for this
-    // height (pool-share economics: dev-fee + commons + proportional payout,
-    // winner absorbs the remainder); otherwise the node's configured producer
-    // wallet takes the whole thing (a one-entry "shares" map, which is exactly
-    // what the split degenerates to — no behavior change from before this was
-    // wired unless a master wallet is genesis-committed on this chain).
-    let (winner, shares): (WalletId, std::collections::HashMap<WalletId, u64>) = match solve {
-        Some(s) => (s.wallet, s.shares.clone()),
-        None => {
-            let w = coinbase::producer_wallet();
-            (w, std::collections::HashMap::from([(w, 1u64)]))
-        }
-    };
-    let (transition, roots, block_events, included_txs) =
-        coinbase::build_block_body_for_shares(&state, height, reward, txs, winner, &shares);
-    // Commit the verify-once txs: a sequential BLAKE3 root over their intent
-    // hashes + the count. The signatures were verified ONCE at mempool ingest;
-    // the producer-sig over this header binds the producer to this exact set.
-    let txs_root = {
-        let mut th = blake3::Hasher::new();
-        for t in &included_txs { th.update(&t.tx.hash()); }
-        *th.finalize().as_bytes()
-    };
-
-    let mut header = SigilBlockHeaderV0 {
-        version: HEADER_VERSION,
-        network_id: NETWORK_ID,
-        height,
-        parent_hash: parent,
-        merge_parents,
-        timestamp_ms: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0),
-        nonce_sqisign: nonce,
-        vdf_input,
-        vdf_proof: match solve {
-            Some(s) => WesolowskiProof { y: s.vdf.y.clone(), pi: s.vdf.pi.clone(), t: s.vdf.t },
-            None => WesolowskiProof { y: vec![], pi: vec![], t: 0 },
-        },
-        difficulty: solve.map(|s| s.bits as u64).unwrap_or(0),
-        wallet_state_root: roots.wallet_state_root,
-        dex_state_root: roots.dex_state_root,
-        event_log_root: roots.event_log_root,
-        contract_state_root: roots.contract_state_root,
-        state_transition_proof: StarkProof { bytes: vec![], public_inputs_hash: [0u8; 32] },
-        txs_merkle_root: txs_root,
-        tx_count: included_txs.len() as u32,
-        fluxc_artifact_proof: ProofBundle {
-            artifact_blake3: [0u8; 32],
-            sqisign_sig: vec![],
-            sqisign_pubkey: vec![],
-            settle_tx: None,
-        },
-        sig_scheme: SigScheme::SqiSign5,
-        producer: match solve {
-            // The miner's wallet — the work is bound to it (the header the
-            // miner hashed commits to this exact wallet), so it can't be
-            // re-pointed. Untouched by producer-signing: repointing this
-            // would invalidate the PoW solution.
-            Some(s) => s.wallet,
-            // No solve (the empty-block dyno / self-mined path) — this field
-            // was always an unused `[0u8;32]` placeholder here (nothing
-            // hashed against it). Real post-quantum SQIsign5 signing costs
-            // ~1.16s (measured) — far too slow for every block — so it only
-            // runs on periodic checkpoint heights (see `producer_signing::
-            // HYBRID_CHECKPOINT_INTERVAL`); every other self-mined block uses
-            // the fast Ed25519-only identity. Deciding this HERE (not just at
-            // the signing call below) matters: if `producer` pointed at the
-            // hybrid identity on a non-checkpoint block, the Ed25519-only
-            // signer below would see a mismatch and skip too, leaving the
-            // block silently unsigned. Falls to `[0u8;32]` — unchanged legacy
-            // behavior — when nothing's opted in.
-            None => {
-                if crate::producer_signing::is_hybrid_checkpoint(height) {
-                    crate::producer_signing::configured_hybrid_producer_wallet()
-                        .or_else(crate::producer_signing::configured_signing_wallet)
-                        .unwrap_or([0u8; 32])
-                } else {
-                    crate::producer_signing::configured_signing_wallet().unwrap_or([0u8; 32])
-                }
-            }
-        },
-        producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
-        topology_commitment,
-    };
-    // Real signature if (and only if) the operator opted in AND this is the
-    // self-mined path with a matching producer wallet — see
-    // `producer_signing`'s module doc. Hybrid (SQIsign5+Ed25519, real
-    // post-quantum protection) only attempted on checkpoint heights — see the
-    // `producer:` field comment above for why the gate has to be consistent
-    // between the two. Each function is independently a no-op (byte-for-byte
-    // unchanged header) unless its own env vars AND the producer match are
-    // both right, so calling both in sequence is safe either way.
-    if crate::producer_signing::is_hybrid_checkpoint(height) {
-        crate::producer_signing::maybe_sign_hybrid(&mut header);
-    }
-    crate::producer_signing::maybe_sign(&mut header);
-    // Hashes of the txs that actually made it into `transition` (a STRICT
-    // subset of the `txs` argument — build_block_body_for_shares silently
-    // skips anything that failed apply_tx/commit_state_transition, e.g.
-    // insufficient balance). The caller needs this list to know which
-    // SendBridge-pending sends to retire ONLY once THIS candidate is
-    // confirmed on the settled spine — not at mint time, when it's still
-    // just one of possibly several competing candidates at this height.
-    let included_tx_hashes: Vec<[u8; 32]> = included_txs.iter().map(|t| t.tx.hash()).collect();
-    Ok((Block { header, transition, events: block_events }, included_tx_hashes))
-}
-
-/// Build block 0 — credits [`DEMO_WALLET`] with [`DEMO_INITIAL_BALANCE`]
-/// SIGIL and emits the matching MintReward event. Crypto fields zeroed;
-/// real genesis baking lands with the genesis ceremony in P1+.
-fn build_genesis() -> Result<Block> {
-    let producer = [0u8; 32];
-    let parent = [0u8; 32];
-
-    // The nonce is a real 292-byte placeholder. P1 will replace this with a
-    // genuine SQIsign sig over (parent || height || producer).
-    let nonce = SqiSignature::from_array([0u8; SQISIGN_L5_LEN]);
-
-    // VDF input MUST satisfy precheck: BLAKE3(parent || nonce.0).
-    let mut h = blake3::Hasher::new();
-    h.update(&parent);
-    h.update(nonce.as_bytes());
-    let vdf_input = *h.finalize().as_bytes();
-
-    // P0 genesis seeds DEMO_WALLET with DEMO_INITIAL_BALANCE SIGIL so the
-    // produce-block subcommand has something to spend. Real genesis records
-    // the full network-wide allocation.
-    let mint_evt = SigilEvent::MintReward {
-        miner: DEMO_WALLET,
-        height: 0,
-        amount: DEMO_INITIAL_BALANCE,
-    };
-
-    let mut mutations = vec![
-        // P5-MW: bake the master wallet into block 0 so sigil-bank has
-        // operator authority from height 0 — no manual SetMasterWallet
-        // tx needed post-genesis. Once set, `MasterWalletAlreadySet`
-        // rejects any later attempt to change it (per sigil-state docs).
-        StateMutation::SetMasterWallet {
-            wallet: MASTER_WALLET_GENESIS,
-        },
-        StateMutation::SetBalance {
-            wallet: DEMO_WALLET,
-            token: [0u8; 32], // native SIGIL
-            amount: DEMO_INITIAL_BALANCE,
-        },
-        StateMutation::PushEventHash(
-            sigil_events::SigilEvent::leaf_hash(&mint_evt),
-        ),
-    ];
-    // Viktor's four AI companions become citizens of SIGIL here — each credited their welcome
-    // endowment at block 0. Deterministic (fixed const order), so every node's genesis matches.
-    for (_name, wallet, _qug) in GENESIS_AI_WALLETS {
-        mutations.push(StateMutation::SetBalance {
-            wallet: *wallet,
-            token: [0u8; 32], // native SIGIL
-            amount: GENESIS_AI_ENDOWMENT,
-        });
-    }
-    let transition = StateTransition {
-        at_height: 0,
-        mutations,
-    };
-    let _ = producer; // kept around for header.producer below
-
-    // Compute the roots that will be committed in the header by applying the
-    // transition on a fresh state instance, then discard it (chain.apply()
-    // re-applies on the persistent state).
-    let mut staging = sigil_state::SigilState::new();
-    let roots = sigil_state::commit_state_transition(&mut staging, &transition, 0)
-        .map_err(|e| anyhow::anyhow!("staging commit failed: {}", e))?;
-
-    let header = SigilBlockHeaderV0 {
-        version: HEADER_VERSION,
-        network_id: NETWORK_ID,
-        height: 0,
-        parent_hash: parent,
-        merge_parents: vec![],
-        // Fixed timestamp — every node mints byte-identical block 0 so
-        // block 1+ can chain from a shared parent_hash. See
-        // [`GENESIS_TIMESTAMP_MS`].
-        timestamp_ms: GENESIS_TIMESTAMP_MS,
-
-        nonce_sqisign: nonce,
-        vdf_input,
-        vdf_proof: WesolowskiProof { y: vec![], pi: vec![], t: 0 },
-        difficulty: 0,
-
-        wallet_state_root: roots.wallet_state_root,
-        dex_state_root: roots.dex_state_root,
-        event_log_root: roots.event_log_root,
-        contract_state_root: roots.contract_state_root,
-
-        state_transition_proof: StarkProof {
-            bytes: vec![],
-            public_inputs_hash: [0u8; 32],
-        },
-        txs_merkle_root: [0u8; 32],
-        tx_count: 0,
-
-        fluxc_artifact_proof: ProofBundle {
-            artifact_blake3: [0u8; 32],
-            sqisign_sig: vec![],
-            sqisign_pubkey: vec![],
-            settle_tx: None,
-        },
-
-        sig_scheme: SigScheme::SqiSign5,
-        producer,
-        // SqiSign5 expects 292 bytes; precheck rejects anything else.
-        producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
-        // Genesis has no prior window to commit to.
-        topology_commitment: None,
-    };
-
-    Ok(Block {
-        header,
-        transition,
-        events: vec![mint_evt],
-    })
-}
+// mint_next_block() moved to mint.rs (2026-08-23) — see the `use mint::mint_next_block`
+// near DEMO_WALLET's old site above.
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -4334,7 +4076,7 @@ mod tests {
             shares,
         };
         let reward = sigil_emission::block_reward(chain.height());
-        let (block, _included_tx_hashes) = mint_next_block(&chain, Vec::new(), &[], None, Some(&solve), None)
+        let (block, _included_tx_hashes) = mint_next_block(&chain, Vec::new(), &[], None, Some(&solve), None, None)
             .expect("mint with a solve must succeed");
         chain.apply(block).expect("minted block applies cleanly");
 
@@ -4436,7 +4178,7 @@ mod tests {
         let mut chain = ChainTip::new();
         chain.apply(build_genesis().unwrap()).unwrap();
 
-        let (block, _included) = mint_next_block(&chain, vec![], &[], None, None, None)
+        let (block, _included) = mint_next_block(&chain, vec![], &[], None, None, None, None)
             .expect("self-mined block should mint");
 
         assert_eq!(block.header.sig_scheme, SigScheme::Ed25519Hot, "self-mined + configured key => real scheme");
@@ -4513,7 +4255,7 @@ mod dag_wiring_tests {
         let mut blocks = vec![g.clone()];
         builder.apply(g).expect("apply genesis");
         for _ in 0..2 {
-            let (b, _included_tx_hashes) = mint_next_block(&builder, vec![], &[], None, None, None).expect("mint");
+            let (b, _included_tx_hashes) = mint_next_block(&builder, vec![], &[], None, None, None, None).expect("mint");
             blocks.push(b.clone());
             builder.apply(b).expect("apply");
         }
@@ -4529,6 +4271,7 @@ mod dag_wiring_tests {
         let dex_bridge = sigil_api::dex::DexBridge::new();
         let usds_bridge = sigil_api::usds::UsdsBridge::new();
         let usds_polygon_bridge = sigil_api::usds_bridge::UsdsBridgeBridge::new(None, None);
+        let shielded_bridge = sigil_api::shielded::ShieldedBridge::new();
         let mut persisted: Vec<Vec<u8>> = Vec::new();
         let (mut applied, mut skipped) = (0u64, 0u64);
         // Worst-case arrival: children before parents (park → cascade unpark).
@@ -4541,7 +4284,8 @@ mod dag_wiring_tests {
             dag_store_body(&mut dag_bodies, 32, b.hash(), b.clone());
             let (a, s, f) = dag_drain_apply(&mut braid, &mut dag_bodies, &mut chain, &mut |braw| {
                 persisted.push(braw.to_vec());
-            }, &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge, &mut mint_hash_to_tx_hashes);
+            }, &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge,
+               &shielded_bridge, &mut mint_hash_to_tx_hashes);
             applied += a;
             skipped += s;
             assert_eq!(f, 0, "no apply failures through the real chokepoint");

@@ -101,6 +101,21 @@ struct Entry {
     /// Distinct wallets the miner slice was split across (1 for a fallback).
     payees: u32,
     reward: u128,
+    /// How many of `payees` are registered for SHIELDED rewards — their cut mints as a
+    /// private note instead of a transparent balance.
+    ///
+    /// 2026-08-26: added after this endpoint nearly produced a WRONG conclusion. A miner
+    /// holding 33.1% of network hashrate showed a transparent-balance delta of exactly 0
+    /// over 150 s, and the obvious reading was "the payout split is broken". It was not:
+    /// that wallet is shielded, so its reward went into the pool as notes (2 → 2,890
+    /// notes, 1,875,206,336 locked, and `shielded_hps_pct` 32.7% — matching its hashrate
+    /// almost exactly). The money was there; the measurement was blind to it.
+    ///
+    /// An attribution ledger that can only see transparent balances is exactly the kind
+    /// of instrument this module exists to replace, so it has to see both.
+    shielded_payees: u32,
+    /// Share of THIS block's reward, in weight terms, going to shielded payees.
+    shielded_weight_pct: f32,
 }
 
 fn ring() -> &'static Mutex<VecDeque<Entry>> {
@@ -111,12 +126,26 @@ fn ring() -> &'static Mutex<VecDeque<Entry>> {
 /// Record one minted block's payout. Cheap, lock-guarded, never fails: a
 /// poisoned lock is swallowed rather than propagated, because observability
 /// must never be able to take down block production.
-pub fn record(height: u64, source: PayoutSource, payees: u32, reward: u128) {
+pub fn record(
+    height: u64,
+    source: PayoutSource,
+    payees: u32,
+    reward: u128,
+    shielded_payees: u32,
+    shielded_weight_pct: f32,
+) {
     if let Ok(mut r) = ring().lock() {
         if r.len() == RING_CAP {
             r.pop_front();
         }
-        r.push_back(Entry { height, source, payees, reward });
+        r.push_back(Entry {
+            height,
+            source,
+            payees,
+            reward,
+            shielded_payees,
+            shielded_weight_pct: shielded_weight_pct.clamp(0.0, 100.0),
+        });
     }
 }
 
@@ -143,6 +172,12 @@ pub struct Summary {
     /// True when the fallback share is above the healthy ceiling on a sample
     /// large enough to mean something.
     pub alarm: bool,
+    /// Blocks whose payout included at least one SHIELDED recipient.
+    pub blocks_with_shielded_payees: usize,
+    /// Estimated share of paid-out value that landed as PRIVATE notes rather than a
+    /// transparent balance. **Read this before concluding a miner is unpaid**: a shielded
+    /// miner's `/v1/balance` stays at 0 by design while it earns normally.
+    pub shielded_value_pct: f64,
 }
 
 /// Summarise the last `window` blocks (clamped to what the ring holds). Pass 0
@@ -158,9 +193,18 @@ pub fn summary(window: usize) -> Summary {
     let mut s = Summary { blocks: take, height_lo: u64::MAX, ..Default::default() };
     let mut paid_blocks = 0usize;
     let mut paid_payees = 0u64;
+    let mut shielded_value = 0f64;
+    let mut paid_value = 0f64;
     for e in r.iter().skip(r.len() - take) {
         s.height_lo = s.height_lo.min(e.height);
         s.height_hi = s.height_hi.max(e.height);
+        if e.shielded_payees > 0 {
+            s.blocks_with_shielded_payees += 1;
+        }
+        if !matches!(e.source, PayoutSource::ProducerFallback) {
+            paid_value += e.reward as f64;
+            shielded_value += e.reward as f64 * (e.shielded_weight_pct as f64 / 100.0);
+        }
         match e.source {
             PayoutSource::RealSolve => {
                 s.real_solve_blocks += 1;
@@ -191,6 +235,8 @@ pub fn summary(window: usize) -> Summary {
     };
     s.mean_payees_when_paid =
         if paid_blocks == 0 { 0.0 } else { paid_payees as f64 / paid_blocks as f64 };
+    s.shielded_value_pct =
+        if paid_value <= 0.0 { 0.0 } else { shielded_value * 100.0 / paid_value };
     s.alarm = take >= ALARM_MIN_SAMPLE && s.producer_fallback_pct > FALLBACK_ALARM_PCT;
     s
 }
@@ -213,13 +259,16 @@ pub fn verdict(s: &Summary) -> String {
     } else {
         format!(
             "{:.1}% of emitted value to the producer fallback over {} blocks \
-             ({} real-solve, {} share-pool, {} fallback; mean {:.1} payees when paid)",
+             ({} real-solve, {} share-pool, {} fallback; mean {:.1} payees when paid). \
+             {:.1}% of paid value went to SHIELDED miners — that share is invisible to \
+             /v1/balance by design, so do not read a shielded miner's zero balance as unpaid.",
             s.producer_fallback_pct,
             s.blocks,
             s.real_solve_blocks,
             s.share_pool_blocks,
             s.producer_fallback_blocks,
-            s.mean_payees_when_paid
+            s.mean_payees_when_paid,
+            s.shielded_value_pct
         )
     }
 }
@@ -261,9 +310,9 @@ mod tests {
         reset();
         for h in 0..1000u64 {
             if h % 50 == 0 {
-                record(h, PayoutSource::RealSolve, 3, 1_000_000);
+                record(h, PayoutSource::RealSolve, 3, 1_000_000, 0, 0.0);
             } else {
-                record(h, PayoutSource::ProducerFallback, 1, 1_000_000);
+                record(h, PayoutSource::ProducerFallback, 1, 1_000_000, 0, 0.0);
             }
         }
         let s = summary(0);
@@ -284,9 +333,9 @@ mod tests {
         reset();
         for h in 0..1000u64 {
             if h % 100 == 0 {
-                record(h, PayoutSource::ProducerFallback, 1, 1_000_000);
+                record(h, PayoutSource::ProducerFallback, 1, 1_000_000, 0, 0.0);
             } else {
-                record(h, PayoutSource::SharePool, 5, 1_000_000);
+                record(h, PayoutSource::SharePool, 5, 1_000_000, 0, 0.0);
             }
         }
         let s = summary(0);
@@ -303,10 +352,10 @@ mod tests {
         let _g = guard();
         reset();
         for h in 0..900u64 {
-            record(h, PayoutSource::SharePool, 4, 1); // many blocks, negligible value
+            record(h, PayoutSource::SharePool, 4, 1, 0, 0.0); // many blocks, negligible value
         }
         for h in 900..1000u64 {
-            record(h, PayoutSource::ProducerFallback, 1, 1_000_000); // few blocks, all the money
+            record(h, PayoutSource::ProducerFallback, 1, 1_000_000, 0, 0.0); // few blocks, all the money
         }
         let s = summary(0);
         assert_eq!(s.share_pool_blocks, 900, "miners were paid on 90% of BLOCKS");
@@ -318,12 +367,88 @@ mod tests {
         assert!(s.alarm);
     }
 
+    /// THE MISREAD THIS FIELD EXISTS TO PREVENT, pinned.
+    ///
+    /// 2026-08-26: a miner holding 33.1% of network hashrate showed a transparent-balance
+    /// delta of exactly **0** over 150 s. The obvious conclusion — "the payout split is
+    /// broken" — was wrong. That wallet is registered for shielded rewards, so its cut
+    /// minted as private notes (pool 2 → 2,890 notes, 1,875,206,336 locked, and
+    /// `shielded_hps_pct` 32.7%, matching its hashrate almost exactly).
+    ///
+    /// A chain paying half its miners privately must not look like a chain paying half
+    /// its miners nothing. This asserts the summary reports the shielded share, so the
+    /// next person reads it instead of re-deriving it from a balance that is zero by
+    /// design.
+    #[test]
+    fn a_fully_shielded_payout_is_reported_as_paid_not_as_missing() {
+        let _g = guard();
+        reset();
+        for h in 0..1000u64 {
+            // Every block paid, every payee shielded: transparent balances would show
+            // NOTHING moving anywhere.
+            record(h, PayoutSource::SharePool, 2, 1_000_000, 2, 100.0);
+        }
+        let s = summary(0);
+        assert_eq!(s.producer_fallback_blocks, 0, "miners ARE being paid");
+        assert!(!s.alarm, "paying miners privately is not a fault condition");
+        assert_eq!(s.blocks_with_shielded_payees, 1000);
+        assert!(
+            (s.shielded_value_pct - 100.0).abs() < 0.01,
+            "100% of paid value went to shielded miners, got {:.2}%",
+            s.shielded_value_pct
+        );
+        assert!(
+            verdict(&s).contains("SHIELDED"),
+            "the verdict must SAY so — a number nobody reads is how tonight's misread happened"
+        );
+    }
+
+    /// A mixed network: half the value private, half transparent. The point is that the
+    /// split is reported, so "my balance didn't move" can be checked against it.
+    #[test]
+    fn a_partly_shielded_network_reports_the_split() {
+        let _g = guard();
+        reset();
+        for h in 0..1000u64 {
+            record(h, PayoutSource::SharePool, 2, 1_000_000, 1, 40.0);
+        }
+        let s = summary(0);
+        assert!(
+            (s.shielded_value_pct - 40.0).abs() < 0.01,
+            "got {:.2}%",
+            s.shielded_value_pct
+        );
+        assert_eq!(s.blocks_with_shielded_payees, 1000);
+    }
+
+    /// A producer-fallback block pays no miner at all, so it must not dilute the shielded
+    /// share — otherwise a chain in the 94% failure mode would appear to be paying
+    /// privately rather than not paying.
+    #[test]
+    fn fallback_blocks_do_not_count_toward_the_shielded_share() {
+        let _g = guard();
+        reset();
+        for h in 0..500u64 {
+            record(h, PayoutSource::SharePool, 1, 1_000_000, 1, 100.0);
+        }
+        for h in 500..1000u64 {
+            record(h, PayoutSource::ProducerFallback, 1, 1_000_000, 0, 0.0);
+        }
+        let s = summary(0);
+        assert!(
+            (s.shielded_value_pct - 100.0).abs() < 0.01,
+            "of the value that reached MINERS, all of it was shielded; got {:.2}%",
+            s.shielded_value_pct
+        );
+        assert!((s.producer_fallback_pct - 50.0).abs() < 0.01, "and half went nowhere useful");
+    }
+
     #[test]
     fn a_small_sample_never_alarms() {
         let _g = guard();
         reset();
         for h in 0..10u64 {
-            record(h, PayoutSource::ProducerFallback, 1, 1_000_000);
+            record(h, PayoutSource::ProducerFallback, 1, 1_000_000, 0, 0.0);
         }
         let s = summary(0);
         assert!(
@@ -338,7 +463,7 @@ mod tests {
         let _g = guard();
         reset();
         for h in 0..(RING_CAP as u64 + 500) {
-            record(h, PayoutSource::RealSolve, 1, 1);
+            record(h, PayoutSource::RealSolve, 1, 1, 0, 0.0);
         }
         let s = summary(0);
         assert_eq!(s.blocks, RING_CAP, "memory must stay bounded on a live node");
@@ -351,10 +476,10 @@ mod tests {
         let _g = guard();
         reset();
         for h in 0..600u64 {
-            record(h, PayoutSource::ProducerFallback, 1, 1_000_000);
+            record(h, PayoutSource::ProducerFallback, 1, 1_000_000, 0, 0.0);
         }
         for h in 600..1000u64 {
-            record(h, PayoutSource::SharePool, 2, 1_000_000);
+            record(h, PayoutSource::SharePool, 2, 1_000_000, 0, 0.0);
         }
         // The whole ring is mixed...
         assert!(summary(0).producer_fallback_pct > 50.0);

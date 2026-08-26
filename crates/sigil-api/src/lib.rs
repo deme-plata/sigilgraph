@@ -33,6 +33,12 @@ use sigil_tx::SignedTx;
 pub mod mining;
 use mining::{MinerKind, MiningBridge, SubmitOutcome};
 
+/// Where each minted block's miner slice actually went. Exists because the
+/// "producer wallet takes ~94% while miners take ~0%" failure has now happened
+/// twice and both times was invisible to every existing metric. See the
+/// module doc.
+pub mod attribution;
+
 /// Durable hashrate/miner-count time series backing the wallet's Network
 /// Power modal timeframe selector (24h/7d/30d/1y/all) — see module docs.
 pub mod mining_history;
@@ -498,6 +504,12 @@ pub async fn shielded_anchor_handler(State(st): State<AppState>) -> Json<serde_j
         "anchor": hex::encode(pool.current_root()),
         "notes": pool.len(),
         "nullifiers": pool.nullifier_count(),
+        // 2026-08-26: the note count says how big the anonymity set IS; this says
+        // how many wallets are set up to keep growing it. A pool stuck at one note
+        // with zero registrations is a configuration problem; the same pool with
+        // many registrations would be a block-production problem. Same call, two
+        // very different diagnoses — and until now neither was visible.
+        "registered": pool.registered_addresses(),
         "value_locked": pool.value_locked().to_string(),
         "ts_ms": now_ms(),
     }))
@@ -1159,6 +1171,23 @@ pub struct MinersResponse {
     /// omits blocks-found/rewards-earned/source columns a Quillon port would
     /// otherwise fabricate.
     pub miners: Vec<mining::MinerEntry>,
+    /// Live hashrate belonging to miners who HAVE published a shield key — i.e.
+    /// the share of network power that actually grows the anonymity set, because
+    /// only a registered wallet's coinbase mints a pool note.
+    ///
+    /// 2026-08-26. SIGIL is privacy-only for peer-to-peer sends, yet its shielded
+    /// pool was sitting at one note while 86 MH/s mined away, and no endpoint
+    /// reported the discrepancy. `net_hps` answers "how much work is the network
+    /// doing"; this answers "how much of that work is buying privacy" — the
+    /// number the whole opt-in design lives or dies on.
+    pub shielded_hps: f64,
+    /// `shielded_hps / net_hps` as a percentage, `0.0` when the network is idle.
+    /// Broken out so a dashboard does not have to re-derive it (and get the
+    /// divide-by-zero wrong).
+    pub shielded_hps_pct: f64,
+    /// How many wallets have published a shield key chain-wide — mining or not.
+    /// `None` if chain state could not be read.
+    pub registered_shield_keys: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1307,6 +1336,66 @@ pub async fn network_topology(State(st): State<AppState>) -> Json<ApiResponse<Ne
     })
 }
 
+/// `?window=<blocks>` — how many recent blocks to attribute over. 0 or missing
+/// means everything the ring still holds (~4096 blocks).
+#[derive(serde::Deserialize)]
+pub struct AttributionQuery {
+    pub window: Option<usize>,
+}
+
+/// The answer to "are miners actually being paid?", in one call.
+#[derive(serde::Serialize)]
+pub struct AttributionResponse {
+    pub blocks: usize,
+    pub height_lo: u64,
+    pub height_hi: u64,
+    pub real_solve_blocks: usize,
+    pub share_pool_blocks: usize,
+    pub producer_fallback_blocks: usize,
+    /// Stringified — these are u128 raw base units and JSON numbers are f64.
+    pub real_solve_value: String,
+    pub share_pool_value: String,
+    pub producer_fallback_value: String,
+    /// Share of emitted VALUE that went to the producer wallet by default.
+    /// This is THE number: >50% on a live network means miners are not paid.
+    pub producer_fallback_pct: f64,
+    pub mean_payees_when_paid: f64,
+    /// Blocks whose payout included at least one shielded recipient.
+    pub blocks_with_shielded_payees: usize,
+    /// Share of paid-out value that landed as PRIVATE notes instead of a transparent
+    /// balance. **Check this before concluding a miner is unpaid** — a shielded miner's
+    /// `/v1/balance` stays at 0 by design while it earns normally.
+    pub shielded_value_pct: f64,
+    pub alarm: bool,
+    /// Plain-language reading of the numbers above — a bare percentage has
+    /// already failed to alarm anyone twice.
+    pub verdict: String,
+}
+
+#[flux_api_macros::api(GET, "/v1/mining/attribution", summary = "Where each minted block's miner slice went — real solve, share pool, or producer fallback")]
+pub async fn mining_attribution(
+    Query(q): Query<AttributionQuery>,
+) -> Json<ApiResponse<AttributionResponse>> {
+    let s = attribution::summary(q.window.unwrap_or(0));
+    ApiResponse::ok(AttributionResponse {
+        blocks: s.blocks,
+        height_lo: if s.blocks == 0 { 0 } else { s.height_lo },
+        height_hi: s.height_hi,
+        real_solve_blocks: s.real_solve_blocks,
+        share_pool_blocks: s.share_pool_blocks,
+        producer_fallback_blocks: s.producer_fallback_blocks,
+        real_solve_value: s.real_solve_value.to_string(),
+        share_pool_value: s.share_pool_value.to_string(),
+        producer_fallback_value: s.producer_fallback_value.to_string(),
+        producer_fallback_pct: s.producer_fallback_pct,
+        mean_payees_when_paid: s.mean_payees_when_paid,
+        blocks_with_shielded_payees: s.blocks_with_shielded_payees,
+        shielded_value_pct: s.shielded_value_pct,
+        alarm: s.alarm,
+        verdict: attribution::verdict(&s),
+    })
+}
+
 #[flux_api_macros::api(GET, "/v1/mining/miners", summary = "Live mining power and accept/reject counters")]
 pub async fn mining_miners(
     State(st): State<AppState>,
@@ -1314,6 +1403,26 @@ pub async fn mining_miners(
 ) -> Json<ApiResponse<MinersResponse>> {
     let (net_hps, live_miners, blocks, shares, rejects) = st.mining.stats(now_ms());
     let wallet = q.wallet.as_deref().and_then(hex32);
+    let mut miners = st.mining.miners_snapshot(now_ms());
+
+    // 2026-08-26: annotate each rig with whether its wallet has published a shield
+    // key, and total the hashrate that does. `MiningBridge` holds no chain-state
+    // handle by design, so this is the layer that can answer it — one read lock,
+    // one registry lookup per rig (a HashMap get), well inside this endpoint's
+    // existing cost. A poisoned lock yields `None`/`0.0` rather than a confident
+    // `false`, which would read as "nobody is registered" — the exact wrong
+    // conclusion to draw from a failed read.
+    let (shielded_hps, registered_shield_keys) = match st.state.read() {
+        Ok(guard) => {
+            let pool = guard.shielded();
+            let hps = mining::annotate_shielded(&mut miners, |w| Some(pool.shielded_address(w).is_some()));
+            (hps, Some(pool.registered_addresses()))
+        }
+        // Chain state unreadable — say "unknown", never "nobody is registered".
+        Err(_) => (mining::annotate_shielded(&mut miners, |_| None), None),
+    };
+    let shielded_hps_pct = mining::shielded_pct(shielded_hps, net_hps);
+
     ApiResponse::ok(MinersResponse {
         height: st.mining.tip().map(|t| t.height),
         net_hps,
@@ -1323,7 +1432,10 @@ pub async fn mining_miners(
         queued_solves: st.mining.queued_solves(),
         rejects,
         my_hps: st.mining.hps_for_wallet_total(wallet),
-        miners: st.mining.miners_snapshot(now_ms()),
+        miners,
+        shielded_hps,
+        shielded_hps_pct,
+        registered_shield_keys,
     })
 }
 
@@ -1350,6 +1462,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/mining/challenge", get(mining_challenge))
         .route("/v1/mining/submit", post(mining_submit))
         .route("/v1/mining/miners", get(mining_miners))
+        .route("/v1/mining/attribution", get(mining_attribution))
         .route("/v1/mining/hashrate/history", get(mining_hashrate_history))
         .route("/v1/dagknight/recent", get(dagknight_recent))
         .route("/v1/network/topology", get(network_topology))
@@ -1377,6 +1490,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/mining/challenge", get(mining_challenge))
         .route("/api/v1/mining/submit", post(mining_submit))
         .route("/api/v1/mining/miners", get(mining_miners))
+        .route("/api/v1/mining/attribution", get(mining_attribution))
         .route("/api/v1/mining/hashrate/history", get(mining_hashrate_history))
         .route("/api/v1/dagknight/recent", get(dagknight_recent))
         // Wallet-compatible aliases (2026-08-16): sigil-top's embedded wallet

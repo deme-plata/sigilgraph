@@ -328,6 +328,107 @@ impl ChainLog {
         Self::full_scan_rebuild(dir, &log_path, from_height, &mut f)
     }
 
+    /// Like [`replay_from`](Self::replay_from), but bounded ABOVE by
+    /// `to_height` (INCLUSIVE): stops at the first record past the window
+    /// instead of scanning to EOF. Same `chain.idx` seek, same probe-skip
+    /// fast path, same torn-tail tolerance; read-only (no writer handle, no
+    /// idx rebuild), so it is safe to run against a log the producer is
+    /// actively appending to.
+    ///
+    /// WHY THIS EXISTS (2026-08-26 incident): the search indexer caught up
+    /// with an UNBOUNDED `replay_from`, and only wrote its progress file
+    /// after that single pass returned. With a ~209k-block backlog the pass
+    /// never returned before the process hit its cgroup memory ceiling, so
+    /// progress was never checkpointed and every restart replayed the exact
+    /// same doomed range — a livelock that starved block production for
+    /// hours. A bounded range is what makes the catch-up resumable, so a
+    /// crash costs one batch instead of all progress.
+    pub fn replay_range(
+        dir: &std::path::Path,
+        from_height: u64,
+        to_height: u64,
+        mut f: impl FnMut(Block),
+    ) -> Result<u64, String> {
+        if to_height < from_height {
+            return Ok(0);
+        }
+        let log_path = dir.join("chain.log");
+        if !log_path.exists() {
+            return Ok(0);
+        }
+        // `unwrap_or(0)` matches `get_range_by_height`: an unusable index just
+        // means "start at byte 0 and let the height filter do the work" —
+        // correct, only slower. Deliberately does NOT fall back to
+        // `full_scan_rebuild`: that path rewrites chain.idx, and this reader
+        // must stay side-effect-free.
+        let start = Self::idx_seek_offset(dir, from_height, &log_path).unwrap_or(0);
+        Self::scan_range(&log_path, start, from_height, to_height, &mut f)
+    }
+
+    /// Scan `[from_height, to_height]` from byte `start`, calling `f` for each
+    /// block inside the window and stopping at the first record above it.
+    /// Records below the window are skipped via the same head-probe used by
+    /// [`scan_filtered`](Self::scan_filtered) — microseconds instead of a
+    /// ~0.5 ms full decode each.
+    fn scan_range(
+        log_path: &Path,
+        start: u64,
+        from_height: u64,
+        to_height: u64,
+        f: &mut impl FnMut(Block),
+    ) -> Result<u64, String> {
+        let file = File::open(log_path).map_err(|e| format!("open chain.log: {}", e))?;
+        let mut r = BufReader::new(file);
+        r.seek(SeekFrom::Start(start)).map_err(|e| format!("seek chain.log: {}", e))?;
+        let mut n = 0u64;
+        let mut head = vec![0u8; PROBE_WINDOW]; // reused probe scratch
+        loop {
+            let mut lb = [0u8; 4];
+            if r.read_exact(&mut lb).is_err() {
+                break; // clean EOF
+            }
+            let len = u32::from_le_bytes(lb) as usize;
+            let head_len = len.min(PROBE_WINDOW);
+            if r.read_exact(&mut head[..head_len]).is_err() {
+                break; // torn tail record
+            }
+            match probe_height_fast(&head[..head_len]) {
+                // Below the window: seek over the payload, never decode it.
+                Some(h) if h < from_height => {
+                    if r.seek_relative((len - head_len) as i64).is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                // Past the window: the log is append-ordered by height, so
+                // nothing further can be in range. Same convention as
+                // `get_range_by_height`.
+                Some(h) if h > to_height => break,
+                // Probe unsure — fall through to the authoritative decode.
+                _ => {}
+            }
+            let mut buf = vec![0u8; len];
+            buf[..head_len].copy_from_slice(&head[..head_len]);
+            if r.read_exact(&mut buf[head_len..]).is_err() {
+                break; // torn tail record
+            }
+            match serde_json::from_slice::<Block>(&buf) {
+                Ok(b) => {
+                    // The decoded header is always authoritative, never the probe.
+                    if b.header.height > to_height {
+                        break;
+                    }
+                    if b.header.height >= from_height {
+                        f(b);
+                        n += 1;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        Ok(n)
+    }
+
     /// Resolve `from_height` to a safe byte offset to start scanning from,
     /// using `chain.idx`. Returns:
     ///   * `Some(offset)` — validated start (or 0 when no entry covers

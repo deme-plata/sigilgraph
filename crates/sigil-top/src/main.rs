@@ -4101,6 +4101,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                             KeyCode::Char('1') => { app.tab = Tab::Node; }
                             KeyCode::Char('2') => { app.tab = Tab::SyncLog; }
                             KeyCode::Char('3') => { app.tab = Tab::Mining; }
+                            KeyCode::Char('4') => { app.tab = Tab::Queues; }
                             KeyCode::Char('y') | KeyCode::Char('Y') => { app.resync(); app.toast_sticky = false; }
                             KeyCode::Char('m') | KeyCode::Char('M') => { app.toggle_engine_mining(); }
                             KeyCode::Char('g') | KeyCode::Char('G') if app.tab == Tab::Mining => {
@@ -4679,14 +4680,15 @@ fn render_update_splash(frame: u8) -> Paragraph<'static> {
 use flux_miner::engine::{self, MinerStats};
 
 #[derive(Clone, Copy, PartialEq)]
-enum Tab { Node, SyncLog, Mining }
+enum Tab { Node, SyncLog, Mining, Queues }
 
 impl Tab {
     fn next(self) -> Tab {
         match self {
             Tab::Node => Tab::SyncLog,
             Tab::SyncLog => Tab::Mining,
-            Tab::Mining => Tab::Node,
+            Tab::Mining => Tab::Queues,
+            Tab::Queues => Tab::Node,
         }
     }
 }

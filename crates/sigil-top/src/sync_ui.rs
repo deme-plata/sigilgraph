@@ -297,6 +297,232 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
     f.render_widget(Paragraph::new(ship_lines), ship);
 }
 
+/// How long an in-flight range may wait before the WAIT bar reads full/red.
+/// Display-only: it does NOT cause a timeout, it just makes a range that is
+/// aging toward one visible before it fails.
+const WAIT_FULL_MS: u64 = 8_000;
+
+fn fmt_eta_secs(secs: u64) -> String {
+    if secs >= 3600 { format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60) }
+    else if secs >= 60 { format!("{}m {:02}s", secs / 60, secs % 60) }
+    else { format!("{secs}s") }
+}
+
+fn fmt_age(ms: u64) -> String {
+    if ms >= 60_000 { format!("{}m{:02}s", ms / 60_000, (ms % 60_000) / 1000) }
+    else if ms >= 1000 { format!("{:.1}s", ms as f64 / 1000.0) }
+    else { format!("{ms}ms") }
+}
+
+/// [4] QUEUES — the torrent-client view of sync, full screen (operator request,
+/// 2026-08-26: "get rid of this in the node tab, put it in a separate tab …
+/// expand the table to give a nice overview over all the queues").
+///
+/// A torrent client's main screen lists every file in the transfer with its own
+/// progress, peer and rate. Sync's equivalent "files" are fetch RANGES: fixed-
+/// stride chunks of chain, each claimed from one peer, each independently in
+/// flight. Before this, the card showed only aggregates plus a single cursor, so
+/// a stalled sync and a slow one looked identical.
+///
+/// HONESTY NOTE — why the bar is WAIT, not PROGRESS: the sync store tracks a
+/// range's lifecycle (in-flight → fetched → verified), not how many of its bytes
+/// have landed, because a range is committed as one unit. There is no per-range
+/// byte counter, so a "% downloaded" bar would be an invented number. The bar
+/// instead shows how long the range has WAITED against [`WAIT_FULL_MS`] — real
+/// data, and exactly what separates a healthy range from a wedging one. Ages are
+/// recomputed on every read (see `sigil_sync::live_telemetry`); a snapshot-time
+/// age froze at 0 and made every row look fresh, which defeated the point.
+pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let s = &app.p2p_state;
+    let t = sigil_sync::live_telemetry();
+
+    let block = card_block(" ◈ FETCH QUEUES · sigil-g0", C_NEON_CYAN);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height < 4 {
+        return;
+    }
+
+    let inflight: Vec<&sigil_sync::RangeRow> =
+        t.rows.iter().filter(|r| matches!(r.state, sigil_sync::RangeState::InFlight { .. })).collect();
+    let staged: Vec<&sigil_sync::RangeRow> =
+        t.rows.iter().filter(|r| matches!(r.state, sigil_sync::RangeState::Fetched { .. })).collect();
+
+    let tip = s.peer_best_height.max(app.target_height);
+    let verified = t.verified_to.max(s.verified);
+    let gap = tip.saturating_sub(verified);
+    let eta = if t.rate >= 1.0 && gap > 0 { Some((gap as f64 / t.rate) as u64) } else { None };
+
+    // ── header: the whole pipeline in two lines ─────────────────────────
+    let [head, mid] = Layout::vertical([Constraint::Length(4), Constraint::Min(0)]).areas(inner);
+    let mut hl: Vec<Line> = Vec::new();
+    hl.push(Line::from(vec![
+        Span::styled("⇣ ", Style::default().fg(C_NEON_GREEN)),
+        Span::styled(format!("{}", inflight.len()), Style::default().fg(if inflight.is_empty() { C_DIM } else { C_NEON_GREEN }).add_modifier(Modifier::BOLD)),
+        dim(" fetching   "),
+        Span::styled("✓ ", Style::default().fg(C_GOLD)),
+        Span::styled(format!("{}", staged.len()), Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
+        dim(" staged   chunk "),
+        Span::styled(group(t.chunk), Style::default().fg(C_VBRIGHT)),
+        dim("   rate "),
+        Span::styled(
+            if t.rate >= 1.0 { format!("{} blk/s", group(t.rate.round() as u64)) } else { "—".into() },
+            Style::default().fg(if t.rate >= 1.0 { C_NEON_GREEN } else { C_DIM }).add_modifier(Modifier::BOLD),
+        ),
+        dim("   eta "),
+        Span::styled(eta.map(fmt_eta_secs).unwrap_or_else(|| "—".into()), Style::default().fg(C_NEON_CYAN)),
+    ]));
+    hl.push(Line::from(vec![
+        dim("verified "), Span::styled(group(verified), Style::default().fg(C_NEON_CYAN)),
+        dim("   fetched→ "), Span::styled(group(t.fetched_to), Style::default().fg(C_GOLD)),
+        dim("   tip "), Span::styled(group(tip), Style::default().fg(C_VBRIGHT)),
+        dim("   gap "), Span::styled(group(gap), Style::default().fg(if gap > 100_000 { C_NEON_PINK } else { C_DIM })),
+        dim("   peers "), Span::styled(format!("{}", s.peer_count), Style::default().fg(if s.peer_count > 0 { C_NEON_GREEN } else { C_RED })),
+    ]));
+    // frontier bar: verified → fetched → tip, so the two watermarks are visible as one picture
+    {
+        let w = (head.width as usize).saturating_sub(2).max(10);
+        let fv = if tip > 0 { (verified as f64 / tip as f64).clamp(0.0, 1.0) } else { 0.0 };
+        let ff = if tip > 0 { (t.fetched_to as f64 / tip as f64).clamp(0.0, 1.0) } else { 0.0 };
+        let nv = (fv * w as f64).round() as usize;
+        let nf = ((ff * w as f64).round() as usize).saturating_sub(nv);
+        hl.push(Line::from(vec![
+            Span::styled("█".repeat(nv.min(w)), Style::default().fg(C_NEON_CYAN)),
+            Span::styled("▒".repeat(nf.min(w.saturating_sub(nv))), Style::default().fg(C_GOLD)),
+            Span::styled("░".repeat(w.saturating_sub(nv + nf)), Style::default().fg(C_DIM)),
+        ]));
+        hl.push(Line::from(vec![
+            Span::styled("█", Style::default().fg(C_NEON_CYAN)), dim(" verified   "),
+            Span::styled("▒", Style::default().fg(C_GOLD)), dim(" fetched, awaiting verify   "),
+            Span::styled("░", Style::default().fg(C_DIM)), dim(" not downloaded"),
+        ]));
+    }
+    f.render_widget(Paragraph::new(hl), head);
+
+    // ── body: the queue table (left) + peer/session panes (right) ───────
+    let [tbl, side] = Layout::horizontal([Constraint::Min(40), Constraint::Length(38)]).spacing(1).areas(mid);
+
+    // ---- the queue table ----
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!(" {:<3} {:<26} {:<11} {:<12} {:<18} {:>8}", "#", "RANGE", "WAIT", "STATE", "PEER", "AGE"),
+        Style::default().fg(C_DIM).add_modifier(Modifier::BOLD),
+    )));
+    if t.rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            if t.chunk == 0 { "  idle — the sync engine is not running (light monitor; press F for full sync)" }
+            else { "  empty — nothing in flight (at tip, or the wire is idle)" },
+            Style::default().fg(C_DIM),
+        )));
+    } else {
+        let mut rows: Vec<&sigil_sync::RangeRow> = t.rows.iter().collect();
+        // in-flight first (that is where trouble shows), then by height
+        rows.sort_by_key(|r| (!matches!(r.state, sigil_sync::RangeState::InFlight { .. }), r.start));
+        let room = (tbl.height as usize).saturating_sub(2);
+        for (i, r) in rows.iter().take(room).enumerate() {
+            let (stxt, scol, peer) = match &r.state {
+                sigil_sync::RangeState::InFlight { peer, fanout, .. } => {
+                    // fanout 0 = claimed but not yet dispatched; >1 = frontier
+                    // redundancy (same range sent to several peers, first good
+                    // reply wins), so name the first and show the count.
+                    let p = if *fanout == 0 {
+                        "— not sent yet".to_string()
+                    } else {
+                        let short = if peer.len() > 13 { format!("{}…", &peer[..12]) } else { peer.clone() };
+                        if *fanout > 1 { format!("{short} ×{fanout}") } else { short }
+                    };
+                    ("⇣ fetching", C_NEON_GREEN, p)
+                }
+                sigil_sync::RangeState::Fetched { .. } => ("✓ staged", C_GOLD, "—".into()),
+                sigil_sync::RangeState::Verified => ("⛓ verified", C_NEON_CYAN, "—".into()),
+            };
+            let (bar, bcol) = match &r.state {
+                sigil_sync::RangeState::InFlight { .. } => {
+                    let frac = (r.age_ms as f64 / WAIT_FULL_MS as f64).clamp(0.0, 1.0);
+                    let w = 9usize;
+                    let fill = (frac * w as f64).round() as usize;
+                    let c = if frac >= 0.85 { C_RED } else if frac >= 0.5 { C_GOLD } else { C_NEON_GREEN };
+                    ("█".repeat(fill.min(w)) + &"░".repeat(w.saturating_sub(fill)), c)
+                }
+                _ => ("─────────".to_string(), C_DIM),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {:<3} ", i + 1), Style::default().fg(C_DIM)),
+                Span::styled(format!("{:<26} ", format!("{}..{}", group(r.start), group(r.end))), Style::default().fg(C_VBRIGHT)),
+                Span::styled(format!("{bar:<11}"), Style::default().fg(bcol)),
+                Span::styled(format!("{stxt:<12}"), Style::default().fg(scol)),
+                Span::styled(format!("{peer:<18}"), Style::default().fg(C_DIM)),
+                Span::styled(format!("{:>8}", fmt_age(r.age_ms)), Style::default().fg(if r.age_ms > WAIT_FULL_MS { C_RED } else { C_DIM })),
+            ]));
+        }
+        if rows.len() > room {
+            lines.push(Line::from(Span::styled(
+                format!("  … {} more — enlarge the window", rows.len() - room),
+                Style::default().fg(C_DIM),
+            )));
+        }
+    }
+    f.render_widget(Paragraph::new(lines), tbl);
+
+    // ---- side: peers holding ranges + session totals ----
+    let [pane_peers, pane_sess] = Layout::vertical([Constraint::Percentage(55), Constraint::Min(0)]).areas(side);
+
+    let mut pl: Vec<Line> = vec![Line::from(Span::styled(
+        "◆ PEERS HOLDING RANGES", Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)))];
+    {
+        use std::collections::BTreeMap;
+        let mut by_peer: BTreeMap<String, (usize, u64)> = BTreeMap::new();
+        let mut undispatched = 0usize;
+        for r in &inflight {
+            if let sigil_sync::RangeState::InFlight { peer, fanout, .. } = &r.state {
+                // fanout 0 = claimed but not yet sent to anyone. Its `peer` is
+                // still the claim placeholder, so grouping it here would invent
+                // a peer that does not exist. Count it separately instead.
+                if *fanout == 0 {
+                    undispatched += 1;
+                    continue;
+                }
+                let e = by_peer.entry(peer.clone()).or_insert((0, 0));
+                e.0 += 1;
+                e.1 = e.1.max(r.age_ms);
+            }
+        }
+        if by_peer.is_empty() {
+            pl.push(Line::from(Span::styled("  none dispatched", Style::default().fg(C_DIM))));
+        }
+        for (peer, (n, oldest)) in by_peer.iter().take(pane_peers.height.saturating_sub(2) as usize) {
+            let p = if peer.len() > 16 { format!("{}…", &peer[..15]) } else { peer.clone() };
+            pl.push(Line::from(vec![
+                Span::styled(format!("  {p:<17}"), Style::default().fg(C_VBRIGHT)),
+                Span::styled(format!("{n:>3} "), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+                dim("rng  oldest "),
+                Span::styled(fmt_age(*oldest), Style::default().fg(if *oldest > WAIT_FULL_MS { C_RED } else { C_DIM })),
+            ]));
+        }
+        if undispatched > 0 {
+            pl.push(Line::from(vec![
+                dim("  "),
+                Span::styled(format!("{undispatched}"), Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
+                dim(" claimed, awaiting dispatch"),
+            ]));
+        }
+    }
+    f.render_widget(Paragraph::new(pl), pane_peers);
+
+    let mb = s.sync_total as f64 / (1024.0 * 1024.0);
+    let sl: Vec<Line> = vec![
+        Line::from(Span::styled("◆ SESSION", Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD))),
+        Line::from(vec![dim("  blocks fetched  "), Span::styled(group(s.fetched_total), Style::default().fg(C_VBRIGHT))]),
+        Line::from(vec![dim("  range blocks    "), Span::styled(group(t.fetched_blocks), Style::default().fg(C_VBRIGHT))]),
+        Line::from(vec![dim("  ranges tracked  "), Span::styled(format!("{}", t.rows.len()), Style::default().fg(C_VBRIGHT))]),
+        Line::from(vec![dim("  commit rate     "), Span::styled(
+            if s.commit_rate >= 1.0 { format!("{} blk/s", group(s.commit_rate.round() as u64)) } else { "—".into() },
+            Style::default().fg(C_NEON_GREEN))]),
+        Line::from(vec![dim("  data            "), Span::styled(if mb >= 1.0 { format!("{mb:.0} MB") } else { "—".into() }, Style::default().fg(C_DIM))]),
+    ];
+    f.render_widget(Paragraph::new(sl), pane_sess);
+}
+
 /// v0.26: read at most the last `max_bytes` of a (possibly huge) log file — seek to the
 /// tail instead of slurping the whole thing, so the Sync Log tab stays O(1) per frame.
 pub(crate) fn read_log_tail(path: &str, max_bytes: u64) -> String {

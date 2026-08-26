@@ -1934,6 +1934,13 @@ impl P2PBlockSync {
                                     } else {
                                         healthy[(rr + k) % healthy.len()].clone()
                                     };
+                                    // Attribute the range to the peer it is actually going to.
+                                    // `claim()` above ran BEFORE a peer was chosen (and the
+                                    // frontier fans the same range out to several peers), so the
+                                    // claim's placeholder is all the queue view had — every row
+                                    // read "pending", which is useless exactly when sync wedges on
+                                    // one bad peer. Display-only; no effect on sync behavior.
+                                    sync_store.note_peer(start, &peer.to_string());
                                     // 2026-08-23 (grogu-adaptive-frontier-width): proven live — a
                                     // connection that drops and reconnects every 10-30s (real,
                                     // observed churn, not a code bug) gives an in-flight multi-MB

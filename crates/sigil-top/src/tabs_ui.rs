@@ -94,6 +94,7 @@ pub(crate) fn render_tab_bar(app: &App) -> Paragraph<'static> {
     spans.extend(tab("Node", "1", Tab::Node));
     spans.extend(tab("Sync Log", "2", Tab::SyncLog));
     spans.extend(tab("Mining", "3", Tab::Mining));
+    spans.extend(tab("Queues", "4", Tab::Queues));
     spans.push(Span::styled(" · Tab cycles", Style::default().fg(C_DIM)));
     Paragraph::new(Line::from(spans))
 }
@@ -243,6 +244,7 @@ pub(crate) fn draw_ui(f: &mut Frame, app: &App) {
         }
         Tab::SyncLog => f.render_widget(render_sync_log(app), body_area),
         Tab::Mining => draw_mining_tab(f, app, body_area),
+        Tab::Queues => crate::sync_ui::draw_queues_tab(f, app, body_area),
     }
 
     f.render_widget(render_footer(app), footer_area);

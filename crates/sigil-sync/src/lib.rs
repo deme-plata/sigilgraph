@@ -55,10 +55,23 @@ use std::sync::{Arc, RwLock};
 pub enum RangeState {
     /// Requested from `peer`, awaiting a reply.
     InFlight {
-        /// Peer the request went to.
+        /// Peer the request went to. A range is CLAIMED before a peer is
+        /// selected (and, at the frontier, is fanned out to several peers), so
+        /// this starts as a placeholder and is filled in by
+        /// [`SyncStore::note_peer`] once the request is actually dispatched.
         peer: String,
         /// Monotonic millis when the request was issued (for timeout sweeps).
         since_ms: u64,
+        /// How many times this range has been DISPATCHED. 0 = claimed but not
+        /// yet sent to anyone; >1 = frontier redundancy, where the same range
+        /// is deliberately requested from several peers and the first good
+        /// reply wins. `peer` names the first one it went to.
+        ///
+        /// Deliberately a dispatch count, not a distinct-peer count: only the
+        /// first peer's name is retained, so de-duplicating later dispatches
+        /// against it would be wrong for every peer after the first. "Sent N
+        /// times, first to X" is a claim this data can actually support.
+        fanout: u8,
     },
     /// Bytes arrived and were committed; not yet verified/applied.
     Fetched {
@@ -67,6 +80,77 @@ pub enum RangeState {
     },
     /// Verified and applied — this range is done and costs no budget.
     Verified,
+}
+
+/// One row of the live fetch table — the torrent-client view of sync.
+///
+/// WHY THIS EXISTS (operator request, 2026-08-26): a torrent client shows every
+/// file in the swarm with its own progress, peer and rate; the SIGIL sync card
+/// showed only aggregate counters plus a single `sync_cursor`, so an operator
+/// watching a stalled sync could not see WHICH ranges were in flight, which peer
+/// held them, or how long they had been outstanding. Those are exactly the facts
+/// that distinguish "slow" from "wedged" — and a wedged range pinned on one peer
+/// is a failure mode this chain has hit repeatedly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RangeRow {
+    /// First height in the range.
+    pub start: u64,
+    /// Exclusive end (`start + chunk`).
+    pub end: u64,
+    /// Lifecycle state, carrying peer/timestamps.
+    pub state: RangeState,
+    /// Milliseconds since this range entered its current state.
+    pub age_ms: u64,
+}
+
+/// A consistent snapshot of live sync work, for read-only display.
+#[derive(Debug, Clone, Default)]
+pub struct Telemetry {
+    pub chunk: u64,
+    pub fetched_to: u64,
+    pub verified_to: u64,
+    pub fetched_blocks: u64,
+    /// Blocks/sec observed this session.
+    pub rate: f64,
+    /// Live ranges, ascending by start.
+    pub rows: Vec<RangeRow>,
+}
+
+/// Process-global mirror of the live store's state.
+///
+/// DESIGN NOTE — why a global rather than a threaded handle: the renderer lives
+/// in `sigil-top`'s TUI while the store is owned deep inside the sync engine's
+/// loop, and the files on that path are under other agents' active edits. A
+/// read-only telemetry mirror keeps this feature entirely additive: nothing on
+/// the sync path changes behavior, and the display cannot affect sync. There is
+/// exactly one `SyncStore` per process, so a single global is unambiguous. If
+/// the store is ever instantiated more than once, the last writer wins — which
+/// is a display artifact only, never a correctness one.
+static TELEMETRY: std::sync::OnceLock<RwLock<Telemetry>> = std::sync::OnceLock::new();
+
+fn telemetry_cell() -> &'static RwLock<Telemetry> {
+    TELEMETRY.get_or_init(|| RwLock::new(Telemetry::default()))
+}
+
+/// Read the latest snapshot of live sync work. Cheap; never blocks the sync path.
+///
+/// Ages are recomputed against the CURRENT clock on every read, not baked in
+/// when the snapshot was taken. That matters: the mirror is only refreshed on
+/// state transitions, so a stored age would freeze at ~0 for a range that is
+/// sitting still — which is precisely the range an operator needs to see. Found
+/// live: every row rendered `0ms` and the WAIT bar never filled, making a
+/// wedged range look identical to a healthy one.
+pub fn live_telemetry() -> Telemetry {
+    let mut t = telemetry_cell().read().map(|g| g.clone()).unwrap_or_default();
+    let now = now_ms();
+    for r in &mut t.rows {
+        r.age_ms = match &r.state {
+            RangeState::InFlight { since_ms, .. } => now.saturating_sub(*since_ms),
+            RangeState::Fetched { at_ms } => now.saturating_sub(*at_ms),
+            RangeState::Verified => 0,
+        };
+    }
+    t
 }
 
 #[derive(Default)]
@@ -119,6 +203,51 @@ impl SyncStore {
         s
     }
 
+    /// Snapshot current state into the process-global telemetry mirror.
+    ///
+    /// Called at the end of every mutating method. The map is bounded by the
+    /// fetch look-ahead budget (tens of entries), so a full clone per
+    /// transition is cheaper than tracking deltas and cannot drift out of sync
+    /// with the real map.
+    /// Build a consistent snapshot of live work. Deterministic and instance-
+    /// scoped, so it can be tested without touching the process-global mirror.
+    pub fn snapshot(&self) -> Telemetry {
+        let now = now_ms();
+        let (rows, fetched_to, verified_to) = {
+            let g = self.read();
+            let rows: Vec<RangeRow> = g
+                .ranges
+                .iter()
+                .map(|(&start, st)| {
+                    let age_ms = match st {
+                        RangeState::InFlight { since_ms, .. } => now.saturating_sub(*since_ms),
+                        RangeState::Fetched { at_ms } => now.saturating_sub(*at_ms),
+                        RangeState::Verified => 0,
+                    };
+                    RangeRow { start, end: start.saturating_add(self.chunk), state: st.clone(), age_ms }
+                })
+                .collect();
+            (rows, g.fetched_to, g.verified_to)
+        };
+        let snap = Telemetry {
+            chunk: self.chunk,
+            fetched_to,
+            verified_to,
+            fetched_blocks: self.fetched_blocks.load(Ordering::Relaxed),
+            rate: self.observed_rate(),
+            rows,
+        };
+        snap
+    }
+
+    /// Publish [`SyncStore::snapshot`] into the process-global mirror the TUI reads.
+    fn mirror(&self) {
+        let snap = self.snapshot();
+        if let Ok(mut g) = telemetry_cell().write() {
+            *g = snap;
+        }
+    }
+
     /// Range stride.
     pub fn chunk(&self) -> u64 {
         self.chunk
@@ -141,10 +270,40 @@ impl SyncStore {
         if g.ranges.contains_key(&start) {
             return false;
         }
-        g.ranges.insert(start, RangeState::InFlight { peer: peer.to_string(), since_ms: now_ms() });
+        g.ranges.insert(start, RangeState::InFlight { peer: peer.to_string(), since_ms: now_ms(), fanout: 0 });
         drop(g);
         self.persist_range(start);
+        self.mirror();
         true
+    }
+
+    /// Record the peer a claimed range was actually dispatched to.
+    ///
+    /// WHY THIS IS SEPARATE FROM [`SyncStore::claim`]: the loop claims a range
+    /// first (to stop another slot grabbing it), and only then picks the peer —
+    /// and at the frontier it deliberately fans the SAME range out to several
+    /// peers, first good reply wins. So at claim time there is genuinely no
+    /// peer yet, and there may end up being more than one. Before this existed
+    /// the queue view showed every row as `pending`, which told an operator
+    /// nothing about WHICH peer was sitting on a stalled range — the single
+    /// most useful fact when sync wedges on one bad peer.
+    ///
+    /// Keeps the FIRST peer's name and counts distinct peers in `fanout`.
+    /// No-op unless the range is currently in flight.
+    pub fn note_peer(&self, start: u64, peer: &str) {
+        {
+            let mut g = self.write();
+            match g.ranges.get_mut(&start) {
+                Some(RangeState::InFlight { peer: p, fanout, .. }) => {
+                    if *fanout == 0 {
+                        *p = peer.to_string();
+                    }
+                    *fanout = fanout.saturating_add(1);
+                }
+                _ => return, // not in flight — nothing to attribute
+            }
+        }
+        self.mirror();
     }
 
     /// Release a claim without progress — a failed/timed-out request. The
@@ -157,6 +316,7 @@ impl SyncStore {
         }
         drop(g);
         self.persist_range(start);
+        self.mirror();
     }
 
     /// A reply landed and was committed. `blocks` feeds the rate selector.
@@ -172,6 +332,7 @@ impl SyncStore {
         self.fetched_blocks.fetch_add(blocks, Ordering::Relaxed);
         self.persist_range(start);
         self.persist_watermarks();
+        self.mirror();
     }
 
     /// Advance the verified watermark. Every range fully below `height`
@@ -194,6 +355,7 @@ impl SyncStore {
             g.ranges.retain(|start, _| start.saturating_add(chunk) > height);
         }
         self.persist_watermarks();
+        self.mirror();
     }
 
     /// Drop claims the verified frontier has passed. Mirrors the loop's old
@@ -201,6 +363,7 @@ impl SyncStore {
     /// behavior-preserving at that call site.
     pub fn retain_from(&self, now_synced: u64) {
         self.write().ranges.retain(|&start, _| start >= now_synced);
+        self.mirror();
     }
 
     /// Ranges tracked at all (in-flight + fetched-unverified) — the direct
@@ -213,6 +376,7 @@ impl SyncStore {
     /// Watermarks are preserved — they describe the chain, not the claims.
     pub fn clear_ranges(&self) {
         self.write().ranges.clear();
+        self.mirror();
     }
 
     /// Highest height fetched (exclusive end of the highest fetched range).
@@ -285,6 +449,9 @@ impl SyncStore {
                 g.ranges.remove(&s);
                 released.push(s);
             }
+        }
+        if !released.is_empty() {
+            self.mirror();
         }
         released
     }
@@ -400,12 +567,86 @@ impl SyncStore {
                 restored += 1;
             }
         }
+        self.mirror();
         restored
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// The FETCH QUEUE table's data path (operator-requested torrent-style view,
+    /// 2026-08-26). Asserts the snapshot reflects each lifecycle transition — a
+    /// table that silently showed stale rows would be worse than no table, since
+    /// its whole purpose is telling a stalled range from a healthy one.
+    #[test]
+    fn snapshot_tracks_the_range_lifecycle() {
+        let s = SyncStore::new(1_000);
+        assert!(s.snapshot().rows.is_empty(), "a fresh store has no live ranges");
+
+        assert!(s.claim(5_000, "peerA"));
+        assert!(s.claim(6_000, "peerB"));
+        let t = s.snapshot();
+        assert_eq!(t.chunk, 1_000);
+        assert_eq!(t.rows.len(), 2, "both claims must be visible");
+
+        let r0 = t.rows.iter().find(|r| r.start == 5_000).expect("range 5000 present");
+        assert_eq!(r0.end, 6_000, "end is start + chunk — what the table prints");
+        match &r0.state {
+            RangeState::InFlight { peer, fanout, .. } => {
+                assert_eq!(peer, "peerA", "claim's placeholder is the caller's string until dispatch");
+                assert_eq!(*fanout, 0, "claimed but not yet dispatched to any peer");
+            }
+            other => panic!("expected InFlight, got {other:?}"),
+        }
+
+        // Dispatch attributes the range to a real peer — this is what the
+        // queue view's PEER column reads instead of the "pending" placeholder.
+        s.note_peer(5_000, "12D3KooWReal");
+        let t = s.snapshot();
+        match &t.rows.iter().find(|r| r.start == 5_000).unwrap().state {
+            RangeState::InFlight { peer, fanout, .. } => {
+                assert_eq!(peer, "12D3KooWReal", "PEER column must name the real peer");
+                assert_eq!(*fanout, 1);
+            }
+            other => panic!("expected InFlight, got {other:?}"),
+        }
+        // Frontier redundancy: the same range dispatched again bumps the count
+        // and KEEPS the first peer's name (that is all this data can support).
+        s.note_peer(5_000, "12D3KooWOther");
+        match &s.snapshot().rows.iter().find(|r| r.start == 5_000).unwrap().state {
+            RangeState::InFlight { peer, fanout, .. } => {
+                assert_eq!(peer, "12D3KooWReal", "first peer's name is retained");
+                assert_eq!(*fanout, 2, "a second dispatch is counted");
+            }
+            other => panic!("expected InFlight, got {other:?}"),
+        }
+        // Attributing a range that is NOT in flight must be a no-op, never a panic.
+        s.note_peer(999_000, "12D3KooWGhost");
+        assert!(s.snapshot().rows.iter().all(|r| r.start != 999_000));
+
+        // Reply lands: the row must flip to staged, not linger as in-flight.
+        s.mark_fetched(5_000, 1_000);
+        let t = s.snapshot();
+        let r0 = t.rows.iter().find(|r| r.start == 5_000).expect("still tracked");
+        assert!(matches!(r0.state, RangeState::Fetched { .. }), "fetched range must read staged");
+        assert_eq!(t.fetched_blocks, 1_000, "blocks feed the rate readout");
+
+        // A released (timed-out) claim must DISAPPEAR — showing a dead range as
+        // in-flight forever is exactly the failure this table exists to expose.
+        s.release(6_000);
+        let t = s.snapshot();
+        assert!(t.rows.iter().all(|r| r.start != 6_000), "released range must leave the table");
+
+        // Verified watermark passes the range: it stops being live work.
+        s.mark_verified_to(6_000);
+        let t = s.snapshot();
+        assert!(t.rows.iter().all(|r| r.start != 5_000), "verified range is no longer outstanding");
+        assert_eq!(t.verified_to, 6_000);
+
+        // The global mirror the TUI reads must agree with the instance snapshot.
+        assert_eq!(live_telemetry().verified_to, 6_000, "global mirror must track the store");
+    }
     use super::*;
 
     #[test]

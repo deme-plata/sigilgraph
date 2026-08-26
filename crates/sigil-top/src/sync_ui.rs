@@ -332,11 +332,106 @@ fn fmt_age(ms: u64) -> String {
 /// data, and exactly what separates a healthy range from a wedging one. Ages are
 /// recomputed on every read (see `sigil_sync::live_telemetry`); a snapshot-time
 /// age froze at 0 and made every row look fresh, which defeated the point.
+/// A range that has LEFT the live queue, kept so the table still shows it.
+///
+/// `sigil_sync::live_telemetry()` tracks only what is currently in flight or staged, so a
+/// range that completes vanishes from the table on the very next frame. On a healthy fast
+/// sync that means rows flash past too quickly to read anything from — the table shows
+/// that work is happening but never what happened. Keeping completions for a couple of
+/// minutes turns it into a record you can actually follow, and it costs one small
+/// bounded deque.
+#[derive(Clone)]
+struct DoneRange {
+    start: u64,
+    end: u64,
+    peer: String,
+    /// How long it sat in flight before completing — the honest per-range duration.
+    wait_ms: u64,
+    at: Instant,
+    /// Reached `Verified` before leaving, as opposed to merely being staged/dropped.
+    verified: bool,
+}
+
+impl DoneRange {
+    fn blocks(&self) -> u64 {
+        self.end.saturating_sub(self.start)
+    }
+    /// Blocks per second for this range alone. The number that makes a row interesting:
+    /// it says which peer is actually fast, not just which one answered.
+    fn rate(&self) -> f64 {
+        if self.wait_ms == 0 { return 0.0; }
+        self.blocks() as f64 / (self.wait_ms as f64 / 1000.0)
+    }
+}
+
+/// How long a completed range stays on screen.
+const DONE_RETAIN: Duration = Duration::from_secs(150);
+/// Hard cap, so a very fast sync cannot grow this without bound.
+const DONE_CAP: usize = 256;
+
+type SeenMap = std::collections::HashMap<(u64, u64), (String, u64, bool)>;
+
+fn done_log() -> &'static std::sync::Mutex<std::collections::VecDeque<DoneRange>> {
+    static D: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<DoneRange>>> =
+        std::sync::OnceLock::new();
+    D.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+}
+
+fn seen_map() -> &'static std::sync::Mutex<SeenMap> {
+    static S: std::sync::OnceLock<std::sync::Mutex<SeenMap>> = std::sync::OnceLock::new();
+    S.get_or_init(|| std::sync::Mutex::new(SeenMap::new()))
+}
+
+/// Diff this frame's live rows against the previous frame; anything that disappeared has
+/// completed, so move it into the retained log.
+fn reap_completed(rows: &[sigil_sync::RangeRow]) {
+    let now = Instant::now();
+    let mut current: SeenMap = SeenMap::new();
+    for r in rows {
+        let (peer, verified) = match &r.state {
+            sigil_sync::RangeState::InFlight { peer, .. } => (peer.clone(), false),
+            sigil_sync::RangeState::Fetched { .. } => (String::new(), false),
+            sigil_sync::RangeState::Verified => (String::new(), true),
+        };
+        current.insert((r.start, r.end), (peer, r.age_ms, verified));
+    }
+    let Ok(mut seen) = seen_map().lock() else { return };
+    let Ok(mut done) = done_log().lock() else { return };
+    for (k, (peer, age_ms, verified)) in seen.iter() {
+        if !current.contains_key(k) {
+            done.push_front(DoneRange {
+                start: k.0,
+                end: k.1,
+                peer: peer.clone(),
+                wait_ms: *age_ms,
+                at: now,
+                verified: *verified,
+            });
+        }
+    }
+    *seen = current;
+    while done.len() > DONE_CAP {
+        done.pop_back();
+    }
+    while done.back().is_some_and(|d| now.duration_since(d.at) > DONE_RETAIN) {
+        done.pop_back();
+    }
+}
+
 pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let s = &app.p2p_state;
     let t = sigil_sync::live_telemetry();
+    // Move anything that left the live queue since the last frame into the retained log,
+    // so the table keeps showing completed work instead of blanking it instantly.
+    reap_completed(&t.rows);
 
-    let block = card_block(" ◈ FETCH QUEUES · sigil-g0", C_NEON_CYAN);
+    // `card_block` wants a &'static str. Build the title once and keep it — leaking on
+    // every frame would be a slow memory leak in a program that redraws continuously.
+    static QUEUES_TITLE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let block = card_block(
+        QUEUES_TITLE.get_or_init(|| format!(" ◈ FETCH QUEUES · {}", build_network_id())).as_str(),
+        C_NEON_CYAN,
+    );
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height < 4 {
@@ -405,7 +500,8 @@ pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
     // ---- the queue table ----
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
-        format!(" {:<3} {:<26} {:<11} {:<12} {:<18} {:>8}", "#", "RANGE", "WAIT", "STATE", "PEER", "AGE"),
+        format!(" {:<3} {:<26} {:>7} {:<11} {:<12} {:<18} {:>9} {:>8}",
+            "#", "RANGE", "BLOCKS", "WAIT", "STATE", "PEER", "blk/s", "AGE"),
         Style::default().fg(C_DIM).add_modifier(Modifier::BOLD),
     )));
     if t.rows.is_empty() {
@@ -446,12 +542,26 @@ pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
                 }
                 _ => ("─────────".to_string(), C_DIM),
             };
+            // BLOCKS and blk/s per range: the table used to say a range was in flight
+            // and how long it had waited, but not how BIG it was — so a slow row and a
+            // huge row looked identical. Per-range throughput is what identifies a slow
+            // peer rather than merely a slow moment.
+            let blocks = r.end.saturating_sub(r.start);
+            let live_rate = if r.age_ms > 0 { blocks as f64 / (r.age_ms as f64 / 1000.0) } else { 0.0 };
+            let rate_txt = if matches!(r.state, sigil_sync::RangeState::InFlight { .. }) && live_rate > 0.0 {
+                format!("{:.0}", live_rate)
+            } else { "—".to_string() };
+            let rate_col = if live_rate >= 1000.0 { C_NEON_GREEN }
+                else if live_rate >= 100.0 { C_GOLD }
+                else { C_DIM };
             lines.push(Line::from(vec![
                 Span::styled(format!(" {:<3} ", i + 1), Style::default().fg(C_DIM)),
                 Span::styled(format!("{:<26} ", format!("{}..{}", group(r.start), group(r.end))), Style::default().fg(C_VBRIGHT)),
+                Span::styled(format!("{:>7} ", group(blocks)), Style::default().fg(C_NEON_CYAN)),
                 Span::styled(format!("{bar:<11}"), Style::default().fg(bcol)),
                 Span::styled(format!("{stxt:<12}"), Style::default().fg(scol)),
                 Span::styled(format!("{peer:<18}"), Style::default().fg(C_DIM)),
+                Span::styled(format!("{rate_txt:>9} "), Style::default().fg(rate_col)),
                 Span::styled(format!("{:>8}", fmt_age(r.age_ms)), Style::default().fg(if r.age_ms > WAIT_FULL_MS { C_RED } else { C_DIM })),
             ]));
         }
@@ -460,6 +570,58 @@ pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
                 format!("  … {} more — enlarge the window", rows.len() - room),
                 Style::default().fg(C_DIM),
             )));
+        }
+    }
+
+    // ── COMPLETED: ranges that have left the live queue ─────────────────────────────
+    //
+    // Kept for DONE_RETAIN so the table reads as a record rather than a strobe. Each row
+    // carries what the live view could never show, because the range was gone before it
+    // could: how many blocks it actually carried, how long it took start to finish, and
+    // the throughput that implies — which is the number that tells a fast peer from a
+    // slow one.
+    if let Ok(done) = done_log().lock() {
+        let used = lines.len();
+        let left = (tbl.height as usize).saturating_sub(used + 1);
+        if left > 1 && !done.is_empty() {
+            let now = Instant::now();
+            let fresh: Vec<&DoneRange> =
+                done.iter().filter(|d| now.duration_since(d.at) <= DONE_RETAIN).collect();
+            if !fresh.is_empty() {
+                let total_blocks: u64 = fresh.iter().map(|d| d.blocks()).sum();
+                let best = fresh.iter().map(|d| d.rate()).fold(0.0_f64, f64::max);
+                lines.push(Line::from(vec![
+                    Span::styled(" ✔ COMPLETED", Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+                    dim(&format!(" — last {}s: ", DONE_RETAIN.as_secs())),
+                    Span::styled(format!("{}", fresh.len()), Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
+                    dim(" ranges  "),
+                    Span::styled(group(total_blocks), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+                    dim(" blocks  peak "),
+                    Span::styled(format!("{:.0} blk/s", best), Style::default().fg(C_GOLD)),
+                ]));
+                for d in fresh.iter().take(left.saturating_sub(1)) {
+                    let age = now.duration_since(d.at).as_secs();
+                    let rate = d.rate();
+                    let rcol = if rate >= 1000.0 { C_NEON_GREEN }
+                        else if rate >= 100.0 { C_GOLD }
+                        else { C_DIM };
+                    // Fade the marker with age so the eye lands on what just happened.
+                    let mark_col = if age < 10 { C_NEON_GREEN } else if age < 45 { C_GOLD } else { C_DIM };
+                    let peer = if d.peer.is_empty() { "—".to_string() }
+                        else if d.peer.len() > 17 { format!("{}…", &d.peer[..16]) }
+                        else { d.peer.clone() };
+                    lines.push(Line::from(vec![
+                        Span::styled(if d.verified { "  ⛓ " } else { "  ✔ " }, Style::default().fg(mark_col)),
+                        Span::styled(format!("{:<26} ", format!("{}..{}", group(d.start), group(d.end))), Style::default().fg(C_DIM)),
+                        Span::styled(format!("{:>7} ", group(d.blocks())), Style::default().fg(C_NEON_CYAN)),
+                        Span::styled(format!("{:<11}", fmt_age(d.wait_ms)), Style::default().fg(C_DIM)),
+                        Span::styled(format!("{:<12}", if d.verified { "⛓ verified" } else { "✔ done" }), Style::default().fg(mark_col)),
+                        Span::styled(format!("{peer:<18}"), Style::default().fg(C_DIM)),
+                        Span::styled(format!("{rate:>9.0} "), Style::default().fg(rcol)),
+                        Span::styled(format!("{:>8}", format!("{age}s ago")), Style::default().fg(C_DIM)),
+                    ]));
+                }
+            }
         }
     }
     f.render_widget(Paragraph::new(lines), tbl);

@@ -20,9 +20,16 @@ pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let [head, rates, tally, netrow, solverow, acctrow, body, hint] = Layout::vertical([
+    // Two extra rows for the SHIELDED panel (2026-08-27). A miner whose wallet has
+    // published a shield key is paid in notes, so `/v1/balance` — the number every other
+    // surface shows them — is frozen at whatever they held before registering, forever.
+    // Live at the time this was added: 7.77 SIGIL transparent and unmoving, while the
+    // same rig's shielded holdings grew past 100 SIGIL. Those two rows are the difference
+    // between "mining is broken" and "mining is working and private".
+    let [head, rates, tally, netrow, solverow, acctrow, shrow, poolrow, body, hint] = Layout::vertical([
         Constraint::Length(1), Constraint::Length(1), Constraint::Length(1), Constraint::Length(1),
-        Constraint::Length(1), Constraint::Length(1), Constraint::Min(0), Constraint::Length(1),
+        Constraint::Length(1), Constraint::Length(1), Constraint::Length(1), Constraint::Length(1),
+        Constraint::Min(0), Constraint::Length(1),
     ]).areas(inner);
 
     let wallet = miner_wallet();
@@ -59,14 +66,33 @@ pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
     ])), tally);
 
     // v7.0.8: NETWORK row — total combined power of all miners + live difficulty + block cadence,
-    // and your slice of it. net_hps ≈ 2^bits / block_interval (estimated from the challenge).
-    let your_share = if s.net_hps > 1.0 { (s.hashrate / s.net_hps * 100.0).clamp(0.0, 100.0) } else { 0.0 };
+    // and your slice of it. net_hps is the SERVER's live sum of every active miner's
+    // self-reported rate (sigil-api::mining::MiningBridge::report_hps/stats — each
+    // wallet's LATEST reported rate, pruned after 30s idle), not a difficulty-derived
+    // estimate (an earlier version of this comment said otherwise; corrected 2026-08-24).
+    //
+    // 2026-08-24: "your share" used to be silently clamped to 100% — so right after
+    // starting to mine (or any time your LOCALLY-measured `hashrate`, which updates
+    // continuously, has ramped ahead of the rate you last PUSHED to the server, which
+    // only refreshes on each challenge fetch), the clamp hid a real, informative
+    // number behind a falsely-clean "100.0%". Operator-reported live: two freshly-
+    // started rigs (uptime <5min) both showed personal hashrate exceeding the
+    // "network total" while share still read 100.0%. Now shown uncapped, with an
+    // explicit "(ramping)" note above 100% so it reads as "you just started, the
+    // server hasn't caught up yet" rather than looking like corrupted data.
+    let your_share_raw = if s.net_hps > 1.0 { s.hashrate / s.net_hps * 100.0 } else { 0.0 };
+    let ramping = your_share_raw > 100.0;
+    let your_share_txt = if ramping {
+        format!("{your_share_raw:.0}% (ramping — server hasn't caught up to your latest rate yet)")
+    } else {
+        format!("{your_share_raw:.1}%")
+    };
     f.render_widget(Paragraph::new(Line::from(vec![
         dim(" ◈ network "), Span::styled(engine::format_hps(s.net_hps), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
         dim(" total power"),
         dim("   difficulty "), Span::styled(format!("{} bits", s.net_bits), Style::default().fg(C_NEON_GOLD)),
         dim("   block "), Span::styled(format!("{:.1}s", s.net_block_ms / 1000.0), Style::default().fg(C_VBRIGHT)),
-        dim("   your share "), Span::styled(format!("{your_share:.1}%"), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+        dim("   your share "), Span::styled(your_share_txt, Style::default().fg(if ramping { C_NEON_GOLD } else { C_NEON_GREEN }).add_modifier(Modifier::BOLD)),
     ])), netrow);
 
     // ── solve-time sparkline (last solve relative to the session max) ─────────
@@ -103,6 +129,76 @@ pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
     // ── LANE-B v0.50: split the lower area — recent MINE-CHAIN blocks (left) vs
     // the live share log (right). The mine-chain is THIS miner's own chain; the
     // produce-tip is what the node syncs/serves — both shown so they never blur.
+    // ── SHIELDED: what this seed actually owns, and the pool it lives in ────────────
+    {
+        #[cfg(feature = "shield-register")]
+        let snap = crate::shield_setup::latest_shielded();
+        #[cfg(not(feature = "shield-register"))]
+        let snap: Option<()> = None;
+
+        #[cfg(feature = "shield-register")]
+        match snap {
+            Some(sn) => {
+                let spendable = sn.balance as f64 / 1e8;
+                f.render_widget(Paragraph::new(Line::from(vec![
+                    Span::styled(" 🛡 SHIELDED", Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+                    dim("  yours "),
+                    Span::styled(format!("{spendable:.8} SIGIL"), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+                    dim("  notes "),
+                    Span::styled(format!("{}", sn.owned), Style::default().fg(C_VBRIGHT)),
+                    dim(if sn.spent > 0 { "  spent " } else { "" }),
+                    Span::styled(
+                        if sn.spent > 0 { format!("{}", sn.spent) } else { String::new() },
+                        Style::default().fg(C_DIM),
+                    ),
+                    dim("   (transparent balance stays 0 — this is the real one)"),
+                ])), shrow);
+
+                // Pool fill matters to a miner in a way it does not to anyone else: at
+                // capacity the pool ROTATES into a fresh generation, and on a build without
+                // rotation it instead stops accepting notes and coinbases are dropped whole.
+                let pct = sn.fill_pct();
+                let fillcol = if pct >= 90.0 { C_NEON_PINK }
+                    else if pct >= 70.0 { C_NEON_GOLD }
+                    else { C_NEON_CYAN };
+                let bars = ((pct / 5.0).round() as usize).min(20);
+                let bar: String = "█".repeat(bars) + &"░".repeat(20 - bars);
+                f.render_widget(Paragraph::new(Line::from(vec![
+                    dim(" pool "),
+                    Span::styled(bar, Style::default().fg(fillcol)),
+                    Span::styled(format!(" {pct:.1}%"), Style::default().fg(fillcol).add_modifier(Modifier::BOLD)),
+                    dim("  "),
+                    Span::styled(format!("{}/{}", group(sn.pool_notes as u64), group(sn.pool_capacity as u64)),
+                        Style::default().fg(C_VBRIGHT)),
+                    dim("  locked "),
+                    Span::styled(format!("{:.2}", sn.pool_locked as f64 / 1e8), Style::default().fg(C_GOLD)),
+                    dim("  epoch "),
+                    Span::styled(format!("{}", sn.epoch), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
+                    dim(if sn.sealed_epochs > 0 { "  sealed " } else { "" }),
+                    Span::styled(
+                        if sn.sealed_epochs > 0 { format!("{}", sn.sealed_epochs) } else { String::new() },
+                        Style::default().fg(C_NEON_GREEN),
+                    ),
+                    dim("  registered "),
+                    Span::styled(format!("{}", sn.registered), Style::default().fg(C_DIM)),
+                ])), poolrow);
+            }
+            None => {
+                f.render_widget(Paragraph::new(Line::from(vec![
+                    Span::styled(" 🛡 SHIELDED", Style::default().fg(C_DIM).add_modifier(Modifier::BOLD)),
+                    dim("  no seed — set SIGIL_MINE_SEED to see private rewards (rewards stay transparent without it)"),
+                ])), shrow);
+                f.render_widget(Paragraph::new(Line::from(dim(" pool  —"))), poolrow);
+            }
+        }
+        #[cfg(not(feature = "shield-register"))]
+        {
+            let _ = snap;
+            f.render_widget(Paragraph::new(Line::from(dim(" 🛡 SHIELDED  built without shield-register"))), shrow);
+            f.render_widget(Paragraph::new(Line::from(dim(" pool  —"))), poolrow);
+        }
+    }
+
     let [mined_col, log_col] = Layout::horizontal([
         Constraint::Percentage(48), Constraint::Percentage(52),
     ]).spacing(1).areas(body);

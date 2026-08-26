@@ -1542,6 +1542,11 @@ fn main() {
                             shield_setup::spawn_registration_keeper(&url, seed, |line| {
                                 println!("  {line}");
                             });
+                            // Keep the SHIELDED balance visible too. A registered wallet is
+                            // paid in notes, so its transparent balance is frozen forever —
+                            // showing only that number is what made a miner earning ~4
+                            // SIGIL/min believe they were earning nothing.
+                            shield_setup::spawn_shielded_scanner(&url, seed);
                             derived
                         }
                         None => {
@@ -2348,6 +2353,7 @@ fn start_mining(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> mpsc::Re
             shield_setup::spawn_registration_keeper(&engine_node_url(), &seed_hex, move |line| {
                 let _ = reg_tx.send(line);
             });
+            shield_setup::spawn_shielded_scanner(&engine_node_url(), &seed_hex);
         }
         let mut req_nonce: u64 = 0; // strictly-increasing per-wallet replay guard (ms floor)
         let difficulty_bits: u32 = std::env::var("SIGIL_MINE_DIFFICULTY").ok()
@@ -2805,10 +2811,37 @@ fn relaunch_new_binary(version: &str) -> bool {
 struct Kalman1D { x: f64, p: f64, q: f64, r: f64, init: bool }
 impl Kalman1D {
     fn new() -> Self { Self { x: 0.0, p: 1.0, q: 6.0, r: 180.0, init: false } }
+
+    /// Force the estimate to `z`, discarding the accumulated model confidence.
+    ///
+    /// For a genuine REGIME CHANGE rather than a noisy sample. The filter's whole premise
+    /// is that the underlying rate is roughly constant and the measurement is noisy; when
+    /// sync leaves bulk import and starts following the frontier, that premise is simply
+    /// false — the rate really did drop by two or three orders of magnitude, and slewing
+    /// toward it is not smoothing, it is lying slowly.
+    fn reset_to(&mut self, z: f64) {
+        if !z.is_finite() { return; }
+        self.x = z.max(0.0);
+        self.p = 1.0;
+        self.init = true;
+    }
+
     fn update(&mut self, z: f64) -> f64 {
         if !z.is_finite() { return self.x; }
         if !self.init { self.x = z; self.init = true; return self.x; }
         self.p += self.q;                       // predict
+        // ADAPTIVE GAIN. With the fixed q=6/r=180 pair the steady-state gain is
+        // k = 36/216 = 0.167, so each sample moves the estimate only a sixth of the way to
+        // the measurement — ~34 samples to cross a 400x drop. That is the right amount of
+        // scepticism for NOISE and far too much for a real change. A residual much larger
+        // than the estimate itself is not noise (the measurement noise model says a sample
+        // lands near x); inflating p in proportion lets the filter believe the new
+        // measurement within a couple of samples and then settle back to being sceptical.
+        let resid = (z - self.x).abs();
+        let scale = self.x.abs().max(z.abs()).max(1.0);
+        if resid > 0.5 * scale {
+            self.p += self.r * (resid / scale).min(4.0);
+        }
         let k = self.p / (self.p + self.r);     // Kalman gain
         self.x += k * (z - self.x);             // correct
         self.p *= 1.0 - k;
@@ -4477,9 +4510,62 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                 {
                     let dt = t1.duration_since(t0).as_secs_f64();
                     if dt >= 1.0 {
-                        app.p2p_rate = b1.saturating_sub(b0) as f64 / dt;
-                        // v0.33.3: feed the measured rate into the Kalman filter for a stable ETA.
-                        app.sync_kf.update(app.p2p_rate);
+                        let long_rate = b1.saturating_sub(b0) as f64 / dt;
+
+                        // REGIME CHANGE, DOWNWARD (2026-08-27). `CATCHUP_JUMP` above already
+                        // resets the window when the metric LEAPS UP, so an instantaneous
+                        // catch-up snap cannot masquerade as a sustained rate. The mirror case
+                        // had no such guard, and it is the one an operator actually stares at:
+                        // bulk import runs at thousands of blk/s, then the sync reaches the
+                        // frontier and drops to the network's real ~10 blk/s. Both effects then
+                        // conspire to keep the old number on screen:
+                        //
+                        //   1. the 30 s trailing window still spans mostly BULK samples, so the
+                        //      measurement itself stays high for a further 30 s; and
+                        //   2. the Kalman gain (0.167 steady-state) needs ~34 more samples to
+                        //      cross a 400x drop.
+                        //
+                        // Reported live at 98.6% synced: "4.6k blk/s even though its more down
+                        // to 10". The panel was averaging across a boundary where averaging has
+                        // no meaning — those are two different processes, not one noisy one.
+                        //
+                        // So: measure a SHORT trailing window too, and when it disagrees with
+                        // the long one by a wide margin, believe the recent past. Discard the
+                        // stale bulk samples and snap the filter rather than slewing.
+                        const SHORT_WINDOW_SECS: f64 = 5.0;
+                        let short_rate = app
+                            .p2p_rate_samples
+                            .iter()
+                            .rev()
+                            .find(|(t, _)| t1.duration_since(*t).as_secs_f64() >= SHORT_WINDOW_SECS)
+                            .and_then(|&(ts, bs)| {
+                                let sdt = t1.duration_since(ts).as_secs_f64();
+                                (sdt >= 1.0).then(|| b1.saturating_sub(bs) as f64 / sdt)
+                            });
+
+                        // Only a COLLAPSE counts, and only a large one: a quarter of the long
+                        // rate, and at least 100 blk/s of absolute difference so ordinary
+                        // frontier jitter (12 -> 4 blk/s) never trips it. Those small moves are
+                        // exactly what the filter is good at and should keep handling.
+                        let collapsed = matches!(short_rate, Some(sr)
+                            if long_rate > 0.0 && sr < long_rate * 0.25 && long_rate - sr > 100.0);
+
+                        if let (true, Some(sr)) = (collapsed, short_rate) {
+                            while app.p2p_rate_samples.len() > 1
+                                && now
+                                    .duration_since(app.p2p_rate_samples[0].0)
+                                    .as_secs_f64()
+                                    > SHORT_WINDOW_SECS
+                            {
+                                app.p2p_rate_samples.pop_front();
+                            }
+                            app.p2p_rate = sr;
+                            app.sync_kf.reset_to(sr);
+                        } else {
+                            app.p2p_rate = long_rate;
+                            // v0.33.3: feed the measured rate into the Kalman filter for a stable ETA.
+                            app.sync_kf.update(app.p2p_rate);
+                        }
                     }
                 }
                 for block in p2p.drain_new_blocks() {
@@ -5172,6 +5258,73 @@ mod pure_helpers_tests {
     //! Coverage for the pure money/format/version helpers (Tier 3 — sigil-top
     //! was the worst-density crate at 581 loc/test). All deterministic, no I/O.
     use super::*;
+
+    /// How many samples the rate filter needs to cross the bulk→frontier cliff.
+    ///
+    /// The operator saw "4.6k blk/s" at 98.6% synced while the node was really doing ~10.
+    /// That is the moment bulk import ends and the frontier follow begins — a genuine
+    /// regime change, not a noisy reading.
+    fn samples_to_converge(from: f64, to: f64) -> usize {
+        let mut kf = Kalman1D::new();
+        for _ in 0..40 {
+            kf.update(from);
+        }
+        assert!((kf.x - from).abs() < from * 0.05, "filter should settle on the bulk rate first");
+        for n in 1..=200 {
+            kf.update(to);
+            // "believable" = within 2x of the truth; at 10 blk/s that is <= 20 on screen.
+            if kf.x <= to * 2.0 {
+                return n;
+            }
+        }
+        usize::MAX
+    }
+
+    #[test]
+    fn rate_filter_crosses_a_regime_change_quickly() {
+        let n = samples_to_converge(4_600.0, 10.0);
+        // The fixed-gain filter (steady-state k = 36/216 = 0.167) needed ~34 samples: with a
+        // ~1 s refresh that is over half a minute of showing a number 400x too high, right at
+        // the point an operator is watching to see whether sync has finished.
+        assert!(
+            n <= 8,
+            "REGRESSION: rate filter took {n} samples to cross a 4600 -> 10 blk/s collapse; \
+             the adaptive gain should cross it in a handful"
+        );
+    }
+
+    /// The adaptive gain must not turn the filter into a passthrough — smoothing ordinary
+    /// jitter is the whole reason it exists, and a twitchy readout was the ORIGINAL
+    /// complaint that motivated the filter in the first place.
+    #[test]
+    fn rate_filter_still_smooths_ordinary_jitter() {
+        let mut kf = Kalman1D::new();
+        for _ in 0..40 {
+            kf.update(100.0);
+        }
+        let settled = kf.x;
+        // A single 20% outlier must barely move the estimate.
+        kf.update(120.0);
+        assert!(
+            (kf.x - settled).abs() < 6.0,
+            "a lone 20% blip moved the estimate by {:.2} — too twitchy",
+            (kf.x - settled).abs()
+        );
+    }
+
+    /// `reset_to` is the explicit escape hatch the caller uses once it has DECIDED a
+    /// collapse happened; it must land exactly, not slew.
+    #[test]
+    fn reset_to_lands_exactly_and_stays_usable() {
+        let mut kf = Kalman1D::new();
+        for _ in 0..40 { kf.update(4_600.0); }
+        kf.reset_to(10.0);
+        assert_eq!(kf.x, 10.0, "reset must land exactly on the new rate");
+        kf.update(11.0);
+        assert!(kf.x > 9.0 && kf.x < 12.0, "and the filter must keep working afterwards");
+        kf.reset_to(f64::NAN);
+        assert!(kf.x.is_finite(), "a non-finite reset must be ignored, not poison the estimate");
+    }
 
     #[test]
     fn hex_to_32_roundtrips_and_rejects_bad_input() {

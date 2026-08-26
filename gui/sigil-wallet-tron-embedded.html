@@ -632,6 +632,27 @@ window.lucide={createIcons:render};render();})();</script>
       const priv = sha3_256(new TextEncoder().encode(String(mnemonic).trim()));
       return { priv, address: hex(ed.getPublicKey(priv)) };
     };
+    // 2026-08-26: a wallet credited by mining (SIGIL_MINE_SEED) can NEVER sign
+    // here via sigilDeriveFrom above -- that hashes whatever text you type
+    // (sha3_256(mnemonic)), but miner_keypair() (sigil-top's real mining
+    // signer) uses the seed's raw bytes directly (hex_to_32 -> from_seed),
+    // an unrelated derivation. No typed phrase can ever land on a
+    // seed-derived address through the text path, so a miner's own credited
+    // wallet was permanently unable to Shield/Send/Swap/Bridge from itself.
+    // This tries the SAME raw-seed scheme first when the input looks like a
+    // 64-hex seed, falling back to the original phrase-hash scheme otherwise
+    // (or if the raw-seed derivation doesn't match who's supposed to sign).
+    window.sigilDeriveAuto = (input, expectedAddr) => {
+      const s = String(input).trim();
+      const hexSeed = /^(0x)?[0-9a-fA-F]{64}$/.test(s) ? s.replace(/^0x/i, '') : null;
+      if (hexSeed) {
+        const raw = new Uint8Array(32);
+        for (let i = 0; i < 32; i++) raw[i] = parseInt(hexSeed.substr(i * 2, 2), 16);
+        const seedKp = { priv: raw, address: hex(ed.getPublicKey(raw)) };
+        if (!expectedAddr || seedKp.address === expectedAddr) return seedKp;
+      }
+      return window.sigilDeriveFrom(s);
+    };
     window.sigilSign = (priv, action, fields, reqNonce) =>
       hex(ed.sign(new TextEncoder().encode(`sigil-rpc/v1|${action}|${fields.join('|')}|nonce=${reqNonce}`), priv));
     window.sigilCryptoReady = true;
@@ -1083,10 +1104,10 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     if(!window.sigilCryptoReady || !window.__sigilShield){ sendStatus('Signer still loading — try again in a moment.', '#fbbf24'); return; }
     var mnemonic = window.__sigilMnemonic;
     if(!mnemonic){
-      mnemonic = (prompt('Enter your recovery phrase to sign this shield deposit.\n(kept in memory for this session only — never saved)')||'').trim();
+      mnemonic = (prompt('Enter your recovery phrase (or 64-hex mining seed) to sign this shield deposit.\n(kept in memory for this session only — never saved)')||'').trim();
       if(!mnemonic){ sendStatus('Cancelled — recovery phrase required to sign.', '#fbbf24'); return; }
     }
-    var kp; try{ kp=window.sigilDeriveFrom(mnemonic); }catch(e){ window.__sigilMnemonic=null; sendStatus('Could not derive a key from that phrase.', '#ff8a8a'); return; }
+    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ window.__sigilMnemonic=null; sendStatus('Could not derive a key from that phrase.', '#ff8a8a'); return; }
     if(kp.address!==from){ window.__sigilMnemonic=null; sendStatus('That phrase does not match this wallet address.', '#ff8a8a'); return; }
     window.__sigilMnemonic=mnemonic;
     try{ localStorage.setItem('sigil-wallet-mnemonic', mnemonic); }catch(e){}
@@ -1235,10 +1256,10 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
 
     var mnemonic = window.__sigilMnemonic;
     if(!mnemonic){
-      mnemonic = (prompt('Enter your recovery phrase to build this private send.\n(kept in memory for this session only — never saved)')||'').trim();
+      mnemonic = (prompt('Enter your recovery phrase (or 64-hex mining seed) to build this private send.\n(kept in memory for this session only — never saved)')||'').trim();
       if(!mnemonic){ privMsg('Cancelled — recovery phrase required.', '#fbbf24'); return; }
     }
-    var kp; try{ kp=window.sigilDeriveFrom(mnemonic); }catch(e){ window.__sigilMnemonic=null; privMsg('Could not derive a key from that phrase.', '#ff8a8a'); return; }
+    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ window.__sigilMnemonic=null; privMsg('Could not derive a key from that phrase.', '#ff8a8a'); return; }
     if(kp.address!==from){ window.__sigilMnemonic=null; privMsg('That phrase does not match this wallet address.', '#ff8a8a'); return; }
     window.__sigilMnemonic=mnemonic;
     try{ localStorage.setItem('sigil-wallet-mnemonic', mnemonic); }catch(e){}
@@ -1520,10 +1541,10 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     if(!window.sigilCryptoReady){ msgEl.textContent='Signer still loading — try again in a moment.'; return; }
     var mnemonic=window.__sigilMnemonic;
     if(!mnemonic){
-      mnemonic=(prompt('Enter your recovery phrase to sign this swap.\n(kept in memory for this session only — never saved)')||'').trim();
+      mnemonic=(prompt('Enter your recovery phrase (or 64-hex mining seed) to sign this swap.\n(kept in memory for this session only — never saved)')||'').trim();
       if(!mnemonic){ msgEl.textContent='Swap cancelled — recovery phrase required to sign.'; msgEl.style.color='#fbbf24'; return; }
     }
-    var kp; try{ kp=window.sigilDeriveFrom(mnemonic); }catch(e){ window.__sigilMnemonic=null; msgEl.textContent='Could not derive a key from that phrase.'; msgEl.style.color='#ff8a8a'; return; }
+    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ window.__sigilMnemonic=null; msgEl.textContent='Could not derive a key from that phrase.'; msgEl.style.color='#ff8a8a'; return; }
     if(kp.address!==from){ window.__sigilMnemonic=null; msgEl.textContent='That phrase does not match this wallet address.'; msgEl.style.color='#ff8a8a'; return; }
     window.__sigilMnemonic=mnemonic;
     try{ localStorage.setItem('sigil-wallet-mnemonic', mnemonic); }catch(e){}
@@ -1756,10 +1777,10 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     if(!window.sigilCryptoReady){ bridgeStatus('Signer still loading — try again in a moment.', '#fbbf24'); return; }
     var mnemonic=window.__sigilMnemonic;
     if(!mnemonic){
-      mnemonic=(prompt('Enter your recovery phrase to sign this bridge lock.\n(kept in memory for this session only — never saved)')||'').trim();
+      mnemonic=(prompt('Enter your recovery phrase (or 64-hex mining seed) to sign this bridge lock.\n(kept in memory for this session only — never saved)')||'').trim();
       if(!mnemonic){ bridgeStatus('Bridge cancelled — recovery phrase required to sign.', '#fbbf24'); return; }
     }
-    var kp; try{ kp=window.sigilDeriveFrom(mnemonic); }catch(e){ window.__sigilMnemonic=null; bridgeStatus('Could not derive a key from that phrase.', '#ff8a8a'); return; }
+    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ window.__sigilMnemonic=null; bridgeStatus('Could not derive a key from that phrase.', '#ff8a8a'); return; }
     if(kp.address!==from){ window.__sigilMnemonic=null; bridgeStatus('That phrase does not match this wallet address.', '#ff8a8a'); return; }
     window.__sigilMnemonic=mnemonic;
     try{ localStorage.setItem('sigil-wallet-mnemonic', mnemonic); }catch(e){}

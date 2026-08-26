@@ -148,6 +148,23 @@ const POLL_EVERY: Duration = Duration::from_secs(60);
 /// rejecting the tx) — long enough not to hammer, short enough to recover unattended.
 const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(120);
 
+/// How often a CONFIRMED registration is re-verified against the chain.
+///
+/// The keeper used to `return` the moment it saw its own key registered, on the
+/// reasonable-sounding assumption that registration is permanent. It is not: chain state
+/// can be replaced wholesale. When SIGIL was cut over from `sigil-g0` to `sigil-g1` on
+/// 2026-08-26 every registration in the old state ceased to exist, and every rig already
+/// running had long since exited this thread — so they kept mining, forever, with
+/// TRANSPARENT rewards and no indication anything had changed. Measured on g1 the morning
+/// after: one wallet registered, while four rigs belonging to a second wallet mined
+/// unregistered for hours.
+///
+/// Staying alive and re-checking costs one cheap GET per interval and makes registration
+/// self-healing across a genesis change, a state rollback, or any other way the entry can
+/// vanish — which is what "automatic" has to mean if it is to survive contact with a
+/// chain that can be reset.
+const RECHECK_WHEN_REGISTERED: Duration = Duration::from_secs(10 * 60);
+
 /// What the chain currently says about a wallet's shielded address.
 pub enum RegistrationState {
     /// Registered, and the published shield key is the one THIS seed derives — block
@@ -248,13 +265,25 @@ where
 
     Some(std::thread::spawn(move || {
         let short = wallet_hex.chars().take(8).collect::<String>();
+        // Whether we have already told the operator this wallet is registered. Also the
+        // memory that lets a later disappearance be reported as a LOSS rather than as a
+        // first-time registration.
+        let mut announced_registered = false;
         loop {
             match registration_state(&node, &wallet_hex, &pk_shield) {
                 RegistrationState::Ours => {
-                    log(format!(
-                        "🔐 {short}… is registered for shielded mining — rewards mint as private notes"
-                    ));
-                    return;
+                    // Announce it ONCE, then keep watching. Re-checking (rather than
+                    // returning) is what makes this survive a chain reset — see
+                    // `RECHECK_WHEN_REGISTERED`. Logging every ten minutes would be noise,
+                    // so only the first confirmation, and any later LOSS, is reported.
+                    if !announced_registered {
+                        announced_registered = true;
+                        log(format!(
+                            "🔐 {short}… is registered for shielded mining — rewards mint as private notes"
+                        ));
+                    }
+                    std::thread::sleep(RECHECK_WHEN_REGISTERED);
+                    continue;
                 }
                 RegistrationState::Foreign { pk_shield: other } => {
                     log(format!(
@@ -270,7 +299,19 @@ where
                     std::thread::sleep(RETRY_AFTER_FAILURE);
                     continue;
                 }
-                RegistrationState::Absent => {}
+                RegistrationState::Absent => {
+                    // Absent AFTER we had already confirmed it means the entry did not
+                    // merely never exist — it DISAPPEARED, which on this chain means the
+                    // state was replaced under us (the g0→g1 cutover being the worked
+                    // example). Say so, then fall through and re-register.
+                    if announced_registered {
+                        announced_registered = false;
+                        log(format!(
+                            "⚠ {short}… is no longer registered — the chain state appears to have \
+                             been replaced. Re-registering so rewards go back to being private."
+                        ));
+                    }
+                }
             }
 
             match register_for_shielded_mining(&node, &seed) {
@@ -318,7 +359,13 @@ where
                     "✓ {short}… shielded registration confirmed on-chain — every reward from here \
                      on is a private note"
                 ));
-                return;
+                // Confirmed, but NOT done: the top of the loop keeps re-verifying so the
+                // registration is restored automatically if the chain state is ever
+                // replaced. Returning here was the original bug — see
+                // `RECHECK_WHEN_REGISTERED`.
+                announced_registered = true;
+                std::thread::sleep(RECHECK_WHEN_REGISTERED);
+                continue;
             }
             log(format!(
                 "⚠ {short}… shielded registration did not settle within {} min — resubmitting",

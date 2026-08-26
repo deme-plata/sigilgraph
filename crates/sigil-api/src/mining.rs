@@ -78,6 +78,49 @@ pub struct MinerEntry {
     pub hash_rate: f64,
     pub last_seen_secs_ago: u64,
     pub kind: MinerKind,
+    /// Has this wallet published a shield key (`POST /v1/shielded/register`)?
+    ///
+    /// 2026-08-26. Without this column the single most important fact about the
+    /// network's privacy was invisible: the pool only grows from the rewards of
+    /// REGISTERED miners, and nothing anywhere reported who was registered. Live
+    /// at the time this was added: 86 MH/s across 5 rigs, 8,564 blocks accepted —
+    /// and a shielded pool holding exactly one note, because not one of them had
+    /// registered and no dial said so. `None` when the caller could not read
+    /// chain state (a poisoned lock), which is honestly different from `false`.
+    pub shielded: Option<bool>,
+}
+
+/// Stamp each rig with whether its wallet has published a shield key, and total
+/// the hashrate that has — the share of network power that actually grows the
+/// anonymity set, since only a registered wallet's coinbase mints a pool note.
+///
+/// Pure (the registry lookup is injected) precisely so the arithmetic that a
+/// dashboard will quote is testable without standing up an `AppState`, a chain,
+/// or a node. `lookup` returns `None` when chain state could not be read at all,
+/// which propagates to `MinerEntry::shielded = None` — honestly different from
+/// `Some(false)`, which would read as "confirmed not registered".
+///
+/// A wallet with several rigs is counted per rig, exactly like `net_hps`, so the
+/// returned value is directly comparable to it.
+pub fn annotate_shielded(
+    miners: &mut [MinerEntry],
+    lookup: impl Fn(&WalletId) -> Option<bool>,
+) -> f64 {
+    let mut hps = 0.0f64;
+    for m in miners.iter_mut() {
+        let w: Option<WalletId> = hex::decode(&m.wallet).ok().and_then(|v| v.try_into().ok());
+        let is_shielded = w.and_then(|w| lookup(&w));
+        if is_shielded == Some(true) {
+            hps += m.hash_rate;
+        }
+        m.shielded = is_shielded;
+    }
+    hps
+}
+
+/// `shielded / total` as a percentage; `0.0` on an idle network rather than NaN.
+pub fn shielded_pct(shielded_hps: f64, net_hps: f64) -> f64 {
+    if net_hps > 0.0 { shielded_hps / net_hps * 100.0 } else { 0.0 }
 }
 
 /// Domain-separated per-height challenge seed, bound to the frontier parent:
@@ -234,6 +277,49 @@ pub fn share_ease_bits() -> u32 {
 /// uses for its pool, so an operator tuning one tunes both the same way).
 pub fn vardiff_rate() -> f64 {
     std::env::var("SIGIL_VARDIFF_RATE").ok().and_then(|s| s.parse().ok()).unwrap_or(0.5)
+}
+
+/// Percentage of the share pool retained after a block pays out
+/// (`SIGIL_SHARE_POOL_RETAIN_PCT`, default 95 — an exponentially-decayed window of
+/// ~20 blocks, ≈4 s at the current cadence).
+///
+/// Exists because a pool emptied every block almost never holds more than one miner,
+/// so per-share weights never get compared and payout tracks *how often you appear in
+/// a drain* instead of *how much work you proved*. See [`MiningBridge::take_share_pool`].
+///
+/// `0` restores the previous drain-and-clear behaviour exactly (a share is paid once,
+/// in full, on a single block). Clamped to 0..=99: 100 would never decay, so a miner
+/// who stopped years ago would earn forever.
+pub fn share_pool_retain_pct() -> u64 {
+    std::env::var("SIGIL_SHARE_POOL_RETAIN_PCT")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(95)
+        .min(99)
+}
+
+/// Work-weight of a share/solve that satisfied `target`.
+///
+/// A hit at `target` is one success in an expected `2^64 / target` hashes, so that
+/// ratio IS the work the submission proves. Weighting by it is what makes a pool
+/// payout proportional to hashrate.
+///
+/// ⚠️ A FLAT weight of 1 would be quietly, badly wrong here — and it is exactly what
+/// the share branch used before 2026-08-26. [`share_target_for`] issues a PER-WALLET
+/// vardiff target deliberately aiming every miner at the same ~[`vardiff_rate`]
+/// shares/sec REGARDLESS of hashrate. Share *count* is therefore designed to be
+/// independent of power. Paying a pool out by count would hand a 1 MH/s CPU the same
+/// as a 100 MH/s GPU, and would be farmable by splitting one rig into ten registered
+/// wallets. Weighting by proven work removes both problems: ten rigs of 1/10th the
+/// power land ten times as many shares, each worth one tenth as much.
+///
+/// Saturating, and floored at 1, so a degenerate target can neither zero out an
+/// honest miner's contribution nor overflow the pool sum.
+pub fn share_work_weight(target: u64) -> u64 {
+    if target == 0 {
+        return 1;
+    }
+    (u64::MAX / target).max(1)
 }
 
 /// Per-wallet share target from a wallet's self-reported Φ (Lane-A) rate,
@@ -559,7 +645,18 @@ pub struct MiningBridge {
 /// while `blocks_accepted` kept climbing and `shares_accepted` stayed at `0`.
 /// Sized generously against that failure mode instead of tightly against a
 /// risk the consumer already closes.
-const SOLVE_QUEUE_CAP: usize = 512;
+///
+/// 2026-08-26: `512` reproduced the EXACT same symptom this doc already
+/// diagnosed once, just at a higher load tier — live 2 real miners at a
+/// combined ~130M H/s pinned `queued_solves` at exactly `512` while
+/// `blocks_accepted`/`shares_accepted` kept climbing, and a wallet actively
+/// mining the whole time sat at a real, confirmed balance of `0`. Same root
+/// cause (arrival rate > tick-drain rate under host contention — here, an
+/// ongoing finality-clamp reconciliation was very plausibly starving the
+/// mint loop's tick frequency too), same fix direction: raise the cap. Not
+/// tightened again — the same "costs a little memory and nothing else"
+/// argument above applies at any depth.
+const SOLVE_QUEUE_CAP: usize = 65_536;
 
 /// Miners are pruned from the rate table after this long without a challenge
 /// fetch, so `net_hps` reflects live power only.
@@ -798,6 +895,10 @@ impl MiningBridge {
                         wallet: hex::encode(wallet),
                         rig: rig.clone(),
                         hash_rate: *rate,
+                        // Filled in by the caller, which is the layer that can
+                        // read chain state — `MiningBridge` deliberately holds no
+                        // `SigilState` handle (see `AppState`).
+                        shielded: None,
                         last_seen_secs_ago: now_ms.saturating_sub(*t) / 1000,
                         kind: *kind,
                     })
@@ -977,7 +1078,12 @@ impl MiningBridge {
             // pool already moved on) or be cleared out from under whoever's
             // still working the live height. Solo credit instead, same shape
             // `mint_next_block`'s producer-wallet fallback already uses.
-            let weight: u64 = 1u64 << ease.min(32);
+            // Same unit as the share branch below (proven work), so the two can
+            // legitimately be summed in one pool. Was `1u64 << ease.min(32)`, which
+            // was internally consistent but on a DIFFERENT scale from share weights
+            // — mixing the two in one map made the proportions meaningless.
+            let weight: u64 = share_work_weight(c.blake4_target);
+            let _ = ease;
             let shares = if historical {
                 HashMap::from([(wallet, weight)])
             } else {
@@ -1029,7 +1135,36 @@ impl MiningBridge {
         // Proven by `a_late_share_is_wrongly_rejected_instead_of_credited`
         // (failed before this change, passes after).
         if honest_word && c.share_target > 0 && check_submission_at(&g, &c, sub, c.share_target, c.share_vdf_t) {
-            let weight = 1u64;
+            // 2026-08-26 (rocky) — CREDIT AT ACHIEVED WORK, not at the flat verification
+            // target. THE PROPORTIONAL-PAYOUT SKEW, measured live that day:
+            //
+            //   wallet            hashrate share    payout share
+            //   434fe2d2…              41.5%           63.2%
+            //   5f749b94…              33.9%            3.2%
+            //
+            // `c.share_target` here is `share_target_from(vtip.bits, ease)` — a CONSTANT,
+            // identical for every miner. So every accepted share earned exactly the same
+            // weight. Meanwhile `mining_challenge` ISSUES each wallet a PER-WALLET vardiff
+            // target (`share_target_for(my_hps, …)`) explicitly tuned so that every miner
+            // lands ~`vardiff_rate` shares/sec REGARDLESS of hashrate. Equal rate × equal
+            // weight = equal pay, whether you bring 1 MH/s or 100 MH/s.
+            //
+            // That is precisely the failure `share_work_weight`'s own doc warns about
+            // ("A FLAT weight of 1 would be quietly, badly wrong here … farmable by
+            // splitting one rig into ten registered wallets"). The weighting function was
+            // right; it was being handed a constant.
+            //
+            // The fix is to weight by the work the miner actually PROVED — `blake4_hash`
+            // is the Lane-A word just verified above, so a lower value means more work.
+            // Expectation is proportional to hashrate for free: a fast rig is issued a
+            // HARDER target, so it only submits very low hashes, each carrying
+            // correspondingly more weight, while still submitting at the same ~0.5/sec.
+            //
+            // Unfakeable, which the issued target would NOT have been: `my_hps` is
+            // self-reported, so crediting by issued difficulty would let a miner claim
+            // 100 GH/s for a large weight while still only needing to beat the easy global
+            // verification target. The achieved hash is checked, so it cannot be inflated.
+            let weight = share_work_weight(sub.block.blake4_hash);
             if let Ok(mut m) = self.shares.lock() {
                 *m.entry(wallet).or_insert(0) += weight;
             }
@@ -1054,6 +1189,70 @@ impl MiningBridge {
     }
 
     /// Producer: take the next verified solve to mint, if one is waiting.
+    /// Drain the accumulated partial-share pool, if any.
+    ///
+    /// Exists for the free-running producer path (`mint_next_block`'s `solve: None`
+    /// branch). Before 2026-08-26 that branch paid the producer's own wallet 100% of
+    /// the miner slice, because the pool only ever cashed out attached to a full BLOCK
+    /// win. Measured live on Epsilon that day: the producer free-runs at ~5 blk/s while
+    /// difficulty targets one miner block-win per 120 s, so miners won ~1 block in 750
+    /// and took 0.1% of emissions for 37% of the network hashrate — the producer wallet
+    /// took 93.8%. Every component was behaving as written; the two cadences were simply
+    /// never reconciled.
+    ///
+    /// Draining here lets a self-minted block pay the real work that arrived since the
+    /// last one. Draining (not cloning) is what keeps it honest: work is paid exactly
+    /// once, so a miner who later wins a block is not paid twice for the same shares.
+    /// 2026-08-26 (rocky, operator-approved) — SECOND HALF OF THE PROPORTIONAL-PAYOUT FIX.
+    ///
+    /// Weighting shares by proven work (see `submit`) is necessary but inert on its own,
+    /// because a drain-everything-per-block pool almost never holds more than one miner.
+    /// Measured live that day: `mean_payees_when_paid` was **1.09** over 4,096 blocks. The
+    /// braid mints ~5 blocks/sec while ~3 miners land ~0.5 shares/sec each, so a given
+    /// block's pool typically contains ONE wallet — and one wallet takes the entire miner
+    /// slice regardless of what its weight says. Payout therefore tracked *how often you
+    /// appear in a drain* (which vardiff equalises across miners by design) rather than
+    /// *how much work you proved*. Weights that never get compared are decoration.
+    ///
+    /// The pool now spans a WINDOW: each drain reports the current weights for payout,
+    /// then retains [`share_pool_retain_pct`] of them. Several miners are present in
+    /// almost every drain, so the weights are genuinely compared and the split follows
+    /// proven work.
+    ///
+    /// **This deliberately changes the payout model — understand it, don't skim it.** The
+    /// comment that stood here said "Draining (not cloning) is what keeps it honest: work
+    /// is paid exactly once." That invariant is relaxed to the standard pool one: a share
+    /// earns a decaying slice of several consecutive blocks instead of all of one.
+    /// **No additional SIGIL is emitted** — each block still pays exactly its own reward,
+    /// divided differently. What changes is variance and fairness, both in the intended
+    /// direction. The accepted cost is that a miner who stops keeps earning a shrinking
+    /// slice for a few seconds; that is inherent to any windowed scheme and is the price
+    /// of not allocating a block's whole reward by coin-flip.
+    ///
+    /// Side effect worth having: the pool now rarely empties, so far fewer blocks fall
+    /// through to the producer-wallet default (36.7% of emitted value before this).
+    ///
+    /// `SIGIL_SHARE_POOL_RETAIN_PCT=0` restores the previous behaviour exactly.
+    pub fn take_share_pool(&self) -> Option<HashMap<WalletId, u64>> {
+        let mut m = self.shares.lock().ok()?;
+        if m.is_empty() {
+            return None;
+        }
+        let retain = share_pool_retain_pct();
+        if retain == 0 {
+            return Some(std::mem::take(&mut *m)); // legacy: paid exactly once, in full
+        }
+        let payout = m.clone();
+        // Decay in place. Integer math, so an entry that rounds to zero is dropped — that
+        // is the window's tail falling off, and it keeps the map bounded however many
+        // wallets pass through.
+        m.retain(|_, w| {
+            *w = w.saturating_mul(retain) / 100;
+            *w > 0
+        });
+        Some(payout)
+    }
+
     pub fn take_solve(&self) -> Option<AcceptedSolve> {
         self.solved.lock().ok().and_then(|mut q| q.pop_front())
     }
@@ -1120,6 +1319,129 @@ mod tests {
 
     fn tiny_bits() -> u32 {
         4
+    }
+
+    /// THE SKEW, pinned. Measured live 2026-08-26 before the fix: a wallet with 41.5% of
+    /// network hashrate took 63.2% of payouts while one with 33.9% took 3.2%.
+    ///
+    /// Cause: every accepted share was credited `share_work_weight(c.share_target)` where
+    /// `c.share_target` is a CONSTANT, while `mining_challenge` issues each wallet a
+    /// per-wallet vardiff target explicitly tuned so all miners submit at the same rate
+    /// regardless of power. Equal rate x equal weight = equal pay. Crediting the ACHIEVED
+    /// hash instead makes the weight track proven work, which is what a fast rig actually
+    /// produces: it is issued a harder target, so its submissions are lower-valued hashes.
+    #[test]
+    fn a_share_is_credited_by_proven_work_not_by_a_flat_constant() {
+        // Two miners, same submission COUNT (what vardiff enforces), different power.
+        // The fast one proves 16x the work per share; the weight must say so.
+        let fast_hash = u64::MAX / 16_000;
+        let slow_hash = u64::MAX / 1_000;
+        let w_fast = share_work_weight(fast_hash);
+        let w_slow = share_work_weight(slow_hash);
+        let ratio = w_fast as f64 / w_slow as f64;
+        assert!(
+            (ratio - 16.0).abs() < 0.1,
+            "weight must scale with proven work: got {ratio:.2}x for 16x the work"
+        );
+
+        // And the regression itself: weighting by a fixed target gives the SAME weight to
+        // both, which is how a 1 MH/s CPU came to earn what a 100 MH/s GPU earned.
+        let flat = share_target_from(16, 0);
+        assert_eq!(
+            share_work_weight(flat),
+            share_work_weight(flat),
+            "a constant target cannot distinguish miners — this is the bug, kept visible"
+        );
+    }
+
+    /// The other half. Weighting is inert if a block's pool holds one wallet, because that
+    /// wallet takes the whole slice whatever its weight. Live `mean_payees_when_paid` was
+    /// 1.09. The window keeps earlier miners present so weights are actually compared.
+    #[test]
+    fn the_share_pool_window_keeps_miners_present_across_blocks() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SIGIL_SHARE_POOL_RETAIN_PCT", "95");
+        let b = MiningBridge::new();
+        let fast: WalletId = [0xAAu8; 32];
+        let slow: WalletId = [0xBBu8; 32];
+
+        // The fast miner lands one heavy share; the next block's drain happens before the
+        // slow miner has landed anything.
+        if let Ok(mut m) = b.shares.lock() {
+            m.insert(fast, 16_000);
+        }
+        let first = b.take_share_pool().expect("pool has work");
+        assert_eq!(first.len(), 1, "block 1 pays the only contributor — unchanged");
+
+        // OLD behaviour: the pool is now empty, so the slow miner alone takes block 2's
+        // ENTIRE reward despite proving 1/16th the work. NEW: the fast miner is still in
+        // the window and the split follows weight.
+        if let Ok(mut m) = b.shares.lock() {
+            *m.entry(slow).or_insert(0) += 1_000;
+        }
+        let second = b.take_share_pool().expect("pool still has the decayed window");
+        assert_eq!(second.len(), 2, "the window keeps the earlier miner present");
+        let wf = second[&fast] as f64;
+        let ws = second[&slow] as f64;
+        assert!(
+            wf > ws * 10.0,
+            "fast miner must still dominate on proven work: fast={wf} slow={ws}"
+        );
+        std::env::remove_var("SIGIL_SHARE_POOL_RETAIN_PCT");
+    }
+
+    /// The window must TERMINATE. A retained fraction that never reached zero would pay a
+    /// miner who quit years ago, forever, and grow the map without bound.
+    #[test]
+    fn the_window_decays_to_nothing_and_stays_bounded() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SIGIL_SHARE_POOL_RETAIN_PCT", "95");
+        let b = MiningBridge::new();
+        let quitter: WalletId = [0xCCu8; 32];
+        if let Ok(mut m) = b.shares.lock() {
+            m.insert(quitter, 1_000_000);
+        }
+        let mut drains = 0;
+        while b.take_share_pool().is_some() {
+            drains += 1;
+            assert!(drains < 10_000, "window never emptied — a quitter would earn forever");
+        }
+        assert!(drains > 1, "a single share should span several blocks, not one");
+        assert!(
+            b.shares.lock().map(|m| m.is_empty()).unwrap_or(false),
+            "the map must be empty once the tail falls off, not merely zeroed"
+        );
+        std::env::remove_var("SIGIL_SHARE_POOL_RETAIN_PCT");
+    }
+
+    /// The escape hatch has to actually work: retain=0 is the exact pre-2026-08-26
+    /// behaviour — drain everything, paid once, in full.
+    #[test]
+    fn retain_zero_restores_the_legacy_drain_exactly() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SIGIL_SHARE_POOL_RETAIN_PCT", "0");
+        let b = MiningBridge::new();
+        let w: WalletId = [0xDDu8; 32];
+        if let Ok(mut m) = b.shares.lock() {
+            m.insert(w, 500);
+        }
+        let paid = b.take_share_pool().expect("pool has work");
+        assert_eq!(paid[&w], 500, "paid in full");
+        assert!(b.take_share_pool().is_none(), "and the pool is empty — paid exactly once");
+        std::env::remove_var("SIGIL_SHARE_POOL_RETAIN_PCT");
+    }
+
+    /// 100% retention would never decay; the clamp is what stops an operator typo from
+    /// creating a pool that can never be emptied.
+    #[test]
+    fn retain_pct_is_clamped_below_one_hundred() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SIGIL_SHARE_POOL_RETAIN_PCT", "100");
+        assert_eq!(share_pool_retain_pct(), 99);
+        std::env::set_var("SIGIL_SHARE_POOL_RETAIN_PCT", "10000");
+        assert_eq!(share_pool_retain_pct(), 99);
+        std::env::remove_var("SIGIL_SHARE_POOL_RETAIN_PCT");
+        assert_eq!(share_pool_retain_pct(), 95, "default");
     }
 
     fn bridge_at(height: u64, parent: [u8; 32]) -> MiningBridge {
@@ -1821,6 +2143,67 @@ mod tests {
              and scanning past the stale front entry (not stopping at it) reaches it"
         );
         assert_eq!(second.height, 30);
+    }
+}
+
+
+#[cfg(test)]
+mod shielded_visibility_tests {
+    use super::*;
+
+    fn rig(wallet: &str, rig: &str, hps: f64) -> MinerEntry {
+        MinerEntry {
+            wallet: wallet.to_string(),
+            rig: rig.to_string(),
+            hash_rate: hps,
+            last_seen_secs_ago: 0,
+            kind: MinerKind::Cpu,
+            shielded: None,
+        }
+    }
+
+    /// The number this whole thing exists to make visible: how much of the
+    /// network's power is actually buying privacy. Live when it was added:
+    /// 86 MH/s and 0.0% — a fact no endpoint reported.
+    #[test]
+    fn only_registered_wallets_hashrate_counts_toward_the_shielded_share() {
+        let reg = "a".repeat(64);
+        let unreg = "b".repeat(64);
+        let mut miners = vec![rig(&reg, "r1", 25.0), rig(&unreg, "r2", 75.0), rig(&reg, "r3", 25.0)];
+
+        let hps = annotate_shielded(&mut miners, |w| Some(w[0] == 0xaa));
+        assert_eq!(hps, 50.0, "both of the registered wallet's rigs count, per-rig like net_hps");
+        assert_eq!(shielded_pct(hps, 125.0), 40.0);
+        assert_eq!(miners[0].shielded, Some(true));
+        assert_eq!(miners[1].shielded, Some(false), "an unregistered rig is confirmed-false, not unknown");
+        assert_eq!(miners[2].shielded, Some(true));
+    }
+
+    /// An unreadable registry must report UNKNOWN, never "nobody is registered" —
+    /// the two look identical on a dashboard and mean opposite things.
+    #[test]
+    fn an_unreadable_registry_reports_unknown_not_zero_registered() {
+        let mut miners = vec![rig(&"c".repeat(64), "r1", 10.0)];
+        let hps = annotate_shielded(&mut miners, |_| None);
+        assert_eq!(hps, 0.0);
+        assert_eq!(miners[0].shielded, None, "unknown is not the same claim as false");
+    }
+
+    /// A malformed wallet string must not be silently counted as registered, and
+    /// must not panic the endpoint either.
+    #[test]
+    fn a_malformed_wallet_is_unknown_and_contributes_nothing() {
+        let mut miners = vec![rig("not-hex", "r1", 999.0)];
+        assert_eq!(annotate_shielded(&mut miners, |_| Some(true)), 0.0);
+        assert_eq!(miners[0].shielded, None);
+    }
+
+    /// An idle network divides by zero if you are careless.
+    #[test]
+    fn an_idle_network_reports_zero_percent_not_nan() {
+        assert_eq!(shielded_pct(0.0, 0.0), 0.0);
+        assert_eq!(shielded_pct(0.0, 100.0), 0.0);
+        assert_eq!(shielded_pct(100.0, 100.0), 100.0);
     }
 }
 

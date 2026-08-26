@@ -694,3 +694,25 @@ pub fn spawn_shielded_scanner(node_url: &str, seed_hex: &str) -> Option<std::thr
         std::thread::sleep(SHIELDED_SCAN_EVERY);
     }))
 }
+
+/// Is this wallet published in the shielded registry?
+///
+/// One cheap GET. Used by the no-seed mining path to tell the difference between "rewards
+/// will be transparent" (true for an unregistered wallet) and "rewards are private and
+/// this process cannot see them" (true for a registered one) — two situations that look
+/// identical from a frozen balance, and only one of which means anything is wrong.
+pub fn wallet_is_registered(node_url: &str, wallet_hex: &str) -> bool {
+    let url = format!(
+        "{}/v1/shielded/address?wallet={wallet_hex}",
+        node_url.trim_end_matches('/')
+    );
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    else {
+        return false;
+    };
+    http_json(&client, &url)
+        .map(|v| v.get("pk_shield").and_then(|p| p.as_str()).is_some_and(|s| !s.is_empty()))
+        .unwrap_or(false)
+}

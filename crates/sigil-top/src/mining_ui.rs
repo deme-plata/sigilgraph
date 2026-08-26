@@ -56,11 +56,44 @@ pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
 
     let total = s.shares_ok + s.shares_bad;
     let accept = if total > 0 { s.shares_ok as f64 / total as f64 * 100.0 } else { 100.0 };
+    // The spendable (shielded) figure when we can compute it, the transparent one
+    // otherwise — as (amount, label) so the label can never drift from the number.
+    let bal_pair: (String, String) = {
+        #[cfg(feature = "shield-register")]
+        {
+            match crate::shield_setup::latest_shielded() {
+                Some(sn) => (
+                    format!("{:.8} SIGIL", sn.balance as f64 / 1e8),
+                    format!(" shielded  ·  {:.8} transparent", s.balance as f64 / 1e8),
+                ),
+                None => (format!("{:.8} SIGIL", s.balance as f64 / 1e8), " transparent".to_string()),
+            }
+        }
+        #[cfg(not(feature = "shield-register"))]
+        {
+            (format!("{:.8} SIGIL", s.balance as f64 / 1e8), " transparent".to_string())
+        }
+    };
+    let bal_span = (
+        Span::styled(bal_pair.0, Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+        Span::styled(bal_pair.1, Style::default().fg(C_DIM)),
+    );
     f.render_widget(Paragraph::new(Line::from(vec![
         dim(" shares "), Span::styled(format!("{} ✓", group(s.shares_ok)), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
         Span::styled(format!("  {} ✗", group(s.shares_bad)), Style::default().fg(if s.shares_bad > 0 { C_RED } else { C_DIM })),
         dim("   accept "), Span::styled(format!("{accept:.0}%"), Style::default().fg(if accept >= 99.0 { C_NEON_GREEN } else { C_NEON_GOLD })),
-        dim("   balance "), Span::styled(format!("{} SIGIL", s.balance), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+        // Was `format!("{} SIGIL", s.balance)` — s.balance is RAW base units, so a
+        // 7.77049863 SIGIL balance rendered as "777049863 SIGIL". SIGIL is 8-decimal;
+        // printing raw units under a SIGIL label is off by 10^8 in the direction that
+        // flatters, which is the worst direction for a money figure.
+        //
+        // And when a shielded snapshot exists, the SPENDABLE number leads. A registered
+        // miner's transparent balance is frozen forever by construction, so showing only
+        // it — on the one line an operator reads to answer "is mining paying me?" — says
+        // "no" no matter how much they earn. Both numbers appear; neither is disguised as
+        // the other.
+        dim("   balance "),
+        bal_span.0, bal_span.1,
         dim("   mine-chain h "), Span::styled(group(s.last_height), Style::default().fg(C_VBRIGHT)),
         dim(" (egen kaede - ikke produce-tippen)"),
     ])), tally);

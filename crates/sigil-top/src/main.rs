@@ -1569,6 +1569,33 @@ fn main() {
                 // Say so once, plainly, instead of leaving the operator to wonder why
                 // their rewards are public. Mining itself is unaffected.
                 let w = fallback_wallet();
+                // The wallet may ALREADY be registered — e.g. registered once from the web
+                // wallet, then mined here by address alone. Then rewards ARE minted as
+                // private notes, the transparent balance never moves, and this rig has no
+                // seed with which to open them: the operator sees a frozen number and
+                // concludes mining is broken. It is not; the money is real and this process
+                // simply cannot see it. Say so explicitly rather than printing the generic
+                // "rewards will be TRANSPARENT" line, which in that case is FALSE.
+                #[cfg(feature = "shield-register")]
+                {
+                    let (wc, urlc) = (w.clone(), url.clone());
+                    std::thread::spawn(move || {
+                        if shield_setup::wallet_is_registered(&urlc, &wc) {
+                            println!(
+                                "  ⚠ {}… IS registered for shielded mining, but this rig has no \
+                                 SIGIL_MINE_SEED.\n    Your rewards are being paid as PRIVATE NOTES \
+                                 — the transparent balance shown below will never rise, and this \
+                                 process cannot open them.\n    Set SIGIL_MINE_SEED=<64-hex seed for \
+                                 this wallet> to see and spend what you are earning.",
+                                &wc.chars().take(8).collect::<String>()
+                            );
+                        } else {
+                            println!("  ℹ mining to {}… with no SIGIL_MINE_SEED — rewards will be TRANSPARENT. \n    Set SIGIL_MINE_SEED=<64-hex seed for this wallet> to have them mint as private notes instead.",
+                                &wc.chars().take(8).collect::<String>());
+                        }
+                    });
+                }
+                #[cfg(not(feature = "shield-register"))]
                 println!("  ℹ mining to {}… with no SIGIL_MINE_SEED — rewards will be TRANSPARENT. \n    Set SIGIL_MINE_SEED=<64-hex seed for this wallet> to have them mint as private notes instead.",
                     &w.chars().take(8).collect::<String>());
                 w
@@ -1600,11 +1627,34 @@ fn main() {
                 if s.shares_ok + s.shares_bad != last {
                     last = s.shares_ok + s.shares_bad;
                     let line = s.log.front().cloned().unwrap_or_default();
+                    // BALANCE, HONESTLY (2026-08-27). `s.balance` comes from
+                    // `flux_miner::engine::fetch_balance`, i.e. GET /api/v1/balance — the
+                    // TRANSPARENT balance. For a wallet that has published a shield key
+                    // that number is frozen forever by construction: every reward it wins
+                    // is minted as a hidden note, so the one line a headless rig prints
+                    // reads as "mining earns nothing" no matter how much it earns.
+                    // Operator-reported twice, the second time against a build that had
+                    // already gained a shielded panel — in the interactive TUI's mining
+                    // tab, which a headless `mine-rig` never renders.
+                    //
+                    // When a seed is present the scanner knows the real figure; show that
+                    // and label it, and keep the transparent number visible so the two are
+                    // never confused for each other.
+                    #[cfg(feature = "shield-register")]
+                    let bal_txt = match shield_setup::latest_shielded() {
+                        Some(sn) => format!(
+                            "shielded {} SIGIL (+{} transparent)",
+                            flux_miner::engine::format_sigil(sn.balance),
+                            flux_miner::engine::format_sigil(s.balance)
+                        ),
+                        None => format!("bal {} SIGIL", flux_miner::engine::format_sigil(s.balance)),
+                    };
+                    #[cfg(not(feature = "shield-register"))]
+                    let bal_txt = format!("bal {} SIGIL", flux_miner::engine::format_sigil(s.balance));
                     println!(
-                        "  [{}] {line}   [✓{} ✗{}]  {} (Φ {})  bal {} SIGIL",
+                        "  [{}] {line}   [✓{} ✗{}]  {} (Φ {})  {bal_txt}",
                         s.mode, s.shares_ok, s.shares_bad,
                         flux_miner::engine::format_hps(s.hashrate), flux_miner::format_flux(s.hashrate),
-                        flux_miner::engine::format_sigil(s.balance)
                     );
                 }
                 if stop.load(Ordering::Relaxed) { break; }

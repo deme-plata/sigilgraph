@@ -121,6 +121,24 @@ flux-fold    = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# frontier_memo.rs (2026-08-25): drives sigil-node's REAL `dag_build_frontier` /
+# `dag_build_frontier_memo` (crates/sigil-node/src/frontier.rs) + `mint_next_block` +
+# `ChainTip`/`Braid` wiring, instead of re-modelling a copy. sigil-node ALREADY
+# normal-depends on sigil-chronos (the chronos_sim/footprint bins), so a normal
+# dependency the other way would be a cycle — this is a dev-dependency instead,
+# which Cargo explicitly supports for exactly this shape: the `frontier_memo`
+# test target links the normal (non-test) build of sigil-node's lib, which itself
+# normal-depends on the normal (non-test) build of sigil-chronos's lib — two
+# distinct, already-deduped units, no cycle. Because of this, `frontier_memo.rs`
+# is declared `#[cfg(test)] mod frontier_memo;` in lib.rs and must NEVER be made
+# reachable from a non-test build (that would turn this into a real cycle and fail
+# to compile). sigil-api is needed alongside it for `dag_drain_apply`'s bridge
+# params (SendBridge/BridgeBridge/DexBridge/UsdsBridge/UsdsBridgeBridge/
+# ShieldedBridge) — it does not depend on sigil-chronos or sigil-node, so it is a
+# perfectly ordinary dependency, dev-only here purely to match frontier_memo's
+# test-only scope.
+sigil-node = { path = "../sigil-node" }
+sigil-api  = { path = "../sigil-api" }
 
 [[bin]]
 name = "chronos_virtual"

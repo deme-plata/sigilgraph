@@ -813,8 +813,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   <div style="width:100%;max-width:460px;max-height:88vh;display:flex;flex-direction:column;background:linear-gradient(160deg,#06121c,#04080c);border:1px solid rgba(33,212,253,.32);border-radius:16px;box-shadow:0 0 60px rgba(33,212,253,.18);overflow:hidden;font-family:'Rajdhani',system-ui,sans-serif">
     <div style="flex:none;display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid rgba(33,212,253,.18);background:rgba(8,16,24,.7)">
       <div style="font-size:20px">🛡</div>
-      <div style="flex:1"><div style="font-family:'Orbitron';font-weight:700;letter-spacing:1px;color:#6df3ff;font-size:15px">SEND — SHIELDED</div>
-        <div style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8">available <b id="sendAvail" style="color:#00e0c6">0.00000000</b> SIGIL (transparent)</div></div>
+      <div style="flex:1"><div style="font-family:'Orbitron';font-weight:700;letter-spacing:1px;color:#6df3ff;font-size:15px">SEND</div>
+        <div style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8">available <b id="sendAvail" style="color:#00e0c6">0.00000000</b> SIGIL</div></div>
       <button id="sendClose" style="background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:8px;width:30px;height:30px;cursor:pointer;font-size:15px">✕</button>
     </div>
     <div id="sendReceipt" style="display:none;flex:1;overflow-y:auto;padding:18px;flex-direction:column;gap:11px;font-family:'Rajdhani',system-ui,sans-serif">
@@ -831,11 +831,11 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       <div style="font-family:'JetBrains Mono';font-size:9.5px;color:#5a93a8;text-align:center">queued into the private pool — lands once the DAG finalizes (can take a while; check the explorer)</div>
     </div>
     <div id="sendForm" style="flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:14px">
-      <div style="background:rgba(33,212,253,.06);border:1px solid rgba(33,212,253,.2);border-radius:10px;padding:10px 12px;font-family:'JetBrains Mono';font-size:10.5px;line-height:1.5;color:#9fc3d1">
-        SIGIL retired public transparent sends. <b style="color:#6df3ff">Send now works by shielding your
-        balance into the private pool</b> — no recipient field, because a private note belongs to
-        <i>you</i> until you're ready to prove a spend. This is the default (only) path below.
+      <div style="display:flex;gap:0;border:1px solid rgba(33,212,253,.22);border-radius:10px;overflow:hidden">
+        <button id="sendTabShield" onclick="sendShowTab('shield')" style="flex:1;background:rgba(33,212,253,.16);border:none;color:#6df3ff;font-family:'Orbitron';font-weight:700;font-size:11px;letter-spacing:1px;padding:10px 6px;cursor:pointer">SHIELD</button>
+        <button id="sendTabPriv" onclick="sendShowTab('priv')" style="flex:1;background:transparent;border:none;color:#7c98a3;font-family:'Orbitron';font-weight:700;font-size:11px;letter-spacing:1px;padding:10px 6px;cursor:pointer">SEND</button>
       </div>
+      <div id="sendPaneShield" style="display:flex;flex-direction:column;gap:12px">
       <div>
         <label style="font-family:'JetBrains Mono';font-size:10px;letter-spacing:1px;color:#6df3ff;text-transform:uppercase">Amount (SIGIL)</label>
         <div style="display:flex;gap:8px;margin-top:6px">
@@ -846,14 +846,10 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       </div>
       <button id="sendGo" onclick="doShield()" style="border:1px solid rgba(33,212,253,.45);background:linear-gradient(90deg,rgba(33,212,253,.2),rgba(0,224,198,.13));color:#6df3ff;font-family:'Orbitron';font-weight:700;font-size:14px;letter-spacing:1px;padding:13px;border-radius:11px;cursor:pointer">🛡 SHIELD BALANCE</button>
       <div id="sendMsg" style="font-family:'JetBrains Mono';font-size:11px;color:#8fb3c2;min-height:14px"></div>
-      <div style="border-top:1px solid rgba(33,212,253,.14);padding-top:12px;display:flex;flex-direction:column;gap:8px">
-        <span style="font-family:'JetBrains Mono';font-size:11px;color:#a78bfa;text-transform:uppercase;letter-spacing:1px">Pay another wallet privately</span>
-        <div id="privIntro" style="font-family:'JetBrains Mono';font-size:10px;line-height:1.5;color:#7c98a3">
-          A private payment proves a real zero-knowledge spend RIGHT HERE in the browser
-          (<span id="privWasmState" style="color:#fbbf24">loading prover…</span>) — nothing about
-          the amount or the recipient reaches the chain in the clear. First CHECK the recipient has
-          published a shielded address, then spend one of your own landed shielded notes to them.
-        </div>
+      <div style="font-family:'JetBrains Mono';font-size:9.5px;color:#5a93a8">Moves this into your own private balance. Public sends are off — this is the deposit step before paying someone privately under the Send tab.</div>
+      </div>
+      <div id="sendPanePriv" style="display:none;flex-direction:column;gap:8px">
+        <div style="font-family:'JetBrains Mono';font-size:9.5px;color:#5a93a8">prover: <span id="privWasmState" style="color:#fbbf24">loading…</span></div>
         <div style="display:flex;gap:8px">
           <input id="checkAddr" placeholder="64-hex SIGIL address to check" autocomplete="off" spellcheck="false"
             style="flex:1;background:rgba(4,8,12,.7);border:1px solid rgba(167,139,250,.22);border-radius:10px;color:#cfe9f2;font-family:'JetBrains Mono';font-size:11px;padding:9px 11px;outline:none">
@@ -1159,6 +1155,17 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     document.getElementById('sendForm').style.display='flex';
     var a=document.getElementById('sendAmt'); if(a)a.value='';
     sendStatus(''); window.closeSend();
+  };
+  // SHIELD/SEND tab toggle — 2026-08-26: the modal used to show both paragraphs of
+  // explanation at once regardless of intent; this just switches which one panel
+  // is visible, no functional change to doShield()/doPrivateSend()/etc below.
+  window.sendShowTab=function(which){
+    var shield=which==='shield';
+    document.getElementById('sendPaneShield').style.display=shield?'flex':'none';
+    document.getElementById('sendPanePriv').style.display=shield?'none':'flex';
+    var ts=document.getElementById('sendTabShield'), tp=document.getElementById('sendTabPriv');
+    ts.style.background=shield?'rgba(33,212,253,.16)':'transparent'; ts.style.color=shield?'#6df3ff':'#7c98a3';
+    tp.style.background=shield?'transparent':'rgba(167,139,250,.16)'; tp.style.color=shield?'#7c98a3':'#cdbdfa';
   };
   // wire every Send action (phone + desktop hero + sidebar)
   function wireSend(){

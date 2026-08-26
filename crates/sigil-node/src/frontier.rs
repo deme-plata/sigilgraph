@@ -107,6 +107,31 @@ pub fn dag_build_frontier(
 ///
 /// NOT YET ADOPTED by `main.rs`. A previous attempt at this shape stopped block
 /// production live; it is here to be driven by chronos FIRST.
+///
+/// **2026-08-25 — a SECOND, DISTINCT reorg gap found by `sigil-chronos`'s
+/// `frontier_memo` harness (real blocks, real `Braid`, engineered ties) and fixed
+/// here.** The `applied == 0` signal above only fires when the walk actually finds
+/// something to try and fails to chain it on. But the walk starts at `tip` and
+/// stops the INSTANT it finds a block shorter than `base` — including `tip`
+/// itself. So whenever the braid's real selected tip ends up AT OR BELOW the
+/// cached frontier's own height (a same-height, smaller-hash competitor displaced
+/// whatever the cache had already committed to, before anything taller was ever
+/// minted on top of it), the walk finds NOTHING (`path_len == 0`) and this
+/// function returned the stale, wrong cached frontier completely unchanged —
+/// silently, with no error, no fallback, nothing. That shape is unreachable from a
+/// single always-immediately-minting producer's own local view (mint and cache
+/// update are always in lockstep there), which is why the adversarial soak's
+/// reorg injections — timed one tick after the contested block, matching that
+/// producer's own cadence — never tripped it. It IS reachable for a verifier/
+/// follower node that tracks the frontier without minting on every tick, or any
+/// gap between "cache the frontier" and "mint on it." Given `path_len == 0` can
+/// ONLY happen when `frontier.height() == tip's height + 1` (that is exactly the
+/// condition that stops the walk on its first step), the fix is to verify that
+/// remaining ambiguity directly: an empty path is trustworthy iff the frontier's
+/// own last-applied block IS `tip` itself; if it's not, the tip changed underneath
+/// the cache at a height the walk could never see, and this falls back to a full
+/// rebuild — the same "never worse than the status quo" guarantee as the
+/// `applied == 0` case above.
 pub fn dag_build_frontier_memo(
     chain: &ChainTip,
     braid: &Braid,
@@ -156,22 +181,41 @@ pub fn dag_build_frontier_memo(
     if path_len > 0 && applied == 0 {
         return dag_build_frontier(chain, braid, dag_bodies);
     }
+    // An empty path is ONLY the healthy "already caught up" state if the
+    // frontier's own tip really IS the braid's current selected tip — see the
+    // 2026-08-25 doc note above. `path_len == 0` can only happen when
+    // `frontier.height() == <tip's height> + 1` (that's the exact condition that
+    // stopped the walk on its first step), so this is the one remaining case the
+    // walk itself could never distinguish: same height, different winner.
+    if path_len == 0 && frontier.parent_hash() != tip {
+        return dag_build_frontier(chain, braid, dag_bodies);
+    }
     FrontierBuild { frontier, path_len, applied, fail_reason }
 }
 
-// NO TESTS HERE YET, deliberately.
+// UPDATE 2026-08-25: the fixture this file called for now exists —
+// `crates/sigil-chronos/src/frontier_memo.rs` (`sigil-node` is a dev-dependency
+// there; see that Cargo.toml entry for why that isn't a cycle). It drives BOTH
+// functions above through real blocks via `sigil_node::mint::mint_next_block` +
+// real `ChainTip::apply` (real `commit_state_transition`, real four-root checks)
+// over a real `Braid` (real `final_depth = 512`), comparing them tick-by-tick
+// across a 2,600-tick adversarial soak (129 engineered, verified-winning 2-deep
+// reorgs, 103 real finality drains) plus three targeted unit tests. It found one
+// real bug in the first version of `dag_build_frontier_memo` — an empty-path case
+// the walk could never distinguish from a same-height reorg — which is fixed
+// above (see the 2026-08-25 doc note on `dag_build_frontier_memo`) and is now
+// covered by a regression test
+// (`memo_falls_back_correctly_when_the_spine_reorgs_underneath_an_already_committed_cache`).
+// With that fix, all four tests pass, 0 divergences from the baseline across the
+// whole soak, and memo's total re-applies were ~63.7k vs baseline's ~1.22M over
+// the same run (a real, measured ~19x reduction, not a projection). See that
+// file's own module doc for the full mechanism and the soak's exact numbers.
 //
-// The cheap thing to write would assert that a walk from tip to base covers
-// `tip - base + 1` blocks. That is arithmetic restated, not evidence, and it
-// would create a false impression of coverage.
-//
-// The test that MATTERS is whether `dag_build_frontier_memo` keeps minting
-// CORRECT — the previous live attempt at this shape compiled, deployed, and
-// stopped block production. Proving that needs real blocks driven through
-// `ChainTip::apply`, which validates the four state roots, i.e. the real
-// block-building machinery `sigil-chronos`'s `SigilSimNode` already has
-// (real apply_tx + commit_state_transition). Wiring that fixture is the next
-// step and the gate on adoption.
+// `main.rs` still runs its OWN separate inline copy of the ORIGINAL algorithm,
+// completely untouched by any of this — this file remains unreachable from the
+// live producer. Chronos-proving the fix is not the same decision as adopting it;
+// that adoption call is still open and belongs to a human, given this exact class
+// of "looked fine, wasn't" history.
 //
 // Until then: `main.rs` still runs its OWN inline copy of the original
 // algorithm and is untouched. `dag_build_frontier_memo` is not reachable from

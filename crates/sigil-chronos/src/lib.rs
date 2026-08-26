@@ -56,6 +56,17 @@ pub mod wedge_writer_gap;
 /// equivocation, and a replay of the exact deep-reorder mechanism that forced
 /// `BraidConfig::final_depth` 64->512.
 pub mod finality_gadget;
+/// Validates `sigil-node`'s `dag_build_frontier_memo` (crates/sigil-node/src/
+/// frontier.rs) — the not-yet-adopted fix for the measured live O(window) mint-tick
+/// cost — against the current-production `dag_build_frontier`, through REAL blocks
+/// (`sigil_node::mint::mint_next_block` + `ChainTip::apply` + `commit_state_
+/// transition`) and a REAL `Braid`, with deterministic, engineered reorg injection.
+/// TEST-ONLY: `sigil-node` is a dev-dependency here (it already normal-depends on
+/// THIS crate for its `chronos_sim`/footprint bins, so a normal dependency back
+/// would cycle — see the Cargo.toml comment on that dep). This module must never
+/// be reachable outside `#[cfg(test)]`.
+#[cfg(test)]
+mod frontier_memo;
 
 use serde::{Deserialize, Serialize};
 

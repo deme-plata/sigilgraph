@@ -1511,7 +1511,20 @@ impl P2PBlockSync {
                             let probe_timeout = if cold_start { Duration::from_millis(1200) } else { REQ_TIMEOUT };
                             for peer in targets {
                                 let payload = serde_json::to_vec(
-                                    &BackfillReq { from: probe_from, to: u64::MAX, headers_only: true, codec: 1 }
+                                    // 2026-08-26 (rocky-win, PERMANENT-DEADLOCK FIX): this probe used
+                                    // to ask [probe_from, u64::MAX]. The responder clamps to its own
+                                    // tip, so the reply carried EVERY header from our frontier to the
+                                    // peer tip in ONE body. Measured live on a 16.5k-block gap: a
+                                    // 4,277,791 B response that could not complete inside libp2p's 8s
+                                    // request timeout, re-sent 78x/15min for 5h41m. Worse, it is a
+                                    // RATCHET: the gap grows with the tip, so the response grows too and
+                                    // the hole can never be filled once it crosses the deliverable size.
+                                    // Bounding to CHUNK (the same span every other fetch uses) caps the
+                                    // body at a size that always lands. Tip discovery is unaffected:
+                                    // the responder already clamped to lo+serve_cap (32768 default), so
+                                    // this probe never learned a tip further than that anyway, and
+                                    // peer_best_height is independently fed by the oracle/tipfetch feed.
+                                    &BackfillReq { from: probe_from, to: probe_from.saturating_add(CHUNK), headers_only: true, codec: 1 }
                                 ).unwrap();
                                 let n = net.clone();
                                 let tx = probe_tx.clone();

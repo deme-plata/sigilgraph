@@ -3909,6 +3909,22 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // From here ratatui owns the screen — divert background eprintln to the logfile
     // (was smearing the dashboard with [p2p-sync]/[aether] lines).
     IN_TUI.store(true, std::sync::atomic::Ordering::Relaxed);
+    // ...and the same for DEPENDENCIES that print on their own. IN_TUI only
+    // diverts THIS crate's macros; flux-db writes storage diagnostics with raw
+    // `eprintln!`, which land in the middle of the frame. Reported live: a real
+    // SST read error ("failed to fill whole buffer") rendered as corrupted text
+    // spliced through the sync card — it looked like a UI bug AND hid the
+    // actual storage error. flux-db honors FLUX_DB_LOG by appending there
+    // instead of writing to stderr; point it at the same logfile everything
+    // else uses. Only set when unset, so an operator can still override.
+    if std::env::var_os("FLUX_DB_LOG").is_none() {
+        // Same resolution the logger above uses, so both streams land together.
+        let p = std::env::var("HOME")
+            .map(|h| format!("{h}/.sigil-top.log"))
+            .or_else(|_| std::env::var("TEMP").map(|t| format!("{t}\\sigil-top.log")))
+            .unwrap_or_else(|_| "sigil-top.log".into());
+        std::env::set_var("FLUX_DB_LOG", p);
+    }
     let mut stdout = std::io::stdout();
     if let Err(e) = execute!(stdout, EnterAlternateScreen) { boot_trace(&format!("EnterAlternateScreen failed (continuing): {e}")); }
 

@@ -40,6 +40,14 @@ grep -q "^version = \"$VER\"" crates/sigil-top/Cargo.toml || { echo "✗ version
 # NOTE: two concurrent LTO links — give the wrapping systemd-run scope MemoryMax>=16G.
 WIN_TARGET_DIR="${WIN_TARGET_DIR:-/home/storage/sigil-target-win}"
 echo "▸ 2/7 build linux + windows (release, PARALLEL — windows in $WIN_TARGET_DIR)"
+# NOTE (2026-08-21): sigil-top's Cargo.toml has `default = ["gpu"]` — GPU
+# support is baked into EVERY plain build already (the client auto-detects
+# hardware and falls back to CPU as needed; SIGIL_MINE_CPU=1 forces CPU).
+# There is no separate GPU-featured artifact to build — confirmed by directly
+# building `--features gpu` into a completely fresh target dir (bypassing all
+# caches) and diffing against the plain build: byte-identical, because `gpu`
+# was already on by default in the plain build. Do NOT re-add a third build
+# step for this — it was tried and is wasted compute, not a fix.
 T_BUILD=$SECONDS
 LLOG="/home/orobit/tmp/release-${VER}-build-linux.log"
 WLOG="/home/orobit/tmp/release-${VER}-build-windows.log"
@@ -60,7 +68,10 @@ S="/home/orobit/tmp/sigil-v${VER}-release"; rm -rf "$S"; mkdir -p "$S"
 cp "$LBIN" "$S/sigil-top-v${VER}-linux-x64"
 cp "$WBIN" "$S/sigil-top-v${VER}-windows-x64.exe"
 tar --sort=name --mtime='2026-01-01 00:00:00' --owner=0 --group=0 --numeric-owner \
-    -czf "$S/sigil-top-v${VER}-src.tar.gz" -C crates sigil-top/src sigil-top/Cargo.toml
+    -czf "$S/sigil-top-v${VER}-src.tar.gz" \
+    -C crates sigil-top/src sigil-top/Cargo.toml \
+    -C .. gui/sigil-wallet-tron-embedded.html gui/sigil-wallet-codex.css \
+    gui/enter-sigil.html gui/sigil-explorer.html gui/vite-engine-embedded.html
 for t in "linux-x64" "windows-x64.exe"; do
   f="$S/sigil-top-v${VER}-${t}"
   "$FLUXC" sign-artifact "$f" --source "$S/sigil-top-v${VER}-src.tar.gz" -o "$f.proof" | grep -q "require-both" || { echo "✗ sign failed $t"; exit 1; }
@@ -77,6 +88,39 @@ cp "$S"/sigil-top-v${VER}-* "$DL/"
 LEGACY_DL="/home/orobit/q-narwhalknight/dist-final/downloads"
 cp "$S"/sigil-top-v${VER}-* "$LEGACY_DL/"
 
+# ── STABLE-NAME LINKS (2026-08-26, rocky) ────────────────────────────────────
+# The two cp's above publish the VERSIONED artifacts, which is what the signed
+# manifest points at — so the AUTO-UPDATER has always been correct and every
+# check we own (flux_release_check, step 6 below) reads the manifest and says
+# "fine". The stable names humans actually `wget` were never refreshed by this
+# script at all. Measured on 2026-08-26, moments after cutting v7.1.91:
+#
+#     sigil-top-linux-x64   15,739,912 B   dated 06-10 09:32
+#
+# Every `wget .../sigil-top-linux-x64` had served a TWO-AND-A-HALF-MONTH-OLD
+# binary since June, and nothing detected it, because publishing to the
+# versioned name only is invisible to a manifest-based check. CLAUDE.md's
+# downloads rule already required "versioned + stable name … so the stable link
+# is always current" — the rule was right, the script just never did it.
+#
+# .tmp-then-mv so a reader mid-download never sees a half-written file (rename
+# is atomic within a filesystem, and an already-open fd keeps the old inode).
+# The .proof rides along, or the stable binary would be unverifiable.
+# ADDITIVE ONLY — nothing is ever deleted from downloads/ (CLAUDE.md rule 9).
+for root in "$DL" "$LEGACY_DL"; do
+  for t in "linux-x64" "windows-x64.exe"; do
+    src="$root/sigil-top-v${VER}-${t}"; dst="$root/sigil-top-${t}"
+    [ -s "$src" ] || { echo "✗ stable-link source missing or empty: $src"; exit 1; }
+    cp -f "$src" "$dst.tmp" && mv -f "$dst.tmp" "$dst"
+    [ -s "$src.proof" ] && { cp -f "$src.proof" "$dst.proof.tmp" && mv -f "$dst.proof.tmp" "$dst.proof"; }
+    # Assert, don't assume: the stable name must now be byte-identical in size
+    # to the versioned artifact it is supposed to mirror.
+    [ "$(stat -c %s "$dst")" = "$(stat -c %s "$src")" ] \
+      || { echo "✗ stable link $dst does not match $src after copy"; exit 1; }
+    echo "  ↻ stable link $(basename "$dst") -> v$VER ($(stat -c %s "$dst") B)"
+  done
+done
+
 echo "▸ 5/7 write + SIGN manifest (mandatory — updater fails closed without a valid .sig)"
 REV=$(git rev-parse --short HEAD)
 cat > "$DL/sigil-top-latest.json" <<EOF
@@ -90,6 +134,7 @@ cat > "$DL/sigil-top-latest.json" <<EOF
   "notes": "$NOTE",
   "targets": {
     "linux-x64":       { "url": "$BASE/sigil-top-v${VER}-linux-x64",       "proof_url": "$BASE/sigil-top-v${VER}-linux-x64.proof",       "blake3_hex": "$LB3", "size_bytes": $LSZ },
+    "linux-x64-gpu":   { "url": "$BASE/sigil-top-v${VER}-linux-x64",       "proof_url": "$BASE/sigil-top-v${VER}-linux-x64.proof",       "blake3_hex": "$LB3", "size_bytes": $LSZ },
     "windows-x64":     { "url": "$BASE/sigil-top-v${VER}-windows-x64.exe", "proof_url": "$BASE/sigil-top-v${VER}-windows-x64.exe.proof", "blake3_hex": "$WB3", "size_bytes": $WSZ },
     "windows-x64-gpu": { "url": "$BASE/sigil-top-v${VER}-windows-x64.exe", "proof_url": "$BASE/sigil-top-v${VER}-windows-x64.exe.proof", "blake3_hex": "$WB3", "size_bytes": $WSZ }
   }
@@ -109,6 +154,20 @@ body=g('sigil-top-latest.json'); sig=bytes.fromhex(g('sigil-top-latest.json.sig'
 Ed25519PublicKey.from_public_bytes(bytes.fromhex(pin)).verify(sig, body)
 print('  ✓ live manifest+sig VALID — channel now', d['version'])
 PY
+
+# The stable links are what a HUMAN gets from a wget line, and they are NOT
+# covered by the manifest check above — which is exactly how they rotted for
+# 2.5 months unnoticed. Fetch them over the real network and assert they match
+# the versioned artifact the manifest points at. Fail the release if not: a
+# release whose published download link serves a stale binary is not released.
+echo "  ▸ verifying LIVE stable links match v$VER"
+for t in "linux-x64" "windows-x64.exe"; do
+  want=$(stat -c %s "$DL/sigil-top-v${VER}-${t}")
+  got=$(curl -sfL -o /dev/null -w '%{size_download}' --max-time 120 "$BASE/sigil-top-${t}?t=$(date +%s)" || echo 0)
+  [ "$got" = "$want" ] \
+    || { echo "✗ LIVE stable link $BASE/sigil-top-${t} served ${got}B, expected ${want}B (v$VER)"; exit 1; }
+  echo "    ✓ $BASE/sigil-top-${t} = ${got}B (v$VER)"
+done
 
 echo "▸ 7/7 commit + tag + push"
 git add crates/sigil-top/Cargo.toml Cargo.lock

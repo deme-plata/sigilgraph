@@ -24,7 +24,7 @@ name = "sigil-top"
 # falling straight through to the existing recovery-phrase flow on any failure. Does
 # NOT change sigilgraph.org's behavior — that's a different process with no such
 # endpoint and no access to this box's secret.
-version = "7.1.98"
+version = "7.1.99"
 edition.workspace = true
 license.workspace = true
 description = "sigil-top — a SIGIL lightweight node + dual-mode (lite scorecard ↔ full dashboard) terminal monitor. v0.9.0 'Verifying Full Sync': downloads the chain genesis→tip over the sigil-g0 P2P mesh AND verifies it as one connected spine (per-header precheck + parent_hash linkage back to genesis), with a persisted verified_to watermark. New `full-sync` (headless sync-and-verify, exit 0 at tip) and `verify-chain` (re-verify the local store) subcommands; TUI surfaces the ⛓ verified-spine height + ⚠ spine-break alarm distinct from raw download progress."

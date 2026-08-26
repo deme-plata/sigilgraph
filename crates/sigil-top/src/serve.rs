@@ -106,10 +106,75 @@ fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Optio
     // boundary only and must NEVER be forwarded to a remote node the way `proxy_api`
     // below would. See `mine_local_api.rs`'s module docs for the full design and the
     // secret-never-leaves-the-process invariant.
+    // ── PRIVATE NETWORK ACCESS (2026-08-27) ─────────────────────────────────────────
+    //
+    // Chrome refuses a request from a PUBLIC origin to the LOOPBACK address space unless
+    // the loopback server explicitly opts in. Measured from the hosted wallet:
+    //
+    //   Access to fetch at 'http://127.0.0.1:9800/api/v1/mine-sign' from origin
+    //   'https://sigilgraph.org' has been blocked by CORS policy: Permission was denied
+    //   for this request to access the `loopback` address space.
+    //
+    // That is the entire reason the hosted wallet demanded a recovery phrase for Swap and
+    // Bridge while a wallet opened from THIS server (same origin, no loopback crossing)
+    // never did. Opting in makes the signer reachable from sigilgraph.org, so the hosted
+    // wallet signs with the mining seed already in this process — no phrase, no paste.
+    //
+    // 🔒 ORIGIN-ALLOWLISTED ON PURPOSE. Everything else here answers
+    // `Access-Control-Allow-Origin: *`, which is harmless for reads. It is NOT harmless
+    // for a SIGNING endpoint: combined with private-network access, `*` would let ANY web
+    // page a user happens to have open ask this process to sign with the mining key —
+    // a drive-by signature oracle for the user's own money. So the preflight reflects only
+    // known SIGIL origins and refuses the rest, and the allowance is granted ONLY on the
+    // `mine_local_api` signing paths, never on the generic proxy below.
+    fn pna_allowed_origin(req: &str) -> Option<String> {
+        const ALLOWED: &[&str] = &[
+            "https://sigilgraph.org",
+            "https://www.sigilgraph.org",
+            "https://sigilgraph.quillon.xyz",
+            "http://127.0.0.1:9800",
+            "http://localhost:9800",
+        ];
+        let origin = req
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("origin:"))
+            .and_then(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()))?;
+        ALLOWED.contains(&origin.as_str()).then_some(origin)
+    }
+
+    // Preflight for the signing endpoints. Answered before anything else so the generic
+    // `*` responses below can never satisfy a private-network preflight by accident.
+    if method == "OPTIONS" && mine_local_api::is_local_path(path) {
+        let resp = match pna_allowed_origin(&req) {
+            Some(origin) => format!(
+                "HTTP/1.1 204 No Content\r\n\
+                 Access-Control-Allow-Origin: {origin}\r\n\
+                 Vary: Origin\r\n\
+                 Access-Control-Allow-Methods: POST, OPTIONS\r\n\
+                 Access-Control-Allow-Headers: content-type\r\n\
+                 Access-Control-Allow-Private-Network: true\r\n\
+                 Access-Control-Max-Age: 600\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n"
+            ),
+            // No ACAO at all -> the browser blocks it. An unknown site gets no signer.
+            None => "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_string(),
+        };
+        let _ = stream.write_all(resp.as_bytes());
+        let _ = stream.flush();
+        return;
+    }
+
     if method == "POST" && mine_local_api::is_local_path(path) {
         let (status, resp_body) = mine_local_api::handle(path, &req_body);
+        // Echo the specific allowlisted origin rather than `*`: a response to a request
+        // that crossed into the loopback address space must name its origin, and `*` is
+        // the wrong answer for a signing endpoint regardless (see `pna_allowed_origin`).
+        // A same-origin call (the wallet opened from this server) sends no Origin header
+        // and needs no ACAO at all, so `*` remains the correct fallback there.
+        let acao = pna_allowed_origin(&req).unwrap_or_else(|| "*".to_string());
         let resp = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: {acao}\r\nVary: Origin\r\nAccess-Control-Allow-Private-Network: true\r\nConnection: close\r\n\r\n",
             resp_body.len()
         );
         let _ = stream.write_all(resp.as_bytes());
@@ -246,6 +311,12 @@ fn names(safe: &str, name: &str) -> bool {
 /// Consequence to keep in mind when editing: a release now genuinely updates these
 /// surfaces for everyone, so `dist-fluxapp` is no longer a way to hot-patch the wallet
 /// without cutting a build. Set `SIGIL_UI_PREFER_DISK=1` for that (see `prefer_disk_ui`).
+// 2026-08-26: gui/sigil-wallet-tron-embedded.html + gui/enter-sigil.html gained the
+// MetaMask/Polygon surface (connect, wallet-from-signature, bidirectional bridge modal,
+// miner drill-down, address book, balance-history chart). sigil-metamask.js is INLINED
+// into both because only the surfaces listed below are served on :9800 — an external
+// script-src would 404 there. This comment also exists to bump the .rs mtime: the flux
+// wrapper cache keys only .rs sources, so a gui/-only edit would NOT rebuild this unit.
 fn embedded_surface(safe: &str) -> Option<(Vec<u8>, &'static str)> {
     const HTML: &str = "text/html; charset=utf-8";
     const JS: &str = "text/javascript; charset=utf-8";

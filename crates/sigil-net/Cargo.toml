@@ -31,3 +31,7 @@ default = []
 arti = ["sigil-net-tor/arti"]
 
 [dev-dependencies]
+# TEST-ONLY. Lets `network_id_matches_the_header_crates_network_id` assert that this
+# crate's network id and the block-header crate's have not drifted apart. Deliberately a
+# dev-dependency so nothing is added to the runtime dependency graph.
+sigil-header = { path = "../sigil-header" }

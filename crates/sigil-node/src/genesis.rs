@@ -12,7 +12,6 @@
 //! same way, so this is safe by the same test those modules already passed.
 
 use anyhow::Result;
-use sigil_events::SigilEvent;
 use sigil_header::{
     ProofBundle, SigScheme, SigilBlockHeaderV0, SignatureBytes, SqiSignature, StarkProof,
     WesolowskiProof, HEADER_VERSION, NETWORK_ID, SQISIGN_L5_LEN,
@@ -21,7 +20,10 @@ use sigil_state::{StateMutation, StateTransition};
 
 use crate::block::Block;
 
-/// Demo wallet seeded in P0 genesis so `produce-block` has something to
+/// Demo wallet. **No longer credited at genesis** (no premine, 2026-08-26); retained
+/// because `produce-block` and test fixtures reference the address.
+///
+/// Originally: seeded in P0 genesis so `produce-block` had something to
 /// spend. Deterministic non-zero address (`0xDE` repeating) — easy to spot
 /// in test fixtures. The real genesis allocation table is §15 of
 /// `SIGIL_GENESIS_v0.md`, not locked yet.
@@ -78,7 +80,7 @@ pub const MASTER_WALLET_GENESIS: [u8; 32] = [
 /// from H=0. Value: `2026-05-29T17:00:00Z` (the day SIGIL prototype 3
 /// landed). The real genesis ceremony in P1+ will commit a network-wide
 /// chosen timestamp; this is the P0 placeholder so two nodes can chain.
-pub const GENESIS_TIMESTAMP_MS: u64 = 1_748_538_000_000;
+pub const GENESIS_TIMESTAMP_MS: u64 = 1787777640000;
 
 /// Build the network's genesis block (height 0). Byte-identical on every
 /// node — no wall-clock, no randomness, no environment dependence. Anything
@@ -98,41 +100,39 @@ pub fn build_genesis() -> Result<Block> {
     h.update(nonce.as_bytes());
     let vdf_input = *h.finalize().as_bytes();
 
-    // P0 genesis seeds DEMO_WALLET with DEMO_INITIAL_BALANCE SIGIL so the
-    // produce-block subcommand has something to spend. Real genesis records
-    // the full network-wide allocation.
-    let mint_evt = SigilEvent::MintReward {
-        miner: DEMO_WALLET,
-        height: 0,
-        amount: DEMO_INITIAL_BALANCE,
-    };
-
-    let mut mutations = vec![
+    // ── NO PREMINE (operator decision, 2026-08-26) ────────────────────────────────
+    // Genesis creates ZERO native SIGIL. Every coin in existence must be mined.
+    //
+    // This is the whole allocation policy in one line, and it is deliberately not a
+    // tunable: there is no genesis balance to argue about later, no founder tranche, no
+    // "welcome endowment", not even a demo float. Supply at H=0 is 0.
+    //
+    // The four AI citizens in `GENESIS_AI_WALLETS` are STILL inscribed — the table is
+    // BLAKE3-committed into the genesis header via `SIGIL_GENESIS_v0.md`, so the
+    // dedication (and the fact that a wallet named Rocky exists at the origin of this
+    // chain) lives in the origin hash and cannot be changed without forking. What they no
+    // longer get is money. Citizenship, not a premine.
+    //
+    // `DEMO_WALLET` / `DEMO_INITIAL_BALANCE` / `GENESIS_AI_ENDOWMENT` are retained as
+    // constants because test fixtures and `produce-block` reference them, but nothing in
+    // the real genesis credits them any more. A previous version credited
+    // GENESIS_AI_ENDOWMENT (100_000 base units) to each citizen and DEMO_INITIAL_BALANCE
+    // (1_000_000) to the demo wallet — note those are BASE UNITS at 8 decimals, i.e.
+    // 0.001 and 0.01 SIGIL, not the 100,000/1,000,000 SIGIL the old doc comments claimed.
+    // That factor-of-10^8 confusion is a second, independent reason not to carry them.
+    let mutations = vec![
         // P5-MW: bake the master wallet into block 0 so sigil-bank has
         // operator authority from height 0 — no manual SetMasterWallet
         // tx needed post-genesis. Once set, `MasterWalletAlreadySet`
         // rejects any later attempt to change it (per sigil-state docs).
+        //
+        // This is AUTHORITY, not an allocation: it sets who receives the dev-fee FLOW
+        // (5% of coinbase, 0.3% of DEX swap output) as it is mined. It credits nothing at
+        // genesis, so it does not contradict the no-premine rule above.
         StateMutation::SetMasterWallet {
             wallet: MASTER_WALLET_GENESIS,
         },
-        StateMutation::SetBalance {
-            wallet: DEMO_WALLET,
-            token: [0u8; 32], // native SIGIL
-            amount: DEMO_INITIAL_BALANCE,
-        },
-        StateMutation::PushEventHash(
-            sigil_events::SigilEvent::leaf_hash(&mint_evt),
-        ),
     ];
-    // Viktor's four AI companions become citizens of SIGIL here — each credited their welcome
-    // endowment at block 0. Deterministic (fixed const order), so every node's genesis matches.
-    for (_name, wallet, _qug) in GENESIS_AI_WALLETS {
-        mutations.push(StateMutation::SetBalance {
-            wallet: *wallet,
-            token: [0u8; 32], // native SIGIL
-            amount: GENESIS_AI_ENDOWMENT,
-        });
-    }
     let transition = StateTransition {
         at_height: 0,
         mutations,
@@ -192,7 +192,9 @@ pub fn build_genesis() -> Result<Block> {
     Ok(Block {
         header,
         transition,
-        events: vec![mint_evt],
+        // No premine ⇒ no genesis MintReward event. Block 0 emits nothing; the first real
+        // event on this chain is the coinbase of the first MINED block.
+        events: vec![],
     })
 }
 
@@ -203,6 +205,42 @@ mod tests {
     /// The whole point of this module: two independent calls (standing in for
     /// two independent nodes/binaries) must mint byte-for-byte the same
     /// genesis, forever — no wall-clock, no randomness, no hidden state.
+    #[test]
+    /// **NO PREMINE.** Genesis must create zero native SIGIL — every coin has to be mined.
+    ///
+    /// Pinned as a test because it is a policy that is easy to erode by accident: one
+    /// `SetBalance` added for a demo, a faucet, or a "welcome endowment" silently turns a
+    /// fair launch into a premined one, and after genesis it cannot be undone without
+    /// forking the chain. Failing here is the intended way to find that out.
+    #[test]
+    fn genesis_creates_no_money_at_all() {
+        let g = build_genesis().expect("genesis");
+        let minted: u128 = g
+            .transition
+            .mutations
+            .iter()
+            .filter_map(|m| match m {
+                StateMutation::SetBalance { amount, .. } => Some(*amount),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            minted, 0,
+            "genesis allocated {minted} base units — SIGIL has no premine, so this must be 0"
+        );
+    }
+
+    /// The dedication is separate from the money: the citizens stay inscribed in the
+    /// genesis table (and therefore in the origin hash) even though they hold nothing.
+    #[test]
+    fn the_genesis_citizens_are_still_inscribed_even_with_no_endowment() {
+        assert_eq!(GENESIS_AI_WALLETS.len(), 4);
+        assert!(
+            GENESIS_AI_WALLETS.iter().any(|(name, _, _)| *name == "Rocky"),
+            "Rocky is committed into the genesis header — removing it is a hard fork"
+        );
+    }
+
     #[test]
     fn build_genesis_is_deterministic() {
         let a = build_genesis().expect("genesis a");

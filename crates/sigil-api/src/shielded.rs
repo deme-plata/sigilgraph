@@ -58,7 +58,12 @@ use crate::send::to_signed;
 /// variance, not just the happy path). `MAX_ATTEMPTS` raised so it can't become the
 /// new accidental limiter — the actual retry cadence is roughly one per candidate
 /// mint, so 512 attempts covers the whole final_depth window with room to spare.
-const MAX_ATTEMPTS: u32 = 600;
+/// 2026-08-26: was 600, which BOUND BEFORE `MAX_AGE` and so re-broke the very thing the
+/// 2026-08-24 MAX_AGE fix below was meant to repair — observed live as
+/// `✗ shielded tx gave up after 600 attempts / 92.0s`. The offer cadence is one per
+/// candidate mint (~6.7/s measured), so 600 offers is ~92s, well under the 2_400s this
+/// path is supposed to wait. Raised to match every other bridge in this crate.
+const MAX_ATTEMPTS: u32 = 30_000;
 /// How long a shielded tx may stay pending before it is dropped.
 const MAX_AGE: Duration = Duration::from_secs(2_400);
 
@@ -664,6 +669,43 @@ pub struct UnshieldRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Guard-rail for the defect that silently disabled this whole path: `MAX_AGE` must
+    /// exceed the time a candidate needs to become eligible to SETTLE, or nothing
+    /// submitted here can ever complete. Deliberately restates its inputs rather than
+    /// importing them — `sigil-api` does not depend on `sigil-dagknight`, and the point
+    /// is to fail loudly if someone re-derives these without redoing this arithmetic.
+    /// `final_depth = 512` at the measured live block rate (6.28 blk/s, 2026-08-26)
+    /// = ~81.5s to the EARLIEST possible settlement. The old 60s was below that floor.
+    #[test]
+    fn max_age_clears_the_worst_case_finality_lag() {
+        const FINAL_DEPTH: u64 = 512;
+        const SLOWEST_MEASURED_BLOCK_RATE_PER_SEC: u64 = 6;
+        let earliest_settlement_secs = FINAL_DEPTH / SLOWEST_MEASURED_BLOCK_RATE_PER_SEC;
+        assert!(
+            MAX_AGE.as_secs() > earliest_settlement_secs,
+            "MAX_AGE {}s is at or below the {}s floor before a candidate can settle — \
+             at this value NO tx on this path can ever complete",
+            MAX_AGE.as_secs(),
+            earliest_settlement_secs,
+        );
+    }
+
+    /// `MAX_ATTEMPTS` must not bind before `MAX_AGE`. This is not hypothetical: raising
+    /// only `MAX_AGE` and leaving the attempt cap is exactly how the shielded path stayed
+    /// broken after its own fix (`gave up after 600 attempts / 92.0s`). Offer cadence is
+    /// one per candidate mint, ~6.7/s measured, so budget against the fastest plausible.
+    #[test]
+    fn max_attempts_does_not_bind_before_max_age() {
+        const FASTEST_OFFER_CADENCE_PER_SEC: u64 = 9;
+        assert!(
+            u64::from(MAX_ATTEMPTS) >= MAX_AGE.as_secs() * FASTEST_OFFER_CADENCE_PER_SEC,
+            "MAX_ATTEMPTS {} cuts this path off after ~{}s, before MAX_AGE {}s",
+            MAX_ATTEMPTS,
+            u64::from(MAX_ATTEMPTS) / FASTEST_OFFER_CADENCE_PER_SEC,
+            MAX_AGE.as_secs(),
+        );
+    }
 
     /// THE ROOT-CAUSE GATE for the "registration never lands" bug (2026-08-24).
     ///

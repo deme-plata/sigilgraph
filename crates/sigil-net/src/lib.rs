@@ -35,27 +35,27 @@ pub use tor_policy::{route_egress, EgressClass, EgressRoute};
 
 /// SIGIL network identifier. Bytes form, used wherever Quillon uses the same
 /// shape for `network_id`. Lives in block headers (per SIGIL_GENESIS_v0.md §2).
-pub const NETWORK_ID: &[u8] = b"sigil-g0";
+pub const NETWORK_ID: &[u8] = b"sigil-g1";
 
 /// String form of [`NETWORK_ID`], for paths/topics/log messages.
-pub const NETWORK_ID_STR: &str = "sigil-g0";
+pub const NETWORK_ID_STR: &str = "sigil-g1";
 
 /// libp2p protocol prefix. All SIGIL streams negotiate under this prefix so a
 /// Quillon node and a SIGIL node sharing a TCP port (or running on the same
 /// host) ignore each other cleanly.
-pub const PROTOCOL_PREFIX: &str = "/sigil/g0/";
+pub const PROTOCOL_PREFIX: &str = "/sigil/g1/";
 
 // ── Gossipsub topics ────────────────────────────────────────────────────────
 //
 // One topic per concern. Keep them dense (publishers know exactly where their
 // message belongs) and stable (changing a topic string is a wire-break).
 
-pub const TOPIC_BLOCKS: &str = "/sigil/g0/blocks";
-pub const TOPIC_PEER_HEIGHTS: &str = "/sigil/g0/peer-heights";
-pub const TOPIC_TIP_PROOFS: &str = "/sigil/g0/tip-proofs";
-pub const TOPIC_TXS: &str = "/sigil/g0/txs";
+pub const TOPIC_BLOCKS: &str = "/sigil/g1/blocks";
+pub const TOPIC_PEER_HEIGHTS: &str = "/sigil/g1/peer-heights";
+pub const TOPIC_TIP_PROOFS: &str = "/sigil/g1/tip-proofs";
+pub const TOPIC_TXS: &str = "/sigil/g1/txs";
 /// `sigil-updater` broadcasts `ReleaseAnnouncement` JSON on this topic.
-pub const TOPIC_RELEASE: &str = "/sigil/g0/release";
+pub const TOPIC_RELEASE: &str = "/sigil/g1/release";
 
 /// All SIGIL topics, in the order a freshly-booted node should subscribe.
 /// Subscribing to blocks before tip-proofs would mean accepting block-data
@@ -84,6 +84,19 @@ pub const DEFAULT_API_PORT: u16 = 8181;
 // Quillon Delta-stall — peer ids drifted between releases. Operators set
 // `SIGIL_BOOTSTRAP_PEERS` as a comma-separated multiaddr list; this crate
 // parses it once. There's no fallback list to be stale.
+//
+// ⚠️ 2026-08-21: `read_bootstrap_peers()`/`DEFAULT_BOOTSTRAP_PEERS` below are
+// NOT called anywhere in this workspace (verified: grep for
+// `read_bootstrap_peers` outside this file returns nothing). sigil-top's
+// real dial path is `flux_p2p::NetworkManager::for_sigil()` →
+// `sigil_bootstrap_peers()` → `flux_p2p::SIGIL_BOOTSTRAP_PEERS`, a
+// DIFFERENT, same-sounding constant in
+// `flux/crates/flux-p2p/src/lib.rs`. An attempt to add a second producer
+// (happysrv) here shipped as v7.1.44 and changed nothing, because nothing
+// reads this list. If you're adding/removing a bootstrap peer for
+// sigil-top, edit `flux_p2p::SIGIL_BOOTSTRAP_PEERS` instead — this module
+// may be dead code entirely; kept updated below only for whatever (if
+// anything) still constructs a `sigil_net` config from it directly.
 
 pub const BOOTSTRAP_ENV: &str = "SIGIL_BOOTSTRAP_PEERS";
 
@@ -434,9 +447,64 @@ mod tests {
         assert_ne!(DEFAULT_API_PORT, 8080);
     }
 
+    /// **Every topic and the protocol prefix must carry the CURRENT network id.**
+    ///
+    /// Bumping `NETWORK_ID` alone is not a chain separation. The gossip topics and the
+    /// libp2p protocol prefix are independent string literals; if they still say `g0`
+    /// while the header id says `g1`, old-chain nodes keep peering, keep gossiping their
+    /// blocks into the new mesh, and are refused only at header precheck — which floods
+    /// the log with `wrong network id` and burns bandwidth+CPU verifying blocks that can
+    /// never apply. That is exactly what happened in the 2026-08-26 g0→g1 reset: the ids
+    /// were bumped, these six literals were not.
+    ///
+    /// The reset runbook's check #7 ("old chain unreachable") passes only when this does.
+    #[test]
+    fn every_topic_carries_the_current_network_id() {
+        // "sigil-g1" -> "g1": the generation suffix that must appear in every path.
+        let generation = NETWORK_ID_STR
+            .rsplit_once('-')
+            .map(|(_, g)| g)
+            .expect("NETWORK_ID_STR is expected to look like `sigil-<generation>`");
+        let expected_prefix = format!("/sigil/{generation}/");
+
+        assert_eq!(
+            PROTOCOL_PREFIX, expected_prefix,
+            "PROTOCOL_PREFIX {PROTOCOL_PREFIX} does not carry network id {NETWORK_ID_STR} — \
+             nodes from the previous chain will still negotiate SIGIL streams with this one"
+        );
+        for topic in ALL_TOPICS {
+            assert!(
+                topic.starts_with(&expected_prefix),
+                "topic {topic} does not carry network id {NETWORK_ID_STR} — a node on the \
+                 previous chain subscribes to the SAME topic and gossips into this mesh"
+            );
+        }
+    }
+
     #[test]
     fn network_id_str_matches_bytes() {
         assert_eq!(NETWORK_ID_STR.as_bytes(), NETWORK_ID);
+    }
+
+    /// **The two network ids MUST agree.**
+    ///
+    /// There are two independent constants: `sigil_header::NETWORK_ID` goes into every
+    /// block header, and this crate's goes into the libp2p protocol prefix, gossip topics,
+    /// paths and sync-auth. A chain reset that bumps only ONE of them produces the worst
+    /// of both worlds — nodes still peer and gossip (same topics) but every block fails
+    /// header validation (different id), which looks like a mysterious sync failure rather
+    /// than the two chains being deliberately separated.
+    ///
+    /// That is not hypothetical: it happened during the 2026-08-26 g0→g1 reset, caught
+    /// only by reading the startup banner. This test is the durable fix.
+    #[test]
+    fn network_id_matches_the_header_crates_network_id() {
+        assert_eq!(
+            NETWORK_ID,
+            &sigil_header::NETWORK_ID[..],
+            "sigil-net and sigil-header disagree about the network id — a reset bumped one \
+             and not the other; nodes would peer but reject every block"
+        );
     }
 
     #[test]

@@ -210,7 +210,10 @@ pub fn dag_drain_apply(
             eprintln!("⛓ ord #{} {}", ord_idx, hex::encode(&oh[..12]));
         }
         ord_idx += 1;
-        let braw = serde_json::to_vec(body).unwrap_or_default();
+        // Persisted form goes through the ONE chain-log encoder (msgpack+zstd, 4.4x
+        // smaller than the JSON this used to write). The P2P wire is unaffected — that
+        // still speaks JSON, and is encoded separately at its own call sites.
+        let braw = crate::chain_log::encode_record(body).unwrap_or_default();
         match chain.apply(body.clone()) {
             Ok(()) => {
                 persist(&braw);

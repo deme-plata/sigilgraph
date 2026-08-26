@@ -579,7 +579,7 @@ fn run_start() -> Result<()> {
         } else {
             let genesis = build_genesis().map_err(|e| anyhow!("build_genesis: {}", e))?;
             let genesis_hash = genesis.hash();
-            let graw = serde_json::to_vec(&genesis).unwrap_or_default();
+            let graw = chain_log::encode_record(&genesis).unwrap_or_default();
             chain.apply(genesis).map_err(|e| anyhow!("genesis apply: {}", e))?;
             let _ = chain_log.append_bytes(&graw);
             eprintln!("✓ chain initialised at H=0 — genesis hash {}",
@@ -736,6 +736,28 @@ fn run_start() -> Result<()> {
             std::env::var("SIGIL_BRIDGE_ADMIN_WALLET").ok().as_deref().and_then(sigil_api::hex32),
             std::env::var("SIGIL_BRIDGE_RELAYER_WALLET").ok().as_deref().and_then(sigil_api::hex32),
         ));
+        // The bridge's SHIELDED vault. Since the privacy-only change consensus refuses
+        // every transparent `Send`, so a lock is now a `Shield` into a vault-owned note
+        // and the vault needs a real key — see `sigil_api::bridge_vault`. Absent seed =
+        // no vault = locking refuses loudly; it never falls back to the retired shape.
+        {
+            use sigil_api::bridge_vault::{BridgeVault, DEFAULT_LEDGER_PATH, DEFAULT_SEED_PATH};
+            let seed_path = std::env::var("SIGIL_BRIDGE_VAULT_SEED")
+                .unwrap_or_else(|_| DEFAULT_SEED_PATH.to_string());
+            let ledger_path = std::env::var("SIGIL_BRIDGE_VAULT_LEDGER")
+                .unwrap_or_else(|_| DEFAULT_LEDGER_PATH.to_string());
+            match BridgeVault::open(std::path::Path::new(&seed_path), std::path::Path::new(&ledger_path)) {
+                Ok(v) => {
+                    let pk = v.public_key_hex();
+                    bridge_bridge.set_vault(Arc::new(v));
+                    println!("🔐 bridge vault loaded — shielded pk {pk} (seed {seed_path})");
+                }
+                Err(e) => {
+                    // Not fatal: a node that does not run the bridge is a normal node.
+                    println!("ℹ bridge vault NOT loaded ({seed_path}: {e}) — /v1/bridge/lock will refuse");
+                }
+            }
+        }
         // Wallet-authenticated swap / add-liquidity / remove-liquidity queue —
         // same "always constructed, inert without traffic" shape as
         // `send_bridge`/`bridge_bridge`. See `sigil_api::dex` module docs.
@@ -1510,7 +1532,7 @@ fn run_start() -> Result<()> {
                             };
                             let roots_json = serde_json::to_string(&header_roots).unwrap_or_else(|_| "null".into());
                             let tiphash = hex_full(&bhash);
-                            let bytes = serde_json::to_vec(&block).unwrap_or_default();
+                            let bytes = chain_log::encode_record(&block).unwrap_or_default();
                             // SIGIL_DAG=1: capture view + body BEFORE apply moves
                             // the block, so our own blocks enter the braid (§3.3).
                             let dag_own: Option<(BlockView, crate::block::Block)> =
@@ -2287,9 +2309,18 @@ fn run_start() -> Result<()> {
                                 // moved to the point-to-point request-response channel
                                 // (see the InboundRequest arm + the gap-request task).
                                 // Anything that isn't a block is ignored here.
-                                let block: crate::block::Block = match serde_json::from_slice(&data) {
-                                    Ok(b) => b,
-                                    Err(_) => continue,
+                                // WIRE v1 (2026-08-27): blocks are gossiped in the same
+                                // versioned record encoding the chain log uses — msgpack+zstd,
+                                // measured 5.13x smaller than the JSON this used to carry, on
+                                // what is by far the highest-volume topic on the network.
+                                //
+                                // `decode_record` accepts BOTH the new form and legacy JSON, so
+                                // this stays readable from any peer that has not updated yet.
+                                // The tolerance is the whole compatibility story: publish new,
+                                // accept old.
+                                let block: crate::block::Block = match chain_log::decode_record(&data) {
+                                    Some(b) => b,
+                                    None => continue,
                                 };
                                 received += 1;
                                 if let Some(br) = braid.as_mut() {
@@ -2542,7 +2573,7 @@ fn run_start() -> Result<()> {
                                 let mut next = Some(block);
                                 while let Some(b) = next.take() {
                                     let bh = b.header.height;
-                                    let braw = serde_json::to_vec(&b).unwrap_or_default();
+                                    let braw = chain_log::encode_record(&b).unwrap_or_default();
                                     match chain.apply(b) {
                                         Ok(_) => {
                                             let _ = chain_log.append_bytes(&braw);
@@ -2786,7 +2817,7 @@ fn run_start() -> Result<()> {
                         while let Some(b) = pending.remove(&chain.height()) {
                             let bhash = b.hash();
                             let view = BlockView::from(&b.header);
-                            let braw = serde_json::to_vec(&b).unwrap_or_default();
+                            let braw = chain_log::encode_record(&b).unwrap_or_default();
                             match chain.apply(b.clone()) {
                                 Ok(_) => {
                                     let _ = chain_log.append_bytes(&braw);
@@ -2831,7 +2862,7 @@ fn run_start() -> Result<()> {
                         // Apply every contiguous block we now have, starting at the tip.
                         while let Some(b) = pending.remove(&chain.height()) {
                             let bh = b.header.height;
-                            let braw = serde_json::to_vec(&b).unwrap_or_default();
+                            let braw = chain_log::encode_record(&b).unwrap_or_default();
                             match chain.apply(b) {
                                 Ok(_) => {
                                     let _ = chain_log.append_bytes(&braw);
@@ -3121,12 +3152,13 @@ fn broadcast_block(block: &Block, dry_run: bool) -> Result<()> {
             "   tip-proof:  flavor={:?}, height={}, size={} bytes",
             tip_proof.flavor, tip_proof.height, tip_proof_bytes.len()
         );
-        // Roundtrip-hash assertion: if the JSON wire format is lossy, the
-        // re-parsed block's header will hash to a different value than the
-        // local block — which would silently drop blocks on the receiver
-        // side. Catch it here.
-        let parsed: Block = serde_json::from_slice(&block_bytes)
-            .context("dry-run: parsing serialized block back from JSON")?;
+        // Roundtrip-hash assertion: if the wire encoding is lossy, the re-parsed
+        // block's header will hash to a different value than the local block —
+        // which would silently drop blocks on the receiver side. Catch it here.
+        // Uses the same tolerant decoder the real receive path does, so this
+        // check exercises exactly what a peer would run.
+        let parsed: Block = chain_log::decode_record(&block_bytes)
+            .context("dry-run: parsing serialized block back off the wire")?;
         let parsed_hash_hex = hex_full(&parsed.hash());
         if parsed_hash_hex != block_hash_hex {
             return Err(anyhow!(
@@ -4299,7 +4331,7 @@ mod dag_wiring_tests {
         assert_eq!(persisted.len(), 3, "each applied block hit the persist hook");
         let persisted_heights: Vec<u64> = persisted
             .iter()
-            .map(|raw| serde_json::from_slice::<crate::block::Block>(raw).unwrap().header.height)
+            .map(|raw| chain_log::decode_record(raw).unwrap().header.height)
             .collect();
         assert_eq!(persisted_heights, vec![0, 1, 2], "persisted in linearized order");
 

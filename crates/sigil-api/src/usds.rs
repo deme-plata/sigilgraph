@@ -21,8 +21,42 @@ use sigil_tx::{SigilTx, SignedTx};
 
 use crate::hex32;
 
-const MAX_ATTEMPTS: u32 = 2_000;
-const MAX_AGE: Duration = Duration::from_secs(60);
+/// **The retry budget is bounded by FINALITY, not by wall-clock guesswork.**
+/// A pending tx retires only via `confirm_applied`, which the producer calls only
+/// for a candidate that has landed on the SETTLED spine — and settlement is gated on
+/// `Braid::finalized_height()` = `tip - final_depth`, with `final_depth = 512`
+/// (`sigil_dagknight::BraidConfig`). At the rate this network actually produces —
+/// **measured 6.28 blk/s live on Epsilon, 2026-08-26** — that is `512 / 6.28 =`
+/// **~81.5 seconds** before a freshly-proposed candidate can settle *at the very best*.
+///
+/// The previous value here was **60s**, i.e. BELOW that floor: a tx gave up ~21s before
+/// the earliest instant it could possibly land, so it was not a race or an edge case —
+/// nothing submitted through this path could ever complete. That is exactly how the
+/// SIGIL->Polygon bridge went its entire life without minting once
+/// (`✗ bridge lock gave up after 402 attempts / 60.1s`, vault balance `0`), and how
+/// shielded registration never landed a note before its own 2026-08-24 fix.
+///
+/// The old doc comment claimed "a fresh candidate is minted roughly every producer tick,
+/// tens of ms — a generous multi-second budget". **That mental model was the bug.** The
+/// offer cadence is one per CANDIDATE MINT (measured ~6.7/s, matching the block rate),
+/// and the thing being waited on is finality, not ticks.
+///
+/// 2_400s (40 min) is the value `shielded.rs` already settled on, and gives real margin
+/// over the WORST case rather than the happy path: `computed_final` additionally clamps
+/// the finality line to `pending_floor - 1`, so a single pending block whose parent never
+/// arrives stalls finality for minutes until the `pending_max_tip_lag` / `max_window`
+/// escape hatches fire.
+///
+/// `MAX_ATTEMPTS` is sized so it cannot become the new accidental limiter — at ~9 offers/s
+/// worst case, covering 2_400s needs ~21.6k. It is a runaway backstop; `MAX_AGE` is
+/// deliberately the binding bound, because that is the one tied to finality.
+/// (This is not hypothetical: `shielded.rs` raised MAX_AGE to 2_400s on 2026-08-24 but
+/// left `MAX_ATTEMPTS = 600`, so it simply started dying at 92s instead of 60s —
+/// `✗ shielded tx gave up after 600 attempts / 92.0s`, observed live.)
+const MAX_ATTEMPTS: u32 = 30_000;
+/// How long a pending tx may stay pending before it is dropped. Must exceed the
+/// finality lag documented on `MAX_ATTEMPTS` above.
+const MAX_AGE: Duration = Duration::from_secs(2_400);
 
 struct Pending {
     tx: SigilTx,

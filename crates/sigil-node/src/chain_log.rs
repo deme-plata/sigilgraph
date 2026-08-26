@@ -91,6 +91,108 @@ fn probe_height_fast(bytes: &[u8]) -> Option<u64> {
 /// back to a full decode for that record (slower, never wrong).
 const PROBE_WINDOW: usize = 256;
 
+/// ── RECORD CODEC ────────────────────────────────────────────────────────────────
+///
+/// A record's framing is unchanged — `[u32 LE len][payload]`. Only the PAYLOAD encoding
+/// is versioned, and both forms coexist in one log forever:
+///
+/// * **legacy**: the payload IS `serde_json` and therefore starts with `{` (0x7B).
+/// * **v1**: `[MAGIC][VERSION][height: u64 LE][zstd(MessagePack(Block))]`.
+///
+/// # Why this changed
+///
+/// JSON measured **3,940 bytes per block** on blocks carrying essentially zero
+/// transactions, because every 32-byte hash is written as a decimal array
+/// (`[153,13,136,…]` — up to 4 characters per byte). At 26 blk/s that is **3.23 TB/year**,
+/// ~44× Bitcoin's bytes/day for a chain recording nothing. Nobody volunteers to keep an
+/// archival copy of that, and an archive nobody keeps is the thing that makes a ledger
+/// die. Size here is a decentralisation property, not a micro-optimisation.
+///
+/// # Why MessagePack and NOT bincode
+///
+/// Measured on 4,000 real blocks (`examples/chainlog_codec_bench.rs`):
+///
+/// | codec | bytes/block | vs JSON | self-describing |
+/// |---|---|---|---|
+/// | JSON (was) | 3,940 | 1.00× | yes |
+/// | MessagePack + zstd | **896** | **4.40×** | **yes** |
+/// | bincode + zstd | 428 | 9.21× | **NO** |
+///
+/// bincode is half the size again and was still rejected, deliberately. bincode is not
+/// self-describing: it stores field ORDER and nothing else, so adding one field to `Block`
+/// or `SigilBlockHeaderV0` makes every previously-written record undecodable. This chain
+/// already depends on the opposite property — `sigil-header` carries several
+/// `#[serde(default)]` fields whose comments say exactly that, e.g. *"keeps pre-tx-count
+/// blocks decoding to 0"*. Historical blocks are ALREADY being read back through a struct
+/// that has grown since they were written. Choosing bincode would trade 2× on disk for the
+/// guarantee that the next header field silently bricks the archive — the precise opposite
+/// of the durability this change exists to buy.
+///
+/// MessagePack keeps field names, so an old record still round-trips through a newer
+/// struct exactly as JSON does today, and `zstd` recovers most of what the names cost.
+const REC_MAGIC: u8 = 0xB5;
+const REC_VERSION_V1: u8 = 1;
+/// `MAGIC | VERSION | height(8)` — the fixed part before the compressed body.
+const REC_V1_HEADER: usize = 10;
+/// zstd level 3: measured 896 B/blk. Higher levels gain little on records this small and
+/// cost append latency on the settlement path, which is the one place that must stay hot.
+const REC_ZSTD_LEVEL: i32 = 3;
+
+/// Encode a block into a record payload. **The single encoder** — every writer goes through
+/// here so a format change can never be applied to only some call sites.
+pub fn encode_record(block: &Block) -> std::io::Result<Vec<u8>> {
+    // Escape hatch: keeps the old format writable for bisecting a suspected codec bug
+    // against a known-good reader. Reading never needs it — both forms always decode.
+    if std::env::var("SIGIL_CHAINLOG_JSON").as_deref() == Ok("1") {
+        return serde_json::to_vec(block)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e));
+    }
+    let packed = rmp_serde::to_vec_named(block)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let body = zstd::encode_all(&packed[..], REC_ZSTD_LEVEL)?;
+    let mut out = Vec::with_capacity(REC_V1_HEADER + body.len());
+    out.push(REC_MAGIC);
+    out.push(REC_VERSION_V1);
+    out.extend_from_slice(&block.header.height.to_le_bytes());
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+/// Decode a record payload written in EITHER format. **The single decoder.**
+///
+/// Returns `None` rather than panicking on a torn or unknown record: every caller already
+/// treats a failed decode as "stop the scan here", which is the correct behaviour for an
+/// append-only log whose tail may be a partial write after a crash.
+pub fn decode_record(payload: &[u8]) -> Option<Block> {
+    match payload.first()? {
+        // Legacy JSON — every record written before 2026-08-27.
+        b'{' => serde_json::from_slice(payload).ok(),
+        &REC_MAGIC => {
+            if payload.len() < REC_V1_HEADER || payload[1] != REC_VERSION_V1 {
+                return None;
+            }
+            let raw = zstd::decode_all(&payload[REC_V1_HEADER..]).ok()?;
+            rmp_serde::from_slice(&raw).ok()
+        }
+        _ => None,
+    }
+}
+
+/// Extract `header.height` from a record payload without decoding the whole block.
+///
+/// For v1 this is exact and O(1) — the height is stored in the record header precisely so
+/// the tail-replay skip path never has to decompress a block it is going to discard. For
+/// legacy JSON it falls back to the byte-scan heuristic, which returns `None` on any doubt.
+fn probe_height(payload: &[u8]) -> Option<u64> {
+    match payload.first()? {
+        &REC_MAGIC if payload.len() >= REC_V1_HEADER && payload[1] == REC_VERSION_V1 => {
+            Some(u64::from_le_bytes(payload[2..10].try_into().ok()?))
+        }
+        b'{' => probe_height_fast(payload),
+        _ => None,
+    }
+}
+
 pub struct ChainLog {
     path: PathBuf,
     writer: BufWriter<File>,
@@ -204,8 +306,7 @@ impl ChainLog {
 
     /// Append one block. O(1) — no full-chain rewrite.
     pub fn append(&mut self, block: &Block) -> std::io::Result<()> {
-        let bytes = serde_json::to_vec(block)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let bytes = encode_record(block)?;
         self.append_bytes(&bytes)
     }
 
@@ -220,7 +321,7 @@ impl ChainLog {
         // parse + 16-byte write happen on 1/4096 of appends — the hot path is
         // untouched for the other 4095.
         if (self.offsets.len() as u64) % IDX_EVERY == 0 {
-            if let Ok(p) = serde_json::from_slice::<HeightProbe>(bytes) {
+            if let Some(h) = probe_height(bytes) { let p = HeightProbe { header: HeaderHeightProbe { height: h } };
                 let off = self.bytes_len;
                 self.write_idx_entry(p.header.height, off);
             }
@@ -231,6 +332,30 @@ impl ChainLog {
     }
 
     /// Read block at `height` from disk (for serving backfill of pruned blocks).
+    ///
+    /// 2026-08-20: `offsets[i]` is populated by `open()`'s startup scan as
+    /// literally "the i-th record found in the file" — it does NOT verify
+    /// that record's own `header.height` field equals `i`. Every append
+    /// during a single continuous run keeps this 1:1 by construction (`i`
+    /// only ever grows in lockstep with real height), so a long-lived
+    /// process's own `offsets` is always correct — but if the file's
+    /// history ever contains a stretch that isn't strictly one record per
+    /// sequential height (found live on Epsilon: a fixed +1077 offset
+    /// starting somewhere in the 240k-300k range, almost certainly from a
+    /// historical bulk-import event), a FRESH `open()` after a restart
+    /// reconstructs an `offsets` that's silently misaligned with real
+    /// height from that point on. This is why the boot-time snapshot
+    /// continuity check (`main.rs`) kept reporting a hash mismatch and
+    /// falling back to a full replay on every single restart — it was
+    /// comparing against the WRONG record, not a genuinely corrupt one
+    /// (confirmed live: the record `get_by_height` below actually finds at
+    /// the snapshot's claimed height has the EXACT hash the snapshot
+    /// expects). `get`/`get_range` are UNCHANGED here (any live caller of
+    /// those already gets self-corrected height≥request rejections at
+    /// apply time — see the module doc — so this doesn't fix them; it adds
+    /// a separate, genuinely height-verified path for callers that need
+    /// the guarantee `get()` was documented to provide but doesn't fully
+    /// deliver post-restart).
     pub fn get(&self, height: u64) -> Option<Block> {
         let off = *self.offsets.get(height as usize)?;
         let mut f = File::open(&self.path).ok()?;
@@ -240,12 +365,128 @@ impl ChainLog {
         let n = u32::from_le_bytes(lb) as usize;
         let mut buf = vec![0u8; n];
         f.read_exact(&mut buf).ok()?;
-        serde_json::from_slice(&buf).ok()
+        decode_record(&buf)
+    }
+
+    /// The REAL height of the last record on disk — i.e. `get(N-1)`'s own
+    /// `header.height` field, not `N-1` itself. `offsets[i]` always points
+    /// at the true i-th physical record in the file (that part of `open()`'s
+    /// scan is fine); the bug documented on [`height`](Self::height)/
+    /// [`get`](Self::get) is trusting `i == that record's real height`,
+    /// which the +1077 historical anomaly breaks. So the LAST offset still
+    /// correctly points at the actual last record — this just reads that
+    /// one record and reports what height it really claims, instead of
+    /// reporting the record count. `None` on an empty log or a read/decode
+    /// failure (callers should treat that as "can't confirm — don't trust
+    /// it", not as height 0).
+    pub fn tip_real_height(&self) -> Option<u64> {
+        let off = *self.offsets.last()?;
+        let mut f = File::open(&self.path).ok()?;
+        f.seek(SeekFrom::Start(off)).ok()?;
+        let mut lb = [0u8; 4];
+        f.read_exact(&mut lb).ok()?;
+        let n = u32::from_le_bytes(lb) as usize;
+        let mut buf = vec![0u8; n];
+        f.read_exact(&mut buf).ok()?;
+        let block: Block = decode_record(&buf)?;
+        Some(block.header.height)
+    }
+
+    /// Like [`get`](Self::get), but VERIFIES the returned block's own
+    /// `header.height` actually equals `height` — immune to the `offsets`
+    /// misalignment documented on `get()` above. Reuses the same
+    /// `chain.idx`-validated seek `replay_from` already relies on (a
+    /// sparse, self-healing height→offset index, checked every
+    /// [`IDX_EVERY`] blocks — NOT the raw scan-built `offsets` array), then
+    /// scans forward a SHORT, bounded distance re-reading each record's
+    /// real height until it finds an exact match, passes it (gap — no such
+    /// height stored), or hits the bound. Cost: one bounded disk scan
+    /// (≤`IDX_EVERY`-ish records in the common case), not a proportional
+    /// fraction of the whole file — safe to call from a hot path, though
+    /// today's only caller is the one-time boot-time snapshot check.
+    pub fn get_by_height(&self, height: u64) -> Option<Block> {
+        const MAX_SCAN: u64 = IDX_EVERY * 4; // generous vs. the 512-block index stride
+        let dir = self.path.parent()?;
+        let start = Self::idx_seek_offset(dir, height, &self.path).unwrap_or(0);
+        let mut r = BufReader::new(File::open(&self.path).ok()?);
+        r.seek(SeekFrom::Start(start)).ok()?;
+        for _ in 0..MAX_SCAN {
+            let mut lb = [0u8; 4];
+            if r.read_exact(&mut lb).is_err() {
+                return None; // EOF before reaching the target height
+            }
+            let n = u32::from_le_bytes(lb) as usize;
+            let mut buf = vec![0u8; n];
+            if r.read_exact(&mut buf).is_err() {
+                return None; // torn tail record
+            }
+            let block: Block = match decode_record(&buf).ok_or(()) {
+                Ok(b) => b,
+                Err(_) => continue, // shouldn't happen; keep scanning rather than abort
+            };
+            match block.header.height.cmp(&height) {
+                std::cmp::Ordering::Equal => return Some(block),
+                std::cmp::Ordering::Greater => return None, // stepped past it — no such height
+                std::cmp::Ordering::Less => continue,
+            }
+        }
+        None
+    }
+
+    /// Like [`get_range`](Self::get_range), but height-validated the same way
+    /// [`get_by_height`](Self::get_by_height) is — immune to the `offsets`
+    /// misalignment documented on `get()`'s doc comment.
+    ///
+    /// 2026-08-21: found live serving a real backfill request — a node whose
+    /// `offsets` array had the same post-restart misalignment as `get()`
+    /// answered `[N..]` with **zero headers** for a range it genuinely had
+    /// on disk (proven: the requester's OWN sync continued past `N` on this
+    /// exact node earlier, and a sibling node served the identical range
+    /// fine). This is exactly the "wasted/failed backfill-serve retries"
+    /// blast radius predicted when `get()` was fixed but `get_range()` was
+    /// deliberately left alone — confirmed, not hypothetical, once observed
+    /// against a peer stuck re-requesting the same range for minutes.
+    ///
+    /// Reuses `idx_seek_offset` for a validated starting position (may land
+    /// slightly BEFORE `from`, since `chain.idx` is sparse — every
+    /// `IDX_EVERY` blocks — so this skips forward re-reading each record's
+    /// real height until reaching `from`, then collects through `to` exactly
+    /// like the original). Still one seek + one sequential read; the skip
+    /// phase is bounded by the same `IDX_EVERY` stride `get_by_height` scans.
+    pub fn get_range_by_height(&self, from: u64, to: u64) -> Vec<Block> {
+        let mut out = Vec::new();
+        let Some(dir) = self.path.parent() else { return out };
+        let start = Self::idx_seek_offset(dir, from, &self.path).unwrap_or(0);
+        let Ok(f) = File::open(&self.path) else { return out };
+        let mut r = BufReader::new(f);
+        if r.seek(SeekFrom::Start(start)).is_err() { return out; }
+        loop {
+            let mut lb = [0u8; 4];
+            if r.read_exact(&mut lb).is_err() { break; } // EOF
+            let n = u32::from_le_bytes(lb) as usize;
+            let mut buf = vec![0u8; n];
+            if r.read_exact(&mut buf).is_err() { break; } // torn tail record
+            let block: Block = match decode_record(&buf).ok_or(()) {
+                Ok(b) => b,
+                Err(_) => continue, // shouldn't happen; keep scanning rather than abort
+            };
+            if block.header.height < from { continue; } // skip-forward from a sparse idx landing
+            if block.header.height > to { break; }
+            out.push(block);
+        }
+        out
     }
 
     /// Read a contiguous height range `[from..=to]` from disk with ONE file open +
     /// sequential read (vs `get()` which opens the file per height — 8192 opens/chunk
     /// was a serve bottleneck). Stops at the end of the log.
+    ///
+    /// 2026-08-21: `offsets`-indexed, so it carries the SAME position-vs-
+    /// real-height fragility as `get()` (see that method's doc comment) —
+    /// confirmed live to silently return zero blocks for a range that
+    /// genuinely exists on disk. Prefer [`get_range_by_height`] for any new
+    /// caller; kept here unmodified for existing call sites until they're
+    /// migrated.
     pub fn get_range(&self, from: u64, to: u64) -> Vec<Block> {
         let start = match self.offsets.get(from as usize) { Some(o) => *o, None => return Vec::new() };
         let mut out = Vec::new();
@@ -259,7 +500,7 @@ impl ChainLog {
             let n = u32::from_le_bytes(lb) as usize;
             let mut buf = vec![0u8; n];
             if r.read_exact(&mut buf).is_err() { break; }
-            match serde_json::from_slice::<Block>(&buf) {
+            match decode_record(&buf).ok_or(()) {
                 Ok(b) => out.push(b),
                 Err(_) => break,
             }
@@ -286,7 +527,7 @@ impl ChainLog {
             if r.read_exact(&mut buf).is_err() {
                 break; // torn tail record
             }
-            match serde_json::from_slice::<Block>(&buf) {
+            match decode_record(&buf).ok_or(()) {
                 Ok(b) => {
                     f(b);
                     n += 1;
@@ -392,7 +633,7 @@ impl ChainLog {
             if r.read_exact(&mut head[..head_len]).is_err() {
                 break; // torn tail record
             }
-            match probe_height_fast(&head[..head_len]) {
+            match probe_height(&head[..head_len]) {
                 // Below the window: seek over the payload, never decode it.
                 Some(h) if h < from_height => {
                     if r.seek_relative((len - head_len) as i64).is_err() {
@@ -412,7 +653,7 @@ impl ChainLog {
             if r.read_exact(&mut buf[head_len..]).is_err() {
                 break; // torn tail record
             }
-            match serde_json::from_slice::<Block>(&buf) {
+            match decode_record(&buf).ok_or(()) {
                 Ok(b) => {
                     // The decoded header is always authoritative, never the probe.
                     if b.header.height > to_height {
@@ -464,7 +705,7 @@ impl ChainLog {
         let n = u32::from_le_bytes(lb) as usize;
         let mut buf = vec![0u8; n];
         r.read_exact(&mut buf).ok()?;
-        let probe: HeightProbe = serde_json::from_slice(&buf).ok()?;
+        let probe = HeightProbe { header: HeaderHeightProbe { height: probe_height(&buf)? } };
         if probe.header.height != h {
             return None;
         }
@@ -502,7 +743,7 @@ impl ChainLog {
                 if r.read_exact(&mut head[..head_len]).is_err() {
                     break; // torn tail record
                 }
-                match probe_height_fast(&head[..head_len]) {
+                match probe_height(&head[..head_len]) {
                     Some(h) if h < from_height => {
                         if r.seek_relative((len - head_len) as i64).is_err() {
                             break;
@@ -516,7 +757,7 @@ impl ChainLog {
                         if r.read_exact(&mut buf[head_len..]).is_err() {
                             break; // torn tail record
                         }
-                        match serde_json::from_slice::<Block>(&buf) {
+                        match decode_record(&buf).ok_or(()) {
                             Ok(b) => {
                                 if b.header.height >= from_height {
                                     f(b);
@@ -534,7 +775,7 @@ impl ChainLog {
             if r.read_exact(&mut buf).is_err() {
                 break; // torn tail record
             }
-            match serde_json::from_slice::<Block>(&buf) {
+            match decode_record(&buf).ok_or(()) {
                 Ok(b) => {
                     f(b);
                     n += 1;
@@ -579,7 +820,7 @@ impl ChainLog {
             // what the append path would have indexed for this record).
             let mut skipped = false;
             if from_height > 0 {
-                if let Some(h) = probe_height_fast(&head[..head_len]) {
+                if let Some(h) = probe_height(&head[..head_len]) {
                     if h < from_height {
                         if need_entry {
                             entries.push((h, byte_off));
@@ -597,7 +838,7 @@ impl ChainLog {
                 if r.read_exact(&mut buf[head_len..]).is_err() {
                     break; // torn tail record
                 }
-                match serde_json::from_slice::<Block>(&buf) {
+                match decode_record(&buf).ok_or(()) {
                     Ok(b) => {
                         if need_entry {
                             entries.push((b.header.height, byte_off));
@@ -667,6 +908,45 @@ mod tests {
         let n = ChainLog::replay(&dir, |_b| { seen += 1; });
         assert_eq!(n.unwrap(), 50);
         assert_eq!(seen, 50);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_range_by_height_returns_the_real_requested_heights() {
+        // 2026-08-21: get_range_by_height is the height-validated replacement
+        // for get_range (see both methods' doc comments — get_range shares
+        // get()'s offsets-array fragility, confirmed live to silently return
+        // zero blocks for a real range once a node's offsets drift from real
+        // height). Note __test_chain builds heights [1..=n], NOT [0..=n-1],
+        // so array-index-based get_range is off by one against real height
+        // on this fixture even with zero anomaly — exactly the class of
+        // assumption get_range_by_height doesn't make. This test checks
+        // get_range_by_height directly against real heights, not against
+        // get_range (which has no reliable "correct" answer to compare to
+        // here).
+        let dir = std::env::temp_dir().join(format!("sigil-chainlog-grbh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let blocks = crate::block::__test_chain(200); // real heights 1..=200
+        {
+            let mut log = ChainLog::open(&dir).unwrap();
+            for b in &blocks {
+                log.append(b).unwrap();
+            }
+        }
+        // reopen so the method reads through a freshly-rebuilt offsets index.
+        let log = ChainLog::open(&dir).unwrap();
+
+        let b = log.get_range_by_height(50, 149);
+        assert_eq!(b.len(), 100, "get_range_by_height must find the full clean range");
+        let b_heights: Vec<u64> = b.iter().map(|blk| blk.header.height).collect();
+        assert_eq!(b_heights, (50u64..=149).collect::<Vec<_>>(), "must return the REAL requested heights");
+
+        // A range at the very tail, and one that overruns the log — both
+        // must stop cleanly at the real end rather than erroring.
+        let tail = log.get_range_by_height(195, 999);
+        assert_eq!(tail.len(), 6, "must stop at the real end of the log (heights 195..=200)");
+        assert_eq!(tail.last().unwrap().header.height, 200);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -818,7 +1098,79 @@ mod probe_height_tests {
     //! (Tier 3). It was only exercised indirectly via replay. Its safety contract
     //! is "return None on ANY doubt" so a wrong/missing probe can never change
     //! which blocks get applied — these tests pin every doubt path.
-    use super::{probe_height_fast, PROBE_WINDOW};
+    use super::{
+        decode_record, encode_record, probe_height, probe_height_fast, PROBE_WINDOW, REC_MAGIC,
+        REC_VERSION_V1,
+    };
+
+    /// A v1 record must survive a full encode→decode round trip unchanged. If this ever
+    /// fails, every block written since the switch is unreadable — the failure mode the
+    /// whole durability change exists to avoid.
+    #[test]
+    fn v1_record_round_trips_byte_identically() {
+        let b = crate::genesis::build_genesis().expect("genesis");
+        let rec = encode_record(&b).expect("encode");
+        assert_eq!(rec[0], REC_MAGIC, "v1 records must carry the magic byte");
+        assert_eq!(rec[1], REC_VERSION_V1);
+        let back = decode_record(&rec).expect("decode");
+        assert_eq!(back.hash(), b.hash(), "round trip must preserve the block hash");
+        assert_eq!(back.header.height, b.header.height);
+    }
+
+    /// **Legacy JSON records must keep decoding forever.** The log is append-only and
+    /// mixed: every block written before 2026-08-27 is JSON and can never be rewritten.
+    /// A reader that lost the ability to read them would strand the entire archive.
+    #[test]
+    fn legacy_json_records_still_decode_and_mix_with_v1_in_one_log() {
+        let b = crate::genesis::build_genesis().expect("genesis");
+        let legacy = serde_json::to_vec(&b).expect("json");
+        assert_eq!(legacy[0], b'{', "legacy records are identified by a leading brace");
+        let from_legacy = decode_record(&legacy).expect("legacy must still decode");
+        assert_eq!(from_legacy.hash(), b.hash());
+
+        // and the two forms must agree with each other, not merely each with themselves
+        let v1 = encode_record(&b).expect("encode");
+        assert_eq!(
+            decode_record(&v1).unwrap().hash(),
+            from_legacy.hash(),
+            "the same block must decode identically from either format"
+        );
+    }
+
+    /// The height probe must be exact for v1 (read straight out of the record header) and
+    /// still work on legacy JSON. Tail-replay uses it to decide which blocks to SKIP, so a
+    /// wrong answer silently skips a block that should have been applied.
+    #[test]
+    fn probe_height_is_exact_for_both_record_formats() {
+        let b = crate::genesis::build_genesis().expect("genesis");
+        let h = b.header.height;
+        assert_eq!(probe_height(&encode_record(&b).unwrap()), Some(h), "v1 probe");
+        assert_eq!(probe_height(&serde_json::to_vec(&b).unwrap()), Some(h), "legacy probe");
+    }
+
+    /// Garbage and truncated records must return `None`, never panic and never a wrong
+    /// block — the tail of an append-only log is a partial write after any crash.
+    #[test]
+    fn malformed_records_are_refused_not_guessed() {
+        assert!(decode_record(&[]).is_none(), "empty");
+        assert!(decode_record(&[0xFF, 0x00]).is_none(), "unknown format tag");
+        assert!(decode_record(&[REC_MAGIC, 99, 0, 0, 0, 0, 0, 0, 0, 0]).is_none(), "bad version");
+        assert!(decode_record(&[REC_MAGIC, REC_VERSION_V1, 1, 2]).is_none(), "truncated header");
+        let mut torn = encode_record(&crate::genesis::build_genesis().unwrap()).unwrap();
+        torn.truncate(torn.len() / 2);
+        assert!(decode_record(&torn).is_none(), "torn compressed body");
+    }
+
+    /// The point of the exercise: v1 must actually be materially smaller than JSON on a
+    /// real block. Measured 4.40x across 4,000 live blocks; assert a conservative 2x so
+    /// the test tracks the property, not the exact ratio.
+    #[test]
+    fn v1_is_substantially_smaller_than_json() {
+        let b = crate::genesis::build_genesis().expect("genesis");
+        let j = serde_json::to_vec(&b).unwrap().len();
+        let v = encode_record(&b).unwrap().len();
+        assert!(v * 2 <= j, "v1 {v} B vs JSON {j} B — expected at least 2x smaller");
+    }
 
     #[test]
     fn reads_the_first_height_then_stops_at_a_non_digit() {

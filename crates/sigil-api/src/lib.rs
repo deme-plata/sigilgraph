@@ -48,6 +48,10 @@ pub mod send;
 use send::SendBridge;
 
 pub mod bridge;
+/// The bridge vault's SHIELDED identity — see the module docs for why the lock had to
+/// stop being a transparent `Send` (consensus retired those) and become a `Shield` into a
+/// vault-owned note.
+pub mod bridge_vault;
 use bridge::BridgeBridge;
 
 pub mod usds_bridge;
@@ -728,6 +732,47 @@ pub struct BridgeLockRequest {
     pub dest_polygon_address: String,
     pub sig: String,
     pub req_nonce: u64,
+    /// The lock id returned by `/v1/bridge/lock/prepare`.
+    #[serde(default)]
+    pub lock_id: u64,
+    /// The `(amount, cm)` parts exactly as `prepare` issued them, in order.
+    #[serde(default)]
+    pub parts: Vec<(u128, String)>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BridgePrepareRequest {
+    pub amount: u128,
+}
+
+/// Phase 1 of a lock. Returns the vault-owned note commitments the depositor must shield
+/// into, and which it must sign over.
+///
+/// Two phases exist because the depositor signs the commitments but must NOT choose them:
+/// a caller-chosen commitment would leave the value spendable by the caller while the
+/// relayer minted wrapped SIGIL against it. See `bridge_vault`'s module docs.
+#[flux_api_macros::api(POST, "/v1/bridge/lock/prepare", summary = "Phase 1: reserve a lock id and get the vault note commitments to sign")]
+pub async fn bridge_lock_prepare_handler(
+    State(st): State<AppState>,
+    Json(req): Json<BridgePrepareRequest>,
+) -> Json<serde_json::Value> {
+    match st.bridge.prepare_lock(req.amount) {
+        Ok((lock_id, parts)) => {
+            let wire: Vec<serde_json::Value> = parts
+                .iter()
+                .map(|p| serde_json::json!({ "amount": p.amount.to_string(), "cm": p.cm_hex }))
+                .collect();
+            Json(serde_json::json!({
+                "ok": true,
+                "lock_id": lock_id,
+                "parts": wire,
+                "sign_message_format":
+                    "sigil-rpc/v1|bridge_lock_shielded|{from}|{amount}|{dest}|{amount0}|{cm0}|...|nonce={req_nonce}",
+                "note": "sign the message over these parts IN ORDER, then POST /v1/bridge/lock",
+            }))
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
 }
 
 #[flux_api_macros::api(POST, "/v1/bridge/lock", summary = "Wallet-signed: lock native SIGIL into the bridge vault for minting on Polygon")]
@@ -735,13 +780,22 @@ pub async fn bridge_lock_handler(
     State(st): State<AppState>,
     Json(req): Json<BridgeLockRequest>,
 ) -> Json<serde_json::Value> {
-    match st.bridge.submit_lock(&req.from, req.amount, &req.dest_polygon_address, &req.sig, req.req_nonce) {
+    match st.bridge.submit_lock(
+        req.lock_id,
+        &req.from,
+        req.amount,
+        &req.dest_polygon_address,
+        &req.parts,
+        &req.sig,
+        req.req_nonce,
+    ) {
         Ok(rec) => Json(serde_json::json!({
             "ok": true,
             "lock_id": rec.id,
             "tx_hash": rec.tx_hash,
+            "part_tx_hashes": rec.part_tx_hashes,
             "vault": bridge::BridgeBridge::vault_hex(),
-            "note": "queued for the next braid block — the relayer mints on Polygon once this settles",
+            "note": "queued for the next braid block — the relayer mints on Polygon once every part settles",
         })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
     }
@@ -776,10 +830,45 @@ pub async fn bridge_unlock_handler(
     State(st): State<AppState>,
     Json(req): Json<BridgeUnlockRequest>,
 ) -> Json<serde_json::Value> {
-    match st.bridge.submit_unlock(&req.relayer, &req.to, req.amount, &req.polygon_burn_tx, &req.sig, req.req_nonce) {
-        Ok(hash) => Json(serde_json::json!({
+    // The payout is an `Unshield` spending the vault's own shielded notes, so it needs the
+    // live pool: the commitment list to build the Merkle path against the current anchor,
+    // and the spent set so a note that already settled elsewhere is not selected again.
+    // Snapshot both under one read guard and release it before proving — proof generation
+    // takes real time and must not hold the state lock while blocks are being applied.
+    let (pool_commitments, spent_nullifiers) = {
+        let guard = match st.state.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let pool = guard.shielded();
+        (
+            // PADDED to POOL_CAPACITY, not the raw note list. The circuit proves a
+            // fixed-depth Merkle path, and the chain's anchor is the root of the padded
+            // tree — handing `build_spend` only the real leaves builds a shallower tree,
+            // which fails as a trace/constraint-degree mismatch inside the prover rather
+            // than as anything that reads like "wrong tree".
+            pool.padded_leaves(sigil_shield::note_v1::padding_leaf_wire),
+            pool.nullifiers().into_iter().collect::<std::collections::BTreeSet<_>>(),
+        )
+    };
+
+    match st.bridge.submit_unlock(
+        &req.relayer,
+        &req.to,
+        req.amount,
+        &req.polygon_burn_tx,
+        &req.sig,
+        req.req_nonce,
+        &pool_commitments,
+        &spent_nullifiers,
+    ) {
+        Ok(hashes) => Json(serde_json::json!({
             "ok": true,
-            "tx_hash": hex::encode(hash),
+            // Kept as `tx_hash` so existing relayers still parse a single hash; an unlock
+            // spanning several denominations reports all of them in `part_tx_hashes`,
+            // mirroring how a lock reports its parts.
+            "tx_hash": hashes.first().map(hex::encode).unwrap_or_default(),
+            "part_tx_hashes": hashes.iter().map(hex::encode).collect::<Vec<_>>(),
             "note": "queued for the next braid block",
         })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
@@ -1552,6 +1641,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/dagknight/recent", get(dagknight_recent))
         .route("/v1/network/topology", get(network_topology))
         .route("/v1/bridge/lock", post(bridge_lock_handler))
+        .route("/v1/bridge/lock/prepare", post(bridge_lock_prepare_handler))
         .route("/v1/bridge/locks", get(bridge_locks_handler))
         .route("/v1/bridge/unlock", post(bridge_unlock_handler))
         .route("/v1/bridge/pause", post(bridge_pause_handler))

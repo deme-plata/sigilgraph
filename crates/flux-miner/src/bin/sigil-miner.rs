@@ -292,7 +292,9 @@ fn run_headless(stats: &Arc<Mutex<MinerStats>>, stop: &Arc<AtomicBool>, restart:
                     s.shares_bad,
                     format_hps(s.hashrate),
                     format_flux(s.hashrate),
-                    s.balance
+                    // raw base units rendered as SIGIL — the label said SIGIL while
+                    // printing raw, overstating by 1e8 once the parse fix lands.
+                    flux_miner::engine::format_sigil(s.balance)
                 );
             }
         }

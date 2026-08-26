@@ -1597,7 +1597,7 @@ fn main() {
                         "  [{}] {line}   [✓{} ✗{}]  {} (Φ {})  bal {} SIGIL",
                         s.mode, s.shares_ok, s.shares_bad,
                         flux_miner::engine::format_hps(s.hashrate), flux_miner::format_flux(s.hashrate),
-                        s.balance
+                        flux_miner::engine::format_sigil(s.balance)
                     );
                 }
                 if stop.load(Ordering::Relaxed) { break; }

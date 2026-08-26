@@ -97,8 +97,34 @@ pub fn fetch_balance(url: &str, wallet: &str) -> Option<u128> {
     let u = format!("{url}/api/v1/balance?wallet={wallet}");
     let txt = reqwest::blocking::get(&u).ok()?.text().ok()?;
     let tail = txt.split("\"balance\":").nth(1)?;
-    let digits: String = tail.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+    // 2026-08-26: `sigil-api` serializes `balance` as a JSON **string**
+    // (`"balance":"2173171"`, u128 does not survive a JS number), but this parser
+    // only skipped WHITESPACE before taking digits — so the opening quote ended the
+    // take_while immediately, `digits` came back empty, `parse()` failed, and the
+    // whole function returned None. `stats.balance` was therefore never assigned and
+    // every miner has displayed `bal 0 SIGIL` for its entire life, no matter how much
+    // it had actually earned. Proven live: the node reported 2,173,171 for the exact
+    // wallet whose miner was printing 0 in the same second.
+    // Tolerates BOTH shapes, so an unquoted number keeps working if it ever changes.
+    let digits: String = tail
+        .trim_start()
+        .trim_start_matches('"')
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     digits.parse().ok()
+}
+
+/// Base units per 1 SIGIL — the wallet UI's own convention (`amount / 1e8`, 8 dp).
+pub const SIGIL_BASE_UNITS: u128 = 100_000_000;
+
+/// Render a raw base-unit balance as SIGIL for display.
+///
+/// The status line said `bal {} SIGIL` while printing RAW base units, so even once
+/// the parse above is fixed it would overstate the balance by 1e8. Kept separate from
+/// the `balance` field itself (which stays raw) so no arithmetic downstream changes.
+pub fn format_sigil(raw: u128) -> String {
+    format!("{}.{:08}", raw / SIGIL_BASE_UNITS, raw % SIGIL_BASE_UNITS)
 }
 
 /// Mirror live mining state to a status file so an EXTERNAL reader (a separately

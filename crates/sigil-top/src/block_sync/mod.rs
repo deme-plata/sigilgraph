@@ -2031,8 +2031,29 @@ impl P2PBlockSync {
                         // in-flight claims older than 6 s are released now; staged data is
                         // never discarded, because a downloaded block is downloaded whether
                         // or not the verifier is currently stuck.
+                        // …and free the ONE range that is actually blocking, in whatever
+                        // state it is in. A range answered by a peer is marked `Fetched`; if
+                        // the store then refused those blocks (forked / unlinkable chunk),
+                        // `release()` will not remove it and `claim()` refuses to re-issue
+                        // it, so the frontier waits forever for a height nothing will ask
+                        // for again. The old blanket `clear_ranges()` masked this by wiping
+                        // EVERY range every 6 s — which is why removing it, on its own,
+                        // would have converted a spinning wedge into a permanent one.
+                        //
+                        // Retry only the frontier chunk and its successor (the next needed
+                        // height sits in one of the two), from a rotating peer, leaving all
+                        // staged look-ahead data untouched.
                         for released in sync_store.sweep_timeouts(6_000) {
                             let _ = released;
+                        }
+                        let frontier_chunk = (now_synced / CHUNK) * CHUNK;
+                        for st in [frontier_chunk, frontier_chunk.saturating_add(CHUNK)] {
+                            if sync_store.retry_range(st) {
+                                crate::tlog!(
+                                    "[sync] frontier parked at {now_synced} for 6s — re-requesting chunk {st} \
+                                     (staged ranges kept)"
+                                );
+                            }
                         }
                         // DYNAMIC BASE: the lowest servable height creeps UP as producers prune early
                         // history from their RAM window (the disk range-serve of pruned-low ranges is

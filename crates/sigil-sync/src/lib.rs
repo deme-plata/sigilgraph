@@ -319,12 +319,45 @@ impl SyncStore {
         self.mirror();
     }
 
+    /// Drop a range whatever state it is in, so it can be claimed again.
+    ///
+    /// [`release`](Self::release) deliberately only frees an IN-FLIGHT claim. That leaves a
+    /// hole: a range that was answered — so it is `Fetched` — but whose blocks the store
+    /// then refused (a forked or unlinkable chunk) can never be re-requested, because
+    /// [`claim`](Self::claim) refuses any key already present and `release` will not remove
+    /// a `Fetched` entry. The frontier then waits forever for a height that nothing will
+    /// ever ask for again.
+    ///
+    /// Until 2026-08-27 the only escape was a blanket `clear_ranges()` on a 6-second timer,
+    /// which "worked" by throwing away every staged range and re-downloading the whole
+    /// window — the re-download storm an operator caught in the queue table. This is the
+    /// targeted version: free exactly the range that is blocking, keep everything else.
+    pub fn retry_range(&self, start: u64) -> bool {
+        let removed = {
+            let mut g = self.write();
+            g.ranges.remove(&start).is_some()
+        };
+        if removed {
+            self.persist_range(start);
+            self.mirror();
+        }
+        removed
+    }
+
     /// A reply landed and was committed. `blocks` feeds the rate selector.
     pub fn mark_fetched(&self, start: u64, blocks: u64) {
         {
             let mut g = self.write();
             g.ranges.insert(start, RangeState::Fetched { at_ms: now_ms() });
-            let end = start.saturating_add(self.chunk);
+            // HONEST WATERMARK (2026-08-27). This credited `start + chunk` unconditionally,
+            // so ANY reply carrying at least one header advanced `fetched_to` by a whole
+            // chunk — whether it delivered 10,000 blocks or 3. Live consequence: a client
+            // displayed `fetched→ 52,697` against a session total of 2,779 blocks actually
+            // fetched, which makes the progress bar, the gap and the ETA all fiction, and
+            // hides a partially-served frontier behind a watermark that says it is done.
+            // Credit what arrived; only a genuinely full chunk moves the mark a full chunk.
+            let covered = blocks.min(self.chunk);
+            let end = start.saturating_add(covered);
             if end > g.fetched_to {
                 g.fetched_to = end;
             }
@@ -574,6 +607,64 @@ impl SyncStore {
 
 #[cfg(test)]
 mod tests {
+
+    use super::*;
+
+    /// A range the store REFUSED must be re-requestable.
+    ///
+    /// `release()` only frees an in-flight claim, and `claim()` refuses any key already
+    /// present — so a `Fetched` range whose blocks were rejected (forked/unlinkable chunk)
+    /// was permanently unaskable. The frontier then waits for a height nothing will ever
+    /// request again. Live signature: verified parked at 42,699 while the same ranges were
+    /// re-issued only because a blanket 6 s `clear_ranges()` kept wiping the whole map.
+    #[test]
+    fn a_fetched_range_can_be_retried_but_not_merely_released() {
+        let st = SyncStore::new(10_000);
+        assert!(st.claim(40_000, "peerA"), "fresh range claims");
+        st.mark_fetched(40_000, 10_000);
+
+        // The store refused the blocks; the range is Fetched, so `release` is a no-op…
+        st.release(40_000);
+        assert!(
+            !st.claim(40_000, "peerB"),
+            "REGRESSION: release() must not free a Fetched range — that is release()'s contract"
+        );
+
+        // …and `retry_range` is the escape hatch that makes it askable again.
+        assert!(st.retry_range(40_000), "retry_range frees a Fetched range");
+        assert!(
+            st.claim(40_000, "peerB"),
+            "REGRESSION: after retry_range the frontier chunk must be re-requestable, or a \
+             rejected chunk wedges sync permanently"
+        );
+        assert!(!st.retry_range(999_999), "retrying an untracked range reports false");
+    }
+
+    /// `fetched_to` must reflect blocks that actually arrived.
+    ///
+    /// It used to credit a whole chunk for ANY reply carrying at least one header, so a
+    /// partially-served frontier looked complete: an operator saw `fetched→ 52,697` against
+    /// 2,779 blocks genuinely fetched, which makes the progress bar, the gap and the ETA
+    /// all fiction.
+    #[test]
+    fn fetched_watermark_credits_only_what_arrived() {
+        let st = SyncStore::new(10_000);
+        st.claim(0, "p");
+        st.mark_fetched(0, 3);
+        assert_eq!(
+            st.fetched_to(), 3,
+            "REGRESSION: a 3-block reply must not advance the watermark by a full 10,000"
+        );
+
+        st.claim(10_000, "p");
+        st.mark_fetched(10_000, 10_000);
+        assert_eq!(st.fetched_to(), 20_000, "a genuinely full chunk credits the full chunk");
+
+        // Never goes backwards.
+        st.claim(30_000, "p");
+        st.mark_fetched(30_000, 1);
+        assert_eq!(st.fetched_to(), 30_001.max(20_000), "monotonic, and honest about the partial");
+    }
 
     /// The FETCH QUEUE table's data path (operator-requested torrent-style view,
     /// 2026-08-26). Asserts the snapshot reflects each lifecycle transition — a

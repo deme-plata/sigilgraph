@@ -353,9 +353,31 @@ pub fn split_coinbase_mutations(
 
         let mut step: Vec<StateMutation> = Vec::with_capacity(3);
         if to_credit > 0 {
-            let bal = work.balance_of(&to, &NATIVE);
-            let Some(new_bal) = bal.checked_add(to_credit) else { return 0 };
-            step.push(StateMutation::SetBalance { wallet: to, token: NATIVE, amount: new_bal });
+            // SHIELDED POOL CREDIT (2026-08-26). The pool-share split is the
+            // path essentially all real block wins go through once external
+            // miners are active — `build_block_body_for`'s ShieldedCoinbase
+            // branch only fires on the increasingly-rare no-solve fallback,
+            // so a registered miner's winnings were landing transparently
+            // regardless of registration. `height` is unique per call (this
+            // function runs at most once per height, and each `to` here is a
+            // distinct HashMap key), so reusing coinbase_commitment_wire's
+            // existing domain cannot collide with any other credit, ever.
+            // Falls back to the transparent credit — same as an unregistered
+            // wallet always got — when unregistered or the amount is past
+            // the shielded circuit's representable range.
+            let shielded = work.shielded().shielded_address(&to).and_then(|pk| {
+                sigil_shield::note_v1::coinbase_commitment_wire(height, &pk, to_credit)
+                    .map(|cm| StateMutation::ShieldedCoinbase { pk_shield: pk, amount: to_credit, cm })
+            });
+            let mutation = match shielded {
+                Some(m) => m,
+                None => {
+                    let bal = work.balance_of(&to, &NATIVE);
+                    let Some(new_bal) = bal.checked_add(to_credit) else { return 0 };
+                    StateMutation::SetBalance { wallet: to, token: NATIVE, amount: new_bal }
+                }
+            };
+            step.push(mutation);
         }
         if let (Some(m), true) = (master, master_credit > 0) {
             let bal = work.balance_of(&m, &NATIVE);
@@ -566,6 +588,78 @@ mod tests {
         let (shares_tr, shares_roots, ..) = build_block_body_for_shares(&st, 1, None, &[], producer, &shares);
         assert_eq!(legacy_tr.mutations, shares_tr.mutations, "identical mutations");
         assert_eq!(legacy_roots.wallet_state_root, shares_roots.wallet_state_root, "identical roots");
+    }
+
+    /// THE GAP THIS SESSION FOUND: `split_coinbase_mutations` — the path
+    /// essentially every real block win goes through once external miners
+    /// are active — used to credit every recipient with a plain, transparent
+    /// `SetBalance`, even a miner who had called `/v1/shielded/register`.
+    /// The legacy `build_block_body_for`'s ShieldedCoinbase branch only fires
+    /// on the no-solve fallback, which real mining traffic rarely hits. This
+    /// proves the pool-split path now honors registration too.
+    #[test]
+    fn pool_share_credit_shields_a_registered_miner() {
+        let mut st = SigilState::new();
+        let seed = [0x42u8; 32];
+        let acct = sigil_shield::wallet::ShieldedAccount::from_seed(seed);
+        let pk_shield = sigil_shield::note_v1::to_wire(acct.public_key());
+        let miner: WalletId = [0x99u8; 32];
+
+        sigil_state::commit_state_transition(
+            &mut st,
+            &StateTransition {
+                at_height: 0,
+                mutations: vec![StateMutation::RegisterShieldedAddress {
+                    wallet: miner,
+                    pk_shield,
+                    pk_encrypt: None,
+                }],
+            },
+            0,
+        )
+        .unwrap();
+
+        let pool_before = st.shielded().len();
+        let shares = std::collections::HashMap::from([(miner, 1u64)]);
+        let (tr, roots, ..) = build_block_body_for_shares(&st, 1, Some(1_000_000), &[], miner, &shares);
+
+        assert!(
+            tr.mutations.iter().any(|m| matches!(m, StateMutation::ShieldedCoinbase { pk_shield: pk, amount: 1_000_000, .. } if *pk == pk_shield)),
+            "a registered miner's pool-share credit must mint a shielded note, not a transparent balance: {:?}",
+            tr.mutations
+        );
+        assert!(
+            !tr.mutations.iter().any(|m| matches!(m, StateMutation::SetBalance { wallet, .. } if *wallet == miner)),
+            "the registered miner must receive NO transparent credit for this reward"
+        );
+
+        let applied = sigil_state::commit_state_transition(&mut st, &tr, 1).unwrap();
+        assert_eq!(applied.wallet_state_root, roots.wallet_state_root, "predicted == applied roots");
+        assert_eq!(st.balance_of(&miner, &NATIVE), 0, "registered miner's transparent balance stays untouched");
+        assert_eq!(st.shielded().len(), pool_before + 1, "exactly one new note entered the pool");
+        // `native_supply()` is transparent-wallets-only by design (PV-1 — see the
+        // HARD SUPPLY CAP comment in commit_state_transition): a shielded credit
+        // moves value OUT of it, into `shielded().value_locked()`. The real
+        // conservation property spans both.
+        assert_eq!(st.native_supply(), 0, "transparent supply is untouched by a shielded credit");
+        assert_eq!(st.shielded().value_locked(), 1_000_000, "the reward is fully accounted for in the shielded pool");
+        assert_eq!(st.native_supply() + st.shielded().value_locked(), 1_000_000, "total issuance (both domains) grows by exactly the reward");
+    }
+
+    /// Regression twin of the test above: an UNREGISTERED miner in the exact
+    /// same pool-split path must be completely unaffected — transparent
+    /// credit, same as before this session's change.
+    #[test]
+    fn pool_share_credit_stays_transparent_for_an_unregistered_miner() {
+        let st = SigilState::new();
+        let miner: WalletId = [0x88u8; 32];
+        let shares = std::collections::HashMap::from([(miner, 1u64)]);
+        let (tr, ..) = build_block_body_for_shares(&st, 1, Some(1_000_000), &[], miner, &shares);
+        assert_eq!(
+            tr.mutations,
+            vec![StateMutation::SetBalance { wallet: miner, token: NATIVE, amount: 1_000_000 }],
+            "unregistered miner keeps the exact pre-existing transparent-credit behavior"
+        );
     }
 
     #[test]

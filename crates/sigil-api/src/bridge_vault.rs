@@ -518,6 +518,7 @@ mod tests {
     /// `SHIELDED_ONLY_HEIGHT`; building one here is the bug this whole path was rewritten
     /// to remove, so assert the transaction SHAPE, not merely that something came back.
     #[test]
+    #[cfg_attr(debug_assertions, ignore = "debug-only winterfell 0.9 `validate_transition_degrees`: the AIR declares an UPPER BOUND on each transition-constraint degree, but the range-bit columns of a spend are witness-dependent — for some note values a column is constant, so its ACTUAL degree comes out lower and the debug assert trips. Both the check and its call site are `#[cfg(debug_assertions)]`, so it cannot fire in release, which is what the node ships. VERIFIED 2026-08-27 by building `--release --tests` and running the binary directly: all 6 pass (47/47 bridge tests, 0 failed). NOTE this uses cfg_attr so the test still RUNS in release rather than being skipped everywhere — sigil-shield's plain #[ignore]s hide the same family and 2 of those genuinely do NOT pass.")]
     fn an_unlock_pays_out_as_unshield_transactions_that_sum_to_the_amount() {
         let v = vault();
         let amount = 700u128; // 500 + 200 — two legal denominations, so two spends.
@@ -547,6 +548,7 @@ mod tests {
     /// settlement window from both selecting the same note. Without it the second spend
     /// is a double-spend that dies at apply, silently losing that unlock.
     #[test]
+    #[cfg_attr(debug_assertions, ignore = "debug-only winterfell 0.9 `validate_transition_degrees`: the AIR declares an UPPER BOUND on each transition-constraint degree, but the range-bit columns of a spend are witness-dependent — for some note values a column is constant, so its ACTUAL degree comes out lower and the debug assert trips. Both the check and its call site are `#[cfg(debug_assertions)]`, so it cannot fire in release, which is what the node ships. VERIFIED 2026-08-27 by building `--release --tests` and running the binary directly: all 6 pass (47/47 bridge tests, 0 failed). NOTE this uses cfg_attr so the test still RUNS in release rather than being skipped everywhere — sigil-shield's plain #[ignore]s hide the same family and 2 of those genuinely do NOT pass.")]
     fn a_note_committed_to_one_unlock_cannot_be_selected_by_the_next() {
         let v = vault();
         let parts = v.prepare(1, 500).expect("prepare");
@@ -570,6 +572,7 @@ mod tests {
     /// nothing — a partially-payable unlock that consumed half its notes would leave the
     /// vault's book disagreeing with the chain.
     #[test]
+    #[cfg_attr(debug_assertions, ignore = "debug-only winterfell 0.9 `validate_transition_degrees`: the AIR declares an UPPER BOUND on each transition-constraint degree, but the range-bit columns of a spend are witness-dependent — for some note values a column is constant, so its ACTUAL degree comes out lower and the debug assert trips. Both the check and its call site are `#[cfg(debug_assertions)]`, so it cannot fire in release, which is what the node ships. VERIFIED 2026-08-27 by building `--release --tests` and running the binary directly: all 6 pass (47/47 bridge tests, 0 failed). NOTE this uses cfg_attr so the test still RUNS in release rather than being skipped everywhere — sigil-shield's plain #[ignore]s hide the same family and 2 of those genuinely do NOT pass.")]
     fn an_unpayable_unlock_reserves_no_notes() {
         let v = vault();
         let parts = v.prepare(1, 500).expect("prepare");
@@ -610,6 +613,7 @@ mod tests {
     /// out is the ordinary case, not an edge case — and the vault holds one 500 note, not
     /// a 200 and a 300. Without splitting, every such unlock is refused.
     #[test]
+    #[cfg_attr(debug_assertions, ignore = "debug-only winterfell 0.9 `validate_transition_degrees`: the AIR declares an UPPER BOUND on each transition-constraint degree, but the range-bit columns of a spend are witness-dependent — for some note values a column is constant, so its ACTUAL degree comes out lower and the debug assert trips. Both the check and its call site are `#[cfg(debug_assertions)]`, so it cannot fire in release, which is what the node ships. VERIFIED 2026-08-27 by building `--release --tests` and running the binary directly: all 6 pass (47/47 bridge tests, 0 failed). NOTE this uses cfg_attr so the test still RUNS in release rather than being skipped everywhere — sigil-shield's plain #[ignore]s hide the same family and 2 of those genuinely do NOT pass.")]
     fn a_larger_note_is_split_so_a_partial_withdrawal_is_payable() {
         let v = vault();
         let parts = v.prepare(1, 500).expect("prepare");
@@ -632,6 +636,7 @@ mod tests {
     /// Splitting takes the SMALLEST covering note, so a big note is not shredded to pay a
     /// small withdrawal while a better-fitting one sits unused.
     #[test]
+    #[cfg_attr(debug_assertions, ignore = "debug-only winterfell 0.9 `validate_transition_degrees`: the AIR declares an UPPER BOUND on each transition-constraint degree, but the range-bit columns of a spend are witness-dependent — for some note values a column is constant, so its ACTUAL degree comes out lower and the debug assert trips. Both the check and its call site are `#[cfg(debug_assertions)]`, so it cannot fire in release, which is what the node ships. VERIFIED 2026-08-27 by building `--release --tests` and running the binary directly: all 6 pass (47/47 bridge tests, 0 failed). NOTE this uses cfg_attr so the test still RUNS in release rather than being skipped everywhere — sigil-shield's plain #[ignore]s hide the same family and 2 of those genuinely do NOT pass.")]
     fn splitting_prefers_the_smallest_covering_note() {
         let v = vault();
         // 700 decomposes to 500 + 200, so the vault ends up holding one of each.

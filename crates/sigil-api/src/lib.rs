@@ -504,6 +504,23 @@ pub async fn shielded_anchor_handler(State(st): State<AppState>) -> Json<serde_j
         "anchor": hex::encode(pool.current_root()),
         "notes": pool.len(),
         "nullifiers": pool.nullifier_count(),
+        // EPOCHS (2026-08-26). The pool's tree is fixed-depth, so an anonymity set fills
+        // and the pool rotates into a new generation rather than refusing notes forever.
+        // A wallet MUST look here: its notes may sit in a sealed epoch, and a spend has to
+        // prove against THAT epoch's root, not the live one. `capacity - notes` is how
+        // much room the live generation has left before the next rotation.
+        "epoch": pool.epoch(),
+        "capacity": sigil_state::shielded::POOL_CAPACITY,
+        "sealed_epochs": pool
+            .archive()
+            .iter()
+            .enumerate()
+            .map(|(i, a)| serde_json::json!({
+                "epoch": i,
+                "anchor": hex::encode(a.root),
+                "notes": a.notes.len(),
+            }))
+            .collect::<Vec<_>>(),
         // 2026-08-26: the note count says how big the anonymity set IS; this says
         // how many wallets are set up to keep growing it. A pool stuck at one note
         // with zero registrations is a configuration problem; the same pool with
@@ -531,16 +548,50 @@ pub async fn shielded_anchor_handler(State(st): State<AppState>) -> Json<serde_j
 /// alone carry no ciphertext, so this endpoint had nothing to hand back for a received
 /// note until `note_ciphertexts` existed to store one.
 #[flux_api_macros::api(GET, "/v1/shielded/leaves", summary = "Real (unpadded) note commitments plus delivery ciphertexts, for wallet/miner note discovery and spend proving")]
-pub async fn shielded_leaves_handler(State(st): State<AppState>) -> Json<serde_json::Value> {
+pub async fn shielded_leaves_handler(
+    State(st): State<AppState>,
+    Query(q): Query<ShieldedLeavesQuery>,
+) -> Json<serde_json::Value> {
     let guard = match st.state.read() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     };
     let pool = guard.shielded();
+    // EPOCH SELECTION (2026-08-26). Omitting `epoch` serves the LIVE generation, which is
+    // exactly the pre-rotation behaviour. A wallet doing a full scan must walk every epoch
+    // from 0 to `epoch` inclusive: a note sealed in an earlier generation is still spendable
+    // and still needs to be found, and its ciphertext only exists in that epoch's archive.
+    let live = pool.epoch();
+    let want = q.epoch.unwrap_or(live);
+    let (leaves, ciphertexts, anchor) = if want == live {
+        (
+            pool.notes().to_vec(),
+            pool.ciphertexts().to_vec(),
+            pool.current_root(),
+        )
+    } else {
+        match pool.archive().get(want as usize) {
+            Some(a) => (a.notes.clone(), a.ciphertexts.clone(), a.root),
+            None => {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("no such epoch {want}; live epoch is {live}"),
+                    "epoch": live,
+                    "ts_ms": now_ms(),
+                }));
+            }
+        }
+    };
     Json(serde_json::json!({
         "ok": true,
-        "leaves": pool.notes().iter().map(hex::encode).collect::<Vec<_>>(),
-        "ciphertexts": pool.ciphertexts(),
+        "epoch": want,
+        "live_epoch": live,
+        // The anchor a spend against THIS epoch must prove membership under. For a sealed
+        // epoch it is permanent; for the live one it moves as notes arrive.
+        "anchor": hex::encode(anchor),
+        "sealed": want != live,
+        "leaves": leaves.iter().map(hex::encode).collect::<Vec<_>>(),
+        "ciphertexts": ciphertexts,
         "capacity": sigil_state::shielded::POOL_CAPACITY,
         "ts_ms": now_ms(),
     }))
@@ -577,6 +628,13 @@ pub async fn shielded_nullifiers_handler(State(st): State<AppState>) -> Json<ser
 /// delivery key (`pk_encrypt`, what a note ciphertext is sealed to). Both are public by
 /// design — see `sigil_shield::note_cipher`'s module docs on why publishing them costs
 /// nothing (they are one-way / cannot be used to spend or decrypt anyone else's notes).
+/// `?epoch=N` on `/v1/shielded/leaves` — which pool generation to serve. Omitted means
+/// the live one, which is what every pre-rotation client already expects.
+#[derive(serde::Deserialize)]
+pub struct ShieldedLeavesQuery {
+    pub epoch: Option<u32>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ShieldedAddressQuery {
     pub wallet: String,

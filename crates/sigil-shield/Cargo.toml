@@ -36,14 +36,27 @@ getrandom = { version = "0.2", features = ["js"] }
 wasm-bindgen = "0.2"
 
 [lib]
-# cdylib: what wasm-bindgen needs to produce a loadable .wasm module. rlib: kept so
-# native crates (sigil-node, sigil-top, sigil-api) still link this normally as a path
-# dependency — cargo only builds the crate-type(s) a consumer actually needs, so a
-# native crate pulling this in as an rlib dependency does not pay for the cdylib
-# output; only building sigil-shield itself (or the wasm32 target) produces both.
-# Confirmed empirically: `fluxc check -p sigil-node` (native, depends on sigil-shield)
-# stayed green after this was added.
-crate-type = ["cdylib", "rlib"]
+# rlib ONLY. Do NOT add "cdylib" here, however tempting — it is what wasm-bindgen
+# wants, but declaring it in the manifest costs the whole workspace its incremental
+# builds. Reason: for a lib target whose crate-type list contains cdylib, cargo emits
+# the artifact WITHOUT `-C extra-filename=<hash>` (a shared object needs a stable
+# SONAME). sigil-shield then becomes the only crate in the tree writing to an unhashed
+# `target/<profile>/deps/libsigil_shield.rlib`, so ALL of its units — every feature
+# set, every profile, every concurrent agent — collide on that one path. Each build
+# rewrites it, its mtime jumps, and cargo correctly marks every consumer stale:
+#
+#     sigil-state dirty: StaleDependency { name: "sigil_shield", dep_mtime > max_mtime }
+#     -> sigil-emission/-events/-oracle/-braidpool -> sigil-api/-chronos -> sigil-node
+#
+# Measured 2026-08-26 with cdylib declared: a NO-OP `build -p sigil-node
+# --profile release-fast` rebuilt ~15 crates and took 63s, then 107s on an identical
+# immediately-following run — it could never converge. With rlib only: 1.1s.
+# (Regression test: crates/sigil-shield/tests/no_cdylib_in_manifest.rs)
+#
+# The browser wallet still gets its .wasm — the cdylib is applied at BUILD time, not
+# declared here, via `cargo rustc --crate-type cdylib`. See scripts/build-shield-wasm.sh,
+# which is the only supported way to regenerate gui/wasm/.
+crate-type = ["rlib"]
 
 [features]
 default = []

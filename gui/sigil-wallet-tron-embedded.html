@@ -848,11 +848,11 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       <div id="sendMsg" style="font-family:'JetBrains Mono';font-size:11px;color:#8fb3c2;min-height:14px"></div>
       <div style="border-top:1px solid rgba(33,212,253,.14);padding-top:12px;display:flex;flex-direction:column;gap:8px">
         <span style="font-family:'JetBrains Mono';font-size:11px;color:#a78bfa;text-transform:uppercase;letter-spacing:1px">Pay another wallet privately</span>
-        <div style="font-family:'JetBrains Mono';font-size:10px;line-height:1.5;color:#7c98a3">
-          A private payment to someone else needs a zero-knowledge spend proof, and no browser here
-          can generate one yet (no in-page prover exists) — this isn't available from the web wallet
-          yet. What <i>is</i> real: you can check right now whether a wallet has published a shielded
-          address to receive one, once proving ships.
+        <div id="privIntro" style="font-family:'JetBrains Mono';font-size:10px;line-height:1.5;color:#7c98a3">
+          A private payment proves a real zero-knowledge spend RIGHT HERE in the browser
+          (<span id="privWasmState" style="color:#fbbf24">loading prover…</span>) — nothing about
+          the amount or the recipient reaches the chain in the clear. First CHECK the recipient has
+          published a shielded address, then spend one of your own landed shielded notes to them.
         </div>
         <div style="display:flex;gap:8px">
           <input id="checkAddr" placeholder="64-hex SIGIL address to check" autocomplete="off" spellcheck="false"
@@ -860,6 +860,15 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
           <button onclick="checkShieldedAddr()" style="background:rgba(167,139,250,.1);border:1px solid rgba(167,139,250,.4);color:#cdbdfa;border-radius:10px;padding:0 14px;font-family:'Rajdhani';font-weight:700;cursor:pointer">CHECK</button>
         </div>
         <div id="checkAddrMsg" style="font-family:'JetBrains Mono';font-size:10.5px;color:#8fb3c2;min-height:14px"></div>
+        <!-- Revealed once CHECK confirms the recipient is registered — see checkShieldedAddr(). -->
+        <div id="privSendBox" style="display:none;flex-direction:column;gap:8px;background:rgba(167,139,250,.05);border:1px solid rgba(167,139,250,.18);border-radius:10px;padding:10px 12px">
+          <label style="font-family:'JetBrains Mono';font-size:10px;letter-spacing:1px;color:#a78bfa;text-transform:uppercase">Amount to send privately (SIGIL)</label>
+          <input id="privAmt" type="text" inputmode="decimal" placeholder="0.00000000"
+            style="background:rgba(4,8,12,.7);border:1px solid rgba(167,139,250,.22);border-radius:10px;color:#cfe9f2;font-family:'Orbitron';font-size:16px;padding:9px 11px;outline:none">
+          <div id="privNoteInfo" style="font-family:'JetBrains Mono';font-size:9.5px;color:#5a93a8"></div>
+          <button id="privGo" onclick="doPrivateSend()" style="border:1px solid rgba(167,139,250,.45);background:linear-gradient(90deg,rgba(167,139,250,.22),rgba(192,132,252,.14));color:#cdbdfa;font-family:'Orbitron';font-weight:700;font-size:13px;letter-spacing:1px;padding:11px;border-radius:10px;cursor:pointer">🔒 SEND PRIVATELY</button>
+          <div id="privMsg" style="font-family:'JetBrains Mono';font-size:10.5px;color:#8fb3c2;min-height:14px"></div>
+        </div>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-top:4px">
           <span style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8;text-transform:uppercase;letter-spacing:1px">Saved wallets</span>
           <button onclick="abAdd()" style="background:rgba(167,139,250,.1);border:1px solid rgba(167,139,250,.35);color:#cdbdfa;border-radius:8px;padding:4px 10px;font-size:11px;font-family:'Rajdhani';font-weight:700;cursor:pointer">＋ save current</button>
@@ -1021,16 +1030,26 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     try{ var raw=BigInt(window.SIGIL_RAW||'0'); document.getElementById('sendAmt').value=(Number(raw)/1e8).toFixed(8); }catch(e){}
   };
   // GET /v1/shielded/address — real, live lookup: does this wallet have a published
-  // shielded address? (No proof/signature needed — this is a public read.)
+  // shielded address? (No proof/signature needed — this is a public read.) 2026-08-25:
+  // a successful, fully-registered lookup now reveals the real private-send panel below
+  // (window.__privRecipient + #privSendBox) — see doPrivateSend().
+  window.__privRecipient=null;
   window.checkShieldedAddr=async function(){
     var addr=(document.getElementById('checkAddr').value||'').trim().toLowerCase();
+    var box=document.getElementById('privSendBox'); if(box) box.style.display='none';
+    window.__privRecipient=null;
     if(!/^[0-9a-f]{64}$/.test(addr)){ checkStatus('Enter a valid 64-hex address.', '#ff8a8a'); return; }
     checkStatus('Checking…', '#6df3ff');
     try{
       var r=await fetch('/v1/shielded/address?wallet='+addr,{cache:'no-store'});
       var j=null; try{ j=await r.json(); }catch(_){}
-      if(j && j.ok){ checkStatus('✓ registered — pk_shield '+j.pk_shield.slice(0,12)+'…  (a private-send UI can pay this wallet once proving ships)', '#00e0c6'); }
-      else { checkStatus('✗ not registered — this wallet hasn\'t published a shielded address yet.', '#fbbf24'); }
+      if(j && j.ok && j.pk_encrypt){
+        window.__privRecipient={wallet:addr, pk_shield:j.pk_shield, pk_encrypt:j.pk_encrypt};
+        checkStatus('✓ registered — pk_shield '+j.pk_shield.slice(0,12)+'… — pick an amount below to pay them privately.', '#00e0c6');
+        if(box) box.style.display='flex';
+      } else if(j && j.ok){
+        checkStatus('✗ this wallet published a shield key but no delivery (encryption) key — it cannot receive a note ciphertext yet, so a private send would be unrecoverable for them.', '#fbbf24');
+      } else { checkStatus('✗ not registered — this wallet hasn\'t published a shielded address yet.', '#fbbf24'); }
     }catch(e){ checkStatus('✗ network error — node unreachable.', '#ff8a8a'); }
   };
   try{ if(!window.__sigilMnemonic){ var _pm=localStorage.getItem('sigil-wallet-mnemonic')||localStorage.getItem('sigil-wallet-seed'); if(_pm) window.__sigilMnemonic=_pm; } }catch(e){}
@@ -1103,7 +1122,10 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       sendStatus('Submitting part '+(i+1)+'/'+denomParts.length+' ('+(Number(value)/1e8).toFixed(8)+' SIGIL)…', '#6df3ff');
       try{
         var r=await fetch('/v1/shield',{method:'POST',headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({from:from,amount:Number(value),cm:cmHex,fee:fee,sig:sig,req_nonce:reqNonce})});
+          // amount/fee are u128 on the wire — sigil_state::u128_str requires a JSON STRING,
+          // not a number (a plain number 422s: "expected a string"). Caught live testing
+          // against the real backend before this shipped.
+          body:JSON.stringify({from:from,amount:value.toString(),cm:cmHex,fee:String(fee),sig:sig,req_nonce:reqNonce})});
         var j=null; try{ j=await r.json(); }catch(_){}
         if(r.ok && j && j.ok){ noteRecord(from,index,Number(value)); landed.push({txid:j.txid,value:value}); }
         else { failed=(j&&(j.error||j.message))||('HTTP '+r.status); break; }
@@ -1149,6 +1171,141 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   document.getElementById('send-modal').addEventListener('click',function(e){ if(e.target===this) window.closeSend(); });
   window.addEventListener('keydown',function(e){ if(e.key==='Escape') window.closeSend(); });
   if(document.readyState!=='loading') wireSend(); else document.addEventListener('DOMContentLoaded',wireSend);
+})();
+</script>
+
+<!-- PRIVATE SEND — real client-side zk-STARK proving (2026-08-25).
+     Loads crates/sigil-shield compiled to WASM (wasm-bindgen --target web) from a plain
+     relative path next to this HTML file — this page has no bundler, so the wasm+JS-glue
+     pair are served as static files (see gui/wasm/). window.sigilShieldWasmReady is a
+     Promise any plain (non-module) script on this page can await; window.sigilShieldWasm
+     is the resolved module namespace once ready. See crates/sigil-shield/src/wasm_api.rs
+     for exactly what each export does, and gui/wasm/smoke-test.html for a minimal
+     standalone loader that proved this pipeline works before this file used it. -->
+<script type="module">
+  window.sigilShieldWasmReady = (async function(){
+    var el=document.getElementById('privWasmState');
+    try{
+      var mod = await import('./wasm/sigil_shield.js');
+      await mod.default(); // fetches + instantiates the sibling .wasm
+      window.sigilShieldWasm = mod;
+      if(el){ el.textContent='prover ready'; el.style.color='#00e0c6'; }
+      return mod;
+    }catch(e){
+      if(el){ el.textContent='prover failed to load — private send unavailable ('+(e&&e.message||e)+')'; el.style.color='#ff8a8a'; }
+      throw e;
+    }
+  })();
+</script>
+<script>
+(function(){
+  function bytesToHex(u8){ return Array.from(u8).map(function(b){return b.toString(16).padStart(2,'0');}).join(''); }
+  function privMsg(m,c){ var el=document.getElementById('privMsg'); if(el){ el.textContent=m; el.style.color=c||'#8fb3c2'; } }
+  // Local note bookkeeping — SAME localStorage schema doShield()'s noteRecord() already
+  // writes (sigil-shielded-notes-<addr>: [{index,value,ts}]), extended here with an
+  // optional `spent` flag so this wallet does not try to reuse a note it already spent.
+  function myNotes(addr){ try{ return JSON.parse(localStorage.getItem('sigil-shielded-notes-'+addr)||'[]'); }catch(e){ return []; } }
+  function saveMyNotes(addr,arr){ try{ localStorage.setItem('sigil-shielded-notes-'+addr, JSON.stringify(arr)); }catch(e){} }
+
+  // Real end-to-end private send: pick one of this wallet's own LANDED shielded notes
+  // that covers amount+fee, build+prove a real spend_full_v4 STARK client-side (via the
+  // WASM module above), seal the recipient's output so they can discover it, and POST
+  // the result to /v1/shielded_send — the same real endpoint sigil-api serves.
+  window.doPrivateSend=async function(){
+    var recipient=window.__privRecipient;
+    if(!recipient){ privMsg('Check a recipient address first.', '#ff8a8a'); return; }
+    var amtStr=(document.getElementById('privAmt').value||'').trim();
+    if(!/^\d+(\.\d{1,8})?$/.test(amtStr) || Number(amtStr)<=0){ privMsg('Amount must be > 0 (max 8 decimals).', '#ff8a8a'); return; }
+    var parts=amtStr.split('.');
+    var amountRaw=BigInt(parts[0]||'0')*100000000n + BigInt(((parts[1]||'')+'00000000').slice(0,8));
+
+    var from=(window.MINE_ADDR||window.ADDR||'').toLowerCase();
+    if(!/^[0-9a-f]{64}$/.test(from)){ privMsg('No wallet address loaded.', '#ff8a8a'); return; }
+
+    var wasm;
+    try{ wasm = window.sigilShieldWasm || await window.sigilShieldWasmReady; }
+    catch(e){ privMsg('Prover failed to load — cannot build a private send.', '#ff8a8a'); return; }
+
+    var mnemonic = window.__sigilMnemonic;
+    if(!mnemonic){
+      mnemonic = (prompt('Enter your recovery phrase to build this private send.\n(kept in memory for this session only — never saved)')||'').trim();
+      if(!mnemonic){ privMsg('Cancelled — recovery phrase required.', '#fbbf24'); return; }
+    }
+    var kp; try{ kp=window.sigilDeriveFrom(mnemonic); }catch(e){ window.__sigilMnemonic=null; privMsg('Could not derive a key from that phrase.', '#ff8a8a'); return; }
+    if(kp.address!==from){ window.__sigilMnemonic=null; privMsg('That phrase does not match this wallet address.', '#ff8a8a'); return; }
+    window.__sigilMnemonic=mnemonic;
+    try{ localStorage.setItem('sigil-wallet-mnemonic', mnemonic); }catch(e){}
+    var seedHex=bytesToHex(kp.priv); // same seed convention as doShield() — see its comment
+
+    var btn=document.getElementById('privGo'); if(btn)btn.disabled=true;
+    privMsg('Loading your shielded notes…', '#6df3ff');
+    try{
+      var lr=await fetch('/v1/shielded/leaves',{cache:'no-store'});
+      var lj=await lr.json();
+      if(!lj || !lj.ok){ privMsg('✗ could not load the shielded pool.', '#ff8a8a'); return; }
+      var leaves=lj.leaves||[], capacity=lj.capacity;
+
+      var FEE=1000n; // sigil_state::shielded::SHIELDED_FEE — mirrored in wasm_api.rs too
+      var candidates=[];
+      var notes=myNotes(from).filter(function(n){ return !n.spent; });
+      for(var i=0;i<notes.length;i++){
+        var n=notes[i];
+        if(BigInt(n.value) < amountRaw+FEE) continue; // this note alone can't cover it
+        var cm; try{ cm=wasm.shieldNoteCommitment(seedHex, n.index, String(n.value)); }catch(e){ continue; }
+        var pos=leaves.indexOf(cm);
+        if(pos<0) continue; // not landed yet (still finalizing) — skip, don't fail the whole send
+        candidates.push({note:n, position:pos});
+      }
+      // Prefer the SMALLEST covering note — leaves bigger notes free for bigger sends
+      // later. This wallet does not yet combine multiple notes into one spend.
+      candidates.sort(function(a,b){ return Number(BigInt(a.note.value)-BigInt(b.note.value)); });
+      if(!candidates.length){
+        privMsg('✗ no landed shielded note covers '+amtStr+' SIGIL + fee. Shield more, wait for a pending deposit to finalize, or send a smaller amount.', '#fbbf24');
+        return;
+      }
+      var pick=candidates[0];
+      var infoEl=document.getElementById('privNoteInfo');
+      if(infoEl) infoEl.textContent='spending a '+(Number(pick.note.value)/1e8).toFixed(8)+' SIGIL note (pool leaf #'+pick.position+')';
+
+      privMsg('Building + proving the private spend — real zk-STARK, client-side (~0.5-2s)…', '#6df3ff');
+      var reqJson;
+      try{
+        reqJson = wasm.buildPrivateSend(
+          seedHex, pick.note.index, String(pick.note.value), pick.position,
+          JSON.stringify(leaves), capacity,
+          recipient.pk_shield, recipient.pk_encrypt,
+          amountRaw.toString()
+        );
+      }catch(e){ privMsg('✗ could not build the spend: '+(e&&e.message||e), '#ff8a8a'); return; }
+      var req=JSON.parse(reqJson);
+
+      privMsg('Submitting…', '#6df3ff');
+      var sr=await fetch('/v1/shielded_send',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          anchor:req.anchor, nullifier:req.nullifier, cm_outs:req.cm_outs,
+          fee:req.fee, proof:req.proof, note_ciphertexts:req.note_ciphertexts
+        })});
+      var sj=null; try{ sj=await sr.json(); }catch(_){}
+      if(!sr.ok || !sj || !sj.ok){ privMsg('✗ '+((sj&&(sj.error||sj.message))||('HTTP '+sr.status)), '#ff8a8a'); return; }
+
+      // Book the spend + the change note locally: mark the spent note so this wallet
+      // never tries to reuse it, and record the change so it becomes spendable —
+      // same schema/pattern doShield()'s noteRecord() already writes.
+      var updated=myNotes(from);
+      for(var k=0;k<updated.length;k++){ if(updated[k].index===pick.note.index){ updated[k].spent=true; } }
+      if(req.change_index!==null && req.change_index!==undefined){
+        updated.push({index:req.change_index, value:Number(req.change_value), ts:Date.now()});
+      }
+      saveMyNotes(from, updated);
+
+      privMsg('✓ sent '+amtStr+' SIGIL privately — txid '+(sj.txid?String(sj.txid).slice(0,10)+'…':'(queued)')+'. Lands once the DAG finalizes (check the explorer).', '#00e0c6');
+      var amtEl=document.getElementById('privAmt'); if(amtEl) amtEl.value='';
+    }catch(e){
+      privMsg('✗ network error — node unreachable.', '#ff8a8a');
+    }finally{
+      if(btn)btn.disabled=false;
+    }
+  };
 })();
 </script>
 

@@ -50,6 +50,12 @@ pub mod spend_full_v4;
 pub mod ring;
 /// Shielded wallet: key derivation, own-note tracking, and spend proving.
 pub mod wallet;
+/// Browser (wasm32) bindings so a plain, bundler-free HTML wallet page can call the
+/// real spend prover client-side. Native builds never see this module — wasm-bindgen
+/// is a wasm32-only dependency (see Cargo.toml), so gating here is what keeps the
+/// native dependency graph for sigil-node/sigil-top untouched.
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_api;
 
 /// Errors surfaced by the shield prover/verifier.
 #[derive(Debug, thiserror::Error)]

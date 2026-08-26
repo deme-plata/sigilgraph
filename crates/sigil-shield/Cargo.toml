@@ -20,5 +20,30 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 rand = { workspace = true }
 
+# WASM build only: getrandom (pulled in transitively via `rand`) has no OS entropy
+# source inside a browser sandbox and refuses to compile without an explicit backend.
+# "js" wires it to the browser's own crypto.getRandomValues() — real entropy, not a
+# stub. Native builds (Linux/Windows) are untouched; this table only applies under
+# target_arch = "wasm32".
+#
+# wasm-bindgen (2026-08-25): the browser-callable skin over `wallet::build_spend` in
+# `src/wasm_api.rs` (gated `#[cfg(target_arch = "wasm32")]` in lib.rs). Version left
+# unpinned ("0.2") but MUST resolve to the same version the `wasm-bindgen` CLI tool is
+# invoked with when generating JS glue — a mismatch hard-fails at that step, not at
+# compile time. Pinned in practice by Cargo.lock (0.2.122 at the time this was added).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+wasm-bindgen = "0.2"
+
+[lib]
+# cdylib: what wasm-bindgen needs to produce a loadable .wasm module. rlib: kept so
+# native crates (sigil-node, sigil-top, sigil-api) still link this normally as a path
+# dependency — cargo only builds the crate-type(s) a consumer actually needs, so a
+# native crate pulling this in as an rlib dependency does not pay for the cdylib
+# output; only building sigil-shield itself (or the wasm32 target) produces both.
+# Confirmed empirically: `fluxc check -p sigil-node` (native, depends on sigil-shield)
+# stayed green after this was added.
+crate-type = ["cdylib", "rlib"]
+
 [features]
 default = []

@@ -461,3 +461,61 @@ pub(crate) fn flux_unregister_scheme() -> Result<(), String> {
     println!("  flux:// handler removed.");
     Ok(())
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    /// SIGIL_BROWSER_PRIVATE=0 is the operator's way to keep the wallet in an
+    /// ORDINARY browser window (so the wallet's own "remember my unlock"
+    /// storage survives across [W] presses) instead of a fresh, storage-wiped
+    /// private window every time. Proves the actual shipped branch: with the
+    /// override set, open_browser_private() calls the same code path as
+    /// plain open_browser() (xdg-open, no incognito flag) — never even
+    /// consulting the incognito-capable browser list.
+    #[test]
+    fn browser_private_opt_out_reaches_the_plain_opener() {
+        let dir = std::env::temp_dir().join(format!(
+            "sigil-browser-private-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("invoked.txt");
+        // A fake `xdg-open` that records exactly what it was called with —
+        // shadows the real one via PATH so no actual browser needs to exist.
+        let fake_xdg_open = dir.join("xdg-open");
+        std::fs::write(&fake_xdg_open, format!(
+            "#!/bin/sh\necho \"$@\" > {}\n", marker.display()
+        )).unwrap();
+        let mut perms = std::fs::metadata(&fake_xdg_open).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&fake_xdg_open, perms).unwrap();
+
+        let prior_path = std::env::var("PATH").unwrap_or_default();
+        let prior_display = std::env::var("DISPLAY").ok();
+        let prior_wayland = std::env::var("WAYLAND_DISPLAY").ok();
+        let prior_flag = std::env::var("SIGIL_BROWSER_PRIVATE").ok();
+        std::env::set_var("PATH", format!("{}:{prior_path}", dir.display()));
+        std::env::set_var("DISPLAY", ":99"); // defeat is_headless() — a display IS present
+        std::env::remove_var("WAYLAND_DISPLAY");
+        std::env::set_var("SIGIL_BROWSER_PRIVATE", "0");
+
+        let opened = open_browser_private("https://example.invalid/?addr=test");
+        // Give the spawned thread a moment to run the fake script.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        // Restore env immediately, before any assertion can panic and skip it.
+        std::env::set_var("PATH", prior_path);
+        match prior_display { Some(v) => std::env::set_var("DISPLAY", v), None => std::env::remove_var("DISPLAY") }
+        match prior_wayland { Some(v) => std::env::set_var("WAYLAND_DISPLAY", v), None => std::env::remove_var("WAYLAND_DISPLAY") }
+        match prior_flag { Some(v) => std::env::set_var("SIGIL_BROWSER_PRIVATE", v), None => std::env::remove_var("SIGIL_BROWSER_PRIVATE") }
+
+        assert!(opened, "a display was present, so this must report true (attempted)");
+        let recorded = std::fs::read_to_string(&marker)
+            .unwrap_or_else(|_| panic!("fake xdg-open was never invoked — SIGIL_BROWSER_PRIVATE=0 did not reach the plain opener"));
+        assert_eq!(recorded.trim(), "https://example.invalid/?addr=test",
+            "xdg-open must receive exactly the URL, no --incognito/--private-window flag");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

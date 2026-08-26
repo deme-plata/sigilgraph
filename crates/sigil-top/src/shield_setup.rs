@@ -31,6 +31,8 @@
 // argument — a CLI arg is visible to every user on the box via `ps aux`; an env var
 // is only visible to root (the same trust boundary as running this process at all).
 
+use std::time::{Duration, Instant};
+
 use ed25519_dalek::{Signer, SigningKey};
 use sigil_shield::note_v1::to_wire;
 use sigil_shield::wallet::ShieldedAccount;
@@ -133,12 +135,235 @@ pub fn register_for_shielded_mining(node_url: &str, seed_hex: &str) -> RegisterO
     }
 }
 
+/// How long to wait for a submitted registration to appear on-chain before resubmitting.
+///
+/// Registration is an ordinary shielded tx, so it only settles once its candidate crosses
+/// `BraidConfig::final_depth` (512) — measured live at ~3.5 s/block that is roughly 30
+/// minutes from submission to visible. 45 gives margin over that floor for reorg and
+/// backlog variance without leaving a genuinely dropped registration unretried for hours.
+const CONFIRM_WINDOW: Duration = Duration::from_secs(45 * 60);
+/// How often to ask the chain whether the registration has landed yet.
+const POLL_EVERY: Duration = Duration::from_secs(60);
+/// Backoff after a submission is refused outright (bad node URL, node down, node
+/// rejecting the tx) — long enough not to hammer, short enough to recover unattended.
+const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(120);
+
+/// What the chain currently says about a wallet's shielded address.
+pub enum RegistrationState {
+    /// Registered, and the published shield key is the one THIS seed derives — block
+    /// rewards will mint into notes this seed can actually spend.
+    Ours,
+    /// Registered to a DIFFERENT shield key. Rewards mint into notes this seed cannot
+    /// spend, which is worse than being unregistered, so the keeper stops and says so
+    /// loudly rather than fighting whoever holds the other seed.
+    Foreign { pk_shield: String },
+    /// Nothing published — rewards stay transparent until we register.
+    Absent,
+    /// Couldn't tell (node unreachable, unparseable answer). Deliberately distinct from
+    /// `Absent`: resubmitting on an unknown state would burn a nonce on a registration
+    /// that may already be queued or live.
+    Unknown(String),
+}
+
+/// Ask the chain what shielded address `wallet_hex` currently publishes.
+pub fn registration_state(
+    node_url: &str,
+    wallet_hex: &str,
+    expect_pk_shield: &str,
+) -> RegistrationState {
+    let url = format!(
+        "{}/v1/shielded/address?wallet={wallet_hex}",
+        node_url.trim_end_matches('/')
+    );
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return RegistrationState::Unknown(format!("http client: {e}")),
+    };
+    let resp = match client.get(&url).send() {
+        Ok(r) => r,
+        Err(e) => return RegistrationState::Unknown(format!("request failed: {e}")),
+    };
+    let parsed: serde_json::Value = match resp.json() {
+        Ok(v) => v,
+        Err(e) => return RegistrationState::Unknown(format!("bad response: {e}")),
+    };
+    if parsed.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        // The node answers a genuinely unregistered wallet with a specific error rather
+        // than an empty success, so this is a real "not registered", not a transport
+        // problem. Anything else stays Unknown.
+        let err = parsed.get("error").and_then(|v| v.as_str()).unwrap_or("");
+        return if err.contains("has not registered") {
+            RegistrationState::Absent
+        } else {
+            RegistrationState::Unknown(if err.is_empty() { "unrecognized response".into() } else { err.to_string() })
+        };
+    }
+    match parsed.get("pk_shield").and_then(|v| v.as_str()) {
+        Some(pk) if pk.eq_ignore_ascii_case(expect_pk_shield) => RegistrationState::Ours,
+        Some(pk) => RegistrationState::Foreign { pk_shield: pk.to_string() },
+        None => RegistrationState::Unknown("registered but no pk_shield in response".into()),
+    }
+}
+
+/// The shield public key `seed_hex` derives — what [`registration_state`] compares against.
+pub fn expected_pk_shield(seed_hex: &str) -> Option<String> {
+    Some(hex::encode(to_wire(ShieldedAccount::from_seed(seed_bytes(seed_hex)?).public_key())))
+}
+
+/// Register this wallet for shielded mining and KEEP it registered, on a background
+/// thread, without anyone having to notice or intervene.
+///
+/// Why a keeper and not the single blocking attempt this replaces: registration only
+/// takes effect ~30 minutes after submission (see [`CONFIRM_WINDOW`]), and the old
+/// one-shot call had no way to observe that. A submission refused by a node that was
+/// briefly down, or accepted at the door and later dropped by the pending-pool's age
+/// limit, printed one line about rewards "staying transparent until this succeeds" and
+/// then nothing ever made it succeed. Measured on the live chain the day this was
+/// written: five rigs, 204 MH/s, 1,749 blocks won — and zero registered wallets.
+///
+/// The loop is idempotent and cheap: it asks the chain first and returns immediately if
+/// the wallet is already registered to this seed's key, so a node that restarts twenty
+/// times a day submits nothing and burns no nonces.
+///
+/// Returns `None` only for a malformed seed; the caller has already validated it in every
+/// current call site, so that arm is defensive rather than expected. `log` receives each
+/// state change — pass whatever surfaces text in the caller's context (`println!` for a
+/// headless rig, the TUI's mpsc sender for `[M]`).
+pub fn spawn_registration_keeper<F>(
+    node_url: &str,
+    seed_hex: &str,
+    log: F,
+) -> Option<std::thread::JoinHandle<()>>
+where
+    F: Fn(String) + Send + 'static,
+{
+    let sk = wallet_signing_key(seed_hex)?;
+    let wallet_hex = hex::encode(sk.verifying_key().to_bytes());
+    let pk_shield = expected_pk_shield(seed_hex)?;
+    let node = node_url.to_string();
+    let seed = seed_hex.to_string();
+
+    Some(std::thread::spawn(move || {
+        let short = wallet_hex.chars().take(8).collect::<String>();
+        loop {
+            match registration_state(&node, &wallet_hex, &pk_shield) {
+                RegistrationState::Ours => {
+                    log(format!(
+                        "🔐 {short}… is registered for shielded mining — rewards mint as private notes"
+                    ));
+                    return;
+                }
+                RegistrationState::Foreign { pk_shield: other } => {
+                    log(format!(
+                        "⚠ {short}… publishes a DIFFERENT shield key ({}…) than this seed derives. \
+                         Rewards mint into notes this seed cannot spend. Mine with the seed that \
+                         registered it, or re-register deliberately.",
+                        other.chars().take(12).collect::<String>()
+                    ));
+                    return;
+                }
+                RegistrationState::Unknown(why) => {
+                    log(format!("… shielded registration state unknown ({why}) — retrying"));
+                    std::thread::sleep(RETRY_AFTER_FAILURE);
+                    continue;
+                }
+                RegistrationState::Absent => {}
+            }
+
+            match register_for_shielded_mining(&node, &seed) {
+                RegisterOutcome::Registered { txid, .. } => {
+                    log(format!(
+                        "🔐 registered {short}… for shielded mining (tx {}…) — takes ~30 min to \
+                         settle; mining continues meanwhile",
+                        txid.chars().take(10).collect::<String>()
+                    ));
+                }
+                RegisterOutcome::Failed { reason, .. } => {
+                    log(format!(
+                        "⚠ shielded registration for {short}… was refused: {reason} — rewards stay \
+                         transparent; retrying in {}s",
+                        RETRY_AFTER_FAILURE.as_secs()
+                    ));
+                    std::thread::sleep(RETRY_AFTER_FAILURE);
+                    continue;
+                }
+                // Unreachable in practice — `wallet_signing_key` already parsed this seed
+                // before the thread was spawned. Handled rather than `unreachable!()` so a
+                // future caller that skips that check gets a message instead of a panic
+                // inside a detached thread nobody is watching.
+                RegisterOutcome::BadSeed => {
+                    log(format!("⚠ shielded registration for {short}… aborted: seed is not valid 64-hex"));
+                    return;
+                }
+            }
+
+            // Submitted. Watch for it to actually land — "accepted at the door" is not the
+            // same as settled, and only the chain can tell us which happened.
+            let deadline = Instant::now() + CONFIRM_WINDOW;
+            let mut landed = false;
+            while Instant::now() < deadline {
+                std::thread::sleep(POLL_EVERY);
+                if let RegistrationState::Ours =
+                    registration_state(&node, &wallet_hex, &pk_shield)
+                {
+                    landed = true;
+                    break;
+                }
+            }
+            if landed {
+                log(format!(
+                    "✓ {short}… shielded registration confirmed on-chain — every reward from here \
+                     on is a private note"
+                ));
+                return;
+            }
+            log(format!(
+                "⚠ {short}… shielded registration did not settle within {} min — resubmitting",
+                CONFIRM_WINDOW.as_secs() / 60
+            ));
+        }
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn valid_seed(byte: u8) -> String {
         hex::encode([byte; 32])
+    }
+
+    #[test]
+    fn expected_pk_shield_matches_what_registration_actually_publishes() {
+        // `registration_state` compares the chain's `pk_shield` against
+        // `expected_pk_shield`. If those two ever derived differently, the keeper would
+        // read its OWN successful registration as `Foreign` and give up forever.
+        let seed = valid_seed(0x7c);
+        let account = ShieldedAccount::from_seed(seed_bytes(&seed).unwrap());
+        let as_registered = hex::encode(to_wire(account.public_key()));
+        assert_eq!(expected_pk_shield(&seed).unwrap(), as_registered);
+    }
+
+    #[test]
+    fn expected_pk_shield_refuses_a_malformed_seed_instead_of_guessing() {
+        assert!(expected_pk_shield("not-a-seed").is_none());
+        assert!(expected_pk_shield("deadbeef").is_none());
+    }
+
+    #[test]
+    fn a_registration_check_that_cannot_reach_the_node_is_unknown_not_absent() {
+        // The distinction is load-bearing: `Absent` makes the keeper submit a new
+        // registration, so misreading an unreachable node as "not registered" would burn
+        // a nonce every retry on a wallet that may already be registered.
+        let state = registration_state(
+            "http://127.0.0.1:1", // reserved, nothing listens
+            &hex::encode([0x11u8; 32]),
+            &hex::encode([0x22u8; 32]),
+        );
+        assert!(matches!(state, RegistrationState::Unknown(_)));
     }
 
     #[test]

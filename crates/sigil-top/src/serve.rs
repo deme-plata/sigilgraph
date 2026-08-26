@@ -19,10 +19,14 @@ use crate::mine_local_api;
 /// Returns a shutdown signal (set to true to stop the server).
 ///
 /// OUT-OF-THE-BOX: the static dir does NOT need to exist. On a user's own machine
-/// (who just downloaded sigil-top) there is no `dist-fluxapp` — but the wallet +
-/// vite-engine are compiled INTO the binary (`include_str!`), so `serve_file` falls
-/// through to the embedded copies. We bind regardless; the dir is just an optional
-/// overlay for richer assets when present (e.g. on a server with the full dist).
+/// (who just downloaded sigil-top) there is no `dist-fluxapp` — the wallet, onboarding,
+/// explorer, vite-engine and WASM prover are compiled INTO the binary (`include_str!`)
+/// and served from there. We bind regardless; the dir supplies everything else (feed
+/// JSON, downloads, site pages).
+///
+/// 2026-08-26: those built-in surfaces are now served IN PREFERENCE to the dir, not as a
+/// fallback from it — see [`embedded_surface`]. A dist folder can no longer shadow the
+/// wallet a release just shipped. `SIGIL_UI_PREFER_DISK=1` opts back out for local dev.
 pub fn start(static_dir: &str, port: u16) -> Result<Arc<AtomicBool>, String> {
     start_with_api(static_dir, port, None)
 }
@@ -215,8 +219,103 @@ fn proxy_feed(safe: &str) -> Option<(Vec<u8>, &'static str)> {
     Some((body, "application/json; charset=utf-8"))
 }
 
+/// True when `safe` is exactly `name`, or a path whose last segment is `name`.
+///
+/// Byte-compares the separator instead of building `format!("/{name}")` so this stays
+/// allocation-free on the hot request path.
+fn names(safe: &str, name: &str) -> bool {
+    safe == name
+        || (safe.len() > name.len()
+            && safe.ends_with(name)
+            && safe.as_bytes()[safe.len() - name.len() - 1] == b'/')
+}
+
+/// Every UI surface compiled INTO the binary, so a downloaded `sigil-top` carries the
+/// complete wallet + explorer + prover with no filesystem overlay and no network fetch.
+///
+/// 2026-08-26 — THIS IS NOW CHECKED BEFORE THE FILESYSTEM, and that reversal is the
+/// whole point. Previously `serve_file` read `dir` first and only fell back here, so any
+/// box that happened to have a `dist-fluxapp/` (every producer box, and any user who ever
+/// unpacked one) served whatever stale HTML was sitting on disk and silently shadowed the
+/// wallet shipped inside the binary. Measured on Epsilon the day this changed: `GET /`
+/// returned an Aug-19 `sigil-wallet-tron.html` (240,979 B) whose Send button still POSTed
+/// to the retired `/api/v1/send`, while the v7.1.86 wallet compiled into the running
+/// binary (321,359 B, zero-prompt signing via `mine_local_api`) was never reachable. A
+/// shipped fix that a week-old file on disk can veto is not shipped.
+///
+/// Consequence to keep in mind when editing: a release now genuinely updates these
+/// surfaces for everyone, so `dist-fluxapp` is no longer a way to hot-patch the wallet
+/// without cutting a build. Set `SIGIL_UI_PREFER_DISK=1` for that (see `prefer_disk_ui`).
+fn embedded_surface(safe: &str) -> Option<(Vec<u8>, &'static str)> {
+    const HTML: &str = "text/html; charset=utf-8";
+    const JS: &str = "text/javascript; charset=utf-8";
+
+    // Wallet visual layer — kept beside the embedded HTML it styles.
+    if names(safe, "sigil-wallet-codex.css") {
+        return Some((
+            include_str!("../../../gui/sigil-wallet-codex.css").as_bytes().to_vec(),
+            "text/css; charset=utf-8",
+        ));
+    }
+    // The wallet itself. Carries the #stats network-stats modal ([T]), the #activity
+    // deep-link ([B]) which opens the Explorer same-origin so its /api/v1/search proxies
+    // to THIS node, the Swap modal, and the shielded Send modal whose local fast path
+    // signs with SIGIL_MINE_SEED and never prompts for a recovery phrase.
+    // NOTE: the flux wrapper cache keys only .rs sources, so an edit to the embedded HTML
+    // alone does NOT rebuild this unit — touch this file alongside any gui/ change.
+    if names(safe, "sigil-wallet-tron.html") {
+        return Some((
+            include_str!("../../../gui/sigil-wallet-tron-embedded.html").as_bytes().to_vec(),
+            HTML,
+        ));
+    }
+    // Onboarding — 6-word mnemonic → fresh wallet. The wallet gate redirects fresh users
+    // here; it must be served or [W] dead-ends on a 404.
+    if names(safe, "enter-sigil.html") {
+        return Some((include_str!("../../../gui/enter-sigil.html").as_bytes().to_vec(), HTML));
+    }
+    if names(safe, "sigil-explorer.html") {
+        return Some((include_str!("../../../gui/sigil-explorer.html").as_bytes().to_vec(), HTML));
+    }
+    if names(safe, "vite-engine.html") {
+        return Some((include_str!("../../../gui/vite-engine-embedded.html").as_bytes().to_vec(), HTML));
+    }
+    if names(safe, "sigil-tron-p2p.js") {
+        return Some((
+            include_str!("../../../gui/sigil-wallet/dist-tron-p2p/sigil-tron-p2p.js").as_bytes().to_vec(),
+            JS,
+        ));
+    }
+    // The private-send WASM prover, so a shielded spend can be proven with no CDN.
+    if names(safe, "wasm/sigil_shield.js") {
+        return Some((include_str!("../../../gui/wasm/sigil_shield.js").as_bytes().to_vec(), JS));
+    }
+    if names(safe, "wasm/sigil_shield_bg.wasm") {
+        return Some((include_bytes!("../../../gui/wasm/sigil_shield_bg.wasm").to_vec(), "application/wasm"));
+    }
+    None
+}
+
+/// `SIGIL_UI_PREFER_DISK=1` restores the pre-2026-08-26 order (filesystem first), for the
+/// one case that reversal takes away: iterating on a surface in `FLUX_STATIC_DIR` without
+/// rebuilding the binary. Off by default — a shipped wallet should not be overridable by
+/// a stale file nobody remembers putting there.
+fn prefer_disk_ui() -> bool {
+    std::env::var("SIGIL_UI_PREFER_DISK")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 fn serve_file(dir: &PathBuf, safe: &str) -> (&'static str, Vec<u8>, &'static str) {
-    // 1. Try the filesystem
+    // 1. Built-in surfaces win over the filesystem — see `embedded_surface` for why.
+    if !prefer_disk_ui() {
+        if let Some((body, ct)) = embedded_surface(safe) {
+            return ("200 OK", body, ct);
+        }
+    }
+
+    // 2. Filesystem: everything that is NOT a built-in surface (feed JSON, downloads,
+    //    site pages, any asset a deployment adds) still comes from `dir`.
     let file_path = dir.join(safe);
     if file_path.exists() && file_path.starts_with(dir) {
         if let Ok(data) = std::fs::read(&file_path) {
@@ -224,7 +323,7 @@ fn serve_file(dir: &PathBuf, safe: &str) -> (&'static str, Vec<u8>, &'static str
         }
     }
 
-    // 2. SPA fallback: try index.html in the requested path's directory
+    // 3. SPA fallback: index.html in the requested path's directory.
     if let Some(slash) = safe.rfind('/') {
         let parent = &safe[..slash];
         let index_path = dir.join(format!("{parent}/index.html"));
@@ -235,80 +334,12 @@ fn serve_file(dir: &PathBuf, safe: &str) -> (&'static str, Vec<u8>, &'static str
         }
     }
 
-    // 3. Built-in wallet visual layer. Keep this beside the embedded HTML so a
-    // downloaded sigil-top has the complete Codex UI without a filesystem
-    // overlay or network request.
-    if safe == "sigil-wallet-codex.css" || safe.ends_with("/sigil-wallet-codex.css") {
-        let css = include_str!("../../../gui/sigil-wallet-codex.css");
-        return ("200 OK", css.as_bytes().to_vec(), "text/css; charset=utf-8");
-    }
-
-    // 3a. Built-in wallet — compiled into the binary. Carries the #stats
-    // network-stats modal (the Quillon-dashboard-equivalent stat set,
-    // deep-linked by sigil-top's [T] shortcut), the #activity deep-link
-    // ([B]), which opens the Explorer/Activity view same-origin so its
-    // /api/v1/search proxies to THIS node, and now a live Swap modal
-    // ([W] → Swap, wired to sigil-rpcd's real /pools /swap /balance —
-    // 2026-08-17, was a "soon" placeholder). NOTE: the flux wrapper
-    // cache keys only .rs sources, so an edit to the embedded HTML alone
-    // does NOT rebuild this unit — touch this file's content alongside
-    // any gui/sigil-wallet-tron-embedded.html change.
-    if safe == "sigil-wallet-tron.html" || safe.ends_with("/sigil-wallet-tron.html") {
-        let html = include_str!("../../../gui/sigil-wallet-tron-embedded.html");
-        return ("200 OK", html.as_bytes().to_vec(), "text/html; charset=utf-8");
-    }
-
-    // 3b. Built-in onboarding — 6-word mnemonic → fresh wallet (the wallet gate
-    // redirects fresh users here; it must be served or [W] dead-ends on a 404).
-    if safe == "enter-sigil.html" || safe.ends_with("/enter-sigil.html") {
-        let html = include_str!("../../../gui/enter-sigil.html");
-        return ("200 OK", html.as_bytes().to_vec(), "text/html; charset=utf-8");
-    }
-
-    // 3c. Built-in SIGIL Explorer (flux-search/flux-db, search-hit fetch-by-height 2026-07-22) — served here so the wallet's
-    // Activity iframe is same-origin and its /api/v1/search hits the node proxy.
-    if safe == "sigil-explorer.html" || safe.ends_with("/sigil-explorer.html") {
-        let html = include_str!("../../../gui/sigil-explorer.html");
-        return ("200 OK", html.as_bytes().to_vec(), "text/html; charset=utf-8");
-    }
-
-    // 4. Built-in vite-engine
-    if safe == "vite-engine.html" || safe.ends_with("/vite-engine.html") {
-        let html = include_str!("../../../gui/vite-engine-embedded.html");
-        return ("200 OK", html.as_bytes().to_vec(), "text/html; charset=utf-8");
-    }
-
-    // 5. 2026-08-23: the tron wallet's js-libp2p bundle was the ONE asset the
-    // "OUT-OF-THE-BOX" promise above (module doc, line ~20) didn't actually
-    // keep — it was only ever read from `static_dir` (step 1) with no embedded
-    // fallback, unlike every other asset the tron page needs. On any machine
-    // without a manually-deployed `dist-fluxapp` tree (a plain downloaded
-    // sigil-top — which is the normal case for an end user, NOT just Epsilon),
-    // `<script src="./sigil-tron-p2p.js">` 404'd, the P2P script never even
-    // started executing, and the P2P modal was permanently stuck showing its
-    // static "starting libp2p… / 0 Connections / dialing bootstrap…"
-    // placeholder — indistinguishable from a real connection failure, which is
-    // exactly what made the earlier location.hostname/wss fix (real, but only
-    // reachable once this file loads at all) look like it hadn't worked.
-    // Rebuild source: gui/sigil-wallet, `vite build --config vite.tron-p2p.config.ts`.
-    if safe == "sigil-tron-p2p.js" || safe.ends_with("/sigil-tron-p2p.js") {
-        let js = include_str!("../../../gui/sigil-wallet/dist-tron-p2p/sigil-tron-p2p.js");
-        return ("200 OK", js.as_bytes().to_vec(), "text/javascript; charset=utf-8");
-    }
-
-    // 6. 2026-08-26: same class of bug as item 5 above (sigil-tron-p2p.js) —
-    // the private-send WASM prover was only ever read from `static_dir`
-    // (step 1), no embedded fallback, so a plain downloaded sigil-top with no
-    // manually-deployed dist tree would 404 loading it and "Pay another
-    // wallet privately" would silently never work for a normal end user.
-    // The wallet HTML imports these via a relative `./wasm/...` path.
-    if safe == "wasm/sigil_shield.js" || safe.ends_with("/wasm/sigil_shield.js") {
-        let js = include_str!("../../../gui/wasm/sigil_shield.js");
-        return ("200 OK", js.as_bytes().to_vec(), "text/javascript; charset=utf-8");
-    }
-    if safe == "wasm/sigil_shield_bg.wasm" || safe.ends_with("/wasm/sigil_shield_bg.wasm") {
-        let wasm = include_bytes!("../../../gui/wasm/sigil_shield_bg.wasm");
-        return ("200 OK", wasm.to_vec(), "application/wasm");
+    // 4. Disk-preferred mode still falls back to the built-in copy, so an override dir
+    //    that only carries one file doesn't 404 every other surface.
+    if prefer_disk_ui() {
+        if let Some((body, ct)) = embedded_surface(safe) {
+            return ("200 OK", body, ct);
+        }
     }
 
     ("404 Not Found", b"404 Not Found\n".to_vec(), "text/plain")
@@ -420,5 +451,75 @@ fn content_type(path: &str) -> &'static str {
         "application/wasm"
     } else {
         "application/octet-stream"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn segment_match_does_not_fire_on_a_name_that_merely_ends_the_same_way() {
+        assert!(names("enter-sigil.html", "enter-sigil.html"));
+        assert!(names("nested/dir/enter-sigil.html", "enter-sigil.html"));
+        // The bug this guards: a `ends_with` without the separator check would serve the
+        // built-in onboarding page for someone's unrelated `fake-enter-sigil.html`.
+        assert!(!names("fake-enter-sigil.html", "enter-sigil.html"));
+        assert!(!names("enter-sigil.htmlx", "enter-sigil.html"));
+        assert!(!names("", "enter-sigil.html"));
+    }
+
+    #[test]
+    fn every_built_in_surface_resolves_to_non_empty_bytes() {
+        for name in [
+            "sigil-wallet-codex.css",
+            "sigil-wallet-tron.html",
+            "enter-sigil.html",
+            "sigil-explorer.html",
+            "vite-engine.html",
+            "sigil-tron-p2p.js",
+            "wasm/sigil_shield.js",
+            "wasm/sigil_shield_bg.wasm",
+        ] {
+            let got = embedded_surface(name);
+            assert!(got.is_some(), "{name} is not served from the binary");
+            let (body, ct) = got.unwrap();
+            assert!(!body.is_empty(), "{name} resolved to an empty body");
+            assert!(!ct.is_empty(), "{name} has no content type");
+        }
+        assert!(embedded_surface("sigil-recent-blocks.json").is_none());
+        assert!(embedded_surface("downloads/sigil-top-linux-x64").is_none());
+    }
+
+    /// The regression this whole change exists to prevent: a stale wallet sitting in the
+    /// static dir must NOT be able to shadow the one compiled into the binary.
+    #[test]
+    fn a_file_on_disk_cannot_shadow_the_built_in_wallet() {
+        let dir = std::env::temp_dir().join(format!(
+            "sigil-serve-precedence-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stale = b"<html>stale wallet from a week-old dist</html>";
+        std::fs::write(dir.join("sigil-wallet-tron.html"), stale).unwrap();
+
+        let (status, body, _ct) = serve_file(&dir, "sigil-wallet-tron.html");
+        assert_eq!(status, "200 OK");
+        assert_ne!(body.as_slice(), stale, "the disk copy shadowed the built-in wallet");
+        assert_eq!(
+            body,
+            embedded_surface("sigil-wallet-tron.html").unwrap().0,
+            "served bytes are not the built-in wallet"
+        );
+
+        // Anything that ISN'T a built-in surface must still come from disk, or a
+        // deployment's own assets would disappear.
+        std::fs::write(dir.join("sigil-tip.json"), b"{\"tip\":1}").unwrap();
+        let (status, body, _) = serve_file(&dir, "sigil-tip.json");
+        assert_eq!(status, "200 OK");
+        assert_eq!(body, b"{\"tip\":1}");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

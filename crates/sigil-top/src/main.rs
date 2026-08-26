@@ -1527,17 +1527,19 @@ fn main() {
                         Some(sk) => {
                             let derived = hex::encode(sk.verifying_key().to_bytes());
                             println!("  🔐 SIGIL_MINE_SEED set — mining wallet derived: {}…", &derived.chars().take(8).collect::<String>());
-                            match shield_setup::register_for_shielded_mining(&url, seed) {
-                                shield_setup::RegisterOutcome::Registered { wallet_hex, txid } => {
-                                    println!("  ✓ registered {}… for shielded mining (tx {}…) — rewards from here on mint privately",
-                                        &wallet_hex.chars().take(8).collect::<String>(), &txid.chars().take(10).collect::<String>());
-                                }
-                                shield_setup::RegisterOutcome::Failed { wallet_hex, reason } => {
-                                    println!("  ⚠ shielded registration failed for {}…: {reason} — mining continues, but rewards stay transparent until this succeeds",
-                                        &wallet_hex.chars().take(8).collect::<String>());
-                                }
-                                shield_setup::RegisterOutcome::BadSeed => unreachable!("just parsed above"),
-                            }
+                            // 2026-08-26: a background KEEPER, not the one-shot attempt
+                            // this replaces. Registration settles ~30 min after
+                            // submission, so the old blocking call could not observe
+                            // whether it landed — a rig whose registration was refused
+                            // (node briefly down) or accepted-then-dropped printed one
+                            // line and mined transparently forever. The keeper asks the
+                            // chain first (so a restart costs nothing when already
+                            // registered), submits when absent, watches for it to
+                            // actually settle, and resubmits if it doesn't. Non-blocking:
+                            // mining starts immediately either way.
+                            shield_setup::spawn_registration_keeper(&url, seed, |line| {
+                                println!("  {line}");
+                            });
                             derived
                         }
                         None => {
@@ -1553,7 +1555,16 @@ fn main() {
                 #[cfg(not(feature = "shield-register"))]
                 { let _ = seed; fallback_wallet() }
             } else {
-                fallback_wallet()
+                // No seed — so this rig CANNOT be auto-registered for shielded mining,
+                // and that is a cryptographic limit rather than a missing feature:
+                // registration is a signed tx over the wallet's own key, and a bare
+                // address is exactly the thing that proves nobody here holds that key.
+                // Say so once, plainly, instead of leaving the operator to wonder why
+                // their rewards are public. Mining itself is unaffected.
+                let w = fallback_wallet();
+                println!("  ℹ mining to {}… with no SIGIL_MINE_SEED — rewards will be TRANSPARENT. \n    Set SIGIL_MINE_SEED=<64-hex seed for this wallet> to have them mint as private notes instead.",
+                    &w.chars().take(8).collect::<String>());
+                w
             };
             let want_gpu = cfg!(feature = "gpu") && std::env::var("SIGIL_MINE_CPU").is_err();
             println!("\n  ▲ sigil-top mine-rig v{VERSION} — dual-lane (BLAKE4 Φ + VDF Ω) — headless");
@@ -2328,16 +2339,13 @@ fn start_mining(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> mpsc::Re
             // Registration lives on the dual-lane money API (same base `mine-rig`
             // uses), not `url` above (that's `/mine`, the legacy single-lane path
             // this function itself POSTs shares to) — the two are different services.
-            match shield_setup::register_for_shielded_mining(&engine_node_url(), &seed_hex) {
-                shield_setup::RegisterOutcome::Registered { wallet_hex, txid } => {
-                    let _ = tx.send(format!("🔐 registered {}… for shielded mining (tx {}…)",
-                        &wallet_hex.chars().take(8).collect::<String>(), &txid.chars().take(10).collect::<String>()));
-                }
-                shield_setup::RegisterOutcome::Failed { reason, .. } => {
-                    let _ = tx.send(format!("⚠ shielded registration failed: {reason} — mining continues transparently"));
-                }
-                shield_setup::RegisterOutcome::BadSeed => {} // already validated by miner_keypair() above; unreachable
-            }
+            // Background keeper (see mine-rig's call site for why one-shot wasn't
+            // enough). Cloning the mpsc sender lets it report state changes into the same
+            // TUI log line the miner uses, long after [M] was pressed.
+            let reg_tx = tx.clone();
+            shield_setup::spawn_registration_keeper(&engine_node_url(), &seed_hex, move |line| {
+                let _ = reg_tx.send(line);
+            });
         }
         let mut req_nonce: u64 = 0; // strictly-increasing per-wallet replay guard (ms floor)
         let difficulty_bits: u32 = std::env::var("SIGIL_MINE_DIFFICULTY").ok()

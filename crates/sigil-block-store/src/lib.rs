@@ -1633,6 +1633,52 @@ mod tests {
             .into_owned()
     }
 
+    /// The behavioural contract the TUI's `[Y]` resync now rests on: a reset must
+    /// leave NOTHING for sync to resume from, and it must SURVIVE a restart.
+    ///
+    /// Added 2026-08-26 after the operator reported "[Y] doesn't work". It didn't:
+    /// `resync()` reset TUI-local counters and never touched the store, so the engine
+    /// carried on from the same watermark. The fix routes [Y] to `reset_watermarks`,
+    /// so this pins what that call is required to do. The persistence half is the
+    /// part that actually matters — a reset that lives only in RAM would resume the
+    /// old cursor on the next launch and look, once again, like [Y] did nothing.
+    #[test]
+    fn reset_watermarks_zeroes_everything_and_survives_reopen() {
+        let path = tmp("resync-reset");
+        let _ = std::fs::remove_dir_all(&path);
+        {
+            let mut s = BlockStore::open(&path).expect("open");
+            // `rebase` is the honest way to fabricate a mid-sync store: `set_verified_to`
+            // clamps to `synced_to.max(fold_anchor_height())`, so on a store with no
+            // blocks it silently collapses to the base and the fixture would be testing
+            // nothing. (Learned the hard way — the first version of this test asserted
+            // 500 and got 1.)
+            s.rebase(500);
+            assert_eq!(s.synced_to(), 500, "precondition: a store mid-sync");
+            assert_eq!(s.verified_to(), 500);
+            assert_eq!(s.base(), 500);
+
+            s.reset_watermarks();
+
+            assert_eq!(s.synced_to(), 0, "synced_to must be zero — sync restarts from base");
+            assert_eq!(s.verified_to(), 0, "verified_to must be zero — the spine is re-verified");
+            assert_eq!(s.best_height(), 0);
+            assert_eq!(s.base(), 0);
+            assert_eq!(s.genesis_hash(), "", "the old chain's genesis anchor must be forgotten");
+            assert!(s.fold_anchor().is_none(), "a stale fold anchor would skip the re-walk");
+        }
+        // The half that makes [Y] real rather than cosmetic: reopen from disk and the
+        // reset is still there. If this regressed, [Y] would appear to work and then
+        // silently resume the old cursor on the next launch.
+        {
+            let s = BlockStore::open(&path).expect("reopen");
+            assert_eq!(s.synced_to(), 0, "reset did not persist — sync would resume where it was");
+            assert_eq!(s.verified_to(), 0, "reset did not persist");
+            assert_eq!(s.best_height(), 0, "reset did not persist");
+        }
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
     /// Wire-codec lab tool (env-gated, skips by default): open the REAL local block DB
     /// (`SIGIL_BENCH_DB=/path`) and dump an exact `'H' + bincode(Vec<Header>)` backfill
     /// payload — byte-identical to what `headers_only` puts on the wire — to

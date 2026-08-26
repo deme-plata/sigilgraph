@@ -3181,11 +3181,24 @@ impl App {
         self.full_sync_target = 0;
         self.full_sync_active = false;
         if let Some(ref p2p) = self.p2p_sync {
+            // v7.1.92 (rocky) — THE ACTUAL FIX. Everything above this line is
+            // TUI-local: counters, the rate window, the Kalman ETA, the feed list.
+            // Resetting them made the hero LOOK restarted while the engine carried on
+            // from exactly where it was, because the persisted store watermarks
+            // (synced_to / verified_to / base) were never touched. Operator report,
+            // 2026-08-26: "[Y] doesn't work" — correct, it never did the one thing
+            // its name promises. `request_full_resync` zeroes those watermarks on the
+            // engine thread (the store lives there and reset needs &mut), so sync
+            // genuinely restarts from the base.
+            p2p.request_full_resync();
             // re-arm the target so the hero shows progress-to-tip again and the
             // engine re-checks it is tracking the latest tip.
             p2p.set_known_tip(self.st.height.max(self.target_height));
-            self.toast = "⟳ RESYNC — sync restarted: counters, rate + ETA reset, re-fetching tip".into();
-        } else if let Some(store) = self.take_idle_store() {
+            self.toast = "⟳ RESYNC — starting from scratch: store watermarks zeroed, re-walking from base".into();
+        } else if let Some(mut store) = self.take_idle_store() {
+            // Same reset, applied directly — there is no engine thread to defer to
+            // yet, and this is the one moment we own the store by value.
+            store.reset_watermarks();
             // v0.71.1: in light monitor [Y] was a silent no-op with a lying toast —
             // there was no engine to resync. Now it STARTS the engine (same path
             // as F) so resync always resyncs.
@@ -3196,7 +3209,7 @@ impl App {
             // the light engine, so persist "light" (was "full", which would have made the
             // next restart launch a genesis archive the operator never asked for).
             persist_sync_mode("light");
-            self.toast = "⟳ RESYNC — engine STARTED (was light monitor), live backfill running".into();
+            self.toast = "⟳ RESYNC — from scratch: watermarks zeroed, engine STARTED (was light monitor)".into();
         } else {
             self.toast = "✗ resync: sync store unavailable — restart the app".into();
         }

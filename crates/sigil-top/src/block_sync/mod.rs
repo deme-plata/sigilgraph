@@ -20,7 +20,10 @@ use std::collections::HashMap;
 // the wire structs, and shared infra (HTTP clients, sane_raise/SANE_LEAD). Each
 // submodule is one lane's surface; the glob `use`s keep launch()'s calls unqualified.
 mod fetch;   // LANE-A net/transport  (rocky-sync-A)
-mod verify;  // LANE-B decode+verify  (rocky-sync-B)
+// pub(crate) (2026-08-23): producer::run reaches verify::inflate_gossip_frame
+// through this path — everything else about this module stays exactly as
+// private as before (only that one already-pub(crate) fn is reachable).
+pub(crate) mod verify;  // LANE-B decode+verify  (rocky-sync-B)
 mod commit;  // LANE-C storage/commit (rocky-sync-C)
 mod skeleton_store; // flat append-only skeleton prefix store (the 10M-blk/s path to 100k)
 mod skel_flux; // ADOPT the native flux-db skeleton extension (flux_db::skeleton)
@@ -282,6 +285,10 @@ pub struct P2PBlockSync {
     /// Set by `set_full_archive`; the engine thread consumes it at tick-top and
     /// re-anchors the store at the genesis base so the frontier re-walks genesis→tip.
     rebase_pending: Arc<AtomicBool>,
+    /// Set by `request_full_resync` ([Y] in the TUI); the engine thread consumes it at
+    /// tick-top and ZEROES every persisted watermark so sync genuinely restarts from
+    /// scratch. See `request_full_resync` for why [Y] did nothing before this existed.
+    resync_pending: Arc<AtomicBool>,
 }
 
 pub use super::block_store::StoredBlock;
@@ -362,6 +369,24 @@ impl P2PBlockSync {
         self.rebase_pending.store(true, Ordering::Relaxed);
     }
 
+    /// v7.1.92: RESTART SYNC FROM SCRATCH on a RUNNING engine — what the TUI's [Y]
+    /// always claimed to do and never did.
+    ///
+    /// The old `resync()` reset TUI-local counters (the rate window, the Kalman ETA,
+    /// the feed list) and re-asserted the tip, then called it done. It never touched
+    /// the STORE, so `synced_to` / `verified_to` / `base` survived untouched and the
+    /// engine simply carried on from exactly where it was. Operator-visible symptom:
+    /// press [Y] on a store wedged mid-sync, watch the numbers blink, and end up
+    /// wedged at the identical height — reported 2026-08-26 as "[Y] doesn't work".
+    /// A local wipe was the only real remedy, which is also the workaround a previous
+    /// investigation of a 2-day client stall had to fall back on.
+    ///
+    /// Consumed on the engine thread (never here) for the same reason `rebase_pending`
+    /// is: the store lives on that thread and `reset_watermarks` needs `&mut`.
+    pub fn request_full_resync(&self) {
+        self.resync_pending.store(true, Ordering::Relaxed);
+    }
+
     /// 0.77: flip a RUNNING engine back to light-monitor — the recent-window snap gates
     /// re-engage and the base snaps forward to the servable window naturally.
     pub fn set_light_monitor(&self) {
@@ -417,8 +442,10 @@ impl P2PBlockSync {
         // was a TUI-local no-op). Every base-snap gate below loads it fresh.
         let recent_only = Arc::new(AtomicBool::new(recent_only_init));
         let rebase_pending = Arc::new(AtomicBool::new(false));
+        let resync_pending = Arc::new(AtomicBool::new(false));
         let recent_only_rt = recent_only.clone();
         let rebase_pending_rt = rebase_pending.clone();
+        let resync_pending_rt = resync_pending.clone();
         let state = Arc::new(Mutex::new(P2PSyncState {
             turbo_continuity: BandwidthContinuity::default(),
             ..P2PSyncState::default()
@@ -1069,13 +1096,60 @@ impl P2PBlockSync {
                     // Windows PC as a redundant full archive if the mine-node fleet is lost).
                     // The recent-window blocks already on disk stay — the frontier absorbs
                     // them as out-of-order arrivals when it reaches them.
+                    // v7.1.92 ([Y] RESYNC, rocky): start over, for real. `reset_watermarks`
+                    // zeroes synced_to / verified_to / best_height / base, forgets the
+                    // genesis anchor and the fold anchor, drops the link cache and
+                    // PERSISTS all of it — so the very next refill walks from the base
+                    // again instead of resuming where the wedge was. Block bodies already
+                    // on disk are deliberately left alone: they are keyed by height and
+                    // simply get re-verified (or overwritten) as sync passes them, which
+                    // makes this dramatically cheaper than the manual directory wipe that
+                    // used to be the only real remedy.
+                    //
+                    // `clear_ranges()` goes with it — in-flight range claims describe the
+                    // OLD cursor and would otherwise hold slots the restarted frontier
+                    // needs. This is the same pairing the reset paths below already use.
+                    //
+                    // Unconditional, unlike `rebase_pending` above: the operator explicitly
+                    // asked to start from scratch, so there is no "already there" case to
+                    // optimise away. Idempotent anyway — resetting zeroed watermarks is a
+                    // no-op beyond the persist.
+                    if resync_pending_rt.swap(false, Ordering::Relaxed) {
+                        let was = store.synced_to();
+                        store.reset_watermarks();
+                        sync_store.clear_ranges();
+                        eprintln!(
+                            "⟳ RESYNC — watermarks zeroed (synced_to {was} → 0), range claims cleared; sync restarts from base"
+                        );
+                        {
+                            let mut st = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                            st.blocks_synced = 0;
+                            st.verified = 0;
+                        }
+                    }
                     if rebase_pending_rt.swap(false, Ordering::Relaxed) {
-                        store.rebase(sync_base);
-                        sync_store.clear_ranges();      // stale recent-window frontier reqs are useless now
-                        snapped = false;
-                        last_synced_seen = store.synced_to();
-                        last_advance_t = Instant::now();
-                        crate::tlog!("[sync] FULL ARCHIVE engaged — base → {} (frontier re-walks genesis→tip, holding every block)", sync_base);
+                        // 2026-08-23 (grogu-rebase-idempotent): `rebase()` is DESTRUCTIVE — it
+                        // unconditionally wipes synced_to/verified_to back to `sync_base` and
+                        // re-walks genesis→tip. That's the correct one-time cost of a genuine
+                        // light-monitor → full-archive transition (base was snapped forward,
+                        // NOT at genesis, so the store really is missing history). But this flag
+                        // can fire a SECOND time on a store that's already a full archive (proven
+                        // live 2026-08-23: "FULL ARCHIVE engaged — base → 1" logged twice for the
+                        // same process, each time collapsing a verified spine that was already
+                        // near the tip down to ~0, forcing a multi-day re-verify at ~97 blk/s for
+                        // no reason — the store never needed re-anchoring, it was already there).
+                        // Only pay the destructive cost when the store is ACTUALLY above the
+                        // target base; already-based-at-or-below is a no-op.
+                        if store.base() > sync_base {
+                            store.rebase(sync_base);
+                            sync_store.clear_ranges();  // stale recent-window frontier reqs are useless now
+                            snapped = false;
+                            last_synced_seen = store.synced_to();
+                            last_advance_t = Instant::now();
+                            crate::tlog!("[sync] FULL ARCHIVE engaged — base → {} (frontier re-walks genesis→tip, holding every block)", sync_base);
+                        } else {
+                            crate::tlog!("[sync] FULL ARCHIVE re-affirmed — store already based at {} (≤ target {}), skipping destructive rebase (spine {} preserved)", store.base(), sync_base, store.verified_to());
+                        }
                     }
 
                     // Process gossiped live-tip blocks — BOUNDED per iteration. The live mesh
@@ -2671,7 +2745,7 @@ impl P2PBlockSync {
             });
         });
 
-        P2PBlockSync { state: state_struct, new_blocks, stop_tx: Some(stop_tx), recent_only, rebase_pending }
+        P2PBlockSync { state: state_struct, new_blocks, stop_tx: Some(stop_tx), recent_only, rebase_pending, resync_pending }
     }
 
     /// 0.77: `None` when the sync thread holds the lock RIGHT NOW (heavy ingest/flush) —

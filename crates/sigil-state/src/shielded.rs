@@ -413,6 +413,20 @@ impl ShieldedPool {
         self.nullifiers.contains(nf)
     }
 
+    /// Every spent nullifier, ascending.
+    ///
+    /// Public by construction: a nullifier IS the double-spend guard, published on every
+    /// spend, and it deliberately does not name the note it consumed — that unlinkability
+    /// is the whole design. Handing out the set therefore leaks nothing, and it is the
+    /// only way a wallet can net spends out of its balance: it derives its own
+    /// `nullifier(position) = compress2(spend_key, position)` for each note it can open
+    /// and checks membership here. Without it a wallet can only ever report a GROSS
+    /// balance that never goes down after a spend — a number that is wrong in the one
+    /// direction that matters.
+    pub fn nullifiers(&self) -> Vec<[u8; 32]> {
+        self.nullifiers.iter().copied().collect()
+    }
+
     pub fn nullifier_count(&self) -> usize {
         self.nullifiers.len()
     }

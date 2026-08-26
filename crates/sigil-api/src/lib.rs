@@ -546,6 +546,32 @@ pub async fn shielded_leaves_handler(State(st): State<AppState>) -> Json<serde_j
     }))
 }
 
+/// Every spent nullifier — what a wallet needs to net spends out of its balance.
+///
+/// A wallet finds its notes by trial-decrypting `/v1/shielded/leaves`, but that only
+/// yields a GROSS total: a spent note stays in the pool forever (the commitment is never
+/// removed — that is what keeps the anonymity set from shrinking). Without the spent set
+/// a balance can only ever go up, which is wrong in the one direction that matters.
+///
+/// The wallet derives `nullifier(position) = compress2(spend_key, position)` for each note
+/// it can open and drops the ones listed here. Publishing the set costs nothing: every
+/// nullifier is already on-chain as the double-spend guard, and it deliberately does not
+/// name the note it consumed.
+#[flux_api_macros::api(GET, "/v1/shielded/nullifiers", summary = "Spent nullifiers, so a wallet can net spends out of its shielded balance")]
+pub async fn shielded_nullifiers_handler(State(st): State<AppState>) -> Json<serde_json::Value> {
+    let guard = match st.state.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let pool = guard.shielded();
+    Json(serde_json::json!({
+        "ok": true,
+        "nullifiers": pool.nullifiers().iter().map(hex::encode).collect::<Vec<_>>(),
+        "count": pool.nullifier_count(),
+        "ts_ms": now_ms(),
+    }))
+}
+
 /// `?wallet=<64-hex>` — the shielded address a payer needs to pay this wallet
 /// privately: the circuit key (`pk_shield`, what a note commitment binds to) and the
 /// delivery key (`pk_encrypt`, what a note ciphertext is sealed to). Both are public by
@@ -1456,6 +1482,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/shielded_send", post(shielded_send_handler))
         .route("/v1/unshield", post(unshield_handler))
         .route("/v1/shielded/anchor", get(shielded_anchor_handler))
+        .route("/v1/shielded/nullifiers", get(shielded_nullifiers_handler))
         .route("/v1/shielded/leaves", get(shielded_leaves_handler))
         .route("/v1/shielded/address", get(shielded_address_handler))
         .route("/v1/eth/usdc", get(eth_usdc_handler))

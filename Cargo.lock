@@ -3759,6 +3759,7 @@ dependencies = [
  "flux-cache",
  "flux-db",
  "rand 0.8.6",
+ "rand_chacha 0.3.1",
  "serde",
  "sqisign-rs",
 ]
@@ -8369,6 +8370,7 @@ dependencies = [
  "flux-miner",
  "flux-p2p",
  "flux-search",
+ "flux-sqisign",
  "flux-vdf",
  "hex",
  "inventory",
@@ -9034,7 +9036,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-top"
-version = "7.3.0"
+version = "7.3.1"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -9049,6 +9051,7 @@ dependencies = [
  "flux-optimize",
  "flux-p2p",
  "flux-rev",
+ "flux-sqisign",
  "flux-sync",
  "flux-topology",
  "flux-turbo-sync",

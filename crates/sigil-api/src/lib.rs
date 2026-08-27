@@ -552,6 +552,42 @@ pub async fn shielded_anchor_handler(State(st): State<AppState>) -> Json<serde_j
 /// itself but had no way to discover a payment someone else sent it; the commitments
 /// alone carry no ciphertext, so this endpoint had nothing to hand back for a received
 /// note until `note_ciphertexts` existed to store one.
+/// Is this exact note commitment already in the pool, in ANY epoch?
+///
+/// A wallet must not reuse a commitment: they are unique per (index, value, key) FOREVER,
+/// and the chokepoint refuses a repeat permanently — a re-used commitment is a deposit that
+/// can never land, no matter how many times it is retried.
+///
+/// Until 2026-08-27 a wallet answered this by downloading `/v1/shielded/leaves` and testing
+/// membership client-side. That was tolerable at a few hundred notes and impossible after
+/// epoch rotation: FOUR epochs at ~9.7 MB each is ~33 MB of JSON, parsed in a browser, to
+/// answer one yes/no question. Observed live — the wallet fell over on epoch 1 and refused
+/// to submit (correctly, fail-closed), so a 100 SIGIL transfer simply could not be made.
+///
+/// One commitment in, one boolean out, every epoch consulted server-side.
+#[flux_api_macros::api(GET, "/v1/shielded/has", summary = "Is this note commitment already used, in any epoch?")]
+pub async fn shielded_has_commitment_handler(
+    State(st): State<AppState>,
+    Query(q): Query<ShieldedHasQuery>,
+) -> Json<serde_json::Value> {
+    let Some(cm) = hex::decode(&q.cm).ok().filter(|b| b.len() == 32) else {
+        return Json(serde_json::json!({
+            "ok": false, "error": "cm must be 64 hex chars (32 bytes)", "ts_ms": now_ms(),
+        }));
+    };
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&cm);
+    let guard = match st.state.read() { Ok(g) => g, Err(p) => p.into_inner() };
+    Json(serde_json::json!({
+        "ok": true,
+        "cm": q.cm,
+        // Spans the live epoch AND every sealed one — the guard the chokepoint itself uses.
+        "present": guard.shielded().has_ever_held(&arr),
+        "epoch": guard.shielded().epoch(),
+        "ts_ms": now_ms(),
+    }))
+}
+
 #[flux_api_macros::api(GET, "/v1/shielded/leaves", summary = "Real (unpadded) note commitments plus delivery ciphertexts, for wallet/miner note discovery and spend proving")]
 pub async fn shielded_leaves_handler(
     State(st): State<AppState>,
@@ -653,6 +689,12 @@ pub async fn shielded_nullifiers_handler(State(st): State<AppState>) -> Json<ser
 /// nothing (they are one-way / cannot be used to spend or decrypt anyone else's notes).
 /// `?epoch=N` on `/v1/shielded/leaves` — which pool generation to serve. Omitted means
 /// the live one, which is what every pre-rotation client already expects.
+/// `?cm=<64 hex>` on `/v1/shielded/has`.
+#[derive(serde::Deserialize)]
+pub struct ShieldedHasQuery {
+    pub cm: String,
+}
+
 #[derive(serde::Deserialize)]
 pub struct ShieldedLeavesQuery {
     pub epoch: Option<u32>,
@@ -1659,6 +1701,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/shielded/anchor", get(shielded_anchor_handler))
         .route("/v1/shielded/nullifiers", get(shielded_nullifiers_handler))
         .route("/v1/shielded/leaves", get(shielded_leaves_handler))
+        .route("/v1/shielded/has", get(shielded_has_commitment_handler))
         .route("/v1/shielded/address", get(shielded_address_handler))
         .route("/v1/eth/usdc", get(eth_usdc_handler))
         .route("/v1/mining/challenge", get(mining_challenge))

@@ -283,6 +283,34 @@ impl ShieldedBridge {
     /// attacker could not redirect the shield key, but COULD still swap in their own
     /// encryption key on an otherwise-honest registration and silently intercept every
     /// future note ciphertext sealed to this wallet.
+    /// PROOF OF POSSESSION for an optional SQIsign L5 key.
+    ///
+    /// Without this, publishing a post-quantum key is a HIJACK primitive rather than a
+    /// defence: the registration itself is authorized by Ed25519 only, so the very adversary
+    /// this upgrade defends against — one who can forge Ed25519 — could register THEIR
+    /// SQIsign key against YOUR wallet. Ramps would then require a signature only they can
+    /// produce. They gain the account and you lose it, delivered by the security feature.
+    ///
+    /// So the registrant must sign the binding themselves, with the key being registered.
+    /// The message commits to the WALLET, so a signature harvested from some other context
+    /// cannot be replayed here, and one made for wallet A cannot register key K to wallet B.
+    fn verify_sqi_possession(
+        wallet_hex: &str,
+        pk_sqi_hex: &str,
+        pop_sig_hex: &str,
+    ) -> Result<Vec<u8>, ShieldedSubmitError> {
+        let pk = hex::decode(pk_sqi_hex).map_err(|_| ShieldedSubmitError::SignatureInvalid)?;
+        if pk.len() != sigil_state::shielded::SQI_PUBLIC_KEY_LEN {
+            return Err(ShieldedSubmitError::SignatureInvalid);
+        }
+        let sig = hex::decode(pop_sig_hex).map_err(|_| ShieldedSubmitError::SignatureInvalid)?;
+        let msg = format!("sigil-rpc/v1|shield-sqi-pop|{wallet_hex}|{pk_sqi_hex}");
+        match flux_sqisign::verify(msg.as_bytes(), &sig, &pk) {
+            Ok(true) => Ok(pk),
+            _ => Err(ShieldedSubmitError::SignatureInvalid),
+        }
+    }
+
     pub fn submit_register(
         &self,
         wallet: &str,
@@ -291,22 +319,41 @@ impl ShieldedBridge {
         fee: u128,
         sig: &str,
         req_nonce: u64,
+        pk_sqi: Option<&str>,
+        sqi_pop: Option<&str>,
     ) -> Result<[u8; 32], ShieldedSubmitError> {
         let w = hex32(wallet, "wallet")?;
         let pk = hex32(pk_shield, "pk_shield")?;
         let pk_enc = hex32(pk_encrypt, "pk_encrypt")?;
+        // The SQIsign key is bound into the Ed25519-signed message too, so the two halves
+        // cannot be mixed and matched: an attacker cannot take a valid Ed25519 registration
+        // and swap in a different (validly self-signed) SQIsign key.
+        let sqi_part = pk_sqi.map(|k| format!("|sqi={k}")).unwrap_or_default();
         let msg = format!(
-            "sigil-rpc/v1|shield-register|{wallet}|{pk_shield}|{pk_encrypt}|{fee}|nonce={req_nonce}"
+            "sigil-rpc/v1|shield-register|{wallet}|{pk_shield}|{pk_encrypt}|{fee}|nonce={req_nonce}{sqi_part}"
         );
         verify_wallet_sig(&w, &msg, sig)?;
+        let sqi_key: Option<Vec<u8>> = match (pk_sqi, sqi_pop) {
+            (None, _) => None,
+            // A key with no possession proof is refused outright rather than stored
+            // unverified — storing it would be the hijack this check exists to prevent.
+            (Some(_), None) => return Err(ShieldedSubmitError::SignatureInvalid),
+            (Some(k), Some(pop)) => Some(Self::verify_sqi_possession(wallet, k, pop)?),
+        };
         self.check_nonce(&w, req_nonce)?;
         let id = self.enqueue(
-            SigilTx::RegisterShieldedAddress { wallet: w, pk_shield: pk, pk_encrypt: Some(pk_enc), fee },
+            SigilTx::RegisterShieldedAddress {
+                wallet: w, pk_shield: pk, pk_encrypt: Some(pk_enc), fee, pk_sqi: sqi_key,
+            },
             None,
         );
         self.fire_relay_hook(id, ShieldedOp::Register(RegisterRequest {
             wallet: wallet.to_string(), pk_shield: pk_shield.to_string(),
             pk_encrypt: pk_encrypt.to_string(), fee, sig: sig.to_string(), req_nonce,
+            // Relayed verbatim so a relaying node re-runs the SAME proof-of-possession
+            // check this node just ran, rather than trusting that we did.
+            pk_sqi: pk_sqi.map(|s| s.to_string()),
+            sqi_pop: sqi_pop.map(|s| s.to_string()),
         }));
         Ok(id)
     }
@@ -614,6 +661,20 @@ pub struct RegisterRequest {
     /// 128-hex Ed25519 signature over
     /// `sigil-rpc/v1|shield-register|{wallet}|{pk_shield}|{pk_encrypt}|{fee}|nonce={req_nonce}`.
     pub sig: String,
+    /// Optional SQIsign L5 public key, hex (129 bytes → 258 hex chars). Upgrades this
+    /// wallet's shielded-RAMP authorization to post-quantum. Omit it and every existing
+    /// client behaves exactly as before.
+    #[serde(default)]
+    pub pk_sqi: Option<String>,
+    /// Proof of possession: a SQIsign signature, BY `pk_sqi` itself, over
+    /// `sigil-rpc/v1|shield-sqi-pop|{wallet}|{pk_sqi}`.
+    ///
+    /// Required whenever `pk_sqi` is present; a key without it is refused rather than
+    /// stored. Without this check, an adversary who can forge the Ed25519 half — exactly
+    /// the adversary this feature exists to stop — could bind THEIR key to YOUR wallet and
+    /// take sole control of its ramps.
+    #[serde(default)]
+    pub sqi_pop: Option<String>,
     /// Client-chosen strictly-increasing nonce, same convention as `/v1/send`.
     pub req_nonce: u64,
 }

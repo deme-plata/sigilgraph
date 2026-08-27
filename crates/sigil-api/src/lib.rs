@@ -422,6 +422,7 @@ pub async fn shielded_register_handler(
 ) -> Json<serde_json::Value> {
     match st.shielded.submit_register(
         &req.wallet, &req.pk_shield, &req.pk_encrypt, req.fee, &req.sig, req.req_nonce,
+        req.pk_sqi.as_deref(), req.sqi_pop.as_deref(),
     ) {
         Ok(h) => Json(serde_json::json!({
             "ok": true, "txid": hex::encode(h), "ts_ms": now_ms(),
@@ -567,7 +568,7 @@ pub async fn shielded_leaves_handler(
     // and still needs to be found, and its ciphertext only exists in that epoch's archive.
     let live = pool.epoch();
     let want = q.epoch.unwrap_or(live);
-    let (leaves, ciphertexts, anchor) = if want == live {
+    let (mut leaves, mut ciphertexts, anchor) = if want == live {
         (
             pool.notes().to_vec(),
             pool.ciphertexts().to_vec(),
@@ -586,10 +587,28 @@ pub async fn shielded_leaves_handler(
             }
         }
     };
+    // INCREMENTAL TAIL. `from` is a POSITION, and positions are append-only, so the
+    // caller can splice what it gets straight onto what it already scanned. `total` is
+    // returned unconditionally so a client can tell "nothing new" from "I asked wrong"
+    // without a second request.
+    let total = leaves.len() as u64;
+    let from = q.from.unwrap_or(0).min(total);
+    if from > 0 {
+        leaves.drain(..from as usize);
+        if (from as usize) < ciphertexts.len() {
+            ciphertexts.drain(..from as usize);
+        } else {
+            ciphertexts.clear();
+        }
+    }
     Json(serde_json::json!({
         "ok": true,
         "epoch": want,
         "live_epoch": live,
+        // Where this page starts, and how many leaves the epoch holds in total — the two
+        // numbers a client needs to request the next tail.
+        "from": from,
+        "total": total,
         // The anchor a spend against THIS epoch must prove membership under. For a sealed
         // epoch it is permanent; for the live one it moves as notes arrive.
         "anchor": hex::encode(anchor),
@@ -637,6 +656,15 @@ pub async fn shielded_nullifiers_handler(State(st): State<AppState>) -> Json<ser
 #[derive(serde::Deserialize)]
 pub struct ShieldedLeavesQuery {
     pub epoch: Option<u32>,
+    /// Serve only leaves from this position onward.
+    ///
+    /// A wallet must trial-decrypt every ciphertext to find its own notes, so it polls this
+    /// endpoint — and the whole page grows without bound as the pool fills. Live on
+    /// 2026-08-27: a browser wallet refreshing every 1.5 s was pulling the full list at
+    /// 21,000+ notes on every cycle, which is megabytes per poll and could not keep up, so
+    /// the displayed balance simply stopped moving. Since positions are append-only and
+    /// stable, a client that has already scanned up to N only needs `[N, len)`.
+    pub from: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

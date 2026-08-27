@@ -119,6 +119,10 @@ ed25519-dalek = { version = "2.2", optional = true }
 # [features] below) because privacy-by-default is the product's own stated design —
 # see the whitepaper's "no opt-in path to transparency" line — not an edge feature.
 sigil-shield = { path = "../sigil-shield", optional = true }
+# Post-quantum authorization for the shielded RAMPS (sqisign-rs 0.3, L5: 292-byte sigs,
+# 129-byte keys). Small enough to carry per-transaction, unlike Dilithium5's ~4.6 KB.
+# Part of `shield-register`, since that is the feature that publishes the key.
+flux-sqisign = { path = "../../../flux/crates/flux-sqisign", optional = true }
 sha3 = { workspace = true, optional = true }
 # 2026-08-26 (mine_local_api.rs's native Shield/PrivateSend fast path): sigil-shield's
 # public API (ShieldedAccount::blinding/note/public_key, Note::commitment, build_spend's
@@ -179,7 +183,7 @@ sqisign = []
 # the much heavier sigil-node/DagKnight graph) so a build that only needs this stays
 # comparatively light; still toggleable if build time ever matters more than this
 # being on by default: `--no-default-features --features gpu`.
-shield-register = ["dep:sigil-shield", "dep:sha3", "dep:ed25519-dalek", "dep:winterfell"]
+shield-register = ["dep:sigil-shield", "dep:sha3", "dep:ed25519-dalek", "dep:winterfell", "dep:flux-sqisign"]
 # v7.1.40: producer-mode Phase 0 — dependency graph only, no application code yet.
 # Off by default; `fluxc build -p sigil-top --features producer` opts in. See the
 # dependency block above for why each crate is here.

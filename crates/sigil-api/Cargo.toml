@@ -8,6 +8,11 @@ edition = "2021"
 # free. Replaces the hand-rolled sigil-rpcd HTTP once it serves the full surface.
 
 [dependencies]
+# Proof-of-possession for the shielded ramps' optional SQIsign L5 key (sqisign-rs 0.3).
+# Verification belongs HERE, where the signature arrives, rather than in `sigil-state` —
+# the consensus state crate only needs the key's length, and putting an isogeny-crypto
+# crate on its critical path would slow every consumer of it.
+flux-sqisign = { path = "../../../flux/crates/flux-sqisign" }
 axum = { version = "0.7", features = ["json", "query"] }
 tokio = { workspace = true }
 serde = { workspace = true }

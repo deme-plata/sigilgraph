@@ -284,6 +284,28 @@ pub struct ShieldedPool {
     #[serde(default)]
     pub(crate) anchor_epoch: std::collections::BTreeMap<[u8; 32], u32>,
 
+    /// Wallets that have published a SQIsign L5 public key (129 bytes, `sqisign-rs 0.3`
+    /// via `flux-sqisign`).
+    ///
+    /// The shielded pool has two authorization models and only one of them was
+    /// post-quantum. A `ShieldedSend` carries no signature at all — the STARK IS the
+    /// authorization — so it is already PQ. But the RAMPS (`Shield`, `Unshield`) and
+    /// registration itself are authorized by an Ed25519 signature over the wallet key,
+    /// and a wallet id IS an Ed25519 public key. A quantum adversary forges that signature
+    /// and shields someone else's balance into the pool, or unshields it out.
+    ///
+    /// Once a wallet appears here, every ramp operation it signs must ALSO carry a valid
+    /// SQIsign signature — require-both, never either-or. Either-or would be worthless:
+    /// an adversary who breaks Ed25519 simply presents the Ed25519 half. And because
+    /// removal is not a supported operation, a wallet that has upgraded cannot be
+    /// downgraded back to Ed25519-only by anyone, including itself — which is what makes
+    /// this a real guarantee rather than a preference.
+    ///
+    /// 292-byte signatures, 129-byte keys: small enough to carry per-ramp-transaction,
+    /// unlike Dilithium5's ~4.6 KB.
+    #[serde(default)]
+    pub(crate) sqi_keys: std::collections::BTreeMap<WalletId, Vec<u8>>,
+
     /// Every commitment this pool has EVER held, across all epochs. A cache (`serde(skip)`,
     /// same reasoning as `tree`): rebuilt on demand from `notes` + `archive`, so it cannot
     /// drift from the truth. It exists because the duplicate-commitment replay guard has
@@ -311,6 +333,21 @@ pub struct EpochArchive {
     /// trial-decrypt a sealed epoch and discover a payment it never scanned for.
     pub ciphertexts: Vec<Option<String>>,
 }
+
+/// Length of a SQIsign L5 public key, in bytes.
+///
+/// Stated here rather than imported from `flux-sqisign` on purpose. This crate is the
+/// consensus STATE — it decides what the chain holds — and pulling an isogeny-crypto
+/// dependency into it to learn one integer would put a large, slow-building crate on the
+/// critical path of every consumer, including ones that must stay lightweight. The actual
+/// signature VERIFICATION lives where the signature arrives (the API/tx layer), which
+/// legitimately depends on `flux-sqisign`; all this layer needs is "is this a plausible
+/// key at all", so that a malformed registration cannot leave a wallet holding an
+/// unusable second factor it can never satisfy.
+///
+/// Pinned against `flux_sqisign::public_key_size()` by a test in the crate that DOES link
+/// it, so the two cannot silently drift.
+pub const SQI_PUBLIC_KEY_LEN: usize = 129;
 
 /// How many historical roots stay spendable. At one root per block this is a ~256-block
 /// window for a transaction to be mined before its anchor expires.
@@ -522,6 +559,27 @@ impl ShieldedPool {
     /// The X25519 note-delivery key a wallet has published, if any.
     pub fn encrypt_key(&self, wallet: &WalletId) -> Option<[u8; 32]> {
         self.encrypt_keys.get(wallet).copied()
+    }
+
+    /// The SQIsign L5 public key a wallet has published, if any. `Some` means every ramp
+    /// operation from this wallet MUST carry a valid SQIsign signature as well as Ed25519.
+    pub fn sqi_key(&self, wallet: &WalletId) -> Option<&[u8]> {
+        self.sqi_keys.get(wallet).map(|v| v.as_slice())
+    }
+
+    /// How many wallets have upgraded to post-quantum ramp authorization.
+    pub fn sqi_registered(&self) -> usize {
+        self.sqi_keys.len()
+    }
+
+    /// Publish a wallet's SQIsign key. UPGRADE-ONLY, deliberately: re-registering a
+    /// DIFFERENT key is allowed (key rotation), but there is no path that removes one.
+    /// A downgrade would let an adversary who can forge Ed25519 strip the second factor
+    /// and then use the first, which is exactly the attack this defends against.
+    pub(crate) fn set_sqi_key(&mut self, wallet: WalletId, pk: Vec<u8>) {
+        if pk.len() == SQI_PUBLIC_KEY_LEN {
+            self.sqi_keys.insert(wallet, pk);
+        }
     }
 
     /// Publish a wallet's note-delivery key. Re-registering replaces it, same as
@@ -780,6 +838,23 @@ impl ShieldedPool {
                     h.update(s.as_bytes());
                 }
                 None => { h.update(&[0u8]); }
+            }
+        }
+        // POST-QUANTUM RAMP KEYS — folded in only once at least one wallet has upgraded.
+        //
+        // Same structural gate as the epoch state below, and for the same reason: this
+        // digest feeds `wallet_state_root`, which settled headers commit to. Folding an
+        // empty map in unconditionally would re-root every block already final. While no
+        // wallet has registered a SQIsign key the digest is byte-identical to before this
+        // field existed; the first registration is itself the activation, and it cannot
+        // occur retroactively.
+        if !self.sqi_keys.is_empty() {
+            h.update(b"sigil-shielded-sqi-keys-v1");
+            h.update(&(self.sqi_keys.len() as u64).to_le_bytes());
+            for (w, pk) in &self.sqi_keys {
+                h.update(w);
+                h.update(&(pk.len() as u32).to_le_bytes());
+                h.update(pk);
             }
         }
         // EPOCH STATE — folded in only once a rotation has actually happened.

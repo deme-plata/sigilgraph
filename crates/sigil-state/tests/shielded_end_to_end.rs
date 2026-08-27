@@ -528,7 +528,7 @@ fn a_registered_miner_is_paid_into_the_pool() {
     let pk = to_wire(acct.public_key());
 
     let mut state = SigilState::default();
-    apply(&mut state, 1, vec![StateMutation::RegisterShieldedAddress { wallet: MINER, pk_shield: pk, pk_encrypt: None }])
+    apply(&mut state, 1, vec![StateMutation::RegisterShieldedAddress { wallet: MINER, pk_shield: pk, pk_sqi: None, pk_encrypt: None }])
         .expect("registration");
     assert_eq!(state.shielded().shielded_address(&MINER), Some(pk));
     assert_eq!(
@@ -652,7 +652,7 @@ fn a_miner_can_open_its_shielded_reward_knowing_only_its_seed() {
 
     let mut state = SigilState::default();
     apply(&mut state, 1, vec![StateMutation::RegisterShieldedAddress {
-        wallet: MINER, pk_shield: pk, pk_encrypt: Some(pk_enc),
+        wallet: MINER, pk_shield: pk, pk_sqi: None, pk_encrypt: Some(pk_enc),
     }]).expect("registration");
 
     // Mint a reward exactly the way coinbase.rs now does: commitment + sealed delivery.

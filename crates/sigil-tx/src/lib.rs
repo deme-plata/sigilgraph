@@ -113,6 +113,20 @@ pub enum SigilTx {
     RegisterShieldedAddress {
         wallet: WalletId,
         pk_shield: [u8; 32],
+        /// X25519 note-delivery key (`pk_enc`) — lets a sender seal a ciphertext this
+        /// wallet can trial-decrypt. `#[serde(default)]` so an already-broadcast
+        /// registration (pk_shield only) still decodes.
+        #[serde(default)]
+        pk_encrypt: Option<[u8; 32]>,
+        /// SQIsign L5 public key (129 bytes), upgrading this wallet's RAMP authorization
+        /// to post-quantum. `#[serde(default)]` so every already-broadcast registration
+        /// still decodes, and so a client that has never heard of this field keeps working.
+        ///
+        /// The API layer refuses to populate this without a proof-of-possession signature
+        /// by the key itself (`shielded::verify_sqi_possession`) — an unproven key here
+        /// would be a wallet-hijack primitive, not a security upgrade.
+        #[serde(default)]
+        pk_sqi: Option<Vec<u8>>,
         #[serde(with = "sigil_state::u128_str")]
         fee: u128,
     },
@@ -146,6 +160,11 @@ pub enum SigilTx {
         #[serde(with = "sigil_state::u128_str")]
         fee: u128,
         proof: Vec<u8>,
+        /// Per-output delivery ciphertext, same order as `cm_outs`. Empty means the
+        /// sender attached none (e.g. an all-self-change spend); when non-empty it must
+        /// match `cm_outs` in length — see the apply logic. Not a STARK public input.
+        #[serde(default)]
+        note_ciphertexts: Vec<Option<String>>,
     },
 
     /// PV-1: move value out of the shielded pool to a transparent wallet.
@@ -1224,6 +1243,36 @@ pub struct ApplyResult {
 /// height before any deployment that already carries real transparent traffic.
 pub const SHIELDED_ONLY_HEIGHT: u64 = 0;
 
+/// Height from which a wallet that has published a SQIsign L5 key MUST also sign its
+/// shielded ramps (`Shield`, `Unshield`) with that key — require-both, never either-or.
+///
+/// DORMANT (`u64::MAX`) until an operator schedules a real height. That is deliberate and
+/// it is the whole point of this constant:
+///
+///   * ENFORCEMENT IS A CONSENSUS RULE. If some nodes require the SQIsign leg and others
+///     do not, they disagree about whether a transaction is VALID, and the chain splits.
+///     A height gate is what lets the whole network change its mind at the same block
+///     instead of whenever each operator happened to restart.
+///   * IT CAN LOCK PEOPLE OUT. A registered key has no removal path (see
+///     `shielded::ShieldedPool::sqi_keys` for why removal would hand the attack back to
+///     the attacker). Anyone who registers a key and loses it can no longer ramp, ever.
+///     Activation must not surprise such a user.
+///
+/// Below this height a registered SQIsign key is recorded and PROVEN (the registration
+/// carries a possession signature) but never demanded — so a wallet can upgrade, verify
+/// the whole path works end to end, and be ready long before the rule bites. Set the
+/// height far enough ahead that every holder has had time to do exactly that.
+pub const SQI_RAMP_REQUIRED_HEIGHT: u64 = u64::MAX;
+
+/// Does the chain require this wallet's ramps to carry a SQIsign signature at `height`?
+///
+/// Two conditions, both necessary: the network has activated the rule, AND this
+/// particular wallet has published a key. A wallet that never upgraded is never affected
+/// — the rule hardens those who opted in, it does not conscript everyone else.
+pub fn sqi_ramp_required(height: u64, wallet_has_sqi_key: bool) -> bool {
+    height >= SQI_RAMP_REQUIRED_HEIGHT && wallet_has_sqi_key
+}
+
 /// Legacy entry point — applies with the gate DISABLED.
 ///
 /// Retained because ~40 call sites (tests, the retired rpcd, chronos harnesses) predate the
@@ -1279,7 +1328,7 @@ fn apply_tx_inner(
         // itself) is enforced by `commit_state_transition`, not here. Duplicating those
         // checks at this layer would create a second place they could drift or be skipped
         // — and this layer's checks are not the ones that gate the money.
-        SigilTx::RegisterShieldedAddress { wallet, pk_shield, fee } => {
+        SigilTx::RegisterShieldedAddress { wallet, pk_shield, pk_encrypt, pk_sqi, fee } => {
             let have = state.balance_of(wallet, &NATIVE);
             if have < *fee {
                 return Err(TxApplyError::InsufficientBalance { have, need: *fee });
@@ -1291,6 +1340,8 @@ fn apply_tx_inner(
             out.mutations.push(StateMutation::RegisterShieldedAddress {
                 wallet: *wallet,
                 pk_shield: *pk_shield,
+                pk_encrypt: *pk_encrypt,
+                pk_sqi: pk_sqi.clone(),
             });
         }
 
@@ -1307,12 +1358,21 @@ fn apply_tx_inner(
             });
         }
 
-        SigilTx::ShieldedSend { anchor, nullifier, cm_outs, fee, proof } => {
+        SigilTx::ShieldedSend { anchor, nullifier, cm_outs, fee, proof, note_ciphertexts } => {
             // Reject an already-spent nullifier early so an obvious replay does not cost
             // a STARK verification. The chokepoint re-checks — this is an optimization,
             // never the guarantee.
             if state.shielded().is_spent(nullifier) {
                 return Err(TxApplyError::ShieldedRejected("nullifier already spent"));
+            }
+            // Delivery is optional per output, but partial is not: a length that neither
+            // matches `cm_outs` nor is empty means either the sender or the wire mangled
+            // the positional alignment, and silently zipping a short/long vector would
+            // deliver a ciphertext to the wrong output.
+            if !note_ciphertexts.is_empty() && note_ciphertexts.len() != cm_outs.len() {
+                return Err(TxApplyError::ShieldedRejected(
+                    "note_ciphertexts length must be 0 or match cm_outs",
+                ));
             }
             out.mutations.push(StateMutation::ShieldedSpend {
                 anchor: *anchor,
@@ -1320,6 +1380,7 @@ fn apply_tx_inner(
                 cm_outs: cm_outs.clone(),
                 fee: *fee,
                 proof: proof.clone(),
+                note_ciphertexts: note_ciphertexts.clone(),
             });
         }
 
@@ -2010,6 +2071,25 @@ mod tests {
     use super::*;
     use sigil_header::{SqiSignature, SQISIGN_L5_LEN};
     use sigil_state::commit_state_transition;
+
+    /// The gate must be INERT until an operator schedules it, and must never affect a
+    /// wallet that did not opt in. Both halves matter: a premature activation forks the
+    /// chain, and conscripting non-upgraded wallets would break every existing user.
+    #[test]
+    fn sqi_ramp_gate_is_dormant_and_only_binds_opted_in_wallets() {
+        assert_eq!(SQI_RAMP_REQUIRED_HEIGHT, u64::MAX, "must ship DORMANT");
+
+        // Dormant: nothing is required at any reachable height, key or no key.
+        assert!(!sqi_ramp_required(0, true));
+        assert!(!sqi_ramp_required(1_000_000, true));
+        assert!(!sqi_ramp_required(u64::MAX - 1, true));
+
+        // A wallet with no registered key is never affected, even at activation.
+        assert!(!sqi_ramp_required(u64::MAX, false));
+
+        // And at activation, a wallet that DID opt in is bound.
+        assert!(sqi_ramp_required(u64::MAX, true));
+    }
 
     fn dummy_signed(tx: SigilTx) -> SignedTx {
         let from = tx.fee_payer();

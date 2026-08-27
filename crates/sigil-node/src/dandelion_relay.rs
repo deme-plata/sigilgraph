@@ -252,8 +252,14 @@ async fn apply_locally(mempool: &Arc<MempoolBackend>, shielded: &Arc<ShieldedBri
 
 fn apply_shielded_op(shielded: &ShieldedBridge, op: ShieldedOp) -> Result<[u8; 32], ()> {
     match op {
+        // The SQIsign key + possession proof are forwarded verbatim so the relaying node
+        // re-runs the SAME proof-of-possession check rather than trusting the origin's
+        // word for it.
         ShieldedOp::Register(r) => shielded
-            .submit_register(&r.wallet, &r.pk_shield, &r.pk_encrypt, r.fee, &r.sig, r.req_nonce)
+            .submit_register(
+                &r.wallet, &r.pk_shield, &r.pk_encrypt, r.fee, &r.sig, r.req_nonce,
+                r.pk_sqi.as_deref(), r.sqi_pop.as_deref(),
+            )
             .map_err(|_| ()),
         ShieldedOp::Shield(r) => shielded
             .submit_shield(&r.from, r.amount, &r.cm, r.fee, &r.sig, r.req_nonce)

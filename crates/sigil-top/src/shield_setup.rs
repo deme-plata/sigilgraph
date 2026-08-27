@@ -89,12 +89,35 @@ pub fn register_for_shielded_mining(node_url: &str, seed_hex: &str) -> RegisterO
         .map(|d| d.as_millis() as u64)
         .unwrap_or(1);
 
+    // POST-QUANTUM RAMP KEY (2026-08-27). Derived from the SAME wallet seed, so it is
+    // recoverable from the seed phrase the user already has — never a second secret to
+    // back up. That matters more here than usual: a registered key has NO removal path
+    // (removing it would hand the attack straight back to an Ed25519 forger), so a key
+    // that could be lost would mean permanent lockout from the shielded ramps.
+    let (sqi_sk, sqi_pk) = flux_sqisign::keygen_from_seed(&seed);
+    let sqi_pk_hex = hex::encode(&sqi_pk);
+    // PROOF OF POSSESSION: sign the wallet↔key binding WITH the key being registered.
+    // Without it, publishing a key is a hijack primitive — see the API-side
+    // `verify_sqi_possession` for the full argument. Signed BEFORE the Ed25519 message is
+    // built, because that message commits to this key.
+    let pop_msg = format!("sigil-rpc/v1|shield-sqi-pop|{wallet_hex}|{sqi_pk_hex}");
+    let sqi_pop = match flux_sqisign::sign(pop_msg.as_bytes(), &sqi_sk, &sqi_pk) {
+        Ok(sig) => Some(hex::encode(sig)),
+        Err(e) => {
+            // Degrade to an Ed25519-only registration rather than failing outright: a
+            // wallet that cannot produce the PQ half must still be able to register and
+            // receive private rewards, exactly as before this feature existed.
+            crate::tlog!("⚠ SQIsign proof-of-possession failed ({e}) — registering Ed25519-only");
+            None
+        }
+    };
+    let sqi_part = sqi_pop.as_ref().map(|_| format!("|sqi={sqi_pk_hex}")).unwrap_or_default();
     let msg = format!(
-        "sigil-rpc/v1|shield-register|{wallet_hex}|{pk_shield_hex}|{pk_encrypt_hex}|{fee}|nonce={req_nonce}"
+        "sigil-rpc/v1|shield-register|{wallet_hex}|{pk_shield_hex}|{pk_encrypt_hex}|{fee}|nonce={req_nonce}{sqi_part}"
     );
     let sig = hex::encode(sk.sign(msg.as_bytes()).to_bytes());
 
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "wallet": wallet_hex,
         "pk_shield": pk_shield_hex,
         "pk_encrypt": pk_encrypt_hex,
@@ -102,6 +125,10 @@ pub fn register_for_shielded_mining(node_url: &str, seed_hex: &str) -> RegisterO
         "sig": sig,
         "req_nonce": req_nonce,
     });
+    if let Some(pop) = &sqi_pop {
+        body["pk_sqi"] = serde_json::Value::String(sqi_pk_hex.clone());
+        body["sqi_pop"] = serde_json::Value::String(pop.clone());
+    }
 
     // 2026-08-24: was "/api/v1/shielded/register" — sigil-api mirrors most routes
     // under both /v1/* and /api/v1/*, but the shielded endpoints were never added to

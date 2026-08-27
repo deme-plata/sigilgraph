@@ -709,7 +709,7 @@ mod tests {
                 mutations: vec![StateMutation::RegisterShieldedAddress {
                     wallet: miner,
                     pk_shield,
-                    pk_encrypt: None,
+                    pk_sqi: None, pk_encrypt: None,
                 }],
             },
             0,
@@ -769,7 +769,7 @@ mod tests {
                 mutations: vec![StateMutation::RegisterShieldedAddress {
                     wallet: miner,
                     pk_shield,
-                    pk_encrypt: None,
+                    pk_sqi: None, pk_encrypt: None,
                 }],
             },
             0,
@@ -863,7 +863,7 @@ mod tests {
             st,
             &StateTransition {
                 at_height: 0,
-                mutations: vec![StateMutation::RegisterShieldedAddress { wallet, pk_shield, pk_encrypt: None }],
+                mutations: vec![StateMutation::RegisterShieldedAddress { wallet, pk_shield, pk_sqi: None, pk_encrypt: None }],
             },
             0,
         )

@@ -558,6 +558,16 @@ pub enum StateMutation {
         /// keeps this readable against any snapshot written before delivery existed.
         #[serde(default)]
         pk_encrypt: Option<[u8; 32]>,
+        /// SQIsign L5 public key (129 bytes, `sqisign-rs 0.3`), upgrading this wallet's
+        /// RAMP authorization to post-quantum. Optional and `#[serde(default)]` so every
+        /// existing snapshot and every existing client keeps working unchanged.
+        ///
+        /// Publishing this is a one-way door: from then on `Shield`/`Unshield` from this
+        /// wallet must carry a SQIsign signature IN ADDITION to Ed25519. See
+        /// `shielded::ShieldedPool::sqi_keys` for why require-both, and why there is no
+        /// removal path.
+        #[serde(default)]
+        pk_sqi: Option<Vec<u8>>,
     },
 
     /// PV-1: move value from a transparent wallet into the shielded pool.
@@ -1129,8 +1139,14 @@ pub fn commit_state_transition(
             }
 
             // ── PV-1 shielded pool ───────────────────────────────────────────────────
-            StateMutation::RegisterShieldedAddress { wallet, pk_shield, pk_encrypt } => {
+            StateMutation::RegisterShieldedAddress { wallet, pk_shield, pk_encrypt, pk_sqi } => {
                 state.shielded.set_address(wallet, pk_shield);
+                if let Some(pk) = pk_sqi {
+                    // Length-checked inside `set_sqi_key`: a wrong-sized key is ignored
+                    // rather than stored, so a malformed registration can never leave a
+                    // wallet holding an unusable second factor it can no longer satisfy.
+                    state.shielded.set_sqi_key(wallet, pk);
+                }
                 if let Some(pk_enc) = pk_encrypt {
                     state.shielded.set_encrypt_key(wallet, pk_enc);
                 }

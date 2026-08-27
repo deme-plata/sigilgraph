@@ -273,7 +273,7 @@ pub fn simulate_coinbase_fill(blocks: usize, miners: usize, seed: u64) -> Coinba
             at_height: 1,
             mutations: keys
                 .iter()
-                .map(|(w, pk)| StateMutation::RegisterShieldedAddress { wallet: *w, pk_shield: *pk, pk_encrypt: None })
+                .map(|(w, pk)| StateMutation::RegisterShieldedAddress { wallet: *w, pk_shield: *pk, pk_sqi: None, pk_encrypt: None })
                 .collect(),
         },
         1,
@@ -420,7 +420,7 @@ pub fn simulate_realistic_mining_pool(
         .map(|m| StateMutation::RegisterShieldedAddress {
             wallet: m.wallet,
             pk_shield: m.pk_shield,
-            pk_encrypt: None,
+            pk_sqi: None, pk_encrypt: None,
         })
         .collect();
     if !registrations.is_empty() {

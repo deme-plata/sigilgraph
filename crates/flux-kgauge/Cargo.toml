@@ -1,0 +1,16 @@
+[package]
+name = "flux-kgauge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-kgauge — the DAG-Knight consensus observability gauge from 'The Theoretical Minimum for Blockchain Consensus' v4 (Kristensen 2026). Implements the base K-gauge (Eq. 10), the observer coverage factor Omega_node (Eq. 17-18), block commitment depth and irreversibility Lambda_commit / f_irrev (Eq. 19-24), and the enhanced gauge K_enhanced (Eq. 25). Every output carries an epistemic provenance tag (Measured / Derived / Protocol / Placeholder / Unavailable) so the paper's Table 1 placeholder catalog is machine-readable rather than prose. Also measures the DAG-Knight anticone parameter k, which is a DIFFERENT quantity from the K-gauge and is kept strictly separate. Pure arithmetic, zero chain deps."
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[[example]]
+name = "from_stdin"
+path = "examples/from_stdin.rs"

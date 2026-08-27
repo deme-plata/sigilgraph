@@ -187,7 +187,15 @@ pub fn build_block_body_for(
         //
         // Falls back to the transparent credit when the producer has NOT registered, so an
         // existing miner is never broken by this.
-        let cb = match work.shielded().shielded_address(&producer) {
+        // Same pool-ceiling guard as `shielded_credit`: a full pool must degrade to a
+        // transparent credit, never to an unpayable block. `None` here takes the existing
+        // unregistered path, which pays transparently.
+        let producer_shield = if work.shielded().len() >= sigil_state::shielded::POOL_CAPACITY {
+            None
+        } else {
+            work.shielded().shielded_address(&producer)
+        };
+        let cb = match producer_shield {
             Some(pk) => match sigil_shield::note_v1::coinbase_commitment_wire(height, &pk, reward) {
                 Some(cm) => StateMutation::ShieldedCoinbase {
                     pk_shield: pk,
@@ -261,10 +269,23 @@ pub fn build_block_body_for_shares(
     let mut included: Vec<SignedTx> = Vec::new();
 
     if !cb_mutations.is_empty() {
-        if sigil_state::commit_state_transition(
+        // FAIL LOUD, not silent. This used to be a bare `.is_ok()` with no `else`: when the
+        // coinbase failed to apply, the ENTIRE coinbase — miner cut, master cut and commons
+        // cut — was discarded and the block minted without it, with no error, no log line
+        // and no counter. A registered miner hashed for nothing and there was no trace to
+        // find (live, 2026-08-26: 31.66 MH/s credited +0 for hours, root cause a full
+        // shielded pool). The tx loop below already learned this lesson — its own comment
+        // reads "Fail LOUD, not silent: a dropped tx used to vanish with zero trace" — the
+        // coinbase path never got the same treatment.
+        match sigil_state::commit_state_transition(
             &mut work, &StateTransition { at_height: height, mutations: cb_mutations.clone() }, height,
-        ).is_ok() {
-            mutations.extend(cb_mutations);
+        ) {
+            Ok(_) => mutations.extend(cb_mutations),
+            Err(e) => eprintln!(
+                "🚨 COINBASE DROPPED at h={height} ({e:?}) — miner, master AND commons cuts \
+                 are unpaid for this block. {} mutation(s) discarded.",
+                cb_mutations.len()
+            ),
         }
     }
 
@@ -332,6 +353,102 @@ pub fn split_coinbase_mutations(
         return mutations;
     }
 
+    // Every wallet credited by this coinbase — miner, master AND commons — mints a
+    // shielded note instead of a transparent balance IF that wallet has published a
+    // shield key. See `shielded_credit` for why this had to become one shared helper.
+    //
+    // The set of note commitments this block has already minted. `append_note` REJECTS
+    // a duplicate commitment (`ShieldedError::DuplicateCommitment`), and that error
+    // fails the whole `commit_state_transition` — which would silently drop the ENTIRE
+    // coinbase for the block, not just the colliding cut. Two credits collide only when
+    // they share `(height, pk_shield, amount)`, i.e. two distinct wallets registered the
+    // SAME shield key and drew equal cuts at the same height. Rare, but the blast radius
+    // is a lost block reward, so the second one falls back to a transparent credit
+    // rather than risking it.
+    let mut minted_cms: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+
+    // One wallet's cut → the right mutation for it. Shielded when `to` has registered a
+    // key AND the amount is inside the circuit's representable range AND the commitment
+    // does not collide with one already minted in this block; transparent otherwise
+    // (byte-for-byte the behavior every unregistered wallet always had).
+    //
+    // 2026-08-26: the shielded branch used to exist ONLY for the miner's own cut, so a
+    // registered master or commons wallet was still paid in the clear. That asymmetry
+    // had no justification — the registry is per-wallet and says nothing about what role
+    // the wallet plays in a block — and it mattered a lot: master (5%) + commons (1%) is
+    // taken from EVERY block regardless of who mined it or whether that miner ever opted
+    // in, so it is the only coinbase cut whose shielding does not depend on persuading
+    // individual miners. Live at the time of the fix: 86 MH/s across 5 rigs, 8,564 blocks
+    // accepted, and a shielded pool holding exactly ONE note — because not one miner was
+    // registered and the two protocol wallets could not contribute even if they were.
+    fn shielded_credit(
+        work: &SigilState,
+        minted: &mut std::collections::HashSet<[u8; 32]>,
+        to: WalletId,
+        amount: u128,
+        height: u64,
+    ) -> Option<StateMutation> {
+        let pk = work.shielded().shielded_address(&to)?;
+        // POOL CEILING (live incident, 2026-08-26). The pool is a fixed-capacity tree,
+        // and `append_note` returns PoolFull at the top. A registered wallet ALWAYS took
+        // the shielded path — the transparent fallback keys off non-registration, not off
+        // whether the note can actually be minted — so once the pool filled, that wallet's
+        // cut could no longer be applied. And because a failed coinbase was dropped whole
+        // and silently (see `build_block_body_for_shares`), the miner was simply paid
+        // NOTHING: measured live at 31.66 MH/s earning +0 while unregistered miners were
+        // paid normally.
+        //
+        // `minted` counts the notes THIS coinbase has already queued but not yet applied,
+        // so several cuts in one block cannot collectively overshoot the ceiling.
+        // Returning None here routes the cut through the caller's existing transparent
+        // credit — "a credit that must never vanish" now also covers a full pool.
+        // 2026-08-27: this early-return is GONE, and removing it is the whole point of
+        // epoch rotation.
+        //
+        // It was added on 2026-08-26 as damage control: back then `append_note` returned
+        // `PoolFull` at capacity, a failed coinbase was dropped whole and silently, and a
+        // registered miner at 31.66 MH/s earned +0 for hours. Falling back to a
+        // transparent credit was strictly better than losing the reward.
+        //
+        // Rotation changed what a full pool MEANS. Appending to a full pool now seals the
+        // generation and opens a fresh one, so the append cannot fail — and because
+        // rotation is triggered BY that append, this check prevented the very thing that
+        // would have fixed it. Measured live: the pool sat at exactly 32,768/32,768 with
+        // `epoch 0, sealed 0` for over two hours while every registered miner's reward
+        // was quietly paid in the clear. No money was lost; privacy was, permanently and
+        // without a single error line, because the mitigation had become the blocker.
+        //
+        // A mid-block rotation is deterministic — every node applies the same mutations in
+        // the same order — so the generation boundary lands at the same transaction of the
+        // same block everywhere.
+        //
+        // `minted` still guards a within-block commitment collision below.
+        let cm = sigil_shield::note_v1::coinbase_commitment_wire(height, &pk, amount)?;
+        if !minted.insert(cm) {
+            return None;
+        }
+        let ct = seal_coinbase_note(work, &to, &pk, amount, height);
+        Some(StateMutation::ShieldedCoinbase { pk_shield: pk, amount, cm, ct })
+    }
+
+    // A credit that must never vanish: shielded when the wallet is registered, else the
+    // absolute-write transparent credit. `None` only on a u128 overflow of the
+    // transparent balance, which the caller treats as "skip this cut" exactly as before.
+    fn credit_mutation(
+        work: &SigilState,
+        minted: &mut std::collections::HashSet<[u8; 32]>,
+        to: WalletId,
+        amount: u128,
+        height: u64,
+    ) -> Option<StateMutation> {
+        if let Some(m) = shielded_credit(work, minted, to, amount, height) {
+            return Some(m);
+        }
+        let bal = work.balance_of(&to, &NATIVE);
+        let new_bal = bal.checked_add(amount)?;
+        Some(StateMutation::SetBalance { wallet: to, token: NATIVE, amount: new_bal })
+    }
+
     // One wallet's cut → mutations, applying the master/commons split exactly
     // like `sigil_rpc::credit_share`: master's own cut is skipped when the
     // credited wallet IS the master (self-mining keeps the full share), the
@@ -358,46 +475,16 @@ pub fn split_coinbase_mutations(
 
         let mut step: Vec<StateMutation> = Vec::with_capacity(3);
         if to_credit > 0 {
-            // SHIELDED POOL CREDIT (2026-08-26). The pool-share split is the
-            // path essentially all real block wins go through once external
-            // miners are active — `build_block_body_for`'s ShieldedCoinbase
-            // branch only fires on the increasingly-rare no-solve fallback,
-            // so a registered miner's winnings were landing transparently
-            // regardless of registration. `height` is unique per call (this
-            // function runs at most once per height, and each `to` here is a
-            // distinct HashMap key), so reusing coinbase_commitment_wire's
-            // existing domain cannot collide with any other credit, ever.
-            // Falls back to the transparent credit — same as an unregistered
-            // wallet always got — when unregistered or the amount is past
-            // the shielded circuit's representable range.
-            let shielded = work.shielded().shielded_address(&to).and_then(|pk| {
-                sigil_shield::note_v1::coinbase_commitment_wire(height, &pk, to_credit)
-                    .map(|cm| StateMutation::ShieldedCoinbase {
-                        pk_shield: pk,
-                        amount: to_credit,
-                        cm,
-                        ct: seal_coinbase_note(work, &to, &pk, to_credit, height),
-                    })
-            });
-            let mutation = match shielded {
-                Some(m) => m,
-                None => {
-                    let bal = work.balance_of(&to, &NATIVE);
-                    let Some(new_bal) = bal.checked_add(to_credit) else { return 0 };
-                    StateMutation::SetBalance { wallet: to, token: NATIVE, amount: new_bal }
-                }
-            };
-            step.push(mutation);
+            let Some(m) = credit_mutation(work, &mut minted_cms, to, to_credit, height) else { return 0 };
+            step.push(m);
         }
         if let (Some(m), true) = (master, master_credit > 0) {
-            let bal = work.balance_of(&m, &NATIVE);
-            let Some(new_bal) = bal.checked_add(master_credit) else { return 0 };
-            step.push(StateMutation::SetBalance { wallet: m, token: NATIVE, amount: new_bal });
+            let Some(mu) = credit_mutation(work, &mut minted_cms, m, master_credit, height) else { return 0 };
+            step.push(mu);
         }
         if commons_credit > 0 {
-            let bal = work.balance_of(&sigil_bank::COMMONS_WALLET, &NATIVE);
-            let Some(new_bal) = bal.checked_add(commons_credit) else { return 0 };
-            step.push(StateMutation::SetBalance { wallet: sigil_bank::COMMONS_WALLET, token: NATIVE, amount: new_bal });
+            let Some(mu) = credit_mutation(work, &mut minted_cms, sigil_bank::COMMONS_WALLET, commons_credit, height) else { return 0 };
+            step.push(mu);
         }
         if step.is_empty() {
             return 0;
@@ -656,6 +743,240 @@ mod tests {
         assert_eq!(st.native_supply() + st.shielded().value_locked(), 1_000_000, "total issuance (both domains) grows by exactly the reward");
     }
 
+    /// Register `wallet`'s shield key derived from `seed`, returning the wire pk.
+    /// THE FULL-POOL GATE — a registered miner must never be paid NOTHING.
+    ///
+    /// Live incident, 2026-08-26: the shielded pool reached its fixed capacity
+    /// (32,768 notes). A registered wallet always took the shielded path — the
+    /// transparent fallback keys off NON-REGISTRATION, not off whether the note can
+    /// actually be minted — so its cut could no longer be applied. The failed coinbase
+    /// was then dropped whole and silently, and the miner earned +0 while unregistered
+    /// miners were paid normally. Measured: 31.66 MH/s, zero credit.
+    ///
+    /// A full pool must degrade to a transparent credit, never to an unpayable block.
+    #[test]
+    fn a_full_pool_rotates_and_keeps_paying_a_registered_miner_privately() {
+        let mut st = SigilState::new();
+        let seed = [0x42u8; 32];
+        let acct = sigil_shield::wallet::ShieldedAccount::from_seed(seed);
+        let pk_shield = sigil_shield::note_v1::to_wire(acct.public_key());
+        let miner: WalletId = [0x99u8; 32];
+
+        sigil_state::commit_state_transition(
+            &mut st,
+            &StateTransition {
+                at_height: 0,
+                mutations: vec![StateMutation::RegisterShieldedAddress {
+                    wallet: miner,
+                    pk_shield,
+                    pk_encrypt: None,
+                }],
+            },
+            0,
+        )
+        .unwrap();
+
+        // Fill the pool to the brim. Distinct heights give distinct commitments, so the
+        // duplicate-commitment replay guard does not fire; amount 1 keeps the locked
+        // value trivial.
+        let filler: Vec<StateMutation> = (0..sigil_state::shielded::POOL_CAPACITY as u64)
+            .map(|i| {
+                let cm = sigil_shield::note_v1::coinbase_commitment_wire(i, &pk_shield, 1)
+                    .expect("in range");
+                StateMutation::ShieldedCoinbase { pk_shield, amount: 1, cm, ct: None }
+            })
+            .collect();
+        sigil_state::commit_state_transition(
+            &mut st,
+            &StateTransition { at_height: 0, mutations: filler },
+            0,
+        )
+        .expect("filling the pool to capacity must itself succeed");
+        assert_eq!(
+            st.shielded().len(),
+            sigil_state::shielded::POOL_CAPACITY,
+            "the pool must actually be full for this test to mean anything"
+        );
+
+        let before = st.balance_of(&miner, &NATIVE);
+        let shares = std::collections::HashMap::from([(miner, 1u64)]);
+        let (tr, ..) = build_block_body_for_shares(&st, 1, Some(1_000_000), &[], miner, &shares);
+
+        // 2026-08-27: this test used to assert the TRANSPARENT FALLBACK — that a full
+        // pool pays a registered miner in the clear rather than not at all. That was the
+        // right behaviour when a full pool meant `PoolFull` and a silently dropped
+        // coinbase. Epoch rotation changed it: appending to a full pool now seals the
+        // generation and opens a fresh one, so the note CAN be minted and the miner keeps
+        // being paid PRIVATELY, which is what they registered for.
+        //
+        // Keeping the old assertion would have pinned the behaviour that made rotation
+        // unreachable — measured live: the pool sat at exactly 32,768/32,768 with
+        // `epoch 0, sealed 0` for over two hours, every registered miner's reward quietly
+        // paid in the clear, no error line anywhere.
+        assert!(
+            tr.mutations.iter().any(|m| matches!(m, StateMutation::ShieldedCoinbase { .. })),
+            "a full pool must ROTATE and still mint a note — falling back to transparent \
+             here is what prevented rotation from ever happening: {:?}",
+            tr.mutations
+        );
+
+        // And it must actually apply: rotation happens inside the append, so this is also
+        // the assertion that a mid-block rotation commits cleanly.
+        let mut after = st.clone();
+        sigil_state::commit_state_transition(&mut after, &tr, 1)
+            .expect("the rotating coinbase must APPLY — the whole point is that the block is payable");
+        assert_eq!(
+            after.shielded().epoch(),
+            1,
+            "the pool must have rotated into a new generation"
+        );
+        assert_eq!(
+            after.shielded().archive().len(),
+            1,
+            "the filled generation must be SEALED, not discarded — its notes stay spendable"
+        );
+        assert_eq!(
+            after.shielded().archive()[0].notes.len(),
+            sigil_state::shielded::POOL_CAPACITY,
+            "the sealed epoch must hold every note it had"
+        );
+        assert!(
+            after.shielded().len() >= 1,
+            "the fresh generation must have taken the new note"
+        );
+        assert_eq!(
+            after.balance_of(&miner, &NATIVE),
+            before,
+            "a registered miner keeps being paid privately — nothing should land transparently"
+        );
+        assert!(
+            after.shielded().value_locked() > st.shielded().value_locked(),
+            "the reward must be locked into the pool; rotation moves no value but the new \
+             note adds to it"
+        );
+    }
+
+    fn register_shield(st: &mut SigilState, wallet: WalletId, seed: [u8; 32]) -> [u8; 32] {
+        let acct = sigil_shield::wallet::ShieldedAccount::from_seed(seed);
+        let pk_shield = sigil_shield::note_v1::to_wire(acct.public_key());
+        sigil_state::commit_state_transition(
+            st,
+            &StateTransition {
+                at_height: 0,
+                mutations: vec![StateMutation::RegisterShieldedAddress { wallet, pk_shield, pk_encrypt: None }],
+            },
+            0,
+        )
+        .unwrap();
+        pk_shield
+    }
+
+    /// THE FIX (2026-08-26). The master wallet takes 5% of EVERY block's reward,
+    /// from every miner, whether or not that miner has opted into shielded rewards
+    /// — so it is the one coinbase cut that can grow the anonymity set in
+    /// proportion to total network hashrate without persuading anybody. Before
+    /// this, `split_coinbase_mutations` looked up the shield registry only for the
+    /// mining wallet's own cut, so a registered master was still paid in the clear
+    /// and that leverage was simply unavailable.
+    #[test]
+    fn a_registered_master_wallets_cut_mints_a_shielded_note() {
+        let mut st = SigilState::new();
+        let master: WalletId = [0x11u8; 32];
+        set_master(&mut st, master);
+        let pk_master = register_shield(&mut st, master, [0x77u8; 32]);
+
+        let miner: WalletId = [0x88u8; 32]; // deliberately NOT registered
+        let shares = std::collections::HashMap::from([(miner, 1u64)]);
+        let reward = 1_000_000u128;
+        let muts = split_coinbase_mutations(&st, 1, reward, miner, &shares);
+
+        let master_note = muts.iter().find_map(|m| match m {
+            StateMutation::ShieldedCoinbase { pk_shield, amount, .. } if *pk_shield == pk_master => Some(*amount),
+            _ => None,
+        });
+        assert_eq!(
+            master_note,
+            Some(reward * sigil_bank::MASTER_MINING_FEE_BPS / 10_000),
+            "the master's 5% must enter the shielded pool once it has registered a key: {muts:?}"
+        );
+        assert!(
+            !muts.iter().any(|m| matches!(m, StateMutation::SetBalance { wallet, .. } if *wallet == master)),
+            "a registered master must get NO transparent credit"
+        );
+        assert!(
+            muts.iter().any(|m| matches!(m, StateMutation::SetBalance { wallet, .. } if *wallet == miner)),
+            "the UNREGISTERED miner is untouched by this — still a transparent credit"
+        );
+
+        // Conservation still spans both domains exactly.
+        let mut after = st.clone();
+        sigil_state::commit_state_transition(&mut after, &StateTransition { at_height: 1, mutations: muts }, 1).unwrap();
+        assert_eq!(
+            after.native_supply() + after.shielded().value_locked(),
+            reward,
+            "every unit of the reward is still accounted for, just split across the two domains"
+        );
+    }
+
+    /// The commons tithe is taken on every block too, so the same rule has to
+    /// apply to it — otherwise a registered commons wallet silently stays public.
+    #[test]
+    fn a_registered_commons_wallets_tithe_mints_a_shielded_note() {
+        let mut st = SigilState::new();
+        let master: WalletId = [0x11u8; 32];
+        set_master(&mut st, master);
+        let pk_commons = register_shield(&mut st, sigil_bank::COMMONS_WALLET, [0x66u8; 32]);
+
+        let miner: WalletId = [0x88u8; 32];
+        let shares = std::collections::HashMap::from([(miner, 1u64)]);
+        let muts = split_coinbase_mutations(&st, 1, 1_000_000, miner, &shares);
+
+        assert!(
+            muts.iter().any(|m| matches!(m, StateMutation::ShieldedCoinbase { pk_shield, .. } if *pk_shield == pk_commons)),
+            "the commons tithe must mint a note once the commons wallet is registered: {muts:?}"
+        );
+        assert!(
+            !muts.iter().any(|m| matches!(m, StateMutation::SetBalance { wallet, .. } if *wallet == sigil_bank::COMMONS_WALLET)),
+            "a registered commons wallet must get NO transparent credit"
+        );
+    }
+
+    /// Guard on the one way this could destroy money rather than shield it.
+    /// `ShieldedPool::append_note` REJECTS a duplicate commitment, and that error
+    /// fails the whole `commit_state_transition` — dropping the ENTIRE block's
+    /// coinbase, not just the colliding cut. Two credits collide only when they
+    /// share `(height, pk_shield, amount)`, which needs two distinct wallets to have
+    /// registered the SAME shield key and drawn equal cuts. Rare; the blast radius
+    /// is a whole block reward, so the second one must fall back to transparent.
+    #[test]
+    fn a_colliding_commitment_falls_back_to_transparent_instead_of_losing_the_reward() {
+        let mut st = SigilState::new();
+        let seed = [0x55u8; 32];
+        // Two DIFFERENT wallets sharing one shield key — the only way to collide.
+        let a: WalletId = [0xA1u8; 32];
+        let b: WalletId = [0xB2u8; 32];
+        let pk = register_shield(&mut st, a, seed);
+        assert_eq!(register_shield(&mut st, b, seed), pk, "both wallets share one shield key");
+
+        // Equal weights ⇒ equal cuts ⇒ identical (height, pk, amount) ⇒ identical cm.
+        let shares = std::collections::HashMap::from([(a, 1u64), (b, 1u64)]);
+        let reward = 1_000_000u128;
+        let muts = split_coinbase_mutations(&st, 1, reward, a, &shares);
+
+        let notes = muts.iter().filter(|m| matches!(m, StateMutation::ShieldedCoinbase { .. })).count();
+        assert_eq!(notes, 1, "exactly one of the two colliding cuts may mint a note: {muts:?}");
+
+        // The decisive assertion: the block still commits and pays out in full.
+        let mut after = st.clone();
+        sigil_state::commit_state_transition(&mut after, &StateTransition { at_height: 1, mutations: muts }, 1)
+            .expect("the coinbase must still commit — a collision must not fail the block");
+        assert_eq!(
+            after.native_supply() + after.shielded().value_locked(),
+            reward,
+            "the full reward is still issued despite the collision"
+        );
+    }
+
     /// Regression twin of the test above: an UNREGISTERED miner in the exact
     /// same pool-split path must be completely unaffected — transparent
     /// credit, same as before this session's change.
@@ -821,6 +1142,9 @@ mod tests {
             ghostdag_k: None,
             final_blue_depth: None,
             saturated_self_heal_window: 64,
+            // 2026-08-26: field added by the pending-eviction work; 0 = disabled,
+            // which is the pre-existing behavior this determinism test asserts.
+            pending_max_tip_lag: 0,
         };
 
         // Two nodes, two DIFFERENT gossip arrival orders.

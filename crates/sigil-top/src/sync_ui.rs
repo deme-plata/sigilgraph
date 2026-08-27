@@ -88,6 +88,13 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
     let (vtext, vcol) = if !s.stall_reason.is_empty() && !synced && !light {
         ("⚠ STALLED — nudging peer", C_NEON_GOLD)
     } else { (vtext, vcol) };
+    // An unservable frontier outranks every other verdict: it is the one state that looks
+    // completely healthy (ranges in flight, bytes moving, a plausible rate and ETA) while
+    // being permanently unable to finish. It must never again read as "SYNCING".
+    let (vtext, vcol) = match s.unservable_frontier {
+        Some(_) if !light => ("🚧 UNSERVABLE HISTORY", C_NEON_PINK),
+        _ => (vtext, vcol),
+    };
 
     // SPINE-BREAK fix: a CONFIRMED watchdog/fatal failure outranks every other headline —
     // the operator must never miss it (this is what replaces the old silent ~499k rate-0).
@@ -461,7 +468,9 @@ pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
     let eta = if t.rate >= 1.0 && gap > 0 { Some((gap as f64 / t.rate) as u64) } else { None };
 
     // ── header: the whole pipeline in two lines ─────────────────────────
-    let [head, mid] = Layout::vertical([Constraint::Length(4), Constraint::Min(0)]).areas(inner);
+    // One extra header row when the unservable-frontier banner is present.
+    let head_rows = if app.p2p_state.unservable_frontier.is_some() { 5 } else { 4 };
+    let [head, mid] = Layout::vertical([Constraint::Length(head_rows), Constraint::Min(0)]).areas(inner);
     let mut hl: Vec<Line> = Vec::new();
     hl.push(Line::from(vec![
         Span::styled("⇣ ", Style::default().fg(C_NEON_GREEN)),
@@ -502,6 +511,19 @@ pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
             Span::styled("█", Style::default().fg(C_NEON_CYAN)), dim(" verified   "),
             Span::styled("▒", Style::default().fg(C_GOLD)), dim(" fetched, awaiting verify   "),
             Span::styled("░", Style::default().fg(C_DIM)), dim(" not downloaded"),
+        ]));
+    }
+    if let Some(h) = s.unservable_frontier {
+        // Name the height, say why it cannot resolve itself, and give the one action that
+        // helps. A verdict with no remedy is how an operator ends up staring at a parked
+        // sync for an hour.
+        hl.push(Line::from(vec![
+            Span::styled(" 🚧 ", Style::default().fg(C_NEON_PINK)),
+            Span::styled(
+                format!("no reachable peer serves h={} ", group(h)),
+                Style::default().fg(C_NEON_PINK).add_modifier(Modifier::BOLD),
+            ),
+            dim("— re-anchored above it; this is NOT a genesis archive. [F] = light monitor."),
         ]));
     }
     f.render_widget(Paragraph::new(hl), head);

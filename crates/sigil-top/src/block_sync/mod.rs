@@ -232,6 +232,16 @@ pub struct P2PSyncState {
     /// not advanced for a while while a higher tip is known. Surfaced in the SYNC hero so a
     /// stall is NEVER a silent 0 blk/s; cleared the moment the frontier advances again.
     pub stall_reason: String,
+
+    /// The height no reachable peer will serve, once that has been PROVEN rather than
+    /// guessed: the frontier chunk was re-requested repeatedly and never once answered,
+    /// while HIGHER ranges were answered fine over the same window.
+    ///
+    /// This state is otherwise indistinguishable from a slow sync — the queue shows ranges
+    /// in flight, bytes moving and a healthy-looking rate, and the progress bar simply does
+    /// not advance. An operator watched exactly that for an hour. `None` means no such
+    /// proof; `Some(h)` means say so, loudly, with the number.
+    pub unservable_frontier: Option<u64>,
     /// v0.59: the latest height from the SIGNED sigil-tip-live.json oracle — the network AUTHORITY
     /// for the tip. Gossip-claimed raises are gated against this (see `sane_raise`) so a phantom or
     /// post-genesis-reset gossip can't push the sync target above the real chain head. 0 until the
@@ -907,6 +917,14 @@ impl P2PBlockSync {
                 // data actually arrives without progress, so it can't false-fire on a quiet
                 // caught-up monitor or a merely-claimed (lying) higher tip. Reset on advance.
                 let mut frontier_serves_since_advance: u32 = 0;
+                // UNSERVABLE-FRONTIER EVIDENCE. Two counters, both cleared on real advance:
+                // how many times we ISSUED the frontier chunk, and how many responses landed
+                // for ranges strictly ABOVE it. A peer that is merely slow answers the
+                // frontier eventually; a peer whose servable floor sits above the frontier
+                // answers everything else promptly and that chunk never, which is the exact
+                // shape this pair detects.
+                let mut frontier_reqs_since_advance: u32 = 0;
+                let mut higher_serves_since_advance: u32 = 0;
                 // v7.0.18 FRONTIER SELF-HEAL: bounded rollback-and-refetch attempts when honest
                 // frontier headers repeatedly refuse to splice (poisoned local seam). Reset on
                 // real advance; after MAX attempts the loud SPINE BREAK verdict stands.
@@ -1443,6 +1461,13 @@ impl P2PBlockSync {
                                     frontier_serves_since_advance =
                                         frontier_serves_since_advance.saturating_add(1);
                                 }
+                                // A range STRICTLY ABOVE the frontier that came back with real
+                                // headers: proof the peer is alive, willing and fast — so a
+                                // frontier that never lands is about the RANGE, not the peer.
+                                if got > 0 && start > store.synced_to() {
+                                    higher_serves_since_advance =
+                                        higher_serves_since_advance.saturating_add(1);
+                                }
                                 // An EMPTY response over a still-needed range means this peer can't
                                 // serve that range (e.g. it pruned genesis / lacks early offsets).
                                 // Re-queue to the FRONT (retry promptly) AND bench this peer briefly
@@ -1884,6 +1909,14 @@ impl P2PBlockSync {
                                     .map(|n| n.clamp(4, 4096)).unwrap_or(64);
                                 if i > 0 && !sync_store.may_fetch(lookahead_budget) { break; }
                                 if !sync_store.claim(start, "pending") { continue; }  // in flight OR already fetched (claimed)
+                                // `i == 0` IS the frontier chunk — the one whose arrival would
+                                // move the contiguous watermark. Count every issue of it; if this
+                                // climbs while `higher_serves_since_advance` climbs too, the
+                                // frontier range is unservable rather than merely slow.
+                                if i == 0 {
+                                    frontier_reqs_since_advance =
+                                        frontier_reqs_since_advance.saturating_add(1);
+                                }
                                 let fanout = if i == 0 {
                                     if full_archive_mode {
                                         healthy.len().max(1)
@@ -2089,8 +2122,61 @@ impl P2PBlockSync {
                             last_synced_seen = now_synced;
                             last_advance_t = Instant::now();
                             frontier_serves_since_advance = 0; // v0.95: real progress clears wedge evidence
-                        } else if recent_only_rt.load(Ordering::Relaxed)
-                            && store.best_height() > now_synced && last_advance_t.elapsed() >= Duration::from_secs(2) {
+                            frontier_reqs_since_advance = 0;
+                            higher_serves_since_advance = 0;
+                        } else if {
+                            // ── UNSERVABLE FRONTIER (2026-08-27) ───────────────────────────
+                            //
+                            // Full-archive deliberately refuses to creep `base` past a hole,
+                            // because skipping SILENTLY abandons blocks. That instinct is right
+                            // and this does not change it. What it changes is the "silently":
+                            // the previous behaviour was to wait forever and trust a watchdog to
+                            // "surface a LOUD sync_failure". Live, it surfaced nothing an
+                            // operator could act on — the queue showed nine ranges in flight,
+                            // bytes moving, a plausible rate and an ETA, and the frontier sat at
+                            // 30,250 for an hour across four releases and a full store wipe.
+                            //
+                            // The distinguishing evidence is cheap and unambiguous: the frontier
+                            // chunk was ISSUED many times and answered NEVER, while ranges above
+                            // it were answered promptly over the same window. A slow peer cannot
+                            // produce that pattern; a peer whose servable floor is above our
+                            // frontier produces exactly it. Measured on the operator's client:
+                            // `30,250..40,250` never once appeared in completions while
+                            // `40,000..110,000` completed in ~700 ms each, repeatedly.
+                            //
+                            // Once PROVEN (not guessed), re-anchor — and record it, so the node
+                            // never again claims to be a genesis archive when it is not.
+                            const UNSERVABLE_REQS: u32 = 6;
+                            const UNSERVABLE_HIGHER: u32 = 6;
+                            let proven_unservable = !recent_only_rt.load(Ordering::Relaxed)
+                                && frontier_reqs_since_advance >= UNSERVABLE_REQS
+                                && higher_serves_since_advance >= UNSERVABLE_HIGHER
+                                && frontier_serves_since_advance == 0
+                                && last_advance_t.elapsed() >= Duration::from_secs(20);
+                            if proven_unservable {
+                                let from = store.base();
+                                let to = now_synced.saturating_add(CHUNK);
+                                crate::tlog!(
+                                    "[sync] 🚧 UNSERVABLE FRONTIER at h={now_synced}: issued the frontier chunk \
+                                     {frontier_reqs_since_advance}x with ZERO answers while {higher_serves_since_advance} \
+                                     higher ranges were served — no reachable peer holds this height. \
+                                     Re-anchoring the archive base {from} → {to}. THIS NODE IS NO LONGER A \
+                                     GENESIS ARCHIVE: heights below {to} are not held and were never obtainable."
+                                );
+                                store.set_base(to);
+                                last_synced_seen = store.synced_to();
+                                last_advance_t = Instant::now();
+                                frontier_reqs_since_advance = 0;
+                                higher_serves_since_advance = 0;
+                                let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                s.unservable_frontier = Some(now_synced);
+                                s.base = store.base();
+                            }
+                            !proven_unservable
+                                && recent_only_rt.load(Ordering::Relaxed)
+                                && store.best_height() > now_synced
+                                && last_advance_t.elapsed() >= Duration::from_secs(2)
+                        } {
                             // SPINE-BREAK fix: the base-skip is a LIGHT-MONITOR-ONLY heuristic now.
                             // In FULL-ARCHIVE mode (`!recent_only`) advancing `base` past a hole would
                             // SILENTLY ABANDON blocks — exactly the corruption of the "hold every block"

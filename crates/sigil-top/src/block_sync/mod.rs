@@ -925,6 +925,11 @@ impl P2PBlockSync {
                 // shape this pair detects.
                 let mut frontier_reqs_since_advance: u32 = 0;
                 let mut higher_serves_since_advance: u32 = 0;
+                // Responses whose header range actually SPANS `synced_to` — i.e. that carried
+                // the one block that would move the watermark. Strictly narrower than
+                // `frontier_serves_since_advance`; see its increment site for why the loose
+                // counter cannot be used as unservability evidence.
+                let mut frontier_covering_serves: u32 = 0;
                 // v7.0.18 FRONTIER SELF-HEAL: bounded rollback-and-refetch attempts when honest
                 // frontier headers repeatedly refuse to splice (poisoned local seam). Reset on
                 // real advance; after MAX attempts the loud SPINE BREAK verdict stands.
@@ -1467,6 +1472,23 @@ impl P2PBlockSync {
                                 if got > 0 && start > store.synced_to() {
                                     higher_serves_since_advance =
                                         higher_serves_since_advance.saturating_add(1);
+                                }
+                                // Did this response actually CONTAIN the height we are stuck on?
+                                //
+                                // `frontier_serves_since_advance` above is deliberately loose —
+                                // it counts anything at-or-below `synced_to + CHUNK`, which
+                                // includes the NEXT chunk. That is right for the wedge watchdog
+                                // and wrong for proving unservability: with the frontier at
+                                // 30,250 the range `40,000..50,000` satisfies `start <= 40,250`,
+                                // so a healthy neighbouring chunk kept incrementing the very
+                                // counter that was supposed to stay at zero. The unservable
+                                // proof needs the strict question — did the block we are waiting
+                                // for arrive? — so ask exactly that.
+                                if header_height_range(&b).map_or(false, |(mn, mx)| {
+                                    mn <= store.synced_to() && mx >= store.synced_to()
+                                }) {
+                                    frontier_covering_serves =
+                                        frontier_covering_serves.saturating_add(1);
                                 }
                                 // An EMPTY response over a still-needed range means this peer can't
                                 // serve that range (e.g. it pruned genesis / lacks early offsets).
@@ -2124,6 +2146,7 @@ impl P2PBlockSync {
                             frontier_serves_since_advance = 0; // v0.95: real progress clears wedge evidence
                             frontier_reqs_since_advance = 0;
                             higher_serves_since_advance = 0;
+                            frontier_covering_serves = 0;
                         } else if {
                             // ── UNSERVABLE FRONTIER (2026-08-27) ───────────────────────────
                             //
@@ -2151,7 +2174,7 @@ impl P2PBlockSync {
                             let proven_unservable = !recent_only_rt.load(Ordering::Relaxed)
                                 && frontier_reqs_since_advance >= UNSERVABLE_REQS
                                 && higher_serves_since_advance >= UNSERVABLE_HIGHER
-                                && frontier_serves_since_advance == 0
+                                && frontier_covering_serves == 0
                                 && last_advance_t.elapsed() >= Duration::from_secs(20);
                             if proven_unservable {
                                 let from = store.base();
@@ -2168,6 +2191,7 @@ impl P2PBlockSync {
                                 last_advance_t = Instant::now();
                                 frontier_reqs_since_advance = 0;
                                 higher_serves_since_advance = 0;
+                                frontier_covering_serves = 0;
                                 let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
                                 s.unservable_frontier = Some(now_synced);
                                 s.base = store.base();

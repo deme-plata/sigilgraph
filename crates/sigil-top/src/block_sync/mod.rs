@@ -2169,10 +2169,28 @@ impl P2PBlockSync {
                             //
                             // Once PROVEN (not guessed), re-anchor — and record it, so the node
                             // never again claims to be a genesis archive when it is not.
-                            const UNSERVABLE_REQS: u32 = 6;
+                            // 2026-08-27, second correction. The first version also required
+                            // `frontier_reqs_since_advance >= 6`, which could not be reached:
+                            // that counter only increments when `claim()` SUCCEEDS, and the
+                            // frontier chunk is claimed ONCE and then sits in flight. `claim()`
+                            // returns false on every subsequent cycle, so the count crawls at
+                            // one per request-timeout instead of one per loop — minutes to
+                            // reach six, against an operator restarting every fifteen seconds.
+                            // Asking "how many times did we ASK" was the wrong evidence twice
+                            // over; what matters is that we asked at all and were never
+                            // answered.
+                            //
+                            // The sufficient proof needs three facts and no counting of
+                            // requests:
+                            //   * we are PARKED (no contiguous advance for 20 s),
+                            //   * not one response has ever carried the stuck height, and
+                            //   * the peers are demonstrably alive and serving other ranges.
+                            // A slow peer fails the second condition as soon as it answers; a
+                            // dead mesh fails the third. Only a servable-floor above our
+                            // frontier satisfies all three.
                             const UNSERVABLE_HIGHER: u32 = 6;
                             let proven_unservable = !recent_only_rt.load(Ordering::Relaxed)
-                                && frontier_reqs_since_advance >= UNSERVABLE_REQS
+                                && frontier_reqs_since_advance >= 1
                                 && higher_serves_since_advance >= UNSERVABLE_HIGHER
                                 && frontier_covering_serves == 0
                                 && last_advance_t.elapsed() >= Duration::from_secs(20);

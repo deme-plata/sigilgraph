@@ -122,30 +122,24 @@ fn idx_seek_offset(dir: &Path, from_height: u64) -> Option<u64> {
 
 /// Pull `header.height` out of a record's leading bytes without a full parse.
 ///
-/// Returns `None` on any doubt — in particular when the digit run reaches the
-/// end of the probe window, since a truncated height would read as a smaller
-/// number and could wrongly skip a record the caller asked for.
+/// 2026-08-27: this had its own implementation that searched the record bytes for the
+/// literal ASCII key `"height":`. Records have not been raw JSON for a long time — the
+/// on-disk format is `[MAGIC][VERSION][height: u64 LE][zstd(MessagePack(Block))]`, so that
+/// string does not occur anywhere in the log (`grep -c '"height":'` over 20 MB of a live
+/// chain.log: ZERO). The probe therefore returned `None` for every record, and the
+/// header-only parse below it was `serde_json::from_slice`, which fails on compressed
+/// bytes for the same reason.
+///
+/// The consequence was total and silent: EVERY range below the producer's RAM window was
+/// served as an empty response — `got=0 h=[0..0] bytes=18` — while the blocks sat
+/// perfectly readable on disk. A full-archive client asking for early history got nothing,
+/// forever, from a node that held every block. Live: 28 of 38 requests empty, 3% carrying
+/// data, a client parked at h=30,250 against a chain at 127,000.
+///
+/// `chain_log` already had the correct probe, handling both the current binary framing and
+/// the legacy JSON form. This now delegates to it. One record format, one reader.
 fn probe_height(bytes: &[u8]) -> Option<u64> {
-    const KEY: &[u8] = b"\"height\":";
-    let window = &bytes[..bytes.len().min(PROBE_WINDOW)];
-    let at = window.windows(KEY.len()).position(|w| w == KEY)? + KEY.len();
-    let mut val: u64 = 0;
-    let mut any = false;
-    let mut terminated = false;
-    for &c in &window[at..] {
-        if c.is_ascii_digit() {
-            val = val.checked_mul(10)?.checked_add((c - b'0') as u64)?;
-            any = true;
-        } else {
-            terminated = true;
-            break;
-        }
-    }
-    if any && terminated {
-        Some(val)
-    } else {
-        None
-    }
+    crate::chain_log::probe_height(bytes)
 }
 
 /// Read the headers for `[from..=to]` from the chain log on disk.
@@ -200,8 +194,11 @@ pub fn read_headers_range(dir: &Path, from: u64, to: u64) -> Vec<SigilBlockHeade
             }
             buf.extend_from_slice(&rest);
         }
-        match serde_json::from_slice::<HeaderOnly>(&buf) {
-            Ok(rec) => {
+        // Decode through `chain_log`'s single decoder, which understands the compressed
+        // binary framing AND the legacy JSON records. The previous `serde_json::from_slice`
+        // could only ever succeed on the latter — see `probe_height` above.
+        match crate::chain_log::decode_record(&buf).map(|b| HeaderOnly { header: b.header }) {
+            Some(rec) => {
                 // Re-check against the authoritative parsed height: the probe is
                 // an optimisation, never the decision of record.
                 if rec.header.height < from {
@@ -214,7 +211,7 @@ pub fn read_headers_range(dir: &Path, from: u64, to: u64) -> Vec<SigilBlockHeade
             }
             // Malformed record: skip it rather than abandoning the range, same
             // as chain_log's own scans.
-            Err(_) => continue,
+            None => continue,
         }
     }
     out
@@ -339,6 +336,59 @@ mod tests {
             f.write_all(&bytes).unwrap();
         }
         f.flush().unwrap();
+    }
+
+    /// Write records in the format PRODUCTION actually uses.
+    ///
+    /// Every other helper here writes raw JSON, which is the LEGACY form. That is exactly
+    /// why the serve path could return empty for every real range while the suite stayed
+    /// green: the tests exercised a format the writer had stopped producing.
+    fn write_log_v1(dir: &Path, blocks: &[crate::block::Block]) {
+        std::fs::create_dir_all(dir).unwrap();
+        let mut f = File::create(log_path(dir)).unwrap();
+        for b in blocks {
+            let bytes = crate::chain_log::encode_record(b).unwrap();
+            f.write_all(&(bytes.len() as u32).to_le_bytes()).unwrap();
+            f.write_all(&bytes).unwrap();
+        }
+        f.flush().unwrap();
+    }
+
+    /// THE REGRESSION (2026-08-27).
+    ///
+    /// `read_headers_range` probed for the literal ASCII `"height":` and parsed with
+    /// `serde_json`. Records are `[MAGIC][VERSION][height u64 LE][zstd(MessagePack)]`, so
+    /// that string appears NOWHERE in a real log (`grep -c` over 20 MB of a live chain.log:
+    /// zero) and the JSON parse cannot succeed either.
+    ///
+    /// Every range below the producer's RAM window was therefore served as an EMPTY
+    /// response — `got=0 h=[0..0] bytes=18` — while the blocks sat perfectly readable on
+    /// disk. Live: 28 of 38 requests empty, 3% carrying data, a full-archive client parked
+    /// at h=30,250 against a chain at 127,000, for hours, from a node holding every block.
+    #[test]
+    fn reads_records_in_the_production_format_not_just_legacy_json() {
+        let dir = tmpdir("v1-format");
+        let genesis = crate::genesis::build_genesis().expect("genesis");
+        write_log_v1(&dir, std::slice::from_ref(&genesis));
+
+        let got = read_headers_range(&dir, genesis.header.height, genesis.header.height);
+        assert_eq!(
+            got.len(),
+            1,
+            "REGRESSION: the serve path must read the format the writer actually emits — \
+             returning nothing here is what served empty ranges to every client while the \
+             blocks were on disk"
+        );
+        assert_eq!(got[0].height, genesis.header.height);
+
+        // And the probe must agree with the framing rather than hunting for a JSON key.
+        let rec = crate::chain_log::encode_record(&genesis).unwrap();
+        assert_eq!(
+            probe_height(&rec),
+            Some(genesis.header.height),
+            "the height is in the record header in plaintext; it must be read from there"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn tmpdir(tag: &str) -> PathBuf {

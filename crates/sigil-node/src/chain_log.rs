@@ -183,7 +183,12 @@ pub fn decode_record(payload: &[u8]) -> Option<Block> {
 /// For v1 this is exact and O(1) — the height is stored in the record header precisely so
 /// the tail-replay skip path never has to decompress a block it is going to discard. For
 /// legacy JSON it falls back to the byte-scan heuristic, which returns `None` on any doubt.
-fn probe_height(payload: &[u8]) -> Option<u64> {
+/// Height of a record, from its framing, without decompressing the body.
+///
+/// `pub(crate)` as of 2026-08-27 because `serve_read` had its OWN copy that only
+/// understood the legacy JSON form — see that module for what it cost. There is one
+/// record format and there must be one reader of it.
+pub(crate) fn probe_height(payload: &[u8]) -> Option<u64> {
     match payload.first()? {
         &REC_MAGIC if payload.len() >= REC_V1_HEADER && payload[1] == REC_VERSION_V1 => {
             Some(u64::from_le_bytes(payload[2..10].try_into().ok()?))

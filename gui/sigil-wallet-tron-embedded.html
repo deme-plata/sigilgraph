@@ -184,7 +184,8 @@ body.view-desktop .desktop{display:flex}
     <div class="dex-ticker-label"><span>DEX</span><small>markets</small></div>
     <div class="dex-ticker-window"><div class="dex-ticker-track" data-dex-ticker-track><span class="dex-ticker-loading">loading token pairs…</span></div></div>
   </div>
-  <div class="balance"><div class="lab"><span>total balance</span><span class="vbadge"><i data-lucide="badge-check"></i>verified</span></div><div class="amtbig amt" id="amt">0<small>.00000000 SIGIL</small></div><div class="sub">connecting…</div></div>
+  <div class="balance"><div class="lab"><span>total balance</span><span class="vbadge"><i data-lucide="badge-check"></i>verified</span></div><div class="amtbig amt" id="amt">0<small>.00000000 SIGIL</small></div><div class="sub">connecting…</div><div id="shieldRow" style="margin-top:6px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#5a93a8"><span style="color:#8b5cf6">🛡 shielded</span> <b id="shieldBal" style="color:#a78bfa">—</b><span id="shieldNote" style="margin-left:8px;opacity:.75"></span></div></div>
+  <div class="bh-wrap" id="bhWrapPhone" data-bh="1"></div>
   <div id="mineNotice" style="display:none;margin:8px 8px 0;border:1px solid rgba(251,191,36,.32);background:rgba(251,191,36,.06);border-radius:14px;padding:10px 12px;font-family:'JetBrains Mono';font-size:11px;color:var(--gold);line-height:1.5"></div>
   <div style="display:flex;gap:9px;flex-wrap:wrap;justify-content:center;margin:12px 8px 2px;font-family:'JetBrains Mono';font-size:11px">
     <a href="flux://enter" style="color:var(--cyan);text-decoration:none;border:1px solid var(--line);background:rgba(33,212,253,.05);border-radius:999px;padding:5px 13px">＋ new wallet</a>
@@ -196,6 +197,7 @@ body.view-desktop .desktop{display:flex}
     <div class="act" onclick="openReceive()"><i class="lic" data-lucide="arrow-down-to-dot"></i><span class="t">Receive</span></div>
     <div class="act" onclick="openSwap()"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div>
     <div class="act" onclick="openMine()"><i class="lic" data-lucide="pickaxe"></i><span class="t">Mine</span></div>
+    <div class="act" onclick="openBook()"><i class="lic" data-lucide="book-user"></i><span class="t">Book</span></div>
   </div>
   <div class="sect" style="margin:18px 16px 8px"><span>Assets</span><span style="color:var(--cyan)" id="passetsN"></span></div>
   <div class="list" id="passets"></div>
@@ -244,7 +246,7 @@ body.view-desktop .desktop{display:flex}
       <div class="mi" onclick="window.closeProfile();window.openMine&&openMine()"><span class="g"><i class="lic" data-lucide="pickaxe" style="width:15px;height:15px"></i></span>Mine SIGIL</div>
       <div class="mi" onclick="window.closeProfile();window.openReceive&&openReceive()"><span class="g"><i class="lic" data-lucide="arrow-down-to-dot" style="width:15px;height:15px"></i></span>Receive · address</div>
       <div class="sep"></div>
-      <a class="mi" href="https://quillon.xyz/downloads.html" target="_blank" rel="noopener"><span class="g"><i class="lic" data-lucide="arrow-down-left" style="width:15px;height:15px"></i></span>Downloads</a>
+      <a class="mi" href="https://sigilgraph.org/sigil-downloads.html" target="_blank" rel="noopener"><span class="g"><i class="lic" data-lucide="arrow-down-left" style="width:15px;height:15px"></i></span>Downloads</a>
       <div class="mi" onclick="window.closeProfile();window.copyAddr&&copyAddr()"><span class="g"><i class="lic" data-lucide="wallet" style="width:15px;height:15px"></i></span>Copy my address</div>
       <div class="mi" onclick="window.closeProfile();window.openSettings&&openSettings()"><span class="g"><i class="lic" data-lucide="settings" style="width:15px;height:15px"></i></span>Settings</div>
     </div>
@@ -263,6 +265,9 @@ body.view-desktop .desktop{display:flex}
         <a onclick="openSend();return false" style="cursor:pointer"><i class="lic" data-lucide="arrow-up-from-dot"></i>Send</a>
         <a onclick="openReceive();return false" style="cursor:pointer"><i class="lic" data-lucide="arrow-down-to-dot"></i>Receive</a>
         <a onclick="openSwap();return false" style="cursor:pointer"><i class="lic" data-lucide="arrow-left-right"></i>Swap</a>
+        <a onclick="openXChain();return false" style="cursor:pointer"><i class="lic" data-lucide="arrow-right-left"></i>Bridge</a>
+        <a onclick="openBook();return false" style="cursor:pointer"><i class="lic" data-lucide="book-user"></i>Address book</a>
+        <a id="mmNavChip" onclick="xcConnectMM();return false" style="cursor:pointer" title="Connect MetaMask (Polygon)">🦊 <span id="mmNavTxt">Connect MetaMask</span></a>
         <div class="grp">Earn</div>
         <a class="soon" title="staking not live on sigil-g0 yet"><i class="lic" data-lucide="layers"></i>Stake<span class="soonchip">soon</span></a>
         <a onclick="openMine();return false" style="cursor:pointer"><i class="lic" data-lucide="pickaxe"></i>Mine</a>
@@ -285,8 +290,10 @@ body.view-desktop .desktop{display:flex}
           <div class="act" onclick="openReceive()"><i class="lic" data-lucide="arrow-down-to-dot"></i><span class="t">Receive</span></div>
           <div class="act" onclick="openSwap()"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div>
           <div class="act" onclick="openMine()"><i class="lic" data-lucide="pickaxe"></i><span class="t">Mine</span></div>
+          <div class="act" onclick="openBook()"><i class="lic" data-lucide="book-user"></i><span class="t">Book</span></div>
         </div>
       </div>
+      <div class="bh-wrap" id="bhWrapDesk" data-bh="1"></div>
       <div class="dgrid">
         <div class="card">
           <div class="sect" style="margin-bottom:12px"><span>Assets</span><span style="color:var(--cyan)" id="dassetsN"></span></div>
@@ -504,9 +511,11 @@ body.view-desktop .desktop{display:flex}
       }catch(e){}
       window.PREV_RAW=mb;
       SIGIL_RAW=mb; window.SIGIL_RAW=SIGIL_RAW; SIGIL_BAL=Number(BigInt(SIGIL_RAW)/100000000n);
+      try{ if(window.bhSample) window.bhSample(mb); }catch(e){}
     }
     if(MINE_ADDR && MINE_ADDR!==ADDR){ const sb=await fetchBal(ADDR); if(sb!=null) SESSION_RAW=sb; }
     render();
+    refreshShielded();
   }
   // LANE-AC: green flash + floating "+X.XX SIGIL ⛏ coinbase" on balance raise.
   function coinFlash(deltaRaw){
@@ -563,6 +572,38 @@ body.view-desktop .desktop{display:flex}
     const txt='H '+BLOCK_H.toLocaleString('en-US');
     document.querySelectorAll('[data-blockcount]').forEach(el=>el.textContent=txt);
   }
+  // ── shielded balance ────────────────────────────────────────────────────
+  // Mining rewards for a REGISTERED wallet mint as shielded notes, not as a
+  // transparent balance, so /v1/balance reads 0 forever while you genuinely earn
+  // (operator-reported, 2026-08-26). The only way to a real number is to open the
+  // notes: derive the delivery identity from the seed, trial-decrypt every
+  // ciphertext in the pool, and net out anything whose nullifier is already spent.
+  //
+  // Needs the seed, so it is only possible once the wallet is unlocked. When it is
+  // not, this says so rather than printing a 0 that looks like "you earned nothing".
+  async function refreshShielded(){
+    const el=document.getElementById('shieldBal'), nt=document.getElementById('shieldNote');
+    if(!el) return;
+    const S=window.__sigilShieldScan, M=window.__sigilShield;
+    if(!S||!M){ el.textContent='—'; if(nt) nt.textContent='scanner unavailable'; return; }
+    let mn=window.__sigilMnemonic; if(!mn){ try{ mn=localStorage.getItem('sigil-wallet-mnemonic'); }catch(e){} }
+    if(!mn){ el.textContent='locked'; if(nt) nt.textContent='unlock to view'; return; }
+    let seed; try{ seed=window.sigilDeriveFrom(mn).priv; }catch(e){ el.textContent='—'; return; }
+    try{
+      const r=await S.fetchShieldedBalance(seed, M, '');
+      el.textContent=(Number(r.balance)/1e8).toFixed(8)+' SIGIL';
+      if(nt){
+        // Never present a gross figure as a balance: if spends could not be netted,
+        // say so. A number that can only go up is wrong in the direction that matters.
+        nt.textContent = r.netted
+          ? (r.notes.length+' note'+(r.notes.length===1?'':'s'))
+          : '⚠ gross — spends not netted';
+        nt.style.color = r.netted ? '' : '#fbbf24';
+      }
+    }catch(e){ el.textContent='—'; if(nt) nt.textContent='scan failed'; }
+  }
+  window.refreshShielded=refreshShielded;
+
   window.refresh=refresh;
 
   window.setView=setView;
@@ -623,6 +664,29 @@ window.lucide={createIcons:render};render();})();</script>
 @noble/hashes/esm/utils.js:
   (*! noble-hashes - MIT License (c) 2022 Paul Miller (paulmillr.com) *)
 */</script>
+<!-- v7.1.96: shielded-note scanner, VENDORED inline for the same reason the signer above is:
+     operator networks with app-level HTTPS filtering block CDN imports, and a wallet that
+     cannot compute its own balance offline is not a wallet. Bundles X25519 +
+     ChaCha20-Poly1305 + BLAKE3 (derive_key) and exposes window.__sigilShieldScan.
+     Verified against a Rust-produced sealed note (gui/sigil-wallet/verify.mjs). -->
+<script>(()=>{function Rr(e){return e instanceof Uint8Array||ArrayBuffer.isView(e)&&e.constructor.name==="Uint8Array"}function Vt(e){if(!Number.isSafeInteger(e)||e<0)throw new Error("positive integer expected, got "+e)}function Lt(e,...t){if(!Rr(e))throw new Error("Uint8Array expected");if(t.length>0&&!t.includes(e.length))throw new Error("Uint8Array expected of length "+t+", got length="+e.length)}function jt(e,t=!0){if(e.destroyed)throw new Error("Hash instance has been destroyed");if(t&&e.finished)throw new Error("Hash#digest() has already been called")}function Qt(e,t){Lt(e);let n=t.outputLen;if(e.length<n)throw new Error("digestInto() expects output buffer of length at least "+n)}function pn(e){return new Uint8Array(e.buffer,e.byteOffset,e.byteLength)}function Ut(e){return new Uint32Array(e.buffer,e.byteOffset,Math.floor(e.byteLength/4))}function Ht(...e){for(let t=0;t<e.length;t++)e[t].fill(0)}function qt(e,t){return e<<32-t|e>>>t}var xn=new Uint8Array(new Uint32Array([287454020]).buffer)[0]===68;function bn(e){return e<<24&4278190080|e<<8&16711680|e>>>8&65280|e>>>24&255}var yn=xn?e=>e:e=>bn(e);function Ur(e){for(let t=0;t<e.length;t++)e[t]=bn(e[t]);return e}var G=xn?e=>e:Ur;function Hr(e){if(typeof e!="string")throw new Error("string expected");return new Uint8Array(new TextEncoder().encode(e))}function Ft(e){return typeof e=="string"&&(e=Hr(e)),Lt(e),e}var Wt=class{};function gn(e){let t=(r,o)=>e(o).update(Ft(r)).digest(),n=e({});return t.outputLen=n.outputLen,t.blockLen=n.blockLen,t.create=r=>e(r),t}var wn=Uint32Array.from([1779033703,3144134277,1013904242,2773480762,1359893119,2600822924,528734635,1541459225]);var Jt=BigInt(4294967295),mn=BigInt(32);function Ee(e,t=!1){return t?{h:Number(e&Jt),l:Number(e>>mn&Jt)}:{h:Number(e>>mn&Jt)|0,l:Number(e&Jt)|0}}function at(e,t,n,r,o){return e=e+t+o|0,r=qt(r^e,16),n=n+r|0,t=qt(t^n,12),{a:e,b:t,c:n,d:r}}function ut(e,t,n,r,o){return e=e+t+o|0,r=qt(r^e,8),n=n+r|0,t=qt(t^n,7),{a:e,b:t,c:n,d:r}}var te=class extends Wt{constructor(t,n){super(),this.finished=!1,this.destroyed=!1,this.length=0,this.pos=0,Vt(t),Vt(n),this.blockLen=t,this.outputLen=n,this.buffer=new Uint8Array(t),this.buffer32=Ut(this.buffer)}update(t){jt(this),t=Ft(t),Lt(t);let{blockLen:n,buffer:r,buffer32:o}=this,s=t.length,i=t.byteOffset,c=t.buffer;for(let a=0;a<s;){this.pos===n&&(G(o),this.compress(o,0,!1),G(o),this.pos=0);let f=Math.min(n-this.pos,s-a),u=i+a;if(f===n&&!(u%4)&&a+f<s){let l=new Uint32Array(c,u,Math.floor((s-a)/4));G(l);for(let x=0;a+n<s;x+=o.length,a+=n)this.length+=n,this.compress(l,x,!1);G(l);continue}r.set(t.subarray(a,a+f),this.pos),this.pos+=f,this.length+=f,a+=f}return this}digestInto(t){jt(this),Qt(t,this);let{pos:n,buffer32:r}=this;this.finished=!0,Ht(this.buffer.subarray(n)),G(r),this.compress(r,0,!0),G(r);let o=Ut(t);this.get().forEach((s,i)=>o[i]=yn(s))}digest(){let{buffer:t,outputLen:n}=this;this.digestInto(t);let r=t.slice(0,n);return this.destroy(),r}_cloneInto(t){let{buffer:n,length:r,finished:o,destroyed:s,outputLen:i,pos:c}=this;return t||(t=new this.constructor({dkLen:i})),t.set(...this.get()),t.buffer.set(n),t.destroyed=s,t.finished=o,t.length=r,t.pos=c,t.outputLen=i,t}clone(){return this._cloneInto()}};function Be(e,t,n,r,o,s,i,c,a,f,u,l,x,d,b,y,h,p,g,w){let E=0;for(let L=0;L<r;L++)({a:o,b:a,c:x,d:h}=at(o,a,x,h,n[t+e[E++]])),{a:o,b:a,c:x,d:h}=ut(o,a,x,h,n[t+e[E++]]),{a:s,b:f,c:d,d:p}=at(s,f,d,p,n[t+e[E++]]),{a:s,b:f,c:d,d:p}=ut(s,f,d,p,n[t+e[E++]]),{a:i,b:u,c:b,d:g}=at(i,u,b,g,n[t+e[E++]]),{a:i,b:u,c:b,d:g}=ut(i,u,b,g,n[t+e[E++]]),{a:c,b:l,c:y,d:w}=at(c,l,y,w,n[t+e[E++]]),{a:c,b:l,c:y,d:w}=ut(c,l,y,w,n[t+e[E++]]),{a:o,b:f,c:b,d:w}=at(o,f,b,w,n[t+e[E++]]),{a:o,b:f,c:b,d:w}=ut(o,f,b,w,n[t+e[E++]]),{a:s,b:u,c:y,d:h}=at(s,u,y,h,n[t+e[E++]]),{a:s,b:u,c:y,d:h}=ut(s,u,y,h,n[t+e[E++]]),{a:i,b:l,c:x,d:p}=at(i,l,x,p,n[t+e[E++]]),{a:i,b:l,c:x,d:p}=ut(i,l,x,p,n[t+e[E++]]),{a:c,b:a,c:d,d:g}=at(c,a,d,g,n[t+e[E++]]),{a:c,b:a,c:d,d:g}=ut(c,a,d,g,n[t+e[E++]]);return{v0:o,v1:s,v2:i,v3:c,v4:a,v5:f,v6:u,v7:l,v8:x,v9:d,v10:b,v11:y,v12:h,v13:p,v14:g,v15:w}}var rt={CHUNK_START:1,CHUNK_END:2,PARENT:4,ROOT:8,KEYED_HASH:16,DERIVE_KEY_CONTEXT:32,DERIVE_KEY_MATERIAL:64},ht=wn.slice(),En=(()=>{let e=Array.from({length:16},(r,o)=>o),t=r=>[2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8].map(o=>r[o]),n=[];for(let r=0,o=e;r<7;r++,o=t(o))n.push(...o);return Uint8Array.from(n)})(),_e=class e extends te{constructor(t={},n=0){super(64,t.dkLen===void 0?32:t.dkLen),this.chunkPos=0,this.chunksDone=0,this.flags=0,this.stack=[],this.posOut=0,this.bufferOut32=new Uint32Array(16),this.chunkOut=0,this.enableXOF=!0;let{key:r,context:o}=t,s=o!==void 0;if(r!==void 0){if(s)throw new Error('Only "key" or "context" can be specified at same time');let i=Ft(r).slice();Lt(i,32),this.IV=Ut(i),G(this.IV),this.flags=n|rt.KEYED_HASH}else if(s){let i=Ft(o),c=new e({dkLen:32},rt.DERIVE_KEY_CONTEXT).update(i).digest();this.IV=Ut(c),G(this.IV),this.flags=n|rt.DERIVE_KEY_MATERIAL}else this.IV=ht.slice(),this.flags=n;this.state=this.IV.slice(),this.bufferOut=pn(this.bufferOut32)}get(){return[]}set(){}b2Compress(t,n,r,o=0){let{state:s,pos:i}=this,{h:c,l:a}=Ee(BigInt(t),!0),{v0:f,v1:u,v2:l,v3:x,v4:d,v5:b,v6:y,v7:h,v8:p,v9:g,v10:w,v11:E,v12:L,v13:v,v14:S,v15:O}=Be(En,o,r,7,s[0],s[1],s[2],s[3],s[4],s[5],s[6],s[7],ht[0],ht[1],ht[2],ht[3],c,a,i,n);s[0]=f^p,s[1]=u^g,s[2]=l^w,s[3]=x^E,s[4]=d^L,s[5]=b^v,s[6]=y^S,s[7]=h^O}compress(t,n=0,r=!1){let o=this.flags;if(this.chunkPos||(o|=rt.CHUNK_START),(this.chunkPos===15||r)&&(o|=rt.CHUNK_END),r||(this.pos=this.blockLen),this.b2Compress(this.chunksDone,o,t,n),this.chunkPos+=1,this.chunkPos===16||r){let s=this.state;this.state=this.IV.slice();for(let i,c=this.chunksDone+1;(r||!(c&1))&&(i=this.stack.pop());c>>=1)this.buffer32.set(i,0),this.buffer32.set(s,8),this.pos=this.blockLen,this.b2Compress(0,this.flags|rt.PARENT,this.buffer32,0),s=this.state,this.state=this.IV.slice();this.chunksDone++,this.chunkPos=0,this.stack.push(s)}this.pos=0}_cloneInto(t){t=super._cloneInto(t);let{IV:n,flags:r,state:o,chunkPos:s,posOut:i,chunkOut:c,stack:a,chunksDone:f}=this;return t.state.set(o.slice()),t.stack=a.map(u=>Uint32Array.from(u)),t.IV.set(n),t.flags=r,t.chunkPos=s,t.chunksDone=f,t.posOut=i,t.chunkOut=c,t.enableXOF=this.enableXOF,t.bufferOut32.set(this.bufferOut32),t}destroy(){this.destroyed=!0,Ht(this.state,this.buffer32,this.IV,this.bufferOut32),Ht(...this.stack)}b2CompressOut(){let{state:t,pos:n,flags:r,buffer32:o,bufferOut32:s}=this,{h:i,l:c}=Ee(BigInt(this.chunkOut++));G(o);let{v0:a,v1:f,v2:u,v3:l,v4:x,v5:d,v6:b,v7:y,v8:h,v9:p,v10:g,v11:w,v12:E,v13:L,v14:v,v15:S}=Be(En,0,o,7,t[0],t[1],t[2],t[3],t[4],t[5],t[6],t[7],ht[0],ht[1],ht[2],ht[3],c,i,n,r);s[0]=a^h,s[1]=f^p,s[2]=u^g,s[3]=l^w,s[4]=x^E,s[5]=d^L,s[6]=b^v,s[7]=y^S,s[8]=t[0]^h,s[9]=t[1]^p,s[10]=t[2]^g,s[11]=t[3]^w,s[12]=t[4]^E,s[13]=t[5]^L,s[14]=t[6]^v,s[15]=t[7]^S,G(o),G(s),this.posOut=0}finish(){if(this.finished)return;this.finished=!0,Ht(this.buffer.subarray(this.pos));let t=this.flags|rt.ROOT;this.stack.length?(t|=rt.PARENT,G(this.buffer32),this.compress(this.buffer32,0,!0),G(this.buffer32),this.chunksDone=0,this.pos=this.blockLen):t|=(this.chunkPos?0:rt.CHUNK_START)|rt.CHUNK_END,this.flags=t,this.b2CompressOut()}writeInto(t){jt(this,!1),Lt(t),this.finish();let{blockLen:n,bufferOut:r}=this;for(let o=0,s=t.length;o<s;){this.posOut>=n&&this.b2CompressOut();let i=Math.min(n-this.posOut,s-o);t.set(r.subarray(this.posOut,this.posOut+i),o),this.posOut+=i,o+=i}return t}xofInto(t){if(!this.enableXOF)throw new Error("XOF is not possible after digest call");return this.writeInto(t)}xof(t){return Vt(t),this.xofInto(new Uint8Array(t))}digestInto(t){if(Qt(t,this),this.finished)throw new Error("digest() was already called");return this.enableXOF=!1,this.writeInto(t),this.destroy(),t}digest(){return this.digestInto(new Uint8Array(this.outputLen))}},ee=gn(e=>new _e(e));function Ae(e){return e instanceof Uint8Array||ArrayBuffer.isView(e)&&e.constructor.name==="Uint8Array"&&"BYTES_PER_ELEMENT"in e&&e.BYTES_PER_ELEMENT===1}function ne(e,t=""){if(typeof e!="number"){let n=t&&`"${t}" `;throw new TypeError(`${n}expected number, got ${typeof e}`)}if(!Number.isSafeInteger(e)||e<0){let n=t&&`"${t}" `;throw new RangeError(`${n}expected integer >= 0, got ${e}`)}}function W(e,t,n=""){let r=Ae(e),o=e?.length,s=t!==void 0;if(!r||s&&o!==t){let i=n&&`"${n}" `,c=s?` of length ${t}`:"",a=r?`length=${o}`:`type=${typeof e}`,f=i+"expected Uint8Array"+c+", got "+a;throw r?new RangeError(f):new TypeError(f)}return e}function Le(e,t=!0){if(e.destroyed)throw new Error("Hash instance has been destroyed");if(t&&e.finished)throw new Error("Hash#digest() has already been called")}function _n(e,t){W(e,void 0,"digestInto() output");let n=t.outputLen;if(e.length<n)throw new RangeError('"digestInto() output" expected to be of length >='+n)}function Zt(...e){for(let t=0;t<e.length;t++)e[t].fill(0)}function re(e){return new DataView(e.buffer,e.byteOffset,e.byteLength)}var An=typeof Uint8Array.from([]).toHex=="function"&&typeof Uint8Array.fromHex=="function",Fr=Array.from({length:256},(e,t)=>t.toString(16).padStart(2,"0"));function oe(e){if(W(e),An)return e.toHex();let t="";for(let n=0;n<e.length;n++)t+=Fr[e[n]];return t}var lt={_0:48,_9:57,A:65,F:70,a:97,f:102};function Bn(e){if(e>=lt._0&&e<=lt._9)return e-lt._0;if(e>=lt.A&&e<=lt.F)return e-(lt.A-10);if(e>=lt.a&&e<=lt.f)return e-(lt.a-10)}function zt(e){if(typeof e!="string")throw new TypeError("hex string expected, got "+typeof e);if(An)try{return Uint8Array.fromHex(e)}catch(o){throw o instanceof SyntaxError?new RangeError(o.message):o}let t=e.length,n=t/2;if(t%2)throw new RangeError("hex string expected, got unpadded hex of length "+t);let r=new Uint8Array(n);for(let o=0,s=0;o<n;o++,s+=2){let i=Bn(e.charCodeAt(s)),c=Bn(e.charCodeAt(s+1));if(i===void 0||c===void 0){let a=e[s]+e[s+1];throw new RangeError('hex string expected, got non-hex character "'+a+'" at index '+s)}r[o]=i*16+c}return r}function Se(...e){let t=0;for(let r=0;r<e.length;r++){let o=e[r];W(o),t+=o.length}let n=new Uint8Array(t);for(let r=0,o=0;r<e.length;r++){let s=e[r];n.set(s,o),o+=s.length}return n}function Ln(e,t={}){let n=(o,s)=>e(s).update(o).digest(),r=e(void 0);return n.outputLen=r.outputLen,n.blockLen=r.blockLen,n.canXOF=r.canXOF,n.create=o=>e(o),Object.assign(n,t),Object.freeze(n)}function Sn(e=32){ne(e,"bytesLength");let t=typeof globalThis=="object"?globalThis.crypto:null;if(typeof t?.getRandomValues!="function")throw new Error("crypto.getRandomValues must be defined");if(e>65536)throw new RangeError(`"bytesLength" expected <= 65536, got ${e}`);return t.getRandomValues(new Uint8Array(e))}var On=e=>({oid:Uint8Array.from([6,9,96,134,72,1,101,3,4,2,e])});var se=class{blockLen;outputLen;canXOF=!1;padOffset;isLE;buffer;view;finished=!1;length=0;pos=0;destroyed=!1;constructor(t,n,r,o){this.blockLen=t,this.outputLen=n,this.padOffset=r,this.isLE=o,this.buffer=new Uint8Array(t),this.view=re(this.buffer)}update(t){Le(this),W(t);let{view:n,buffer:r,blockLen:o}=this,s=t.length;for(let i=0;i<s;){let c=Math.min(o-this.pos,s-i);if(c===o){let a=re(t);for(;o<=s-i;i+=o)this.process(a,i);continue}r.set(t.subarray(i,i+c),this.pos),this.pos+=c,i+=c,this.pos===o&&(this.process(n,0),this.pos=0)}return this.length+=t.length,this.roundClean(),this}digestInto(t){Le(this),_n(t,this),this.finished=!0;let{buffer:n,view:r,blockLen:o,isLE:s}=this,{pos:i}=this;n[i++]=128,Zt(this.buffer.subarray(i)),this.padOffset>o-i&&(this.process(r,0),i=0);for(let l=i;l<o;l++)n[l]=0;r.setBigUint64(o-8,BigInt(this.length*8),s),this.process(r,0);let c=re(t),a=this.outputLen;if(a%4)throw new Error("_sha2: outputLen must be aligned to 32bit");let f=a/4,u=this.get();if(f>u.length)throw new Error("_sha2: outputLen bigger than state");for(let l=0;l<f;l++)c.setUint32(4*l,u[l],s)}digest(){let{buffer:t,outputLen:n}=this;this.digestInto(t);let r=t.slice(0,n);return this.destroy(),r}_cloneInto(t){t||=new this.constructor,t.set(...this.get());let{blockLen:n,buffer:r,length:o,finished:s,destroyed:i,pos:c}=this;return t.destroyed=i,t.finished=s,t.length=o,t.pos=c,o%n&&t.buffer.set(r),t}clone(){return this._cloneInto()}};var Z=Uint32Array.from([1779033703,4089235720,3144134277,2227873595,1013904242,4271175723,2773480762,1595750129,1359893119,2917565137,2600822924,725511199,528734635,4215389547,1541459225,327033209]);var ie=BigInt(4294967295),In=BigInt(32);function kr(e,t=!1){return t?{h:Number(e&ie),l:Number(e>>In&ie)}:{h:Number(e>>In&ie)|0,l:Number(e&ie)|0}}function vn(e,t=!1){let n=e.length,r=new Uint32Array(n),o=new Uint32Array(n);for(let s=0;s<n;s++){let{h:i,l:c}=kr(e[s],t);[r[s],o[s]]=[i,c]}return[r,o]}var Oe=(e,t,n)=>e>>>n,Ie=(e,t,n)=>e<<32-n|t>>>n,St=(e,t,n)=>e>>>n|t<<32-n,Ot=(e,t,n)=>e<<32-n|t>>>n,Xt=(e,t,n)=>e<<64-n|t>>>n-32,Gt=(e,t,n)=>e>>>n-32|t<<64-n;function ot(e,t,n,r){let o=(t>>>0)+(r>>>0);return{h:e+n+(o/2**32|0)|0,l:o|0}}var Tn=(e,t,n)=>(e>>>0)+(t>>>0)+(n>>>0),Rn=(e,t,n,r)=>t+n+r+(e/2**32|0)|0,Un=(e,t,n,r)=>(e>>>0)+(t>>>0)+(n>>>0)+(r>>>0),Hn=(e,t,n,r,o)=>t+n+r+o+(e/2**32|0)|0,Fn=(e,t,n,r,o)=>(e>>>0)+(t>>>0)+(n>>>0)+(r>>>0)+(o>>>0),kn=(e,t,n,r,o,s)=>t+n+r+o+s+(e/2**32|0)|0;var Nn=vn(["0x428a2f98d728ae22","0x7137449123ef65cd","0xb5c0fbcfec4d3b2f","0xe9b5dba58189dbbc","0x3956c25bf348b538","0x59f111f1b605d019","0x923f82a4af194f9b","0xab1c5ed5da6d8118","0xd807aa98a3030242","0x12835b0145706fbe","0x243185be4ee4b28c","0x550c7dc3d5ffb4e2","0x72be5d74f27b896f","0x80deb1fe3b1696b1","0x9bdc06a725c71235","0xc19bf174cf692694","0xe49b69c19ef14ad2","0xefbe4786384f25e3","0x0fc19dc68b8cd5b5","0x240ca1cc77ac9c65","0x2de92c6f592b0275","0x4a7484aa6ea6e483","0x5cb0a9dcbd41fbd4","0x76f988da831153b5","0x983e5152ee66dfab","0xa831c66d2db43210","0xb00327c898fb213f","0xbf597fc7beef0ee4","0xc6e00bf33da88fc2","0xd5a79147930aa725","0x06ca6351e003826f","0x142929670a0e6e70","0x27b70a8546d22ffc","0x2e1b21385c26c926","0x4d2c6dfc5ac42aed","0x53380d139d95b3df","0x650a73548baf63de","0x766a0abb3c77b2a8","0x81c2c92e47edaee6","0x92722c851482353b","0xa2bfe8a14cf10364","0xa81a664bbc423001","0xc24b8b70d0f89791","0xc76c51a30654be30","0xd192e819d6ef5218","0xd69906245565a910","0xf40e35855771202a","0x106aa07032bbd1b8","0x19a4c116b8d2d0c8","0x1e376c085141ab53","0x2748774cdf8eeb99","0x34b0bcb5e19b48a8","0x391c0cb3c5c95a63","0x4ed8aa4ae3418acb","0x5b9cca4f7763e373","0x682e6ff3d6b2b8a3","0x748f82ee5defb2fc","0x78a5636f43172f60","0x84c87814a1f0ab72","0x8cc702081a6439ec","0x90befffa23631e28","0xa4506cebde82bde9","0xbef9a3f7b2c67915","0xc67178f2e372532b","0xca273eceea26619c","0xd186b8c721c0c207","0xeada7dd6cde0eb1e","0xf57d4f7fee6ed178","0x06f067aa72176fba","0x0a637dc5a2c898a6","0x113f9804bef90dae","0x1b710b35131c471b","0x28db77f523047d84","0x32caab7b40c72493","0x3c9ebe0a15c9bebc","0x431d67c49c100d4c","0x4cc5d4becb3e42b6","0x597f299cfc657e2a","0x5fcb6fab3ad6faec","0x6c44198c4a475817"].map(e=>BigInt(e))),Dr=Nn[0],Cr=Nn[1],bt=new Uint32Array(80),yt=new Uint32Array(80),ve=class extends se{constructor(t){super(128,t,16,!1)}get(){let{Ah:t,Al:n,Bh:r,Bl:o,Ch:s,Cl:i,Dh:c,Dl:a,Eh:f,El:u,Fh:l,Fl:x,Gh:d,Gl:b,Hh:y,Hl:h}=this;return[t,n,r,o,s,i,c,a,f,u,l,x,d,b,y,h]}set(t,n,r,o,s,i,c,a,f,u,l,x,d,b,y,h){this.Ah=t|0,this.Al=n|0,this.Bh=r|0,this.Bl=o|0,this.Ch=s|0,this.Cl=i|0,this.Dh=c|0,this.Dl=a|0,this.Eh=f|0,this.El=u|0,this.Fh=l|0,this.Fl=x|0,this.Gh=d|0,this.Gl=b|0,this.Hh=y|0,this.Hl=h|0}process(t,n){for(let w=0;w<16;w++,n+=4)bt[w]=t.getUint32(n),yt[w]=t.getUint32(n+=4);for(let w=16;w<80;w++){let E=bt[w-15]|0,L=yt[w-15]|0,v=St(E,L,1)^St(E,L,8)^Oe(E,L,7),S=Ot(E,L,1)^Ot(E,L,8)^Ie(E,L,7),O=bt[w-2]|0,_=yt[w-2]|0,T=St(O,_,19)^Xt(O,_,61)^Oe(O,_,6),R=Ot(O,_,19)^Gt(O,_,61)^Ie(O,_,6),U=Un(S,R,yt[w-7],yt[w-16]),I=Hn(U,v,T,bt[w-7],bt[w-16]);bt[w]=I|0,yt[w]=U|0}let{Ah:r,Al:o,Bh:s,Bl:i,Ch:c,Cl:a,Dh:f,Dl:u,Eh:l,El:x,Fh:d,Fl:b,Gh:y,Gl:h,Hh:p,Hl:g}=this;for(let w=0;w<80;w++){let E=St(l,x,14)^St(l,x,18)^Xt(l,x,41),L=Ot(l,x,14)^Ot(l,x,18)^Gt(l,x,41),v=l&d^~l&y,S=x&b^~x&h,O=Fn(g,L,S,Cr[w],yt[w]),_=kn(O,p,E,v,Dr[w],bt[w]),T=O|0,R=St(r,o,28)^Xt(r,o,34)^Xt(r,o,39),U=Ot(r,o,28)^Gt(r,o,34)^Gt(r,o,39),I=r&s^r&c^s&c,B=o&i^o&a^i&a;p=y|0,g=h|0,y=d|0,h=b|0,d=l|0,b=x|0,{h:l,l:x}=ot(f|0,u|0,_|0,T|0),f=c|0,u=a|0,c=s|0,a=i|0,s=r|0,i=o|0;let A=Tn(T,U,B);r=Rn(A,_,R,I),o=A|0}({h:r,l:o}=ot(this.Ah|0,this.Al|0,r|0,o|0)),{h:s,l:i}=ot(this.Bh|0,this.Bl|0,s|0,i|0),{h:c,l:a}=ot(this.Ch|0,this.Cl|0,c|0,a|0),{h:f,l:u}=ot(this.Dh|0,this.Dl|0,f|0,u|0),{h:l,l:x}=ot(this.Eh|0,this.El|0,l|0,x|0),{h:d,l:b}=ot(this.Fh|0,this.Fl|0,d|0,b|0),{h:y,l:h}=ot(this.Gh|0,this.Gl|0,y|0,h|0),{h:p,l:g}=ot(this.Hh|0,this.Hl|0,p|0,g|0),this.set(r,o,s,i,c,a,f,u,l,x,d,b,y,h,p,g)}roundClean(){Zt(bt,yt)}destroy(){this.destroyed=!0,Zt(this.buffer),this.set(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)}},Te=class extends ve{Ah=Z[0]|0;Al=Z[1]|0;Bh=Z[2]|0;Bl=Z[3]|0;Ch=Z[4]|0;Cl=Z[5]|0;Dh=Z[6]|0;Dl=Z[7]|0;Eh=Z[8]|0;El=Z[9]|0;Fh=Z[10]|0;Fl=Z[11]|0;Gh=Z[12]|0;Gl=Z[13]|0;Hh=Z[14]|0;Hl=Z[15]|0;constructor(){super(64)}};var Re=Ln(()=>new Te,On(3));var Y=(e,t,n)=>W(e,t,n),He=ne,Fe=oe,gt=(...e)=>Se(...e),Dn=e=>zt(e),ke=Ae,Ne=e=>Sn(e),fe=BigInt(0),Ue=BigInt(1);function ae(e,t=""){if(typeof e!="boolean"){let n=t&&`"${t}" `;throw new TypeError(n+"expected boolean, got type="+typeof e)}return e}function Mr(e){if(typeof e=="bigint"){if(!ce(e))throw new RangeError("positive bigint expected, got "+e)}else He(e);return e}function wt(e,t=""){if(typeof e!="number"){let n=t&&`"${t}" `;throw new TypeError(n+"expected number, got type="+typeof e)}if(!Number.isSafeInteger(e)){let n=t&&`"${t}" `;throw new RangeError(n+"expected safe integer, got "+e)}}function Cn(e){if(typeof e!="string")throw new TypeError("hex string expected, got "+typeof e);return e===""?fe:BigInt("0x"+e)}function De(e){return Cn(oe(e))}function st(e){return Cn(oe(mt(W(e)).reverse()))}function Ce(e,t){if(ne(t),t===0)throw new RangeError("zero length");e=Mr(e);let n=e.toString(16);if(n.length>t*2)throw new RangeError("number too large");return zt(n.padStart(t*2,"0"))}function ue(e,t){return Ce(e,t).reverse()}function Mn(e,t){if(e=Y(e),t=Y(t),e.length!==t.length)return!1;let n=0;for(let r=0;r<e.length;r++)n|=e[r]^t[r];return n===0}function mt(e){return Uint8Array.from(Y(e))}function he(e){if(typeof e!="string")throw new TypeError("ascii string expected, got "+typeof e);return Uint8Array.from(e,(t,n)=>{let r=t.charCodeAt(0);if(t.length!==1||r>127)throw new RangeError(`string contains non-ASCII character "${e[n]}" with code ${r} at position ${n}`);return r})}var ce=e=>typeof e=="bigint"&&fe<=e;function Vr(e,t,n){return ce(e)&&ce(t)&&ce(n)&&t<=e&&e<n}function kt(e,t,n,r){if(!Vr(t,n,r))throw new RangeError("expected valid "+e+": "+n+" <= n < "+r+", got "+t)}function Me(e){if(e<fe)throw new Error("expected non-negative bigint, got "+e);let t;for(t=0;e>fe;e>>=Ue,t+=1);return t}var Vn=e=>(Ue<<BigInt(e))-Ue;function Et(e,t={},n={}){if(Object.prototype.toString.call(e)!=="[object Object]")throw new TypeError("expected valid options object");function r(s,i,c){if(!c&&i!=="function"&&!Object.hasOwn(e,s))throw new TypeError(`param "${s}" is invalid: expected own property`);let a=e[s];if(c&&a===void 0)return;let f=typeof a;if(f!==i||a===null)throw new TypeError(`param "${s}" is invalid: expected ${i}, got ${f}`)}let o=(s,i)=>Object.entries(s).forEach(([c,a])=>r(c,a,i));o(t,!1),o(n,!0)}var Ve=()=>{throw new Error("not implemented")};var z=BigInt(0),q=BigInt(1),It=BigInt(2),zn=BigInt(3),Xn=BigInt(4),Gn=BigInt(5),jr=BigInt(7),Kn=BigInt(8),qr=BigInt(9),Yn=BigInt(16);function V(e,t){if(t<=z)throw new Error("mod: expected positive modulus, got "+t);let n=e%t;return n>=z?n:t+n}function P(e,t,n){if(t<z)throw new Error("pow2: expected non-negative exponent, got "+t);let r=e;for(;t-- >z;)r*=r,r%=n;return r}function jn(e,t){if(e===z)throw new Error("invert: expected non-zero number");if(t<=z)throw new Error("invert: expected positive modulus, got "+t);let n=V(e,t),r=t,o=z,s=q,i=q,c=z;for(;n!==z;){let f=r/n,u=r-n*f,l=o-i*f,x=s-c*f;r=n,n=u,o=i,s=c,i=l,c=x}if(r!==q)throw new Error("invert: does not exist");return V(o,t)}function je(e,t,n){let r=e;if(!r.eql(r.sqr(t),n))throw new Error("Cannot find square root")}function Pn(e,t){let n=e,r=(n.ORDER+q)/Xn,o=n.pow(t,r);return je(n,o,t),o}function Zr(e,t){let n=e,r=(n.ORDER-Gn)/Kn,o=n.mul(t,It),s=n.pow(o,r),i=n.mul(t,s),c=n.mul(n.mul(i,It),s),a=n.mul(i,n.sub(c,n.ONE));return je(n,a,t),a}function zr(e){let t=pe(e),n=$n(e),r=n(t,t.neg(t.ONE)),o=n(t,r),s=n(t,t.neg(r)),i=(e+jr)/Yn;return((c,a)=>{let f=c,u=f.pow(a,i),l=f.mul(u,r),x=f.mul(u,o),d=f.mul(u,s),b=f.eql(f.sqr(l),a),y=f.eql(f.sqr(x),a);u=f.cmov(u,l,b),l=f.cmov(d,x,y);let h=f.eql(f.sqr(l),a),p=f.cmov(u,l,h);return je(f,p,a),p})}function $n(e){if(e<zn)throw new Error("sqrt is not defined for small field");let t=e-q,n=0;for(;t%It===z;)t/=It,n++;let r=It,o=pe(e);for(;qn(o,r)===1;)if(r++>1e3)throw new Error("Cannot find square root: probably non-prime P");if(n===1)return Pn;let s=o.pow(r,t),i=(t+q)/It;return function(a,f){let u=a;if(u.is0(f))return f;if(qn(u,f)!==1)throw new Error("Cannot find square root");let l=n,x=u.mul(u.ONE,s),d=u.pow(f,t),b=u.pow(f,i);for(;!u.eql(d,u.ONE);){if(u.is0(d))return u.ZERO;let y=1,h=u.sqr(d);for(;!u.eql(h,u.ONE);)if(y++,h=u.sqr(h),y===l)throw new Error("Cannot find square root");let p=q<<BigInt(l-y-1),g=u.pow(x,p);l=y,x=u.sqr(g),d=u.mul(d,x),b=u.mul(b,g)}return b}}function Xr(e){return e%Xn===zn?Pn:e%Kn===Gn?Zr:e%Yn===qr?zr(e):$n(e)}var dt=(e,t)=>(V(e,t)&q)===q,Gr=["create","isValid","is0","neg","inv","sqrt","sqr","eql","add","sub","mul","pow","div","addN","subN","mulN","sqrN"];function Wn(e){let t={ORDER:"bigint",BYTES:"number",BITS:"number"},n=Gr.reduce((r,o)=>(r[o]="function",r),t);if(Et(e,n),wt(e.BYTES,"BYTES"),wt(e.BITS,"BITS"),e.BYTES<1||e.BITS<1)throw new Error("invalid field: expected BYTES/BITS > 0");if(e.ORDER<=q)throw new Error("invalid field: expected ORDER > 1, got "+e.ORDER);return e}function Kr(e,t,n){let r=e;if(n<z)throw new Error("invalid exponent, negatives unsupported");if(n===z)return r.ONE;if(n===q)return t;let o=r.ONE,s=t;for(;n>z;)n&q&&(o=r.mul(o,s)),s=r.sqr(s),n>>=q;return o}function de(e,t,n=!1){let r=e,o=new Array(t.length).fill(n?r.ZERO:void 0),s=t.reduce((c,a,f)=>r.is0(a)?c:(o[f]=c,r.mul(c,a)),r.ONE),i=r.inv(s);return t.reduceRight((c,a,f)=>r.is0(a)?c:(o[f]=r.mul(c,o[f]),r.mul(c,a)),i),o}function qn(e,t){let n=e,r=(n.ORDER-q)/It,o=n.pow(t,r),s=n.eql(o,n.ONE),i=n.eql(o,n.ZERO),c=n.eql(o,n.neg(n.ONE));if(!s&&!i&&!c)throw new Error("invalid Legendre symbol result");return s?1:i?0:-1}function Yr(e,t){if(t!==void 0&&He(t),e<=z)throw new Error("invalid n length: expected positive n, got "+e);if(t!==void 0&&t<1)throw new Error("invalid n length: expected positive bit length, got "+t);let n=Me(e);if(t!==void 0&&t<n)throw new Error(`invalid n length: expected bit length (${n}) >= n.length (${t})`);let r=t!==void 0?t:n,o=Math.ceil(r/8);return{nBitLength:r,nByteLength:o}}var Zn=new WeakMap,le=class{ORDER;BITS;BYTES;isLE;ZERO=z;ONE=q;_lengths;_mod;constructor(t,n={}){if(t<=q)throw new Error("invalid field: expected ORDER > 1, got "+t);let r;this.isLE=!1,n!=null&&typeof n=="object"&&(typeof n.BITS=="number"&&(r=n.BITS),typeof n.sqrt=="function"&&Object.defineProperty(this,"sqrt",{value:n.sqrt,enumerable:!0}),typeof n.isLE=="boolean"&&(this.isLE=n.isLE),n.allowedLengths&&(this._lengths=Object.freeze(n.allowedLengths.slice())),typeof n.modFromBytes=="boolean"&&(this._mod=n.modFromBytes));let{nBitLength:o,nByteLength:s}=Yr(t,r);if(s>2048)throw new Error("invalid field: expected ORDER of <= 2048 bytes");this.ORDER=t,this.BITS=o,this.BYTES=s,Object.freeze(this)}create(t){return V(t,this.ORDER)}isValid(t){if(typeof t!="bigint")throw new TypeError("invalid field element: expected bigint, got "+typeof t);return z<=t&&t<this.ORDER}is0(t){return t===z}isValidNot0(t){return!this.is0(t)&&this.isValid(t)}isOdd(t){return(t&q)===q}neg(t){return V(-t,this.ORDER)}eql(t,n){return t===n}sqr(t){return V(t*t,this.ORDER)}add(t,n){return V(t+n,this.ORDER)}sub(t,n){return V(t-n,this.ORDER)}mul(t,n){return V(t*n,this.ORDER)}pow(t,n){return Kr(this,t,n)}div(t,n){return V(t*jn(n,this.ORDER),this.ORDER)}sqrN(t){return t*t}addN(t,n){return t+n}subN(t,n){return t-n}mulN(t,n){return t*n}inv(t){return jn(t,this.ORDER)}sqrt(t){let n=Zn.get(this);return n||Zn.set(this,n=Xr(this.ORDER)),n(this,t)}toBytes(t){return this.isLE?ue(t,this.BYTES):Ce(t,this.BYTES)}fromBytes(t,n=!1){Y(t);let{_lengths:r,BYTES:o,isLE:s,ORDER:i,_mod:c}=this;if(r){if(t.length<1||!r.includes(t.length)||t.length>o)throw new Error("Field.fromBytes: expected "+r+" bytes, got "+t.length);let f=new Uint8Array(o);f.set(t,s?0:f.length-t.length),t=f}if(t.length!==o)throw new Error("Field.fromBytes: expected "+o+" bytes, got "+t.length);let a=s?st(t):De(t);if(c&&(a=V(a,i)),!n&&!this.isValid(a))throw new Error("invalid field element: outside of range 0..ORDER");return a}invertBatch(t){return de(this,t)}cmov(t,n,r){return ae(r,"condition"),r?n:t}};Object.freeze(le.prototype);function pe(e,t={}){return new le(e,t)}var xe=BigInt(0),Xe=BigInt(1);function Qn(e,t){let n=t.negate();return e?n:t}function ye(e,t){let n=de(e.Fp,t.map(r=>r.Z));return t.map((r,o)=>e.fromAffine(r.toAffine(n[o])))}function nr(e,t){if(!Number.isSafeInteger(e)||e<=0||e>t)throw new Error("invalid window size, expected [1.."+t+"], got W="+e)}function qe(e,t){nr(e,t);let n=Math.ceil(t/e)+1,r=2**(e-1),o=2**e,s=Vn(e),i=BigInt(e);return{windows:n,windowSize:r,mask:s,maxNumber:o,shiftBy:i}}function Jn(e,t,n){let{windowSize:r,mask:o,maxNumber:s,shiftBy:i}=n,c=Number(e&o),a=e>>i;c>r&&(c-=s,a+=Xe);let f=t*r,u=f+Math.abs(c)-1,l=c===0,x=c<0,d=t%2!==0;return{nextN:a,offset:u,isZero:l,isNeg:x,isNegF:d,offsetF:f}}var Ze=new WeakMap,rr=new WeakMap;function ze(e){return rr.get(e)||1}function tr(e){if(e!==xe)throw new Error("invalid wNAF")}var be=class{BASE;ZERO;Fn;bits;constructor(t,n){this.BASE=t.BASE,this.ZERO=t.ZERO,this.Fn=t.Fn,this.bits=n}_unsafeLadder(t,n,r=this.ZERO){let o=t;for(;n>xe;)n&Xe&&(r=r.add(o)),o=o.double(),n>>=Xe;return r}precomputeWindow(t,n){let{windows:r,windowSize:o}=qe(n,this.bits),s=[],i=t,c=i;for(let a=0;a<r;a++){c=i,s.push(c);for(let f=1;f<o;f++)c=c.add(i),s.push(c);i=c.double()}return s}wNAF(t,n,r){if(!this.Fn.isValid(r))throw new Error("invalid scalar");let o=this.ZERO,s=this.BASE,i=qe(t,this.bits);for(let c=0;c<i.windows;c++){let{nextN:a,offset:f,isZero:u,isNeg:l,isNegF:x,offsetF:d}=Jn(r,c,i);r=a,u?s=s.add(Qn(x,n[d])):o=o.add(Qn(l,n[f]))}return tr(r),{p:o,f:s}}wNAFUnsafe(t,n,r,o=this.ZERO){let s=qe(t,this.bits);for(let i=0;i<s.windows&&r!==xe;i++){let{nextN:c,offset:a,isZero:f,isNeg:u}=Jn(r,i,s);if(r=c,!f){let l=n[a];o=o.add(u?l.negate():l)}}return tr(r),o}getPrecomputes(t,n,r){let o=Ze.get(n);return o||(o=this.precomputeWindow(n,t),t!==1&&(typeof r=="function"&&(o=r(o)),Ze.set(n,o))),o}cached(t,n,r){let o=ze(t);return this.wNAF(o,this.getPrecomputes(o,t,r),n)}unsafe(t,n,r,o){let s=ze(t);return s===1?this._unsafeLadder(t,n,o):this.wNAFUnsafe(s,this.getPrecomputes(s,t,r),n,o)}createCache(t,n){nr(n,this.bits),rr.set(t,n),Ze.delete(t)}hasCache(t){return ze(t)!==1}};function er(e,t,n){if(t){if(t.ORDER!==e)throw new Error("Field.ORDER must match order: Fp == p, Fn == n");return Wn(t),t}else return pe(e,{isLE:n})}function or(e,t,n={},r){if(r===void 0&&(r=e==="edwards"),!t||typeof t!="object")throw new Error(`expected valid ${e} CURVE object`);for(let a of["p","n","h"]){let f=t[a];if(!(typeof f=="bigint"&&f>xe))throw new Error(`CURVE.${a} must be positive bigint`)}let o=er(t.p,n.Fp,r),s=er(t.n,n.Fn,r),c=["Gx","Gy","a",e==="weierstrass"?"b":"d"];for(let a of c)if(!o.isValid(t[a]))throw new Error(`CURVE.${a} must be valid field element of CURVE.Fp`);return t=Object.freeze(Object.assign({},t)),{CURVE:t,Fp:o,Fn:s}}function Ge(e,t){return function(r){let o=e(r);return{secretKey:o,publicKey:t(o)}}}var Bt=BigInt(0),K=BigInt(1),Ke=BigInt(2),Pr=BigInt(8);function $r(e,t,n,r){let o=e.sqr(n),s=e.sqr(r),i=e.add(e.mul(t.a,o),s),c=e.add(e.ONE,e.mul(t.d,e.mul(o,s)));return e.eql(i,c)}function sr(e,t={}){let n=t,r=or("edwards",e,n,n.FpFnLE),{Fp:o,Fn:s}=r,i=r.CURVE,{h:c}=i;Et(n,{},{uvRatio:"function"});let a=Ke<<BigInt(s.BYTES*8)-K,f=y=>o.create(y),u=n.uvRatio===void 0?(y,h)=>{try{return{isValid:!0,value:o.sqrt(o.div(y,h))}}catch{return{isValid:!1,value:Bt}}}:n.uvRatio;if(!$r(o,i,i.Gx,i.Gy))throw new Error("bad curve params: generator point");function l(y,h,p=!1){let g=p?K:Bt;return kt("coordinate "+y,h,g,a),h}function x(y){if(!(y instanceof d))throw new Error("EdwardsPoint expected")}class d{static BASE=new d(i.Gx,i.Gy,K,f(i.Gx*i.Gy));static ZERO=new d(Bt,K,K,Bt);static Fp=o;static Fn=s;X;Y;Z;T;constructor(h,p,g,w){this.X=l("x",h),this.Y=l("y",p),this.Z=l("z",g,!0),this.T=l("t",w),Object.freeze(this)}static CURVE(){return i}static fromAffine(h){if(h instanceof d)throw new Error("extended point not allowed");let{x:p,y:g}=h||{};return l("x",p),l("y",g),new d(p,g,K,f(p*g))}static fromBytes(h,p=!1){let g=o.BYTES,{a:w,d:E}=i;h=mt(Y(h,g,"point")),ae(p,"zip215");let L=mt(h),v=h[g-1];L[g-1]=v&-129;let S=st(L),O=p?a:o.ORDER;kt("point.y",S,Bt,O);let _=f(S*S),T=f(_-K),R=f(E*_-w),{isValid:U,value:I}=u(T,R);if(!U)throw new Error("bad point: invalid y coordinate");let B=(I&K)===K,A=(v&128)!==0;if(!p&&I===Bt&&A)throw new Error("bad point: x=0 and x_0=1");return A!==B&&(I=f(-I)),d.fromAffine({x:I,y:S})}static fromHex(h,p=!1){return d.fromBytes(Dn(h),p)}get x(){return this.toAffine().x}get y(){return this.toAffine().y}precompute(h=8,p=!0){return b.createCache(this,h),p||this.multiply(Ke),this}assertValidity(){let h=this,{a:p,d:g}=i;if(h.is0())throw new Error("bad point: ZERO");let{X:w,Y:E,Z:L,T:v}=h,S=f(w*w),O=f(E*E),_=f(L*L),T=f(_*_),R=f(S*p),U=f(_*f(R+O)),I=f(T+f(g*f(S*O)));if(U!==I)throw new Error("bad point: equation left != right (1)");let B=f(w*E),A=f(L*v);if(B!==A)throw new Error("bad point: equation left != right (2)")}equals(h){x(h);let{X:p,Y:g,Z:w}=this,{X:E,Y:L,Z:v}=h,S=f(p*v),O=f(E*w),_=f(g*v),T=f(L*w);return S===O&&_===T}is0(){return this.equals(d.ZERO)}negate(){return new d(f(-this.X),this.Y,this.Z,f(-this.T))}double(){let{a:h}=i,{X:p,Y:g,Z:w}=this,E=f(p*p),L=f(g*g),v=f(Ke*f(w*w)),S=f(h*E),O=p+g,_=f(f(O*O)-E-L),T=S+L,R=T-v,U=S-L,I=f(_*R),B=f(T*U),A=f(_*U),H=f(R*T);return new d(I,B,H,A)}add(h){x(h);let{a:p,d:g}=i,{X:w,Y:E,Z:L,T:v}=this,{X:S,Y:O,Z:_,T}=h,R=f(w*S),U=f(E*O),I=f(v*g*T),B=f(L*_),A=f((w+E)*(S+O)-R-U),H=B-I,N=B+I,F=f(U-p*R),m=f(A*H),D=f(N*F),M=f(A*F),C=f(H*N);return new d(m,D,C,M)}subtract(h){return x(h),this.add(h.negate())}multiply(h){if(!s.isValidNot0(h))throw new RangeError("invalid scalar: expected 1 <= sc < curve.n");let{p,f:g}=b.cached(this,h,w=>ye(d,w));return ye(d,[p,g])[0]}multiplyUnsafe(h){if(!s.isValid(h))throw new RangeError("invalid scalar: expected 0 <= sc < curve.n");return h===Bt?d.ZERO:this.is0()||h===K?this:b.unsafe(this,h,p=>ye(d,p))}isSmallOrder(){return this.clearCofactor().is0()}isTorsionFree(){return b.unsafe(this,i.n).is0()}toAffine(h){let p=this,g=h,{X:w,Y:E,Z:L}=p,v=p.is0();g==null&&(g=v?Pr:o.inv(L));let S=f(w*g),O=f(E*g),_=o.mul(L,g);if(v)return{x:Bt,y:K};if(_!==K)throw new Error("invZ was invalid");return{x:S,y:O}}clearCofactor(){return c===K?this:this.multiplyUnsafe(c)}toBytes(){let{x:h,y:p}=this.toAffine(),g=o.toBytes(p);return g[g.length-1]|=h&K?128:0,g}toHex(){return Fe(this.toBytes())}toString(){return`<Point ${this.is0()?"ZERO":this.toHex()}>`}}let b=new be(d,s.BITS);return s.BITS>=8&&d.BASE.precompute(8),Object.freeze(d.prototype),Object.freeze(d),d}var ge=class{static BASE;static ZERO;static Fp;static Fn;ep;constructor(t){this.ep=t}static fromBytes(t){Ve()}static fromHex(t){Ve()}get x(){return this.toAffine().x}get y(){return this.toAffine().y}clearCofactor(){return this}assertValidity(){this.ep.assertValidity()}toAffine(t){return this.ep.toAffine(t)}toHex(){return Fe(this.toBytes())}toString(){return this.toHex()}isTorsionFree(){return!0}isSmallOrder(){return!1}add(t){return this.assertSame(t),this.init(this.ep.add(t.ep))}subtract(t){return this.assertSame(t),this.init(this.ep.subtract(t.ep))}multiply(t){return this.init(this.ep.multiply(t))}multiplyUnsafe(t){return this.init(this.ep.multiplyUnsafe(t))}double(){return this.init(this.ep.double())}negate(){return this.init(this.ep.negate())}precompute(t,n){return this.ep.precompute(t,n),this}};function Kt(e,t){if(wt(e),wt(t),t<0||t>4)throw new Error("invalid I2OSP length: "+t);if(e<0||e>2**(8*t)-1)throw new Error("invalid I2OSP input: "+e);let n=Array.from({length:t}).fill(0);for(let r=t-1;r>=0;r--)n[r]=e&255,e>>>=8;return new Uint8Array(n)}function Wr(e,t){let n=new Uint8Array(e.length);for(let r=0;r<e.length;r++)n[r]=e[r]^t[r];return n}function Qr(e){if(!ke(e)&&typeof e!="string")throw new Error("DST must be Uint8Array or ascii string");let t=typeof e=="string"?he(e):e;if(t.length===0)throw new Error("DST must be non-empty");return t}function Ye(e,t,n,r){Y(e),wt(n),t=Qr(t),t.length>255&&(t=r(gt(he("H2C-OVERSIZE-DST-"),t)));let{outputLen:o,blockLen:s}=r,i=Math.ceil(n/o);if(n>65535||i>255)throw new Error("expand_message_xmd: invalid lenInBytes");let c=gt(t,Kt(t.length,1)),a=new Uint8Array(s),f=Kt(n,2),u=new Array(i),l=r(gt(a,e,f,Kt(0,1),c));u[0]=r(gt(l,Kt(1,1),c));for(let d=1;d<i;d++){let b=[Wr(l,u[d-1]),Kt(d+1,1),c];u[d]=r(gt(...b))}return gt(...u).slice(0,n)}var ir="HashToScalar-";var Yt=BigInt(0),Nt=BigInt(1),we=BigInt(2);function Jr(e){return Et(e,{P:"bigint",type:"string",adjustScalarBytes:"function",powPminus2:"function"},{randomBytes:"function"}),Object.freeze({...e})}function cr(e){let t=Jr(e),{P:n,type:r,adjustScalarBytes:o,powPminus2:s,randomBytes:i}=t,c=r==="x25519";if(!c&&r!=="x448")throw new Error("invalid type");let a=i===void 0?Ne:i,f=c?255:448,u=c?32:56,l=BigInt(c?9:5),x=BigInt(c?121665:39081),d=c?we**BigInt(254):we**BigInt(447),b=c?BigInt(8)*we**BigInt(251)-Nt:BigInt(4)*we**BigInt(445)-Nt,y=d+b+Nt,h=B=>V(B,n),p=g(l);function g(B){return ue(h(B),u)}function w(B){let A=mt(Y(B,u,"uCoordinate"));return c&&(A[31]&=127),h(st(A))}function E(B){return st(o(mt(Y(B,u,"scalar"))))}function L(B,A){let H=T(w(A),E(B));if(H===Yt)throw new Error("invalid private or public key received");return g(H)}function v(B){return L(B,p)}let S=v,O=L;function _(B,A,H){let N=h(B*(A-H));return A=h(A-N),H=h(H+N),{x_2:A,x_3:H}}function T(B,A){kt("u",B,Yt,n),kt("scalar",A,d,y);let H=A,N=B,F=Nt,m=Yt,D=B,M=Nt,C=Yt;for(let J=BigInt(f-1);J>=Yt;J--){let ct=H>>J&Nt;C^=ct,{x_2:F,x_3:D}=_(C,F,D),{x_2:m,x_3:M}=_(C,m,M),C=ct;let tt=F+m,et=h(tt*tt),nt=F-m,ft=h(nt*nt),an=et-ft,vr=D+M,Tr=D-M,un=h(Tr*tt),hn=h(vr*nt),ln=un+hn,dn=un-hn;D=h(ln*ln),M=h(N*h(dn*dn)),F=h(et*ft),m=h(an*(et+h(x*an)))}({x_2:F,x_3:D}=_(C,F,D)),{x_2:m,x_3:M}=_(C,m,M);let $=s(m);return h(F*$)}let R={secretKey:u,publicKey:u,seed:u},U=B=>(B=B===void 0?a(u):B,Y(B,R.seed,"seed"),B),I={randomSecretKey:U};return Object.freeze(R),Object.freeze(I),Object.freeze({keygen:Ge(U,S),getSharedSecret:O,getPublicKey:S,scalarMult:L,scalarMultBase:v,utils:I,GuBytes:p.slice(),lengths:R})}var to=BigInt(0),pt=BigInt(1),fr=BigInt(2),eo=BigInt(3),no=BigInt(5),ro=BigInt(8),Tt=BigInt("0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffed"),Qe={p:Tt,n:BigInt("0x1000000000000000000000000000000014def9dea2f79cd65812631a5cf5d3ed"),h:ro,a:BigInt("0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffec"),d:BigInt("0x52036cee2b6ffe738cc740797779e89800700a4d4141d8ab75eb4dca135978a3"),Gx:BigInt("0x216936d3cd6e53fec0a4e231fdd6dc5c692cc7609525a7b2c9562d608f25d51a"),Gy:BigInt("0x6666666666666666666666666666666666666666666666666666666666666658")};function hr(e){let t=BigInt(10),n=BigInt(20),r=BigInt(40),o=BigInt(80),s=Tt,c=e*e%s*e%s,a=P(c,fr,s)*c%s,f=P(a,pt,s)*e%s,u=P(f,no,s)*f%s,l=P(u,t,s)*u%s,x=P(l,n,s)*l%s,d=P(x,r,s)*x%s,b=P(d,o,s)*d%s,y=P(b,o,s)*d%s,h=P(y,t,s)*u%s;return{pow_p_5_8:P(h,fr,s)*e%s,b2:c}}function oo(e){return e[0]&=248,e[31]&=127,e[31]|=64,e}var Pe=BigInt("19681161376707505956807079304988542015446066515923890162744021073123829784752");function Je(e,t){let n=Tt,r=V(t*t*t,n),o=V(r*r*t,n),s=hr(e*o).pow_p_5_8,i=V(e*r*s,n),c=V(t*i*i,n),a=i,f=V(i*Pe,n),u=c===e,l=c===V(-e,n),x=c===V(-e*Pe,n);return u&&(i=a),(l||x)&&(i=f),dt(i,n)&&(i=V(-i,n)),{isValid:u||l,value:i}}var vt=sr(Qe,{uvRatio:Je}),_t=vt.Fp,lr=vt.Fn;var tn=(()=>{let e=Tt;return cr({P:e,type:"x25519",powPminus2:t=>{let{pow_p_5_8:n,b2:r}=hr(t);return V(P(n,eo,e)*r,e)},adjustScalarBytes:oo})})();var $e=Pe,so=BigInt("25063068953384623474111414158702152701244531502492656460079210482610430750235"),io=BigInt("54469307008909316920995813868745141605393597292927456921205312896311721017578"),co=BigInt("1159843021668779879193775521855586647937357759715417654439879720876111806838"),fo=BigInt("40440834346308536858101042469323190826248399146238708352240133220865137265952"),ar=e=>Je(pt,e),ao=BigInt("0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),We=e=>_t.create(st(e)&ao);function ur(e){let{d:t}=Qe,n=Tt,r=p=>_t.create(p),o=r($e*e*e),s=r((o+pt)*co),i=BigInt(-1),c=r((i-t*o)*r(o+t)),{isValid:a,value:f}=Je(s,c),u=r(f*e);dt(u,n)||(u=r(-u)),a||(f=u),a||(i=o);let l=r(i*(o-pt)*fo-c),x=f*f,d=r((f+f)*c),b=r(l*so),y=r(pt-x),h=r(pt+x);return new vt(r(d*h),r(y*b),r(b*h),r(d*y))}var At=class e extends ge{static BASE=new e(vt.BASE);static ZERO=new e(vt.ZERO);static Fp=_t;static Fn=lr;constructor(t){super(t)}static fromAffine(t){return new e(vt.fromAffine(t))}assertSame(t){if(!(t instanceof e))throw new Error("RistrettoPoint expected")}init(t){return new e(t)}static fromBytes(t){W(t,32);let{a:n,d:r}=Qe,o=Tt,s=E=>_t.create(E),i=We(t);if(!Mn(_t.toBytes(i),t)||dt(i,o))throw new Error("invalid ristretto255 encoding 1");let c=s(i*i),a=s(pt+n*c),f=s(pt-n*c),u=s(a*a),l=s(f*f),x=s(n*r*u-l),{isValid:d,value:b}=ar(s(x*l)),y=s(b*f),h=s(b*y*x),p=s((i+i)*y);dt(p,o)&&(p=s(-p));let g=s(a*h),w=s(p*g);if(!d||dt(w,o)||g===to)throw new Error("invalid ristretto255 encoding 2");return new e(new vt(p,g,pt,w))}static fromHex(t){return e.fromBytes(zt(t))}toBytes(){let{X:t,Y:n,Z:r,T:o}=this.ep,s=Tt,i=h=>_t.create(h),c=i(i(r+n)*i(r-n)),a=i(t*n),f=i(a*a),{value:u}=ar(i(c*f)),l=i(u*c),x=i(u*a),d=i(l*x*o),b;if(dt(o*d,s)){let h=i(n*$e),p=i(t*$e);t=h,n=p,b=i(l*io)}else b=x;dt(t*d,s)&&(n=i(-n));let y=i((r-n)*b);return dt(y,s)&&(y=i(-y)),_t.toBytes(y)}equals(t){this.assertSame(t);let{X:n,Y:r}=this.ep,{X:o,Y:s}=t.ep,i=f=>_t.create(f),c=i(n*s)===i(r*o),a=i(r*s)===i(n*o);return c||a}is0(){return this.equals(e.ZERO)}};Object.freeze(At.BASE);Object.freeze(At.ZERO);Object.freeze(At.prototype);Object.freeze(At);var uo=Object.freeze({Point:At,hashToCurve(e,t){let n=t?.DST===void 0?"ristretto255_XMD:SHA-512_R255MAP_RO_":t.DST,r=Ye(e,n,64,Re);return uo.deriveToCurve(r)},hashToScalar(e,t={DST:ir}){let n=Ye(e,t.DST,64,Re);return lr.create(st(n))},deriveToCurve(e){W(e,64);let t=We(e.subarray(0,32)),n=ur(t),r=We(e.subarray(32,64)),o=ur(r);return new At(n.add(o))}});function ho(e){return e instanceof Uint8Array||ArrayBuffer.isView(e)&&e.constructor.name==="Uint8Array"&&"BYTES_PER_ELEMENT"in e&&e.BYTES_PER_ELEMENT===1}function me(e){if(typeof e!="boolean")throw new TypeError(`boolean expected, not ${e}`)}function Dt(e){if(typeof e!="number")throw new TypeError("number expected, got "+typeof e);if(!Number.isSafeInteger(e)||e<0)throw new RangeError("positive integer expected, got "+e)}function j(e,t,n=""){let r=ho(e),o=e?.length,s=t!==void 0;if(!r||s&&o!==t){let i=n&&`"${n}" `,c=s?` of length ${t}`:"",a=r?`length=${o}`:`type=${typeof e}`,f=i+"expected Uint8Array"+c+", got "+a;throw r?new RangeError(f):new TypeError(f)}return e}function en(e,t=!0){if(e.destroyed)throw new Error("Hash instance has been destroyed");if(t&&e.finished)throw new Error("Hash#digest() has already been called")}function dr(e,t,n=!1){j(e,void 0,"output");let r=t.outputLen;if(e.length<r)throw new RangeError("digestInto() expects output buffer of length at least "+r);if(n&&!Ct(e))throw new Error("invalid output, must be aligned")}function it(e){return new Uint32Array(e.buffer,e.byteOffset,Math.floor(e.byteLength/4))}function Q(...e){for(let t=0;t<e.length;t++)e[t].fill(0)}function lo(e){return new DataView(e.buffer,e.byteOffset,e.byteLength)}var Rt=new Uint8Array(new Uint32Array([287454020]).buffer)[0]===68,po=e=>e<<24&4278190080|e<<8&16711680|e>>>8&65280|e>>>24&255;var xo=e=>{for(let t=0;t<e.length;t++)e[t]=po(e[t]);return e},xt=Rt?e=>e:xo;function pr(e,t){if(t==null||typeof t!="object")throw new Error("options must be defined");return Object.assign(e,t)}function xr(e,t){if(e.length!==t.length)return!1;let n=0;for(let r=0;r<e.length;r++)n|=e[r]^t[r];return n===0}function br(e,t,n){let r=t,o=n||(()=>[]),s=(c,a)=>r(a,...o(c)).update(c).digest(),i=r(new Uint8Array(e),...o(new Uint8Array(0)));return s.outputLen=i.outputLen,s.blockLen=i.blockLen,s.create=(c,...a)=>r(c,...a),s}var yr=(e,t)=>{function n(r,...o){if(j(r,void 0,"key"),e.nonceLength!==void 0){let u=o[0];j(u,e.varSizeNonce?void 0:e.nonceLength,"nonce")}let s=e.tagLength;s&&o[1]!==void 0&&j(o[1],void 0,"AAD");let i=t(r,...o),c=(u,l)=>{if(l!==void 0){if(u!==2)throw new Error("cipher output not supported");j(l,void 0,"output")}},a=!1;return{encrypt(u,l){if(a)throw new Error("cannot encrypt() twice with same key + nonce");return a=!0,j(u),c(i.encrypt.length,l),i.encrypt(u,l)},decrypt(u,l){if(j(u),s&&u.length<s)throw new Error('"ciphertext" expected length bigger than tagLength='+s);return c(i.decrypt.length,l),i.decrypt(u,l)}}}return Object.assign(n,e),n};function Pt(e,t,n=!0){if(t===void 0)return new Uint8Array(e);if(j(t,void 0,"output"),t.length!==e)throw new Error('"output" expected Uint8Array of length '+e+", got: "+t.length);if(n&&!Ct(t))throw new Error("invalid output, must be aligned");return t}function gr(e,t,n){Dt(e),Dt(t),me(n);let r=new Uint8Array(16),o=lo(r);return o.setBigUint64(0,BigInt(t),n),o.setBigUint64(8,BigInt(e),n),r}function Ct(e){return e.byteOffset%4===0}function Mt(e){return Uint8Array.from(j(e))}var mr=e=>Uint8Array.from(e.split(""),t=>t.charCodeAt(0)),bo=xt(it(mr("expand 16-byte k"))),yo=xt(it(mr("expand 32-byte k")));function k(e,t){return e<<t|e>>>32-t}var $t=64,go=16,nn=2**32-1,wr=Uint32Array.of();function wo(e,t,n,r,o,s,i,c){let a=o.length,f=new Uint8Array($t),u=it(f),l=Rt&&Ct(o)&&Ct(s),x=l?it(o):wr,d=l?it(s):wr;if(!Rt){for(let b=0;b<a;i++){if(e(t,n,r,u,i,c),xt(u),i>=nn)throw new Error("arx: counter overflow");let y=Math.min($t,a-b);for(let h=0,p;h<y;h++)p=b+h,s[p]=o[p]^f[h];b+=y}return}for(let b=0;b<a;i++){if(e(t,n,r,u,i,c),i>=nn)throw new Error("arx: counter overflow");let y=Math.min($t,a-b);if(l&&y===$t){let h=b/4;if(b%4!==0)throw new Error("arx: invalid block position");for(let p=0,g;p<go;p++)g=h+p,d[g]=x[g]^u[p];b+=$t;continue}for(let h=0,p;h<y;h++)p=b+h,s[p]=o[p]^f[h];b+=y}}function Er(e,t){let{allowShortKeys:n,extendNonceFn:r,counterLength:o,counterRight:s,rounds:i}=pr({allowShortKeys:!1,counterLength:8,counterRight:!1,rounds:20},t);if(typeof e!="function")throw new Error("core must be a function");return Dt(o),Dt(i),me(s),me(n),(c,a,f,u,l=0)=>{j(c,void 0,"key"),j(a,void 0,"nonce"),j(f,void 0,"data");let x=f.length;if(u=Pt(x,u,!1),Dt(l),l<0||l>=nn)throw new Error("arx: counter overflow");let d=[],b=c.length,y,h;if(b===32)d.push(y=Mt(c)),h=yo;else if(b===16&&n)y=new Uint8Array(32),y.set(c),y.set(c,16),h=bo,d.push(y);else throw j(c,32,"arx key"),new Error("invalid key size");(!Rt||!Ct(a))&&d.push(a=Mt(a));let p=it(y);if(r){if(a.length!==24)throw new Error("arx: extended nonce must be 24 bytes");let E=a.subarray(0,16);if(Rt)r(h,p,it(E),p);else{let L=xt(Uint32Array.from(h));r(L,p,it(E),p),Q(L),xt(p)}a=a.subarray(16)}else Rt||xt(p);let g=16-o;if(g!==a.length)throw new Error(`arx: nonce must be ${g} or 16 bytes`);if(g!==12){let E=new Uint8Array(12);E.set(a,s?0:12-a.length),a=E,d.push(a)}let w=xt(it(a));try{return wo(e,h,p,w,f,u,l,i),u}finally{Q(...d)}}}function X(e,t){return e[t++]&255|(e[t++]&255)<<8}var rn=class{blockLen=16;outputLen=16;buffer=new Uint8Array(16);r=new Uint16Array(10);h=new Uint16Array(10);pad=new Uint16Array(8);pos=0;finished=!1;destroyed=!1;constructor(t){t=Mt(j(t,32,"key"));let n=X(t,0),r=X(t,2),o=X(t,4),s=X(t,6),i=X(t,8),c=X(t,10),a=X(t,12),f=X(t,14);this.r[0]=n&8191,this.r[1]=(n>>>13|r<<3)&8191,this.r[2]=(r>>>10|o<<6)&7939,this.r[3]=(o>>>7|s<<9)&8191,this.r[4]=(s>>>4|i<<12)&255,this.r[5]=i>>>1&8190,this.r[6]=(i>>>14|c<<2)&8191,this.r[7]=(c>>>11|a<<5)&8065,this.r[8]=(a>>>8|f<<8)&8191,this.r[9]=f>>>5&127;for(let u=0;u<8;u++)this.pad[u]=X(t,16+2*u)}process(t,n,r=!1){let o=r?0:2048,{h:s,r:i}=this,c=i[0],a=i[1],f=i[2],u=i[3],l=i[4],x=i[5],d=i[6],b=i[7],y=i[8],h=i[9],p=X(t,n+0),g=X(t,n+2),w=X(t,n+4),E=X(t,n+6),L=X(t,n+8),v=X(t,n+10),S=X(t,n+12),O=X(t,n+14),_=s[0]+(p&8191),T=s[1]+((p>>>13|g<<3)&8191),R=s[2]+((g>>>10|w<<6)&8191),U=s[3]+((w>>>7|E<<9)&8191),I=s[4]+((E>>>4|L<<12)&8191),B=s[5]+(L>>>1&8191),A=s[6]+((L>>>14|v<<2)&8191),H=s[7]+((v>>>11|S<<5)&8191),N=s[8]+((S>>>8|O<<8)&8191),F=s[9]+(O>>>5|o),m=0,D=m+_*c+T*(5*h)+R*(5*y)+U*(5*b)+I*(5*d);m=D>>>13,D&=8191,D+=B*(5*x)+A*(5*l)+H*(5*u)+N*(5*f)+F*(5*a),m+=D>>>13,D&=8191;let M=m+_*a+T*c+R*(5*h)+U*(5*y)+I*(5*b);m=M>>>13,M&=8191,M+=B*(5*d)+A*(5*x)+H*(5*l)+N*(5*u)+F*(5*f),m+=M>>>13,M&=8191;let C=m+_*f+T*a+R*c+U*(5*h)+I*(5*y);m=C>>>13,C&=8191,C+=B*(5*b)+A*(5*d)+H*(5*x)+N*(5*l)+F*(5*u),m+=C>>>13,C&=8191;let $=m+_*u+T*f+R*a+U*c+I*(5*h);m=$>>>13,$&=8191,$+=B*(5*y)+A*(5*b)+H*(5*d)+N*(5*x)+F*(5*l),m+=$>>>13,$&=8191;let J=m+_*l+T*u+R*f+U*a+I*c;m=J>>>13,J&=8191,J+=B*(5*h)+A*(5*y)+H*(5*b)+N*(5*d)+F*(5*x),m+=J>>>13,J&=8191;let ct=m+_*x+T*l+R*u+U*f+I*a;m=ct>>>13,ct&=8191,ct+=B*c+A*(5*h)+H*(5*y)+N*(5*b)+F*(5*d),m+=ct>>>13,ct&=8191;let tt=m+_*d+T*x+R*l+U*u+I*f;m=tt>>>13,tt&=8191,tt+=B*a+A*c+H*(5*h)+N*(5*y)+F*(5*b),m+=tt>>>13,tt&=8191;let et=m+_*b+T*d+R*x+U*l+I*u;m=et>>>13,et&=8191,et+=B*f+A*a+H*c+N*(5*h)+F*(5*y),m+=et>>>13,et&=8191;let nt=m+_*y+T*b+R*d+U*x+I*l;m=nt>>>13,nt&=8191,nt+=B*u+A*f+H*a+N*c+F*(5*h),m+=nt>>>13,nt&=8191;let ft=m+_*h+T*y+R*b+U*d+I*x;m=ft>>>13,ft&=8191,ft+=B*l+A*u+H*f+N*a+F*c,m+=ft>>>13,ft&=8191,m=(m<<2)+m|0,m=m+D|0,D=m&8191,m=m>>>13,M+=m,s[0]=D,s[1]=M,s[2]=C,s[3]=$,s[4]=J,s[5]=ct,s[6]=tt,s[7]=et,s[8]=nt,s[9]=ft}finalize(){let{h:t,pad:n}=this,r=new Uint16Array(10),o=t[1]>>>13;t[1]&=8191;for(let c=2;c<10;c++)t[c]+=o,o=t[c]>>>13,t[c]&=8191;t[0]+=o*5,o=t[0]>>>13,t[0]&=8191,t[1]+=o,o=t[1]>>>13,t[1]&=8191,t[2]+=o,r[0]=t[0]+5,o=r[0]>>>13,r[0]&=8191;for(let c=1;c<10;c++)r[c]=t[c]+o,o=r[c]>>>13,r[c]&=8191;r[9]-=8192;let s=(o^1)-1;for(let c=0;c<10;c++)r[c]&=s;s=~s;for(let c=0;c<10;c++)t[c]=t[c]&s|r[c];t[0]=(t[0]|t[1]<<13)&65535,t[1]=(t[1]>>>3|t[2]<<10)&65535,t[2]=(t[2]>>>6|t[3]<<7)&65535,t[3]=(t[3]>>>9|t[4]<<4)&65535,t[4]=(t[4]>>>12|t[5]<<1|t[6]<<14)&65535,t[5]=(t[6]>>>2|t[7]<<11)&65535,t[6]=(t[7]>>>5|t[8]<<8)&65535,t[7]=(t[8]>>>8|t[9]<<5)&65535;let i=t[0]+n[0];t[0]=i&65535;for(let c=1;c<8;c++)i=(t[c]+n[c]|0)+(i>>>16)|0,t[c]=i&65535;Q(r)}update(t){en(this),j(t),t=Mt(t);let{buffer:n,blockLen:r}=this,o=t.length;for(let s=0;s<o;){let i=Math.min(r-this.pos,o-s);if(i===r){for(;r<=o-s;s+=r)this.process(t,s);continue}n.set(t.subarray(s,s+i),this.pos),this.pos+=i,s+=i,this.pos===r&&(this.process(n,0,!1),this.pos=0)}return this}destroy(){this.destroyed=!0,Q(this.h,this.r,this.buffer,this.pad)}digestInto(t){en(this),dr(t,this),this.finished=!0;let{buffer:n,h:r}=this,{pos:o}=this;if(o){for(n[o++]=1;o<16;o++)n[o]=0;this.process(n,0,!0)}this.finalize();let s=0;for(let i=0;i<8;i++)t[s++]=r[i]>>>0,t[s++]=r[i]>>>8}digest(){let{buffer:t,outputLen:n}=this;this.digestInto(t);let r=t.slice(0,n);return this.destroy(),r}},Br=br(32,e=>new rn(e));function mo(e,t,n,r,o,s=20){let i=e[0],c=e[1],a=e[2],f=e[3],u=t[0],l=t[1],x=t[2],d=t[3],b=t[4],y=t[5],h=t[6],p=t[7],g=o,w=n[0],E=n[1],L=n[2],v=i,S=c,O=a,_=f,T=u,R=l,U=x,I=d,B=b,A=y,H=h,N=p,F=g,m=w,D=E,M=L;for(let $=0;$<s;$+=2)v=v+T|0,F=k(F^v,16),B=B+F|0,T=k(T^B,12),v=v+T|0,F=k(F^v,8),B=B+F|0,T=k(T^B,7),S=S+R|0,m=k(m^S,16),A=A+m|0,R=k(R^A,12),S=S+R|0,m=k(m^S,8),A=A+m|0,R=k(R^A,7),O=O+U|0,D=k(D^O,16),H=H+D|0,U=k(U^H,12),O=O+U|0,D=k(D^O,8),H=H+D|0,U=k(U^H,7),_=_+I|0,M=k(M^_,16),N=N+M|0,I=k(I^N,12),_=_+I|0,M=k(M^_,8),N=N+M|0,I=k(I^N,7),v=v+R|0,M=k(M^v,16),H=H+M|0,R=k(R^H,12),v=v+R|0,M=k(M^v,8),H=H+M|0,R=k(R^H,7),S=S+U|0,F=k(F^S,16),N=N+F|0,U=k(U^N,12),S=S+U|0,F=k(F^S,8),N=N+F|0,U=k(U^N,7),O=O+I|0,m=k(m^O,16),B=B+m|0,I=k(I^B,12),O=O+I|0,m=k(m^O,8),B=B+m|0,I=k(I^B,7),_=_+T|0,D=k(D^_,16),A=A+D|0,T=k(T^A,12),_=_+T|0,D=k(D^_,8),A=A+D|0,T=k(T^A,7);let C=0;r[C++]=i+v|0,r[C++]=c+S|0,r[C++]=a+O|0,r[C++]=f+_|0,r[C++]=u+T|0,r[C++]=l+R|0,r[C++]=x+U|0,r[C++]=d+I|0,r[C++]=b+B|0,r[C++]=y+A|0,r[C++]=h+H|0,r[C++]=p+N|0,r[C++]=g+F|0,r[C++]=w+m|0,r[C++]=E+D|0,r[C++]=L+M|0}var Eo=Er(mo,{counterRight:!1,counterLength:4,allowShortKeys:!1});var Bo=new Uint8Array(16),_r=(e,t)=>{e.update(t);let n=t.length%16;n&&e.update(Bo.subarray(n))},_o=new Uint8Array(32);function Ar(e,t,n,r,o){o!==void 0&&j(o,void 0,"AAD");let s=e(t,n,_o),i=gr(r.length,o?o.length:0,!0),c=Br.create(s);o&&_r(c,o),_r(c,r),c.update(i);let a=c.digest();return Q(s,i),a}var Ao=e=>(t,n,r)=>({encrypt(s,i){let c=s.length;i=Pt(c+16,i,!1),i.set(s);let a=i.subarray(0,-16);e(t,n,a,a,1);let f=Ar(e,t,n,a,r);return i.set(f,c),Q(f),i},decrypt(s,i){i=Pt(s.length-16,i,!1);let c=s.subarray(0,-16),a=s.subarray(-16),f=Ar(e,t,n,c,r);if(!xr(a,f))throw Q(f),new Error("invalid tag");return i.set(s.subarray(0,-16)),e(t,n,i,i,1),Q(f),i}}),Lr=yr({blockSize:64,nonceLength:12,tagLength:16},Ao(Eo));var Lo="flux-swarm-secret v1 sealed-box x25519 aead-key",So="flux-swarm-secret v1 sealed-box x25519 aead-nonce",Sr="x25519-chacha20poly1305-blake3",Oo=new TextEncoder().encode("SIGILNT1"),Io=new TextEncoder().encode("sigil-shielded-enc-key-v1"),Or=e=>Uint8Array.from(e.match(/../g).map(t=>parseInt(t,16)));function on(e){let t=ee.create({});t.update(Io),t.update(e);let n=t.digest();return{sk:n,pk:tn.getPublicKey(n)}}function vo(e,t,n){let r=new Uint8Array(96);r.set(e,0),r.set(t,32),r.set(n,64);let o=ee(r,{context:Lo,dkLen:32}),s=ee(r,{context:So,dkLen:32}).slice(0,12);return{key:o,nonce:s}}function sn(e,t){let n;try{n=JSON.parse(e)}catch{return null}if(n.suite!==Sr)return null;try{let r=Or(n.eph_pk),o=tn.getSharedSecret(t.sk,r),{key:s,nonce:i}=vo(o,r,t.pk);return Lr(s,i,new TextEncoder().encode(Sr)).decrypt(Or(n.ct))}catch{return null}}function cn(e){if(!e||e.length!==24)return null;for(let n=0;n<8;n++)if(e[n]!==Oo[n])return null;let t=new DataView(e.buffer,e.byteOffset,e.byteLength);return{value:t.getBigUint64(8,!0),blinding:t.getBigUint64(16,!0)}}function fn(e,t,n={}){let{spent:r=null,mimc:o=null}=n,s=on(t),i=[],c=0n,a=0n,f=0n,u=o?o.deriveField(t,"spend-key",0):null,l=!!(r&&o&&u);for(let x=0;x<e.length;x++){let d=e[x];if(!d)continue;let b=cn(sn(d,s));if(!b)continue;c+=b.value;let y=!1;if(l){let h=o.toWireHex(o.compress2(u,BigInt(x))).toLowerCase();y=r.has(h)}y?f+=b.value:a+=b.value,i.push({index:x,value:b.value,blinding:b.blinding,spent:y})}return{balance:l?a:c,gross:c,spentValue:l?f:null,netted:l,notes:i}}async function Ir(e,t,n=""){let[r,o]=await Promise.all([fetch(`${n}/v1/shielded/leaves`).then(i=>i.json()),fetch(`${n}/v1/shielded/nullifiers`).then(i=>i.json()).catch(()=>null)]),s=o&&o.ok?new Set(o.nullifiers.map(i=>i.toLowerCase())):null;return fn(r.ciphertexts||[],e,{spent:s,mimc:t})}window.__sigilShieldScan={scanBalance:fn,encIdentityFromSeed:on,openEnvelope:sn,decodeNote:cn,fetchShieldedBalance:Ir};})();
+/*! Bundled license information:
+
+@noble/hashes/esm/utils.js:
+  (*! noble-hashes - MIT License (c) 2022 Paul Miller (paulmillr.com) *)
+
+@noble/curves/utils.js:
+@noble/curves/abstract/modular.js:
+@noble/curves/abstract/curve.js:
+@noble/curves/abstract/edwards.js:
+@noble/curves/abstract/montgomery.js:
+@noble/curves/ed25519.js:
+  (*! noble-curves - MIT License (c) 2022 Paul Miller (paulmillr.com) *)
+
+@noble/ciphers/utils.js:
+  (*! noble-ciphers - MIT License (c) 2023 Paul Miller (paulmillr.com) *)
+*/
+</script>
 <script>
   try {
     const { ed, sha3_256, sha512 } = window.__noble;
@@ -852,6 +916,75 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       <div style="font-family:'JetBrains Mono';font-size:9.5px;color:#5a93a8;text-align:center">queued into the private pool — lands once the DAG finalizes (can take a while; check the explorer)</div>
     </div>
     <div id="sendForm" style="flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:14px">
+      <!-- ══ UNIFIED SEND (2026-08-26, operator-directed) ═══════════════════════════
+           Viktor: "ease the send modal flow so user first see address they should
+           send to and then after that amount in two nicely designed input boxes.
+           not like it right now where users have to shield balance first i dont
+           want that."
+           SIGIL has no transparent send (SHIELDED_ONLY_HEIGHT = 0), so paying
+           someone is genuinely shield-then-shielded-send. That stays true — but it
+           is now a PROGRESS INDICATOR, not two decisions the user has to make and
+           sequence themselves. This block drives the SAME doShield()/
+           doPrivateSend()/checkShieldedAddr() functions as before; none of the
+           crypto paths were rewritten. The old two-tab UI is preserved verbatim
+           below under "advanced" so nothing is lost and this is reversible.
+      ────────────────────────────────────────────────────────────────────────────-->
+      <div id="sendUnified" style="display:flex;flex-direction:column;gap:14px">
+
+        <!-- ── 1. RECIPIENT ───────────────────────────────────────────────────── -->
+        <div>
+          <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:7px">
+            <label style="font-family:'JetBrains Mono';font-size:10px;letter-spacing:1.4px;color:#6df3ff;text-transform:uppercase">① Send to</label>
+            <span id="uniAddrChip" style="font-family:'JetBrains Mono';font-size:9.5px;color:#5a93a8"></span>
+          </div>
+          <input id="uniAddr" placeholder="SIGIL address (64 hex characters)" autocomplete="off" spellcheck="false"
+            style="width:100%;box-sizing:border-box;background:rgba(4,8,12,.72);border:1px solid rgba(33,212,253,.26);border-radius:12px;color:#cfe9f2;font-family:'JetBrains Mono';font-size:12.5px;padding:13px 14px;outline:none;transition:border-color .18s,box-shadow .18s">
+          <div id="uniAddrMsg" style="font-family:'JetBrains Mono';font-size:10.5px;color:#8fb3c2;min-height:15px;margin-top:6px"></div>
+        </div>
+
+        <!-- ── 2. AMOUNT ──────────────────────────────────────────────────────── -->
+        <div>
+          <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:7px">
+            <label style="font-family:'JetBrains Mono';font-size:10px;letter-spacing:1.4px;color:#6df3ff;text-transform:uppercase">② Amount</label>
+            <span id="uniAvail" style="font-family:'JetBrains Mono';font-size:9.5px;color:#5a93a8"></span>
+          </div>
+          <div style="display:flex;gap:9px">
+            <input id="uniAmt" type="text" inputmode="decimal" placeholder="0.00000000"
+              style="flex:1;min-width:0;background:rgba(4,8,12,.72);border:1px solid rgba(33,212,253,.26);border-radius:12px;color:#cfe9f2;font-family:'Orbitron';font-size:19px;padding:12px 14px;outline:none;transition:border-color .18s,box-shadow .18s">
+            <button onclick="uniMax()" style="background:rgba(0,224,198,.1);border:1px solid rgba(0,224,198,.4);color:#00e0c6;border-radius:12px;padding:0 16px;font-family:'Rajdhani';font-weight:700;font-size:13px;letter-spacing:.5px;cursor:pointer">MAX</button>
+          </div>
+        </div>
+
+        <!-- ── 3. ONE BUTTON ──────────────────────────────────────────────────── -->
+        <button id="uniGo" onclick="doUnifiedSend()"
+          style="border:1px solid rgba(33,212,253,.45);background:linear-gradient(90deg,rgba(33,212,253,.22),rgba(0,224,198,.15));color:#6df3ff;font-family:'Orbitron';font-weight:700;font-size:14px;letter-spacing:1.5px;padding:14px;border-radius:12px;cursor:pointer;transition:opacity .18s">SEND PRIVATELY</button>
+
+        <!-- progress: the shield step shows up HERE as a step, never as a decision -->
+        <div id="uniSteps" style="display:none;flex-direction:column;gap:7px;background:rgba(33,212,253,.045);border:1px solid rgba(33,212,253,.16);border-radius:11px;padding:11px 13px">
+          <div id="uniStep1" style="font-family:'JetBrains Mono';font-size:10.5px;color:#5a93a8">○ 1 · move funds into your private balance</div>
+          <div id="uniStep2" style="font-family:'JetBrains Mono';font-size:10.5px;color:#5a93a8">○ 2 · pay the recipient privately</div>
+        </div>
+        <div id="uniMsg" style="font-family:'JetBrains Mono';font-size:11px;color:#8fb3c2;min-height:15px"></div>
+
+        <!-- Rotating privacy note. Operator ask (2026-08-26): this sits in a place that
+             gets read hundreds of times, so it should reward re-reading instead of
+             becoming wallpaper. Every line below is a REAL property of this codebase and
+             was checked against source before being written — see SIGIL_SECRETS. -->
+        <div style="display:flex;flex-direction:column;gap:7px">
+          <div style="font-family:'JetBrains Mono';font-size:9.5px;color:#5a93a8;line-height:1.5">
+            Your private balance tops itself up — step 1 only runs if it's short.
+          </div>
+          <div id="uniSecret" onclick="uniNextSecret()" title="tap for another"
+            style="font-family:'JetBrains Mono';font-size:9.5px;line-height:1.6;color:#7fb3c4;background:rgba(167,139,250,.055);border:1px solid rgba(167,139,250,.16);border-left:2px solid rgba(167,139,250,.5);border-radius:0 9px 9px 0;padding:9px 11px;cursor:pointer;transition:background .2s"></div>
+        </div>
+
+        <div style="text-align:center;margin-top:2px">
+          <span onclick="uniToggleAdvanced()" id="uniAdvLink"
+            style="font-family:'JetBrains Mono';font-size:10px;color:#4d7e91;cursor:pointer;text-decoration:underline;text-underline-offset:3px">advanced — shield / send separately</span>
+        </div>
+      </div>
+
+      <div id="sendAdvanced" style="display:none;flex-direction:column;gap:14px">
       <div style="display:flex;gap:0;border:1px solid rgba(33,212,253,.22);border-radius:10px;overflow:hidden">
         <button id="sendTabShield" onclick="sendShowTab('shield')" style="flex:1;background:rgba(33,212,253,.16);border:none;color:#6df3ff;font-family:'Orbitron';font-weight:700;font-size:11px;letter-spacing:1px;padding:10px 6px;cursor:pointer">SHIELD</button>
         <button id="sendTabPriv" onclick="sendShowTab('priv')" style="flex:1;background:transparent;border:none;color:#7c98a3;font-family:'Orbitron';font-weight:700;font-size:11px;letter-spacing:1px;padding:10px 6px;cursor:pointer">SEND</button>
@@ -892,6 +1025,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         </div>
         <div id="abList" style="display:flex;flex-direction:column;gap:6px"></div>
       </div>
+      </div><!-- /#sendAdvanced -->
     </div>
   </div>
 </div>
@@ -1040,6 +1174,78 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     var label=prompt('Label for this address:', shortA(addr))||shortA(addr);
     var a=abLoad(); if(!a.some(function(e){return e.addr===addr;})){ a.unshift({label:label,addr:addr}); abSave(a); abRender(); }
   };
+  // ══ ONE-TIME UNLOCK (2026-08-26, operator-directed) ══════════════════════════
+  // Viktor, verbatim: "launch sigil top node. press w ... create a new wallet. store the
+  // mnemonic safely. then it should just work forever no need to ask for mnemonic again
+  // only if i log out or use another computer."
+  //
+  // That is ordinary wallet UX, and the logout contract it needs ALREADY exists:
+  // `sigilLogout()` removes sigil-wallet-address / -mnemonic / -seed. So "kept until you
+  // log out" is a promise this page can actually keep.
+  //
+  // WHY IT ASKED EVERY SINGLE TIME BEFORE: the in-memory cache was populated from
+  // localStorage exactly ONCE at script load, and NOTHING ever wrote it back —
+  // enter-sigil.html stores the ADDRESS on login, never the phrase. So every signing
+  // path re-prompted forever, no matter how many times you typed it.
+  //
+  // ⚠️ HONEST ABOUT THE TRADE: this stores the signing secret in THIS browser's
+  // localStorage. That is the same posture as every browser wallet, and it is why the
+  // prompt text below no longer claims "never saved" — that line was about to become a
+  // lie. It is readable by any script that achieves XSS on this origin. Intended use is
+  // localhost + your own machine. `LOG OUT / SWITCH WALLET` erases it.
+  // ── CROSS-ORIGIN SEED HANDOFF (2026-08-26) ───────────────────────────────────
+  // enter-sigil.html saves the seed to localStorage and then redirects to a DIFFERENT
+  // HOST (fluxapp.xyz). localStorage is per-origin, so the seed the operator just typed
+  // at login was invisible here — the wallet found nothing and re-prompted on EVERY
+  // send, forever, no matter how many times it was entered. Reported as
+  // "i've just logged in using the same mnemonic, now it asks me twice".
+  //
+  // The gate now appends `#s=<seed>` on redirect; we consume it, persist it to THIS
+  // origin, and strip it from the URL immediately so it never lingers in the address
+  // bar, history, or a copy-pasted link. A URL FRAGMENT is used deliberately: fragments
+  // are never sent to the server, so the seed does not appear in any access log.
+  function sigilAdoptSeedFromHash(){
+    try{
+      var h = location.hash || '';
+      var m = h.match(/[#&]s=([0-9a-zA-Z ]+)/);
+      if(!m) return;
+      var val = decodeURIComponent(m[1]).trim();
+      if(val) localStorage.setItem('sigil-wallet-mnemonic', val);
+      // strip the fragment without adding a history entry
+      history.replaceState(null, '', location.pathname + location.search);
+    }catch(e){}
+  }
+  try{ sigilAdoptSeedFromHash(); }catch(e){}
+  try{ sigilAdoptLocal(sigilLoadSecret()); }catch(e){}
+  // Hand the seed to the LOCAL signer (:9800) once, so it can sign without ever
+  // prompting again. No-op on a hosted origin: the fetch is same-origin and relative,
+  // so it only resolves when this page is served BY sigil-top itself. Fire-and-forget —
+  // a failure must never block a send, it just means the phrase prompt stays.
+  function sigilAdoptLocal(m){
+    try{
+      if(!m) return;
+      if(location.port !== '9800') return;          // only the node-local wallet
+      if(sessionStorage.getItem('sigil-adopted')) return;
+      sessionStorage.setItem('sigil-adopted','1');
+      fetch('/api/v1/adopt-seed',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({seed:m})}).catch(function(){});
+    }catch(e){}
+  }
+  // Purge a stored secret that turned out to be for a DIFFERENT wallet. Without this,
+  // persistence (added earlier today) turned a one-off mismatch into a permanent wedge:
+  // the mismatch branch cleared only `window.__sigilMnemonic`, so the very next attempt
+  // reloaded the same bad seed from localStorage and failed identically, every time.
+  function sigilForgetSecret(){
+    try{ localStorage.removeItem('sigil-wallet-mnemonic'); localStorage.removeItem('sigil-wallet-seed'); }catch(e){}
+    try{ sessionStorage.removeItem('sigil-adopted'); }catch(e){}
+  }
+  window.sigilForgetSecret=sigilForgetSecret;
+  function sigilSaveSecret(m){ try{ if(m) localStorage.setItem('sigil-wallet-mnemonic', m); }catch(e){} sigilAdoptLocal(m); }
+  function sigilLoadSecret(){
+    try{ return localStorage.getItem('sigil-wallet-mnemonic') || localStorage.getItem('sigil-wallet-seed') || null; }
+    catch(e){ return null; }
+  }
+  window.sigilSaveSecret=sigilSaveSecret; window.sigilLoadSecret=sigilLoadSecret;
   function sendStatus(m,c){ var el=document.getElementById('sendMsg'); if(el){ el.textContent=m; el.style.color=c||'#8fb3c2'; } }
   function checkStatus(m,c){ var el=document.getElementById('checkAddrMsg'); if(el){ el.textContent=m; el.style.color=c||'#8fb3c2'; } }
   window.sendStatus=sendStatus;
@@ -1070,12 +1276,53 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     }catch(e){ checkStatus('✗ network error — node unreachable.', '#ff8a8a'); }
   };
   try{ if(!window.__sigilMnemonic){ var _pm=localStorage.getItem('sigil-wallet-mnemonic')||localStorage.getItem('sigil-wallet-seed'); if(_pm) window.__sigilMnemonic=_pm; } }catch(e){}
+  // Warn UP FRONT when the wallet on screen is one this browser cannot sign for.
+  // Live failure 2026-08-26: [W] on a server opened the BOX's mining wallet, showed its
+  // 1,299 SIGIL as "yours", and the mismatch only surfaced at step 1 of a send, after
+  // the operator had typed a (correct!) recovery phrase. Say it when the modal OPENS.
+  function sigilSignableWarning(){
+    try{
+      var from=((window.MINE_ADDR||window.ADDR)||'').toLowerCase();
+      var m=window.__sigilMnemonic||sigilLoadSecret();
+      if(!from||!m||!window.sigilDeriveAuto) return null;
+      var kp; try{ kp=window.sigilDeriveAuto(m, from); }catch(e){ return null; }
+      if(kp && kp.address && kp.address!==from){
+        return 'This is wallet '+from.slice(0,10)+'… but your saved phrase unlocks '
+             + kp.address.slice(0,10)+'…. You cannot send from this one — reopen the wallet with ?addr='
+             + kp.address.slice(0,10)+'…';
+      }
+    }catch(e){}
+    return null;
+  }
   window.openSend=function(){
     var m=document.getElementById('send-modal'); if(!m) return;
     try{ var raw=BigInt(window.SIGIL_RAW||'0'); var w=raw/100000000n, f=(raw%100000000n).toString().padStart(8,'0');
       document.getElementById('sendAvail').textContent=w.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')+'.'+f; }catch(e){}
     sendStatus(''); checkStatus(''); abRender(); m.style.display='flex';
-    setTimeout(function(){ var t=document.getElementById('sendAmt'); if(t)t.focus(); }, 30);
+    // ── unified flow reset (2026-08-26) — start clean, mirror the balance, and put
+    // the cursor on the RECIPIENT box, because that is now question ① not question ②.
+    try{
+      var ua=document.getElementById('uniAddr'), um=document.getElementById('uniAmt');
+      if(ua) ua.value=''; if(um) um.value='';
+      window.__privRecipient=null;
+      var am=document.getElementById('uniAddrMsg'); if(am) am.textContent='';
+      var ac=document.getElementById('uniAddrChip'); if(ac) ac.textContent='';
+      uniGlow('uniAddr',null); uniGlow('uniAmt',null); uniMsg('');
+      var st=document.getElementById('uniSteps'); if(st) st.style.display='none';
+      var av=document.getElementById('uniAvail'); if(av) av.textContent='';
+      // advance to the NEXT secret on every open, so it's a new one each time
+      uniNextSecret();
+      // idempotent listener wiring (openSend can run many times)
+      if(ua && !ua.dataset.wired){ ua.addEventListener('input', window.uniValidateAddr); ua.dataset.wired='1'; }
+      var adv=document.getElementById('sendAdvanced'), uni=document.getElementById('sendUnified');
+      if(adv) adv.style.display='none';
+      if(uni) uni.style.display='flex';
+      var rc=document.getElementById('sendReceipt'), sf=document.getElementById('sendForm');
+      if(rc) rc.style.display='none';
+      if(sf) sf.style.display='flex';
+    }catch(e){}
+    try{ var w=sigilSignableWarning(); if(w) uniMsg('⚠ '+w, '#fbbf24'); }catch(e){}
+    setTimeout(function(){ var t=document.getElementById('uniAddr'); if(t)t.focus(); }, 30);
   };
   window.closeSend=function(){ var m=document.getElementById('send-modal'); if(m)m.style.display='none'; };
   // localStorage-persisted note index counter, mirroring sigil_shield::wallet::NoteStore's
@@ -1087,6 +1334,77 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     localStorage.setItem(key,String(n+1));
     return n;
   }
+  /* ══ SETTLEMENT GATE (2026-08-26) ═══════════════════════════════════════════
+     A receipt used to be rendered the moment /v1/shield returned ok. That is the
+     node saying "queued", NOT "accepted". Measured live: a 10 SIGIL send was
+     dropped 600 times over 92s with Shielded(PoolFull) and the wallet still
+     displayed a normal success receipt with a txid. The user reasonably believed
+     they had paid someone. A wallet must never claim a payment landed when it did
+     not — so the receipt now waits for observable settlement.
+
+     THE SIGNAL. /v1/transactions/<hash> cannot help: it only distinguishes
+     "mempool" from "unknown", and a DROPPED tx and a SETTLED tx are both
+     "unknown". What is observable is the pool itself — a shield mints a note, so
+     the pool's note count rises. /v1/shielded/anchor is small and cheap to poll,
+     unlike /v1/shielded/leaves (2.3 MB).
+
+     Deliberately conservative: on timeout we say NOT CONFIRMED rather than
+     guessing. Being wrong in the "we could not confirm it" direction costs the
+     user a re-check; being wrong the other way costs them the payment. */
+  async function poolNoteCount(){
+    try{
+      var r=await fetch('/v1/shielded/anchor',{cache:'no-store'});
+      var j=await r.json(); var d=(j&&j.data)?j.data:j;
+      var n=d&&d.notes; return (typeof n==='number')?n:null;
+    }catch(e){ return null; }
+  }
+
+  // The node gives up on a shielded tx after ~600 attempts / ~92s, so wait past
+  // that before calling it unconfirmed — otherwise we'd report failure while the
+  // node is still genuinely retrying.
+  var SETTLE_TIMEOUT_MS=125000, SETTLE_POLL_MS=3000;
+
+  async function awaitSettlement(baseline, wantParts, onTick){
+    if(baseline===null) return 'unknown';   // couldn't read a baseline — don't claim either way
+    var deadline=Date.now()+SETTLE_TIMEOUT_MS;
+    while(Date.now()<deadline){
+      await new Promise(function(r){ setTimeout(r, SETTLE_POLL_MS); });
+      var now=await poolNoteCount();
+      if(now!==null && now>=baseline+wantParts) return 'settled';
+      if(onTick) onTick(Math.max(0,Math.round((deadline-Date.now())/1000)));
+    }
+    return 'timeout';
+  }
+
+  /* A shield books its notes locally BEFORE submitting, because the index has to be
+     reserved to build the commitment. If the tx never settles those entries are
+     phantom money: they inflate the wallet's spendable balance and every later
+     spend built on them fails. Roll them back rather than leave the ledger lying. */
+  function noteRollback(addr, indices){
+    try{
+      var key='sigil-shielded-notes-'+addr;
+      var arr=JSON.parse(localStorage.getItem(key)||'[]');
+      var keep=arr.filter(function(n){ return indices.indexOf(n.index)<0; });
+      localStorage.setItem(key,JSON.stringify(keep));
+    }catch(e){}
+  }
+
+  function showReceiptUnconfirmed(amtStr, reason, indices, addr){
+    if(indices && indices.length && addr) noteRollback(addr, indices);
+    var rc=document.getElementById('sendReceipt');
+    document.getElementById('rcAmt').textContent=amtStr+' SIGIL';
+    document.getElementById('rcRows').innerHTML=
+      '<div style="font-family:\'JetBrains Mono\';font-size:11px;color:#fbbf24;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.3);border-radius:10px;padding:11px 12px;line-height:1.6">'
+      +'<b>NOT CONFIRMED — treat this as NOT sent.</b><br>'+reason
+      +'<br><br>The network did not accept it within '+Math.round(SETTLE_TIMEOUT_MS/1000)+'s. '
+      +'Nothing was deducted from your balance, and the notes this attempt reserved have been released.'
+      +'</div>';
+    var t=document.querySelector('#sendReceipt .rc-title, #rcTitle');
+    if(t){ t.textContent='✗ NOT CONFIRMED'; t.style.color='#fbbf24'; }
+    document.getElementById('sendForm').style.display='none';
+    if(rc) rc.style.display='flex';
+  }
+
   function noteRecord(addr,index,value){
     try{
       var key='sigil-shielded-notes-'+addr;
@@ -1130,15 +1448,19 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     sendStatus('');
 
     if(!window.sigilCryptoReady || !window.__sigilShield){ sendStatus('Signer still loading — try again in a moment.', '#fbbf24'); return; }
-    var mnemonic = window.__sigilMnemonic;
+    var mnemonic = window.__sigilMnemonic || sigilLoadSecret();
     if(!mnemonic){
-      mnemonic = (prompt('Enter your recovery phrase (or 64-hex mining seed) to sign this shield deposit.\n(kept in memory for this session only — never saved)')||'').trim();
+      mnemonic = (prompt('Enter your recovery phrase (or 64-hex mining seed) to sign this shield deposit.\nSaved in THIS browser until you press LOG OUT.')||'').trim();
       if(!mnemonic){ sendStatus('Cancelled — recovery phrase required to sign.', '#fbbf24'); return; }
     }
-    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ window.__sigilMnemonic=null; sendStatus('Could not derive a key from that phrase.', '#ff8a8a'); return; }
-    if(kp.address!==from){ window.__sigilMnemonic=null; sendStatus('That phrase does not match this wallet address.', '#ff8a8a'); return; }
-    window.__sigilMnemonic=mnemonic;
+    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ window.__sigilMnemonic=null; sigilForgetSecret(); sendStatus('Could not derive a key from that phrase.', '#ff8a8a'); return; }
+    if(kp.address!==from){ window.__sigilMnemonic=null; sigilForgetSecret(); sendStatus('That phrase belongs to '+kp.address.slice(0,10)+'… but this wallet is '+from.slice(0,10)+'…. Cleared it — press SEND again to enter the right one.', '#ff8a8a'); return; }
+    window.__sigilMnemonic=mnemonic; sigilSaveSecret(mnemonic);
     try{ localStorage.setItem('sigil-wallet-mnemonic', mnemonic); }catch(e){}
+    // The seed is now PROVEN to belong to this wallet (kp.address===from above),
+    // which is exactly the precondition registration needs. Fire-and-forget: it
+    // asks the chain first and does nothing if already registered.
+    if(window.sigilEnsureRegistered) window.sigilEnsureRegistered(from, kp.priv);
 
     var S=window.__sigilShield;
     var seed32=kp.priv; // sha3_256(mnemonic) — the SAME 32-byte seed convention sigil-top's
@@ -1153,13 +1475,52 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     sendStatus('Deriving '+denomParts.length+' note'+(denomParts.length===1?'':'s')+' and signing…', '#6df3ff');
     var btn=document.getElementById('sendGo'); if(btn)btn.disabled=true;
     var landed=[], failed=null;
+
+    // 2026-08-26 — DUPLICATE-COMMITMENT FIX. A note's blinding is deterministic
+    // in (seed, index), so the old localStorage counter re-derived commitments
+    // that already exist whenever site data was cleared or the wallet was opened
+    // from another origin; sigil_state's replay guard then rejected the deposit
+    // on EVERY block, forever (observed live: 180 rejections on one deposit).
+    // Ask the CHAIN which commitments exist and pick an index that is genuinely
+    // free. The candidate cm is built with the SAME S.* derivation used to
+    // submit it two lines below, so what we test is exactly what we send.
+    var poolTaken=Object.create(null), usedIdx=Object.create(null);
+    try{
+      var plr=await fetch('/v1/shielded/leaves',{cache:'no-store'});
+      var plj=null; try{ plj=await plr.json(); }catch(_){}
+      if(plj && plj.ok && plj.leaves){
+        for(var pi=0;pi<plj.leaves.length;pi++) poolTaken[String(plj.leaves[pi]).toLowerCase()]=1;
+      } else { throw new Error('pool unreadable'); }
+    }catch(e){
+      // Fail CLOSED. Submitting blind is what produced the permanently-stuck
+      // deposits; refusing costs the user one retry and nothing else.
+      sendStatus('✗ could not read the shielded pool — not submitting blind (a re-used note commitment is rejected forever). Try again in a moment.', '#ff8a8a');
+      if(btn)btn.disabled=false; return;
+    }
+    function freeIndexFor(value){
+      for(var idx=0; idx<4096; idx++){
+        if(usedIdx[idx]) continue;
+        var b=S.deriveField(seed32,'blinding',idx);
+        var innr=S.compress2(BigInt(value),b);
+        var c=S.compress2(innr,pk);
+        var h=S.toWireHex(c);
+        if(!poolTaken[String(h).toLowerCase()]){ usedIdx[idx]=1; return {index:idx, blinding:b, cmHex:h}; }
+      }
+      return null;
+    }
+
+    // baseline for the settlement gate — read BEFORE anything is submitted
+    var settleBaseline=await poolNoteCount();
+    var bookedIndices=[];
     for(var i=0;i<denomParts.length;i++){
       var value=denomParts[i];
-      var index=noteIndexNext(from);
-      var blinding=S.deriveField(seed32,'blinding',index);
-      var inner=S.compress2(BigInt(value),blinding);
-      var cm=S.compress2(inner,pk);
-      var cmHex=S.toWireHex(cm);
+      var slot=freeIndexFor(value);
+      if(!slot){ failed='no free note index for '+(Number(value)/1e8).toFixed(8)+' SIGIL in the first 4096 — this wallet has deposited that denomination a lot; try a different amount'; break; }
+      var index=slot.index;
+      var cmHex=slot.cmHex;
+      // Keep the legacy counter moving so anything still reading it stays ahead
+      // of what we actually used, rather than handing out an index we just took.
+      try{ var lk='sigil-shielded-noteidx-'+from; var lv=parseInt(localStorage.getItem(lk)||'0',10)||0; if(index+1>lv) localStorage.setItem(lk,String(index+1)); }catch(e){}
       var fee=(i===0)?0:0; // 0 fee — matches the mine-rig shield-register precedent
       var reqNonce=Date.now()+i; // strictly increasing per part, same nonce space as register
       var sig; try{ sig=window.sigilSign(kp.priv,'shield',[from,value.toString(),cmHex,fee],reqNonce); }
@@ -1172,12 +1533,30 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
           // against the real backend before this shipped.
           body:JSON.stringify({from:from,amount:value.toString(),cm:cmHex,fee:String(fee),sig:sig,req_nonce:reqNonce})});
         var j=null; try{ j=await r.json(); }catch(_){}
-        if(r.ok && j && j.ok){ noteRecord(from,index,Number(value)); landed.push({txid:j.txid,value:value}); }
+        if(r.ok && j && j.ok){ noteRecord(from,index,Number(value)); bookedIndices.push(index); landed.push({txid:j.txid,value:value}); }
         else { failed=(j&&(j.error||j.message))||('HTTP '+r.status); break; }
       }catch(e){ failed='network error — node unreachable'; break; }
     }
-    if(landed.length && !failed){ showReceipt(landed, amtStr, from); setTimeout(function(){ if(window.refresh)refresh(); }, 600); }
-    else if(landed.length && failed){ showReceipt(landed, amtStr, from, 'partial — '+landed.length+'/'+denomParts.length+' parts landed, then: '+failed); }
+    if(landed.length){
+      // SUBMITTED != ACCEPTED. Wait for the pool to actually grow before claiming
+      // anything — see the settlement-gate comment above noteRecord().
+      sendStatus('Submitted — waiting for the network to accept it…', '#6df3ff');
+      var outcome=await awaitSettlement(settleBaseline, landed.length, function(left){
+        sendStatus('Submitted — waiting for the network to accept it… '+left+'s', '#6df3ff');
+      });
+      if(outcome==='settled'){
+        var warn=failed?('partial — '+landed.length+'/'+denomParts.length+' parts landed, then: '+failed):undefined;
+        showReceipt(landed, amtStr, from, warn);
+        setTimeout(function(){ if(window.refresh)refresh(); }, 600);
+      } else if(outcome==='unknown'){
+        showReceipt(landed, amtStr, from,
+          '⚠ could not reach the pool to confirm settlement — this receipt shows what was SUBMITTED, not what settled. Re-check your balance before assuming it landed.');
+      } else {
+        showReceiptUnconfirmed(amtStr,
+          'The node accepted it into the mempool but it was never committed. The most common cause right now is a FULL shielded pool (Shielded(PoolFull)) — every private send fails until that is resolved.',
+          bookedIndices, from);
+      }
+    }
     else { sendStatus('✗ '+failed, '#ff8a8a'); }
     if(btn)btn.disabled=false;
   };
@@ -1216,6 +1595,219 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     ts.style.background=shield?'rgba(33,212,253,.16)':'transparent'; ts.style.color=shield?'#6df3ff':'#7c98a3';
     tp.style.background=shield?'transparent':'rgba(167,139,250,.16)'; tp.style.color=shield?'#7c98a3':'#cdbdfa';
   };
+
+  // ══ UNIFIED SEND ORCHESTRATOR (2026-08-26, operator-directed) ═════════════════
+  // Viktor: users should see WHERE they're sending, then HOW MUCH, in two boxes —
+  // and must not have to shield first. SIGIL genuinely has no transparent send
+  // (SHIELDED_ONLY_HEIGHT = 0 in sigil-tx), so a payment IS shield-then-
+  // shielded-send. What changed is that the shield step is now a PROGRESS LINE the
+  // wallet performs for you, not a decision you have to understand and sequence.
+  //
+  // DELIBERATELY drives the existing doShield()/doPrivateSend()/checkShieldedAddr()
+  // by populating the inputs they already read. No crypto path was rewritten, so
+  // this cannot introduce a spend/proof bug — worst case it mis-drives a step and
+  // the underlying function reports its own error, exactly as it does today.
+  // ══ PRIVACY SECRETS ══════════════════════════════════════════════════════════
+  // Operator ask (2026-08-26): "the text can be much more clever and interesting now
+  // that its going to be read many times ... add interesting exciting to read spicy
+  // privacy secrets". One rotates in each time the modal opens; tapping it advances.
+  //
+  // RULE FOR ANYONE ADDING TO THIS LIST: every line must be a TRUE, checkable property
+  // of THIS codebase, not privacy marketing. Each of the twelve below was verified
+  // against source before shipping — the file:line that backs it is in the comment.
+  // A wallet that lies to look clever is worse than a boring wallet.
+  var SIGIL_SECRETS=[
+    // sigil-wallet-tron-embedded.html — the WASM prover runs in this page
+    "Your spend proof is built <b style='color:#c9b6fb'>in this browser</b>, on this device. The node is handed a proof, never your seed.",
+    // sigil-tx/src/lib.rs:1235 — pub const SHIELDED_ONLY_HEIGHT: u64 = 0
+    "SIGIL has never had a public send. <b style='color:#c9b6fb'>SHIELDED_ONLY_HEIGHT = 0</b> — private since block zero, not privacy bolted on later.",
+    // sigil-shield/src/spend_full_v4.rs — winterfell STARK, no setup ceremony
+    "The proof is a zk-STARK, so there was <b style='color:#c9b6fb'>no trusted setup</b>. Nobody anywhere ever held a secret that could quietly forge coins.",
+    // spend_full_v4.rs:464 — type HashFn = Blake3_256
+    "That STARK is built from plain <b style='color:#c9b6fb'>BLAKE3 hashing</b>. No elliptic curves to break — a quantum computer doesn't get a shortcut here.",
+    // sigil-shield/src/notes.rs:44 — Note::nullifier(spend_key, position)
+    "Spending publishes a <b style='color:#c9b6fb'>nullifier</b>, never the coin. The chain proves you didn't double-spend without ever learning which coin you spent.",
+    // sigil-dandelion/src/lib.rs:13-17 — stem then fluff
+    "Before your payment is shouted to the network it walks a quiet <b style='color:#c9b6fb'>stem path</b> first. The node that broadcasts it is not the node that made it.",
+    // sigil-shield/src/mimc.rs — MiMC chosen for arithmetic-circuit cheapness
+    "Notes are hashed with <b style='color:#c9b6fb'>MiMC</b>, picked because it's cheap <i>inside</i> a proof. The cryptography was chosen to make privacy provable, not just possible.",
+    // sigil-shield/src/note_v1.rs:429 — recipient derives from (height, pk)
+    "The recipient finds your payment with a <b style='color:#c9b6fb'>key of their own</b>. No announcement, no lookup, nothing on-chain saying you two ever spoke.",
+    // sigil-shield/src/notes.rs — balance is a note set, not a stored integer
+    "Your balance isn't a number the chain keeps for you. It's a <b style='color:#c9b6fb'>set of notes</b> only your keys can open — the chain can't read it either.",
+    // spend_full_v4.rs:75 — conservation lane inside the circuit
+    "The amount lives <b style='color:#c9b6fb'>inside the proof</b>. Validators check the money balances without ever learning how much moved.",
+    // SIGIL_GENESIS_v0.md §2 — four state roots per block
+    "Every block commits <b style='color:#c9b6fb'>four state roots</b>. A node lying about your balance can be caught by anyone — privacy here doesn't mean 'just trust us'.",
+    // spend_full_v4.rs:75 — membership proof over the note tree
+    "You prove your coin is <b style='color:#c9b6fb'>somewhere in the tree</b> without pointing at it. That anonymity set is every note ever shielded — it only grows."
+  ];
+  function uniRenderSecret(){
+    var el=document.getElementById('uniSecret'); if(!el) return;
+    var n=0; try{ n=parseInt(localStorage.getItem('sigil-secret-idx')||'0',10)||0; }catch(e){}
+    n=((n%SIGIL_SECRETS.length)+SIGIL_SECRETS.length)%SIGIL_SECRETS.length;
+    el.innerHTML='<span style="color:#a78bfa;letter-spacing:1px">◈ '+(n+1)+'/'+SIGIL_SECRETS.length+'</span>  '+SIGIL_SECRETS[n];
+  }
+  window.uniNextSecret=function(){
+    try{ var n=(parseInt(localStorage.getItem('sigil-secret-idx')||'0',10)||0)+1; localStorage.setItem('sigil-secret-idx',String(n)); }catch(e){}
+    uniRenderSecret();
+  };
+  function uniMsg(m,c){ var el=document.getElementById('uniMsg'); if(el){ el.textContent=m||''; el.style.color=c||'#8fb3c2'; } }
+  function uniStep(n,state){
+    var el=document.getElementById('uniStep'+n); if(!el) return;
+    var label = n===1 ? 'move funds into your private balance' : 'pay the recipient privately';
+    var mark = {todo:'○', busy:'◐', done:'●', fail:'✗'}[state]||'○';
+    var col  = {todo:'#5a93a8', busy:'#6df3ff', done:'#00e0c6', fail:'#ff8a8a'}[state]||'#5a93a8';
+    el.textContent = mark+' '+n+' · '+label; el.style.color = col;
+  }
+  function uniGlow(id,ok){
+    var el=document.getElementById(id); if(!el) return;
+    el.style.borderColor = ok===null ? 'rgba(33,212,253,.26)' : (ok ? 'rgba(0,224,198,.55)' : 'rgba(255,138,138,.55)');
+    el.style.boxShadow   = ok===null ? 'none' : (ok ? '0 0 0 3px rgba(0,224,198,.10)' : '0 0 0 3px rgba(255,138,138,.10)');
+  }
+  window.uniMax=function(){
+    try{ var raw=BigInt(window.SIGIL_RAW||'0'); document.getElementById('uniAmt').value=(Number(raw)/1e8).toFixed(8); }catch(e){}
+  };
+  window.uniToggleAdvanced=function(){
+    var a=document.getElementById('sendAdvanced'), u=document.getElementById('sendUnified'), l=document.getElementById('uniAdvLink');
+    var showAdv = a.style.display==='none';
+    a.style.display = showAdv?'flex':'none';
+    u.style.display = showAdv?'none':'flex';
+    if(showAdv && !a.dataset.init){ window.sendShowTab('shield'); a.dataset.init='1'; }
+    if(!showAdv && l) l.textContent='advanced — shield / send separately';
+  };
+  // Live recipient validation, debounced — replaces the manual CHECK button. Reuses
+  // checkShieldedAddr() verbatim (it sets window.__privRecipient, which doPrivateSend
+  // requires); we just mirror its verdict into the unified box's own status line.
+  var uniAddrTimer=null;
+  window.uniValidateAddr=function(){
+    var v=(document.getElementById('uniAddr').value||'').trim().toLowerCase();
+    var chip=document.getElementById('uniAddrChip');
+    window.__privRecipient=null; uniGlow('uniAddr',null);
+    if(chip) chip.textContent='';
+    document.getElementById('uniAddrMsg').textContent='';
+    if(uniAddrTimer) clearTimeout(uniAddrTimer);
+    if(!v) return;
+    if(!/^[0-9a-f]{64}$/.test(v)){
+      var msg = v.length<64 ? ('needs '+(64-v.length)+' more character'+((64-v.length)===1?'':'s')) : 'not a valid 64-character hex address';
+      document.getElementById('uniAddrMsg').textContent=msg;
+      document.getElementById('uniAddrMsg').style.color='#7c98a3';
+      return;
+    }
+    document.getElementById('uniAddrMsg').textContent='checking this address can receive private payments…';
+    document.getElementById('uniAddrMsg').style.color='#6df3ff';
+    uniAddrTimer=setTimeout(async function(){
+      var ck=document.getElementById('checkAddr'); if(ck) ck.value=v;
+      try{ await window.checkShieldedAddr(); }catch(e){}
+      var el=document.getElementById('uniAddrMsg');
+      if(window.__privRecipient){
+        el.textContent='✓ ready to receive a private payment'; el.style.color='#00e0c6';
+        uniGlow('uniAddr',true);
+        if(chip){ chip.textContent=v.slice(0,8)+'…'+v.slice(-6); chip.style.color='#00e0c6'; }
+      }else{
+        // surface checkShieldedAddr's own verdict rather than inventing one
+        var src=document.getElementById('checkAddrMsg');
+        el.textContent=(src&&src.textContent)?src.textContent:'this address cannot receive private payments yet';
+        el.style.color='#fbbf24';
+        // amber, not red: the address is well-formed, the RECIPIENT just hasn't
+        // published a shielded address. Nothing for the sender to correct by retyping.
+        var box=document.getElementById('uniAddr');
+        if(box){ box.style.borderColor='rgba(251,191,36,.6)'; box.style.boxShadow='0 0 0 3px rgba(251,191,36,.10)'; }
+      }
+    }, 350);
+  };
+  function uniUnspentRaw(from){
+    try{
+      return myNotes(from).filter(function(n){ return !n.spent; })
+        .reduce(function(a,n){ return a + BigInt(n.value); }, 0n);
+    }catch(e){ return 0n; }
+  }
+  window.doUnifiedSend=async function(){
+    var btn=document.getElementById('uniGo');
+    var addr=(document.getElementById('uniAddr').value||'').trim().toLowerCase();
+    var amtStr=(document.getElementById('uniAmt').value||'').trim();
+    uniMsg('');
+    if(!/^[0-9a-f]{64}$/.test(addr)){ uniMsg('Enter the recipient\'s 64-character SIGIL address first.', '#ff8a8a'); uniGlow('uniAddr',false); return; }
+    if(!/^\d+(\.\d{1,8})?$/.test(amtStr) || Number(amtStr)<=0){ uniMsg('Enter an amount greater than 0 (up to 8 decimals).', '#ff8a8a'); uniGlow('uniAmt',false); return; }
+    uniGlow('uniAmt',null);
+    if(!window.__privRecipient){
+      uniMsg('Checking the recipient…', '#6df3ff');
+      var ck=document.getElementById('checkAddr'); if(ck) ck.value=addr;
+      try{ await window.checkShieldedAddr(); }catch(e){}
+      if(!window.__privRecipient){
+        var src=document.getElementById('checkAddrMsg');
+        uniMsg((src&&src.textContent)?src.textContent:'That address cannot receive private payments yet.', '#fbbf24');
+        return;
+      }
+    }
+    var from=(window.MINE_ADDR||window.ADDR||'').toLowerCase();
+    if(!/^[0-9a-f]{64}$/.test(from)){ uniMsg('No wallet address loaded.', '#ff8a8a'); return; }
+
+    var parts=amtStr.split('.');
+    var amountRaw=BigInt(parts[0]||'0')*100000000n + BigInt(((parts[1]||'')+'00000000').slice(0,8));
+
+    document.getElementById('uniSteps').style.display='flex';
+    uniStep(1,'todo'); uniStep(2,'todo');
+    if(btn){ btn.disabled=true; btn.style.opacity='.55'; }
+    function finish(ok){ if(btn){ btn.disabled=false; btn.style.opacity='1'; } }
+
+    try{
+      // ── STEP 1 — top up the private balance ONLY if it's short ───────────────
+      var have=uniUnspentRaw(from);
+      if(have < amountRaw){
+        var shortfall = amountRaw - have;
+        uniStep(1,'busy');
+        uniMsg('Step 1 of 2 — moving '+(Number(shortfall)/1e8).toFixed(8)+' SIGIL into your private balance…', '#6df3ff');
+        var sa=document.getElementById('sendAmt'); if(sa) sa.value=(Number(shortfall)/1e8).toFixed(8);
+        // doShield() ends by switching the modal to the receipt pane; suppress that
+        // for the intermediate step so the user stays in one continuous flow and
+        // only sees a receipt for the payment they actually asked for.
+        var realReceipt=window.showReceipt; var shielded=false;
+        window.showReceipt=function(){ shielded=true; };
+        try{ await window.doShield(); } finally { window.showReceipt=realReceipt; }
+        if(!shielded){
+          uniStep(1,'fail');
+          var sm=document.getElementById('sendMsg');
+          uniMsg((sm&&sm.textContent)?('Step 1 failed — '+sm.textContent):'Step 1 failed while moving funds into your private balance.', '#ff8a8a');
+          return finish(false);
+        }
+        uniStep(1,'done');
+      } else {
+        uniStep(1,'done');
+      }
+
+      // ── STEP 2 — pay the recipient ──────────────────────────────────────────
+      // A freshly shielded note is not spendable until it lands on the DAG. That is
+      // a real property of the chain, not something this UI can hide — so retry a
+      // bounded number of times and SAY what we're waiting for rather than failing
+      // with a confusing error the moment step 1 finishes.
+      uniStep(2,'busy');
+      var pa=document.getElementById('privAmt'); if(pa) pa.value=amtStr;
+      var attempts=0, MAXT=10, ok=false;
+      while(attempts<MAXT && !ok){
+        attempts++;
+        uniMsg(attempts===1 ? 'Step 2 of 2 — building the private payment…'
+                            : 'Step 2 of 2 — waiting for your private balance to finalize on the DAG (attempt '+attempts+' of '+MAXT+')…', '#6df3ff');
+        var before=(document.getElementById('privMsg')||{}).textContent||'';
+        try{ await window.doPrivateSend(); }catch(e){}
+        var pm=(document.getElementById('privMsg')||{}).textContent||'';
+        // doPrivateSend() shows the shared receipt pane on success; that is the
+        // signal we key on, since it has no return value.
+        if(document.getElementById('sendReceipt') && document.getElementById('sendReceipt').style.display!=='none'){ ok=true; break; }
+        if(attempts<MAXT) await new Promise(function(r){ setTimeout(r,3000); });
+      }
+      if(ok){ uniStep(2,'done'); uniMsg(''); }
+      else{
+        uniStep(2,'fail');
+        var pm2=(document.getElementById('privMsg')||{}).textContent||'';
+        uniMsg(pm2 ? ('Step 2 — '+pm2) : 'Your funds ARE in your private balance (step 1 succeeded). The payment could not be built yet — the shielded note usually needs a short while to finalize on the DAG. Press SEND again in a minute; nothing was lost.', '#fbbf24');
+      }
+      finish(ok);
+    }catch(e){
+      uniMsg('Unexpected error: '+(e&&e.message?e.message:e), '#ff8a8a');
+      finish(false);
+    }
+  };
   // wire every Send action (phone + desktop hero + sidebar)
   function wireSend(){
     document.querySelectorAll('.act,.snav a,.dactions .act').forEach(function(el){
@@ -1252,6 +1844,180 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       throw e;
     }
   })();
+</script>
+<script>
+/* ══════════════════════════════════════════════════════════════════════════════
+   SIGIL wallet — shielded AUTO-REGISTRATION + chain-derived note index
+   (2026-08-26, rocky)
+
+   Two bugs this closes, both diagnosed against the LIVE node, not guessed:
+
+   (1) OF EVERY WALLET ON THE CHAIN, EXACTLY ONE WAS REGISTERED to receive
+       shielded payments — and it was registered by hand. Registration is a
+       SIGNED transaction over the wallet's own key (see sigil-api's
+       RegisterRequest), so the node can never do it for you: only something
+       holding the seed can. sigil-top's mine path already auto-registers
+       (shield_setup::spawn_registration_keeper); the BROWSER WALLET never did,
+       and the browser wallet is where every non-mining wallet is born. Result:
+       "recipient has not registered a shielded address" on essentially every
+       private send anyone ever tried. This block registers automatically, from
+       the seed the wallet already holds, the moment it is unlocked.
+
+   (2) DUPLICATE COMMITMENT — deposits rejected forever. A note's blinding is
+       deterministic in (seed, index), and the old index counter lived in
+       localStorage. Clear site data, switch browser, or cross an origin
+       boundary and the counter restarts at 0, re-deriving a commitment that is
+       ALREADY in the pool. sigil_state's replay guard then rejects that deposit
+       on EVERY block, forever — observed live on tx e65fdb6c…: 180 rejections
+       with Shielded(DuplicateCommitment(6663d196e251db01…)) and still going.
+       The chain already knows which commitments exist, so ask IT for a free
+       index instead of trusting a counter that does not survive a cache clear.
+   ══════════════════════════════════════════════════════════════════════════ */
+(function(){
+  function b2h(u8){ return Array.from(u8).map(function(b){return b.toString(16).padStart(2,'0');}).join(''); }
+
+  /* ── 1. AUTO-REGISTRATION ────────────────────────────────────────────────
+     Idempotent and nonce-safe. It ASKS THE CHAIN FIRST, so a wallet that is
+     already registered submits nothing and reopening this page a thousand times
+     costs nothing. On an UNREACHABLE node it does NOT submit: an unknown state
+     is not an absent registration, and guessing burns a nonce on a wallet that
+     may already be registered — the same reasoning sigil-top's registration
+     keeper documents.                                                        */
+  window.__sigilRegState = window.__sigilRegState || {};
+  window.sigilAutoRegisterShield = async function(addr, privBytes, log){
+    log = log || function(){};
+    addr = (addr||'').toLowerCase();
+    if(!/^[0-9a-f]{64}$/.test(addr)) return {ok:false, reason:'bad wallet address'};
+    if(!privBytes || privBytes.length !== 32) return {ok:false, reason:'no seed'};
+    var st = window.__sigilRegState;
+    if(st[addr] === 'ours' || st[addr] === 'pending') return {ok:true, already:true};
+    if(st[addr] === 'foreign') return {ok:false, reason:'registered to a foreign shield key'};
+
+    var seedHex = b2h(privBytes), wasm;
+    try{ wasm = window.sigilShieldWasm || await window.sigilShieldWasmReady; }
+    catch(e){ return {ok:false, reason:'prover not loaded'}; }
+
+    // pk_shield  — the circuit key a note commitment binds to.
+    // pk_encrypt — the X25519 key note ciphertexts are sealed to. BOTH are
+    // required: a registration carrying only pk_shield can be paid privately but
+    // the recipient could never DISCOVER the payment, which is the whole point.
+    var pkShield, pkEncrypt;
+    try{
+      pkShield  = wasm.shieldPublicKey(seedHex);
+      pkEncrypt = wasm.shieldEncryptPublicKey(seedHex);
+    }catch(e){ return {ok:false, reason:'key derivation failed: '+(e&&e.message||e)}; }
+
+    try{
+      var r = await fetch('/v1/shielded/address?wallet='+addr, {cache:'no-store'});
+      var j = null; try{ j = await r.json(); }catch(_){}
+      if(j && j.ok && j.pk_shield){
+        if(String(j.pk_shield).toLowerCase() === String(pkShield).toLowerCase()){
+          st[addr] = 'ours';
+          return {ok:true, already:true};
+        }
+        // Registered to a DIFFERENT shield key: rewards and payments would mint
+        // into notes THIS seed cannot spend — strictly worse than unregistered.
+        // Say so loudly and stop, rather than fight whoever holds the other seed.
+        st[addr] = 'foreign';
+        log('⚠ '+addr.slice(0,10)+'… is already registered to a DIFFERENT shield key — private payments to it cannot be spent by this wallet.');
+        return {ok:false, reason:'registered to a foreign shield key'};
+      }
+    }catch(e){
+      return {ok:false, reason:'node unreachable — not submitting on an unknown state'};
+    }
+
+    // Canonical message is pinned by a test on the Rust side
+    // (shield_setup::signed_message_matches_the_server_side_canonical_format):
+    //   sigil-rpc/v1|shield-register|{wallet}|{pk_shield}|{pk_encrypt}|{fee}|nonce={n}
+    // window.sigilSign builds exactly `sigil-rpc/v1|{action}|{fields…}|nonce={n}`,
+    // so the field ORDER here is load-bearing — do not reorder it.
+    var fee = '0', reqNonce = Date.now(), sig;
+    try{ sig = window.sigilSign(privBytes, 'shield-register', [addr, pkShield, pkEncrypt, fee], reqNonce); }
+    catch(e){ return {ok:false, reason:'signing failed'}; }
+
+    try{
+      var rr = await fetch('/v1/shielded/register', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({wallet:addr, pk_shield:pkShield, pk_encrypt:pkEncrypt, fee:fee, sig:sig, req_nonce:reqNonce})});
+      var rj = null; try{ rj = await rr.json(); }catch(_){}
+      if(rr.ok && rj && rj.ok){
+        st[addr] = 'pending';
+        log('🔐 '+addr.slice(0,10)+'… registered to receive privately — takes a few minutes to settle, then mining rewards mint as private notes too.');
+        return {ok:true, txid: rj.txid};
+      }
+      return {ok:false, reason:(rj && (rj.error||rj.message)) || ('HTTP '+rr.status)};
+    }catch(e){ return {ok:false, reason:'network error'}; }
+  };
+
+  /* Fire-and-forget wrapper: safe to call on every unlock, every send, and at
+     boot. Never throws, never blocks the caller, never shows a modal — the
+     worst case is that it silently does nothing and the wallet behaves exactly
+     as it did before this block existed.                                     */
+  window.sigilEnsureRegistered = function(addr, privBytes){
+    try{
+      Promise.resolve(window.sigilAutoRegisterShield(addr, privBytes, function(line){
+        try{ console.info('[sigil-register]', line); }catch(_){}
+        var el = document.getElementById('privMsg');
+        if(el && !el.textContent) { el.textContent = line; el.style.color = '#00e0c6'; }
+      })).then(function(res){
+        if(res && !res.ok) { try{ console.info('[sigil-register] not registered:', res.reason); }catch(_){} }
+      }).catch(function(){});
+    }catch(e){}
+  };
+
+  /* ── 2. FREE NOTE INDEX, DERIVED FROM THE CHAIN ──────────────────────────
+     Returns the lowest index whose commitment for THIS (seed, value) is not
+     already a leaf in the pool. `used` lets one multi-part deposit skip indices
+     it has already consumed in the same batch — two parts of equal value would
+     otherwise both pick the same "free" index and the second would be rejected
+     as a duplicate, reproducing the very bug this replaces.                   */
+  window.sigilFreeNoteIndex = async function(seedHex, valueStr, opts){
+    opts = opts || {};
+    var wasm = window.sigilShieldWasm || await window.sigilShieldWasmReady;
+    var leaves = opts.leaves;
+    if(!leaves){
+      var lr = await fetch('/v1/shielded/leaves', {cache:'no-store'});
+      var lj = null; try{ lj = await lr.json(); }catch(_){}
+      if(!lj || !lj.ok) throw new Error('could not read the shielded pool');
+      leaves = lj.leaves || [];
+    }
+    var taken = Object.create(null);
+    for(var i=0;i<leaves.length;i++) taken[String(leaves[i]).toLowerCase()] = 1;
+    var used = opts.used || Object.create(null);
+    var scan = opts.scan || 4096;
+    for(var idx=0; idx<scan; idx++){
+      if(used[idx]) continue;
+      var cm; try{ cm = wasm.shieldNoteCommitment(seedHex, idx, String(valueStr)); }catch(e){ continue; }
+      if(!taken[String(cm).toLowerCase()]){ used[idx] = 1; return {index: idx, cm: cm, used: used}; }
+    }
+    throw new Error('no free note index in the first '+scan+' for this amount');
+  };
+
+  /* ── 3. BOOT HOOK ────────────────────────────────────────────────────────
+     If this browser already holds an unlocked wallet, register it now. This is
+     what makes registration "automatic and dynamic" rather than something the
+     user has to know exists: by the time anyone tries to pay this wallet
+     privately, it is already payable.                                        */
+  function bootRegister(){
+    try{
+      var addr = (window.MINE_ADDR || window.ADDR || '').toLowerCase();
+      if(!/^[0-9a-f]{64}$/.test(addr)) return;
+      var m = window.__sigilMnemonic || (window.sigilLoadSecret && window.sigilLoadSecret());
+      if(!m || !window.sigilDeriveAuto) return;
+      var kp; try{ kp = window.sigilDeriveAuto(m, addr); }catch(e){ return; }
+      if(!kp || kp.address !== addr) return;   // wrong phrase for this wallet — not ours to register
+      window.sigilEnsureRegistered(addr, kp.priv);
+    }catch(e){}
+  }
+  // Wait for BOTH the signer and the prover; whichever is slower gates us.
+  (function waitReady(tries){
+    if(tries <= 0) return;
+    if(window.sigilCryptoReady && window.sigilShieldWasmReady){
+      Promise.resolve(window.sigilShieldWasmReady).then(bootRegister).catch(function(){});
+      return;
+    }
+    setTimeout(function(){ waitReady(tries-1); }, 500);
+  })(60);
+})();
 </script>
 <script>
 (function(){
@@ -1317,15 +2083,18 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     try{ wasm = window.sigilShieldWasm || await window.sigilShieldWasmReady; }
     catch(e){ privMsg('Prover failed to load — cannot build a private send.', '#ff8a8a'); return; }
 
-    var mnemonic = window.__sigilMnemonic;
+    var mnemonic = window.__sigilMnemonic || sigilLoadSecret();
     if(!mnemonic){
-      mnemonic = (prompt('Enter your recovery phrase (or 64-hex mining seed) to build this private send.\n(kept in memory for this session only — never saved)')||'').trim();
+      mnemonic = (prompt('Enter your recovery phrase (or 64-hex mining seed) to build this private send.\nSaved in THIS browser until you press LOG OUT.')||'').trim();
       if(!mnemonic){ privMsg('Cancelled — recovery phrase required.', '#fbbf24'); return; }
     }
-    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ window.__sigilMnemonic=null; privMsg('Could not derive a key from that phrase.', '#ff8a8a'); return; }
-    if(kp.address!==from){ window.__sigilMnemonic=null; privMsg('That phrase does not match this wallet address.', '#ff8a8a'); return; }
-    window.__sigilMnemonic=mnemonic;
+    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ window.__sigilMnemonic=null; sigilForgetSecret(); privMsg('Could not derive a key from that phrase.', '#ff8a8a'); return; }
+    if(kp.address!==from){ window.__sigilMnemonic=null; sigilForgetSecret(); privMsg('That phrase belongs to '+kp.address.slice(0,10)+'… but this wallet is '+from.slice(0,10)+'…. Cleared it — press SEND again to enter the right one.', '#ff8a8a'); return; }
+    window.__sigilMnemonic=mnemonic; sigilSaveSecret(mnemonic);
     try{ localStorage.setItem('sigil-wallet-mnemonic', mnemonic); }catch(e){}
+    // Register the SENDER as well — a payer who is not registered cannot be paid
+    // back, and their own mining rewards keep minting transparently.
+    if(window.sigilEnsureRegistered) window.sigilEnsureRegistered(from, kp.priv);
     var seedHex=bytesToHex(kp.priv); // same seed convention as doShield() — see its comment
 
     var btn=document.getElementById('privGo'); if(btn)btn.disabled=true;
@@ -1636,14 +2405,14 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     if(await trySwapFastPath(from,pool,window.__swapDir,q,L,fastNonce,msgEl)) return;
 
     if(!window.sigilCryptoReady){ msgEl.textContent='Signer still loading — try again in a moment.'; return; }
-    var mnemonic=window.__sigilMnemonic;
+    var mnemonic=window.__sigilMnemonic||sigilLoadSecret();
     if(!mnemonic){
-      mnemonic=(prompt('Enter your recovery phrase (or 64-hex mining seed) to sign this swap.\n(kept in memory for this session only — never saved)')||'').trim();
+      mnemonic=(prompt('Enter your recovery phrase (or 64-hex mining seed) to sign this swap.\nSaved in THIS browser until you press LOG OUT.')||'').trim();
       if(!mnemonic){ msgEl.textContent='Swap cancelled — recovery phrase required to sign.'; msgEl.style.color='#fbbf24'; return; }
     }
-    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ window.__sigilMnemonic=null; msgEl.textContent='Could not derive a key from that phrase.'; msgEl.style.color='#ff8a8a'; return; }
-    if(kp.address!==from){ window.__sigilMnemonic=null; msgEl.textContent='That phrase does not match this wallet address.'; msgEl.style.color='#ff8a8a'; return; }
-    window.__sigilMnemonic=mnemonic;
+    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ window.__sigilMnemonic=null; sigilForgetSecret(); msgEl.textContent='Could not derive a key from that phrase.'; msgEl.style.color='#ff8a8a'; return; }
+    if(kp.address!==from){ window.__sigilMnemonic=null; sigilForgetSecret(); msgEl.textContent='That phrase belongs to '+kp.address.slice(0,10)+'… but this wallet is '+from.slice(0,10)+'…. Cleared it — press SEND again to enter the right one.'; msgEl.style.color='#ff8a8a'; return; }
+    window.__sigilMnemonic=mnemonic; sigilSaveSecret(mnemonic);
     try{ localStorage.setItem('sigil-wallet-mnemonic', mnemonic); }catch(e){}
     var reqNonce=Date.now();
     var dir=window.__swapDir;
@@ -1788,6 +2557,383 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
      settles. That mint is NOT instant and NOT reversible from here — this
      modal only submits the lock, it does not wait for or confirm the mint,
      so the copy below says so plainly instead of implying otherwise. -->
+<!-- sigil-metamask.js INLINED here on purpose: sigil-top serves ONLY the
+     surfaces compiled into the binary (serve.rs::embedded_surface), so an
+     external script-src reference would 404 on localhost:9800. Keep it inline;
+     the web copies under dist-*/ load the same code as a separate file. -->
+<script>
+/* ──────────────────────────────────────────────────────────────────────────
+   sigil-metamask.js — SIGILGRAPH ⇄ MetaMask / Polygon integration.
+   2026-08-26. Plain classic script (no bundler, no ESM, no CDN): defines
+   window.SigilMM. Loaded by enter-sigil.html (create-wallet-with-MetaMask)
+   and sigil-wallet-tron.html (connect button + cross-chain bridge modal).
+
+   ── Everything here was verified against the LIVE deployment, not assumed ──
+
+   Wrapped-SIGIL ERC-20, Polygon mainnet (chain 137):
+     0xc224602C32F5c7f68d3Ef002aE4C99e4C7Df25B7
+   Verified live 2026-08-26 by eth_call against polygon-bor-rpc.publicnode.com:
+     symbol()   -> "SIGIL"
+     decimals() -> 18        (0x12)
+
+   The RETURN leg (Polygon -> native SIGIL) calls, on that contract:
+     burn(uint256 amount, bytes32 destSigilAddress)   selector 0xbcf64e05
+   Confirmed by fetching the deployed runtime bytecode via eth_getCode and
+   matching function selectors: `burn(uint256,bytes32)` (0xbcf64e05) IS
+   present; the reversed-argument `burn(bytes32,uint256)` (0x7a408454) and
+   `burn(uint256,address)` (0xfcd3533c) are BOTH absent — so the argument
+   order below is not a guess. The BurnedTo topic hash
+   (0x95d8284568...c9b79785) is likewise present in the bytecode, i.e. the
+   function really does emit the event the relayer watches for. The keccak
+   used to derive those selectors was self-tested against the canonical
+   ERC-20 Transfer topic hash first.
+
+   That event is consumed by crates/sigil-relayer (systemd:
+   sigil-bridge-relayer.service, confirmed ACTIVE 2026-08-26), which decodes
+     event BurnedTo(address indexed from, uint256 amount, bytes32 indexed destSigilAddress)
+   and submits a relayer-signed POST /v1/bridge/unlock to sigil-api, releasing
+   native SIGIL from the bridge vault. Burns are deduped by tx hash in the
+   node's `processed_burns` set, so the same burn can never unlock twice.
+
+   Decimals: native SIGIL is 8dp, wrapped SIGIL is 18dp, so the bridge's one
+   conversion factor is 10^10 (sigil-relayer::DECIMAL_SHIFT). The relayer
+   FLOORS any burn that is not a clean multiple of 10^10 and that dust is
+   unrecoverable — so every amount this file sends is forced to a clean
+   multiple by capping input at 8 decimal places. Never relax that.
+
+   Polygon's native gas token is POL (renamed from MATIC); wallet_addEthereumChain
+   below uses POL deliberately.
+   ────────────────────────────────────────────────────────────────────────── */
+(function (root) {
+  'use strict';
+
+  var POLYGON_PARAMS = {
+    chainId: '0x89',                       // 137
+    chainName: 'Polygon Mainnet',
+    nativeCurrency: { name: 'POL', symbol: 'POL', decimals: 18 },
+    rpcUrls: ['https://polygon-rpc.com', 'https://polygon-bor-rpc.publicnode.com'],
+    blockExplorerUrls: ['https://polygonscan.com']
+  };
+
+  var TOKEN = {
+    address: '0xc224602C32F5c7f68d3Ef002aE4C99e4C7Df25B7',
+    symbol: 'SIGIL',
+    decimals: 18
+  };
+
+  // Read-only fallbacks, same order/endpoints as sigil-api's Chain::Polygon
+  // public_fallbacks() — used when no injected wallet is present so the
+  // balance card still works for a logged-out visitor.
+  var PUBLIC_RPCS = ['https://polygon-bor-rpc.publicnode.com', 'https://1rpc.io/matic'];
+
+  var SEL_BURN      = '0xbcf64e05'; // burn(uint256,bytes32)
+  var SEL_BALANCEOF = '0x70a08231'; // balanceOf(address)
+
+  var DECIMAL_SHIFT = 10000000000n; // 10^10 — native 8dp -> wrapped 18dp
+
+  // ── provider discovery: EIP-6963 first (MetaMask's own recommendation),
+  // legacy window.ethereum as fallback. Pre-6963 the LAST extension to inject
+  // won window.ethereum, so with several wallets installed you could silently
+  // drive the wrong one; 6963 makes each announce itself instead.
+  var providers = [];   // [{info:{uuid,name,rdns,icon}, provider}]
+  var announced = {};
+
+  function onAnnounce(ev) {
+    try {
+      var d = ev.detail; if (!d || !d.provider || !d.info) return;
+      var key = d.info.uuid || d.info.rdns || d.info.name;
+      if (announced[key]) return;
+      announced[key] = true;
+      providers.push({ info: d.info, provider: d.provider });
+    } catch (e) { /* a malformed announce must never break the page */ }
+  }
+
+  if (root.addEventListener) {
+    root.addEventListener('eip6963:announceProvider', onAnnounce);
+    try { root.dispatchEvent(new Event('eip6963:requestProvider')); } catch (e) {}
+  }
+
+  function legacyProviders() {
+    var out = [], eth = root.ethereum;
+    if (!eth) return out;
+    if (Array.isArray(eth.providers)) {
+      eth.providers.forEach(function (p) {
+        out.push({ info: { name: p.isMetaMask ? 'MetaMask' : 'Injected wallet', rdns: 'legacy', uuid: 'legacy-' + out.length }, provider: p });
+      });
+    } else {
+      out.push({ info: { name: eth.isMetaMask ? 'MetaMask' : 'Injected wallet', rdns: 'legacy', uuid: 'legacy-0' }, provider: eth });
+    }
+    return out;
+  }
+
+  function list() {
+    // Re-request each time: extensions can announce late (slow startup, or the
+    // user installs/enables one while the page is open).
+    try { root.dispatchEvent(new Event('eip6963:requestProvider')); } catch (e) {}
+    if (providers.length) return providers.slice();
+    return legacyProviders();
+  }
+
+  function pick() {
+    var all = list();
+    if (!all.length) return null;
+    for (var i = 0; i < all.length; i++) {
+      var n = (all[i].info.rdns || '') + ' ' + (all[i].info.name || '');
+      if (/metamask/i.test(n)) return all[i];        // prefer MetaMask when present
+    }
+    return all[0];
+  }
+
+  var state = { provider: null, account: null, chainId: null, label: null };
+  var listeners = {};
+
+  function emit(name, payload) {
+    (listeners[name] || []).forEach(function (fn) { try { fn(payload); } catch (e) {} });
+  }
+
+  function on(name, fn) { (listeners[name] = listeners[name] || []).push(fn); }
+
+  function available() { return !!pick(); }
+
+  function req(method, params) {
+    if (!state.provider) throw new Error('No wallet connected');
+    return state.provider.request({ method: method, params: params || [] });
+  }
+
+  function bind(p) {
+    if (!p || p.__sigilBound) return;
+    p.__sigilBound = true;
+    try {
+      p.on('accountsChanged', function (accts) {
+        state.account = (accts && accts[0]) ? accts[0].toLowerCase() : null;
+        if (!state.account) { state.provider = null; try { localStorage.removeItem('sigil-mm-connected'); } catch (e) {} }
+        emit('change', getState());
+      });
+      p.on('chainChanged', function (cid) {
+        state.chainId = cid;
+        emit('change', getState());
+      });
+    } catch (e) { /* some injected providers expose no .on — non-fatal */ }
+  }
+
+  function getState() {
+    return {
+      connected: !!state.account,
+      account: state.account,
+      chainId: state.chainId,
+      onPolygon: state.chainId === POLYGON_PARAMS.chainId,
+      label: state.label
+    };
+  }
+
+  /** Connect (prompts MetaMask). Returns the new state. */
+  async function connect() {
+    var sel = pick();
+    if (!sel) {
+      var err = new Error('No browser wallet detected. Install MetaMask, then reload this page.');
+      err.code = 'NO_PROVIDER';
+      throw err;
+    }
+    state.provider = sel.provider;
+    state.label = sel.info.name || 'Injected wallet';
+    bind(state.provider);
+    var accts = await req('eth_requestAccounts');
+    if (!accts || !accts.length) throw new Error('No account was authorized.');
+    state.account = accts[0].toLowerCase();
+    try { state.chainId = await req('eth_chainId'); } catch (e) {}
+    try { localStorage.setItem('sigil-mm-connected', '1'); } catch (e) {}
+    emit('change', getState());
+    return getState();
+  }
+
+  /**
+   * Reconnect silently if the user already authorized this site in a previous
+   * visit — eth_accounts never prompts, so this is safe to call on page load.
+   */
+  async function resume() {
+    try { if (localStorage.getItem('sigil-mm-connected') !== '1') return getState(); } catch (e) { return getState(); }
+    var sel = pick(); if (!sel) return getState();
+    state.provider = sel.provider;
+    state.label = sel.info.name || 'Injected wallet';
+    bind(state.provider);
+    try {
+      var accts = await req('eth_accounts');
+      if (accts && accts.length) {
+        state.account = accts[0].toLowerCase();
+        try { state.chainId = await req('eth_chainId'); } catch (e) {}
+        emit('change', getState());
+      } else {
+        state.provider = null; state.account = null;
+      }
+    } catch (e) { state.provider = null; state.account = null; }
+    return getState();
+  }
+
+  function disconnect() {
+    // EIP-1193 has no revoke; this forgets the site's own connection state.
+    state.provider = null; state.account = null; state.chainId = null; state.label = null;
+    try { localStorage.removeItem('sigil-mm-connected'); } catch (e) {}
+    emit('change', getState());
+  }
+
+  /**
+   * Make sure MetaMask is on Polygon mainnet, adding the network if the user
+   * doesn't have it yet. 4902 = "chain not added"; MetaMask also surfaces that
+   * as -32603 wrapping 4902 in some versions, so both are handled.
+   */
+  async function ensurePolygon() {
+    if (!state.provider) await connect();
+    try { state.chainId = await req('eth_chainId'); } catch (e) {}
+    if (state.chainId === POLYGON_PARAMS.chainId) return true;
+    try {
+      await req('wallet_switchEthereumChain', [{ chainId: POLYGON_PARAMS.chainId }]);
+    } catch (e) {
+      var code = e && (e.code != null ? e.code : (e.data && e.data.originalError && e.data.originalError.code));
+      if (code === 4902 || code === -32603) {
+        await req('wallet_addEthereumChain', [POLYGON_PARAMS]);   // adds AND switches
+      } else {
+        throw e;
+      }
+    }
+    try { state.chainId = await req('eth_chainId'); } catch (e) {}
+    emit('change', getState());
+    return state.chainId === POLYGON_PARAMS.chainId;
+  }
+
+  /**
+   * Ask MetaMask to display wrapped SIGIL in its asset list. Never fatal:
+   * the user may simply decline, and the bridge works either way.
+   */
+  async function watchToken() {
+    if (!state.provider) return false;
+    try {
+      return !!(await req('wallet_watchAsset', {
+        type: 'ERC20',
+        options: { address: TOKEN.address, symbol: TOKEN.symbol, decimals: TOKEN.decimals }
+      }));
+    } catch (e) { return false; }
+  }
+
+  /** connect -> Polygon -> offer the token, in one call. */
+  async function connectFull() {
+    var st = await connect();
+    try { await ensurePolygon(); } catch (e) { /* user may decline the switch */ }
+    try { await watchToken(); } catch (e) {}
+    return getState();
+  }
+
+  async function signMessage(message) {
+    if (!state.account) await connect();
+    return await req('personal_sign', [message, state.account]);
+  }
+
+  // ── ABI helpers (hand-rolled: two static call shapes, no encoder needed) ──
+  function pad32(hexNo0x) {
+    var h = String(hexNo0x).replace(/^0x/, '').toLowerCase();
+    if (h.length > 64) throw new Error('value too wide for uint256/bytes32');
+    return '0'.repeat(64 - h.length) + h;
+  }
+
+  async function rawCall(to, data) {
+    var body = { jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: to, data: data }, 'latest'] };
+    if (state.provider) {
+      try { return await req('eth_call', [{ to: to, data: data }, 'latest']); } catch (e) { /* fall through to public RPC */ }
+    }
+    var lastErr = null;
+    for (var i = 0; i < PUBLIC_RPCS.length; i++) {
+      try {
+        var r = await fetch(PUBLIC_RPCS[i], {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
+        });
+        var j = await r.json();
+        if (j && j.result) return j.result;
+        lastErr = new Error((j && j.error && j.error.message) || 'RPC returned no result');
+      } catch (e) { lastErr = e; }
+    }
+    throw lastErr || new Error('every Polygon RPC endpoint failed');
+  }
+
+  /** Wrapped-SIGIL balance of a Polygon address, as an 18dp wei BigInt. */
+  async function balanceOfWei(addr) {
+    var a = String(addr || '').toLowerCase().replace(/^0x/, '');
+    if (!/^[0-9a-f]{40}$/.test(a)) throw new Error('not a valid Polygon address');
+    var res = await rawCall(TOKEN.address, SEL_BALANCEOF + pad32(a));
+    return BigInt(res || '0x0');
+  }
+
+  /**
+   * Burn wrapped SIGIL on Polygon and instruct the bridge to release the same
+   * amount of native SIGIL to `sigilAddr64hex`.
+   *
+   * @param amountBase8      BigInt, native SIGIL base units (8dp) — NOT wei.
+   * @param sigilAddr64hex   the 64-hex SIGIL wallet address (bytes32).
+   * @returns the Polygon transaction hash.
+   *
+   * THIS SPENDS REAL TOKENS AND IS NOT REVERSIBLE. Callers must confirm first.
+   */
+  async function burnToSigil(amountBase8, sigilAddr64hex) {
+    if (!state.account) await connect();
+    var ok = await ensurePolygon();
+    if (!ok) throw new Error('MetaMask must be on Polygon mainnet to burn wrapped SIGIL.');
+
+    var dest = String(sigilAddr64hex || '').toLowerCase().replace(/^0x/, '');
+    if (!/^[0-9a-f]{64}$/.test(dest)) throw new Error('Destination must be a 64-hex SIGIL address.');
+
+    var amt = BigInt(amountBase8);
+    if (amt <= 0n) throw new Error('Amount must be greater than zero.');
+
+    // 8dp -> 18dp. Because the caller is capped at 8 decimals this is always a
+    // clean multiple of DECIMAL_SHIFT, so the relayer's flooring never bites.
+    var wei = amt * DECIMAL_SHIFT;
+
+    var bal = await balanceOfWei(state.account);
+    if (bal < wei) throw new Error('Not enough wrapped SIGIL on Polygon — you hold ' + formatWei(bal) + '.');
+
+    var data = SEL_BURN + pad32(wei.toString(16)) + pad32(dest);
+    return await req('eth_sendTransaction', [{ from: state.account, to: TOKEN.address, data: data }]);
+  }
+
+  /** 18dp wei BigInt -> display string with 8dp (the native SIGIL precision). */
+  function formatWei(wei) {
+    var base = BigInt(wei) / DECIMAL_SHIFT;              // -> 8dp base units
+    var whole = base / 100000000n;
+    var frac = (base % 100000000n).toString().padStart(8, '0');
+    return whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',') + '.' + frac;
+  }
+
+  /** "1.5" -> 150000000n (8dp base units). Rejects >8dp instead of rounding. */
+  function parseAmount8(str) {
+    var s = String(str || '').trim();
+    if (!/^\d+(\.\d{1,8})?$/.test(s)) throw new Error('Amount must be a number with at most 8 decimals.');
+    var p = s.split('.');
+    return BigInt(p[0] || '0') * 100000000n + BigInt(((p[1] || '') + '00000000').slice(0, 8));
+  }
+
+  root.SigilMM = {
+    POLYGON_PARAMS: POLYGON_PARAMS,
+    TOKEN: TOKEN,
+    DECIMAL_SHIFT: DECIMAL_SHIFT,
+    available: available,
+    list: list,
+    connect: connect,
+    connectFull: connectFull,
+    resume: resume,
+    disconnect: disconnect,
+    ensurePolygon: ensurePolygon,
+    watchToken: watchToken,
+    signMessage: signMessage,
+    balanceOfWei: balanceOfWei,
+    burnToSigil: burnToSigil,
+    formatWei: formatWei,
+    parseAmount8: parseAmount8,
+    getState: getState,
+    on: on,
+    explorerTx: function (h) { return 'https://polygonscan.com/tx/' + h; },
+    explorerToken: function () { return 'https://polygonscan.com/token/' + TOKEN.address; }
+  };
+})(window);
+
+</script>
 <div id="bridge-modal" style="display:none;position:fixed;inset:0;z-index:10001;background:rgba(2,5,9,.82);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:18px">
   <div style="width:100%;max-width:460px;max-height:88vh;display:flex;flex-direction:column;background:linear-gradient(160deg,#06121c,#04080c);border:1px solid rgba(33,212,253,.32);border-radius:16px;box-shadow:0 0 60px rgba(33,212,253,.18);overflow:hidden;font-family:'Rajdhani',system-ui,sans-serif">
     <div style="flex:none;display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid rgba(33,212,253,.18);background:rgba(8,16,24,.7)">
@@ -1853,7 +2999,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       if(accts && accts[0]) document.getElementById('bridgeDest').value=accts[0];
     }catch(e){ /* user rejected — leave the field as-is */ }
   };
-  async function submitBridgeLockSigned(from,base,dest,amtStr,reqNonce,sig){
+  async function submitBridgeLockSigned(from,base,dest,amtStr,reqNonce,sig,lockId,parts){
     bridgeStatus('Submitting…', '#6df3ff'); var btn=document.getElementById('bridgeGo'); if(btn)btn.disabled=true;
     try{
       // NOT /api/v1/bridge/lock — sigil-api only ever registered this route bare at
@@ -1862,7 +3008,9 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       // /api/ prefix returns a real HTTP 404 with a genuine 42-SIGIL balance behind
       // it. serve.rs now proxies bare /v1/* too (same fix, other half).
       var r=await fetch('/v1/bridge/lock',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({from:from,amount:Number(base),dest_polygon_address:dest,sig:sig,req_nonce:reqNonce})});
+        body:JSON.stringify({lock_id:lockId,from:from,amount:Number(base),dest_polygon_address:dest,
+                             parts:parts.map(function(p){return [Number(p.amount),p.cm];}),
+                             sig:sig,req_nonce:reqNonce})});
       var j=null; try{ j=await r.json(); }catch(_){}
       if(r.ok && j && j.ok){ bridgeShowReceipt(j, dest, amtStr, from); setTimeout(function(){ if(window.refresh)refresh(); }, 600); }
       else { bridgeStatus('✗ '+((j&&(j.error||j.message))||('HTTP '+r.status)), '#ff8a8a'); }
@@ -1873,17 +3021,47 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   // ask sigil-top's own local /api/v1/mine-sign to sign the SAME canonical bridge_lock
   // message (byte-identical to what window.sigilSign builds), zero prompt when this box
   // mines. Any failure falls straight through to the manual recovery-phrase flow below.
-  async function tryBridgeFastPath(from,base,dest,amtStr,reqNonce){
+  // PHASE 1: the vault — never the caller — chooses the note commitments the deposit is
+  // shielded into. A caller-chosen commitment would leave the value spendable by the caller
+  // while wrapped SIGIL was minted against it on Polygon, i.e. a free mint.
+  async function bridgePrepare(base){
+    var r=await fetch('/v1/bridge/lock/prepare',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({amount:Number(base)})});
+    var j=null; try{ j=await r.json(); }catch(_){}
+    if(!r.ok || !j || !j.ok) throw new Error((j&&(j.error||j.message))||('HTTP '+r.status));
+    if(!j.parts || !j.parts.length) throw new Error('prepare returned no note commitments');
+    return j;
+  }
+  // sigil-rpc/v1|bridge_lock_shielded|{from}|{amount}|{dest}|{amount0}|{cm0}|…|nonce={n}
+  // Order is load-bearing: the server compares the parts POSITIONALLY.
+  function bridgeSignFields(from,base,dest,parts){
+    var f=[from,base.toString(),dest];
+    for(var i=0;i<parts.length;i++){ f.push(String(parts[i].amount)); f.push(parts[i].cm); }
+    return f;
+  }
+  // Two bases. The relative path only reaches sigil-top when the wallet was OPENED FROM it;
+  // from sigilgraph.org it resolves to the server, which 404s. text/plain keeps it a CORS
+  // simple request (sigil-top's OPTIONS advertises no Allow-Headers).
+  var MINE_SIGN_BASES = ['', 'http://127.0.0.1:9800'];
+  async function mineSign(action, fields, reqNonce, from){
+    for (var i=0; i<MINE_SIGN_BASES.length; i++){
+      try{
+        var fr=await fetch(MINE_SIGN_BASES[i]+'/api/v1/mine-sign',{method:'POST',
+          headers:{'Content-Type':'text/plain'},
+          body:JSON.stringify({action:action, fields:fields, nonce:reqNonce})});
+        if(!fr.ok) continue;
+        var fj=null; try{ fj=await fr.json(); }catch(_){ continue; }
+        if(!fj || !fj.ok || !fj.signature || fj.address!==from) continue;
+        return fj.signature;
+      }catch(e){ /* unreachable base — try the next */ }
+    }
+    return null;
+  }
+  async function tryBridgeFastPath(from,base,dest,amtStr,reqNonce,lockId,parts){
     try{
-      // Message shape MUST byte-match bridge.rs::submit_lock:
-      // sigil-rpc/v1|bridge_lock|{from}|{amount}|{dest}|nonce={req_nonce}
-      var fields=[from,base.toString(),dest];
-      var fr=await fetch('/api/v1/mine-sign',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({action:'bridge_lock', fields:fields, nonce:reqNonce})});
-      if(!fr.ok) return false;
-      var fj=null; try{ fj=await fr.json(); }catch(_){ return false; }
-      if(!fj || !fj.ok || fj.address!==from || !fj.signature) return false;
-      await submitBridgeLockSigned(from,base,dest,amtStr,reqNonce,fj.signature);
+      var sig=await mineSign('bridge_lock_shielded', bridgeSignFields(from,base,dest,parts), reqNonce, from);
+      if(!sig) return false;
+      await submitBridgeLockSigned(from,base,dest,amtStr,reqNonce,sig,lockId,parts);
       return true;
     }catch(e){ return false; }
   }
@@ -1897,22 +3075,28 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     var from=(window.MINE_ADDR||window.ADDR||'').toLowerCase();
     if(!/^[0-9a-f]{64}$/.test(from)){ bridgeStatus('No wallet address loaded.', '#ff8a8a'); return; }
 
+    var prep;
+    bridgeStatus('Preparing lock…', '#6df3ff');
+    try{ prep=await bridgePrepare(base); }
+    catch(e){ bridgeStatus('✗ '+(e&&e.message?e.message:'could not prepare the lock'), '#ff8a8a'); return; }
+    var lockId=prep.lock_id, parts=prep.parts;
+
     var fastNonce=Date.now();
-    if(await tryBridgeFastPath(from,base,dest,amtStr,fastNonce)) return;
+    if(await tryBridgeFastPath(from,base,dest,amtStr,fastNonce,lockId,parts)) return;
 
     if(!window.sigilCryptoReady){ bridgeStatus('Signer still loading — try again in a moment.', '#fbbf24'); return; }
-    var mnemonic=window.__sigilMnemonic;
+    var mnemonic=window.__sigilMnemonic||sigilLoadSecret();
     if(!mnemonic){
-      mnemonic=(prompt('Enter your recovery phrase (or 64-hex mining seed) to sign this bridge lock.\n(kept in memory for this session only — never saved)')||'').trim();
+      mnemonic=(prompt('Enter your recovery phrase (or 64-hex mining seed) to sign this bridge lock.\nSaved in THIS browser until you press LOG OUT.')||'').trim();
       if(!mnemonic){ bridgeStatus('Bridge cancelled — recovery phrase required to sign.', '#fbbf24'); return; }
     }
-    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ window.__sigilMnemonic=null; bridgeStatus('Could not derive a key from that phrase.', '#ff8a8a'); return; }
-    if(kp.address!==from){ window.__sigilMnemonic=null; bridgeStatus('That phrase does not match this wallet address.', '#ff8a8a'); return; }
-    window.__sigilMnemonic=mnemonic;
+    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ window.__sigilMnemonic=null; sigilForgetSecret(); bridgeStatus('Could not derive a key from that phrase.', '#ff8a8a'); return; }
+    if(kp.address!==from){ window.__sigilMnemonic=null; sigilForgetSecret(); bridgeStatus('That phrase belongs to '+kp.address.slice(0,10)+'… but this wallet is '+from.slice(0,10)+'…. Cleared it — press SEND again to enter the right one.', '#ff8a8a'); return; }
+    window.__sigilMnemonic=mnemonic; sigilSaveSecret(mnemonic);
     try{ localStorage.setItem('sigil-wallet-mnemonic', mnemonic); }catch(e){}
     var reqNonce=Date.now();
-    var sig; try{ sig=window.sigilSign(kp.priv,'bridge_lock',[from,base.toString(),dest],reqNonce); }catch(e){ bridgeStatus('Signing failed.', '#ff8a8a'); return; }
-    await submitBridgeLockSigned(from,base,dest,amtStr,reqNonce,sig);
+    var sig; try{ sig=window.sigilSign(kp.priv,'bridge_lock_shielded',bridgeSignFields(from,base,dest,parts),reqNonce); }catch(e){ bridgeStatus('Signing failed.', '#ff8a8a'); return; }
+    await submitBridgeLockSigned(from,base,dest,amtStr,reqNonce,sig,lockId,parts);
   };
   function _bcRow(l,v){ return '<div style="display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid rgba(33,212,253,.09)"><span style="font-family:\'JetBrains Mono\';font-size:10px;letter-spacing:1px;color:#5a93a8;text-transform:uppercase">'+l+'</span><span style="font-family:\'JetBrains Mono\';font-size:11px;color:#cfe9f2;overflow-wrap:anywhere;text-align:right">'+v+'</span></div>'; }
   function bridgeShowReceipt(j, dest, amtStr, from){
@@ -1985,6 +3169,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         <button onclick="setView('phone')" style="flex:1;background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:10px;padding:10px;cursor:pointer;font-family:'JetBrains Mono';font-size:11px">⤡ phone view</button>
         <button onclick="setView('desktop')" style="flex:1;background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:10px;padding:10px;cursor:pointer;font-family:'JetBrains Mono';font-size:11px">⤢ desktop view</button>
       </div>
+      <a href="/api.html" target="_blank" rel="noopener" style="display:block;text-decoration:none;background:rgba(139,92,246,.09);border:1px solid rgba(139,92,246,.38);color:#c4b5fd;border-radius:10px;padding:11px;cursor:pointer;font-family:'Orbitron';font-size:12px;letter-spacing:1px;text-align:center">⌘ NODE API DOCS</a>
+      <div style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8;line-height:1.5">every endpoint this wallet calls, with a run button that hits YOUR node — plus the OpenAPI document for building against it</div>
       <button onclick="sigilLogout()" style="background:rgba(255,122,60,.07);border:1px solid rgba(255,122,60,.35);color:#ff9a6c;border-radius:10px;padding:11px;cursor:pointer;font-family:'Orbitron';font-size:12px;letter-spacing:1px">⎋ LOG OUT / SWITCH WALLET</button>
       <div style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8;line-height:1.5">log out clears this browser's wallet session (the on-chain wallet and its funds are untouched — re-enter with your recovery phrase)</div>
     </div>
@@ -4621,10 +5807,11 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     var n=document.getElementById('npMinersN'); if(n) n.textContent=list.length+' live';
     var el=document.getElementById('npMiners'); if(!el) return;
     if(!list.length){ el.innerHTML='<div style="font-family:\'JetBrains Mono\';font-size:11px;color:#5a93a8;padding:10px 2px">no live miners reporting right now</div>'; return; }
-    el.innerHTML=list.map(function(m){
+    window.__npMiners=list; window.__npNet=d||{};
+    el.innerHTML=list.map(function(m,__mi){
       var icon = m.kind==='gpu' ? '🖥' : (m.kind==='cpu' ? '⛏' : '❓');
       var seen = m.last_seen_secs_ago!=null ? (m.last_seen_secs_ago+'s ago') : '—';
-      return '<div class="act-item">'
+      return '<div class="act-item" data-mi="'+__mi+'" style="cursor:pointer" title="Open miner details">'
         +'<div class="ai" style="font-size:14px">'+icon+'</div>'
         +'<div style="min-width:0;flex:1"><div class="at" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(m.rig||'rig')+'</div>'
         +'<div class="as">'+shortHex(m.wallet)+' · seen '+seen+'</div></div>'
@@ -4810,6 +5997,903 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
   window.addEventListener('hashchange',maybeActivity);
   if(document.readyState!=='loading') maybeActivity();
   else document.addEventListener('DOMContentLoaded',maybeActivity);
+})();
+</script>
+
+<!-- ══════════════════════════════════════════════════════════════════════════
+     2026-08-26 — MetaMask / Polygon cross-chain bridge + miner drill-down.
+
+     Everything below was verified against the live deployment before shipping:
+       · wrapped SIGIL 0xc224602C32F5c7f68d3Ef002aE4C99e4C7Df25B7 on Polygon 137,
+         symbol()="SIGIL" decimals()=18 (live eth_call)
+       · return leg calls burn(uint256,bytes32) sel 0xbcf64e05 — confirmed present
+         in the deployed bytecode, reversed-arg variants confirmed ABSENT
+       · sigil-bridge-relayer.service ACTIVE, decodes BurnedTo and submits the
+         relayer-signed /v1/bridge/unlock that releases native SIGIL
+       · outbound leg reuses the EXISTING proven signing path (window.sigilSign /
+         sigilDeriveAuto) and the same POST /v1/bridge/lock body shape as the
+         original bridge modal — no new signing scheme was invented here.
+     See sigil-metamask.js for the full provenance notes.
+     ══════════════════════════════════════════════════════════════════════════ -->
+<style>
+  .xc-ov{display:none;position:fixed;inset:0;z-index:10006;background:rgba(2,5,9,.84);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:18px}
+  .xc-box{width:100%;max-width:470px;max-height:90vh;display:flex;flex-direction:column;background:linear-gradient(160deg,#06121c,#04080c);border:1px solid rgba(33,212,253,.32);border-radius:16px;box-shadow:0 0 60px rgba(33,212,253,.18);overflow:hidden;font-family:'Rajdhani',system-ui,sans-serif}
+  .xc-hd{flex:none;display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid rgba(33,212,253,.18);background:rgba(8,16,24,.7)}
+  .xc-ttl{font-family:'Orbitron';font-weight:700;letter-spacing:1px;color:#6df3ff;font-size:15px}
+  .xc-sub{font-family:'JetBrains Mono';font-size:10px;color:#5a93a8}
+  .xc-x{background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:8px;width:30px;height:30px;cursor:pointer;font-size:15px}
+  .xc-bd{flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:13px}
+  /* the direction slider: a two-stop track with a sliding knob */
+  .xc-rail{position:relative;display:flex;align-items:stretch;gap:0;background:rgba(4,8,12,.75);border:1px solid rgba(33,212,253,.2);border-radius:14px;padding:5px;overflow:hidden}
+  .xc-knob{position:absolute;top:5px;bottom:5px;left:5px;width:calc(50% - 5px);border-radius:11px;background:linear-gradient(120deg,rgba(33,212,253,.26),rgba(0,224,198,.18));border:1px solid rgba(33,212,253,.45);transition:transform .32s cubic-bezier(.4,1.4,.5,1);pointer-events:none}
+  .xc-ov[data-dir="to_sigil"] .xc-knob{transform:translateX(100%)}
+  .xc-half{position:relative;z-index:1;flex:1;text-align:center;padding:9px 6px;cursor:pointer;user-select:none}
+  .xc-half .n{font-family:'Orbitron';font-weight:700;font-size:11px;letter-spacing:.5px;color:#5a93a8;transition:color .2s}
+  .xc-half .s{font-family:'JetBrains Mono';font-size:9px;color:#456;margin-top:2px}
+  .xc-ov[data-dir="to_polygon"] .xc-half[data-h="0"] .n,
+  .xc-ov[data-dir="to_sigil"]   .xc-half[data-h="1"] .n{color:#6df3ff}
+  .xc-flow{display:flex;align-items:center;justify-content:center;gap:12px;font-family:'JetBrains Mono';font-size:11px;color:#8fb3c2}
+  .xc-chip{display:flex;align-items:center;gap:6px;background:rgba(4,8,12,.7);border:1px solid rgba(33,212,253,.18);border-radius:9px;padding:7px 11px}
+  .xc-swap{background:rgba(33,212,253,.12);border:1px solid rgba(33,212,253,.4);color:#6df3ff;border-radius:50%;width:30px;height:30px;cursor:pointer;font-size:14px;line-height:1;transition:transform .3s}
+  .xc-swap:hover{transform:rotate(180deg)}
+  .xc-lbl{font-family:'JetBrains Mono';font-size:10px;letter-spacing:1px;color:#6df3ff;text-transform:uppercase}
+  .xc-in{width:100%;box-sizing:border-box;background:rgba(4,8,12,.7);border:1px solid rgba(33,212,253,.22);border-radius:10px;color:#cfe9f2;font-family:'JetBrains Mono';font-size:12px;padding:11px 12px;outline:none}
+  .xc-amt{flex:1;min-width:0;background:rgba(4,8,12,.7);border:1px solid rgba(33,212,253,.22);border-radius:10px;color:#cfe9f2;font-family:'Orbitron';font-size:19px;padding:10px 12px;outline:none}
+  .xc-rng{width:100%;-webkit-appearance:none;appearance:none;height:5px;border-radius:4px;background:linear-gradient(90deg,#21d4fd var(--p,0%),rgba(33,212,253,.14) var(--p,0%));outline:none;margin:2px 0}
+  .xc-rng::-webkit-slider-thumb{-webkit-appearance:none;width:17px;height:17px;border-radius:50%;background:#06121c;border:2px solid #21d4fd;cursor:pointer;box-shadow:0 0 9px rgba(33,212,253,.6)}
+  .xc-rng::-moz-range-thumb{width:17px;height:17px;border-radius:50%;background:#06121c;border:2px solid #21d4fd;cursor:pointer}
+  .xc-pcts{display:flex;gap:6px}
+  .xc-pct{flex:1;background:rgba(33,212,253,.07);border:1px solid rgba(33,212,253,.22);color:#8fb3c2;border-radius:8px;padding:6px;cursor:pointer;font-family:'JetBrains Mono';font-size:10px}
+  .xc-pct:hover{color:#6df3ff;border-color:rgba(33,212,253,.5)}
+  .xc-go{border:1px solid rgba(33,212,253,.45);background:linear-gradient(90deg,rgba(33,212,253,.2),rgba(0,224,198,.13));color:#6df3ff;font-family:'Orbitron';font-weight:700;font-size:13px;letter-spacing:1px;padding:13px;border-radius:11px;cursor:pointer}
+  .xc-go:disabled{opacity:.5;cursor:not-allowed}
+  .xc-msg{font-family:'JetBrains Mono';font-size:11px;color:#8fb3c2;min-height:14px;line-height:1.5;word-break:break-word}
+  .xc-warn{font-family:'JetBrains Mono';font-size:10px;color:#fbbf24;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.25);border-radius:9px;padding:9px 10px;line-height:1.5}
+  .xc-mm{display:flex;align-items:center;gap:9px;background:rgba(4,8,12,.6);border:1px solid rgba(33,212,253,.16);border-radius:10px;padding:9px 11px}
+  .xc-mmb{flex:none;background:rgba(33,212,253,.1);border:1px solid rgba(33,212,253,.4);color:#6df3ff;border-radius:8px;padding:7px 12px;cursor:pointer;font-family:'Orbitron';font-size:10px;letter-spacing:.5px}
+  .xc-dot{width:7px;height:7px;border-radius:50%;background:#456;flex:none}
+  .xc-dot.on{background:#00e0c6;box-shadow:0 0 7px rgba(0,224,198,.8)}
+  .xc-row{display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid rgba(33,212,253,.09);font-family:'JetBrains Mono';font-size:11px}
+  .xc-row .k{color:#5a93a8}
+  .xc-row .v{color:#cfe9f2;text-align:right;word-break:break-all}
+  .xc-bar{height:6px;border-radius:4px;background:rgba(33,212,253,.13);overflow:hidden;margin-top:5px}
+  .xc-bar i{display:block;height:100%;background:linear-gradient(90deg,#21d4fd,#00e0c6);border-radius:4px}
+</style>
+
+<!-- ── cross-chain bridge (bidirectional) ── -->
+<div id="xchain-modal" class="xc-ov" data-dir="to_polygon">
+  <div class="xc-box">
+    <div class="xc-hd">
+      <div style="font-size:20px">&#127760;</div>
+      <div style="flex:1"><div class="xc-ttl">CROSS-CHAIN BRIDGE</div>
+        <div class="xc-sub" id="xcSub">SIGIL &#8644; Polygon &middot; 1:1 wrapped</div></div>
+      <button class="xc-x" onclick="closeXChain()">&#10005;</button>
+    </div>
+
+    <div id="xcReceipt" style="display:none;flex:1;overflow-y:auto;padding:18px;flex-direction:column;gap:11px">
+      <div style="text-align:center;padding:6px 0 2px">
+        <div style="font-size:34px;color:#00e0c6;text-shadow:0 0 18px rgba(0,224,198,.6)">&#10003;</div>
+        <div id="xcRcTtl" style="font-family:'Orbitron';font-weight:700;letter-spacing:1px;color:#00e0c6;font-size:14px;margin-top:2px"></div>
+        <div id="xcRcAmt" style="font-family:'Orbitron';font-weight:900;font-size:25px;color:#6df3ff;margin-top:6px"></div>
+      </div>
+      <div id="xcRcRows"></div>
+      <div class="xc-warn" id="xcRcNote"></div>
+      <button class="xc-go" onclick="xcReceiptDone()">DONE</button>
+    </div>
+
+    <div class="xc-bd" id="xcForm">
+      <div class="xc-rail" id="xcRail">
+        <div class="xc-knob"></div>
+        <div class="xc-half" data-h="0" onclick="xcSetDir('to_polygon')">
+          <div class="n">SIGIL &#8594; POLYGON</div><div class="s">lock &middot; relayer mints</div></div>
+        <div class="xc-half" data-h="1" onclick="xcSetDir('to_sigil')">
+          <div class="n">POLYGON &#8594; SIGIL</div><div class="s">burn &middot; relayer unlocks</div></div>
+      </div>
+
+      <div class="xc-flow">
+        <div class="xc-chip" id="xcFrom">&#9670; SIGIL</div>
+        <button class="xc-swap" onclick="xcFlip()" title="swap direction">&#8646;</button>
+        <div class="xc-chip" id="xcTo">&#11041; Polygon</div>
+      </div>
+
+      <div class="xc-mm">
+        <span class="xc-dot" id="xcDot"></span>
+        <div style="flex:1;min-width:0">
+          <div style="font-family:'JetBrains Mono';font-size:10.5px;color:#cfe9f2" id="xcMMTxt">MetaMask not connected</div>
+          <div style="font-family:'JetBrains Mono';font-size:9.5px;color:#5a93a8" id="xcMMSub">needed for the Polygon side</div>
+        </div>
+        <button class="xc-mmb" id="xcMMBtn" onclick="xcConnectMM()">CONNECT</button>
+      </div>
+
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:baseline">
+          <label class="xc-lbl">Amount</label>
+          <span style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8">available <b id="xcAvail" style="color:#00e0c6">&mdash;</b></span>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <input id="xcAmt" type="text" inputmode="decimal" placeholder="0.00000000" class="xc-amt" oninput="xcOnAmt()">
+          <button onclick="xcPct(100)" style="background:rgba(0,224,198,.1);border:1px solid rgba(0,224,198,.4);color:#00e0c6;border-radius:10px;padding:0 14px;font-family:'Rajdhani';font-weight:700;cursor:pointer">MAX</button>
+        </div>
+        <input id="xcRange" class="xc-rng" type="range" min="0" max="100" value="0" step="1" oninput="xcOnRange(this.value)">
+        <div class="xc-pcts">
+          <button class="xc-pct" onclick="xcPct(25)">25%</button>
+          <button class="xc-pct" onclick="xcPct(50)">50%</button>
+          <button class="xc-pct" onclick="xcPct(75)">75%</button>
+          <button class="xc-pct" onclick="xcPct(100)">100%</button>
+        </div>
+      </div>
+
+      <div>
+        <label class="xc-lbl" id="xcDestLbl">Destination &mdash; Polygon address</label>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <input id="xcDest" class="xc-in" placeholder="0x&hellip;" autocomplete="off" spellcheck="false">
+          <button onclick="xcFillDest()" title="autofill" style="flex:none;background:rgba(33,212,253,.1);border:1px solid rgba(33,212,253,.35);color:#6df3ff;border-radius:10px;padding:0 13px;cursor:pointer;font-size:14px">&#8623;</button>
+        </div>
+      </div>
+
+      <div class="xc-warn" id="xcNote"></div>
+      <button class="xc-go" id="xcGo" onclick="xcGo()">BRIDGE</button>
+      <div class="xc-msg" id="xcMsg"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── miner drill-down ── -->
+<div id="miner-modal" class="xc-ov">
+  <div class="xc-box" style="max-width:430px">
+    <div class="xc-hd">
+      <div style="font-size:20px" id="mdIcon">&#9935;</div>
+      <div style="flex:1;min-width:0">
+        <div class="xc-ttl" id="mdRig" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+        <div class="xc-sub" id="mdSub"></div>
+      </div>
+      <button class="xc-x" onclick="closeMiner()">&#10005;</button>
+    </div>
+    <div class="xc-bd" id="mdBody"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  'use strict';
+  var MM = window.SigilMM;
+
+  /* ── small helpers ─────────────────────────────────────────────────────── */
+  function $(id){ return document.getElementById(id); }
+  function fmt8(base){                       // 8dp base units -> display string
+    var b=BigInt(base), w=b/100000000n, f=(b%100000000n).toString().padStart(8,'0');
+    return w.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')+'.'+f;
+  }
+  function fmtHps(h){
+    h=Number(h)||0; var u=['H/s','KH/s','MH/s','GH/s','TH/s','PH/s'], i=0;
+    while(h>=1000 && i<u.length-1){ h/=1000; i++; }
+    return (h<10?h.toFixed(2):h<100?h.toFixed(1):h.toFixed(0))+' '+u[i];
+  }
+  function shortH(h){ h=String(h||''); return h.length>16 ? h.slice(0,8)+'…'+h.slice(-6) : h; }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+  function msg(t,c){ var e=$('xcMsg'); if(e){ e.textContent=t||''; e.style.color=c||'#8fb3c2'; } }
+
+  /* ── state ─────────────────────────────────────────────────────────────── */
+  var dir='to_polygon';           // 'to_polygon' = lock native | 'to_sigil' = burn wrapped
+  var availBase=0n;               // available balance on the SOURCE chain, 8dp base units
+
+  function sigilAddr(){ return String(window.MINE_ADDR||window.ADDR||'').toLowerCase(); }
+
+  /* ── MetaMask connection chrome ────────────────────────────────────────── */
+  function paintMM(){
+    var st = MM ? MM.getState() : {connected:false};
+    var dot=$('xcDot'), txt=$('xcMMTxt'), sub=$('xcMMSub'), btn=$('xcMMBtn');
+    var nav=$('mmNavTxt');
+    if(st.connected){
+      if(dot) dot.className='xc-dot on';
+      if(txt) txt.textContent=(st.label||'Wallet')+' · '+st.account.slice(0,6)+'…'+st.account.slice(-4);
+      if(sub) sub.textContent= st.onPolygon ? 'Polygon mainnet ✓' : 'wrong network — click SWITCH';
+      if(btn) btn.textContent= st.onPolygon ? 'TOKEN' : 'SWITCH';
+      if(nav) nav.textContent=st.account.slice(0,6)+'…'+st.account.slice(-4);
+    } else {
+      if(dot) dot.className='xc-dot';
+      if(txt) txt.textContent='MetaMask not connected';
+      if(sub) sub.textContent='needed for the Polygon side';
+      if(btn) btn.textContent='CONNECT';
+      if(nav) nav.textContent='Connect MetaMask';
+    }
+  }
+
+  window.xcConnectMM = async function(){
+    if(!MM){ msg('MetaMask helper failed to load — reload the page.','#ff8a8a'); return; }
+    if(!MM.available()){
+      msg('No browser wallet detected. Install MetaMask, then reload this page.','#ff8a8a');
+      paintMM(); return;
+    }
+    try{
+      var st=MM.getState();
+      if(!st.connected){ msg('Waiting for MetaMask…','#6df3ff'); await MM.connect(); }
+      msg('Switching to Polygon…','#6df3ff');
+      try{ await MM.ensurePolygon(); }catch(e){}
+      msg('Adding the wrapped SIGIL token…','#6df3ff');
+      try{ await MM.watchToken(); }catch(e){}
+      msg('');
+      paintMM(); xcFillDest(); refreshAvail();
+    }catch(e){
+      msg(e && e.code===4001 ? 'Cancelled in MetaMask.' : ('MetaMask: '+((e&&e.message)||e)),'#ff8a8a');
+      paintMM();
+    }
+  };
+
+  /* ── direction + balances ──────────────────────────────────────────────── */
+  window.xcSetDir=function(d){
+    dir=(d==='to_sigil')?'to_sigil':'to_polygon';
+    var m=$('xchain-modal'); if(m) m.setAttribute('data-dir',dir);
+    var toPoly = dir==='to_polygon';
+    $('xcFrom').innerHTML = toPoly ? '◈ SIGIL' : '⬟ Polygon';
+    $('xcTo').innerHTML   = toPoly ? '⬟ Polygon' : '◈ SIGIL';
+    $('xcDestLbl').textContent = toPoly ? 'Destination — Polygon address' : 'Destination — SIGIL address';
+    $('xcDest').placeholder = toPoly ? '0x… 40-hex Polygon address' : '64-hex SIGIL address';
+    $('xcGo').textContent = toPoly ? '🌉 LOCK & BRIDGE' : '🔥 BURN & BRIDGE';
+    $('xcNote').innerHTML = toPoly
+      ? 'Locks native SIGIL you already hold into the chain’s bridge vault. The relayer then mints the same amount of wrapped SIGIL to your Polygon address. The lock is submitted here — the mint is not instant and is not reversible from this screen.'
+      : 'Burns wrapped SIGIL on Polygon (a real Polygon transaction — you pay POL gas). The relayer sees the burn and releases the same amount of native SIGIL to the address below. <b>Burning is irreversible.</b>';
+    $('xcAmt').value=''; $('xcRange').value=0; paintRange(0);
+    msg(''); xcFillDest(); refreshAvail();
+  };
+  window.xcFlip=function(){ xcSetDir(dir==='to_polygon'?'to_sigil':'to_polygon'); };
+
+  window.xcFillDest=function(){
+    var st = MM ? MM.getState() : {};
+    if(dir==='to_polygon'){
+      var a = st.account;
+      if(!a){ try{ a=localStorage.getItem('sigil-mm-account')||''; }catch(e){} }
+      if(a) $('xcDest').value=a;
+    } else {
+      var s=sigilAddr(); if(/^[0-9a-f]{64}$/.test(s)) $('xcDest').value=s;
+    }
+  };
+
+  async function refreshAvail(){
+    var el=$('xcAvail'); if(el) el.textContent='…';
+    try{
+      if(dir==='to_polygon'){
+        availBase = BigInt(window.SIGIL_RAW||'0');
+        if(el) el.textContent=fmt8(availBase)+' SIGIL';
+      } else {
+        var st = MM ? MM.getState() : {};
+        if(!st.connected){ availBase=0n; if(el) el.textContent='connect MetaMask'; return; }
+        var wei = await MM.balanceOfWei(st.account);
+        availBase = wei / MM.DECIMAL_SHIFT;          // 18dp -> 8dp base units
+        if(el) el.textContent=fmt8(availBase)+' wSIGIL';
+      }
+    }catch(e){ availBase=0n; if(el) el.textContent='unavailable'; }
+  }
+
+  /* ── amount slider ─────────────────────────────────────────────────────── */
+  function paintRange(p){ var r=$('xcRange'); if(r) r.style.setProperty('--p', p+'%'); }
+  window.xcOnRange=function(p){
+    p=Number(p)||0; paintRange(p);
+    if(availBase<=0n){ $('xcAmt').value=''; return; }
+    var v = (availBase * BigInt(Math.round(p))) / 100n;
+    $('xcAmt').value = p===0 ? '' : fmt8(v).replace(/,/g,'');
+  };
+  window.xcPct=function(p){ $('xcRange').value=p; xcOnRange(p); };
+  window.xcOnAmt=function(){
+    // keep the slider in step when the user types an amount by hand
+    try{
+      var v=MM.parseAmount8($('xcAmt').value||'0');
+      var p = availBase>0n ? Number((v*100n)/availBase) : 0;
+      p=Math.max(0,Math.min(100,p)); $('xcRange').value=p; paintRange(p);
+    }catch(e){}
+  };
+
+  /* ── open / close ──────────────────────────────────────────────────────── */
+  window.openXChain=function(d){
+    var m=$('xchain-modal'); if(!m) return;
+    $('xcForm').style.display='flex'; $('xcReceipt').style.display='none';
+    m.style.display='flex';
+    if(MM && MM.resume) MM.resume().then(paintMM);
+    paintMM();
+    xcSetDir(d||dir);
+  };
+  window.closeXChain=function(){ var m=$('xchain-modal'); if(m) m.style.display='none'; };
+  window.xcReceiptDone=function(){ closeXChain(); if(window.refresh) try{ refresh(); }catch(e){} };
+
+  /* ── submit ────────────────────────────────────────────────────────────── */
+  function receipt(title, amtStr, rows, note){
+    $('xcRcTtl').textContent=title;
+    $('xcRcAmt').textContent=amtStr;
+    $('xcRcRows').innerHTML=rows.map(function(r){
+      return '<div class="xc-row"><span class="k">'+esc(r[0])+'</span><span class="v">'+r[1]+'</span></div>';
+    }).join('');
+    $('xcRcNote').innerHTML=note;
+    $('xcForm').style.display='none'; $('xcReceipt').style.display='flex';
+  }
+
+  window.xcGo=async function(){
+    var btn=$('xcGo');
+    var amtStr=String($('xcAmt').value||'').trim();
+    var base; try{ base=MM.parseAmount8(amtStr); }catch(e){ msg(e.message,'#ff8a8a'); return; }
+    if(base<=0n){ msg('Amount must be greater than zero.','#ff8a8a'); return; }
+    if(availBase>0n && base>availBase){ msg('Amount exceeds your available balance.','#ff8a8a'); return; }
+    var dest=String($('xcDest').value||'').trim();
+
+    btn.disabled=true;
+    try{
+      if(dir==='to_polygon'){
+        /* ── native SIGIL -> Polygon: lock, signed with the SIGIL key ──────
+           Deliberately reuses the wallet's existing signer + the same
+           POST /v1/bridge/lock body the original bridge modal sends. */
+        var destN=dest.toLowerCase().replace(/^0x/,'');
+        if(!/^[0-9a-f]{40}$/.test(destN)){ msg('Destination must be a valid Polygon address (0x… 40 hex).','#ff8a8a'); return; }
+        var from=sigilAddr();
+        if(!/^[0-9a-f]{64}$/.test(from)){ msg('No SIGIL wallet address loaded.','#ff8a8a'); return; }
+        if(!window.sigilCryptoReady){ msg('Signer still loading — try again in a moment.','#fbbf24'); return; }
+
+        var mn=window.__sigilMnemonic||(window.sigilLoadSecret&&window.sigilLoadSecret());
+        if(!mn){
+          mn=(prompt('Enter your recovery phrase (or 64-hex mining seed) to sign this bridge lock.\nSaved in THIS browser until you press LOG OUT.')||'').trim();
+          if(!mn){ msg('Cancelled — recovery phrase required to sign.','#fbbf24'); return; }
+        }
+        var kp; try{ kp=window.sigilDeriveAuto(mn, from); }
+        catch(e){ window.__sigilMnemonic=null; if(window.sigilForgetSecret) sigilForgetSecret(); msg('Could not derive a key from that phrase.','#ff8a8a'); return; }
+        if(kp.address!==from){
+          window.__sigilMnemonic=null; if(window.sigilForgetSecret) sigilForgetSecret();
+          msg('That phrase belongs to '+kp.address.slice(0,10)+'… but this wallet is '+from.slice(0,10)+'…. Cleared it — press BRIDGE again.','#ff8a8a'); return;
+        }
+        window.__sigilMnemonic=mn; if(window.sigilSaveSecret) sigilSaveSecret(mn);
+
+        var nonce=Date.now();
+        var sig=window.sigilSign(kp.priv,'bridge_lock',[from,base.toString(),dest],nonce);
+        msg('Submitting lock…','#6df3ff');
+        var r=await fetch('/v1/bridge/lock',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({from:from,amount:Number(base),dest_polygon_address:dest,sig:sig,req_nonce:nonce})});
+        var j=null; try{ j=await r.json(); }catch(_){}
+        if(!(r.ok && j && j.ok)){ msg('✗ '+((j&&(j.error||j.message))||('HTTP '+r.status)),'#ff8a8a'); return; }
+        receipt('LOCKED — QUEUED FOR MINT', fmt8(base)+' SIGIL', [
+          ['direction','SIGIL → Polygon'],
+          ['from', esc(shortH(from))],
+          ['to', esc(dest)],
+          ['vault', esc(shortH((j.data&&j.data.vault)||''))]
+        ], 'The lock is submitted, not the mint. The relayer mints wrapped SIGIL to your Polygon address once this settles — check the Polygon balance again in a few minutes, not instantly.');
+
+      } else {
+        /* ── Polygon -> native SIGIL: burn wrapped, relayer unlocks ──────── */
+        var destS=dest.toLowerCase().replace(/^0x/,'');
+        if(!/^[0-9a-f]{64}$/.test(destS)){ msg('Destination must be a 64-hex SIGIL address.','#ff8a8a'); return; }
+        if(!MM || !MM.getState().connected){ msg('Connect MetaMask first.','#ff8a8a'); return; }
+        if(!confirm('Burn '+fmt8(base)+' wrapped SIGIL on Polygon?\n\nThis is a real, IRREVERSIBLE Polygon transaction. The bridge relayer will then release the same amount of native SIGIL to:\n\n'+destS)) { msg('Cancelled.','#fbbf24'); return; }
+        msg('Confirm the burn in MetaMask…','#6df3ff');
+        var tx=await MM.burnToSigil(base, destS);
+        receipt('BURNED — QUEUED FOR RELEASE', fmt8(base)+' wSIGIL', [
+          ['direction','Polygon → SIGIL'],
+          ['tx','<a href="'+MM.explorerTx(tx)+'" target="_blank" rel="noreferrer" style="color:#6df3ff">'+esc(shortH(tx))+'</a>'],
+          ['to', esc(shortH(destS))]
+        ], 'The burn is on Polygon now. The relayer releases native SIGIL once the burn has enough confirmations — it polls every ~15s, so allow a few minutes. Each burn can only ever be released once.');
+      }
+    }catch(e){
+      msg(e && e.code===4001 ? 'Cancelled in MetaMask.' : ('✗ '+((e&&e.message)||e)),'#ff8a8a');
+    }finally{ btn.disabled=false; }
+  };
+
+  /* Route the wallet's existing bridge entry points at this modal. */
+  window.openBridge = function(){ openXChain('to_polygon'); };
+  window.openBridgeFrom = function(){ openXChain('to_polygon'); };
+
+  if(MM && MM.on) MM.on('change', function(){ paintMM(); refreshAvail(); });
+  if(MM && MM.resume) MM.resume().then(paintMM).catch(function(){});
+
+  /* ══ miner drill-down ═════════════════════════════════════════════════════
+     Every figure below is read from /v1/mining/miners, or derived from it by
+     plain arithmetic. Nothing is estimated from outside that payload. */
+  window.closeMiner=function(){ var m=$('miner-modal'); if(m) m.style.display='none'; };
+
+  window.openMiner=function(idx){
+    var list=window.__npMiners||[], net=window.__npNet||{};
+    var m=list[idx]; if(!m) return;
+    var netHps=Number(net.net_hps)||0;
+    var hps=Number(m.hash_rate)||0;
+    var share = netHps>0 ? (hps/netHps*100) : 0;
+
+    // Same wallet can run several rigs — aggregate them, that is real signal.
+    var sameWallet=list.filter(function(x){ return x.wallet===m.wallet; });
+    var walletHps=sameWallet.reduce(function(a,x){ return a+(Number(x.hash_rate)||0); },0);
+    var walletShare = netHps>0 ? (walletHps/netHps*100) : 0;
+    var rank=list.indexOf(m)+1;
+
+    $('mdIcon').innerHTML = m.kind==='gpu' ? '🖥' : (m.kind==='cpu' ? '⛏' : '❓');
+    $('mdRig').textContent = m.rig||'rig';
+    $('mdSub').textContent = 'rank #'+rank+' of '+list.length+' live · '+(m.kind||'unknown')+(m.shielded?' · shielded':'');
+
+    var rows=[
+      ['hashrate', esc(fmtHps(hps))],
+      ['share of network', '<b style="color:#00e0c6">'+share.toFixed(share<1?3:2)+'%</b>'],
+      ['rank', '#'+rank+' of '+list.length],
+      ['type', esc(m.kind||'unknown')],
+      ['last seen', m.last_seen_secs_ago!=null ? esc(m.last_seen_secs_ago+'s ago') : '—'],
+      ['shielded', m.shielded ? 'yes' : 'no']
+    ];
+
+    var html=''
+      + '<div>'
+      +   '<div style="font-family:\'JetBrains Mono\';font-size:10px;color:#5a93a8;text-transform:uppercase;letter-spacing:1px">Share of network power</div>'
+      +   '<div style="font-family:\'Orbitron\';font-weight:900;font-size:30px;color:#21d4fd;margin-top:3px">'+share.toFixed(share<1?3:2)+'<span style="font-size:15px">%</span></div>'
+      +   '<div class="xc-bar"><i style="width:'+Math.max(0.6,Math.min(100,share)).toFixed(2)+'%"></i></div>'
+      +   '<div style="font-family:\'JetBrains Mono\';font-size:10px;color:#5a93a8;margin-top:5px">'+esc(fmtHps(hps))+' of '+esc(fmtHps(netHps))+' network</div>'
+      + '</div>'
+      + '<div>'+rows.map(function(r){
+          return '<div class="xc-row"><span class="k">'+esc(r[0])+'</span><span class="v">'+r[1]+'</span></div>'; }).join('')+'</div>';
+
+    if(sameWallet.length>1){
+      html += '<div>'
+        + '<div class="xc-lbl" style="margin-bottom:5px">Same wallet · '+sameWallet.length+' rigs</div>'
+        + '<div class="xc-row"><span class="k">combined hashrate</span><span class="v">'+esc(fmtHps(walletHps))+'</span></div>'
+        + '<div class="xc-row"><span class="k">combined share</span><span class="v"><b style="color:#00e0c6">'+walletShare.toFixed(walletShare<1?3:2)+'%</b></span></div>'
+        + sameWallet.map(function(x){
+            return '<div class="xc-row"><span class="k" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(x.rig||'rig')+'</span><span class="v">'+esc(fmtHps(x.hash_rate||0))+'</span></div>'; }).join('')
+        + '</div>';
+    }
+
+    html += '<div>'
+      + '<div class="xc-lbl" style="margin-bottom:5px">Wallet</div>'
+      + '<div style="font-family:\'JetBrains Mono\';font-size:10.5px;color:#cfe9f2;word-break:break-all;background:rgba(4,8,12,.7);border:1px solid rgba(33,212,253,.16);border-radius:9px;padding:9px 10px">'+esc(m.wallet)+'</div>'
+      + '<div style="display:flex;gap:8px;margin-top:7px">'
+      +   '<button class="xc-pct" onclick="mdCopy(\''+esc(m.wallet)+'\')">copy address</button>'
+      +   '<button class="xc-pct" onclick="mdBalance(\''+esc(m.wallet)+'\')" id="mdBalBtn">load balance</button>'
+      + '</div>'
+      + '<div id="mdBal" style="font-family:\'JetBrains Mono\';font-size:11px;color:#8fb3c2;margin-top:7px;line-height:1.5"></div>'
+      + '</div>';
+
+    // Expected-blocks framing is pure arithmetic on the share, not a forecast
+    // of luck: it says what fraction of blocks this power is entitled to.
+    html += '<div class="xc-warn" style="color:#8fb3c2;border-color:rgba(33,212,253,.2);background:rgba(33,212,253,.05)">'
+      + 'At this share, this rig is entitled to about <b style="color:#6df3ff">'+share.toFixed(2)+'</b> of every 100 blocks the network mints. '
+      + 'Short-run results vary with luck — this is the expected rate, not a prediction.'
+      + (m.shielded ? ' This miner is <b>shielded</b>: its rewards are paid privately and are invisible to the public balance endpoint, so a zero balance here does <b>not</b> mean unpaid.' : '')
+      + '</div>';
+
+    $('mdBody').innerHTML=html;
+    $('miner-modal').style.display='flex';
+  };
+
+  window.mdCopy=function(a){
+    try{ navigator.clipboard.writeText(a); var e=$('mdBal'); if(e){ e.textContent='✓ address copied'; e.style.color='#00e0c6'; } }catch(e){}
+  };
+
+  window.mdBalance=async function(w){
+    var e=$('mdBal'); if(!e) return;
+    e.style.color='#8fb3c2'; e.textContent='loading…';
+    try{
+      var r=await fetch('/v1/balance?wallet='+encodeURIComponent(w));
+      var j=await r.json();
+      if(j && j.ok && j.data && j.data.balance!=null){
+        e.innerHTML='balance <b style="color:#00e0c6">'+fmt8(j.data.balance)+'</b> SIGIL';
+      } else { e.textContent='balance unavailable'; }
+    }catch(err){ e.textContent='could not reach the node'; }
+  };
+
+  // Delegated click: the miner rows are re-rendered on every poll, so binding
+  // per-row would leak handlers. One listener on the container survives that.
+  document.addEventListener('click', function(ev){
+    var row=ev.target && ev.target.closest ? ev.target.closest('#npMiners .act-item[data-mi]') : null;
+    if(!row) return;
+    var i=parseInt(row.getAttribute('data-mi'),10);
+    if(!isNaN(i)) openMiner(i);
+  });
+
+  // Backdrop click + Esc close, matching the rest of the wallet's modals.
+  ['xchain-modal','miner-modal'].forEach(function(id){
+    var m=document.getElementById(id); if(!m) return;
+    m.addEventListener('click', function(ev){ if(ev.target===m) m.style.display='none'; });
+  });
+  document.addEventListener('keydown', function(ev){
+    if(ev.key!=='Escape') return;
+    ['xchain-modal','miner-modal'].forEach(function(id){
+      var m=document.getElementById(id); if(m && m.style.display==='flex') m.style.display='none';
+    });
+  });
+})();
+</script>
+
+<!-- ══════════════════════════════════════════════════════════════════════════
+     2026-08-26 — standalone ADDRESS BOOK.
+
+     The wallet already had an address book, but it was buried inside the Send
+     modal's advanced panel and could only fill the "check balance" field. This
+     promotes it to a first-class screen reachable from the action row.
+
+     It deliberately reuses the EXISTING storage — localStorage key
+     'sigil-addrbook', entries {label, addr} — so the two views are the same
+     book, not two that drift apart. Anything saved here shows up in Send's
+     "Saved wallets" list and vice versa.
+     ══════════════════════════════════════════════════════════════════════════ -->
+<style>
+  .abk-item{display:flex;align-items:center;gap:9px;padding:9px 11px;background:rgba(8,16,24,.55);border:1px solid rgba(33,212,253,.12);border-radius:10px}
+  .abk-item:hover{border-color:rgba(33,212,253,.3)}
+  .abk-nm{font-family:'Rajdhani';font-weight:700;font-size:14px;color:#cfe9f2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .abk-ad{font-family:'JetBrains Mono';font-size:10px;color:#5a93a8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .abk-b{background:rgba(33,212,253,.1);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:7px;padding:5px 9px;font-size:11px;cursor:pointer;font-family:'Rajdhani';font-weight:700;flex:none}
+  .abk-b.d{background:rgba(255,90,90,.08);border-color:rgba(255,90,90,.3);color:#ff8a8a}
+  .abk-b.g{background:rgba(0,224,198,.1);border-color:rgba(0,224,198,.35);color:#00e0c6}
+</style>
+<div id="book-modal" class="xc-ov">
+  <div class="xc-box" style="max-width:470px">
+    <div class="xc-hd">
+      <div style="font-size:20px">&#128214;</div>
+      <div style="flex:1"><div class="xc-ttl">ADDRESS BOOK</div>
+        <div class="xc-sub" id="abkSub">saved on this device only</div></div>
+      <button class="xc-x" onclick="closeBook()">&#10005;</button>
+    </div>
+    <div class="xc-bd">
+      <div>
+        <label class="xc-lbl">Add a contact</label>
+        <input id="abkLabel" class="xc-in" style="margin-top:6px" placeholder="Name (e.g. Torbj&oslash;rn, cold wallet)" autocomplete="off">
+        <input id="abkAddr" class="xc-in" style="margin-top:7px" placeholder="64-hex SIGIL address" autocomplete="off" spellcheck="false">
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button class="xc-go" style="flex:1;font-size:11px;padding:10px" onclick="abkAdd()">&#65291; SAVE CONTACT</button>
+          <button class="abk-b" style="padding:0 14px" onclick="abkFillMine()" title="use my own address">me</button>
+        </div>
+        <div class="xc-msg" id="abkMsg" style="margin-top:6px"></div>
+      </div>
+      <div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+          <label class="xc-lbl">Contacts <span id="abkN" style="color:#5a93a8"></span></label>
+          <input id="abkFind" class="xc-in" style="width:150px;padding:6px 9px;font-size:11px" placeholder="search&hellip;" oninput="abkRender()">
+        </div>
+        <div id="abkList" style="display:flex;flex-direction:column;gap:7px;margin-top:8px"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  'use strict';
+  var KEY='sigil-addrbook';   // SAME key the Send modal's book already uses
+  function $(id){ return document.getElementById(id); }
+  function load(){ try{ return JSON.parse(localStorage.getItem(KEY)||'[]'); }catch(e){ return []; } }
+  function save(a){ try{ localStorage.setItem(KEY, JSON.stringify(a)); return true; }catch(e){ return false; } }
+  function shortA(a){ return a?(a.slice(0,10)+'…'+a.slice(-8)):''; }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+  function say(t,c){ var e=$('abkMsg'); if(e){ e.textContent=t||''; e.style.color=c||'#8fb3c2'; } }
+
+  window.abkRender=function(){
+    var box=$('abkList'); if(!box) return;
+    var all=load();
+    var q=String(($('abkFind')||{}).value||'').trim().toLowerCase();
+    var a=q ? all.filter(function(e){
+      return String(e.label||'').toLowerCase().indexOf(q)>=0 || String(e.addr||'').toLowerCase().indexOf(q)>=0;
+    }) : all;
+    var n=$('abkN'); if(n) n.textContent = all.length ? ('· '+a.length+(q?(' of '+all.length):'')) : '';
+    if(!all.length){
+      box.innerHTML='<div style="font-family:\'JetBrains Mono\';font-size:11px;color:#5a93a8;line-height:1.6">No contacts yet. Add one above — it is stored in this browser only, never sent anywhere.</div>';
+      return;
+    }
+    if(!a.length){ box.innerHTML='<div style="font-family:\'JetBrains Mono\';font-size:11px;color:#5a93a8">No contact matches &ldquo;'+esc(q)+'&rdquo;.</div>'; return; }
+    box.innerHTML=a.map(function(e){
+      var i=all.indexOf(e);
+      return '<div class="abk-item">'
+        + '<div style="flex:1;min-width:0">'
+        +   '<div class="abk-nm">'+esc(e.label||'unnamed')+'</div>'
+        +   '<div class="abk-ad" title="'+esc(e.addr)+'">'+esc(shortA(e.addr))+'</div>'
+        + '</div>'
+        + '<button class="abk-b g" onclick="abkSend('+i+')" title="send to this contact">send</button>'
+        + '<button class="abk-b" onclick="abkCopy('+i+')" title="copy address">copy</button>'
+        + '<button class="abk-b" onclick="abkRename('+i+')" title="rename">✎</button>'
+        + '<button class="abk-b d" onclick="abkDel('+i+')" title="delete">✕</button>'
+        + '</div>';
+    }).join('');
+  };
+
+  window.abkAdd=function(){
+    var label=String(($('abkLabel')||{}).value||'').trim();
+    var addr=String(($('abkAddr')||{}).value||'').trim().toLowerCase().replace(/^0x/,'');
+    if(!/^[0-9a-f]{64}$/.test(addr)){ say('Address must be 64 hex characters.','#ff8a8a'); return; }
+    var a=load();
+    var dup=a.filter(function(e){ return e.addr===addr; })[0];
+    if(dup){ say('Already saved as “'+dup.label+'”.','#fbbf24'); return; }
+    a.unshift({label: label || shortA(addr), addr: addr});
+    if(!save(a)){ say('Could not save — browser storage is unavailable.','#ff8a8a'); return; }
+    $('abkLabel').value=''; $('abkAddr').value='';
+    say('✓ saved','#00e0c6'); abkRender();
+  };
+
+  window.abkDel=function(i){
+    var a=load(); if(!a[i]) return;
+    if(!confirm('Remove “'+(a[i].label||'unnamed')+'” from the address book?')) return;
+    a.splice(i,1); save(a); say(''); abkRender();
+  };
+
+  window.abkRename=function(i){
+    var a=load(); if(!a[i]) return;
+    var v=prompt('Name for this contact:', a[i].label||'');
+    if(v===null) return;
+    a[i].label=String(v).trim()||shortA(a[i].addr);
+    save(a); abkRender();
+  };
+
+  window.abkCopy=function(i){
+    var a=load(); if(!a[i]) return;
+    try{ navigator.clipboard.writeText(a[i].addr); say('✓ address copied','#00e0c6'); }
+    catch(e){ say('Copy failed — select it manually.','#ff8a8a'); }
+  };
+
+  /* Hand the contact straight to the Send flow: open Send, then fill the
+     recipient box (#uniAddr) and fire an input event so the wallet's own
+     address validation/resolution runs exactly as if it were typed. */
+  window.abkSend=function(i){
+    var a=load(); if(!a[i]) return;
+    var addr=a[i].addr;
+    closeBook();
+    if(typeof window.openSend!=='function'){ return; }
+    window.openSend();
+    setTimeout(function(){
+      var el=document.getElementById('uniAddr');
+      if(el){
+        el.value=addr;
+        try{ el.dispatchEvent(new Event('input',{bubbles:true})); }catch(e){}
+        try{ el.focus(); }catch(e){}
+      }
+    }, 90);
+  };
+
+  window.abkFillMine=function(){
+    var me=String(window.MINE_ADDR||window.ADDR||'').toLowerCase();
+    if(/^[0-9a-f]{64}$/.test(me)){ $('abkAddr').value=me; say('Filled with this wallet’s address.'); }
+    else say('This wallet has no address loaded yet.','#fbbf24');
+  };
+
+  window.openBook=function(){
+    var m=$('book-modal'); if(!m) return;
+    say(''); if($('abkFind')) $('abkFind').value='';
+    abkRender(); m.style.display='flex';
+  };
+  window.closeBook=function(){ var m=$('book-modal'); if(m) m.style.display='none'; };
+
+  var m=$('book-modal');
+  if(m) m.addEventListener('click', function(ev){ if(ev.target===m) m.style.display='none'; });
+  document.addEventListener('keydown', function(ev){
+    if(ev.key==='Escape' && m && m.style.display==='flex') m.style.display='none';
+  });
+  // Enter in the address box saves, matching the rest of the wallet's forms.
+  document.addEventListener('keydown', function(ev){
+    if(ev.key!=='Enter') return;
+    if(ev.target && (ev.target.id==='abkAddr' || ev.target.id==='abkLabel')) { ev.preventDefault(); abkAdd(); }
+  });
+})();
+</script>
+
+<!-- ══════════════════════════════════════════════════════════════════════════
+     2026-08-26 — BALANCE HISTORY graph (front page, under the total balance).
+
+     READ THIS BEFORE "FIXING" IT WITH A SERVER CALL:
+
+     sigil-g0 has NO balance-history endpoint, and no per-address transaction
+     history to reconstruct one from. Verified against the live node this
+     session by enumerating every route sigil-api registers:
+       · GET /v1/balance                 → a single point-in-time number
+       · GET /v1/mining/hashrate/history → the ONLY durable time series, and
+                                           it is network hashrate, not balance
+     There is no /v1/balance/history, no tx list, and chain state is
+     balances-only — so a *real* past balance curve simply cannot be fetched.
+
+     Therefore this chart plots a CLIENT-SIDE LEDGER: every successful balance
+     read is appended to localStorage, and the graph draws those samples. That
+     makes it honest — it shows what this browser actually observed, starting
+     the first time the wallet was opened after this shipped — instead of
+     inventing a curve. A fresh wallet correctly shows "recording…" rather than
+     a fake backfilled line. Do not backfill it with synthetic points.
+
+     Storage: key 'sigil-balhist-<address>' (per address, so switching wallets
+     never mixes curves), entries {t: epochMs, v: '<base units, 8dp>'}.
+     ══════════════════════════════════════════════════════════════════════════ -->
+<style>
+  .bh-wrap{margin:14px 16px 4px}
+  .dmain > .bh-wrap{margin:0 0 20px}
+  .bh-card{background:rgba(4,8,12,.55);border:1px solid rgba(33,212,253,.16);border-radius:14px;padding:13px 14px 10px}
+  .bh-top{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+  .bh-ttl{font-family:'JetBrains Mono';font-size:10px;letter-spacing:1.4px;color:#5a93a8;text-transform:uppercase}
+  .bh-tabs{display:flex;gap:4px}
+  .bh-tab{background:rgba(33,212,253,.06);border:1px solid rgba(33,212,253,.18);color:#5a93a8;border-radius:7px;padding:3px 9px;font-family:'JetBrains Mono';font-size:10px;cursor:pointer}
+  .bh-tab:hover{color:#6df3ff}
+  .bh-tab.on{background:rgba(33,212,253,.18);border-color:rgba(33,212,253,.5);color:#6df3ff}
+  .bh-delta{font-family:'Orbitron';font-weight:700;font-size:13px}
+  .bh-up{color:#00e0c6}.bh-dn{color:#ff8a8a}.bh-flat{color:#5a93a8}
+  .bh-svg{width:100%;height:104px;display:block;margin-top:9px;overflow:visible}
+  .bh-foot{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-family:'JetBrains Mono';font-size:9.5px;color:#5a93a8}
+  .bh-foot b{color:#8fb3c2;font-weight:500}
+  .bh-empty{font-family:'JetBrains Mono';font-size:10.5px;color:#5a93a8;line-height:1.6;padding:12px 2px 6px}
+  .bh-tip{position:fixed;z-index:10050;pointer-events:none;background:rgba(4,10,16,.96);border:1px solid rgba(33,212,253,.42);border-radius:8px;padding:6px 9px;font-family:'JetBrains Mono';font-size:10px;color:#cfe9f2;display:none;white-space:nowrap;box-shadow:0 6px 22px rgba(0,0,0,.55)}
+</style>
+<div class="bh-tip" id="bhTip"></div>
+<script>
+(function(){
+  'use strict';
+  var RANGES={'24h':864e5,'7d':6048e5,'30d':2592e6,'all':Infinity};
+  var RLBL={'24h':'24H','7d':'7D','30d':'30D','all':'ALL'};
+  var range='24h';
+  var MAXPTS=3000;
+
+  function addr(){ return String(window.MINE_ADDR||window.ADDR||'').toLowerCase(); }
+  function key(){ var a=addr(); return a ? 'sigil-balhist-'+a : null; }
+  function load(){ var k=key(); if(!k) return []; try{ var a=JSON.parse(localStorage.getItem(k)||'[]'); return Array.isArray(a)?a:[]; }catch(e){ return []; } }
+  function save(a){ var k=key(); if(!k) return; try{ localStorage.setItem(k, JSON.stringify(a)); }catch(e){} }
+
+  function fmt8(raw){
+    try{ var b=BigInt(raw), w=b/100000000n, f=(b%100000000n).toString().padStart(8,'0');
+      return w.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')+'.'+f; }catch(e){ return '0.00000000'; }
+  }
+  function num(raw){ try{ return Number(BigInt(raw))/1e8; }catch(e){ return 0; } }
+  function ago(ms){
+    var s=Math.max(0,Math.round((Date.now()-ms)/1000));
+    if(s<60) return s+'s ago';
+    if(s<3600) return Math.round(s/60)+'m ago';
+    if(s<86400) return Math.round(s/3600)+'h ago';
+    return Math.round(s/86400)+'d ago';
+  }
+  function when(ms){
+    var d=new Date(ms);
+    return d.toLocaleDateString(undefined,{month:'short',day:'numeric'})+' '+
+           d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});
+  }
+
+  /* Append a sample. Records a point when the value CHANGES, and otherwise a
+     10-minute heartbeat so a flat balance still draws a continuous line
+     instead of a single stale dot. */
+  window.bhSample=function(raw){
+    if(raw==null || !key()) return;
+    var v=String(raw), now=Date.now(), a=load();
+    var last=a[a.length-1];
+    if(last){
+      if(last.v===v && (now-last.t)<600000) return;      // unchanged & recent
+      if(last.v===v && (now-last.t)<60000) return;
+    }
+    a.push({t:now, v:v});
+    if(a.length>MAXPTS){                                  // thin the oldest half
+      var half=Math.floor(a.length/2), keep=[];
+      for(var i=0;i<half;i+=2) keep.push(a[i]);
+      a=keep.concat(a.slice(half));
+    }
+    save(a);
+    render();
+  };
+
+  function inRange(a){
+    var span=RANGES[range];
+    if(span===Infinity) return a.slice();
+    var cut=Date.now()-span;
+    var r=a.filter(function(p){ return p.t>=cut; });
+    // keep one earlier anchor so a window with no new samples still has a line
+    if(r.length<2){
+      var before=a.filter(function(p){ return p.t<cut; });
+      if(before.length) r=[before[before.length-1]].concat(r);
+    }
+    return r;
+  }
+
+  function downsample(pts,max){
+    if(pts.length<=max) return pts;
+    var out=[], step=pts.length/max;
+    for(var i=0;i<max;i++) out.push(pts[Math.floor(i*step)]);
+    if(out[out.length-1]!==pts[pts.length-1]) out.push(pts[pts.length-1]);
+    return out;
+  }
+
+  function svgFor(pts,W,H){
+    var vals=pts.map(function(p){ return num(p.v); });
+    var lo=Math.min.apply(null,vals), hi=Math.max.apply(null,vals);
+    var pad=(hi-lo)||Math.max(hi*0.02,0.00000001);
+    var y0=lo-pad*0.25, y1=hi+pad*0.25;
+    var t0=pts[0].t, t1=pts[pts.length-1].t; if(t1===t0) t1=t0+1;
+    var X=function(t){ return ((t-t0)/(t1-t0))*W; };
+    var Y=function(v){ return H-((v-y0)/((y1-y0)||1))*H; };
+    var d='', area='';
+    pts.forEach(function(p,i){
+      var x=X(p.t).toFixed(2), y=Y(num(p.v)).toFixed(2);
+      d += (i?' L':'M')+x+' '+y;
+    });
+    area = d+' L'+W.toFixed(2)+' '+H+' L0 '+H+' Z';
+    return {d:d, area:area, lo:lo, hi:hi, X:X, Y:Y, t0:t0, t1:t1};
+  }
+
+  function renderInto(wrap){
+    var all=load();
+    var id=wrap.id;
+    var head=''
+      + '<div class="bh-top">'
+      +   '<span class="bh-ttl">Balance history</span>'
+      +   '<div class="bh-tabs">'
+      +     Object.keys(RANGES).map(function(r){
+            return '<button class="bh-tab'+(r===range?' on':'')+'" onclick="bhRange(\''+r+'\')">'+RLBL[r]+'</button>'; }).join('')
+      +   '</div>'
+      + '</div>';
+
+    if(all.length<2){
+      wrap.innerHTML='<div class="bh-card">'+head
+        +'<div class="bh-empty">Recording&hellip; this chart is built from balance readings taken in <b style="color:#8fb3c2">this browser</b>, because the chain stores balances but no balance <i>history</i>. '
+        +(all.length? 'One reading so far — the line appears from the second one.' : 'Your first reading lands as soon as the wallet syncs.')
+        +'</div></div>';
+      return;
+    }
+
+    var pts=downsample(inRange(all),140);
+    if(pts.length<2){
+      wrap.innerHTML='<div class="bh-card">'+head
+        +'<div class="bh-empty">No readings inside the '+RLBL[range]+' window yet — try a wider range.</div></div>';
+      return;
+    }
+
+    var W=600,H=104;
+    var g=svgFor(pts,W,H);
+    var first=num(pts[0].v), last=num(pts[pts.length-1].v);
+    var diff=last-first;
+    var pct = first!==0 ? (diff/first*100) : (diff!==0?100:0);
+    var cls = diff>0?'bh-up':(diff<0?'bh-dn':'bh-flat');
+    var arrow = diff>0?'▲':(diff<0?'▼':'■');
+    var sign = diff>0?'+':'';
+
+    wrap.innerHTML='<div class="bh-card">'
+      + head
+      + '<div style="display:flex;align-items:baseline;gap:9px;margin-top:5px">'
+      +   '<span class="bh-delta '+cls+'">'+arrow+' '+sign+diff.toFixed(8)+'</span>'
+      +   '<span style="font-family:\'JetBrains Mono\';font-size:10px;color:#5a93a8">SIGIL over '+RLBL[range]
+      +     (first!==0?(' &middot; '+sign+pct.toFixed(2)+'%'):'')+'</span>'
+      + '</div>'
+      + '<svg class="bh-svg" viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" data-bhsvg="'+id+'">'
+      +   '<defs><linearGradient id="bhg-'+id+'" x1="0" y1="0" x2="0" y2="1">'
+      +     '<stop offset="0%" stop-color="#21d4fd" stop-opacity=".38"/>'
+      +     '<stop offset="100%" stop-color="#21d4fd" stop-opacity="0"/></linearGradient></defs>'
+      +   '<path d="'+g.area+'" fill="url(#bhg-'+id+')"/>'
+      +   '<path d="'+g.d+'" fill="none" stroke="#21d4fd" stroke-width="1.6" vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/>'
+      +   '<circle cx="'+g.X(pts[pts.length-1].t).toFixed(2)+'" cy="'+g.Y(last).toFixed(2)+'" r="3" fill="#00e0c6"/>'
+      +   '<line class="bh-guide" x1="0" y1="0" x2="0" y2="'+H+'" stroke="#6df3ff" stroke-width="1" vector-effect="non-scaling-stroke" opacity="0"/>'
+      + '</svg>'
+      + '<div class="bh-foot">'
+      +   '<span>high <b>'+g.hi.toFixed(8)+'</b></span>'
+      +   '<span>low <b>'+g.lo.toFixed(8)+'</b></span>'
+      +   '<span><b>'+pts.length+'</b> of '+all.length+' readings</span>'
+      +   '<span>since <b>'+when(pts[0].t)+'</b></span>'
+      +   '<span>last <b>'+ago(all[all.length-1].t)+'</b></span>'
+      + '</div></div>';
+
+    // hover readout
+    var svg=wrap.querySelector('svg[data-bhsvg]');
+    if(svg){
+      var tip=document.getElementById('bhTip');
+      var guide=svg.querySelector('.bh-guide');
+      svg.addEventListener('mousemove', function(ev){
+        var r=svg.getBoundingClientRect();
+        var frac=(ev.clientX-r.left)/r.width;
+        var i=Math.max(0,Math.min(pts.length-1,Math.round(frac*(pts.length-1))));
+        var p=pts[i];
+        if(guide){ var gx=g.X(p.t); guide.setAttribute('x1',gx); guide.setAttribute('x2',gx); guide.setAttribute('opacity','.55'); }
+        if(tip){
+          tip.innerHTML='<b style="color:#6df3ff">'+fmt8(p.v)+'</b> SIGIL<br><span style="color:#5a93a8">'+when(p.t)+'</span>';
+          tip.style.display='block';
+          tip.style.left=Math.min(window.innerWidth-160, ev.clientX+13)+'px';
+          tip.style.top=Math.max(6, ev.clientY-42)+'px';
+        }
+      });
+      svg.addEventListener('mouseleave', function(){
+        if(guide) guide.setAttribute('opacity','0');
+        if(tip) tip.style.display='none';
+      });
+    }
+  }
+
+  function render(){
+    var ws=document.querySelectorAll('[data-bh="1"]');
+    for(var i=0;i<ws.length;i++) renderInto(ws[i]);
+  }
+  window.bhRange=function(r){ if(RANGES[r]!==undefined){ range=r; render(); } };
+  window.bhRender=render;
+
+  function boot(){
+    render();
+    // seed a first point from whatever the wallet already has, so a returning
+    // user's chart starts immediately rather than after the next poll
+    setTimeout(function(){ try{ if(window.SIGIL_RAW!=null) window.bhSample(window.SIGIL_RAW); }catch(e){} }, 2500);
+    setInterval(function(){ try{ if(window.SIGIL_RAW!=null) window.bhSample(window.SIGIL_RAW); }catch(e){} }, 60000);
+  }
+  if(document.readyState!=='loading') boot();
+  else document.addEventListener('DOMContentLoaded', boot);
 })();
 </script>
 </body></html>

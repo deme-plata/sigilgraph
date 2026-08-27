@@ -2046,13 +2046,37 @@ impl P2PBlockSync {
                         for released in sync_store.sweep_timeouts(6_000) {
                             let _ = released;
                         }
-                        let frontier_chunk = (now_synced / CHUNK) * CHUNK;
-                        for st in [frontier_chunk, frontier_chunk.saturating_add(CHUNK)] {
-                            if sync_store.retry_range(st) {
-                                crate::tlog!(
-                                    "[sync] frontier parked at {now_synced} for 6s — re-requesting chunk {st} \
-                                     (staged ranges kept)"
-                                );
+                        // 2026-08-27 (operator screenshot): the first version computed
+                        // `(now_synced / CHUNK) * CHUNK` and retried that start plus the
+                        // next one. Range starts are NOT chunk-aligned — the frontier
+                        // range is anchored at the exact verified height (live: the
+                        // frontier was `30,250..40,250` while `now_synced` was 30,250, so
+                        // the aligned guess 30,000 matched nothing) while look-ahead
+                        // ranges ARE aligned. So the guess missed the range that was
+                        // actually blocking and instead hit a perfectly healthy staged
+                        // look-ahead range, releasing and re-requesting it every 6
+                        // seconds. That is a duplicate-fetch storm CAUSED BY the fix for
+                        // the previous duplicate-fetch storm — visible as 40,000..50,000
+                        // and 50,000..60,000 each completing three times in 150 s.
+                        //
+                        // Ask the store which range actually covers the next needed
+                        // height instead of assuming its alignment, and retry only a
+                        // range that has already been ANSWERED (`Fetched`) — an in-flight
+                        // one is `sweep_timeouts`'s job and is not stuck, merely slow.
+                        {
+                            let snap = sync_store.snapshot();
+                            if let Some(row) = snap.rows.iter().find(|r| {
+                                r.start <= now_synced
+                                    && now_synced < r.end
+                                    && matches!(r.state, sigil_sync::RangeState::Fetched { .. })
+                            }) {
+                                if sync_store.retry_range(row.start) {
+                                    crate::tlog!(
+                                        "[sync] frontier parked at {now_synced} for 6s — range {}..{} was \
+                                         answered but never verified; re-requesting it (staged look-ahead kept)",
+                                        row.start, row.end
+                                    );
+                                }
                             }
                         }
                         // DYNAMIC BASE: the lowest servable height creeps UP as producers prune early

@@ -30,6 +30,7 @@ pub(crate) mod block_sync;
 mod chain_verify; // v0.9.0: full verifying sync — spine continuity + precheck walk
 mod ledger_verify; // ONE-CHAIN P2a: verify the MONEY chain's header spine + real /supply truth
 mod gap_sync;     // SPINE-BREAK fix: testable genesis-up contiguity engine + shared watchdog/classify
+mod help;
 mod serve;
 mod heroes;
 use heroes::*;
@@ -705,7 +706,7 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self { lite: false, once: false, tui: true, interval: 2,
-            api: "https://sigilgraph.fluxapp.xyz/api/v1/status".into(), feed: DEFAULT_FEED.into(),
+            api: crate::help::DEFAULT_API.into(), feed: DEFAULT_FEED.into(),
             initial_toast: None }
     }
 }
@@ -731,20 +732,9 @@ fn parse_args() -> Config {
 }
 
 fn print_help() {
-    println!(
-        "sigil-top {VERSION} — SIGIL node monitor\n\n  \
-         sigil-top              full dashboard (refresh 2s)\n  \
-         sigil-top --lite       compact scorecard\n  \
-         sigil-top --once       single snapshot, then exit\n  \
-         sigil-top --interval N refresh seconds\n  \
-         sigil-top --tui        opt-in ratatui TUI (alt-screen, interactive keys)\n  \
-         sigil-top --api URL    status endpoint (default https://sigilgraph.fluxapp.xyz/api/v1/status)\n\n  \
-         sigil-top full-sync    headless: download + VERIFY the chain genesis→tip, exit 0 when\n  \
-         {space}             the verified spine reaches the network tip ([--target H] [--timeout S])\n  \
-         sigil-top verify-chain re-verify the LOCAL store (precheck + parent linkage), exit 1 on a\n  \
-         {space}             break, 0 if it's a clean connected spine to genesis ([--json])",
-        space = "      "
-    );
+    // Full reference lives in `help.rs` — see that module for why it moved and for
+    // the dead-`fluxapp`-default this used to advertise.
+    help::print_help(VERSION);
 }
 
 /// ONE-CHAIN (v7.1.6): make status show THE chain, not the retiring spine.

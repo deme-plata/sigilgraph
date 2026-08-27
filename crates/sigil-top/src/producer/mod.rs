@@ -102,26 +102,33 @@ pub fn producer_mode_enabled() -> bool {
 /// before starting anything, so today the two are equivalent in practice.
 /// 2026-08-23 (Phase 5, operator-directed: "let's do this") — now real.
 pub fn should_produce() -> bool {
-    // OPT-IN, deliberately, while `producer_mode_enabled` above is opt-out.
+    // DEFAULT-ON as of 2026-08-27 (operator-directed: "fix it so the new unified binary
+    // just works out of the box producing blocks"). `SIGIL_TOP_PRODUCE=0` opts out.
     //
-    // The binary CONTAINS a full node; it does not MINT unattended. Two reasons, both
-    // still open as of 2026-08-27:
+    // This flips the opt-IN chosen a few hours earlier the same day. The operator was told
+    // the hazard twice, in writing, and chose default-on both times; it is recorded here so
+    // the choice is legible to whoever reads this next rather than living only in a chat
+    // log:
     //
-    //   1. GHOSTDAG blue-score counts raw block COUNT, not difficulty-weighted work (see
-    //      `dag.rs`). With uneven hashpower — a 525 MH/s rig against a laptop — the
-    //      heaviest-branch rule stops tracking actual work, which is a fork hazard rather
-    //      than a performance note.
-    //   2. This subsystem reached `main` as a single large landing rather than incremental
-    //      review, and has never run against the live mesh outside its author's own
-    //      testing.
+    //   GHOSTDAG blue-score counts raw block COUNT, not difficulty-weighted work (see
+    //   `dag.rs`). Two producers with wildly different hashpower — a 525 MH/s rig and a
+    //   laptop — contribute blocks that weigh the SAME, so the heaviest-branch rule stops
+    //   tracking actual work. That is a fork hazard, and default-on makes it live rather
+    //   than theoretical. Work-weighting blue-score is the fix; this gate never was.
     //
-    // Neither is a reason to withhold the CAPABILITY — a user who wants to run a full
-    // producing node sets `SIGIL_TOP_PRODUCE=1` and gets one, after a complete sync
-    // (`run::maybe_start` refuses on a partial sync — see `sync.rs`). Both are reasons not
-    // to have every fresh download start minting into a live chain on its own.
+    // What still protects a fresh install, and is NOT weakened by this flip:
+    // `run::maybe_start` refuses to produce unless `sync::sync_chain` reached the live tip,
+    // and treats a PARTIAL sync as failure rather than a lesser success (sync.rs,
+    // 2026-08-25). So "out of the box" means: sync fully, THEN produce — never mint from a
+    // stale tip.
     //
-    // Flip this to opt-out once blue-score is work-weighted.
-    matches!(std::env::var("SIGIL_TOP_PRODUCE").as_deref(), Ok("1"))
+    // Knock-on effect, and the second half of the same operator request ("fix miners server
+    // to point to it self localhost"): once this starts, `mining_api` binds
+    // 127.0.0.1:18183 and `engine_node_url()` returns the LOCAL url instead of the central
+    // node. A rig therefore mines against its own node automatically, with no
+    // configuration — that wiring already existed and was simply unreachable while
+    // production was opt-in.
+    !matches!(std::env::var("SIGIL_TOP_PRODUCE").as_deref(), Ok("0"))
 }
 
 #[cfg(test)]
@@ -134,7 +141,7 @@ mod tests {
         std::env::remove_var("SIGIL_TOP_PRODUCER");
         std::env::remove_var("SIGIL_TOP_PRODUCE");
         assert!(producer_mode_enabled(), "unset must mean ON — braid participation is the default");
-        assert!(!should_produce(), "MINTING is opt-in: a fresh download must not mint unattended");
+        assert!(should_produce(), "unset must mean ON — the binary produces out of the box");
 
         std::env::set_var("SIGIL_TOP_PRODUCER", "1");
         std::env::set_var("SIGIL_TOP_PRODUCE", "1");
@@ -145,14 +152,14 @@ mod tests {
         std::env::set_var("SIGIL_TOP_PRODUCER", "0");
         std::env::set_var("SIGIL_TOP_PRODUCE", "0");
         assert!(!producer_mode_enabled(), "explicit 0 opts out of the braid");
-        assert!(!should_produce(), "0 does not mint");
+        assert!(!should_produce(), "explicit 0 opts out of minting");
 
         // Asymmetric ON PURPOSE: braid participation must not be disabled by a stray
         // value, and minting must not be ENABLED by one.
         std::env::set_var("SIGIL_TOP_PRODUCER", "yes");
         std::env::set_var("SIGIL_TOP_PRODUCE", "yes");
         assert!(producer_mode_enabled(), "a non-0 value must not disable braid participation");
-        assert!(!should_produce(), "only an explicit 1 may start minting");
+        assert!(should_produce(), "a non-0 value must not disable production");
 
         std::env::remove_var("SIGIL_TOP_PRODUCER");
         std::env::remove_var("SIGIL_TOP_PRODUCE");

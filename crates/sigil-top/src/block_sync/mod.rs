@@ -897,6 +897,10 @@ impl P2PBlockSync {
                 // skip peers that are BEHIND the frontier — they'd just return EMPTY (the "producers
                 // serving empty for the head" symptom). Updated from every response.
                 let mut peer_top: HashMap<String, (u64, Instant)> = HashMap::new();
+                // Dispatch time per in-flight range, so a response's latency is the REAL
+                // round trip for that request rather than a batch-wide approximation.
+                // Keyed by range start, which is unique while a range is claimed.
+                let mut req_started: HashMap<u64, Instant> = HashMap::new();
                 let mut rr: usize = 0;                                 // round-robin peer cursor
                 let mut last_state = crate::instant_ago(1);
                 let mut fetched_session: u64 = 0;                      // headers stored this session
@@ -1417,11 +1421,18 @@ impl P2PBlockSync {
                         // frontier-anchored refill does not re-request it every cycle (~60% serve waste).
                         // Cleared on a genuine miss (empty/timeout) below; pruned once the frontier passes.
                         let mut fetched_ok = false;
+                        // `peer` is moved into `peer_bench` on some paths, so keep the id
+                        // for the SAP feed before the match can consume it.
+                        let sap_peer = peer.clone();
+                        // Headers this response actually delivered — hoisted so the SAP
+                        // feed below can see it; `got` itself is scoped to the match arm.
+                        let mut delivered: usize = 0;
                         match bytes {
                             Some(b) => {
                                 peer_bench.remove(&peer);              // answered → healthy again
                                 let headers = headers_precomputed.unwrap_or_default();
                                 let got = headers.len();
+                                delivered = got;
                                 pending_headers.extend(headers);
                                 bytes_session += b.len() as u64;
                                 if got > 0 {
@@ -1544,6 +1555,28 @@ impl P2PBlockSync {
                                 peer_bench.insert(peer, Instant::now() + BENCH);
                             }
                         }
+                        // ── FEED SAP (2026-08-27) ────────────────────────────────────
+                        //
+                        // This is the one place that knows, per peer, all three things the
+                        // SAP table was declared to measure and was never given: how much
+                        // the peer DELIVERED, how long it took, and whether our store
+                        // ACCEPTED it. Until now those went into local counters, were
+                        // printed once as `lead=1(3%) empty=28`, and were discarded — while
+                        // `flux_sap_status` reported a table nothing populated and
+                        // `flux_tune` redistributed weights across components that were all
+                        // zero.
+                        //
+                        // The distinction that only this site can draw: `fetched_ok` is
+                        // whether real headers arrived, which is NOT the same as being
+                        // useful. A peer answering promptly with an empty page scores 0
+                        // contribution and 0 accuracy here — which is exactly the peer that
+                        // froze a client's frontier for hours while every dial read healthy.
+                        let sap_latency_ms = req_started
+                            .remove(&start)
+                            .map(|t| t.elapsed().as_secs_f64() * 1000.0)
+                            .unwrap_or(0.0);
+                        net.observe_peer_response(&sap_peer, delivered as u64, sap_latency_ms, fetched_ok);
+
                         // v0.58 (10k-sync): only a genuine miss frees the claim for re-request.
                         if !fetched_ok {
                             sync_store.release(start);
@@ -2016,6 +2049,7 @@ impl P2PBlockSync {
                                     // read "pending", which is useless exactly when sync wedges on
                                     // one bad peer. Display-only; no effect on sync behavior.
                                     sync_store.note_peer(start, &peer.to_string());
+                                    req_started.entry(start).or_insert_with(Instant::now);
                                     // 2026-08-23 (grogu-adaptive-frontier-width): proven live — a
                                     // connection that drops and reconnects every 10-30s (real,
                                     // observed churn, not a code bug) gives an in-flight multi-MB

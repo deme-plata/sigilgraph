@@ -86,7 +86,14 @@ pub mod sync;
 /// 2026-08-23 (Phase 3, operator-directed: "let's do this") — now real. See
 /// `run::maybe_start` for what actually consumes this.
 pub fn producer_mode_enabled() -> bool {
-    std::env::var("SIGIL_TOP_PRODUCER").map(|v| v == "1").unwrap_or(false)
+    // DEFAULT-ON as of 2026-08-27 (operator-directed: "yes . but should have full sync
+    // first"). Every sigil-top is a full node that joins the braid; `SIGIL_TOP_PRODUCER=0`
+    // opts out. The "full sync first" condition is not added here — it is already
+    // structural in `run::maybe_start`, which refuses to start unless `sync::sync_chain`
+    // reached the live tip, and treats a PARTIAL sync as failure rather than as a lesser
+    // success (see that module's 2026-08-25 finding: producing from a height tens of
+    // thousands of blocks behind the tip is a silent fork by construction).
+    !matches!(std::env::var("SIGIL_TOP_PRODUCER").as_deref(), Ok("0"))
 }
 
 /// Runtime gate 2: has the operator opted this instance into actually minting
@@ -95,7 +102,26 @@ pub fn producer_mode_enabled() -> bool {
 /// before starting anything, so today the two are equivalent in practice.
 /// 2026-08-23 (Phase 5, operator-directed: "let's do this") — now real.
 pub fn should_produce() -> bool {
-    std::env::var("SIGIL_TOP_PRODUCE").map(|v| v == "1").unwrap_or(false)
+    // OPT-IN, deliberately, while `producer_mode_enabled` above is opt-out.
+    //
+    // The binary CONTAINS a full node; it does not MINT unattended. Two reasons, both
+    // still open as of 2026-08-27:
+    //
+    //   1. GHOSTDAG blue-score counts raw block COUNT, not difficulty-weighted work (see
+    //      `dag.rs`). With uneven hashpower — a 525 MH/s rig against a laptop — the
+    //      heaviest-branch rule stops tracking actual work, which is a fork hazard rather
+    //      than a performance note.
+    //   2. This subsystem reached `main` as a single large landing rather than incremental
+    //      review, and has never run against the live mesh outside its author's own
+    //      testing.
+    //
+    // Neither is a reason to withhold the CAPABILITY — a user who wants to run a full
+    // producing node sets `SIGIL_TOP_PRODUCE=1` and gets one, after a complete sync
+    // (`run::maybe_start` refuses on a partial sync — see `sync.rs`). Both are reasons not
+    // to have every fresh download start minting into a live chain on its own.
+    //
+    // Flip this to opt-out once blue-score is work-weighted.
+    matches!(std::env::var("SIGIL_TOP_PRODUCE").as_deref(), Ok("1"))
 }
 
 #[cfg(test)]
@@ -104,15 +130,30 @@ mod tests {
 
     #[test]
     fn gates_read_the_real_env_vars() {
+        // Unset = ON. Producing is the default posture now; the env vars are an OPT-OUT.
         std::env::remove_var("SIGIL_TOP_PRODUCER");
         std::env::remove_var("SIGIL_TOP_PRODUCE");
-        assert!(!producer_mode_enabled());
-        assert!(!should_produce());
+        assert!(producer_mode_enabled(), "unset must mean ON — braid participation is the default");
+        assert!(!should_produce(), "MINTING is opt-in: a fresh download must not mint unattended");
 
         std::env::set_var("SIGIL_TOP_PRODUCER", "1");
         std::env::set_var("SIGIL_TOP_PRODUCE", "1");
         assert!(producer_mode_enabled());
         assert!(should_produce());
+
+        // Only an explicit "0" opts out — a stray value must not silently disable a node.
+        std::env::set_var("SIGIL_TOP_PRODUCER", "0");
+        std::env::set_var("SIGIL_TOP_PRODUCE", "0");
+        assert!(!producer_mode_enabled(), "explicit 0 opts out of the braid");
+        assert!(!should_produce(), "0 does not mint");
+
+        // Asymmetric ON PURPOSE: braid participation must not be disabled by a stray
+        // value, and minting must not be ENABLED by one.
+        std::env::set_var("SIGIL_TOP_PRODUCER", "yes");
+        std::env::set_var("SIGIL_TOP_PRODUCE", "yes");
+        assert!(producer_mode_enabled(), "a non-0 value must not disable braid participation");
+        assert!(!should_produce(), "only an explicit 1 may start minting");
+
         std::env::remove_var("SIGIL_TOP_PRODUCER");
         std::env::remove_var("SIGIL_TOP_PRODUCE");
     }

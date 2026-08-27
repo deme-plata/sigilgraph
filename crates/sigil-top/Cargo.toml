@@ -156,7 +156,22 @@ flux-vdf = { path = "../flux-vdf" }
 # When activated, sigil-tip-proof links flux-sqisign and verify_tip() constructs
 # a TipProof::new_sqisign() for adversary-resistant tip verification.
 [features]
-default = ["gpu", "shield-register"]
+# UNIFIED BINARY (2026-08-27, operator-directed: "i want sigil top to now behave like a
+# real node producing blocks"). `producer` is now DEFAULT-ON, so every downloaded sigil-top
+# CONTAINS a full node: snapshot bootstrap + P2P tail replay, the real
+# frontier→mint→insert→drain-apply loop against the live mesh, and a local `sigil-api` so a
+# miner can mine against their own node instead of a central one. All of it re-exported
+# from `sigil-node` rather than duplicated, so there is one implementation of consensus.
+#
+# Shipping the CAPABILITY is not the same as switching it on. `SIGIL_TOP_PRODUCER=1` and
+# `SIGIL_TOP_PRODUCE=1` are still required before anything mints — see `producer/mod.rs`.
+# That gate stays until GHOSTDAG blue-score is difficulty-WEIGHTED: it currently counts raw
+# block COUNT, which is only sound when producers have roughly uniform hashpower. A 525 MH/s
+# rig and a laptop each contribute blocks that count the same, so on a real fleet the
+# heaviest-branch rule stops tracking actual work. That is a fork hazard, and it is the
+# operator's call to make deliberately rather than mine to make silently by flipping a
+# default.
+default = ["gpu", "shield-register", "producer"]
 gpu = ["flux-miner/gpu"]
 sqisign = []
 # 2026-08-24: `mine-rig --seed`'s auto-registration path. Default-on — see the

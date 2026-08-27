@@ -153,8 +153,20 @@ impl ProducerState {
             v
         };
 
+        // 7th arg (2026-08-26, Option C): the partial-share pool, drained ONLY for a
+        // self-minted block. With a real solve the winner's own `shares` map already
+        // carries the pool (`submit()` folds and clears it), so draining here too would
+        // pay the same work twice. Identical contract to sigil-node's own producer loop
+        // — this instance shares the SAME `MiningBridge`, so it must make the same
+        // decision or a sigil-top producer would silently reintroduce the 93.8%
+        // pay-yourself behaviour Option C exists to remove.
+        let share_pool = if solve.is_none() {
+            self.api.mining.take_share_pool()
+        } else {
+            None
+        };
         let (block, minted_tx_hashes) =
-            mint_next_block(&frontier, merge_parents, &txs, None, solve.as_ref(), topology_commitment)?;
+            mint_next_block(&frontier, merge_parents, &txs, None, solve.as_ref(), topology_commitment, share_pool)?;
         let minted_height = block.header.height;
         // Same wire shape sigil-node's own TOPIC_BLOCKS publisher uses (plain
         // serde_json::to_vec — confirmed by reading its actual publish call

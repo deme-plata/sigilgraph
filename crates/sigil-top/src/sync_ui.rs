@@ -605,11 +605,20 @@ pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
                 // How many rows were too fast to measure — usually the duplicate-reply
                 // signature, which is worth surfacing rather than hiding.
                 let instant = fresh.iter().filter(|d| d.rate().is_none()).count();
+                // SAY WHEN THE COUNT IS THE CAP. `fresh.len()` maxes out at DONE_CAP, so a
+                // saturated log reads "256 ranges" whatever the truth is — a number that
+                // looks measured and is not. An operator reading 256 ranges / 2,560,000
+                // blocks against 10,707 actually fetched deserves to know which of those
+                // figures is a ceiling.
+                let capped = fresh.len() >= DONE_CAP;
                 lines.push(Line::from(vec![
                     Span::styled(" ✔ COMPLETED", Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
                     dim(&format!(" — last {}s: ", DONE_RETAIN.as_secs())),
-                    Span::styled(format!("{}", fresh.len()), Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD)),
-                    dim(" ranges  "),
+                    Span::styled(
+                        if capped { format!("{}+", fresh.len()) } else { format!("{}", fresh.len()) },
+                        Style::default().fg(C_VBRIGHT).add_modifier(Modifier::BOLD),
+                    ),
+                    dim(if capped { " ranges (log full) " } else { " ranges  " }),
                     Span::styled(group(total_blocks), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
                     dim(" blocks  peak "),
                     Span::styled(

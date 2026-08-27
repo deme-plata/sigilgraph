@@ -5135,7 +5135,19 @@ fn reset_store_on_network_change(path: &str) {
 /// already shipped once, re-armed so it fires again for stores that picked up NEW damage
 /// since the last time.
 fn heal_wedged_store_once(path: &str) {
-    const HEAL_MARKER: &str = "frontier-stall-heal-v7.1.75";
+    // RE-ARMED 2026-08-27 (v7.1.75 -> v7.2.5). The marker is a ONE-SHOT per exact string,
+    // so every store that has launched since v7.1.75 is immune to a repeat wipe even when
+    // it picks up NEW damage — which is exactly what happened. Live: an operator's client
+    // sat with `verified 30,250` while `fetched-to` ran to 120,000, across several restarts
+    // and four releases. Honest headers for `30,250..40,250` arrived and completed in ~2 s
+    // every time, and the store refused to splice them: a poisoned local seam that no
+    // amount of refetching can repair, because the bad block is OURS.
+    //
+    // The bounded in-run self-heal (`rollback_frontier(4096)`, 3 attempts behind a 45 s
+    // watchdog) only covers damage within ~12k blocks of the frontier. This covers the case
+    // where it is deeper, or where the wedge survives restarts. The store re-syncs clean —
+    // at the rates these clients reach that is a couple of minutes.
+    const HEAL_MARKER: &str = "frontier-stall-heal-v7.2.5";
     let marker = format!("{path}.healver");
     if std::fs::read_to_string(&marker).map(|s| s.trim() == HEAL_MARKER).unwrap_or(false) {
         return; // already healed under THIS marker on a prior launch — leave the store alone

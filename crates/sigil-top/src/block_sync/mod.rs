@@ -930,6 +930,11 @@ impl P2PBlockSync {
                 // `frontier_serves_since_advance`; see its increment site for why the loose
                 // counter cannot be used as unservability evidence.
                 let mut frontier_covering_serves: u32 = 0;
+                // DIAGNOSTIC (2026-08-27). Three releases in a row shipped an
+                // unservable-frontier detector that could not fire, each time because a
+                // condition I could not observe behaved differently than I assumed. This
+                // prints the actual values rather than inferring them from the queue table.
+                let mut last_diag = Instant::now();
                 // v7.0.18 FRONTIER SELF-HEAL: bounded rollback-and-refetch attempts when honest
                 // frontier headers repeatedly refuse to splice (poisoned local seam). Reset on
                 // real advance; after MAX attempts the loud SPINE BREAK verdict stands.
@@ -1484,11 +1489,26 @@ impl P2PBlockSync {
                                 // counter that was supposed to stay at zero. The unservable
                                 // proof needs the strict question — did the block we are waiting
                                 // for arrive? — so ask exactly that.
-                                if header_height_range(&b).map_or(false, |(mn, mx)| {
-                                    mn <= store.synced_to() && mx >= store.synced_to()
-                                }) {
+                                let _synced_now = store.synced_to();
+                                let _hdr = header_height_range(&b);
+                                let _covers = _hdr.map_or(false, |(mn, mx)| {
+                                    mn <= _synced_now && mx >= _synced_now
+                                });
+                                if _covers {
                                     frontier_covering_serves =
                                         frontier_covering_serves.saturating_add(1);
+                                }
+                                // THE decisive question, printed per response for any range
+                                // at or below the frontier chunk: did headers for the height
+                                // we are stuck on actually ARRIVE? If they did, this is a
+                                // poisoned seam (the store refuses them) and a re-anchor is the
+                                // wrong remedy. If they never do, the range is unservable.
+                                if start <= _synced_now.saturating_add(CHUNK) {
+                                    crate::tlog!(
+                                        "[diag] resp start={start} got={got} hdr={:?} synced={_synced_now} \
+                                         covers_stuck_height={_covers} bytes={}",
+                                        _hdr, b.len()
+                                    );
                                 }
                                 // An EMPTY response over a still-needed range means this peer can't
                                 // serve that range (e.g. it pruned genesis / lacks early offsets).
@@ -2189,6 +2209,27 @@ impl P2PBlockSync {
                             // dead mesh fails the third. Only a servable-floor above our
                             // frontier satisfies all three.
                             const UNSERVABLE_HIGHER: u32 = 6;
+                            // Print every input to the decision, every 10 s, while parked.
+                            // `would_fire` is the verdict itself, so there is no gap between
+                            // what is logged and what is evaluated.
+                            if last_diag.elapsed() >= Duration::from_secs(10) {
+                                last_diag = Instant::now();
+                                let lm = recent_only_rt.load(Ordering::Relaxed);
+                                let parked = last_advance_t.elapsed().as_secs();
+                                let would_fire = !lm
+                                    && frontier_reqs_since_advance >= 1
+                                    && higher_serves_since_advance >= UNSERVABLE_HIGHER
+                                    && frontier_covering_serves == 0
+                                    && parked >= 20;
+                                crate::tlog!(
+                                    "[diag] UNSERVABLE-CHECK synced={now_synced} parked={parked}s \
+                                     light_mode={lm} frontier_reqs={frontier_reqs_since_advance} \
+                                     higher_serves={higher_serves_since_advance} \
+                                     covering_serves={frontier_covering_serves} \
+                                     peers={} → would_fire={would_fire}",
+                                    { let g = state_clone.lock().unwrap_or_else(|e| e.into_inner()); g.peer_count }
+                                );
+                            }
                             let proven_unservable = !recent_only_rt.load(Ordering::Relaxed)
                                 && frontier_reqs_since_advance >= 1
                                 && higher_serves_since_advance >= UNSERVABLE_HIGHER

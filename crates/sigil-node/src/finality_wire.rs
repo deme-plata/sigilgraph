@@ -56,6 +56,23 @@ pub struct FinalityWire {
     /// Set once so the operator gets one clear line about what finality is
     /// doing, rather than silence they have to infer meaning from.
     announced: bool,
+    /// Highest height ever handed to [`FinalityWire::on_block`] — i.e. the
+    /// MINT clock.
+    ///
+    /// This exists because the node runs two different height clocks and the
+    /// Phase 2 report was silently mixing them. Votes are cast at mint time,
+    /// but `main.rs` had the only convenient tip to hand — `chain.height()`,
+    /// the SETTLED height — and settlement is itself gated on
+    /// `finalized_height() = tip - final_depth`, so the settled clock trails
+    /// the mint clock by roughly `final_depth`.
+    ///
+    /// Measured on the live producer 2026-08-28 at the same instant:
+    /// settled `H=314041`, certified height `314528` — 487 apart. The report
+    /// therefore printed `+1010 blocks` ahead of the depth rule when the
+    /// genuine saving was ~512: the other ~490 was the clock offset, counted
+    /// as if it were a speedup. Roughly a 2x overstatement of the whole
+    /// feature's benefit, in the one number the feature exists to produce.
+    last_vote_height: u64,
 }
 
 impl FinalityWire {
@@ -82,7 +99,7 @@ impl FinalityWire {
                     cfg.checkpoint_interval,
                     if key.is_some() { "VALIDATOR" } else { "observer" }
                 );
-                Self { observer, signing_key: key, announced: true }
+                Self { observer, signing_key: key, announced: true, last_vote_height: 0 }
             }
             Err(env_config::ConfigError::Disabled) => Self::disabled(),
             Err(e) => {
@@ -106,6 +123,7 @@ impl FinalityWire {
             observer: FinalityObserver::new(Default::default(), ObserverConfig::default()),
             signing_key: None,
             announced: false,
+            last_vote_height: 0,
         }
     }
 
@@ -144,6 +162,11 @@ impl FinalityWire {
         // not when the first vote arrives, or the measurement would quietly
         // exclude the network time it is supposed to be measuring.
         self.observer.note_checkpoint_seen(height, now_ms);
+        // Remember the mint clock, so `heartbeat_line` can compare like with
+        // like. Recorded before the validator early-return below: a pure
+        // observer sees checkpoints too, and its report must not silently
+        // fall back to the settled clock just because it holds no key.
+        self.last_vote_height = self.last_vote_height.max(height);
 
         let order = order_hash.unwrap_or(spine_block_hash);
         let key = self.signing_key.as_ref()?;
@@ -181,19 +204,36 @@ impl FinalityWire {
         }
     }
 
+    /// The tip to measure the depth rule against.
+    ///
+    /// The depth rule and the certificate MUST be evaluated on the same
+    /// clock or their difference is not a latency saving, it is a unit
+    /// error — see [`FinalityWire::last_vote_height`] for the live numbers
+    /// that made this concrete. `max` rather than "always the mint clock"
+    /// so a node that has not yet minted (a pure observer, or one still
+    /// syncing) still reports against the settled tip it does have, instead
+    /// of measuring against height 0.
+    fn measurement_tip(&self, settled_height: u64) -> u64 {
+        self.last_vote_height.max(settled_height)
+    }
+
     /// The Phase 2 log line, for the node's existing 5s heartbeat.
     /// `None` when finality is disabled — an unconfigured node should not
     /// gain a new recurring log line it did not ask for.
-    pub fn heartbeat_line(&self, tip_height: u64) -> Option<String> {
+    ///
+    /// `settled_height` is the caller's `chain.height()`; the comparison is
+    /// made on [`FinalityWire::measurement_tip`].
+    pub fn heartbeat_line(&self, settled_height: u64) -> Option<String> {
         if !self.enabled() {
             return None;
         }
-        Some(self.observer.report(tip_height).verdict())
+        Some(self.observer.report(self.measurement_tip(settled_height)).verdict())
     }
 
-    /// Full structured report, for a future `/v1/finality` route.
-    pub fn report(&self, tip_height: u64) -> Option<ObserverReport> {
-        self.enabled().then(|| self.observer.report(tip_height))
+    /// Full structured report, for a future `/v1/finality` route. Same
+    /// same-clock correction as [`FinalityWire::heartbeat_line`].
+    pub fn report(&self, settled_height: u64) -> Option<ObserverReport> {
+        self.enabled().then(|| self.observer.report(self.measurement_tip(settled_height)))
     }
 
     /// Whether the startup banner was printed (test/introspection helper).
@@ -269,6 +309,7 @@ mod tests {
             observer: FinalityObserver::new(committee, cfg),
             signing_key: Some(key(99)),
             announced: true,
+            last_vote_height: 0,
         };
         assert!(w.enabled());
         assert_eq!(w.on_block(321, [1u8; 32], None, 0), None, "not a checkpoint height");
@@ -288,6 +329,7 @@ mod tests {
             observer: FinalityObserver::new(committee, cfg),
             signing_key: Some(ks[0].clone()),
             announced: true,
+            last_vote_height: 0,
         };
         let bytes = w.on_block(320, [7u8; 32], Some([9u8; 32]), 1_000).expect("validator must publish");
         assert!(decode_vote(&bytes).is_some());
@@ -305,6 +347,75 @@ mod tests {
         assert!(line.contains("400ms"), "latency must be measured from on_block: {line}");
     }
 
+    /// Regression: the depth rule and the certificate must be measured on
+    /// the SAME height clock.
+    ///
+    /// This is not hypothetical. On the live producer, 2026-08-28, the
+    /// heartbeat read `would-be-final=314528 vs depth-rule=313535
+    /// (+1010 blocks)` while `chain.height()` — the settled clock the caller
+    /// passes in — was `314041`. Settlement is gated on
+    /// `finalized_height() = tip - final_depth`, so the settled clock trails
+    /// the mint clock the votes are cast on by roughly `final_depth`. The
+    /// reported `+1010` was therefore ~512 of genuine saving plus ~490 of
+    /// pure clock offset, presented as if the whole thing were a speedup:
+    /// a 2x overstatement of the one number Phase 2 exists to produce, in
+    /// the direction that flatters the feature.
+    ///
+    /// The fix compares against `measurement_tip`, so the delta collapses to
+    /// the real depth-rule distance regardless of how far the settled clock
+    /// happens to trail.
+    #[test]
+    fn depth_rule_is_measured_on_the_same_clock_as_the_certificate() {
+        let k = key(1);
+        let committee = sigil_braidpool::committee::Committee::new(vec![(
+            k.verifying_key().to_bytes(),
+            k.verifying_key().to_bytes(),
+        )]);
+        let cfg = ObserverConfig { checkpoint_interval: 32, ..Default::default() };
+        let mut w = FinalityWire {
+            observer: FinalityObserver::new(committee, cfg),
+            signing_key: Some(k),
+            announced: true,
+            last_vote_height: 0,
+        };
+
+        // The live shape: a certificate at the mint height, while the caller
+        // can only offer a settled height ~final_depth behind it.
+        const MINT: u64 = 314_528;
+        const SETTLED: u64 = 314_041; // 487 behind, as measured live
+        w.on_block(MINT, [1u8; 32], Some([2u8; 32]), 0).expect("n=1 committee certifies on its own vote");
+
+        let r = w.report(SETTLED).expect("finality is enabled");
+        assert_eq!(r.finalized_height, Some(MINT));
+        // Measured on the mint clock, the depth rule sits exactly
+        // DEPTH_RULE_BLOCKS below the certificate — no clock offset smuggled in.
+        assert_eq!(r.depth_rule_height, MINT - sigil_finality::observer::DEPTH_RULE_BLOCKS);
+        assert_eq!(
+            r.blocks_ahead_of_depth_rule(),
+            sigil_finality::observer::DEPTH_RULE_BLOCKS as i64,
+            "the saving is the depth rule itself, not the depth rule plus the settled-clock lag"
+        );
+
+        // And the pre-fix behaviour, pinned so the regression is unmistakable:
+        // measuring against the settled clock inflates the same saving by the
+        // full 487-block offset. 314_528 - (314_041 - 512) = 999, which is the
+        // magnitude the live heartbeats were printing (they ranged 993-1023 as
+        // the settled clock drifted between prints; the exact figure moves with
+        // the offset, the ~2x inflation does not).
+        let inflated = MINT as i64 - (SETTLED - sigil_finality::observer::DEPTH_RULE_BLOCKS) as i64;
+        assert_eq!(inflated, 999);
+        assert_eq!(
+            inflated - r.blocks_ahead_of_depth_rule(),
+            (MINT - SETTLED) as i64,
+            "the entire overstatement is exactly the mint-vs-settled clock offset"
+        );
+        assert!(
+            inflated > r.blocks_ahead_of_depth_rule() * 19 / 10,
+            "the old number was nearly double the real saving: {inflated} vs {}",
+            r.blocks_ahead_of_depth_rule()
+        );
+    }
+
     #[test]
     fn order_hash_falls_back_to_the_spine_hash_when_the_braid_is_off() {
         let ks: Vec<SigningKey> = (1..5u8).map(key).collect();
@@ -316,6 +427,7 @@ mod tests {
             observer: FinalityObserver::new(committee, cfg),
             signing_key: Some(ks[0].clone()),
             announced: true,
+            last_vote_height: 0,
         };
         let bytes = w.on_block(320, [7u8; 32], None, 0).unwrap();
         let v = decode_vote(&bytes).unwrap();

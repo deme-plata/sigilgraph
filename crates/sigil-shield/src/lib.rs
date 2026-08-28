@@ -56,6 +56,9 @@ pub mod spend_full_v5;
 pub mod ring;
 /// Shielded wallet: key derivation, own-note tracking, and spend proving.
 pub mod wallet;
+/// Choosing WHICH note to spend, and what to do when no single note is big enough.
+/// `build_spend` takes a position and never helped pick it; this is that missing half.
+pub mod payment;
 /// Browser (wasm32) bindings so a plain, bundler-free HTML wallet page can call the
 /// real spend prover client-side. Native builds never see this module — wasm-bindgen
 /// is a wasm32-only dependency (see Cargo.toml), so gating here is what keeps the

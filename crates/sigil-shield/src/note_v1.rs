@@ -474,6 +474,25 @@ pub enum WireVerifyError {
     MalformedProof,
     #[error("STARK verification failed: {0}")]
     VerifierRejected(String),
+    /// Two inputs naming the same nullifier: one note spent twice in one transaction.
+    ///
+    /// This is NOT something the circuit can catch. Feeding one note in as both inputs
+    /// gives two independently-valid input blocks and a conservation lane summing
+    /// `2 x value`; every constraint holds. The only tell is the repeated nullifier, and
+    /// because the chain records nullifiers in a SET the duplicate insert is a no-op —
+    /// one note burned, double the value out. Checked here, before any proof work.
+    #[error("both inputs name the same nullifier (one note spent twice)")]
+    DuplicateNullifier,
+    /// A nullifier count no shipped circuit accepts. 1 is v4/v5, 2 is v6.
+    #[error("no circuit takes {got} input(s)")]
+    UnsupportedInputCount { got: usize },
+    /// The proof's trace is not the shape the selected circuit uses.
+    ///
+    /// Checked BEFORE the proof reaches any AIR, because winterfell 0.9's generated
+    /// `Air::new` asserts the width and a mismatch is a PANIC, not an error — and this
+    /// path is reachable from the network. See `verify_spend_wire_multi`.
+    #[error("proof trace is {got} columns wide; the selected circuit uses {expected}")]
+    WrongTraceWidth { expected: usize, got: usize },
 }
 
 /// Verify a shielded-spend proof from its wire-encoded public inputs.
@@ -488,26 +507,149 @@ pub fn verify_spend_wire(
     cm_outs: &[[u8; 32]],
     proof: &[u8],
 ) -> Result<(), WireVerifyError> {
+    verify_spend_wire_multi(anchor, std::slice::from_ref(nullifier), fee, cm_outs, proof)
+}
+
+/// Verify a spend with ONE OR TWO inputs, dispatching on the DECLARED nullifier count.
+///
+/// # Dispatch is on arity, never on proof shape
+///
+/// The number of nullifiers is a field of the transaction: the sender says how many notes
+/// they are spending, and that statement selects the circuit. Nothing is inferred from the
+/// proof.
+///
+/// 🪤 In particular, DO NOT dispatch on trace length. It is ambiguous — a v4 trace is
+/// `(depth+1)*64` rows and a v5 trace is exactly twice that, so a 512-row trace is v4 over
+/// a depth-7 pool OR v5 over a depth-3 pool, indistinguishable from the proof alone. An
+/// earlier version of this function did precisely that and passed its own round-trip test
+/// only because the test used one depth on both sides; the wallet, on a different depth,
+/// got `expected 9408 query value bytes, but was 10752`.
+///
+/// | nullifiers | circuit | notes |
+/// |---|---|---|
+/// | 1 | v5, then v4 | see the dual-accept window below |
+/// | 2 | v6 | two inputs, one anchor, one sum |
+///
+/// # The v5/v4 dual-accept window
+///
+/// v5 is v4's constraint system on a trace whose second half is reserved randomness. Both
+/// are accepted for one input because **v4 is sound** — it proves exactly what it claims —
+/// it simply does not HIDE: a v4 proof publishes both output amounts and the recipient key
+/// verbatim, ~85 occurrences each. Refusing it outright would brick every already-installed
+/// wallet the moment a node updated, which on a testnet where the leak is already public is
+/// the worse failure. Try the hiding circuit first, fall back to the legacy one.
+///
+/// Each verify is ~1-2 ms and a genuinely invalid proof fails both, so version-agnosticism
+/// costs one extra failed verify on the legacy path — cheaper than a consensus split. The
+/// window should close (v5 required) once wallets have moved; that is a height gate, and it
+/// is not set yet.
+pub fn verify_spend_wire_multi(
+    anchor: &[u8; 32],
+    nullifiers: &[[u8; 32]],
+    fee: u128,
+    cm_outs: &[[u8; 32]],
+    proof: &[u8],
+) -> Result<(), WireVerifyError> {
     use crate::spend_full_v4::{verify_spend_full_v4, SpendFullV4PublicInputs, N_OUTS};
+    use crate::spend_full_v5::{verify_spend_full_v5, SpendFullV5PublicInputs};
+    use crate::spend_full_v5::WIDTH as V5_WIDTH;
+    use crate::spend_full_v6::{
+        reject_duplicate_nullifiers, verify_spend_full_v6, SpendFullV6PublicInputs,
+        N_INS as V6_INS, WIDTH as V6_WIDTH,
+    };
 
     if cm_outs.len() != N_OUTS {
         return Err(WireVerifyError::WrongOutputCount { expected: N_OUTS, got: cm_outs.len() });
+    }
+    // Arity BEFORE decoding: it is a length check on the caller's own declaration, so a
+    // wrong count should be reported as a wrong count and not as whatever the first
+    // malformed field happens to be.
+    if nullifiers.len() != 1 && nullifiers.len() != V6_INS {
+        return Err(WireVerifyError::UnsupportedInputCount { got: nullifiers.len() });
     }
     if fee >= (1u128 << RANGE_BITS) {
         return Err(WireVerifyError::FeeOutOfRange(fee));
     }
 
     let root = from_wire(anchor)?;
-    let nf = from_wire(nullifier)?;
     let fee_e = BaseElement::new(fee as u64);
     let mut outs = [BaseElement::ZERO; N_OUTS];
     for (slot, cm) in outs.iter_mut().zip(cm_outs.iter()) {
         *slot = from_wire(cm)?;
     }
+    let nfs: Vec<BaseElement> =
+        nullifiers.iter().map(|n| from_wire(n)).collect::<Result<_, _>>()?;
+
+    // DUPLICATE CHECK BEFORE THE PROOF IS EVEN PARSED.
+    //
+    // Ordering is not a micro-optimisation here. The circuit ACCEPTS one note fed in as
+    // both inputs — two independently-valid blocks, a conservation lane summing 2 x value,
+    // every constraint satisfied — so this check is the only thing standing between that
+    // witness and minted money. Putting it ahead of parsing keeps it impossible to reach
+    // any verification path without having passed it.
+    //
+    // (An earlier arrangement had it after `Proof::from_bytes`, which made the "before any
+    // proof work" claim in this function's docs false. The test
+    // `duplicate_nullifiers_are_refused_before_any_proof_work` passes deliberately
+    // malformed proof bytes for exactly this reason: if the guard ever drifts back behind
+    // parsing, it reports MalformedProof and the test fails.)
+    if nfs.len() == V6_INS {
+        let pair: [BaseElement; V6_INS] = [nfs[0], nfs[1]];
+        reject_duplicate_nullifiers(&pair).map_err(|_| WireVerifyError::DuplicateNullifier)?;
+    }
 
     let p = winterfell::Proof::from_bytes(proof).map_err(|_| WireVerifyError::MalformedProof)?;
-    verify_spend_full_v4(p, SpendFullV4PublicInputs { root, nf, fee: fee_e, cm_outs: outs })
-        .map_err(|e| WireVerifyError::VerifierRejected(format!("{e:?}")))
+
+    // TRACE-WIDTH GUARD — a REMOTE PANIC otherwise, not merely a bad error message.
+    //
+    // winterfell 0.9's `Air::new` begins `assert_eq!(WIDTH, trace_info.width())`. That is
+    // an assert, so handing a circuit a proof of the wrong shape ABORTS THE PROCESS. This
+    // function is called from the settlement chokepoint on transactions that arrive from
+    // the network, so before this guard existed any peer could crash a node by sending a
+    // spend declaring two nullifiers with a v5-shaped (33-column) proof attached. Found by
+    // `a_v5_and_a_v6_proof_of_the_same_depth_are_never_confused`, which did exactly that
+    // and panicked at `spend_full_v6.rs:341` — `left: 46, right: 33`.
+    //
+    // 🪤 This is NOT dispatch on proof shape, and the distinction matters. The circuit was
+    // already chosen by the DECLARED nullifier count; this only checks that the proof the
+    // caller attached is the shape that circuit can even be handed. A mismatch is refused,
+    // never re-routed — re-routing here would reintroduce exactly the ambiguity the arity
+    // dispatch exists to avoid.
+    //
+    // v4 and v5 share a width (33) and differ only in trace LENGTH, which no assert
+    // guards, so the dual-accept window is unaffected: a v4 proof reaches v5's verifier and
+    // is rejected normally, as `off_circuit_matches_in_circuit_spend_full` confirms.
+    let expected_width = if nfs.len() == V6_INS { V6_WIDTH } else { V5_WIDTH };
+    let got_width = p.trace_info().main_trace_width();
+    if got_width != expected_width {
+        return Err(WireVerifyError::WrongTraceWidth { expected: expected_width, got: got_width });
+    }
+
+    match nfs.len() {
+        1 => {
+            let nf = nfs[0];
+            let p4 = p.clone();
+            match verify_spend_full_v5(p, SpendFullV5PublicInputs { root, nf, fee: fee_e, cm_outs: outs })
+            {
+                Ok(()) => Ok(()),
+                Err(v5_err) => verify_spend_full_v4(
+                    p4,
+                    SpendFullV4PublicInputs { root, nf, fee: fee_e, cm_outs: outs },
+                )
+                // Report the v5 error, not the v4 one: v5 is the circuit callers should be
+                // on, so its rejection is the diagnostic that helps them.
+                .map_err(|_| WireVerifyError::VerifierRejected(format!("{v5_err:?}"))),
+            }
+        }
+        n if n == V6_INS => {
+            // Already refused above, ahead of proof parsing.
+            let nf: [BaseElement; V6_INS] = [nfs[0], nfs[1]];
+            debug_assert!(reject_duplicate_nullifiers(&nf).is_ok());
+            verify_spend_full_v6(p, SpendFullV6PublicInputs { root, nf, fee: fee_e, cm_outs: outs })
+                .map_err(|e| WireVerifyError::VerifierRejected(format!("{e:?}")))
+        }
+        got => Err(WireVerifyError::UnsupportedInputCount { got }),
+    }
 }
 
 #[cfg(test)]
@@ -522,6 +664,148 @@ mod tests {
 
     fn e(v: u64) -> BaseElement {
         BaseElement::new(v)
+    }
+
+    /// THE DISPATCH GATE (requested in review).
+    ///
+    /// A v5 proof and a v6 proof built over the SAME pool depth must never be mistaken for
+    /// each other. This is the test the earlier trace-length dispatch would have failed —
+    /// and note that it only means something because both sides use one depth: an earlier
+    /// round-trip test used a single depth on both sides of a LENGTH comparison and passed
+    /// while the wallet, on another depth, got `expected 9408 query value bytes, but was
+    /// 10752`. Here the shared depth is the point, not the flaw: with arity dispatch, the
+    /// declared nullifier count decides, and the depth is irrelevant.
+    #[test]
+    #[ignore = "proves two circuits; winterfell 0.9 debug-only validate_transition_degrees. Run release-compiled."]
+    fn a_v5_and_a_v6_proof_of_the_same_depth_are_never_confused() {
+        use crate::mimc::compress2;
+        use crate::membership::CompressTree;
+        use crate::spend_full_v5 as v5;
+        use crate::spend_full_v6 as v6;
+        use winterfell::Prover;
+
+        let e = BaseElement::new;
+        let pk_of = |sk: BaseElement| compress2(sk, BaseElement::new(v5::PK_DOMAIN));
+        let leaf = |v, b, sk| compress2(compress2(v, b), pk_of(sk));
+        let cm_out = |v, b, pk| compress2(compress2(v, b), pk);
+
+        let sk = e(0xDEAD);
+        let me = pk_of(sk);
+        // ONE pool, depth 3, holding both notes — so both proofs share a depth AND a root.
+        let (n0, n1) = ((e(50), e(4242), sk), (e(47), e(1337), sk));
+        let (p0, p1) = (2usize, 5usize);
+        let mut leaves: Vec<BaseElement> = (0..8).map(|i| padding_leaf(i as u64)).collect();
+        leaves[p0] = leaf(n0.0, n0.1, n0.2);
+        leaves[p1] = leaf(n1.0, n1.1, n1.2);
+        let tree = CompressTree::new(leaves);
+        let (path0, path1) = (tree.path(p0), tree.path(p1));
+        let anchor = to_wire(tree.root());
+        let fee = 3u128;
+
+        // v5: spend note 0 alone. 50 - 3 = 47, split 30 + 17.
+        let outs5 = [(e(30), e(777), me), (e(17), e(888), me)];
+        let t5 = v5::build_spend_full_v5_trace(
+            n0.0, n0.1, n0.2, e(fee as u64), &outs5, &path0, &v5::v5_options(),
+        );
+        let proof5 = v5::SpendFullV5Prover::new(v5::v5_options()).prove(t5).unwrap().to_bytes();
+        let nf0 = to_wire(compress2(sk, e(p0 as u64)));
+        let cm5: Vec<[u8; 32]> = outs5.iter().map(|(v, b, pk)| to_wire(cm_out(*v, *b, *pk))).collect();
+
+        // v6: spend BOTH. 50 + 47 - 3 = 94.
+        let outs6 = [(e(94), e(777), me), (e(0), e(888), me)];
+        let t6 = v6::build_spend_full_v6_trace(
+            &[n0, n1], e(fee as u64), &outs6, &[&path0, &path1], &v6::v6_options(),
+        );
+        let proof6 = v6::SpendFullV6Prover::new(v6::v6_options()).prove(t6).unwrap().to_bytes();
+        let nf1 = to_wire(compress2(sk, e(p1 as u64)));
+        let cm6: Vec<[u8; 32]> = outs6.iter().map(|(v, b, pk)| to_wire(cm_out(*v, *b, *pk))).collect();
+
+        // Each verifies under its OWN declared arity.
+        verify_spend_wire_multi(&anchor, &[nf0], fee, &cm5, &proof5).expect("v5 at arity 1");
+        verify_spend_wire_multi(&anchor, &[nf0, nf1], fee, &cm6, &proof6).expect("v6 at arity 2");
+
+        // And neither is accepted under the other's.
+        assert!(
+            verify_spend_wire_multi(&anchor, &[nf0, nf1], fee, &cm5, &proof5).is_err(),
+            "a v5 proof must not verify as v6 — same depth, different circuit"
+        );
+        assert!(
+            verify_spend_wire_multi(&anchor, &[nf0], fee, &cm6, &proof6).is_err(),
+            "a v6 proof must not verify as v5"
+        );
+    }
+
+    /// A proof of the wrong SHAPE must be refused, not panic the process.
+    ///
+    /// winterfell 0.9's `Air::new` asserts the trace width, so before the guard in
+    /// `verify_spend_wire_multi` a mismatched proof aborted. Since this function is called
+    /// on transactions arriving from the network, that was a remote crash: declare two
+    /// nullifiers, attach a 33-column v5 proof, and the node dies. Cheap to trigger, and it
+    /// needs no valid proof at all — only correctly-framed bytes.
+    #[test]
+    fn a_proof_of_the_wrong_width_is_refused_and_does_not_panic() {
+        use crate::mimc::compress2;
+        use crate::membership::CompressTree;
+        use crate::spend_full_v5 as v5;
+        use winterfell::Prover;
+
+        let e = BaseElement::new;
+        let pk_of = |sk: BaseElement| compress2(sk, BaseElement::new(v5::PK_DOMAIN));
+        let sk = e(0xDEAD);
+        let me = pk_of(sk);
+        let (value, blinding) = (e(100), e(4242));
+        let mut leaves: Vec<BaseElement> = (0..8).map(|i| padding_leaf(i as u64)).collect();
+        leaves[3] = compress2(compress2(value, blinding), me);
+        let tree = CompressTree::new(leaves);
+        let path = tree.path(3);
+
+        let outs = [(e(50), e(777), me), (e(47), e(888), me)];
+        let t = v5::build_spend_full_v5_trace(value, blinding, sk, e(3), &outs, &path, &v5::v5_options());
+        let proof = v5::SpendFullV5Prover::new(v5::v5_options()).prove(t).unwrap().to_bytes();
+
+        // A genuine v5 proof, offered with TWO declared nullifiers so arity selects v6.
+        let nf0 = to_wire(compress2(sk, e(3)));
+        let nf1 = to_wire(compress2(sk, e(5)));
+        let cms: Vec<[u8; 32]> = outs
+            .iter()
+            .map(|(v, b, pk)| to_wire(compress2(compress2(*v, *b), *pk)))
+            .collect();
+
+        let err = verify_spend_wire_multi(&to_wire(tree.root()), &[nf0, nf1], 3, &cms, &proof)
+            .expect_err("a v5-shaped proof must never be handed to v6");
+        assert_eq!(
+            err,
+            WireVerifyError::WrongTraceWidth {
+                expected: crate::spend_full_v6::WIDTH,
+                got: crate::spend_full_v5::WIDTH,
+            },
+            "got {err:?}"
+        );
+    }
+
+    /// Two identical nullifiers are refused BEFORE any proof work. The proof bytes here are
+    /// garbage on purpose: if the guard were ordered after verification this would surface
+    /// as `VerifierRejected`, and the ordering matters because the circuit ACCEPTS the
+    /// witness this guard exists to stop.
+    #[test]
+    fn duplicate_nullifiers_are_refused_before_any_proof_work() {
+        let nf = to_wire(BaseElement::new(7));
+        let cms = [to_wire(BaseElement::new(2)), to_wire(BaseElement::new(3))];
+        let err = verify_spend_wire_multi(&to_wire(BaseElement::new(1)), &[nf, nf], 3, &cms, b"not a proof")
+            .expect_err("must refuse");
+        assert_eq!(err, WireVerifyError::DuplicateNullifier, "got {err:?}");
+    }
+
+    /// An arity no circuit implements is refused by name, not by a confusing verifier error.
+    #[test]
+    fn an_unsupported_input_count_is_refused() {
+        let w = |v: u64| to_wire(BaseElement::new(v));
+        let cms = [w(2), w(3)];
+        let nfs = [w(1), w(2), w(3)];
+        let err = verify_spend_wire_multi(&w(1), &nfs, 3, &cms, b"x").expect_err("must refuse");
+        assert_eq!(err, WireVerifyError::UnsupportedInputCount { got: 3 }, "got {err:?}");
+        let err0 = verify_spend_wire_multi(&w(1), &[], 3, &cms, b"x").expect_err("must refuse");
+        assert_eq!(err0, WireVerifyError::UnsupportedInputCount { got: 0 }, "got {err0:?}");
     }
 
     /// THE CONVERGENCE GATE — the whole point of this module.

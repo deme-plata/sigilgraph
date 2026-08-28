@@ -40,7 +40,8 @@ use winterfell::Prover;
 
 use crate::mimc::{compress2, mimc_options};
 use crate::note_v1::{from_wire, to_wire, Note, NoteError, ShieldedPoolTree, RANGE_BITS};
-use crate::spend_full_v4::{build_spend_full_v4_trace, SpendFullV4Prover, N_OUTS, PK_DOMAIN};
+use crate::spend_full_v4::{N_OUTS, PK_DOMAIN};
+use crate::spend_full_v5::{build_spend_full_v5_trace, v5_options, SpendFullV5Prover};
 
 /// Reduce 32 bytes to a Goldilocks element, rejecting nothing (always canonical).
 ///
@@ -428,15 +429,33 @@ pub fn build_spend(
     }
 
     let path = tree.path(position as usize);
-    let trace = build_spend_full_v4_trace(
+    // PROVE WITH v5, THE HIDING CIRCUIT (2026-08-28).
+    //
+    // This wallet proved with v4 for its whole life, and v4 is sound but NOT hiding: it
+    // holds the secrets in constant trace columns, so the recipient key and both output
+    // amounts appear in the proof bytes verbatim, ~85 occurrences each. v5 fixes that by
+    // reserving the trace's second half for randomness — and v5 was written, committed,
+    // and then never called. It sat as dead code, referenced only from `examples/`, while
+    // every real spend kept publishing its witness.
+    //
+    // `build_spend_full_v5_trace` draws its mask from the OS. That is not optional: two
+    // proofs of the same witness under the SAME seed are byte-identical, and differencing
+    // two proofs under different seeds is exactly the attack the randomness exists to stop.
+    // A fixed seed is a test-only affordance.
+    //
+    // Verification accepts v4 as well during the rollout window (see
+    // `note_v1::verify_spend_wire_multi`), so this change does not strand older wallets —
+    // it only stops THIS one leaking.
+    let trace = build_spend_full_v5_trace(
         note.value,
         note.blinding,
         note.spend_key,
         BaseElement::new(public_value),
         &outs,
         &path,
+        &v5_options(),
     );
-    let proof = SpendFullV4Prover::new(mimc_options())
+    let proof = SpendFullV5Prover::new(v5_options())
         .prove(trace)
         .expect("a conserving, in-range witness must prove");
 
@@ -545,14 +564,19 @@ mod tests {
         assert_eq!(store.balance(), 0, "a spent note stops counting");
     }
 
-    /// THE WALLET GATE: a wallet-built spend must verify under the production circuit.
+    /// THE WALLET GATE: a wallet-built spend must verify through THE PRODUCTION PATH.
     ///
-    /// IGNORED in debug only: `build_spend` proves with `SpendFullV4Prover`, hitting the
-    /// same winterfell 0.9 debug-only `validate_transition_degrees` quirk documented on
-    /// `spend_full_v4.rs`'s tests — not a soundness gap; release-compiled winter-prover
-    /// passes (confirmed empirically).
+    /// Deliberately calls `note_v1::verify_spend_wire` — the function the settlement
+    /// chokepoint actually calls — rather than naming a circuit directly. It used to call
+    /// `verify_spend_full_v4`, and that is precisely how the wallet could be switched from
+    /// v4 to v5 with the test still describing v4: a test that names a circuit tests that
+    /// circuit, not the path a real spend takes.
+    ///
+    /// IGNORED in debug only: `build_spend` proves, hitting the winterfell 0.9 debug-only
+    /// `validate_transition_degrees` quirk documented on the circuit tests — not a
+    /// soundness gap; release-compiled winter-prover passes.
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees vs witness-dependent range-bit column degree (same family as spend_full_v4); release-compiled winter-prover passes."]
+    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees vs witness-dependent range-bit column degree; release-compiled winter-prover passes."]
     fn wallet_built_spend_verifies() {
         let acct = ShieldedAccount::from_seed([42u8; 32]);
         let mut store = NoteStore::new();
@@ -565,20 +589,60 @@ mod tests {
         let bundle = build_spend(&acct, &mut store, &pool, index as usize, 3, &[(50, me), (47, me)])
             .expect("wallet must build a spend");
 
-        let root = from_wire(&bundle.anchor).unwrap();
-        let nf = from_wire(&bundle.nullifier).unwrap();
-        let cm_outs = [
-            from_wire(&bundle.cm_outs[0]).unwrap(),
-            from_wire(&bundle.cm_outs[1]).unwrap(),
-        ];
-        let proof = winterfell::Proof::from_bytes(&bundle.proof).expect("decode");
-        verify_spend_full_v4(
-            proof,
-            SpendFullV4PublicInputs { root, nf, fee: BaseElement::new(3), cm_outs },
+        crate::note_v1::verify_spend_wire(
+            &bundle.anchor,
+            &bundle.nullifier,
+            3,
+            &bundle.cm_outs,
+            &bundle.proof,
         )
-        .expect("SECURITY: a wallet-built spend must verify under the production circuit");
+        .expect("SECURITY: a wallet-built spend must verify through the production path");
 
         assert_eq!(bundle.out_indices.len(), 2, "change notes recorded for tracking");
+    }
+
+    /// THE LEAK REGRESSION — the reason the wallet was moved from v4 to v5.
+    ///
+    /// v4 holds the witness in constant trace columns, so a v4 proof carries the recipient
+    /// key and both output amounts verbatim, ~85 occurrences each. v5 fixes it by reserving
+    /// the trace's second half for randomness. v5 was written and committed on 2026-08-28
+    /// and then **never called**: `wallet.rs` kept proving with v4 and
+    /// `note_v1::verify_spend_wire` kept verifying with v4, so the fix sat as dead code
+    /// while every real spend published its witness.
+    ///
+    /// This test is what makes that impossible to repeat. It does not name a circuit — it
+    /// asks the only question that matters: is any secret in the bytes the wallet is about
+    /// to broadcast? Revert `build_spend` to v4 and it fails immediately.
+    #[test]
+    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees; release-compiled winter-prover passes."]
+    fn a_wallet_built_spend_does_not_publish_its_witness() {
+        let acct = ShieldedAccount::from_seed([42u8; 32]);
+        let bob = ShieldedAccount::from_seed([0xB0u8; 32]);
+        let mut store = NoteStore::new();
+        let (index, cm) = shield_note(&acct, &mut store, 100).unwrap();
+        let pool = padded(&[cm]);
+        assert_eq!(store.scan_owned(&acct, &pool), 1);
+
+        // Pay a third party, which is the case where a leak actually costs someone
+        // something: 60 to Bob, 37 back as change, fee 3.
+        let bundle = build_spend(
+            &acct, &mut store, &pool, index as usize, 3,
+            &[(60, bob.public_key()), (37, acct.public_key())],
+        )
+        .expect("wallet must build a spend");
+
+        let secrets = [
+            ("note.value", BaseElement::new(100)),
+            ("payment.amount", BaseElement::new(60)),
+            ("change.amount", BaseElement::new(37)),
+            ("recipient.pk", bob.public_key()),
+            ("spend_key", acct.spend_key()),
+        ];
+        let hits = crate::zk_mask::scan_proof_for_secrets(&bundle.proof, &secrets);
+        assert!(
+            hits.is_empty(),
+            "SECURITY: the wallet published its own witness in the proof: {hits:?}"
+        );
     }
 
     /// Paying a THIRD PARTY: the note goes to them, and this wallet must not count it as

@@ -5,9 +5,11 @@
 // records a `verified_to` watermark that is cryptographically meaningful:
 //
 //   blocks 0..verified_to have each
-//     1. passed `SigilBlockHeaderV0::precheck()` — schema/version/network_id, signature
-//        LENGTH, nonce well-formedness, AND the internal-consistency invariant
-//        `vdf_input == BLAKE3(parent_hash || nonce_sqisign)`; and
+//     1. passed `SigilBlockHeaderV0::verify_at_height()` — schema/version/network_id,
+//        signature LENGTH, nonce well-formedness, the internal-consistency invariant
+//        `vdf_input == BLAKE3(parent_hash || nonce_sqisign)`, AND — at/above
+//        H1_PRODUCER_SIG_ACTIVATION_HEIGHT, for headers using the Ed25519Hot scheme —
+//        a REAL producer-signature check (2026-08-20; was precheck()-only before this);
 //     2. linked to their parent: `header[h].parent_hash == header[h-1].hash()`.
 //
 // This is SIGIL claim #2 ("state divergence is impossible to hide") made operational on
@@ -16,11 +18,15 @@
 // down to genesis, or `verified_to` stalls at the first break and we say so loudly.
 //
 // HONEST scope (what this does NOT yet check):
-//   • The SQIsign producer signature and Wesolowski VDF proof are NOT cryptographically
-//     verified here — those need flux-sqisign / flux-vdf verify entrypoints wired in
-//     (gated behind the `sqisign` feature, follow-on). `precheck()` checks their SHAPE
-//     and the VDF-input binding, not the underlying hardness. So `verified_to` proves
-//     "connected, well-formed, internally-consistent chain", not "every proof re-checked".
+//   • Ed25519Hot producer signatures ARE checked (above), but ONLY once activated, and
+//     ONLY for that scheme — SqiSign5 (the v0 default; every externally-mined block, since
+//     the block-sealing node can't hold arbitrary miners' keys) and HybridSqiEd25519 (the
+//     real post-quantum scheme) still are NOT — those need `flux-sqisign`/`sqisign_rs`
+//     verify entrypoints, which this crate deliberately doesn't link unconditionally (same
+//     "light clients stay light" reasoning as `sigil-header`'s own module doc — see
+//     `sigil-node::producer_signing::verify_self_mined_hybrid` for what a heavier build,
+//     e.g. one already using the `producer` feature, would need to additionally call). The
+//     Wesolowski VDF proof is likewise still unverified (needs flux-vdf).
 //   • The 4 state roots / STARK transition proof are committed in the header (and so are
 //     covered by the parent-linkage hash chain) but not independently re-derived — that
 //     needs full block bodies + the state machine (Phase 3, flux-zk-stark gate).
@@ -86,7 +92,17 @@ fn verify_one(
     header: &sigil_header::SigilBlockHeaderV0,
     parent_hash: Option<&sigil_header::BlockHash>,
 ) -> Result<(), BreakReason> {
-    header.precheck().map_err(|e| BreakReason::Precheck(e.to_string()))?;
+    // 2026-08-20: was bare `precheck()` — `verify_at_height` is a strict
+    // superset (precheck, THEN, only at/above H1_PRODUCER_SIG_ACTIVATION_
+    // HEIGHT and only for the Ed25519Hot scheme, a real signature check).
+    // Closes exactly the gap this module's own doc comment used to call out
+    // ("the SQIsign producer signature... [is] NOT cryptographically
+    // verified here") for the one scheme this crate CAN check without a
+    // heavier PQ-crypto dependency (see sigil-header's own doc on why
+    // SqiSign5/Dilithium5/HybridSqiEd25519 still can't be checked at this
+    // layer). Below the activation height, or for any other scheme, this is
+    // byte-for-byte identical to the old precheck()-only behavior.
+    header.verify_at_height(header.height).map_err(|e| BreakReason::Precheck(e.to_string()))?;
     if let Some(expected) = parent_hash {
         if header.parent_hash != *expected {
             return Err(BreakReason::ParentMismatch {
@@ -210,10 +226,14 @@ pub fn verify_to_parallel(store: &mut BlockStore, max_steps: u64) -> VerifyRepor
         return VerifyReport { verified_to: start, checked: 0, first_break: frontier_break };
     }
 
-    // (2) Parallel precheck — the embarrassingly-parallel hot path.
+    // (2) Parallel precheck — the embarrassingly-parallel hot path. Same
+    // verify_at_height upgrade as verify_one above (real Ed25519Hot
+    // signature check once activated; a pure no-op below the activation
+    // height or for any other scheme) — `header.height` is a pure function
+    // of the header alone, so this stays fully parallel, no shared state.
     let precheck_results: Vec<Option<BreakReason>> = window
         .par_iter()
-        .map(|hdr| hdr.precheck().err().map(|e| BreakReason::Precheck(e.to_string())))
+        .map(|hdr| hdr.verify_at_height(hdr.height).err().map(|e| BreakReason::Precheck(e.to_string())))
         .collect();
 
     // (3) Sequential linkage walk in height order — identical failure ordering

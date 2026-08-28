@@ -249,6 +249,46 @@ pub fn build_block_body_for(
 /// then returns 100% to the credited wallet — see `split_mining_reward`), so
 /// this is safe to use for BOTH the mined-block case and the default
 /// free-running producer case (a one-entry shares map).
+/// Sub-phase profiling for [`build_block_body_for_shares`] (2026-08-27).
+///
+/// Measured live: produce loop ~316ms/block, `mint` 153ms, and THIS function
+/// 100.8ms — 66% of mint, the largest identified cost in the producer. Three
+/// hypotheses were already eliminated BY MEASUREMENT rather than argument: the
+/// four state roots are O(1); producer signing is a no-op on the live node; and
+/// `state_snapshot()`'s clone, which I predicted would dominate, measured 18.5ms.
+///
+/// The thing this exposes: there are THREE full `SigilState::clone()` calls per
+/// block — `state_snapshot()` in the producer, `let mut work = state.clone()`
+/// here, and a third inside `split_coinbase_mutations`. At ~18.5ms each that is
+/// ~55ms of pure copying per block before any useful work happens.
+pub mod prof {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    /// `split_coinbase_mutations` — includes its OWN state clone.
+    pub static SPLIT_US: AtomicU64 = AtomicU64::new(0);
+    /// The second full `SigilState::clone()`.
+    pub static CLONE2_US: AtomicU64 = AtomicU64::new(0);
+    /// Committing the coinbase mutations.
+    pub static CBCOMMIT_US: AtomicU64 = AtomicU64::new(0);
+    /// The user-tx apply+commit loop.
+    pub static TXLOOP_US: AtomicU64 = AtomicU64::new(0);
+    /// `work.roots()` — documented O(1); measured to confirm.
+    pub static ROOTS_US: AtomicU64 = AtomicU64::new(0);
+    /// Clone #3 of 3: `state.clone()` INSIDE `split_coinbase_mutations`.
+    pub static CLONE3_US: AtomicU64 = AtomicU64::new(0);
+    /// The credit_one/commit_state_transition work inside split (shielded-pool
+    /// appends live here — a growing Merkle tree, not obviously O(1)).
+    pub static CREDIT_US: AtomicU64 = AtomicU64::new(0);
+    pub static CALLS: AtomicU64 = AtomicU64::new(0);
+    pub fn add(c: &AtomicU64, t: std::time::Instant) { c.fetch_add(t.elapsed().as_micros() as u64, Relaxed); }
+    /// `(split, clone2, cb_commit, tx_loop, roots, calls)` in µs, cumulative.
+    pub fn read() -> (u64, u64, u64, u64, u64, u64) {
+        (SPLIT_US.load(Relaxed), CLONE2_US.load(Relaxed), CBCOMMIT_US.load(Relaxed),
+         TXLOOP_US.load(Relaxed), ROOTS_US.load(Relaxed), CALLS.load(Relaxed))
+    }
+    /// `(clone3, credit)` in µs, cumulative — the inside of `split_coinbase_mutations`.
+    pub fn read_split() -> (u64, u64) { (CLONE3_US.load(Relaxed), CREDIT_US.load(Relaxed)) }
+}
+
 pub fn build_block_body_for_shares(
     state: &SigilState,
     height: u64,
@@ -258,16 +298,22 @@ pub fn build_block_body_for_shares(
     shares: &std::collections::HashMap<WalletId, u64>,
 ) -> (StateTransition, StateRoots, Vec<sigil_events::SigilEvent>, Vec<SignedTx>) {
     let reward = reward.unwrap_or_else(|| sigil_emission::block_reward(height));
+    let _t = std::time::Instant::now();
     let cb_mutations = split_coinbase_mutations(state, height, reward, winner, shares);
+    prof::add(&prof::SPLIT_US, _t);
 
     // Re-apply the coinbase mutations against a fresh evolving clone (mirrors
     // build_block_body_for's pattern exactly) so txs see the post-coinbase
     // balances, then run user sends in order on top.
+    // PROFILE: clone #2 of 3 per block.
+    let _t = std::time::Instant::now();
     let mut work = state.clone();
+    prof::add(&prof::CLONE2_US, _t);
     let mut mutations: Vec<StateMutation> = Vec::new();
     let mut events: Vec<sigil_events::SigilEvent> = Vec::new();
     let mut included: Vec<SignedTx> = Vec::new();
 
+    let _t_cb = std::time::Instant::now();
     if !cb_mutations.is_empty() {
         // FAIL LOUD, not silent. This used to be a bare `.is_ok()` with no `else`: when the
         // coinbase failed to apply, the ENTIRE coinbase — miner cut, master cut and commons
@@ -289,6 +335,9 @@ pub fn build_block_body_for_shares(
         }
     }
 
+    prof::add(&prof::CBCOMMIT_US, _t_cb);
+
+    let _t_tx = std::time::Instant::now();
     for tx in txs {
         let res = match sigil_tx::apply_tx_at(&work, tx, height) {
             Ok(res) => res,
@@ -315,7 +364,12 @@ pub fn build_block_body_for_shares(
         }
     }
 
-    (StateTransition { at_height: height, mutations }, work.roots(), events, included)
+    prof::add(&prof::TXLOOP_US, _t_tx);
+    let _t_r = std::time::Instant::now();
+    let roots = work.roots();
+    prof::add(&prof::ROOTS_US, _t_r);
+    prof::CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    (StateTransition { at_height: height, mutations }, roots, events, included)
 }
 
 /// Full pool-share coinbase: split `reward` proportionally over `shares`
@@ -347,11 +401,17 @@ pub fn split_coinbase_mutations(
     winner: WalletId,
     shares: &std::collections::HashMap<WalletId, u64>,
 ) -> Vec<StateMutation> {
+    // PROFILE: clone #3 of 3. NOTE the ordering bug this exposes — the clone
+    // happens BEFORE the `reward == 0` early return, so a zero-reward block
+    // copies the entire state for nothing.
+    let _t_c3 = std::time::Instant::now();
     let mut work = state.clone();
+    prof::add(&prof::CLONE3_US, _t_c3);
     let mut mutations: Vec<StateMutation> = Vec::new();
     if reward == 0 {
         return mutations;
     }
+    let _t_credit = std::time::Instant::now();
 
     // Every wallet credited by this coinbase — miner, master AND commons — mints a
     // shielded note instead of a transparent balance IF that wallet has published a
@@ -503,6 +563,7 @@ pub fn split_coinbase_mutations(
     if total == 0 {
         // Defensive: caller bug (empty shares) — solo semantics for the winner.
         credit_one(&mut work, winner, reward);
+        prof::add(&prof::CREDIT_US, _t_credit);
         return mutations;
     }
 
@@ -521,6 +582,7 @@ pub fn split_coinbase_mutations(
     }
     let winner_cut = reward.saturating_sub(allocated.min(reward));
     credit_one(&mut work, winner, winner_cut);
+    prof::add(&prof::CREDIT_US, _t_credit);
     mutations
 }
 

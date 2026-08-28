@@ -1,3 +1,28 @@
+% v1.5 (2026-08-27): prediction 2 RESTATED and regraded open -> derived+sim.
+% The row asserted a PID discriminant (Kp^2 >= 4 Kd Ki); the implemented
+% controller (sigil-emission/src/controller.rs) has NO integral and NO
+% derivative term, so Ki = Kd = 0 and that test reduces to 0.64 >= 0 -- it
+% passed vacuously and could never fail. Replaced with the characteristic
+% equation actually derived from the implemented law (proportional + quadratic
+% accel + EMA lag, over an integrating plant): lambda^2-(1+Kp-x)lambda+Kp=0.
+% det = Kp = 0.8 < 1 for every loop gain, so complex roots always lie inside
+% the unit circle -- oscillation, if reachable, is necessarily damped; and
+% steady-state x ~ 0.16/k leaves the complex window after ~14 blocks.
+% Empirically closed against the REAL controller, not a model of it:
+% +20%% over-mint shock -> +0.4163%% after 3,000 blocks, 0 sign changes,
+% correction_factor 0.9969. Tests: sigil-emission controller::
+% prediction_2_stability (5), suite 30/30. NOT promoted to measured: no live
+% chain under real block-rate variance yet. Two open items recorded in the
+% row's falsification column. No other claims changed.
+% v1.4 (2026-08-23): two real changes, no promotions/regrades. (1) sigil-rpcd
+% references in the Architecture and Predictions sections were stale — that daemon
+% was stopped and disabled 2026-08-17; the money API is sigil-api, embedded in
+% sigil-node, reading/writing the real SigilState directly (no second ledger to
+% drift). (2) The "Light client first: sigil-top" section is no longer accurate as
+% light-client-only: sigil-top now links sigil-node's genesis/mint/DAG-ordering
+% logic directly and carries its own producer loop, proven correct in an
+% adversarial two-instance offline simulation (graded \stS, same category as the
+% braid's S1--S6 convergence gate) — explicitly NOT yet claimed live on sigil-g0.
 % SIGIL Whitepaper v1.2 — redesigned edition ("scientific instrument, not
 % crypto brochure"). Design review 2026-07-18 applied: epistemic-status pill
 % system, three technical figures (equation map / fold flow / evidence
@@ -106,11 +131,11 @@
 \fancyhfoffset{0pt}
 \renewcommand{\headrulewidth}{0.4pt}
 \renewcommand{\headrule}{{\color{slate}\hrule width\headwidth height 0.4pt}}
-\fancyhead[L]{\scriptsize\textcolor{gray}{SIGIL --- The Variational Chain \,$\cdot$\, whitepaper v1.3}}
+\fancyhead[L]{\scriptsize\textcolor{gray}{SIGIL --- The Variational Chain \,$\cdot$\, whitepaper v1.4}}
 \fancyhead[R]{\scriptsize\textcolor{gray}{\thepage}}
 
 \hypersetup{
-  pdftitle={SIGIL — The Variational Chain (Whitepaper v1.3)},
+  pdftitle={SIGIL — The Variational Chain (Whitepaper v1.4)},
   pdfauthor={bitknight.dipper688@passmail.net},
   pdfsubject={An experimental provenance-signed BlockDAG organized by a conjectural effective action; sigilgraph repo, branch feat/commons-tithe-routing-0.36.1, source d7906ff based on 16f05a8; benchmark record June--July 2026},
   pdfkeywords={SIGIL, BlockDAG, DagKnight, post-quantum, STARK, SQIsign, ML-KEM, fold, gossip delivery law}
@@ -140,7 +165,7 @@
 \end{tikzpicture}\\[10pt]
 {\Huge\bfseries\textcolor{ink}{SIGIL — The Variational Chain}}\\[8pt]
 {\Large An Experimental Provenance-Signed BlockDAG\\Organized by a Conjectural Effective Action}\\[10pt]
-{\normalsize Whitepaper v1.3 · 2026-07-22}\\[6pt]
+{\normalsize Whitepaper v1.4 · 2026-08-23}\\[6pt]
 {\normalsize\texttt{bitknight.dipper688@passmail.net}}\\[2pt]
 {\small SIGIL / Flux Foundation · \texttt{sigilgraph.quillon.xyz}}\\[2pt]
 {\small source \texttt{d7906ff} · based on \texttt{16f05a8} · branch \texttt{feat/commons-tithe-routing-0.36.1}}\\[6pt]
@@ -1210,6 +1235,19 @@ BLAKE3-pinned client key, and verifies the DNS tip anchor: an SQIsign-L5-signed
 \texttt{v=sigil1} TXT record at the apex, so a fresh node can authenticate the tip
 before speaking to any peer.
 
+\emph{No longer light-client-only, as of 2026-08-23} \hfill \stS. \texttt{sigil-top} now
+links \texttt{sigil-node}'s genesis, minting, and DAG-ordering logic directly as a shared
+library rather than duplicating it, and carries its own producer loop (seed
+$\to$ frontier $\to$ mint $\to$ settle) capable of running as a second, independent
+participant on \texttt{sigil-g0}. What is graded \stS here, precisely: an
+adversarial two-instance simulation — two producers racing each other and cross-feeding
+competing candidates in alternating arrival order — settles both instances to the
+identical chain (same height, same tip hash) every run, the same convergence property
+\S\ref{sec:consensus}'s S1--S6 gate checks for the braid generally. What is \emph{not}
+yet claimed: this loop has not been exercised against the live \texttt{sigil-g0} network.
+The gap between "proven correct offline" and "confirmed working live" is stated rather
+than elided, consistent with this paper's grading discipline throughout.
+
 \subsection{Dual-lane mining: $\Phi$ POWER $\times$ $\Omega$ TIME \hfill \stL}
 \label{sec:mining}
 
@@ -1317,7 +1355,7 @@ Solid is live; translucent is tested; wireframe is not yet earned.}
 
 \section{Predictions: the research scoreboard}\label{sec:predictions}
 
-The master equation earns its place only if it predicts. Status as of 2026-07-18:
+The master equation earns its place only if it predicts. Status as of 2026-08-27 (only row~2 has moved since 2026-07-18):
 
 \begin{center}
 \small
@@ -1329,9 +1367,14 @@ Prediction & Status & Evidence & Next falsification test \\
 \midrule
 1. Fork survival $\propto \exp(-\Delta R\,\tau_{\mathrm{block}})$ & \stO & none yet &
 fork-survival statistics vs.\ producer reputation \\
-2. PID non-oscillatory iff $K_p^2 \ge 4K_dK_i$ (corrected; char.\ eq.\
-$K_ds^2{+}K_ps{+}K_i{=}0$) & \stO & none yet & derive against the implemented
-controller, then tune to critical value on testnet \\
+2. Emission controller is non-oscillatory \emph{(restated v1.5 --- the
+implemented controller is not a PID)}. Real char.\ eq.\
+$\lambda^2-(1{+}K_p{-}x)\lambda+K_p=0$, loop gain $x\equiv\alpha K_pR^*/T$ &
+\stD & derived + driven against the REAL \texttt{EmissionController}: $+20\%$
+over-mint shock $\to$ $+0.42\%$ after 3{,}000 blocks, \textbf{0} error sign
+changes. \texttt{sigil-emission} 30/30 & measure on a live chain under real
+block-rate variance; decide whether $\lambda_1\!\to\!1$ (sub-exponential
+convergence) is acceptable, and split \texttt{CORRECTION\_SMOOTHING}'s two roles \\
 3. Topology commitment detects order-tampering forks & \stG & braid gates: 16/16
 orderings agree; tamper 5/5 rejected & land the header commitment; measure detection
 latency vs.\ state-root-only \\

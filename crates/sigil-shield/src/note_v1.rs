@@ -489,6 +489,7 @@ pub fn verify_spend_wire(
     proof: &[u8],
 ) -> Result<(), WireVerifyError> {
     use crate::spend_full_v4::{verify_spend_full_v4, SpendFullV4PublicInputs, N_OUTS};
+    use crate::spend_full_v5::{verify_spend_full_v5, SpendFullV5PublicInputs};
 
     if cm_outs.len() != N_OUTS {
         return Err(WireVerifyError::WrongOutputCount { expected: N_OUTS, got: cm_outs.len() });
@@ -506,8 +507,38 @@ pub fn verify_spend_wire(
     }
 
     let p = winterfell::Proof::from_bytes(proof).map_err(|_| WireVerifyError::MalformedProof)?;
-    verify_spend_full_v4(p, SpendFullV4PublicInputs { root, nf, fee: fee_e, cm_outs: outs })
-        .map_err(|e| WireVerifyError::VerifierRejected(format!("{e:?}")))
+
+    // ── DUAL-ACCEPT WINDOW (2026-08-28) ────────────────────────────────────────────
+    //
+    // v5 is v4's constraint system on a trace whose second half is reserved randomness.
+    // Both are accepted during rollout: v4 is SOUND — it proves exactly what it claims —
+    // it simply is not hiding (a v4 proof publishes the output amounts and the recipient
+    // key verbatim, 85 occurrences each). Refusing it outright would brick every already-
+    // installed wallet the moment a node updates, a worse failure than a transitional
+    // window on a testnet where the leak is already public.
+    //
+    // 🪤 DO NOT dispatch on trace length. It is AMBIGUOUS: a v4 trace is `(depth+1)*64`
+    // rows and a v5 trace is exactly twice that, so a 512-row trace is v4 over a depth-7
+    // pool OR v5 over a depth-3 pool, with no way to tell from the proof. An earlier
+    // version of this function did exactly that and passed its own round-trip test only
+    // because the test used one depth for both sides; the wallet, on a different pool
+    // depth, got `expected 9408 query value bytes, but was 10752`.
+    //
+    // So: try the hiding circuit first, fall back to the legacy one. Each verify is ~1-2 ms
+    // and a genuinely invalid proof fails both, so the cost of being version-agnostic is
+    // one extra failed verify on the legacy path — cheaper than a consensus split.
+    let v5_inputs = SpendFullV5PublicInputs { root, nf, fee: fee_e, cm_outs: outs };
+    let p4 = p.clone();
+    match verify_spend_full_v5(p, v5_inputs) {
+        Ok(()) => Ok(()),
+        Err(v5_err) => verify_spend_full_v4(
+            p4,
+            SpendFullV4PublicInputs { root, nf, fee: fee_e, cm_outs: outs },
+        )
+        // Report the v5 error, not the v4 one: v5 is the circuit callers should be on, so
+        // its rejection reason is the actionable one.
+        .map_err(|_| WireVerifyError::VerifierRejected(format!("{v5_err:?}"))),
+    }
 }
 
 #[cfg(test)]

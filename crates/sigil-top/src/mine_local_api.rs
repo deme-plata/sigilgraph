@@ -559,13 +559,76 @@ pub fn is_local_path(path: &str) -> bool {
     matches!(
         path,
         "/api/v1/mine-shield" | "/api/v1/mine-sign" | "/api/v1/mine-send-private"
+            | "/api/v1/adopt-seed"
     )
+}
+
+/// `POST /api/v1/adopt-seed` — body `{"seed":"<64-hex or recovery phrase>"}`.
+///
+/// The last mile of "launch sigil-top, press [W], create a wallet, and it just works".
+/// A wallet created in the BROWSER holds a seed this process knows nothing about, so the
+/// local signer had no key and every send fell back to a recovery-phrase prompt. This
+/// lets the page hand its seed over ONCE; `crate::miner_seed()` picks it up from disk
+/// from then on, so the operator is never asked again — no env var, no flags.
+///
+/// SAFETY, deliberately narrow:
+/// * `:9800` binds 127.0.0.1 ONLY (see `wallet_ui`), so this is not reachable off-box.
+/// * Written 0600 to `crate::local_seed_path()`.
+/// * REFUSES to overwrite an existing seed — a second wallet cannot silently hijack the
+///   signer, and a stray call cannot destroy the operator's key. Rotating is a
+///   deliberate manual `rm` of that file.
+/// * The seed is never echoed back; the response carries only the derived ADDRESS, so
+///   the caller can confirm which wallet was adopted without the secret crossing the
+///   wire a second time.
+fn handle_adopt_seed(body: &str) -> (&'static str, String) {
+    #[derive(serde::Deserialize)]
+    struct Req { seed: String }
+    let req: Req = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(e) => return ("400 Bad Request", format!(r#"{{"ok":false,"error":"bad body: {e}"}}"#)),
+    };
+    let raw = req.seed.trim().to_string();
+    if raw.is_empty() {
+        return ("400 Bad Request", r#"{"ok":false,"error":"seed is empty"}"#.into());
+    }
+    // Accept EITHER a 64-hex seed or a recovery phrase, matching what the browser's own
+    // `sigilDeriveAuto` accepts — the page should not have to know which form it holds.
+    let seed_hex = if crate::hex_to_32(&raw).is_some() {
+        raw.clone()
+    } else {
+        hex::encode(<sha3::Sha3_256 as sha3::Digest>::digest(raw.as_bytes()))
+    };
+    let Some(seed) = crate::hex_to_32(&seed_hex) else {
+        return ("400 Bad Request", r#"{"ok":false,"error":"could not derive a 32-byte seed"}"#.into());
+    };
+    let path = crate::local_seed_path();
+    if path.exists() {
+        // Idempotent when it is the SAME wallet; refuses when it is a different one.
+        let same = std::fs::read_to_string(&path).ok()
+            .map(|e| e.trim().eq_ignore_ascii_case(&seed_hex)).unwrap_or(false);
+        if !same {
+            return ("409 Conflict", r#"{"ok":false,"error":"a different wallet seed is already adopted — remove the seed file by hand to rotate"}"#.into());
+        }
+    } else {
+        if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
+        if let Err(e) = std::fs::write(&path, &seed_hex) {
+            return ("500 Internal Server Error", format!(r#"{{"ok":false,"error":"write failed: {e}"}}"#));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    let addr = hex::encode(ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key().to_bytes());
+    ("200 OK", format!(r#"{{"ok":true,"wallet":"{addr}","note":"signer adopted; no recovery phrase will be requested again on this box"}}"#))
 }
 
 /// Dispatch one of the three local-only endpoints. `body` is the raw request body
 /// (already extracted by `serve.rs`'s `handle_conn`).
 pub fn handle(path: &str, body: &str) -> (&'static str, String) {
     match path {
+        "/api/v1/adopt-seed" => handle_adopt_seed(body),
         "/api/v1/mine-sign" => handle_mine_sign(body),
         #[cfg(feature = "shield-register")]
         "/api/v1/mine-shield" => shield_ops::handle_mine_shield(body),

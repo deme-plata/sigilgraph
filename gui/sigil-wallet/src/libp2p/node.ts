@@ -238,10 +238,26 @@ export async function createBrowserNode(): Promise<Libp2p> {
     const r = await fetch('/bridge-addr.json?t=' + Date.now(), { cache: 'no-store' })
     if (r.ok) {
       const j: any = await r.json()
-      const host = (typeof location !== 'undefined' && location.hostname) || 'sigilgraph.fluxapp.xyz'
-      if (j?.peer) {
+      // 2026-08-23: prefer the bridge's OWN pre-resolved `wss` multiaddr (it already
+      // bakes in a domain the :9443 TLS cert actually covers — quillon.xyz et al.)
+      // instead of rebuilding one from `location.hostname`. Rebuilding from
+      // location.hostname broke every non-cert-covered origin (most notably
+      // localhost:9800, sigil-top's own embedded server): the browser would try
+      // `wss://localhost:9443/...`, and :9443's cert (SAN: quillon.xyz,
+      // buzz.quillon.xyz, sigilgraph.quillon.xyz only — verified live, no
+      // wildcard, no localhost) fails that handshake, so bootstrap silently never
+      // connects. A WSS dial is a separate TCP/TLS connection from the page's own
+      // origin — it is NOT subject to same-origin/CORS, so there's no reason it
+      // needs to match location.hostname at all. Fall back to the old
+      // reconstruction only if the bridge hasn't published `wss` yet (older
+      // bridge-addr.json format).
+      if (j?.wss) {
+        bridgeBootstrap = [j.wss]
+        console.log('🌉 [LIBP2P] live sigil-bridge bootstrap (bridge-published wss) →', bridgeBootstrap[0])
+      } else if (j?.peer) {
+        const host = (typeof location !== 'undefined' && location.hostname) || 'sigilgraph.fluxapp.xyz'
         bridgeBootstrap = [`/dns4/${host}/tcp/9443/wss/p2p/${j.peer}`]
-        console.log('🌉 [LIBP2P] live sigil-bridge bootstrap →', bridgeBootstrap[0])
+        console.log('🌉 [LIBP2P] live sigil-bridge bootstrap (reconstructed, no wss field) →', bridgeBootstrap[0])
       }
     }
   } catch (e) {

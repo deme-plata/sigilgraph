@@ -35,6 +35,7 @@
 //! NOT the safety mechanism (see above: the real safety nets are the
 //! on-chain OperatorMinted check and bridge.rs's processed_burns set).
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -184,8 +185,24 @@ struct LocksResponse {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct RelayerState {
+    /// A CURSOR for `/v1/bridge/locks?since=`, and nothing more.
+    ///
+    /// It is deliberately NOT the dedup key any more. `next_lock_id` is an in-memory
+    /// counter in `sigil-api::bridge`, so a node restart sends it back to 1 — and when this
+    /// value was the dedup key, the next lock re-used an id the contract had already minted
+    /// and was skipped as a duplicate: SIGIL locked, no wrapped SIGIL minted, value stranded
+    /// in the vault. Observed live 2026-08-27
+    /// (`- lock 1 already minted on-chain … skipping`). See `minted_lock_txs`.
     last_lock_id: u64,
     last_polygon_block: u64,
+    /// **The dedup key: SIGIL lock transaction hashes already minted.**
+    ///
+    /// A transaction hash is content-derived and globally unique, so unlike a sequential id
+    /// it cannot be reset, re-used or collided by any restart on either side. This set is
+    /// the authority; the on-chain `already_minted` query stays as the backstop for the one
+    /// window this file cannot cover — a crash between "mint confirmed" and "state saved".
+    #[serde(default)]
+    minted_lock_txs: BTreeSet<String>,
 }
 
 struct Config {
@@ -221,8 +238,12 @@ impl Config {
 
 fn load_state(path: &PathBuf, default_start_block: u64) -> RelayerState {
     match std::fs::read_to_string(path) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or(RelayerState { last_lock_id: 0, last_polygon_block: default_start_block }),
-        Err(_) => RelayerState { last_lock_id: 0, last_polygon_block: default_start_block },
+        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|_| RelayerState {
+            last_lock_id: 0, last_polygon_block: default_start_block, minted_lock_txs: BTreeSet::new(),
+        }),
+        Err(_) => RelayerState {
+            last_lock_id: 0, last_polygon_block: default_start_block, minted_lock_txs: BTreeSet::new(),
+        },
     }
 }
 
@@ -404,10 +425,25 @@ async fn get_logs_chunked(
 /// hundreds of chunked requests for no real safety benefit.
 const MINT_CHECK_LOOKBACK_BLOCKS: u64 = 1000;
 
-async fn already_minted(provider: &impl Provider, contract: Address, lock_id: u64) -> Result<bool> {
+/// Interpret a SIGIL lock tx hash as the `lockId` passed to `mint`.
+///
+/// The contract takes `lockId` as an opaque `uint256` with no on-chain idempotency guard of
+/// its own, so nothing about it requires a small sequential number — and a 32-byte hash is
+/// exactly a `uint256`. Using the hash makes the mint's on-chain identity content-derived:
+/// two different locks can never share one, and a restart cannot re-issue one.
+fn lock_key(tx_hash: &str) -> Result<U256> {
+    let h = tx_hash.strip_prefix("0x").unwrap_or(tx_hash);
+    let bytes = hex::decode(h).with_context(|| format!("lock tx_hash {tx_hash} is not hex"))?;
+    if bytes.len() != 32 {
+        anyhow::bail!("lock tx_hash {tx_hash} is {} bytes, expected 32", bytes.len());
+    }
+    Ok(U256::from_be_slice(&bytes))
+}
+
+async fn already_minted(provider: &impl Provider, contract: Address, key: U256) -> Result<bool> {
     let latest = provider.get_block_number().await.context("fetching latest block for the resume-safety check failed")?;
     let from = latest.saturating_sub(MINT_CHECK_LOOKBACK_BLOCKS);
-    let lock_id_topic: B256 = B256::from(U256::from(lock_id));
+    let lock_id_topic: B256 = B256::from(key);
     let base = Filter::new().address(contract).event_signature(ISigilBridgeWrapped::OperatorMinted::SIGNATURE_HASH).topic2(lock_id_topic);
     let logs = get_logs_chunked(provider, &base, from, latest).await?;
     Ok(!logs.is_empty())
@@ -427,6 +463,24 @@ async fn poll_locks_and_mint(
     resume_checked: &mut bool,
     polygon_provider: &(impl Provider + Clone),
 ) -> Result<()> {
+    // Self-heal the CURSOR. `next_lock_id` restarts at 1 with the node, so a cursor left
+    // ahead of it would silently match nothing and the relayer would go quiet forever while
+    // real locks piled up. If the feed's highest id is below the cursor, the counter has
+    // restarted — rewind and re-scan. Re-scanning is safe precisely because dedup is keyed
+    // on the tx hash: anything already minted is recognised and skipped.
+    let probe = fetch_locks_since(&cfg.sigil_api_url, 0)?;
+    if let Some(max_id) = probe.iter().map(|l| l.id).max() {
+        if max_id < state.last_lock_id {
+            eprintln!(
+                "~ lock-id counter restarted (feed max {max_id} < cursor {}) — rewinding cursor to 0; \
+                 tx-hash dedup makes the re-scan safe",
+                state.last_lock_id
+            );
+            state.last_lock_id = 0;
+            save_state(&cfg.state_file, state)?;
+        }
+    }
+
     let locks = fetch_locks_since(&cfg.sigil_api_url, state.last_lock_id)?;
     for lock in locks {
         // Locks are sequential and the watermark is a single id, so an unsettled lock must
@@ -444,24 +498,40 @@ async fn poll_locks_and_mint(
             .with_context(|| format!("lock {} has an invalid dest_polygon_address {}", lock.id, lock.dest_polygon_address))?;
         let polygon_amount = U256::from(amount_base) * U256::from(DECIMAL_SHIFT);
 
+        let key = lock_key(&lock.tx_hash)?;
+
+        // Local set first: exact, free, and survives restarts.
+        if state.minted_lock_txs.contains(&lock.tx_hash) {
+            eprintln!("- lock {} (sigil tx {}) already minted — skipping", lock.id, lock.tx_hash);
+            state.last_lock_id = lock.id;
+            save_state(&cfg.state_file, state)?;
+            continue;
+        }
+
+        // On-chain backstop, once per process, for the crash window the local set cannot
+        // cover: a prior run that minted and died before saving.
         if !*resume_checked {
-            if already_minted(polygon_provider, cfg.contract, lock.id).await? {
-                eprintln!("- lock {} already minted on-chain (resumed after a restart) — skipping, advancing watermark", lock.id);
+            *resume_checked = true;
+            if already_minted(polygon_provider, cfg.contract, key).await? {
+                eprintln!(
+                    "- lock {} (sigil tx {}) found already minted on-chain — recording and skipping",
+                    lock.id, lock.tx_hash
+                );
+                state.minted_lock_txs.insert(lock.tx_hash.clone());
                 state.last_lock_id = lock.id;
                 save_state(&cfg.state_file, state)?;
-                *resume_checked = true;
                 continue;
             }
-            *resume_checked = true;
         }
 
         eprintln!("+ lock {} from {} amount={} -> mint {polygon_amount} to {dest} (sigil tx {})", lock.id, lock.from, lock.amount, lock.tx_hash);
         let c = ISigilBridgeWrapped::new(cfg.contract, polygon_provider.clone());
-        let pending = c.mint(dest, polygon_amount, U256::from(lock.id)).send().await
+        let pending = c.mint(dest, polygon_amount, key).send().await
             .with_context(|| format!("mint tx failed to send for lock {}", lock.id))?;
         let receipt = pending.get_receipt().await.with_context(|| format!("mint tx failed to confirm for lock {}", lock.id))?;
         eprintln!("  minted: tx={:?} status={}", receipt.transaction_hash, receipt.status());
 
+        state.minted_lock_txs.insert(lock.tx_hash.clone());
         state.last_lock_id = lock.id;
         save_state(&cfg.state_file, state)?;
     }

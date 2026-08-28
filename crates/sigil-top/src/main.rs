@@ -66,6 +66,7 @@ mod producer;
 // crate's Cargo.toml `shield-register` feature comment).
 #[cfg(feature = "shield-register")]
 mod shield_setup;
+mod release_anim;  // the release ceremony: animation + changelog on first boot after an update
 
 use crate::cathedral::Cathedral;
 
@@ -857,13 +858,22 @@ struct StallState {
     frozen: bool,
     stalled_secs: u64,
 }
-const STALL_FILE: &str = "/tmp/sigil-top-stall";
 const STALL_SECS: u64 = 45;
-fn stall_check(height: u64, online: bool) -> StallState {
+
+/// Stall state is per-NETWORK. One global `/tmp/sigil-top-stall` meant a g0-era height
+/// survived the g0→g1 cutover and was compared against g1 heights forever — the chain
+/// "never advanced" because it was being measured against a different chain.
+fn stall_file(net: &str) -> String {
+    let safe: String = net.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+    format!("/tmp/sigil-top-stall-{}", if safe.is_empty() { "unknown".into() } else { safe })
+}
+
+fn stall_check(height: u64, online: bool, net: &str) -> StallState {
     use std::time::{SystemTime, UNIX_EPOCH};
+    let stall_path = stall_file(net);
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let (mut prev_h, mut since) = (u64::MAX, now);
-    if let Ok(s) = std::fs::read_to_string(STALL_FILE) {
+    if let Ok(s) = std::fs::read_to_string(&stall_path) {
         let mut it = s.trim().split(':');
         if let (Some(a), Some(b)) = (it.next(), it.next()) {
             prev_h = a.parse().unwrap_or(u64::MAX);
@@ -876,7 +886,7 @@ fn stall_check(height: u64, online: bool) -> StallState {
     if height != prev_h {
         since = now; // advanced (or first sight) → reset the clock
     }
-    let _ = std::fs::write(STALL_FILE, format!("{height}:{since}"));
+    let _ = std::fs::write(&stall_path, format!("{height}:{since}"));
     let stalled = now.saturating_sub(since);
     StallState { frozen: stalled >= STALL_SECS, stalled_secs: stalled }
 }
@@ -898,10 +908,19 @@ fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str) -> String
         let e = last_feed_err();
         if !e.is_empty() { o.push_str(&format!("  {RED}why: {}{RESET}\n", e.chars().take(160).collect::<String>())); }
     }
-    // ST-2: FROZEN banner — the chain has stopped advancing (peering loss / no qualifying PoW)
-    let stall = stall_check(st.height, online);
+    // ST-2: FROZEN banner — the chain has stopped advancing (peering loss / no qualifying PoW).
+    //
+    // 2026-08-28: this watched `st.height` while the NODE box below displays the VERIFIED
+    // TIP height (`st.tip.height`, see `disp_height`). The two are different numbers from
+    // different sources, so the panel could show a chain advancing normally while this
+    // banner screamed FROZEN about a stale height that never moved — observed live at
+    // "height 325651 not advancing for 85228s" while the node was happily producing at
+    // 221768. A freeze alarm that cries wolf is worse than no alarm, because the next real
+    // freeze gets ignored. Watch the SAME number the operator is reading.
+    let watch_height = st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(st.height);
+    let stall = stall_check(watch_height, online, net);
     if stall.frozen {
-        o.push_str(&format!("  {RED}{BOLD}■ FROZEN{RESET} {RED}height {} not advancing for {}s — node stalled (check peers / PoW){RESET}\n", st.height, stall.stalled_secs));
+        o.push_str(&format!("  {RED}{BOLD}■ FROZEN{RESET} {RED}height {} not advancing for {}s — node stalled (check peers / PoW){RESET}\n", watch_height, stall.stalled_secs));
     }
     match read_session() {
         Some(id) => {
@@ -962,7 +981,7 @@ fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str) -> String
     if let Some(tip) = st.tip.as_ref() {
         let v = verify_tip(tip);
         let badge = if v.ok { format!("{GREEN}✓ VERIFIED{RESET}") } else { format!("{RED}✗ FAILED{RESET}") };
-        o.push_str(&mid_title(&format!("4 STATE ROOTS  {badge}  (tip-proof · sigil-g0)")));
+        o.push_str(&mid_title(&format!("4 STATE ROOTS  {badge}  (tip-proof · {net})")));
         o.push_str(&row("wallet", &short_hex(&tip.roots.wallet_state_root)));
         o.push_str(&row("dex", &short_hex(&tip.roots.dex_state_root)));
         o.push_str(&row("events", &short_hex(&tip.roots.event_log_root)));
@@ -1100,7 +1119,11 @@ fn render_lite(st: &NodeStatus, online: bool) -> String {
         None => (st.height, String::new()),
     };
     // ST-2: FROZEN token — height not advancing (drop into tmux strips / SSH peeks)
-    let stall = stall_check(st.height, online);
+    // Same correction as `render_full`: watch the VERIFIED TIP the operator is shown,
+    // not the raw status height, and scope the stall state to this network.
+    let watch_height = st.tip.as_ref().map(|t| t.height).filter(|h| *h > 0).unwrap_or(st.height);
+    let net_id = if st.network.is_empty() { build_network_id() } else { st.network.clone() };
+    let stall = stall_check(watch_height, online, &net_id);
     let frozen = if stall.frozen { format!("  {RED}{BOLD}■FROZEN {}s{RESET}", stall.stalled_secs) } else { String::new() };
     format!(
         "  {dot} {VBRIGHT}◆ SIGIL{RESET} {DIM}{net}{RESET}  h{GOLD}{height}{RESET}{vbadge}{frozen}  {VIOLET}{}{RESET}peers  {GOLD}{}{RESET}{DIM}/21M {:.2}%{RESET}  {DIM}fold 2.5KB·1chk{RESET}\n",
@@ -1298,6 +1321,33 @@ fn sync_mode_path() -> std::path::PathBuf {
         .unwrap_or_else(std::env::temp_dir);
     dir.join("sync-mode")
 }
+/// Where we remember which version last ran, so the release ceremony fires exactly once
+/// per upgrade. Same home-dir rules as `sync_mode_path`.
+fn last_version_path() -> std::path::PathBuf {
+    sync_mode_path().with_file_name("last-version")
+}
+
+/// True the FIRST time a given build runs, and never again.
+///
+/// The updater re-execs into the new binary, so the ceremony cannot play before the
+/// restart — it would be killed mid-animation. Playing it on first boot of the new build
+/// is also simply more correct: the changelog shown is the changelog of the code you are
+/// now running, read out of that binary rather than fetched.
+///
+/// A fresh install writes the marker WITHOUT celebrating: a first-time user has not
+/// upgraded to anything, and opening on a changelog for changes they never saw is noise.
+fn claim_first_run_of_this_version() -> bool {
+    let p = last_version_path();
+    let prev = std::fs::read_to_string(&p).ok().map(|s| s.trim().to_string());
+    if let Some(d) = p.parent() { let _ = std::fs::create_dir_all(d); }
+    let _ = std::fs::write(&p, VERSION);
+    match prev {
+        Some(v) if v == VERSION => false,   // same build as last boot
+        Some(_) => true,                     // upgraded (or downgraded) — celebrate
+        None => false,                       // fresh install — record, stay quiet
+    }
+}
+
 fn persist_sync_mode(mode: &str) {
     let p = sync_mode_path();
     if let Some(d) = p.parent() { let _ = std::fs::create_dir_all(d); }
@@ -2302,9 +2352,45 @@ pub(crate) fn set_mine_wallet(addr: &str) -> bool {
 /// duplication is exactly the class of bug (a 0x-prefix handling mismatch) documented on
 /// `hex_to_32`'s own comment; this function exists so `mine_local_api.rs` doesn't grow a
 /// THIRD copy with its own edge cases.
+/// Where a persisted local wallet seed lives when the operator has not exported
+/// `SIGIL_MINE_SEED`. `$SIGIL_TOP_HOME/wallet.seed`, else `~/.sigil-top/wallet.seed`.
+pub(crate) fn local_seed_path() -> std::path::PathBuf {
+    std::env::var("SIGIL_TOP_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into()))
+                .join(".sigil-top")
+        })
+        .join("wallet.seed")
+}
+
+/// The local wallet seed: `SIGIL_MINE_SEED` first, then the on-disk file.
+///
+/// 2026-08-26 (operator-directed). This used to read the env var ONLY, documented as
+/// "never persisted". That is a defensible default for a mining rig, but it made the
+/// operator's actual flow impossible: launch sigil-top, press [W], create a wallet in
+/// the browser, have it just work. Without a seed the local `:9800` signer has no key,
+/// so `mine-shield` / `mine-send-private` return "not available" and the page falls all
+/// the way back to prompting for the recovery phrase — on EVERY send, forever. Reported
+/// verbatim: "it asks for the recovery phrase ... i dont want that", and separately
+/// "i want this automatic without the paramters and env".
+///
+/// SECURITY POSTURE, stated plainly rather than assumed: this persists a signing key to
+/// disk. It is written 0600, in the operator's own home, on a box where `:9800` already
+/// binds 127.0.0.1 ONLY precisely because it holds signing material. Note the env-var
+/// alternative is not obviously safer — `/proc/<pid>/environ` exposes it to root just the
+/// same, and typing it on a command line leaks it to shell history and `ps`. What this
+/// genuinely changes: the key now survives a reboot, so treat the file as the wallet
+/// backup it is. `SIGIL_MINE_SEED` still wins when set, so no existing rig changes
+/// behaviour.
 pub(crate) fn miner_seed() -> Option<[u8; 32]> {
-    let seed_hex = std::env::var("SIGIL_MINE_SEED").ok()?;
-    hex_to_32(seed_hex.trim())
+    if let Ok(seed_hex) = std::env::var("SIGIL_MINE_SEED") {
+        if let Some(s) = hex_to_32(seed_hex.trim()) {
+            return Some(s);
+        }
+    }
+    let raw = std::fs::read_to_string(local_seed_path()).ok()?;
+    hex_to_32(raw.trim())
 }
 
 /// The miner's SIGNING keypair. Required now that `/mine` is auth-gated (audit C1:
@@ -2900,6 +2986,7 @@ struct App {
     latest: String,            // live version from the flux release channel (auto-refreshed)
     last_update_check: Instant,
     update_rx: Option<mpsc::Receiver<String>>, // [U] runs on a bg thread; result lands here
+    ceremony: release_anim::ReleaseCeremony, // release animation + changelog, first boot after an update
     blocks: Vec<FeedBlock>,
     target_height: u64,  // the network tip we're syncing to
     synced_height: u64,  // last height we cryptographically verified
@@ -3013,6 +3100,7 @@ impl App {
               // v0.7.5: Trigger first check immediately (now - 300s = overdue)
               last_update_check: instant_ago(301),
               update_rx: None,
+              ceremony: release_anim::ReleaseCeremony::new(),
               blocks: Vec::new(),
               target_height: 0, synced_height: 0, verified_count: 0, streak: 0, score: 0,
               mining: false, mine_rx: None, mine_stop: None, mine_accepted: 0,
@@ -3839,6 +3927,16 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
     // the first probe is in flight while crossterm sets up; pre-TUI prints go to stder
     // (IN_TUI is still false), which is exactly where pre-UI diagnostics belong. ─────────
     let mut app = App::new(cfg);
+    // Release ceremony: fires exactly once, on the first boot of a NEW build — i.e. right
+    // after [U] updated and re-exec'd us. `claim_first_run_of_this_version` writes the
+    // marker as it reads it, so a crash mid-animation cannot make it replay forever.
+    // Suppressed for headless/automated rigs, which have nobody to watch it.
+    if std::env::var("SIGIL_NO_CEREMONY").is_err()
+        && std::env::var("SIGIL_AUTOMINE").is_err()
+        && claim_first_run_of_this_version()
+    {
+        app.ceremony.start();
+    }
     // v4 AUTO-START: env-driven mining + full-sync (headless rigs, no keypress).
     if std::env::var("SIGIL_AUTOMINE").is_ok() {
         use std::sync::atomic::Ordering;
@@ -4120,6 +4218,16 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                     frame_panicked = true;
                     log_line("[render] frame panicked — caught".into());
                 }
+                // The release ceremony paints OVER the normal UI, under the same panic
+                // guard: a decorative frame must never be able to kill the monitor.
+                if app.ceremony.is_running() {
+                    let area = f.area();
+                    let cer = &app.ceremony;
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cer.render(f, area))).is_err() {
+                        frame_panicked = true;
+                        log_line("[render] release ceremony panicked — caught".into());
+                    }
+                }
                 // v0.33 GLOBAL ASCII pass: on Windows (or SIGIL_ASCII=1) rewrite any remaining
                 // wide/emoji cell symbol to width-1 ASCII. Done on the buffer AFTER layout but
                 // BEFORE flush: ratatui already reserved 2 cells for a wide glyph, so emitting a
@@ -4181,6 +4289,16 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             let poll_ms = if animating { if cfg!(windows) { 66 } else { 33 } } else { 200 };
             if event::poll(Duration::from_millis(poll_ms))? {
                 if let Event::Key(k) = event::read()? {
+                    // While the release ceremony is up it owns the keyboard: the first key
+                    // skips the animation to its settled frame, the second dismisses it.
+                    // Nothing else should fire — a user hitting a key to get rid of the
+                    // animation must not also toggle mining.
+                    if app.ceremony.is_running() {
+                        if k.kind == crossterm::event::KeyEventKind::Press {
+                            app.ceremony.on_key();
+                        }
+                        continue;
+                    }
                     if k.kind == KeyEventKind::Press {
                         // LANE-U v0.67: the first key dismisses the welcome modal (F also falls
                         // through to start sync/mining as usual).
@@ -4352,7 +4470,27 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                 // balance — "the balance is right but it's a different wallet."
                                 // Passing the real mining address explicitly overrides whatever
                                 // is cached, same as the headless link already does.
-                                let url = format!("http://localhost:{}/?addr={}", wallet_ui::WALLET_PORT, miner_wallet());
+                                // 2026-08-26: `?addr=` used to be `miner_wallet()` — the wallet THIS
+                                // MACHINE mines to. On the operator's own laptop that is also their
+                                // wallet, so it looked right; on a server it is NOT. Live failure:
+                                // [W] on Epsilon opened the box's own rig wallet (a406208d62…,
+                                // 1,299 SIGIL) and labelled it "yours". The operator entered the
+                                // correct phrase for THEIR wallet (1cb36ed2b0…) and every send died
+                                // at "that phrase does not match this wallet address" — the page was
+                                // presenting a wallet they could never sign for, with its balance
+                                // shown as their own.
+                                //
+                                // Prefer the wallet the LOCAL SIGNER actually holds a key for, so the
+                                // displayed address and the signable address can never disagree. If
+                                // no seed is configured, pass NO `?addr=` at all and let the page use
+                                // its own logged-in wallet from localStorage — a wrong address is
+                                // worse than none, because none is self-correcting.
+                                let signable = miner_seed()
+                                    .map(|s| hex::encode(ed25519_dalek::SigningKey::from_bytes(&s).verifying_key().to_bytes()));
+                                let url = match signable {
+                                    Some(a) => format!("http://localhost:{}/?addr={}", wallet_ui::WALLET_PORT, a),
+                                    None => format!("http://localhost:{}/", wallet_ui::WALLET_PORT),
+                                };
                                 if !ensure_serve_up(&mut app) {
                                     app.toast = format!("✗ local wallet server down ({})", app.serve_status).into();
                                     app.toast_sticky = true;
@@ -5127,16 +5265,16 @@ fn reset_store_on_network_change(path: &str) {
 fn heal_wedged_store_once(path: &str) {
     // RE-ARMED 2026-08-27 (v7.1.75 -> v7.2.5). The marker is a ONE-SHOT per exact string,
     // so every store that has launched since v7.1.75 is immune to a repeat wipe even when
-    // it picks up NEW damage — which is exactly what happened. Live: an operator's client
+    // it picks up NEW damage — which is precisely what happened. Live: an operator's client
     // sat with `verified 30,250` while `fetched-to` ran to 120,000, across several restarts
-    // and four releases. Honest headers for `30,250..40,250` arrived and completed in ~2 s
-    // every time, and the store refused to splice them: a poisoned local seam that no
-    // amount of refetching can repair, because the bad block is OURS.
+    // and four releases. Honest headers for `30,250..40,250` arrived and completed in ~2 s,
+    // every time, and the store refused to splice them: a poisoned local seam that no amount
+    // of refetching can repair, because the bad block is OURS.
     //
     // The bounded in-run self-heal (`rollback_frontier(4096)`, 3 attempts behind a 45 s
-    // watchdog) only covers damage within ~12k blocks of the frontier. This covers the case
-    // where it is deeper, or where the wedge survives restarts. The store re-syncs clean —
-    // at the rates these clients reach that is a couple of minutes.
+    // watchdog) covers damage within ~12k blocks of the frontier. This covers the case where
+    // it is deeper, or where the wedge survives restarts. The store re-syncs clean — at the
+    // rates these clients actually reach (600-1400 blk/s) that is a couple of minutes.
     const HEAL_MARKER: &str = "frontier-stall-heal-v7.2.5";
     let marker = format!("{path}.healver");
     if std::fs::read_to_string(&marker).map(|s| s.trim() == HEAL_MARKER).unwrap_or(false) {
@@ -5309,6 +5447,48 @@ pub(crate) fn engine_node_url() -> String {
 mod pure_helpers_tests {
     //! Coverage for the pure money/format/version helpers (Tier 3 — sigil-top
     //! was the worst-density crate at 581 loc/test). All deterministic, no I/O.
+
+    use super::{stall_file, stall_check};
+
+    /// The stall file MUST be per-network. One global path let a g0-era height survive the
+    /// g0→g1 cutover and be compared against g1 heights forever, so the chain "never
+    /// advanced" because it was measured against a different chain.
+    #[test]
+    fn stall_state_is_scoped_per_network() {
+        assert_ne!(stall_file("sigil-g0"), stall_file("sigil-g1"));
+        assert!(stall_file("sigil-g1").ends_with("sigil-g1"));
+        // path traversal / junk in a network id must not escape /tmp
+        let f = stall_file("../../etc/passwd");
+        assert!(!f.contains(".."), "network id must be sanitised into the filename: {f}");
+        assert!(stall_file("").ends_with("unknown"));
+    }
+
+    /// An advancing height resets the clock; a still one accumulates. This is the whole
+    /// contract of the freeze alarm.
+    #[test]
+    fn stall_clock_resets_when_the_height_moves() {
+        let net = "sigil-test-stallclock";
+        let _ = std::fs::remove_file(stall_file(net));
+        let a = stall_check(100, true, net);
+        assert!(!a.frozen, "first sight is never frozen");
+        let b = stall_check(101, true, net);
+        assert_eq!(b.stalled_secs, 0, "a moved height resets the clock");
+        let c = stall_check(101, true, net);
+        assert!(!c.frozen, "same height for one tick is not yet a freeze");
+        let _ = std::fs::remove_file(stall_file(net));
+    }
+
+    /// Offline or height-0 must never raise the alarm — that is a feed problem, not a
+    /// chain problem, and conflating them is how a real freeze gets ignored.
+    #[test]
+    fn offline_or_zero_height_never_reports_frozen() {
+        let net = "sigil-test-offline";
+        let _ = std::fs::remove_file(stall_file(net));
+        assert!(!stall_check(500, false, net).frozen);
+        assert!(!stall_check(0, true, net).frozen);
+        let _ = std::fs::remove_file(stall_file(net));
+    }
+
     use super::*;
 
     /// How many samples the rate filter needs to cross the bulk→frontier cliff.

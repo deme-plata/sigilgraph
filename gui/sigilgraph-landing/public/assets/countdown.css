@@ -1,0 +1,262 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   SIGIL Graph — mainnet launch countdown
+   2026-08-26 (rocky, operator request)
+
+   Non-destructive layer, same pattern as codex-touch.css: the markup lives
+   directly in index.html ABOVE #root, so it paints on first byte and never
+   fights React for the DOM. Nothing here targets an app selector, so a source
+   rebuild cannot break it and it cannot break the app.
+
+   Palette is taken from the live cascade (codex-touch.css wins over the built
+   sheet), NOT invented:
+       --bg #080b0a  --panel #111916  --panel2 #17221e
+       --accent #10a37f  --accent-bright #7de3c3  --gold #f4b860
+       --text #f2f7f4  --dim #a5b5ae  --dimmer #6e8078
+   Fonts (Sora, JetBrains Mono) are already preconnected + loaded by index.html,
+   so this adds no network request beyond the file itself.
+   ──────────────────────────────────────────────────────────────────────────── */
+
+.sg-cd {
+  --cd-accent: #7de3c3;
+  --cd-accent-deep: #10a37f;
+  --cd-gold: #f4b860;
+  --cd-text: #f2f7f4;
+  --cd-dim: #a5b5ae;
+  --cd-dimmer: #6e8078;
+
+  position: relative;
+  isolation: isolate;
+  padding: clamp(2.75rem, 7vw, 5.5rem) 1.25rem clamp(2.25rem, 5vw, 4rem);
+  text-align: center;
+  font-family: "Sora", system-ui, sans-serif;
+  color: var(--cd-text);
+  background:
+    radial-gradient(120% 140% at 50% -20%, rgba(16, 163, 127, 0.20) 0%, rgba(8, 11, 10, 0) 62%),
+    linear-gradient(180deg, #0a1110 0%, #080b0a 100%);
+  overflow: hidden;
+}
+
+/* Hairline top/bottom rules that fade at the edges — cheaper and cleaner than
+   a full border, and they read as "instrument panel" rather than "banner". */
+.sg-cd::before,
+.sg-cd::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(125, 227, 195, 0.38), transparent);
+}
+.sg-cd::before { top: 0; }
+.sg-cd::after  { bottom: 0; }
+
+/* Faint grid, masked to a soft vignette. Sits behind everything (z-index -1 on
+   an isolated stacking context) so it can never intercept a click. */
+.sg-cd__grid {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(125, 227, 195, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(125, 227, 195, 0.06) 1px, transparent 1px);
+  background-size: 46px 46px;
+  -webkit-mask-image: radial-gradient(70% 60% at 50% 40%, #000 0%, transparent 100%);
+          mask-image: radial-gradient(70% 60% at 50% 40%, #000 0%, transparent 100%);
+}
+
+/* ── Eyebrow: live pill ─────────────────────────────────────────────────── */
+.sg-cd__eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.4rem 0.95rem;
+  border: 1px solid rgba(125, 227, 195, 0.22);
+  border-radius: 999px;
+  background: rgba(125, 227, 195, 0.06);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--cd-accent);
+}
+
+.sg-cd__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--cd-accent);
+  box-shadow: 0 0 0 0 rgba(125, 227, 195, 0.55);
+  animation: sg-cd-pulse 2.4s ease-out infinite;
+}
+
+@keyframes sg-cd-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(125, 227, 195, 0.5); }
+  70%  { box-shadow: 0 0 0 9px rgba(125, 227, 195, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(125, 227, 195, 0); }
+}
+
+/* ── Headline ───────────────────────────────────────────────────────────── */
+.sg-cd__title {
+  margin: 1.35rem 0 0.5rem;
+  font-size: clamp(1.9rem, 5.2vw, 3.4rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+}
+
+.sg-cd__title em {
+  font-style: normal;
+  background: linear-gradient(100deg, var(--cd-accent) 0%, var(--cd-gold) 100%);
+  -webkit-background-clip: text;
+          background-clip: text;
+  color: transparent;
+}
+
+.sg-cd__sub {
+  margin: 0 auto;
+  max-width: 46ch;
+  font-size: clamp(0.9rem, 1.7vw, 1.03rem);
+  line-height: 1.6;
+  color: var(--cd-dim);
+}
+
+/* ── The clock ──────────────────────────────────────────────────────────── */
+.sg-cd__clock {
+  display: flex;
+  justify-content: center;
+  align-items: stretch;
+  gap: clamp(0.5rem, 1.8vw, 1.1rem);
+  margin: clamp(2rem, 4.5vw, 3rem) auto 0;
+  flex-wrap: nowrap;
+}
+
+.sg-cd__unit {
+  position: relative;
+  flex: 0 1 8.5rem;
+  min-width: 0;
+  padding: clamp(0.9rem, 2.2vw, 1.5rem) clamp(0.4rem, 1.4vw, 1rem);
+  border: 1px solid rgba(125, 227, 195, 0.14);
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgba(23, 34, 30, 0.92) 0%, rgba(17, 25, 22, 0.92) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.045),
+    0 18px 40px -28px rgba(0, 0, 0, 0.9);
+}
+
+/* A soft glow that lives *behind* the panel, so the digits stay crisp. */
+.sg-cd__unit::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  z-index: -1;
+  border-radius: inherit;
+  background: linear-gradient(180deg, rgba(16, 163, 127, 0.28), transparent 65%);
+  opacity: 0.55;
+}
+
+.sg-cd__num {
+  display: block;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: clamp(2rem, 6.4vw, 3.65rem);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  /* tabular-nums is load-bearing: without it the digits jitter every tick and
+     the whole thing looks cheap. */
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  color: var(--cd-text);
+  text-shadow: 0 0 24px rgba(125, 227, 195, 0.22);
+}
+
+.sg-cd__label {
+  display: block;
+  margin-top: 0.6rem;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.62rem;
+  font-weight: 500;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--cd-dimmer);
+}
+
+/* The tick. A short lift + brighten on the digit that just changed — enough to
+   register motion, short enough never to be mid-animation on the next tick. */
+.sg-cd__num.is-tick {
+  animation: sg-cd-tick 420ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes sg-cd-tick {
+  0%   { transform: translateY(-22%); opacity: 0.25; filter: blur(1.5px); }
+  55%  { transform: translateY(0);    opacity: 1;    filter: blur(0); }
+  100% { transform: translateY(0);    opacity: 1; }
+}
+
+/* Seconds get the accent colour so the eye has one thing that is obviously
+   live, without animating four panels at once. */
+.sg-cd__unit--sec .sg-cd__num { color: var(--cd-accent); }
+
+/* ── Target line + progress ─────────────────────────────────────────────── */
+.sg-cd__target {
+  margin: clamp(1.6rem, 3.5vw, 2.2rem) 0 0;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.76rem;
+  letter-spacing: 0.08em;
+  color: var(--cd-dimmer);
+}
+.sg-cd__target strong {
+  color: var(--cd-dim);
+  font-weight: 500;
+}
+
+.sg-cd__rail {
+  position: relative;
+  width: min(34rem, 88vw);
+  height: 3px;
+  margin: 1.1rem auto 0;
+  border-radius: 999px;
+  background: rgba(125, 227, 195, 0.10);
+  overflow: hidden;
+}
+
+.sg-cd__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--cd-accent-deep), var(--cd-accent));
+  box-shadow: 0 0 14px rgba(125, 227, 195, 0.5);
+  transition: width 900ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* ── Launched state ─────────────────────────────────────────────────────── */
+.sg-cd.is-launched .sg-cd__clock,
+.sg-cd.is-launched .sg-cd__rail { display: none; }
+
+.sg-cd__live {
+  display: none;
+  margin: clamp(1.8rem, 4vw, 2.6rem) auto 0;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: clamp(1.1rem, 3vw, 1.6rem);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--cd-accent);
+}
+.sg-cd.is-launched .sg-cd__live { display: block; }
+
+/* ── Responsive ─────────────────────────────────────────────────────────── */
+@media (max-width: 560px) {
+  /* 2x2 beats a squashed single row — four 40px-wide cards read as noise. */
+  .sg-cd__clock { flex-wrap: wrap; }
+  .sg-cd__unit  { flex: 0 0 calc(50% - 0.5rem); }
+}
+
+/* ── Motion / contrast preferences ──────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .sg-cd__dot { animation: none; }
+  .sg-cd__num.is-tick { animation: none; }
+  .sg-cd__fill { transition: none; }
+}

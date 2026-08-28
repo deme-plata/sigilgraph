@@ -40,7 +40,8 @@ use winterfell::Prover;
 
 use crate::mimc::{compress2, mimc_options};
 use crate::note_v1::{from_wire, to_wire, Note, NoteError, ShieldedPoolTree, RANGE_BITS};
-use crate::spend_full_v4::{build_spend_full_v4_trace, SpendFullV4Prover, N_OUTS, PK_DOMAIN};
+use crate::spend_full_v5::{build_spend_full_v5_trace, v5_options, SpendFullV5Prover};
+use crate::spend_full_v4::{N_OUTS, PK_DOMAIN};
 
 /// Reduce 32 bytes to a Goldilocks element, rejecting nothing (always canonical).
 ///
@@ -428,15 +429,21 @@ pub fn build_spend(
     }
 
     let path = tree.path(position as usize);
-    let trace = build_spend_full_v4_trace(
+    // v5, not v4: the trace's second half is reserved randomness, so the proof no longer
+    // publishes the output amounts and the recipient key. `build_spend_full_v5_trace`
+    // draws its mask seed from the OS — a fixed seed here would defeat the whole point,
+    // since two proofs of one spend under one seed are byte-identical.
+    let opts = v5_options();
+    let trace = build_spend_full_v5_trace(
         note.value,
         note.blinding,
         note.spend_key,
         BaseElement::new(public_value),
         &outs,
         &path,
+        &opts,
     );
-    let proof = SpendFullV4Prover::new(mimc_options())
+    let proof = SpendFullV5Prover::new(opts)
         .prove(trace)
         .expect("a conserving, in-range witness must prove");
 
@@ -565,18 +572,25 @@ mod tests {
         let bundle = build_spend(&acct, &mut store, &pool, index as usize, 3, &[(50, me), (47, me)])
             .expect("wallet must build a spend");
 
-        let root = from_wire(&bundle.anchor).unwrap();
-        let nf = from_wire(&bundle.nullifier).unwrap();
-        let cm_outs = [
-            from_wire(&bundle.cm_outs[0]).unwrap(),
-            from_wire(&bundle.cm_outs[1]).unwrap(),
-        ];
-        let proof = winterfell::Proof::from_bytes(&bundle.proof).expect("decode");
-        verify_spend_full_v4(
-            proof,
-            SpendFullV4PublicInputs { root, nf, fee: BaseElement::new(3), cm_outs },
+        // Verify through the CONSENSUS entry point, not a hand-picked circuit version.
+        // The wallet now proves with v5; pinning this test to v4 would have asserted the
+        // wrong thing, and `verify_spend_wire` is what `sigil_state` actually calls.
+        crate::note_v1::verify_spend_wire(
+            &bundle.anchor,
+            &bundle.nullifier,
+            3u128,
+            &bundle.cm_outs,
+            &bundle.proof,
         )
         .expect("SECURITY: a wallet-built spend must verify under the production circuit");
+
+        // And it must not carry the witness — the whole reason the wallet moved to v5.
+        let leaks = crate::zk_mask::scan_proof_for_secrets(
+            &bundle.proof,
+            &[("output 50", BaseElement::new(50)), ("output 47", BaseElement::new(47)),
+              ("owner pk", me)],
+        );
+        assert!(leaks.is_empty(), "SECURITY: wallet spend published its witness: {leaks:?}");
 
         assert_eq!(bundle.out_indices.len(), 2, "change notes recorded for tracking");
     }

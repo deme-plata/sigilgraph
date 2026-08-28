@@ -67,6 +67,30 @@ pub fn shield_public_key(seed_hex: &str) -> Result<String, JsValue> {
     Ok(hex::encode(to_wire(account.public_key())))
 }
 
+/// This account's X25519 note-DELIVERY public key, hex.
+///
+/// `POST /v1/shielded/register` requires BOTH this and [`shield_public_key`]: pk_shield
+/// lets a payer bind an output note to you, but without a delivery key nothing could
+/// ever tell you a payment landed — you would have to be told out of band, which is the
+/// exact gap registration exists to close.
+///
+/// Added 2026-08-26 so a browser wallet can self-register with the seed NEVER leaving
+/// the device. Before this, pk_shield was exported but pk_encrypt was not, so the only
+/// way to register was `sigil-top`'s native path (`shield_setup::register_for_shielded_mining`,
+/// which reads `SIGIL_MINE_SEED`) — i.e. a wallet created in the browser could not
+/// register at all, and therefore could never receive a private payment. Measured on the
+/// live chain that day: of every wallet checked — the operator's own included — exactly
+/// ONE was registered, so essentially every send failed with "not registered".
+///
+/// Derivation is `note_cipher::enc_identity_from_seed`, the SAME function
+/// `shield_setup` uses, so a browser-registered wallet and a rig-registered wallet
+/// publish byte-identical keys. Deliberately NOT re-derived in JS: a second hand-ported
+/// copy that drifted would silently make notes undecryptable.
+#[wasm_bindgen(js_name = shieldEncryptPublicKey)]
+pub fn shield_encrypt_public_key(seed_hex: &str) -> Result<String, JsValue> {
+    Ok(crate::note_cipher::enc_identity_from_seed(&hex32(seed_hex)?).public_hex())
+}
+
 /// The commitment this account would publish for a SELF-CREATED note at `index` holding
 /// `value` — deterministic from the seed alone. A wallet shields a deposit by computing
 /// this locally (already done in JS on this page for `doShield()`'s fixed-denomination

@@ -13,4 +13,5 @@ sigil-header = { path = "../sigil-header" }
 sigil-braidpool = { path = "../sigil-braidpool" }
 
 [dev-dependencies]
+hex = "0.4"
 rand = { workspace = true }

@@ -103,7 +103,14 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
     } else { (vtext, vcol) };
 
     // state-themed border; title chip stays neon-cyan
-    let block = card_block(" ◇ SYNC · sigil-g0", C_NEON_CYAN)
+    // Was hardcoded "sigil-g0" — it kept saying g0 for the whole g1 chain. `card_block`
+    // wants a &'static str, and the network id IS static for the life of the binary
+    // (it is a compile-time constant in sigil-header), so resolve it once into a OnceLock.
+    static SYNC_TITLE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let title = SYNC_TITLE.get_or_init(|| {
+        format!(" ◇ SYNC · {}", String::from_utf8_lossy(&sigil_header::NETWORK_ID).trim())
+    });
+    let block = card_block(title, C_NEON_CYAN)
         .border_style(Style::default().fg(vcol));
     let inner = block.inner(area);
     f.render_widget(block, area);

@@ -57,6 +57,8 @@
 use std::collections::{HashMap, HashSet};
 
 use ed25519_dalek::{Signer, Signature, SigningKey, Verifier, VerifyingKey};
+pub mod observer;
+
 use serde::{Deserialize, Serialize};
 
 use sigil_braidpool::committee::{availability_quorum, bft_active, max_byzantine, Committee};

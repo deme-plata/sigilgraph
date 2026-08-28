@@ -435,7 +435,7 @@ fn apply_block(n: &mut Node, rec: &serde_json::Value, g: &ModSquaring) -> Result
     // Pre-activation drift observation (go/no-go prerequisite #1) — ungated, log-only.
     h7_telemetry::record(bh, rec_ts, apply_now_us);
     let miner = hex32(&sub.wallet).ok_or("bad wallet")?;
-    let c = Challenge { height: bh, vdf_input: mining_seed(&n.tip_hash, bh), blake4_target: target_from_bits(bits), vdf_t, net_hps: 0.0, share_target: 0 };
+    let c = Challenge { height: bh, vdf_input: mining_seed(&n.tip_hash, bh), blake4_target: target_from_bits(bits), vdf_t, net_hps: 0.0, share_target: 0, share_vdf_t: 0 };
     if !check_submission(g, &c, &sub) { return Err(format!("block {bh}: dual-lane verify FAILED")); }
     // LANE-R: recompute the reward the SAME way the producer did — time-based from the block's
     // stored µs ts when genesis is anchored, else the legacy block-based schedule. A follower
@@ -1609,6 +1609,11 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 vdf_t: mining_vdf_t(),
                 net_hps,
                 share_target: share_target_from(n.bits, w_ease),
+                // sigil-rpcd is retired (permanently dead per operator instruction,
+                // 2026-08-17) — this is a compile-compatibility stub only, not a
+                // port of the 2026-08-20 VDF-bound-hashrate fix. Real pool traffic
+                // goes through sigil-api::mining, which has the real fix.
+                share_vdf_t: 0,
             };
             ok(serde_json::to_string(&c).unwrap_or_else(|_| "{}".into()))
         }
@@ -1704,7 +1709,7 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                         if pc.height == sub.height
                             && pc.share_target > 0
                             && !n.prev_share_seen.contains(&(miner, sub.block.nonce))
-                            && check_submission_at(&pg, &pc, &sub, share_target_from(pc_bits, n.share_ease))
+                            && check_submission_at(&pg, &pc, &sub, share_target_from(pc_bits, n.share_ease), pc.share_vdf_t)
                         {
                             let earned = achieved_ease(&sub.block.header, sub.block.nonce, pc_bits, n.share_ease);
                             let w = share_weight(n.share_ease, earned);
@@ -1731,13 +1736,16 @@ fn route(node: &RwLock<Node>, method: &str, path: &str, query: &str, body: &str,
                 vdf_t: mining_vdf_t(),
                 net_hps: 0.0,
                 share_target,
+                // retired (see the other sigil-rpcd share_vdf_t note above) — compile
+                // stub, real pool traffic verifies through sigil-api::mining instead.
+                share_vdf_t: 0,
             };
             let g = ModSquaring::bench_2048();
             if !check_submission(&g, &c, &sub) {
                 // POOL-SHARES: not a block — is it a valid sub-difficulty SHARE?
                 // Same height/header/VDF binding, easier Lane-A target. Recorded
                 // into this height's payout window, credited when the block lands.
-                if share_target > 0 && check_submission_at(&g, &c, &sub, share_target) {
+                if share_target > 0 && check_submission_at(&g, &c, &sub, share_target, c.share_vdf_t) {
                     // Caps first (a capped submit must not grow the dedup set),
                     // then dedup, then count — all inside credit_share.
                     // VARDIFF BAND-AID: weight comes from the ease the hash ACTUALLY

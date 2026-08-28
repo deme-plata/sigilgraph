@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#09110e" />
+  <meta name="color-scheme" content="dark" />
+  <title>SIGIL Graph — a chain that proves, not asserts</title>
+  <meta name="description" content="SIGIL Graph: DagKnight consensus, four committed state roots per block, a native DEX, and USDS — a fixed-buffer stablecoin. Verify, don't trust." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🔮</text></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/countdown.css?v=20260826-2">
+  <script src="/assets/countdown.js?v=20260826-2" defer></script>
+</head>
+<body>
+  <!-- Mainnet launch countdown (2026-08-26, rocky — operator request).
+       Markup is STATIC and sits above #root so it paints on the first byte:
+       no flash of an empty panel, and React never touches these nodes. The
+       CSS/JS are additive files under /assets, same non-destructive pattern
+       as codex-touch.css below, so a source rebuild cannot drop them.
+       The launch instant lives in exactly one place: TARGET_MS in countdown.js. -->
+  <section class="sg-cd" data-sg-countdown aria-labelledby="sg-cd-title">
+    <div class="sg-cd__grid" aria-hidden="true"></div>
+
+    <span class="sg-cd__eyebrow"><i class="sg-cd__dot" aria-hidden="true"></i>Mainnet launch</span>
+
+    <h2 class="sg-cd__title" id="sg-cd-title">SIGIL Graph goes <em>live</em></h2>
+    <p class="sg-cd__sub">DagKnight consensus, four committed state roots per block, a native DEX and a shielded pool — on mainnet.</p>
+
+    <div class="sg-cd__clock" aria-hidden="true">
+      <div class="sg-cd__unit"><span class="sg-cd__num" data-cd="d">--</span><span class="sg-cd__label">Days</span></div>
+      <div class="sg-cd__unit"><span class="sg-cd__num" data-cd="h">--</span><span class="sg-cd__label">Hours</span></div>
+      <div class="sg-cd__unit"><span class="sg-cd__num" data-cd="m">--</span><span class="sg-cd__label">Minutes</span></div>
+      <div class="sg-cd__unit sg-cd__unit--sec"><span class="sg-cd__num" data-cd="s">--</span><span class="sg-cd__label">Seconds</span></div>
+    </div>
+
+    <div class="sg-cd__rail" aria-hidden="true"><span class="sg-cd__fill" data-cd-fill></span></div>
+
+    <p class="sg-cd__target">LAUNCH · <strong data-cd-target>18 DEC 2026 · 13:00 CET</strong></p>
+    <p class="sg-cd__live">Mainnet is live</p>
+
+    <span data-cd-sr aria-live="polite" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap"></span>
+  </section>
+
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+  <!-- Codex visual pass (2026-08-18) — non-destructive theme layer that must
+       load AFTER the built app CSS to win the cascade (same selectors,
+       overriding colors/effects). Kept in source now so a source rebuild
+       never drops it again; see public/assets/codex-touch.css. Placed here
+       (not <head>) so vite's own injected <link> for the built stylesheet
+       always ends up first regardless of build-tool internals. -->
+  <link rel="stylesheet" href="/assets/codex-touch.css?v=20260818-1">
+</body>
+</html>

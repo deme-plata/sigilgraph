@@ -369,3 +369,173 @@ mod tests {
         assert!(annual_fast > target / 4 && annual_fast < target * 4, "fast ≈ annual target");
     }
 }
+
+#[cfg(test)]
+mod prediction_2_stability {
+    //! Closes whitepaper prediction #2 — "PID non-oscillatory iff `Kp² ≥ 4·Kd·Ki`,
+    //! characteristic equation `Kd·s² + Kp·s + Ki = 0`" — by deriving against the
+    //! IMPLEMENTED controller rather than an assumed one.
+    //!
+    //! ## The prediction does not apply as written
+    //!
+    //! That discriminant describes a full PID. This controller has **no integral
+    //! term and no derivative term** (grep: zero hits for integral/derivative/
+    //! prev_error in this file). So `Ki = Kd = 0`, the stated characteristic
+    //! equation degenerates to `Kp·s = 0`, and the test `Kp² ≥ 4·Kd·Ki` reduces
+    //! to `0.64 ≥ 0` — it would PASS VACUOUSLY. A prediction that cannot fail is
+    //! not evidence, which is why this module restates it instead of ticking it.
+    //!
+    //! ## What is actually implemented
+    //!
+    //! Per block, with `Kp = CORRECTION_SMOOTHING = 0.8`, `α = 1 - Kp = 0.2`:
+    //!
+    //! ```text
+    //!   e_k  = (C_k - T_k) / T_k                  relative cumulative error
+    //!   f_k  = 1 - Kp·e_k                         proportional (|e| ≤ 0.10)
+    //!   F_k  = Kp·F_{k-1} + α·f_k                 first-order lag (EMA)
+    //!   C_k+1 = C_k + R*·F_k                      the plant: an INTEGRATOR
+    //! ```
+    //!
+    //! Note `CORRECTION_SMOOTHING` is doing two unrelated jobs — proportional
+    //! gain on line ~186 and EMA weight on line ~255. Retuning the smoother
+    //! would silently retune the gain. Flagged, not changed.
+    //!
+    //! ## The real characteristic equation
+    //!
+    //! Writing `d_k = C_k - T_k` and `G_k = F_k - 1`, and linearising with
+    //! `x ≡ α·Kp·R*/T` (the loop gain):
+    //!
+    //! ```text
+    //!   λ² - (1 + Kp - x)·λ + Kp = 0        i.e.  λ² - (1.8 - x)·λ + 0.8 = 0
+    //! ```
+    //!
+    //! Two consequences fall straight out:
+    //!
+    //! 1. **det = Kp = 0.8, always.** The product of the roots is fixed. So if
+    //!    the roots are ever complex, `|λ| = √0.8 ≈ 0.894 < 1` — any oscillation
+    //!    is necessarily DAMPED. The controller cannot sustain a limit cycle.
+    //! 2. **Oscillation requires `(1.8 - x)² < 4·0.8`**, i.e. `0.0111 < x < 3.589`.
+    //!    But `T` is CUMULATIVE emission, so after `k` blocks `T ≈ k·R*` and
+    //!    `x ≈ α·Kp/k = 0.16/k`. That drops below 0.0111 once `k > ~14`. The
+    //!    controller is therefore non-oscillatory in steady state — not because
+    //!    the gains were tuned, but because the loop gain decays as `1/k`.
+    //!
+    //! The same `1/k` decay is the real finding: `λ₁ ≈ 1 - 5x → 1`. Correction
+    //! becomes asymptotically weak, so error decays sub-exponentially. The
+    //! controller does not diverge; it converges ever more slowly.
+
+    use super::*;
+
+    const KP: f64 = CORRECTION_SMOOTHING;
+
+    /// Discriminant of the DERIVED characteristic equation.
+    fn disc(x: f64) -> f64 { (1.0 + KP - x).powi(2) - 4.0 * KP }
+
+    #[test]
+    fn stated_pid_discriminant_is_vacuous_here_because_ki_and_kd_are_zero() {
+        let (kp, ki, kd) = (KP, 0.0, 0.0);          // this controller, honestly
+        assert!(kp * kp >= 4.0 * kd * ki, "the stated test passes...");
+        assert_eq!(ki, 0.0, "...but only because there is no integral term");
+        assert_eq!(kd, 0.0, "...and no derivative term. It cannot fail, so it is not evidence.");
+    }
+
+    #[test]
+    fn product_of_roots_is_kp_so_any_oscillation_is_damped() {
+        // det = Kp = 0.8 < 1 for every loop gain ⇒ complex roots have modulus
+        // sqrt(0.8) < 1. No sustained oscillation is reachable.
+        for &x in &[0.0, 0.05, 0.5, 1.8, 3.0, 3.5] {
+            if disc(x) < 0.0 {
+                let modulus = KP.sqrt();
+                assert!(modulus < 1.0, "complex roots must be inside the unit circle (x={x})");
+            }
+        }
+        assert!(KP < 1.0, "det = Kp must be < 1 or the loop is not contracting");
+    }
+
+    #[test]
+    fn oscillation_window_matches_the_derivation() {
+        // Roots are complex exactly on 0.0111 < x < 3.589.
+        assert!(disc(0.0111 + 1e-4) < 0.0, "just inside the window must be oscillatory");
+        assert!(disc(0.0111 - 1e-3) > 0.0, "just below the window must be real-rooted");
+        assert!(disc(3.589 + 1e-3) > 0.0, "just above the window must be real-rooted");
+    }
+
+    #[test]
+    fn steady_state_loop_gain_falls_out_of_the_oscillation_window_after_about_14_blocks() {
+        // x ≈ α·Kp/k with α = 1-Kp.
+        let alpha = 1.0 - KP;
+        let x = |k: f64| alpha * KP / k;
+        assert!(disc(x(5.0))  < 0.0, "very early (k=5) the loop CAN be oscillatory");
+        assert!(disc(x(20.0)) > 0.0, "by k=20 the roots are real — non-oscillatory");
+        // and it only gets more real from there
+        assert!(disc(x(1_000.0)) > 0.0);
+    }
+
+    /// THE EMPIRICAL HALF: drive the REAL `EmissionController`, inject a genuine
+    /// over-mint disturbance, and count sign changes of the error. Oscillation
+    /// would show up as repeated crossings; monotone recovery shows at most one.
+    #[test]
+    fn real_controller_recovers_from_over_mint_without_oscillating() {
+        const GEN: u64 = 1_700_000_000;
+        let mut c = EmissionController::new(GEN);
+
+        // Run 400 blocks at a steady 1 block/sec, booking what it asks for.
+        let mut t = GEN;
+        let mut supply: u128 = 0;
+        for _ in 0..400 {
+            t += 1;
+            let r = c.calculate_block_reward(t, supply);
+            c.record_emission(r);
+            supply = supply.saturating_add(r);
+        }
+
+        // Disturbance: book a large unearned over-mint (the Quillon failure shape).
+        let shock = c.total_cumulative_emission / 5;      // +20% over target
+        c.record_emission(shock);
+        supply = supply.saturating_add(shock);
+
+        // Recovery: track the sign of the error each block.
+        let mut signs: Vec<i8> = Vec::new();
+        for _ in 0..3_000 {
+            t += 1;
+            let r = c.calculate_block_reward(t, supply);
+            c.record_emission(r);
+            supply = supply.saturating_add(r);
+            let elapsed = t - GEN;
+            let target = c.target_cumulative_at_time(elapsed);
+            if target == 0 { continue; }
+            let e = c.total_cumulative_emission as f64 - target as f64;
+            signs.push(if e > 0.0 { 1 } else if e < 0.0 { -1 } else { 0 });
+        }
+        let crossings = signs.windows(2).filter(|w| w[0] != 0 && w[1] != 0 && w[0] != w[1]).count();
+
+        // Zero crossings alone would be a VACUOUS pass — it is also what you
+        // would see if the controller never moved at all. Measure the magnitude
+        // too, so "non-oscillatory" cannot be confused with "inert".
+        let elapsed_end = t - GEN;
+        let target_end = c.target_cumulative_at_time(elapsed_end) as f64;
+        let err_end = (c.total_cumulative_emission as f64 - target_end) / target_end;
+        eprintln!(
+            "prediction-2 empirical: {} sign changes over {} post-shock blocks (Kp={KP}) · \
+             error after shock +20.00% -> {:+.4}% at end · correction_factor={:.4}",
+            crossings, signs.len(), err_end * 100.0, c.correction_factor
+        );
+        assert!(
+            c.correction_factor < 1.0,
+            "after an OVER-mint the correction factor must be BELOW 1 (shrinking rewards); \
+             got {} — the controller is inert, not stable",
+            c.correction_factor
+        );
+        assert!(
+            err_end.abs() < 0.20,
+            "error did not shrink at all ({:.4}) — a 0-crossing result would then be vacuous",
+            err_end
+        );
+        assert!(
+            crossings <= 2,
+            "implemented controller oscillated: {crossings} error sign changes after a +20% over-mint \
+             shock. The derivation says complex roots need 0.0111 < x < 3.589 and steady-state \
+             x ≈ 0.16/k is far below that, so >2 crossings would falsify the derivation."
+        );
+    }
+}

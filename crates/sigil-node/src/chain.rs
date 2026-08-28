@@ -103,16 +103,35 @@ impl ChainTip {
         self.state.clone()
     }
 
-    /// Apply a block. Runs header precheck, applies the state transition
-    /// through the chokepoint, verifies the resulting roots match the
-    /// header's declared roots, and appends on success.
+    /// Apply a block. Runs header precheck (+ producer-signature verification
+    /// once height-gated activation flips on, see below), applies the state
+    /// transition through the chokepoint, verifies the resulting roots match
+    /// the header's declared roots, and appends on success.
     ///
-    /// Phase 0 omits crypto verification (SQIsign nonce, producer sig, VDF,
-    /// STARK). Those land in P1+ when the relevant crates port.
+    /// 2026-08-20: `verify_at_height` replaces the bare `precheck()` this
+    /// comment used to describe as omitted. Below `H1_PRODUCER_SIG_
+    /// ACTIVATION_HEIGHT` (dormant at `u64::MAX` by default) this is
+    /// EXACTLY `precheck()` — zero behavior change on any chain that hasn't
+    /// had an operator schedule a real activation height. VDF/STARK
+    /// verification are still not wired — those land in P1+.
+    ///
+    /// 2026-08-20 (post-quantum): `HybridSqiEd25519` (SQIsign5+Ed25519,
+    /// require-both) can't be verified inside `sigil-header` — it would need
+    /// to link `flux-sqisign`/`sqisign_rs`, breaking that crate's dependency-
+    /// light design (see its module doc). So THIS layer does that check,
+    /// alongside (not instead of) `verify_at_height`, height-gated the same
+    /// way. Fails closed if `SIGIL_TRUSTED_PRODUCER_ID_HEX` isn't configured
+    /// — see `producer_signing::verify_self_mined_hybrid`'s doc.
     pub fn apply(&mut self, block: Block) -> Result<()> {
-        block.header.precheck().with_context(|| "header precheck failed")?;
-
         let expected_height = self.height();
+        block.header.verify_at_height(expected_height).with_context(|| "header verification failed")?;
+        if expected_height >= sigil_header::H1_PRODUCER_SIG_ACTIVATION_HEIGHT
+            && block.header.sig_scheme == sigil_header::SigScheme::HybridSqiEd25519
+        {
+            crate::producer_signing::verify_self_mined_hybrid(&block.header)
+                .map_err(|e| anyhow!("hybrid producer-signature verification failed: {e}"))?;
+        }
+
         if block.header.height != expected_height {
             return Err(anyhow!(
                 "block height mismatch: chain expects {}, block claims {}",

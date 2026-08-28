@@ -1,0 +1,349 @@
+// sigil-top/src/serve.rs — Embedded HTTP static-file server (v0.7.0)
+//
+// No external process. No fluxc binary needed. A single TcpListener thread
+// serves the wallet + vite-engine + static assets on localhost:9800.
+// The wallet HTML is compiled INTO the binary via include_str!.
+
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+
+use crate::local_api::LocalApi;
+
+/// Start the embedded server on 127.0.0.1:port, serving static_dir.
+/// Returns a shutdown signal (set to true to stop the server).
+///
+/// OUT-OF-THE-BOX: the static dir does NOT need to exist. On a user's own machine
+/// (who just downloaded sigil-top) there is no `dist-fluxapp` — but the wallet +
+/// vite-engine are compiled INTO the binary (`include_str!`), so `serve_file` falls
+/// through to the embedded copies. We bind regardless; the dir is just an optional
+/// overlay for richer assets when present (e.g. on a server with the full dist).
+pub fn start(static_dir: &str, port: u16) -> Result<Arc<AtomicBool>, String> {
+    start_with_api(static_dir, port, None)
+}
+
+/// v0.11.0: like [`start`], but also serves the explorer's `/api/v1/*` from a LOCAL
+/// verified-spine view (blocks / status / aether-verify / cortex / peers) before
+/// proxying to the remote node. Pass `None` for the old pure-proxy behaviour.
+pub fn start_with_api(
+    static_dir: &str,
+    port: u16,
+    local_api: Option<Arc<LocalApi>>,
+) -> Result<Arc<AtomicBool>, String> {
+    let dir = PathBuf::from(static_dir); // may not exist — embedded wallet still serves
+    let listener =
+        TcpListener::bind(format!("127.0.0.1:{port}")).map_err(|e| format!("bind :{port}: {e}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("nonblocking: {e}"))?;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = stop.clone();
+    thread::spawn(move || {
+        serve_loop(listener, dir, stop_clone, local_api);
+    });
+    Ok(stop)
+}
+
+fn serve_loop(
+    listener: TcpListener,
+    dir: PathBuf,
+    stop: Arc<AtomicBool>,
+    local_api: Option<Arc<LocalApi>>,
+) {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                let dir = dir.clone();
+                let api = local_api.clone();
+                thread::spawn(move || handle_conn(&mut stream, &dir, api.as_deref()));
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => {
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+}
+
+fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Option<&LocalApi>) {
+    let mut buf = [0u8; 4096];
+    let n = match stream.read(&mut buf) {
+        Ok(n) if n > 0 => n,
+        _ => return,
+    };
+    let req = String::from_utf8_lossy(&buf[..n]);
+    let first_line = req.lines().next().unwrap_or("GET / HTTP/1.1");
+    let mut parts = first_line.split_whitespace();
+    let method = parts.next().unwrap_or("GET").to_string();
+    let path = parts.next().unwrap_or("/");
+    // v7.0.10-fix: capture the request body so POSTs (e.g. /api/v1/send) proxy correctly. The
+    // old proxy hardcoded GET + dropped the body, so every wallet Send hit the node as a GET →
+    // "unknown route". Body follows the blank line after the headers (small JSON, one read).
+    let req_body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+
+    // /api/* → LOCAL-FIRST. If this node has a verified-spine view that can answer the
+    // request (blocks / status / aether-verify / cortex / peers), serve it locally
+    // (trust-minimised). Otherwise relay to the SIGIL node over std TCP — same-origin,
+    // no CORS / mixed-content. Default node is the public sigil-rpcd; override with
+    // SIGIL_NODE_URL to point at a LOCAL node.
+    if path.starts_with("/api/") {
+        if let Some(api) = local_api {
+            if let Some(body) = api.handle(path) {
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+                return;
+            }
+        }
+        let (status, body, ct) = proxy_api(&method, path, &req_body);
+        let resp = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(resp.as_bytes());
+        let _ = stream.write_all(&body);
+        let _ = stream.flush();
+        return;
+    }
+
+    // Decode URL (static files)
+    let path = path.split('?').next().unwrap_or(path);
+    let path = if path == "/" { "/sigil-wallet-tron.html" } else { path };
+    let safe = path.trim_start_matches('/').replace("..", "").replace('\\', "");
+
+    let (status, body, ct) = serve_file(dir, &safe);
+    // v0.59 FEED-LESS HOST FIX: a client with no co-located producer doesn't have the live DAG
+    // feed files on disk (they're published only on the producer box), so serve_file 404s, the
+    // explorer's same-origin fetch fails, and it falls back to the rpcd MINING sub-chain — showing
+    // height ~3k / 56k-high blocks instead of the real multi-million DAG chain. Proxy the known
+    // feed files from the sigilgraph host SERVER-SIDE (reqwest HTTPS — no CORS, no mixed-content)
+    // so the explorer sees the REAL chain on any host. Everything else keeps its normal 404.
+    let (status, body, ct): (&str, Vec<u8>, &str) = if status.starts_with("404") && is_feed_path(&safe) {
+        match proxy_feed(&safe) {
+            Some((b, c)) => ("200 OK", b, c),
+            None => (status, body, ct),
+        }
+    } else {
+        (status, body, ct)
+    };
+
+    let resp = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(resp.as_bytes());
+    let _ = stream.write_all(&body);
+    let _ = stream.flush();
+}
+
+/// Remote host publishing the live DAG-chain feeds (recent-blocks, tip, tip-live). Override with
+/// `SIGIL_FEED_URL`. Used only for the feed-less-host fallback in `handle_conn`.
+fn feed_host() -> String {
+    std::env::var("SIGIL_FEED_URL").unwrap_or_else(|_| "https://sigilgraph.fluxapp.xyz".into())
+}
+
+/// The static feed files a feed-less client may request but won't have on disk. Restricted to this
+/// known set so the fallback can never become an open proxy.
+fn is_feed_path(safe: &str) -> bool {
+    matches!(
+        safe,
+        "sigil-recent-blocks.json" | "sigil-tip.json" | "sigil-tip-live.json" | "sigil-anchor-key.json"
+    )
+}
+
+/// Fetch a feed file from `feed_host()` over HTTPS. Blocking (we run per-connection in a thread);
+/// `None` on any error so the caller falls back to the original 404.
+fn proxy_feed(safe: &str) -> Option<(Vec<u8>, &'static str)> {
+    let url = format!("{}/{}", feed_host().trim_end_matches('/'), safe);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(6))
+        .build()
+        .ok()?;
+    let resp = client.get(&url).send().ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body = resp.bytes().ok()?.to_vec();
+    Some((body, "application/json; charset=utf-8"))
+}
+
+fn serve_file(dir: &PathBuf, safe: &str) -> (&'static str, Vec<u8>, &'static str) {
+    // 1. Try the filesystem
+    let file_path = dir.join(safe);
+    if file_path.exists() && file_path.starts_with(dir) {
+        if let Ok(data) = std::fs::read(&file_path) {
+            return ("200 OK", data, content_type(safe));
+        }
+    }
+
+    // 2. SPA fallback: try index.html in the requested path's directory
+    if let Some(slash) = safe.rfind('/') {
+        let parent = &safe[..slash];
+        let index_path = dir.join(format!("{parent}/index.html"));
+        if index_path.exists() {
+            if let Ok(data) = std::fs::read(&index_path) {
+                return ("200 OK", data, "text/html; charset=utf-8");
+            }
+        }
+    }
+
+    // 3. Built-in wallet — compiled into the binary. Carries the #stats
+    // network-stats modal (the Quillon-dashboard-equivalent stat set,
+    // deep-linked by sigil-top's [T] shortcut), the #activity deep-link
+    // ([B]), which opens the Explorer/Activity view same-origin so its
+    // /api/v1/search proxies to THIS node, and now a live Swap modal
+    // ([W] → Swap, wired to sigil-rpcd's real /pools /swap /balance —
+    // 2026-08-17, was a "soon" placeholder). NOTE: the flux wrapper
+    // cache keys only .rs sources, so an edit to the embedded HTML alone
+    // does NOT rebuild this unit — touch this file's content alongside
+    // any gui/sigil-wallet-tron-embedded.html change.
+    if safe == "sigil-wallet-tron.html" || safe.ends_with("/sigil-wallet-tron.html") {
+        let html = include_str!("../../../gui/sigil-wallet-tron-embedded.html");
+        return ("200 OK", html.as_bytes().to_vec(), "text/html; charset=utf-8");
+    }
+
+    // 3b. Built-in onboarding — 6-word mnemonic → fresh wallet (the wallet gate
+    // redirects fresh users here; it must be served or [W] dead-ends on a 404).
+    if safe == "enter-sigil.html" || safe.ends_with("/enter-sigil.html") {
+        let html = include_str!("../../../gui/enter-sigil.html");
+        return ("200 OK", html.as_bytes().to_vec(), "text/html; charset=utf-8");
+    }
+
+    // 3c. Built-in SIGIL Explorer (flux-search/flux-db, search-hit fetch-by-height 2026-07-22) — served here so the wallet's
+    // Activity iframe is same-origin and its /api/v1/search hits the node proxy.
+    if safe == "sigil-explorer.html" || safe.ends_with("/sigil-explorer.html") {
+        let html = include_str!("../../../gui/sigil-explorer.html");
+        return ("200 OK", html.as_bytes().to_vec(), "text/html; charset=utf-8");
+    }
+
+    // 4. Built-in vite-engine
+    if safe == "vite-engine.html" || safe.ends_with("/vite-engine.html") {
+        let html = include_str!("../../../gui/vite-engine-embedded.html");
+        return ("200 OK", html.as_bytes().to_vec(), "text/html; charset=utf-8");
+    }
+
+    ("404 Not Found", b"404 Not Found\n".to_vec(), "text/plain")
+}
+
+/// Proxy a `GET /api/...` to the SIGIL node over std TCP and relay its JSON body.
+/// Node = `SIGIL_NODE_URL` env (point at a LOCAL node), else the live braid API.
+/// The node speaks plain HTTP, so this works from the http://localhost wallet with
+/// no CORS / mixed-content issues.
+///
+/// ⚠️ BUG FIX (2026-08-16): this defaulted to `:8099` (sigil-rpcd) — dead since
+/// 2026-08-15, frozen at height 325651. `engine_node_url()` (the mining default,
+/// a few hundred lines away) already correctly points at `:18181` (the live
+/// sigil-api braid money API, same host). This function — everything the wallet's
+/// balance/status/send/search calls go through — never got the same fix, so the
+/// wallet kept silently showing pre-reset-era balances from the dead chain with
+/// no visible error. Operator-reported live: wallet showed 6,211 SIGIL from the
+/// wallet's session cache (refresh() deliberately never regresses on a null
+/// fetch, so an old good value sticks around forever if new fetches quietly
+/// fail) while the server-verified balance for that exact address was 0 on the
+/// live chain. sigil-api aliases /api/v1/balance + /api/v1/supply (this same
+/// session, sigil-api/src/lib.rs) so this port actually serves what the wallet
+/// asks for now — status/recent/search/send are NOT yet ported (separate,
+/// larger follow-up: sigil-api has no transaction-history indexing yet).
+fn proxy_api(method: &str, path_and_query: &str, req_body: &str) -> (String, Vec<u8>, &'static str) {
+    let node = std::env::var("SIGIL_NODE_URL")
+        .unwrap_or_else(|_| "http://sigilgraph.quillon.xyz:18181".into());
+    let hostport = node
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    let hostport = hostport.split('/').next().unwrap_or(hostport);
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(18181)),
+        None => (hostport.to_string(), 18181),
+    };
+
+    let mut stream = match std::net::TcpStream::connect((host.as_str(), port)) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                "502 Bad Gateway".to_string(),
+                format!("{{\"error\":\"node unreachable: {e}\"}}").into_bytes(),
+                "application/json",
+            )
+        }
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(6)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(6)));
+    // v7.0.10-fix: forward the REAL method + body (was hardcoded GET) so POST /api/v1/send etc.
+    // reach the node's POST routes instead of falling through to "unknown route".
+    let req = format!(
+        "{method} {path_and_query} HTTP/1.1\r\nHost: {host}\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{req_body}",
+        req_body.len()
+    );
+    if stream.write_all(req.as_bytes()).is_err() {
+        return (
+            "502 Bad Gateway".to_string(),
+            b"{\"error\":\"node write failed\"}".to_vec(),
+            "application/json",
+        );
+    }
+    let mut raw = Vec::new();
+    let _ = stream.read_to_end(&mut raw);
+    let header_end = raw.windows(4).position(|w| w == b"\r\n\r\n");
+    // Relay the UPSTREAM's real status line ("200 OK", "404 Not Found", ...)
+    // instead of hardcoding success. Previously this always returned "200 OK"
+    // regardless of what the node actually answered, so a real 404 (e.g. a
+    // route that didn't exist yet, like /api/v1/send before it was added)
+    // reached the browser as a fake 200 with an unparseable body — the wallet
+    // saw `HTTP 200` in its error banner while the request had actually
+    // failed. Parsed from the head, not assumed.
+    let status = {
+        let head = match header_end {
+            Some(i) => &raw[..i],
+            None => raw.as_slice(),
+        };
+        String::from_utf8_lossy(head)
+            .lines()
+            .next()
+            .and_then(|line| line.splitn(2, ' ').nth(1))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "502 Bad Gateway".to_string())
+    };
+    // split off the HTTP headers; relay the body (sigil-rpcd sends Content-Length + close)
+    let body = match header_end {
+        Some(i) => raw[i + 4..].to_vec(),
+        None => raw,
+    };
+    (status, body, "application/json")
+}
+
+fn content_type(path: &str) -> &'static str {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".html") || lower.ends_with(".htm") {
+        "text/html; charset=utf-8"
+    } else if lower.ends_with(".js") {
+        "application/javascript; charset=utf-8"
+    } else if lower.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if lower.ends_with(".json") {
+        "application/json"
+    } else if lower.ends_with(".svg") {
+        "image/svg+xml"
+    } else if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".ico") {
+        "image/x-icon"
+    } else if lower.ends_with(".wasm") {
+        "application/wasm"
+    } else {
+        "application/octet-stream"
+    }
+}

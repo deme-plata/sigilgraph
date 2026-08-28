@@ -171,6 +171,39 @@ body.view-desktop .desktop{display:flex}
 .caption{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:3;font-family:'JetBrains Mono';font-size:11px;color:var(--dim);letter-spacing:1px}.caption b{color:var(--cyan)}
 </style>
 <link rel="stylesheet" href="/sigil-wallet-codex.css?v=20260819-1">
+<style id="ac-bank">
+/* 2026-08-27 — Recent Activity redesigned to bank-statement legibility.
+   Operator brief: "big buttons, clear text, 16-18pt". Previous markup used
+   12px titles / 9.5px sublines / 8.5px badges — the complaint, precisely.
+   tnum keeps decimal points aligned down the amount column, which is the one
+   detail that makes a statement scannable instead of just a list. */
+#acList{font-family:Inter,system-ui,-apple-system,'Segoe UI',sans-serif;font-feature-settings:"tnum" 1}
+#acList .ac-day{font-size:15px;font-weight:600;color:#63758a;text-transform:uppercase;
+  letter-spacing:.06em;margin:20px 2px 8px}
+#acList .ac-grp{background:rgba(8,16,24,.55);border:1px solid rgba(33,212,253,.14);
+  border-radius:16px;overflow:hidden}
+#acList .ac-row{display:flex;align-items:center;gap:15px;padding:17px 18px;min-height:76px;
+  border-bottom:1px solid rgba(33,212,253,.09);transition:background .12s}
+#acList .ac-grp .ac-row:last-child{border-bottom:none}
+#acList .ac-row:hover{background:rgba(33,212,253,.05)}
+#acList .ac-ic{width:46px;height:46px;border-radius:13px;flex:none;display:grid;place-items:center;font-size:21px}
+#acList .ac-mid{flex:1;min-width:0}
+#acList .ac-t1{font-size:17px;font-weight:600;letter-spacing:-.01em;color:#eaf0f6;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#acList .ac-t2{font-size:15px;color:#93a3b5;margin-top:3px;display:flex;align-items:center;
+  gap:7px;flex-wrap:wrap;overflow-wrap:anywhere}
+#acList .ac-amt{flex:none;text-align:right;font-size:19px;font-weight:700;letter-spacing:-.02em;white-space:nowrap}
+#acList .ac-amt small{display:block;font-size:13px;font-weight:600;color:#63758a;letter-spacing:.4px;margin-top:1px}
+#acList .ac-tag{font-size:13px;font-weight:600;padding:3px 9px;border-radius:7px;
+  border:1px solid rgba(33,212,253,.2);color:#93a3b5}
+#acList .ac-tag.pend{color:#f5c451;border-color:rgba(245,196,81,.35);background:rgba(245,196,81,.09)}
+#acList .ac-tag.shield{color:#a78bfa;border-color:rgba(167,139,250,.35);background:rgba(167,139,250,.09)}
+#acList .ac-empty{padding:30px 20px;font-size:16px;line-height:1.6;color:#93a3b5}
+#acList .ac-empty h3{color:#eaf0f6;font-size:20px;margin:0 0 8px;font-weight:600}
+#acList .ac-why{margin-top:16px;background:rgba(167,139,250,.07);border:1px solid rgba(167,139,250,.28);
+  border-radius:12px;padding:14px 16px;font-size:15px;line-height:1.55}
+#acList .ac-why b{color:#a78bfa}
+</style>
 </head>
 <body>
 <div class="scene"><div class="aurora"><i></i><i></i><i></i></div></div>
@@ -721,6 +754,12 @@ body.view-desktop .desktop{display:flex}
     }
     return { balance:balance, gross:gross, notes:notes, netted:!!spent, epochs:live+1, sealed:sealed };
   }
+  // 2026-08-27: exposed so the Activity ledger's shielded observer can reuse the
+  // SAME scanner the Shield card uses, rather than a second implementation of
+  // trial-decryption. Without this the observer silently no-ops and a shielded
+  // miner keeps seeing an empty activity list.
+  try{ window._scanAllEpochsFast = _scanAllEpochsFast; }catch(e){}
+
 
   async function refreshShielded(){
     const el=document.getElementById('shieldBal'), nt=document.getElementById('shieldNote');
@@ -2399,17 +2438,15 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     var pairs=(window.__swapPools||[]).map(function(p){
       return {pair:String(p.sym_a||'TOKEN')+'/'+String(p.sym_b||'TOKEN'),fee:Number(p.fee_bps||0),live:true};
     });
-    // Keep the ribbon useful while an older braid node lacks /v1/pools. These
-    // are the wallet's registered market symbols; live reserves replace them
-    // automatically as soon as the pool discovery endpoint is available.
-    if(!pairs.length) pairs=[
-      {pair:'SIGIL/USDT',fee:0,live:false},
-      {pair:'SIGIL/USDS',fee:30,live:false},
-      {pair:'USDS/wQUG',fee:30,live:false},
-      {pair:'CLAI/USDS',fee:30,live:false},
-      {pair:'PACI/USDS',fee:30,live:false},
-      {pair:'SCAL/USDS',fee:30,live:false}
-    ];
+    // The ONLY real market this wallet can trade today is wSIGIL/USDC on
+    // Uniswap V2 (Polygon). sigil-g1 lists no native pools at all — /v1/pools
+    // returns [] — so the six symbols that used to sit here (SIGIL/USDT,
+    // SIGIL/USDS, USDS/wQUG, CLAI/USDS, PACI/USDS, SCAL/USDS) advertised
+    // markets that do not exist. Operator call, 2026-08-27: replace them with
+    // the real one. Live figures come from wsigil-market.js, which reads the
+    // pair's own getReserves(); if it is absent the ribbon shows nothing
+    // rather than inventing a listing.
+    if(!pairs.length) pairs=(window.SigilMarket&&window.SigilMarket.tickerPairs())||[];
     var loop=pairs.length>1?pairs.concat(pairs):pairs.concat(pairs,pairs,pairs);
     var markup=loop.map(function(p){return '<span class="dex-pair"><b>'+swapEsc(p.pair)+'</b><i'+(p.live?'':' class="is-listed"')+'>'+(p.live?'● live':'listed')+'</i>'+(p.fee?'<em>'+swapEsc((p.fee/100).toFixed(2))+'% fee</em>':'')+'</span>';}).join('');
     tracks.forEach(function(track){ track.innerHTML=markup; track.classList.toggle('is-static',pairs.length===1); });
@@ -2699,6 +2736,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
      modal only submits the lock, it does not wait for or confirm the mint,
      so the copy below says so plainly instead of implying otherwise. -->
 <script src="sigil-metamask.js"></script>
+<script src="wsigil-market.js"></script>
 <div id="bridge-modal" style="display:none;position:fixed;inset:0;z-index:10001;background:rgba(2,5,9,.82);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:18px">
   <div style="width:100%;max-width:460px;max-height:88vh;display:flex;flex-direction:column;background:linear-gradient(160deg,#06121c,#04080c);border:1px solid rgba(33,212,253,.32);border-radius:16px;box-shadow:0 0 60px rgba(33,212,253,.18);overflow:hidden;font-family:'Rajdhani',system-ui,sans-serif">
     <div style="flex:none;display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid rgba(33,212,253,.18);background:rgba(8,16,24,.7)">
@@ -6693,6 +6731,57 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
       }
     }
     try{ localStorage.setItem(bkey(), raw); }catch(e){}
+
+    // ── 2026-08-27: the transparent balance is NOT where mining rewards land ──
+    // Measured live that day: 4 of 5 active miners run `shielded: true`, so their
+    // coinbase is minted straight into the shielded pool and the transparent
+    // figure above never moves. The observer therefore saw a delta of zero and
+    // wrote no row — which reads to a user as "I am not being paid", when in fact
+    // the pool was growing the whole time. Watch the shielded side too.
+    await pollShielded();
+  }
+
+  /* Shielded-side observer. There is no server route for a per-wallet shielded
+     balance (/v1/shielded/{balance,notes,registered} all 404), so this reuses the
+     wallet's own trial-decryption scanner — the same one the Shield card uses. */
+  function skey(){ return 'sigil-activity-shield-' + addr(); }
+  async function pollShielded(){
+    if(!addr()) return;
+    var S = window.__sigilShieldScan, M = window.__sigilShield;
+    if(!S || !M || typeof window._scanAllEpochsFast !== 'function') return;  // scanner not loaded
+    var mn = window.__sigilMnemonic;
+    if(!mn){ try{ mn = localStorage.getItem('sigil-wallet-mnemonic'); }catch(e){} }
+    if(!mn) return;                                   // locked — cannot decrypt, stay silent
+    var raw;
+    try{
+      var seed = window.sigilDeriveFrom(mn).priv;
+      var r = await window._scanAllEpochsFast(seed, M, S);
+      // A gross figure that can only ever rise is worse than no figure: it would
+      // manufacture phantom incoming rows on every spend. Skip unless netted.
+      if(!r || !r.netted) return;
+      raw = String(r.balance);
+    }catch(e){ return; }
+
+    var prev = null; try{ prev = localStorage.getItem(skey()); }catch(e){}
+    if(prev !== null && prev !== raw){
+      var d; try{ d = BigInt(raw) - BigInt(prev); }catch(e){ d = 0n; }
+      if(d > 0n){
+        var rig = await checkMining(addr());
+        add({
+          cat: rig ? 'miner' : 'shield', dir:'in', src:'observed', shielded:true,
+          label: rig ? ('Mining reward \u00b7 ' + (rig.rig || 'rig')) : 'Shielded credit',
+          amount: d.toString(), peer: rig ? (rig.rig||'') : 'shielded pool', status:'confirmed'
+        });
+      } else if(d < 0n){
+        var recent = load().slice(-6);
+        var signedJustNow = recent.some(function(e){ return e.src==='signed' && (Date.now()-e.ts) < 180000; });
+        if(!signedJustNow){
+          add({ cat:'out', dir:'out', src:'observed', shielded:true,
+                label:'Shielded spend', amount:(-d).toString(), status:'confirmed' });
+        }
+      }
+    }
+    try{ localStorage.setItem(skey(), raw); }catch(e){}
   }
 
   /* ── VERIFY: resolve pending txids against the chain ────────────────────── */
@@ -6761,32 +6850,46 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     });
     return l;
   }
+  // Bank-statement row. Sizes are deliberate: 17px title / 15px subline /
+  // 19px amount, 76px row height, 46px icon. Signed amounts use '+' green for
+  // inbound and a NEUTRAL colour for outbound — an ordinary payment is not an
+  // error and should not be painted red.
   function row(e){
     var c = cat(e.cat), inbound = e.dir === 'in';
-    var sign = inbound ? '+' : '−', col = inbound ? '#00e0c6' : '#ff9a6c';
-    var prov = e.src === 'signed'
-      ? '<span style="color:#00e0c6;border:1px solid rgba(0,224,198,.35);border-radius:999px;padding:1px 6px;font-size:8.5px;letter-spacing:.6px">SIGNED</span>'
-      : '<span style="color:#fbbf24;border:1px solid rgba(251,191,36,.35);border-radius:999px;padding:1px 6px;font-size:8.5px;letter-spacing:.6px">OBSERVED</span>';
-    var st = e.status === 'confirmed'
-      ? '<span style="color:#00e0c6">● confirmed</span>'
-      : (e.status === 'failed' ? '<span style="color:#ff8a8a">● failed</span>'
-                               : '<span style="color:#fbbf24">◐ '+esc(e.status||'pending')+'</span>');
-    return '<div style="display:flex;align-items:center;gap:12px;padding:11px 2px;border-bottom:1px solid rgba(33,212,253,.08)">'
-      + '<div style="flex:none;width:34px;height:34px;border-radius:11px;display:grid;place-items:center;font-size:14px;'
-      +   'border:1px solid '+c.col+'55;background:'+c.col+'14;color:'+c.col+'">'+c.ico+'</div>'
-      + '<div style="flex:1;min-width:0">'
-      +   '<div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">'
-      +     '<span style="font-family:\'JetBrains Mono\';font-size:12px;color:#d7eef5">'+esc(e.label||c.label)+'</span>'+prov
-      +   '</div>'
-      +   '<div style="font-family:\'JetBrains Mono\';font-size:9.5px;color:#5a93a8;margin-top:3px;overflow-wrap:anywhere">'
-      +     ago(e.ts)+' · '+st + (e.txid ? ' · <span title="'+esc(e.txid)+'">'+esc(shortHex(e.txid))+'</span>' : '')
-      +     (e.peer ? ' · '+esc(shortHex(e.peer)) : '')
-      +   '</div>'
+    var sign = inbound ? '+' : '\u2212';
+    var col  = inbound ? '#37d99a' : '#eaf0f6';
+    var bits = [];
+    bits.push(clockOf(e.ts));
+    if(e.peer) bits.push(esc(shortHex(e.peer)));
+    var tags = '';
+    if(e.status && e.status !== 'confirmed' && e.status !== 'failed')
+      tags += '<span class="ac-tag pend">Pending</span>';
+    if(e.status === 'failed')
+      tags += '<span class="ac-tag pend" style="color:#ff8a8a;border-color:rgba(255,138,138,.4);background:rgba(255,138,138,.09)">Failed</span>';
+    if(e.shielded) tags += '<span class="ac-tag shield">\u25c8 Shielded</span>';
+    return '<div class="ac-row">'
+      + '<div class="ac-ic" style="background:'+c.col+'1f;color:'+c.col+'">'+c.ico+'</div>'
+      + '<div class="ac-mid">'
+      +   '<div class="ac-t1">'+esc(e.label||c.label)+'</div>'
+      +   '<div class="ac-t2">'+bits.join(' <span style="opacity:.5">\u00b7</span> ')+tags+'</div>'
       + '</div>'
-      + '<div style="flex:none;text-align:right;font-family:\'Orbitron\';font-weight:700;font-size:13px;color:'+col+'">'
-      +   sign+amt(e.amount)+'<div style="font-family:\'JetBrains Mono\';font-weight:400;font-size:8.5px;color:#4d7a8a;letter-spacing:.5px">SIGIL</div>'
-      + '</div>'
+      + '<div class="ac-amt" style="color:'+col+'">'+sign+amt(e.amount)+'<small>SIGIL</small></div>'
       + '</div>';
+  }
+  function clockOf(ts){
+    try{ return new Date(ts).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}); }
+    catch(_){ return ago(ts); }
+  }
+  // Today / Yesterday / "Monday, 25 August" — the way a statement breaks up.
+  function dayLabelOf(ts){
+    try{
+      var a=new Date(ts), b=new Date();
+      var f=function(x){ return new Date(x.getFullYear(),x.getMonth(),x.getDate()).getTime(); };
+      var d=Math.round((f(b)-f(a))/86400000);
+      if(d===0) return 'Today';
+      if(d===1) return 'Yesterday';
+      return a.toLocaleDateString('en-GB',{weekday:'long',day:'numeric',month:'long'});
+    }catch(_){ return ''; }
   }
   function render(){
     var host = document.getElementById('acList'); if(!host) return;
@@ -6806,11 +6909,29 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
             : 'Nothing recorded yet for this wallet.<br><br>'
               + 'Activity is captured from the moment you send, swap or shield — those rows carry the real txid the node returns. '
               + 'Incoming and mining credits appear when the balance actually changes on-chain.<br><br>'
-              + '<span style="color:#4d7a8a">There is no history to backfill: sigil-g0 serves no per-address transaction log, and its search index is currently disabled.</span>')
+              + '<span style="color:#4d7a8a">There is no history to backfill: the chain serves no per-address transaction log, and its search index is currently disabled.</span>'
+              + ((window.MINE_ADDR && window.ADDR && String(window.MINE_ADDR).toLowerCase() !== String(window.ADDR).toLowerCase())
+                  ? '<div class="ac-why"><b>Mining pays a different wallet.</b> This node credits '
+                    + esc(shortHex(window.MINE_ADDR)) + ', but you are viewing '
+                    + esc(shortHex(window.ADDR)) + '. Activity is recorded per wallet, so those rewards are on the other ledger.</div>'
+                  : '')
+              + '<div class="ac-why"><b>Mining and see nothing?</b> A shielded miner\'s rewards land in the shielded pool, so the transparent balance never changes. Unlock the wallet so the shielded scanner can run \u2014 it reads those notes by trial-decryption.</div>')
         + '</div>';
       return;
     }
-    host.innerHTML = l.map(row).join('');
+    // Group into day sections. `l` is already in display order.
+    var html='', lastDay=null;
+    for(var i=0;i<l.length;i++){
+      var dl = dayLabelOf(l[i].ts);
+      if(dl !== lastDay){
+        if(lastDay !== null) html += '</div>';
+        html += '<div class="ac-day">'+esc(dl)+'</div><div class="ac-grp">';
+        lastDay = dl;
+      }
+      html += row(l[i]);
+    }
+    if(lastDay !== null) html += '</div>';
+    host.innerHTML = html;
   }
 
   /* ── open / close ───────────────────────────────────────────────────────── */

@@ -13,6 +13,7 @@ mod chain_log;
 mod genesis; // 2026-08-23: moved out so sigil-top's `producer` feature shares the REAL build_genesis()
 mod mint; // 2026-08-23: moved out so sigil-top's `producer` feature shares the REAL mint_next_block()
 mod dag; // 2026-08-23: moved out so sigil-top's `producer` feature shares the REAL braid wiring
+mod finality_wire; // 2026-08-27: Instant Finality PHASE 2 — observational only, zero consensus effect
 // 2026-08-26 (frontier-memo adoption): `frontier.rs` already declared `pub mod
 // frontier;` in `lib.rs`; this is the matching bin-local declaration (same
 // two-independent-copies-of-one-source pattern as `dag`/`mint`/`genesis` above)
@@ -344,14 +345,39 @@ fn run_start() -> Result<()> {
         sync_auth_gate.enforcing()
     );
 
-    // Tor-only without arti = hard error. The operator asked for Tor; they get Tor or a clear failure.
+    // Any transport whose name contains "tor" without arti = hard error. The
+    // operator asked for Tor; they get Tor or a clear failure.
+    //
+    // 2026-08-27: this guard used to match ONLY `SigilTransport::Tor`, so
+    // `SIGIL_TRANSPORT=wg+tor:<iface>` — the composite mode — parsed fine,
+    // started fine, logged nothing, and ran plain TCP. Epsilon shipped in
+    // exactly that state: the unit file asked for wg+tor, the binary had no
+    // arti symbols in it at all, and the node listened unencrypted on a public
+    // port. Nothing anywhere said so. A privacy setting that silently does
+    // nothing is worse than one that is off, because the operator stops
+    // looking. `WireGuardThenTor` is now covered too.
     #[cfg(not(feature = "arti"))]
-    if matches!(cfg.transport, SigilTransport::Tor) {
+    if matches!(
+        cfg.transport,
+        SigilTransport::Tor | SigilTransport::WireGuardThenTor { .. }
+    ) {
         return Err(anyhow!(
-            "SIGIL_TRANSPORT=tor selected but sigil-node was built without --features arti. \
-             Rebuild with: fluxc build --package sigil-node --features sigil-net/arti"
+            "SIGIL_TRANSPORT={} requests Tor egress, but this sigil-node was built \
+             without --features arti — the Tor leg would silently do nothing. \
+             Either rebuild with: fluxc build --package sigil-node --features sigil-net/arti \
+             or set a transport that does not name Tor (direct | wireguard:<iface>).",
+            std::env::var(sigil_net::TRANSPORT_ENV).unwrap_or_else(|_| "<unset>".into())
         ));
     }
+
+    // Even WITH arti compiled in, say out loud which privacy legs are actually
+    // carrying traffic. The failure mode this prints against is a config that
+    // claims more than it delivers — see the note above.
+    eprintln!(
+        "   transport:       {:?}  (arti compiled in: {})",
+        cfg.transport,
+        cfg!(feature = "arti")
+    );
 
     let net_config = flux_p2p::NetworkConfig {
         node_id: node_id.clone(),
@@ -921,6 +947,21 @@ fn run_start() -> Result<()> {
         // None ⇒ SIGIL_DAG=0 behavior-identical (design §3.1). Seeded from the
         // local chain's in-RAM window so the producer's own spine is known.
         let mut braid: Option<Braid> = dag_mode.then(|| dag_seed_braid(&chain));
+        // SIGIL_FRONTIER_MEMO=0 reverts to the plain O(window) frontier rebuild
+        // without a redeploy. Default ON (chronos-validated 2026-08-27).
+        let frontier_memo_on: bool = std::env::var("SIGIL_FRONTIER_MEMO")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
+        eprintln!("🧠 frontier memo: {} (SIGIL_FRONTIER_MEMO=0 to disable)",
+            if frontier_memo_on { "ON — O(new) incremental" } else { "OFF — O(window) full rebuild" });
+        // INSTANT FINALITY PHASE 2 (2026-08-27) — OBSERVATIONAL ONLY.
+        // Tallies gossiped validator votes and reports what an absolute
+        // finality rule WOULD have said, beside today's 512-block depth
+        // rule, so the latency of the real thing can be measured before
+        // anything is gated on it. Inert unless SIGIL_FINALITY_COMMITTEE is
+        // set; it never touches `braid`, storage, or fork choice. Gating
+        // consensus on these certificates is Phase 3.
+        let mut finality = finality_wire::FinalityWire::from_env();
         // QTFT-2: receipt-side topology-commitment verification. Default is
         // OBSERVE ONLY (recompute + count + loudly log a genuine mismatch,
         // never refuse the block) — this is deliberately NOT gated by
@@ -939,6 +980,10 @@ fn run_start() -> Result<()> {
                 if topology_enforce { "1" } else { "0" });
         }
         let mut topology_stats = TopologyStats::default();
+        // Observations we could not check on arrival, kept so they can be checked once the
+        // braid backfills behind us. See `DeferredTopology` — without this, a node that is
+        // behind verifies NOTHING, which is what it was doing.
+        let mut deferred_topology = crate::dag::DeferredTopology::default();
         // Blocks admitted live via THIS gossipsub path since boot — the
         // verifier requires a full window's worth of these before ever
         // comparing, so a fresh boot / recent snapshot restore can never look
@@ -1208,6 +1253,14 @@ fn run_start() -> Result<()> {
         let mut ph_frontier_us: u64 = 0;
         let mut ph_mint_us: u64 = 0;
         let mut ph_drain_us: u64 = 0;
+        // PROFILING (2026-08-27): apply + chain-log split out from the mint
+        // phase, so an fsync-bound write is never mistaken for slow state math.
+        let mut ph_apply_us: u64 = 0;
+        // Real work done by the frontier phase, in BLOCK RE-APPLIES — the
+        // outcome metric. Elapsed time alone cannot tell you whether the memo
+        // is working or silently falling back to a full rebuild.
+        let mut ph_frontier_applied: u64 = 0;
+        let mut ph_log_us: u64 = 0;
         let ph_serve_us = std::sync::atomic::AtomicU64::new(0);
         let mut ph_ticks: u64 = 0;
         let mut last_phase_log = std::time::Instant::now();
@@ -1221,6 +1274,16 @@ fn run_start() -> Result<()> {
         let mut req_frontier: u64 = chain.height();
         let mut net_tip: u64 = 0;
         const FETCH_CHUNK: u64 = 8192;
+        // FETCH_CHUNK is sized for HEADERS (~170 B each — 8192 of them is ~1.4 MB, fine).
+        // A body request at that width is a different animal entirely: `served 8193 blocks`
+        // is tens of megabytes in ONE response, and on 2026-08-27 a follower asked for
+        // exactly that range 1,665 times in a row, was served it every time, applied NOTHING,
+        // and dropped the peer connection on each attempt — a permanent sync stall at a fixed
+        // height with the producer dutifully re-sending megabytes forever.
+        //
+        // Bodies therefore get their own, far smaller width. A deep gap now closes over many
+        // small responses instead of one that never lands.
+        const BODY_FETCH_CHUNK: u64 = 512;
         const FETCH_MAX_AHEAD: u64 = 131_072; // keep ~16 ranges in flight ahead of the applied tip
         loop {
             // Slide the window: fire consecutive range-requests until req_frontier is
@@ -1232,7 +1295,7 @@ fn run_start() -> Result<()> {
                 while req_frontier < net_tip && req_frontier < tip + FETCH_MAX_AHEAD {
                     if let Some(peer) = mgr.connected_peers().into_iter().next() {
                         let from = req_frontier;
-                        let to = (from + FETCH_CHUNK).min(net_tip);
+                        let to = (from + BODY_FETCH_CHUNK).min(net_tip);
                         let req = BackfillReq { from, to, headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()) };
                         let mgr2 = std::sync::Arc::clone(&mgr);
                         let bf_tx2 = bf_tx.clone();
@@ -1271,7 +1334,7 @@ fn run_start() -> Result<()> {
                             };
                             let _ = bf_tx2.send(blocks).await;
                         });
-                        req_frontier += FETCH_CHUNK;
+                        req_frontier += BODY_FETCH_CHUNK;
                     } else { break; }
                 }
             }
@@ -1282,6 +1345,43 @@ fn run_start() -> Result<()> {
                     // — otherwise the receiver joins mid-stream and gaps
                     // forever (Phase 0 has no backfill). Once grace elapses,
                     // both advance from H=1 in lockstep.
+                    // ── SYNC GATE (2026-08-27) ──────────────────────────────────
+                    //
+                    // Belt and braces: the node decides for ITSELF whether it is entitled
+                    // to mint, rather than an operator having to time the flip by hand.
+                    //
+                    // A producer that mints while far behind does not catch up faster — it
+                    // builds its OWN spine from wherever it happens to be, and every block
+                    // it makes is one nobody else will ever choose. This box has done
+                    // exactly that: with SIGIL_PRODUCER=1 and its traffic silently dropped
+                    // by an iptables rule on the peer, it free-ran a PRIVATE chain to
+                    // height ~2,060,403 over seven days. Nothing detected it, because from
+                    // the inside a private fork looks identical to a healthy chain.
+                    //
+                    // Evaluated EVERY tick, not once at startup: a node that falls behind
+                    // later must stop, and a startup check would never notice.
+                    //
+                    // `net_tip == 0` = no peer has advertised a height yet. That is the
+                    // genuine bootstrap/solo case and is deliberately NOT gated, so a first
+                    // node can still start a chain.
+                    let sync_slack: u64 = std::env::var("SIGIL_PRODUCE_SYNC_SLACK")
+                        .ok().and_then(|v| v.parse().ok()).unwrap_or(64);
+                    let local_h = chain.height();
+                    let behind = net_tip.saturating_sub(local_h);
+                    // Hysteresis: enter production within `slack`, leave only at 4x. A
+                    // single threshold would flap in and out every tick at the boundary,
+                    // which is worse than either state.
+                    let sync_ok = net_tip == 0 || behind <= sync_slack;
+                    let sync_lost = net_tip > 0 && behind > sync_slack.saturating_mul(4);
+                    if producing && sync_lost {
+                        producing = false;
+                        eprintln!(
+                            "⏸ PRODUCTION PAUSED — {behind} blocks behind the mesh (local {local_h} \
+                             vs peer-best {net_tip}). Minting from here would build a private spine, \
+                             not this chain. Resumes automatically within {sync_slack} blocks."
+                        );
+                    }
+
                     let peers = mgr.summary().peer_count;
                     // DEV: SIGIL_SOLO_MINT=1 lets a single node mint with no peer
                     // (self-contained coinbase/chronos proofs). Off by default —
@@ -1297,11 +1397,15 @@ fn run_start() -> Result<()> {
                         first_peer_at = Some(std::time::Instant::now());
                         eprintln!("🤝 peer connected — minting block 1 in {}ms (mesh-graft grace)", grace_ms);
                     } else if !producing
+                        && sync_ok
                         && first_peer_at.map(|t| t.elapsed().as_millis() as u64 >= grace_ms).unwrap_or(false)
                     {
                         producing = true;
-                        eprintln!("🏭 grace elapsed — streaming blocks now");
+                        eprintln!(
+                            "🏭 grace elapsed and in sync (local {local_h} vs peer-best {net_tip}) — streaming blocks now"
+                        );
                     }
+
                     if producing {
                     // DAGKnight: mint on the FRONTIER (settled chain + pending selected
                     // spine), not the settled chain — the settled chain advances only via
@@ -1322,9 +1426,48 @@ fn run_start() -> Result<()> {
                     // stable; `frontier_cache` is no longer read, left declared for the next
                     // deliberate, chronos-first re-adoption attempt.
                     let _t_frontier = std::time::Instant::now(); // cheap; only READ when profiling
-                    let _ = &frontier_cache;
+                    // 2026-08-27 — MEMO RE-ADOPTED, this time with the proof the
+                    // 2026-08-23 attempt never had.
+                    //
+                    // Measured on the live producer that day: `frontier` costs
+                    // 97ms of a 220ms/block timed budget (44%), because
+                    // `dag_build_frontier` re-applies the whole pending spine
+                    // from the settled tip EVERY tick — measured at 471
+                    // re-applies/tick, matching this file's own "~final_depth"
+                    // prediction.
+                    //
+                    // `sigil-chronos::frontier_memo` now drives BOTH functions
+                    // through real `mint_next_block` + `ChainTip::apply` (so the
+                    // four state roots are genuinely validated) across 2600
+                    // ticks with 129 adversarial 2-deep reorgs, each confirmed
+                    // to have actually won the min-hash tie-break:
+                    //     baseline 1,224,839 applies · memo 63,653 · 19.2x fewer
+                    //     divergent_ticks = 0
+                    // That harness is exactly the precondition `frontier.rs`'s
+                    // module doc demands before re-adoption.
+                    //
+                    // KILL SWITCH: `SIGIL_FRONTIER_MEMO=0` reverts to the plain
+                    // O(window) rebuild WITHOUT a redeploy. The last attempt at
+                    // this stopped block production dead and had to be rolled
+                    // back by shipping a new binary; an env flag turns that into
+                    // a restart. Default is ON — the evidence supports it — but
+                    // the escape hatch is the point.
                     let frontier_opt: Option<ChainTip> = braid.as_ref().map(|br| {
-                        dag_build_frontier(&chain, br, &dag_bodies).frontier
+                        if frontier_memo_on {
+                            let fb = frontier::dag_build_frontier_memo(&chain, br, &dag_bodies, frontier_cache.as_ref());
+                            // Count REAL re-applies, not elapsed time. A cache
+                            // that reports its own hit-rate can lie; this is the
+                            // work actually done, and it should fall from ~471
+                            // to ~25 per tick. If it does not, the memo is
+                            // silently falling back and the win is imaginary.
+                            ph_frontier_applied += fb.applied as u64;
+                            frontier_cache = Some(fb.frontier.clone());
+                            fb.frontier
+                        } else {
+                            let fb = dag_build_frontier(&chain, br, &dag_bodies);
+                            ph_frontier_applied += fb.applied as u64;
+                            fb.frontier
+                        }
                     });
                     ph_frontier_us += _t_frontier.elapsed().as_micros() as u64;
                     ph_ticks += 1;
@@ -1497,7 +1640,20 @@ fn run_start() -> Result<()> {
                             (w.len().max(1) as u32, sh_n, pct)
                         }
                     };
-                    match mint_next_block(mint_ref, mp, &block_txs, reward_override, solve.as_ref(), topology_commitment, share_pool) {
+                    // PROFILING (2026-08-27): ph_mint_us was declared next to
+                    // ph_frontier_us/ph_drain_us but never accumulated, so the
+                    // single most expensive phase was the one phase nobody
+                    // timed. Measured live: the producer is configured with a
+                    // 50 blk/s FLOOR (SIGIL_RATE_MIN) and delivers ~2.5 blk/s,
+                    // pinned at ~85% of ONE core on a 48-core box — roughly
+                    // 339 ms of single-threaded CPU per block. Raising the rate
+                    // knob cannot help; it is already asking for 20x what the
+                    // loop achieves. This closes the instrument so the 339 ms
+                    // can be attributed instead of guessed.
+                    let _t_mint = std::time::Instant::now();
+                    let _mint_result = mint_next_block(mint_ref, mp, &block_txs, reward_override, solve.as_ref(), topology_commitment, share_pool);
+                    ph_mint_us += _t_mint.elapsed().as_micros() as u64;
+                    match _mint_result {
                         Ok((block, minted_tx_hashes)) => {
                             let h = block.header.height;
                             sigil_api::attribution::record(
@@ -1568,9 +1724,19 @@ fn run_start() -> Result<()> {
                                 ph_drain_us += _t_drain.elapsed().as_micros() as u64;
                                 true
                             } else {
-                                match chain.apply(block) {
+                                let _t_apply = std::time::Instant::now();
+                                let _apply_res = chain.apply(block);
+                                ph_apply_us += _t_apply.elapsed().as_micros() as u64;
+                                match _apply_res {
                                     Ok(_) => {
+                                        // chain-log append timed separately: an
+                                        // fsync-bound write and an in-memory
+                                        // state transition fail for completely
+                                        // different reasons and are fixed in
+                                        // completely different places.
+                                        let _t_log = std::time::Instant::now();
                                         let _ = chain_log.append_bytes(&bytes);
+                                        ph_log_us += _t_log.elapsed().as_micros() as u64;
                                         // Linear mode applies its own block synchronously, right
                                         // here — no candidate-racing, so no lookup needed: these
                                         // ARE the hashes that just landed.
@@ -1634,6 +1800,19 @@ fn run_start() -> Result<()> {
                                     }
                                     if let Err(e) = mgr.publish(sigil_net::TOPIC_BLOCKS, bytes) {
                                         eprintln!("⚠ publish block H={} failed: {}", h, e);
+                                    }
+                                    // PHASE 2 finality vote. `topology_commitment` is the
+                                    // braid's own order commitment for this height — the
+                                    // same value that rides in the header — so the vote
+                                    // commits to the ORDER, not merely to a block hash.
+                                    // Returns None off checkpoints, or when this node holds
+                                    // no committee key. Dropping the payload would have no
+                                    // effect on the chain; publishing it only feeds peers'
+                                    // measurements.
+                                    if let Some(vb) = finality.on_block(h, bhash, topology_commitment, finality_wire::now_ms()) {
+                                        if let Err(e) = mgr.publish(sigil_net::TOPIC_FINALITY_VOTES, vb) {
+                                            eprintln!("⚠ publish finality vote H={} failed: {}", h, e);
+                                        }
                                     }
                                     if produced % 100 == 0 {
                                         let secs = t_start.elapsed().as_secs_f64().max(1e-6);
@@ -1709,6 +1888,51 @@ fn run_start() -> Result<()> {
                             eprintln!("⚠ publish peer-heights failed: {}", e);
                         }
                         eprintln!("⚡ heartbeat — peers={} started={}", sum.peer_count, sum.started);
+                        // PHASE 2: what an absolute finality rule WOULD have
+                        // settled, printed next to what today's depth rule has.
+                        // Silent unless finality is configured.
+                        if let Some(line) = finality.heartbeat_line(chain.height()) {
+                            eprintln!("{line}");
+                        }
+                        // PROFILING READOUT (2026-08-27). These accumulators
+                        // existed but were never printed — the instrument was
+                        // built and never read. Per-block averages in
+                        // microseconds. `timed_total` is the sum of the phases
+                        // below; compare it against the ~339 ms/block the
+                        // process actually spends. Whatever is missing is a
+                        // phase nobody has instrumented yet — that gap is the
+                        // number that says the instrument is still incomplete.
+                        if ph_ticks > 0 {
+                            let t = ph_ticks;
+                            let sum = ph_frontier_us + ph_mint_us + ph_drain_us + ph_apply_us + ph_log_us;
+                            eprintln!(
+                                "⏱ produce profile — ticks={} blocks={} · frontier={}µs ({} re-applies/tick) mint={}µs drain={}µs apply={}µs log={}µs · timed_total={}µs/blk",
+                                t, produced,
+                                ph_frontier_us / t, ph_frontier_applied / t, ph_mint_us / t, ph_drain_us / t,
+                                ph_apply_us / t, ph_log_us / t, sum / t
+                            );
+                            // MINT SUB-PHASES — mint is 60% of the budget and was
+                            // an unattributed lump until 2026-08-27.
+                            let (snap, body, txr, hdr, calls) = mint::prof::read();
+                            if calls > 0 {
+                                eprintln!(
+                                    "⏱   mint breakdown — state_clone={}µs body={}µs txs_root={}µs header={}µs · over {} mints",
+                                    snap / calls, body / calls, txr / calls, hdr / calls, calls
+                                );
+                                let (sp, c2, cb, tl, rt, bc) = coinbase::prof::read();
+                                if bc > 0 {
+                                    eprintln!(
+                                        "⏱     body breakdown — split_coinbase={}µs clone2={}µs cb_commit={}µs tx_loop={}µs roots={}µs · over {} calls",
+                                        sp / bc, c2 / bc, cb / bc, tl / bc, rt / bc, bc
+                                    );
+                                    let (c3, cr) = coinbase::prof::read_split();
+                                    eprintln!(
+                                        "⏱       split internals — clone3={}µs credit_commits={}µs",
+                                        c3 / bc, cr / bc
+                                    );
+                                }
+                            }
+                        }
 
                         // Fail-loud finality monitoring — see `last_below_final`'s
                         // doc comment above. `below_final` counts blocks the
@@ -2296,6 +2520,21 @@ fn run_start() -> Result<()> {
                         flux_p2p::SwarmAppEvent::GossipsubMessage {
                             topic, from, data, ..
                         } => {
+                            // PHASE 2 finality votes. Checked before the block
+                            // arm and `continue`d so it can never fall through
+                            // into block handling. Nothing here reaches
+                            // Braid::insert, storage, or fork choice — a vote is
+                            // tallied for measurement and nothing else. Malformed
+                            // payloads are dropped silently by `on_gossip`: this
+                            // is a public topic, so junk is expected traffic, and
+                            // logging each piece would be a remotely-triggerable
+                            // log flood.
+                            if topic == sigil_net::TOPIC_FINALITY_VOTES {
+                                if let Some(line) = finality.on_gossip(&data, finality_wire::now_ms()) {
+                                    eprintln!("{line}");
+                                }
+                                continue;
+                            }
                             if topic == sigil_net::TOPIC_BLOCKS {
                                 // Receiver: COUNT every block that arrives (the
                                 // cross-host throughput number), then apply in
@@ -2363,6 +2602,13 @@ fn run_start() -> Result<()> {
                                     );
                                     live_blocks_witnessed = live_blocks_witnessed.saturating_add(1);
                                     topology_stats.record(topo_verdict);
+                                    // Fires on a timer for EVERY verdict, including the good ones —
+                                    // see `TopologyStats::heartbeat` for why silence was not enough.
+                                    topology_stats.heartbeat_with_deferred(
+                                        topology_enforce,
+                                        deferred_topology.len(),
+                                        deferred_topology.dropped_unverified,
+                                    );
                                     match topo_verdict {
                                         TopoVerdict::Mismatch => {
                                             eprintln!(
@@ -2391,11 +2637,46 @@ fn run_start() -> Result<()> {
                                             topology_stats.logged_incomplete_once = true;
                                             eprintln!(
                                                 "🧶 QTFT topology check: window has a residency gap at height {bheight} \
-                                                 (likely bulk-backfill catch-up racing eviction) — skipping comparison for \
-                                                 this block rather than risking a false accusation; one-time notice",
+                                                 (likely bulk-backfill catch-up racing eviction) — DEFERRED for re-check \
+                                                 once the braid fills in behind us; one-time notice",
                                             );
                                         }
                                         _ => {}
+                                    }
+
+                                    // Park anything we could not check, instead of discarding it.
+                                    if topo_verdict == TopoVerdict::WindowIncomplete {
+                                        if let Some(c) = block.header.topology_commitment {
+                                            deferred_topology.park(bheight, c);
+                                        }
+                                    }
+
+                                    // Retry a small batch of older parked observations against the
+                                    // braid as it stands now. Bounded per tick so a node with
+                                    // thousands parked never stalls its own loop.
+                                    if !deferred_topology.is_empty() {
+                                        let resolved = deferred_topology.drain_ready(|h, claimed| {
+                                            match verify_topology_window(br, h, Some(claimed)) {
+                                                // still not resident — keep it parked
+                                                TopoVerdict::WindowIncomplete => None,
+                                                v => Some(v),
+                                            }
+                                        });
+                                        for (h, v) in resolved {
+                                            topology_stats.record(v);
+                                            if v == TopoVerdict::Mismatch {
+                                                // Deliberately never rejects: by the time a deferred
+                                                // block verifies it was admitted long ago, so a late
+                                                // mismatch is an alarm, not an admission decision.
+                                                eprintln!(
+                                                    "🧶⚠ QTFT DEFERRED topology MISMATCH at height {h} — \
+                                                     this block was admitted before its window was \
+                                                     resident and does NOT match on re-check \
+                                                     (totals: {}/{} match/mismatch)",
+                                                    topology_stats.matched, topology_stats.mismatched,
+                                                );
+                                            }
+                                        }
                                     }
                                     match br.insert(BlockView::from(&block.header)) {
                                         InsertOutcome::Inserted { .. } => {
@@ -2434,9 +2715,48 @@ fn run_start() -> Result<()> {
                                                     // (`FETCH_CHUNK`, defined above in this fn) — a deep
                                                     // gap now closes incrementally over many requests
                                                     // instead of one unbounded one.
+                                                    // 2026-08-27: BODY_FETCH_CHUNK, not FETCH_CHUNK.
+                                                    // The 2026-08-20 fix bounded this from
+                                                    // "unbounded" to FETCH_CHUNK — but FETCH_CHUNK is
+                                                    // the HEADER width (8192), and this request asks
+                                                    // for full bodies. Measured live: the producer
+                                                    // dutifully `served 8193 blocks` and the peer
+                                                    // disconnected one second later, every time, so
+                                                    // the follower sat frozen at a fixed height
+                                                    // re-requesting the identical range 1,665 times.
                                                     let req_to = chain.height()
-                                                        .saturating_add(FETCH_CHUNK)
+                                                        .saturating_add(BODY_FETCH_CHUNK)
                                                         .min(bheight.saturating_add(1));
+                                                    // 2026-08-27: DO NOT send an inverted range.
+                                                    //
+                                                    // `req_to` is clamped to the height of the block
+                                                    // that triggered this fetch. When that block came
+                                                    // from a peer BEHIND us — which is the normal case
+                                                    // on a DAG, and the permanent case for any peer
+                                                    // still catching up — `bheight + 1 < chain.height()`
+                                                    // and the request becomes `[high..=low]`.
+                                                    //
+                                                    // The serve side answers such a request with
+                                                    // nothing (`read_headers_range` opens with
+                                                    // `if to < from { return out }`), so it is pure
+                                                    // waste — but it is not harmless. Measured live on
+                                                    // happysrv: peers ahead of it sent inverted ranges
+                                                    // continuously (`served 0 HEADERS [140826..=138206]`
+                                                    // over and over). Each one occupies a
+                                                    // request_response slot on a node that is ALREADY
+                                                    // struggling, the resulting timeouts trip the
+                                                    // six-inbound-failure teardown in
+                                                    // `flux-p2p::swarm`, and the connection that gets
+                                                    // torn down is the one the behind node needs to
+                                                    // catch up on. A node that falls behind is
+                                                    // therefore pushed further behind, permanently:
+                                                    // happysrv synced at ~100 blk/s to height 141,085
+                                                    // and then sat frozen there for nine hours.
+                                                    //
+                                                    // There is nothing to ask for, so ask for nothing.
+                                                    if req_to <= chain.height() {
+                                                        continue;
+                                                    }
                                                     let req = BackfillReq {
                                                         from: chain.height(),
                                                         to: req_to,
@@ -2549,7 +2869,7 @@ fn run_start() -> Result<()> {
                                     if last_req.elapsed() >= std::time::Duration::from_millis(15) {
                                         last_req = std::time::Instant::now();
                                         if let Some(peer) = mgr.connected_peers().into_iter().next() {
-                                            let req = BackfillReq { from: expected, to: expected.saturating_add(8192), headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()) };
+                                            let req = BackfillReq { from: expected, to: expected.saturating_add(BODY_FETCH_CHUNK), headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()) };
                                             eprintln!("⇪ rr-backfill: gap (have {}, saw {}) — requesting [{}..={}] from {}",
                                                 expected, h, req.from, req.to, peer);
                                             let mgr2 = std::sync::Arc::clone(&mgr);
@@ -2698,10 +3018,31 @@ fn run_start() -> Result<()> {
                                     && last_req.elapsed() >= std::time::Duration::from_millis(15)
                                 {
                                     last_req = std::time::Instant::now();
-                                    if let Some(peer) = mgr.connected_peers().into_iter().next() {
+                                    // Ask the peer that JUST ANNOUNCED it is ahead of us.
+                                    //
+                                    // This used to be `connected_peers().into_iter().next()` — an
+                                    // arbitrary peer, chosen with no regard for whether it holds any
+                                    // chain at all. The mesh contains light clients (`sigil-top`)
+                                    // which speak the same backfill protocol and answer every
+                                    // request with ZERO bytes, because they have nothing to serve.
+                                    // Picking one is unrecoverable: the reply is an empty success,
+                                    // not an error, so no failure path fires, no counter trips, and
+                                    // the node simply asks the same black hole forever.
+                                    //
+                                    // Measured live 2026-08-27: happysrv sat frozen at height
+                                    // 141,085 for ten hours, 449 identical requests, every one
+                                    // answered `0 B in 8019 ms` by a sigil-top instance — while
+                                    // Epsilon, which had every block it needed, was never asked.
+                                    //
+                                    // `from` is the sender of the peer-heights announcement we are
+                                    // reacting to. It told us its height; it is by construction the
+                                    // right peer to ask, and it is a full node because only a node
+                                    // with a chain publishes a height.
+                                    {
+                                        let peer = from;
                                         let req = BackfillReq {
                                             from: expected,
-                                            to: expected.saturating_add(8192),
+                                            to: expected.saturating_add(BODY_FETCH_CHUNK),
                                             headers_only: false,
                                             codec: 0, // node-to-node needs full blocks; raw JSON path
                                             handshake: Some((*sync_hs).clone()),
@@ -2719,19 +3060,49 @@ fn run_start() -> Result<()> {
                                             // why a permanently-repeating, permanently-unanswered
                                             // request for the same range was invisible until read
                                             // by hand from the source.
+                                            // 2026-08-27 (happysrv 45k-block freeze): every arm
+                                            // below logs, and on a frozen node NONE of them ever
+                                            // fired — 449 requests produced no success, no empty
+                                            // response, no decode error and no send error. The only
+                                            // shape that fits is a future that never completes, so
+                                            // the await itself is now bounded and the "still
+                                            // pending" case is reported like any other outcome.
+                                            // A hang that looks identical to silence is the reason
+                                            // this took a whole session to corner.
+                                            const RR_TIMEOUT: std::time::Duration =
+                                                std::time::Duration::from_secs(30);
                                             match serde_json::to_vec(&req) {
-                                                Ok(payload) => match mgr2.send_request(peer, payload).await {
-                                                    Ok(bytes) => match bincode::deserialize::<BackfillResp>(&bytes) {
+                                                Ok(payload) => {
+                                                    let t0 = std::time::Instant::now();
+                                                    eprintln!("→ rr-backfill(peer-heights): send_request [{req_from}..={req_to}) to {peer} …");
+                                                    match tokio::time::timeout(RR_TIMEOUT, mgr2.send_request(peer, payload)).await {
+                                                    Err(_elapsed) => eprintln!(
+                                                        "⏳ rr-backfill(peer-heights): send_request for [{req_from}..={req_to}) to {peer} NEVER COMPLETED within {}s — the request_response future is hanging, not failing",
+                                                        RR_TIMEOUT.as_secs()),
+                                                    Ok(inner) => match inner {
+                                                    Ok(bytes) => {
+                                                        // Shape of what came back, before trusting it:
+                                                        // a headers payload starts 'H'/'Z' and would
+                                                        // fail a BackfillResp decode, which is a very
+                                                        // different bug from an empty block list.
+                                                        eprintln!("← rr-backfill(peer-heights): {} B in {} ms for [{req_from}..={req_to}) from {peer} (first byte {:?})",
+                                                            bytes.len(), t0.elapsed().as_millis(), bytes.first().map(|b| *b as char));
+                                                        match bincode::deserialize::<BackfillResp>(&bytes) {
                                                         Ok(resp) => {
                                                             if resp.blocks.is_empty() {
                                                                 eprintln!("⚠ rr-backfill(peer-heights): peer {peer} returned an EMPTY response for [{req_from}..={req_to}) — the repeating-request-no-progress symptom");
+                                                            } else {
+                                                                eprintln!("✅ rr-backfill(peer-heights): {} blocks for [{req_from}..={req_to}) from {peer}", resp.blocks.len());
                                                             }
                                                             let _ = bf_tx2.send(resp.blocks).await;
                                                         }
                                                         Err(e) => eprintln!("⚠ rr-backfill(peer-heights): decode failed for [{req_from}..={req_to}) from {peer}: {e}"),
-                                                    },
+                                                        }
+                                                    }
                                                     Err(e) => eprintln!("⚠ rr-backfill(peer-heights): send_request failed for [{req_from}..={req_to}) to {peer}: {e}"),
-                                                },
+                                                    },
+                                                    }
+                                                }
                                                 Err(e) => eprintln!("⚠ rr-backfill(peer-heights): request serialize failed: {e}"),
                                             }
                                         });
@@ -3580,7 +3951,19 @@ struct TopologyStats {
     window_incomplete: u64,
     logged_insufficient_once: bool,
     logged_incomplete_once: bool,
+    /// `matched` at the last heartbeat, so the heartbeat can report a RATE and,
+    /// crucially, notice when the number has stopped moving.
+    last_beat_matched: u64,
+    last_beat_at: Option<std::time::Instant>,
+    /// Observations parked awaiting a resident window, and ones lost to queue overflow —
+    /// reported so a coverage gap is stated rather than hidden.
+    pending_deferred: usize,
+    dropped_deferred: u64,
 }
+
+/// How often the verification heartbeat prints. Long enough not to be noise, short
+/// enough that an operator watching a node notices a stall within a minute.
+const TOPOLOGY_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl TopologyStats {
     fn record(&mut self, v: TopoVerdict) {
@@ -3590,6 +3973,57 @@ impl TopologyStats {
             TopoVerdict::InsufficientHistory => self.insufficient_history += 1,
             TopoVerdict::NoWindowYet => self.no_window_yet += 1,
             TopoVerdict::WindowIncomplete => self.window_incomplete += 1,
+        }
+    }
+
+    /// **Positive confirmation that cross-node integrity checking is actually running.**
+    ///
+    /// Before this existed, QTFT logged a line only on MISMATCH, and the counters were
+    /// printed only inside that same branch. So a clean log was indistinguishable from a
+    /// check that never compared a single block — and on a real follower synced against
+    /// the live producer for 20 minutes (2026-08-27), that is exactly what it looked
+    /// like: three one-time notices, zero comparisons, no way to tell which.
+    ///
+    /// Silence is not evidence. A verifier that only speaks when it fails cannot be
+    /// distinguished from a verifier that is not running, which makes it worth nothing as
+    /// an integrity guarantee. This prints the counters on a timer whether or not anything
+    /// is wrong, and says plainly when NOTHING is being verified.
+    fn heartbeat_with_deferred(&mut self, enforcing: bool, parked: usize, dropped: u64) {
+        self.pending_deferred = parked;
+        self.dropped_deferred = dropped;
+        self.heartbeat(enforcing);
+    }
+
+    fn heartbeat(&mut self, enforcing: bool) {
+        let now = std::time::Instant::now();
+        match self.last_beat_at {
+            Some(t) if now.duration_since(t) < TOPOLOGY_HEARTBEAT => return,
+            _ => {}
+        }
+        self.last_beat_at = Some(now);
+        let delta = self.matched.saturating_sub(self.last_beat_matched);
+        self.last_beat_matched = self.matched;
+
+        let total_skipped = self.insufficient_history + self.no_window_yet + self.window_incomplete;
+        if self.matched == 0 && self.mismatched == 0 {
+            eprintln!(
+                "🧶⚠ QTFT: NOT VERIFYING — 0 blocks compared so far ({total_skipped} skipped: \
+                 {} insufficient-history / {} no-window / {} window-incomplete; \
+                 {} deferred awaiting a resident window, {} lost to overflow). \
+                 A clean log here means nothing until this number moves.",
+                self.insufficient_history, self.no_window_yet, self.window_incomplete,
+                self.pending_deferred, self.dropped_deferred
+            );
+        } else {
+            eprintln!(
+                "🧶 QTFT verified: {} matched (+{delta}/min) · {} MISMATCHED · {total_skipped} skipped \
+                 · {} deferred pending · {} lost · mode={}",
+                self.matched,
+                self.mismatched,
+                self.pending_deferred,
+                self.dropped_deferred,
+                if enforcing { "enforce" } else { "observe-only" }
+            );
         }
     }
 }
@@ -3674,6 +4108,20 @@ impl PeerProducerAffinity {
 /// incomplete relative to what the producer saw, which would manufacture
 /// false mismatches against perfectly honest peers — so it reports
 /// `InsufficientHistory` instead of guessing.
+/// Verify a commitment against its window, with NO live-witness gate.
+///
+/// This is the half of `verify_topology_on_receipt` that does the actual work. It is split out
+/// because deferred verification (`DeferredTopology`) replays observations recorded long ago:
+/// the "have I witnessed enough live blocks yet" question was answered when the block first
+/// arrived, and asking it again at replay time would permanently reject exactly the historical
+/// blocks this path exists to check.
+fn verify_topology_window(braid: &Braid, height: u64, claimed: Option<[u8; 32]>) -> TopoVerdict {
+    if height == 0 {
+        return TopoVerdict::NoWindowYet;
+    }
+    verify_topology_inner(braid, height, claimed)
+}
+
 fn verify_topology_on_receipt(
     braid: &Braid,
     height: u64,
@@ -3686,6 +4134,10 @@ fn verify_topology_on_receipt(
     if blocks_witnessed_live < TOPOLOGY_COMMITMENT_WINDOW + TOPOLOGY_VERIFY_HISTORY_MARGIN {
         return TopoVerdict::InsufficientHistory;
     }
+    verify_topology_inner(braid, height, claimed)
+}
+
+fn verify_topology_inner(braid: &Braid, height: u64, claimed: Option<[u8; 32]>) -> TopoVerdict {
     // Check window completeness directly rather than trusting
     // `blocks_witnessed_live` as a proxy for it — a node that caught up via
     // bulk backfill can cross the live-witness threshold while its window

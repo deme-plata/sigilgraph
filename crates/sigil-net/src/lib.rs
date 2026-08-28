@@ -57,6 +57,16 @@ pub const TOPIC_TXS: &str = "/sigil/g1/txs";
 /// `sigil-updater` broadcasts `ReleaseAnnouncement` JSON on this topic.
 pub const TOPIC_RELEASE: &str = "/sigil/g1/release";
 
+/// Phase 2 of SIGIL True Instant Finality: signed `FinalityVote`s from the
+/// configured validator committee.
+///
+/// This topic is PURELY OBSERVATIONAL in Phase 2 — nothing published here
+/// reaches `Braid::insert()`, block production, or fork choice. A node with
+/// no committee configured subscribes and ignores every message, exactly as
+/// it does for any topic it has no use for. Gating consensus on these votes
+/// is Phase 3, behind an opt-in flag, isolated testnet first.
+pub const TOPIC_FINALITY_VOTES: &str = "/sigil/g1/finality-votes";
+
 /// All SIGIL topics, in the order a freshly-booted node should subscribe.
 /// Subscribing to blocks before tip-proofs would mean accepting block-data
 /// from peers whose tips we haven't verified yet — the verify-before-sync
@@ -67,6 +77,10 @@ pub const ALL_TOPICS: &[&str] = &[
     TOPIC_RELEASE,
     TOPIC_BLOCKS,
     TOPIC_TXS,
+    // Last deliberately: finality votes are observational in Phase 2 and
+    // must never delay subscribing to the topics sync correctness depends
+    // on (see `tip_proofs_subscribed_before_blocks`).
+    TOPIC_FINALITY_VOTES,
 ];
 
 // ── Default ports ───────────────────────────────────────────────────────────

@@ -1,5 +1,8 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { createPortal } from 'react-dom';
+import { sha3_256 } from '@noble/hashes/sha3';
+import { keypairFromMnemonic, storeWallet, walletSession } from './services/walletAuth';
+import { qnkAPI } from './services/api';
 import LoginScreen from './components/LoginScreen';
 import Dashboard from './components/Dashboard';
 import SigilDexScreen from './components/SigilDexScreen';
@@ -13,6 +16,7 @@ import AnimatedBorder from './components/AnimatedBorder';
 import OAuthConsentPage from './components/OAuthConsentPage';
 import MinerLoginPage from './components/MinerLoginPage';
 import POSMode from './components/POSMode';
+import DagKnightManifold from './components/DagKnightManifold';
 import { sseManager } from './services/sseManager';
 import IncomingMemoModal from './components/IncomingMemoModal';
 import SendModal from './components/SendModal';
@@ -149,6 +153,89 @@ function App() {
     console.log('🔐 Initializing authenticated state:', saved);
     return saved === 'true';
   });
+  // v-next: Deep-link auto-login from sigilgraph.org's landing-page wallet
+  // generator ("Try SIGIL, right here"). That page derives a wallet with the
+  // EXACT same scheme as keypairFromMnemonic() below (sha3_256(phrase) ->
+  // ed25519 keypair) and its "Open Wallet ↗" button links here as
+  // `#import=<url-encoded phrase>`. Without this, that link just opened a
+  // blank login screen — the visitor's freshly-generated wallet was real but
+  // they landed logged out, with no way in except re-typing the phrase by
+  // hand (which the login form rejects anyway — it requires a 12/24-word
+  // BIP39 phrase, and the landing page's phrase is a 6-word non-BIP39 one).
+  // This consumes the fragment once, derives the SAME address, imports/
+  // registers it against the API (idempotent — same call the manual
+  // "Authenticate" flow makes), and logs straight into the Dashboard.
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (!hash.startsWith('#import=')) return;
+    const phrase = decodeURIComponent(hash.slice('#import='.length)).trim();
+
+    // Strip the phrase out of the URL immediately, whether or not the
+    // auto-login below succeeds — it must not linger in history/bookmarks.
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    if (!phrase) return;
+
+    (async () => {
+      try {
+        // Deterministic, phrase-derived password — same "never shown, never
+        // typed" pattern as handleMetaMaskLogin's autoPassword, so the user
+        // isn't asked to invent a password for a wallet they just made.
+        const pwSeed = sha3_256(new TextEncoder().encode('sigilgraph-landing-import|' + phrase));
+        const autoPassword = 'lp_' + Array.from(pwSeed.slice(0, 16))
+          .map((b) => b.toString(16).padStart(2, '0'))
+          .join('');
+
+        const keyPair = await keypairFromMnemonic(phrase);
+
+        // Best-effort server-side registration only — NOT a precondition for
+        // login. A SIGIL address is just a keypair (the landing page already
+        // proves this: it reads /v1/balance for a freshly-derived address
+        // with no prior "import" call), so this must not block auto-login if
+        // the wallet API is unreachable. It has been, in practice: sigil-rpcd
+        // (the backend this vhost's /v1 proxies to) has been down since
+        // 2026-08-17, which means right now this call — and therefore the
+        // EXISTING manual "Authenticate" tab in LoginScreen, which throws
+        // hard on this same call — both fail for every visitor, not just
+        // this deep link. Surfaced separately; not silently worked around
+        // beyond making this specific path resilient to it.
+        let apiWalletId = '';
+        try {
+          const response = await qnkAPI.createWallet(phrase, autoPassword);
+          if (response.success && response.data) {
+            apiWalletId = response.data.id;
+          } else {
+            console.warn('⚠️ [Landing import] Wallet API import did not succeed — continuing with a local-only session:', response.error);
+          }
+        } catch (apiErr) {
+          console.warn('⚠️ [Landing import] Wallet API unreachable — continuing with a local-only session:', apiErr);
+        }
+
+        localStorage.setItem('walletAddress', keyPair.address);
+        if (apiWalletId) localStorage.setItem('walletId', apiWalletId);
+        localStorage.removeItem('cachedBalance');
+        localStorage.removeItem('cachedQugusdBalance');
+        localStorage.removeItem('walletBalanceHistory');
+
+        const wallet = await storeWallet(phrase, autoPassword, true, true, true);
+        walletSession.setSession(
+          wallet.privateKey,
+          wallet.address,
+          phrase,
+          wallet.dilithium5SecretKey,
+          wallet.dilithium5PublicKey
+        );
+
+        console.log('✅ [Landing import] Auto-logged into wallet generated on sigilgraph.org');
+        setAuthenticated(true);
+      } catch (err) {
+        // Fails open onto the normal LoginScreen — the phrase is already
+        // gone from the URL, and the user's testnet balance is never at
+        // risk (it's a throwaway "try it" wallet either way).
+        console.error('❌ [Landing import] Auto-login failed:', err);
+      }
+    })();
+  }, []);
+
   const [currentScreen, setCurrentScreen] = useState<Screen>(() => {
     console.log('🎬 Initializing currentScreen to dashboard');
     return 'dashboard';
@@ -202,6 +289,24 @@ function App() {
   // Bounty modal — opened by TopBar/GlobalTopBar button via custom event
   const [showBountyModal, setShowBountyModal] = useState(false);
   const [showBountySite, setShowBountySite] = useState(false);
+
+  // Mobile Send modal (SendModal.tsx) — replaces the full-screen send for the
+  // quick coin-send action; the full TransactionScreenV2 stays reachable via
+  // nav. PRE-EXISTING BUG FIX: this hook used to live below the `if
+  // (!authenticated) return <LoginScreen/>` early return (~line 1000), so it
+  // was only ever called once authenticated became true within an already-
+  // mounted App — a live LoginScreen->Dashboard transition then called one
+  // more hook than the previous render did, which is a Rules-of-Hooks
+  // violation (React error #310, "Rendered more hooks than during the
+  // previous render"), crashing the whole app into its ErrorBoundary right
+  // at the moment login succeeds. This went unnoticed because a fresh page
+  // load with `authenticated` already true in localStorage never exercises
+  // the transition (hooks are consistent from the first render), and no
+  // *live* transition happened for days while the wallet API backend this
+  // login flow depends on was down. Moved here so the hook is called
+  // unconditionally on every render, like every other hook in this
+  // component must be.
+  const [showSendModal, setShowSendModal] = useState(false);
   useEffect(() => {
     const handler = () => setShowBountyModal(true);
     window.addEventListener('open-bounty-modal', handler);
@@ -855,6 +960,12 @@ function App() {
     );
   }
 
+  // 2026-08-21: DagKnight manifold — the BlockDAG braid as a Lorentzian
+  // 4-manifold, live GHOSTDAG blue/red coloring. Public, no wallet needed.
+  if (window.location.pathname.includes('/dagknight')) {
+    return <DagKnightManifold />;
+  }
+
   // v7.3.0: OAuth2 consent page intercept — render standalone consent page
   // when URL path is /oauth/consent (redirected from /api/v1/oauth2/authorize)
   if (window.location.pathname === '/oauth/consent') {
@@ -910,10 +1021,6 @@ function App() {
     // Store selected token in localStorage for DEX to pick up
     localStorage.setItem('selectedToken', JSON.stringify(token));
   };
-
-  // Mobile Send modal (SendModal.tsx) — replaces the full-screen send for the
-  // quick coin-send action; the full TransactionScreenV2 stays reachable via nav.
-  const [showSendModal, setShowSendModal] = useState(false);
 
   // Handle coin send click - open the Send modal with the pre-selected coin
   const handleCoinSendClick = (coinSymbol: string) => {

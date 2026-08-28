@@ -24,7 +24,7 @@ repository = "https://github.com/flux-lang/sigil"
 # trigger extra rebuilds, only feature-set changes do.
 [workspace.dependencies]
 # Serde / JSON
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 
 # Error handling

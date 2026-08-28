@@ -330,7 +330,7 @@ mod tests {
         // ── build + log a real 500-block chain (heights 0..=499) ──
         let mut log = ChainLog::open(&dir).unwrap();
         let mut chain = ChainTip::new();
-        let genesis = crate::build_genesis().expect("genesis builds");
+        let genesis = crate::genesis::build_genesis().expect("genesis builds");
         log.append(&genesis).unwrap();
         chain.apply(genesis).expect("genesis applies");
         let mut snap_height_saved: Option<u64> = None;
@@ -340,7 +340,7 @@ mod tests {
             // 5th arg = `solve: Option<&AcceptedSolve>` — added by 44ae98e
             // (mining on the braid). `None` = mint without a PoW solve, which is
             // what this snapshot/replay-equivalence test wants.
-            let (b, _included_tx_hashes) = crate::mint_next_block(&chain, vec![], &[], None, None, None).expect("mint");
+            let (b, _included_tx_hashes) = crate::mint::mint_next_block(&chain, vec![], &[], None, None, None, None).expect("mint");
             log.append(&b).unwrap();
             chain.apply(b).expect("block applies");
             // snapshot at H=400 (tip header height 400, 401 blocks applied)
@@ -399,8 +399,8 @@ mod tests {
         }
         // state-level spot check beyond the roots: demo wallet balance survives
         assert_eq!(
-            restored.state_snapshot().balance_of(&crate::DEMO_WALLET, &[0u8; 32]),
-            full.state_snapshot().balance_of(&crate::DEMO_WALLET, &[0u8; 32]),
+            restored.state_snapshot().balance_of(&crate::genesis::DEMO_WALLET, &[0u8; 32]),
+            full.state_snapshot().balance_of(&crate::genesis::DEMO_WALLET, &[0u8; 32]),
         );
 
         let metrics = format!(
@@ -425,7 +425,7 @@ mod tests {
             .join(format!("sigil-state-snap-corrupt-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut chain = ChainTip::new();
-        chain.apply(crate::build_genesis().unwrap()).unwrap();
+        chain.apply(crate::genesis::build_genesis().unwrap()).unwrap();
         let snap = StateSnapshot::capture(&chain).unwrap();
         save_state(&snap, &dir).unwrap();
         assert!(load_state(&dir).is_some(), "pristine snapshot loads");
@@ -452,7 +452,7 @@ mod tests {
             .join(format!("sigil-snap-sqisign-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut chain = ChainTip::new();
-        chain.apply(crate::build_genesis().unwrap()).unwrap();
+        chain.apply(crate::genesis::build_genesis().unwrap()).unwrap();
         let snap = StateSnapshot::capture(&chain).unwrap();
         save_state(&snap, &dir).unwrap();
         assert!(load_state(&dir).is_some(), "pristine signed snapshot loads");

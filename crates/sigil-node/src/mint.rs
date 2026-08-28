@@ -31,6 +31,40 @@ use crate::chain::ChainTip;
 /// the caller's DAG braid (see `crate::dag`) — a block can't be minted without
 /// knowing its DAG parents, which is why this function and `dag::dag_build_frontier`
 /// always get ported/called together.
+
+/// Sub-phase profiling for [`mint_next_block`] (2026-08-27).
+///
+/// Measured live that day: the produce loop spends ~193ms/block, of which
+/// `mint` is 115ms — 60% of the budget — and it was an unattributed lump. Two
+/// plausible causes were checked and ELIMINATED first, which is why this exists
+/// rather than a guess: the four state roots are O(1) incremental
+/// (`sigil-state/src/lib.rs:181,194`), and producer signing is a no-op on the
+/// live producer (`SIGIL_PRODUCER_SIGNING_SEED_HEX` unset).
+///
+/// Atomics rather than a return-value change on purpose: `mint_next_block` is
+/// shared with `sigil-top`'s `producer` feature and driven by
+/// `sigil-chronos::frontier_memo`. Changing its signature would break both.
+pub mod prof {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    /// `chain.state_snapshot()` — a FULL `SigilState::clone()` per block.
+    pub static SNAPSHOT_US: AtomicU64 = AtomicU64::new(0);
+    /// `coinbase::build_block_body_for_shares` — coinbase mutations + roots.
+    pub static BODY_US: AtomicU64 = AtomicU64::new(0);
+    /// BLAKE3 over included tx intent hashes.
+    pub static TXROOT_US: AtomicU64 = AtomicU64::new(0);
+    /// Header assembly incl. the vdf_input BLAKE3 and producer signing.
+    pub static HEADER_US: AtomicU64 = AtomicU64::new(0);
+    /// Calls, so the reader can average.
+    pub static CALLS: AtomicU64 = AtomicU64::new(0);
+
+    pub fn add(c: &AtomicU64, t: std::time::Instant) { c.fetch_add(t.elapsed().as_micros() as u64, Relaxed); }
+    /// `(snapshot, body, txroot, header, calls)` in microseconds, cumulative.
+    pub fn read() -> (u64, u64, u64, u64, u64) {
+        (SNAPSHOT_US.load(Relaxed), BODY_US.load(Relaxed), TXROOT_US.load(Relaxed),
+         HEADER_US.load(Relaxed), CALLS.load(Relaxed))
+    }
+}
+
 pub fn mint_next_block(
     chain: &ChainTip,
     merge_parents: Vec<BlockHash>,
@@ -71,7 +105,11 @@ pub fn mint_next_block(
     // adaptive controller (if live) supplies the exact amount; else the height
     // schedule. Sends flow through apply_tx → real balance moves on the braid.
     let coinbase_on = std::env::var("SIGIL_COINBASE").map(|v| v != "0").unwrap_or(true);
+    // PROFILE: this is a full SigilState::clone() — every wallet balance, the
+    // whole shielded pool, DEX and contract state — copied per block.
+    let _t = std::time::Instant::now();
     let state = chain.state_snapshot();
+    prof::add(&prof::SNAPSHOT_US, _t);
     let reward = if coinbase_on { reward_override } else { Some(0u128) };
     // Mined block → the reward is split over the verified solves for this
     // height (pool-share economics: dev-fee + commons + proportional payout,
@@ -108,16 +146,21 @@ pub fn mint_next_block(
             }
         }
     };
+    let _t = std::time::Instant::now();
     let (transition, roots, block_events, included_txs) =
         crate::coinbase::build_block_body_for_shares(&state, height, reward, txs, winner, &shares);
+    prof::add(&prof::BODY_US, _t);
     // Commit the verify-once txs: a sequential BLAKE3 root over their intent
     // hashes + the count. The signatures were verified ONCE at mempool ingest;
     // the producer-sig over this header binds the producer to this exact set.
+    let _t = std::time::Instant::now();
     let txs_root = {
         let mut th = blake3::Hasher::new();
         for t in &included_txs { th.update(&t.tx.hash()); }
         *th.finalize().as_bytes()
     };
+    prof::add(&prof::TXROOT_US, _t);
+    let _t_header = std::time::Instant::now();
 
     let mut header = SigilBlockHeaderV0 {
         version: HEADER_VERSION,
@@ -201,5 +244,7 @@ pub fn mint_next_block(
     // confirmed on the settled spine — not at mint time, when it's still
     // just one of possibly several competing candidates at this height.
     let included_tx_hashes: Vec<[u8; 32]> = included_txs.iter().map(|t| t.tx.hash()).collect();
+    prof::add(&prof::HEADER_US, _t_header);
+    prof::CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok((Block { header, transition, events: block_events }, included_tx_hashes))
 }

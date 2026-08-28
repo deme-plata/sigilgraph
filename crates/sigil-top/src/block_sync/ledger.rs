@@ -134,7 +134,10 @@ fn sync_cycle(db: &flux_db::Database) {
                 info.break_note = Some("undecodable header in batch".into());
                 break;
             };
-            if h.precheck().is_err() {
+            // 2026-08-20: verify_at_height — same upgrade as chain_verify.rs
+            // (real Ed25519Hot signature check once activated; a pure no-op
+            // below the activation height or for any other scheme).
+            if h.verify_at_height(h.height).is_err() {
                 info.break_note = Some(format!("precheck failed at #{}", h.height));
                 break;
             }

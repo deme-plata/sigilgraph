@@ -443,3 +443,173 @@ pub fn topology_commit_hash(
     }
     Some(*h.finalize().as_bytes())
 }
+
+/// How many unverified `(height, commitment)` observations may be parked at once.
+///
+/// A follower can sit thousands of blocks behind, and every one of those blocks arrives with a
+/// commitment we cannot check yet, so this must be generous — but it is still RAM, so it is
+/// bounded and the eviction is counted rather than silent.
+pub const DEFERRED_TOPOLOGY_CAP: usize = 8192;
+
+/// How many parked observations are retried per drain call. Verification recomputes an
+/// Alexander polynomial over a 32-block window, so draining thousands in one tick would stall
+/// the loop; a small batch per tick catches up steadily without a latency spike.
+pub const DEFERRED_TOPOLOGY_BATCH: usize = 16;
+
+/// **Deferred cross-node topology verification.**
+///
+/// # The problem this exists to fix
+///
+/// `verify_topology_on_receipt` can only check a block whose committed window
+/// `[h-32, h-1]` is fully RESIDENT locally. A node that is behind is applying blocks around
+/// `tip - lag` while live blocks arrive at `tip`, so the window a live block commits to sits at
+/// a height it has not reached — every block returns `WindowIncomplete` and the observation was
+/// **thrown away**.
+///
+/// Measured on a real follower against the live chain on 2026-08-27: **0 of 2,865 blocks
+/// verified**, 2,825 of them discarded as `WindowIncomplete`. Verification was structurally
+/// unreachable for any node that was not already at the tip — which is every node that is
+/// syncing, i.e. exactly when you most want the check.
+///
+/// # The fix: defer, do not discard
+///
+/// A commitment is a claim about a FIXED window of history. It does not decay, and it does not
+/// have to be checked the instant the block arrives — it only has to be checked eventually,
+/// against the same window. So park `(height, claimed)` and retry as the braid fills in behind.
+/// A catching-up node then verifies history with a lag instead of verifying nothing at all.
+///
+/// Nothing here weakens the check: the same window, the same recomputation, the same verdict.
+/// The only thing that changes is *when* it happens. Enforcement is deliberately NOT wired to
+/// this path — by the time a deferred block verifies it is long since admitted, so a late
+/// mismatch is an alarm to raise, not a block to reject.
+#[derive(Debug, Default)]
+pub struct DeferredTopology {
+    /// height → the commitment that block claimed. `BTreeMap` so draining is oldest-first,
+    /// which matches the order the braid backfills.
+    parked: BTreeMap<u64, [u8; 32]>,
+    /// Observations dropped because the queue was full. Surfaced so a coverage gap is
+    /// reported rather than silently pretended away.
+    pub dropped_unverified: u64,
+}
+
+impl DeferredTopology {
+    /// Park an observation we could not check yet. Oldest-first eviction on overflow: the
+    /// oldest parked height is the one whose window is least likely to ever become resident on
+    /// a node that is pruning behind itself.
+    pub fn park(&mut self, height: u64, claimed: [u8; 32]) {
+        self.parked.insert(height, claimed);
+        while self.parked.len() > DEFERRED_TOPOLOGY_CAP {
+            if let Some(&oldest) = self.parked.keys().next() {
+                self.parked.remove(&oldest);
+                self.dropped_unverified = self.dropped_unverified.saturating_add(1);
+            } else {
+                break;
+            }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.parked.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.parked.is_empty()
+    }
+
+    /// Retry up to [`DEFERRED_TOPOLOGY_BATCH`] parked observations against the braid as it
+    /// stands now, oldest first. Returns `(height, verdict)` for each one that produced a real
+    /// verdict; anything still `WindowIncomplete` stays parked for a later call.
+    ///
+    /// `verify` is passed in rather than called directly so this stays free of `main.rs` and
+    /// testable on its own.
+    pub fn drain_ready<V, F>(&mut self, mut verify: F) -> Vec<(u64, V)>
+    where
+        F: FnMut(u64, [u8; 32]) -> Option<V>,
+    {
+        let candidates: Vec<(u64, [u8; 32])> = self
+            .parked
+            .iter()
+            .take(DEFERRED_TOPOLOGY_BATCH)
+            .map(|(h, c)| (*h, *c))
+            .collect();
+
+        let mut out = Vec::new();
+        for (height, claimed) in candidates {
+            // `None` means "still not resident" — leave it parked and try again later.
+            // `Some(v)` is a settled outcome for this height, so the observation retires.
+            if let Some(v) = verify(height, claimed) {
+                self.parked.remove(&height);
+                out.push((height, v));
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod deferred_topology_tests {
+    use super::*;
+
+    /// The whole point: an observation that cannot be checked on arrival must survive to be
+    /// checked later, rather than being discarded as it was before 2026-08-27.
+    #[test]
+    fn an_unverifiable_observation_is_kept_and_verified_once_the_window_arrives() {
+        let mut d = DeferredTopology::default();
+        d.park(100, [0xAA; 32]);
+        assert_eq!(d.len(), 1);
+
+        // First retry: the window is still missing, so it must STAY parked.
+        let out: Vec<(u64, &str)> = d.drain_ready(|_, _| None);
+        assert!(out.is_empty(), "an incomplete window must not resolve the observation");
+        assert_eq!(d.len(), 1, "the observation must survive to be retried");
+
+        // The braid has since backfilled — now it verifies, and leaves the queue.
+        let out = d.drain_ready(|h, c| {
+            assert_eq!((h, c), (100, [0xAA; 32]), "the ORIGINAL claim must be replayed verbatim");
+            Some("match")
+        });
+        assert_eq!(out, vec![(100, "match")]);
+        assert!(d.is_empty());
+    }
+
+    /// A late MISMATCH must still be reported, not swallowed — a divergent producer found
+    /// thirty seconds late is still a divergent producer.
+    #[test]
+    fn a_late_mismatch_is_still_surfaced() {
+        let mut d = DeferredTopology::default();
+        d.park(7, [0xBB; 32]);
+        let out = d.drain_ready(|_, _| Some("mismatch"));
+        assert_eq!(out, vec![(7, "mismatch")]);
+        assert!(d.is_empty(), "a resolved observation must not be retried forever");
+    }
+
+    /// Overflow must be COUNTED, not silent. A dropped observation is a hole in coverage, and
+    /// a verifier that hides its holes is the failure mode this whole change exists to remove.
+    #[test]
+    fn overflow_evicts_oldest_first_and_counts_the_loss() {
+        let mut d = DeferredTopology::default();
+        for h in 0..(DEFERRED_TOPOLOGY_CAP as u64 + 5) {
+            d.park(h, [0xCC; 32]);
+        }
+        assert_eq!(d.len(), DEFERRED_TOPOLOGY_CAP);
+        assert_eq!(d.dropped_unverified, 5, "every dropped observation must be counted");
+        // Oldest went first: height 0..5 are gone, the newest survive.
+        let out = d.drain_ready(|h, _| {
+            assert!(h >= 5, "eviction must take the OLDEST heights, not arbitrary ones");
+            Some(())
+        });
+        assert!(!out.is_empty());
+    }
+
+    /// Draining is batched so a node with thousands parked cannot stall its own event loop.
+    #[test]
+    fn a_drain_is_bounded_per_call() {
+        let mut d = DeferredTopology::default();
+        for h in 0..1000 {
+            d.park(h, [0xDD; 32]);
+        }
+        let out = d.drain_ready(|_, _| Some(()));
+        assert_eq!(out.len(), DEFERRED_TOPOLOGY_BATCH);
+        assert_eq!(d.len(), 1000 - DEFERRED_TOPOLOGY_BATCH);
+    }
+}

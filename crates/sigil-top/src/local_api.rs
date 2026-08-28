@@ -106,10 +106,36 @@ impl LocalApi {
             // GET /api/v1/use-wallet?address=<64hex> → the [W] wallet claims "mine to ME",
             // so mined coins land in the keyed wallet the operator actually sees (not the
             // unspendable hostname-hash default). Takes effect on the next mining (re)start.
+            //
+            // 2026-08-26: this used to echo the JUST-CHOSEN address back as `mining_wallet`
+            // unconditionally — true only when no higher-priority source is set. Per
+            // `resolve_mine_wallet`'s real precedence (`SIGIL_MINE_SEED` > `SIGIL_MINE_WALLET`
+            // > this choice > hostname hash), a `SIGIL_MINE_SEED` left set from an earlier
+            // session silently keeps crediting THAT wallet — the operator picks a brand new
+            // wallet here, sees `{"ok":true, mining_wallet: <new address>}`, and watches its
+            // balance sit at zero forever while real rewards land somewhere they never look.
+            // Now re-resolves the REAL effective wallet after the write and reports the
+            // truth, naming exactly which override is shadowing the chosen address.
             "/api/v1/use-wallet" => {
                 match qparam(query, "address") {
-                    Some(addr) if crate::set_mine_wallet(&addr) =>
-                        Some(format!(r#"{{"ok":true,"mining_wallet":"{}"}}"#, addr.trim())),
+                    Some(addr) if crate::set_mine_wallet(&addr) => {
+                        let chosen = addr.trim().to_string();
+                        let effective = crate::miner_wallet();
+                        if effective == chosen {
+                            Some(format!(r#"{{"ok":true,"mining_wallet":"{chosen}"}}"#))
+                        } else {
+                            let shadowed_by = if std::env::var("SIGIL_MINE_SEED").is_ok() {
+                                "SIGIL_MINE_SEED"
+                            } else if std::env::var("SIGIL_MINE_WALLET").is_ok() {
+                                "SIGIL_MINE_WALLET"
+                            } else {
+                                "unknown"
+                            };
+                            Some(format!(
+                                r#"{{"ok":true,"chosen":"{chosen}","mining_wallet":"{effective}","warning":"mining will still credit {effective}, not {chosen} — {shadowed_by} is set and takes priority; unset it (or set it to this wallet's own seed) for rewards to land here"}}"#
+                            ))
+                        }
+                    }
                     _ => Some(r#"{"ok":false,"error":"address must be 64 hex chars"}"#.to_string()),
                 }
             }

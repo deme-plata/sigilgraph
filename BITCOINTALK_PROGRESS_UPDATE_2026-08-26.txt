@@ -1,0 +1,61 @@
+Post as a REPLY in the existing thread (topic=5588877), not an OP rewrite. BTT convention for
+ANN threads is dated progress-update replies; the OP stays as the pitch, updates stay as a trail.
+
+=====
+
+[b][size=13pt]Progress update — 2026-08-26[/size][/b]
+
+[size=9pt][i]Still testnet. Still single-producer. Nothing below changes the honest-status section of the OP — it's an update on what shipped, not a decentralization claim.[/i][/size]
+
+Since the OP (v7.0.4) the chain has kept running and taken a real hardening pass. Headline items, each with a verification you can check yourself, not a status update to take on faith:
+
+[list]
+[*][b]Current release: sigil-top v7.1.85[/b] (was v7.0.4 in the OP — the manifest below is content-addressed, same verify flow as before).
+[*][b]The hand-rolled RPC backend (sigil-rpcd) was retired outright[/b] rather than patched. It had quietly drifted from the real chain state — at the point we measured it, its reported supply was off by more than 20× from the real node. Two money backends that can disagree is worse than one backend, so the old one is gone, not reconciled.
+[*][b]Fresh-genesis full sync dropped from hours to ~8 seconds.[/b] Root cause was two stacked bugs in the p2p sync path (a timeout mismatch and an undetected wedged substream) — not the local commit pipeline, which was never the bottleneck. Verified on a clean re-run, not benchmarked in isolation.
+[*][b]A real mainnet-relevant sync-down class of bug was found and closed[/b] on the node's deep-catchup path (pending-set overflow that could stall a node mid-sync), along with a snapshot-boot bug that made every node restart replay 3.5–35 minutes of chain instead of loading the snapshot (now ~5 seconds).
+[*][b]A second, mirror-image version of the sync-path bug was found and closed this week[/b] on the responder side: the earlier fix only recovered a node's own stuck outbound requests, not a stuck inbound response path. Found live on a second experimental node that was serving backfill and silently failing ~98% of it with no recovery — now torn down and reconnected automatically past a failure threshold, same as the client-side fix.
+[*][b]A real peer-map UI now exists[/b] and shows genuine node telemetry (peer count, mesh health, fan-out) instead of only what your own browser tab can see, with an honest fallback badge if the backend can't be reached.
+[/list]
+
+None of that changes the "what we are NOT claiming" section — block-apply producer-signature enforcement, the trustless VDF modulus, and peer-sync ingress auth are still on the named hardening backlog, still not shipped. This update is about what closed, not about declaring the list done.
+
+[b][size=12pt]Full project report — expanded[/size][/b]
+
+We wrote up the last twelve weeks as a proper project report — phase plan, Gantt chart, a risk register (including the backend split and the sync-throughput bug above, reported honestly as things that broke and got fixed, not smoothed over), and a SWOT. It's grown since the first draft of this update; two additions worth flagging specifically:
+
+[list]
+[*]A section on [b]sigil-shield[/b] — SIGIL ships shielded-by-default, not opt-in: transparent peer-to-peer sends are retired at the protocol level from genesis. Sender anonymity uses a post-quantum linkable ring signature, and the detail we think is genuinely underappreciated: the anonymity-set root lives inside the same structurally-committed state root every block header carries. That means mining isn't just securing throughput — every block a miner produces mechanically deepens the anonymity set everyone else's privacy depends on.
+[*]A real accounting of [b]the live fee architecture[/b] — the 5% creator fee and 1.2% commons split are not roadmap items, they're basis-point constants in the coinbase split, unit-tested and running on every block since genesis. Same model as Quillon Graph's, run a second time. The report also covers sigil-bank's credit vault, the DEX fee, and the emission controller's actual monetary-policy design (a PID-style target-seeking supply curve, not just a fixed halving schedule).
+[/list]
+
+Every number in the report is pulled from git history or a live query against the running node at write time, not recalled from memory.
+
+[code]wget https://sigilgraph.fluxapp.xyz/downloads/sigil-project-report.pdf[/code]
+
+[b][size=12pt]Updated verify walkthrough[/size][/b]
+
+[code]wget https://sigilgraph.fluxapp.xyz/downloads/sigil-top-v7.1.85-linux-x64
+wget https://sigilgraph.fluxapp.xyz/downloads/sigil-top-v7.1.85-linux-x64.proof
+
+b3sum sigil-top-v7.1.85-linux-x64
+# => fafde74615b1b891bbd36bdc1832419eef89a1244b4d9ae307916bc0ef237d7a
+
+fluxc verify-proof sigil-top-v7.1.85-linux-x64 sigil-top-v7.1.85-linux-x64.proof
+#    -> "Verified provenance proof"
+
+# builder key fingerprints are unchanged from the OP — re-check them, don't assume:
+#      https://sigilgraph.fluxapp.xyz/downloads/sigil-builder-keys.json[/code]
+
+[b][size=12pt]Live numbers right now[/size][/b]
+
+[list]
+[*]Height: 2,181,233
+[*]Supply: 3,998,866 / 21,000,000 SIGIL (19.04% minted)
+[*]Status feed: https://sigilgraph.fluxapp.xyz/sigil-status.json
+[*]Release manifest: https://sigilgraph.fluxapp.xyz/downloads/sigil-top-latest.json
+[/list]
+
+As always: this is a testnet, it will be reset, don't route real value through it. Keep breaking it.
+
+— bitknight

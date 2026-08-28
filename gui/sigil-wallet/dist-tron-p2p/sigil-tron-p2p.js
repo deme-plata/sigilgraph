@@ -72279,8 +72279,8 @@ async function yI() {
   try {
     const r = await fetch("/bridge-addr.json?t=" + Date.now(), { cache: "no-store" });
     if (r.ok) {
-      const s = await r.json(), i = typeof location < "u" && location.hostname || "sigilgraph.fluxapp.xyz";
-      s?.peer && (n = [`/dns4/${i}/tcp/9443/wss/p2p/${s.peer}`], console.log("🌉 [LIBP2P] live sigil-bridge bootstrap →", n[0]));
+      const s = await r.json();
+      s?.wss ? (n = [s.wss], console.log("🌉 [LIBP2P] live sigil-bridge bootstrap (bridge-published wss) →", n[0])) : s?.peer && (n = [`/dns4/${typeof location < "u" && location.hostname || "sigilgraph.fluxapp.xyz"}/tcp/9443/wss/p2p/${s.peer}`], console.log("🌉 [LIBP2P] live sigil-bridge bootstrap (reconstructed, no wss field) →", n[0]));
     }
   } catch (r) {
     console.warn("⚠️ [LIBP2P] /bridge-addr.json fetch failed — using static bootstrap", r);

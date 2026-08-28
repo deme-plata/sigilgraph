@@ -128,7 +128,26 @@ pub fn should_produce() -> bool {
     // node. A rig therefore mines against its own node automatically, with no
     // configuration — that wiring already existed and was simply unreachable while
     // production was opt-in.
-    !matches!(std::env::var("SIGIL_TOP_PRODUCE").as_deref(), Ok("0"))
+    // 2026-08-27, LATER THE SAME DAY — back to opt-IN (operator-directed: "i liked it
+    // better when sigil top node started in light mode and user was in control of whether
+    // they wanted to sync or just verify the whole chain and begin mine").
+    //
+    // The hazard recorded above is the reason this is the safer default anyway: with
+    // blue-score counting raw block COUNT rather than difficulty-weighted work, every
+    // laptop that starts minting out of the box is a fork risk that nobody chose. Opt-in
+    // makes participation a decision instead of a side effect of installing.
+    //
+    // It also fixes a quieter harm found tonight: a `sigil-top` sitting in the mesh
+    // answers backfill requests with ZERO bytes, because a light node has no chain to
+    // serve. A full node that picks it as a sync source stalls forever on an empty
+    // success that trips no error path — happysrv sat frozen 51k blocks behind for ten
+    // hours doing exactly this. Fewer uninvited half-nodes in the mesh is fewer black
+    // holes; the real repair is that a light node should DECLINE rather than answer
+    // empty, which is tracked separately.
+    //
+    // `SIGIL_TOP_PRODUCE=1` opts in; the TUI's own control persists the choice via
+    // `persist_sync_mode`, so an operator who turns it on keeps it across updates.
+    matches!(std::env::var("SIGIL_TOP_PRODUCE").as_deref(), Ok("1") | Ok("true"))
 }
 
 #[cfg(test)]
@@ -137,11 +156,15 @@ mod tests {
 
     #[test]
     fn gates_read_the_real_env_vars() {
-        // Unset = ON. Producing is the default posture now; the env vars are an OPT-OUT.
+        // Unset = light. Braid participation stays available, but MINTING is a decision
+        // the operator makes, not something installing the binary does to the network.
         std::env::remove_var("SIGIL_TOP_PRODUCER");
         std::env::remove_var("SIGIL_TOP_PRODUCE");
-        assert!(producer_mode_enabled(), "unset must mean ON — braid participation is the default");
-        assert!(should_produce(), "unset must mean ON — the binary produces out of the box");
+        assert!(producer_mode_enabled(), "unset must still allow braid participation");
+        assert!(!should_produce(), "unset must mean LIGHT — minting is opt-in");
+        std::env::set_var("SIGIL_TOP_PRODUCE", "1");
+        assert!(should_produce(), "SIGIL_TOP_PRODUCE=1 opts in");
+        std::env::remove_var("SIGIL_TOP_PRODUCE");
 
         std::env::set_var("SIGIL_TOP_PRODUCER", "1");
         std::env::set_var("SIGIL_TOP_PRODUCE", "1");
@@ -159,7 +182,11 @@ mod tests {
         std::env::set_var("SIGIL_TOP_PRODUCER", "yes");
         std::env::set_var("SIGIL_TOP_PRODUCE", "yes");
         assert!(producer_mode_enabled(), "a non-0 value must not disable braid participation");
-        assert!(should_produce(), "a non-0 value must not disable production");
+        // The comment directly above already stated this contract; the assertion used to
+        // contradict it because minting was default-on. Under opt-in they agree: only an
+        // explicit 1/true starts minting, so a typo or a stray value can never enlist a
+        // machine into block production.
+        assert!(!should_produce(), "a stray value must NOT enable minting");
 
         std::env::remove_var("SIGIL_TOP_PRODUCER");
         std::env::remove_var("SIGIL_TOP_PRODUCE");

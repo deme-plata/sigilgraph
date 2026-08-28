@@ -1679,6 +1679,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
+    /// The regression that shipped in v7.1.92 and was caught by the operator in minutes:
+    /// *"it correctly resets spine but it never begins to sync again saying stalled"*.
+    ///
+    /// `reset_watermarks()` sets `base = 0`. On SIGIL that is not a neutral default — it
+    /// is UNREACHABLE: height 0 is minted locally and never served by range-backfill once
+    /// it leaves the producer's RAM window. A store left anchored at 0 waits forever for a
+    /// block no peer will send, which presents as a permanent STALL, not as an error.
+    ///
+    /// So a reset is only half an operation. This pins the WHOLE sequence [Y] performs,
+    /// and asserts the store ends up anchored at a SERVABLE height. A reset that forgets
+    /// the re-anchor fails here instead of in the operator's terminal.
+    #[test]
+    fn resync_sequence_re_anchors_at_a_servable_base_not_zero() {
+        let path = tmp("resync-rebase");
+        let _ = std::fs::remove_dir_all(&path);
+        const SIGIL_SYNC_BASE: u64 = 1; // the engine's default anchor (SIGIL_SYNC_BASE)
+        {
+            let mut s = BlockStore::open(&path).expect("open");
+            s.rebase(500); // a store mid-sync
+
+            // The exact pair the engine performs on [Y].
+            s.reset_watermarks();
+            assert_eq!(s.base(), 0, "reset alone drops the anchor to the unreachable 0");
+            s.set_base(SIGIL_SYNC_BASE);
+
+            assert_eq!(s.base(), SIGIL_SYNC_BASE, "must re-anchor, or sync stalls forever");
+            assert_eq!(
+                s.synced_to(), SIGIL_SYNC_BASE,
+                "set_base raises the frontier to the anchor — below base is never fetched"
+            );
+        }
+        // And it must still be anchored after a restart, for the same reason the reset
+        // itself has to persist.
+        {
+            let s = BlockStore::open(&path).expect("reopen");
+            assert!(
+                s.synced_to() >= SIGIL_SYNC_BASE,
+                "re-anchor did not persist — a restart would resume stalled at 0"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
     /// Wire-codec lab tool (env-gated, skips by default): open the REAL local block DB
     /// (`SIGIL_BENCH_DB=/path`) and dump an exact `'H' + bincode(Vec<Header>)` backfill
     /// payload — byte-identical to what `headers_only` puts on the wire — to

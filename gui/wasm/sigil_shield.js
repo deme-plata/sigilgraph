@@ -71,6 +71,50 @@ export function buildPrivateSend(seed_hex, note_index, note_value_str, note_posi
 }
 
 /**
+ * This account's X25519 note-DELIVERY public key, hex.
+ *
+ * `POST /v1/shielded/register` requires BOTH this and [`shield_public_key`]: pk_shield
+ * lets a payer bind an output note to you, but without a delivery key nothing could
+ * ever tell you a payment landed — you would have to be told out of band, which is the
+ * exact gap registration exists to close.
+ *
+ * Added 2026-08-26 so a browser wallet can self-register with the seed NEVER leaving
+ * the device. Before this, pk_shield was exported but pk_encrypt was not, so the only
+ * way to register was `sigil-top`'s native path (`shield_setup::register_for_shielded_mining`,
+ * which reads `SIGIL_MINE_SEED`) — i.e. a wallet created in the browser could not
+ * register at all, and therefore could never receive a private payment. Measured on the
+ * live chain that day: of every wallet checked — the operator's own included — exactly
+ * ONE was registered, so essentially every send failed with "not registered".
+ *
+ * Derivation is `note_cipher::enc_identity_from_seed`, the SAME function
+ * `shield_setup` uses, so a browser-registered wallet and a rig-registered wallet
+ * publish byte-identical keys. Deliberately NOT re-derived in JS: a second hand-ported
+ * copy that drifted would silently make notes undecryptable.
+ * @param {string} seed_hex
+ * @returns {string}
+ */
+export function shieldEncryptPublicKey(seed_hex) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(seed_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.shieldEncryptPublicKey(ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
  * The commitment this account would publish for a SELF-CREATED note at `index` holding
  * `value` — deterministic from the seed alone. A wallet shields a deposit by computing
  * this locally (already done in JS on this page for `doShield()`'s fixed-denomination

@@ -1149,9 +1149,28 @@ impl P2PBlockSync {
                     if resync_pending_rt.swap(false, Ordering::Relaxed) {
                         let was = store.synced_to();
                         store.reset_watermarks();
+                        // v7.1.93 — MANDATORY SECOND HALF, and omitting it is a HANG.
+                        //
+                        // `reset_watermarks()` sets `base = 0`. For SIGIL that is not a
+                        // neutral default, it is unreachable: height 0 is minted locally
+                        // and is NEVER served by the range-backfill endpoint once it
+                        // leaves the producer's RAM window (see BlockStore::base's doc).
+                        // With base 0 the contiguous frontier waits forever for a block
+                        // no peer will ever send, and the TUI sits on "STALLED" — which
+                        // is exactly what v7.1.92 shipped and the operator hit within
+                        // minutes: "it correctly resets spine but it never begins to
+                        // sync again saying stalled".
+                        //
+                        // The genesis-reset path a thousand lines below always paired
+                        // these two calls (`reset_watermarks(); set_base(GENESIS_ANCHOR_HEIGHT);`).
+                        // v7.1.92 copied the first line and not the second. `sync_base`
+                        // is the same value the engine anchors to at startup (1 for
+                        // SIGIL, `SIGIL_SYNC_BASE`-overridable), so a resync now lands on
+                        // exactly the anchor a fresh boot would.
+                        store.set_base(sync_base);
                         sync_store.clear_ranges();
                         eprintln!(
-                            "⟳ RESYNC — watermarks zeroed (synced_to {was} → 0), range claims cleared; sync restarts from base"
+                            "⟳ RESYNC — watermarks zeroed (synced_to {was} → 0), re-anchored at base {sync_base}, range claims cleared"
                         );
                         {
                             let mut st = state_clone.lock().unwrap_or_else(|e| e.into_inner());

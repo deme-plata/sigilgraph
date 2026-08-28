@@ -1,0 +1,12 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: process.env.CHROME || '/usr/bin/chromium', args:['--no-sandbox'] });
+const p = await b.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
+await p.goto('https://sigilgraph.org/', { waitUntil: 'networkidle', timeout: 60000 });
+await p.waitForTimeout(1500);
+const box = await p.locator('.sg-cd__clock').boundingBox();
+const units = await p.locator('.sg-cd__unit').count();
+const first = await p.locator('.sg-cd__unit').first().boundingBox();
+console.log('clock box', JSON.stringify(box), 'units', units, 'unit w', first && first.width.toFixed(0));
+console.log('rows =', box && first ? Math.round(box.height / first.height) : '?');
+await p.locator('.sg-cd').screenshot({ path: '/tmp/claude-0/-home-storage-claude-code/08a5f5f3-a4aa-4a7e-b79f-ff7431aea19a/scratchpad/sg-mobile.png' });
+await b.close();

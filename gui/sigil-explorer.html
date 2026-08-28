@@ -87,7 +87,170 @@ body{min-height:100vh;background:var(--bg);color:var(--text);font-family:'Rajdha
 .search-results .sr:hover{background:rgba(33,212,253,.06)}
 .search-results .sr .srt{color:var(--cyan)}
 .search-results .sr .srd{color:var(--dim)}
+
+/* Codex activity pass — shared visual language with the wallet shell. */
+:root{
+  --bg:#070a09;--cyan:#73e5c2;--cyan-bright:#b4f3df;--cm:#5b9cff;--teal:#10a37f;
+  --grid:rgba(125,227,195,.10);--glow:rgba(16,163,127,.34);--gold:#f4b860;
+  --orange:#ff8a70;--line:rgba(125,227,195,.17);--text:#eef6f2;--dim:#7c9188;
+  --panel:rgba(12,20,16,.90);--violet:#9a8df5
+}
+html{color-scheme:dark}
+*{scrollbar-width:thin;scrollbar-color:rgba(125,227,195,.46) rgba(7,10,9,.6)}
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-track{background:rgba(7,10,9,.66)}
+::-webkit-scrollbar-thumb{border:2px solid #070a09;border-radius:999px;background:linear-gradient(180deg,#9aecd2,#10a37f 66%,#4d8dff)}
+body{
+  background:#070a09;color:var(--text);font-family:"Segoe UI",Inter,system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased
+}
+::selection{color:#04110d;background:var(--cyan)}
+.scene{
+  background:
+    radial-gradient(66% 52% at 2% -5%,rgba(16,163,127,.20),transparent 70%),
+    radial-gradient(52% 44% at 98% 2%,rgba(78,139,255,.14),transparent 72%),
+    radial-gradient(46% 38% at 52% 102%,rgba(154,141,245,.09),transparent 72%),
+    linear-gradient(180deg,#09100d 0%,#070a09 52%,#080b0a 100%)
+}
+.scene::before{
+  position:absolute;inset:0;content:"";pointer-events:none;
+  background-image:linear-gradient(rgba(125,227,195,.022) 1px,transparent 1px),linear-gradient(90deg,rgba(125,227,195,.022) 1px,transparent 1px);
+  background-size:58px 58px;mask-image:radial-gradient(ellipse 86% 78% at 52% 22%,#000 10%,transparent 78%)
+}
+.aurora{opacity:.24;filter:blur(96px)}
+.aurora i:nth-child(1){background:radial-gradient(circle,#10a37f,transparent 65%)}
+.aurora i:nth-child(2){background:radial-gradient(circle,#4d8dff,transparent 65%)}
+.aurora i:nth-child(3){background:radial-gradient(circle,#9a8df5,transparent 62%);opacity:.42}
+.app{max-width:1380px;padding:24px 30px 54px}
+html.embedded .app{max-width:none;padding:22px 28px 44px}
+.topbar{
+  position:sticky;z-index:40;top:14px;min-height:66px;margin-bottom:26px;padding:11px 16px;
+  border-color:rgba(125,227,195,.17);border-radius:18px;
+  background:linear-gradient(180deg,rgba(14,24,19,.94),rgba(8,14,10,.92));
+  box-shadow:0 22px 60px rgba(0,0,0,.28),inset 0 1px rgba(255,255,255,.025);
+  backdrop-filter:blur(20px) saturate(135%)
+}
+.brand{color:#f5faf7;font-family:"Segoe UI",Inter,system-ui,sans-serif;font-size:15px;font-weight:760;letter-spacing:.035em}
+.brand span{color:var(--cyan)}
+.net{color:#91ead0;border-color:rgba(125,227,195,.24);background:rgba(16,163,127,.07)}
+.search-wrap{
+  max-width:560px;height:42px;border-color:rgba(125,227,195,.16);border-radius:12px;
+  background:linear-gradient(180deg,rgba(21,32,27,.82),rgba(9,16,12,.88));
+  box-shadow:inset 0 1px rgba(255,255,255,.025)
+}
+.search-wrap:focus-within{box-shadow:0 0 0 3px rgba(16,163,127,.1),0 0 28px rgba(16,163,127,.09)}
+.search-wrap::before{background:linear-gradient(120deg,var(--cyan),#5b9cff,var(--gold),var(--teal))}
+.search-wrap .search-ico{color:var(--cyan);filter:drop-shadow(0 0 5px rgba(16,163,127,.32))}
+.search-wrap .search-kbd{color:#8ba097;border-color:rgba(125,227,195,.15);background:rgba(255,255,255,.035)}
+.live-stats{align-items:center;color:#82968d;font-size:10px}
+.live-stats .ok{display:inline-block;width:7px;height:7px;overflow:hidden;color:transparent;border-radius:50%;background:#73e5c2;box-shadow:0 0 14px rgba(115,229,194,.75)}
+.activity-intro{display:flex;align-items:flex-end;justify-content:space-between;gap:28px;margin:2px 2px 24px;padding:10px 4px 4px}
+.activity-copy{max-width:720px}
+.activity-eyebrow{display:flex;align-items:center;gap:8px;color:#86dfc3;font-family:"JetBrains Mono",monospace;font-size:9px;letter-spacing:.16em;text-transform:uppercase}
+.activity-eyebrow::before{width:18px;height:1px;content:"";background:linear-gradient(90deg,var(--cyan),transparent)}
+.activity-copy h1{margin-top:8px;color:#f4faf7;font-size:clamp(30px,4vw,50px);font-weight:730;letter-spacing:-.045em;line-height:1.02}
+.activity-copy h1 span{color:#96ead0}
+.activity-copy p{max-width:650px;margin-top:10px;color:#80958b;font-size:14px;line-height:1.55}
+.activity-signal{display:flex;align-items:center;gap:11px;min-width:220px;padding:12px 14px;border:1px solid rgba(125,227,195,.14);border-radius:14px;background:linear-gradient(155deg,rgba(18,30,24,.8),rgba(8,14,10,.82));box-shadow:inset 0 1px rgba(255,255,255,.025)}
+.activity-signal>i{width:9px;height:9px;flex:0 0 9px;border-radius:50%;background:#73e5c2;box-shadow:0 0 18px rgba(115,229,194,.75);animation:signalPulse 2s ease-in-out infinite}
+@keyframes signalPulse{50%{opacity:.45;box-shadow:0 0 7px rgba(115,229,194,.32)}}
+.activity-signal div{display:flex;flex-direction:column}
+.activity-signal b{color:#dff7ef;font-size:12px;font-weight:680}
+.activity-signal span{margin-top:2px;color:#71867c;font-family:"JetBrains Mono",monospace;font-size:8.5px;letter-spacing:.06em;text-transform:uppercase}
+.extabs{gap:6px!important;width:fit-content;margin:0 0 18px!important;padding:4px;border:1px solid rgba(125,227,195,.13);border-radius:13px;background:rgba(8,14,10,.72)}
+.extabs button{flex:none!important;min-width:138px;padding:9px 16px!important;border:0!important;border-radius:9px!important;color:#7f948a!important;background:transparent!important;font-family:"Segoe UI",Inter,system-ui,sans-serif!important;font-size:11px!important;font-weight:700;letter-spacing:.06em!important;transition:color .16s ease,background .16s ease,box-shadow .16s ease}
+#tabbtn-blocks{color:#d8f7ed!important;background:linear-gradient(135deg,rgba(16,163,127,.19),rgba(78,139,255,.08))!important;box-shadow:inset 0 1px rgba(255,255,255,.035)}
+.stats-grid{grid-template-columns:repeat(6,minmax(138px,1fr));gap:10px;margin-bottom:26px}
+.stat{position:relative;overflow:hidden;min-height:104px;padding:16px;border-color:rgba(125,227,195,.13);border-radius:15px;background:radial-gradient(100% 110% at 100% 0%,rgba(78,139,255,.055),transparent 64%),linear-gradient(155deg,rgba(18,29,24,.88),rgba(8,14,10,.9));box-shadow:inset 0 1px rgba(255,255,255,.025),0 12px 32px rgba(0,0,0,.11)}
+.stat::before{position:absolute;top:0;right:16%;left:16%;height:1px;content:"";background:linear-gradient(90deg,transparent,rgba(125,227,195,.35),transparent)}
+.stat .lbl{color:#73887e;font-size:8.5px;letter-spacing:.13em}
+.stat .val{margin-top:9px;color:#e9f6f1;font-family:"JetBrains Mono",monospace;font-size:18px;font-weight:650;letter-spacing:-.04em}
+.stat .val.c{color:#a9eed9}.stat .val.g{color:#ffd08b}.stat .val.t{color:#73e5c2}.stat .val.v{color:#c8bfff}
+.section{margin-bottom:28px}
+.section h2{display:flex;align-items:center;gap:10px;margin-bottom:11px;padding-left:2px;color:#91a69c;font-family:"Segoe UI",Inter,system-ui,sans-serif;font-size:10px;font-weight:760;letter-spacing:.14em}
+.section h2::after{height:1px;flex:1;content:"";background:linear-gradient(90deg,rgba(125,227,195,.12),transparent)}
+.block-list,.txn-list{gap:7px}
+.block-row,.txn{min-height:52px;border-color:rgba(125,227,195,.105);border-radius:13px;background:linear-gradient(90deg,rgba(16,163,127,.055),rgba(78,139,255,.022) 68%,rgba(8,14,10,.76));box-shadow:inset 0 1px rgba(255,255,255,.018)}
+.block-row{padding:11px 14px}
+.block-row:hover{border-color:rgba(125,227,195,.3);background:linear-gradient(90deg,rgba(16,163,127,.095),rgba(78,139,255,.035) 72%,rgba(8,14,10,.82));transform:translateY(-1px)}
+.block-row .bh{min-width:94px;color:#a9eed9;font-family:"JetBrains Mono",monospace;font-size:12px}
+.block-row .hash{color:#748a80;font-size:10px}
+.block-row .badge,.txn .type{border:1px solid transparent;padding:4px 9px;font-size:8px;letter-spacing:.06em}
+.badge-d{color:#b4f3df;background:rgba(16,163,127,.1);border-color:rgba(125,227,195,.14)!important}
+.badge-e{color:#ffd08b;background:rgba(244,184,96,.09);border-color:rgba(244,184,96,.14)!important}
+.badge-g{color:#d7d0ff;background:rgba(154,141,245,.1);border-color:rgba(154,141,245,.14)!important}
+.badge-b{color:#a9c9ff;background:rgba(78,139,255,.1);border-color:rgba(78,139,255,.14)!important}
+.txn{padding:11px 14px;color:#83988e}.txn .type{color:#9ae8cf;background:rgba(16,163,127,.08)}.txn .amt{color:#ffd08b}
+.peers-list{gap:7px}.peer{padding:7px 12px;color:#c8bfff;border-color:rgba(154,141,245,.14);background:rgba(154,141,245,.055)}
+.empty{min-height:92px;display:grid;place-items:center;color:#71867c;border:1px dashed rgba(125,227,195,.13);border-radius:14px;background:rgba(7,13,9,.34);padding:24px}
+.search-modal{padding-top:8vh;background:rgba(2,5,4,.82);backdrop-filter:blur(18px) saturate(130%)}
+.search-card{border-color:rgba(125,227,195,.22);border-radius:22px;background:radial-gradient(100% 80% at 100% 0%,rgba(78,139,255,.08),transparent 60%),linear-gradient(155deg,rgba(17,28,22,.99),rgba(6,11,8,.995));box-shadow:0 34px 100px rgba(0,0,0,.68),0 0 60px rgba(16,163,127,.08)}
+.search-card .schead{min-height:66px;border-bottom-color:rgba(125,227,195,.13);background:rgba(18,29,24,.52)}
+.search-card .schead .q{color:#b4f3df}.sresult{border:1px solid transparent}.sresult:hover{border-color:rgba(125,227,195,.11);background:rgba(16,163,127,.055);transform:translateY(-1px)}
+#blkModal{background:rgba(2,5,4,.84)!important;backdrop-filter:blur(18px) saturate(130%)!important}
+#blkModal>div{border-color:rgba(125,227,195,.22)!important;border-radius:24px!important;background:radial-gradient(100% 80% at 100% 0%,rgba(78,139,255,.08),transparent 60%),linear-gradient(155deg,rgba(17,28,22,.99),rgba(6,11,8,.995))!important;box-shadow:0 34px 100px rgba(0,0,0,.68),0 0 60px rgba(16,163,127,.08)!important}
+#cidToast{border-color:rgba(154,141,245,.3)!important;border-radius:16px!important;background:linear-gradient(155deg,rgba(17,28,22,.98),rgba(6,11,8,.99))!important;box-shadow:0 24px 70px rgba(0,0,0,.58),0 0 34px rgba(154,141,245,.1)!important}
+.emission-feature{
+  position:relative;isolation:isolate;display:grid;grid-template-columns:minmax(0,1.45fr) minmax(260px,.55fr);gap:22px;
+  min-height:180px;margin:0 0 28px;padding:22px 24px;overflow:hidden;cursor:pointer;
+  border:1px solid rgba(244,184,96,.26);border-radius:20px;
+  background:
+    radial-gradient(80% 140% at 100% 0%,rgba(255,138,112,.13),transparent 58%),
+    radial-gradient(75% 120% at 0% 100%,rgba(16,163,127,.12),transparent 62%),
+    linear-gradient(145deg,rgba(24,29,20,.96),rgba(10,17,13,.94));
+  box-shadow:inset 0 1px rgba(255,255,255,.035),0 20px 54px rgba(0,0,0,.18),0 0 40px rgba(244,184,96,.035);
+  transition:transform .2s ease,border-color .2s ease,box-shadow .2s ease
+}
+.emission-feature:hover{transform:translateY(-2px);border-color:rgba(255,208,139,.48);box-shadow:inset 0 1px rgba(255,255,255,.045),0 26px 65px rgba(0,0,0,.24),0 0 48px rgba(244,184,96,.075)}
+.emission-feature::before{position:absolute;z-index:-1;inset:0;content:"";opacity:.24;background-image:linear-gradient(rgba(244,184,96,.055) 1px,transparent 1px),linear-gradient(90deg,rgba(244,184,96,.055) 1px,transparent 1px);background-size:30px 30px;mask-image:linear-gradient(90deg,#000,transparent 80%)}
+.emission-feature::after{position:absolute;top:0;right:8%;left:8%;height:1px;content:"";background:linear-gradient(90deg,transparent,rgba(255,208,139,.72),rgba(115,229,194,.42),transparent)}
+.emission-main{display:flex;flex-direction:column;justify-content:space-between;min-width:0}
+.emission-kicker{display:flex;align-items:center;gap:9px;color:#ffd08b;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:650;letter-spacing:.16em;text-transform:uppercase}
+.emission-kicker i{width:8px;height:8px;border-radius:50%;background:#f4b860;box-shadow:0 0 18px rgba(244,184,96,.8);animation:signalPulse 2s ease-in-out infinite}
+.emission-title-row{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-top:12px}
+.emission-title-row h2{color:#fff7e8;font-size:clamp(22px,3vw,34px);font-weight:720;letter-spacing:-.035em;line-height:1}
+.emission-title-row p{max-width:560px;margin-top:8px;color:#89998e;font-size:12px;line-height:1.5}
+.emission-open-btn{flex:none;padding:8px 12px;border:1px solid rgba(244,184,96,.25);border-radius:999px;color:#ffd08b;background:rgba(244,184,96,.08);font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+.emission-supply{margin-top:20px}
+.emission-supply-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+.emission-supply-head strong{color:#fff1d3;font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:650}
+.emission-supply-head span{color:#8d9d93;font-family:'JetBrains Mono',monospace;font-size:9px}
+.emission-cap-bar,.emission-progress{height:7px;margin-top:8px;overflow:hidden;border-radius:999px;background:rgba(255,255,255,.055)}
+.emission-cap-bar>i,.emission-progress>i{display:block;width:0;height:100%;border-radius:inherit;background:linear-gradient(90deg,#c98138,#f4b860 55%,#73e5c2);box-shadow:0 0 16px rgba(244,184,96,.35);transition:width .7s ease}
+.emission-side{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-content:stretch;gap:8px}
+.emission-mini{display:flex;min-width:0;flex-direction:column;justify-content:center;padding:12px;border:1px solid rgba(244,184,96,.11);border-radius:13px;background:rgba(5,10,7,.34)}
+.emission-mini span{color:#71867c;font-family:'JetBrains Mono',monospace;font-size:7.5px;letter-spacing:.11em;text-transform:uppercase}
+.emission-mini b{margin-top:6px;overflow:hidden;color:#eaf6f1;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:650;text-overflow:ellipsis;white-space:nowrap}
+.emission-mini b.gold{color:#ffd08b}.emission-mini b.mint{color:#9ae8cf}.emission-mini b.violet{color:#c8bfff}
+.emission-modal{position:fixed;z-index:450;inset:0;display:none;align-items:center;justify-content:center;padding:22px;background:rgba(2,5,4,.86);backdrop-filter:blur(18px) saturate(135%)}
+.emission-modal.on{display:flex;animation:blkIn .18s ease}
+.emission-dialog{position:relative;width:min(1180px,97vw);max-height:93vh;overflow:auto;border:1px solid rgba(244,184,96,.3);border-radius:24px;background:radial-gradient(90% 70% at 100% 0%,rgba(255,138,112,.09),transparent 58%),radial-gradient(70% 60% at 0% 100%,rgba(16,163,127,.08),transparent 60%),linear-gradient(155deg,rgba(18,25,20,.995),rgba(5,9,7,.998));box-shadow:0 40px 120px rgba(0,0,0,.72),0 0 70px rgba(244,184,96,.08)}
+.emission-dialog-head{position:sticky;z-index:5;top:0;display:flex;align-items:center;justify-content:space-between;gap:18px;padding:18px 22px;border-bottom:1px solid rgba(244,184,96,.14);background:rgba(11,17,13,.94);backdrop-filter:blur(18px)}
+.emission-dialog-title{display:flex;align-items:center;gap:12px}
+.emission-orb{display:grid;width:38px;height:38px;place-items:center;border:1px solid rgba(244,184,96,.32);border-radius:12px;color:#ffd08b;background:radial-gradient(circle,rgba(244,184,96,.2),rgba(244,184,96,.04));box-shadow:inset 0 1px rgba(255,255,255,.06),0 0 22px rgba(244,184,96,.09);font-family:'JetBrains Mono',monospace;font-size:17px}
+.emission-dialog-title h2{color:#fff3da;font-size:17px;font-weight:720;letter-spacing:-.01em}.emission-dialog-title p{margin-top:2px;color:#768b81;font-family:'JetBrains Mono',monospace;font-size:8px;letter-spacing:.08em;text-transform:uppercase}
+.emission-dialog-meta{display:flex;align-items:center;gap:9px}.emission-era{padding:5px 9px;border:1px solid rgba(154,141,245,.22);border-radius:999px;color:#c8bfff;background:rgba(154,141,245,.08);font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:650}.emission-close{display:grid;width:34px;height:34px;place-items:center;border:1px solid rgba(125,227,195,.13);border-radius:10px;color:#82968d;background:rgba(255,255,255,.025);cursor:pointer;font-size:18px}.emission-close:hover{color:#fff;border-color:rgba(244,184,96,.3);background:rgba(244,184,96,.07)}
+.emission-dialog-body{padding:20px 22px 24px}
+.emission-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}
+.emetric,.controller-tile,.emission-panel{border:1px solid rgba(125,227,195,.11);border-radius:14px;background:linear-gradient(155deg,rgba(18,28,23,.62),rgba(6,11,8,.68));box-shadow:inset 0 1px rgba(255,255,255,.018)}
+.emetric{min-height:92px;padding:13px;text-align:center}.emetric span,.controller-tile span{color:#71867c;font-family:'JetBrains Mono',monospace;font-size:7.5px;letter-spacing:.1em;text-transform:uppercase}.emetric b{display:block;margin-top:8px;color:#eff9f5;font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:650}.emetric small{display:block;margin-top:4px;color:#687d73;font-size:8px}.emetric.amber{border-color:rgba(244,184,96,.17);background:rgba(244,184,96,.045)}.emetric.amber b{color:#ffd08b}.emetric.mint b{color:#9ae8cf}.emetric.violet b{color:#c8bfff}.emetric.alert b{color:#ffad9b}
+.emission-modal-grid{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(310px,.75fr);gap:12px;margin-top:12px}
+.emission-panel{padding:16px}.emission-panel-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;color:#93a89e;font-size:9px;font-weight:760;letter-spacing:.13em;text-transform:uppercase}.emission-panel-title small{color:#667a70;font-family:'JetBrains Mono',monospace;font-size:7px;font-weight:500;letter-spacing:.04em;text-transform:none}
+.emission-cap-readout{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}.emission-cap-readout b{color:#fff0d2;font-family:'JetBrains Mono',monospace;font-size:23px}.emission-cap-readout span{color:#7f948a;font-family:'JetBrains Mono',monospace;font-size:9px}.emission-progress{height:12px;margin-top:12px}.emission-progress>i{position:relative}.emission-progress>i::after{position:absolute;top:0;right:0;width:1px;height:100%;content:"";background:#fff;box-shadow:0 0 10px #fff}
+.emission-supply-foot{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px}.emission-supply-foot div{padding:9px;border-radius:10px;background:rgba(0,0,0,.16);text-align:center}.emission-supply-foot span{display:block;color:#6e8379;font-size:8px}.emission-supply-foot b{display:block;margin-top:4px;color:#dfece7;font-family:'JetBrains Mono',monospace;font-size:9px}
+.controller-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:12px}.controller-tile{padding:12px;text-align:center}.controller-tile b{display:block;margin-top:7px;color:#eaf6f1;font-family:'JetBrains Mono',monospace;font-size:14px}.controller-tile small{display:block;margin-top:4px;color:#687d73;font-size:7.5px}.controller-gauge{position:relative;height:5px;margin-top:9px;border-radius:999px;background:linear-gradient(90deg,rgba(255,138,112,.25),rgba(115,229,194,.3),rgba(244,184,96,.25))}.controller-gauge i{position:absolute;top:-2px;width:2px;height:9px;border-radius:2px;background:#fff;box-shadow:0 0 8px rgba(255,255,255,.7);transform:translateX(-50%)}
+.emission-formula{padding:14px;border:1px solid rgba(154,141,245,.12);border-radius:13px;background:rgba(154,141,245,.035)}.emission-formula code{display:block;color:#d7d0ff;font-family:'JetBrains Mono',monospace;font-size:11px}.emission-formula p{margin-top:8px;color:#768b81;font-size:10px;line-height:1.5}.emission-spec{display:grid;grid-template-columns:repeat(2,1fr);gap:7px;margin-top:10px}.emission-spec div{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 9px;border-radius:9px;background:rgba(0,0,0,.15)}.emission-spec span{color:#6f8379;font-size:8px}.emission-spec b{color:#dbe9e3;font-family:'JetBrains Mono',monospace;font-size:8px}
+.emission-chart{min-height:132px}.emission-chart svg{display:block;width:100%;height:120px}.emission-chart-empty{display:grid;height:120px;place-items:center;color:#687d73;font-family:'JetBrains Mono',monospace;font-size:8px;text-align:center}
+.era-table{width:100%;border-collapse:collapse;font-family:'JetBrains Mono',monospace;font-size:8px}.era-table th,.era-table td{padding:7px 5px;border-bottom:1px solid rgba(125,227,195,.075);text-align:right}.era-table th:first-child,.era-table td:first-child,.era-table th:nth-child(2),.era-table td:nth-child(2){text-align:left}.era-table th{color:#697e74;font-weight:600;text-transform:uppercase}.era-table td{color:#9db0a7}.era-table tr.current td{color:#ffe0aa;background:rgba(244,184,96,.045)}
+.emission-note{margin-top:12px;padding-top:12px;border-top:1px solid rgba(125,227,195,.09);color:#65796f;font-size:9px;line-height:1.55}.emission-note b{color:#8fa69b}.emission-note code{color:#9ae8cf;font-family:'JetBrains Mono',monospace}
+body.emission-open{overflow:hidden}
+.floating-btns a{color:#7c9188;border-color:rgba(125,227,195,.14);background:rgba(10,17,13,.88);backdrop-filter:blur(12px)}
+html.embedded .floating-btns{display:none}
+@media(max-width:1120px){.stats-grid{grid-template-columns:repeat(3,minmax(150px,1fr))}.topbar{position:relative;top:0}.emission-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}.emission-modal-grid{grid-template-columns:1fr}.controller-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:760px){.app,html.embedded .app{padding:14px 14px 36px}.topbar{gap:10px;padding:12px}.brand{width:100%}.search-wrap{order:3;max-width:none;flex-basis:100%}.live-stats{margin-left:auto}.activity-intro{align-items:flex-start;flex-direction:column}.activity-signal{width:100%}.stats-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.block-row{gap:8px}.block-row .bh{min-width:68px}.block-row .hash{max-width:36vw}.extabs{width:100%}.extabs button{flex:1!important;min-width:0}.emission-feature{grid-template-columns:1fr;padding:18px}.emission-title-row{flex-direction:column}.emission-open-btn{align-self:flex-start}.emission-side{grid-template-columns:repeat(2,minmax(0,1fr))}.emission-modal{padding:8px}.emission-dialog{width:100%;max-height:97vh;border-radius:18px}.emission-dialog-head{padding:14px}.emission-dialog-title h2{font-size:14px}.emission-dialog-title p{display:none}.emission-dialog-body{padding:14px}.emission-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.emission-metrics .emetric:last-child{grid-column:span 2}.emission-supply-foot{grid-template-columns:repeat(2,1fr)}.emission-spec{grid-template-columns:1fr}.era-table{font-size:7px}.emission-dialog-meta .emission-era{display:none}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}}
 </style>
+<script>if(window.self!==window.top)document.documentElement.classList.add('embedded');</script>
 </head>
 <body>
 <div class="scene"><div class="aurora"><i></i><i></i><i></i></div></div>
@@ -102,6 +265,15 @@ body{min-height:100vh;background:var(--bg);color:var(--text);font-family:'Rajdha
     </div>
     <div class="live-stats"><span class="ok" id="live-dot">●</span> <span id="live-txt">loading…</span></div>
   </div>
+
+  <section class="activity-intro">
+    <div class="activity-copy">
+      <div class="activity-eyebrow">Verified ledger</div>
+      <h1>Activity <span>on-chain</span></h1>
+      <p>Follow settled blocks, transactions, peers and state commitments from the same verified spine your wallet trusts.</p>
+    </div>
+    <div class="activity-signal"><i></i><div><b>Following sigil-g0</b><span>live · locally verified</span></div></div>
+  </section>
 
   <div class="search-modal" id="searchModal" onclick="if(event.target===this)closeSearchModal()">
     <div class="search-card">
@@ -119,6 +291,31 @@ body{min-height:100vh;background:var(--bg);color:var(--text);font-family:'Rajdha
   <div id="tab-blocks">
   <div class="stats-grid" id="stats"></div>
 
+  <section class="emission-feature" id="emissionFeature" role="button" tabindex="0" aria-label="Open SIGIL emission controller analytics" onclick="openEmissionModal()" onkeydown="if(event.key==='Enter'||event.key===' '){openEmissionModal();event.preventDefault()}">
+    <div class="emission-main">
+      <div>
+        <div class="emission-kicker"><i></i><span>Consensus economics &middot; live</span></div>
+        <div class="emission-title-row">
+          <div>
+            <h2>Adaptive emission controller</h2>
+            <p>Rate-independent issuance with a 21M hard cap, four-year eras and a self-correcting budget signal derived from the verified supply.</p>
+          </div>
+          <span class="emission-open-btn">Open analytics &nearr;</span>
+        </div>
+      </div>
+      <div class="emission-supply">
+        <div class="emission-supply-head"><strong id="emCardSupply">Loading supply&hellip;</strong><span id="emCardPct">&mdash; of 21M</span></div>
+        <div class="emission-cap-bar"><i id="emCardBar"></i></div>
+      </div>
+    </div>
+    <div class="emission-side">
+      <div class="emission-mini"><span>Era</span><b class="gold" id="emCardEra">0 &middot; active</b></div>
+      <div class="emission-mini"><span>Annual target</span><b id="emCardAnnual">2.625M SIGIL</b></div>
+      <div class="emission-mini"><span>Live block rate</span><b class="mint" id="emCardRate">measuring&hellip;</b></div>
+      <div class="emission-mini"><span>Controller signal</span><b class="violet" id="emCardSignal">deriving&hellip;</b></div>
+    </div>
+  </section>
+
   <div class="section"><h2>⬡ Recent Blocks</h2><div class="block-list" id="blocks"><div class="empty">Loading chain data…</div></div></div>
 
   <div class="section"><h2>⟷ Transactions</h2><div class="txn-list" id="txns"><div class="empty">Loading…</div></div></div>
@@ -132,6 +329,74 @@ body{min-height:100vh;background:var(--bg);color:var(--text);font-family:'Rajdha
        host so it works on any client (the local sigil-top serve doesn't embed this page). -->
   <div id="tab-fluxrev" style="display:none">
     <iframe id="fluxrevFrame" data-src="https://sigilgraph.fluxapp.xyz/flux-versions.html" title="Flux Version Control — flux-rev provenance" loading="lazy" style="width:100%;height:80vh;border:1px solid var(--line);border-radius:12px;background:var(--bg)"></iframe>
+  </div>
+</div>
+
+<div class="emission-modal" id="emissionModal" role="dialog" aria-modal="true" aria-labelledby="emissionModalTitle" onclick="if(event.target===this)closeEmissionModal()">
+  <div class="emission-dialog" onclick="event.stopPropagation()">
+    <div class="emission-dialog-head">
+      <div class="emission-dialog-title">
+        <div class="emission-orb">&Phi;</div>
+        <div><h2 id="emissionModalTitle">SIGIL Emission Controller</h2><p>Live supply &middot; deterministic schedule &middot; adaptive reward</p></div>
+      </div>
+      <div class="emission-dialog-meta"><span class="emission-era" id="emModalEra">Era 0 &middot; live</span><button class="emission-close" type="button" aria-label="Close emission analytics" onclick="closeEmissionModal()">&times;</button></div>
+    </div>
+    <div class="emission-dialog-body">
+      <div class="emission-metrics">
+        <div class="emetric amber"><span>Observed today</span><b id="emToday">&mdash;</b><small id="emTodaySub">from first Activity sample</small></div>
+        <div class="emetric amber"><span>Daily target</span><b id="emDailyTarget">7,186.86</b><small>SIGIL / UTC day</small></div>
+        <div class="emetric alert" id="emDriftTile"><span>Schedule drift</span><b id="emDrift">&mdash;</b><small id="emDriftLabel">deriving from supply</small></div>
+        <div class="emetric mint"><span>Live block rate</span><b id="emBlockRate">measuring&hellip;</b><small>verified height delta</small></div>
+        <div class="emetric violet"><span>Adaptive reward</span><b id="emReward">&mdash;</b><small>derived SIGIL / block</small></div>
+      </div>
+
+      <div class="emission-modal-grid">
+        <section class="emission-panel">
+          <div class="emission-panel-title"><span>Supply dashboard</span><small>live from /api/v1/supply</small></div>
+          <div class="emission-cap-readout"><b id="emSupply">&mdash;</b><span id="emSupplyPct">&mdash; of hard cap</span></div>
+          <div class="emission-progress"><i id="emSupplyBar"></i></div>
+          <div class="emission-supply-foot">
+            <div><span>Remaining</span><b id="emRemaining">&mdash;</b></div>
+            <div><span>Annual target</span><b id="emAnnual">&mdash;</b></div>
+            <div><span>Next halving</span><b id="emHalving">&mdash;</b></div>
+            <div><span>Era progress</span><b id="emEraProgress">&mdash;</b></div>
+          </div>
+        </section>
+        <section class="emission-panel">
+          <div class="emission-panel-title"><span>Controller law</span><small>consensus constants</small></div>
+          <div class="emission-formula">
+            <code>R = annual_target / (block_rate &times; seconds_per_year)</code>
+            <p>The reward moves inversely with throughput. A bounded correction signal then pulls cumulative issuance back toward the time schedule without allowing supply beyond 21,000,000.</p>
+          </div>
+          <div class="emission-spec">
+            <div><span>Rate window</span><b>30 min</b></div><div><span>Live guard</span><b>120 sec</b></div>
+            <div><span>Correction bounds</span><b>0.01&times;&ndash;5.0&times;</b></div><div><span>Smoothing</span><b>0.80</b></div>
+            <div><span>Reward floor</span><b>0.00001</b></div><div><span>Reward ceiling</span><b>2.0 SIGIL</b></div>
+            <div><span>Halving eras</span><b>64 &times; 4yr</b></div><div><span>Arithmetic</span><b>u128 base units</b></div>
+          </div>
+        </section>
+      </div>
+
+      <div class="controller-grid">
+        <div class="controller-tile"><span>Stock-to-flow</span><b id="emS2F">&mdash;</b><small id="emS2FLabel">live supply / annual flow</small><div class="controller-gauge"><i id="emS2FGauge"></i></div></div>
+        <div class="controller-tile"><span>Annual inflation</span><b id="emInflation">&mdash;</b><small>current-era target / supply</small><div class="controller-gauge"><i id="emInflationGauge"></i></div></div>
+        <div class="controller-tile"><span>Correction signal</span><b id="emCorrection">&mdash;</b><small id="emCorrectionLabel">instantaneous derived signal</small><div class="controller-gauge"><i id="emCorrectionGauge"></i></div></div>
+        <div class="controller-tile"><span>Budget burn</span><b id="emBurn">&mdash;</b><small id="emBurnLabel">waiting for supply movement</small><div class="controller-gauge"><i id="emBurnGauge"></i></div></div>
+      </div>
+
+      <div class="emission-modal-grid">
+        <section class="emission-panel emission-chart">
+          <div class="emission-panel-title"><span>Observed issuance</span><small>Activity-session samples vs target pace</small></div>
+          <div id="emChart"><div class="emission-chart-empty">Collecting verified supply samples&hellip;<br>the chart appears after the supply changes.</div></div>
+        </section>
+        <section class="emission-panel">
+          <div class="emission-panel-title"><span>Halving schedule</span><small>64 eras &middot; 256 years</small></div>
+          <table class="era-table"><thead><tr><th>Era</th><th>Period</th><th>Annual</th><th>Daily</th><th>Cumulative</th></tr></thead><tbody id="emEraTable"></tbody></table>
+        </section>
+      </div>
+
+      <div class="emission-note"><b>Data provenance:</b> supply is live chain state; block rate is measured from verified height changes. Values labelled <b>derived</b> apply the published <code>sigil-emission</code> consensus formula to those public readings. The node does not currently expose its persisted internal correction watermark, so the modal never presents that private state as a direct API measurement.</div>
+    </div>
   </div>
 </div>
 
@@ -221,6 +486,134 @@ document.addEventListener('keydown',function(e){
   if(e.key==='Escape'){closeSearchModal();}
 });
 
+var EMISSION_CFG={
+  max:21000000,genesis:1786752000,secondsPerYear:31557600,secondsPerEra:126230400,
+  era0Total:10500000,annual0:2625000,minReward:.00001,maxReward:2,
+  smoothing:.8,correctionMin:.01,correctionMax:5
+};
+var _emissionRuntime={height:null,heightAt:0,bps:null,samples:[]};
+
+function emEl(id){return document.getElementById(id);}
+function emSet(id,value){var el=emEl(id);if(el)el.textContent=value;}
+function fmtSigil(v,digits){
+  v=Number(v)||0;
+  if(v>=1000000)return(v/1000000).toFixed(3).replace(/0+$/,'').replace(/\.$/,'')+'M';
+  if(v>=1000)return v.toLocaleString('en-US',{maximumFractionDigits:digits==null?2:digits});
+  if(v>=1)return v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:digits==null?4:digits});
+  if(v>0)return v.toFixed(digits==null?6:digits);
+  return'0';
+}
+function emClamp(v,min,max){return Math.min(Math.max(v,min),max);}
+function emSchedule(nowSec){
+  var elapsed=Math.max(0,nowSec-EMISSION_CFG.genesis);
+  var era=Math.min(63,Math.floor(elapsed/EMISSION_CFG.secondsPerEra));
+  var into=elapsed%EMISSION_CFG.secondsPerEra;
+  var annual=EMISSION_CFG.annual0/Math.pow(2,era);
+  var target=0;
+  for(var k=0;k<era;k++)target+=EMISSION_CFG.era0Total/Math.pow(2,k);
+  target+=(EMISSION_CFG.era0Total/Math.pow(2,era))*(into/EMISSION_CFG.secondsPerEra);
+  var eraEnd=EMISSION_CFG.genesis+(era+1)*EMISSION_CFG.secondsPerEra;
+  return{era:era,elapsed:elapsed,into:into,annual:annual,daily:annual/365.25,target:Math.min(target,EMISSION_CFG.max),eraEnd:eraEnd,eraProgress:(into/EMISSION_CFG.secondsPerEra)*100};
+}
+function emCorrection(actual,target){
+  if(target<=0)return 1;
+  var error=(actual-target)/target;
+  var factor=1-EMISSION_CFG.smoothing*error;
+  if(Math.abs(error)>.10)factor+=error>0?-2*error*error:2*error*error;
+  return emClamp(factor,EMISSION_CFG.correctionMin,EMISSION_CFG.correctionMax);
+}
+function emDayBaseline(supply){
+  var day=new Date().toISOString().slice(0,10),key='sigil-emission-day-baseline';
+  var row=null;
+  try{row=JSON.parse(localStorage.getItem(key)||'null');}catch(e){}
+  if(!row||row.day!==day||!isFinite(row.supply)||row.supply>supply){row={day:day,supply:supply,at:Date.now()};try{localStorage.setItem(key,JSON.stringify(row));}catch(e){}}
+  return row;
+}
+function renderEmissionChart(samples,dailyTarget){
+  var host=emEl('emChart');if(!host)return;
+  if(samples.length<2||samples[samples.length-1].supply<=samples[0].supply){host.innerHTML='<div class="emission-chart-empty">Collecting verified supply samples&hellip;<br>the chart appears after the supply changes.</div>';return;}
+  var W=620,H=112,pad=9,t0=samples[0].at,t1=samples[samples.length-1].at,base=samples[0].supply;
+  var actual=samples.map(function(s){return Math.max(0,s.supply-base);});
+  var target=samples.map(function(s){return Math.max(0,(s.at-t0)/86400000*dailyTarget);});
+  var max=Math.max.apply(null,actual.concat(target).concat([.000001]));
+  function x(at){return pad+(at-t0)/Math.max(t1-t0,1)*(W-pad*2);}
+  function y(v){return H-pad-(v/max)*(H-pad*2);}
+  function points(vals){return vals.map(function(v,i){return x(samples[i].at).toFixed(1)+','+y(v).toFixed(1);}).join(' ');}
+  var actualPts=points(actual),targetPts=points(target),lastActual=actual[actual.length-1],lastTarget=target[target.length-1];
+  host.innerHTML='<svg viewBox="0 0 '+W+' '+(H+18)+'" role="img" aria-label="Observed versus target issuance">'+
+    '<defs><linearGradient id="emArea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f4b860" stop-opacity=".35"/><stop offset="1" stop-color="#f4b860" stop-opacity="0"/></linearGradient></defs>'+
+    '<line x1="'+pad+'" y1="'+(H-pad)+'" x2="'+(W-pad)+'" y2="'+(H-pad)+'" stroke="rgba(125,227,195,.12)"/>'+
+    '<polyline points="'+targetPts+'" fill="none" stroke="#73e5c2" stroke-width="1.2" stroke-dasharray="5 4"/>'+
+    '<polygon points="'+actualPts+' '+x(t1)+','+(H-pad)+' '+x(t0)+','+(H-pad)+'" fill="url(#emArea)"/>'+
+    '<polyline points="'+actualPts+'" fill="none" stroke="#f4b860" stroke-width="2"/>'+
+    '<circle cx="'+x(t1)+'" cy="'+y(lastActual)+'" r="3" fill="#ffd08b"/>'+
+    '<text x="'+pad+'" y="'+(H+12)+'" fill="#71867c" font-size="7">session start</text><text x="'+(W-pad)+'" y="'+(H+12)+'" fill="#71867c" font-size="7" text-anchor="end">now</text>'+
+    '<text x="'+(W-pad)+'" y="10" fill="#f4b860" font-size="7" text-anchor="end">observed '+fmtSigil(lastActual,6)+'</text>'+
+    '<text x="'+(W-pad)+'" y="20" fill="#73e5c2" font-size="7" text-anchor="end">target '+fmtSigil(lastTarget,6)+'</text></svg>';
+}
+function renderEraTable(currentEra){
+  var body=emEl('emEraTable');if(!body)return;
+  var genesisYear=new Date(EMISSION_CFG.genesis*1000).getUTCFullYear(),cumulative=0,rows='';
+  for(var era=0;era<6;era++){
+    var budget=EMISSION_CFG.era0Total/Math.pow(2,era),annual=budget/4,daily=annual/365.25;
+    cumulative+=budget;
+    rows+='<tr class="'+(era===currentEra?'current':'')+'"><td>'+era+(era===currentEra?' &larr;':'')+'</td><td>'+String(genesisYear+era*4)+'&ndash;'+String(genesisYear+(era+1)*4)+'</td><td>'+fmtSigil(annual,0)+'</td><td>'+fmtSigil(daily,2)+'</td><td>'+((cumulative/EMISSION_CFG.max)*100).toFixed(3)+'%</td></tr>';
+  }
+  rows+='<tr><td>6&ndash;63</td><td>halves / 4yr</td><td>&rarr; 0</td><td>&rarr; 0</td><td>&rarr; 100%</td></tr>';
+  body.innerHTML=rows;
+}
+async function loadEmission(status,dag){
+  try{
+    var responses=await Promise.all([
+      fetch('/api/v1/supply',{cache:'no-store'}),
+      fetch('/api/v1/mining/miners',{cache:'no-store'}).catch(function(){return null;})
+    ]);
+    var supplyJson=await responses[0].json(),minerJson=responses[1]&&responses[1].ok?await responses[1].json():null;
+    var sdata=supplyJson.data||supplyJson,maxRaw=Number(sdata.max_supply||2100000000000000),raw=Number(sdata.native_supply||0);
+    var supply=raw/100000000,maxSupply=maxRaw/100000000||EMISSION_CFG.max,pct=Number(sdata.minted_pct);
+    if(!isFinite(pct))pct=supply/maxSupply*100;
+    var now=Date.now(),nowSec=Math.floor(now/1000),schedule=emSchedule(nowSec);
+    var mdata=minerJson&&(minerJson.data||minerJson);
+    var height=Number((status&&(status.height!=null?status.height:status.tip))||(mdata&&mdata.height)||(dag&&dag.height)||0);
+    if(_emissionRuntime.height!=null&&height>=_emissionRuntime.height){
+      var secs=(now-_emissionRuntime.heightAt)/1000;
+      if(secs>=2){var instant=(height-_emissionRuntime.height)/secs;if(isFinite(instant)&&instant>=0)_emissionRuntime.bps=_emissionRuntime.bps==null?instant:_emissionRuntime.bps*.65+instant*.35;}
+    }
+    _emissionRuntime.height=height;_emissionRuntime.heightAt=now;
+    var bps=_emissionRuntime.bps,drift=schedule.target>0?(supply-schedule.target)/schedule.target*100:0,correction=emCorrection(supply,schedule.target);
+    var reward=bps!=null&&bps>0?emClamp(schedule.annual/(bps*EMISSION_CFG.secondsPerYear)*correction,EMISSION_CFG.minReward,EMISSION_CFG.maxReward):null;
+    var baseline=emDayBaseline(supply),observed=Math.max(0,supply-baseline.supply),observedHours=Math.max((now-baseline.at)/3600000,0),targetHour=schedule.daily/24;
+    var observedHour=observedHours>=1/60?observed/observedHours:null,burn=observedHour!=null&&targetHour>0?observedHour/targetHour:null;
+    _emissionRuntime.samples.push({at:now,supply:supply});if(_emissionRuntime.samples.length>36)_emissionRuntime.samples.shift();
+    var remaining=Math.max(0,maxSupply-supply),days=Math.max(0,Math.floor((schedule.eraEnd-nowSec)/86400));
+    var s2f=schedule.annual>0?supply/schedule.annual:0,inflation=supply>0?schedule.annual/supply*100:0;
+
+    emSet('emCardSupply',fmtSigil(supply,4)+' SIGIL circulating');emSet('emCardPct',pct.toFixed(4)+'% of 21M');
+    var cardBar=emEl('emCardBar');if(cardBar)cardBar.style.width=emClamp(pct,0,100)+'%';
+    emSet('emCardEra',schedule.era+' · '+schedule.eraProgress.toFixed(3)+'%');emSet('emCardAnnual',fmtSigil(schedule.annual,2)+' SIGIL');
+    emSet('emCardRate',bps==null?'measuring…':bps.toFixed(2)+' blk/s');emSet('emCardSignal',correction.toFixed(4)+'× '+(correction<.95?'throttle':correction>1.05?'boost':'balanced'));
+    emSet('emModalEra','Era '+schedule.era+' · live');emSet('emToday',fmtSigil(observed,6)+' SIGIL');
+    emSet('emTodaySub','since '+new Date(baseline.at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})+' today');
+    emSet('emDailyTarget',fmtSigil(schedule.daily,2));emSet('emDrift',(drift>=0?'+':'')+drift.toFixed(Math.abs(drift)>999?0:2)+'%');
+    emSet('emDriftLabel',Math.abs(drift)<2?'within schedule tolerance':drift>0?'supply ahead of time target':'supply behind time target');
+    var driftTile=emEl('emDriftTile');if(driftTile)driftTile.className='emetric '+(Math.abs(drift)<2?'mint':Math.abs(drift)<10?'amber':'alert');
+    emSet('emBlockRate',bps==null?'measuring…':bps.toFixed(3)+' bps');emSet('emReward',reward==null?'measuring…':reward.toFixed(reward<.001?6:4));
+    emSet('emSupply',fmtSigil(supply,4)+' SIGIL');emSet('emSupplyPct',pct.toFixed(6)+'% of 21,000,000');
+    var supplyBar=emEl('emSupplyBar');if(supplyBar)supplyBar.style.width=emClamp(pct,0,100)+'%';
+    emSet('emRemaining',fmtSigil(remaining,2));emSet('emAnnual',fmtSigil(schedule.annual,2));emSet('emHalving',days.toLocaleString()+' days');emSet('emEraProgress',schedule.eraProgress.toFixed(4)+'%');
+    emSet('emS2F',s2f.toFixed(3));emSet('emS2FLabel',s2f<1?'early flow':s2f<10?'commodity range':s2f<50?'scarcity building':'high scarcity');
+    emSet('emInflation',inflation.toFixed(3)+'%');emSet('emCorrection',correction.toFixed(6)+'×');emSet('emCorrectionLabel',correction<.95?'derived throttling signal':correction>1.05?'derived catch-up signal':'derived balanced signal');
+    emSet('emBurn',burn==null?'collecting':(burn*100).toFixed(1)+'%');emSet('emBurnLabel',burn==null?'waiting for supply movement':burn>.05?'observed / target hourly pace':'no new issuance observed');
+    var s2fg=emEl('emS2FGauge'),infg=emEl('emInflationGauge'),cfg=emEl('emCorrectionGauge'),burng=emEl('emBurnGauge');
+    if(s2fg)s2fg.style.left=emClamp(s2f/121*100,0,100)+'%';if(infg)infg.style.left=emClamp(inflation,0,100)+'%';if(cfg)cfg.style.left=emClamp((correction-.01)/(5-.01)*100,0,100)+'%';if(burng)burng.style.left=burn==null?'50%':emClamp(burn/2*100,0,100)+'%';
+    renderEmissionChart(_emissionRuntime.samples,schedule.daily);renderEraTable(schedule.era);
+  }catch(e){emSet('emCardSupply','Supply unavailable');emSet('emCardSignal','retrying…');}
+}
+function openEmissionModal(){var m=emEl('emissionModal');if(m){m.classList.add('on');document.body.classList.add('emission-open');loadEmission(window._status,window._dag);}}
+function closeEmissionModal(){var m=emEl('emissionModal');if(m)m.classList.remove('on');document.body.classList.remove('emission-open');}
+window.openEmissionModal=openEmissionModal;window.closeEmissionModal=closeEmissionModal;
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeEmissionModal();});
+
 async function load(){
   // v0.11.5: the REAL chain height + recent blocks come from the DAG producer feed
   // (sigil-node journal → /sigil-recent-blocks.json, millions height, ~107 blk/s).
@@ -233,6 +626,7 @@ async function load(){
   // node status via the same-origin /api proxy → stats bar
   try{
     let r=await fetch('/api/v1/status',{cache:'no-store'}); let d=await r.json();
+    window._status=d;
     // DAG feed height is authoritative for the headline (the live tip); status height
     // is a sub-counter. Fall back to status only if the feed is unavailable.
     var height=(d.height!=null?d.height:(d.data&&d.data.height))||(dag&&dag.height)||0;
@@ -257,6 +651,11 @@ async function load(){
       verTile+
       '<div class="stat"><div class="lbl">Store</div><div class="val v">flux-db'+(local?' · local':'')+'</div></div>';
   }catch(e){ document.getElementById('live-txt').textContent='node unreachable'; }
+
+  // Activity's emission card is always useful, even when the recent-block feed
+  // is momentarily unavailable. It reads supply directly from the local node and
+  // derives only the values that the public API does not expose.
+  await loadEmission(window._status,dag);
 
   // Recent Blocks ← LIVE DAG producer feed (millions height). Falls back to the
   // rpcd mining-chain /api/v1/recent only if the feed is unavailable.
@@ -310,6 +709,8 @@ async function load(){
   try{
     let r=await fetch('/api/v1/recent?kind=tx&limit=20',{cache:'no-store'}); let j=await r.json();
     var txs=j.results||[];
+    var activityWallet=''; try{activityWallet=(new URLSearchParams(location.search).get('wallet')||'').toLowerCase();}catch(e){}
+    if(activityWallet){txs=txs.filter(function(t){return JSON.stringify(t).toLowerCase().indexOf(activityWallet)>=0;});}
     var el=document.getElementById('txns');
     el.innerHTML=txs.length?txs.map(function(t){
       var cid=t.cid?'<span style="color:var(--violet);font-family:\'JetBrains Mono\';font-size:9px;cursor:pointer" title="content address (blake3) — click to verify" onclick="verifyCid(\''+t.cid+'\')">⬡'+t.cid.slice(0,8)+'…</span>':'';
@@ -443,6 +844,17 @@ setInterval(load,10000);
 
 // pre-search from ?q= — the wallet embeds this explorer with the user's address
 (function(){try{var q=new URLSearchParams(location.search).get('q');if(q){var el=document.getElementById('search');if(el){el.value=q;if(typeof doSearch==='function')doSearch();}}}catch(e){}})();
+// Wallet-embedded Activity opens as a calm dashboard, not an intrusive automatic
+// search dialog. The address remains one click away in the search field.
+(function(){try{
+  var wallet=new URLSearchParams(location.search).get('wallet'); if(!wallet)return;
+  var el=document.getElementById('search'); if(el){el.placeholder='Search this wallet · blocks · hashes · transactions…';}
+  var sig=document.querySelector('.activity-signal'); if(sig){
+    var b=sig.querySelector('b'),s=sig.querySelector('span');
+    if(b)b.textContent='Following this wallet';
+    if(s)s.textContent=wallet.slice(0,8)+'…'+wallet.slice(-6)+' · locally verified';
+  }
+}catch(e){}})();
 // deep-link: ?verify=<cid> auto-verifies a content-address (shows the toast)
 (function(){try{var vc=new URLSearchParams(location.search).get('verify');if(vc)setTimeout(function(){verifyCid(vc)},700);}catch(e){}})();
 </script>

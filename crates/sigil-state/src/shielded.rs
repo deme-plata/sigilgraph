@@ -206,7 +206,7 @@ pub enum ShieldedError {
 pub struct ShieldedPool {
     /// Note commitments in insertion order. Index IS the leaf position the nullifier
     /// binds to, so this vector must never be reordered or compacted.
-    pub(crate) notes: Vec<[u8; 32]>,
+    pub(crate) notes: std::sync::Arc<Vec<[u8; 32]>>,
     /// Every nullifier ever revealed. Membership here means "already spent".
     pub(crate) nullifiers: BTreeSet<[u8; 32]>,
     /// Total value currently locked in the pool. Increased by shield, decreased by
@@ -258,13 +258,13 @@ pub struct ShieldedPool {
     /// wallet trial-decrypts every entry here against its own key, and a successful open
     /// IS the ownership proof (`sigil_shield::note_cipher`).
     #[serde(default)]
-    pub(crate) note_ciphertexts: Vec<Option<String>>,
+    pub(crate) note_ciphertexts: std::sync::Arc<Vec<Option<String>>>,
 
     /// Derived index over `notes`, rebuilt on demand. `serde(skip)` because it is a cache:
     /// persisting it would create a second copy of the truth that could drift from
     /// `notes`, which is exactly the class of bug that killed `sigil-rpcd`.
     #[serde(skip)]
-    pub(crate) tree: Option<sigil_shield::note_v1::IncrementalTree>,
+    pub(crate) tree: Option<std::sync::Arc<sigil_shield::note_v1::IncrementalTree>>,
 
     /// Which pool generation the *live* tree is. Epoch 0 is every chain that has never
     /// rotated, and its behaviour is byte-for-byte what it was before rotation existed.
@@ -276,7 +276,7 @@ pub struct ShieldedPool {
     /// chain lives: its owner proves membership against `root`, and a wallet that has
     /// never scanned still needs `notes`/`ciphertexts` to find and open it.
     #[serde(default)]
-    pub(crate) archive: Vec<EpochArchive>,
+    pub(crate) archive: Vec<std::sync::Arc<EpochArchive>>,
 
     /// Which epoch each windowed anchor belonged to, so a spend arriving against a root
     /// from before a rotation is scoped to the right generation. Absent ⇒ epoch 0, which
@@ -312,7 +312,7 @@ pub struct ShieldedPool {
     /// to keep working after a rotation clears `notes` — without it, rotation would quietly
     /// re-open the exact replay hole `DuplicateCommitment` was added to close.
     #[serde(skip)]
-    pub(crate) seen_commitments: Option<BTreeSet<[u8; 32]>>,
+    pub(crate) seen_commitments: Option<std::sync::Arc<BTreeSet<[u8; 32]>>>,
 }
 
 /// A sealed pool generation: the anonymity set exactly as it stood when it filled.
@@ -452,7 +452,19 @@ impl ShieldedPool {
     }
 
     /// The sealed epochs, oldest first — index IS the epoch number.
-    pub fn archive(&self) -> &[EpochArchive] {
+    ///
+    /// Behind `Arc` purely for cost: a sealed epoch is immutable by definition, and the
+    /// producer clones the whole `SigilState` three times per block (see
+    /// `sigil-node/src/coinbase.rs` — "Clone #1/2/3 of 3"). Cloning the archive by value
+    /// deep-copied every leaf AND every delivery ciphertext — each `Some(String)` is its
+    /// own heap allocation — so at 10 sealed epochs that was ~983,000 malloc/free pairs
+    /// per block, measured live at 20.19% of all node CPU in
+    /// `drop_in_place<Vec<EpochArchive>>` alone. Worse, the cost stepped up permanently
+    /// at every rotation, so block rate decayed without bound as the chain aged. `Arc`
+    /// makes the same clone ten refcount bumps. Nothing observable changes: the archive is
+    /// append-only (`rotate_epoch` only pushes), and the consensus digest below hashes
+    /// field-by-field, so `wallet_state_root` stays byte-identical.
+    pub fn archive(&self) -> &[std::sync::Arc<EpochArchive>] {
         &self.archive
     }
 
@@ -498,11 +510,16 @@ impl ShieldedPool {
     /// consensus split.
     pub(crate) fn rotate_epoch(&mut self) {
         let root = self.current_root_fast();
-        self.archive.push(EpochArchive {
+        // `try_unwrap` moves the buffer out with no copy in the normal case (this pool
+        // holds the only reference). The fallback clone is correctness insurance for a
+        // pool that is mid-copy-on-write, not an expected path.
+        let sealed_notes = std::mem::take(&mut self.notes);
+        let sealed_cts = std::mem::take(&mut self.note_ciphertexts);
+        self.archive.push(std::sync::Arc::new(EpochArchive {
             root,
-            notes: std::mem::take(&mut self.notes),
-            ciphertexts: std::mem::take(&mut self.note_ciphertexts),
-        });
+            notes: std::sync::Arc::try_unwrap(sealed_notes).unwrap_or_else(|a| (*a).clone()),
+            ciphertexts: std::sync::Arc::try_unwrap(sealed_cts).unwrap_or_else(|a| (*a).clone()),
+        }));
         // The sealed root stays spendable forever; record its epoch before bumping.
         self.anchor_epoch.insert(root, self.epoch);
         self.epoch += 1;
@@ -599,12 +616,12 @@ impl ShieldedPool {
     fn tree_mut(&mut self) -> &mut sigil_shield::note_v1::IncrementalTree {
         if self.tree.is_none() {
             let mut t = sigil_shield::note_v1::IncrementalTree::new();
-            for cm in &self.notes {
+            for cm in self.notes.iter() {
                 t.append(sigil_shield::note_v1::from_wire(cm).unwrap_or_default());
             }
-            self.tree = Some(t);
+            self.tree = Some(std::sync::Arc::new(t));
         }
-        self.tree.as_mut().unwrap()
+        std::sync::Arc::make_mut(self.tree.as_mut().expect("just populated above"))
     }
 
     /// The current anonymity-set root, as the circuit computes it.
@@ -679,7 +696,8 @@ impl ShieldedPool {
     /// `value = 0, blinding = 0`, which would let them "prove membership" of a note nobody
     /// ever inserted.
     pub fn padded_leaves(&self, filler: impl Fn(u64) -> [u8; 32]) -> Vec<[u8; 32]> {
-        let mut leaves = self.notes.clone();
+        // Deliberately a DEEP copy: the caller pads and mutates the result.
+        let mut leaves = (*self.notes).clone();
         for i in leaves.len()..POOL_CAPACITY {
             leaves.push(filler(i as u64));
         }
@@ -709,7 +727,7 @@ impl ShieldedPool {
             seen.extend(a.notes.iter().copied());
         }
         seen.extend(self.notes.iter().copied());
-        self.seen_commitments = Some(seen);
+        self.seen_commitments = Some(std::sync::Arc::new(seen));
     }
 
     // ── mutators: pub(crate) so only the chokepoint may call them ────────────────────
@@ -756,9 +774,9 @@ impl ShieldedPool {
         // keep the incremental index in step with the source of truth
         let leaf = sigil_shield::note_v1::from_wire(&cm).unwrap_or_default();
         self.tree_mut().append(leaf);
-        self.notes.push(cm);
-        self.note_ciphertexts.push(ciphertext);
-        if let Some(seen) = self.seen_commitments.as_mut() {
+        std::sync::Arc::make_mut(&mut self.notes).push(cm);
+        std::sync::Arc::make_mut(&mut self.note_ciphertexts).push(ciphertext);
+        if let Some(seen) = self.seen_commitments.as_mut().map(std::sync::Arc::make_mut) {
             seen.insert(cm);
         }
         Ok(position)
@@ -819,7 +837,7 @@ impl ShieldedPool {
         let mut h = blake3::Hasher::new();
         h.update(b"sigil-shielded-pool-v1");
         h.update(&(self.notes.len() as u64).to_le_bytes());
-        for n in &self.notes {
+        for n in self.notes.iter() {
             h.update(n);
         }
         h.update(&(self.nullifiers.len() as u64).to_le_bytes());
@@ -830,7 +848,7 @@ impl ShieldedPool {
         // Ciphertexts ride alongside notes and must be identical on every node, same as
         // the notes themselves — a node holding a different delivery ciphertext for the
         // same commitment is a state divergence exactly like a different note would be.
-        for ct in &self.note_ciphertexts {
+        for ct in self.note_ciphertexts.iter() {
             match ct {
                 Some(s) => {
                     h.update(&[1u8]);
@@ -1205,4 +1223,61 @@ mod tests {
         assert_eq!(p.encrypt_key(&wallet), Some([9u8; 32]));
         assert_eq!(p.shielded_address(&wallet), None, "the two registries do not leak into each other");
     }
+    /// CONSENSUS PIN for the `Arc`-wrapping of the sealed epoch archive (2026-08-28).
+    ///
+    /// The archive moved from `Vec<EpochArchive>` to `Vec<Arc<EpochArchive>>` purely to
+    /// stop the producer deep-copying every sealed leaf and ciphertext three times per
+    /// block. `wallet_state_root` commits to `digest()`, and the node persists state with
+    /// MessagePack, so BOTH the digest and the encoded bytes have to be unchanged or the
+    /// chain re-roots and old snapshots stop loading. This test pins both against values
+    /// computed with the pre-Arc code, so the claim is measured, not argued.
+    #[test]
+    fn arc_archive_does_not_move_the_consensus_digest_or_the_wire() {
+        let mut p = ShieldedPool::new();
+        fill_to_capacity(&mut p);
+        // Rotate, and carry a real delivery ciphertext across the seal — the
+        // `Vec<Option<String>>` is the field with per-element heap allocations, so it is
+        // exactly the one an Arc change could disturb.
+        p.append_note_with_delivery(wire(90_001), Some("ct-alpha".to_string())).unwrap();
+        p.append_note_with_delivery(wire(90_002), None).unwrap();
+        p.append_note_with_delivery(wire(90_003), Some("ct-beta".to_string())).unwrap();
+        assert_eq!(p.epoch(), 1, "must have rotated exactly once");
+        assert_eq!(p.archive().len(), 1);
+        assert_eq!(p.archive()[0].notes.len(), POOL_CAPACITY);
+
+        let digest = hex_of(&p.digest());
+        // MessagePack is what the node actually writes to disk.
+        let encoded = rmp_serde::to_vec(&p).expect("pool encodes");
+        let wire_hash = hex_of(blake3::hash(&encoded).as_bytes());
+
+        // An old on-disk snapshot must still load, and load to the same digest — this is
+        // what proves `Arc<T>` is wire-identical to `T` rather than merely compiling.
+        let round: ShieldedPool = rmp_serde::from_slice(&encoded).expect("pool decodes");
+        assert_eq!(round.digest(), p.digest(), "round-trip must preserve the digest");
+        assert_eq!(round.archive().len(), 1, "round-trip must preserve the sealed epoch");
+        assert_eq!(
+            round.archive()[0].ciphertexts.len(),
+            POOL_CAPACITY,
+            "round-trip must preserve every ciphertext slot"
+        );
+
+        // Both constants were produced by running THIS test against the pre-Arc code
+        // (`archive: Vec<EpochArchive>`) and are reproduced exactly by the Arc version.
+        // If either assertion ever fires, the shielded pool's consensus commitment or its
+        // on-disk encoding has changed and every settled header is at risk — treat it as a
+        // hard fork, not a test to update.
+        assert_eq!(
+            digest, "af7fba0d19f3eae53df51754cf0290d4313fb2ed75def667b5eee5efae06f50e",
+            "CONSENSUS DIGEST MOVED — wallet_state_root would re-root settled history"
+        );
+        assert_eq!(
+            wire_hash, "e1f4271974db296197687f77b616285b8b2d4b4eeae7c8ff33fa872aca1372aa",
+            "PERSISTED WIRE FORMAT MOVED — existing on-disk snapshots would not load"
+        );
+    }
+
+    fn hex_of(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
 }

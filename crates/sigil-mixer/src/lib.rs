@@ -16,6 +16,21 @@
 //! of the would-be curve point; full Pedersen with real ark-bn254 G1 ops
 //! lands in P1. The wire schema is stable from Phase 0 on so sigil-tx +
 //! sigil-state can integrate today without churning when the math fills in.
+//!
+//! # Verification is fail-closed (PV-0 remediation, 2026-08-20)
+//!
+//! [`verify_shielded_send`] **never returns `Ok`**. Without
+//! `--features real-zk` there is no proof system compiled in, so it rejects
+//! with [`ShieldedSendVerifyError::ZkStubAccepted`]; with `real-zk` it still
+//! rejects, because flux-zk-stark's verifier is `async`. The one function
+//! that can return a [`VerifyOk`] is [`verify::verify_shielded_send_with_stark`]
+//! (`real-zk` only), after flux-zk-stark has genuinely verified a proof bound
+//! to the tx. See the `verify` module docs for the enforcement mechanism and
+//! for what that path still does NOT prove.
+//!
+//! Practical consequence for integrators: this crate cannot yet be wired into
+//! sigil-state's settlement chokepoint. That is deliberate — it fails loudly
+//! instead of silently accepting unverified value transfers.
 
 pub mod commitment;
 pub mod nullifier;
@@ -33,7 +48,11 @@ pub use commitment::{commit, Commitment, CommitmentError};
 pub use nullifier::{derive_nullifier, Nullifier};
 pub use pool::{PoolError, ShieldedPool};
 pub use tx::{ShieldedSendTxData, TxDataError};
-pub use verify::{verify_shielded_send, ShieldedSendVerifyError};
+pub use verify::{verify_shielded_send, ShieldedSendVerifyError, VerifyOk};
+
+/// The only VerifyOk-producing entry point in the crate — see `verify`.
+#[cfg(feature = "real-zk")]
+pub use verify::verify_shielded_send_with_stark;
 
 #[cfg(feature = "real-zk")]
 pub use stark_proofs::{

@@ -108,7 +108,9 @@ fn refresh(watermark: &mut Option<(u64, u64, u64)>) -> Option<LedgerInfo> {
         Some(c) => c,
         None => { info.break_note = Some(format!("tip header #{h} unavailable")); return Some(info); }
     };
-    if cur.precheck().is_err() { info.break_note = Some(format!("precheck failed at tip #{h}")); return Some(info); }
+    // 2026-08-20: verify_at_height — real Ed25519Hot signature check once
+    // activated, no-op otherwise (same upgrade as chain_verify.rs).
+    if cur.verify_at_height(cur.height).is_err() { info.break_note = Some(format!("precheck failed at tip #{h}")); return Some(info); }
     let mut walked = 0u64;
     while walked < BUDGET && h > advertised_floor {
         // stitch onto the already-verified suffix: once we link down to the old
@@ -118,7 +120,7 @@ fn refresh(watermark: &mut Option<(u64, u64, u64)>) -> Option<LedgerInfo> {
             Some(p) => p,
             None => break, // storage floor — normal terminator, not corruption
         };
-        if parent.precheck().is_err() {
+        if parent.verify_at_height(parent.height).is_err() {
             info.break_note = Some(format!("precheck failed at #{}", h - 1));
             break;
         }

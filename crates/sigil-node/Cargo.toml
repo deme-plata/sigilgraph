@@ -66,6 +66,8 @@ rand            = { workspace = true }
 # SIGIL_DAG=1 real ordering: deterministic braid linearization (NOT GHOSTDAG,
 # NOT DagKnight-the-paper — docs/SIGIL_DAGKNIGHT_LANE_v0.md §1).
 sigil-dagknight = { workspace = true }
+sigil-finality  = { path = "../sigil-finality" }
+sigil-braidpool = { path = "../sigil-braidpool" }
 flux-topology = { path = "../flux-topology" }
 flux-p2p      = { workspace = true }
 # our own file system: Reed-Solomon erasure + encryption. Wired here for

@@ -903,7 +903,27 @@ pub fn verify_spend_proof(
     cm_outs: &[[u8; 32]],
     proof: &[u8],
 ) -> Result<(), ShieldedError> {
-    sigil_shield::note_v1::verify_spend_wire(anchor, nullifier, fee, cm_outs, proof)
+    verify_spend_proof_multi(anchor, std::slice::from_ref(nullifier), fee, cm_outs, proof)
+}
+
+/// Verify a spend proof with ONE OR TWO inputs.
+///
+/// The nullifier COUNT selects the circuit — 1 is v5 (falling back to v4 during the rollout
+/// window), 2 is v6. It is the sender's own declaration, so nothing is inferred from the
+/// proof's shape; a proof whose trace does not match the selected circuit is refused rather
+/// than re-routed.
+///
+/// Callers must have already established that the tags are DISTINCT. This function does
+/// check it (defence in depth, since the circuit itself cannot), but the state layer checks
+/// first so a duplicate never reaches proof verification at all.
+pub fn verify_spend_proof_multi(
+    anchor: &[u8; 32],
+    nullifiers: &[[u8; 32]],
+    fee: u128,
+    cm_outs: &[[u8; 32]],
+    proof: &[u8],
+) -> Result<(), ShieldedError> {
+    sigil_shield::note_v1::verify_spend_wire_multi(anchor, nullifiers, fee, cm_outs, proof)
         .map_err(|e| ShieldedError::ProofRejected(e.to_string()))
 }
 

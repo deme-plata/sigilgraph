@@ -493,6 +493,10 @@ impl ShieldedBridge {
         let tx = SigilTx::ShieldedSend {
             anchor: anchor_b,
             nullifier: nf,
+            // The RPC surface is still 1-input. A 2-input spend needs the caller to send
+            // both tags, and that request shape has not been added yet — so this stays
+            // empty rather than silently dropping a second input the caller meant to spend.
+            extra_nullifiers: Vec::new(),
             cm_outs: outs,
             fee,
             proof,

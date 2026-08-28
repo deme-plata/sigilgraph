@@ -648,7 +648,16 @@ pub enum StateMutation {
         /// arbitrary root would let a prover invent a tree containing a note of any value.
         anchor: [u8; 32],
         /// Revealed spend tag; membership in the nullifier set means already-spent.
+        ///
+        /// ⚠️ This is the FIRST input's tag, not necessarily the only one. Read
+        /// `extra_nullifiers` too — or better, do not read either directly.
         nullifier: [u8; 32],
+        /// Tags for inputs beyond the first. Empty for a 1-input spend.
+        ///
+        /// `#[serde(default)]` so every ShieldedSpend already written into the chain log
+        /// keeps deserialising into the new shape.
+        #[serde(default)]
+        extra_nullifiers: Vec<[u8; 32]>,
         /// New note commitments to append, in order.
         cm_outs: Vec<[u8; 32]>,
         /// The public fee, credited to the master wallet.
@@ -1198,7 +1207,7 @@ pub fn commit_state_transition(
                 state.shielded.remember_anchor_dirty();
             }
 
-            StateMutation::ShieldedSpend { anchor, nullifier, cm_outs, fee, proof, note_ciphertexts } => {
+            StateMutation::ShieldedSpend { anchor, nullifier, extra_nullifiers, cm_outs, fee, proof, note_ciphertexts } => {
                 // FIXED FEE. A freely-chosen fee is public and therefore a fingerprint:
                 // amounts stay hidden while the fee quietly identifies the sender. One
                 // mandatory value makes it carry no information.
@@ -1214,23 +1223,56 @@ pub fn commit_state_transition(
                 let Some(spend_epoch) = state.shielded.epoch_of_anchor(&anchor) else {
                     return Err(CommitError::UnknownAnchor { anchor });
                 };
-                // 2. Freshness BEFORE proof work — a replay is cheap to reject. Scoped to
+                // 2. EVERY nullifier this spend reveals, gathered once so no step below can
+                //    accidentally consider only the first. A 2-input spend that verifies
+                //    while recording one tag leaves the other note spendable — a
+                //    double-spend by omission, and the likeliest way this feature gets
+                //    deployed wrongly.
+                let nfs: Vec<[u8; 32]> = std::iter::once(nullifier)
+                    .chain(extra_nullifiers.iter().copied())
+                    .collect();
+
+                //    DISTINCTNESS, before anything else touches them. The circuit accepts
+                //    one note fed in as both inputs: both blocks are independently valid and
+                //    the conservation lane simply sums twice the value. The only tell is the
+                //    repeated tag, and a set makes the duplicate insert a no-op — one note
+                //    burned, double the value out. This check is the whole defence.
+                for i in 0..nfs.len() {
+                    for j in (i + 1)..nfs.len() {
+                        if nfs[i] == nfs[j] {
+                            return Err(CommitError::Shielded(
+                                shielded::ShieldedError::NullifierAlreadySpent(nfs[i]),
+                            ));
+                        }
+                    }
+                }
+
+                //    Freshness BEFORE proof work — a replay is cheap to reject. Scoped to
                 //    the anchor's epoch: the circuit binds `nf` to an in-tree position, so
                 //    the same raw nullifier can belong to two different notes in two
                 //    different generations, and judging them the same would freeze one.
-                if state.shielded.is_spent_in_epoch(spend_epoch, &nullifier) {
-                    return Err(CommitError::Shielded(
-                        shielded::ShieldedError::NullifierAlreadySpent(nullifier),
-                    ));
+                //    ALL of them are checked here, so step 4 cannot fail halfway.
+                for nf in &nfs {
+                    if state.shielded.is_spent_in_epoch(spend_epoch, nf) {
+                        return Err(CommitError::Shielded(
+                            shielded::ShieldedError::NullifierAlreadySpent(*nf),
+                        ));
+                    }
                 }
                 // 3. The arithmetic half. This is the step that makes the hidden amounts
-                //    safe: it proves the note existed, was worth what was spent, and that
+                //    safe: it proves the notes existed, were worth what was spent, and that
                 //    every output commitment is bound to an in-range conserved amount.
-                //    Verified here, in the chokepoint, so no caller can skip it.
-                shielded::verify_spend_proof(&anchor, &nullifier, fee, &cm_outs, &proof)
+                //    Verified here, in the chokepoint, so no caller can skip it. The
+                //    nullifier COUNT selects the circuit — 1 is v5/v4, 2 is v6.
+                shielded::verify_spend_proof_multi(&anchor, &nfs, fee, &cm_outs, &proof)
                     .map_err(|e| CommitError::ShieldedProofRejected { reason: e.to_string() })?;
-                // 4. Only now mutate.
-                state.shielded.spend_nullifier_in_epoch(spend_epoch, nullifier)?;
+                // 4. Only now mutate. ALL-OR-NOTHING: every tag was proven distinct and
+                //    fresh above, and `spend_nullifier_in_epoch` fails only on a duplicate
+                //    insert, so no insert in this loop can fail once the first has
+                //    succeeded. That is what makes the pair atomic without a rollback path.
+                for nf in &nfs {
+                    state.shielded.spend_nullifier_in_epoch(spend_epoch, *nf)?;
+                }
                 for (i, cm) in cm_outs.iter().enumerate() {
                     let ct = note_ciphertexts.get(i).cloned().flatten();
                     state.shielded.append_note_with_delivery(*cm, ct)?;

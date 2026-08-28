@@ -133,6 +133,7 @@ fn shield_then_spend_is_accepted_and_mutates_state() {
         vec![StateMutation::ShieldedSpend {
             anchor,
             nullifier: nf,
+            extra_nullifiers: vec![],
             cm_outs: cm_outs.clone(),
             fee: SHIELDED_FEE,
             proof,
@@ -167,6 +168,7 @@ fn replaying_a_nullifier_is_refused() {
     let spend = |p: Vec<u8>| StateMutation::ShieldedSpend {
         anchor,
         nullifier: nf,
+        extra_nullifiers: vec![],
         cm_outs: cm_outs.clone(),
         fee: SHIELDED_FEE,
         proof: p,
@@ -203,6 +205,7 @@ fn unknown_anchor_is_refused() {
         vec![StateMutation::ShieldedSpend {
             anchor: [0xAB; 32], // a root this pool never had
             nullifier: nf,
+            extra_nullifiers: vec![],
             cm_outs,
             fee: SHIELDED_FEE,
             proof,
@@ -228,7 +231,7 @@ fn tampered_proof_is_refused() {
     let err = apply(
         &mut state,
         3,
-        vec![StateMutation::ShieldedSpend { anchor, nullifier: nf, cm_outs, fee: SHIELDED_FEE, proof, note_ciphertexts: vec![] }],
+        vec![StateMutation::ShieldedSpend { anchor, nullifier: nf, extra_nullifiers: vec![], cm_outs, fee: SHIELDED_FEE, proof, note_ciphertexts: vec![] }],
     )
     .expect_err("SECURITY: a tampered proof must be refused");
     assert!(
@@ -261,6 +264,7 @@ fn inflated_output_commitments_are_refused_at_the_chokepoint() {
         vec![StateMutation::ShieldedSpend {
             anchor,
             nullifier: nf,
+            extra_nullifiers: vec![],
             cm_outs: inflated,
             fee: SHIELDED_FEE,
             proof,
@@ -394,7 +398,7 @@ fn shielded_pool_survives_the_snapshot_round_trip() {
     apply(
         &mut restored,
         3,
-        vec![StateMutation::ShieldedSpend { anchor, nullifier: nf, cm_outs, fee: SHIELDED_FEE, proof, note_ciphertexts: vec![] }],
+        vec![StateMutation::ShieldedSpend { anchor, nullifier: nf, extra_nullifiers: vec![], cm_outs, fee: SHIELDED_FEE, proof, note_ciphertexts: vec![] }],
     )
     .expect("a spend must still verify against a restored anchor");
     assert!(restored.shielded().is_spent(&nf));
@@ -415,7 +419,7 @@ fn a_nonstandard_fee_is_refused() {
     let err = apply(
         &mut state,
         3,
-        vec![StateMutation::ShieldedSpend { anchor, nullifier: nf, cm_outs, fee: 1_337, proof, note_ciphertexts: vec![] }],
+        vec![StateMutation::ShieldedSpend { anchor, nullifier: nf, extra_nullifiers: vec![], cm_outs, fee: 1_337, proof, note_ciphertexts: vec![] }],
     )
     .expect_err("SECURITY: a chosen fee is a fingerprint and must be refused");
     assert!(matches!(err, CommitError::Shielded(_)), "got {err:?}");

@@ -156,6 +156,16 @@ pub enum SigilTx {
     ShieldedSend {
         anchor: [u8; 32],
         nullifier: [u8; 32],
+        /// Nullifiers for inputs BEYOND the first. Empty for a 1-input spend (v4/v5); one
+        /// entry for a 2-input spend (v6).
+        ///
+        /// Additive rather than turning `nullifier` into a `Vec`, so every transaction
+        /// already recorded in the chain log keeps deserialising — `#[serde(default)]`
+        /// gives an empty vector for the old shape. The cost is that a careless reader can
+        /// see `nullifier` and miss the rest, so nothing reads it directly: use
+        /// [`SigilTx::shielded_send_nullifiers`], and see the atomicity note there.
+        #[serde(default)]
+        extra_nullifiers: Vec<[u8; 32]>,
         cm_outs: Vec<[u8; 32]>,
         #[serde(with = "sigil_state::u128_str")]
         fee: u128,
@@ -541,6 +551,26 @@ impl SigilTx {
             SigilTx::BankPropose { proposer, .. } => *proposer,
             SigilTx::BankApprove { approver, .. } => *approver,
             SigilTx::BankExecute { executor, .. } => *executor,
+        }
+    }
+
+    /// Every nullifier a shielded spend reveals, first one included.
+    ///
+    /// THE POINT OF THIS EXISTING: `extra_nullifiers` is additive, so `nullifier` alone
+    /// still compiles and still looks complete. A path that reads it and records only that
+    /// one accepts a 2-input spend while burning a single note — the other input's note
+    /// stays spendable, which is a double-spend by omission. Read them through here.
+    ///
+    /// Returns `None` for a transaction that is not a shielded spend.
+    pub fn shielded_send_nullifiers(&self) -> Option<Vec<[u8; 32]>> {
+        match self {
+            SigilTx::ShieldedSend { nullifier, extra_nullifiers, .. } => {
+                let mut v = Vec::with_capacity(1 + extra_nullifiers.len());
+                v.push(*nullifier);
+                v.extend_from_slice(extra_nullifiers);
+                Some(v)
+            }
+            _ => None,
         }
     }
 
@@ -1243,6 +1273,27 @@ pub struct ApplyResult {
 /// height before any deployment that already carries real transparent traffic.
 pub const SHIELDED_ONLY_HEIGHT: u64 = 0;
 
+/// Height from which a shielded spend may declare MORE THAN ONE input.
+///
+/// Below it, `extra_nullifiers` must be empty and a transaction carrying any is refused —
+/// so the multi-input circuit cannot be reached by a transaction until every node agrees it
+/// is allowed to be, and blocks already on the chain validate exactly as they did.
+///
+/// Sequenced AFTER [`TRANSPARENT_COINBASE_HEIGHT`] (500,000) on purpose. The two changes are
+/// independent, and putting them at one height would mean a problem with either forces
+/// reverting both. This one is also PERMISSIVE — it only allows something new — so it can
+/// activate late at no cost, and nothing can even produce such a transaction until wallets
+/// support it.
+///
+/// 600,000 is ~10 hours after the coinbase change at the measured 2.66 blk/s, which leaves
+/// room to watch that one land cleanly first.
+pub const SHIELDED_MULTI_INPUT_HEIGHT: u64 = 600_000;
+
+/// May a spend at `height` declare more than one input?
+pub fn multi_input_spend_allowed(height: u64) -> bool {
+    height >= SHIELDED_MULTI_INPUT_HEIGHT
+}
+
 /// Height from which a wallet that has published a SQIsign L5 key MUST also sign its
 /// shielded ramps (`Shield`, `Unshield`) with that key — require-both, never either-or.
 ///
@@ -1427,11 +1478,47 @@ fn apply_tx_inner(
             });
         }
 
-        SigilTx::ShieldedSend { anchor, nullifier, cm_outs, fee, proof, note_ciphertexts } => {
+        SigilTx::ShieldedSend { anchor, nullifier, extra_nullifiers, cm_outs, fee, proof, note_ciphertexts } => {
+            // MULTI-INPUT GATE. Below the activation height a spend may declare exactly one
+            // input, so a transaction carrying extras is refused outright rather than
+            // silently having them ignored — ignoring them would verify a 2-input proof
+            // while recording one nullifier, which is the double-spend this whole gate
+            // exists to make unreachable.
+            // `at_height == None` is the legacy entry point, documented as "gate DISABLED"
+            // — tests, harnesses and other non-consensus callers. Matching that convention
+            // rather than inventing a stricter one here: consensus always arrives through
+            // `apply_tx_at` with a real height, so the permissive branch is unreachable
+            // from a block.
+            if !extra_nullifiers.is_empty()
+                && at_height.is_some_and(|h| !multi_input_spend_allowed(h))
+            {
+                return Err(TxApplyError::ShieldedRejected(
+                    "multi-input shielded spend is not active at this height",
+                ));
+            }
+            let nfs = {
+                let mut v = Vec::with_capacity(1 + extra_nullifiers.len());
+                v.push(*nullifier);
+                v.extend_from_slice(extra_nullifiers);
+                v
+            };
+            // DISTINCTNESS. Not a formality: the circuit ACCEPTS one note fed in as both
+            // inputs — two independently-valid blocks, a conservation lane summing twice the
+            // value, every constraint satisfied — and the chain stores nullifiers in a set,
+            // so the duplicate insert is a no-op. One note burned, double the value out.
+            for i in 0..nfs.len() {
+                for j in (i + 1)..nfs.len() {
+                    if nfs[i] == nfs[j] {
+                        return Err(TxApplyError::ShieldedRejected(
+                            "two inputs name the same nullifier",
+                        ));
+                    }
+                }
+            }
             // Reject an already-spent nullifier early so an obvious replay does not cost
-            // a STARK verification. The chokepoint re-checks — this is an optimization,
-            // never the guarantee.
-            if state.shielded().is_spent(nullifier) {
+            // a STARK verification. EVERY nullifier, not just the first. The chokepoint
+            // re-checks — this is an optimization, never the guarantee.
+            if nfs.iter().any(|nf| state.shielded().is_spent(nf)) {
                 return Err(TxApplyError::ShieldedRejected("nullifier already spent"));
             }
             // Delivery is optional per output, but partial is not: a length that neither
@@ -1446,6 +1533,7 @@ fn apply_tx_inner(
             out.mutations.push(StateMutation::ShieldedSpend {
                 anchor: *anchor,
                 nullifier: *nullifier,
+                extra_nullifiers: extra_nullifiers.clone(),
                 cm_outs: cm_outs.clone(),
                 fee: *fee,
                 proof: proof.clone(),
@@ -3181,6 +3269,147 @@ mod r1_mempool_tests {
 
 #[cfg(test)]
 mod r2_apply_tests {
+    use super::*;
+    use sigil_header::SQISIGN_L5_LEN;
+
+    /// Local to this module: `crate::tests::dummy_signed` is private to that module.
+    /// `apply_tx*` only prechecks, so an unsigned shell is enough for gate tests.
+    fn gate_signed(tx: SigilTx) -> SignedTx {
+        let from = tx.fee_payer();
+        SignedTx {
+            tx,
+            from_pubkey: from,
+            nonce: 0,
+            sig_scheme: SigScheme::SqiSign5,
+            sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
+            pubkey: PubKeyBytes(Vec::new()),
+        }
+    }
+
+    /// THE MULTI-INPUT GATE, from both sides.
+    ///
+    /// Below the activation height a spend declaring a second input must be REFUSED, not
+    /// have the extra tag quietly ignored. Ignoring it is the dangerous outcome: the proof
+    /// would still be a 2-input proof, so the chain would verify a spend of two notes while
+    /// recording one nullifier — leaving the other note spendable. A double-spend by
+    /// omission is exactly what this gate exists to make unreachable.
+    #[test]
+    fn a_second_input_is_refused_below_the_activation_height() {
+        let tx = SigilTx::ShieldedSend {
+            anchor: [1u8; 32],
+            nullifier: [2u8; 32],
+            extra_nullifiers: vec![[3u8; 32]],
+            cm_outs: vec![[4u8; 32], [5u8; 32]],
+            fee: sigil_state::shielded::SHIELDED_FEE,
+            proof: vec![0u8; 8],
+            note_ciphertexts: vec![],
+        };
+        let signed = gate_signed(tx);
+        let st = SigilState::new();
+
+        let below = apply_tx_at(&st, &signed, SHIELDED_MULTI_INPUT_HEIGHT - 1);
+        assert!(
+            matches!(below, Err(TxApplyError::ShieldedRejected(m)) if m.contains("not active")),
+            "a second input must be refused before activation, got {below:?}"
+        );
+
+        // At the activation height the gate lets it through to the real checks — which
+        // reject it for a different reason (the proof is nonsense here). The point is that
+        // it is no longer THIS reason.
+        let at = apply_tx_at(&st, &signed, SHIELDED_MULTI_INPUT_HEIGHT);
+        assert!(
+            !matches!(&at, Err(TxApplyError::ShieldedRejected(m)) if m.contains("not active")),
+            "the gate must be open at the activation height, got {at:?}"
+        );
+    }
+
+    /// The same note declared as both inputs is refused BEFORE any proof work.
+    ///
+    /// Load-bearing, not hygiene: the circuit ACCEPTS this witness. Both input blocks are
+    /// independently valid, the conservation lane sums twice the value, and every
+    /// constraint holds. The only tell is the repeated tag — and the chain stores tags in a
+    /// set, so the duplicate insert is a no-op. One note burned, double the value out.
+    #[test]
+    fn the_same_nullifier_declared_twice_is_refused() {
+        let nf = [2u8; 32];
+        let tx = SigilTx::ShieldedSend {
+            anchor: [1u8; 32],
+            nullifier: nf,
+            extra_nullifiers: vec![nf],
+            cm_outs: vec![[4u8; 32], [5u8; 32]],
+            fee: sigil_state::shielded::SHIELDED_FEE,
+            proof: vec![0u8; 8],
+            note_ciphertexts: vec![],
+        };
+        let signed = gate_signed(tx);
+        let st = SigilState::new();
+        let r = apply_tx_at(&st, &signed, SHIELDED_MULTI_INPUT_HEIGHT);
+        assert!(
+            matches!(r, Err(TxApplyError::ShieldedRejected(m)) if m.contains("same nullifier")),
+            "one note used as both inputs must be refused, got {r:?}"
+        );
+    }
+
+    /// Nothing may read only the first tag. `shielded_send_nullifiers` is the sanctioned
+    /// accessor precisely because `nullifier` alone still compiles and still looks complete.
+    #[test]
+    fn the_accessor_returns_every_nullifier() {
+        let tx = SigilTx::ShieldedSend {
+            anchor: [1u8; 32],
+            nullifier: [2u8; 32],
+            extra_nullifiers: vec![[3u8; 32]],
+            cm_outs: vec![[4u8; 32], [5u8; 32]],
+            fee: 1,
+            proof: vec![],
+            note_ciphertexts: vec![],
+        };
+        assert_eq!(tx.shielded_send_nullifiers(), Some(vec![[2u8; 32], [3u8; 32]]));
+        assert_eq!(
+            SigilTx::Shield { from: [0u8; 32], amount: 1, cm: [0u8; 32], fee: 0 }
+                .shielded_send_nullifiers(),
+            None,
+            "only a shielded spend has nullifiers"
+        );
+    }
+
+    /// A ShieldedSend serialised BEFORE this field existed must still decode — every one
+    /// already written into the chain log is that shape, and a chain that cannot replay its
+    /// own history is not a chain.
+    #[test]
+    fn a_pre_multi_input_transaction_still_deserialises() {
+        // Build the legacy shape the honest way: serialise a real transaction with the
+        // real serialiser, then DELETE the field, which is exactly what a record written
+        // before the field existed looks like. Hand-writing the JSON would only test that
+        // my idea of the old shape round-trips.
+        let modern = SigilTx::ShieldedSend {
+            anchor: [1u8; 32],
+            nullifier: [2u8; 32],
+            extra_nullifiers: vec![],
+            cm_outs: vec![[4u8; 32], [5u8; 32]],
+            fee: 7,
+            proof: vec![],
+            note_ciphertexts: vec![],
+        };
+        // `SigilTx` is `#[serde(tag = "kind")]` — INTERNALLY tagged, so the JSON is flat
+        // (`{"kind": "ShieldedSend", "anchor": ..., ...}`) and not nested under a variant
+        // key. Getting that wrong is how this test failed first time round.
+        let mut v = serde_json::to_value(&modern).expect("serialise");
+        let body = v.as_object_mut().expect("a flat object");
+        assert_eq!(body.get("kind").and_then(|k| k.as_str()), Some("ShieldedSend"));
+        assert!(
+            body.remove("extra_nullifiers").is_some(),
+            "the field must have been there to remove"
+        );
+
+        let legacy: SigilTx = serde_json::from_value(v).expect("legacy shape must decode");
+        assert_eq!(
+            legacy.shielded_send_nullifiers(),
+            Some(vec![[2u8; 32]]),
+            "an old transaction has exactly one input"
+        );
+        assert_eq!(legacy, modern, "and is otherwise identical to the modern one-input form");
+    }
+
     use super::*;
 
     #[test]

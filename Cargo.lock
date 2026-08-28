@@ -3526,6 +3526,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "flux-kgauge"
+version = "5.1.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "flux-lattice-guard"
 version = "0.41.0"
 dependencies = [
@@ -9036,7 +9044,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-top"
-version = "7.3.2"
+version = "7.3.3"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",

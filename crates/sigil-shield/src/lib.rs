@@ -38,6 +38,9 @@ pub mod note_cipher;
 /// Viewing keys and selective disclosure: confidential by default, provable on demand —
 /// what regulated users actually need.
 pub mod viewing;
+/// Zero-knowledge masking + the `HidingProver` contract: a prover that refuses to
+/// return a proof containing its own witness.
+pub mod zk_mask;
 pub mod mimc;
 pub mod membership;
 pub mod transfer;
@@ -47,6 +50,9 @@ pub mod spend_full;
 /// Fully owner-bound spend — inputs AND outputs. v3 left outputs un-owned, so
 /// change notes inherited the very flaw v3 fixed.
 pub mod spend_full_v4;
+/// Zero-knowledge spend: v4's constraint system on a trace whose second half is reserved
+/// randomness, so the openings no longer print the witness. See [`zk_mask`].
+pub mod spend_full_v5;
 pub mod ring;
 /// Shielded wallet: key derivation, own-note tracking, and spend proving.
 pub mod wallet;

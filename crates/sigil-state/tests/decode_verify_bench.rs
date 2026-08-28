@@ -79,6 +79,9 @@ fn mk_header(height: u64, parent_hash: BlockHash, pad: usize) -> SigilBlockHeade
         sig_scheme: scheme,
         producer: [0u8; 32],
         producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
+        // Dormant on this chain (TOPOLOGY_COMMITMENT_ACTIVATION_HEIGHT is u64::MAX),
+        // so `None` is what every real header carries — and what `hash()` strips.
+        topology_commitment: None,
     }
 }
 

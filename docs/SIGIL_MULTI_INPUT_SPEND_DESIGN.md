@@ -1,7 +1,10 @@
 # Spending more than one note at a time — the design for a 2-in circuit
 
-**Status:** design, not built. Written 2026-08-28 after fixing the dust that made it urgent.
+**Status:** circuit BUILT and tested (`spend_full_v6`, 13 tests). Not yet reachable from the
+chain — wire format, state application, dispatch and wallet still to come.
 **Depends on:** `TRANSPARENT_COINBASE_HEIGHT` (shipped) and `sigil-shield::payment` (shipped).
+**Corrected 2026-08-28** after operator review and a check of the live tree; the corrections
+are marked inline.
 
 ---
 
@@ -70,14 +73,27 @@ blowup factor — the exact territory where an earlier session lost hours to
 `InconsistentOodConstraintEvaluations`. It also means dummy nullifiers get revealed and
 recorded forever, growing the spent set with entries that never corresponded to money.
 
-None of that is necessary, because **the verifier already dispatches on circuit version**.
-`note_v1::verify_spend_wire` tries v5 and falls back to v4. Adding a third branch costs one
-`if`. So:
+None of that is necessary, because dispatching on a declared circuit version is one `if`.
 
-| Wallet needs | Circuit | Inputs |
-|---|---|---|
-| Pay from one note | `spend_full_v5` (unchanged) | 1 |
-| Merge two notes | `spend_full_v6` (new) | 2 |
+⚠️ **CORRECTION.** An earlier draft of this paragraph said `note_v1::verify_spend_wire`
+*already* dispatches, trying v5 and falling back to v4. **It does not.** Checked directly:
+`verify_spend_wire` calls `verify_spend_full_v4` and nothing else, and `wallet.rs` proves
+with `build_spend_full_v4_trace` + `mimc_options()`. `spend_full_v5` is committed but is
+**dead code** — referenced only from `examples/`. The wiring exists solely in an orphaned
+commit (`033bb594`, "wip: preserve orphaned in-flight work") which is *not* an ancestor of
+this branch.
+
+That matters far beyond this document: **the zero-knowledge fix is not in the production
+spend path.** Live spends still prove and verify with v4, the circuit that publishes the
+recipient key and both output amounts ~85x each in the clear. v5 fixed it, v5 was committed,
+and nothing calls v5. So the dispatch work below is not an optional third branch — the
+*first* branch is missing too.
+
+| Wallet needs | Circuit | Inputs | Wired today? |
+|---|---|---|---|
+| Pay from one note | `spend_full_v4` | 1 | ✅ — and it leaks the witness |
+| Pay from one note, privately | `spend_full_v5` | 1 | ❌ dead code |
+| Merge two notes | `spend_full_v6` | 2 | ❌ built, not wired |
 
 Every spend has **exactly** the number of inputs its circuit declares. No dummies, no
 conditional membership, no degree change, no new soundness argument beyond "v6 is v5 with a
@@ -89,14 +105,24 @@ v5's trace is 33 columns wide: 15 for the input (cols 0–8 Merkle lanes, 9–14
 owner-key binding) and 9 per output. v6 adds one more 15-column input block:
 
 ```
-v5:  [ input 0 : 15 ] [ out 0 : 9 ] [ out 1 : 9 ]                = 33 columns
-v6:  [ input 0 : 15 ] [ input 1 : 15 ] [ out 0 : 9 ] [ out 1 : 9 ] = 48 columns
+v5:  [0 bal][1 sub][ input 0 : 13 ] [ out 0 : 9 ] [ out 1 : 9 ]                = 33 columns
+v6:  [0 bal][1 sub][ input 0 : 13 ] [ out 0 : 9 ] [ out 1 : 9 ] [ input 1 : 13 ] = 46 columns
 ```
 
-Trace **length is unchanged** — `(depth+1)·64`, doubled for the zero-knowledge mask. That
-is the reason to grow width rather than time: FRI depth follows trace length, so a wider
-trace costs more trace-LDE and a bigger commitment, but does not deepen FRI. Expect
-roughly `48/33 ≈ 1.45×` v5's proving cost, not `2×`.
+⚠️ **CORRECTION:** an earlier draft said 48 columns and `48/33 ≈ 1.45×`. The real figure is
+**46**, because columns 0 and 1 — the conservation lane and the subtrahend lane — are
+*shared*, not duplicated per input. Input 1 adds 13 columns, not 15. As built, input 1 is
+appended at columns 33..=45 so v5's layout stays byte-identical and no existing constraint
+index moves.
+
+Trace **length is unchanged** — `(depth+1)·64`, doubled for the zero-knowledge mask. That is
+the reason to grow width rather than time: FRI depth follows trace length, so a wider trace
+costs more trace-LDE and a bigger commitment but does not deepen FRI.
+
+`46/33 ≈ 1.4×` is a first-order expectation for trace-proportional work only, and should be
+read as such (noted in review): hashing, composition-polynomial evaluation, memory bandwidth
+and commitment overhead do not all scale linearly with width. **Not yet measured** — the
+benchmark is on the checklist below and the ratio here is a prediction, not a result.
 
 Public inputs gain a second nullifier:
 
@@ -115,10 +141,21 @@ Constraints are v5's, instantiated twice at a column offset, plus exactly one ne
 value_0 + value_1  ==  out_0 + out_1 + fee
 ```
 
-The range bound already in v5's module docs must be re-checked for the extra term:
-`(N_OUTS + 1) · 2^RANGE_BITS < p` becomes `(N_INS + N_OUTS) · 2^RANGE_BITS < p`. At
-`RANGE_BITS = 58` and the Goldilocks prime this still holds with room, but it is a
-correctness condition and belongs in a `const` assertion, not a comment.
+The field bound needs re-deriving, and the first draft got the reason wrong. Conservation is
+checked **in the field**, so for field equality to imply integer equality neither *side* may
+wrap. Every amount is separately range-constrained to `< 2^RANGE_BITS` by the circuit, so the
+bound is set by the side with more terms — not by their total:
+
+```
+inputs        : N_INS terms          = 2
+outputs + fee : N_OUTS + 1 terms     = 3      ← the binding side
+⇒ max(N_INS, N_OUTS + 1) · 2^RANGE_BITS  <  p
+```
+
+The earlier draft used `(N_INS + N_OUTS) = 4`, which is *stricter* and therefore still sound,
+but for the wrong reason — and a future arity change would have inherited the wrong rule.
+Corrected in review. At `RANGE_BITS = 58` and Goldilocks there is abundant room either way.
+It is a `const` assertion in the code, not a comment.
 
 ### What else has to move
 
@@ -131,15 +168,67 @@ correctness condition and belongs in a `const` assertion, not a comment.
   declared version, **never on trace length** — 512 rows is v4-at-depth-7 *or* v5-at-depth-3,
   and that ambiguity has already caused one failure ("expected 9408 query value bytes, but
   was 10752").
-- **Wallet.** `payment::plan_payment` gains a `ConsolidateThenSpend` arm: merge the two
-  smallest notes, repeat until one note covers the payment. `log₂(n)` rounds — 4–5 for a
-  wallet with 20 notes, and each round is an ordinary transaction.
+- **Wallet.** `payment::plan_payment` gains a `ConsolidateThenSpend` arm. See the section
+  below — the first draft of this line got the cost badly wrong.
+
+## Planning a payment, and what consolidation actually costs
+
+**Correction (review, 2026-08-28).** An earlier draft said consolidation takes `log₂(n)`
+rounds and implied 4–5 transactions for a 20-note wallet. That confuses *depth* with
+*count*. Each merge is its own transaction, and each one reduces the note count by exactly
+one, so **reducing `n` notes to one costs `n − 1` transactions**, no matter how they are
+scheduled. A balanced schedule only shortens the critical path:
+
+```
+round 1:  20 → 10     10 transactions
+round 2:  10 →  5      5 transactions
+round 3:   5 →  3      2 transactions + 1 carried
+round 4:   3 →  2      1 transaction  + 1 carried
+round 5:   2 →  1      1 transaction
+                      ─────────────────
+                      19 transactions, depth 5
+```
+
+19, not 5. That difference decides whether background consolidation is a quiet convenience
+or a fee event the user must consent to, so it belongs in the design, not in the code
+review.
+
+**And consolidation is usually the wrong move anyway.** Merging the two smallest notes is
+the obvious rule and it is bad. A wallet holding
+
+```
+0.1   0.2   0.3   4.9   5.0
+```
+
+that wants to send `9.5` needs no consolidation at all — `4.9 + 5.0` is a single v6 spend.
+Repeatedly merging the smallest notes would burn several transactions to arrive at the
+same place. So the planner asks, in order:
+
+```
+1. Does ONE note cover amount + fee?            → v5 spend, done.
+2. Do TWO notes cover it?                        → v6 spend, done.
+3. Otherwise: pick the consolidation pair that
+   minimises expected remaining cost.
+4. Repeat only while step 2 still fails.
+```
+
+Steps 1 and 2 cover almost every real wallet, and neither costs an extra transaction. Step 3
+is the rare path. For small note sets an exhaustive pair search is trivial; for large ones,
+sort and use a two-pointer scan.
+
+Note the asymmetry with the single-note rule already shipped in `sigil-shield::payment`,
+which picks the *smallest* covering note deliberately — spending the largest would destroy
+the only note capable of a big payment. For a pair, the same logic gives "smallest pair that
+covers", not "two largest".
 
 ## What this does not fix
 
-**The 836,536 notes already in the pool stay stranded.** Two-in halves the count per round,
-so clearing them would take ~418,000 transactions in the first round alone. They cannot be
-economically swept, and no widening of the circuit changes that — 4-in still needs ~209,000.
+**The 836,536 notes already in the pool are not cheaply recoverable in bulk.** Precision
+matters here (review, 2026-08-28): they are *not* cryptographically stranded. Once v6 exists
+any individual holder can recover their own balance through repeated 2-in merges, and that
+works. What cannot be done cheaply is compressing the pool as a whole — one merge removes
+one note, so clearing 836,536 of them is ~836,535 transactions however they are scheduled,
+and a 4-in circuit only changes the constant. The obstacle is economic, not cryptographic.
 
 g1 is a testnet that was reset on 2026-08-26 with zero premine, so there are two honest
 options, and both are operator decisions:
@@ -150,18 +239,66 @@ options, and both are operator decisions:
    counted in distinct unlinkable owners, not in notes — start from an honest zero rather
    than from 836,536 pieces of attributable padding.
 
+## The refactor this points at
+
+As built, v6's input-1 constraint block is a transcription of input 0's at different column
+offsets. That was deliberate — the frame indices differ, a shared helper would take a dozen
+of them, and this is consensus code where an index slip is expensive. But it does not scale:
+a hypothetical 4-in circuit would be four transcriptions.
+
+The suggestion from review is the right shape, and it keeps the property that makes this
+design safe:
+
+```rust
+SpendFullAir<const N_INS: usize>
+```
+
+with **separate protocol versions at fixed arity**, so the family reads:
+
+```
+v5 = SpendFull<1>
+v6 = SpendFull<2>
+v7 = SpendFull<4>    // only if ever justified
+```
+
+That is not "a variable-input circuit". Each shipped version still has a compile-time fixed
+input count, so there is still no runtime padding, no dummy notes, no conditional
+membership and no degree increase — the whole reason this design works. It only removes the
+copy-paste.
+
+Two things make this cheaper than it looks. The column layout is already generated by
+`const fn` helpers on the output side (`col_hv(i)`, `col_iox(i)`, …), so the same treatment
+on the input side is mechanical. And v5 is currently dead code (see the correction above),
+so refactoring it carries none of the risk of touching a live circuit.
+
+Worth doing before v7 is ever contemplated, and not urgent before then.
+
 ## Order of work
 
-1. `spend_full_v6.rs` — v5 duplicated at an offset, plus the sum constraint. Prove and
-   verify a real 2-note merge in a test before anything else moves.
-2. Wire format + height gate + atomic double-nullifier application.
-3. Third dispatch branch, with a test that a v5 proof and a v6 proof of the same depth are
-   never confused.
-4. `ConsolidateThenSpend` in the planner, and the wallet loop that runs it in the
-   background so the user never sees the word "consolidate".
 
-Step 1 is self-contained and is where the risk is. Do not start step 2 until a v6 proof
-verifies.
+0. ✅ **DONE** — `spend_full_v6.rs`, 13 tests. A real 2-note merge proves and verifies.
+1. **Wire v5 into the production path.** This jumped the queue: the discovery that
+   `verify_spend_wire` still calls v4 means live spends publish the witness. Privacy before
+   convenience.
+2. Wire format + height gate + atomic double-nullifier application — with
+   `reject_duplicate_nullifiers` called at state application, not only in the verifier.
+3. Dispatch, keyed on a declared version. ⚠️ **never** on trace length.
+4. Planner: steps 1–2 of the payment algorithm above (one note, then two) before any
+   consolidation logic, since they cover almost every real wallet at no extra transaction.
+5. Benchmark the width increase — proving time, peak memory, proof size — and replace the
+   predicted `1.4x` with a measured number.
+
+Validation checklist for step 2 onward, from review:
+
+  - two real notes at the same anchor ✅
+  - a bad path on either input ✅
+  - either ownership key wrong ✅
+  - each published nullifier mutated independently ✅
+  - `v0 + v1 != o0 + o1 + fee` ✅
+  - duplicate nullifiers refused ✅
+  - randomised masking leaves public inputs invariant ✅
+  - v5/v6 same-depth dispatch — **pending**, needs step 3
+  - width/memory/proof-size benchmark — **pending**, step 5
 
 ## A note on testing this class of change
 

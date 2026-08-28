@@ -387,6 +387,15 @@ mod tests {
             ghostdag_k: None,
             final_blue_depth: None,
             saturated_self_heal_window: 1 << 20,
+            // 0 disables pending eviction entirely — the same value
+            // `sigil_dagknight::sim` uses in both its simulation configs,
+            // and for the same reason. Every other cap here is already set
+            // enormous (1<<20) so that eviction can never confound the
+            // measurement; inheriting the production default (512) would
+            // quietly switch tip-lag eviction ON inside the one scenario
+            // that exists to replay DEEP reordering, which is exactly where
+            // it could mask the behaviour under test.
+            pending_max_tip_lag: 0,
         };
 
         // Node A: creation order (k_probe.rs: `Braid::new_with_base(cfg, GENESIS, 0)`).

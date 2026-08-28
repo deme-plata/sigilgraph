@@ -114,7 +114,13 @@ fn fingerprint(c: &ChainTip) -> Fingerprint {
 /// real `commit_state_transition`, real header. No merge parents, no user txs (see
 /// the module doc for why txs are deliberately absent).
 fn mint(frontier: &ChainTip, reward: u128) -> Block {
-    mint_next_block(frontier, vec![], &[], Some(reward), None, None)
+    // Trailing `None` is `share_pool`: the partial-share pool drained for
+    // this block. It only has any effect when `solve` is `Some`, and `solve`
+    // is `None` here by construction — this helper mints a block whose only
+    // distinguishing feature is its reward value (see the fn doc). Passing a
+    // pool would add coinbase credits the fingerprint is not supposed to
+    // vary on.
+    mint_next_block(frontier, vec![], &[], Some(reward), None, None, None)
         .expect("mint_next_block on a well-formed frontier must succeed")
         .0
 }
@@ -125,16 +131,38 @@ fn mint(frontier: &ChainTip, reward: u128) -> Block {
 /// randomly-varied competitor happens to win the braid's min-hash tie-break, we
 /// search until we hold one that provably will, then assert the braid agrees.
 fn mint_hash_losing_sibling(parent: &ChainTip, beat: BlockHash, reward_base: u128) -> Block {
-    for k in 1u128..4096 {
+    // The search needs a hash STRICTLY BELOW `beat`. Each candidate is an
+    // independent uniform draw, so the success probability is exactly
+    // `beat / 2^256` — which is uniform on (0,1) across runs, because `beat`
+    // is itself a block hash. That means the expected number of tries is
+    // `2^256 / beat`: usually a handful, but occasionally enormous.
+    //
+    // The old cap was 4095. Integrating the failure probability over a uniform
+    // `beat` gives ~1/4096 per call, and this soak calls it ~130 times, so a
+    // clean run failed outright roughly 3% of the time — which is exactly what
+    // was observed. That is a FLAKY TEST, not a product defect: verified
+    // separately by `diag_reward_varies_header`, which shows 16 reward values
+    // still produce 16 distinct hashes, so the search space is healthy.
+    //
+    // Raising the cap turns a 3% flake into a ~1-in-10^5 flake while costing
+    // nothing on the overwhelming majority of calls that succeed in single
+    // digits (mint is sub-millisecond against this harness's small state).
+    const MAX_TRIES: u128 = 1 << 18;
+    for k in 1u128..MAX_TRIES {
         let candidate = mint(parent, reward_base.wrapping_add(k.wrapping_mul(1_000_003)));
         if candidate.hash() < beat {
             return candidate;
         }
     }
+    // If this ever fires, report the ACTUAL difficulty rather than guessing at
+    // causes — `beat`'s leading bytes are what determine whether the search was
+    // hard, and a near-zero `beat` is an unlucky draw, not a broken mint path.
     panic!(
-        "could not find a smaller-hash sibling in 4095 tries — either BLAKE3 stopped \
-         behaving like a uniform-random oracle, or reward_override stopped changing the \
-         header (both would be a much bigger problem than this test)"
+        "no sibling below beat={} in {} tries. beat's leading bytes decide the difficulty: \
+         a near-zero beat means an unlucky draw (expected tries = 2^256/beat), NOT a broken \
+         mint path — `diag_reward_varies_header` proves reward_override still varies the hash.",
+        hex::encode(&beat[..8]),
+        MAX_TRIES
     );
 }
 
@@ -513,6 +541,39 @@ mod tests {
             fingerprint(&result.frontier).parent_hash,
             lm.hash(),
             "sanity: the orphaned block must not still be what the frontier is built on"
+        );
+    }
+}
+
+#[cfg(test)]
+mod diag_reward_varies_header {
+    use super::*;
+
+    /// Diagnostic for `mint_hash_losing_sibling`'s panic ("reward_override
+    /// stopped changing the header"). Answers the question empirically rather
+    /// than by reading the mint path: mint N siblings on ONE parent, varying
+    /// only `reward_override`, and report how many DISTINCT hashes result.
+    ///
+    /// If the count is 1, reward genuinely no longer reaches the header and the
+    /// soak test's search can never terminate — that is a real defect in the
+    /// mint path, not a flaky test. If the count is N, the search is sound and
+    /// the failure is about the `beat` threshold instead.
+    #[test]
+    fn reward_override_still_changes_the_block_hash() {
+        let (chain, _braid, _bodies) = fresh_world();
+        let mut hashes = std::collections::HashSet::new();
+        let mut first: Vec<String> = Vec::new();
+        for k in 1u128..=16 {
+            let b = mint(&chain, 1_000_000u128.wrapping_add(k.wrapping_mul(1_000_003)));
+            let h = b.hash();
+            if first.len() < 4 { first.push(hex::encode(&h[..8])); }
+            hashes.insert(h);
+        }
+        eprintln!("distinct hashes from 16 reward values: {} · first four: {:?}", hashes.len(), first);
+        assert_eq!(
+            hashes.len(), 16,
+            "reward_override no longer produces distinct block hashes — the soak test's \
+             sibling search cannot terminate, and this is a mint-path defect, not a flaky test"
         );
     }
 }

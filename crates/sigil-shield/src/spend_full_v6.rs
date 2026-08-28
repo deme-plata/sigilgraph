@@ -253,6 +253,55 @@ const fn col_ooy(i: usize) -> usize { BASE_COLS + COLS_PER_OUT * i + 8 } // oute
 /// What a v2 spend reveals: the anonymity-set root, the nullifier, the fee, and the output
 /// commitments. The output VALUES stay hidden; only their commitments are public, because
 /// consensus must insert those into the note tree.
+/// Domain separator bound into the public inputs, so a v6 proof can never be reinterpreted
+/// as another circuit's even if the wire envelope changes later.
+///
+/// The widths already differ (v5 is 33 columns, v6 is 46) so winterfell would reject a
+/// cross-version replay on `TraceInfo` alone — but that is an accident of the current
+/// layouts, not a guarantee. Binding the version into the transcript makes it one.
+/// "SIGIL_SPEND_V6" as big-endian ASCII.
+pub const V6_DOMAIN: u64 = 0x5347_4C5F_5350_5636;
+
+/// Why a v6 spend must be refused BEFORE its proof is considered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V6Reject {
+    /// Both inputs name the same nullifier: the same note spent twice in one transaction.
+    DuplicateNullifier,
+}
+
+impl std::fmt::Display for V6Reject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            V6Reject::DuplicateNullifier => {
+                write!(f, "both inputs name the same nullifier (one note spent twice)")
+            }
+        }
+    }
+}
+impl std::error::Error for V6Reject {}
+
+/// THE CHECK THE CIRCUIT CANNOT MAKE FOR YOU.
+///
+/// Feeding one note in as both inputs produces two independently-valid input blocks and a
+/// conservation lane summing `2 x value`. Every constraint holds. The only tell is that
+/// both nullifiers come out identical — and because the chain records nullifiers in a SET,
+/// the second insert is a no-op, so one note is burned and double the value leaves the pool.
+///
+/// The AIR has no way to notice: each block is separately correct, and "these two witnesses
+/// differ" is not a statement about any single row. It has to be checked on the public
+/// inputs, which is where this lives. Call it in the verifier path AND at state application
+/// — belt and braces, because the cost of missing it is minted money.
+pub fn reject_duplicate_nullifiers(nf: &[BaseElement; N_INS]) -> Result<(), V6Reject> {
+    for i in 0..N_INS {
+        for j in (i + 1)..N_INS {
+            if nf[i] == nf[j] {
+                return Err(V6Reject::DuplicateNullifier);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct SpendFullV6PublicInputs {
     pub root: BaseElement,
@@ -264,7 +313,8 @@ pub struct SpendFullV6PublicInputs {
 }
 impl ToElements<BaseElement> for SpendFullV6PublicInputs {
     fn to_elements(&self) -> Vec<BaseElement> {
-        let mut v = vec![self.root];
+        // Version first, so the transcript can never collide with another circuit's.
+        let mut v = vec![BaseElement::new(V6_DOMAIN), self.root];
         v.extend_from_slice(&self.nf);
         v.push(self.fee);
         v.extend_from_slice(&self.cm_outs);
@@ -712,6 +762,87 @@ impl Prover for SpendFullV6Prover {
 /// the same seed are byte-identical, and differencing two proofs under DIFFERENT seeds is
 /// exactly the attack the randomness exists to stop — so a fixed seed is a test-only affordance
 /// and never acceptable in a wallet. [`build_spend_full_v6_trace`] wraps this with OS entropy.
+/// A v6 witness whose two inputs are PROVEN to sit under one anchor.
+///
+/// The builder below takes paths as a plain array and can only check that their depths
+/// match; nothing stops a caller passing two paths from different trees. The AIR would
+/// catch it — both lanes are asserted against the single public root, so one of them
+/// simply fails — but the failure arrives as an opaque verifier rejection long after the
+/// mistake, which is the worst place to learn about it.
+///
+/// `SpendV6Witness::new` rejects it at construction, where the caller still has the context
+/// to fix it. Prefer this over calling the builder directly. (Raised in review by the
+/// operator: the invariant should be visible in the API rather than left to the builder.)
+pub struct SpendV6Witness<'a> {
+    pub anchor: BaseElement,
+    pub ins: [(BaseElement, BaseElement, BaseElement); N_INS],
+    pub outs: [(BaseElement, BaseElement, BaseElement); N_OUTS],
+    pub paths: [&'a MerklePath; N_INS],
+}
+
+/// Why a witness could not be assembled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WitnessError {
+    /// A path does not climb to the declared anchor — two different trees, or a stale one.
+    PathNotUnderAnchor { input: usize },
+    /// The two paths are of different depths, so they cannot be from one tree.
+    DepthMismatch { left: usize, right: usize },
+}
+
+impl std::fmt::Display for WitnessError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WitnessError::PathNotUnderAnchor { input } => {
+                write!(f, "input {input}'s membership path does not climb to the declared anchor")
+            }
+            WitnessError::DepthMismatch { left, right } => {
+                write!(f, "paths are depth {left} and {right}; both inputs must be in one tree")
+            }
+        }
+    }
+}
+impl std::error::Error for WitnessError {}
+
+/// Recompute a path's root off-circuit, folding EXACTLY as the trace does: at each segment
+/// boundary the running hash and the sibling are ordered by the direction bit, and the next
+/// segment compresses that pair. Written out rather than borrowed from `membership` so the
+/// two cannot drift — if this fold ever disagrees with the circuit's, `SpendV6Witness::new`
+/// starts rejecting honest witnesses, which is the loud failure, not the quiet one.
+fn fold_to_root(path: &MerklePath) -> BaseElement {
+    let mut running = path.leaf;
+    for (sib, bit) in path.siblings.iter().zip(path.bits.iter()) {
+        let (l, r) = if *bit { (*sib, running) } else { (running, *sib) };
+        running = compress2(l, r);
+    }
+    running
+}
+
+impl<'a> SpendV6Witness<'a> {
+    /// Assemble a witness, refusing anything whose paths are not both under `anchor`.
+    pub fn new(
+        anchor: BaseElement,
+        ins: [(BaseElement, BaseElement, BaseElement); N_INS],
+        outs: [(BaseElement, BaseElement, BaseElement); N_OUTS],
+        paths: [&'a MerklePath; N_INS],
+    ) -> Result<Self, WitnessError> {
+        let (d0, d1) = (paths[0].siblings.len(), paths[1].siblings.len());
+        if d0 != d1 {
+            return Err(WitnessError::DepthMismatch { left: d0, right: d1 });
+        }
+        for (i, path) in paths.iter().enumerate() {
+            if fold_to_root(path) != anchor {
+                return Err(WitnessError::PathNotUnderAnchor { input: i });
+            }
+        }
+        Ok(Self { anchor, ins, outs, paths })
+    }
+
+    /// Build the trace for this witness with fresh OS entropy.
+    pub fn build_trace(&self, fee: BaseElement, options: &ProofOptions) -> TraceTable<BaseElement> {
+        build_spend_full_v6_trace(&self.ins, fee, &self.outs, &self.paths, options)
+    }
+}
+
 /// `ins[k] = (value, blinding, spend_key)`; `paths[k]` is that note's membership path.
 /// Both paths must be against the SAME anchor and the same depth — two leaves of one tree.
 #[allow(clippy::too_many_arguments)]
@@ -767,9 +898,22 @@ pub fn build_spend_full_v6_trace_seeded(
     // The field bound in the module docs grows with the extra input term: every amount in
     // play must sum to less than p, or field conservation stops implying integer
     // conservation and value can be minted by wrapping.
+    // FIELD BOUND. Every amount is range-constrained to < 2^RANGE_BITS by the circuit, and
+    // the conservation equality is checked IN THE FIELD. For field equality to imply integer
+    // equality, neither SIDE may wrap — so the bound is set by the side with more terms, not
+    // by their total. Inputs contribute N_INS terms; outputs plus the fee contribute
+    // N_OUTS + 1. At N_INS = 2, N_OUTS = 2 the binding side is outputs+fee, i.e. 3 terms.
+    // (An earlier draft used N_INS + N_OUTS = 4, which is stricter and so still sound, but
+    // for the wrong reason — worth stating correctly since a future arity change would
+    // otherwise inherit the wrong rule. Raised in review by the operator.)
+    const MAX_TERMS: u128 = if N_INS as u128 > N_OUTS as u128 + 1 {
+        N_INS as u128
+    } else {
+        N_OUTS as u128 + 1
+    };
     const _: () = assert!(
-        (N_INS as u128 + N_OUTS as u128) * (1u128 << RANGE_BITS) < BaseElement::MODULUS as u128,
-        "RANGE_BITS too large for this many inputs + outputs"
+        MAX_TERMS * (1u128 << RANGE_BITS) < BaseElement::MODULUS as u128,
+        "RANGE_BITS too large: the wider side of the conservation equality can wrap the field"
     );
     assert!((value.as_int() as u128) < bound, "input 0 value exceeds the range bound");
     assert!((value1.as_int() as u128) < bound, "input 1 value exceeds the range bound");
@@ -1372,9 +1516,9 @@ mod tests {
             cm_outs: [cm_out(e(40), e(777), bob), cm_out(e(54), e(888), me)],
         };
         let els = pub_in.to_elements();
-        assert_eq!(els.len(), 1 + N_INS + 1 + N_OUTS, "root, both nf, fee, both cm_outs");
-        assert_eq!(els[1], nf_of(sk, 2));
-        assert_eq!(els[2], nf_of(sk, 5));
+        assert_eq!(els.len(), 1 + 1 + N_INS + 1 + N_OUTS, "domain, root, both nf, fee, both cm_outs");
+        assert_eq!(els[2], nf_of(sk, 2));
+        assert_eq!(els[3], nf_of(sk, 5));
         assert!(!els.contains(&me), "the spender's own key must never be published");
         assert!(!els.contains(&bob), "the recipient's key must never be published");
     }
@@ -1409,6 +1553,185 @@ mod tests {
         ];
         let hits = crate::zk_mask::scan_proof_for_secrets(&bytes, &secrets);
         assert!(hits.is_empty(), "witness values found in the proof: {hits:?}");
+    }
+
+    /// ⚠️ THE DOUBLE-SPEND VECTOR, demonstrated. Feeding the SAME note as both inputs
+    /// produces two independently-valid input blocks, a conservation lane summing
+    /// `2 x value`, and TWO IDENTICAL NULLIFIERS. The circuit has no reason to object —
+    /// each block proves membership, ownership and nullifier derivation correctly. But the
+    /// state layer records nullifiers in a SET, so the second insert is a no-op: one note
+    /// burned, double the value minted.
+    ///
+    /// This test exists to pin the fact that the CIRCUIT does not stop it, so nobody later
+    /// removes the check that does. Raised in review by the operator.
+    #[test]
+    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees; run release-compiled."]
+    fn the_same_note_twice_is_accepted_by_the_circuit_and_must_be_caught_outside_it() {
+        let sk = e(0xDEAD);
+        let me = pk_of(sk);
+        let n0 = (e(50), e(4242), sk);
+        let n1 = (e(47), e(1337), sk);
+        let (tree, p0, _p1) = pool_with2(n0, n1);
+        let path0 = tree.path(p0);
+        let fee = e(0);
+
+        // The same note, twice. 50 + 50 = 100 out of a note worth 50.
+        let outs = [(e(100), e(777), me), (e(0), e(888), me)];
+        let trace = build_spend_full_v6_trace(
+            &[n0, n0], fee, &outs, &[&path0, &path0], &v6_options(),
+        );
+        let proof = SpendFullV6Prover::new(v6_options()).prove(trace).expect("prove");
+        let pub_in = SpendFullV6PublicInputs {
+            root: tree.root(),
+            nf: [nf_of(sk, p0), nf_of(sk, p0)],
+            fee,
+            cm_outs: [cm_out(e(100), e(777), me), cm_out(e(0), e(888), me)],
+        };
+        assert_eq!(pub_in.nf[0], pub_in.nf[1], "the tell: one note used twice repeats its nullifier");
+        let circuit_says = verify_spend_full_v6(proof, pub_in.clone());
+        assert!(
+            circuit_says.is_ok(),
+            "the circuit ACCEPTS this — which is exactly why the equality check must live \
+             outside it, in the state layer: {circuit_says:?}"
+        );
+        // And this is the check that has to catch it.
+        assert!(
+            reject_duplicate_nullifiers(&pub_in.nf).is_err(),
+            "the guard must refuse two identical nullifiers"
+        );
+    }
+
+    /// MANDATORY MASKING INVARIANT (requested in review, and it earns its place).
+    ///
+    /// Same witness, same anchor, DIFFERENT mask randomness must give:
+    ///   * identical public inputs — the mask must not touch anything published;
+    ///   * different proof bytes   — or the randomness is not doing its job;
+    ///   * and both must verify.
+    ///
+    /// This is the direct regression test for the bug that cost the most time on v5:
+    /// `get_pub_inputs` read `trace.length() - 1`, which after padding is a MASKED row, so
+    /// a published value moved with the randomness. It surfaced only as
+    /// `InconsistentOodConstraintEvaluations`, which names nothing. v6 doubles the number
+    /// of places that mistake can be made — two nullifier lanes, two Merkle lanes — so the
+    /// invariant is pinned rather than argued.
+    #[test]
+    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees; run release-compiled."]
+    fn masking_changes_the_proof_and_nothing_that_is_published() {
+        let sk = e(0xDEAD);
+        let me = pk_of(sk);
+        let n0 = (e(50), e(4242), sk);
+        let n1 = (e(47), e(1337), sk);
+        let (tree, p0, p1) = pool_with2(n0, n1);
+        let (path0, path1) = (tree.path(p0), tree.path(p1));
+        let fee = e(3);
+        let outs = [(e(94), e(777), me), (e(0), e(888), me)];
+
+        let mut published = Vec::new();
+        let mut proofs = Vec::new();
+        for seed in [[0x11u8; 32], [0x22u8; 32]] {
+            let trace = build_spend_full_v6_trace_seeded(
+                &[n0, n1], fee, &outs, &[&path0, &path1], &v6_options(), seed,
+            );
+            // Read the public inputs the PROVER would publish, straight off the trace —
+            // this is the exact call that had the bug.
+            let air_pub = <SpendFullV6Prover as Prover>::get_pub_inputs(
+                &SpendFullV6Prover::new(v6_options()), &trace,
+            );
+            published.push(air_pub.to_elements());
+            proofs.push(SpendFullV6Prover::new(v6_options()).prove(trace).expect("prove"));
+        }
+
+        assert_eq!(
+            published[0], published[1],
+            "the mask leaked into a published value — this is the v5 bug, in v6"
+        );
+        assert_ne!(
+            proofs[0].to_bytes(), proofs[1].to_bytes(),
+            "two proofs under different masks must differ, or the randomness is inert"
+        );
+
+        let pub_in = SpendFullV6PublicInputs {
+            root: tree.root(),
+            nf: [nf_of(sk, p0), nf_of(sk, p1)],
+            fee,
+            cm_outs: [cm_out(e(94), e(777), me), cm_out(e(0), e(888), me)],
+        };
+        assert_eq!(published[0], pub_in.to_elements(), "prover and caller must agree");
+        for proof in proofs {
+            verify_spend_full_v6(proof, pub_in.clone()).expect("both masks must verify");
+        }
+    }
+
+    /// A bad membership path on EITHER input must be refused — not just on input 0. An
+    /// input block that is present but unchecked is the classic way a multi-input circuit
+    /// goes wrong, so both are exercised.
+    #[test]
+    fn a_bad_path_on_either_input_is_refused() {
+        let sk = e(0xDEAD);
+        let me = pk_of(sk);
+        let n0 = (e(50), e(4242), sk);
+        let n1 = (e(47), e(1337), sk);
+        let (tree, p0, p1) = pool_with2(n0, n1);
+        let (path0, path1) = (tree.path(p0), tree.path(p1));
+
+        // A path from a DIFFERENT tree: same shape, wrong root.
+        let other = crate::membership::CompressTree::new(
+            (0..8).map(|i| crate::note_v1::padding_leaf(100 + i as u64)).collect(),
+        );
+        let foreign = other.path(1);
+        assert_ne!(other.root(), tree.root(), "the decoy must really be a different tree");
+
+        let outs = [(e(94), e(777), me), (e(0), e(888), me)];
+        for (which, paths) in [(0usize, [&foreign, &path1]), (1usize, [&path0, &foreign])] {
+            let w = SpendV6Witness::new(tree.root(), [n0, n1], outs, paths);
+            assert!(
+                matches!(w, Err(WitnessError::PathNotUnderAnchor { input }) if input == which),
+                "input {which}'s foreign path must be refused at witness construction: {:?}",
+                w.err()
+            );
+        }
+        // And the honest pair is accepted.
+        assert!(SpendV6Witness::new(tree.root(), [n0, n1], outs, [&path0, &path1]).is_ok());
+    }
+
+    /// Mutating EITHER published nullifier must break verification independently. If only
+    /// one is really bound, a spend could name a nullifier the chain then records while the
+    /// circuit proved a different note.
+    #[test]
+    fn each_published_nullifier_is_independently_bound() {
+        let sk = e(0xDEAD);
+        let me = pk_of(sk);
+        let pub_in = SpendFullV6PublicInputs {
+            root: e(1),
+            nf: [nf_of(sk, 2), nf_of(sk, 5)],
+            fee: e(3),
+            cm_outs: [cm_out(e(94), e(777), me), cm_out(e(0), e(888), me)],
+        };
+        let base = pub_in.to_elements();
+        for i in 0..N_INS {
+            let mut tampered = pub_in.clone();
+            tampered.nf[i] = e(0xFFFF);
+            assert_ne!(
+                base, tampered.to_elements(),
+                "tampering with nullifier {i} must change the transcript"
+            );
+        }
+    }
+
+    /// The version domain separator must lead the transcript, so a v6 proof cannot be
+    /// replayed against another circuit's public inputs even if widths ever coincide.
+    #[test]
+    fn the_version_is_bound_into_the_transcript() {
+        let me = pk_of(e(1));
+        let pub_in = SpendFullV6PublicInputs {
+            root: e(1),
+            nf: [e(2), e(3)],
+            fee: e(4),
+            cm_outs: [cm_out(e(5), e(6), me), cm_out(e(7), e(8), me)],
+        };
+        let els = pub_in.to_elements();
+        assert_eq!(els[0], BaseElement::new(V6_DOMAIN), "version leads the transcript");
+        assert_eq!(els.len(), 1 + 1 + N_INS + 1 + N_OUTS, "domain, root, nfs, fee, cm_outs");
     }
 
     /// Geometry guard. The reserved-randomness region must still outrun the number of

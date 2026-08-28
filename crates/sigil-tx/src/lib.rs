@@ -1264,6 +1264,58 @@ pub const SHIELDED_ONLY_HEIGHT: u64 = 0;
 /// height far enough ahead that every holder has had time to do exactly that.
 pub const SQI_RAMP_REQUIRED_HEIGHT: u64 = u64::MAX;
 
+/// Height from which a coinbase pays its cuts TRANSPARENTLY, even to a wallet that has
+/// registered a shielded address.
+///
+/// WHAT THIS FIXES. A shielded coinbase mints one note per payee per block. At ~6.28
+/// blocks/second that is ~543,000 notes per payee per day, each one worth a single block
+/// reward. The spend circuit is 1-in/2-out: one note in, one payment and one change note
+/// out. So a miner's balance is real, and almost all of it is unspendable — not locked by
+/// a bug, but by arithmetic. To send you must pick ONE note, and one note is one block's
+/// reward. Measured live at height 311,862: epoch 25, 822,556 notes, 34 registered
+/// wallets, and exactly ONE nullifier ever revealed. A write-only pool.
+///
+/// The pathology had an ugly shape: a miner who never registered was paid with
+/// `SetBalance`, which ADDS, and could spend everything. A miner who registered — who
+/// opted into privacy — got dust. Registering for privacy is what broke spending.
+///
+/// WHY TRANSPARENT IS ALSO THE MORE HONEST CHOICE, not just the simpler one. It is
+/// tempting to read this as trading privacy for usability. It is not, because the privacy
+/// being given up here was already nil. A coinbase note is minted in the block its owner
+/// just mined, and that block names the miner. `sigil-chronos` measured the linkage
+/// directly: 620 of 620 coinbase notes were publicly attributable to their miner at mint
+/// time. They enlarged the note count without enlarging the anonymity set, which is
+/// measured in distinct unlinkable OWNERS, not in notes. 822,556 attributable dust notes
+/// are padding, not cover.
+///
+/// A deliberate `Shield` is strictly better cover than a coinbase note on every axis that
+/// matters. Its timing is chosen by the user rather than forced to the block they mined;
+/// its amount is a standard denomination rather than an exact block reward; and it mints
+/// ONE note big enough to actually spend. The transparent balance becomes the accrual
+/// bucket, which is why this needs no new consensus state: `SetBalance` already adds.
+///
+/// So the flow after this height is: mine → balance grows → `Shield` once, for as much as
+/// you like → spend it privately. Rather than: mine → 543,000 unspendable crumbs a day.
+///
+/// GATED BY HEIGHT, NOT BY ENV. A coinbase is part of the block body, so two nodes
+/// disagreeing about how to pay it produce different blocks and the chain forks. An
+/// environment variable would make that disagreement a deployment accident; a height makes
+/// every node switch at the same block regardless of when its operator restarts. Below
+/// this height the old shielded-coinbase path is preserved EXACTLY, so all 311k existing
+/// blocks still validate byte-for-byte — the golden rule for a live chain.
+///
+/// Set to 400,000 on 2026-08-28, ~88,000 blocks (~3.9 hours) ahead of the tip at the time,
+/// which is the rollout window for the node binary carrying this rule.
+pub const TRANSPARENT_COINBASE_HEIGHT: u64 = 400_000;
+
+/// Does the coinbase at `height` pay transparently to everyone?
+///
+/// The single place this rule is asked, so a caller can never accidentally reimplement the
+/// comparison with the boundary flipped.
+pub fn coinbase_is_transparent(height: u64) -> bool {
+    height >= TRANSPARENT_COINBASE_HEIGHT
+}
+
 /// Does the chain require this wallet's ramps to carry a SQIsign signature at `height`?
 ///
 /// Two conditions, both necessary: the network has activated the rule, AND this

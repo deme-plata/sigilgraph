@@ -441,8 +441,24 @@ pub fn split_coinbase_mutations(
         amount: u128,
         height: u64,
     ) -> Option<StateMutation> {
-        if let Some(m) = shielded_credit(work, minted, to, amount, height) {
-            return Some(m);
+        // DUST GATE (2026-08-28). From `TRANSPARENT_COINBASE_HEIGHT` every cut is paid
+        // transparently, registered or not. A shielded coinbase minted one note per payee
+        // per block, and with a 1-in/2-out spend circuit one note is the most a single
+        // send can draw on — so a miner's balance was real and almost none of it was
+        // spendable. Measured live: 822,556 notes, 34 wallets, ONE nullifier ever.
+        //
+        // Nothing is lost by dropping it: `sigil-chronos` measured coinbase notes as 620
+        // of 620 publicly attributable to their miner at mint time, because the block a
+        // note is minted in names the miner who mined it. They grew the note count without
+        // growing the anonymity set, which counts distinct unlinkable owners. Privacy now
+        // comes from a deliberate `Shield` — user-chosen timing, standard denomination,
+        // and one note large enough to actually spend. The transparent balance is the
+        // accrual bucket, which is why this needs no new consensus state: `SetBalance`
+        // adds. See `sigil_tx::TRANSPARENT_COINBASE_HEIGHT` for the full argument.
+        if !sigil_tx::coinbase_is_transparent(height) {
+            if let Some(m) = shielded_credit(work, minted, to, amount, height) {
+                return Some(m);
+            }
         }
         let bal = work.balance_of(&to, &NATIVE);
         let new_bal = bal.checked_add(amount)?;
@@ -686,6 +702,138 @@ mod tests {
         assert_eq!(legacy_tr.mutations, shares_tr.mutations, "identical mutations");
         assert_eq!(legacy_roots.wallet_state_root, shares_roots.wallet_state_root, "identical roots");
     }
+    /// Registers `miner` for shielded pay and returns the wire pk.
+    fn register_for_shielded_pay(st: &mut SigilState, miner: WalletId, seed: u8) -> [u8; 32] {
+        let acct = sigil_shield::wallet::ShieldedAccount::from_seed([seed; 32]);
+        let pk_shield = sigil_shield::note_v1::to_wire(acct.public_key());
+        sigil_state::commit_state_transition(
+            st,
+            &StateTransition {
+                at_height: 0,
+                mutations: vec![StateMutation::RegisterShieldedAddress {
+                    wallet: miner,
+                    pk_shield,
+                    pk_sqi: None, pk_encrypt: None,
+                }],
+            },
+            0,
+        )
+        .unwrap();
+        pk_shield
+    }
+
+    /// THE BOUNDARY, from below. One block before activation the old rule still holds, so
+    /// every block already on the chain validates exactly as it did when it was produced.
+    /// This is the half of a height gate that is easy to forget to test and expensive to
+    /// get wrong: break it and 311k historical blocks stop verifying.
+    #[test]
+    fn the_block_before_activation_still_pays_a_registered_miner_privately() {
+        let mut st = SigilState::new();
+        let miner: WalletId = [0x99u8; 32];
+        let pk = register_for_shielded_pay(&mut st, miner, 0x42);
+
+        let h = sigil_tx::TRANSPARENT_COINBASE_HEIGHT - 1;
+        let shares = std::collections::HashMap::from([(miner, 1u64)]);
+        let (tr, ..) = build_block_body_for_shares(&st, h, Some(1_000_000), &[], miner, &shares);
+
+        assert!(
+            tr.mutations.iter().any(|m| matches!(m, StateMutation::ShieldedCoinbase { pk_shield: p, .. } if *p == pk)),
+            "the last pre-activation block must still mint a shielded note: {:?}",
+            tr.mutations
+        );
+    }
+
+    /// THE BOUNDARY, from above. At the activation height the same registered miner is
+    /// paid in the clear — an ADDITIVE `SetBalance`, no note, pool untouched.
+    #[test]
+    fn at_activation_height_a_registered_miner_is_paid_transparently() {
+        let mut st = SigilState::new();
+        let miner: WalletId = [0x99u8; 32];
+        let _pk = register_for_shielded_pay(&mut st, miner, 0x42);
+
+        let h = sigil_tx::TRANSPARENT_COINBASE_HEIGHT;
+        let pool_before = st.shielded().len();
+        let shares = std::collections::HashMap::from([(miner, 1u64)]);
+        let (tr, roots, ..) = build_block_body_for_shares(&st, h, Some(1_000_000), &[], miner, &shares);
+
+        assert!(
+            !tr.mutations.iter().any(|m| matches!(m, StateMutation::ShieldedCoinbase { .. })),
+            "no note may be minted at or after activation: {:?}",
+            tr.mutations
+        );
+        assert!(
+            tr.mutations.iter().any(|m| matches!(m, StateMutation::SetBalance { wallet, amount: 1_000_000, .. } if *wallet == miner)),
+            "the registered miner must be paid transparently: {:?}",
+            tr.mutations
+        );
+
+        let applied = sigil_state::commit_state_transition(&mut st, &tr, h).unwrap();
+        assert_eq!(applied.wallet_state_root, roots.wallet_state_root, "predicted == applied roots");
+        assert_eq!(st.balance_of(&miner, &NATIVE), 1_000_000, "the whole reward is in one spendable number");
+        assert_eq!(st.shielded().len(), pool_before, "the pool did not grow");
+        assert_eq!(st.shielded().value_locked(), 0, "no value is locked in the pool");
+        assert_eq!(st.native_supply(), 1_000_000, "issuance is fully transparent now");
+    }
+
+    /// THE POINT OF THE WHOLE CHANGE, stated as a property.
+    ///
+    /// Mine the same 100 blocks under both rules and ask the only question a user cares
+    /// about: how much can I send in one transaction?
+    ///
+    /// The spend circuit is 1-in/2-out — one note in, one payment and one change note out
+    /// — so under the shielded coinbase the answer is "one block's reward", no matter how
+    /// many blocks you mined. 100 blocks of work, and the largest single send is 1/100th
+    /// of it. That is the live complaint ("0.006 out of 11 SIGIL") reproduced in a test.
+    ///
+    /// Transparent balances ADD, so after activation the answer is "all of it".
+    #[test]
+    fn after_activation_a_miner_can_spend_everything_they_mined() {
+        const BLOCKS: u64 = 100;
+        const REWARD: u128 = 1_000_000;
+        let miner: WalletId = [0x99u8; 32];
+        let shares = std::collections::HashMap::from([(miner, 1u64)]);
+
+        // --- OLD RULE: 100 blocks, 100 notes, biggest single send = ONE reward. ---
+        let mut dust = SigilState::new();
+        register_for_shielded_pay(&mut dust, miner, 0x42);
+        for i in 0..BLOCKS {
+            let h = 1 + i; // safely below activation
+            let (tr, ..) = build_block_body_for_shares(&dust, h, Some(REWARD), &[], miner, &shares);
+            sigil_state::commit_state_transition(&mut dust, &tr, h).unwrap();
+        }
+        assert_eq!(dust.shielded().len() as u64, BLOCKS, "one note per block — the dust");
+        assert_eq!(dust.shielded().value_locked(), REWARD * BLOCKS as u128, "the value is all there…");
+        assert_eq!(dust.balance_of(&miner, &NATIVE), 0, "…and none of it is transparent");
+        // The spendable-in-one-transaction ceiling is the LARGEST SINGLE NOTE, because the
+        // circuit takes exactly one input. Every coinbase note is worth one reward.
+        let old_max_single_send = REWARD;
+
+        // --- NEW RULE: 100 blocks, 0 notes, biggest single send = EVERYTHING. ---
+        let mut clean = SigilState::new();
+        register_for_shielded_pay(&mut clean, miner, 0x42);
+        for i in 0..BLOCKS {
+            let h = sigil_tx::TRANSPARENT_COINBASE_HEIGHT + i;
+            let (tr, ..) = build_block_body_for_shares(&clean, h, Some(REWARD), &[], miner, &shares);
+            sigil_state::commit_state_transition(&mut clean, &tr, h).unwrap();
+        }
+        assert_eq!(clean.shielded().len(), 0, "not one dust note was created");
+        let new_max_single_send = clean.balance_of(&miner, &NATIVE);
+        assert_eq!(new_max_single_send, REWARD * BLOCKS as u128, "the whole haul, in one number");
+
+        assert_eq!(
+            new_max_single_send / old_max_single_send,
+            BLOCKS as u128,
+            "a miner can now send {BLOCKS}x more in a single transaction than before"
+        );
+
+        // Same money either way — this changes WHERE the value sits, never HOW MUCH.
+        assert_eq!(
+            dust.native_supply() + dust.shielded().value_locked(),
+            clean.native_supply() + clean.shielded().value_locked(),
+            "total issuance across both domains is identical under both rules"
+        );
+    }
+
 
     /// THE GAP THIS SESSION FOUND: `split_coinbase_mutations` — the path
     /// essentially every real block win goes through once external miners
@@ -1023,8 +1171,21 @@ mod tests {
     /// a byte-identical wallet_state_root + native_supply — divergence == 0.
     /// This is what makes it SAFE to settle money over the braid's finalized
     /// order: the order determines the money, uniquely, on every node.
-    /// Step 2 gate: a real SEND applied in a braid block moves balances, and two
-    /// nodes building the same (coinbase + send) body reach identical roots.
+    /// Step 2 gate: two nodes building the same (coinbase + txs) body reach identical
+    /// roots, and a REFUSED transaction is refused identically on both.
+    ///
+    /// 2026-08-28: this test used to assert that a transparent `SigilTx::Send` was
+    /// INCLUDED and moved balances. That stopped being true when `SHIELDED_ONLY_HEIGHT`
+    /// was set to 0 — `apply_tx_at` now returns `TransparentSendRetired` for a transparent
+    /// send at EVERY height, deliberately, because a transparent send publishes exactly
+    /// the payer/payee link and amount the pool exists to hide. The test did not fail at
+    /// the time because sigil-node's lib-test target did not compile (three wrong module
+    /// paths in `snapshot.rs`, a stale `mint_next_block` arity, a missing dev-dependency),
+    /// so it had never actually run.
+    ///
+    /// Rewritten to assert what the chain really does, keeping the property this test is
+    /// FOR — determinism. Refusal is a consensus outcome like any other: both nodes must
+    /// drop the same transaction and land on the same root, or they fork on invalid input.
     #[test]
     fn send_applies_in_block_and_is_deterministic() {
         use sigil_tx::{ed25519_keygen, ed25519_sign_tx, SigilTx};
@@ -1048,17 +1209,19 @@ mod tests {
         let (tr1, r1, ev1, inc1) = build_block_body(&base, 1, Some(0), &[tx.clone()]);
         let (tr2, r2, _ev2, inc2) = build_block_body(&base, 1, Some(0), &[tx]);
 
-        assert_eq!(inc1.len(), 1, "the valid send is included");
-        assert_eq!(inc2.len(), 1);
+        // The transparent send is retired chain-wide, so neither node includes it.
+        assert!(sigil_tx::SHIELDED_ONLY_HEIGHT == 0, "this test encodes the shielded-only policy");
+        assert_eq!(inc1.len(), 0, "a transparent send is refused (TransparentSendRetired)");
+        assert_eq!(inc2.len(), 0, "…and refused identically on the second node");
         assert_eq!(r1.wallet_state_root, r2.wallet_state_root, "two nodes → identical roots (deterministic)");
-        assert!(!ev1.is_empty(), "send emits typed events (Send+Receive)");
+        assert!(ev1.is_empty(), "a refused send emits no Send/Receive events");
 
-        // apply on a node and check the money actually moved
+        // Applying the body must move no money: the refusal is total, not partial.
         let mut node = base.clone();
         let computed = sigil_state::commit_state_transition(&mut node, &tr1, 1).unwrap();
         assert_eq!(computed.wallet_state_root, r1.wallet_state_root, "predicted == applied roots");
-        assert_eq!(node.balance_of(&recipient, &NATIVE), 250_000_000, "recipient received the send");
-        assert_eq!(node.balance_of(&sender, &NATIVE), 1_000_000_000 - 250_000_000 - 1_000, "sender debited amount+fee");
+        assert_eq!(node.balance_of(&recipient, &NATIVE), 0, "recipient received nothing");
+        assert_eq!(node.balance_of(&sender, &NATIVE), 1_000_000_000, "sender was not debited — not even the fee");
         let _ = tr2;
     }
 

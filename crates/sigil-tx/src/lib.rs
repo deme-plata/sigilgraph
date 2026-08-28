@@ -1304,9 +1304,26 @@ pub const SQI_RAMP_REQUIRED_HEIGHT: u64 = u64::MAX;
 /// this height the old shielded-coinbase path is preserved EXACTLY, so all 311k existing
 /// blocks still validate byte-for-byte — the golden rule for a live chain.
 ///
-/// Set to 400,000 on 2026-08-28, ~88,000 blocks (~3.9 hours) ahead of the tip at the time,
-/// which is the rollout window for the node binary carrying this rule.
-pub const TRANSPARENT_COINBASE_HEIGHT: u64 = 400_000;
+/// SIZING THE ACTIVATION WINDOW. Two things were measured before picking this number,
+/// and both moved it:
+///
+///   * The block rate is **2.66 blk/s**, sampled over 90 s at height 317,141 — not the
+///     6.28 blk/s carried in older notes, which was a catch-up rate, not the steady one.
+///     Deriving the window from the wrong rate makes it 2.4x shorter than it looks.
+///   * The node has **7 peers, 3 of them on genuinely external IPs**. A coinbase is part
+///     of the block body, so a follower still running the old rule recomputes a different
+///     `wallet_state_root` at this height and falls off the chain. They update through the
+///     signed `sigil-top-latest.json` manifest, which clients poll on their own schedule —
+///     so the window must cover a poll cycle plus the release itself, not just a restart.
+///
+/// Set to 500,000 on 2026-08-28: 182,514 blocks ahead of the tip at the time, ~19 hours at
+/// the measured rate. Long enough for a release to propagate to independent operators;
+/// short enough that it costs only ~3,900 SIGIL of further dust (at the measured 0.0216
+/// SIGIL average note) rather than the ~8,300 a 40-hour window would.
+///
+/// An earlier draft said 400,000 on a 6.28 blk/s assumption and before the external peers
+/// were counted. Corrected here rather than amended, because the branch was already pushed.
+pub const TRANSPARENT_COINBASE_HEIGHT: u64 = 500_000;
 
 /// Does the coinbase at `height` pay transparently to everyone?
 ///

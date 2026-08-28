@@ -8,4 +8,5 @@ description = "USDS (usdSIGIL) — SIGIL's native $-pegged stablecoin. Mint by l
 [dependencies]
 sigil-state  = { path = "../sigil-state" }
 sigil-oracle = { path = "../sigil-oracle" }
+sigil-bank   = { path = "../sigil-bank" }
 thiserror    = { workspace = true }

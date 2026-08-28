@@ -50,6 +50,17 @@ pub enum SigScheme {
     /// stays the post-quantum SETTLEMENT scheme. NOT post-quantum — must be
     /// gated to the hot path; never for settlement/finality.
     Ed25519Hot = 2,
+    /// 2026-08-20: SQIsign5 + Ed25519, REQUIRE-BOTH (defense-in-depth — a break
+    /// in either family alone does not forge a block). This is the real
+    /// post-quantum-safe scheme for block production: unlike solo `Ed25519Hot`
+    /// (classical only) or solo `SqiSign5` (PQ but currently unverifiable — see
+    /// `verify_producer_sig`'s doc), this is both quantum-resistant AND
+    /// verifiable today. Wire format = `flux_sqisign::hybrid::serialize_hybrid`
+    /// over exactly `[SQIsign, Ed25519]` in that order — 529 bytes, fixed
+    /// (2 header bytes + 426-byte SQIsign leg + 101-byte Ed25519 leg). Actual
+    /// verification happens at the `sigil-node` layer (`producer_signing`),
+    /// not here — see `verify_producer_sig`'s doc for why.
+    HybridSqiEd25519 = 3,
 }
 
 /// Variable-length signature bytes. The concrete length is determined by
@@ -72,6 +83,9 @@ impl SigScheme {
             SigScheme::SqiSign5   => 292,
             SigScheme::Dilithium5 => 4595,
             SigScheme::Ed25519Hot => 64,
+            // 2 (version+count) + SQIsign leg [1+2+292+2+129=426] + Ed25519 leg
+            // [1+2+64+2+32=101] = 529, fixed since the leg order/sizes are fixed.
+            SigScheme::HybridSqiEd25519 => 529,
         }
     }
 
@@ -83,6 +97,9 @@ impl SigScheme {
             SigScheme::SqiSign5   => 129,  // flux_sqisign::public_key_size()
             SigScheme::Dilithium5 => 2592, // Dilithium5 public key (NIST FIPS-204)
             SigScheme::Ed25519Hot => 32,   // ed25519 compressed Edwards-Y point
+            // Not a single flat pubkey (two independent keys embedded in the
+            // signature bundle itself) — unused by anything that reads this.
+            SigScheme::HybridSqiEd25519 => 0,
         }
     }
 }
@@ -407,10 +424,16 @@ impl SigilBlockHeaderV0 {
     /// could forge a header the network applied. Fail-closed.
     ///
     /// Only the `Ed25519Hot` scheme is verifiable from the header alone: its
-    /// 32-byte `producer` ValidatorId **is** the ed25519 public key. `SqiSign5`
-    /// and `Dilithium5` carry larger public keys not present in the header, so
-    /// they require a validator registry / DNS anchor (a follow-on — see the
-    /// hardening backlog); until that lands they fail closed here.
+    /// 32-byte `producer` ValidatorId **is** the ed25519 public key. `SqiSign5`,
+    /// `Dilithium5`, and `HybridSqiEd25519` carry larger public keys not present
+    /// in the header (SQIsign alone is 129 B), so they require a validator
+    /// registry / pinned trusted pubkey to resolve — this crate deliberately
+    /// stays dependency-light (no `flux-sqisign`/`sqisign_rs` link, so a light
+    /// client including just `sigil-header` doesn't pull in ~50 MB of PQ crypto
+    /// — see the module doc). `sigil-node`'s `producer_signing` module (which
+    /// DOES depend on `flux-sqisign`) does the real check for
+    /// `HybridSqiEd25519`, layered on top of `verify_at_height` — see
+    /// `ChainTip::apply`. Until an operator wires that up, these fail closed.
     pub fn verify_producer_sig(&self) -> Result<(), HeaderError> {
         // Length must match the declared scheme before we touch crypto.
         if self.producer_sig.0.len() != self.sig_scheme.expected_sig_len() {
@@ -435,7 +458,7 @@ impl SigilBlockHeaderV0 {
                 vk.verify(&self.signing_bytes(), &sig)
                     .map_err(|_| HeaderError::ProducerSigInvalid)
             }
-            scheme @ (SigScheme::SqiSign5 | SigScheme::Dilithium5) => {
+            scheme @ (SigScheme::SqiSign5 | SigScheme::Dilithium5 | SigScheme::HybridSqiEd25519) => {
                 Err(HeaderError::ProducerPubkeyUnavailable { scheme })
             }
         }
@@ -444,25 +467,52 @@ impl SigilBlockHeaderV0 {
     /// Height-gated validation for block apply (the H1 upgrade). Below
     /// [`H1_PRODUCER_SIG_ACTIVATION_HEIGHT`] this is `precheck()` only — exactly
     /// the legacy behaviour, so every historical block still validates under the
-    /// rules that were live when it was produced. At/above the activation height
-    /// the producer signature MUST verify. The activation height is
+    /// rules that were live when it was produced. The activation height is
     /// [`u64::MAX`] by default (dormant): merging this code changes nothing on
     /// the live chain until an operator schedules a real future height.
+    ///
+    /// 2026-08-20 (operator-scoped activation): at/above the activation height,
+    /// enforcement is SCHEME-GATED, not blanket. Only `Ed25519Hot` is checked
+    /// HERE (this crate can verify it standalone). `SqiSign5`/`Dilithium5`
+    /// (externally-mined/pool blocks; `SqiSign5` is also the v0 default for
+    /// everything until an operator opts in) are left at precheck-only
+    /// PERMANENTLY, regardless of height — `header.producer` for a solved
+    /// block is part of the PoW challenge itself (bound to the miner's wallet
+    /// at solve time), so the sealing node has no way to hold every miner's
+    /// private key; blanket enforcement would reject every real external
+    /// miner's block the moment the height hit, with no way for them to comply.
+    /// `HybridSqiEd25519` (the real post-quantum-safe scheme, SQIsign+Ed25519
+    /// require-both) is ALSO left alone here — this crate can't verify it
+    /// (see `verify_producer_sig`'s doc) — its enforcement happens ONE LAYER
+    /// UP, in `sigil-node`'s `ChainTip::apply`, as an additional check beyond
+    /// this function. This makes activation genuinely safe to schedule on a
+    /// chain with live external miners: it tightens exactly the blocks a node
+    /// can actually sign for, and touches nothing else.
     pub fn verify_at_height(&self, apply_height: u64) -> Result<(), HeaderError> {
         self.precheck()?;
-        if apply_height >= H1_PRODUCER_SIG_ACTIVATION_HEIGHT {
+        if apply_height >= H1_PRODUCER_SIG_ACTIVATION_HEIGHT
+            && self.sig_scheme == SigScheme::Ed25519Hot
+        {
             self.verify_producer_sig()?;
         }
         Ok(())
     }
 }
 
-/// Activation height for H1 (producer-signature verification on block apply).
-/// **Dormant by default** — `u64::MAX` means "never active", so this code is a
-/// pure no-op on the live chain until an operator sets it to a real future
-/// height (mainnet-safe upgrade: schedule ≥ current_height + a safe margin, and
-/// wire producer-side signing + a validator registry for the PQ schemes first).
-pub const H1_PRODUCER_SIG_ACTIVATION_HEIGHT: u64 = u64::MAX;
+/// Activation height for H1 (producer-signature verification on block apply,
+/// scheme-gated to `Ed25519Hot` only — see `verify_at_height`'s doc comment).
+///
+/// 2026-08-20: SET to a real future height, operator-directed. Epsilon's
+/// height was ~1,940,626 at set time; true current throughput was hard to
+/// pin down live (observed anywhere from near-zero to the adaptive rate
+/// governor's ~60 blk/s ceiling depending on concurrent sync/backfill load at
+/// the moment), so this uses a generous buffer safe under any of those rates
+/// — many hours at minimum, comfortably longer at the low end — giving real
+/// time to observe self-mined blocks landing correctly Ed25519-signed before
+/// enforcement becomes mandatory. External miners are permanently exempt
+/// (SqiSign5 stays precheck-only forever), so this activation cannot break
+/// their blocks regardless of when it's reached.
+pub const H1_PRODUCER_SIG_ACTIVATION_HEIGHT: u64 = 8_000_000;
 
 /// Header-layer validation errors. Crypto-layer errors live in the relevant
 /// crates (flux-sqisign, flux-vdf, flux-zk-stark).
@@ -584,6 +634,100 @@ mod tests {
         let mut h = fake_header();
         h.vdf_input = [42u8; 32];
         assert!(matches!(h.precheck(), Err(HeaderError::VdfInputMismatch)));
+    }
+
+    /// 2026-08-23: the browser wallet's real (non-superficial) verification port
+    /// needs a JS canonical serializer that produces BYTE-IDENTICAL JSON to this
+    /// crate's `hash()`/`signing_bytes()` — one wrong field order or type shape
+    /// and every JS-computed hash silently disagrees with the real chain. This is
+    /// the cross-language conformance fixture: a header with VARIED (non-all-
+    /// zero/non-empty) values in every field so a field-order or type-shape bug
+    /// can't hide behind a coincidentally-matching default. Run with
+    /// `--nocapture` and copy the printed JSON + hex hashes into the JS test as
+    /// hardcoded expected output — this is the "prove it before trusting it"
+    /// step [[feedback_verify_before_claiming_results]] calls for on money-
+    /// adjacent code, not a throwaway scratch test.
+    #[test]
+    fn js_port_conformance_fixture() {
+        let parent: [u8; 32] = {
+            let mut a = [0u8; 32];
+            for i in 0..32 { a[i] = (i as u8) + 1; }
+            a
+        };
+        let nonce = SqiSignature::from_array({
+            let mut a = [0u8; SQISIGN_L5_LEN];
+            for i in 0..SQISIGN_L5_LEN { a[i] = ((i * 7 + 3) % 256) as u8; }
+            a
+        });
+        let mut h = blake3::Hasher::new();
+        h.update(&parent);
+        h.update(nonce.as_bytes());
+        let vdf_input: [u8; 32] = *h.finalize().as_bytes();
+        let merge1: [u8; 32] = {
+            let mut a = [0u8; 32];
+            for i in 0..32 { a[i] = (200 + i) as u8; }
+            a
+        };
+
+        let header = SigilBlockHeaderV0 {
+            version: HEADER_VERSION,
+            network_id: NETWORK_ID,
+            height: 2_003_042,
+            parent_hash: parent,
+            merge_parents: vec![merge1],
+            timestamp_ms: 1_787_500_000_123,
+            nonce_sqisign: nonce,
+            vdf_input,
+            vdf_proof: WesolowskiProof { y: vec![1, 2, 3, 4], pi: vec![5, 6, 7], t: 12345 },
+            difficulty: 987_654,
+            wallet_state_root: [11u8; 32],
+            dex_state_root: [22u8; 32],
+            event_log_root: [33u8; 32],
+            contract_state_root: [44u8; 32],
+            state_transition_proof: StarkProof { bytes: vec![9, 8, 7], public_inputs_hash: [55u8; 32] },
+            txs_merkle_root: [66u8; 32],
+            tx_count: 17,
+            fluxc_artifact_proof: ProofBundle {
+                artifact_blake3: [77u8; 32],
+                sqisign_sig: vec![1, 1, 2, 3, 5],
+                sqisign_pubkey: vec![8, 13, 21],
+                settle_tx: Some([88u8; 32]),
+            },
+            sig_scheme: SigScheme::Ed25519Hot,
+            producer: [99u8; 32],
+            producer_sig: SignatureBytes(vec![0xAB; 64]),
+            topology_commitment: Some([111u8; 32]),
+        };
+
+        let hash_bytes = header.hash();
+        let signing = header.signing_bytes();
+        let mut sh = blake3::Hasher::new();
+        sh.update(&signing);
+        let signing_hash: [u8; 32] = *sh.finalize().as_bytes();
+
+        let canonical_json = String::from_utf8(serde_json::to_vec(&header).unwrap()).unwrap();
+
+        println!("=== JS PORT CONFORMANCE FIXTURE (topology_commitment: Some) ===");
+        println!("CANONICAL_JSON={canonical_json}");
+        println!("HASH_HEX={}", hex_encode(&hash_bytes));
+        println!("SIGNING_BYTES_HASH_HEX={}", hex_encode(&signing_hash));
+
+        // Second fixture: topology_commitment: None, exercising the null-strip path.
+        let mut header_none = header.clone();
+        header_none.topology_commitment = None;
+        let hash_none = header_none.hash();
+        let canonical_json_none = String::from_utf8(serde_json::to_vec(&header_none).unwrap()).unwrap();
+        println!("=== JS PORT CONFORMANCE FIXTURE (topology_commitment: None) ===");
+        println!("CANONICAL_JSON_NONE={canonical_json_none}");
+        println!("HASH_HEX_NONE={}", hex_encode(&hash_none));
+
+        // Sanity: the two fixtures must NOT collide (proves the field is actually
+        // load-bearing in the hash, not silently dropped by the strip logic).
+        assert_ne!(hash_bytes, hash_none);
+    }
+
+    fn hex_encode(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
     }
 
     #[test]
@@ -756,6 +900,23 @@ mod tests {
             forged.verify_at_height(H1_PRODUCER_SIG_ACTIVATION_HEIGHT),
             Err(HeaderError::ProducerSigInvalid)
         ));
+    }
+
+    #[test]
+    fn h1_activation_exempts_sqisign5_permanently() {
+        // At/above activation, a SqiSign5 header (the v0 default; every
+        // externally-mined/pool block, since the sealing node can't hold
+        // arbitrary miners' private keys) must NOT be rejected just because
+        // it carries the historical zeroed placeholder signature — real
+        // enforcement only applies to Ed25519Hot. This is what makes
+        // activation safe on a chain with live external miners: it can't
+        // suddenly start rejecting their blocks.
+        let h = fake_header(); // SqiSign5, 292-byte zero sig
+        assert_eq!(h.sig_scheme, SigScheme::SqiSign5);
+        assert!(
+            h.verify_at_height(H1_PRODUCER_SIG_ACTIVATION_HEIGHT).is_ok(),
+            "SqiSign5 must stay precheck-only even at/above activation"
+        );
     }
 }
 

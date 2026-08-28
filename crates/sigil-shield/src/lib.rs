@@ -53,6 +53,9 @@ pub mod spend_full_v4;
 /// Zero-knowledge spend: v4's constraint system on a trace whose second half is reserved
 /// randomness, so the openings no longer print the witness. See [`zk_mask`].
 pub mod spend_full_v5;
+/// Two-input spend: the circuit that lets a wallet MERGE notes. v5 stays the 1-input
+/// circuit; see docs/SIGIL_MULTI_INPUT_SPEND_DESIGN.md for why adding beats generalising.
+pub mod spend_full_v6;
 pub mod ring;
 /// Shielded wallet: key derivation, own-note tracking, and spend proving.
 pub mod wallet;

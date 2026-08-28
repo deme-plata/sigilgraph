@@ -44,7 +44,11 @@ pub(super) fn zstd_decompress_body(body: &[u8]) -> Option<Vec<u8>> {
 /// `serde_json::from_slice`, borrowing the input untouched on the legacy path (zero-copy),
 /// or `None` on a malformed `Z` frame — the caller drops it exactly like any unparseable
 /// gossip message (benched peer, never a panic, never a zstd-bomb: see the 64 MiB cap).
-pub(super) fn inflate_gossip_frame(data: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
+// 2026-08-23 (grogu-producer-network): widened super→crate so `producer::run`'s
+// network-connected loop (feature-gated, off by default) can decode the SAME
+// gossip envelope shape the light-client sync engine already handles — zero
+// behavior change for every existing caller, still `pub(crate)` not `pub`.
+pub(crate) fn inflate_gossip_frame(data: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
     match data.first() {
         Some(&b'Z') => zstd_decompress_body(&data[1..]).map(std::borrow::Cow::Owned),
         _ => Some(std::borrow::Cow::Borrowed(data)), // legacy JSON `{…}` — pass through untouched
@@ -244,9 +248,15 @@ pub(super) fn decode_backfill_headers(bytes: &[u8]) -> Vec<SigilBlockHeaderV0> {
 /// Seam: `mod.rs` calls this, then `commit_buf.push(&mut store, &headers)`.
 pub(super) fn decode_verify_backfill(bytes: &[u8]) -> Vec<SigilBlockHeaderV0> {
     use rayon::prelude::*;
+    // 2026-08-20: verify_at_height (precheck + real Ed25519Hot sig check once
+    // activated, no-op otherwise) instead of bare precheck — same reasoning
+    // as chain_verify.rs's verify_one/verify_to_parallel. Purely an early-
+    // drop optimization either way (the authoritative spine walk downstream
+    // re-checks this properly), but no reason to store-then-reject a
+    // signature-invalid header when it can be dropped here just as cheaply.
     decode_backfill_headers(bytes)
         .into_par_iter()
-        .filter(|h| h.precheck().is_ok())
+        .filter(|h| h.verify_at_height(h.height).is_ok())
         .collect()
 }
 

@@ -26,6 +26,7 @@ sigil-state  = { path = "../sigil-state" }
 sigil-events = { path = "../sigil-events" }
 sigil-dex    = { path = "../sigil-dex" }
 sigil-bank   = { path = "../sigil-bank" }
+sigil-usds   = { path = "../sigil-usds" }
 # Tier-1 sig-wall: real SQIsign Level-5 verify, dispatched by SigScheme byte.
 flux-sqisign = { path = "../../../flux/crates/flux-sqisign" }
 # Hot-path scheme (crypto-agility split): ed25519 batch×parallel verify for the

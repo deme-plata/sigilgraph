@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 /// Network ID baked into every header. Prevents replay across the
 /// Quillon/SIGIL boundary. See genesis §1 lock #3.
-pub const NETWORK_ID: [u8; 8] = *b"sigil-g1";
+pub const NETWORK_ID: [u8; 8] = *b"sigil-g2";
 
 /// Header schema version. Bumped only when the on-wire layout changes.
 /// Code that reads a foreign-version header MUST refuse and not guess.

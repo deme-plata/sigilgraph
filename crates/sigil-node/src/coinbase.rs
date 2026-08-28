@@ -722,12 +722,23 @@ mod tests {
         pk_shield
     }
 
-    /// THE BOUNDARY, from below. One block before activation the old rule still holds, so
-    /// every block already on the chain validates exactly as it did when it was produced.
-    /// This is the half of a height gate that is easy to forget to test and expensive to
-    /// get wrong: break it and 311k historical blocks stop verifying.
+    /// THE BOUNDARY, from below — SKIPPED WHEN THE GATE IS AT ZERO.
+    ///
+    /// On a chain that already has history, this is the half of a height gate that is easy
+    /// to forget and expensive to get wrong: break it and every settled block stops
+    /// validating. On `sigil-g2` the gate is 0, so there IS no block before activation and
+    /// the property is vacuous — asserting it would mean asserting something about height
+    /// `0 - 1`.
+    ///
+    /// Kept, guarded, rather than deleted: the day this rule activates on a live chain, this
+    /// test is the one that has to exist, and re-deriving it later from scratch is how the
+    /// pre-activation regime ends up untested.
     #[test]
     fn the_block_before_activation_still_pays_a_registered_miner_privately() {
+        if sigil_tx::TRANSPARENT_COINBASE_HEIGHT == 0 {
+            // Active from genesis; there is no pre-activation regime to preserve.
+            return;
+        }
         let mut st = SigilState::new();
         let miner: WalletId = [0x99u8; 32];
         let pk = register_for_shielded_pay(&mut st, miner, 0x42);
@@ -741,6 +752,27 @@ mod tests {
             "the last pre-activation block must still mint a shielded note: {:?}",
             tr.mutations
         );
+    }
+
+    /// GENESIS IS ALREADY TRANSPARENT. With the gate at 0 the very first block a registered
+    /// miner can win pays in the clear — which is the property that makes the dust
+    /// impossible on this chain rather than merely stopped partway through it.
+    #[test]
+    fn from_the_first_block_a_registered_miner_is_paid_transparently() {
+        let mut st = SigilState::new();
+        let miner: WalletId = [0x99u8; 32];
+        let _pk = register_for_shielded_pay(&mut st, miner, 0x42);
+        let shares = std::collections::HashMap::from([(miner, 1u64)]);
+
+        for h in [sigil_tx::TRANSPARENT_COINBASE_HEIGHT, sigil_tx::TRANSPARENT_COINBASE_HEIGHT + 1] {
+            let (tr, ..) = build_block_body_for_shares(&st, h, Some(1_000_000), &[], miner, &shares);
+            assert!(
+                !tr.mutations.iter().any(|m| matches!(m, StateMutation::ShieldedCoinbase { .. })),
+                "height {h} must mint no note: {:?}",
+                tr.mutations
+            );
+        }
+        assert_eq!(st.shielded().len(), 0, "not one dust note can exist on this chain");
     }
 
     /// THE BOUNDARY, from above. At the activation height the same registered miner is
@@ -777,61 +809,52 @@ mod tests {
 
     /// THE POINT OF THE WHOLE CHANGE, stated as a property.
     ///
-    /// Mine the same 100 blocks under both rules and ask the only question a user cares
-    /// about: how much can I send in one transaction?
+    /// The question a user actually asks is "how much can I send in one transaction?" The
+    /// spend circuit takes one note, so under a shielded coinbase the answer was "one
+    /// block's reward" no matter how many blocks you mined — 100 blocks of work and the
+    /// largest single send is 1/100th of it. That is the live complaint ("0.006 out of 11
+    /// SIGIL") reproduced as arithmetic.
     ///
-    /// The spend circuit is 1-in/2-out — one note in, one payment and one change note out
-    /// — so under the shielded coinbase the answer is "one block's reward", no matter how
-    /// many blocks you mined. 100 blocks of work, and the largest single send is 1/100th
-    /// of it. That is the live complaint ("0.006 out of 11 SIGIL") reproduced in a test.
+    /// Transparent balances ADD, so the answer is now "all of it".
     ///
-    /// Transparent balances ADD, so after activation the answer is "all of it".
+    /// An earlier version of this test mined the same 100 blocks under BOTH rules and
+    /// compared them. That comparison is no longer expressible: with the gate at 0 there is
+    /// no height that produces dust, which is exactly the outcome being tested. So the test
+    /// now asserts the surviving half directly — and asserts the pool stays empty, which is
+    /// the stronger statement, because it says the dust cannot occur at all rather than
+    /// that it occurs less.
     #[test]
-    fn after_activation_a_miner_can_spend_everything_they_mined() {
+    fn a_miner_can_spend_everything_they_mined_and_the_pool_stays_empty() {
         const BLOCKS: u64 = 100;
         const REWARD: u128 = 1_000_000;
         let miner: WalletId = [0x99u8; 32];
         let shares = std::collections::HashMap::from([(miner, 1u64)]);
 
-        // --- OLD RULE: 100 blocks, 100 notes, biggest single send = ONE reward. ---
-        let mut dust = SigilState::new();
-        register_for_shielded_pay(&mut dust, miner, 0x42);
-        for i in 0..BLOCKS {
-            let h = 1 + i; // safely below activation
-            let (tr, ..) = build_block_body_for_shares(&dust, h, Some(REWARD), &[], miner, &shares);
-            sigil_state::commit_state_transition(&mut dust, &tr, h).unwrap();
-        }
-        assert_eq!(dust.shielded().len() as u64, BLOCKS, "one note per block — the dust");
-        assert_eq!(dust.shielded().value_locked(), REWARD * BLOCKS as u128, "the value is all there…");
-        assert_eq!(dust.balance_of(&miner, &NATIVE), 0, "…and none of it is transparent");
-        // The spendable-in-one-transaction ceiling is the LARGEST SINGLE NOTE, because the
-        // circuit takes exactly one input. Every coinbase note is worth one reward.
-        let old_max_single_send = REWARD;
+        let mut st = SigilState::new();
+        // Registered for shielded pay — the case that used to produce dust, and the one a
+        // privacy-minded miner opts into.
+        register_for_shielded_pay(&mut st, miner, 0x42);
 
-        // --- NEW RULE: 100 blocks, 0 notes, biggest single send = EVERYTHING. ---
-        let mut clean = SigilState::new();
-        register_for_shielded_pay(&mut clean, miner, 0x42);
         for i in 0..BLOCKS {
             let h = sigil_tx::TRANSPARENT_COINBASE_HEIGHT + i;
-            let (tr, ..) = build_block_body_for_shares(&clean, h, Some(REWARD), &[], miner, &shares);
-            sigil_state::commit_state_transition(&mut clean, &tr, h).unwrap();
+            let (tr, ..) = build_block_body_for_shares(&st, h, Some(REWARD), &[], miner, &shares);
+            sigil_state::commit_state_transition(&mut st, &tr, h).unwrap();
         }
-        assert_eq!(clean.shielded().len(), 0, "not one dust note was created");
-        let new_max_single_send = clean.balance_of(&miner, &NATIVE);
-        assert_eq!(new_max_single_send, REWARD * BLOCKS as u128, "the whole haul, in one number");
 
+        assert_eq!(st.shielded().len(), 0, "not one dust note may exist after {BLOCKS} blocks");
+        assert_eq!(st.shielded().value_locked(), 0, "no value is stranded in the pool");
+
+        // The whole haul, in ONE number a single transaction can draw on.
+        let spendable = st.balance_of(&miner, &NATIVE);
+        assert_eq!(spendable, REWARD * BLOCKS as u128, "every block's reward, spendable together");
+
+        // Under the old rule the ceiling was ONE note = one reward, whatever the total.
         assert_eq!(
-            new_max_single_send / old_max_single_send,
+            spendable / REWARD,
             BLOCKS as u128,
-            "a miner can now send {BLOCKS}x more in a single transaction than before"
+            "a miner can now send {BLOCKS}x more in one transaction than the old rule allowed"
         );
-
-        // Same money either way — this changes WHERE the value sits, never HOW MUCH.
-        assert_eq!(
-            dust.native_supply() + dust.shielded().value_locked(),
-            clean.native_supply() + clean.shielded().value_locked(),
-            "total issuance across both domains is identical under both rules"
-        );
+        assert_eq!(st.native_supply(), REWARD * BLOCKS as u128, "issuance is fully transparent");
     }
 
 
@@ -844,6 +867,14 @@ mod tests {
     /// proves the pool-split path now honors registration too.
     #[test]
     fn pool_share_credit_shields_a_registered_miner() {
+        // PRE-ACTIVATION REGIME. `TRANSPARENT_COINBASE_HEIGHT` is 0 on this chain, so no
+        // height mints a shielded coinbase and this property is unreachable rather than
+        // broken. Guarded rather than deleted: it documents the rule every block before
+        // activation was settled under, and it is the test a future chain that ships the
+        // shielded branch will need. Deleting it is how a regime ends up undescribed.
+        if sigil_tx::TRANSPARENT_COINBASE_HEIGHT == 0 {
+            return;
+        }
         let mut st = SigilState::new();
         let seed = [0x42u8; 32];
         let acct = sigil_shield::wallet::ShieldedAccount::from_seed(seed);
@@ -904,6 +935,14 @@ mod tests {
     /// A full pool must degrade to a transparent credit, never to an unpayable block.
     #[test]
     fn a_full_pool_rotates_and_keeps_paying_a_registered_miner_privately() {
+        // PRE-ACTIVATION REGIME — see the identical guard on the tests above.
+        // `TRANSPARENT_COINBASE_HEIGHT` is 0, so no height mints a shielded coinbase and
+        // epoch rotation cannot be reached through this path. Kept because it documents
+        // the incident it was written for (a full pool silently paying a registered miner
+        // NOTHING) and because a future chain shipping the shielded branch needs it.
+        if sigil_tx::TRANSPARENT_COINBASE_HEIGHT == 0 {
+            return;
+        }
         let mut st = SigilState::new();
         let seed = [0x42u8; 32];
         let acct = sigil_shield::wallet::ShieldedAccount::from_seed(seed);
@@ -1028,6 +1067,14 @@ mod tests {
     /// and that leverage was simply unavailable.
     #[test]
     fn a_registered_master_wallets_cut_mints_a_shielded_note() {
+        // PRE-ACTIVATION REGIME. `TRANSPARENT_COINBASE_HEIGHT` is 0 on this chain, so no
+        // height mints a shielded coinbase and this property is unreachable rather than
+        // broken. Guarded rather than deleted: it documents the rule every block before
+        // activation was settled under, and it is the test a future chain that ships the
+        // shielded branch will need. Deleting it is how a regime ends up undescribed.
+        if sigil_tx::TRANSPARENT_COINBASE_HEIGHT == 0 {
+            return;
+        }
         let mut st = SigilState::new();
         let master: WalletId = [0x11u8; 32];
         set_master(&mut st, master);
@@ -1070,6 +1117,14 @@ mod tests {
     /// apply to it — otherwise a registered commons wallet silently stays public.
     #[test]
     fn a_registered_commons_wallets_tithe_mints_a_shielded_note() {
+        // PRE-ACTIVATION REGIME. `TRANSPARENT_COINBASE_HEIGHT` is 0 on this chain, so no
+        // height mints a shielded coinbase and this property is unreachable rather than
+        // broken. Guarded rather than deleted: it documents the rule every block before
+        // activation was settled under, and it is the test a future chain that ships the
+        // shielded branch will need. Deleting it is how a regime ends up undescribed.
+        if sigil_tx::TRANSPARENT_COINBASE_HEIGHT == 0 {
+            return;
+        }
         let mut st = SigilState::new();
         let master: WalletId = [0x11u8; 32];
         set_master(&mut st, master);
@@ -1098,6 +1153,14 @@ mod tests {
     /// is a whole block reward, so the second one must fall back to transparent.
     #[test]
     fn a_colliding_commitment_falls_back_to_transparent_instead_of_losing_the_reward() {
+        // PRE-ACTIVATION REGIME. `TRANSPARENT_COINBASE_HEIGHT` is 0 on this chain, so no
+        // height mints a shielded coinbase and this property is unreachable rather than
+        // broken. Guarded rather than deleted: it documents the rule every block before
+        // activation was settled under, and it is the test a future chain that ships the
+        // shielded branch will need. Deleting it is how a regime ends up undescribed.
+        if sigil_tx::TRANSPARENT_COINBASE_HEIGHT == 0 {
+            return;
+        }
         let mut st = SigilState::new();
         let seed = [0x55u8; 32];
         // Two DIFFERENT wallets sharing one shield key — the only way to collide.

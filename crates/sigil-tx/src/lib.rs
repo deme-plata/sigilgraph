@@ -1285,9 +1285,15 @@ pub const SHIELDED_ONLY_HEIGHT: u64 = 0;
 /// activate late at no cost, and nothing can even produce such a transaction until wallets
 /// support it.
 ///
-/// 600,000 is ~10 hours after the coinbase change at the measured 2.66 blk/s, which leaves
-/// room to watch that one land cleanly first.
-pub const SHIELDED_MULTI_INPUT_HEIGHT: u64 = 600_000;
+/// ZERO ON `sigil-g2`. Same reasoning as [`TRANSPARENT_COINBASE_HEIGHT`]: a fresh chain has
+/// no history to invalidate, so sequencing the two changes apart buys nothing. It also means
+/// a two-note merge is testable the day the chain starts rather than ~2 days later, which is
+/// the whole reason the reset was worth doing rather than waiting out a window.
+///
+/// (Previously 600,000, deliberately after the coinbase change so a problem with either
+/// would not force reverting both. That sequencing matters on a LIVE chain and is the shape
+/// to copy for any future activation.)
+pub const SHIELDED_MULTI_INPUT_HEIGHT: u64 = 0;
 
 /// May a spend at `height` declare more than one input?
 pub fn multi_input_spend_allowed(height: u64) -> bool {
@@ -1355,8 +1361,22 @@ pub const SQI_RAMP_REQUIRED_HEIGHT: u64 = u64::MAX;
 /// this height the old shielded-coinbase path is preserved EXACTLY, so all 311k existing
 /// blocks still validate byte-for-byte — the golden rule for a live chain.
 ///
-/// SIZING THE ACTIVATION WINDOW. Two things were measured before picking this number,
-/// and both moved it:
+/// ZERO ON `sigil-g2` (2026-08-28). A rollout window exists to let a running chain and its
+/// followers cross a rule change together. A chain that starts at block 0 under the new rule
+/// has nothing to cross: there is no history built under the old rule, and every node needs
+/// the new binary to join at all. So the window is not shortened here, it is *unnecessary* —
+/// and the dust the old rule produced (836,536 notes, 230,000/day) never begins.
+///
+/// ⚠️ NOT lowerable in place on a chain that already has history. Setting this to 0 on the
+/// g1 chain would have declared all ~317,000 existing blocks invalid, because they were
+/// built under the shielded-coinbase rule. Gates to zero and a chain reset are ONE
+/// indivisible change.
+///
+/// The window arithmetic below is kept because it is the reasoning any FUTURE activation on
+/// a live chain will need, and because both measurements in it were hard-won.
+///
+/// SIZING THE ACTIVATION WINDOW (for a live chain — not needed here). Two things were
+/// measured before picking the old number, and both moved it:
 ///
 ///   * The block rate is **2.66 blk/s**, sampled over 90 s at height 317,141 — not the
 ///     6.28 blk/s carried in older notes, which was a catch-up rate, not the steady one.
@@ -1374,7 +1394,7 @@ pub const SQI_RAMP_REQUIRED_HEIGHT: u64 = u64::MAX;
 ///
 /// An earlier draft said 400,000 on a 6.28 blk/s assumption and before the external peers
 /// were counted. Corrected here rather than amended, because the branch was already pushed.
-pub const TRANSPARENT_COINBASE_HEIGHT: u64 = 500_000;
+pub const TRANSPARENT_COINBASE_HEIGHT: u64 = 0;
 
 /// Does the coinbase at `height` pay transparently to everyone?
 ///

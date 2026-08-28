@@ -35,27 +35,27 @@ pub use tor_policy::{route_egress, EgressClass, EgressRoute};
 
 /// SIGIL network identifier. Bytes form, used wherever Quillon uses the same
 /// shape for `network_id`. Lives in block headers (per SIGIL_GENESIS_v0.md §2).
-pub const NETWORK_ID: &[u8] = b"sigil-g1";
+pub const NETWORK_ID: &[u8] = b"sigil-g2";
 
 /// String form of [`NETWORK_ID`], for paths/topics/log messages.
-pub const NETWORK_ID_STR: &str = "sigil-g1";
+pub const NETWORK_ID_STR: &str = "sigil-g2";
 
 /// libp2p protocol prefix. All SIGIL streams negotiate under this prefix so a
 /// Quillon node and a SIGIL node sharing a TCP port (or running on the same
 /// host) ignore each other cleanly.
-pub const PROTOCOL_PREFIX: &str = "/sigil/g1/";
+pub const PROTOCOL_PREFIX: &str = "/sigil/g2/";
 
 // ── Gossipsub topics ────────────────────────────────────────────────────────
 //
 // One topic per concern. Keep them dense (publishers know exactly where their
 // message belongs) and stable (changing a topic string is a wire-break).
 
-pub const TOPIC_BLOCKS: &str = "/sigil/g1/blocks";
-pub const TOPIC_PEER_HEIGHTS: &str = "/sigil/g1/peer-heights";
-pub const TOPIC_TIP_PROOFS: &str = "/sigil/g1/tip-proofs";
-pub const TOPIC_TXS: &str = "/sigil/g1/txs";
+pub const TOPIC_BLOCKS: &str = "/sigil/g2/blocks";
+pub const TOPIC_PEER_HEIGHTS: &str = "/sigil/g2/peer-heights";
+pub const TOPIC_TIP_PROOFS: &str = "/sigil/g2/tip-proofs";
+pub const TOPIC_TXS: &str = "/sigil/g2/txs";
 /// `sigil-updater` broadcasts `ReleaseAnnouncement` JSON on this topic.
-pub const TOPIC_RELEASE: &str = "/sigil/g1/release";
+pub const TOPIC_RELEASE: &str = "/sigil/g2/release";
 /// Finality votes (`sigil_finality::FinalityVote`, JSON). Phase 2 of SIGIL
 /// True Instant Finality — see `crates/sigil-node/src/finality_wire.rs`.
 ///
@@ -65,7 +65,7 @@ pub const TOPIC_RELEASE: &str = "/sigil/g1/release";
 /// deliberate — an observer that does not vote still needs to *receive*
 /// votes, since measuring how fast a certificate assembles is the entire
 /// point of Phase 2.
-pub const TOPIC_FINALITY_VOTES: &str = "/sigil/g1/finality-votes";
+pub const TOPIC_FINALITY_VOTES: &str = "/sigil/g2/finality-votes";
 
 /// All SIGIL topics, in the order a freshly-booted node should subscribe.
 /// Subscribing to blocks before tip-proofs would mean accepting block-data
@@ -473,7 +473,7 @@ mod tests {
     /// The reset runbook's check #7 ("old chain unreachable") passes only when this does.
     #[test]
     fn every_topic_carries_the_current_network_id() {
-        // "sigil-g1" -> "g1": the generation suffix that must appear in every path.
+        // "sigil-g2" -> "g1": the generation suffix that must appear in every path.
         let generation = NETWORK_ID_STR
             .rsplit_once('-')
             .map(|(_, g)| g)

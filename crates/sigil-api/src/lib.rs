@@ -461,7 +461,8 @@ pub async fn shielded_send_handler(
         Err(_) => return Json(serde_json::json!({ "ok": false, "error": "proof must be hex" })),
     };
     match st.shielded.submit_shielded_send(
-        &req.anchor, &req.nullifier, &req.cm_outs, req.fee, proof, &req.note_ciphertexts,
+        &req.anchor, &req.nullifier, &req.extra_nullifiers, &req.cm_outs, req.fee, proof,
+        &req.note_ciphertexts,
     ) {
         Ok(h) => Json(serde_json::json!({
             "ok": true, "txid": hex::encode(h), "ts_ms": now_ms(),

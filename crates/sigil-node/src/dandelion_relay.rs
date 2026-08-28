@@ -267,7 +267,18 @@ fn apply_shielded_op(shielded: &ShieldedBridge, op: ShieldedOp) -> Result<[u8; 3
         ShieldedOp::ShieldedSend(r) => {
             let proof = hex::decode(r.proof.trim_start_matches("0x")).map_err(|_| ())?;
             shielded
-                .submit_shielded_send(&r.anchor, &r.nullifier, &r.cm_outs, r.fee, proof, &r.note_ciphertexts)
+                .submit_shielded_send(
+                    &r.anchor,
+                    &r.nullifier,
+                    // Forward EVERY tag. Relaying a two-input spend as one-input hands the
+                    // next hop a request whose proof cannot verify, and the failure surfaces
+                    // there as a proof bug rather than as a relay bug.
+                    &r.extra_nullifiers,
+                    &r.cm_outs,
+                    r.fee,
+                    proof,
+                    &r.note_ciphertexts,
+                )
                 .map_err(|_| ())
         }
         ShieldedOp::Unshield(r) => {

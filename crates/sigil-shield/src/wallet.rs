@@ -42,6 +42,7 @@ use crate::mimc::{compress2, mimc_options};
 use crate::note_v1::{from_wire, to_wire, Note, NoteError, ShieldedPoolTree, RANGE_BITS};
 use crate::spend_full_v4::{N_OUTS, PK_DOMAIN};
 use crate::spend_full_v5::{build_spend_full_v5_trace, v5_options, SpendFullV5Prover};
+use crate::spend_full_v6::{self as v6, N_INS as V6_INS};
 
 /// Reduce 32 bytes to a Goldilocks element, rejecting nothing (always canonical).
 ///
@@ -303,6 +304,9 @@ impl NoteStore {
 pub struct SpendBundle {
     pub anchor: [u8; 32],
     pub nullifier: [u8; 32],
+    /// Tags for inputs beyond the first. Empty for a one-note spend, one entry for a
+    /// two-note merge. Goes straight into `SigilTx::ShieldedSend::extra_nullifiers`.
+    pub extra_nullifiers: Vec<[u8; 32]>,
     pub cm_outs: Vec<[u8; 32]>,
     /// The public value: a fee for a shielded send, or the withdrawn amount for an
     /// unshield — the circuit treats them identically.
@@ -334,6 +338,14 @@ pub enum SpendBuildError {
     WrongOutputCount { expected: usize, got: usize },
     #[error("the pool's leaves do not contain this note at its recorded position")]
     PositionMismatch,
+    /// Both inputs are the same note. The circuit cannot catch this — see
+    /// `spend_full_v6::reject_duplicate_nullifiers` — so it is refused here, at the point
+    /// where a wallet bug would otherwise produce a proof that mints money.
+    #[error("both inputs are the same note (position {position})")]
+    SameNoteTwice { position: usize },
+    /// A membership path does not climb to the anchor the spend declares.
+    #[error("witness rejected: {0}")]
+    Witness(String),
     #[error(transparent)]
     Note(#[from] NoteError),
 }
@@ -462,7 +474,138 @@ pub fn build_spend(
     Ok(SpendBundle {
         anchor: to_wire(tree.root()),
         nullifier: to_wire(note.nullifier(position)),
+        extra_nullifiers: Vec::new(),
         // the OWNER-BOUND output commitment: compress2(compress2(value, blinding), pk)
+        cm_outs: outs
+            .iter()
+            .map(|(v, b, pk)| to_wire(compress2(compress2(*v, *b), *pk)))
+            .collect(),
+        public_value: public_value as u128,
+        proof: proof.to_bytes(),
+        out_indices,
+        out_preimages,
+    })
+}
+
+/// Spend TWO notes in one transaction — the merge `build_spend` cannot express.
+///
+/// One note in means the biggest payment a wallet can make is bounded by its biggest single
+/// note, and no sequence of transactions ever makes a note bigger. This is the way out:
+/// two notes go in, and one output can exceed either of them.
+///
+/// Both notes must be in the SAME pool (they are proven against one anchor), and both must
+/// belong to this account. Outputs work exactly as in [`build_spend`]: pass the payee's key
+/// to pay someone, or this account's key to keep change.
+///
+/// ⚠️ Rejects the same note given twice. That is not defensive tidiness — the CIRCUIT
+/// accepts it. Two identical input blocks are each independently valid and the conservation
+/// lane simply sums twice the value, so the proof verifies; the only tell is the repeated
+/// nullifier, and the chain stores those in a set, so the duplicate is a no-op. One note
+/// burned, double the value out. The chain refuses it too (twice over), but a wallet should
+/// never build one in the first place.
+#[allow(clippy::too_many_arguments)]
+pub fn build_spend_2(
+    account: &ShieldedAccount,
+    store: &mut NoteStore,
+    pool_commitments: &[[u8; 32]],
+    store_positions: [usize; V6_INS],
+    public_value: u64,
+    outs_spec: &[(u64, BaseElement)],
+) -> Result<SpendBundle, SpendBuildError> {
+    if outs_spec.len() != N_OUTS {
+        return Err(SpendBuildError::WrongOutputCount { expected: N_OUTS, got: outs_spec.len() });
+    }
+    if store_positions[0] == store_positions[1] {
+        return Err(SpendBuildError::SameNoteTwice { position: store_positions[0] });
+    }
+
+    // Gather both notes and their on-chain leaf positions.
+    let mut owned = Vec::with_capacity(V6_INS);
+    for sp in store_positions {
+        let n = store
+            .notes
+            .get(sp)
+            .filter(|n| !n.spent)
+            .cloned()
+            .ok_or(SpendBuildError::NoSuitableNote { needed: public_value })?;
+        owned.push(n);
+    }
+    let mut leaf_positions = Vec::with_capacity(V6_INS);
+    for n in &owned {
+        leaf_positions.push(n.position.ok_or(SpendBuildError::NoteNotOnChain)?);
+    }
+    // Two DIFFERENT store slots could still name one on-chain leaf if the store were
+    // corrupted. The circuit would accept that just as happily.
+    if leaf_positions[0] == leaf_positions[1] {
+        return Err(SpendBuildError::SameNoteTwice { position: leaf_positions[0] as usize });
+    }
+
+    let in_sum: u64 = owned.iter().map(|n| n.value).sum();
+    let out_values: Vec<u64> = outs_spec.iter().map(|(v, _)| *v).collect();
+    let sum: u64 = out_values.iter().sum();
+    let expected = in_sum.saturating_sub(public_value);
+    if sum != expected {
+        return Err(SpendBuildError::NonConserving { expected, got: sum });
+    }
+
+    let leaves: Vec<BaseElement> = pool_commitments
+        .iter()
+        .enumerate()
+        .map(|(i, c)| from_wire(c).unwrap_or_else(|_| crate::note_v1::padding_leaf(i as u64)))
+        .collect();
+    let tree = ShieldedPoolTree::new(leaves).map_err(SpendBuildError::Note)?;
+
+    let mut notes = Vec::with_capacity(V6_INS);
+    for (n, pos) in owned.iter().zip(leaf_positions.iter()) {
+        let note = Note {
+            value: BaseElement::new(n.value),
+            blinding: n.blinding,
+            spend_key: account.spend_key(),
+        };
+        if tree.leaf(*pos as usize) != Some(note.commitment()) {
+            return Err(SpendBuildError::PositionMismatch);
+        }
+        notes.push(note);
+    }
+
+    // Outputs: identical handling to `build_spend` — only notes bound to THIS account are
+    // tracked, since a note paid to someone else is not ours to spend.
+    let mine = account.public_key();
+    let mut outs = [(BaseElement::ZERO, BaseElement::ZERO, BaseElement::ZERO); N_OUTS];
+    let mut out_indices = Vec::new();
+    let mut out_preimages = Vec::with_capacity(N_OUTS);
+    for (i, (v, recipient)) in outs_spec.iter().enumerate() {
+        let idx = store.allocate_with(account, *v);
+        let blinding = account.blinding(idx);
+        if *recipient == mine {
+            out_indices.push(idx);
+        } else {
+            store.notes.retain(|n| n.index != Some(idx));
+        }
+        out_preimages.push((*v, blinding));
+        outs[i] = (BaseElement::new(*v), blinding, *recipient);
+    }
+
+    let path0 = tree.path(leaf_positions[0] as usize);
+    let path1 = tree.path(leaf_positions[1] as usize);
+    let ins = [
+        (notes[0].value, notes[0].blinding, notes[0].spend_key),
+        (notes[1].value, notes[1].blinding, notes[1].spend_key),
+    ];
+    // `SpendV6Witness::new` re-derives each path's root and refuses anything that does not
+    // climb to the declared anchor — cheap here, and the alternative is an opaque verifier
+    // rejection much later.
+    let witness = v6::SpendV6Witness::new(tree.root(), ins, outs, [&path0, &path1])
+        .map_err(|e| SpendBuildError::Witness(e.to_string()))?;
+    let trace = witness.build_trace(BaseElement::new(public_value), &v6::v6_options());
+    let proof = v6::SpendFullV6Prover::new(v6::v6_options())
+        .prove(trace)
+        .expect("a conserving, in-range two-note witness must prove");
+
+    Ok(SpendBundle {
+        anchor: to_wire(tree.root()),
+        nullifier: to_wire(notes[0].nullifier(leaf_positions[0])),
+        extra_nullifiers: vec![to_wire(notes[1].nullifier(leaf_positions[1]))],
         cm_outs: outs
             .iter()
             .map(|(v, b, pk)| to_wire(compress2(compress2(*v, *b), *pk)))
@@ -599,6 +742,127 @@ mod tests {
         .expect("SECURITY: a wallet-built spend must verify through the production path");
 
         assert_eq!(bundle.out_indices.len(), 2, "change notes recorded for tracking");
+    }
+
+    /// THE MERGE, END TO END: two notes in, one bigger note out, verified through the
+    /// production path.
+    ///
+    /// This is the transaction a one-input wallet cannot express at any parameter setting.
+    /// It goes through `note_v1::verify_spend_wire_multi` — the function the settlement
+    /// chokepoint calls — rather than naming a circuit, so it tests the path a real spend
+    /// takes and not a circuit I happened to pick.
+    #[test]
+    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees; release-compiled winter-prover passes."]
+    fn two_notes_merge_into_one_the_wallet_could_not_have_made_before() {
+        let acct = ShieldedAccount::from_seed([42u8; 32]);
+        let mut store = NoteStore::new();
+        let (i0, cm0) = shield_note(&acct, &mut store, 50).unwrap();
+        let (i1, cm1) = shield_note(&acct, &mut store, 47).unwrap();
+        let pool = padded(&[cm0, cm1]);
+        assert_eq!(store.scan_owned(&acct, &pool), 2);
+
+        let p0 = store.notes.iter().position(|n| n.index == Some(i0)).unwrap();
+        let p1 = store.notes.iter().position(|n| n.index == Some(i1)).unwrap();
+        let me = acct.public_key();
+
+        // 50 + 47 - 3 fee = 94, all of it into ONE note. Neither input could fund it.
+        let bundle = build_spend_2(&acct, &mut store, &pool, [p0, p1], 3, &[(94, me), (0, me)])
+            .expect("the wallet must be able to merge two notes");
+
+        assert_eq!(bundle.extra_nullifiers.len(), 1, "a two-note spend reveals two tags");
+        assert_ne!(
+            bundle.nullifier, bundle.extra_nullifiers[0],
+            "two distinct notes must nullify distinctly"
+        );
+
+        let mut nfs = vec![bundle.nullifier];
+        nfs.extend_from_slice(&bundle.extra_nullifiers);
+        crate::note_v1::verify_spend_wire_multi(&bundle.anchor, &nfs, 3, &bundle.cm_outs, &bundle.proof)
+            .expect("SECURITY: a wallet-built merge must verify through the production path");
+    }
+
+    /// Two small notes fund a payment to a third party that NEITHER could cover — the case
+    /// a user actually hits, and the one a one-input wallet has to refuse.
+    #[test]
+    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees; release-compiled winter-prover passes."]
+    fn two_notes_fund_a_payment_neither_could_cover_and_hide_the_payee() {
+        let acct = ShieldedAccount::from_seed([7u8; 32]);
+        let bob = ShieldedAccount::from_seed([0xB0u8; 32]);
+        let mut store = NoteStore::new();
+        let (i0, cm0) = shield_note(&acct, &mut store, 30).unwrap();
+        let (i1, cm1) = shield_note(&acct, &mut store, 30).unwrap();
+        let pool = padded(&[cm0, cm1]);
+        store.scan_owned(&acct, &pool);
+        let p0 = store.notes.iter().position(|n| n.index == Some(i0)).unwrap();
+        let p1 = store.notes.iter().position(|n| n.index == Some(i1)).unwrap();
+
+        // 40 to Bob — more than either note holds — 18 back as change, fee 2.
+        let bundle = build_spend_2(
+            &acct, &mut store, &pool, [p0, p1], 2,
+            &[(40, bob.public_key()), (18, acct.public_key())],
+        )
+        .expect("two notes must be able to fund one larger payment");
+
+        let mut nfs = vec![bundle.nullifier];
+        nfs.extend_from_slice(&bundle.extra_nullifiers);
+        crate::note_v1::verify_spend_wire_multi(&bundle.anchor, &nfs, 2, &bundle.cm_outs, &bundle.proof)
+            .expect("must verify through the production path");
+
+        // The merge must not have cost the privacy the single-input path just gained.
+        let secrets = [
+            ("input0.value", BaseElement::new(30)),
+            ("payment.amount", BaseElement::new(40)),
+            ("change.amount", BaseElement::new(18)),
+            ("recipient.pk", bob.public_key()),
+            ("spend_key", acct.spend_key()),
+        ];
+        let hits = crate::zk_mask::scan_proof_for_secrets(&bundle.proof, &secrets);
+        assert!(hits.is_empty(), "SECURITY: the merge published its witness: {hits:?}");
+    }
+
+    /// The same note offered as both inputs is refused BY THE WALLET, before a proof exists.
+    ///
+    /// The circuit would accept it and the resulting proof would verify; only the repeated
+    /// nullifier gives it away, and a set makes the duplicate insert a no-op. The chain
+    /// refuses it in two places, but a wallet that can build one is a wallet that can be
+    /// tricked into broadcasting one.
+    #[test]
+    fn the_wallet_refuses_to_spend_one_note_as_both_inputs() {
+        let acct = ShieldedAccount::from_seed([42u8; 32]);
+        let mut store = NoteStore::new();
+        let (i0, cm0) = shield_note(&acct, &mut store, 50).unwrap();
+        let pool = padded(&[cm0]);
+        store.scan_owned(&acct, &pool);
+        let p0 = store.notes.iter().position(|n| n.index == Some(i0)).unwrap();
+        let me = acct.public_key();
+
+        let r = build_spend_2(&acct, &mut store, &pool, [p0, p0], 0, &[(100, me), (0, me)]);
+        assert!(
+            matches!(r, Err(SpendBuildError::SameNoteTwice { .. })),
+            "the wallet must never build a doubled-input spend, got {r:?}"
+        );
+    }
+
+    /// Conservation is the wallet's obligation too: outputs plus fee must equal the SUM of
+    /// both inputs, not either one of them.
+    #[test]
+    fn a_merge_must_conserve_the_sum_of_both_inputs() {
+        let acct = ShieldedAccount::from_seed([42u8; 32]);
+        let mut store = NoteStore::new();
+        let (i0, cm0) = shield_note(&acct, &mut store, 50).unwrap();
+        let (i1, cm1) = shield_note(&acct, &mut store, 47).unwrap();
+        let pool = padded(&[cm0, cm1]);
+        store.scan_owned(&acct, &pool);
+        let p0 = store.notes.iter().position(|n| n.index == Some(i0)).unwrap();
+        let p1 = store.notes.iter().position(|n| n.index == Some(i1)).unwrap();
+        let me = acct.public_key();
+
+        // 50 alone would conserve; 50 + 47 does not.
+        let r = build_spend_2(&acct, &mut store, &pool, [p0, p1], 3, &[(47, me), (0, me)]);
+        assert!(
+            matches!(r, Err(SpendBuildError::NonConserving { expected: 94, got: 47 })),
+            "got {r:?}"
+        );
     }
 
     /// THE LEAK REGRESSION — the reason the wallet was moved from v4 to v5.

@@ -90,6 +90,15 @@ pub enum ShieldedSubmitError {
     AlreadyQueued,
     /// Wrong number of output commitments for the circuit's fixed arity.
     WrongOutputCount { expected: usize, got: usize },
+    /// Two inputs name the same nullifier — one note offered twice in one spend.
+    ///
+    /// Refused here even though the chain refuses it too, because this is the only layer a
+    /// hand-built request passes through. The circuit cannot catch it: two identical input
+    /// blocks are each independently valid and the conservation lane simply sums twice the
+    /// value, so the proof VERIFIES. Only the repeated tag reveals it, and the chain stores
+    /// tags in a set, so the duplicate insert is a no-op — one note burned, double the value
+    /// out of the pool.
+    DuplicateNullifier,
     /// The signature does not verify against the named wallet's own key.
     ///
     /// 2026-08-23: `Shield` and `RegisterShieldedAddress` both name a wallet whose
@@ -116,6 +125,11 @@ impl ShieldedSubmitError {
                 format!("{field} must be {expected} bytes, got {got}")
             }
             Self::ZeroAmount => "amount must be > 0".into(),
+            Self::DuplicateNullifier => {
+                "two inputs name the same nullifier (one note cannot be spent twice in one \
+                 transaction)"
+                    .into()
+            }
             Self::NotADenomination { amount, suggestion } => match suggestion {
                 Some(parts) => format!(
                     "{amount} is not a standard ramp denomination (a distinctive amount can be \
@@ -462,10 +476,12 @@ impl ShieldedBridge {
     /// may itself be absent, e.g. for a self-change output the sender already knows).
     /// Not part of the proof's public inputs: it rides on the transaction purely so the
     /// recipient's wallet can discover the payment without an out-of-band channel.
+    #[allow(clippy::too_many_arguments)]
     pub fn submit_shielded_send(
         &self,
         anchor: &str,
         nullifier: &str,
+        extra_nullifiers: &[String],
         cm_outs: &[String],
         fee: u128,
         proof: Vec<u8>,
@@ -479,6 +495,19 @@ impl ShieldedBridge {
         }
         let anchor_b = hex32(anchor, "anchor")?;
         let nf = hex32(nullifier, "nullifier")?;
+        let mut extra: Vec<[u8; 32]> = Vec::with_capacity(extra_nullifiers.len());
+        for e in extra_nullifiers {
+            let tag = hex32(e, "extra_nullifier")?;
+            // DISTINCTNESS AT THE DOOR. The wallet refuses this and the chain refuses it
+            // twice over, but the API is where a hand-built request arrives — and this is
+            // the one check the CIRCUIT cannot make. One note offered as both inputs gives
+            // two independently-valid input blocks and a conservation lane summing twice
+            // the value, so the proof verifies. Only the repeated tag gives it away.
+            if tag == nf || extra.contains(&tag) {
+                return Err(ShieldedSubmitError::DuplicateNullifier);
+            }
+            extra.push(tag);
+        }
         let outs = self.decode_outs(cm_outs)?;
         if !note_ciphertexts.is_empty() && note_ciphertexts.len() != outs.len() {
             return Err(ShieldedSubmitError::WrongCiphertextCount {
@@ -487,7 +516,14 @@ impl ShieldedBridge {
             });
         }
         self.reject_if_queued(&nf)?;
-        self.precheck_proof(&anchor_b, &nf, fee, &outs, &proof)?;
+        for e in &extra {
+            self.reject_if_queued(e)?;
+        }
+        // Precheck against EVERY tag: the COUNT selects the circuit, so prechecking only
+        // the first would verify a two-input proof as a one-input one — failing for the
+        // wrong reason and reporting a misleading error to the caller.
+        let all_nfs: Vec<[u8; 32]> = std::iter::once(nf).chain(extra.iter().copied()).collect();
+        self.precheck_proof_multi(&anchor_b, &all_nfs, fee, &outs, &proof)?;
 
         let proof_hex = hex::encode(&proof);
         let tx = SigilTx::ShieldedSend {
@@ -496,7 +532,7 @@ impl ShieldedBridge {
             // The RPC surface is still 1-input. A 2-input spend needs the caller to send
             // both tags, and that request shape has not been added yet — so this stays
             // empty rather than silently dropping a second input the caller meant to spend.
-            extra_nullifiers: Vec::new(),
+            extra_nullifiers: extra,
             cm_outs: outs,
             fee,
             proof,
@@ -504,8 +540,16 @@ impl ShieldedBridge {
         };
         let id = self.enqueue(tx, Some(nf));
         self.fire_relay_hook(id, ShieldedOp::ShieldedSend(ShieldedSendRequest {
-            anchor: anchor.to_string(), nullifier: nullifier.to_string(), cm_outs: cm_outs.to_vec(),
-            fee, proof: proof_hex, note_ciphertexts: note_ciphertexts.to_vec(),
+            anchor: anchor.to_string(),
+            nullifier: nullifier.to_string(),
+            // The relay must see EVERY tag. Forwarding a two-input spend as if it were
+            // one-input would hand the next hop a request whose proof cannot verify — and
+            // the relay is exactly where such a mistake looks like a proof bug.
+            extra_nullifiers: extra_nullifiers.to_vec(),
+            cm_outs: cm_outs.to_vec(),
+            fee,
+            proof: proof_hex,
+            note_ciphertexts: note_ciphertexts.to_vec(),
         }));
         Ok(id)
     }
@@ -568,6 +612,8 @@ impl ShieldedBridge {
     }
 
     /// Door-level proof check. A DoS guard, not the security boundary — see module docs.
+    /// One-input precheck. Kept as its own entry point because `submit_unshield` is
+    /// always one input by construction.
     fn precheck_proof(
         &self,
         anchor: &[u8; 32],
@@ -576,7 +622,19 @@ impl ShieldedBridge {
         cm_outs: &[[u8; 32]],
         proof: &[u8],
     ) -> Result<(), ShieldedSubmitError> {
-        sigil_shield::note_v1::verify_spend_wire(anchor, nf, public_value, cm_outs, proof)
+        self.precheck_proof_multi(anchor, std::slice::from_ref(nf), public_value, cm_outs, proof)
+    }
+
+    /// Precheck with any supported input count. The nullifier COUNT selects the circuit.
+    fn precheck_proof_multi(
+        &self,
+        anchor: &[u8; 32],
+        nfs: &[[u8; 32]],
+        public_value: u128,
+        cm_outs: &[[u8; 32]],
+        proof: &[u8],
+    ) -> Result<(), ShieldedSubmitError> {
+        sigil_shield::note_v1::verify_spend_wire_multi(anchor, nfs, public_value, cm_outs, proof)
             .map_err(|e| ShieldedSubmitError::ProofRejected(e.to_string()))
     }
 
@@ -704,6 +762,14 @@ pub struct ShieldRequest {
 pub struct ShieldedSendRequest {
     pub anchor: String,
     pub nullifier: String,
+    /// Hex tags for inputs BEYOND the first. Omit or pass `[]` for a one-note spend; one
+    /// entry for a two-note merge — the only way to spend more than a wallet's largest
+    /// single note.
+    ///
+    /// Refused before `sigil_tx::SHIELDED_MULTI_INPUT_HEIGHT`, and refused outright if it
+    /// repeats `nullifier`.
+    #[serde(default)]
+    pub extra_nullifiers: Vec<String>,
     pub cm_outs: Vec<String>,
     #[serde(with = "sigil_state::u128_str")]
     pub fee: u128,

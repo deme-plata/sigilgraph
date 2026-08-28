@@ -98,7 +98,21 @@ pub struct Braid {
     frozen_acc: [u8; 32],
     /// How many of `frozen` have been handed out by `drain_ordered`.
     drained: usize,
-    below_final_count: u64,
+    /// Blocks REFUSED at the door because they arrived at or below the finality
+    /// line. This is the guard working as designed — a stale re-offer, a gossip
+    /// echo, or a peer replaying history it is backfilling from us. Nothing is
+    /// lost: these were never in the braid. Counted separately from
+    /// `below_final_dropped` since 2026-08-26, because conflating the two made the
+    /// heartbeat alarm cry "PERMANENTLY orphaned" on entirely routine traffic —
+    /// bursts of 60-70 every couple of minutes on a node serving backfill.
+    below_final_refused: u64,
+    /// Blocks the braid HAD (parked awaiting a parent) and then genuinely gave up
+    /// on. This is the real loss signal, and the one worth waking someone for.
+    below_final_dropped: u64,
+    /// Tip height at the moment each pending entry was parked — the deterministic
+    /// clock for `evict_stale_pending`. Kept beside `pending` rather than inside
+    /// `BlockView` so the wire type is untouched.
+    pending_parked_at: HashMap<BlockHash, u64>,
     rejected_count: u64,
     /// Parked views dropped at unpark time (turned stale/invalid/window-full).
     dropped_count: u64,
@@ -131,7 +145,9 @@ impl Braid {
             frozen: Vec::new(),
             frozen_acc: [0u8; 32],
             drained: 0,
-            below_final_count: 0,
+            below_final_refused: 0,
+            below_final_dropped: 0,
+            pending_parked_at: HashMap::new(),
             rejected_count: 0,
             dropped_count: 0,
         }
@@ -178,7 +194,8 @@ impl Braid {
         }
         if let Some(f) = self.computed_final() {
             if view.height <= f {
-                self.below_final_count += 1;
+                // Guard held. Routine: see `below_final_refused`.
+                self.below_final_refused += 1;
                 return InsertOutcome::BelowFinal { finalized: f };
             }
         }
@@ -247,14 +264,77 @@ impl Braid {
     /// Park a view, keeping the `pending_heights` index in lock-step.
     fn park(&mut self, view: BlockView) {
         let h = view.height;
-        if self.pending.insert(view.hash, view).is_none() {
+        let hash = view.hash;
+        // Stamp the tip we were at when this started waiting. `evict_stale_pending`
+        // measures the wait in tip advances from here — deterministic across nodes
+        // in a way a wall clock could never be.
+        let at = self.tip_height().unwrap_or(h);
+        if self.pending.insert(hash, view).is_none() {
             *self.pending_heights.entry(h).or_insert(0) += 1;
+            self.pending_parked_at.insert(hash, at);
         }
+    }
+
+    /// Height of the currently selected tip, if the window has one.
+    fn tip_height(&self) -> Option<u64> {
+        let tip = self.selected_tip()?;
+        Some(self.recs.get(&tip)?.view.height)
+    }
+
+    /// Give up on pending entries whose missing parent can no longer arrive.
+    ///
+    /// This is the fix for the finality freeze itself. `computed_final` clamps the
+    /// finality line to `pending_floor - 1`, so a SINGLE unsatisfiable pending entry
+    /// holds finality where it is indefinitely — `saturated_self_heal_window` only
+    /// engages at `max_pending`, which one stuck entry never reaches. Once the tip
+    /// has moved `pending_max_tip_lag` past where an entry parked, its parent is
+    /// below the finality line and `insert()` would refuse it anyway, so waiting
+    /// longer cannot succeed; dropping it lets the line move again.
+    ///
+    /// Returns how many were dropped. `pending_max_tip_lag == 0` disables this.
+    fn evict_stale_pending(&mut self) -> usize {
+        let lag = self.cfg.pending_max_tip_lag;
+        if lag == 0 || self.pending.is_empty() {
+            return 0;
+        }
+        let Some(tip_h) = self.tip_height() else { return 0 };
+        // The UNCLAMPED line — where finality would sit if nothing were pinning it.
+        // An entry at or below it can never be accepted (`insert()` applies exactly this
+        // rule at the door), so it is pure deadweight AND it is the thing holding the
+        // clamp down. An entry above it is still legitimately waiting and blocks nothing,
+        // so it is left alone however long it has been there: this evicts only what is
+        // both hopeless and in the way.
+        let unclamped = tip_h.saturating_sub(self.cfg.final_depth);
+        let stale: Vec<BlockHash> = self
+            .pending
+            .iter()
+            .filter(|(hash, view)| {
+                view.height <= unclamped
+                    && self
+                        .pending_parked_at
+                        .get(*hash)
+                        .is_some_and(|parked_at| tip_h.saturating_sub(*parked_at) > lag)
+            })
+            .map(|(hash, _)| *hash)
+            .collect();
+        for hash in &stale {
+            // unpark_take keeps `pending_heights` (and so `pending_floor`) in lock-step.
+            self.unpark_take(hash);
+        }
+        if !stale.is_empty() {
+            for kids in self.waiters.values_mut() {
+                kids.retain(|k| self.pending.contains_key(k));
+            }
+            self.waiters.retain(|_, kids| !kids.is_empty());
+            self.below_final_dropped += stale.len() as u64;
+        }
+        stale.len()
     }
 
     /// Take a view out of the parked set, keeping the index in lock-step.
     fn unpark_take(&mut self, hash: &BlockHash) -> Option<BlockView> {
         let view = self.pending.remove(hash)?;
+        self.pending_parked_at.remove(hash);
         if let std::collections::btree_map::Entry::Occupied(mut e) =
             self.pending_heights.entry(view.height)
         {
@@ -350,7 +430,8 @@ impl Braid {
             };
             if let Some(f) = self.computed_final() {
                 if view.height <= f {
-                    self.below_final_count += 1;
+                    // We were holding this one and can no longer place it: a real loss.
+                    self.below_final_dropped += 1;
                     continue;
                 }
             }
@@ -411,7 +492,23 @@ impl Braid {
             return Some(tip_line);
         };
         let clamped = tip_line.min(floor.saturating_sub(1));
-        let hard_floor = tip_height.saturating_sub(self.cfg.max_window as u64);
+        // 2026-08-21: when the pending pool is genuinely AT its cap (not
+        // just "some entry is old"), that's a much stronger signal of real
+        // trouble than ordinary fork-resolution lag — self-heal on the
+        // tighter `saturated_self_heal_window` instead of waiting out the
+        // full `max_window`. See `BraidConfig::saturated_self_heal_window`'s
+        // doc for why this is deterministic-safe (same category of
+        // local-pending-dependent state `pending_floor` above already is,
+        // and every honest node still converges to the identical value once
+        // its own tip is far enough past the stuck point — this only
+        // changes HOW SOON, never THE ANSWER). Below the cap, behavior is
+        // byte-for-byte unchanged.
+        let window = if self.pending.len() >= self.cfg.max_pending {
+            self.cfg.max_window.min(self.cfg.saturated_self_heal_window)
+        } else {
+            self.cfg.max_window
+        };
+        let hard_floor = tip_height.saturating_sub(window as u64);
         Some(clamped.max(hard_floor).min(tip_line))
     }
 
@@ -551,6 +648,11 @@ impl Braid {
         self.ghostdag.is_some()
     }
 
+    /// The configured cluster-bound `k`, or `None` in v1 mode.
+    pub fn ghostdag_k(&self) -> Option<u32> {
+        self.cfg.ghostdag_k
+    }
+
     /// v2 only: true iff `h` is colored BLUE relative to the current selected
     /// tip. Always `false` in v1 mode (no coloring exists to query).
     pub fn is_blue(&self, h: &BlockHash) -> bool {
@@ -560,7 +662,7 @@ impl Braid {
         let Some(tip) = self.selected_tip() else {
             return false;
         };
-        store.is_blue(&tip, h)
+        store.is_blue(&self.dag, &tip, h)
     }
 
     /// Current DAG tips (window blocks with no known children), minus
@@ -627,6 +729,11 @@ impl Braid {
     /// over the same DAG — equality over every block once the selected tip is
     /// `final_depth` past it. See the module doc for the stability argument.
     pub fn drain_ordered(&mut self) -> Vec<BlockHash> {
+        // BEFORE finality is computed, not after: `computed_final` clamps the line to
+        // `pending_floor - 1`, so an entry that is never going to be satisfiable has to
+        // be gone before the clamp reads the floor — otherwise the line stays pinned for
+        // exactly as long as we keep hoping. See `evict_stale_pending`.
+        self.evict_stale_pending();
         if let Some(f) = self.computed_final() {
             // Cleanup FIRST so everything emitted by this call stays resident
             // (spine-checkable by the caller) until the next drain.
@@ -698,10 +805,11 @@ impl Braid {
         // Pendings at or below the finality line can never be accepted.
         let before = self.pending.len();
         self.pending.retain(|_, v| v.height > f);
+        self.pending_parked_at.retain(|h, _| self.pending.contains_key(h));
         if self.pending.len() != before {
             self.rebuild_pending_heights();
         }
-        self.below_final_count += (before - self.pending.len()) as u64;
+        self.below_final_dropped += (before - self.pending.len()) as u64;
         for kids in self.waiters.values_mut() {
             kids.retain(|k| self.pending.contains_key(k));
         }
@@ -808,7 +916,9 @@ impl Braid {
             tips,
             emitted_total: self.frozen.len(),
             finalized_height: self.finalized_height(),
-            below_final: self.below_final_count,
+            below_final: self.below_final_refused + self.below_final_dropped,
+            below_final_refused: self.below_final_refused,
+            below_final_dropped: self.below_final_dropped,
             rejected: self.rejected_count,
             dropped: self.dropped_count,
             dag_memory_bytes: self.dag.stats().memory_bytes,
@@ -821,6 +931,72 @@ impl Braid {
     pub(crate) fn view_of(&self, h: &BlockHash) -> Option<&BlockView> {
         self.recs.get(h).map(|r| &r.view)
     }
+
+    /// Read-only snapshot of the most recent `limit` FINALIZED blocks (the
+    /// `frozen` prefix — never reorders, safe to display) with their v2
+    /// GHOSTDAG coloring, for external observers (the DagKnight
+    /// visualization API). Pure in-memory copy, no I/O, cheap: this exists
+    /// so a caller (e.g. an axum handler on a different task) can get a
+    /// point-in-time picture without holding any lock on `Braid` itself —
+    /// the caller is expected to invoke this from the same task that owns
+    /// `Braid` (the producer's event loop) and copy the *result* out into
+    /// its own shared/locked snapshot type; see sigil-node's periodic
+    /// dag-snapshot tick for the intended call site.
+    pub fn recent_summary(&self, limit: usize) -> Vec<BlockSummary> {
+        // `is_blue`/`blue_score` can only answer for blocks still resident
+        // in `self.dag`'s bounded sliding window (~`cfg.max_window`, ~1025
+        // in practice) — NOT for the deep tail of `self.frozen`, which is
+        // unbounded append-only history and, once the chain has run long
+        // enough, ages a "recent" 200-block slice right past that window
+        // edge well before it'd age out of `frozen` itself (measured live
+        // 2026-08-21: a `frozen`-tail query returned 200/200 blocks with
+        // `is_blue=false` — not because they were red, but because they'd
+        // already fallen outside the window `is_blue` can see). Fix: take a
+        // BOUNDED tail slice of `frozen` (a slice, never `.clone()` the
+        // whole multi-million-entry vec) plus the small fluid suffix
+        // (`suffix_order`, bounded by the current window — cheap to call
+        // every tick), then keep only the last `limit` of that combined,
+        // still-windowed sequence.
+        let frozen_tail_start = self.frozen.len().saturating_sub(limit);
+        let mut hashes: Vec<BlockHash> = self.frozen[frozen_tail_start..].to_vec();
+        hashes.extend(self.suffix_order());
+        let start = hashes.len().saturating_sub(limit);
+        hashes[start..]
+            .iter()
+            .filter_map(|h| {
+                let rec = self.recs.get(h)?;
+                Some(BlockSummary {
+                    hash: rec.view.hash,
+                    parent: rec.view.parent,
+                    merge_parents: rec.view.merge_parents.clone(),
+                    height: rec.view.height,
+                    producer: rec.view.producer,
+                    blue_score: self.blue_score(h),
+                    is_blue: self.is_blue(h),
+                })
+            })
+            .collect()
+    }
+}
+
+/// One finalized block's causal links + v2 GHOSTDAG coloring, for display
+/// purposes only (not a consensus type — never fed back into `insert`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BlockSummary {
+    /// Canonical block hash.
+    pub hash: BlockHash,
+    /// `header.parent_hash` — the spine edge.
+    pub parent: BlockHash,
+    /// `header.merge_parents` — the merge edges.
+    pub merge_parents: Vec<BlockHash>,
+    /// Block height.
+    pub height: u64,
+    /// `header.producer` (ValidatorId).
+    pub producer: [u8; 32],
+    /// v2 GHOSTDAG blue score (0 in v1 mode).
+    pub blue_score: u64,
+    /// v2 GHOSTDAG blue/red coloring (always false in v1 mode).
+    pub is_blue: bool,
 }
 
 /// Occupancy + counter snapshot for a [`Braid`].
@@ -839,7 +1015,12 @@ pub struct BraidStats {
     /// Current finalized height (0 until the tip clears `final_depth`).
     pub finalized_height: u64,
     /// Inserts refused below the finality line (including pruned pendings).
+    /// Total of the two below — kept so existing readers keep compiling.
     pub below_final: u64,
+    /// Stale/echoed blocks refused at the door. Routine; not a fault signal.
+    pub below_final_refused: u64,
+    /// Blocks the braid was holding and gave up on. THIS is the fault signal.
+    pub below_final_dropped: u64,
     /// Structurally rejected inserts.
     pub rejected: u64,
     /// Parked views dropped at unpark time (stale / invalid / window-full).
@@ -980,6 +1161,110 @@ mod tests {
             InsertOutcome::MissingParents(_) | InsertOutcome::BelowFinal { .. } => {}
             other => panic!("below-base insert got {other:?}"),
         }
+    }
+
+    /// THE FREEZE. One unsatisfiable pending entry pins `pending_floor`, which
+    /// `computed_final` clamps the finality line to — so finality stops advancing
+    /// with a pending pool of 1 out of 4,096, far below anything
+    /// `saturated_self_heal_window` reacts to.
+    #[test]
+    fn one_stuck_pending_entry_no_longer_pins_the_finality_line() {
+        let mut c = cfg(4);
+        c.pending_max_tip_lag = 8;
+        let mut b = Braid::new(c);
+        for view in chain_views(30) {
+            b.insert(view);
+        }
+        b.drain_ordered();
+
+        // An orphan just above the finality line whose parent will never arrive: it
+        // parks (below the line it would simply be refused at the door), and its height
+        // becomes the floor everything above it is clamped behind.
+        b.insert(v([0xE1; 32], [0xEE; 32], vec![], 29, PB));
+        assert_eq!(b.stats().pending, 1, "orphan must park, not be accepted");
+        b.drain_ordered();
+        let pinned = b.finalized_height();
+
+        // Advance the tip well past `pending_max_tip_lag`.
+        for i in 31..=60u8 {
+            b.insert(v(h(i), h(i - 1), vec![], i as u64, PA));
+        }
+        b.drain_ordered();
+
+        let after = b.finalized_height();
+        assert_eq!(b.stats().pending, 0, "the unsatisfiable entry must be evicted");
+        assert!(
+            after > pinned,
+            "finality still pinned at {pinned} after the tip advanced 30 heights (now {after}) \
+             — one stuck pending entry is freezing the chain"
+        );
+        assert_eq!(
+            b.stats().below_final_dropped,
+            1,
+            "the eviction is a real loss and must be counted as one"
+        );
+    }
+
+    /// The eviction must not fire on an entry merely waiting its turn — out-of-order
+    /// arrival inside the lag window is normal and must still resolve.
+    #[test]
+    fn a_pending_entry_whose_parent_arrives_in_time_is_not_evicted() {
+        let mut c = cfg(4);
+        c.pending_max_tip_lag = 64;
+        let mut b = Braid::new(c);
+        for view in chain_views(10) {
+            b.insert(view);
+        }
+        // Child first (parks), parent second (unparks it) — the ordinary reorder case.
+        b.insert(v(h(12), h(11), vec![], 12, PA));
+        assert_eq!(b.stats().pending, 1);
+        b.drain_ordered();
+        assert_eq!(b.stats().pending, 1, "must not be evicted inside the lag window");
+        b.insert(v(h(11), h(10), vec![], 11, PA));
+        assert_eq!(b.stats().pending, 0, "parent arrival must unpark the child");
+        assert_eq!(b.stats().below_final_dropped, 0, "nothing was lost here");
+    }
+
+    /// A stale block re-offered by a peer is refused, not lost — and must not be
+    /// counted as a loss, or the alarm cries wolf on routine backfill traffic.
+    #[test]
+    fn a_stale_re_offer_counts_as_refused_never_as_dropped() {
+        let mut b = Braid::new(cfg(4));
+        for view in chain_views(40) {
+            b.insert(view);
+        }
+        b.drain_ordered();
+        let f = b.finalized_height();
+        assert!(f >= 1, "need a finalized height to re-offer below");
+
+        // Re-offer a block at a height already finalized.
+        assert!(matches!(
+            b.insert(v([0xAB; 32], [0xCD; 32], vec![], f - 1, PB)),
+            InsertOutcome::BelowFinal { .. }
+        ));
+
+        let s = b.stats();
+        assert_eq!(s.below_final_refused, 1, "a refused re-offer belongs in the refused bucket");
+        assert_eq!(s.below_final_dropped, 0, "nothing was dropped — this block was never held");
+        assert_eq!(s.below_final, 1, "the legacy total still sums both buckets");
+    }
+
+    /// `pending_max_tip_lag: 0` must reproduce the pre-2026-08-26 behavior exactly, so
+    /// the change can be switched off with one env var if it ever misbehaves live.
+    #[test]
+    fn eviction_disabled_leaves_a_stuck_entry_parked() {
+        let mut c = cfg(4);
+        c.pending_max_tip_lag = 0;
+        let mut b = Braid::new(c);
+        for view in chain_views(30) {
+            b.insert(view);
+        }
+        b.insert(v([0xE1; 32], [0xEE; 32], vec![], 29, PB));
+        for i in 31..=60u8 {
+            b.insert(v(h(i), h(i - 1), vec![], i as u64, PA));
+        }
+        b.drain_ordered();
+        assert_eq!(b.stats().pending, 1, "with lag=0 the old pinning behavior must be intact");
     }
 
     #[test]
@@ -1213,6 +1498,89 @@ mod tests {
         assert_ne!(a.order_hash(), before);
     }
 
+    // ── recent_summary colouring under a sliding window ─────────────────────
+    // Added 2026-08-28 while tracing a live observation: /v1/dagknight/recent
+    // returned 200/200 blocks with `is_blue = false` while `blue_score`
+    // advanced by exactly 1 on every one of them. Those two statements cannot
+    // both describe the same chain, so one of them is a measurement artefact.
+
+    /// 32-byte hash from a u64, so a test chain can exceed 256 blocks
+    /// (`h(n: u8)` above tops out at 256 and cannot reach a cleanup cycle).
+    fn hw(n: u64) -> BlockHash {
+        let mut out = [0u8; 32];
+        out[..8].copy_from_slice(&(n + 1).to_le_bytes());
+        out
+    }
+
+    /// Linear chain of `n` blocks above genesis, all one producer, no merges.
+    fn long_linear_chain(b: &mut Braid, n: u64) {
+        b.insert(v(hw(0), [0u8; 32], vec![], 0, PA));
+        for i in 1..=n {
+            b.insert(v(hw(i), hw(i - 1), vec![], i, PA));
+        }
+    }
+
+    #[test]
+    fn recent_summary_colouring_agrees_with_blue_score() {
+        // A straight chain has no concurrency, so GHOSTDAG must colour every
+        // block blue: there is nothing for the k-cluster bound to reject.
+        // `blue_score` advancing by 1 per block says exactly that. `is_blue`
+        // must not contradict it.
+        let mut b = Braid::new(BraidConfig {
+            ghostdag_k: Some(18),
+            final_depth: 64,
+            ..BraidConfig::default()
+        });
+        long_linear_chain(&mut b, 2_000);
+
+        let recent = b.recent_summary(200);
+        assert!(!recent.is_empty(), "no recent blocks to inspect");
+
+        let mut contradictions = 0usize;
+        let mut prev: Option<u64> = None;
+        for s in &recent {
+            if let Some(p) = prev {
+                if s.blue_score > p && !s.is_blue {
+                    contradictions += 1;
+                }
+            }
+            prev = Some(s.blue_score);
+        }
+
+        assert_eq!(
+            contradictions,
+            0,
+            "{contradictions} of {} recent blocks report is_blue=false while blue_score advances; \
+             first={:?} last={:?}",
+            recent.len(),
+            recent.first().map(|s| (s.height, s.blue_score, s.is_blue)),
+            recent.last().map(|s| (s.height, s.blue_score, s.is_blue)),
+        );
+    }
+
+    #[test]
+    fn blue_score_tracks_height_on_a_long_linear_chain() {
+        // The narrower claim underneath the one above: with no merges,
+        // blue_score(B) = blue_score(selected_parent) + 1, so it must equal
+        // height everywhere. `ghostdag::linear_chain_blue_score_tracks_height`
+        // proves this over a short chain that never triggers cleanup; this
+        // runs it long enough for the sliding window to recycle indices.
+        let mut b = Braid::new(BraidConfig {
+            ghostdag_k: Some(18),
+            final_depth: 64,
+            ..BraidConfig::default()
+        });
+        long_linear_chain(&mut b, 2_000);
+
+        for s in b.recent_summary(200) {
+            assert_eq!(
+                s.blue_score, s.height,
+                "height {} has blue_score {} on a chain with no concurrency",
+                s.height, s.blue_score
+            );
+        }
+    }
+
     // ── v2.1 blue-score finality (final_blue_depth) ─────────────────────────
     // Added 2026-08-15 alongside `computed_final`'s v2 branch. See
     // `BraidConfig::final_blue_depth`'s doc comment for exactly what this
@@ -1425,6 +1793,100 @@ mod tests {
             a.order_hash(),
             b.order_hash(),
             "creation-order and shuffled-order delivery must converge to the identical order_hash"
+        );
+    }
+
+    /// 2026-08-21: the "no eviction path for a stuck pending pool" fix.
+    /// Reproduces the live incident's shape (a permanently-unsatisfiable
+    /// pending block wedges `finalized_height` forever) at a scale a unit
+    /// test can afford, and proves the pool actually drains once it's
+    /// genuinely saturated — not just that `computed_final()` returns a
+    /// different number, but that `drain_ordered()`'s cleanup (`pending.
+    /// retain`) really evicts the stuck entries, since that's the real
+    /// eviction path this fix closes (see `computed_final`'s doc comment).
+    #[test]
+    fn saturated_pending_pool_self_heals_faster_than_normal_max_window() {
+        let mut c = cfg(1); // small final_depth — keep the test's chain short
+        c.max_pending = 2;
+        c.max_window = 1000; // deliberately large "normal" self-heal window
+        c.saturated_self_heal_window = 5; // tight window, used ONLY once saturated
+        let mut b = Braid::new(c);
+
+        b.insert(genesis());
+        // Two views whose parent hash was never inserted — these can NEVER
+        // resolve, exactly like the live incident's orphaned block. Two of
+        // them exactly saturates max_pending=2.
+        let missing_parent = h(99);
+        assert!(matches!(
+            b.insert(v(h(50), missing_parent, vec![], 1, PA)),
+            InsertOutcome::MissingParents(_)
+        ));
+        assert!(matches!(
+            b.insert(v(h(51), missing_parent, vec![], 1, PB)),
+            InsertOutcome::MissingParents(_)
+        ));
+        assert_eq!(b.pending.len(), 2, "pool must be saturated at max_pending");
+
+        // Grow the real spine well past saturated_self_heal_window (5) but
+        // nowhere near max_window (1000) — the normal, unsaturated rule
+        // would NOT have advanced finality this far yet.
+        let mut parent = h(0);
+        for i in 1..=10u8 {
+            let view = v(h(i), parent, vec![], i as u64, PA);
+            assert!(matches!(b.insert(view), InsertOutcome::Inserted { .. }));
+            parent = h(i);
+        }
+
+        assert!(
+            b.finalized_height() > 0,
+            "a saturated pool must self-heal within a handful of heights, \
+             not wait out the full max_window — finalized_height is still 0"
+        );
+
+        // The real eviction path: drain_ordered() must actually REMOVE the
+        // stuck entries from `pending`, not just compute a higher number.
+        b.drain_ordered();
+        assert!(
+            b.pending.is_empty(),
+            "the stuck pending entries must actually be evicted once \
+             finality passes their height, not just orphaned in theory"
+        );
+    }
+
+    /// Companion to the saturated case above: BELOW the cap, behavior must
+    /// be byte-for-byte unchanged — the tighter window only ever applies
+    /// once the pool is genuinely full. A single stuck block (the ORIGINAL
+    /// 2026-08-20 incident's exact shape) must still get the full
+    /// `max_window` worth of patience, not the saturated fast-path.
+    #[test]
+    fn unsaturated_pending_still_uses_the_full_max_window() {
+        let mut c = cfg(1);
+        c.max_pending = 100; // plenty of headroom — nowhere near saturated
+        c.max_window = 20;
+        c.saturated_self_heal_window = 3; // must NOT apply here
+        let mut b = Braid::new(c);
+
+        b.insert(genesis());
+        let missing_parent = h(99);
+        assert!(matches!(
+            b.insert(v(h(50), missing_parent, vec![], 1, PA)),
+            InsertOutcome::MissingParents(_)
+        ));
+        assert_eq!(b.pending.len(), 1, "one stuck block, pool nowhere near full");
+
+        // Grow past saturated_self_heal_window (3) but not past max_window (20).
+        let mut parent = h(0);
+        for i in 1..=10u8 {
+            let view = v(h(i), parent, vec![], i as u64, PA);
+            b.insert(view);
+            parent = h(i);
+        }
+        assert_eq!(
+            b.finalized_height(),
+            0,
+            "an unsaturated pool must still wait out the FULL max_window, \
+             exactly as before this fix — the tighter window must not \
+             leak into the normal case"
         );
     }
 }

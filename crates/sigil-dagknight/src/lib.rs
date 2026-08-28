@@ -31,7 +31,7 @@ pub mod sim;
 pub mod view;
 
 pub use bitset::{BitfieldDag, BitfieldDagStats, VertexBitfield, VertexIndexMap};
-pub use braid::{Braid, BraidStats};
+pub use braid::{Braid, BraidStats, BlockSummary};
 pub use ghostdag::{BlockGhostdagData, GhostdagStore};
 pub use present::BraidPresentation;
 pub use sim::BraidSimReport;
@@ -115,6 +115,49 @@ pub struct BraidConfig {
     /// exact adversarial scenario that exposed the original bug. Env
     /// `SIGIL_DAG_FINAL_BLUE_DEPTH` (unset or unparsable = `None`).
     pub final_blue_depth: Option<u64>,
+    /// 2026-08-21 (the "no eviction path for a stuck pending pool" fragility,
+    /// found live on both Epsilon and happysrv — see
+    /// `computed_final`'s doc comment for the mechanism this closes). When
+    /// the pending pool is genuinely AT its `max_pending` cap — not just
+    /// "some entry is old", but structurally full — that is a much stronger
+    /// signal of real trouble than ordinary fork-resolution lag, and the
+    /// system should self-heal far sooner than the general `max_window`
+    /// hard-floor (16,384 heights ⇒ 7-40+ minutes at SIGIL's measured
+    /// throughput) allows. Default 2_048 (env
+    /// `SIGIL_DAG_SATURATED_SELF_HEAL_WINDOW`) — a few multiples of
+    /// `final_depth` (still generous margin for genuinely-recoverable
+    /// forks), but self-heals in roughly a minute instead of the better
+    /// part of an hour. Only takes effect when `pending.len() >=
+    /// max_pending`; below the cap, behavior is byte-for-byte unchanged
+    /// (uses `max_window` exactly as before).
+    pub saturated_self_heal_window: usize,
+
+    /// 2026-08-26 — the OTHER half of the "stuck pending pool" fragility, and the
+    /// one that was actually biting live.
+    ///
+    /// [`Self::saturated_self_heal_window`] deliberately only engages when the pool
+    /// is AT `max_pending` ("below the cap, behavior is byte-for-byte unchanged").
+    /// But `computed_final` clamps the finality line to `pending_floor - 1`, and
+    /// `pending_floor` is the LOWEST pending height — so exactly ONE pending entry
+    /// whose parent never arrives pins the finality line where it is, forever, with
+    /// a pool of 1 out of 4,096. Finality then advances only via the `max_window`
+    /// hard floor: 16,384 heights behind the tip, which at the rate measured live
+    /// on Epsilon (2026-08-26: 3 blocks in 3 minutes) is over a week. Every
+    /// settlement-gated subsystem stalls behind it — shielded registrations were
+    /// simply the first place it was noticed.
+    ///
+    /// So: a pending entry is evicted once the tip has advanced this many heights
+    /// past where it was parked, whatever the pool occupancy. The bound is measured
+    /// in TIP HEIGHT, never wall-clock — braid state has to converge identically on
+    /// every node, and a clock does not. `final_depth` is the principled default:
+    /// past that the missing parent is below the finality line and `insert()` would
+    /// refuse it anyway, so continuing to wait cannot succeed.
+    ///
+    /// Same safety category as `pending_floor` and `saturated_self_heal_window`
+    /// already are — this changes HOW SOON a node stops waiting, never WHAT it
+    /// orders. Env `SIGIL_DAG_PENDING_MAX_TIP_LAG`; 0 disables eviction entirely
+    /// (the pre-2026-08-26 behavior).
+    pub pending_max_tip_lag: u64,
 }
 
 impl Default for BraidConfig {
@@ -126,6 +169,8 @@ impl Default for BraidConfig {
             max_merge_parents: 4,
             ghostdag_k: None,
             final_blue_depth: None,
+            saturated_self_heal_window: 2_048,
+            pending_max_tip_lag: 512,
         }
     }
 }
@@ -152,6 +197,11 @@ impl BraidConfig {
             final_blue_depth: std::env::var("SIGIL_DAG_FINAL_BLUE_DEPTH")
                 .ok()
                 .and_then(|v| v.trim().parse().ok()),
+            saturated_self_heal_window: get(
+                "SIGIL_DAG_SATURATED_SELF_HEAL_WINDOW",
+                d.saturated_self_heal_window,
+            ),
+            pending_max_tip_lag: get("SIGIL_DAG_PENDING_MAX_TIP_LAG", d.pending_max_tip_lag),
         }
     }
 }

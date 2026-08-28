@@ -46,6 +46,17 @@ pub struct BraidPresentation {
     pub word: Vec<i32>,
     /// Strand index → producer id (ascending byte-order — the ranking).
     pub producers: Vec<[u8; 32]>,
+    /// Number of DISTINCT heights in `[from_height, to_height]` that were
+    /// actually resident when this presentation was extracted (2026-08-20:
+    /// added after a real false-positive incident — a node that populates
+    /// its window via bulk backfill rather than one-at-a-time live gossip
+    /// can have gaps in an otherwise in-range window, e.g. from eviction
+    /// racing the catch-up, and `braid_word` silently skips non-resident
+    /// blocks per this module's own doc rather than erroring). Compare
+    /// against `to_height - from_height + 1` (when `to_height >=
+    /// from_height`) to detect an INCOMPLETE window before trusting this
+    /// presentation for anything that compares it across two nodes.
+    pub heights_resident: usize,
 }
 
 impl Braid {
@@ -58,6 +69,7 @@ impl Braid {
                 strands: 0,
                 word: Vec::new(),
                 producers: Vec::new(),
+                heights_resident: 0,
             };
         }
 
@@ -69,6 +81,12 @@ impl Braid {
             .filter_map(|hash| self.view_of(&hash))
             .filter(|v| in_window(v.height))
             .collect();
+        let heights_resident: usize = {
+            let mut hs: Vec<u64> = ordered.iter().map(|v| v.height).collect();
+            hs.sort_unstable();
+            hs.dedup();
+            hs.len()
+        };
 
         // Strand ranking: ascending producer id.
         let mut producers: Vec<[u8; 32]> = ordered.iter().map(|v| v.producer).collect();
@@ -135,6 +153,7 @@ impl Braid {
             strands: n as u32,
             word,
             producers,
+            heights_resident,
         }
     }
 }

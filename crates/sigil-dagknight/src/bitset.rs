@@ -27,7 +27,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use sigil_header::BlockHash;
 
 /// Compact bitfield representing a set of vertices by index.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VertexBitfield {
     bits: Vec<u64>,
     capacity: usize, // Total number of bits (rounded up to 64)
@@ -61,6 +61,21 @@ impl VertexBitfield {
         if word < self.bits.len() {
             self.bits[word] &= !(1u64 << bit);
         }
+    }
+
+    /// Addressable width in bits. Indices at or above this are silently
+    /// dropped by [`Self::set`] and read as `false` by [`Self::test`], so any
+    /// code holding a bitfield against a growing index space must keep this at
+    /// or above that space's capacity — see `GhostdagStore::blue_set_of`.
+    #[inline]
+    pub fn width(&self) -> usize {
+        self.bits.len() * 64
+    }
+
+    /// Number of set bits.
+    #[inline]
+    pub fn count(&self) -> usize {
+        self.bits.iter().map(|w| w.count_ones() as usize).sum()
     }
 
     /// Test if bit is set.
@@ -159,6 +174,18 @@ impl VertexBitfield {
     /// True iff no bit is set.
     pub fn is_empty(&self) -> bool {
         self.bits.iter().all(|&w| w == 0)
+    }
+
+    /// Zero every word in place — same end state as replacing `self` with a
+    /// freshly `VertexBitfield::new`'d one of the same width, but without the
+    /// allocation. See `cleanup_below_height`'s doc comment for why this
+    /// matters: it used to reset a removed vertex's own bitfields via a fresh
+    /// `VertexBitfield::new(capacity)` per removed vertex per array.
+    #[inline]
+    pub fn clear_all(&mut self) {
+        for w in self.bits.iter_mut() {
+            *w = 0;
+        }
     }
 
     /// Total addressable bits (rounded up to the word size).
@@ -303,6 +330,10 @@ pub struct BitfieldDag {
     heights: Vec<u64>,
     /// Producer of each vertex index — second tie-break component.
     producers: Vec<[u8; 32]>,
+    /// The `cap` value `ensure_capacity` last swept every bitfield to. See
+    /// that method's doc comment — lets it skip the O(vertex_count) re-sweep
+    /// on every insert once capacity has stopped growing.
+    last_swept_cap: usize,
 }
 
 impl Default for BitfieldDag {
@@ -321,6 +352,7 @@ impl BitfieldDag {
             parent_sets: Vec::new(),
             heights: Vec::new(),
             producers: Vec::new(),
+            last_swept_cap: 0,
         }
     }
 
@@ -345,7 +377,20 @@ impl BitfieldDag {
             self.producers.push([0u8; 32]);
         }
 
-        if cap > 0 {
+        // 2026-08-22 (live malloc/page-fault-storm investigation, found via a
+        // live `perf` profile dominated by malloc/free/page-fault handling
+        // during a severe production stall): this re-swept EVERY resident
+        // bitfield's word-width on EVERY single `add_vertex` call — one
+        // O(vertex_count) pass per candidate block, own or relayed — even
+        // though `grow_to` below is a guaranteed no-op unless `cap` actually
+        // grew since the last call (`index_map.capacity()` is monotonic
+        // non-decreasing, so `cap` here is too). Under heavy candidate churn
+        // (many ticks/sec, each inserting a vertex) this added up to real,
+        // wasted CPU on every insert for no behavioral benefit. Skipping the
+        // sweep whenever `cap` hasn't grown past what was last applied keeps
+        // the exact same invariant (every bitfield is at least `cap` bits
+        // wide) at a fraction of the cost in the steady state.
+        if cap > self.last_swept_cap {
             for bf in self.past_sets.iter_mut() {
                 bf.grow_to(cap);
             }
@@ -355,6 +400,7 @@ impl BitfieldDag {
             for bf in self.parent_sets.iter_mut() {
                 bf.grow_to(cap);
             }
+            self.last_swept_cap = cap;
         }
     }
 
@@ -388,17 +434,27 @@ impl BitfieldDag {
             }
         }
 
-        self.past_sets[idx as usize] = past;
-
-        // Update future sets: every vertex in our past gets us in their future
-        for past_idx in self.past_sets[idx as usize]
-            .iter_set_bits()
-            .collect::<Vec<_>>()
-        {
+        // Update future sets: every vertex in our past gets us in their future.
+        // 2026-08-22 (live malloc/page-fault-storm investigation): this used to
+        // read back `self.past_sets[idx].iter_set_bits().collect::<Vec<_>>()`
+        // AFTER storing `past` into `self`, purely to dodge a borrow-checker
+        // conflict (can't hold `past_sets`'s iterator live while mutating
+        // `future_sets`). That `.collect()` allocated a fresh `Vec<u32>` sized
+        // to the vertex's ENTIRE transitive-ancestor count on every single
+        // `add_vertex` call — for a vertex deep in an ~8k-wide window that can
+        // be thousands of entries, repeated on every candidate insert (own AND
+        // every relayed peer block). Iterating the LOCAL `past` variable
+        // directly, before moving it into `self`, needs no such allocation —
+        // `iter_set_bits()` is a lazy iterator over the existing bitfield
+        // words — and there's no borrow conflict since `past` isn't part of
+        // `self` yet. Same final state, zero wasted heap churn.
+        for past_idx in past.iter_set_bits() {
             if (past_idx as usize) < self.future_sets.len() {
                 self.future_sets[past_idx as usize].set(idx);
             }
         }
+
+        self.past_sets[idx as usize] = past;
 
         idx
     }
@@ -558,6 +614,29 @@ impl BitfieldDag {
         self.index_map.get_index(vertex_id).is_some()
     }
 
+    /// Compact vertex index for a resident hash, if any. 2026-08-19: exposed
+    /// so callers outside this module (`GhostdagStore`) can index their own
+    /// per-vertex `VertexBitfield`s against the SAME index space this DAG
+    /// already uses internally, instead of paying for a `HashSet<BlockHash>`
+    /// per stored set — see `GhostdagStore::BlockGhostdagData::full_blue_set`.
+    pub fn index_of(&self, vertex_id: &BlockHash) -> Option<u32> {
+        self.index_map.get_index(vertex_id)
+    }
+
+    /// Current index-space capacity (in vertices) — the size a fresh
+    /// `VertexBitfield` needs to be addressable against every currently
+    /// resident vertex.
+    pub fn capacity(&self) -> usize {
+        self.index_map.capacity()
+    }
+
+    /// The hash behind a compact vertex index, if resident — the inverse of
+    /// `index_of`. Mainly for translating a `VertexBitfield`'s
+    /// `iter_set_bits()` back into hashes.
+    pub fn hash_of(&self, idx: u32) -> Option<BlockHash> {
+        self.index_map.get_vertex(idx).copied()
+    }
+
     /// Height of an active vertex.
     pub fn height_of(&self, vertex_id: &BlockHash) -> Option<u64> {
         let idx = self.index_map.get_index(vertex_id)?;
@@ -589,30 +668,56 @@ impl BitfieldDag {
             .collect();
 
         let removed_count = to_remove.len();
+        if removed_count == 0 {
+            return 0;
+        }
 
-        for (vid, idx) in to_remove {
-            // Clear this vertex's bitfield data
+        // 2026-08-22 (live malloc/page-fault-storm investigation): this used
+        // to loop per-removed-vertex, and for EACH one (a) allocate three
+        // fresh `VertexBitfield`s sized to the FULL index-space capacity, and
+        // (b) scan every bitfield in past_sets/future_sets/parent_sets — i.e.
+        // every vertex EVER tracked, not just the removed ones or the active
+        // window — just to clear that one vertex's bit. That's an
+        // O(removed_count × total_capacity) cost. Under real load (candidate
+        // churn outpacing finalization, so cleanup runs late and has to
+        // remove a big batch at once) that quadratic behavior is exactly
+        // what a live `perf` profile caught as a malloc/free/page-fault
+        // storm during a severe production stall. Fix: build ONE bitfield of
+        // every index being removed, then do a SINGLE O(total_capacity) pass
+        // over each array subtracting it — same final state (every removed
+        // index's bit cleared everywhere) in one pass instead of
+        // `removed_count` passes. Resetting a removed vertex's OWN
+        // past/future/parent set is now an in-place zero (`clear_all`, no
+        // allocation) instead of a fresh `VertexBitfield::new(capacity)`.
+        let cap = self.index_map.capacity();
+        let mut removed_mask = VertexBitfield::new(cap);
+        for &(_, idx) in &to_remove {
+            removed_mask.set(idx);
+        }
+
+        for &(_, idx) in &to_remove {
             if (idx as usize) < self.past_sets.len() {
-                self.past_sets[idx as usize] = VertexBitfield::new(self.index_map.capacity());
+                self.past_sets[idx as usize].clear_all();
             }
             if (idx as usize) < self.future_sets.len() {
-                self.future_sets[idx as usize] = VertexBitfield::new(self.index_map.capacity());
+                self.future_sets[idx as usize].clear_all();
             }
             if (idx as usize) < self.parent_sets.len() {
-                self.parent_sets[idx as usize] = VertexBitfield::new(self.index_map.capacity());
+                self.parent_sets[idx as usize].clear_all();
             }
+        }
 
-            // Clear this vertex's bit from all other past/future/parent sets
-            for bf in self.past_sets.iter_mut() {
-                bf.clear(idx);
-            }
-            for bf in self.future_sets.iter_mut() {
-                bf.clear(idx);
-            }
-            for bf in self.parent_sets.iter_mut() {
-                bf.clear(idx);
-            }
+        for bf in self.past_sets.iter_mut() {
+            bf.subtract(&removed_mask);
+        }
+        for bf in self.future_sets.iter_mut() {
+            bf.subtract(&removed_mask);
+        }
+        for bf in self.parent_sets.iter_mut() {
+            bf.subtract(&removed_mask);
+        }
 
+        for (vid, _) in to_remove {
             self.index_map.remove(&vid);
         }
 

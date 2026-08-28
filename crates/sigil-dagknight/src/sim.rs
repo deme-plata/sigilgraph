@@ -238,6 +238,10 @@ fn open_cfg(n: usize, final_depth: u64) -> BraidConfig {
         max_merge_parents: 4,
         ghostdag_k: None,
         final_blue_depth: None,
+        // Permutation feeds hold parents deliberately out of order — eviction off so
+        // arrival order stays the only variable under test.
+        pending_max_tip_lag: 0,
+        saturated_self_heal_window: n + 64,
     }
 }
 
@@ -447,6 +451,10 @@ pub fn run_permutation_invariance(seed: u64, perms: u32) -> BraidSimReport {
         max_merge_parents: 4,
         ghostdag_k: None,
         final_blue_depth: None,
+        // Permutation feeds hold parents deliberately out of order — eviction off so
+        // arrival order stays the only variable under test.
+        pending_max_tip_lag: 0,
+        saturated_self_heal_window: n + ext_len as usize + 64,
     };
     let mut checks = Checks::default();
 
@@ -963,6 +971,143 @@ pub fn run_live_topology(seed: u64, drop_pct: u8, equivocate: bool) -> BraidSimR
     }
 }
 
+// ─── S8: S5's harness under the REAL live finality clamp ───────────────────
+
+/// S8 — identical harness to S5 (seeded gossip drop, bounded reorder, two
+/// nodes converging via missing-parent backfill), with exactly ONE change:
+/// `final_depth`/`max_pending` are the REAL production defaults
+/// (`BraidConfig::default()`, final_depth=512, max_pending=4096), not S5's
+/// `open_cfg`, which deliberately sets `final_depth` above the whole
+/// generated DAG's height so the finality clamp can never fire — a
+/// simplification S1/S5/S7 all share, stated in their own code, to isolate
+/// pure ordering-convergence from the clamp.
+///
+/// S5 proves two nodes' ORDERING agrees once backfill completes; it proves
+/// nothing about whether the clamp that actually deletes old blocks —
+/// `final_depth` — stays quiet while that backfill is happening. This
+/// scenario asks exactly that question, the one the live 2026-08-26
+/// `FINALITY VIOLATION` (14 blocks permanently orphaned on Epsilon,
+/// reconciling with a second producer after a restart) raised and that no
+/// existing scenario answers. `divergence` on this report is the number of
+/// blocks either node's REAL finality clamp permanently orphaned
+/// (`BraidStats::below_final` delta) while catching up from a `drop_pct`
+/// backlog — the direct, load-bearing measurement. Linearization divergence
+/// is also checked, but reported separately in `detail`: once the real
+/// clamp orphans a block, that block can never be re-inserted, so some
+/// linearization drift is an *expected consequence* of a nonzero orphan
+/// count, not a second, independent bug.
+pub fn run_restart_catchup(seed: u64, drop_pct: u8) -> BraidSimReport {
+    let mut rng = XorShift64::new(seed);
+    let producers = 2u8;
+    let blocks = 2_000u64;
+    let gen = gen_braid(&mut rng, producers, blocks, false);
+    let n = gen.views.len();
+    let cfg = BraidConfig::default(); // the REAL live production config — not open_cfg
+    let drop_pct = drop_pct.min(90) as u64;
+    let mut checks = Checks::default();
+
+    let mut braids: Vec<Braid> = Vec::with_capacity(2);
+    let mut orphaned_total = 0u64;
+    for node in 0u64..2 {
+        let mut nrng = XorShift64::new(seed ^ 0x9E37_79B9_7F4A_7C15u64.wrapping_mul(node + 1));
+        // Same seeded delivery schedule as S5: drop, then bounded forward reorder (≤ 8).
+        let mut delivered: Vec<usize> = Vec::new();
+        let mut undelivered: Vec<usize> = Vec::new();
+        for i in 0..n {
+            if nrng.below(100) < drop_pct {
+                undelivered.push(i);
+            } else {
+                delivered.push(i);
+            }
+        }
+        for i in 0..delivered.len() {
+            let w = (delivered.len() - i).min(8) as u64;
+            let j = i + nrng.below(w) as usize;
+            delivered.swap(i, j);
+        }
+
+        let mut b = Braid::new(cfg.clone());
+        let mut bad = 0u64;
+        for &i in &delivered {
+            match b.insert(gen.views[i].clone()) {
+                InsertOutcome::Inserted { .. }
+                | InsertOutcome::MissingParents(_)
+                | InsertOutcome::Duplicate => {}
+                _ => bad += 1,
+            }
+        }
+        checks.ok(bad == 0, format!("node {node}: {bad} delivered inserts rejected"));
+        let below_final_pre_backfill = b.stats().below_final;
+
+        let mut guard = 0usize;
+        loop {
+            guard += 1;
+            if guard > 4 * n + 16 {
+                checks.ok(false, format!("node {node}: backfill did not converge"));
+                break;
+            }
+            let mp = b.missing_parents();
+            if !mp.is_empty() {
+                for h in mp {
+                    match gen.by_hash.get(&h) {
+                        Some(&i) => {
+                            let _ = b.insert(gen.views[i].clone());
+                            undelivered.retain(|&x| x != i);
+                        }
+                        None => checks.ok(false, format!("node {node}: foreign missing parent")),
+                    }
+                }
+                continue;
+            }
+            match undelivered.pop() {
+                Some(i) => {
+                    let _ = b.insert(gen.views[i].clone());
+                }
+                None => break,
+            }
+        }
+        let below_final_post = b.stats().below_final;
+        let node_orphaned = below_final_post.saturating_sub(below_final_pre_backfill);
+        orphaned_total += node_orphaned;
+        checks.ok(
+            node_orphaned == 0,
+            format!(
+                "node {node}: {node_orphaned} block(s) permanently orphaned by the REAL finality clamp during backfill (final_depth={})",
+                cfg.final_depth
+            ),
+        );
+        checks.ok(
+            b.missing_parents().is_empty(),
+            format!("node {node}: missing parents after backfill"),
+        );
+        braids.push(b);
+    }
+
+    let lin0 = braids[0].linearize();
+    let lin1 = braids[1].linearize();
+    let div = divergence_count(&lin0, &lin1);
+    checks.ok(
+        div == 0 || orphaned_total > 0,
+        "linearizations diverge despite zero orphans — a NEW, unexplained bug",
+    );
+    let oh0 = braids[0].order_hash();
+
+    let passed = checks.passed();
+    BraidSimReport {
+        scenario: "S8 real-clamp catchup",
+        blocks: n as u64,
+        producers,
+        divergence: orphaned_total,
+        order_hash_hex: hex32(&oh0),
+        passed,
+        detail: checks.detail(format!(
+            "drop {drop_pct}% · reorder ≤8 · final_depth={} max_pending={} (REAL defaults, not widened) · \
+             {orphaned_total} block(s) orphaned · linearization_divergence={div}",
+            cfg.final_depth, cfg.max_pending
+        )),
+    }
+}
+
 // ─── S6: window / memory bounds ─────────────────────────────────────────────
 
 /// S6 — a long honest run (default gate: 100k blocks, `final_depth` 64,
@@ -1111,6 +1256,36 @@ mod tests {
     fn s6_window_bounded() {
         let r = run_window_bounds(7, 20_000);
         assert!(r.passed, "{}", r.detail);
+    }
+
+    // ── S8: real-clamp catch-up, at increasing outage sizes ──
+    // Not asserted `passed` on purpose — the whole point is to OBSERVE where
+    // (if anywhere) the real final_depth=512 clamp starts orphaning blocks,
+    // not to assume in advance which way it breaks. `cargo test -- --nocapture`
+    // (or the braid_sim gate binary) prints the actual numbers.
+
+    #[test]
+    fn s8_real_clamp_catchup_light_drop() {
+        let r = run_restart_catchup(0xDA68, 10);
+        println!("{}", r.summary());
+    }
+
+    #[test]
+    fn s8_real_clamp_catchup_moderate_drop() {
+        let r = run_restart_catchup(0xDA69, 30);
+        println!("{}", r.summary());
+    }
+
+    #[test]
+    fn s8_real_clamp_catchup_heavy_drop() {
+        let r = run_restart_catchup(0xDA6A, 70);
+        println!("{}", r.summary());
+    }
+
+    #[test]
+    fn s8_real_clamp_catchup_max_drop() {
+        let r = run_restart_catchup(0xDA6B, 90);
+        println!("{}", r.summary());
     }
 
     #[test]

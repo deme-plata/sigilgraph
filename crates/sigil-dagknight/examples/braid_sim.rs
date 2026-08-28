@@ -18,6 +18,11 @@ fn main() {
         sim::run_live_topology(0xDA65, 30, true),
         sim::run_window_bounds(0xDA66, 100_000),
         sim::run_ghostdag_dual_instance(0xDA67, 3, 10_000, 4),
+        sim::run_restart_catchup(0xDA68, 10),
+        sim::run_restart_catchup(0xDA69, 30),
+        sim::run_restart_catchup(0xDA6A, 50),
+        sim::run_restart_catchup(0xDA6B, 70),
+        sim::run_restart_catchup(0xDA6C, 90),
     ];
     let mut all = true;
     for r in &reports {

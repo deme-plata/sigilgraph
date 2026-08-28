@@ -63,11 +63,12 @@
 //! measurement, not speculatively.
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::collections::HashSet;
 
 use sigil_header::BlockHash;
 
-use crate::bitset::BitfieldDag;
+use crate::bitset::{BitfieldDag, VertexBitfield};
 
 /// GHOSTDAG data computed for one block: its selected parent, the blue/red
 /// split of everything its non-selected parents pulled in, and its blue
@@ -86,7 +87,39 @@ pub struct BlockGhostdagData {
     pub merge_set_reds: Vec<BlockHash>,
     /// `blue_score(selected_parent) + 1 + |merge_set_blues|`.
     pub blue_score: u64,
+    /// v2.1 (2026-08-19 — measured via real `perf` profiling on a deep
+    /// catch-up node, per this module's own "complexity note" above, which
+    /// named exactly this fix and exactly this trigger condition before it
+    /// was ever a problem). The FULL historical blue set as of this block —
+    /// `{this block} ∪ new_blues(this block) ∪ selected_parent's own
+    /// full_blue_set` — computed once here instead of reconstructed by
+    /// walking the entire selected-parent chain (up to the whole resident
+    /// window, thousands of blocks) on every `blue_set_of`/`is_blue` call.
+    /// Correct by construction (each block's full set is built directly
+    /// from its already-correct parent's full set, not re-derived), and
+    /// evicted in lockstep with the rest of this struct by `forget()` — no
+    /// separate cache-invalidation path to get wrong. A late-joining node
+    /// doing a deep catch-up used to spend the overwhelming majority of its
+    /// CPU here (81% of sampled time, ~36% of that shows up as pure hashing
+    /// underneath the repeated HashSet reconstruction) while producing zero
+    /// visible sync progress.
+    ///
+    /// Stored as a [`VertexBitfield`] (indexed via [`BitfieldDag::index_of`]),
+    /// NOT a `HashSet<BlockHash>` — the first version of this fix used a
+    /// HashSet and OOM-killed a real catch-up node at ~15GB in under a
+    /// minute: consecutive blocks' full blue sets are ~identical (each adds
+    /// only a handful of members), but each block still stored an
+    /// independent full clone, so total memory scaled as O(window²) at
+    /// ~80+ bytes per member. A bitfield costs a FIXED `window/8` bytes per
+    /// stored set REGARDLESS of how many members are set, so the same
+    /// O(window²) count of stored sets costs O(window²/8) bytes total — the
+    /// exact tradeoff `BitfieldDag` itself already documents and accepts
+    /// for its own past/future sets at this same window size (its own doc
+    /// comment: "memory is O(window²/8) bytes" — ~32MB at max_window=16384,
+    /// nowhere near OOM territory).
+    full_blue_set: VertexBitfield,
 }
+
 
 /// Incremental GHOSTDAG blue/red coloring store, parameterized by the fixed
 /// cluster bound `k`. Lives alongside [`crate::braid::Braid`]'s window; the
@@ -121,30 +154,78 @@ impl GhostdagStore {
         self.data.get(h).map(|d| d.blue_score).unwrap_or(0)
     }
 
-    /// Reconstruct the full blue set of `block`: itself, plus every ancestor
+    /// The full blue set of `block` as a compact bitfield (indexed via
+    /// `BitfieldDag::index_of` — see `full_blue_set`'s doc for why a
+    /// bitfield, not a `HashSet<BlockHash>`): itself, plus every ancestor
     /// reachable by walking `selected_parent` pointers within the resident
-    /// window, plus each of those ancestors' local `merge_set_blues`. See
-    /// the module doc's complexity note.
-    fn blue_set_of(&self, block: &BlockHash) -> HashSet<BlockHash> {
-        let mut set = HashSet::new();
-        let mut cur = Some(*block);
-        while let Some(h) = cur {
-            if !set.insert(h) {
-                break; // defensive: a cycle should be structurally impossible
-            }
-            let Some(d) = self.data.get(&h) else { break };
-            for b in &d.merge_set_blues {
-                set.insert(*b);
-            }
-            cur = d.selected_parent;
-        }
-        set
+    /// window, plus each of those ancestors' local `merge_set_blues`. v2.1:
+    /// a plain memoized clone instead of a from-scratch chain walk. Unknown/
+    /// non-resident blocks get an empty bitfield sized to the DAG's current
+    /// capacity, matching the old walk's behavior of returning nothing for
+    /// a block with zero resident data.
+    fn blue_set_of(&self, dag: &BitfieldDag, block: &BlockHash) -> VertexBitfield {
+        let mut bf = self
+            .data
+            .get(block)
+            .map(|d| d.full_blue_set.clone())
+            .unwrap_or_else(|| VertexBitfield::new(dag.capacity()));
+        // 2026-08-28: `grow_to` is load-bearing, and its absence was a live
+        // bug that silently disabled GHOSTDAG colouring for every chain
+        // longer than 64 blocks.
+        //
+        // Every block after the seed inherits its blue set by CLONING its
+        // selected parent's, and a clone preserves the parent's *width*.
+        // Nothing in this store ever widened it, so the width stayed frozen
+        // at whatever `dag.capacity()` was when the seed block was computed —
+        // one 64-bit word. `BitfieldDag::ensure_capacity` does sweep
+        // `grow_to` across its own `past_sets`/`future_sets`/`parent_sets`,
+        // but `full_blue_set` lives in THIS struct and was never in that
+        // sweep, even though it is indexed against the same index space.
+        //
+        // `VertexBitfield::set` and `::test` both fail silently out of range
+        // (no-op, and `false`, respectively). So from vertex index 64 onward:
+        //   - `compute` could not set a block's own bit -> a block was not in
+        //     its own blue set,
+        //   - `is_blue` answered `false` for every query,
+        //   - and the k-cluster admission test below, which reads
+        //     `blue_set.test(i)`, saw a saturated all-ones 64-bit window
+        //     instead of the real blue set, so it was neither counting the
+        //     right members nor enforcing `k` against them.
+        //
+        // Symptom that surfaced it: `/v1/dagknight/recent` returning 200/200
+        // blocks with `is_blue = false` while `blue_score` advanced by 1 on
+        // every one of them — two statements that cannot both be true of the
+        // same chain. `blue_score` was right; the colouring was not.
+        //
+        // `index_map.capacity()` is monotonic non-decreasing, so growing here
+        // is a no-op in the steady state and can never shrink a set.
+        bf.grow_to(dag.capacity());
+        bf
     }
 
     /// True iff `target` is blue relative to `tip` (on `tip`'s
     /// selected-parent chain, or in some chain ancestor's `merge_set_blues`).
-    pub fn is_blue(&self, tip: &BlockHash, target: &BlockHash) -> bool {
-        self.blue_set_of(tip).contains(target)
+    /// Looks directly at the memoized bitfield without cloning it (unlike
+    /// routing through `blue_set_of`, which exists for `compute`'s need to
+    /// further extend a copy) — needs `dag` only to translate `target` into
+    /// its compact index.
+    pub fn is_blue(&self, dag: &BitfieldDag, tip: &BlockHash, target: &BlockHash) -> bool {
+        let Some(target_idx) = dag.index_of(target) else { return false };
+        let Some(d) = self.data.get(tip) else { return false };
+        // Width invariant, maintained by `blue_set_of`'s `grow_to`: a stored
+        // blue set is always at least as wide as the index space was when it
+        // was computed, and capacity is monotonic, so the TIP's set — the most
+        // recently computed one — addresses every currently resident vertex.
+        // Without that invariant `test` returns `false` for out-of-range
+        // indices, which is indistinguishable from an honest "not blue" and is
+        // exactly how this went unnoticed. See `blue_set_of`.
+        debug_assert!(
+            (target_idx as usize) < d.full_blue_set.width(),
+            "blue set of tip is {} bits wide but target index is {target_idx}: \
+             a narrow set silently answers `false` for every query past its width",
+            d.full_blue_set.width()
+        );
+        d.full_blue_set.test(target_idx)
     }
 
     /// Select the candidate with the highest blue score, tie-broken by the
@@ -172,6 +253,10 @@ impl GhostdagStore {
         parents: &[BlockHash],
     ) -> &BlockGhostdagData {
         if parents.is_empty() {
+            let block_idx = dag.index_of(&block)
+                .expect("dag.add_vertex(block, ..) must already have run");
+            let mut full_blue_set = VertexBitfield::new(dag.capacity());
+            full_blue_set.set(block_idx);
             self.data.insert(
                 block,
                 BlockGhostdagData {
@@ -179,6 +264,7 @@ impl GhostdagStore {
                     merge_set_blues: Vec::new(),
                     merge_set_reds: Vec::new(),
                     blue_score: 0,
+                    full_blue_set,
                 },
             );
             return self.data.get(&block).expect("just inserted");
@@ -211,8 +297,10 @@ impl GhostdagStore {
                 .then_with(|| a.cmp(b))
         });
 
-        // 4. Greedy k-cluster admission.
-        let mut blue_set = self.blue_set_of(&selected_parent);
+        // 4. Greedy k-cluster admission. Membership tests go through the
+        // vertex index (`dag.index_of`), not the hash directly — `blue_set`
+        // is now a `VertexBitfield` (see `full_blue_set`'s doc for why).
+        let mut blue_set = self.blue_set_of(dag, &selected_parent);
         let mut new_blues = Vec::new();
         let mut new_reds = Vec::new();
         for cand in merge_set {
@@ -220,7 +308,7 @@ impl GhostdagStore {
             let blue_anticone: Vec<BlockHash> = cand_anticone
                 .iter()
                 .copied()
-                .filter(|h| blue_set.contains(h))
+                .filter(|h| dag.index_of(h).is_some_and(|i| blue_set.test(i)))
                 .collect();
 
             let admits = blue_anticone.len() as u32 <= self.k
@@ -228,7 +316,7 @@ impl GhostdagStore {
                     let anc_anticone = dag.anticone_hashes(anc).unwrap_or_default();
                     let anc_blue_count = anc_anticone
                         .iter()
-                        .filter(|h| blue_set.contains(*h))
+                        .filter(|h| dag.index_of(h).is_some_and(|i| blue_set.test(i)))
                         .count() as u32;
                     // +1 for `cand` itself joining anc's blue anticone
                     // (anticone-symmetry: cand ∈ anticone(anc) here).
@@ -236,7 +324,9 @@ impl GhostdagStore {
                 });
 
             if admits {
-                blue_set.insert(cand);
+                if let Some(idx) = dag.index_of(&cand) {
+                    blue_set.set(idx);
+                }
                 new_blues.push(cand);
             } else {
                 new_reds.push(cand);
@@ -245,6 +335,15 @@ impl GhostdagStore {
 
         let blue_score = self.blue_score(&selected_parent) + 1 + new_blues.len() as u64;
 
+        // `blue_set` already equals full_blue_set(selected_parent) ∪ new_blues
+        // (built above for the admission test) — reuse it directly instead of
+        // reconstructing; just add `block` itself, matching what the old
+        // from-scratch walk would have produced for this exact block.
+        let mut full_blue_set = blue_set;
+        let block_idx = dag.index_of(&block)
+            .expect("dag.add_vertex(block, ..) must already have run");
+        full_blue_set.set(block_idx);
+
         self.data.insert(
             block,
             BlockGhostdagData {
@@ -252,6 +351,7 @@ impl GhostdagStore {
                 merge_set_blues: new_blues,
                 merge_set_reds: new_reds,
                 blue_score,
+                full_blue_set,
             },
         );
         self.data.get(&block).expect("just inserted")
@@ -294,6 +394,108 @@ mod tests {
         (dag, store)
     }
 
+    /// 32-byte hash from a u64 — the `h(n: u8)` helper tops out at 256 and
+    /// cannot reach the index width where the 2026-08-28 bug lived.
+    fn hw(n: u64) -> BlockHash {
+        let mut out = [0u8; 32];
+        out[..8].copy_from_slice(&(n + 1).to_le_bytes());
+        out
+    }
+
+    /// Regression, 2026-08-28. A block must be a member of its own blue set.
+    ///
+    /// This is the minimal invariant whose silent violation disabled GHOSTDAG
+    /// colouring for every chain past 64 blocks: `full_blue_set` was inherited
+    /// by cloning the selected parent's, which preserved its width, and
+    /// nothing ever grew it. `VertexBitfield::set` no-ops out of range, so
+    /// from index 64 onward a block could not even record itself.
+    #[test]
+    fn every_block_is_in_its_own_blue_set_past_one_word() {
+        let mut dag = BitfieldDag::new();
+        let mut store = GhostdagStore::new(18);
+        let n = 500u64; // comfortably past the 64-bit single-word width
+
+        dag.add_vertex(hw(0), &[], 0, [1u8; 32]);
+        store.compute(&dag, hw(0), &[]);
+        for i in 1..=n {
+            dag.add_vertex(hw(i), &[hw(i - 1)], i, [1u8; 32]);
+            store.compute(&dag, hw(i), &[hw(i - 1)]);
+        }
+
+        for i in 0..=n {
+            assert!(
+                store.is_blue(&dag, &hw(i), &hw(i)),
+                "block at index {i} is not in its own blue set"
+            );
+        }
+    }
+
+    /// Regression, 2026-08-28. A stored blue set must address the whole index
+    /// space, or `test` silently answers `false` past its width and every
+    /// query beyond it is indistinguishable from an honest "not blue".
+    #[test]
+    fn stored_blue_sets_stay_at_least_as_wide_as_the_index_space() {
+        let mut dag = BitfieldDag::new();
+        let mut store = GhostdagStore::new(18);
+        let n = 500u64;
+
+        dag.add_vertex(hw(0), &[], 0, [1u8; 32]);
+        store.compute(&dag, hw(0), &[]);
+        for i in 1..=n {
+            dag.add_vertex(hw(i), &[hw(i - 1)], i, [1u8; 32]);
+            store.compute(&dag, hw(i), &[hw(i - 1)]);
+        }
+
+        let tip = hw(n);
+        let width = store.blue_set_of(&dag, &tip).width();
+        assert!(
+            width >= dag.capacity(),
+            "tip blue set is {width} bits wide against an index space of {}",
+            dag.capacity()
+        );
+        // And it really is populated, not merely wide: a linear chain colours
+        // every block blue, so the count must track the chain length.
+        assert_eq!(
+            store.blue_set_of(&dag, &tip).count(),
+            (n + 1) as usize,
+            "a straight chain must have every block in the tip's blue set"
+        );
+    }
+
+    /// The k-cluster admission test reads `blue_set.test(i)`. If the set is
+    /// truncated it saturates at an all-ones 64-bit window, so admission stops
+    /// consulting the real blue set. Guard the property admission depends on:
+    /// membership answers must be correct for indices past one word.
+    #[test]
+    fn blue_membership_is_correct_past_one_word() {
+        let mut dag = BitfieldDag::new();
+        let mut store = GhostdagStore::new(18);
+        let n = 300u64;
+
+        dag.add_vertex(hw(0), &[], 0, [1u8; 32]);
+        store.compute(&dag, hw(0), &[]);
+        for i in 1..=n {
+            dag.add_vertex(hw(i), &[hw(i - 1)], i, [1u8; 32]);
+            store.compute(&dag, hw(i), &[hw(i - 1)]);
+        }
+
+        let tip = hw(n);
+        // Every ancestor is blue relative to the tip...
+        for i in 0..=n {
+            assert!(store.is_blue(&dag, &tip, &hw(i)), "ancestor {i}");
+        }
+        // ...and a vertex that is not an ancestor is not blue. Add a sibling
+        // hanging off an early block: it is concurrent with the tip's chain,
+        // never merged, so it must not appear in the tip's blue set.
+        let sibling = hw(n + 1_000);
+        dag.add_vertex(sibling, &[hw(10)], 11, [2u8; 32]);
+        store.compute(&dag, sibling, &[hw(10)]);
+        assert!(
+            !store.is_blue(&dag, &tip, &sibling),
+            "an unmerged concurrent block must not be blue relative to the tip"
+        );
+    }
+
     #[test]
     fn genesis_has_zero_blue_score_and_no_selected_parent() {
         let (_, store) = build(&[(h(0), vec![], 0, producer(0))], 2);
@@ -331,15 +533,15 @@ mod tests {
             (b, vec![g], 1, producer(2)),
             (c, vec![a, b], 2, producer(1)),
         ];
-        let (_, store) = build(&specs, 2);
+        let (dag, store) = build(&specs, 2);
         let dc = store.get(&c).unwrap();
         // One of {a,b} is selected parent, the other must be in merge_set_blues
         // (anticone size 1 <= k=2, nothing else contends).
         assert_eq!(dc.merge_set_blues.len(), 1);
         assert!(dc.merge_set_reds.is_empty());
         assert_eq!(dc.blue_score, 3); // selected_parent(1) + 1 + 1 new blue
-        assert!(store.is_blue(&c, &a));
-        assert!(store.is_blue(&c, &b));
+        assert!(store.is_blue(&dag, &c, &a));
+        assert!(store.is_blue(&dag, &c, &b));
     }
 
     #[test]
@@ -372,16 +574,20 @@ mod tests {
 
         // K-CLUSTER INVARIANT: every blue block's anticone, restricted to the
         // final blue set, has size <= k.
-        let blue_set = store.blue_set_of(&b);
-        for blue in &blue_set {
-            let ac = dag.anticone_hashes(blue).unwrap_or_default();
-            let blue_ac = ac.iter().filter(|x| blue_set.contains(*x)).count();
+        let blue_set = store.blue_set_of(&dag, &b);
+        for blue_idx in blue_set.iter_set_bits() {
+            let blue = dag.hash_of(blue_idx).expect("set bit must be a resident vertex");
+            let ac = dag.anticone_hashes(&blue).unwrap_or_default();
+            let blue_ac = ac
+                .iter()
+                .filter(|x| dag.index_of(x).is_some_and(|i| blue_set.test(i)))
+                .count();
             assert!(blue_ac as u32 <= 2, "blue {blue:?} has blue-anticone {blue_ac} > k=2");
         }
         // And every red is red BECAUSE admitting it would have broken the bound
         // (sanity: reds are not in the final blue set).
         for red in &db.merge_set_reds {
-            assert!(!blue_set.contains(red));
+            assert!(!dag.index_of(red).is_some_and(|i| blue_set.test(i)));
         }
     }
 

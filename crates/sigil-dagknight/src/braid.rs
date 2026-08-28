@@ -1558,6 +1558,67 @@ mod tests {
         );
     }
 
+    /// Live-like parameters: `final_depth` 512 (the production default) and a
+    /// chain long enough that `cleanup_below_height` runs many times and
+    /// RECYCLES indices repeatedly. The 2000-block / final_depth-64 test above
+    /// passes with the `grow_to` fix; this one asks whether that is sufficient
+    /// under the conditions the live node actually runs in.
+    #[test]
+    fn recent_summary_colouring_survives_repeated_index_recycling() {
+        let mut b = Braid::new(BraidConfig {
+            ghostdag_k: Some(4), // live SIGIL_DAG_GHOSTDAG_K
+            final_depth: 512,    // live default
+            ..BraidConfig::default()
+        });
+        long_linear_chain(&mut b, 20_000);
+
+        let recent = b.recent_summary(200);
+        let blue = recent.iter().filter(|s| s.is_blue).count();
+        assert_eq!(
+            blue,
+            recent.len(),
+            "only {}/{} recent blocks are blue on a straight chain; \
+             first={:?} last={:?}",
+            blue,
+            recent.len(),
+            recent.first().map(|s| (s.height, s.blue_score, s.is_blue)),
+            recent.last().map(|s| (s.height, s.blue_score, s.is_blue)),
+        );
+    }
+
+    /// Snapshot boot: the node restarts and begins inserting at a height far
+    /// above genesis, so the FIRST block's parent is not resident. This is the
+    /// live condition on Epsilon (restarted 07:25, db `/home/storage/sigil-snap-db`)
+    /// that the from-genesis tests above never exercise.
+    #[test]
+    fn recent_summary_colouring_after_a_snapshot_boot() {
+        let mut b = Braid::new(BraidConfig {
+            ghostdag_k: Some(4),
+            final_depth: 512,
+            ..BraidConfig::default()
+        });
+
+        // Start at height 200_000 with an unknown parent, as a snapshot boot does.
+        let base = 200_000u64;
+        b.insert(v(hw(base), hw(base - 1), vec![], base, PA));
+        for i in 1..=3_000u64 {
+            b.insert(v(hw(base + i), hw(base + i - 1), vec![], base + i, PA));
+        }
+
+        let recent = b.recent_summary(200);
+        let blue = recent.iter().filter(|s| s.is_blue).count();
+        assert_eq!(
+            blue,
+            recent.len(),
+            "snapshot boot: only {}/{} recent blocks blue on a straight chain; \
+             first={:?} last={:?}",
+            blue,
+            recent.len(),
+            recent.first().map(|s| (s.height, s.blue_score, s.is_blue)),
+            recent.last().map(|s| (s.height, s.blue_score, s.is_blue)),
+        );
+    }
+
     #[test]
     fn blue_score_tracks_height_on_a_long_linear_chain() {
         // The narrower claim underneath the one above: with no merges,

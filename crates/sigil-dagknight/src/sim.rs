@@ -163,6 +163,8 @@ fn gen_braid(rng: &mut XorShift64, producers: u8, blocks: u64, equivocate: bool)
         merge_parents: Vec::new(),
         height: 0,
         producer: genesis_producer,
+        // synthetic block: no header, so no work claim to carry
+        difficulty: 0,
     });
     let mut tips: Vec<(BlockHash, u64)> = vec![(genesis_hash, 0); producers];
     let mut nonce = 1u64;
@@ -198,6 +200,8 @@ fn gen_braid(rng: &mut XorShift64, producers: u8, blocks: u64, equivocate: bool)
             merge_parents: merges,
             height,
             producer: pid,
+            // synthetic block: no header, so no work claim to carry
+            difficulty: 0,
         });
         tips[p] = (hash, height);
 
@@ -212,6 +216,8 @@ fn gen_braid(rng: &mut XorShift64, producers: u8, blocks: u64, equivocate: bool)
                 merge_parents: Vec::new(),
                 height,
                 producer: pid,
+                // synthetic block: no header, so no work claim to carry
+                difficulty: 0,
             });
             equivocation = Some(if hash < twin { (hash, twin) } else { (twin, hash) });
         }
@@ -478,6 +484,8 @@ pub fn run_permutation_invariance(seed: u64, perms: u32) -> BraidSimReport {
             merge_parents: Vec::new(),
             height: eh + 1,
             producer: producer_id(0),
+            // synthetic block: no header, so no work claim to carry
+            difficulty: 0,
         });
         ep = hash;
         eh += 1;
@@ -613,6 +621,8 @@ pub fn run_withheld_attacker(seed: u64, fork_depth: u64) -> BraidSimReport {
                 merge_parents: Vec::new(),
                 height,
                 producer: ATTACKER,
+                // synthetic block: no header, so no work claim to carry
+                difficulty: 0,
             });
             if !matches!(out, InsertOutcome::BelowFinal { .. }) {
                 not_refused += 1;
@@ -657,6 +667,8 @@ pub fn run_withheld_attacker(seed: u64, fork_depth: u64) -> BraidSimReport {
                 merge_parents: Vec::new(),
                 height,
                 producer: ATTACKER,
+                // synthetic block: no header, so no work claim to carry
+                difficulty: 0,
             });
             if !matches!(out, InsertOutcome::Inserted { .. }) {
                 not_accepted += 1;
@@ -736,6 +748,8 @@ pub fn run_tamper_reject(seed: u64) -> BraidSimReport {
         merge_parents: Vec::new(),
         height: 50,
         producer: ATTACKER,
+        // synthetic block: no header, so no work claim to carry
+        difficulty: 0,
     });
     checks.ok(
         out == InsertOutcome::MissingParents(vec![ghost_parent]),
@@ -763,6 +777,8 @@ pub fn run_tamper_reject(seed: u64) -> BraidSimReport {
                 merge_parents: Vec::new(),
                 height: 3,
                 producer: ATTACKER,
+                // synthetic block: no header, so no work claim to carry
+                difficulty: 0,
             },
         ),
         (
@@ -773,6 +789,8 @@ pub fn run_tamper_reject(seed: u64) -> BraidSimReport {
                 merge_parents: (2..7).map(fresh).collect(),
                 height: anchor.height + 1,
                 producer: ATTACKER,
+                // synthetic block: no header, so no work claim to carry
+                difficulty: 0,
             },
         ),
         (
@@ -783,6 +801,8 @@ pub fn run_tamper_reject(seed: u64) -> BraidSimReport {
                 merge_parents: vec![fresh(11), fresh(11)],
                 height: anchor.height + 1,
                 producer: ATTACKER,
+                // synthetic block: no header, so no work claim to carry
+                difficulty: 0,
             },
         ),
         (
@@ -793,6 +813,8 @@ pub fn run_tamper_reject(seed: u64) -> BraidSimReport {
                 merge_parents: vec![anchor.hash],
                 height: anchor.height + 1,
                 producer: ATTACKER,
+                // synthetic block: no header, so no work claim to carry
+                difficulty: 0,
             },
         ),
         (
@@ -803,6 +825,8 @@ pub fn run_tamper_reject(seed: u64) -> BraidSimReport {
                 merge_parents: Vec::new(),
                 height: anchor.height + 7,
                 producer: ATTACKER,
+                // synthetic block: no header, so no work claim to carry
+                difficulty: 0,
             },
         ),
     ];

@@ -167,6 +167,8 @@ fn run_cell(producers: usize, k: usize, delay: usize, rounds: usize, seed: u64) 
                 merge_parents,
                 height,
                 producer: producer_id(p),
+                // synthetic block: no header, so no work claim to carry
+                difficulty: 0,
             });
             minted.push((p, hash));
         }

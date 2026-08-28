@@ -392,7 +392,7 @@ impl Braid {
             .copied()
             .collect();
         self.dag
-            .add_vertex(view.hash, &dag_parents, view.height, view.producer);
+            .add_vertex(view.hash, &dag_parents, view.height, view.producer, view.difficulty);
         if let Some(store) = &mut self.ghostdag {
             store.compute(&self.dag, view.hash, &dag_parents);
         }
@@ -1059,6 +1059,8 @@ mod tests {
             merge_parents,
             height,
             producer,
+            // test blocks carry no header, so no work claim
+            difficulty: 0,
         }
     }
 
@@ -1797,7 +1799,7 @@ mod tests {
                         backlog[p as usize].pop_front();
                     }
                 }
-                views.push(BlockView { hash, parent, merge_parents, height: r as u64, producer: [p; 32] });
+                views.push(BlockView { hash, parent, merge_parents, height: r as u64, producer: [p; 32], difficulty: 0 });
                 minted.push((p, hash));
             }
             for (origin, hash) in &minted {

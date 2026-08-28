@@ -330,6 +330,11 @@ pub struct BitfieldDag {
     heights: Vec<u64>,
     /// Producer of each vertex index — second tie-break component.
     producers: Vec<[u8; 32]>,
+    /// `header.difficulty` of each vertex index. Feeds the ordering layer's
+    /// work accounting (`GhostdagStore` / `WorkPolicy`). See
+    /// `BlockView::difficulty` for the units caveat: it is an EXPONENT, and it
+    /// is 0 on almost every block on this chain today.
+    difficulties: Vec<u64>,
     /// The `cap` value `ensure_capacity` last swept every bitfield to. See
     /// that method's doc comment — lets it skip the O(vertex_count) re-sweep
     /// on every insert once capacity has stopped growing.
@@ -352,6 +357,7 @@ impl BitfieldDag {
             parent_sets: Vec::new(),
             heights: Vec::new(),
             producers: Vec::new(),
+            difficulties: Vec::new(),
             last_swept_cap: 0,
         }
     }
@@ -375,6 +381,9 @@ impl BitfieldDag {
         }
         while self.producers.len() < needed {
             self.producers.push([0u8; 32]);
+        }
+        while self.difficulties.len() < needed {
+            self.difficulties.push(0);
         }
 
         // 2026-08-22 (live malloc/page-fault-storm investigation, found via a
@@ -413,12 +422,14 @@ impl BitfieldDag {
         parents: &[BlockHash],
         height: u64,
         producer: [u8; 32],
+        difficulty: u64,
     ) -> u32 {
         let idx = self.index_map.get_or_insert(vertex_id);
         self.ensure_capacity(idx);
 
         self.heights[idx as usize] = height;
         self.producers[idx as usize] = producer;
+        self.difficulties[idx as usize] = difficulty;
 
         // Build past set: union of all parents' past sets + parents themselves
         let cap = self.index_map.capacity();
@@ -649,6 +660,18 @@ impl BitfieldDag {
         self.producers.get(idx as usize).copied()
     }
 
+    /// `header.difficulty` of an active vertex, by index — the hot path used
+    /// by the ordering layer's work accounting, which already holds indices.
+    pub fn difficulty_at(&self, idx: u32) -> u64 {
+        self.difficulties.get(idx as usize).copied().unwrap_or(0)
+    }
+
+    /// `header.difficulty` of an active vertex.
+    pub fn difficulty_of(&self, vertex_id: &BlockHash) -> Option<u64> {
+        let idx = self.index_map.get_index(vertex_id)?;
+        self.difficulties.get(idx as usize).copied()
+    }
+
     /// Remove vertices below the cutoff height, recycling indices — the hard
     /// sliding window. MUST run as finalization advances; never point this
     /// structure at unbounded history.
@@ -868,9 +891,9 @@ mod tests {
         let mut dag = BitfieldDag::new();
 
         // Chain: v0 -> v1 -> v2
-        dag.add_vertex(h(0), &[], 1, P0);
-        dag.add_vertex(h(1), &[h(0)], 2, P0);
-        dag.add_vertex(h(2), &[h(1)], 3, P0);
+        dag.add_vertex(h(0), &[], 1, P0, 0);
+        dag.add_vertex(h(1), &[h(0)], 2, P0, 0);
+        dag.add_vertex(h(2), &[h(1)], 3, P0, 0);
 
         assert!(dag.causally_precedes(&h(0), &h(1)));
         assert!(dag.causally_precedes(&h(0), &h(2)));
@@ -883,10 +906,10 @@ mod tests {
         let mut dag = BitfieldDag::new();
 
         // Diamond: v0 -> v1, v0 -> v2, v1 -> v3, v2 -> v3
-        dag.add_vertex(h(0), &[], 1, P0);
-        dag.add_vertex(h(1), &[h(0)], 2, P0);
-        dag.add_vertex(h(2), &[h(0)], 2, P0);
-        dag.add_vertex(h(3), &[h(1), h(2)], 3, P0);
+        dag.add_vertex(h(0), &[], 1, P0, 0);
+        dag.add_vertex(h(1), &[h(0)], 2, P0, 0);
+        dag.add_vertex(h(2), &[h(0)], 2, P0, 0);
+        dag.add_vertex(h(3), &[h(1), h(2)], 3, P0, 0);
 
         // v1 and v2 are concurrent
         let ac_v1 = dag.anticone(&h(1)).unwrap();
@@ -903,10 +926,10 @@ mod tests {
     fn test_dag_cleanup() {
         let mut dag = BitfieldDag::new();
 
-        dag.add_vertex(h(0), &[], 1, P0);
-        dag.add_vertex(h(1), &[h(0)], 2, P0);
-        dag.add_vertex(h(2), &[h(1)], 3, P0);
-        dag.add_vertex(h(3), &[h(2)], 4, P0);
+        dag.add_vertex(h(0), &[], 1, P0, 0);
+        dag.add_vertex(h(1), &[h(0)], 2, P0, 0);
+        dag.add_vertex(h(2), &[h(1)], 3, P0, 0);
+        dag.add_vertex(h(3), &[h(2)], 4, P0, 0);
 
         assert_eq!(dag.vertex_count(), 4);
 
@@ -918,9 +941,9 @@ mod tests {
     fn test_dag_topological_sort() {
         let mut dag = BitfieldDag::new();
 
-        dag.add_vertex(h(1), &[], 1, P0);
-        dag.add_vertex(h(2), &[], 1, P0);
-        dag.add_vertex(h(3), &[h(1)], 2, P0);
+        dag.add_vertex(h(1), &[], 1, P0, 0);
+        dag.add_vertex(h(2), &[], 1, P0, 0);
+        dag.add_vertex(h(3), &[h(1)], 2, P0, 0);
 
         let sorted = dag.topological_sort();
         assert_eq!(sorted.len(), 3);
@@ -1008,7 +1031,7 @@ mod tests {
     fn build(order: &[Spec]) -> BitfieldDag {
         let mut dag = BitfieldDag::new();
         for (hash, parents, height, producer) in order {
-            dag.add_vertex(*hash, parents, *height, *producer);
+            dag.add_vertex(*hash, parents, *height, *producer, 0);
         }
         dag
     }
@@ -1109,9 +1132,9 @@ mod tests {
         let build_windowed = |orders_seed: u64| -> Vec<BlockHash> {
             let mut dag = BitfieldDag::new();
             // Prefix chain that gets finalized away.
-            dag.add_vertex(h(100), &[], 0, P0);
-            dag.add_vertex(h(101), &[h(100)], 1, P0);
-            dag.add_vertex(h(102), &[h(101)], 2, P0);
+            dag.add_vertex(h(100), &[], 0, P0, 0);
+            dag.add_vertex(h(101), &[h(100)], 1, P0, 0);
+            dag.add_vertex(h(102), &[h(101)], 2, P0, 0);
             dag.cleanup_below_height(3); // recycles 3 indices
             // Window DAG inserted in a shuffled valid order.
             let specs: Vec<Spec> = vec![
@@ -1121,7 +1144,7 @@ mod tests {
                 (h(13), vec![h(11), h(12)], 5, [0x02; 32]),
             ];
             for (hash, parents, height, producer) in shuffled_valid_order(&specs, orders_seed) {
-                dag.add_vertex(hash, &parents, height, producer);
+                dag.add_vertex(hash, &parents, height, producer, 0);
             }
             dag.topological_sort()
         };

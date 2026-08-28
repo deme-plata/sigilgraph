@@ -10,11 +10,15 @@
 //! sigil-node's own test suite after the move (only pre-existing, unrelated
 //! failures remain — see the git log on `coinbase.rs` for that one).
 //!
-//! Known, documented limitation carried forward from sigil-dagknight itself (not
-//! something this module fixes): blue-score uses raw block COUNT, not
-//! difficulty-weighted work — correct only when producers have roughly uniform
-//! mining power. Epsilon and a home PC will not. This is an explicit operator
-//! judgment call before ever enabling real production against the live mesh —
-//! it is not resolved by this port.
+//! Carried forward from sigil-dagknight (not fixed by this module, and now
+//! only PARTLY open): selection weighted blue-score by raw block COUNT, which
+//! is correct only when producers have roughly uniform mining power — Epsilon
+//! and a home PC do not. As of 2026-08-28 the mechanism to fix this exists
+//! (`sigil_dagknight::ghostdag::WorkPolicy`) and selection compares accumulated
+//! WORK; but it ships as `UniformCount`, which equals the old count exactly, so
+//! the hazard is unchanged in behaviour until an operator activates a real work
+//! policy. Doing so is consensus-affecting and has a prerequisite: today
+//! `header.difficulty` is 0 on 99.83% of blocks, so activating it as-is would
+//! be worse than counting.
 
 pub use sigil_node::dag::*;

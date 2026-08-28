@@ -19,13 +19,16 @@
 //! & Zohar) derives on the fly. Making `k` adaptive is a further, separate
 //! increment and is not promised here.
 //!
-//! Also not (yet) included: blue **work** (difficulty-weighted) as the
-//! selection/finality metric — this module uses blue **score** (a count),
-//! which is the right metric only when block-minting difficulty is roughly
-//! uniform across producers. `Braid`'s finality window (`final_depth`)
-//! likewise still counts in **height**, not blue score — see
-//! `Braid::computed_final`. Both are explicit, scoped follow-ups, not silent
-//! gaps.
+//! Blue **work** (difficulty-weighted selection) is now implemented — see
+//! [`WorkPolicy`] — but the DEFAULT is `UniformCount`, under which `blue_work`
+//! is numerically identical to blue score and selection is byte-for-byte what
+//! it always was. That default is not timidity: `header.difficulty` on this
+//! chain is an EXPONENT and is 0 on 99.83% of blocks (measured 2026-08-28,
+//! 7 real solves in 4096), so weighting by it today would be worse than
+//! counting. Activating `Exponential` is consensus-affecting and blocked on a
+//! prerequisite — every block carrying a truthful work claim. `Braid`'s
+//! finality window (`final_depth`) still counts in **height**, not blue score
+//! or work — see `Braid::computed_final`. Explicit, scoped follow-ups.
 //!
 //! ## Algorithm
 //!
@@ -87,6 +90,12 @@ pub struct BlockGhostdagData {
     pub merge_set_reds: Vec<BlockHash>,
     /// `blue_score(selected_parent) + 1 + |merge_set_blues|`.
     pub blue_score: u64,
+    /// Accumulated WORK of this block's full blue set, under the store's
+    /// [`WorkPolicy`]. Under `UniformCount` this equals `blue_score` exactly —
+    /// that equivalence is asserted by test, and is what makes the default a
+    /// provable no-op. `u128` because `Exponential` sums powers of two and a
+    /// `u64` would overflow well inside a normal window.
+    pub blue_work: u128,
     /// v2.1 (2026-08-19 — measured via real `perf` profiling on a deep
     /// catch-up node, per this module's own "complexity note" above, which
     /// named exactly this fix and exactly this trigger condition before it
@@ -121,12 +130,86 @@ pub struct BlockGhostdagData {
 }
 
 
+/// How much a block weighs when comparing two branches.
+///
+/// GHOSTDAG's published selection rule compares blue **score** — a COUNT of
+/// blue blocks. That is the correct metric only when every block represents
+/// roughly the same work. Two producers with very different hashpower break
+/// that assumption: their blocks count the same, so "heaviest branch" stops
+/// tracking actual work. That is a fork hazard, and it is why this type exists.
+///
+/// ## Why the obvious fix is not the default
+///
+/// The obvious weight is `header.difficulty`. On this chain, today, that would
+/// be **worse than counting**, for two measured reasons:
+///
+/// 1. **It is an exponent, not work.** `difficulty` is `solve.bits`, fed to
+///    `target_from_bits`, so the work it denotes is `2^bits`. Summing `bits`
+///    would treat 25 as 1.04x of 24 instead of 2x.
+/// 2. **It is zero on almost every block.** Measured 2026-08-28 against the
+///    live chain: 7 of 4096 recent blocks carried a real solve (0.17%). The
+///    other 4089 are producer free-run mints with `difficulty = 0` AND
+///    `vdf_proof.t = 0` — they carry no proof of work at all. Weighting by it
+///    would give 99.83% of blocks zero weight and let a handful of blocks
+///    decide fork choice outright.
+///
+/// So the plumbing is built here and the metric is switchable, but the default
+/// reproduces today's behaviour EXACTLY. Activating a real work metric is
+/// blocked on a separate prerequisite: every block must carry a truthful
+/// statement of its own work. Until then `Exponential` is a loaded gun.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkPolicy {
+    /// Every block weighs 1. `blue_work` is then numerically identical to
+    /// blue score, so selection is byte-for-byte what it was before this type
+    /// existed. **The default**, and a strict no-op.
+    UniformCount,
+    /// `weight = 2^min(difficulty, 63)`, floored at `base` for blocks that
+    /// declare no difficulty. `base` keeps an unproven block from weighing
+    /// zero, which is what makes this survivable at all on a chain where most
+    /// blocks declare nothing.
+    ///
+    /// ⚠️ Consensus-affecting. Every node must switch together or the network
+    /// forks on the metric itself. Do not enable without a coordinated
+    /// activation.
+    Exponential {
+        /// Floor weight for a block that declares `difficulty == 0`. Must be
+        /// >= 1: a zero-weight block is invisible to branch comparison.
+        base: u64,
+    },
+}
+
+impl Default for WorkPolicy {
+    fn default() -> Self {
+        WorkPolicy::UniformCount
+    }
+}
+
+impl WorkPolicy {
+    /// Weight of a single block. Never returns 0 — a zero-weight block is
+    /// invisible to branch comparison, which is the failure this whole type is
+    /// meant to avoid.
+    pub fn weight(self, difficulty: u64) -> u128 {
+        match self {
+            WorkPolicy::UniformCount => 1,
+            WorkPolicy::Exponential { base } => {
+                let floor = (base as u128).max(1);
+                if difficulty == 0 {
+                    floor
+                } else {
+                    (1u128 << difficulty.min(63)).max(floor)
+                }
+            }
+        }
+    }
+}
+
 /// Incremental GHOSTDAG blue/red coloring store, parameterized by the fixed
 /// cluster bound `k`. Lives alongside [`crate::braid::Braid`]'s window; the
 /// caller (`Braid`) is responsible for calling [`GhostdagStore::forget`] in
 /// lockstep with its own window cleanup so the two stay bounded together.
 pub struct GhostdagStore {
     k: u32,
+    policy: WorkPolicy,
     data: HashMap<BlockHash, BlockGhostdagData>,
 }
 
@@ -135,8 +218,27 @@ impl GhostdagStore {
     pub fn new(k: u32) -> Self {
         Self {
             k,
+            policy: WorkPolicy::default(),
             data: HashMap::new(),
         }
+    }
+
+    /// New store with an explicit work policy.
+    ///
+    /// ⚠️ Anything other than [`WorkPolicy::UniformCount`] changes which branch
+    /// wins and is therefore consensus-affecting — every node must agree.
+    pub fn with_policy(k: u32, policy: WorkPolicy) -> Self {
+        Self { k, policy, data: HashMap::new() }
+    }
+
+    /// The configured work policy.
+    pub fn policy(&self) -> WorkPolicy {
+        self.policy
+    }
+
+    /// Accumulated blue work of `h`, or 0 if unknown.
+    pub fn blue_work(&self, h: &BlockHash) -> u128 {
+        self.data.get(h).map(|d| d.blue_work).unwrap_or(0)
     }
 
     /// The configured cluster bound.
@@ -231,11 +333,20 @@ impl GhostdagStore {
     /// Select the candidate with the highest blue score, tie-broken by the
     /// smaller hash — the v2 analog of `Braid`'s v1 max-height/min-hash tip
     /// selection.
+    /// Heaviest branch by accumulated blue WORK, tie-broken by the smaller
+    /// hash.
+    ///
+    /// Under [`WorkPolicy::UniformCount`] — the default — `blue_work` is
+    /// numerically equal to `blue_score`, so this is exactly the blue-score
+    /// comparison it replaces. `select_tip_matches_blue_score_under_uniform`
+    /// asserts that equivalence on a DAG with real concurrency, so switching
+    /// this comparison from score to work cannot silently change consensus
+    /// while the default policy is in force.
     pub fn select_tip<'a>(&self, candidates: impl Iterator<Item = &'a BlockHash>) -> Option<BlockHash> {
         candidates.copied().reduce(|a, b| {
-            let sa = self.blue_score(&a);
-            let sb = self.blue_score(&b);
-            if sb > sa || (sb == sa && b < a) {
+            let wa = self.blue_work(&a);
+            let wb = self.blue_work(&b);
+            if wb > wa || (wb == wa && b < a) {
                 b
             } else {
                 a
@@ -257,6 +368,12 @@ impl GhostdagStore {
                 .expect("dag.add_vertex(block, ..) must already have run");
             let mut full_blue_set = VertexBitfield::new(dag.capacity());
             full_blue_set.set(block_idx);
+            // Mirror the genesis blue_score convention (`blue_score: 0`): the
+            // seed block is the common ancestor of everything, so it cancels
+            // out of every branch comparison and contributes no work. Giving it
+            // weight here would break the `blue_work == blue_score` identity at
+            // the very first child — which is exactly what the test caught.
+            let seed_work: u128 = 0;
             self.data.insert(
                 block,
                 BlockGhostdagData {
@@ -264,6 +381,7 @@ impl GhostdagStore {
                     merge_set_blues: Vec::new(),
                     merge_set_reds: Vec::new(),
                     blue_score: 0,
+                    blue_work: seed_work,
                     full_blue_set,
                 },
             );
@@ -334,14 +452,27 @@ impl GhostdagStore {
         }
 
         let blue_score = self.blue_score(&selected_parent) + 1 + new_blues.len() as u64;
+        // Work accumulates over exactly the same set the score counts: the
+        // selected parent's accumulated work, plus this block, plus every
+        // member this block newly coloured blue. Keeping the two in lockstep is
+        // what makes `UniformCount` provably equal to the count.
+        let block_idx = dag.index_of(&block)
+            .expect("dag.add_vertex(block, ..) must already have run");
+        let blue_work = {
+            let mut w = self.blue_work(&selected_parent);
+            w = w.saturating_add(self.policy.weight(dag.difficulty_at(block_idx)));
+            for nb in &new_blues {
+                let d = dag.index_of(nb).map(|i| dag.difficulty_at(i)).unwrap_or(0);
+                w = w.saturating_add(self.policy.weight(d));
+            }
+            w
+        };
 
         // `blue_set` already equals full_blue_set(selected_parent) ∪ new_blues
         // (built above for the admission test) — reuse it directly instead of
         // reconstructing; just add `block` itself, matching what the old
         // from-scratch walk would have produced for this exact block.
         let mut full_blue_set = blue_set;
-        let block_idx = dag.index_of(&block)
-            .expect("dag.add_vertex(block, ..) must already have run");
         full_blue_set.set(block_idx);
 
         self.data.insert(
@@ -351,6 +482,7 @@ impl GhostdagStore {
                 merge_set_blues: new_blues,
                 merge_set_reds: new_reds,
                 blue_score,
+                blue_work,
                 full_blue_set,
             },
         );
@@ -388,7 +520,7 @@ mod tests {
         let mut dag = BitfieldDag::new();
         let mut store = GhostdagStore::new(k);
         for (hash, parents, height, prod) in specs {
-            dag.add_vertex(*hash, parents, *height, *prod);
+            dag.add_vertex(*hash, parents, *height, *prod, 0);
             store.compute(&dag, *hash, parents);
         }
         (dag, store)
@@ -415,10 +547,10 @@ mod tests {
         let mut store = GhostdagStore::new(18);
         let n = 500u64; // comfortably past the 64-bit single-word width
 
-        dag.add_vertex(hw(0), &[], 0, [1u8; 32]);
+        dag.add_vertex(hw(0), &[], 0, [1u8; 32], 0);
         store.compute(&dag, hw(0), &[]);
         for i in 1..=n {
-            dag.add_vertex(hw(i), &[hw(i - 1)], i, [1u8; 32]);
+            dag.add_vertex(hw(i), &[hw(i - 1)], i, [1u8; 32], 0);
             store.compute(&dag, hw(i), &[hw(i - 1)]);
         }
 
@@ -439,10 +571,10 @@ mod tests {
         let mut store = GhostdagStore::new(18);
         let n = 500u64;
 
-        dag.add_vertex(hw(0), &[], 0, [1u8; 32]);
+        dag.add_vertex(hw(0), &[], 0, [1u8; 32], 0);
         store.compute(&dag, hw(0), &[]);
         for i in 1..=n {
-            dag.add_vertex(hw(i), &[hw(i - 1)], i, [1u8; 32]);
+            dag.add_vertex(hw(i), &[hw(i - 1)], i, [1u8; 32], 0);
             store.compute(&dag, hw(i), &[hw(i - 1)]);
         }
 
@@ -472,10 +604,10 @@ mod tests {
         let mut store = GhostdagStore::new(18);
         let n = 300u64;
 
-        dag.add_vertex(hw(0), &[], 0, [1u8; 32]);
+        dag.add_vertex(hw(0), &[], 0, [1u8; 32], 0);
         store.compute(&dag, hw(0), &[]);
         for i in 1..=n {
-            dag.add_vertex(hw(i), &[hw(i - 1)], i, [1u8; 32]);
+            dag.add_vertex(hw(i), &[hw(i - 1)], i, [1u8; 32], 0);
             store.compute(&dag, hw(i), &[hw(i - 1)]);
         }
 
@@ -488,12 +620,143 @@ mod tests {
         // hanging off an early block: it is concurrent with the tip's chain,
         // never merged, so it must not appear in the tip's blue set.
         let sibling = hw(n + 1_000);
-        dag.add_vertex(sibling, &[hw(10)], 11, [2u8; 32]);
+        dag.add_vertex(sibling, &[hw(10)], 11, [2u8; 32], 0);
         store.compute(&dag, sibling, &[hw(10)]);
         assert!(
             !store.is_blue(&dag, &tip, &sibling),
             "an unmerged concurrent block must not be blue relative to the tip"
         );
+    }
+
+    // ── work weighting (2026-08-28) ─────────────────────────────────────────
+
+    /// The load-bearing safety property: with the DEFAULT policy, `blue_work`
+    /// is numerically identical to `blue_score` on every block — including on a
+    /// DAG with real concurrency, reds and merges. `select_tip` was switched
+    /// from comparing score to comparing work; this is what makes that switch
+    /// provably not a consensus change.
+    #[test]
+    fn blue_work_equals_blue_score_under_uniform_count() {
+        let mut dag = BitfieldDag::new();
+        let mut store = GhostdagStore::new(2);
+        assert_eq!(store.policy(), WorkPolicy::UniformCount, "default must be the no-op");
+
+        // genesis
+        dag.add_vertex(h(0), &[], 0, producer(0), 0);
+        store.compute(&dag, h(0), &[]);
+        // two concurrent children, then a merge — real width, not a chain
+        dag.add_vertex(h(1), &[h(0)], 1, producer(1), 7);
+        store.compute(&dag, h(1), &[h(0)]);
+        dag.add_vertex(h(2), &[h(0)], 1, producer(2), 31);
+        store.compute(&dag, h(2), &[h(0)]);
+        dag.add_vertex(h(3), &[h(1), h(2)], 2, producer(3), 0);
+        store.compute(&dag, h(3), &[h(1), h(2)]);
+
+        for b in [h(0), h(1), h(2), h(3)] {
+            assert_eq!(
+                store.blue_work(&b) as u64,
+                store.blue_score(&b),
+                "block {:?}: work {} != score {} under UniformCount",
+                &b[..1], store.blue_work(&b), store.blue_score(&b)
+            );
+        }
+    }
+
+    /// Differing `difficulty` must have NO effect while the default policy is
+    /// in force — otherwise merely plumbing the field through would have
+    /// changed selection.
+    #[test]
+    fn difficulty_is_inert_under_the_default_policy() {
+        fn tip_with(diffs: [u64; 3]) -> (u128, u64) {
+            let mut dag = BitfieldDag::new();
+            let mut store = GhostdagStore::new(2);
+            dag.add_vertex(h(0), &[], 0, producer(0), diffs[0]);
+            store.compute(&dag, h(0), &[]);
+            dag.add_vertex(h(1), &[h(0)], 1, producer(1), diffs[1]);
+            store.compute(&dag, h(1), &[h(0)]);
+            dag.add_vertex(h(2), &[h(1)], 2, producer(2), diffs[2]);
+            store.compute(&dag, h(2), &[h(1)]);
+            (store.blue_work(&h(2)), store.blue_score(&h(2)))
+        }
+        assert_eq!(tip_with([0, 0, 0]), tip_with([0, 40, 63]));
+    }
+
+    /// The weight function itself: an EXPONENT, not a linear count. This is the
+    /// unit-confusion that would silently under-weight strong blocks if someone
+    /// summed `bits` directly.
+    #[test]
+    fn exponential_policy_treats_difficulty_as_an_exponent() {
+        let p = WorkPolicy::Exponential { base: 1 };
+        assert_eq!(p.weight(10), 1024);
+        assert_eq!(p.weight(11), 2048, "one more bit must DOUBLE the weight, not add 1");
+        // saturates rather than shifting past the width of u128
+        assert_eq!(p.weight(63), 1u128 << 63);
+        assert_eq!(p.weight(9_999), 1u128 << 63);
+    }
+
+    /// A block that declares no work must never weigh zero: a zero-weight block
+    /// is invisible to branch comparison, which is the exact failure this whole
+    /// mechanism exists to prevent. On this chain 99.83% of blocks declare
+    /// nothing, so this floor is what keeps `Exponential` survivable at all.
+    #[test]
+    fn undeclared_work_is_floored_never_zero() {
+        for p in [WorkPolicy::UniformCount, WorkPolicy::Exponential { base: 1 },
+                  WorkPolicy::Exponential { base: 8 }] {
+            assert!(p.weight(0) >= 1, "{p:?} gave zero weight to an undeclared block");
+        }
+        assert_eq!(WorkPolicy::Exponential { base: 8 }.weight(0), 8);
+        // and a declared-but-tiny difficulty never drops below the floor either
+        assert_eq!(WorkPolicy::Exponential { base: 8 }.weight(1), 8);
+    }
+
+    /// Under `Exponential`, a branch built from fewer but much harder blocks
+    /// outweighs a longer branch of easy ones. This is the hazard the comment
+    /// on `should_produce()` describes, demonstrated as a behaviour change —
+    /// and it is why the policy is opt-in and consensus-affecting.
+    #[test]
+    fn exponential_lets_harder_work_outweigh_more_blocks() {
+        fn work_of_chain(policy: WorkPolicy, diffs: &[u64]) -> u128 {
+            let mut dag = BitfieldDag::new();
+            let mut store = GhostdagStore::with_policy(2, policy);
+            dag.add_vertex(hw(0), &[], 0, producer(0), 0);
+            store.compute(&dag, hw(0), &[]);
+            for (i, d) in diffs.iter().enumerate() {
+                let n = i as u64 + 1;
+                dag.add_vertex(hw(n), &[hw(n - 1)], n, producer(1), *d);
+                store.compute(&dag, hw(n), &[hw(n - 1)]);
+            }
+            store.blue_work(&hw(diffs.len() as u64))
+        }
+        let strong = work_of_chain(WorkPolicy::Exponential { base: 1 }, &[20, 20]);
+        let weak   = work_of_chain(WorkPolicy::Exponential { base: 1 }, &[0; 50]);
+        assert!(strong > weak, "2 hard blocks ({strong}) should outweigh 50 empty ones ({weak})");
+
+        // ...and under the default the longer chain wins, exactly as today.
+        let strong_u = work_of_chain(WorkPolicy::UniformCount, &[20, 20]);
+        let weak_u   = work_of_chain(WorkPolicy::UniformCount, &[0; 50]);
+        assert!(weak_u > strong_u, "UniformCount must still be a pure count");
+    }
+
+    /// `select_tip` picks the heavier branch, and under the default that is
+    /// identical to picking the higher blue score.
+    #[test]
+    fn select_tip_matches_blue_score_under_uniform() {
+        let mut dag = BitfieldDag::new();
+        let mut store = GhostdagStore::new(2);
+        dag.add_vertex(h(0), &[], 0, producer(0), 0);
+        store.compute(&dag, h(0), &[]);
+        dag.add_vertex(h(1), &[h(0)], 1, producer(1), 0);
+        store.compute(&dag, h(1), &[h(0)]);
+        dag.add_vertex(h(2), &[h(1)], 2, producer(2), 0);
+        store.compute(&dag, h(2), &[h(1)]);
+
+        let cands = [h(0), h(1), h(2)];
+        let by_work = store.select_tip(cands.iter()).unwrap();
+        let by_score = cands.iter().copied().reduce(|a, b| {
+            let (sa, sb) = (store.blue_score(&a), store.blue_score(&b));
+            if sb > sa || (sb == sa && b < a) { b } else { a }
+        }).unwrap();
+        assert_eq!(by_work, by_score);
     }
 
     #[test]
@@ -613,7 +876,7 @@ mod tests {
         let parents = vec![a2, b];
         // Manually mirror what Braid does: add to dag then compute.
         let mut dag = dag;
-        dag.add_vertex(c, &parents, 3, producer(3));
+        dag.add_vertex(c, &parents, 3, producer(3), 0);
         let dc = store.compute(&dag, c, &parents);
         assert_eq!(dc.selected_parent, Some(a2), "higher blue score must win selection");
     }

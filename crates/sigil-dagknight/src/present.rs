@@ -181,6 +181,8 @@ mod tests {
         producer: [u8; 32],
     ) -> BlockView {
         BlockView {
+            // synthetic block: no header, so no work claim to carry
+            difficulty: 0,
             hash,
             parent,
             merge_parents,

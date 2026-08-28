@@ -116,6 +116,27 @@ pub fn should_produce() -> bool {
     //   tracking actual work. That is a fork hazard, and default-on makes it live rather
     //   than theoretical. Work-weighting blue-score is the fix; this gate never was.
     //
+    // STATUS 2026-08-28 — the fix is HALF done, and the half that is missing is not the
+    // part you would guess. The mechanism now exists and is wired end to end:
+    // `header.difficulty` reaches the ordering layer (`BlockView` -> `BitfieldDag` ->
+    // `GhostdagStore`), blue WORK accumulates alongside blue score, and `select_tip`
+    // compares work. It ships as `WorkPolicy::UniformCount`, which is numerically
+    // identical to the old count — asserted by test — so nothing about selection has
+    // changed yet.
+    //
+    // What blocks activation is the DATA, not the code. Measured against the live chain
+    // that day: `header.difficulty` is `solve.bits`, an EXPONENT (work is 2^bits, not
+    // bits), and it is 0 on 4089 of 4096 recent blocks — those are producer free-run
+    // mints carrying `difficulty = 0` AND `vdf_proof.t = 0`, i.e. no proof of work at
+    // all. Switching to a real work metric today would hand 99.83% of blocks zero weight
+    // and let 7 blocks decide fork choice. That is strictly worse than the count it
+    // replaces.
+    //
+    // So the honest statement of the hazard is now: the ordering layer can weight by work
+    // the moment blocks tell the truth about their work. Until every block carries a
+    // meaningful work claim, `Exponential` is a loaded gun and the hazard stands as
+    // written above.
+    //
     // What still protects a fresh install, and is NOT weakened by this flip:
     // `run::maybe_start` refuses to produce unless `sync::sync_chain` reached the live tip,
     // and treats a PARTIAL sync as failure rather than a lesser success (sync.rs,

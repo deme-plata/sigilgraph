@@ -11,8 +11,11 @@
 //! test bounding each blue block's concurrent-block ("blue anticone") count
 //! by a fixed `k`. **It is still NOT DagKnight-the-paper** (no parameterless
 //! min-cut anticone bound — `k` is fixed, not derived from observed network
-//! delay) and does not yet use blue **work** (difficulty-weighted) for
-//! selection or finality — see the `ghostdag` module doc for the full,
+//! delay). Blue **work** (difficulty-weighted selection) now EXISTS as
+//! `ghostdag::WorkPolicy`, but ships defaulted to `UniformCount`, which is
+//! numerically identical to blue score — so selection is unchanged until an
+//! operator deliberately activates it. Finality still counts in **height**.
+//! See the `ghostdag` module doc for the full,
 //! current honest-naming statement. Any release notes, science_summary text,
 //! or TUI strings sourced from this crate must reproduce these claims and
 //! nothing stronger. Binding statement: `docs/SIGIL_DAGKNIGHT_LANE_v0.md` §1

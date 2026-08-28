@@ -294,6 +294,12 @@ impl Air for SpendFullV5Air {
             degrees.push(TransitionConstraintDegree::new(2));                          // bit boolean
             degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // first·(rem−hv)
         }
+        // FINDING-1 FIX (mint via unconstrained conservation column): pin `out` (col 1)
+        // to zero on every row where it is not already fixed. It is fixed to the fee at row
+        // 0 (via `first`) and to output i at row i+1 (via `osel_i`); it was FREE elsewhere,
+        // which let a hand-built trace inflate the outputs past the input while the balance
+        // accumulator still landed on zero. Same degree shape as `osel*(out-hv)` above.
+        degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // (1-first-sum osel)*out
         let num_assertions = 5 + 2 * N_OUTS;
         SpendFullV5Air {
             // The real region is the first half; everything from its last row onward is
@@ -465,6 +471,18 @@ impl Air for SpendFullV5Air {
             result[base + 13] = rbit * (rbit - one);
             result[base + 14] = first * (rem - hv);
         }
+
+        // FINDING-1 FIX (see Air::new): out (col 1) must be zero except where pinned -- row
+        // 0 (fee, via `first`) and rows 1..=N_OUTS (outputs, via `osel_i`). Without this the
+        // column was FREE on every other row, so a prover writing its own trace could park
+        // value-(fee+sum outputs) in a free row, telescope the accumulator back to zero, and
+        // mint the outputs from nothing. This forces sum_rows out == fee + sum outputs.
+        let mut osel_sum = E::ZERO;
+        for i in 0..N_OUTS {
+            osel_sum = osel_sum + periodic[6 + i];
+        }
+        let out_zero_idx = result.len() - 1;
+        result[out_zero_idx] = (one - first - osel_sum) * out;
     }
 
     fn get_assertions(&self) -> Vec<Assertion<Self::BaseField>> {

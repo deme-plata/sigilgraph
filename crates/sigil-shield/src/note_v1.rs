@@ -493,6 +493,16 @@ pub enum WireVerifyError {
     /// path is reachable from the network. See `verify_spend_wire_multi`.
     #[error("proof trace is {got} columns wide; the selected circuit uses {expected}")]
     WrongTraceWidth { expected: usize, got: usize },
+
+    /// The proof declares a trace length outside the sane range for any shielded circuit.
+    ///
+    /// The width guard's missing half. winterfell 0.9 deserializes trace length as an
+    /// UNBOUNDED base-2 exponent (`2_usize.pow(read_u8())`), and an out-of-range length
+    /// PANICS inside `Air::new` before any crypto runs (root-of-unity order > 2^32, a
+    /// wrapped 2^>=64 length of 0, or a periodic index past a too-short trace) — reachable
+    /// from the network. Length is the second attacker-chosen shape a `Proof` carries.
+    #[error("proof trace length {got} is outside the accepted range [{min}, {max}]")]
+    WrongTraceLength { got: usize, min: usize, max: usize },
 }
 
 /// Verify a shielded-spend proof from its wire-encoded public inputs.
@@ -623,6 +633,20 @@ pub fn verify_spend_wire_multi(
     let got_width = p.trace_info().main_trace_width();
     if got_width != expected_width {
         return Err(WireVerifyError::WrongTraceWidth { expected: expected_width, got: got_width });
+    }
+
+    // TRACE-LENGTH GUARD — the width guard's missing half. A winterfell `Proof` carries TWO
+    // attacker-chosen shape numbers; the check above validates the width and this validates
+    // the length. winterfell 0.9 reads trace length as a base-2 exponent with NO upper bound
+    // (`trace_info.rs`: `2_usize.pow(read_u8())`), so an out-of-range length panics inside
+    // `Air::new` before any crypto runs. The real shielded circuits are 1024 (v4) or 2048
+    // (v5/v6) rows at the fixed pool depth; this range excludes every panic/OOM length, while
+    // any in-range non-matching length simply fails verification normally instead of crashing.
+    const MIN_TRACE_LEN: usize = 128;
+    const MAX_TRACE_LEN: usize = 65_536;
+    let got_len = p.trace_info().length();
+    if got_len < MIN_TRACE_LEN || got_len > MAX_TRACE_LEN {
+        return Err(WireVerifyError::WrongTraceLength { got: got_len, min: MIN_TRACE_LEN, max: MAX_TRACE_LEN });
     }
 
     match nfs.len() {

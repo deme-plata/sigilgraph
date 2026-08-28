@@ -412,6 +412,12 @@ impl Air for SpendFullV6Air {
             degrees.push(TransitionConstraintDegree::new(2));                          // bit boolean
             degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // first·(rem−hv)
         }
+        // FINDING-1 FIX (mint via unconstrained conservation column): pin `out` (col 1)
+        // to zero on every row where it is not already fixed. It is fixed to the fee at row
+        // 0 (via `first`) and to output i at row i+1 (via `osel_i`); it was FREE elsewhere,
+        // which let a hand-built trace inflate the outputs past the input while the balance
+        // accumulator still landed on zero. Same degree shape as `osel*(out-hv)` above.
+        degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // (1-first-sum osel)*out
         // 5 for input 0 + the shared lanes, 3 more for input 1 (its root, its nullifier,
         // its exhausted position accumulator), 2 per output.
         let num_assertions = 5 + 3 + 2 * N_OUTS;
@@ -658,6 +664,18 @@ impl Air for SpendFullV6Air {
             result[base + 13] = rbit * (rbit - one);
             result[base + 14] = first * (rem - hv);
         }
+
+        // FINDING-1 FIX (see Air::new): out (col 1) must be zero except where pinned -- row
+        // 0 (fee, via `first`) and rows 1..=N_OUTS (outputs, via `osel_i`). Without this the
+        // column was FREE on every other row, so a prover writing its own trace could park
+        // value-(fee+sum outputs) in a free row, telescope the accumulator back to zero, and
+        // mint the outputs from nothing. This forces sum_rows out == fee + sum outputs.
+        let mut osel_sum = E::ZERO;
+        for i in 0..N_OUTS {
+            osel_sum = osel_sum + periodic[6 + i];
+        }
+        let out_zero_idx = result.len() - 1;
+        result[out_zero_idx] = (one - first - osel_sum) * out;
     }
 
     fn get_assertions(&self) -> Vec<Assertion<Self::BaseField>> {
@@ -1460,6 +1478,61 @@ mod tests {
         assert!(
             matches!(out, Ok(Err(_)) | Err(_)),
             "minting value out of thin air across two inputs must not verify"
+        );
+    }
+
+    /// THE CONSERVATION FAUCET regression — the mint the test above does NOT catch.
+    ///
+    /// `inflated_outputs_cannot_exceed_the_sum_of_both_inputs` inflates an output but lets the
+    /// balance accumulator land on a nonzero value, so it is caught by the `balance[last] == 0`
+    /// assertion — the naive attack. The REAL faucet keeps the accumulator landing on zero:
+    /// `out` (col 1) was pinned only at the fee row and the two output rows and left FREE on
+    /// every other row, so a hand-built trace could park `value - (fee + sum outputs)` in a
+    /// free row and telescope straight back to zero while the outputs exceed the inputs. Here
+    /// the inputs hold 97, fee is 3 (honest ceiling 94), yet output 0 claims 1000 -- 906 minted
+    /// -- with the deficit hidden in row 3 and the running balance repaired to still hit zero at
+    /// the last real row. EVERY other constraint, `balance[last] == 0` included, is satisfied;
+    /// the only thing rejecting this is the `(1 - first - sum osel)*out == 0` constraint added to
+    /// close the hole. Remove that constraint and this proof verifies -- free money.
+    #[test]
+    fn the_conservation_faucet_is_closed() {
+        let sk = e(0xBEEF);
+        let me = pk_of(sk);
+        let n0 = (e(50), e(4242), sk);
+        let n1 = (e(47), e(1337), sk);
+        let (tree, p0, p1) = pool_with2(n0, n1);
+        let (path0, path1) = (tree.path(p0), tree.path(p1));
+        let fee = e(3);
+        // Mint 906: claim a 1000 output the two inputs (97 total) cannot fund.
+        let outs = [(e(1_000), e(777), me), (e(0), e(888), me)];
+
+        let out = std::panic::catch_unwind(|| {
+            let mut trace = build_v6_trace_unchecked(&[n0, n1], fee, &outs, &[&path0, &path1]);
+            // Hide the 906 deficit in a free conservation row (row 3, past fee + 2 outputs) and
+            // repair the running balance (col 0) so it still lands on zero at the last real row
+            // -- a state a naive inflation can never reach, and exactly what the fix must reject.
+            let depth = path0.siblings.len();
+            let real_len = (depth + 1) * SEG;
+            let deficit = e(50) + e(47) - e(3) - e(1_000); // balance at row 3: a huge field elt
+            trace.set(1, 3, deficit);
+            for r in 4..real_len {
+                trace.set(0, r, e(0));
+            }
+            let proof = SpendFullV6Prover::new(v6_options()).prove(trace)?;
+            verify_spend_full_v6(
+                proof,
+                SpendFullV6PublicInputs {
+                    root: tree.root(),
+                    nf: [nf_of(sk, p0), nf_of(sk, p1)],
+                    fee,
+                    cm_outs: [cm_out(e(1_000), e(777), me), cm_out(e(0), e(888), me)],
+                },
+            )
+            .map_err(|_| winterfell::ProverError::UnsupportedFieldExtension(2))
+        });
+        assert!(
+            matches!(out, Ok(Err(_)) | Err(_)),
+            "SECURITY: minting via an unconstrained free conservation row must not verify"
         );
     }
 

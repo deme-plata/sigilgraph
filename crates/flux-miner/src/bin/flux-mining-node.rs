@@ -48,7 +48,7 @@ fn main() {
 
         if is_get && url.starts_with("/api/v1/mining/challenge") {
             let h = height.load(Ordering::SeqCst);
-            let c = Challenge { height: h, vdf_input: seed_for(h), blake4_target, vdf_t, net_hps: 0.0, share_target: 0 };
+            let c = Challenge { height: h, vdf_input: seed_for(h), blake4_target, vdf_t, net_hps: 0.0, share_target: 0, share_vdf_t: 0 };
             let _ = req.respond(json(serde_json::to_string(&c).unwrap()));
         } else if is_post && url.starts_with("/api/v1/mining/submit") {
             let mut body = String::new();
@@ -57,7 +57,7 @@ fn main() {
                 Ok(sub) => {
                     // Reconstruct the challenge this share's height was issued under
                     // (target + vdf_t are fixed; seed is height-derived), then verify.
-                    let c = Challenge { height: sub.height, vdf_input: seed_for(sub.height), blake4_target, vdf_t, net_hps: 0.0, share_target: 0 };
+                    let c = Challenge { height: sub.height, vdf_input: seed_for(sub.height), blake4_target, vdf_t, net_hps: 0.0, share_target: 0, share_vdf_t: 0 };
                     if check_submission(&g, &c, &sub) {
                         let now = height.fetch_add(1, Ordering::SeqCst) + 1;
                         println!("  ✓ accepted h={} from {} → height now {now}", sub.height, sub.wallet);

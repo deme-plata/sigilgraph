@@ -121,10 +121,23 @@ pub fn mine_dual<G: VdfGroup>(header: &[u8], target: u64, vdf_t: u64, g: &G) -> 
 /// this because one height yields MANY shares: each found share is submitted and
 /// the search continues from where it stopped (restarting at 0 would re-find the
 /// same nonce forever), and the budget keeps the loop responsive to tip changes.
+///
+/// 2026-08-20 (the VDF-bound hashrate-collapse fix): a hit is graded against
+/// TWO thresholds. `target` is the (easy) share-grade search bound the loop
+/// stops on. If the hit ALSO clears the much harder `full_target` (the real
+/// block target — a rare, lucky find within a share search), the assembled
+/// block gets the FULL `full_vdf_t` depth so it can be submitted and accepted
+/// as an actual block; otherwise it gets the much smaller `share_vdf_t` —
+/// enough sequential work to prove the share is genuine without the VDF's
+/// fixed, hardware-independent cost dominating every miner's cycle time
+/// regardless of raw hash power. See `Challenge::share_vdf_t`'s doc for the
+/// full story of why this exists as a second, independent depth.
 pub fn mine_dual_from<G: VdfGroup>(
     header: &[u8],
     target: u64,
-    vdf_t: u64,
+    full_target: u64,
+    share_vdf_t: u64,
+    full_vdf_t: u64,
     g: &G,
     base: u64,
     budget: u64,
@@ -134,6 +147,7 @@ pub fn mine_dual_from<G: VdfGroup>(
         let words = pow::blake4_words_x8(header, b);
         if let Some(i) = words.iter().position(|&w| w <= target) {
             let nonce = b.wrapping_add(i as u64);
+            let vdf_t = if words[i] <= full_target { full_vdf_t } else { share_vdf_t };
             return (Some(block_for_nonce(header, nonce, g, vdf_t)), nonce.wrapping_add(1));
         }
         b = b.wrapping_add(8);
@@ -306,7 +320,7 @@ mod tests {
             );
 
             // Path 2: pool mode — resumable search, then the GPU-style assembler.
-            if let (Some(pb), _) = mine_dual_from(&header, target, 1_000, &g, 0, 100_000) {
+            if let (Some(pb), _) = mine_dual_from(&header, target, target, 1_000, 1_000, &g, 0, 100_000) {
                 assert_eq!(pb.blake4_hash, blake4(&pb.header, pb.nonce));
                 assert!(
                     verify_dual_with(&g, &pb, target, true),
@@ -343,5 +357,98 @@ mod tests {
         assert_eq!(format_flux(1e18), "1.000 Φ");
         assert_eq!(format_flux(3e9), "3.000 nΦ"); // 3 GH/s = 3 nanoflux
         assert_eq!(format_omega(1e6), "1.000 Ω"); // 1 Mturn/s = 1 omega
+    }
+
+    // ── 2026-08-20: the VDF-bound hashrate-collapse fix ──────────────────────
+    //
+    // Real incident: VARDIFF pushed a fast miner's share difficulty easy enough
+    // that Lane-A (the hash search) took microseconds, but every share still
+    // paid the FULL block-level VDF (600 sequential, hardware-independent
+    // squarings) — so a 500 MH/s GPU and a 50 MH/s CPU both collapsed to the
+    // same VDF-bound share rate, and raw hash power stopped differentiating
+    // anyone. These tests prove the fix: a share gets a much smaller REQUIRED
+    // depth than a block, a lucky hit that ALSO clears the block target still
+    // gets the full depth (so it can be submitted as a real block), and a
+    // share-depth proof can never be replayed to satisfy the harder
+    // block-level check (anti-forgery is preserved, not weakened).
+
+    #[test]
+    fn mine_dual_from_uses_the_small_share_depth_for_an_ordinary_share() {
+        let g = ModSquaring::bench_2048();
+        // share target easy enough to find fast; full_target MUCH harder so an
+        // ordinary hit essentially never also clears it in this small budget.
+        let share_target = u64::MAX >> 8;
+        let full_target = 1; // effectively unreachable in a 200k-nonce budget
+        let wallet = "w";
+        let c = client::Challenge {
+            height: 1, vdf_input: [0u8; 32], blake4_target: full_target, vdf_t: 600,
+            net_hps: 0.0, share_target, share_vdf_t: 8,
+        };
+        // build_header, not an arbitrary byte string — check_submission_at
+        // rebuilds and compares this exact header, same as a real node does.
+        let header = client::build_header(&c, wallet);
+        let (found, _) = mine_dual_from(&header, share_target, full_target, 8, 600, &g, 0, 200_000);
+        let block = found.expect("an easy 8-bit-ish target must find a hit in 200k nonces");
+        assert_eq!(block.vdf.t, 8, "an ordinary share must get the SMALL share depth, not the block's");
+        assert!(
+            client::check_submission_at(
+                &g,
+                &c,
+                &client::Submission { height: 1, wallet: wallet.into(), block: block.clone() },
+                share_target,
+                8,
+            ),
+            "a genuine share-depth proof must verify against the share target + share depth"
+        );
+    }
+
+    #[test]
+    fn mine_dual_from_uses_the_full_depth_for_a_hit_that_also_clears_the_block_target() {
+        let g = ModSquaring::bench_2048();
+        let header = b"sigil-g0-lucky-block-hit";
+        // target == full_target: EVERY hit the search finds also clears the
+        // block target by construction, so the grading logic must always pick
+        // full_vdf_t here, never share_vdf_t.
+        let target = u64::MAX >> 12;
+        let (found, _) = mine_dual_from(header, target, target, 8, 600, &g, 0, 200_000);
+        let block = found.expect("an easy target must find a hit");
+        assert_eq!(block.vdf.t, 600, "a hit that clears the block target must get the FULL depth");
+    }
+
+    #[test]
+    fn a_share_depth_proof_can_never_be_replayed_to_satisfy_the_block_level_check() {
+        // Anti-forgery must not have weakened: a proof built at the shallow
+        // share depth can NEVER pass a check that requires the block's full
+        // depth, even against the exact same header/nonce/target shape.
+        let g = ModSquaring::bench_2048();
+        // Trivially-easy target — ANY nonce clears it — so this test isolates
+        // the VDF-depth check specifically, without also needing a real Lane-A
+        // search for a nonce that happens to clear a harder target.
+        let full_target = u64::MAX;
+        let wallet = "w";
+        let c = client::Challenge {
+            height: 1,
+            vdf_input: [0u8; 32],
+            blake4_target: full_target,
+            vdf_t: 600,
+            net_hps: 0.0,
+            share_target: u64::MAX,
+            share_vdf_t: 8,
+        };
+        let header = client::build_header(&c, wallet);
+        let share_block = block_for_nonce(&header, 42, &g, 8); // shallow, share-grade proof
+        let sub = client::Submission { height: 1, wallet: wallet.into(), block: share_block };
+
+        // Checking it as a SHARE (target=full_target here for simplicity, depth=8) works.
+        assert!(
+            client::check_submission_at(&g, &c, &sub, full_target, 8),
+            "the shallow proof must verify at ITS OWN depth"
+        );
+        // But checking it as if it were a BLOCK (depth=600) must fail — the
+        // proof genuinely only committed to 8 sequential turns, not 600.
+        assert!(
+            !client::check_submission_at(&g, &c, &sub, full_target, 600),
+            "a share-depth proof must NEVER satisfy the block's full-depth requirement"
+        );
     }
 }

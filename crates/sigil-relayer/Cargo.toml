@@ -1,0 +1,25 @@
+[package]
+name = "sigil-relayer"
+version.workspace = true
+edition = "2021"
+
+[[bin]]
+name = "sigil-relayer"
+path = "src/main.rs"
+
+[dependencies]
+# SIGIL-side signing — same primitives/message scheme as sigil-api's send.rs
+# and bridge.rs, so a signature this crate produces is byte-for-byte what
+# those modules already verify.
+ed25519-dalek = { version = "2.2" }
+hex = "0.4"
+# SIGIL-side HTTP — GET /v1/bridge/locks, POST /v1/bridge/unlock. Blocking,
+# minimal client, same rationale as sigil-api/eth.rs: one occasional call at
+# a time, not a general HTTP stack.
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+serde = { workspace = true }
+serde_json = "1"
+# Polygon-side signing + RPC + contract calls (mint / BurnedTo logs).
+alloy = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+anyhow = "1"

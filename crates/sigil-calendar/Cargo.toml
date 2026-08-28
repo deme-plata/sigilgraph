@@ -1,0 +1,20 @@
+[package]
+name = "sigil-calendar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "sigil-calendar — SIGIL's citizen calendar (personal events, network milestones, and PLANNED — not yet autonomously executed — scheduled payments). Ported from Quillon's crates/q-api-server/src/calendar_api.rs (event model + reminders) with the money-moving half deliberately NOT carried over: the original executed scheduled transactions by directly mutating an in-memory balance HashMap, bypassing the real signed-transaction chokepoint entirely — unsafe to port as-is onto SIGIL's real money path. See the `scheduled` module doc for what would actually be needed before this can move real funds."
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+blake3     = { workspace = true }
+hex        = { workspace = true }
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+
+flux-db = { path = "../../../flux/crates/flux-db" }
+sigil-oauth = { path = "../sigil-oauth" }
+
+[dev-dependencies]
+rand = { workspace = true }

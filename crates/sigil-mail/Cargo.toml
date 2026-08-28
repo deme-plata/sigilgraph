@@ -1,0 +1,37 @@
+[package]
+name = "sigil-mail"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "sigil-mail — SIGIL's self-hosted mail service (@sigilgraph.org and future domains). A faithful port of the proven SMTP/IMAP/DKIM/queue engine from the 3-month axum-mail-server project (backed up at beta-migration/fs/opt/orobit/shared/axum-mail-server), with the identity boundary REBUILT to be SIGIL-wallet-native (sigil-oauth) instead of the original's password+JWT auth, and Quillon-specific billing (Stripe subscriptions) dropped entirely — not needed here. See MAIL_PORT_NOTES.md for the port-vs-rebuild decisions."
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+blake3     = { workspace = true }
+hex        = { workspace = true }
+anyhow     = { workspace = true }
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+# net/io-util added on top of the workspace's feature set — needed for the
+# SMTP server's raw TcpListener + AsyncBufReadExt/AsyncWriteExt.
+tokio      = { workspace = true, features = ["net", "io-util"] }
+base64     = "0.22"
+# Real MX-record resolution for outbound delivery (mta.rs) — same crate
+# family (hickory, formerly trust-dns) already present transitively in this
+# workspace's dependency tree.
+hickory-resolver = "0.24"
+
+# Storage: flux-db (the same key-value engine sigil-node/sigil-top already use),
+# not a separate Postgres/sqlx layer like the original — one less moving part,
+# one less thing to operate, matches this workspace's convention everywhere else.
+flux-db = { path = "../../../flux/crates/flux-db" }
+
+# Identity: mailboxes are keyed by SIGIL wallet id, and login is a real wallet
+# signature challenge (sigil-oauth's WalletAssertion/TokenClaims), not a
+# separate password+JWT system — this is the "rebuild the identity boundary"
+# half of the port-vs-rebuild decision.
+sigil-oauth = { path = "../sigil-oauth" }
+
+[dev-dependencies]
+rand = { workspace = true }

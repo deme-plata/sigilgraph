@@ -210,11 +210,22 @@ fn main() {
     );
     eprintln!("sigil-memwedge: driving a real Braid the way sigil-node does (insert -> drain_ordered)");
 
+    // Only the knobs this tool actually sweeps are named; everything else
+    // takes the production default via `..Default::default()`.
+    //
+    // Spelling out every field here is what broke this bin: `BraidConfig`
+    // gained `ghostdag_k`, `final_blue_depth`, `saturated_self_heal_window`
+    // and `pending_max_tip_lag`, and an exhaustive initializer turns each
+    // such addition into a compile error in a diagnostic tool that has no
+    // opinion about those fields. Inheriting the defaults is also the more
+    // honest measurement: a memory probe should model the braid production
+    // actually runs, not a frozen subset of it.
     let cfg = BraidConfig {
         final_depth,
         max_window,
         max_pending: 4_096,
         max_merge_parents: 4,
+        ..Default::default()
     };
     let mut braid = Braid::new_with_base(cfg, GENESIS, 0);
 

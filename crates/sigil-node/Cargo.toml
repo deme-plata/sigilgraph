@@ -66,6 +66,10 @@ rand            = { workspace = true }
 # SIGIL_DAG=1 real ordering: deterministic braid linearization (NOT GHOSTDAG,
 # NOT DagKnight-the-paper — docs/SIGIL_DAGKNIGHT_LANE_v0.md §1).
 sigil-dagknight = { workspace = true }
+# Phase 2 of SIGIL True Instant Finality — observational only. The node
+# holds a `FinalityWire` that is inert unless SIGIL_FINALITY_COMMITTEE is set,
+# and nothing it returns is consulted by block production or validation.
+sigil-finality = { path = "../sigil-finality" }
 flux-topology = { path = "../flux-topology" }
 flux-p2p      = { workspace = true }
 # our own file system: Reed-Solomon erasure + encryption. Wired here for
@@ -82,3 +86,6 @@ sigil-chronos = { path = "../sigil-chronos" }
 flux-chronos  = { path = "../../../flux/crates/flux-chronos" }
 
 [dev-dependencies]
+# Test-only: finality_wire.rs's committee tests construct a real
+# sigil_braidpool::committee::Committee. Non-test code does not touch it.
+sigil-braidpool = { path = "../sigil-braidpool" }

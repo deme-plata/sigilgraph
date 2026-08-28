@@ -56,6 +56,16 @@ pub const TOPIC_TIP_PROOFS: &str = "/sigil/g1/tip-proofs";
 pub const TOPIC_TXS: &str = "/sigil/g1/txs";
 /// `sigil-updater` broadcasts `ReleaseAnnouncement` JSON on this topic.
 pub const TOPIC_RELEASE: &str = "/sigil/g1/release";
+/// Finality votes (`sigil_finality::FinalityVote`, JSON). Phase 2 of SIGIL
+/// True Instant Finality — see `crates/sigil-node/src/finality_wire.rs`.
+///
+/// Subscribing is unconditional but publishing is not: a node only emits on
+/// this topic when `SIGIL_FINALITY_COMMITTEE` names it, so an unconfigured
+/// node carries one idle subscription and nothing else. That asymmetry is
+/// deliberate — an observer that does not vote still needs to *receive*
+/// votes, since measuring how fast a certificate assembles is the entire
+/// point of Phase 2.
+pub const TOPIC_FINALITY_VOTES: &str = "/sigil/g1/finality-votes";
 
 /// All SIGIL topics, in the order a freshly-booted node should subscribe.
 /// Subscribing to blocks before tip-proofs would mean accepting block-data
@@ -67,6 +77,9 @@ pub const ALL_TOPICS: &[&str] = &[
     TOPIC_RELEASE,
     TOPIC_BLOCKS,
     TOPIC_TXS,
+    // Last: a purely observational diagnostic must never delay subscribing
+    // to a topic the chain actually depends on.
+    TOPIC_FINALITY_VOTES,
 ];
 
 // ── Default ports ───────────────────────────────────────────────────────────

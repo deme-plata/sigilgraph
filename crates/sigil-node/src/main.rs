@@ -29,6 +29,7 @@ mod sync_auth;
 mod search_index;
 mod serve_read; // header-only reads for the backfill SERVE path — see its module doc
 mod producer_signing;
+mod finality_wire; // Phase 2 finality observer plumbing — zero consensus effect, see its module doc
 
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1063,6 +1064,10 @@ fn run_start() -> Result<()> {
         // gossip re-broadcast flood); heartbeat is gated to 5s below.
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
         let mut last_heartbeat = std::time::Instant::now();
+        // Phase 2 of SIGIL True Instant Finality — OBSERVATIONAL ONLY.
+        // Inert unless SIGIL_FINALITY_COMMITTEE is set; nothing it returns is
+        // read by production, validation, or fork choice. See finality_wire.rs.
+        let mut finality = finality_wire::FinalityWire::from_env();
         // Fail-loud finality monitoring (2026-08-15, the P=6 k=1 investigation):
         // `below_final` was already tracked in BraidStats but nothing ever
         // surfaced it to an operator — a node could be silently orphaning
@@ -1635,6 +1640,16 @@ fn run_start() -> Result<()> {
                                     if let Err(e) = mgr.publish(sigil_net::TOPIC_BLOCKS, bytes) {
                                         eprintln!("⚠ publish block H={} failed: {}", h, e);
                                     }
+                                    // Phase 2 finality vote. Discarding this value
+                                    // has no effect on the chain — see the safety
+                                    // posture in finality_wire.rs.
+                                    if let Some(vb) = finality.on_block(
+                                        h, bhash, topology_commitment, finality_wire::now_ms()
+                                    ) {
+                                        if let Err(e) = mgr.publish(sigil_net::TOPIC_FINALITY_VOTES, vb) {
+                                            eprintln!("⚠ publish finality vote H={} failed: {}", h, e);
+                                        }
+                                    }
                                     if produced % 100 == 0 {
                                         let secs = t_start.elapsed().as_secs_f64().max(1e-6);
                                         eprintln!("🏭 produced {} blocks ({:.1}/s) · {} txs ({:.0} TPS verify-once) — tip H={}",
@@ -1709,6 +1724,12 @@ fn run_start() -> Result<()> {
                             eprintln!("⚠ publish peer-heights failed: {}", e);
                         }
                         eprintln!("⚡ heartbeat — peers={} started={}", sum.peer_count, sum.started);
+                        // Phase 2's whole deliverable: the measured comparison
+                        // between a certificate and today's 512-block depth rule.
+                        // Silent unless finality is configured.
+                        if let Some(line) = finality.heartbeat_line(chain.height()) {
+                            eprintln!("🔗 {}", line);
+                        }
 
                         // Fail-loud finality monitoring — see `last_below_final`'s
                         // doc comment above. `below_final` counts blocks the
@@ -2753,6 +2774,15 @@ fn run_start() -> Result<()> {
                                 if bincode::deserialize::<crate::dandelion_relay::RelayedTx>(&data).is_ok() {
                                     let id = crate::dandelion_relay::id_of(&data);
                                     let _ = dandelion_tx.send(crate::dandelion_relay::Cmd::FluffIncoming { id, bytes: data });
+                                }
+                            } else if topic == sigil_net::TOPIC_FINALITY_VOTES {
+                                // Phase 2: tally only. `on_gossip` returns a log line
+                                // for a certificate or an equivocation and `None` for
+                                // everything else — including rejected votes, which on
+                                // a public topic are the system working, not an
+                                // incident. Nothing here reaches Braid::insert().
+                                if let Some(line) = finality.on_gossip(&data, finality_wire::now_ms()) {
+                                    eprintln!("{}", line);
                                 }
                             } else {
                                 let preview = std::str::from_utf8(&data)
@@ -4382,6 +4412,9 @@ mod dag_wiring_tests {
                     merge_parents,
                     height,
                     producer,
+                    // Free-run mint: no PoW solve behind these synthetic blocks,
+                    // which is what `difficulty = 0` means on this chain (see BlockView::difficulty).
+                    difficulty: 0,
                 }
             })
             .collect()
@@ -4547,6 +4580,9 @@ mod dag_wiring_tests {
                 merge_parents: vec![],
                 height,
                 producer,
+                // Free-run mint: no PoW solve behind these synthetic blocks,
+                // which is what `difficulty = 0` means on this chain (see BlockView::difficulty).
+                difficulty: 0,
             };
             assert!(!matches!(braid.insert(view), InsertOutcome::Rejected(_)));
         }
@@ -4579,6 +4615,9 @@ mod dag_wiring_tests {
                 merge_parents: vec![],
                 height,
                 producer,
+                // Free-run mint: no PoW solve behind these synthetic blocks,
+                // which is what `difficulty = 0` means on this chain (see BlockView::difficulty).
+                difficulty: 0,
             };
             assert!(!matches!(braid.insert(view), InsertOutcome::Rejected(_)));
         }

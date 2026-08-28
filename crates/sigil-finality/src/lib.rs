@@ -59,6 +59,16 @@ use std::collections::{HashMap, HashSet};
 use ed25519_dalek::{Signer, Signature, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
+/// Phase 2 — the observational finality gadget: gossip-fed vote tallying,
+/// per-height certificate assembly, and the latency measurement that says
+/// how much faster a certificate arrives than today's 512-block depth rule.
+///
+/// Declared here rather than left as an untracked file (which is how it sat
+/// from 2026-08-28 until now, compiled into nothing): the module is pure
+/// state-transition code with no I/O and no consensus reachability, so
+/// declaring it changes what is *built*, never what the chain *does*.
+pub mod observer;
+
 use sigil_braidpool::committee::{availability_quorum, bft_active, max_byzantine, Committee};
 use sigil_header::{BlockHash, ValidatorId};
 

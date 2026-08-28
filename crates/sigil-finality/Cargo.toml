@@ -13,4 +13,8 @@ sigil-header = { path = "../sigil-header" }
 sigil-braidpool = { path = "../sigil-braidpool" }
 
 [dev-dependencies]
+# Only the env_config tests need hex — they build a committee env string from
+# real generated keys. Library code hand-decodes hex in `parse_committee` so
+# the runtime dependency stays at zero.
+hex = { workspace = true }
 rand = { workspace = true }

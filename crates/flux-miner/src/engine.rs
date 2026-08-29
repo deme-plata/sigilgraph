@@ -115,8 +115,11 @@ pub fn fetch_balance(url: &str, wallet: &str) -> Option<u128> {
     digits.parse().ok()
 }
 
-/// Base units per 1 SIGIL — the wallet UI's own convention (`amount / 1e8`, 8 dp).
-pub const SIGIL_BASE_UNITS: u128 = 100_000_000;
+/// Base units per 1 SIGIL.
+/// 2026-08-29: 1e8 → 1e10 — SIGIL moved to 10 decimals (21M cap = 2.1e17 base
+/// units, see the sigil-g2 denomination-ladder change). At 8 dp this display
+/// overstated every miner's balance by exactly 100x.
+pub const SIGIL_BASE_UNITS: u128 = 10_000_000_000;
 
 /// Render a raw base-unit balance as SIGIL for display.
 ///

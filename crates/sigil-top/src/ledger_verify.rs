@@ -17,11 +17,15 @@
 use super::*;
 use std::sync::{Mutex, OnceLock};
 
-/// Where the ledger lives. Override with SIGIL_LEDGER_URL; the default is the
-/// public rpcd — same origin the wallet/explorer already use.
+/// Where the ledger lives. Override with SIGIL_LEDGER_URL.
+/// 2026-08-29: default moved off the retired sigil-rpcd (`:8099`, permanently
+/// stopped 2026-08-17). A manually-resurrected zombie of it fed this panel two
+/// days of frozen g1 numbers — supply 190,330, height 325,651, a red
+/// "precheck failed" — on a chain that had since reset to g2. The braid's
+/// sigil-api behind sigilgraph.org is the money truth now.
 fn ledger_base() -> String {
     std::env::var("SIGIL_LEDGER_URL").ok().filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "http://sigilgraph.quillon.xyz:8099".into())
+        .unwrap_or_else(|| "https://sigilgraph.org".into())
 }
 
 #[derive(Clone, Debug, Default)]
@@ -82,12 +86,35 @@ fn fetch_header(h: u64) -> Option<sigil_header::SigilBlockHeaderV0> {
 /// verified ground is never re-walked.
 fn refresh(watermark: &mut Option<(u64, u64, u64)>) -> Option<LedgerInfo> {
     const BUDGET: u64 = 200;
-    let sup = get_json("/supply")?;
+    // sigil-api wraps in {ok,data:{…}} and names the percent `minted_pct`
+    // (already a percent, like rpcd's `pct`); the legacy flat shape is kept so
+    // an explicit SIGIL_LEDGER_URL at an old rpcd still parses.
+    let sup = get_json("/v1/supply").or_else(|| get_json("/supply"))?;
+    let sup = sup.get("data").cloned().unwrap_or(sup);
     let supply_base: u128 = sup.get("native_supply")?.as_str()?.parse().ok()?;
-    let pct = sup.get("pct").and_then(|p| p.as_f64()).unwrap_or(0.0);
-    let height = sup.get("height").and_then(|h| h.as_u64()).unwrap_or(0);
+    let pct = sup
+        .get("pct")
+        .or_else(|| sup.get("minted_pct"))
+        .and_then(|p| p.as_f64())
+        .unwrap_or(0.0);
+    let height = sup
+        .get("height")
+        .and_then(|h| h.as_u64())
+        .or_else(|| get_json("/v1/mining/miners")?.get("data")?.get("height")?.as_u64())
+        .unwrap_or(0);
 
-    let tipj = get_json("/tip")?;
+    // sigil-api serves no /tip header walk — and needs none: on g2 the money
+    // chain IS the braid spine, whose linkage the TUI's own chain verify
+    // already proves. Supply truth stands alone; the walk below only runs
+    // against a legacy rpcd that still answers /tip.
+    let Some(tipj) = get_json("/tip") else {
+        let mut info = LedgerInfo { supply_base, pct, height, ..Default::default() };
+        if let Some((f, _t, c)) = *watermark {
+            info.verified_floor = f;
+            info.checked = c;
+        }
+        return Some(info);
+    };
     let header_tip = tipj.get("header_tip").and_then(|v| v.as_u64()).unwrap_or(0);
     // The node advertises where the self-linked chain STARTS (headers below are
     // the P1-era fold-tip-parent style, or absent) — walking past it would report

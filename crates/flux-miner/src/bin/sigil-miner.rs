@@ -37,8 +37,12 @@ use flux_miner::engine::{format_hps, report_diag, supervisor, MinerStats};
 use flux_miner::{format_flux, format_omega};
 
 /// Public dual-lane mining endpoint — sigil-rpcd's API port, reachable directly
-/// (firewall ACCEPTs :8099). Override with a positional arg or SIGIL_MINE_URL.
-const DEFAULT_URL: &str = "http://sigilgraph.quillon.xyz:8099";
+/// Override with a positional arg or SIGIL_MINE_URL.
+/// 2026-08-29: was the retired sigil-rpcd (`:8099`, permanently stopped
+/// 2026-08-17 — a resurrected zombie of it served frozen g1 numbers for two
+/// days, which is how this default finally moved). The braid's sigil-api at
+/// sigilgraph.org is the only live money/mining backend.
+const DEFAULT_URL: &str = "https://sigilgraph.org";
 /// This build's version (the flux-miner crate version) — what the auto-updater
 /// compares against the published manifest.
 const VERSION: &str = env!("CARGO_PKG_VERSION");

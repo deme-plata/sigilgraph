@@ -67,6 +67,22 @@ pub fn shield_public_key(seed_hex: &str) -> Result<String, JsValue> {
     Ok(hex::encode(to_wire(account.public_key())))
 }
 
+/// The X25519 note-delivery key ciphertexts are sealed to — the OTHER half of this
+/// wallet's shielded address. `pk_shield` alone makes a wallet payable but not
+/// notifiable: without publishing this key too, nothing can tell the wallet a payment
+/// landed. The wallet page calls this during auto-registration.
+///
+/// 2026-08-29: this export existed only in an UNCOMMITTED working tree the 08-26 site
+/// build was cut from — the page called it, the committed crate lacked it, and every
+/// fresh WASM build silently broke registration. Re-added from the committed
+/// `ShieldedAccount::address` derivation, the same one the node and MCP use.
+#[wasm_bindgen(js_name = shieldEncryptPublicKey)]
+pub fn shield_encrypt_public_key(seed_hex: &str) -> Result<String, JsValue> {
+    let seed = hex32(seed_hex)?;
+    let account = ShieldedAccount::from_seed(seed);
+    Ok(account.address(&seed).pk_enc)
+}
+
 /// The commitment this account would publish for a SELF-CREATED note at `index` holding
 /// `value` — deterministic from the seed alone. A wallet shields a deposit by computing
 /// this locally (already done in JS on this page for `doShield()`'s fixed-denomination

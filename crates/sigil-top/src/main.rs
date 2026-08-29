@@ -267,8 +267,11 @@ fn short_rev() -> String {
     let r = FLUX_REV.strip_prefix("full:").unwrap_or(FLUX_REV);
     r.chars().take(10).collect()
 }
-const MAX_SUPPLY_BASE: u128 = 2_100_000_000_000_000; // 21 M × 10^8
-const DECIMALS: u32 = 8;
+// 2026-08-29: 8 → 10 decimals (the sigil-g2 move; /v1/supply's max_supply is
+// 2.1e17). At 8 dp every SIGIL amount this client rendered — supply, balances,
+// send previews — was overstated exactly 100x.
+const MAX_SUPPLY_BASE: u128 = 210_000_000_000_000_000; // 21 M × 10^10
+const DECIMALS: u32 = 10;
 
 // obsidian + violet ANSI (256-color)
 const RESET: &str = "\x1b[0m";

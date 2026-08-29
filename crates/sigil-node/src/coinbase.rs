@@ -290,6 +290,19 @@ pub fn build_block_body_for_shares(
     }
 
     for tx in txs {
+        // ALREADY-LANDED, not an error (2026-08-29, measured on g2 launch day). Between
+        // inclusion and 512-deep finality the mempool keeps offering a landed Shield on
+        // every candidate — at 8–60 blk/s that was hundreds of "✗ tx dropped …
+        // DuplicateCommitment" lines for a transaction that was in fact FINE, which is
+        // indistinguishable in the log from real money loss (the exact panic the fail-loud
+        // rule exists to cause, cried wolf). A commitment can only ever land once, so
+        // "already in the pool" IS the success signal: skip quietly and let the bridge's
+        // finality confirm retire it. Real failures still hit the loud path below.
+        if let sigil_tx::SigilTx::Shield { cm, .. } = &tx.tx {
+            if work.shielded().has_ever_held(cm) {
+                continue;
+            }
+        }
         let res = match sigil_tx::apply_tx_at(&work, tx, height) {
             Ok(res) => res,
             Err(e) => {

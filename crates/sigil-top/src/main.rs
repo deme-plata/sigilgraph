@@ -1381,6 +1381,15 @@ fn main() {
         // tears down the running app to hand off. This is what stops a bad/corrupt/ABI-
         // mismatched update from making the app vanish on the restart-after-sync.
         Some("--selfcheck") => { println!("{VERSION}"); return; }
+        // v7.4.2: an EXPLICIT version command that prints and exits. Until now
+        // `version`/`--version` were unhandled and fell through to the default
+        // TUI, which only *sometimes* flushed its `v{VERSION}` header to stdout
+        // before blocking on the async runtime — so `release-sigil-top.sh`'s
+        // own `"$LBIN" version | grep -q "v$VER"` sanity check was a coin-flip
+        // that finally hung the whole release ceremony (2026-08-29, v7.4.2).
+        // Print the same `v{VERSION}` the header shows, so that grep is
+        // deterministic and users get a real version command.
+        Some("version") | Some("--version") | Some("-V") => { println!("sigil-top v{VERSION}"); return; }
         // v0.27.5: manual rollback escape hatch — revert to the previous binary the last update
         // backed up (pre-flighted before the swap). The operator's "undo a bad update" button.
         Some("revert") => { do_revert(); return; }

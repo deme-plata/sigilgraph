@@ -9,7 +9,7 @@
 //!
 //! ## Deliberate divergences from the QSHARE original (the LANE-W spec)
 //!
-//! 1. **Decimals 8, not 24.** SIGIL convention (`sigil_state::SIGIL_DECIMALS`).
+//! 1. **Decimals 10, not 24.** SIGIL convention (`sigil_state::SIGIL_DECIMALS`).
 //!    All base-unit constants are scaled accordingly.
 //! 2. **Treasury = the sigil-bank pool.** QSHARE held a basket of QCREDIT
 //!    vault positions inside its own struct. SSHARE's treasury is the
@@ -43,14 +43,20 @@ use sigil_state::{
 // ============ PROTOCOL CONSTANTS ============
 
 /// SSHARE decimals — SIGIL convention (8), NOT QUG's 24.
-pub const SSHARE_DECIMALS: u32 = 8;
+pub const SSHARE_DECIMALS: u32 = sigil_state::SIGIL_DECIMALS;
 
 /// One whole SSHARE in base units.
 pub const ONE_SSHARE: u128 = 10u128.pow(SSHARE_DECIMALS);
 
 // Compile-time correctness: decimals stay in lockstep with the native token.
 const _: () = assert!(SSHARE_DECIMALS == sigil_state::SIGIL_DECIMALS, "SSHARE must match SIGIL decimals");
-const _: () = assert!(ONE_SSHARE == 100_000_000, "SSHARE base unit must be 10^8");
+// Same lesson as `sigil_state`'s supply assert: check the RELATIONSHIP, not the literal.
+// This hardcoded 10^8 and so broke when SIGIL moved to 10 decimals — for the right reason
+// (SSHARE must track SIGIL) but by testing the wrong thing.
+const _: () = assert!(
+    ONE_SSHARE == 10u128.pow(sigil_state::SIGIL_DECIMALS),
+    "SSHARE base unit must be one whole SIGIL's worth of glyphs"
+);
 
 /// SSHARE token id in the wallet SMT. (USDS is `[0xD5; 32]`, QCREDIT is
 /// `[0xC1; 32]` — this must stay distinct from every other token sentinel.)
@@ -1678,7 +1684,11 @@ mod tests {
         reg.register_token(meta).unwrap();
         let row = reg.token_by_symbol(SSHARE_SYMBOL).expect("SSHARE registered");
         assert_eq!(row.token_id, SSHARE);
-        assert_eq!(row.decimals, 8, "SIGIL convention — NOT QUG's 24");
+        assert_eq!(
+            row.decimals,
+            sigil_state::SIGIL_DECIMALS as u8,
+            "SSHARE must track SIGIL's decimals — 10 now, and never QUG's 24"
+        );
         assert_eq!(row.total_supply, 1_000 * ONE_SSHARE);
     }
 

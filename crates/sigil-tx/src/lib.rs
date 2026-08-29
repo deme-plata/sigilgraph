@@ -3327,11 +3327,17 @@ mod r2_apply_tests {
         let signed = gate_signed(tx);
         let st = SigilState::new();
 
-        let below = apply_tx_at(&st, &signed, SHIELDED_MULTI_INPUT_HEIGHT - 1);
-        assert!(
-            matches!(below, Err(TxApplyError::ShieldedRejected(m)) if m.contains("not active")),
-            "a second input must be refused before activation, got {below:?}"
-        );
+        // PRE-ACTIVATION HALF — vacuous on a chain whose gate is 0, and asserting it would
+        // mean asserting something about height `0 - 1`. Guarded rather than deleted: on a
+        // chain that activates this at a real height, this is the assertion that matters,
+        // and rediscovering it later is how a pre-activation regime ends up untested.
+        if SHIELDED_MULTI_INPUT_HEIGHT > 0 {
+            let below = apply_tx_at(&st, &signed, SHIELDED_MULTI_INPUT_HEIGHT - 1);
+            assert!(
+                matches!(below, Err(TxApplyError::ShieldedRejected(m)) if m.contains("not active")),
+                "a second input must be refused before activation, got {below:?}"
+            );
+        }
 
         // At the activation height the gate lets it through to the real checks — which
         // reject it for a different reason (the proof is nonsense here). The point is that

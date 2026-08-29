@@ -45,9 +45,9 @@ pub const NUM_ERAS: u64 = 64;
 /// Fixed-point precision for the integer reward math (Quillon `PRECISION`).
 const PRECISION: u128 = 1_000_000;
 /// Floor while emission is active — 0.00001 SIGIL (Quillon `MIN_REWARD`).
-pub const MIN_REWARD: u128 = 1_000;
+pub const MIN_REWARD: u128 = 100_000;
 /// Absolute per-block ceiling — 2.0 SIGIL (Quillon `ABSOLUTE_MAX_REWARD_PER_BLOCK`).
-pub const ABSOLUTE_MAX_REWARD_PER_BLOCK: u128 = 200_000_000;
+pub const ABSOLUTE_MAX_REWARD_PER_BLOCK: u128 = 20_000_000_000;
 /// PID smoothing (Quillon `CORRECTION_SMOOTHING`).
 const CORRECTION_SMOOTHING: f64 = 0.8;
 const CORRECTION_MIN: f64 = 0.01;

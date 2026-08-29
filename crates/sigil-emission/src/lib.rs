@@ -30,7 +30,7 @@ pub const HALVING_INTERVAL: u64 = 2_100_000;
 
 /// Reward for the genesis epoch, in base units (8 decimals → 5.00000000 SIGIL).
 /// `INITIAL_BLOCK_REWARD × HALVING_INTERVAL == MAX_SUPPLY / 2`.
-pub const INITIAL_BLOCK_REWARD: u128 = 500_000_000;
+pub const INITIAL_BLOCK_REWARD: u128 = 50_000_000_000;
 
 const _: () = assert!(
     INITIAL_BLOCK_REWARD * (HALVING_INTERVAL as u128) == MAX_SUPPLY / 2,

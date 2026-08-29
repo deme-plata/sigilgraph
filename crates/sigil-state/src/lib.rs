@@ -109,7 +109,19 @@ pub fn derive_pool_id(token_x: &TokenId, token_y: &TokenId, fee_bps: u16) -> Poo
 }
 
 /// Native SIGIL decimals (base units per whole coin = 10^this).
-pub const SIGIL_DECIMALS: u32 = 8;
+pub const SIGIL_DECIMALS: u32 = 10;
+
+/// The base unit is a **glyph**: 1 SIGIL = 10,000,000,000 glyphs.
+///
+/// The name is not decoration. A *glyph* is a sign with a fixed, shared meaning that anyone
+/// can read; a *sigil* (from `sigillum`, "a small seal") is a unique mark whose meaning is
+/// private to whoever made it and which cannot be read as ordinary text. That is exactly the
+/// split this chain implements — the glyph is the public, countable accounting unit, and the
+/// SIGIL it composes into is the sealed thing only its owner can open. A shielded note is
+/// literally a sealed commitment.
+pub const BASE_UNIT_NAME: &str = "glyph";
+/// Plural of [`BASE_UNIT_NAME`], for display code that would otherwise guess.
+pub const BASE_UNIT_NAME_PLURAL: &str = "glyphs";
 
 /// Hard, protocol-level maximum supply of the native SIGIL token, in base
 /// units: **21,000,000 SIGIL × 10^8 = 2.1×10^15**. This is a *compile-time
@@ -121,9 +133,41 @@ pub const SIGIL_DECIMALS: u32 = 8;
 /// hard invariant at the chokepoint rather than emission-controller bookkeeping.)
 pub const MAX_SUPPLY: u128 = 21_000_000 * 10u128.pow(SIGIL_DECIMALS);
 
-// Compile-time correctness: the cap is exactly 21M × 10^8. A wrong edit to
-// either constant fails the BUILD, before any node can run with a bad cap.
-const _: () = assert!(MAX_SUPPLY == 2_100_000_000_000_000, "SIGIL max supply must be 21,000,000 × 10^8");
+/// ⚠️ THE DECIMAL CEILING, enforced at compile time.
+///
+/// Shielded note amounts are range-constrained to `2^RANGE_BITS` inside the STARK, over the
+/// 64-bit Goldilocks field. So the decimal count is not a free choice: at `RANGE_BITS = 58`
+/// a single note tops out at `2^58 / 10^DECIMALS` SIGIL.
+///
+///   8 dp -> 2,882,303,761 SIGIL per note  (137x the supply cap — the old margin)
+///  10 dp ->    28,823,037 SIGIL per note  (1.37x the cap — where we are now)
+///  12 dp ->       288,230 SIGIL per note  (BELOW the cap — a note could not hold the supply)
+///  18 dp ->        0.2882 SIGIL per note  (cannot represent one SIGIL at all)
+///
+/// This is why SIGIL cannot simply adopt Quillon's 24 decimals: Quillon has no
+/// range-constrained notes, so no field ceiling. Privacy and fine decimals are in direct
+/// tension, and 10 is near the top of what the circuit allows.
+///
+/// 1.37x is thin. This assertion exists so that raising the supply, or changing
+/// `RANGE_BITS`, fails the BUILD rather than silently wrapping a note amount in the field on
+/// a chain that is already running.
+const _: () = assert!(
+    MAX_SUPPLY < (1u128 << 58),
+    "a single shielded note must be able to hold the entire supply: raise RANGE_BITS, lower \
+     SIGIL_DECIMALS, or lower MAX_SUPPLY"
+);
+
+// Compile-time correctness: the cap is exactly 21M coins at whatever SIGIL_DECIMALS says.
+// A wrong edit to either constant fails the BUILD, before any node can run with a bad cap.
+//
+// This assertion used to hardcode `2_100_000_000_000_000` (21M x 10^8) and therefore broke
+// the moment SIGIL_DECIMALS moved from 8 to 10 — correctly, but for the wrong reason: it was
+// checking the literal, not the relationship. Derived now, so it keeps testing the property
+// it was written to test rather than the value it happened to have.
+const _: () = assert!(
+    MAX_SUPPLY == 21_000_000 * 10u128.pow(SIGIL_DECIMALS),
+    "SIGIL max supply must be exactly 21,000,000 coins at SIGIL_DECIMALS"
+);
 
 /// DEX pool state at a height. Carries the identifying pair (`token_a` /
 /// `token_b`), reserves, total outstanding LP shares, and the per-pool fee in
@@ -1690,7 +1734,12 @@ mod tests {
     fn supply_cap_enforced_at_21m() {
         let mut s = SigilState::new();
         assert_eq!(s.native_supply(), 0);
-        assert_eq!(MAX_SUPPLY, 21_000_000 * 100_000_000);
+        // 21 MILLION COINS is the property; 10^8 was only what a coin happened to be worth
+        // in base units when this line was written. Third literal of this kind to break on
+        // the 8 -> 10 decimal move, after `sigil-state`'s cap assert and `sigil-vm`'s
+        // SSHARE assert — all three now check the relationship instead.
+        assert_eq!(MAX_SUPPLY, 21_000_000 * 10u128.pow(SIGIL_DECIMALS));
+        assert_eq!(SIGIL_DECIMALS, 10, "SIGIL is 10 dp; the base unit is the glyph");
 
         // mint EXACTLY 21M → allowed.
         let mint = StateTransition { at_height: 1, mutations: vec![

@@ -61,10 +61,17 @@ sol! {
     }
 }
 
-/// SIGIL is 8 decimals (`sigil_state::SIGIL_DECIMALS`); the Polygon wrapped
+/// SIGIL is 10 decimals (`sigil_state::SIGIL_DECIMALS`); the Polygon wrapped
 /// token is a standard 18-decimal ERC20. This is the one conversion factor
 /// the whole bridge's accounting depends on getting right in both directions.
-const DECIMAL_SHIFT: u128 = 10u128.pow(10);
+/// SIGIL decimals, mirrored here because this binary deliberately does not depend on
+/// `sigil-state` (it talks to the chain over HTTP, not by linking it). Mirrored constants
+/// rot, so the pair below is checked against the real one by
+/// `sigil-relayer`'s `decimals_match_the_chain` test rather than by hope.
+const SIGIL_DECIMALS_MIRROR: u32 = 10;
+/// Polygon's wrapped token is a standard 18-decimal ERC20.
+const WRAPPED_DECIMALS: u32 = 18;
+const DECIMAL_SHIFT: u128 = 10u128.pow(WRAPPED_DECIMALS - SIGIL_DECIMALS_MIRROR);
 
 /// `amount` as it arrives on the wire.
 ///
@@ -100,7 +107,7 @@ const DECIMAL_SHIFT: u128 = 10u128.pow(10);
 struct WireAmount(u128);
 
 impl WireAmount {
-    /// Base units (SIGIL is 8dp — `sigil_state::SIGIL_DECIMALS`).
+    /// Base units, i.e. glyphs (SIGIL is 10dp — `sigil_state::SIGIL_DECIMALS`).
     fn to_base_units(&self) -> Result<u128> {
         Ok(self.0)
     }

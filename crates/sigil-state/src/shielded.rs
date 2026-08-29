@@ -67,7 +67,7 @@ pub const POOL_CAPACITY: usize = 1 << POOL_DEPTH;
 /// The cost is that there is no fee market and therefore no fee-based priority. That is
 /// the correct trade for a privacy chain: a fee market is an auction in which the bid is
 /// public, and a public bid is an identifier.
-pub const SHIELDED_FEE: u128 = 1_000;
+pub const SHIELDED_FEE: u128 = 100_000;
 
 /// Allowed shield / unshield amounts.
 ///
@@ -118,7 +118,28 @@ pub const DENOMINATIONS: &[u128] = &[
     10_000_000_000_000, 20_000_000_000_000, 50_000_000_000_000,
     100_000_000_000_000, 200_000_000_000_000, 500_000_000_000_000,
     1_000_000_000_000_000, 2_000_000_000_000_000, 5_000_000_000_000_000,
+    // Rungs added when SIGIL moved from 8 to 10 decimals. The ladder is written in base
+    // units (glyphs), so every rung became 100x SMALLER in coin terms overnight: the old top
+    // rung was 50,000,000 SIGIL, comfortably above the supply cap, and at 10 dp the same
+    // number means 500,000 SIGIL. Without these, shielding a large holding would have
+    // silently required many ramps instead of one — and many ramps is exactly the
+    // correlation pattern denominations exist to prevent.
+    10_000_000_000_000_000, 20_000_000_000_000_000, 50_000_000_000_000_000,
+    100_000_000_000_000_000, 200_000_000_000_000_000,
 ];
+
+// The ladder must reach the supply cap (or no single ramp can move a large holding) and must
+// stay inside the shielded circuit's range bound (or a legal denomination could not be
+// proven). 2^58 = 28,823,038 SIGIL at 10 dp, so 20,000,000 is the last rung that fits —
+// 50,000,000 would not, which is why the 1/2/5 pattern stops at 2 here.
+const _: () = assert!(
+    DENOMINATIONS[DENOMINATIONS.len() - 1] >= crate::MAX_SUPPLY / 2,
+    "the ladder must cover a substantial fraction of the supply in one ramp"
+);
+const _: () = assert!(
+    DENOMINATIONS[DENOMINATIONS.len() - 1] < (1u128 << 58),
+    "every denomination must be provable inside the shielded circuit's range bound"
+);
 
 /// Is `amount` one of the permitted ramp denominations?
 pub fn is_denomination(amount: u128) -> bool {

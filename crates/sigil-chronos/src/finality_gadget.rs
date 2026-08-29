@@ -367,7 +367,13 @@ mod tests {
                         _ => break,
                     }
                 }
-                views.push(BlockView { hash, parent, merge_parents, height, producer: dr_producer_id(p) });
+                views.push(BlockView { hash, parent, merge_parents, height, producer: dr_producer_id(p),
+                    // 0 = a producer free-run mint, which is what 99.83% of real
+                    // blocks are (7 of 4096 measured 2026-08-28 carried a real
+                    // solve). Matching that here keeps the simulation honest:
+                    // WorkPolicy defaults to UniformCount precisely because
+                    // weighting by this field would give almost every block zero.
+                    difficulty: 0 });
                 minted.push((p, hash));
             }
             for (origin, hash) in &minted {

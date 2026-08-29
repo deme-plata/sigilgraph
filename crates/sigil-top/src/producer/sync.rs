@@ -271,9 +271,53 @@ async fn tail_replay(net: &flux_p2p::NetworkManager, chain: &mut ChainTip) -> Op
 /// On ANY failure returns `None` — the caller must refuse to start producing rather
 /// than fall back to a fresh, network-incompatible genesis.
 pub async fn sync_chain(net: &flux_p2p::NetworkManager) -> Option<ChainTip> {
-    let url = std::env::var(SNAPSHOT_URL_ENV).unwrap_or_else(|_| DEFAULT_SNAPSHOT_URL.to_string());
-    let mut chain = fetch_snapshot(&url).await?;
-    crate::tlog!("[producer-sync] snapshot restored at height={} — starting tail replay", chain.height());
+    // GENESIS-UP IS THE DEFAULT (2026-08-28, operator: "i dont want snapshots. just sync
+    // from scratch. it syncs 5-10kblks so its fine").
+    //
+    // Two reasons, and the second is the important one:
+    //
+    // 1. It is fast enough. Backfill runs at 5-10k blk/s, so ~264k blocks is well under a
+    //    minute — while the snapshot path downloads 94 MB and THEN still tail-replays tens
+    //    of thousands of blocks, which in practice timed out repeatedly against the live
+    //    node's expensive-serve throttle. Measured 2026-08-28: a four-minute snapshot boot
+    //    never reached the tip and never mined a single share.
+    //
+    // 2. THE SNAPSHOT IS NOT AUTHENTICATED unless the operator happens to have set
+    //    SIGIL_TOP_SNAPSHOT_SIGNER_PK_HEX — otherwise `fetch_snapshot` logs "signer
+    //    identity is NOT pinned, only transit corruption is checked" and restores 94 MB of
+    //    state from an unverified source anyway. For a project whose whole claim is
+    //    verify-don't-trust, bootstrapping every fresh node from an unpinned blob is the
+    //    wrong default. Replaying from genesis over the p2p mesh verifies every block.
+    //
+    // Snapshot boot remains available for anyone who wants it — set SIGIL_TOP_SNAPSHOT=1 —
+    // and is still the right tool once the chain is long enough that genesis replay hurts.
+    // If you do use it, PIN THE SIGNER.
+    let want_snapshot = matches!(std::env::var("SIGIL_TOP_SNAPSHOT").as_deref(), Ok("1"));
+    let mut chain = if want_snapshot {
+        let url = std::env::var(SNAPSHOT_URL_ENV).unwrap_or_else(|_| DEFAULT_SNAPSHOT_URL.to_string());
+        let c = fetch_snapshot(&url).await?;
+        crate::tlog!("[producer-sync] snapshot restored at height={} — starting tail replay", c.height());
+        c
+    } else {
+        // Genesis is applied locally from `mint::build_genesis`, never fetched, so the
+        // starting point is the one compiled into this binary rather than one a peer
+        // asserted. Everything above it arrives through the same verified replay path the
+        // snapshot route uses for its tail.
+        let mut c = ChainTip::new();
+        let g = match crate::producer::mint::build_genesis() {
+            Ok(g) => g,
+            Err(e) => {
+                crate::tlog!("[producer-sync] ✗ could not build genesis locally: {e}");
+                return None;
+            }
+        };
+        if let Err(e) = c.apply(g) {
+            crate::tlog!("[producer-sync] ✗ genesis failed to apply: {e:?}");
+            return None;
+        }
+        crate::tlog!("[producer-sync] genesis-up sync (no snapshot) — replaying from height 0");
+        c
+    };
     let applied = tail_replay(net, &mut chain).await?;
     crate::tlog!(
         "[producer-sync] sync-then-produce bootstrap complete: height={} ({applied} blocks replayed after snapshot)",

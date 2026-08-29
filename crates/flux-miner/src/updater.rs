@@ -23,9 +23,38 @@ pub fn parse_manifest(body: &str, current: &str) -> Option<UpdateInfo> {
         Err(_) => (Some(body.trim().to_string()), None),
     };
     match (ver, url) {
-        (Some(v), Some(u)) if v != current && !v.is_empty() => Some(UpdateInfo { version: v, url: u }),
+        // STRICTLY NEWER, not merely different (2026-08-29). `v != current`
+        // accepted a downgrade: a miner running 0.2.1 met a stale
+        // sigil-miner-latest manifest pinned at 0.1.10 and "updated" BACKWARD,
+        // losing every fix in between on every launch — an accidental (or
+        // malicious) rollback channel. Semver-compare so only a real upgrade
+        // proceeds; a manifest that is equal, older, or unparseable is a no-op.
+        (Some(v), Some(u)) if is_strictly_newer(&v, current) => Some(UpdateInfo { version: v, url: u }),
         _ => None,
     }
+}
+
+/// True iff `candidate` is a strictly higher dotted-numeric version than
+/// `current`. Non-numeric or empty components sort as 0, missing trailing
+/// components are 0 (so `1.2` == `1.2.0`), and an unparseable candidate is
+/// never newer (fail-closed — no update rather than a wrong one).
+fn is_strictly_newer(candidate: &str, current: &str) -> bool {
+    fn parts(s: &str) -> Vec<u64> {
+        s.trim()
+            .trim_start_matches('v')
+            .split('.')
+            .map(|p| p.trim().parse::<u64>().unwrap_or(0))
+            .collect()
+    }
+    let (a, b) = (parts(candidate), parts(current));
+    let n = a.len().max(b.len());
+    for i in 0..n {
+        let (x, y) = (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0));
+        if x != y {
+            return x > y;
+        }
+    }
+    false
 }
 
 /// Fetch the manifest URL and check for a newer version than `current`.
@@ -102,5 +131,24 @@ mod tests {
     fn version_without_url_is_no_update() {
         // bare/urlless manifest can't be auto-applied → no UpdateInfo.
         assert!(parse_manifest("0.9.9", "0.1.0").is_none());
+    }
+
+    #[test]
+    fn a_stale_manifest_cannot_downgrade() {
+        // The live bug (2026-08-29): running 0.2.1, manifest pinned at 0.1.10.
+        assert!(parse_manifest(r#"{"version":"0.1.10","url":"https://x"}"#, "0.2.1").is_none());
+    }
+
+    #[test]
+    fn semver_compares_numerically_not_lexically() {
+        // 0.1.10 > 0.1.9 numerically (a string compare would say otherwise).
+        assert!(is_strictly_newer("0.1.10", "0.1.9"));
+        assert!(!is_strictly_newer("0.1.9", "0.1.10"));
+        // 7.4.2 > 7.4.1; equal is not newer; short form pads with zeros.
+        assert!(is_strictly_newer("7.4.2", "7.4.1"));
+        assert!(!is_strictly_newer("7.4.1", "7.4.1"));
+        assert!(is_strictly_newer("1.2", "1.1.9"));
+        // unparseable candidate fails closed.
+        assert!(!is_strictly_newer("garbage", "0.1.0"));
     }
 }

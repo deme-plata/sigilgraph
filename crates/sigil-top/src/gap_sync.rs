@@ -361,11 +361,38 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    /// Root-partition protection (2026-08-30: /tmp scratch leaks filled Epsilon's
+    /// 40 GB root disk to 0 bytes free → rescue mode). Prefer SIGIL_SCRATCH_DIR,
+    /// else the big array when present, else temp_dir; sweep dirs left by dead
+    /// test runs (per-pid names — a rerun never reuses the pid, so leftovers
+    /// otherwise accumulate forever).
     fn tmp(tag: &str) -> String {
-        std::env::temp_dir()
-            .join(format!("sigil-gapsync-{}-{}", std::process::id(), tag))
-            .to_string_lossy()
-            .into_owned()
+        let root = std::env::var("SIGIL_SCRATCH_DIR")
+            .ok()
+            .filter(|p| !p.trim().is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                let big = std::path::Path::new("/home/storage/sigil-scratch");
+                (big.parent().is_some_and(|s| s.is_dir()) && std::fs::create_dir_all(big).is_ok())
+                    .then(|| big.to_path_buf())
+            })
+            .unwrap_or_else(std::env::temp_dir);
+        let _ = std::fs::create_dir_all(&root);
+        if let Ok(rd) = std::fs::read_dir(&root) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if let Some(rest) = name.strip_prefix("sigil-gapsync-") {
+                    if let Some(pid) = rest.split('-').next() {
+                        if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                            let _ = std::fs::remove_dir_all(e.path());
+                        }
+                    }
+                }
+            }
+        }
+        let p = root.join(format!("sigil-gapsync-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&p);
+        p.to_string_lossy().into_owned()
     }
 
     /// A precheck-valid, correctly-linked header (mirrors chain_verify.rs's test builder).

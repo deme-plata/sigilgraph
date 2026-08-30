@@ -76,6 +76,33 @@ fn human(bytes: f64) -> String {
     format!("{:.2} {}", v, U[i])
 }
 
+/// Scratch root for the heavy flux-db stores. 2026-08-30 incident: a killed run
+/// left 6.3 GB under /tmp on Epsilon's 40 GB root partition, filled it to zero
+/// bytes free, and the box needed rescue mode — nothing can exec on a full root.
+/// So: SIGIL_SCRATCH_DIR wins, else the big array if it exists, else temp_dir.
+fn scratch_root() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("SIGIL_SCRATCH_DIR") {
+        if !p.trim().is_empty() {
+            let p = std::path::PathBuf::from(p);
+            let _ = std::fs::create_dir_all(&p);
+            return p;
+        }
+    }
+    let big = std::path::Path::new("/home/storage/sigil-scratch");
+    if big.parent().is_some_and(|s| s.is_dir()) && std::fs::create_dir_all(big).is_ok() {
+        return big.to_path_buf();
+    }
+    std::env::temp_dir()
+}
+
+/// Free bytes on the filesystem holding `dir` (`df -kP`; dev harness, unix-only).
+fn free_bytes(dir: &std::path::Path) -> Option<u64> {
+    let out = std::process::Command::new("df").arg("-kP").arg(dir).output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let avail_kib: u64 = s.lines().nth(1)?.split_whitespace().nth(3)?.parse().ok()?;
+    Some(avail_kib * 1024)
+}
+
 fn main() {
     let n: u64 = std::env::var("SIM_BLOCKS").ok().and_then(|s| s.parse().ok()).unwrap_or(20_000);
     let step: u64 = std::env::var("SIM_STEP").ok().and_then(|s| s.parse().ok()).unwrap_or(2_000);
@@ -83,7 +110,38 @@ fn main() {
         .unwrap_or_else(|_| "/home/storage/deepseek-codewhale/sigil/chronos-footprint-results.json".into());
 
     // Fresh scratch dirs for the two flux-db stores.
-    let base = std::env::temp_dir().join(format!("sigil-chronos-sim-{}", std::process::id()));
+    let root = scratch_root();
+
+    // Sweep leftovers from previous runs. Dirs are per-pid and the end-of-main
+    // remove_dir_all never runs when a sim is killed or crashes, so any sibling
+    // whose pid is no longer alive is a dead run's garbage.
+    if let Ok(rd) = std::fs::read_dir(&root) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if let Some(pid) = name.strip_prefix("sigil-chronos-sim-") {
+                if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                    println!("sweeping stale scratch from dead run: {}", e.path().display());
+                    let _ = std::fs::remove_dir_all(e.path());
+                }
+            }
+        }
+    }
+
+    // A run measured 6.3 GB on disk; refuse to start where that can't fit with
+    // headroom, instead of quietly strangling the filesystem underneath us.
+    const MIN_FREE: u64 = 20 * 1024 * 1024 * 1024;
+    if let Some(free) = free_bytes(&root) {
+        if free < MIN_FREE {
+            eprintln!(
+                "REFUSING to run: only {} free on {} (need {}). Set SIGIL_SCRATCH_DIR to a roomier filesystem.",
+                human(free as f64), root.display(), human(MIN_FREE as f64)
+            );
+            std::process::exit(1);
+        }
+    }
+
+    let base = root.join(format!("sigil-chronos-sim-{}", std::process::id()));
+    println!("scratch: {}", base.display());
     let _ = std::fs::remove_dir_all(&base);
     let full = BlockStore::open(base.join("fluxdb-full")).expect("open full store");
     let history = BlockStore::open(base.join("fluxdb-history")).expect("open history store");

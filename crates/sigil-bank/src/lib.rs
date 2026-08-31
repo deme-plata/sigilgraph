@@ -30,6 +30,7 @@
 pub mod credit;
 pub mod mandate; // LANE-Y: agent spend-mandates (on-chain home for the agent-money guard)
 pub mod council; // LANE-Y: bank 2-of-2 council for treasury transfers
+pub mod welfare; // SIGIL-Nation: citizen welfare financed from the mining dev fee
 
 use serde::{Deserialize, Serialize};
 
@@ -127,6 +128,13 @@ pub struct MiningSplit {
     /// Credited to the commons wallet; governed + delegated by sigil_council.
     ///  when no bank.
     pub commons_share: u128,
+    /// SIGIL-Nation welfare treasury slice, carved OUT OF `master_share`
+    /// from [`welfare::WELFARE_FROM_HEIGHT`] (see
+    /// [`welfare::split_mining_reward_at`]). Always `0` from the legacy
+    /// [`split_mining_reward`], and `#[serde(default)]` so recorded splits
+    /// from before the field existed still decode.
+    #[serde(default)]
+    pub welfare_share: u128,
 }
 
 /// Outcome of [`split_swap_output`]. The caller credits `user_share` of
@@ -156,7 +164,7 @@ pub fn split_mining_reward(
     master_wallet: Option<WalletId>,
 ) -> Result<MiningSplit, BankError> {
     if master_wallet.is_none() || reward == 0 {
-        return Ok(MiningSplit { validator_share: reward, master_share: 0, operator_share: 0, commons_share: 0 });
+        return Ok(MiningSplit { validator_share: reward, master_share: 0, operator_share: 0, commons_share: 0, welfare_share: 0 });
     }
     let master_share = reward
         .checked_mul(MASTER_MINING_FEE_BPS)
@@ -175,7 +183,7 @@ pub fn split_mining_reward(
         / BPS_DENOMINATOR;
     // master + operator + commons = 500+10+120 = 630 bps << 100% → always safe.
     let validator_share = reward - master_share - operator_share - commons_share;
-    Ok(MiningSplit { validator_share, master_share, operator_share, commons_share })
+    Ok(MiningSplit { validator_share, master_share, operator_share, commons_share, welfare_share: 0 })
 }
 
 /// Split a swap output between the user and the master wallet using

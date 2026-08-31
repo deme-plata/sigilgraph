@@ -24,6 +24,7 @@ blake3 = { workspace = true }
 
 sigil-state = { path = "../sigil-state" }
 sigil-tx = { path = "../sigil-tx" }
+sigil-bank = { path = "../sigil-bank" }
 # Door-level shielded-proof precheck (a DoS guard; the chokepoint is the authority).
 sigil-shield = { path = "../sigil-shield" }
 sigil-emission = { path = "../sigil-emission" }

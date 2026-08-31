@@ -66,6 +66,8 @@ use usds::UsdsBridge;
 pub mod eth;
 
 pub mod dagknight;
+/// SIGIL-Nation: citizen attestation + welfare claims (dev-fee financed).
+pub mod nation;
 /// PV-1 private transfers: shield / shielded-send / unshield.
 pub mod shielded;
 use dagknight::DagSnapshotBridge;
@@ -1705,6 +1707,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/shielded/has", get(shielded_has_commitment_handler))
         .route("/v1/shielded/address", get(shielded_address_handler))
         .route("/v1/eth/usdc", get(eth_usdc_handler))
+        .route("/v1/nation/status", get(nation::nation_status))
+        .route("/v1/nation/citizen", get(nation::nation_citizen))
+        .route("/v1/nation/attest", post(nation::nation_attest))
+        .route("/v1/nation/welfare/claim", post(nation::nation_welfare_claim))
         .route("/v1/mining/challenge", get(mining_challenge))
         .route("/v1/mining/submit", post(mining_submit))
         .route("/v1/mining/miners", get(mining_miners))

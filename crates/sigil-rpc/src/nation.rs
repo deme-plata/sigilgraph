@@ -13,7 +13,11 @@ use sigil_state::{
 };
 
 /// The borger.dk citizen registry contract (wallet → cpr_hash attestation).
-pub const BORGER_REGISTRY: ContractId = [0x0B; 32];
+/// The canonical constant now lives in `sigil_bank::welfare` so the consensus
+/// layer (`sigil-tx`'s `CitizenAttest`/`WelfareClaim`) can read the registry
+/// without a dependency cycle; re-exported here so existing callers keep
+/// compiling. Same value it always was: `[0x0B; 32]`.
+pub use sigil_bank::welfare::BORGER_REGISTRY;
 /// The only authority allowed to attest citizens (the gov / NemID issuer).
 pub const BORGER_AUTHORITY: WalletId = [0x0A; 32];
 /// The e-Boks receipt ledger contract (citizen → last document hash).

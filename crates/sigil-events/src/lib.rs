@@ -337,6 +337,25 @@ pub enum SigilEvent {
         #[serde(with = "u128_str")]
         amount: u128,
     },
+    /// SIGIL-Nation — a citizen attested into the borger registry
+    /// (wallet → cpr_hash) by the nation authority (the master wallet).
+    /// The cpr_hash itself stays in the contract slot, not in the event.
+    CitizenAttested {
+        /// The attesting authority (consensus checks it is the master wallet).
+        authority: WalletId,
+        /// The wallet now recognized as a citizen.
+        citizen: WalletId,
+    },
+    /// SIGIL-Nation — a welfare stipend paid from the welfare treasury
+    /// (`sigil_bank::welfare::WELFARE_WALLET`, financed by the mining
+    /// dev-fee carve) to an attested citizen.
+    WelfareClaimed {
+        /// The claiming citizen.
+        citizen: WalletId,
+        /// Net amount credited (stipend minus the declared fee), in glyphs.
+        #[serde(with = "u128_str")]
+        amount: u128,
+    },
 }
 
 impl SigilEvent {
@@ -364,6 +383,8 @@ impl SigilEvent {
             SigilEvent::BankProposed    { .. } => 17,
             SigilEvent::BankApproved    { .. } => 18,
             SigilEvent::BankExecuted    { .. } => 19,
+            SigilEvent::CitizenAttested { .. } => 20,
+            SigilEvent::WelfareClaimed  { .. } => 21,
         }
     }
 

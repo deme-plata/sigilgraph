@@ -460,6 +460,36 @@ pub enum SigilTx {
         #[serde(with = "u128_str")]
         fee: u128,
     },
+    /// SIGIL-Nation — attest a wallet as a citizen in the borger registry.
+    /// Consensus requires the signer to be the genesis-committed **master
+    /// wallet** (the only wallet with real keys that genesis names — the
+    /// legacy `BORGER_AUTHORITY` placeholder has no keyholder). Active from
+    /// `sigil_bank::welfare::WELFARE_FROM_HEIGHT`.
+    CitizenAttest {
+        /// The attesting authority — must equal the chain's master wallet.
+        authority: WalletId,
+        /// The wallet being recognized as a citizen.
+        citizen: WalletId,
+        /// Hash of the citizen's civil identity (e.g. BLAKE3 of a CPR
+        /// number). The raw identity NEVER goes on chain — only this hash.
+        cpr_hash: [u8; 32],
+        /// Fee in native SIGIL, paid by the authority.
+        #[serde(with = "u128_str")]
+        fee: u128,
+    },
+    /// SIGIL-Nation — an attested citizen claims the periodic welfare
+    /// stipend (`sigil_bank::welfare::WELFARE_STIPEND_GLYPHS`) from the
+    /// welfare treasury, at most once per
+    /// `WELFARE_CLAIM_INTERVAL_BLOCKS`. The fee is taken OUT OF the stipend
+    /// (net credit = stipend − fee), so a citizen with a zero balance can
+    /// always claim — welfare that requires money to receive isn't welfare.
+    WelfareClaim {
+        /// The claiming citizen — also the signer.
+        citizen: WalletId,
+        /// Fee in native SIGIL, deducted from the stipend.
+        #[serde(with = "u128_str")]
+        fee: u128,
+    },
 }
 
 /// Compact tag for indexing — matches [`SigilEvent::tag`] convention. The
@@ -490,6 +520,8 @@ impl SigilTx {
             SigilTx::Shield          { .. } => 16,
             SigilTx::ShieldedSend    { .. } => 17,
             SigilTx::Unshield        { .. } => 18,
+            SigilTx::CitizenAttest   { .. } => 20,
+            SigilTx::WelfareClaim    { .. } => 21,
         }
     }
 
@@ -516,7 +548,9 @@ impl SigilTx {
             SigilTx::MandateClose    { fee, .. } |
             SigilTx::BankPropose     { fee, .. } |
             SigilTx::BankApprove     { fee, .. } |
-            SigilTx::BankExecute     { fee, .. } => *fee,
+            SigilTx::BankExecute     { fee, .. } |
+            SigilTx::CitizenAttest   { fee, .. } |
+            SigilTx::WelfareClaim    { fee, .. } => *fee,
         }
     }
 
@@ -551,6 +585,8 @@ impl SigilTx {
             SigilTx::BankPropose { proposer, .. } => *proposer,
             SigilTx::BankApprove { approver, .. } => *approver,
             SigilTx::BankExecute { executor, .. } => *executor,
+            SigilTx::CitizenAttest { authority, .. } => *authority,
+            SigilTx::WelfareClaim { citizen, .. } => *citizen,
         }
     }
 
@@ -1224,6 +1260,34 @@ pub enum TxApplyError {
     /// `commit_state_transition` and are never skipped because of a pass here.
     #[error("shielded tx rejected: {0}")]
     ShieldedRejected(&'static str),
+
+    /// A SIGIL-Nation transaction (CitizenAttest / WelfareClaim) arrived
+    /// before the feature's activation height.
+    #[error("nation feature not active: activates at height {activates_at}, tx at {height}")]
+    NationNotActive { height: u64, activates_at: u64 },
+
+    /// CitizenAttest signed by a wallet that is not the chain's master
+    /// wallet (or the chain has no master wallet committed).
+    #[error("attest refused: signer is not the nation authority (master wallet)")]
+    NotNationAuthority,
+
+    /// CitizenAttest with an all-zero cpr_hash — an empty attestation
+    /// would be indistinguishable from "not a citizen".
+    #[error("attest refused: cpr_hash must be non-zero")]
+    InvalidAttestation,
+
+    /// WelfareClaim from a wallet with no borger-registry attestation.
+    #[error("welfare refused: wallet is not an attested citizen")]
+    NotCitizen,
+
+    /// WelfareClaim inside the per-citizen cooldown window.
+    #[error("welfare cooldown: next claim allowed at height {next_height}")]
+    WelfareCooldown { next_height: u64 },
+
+    /// The welfare treasury cannot cover the stipend. Welfare never mints —
+    /// an underfunded treasury refuses instead.
+    #[error("welfare treasury underfunded: has {have}, stipend is {need}")]
+    WelfareTreasuryInsufficient { have: u128, need: u128 },
 }
 
 /// Result of applying one tx: the atomic batch of state mutations + the
@@ -2130,6 +2194,92 @@ fn apply_tx_inner(
                 out.mutations.push(StateMutation::SetBalance { wallet: *to, token: *token, amount: new_to });
             }
             let evt = SigilEvent::BankExecuted { id: id.clone(), from: *from, to: *to, token: *token, amount: *amount };
+            out.mutations.push(StateMutation::PushEventHash(evt.leaf_hash()));
+            out.events.push(evt);
+        }
+
+        // ── SIGIL-Nation: citizenship + welfare ─────────────────────────────
+        // Both arms use `at_height.unwrap_or(0)`: the legacy no-height entry
+        // point therefore REFUSES nation txs (0 < activation height) instead
+        // of applying them ungated — stricter than the multi-input-spend
+        // convention on purpose, because these arms also need the real height
+        // as DATA (the claim ledger records it), not just as a gate.
+        SigilTx::CitizenAttest { authority, citizen, cpr_hash, fee } => {
+            use sigil_bank::welfare as wf;
+            let height = at_height.unwrap_or(0);
+            if !wf::welfare_active(height) {
+                return Err(TxApplyError::NationNotActive { height, activates_at: wf::WELFARE_FROM_HEIGHT });
+            }
+            // The nation authority IS the genesis-committed master wallet —
+            // the only genesis-named wallet with a real keyholder. The
+            // legacy BORGER_AUTHORITY placeholder ([0x0A;32]) has no keys,
+            // so binding to it would make attestation permanently unusable.
+            match state.master_wallet() {
+                Some(m) if m == *authority => {}
+                _ => return Err(TxApplyError::NotNationAuthority),
+            }
+            if cpr_hash == &[0u8; 32] {
+                return Err(TxApplyError::InvalidAttestation);
+            }
+            let have = state.balance_of(authority, &NATIVE);
+            if have < *fee {
+                return Err(TxApplyError::InsufficientBalance { have, need: *fee });
+            }
+            if *fee > 0 {
+                // Fee burns, same as Send: debited, credited nowhere.
+                out.mutations.push(StateMutation::SetBalance {
+                    wallet: *authority, token: NATIVE, amount: have - *fee,
+                });
+            }
+            out.mutations.push(StateMutation::SetContractSlot {
+                contract: wf::BORGER_REGISTRY, slot: *citizen, value: *cpr_hash,
+            });
+            let evt = SigilEvent::CitizenAttested { authority: *authority, citizen: *citizen };
+            out.mutations.push(StateMutation::PushEventHash(evt.leaf_hash()));
+            out.events.push(evt);
+        }
+
+        SigilTx::WelfareClaim { citizen, fee } => {
+            use sigil_bank::welfare as wf;
+            let height = at_height.unwrap_or(0);
+            if !wf::welfare_active(height) {
+                return Err(TxApplyError::NationNotActive { height, activates_at: wf::WELFARE_FROM_HEIGHT });
+            }
+            // Degenerate aliasing guard: the treasury itself can never be a
+            // claimant — a claim would debit and credit the same slot.
+            if *citizen == wf::WELFARE_WALLET {
+                return Err(TxApplyError::NotCitizen);
+            }
+            if state.contract_slot(&wf::BORGER_REGISTRY, citizen) == [0u8; 32] {
+                return Err(TxApplyError::NotCitizen);
+            }
+            let last = wf::decode_claim_height(&state.contract_slot(&wf::WELFARE_LEDGER, citizen));
+            if !wf::claim_eligible(last, height) {
+                return Err(TxApplyError::WelfareCooldown { next_height: wf::next_claim_height(last) });
+            }
+            let stipend = wf::WELFARE_STIPEND_GLYPHS;
+            let treasury = state.balance_of(&wf::WELFARE_WALLET, &NATIVE);
+            if treasury < stipend {
+                return Err(TxApplyError::WelfareTreasuryInsufficient { have: treasury, need: stipend });
+            }
+            // The fee comes OUT OF the stipend (net = stipend − fee), so a
+            // zero-balance citizen can always claim. The fee portion burns.
+            if *fee > stipend {
+                return Err(TxApplyError::InsufficientBalance { have: stipend, need: *fee });
+            }
+            let net = stipend - *fee;
+            let cbal = state.balance_of(citizen, &NATIVE);
+            let new_cbal = cbal.checked_add(net).ok_or(TxApplyError::Overflow)?;
+            out.mutations.push(StateMutation::SetBalance {
+                wallet: wf::WELFARE_WALLET, token: NATIVE, amount: treasury - stipend,
+            });
+            out.mutations.push(StateMutation::SetBalance {
+                wallet: *citizen, token: NATIVE, amount: new_cbal,
+            });
+            out.mutations.push(StateMutation::SetContractSlot {
+                contract: wf::WELFARE_LEDGER, slot: *citizen, value: wf::encode_claim_height(height),
+            });
+            let evt = SigilEvent::WelfareClaimed { citizen: *citizen, amount: net };
             out.mutations.push(StateMutation::PushEventHash(evt.leaf_hash()));
             out.events.push(evt);
         }
@@ -3467,5 +3617,117 @@ mod r2_apply_tests {
         ));
         assert_eq!(st.roots().wallet_state_root, before, "replay must not change state");
         assert_eq!(st.nonce_of(&author), 1, "replay must not advance the nonce");
+    }
+}
+
+// ── SIGIL-Nation: citizenship + welfare (consensus arms) ────────────────────
+#[cfg(test)]
+mod nation_welfare_tests {
+    use super::*;
+    use sigil_bank::welfare as wf;
+    use sigil_header::SQISIGN_L5_LEN;
+    use sigil_state::commit_state_transition;
+
+    const MASTER: WalletId = [0xAA; 32];
+    const ALICE: WalletId = [0x11; 32];
+    const CPR: [u8; 32] = [0x42; 32];
+    const H: u64 = wf::WELFARE_FROM_HEIGHT;
+
+    fn signed(tx: SigilTx) -> SignedTx {
+        let from = tx.fee_payer();
+        SignedTx {
+            tx,
+            from_pubkey: from,
+            nonce: 0,
+            sig_scheme: SigScheme::SqiSign5,
+            sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
+            pubkey: PubKeyBytes(Vec::new()),
+        }
+    }
+
+    fn nation_state(treasury: u128) -> SigilState {
+        let mut s = SigilState::new();
+        commit_state_transition(&mut s, &StateTransition { at_height: 0, mutations: vec![
+            StateMutation::SetMasterWallet { wallet: MASTER },
+            StateMutation::SetBalance { wallet: MASTER, token: NATIVE, amount: 1_000_000 },
+            StateMutation::SetBalance { wallet: wf::WELFARE_WALLET, token: NATIVE, amount: treasury },
+        ] }, 0).unwrap();
+        s
+    }
+
+    fn apply_commit(s: &mut SigilState, tx: SigilTx, h: u64) -> Result<(), TxApplyError> {
+        let r = apply_tx_at(s, &signed(tx), h)?;
+        commit_state_transition(s, &StateTransition { at_height: h, mutations: r.mutations }, h)
+            .expect("commit after successful apply");
+        Ok(())
+    }
+
+    #[test]
+    fn attest_then_claim_full_lifecycle() {
+        let mut s = nation_state(wf::WELFARE_STIPEND_GLYPHS * 3);
+        apply_commit(&mut s, SigilTx::CitizenAttest { authority: MASTER, citizen: ALICE, cpr_hash: CPR, fee: 0 }, H).unwrap();
+        assert_eq!(s.contract_slot(&wf::BORGER_REGISTRY, &ALICE), CPR);
+
+        apply_commit(&mut s, SigilTx::WelfareClaim { citizen: ALICE, fee: 0 }, H + 1).unwrap();
+        assert_eq!(s.balance_of(&ALICE, &NATIVE), wf::WELFARE_STIPEND_GLYPHS);
+        assert_eq!(s.balance_of(&wf::WELFARE_WALLET, &NATIVE), wf::WELFARE_STIPEND_GLYPHS * 2);
+        assert_eq!(wf::decode_claim_height(&s.contract_slot(&wf::WELFARE_LEDGER, &ALICE)), H + 1);
+
+        // Cooldown: immediate re-claim refused with the exact next height.
+        let err = apply_tx_at(&s, &signed(SigilTx::WelfareClaim { citizen: ALICE, fee: 0 }), H + 2).unwrap_err();
+        assert!(matches!(err, TxApplyError::WelfareCooldown { next_height } if next_height == H + 1 + wf::WELFARE_CLAIM_INTERVAL_BLOCKS));
+
+        // After the interval the claim opens again.
+        apply_commit(&mut s, SigilTx::WelfareClaim { citizen: ALICE, fee: 0 }, H + 1 + wf::WELFARE_CLAIM_INTERVAL_BLOCKS).unwrap();
+        assert_eq!(s.balance_of(&ALICE, &NATIVE), wf::WELFARE_STIPEND_GLYPHS * 2);
+    }
+
+    #[test]
+    fn nation_txs_refused_below_activation() {
+        let s = nation_state(wf::WELFARE_STIPEND_GLYPHS);
+        let att = signed(SigilTx::CitizenAttest { authority: MASTER, citizen: ALICE, cpr_hash: CPR, fee: 0 });
+        assert!(matches!(apply_tx_at(&s, &att, H - 1), Err(TxApplyError::NationNotActive { .. })));
+        let clm = signed(SigilTx::WelfareClaim { citizen: ALICE, fee: 0 });
+        assert!(matches!(apply_tx_at(&s, &clm, H - 1), Err(TxApplyError::NationNotActive { .. })));
+        // The legacy no-height entry point refuses too (unwrap_or(0)).
+        assert!(matches!(apply_tx(&s, &att), Err(TxApplyError::NationNotActive { .. })));
+    }
+
+    #[test]
+    fn attest_requires_master_and_nonzero_cpr() {
+        let s = nation_state(0);
+        let rogue = signed(SigilTx::CitizenAttest { authority: ALICE, citizen: ALICE, cpr_hash: CPR, fee: 0 });
+        assert!(matches!(apply_tx_at(&s, &rogue, H).unwrap_err(), TxApplyError::NotNationAuthority));
+        let empty = signed(SigilTx::CitizenAttest { authority: MASTER, citizen: ALICE, cpr_hash: [0u8; 32], fee: 0 });
+        assert!(matches!(apply_tx_at(&s, &empty, H).unwrap_err(), TxApplyError::InvalidAttestation));
+    }
+
+    #[test]
+    fn claim_requires_citizenship_and_funded_treasury() {
+        let mut s = nation_state(0);
+        // Not attested → NotCitizen.
+        let clm = signed(SigilTx::WelfareClaim { citizen: ALICE, fee: 0 });
+        assert!(matches!(apply_tx_at(&s, &clm, H).unwrap_err(), TxApplyError::NotCitizen));
+        // Attested but treasury empty → refused, never mints.
+        apply_commit(&mut s, SigilTx::CitizenAttest { authority: MASTER, citizen: ALICE, cpr_hash: CPR, fee: 0 }, H).unwrap();
+        assert!(matches!(
+            apply_tx_at(&s, &clm, H + 1).unwrap_err(),
+            TxApplyError::WelfareTreasuryInsufficient { have: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn claim_fee_comes_out_of_stipend_and_conserves() {
+        let mut s = nation_state(wf::WELFARE_STIPEND_GLYPHS);
+        apply_commit(&mut s, SigilTx::CitizenAttest { authority: MASTER, citizen: ALICE, cpr_hash: CPR, fee: 0 }, H).unwrap();
+        let fee = 7u128;
+        let before = s.balance_of(&ALICE, &NATIVE) + s.balance_of(&wf::WELFARE_WALLET, &NATIVE);
+        apply_commit(&mut s, SigilTx::WelfareClaim { citizen: ALICE, fee }, H + 1).unwrap();
+        // Alice nets stipend − fee; the fee burns (leaves the two balances).
+        assert_eq!(s.balance_of(&ALICE, &NATIVE), wf::WELFARE_STIPEND_GLYPHS - fee);
+        assert_eq!(s.balance_of(&wf::WELFARE_WALLET, &NATIVE), 0);
+        let after = s.balance_of(&ALICE, &NATIVE) + s.balance_of(&wf::WELFARE_WALLET, &NATIVE);
+        assert_eq!(before - after, fee, "exactly the fee burns, nothing else moves");
+        // A zero-balance citizen could claim: no citizen-side balance was required.
     }
 }

@@ -490,7 +490,11 @@ pub fn split_coinbase_mutations(
             return 0;
         }
         let master = work.master_wallet();
-        let Ok(split) = sigil_bank::split_mining_reward(cut, master) else {
+        // Height-aware split: from `welfare::WELFARE_FROM_HEIGHT` this carves
+        // the SIGIL-Nation welfare slice (200 bps) OUT OF the master's 500 —
+        // below activation it is byte-identical to the legacy split, so every
+        // historical block replays unchanged.
+        let Ok(split) = sigil_bank::welfare::split_mining_reward_at(cut, master, height) else {
             return 0;
         };
         let master_credit = match master {
@@ -498,11 +502,20 @@ pub fn split_coinbase_mutations(
             _ => 0,
         };
         let commons_credit = if master.is_some() { split.commons_share } else { 0 };
-        let Some(to_credit) = cut.checked_sub(master_credit).and_then(|r| r.checked_sub(commons_credit)) else {
+        // Like the commons tithe, the welfare carve applies whenever a master
+        // exists, regardless of who mined — a self-mining master keeps its own
+        // dev fee but still funds welfare (it is a protocol commitment to the
+        // nation's citizens, not the master's charity).
+        let welfare_credit = if master.is_some() { split.welfare_share } else { 0 };
+        let Some(to_credit) = cut
+            .checked_sub(master_credit)
+            .and_then(|r| r.checked_sub(commons_credit))
+            .and_then(|r| r.checked_sub(welfare_credit))
+        else {
             return 0;
         };
 
-        let mut step: Vec<StateMutation> = Vec::with_capacity(3);
+        let mut step: Vec<StateMutation> = Vec::with_capacity(4);
         if to_credit > 0 {
             let Some(m) = credit_mutation(work, &mut minted_cms, to, to_credit, height) else { return 0 };
             step.push(m);
@@ -513,6 +526,10 @@ pub fn split_coinbase_mutations(
         }
         if commons_credit > 0 {
             let Some(mu) = credit_mutation(work, &mut minted_cms, sigil_bank::COMMONS_WALLET, commons_credit, height) else { return 0 };
+            step.push(mu);
+        }
+        if welfare_credit > 0 {
+            let Some(mu) = credit_mutation(work, &mut minted_cms, sigil_bank::welfare::WELFARE_WALLET, welfare_credit, height) else { return 0 };
             step.push(mu);
         }
         if step.is_empty() {
@@ -646,6 +663,45 @@ mod tests {
         // EXACT CONSERVATION: no unit created or destroyed by the split.
         assert_eq!(
             total_native_delta(&st, &after, &[winner, master, sigil_bank::COMMONS_WALLET]),
+            reward
+        );
+    }
+
+    #[test]
+    fn split_coinbase_carves_welfare_from_dev_fee_after_activation() {
+        // SIGIL-Nation: from WELFARE_FROM_HEIGHT, 200 of the master's 500 bps
+        // flow to the welfare treasury. Miner + commons take are UNCHANGED —
+        // welfare is financed by the dev fee, not by a new skim.
+        use sigil_bank::welfare as wf;
+        let mut st = SigilState::new();
+        let master: WalletId = [0x99; 32];
+        set_master(&mut st, master);
+        let winner: WalletId = [0x42; 32];
+        let shares = std::collections::HashMap::from([(winner, 1u64)]);
+        let reward = 100_000u128;
+        let h = wf::WELFARE_FROM_HEIGHT;
+        let muts = split_coinbase_mutations(&st, h, reward, winner, &shares);
+        let mut after = st.clone();
+        sigil_state::commit_state_transition(&mut after, &StateTransition { at_height: h, mutations: muts }, h).unwrap();
+
+        let welfare_bal = after.balance_of(&wf::WELFARE_WALLET, &NATIVE);
+        let master_bal = after.balance_of(&master, &NATIVE);
+        let commons_bal = after.balance_of(&sigil_bank::COMMONS_WALLET, &NATIVE);
+        assert_eq!(welfare_bal, reward * wf::WELFARE_MINING_FEE_BPS / 10_000, "welfare gets exactly 200 bps");
+        assert_eq!(master_bal, reward * 300 / 10_000, "master keeps 500 − 200 = 300 bps");
+        assert_eq!(commons_bal, reward * 120 / 10_000, "commons tithe unchanged by welfare");
+        // Winner take identical to the pre-activation split at height 1.
+        let muts_legacy = split_coinbase_mutations(&st, 1, reward, winner, &shares);
+        let mut legacy = st.clone();
+        sigil_state::commit_state_transition(&mut legacy, &StateTransition { at_height: 1, mutations: muts_legacy }, 1).unwrap();
+        assert_eq!(
+            after.balance_of(&winner, &NATIVE),
+            legacy.balance_of(&winner, &NATIVE),
+            "the miner's take must not change at welfare activation"
+        );
+        // EXACT CONSERVATION across all four credited wallets.
+        assert_eq!(
+            total_native_delta(&st, &after, &[winner, master, sigil_bank::COMMONS_WALLET, wf::WELFARE_WALLET]),
             reward
         );
     }

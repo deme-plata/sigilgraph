@@ -669,9 +669,10 @@ mod tests {
 
     #[test]
     fn split_coinbase_carves_welfare_from_dev_fee_after_activation() {
-        // SIGIL-Nation: from WELFARE_FROM_HEIGHT, 200 of the master's 500 bps
-        // flow to the welfare treasury. Miner + commons take are UNCHANGED —
-        // welfare is financed by the dev fee, not by a new skim.
+        // SIGIL-Nation: from WELFARE_FROM_HEIGHT the gross dev fee rises to
+        // 750 bps (operator directive 2026-08-31) — 200 bps of it flow to the
+        // welfare treasury, master nets 550, and the validator absorbs the
+        // 250 bps raise. Commons is untouched.
         use sigil_bank::welfare as wf;
         let mut st = SigilState::new();
         let master: WalletId = [0x99; 32];
@@ -688,16 +689,20 @@ mod tests {
         let master_bal = after.balance_of(&master, &NATIVE);
         let commons_bal = after.balance_of(&sigil_bank::COMMONS_WALLET, &NATIVE);
         assert_eq!(welfare_bal, reward * wf::WELFARE_MINING_FEE_BPS / 10_000, "welfare gets exactly 200 bps");
-        assert_eq!(master_bal, reward * 300 / 10_000, "master keeps 500 − 200 = 300 bps");
+        assert_eq!(
+            master_bal,
+            reward * (wf::MASTER_MINING_FEE_BPS_V2 - wf::WELFARE_MINING_FEE_BPS) / 10_000,
+            "master nets 750 − 200 = 550 bps"
+        );
         assert_eq!(commons_bal, reward * 120 / 10_000, "commons tithe unchanged by welfare");
-        // Winner take identical to the pre-activation split at height 1.
+        // The miner absorbs exactly the 250 bps dev-fee raise vs pre-activation.
         let muts_legacy = split_coinbase_mutations(&st, 1, reward, winner, &shares);
         let mut legacy = st.clone();
         sigil_state::commit_state_transition(&mut legacy, &StateTransition { at_height: 1, mutations: muts_legacy }, 1).unwrap();
         assert_eq!(
-            after.balance_of(&winner, &NATIVE),
-            legacy.balance_of(&winner, &NATIVE),
-            "the miner's take must not change at welfare activation"
+            legacy.balance_of(&winner, &NATIVE) - after.balance_of(&winner, &NATIVE),
+            reward * (wf::MASTER_MINING_FEE_BPS_V2 - sigil_bank::MASTER_MINING_FEE_BPS) / 10_000,
+            "the miner's take drops by exactly the fee raise, nothing more"
         );
         // EXACT CONSERVATION across all four credited wallets.
         assert_eq!(

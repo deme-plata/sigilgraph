@@ -66,7 +66,7 @@ pub async fn nation_status(State(st): State<AppState>) -> Json<ApiResponse<Natio
         stipend_glyphs: wf::WELFARE_STIPEND_GLYPHS.to_string(),
         claim_interval_blocks: wf::WELFARE_CLAIM_INTERVAL_BLOCKS,
         welfare_bps: wf::WELFARE_MINING_FEE_BPS as u64,
-        financed_by: "mining dev-fee carve (200 of the master's 500 bps); QUG/QUGUSD welfare runs on Quillon Graph",
+        financed_by: "mining dev-fee carve (200 of the 750-bps dev fee; master nets 550); QUG/QUGUSD welfare runs on Quillon Graph",
     })
 }
 

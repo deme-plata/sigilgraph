@@ -9,10 +9,12 @@
 //!
 //! 1. Every block reward is already split by [`crate::split_mining_reward`]:
 //!    500 bps dev fee → master, 120 bps → commons, 10 bps → operator pool.
-//! 2. From [`WELFARE_FROM_HEIGHT`], [`split_mining_reward_at`] carves
-//!    [`WELFARE_MINING_FEE_BPS`] (200 bps) **out of the master's 500 bps**
-//!    into [`WELFARE_WALLET`]. The miner's take is unchanged — welfare is
-//!    financed by the dev fee, exactly as promised, not by a new skim.
+//! 2. From [`WELFARE_FROM_HEIGHT`], [`split_mining_reward_at`] raises the
+//!    gross dev fee to [`MASTER_MINING_FEE_BPS_V2`] (750 bps, operator
+//!    directive 2026-08-31) and routes [`WELFARE_MINING_FEE_BPS`] (200 bps)
+//!    of it into [`WELFARE_WALLET`] — master nets 550 bps, welfare is
+//!    financed by the dev fee as promised, and the 250 bps raise comes out
+//!    of the validator share (deliberate, documented at the constant).
 //! 3. An attested citizen (borger registry, `sigil_tx::CitizenAttest`)
 //!    claims [`WELFARE_STIPEND_GLYPHS`] at most once per
 //!    [`WELFARE_CLAIM_INTERVAL_BLOCKS`] via `sigil_tx::WelfareClaim`.
@@ -41,11 +43,22 @@ pub const WELFARE_LEDGER: [u8; 32] = [0x77; 32];
 /// `sigil-rpc` re-exports it, so existing callers keep compiling.
 pub const BORGER_REGISTRY: [u8; 32] = [0x0B; 32];
 
-/// Welfare slice of the mining reward, in basis points, **carved out of**
-/// [`crate::MASTER_MINING_FEE_BPS`] (not added on top): 200 of the master's
-/// 500 bps. Total protocol skim stays 630 bps; the validator share is
-/// byte-identical before and after activation.
+/// Welfare slice of the mining reward, in basis points, carved out of the
+/// post-activation dev fee ([`MASTER_MINING_FEE_BPS_V2`]): 200 of 750.
 pub const WELFARE_MINING_FEE_BPS: u128 = 200;
+
+/// Post-activation gross dev fee, in basis points: **750 bps = 7.5%**,
+/// raised from the genesis 500 bps by operator directive (Viktor,
+/// 2026-08-31: *"raise my dev fee to 7-8% … with 40% of the dev fee to
+/// this system I want a little more"* — 7.5% is the midpoint of the asked
+/// range). Net to the master after the welfare carve: 750 − 200 =
+/// **550 bps (5.5%)**, a little more than the original 5%. Applies ONLY
+/// from [`WELFARE_FROM_HEIGHT`]; every block below it splits at the
+/// genesis [`crate::MASTER_MINING_FEE_BPS`] (500), so historical replay is
+/// byte-identical. Unlike the first welfare design, this DOES lower the
+/// miner's take post-activation (by 250 bps) — that is the point of the
+/// raise, stated here so nobody reads it as an accident.
+pub const MASTER_MINING_FEE_BPS_V2: u128 = 750;
 
 /// Activation height for the whole nation-welfare feature: the coinbase
 /// carve, `CitizenAttest`, and `WelfareClaim` are all refused below it.
@@ -73,12 +86,14 @@ pub fn welfare_active(height: u64) -> bool {
 }
 
 /// Height-aware mining split: identical to [`crate::split_mining_reward`]
-/// below [`WELFARE_FROM_HEIGHT`]; from activation, carves
-/// [`WELFARE_MINING_FEE_BPS`] out of the master share into `welfare_share`.
+/// below [`WELFARE_FROM_HEIGHT`]; from activation, the gross dev fee rises
+/// to [`MASTER_MINING_FEE_BPS_V2`] (750 bps) and [`WELFARE_MINING_FEE_BPS`]
+/// (200 bps) of it flows to the welfare treasury — master nets 550 bps.
 ///
 /// Invariants (tested):
-/// - `validator_share`, `operator_share`, `commons_share` are unchanged by
-///   activation — only the master's slice is divided.
+/// - `operator_share` and `commons_share` are unchanged by activation.
+/// - The validator take drops by exactly the fee raise (250 bps) at
+///   activation — deliberate, see [`MASTER_MINING_FEE_BPS_V2`].
 /// - Exact conservation: the four shares plus `welfare_share` always sum to
 ///   `reward`.
 pub fn split_mining_reward_at(
@@ -90,14 +105,22 @@ pub fn split_mining_reward_at(
     if master_wallet.is_none() || reward == 0 || !welfare_active(height) {
         return Ok(split);
     }
+    // Post-activation gross dev fee (750 bps), replacing the legacy 500.
+    let master_gross = reward
+        .checked_mul(MASTER_MINING_FEE_BPS_V2)
+        .ok_or(BankError::MathOverflow)?
+        / BPS_DENOMINATOR;
     let welfare_share = reward
         .checked_mul(WELFARE_MINING_FEE_BPS)
         .ok_or(BankError::MathOverflow)?
         / BPS_DENOMINATOR;
-    // floor(r·500/10k) ≥ floor(r·200/10k) for all r (monotone in bps), so
+    // floor(r·750/10k) ≥ floor(r·200/10k) for all r (monotone in bps), so
     // this subtraction cannot underflow; debug-assert documents it.
-    debug_assert!(split.master_share >= welfare_share);
-    split.master_share -= welfare_share;
+    debug_assert!(master_gross >= welfare_share);
+    // The validator absorbs the fee raise: recompute its share from the new
+    // gross rather than the legacy split's 500-bps one.
+    split.validator_share = reward - master_gross - split.operator_share - split.commons_share;
+    split.master_share = master_gross - welfare_share;
     split.welfare_share = welfare_share;
     Ok(split)
 }
@@ -149,17 +172,24 @@ mod tests {
     }
 
     #[test]
-    fn split_carves_welfare_from_master_only() {
+    fn split_raises_dev_fee_and_carves_welfare_after_activation() {
         let reward = 1_000_000u128;
         let legacy = split_mining_reward(reward, MASTER).unwrap();
         let at = split_mining_reward_at(reward, MASTER, WELFARE_FROM_HEIGHT).unwrap();
-        // Miner, operator pool and commons untouched.
-        assert_eq!(at.validator_share, legacy.validator_share);
+        // Operator pool and commons untouched by activation.
         assert_eq!(at.operator_share, legacy.operator_share);
         assert_eq!(at.commons_share, legacy.commons_share);
-        // Welfare = 200 bps of the reward, taken from the master's 500.
+        // Gross dev fee 750 bps: master nets 550, welfare gets 200.
         assert_eq!(at.welfare_share, reward * WELFARE_MINING_FEE_BPS / BPS_DENOMINATOR);
-        assert_eq!(at.master_share + at.welfare_share, legacy.master_share);
+        assert_eq!(
+            at.master_share,
+            reward * (MASTER_MINING_FEE_BPS_V2 - WELFARE_MINING_FEE_BPS) / BPS_DENOMINATOR
+        );
+        // The validator absorbs exactly the 250 bps raise.
+        assert_eq!(
+            legacy.validator_share - at.validator_share,
+            reward * (MASTER_MINING_FEE_BPS_V2 - crate::MASTER_MINING_FEE_BPS) / BPS_DENOMINATOR
+        );
         // Exact conservation over all five shares.
         assert_eq!(
             at.validator_share + at.master_share + at.operator_share + at.commons_share + at.welfare_share,

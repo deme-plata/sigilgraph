@@ -128,11 +128,12 @@ pub struct MiningSplit {
     /// Credited to the commons wallet; governed + delegated by sigil_council.
     ///  when no bank.
     pub commons_share: u128,
-    /// SIGIL-Nation welfare treasury slice, carved OUT OF `master_share`
-    /// from [`welfare::WELFARE_FROM_HEIGHT`] (see
-    /// [`welfare::split_mining_reward_at`]). Always `0` from the legacy
-    /// [`split_mining_reward`], and `#[serde(default)]` so recorded splits
-    /// from before the field existed still decode.
+    /// SIGIL-Nation welfare treasury slice: from
+    /// [`welfare::WELFARE_FROM_HEIGHT`] the gross dev fee rises to
+    /// [`welfare::MASTER_MINING_FEE_BPS_V2`] (750 bps) and 200 bps of it
+    /// land here (see [`welfare::split_mining_reward_at`]). Always `0` from
+    /// the legacy [`split_mining_reward`], and `#[serde(default)]` so
+    /// recorded splits from before the field existed still decode.
     #[serde(default)]
     pub welfare_share: u128,
 }

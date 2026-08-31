@@ -8385,6 +8385,7 @@ dependencies = [
  "rand 0.8.6",
  "serde",
  "serde_json",
+ "sigil-bank",
  "sigil-dagknight",
  "sigil-emission",
  "sigil-header",

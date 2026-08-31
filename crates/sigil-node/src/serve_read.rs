@@ -217,6 +217,71 @@ pub fn read_headers_range(dir: &Path, from: u64, to: u64) -> Vec<SigilBlockHeade
     out
 }
 
+/// Read FULL blocks for `[from..=to]` from the chain log on disk — the
+/// full-body sibling of [`read_headers_range`], same one-open/one-seek/
+/// sequential-scan shape, same probe-and-skip cheap path, same torn-tail and
+/// malformed-record tolerance. Exists so the serve path can answer a
+/// full-block backfill OFF the produce loop: this reads by PATH (its own
+/// file handle), never touching `chain_log`'s append handle, which is the
+/// same concurrent-reader pattern the off-thread header serve has run live
+/// since 2026-08-26.
+pub fn read_blocks_range(dir: &Path, from: u64, to: u64) -> Vec<crate::block::Block> {
+    let mut out = Vec::new();
+    if to < from {
+        return out;
+    }
+    let start = idx_seek_offset(dir, from).unwrap_or(0);
+    let Ok(f) = File::open(log_path(dir)) else {
+        return out;
+    };
+    let mut r = BufReader::new(f);
+    if r.seek(SeekFrom::Start(start)).is_err() {
+        return out;
+    }
+    loop {
+        let mut lb = [0u8; 4];
+        if r.read_exact(&mut lb).is_err() {
+            break; // clean EOF
+        }
+        let n = u32::from_le_bytes(lb) as usize;
+        let take = n.min(PROBE_WINDOW);
+        let mut buf = vec![0u8; take];
+        if r.read_exact(&mut buf).is_err() {
+            break; // torn tail record
+        }
+        match probe_height(&buf) {
+            Some(h) if h < from => {
+                if r.seek_relative((n - take) as i64).is_err() {
+                    break;
+                }
+                continue;
+            }
+            Some(h) if h > to => break,
+            _ => {}
+        }
+        if n > take {
+            let mut rest = vec![0u8; n - take];
+            if r.read_exact(&mut rest).is_err() {
+                break;
+            }
+            buf.extend_from_slice(&rest);
+        }
+        match crate::chain_log::decode_record(&buf) {
+            Some(b) => {
+                if b.header.height < from {
+                    continue;
+                }
+                if b.header.height > to {
+                    break;
+                }
+                out.push(b);
+            }
+            None => continue,
+        }
+    }
+    out
+}
+
 /// Encode a header run onto the backfill wire for `codec` 0, 1 or 2.
 ///
 /// ONE implementation, called from both the inline serve path and the
@@ -395,6 +460,29 @@ mod tests {
         let d = std::env::temp_dir().join(format!("sigil-serve-read-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    /// The off-thread FULL-BLOCK serve (2026-08-31) reads through this: same
+    /// production framing as the header reader, but the whole block must
+    /// survive the round-trip — a body-dropping regression here would feed
+    /// syncing producers empty transactions while looking perfectly healthy.
+    #[test]
+    fn read_blocks_range_returns_full_blocks_in_production_format() {
+        let dir = tmpdir("blocks-range");
+        let genesis = crate::genesis::build_genesis().expect("genesis");
+        write_log_v1(&dir, std::slice::from_ref(&genesis));
+
+        let got = read_blocks_range(&dir, genesis.header.height, genesis.header.height);
+        assert_eq!(got.len(), 1, "the production-format record must decode as a FULL block");
+        assert_eq!(got[0].header.height, genesis.header.height);
+        assert_eq!(
+            got[0].header.hash(),
+            genesis.header.hash(),
+            "byte-identical header round-trip — the serve wire depends on it"
+        );
+        // A range past the log's end returns short/empty, never mis-served data.
+        assert!(read_blocks_range(&dir, genesis.header.height + 1, genesis.header.height + 5).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The duplication guard called out in the module doc: if `chain_log`'s

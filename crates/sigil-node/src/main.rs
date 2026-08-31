@@ -1228,6 +1228,21 @@ fn run_start() -> Result<()> {
         // churn of peer ids can't grow this without limit.
         let mut last_expensive_by_peer: std::collections::HashMap<String, std::time::Instant> =
             std::collections::HashMap::new();
+        // In-flight cap for OFF-THREAD FULL-BLOCK serves (2026-08-31). Deep-history
+        // full-block backfill used to be the one serve class with no off-thread
+        // path: it ran get_range_by_height + zstd/MessagePack decode of whole
+        // bodies INLINE, so the expensive throttle above had to drop most of a
+        // syncing peer's requests to protect production — measured live as a
+        // producer-mode sigil-top burning 6 retry attempts per range
+        // ("decode BackfillResp failed: unexpected end of file"). Now those
+        // serves run on spawn_blocking readers with their OWN file handle
+        // (serve_read::read_blocks_range), so the produce loop never pays for
+        // them and they bypass the per-peer throttle entirely — bounded by this
+        // counter instead: at most N disk readers at once, requests beyond the
+        // cap are dropped exactly like the throttle drops them (caller retries).
+        let serve_full_inflight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let serve_full_inflight_cap: usize = std::env::var("SIGIL_SERVE_FULL_INFLIGHT")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(3);
         // === request-ahead fetch pipeline (windowed backfill — overlaps fetch with apply) ===
         let mut req_frontier: u64 = chain.height();
         let mut net_tip: u64 = 0;
@@ -2031,6 +2046,59 @@ fn run_start() -> Result<()> {
                             // single point of contention that one bad actor can monopolize.
                             // A global backstop remains below so N peers can't sum to an
                             // unbounded inline cost.
+                            // ── OFF-THREAD FULL-BLOCK SERVE (2026-08-31) ────────────────
+                            //
+                            // The deep-history full-block request — exactly what a
+                            // producer-mode sigil-top sends while catching up — was the
+                            // last serve class still running INLINE (decompress +
+                            // MessagePack-decode of every body on the produce loop), which
+                            // is why the expensive throttle had to drop most of them and a
+                            // syncing client saw "decode BackfillResp failed: unexpected
+                            // end of file" six retries per range. Serve it the same way the
+                            // header path has been served off-thread since 2026-08-26: a
+                            // spawn_blocking reader with its OWN file handle
+                            // (serve_read::read_blocks_range — never chain_log's append
+                            // handle), the RAM-window tail cloned here while we hold
+                            // `chain`, byte-identical BackfillResp encoding, respond-first,
+                            // then cache-fill through the same done channel. These serves
+                            // BYPASS the per-peer expensive throttle — the produce loop no
+                            // longer pays for them — and are bounded by the in-flight cap
+                            // declared with `serve_full_inflight` instead; at the cap the
+                            // request is dropped exactly as the throttle would (the client
+                            // already retries on its own cadence).
+                            if !req.headers_only && req.codec < 3 && lo < wbase {
+                                use std::sync::atomic::Ordering;
+                                if serve_full_inflight.load(Ordering::Relaxed) >= serve_full_inflight_cap {
+                                    expensive_throttled += 1;
+                                    continue;
+                                }
+                                serve_full_inflight.fetch_add(1, Ordering::Relaxed);
+                                let window_blocks: Vec<crate::block::Block> =
+                                    (lo.max(wbase)..=hi).filter_map(|h| chain.get(h).cloned()).collect();
+                                let disk_hi = hi.min(wbase.saturating_sub(1));
+                                let dir = snap_dir.clone();
+                                let mgr2 = std::sync::Arc::clone(&mgr);
+                                let done = serve_done_tx.clone();
+                                let inflight = std::sync::Arc::clone(&serve_full_inflight);
+                                let peer2 = peer;
+                                tokio::task::spawn_blocking(move || {
+                                    let mut blocks = crate::serve_read::read_blocks_range(&dir, lo, disk_hi);
+                                    blocks.extend(window_blocks);
+                                    let n = blocks.len();
+                                    let resp = BackfillResp { blocks };
+                                    let blob = std::sync::Arc::new(
+                                        bincode::serialize(&resp).unwrap_or_default(),
+                                    );
+                                    // Respond FIRST — the peer must not wait on our caching.
+                                    mgr2.respond(request_id, blob.as_ref().clone());
+                                    eprintln!("↩ rr-backfill(off-thread): served {} BLOCKS [{}..={}] to {} ({} B)",
+                                        n, lo, hi, peer2, blob.len());
+                                    let _ = done.try_send((ckey, immutable, hot_eligible, blob));
+                                    inflight.fetch_sub(1, Ordering::Relaxed);
+                                });
+                                continue;
+                            }
+
                             let peer_key = peer.to_string();
                             if last_expensive_by_peer
                                 .get(&peer_key)

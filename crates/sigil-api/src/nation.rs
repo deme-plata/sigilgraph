@@ -45,6 +45,11 @@ pub struct NationStatusResponse {
     pub claim_interval_blocks: u64,
     /// Mining-reward welfare carve in basis points (taken out of the dev fee).
     pub welfare_bps: u64,
+    /// The nation authority (the chain's master wallet), 64-hex — the only
+    /// wallet whose `CitizenAttest` consensus accepts. Empty if the chain
+    /// has no master committed. Lets the wallet UI show the attest panel
+    /// only to the authority.
+    pub authority_wallet: String,
     /// Where the money comes from, for humans.
     pub financed_by: &'static str,
 }
@@ -52,11 +57,11 @@ pub struct NationStatusResponse {
 #[flux_api_macros::api(GET, "/v1/nation/status", summary = "SIGIL-Nation welfare treasury + policy status")]
 pub async fn nation_status(State(st): State<AppState>) -> Json<ApiResponse<NationStatusResponse>> {
     let height = st.mining.tip().map(|t| t.height).unwrap_or(0);
-    let treasury = st
+    let (treasury, authority) = st
         .state
         .read()
-        .map(|s| s.balance_of(&wf::WELFARE_WALLET, &NATIVE))
-        .unwrap_or(0);
+        .map(|s| (s.balance_of(&wf::WELFARE_WALLET, &NATIVE), s.master_wallet()))
+        .unwrap_or((0, None));
     ApiResponse::ok(NationStatusResponse {
         active: wf::welfare_active(height),
         activation_height: wf::WELFARE_FROM_HEIGHT,
@@ -66,6 +71,7 @@ pub async fn nation_status(State(st): State<AppState>) -> Json<ApiResponse<Natio
         stipend_glyphs: wf::WELFARE_STIPEND_GLYPHS.to_string(),
         claim_interval_blocks: wf::WELFARE_CLAIM_INTERVAL_BLOCKS,
         welfare_bps: wf::WELFARE_MINING_FEE_BPS as u64,
+        authority_wallet: authority.map(hex::encode).unwrap_or_default(),
         financed_by: "mining dev-fee carve (200 of the 750-bps dev fee; master nets 550); QUG/QUGUSD welfare runs on Quillon Graph",
     })
 }
@@ -174,6 +180,274 @@ pub async fn nation_welfare_claim(
 ) -> Json<ApiResponse<SubmitResponse>> {
     let ok = matches!(tx.tx, SigilTx::WelfareClaim { .. });
     submit_nation_tx(&st, tx, "WelfareClaim", ok)
+}
+
+// ── NationBridge: the wallet-friendly claim/attest queue ────────────────────
+//
+// The web wallet cannot build a consensus `SignedTx` (BLAKE3 account binding
+// + byte-exact serde encoding), so — exactly like send/shield/dex/usds — it
+// signs the canonical RPC message `sigil-rpc/v1|{action}|{fields}|nonce={n}`
+// with its Ed25519 key (wallet address == the raw pubkey), the bridge
+// authenticates HERE, and the producer embeds a placeholder-signature
+// `SignedTx` (apply_tx only prechecks; real auth already happened). Same
+// non-destructive snapshot/confirm contract as `SendBridge` — see its docs.
+
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use sigil_state::WalletId;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+const MAX_ATTEMPTS: u32 = 30_000;
+const MAX_AGE: Duration = Duration::from_secs(2_400);
+
+struct NationPending {
+    tx: SigilTx,
+    attempts: u32,
+    first_seen: Instant,
+}
+
+/// Why a nation submission was rejected before reaching the pending pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NationSubmitError {
+    BadAddress,
+    BadCprHash,
+    BadSignatureEncoding,
+    SignatureInvalid,
+    ReplayedNonce,
+}
+
+impl NationSubmitError {
+    /// Human-usable message for the flat wallet JSON responses.
+    pub fn message(self) -> &'static str {
+        match self {
+            NationSubmitError::BadAddress => "address must be a 64-hex wallet",
+            NationSubmitError::BadCprHash => "cpr_hash must be 64 hex chars and non-zero",
+            NationSubmitError::BadSignatureEncoding => "sig must be 128 hex chars (64 bytes)",
+            NationSubmitError::SignatureInvalid => "signature does not match the signing wallet",
+            NationSubmitError::ReplayedNonce => "req_nonce must be greater than the last accepted nonce for this wallet",
+        }
+    }
+}
+
+/// Wallet-authenticated queue for `WelfareClaim` and `CitizenAttest`.
+pub struct NationBridge {
+    pending: Mutex<HashMap<[u8; 32], NationPending>>,
+    nonce_watermark: Mutex<HashMap<WalletId, u64>>,
+}
+
+impl Default for NationBridge {
+    fn default() -> Self {
+        Self { pending: Mutex::new(HashMap::new()), nonce_watermark: Mutex::new(HashMap::new()) }
+    }
+}
+
+impl NationBridge {
+    pub fn new() -> Self { Self::default() }
+
+    fn verify_and_watermark(
+        &self,
+        signer: &WalletId,
+        msg: &str,
+        sig_hex: &str,
+        req_nonce: u64,
+    ) -> Result<(), NationSubmitError> {
+        let sig_hex = sig_hex.strip_prefix("0x").unwrap_or(sig_hex);
+        let sig_bytes = hex::decode(sig_hex).map_err(|_| NationSubmitError::BadSignatureEncoding)?;
+        let sig_arr: [u8; 64] =
+            sig_bytes.try_into().map_err(|_| NationSubmitError::BadSignatureEncoding)?;
+        let vk = VerifyingKey::from_bytes(signer).map_err(|_| NationSubmitError::SignatureInvalid)?;
+        vk.verify(msg.as_bytes(), &Signature::from_bytes(&sig_arr))
+            .map_err(|_| NationSubmitError::SignatureInvalid)?;
+        let mut wm = self.nonce_watermark.lock().unwrap();
+        let last = wm.get(signer).copied().unwrap_or(0);
+        if req_nonce <= last {
+            return Err(NationSubmitError::ReplayedNonce);
+        }
+        wm.insert(*signer, req_nonce);
+        Ok(())
+    }
+
+    fn queue(&self, tx: SigilTx) -> [u8; 32] {
+        let tx_hash = tx.hash();
+        self.pending.lock().unwrap().entry(tx_hash).or_insert_with(|| NationPending {
+            tx,
+            attempts: 0,
+            first_seen: Instant::now(),
+        });
+        tx_hash
+    }
+
+    /// Authenticate + queue a citizen's welfare claim. The wallet signs
+    /// exactly `sigilSign(priv,'welfare_claim',[wallet,fee],reqNonce)`:
+    /// `sigil-rpc/v1|welfare_claim|{wallet}|{fee}|nonce={req_nonce}` —
+    /// `wallet_hex` reused VERBATIM in the message (see `SendBridge::submit`
+    /// for why casing must not be re-encoded).
+    pub fn submit_claim(
+        &self,
+        wallet_hex: &str,
+        fee: u128,
+        sig_hex: &str,
+        req_nonce: u64,
+    ) -> Result<[u8; 32], NationSubmitError> {
+        let citizen = crate::hex32(wallet_hex).ok_or(NationSubmitError::BadAddress)?;
+        let msg = format!("sigil-rpc/v1|welfare_claim|{wallet_hex}|{fee}|nonce={req_nonce}");
+        self.verify_and_watermark(&citizen, &msg, sig_hex, req_nonce)?;
+        Ok(self.queue(SigilTx::WelfareClaim { citizen, fee }))
+    }
+
+    /// Authenticate + queue a citizen attestation, signed by the nation
+    /// authority's wallet (consensus additionally enforces authority ==
+    /// master wallet at apply). Message:
+    /// `sigil-rpc/v1|citizen_attest|{authority}|{citizen}|{cpr_hash}|{fee}|nonce={req_nonce}`.
+    pub fn submit_attest(
+        &self,
+        authority_hex: &str,
+        citizen_hex: &str,
+        cpr_hash_hex: &str,
+        fee: u128,
+        sig_hex: &str,
+        req_nonce: u64,
+    ) -> Result<[u8; 32], NationSubmitError> {
+        let authority = crate::hex32(authority_hex).ok_or(NationSubmitError::BadAddress)?;
+        let citizen = crate::hex32(citizen_hex).ok_or(NationSubmitError::BadAddress)?;
+        let cpr_hash = crate::hex32(cpr_hash_hex).ok_or(NationSubmitError::BadCprHash)?;
+        if cpr_hash == [0u8; 32] {
+            return Err(NationSubmitError::BadCprHash);
+        }
+        let msg = format!(
+            "sigil-rpc/v1|citizen_attest|{authority_hex}|{citizen_hex}|{cpr_hash_hex}|{fee}|nonce={req_nonce}"
+        );
+        self.verify_and_watermark(&authority, &msg, sig_hex, req_nonce)?;
+        Ok(self.queue(SigilTx::CitizenAttest { authority, citizen, cpr_hash, fee }))
+    }
+
+    /// Snapshot every still-pending nation tx for the producer's CURRENT
+    /// mint attempt — non-destructive, same contract as
+    /// `SendBridge::snapshot_for_mint` (see its docs for why).
+    pub fn snapshot_for_mint(&self) -> Vec<SignedTx> {
+        let mut guard = self.pending.lock().unwrap();
+        let mut out = Vec::with_capacity(guard.len());
+        guard.retain(|hash, p| {
+            if p.attempts >= MAX_ATTEMPTS || p.first_seen.elapsed() >= MAX_AGE {
+                eprintln!(
+                    "✗ nation tx gave up after {} attempts / {:.1}s (likely refused at apply — \
+                     not a citizen, cooldown, or treasury underfunded) hash={}",
+                    p.attempts, p.first_seen.elapsed().as_secs_f64(), hex::encode(hash)
+                );
+                return false;
+            }
+            p.attempts += 1;
+            out.push(crate::send::to_signed(p.tx.clone()));
+            true
+        });
+        out
+    }
+
+    /// Retire hashes carried by a candidate confirmed on the settled spine.
+    pub fn confirm_applied(&self, hashes: &[[u8; 32]]) {
+        let mut guard = self.pending.lock().unwrap();
+        for h in hashes {
+            guard.remove(h);
+        }
+    }
+
+    /// Is this tx hash still pending in the bridge?
+    pub fn contains(&self, hash: &[u8; 32]) -> bool {
+        self.pending.lock().unwrap().contains_key(hash)
+    }
+}
+
+/// Body for `POST /v1/nation/welfare/claim_wallet` — the wallet's flat
+/// signed request (same family as `SendRequest`).
+#[derive(Debug, Deserialize)]
+pub struct WalletClaimRequest {
+    /// 64-hex citizen wallet (== raw Ed25519 pubkey).
+    pub wallet: String,
+    /// Fee in glyphs, deducted from the stipend. The wallet sends 0.
+    /// u64 on the wire (fits any sane fee) — serde_json's derived u128 is a
+    /// known trap in this workspace, see sigil-tx's `u128_str` note.
+    #[serde(default)]
+    pub fee: u64,
+    /// 128-hex Ed25519 signature over the canonical RPC message.
+    pub sig: String,
+    /// Client-chosen strictly-increasing nonce (the wallet uses `Date.now()`).
+    pub req_nonce: u64,
+}
+
+/// Body for `POST /v1/nation/attest_wallet`.
+#[derive(Debug, Deserialize)]
+pub struct WalletAttestRequest {
+    /// 64-hex authority wallet — must be the chain's master wallet.
+    pub authority: String,
+    /// 64-hex wallet being attested as a citizen.
+    pub citizen: String,
+    /// 64-hex non-zero hash of the citizen's civil identity.
+    pub cpr_hash: String,
+    /// Fee in glyphs, paid by the authority. The wallet sends 0. u64 on the
+    /// wire for the same reason as `WalletClaimRequest::fee`.
+    #[serde(default)]
+    pub fee: u64,
+    /// 128-hex Ed25519 signature over the canonical RPC message.
+    pub sig: String,
+    /// Client-chosen strictly-increasing nonce.
+    pub req_nonce: u64,
+}
+
+/// Dry-run a nation tx against live state at tip height so the wallet gets
+/// the real refusal reason ("cooldown until height N") instead of a queued
+/// tx that silently never lands. Returns None when it would apply.
+fn dry_run_reason(st: &AppState, tx: &SigilTx) -> Option<String> {
+    let height = st.mining.tip().map(|t| t.height).unwrap_or(0);
+    let s = st.state.read().ok()?;
+    apply_tx_at(&s, &crate::send::to_signed(tx.clone()), height)
+        .err()
+        .map(|e| format!("{e}"))
+}
+
+#[flux_api_macros::api(POST, "/v1/nation/welfare/claim_wallet", summary = "Wallet-signed: claim the welfare stipend (flat JSON, sigil-rpc/v1 message)")]
+pub async fn nation_claim_wallet(
+    State(st): State<AppState>,
+    Json(req): Json<WalletClaimRequest>,
+) -> Json<serde_json::Value> {
+    let Some(citizen) = hex32(&req.wallet) else {
+        return Json(serde_json::json!({ "ok": false, "error": "wallet must be 64-hex" }));
+    };
+    if let Some(reason) = dry_run_reason(&st, &SigilTx::WelfareClaim { citizen, fee: req.fee as u128 }) {
+        return Json(serde_json::json!({ "ok": false, "error": reason }));
+    }
+    match st.nation.submit_claim(&req.wallet, req.fee as u128, &req.sig, req.req_nonce) {
+        Ok(tx_hash) => Json(serde_json::json!({
+            "ok": true,
+            "txid": hex::encode(tx_hash),
+            "note": "queued for the next braid block",
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
+#[flux_api_macros::api(POST, "/v1/nation/attest_wallet", summary = "Master-wallet-signed: attest a citizen (flat JSON, sigil-rpc/v1 message)")]
+pub async fn nation_attest_wallet(
+    State(st): State<AppState>,
+    Json(req): Json<WalletAttestRequest>,
+) -> Json<serde_json::Value> {
+    let (Some(authority), Some(citizen), Some(cpr_hash)) =
+        (hex32(&req.authority), hex32(&req.citizen), hex32(&req.cpr_hash))
+    else {
+        return Json(serde_json::json!({ "ok": false, "error": "authority/citizen/cpr_hash must be 64-hex" }));
+    };
+    let tx = SigilTx::CitizenAttest { authority, citizen, cpr_hash, fee: req.fee as u128 };
+    if let Some(reason) = dry_run_reason(&st, &tx) {
+        return Json(serde_json::json!({ "ok": false, "error": reason }));
+    }
+    match st.nation.submit_attest(&req.authority, &req.citizen, &req.cpr_hash, req.fee as u128, &req.sig, req.req_nonce) {
+        Ok(tx_hash) => Json(serde_json::json!({
+            "ok": true,
+            "txid": hex::encode(tx_hash),
+            "note": "queued for the next braid block",
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
 }
 
 #[cfg(test)]

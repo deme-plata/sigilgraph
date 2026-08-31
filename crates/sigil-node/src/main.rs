@@ -707,6 +707,11 @@ fn run_start() -> Result<()> {
         // `mining_bridge`. See `sigil_api::send` module docs for why this is
         // a bridge instead of routing through `Mempool::ingest`.
         let send_bridge = Arc::new(sigil_api::send::SendBridge::new());
+        // SIGIL-Nation wallet-authenticated welfare-claim / citizen-attest
+        // queue — same drain contract as `send_bridge`. Inert without
+        // traffic, and consensus refuses nation txs below the activation
+        // height anyway (sigil_bank::welfare::WELFARE_FROM_HEIGHT).
+        let nation_bridge = Arc::new(sigil_api::nation::NationBridge::new());
         // PV-1 private transfers. Drained on the same contract as `send_bridge`:
         // re-embedded into every candidate, retired only when one lands on the spine.
         let shielded_bridge = Arc::new(sigil_api::shielded::ShieldedBridge::new());
@@ -809,6 +814,7 @@ fn run_start() -> Result<()> {
                     dagknight: Arc::clone(&dag_snapshot_bridge),
                     history: Arc::clone(&mining_history_store),
                     network: Some(Arc::clone(&mgr)),
+                    nation: Arc::clone(&nation_bridge),
                 };
                 // Samples the live mining aggregate once/minute into the
                 // durable store above. Same "reader of already-published
@@ -1423,6 +1429,7 @@ fn run_start() -> Result<()> {
                         let mut v: Vec<SignedTx> =
                             if txgen > 0 { mempool.pull(txgen) } else { Vec::new() };
                         v.extend(send_bridge.snapshot_for_mint());
+                        v.extend(nation_bridge.snapshot_for_mint());
                         v.extend(shielded_bridge.snapshot_for_mint());
                         v.extend(bridge_bridge.snapshot_for_mint());
                         v.extend(dex_bridge.snapshot_for_mint());
@@ -1581,6 +1588,7 @@ fn run_start() -> Result<()> {
                                         // ARE the hashes that just landed.
                                         if !minted_tx_hashes.is_empty() {
                                             send_bridge.confirm_applied(&minted_tx_hashes);
+                                            nation_bridge.confirm_applied(&minted_tx_hashes);
                                             shielded_bridge.confirm_applied(&minted_tx_hashes);
                                             bridge_bridge.confirm_applied(&minted_tx_hashes);
                                             dex_bridge.confirm_applied(&minted_tx_hashes);

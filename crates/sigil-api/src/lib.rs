@@ -127,6 +127,9 @@ pub struct AppState {
     /// (main.rs) always sets it. The handler reports a clean "unavailable"
     /// response rather than panicking when it's absent.
     pub network: Option<Arc<flux_p2p::NetworkManager>>,
+    /// SIGIL-Nation wallet-authenticated claim/attest queue — same drain
+    /// contract as `send`; see the `nation` module docs.
+    pub nation: Arc<nation::NationBridge>,
 }
 
 impl AppState {
@@ -151,6 +154,7 @@ impl AppState {
             // instead of calling this constructor.
             history: Arc::new(MiningHistoryStore::open_ephemeral()),
             network: None,
+            nation: Arc::new(nation::NationBridge::new()),
         }
     }
 }
@@ -1711,6 +1715,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/nation/citizen", get(nation::nation_citizen))
         .route("/v1/nation/attest", post(nation::nation_attest))
         .route("/v1/nation/welfare/claim", post(nation::nation_welfare_claim))
+        .route("/v1/nation/attest_wallet", post(nation::nation_attest_wallet))
+        .route("/v1/nation/welfare/claim_wallet", post(nation::nation_claim_wallet))
         .route("/v1/mining/challenge", get(mining_challenge))
         .route("/v1/mining/submit", post(mining_submit))
         .route("/v1/mining/miners", get(mining_miners))

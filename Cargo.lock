@@ -9126,6 +9126,7 @@ dependencies = [
  "sigil-dex",
  "sigil-events",
  "sigil-header",
+ "sigil-oracle",
  "sigil-state",
  "sigil-usds",
  "thiserror 1.0.69",

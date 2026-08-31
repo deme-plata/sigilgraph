@@ -478,15 +478,38 @@ pub enum SigilTx {
         fee: u128,
     },
     /// SIGIL-Nation — an attested citizen claims the periodic welfare
-    /// stipend (`sigil_bank::welfare::WELFARE_STIPEND_GLYPHS`) from the
-    /// welfare treasury, at most once per
-    /// `WELFARE_CLAIM_INTERVAL_BLOCKS`. The fee is taken OUT OF the stipend
-    /// (net credit = stipend − fee), so a citizen with a zero balance can
-    /// always claim — welfare that requires money to receive isn't welfare.
+    /// stipend, at most once per `WELFARE_CLAIM_INTERVAL_BLOCKS`.
+    ///
+    /// **Paid in sUSD** (operator ruling 2026-08-31): the treasury's SIGIL is
+    /// locked into the USDS vault as collateral (105% buffer, oracle-priced)
+    /// and exactly `sigil_bank::welfare::WELFARE_STIPEND_USD_E8` of freshly
+    /// minted USDS lands in the citizen's wallet — the stipend is a promise
+    /// about purchasing power, not a bet on SIGIL's price. The fee burns
+    /// FROM THE TREASURY (bounded by `WELFARE_STIPEND_GLYPHS`), so a citizen
+    /// with a zero balance can always claim — welfare that requires money to
+    /// receive isn't welfare. No oracle price or an underfunded treasury
+    /// refuses the claim: fail closed, never an unbacked payment.
     WelfareClaim {
         /// The claiming citizen — also the signer.
         citizen: WalletId,
-        /// Fee in native SIGIL, deducted from the stipend.
+        /// Fee in native SIGIL, burned from the welfare treasury.
+        #[serde(with = "u128_str")]
+        fee: u128,
+    },
+    /// SIGIL-Nation — push the SIGIL/USD oracle price (USD×1e8 per whole
+    /// SIGIL). Signer must be the state-committed **master wallet** — the
+    /// genesis `ORACLE_AUTHORITY` placeholder (`[0x0A;32]`) has no keyholder,
+    /// same reasoning as `CitizenAttest`. Height-gated with the nation txs:
+    /// the oracle's consumer is the USDS welfare payout, and without a price
+    /// every claim refuses (fail closed) — so pushing the price is part of
+    /// operating the nation, not an optional extra.
+    OraclePush {
+        /// The pushing authority — must equal the chain's master wallet.
+        authority: WalletId,
+        /// Price in USD×1e8 per whole SIGIL. Must be non-zero.
+        #[serde(with = "u128_str")]
+        price_usd_e8: u128,
+        /// Fee in native SIGIL, paid by the authority.
         #[serde(with = "u128_str")]
         fee: u128,
     },
@@ -522,6 +545,7 @@ impl SigilTx {
             SigilTx::Unshield        { .. } => 18,
             SigilTx::CitizenAttest   { .. } => 20,
             SigilTx::WelfareClaim    { .. } => 21,
+            SigilTx::OraclePush      { .. } => 22,
         }
     }
 
@@ -550,7 +574,8 @@ impl SigilTx {
             SigilTx::BankApprove     { fee, .. } |
             SigilTx::BankExecute     { fee, .. } |
             SigilTx::CitizenAttest   { fee, .. } |
-            SigilTx::WelfareClaim    { fee, .. } => *fee,
+            SigilTx::WelfareClaim    { fee, .. } |
+            SigilTx::OraclePush      { fee, .. } => *fee,
         }
     }
 
@@ -587,6 +612,7 @@ impl SigilTx {
             SigilTx::BankExecute { executor, .. } => *executor,
             SigilTx::CitizenAttest { authority, .. } => *authority,
             SigilTx::WelfareClaim { citizen, .. } => *citizen,
+            SigilTx::OraclePush { authority, .. } => *authority,
         }
     }
 
@@ -1270,6 +1296,11 @@ pub enum TxApplyError {
     /// wallet (or the chain has no master wallet committed).
     #[error("attest refused: signer is not the nation authority (master wallet)")]
     NotNationAuthority,
+    /// OraclePush with a zero price — zero is how "no oracle" is
+    /// represented, so pushing it would be an un-push, silently re-bricking
+    /// every welfare claim.
+    #[error("oracle price must be non-zero")]
+    ZeroOraclePrice,
 
     /// CitizenAttest with an all-zero cpr_hash — an empty attestation
     /// would be indistinguishable from "not a citizen".
@@ -2257,31 +2288,76 @@ fn apply_tx_inner(
             if !wf::claim_eligible(last, height) {
                 return Err(TxApplyError::WelfareCooldown { next_height: wf::next_claim_height(last) });
             }
-            let stipend = wf::WELFARE_STIPEND_GLYPHS;
-            let treasury = state.balance_of(&wf::WELFARE_WALLET, &NATIVE);
-            if treasury < stipend {
-                return Err(TxApplyError::WelfareTreasuryInsufficient { have: treasury, need: stipend });
+            // ── sUSD payout (operator ruling 2026-08-31) ─────────────────
+            // The stipend is DENOMINATED IN DOLLARS and PAID IN USDS: the
+            // treasury's SIGIL is locked into the USDS vault as collateral
+            // (105% buffer, oracle-priced) and exactly
+            // WELFARE_STIPEND_USD_E8 of freshly minted USDS lands in the
+            // citizen's wallet — volatility stays with the treasury, never
+            // the citizen. The tx fee still burns (folded into the SAME
+            // treasury debit — two absolute SetBalance writes to one key
+            // would be last-write-wins) and still cannot exceed one SIGIL
+            // (WELFARE_STIPEND_GLYPHS, now purely the fee ceiling), so a
+            // zero-balance citizen can always claim. No oracle price →
+            // UsdsError::NoPrice → the claim REFUSES: fail closed, never an
+            // unbacked payment.
+            if *fee > wf::WELFARE_STIPEND_GLYPHS {
+                return Err(TxApplyError::InsufficientBalance { have: wf::WELFARE_STIPEND_GLYPHS, need: *fee });
             }
-            // The fee comes OUT OF the stipend (net = stipend − fee), so a
-            // zero-balance citizen can always claim. The fee portion burns.
-            if *fee > stipend {
-                return Err(TxApplyError::InsufficientBalance { have: stipend, need: *fee });
-            }
-            let net = stipend - *fee;
-            let cbal = state.balance_of(citizen, &NATIVE);
-            let new_cbal = cbal.checked_add(net).ok_or(TxApplyError::Overflow)?;
-            out.mutations.push(StateMutation::SetBalance {
-                wallet: wf::WELFARE_WALLET, token: NATIVE, amount: treasury - stipend,
-            });
-            out.mutations.push(StateMutation::SetBalance {
-                wallet: *citizen, token: NATIVE, amount: new_cbal,
-            });
+            let plan = match sigil_usds::plan_welfare_mint(
+                state, wf::WELFARE_WALLET, *citizen, wf::WELFARE_STIPEND_USD_E8, *fee,
+            ) {
+                Ok(p) => p,
+                Err(sigil_usds::UsdsError::WelfarePayerUnderfunded { have, need }) => {
+                    return Err(TxApplyError::WelfareTreasuryInsufficient { have, need });
+                }
+                Err(e) => return Err(e.into()),
+            };
+            out.mutations.extend(plan.mutations);
             out.mutations.push(StateMutation::SetContractSlot {
                 contract: wf::WELFARE_LEDGER, slot: *citizen, value: wf::encode_claim_height(height),
             });
-            let evt = SigilEvent::WelfareClaimed { citizen: *citizen, amount: net };
+            // `amount` is USDS base units (1e8 = $1) since the sUSD payout —
+            // pre-USDS it was glyphs; no claim landed under the old meaning
+            // (activation-gated), so the event stream stays single-meaning.
+            let evt = SigilEvent::WelfareClaimed { citizen: *citizen, amount: plan.usds_to_recipient };
             out.mutations.push(StateMutation::PushEventHash(evt.leaf_hash()));
             out.events.push(evt);
+        }
+
+        SigilTx::OraclePush { authority, price_usd_e8, fee } => {
+            use sigil_bank::welfare as wf;
+            let height = at_height.unwrap_or(0);
+            if !wf::welfare_active(height) {
+                return Err(TxApplyError::NationNotActive { height, activates_at: wf::WELFARE_FROM_HEIGHT });
+            }
+            // Same authority rule as CitizenAttest: the state-committed
+            // master wallet, because the genesis ORACLE_AUTHORITY
+            // placeholder has no keyholder.
+            match state.master_wallet() {
+                Some(m) if m == *authority => {}
+                _ => return Err(TxApplyError::NotNationAuthority),
+            }
+            if *price_usd_e8 == 0 {
+                return Err(TxApplyError::ZeroOraclePrice);
+            }
+            let have = state.balance_of(authority, &NATIVE);
+            if have < *fee {
+                return Err(TxApplyError::InsufficientBalance { have, need: *fee });
+            }
+            if *fee > 0 {
+                // Fee burns, same as CitizenAttest.
+                out.mutations.push(StateMutation::SetBalance {
+                    wallet: *authority, token: NATIVE, amount: have - *fee,
+                });
+            }
+            // Byte-identical encoding to sigil_oracle::update_price, so
+            // read_price sees exactly what a direct push would have written.
+            let mut value = [0u8; 32];
+            value[..16].copy_from_slice(&price_usd_e8.to_le_bytes());
+            out.mutations.push(StateMutation::SetContractSlot {
+                contract: sigil_oracle::ORACLE_CONTRACT, slot: sigil_oracle::PRICE_SLOT, value,
+            });
         }
     }
 
@@ -3645,6 +3721,10 @@ mod nation_welfare_tests {
         }
     }
 
+    /// Per-claim collateral at the fixture's $2.00 oracle price:
+    /// ceil($1.00 × 1.05 × 1e10 / $2.00) = 5.25e9 glyphs (0.525 SIGIL).
+    const LOCK_AT_2USD: u128 = 5_250_000_000;
+
     fn nation_state(treasury: u128) -> SigilState {
         let mut s = SigilState::new();
         commit_state_transition(&mut s, &StateTransition { at_height: 0, mutations: vec![
@@ -3652,6 +3732,8 @@ mod nation_welfare_tests {
             StateMutation::SetBalance { wallet: MASTER, token: NATIVE, amount: 1_000_000 },
             StateMutation::SetBalance { wallet: wf::WELFARE_WALLET, token: NATIVE, amount: treasury },
         ] }, 0).unwrap();
+        // $2.00/SIGIL — the sUSD stipend needs a live oracle price.
+        sigil_oracle::update_price(&mut s, 0, sigil_oracle::ORACLE_AUTHORITY, 200_000_000).unwrap();
         s
     }
 
@@ -3669,17 +3751,22 @@ mod nation_welfare_tests {
         assert_eq!(s.contract_slot(&wf::BORGER_REGISTRY, &ALICE), CPR);
 
         apply_commit(&mut s, SigilTx::WelfareClaim { citizen: ALICE, fee: 0 }, H + 1).unwrap();
-        assert_eq!(s.balance_of(&ALICE, &NATIVE), wf::WELFARE_STIPEND_GLYPHS);
-        assert_eq!(s.balance_of(&wf::WELFARE_WALLET, &NATIVE), wf::WELFARE_STIPEND_GLYPHS * 2);
+        // sUSD payout: Alice holds exactly $1.00 of USDS, NO native SIGIL —
+        // the treasury's SIGIL moved into the USDS vault as collateral.
+        assert_eq!(s.balance_of(&ALICE, &sigil_usds::USDS), wf::WELFARE_STIPEND_USD_E8);
+        assert_eq!(s.balance_of(&ALICE, &NATIVE), 0);
+        assert_eq!(s.balance_of(&wf::WELFARE_WALLET, &NATIVE), wf::WELFARE_STIPEND_GLYPHS * 3 - LOCK_AT_2USD);
+        assert_eq!(s.balance_of(&sigil_usds::VAULT, &NATIVE), LOCK_AT_2USD);
         assert_eq!(wf::decode_claim_height(&s.contract_slot(&wf::WELFARE_LEDGER, &ALICE)), H + 1);
 
         // Cooldown: immediate re-claim refused with the exact next height.
         let err = apply_tx_at(&s, &signed(SigilTx::WelfareClaim { citizen: ALICE, fee: 0 }), H + 2).unwrap_err();
         assert!(matches!(err, TxApplyError::WelfareCooldown { next_height } if next_height == H + 1 + wf::WELFARE_CLAIM_INTERVAL_BLOCKS));
 
-        // After the interval the claim opens again.
+        // After the interval the claim opens again — another $1.00.
         apply_commit(&mut s, SigilTx::WelfareClaim { citizen: ALICE, fee: 0 }, H + 1 + wf::WELFARE_CLAIM_INTERVAL_BLOCKS).unwrap();
-        assert_eq!(s.balance_of(&ALICE, &NATIVE), wf::WELFARE_STIPEND_GLYPHS * 2);
+        assert_eq!(s.balance_of(&ALICE, &sigil_usds::USDS), wf::WELFARE_STIPEND_USD_E8 * 2);
+        assert_eq!(s.balance_of(&sigil_usds::VAULT, &NATIVE), LOCK_AT_2USD * 2);
     }
 
     #[test]
@@ -3717,17 +3804,68 @@ mod nation_welfare_tests {
     }
 
     #[test]
-    fn claim_fee_comes_out_of_stipend_and_conserves() {
+    fn claim_fee_burns_from_treasury_and_conserves() {
         let mut s = nation_state(wf::WELFARE_STIPEND_GLYPHS);
         apply_commit(&mut s, SigilTx::CitizenAttest { authority: MASTER, citizen: ALICE, cpr_hash: CPR, fee: 0 }, H).unwrap();
         let fee = 7u128;
-        let before = s.balance_of(&ALICE, &NATIVE) + s.balance_of(&wf::WELFARE_WALLET, &NATIVE);
+        let native_before = s.balance_of(&ALICE, &NATIVE)
+            + s.balance_of(&wf::WELFARE_WALLET, &NATIVE)
+            + s.balance_of(&sigil_usds::VAULT, &NATIVE);
         apply_commit(&mut s, SigilTx::WelfareClaim { citizen: ALICE, fee }, H + 1).unwrap();
-        // Alice nets stipend − fee; the fee burns (leaves the two balances).
-        assert_eq!(s.balance_of(&ALICE, &NATIVE), wf::WELFARE_STIPEND_GLYPHS - fee);
-        assert_eq!(s.balance_of(&wf::WELFARE_WALLET, &NATIVE), 0);
-        let after = s.balance_of(&ALICE, &NATIVE) + s.balance_of(&wf::WELFARE_WALLET, &NATIVE);
-        assert_eq!(before - after, fee, "exactly the fee burns, nothing else moves");
-        // A zero-balance citizen could claim: no citizen-side balance was required.
+        // Alice gets the FULL $1.00 in USDS (the fee never touches her) and
+        // needed no starting balance; the fee burns from the treasury.
+        assert_eq!(s.balance_of(&ALICE, &sigil_usds::USDS), wf::WELFARE_STIPEND_USD_E8);
+        assert_eq!(s.balance_of(&ALICE, &NATIVE), 0);
+        assert_eq!(s.balance_of(&wf::WELFARE_WALLET, &NATIVE), wf::WELFARE_STIPEND_GLYPHS - LOCK_AT_2USD - fee);
+        assert_eq!(s.balance_of(&sigil_usds::VAULT, &NATIVE), LOCK_AT_2USD);
+        let native_after = s.balance_of(&ALICE, &NATIVE)
+            + s.balance_of(&wf::WELFARE_WALLET, &NATIVE)
+            + s.balance_of(&sigil_usds::VAULT, &NATIVE);
+        assert_eq!(native_before - native_after, fee, "exactly the fee burns, nothing else leaves NATIVE");
+        // A fee above the ceiling (one SIGIL) is refused outright — checked
+        // on a second, cooldown-free citizen (the cooldown guard runs first).
+        const BOB: WalletId = [0x33; 32];
+        apply_commit(&mut s, SigilTx::CitizenAttest { authority: MASTER, citizen: BOB, cpr_hash: CPR, fee: 0 }, H + 2).unwrap();
+        let big = signed(SigilTx::WelfareClaim { citizen: BOB, fee: wf::WELFARE_STIPEND_GLYPHS + 1 });
+        assert!(matches!(apply_tx_at(&s, &big, H + 3).unwrap_err(), TxApplyError::InsufficientBalance { .. }));
+    }
+
+    #[test]
+    fn claim_without_oracle_price_fails_closed() {
+        // Build nation state WITHOUT the fixture's price push.
+        let mut s = SigilState::new();
+        commit_state_transition(&mut s, &StateTransition { at_height: 0, mutations: vec![
+            StateMutation::SetMasterWallet { wallet: MASTER },
+            StateMutation::SetBalance { wallet: MASTER, token: NATIVE, amount: 1_000_000 },
+            StateMutation::SetBalance { wallet: wf::WELFARE_WALLET, token: NATIVE, amount: wf::WELFARE_STIPEND_GLYPHS },
+        ] }, 0).unwrap();
+        apply_commit(&mut s, SigilTx::CitizenAttest { authority: MASTER, citizen: ALICE, cpr_hash: CPR, fee: 0 }, H).unwrap();
+        let clm = signed(SigilTx::WelfareClaim { citizen: ALICE, fee: 0 });
+        assert!(matches!(
+            apply_tx_at(&s, &clm, H + 1).unwrap_err(),
+            TxApplyError::Usds(sigil_usds::UsdsError::NoPrice)
+        ));
+        // An OraclePush from the master unbricks it.
+        apply_commit(&mut s, SigilTx::OraclePush { authority: MASTER, price_usd_e8: 200_000_000, fee: 0 }, H + 1).unwrap();
+        apply_commit(&mut s, SigilTx::WelfareClaim { citizen: ALICE, fee: 0 }, H + 2).unwrap();
+        assert_eq!(s.balance_of(&ALICE, &sigil_usds::USDS), wf::WELFARE_STIPEND_USD_E8);
+    }
+
+    #[test]
+    fn oracle_push_requires_master_nonzero_price_and_activation() {
+        let mut s = nation_state(0);
+        // Rogue pusher refused.
+        let rogue = signed(SigilTx::OraclePush { authority: ALICE, price_usd_e8: 100, fee: 0 });
+        assert!(matches!(apply_tx_at(&s, &rogue, H).unwrap_err(), TxApplyError::NotNationAuthority));
+        // Zero price refused — it would re-brick every claim.
+        let zero = signed(SigilTx::OraclePush { authority: MASTER, price_usd_e8: 0, fee: 0 });
+        assert!(matches!(apply_tx_at(&s, &zero, H).unwrap_err(), TxApplyError::ZeroOraclePrice));
+        // Below activation refused, and the no-height entry point refuses too.
+        let push = signed(SigilTx::OraclePush { authority: MASTER, price_usd_e8: 300_000_000, fee: 0 });
+        assert!(matches!(apply_tx_at(&s, &push, H - 1), Err(TxApplyError::NationNotActive { .. })));
+        assert!(matches!(apply_tx(&s, &push), Err(TxApplyError::NationNotActive { .. })));
+        // A valid push lands and read_price sees it (byte-identical encoding).
+        apply_commit(&mut s, SigilTx::OraclePush { authority: MASTER, price_usd_e8: 300_000_000, fee: 0 }, H).unwrap();
+        assert_eq!(sigil_oracle::read_price(&s), 300_000_000);
     }
 }

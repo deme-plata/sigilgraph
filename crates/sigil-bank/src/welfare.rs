@@ -80,6 +80,15 @@ pub const WELFARE_CLAIM_INTERVAL_BLOCKS: u64 = 200_000;
 /// grows with emission; an empty treasury refuses claims rather than mints.
 pub const WELFARE_STIPEND_GLYPHS: u128 = 10_000_000_000;
 
+/// The stipend in USDS base units ($1 == 1e8): **$1.00 per claim interval.**
+/// Operator ruling 2026-08-31 ("paid out in sigil sUSD for certainty and no
+/// volatility"): the payout asset is USDS, so the stipend is a promise about
+/// purchasing power, not a bet on SIGIL's price. `WelfareClaim` locks
+/// treasury SIGIL into the USDS vault as collateral and mints exactly this
+/// amount to the citizen (`sigil_usds::plan_welfare_mint`). The GLYPHS
+/// constant above now serves only as the claim-fee ceiling.
+pub const WELFARE_STIPEND_USD_E8: u128 = 100_000_000;
+
 /// Is the nation-welfare feature active at `height`?
 pub fn welfare_active(height: u64) -> bool {
     height >= WELFARE_FROM_HEIGHT

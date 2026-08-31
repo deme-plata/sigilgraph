@@ -39,8 +39,21 @@ pub struct NationStatusResponse {
     pub treasury_glyphs: String,
     /// Welfare treasury wallet, 64-hex.
     pub treasury_wallet: String,
-    /// Stipend per claim, in glyphs, as a string.
+    /// Stipend per claim, in glyphs, as a string. ⚠️ Legacy field kept for
+    /// UI compatibility — since the sUSD ruling the stipend is DENOMINATED
+    /// in USDS (`stipend_usd_e8`); this glyph constant is only the fee
+    /// ceiling on a claim.
     pub stipend_glyphs: String,
+    /// What claims actually pay out: `"USDS"` (operator ruling 2026-08-31 —
+    /// certainty over volatility).
+    pub payout_asset: &'static str,
+    /// Stipend per claim in USDS base units (1e8 == $1.00), as a string.
+    pub stipend_usd_e8: String,
+    /// Current oracle price (USD×1e8 per SIGIL), as a string. `"0"` means
+    /// the oracle is unfed and every claim will refuse (fail closed) until
+    /// the authority pushes a price (`SigilTx::OraclePush` /
+    /// `POST /v1/nation/oracle/push_wallet`).
+    pub oracle_price_usd_e8: String,
     /// Minimum blocks between two claims by the same citizen.
     pub claim_interval_blocks: u64,
     /// Mining-reward welfare carve in basis points (taken out of the dev fee).
@@ -57,11 +70,17 @@ pub struct NationStatusResponse {
 #[flux_api_macros::api(GET, "/v1/nation/status", summary = "SIGIL-Nation welfare treasury + policy status")]
 pub async fn nation_status(State(st): State<AppState>) -> Json<ApiResponse<NationStatusResponse>> {
     let height = st.mining.tip().map(|t| t.height).unwrap_or(0);
-    let (treasury, authority) = st
+    let (treasury, authority, oracle_price) = st
         .state
         .read()
-        .map(|s| (s.balance_of(&wf::WELFARE_WALLET, &NATIVE), s.master_wallet()))
-        .unwrap_or((0, None));
+        .map(|s| {
+            (
+                s.balance_of(&wf::WELFARE_WALLET, &NATIVE),
+                s.master_wallet(),
+                sigil_oracle::read_price(&s),
+            )
+        })
+        .unwrap_or((0, None, 0));
     ApiResponse::ok(NationStatusResponse {
         active: wf::welfare_active(height),
         activation_height: wf::WELFARE_FROM_HEIGHT,
@@ -69,10 +88,13 @@ pub async fn nation_status(State(st): State<AppState>) -> Json<ApiResponse<Natio
         treasury_glyphs: treasury.to_string(),
         treasury_wallet: hex::encode(wf::WELFARE_WALLET),
         stipend_glyphs: wf::WELFARE_STIPEND_GLYPHS.to_string(),
+        payout_asset: "USDS",
+        stipend_usd_e8: wf::WELFARE_STIPEND_USD_E8.to_string(),
+        oracle_price_usd_e8: oracle_price.to_string(),
         claim_interval_blocks: wf::WELFARE_CLAIM_INTERVAL_BLOCKS,
         welfare_bps: wf::WELFARE_MINING_FEE_BPS as u64,
         authority_wallet: authority.map(hex::encode).unwrap_or_default(),
-        financed_by: "mining dev-fee carve (200 of the 750-bps dev fee; master nets 550); QUG/QUGUSD welfare runs on Quillon Graph",
+        financed_by: "mining dev-fee carve (200 of the 750-bps dev fee; master nets 550), paid out as USDS; QUG/QUGUSD welfare runs on Quillon Graph",
     })
 }
 
@@ -322,6 +344,26 @@ impl NationBridge {
         Ok(self.queue(SigilTx::CitizenAttest { authority, citizen, cpr_hash, fee }))
     }
 
+    /// Authenticate + queue an oracle price push, signed by the nation
+    /// authority's wallet (consensus additionally enforces authority ==
+    /// master wallet at apply). Message:
+    /// `sigil-rpc/v1|oracle_push|{authority}|{price_usd_e8}|{fee}|nonce={req_nonce}`.
+    pub fn submit_oracle_push(
+        &self,
+        authority_hex: &str,
+        price_usd_e8: u128,
+        fee: u128,
+        sig_hex: &str,
+        req_nonce: u64,
+    ) -> Result<[u8; 32], NationSubmitError> {
+        let authority = crate::hex32(authority_hex).ok_or(NationSubmitError::BadAddress)?;
+        let msg = format!(
+            "sigil-rpc/v1|oracle_push|{authority_hex}|{price_usd_e8}|{fee}|nonce={req_nonce}"
+        );
+        self.verify_and_watermark(&authority, &msg, sig_hex, req_nonce)?;
+        Ok(self.queue(SigilTx::OraclePush { authority, price_usd_e8, fee }))
+    }
+
     /// Snapshot every still-pending nation tx for the producer's CURRENT
     /// mint attempt — non-destructive, same contract as
     /// `SendBridge::snapshot_for_mint` (see its docs for why).
@@ -441,6 +483,50 @@ pub async fn nation_attest_wallet(
         return Json(serde_json::json!({ "ok": false, "error": reason }));
     }
     match st.nation.submit_attest(&req.authority, &req.citizen, &req.cpr_hash, req.fee as u128, &req.sig, req.req_nonce) {
+        Ok(tx_hash) => Json(serde_json::json!({
+            "ok": true,
+            "txid": hex::encode(tx_hash),
+            "note": "queued for the next braid block",
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
+/// Body for `POST /v1/nation/oracle/push_wallet`.
+#[derive(Debug, Deserialize)]
+pub struct WalletOraclePushRequest {
+    /// 64-hex authority wallet — must be the chain's master wallet.
+    pub authority: String,
+    /// Price in USD×1e8 per whole SIGIL (u64 on the wire — see
+    /// `WalletClaimRequest::fee` for the u128 serde trap). $184B/SIGIL of
+    /// headroom is enough.
+    pub price_usd_e8: u64,
+    /// Fee in glyphs, paid by the authority. The wallet sends 0.
+    #[serde(default)]
+    pub fee: u64,
+    /// 128-hex Ed25519 signature over the canonical RPC message.
+    pub sig: String,
+    /// Client-chosen strictly-increasing nonce.
+    pub req_nonce: u64,
+}
+
+#[flux_api_macros::api(POST, "/v1/nation/oracle/push_wallet", summary = "Master-wallet-signed: push the SIGIL/USD oracle price the sUSD welfare payout mints at")]
+pub async fn nation_oracle_push_wallet(
+    State(st): State<AppState>,
+    Json(req): Json<WalletOraclePushRequest>,
+) -> Json<serde_json::Value> {
+    let Some(authority) = hex32(&req.authority) else {
+        return Json(serde_json::json!({ "ok": false, "error": "authority must be 64-hex" }));
+    };
+    let tx = SigilTx::OraclePush {
+        authority,
+        price_usd_e8: req.price_usd_e8 as u128,
+        fee: req.fee as u128,
+    };
+    if let Some(reason) = dry_run_reason(&st, &tx) {
+        return Json(serde_json::json!({ "ok": false, "error": reason }));
+    }
+    match st.nation.submit_oracle_push(&req.authority, req.price_usd_e8 as u128, req.fee as u128, &req.sig, req.req_nonce) {
         Ok(tx_hash) => Json(serde_json::json!({
             "ok": true,
             "txid": hex::encode(tx_hash),

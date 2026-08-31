@@ -44,8 +44,14 @@
 //! - **Everything is committed in roots** via `commit_state_transition` — no
 //!   side ledger (the Quillon-postmortem discipline).
 //!
-//! Units: SIGIL price is USD×1e8 per SIGIL (`sigil_oracle::PRICE_SCALE`); USDS
-//! has 8 decimals ($1 == 1e8 base).
+//! Units: SIGIL price is USD×1e8 per WHOLE SIGIL (`sigil_oracle::PRICE_SCALE`);
+//! USDS has 8 decimals ($1 == 1e8 base); NATIVE amounts are g2 GLYPHS
+//! (1 SIGIL == 10^10 glyphs, [`GLYPHS_PER_SIGIL`]). glyphs → USD-e8 is
+//! `glyphs × price / GLYPHS_PER_SIGIL`. ⚠️ The original 2026-08-18 version
+//! divided by `PRICE_SCALE` here — correct on g1's 8-decimal chain, a silent
+//! 100× over-mint on g2's 10-decimal chain. Fixed 2026-08-31 before the
+//! module's first live use (the oracle had never been fed, so no mis-scaled
+//! mint ever landed — verified `usds_supply == 0` on the live node).
 
 use sigil_bank::{split_swap_output, BankError, DEV_MASTER_WALLET};
 use sigil_oracle::{read_price, PRICE_SCALE};
@@ -68,6 +74,14 @@ pub const VAULT: WalletId = [0x0B; 32];
 /// change it.
 pub const MINT_BUFFER_BPS: u128 = 10_500;
 
+/// g2 native decimals: 1 SIGIL = 10^10 glyphs. Every NATIVE amount in this
+/// module is glyphs; every USD value is USDS-base (1e8 = $1); the oracle
+/// price is USD×1e8 per WHOLE SIGIL. This constant exists so the glyph↔USD
+/// conversion is written once — dividing by `PRICE_SCALE` instead (the g1
+/// 8-decimal formula) over-values SIGIL 100× and is exactly the bug class
+/// the Android-wallet "8dp on a 10dp chain" note warns about.
+pub const GLYPHS_PER_SIGIL: u128 = 10_000_000_000;
+
 #[derive(Debug, thiserror::Error)]
 pub enum UsdsError {
     #[error("oracle price is unset (0) — cannot mint/redeem")]
@@ -80,6 +94,8 @@ pub enum UsdsError {
     InsufficientUsds,
     #[error("vault underfunded for this redemption")]
     VaultUnderfunded,
+    #[error("welfare payer holds {have} glyphs but the mint needs {need} (collateral + fee)")]
+    WelfarePayerUnderfunded { have: u128, need: u128 },
     #[error("arithmetic overflow")]
     Overflow,
     #[error("protocol fee split: {0}")]
@@ -119,7 +135,9 @@ pub fn plan_mint(state: &SigilState, user: WalletId, sigil_amount: u128) -> Resu
         return Err(UsdsError::InsufficientSigil);
     }
 
-    let locked_value = sigil_amount.checked_mul(price).ok_or(UsdsError::Overflow)? / PRICE_SCALE;
+    // glyphs → USD-e8: divide by GLYPHS_PER_SIGIL (g2 10-dp), NOT PRICE_SCALE.
+    let locked_value =
+        sigil_amount.checked_mul(price).ok_or(UsdsError::Overflow)? / GLYPHS_PER_SIGIL;
     // The buffer: mint only `value / 1.05` in USDS — see module docs.
     let usds_gross = locked_value
         .checked_mul(sigil_bank::BPS_DENOMINATOR)
@@ -150,6 +168,97 @@ pub fn plan_mint(state: &SigilState, user: WalletId, sigil_amount: u128) -> Resu
             },
         ],
     })
+}
+
+/// A planned welfare stipend mint — see [`plan_welfare_mint`].
+pub struct WelfareMintPlan {
+    /// NATIVE glyphs locked from the payer into the vault as collateral.
+    pub sigil_locked: u128,
+    /// USDS credited to the recipient — exactly the requested target.
+    pub usds_to_recipient: u128,
+    pub mutations: Vec<StateMutation>,
+}
+
+/// Plan minting EXACTLY `usds_target` USDS to `recipient`, collateralized by
+/// the `payer`'s NATIVE at the oracle price with the same [`MINT_BUFFER_BPS`]
+/// cushion as [`plan_mint`] — the welfare-stipend shape (payer = the welfare
+/// treasury, recipient = the claiming citizen). Read-only; the caller
+/// (`sigil-tx::apply_tx`'s `WelfareClaim` arm) commits the mutations.
+///
+/// Differences from [`plan_mint`], all deliberate:
+/// - **Inverted direction**: the caller names the USDS OUT and we solve for
+///   the SIGIL in, rounding UP both steps so the vault's collateral never
+///   dips below the buffer.
+/// - **No protocol swap fee**: the dev fee already took its welfare carve
+///   when the treasury was funded (200 bps of every block reward) — taxing
+///   the stipend again on the way out would be the protocol fee'ing its own
+///   welfare payment.
+/// - **`native_fee_burn`** folds the claim tx's fee into the payer debit in
+///   the SAME `SetBalance` (two absolute writes to one key would leave
+///   last-write-wins nondeterminism), and that fee burns — matching the
+///   pre-USDS `WelfareClaim` semantics exactly.
+pub fn plan_welfare_mint(
+    state: &SigilState,
+    payer: WalletId,
+    recipient: WalletId,
+    usds_target: u128,
+    native_fee_burn: u128,
+) -> Result<WelfareMintPlan, UsdsError> {
+    if usds_target == 0 {
+        return Err(UsdsError::ZeroAmount);
+    }
+    if payer == VAULT {
+        // The vault can't collateralize itself — and payer/VAULT sharing a
+        // key would make the two NATIVE SetBalance writes below race.
+        return Err(UsdsError::InsufficientSigil);
+    }
+    let price = read_price(state);
+    if price == 0 {
+        return Err(UsdsError::NoPrice);
+    }
+    // USD value that must be locked: target × 1.05, rounded up.
+    let locked_value = div_ceil(
+        usds_target.checked_mul(MINT_BUFFER_BPS).ok_or(UsdsError::Overflow)?,
+        sigil_bank::BPS_DENOMINATOR,
+    );
+    // Glyphs carrying that value at the oracle price, rounded up.
+    let sigil_locked = div_ceil(
+        locked_value.checked_mul(GLYPHS_PER_SIGIL).ok_or(UsdsError::Overflow)?,
+        price,
+    );
+    let payer_sigil = state.balance_of(&payer, &NATIVE);
+    let need = sigil_locked.checked_add(native_fee_burn).ok_or(UsdsError::Overflow)?;
+    if payer_sigil < need {
+        return Err(UsdsError::WelfarePayerUnderfunded { have: payer_sigil, need });
+    }
+    let vault_sigil = state.balance_of(&VAULT, &NATIVE);
+    let recipient_usds = state.balance_of(&recipient, &USDS);
+    Ok(WelfareMintPlan {
+        sigil_locked,
+        usds_to_recipient: usds_target,
+        mutations: vec![
+            // ONE absolute write per (wallet, token): collateral + fee burn
+            // leave the payer together; only the collateral reaches the vault
+            // (the fee portion burns, reducing NATIVE supply — same as the
+            // fee burn every Send already does).
+            StateMutation::SetBalance { wallet: payer, token: NATIVE, amount: payer_sigil - need },
+            StateMutation::SetBalance {
+                wallet: VAULT,
+                token: NATIVE,
+                amount: vault_sigil.checked_add(sigil_locked).ok_or(UsdsError::Overflow)?,
+            },
+            StateMutation::SetBalance {
+                wallet: recipient,
+                token: USDS,
+                amount: recipient_usds.checked_add(usds_target).ok_or(UsdsError::Overflow)?,
+            },
+        ],
+    })
+}
+
+/// Ceiling division without the `a + b - 1` overflow trap.
+fn div_ceil(a: u128, b: u128) -> u128 {
+    a / b + u128::from(a % b != 0)
 }
 
 /// Mint USDS by locking `sigil_amount` of NATIVE into the vault, committing
@@ -193,7 +302,9 @@ pub fn plan_redeem(state: &SigilState, user: WalletId, usds_amount: u128) -> Res
     if user_usds < usds_amount {
         return Err(UsdsError::InsufficientUsds);
     }
-    let sigil_gross = usds_amount.checked_mul(PRICE_SCALE).ok_or(UsdsError::Overflow)? / price;
+    // USD-e8 → glyphs: multiply by GLYPHS_PER_SIGIL (g2 10-dp), NOT PRICE_SCALE.
+    let sigil_gross =
+        usds_amount.checked_mul(GLYPHS_PER_SIGIL).ok_or(UsdsError::Overflow)? / price;
     let split = split_swap_output(sigil_gross, Some(DEV_MASTER_WALLET))?;
 
     let vault_sigil = state.balance_of(&VAULT, &NATIVE);
@@ -245,14 +356,15 @@ mod tests {
 
     const USER: WalletId = [0x11; 32];
 
-    // genesis: fund USER with 21 SIGIL (21 × 1e8 base), set price $1.00 —
-    // chosen so 21 × 10000/10500 lands exactly on 20e8 (no rounding noise
-    // in the buffer math, so fee math is the only rounding in play).
+    // genesis: fund USER with 21 SIGIL (21 × 1e10 GLYPHS — g2 decimals), set
+    // price $1.00 — chosen so the $21 value × 10000/10500 lands exactly on
+    // 20e8 USDS (no rounding noise in the buffer math, so fee math is the
+    // only rounding in play).
     fn genesis() -> SigilState {
         let mut s = SigilState::new();
         let t = StateTransition {
             at_height: 0,
-            mutations: vec![StateMutation::SetBalance { wallet: USER, token: NATIVE, amount: 21 * 100_000_000 }],
+            mutations: vec![StateMutation::SetBalance { wallet: USER, token: NATIVE, amount: 21 * GLYPHS_PER_SIGIL }],
         };
         commit_state_transition(&mut s, &t, 0).unwrap();
         update_price(&mut s, 1, ORACLE_AUTHORITY, PRICE_SCALE).unwrap(); // $1 / SIGIL
@@ -266,15 +378,16 @@ mod tests {
     #[test]
     fn mint_applies_the_buffer_before_the_fee() {
         let mut s = genesis();
-        // lock 21 SIGIL @ $1 = $21 value → buffer'd gross = 21e8 × 10000/10500 = 20e8 ($20 exactly)
-        let usds = mint(&mut s, 2, USER, 21 * 100_000_000).unwrap();
+        // lock 21 SIGIL (21e10 glyphs) @ $1 = $21 value → buffer'd gross =
+        // 21e8 × 10000/10500 = 20e8 USDS ($20 exactly)
+        let usds = mint(&mut s, 2, USER, 21 * GLYPHS_PER_SIGIL).unwrap();
         let expected_split = split_swap_output(20 * 100_000_000, Some(DEV_MASTER_WALLET)).unwrap();
         assert_eq!(usds, expected_split.user_share, "user gets the post-fee share of the buffer'd amount");
         assert!(usds < 21 * 100_000_000, "buffer + fee must issue LESS USDS than the raw locked value");
         assert_eq!(s.balance_of(&USER, &USDS), usds);
         assert_eq!(s.balance_of(&DEV_MASTER_WALLET, &USDS), expected_split.master_share, "protocol fee credited in USDS");
         assert_eq!(s.balance_of(&USER, &NATIVE), 0, "the FULL 21 SIGIL is locked, not just the buffer'd portion");
-        assert_eq!(s.balance_of(&VAULT, &NATIVE), 21 * 100_000_000, "vault holds the full lock");
+        assert_eq!(s.balance_of(&VAULT, &NATIVE), 21 * GLYPHS_PER_SIGIL, "vault holds the full lock");
     }
 
     #[test]
@@ -284,9 +397,9 @@ mod tests {
         // supply (the safety margin QUGUSD gets from a 135% ratio; USDS gets
         // it from this fixed buffer instead).
         let mut s = genesis();
-        mint(&mut s, 2, USER, 21 * 100_000_000).unwrap();
+        mint(&mut s, 2, USER, 21 * GLYPHS_PER_SIGIL).unwrap();
         let price = read_price(&s);
-        let vault_value = s.balance_of(&VAULT, &NATIVE) * price / PRICE_SCALE;
+        let vault_value = s.balance_of(&VAULT, &NATIVE) * price / GLYPHS_PER_SIGIL;
         let total_usds = s.balance_of(&USER, &USDS) + s.balance_of(&DEV_MASTER_WALLET, &USDS);
         assert!(vault_value > total_usds, "vault_value={vault_value} must exceed total_usds={total_usds}");
     }
@@ -294,11 +407,11 @@ mod tests {
     #[test]
     fn redeem_pays_the_fee_from_the_released_sigil() {
         let mut s = genesis();
-        let usds = mint(&mut s, 2, USER, 21 * 100_000_000).unwrap();
+        let usds = mint(&mut s, 2, USER, 21 * GLYPHS_PER_SIGIL).unwrap();
         let before = native_total(&s);
 
         let sigil_back = redeem(&mut s, 3, USER, usds).unwrap();
-        let expected_gross = usds.checked_mul(PRICE_SCALE).unwrap() / read_price(&s);
+        let expected_gross = usds.checked_mul(GLYPHS_PER_SIGIL).unwrap() / read_price(&s);
         let expected_split = split_swap_output(expected_gross, Some(DEV_MASTER_WALLET)).unwrap();
         assert_eq!(sigil_back, expected_split.user_share);
         assert_eq!(s.balance_of(&USER, &USDS), 0, "USDS burned");
@@ -319,14 +432,87 @@ mod tests {
     #[test]
     fn cannot_mint_more_than_collateral() {
         let mut s = genesis();
-        assert!(matches!(mint(&mut s, 2, USER, 999 * 100_000_000), Err(UsdsError::InsufficientSigil)));
+        assert!(matches!(mint(&mut s, 2, USER, 999 * GLYPHS_PER_SIGIL), Err(UsdsError::InsufficientSigil)));
     }
 
     #[test]
     fn cannot_redeem_more_than_balance() {
         let mut s = genesis();
-        mint(&mut s, 2, USER, 21 * 100_000_000).unwrap();
+        mint(&mut s, 2, USER, 21 * GLYPHS_PER_SIGIL).unwrap();
         let over = s.balance_of(&USER, &USDS) + 1;
         assert!(matches!(redeem(&mut s, 3, USER, over), Err(UsdsError::InsufficientUsds)));
+    }
+
+    const TREASURY: WalletId = [0x57; 32];
+    const CITIZEN: WalletId = [0x22; 32];
+
+    fn welfare_state(treasury_glyphs: u128, price: u128) -> SigilState {
+        let mut s = SigilState::new();
+        let t = StateTransition {
+            at_height: 0,
+            mutations: vec![StateMutation::SetBalance { wallet: TREASURY, token: NATIVE, amount: treasury_glyphs }],
+        };
+        commit_state_transition(&mut s, &t, 0).unwrap();
+        if price > 0 {
+            update_price(&mut s, 1, ORACLE_AUTHORITY, price).unwrap();
+        }
+        s
+    }
+
+    #[test]
+    fn welfare_mint_solves_for_collateral_exactly() {
+        // $1.00 target at $2.00/SIGIL with the 105% buffer:
+        // lock value = ceil(1e8 × 10500/10000) = 1.05e8 USD-e8
+        // glyphs     = ceil(1.05e8 × 1e10 / 2e8) = 5.25e9 (0.525 SIGIL)
+        let mut s = welfare_state(3 * GLYPHS_PER_SIGIL, 200_000_000);
+        let fee = 5u128;
+        let plan = plan_welfare_mint(&s, TREASURY, CITIZEN, 100_000_000, fee).unwrap();
+        assert_eq!(plan.sigil_locked, 5_250_000_000);
+        assert_eq!(plan.usds_to_recipient, 100_000_000);
+        commit_state_transition(&mut s, &StateTransition { at_height: 2, mutations: plan.mutations }, 2).unwrap();
+        assert_eq!(s.balance_of(&CITIZEN, &USDS), 100_000_000, "citizen holds exactly $1.00");
+        assert_eq!(s.balance_of(&CITIZEN, &NATIVE), 0, "no NATIVE was needed or received");
+        assert_eq!(s.balance_of(&VAULT, &NATIVE), 5_250_000_000, "vault holds the collateral");
+        assert_eq!(
+            s.balance_of(&TREASURY, &NATIVE),
+            3 * GLYPHS_PER_SIGIL - 5_250_000_000 - fee,
+            "treasury paid collateral + fee; the fee burned"
+        );
+    }
+
+    #[test]
+    fn welfare_mint_rounds_collateral_up() {
+        // A price that doesn't divide cleanly must round the lock UP, so the
+        // vault never holds less than the buffered value of the USDS issued.
+        let s = welfare_state(GLYPHS_PER_SIGIL, 333_333_333);
+        let plan = plan_welfare_mint(&s, TREASURY, CITIZEN, 100_000_000, 0).unwrap();
+        let locked_value_floor = plan.sigil_locked * 333_333_333 / GLYPHS_PER_SIGIL;
+        assert!(
+            locked_value_floor >= 105_000_000 - 1,
+            "collateral value {locked_value_floor} must cover the buffered target"
+        );
+        assert_eq!(plan.sigil_locked, div_ceil(105_000_000u128 * GLYPHS_PER_SIGIL, 333_333_333));
+    }
+
+    #[test]
+    fn welfare_mint_fails_closed() {
+        // No oracle price → refuse, never mint.
+        let s = welfare_state(GLYPHS_PER_SIGIL, 0);
+        assert!(matches!(
+            plan_welfare_mint(&s, TREASURY, CITIZEN, 100_000_000, 0),
+            Err(UsdsError::NoPrice)
+        ));
+        // Underfunded payer → refuse with the exact have/need.
+        let s = welfare_state(10, 200_000_000);
+        assert!(matches!(
+            plan_welfare_mint(&s, TREASURY, CITIZEN, 100_000_000, 3),
+            Err(UsdsError::WelfarePayerUnderfunded { have: 10, need: 5_250_000_003 })
+        ));
+        // The vault can never be the payer.
+        let s = welfare_state(GLYPHS_PER_SIGIL, 200_000_000);
+        assert!(matches!(
+            plan_welfare_mint(&s, VAULT, CITIZEN, 100_000_000, 0),
+            Err(UsdsError::InsufficientSigil)
+        ));
     }
 }

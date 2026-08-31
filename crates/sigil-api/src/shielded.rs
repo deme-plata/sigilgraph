@@ -981,7 +981,7 @@ mod tests {
         let pk_encrypt = "dd".repeat(32);
         let forged = sign_register(&attacker_sk, &owner, &pk_shield, &pk_encrypt, 0, 1);
         assert_eq!(
-            b.submit_register(&owner, &pk_shield, &pk_encrypt, 0, &forged, 1).unwrap_err(),
+            b.submit_register(&owner, &pk_shield, &pk_encrypt, 0, &forged, 1, None, None).unwrap_err(),
             ShieldedSubmitError::SignatureInvalid,
             "an attacker must not be able to redirect someone else's future mining rewards"
         );
@@ -998,7 +998,7 @@ mod tests {
         let sig = sign_register(&owner_sk, &owner, &pk_shield, &honest_pk_encrypt, 0, 1);
         let swapped_pk_encrypt = "ee".repeat(32);
         assert_eq!(
-            b.submit_register(&owner, &pk_shield, &swapped_pk_encrypt, 0, &sig, 1).unwrap_err(),
+            b.submit_register(&owner, &pk_shield, &swapped_pk_encrypt, 0, &sig, 1, None, None).unwrap_err(),
             ShieldedSubmitError::SignatureInvalid,
             "SECURITY: a signature over one encryption key must not authorize a different one"
         );
@@ -1011,7 +1011,7 @@ mod tests {
         let pk_shield = "cc".repeat(32);
         let pk_encrypt = "dd".repeat(32);
         let sig = sign_register(&sk, &wallet, &pk_shield, &pk_encrypt, 0, 1);
-        b.submit_register(&wallet, &pk_shield, &pk_encrypt, 0, &sig, 1)
+        b.submit_register(&wallet, &pk_shield, &pk_encrypt, 0, &sig, 1, None, None)
             .expect("owner-signed, must succeed");
     }
 
@@ -1022,7 +1022,7 @@ mod tests {
         let outs = vec!["11".repeat(32), "22".repeat(32)];
         let err = b
             .submit_shielded_send(
-                &"aa".repeat(32), &"bb".repeat(32), &outs,
+                &"aa".repeat(32), &"bb".repeat(32), &[], &outs,
                 sigil_state::shielded::SHIELDED_FEE, vec![0u8; 64], &[],
             )
             .unwrap_err();
@@ -1037,6 +1037,7 @@ mod tests {
             .submit_shielded_send(
                 &"aa".repeat(32),
                 &"bb".repeat(32),
+                &[],
                 &["11".repeat(32)],
                 sigil_state::shielded::SHIELDED_FEE,
                 vec![0u8; 64],
@@ -1054,7 +1055,7 @@ mod tests {
         let outs = vec!["11".repeat(32), "22".repeat(32)];
         let err = b
             .submit_shielded_send(
-                &"aa".repeat(32), &"bb".repeat(32), &outs,
+                &"aa".repeat(32), &"bb".repeat(32), &[], &outs,
                 sigil_state::shielded::SHIELDED_FEE, vec![0u8; 64],
                 &[Some("only-one".to_string())],
             )

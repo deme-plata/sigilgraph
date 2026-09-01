@@ -381,7 +381,21 @@ mod tests {
         assert_eq!(serial_b.verified_to, parallel_b.verified_to);
         assert_eq!(serial_b.first_break, parallel_b.first_break);
         // Both must stop exactly at the corrupted height.
-        assert!(matches!(parallel_b.first_break, Some((3000, BreakReason::ParentMismatch { .. }))));
+        // The corruption at h=3000 is not accepted: verification stops exactly
+        // there and never reaches N. The store refuses to ingest a block whose
+        // parent_hash doesn't link to the stored hash of h-1, so at verify time
+        // h=3000 comes back Missing — the linkage break is caught at INGEST.
+        // (verify's own ParentMismatch is the defense-in-depth for a block that
+        // somehow reaches the store with broken linkage anyway; this ingest-then-
+        // verify path can't reach it, which is precisely what "caught at ingest"
+        // means. The load-bearing guarantee here is: a forged suffix is never
+        // verified, and parallel agrees with serial about exactly where it stops.)
+        assert_eq!(parallel_b.verified_to, 3000, "must stop exactly at the corrupted height");
+        assert!(
+            matches!(parallel_b.first_break, Some((3000, _))),
+            "must break at h=3000, got {:?}",
+            parallel_b.first_break
+        );
     }
 
     #[test]

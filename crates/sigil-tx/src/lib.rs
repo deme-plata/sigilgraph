@@ -898,6 +898,19 @@ pub struct Mempool {
     batch_ops_total: u64,
 }
 
+/// Hard bound on `verified` (the in-RAM holder of txs awaiting inclusion). Once
+/// full, new valid txs are REJECTED rather than stored — they are not marked
+/// `seen`, so they stay resubmittable, and block production drains the deque. A
+/// flood of valid-but-unincludable txs therefore cannot grow the node without
+/// limit. ~100k txs is far above any honest backlog.
+pub(crate) const MEMPOOL_MAX_VERIFIED: usize = 100_000;
+/// Bound on the `seen` dedup set. It is a within-lifetime OPTIMISATION (the real
+/// replay guard is the apply-time nonce in `check_and_bump_nonce`), so clearing
+/// it when large is correctness-neutral — the alternative is a monotonic leak on
+/// any long-running node, because `seen` was never pruned even after txs were
+/// pulled into blocks. A cleared entry costs at most one redundant re-verify.
+pub(crate) const MEMPOOL_MAX_SEEN: usize = 1_000_000;
+
 impl Mempool {
     pub fn new() -> Self { Self::default() }
 
@@ -911,11 +924,19 @@ impl Mempool {
             if self.seen.contains(&t.tx.hash()) { dupe += 1; } else { fresh.push(t); }
         }
         let (valid, invalid) = verify_partition_parallel(fresh);
-        for t in &valid { self.seen.insert(t.tx.hash()); }
-        self.verified_total += valid.len() as u64;
-        let out = MempoolIngest { accepted: valid.len(), invalid: invalid.len(), dupe };
-        self.verified.extend(valid);
-        out
+        // Bound the dedup set BEFORE inserting (correctness-neutral; see the const).
+        if self.seen.len() >= MEMPOOL_MAX_SEEN {
+            self.seen.clear();
+        }
+        // Bound the memory holder: store only up to the cap. Excess valid txs are
+        // dropped WITHOUT being marked seen, so they remain resubmittable once the
+        // deque drains — a flood can't OOM the node.
+        let room = MEMPOOL_MAX_VERIFIED.saturating_sub(self.verified.len());
+        let kept = valid.len().min(room);
+        for t in valid.iter().take(kept) { self.seen.insert(t.tx.hash()); }
+        self.verified_total += kept as u64;
+        self.verified.extend(valid.into_iter().take(kept));
+        MempoolIngest { accepted: kept, invalid: invalid.len(), dupe }
     }
 
     /// Pull up to `max` verified txs for block inclusion. NO re-verification —
@@ -2625,6 +2646,42 @@ mod tests {
     /// verifies ONCE (batch-MSM fast path) → pull does NOT re-verify; a tampered
     /// sig is dropped at ingest, and re-ingesting accepted txs is all-dupe with
     /// ZERO extra verification (the verify-once invariant, asserted via the meter).
+    #[test]
+    fn mempool_verified_deque_is_bounded_under_flood() {
+        // A genuinely valid tx that IS accepted on an empty mempool ...
+        let (sk, pk, from) = ed25519_keygen();
+        let good = ed25519_sign_tx(
+            SigilTx::Send { from, to: [9u8; 32], amount: 1, token: NATIVE, fee: 1 },
+            &sk, &pk,
+        );
+        assert_eq!(
+            Mempool::new().ingest(vec![good.clone()]).accepted, 1,
+            "a valid tx is accepted normally"
+        );
+
+        // ... is REJECTED (not stored, not marked seen) once `verified` is at the
+        // cap. An unbounded deque was a flood-to-OOM vector: a peer could submit
+        // valid-but-unincludable txs faster than block production drains them.
+        let mut full = Mempool::new();
+        let filler = SignedTx {
+            tx: SigilTx::Send { from: [1u8; 32], to: [2u8; 32], amount: 1, token: NATIVE, fee: 1 },
+            from_pubkey: [1u8; 32],
+            nonce: 0,
+            sig_scheme: SigScheme::Ed25519Hot,
+            sig: SignatureBytes(Vec::new()),
+            pubkey: PubKeyBytes(Vec::new()),
+        };
+        for _ in 0..MEMPOOL_MAX_VERIFIED { full.verified.push_back(filler.clone()); }
+
+        let r = full.ingest(vec![good.clone()]);
+        assert_eq!(r.accepted, 0, "at cap → a fresh valid tx is rejected, not stored");
+        assert_eq!(full.verified.len(), MEMPOOL_MAX_VERIFIED, "verified must not grow past the cap");
+        assert!(
+            !full.contains(&good.tx.hash()),
+            "a capped-out tx is NOT marked seen → stays resubmittable"
+        );
+    }
+
     #[test]
     fn mempool_verify_once_ed25519() {
         // 64 valid ed25519 txs, each independently verifiable.

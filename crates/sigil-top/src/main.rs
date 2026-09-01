@@ -205,20 +205,8 @@ fn last_panic_line() -> String {
         .unwrap_or_else(|| "[PANIC] <panic hook did not run>".into())
 }
 
-fn release_channel_stale_msg(channel_version: &str) -> String {
-    format!(
-        "release channel is stale: channel v{} < this binary v{} — publish/re-sign sigil-top-latest.json",
-        channel_version, VERSION
-    )
-}
-
-fn release_channel_current_msg(channel_version: &str) -> String {
-    if version_gt(VERSION, channel_version) {
-        format!("⚠ {}", release_channel_stale_msg(channel_version))
-    } else {
-        format!("✓ up to date (v{VERSION}; channel v{channel_version}) — checked")
-    }
-}
+mod channel_msg;
+pub(crate) use channel_msg::{release_channel_current_msg, release_channel_stale_msg};
 
 /// `tlog!(...)` — like `eprintln!` but TUI-safe (goes to the logfile while the
 /// dashboard is up). Use for all background/diagnostic output.

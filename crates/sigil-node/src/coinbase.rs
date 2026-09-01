@@ -51,7 +51,10 @@ pub fn producer_wallet() -> WalletId {
 }
 
 fn hex64(s: &str) -> Option<WalletId> {
-    if s.len() != 64 {
+    // len() is BYTES and the loop byte-slices s[i*2..i*2+2]: a 64-BYTE string with a
+    // multibyte char would pass the length check, then split a UTF-8 boundary and PANIC.
+    // Valid hex is ASCII, so require that up front (mirrors sigil-top's hex_to_32 fix).
+    if s.len() != 64 || !s.is_ascii() {
         return None;
     }
     let mut out = [0u8; 32];
@@ -59,6 +62,20 @@ fn hex64(s: &str) -> Option<WalletId> {
         out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod hex64_tests {
+    use super::hex64;
+    #[test]
+    fn valid_and_bad_input_never_panics() {
+        assert!(hex64(&"a".repeat(64)).is_some());
+        assert!(hex64("").is_none());
+        assert!(hex64(&"z".repeat(64)).is_none());          // 64 chars, non-hex
+        let straddle = format!("a{}", "€".repeat(21));       // 64 BYTES, multibyte, would split a boundary
+        assert_eq!(straddle.len(), 64);
+        assert!(hex64(&straddle).is_none());                 // fixed: !is_ascii → None, no panic
+    }
 }
 
 /// Build the coinbase transition for a block at `height`: credit `producer`

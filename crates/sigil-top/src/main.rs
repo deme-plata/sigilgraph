@@ -2641,44 +2641,10 @@ fn windows_swap_fallback(beside: &std::path::Path, rel: &Release, mb: f64, prov:
 /// the exact bug this fixes. Spawn `target --selfcheck` (a no-op that prints the version and
 /// exits 0) with a short timeout; return Ok(version) only if it runs cleanly AND prints a
 /// non-empty version. Anything else → don't hand off, keep the running app alive.
-fn preflight_binary(target: &std::path::Path) -> Result<String, String> {
-    use std::process::{Command, Stdio};
-    use std::io::Read;
-    let mut child = Command::new(target)
-        .arg("--selfcheck")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("spawn failed: {e}"))?;
-    // v0.26 (DeepSeek-hardened): poll on THIS thread so we keep the Child handle and can KILL
-    // it on timeout — a binary that HANGS on start must not leak a thread + zombie child (the
-    // old wait_with_output-on-a-thread design couldn't reach the child to kill it). --selfcheck
-    // prints ~7 bytes then exits immediately, so the stdout pipe never fills → no try_wait
-    // deadlock. A hung child is itself a strong "don't hand off" signal.
-    let deadline = Instant::now() + Duration::from_secs(6);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(st)) => break st,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait(); // reap the zombie
-                    return Err("--selfcheck timed out (binary hangs on start)".into());
-                }
-                std::thread::sleep(Duration::from_millis(30));
-            }
-            Err(e) => { let _ = child.kill(); let _ = child.wait(); return Err(format!("wait failed: {e}")); }
-        }
-    };
-    let mut buf = String::new();
-    if let Some(mut out) = child.stdout.take() { let _ = out.read_to_string(&mut buf); }
-    if !status.success() {
-        return Err(format!("--selfcheck exited {:?}", status.code()));
-    }
-    let v = buf.trim().to_string();
-    if v.is_empty() { Err("empty --selfcheck output".into()) } else { Ok(v) }
-}
+// Self-update subsystem being split into updater.rs (god-file split, 2026-09-01).
+// preflight_binary moved there; more of the cluster follows across ticks.
+mod updater;
+pub(crate) use updater::preflight_binary;
 
 /// Relaunch into the just-installed binary after a successful `self_update`. `self_replace`
 /// put the new version at the current exe path, so that's the canonical target; a versioned

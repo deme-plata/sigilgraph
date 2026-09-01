@@ -1500,6 +1500,24 @@ mod tests {
     }
 
     #[test]
+    fn nonce_carrier_roundtrips_and_rejects_short_input() {
+        // The producer packs the winning (nonce, blake4_hash) into the header's
+        // 292-byte nonce field; every follower unpacks it to re-verify the PoW.
+        // A byte-layout drift between the two would reject valid blocks — lock it.
+        let (nonce, hash) = (0xDEAD_BEEF_1234_5678u64, 0x0FE0_DCBA_9876_5432u64);
+        let carrier = pack_nonce_carrier(nonce, hash);
+        assert_eq!(carrier.len(), 292);
+        assert_eq!(unpack_nonce_carrier(&carrier), Some((nonce, hash)));
+        // Only the first 16 bytes carry payload — the rest is zero padding.
+        assert!(carrier[16..].iter().all(|&b| b == 0));
+        // 16 bytes is the exact minimum that decodes.
+        assert_eq!(unpack_nonce_carrier(&carrier[..16]), Some((nonce, hash)));
+        // A truncated field must return None, never panic on the fixed slice.
+        assert_eq!(unpack_nonce_carrier(&carrier[..15]), None);
+        assert_eq!(unpack_nonce_carrier(&[]), None);
+    }
+
+    #[test]
     fn challenge_binds_to_the_frontier_parent() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let parent_a = [0x11u8; 32];

@@ -518,7 +518,7 @@ mod tests {
     #[test]
     fn reads_exactly_the_requested_range() {
         let tmp = tmpdir("range");
-        write_log(&tmp, &(0..50).collect::<Vec<_>>());
+        write_log_v1(&tmp, &crate::block::__test_chain(50)); // heights 1..=50, production format
 
         let hs = read_headers_range(&tmp, 10, 19);
         assert_eq!(hs.len(), 10, "inclusive range [10..=19]");
@@ -533,12 +533,12 @@ mod tests {
     #[test]
     fn stops_at_end_of_log_and_handles_empty_and_inverted_ranges() {
         let tmp = tmpdir("eof");
-        write_log(&tmp, &(0..10).collect::<Vec<_>>());
+        write_log_v1(&tmp, &crate::block::__test_chain(10)); // heights 1..=10, production format
 
         // Asking past the end returns what exists, not an error.
         let hs = read_headers_range(&tmp, 5, 999);
-        assert_eq!(hs.len(), 5);
-        assert_eq!(hs.last().unwrap().height, 9);
+        assert_eq!(hs.len(), 6, "heights 5..=10");
+        assert_eq!(hs.last().unwrap().height, 10);
 
         // Inverted range is empty and never touches the disk.
         assert!(read_headers_range(&tmp, 9, 3).is_empty());
@@ -552,7 +552,7 @@ mod tests {
     #[test]
     fn a_torn_tail_record_truncates_instead_of_panicking() {
         let tmp = tmpdir("torn");
-        write_log(&tmp, &(0..10).collect::<Vec<_>>());
+        write_log_v1(&tmp, &crate::block::__test_chain(10)); // 10 intact records, production format
 
         // Append a length prefix promising far more bytes than actually follow.
         let mut f = std::fs::OpenOptions::new().append(true).open(log_path(&tmp)).unwrap();

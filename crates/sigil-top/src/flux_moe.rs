@@ -21,19 +21,24 @@ pub(crate) fn ollama_base() -> String {
         .unwrap_or_else(|| "http://localhost:11434".to_string())
 }
 
-fn client() -> reqwest::blocking::Client {
+fn client_with_timeout(total_secs: u64) -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(total_secs))
         .connect_timeout(Duration::from_secs(2))
         .build()
         .unwrap_or_else(|_| reqwest::blocking::Client::new())
 }
+/// Chat may legitimately take a while (the model is generating), so it gets a
+/// generous timeout — and it runs OFF the UI thread.
+fn client() -> reqwest::blocking::Client { client_with_timeout(120) }
 
 /// The models the local ollama has pulled, newest first. Empty ⇒ ollama not
 /// running (or no models). The caller shows the "install a model" hint then.
 pub(crate) fn list_models() -> Vec<String> {
     let url = format!("{}/api/tags", ollama_base());
-    let resp = match client().get(&url).send() {
+    // Detection runs on the UI thread (the [5] keypress), so cap it hard: a hung ollama
+    // that accepts the connection but never answers must NOT freeze the dashboard.
+    let resp = match client_with_timeout(4).get(&url).send() {
         Ok(r) if r.status().is_success() => r,
         _ => return Vec::new(),
     };

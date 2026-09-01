@@ -2232,7 +2232,10 @@ fn apply_tx_inner(
                 // Debit and credit cancel on the same slot — no-op transfer,
                 // net zero, matches Send's self-send handling.
             } else {
-                let new_from = from_bal - *amount;
+                // checked (guarded by from_bal < *amount above) — fail loud, never wrap.
+                let new_from = from_bal
+                    .checked_sub(*amount)
+                    .ok_or(TxApplyError::InsufficientBalance { have: from_bal, need: *amount })?;
                 let to_bal = state.balance_of(to, token);
                 let new_to = to_bal.checked_add(*amount).ok_or(TxApplyError::Overflow)?;
                 out.mutations.push(StateMutation::SetBalance { wallet: *from, token: *token, amount: new_from });
@@ -2273,7 +2276,9 @@ fn apply_tx_inner(
             if *fee > 0 {
                 // Fee burns, same as Send: debited, credited nowhere.
                 out.mutations.push(StateMutation::SetBalance {
-                    wallet: *authority, token: NATIVE, amount: have - *fee,
+                    wallet: *authority, token: NATIVE,
+                    // checked (guarded by have < *fee above).
+                    amount: have.checked_sub(*fee).ok_or(TxApplyError::InsufficientBalance { have, need: *fee })?,
                 });
             }
             out.mutations.push(StateMutation::SetContractSlot {
@@ -2362,7 +2367,9 @@ fn apply_tx_inner(
             if *fee > 0 {
                 // Fee burns, same as CitizenAttest.
                 out.mutations.push(StateMutation::SetBalance {
-                    wallet: *authority, token: NATIVE, amount: have - *fee,
+                    wallet: *authority, token: NATIVE,
+                    // checked (guarded by have < *fee above).
+                    amount: have.checked_sub(*fee).ok_or(TxApplyError::InsufficientBalance { have, need: *fee })?,
                 });
             }
             // Byte-identical encoding to sigil_oracle::update_price, so

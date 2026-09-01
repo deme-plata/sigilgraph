@@ -395,6 +395,31 @@ mod tests {
     }
 
     #[test]
+    fn a_bad_signature_never_burns_the_nonce() {
+        // Ordering invariant: verify_sig runs BEFORE check_nonce, so a request that
+        // fails auth must NOT advance the nonce watermark — otherwise an attacker who
+        // knows your next nonce could grief you by burning it with a garbage-signed
+        // request, blocking your real one.
+        let (sk, from) = signer();
+        let from_hex = hex::encode(from);
+        let bridge = UsdsBridgeBridge::new(None, Some([9u8; 32]));
+
+        // A lock at nonce 1 with a bogus signature is rejected (bad sig).
+        assert!(
+            bridge.submit_lock(&from_hex, 1000, DEST, "deadbeef", 1).is_err(),
+            "a bad signature must be rejected"
+        );
+        // The correctly-signed nonce-1 lock STILL works — the failed attempt above
+        // did not consume nonce 1.
+        let msg = format!("sigil-rpc/v1|usds_bridge_lock|{from_hex}|1000|{DEST}|nonce=1");
+        let sig = sign(&sk, &msg);
+        assert!(
+            bridge.submit_lock(&from_hex, 1000, DEST, &sig, 1).is_ok(),
+            "the failed bad-sig attempt must not have burned nonce 1"
+        );
+    }
+
+    #[test]
     fn lock_rejected_before_a_relayer_is_ever_configured() {
         let (sk, from) = signer();
         let from_hex = hex::encode(from);

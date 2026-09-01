@@ -418,6 +418,15 @@ pub fn add_liquidity(
         });
     }
 
+    // Non-empty by shares — but a well-formed non-empty pool ALSO has positive
+    // reserves. Guard that invariant explicitly: a degenerate (total_shares>0,
+    // reserve==0) pool would pass the ratio check below (0 == 0) and then divide
+    // by zero at `/ pool.reserve_a`, panicking even in release. Reject it,
+    // mirroring the `reserve_in == 0` guard `swap` already has.
+    if pool.reserve_a == 0 || pool.reserve_b == 0 {
+        return Err(DexError::EmptyPool);
+    }
+
     // Non-empty pool: enforce ratio match. q-dex tolerates ratio mismatch by
     // minting shares proportional to the smaller side; SIGIL Phase 0 is
     // strict to keep the chokepoint surface minimal. A future patch can relax
@@ -865,5 +874,17 @@ mod tests {
         let s = serde_json::to_string(&d).unwrap();
         let d2: SwapDirection = serde_json::from_str(&s).unwrap();
         assert_eq!(d, d2);
+    }
+
+    /// A degenerate pool — shares outstanding but ZERO reserves — must be rejected
+    /// with EmptyPool, never a divide-by-zero panic at `/ pool.reserve_a`. This
+    /// guards the invariant that a `total_shares > 0` pool always has positive
+    /// reserves; if state ever violated it, add_liquidity stays total (returns an
+    /// error) instead of crashing the node. Mirrors swap's reserve==0 guard.
+    #[test]
+    fn add_liquidity_on_zero_reserve_pool_errs_not_panics() {
+        let degenerate = pool_30bps(0, 0, 1); // total_shares=1, reserves 0/0
+        let r = add_liquidity(&degenerate, 100, 100, 30);
+        assert!(matches!(r, Err(DexError::EmptyPool)), "want EmptyPool, got {r:?}");
     }
 }

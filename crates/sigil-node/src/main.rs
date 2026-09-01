@@ -3595,6 +3595,45 @@ impl PeerProducerAffinity {
     }
 }
 
+#[cfg(test)]
+mod peer_affinity_tests {
+    use super::PeerProducerAffinity;
+    use flux_p2p::PeerId;
+
+    #[test]
+    fn best_for_prefers_the_most_recent_producer_sighting_else_first() {
+        let (a, b, c) = (PeerId::random(), PeerId::random(), PeerId::random());
+        let prod = [7u8; 32];
+        let mut aff = PeerProducerAffinity::default();
+
+        // No sightings → fall back to the FIRST connected peer.
+        assert_eq!(aff.best_for(&[a, b], Some(prod)), Some(a));
+        // producer = None → no affinity to use → first connected peer.
+        assert_eq!(aff.best_for(&[b, a], None), Some(b));
+        // Nothing connected → None.
+        assert_eq!(aff.best_for(&[], Some(prod)), None);
+
+        // b has seen `prod` (h=10), a hasn't → prefer b even though a is first.
+        aff.record(b, prod, 10);
+        assert_eq!(aff.best_for(&[a, b], Some(prod)), Some(b));
+
+        // c saw it more recently (h=20) → the HIGHEST-height sighting wins.
+        aff.record(c, prod, 20);
+        assert_eq!(aff.best_for(&[a, b, c], Some(prod)), Some(c));
+
+        // A sighting of a DIFFERENT producer doesn't influence this one's choice.
+        aff.record(a, [9u8; 32], 999);
+        assert_eq!(aff.best_for(&[a, b, c], Some(prod)), Some(c));
+
+        // record keeps the MAX height: b jumps to 25 and now beats c's 20 ...
+        aff.record(b, prod, 25);
+        assert_eq!(aff.best_for(&[b, c], Some(prod)), Some(b));
+        // ... and a later LOWER height must not downgrade it (max-wins).
+        aff.record(b, prod, 1);
+        assert_eq!(aff.best_for(&[b, c], Some(prod)), Some(b));
+    }
+}
+
 /// QTFT-2: recompute the topology commitment a peer's block SHOULD carry —
 /// using the exact same windowed Alexander-polynomial algorithm the producer
 /// used at mint time (`compute_topology_commitment`) — and compare it to

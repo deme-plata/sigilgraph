@@ -447,6 +447,34 @@ mod tests {
     }
 
     #[test]
+    fn a_bad_signature_does_not_burn_the_nonce() {
+        // submit verifies the signature BEFORE advancing the nonce watermark, so a
+        // request that fails auth must NOT consume the nonce — else an attacker who
+        // knows a wallet's next nonce could grief it by burning that nonce with a
+        // garbage-signed send, blocking the wallet's real send. (Same invariant as
+        // the USDS/BTC bridges; this is the most-used money path.)
+        let (sk, from) = signer();
+        let from_hex = hex::encode(from);
+        let to_hex = "22".repeat(32);
+        let bridge = SendBridge::new();
+
+        // Valid-LENGTH but cryptographically wrong signature (64 zero bytes) — fails
+        // vk.verify, which runs before the nonce advances.
+        let bad_sig = "00".repeat(64);
+        assert!(bridge.submit(&from_hex, &to_hex, 1_000, "SIGIL", &bad_sig, 1).is_err());
+        assert_eq!(bridge.pending_len(), 0, "a rejected send never enters the pool");
+
+        // The correctly-signed nonce-1 send STILL works — the failed attempt did
+        // not consume nonce 1.
+        let sig = sign_send(&sk, &from_hex, &to_hex, 1_000, 1);
+        assert!(
+            bridge.submit(&from_hex, &to_hex, 1_000, "SIGIL", &sig, 1).is_ok(),
+            "the bad-sig attempt must not have burned nonce 1"
+        );
+        assert_eq!(bridge.pending_len(), 1);
+    }
+
+    #[test]
     fn a_replayed_nonce_is_rejected_even_with_a_valid_signature() {
         let (sk, from) = signer();
         let from_hex = hex::encode(from);

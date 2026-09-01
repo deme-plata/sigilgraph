@@ -1518,6 +1518,31 @@ mod tests {
     }
 
     #[test]
+    fn verify_header_pow_rejects_malformed_proofs_without_panicking() {
+        // Every field here is attacker-controlled network data on the block wire.
+        // verify_header_pow MUST return false — never panic (a remote crash) — on
+        // any shape of garbage. The VDF decode is total (BigUint::from_bytes_le),
+        // so an arbitrary-length y/pi just fails verification; this test locks that.
+        let parent = [1u8; 32];
+        let producer = [2u8; 32];
+        let (bits, t) = (16u32, 4u64);
+        let empty_vdf = VdfProof { y: vec![], pi: vec![], t };
+
+        // Too-short / empty nonce carrier → unpack fails → false, no slice panic.
+        assert!(!verify_header_pow(&parent, 5, &producer, &[], &empty_vdf, bits, t));
+        assert!(!verify_header_pow(&parent, 5, &producer, &[0u8; 3], &empty_vdf, bits, t));
+
+        // Full carrier, but garbage VDF proof of arbitrary lengths → false, no panic.
+        let carrier = pack_nonce_carrier(42, 99);
+        let junk = VdfProof { y: vec![0xAB; 7], pi: vec![0xCD; 301], t };
+        assert!(!verify_header_pow(&parent, 5, &producer, &carrier, &junk, bits, t));
+
+        // A mismatched vdf.t is rejected up front, before any VDF work.
+        let wrong_t = VdfProof { y: vec![1], pi: vec![1], t: t + 1 };
+        assert!(!verify_header_pow(&parent, 5, &producer, &carrier, &wrong_t, bits, t));
+    }
+
+    #[test]
     fn challenge_binds_to_the_frontier_parent() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let parent_a = [0x11u8; 32];

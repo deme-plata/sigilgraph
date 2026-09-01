@@ -101,3 +101,42 @@ pub fn take_creditable_solve(
     }
     None // scanned the cap without finding a creditable solve
 }
+
+#[cfg(test)]
+mod solve_credit_tests {
+    use super::near_miss_credit;
+    use sigil_api::mining::AcceptedSolve;
+    use std::collections::HashMap;
+
+    #[test]
+    fn near_miss_zeroes_only_pow_fields_and_keeps_who_gets_paid() {
+        let wallet = [0xAAu8; 32];
+        let mut shares = HashMap::new();
+        shares.insert([0xBBu8; 32], 7u64);
+        let s = AcceptedSolve {
+            wallet,
+            height: 42,
+            parent_hash: [0x11u8; 32],
+            nonce: 999,
+            blake4_hash: 0xDEAD,
+            vdf: flux_vdf::VdfProof { y: vec![1, 2, 3], pi: vec![4, 5], t: 100 },
+            bits: 24,
+            shares: shares.clone(),
+        };
+        let n = near_miss_credit(s);
+
+        // PoW fields MUST be zeroed: they were computed against a DIFFERENT parent,
+        // so embedding them would make the header fail re-verification for followers.
+        assert_eq!(n.nonce, 0);
+        assert_eq!(n.blake4_hash, 0);
+        assert!(n.vdf.y.is_empty() && n.vdf.pi.is_empty() && n.vdf.t == 0);
+
+        // Everything that decides WHO gets paid MUST be preserved — a near-miss
+        // still credits the real miner (and their pool shares), just without the PoW.
+        assert_eq!(n.wallet, wallet);
+        assert_eq!(n.height, 42);
+        assert_eq!(n.parent_hash, [0x11u8; 32]);
+        assert_eq!(n.bits, 24);
+        assert_eq!(n.shares, shares);
+    }
+}

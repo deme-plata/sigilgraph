@@ -3844,6 +3844,20 @@ fn resolve_listen_addr(t: &sigil_net::SigilTransport, port: u16) -> String {
     }
 }
 
+#[cfg(test)]
+mod listen_addr_tests {
+    use super::resolve_listen_addr;
+    use sigil_net::SigilTransport;
+    #[test]
+    fn only_direct_binds_public() {
+        // SECURITY invariant: Direct exposes 0.0.0.0 (the node is meant to be dialed);
+        // Tor stays on 127.0.0.1. A regression that bound a private transport to 0.0.0.0
+        // would silently expose a node meant to be reachable only over its tunnel.
+        assert_eq!(resolve_listen_addr(&SigilTransport::Direct, 9501), "/ip4/0.0.0.0/tcp/9501");
+        assert_eq!(resolve_listen_addr(&SigilTransport::Tor, 9501), "/ip4/127.0.0.1/tcp/9501");
+    }
+}
+
 /// Env var overrides for `wg-up`. The defaults work for single-machine
 /// dev mode; multi-node operators MUST set SIGIL_WG_ADDRESS per node or
 /// the mesh will silently overlap on `10.42.0.1/16`.

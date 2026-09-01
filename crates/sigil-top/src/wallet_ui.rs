@@ -511,18 +511,29 @@ mod tests {
         std::env::set_var("SIGIL_BROWSER_PRIVATE", "0");
 
         let opened = open_browser_private("https://example.invalid/?addr=test");
-        // Give the spawned thread a moment to run the fake script.
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        // Poll for the fake xdg-open to run (it writes `marker`) instead of a fixed
+        // sleep — robust under heavy parallel test load, where the spawned opener
+        // thread may not be scheduled within a fixed 300ms window (a timing flake).
+        // Once the marker exists the subprocess has already read PATH + run, so it's
+        // then safe to restore the env.
+        let mut recorded = None;
+        for _ in 0..300 {
+            if let Ok(s) = std::fs::read_to_string(&marker) {
+                recorded = Some(s);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
-        // Restore env immediately, before any assertion can panic and skip it.
+        // Restore env, before any assertion can panic and skip it.
         std::env::set_var("PATH", prior_path);
         match prior_display { Some(v) => std::env::set_var("DISPLAY", v), None => std::env::remove_var("DISPLAY") }
         match prior_wayland { Some(v) => std::env::set_var("WAYLAND_DISPLAY", v), None => std::env::remove_var("WAYLAND_DISPLAY") }
         match prior_flag { Some(v) => std::env::set_var("SIGIL_BROWSER_PRIVATE", v), None => std::env::remove_var("SIGIL_BROWSER_PRIVATE") }
 
         assert!(opened, "a display was present, so this must report true (attempted)");
-        let recorded = std::fs::read_to_string(&marker)
-            .unwrap_or_else(|_| panic!("fake xdg-open was never invoked — SIGIL_BROWSER_PRIVATE=0 did not reach the plain opener"));
+        let recorded = recorded
+            .unwrap_or_else(|| panic!("fake xdg-open was never invoked within ~3s — SIGIL_BROWSER_PRIVATE=0 did not reach the plain opener"));
         assert_eq!(recorded.trim(), "https://example.invalid/?addr=test",
             "xdg-open must receive exactly the URL, no --incognito/--private-window flag");
         let _ = std::fs::remove_dir_all(&dir);

@@ -2275,47 +2275,11 @@ fn measure_eclipse_k(tip_height: u64, tip_ok: bool) -> (u32, Vec<(String, bool)>
 /// through the instant the console reports it — a normal terminal is unaffected, and a
 /// conhost that's briefly 0×0 still gets a full first frame. It also makes the TUI
 /// render in a size-less pty, which is how this fix is validated without a Windows box.
-struct SafeSizeBackend<W: std::io::Write> {
-    inner: ratatui::backend::CrosstermBackend<W>,
-}
-impl<W: std::io::Write> std::io::Write for SafeSizeBackend<W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> { self.inner.write(buf) }
-    fn flush(&mut self) -> std::io::Result<()> { std::io::Write::flush(&mut self.inner) }
-}
-impl<W: std::io::Write> ratatui::backend::Backend for SafeSizeBackend<W> {
-    fn draw<'a, I>(&mut self, content: I) -> std::io::Result<()>
-    where
-        I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
-    {
-        self.inner.draw(content)
-    }
-    fn hide_cursor(&mut self) -> std::io::Result<()> { self.inner.hide_cursor() }
-    fn show_cursor(&mut self) -> std::io::Result<()> { self.inner.show_cursor() }
-    fn get_cursor_position(&mut self) -> std::io::Result<ratatui::layout::Position> {
-        self.inner.get_cursor_position()
-    }
-    fn set_cursor_position<P: Into<ratatui::layout::Position>>(&mut self, position: P) -> std::io::Result<()> {
-        self.inner.set_cursor_position(position)
-    }
-    fn clear(&mut self) -> std::io::Result<()> { self.inner.clear() }
-    fn size(&self) -> std::io::Result<ratatui::layout::Size> {
-        // Clamp BOTH a degenerate Ok((0,0)) AND an Err (some Windows consoles error the
-        // size query at startup) to a paintable fallback, so ratatui's autoresize never
-        // gets a 0-size buffer NOR a failure that would abort term.draw and exit the TUI.
-        match self.inner.size() {
-            Ok(s) if s.width >= 2 && s.height >= 2 => Ok(s),
-            _ => Ok(ratatui::layout::Size::new(120, 30)),
-        }
-    }
-    fn window_size(&mut self) -> std::io::Result<ratatui::backend::WindowSize> { self.inner.window_size() }
-    fn flush(&mut self) -> std::io::Result<()> { ratatui::backend::Backend::flush(&mut self.inner) }
-}
+// SafeSizeBackend (ratatui backend clamping a degenerate console size) extracted
+// to safe_backend.rs (god-file split). Constructed in run_tui, so pub(crate).
+mod safe_backend;
+pub(crate) use safe_backend::SafeSizeBackend;
 
-/// v7.0.21 DIAL-WHILE-OPENING: the complete store-open ceremony (one-time heal marker,
-/// oversized light-boot check, primary→temp→volatile fallbacks, aether bootstrap),
-/// extracted from run_tui so it can run on a BACKGROUND thread while the mesh dials.
-/// Returns the opened store + an optional operator-facing note (the old sticky toasts).
-/// Err = every fallback failed (near-impossible: volatile is a fresh temp dir).
 // open_store_with_fallbacks(+_inner) moved to store_lifecycle.rs (god-file split),
 // co-located with the reset/heal/size-guard helpers it drives. Re-exported below.
 

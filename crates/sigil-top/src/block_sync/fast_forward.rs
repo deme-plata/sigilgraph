@@ -439,24 +439,32 @@ mod tests {
     /// and never stored. Batching must not change WHICH bodies land — only WHEN.
     #[test]
     fn batched_sink_stores_matching_rejects_tampered() {
-        std::env::set_var("SIGIL_SST_BATCH", "8");
+        // 256 is the clamp FLOOR for SIGIL_SST_BATCH (tiny SST installs are
+        // inefficient), so the old value 8 was silently clamped up to 256 — which
+        // is what this assertion caught. Use the floor and enough blocks
+        // (300 > 256) that the buffer crosses a real install boundary; the point
+        // of the test is that batching changes only WHEN a body lands, never
+        // WHETHER (matching the sibling batched_sink_matches_legacy_height_set).
+        std::env::set_var("SIGIL_SST_BATCH", "256");
         std::env::set_var("SIGIL_SST_FSYNC", "0");
         let sp = tmp("skel");
         let bp = tmp("store");
-        let blocks = chain(20);
+        let blocks = chain(300);
         let mut skel = fresh_skel(&sp, &blocks);
         let mut store = fresh_store(&bp);
 
         let mut sink = Pass2Sink::from_env();
-        assert_eq!(sink.batch, 8, "env batch honoured");
-        let (_s1, r1) = sink.accept(&mut skel, &mut store, &blocks[0..7]);
-        let (_s2, r2) = sink.accept(&mut skel, &mut store, &blocks[7..15]);
-        let (_s3, r3) = sink.accept(&mut skel, &mut store, &blocks[15..20]);
-        assert_eq!(r1 + r2 + r3, 0, "no honest body rejected");
+        assert_eq!(sink.batch, 256, "clamp floor honoured");
+        let mut rejected = 0;
+        for chunk in blocks.chunks(37) {
+            let (_s, r) = sink.accept(&mut skel, &mut store, chunk);
+            rejected += r;
+        }
+        assert_eq!(rejected, 0, "no honest body rejected");
         sink.flush(&mut store);
         assert_eq!(sink.pending(), 0, "buffer drained");
-        assert_eq!(sink.committed(), 20, "every honest body committed exactly once");
-        for h in 1..=20u64 {
+        assert_eq!(sink.committed(), 300, "every honest body committed exactly once");
+        for h in 1..=300u64 {
             assert!(store.has_height(h), "height {h} present after fast-forward");
         }
 

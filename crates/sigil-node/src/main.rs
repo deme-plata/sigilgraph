@@ -120,6 +120,19 @@ impl SkeletonRecord {
     fn from_header(h: &sigil_header::SigilBlockHeaderV0) -> Self {
         Self { height: h.height, block_hash: h.hash(), parent_hash: h.parent_hash }
     }
+
+    /// Feed this record's canonical 72-byte wire image (height LE ‖ block_hash ‖
+    /// parent_hash) to a hasher. Byte-identical to `bincode::serialize(self)` —
+    /// see `skeleton_record_hash_into_matches_bincode` — but with NO per-record
+    /// heap allocation, and no `unwrap_or_default()` that could silently hash
+    /// empty bytes on a (hypothetical) serialize failure. `archive_root` is built
+    /// this way over EVERY record in the chain on the serve path, so dropping the
+    /// alloc matters at millions of records.
+    fn hash_into(&self, hh: &mut blake3::Hasher) {
+        hh.update(&self.height.to_le_bytes());
+        hh.update(&self.block_hash);
+        hh.update(&self.parent_hash);
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -143,6 +156,36 @@ mod snapshot_wire_tests {
     fn skeleton_record_is_72_bytes_on_the_wire() {
         let rec = SkeletonRecord { height: 7, block_hash: [1u8; 32], parent_hash: [2u8; 32] };
         assert_eq!(bincode::serialize(&rec).unwrap().len(), 72);
+    }
+
+    /// The alloc-free serve-path hash (`hash_into`) MUST feed BLAKE3 exactly the
+    /// bytes `bincode::serialize` would — otherwise the producer's `archive_root`
+    /// diverges from the client's `SnapshotVerifier` and every snapshot pull fails
+    /// RootMismatch. Proves both the byte image and the resulting digest match, so
+    /// the perf change is provably wire-identical (not just "should be").
+    #[test]
+    fn skeleton_record_hash_into_matches_bincode() {
+        let rec = SkeletonRecord {
+            height: 0x0102_0304_0506_0708,
+            block_hash: [3u8; 32],
+            parent_hash: [4u8; 32],
+        };
+        // Manual 72-B image == bincode image, byte for byte (fixint LE, no tags).
+        let mut manual = Vec::with_capacity(72);
+        manual.extend_from_slice(&rec.height.to_le_bytes());
+        manual.extend_from_slice(&rec.block_hash);
+        manual.extend_from_slice(&rec.parent_hash);
+        assert_eq!(manual, bincode::serialize(&rec).unwrap(), "manual image must equal bincode");
+        // ...and hash_into digests exactly that image.
+        let mut a = blake3::Hasher::new();
+        rec.hash_into(&mut a);
+        let mut b = blake3::Hasher::new();
+        b.update(&bincode::serialize(&rec).unwrap());
+        assert_eq!(
+            a.finalize().as_bytes(),
+            b.finalize().as_bytes(),
+            "hash_into digest must equal BLAKE3(bincode(rec))"
+        );
     }
 
     /// SnapshotHeader round-trips bincode (what the client's `bincode::deserialize::<SnapshotHeader>`
@@ -2344,13 +2387,13 @@ fn run_start() -> Result<()> {
                                             while at < gw {
                                                 let end = at.saturating_add(FOLD_CHUNK - 1).min(gw.saturating_sub(1));
                                                 for hd in crate::serve_read::read_headers_range(&snap_dir, at, end) {
-                                                    hh.update(&bincode::serialize(&SkeletonRecord::from_header(&hd)).unwrap_or_default());
+                                                    SkeletonRecord::from_header(&hd).hash_into(&mut hh);
                                                 }
                                                 at = end.saturating_add(1);
                                             }
                                             for h2 in gw..=ga {
                                                 if let Some(b2) = chain.get(h2) {
-                                                    hh.update(&bincode::serialize(&SkeletonRecord::from_header(&b2.header)).unwrap_or_default());
+                                                    SkeletonRecord::from_header(&b2.header).hash_into(&mut hh);
                                                 }
                                             }
                                             let r = *hh.finalize().as_bytes();

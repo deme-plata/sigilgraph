@@ -55,3 +55,32 @@ pub(crate) fn sa<S: Into<String>>(s: S) -> String {
         other => other,
     }).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn sa_passes_through_in_rich_mode() {
+        // Rich terminals keep the real glyphs — sa must be an identity.
+        UI_ASCII.store(false, Ordering::Relaxed);
+        assert_eq!(sa("◆ mined ⛏ 100%"), "◆ mined ⛏ 100%");
+    }
+
+    #[test]
+    fn sa_maps_wide_glyphs_in_ascii_mode() {
+        // Legacy conhost: emoji-presentation glyphs that smear layout become width-1 ASCII;
+        // CP437-safe glyphs (box-drawing, blocks, ·) fall through untouched.
+        UI_ASCII.store(true, Ordering::Relaxed);
+        assert_eq!(sa("◆"), "*");
+        assert_eq!(sa("✓ ✗"), "v x");
+        assert_eq!(sa("→ ← ▲ ▼"), "> < ^ v");
+        assert_eq!(sa("⚡ done"), "! done");
+        // every output char must be single-width ASCII (the whole point).
+        assert!(sa("◆✓→⚡⛓").chars().all(|c| c.is_ascii()));
+        // pass-through set stays intact.
+        assert_eq!(sa("─│█░·"), "─│█░·");
+        UI_ASCII.store(false, Ordering::Relaxed); // don't leak state to other tests
+    }
+}

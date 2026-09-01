@@ -1115,19 +1115,6 @@ fn render_lite(st: &NodeStatus, online: bool) -> String {
 // ─── wallet login (sigil-oauth: OAuth2 PKCE, wallet signs — no password) ─────
 
 pub(crate) fn flux_home() -> String { std::env::var("HOME").unwrap_or_else(|_| "/root".into()) }
-fn session_path() -> String { format!("{}/.flux/sigil-session.json", flux_home()) }
-
-fn read_session() -> Option<String> {
-    let body = std::fs::read_to_string(session_path()).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
-    v.get("wallet_id").and_then(|x| x.as_str()).map(|s| s.to_string())
-}
-fn write_session(id: &str) {
-    let _ = std::fs::create_dir_all(format!("{}/.flux", flux_home()));
-    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let _ = std::fs::write(session_path(), format!("{{\"wallet_id\":\"{id}\",\"ts\":{ts}}}"));
-}
-fn clear_session() { let _ = std::fs::remove_file(session_path()); }
 
 fn hex_to_32(h: &str) -> Option<[u8; 32]> {
     // 2026-08-25: shield_setup.rs's seed_bytes() (used by headless `mine-rig`) strips
@@ -1245,6 +1232,8 @@ fn enable_rich_console() {}
 // including heroes.rs / sync_ui.rs / tabs_ui.rs via `use super::*` — is unchanged.
 mod console_glyphs;
 pub(crate) use console_glyphs::{init_ui_ascii, sa, ui_ascii};
+mod session;
+pub(crate) use session::{clear_session, read_session, session_path, write_session};
 
 /// v0.40: on Windows, drop to BELOW_NORMAL priority class BEFORE any thread
 /// spawns. The OS scheduler then always favors the user's own apps — whateve

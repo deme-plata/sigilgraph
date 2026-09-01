@@ -189,7 +189,10 @@ fn now_ms() -> u64 {
 /// `SIGIL_BRIDGE_RELAYER_WALLET` env vars into `WalletId`s at startup.
 pub fn hex32(s: &str) -> Option<WalletId> {
     let s = s.strip_prefix("0x").unwrap_or(s);
-    if s.len() != 64 { return None; }
+    // ASCII guard (DoS hardening): len() is BYTES, the loop byte-slices s[i*2..i*2+2].
+    // A crafted 64-BYTE non-ASCII wallet id would split a UTF-8 boundary and PANIC the
+    // API thread. Valid hex is ASCII, so reject non-ASCII up front.
+    if s.len() != 64 || !s.is_ascii() { return None; }
     let mut out = [0u8; 32];
     for i in 0..32 {
         out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;

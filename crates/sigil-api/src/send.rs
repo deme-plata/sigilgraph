@@ -141,7 +141,9 @@ impl SendError {
 
 fn hex32(s: &str) -> Option<WalletId> {
     let s = s.strip_prefix("0x").unwrap_or(s);
-    if s.len() != 64 { return None; }
+    // ASCII guard (DoS hardening): a crafted 64-BYTE non-ASCII string would split a UTF-8
+    // boundary in the byte-slice below and PANIC — a request must never crash the API.
+    if s.len() != 64 || !s.is_ascii() { return None; }
     let mut out = [0u8; 32];
     for i in 0..32 {
         out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;

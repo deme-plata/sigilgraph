@@ -678,22 +678,29 @@ mod tests {
         });
     }
 
-    /// `maybe_start` must be a hard no-op unless BOTH env vars are set — this is
-    /// the safety contract the whole module exists to respect. Locks it in the
-    /// same way `producer::tests::gates_are_inert_regardless_of_env` already does
-    /// for the two gate functions themselves.
+    /// `maybe_start` must SHORT-CIRCUIT to None on either opt-out flag
+    /// (`SIGIL_TOP_PRODUCER=0` / `SIGIL_TOP_PRODUCE=0`) BEFORE it reaches
+    /// `sync_chain_blocking` — otherwise a unit test wanders into a real
+    /// full-genesis network sync and hangs the whole suite forever. Producer
+    /// mode is DEFAULT-ON since 2026-08-27 (the earlier opt-in contract this
+    /// test used to assert was flipped), so the default-on path is NOT exercised
+    /// here — it belongs to the ignored networked integration test. This pins
+    /// only the two opt-outs, the safe and deterministic half.
     #[test]
-    fn maybe_start_is_inert_without_both_env_vars() {
-        std::env::remove_var("SIGIL_TOP_PRODUCER");
+    fn maybe_start_opts_out_when_either_flag_is_zero() {
+        std::env::set_var("SIGIL_TOP_PRODUCER", "0");
         std::env::remove_var("SIGIL_TOP_PRODUCE");
-        assert!(maybe_start(Duration::from_millis(1)).is_none());
-
-        std::env::set_var("SIGIL_TOP_PRODUCER", "1");
-        assert!(maybe_start(Duration::from_millis(1)).is_none(), "one flag alone must not start it");
+        assert!(
+            maybe_start(Duration::from_millis(1)).is_none(),
+            "SIGIL_TOP_PRODUCER=0 must opt out without starting a sync"
+        );
         std::env::remove_var("SIGIL_TOP_PRODUCER");
 
-        std::env::set_var("SIGIL_TOP_PRODUCE", "1");
-        assert!(maybe_start(Duration::from_millis(1)).is_none(), "the other flag alone must not start it either");
+        std::env::set_var("SIGIL_TOP_PRODUCE", "0");
+        assert!(
+            maybe_start(Duration::from_millis(1)).is_none(),
+            "SIGIL_TOP_PRODUCE=0 must opt out without starting a sync"
+        );
         std::env::remove_var("SIGIL_TOP_PRODUCE");
     }
 

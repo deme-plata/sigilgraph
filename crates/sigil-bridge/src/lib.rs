@@ -337,4 +337,33 @@ mod tests {
         ));
         assert_eq!(ledger.peg(BridgeAsset::Btc), AssetPeg { locked: 5_000, minted: 5_000 });
     }
+
+    #[test]
+    fn a_forged_signature_does_not_burn_the_withdrawal_id() {
+        // Ordering invariant: process_withdrawal verifies the signature BEFORE it
+        // marks the id processed (mark_withdrawal is last, after burn/unlock). So a
+        // request that fails auth must NOT consume the id — else an attacker who
+        // knows a victim's withdrawal INTENT (asset/amount/owner/dest/nonce, which
+        // fully determine the id) but not their key could grief them by pre-consuming
+        // that id with a forged-signature request, blocking their real withdrawal.
+        let mut ledger = BridgeLedger::new();
+        let proof = valid_proof_for(&deposit_tx(5_000, [4u8; 32]), 6);
+        process_deposit(&mut ledger, BridgeAsset::Btc, &proof, None).unwrap();
+
+        let kp = Keypair::from_seed(&[8u8; 32]);
+        let mut req = WithdrawalRequest {
+            asset: BridgeAsset::Btc, amount: 5_000, owner: kp.pubkey(),
+            dest: "bc1qvictim".into(), nonce: 1, sig: [0u8; 64], // forged (zero) sig
+        };
+        // Attacker's forged-sig request (right intent, wrong sig) → rejected.
+        assert!(matches!(
+            process_withdrawal(&mut ledger, &req),
+            Err(BridgeError::UnauthorizedWithdrawal)
+        ));
+        // The victim's SAME withdrawal, correctly signed, still succeeds — the forged
+        // attempt (same id) did not mark it processed.
+        req.sig = kp.sign(&req.signing_bytes());
+        process_withdrawal(&mut ledger, &req).unwrap();
+        assert_eq!(ledger.peg(BridgeAsset::Btc), AssetPeg { locked: 0, minted: 0 });
+    }
 }

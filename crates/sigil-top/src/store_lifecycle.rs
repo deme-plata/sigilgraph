@@ -233,3 +233,124 @@ pub(crate) fn human_bytes(bytes: u64) -> String {
         format!("{n:.1} {}", UNITS[unit])
     }
 }
+
+/// Open the light client's block store, healing/resetting as needed and falling
+/// back through temp → volatile stores if the primary can't open. Extracted from
+/// main.rs alongside the reset/heal/size-guard helpers it drives. Always marks the
+/// `OpenProgress` finished on every exit path.
+pub(crate) fn open_store_with_fallbacks(
+    db_path: &str,
+    want_sync: bool,
+    progress: std::sync::Arc<block_store::OpenProgress>,
+) -> Result<(block_store::BlockStore, Option<String>), String> {
+    // Guarantee `finished` flips on EVERY exit path (Ok, an early Err, or the fallthrough
+    // Ok at the bottom) without threading a mark_finished() call into each of this
+    // function's several `return`s — the light-boot/oversized-store shortcut in particular
+    // never touches `open_with_timeout_and_progress` at all, so nothing else would mark it.
+    let result = open_store_with_fallbacks_inner(db_path, want_sync, progress.clone());
+    progress.mark_finished();
+    result
+}
+
+fn open_store_with_fallbacks_inner(
+    db_path: &str,
+    want_sync: bool,
+    progress: std::sync::Arc<block_store::OpenProgress>,
+) -> Result<(block_store::BlockStore, Option<String>), String> {
+    // v7.0.7: heal a store wedged by the v7.0.3–7.0.5 frontier-stall bug (one-time, marked).
+    reset_store_on_network_change(db_path);
+    heal_wedged_store_once(db_path);
+    let oversized_primary = oversized_store_for_light_boot(db_path, want_sync);
+    boot_trace(&format!("opening block store path={db_path} mode=background want_sync={want_sync}"));
+    let mut note: Option<String> = None;
+    let mut store = if let Some(bytes) = oversized_primary {
+        let volatile = std::env::temp_dir()
+            .join(format!("sigil-top-light-{}.db", std::process::id()));
+        let volatile_s = volatile.to_string_lossy().into_owned();
+        boot_trace(&format!(
+            "primary block store is {} bytes; skipping open and using volatile {volatile_s}",
+            bytes
+        ));
+        match block_store::BlockStore::open(&volatile_s) {
+            Ok(s) => {
+                note = Some(format!(
+                    "⚠ local store is {} on disk; dashboard started on a fresh light store. Use --sync or SIGIL_TOP_FORCE_STORE=1 to reopen it.",
+                    human_bytes(bytes)
+                ));
+                s
+            }
+            Err(e) => return Err(format!("volatile block store unavailable after skipping oversized primary: {e}")),
+        }
+    } else {
+        // v6→v7.0.19: a HANG opening the primary (foreign format) falls back after the
+        // watchdog; 180s default so a legitimate multi-minute compaction isn't mistaken
+        // for a hang (the v7.0.19 "sync reset to 0" incident).
+        // v7.0.23 SIZE-AWARE: 180s was STILL too short once a real archive grew to ~14M
+        // blocks — the watchdog abandoned a multi-GB store mid-open and silently restarted
+        // the sync from genesis on an empty temp store (the operator's "spine reset to
+        // 240k" incident). A fixed timeout can never scale with store size, so: a LARGE
+        // store (>256 MB — hours of sync investment) is NEVER abandoned; we wait as long
+        // as it takes (the engine's "opening local block store — mesh already dialing"
+        // status + the dial-while-opening mesh make the wait visible and productive).
+        // The 180s fallback remains only for SMALL stores, where a foreign/corrupt hang
+        // is the likelier explanation and a re-sync is cheap.
+        let open_timeout = std::env::var("SIGIL_TOP_OPEN_TIMEOUT_SECS")
+            .ok().and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or_else(|| {
+                const BIG_STORE_BYTES: u64 = 256 * 1024 * 1024;
+                match dir_size_capped(db_path, BIG_STORE_BYTES) {
+                    Ok(bytes) if bytes > BIG_STORE_BYTES => {
+                        boot_trace(&format!("store is >{} bytes — open watchdog DISABLED (never abandon a big archive)", BIG_STORE_BYTES));
+                        u64::MAX / 4 // effectively: wait for the open, however long
+                    }
+                    _ => 180,
+                }
+            });
+        match block_store::BlockStore::open_with_timeout_and_progress(db_path, open_timeout, Some(progress.clone())) {
+            Ok(s) => s,
+            Err(primary) => {
+                boot_trace(&format!("primary store open failed/hung: {primary}"));
+                let temp_path = std::env::temp_dir().join("sigil-top-blocks.db");
+                match block_store::BlockStore::open_with_timeout(temp_path.to_string_lossy().as_ref(), open_timeout) {
+                    Ok(s) => {
+                        note = Some(format!("⚠ primary block store unavailable ({primary}); using temp store"));
+                        s
+                    }
+                    Err(temp_err) => {
+                        let volatile = std::env::temp_dir()
+                            .join(format!("sigil-top-blocks-volatile-{}.db", std::process::id()));
+                        match block_store::BlockStore::open_with_timeout(volatile.to_string_lossy().as_ref(), open_timeout) {
+                            Ok(s) => {
+                                note = Some(format!("⚠ block store fallback is volatile ({primary}; temp: {temp_err})"));
+                                s
+                            }
+                            Err(volatile_err) => {
+                                return Err(format!(
+                                    "block store unavailable: primary={primary}; temp={temp_err}; volatile={volatile_err}"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    boot_trace(&format!("block store opened best={} synced={} verified={}",
+        store.best_height(), store.synced_to(), store.verified_to()));
+
+    // v0.7.1/v0.56: aether shard bootstrap — Epsilon-server path, silently skipped elsewhere.
+    let aether_dir = std::env::var("SIGIL_AETHER_DIR")
+        .unwrap_or_else(|_| "/opt/orobit/sigil-data/db-epsilon/aether".to_string());
+    if std::path::Path::new(&aether_dir).is_dir() {
+        match block_store::sync_aether_to_fluxdb(&mut store, &aether_dir) {
+            Ok(n) if n > 0 => {
+                if note.is_none() {
+                    note = Some(format!("⬇ Synced {n} blocks → flux-db (height {})", store.best_height()));
+                }
+            }
+            Err(e) => crate::tlog!("[aether] {e}"),
+            _ => {}
+        }
+    }
+    Ok((store, note))
+}

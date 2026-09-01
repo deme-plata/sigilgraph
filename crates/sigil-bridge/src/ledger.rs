@@ -190,4 +190,44 @@ mod tests {
         assert_eq!(l.peg(BridgeAsset::Zec), AssetPeg { locked: 20, minted: 20 });
         assert!(l.peg_ok());
     }
+
+    #[test]
+    fn deposit_can_be_minted_against_only_once() {
+        // audit C9: without this an attacker replays ONE valid deposit proof N
+        // times to mint N×. mark_spent must accept an id once, reject the replay.
+        let mut l = BridgeLedger::new();
+        let id = [7u8; 32];
+        assert!(!l.is_spent(&id));
+        assert!(l.mark_spent(id), "first sighting consumes the deposit");
+        assert!(l.is_spent(&id));
+        assert!(!l.mark_spent(id), "replay of the same deposit id is rejected");
+        // A different deposit is independent.
+        let other = [8u8; 32];
+        assert!(!l.is_spent(&other));
+        assert!(l.mark_spent(other));
+    }
+
+    #[test]
+    fn withdrawal_authorization_is_idempotent() {
+        // audit C9: the same signed withdrawal must not burn/unlock (or pay out)
+        // twice. mark_withdrawal accepts once, rejects the replay.
+        let mut l = BridgeLedger::new();
+        let id = [1u8; 32];
+        assert!(!l.is_withdrawal_processed(&id));
+        assert!(l.mark_withdrawal(id));
+        assert!(l.is_withdrawal_processed(&id));
+        assert!(!l.mark_withdrawal(id), "replayed withdrawal is rejected");
+    }
+
+    #[test]
+    fn burn_and_unlock_reject_more_than_present() {
+        let mut l = BridgeLedger::new();
+        l.lock(BridgeAsset::Btc, 50).unwrap();
+        l.mint(BridgeAsset::Btc, 50).unwrap();
+        // Can't burn more wrapped than exists, nor unlock more collateral than held.
+        assert_eq!(l.burn(BridgeAsset::Btc, 51), Err(PegError::Underflow { asset: BridgeAsset::Btc }));
+        assert_eq!(l.unlock(BridgeAsset::Btc, 51), Err(PegError::Underflow { asset: BridgeAsset::Btc }));
+        // The failed operations left the peg untouched.
+        assert_eq!(l.peg(BridgeAsset::Btc), AssetPeg { locked: 50, minted: 50 });
+    }
 }

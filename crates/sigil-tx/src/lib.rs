@@ -2494,6 +2494,26 @@ mod tests {
         assert!(sqi_ramp_required(u64::MAX, true));
     }
 
+    /// The two genesis-active gates (multi-input spends, transparent coinbase).
+    /// Lock the constants — an accidental change silently reschedules a consensus
+    /// rule — and the INCLUSIVE `>=` boundary: a `>` typo would leave the
+    /// activation block itself under the OLD rule and fork the chain.
+    #[test]
+    fn genesis_active_gates_are_on_from_height_zero_inclusive() {
+        assert_eq!(SHIELDED_MULTI_INPUT_HEIGHT, 0, "multi-input active from genesis");
+        assert_eq!(TRANSPARENT_COINBASE_HEIGHT, 0, "transparent coinbase active from genesis");
+
+        // Inclusive boundary: ON at exactly the activation height (catches >= vs >).
+        assert!(multi_input_spend_allowed(SHIELDED_MULTI_INPUT_HEIGHT));
+        assert!(coinbase_is_transparent(TRANSPARENT_COINBASE_HEIGHT));
+
+        // Monotone forward: still on at any later height.
+        assert!(multi_input_spend_allowed(1));
+        assert!(multi_input_spend_allowed(u64::MAX));
+        assert!(coinbase_is_transparent(1));
+        assert!(coinbase_is_transparent(u64::MAX));
+    }
+
     fn dummy_signed(tx: SigilTx) -> SignedTx {
         let from = tx.fee_payer();
         SignedTx {

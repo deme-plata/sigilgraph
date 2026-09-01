@@ -2473,6 +2473,32 @@ fn leading_zero_bits(d: &[u8]) -> u32 {
     n
 }
 
+#[cfg(test)]
+mod leading_zero_bits_tests {
+    use super::leading_zero_bits;
+
+    #[test]
+    fn counts_leading_zeros_across_byte_boundaries() {
+        assert_eq!(leading_zero_bits(&[]), 0);
+        // Whole zero bytes are 8 bits each; no non-zero byte → never breaks.
+        assert_eq!(leading_zero_bits(&[0x00, 0x00, 0x00]), 24);
+        assert_eq!(leading_zero_bits(&[0xFF, 0x00]), 0); // first byte non-zero
+        assert_eq!(leading_zero_bits(&[0x0F]), 4); // 0000_1111
+        assert_eq!(leading_zero_bits(&[0x00, 0x80]), 8); // 8 + 0 (1000_0000)
+        assert_eq!(leading_zero_bits(&[0x00, 0x01]), 15); // 8 + 7
+        assert_eq!(leading_zero_bits(&[0x00, 0x00, 0x20]), 18); // 16 + 2 (0010_0000)
+    }
+
+    #[test]
+    fn more_leading_zeros_is_a_strictly_higher_count() {
+        // The miner accepts a nonce when leading_zero_bits(hash) >= difficulty,
+        // so the measure must be monotone: a hash with more leading zeros scores
+        // strictly higher, never equal-or-less.
+        assert!(leading_zero_bits(&[0x00, 0x00]) > leading_zero_bits(&[0x00, 0x40]));
+        assert!(leading_zero_bits(&[0x00, 0x01]) > leading_zero_bits(&[0x01, 0x00]));
+    }
+}
+
 /// Default-ON startup auto-update against the **pinned release channel**. Runs once at launch:
 /// fetch the operator-controlled manifest, and ONLY if it names a version newer than this binary
 /// (i.e. the operator has *promoted* a release by writing the manifest — publishing a GitHub release

@@ -3987,42 +3987,6 @@ fn load_or_generate_wg_key(
 }
 
 /// Path to the persisted peer manifest for a WG interface.
-fn peers_manifest_path(db_path: &std::path::Path, iface: &str) -> std::path::PathBuf {
-    db_path.join("wg-peers").join(format!("{iface}.json"))
-}
-
-/// Read the peer manifest for `iface`. Missing file → empty list (no error).
-fn load_peers_manifest(
-    db_path: &std::path::Path,
-    iface: &str,
-) -> Result<Vec<sigil_net_wg::WgPeer>> {
-    let p = peers_manifest_path(db_path, iface);
-    if !p.exists() {
-        return Ok(Vec::new());
-    }
-    let bytes = std::fs::read(&p).with_context(|| format!("reading {}", p.display()))?;
-    let peers: Vec<sigil_net_wg::WgPeer> = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing JSON manifest at {}", p.display()))?;
-    Ok(peers)
-}
-
-/// Persist a peer manifest atomically — write to `<file>.tmp`, then rename.
-fn save_peers_manifest(
-    db_path: &std::path::Path,
-    iface: &str,
-    peers: &[sigil_net_wg::WgPeer],
-) -> Result<()> {
-    let p = peers_manifest_path(db_path, iface);
-    if let Some(parent) = p.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
-    }
-    let tmp = p.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(peers).context("serializing peer manifest")?;
-    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, &p).with_context(|| format!("rename {} -> {}", tmp.display(), p.display()))?;
-    Ok(())
-}
-
 /// Append a peer to the persisted manifest and apply it live via `wg set`.
 /// Live application is best-effort — if `wg set` fails (interface down,
 /// `wg` missing), the manifest write still succeeds and a warning is logged.
@@ -4118,6 +4082,8 @@ fn run_wg_list_peers(iface: &str) -> Result<()> {
 // re-exported so all call sites are unchanged.
 mod hex_fmt;
 pub(crate) use hex_fmt::{hex_full, hex_short_block};
+mod wg_manifest;
+pub(crate) use wg_manifest::{load_peers_manifest, peers_manifest_path, save_peers_manifest};
 
 /// Fire-and-forget chain event to `SIGIL_WEBHOOK_URL` so observers (the flux
 /// MCP webhook collector, a dashboard, an agent) get block-accept /

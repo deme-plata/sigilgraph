@@ -1989,6 +1989,55 @@ impl Kalman1D {
     }
 }
 
+#[cfg(test)]
+mod kalman_tests {
+    use super::Kalman1D;
+
+    #[test]
+    fn filter_is_stable_and_never_produces_garbage() {
+        // First finite sample initializes the estimate exactly.
+        let mut f = Kalman1D::new();
+        assert_eq!(f.update(100.0), 100.0);
+
+        // Non-finite samples are rejected: return the current estimate, no corruption
+        // (a NaN/inf ETA on screen — or a poisoned filter state — is the failure this guards).
+        assert_eq!(f.update(f64::NAN), 100.0);
+        assert_eq!(f.update(f64::INFINITY), 100.0);
+        assert!(f.update(101.0).is_finite());
+
+        // A small blip is heavily DAMPENED (steady-state gain ~0.04) — barely moves.
+        let mut g = Kalman1D::new();
+        g.update(100.0);
+        let after = g.update(110.0);
+        assert!((100.0..101.0).contains(&after), "small blip must be smoothed, got {after}");
+
+        // A big regime change (a ~400x drop) is FOLLOWED fast via the adaptive gain.
+        let mut h = Kalman1D::new();
+        h.update(400.0);
+        let dropped = h.update(1.0);
+        assert!(dropped < 300.0, "a real drop must be believed quickly, got {dropped}");
+
+        // reset_to forces the estimate; clamps negatives to 0; ignores non-finite input.
+        let mut r = Kalman1D::new();
+        r.update(400.0);
+        r.reset_to(1.0);
+        let v = r.update(1.0);
+        assert!(v.is_finite() && (0.9..1.1).contains(&v), "reset_to should force ~1, got {v}");
+        let mut n = Kalman1D::new();
+        n.update(5.0);
+        n.reset_to(-9.0);
+        assert!(n.update(0.0) >= 0.0, "negative reset clamps to 0");
+        n.reset_to(f64::NAN); // ignored — no corruption
+        assert!(n.update(0.0).is_finite());
+
+        // Output stays finite across a long, wildly-noisy sequence.
+        let mut s = Kalman1D::new();
+        for z in [10.0, 1000.0, 0.001, 500.0, 2.0, 800.0, 0.5] {
+            assert!(s.update(z).is_finite());
+        }
+    }
+}
+
 struct App {
     cfg: Config,
     st: NodeStatus,

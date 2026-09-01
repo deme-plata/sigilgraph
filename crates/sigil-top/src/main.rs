@@ -762,45 +762,8 @@ fn one_chain_view(st: &mut NodeStatus, spine_off: bool) -> Option<u64> {
 }
 
 /// Minimal blocking HTTP GET — no http-client dependency.
-fn http_get(url: &str, timeout: Duration) -> Option<String> {
-    let rest = url.strip_prefix("http://")?;
-    let (hostport, path) = match rest.split_once('/') {
-        Some((hp, p)) => (hp.to_string(), format!("/{p}")),
-        None => (rest.to_string(), "/".to_string()),
-    };
-    let addr = if hostport.contains(':') { hostport.clone() } else { format!("{hostport}:80") };
-    let sock = addr.to_socket_addrs().ok()?.next()?;
-    let mut stream = TcpStream::connect_timeout(&sock, timeout).ok()?;
-    stream.set_read_timeout(Some(timeout)).ok()?;
-    stream.set_write_timeout(Some(timeout)).ok()?;
-    let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {hostport}\r\nConnection: close\r\nUser-Agent: sigil-top/{VERSION}\r\n\r\n"
-    );
-    stream.write_all(req.as_bytes()).ok()?;
-    let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).ok()?;
-    String::from_utf8(buf).ok()
-}
-
-/// Tolerant JSON extraction — grab the outermost object, ignore HTTP framing.
-fn parse_status(body: &str) -> Option<NodeStatus> {
-    let start = body.find('{')?;
-    let end = body.rfind('}')?;
-    if end <= start { return None; }
-    serde_json::from_str(&body[start..=end]).ok()
-}
-
-fn fetch(api: &str) -> Result<NodeStatus, ()> {
-    // `file:<path>` reads a saved status snapshot — lets you verify the real tip
-    // offline / over a transport this std-only binary doesn't speak (e.g. pipe a
-    // curl of the https testnet snapshot through a file). Otherwise plain http GET.
-    let body = if let Some(path) = api.strip_prefix("file:") {
-        std::fs::read_to_string(path).ok()
-    } else {
-        http_get(api, Duration::from_millis(800))
-    };
-    body.and_then(|b| parse_status(&b)).ok_or(())
-}
+mod http_client;
+pub(crate) use http_client::{fetch, http_get, parse_status};
 
 fn hex(b: &[u8]) -> String {
     let mut s = String::with_capacity(b.len() * 2);

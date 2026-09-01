@@ -1713,7 +1713,12 @@ fn apply_tx_inner(
                         wallet: *from, token: NATIVE, amount: final_native,
                     });
                 } else {
-                    let new_from_native = from_native - need_native;
+                    // checked (guarded by from_native < need_native above) — a plain `-`
+                    // would silently wrap in release (debug_assertions off) if that guard
+                    // were ever moved; fail loud instead of minting.
+                    let new_from_native = from_native
+                        .checked_sub(need_native)
+                        .ok_or(TxApplyError::InsufficientBalance { have: from_native, need: need_native })?;
                     let to_native = state.balance_of(to, &NATIVE);
                     let new_to_native = to_native
                         .checked_add(*amount)
@@ -1738,7 +1743,10 @@ fn apply_tx_inner(
                     // nothing for it so the pre-state value is preserved
                     // (balance-sufficiency was checked above).
                 } else {
-                    let new_from_token = from_token - amount;
+                    // checked (guarded by from_token < *amount above) — see the native branch.
+                    let new_from_token = from_token
+                        .checked_sub(*amount)
+                        .ok_or(TxApplyError::InsufficientBalance { have: from_token, need: *amount })?;
                     let to_bal = state.balance_of(to, token);
                     let new_to = to_bal.checked_add(*amount).ok_or(TxApplyError::Overflow)?;
                     out.mutations.push(StateMutation::SetBalance {
@@ -1805,7 +1813,9 @@ fn apply_tx_inner(
                     });
                 }
                 out.mutations.push(StateMutation::SetBalance {
-                    wallet: *from, token: NATIVE, amount: from_native - need,
+                    wallet: *from, token: NATIVE,
+                    // checked (guarded by from_native < need above) — fail loud, never wrap.
+                    amount: from_native.checked_sub(need).ok_or(TxApplyError::InsufficientBalance { have: from_native, need })?,
                 });
             } else {
                 if sender_in_bal < *in_amt {
@@ -1814,10 +1824,14 @@ fn apply_tx_inner(
                     });
                 }
                 out.mutations.push(StateMutation::SetBalance {
-                    wallet: *from, token: *in_token, amount: sender_in_bal - in_amt,
+                    wallet: *from, token: *in_token,
+                    // checked (guarded by sender_in_bal < *in_amt above).
+                    amount: sender_in_bal.checked_sub(*in_amt).ok_or(TxApplyError::InsufficientBalance { have: sender_in_bal, need: *in_amt })?,
                 });
                 out.mutations.push(StateMutation::SetBalance {
-                    wallet: *from, token: NATIVE, amount: from_native - fee,
+                    wallet: *from, token: NATIVE,
+                    // checked (guarded by the from_native < *fee check at the top of Swap).
+                    amount: from_native.checked_sub(*fee).ok_or(TxApplyError::InsufficientBalance { have: from_native, need: *fee })?,
                 });
             }
 

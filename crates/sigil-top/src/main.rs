@@ -1920,6 +1920,34 @@ struct Release {
     flux_rev: String,
 }
 
+#[cfg(test)]
+mod release_parse_tests {
+    use super::Release;
+    #[test]
+    fn full_manifest_with_aliases() {
+        let j = r#"{"version":"7.6.0","url":"https://x/bin","blake3":"abc","size":1234,"flux_rev":"full:deadbeef","targets":{}}"#;
+        let r: Release = serde_json::from_str(j).unwrap();
+        assert_eq!(r.version, "7.6.0");
+        assert_eq!(r.blake3_hex, "abc");        // via alias "blake3"
+        assert_eq!(r.size_bytes, 1234);         // via alias "size"
+        assert_eq!(r.flux_rev, "full:deadbeef");
+    }
+    #[test]
+    fn partial_manifest_uses_defaults() {
+        // Every field is #[serde(default)] → a manifest missing fields must still parse,
+        // yielding a safe empty-url Release (the update path then just does nothing).
+        let r: Release = serde_json::from_str(r#"{"version":"7.6.0"}"#).unwrap();
+        assert_eq!(r.version, "7.6.0");
+        assert_eq!(r.url, "");
+        assert_eq!(r.size_bytes, 0);
+    }
+    #[test]
+    fn malformed_json_errs_not_panics() {
+        assert!(serde_json::from_str::<Release>("{not json").is_err());
+        assert!(serde_json::from_str::<Release>("").is_err());
+    }
+}
+
 /// Old manifest target triples that map to our short platform names.
 /// v0.38 VARIANT PINNING: a GPU build reads ONLY its -gpu channel key — it must
 /// never cross-grade itself to the CPU binary (or vice versa). No -gpu key in the

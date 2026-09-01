@@ -745,11 +745,14 @@ mod fast_path_tests {
         let p = tmp("forged-frontier");
         let _ = std::fs::remove_dir_all(&p);
         let mut s = BlockStore::open(&p).unwrap();
-        // The forged 120 won't link to 119 via the strict batch path; force it in so we
-        // exercise the fast-path's own defense (mirrors chain_verify's force_insert test).
-        for hdr in &chain[..120] { let _ = s.put_block_fast(hdr.clone()); }
-        s.force_insert_block(chain[120].clone());
-        for hdr in &chain[121..] { let _ = s.put_block_fast(hdr.clone()); }
+        // Force EVERY block into the height index (bypassing the strict linkage
+        // path). put_block_fast defers height-indexing to `advance`, and the forge
+        // at 120 makes advance stop short of the anchor — so relying on it leaves
+        // the anchor at 150 un-indexed and this fails earlier as AnchorBlockMissing
+        // (a real but DIFFERENT defense). Force-indexing the whole range makes the
+        // authenticated anchor reachable, so the fast path's OWN frontier
+        // re-verification runs and catches the broken linkage at 120.
+        for hdr in &chain { s.force_insert_block(hdr.clone()); }
         s.advance();
 
         let anchor_hash = chain[anchor as usize].hash();

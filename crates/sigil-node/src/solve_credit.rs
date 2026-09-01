@@ -46,7 +46,20 @@ pub fn near_miss_credit(s: sigil_api::mining::AcceptedSolve) -> sigil_api::minin
 /// compares), so 512 costs negligible tick time; it does NOT change any verification or
 /// acceptance rule, only how many already-accepted entries get checked for payout per
 /// round.
-pub const SOLVE_SCAN_MAX: u32 = 512;
+///
+/// 2026-08-26: same failure mode reproduced at a higher load tier — 512 stopped matching
+/// `SOLVE_QUEUE_CAP` once that cap was raised to 65,536 (`mining.rs`), so a fully-saturated
+/// queue could no longer be drained in one pass, and worse: with block production itself
+/// intermittently starved, a tick could arrive to find the front 512 entries had ALL aged
+/// past `credit_window` — the whole scan finds nothing creditable, discards all 512 as
+/// stale, and credits nobody that round, while the queue immediately refills from the back.
+/// Raised to match the new `SOLVE_QUEUE_CAP` again, restoring the original invariant.
+///
+/// 2026-09-01: this shared-module copy was still pinned at the stale 512 while the live
+/// producer in `main.rs` had long since been raised to 65,536 — the exact drift this
+/// module was extracted to prevent. Synced here, and `main.rs` now calls THIS function
+/// instead of its own duplicate so the two cannot diverge again.
+pub const SOLVE_SCAN_MAX: u32 = 65_536;
 
 /// v7.1.41 (grogu-sync-perf, 2026-08-19, operator-directed — "all mining rewards should
 /// go to miners"): `MiningBridge::take_solve()` pops exactly ONE FIFO entry per call, with

@@ -1245,33 +1245,10 @@ fn lower_process_priority() {
 /// at this original path. Capturing it up front makes relaunch reliable.
 static INSTALL_EXE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
-/// v0.71.1 LANE-V: persisted sync mode — F/Y write it, boot reads it, so a node
-/// the operator put in full-sync RESUMES full-sync after updates and restarts.
-/// Fresh installs have no file -> light monitor stays the safe default.
-fn sync_mode_path() -> std::path::PathBuf {
-    let dir = std::env::var("SIGIL_TOP_HOME").ok().map(std::path::PathBuf::from)
-        .or_else(|| std::env::var("HOME").ok().map(|h| std::path::Path::new(&h).join(".sigil-top")))
-        .or_else(|| std::env::var("USERPROFILE").ok().map(|h| std::path::Path::new(&h).join(".sigil-top")))
-        .unwrap_or_else(std::env::temp_dir);
-    dir.join("sync-mode")
-}
-fn persist_sync_mode(mode: &str) {
-    let p = sync_mode_path();
-    if let Some(d) = p.parent() { let _ = std::fs::create_dir_all(d); }
-    let _ = std::fs::write(&p, mode);
-}
-fn read_sync_mode() -> Option<String> {
-    std::fs::read_to_string(sync_mode_path()).ok().map(|s| s.trim().to_string())
-}
-
-/// v0.64: append a startup breadcrumb to %TEMP%/sigil-top-startup.log (best-effort).
-fn boot_trace(msg: &str) {
-    use std::io::Write;
-    let p = std::env::temp_dir().join("sigil-top-startup.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
-        let _ = writeln!(f, "{}", msg);
-    }
-}
+// Sync-mode persistence + boot_trace extracted to startup_util.rs (god-file split,
+// 2026-09-01). Re-exported so main.rs's unqualified calls are unchanged.
+mod startup_util;
+pub(crate) use startup_util::{boot_trace, persist_sync_mode, read_sync_mode};
 
 /// v3 (2026-06-19) — THE real "no TUI on Windows" root cause: Rust's `is_terminal()`
 /// returns FALSE on some genuine Windows consoles (double-click / conhost / Windows

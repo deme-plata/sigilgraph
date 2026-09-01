@@ -4101,7 +4101,22 @@ mod tests {
             pubkey: sigil_header::PubKeyBytes(Vec::new()),
         };
 
-        let staging = chain.state_snapshot();
+        // g2 genesis carries NO premine (supply at H=0 is 0 — see genesis.rs), so
+        // DEMO_WALLET starts empty and nothing could be spent. Credit it in the
+        // staging state, standing in for the coinbase that funds a spender on the
+        // real chain, so the Send has balance to move. This is a pipeline test
+        // (does producing a block with a real signed tx advance the tip), not a
+        // conservation test — that lives in sigil-tx / the coinbase suite.
+        let mut staging = chain.state_snapshot();
+        let seed = StateTransition {
+            at_height: 1,
+            mutations: vec![sigil_state::StateMutation::SetBalance {
+                wallet: DEMO_WALLET,
+                token: [0u8; 32],
+                amount: DEMO_INITIAL_BALANCE,
+            }],
+        };
+        sigil_state::commit_state_transition(&mut staging, &seed, 1).unwrap();
         let r = apply_tx(&staging, &signed).expect("Send should apply");
         let final_t = StateTransition { at_height: 1, mutations: r.mutations };
 

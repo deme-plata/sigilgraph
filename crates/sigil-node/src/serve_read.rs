@@ -389,25 +389,11 @@ mod tests {
         }
     }
 
-    /// Build a throwaway chain.log framed exactly like `ChainLog::append`:
-    /// u32-LE length prefix + serde_json record.
-    fn write_log(dir: &Path, heights: &[u64]) {
-        std::fs::create_dir_all(dir).unwrap();
-        let mut f = File::create(log_path(dir)).unwrap();
-        for &h in heights {
-            let rec = Rec { header: mk_header(h), body_filler: vec![9u64; 64] };
-            let bytes = serde_json::to_vec(&rec).unwrap();
-            f.write_all(&(bytes.len() as u32).to_le_bytes()).unwrap();
-            f.write_all(&bytes).unwrap();
-        }
-        f.flush().unwrap();
-    }
-
-    /// Write records in the format PRODUCTION actually uses.
-    ///
-    /// Every other helper here writes raw JSON, which is the LEGACY form. That is exactly
-    /// why the serve path could return empty for every real range while the suite stayed
-    /// green: the tests exercised a format the writer had stopped producing.
+    /// Write records in the format PRODUCTION actually uses — the ONLY log writer
+    /// the tests use now. The legacy raw-JSON `write_log` helper was removed once
+    /// its last callers were migrated here: it wrote a `Rec` shape the real serve
+    /// path (`chain_log::decode_record`) had stopped decoding, so every test using
+    /// it silently returned empty for every range.
     fn write_log_v1(dir: &Path, blocks: &[crate::block::Block]) {
         std::fs::create_dir_all(dir).unwrap();
         let mut f = File::create(log_path(dir)).unwrap();
@@ -678,29 +664,44 @@ mod tests {
         );
     }
 
-    /// The whole point of the module: serving headers must not depend on block
-    /// bodies being decodable. A record whose body is complete garbage — but
-    /// whose header is intact — must still serve, because we never look at the
-    /// body. This is the property that makes the fast path cheap.
+    /// A single corrupt/undecodable record in the MIDDLE of the log must be
+    /// skipped, not abort the whole range — a syncing peer still gets every
+    /// intact record around it (the `None => continue` arm in read_headers_range).
+    ///
+    /// (Historical note: this used to assert a header could be served out of a
+    /// record whose BODY was garbage. That was true only for the legacy JSON form.
+    /// The v1 format compresses header+body together, so a record whose body won't
+    /// decode yields no header at all — there is nothing to extract. What still
+    /// holds, and is what actually protects a syncing peer, is that such a record
+    /// is dropped without poisoning the rest of the range.)
     #[test]
-    fn headers_are_returned_without_the_body_being_well_formed() {
+    fn a_malformed_record_is_skipped_not_fatal_to_the_range() {
+        fn write_rec(f: &mut File, bytes: &[u8]) {
+            f.write_all(&(bytes.len() as u32).to_le_bytes()).unwrap();
+            f.write_all(bytes).unwrap();
+        }
         let tmp = tmpdir("nobody");
         std::fs::create_dir_all(&tmp).unwrap();
+        let blocks = crate::block::__test_chain(4); // heights 1..=4, production format
         let mut f = File::create(log_path(&tmp)).unwrap();
-        for h in 0u64..5 {
-            let hdr = serde_json::to_string(&mk_header(h)).unwrap();
-            // `header` first (as in the real record), then a body field holding
-            // a string of junk. Valid JSON, meaningless body.
-            let rec = format!("{{\"header\":{},\"body_filler\":\"@@@not-a-block@@@\"}}", hdr);
-            let bytes = rec.into_bytes();
-            f.write_all(&(bytes.len() as u32).to_le_bytes()).unwrap();
-            f.write_all(&bytes).unwrap();
+        for b in &blocks[..2] {
+            write_rec(&mut f, &crate::chain_log::encode_record(b).unwrap());
+        }
+        // A COMPLETE record (real length prefix, fully present) that the decoder
+        // rejects: the leading `{` routes it to the JSON path, which then fails to
+        // parse it as a Block. Must be SKIPPED, never abort the scan.
+        write_rec(&mut f, b"{ a complete record that does not decode to a block");
+        for b in &blocks[2..] {
+            write_rec(&mut f, &crate::chain_log::encode_record(b).unwrap());
         }
         f.flush().unwrap();
 
-        let hs = read_headers_range(&tmp, 0, 4);
-        assert_eq!(hs.len(), 5);
-        assert_eq!(hs.iter().map(|h| h.height).collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
+        let hs = read_headers_range(&tmp, 0, 100);
+        assert_eq!(
+            hs.iter().map(|h| h.height).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4],
+            "the malformed middle record is skipped; the 4 valid ones all survive",
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

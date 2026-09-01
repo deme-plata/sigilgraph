@@ -3,6 +3,46 @@
 #![allow(clippy::too_many_lines)]
 use super::*;
 
+/// Format a raw glyph amount (10^10 glyphs = 1 SIGIL on the g2 chain) as a
+/// decimal SIGIL string with `frac` fractional digits, using integer math so a
+/// large balance never loses precision to f64. The chain is 10-decimal
+/// (`main::DECIMALS`); dividing balances by 10^8 — a leftover from the dead
+/// 8-decimal g1 chain — overstated every displayed balance 100×.
+pub(crate) fn fmt_glyphs(glyphs: u128, frac: usize) -> String {
+    const GLYPHS_PER_SIGIL: u128 = 10_000_000_000; // 10^10
+    let whole = glyphs / GLYPHS_PER_SIGIL;
+    let frac = frac.min(10);
+    if frac == 0 {
+        return whole.to_string();
+    }
+    let scaled = (glyphs % GLYPHS_PER_SIGIL) / 10u128.pow((10 - frac) as u32);
+    format!("{whole}.{scaled:0width$}", width = frac)
+}
+
+#[cfg(test)]
+mod fmt_glyphs_tests {
+    use super::fmt_glyphs;
+    const U: u128 = 10_000_000_000; // one SIGIL, in glyphs
+
+    #[test]
+    fn scales_by_ten_decimals_not_eight() {
+        assert_eq!(fmt_glyphs(U, 2), "1.00");
+        assert_eq!(fmt_glyphs(U, 8), "1.00000000");
+        assert_eq!(fmt_glyphs(0, 2), "0.00");
+        // The live native_supply figure: 36,043.50 SIGIL — NOT 3,604,350 (the 1e8 bug).
+        assert_eq!(fmt_glyphs(360_435_083_780_273, 2), "36043.50");
+        assert_eq!(fmt_glyphs(360_435_083_780_273, 4), "36043.5083");
+    }
+
+    #[test]
+    fn truncates_sub_unit_and_stays_exact_past_f64_range() {
+        assert_eq!(fmt_glyphs(U - 1, 2), "0.99"); // 0.9999999999 truncates, never rounds up
+        assert_eq!(fmt_glyphs(U + 5, 0), "1");
+        // 10,000,000 SIGIL = 10^17 glyphs — well past f64's 2^53 exact-integer limit.
+        assert_eq!(fmt_glyphs(100_000_000_000_000_000, 2), "10000000.00");
+    }
+}
+
 /// [5] Mining — the REAL in-process dual-lane miner. Reads the SAME engine state
 /// (flux_miner::engine::MinerStats) the standalone sigil-miner exe shows, so
 /// sigil-top is node + miner in ONE binary. [m] start/stop · [g] GPU/CPU.
@@ -63,15 +103,15 @@ pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
         {
             match crate::shield_setup::latest_shielded() {
                 Some(sn) => (
-                    format!("{:.8} SIGIL", sn.balance as f64 / 1e8),
-                    format!(" shielded  ·  {:.8} transparent", s.balance as f64 / 1e8),
+                    format!("{} SIGIL", fmt_glyphs(sn.balance as u128, 8)),
+                    format!(" shielded  ·  {} transparent", fmt_glyphs(s.balance as u128, 8)),
                 ),
-                None => (format!("{:.8} SIGIL", s.balance as f64 / 1e8), " transparent".to_string()),
+                None => (format!("{} SIGIL", fmt_glyphs(s.balance as u128, 8)), " transparent".to_string()),
             }
         }
         #[cfg(not(feature = "shield-register"))]
         {
-            (format!("{:.8} SIGIL", s.balance as f64 / 1e8), " transparent".to_string())
+            (format!("{} SIGIL", fmt_glyphs(s.balance as u128, 8)), " transparent".to_string())
         }
     };
     let bal_span = (
@@ -172,11 +212,11 @@ pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
         #[cfg(feature = "shield-register")]
         match snap {
             Some(sn) => {
-                let spendable = sn.balance as f64 / 1e8;
+                let spendable = fmt_glyphs(sn.balance as u128, 8);
                 f.render_widget(Paragraph::new(Line::from(vec![
                     Span::styled(" 🛡 SHIELDED", Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
                     dim("  yours "),
-                    Span::styled(format!("{spendable:.8} SIGIL"), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("{spendable} SIGIL"), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
                     dim("  notes "),
                     Span::styled(format!("{}", sn.owned), Style::default().fg(C_VBRIGHT)),
                     dim(if sn.spent > 0 { "  spent " } else { "" }),
@@ -204,7 +244,7 @@ pub(crate) fn draw_mining_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
                     Span::styled(format!("{}/{}", group(sn.pool_notes as u64), group(sn.pool_capacity as u64)),
                         Style::default().fg(C_VBRIGHT)),
                     dim("  locked "),
-                    Span::styled(format!("{:.2}", sn.pool_locked as f64 / 1e8), Style::default().fg(C_GOLD)),
+                    Span::styled(fmt_glyphs(sn.pool_locked as u128, 2), Style::default().fg(C_GOLD)),
                     dim("  epoch "),
                     Span::styled(format!("{}", sn.epoch), Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD)),
                     dim(if sn.sealed_epochs > 0 { "  sealed " } else { "" }),
@@ -322,7 +362,7 @@ pub(crate) fn draw_mining_hero(f: &mut Frame, app: &App, area: ratatui::layout::
 
     // ── telemetry (left): network economics + YOUR mining ────────────────
     let est_earn = format!("~{:.4}", app.verified_count as f64 * 0.0005);
-    let (whole, cents) = (app.wallet_balance / 100_000_000, (app.wallet_balance % 100_000_000) / 1_000_000);
+    let wallet_bal = fmt_glyphs(app.wallet_balance, 2);
     let tlines = vec![
         Line::from(vec![
             dim("reward "), Span::styled("5 SIGIL/blk".to_string(), Style::default().fg(C_GREEN)),
@@ -336,7 +376,7 @@ pub(crate) fn draw_mining_hero(f: &mut Frame, app: &App, area: ratatui::layout::
             dim("   streak ×"), Span::styled(group(app.streak), Style::default().fg(C_GOLD)),
         ]),
         Line::from(vec![
-            dim("wallet "), Span::styled(format!("{whole}.{cents:02} SIGIL"), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
+            dim("wallet "), Span::styled(format!("{wallet_bal} SIGIL"), Style::default().fg(C_NEON_GREEN).add_modifier(Modifier::BOLD)),
             dim("   hashes "), Span::styled(format!("{}M", app.mine_hashes / 1_000_000), Style::default().fg(C_DIM)),
             dim("   est earn "), Span::styled(est_earn, Style::default().fg(C_GOLD)),
             dim("   [M] mine"),
@@ -377,10 +417,9 @@ pub(crate) fn render_mining(app: &App) -> Paragraph<'static> {
     };
     // v0.2.35: wallet balance line
     let bal_line = if app.wallet_balance > 0 {
-        let whole = app.wallet_balance / 100_000_000;
-        let frac = (app.wallet_balance % 100_000_000) / 1_000_000;
+        let bal_str = fmt_glyphs(app.wallet_balance, 2);
         Line::from(vec![
-            dim("balance "), Span::styled(format!("{whole}.{frac:02} SIGIL"), Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
+            dim("balance "), Span::styled(format!("{bal_str} SIGIL"), Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
             dim("   shares "), Span::styled(group(app.mine_accepted), Style::default().fg(C_DIM)),
         ])
     } else {

@@ -2493,14 +2493,9 @@ fn self_update(rel: &Release) -> Result<String, String> {
             t.url = format!("{}/{}", CHANNEL_BASES[bi.min(CHANNEL_BASES.len()-1)], name);
         }
     }
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .min_tls_version(reqwest::tls::Version::TLS_1_2)
-        .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION")))
-        .build().map_err(|e| e.to_string())?;
-    let bytes = client.get(&t.url).send().map_err(|e| e.to_string())?
-        .error_for_status().map_err(|e| e.to_string())?
-        .bytes().map_err(|e| e.to_string())?;
+    // Use the ONE hardened download path (updater::fetch_binary_reqwest) rather than a
+    // duplicate inline client — a single place to get TLS ≥1.2, the UA, and the timeout right.
+    let bytes = fetch_binary_reqwest(&t.url)?;
     if t.size_bytes != 0 && bytes.len() as u64 != t.size_bytes {
         return Err(format!("size mismatch — got {} expected {} bytes", bytes.len(), t.size_bytes));
     }

@@ -49,3 +49,45 @@ impl BridgeAsset {
         [BridgeAsset::Btc, BridgeAsset::Eth, BridgeAsset::Zec, BridgeAsset::Iron]
     }
 }
+
+#[cfg(test)]
+mod asset_tests {
+    use super::BridgeAsset;
+
+    #[test]
+    fn tags_are_stable_and_distinct() {
+        // These 1-byte tags feed the committed bridge supply-root hash. Changing
+        // one, or letting two assets collide on the same tag, silently forks the
+        // root across nodes — a consensus fault. Pin the exact values.
+        assert_eq!(BridgeAsset::Btc.tag(), 1);
+        assert_eq!(BridgeAsset::Eth.tag(), 2);
+        assert_eq!(BridgeAsset::Zec.tag(), 3);
+        assert_eq!(BridgeAsset::Iron.tag(), 4);
+
+        let mut tags: Vec<u8> = BridgeAsset::all().iter().map(|a| a.tag()).collect();
+        let n = tags.len();
+        tags.sort_unstable();
+        tags.dedup();
+        assert_eq!(tags.len(), n, "asset tags must be unique (a collision merges root slots)");
+    }
+
+    #[test]
+    fn wrapped_symbols_are_distinct() {
+        // Symbols name the on-chain wrapped token; a duplicate would alias two
+        // different collateral pools onto one visible token.
+        let mut syms: Vec<&str> = BridgeAsset::all().iter().map(|a| a.wrapped_symbol()).collect();
+        let n = syms.len();
+        syms.sort_unstable();
+        syms.dedup();
+        assert_eq!(syms.len(), n, "wrapped symbols must be unique");
+    }
+
+    #[test]
+    fn every_asset_needs_at_least_one_confirmation() {
+        // A zero-confirmation asset would let a mint fire on an unconfirmed,
+        // reorg-able deposit — the classic bridge double-spend. Never allow 0.
+        for a in BridgeAsset::all() {
+            assert!(a.min_confirmations() >= 1, "{a:?} must require >= 1 confirmation");
+        }
+    }
+}

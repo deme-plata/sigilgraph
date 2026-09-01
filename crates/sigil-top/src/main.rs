@@ -605,35 +605,12 @@ fn do_login(seed_hex: Option<String>) {
     println!("  {DIM}OAuth2 PKCE wallet-assertion (no password) · sigil-oauth · session at {}{RESET}\n", session_path());
 }
 
-/// Make the Windows console speak UTF-8 and process ANSI/VT escapes, so the rich
-/// glyphs (◆ ● ✓ ╭─╮ ⚡ ⛓) render as real icons instead of `?`, and the colours
-/// show in legacy conhost too. No-op on Unix. Raw kernel32 FFI — no extra dep.
+// Windows console / process-priority FFI helpers extracted to platform.rs
+// (god-file split). Re-exported so main()'s call sites stay unqualified.
+mod platform;
+pub(crate) use platform::{enable_rich_console, win_has_console};
 #[cfg(windows)]
-fn enable_rich_console() {
-    type Dword = u32;
-    type Handle = *mut core::ffi::c_void;
-    const STD_OUTPUT_HANDLE: Dword = 0xFFFF_FFF5; // (DWORD)-11
-    const ENABLE_VIRTUAL_TERMINAL_PROCESSING: Dword = 0x0004;
-    const CP_UTF8: Dword = 65001;
-    extern "system" {
-        fn SetConsoleOutputCP(cp: Dword) -> i32;
-        fn SetConsoleCP(cp: Dword) -> i32;
-        fn GetStdHandle(n: Dword) -> Handle;
-        fn GetConsoleMode(h: Handle, mode: *mut Dword) -> i32;
-        fn SetConsoleMode(h: Handle, mode: Dword) -> i32;
-    }
-    unsafe {
-        SetConsoleOutputCP(CP_UTF8);
-        SetConsoleCP(CP_UTF8);
-        let h = GetStdHandle(STD_OUTPUT_HANDLE);
-        let mut mode: Dword = 0;
-        if GetConsoleMode(h, &mut mode) != 0 {
-            SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-        }
-    }
-}
-#[cfg(not(windows))]
-fn enable_rich_console() {}
+pub(crate) use platform::lower_process_priority;
 
 // Console glyph subsystem (UI_ASCII / ui_ascii / init_ui_ascii / sa) extracted to
 // console_glyphs.rs (god-file split, 2026-09-01). Re-exported so every call site —
@@ -642,23 +619,6 @@ mod console_glyphs;
 pub(crate) use console_glyphs::{init_ui_ascii, sa, ui_ascii};
 mod session;
 pub(crate) use session::{clear_session, read_session, session_path, write_session};
-
-/// v0.40: on Windows, drop to BELOW_NORMAL priority class BEFORE any thread
-/// spawns. The OS scheduler then always favors the user's own apps — whateve
-/// sigil-top does (render, mine, opt-in sync), it can never make the desktop
-/// stutter. No crate dep: two kernel32 calls.
-#[cfg(windows)]
-fn lower_process_priority() {
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetCurrentProcess() -> isize;
-        fn SetPriorityClass(handle: isize, class: u32) -> i32;
-    }
-    const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
-    unsafe {
-        let _ = SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
-    }
-}
 
 /// The install path captured at startup, BEFORE any self-replace. Afte
 /// `self_replace` swaps the binary, `/proc/self/exe` (what `current_exe()` reads)
@@ -671,21 +631,6 @@ static INSTALL_EXE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLoc
 // 2026-09-01). Re-exported so main.rs's unqualified calls are unchanged.
 mod startup_util;
 pub(crate) use startup_util::{boot_trace, persist_sync_mode, read_sync_mode};
-
-/// v3 (2026-06-19) — THE real "no TUI on Windows" root cause: Rust's `is_terminal()`
-/// returns FALSE on some genuine Windows consoles (double-click / conhost / Windows
-/// Terminal), so sigil-top fell through to the headless path and the dashboard never
-/// opened (reproduced under Wine adverse-mode: `interactive=false` → exit before run_tui).
-/// On Windows a console IS attached whenever GetConsoleWindow() is non-null — trust that
-/// over is_terminal(). A genuine service/redirected run with no console returns null →
-/// stays headless, so no CI/pipe regression.
-#[cfg(windows)]
-fn win_has_console() -> bool {
-    extern "system" { fn GetConsoleWindow() -> *mut core::ffi::c_void; }
-    unsafe { !GetConsoleWindow().is_null() }
-}
-#[cfg(not(windows))]
-fn win_has_console() -> bool { false }
 
 fn main() {
     // v0.64: STARTUP TRACE + panic capture. If the app exits unexpectedly on a

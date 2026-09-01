@@ -51,11 +51,28 @@ pub const LOCAL_MINING_API_PORT: u16 = 18183;
 /// beyond what it already uses for the probe itself).
 static LOCAL_MINING_API_UP: AtomicBool = AtomicBool::new(false);
 
-/// `127.0.0.1:<LOCAL_MINING_API_PORT>` — loopback only. This is a node the operator is
-/// running for themselves; it has no business accepting mining traffic from the network.
-pub fn local_mining_api_addr() -> String {
-    format!("127.0.0.1:{LOCAL_MINING_API_PORT}")
+/// The local mining API port. Defaults to [`LOCAL_MINING_API_PORT`] (18183) but is
+/// overridable via `SIGIL_LOCAL_MINING_API_PORT`. The default was chosen to be distinct
+/// from the node's own ports, but a sigil-node's raw tx-ingest bridge ALSO binds 18183 —
+/// so a sigil-top producer sharing a box with a node (or a test running on such a box)
+/// must be able to relocate this loopback API instead of failing to bind.
+pub fn local_mining_api_port() -> u16 {
+    std::env::var("SIGIL_LOCAL_MINING_API_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(LOCAL_MINING_API_PORT)
 }
+
+/// `127.0.0.1:<port>` — loopback only. This is a node the operator is running for
+/// themselves; it has no business accepting mining traffic from the network.
+pub fn local_mining_api_addr() -> String {
+    format!("127.0.0.1:{}", local_mining_api_port())
+}
+
+/// Serializes the two tests that read/override `SIGIL_LOCAL_MINING_API_PORT` — env vars
+/// are process-global and cargo runs tests in parallel.
+#[cfg(test)]
+pub(crate) static PORT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The URL a local miner (or `engine_node_url()` in `main.rs`) should point at.
 pub fn local_mining_api_url() -> String {
@@ -128,6 +145,8 @@ mod tests {
     // not as a unit test against shared global state.
     #[test]
     fn port_is_distinct_from_wallet_and_remote_convention() {
+        let _g = PORT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("SIGIL_LOCAL_MINING_API_PORT"); // assert the DEFAULT
         assert_ne!(LOCAL_MINING_API_PORT, 9800, "must not collide with the embedded wallet server");
         assert_ne!(LOCAL_MINING_API_PORT, 18181, "must not collide with the conventional remote sigil-api port");
         assert_eq!(local_mining_api_addr(), "127.0.0.1:18183");

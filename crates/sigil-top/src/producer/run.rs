@@ -570,6 +570,19 @@ mod tests {
         std::env::set_var("SIGIL_MINING_BLAKE4_BITS", "8");
         std::env::set_var("SIGIL_MINING_VDF_T", "4");
 
+        // The live sigil-node on this box binds 18183 (its raw tx-ingest port), which
+        // is our DEFAULT local-mining-API port — relocate to a free ephemeral port so
+        // the test is isolated from any co-located node. Serialized against the
+        // addr-default assertion in mining_api via PORT_ENV_LOCK.
+        let _port_g = mining_api::PORT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let free_port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let p = l.local_addr().unwrap().port();
+            drop(l);
+            p
+        };
+        std::env::set_var("SIGIL_LOCAL_MINING_API_PORT", free_port.to_string());
+
         let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         rt.block_on(async move {
             let addr = mining_api::local_mining_api_addr();
@@ -669,6 +682,7 @@ mod tests {
             std::env::remove_var("SIGIL_DAG_FINAL_DEPTH");
             std::env::remove_var("SIGIL_MINING_BLAKE4_BITS");
             std::env::remove_var("SIGIL_MINING_VDF_T");
+            std::env::remove_var("SIGIL_LOCAL_MINING_API_PORT");
 
             assert!(
                 credited_raw.is_some(),

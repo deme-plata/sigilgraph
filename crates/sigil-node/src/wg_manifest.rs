@@ -44,9 +44,52 @@ pub(crate) fn save_peers_manifest(
     Ok(())
 }
 
+/// Load the WG private key from disk, or generate + persist a fresh one
+/// (chmod 0600). The keys directory itself is chmod 0700.
+pub(crate) fn load_or_generate_wg_key(
+    keys_dir: &std::path::Path,
+    key_path: &std::path::Path,
+) -> Result<sigil_net_wg::WgPrivateKey> {
+    use sigil_net_wg::WgPrivateKey;
+
+    if key_path.exists() {
+        let b64 = std::fs::read_to_string(key_path)
+            .with_context(|| format!("reading {}", key_path.display()))?;
+        let sk = WgPrivateKey::from_base64(b64.trim())
+            .with_context(|| format!("parsing WG key at {}", key_path.display()))?;
+        return Ok(sk);
+    }
+
+    // Fresh key path. Create dir 0700, write key 0600.
+    std::fs::create_dir_all(keys_dir)
+        .with_context(|| format!("creating {}", keys_dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(keys_dir)?.permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(keys_dir, perms).ok();
+    }
+
+    let sk = WgPrivateKey::generate();
+    std::fs::write(key_path, sk.to_base64())
+        .with_context(|| format!("writing {}", key_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(key_path)?.permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(key_path, perms).ok();
+    }
+    eprintln!("📝 generated fresh WG keypair at {}", key_path.display());
+    Ok(sk)
+}
+
 #[cfg(test)]
 mod wg_manifest_tests {
-    use super::{load_peers_manifest, peers_manifest_path, save_peers_manifest};
+    use super::{
+        load_or_generate_wg_key, load_peers_manifest, peers_manifest_path, save_peers_manifest,
+    };
 
     fn scratch() -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!(
@@ -90,6 +133,27 @@ mod wg_manifest_tests {
         std::fs::write(&p, b"{ this is not valid json").unwrap();
         // A truncated/garbage manifest must error, never be read as "no peers".
         assert!(load_peers_manifest(&d, "sigilwg0").is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn wg_key_is_generated_once_then_reused() {
+        let d = scratch();
+        let keys_dir = d.join("wg-keys");
+        let key_path = keys_dir.join("sigilwg0.key");
+        assert!(!key_path.exists());
+        // First call generates and persists.
+        let k1 = load_or_generate_wg_key(&keys_dir, &key_path).expect("generate");
+        assert!(key_path.exists(), "key persisted to disk");
+        // Second call must LOAD the same key, never mint a new identity.
+        let k2 = load_or_generate_wg_key(&keys_dir, &key_path).expect("reload");
+        assert_eq!(k1.to_base64(), k2.to_base64(), "identity is stable across calls");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&key_path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "private key must be chmod 0600");
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 }

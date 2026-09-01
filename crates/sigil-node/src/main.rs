@@ -3945,48 +3945,6 @@ fn run_wg_down(iface: &str) -> Result<()> {
     Ok(())
 }
 
-/// Load the WG private key from disk, or generate + persist a fresh one
-/// (chmod 0600). The keys directory itself is chmod 0700.
-fn load_or_generate_wg_key(
-    keys_dir: &std::path::Path,
-    key_path: &std::path::Path,
-) -> Result<sigil_net_wg::WgPrivateKey> {
-    use sigil_net_wg::WgPrivateKey;
-
-    if key_path.exists() {
-        let b64 = std::fs::read_to_string(key_path)
-            .with_context(|| format!("reading {}", key_path.display()))?;
-        let sk = WgPrivateKey::from_base64(b64.trim())
-            .with_context(|| format!("parsing WG key at {}", key_path.display()))?;
-        return Ok(sk);
-    }
-
-    // Fresh key path. Create dir 0700, write key 0600.
-    std::fs::create_dir_all(keys_dir)
-        .with_context(|| format!("creating {}", keys_dir.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(keys_dir)?.permissions();
-        perms.set_mode(0o700);
-        std::fs::set_permissions(keys_dir, perms).ok();
-    }
-
-    let sk = WgPrivateKey::generate();
-    std::fs::write(key_path, sk.to_base64())
-        .with_context(|| format!("writing {}", key_path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(key_path)?.permissions();
-        perms.set_mode(0o600);
-        std::fs::set_permissions(key_path, perms).ok();
-    }
-    eprintln!("📝 generated fresh WG keypair at {}", key_path.display());
-    Ok(sk)
-}
-
-/// Path to the persisted peer manifest for a WG interface.
 /// Append a peer to the persisted manifest and apply it live via `wg set`.
 /// Live application is best-effort — if `wg set` fails (interface down,
 /// `wg` missing), the manifest write still succeeds and a warning is logged.
@@ -4083,7 +4041,9 @@ fn run_wg_list_peers(iface: &str) -> Result<()> {
 mod hex_fmt;
 pub(crate) use hex_fmt::{hex_full, hex_short_block};
 mod wg_manifest;
-pub(crate) use wg_manifest::{load_peers_manifest, peers_manifest_path, save_peers_manifest};
+pub(crate) use wg_manifest::{
+    load_or_generate_wg_key, load_peers_manifest, peers_manifest_path, save_peers_manifest,
+};
 
 /// Fire-and-forget chain event to `SIGIL_WEBHOOK_URL` so observers (the flux
 /// MCP webhook collector, a dashboard, an agent) get block-accept /

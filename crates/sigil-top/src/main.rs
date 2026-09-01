@@ -2183,6 +2183,34 @@ fn version_gt(a: &str, b: &str) -> bool {
     false
 }
 
+#[cfg(test)]
+mod version_gt_tests {
+    use super::version_gt;
+    #[test]
+    fn numeric_not_lexical() {
+        // The classic bug guard: "7.5.10" must be > "7.5.9" (10 > 9), NOT string-compared
+        // where "10" < "9". A regression to lexical compare here silently stops updates.
+        assert!(version_gt("7.5.10", "7.5.9"));
+        assert!(!version_gt("7.5.9", "7.5.10"));
+        assert!(version_gt("7.10.0", "7.9.99"));
+    }
+    #[test]
+    fn ordering_and_equality() {
+        assert!(version_gt("8.0.0", "7.9.9"));   // major wins
+        assert!(version_gt("7.6.0", "7.5.9"));   // minor wins
+        assert!(!version_gt("7.5.5", "7.5.5"));  // equal is NOT greater
+        assert!(version_gt("7.5.1", "7.5"));     // longer, trailing component > missing(0)
+        assert!(!version_gt("7.5", "7.5.1"));
+    }
+    #[test]
+    fn malformed_is_safe() {
+        // Non-numeric components parse to 0 — must never panic.
+        assert!(!version_gt("7.x.1", "7.0.5")); // [7,0,1] vs [7,0,5] → false
+        assert!(!version_gt("", "0.0.0"));
+        assert!(version_gt("1", ""));
+    }
+}
+
 /// Download the new binary, BLAKE3-verify against the manifest, and hot-swap THIS
 /// executable in place (cross-platform via `self_replace`). Returns a status line.
 /// The mining endpoint (sigil-rpcd `/mine`). Override with `SIGIL_MINE_URL`; defaults to the local

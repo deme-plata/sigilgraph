@@ -1070,27 +1070,8 @@ fn bottom() -> String { format!("  {VIOLET}╰{}╯{RESET}\n", "─".repeat(BOX_
 /// Display width of `s`, ignoring ANSI escape sequences. Most glyphs are one
 /// column; emoji-presentation symbols (⬡ ⛏ ⬆ …) are two. Honest width here is what
 /// keeps the box's right border flush instead of ragged — the recurring bug.
-fn display_width(s: &str) -> usize {
-    let mut w = 0usize; let mut in_esc = false;
-    for ch in s.chars() {
-        if in_esc { if ch == 'm' { in_esc = false; } continue; }
-        if ch == '\x1b' { in_esc = true; continue; }
-        w += char_cols(ch);
-    }
-    w
-}
-/// Terminal column count for one char. Covers the emoji/CJK ranges this UI can
-/// actually reach; text-presentation marks (✓ ✗ · … µ → ∀ ⊃ ● █ ░) stay 1 col.
-fn char_cols(c: char) -> usize {
-    let u = c as u32;
-    let wide = (0x1100..=0x115F).contains(&u)   // Hangul Jamo
-        || (0x2B00..=0x2BFF).contains(&u)        // ⬆ ⬡ and friends (emoji arrows/symbols)
-        || (0x1F000..=0x1FAFF).contains(&u)      // emoji
-        || (0x2E80..=0xA4CF).contains(&u)        // CJK
-        || (0xFF00..=0xFF60).contains(&u)        // fullwidth forms
-        || matches!(u, 0x26CF | 0x26A1 | 0x231B | 0x23F3); // ⛏ ⚡ ⌛ ⏳ (emoji-presentation)
-    if u == 0 { 0 } else if wide { 2 } else { 1 }
-}
+mod text_width;
+pub(crate) use text_width::display_width;
 
 fn render_lite(st: &NodeStatus, online: bool) -> String {
     let build_net = build_network_id();

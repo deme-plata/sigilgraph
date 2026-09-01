@@ -1140,10 +1140,35 @@ fn hex_to_32(h: &str) -> Option<[u8; 32]> {
     // (and credited) correctly the whole time; interactive mined to the wrong address.
     let h = h.trim();
     let h = h.strip_prefix("0x").or_else(|| h.strip_prefix("0X")).unwrap_or(h);
-    if h.len() != 64 { return None; }
+    // len() is BYTES and the slice below is byte-indexed: a 64-BYTE string with a multibyte
+    // char (e.g. "a€…") would pass the length check, then `&h[i*2..i*2+2]` could split a
+    // UTF-8 boundary and PANIC. Valid hex is ASCII, so require that up front.
+    if h.len() != 64 || !h.is_ascii() { return None; }
     let mut o = [0u8; 32];
     for i in 0..32 { o[i] = u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).ok()?; }
     Some(o)
+}
+
+#[cfg(test)]
+mod hex_to_32_tests {
+    use super::hex_to_32;
+    const V: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    #[test]
+    fn valid_and_prefix() {
+        let r = hex_to_32(V).unwrap();
+        assert_eq!(r[0], 0x00); assert_eq!(r[1], 0x11); assert_eq!(r[31], 0xff);
+        assert_eq!(hex_to_32(&format!("0x{V}")), hex_to_32(V)); // 0x prefix stripped
+    }
+    #[test]
+    fn bad_input_returns_none_never_panics() {
+        assert!(hex_to_32("").is_none());
+        assert!(hex_to_32("tooshort").is_none());
+        assert!(hex_to_32(&"z".repeat(64)).is_none()); // 64 chars, non-hex
+        // 64 BYTES but multibyte + straddling — the exact case that used to panic on the slice.
+        let straddle = format!("a{}", "€".repeat(21)); // 1 + 63 = 64 bytes, not ASCII
+        assert_eq!(straddle.len(), 64);
+        assert!(hex_to_32(&straddle).is_none()); // fixed: !is_ascii → None, no panic
+    }
 }
 
 /// `sigil-top login --seed <hex64>` — the wallet signs an OAuth2 PKCE auth

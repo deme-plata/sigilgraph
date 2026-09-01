@@ -423,6 +423,31 @@ mod tests {
     }
 
     #[test]
+    fn nonce_watermark_is_strictly_increasing_per_wallet() {
+        // The nonce guard gates every bridge op (lock/unlock/pause/rotate) — it stops
+        // a captured, validly-signed request from being replayed. The watermark must
+        // require a STRICTLY greater nonce, per wallet.
+        let bridge = UsdsBridgeBridge::new(None, None);
+        let alice = [0xAAu8; 32];
+        let bob = [0xBBu8; 32];
+
+        // nonce 0 is never valid — the watermark starts at 0 and requires >.
+        assert!(matches!(bridge.check_nonce(alice, 0), Err(UsdsBridgeError::ReplayedNonce)));
+        // First real nonce accepted; replaying it under the same nonce is rejected.
+        assert!(bridge.check_nonce(alice, 1).is_ok());
+        assert!(
+            matches!(bridge.check_nonce(alice, 1), Err(UsdsBridgeError::ReplayedNonce)),
+            "a captured signed request must not replay under its own nonce"
+        );
+        // A jump forward is fine; an older nonce below the watermark is rejected.
+        assert!(bridge.check_nonce(alice, 5).is_ok());
+        assert!(matches!(bridge.check_nonce(alice, 3), Err(UsdsBridgeError::ReplayedNonce)));
+        assert!(bridge.check_nonce(alice, 6).is_ok());
+        // Watermarks are independent per wallet — alice's high nonce doesn't gate bob.
+        assert!(bridge.check_nonce(bob, 1).is_ok());
+    }
+
+    #[test]
     fn relayer_unlock_round_trip_and_double_unlock_rejected() {
         let (relayer_sk, relayer) = signer();
         let relayer_hex = hex::encode(relayer);

@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SIGIL Nation — Welfare Whitepaper</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#04080c;--panel:#06121c;--line:rgba(33,212,253,.22);--cy:#21d4fd;--tl:#00e0c6;--gold:#fbbf24;--tx:#c9e4ee;--dim:#5a93a8;--mono:'JetBrains Mono',monospace}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(1200px 600px at 50% -10%,#0a1a28,var(--bg));color:var(--tx);font-family:'Rajdhani',system-ui,sans-serif;font-size:17px;line-height:1.62}
+.wrap{max-width:880px;margin:0 auto;padding:38px 20px 80px}
+header{border-bottom:1px solid var(--line);padding-bottom:22px;margin-bottom:30px}
+h1{font-size:clamp(26px,5vw,40px);margin:0 0 6px;color:#e8f6fb;letter-spacing:.06em}
+h1 .n{color:var(--gold)}
+.sub{font-family:var(--mono);font-size:12px;color:var(--dim);letter-spacing:1px}
+h2{color:var(--cy);font-size:21px;letter-spacing:.08em;margin:36px 0 10px;text-transform:uppercase}
+h3{color:#9fd8e8;font-size:17px;margin:22px 0 6px}
+p{margin:10px 0}
+code{font-family:var(--mono);font-size:.86em;color:var(--tl);background:rgba(0,224,198,.07);padding:1px 6px;border-radius:6px}
+a{color:var(--cy)}
+table{width:100%;border-collapse:collapse;margin:14px 0;font-size:15px}
+th,td{border:1px solid rgba(33,212,253,.14);padding:8px 12px;text-align:left}
+th{font-family:var(--mono);font-size:11px;letter-spacing:1px;color:var(--dim);text-transform:uppercase;background:rgba(8,16,24,.7)}
+td code{white-space:nowrap}
+.tilerow{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0}
+.tile{flex:1 1 150px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.tile .k{font-family:var(--mono);font-size:10px;letter-spacing:1px;color:var(--dim);text-transform:uppercase}
+.tile .v{font-size:22px;font-weight:700;color:#e8f6fb;margin-top:2px}
+.tile .v.small{font-size:15px}
+.flow{display:flex;align-items:stretch;gap:8px;flex-wrap:wrap;margin:18px 0;font-family:var(--mono);font-size:12px}
+.fbox{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;text-align:center;flex:1 1 120px}
+.fbox b{display:block;color:#e8f6fb;font-size:13px;margin-bottom:3px}
+.farr{align-self:center;color:var(--cy);font-size:18px;flex:0}
+.note{border-left:3px solid var(--gold);background:rgba(251,191,36,.06);padding:10px 14px;border-radius:0 10px 10px 0;margin:16px 0}
+.note b{color:var(--gold)}
+.status{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:12px 16px;margin:18px 0;font-family:var(--mono);font-size:13px;color:var(--dim)}
+.status .on{color:var(--tl)}
+footer{margin-top:48px;border-top:1px solid var(--line);padding-top:16px;font-family:var(--mono);font-size:11px;color:var(--dim)}
+@media(max-width:600px){.farr{display:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>SIGIL <span class="n">NATION</span> — Welfare</h1>
+  <div class="sub">WHITEPAPER v1.0 · 2026-08-31 · A CITIZEN STIPEND ENFORCED BY CONSENSUS, FINANCED BY THE MINING DEV FEE, PAID IN sUSD</div>
+</header>
+
+<div class="status" id="live">◌ fetching live nation status…</div>
+
+<h2>One sentence</h2>
+<p><b>Every attested citizen of the SIGIL chain can claim a stipend at a fixed cadence, financed by a 2% carve of every block's mining reward, paid out in <span style="color:var(--gold)">sUSD</span> — SIGIL's collateral-backed stablecoin — so the safety net is denominated in certainty, not volatility.</b></p>
+<p>No committee disburses it. No database can be edited to deny it. The stipend is a consensus rule: the same machinery that stops a double-spend is the machinery that guarantees the payment.</p>
+
+<h2>The money flow</h2>
+<div class="flow">
+  <div class="fbox"><b>Block reward</b>every mined block</div>
+  <div class="farr">→</div>
+  <div class="fbox"><b>Dev fee 7.5%</b>750 bps<br>(500 bps before activation)</div>
+  <div class="farr">→</div>
+  <div class="fbox"><b>Welfare 2%</b>200 bps → treasury <code>0x57…57</code></div>
+  <div class="farr">→</div>
+  <div class="fbox"><b>Citizen</b>stipend in sUSD<br>per claim interval</div>
+</div>
+<p>At activation the gross dev fee rises from 500 to 750 basis points. The welfare treasury takes 200 bps of the block reward, the master wallet nets 550, and the <i>validator</i> absorbs the 250 bps raise — deliberately: the safety net is paid for by the network's operators, not by squeezing the existing master split below its genesis rate. Every block below the activation height splits at the old genesis 500 — history replays byte-identically.</p>
+
+<h2>Why sUSD, not SIGIL</h2>
+<p>A stipend exists to be <i>planned around</i>. A citizen who receives 1 SIGIL receives a lottery ticket: worth one amount at claim time and a different amount at the grocery store. Paying in sUSD (operator ruling, 2026-08-31) makes the stipend a promise about <b>purchasing power</b>.</p>
+<p>sUSD is not an IOU. It is minted only against native SIGIL locked in the collateral vault at the oracle price, with a 105% collateral cushion (<code>MINT_BUFFER_BPS = 10_500</code>). When a citizen claims, the treasury's SIGIL is locked as collateral and freshly minted sUSD lands in the citizen's wallet. If the treasury cannot cover the collateral, or the price oracle is unfed, the claim <b>refuses</b> — the system fails closed rather than paying with something it does not have.</p>
+<div class="note"><b>Rollout honesty:</b> the sUSD payout is implemented and committed (consensus commit <code>708fded3</code>: <code>WelfareClaim</code> mints USDS; new <code>OraclePush</code> tx, tag 22, feeds the price oracle — which, until this work, had never had a production caller). It reaches the chain when the updated node binary is deployed and takes real effect once the authority pushes the first oracle price; until that price exists every claim refuses, by design. The live-status bar above tells you what the chain is doing <i>right now</i>.</div>
+
+<h2>Citizenship &amp; privacy</h2>
+<p>Claims are open to <b>attested citizens</b> only. Attestation (<code>CitizenAttest</code>, tx tag 20) is signed by the nation's authority wallet — the master wallet, whose key actually exists and is genesis-pinned. What goes on chain is not your civil ID: the wallet hashes it in your browser (<code>SHA-256("sigil-cpr|" + id)</code>) and only that hash enters the borger registry. The chain can prove "this wallet is a citizen" without ever learning who the citizen is.</p>
+<p>A claim (<code>WelfareClaim</code>, tx tag 21) needs no starting balance — the transaction fee comes out of the stipend itself, so a citizen with zero SIGIL can still claim. That detail is the whole point: a welfare system you need money to access is not a welfare system.</p>
+
+<h2>Parameters</h2>
+<table>
+<tr><th>parameter</th><th>value</th><th>meaning</th></tr>
+<tr><td>Activation height</td><td><code>900,000</code></td><td>welfare rules switch on; doubles as the client-update grace window</td></tr>
+<tr><td>Welfare carve</td><td><code>200 bps</code></td><td>2% of every block reward → treasury</td></tr>
+<tr><td>Dev fee (gross)</td><td><code>750 bps</code></td><td>was 500; validator absorbs the raise</td></tr>
+<tr><td>Stipend</td><td><code>1 sUSD</code> per interval</td><td>fixed purchasing power (pre-sUSD code: 1 SIGIL)</td></tr>
+<tr><td>Claim interval</td><td><code>200,000 blocks</code></td><td>per-citizen cooldown between claims</td></tr>
+<tr><td>Treasury wallet</td><td><code>0x57 × 32</code></td><td>'W' — consensus-owned, no private key exists</td></tr>
+<tr><td>sUSD collateral</td><td><code>105%</code></td><td>every sUSD backed by ≥ its value in vault SIGIL at issue</td></tr>
+<tr><td>Underfunded claim</td><td><b>refused</b></td><td>fail-closed; no unbacked payment can exist</td></tr>
+</table>
+
+<h2>API</h2>
+<p>Everything the wallet does, you can do raw — same origin, real JSON:</p>
+<table>
+<tr><th>route</th><th>what</th></tr>
+<tr><td><code>GET /v1/nation/status</code></td><td>treasury, stipend, interval, carve, activation progress, authority</td></tr>
+<tr><td><code>GET /v1/nation/citizen?wallet=…</code></td><td>citizenship + last-claim height for one wallet</td></tr>
+<tr><td><code>POST /v1/nation/welfare/claim_wallet</code></td><td>claim the stipend (wallet-signed; dry-run first, then mempool)</td></tr>
+<tr><td><code>POST /v1/nation/attest_wallet</code></td><td>authority-only: attest a citizen</td></tr>
+</table>
+
+<h2>What this is, structurally</h2>
+<p>Most chains ask "how do we stop bad transactions?" This module asks the inverse: <b>can a chain make a payment obligation as tamper-proof as a balance?</b> The stipend is not a treasury someone administers — it is a standing consequence of block production. As long as blocks are mined, the treasury fills; as long as the treasury covers the collateral, any citizen's claim is valid by rule. The state cannot quietly skip a payment for the same reason it cannot quietly mint a coin.</p>
+<p>For the wider ambition — hardware-attested state machinery, citizen-verifiable records, the sovereign-grade deployment this welfare module is the first inhabited room of — see the original concept brief: <a href="https://quillon.xyz/downloads/SIGIL_NATION_v0.md">SIGIL Nation concept brief v0 (May 2026)</a>.</p>
+
+<footer>
+SIGIL NATION WHITEPAPER v1.0 · 2026-08-31 · consensus: <code>sigil-bank::welfare</code> + <code>sigil-tx</code> tags 20/21 · UI: <a href="/enter-sigil.html">sigilgraph.org wallet</a> → Nation → Welfare<br>
+sUSD payout: operator ruling 2026-08-31 (this document states the target design; see live bar for current chain state)
+</footer>
+</div>
+<script>
+(async()=>{
+  const el=document.getElementById('live');
+  try{
+    const r=await fetch('/v1/nation/status');const j=await r.json();const d=j.data||{};
+    const pct=Math.min(100,(100*d.height/d.activation_height)).toFixed(1);
+    el.innerHTML='LIVE · height <span class="on">'+Number(d.height).toLocaleString()+'</span> / '+Number(d.activation_height).toLocaleString()+' ('+pct+'%) · welfare <span class="on">'+(d.active?'ACTIVE':'pre-activation')+'</span> · treasury <span class="on">'+(Number(d.treasury_glyphs)/1e10).toFixed(4)+' SIGIL</span> · carve '+d.welfare_bps+' bps';
+  }catch(e){ el.textContent='live status unavailable — node may be restarting'; }
+})();
+</script>
+</body>
+</html>

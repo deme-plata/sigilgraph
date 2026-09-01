@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="https://fluxapp.xyz/sigil-login/favicon.svg" />
+    <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SIGILGRAPH · The Undeniable Chain</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -24,6 +24,16 @@ body{font-family:var(--font-sans);background:linear-gradient(135deg,#0a0e1a 0%,#
 .footer{text-align:center;margin-top:16px;font-size:12px;color:var(--text-muted)}
 .footer a{color:var(--accent-gold);text-decoration:none}
 .status{margin-top:14px;padding:8px 12px;border-radius:8px;background:rgba(0,212,170,0.05);border:1px solid rgba(0,212,170,0.1);text-align:center;font-family:var(--font-mono);font-size:11px;color:var(--accent-cyan)}
+.btn-secondary{background:linear-gradient(135deg,#1a1f35,#232a45);color:var(--accent-cyan);border:1px solid var(--border-color)}
+.btn-secondary:hover{border-color:var(--accent-cyan);box-shadow:0 8px 25px rgba(0,212,170,0.12)}
+.or-div{display:flex;align-items:center;gap:10px;margin:16px 0 12px;color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:1px}
+.or-div::before,.or-div::after{content:'';flex:1;height:1px;background:var(--border-color)}
+.words{margin-top:12px;padding:12px 14px;border-radius:10px;background:rgba(200,168,78,0.06);border:1px solid rgba(200,168,78,0.25);font-family:var(--font-mono);font-size:14px;color:var(--accent-gold);word-spacing:4px;line-height:1.8;display:none;user-select:all}
+.words.show{display:block}
+.warn{margin-top:8px;font-size:11px;color:var(--text-secondary);text-align:center;line-height:1.6;display:none}
+.warn.show{display:block}
+.local-hint{margin-top:8px;font-size:11px;color:var(--text-muted);text-align:center;line-height:1.6}
+.local-hint code{color:var(--accent-cyan);background:rgba(0,212,170,0.08);padding:1px 5px;border-radius:4px}
 /* ── chain search bar (explore the chain from the gate) ── */
 .topsearch{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:50;width:min(560px,92vw);display:flex;align-items:center;gap:9px;padding:10px 14px;border-radius:13px;cursor:text;background:linear-gradient(180deg,rgba(0,212,170,.06),rgba(149,128,255,.06));border:1px solid var(--border-color);transition:.2s}
 .topsearch::before{content:'';position:absolute;inset:-1px;border-radius:13px;padding:1px;background:linear-gradient(120deg,var(--accent-cyan),var(--accent-violet),var(--accent-gold));-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;opacity:0;transition:.2s;pointer-events:none}
@@ -42,6 +52,10 @@ body{font-family:var(--font-sans);background:linear-gradient(135deg,#0a0e1a 0%,#
 .wdrop .wr .wty{font-size:8px;font-family:var(--font-mono);padding:2px 7px;border-radius:999px;text-transform:uppercase}
 .wdrop .wr .wty.live{background:rgba(0,212,170,.14);color:var(--accent-cyan)}.wdrop .wr .wty.flux{background:rgba(149,128,255,.14);color:var(--accent-violet)}
 .wdrop .wfoot{padding:9px 12px;font-family:var(--font-mono);font-size:10px;color:var(--text-muted);border-top:1px solid var(--border-color);text-align:center}
+          .mmnote{font-size:11.5px;line-height:1.5;color:#6f8fa0;margin-top:7px;text-align:left}
+      .mmstat{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;line-height:1.5;color:#6df3ff;margin-top:7px;min-height:14px;text-align:left;word-break:break-word}
+      .mmstat.err{color:#ff8a8a}
+      .mmstat.ok{color:#00e0c6}
     </style>
   </head>
   <body>
@@ -59,60 +73,259 @@ body{font-family:var(--font-sans);background:linear-gradient(135deg,#0a0e1a 0%,#
       <form onsubmit="event.preventDefault();go()">
         <div class="form-group">
           <label>Node ID or Seed Phrase</label>
-          <input type="text" id="seed" placeholder="qnk... or 12-word phrase" autofocus>
+          <input type="text" id="seed" placeholder="qnk… or your recovery phrase (6-word or 12-word)" autofocus>
         </div>
-        <button type="submit" class="btn">◈ Enter Sigilgraph</button>
+        <button type="submit" class="btn" id="goBtn">◈ Enter Sigilgraph</button>
       </form>
-      <div class="footer">
-        <p>New? <a href="#" onclick="generateMnemonic()">Generate a mnemonic</a></p>
-        <div id="mnemonic" style="margin-top:10px;font-family:var(--font-mono);font-size:13px;color:var(--accent-gold);word-break:break-word"></div>
-      </div>
+      <button type="button" class="btn btn-secondary" style="margin-top:10px" onclick="createWallet()">✨ Create New Wallet</button>
+      <button type="button" class="btn btn-secondary" id="mmCreateBtn" style="margin-top:8px" onclick="createWalletMetaMask()">🦊 Open My MetaMask Wallet</button>
+      <div class="mmnote" id="mmNote">Derives your SIGIL wallet from a MetaMask signature (free, not a transaction), switches MetaMask to Polygon and adds the wrapped SIGIL token. <b>This does not make a new wallet.</b> The signature is deterministic, so one MetaMask account maps to exactly ONE SIGIL wallet — pressing this again, in a new tab or a private window, re-opens the SAME wallet with the SAME balance. MetaMask lives in the browser extension, not in the page, so private browsing does not change the result. For a genuinely new, empty wallet use <b>✨ Create New Wallet</b> above.</div>
+      <div class="mmstat" id="mmStat"></div>
+      <div class="words" id="words" title="Click to select — copy and store safely"></div>
+      <div class="warn" id="warn">⚠ Write these 12 words down — they <b>are</b> your wallet. Anyone with them controls it; lose them and the wallet is gone. Then press <b>◈ Enter Sigilgraph</b>.</div>
+
+      <div class="or-div">or</div>
+      <button type="button" class="btn btn-secondary" onclick="openLocalWallet()">⬡ Open Local Wallet</button>
+      <div class="local-hint">Opens the wallet your node serves at <code>localhost:9800</code> — run <code>sigil-top</code> first (or press <b>W</b> in the node).</div>
+
       <div class="status">● sigilgraph H 0.8.1 · flux v0.26.0 · SSL valid</div>
     </div>
     <script>
-      var WL=["abandon","ability","able","about","above","absent","absorb","abstract","absurd","abuse","access","accident","account","accuse","achieve","acid","acoustic","acquire","across","act","action","actor","actress","actual","adapt","add","addict","address","adjust","admit","adult","advance","advice","aerobic","affair","afford","afraid","again","age","agent","agree","ahead","aim","air","airport","aisle","alarm","album","alcohol","alert","alien","all","alley","allow","almost","alone","alpha","already","also","alter","always","amaze","amber","ambush","amaze","amount","amuse","analyst","anchor","ancient","anger","angle","angry","animal","ankle","announce","annual","another","answer","antenna","antique","anxiety","any","apart","apology","appear","apple","approve","april","arch","arctic","area","arena","argue","arm","armed","armor","army","around","arrange","arrest","arrive","arrow","art","artefact","artist","artwork","ask","aspect","assault","asset","assist","assume","asthma","athlete","atom","attack","attend","attitude","attract","auction","audit","august","aunt","author","auto","autumn","average","avocado","avoid","awake","aware","away","awesome","awful","awkward","axis","baby","bachelor","bacon","badge","bag","balance","balcony","ball","bamboo","banana","banner","bar","barely","bargain","barrel","base","basic","basket","battle","beach","bean","beauty","because","become","beef","before","begin","behave","behind","believe","below","belt","bench","benefit","best","betray","better","between","beyond","bicycle","bid","bike","bind","biology","bird","birth","bitter","black","blade","blame","blanket","blast","bleak","bless","blind","blood","blossom","blouse","blue","blur","blush","board","boat","body","boil","bomb","bone","bonus","book","boost","border","boring","borrow","boss","bottom","bounce","box","boy","bracket","brain","brand","brass","brave","bread","breeze","brick","bridge","brief","bright","bring","brisk","broccoli","broken","bronze","broom","brother","brown","brush","bubble","buddy","budget","buffalo","build","bulb","bulk","bullet","bundle","bunker","burden","burger","burst","bus","business","busy","butter","buyer","bypass","cabin","cable","cactus","cage","cake","call","calm","camera","camp","can","canal","cancel","candy","cannon","canoe","canvas","canyon","capable","capital","captain","car","carbon","card","cargo","carpet","carry","cart","case","cash","casino","castle","casual","cat","catalog","catch","category","cattle","caught","cause","caution","cave","ceiling","celery","cement","census","century","cereal","certain","chair","chalk","champion","change","chaos","chapter","charge","chase","chat","cheap","check","cheese","chef","cherry","chest","chicken","chief","child","chimney","choice","choose","chronic","chuckle","chunk","churn","cigar","cinnamon","circle","citizen","city","civil","claim","clap","clarify","claw","clay","clean","clerk","clever","click","client","cliff","climb","clinic","clip","clock","clog","close","cloth","cloud","clown","club","clump","cluster","clutch","coach","coast","coconut","code","coffee","coil","coin","collect","color","column","combine","come","comfort","comic","common","company","concert","conduct","confirm","congress","connect","consider","control","convince","cook","cool","copper","copy","coral","core","corn","correct","cost","cotton","couch","country","couple","course","cousin","cover","coyote","crack","cradle","craft","crane","crash","crate","crawl","crazy","cream","credit","creek","crew","cricket","crime","crisp","critic","crop","cross","crouch","crowd","crucial","cruel","cruise","crumble","crunch","crush","cry","crystal","cube","culture","cup","cupboard","curious","current","curtain","curve","cushion","custom","cute","cycle","dad","damage","damp","dance","danger","daring","dash","date","daughter","dawn","day","deal","debate","debris","decade","december","decide","decline","decorate","decrease","deer","defense","define","defy","degree","delay","deliver","demand","demise","denial","dentist","deny","depart","depend","deposit","depth","deputy","derive","describe","desert","design","desk","despair","destroy","detail","detect","develop","device","devote","diagram","dial","diamond","diary","dice","diesel","diet","differ","digital","dignity","dilemma","dinner","dinosaur","direct","dirt","disagree","discover","disease","dish","dismiss","disorder","display","distance","divert","divide","divorce","dizzy","doctor","document","dog","doll","dolphin","domain","donate","donkey","donor","door","dose","double","dove","draft","dragon","drama","drastic","draw","dream","dress","drift","drill","drink","drip","drive","drop","drum","dry","duck","dumb","dune","during","dust","dutch","duty","dwarf","dynamic","eager","eagle","early","earn","earth","easily","east","easy","echo","ecology","economy","edge","edit","educate","effort","egg","eight","either","elbow","elder","electric","elegant","element","elephant","elevator","elite","else","embark","embody","embrace","emerge","emotion","employ","empower","empty","enable","enact","end","endless","endorse","enemy","energy","enforce","engage","engine","enhance","enjoy","enlist","enough","enrich","enroll","ensure","enter","entire","entry","envelope","episode","equal","equip","era","erase","erode","erosion","error","erupt","escape","essay","essence","estate","eternal","ethics","evidence","evil","evoke","evolve","exact","example","excess","exchange","excite","exclude","excuse","execute","exercise","exhaust","exhibit","exile","exist","exit","exotic","expand","expect","expire","explain","expose","express","extend","extra","eye","eyebrow","fabric","face","faculty","fade","faint","faith","fall","false","fame","family","famous","fan","fancy","fantasy","farm","fashion","fat","fatal","father","fatigue","fault","favorite","feature","february","federal","fee","feed","feel","female","fence","festival","fetch","fever","few","fiber","fiction","field","figure","file","film","filter","final","find","fine","finger","finish","fire","firm","first","fiscal","fish","fit","fitness","fix","flag","flame","flash","flat","flavor","flee","flight","flip","float","flock","floor","flora","flour","fluid","flush","fly","foam","focus","fog","foil","fold","follow","food","foot","force","foreign","forest","forget","fork","fortune","forum","forward","fossil","foster","found","fox","fragile","frame","frequent","fresh","friend","fringe","frog","front","frost","frown","frozen","fruit","fuel","fun","funny","furnace","fury","future","gadget","gain","galaxy","gallery","gap","garage","garbage","garden","garlic","garment","gas","gasp","gate","gather","gauge","gaze","general","genius","genre","gentle","genuine","gesture","ghost","giant","gift","giggle","ginger","giraffe","girl","give","glad","glance","glare","glass","glide","glimpse","globe","gloom","glory","glove","glow","glue","goat","goddess","gold","good","goose","gorilla","gospel","gossip","govern","gown","grab","grace","grain","grant","grape","grass","gravity","great","green","grid","grief","grit","grocery","group","grow","grunt","guard","guess","guide","guilt","guitar","gun","gym","habit","hair","half","hammer","hamster","hand","happy","harbor","hard","harsh","harvest","hat","have","hawk","hazard","head","health","heart","heavy","hedgehog","height","hello","helmet","help","hen","hero","hidden","high","hill","hint","hip","hire","history","hobby","hockey","hold","hole","holiday","hollow","home","honey","hood","hope","horn","horror","horse","hospital","host","hotel","hour","hover","hub","human","humble","humor","hundred","hungry","hunt","hurdle","hurry","hurt","husband","hybrid","ice","icon","idea","identify","idle","ignore","ill","illegal","illness","image","imitate","immense","immune","impact","impose","improve","impulse","inch","include","income","increase","index","indicate","indoor","industry","infant","inflict","inform","inhale","inherit","initial","inject","injury","inmate","inner","innocent","input","inquiry","insane","insect","inside","inspire","install","intact","interest","into","invest","invite","involve","iron","island","isolate","issue","item","ivory","jacket","jaguar","jar","jazz","jealous","jeans","jelly","jewel","job","join","joke","journey","joy","judge","juice","jump","jungle","junior","junk","just","kangaroo","keen","keep","ketchup","key","kick","kid","kidney","kind","kingdom","kiss","kit","kitchen","kite","kitten","kiwi","knee","knife","knock","know","lab","label","labor","ladder","lady","lake","lamp","language","laptop","large","later","latin","laugh","laundry","lava","law","lawn","lawsuit","layer","lazy","leader","leaf","learn","leave","lecture","left","leg","legal","legend","leisure","lemon","lend","length","lens","leopard","lesson","letter","level","liar","liberty","library","license","life","lift","light","like","limb","limit","link","lion","liquid","list","little","live","lizard","load","loan","lobster","local","lock","logic","lonely","long","loop","lottery","loud","lounge","love","loyal","lucky","luggage","lumber","lunar","lunch","luxury","lyrics","machine","mad","magic","magnet","maid","mail","main","major","make","mammal","man","manage","mandate","mango","mansion","manual","maple","marble","march","margin","marine","market","marriage","mask","mass","master","match","material","math","matrix","matter","maximum","maze","meadow","mean","measure","meat","mechanic","medal","media","melody","melt","member","memory","mention","menu","mercy","merge","merit","merry","mesh","message","metal","method","middle","midnight","milk","million","mimic","mind","minimum","minor","minute","miracle","mirror","misery","miss","mistake","mix","mixed","mixture","mobile","model","modify","mom","moment","monitor","monkey","monster","month","moon","moral","more","morning","mosquito","mother","motion","motor","mountain","mouse","move","movie","much","muffin","mule","multiply","muscle","museum","mushroom","music","must","mutual","myself","mystery","myth","naive","name","napkin","narrow","nasty","nation","nature","near","neck","need","negative","neglect","neither","nephew","nerve","nest","net","network","neutral","never","news","next","nice","night","noble","noise","nominee","noodle","normal","north","nose","notable","note","nothing","notice","novel","now","nuclear","number","nurse","nut","oak","obey","object","oblige","obscure","observe","obtain","obvious","occur","ocean","october","odor","off","offer","office","often","oil","okay","old","olive","olympic","omit","once","one","onion","online","only","open","opera","opinion","oppose","option","orange","orbit","orchard","order","ordinary","organ","orient","original","orphan","ostrich","other","outdoor","outer","output","outside","oval","oven","over","own","owner","oxygen","oyster","ozone","pact","paddle","page","pair","palace","palm","panda","panel","panic","panther","paper","parade","parent","park","parrot","party","pass","patch","path","patient","patrol","pattern","pause","pave","payment","peace","peanut","pear","peasant","pelican","pen","penalty","pencil","people","pepper","perfect","permit","person","pet","phone","photo","phrase","physical","piano","piece","pig","pigeon","pill","pilot","pink","pioneer","pipe","pirate","pistol","pitch","pizza","place","planet","plastic","plate","play","player","pleasure","plenty","plot","plug","plunge","poem","poet","point","polar","pole","police","pond","pony","pool","popular","portion","position","possible","post","potato","pottery","poverty","powder","power","practice","praise","predict","prefer","pregnant","premium","prepare","presence","prevent","prey","price","pride","primary","prime","prince","prison","private","prize","problem","process","produce","profit","program","project","promote","proof","property","prosper","protect","proud","provide","public","pudding","pull","pulp","pulse","pumpkin","punch","pupil","puppy","purchase","purity","purpose","purse","push","put","puzzle","pyramid","qualify","quality","quantum","quarter","queen","quest","question","quick","quiet","quit","quite","quiz","quote","rabbit","raccoon","race","rack","radar","radio","rail","rain","raise","rally","ramp","ranch","random","range","rapid","rare","rate","rather","raven","raw","razor","ready","real","reason","rebel","rebuild","recall","receive","recipe","record","recycle","reduce","reflect","reform","refuse","region","regret","regular","reject","relax","release","relief","rely","remain","remember","remind","remove","render","renew","rent","reopen","repair","repeat","replace","report","require","rescue","resemble","resist","resource","response","result","retire","retreat","return","reunion","reveal","review","reward","rhythm","rib","ribbon","rice","rich","ride","ridge","rifle","right","rigid","ring","riot","ripple","risk","ritual","rival","river","road","roast","robot","robust","rocket","romance","roof","rookie","room","rose","rotate","rough","round","route","royal","rubber","rude","rug","rule","run","runway","rural","sad","saddle","sadness","safe","sail","salad","salmon","salon","salt","salute","same","sample","sand","satisfy","satoshi","sauce","sausage","save","say","scale","scan","scare","scatter","scene","scheme","school","science","scissors","scorpion","scout","scrap","screen","script","scrub","sea","search","season","seat","second","secret","section","security","seed","seek","segment","select","sell","seminar","senior","sense","sentence","series","service","session","settle","setup","seven","shadow","shaft","shallow","share","shed","shell","sheriff","shield","shift","shine","ship","shiver","shock","shoe","shoot","shop","short","shoulder","shove","shrimp","shrug","shuffle","shy","sibling","sick","side","siege","sight","sign","silent","silk","silly","silver","similar","simple","since","sing","siren","sister","situate","six","size","skate","sketch","ski","skill","skin","skirt","skull","slab","slam","sleep","slender","slice","slide","slight","slim","slogan","slot","slow","slush","small","smart","smile","smoke","smooth","snack","snake","snap","sniff","snow","soap","soccer","social","sock","soda","soft","solar","soldier","solid","solution","solve","someone","song","soon","sorry","sort","soul","sound","soup","source","south","space","spare","spatial","spawn","speak","special","speed","spell","spend","sphere","spice","spider","spike","spin","spirit","split","spoil","sponsor","spoon","sport","spot","spray","spread","spring","spy","square","squeeze","squirrel","stable","stadium","staff","stage","stairs","stamp","stand","start","state","stay","steak","steel","stem","step","stereo","stick","still","sting","stock","stomach","stone","stool","story","stove","strategy","street","strike","strong","struggle","student","stuff","stumble","style","subject","submit","subway","success","such","sudden","suffer","sugar","suggest","suit","sun","sunny","sunset","super","supply","supreme","sure","surface","surge","surprise","surround","survey","suspect","sustain","swallow","swamp","swap","swarm","swear","sweet","swift","swim","swing","swiss","switch","sword","symbol","symptom","syrup","system","table","tackle","tag","tail","talent","talk","tank","tape","target","task","taste","tattoo","taxi","teach","team","tell","ten","tenant","tennis","tent","term","test","text","thank","that","theme","then","theory","there","thermostat","thick","thief","thin","thing","think","third","this","thorn","thought","thread","threat","three","thrive","throw","thumb","thunder","ticket","tide","tiger","tilt","timber","time","tiny","tip","tired","tissue","title","toast","tobacco","today","toddler","toe","together","toilet","token","tomato","tomorrow","tone","tongue","tonight","tool","tooth","top","topic","topple","torch","tornado","tortoise","toss","total","tourist","toward","tower","town","toy","track","trade","traffic","tragic","train","transfer","trap","trash","travel","tray","treat","tree","trend","trial","tribe","trick","trigger","trim","trip","trophy","trouble","truck","true","truly","trumpet","trust","truth","try","tube","tuition","tumble","tuna","tunnel","turkey","turn","turtle","twelve","twenty","twice","twin","twist","two","type","typical","ugly","umbrella","unable","unaware","uncle","uncover","under","undo","unfair","unfold","unhappy","uniform","unique","unit","universe","unknown","unlock","until","unusual","unveil","update","upgrade","uphold","upon","upper","upset","urban","urge","usage","use","used","useful","useless","usual","utility","vacant","vacuum","vague","valid","valley","valve","van","vanish","vapor","various","vast","vault","vehicle","velvet","vendor","venture","venue","verb","verify","version","very","vessel","veteran","viable","vibrant","vicious","victory","video","view","village","vintage","violin","virtual","virus","visa","visit","visual","vital","vivid","vocal","voice","void","volcano","volume","vote","voyage","wage","wagon","wait","walk","wall","walnut","want","warfare","warm","warrior","wash","wasp","waste","water","wave","way","wealth","weapon","wear","weasel","weather","web","wedding","weekend","weird","welcome","west","wet","whale","what","wheat","wheel","when","where","whip","whisper","wide","width","wife","wild","will","win","window","wine","wing","wink","winner","winter","wire","wisdom","wise","wish","witness","wolf","woman","wonder","wood","wool","word","work","world","worry","worth","wrap","wreck","wrestle","wrist","write","wrong","yard","year","yellow","you","young","youth","zebra","zenith","zero","zone","zoo","aether","akashic","alchemy","amethyst","anvil","arcanum","astral","aurora","bastion","beacon","binary","blitz","cipher","cosmic","crux","cypher","daemon","delta","dynamo","echo","eclipse","ember","epsilon","ethereal","fathom","flux","forge","fusion","galaxy","gamma","genesis","glyph","gravity","havoc","hologram","hyperion","ignite","inferno","ion","karma","kinetic","labyrinth","lambda","lattice","lumen","matrix","membrane","meteor","mirror","momentum","neural","nexus","nucleus","omega","orbit","oscillate","paradigm","particle","pendulum","photon","pipeline","plasma","portal","prism","pulse","quantum","radial","relay","resonate","rift","schema","sentinel","shatter","signal","silicon","singularity","solaris","spectral","spiral","syntax","temple","tensor","terra","tesla","tetra","theta","titan","torus","transit","tribal","trinity","triton","tunnel","turbo","ultra","umbra","utopia","vector","vertex","vortex","warp","waveform","wick","xenon","yield","zenith"];
+      var WL=["abandon","ability","able","about","above","absent","absorb","abstract","absurd","abuse","access","accident","account","accuse","achieve","acid","acoustic","acquire","across","act","action","actor","actress","actual","adapt","add","addict","address","adjust","admit","adult","advance","advice","aerobic","affair","afford","afraid","again","age","agent","agree","ahead","aim","air","airport","aisle","alarm","album","alcohol","alert","alien","all","alley","allow","almost","alone","alpha","already","also","alter","always","amaze","amber","ambush","amount","amuse","analyst","anchor","ancient","anger","angle","angry","animal","ankle","announce","annual","another","answer","antenna","antique","anxiety","any","apart","apology","appear","apple","approve","april","arch","arctic","area","arena","argue","arm","armed","armor","army","around","arrange","arrest","arrive","arrow","art","artefact","artist","artwork","ask","aspect","assault","asset","assist","assume","asthma","athlete","atom","attack","attend","attitude","attract","auction","audit","august","aunt","author","auto","autumn","average","avocado","avoid","awake","aware","away","awesome","awful","awkward","axis","baby","bachelor","bacon","badge","bag","balance","balcony","ball","bamboo","banana","banner","bar","barely","bargain","barrel","base","basic","basket","battle","beach","bean","beauty","because","become","beef","before","begin","behave","behind","believe","below","belt","bench","benefit","best","betray","better","between","beyond","bicycle","bid","bike","bind","biology","bird","birth","bitter","black","blade","blame","blanket","blast","bleak","bless","blind","blood","blossom","blouse","blue","blur","blush","board","boat","body","boil","bomb","bone","bonus","book","boost","border","boring","borrow","boss","bottom","bounce","box","boy","bracket","brain","brand","brass","brave","bread","breeze","brick","bridge","brief","bright","bring","brisk","broccoli","broken","bronze","broom","brother","brown","brush","bubble","buddy","budget","buffalo","build","bulb","bulk","bullet","bundle","bunker","burden","burger","burst","bus","business","busy","butter","buyer","bypass","cabin","cable","cactus","cage","cake","call","calm","camera","camp","can","canal","cancel","candy","cannon","canoe","canvas","canyon","capable","capital","captain","car","carbon","card","cargo","carpet","carry","cart","case","cash","casino","castle","casual","cat","catalog","catch","category","cattle","caught","cause","caution","cave","ceiling","celery","cement","census","century","cereal","certain","chair","chalk","champion","change","chaos","chapter","charge","chase","chat","cheap","check","cheese","chef","cherry","chest","chicken","chief","child","chimney","choice","choose","chronic","chuckle","chunk","churn","cigar","cinnamon","circle","citizen","city","civil","claim","clap","clarify","claw","clay","clean","clerk","clever","click","client","cliff","climb","clinic","clip","clock","clog","close","cloth","cloud","clown","club","clump","cluster","clutch","coach","coast","coconut","code","coffee","coil","coin","collect","color","column","combine","come","comfort","comic","common","company","concert","conduct","confirm","congress","connect","consider","control","convince","cook","cool","copper","copy","coral","core","corn","correct","cost","cotton","couch","country","couple","course","cousin","cover","coyote","crack","cradle","craft","crane","crash","crate","crawl","crazy","cream","credit","creek","crew","cricket","crime","crisp","critic","crop","cross","crouch","crowd","crucial","cruel","cruise","crumble","crunch","crush","cry","crystal","cube","culture","cup","cupboard","curious","current","curtain","curve","cushion","custom","cute","cycle","dad","damage","damp","dance","danger","daring","dash","date","daughter","dawn","day","deal","debate","debris","decade","december","decide","decline","decorate","decrease","deer","defense","define","defy","degree","delay","deliver","demand","demise","denial","dentist","deny","depart","depend","deposit","depth","deputy","derive","describe","desert","design","desk","despair","destroy","detail","detect","develop","device","devote","diagram","dial","diamond","diary","dice","diesel","diet","differ","digital","dignity","dilemma","dinner","dinosaur","direct","dirt","disagree","discover","disease","dish","dismiss","disorder","display","distance","divert","divide","divorce","dizzy","doctor","document","dog","doll","dolphin","domain","donate","donkey","donor","door","dose","double","dove","draft","dragon","drama","drastic","draw","dream","dress","drift","drill","drink","drip","drive","drop","drum","dry","duck","dumb","dune","during","dust","dutch","duty","dwarf","dynamic","eager","eagle","early","earn","earth","easily","east","easy","echo","ecology","economy","edge","edit","educate","effort","egg","eight","either","elbow","elder","electric","elegant","element","elephant","elevator","elite","else","embark","embody","embrace","emerge","emotion","employ","empower","empty","enable","enact","end","endless","endorse","enemy","energy","enforce","engage","engine","enhance","enjoy","enlist","enough","enrich","enroll","ensure","enter","entire","entry","envelope","episode","equal","equip","era","erase","erode","erosion","error","erupt","escape","essay","essence","estate","eternal","ethics","evidence","evil","evoke","evolve","exact","example","excess","exchange","excite","exclude","excuse","execute","exercise","exhaust","exhibit","exile","exist","exit","exotic","expand","expect","expire","explain","expose","express","extend","extra","eye","eyebrow","fabric","face","faculty","fade","faint","faith","fall","false","fame","family","famous","fan","fancy","fantasy","farm","fashion","fat","fatal","father","fatigue","fault","favorite","feature","february","federal","fee","feed","feel","female","fence","festival","fetch","fever","few","fiber","fiction","field","figure","file","film","filter","final","find","fine","finger","finish","fire","firm","first","fiscal","fish","fit","fitness","fix","flag","flame","flash","flat","flavor","flee","flight","flip","float","flock","floor","flora","flour","fluid","flush","fly","foam","focus","fog","foil","fold","follow","food","foot","force","foreign","forest","forget","fork","fortune","forum","forward","fossil","foster","found","fox","fragile","frame","frequent","fresh","friend","fringe","frog","front","frost","frown","frozen","fruit","fuel","fun","funny","furnace","fury","future","gadget","gain","galaxy","gallery","gap","garage","garbage","garden","garlic","garment","gas","gasp","gate","gather","gauge","gaze","general","genius","genre","gentle","genuine","gesture","ghost","giant","gift","giggle","ginger","giraffe","girl","give","glad","glance","glare","glass","glide","glimpse","globe","gloom","glory","glove","glow","glue","goat","goddess","gold","good","goose","gorilla","gospel","gossip","govern","gown","grab","grace","grain","grant","grape","grass","gravity","great","green","grid","grief","grit","grocery","group","grow","grunt","guard","guess","guide","guilt","guitar","gun","gym","habit","hair","half","hammer","hamster","hand","happy","harbor","hard","harsh","harvest","hat","have","hawk","hazard","head","health","heart","heavy","hedgehog","height","hello","helmet","help","hen","hero","hidden","high","hill","hint","hip","hire","history","hobby","hockey","hold","hole","holiday","hollow","home","honey","hood","hope","horn","horror","horse","hospital","host","hotel","hour","hover","hub","human","humble","humor","hundred","hungry","hunt","hurdle","hurry","hurt","husband","hybrid","ice","icon","idea","identify","idle","ignore","ill","illegal","illness","image","imitate","immense","immune","impact","impose","improve","impulse","inch","include","income","increase","index","indicate","indoor","industry","infant","inflict","inform","inhale","inherit","initial","inject","injury","inmate","inner","innocent","input","inquiry","insane","insect","inside","inspire","install","intact","interest","into","invest","invite","involve","iron","island","isolate","issue","item","ivory","jacket","jaguar","jar","jazz","jealous","jeans","jelly","jewel","job","join","joke","journey","joy","judge","juice","jump","jungle","junior","junk","just","kangaroo","keen","keep","ketchup","key","kick","kid","kidney","kind","kingdom","kiss","kit","kitchen","kite","kitten","kiwi","knee","knife","knock","know","lab","label","labor","ladder","lady","lake","lamp","language","laptop","large","later","latin","laugh","laundry","lava","law","lawn","lawsuit","layer","lazy","leader","leaf","learn","leave","lecture","left","leg","legal","legend","leisure","lemon","lend","length","lens","leopard","lesson","letter","level","liar","liberty","library","license","life","lift","light","like","limb","limit","link","lion","liquid","list","little","live","lizard","load","loan","lobster","local","lock","logic","lonely","long","loop","lottery","loud","lounge","love","loyal","lucky","luggage","lumber","lunar","lunch","luxury","lyrics","machine","mad","magic","magnet","maid","mail","main","major","make","mammal","man","manage","mandate","mango","mansion","manual","maple","marble","march","margin","marine","market","marriage","mask","mass","master","match","material","math","matrix","matter","maximum","maze","meadow","mean","measure","meat","mechanic","medal","media","melody","melt","member","memory","mention","menu","mercy","merge","merit","merry","mesh","message","metal","method","middle","midnight","milk","million","mimic","mind","minimum","minor","minute","miracle","mirror","misery","miss","mistake","mix","mixed","mixture","mobile","model","modify","mom","moment","monitor","monkey","monster","month","moon","moral","more","morning","mosquito","mother","motion","motor","mountain","mouse","move","movie","much","muffin","mule","multiply","muscle","museum","mushroom","music","must","mutual","myself","mystery","myth","naive","name","napkin","narrow","nasty","nation","nature","near","neck","need","negative","neglect","neither","nephew","nerve","nest","net","network","neutral","never","news","next","nice","night","noble","noise","nominee","noodle","normal","north","nose","notable","note","nothing","notice","novel","now","nuclear","number","nurse","nut","oak","obey","object","oblige","obscure","observe","obtain","obvious","occur","ocean","october","odor","off","offer","office","often","oil","okay","old","olive","olympic","omit","once","one","onion","online","only","open","opera","opinion","oppose","option","orange","orbit","orchard","order","ordinary","organ","orient","original","orphan","ostrich","other","outdoor","outer","output","outside","oval","oven","over","own","owner","oxygen","oyster","ozone","pact","paddle","page","pair","palace","palm","panda","panel","panic","panther","paper","parade","parent","park","parrot","party","pass","patch","path","patient","patrol","pattern","pause","pave","payment","peace","peanut","pear","peasant","pelican","pen","penalty","pencil","people","pepper","perfect","permit","person","pet","phone","photo","phrase","physical","piano","piece","pig","pigeon","pill","pilot","pink","pioneer","pipe","pirate","pistol","pitch","pizza","place","planet","plastic","plate","play","player","pleasure","plenty","plot","plug","plunge","poem","poet","point","polar","pole","police","pond","pony","pool","popular","portion","position","possible","post","potato","pottery","poverty","powder","power","practice","praise","predict","prefer","pregnant","premium","prepare","presence","prevent","prey","price","pride","primary","prime","prince","prison","private","prize","problem","process","produce","profit","program","project","promote","proof","property","prosper","protect","proud","provide","public","pudding","pull","pulp","pulse","pumpkin","punch","pupil","puppy","purchase","purity","purpose","purse","push","put","puzzle","pyramid","qualify","quality","quantum","quarter","queen","quest","question","quick","quiet","quit","quite","quiz","quote","rabbit","raccoon","race","rack","radar","radio","rail","rain","raise","rally","ramp","ranch","random","range","rapid","rare","rate","rather","raven","raw","razor","ready","real","reason","rebel","rebuild","recall","receive","recipe","record","recycle","reduce","reflect","reform","refuse","region","regret","regular","reject","relax","release","relief","rely","remain","remember","remind","remove","render","renew","rent","reopen","repair","repeat","replace","report","require","rescue","resemble","resist","resource","response","result","retire","retreat","return","reunion","reveal","review","reward","rhythm","rib","ribbon","rice","rich","ride","ridge","rifle","right","rigid","ring","riot","ripple","risk","ritual","rival","river","road","roast","robot","robust","rocket","romance","roof","rookie","room","rose","rotate","rough","round","route","royal","rubber","rude","rug","rule","run","runway","rural","sad","saddle","sadness","safe","sail","salad","salmon","salon","salt","salute","same","sample","sand","satisfy","satoshi","sauce","sausage","save","say","scale","scan","scare","scatter","scene","scheme","school","science","scissors","scorpion","scout","scrap","screen","script","scrub","sea","search","season","seat","second","secret","section","security","seed","seek","segment","select","sell","seminar","senior","sense","sentence","series","service","session","settle","setup","seven","shadow","shaft","shallow","share","shed","shell","sheriff","shield","shift","shine","ship","shiver","shock","shoe","shoot","shop","short","shoulder","shove","shrimp","shrug","shuffle","shy","sibling","sick","side","siege","sight","sign","silent","silk","silly","silver","similar","simple","since","sing","siren","sister","situate","six","size","skate","sketch","ski","skill","skin","skirt","skull","slab","slam","sleep","slender","slice","slide","slight","slim","slogan","slot","slow","slush","small","smart","smile","smoke","smooth","snack","snake","snap","sniff","snow","soap","soccer","social","sock","soda","soft","solar","soldier","solid","solution","solve","someone","song","soon","sorry","sort","soul","sound","soup","source","south","space","spare","spatial","spawn","speak","special","speed","spell","spend","sphere","spice","spider","spike","spin","spirit","split","spoil","sponsor","spoon","sport","spot","spray","spread","spring","spy","square","squeeze","squirrel","stable","stadium","staff","stage","stairs","stamp","stand","start","state","stay","steak","steel","stem","step","stereo","stick","still","sting","stock","stomach","stone","stool","story","stove","strategy","street","strike","strong","struggle","student","stuff","stumble","style","subject","submit","subway","success","such","sudden","suffer","sugar","suggest","suit","sun","sunny","sunset","super","supply","supreme","sure","surface","surge","surprise","surround","survey","suspect","sustain","swallow","swamp","swap","swarm","swear","sweet","swift","swim","swing","swiss","switch","sword","symbol","symptom","syrup","system","table","tackle","tag","tail","talent","talk","tank","tape","target","task","taste","tattoo","taxi","teach","team","tell","ten","tenant","tennis","tent","term","test","text","thank","that","theme","then","theory","there","thermostat","thick","thief","thin","thing","think","third","this","thorn","thought","thread","threat","three","thrive","throw","thumb","thunder","ticket","tide","tiger","tilt","timber","time","tiny","tip","tired","tissue","title","toast","tobacco","today","toddler","toe","together","toilet","token","tomato","tomorrow","tone","tongue","tonight","tool","tooth","top","topic","topple","torch","tornado","tortoise","toss","total","tourist","toward","tower","town","toy","track","trade","traffic","tragic","train","transfer","trap","trash","travel","tray","treat","tree","trend","trial","tribe","trick","trigger","trim","trip","trophy","trouble","truck","true","truly","trumpet","trust","truth","try","tube","tuition","tumble","tuna","tunnel","turkey","turn","turtle","twelve","twenty","twice","twin","twist","two","type","typical","ugly","umbrella","unable","unaware","uncle","uncover","under","undo","unfair","unfold","unhappy","uniform","unique","unit","universe","unknown","unlock","until","unusual","unveil","update","upgrade","uphold","upon","upper","upset","urban","urge","usage","use","used","useful","useless","usual","utility","vacant","vacuum","vague","valid","valley","valve","van","vanish","vapor","various","vast","vault","vehicle","velvet","vendor","venture","venue","verb","verify","version","very","vessel","veteran","viable","vibrant","vicious","victory","video","view","village","vintage","violin","virtual","virus","visa","visit","visual","vital","vivid","vocal","voice","void","volcano","volume","vote","voyage","wage","wagon","wait","walk","wall","walnut","want","warfare","warm","warrior","wash","wasp","waste","water","wave","way","wealth","weapon","wear","weasel","weather","web","wedding","weekend","weird","welcome","west","wet","whale","what","wheat","wheel","when","where","whip","whisper","wide","width","wife","wild","will","win","window","wine","wing","wink","winner","winter","wire","wisdom","wise","wish","witness","wolf","woman","wonder","wood","wool","word","work","world","worry","worth","wrap","wreck","wrestle","wrist","write","wrong","yard","year","yellow","you","young","youth","zebra","zenith","zero","zone","zoo","aether","akashic","alchemy","amethyst","anvil","arcanum","astral","aurora","bastion","beacon","binary","blitz","cipher","cosmic","crux","cypher","daemon","delta","dynamo","eclipse","ember","epsilon","ethereal","fathom","flux","forge","fusion","gamma","genesis","glyph","havoc","hologram","hyperion","ignite","inferno","ion","karma","kinetic","labyrinth","lambda","lattice","lumen","membrane","meteor","momentum","neural","nexus","nucleus","omega","oscillate","paradigm","particle","pendulum","photon","pipeline","plasma","portal","prism","radial","relay","resonate","rift","schema","sentinel","shatter","signal","silicon","singularity","solaris","spectral","spiral","syntax","temple","tensor","terra","tesla","tetra","theta","titan","torus","transit","tribal","trinity","triton","turbo","ultra","umbra","utopia","vector","vertex","vortex","warp","waveform","wick","xenon","yield"];
     </script>
+    <script src="sigil-metamask.js"></script>
     <script type="module">
       // Real wallet derivation — identical to the SIGIL React wallet's
       // keypairFromMnemonic:  priv = SHA3-256(mnemonic) ; pub = Ed25519(priv) ;
       // address = hex(pub) (64-hex). The node keys balances by this 64-hex.
-      import { sha3_256 } from 'https://esm.sh/@noble/hashes@1.3.3/sha3';
-      import { sha512 }   from 'https://esm.sh/@noble/hashes@1.3.3/sha512';
-      import * as ed      from 'https://esm.sh/@noble/ed25519@2.1.0';
+      // ALL crypto is VENDORED — no CDN at runtime. The wallet pages learned this
+      // the hard way: operator-network HTTPS filtering blocked esm.sh, sigilSign
+      // was never defined, and the Send button silently did nothing. The GATE had
+      // the same exposure and worse consequences — a blocked import here means the
+      // key derivation itself is unavailable, i.e. nobody can log in at all.
+      // Each bundle was checked against a published test vector before being
+      // trusted with a key: SHA3-256 and SHA-512 against the NIST "abc" vectors
+      // (SHA3 additionally cross-checked against node:crypto), Ed25519 against
+      // RFC 8032 test 1, Argon2id against RFC 9106.
+      import { argon2id } from './sigil-argon2.mjs';
+      import { sha3_256 } from './sigil-sha3.mjs';
+      import { sha512 }   from './sigil-sha512.mjs';
+      import * as ed      from './sigil-ed25519.mjs';
       ed.etc.sha512Sync = (...m) => sha512(ed.etc.concatBytes(...m));
 
-      function deriveAddress(mnemonic){
-        const priv = sha3_256(new TextEncoder().encode(mnemonic.trim()));
-        const pub  = ed.getPublicKey(priv);
+      // ── Wallet derivation, versioned ────────────────────────────────────
+      //
+      // v1 (original): priv = SHA3-256(phrase). Phrases were always 6 words from a
+      //   2,159-word list = 6 x log2(2159) = 66.5 bits. A hash does not create
+      //   entropy — it only reshapes it — so the 256-bit private key inherited
+      //   exactly those 66.5 bits, which is below every modern floor (NIST wants
+      //   112+ for anything long-lived; BIP39-12 is 128).
+      //
+      // v2 (2026-08-27): 12 words = 132.9 bits, stretched with Argon2id.
+      //   Argon2id adds no entropy either, but it changes the COST of a guess from
+      //   ~0.5us to ~1.2s and, far more importantly, makes each guess need 16 MiB.
+      //   That is what breaks a GPU: a 24 GB card fits ~1,500 memory-hard lanes
+      //   instead of millions of bare hashes, so the attacker's structural
+      //   advantage largely evaporates. It also protects the users who ignore the
+      //   generated phrase and type something memorable of their own.
+      //
+      // PARAMS ARE PART OF THE ADDRESS. Changing t/m/p changes every derived
+      // wallet, so these are pinned; a future tuning must ship as v3, not as an
+      // edit here.
+      const V2_SALT = new TextEncoder().encode('sigilgraph-wallet-v2');
+      const V2_PARAMS = { t: 3, m: 16384, p: 1, dkLen: 32 };   // 16 MiB, ~1.2 s
+
+      // Which scheme does a typed phrase belong to?
+      //
+      // Dispatching on word count is safe because the generator has only ever
+      // emitted SIX words, so no pre-existing wallet can be 12 words. `v1:`/`v2:`
+      // prefixes are the manual escape hatch for anyone whose custom phrase
+      // happens to land on the wrong side of that test.
+      function schemeFor(phrase){
+        const t = phrase.trim();
+        if (/^v1:/i.test(t)) return { v: 1, phrase: t.replace(/^v1:/i, '').trim() };
+        if (/^v2:/i.test(t)) return { v: 2, phrase: t.replace(/^v2:/i, '').trim() };
+        // A MetaMask-derived wallet: one long signature, not words. v2 by construction.
+        if (/^mm2:/i.test(t)) return { v: 2, phrase: t };
+        // The retired MetaMask path hashed the signature down to 6 words; those
+        // wallets are ordinary v1 phrases and keep working via the word-count test.
+        const n = t.split(/\s+/).filter(Boolean).length;
+        return { v: n >= 12 ? 2 : 1, phrase: t };
+      }
+
+      function privToAddress(priv){
+        const pub = ed.getPublicKey(priv);
         return Array.from(pub, b => b.toString(16).padStart(2,'0')).join('');
       }
 
-      window.generateMnemonic = function(){
-        const words=[], pool=new Uint32Array(6);
-        crypto.getRandomValues(pool);
-        for(let i=0;i<6;i++) words.push(WL[pool[i]%WL.length]);
+      // Async because Argon2id takes ~1.2 s. Callers must await.
+      async function deriveAddress(mnemonic){
+        const { v, phrase } = schemeFor(mnemonic);
+        const bytes = new TextEncoder().encode(phrase);
+        const priv = v === 2
+          ? argon2id(bytes, V2_SALT, V2_PARAMS)
+          : sha3_256(bytes);
+        return privToAddress(priv);
+      }
+
+      // Create a fresh wallet: generate a 6-word phrase, show it prominently with a
+      // save-your-words warning, and pre-fill the seed so the user proceeds with one tap.
+      window.createWallet = function(){
+        // TWELVE words, not six: 12 x log2(2159) = 132.9 bits, versus 66.5 before.
+        // Rejection sampling rather than a bare `% WL.length` — the modulo bias is
+        // tiny (~5e-7) but it costs nothing to not have it.
+        const words=[];
+        const limit = Math.floor(0x100000000 / WL.length) * WL.length;
+        while (words.length < 12) {
+          const r = new Uint32Array(1);
+          crypto.getRandomValues(r);
+          if (r[0] < limit) words.push(WL[r[0] % WL.length]);
+        }
         const phrase = words.join(' ');
-        document.getElementById('mnemonic').textContent = phrase;
+        const wl=document.getElementById('words'); wl.textContent = phrase; wl.classList.add('show');
+        document.getElementById('warn').classList.add('show');
         document.getElementById('seed').value = phrase;
       };
+      // legacy alias kept for any old callers
+      window.generateMnemonic = window.createWallet;
 
-      window.go = function(){
+      // ── Create a SIGIL wallet from MetaMask (2026-08-26) ──────────────────
+      // The user signs one fixed, human-readable message. personal_sign is
+      // deterministic ECDSA (RFC 6979), so the SAME MetaMask account always
+      // produces the SAME signature for this exact string, and therefore the
+      // same SIGIL wallet — the account becomes a recovery path.
+      //
+      // The signature is hashed down into a 6-word phrase from the SAME
+      // wordlist `createWallet()` uses, so a MetaMask-made wallet is an
+      // ordinary SIGIL wallet in every respect: same derivation
+      // (priv = SHA3-256(phrase), pub = Ed25519(priv)), same format, and the
+      // user still gets 6 words they can write down. Nothing about the rest of
+      // the wallet, the node, or signing needs to know MetaMask was involved.
+      //
+      // The message is versioned and pins the account, so a future v2 can
+      // change derivation without silently moving anyone's existing wallet.
+      function mmMessage(account){
+        return [
+          'SIGILGRAPH wallet derivation v1',
+          '',
+          'Signing this message derives your SIGIL wallet key.',
+          'It is deterministic: this MetaMask account will always',
+          'produce the same SIGIL wallet.',
+          '',
+          'This is NOT a transaction and costs no gas.',
+          'Only sign this on a site you trust.',
+          '',
+          'Account: ' + account
+        ].join('\n');
+      }
+
+      function mmStat(msg, cls){
+        var e = document.getElementById('mmStat');
+        if(e){ e.textContent = msg || ''; e.className = 'mmstat' + (cls ? ' ' + cls : ''); }
+      }
+
+      // signature -> 6 words, by hashing and taking 4 bytes per word. Uses the
+      // same SHA3-256 already imported for address derivation.
+      function mmPhraseFromSignature(sig){
+        const h = sha3_256(new TextEncoder().encode('sigil-mm-v1|' + sig.toLowerCase()));
+        const words = [];
+        for(let i=0;i<6;i++){
+          const n = ((h[i*4]<<24)>>>0) + ((h[i*4+1]<<16)>>>0) + ((h[i*4+2]<<8)>>>0) + h[i*4+3];
+          words.push(WL[n % WL.length]);
+        }
+        return words.join(' ');
+      }
+
+      window.createWalletMetaMask = async function(){
+        const btn = document.getElementById('mmCreateBtn');
+        if(!window.SigilMM){ mmStat('MetaMask helper failed to load — reload the page.', 'err'); return; }
+        if(!window.SigilMM.available()){
+          mmStat('No browser wallet detected. Install MetaMask, then reload this page.', 'err');
+          return;
+        }
+        if(btn) btn.disabled = true;
+        try{
+          mmStat('Waiting for MetaMask\u2026');
+          const st = await window.SigilMM.connect();
+
+          mmStat('Switching MetaMask to Polygon\u2026');
+          try { await window.SigilMM.ensurePolygon(); }
+          catch(e){ /* declining the switch must not block wallet creation */ }
+
+          mmStat('Adding the wrapped SIGIL token\u2026');
+          try { await window.SigilMM.watchToken(); } catch(e){}
+
+          mmStat('Sign the message in MetaMask to derive your wallet\u2026');
+          const sig = await window.SigilMM.signMessage(mmMessage(st.account));
+          if(!sig) throw new Error('MetaMask returned no signature.');
+
+          // v2: the signature carries ~256 bits. The old path hashed it down into
+          // SIX words and derived from those, throwing away all but 66.5 bits for
+          // no benefit — nobody needs to memorise a MetaMask-derived wallet,
+          // because the MetaMask account IS the backup. Use the signature directly.
+          const phrase = 'mm2:' + sig.toLowerCase();
+          const addr = await deriveAddress(phrase);
+
+          const wl = document.getElementById('words');
+          wl.textContent = 'Your MetaMask account is your backup — re-sign on this page to recover this wallet. There is no phrase to write down.';
+          wl.classList.add('show');
+          document.getElementById('seed').value = phrase;
+
+          // Remember which Polygon account this came from, so the wallet can
+          // pre-fill the bridge destination without asking again.
+          try { localStorage.setItem('sigil-mm-account', st.account); } catch(e){}
+
+          mmStat('\u2713 Wallet ' + addr.slice(0,10) + '\u2026' + addr.slice(-6) + ' derived from ' + st.account.slice(0,6) + '\u2026' + st.account.slice(-4) + '. Press \u25c8 Enter Sigilgraph.', 'ok');
+        }catch(e){
+          const m = (e && (e.message || e.toString())) || 'unknown error';
+          // 4001 = user rejected the request in MetaMask.
+          if(e && e.code === 4001) mmStat('Cancelled in MetaMask.', 'err');
+          else mmStat('MetaMask: ' + m, 'err');
+        }finally{
+          if(btn) btn.disabled = false;
+        }
+      };
+      // Shortcut to the node-served wallet (sigil-top serves it at localhost:9800,
+      // the same wallet the node's [W] key opens). https→http://localhost is allowed
+      // for top-level navigations; if the node isn't running the tab shows a plain
+      // connection error, which is the honest signal to start sigil-top.
+      window.openLocalWallet = function(){
+        window.open('http://localhost:9800','_blank','noopener');
+      };
+
+      window.go = async function(){
         const seed = document.getElementById('seed').value.trim();
         if(!seed){ alert('Enter a seed phrase or generate one'); return; }
         let address;
         if(/^[0-9a-fA-F]{64}$/.test(seed)){
           address = seed.toLowerCase();              // already a raw address
         } else {
-          try { address = deriveAddress(seed); }      // mnemonic → fresh wallet
+          // v2 derivation is Argon2id — deliberately slow (~1.2 s, longer on a
+          // phone). Say so, or the page looks frozen and people click twice.
+          const btn = document.getElementById('goBtn');
+          const prev = btn ? btn.textContent : null;
+          if (btn) { btn.disabled = true; btn.textContent = 'Deriving your wallet…'; }
+          try { address = await deriveAddress(seed); }
           catch(e){ alert('Could not derive a wallet from that phrase: '+e); return; }
+          finally { if (btn) { btn.disabled = false; if (prev !== null) btn.textContent = prev; } }
         }
         localStorage.setItem('sigil-wallet-seed', seed);
         localStorage.setItem('sigil-wallet-address', address);
-        // LANE-N: tell the local node to MINE to this (keyed) wallet, so mined coins
-        // land where [W] shows them — not the unspendable hostname-hash default.
-        // Best-effort: only the embedded :9800 node serves /api/v1/use-wallet.
-        try { fetch('/api/v1/use-wallet?address='+encodeURIComponent(address), {cache:'no-store'}); } catch(e){}
-        window.location.href='sigil-wallet-tron.html';
+        // Absolute → the shared fluxapp vhost where /api (sigil-rpcd) is wired, so
+        // balances load regardless of which host served this gate (apex sigilgraph
+        // is served by its own fluxc-serve backend that only carries the gate).
+        // 2026-08-26 (operator-directed): RELATIVE, so the wallet opens on the SAME
+        // ORIGIN that served this gate. It used to be a hardcoded absolute redirect to
+        // fluxapp.xyz — but this gate saves `sigil-wallet-seed`/`sigil-wallet-address`
+        // to localStorage, and localStorage is PER-ORIGIN. Sending the user across a
+        // domain boundary made the seed they had just typed invisible to the wallet, so
+        // it re-prompted for the recovery phrase on EVERY send, forever. Reported as
+        // "i've just logged in using the same mnemonic, now it asks me twice".
+        // Same origin => the seed is simply already there. No secret in any URL.
+        // Verified 2026-08-26: sigilgraph.org serves /v1/health, /v1/balance and
+        // /v1/shielded/address all 200, so the old "only fluxapp has /api wired"
+        // reason for the absolute URL no longer holds.
+        window.location.href='sigil-wallet-tron-embedded.html';
       };
 
       // ── chain search from the gate (same as wallet/explorer; routes detail to the explorer) ──

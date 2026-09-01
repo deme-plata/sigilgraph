@@ -171,6 +171,39 @@ body.view-desktop .desktop{display:flex}
 .caption{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:3;font-family:'JetBrains Mono';font-size:11px;color:var(--dim);letter-spacing:1px}.caption b{color:var(--cyan)}
 </style>
 <link rel="stylesheet" href="/sigil-wallet-codex.css?v=20260819-1">
+<style id="ac-bank">
+/* 2026-08-27 — Recent Activity redesigned to bank-statement legibility.
+   Operator brief: "big buttons, clear text, 16-18pt". Previous markup used
+   12px titles / 9.5px sublines / 8.5px badges — the complaint, precisely.
+   tnum keeps decimal points aligned down the amount column, which is the one
+   detail that makes a statement scannable instead of just a list. */
+#acList{font-family:Inter,system-ui,-apple-system,'Segoe UI',sans-serif;font-feature-settings:"tnum" 1}
+#acList .ac-day{font-size:15px;font-weight:600;color:#63758a;text-transform:uppercase;
+  letter-spacing:.06em;margin:20px 2px 8px}
+#acList .ac-grp{background:rgba(8,16,24,.55);border:1px solid rgba(33,212,253,.14);
+  border-radius:16px;overflow:hidden}
+#acList .ac-row{display:flex;align-items:center;gap:15px;padding:17px 18px;min-height:76px;
+  border-bottom:1px solid rgba(33,212,253,.09);transition:background .12s}
+#acList .ac-grp .ac-row:last-child{border-bottom:none}
+#acList .ac-row:hover{background:rgba(33,212,253,.05)}
+#acList .ac-ic{width:46px;height:46px;border-radius:13px;flex:none;display:grid;place-items:center;font-size:21px}
+#acList .ac-mid{flex:1;min-width:0}
+#acList .ac-t1{font-size:17px;font-weight:600;letter-spacing:-.01em;color:#eaf0f6;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#acList .ac-t2{font-size:15px;color:#93a3b5;margin-top:3px;display:flex;align-items:center;
+  gap:7px;flex-wrap:wrap;overflow-wrap:anywhere}
+#acList .ac-amt{flex:none;text-align:right;font-size:19px;font-weight:700;letter-spacing:-.02em;white-space:nowrap}
+#acList .ac-amt small{display:block;font-size:13px;font-weight:600;color:#63758a;letter-spacing:.4px;margin-top:1px}
+#acList .ac-tag{font-size:13px;font-weight:600;padding:3px 9px;border-radius:7px;
+  border:1px solid rgba(33,212,253,.2);color:#93a3b5}
+#acList .ac-tag.pend{color:#f5c451;border-color:rgba(245,196,81,.35);background:rgba(245,196,81,.09)}
+#acList .ac-tag.shield{color:#a78bfa;border-color:rgba(167,139,250,.35);background:rgba(167,139,250,.09)}
+#acList .ac-empty{padding:30px 20px;font-size:16px;line-height:1.6;color:#93a3b5}
+#acList .ac-empty h3{color:#eaf0f6;font-size:20px;margin:0 0 8px;font-weight:600}
+#acList .ac-why{margin-top:16px;background:rgba(167,139,250,.07);border:1px solid rgba(167,139,250,.28);
+  border-radius:12px;padding:14px 16px;font-size:15px;line-height:1.55}
+#acList .ac-why b{color:#a78bfa}
+</style>
 </head>
 <body>
 <div class="scene"><div class="aurora"><i></i><i></i><i></i></div></div>
@@ -203,7 +236,8 @@ body.view-desktop .desktop{display:flex}
   <div class="list" id="passets"></div>
   <div class="sect" style="margin:18px 16px 8px"><span>🌉 Polygon Bridge</span></div>
   <div style="margin:0 16px 16px;background:rgba(4,8,12,.55);border:1px solid rgba(33,212,253,.16);border-radius:14px;padding:12px">
-    <div style="font-family:'JetBrains Mono';font-size:10.5px;color:var(--dim);padding:0 0 10px;line-height:1.5">Wrapped SIGIL on Polygon mainnet — real bridge, real contract, nothing locked/minted yet so every address correctly reads 0 today.</div>
+    <div style="font-family:'JetBrains Mono';font-size:10.5px;color:var(--dim);padding:0 0 8px;line-height:1.5">Wrapped SIGIL on Polygon mainnet — real bridge, real contract.</div>
+    <div id="polyMktPhone" style="font-family:'JetBrains Mono';font-size:10.5px;color:var(--dim);padding:0 0 10px;line-height:1.6">reading Polygon…</div>
     <div style="display:flex;gap:8px;margin-bottom:8px">
       <input id="polyAddrPhone" placeholder="0x… your Polygon address" style="flex:1;min-width:0;background:rgba(4,8,12,.7);border:1px solid rgba(33,212,253,.22);border-radius:8px;color:#cfe9f2;font-family:'JetBrains Mono';font-size:12px;padding:9px 10px;outline:none">
       <button onclick="window.polyBridgeUseMetaMask('polyAddrPhone')" title="autofill from MetaMask" style="flex:none;background:rgba(33,212,253,.1);border:1px solid rgba(33,212,253,.35);color:#6df3ff;border-radius:8px;padding:0 12px;cursor:pointer;font-size:15px">🦊</button>
@@ -244,6 +278,7 @@ body.view-desktop .desktop{display:flex}
       <div class="mi" onclick="window.closeProfile();window.openStats&&openStats()"><span class="g"><i class="lic" data-lucide="activity" style="width:15px;height:15px"></i></span>Network stats</div>
       <div class="mi" onclick="window.closeProfile();window.openPower&&openPower()"><span class="g"><i class="lic" data-lucide="activity" style="width:15px;height:15px"></i></span>Network Power</div>
       <div class="mi" onclick="window.closeProfile();window.openMine&&openMine()"><span class="g"><i class="lic" data-lucide="pickaxe" style="width:15px;height:15px"></i></span>Mine SIGIL</div>
+      <div class="mi" onclick="window.closeProfile();window.openNation&&openNation()"><span class="g"><i class="lic" data-lucide="landmark" style="width:15px;height:15px"></i></span>Nation · Welfare</div>
       <div class="mi" onclick="window.closeProfile();window.openReceive&&openReceive()"><span class="g"><i class="lic" data-lucide="arrow-down-to-dot" style="width:15px;height:15px"></i></span>Receive · address</div>
       <div class="sep"></div>
       <a class="mi" href="https://sigilgraph.org/sigil-downloads.html" target="_blank" rel="noopener"><span class="g"><i class="lic" data-lucide="arrow-down-left" style="width:15px;height:15px"></i></span>Downloads</a>
@@ -271,6 +306,9 @@ body.view-desktop .desktop{display:flex}
         <div class="grp">Earn</div>
         <a class="soon" title="staking not live on sigil-g0 yet"><i class="lic" data-lucide="layers"></i>Stake<span class="soonchip">soon</span></a>
         <a onclick="openMine();return false" style="cursor:pointer"><i class="lic" data-lucide="pickaxe"></i>Mine</a>
+        <div class="grp">Nation</div>
+        <a id="navNation" onclick="openNation();return false" style="cursor:pointer" title="SIGIL-Nation welfare — a citizen stipend financed by the mining dev fee"><i class="lic" data-lucide="landmark"></i>Welfare</a>
+        <a id="navSigilOS" onclick="openSigilOS();return false" style="cursor:pointer" title="SIGIL OS — a browser desktop for the Nation"><i class="lic" data-lucide="monitor"></i>SIGIL OS</a>
         <div class="grp">System</div>
         <a href="flux://stats"><i class="lic" data-lucide="activity"></i>Node stats</a>
         <a href="flux://enter"><i class="lic" data-lucide="user-plus"></i>New wallet</a>
@@ -306,7 +344,8 @@ body.view-desktop .desktop{display:flex}
           </div>
           <div class="card" id="polyBridgeCard">
             <div class="sect" style="margin-bottom:8px"><span>🌉 Polygon Bridge</span><a href="https://polygonscan.com/token/0xc224602C32F5c7f68d3Ef002aE4C99e4C7Df25B7" target="_blank" rel="noreferrer" style="cursor:pointer;color:var(--cyan);text-decoration:none;font-size:11px;border:1px solid var(--line);border-radius:999px;padding:3px 10px">↗ contract</a></div>
-            <div style="font-family:'JetBrains Mono';font-size:10.5px;color:var(--dim);padding:0 2px 10px;line-height:1.5">Wrapped SIGIL (ERC-20), 1:1 bridged from sigil-g0. Real bridge, real contract, live on Polygon mainnet — but nothing has been locked/minted through it yet, so every address correctly reads 0 today.</div>
+            <div style="font-family:'JetBrains Mono';font-size:10.5px;color:var(--dim);padding:0 2px 8px;line-height:1.5">Wrapped SIGIL (ERC-20), 1:1 bridged from sigil-g0. Real bridge, real contract, live on Polygon mainnet.</div>
+            <div id="polyMktDesk" style="font-family:'JetBrains Mono';font-size:10.5px;color:var(--dim);padding:0 2px 10px;line-height:1.6">reading Polygon…</div>
             <div style="display:flex;gap:8px;margin-bottom:8px">
               <input id="polyAddrDesk" placeholder="0x… your Polygon address" style="flex:1;min-width:0;background:rgba(4,8,12,.7);border:1px solid rgba(33,212,253,.22);border-radius:8px;color:#cfe9f2;font-family:'JetBrains Mono';font-size:12px;padding:9px 10px;outline:none">
               <button onclick="window.polyBridgeUseMetaMask('polyAddrDesk')" title="autofill from MetaMask" style="flex:none;background:rgba(33,212,253,.1);border:1px solid rgba(33,212,253,.35);color:#6df3ff;border-radius:8px;padding:0 12px;cursor:pointer;font-size:15px">🦊</button>
@@ -721,6 +760,12 @@ body.view-desktop .desktop{display:flex}
     }
     return { balance:balance, gross:gross, notes:notes, netted:!!spent, epochs:live+1, sealed:sealed };
   }
+  // 2026-08-27: exposed so the Activity ledger's shielded observer can reuse the
+  // SAME scanner the Shield card uses, rather than a second implementation of
+  // trial-decryption. Without this the observer silently no-ops and a shielded
+  // miner keeps seeing an empty activity list.
+  try{ window._scanAllEpochsFast = _scanAllEpochsFast; }catch(e){}
+
 
   async function refreshShielded(){
     const el=document.getElementById('shieldBal'), nt=document.getElementById('shieldNote');
@@ -828,13 +873,56 @@ window.lucide={createIcons:render};render();})();</script>
   (*! noble-ciphers - MIT License (c) 2023 Paul Miller (paulmillr.com) *)
 */
 </script>
+<script type="module">
+  // Argon2id for v2 wallet derivation. VENDORED, not imported from a CDN: this
+  // page was broken once before by operator-network HTTPS filtering blocking
+  // esm.sh, which left sigilSign undefined and the Send button dead. Verified
+  // against the RFC 9106 Argon2id test vector before being trusted with a key.
+  import { argon2id } from './sigil-argon2.mjs';
+  window.__argon2id = argon2id;
+</script>
 <script>
   try {
     const { ed, sha3_256, sha512 } = window.__noble;
     ed.etc.sha512Sync = (...m) => sha512(ed.etc.concatBytes(...m)); // @noble/ed25519 v2 needs this for sync sign
     const hex = (u8) => Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join('');
+    // ── Versioned derivation. MUST stay byte-identical to enter-sigil.html's,
+    //    or a wallet created at the gate cannot sign here. ──────────────────
+    //
+    // v1: priv = SHA3-256(phrase). Six words over a 2,159-word list = 66.5 bits.
+    //     Hashing does not create entropy, so the 256-bit key only ever had 66.5.
+    // v2 (2026-08-27): twelve words = 132.9 bits, stretched with Argon2id at
+    //     16 MiB / t=3. The memory cost is the point: it denies an attacker the
+    //     GPU parallelism that makes a bare-hash guess free.
+    //
+    // Params are part of the address — retuning them means shipping a v3.
+    const V2_SALT = new TextEncoder().encode('sigilgraph-wallet-v2');
+    const V2_PARAMS = { t: 3, m: 16384, p: 1, dkLen: 32 };
+
+    function sigilSchemeFor(phrase){
+      const t = String(phrase).trim();
+      if (/^v1:/i.test(t))  return { v: 1, phrase: t.replace(/^v1:/i, '').trim() };
+      if (/^v2:/i.test(t))  return { v: 2, phrase: t.replace(/^v2:/i, '').trim() };
+      if (/^mm2:/i.test(t)) return { v: 2, phrase: t };   // MetaMask v2: raw signature
+      // The generator only ever emitted SIX words, so nothing pre-existing is 12.
+      return { v: (t.split(/\s+/).filter(Boolean).length >= 12) ? 2 : 1, phrase: t };
+    }
+
     window.sigilDeriveFrom = (mnemonic) => {
-      const priv = sha3_256(new TextEncoder().encode(String(mnemonic).trim()));
+      const { v, phrase } = sigilSchemeFor(mnemonic);
+      const bytes = new TextEncoder().encode(phrase);
+      let priv;
+      if (v === 2) {
+        // Synchronous on purpose: there are ~10 call sites in this file alone,
+        // all sync, and turning money-signing async to save a preload would be a
+        // far riskier change than loading 13 KB up front.
+        if (!window.__argon2id) {
+          throw new Error('Secure (12-word) derivation is still loading — try again in a moment.');
+        }
+        priv = window.__argon2id(bytes, V2_SALT, V2_PARAMS);
+      } else {
+        priv = sha3_256(bytes);
+      }
       return { priv, address: hex(ed.getPublicKey(priv)) };
     };
     // 2026-08-26: a wallet credited by mining (SIGIL_MINE_SEED) can NEVER sign
@@ -1045,8 +1133,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     </div>
     <div id="sendReceipt" style="display:none;flex:1;overflow-y:auto;padding:18px;flex-direction:column;gap:11px;font-family:'Rajdhani',system-ui,sans-serif">
       <div style="text-align:center;padding:6px 0 2px">
-        <div style="font-size:34px;color:#00e0c6;text-shadow:0 0 18px rgba(0,224,198,.6)">🛡</div>
-        <div style="font-family:'Orbitron';font-weight:700;letter-spacing:1px;color:#00e0c6;font-size:15px;margin-top:2px">SHIELDED</div>
+        <div id="rcIcon" style="font-size:34px;color:#00e0c6;text-shadow:0 0 18px rgba(0,224,198,.6)">🛡</div>
+        <div id="rcHead" style="font-family:'Orbitron';font-weight:700;letter-spacing:1px;color:#00e0c6;font-size:15px;margin-top:2px">SHIELDED</div>
         <div id="rcAmt" style="font-family:'Orbitron';font-weight:900;font-size:26px;color:#6df3ff;margin-top:6px"></div>
       </div>
       <div id="rcRows" style="display:flex;flex-direction:column;gap:0"></div>
@@ -1054,7 +1142,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         <button onclick="receiptCopyTx()" id="rcCopyBtn" style="flex:1;background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:10px;padding:10px;cursor:pointer;font-family:'JetBrains Mono';font-size:11px">⧉ copy txid</button>
         <button onclick="receiptDone()" style="flex:1;background:linear-gradient(90deg,rgba(33,212,253,.18),rgba(0,224,198,.14));border:1px solid rgba(33,212,253,.4);color:#6df3ff;border-radius:10px;padding:10px;cursor:pointer;font-family:'Orbitron';font-size:11px;letter-spacing:1px">DONE</button>
       </div>
-      <div style="font-family:'JetBrains Mono';font-size:9.5px;color:#5a93a8;text-align:center">queued into the private pool — lands once the DAG finalizes (can take a while; check the explorer)</div>
+      <div id="rcFoot" style="font-family:'JetBrains Mono';font-size:9.5px;color:#5a93a8;text-align:center;line-height:1.6"></div>
     </div>
     <div id="sendForm" style="flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:14px">
       <!-- ══ UNIFIED SEND (2026-08-26, operator-directed) ═══════════════════════════
@@ -1625,27 +1713,64 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     // Ask the CHAIN which commitments exist and pick an index that is genuinely
     // free. The candidate cm is built with the SAME S.* derivation used to
     // submit it two lines below, so what we test is exactly what we send.
-    var poolTaken=Object.create(null), usedIdx=Object.create(null);
-    try{
-      var plr=await fetch('/v1/shielded/leaves',{cache:'no-store'});
-      var plj=null; try{ plj=await plr.json(); }catch(_){}
-      if(plj && plj.ok && plj.leaves){
-        for(var pi=0;pi<plj.leaves.length;pi++) poolTaken[String(plj.leaves[pi]).toLowerCase()]=1;
-      } else { throw new Error('pool unreadable'); }
-    }catch(e){
-      // Fail CLOSED. Submitting blind is what produced the permanently-stuck
-      // deposits; refusing costs the user one retry and nothing else.
-      sendStatus('✗ could not read the shielded pool — not submitting blind (a re-used note commitment is rejected forever). Try again in a moment.', '#ff8a8a');
-      if(btn)btn.disabled=false; return;
+    var usedIdx=Object.create(null);
+
+    // ── ASK ABOUT ONE COMMITMENT, NOT THE WHOLE POOL (2026-08-27) ─────────────
+    //
+    // What we need to know is tiny: "does this exact commitment already exist?"
+    // The previous two attempts answered it by downloading every leaf and
+    // searching locally — first the live epoch (which went blind the moment the
+    // pool rotated, since ~112,000 sealed commitments vanished from that view and
+    // a send was refused 34 times as a duplicate), then every epoch (correct, but
+    // four generations of leaves is ~33 MB of JSON in a browser tab, and it died
+    // partway with "pool unreadable (epoch 1)").
+    //
+    // `/v1/shielded/has` asks the node the actual question. It looks in
+    // `seen_commitments`, which spans sealed epochs and the live one alike, and
+    // answers in a few dozen bytes. A commitment is unique per (index, value, key)
+    // FOREVER, so this is the same question the chokepoint will ask when the
+    // deposit lands — we are now testing exactly what consensus tests.
+    var _hasCache=Object.create(null);
+    var _bulkTaken=null;   // legacy fallback only — see _loadBulk
+
+    // A node older than this endpoint 404s. Fall back to the full walk rather
+    // than guessing: an unanswerable question must not become a "no".
+    async function _loadBulk(){
+      if(_bulkTaken) return;
+      var t=Object.create(null);
+      var a=await fetch('/v1/shielded/anchor',{cache:'no-store'}).then(function(r){return r.json();});
+      var live=(a && typeof a.epoch==='number') ? a.epoch : 0;
+      for(var e=0;e<=live;e++){
+        var u=(e===live) ? '/v1/shielded/leaves' : ('/v1/shielded/leaves?epoch='+e);
+        var r=await fetch(u,{cache:'no-store'});
+        var j=null; try{ j=await r.json(); }catch(_){}
+        if(!j || !j.ok || !j.leaves) throw new Error('pool unreadable (epoch '+e+')');
+        for(var i=0;i<j.leaves.length;i++) t[String(j.leaves[i]).toLowerCase()]=1;
+      }
+      _bulkTaken=t;
     }
-    function freeIndexFor(value){
+
+    async function _cmExists(hex){
+      var k=String(hex).toLowerCase();
+      if(k in _hasCache) return _hasCache[k];
+      if(_bulkTaken) return (_hasCache[k]=!!_bulkTaken[k]);
+      var r=await fetch('/v1/shielded/has?cm='+k,{cache:'no-store'});
+      if(r.status===404){ await _loadBulk(); return (_hasCache[k]=!!_bulkTaken[k]); }
+      var j=null; try{ j=await r.json(); }catch(_){}
+      // Fail CLOSED on anything ambiguous. Submitting blind is what produced the
+      // permanently-stuck deposits; refusing costs the user one retry.
+      if(!j || j.ok!==true || typeof j.present!=='boolean') throw new Error('shielded/has unreadable');
+      return (_hasCache[k]=j.present);
+    }
+
+    async function freeIndexFor(value){
       for(var idx=0; idx<4096; idx++){
         if(usedIdx[idx]) continue;
         var b=S.deriveField(seed32,'blinding',idx);
         var innr=S.compress2(BigInt(value),b);
         var c=S.compress2(innr,pk);
         var h=S.toWireHex(c);
-        if(!poolTaken[String(h).toLowerCase()]){ usedIdx[idx]=1; return {index:idx, blinding:b, cmHex:h}; }
+        if(!(await _cmExists(h))){ usedIdx[idx]=1; return {index:idx, blinding:b, cmHex:h}; }
       }
       return null;
     }
@@ -1655,7 +1780,12 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     var bookedIndices=[];
     for(var i=0;i<denomParts.length;i++){
       var value=denomParts[i];
-      var slot=freeIndexFor(value);
+      var slot=null;
+      try{ slot=await freeIndexFor(value); }
+      catch(_e){
+        sendStatus('\u2717 could not read the shielded pool \u2014 not submitting blind (a re-used note commitment is rejected forever). Try again in a moment.', '#ff8a8a');
+        if(btn)btn.disabled=false; return;
+      }
       if(!slot){ failed='no free note index for '+(Number(value)/1e8).toFixed(8)+' SIGIL in the first 4096 — this wallet has deposited that denomination a lot; try a different amount'; break; }
       var index=slot.index;
       var cmHex=slot.cmHex;
@@ -1703,11 +1833,47 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   };
   function _rcRow(l,v){ return '<div style="display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid rgba(33,212,253,.09)"><span style="font-family:\'JetBrains Mono\';font-size:10px;letter-spacing:1px;color:#5a93a8;text-transform:uppercase">'+l+'</span><span style="font-family:\'JetBrains Mono\';font-size:11px;color:#cfe9f2;overflow-wrap:anywhere;text-align:right">'+v+'</span></div>'; }
   window.__lastTxid='';
-  function showReceipt(landedParts, amtStr, from, warn){
+  // ── The receipt must say WHICH of the two steps just happened. ──────────────
+  //
+  // A payment on SIGIL is shield-then-shielded-send (there is no transparent send:
+  // SHIELDED_ONLY_HEIGHT = 0). Both steps rendered THIS pane with the same headline,
+  // the same "queued into the private pool" footer, and a `wallet` row showing the
+  // SENDER — so a completed step 1 was visually identical to a completed payment.
+  // On 2026-08-27 the operator shielded 210 SIGIL, saw this receipt, and reasonably
+  // concluded it had been sent. It had not: it was in his own shielded balance. The
+  // SAME receipt had also been shown while the node was rejecting the transaction on
+  // every single block. A receipt that looks identical whether you succeeded,
+  // half-succeeded, or were refused is worse than no receipt.
+  //
+  // `kind`: 'shield' (step 1, your own private balance) | 'send' (step 2, recipient
+  // actually paid). Also stamps data-kind on the pane — the orchestrator keys on it.
+  function showReceipt(landedParts, amtStr, from, warn, kind, recipient){
+    kind = (kind === 'send') ? 'send' : 'shield';
     window.__lastTxid=(landedParts[0]&&landedParts[0].txid)||'';
     var short=function(a){ return a?(a.slice(0,10)+'…'+a.slice(-8)):'—'; };
     document.getElementById('rcAmt').textContent=amtStr+' SIGIL';
-    var rows=_rcRow('wallet','<span title="'+from+'">'+short(from)+'</span>')+
+
+    var pane=document.getElementById('sendReceipt');
+    if(pane) pane.setAttribute('data-kind', kind);
+    var icon=document.getElementById('rcIcon'), head=document.getElementById('rcHead'),
+        foot=document.getElementById('rcFoot');
+    if(kind==='send'){
+      if(icon) icon.textContent='🔒';
+      if(head){ head.textContent='SENT PRIVATELY'; head.style.color='#c0a8fa'; }
+      if(foot) foot.innerHTML='submitted to the network — final once the DAG settles it '
+        +'(~512 blocks). Until then it is accepted, not finished.';
+    } else {
+      if(icon) icon.textContent='🛡';
+      if(head){ head.textContent='SHIELDED — NOT SENT YET'; head.style.color='#00e0c6'; }
+      if(foot) foot.innerHTML='<b style="color:#fbbf24">Step 1 of 2.</b> Your SIGIL is now in '
+        +'YOUR OWN private balance — nobody has been paid. To pay someone: enter their address, '
+        +'press CHECK, then 🔒 SEND PRIVATELY.';
+    }
+
+    var rows=_rcRow(kind==='send'?'from':'wallet','<span title="'+from+'">'+short(from)+'</span>')+
+      (kind==='send' && recipient
+        ? _rcRow('to','<span title="'+(recipient.wallet||recipient)+'">'+short(recipient.wallet||recipient)+'</span>')
+        : _rcRow('status','<span style="color:#fbbf24">your private balance — NOT sent</span>'))+
       _rcRow('notes',landedParts.length+' (denomination-split)')+
       _rcRow('time',new Date().toLocaleString());
     landedParts.forEach(function(p,i){
@@ -1930,11 +2096,19 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         uniMsg(attempts===1 ? 'Step 2 of 2 — building the private payment…'
                             : 'Step 2 of 2 — waiting for your private balance to finalize on the DAG (attempt '+attempts+' of '+MAXT+')…', '#6df3ff');
         var before=(document.getElementById('privMsg')||{}).textContent||'';
-        try{ await window.doPrivateSend(); }catch(e){}
+        // Step 1 leaves the receipt pane VISIBLE, so the old test here —
+        // "is the receipt pane visible?" — was ALREADY TRUE before doPrivateSend()
+        // had done anything. Step 2 therefore declared success on its first attempt
+        // every time, and the wallet reported DONE for a payment it never made.
+        // (Reproduced live 2026-08-27: 210 SIGIL shielded, nothing sent, receipt shown.)
+        // Hide the pane first, then require BOTH an explicit true AND a receipt
+        // stamped data-kind="send".
+        var rcPane=document.getElementById('sendReceipt');
+        if(rcPane){ rcPane.style.display='none'; rcPane.removeAttribute('data-kind'); }
+        var sent=false;
+        try{ sent = (await window.doPrivateSend())===true; }catch(e){ sent=false; }
         var pm=(document.getElementById('privMsg')||{}).textContent||'';
-        // doPrivateSend() shows the shared receipt pane on success; that is the
-        // signal we key on, since it has no return value.
-        if(document.getElementById('sendReceipt') && document.getElementById('sendReceipt').style.display!=='none'){ ok=true; break; }
+        if(sent && rcPane && rcPane.getAttribute('data-kind')==='send'){ ok=true; break; }
         if(attempts<MAXT) await new Promise(function(r){ setTimeout(r,3000); });
       }
       if(ok){ uniStep(2,'done'); uniMsg(''); }
@@ -1975,7 +2149,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   window.sigilShieldWasmReady = (async function(){
     var el=document.getElementById('privWasmState');
     try{
-      var mod = await import('./wasm/sigil_shield.js');
+      var mod = await import('./wasm/sigil_shield.js?v=740');
       await mod.default(); // fetches + instantiates the sibling .wasm
       window.sigilShieldWasm = mod;
       if(el){ el.textContent='prover ready'; el.style.color='#00e0c6'; }
@@ -2082,8 +2256,37 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       var rj = null; try{ rj = await rr.json(); }catch(_){}
       if(rr.ok && rj && rj.ok){
         st[addr] = 'pending';
-        log('🔐 '+addr.slice(0,10)+'… registered to receive privately — takes a few minutes to settle, then mining rewards mint as private notes too.');
-        return {ok:true, txid: rj.txid};
+        // SUBMITTED is not REGISTERED. This used to claim "registered" the
+        // instant the POST returned, while the chain still answered
+        // `wallet has not registered a shielded address` for about another
+        // minute — measured 2026-08-28: POST at t=0, /v1/shielded/address
+        // resolved between t=30s and t=60s. Anyone told "registered" and then
+        // handed the address in that window watched their private send bounce,
+        // with the wallet insisting it had worked. Same false-receipt shape as
+        // the send flow. So: say SUBMITTED now, and only say registered once
+        // the chain says so.
+        log('🔐 '+addr.slice(0,10)+'… registration submitted — confirming on-chain (~1 min). Private payments to this address will bounce until it settles.');
+        (function confirmRegistration(tries){
+          if(tries <= 0){
+            st[addr] = 'unknown';
+            log('⚠ '+addr.slice(0,10)+'… registration has not shown up on-chain yet. It may still settle; re-open the wallet to re-check before sharing the address for private payments.');
+            return;
+          }
+          setTimeout(function(){
+            fetch('/v1/shielded/address?wallet='+addr+'&cb='+Date.now(), {cache:'no-store'})
+              .then(function(r){ return r.json(); })
+              .then(function(j){
+                if(j && j.ok){
+                  st[addr] = 'registered';
+                  log('🔐 '+addr.slice(0,10)+'… is now registered on-chain — it can receive private payments.');
+                } else {
+                  confirmRegistration(tries - 1);
+                }
+              })
+              .catch(function(){ confirmRegistration(tries - 1); });
+          }, 5000);
+        })(36);   // 36 x 5s = 3 min, comfortably past the ~60s observed
+        return {ok:true, txid: rj.txid, settled:false};
       }
       return {ok:false, reason:(rj && (rj.error||rj.message)) || ('HTTP '+rr.status)};
     }catch(e){ return {ok:false, reason:'network error'}; }
@@ -2213,7 +2416,12 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
           privMsg('✓ sent '+amtStr+' SIGIL privately — txid '+(ffj.txid?String(ffj.txid).slice(0,10)+'…':'(queued)')+'. Lands once the DAG finalizes (check the explorer).', '#00e0c6');
           var fastAmtEl=document.getElementById('privAmt'); if(fastAmtEl) fastAmtEl.value='';
           if(fastPrivBtn)fastPrivBtn.disabled=false;
-          return;
+          // A receipt that says SENT (not SHIELDED), and an EXPLICIT success for the
+          // orchestrator. It used to infer success from the receipt pane merely being
+          // visible — which step 1 had already made true, so it reported DONE for a
+          // payment it never made.
+          try{ showReceipt([{txid:ffj.txid,value:amountRaw}], amtStr, from, null, 'send', recipient); }catch(e){}
+          return true;
         }
       }
     }catch(e){ /* local endpoint unreachable/absent — fall through to the manual flow below */ }
@@ -2301,11 +2509,16 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
 
       privMsg('✓ sent '+amtStr+' SIGIL privately — txid '+(sj.txid?String(sj.txid).slice(0,10)+'…':'(queued)')+'. Lands once the DAG finalizes (check the explorer).', '#00e0c6');
       var amtEl=document.getElementById('privAmt'); if(amtEl) amtEl.value='';
+      // Receipt says SENT, and an EXPLICIT success is handed back — see the fast
+      // path above and the orchestrator for why inferring it was wrong.
+      try{ showReceipt([{txid:sj.txid,value:amountRaw}], amtStr, from, null, 'send', recipient); }catch(e){}
+      return true;
     }catch(e){
       privMsg('✗ network error — node unreachable.', '#ff8a8a');
     }finally{
       if(btn)btn.disabled=false;
     }
+    return false;
   };
 })();
 </script>
@@ -2399,17 +2612,15 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     var pairs=(window.__swapPools||[]).map(function(p){
       return {pair:String(p.sym_a||'TOKEN')+'/'+String(p.sym_b||'TOKEN'),fee:Number(p.fee_bps||0),live:true};
     });
-    // Keep the ribbon useful while an older braid node lacks /v1/pools. These
-    // are the wallet's registered market symbols; live reserves replace them
-    // automatically as soon as the pool discovery endpoint is available.
-    if(!pairs.length) pairs=[
-      {pair:'SIGIL/USDT',fee:0,live:false},
-      {pair:'SIGIL/USDS',fee:30,live:false},
-      {pair:'USDS/wQUG',fee:30,live:false},
-      {pair:'CLAI/USDS',fee:30,live:false},
-      {pair:'PACI/USDS',fee:30,live:false},
-      {pair:'SCAL/USDS',fee:30,live:false}
-    ];
+    // The ONLY real market this wallet can trade today is wSIGIL/USDC on
+    // Uniswap V2 (Polygon). sigil-g1 lists no native pools at all — /v1/pools
+    // returns [] — so the six symbols that used to sit here (SIGIL/USDT,
+    // SIGIL/USDS, USDS/wQUG, CLAI/USDS, PACI/USDS, SCAL/USDS) advertised
+    // markets that do not exist. Operator call, 2026-08-27: replace them with
+    // the real one. Live figures come from wsigil-market.js, which reads the
+    // pair's own getReserves(); if it is absent the ribbon shows nothing
+    // rather than inventing a listing.
+    if(!pairs.length) pairs=(window.SigilMarket&&window.SigilMarket.tickerPairs())||[];
     var loop=pairs.length>1?pairs.concat(pairs):pairs.concat(pairs,pairs,pairs);
     var markup=loop.map(function(p){return '<span class="dex-pair"><b>'+swapEsc(p.pair)+'</b><i'+(p.live?'':' class="is-listed"')+'>'+(p.live?'● live':'listed')+'</i>'+(p.fee?'<em>'+swapEsc((p.fee/100).toFixed(2))+'% fee</em>':'')+'</span>';}).join('');
     tracks.forEach(function(track){ track.innerHTML=markup; track.classList.toggle('is-static',pairs.length===1); });
@@ -2699,6 +2910,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
      modal only submits the lock, it does not wait for or confirm the mint,
      so the copy below says so plainly instead of implying otherwise. -->
 <script src="sigil-metamask.js"></script>
+<script src="wsigil-market.js"></script>
 <div id="bridge-modal" style="display:none;position:fixed;inset:0;z-index:10001;background:rgba(2,5,9,.82);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:18px">
   <div style="width:100%;max-width:460px;max-height:88vh;display:flex;flex-direction:column;background:linear-gradient(160deg,#06121c,#04080c);border:1px solid rgba(33,212,253,.32);border-radius:16px;box-shadow:0 0 60px rgba(33,212,253,.18);overflow:hidden;font-family:'Rajdhani',system-ui,sans-serif">
     <div style="flex:none;display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid rgba(33,212,253,.18);background:rgba(8,16,24,.7)">
@@ -6693,6 +6905,57 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
       }
     }
     try{ localStorage.setItem(bkey(), raw); }catch(e){}
+
+    // ── 2026-08-27: the transparent balance is NOT where mining rewards land ──
+    // Measured live that day: 4 of 5 active miners run `shielded: true`, so their
+    // coinbase is minted straight into the shielded pool and the transparent
+    // figure above never moves. The observer therefore saw a delta of zero and
+    // wrote no row — which reads to a user as "I am not being paid", when in fact
+    // the pool was growing the whole time. Watch the shielded side too.
+    await pollShielded();
+  }
+
+  /* Shielded-side observer. There is no server route for a per-wallet shielded
+     balance (/v1/shielded/{balance,notes,registered} all 404), so this reuses the
+     wallet's own trial-decryption scanner — the same one the Shield card uses. */
+  function skey(){ return 'sigil-activity-shield-' + addr(); }
+  async function pollShielded(){
+    if(!addr()) return;
+    var S = window.__sigilShieldScan, M = window.__sigilShield;
+    if(!S || !M || typeof window._scanAllEpochsFast !== 'function') return;  // scanner not loaded
+    var mn = window.__sigilMnemonic;
+    if(!mn){ try{ mn = localStorage.getItem('sigil-wallet-mnemonic'); }catch(e){} }
+    if(!mn) return;                                   // locked — cannot decrypt, stay silent
+    var raw;
+    try{
+      var seed = window.sigilDeriveFrom(mn).priv;
+      var r = await window._scanAllEpochsFast(seed, M, S);
+      // A gross figure that can only ever rise is worse than no figure: it would
+      // manufacture phantom incoming rows on every spend. Skip unless netted.
+      if(!r || !r.netted) return;
+      raw = String(r.balance);
+    }catch(e){ return; }
+
+    var prev = null; try{ prev = localStorage.getItem(skey()); }catch(e){}
+    if(prev !== null && prev !== raw){
+      var d; try{ d = BigInt(raw) - BigInt(prev); }catch(e){ d = 0n; }
+      if(d > 0n){
+        var rig = await checkMining(addr());
+        add({
+          cat: rig ? 'miner' : 'shield', dir:'in', src:'observed', shielded:true,
+          label: rig ? ('Mining reward \u00b7 ' + (rig.rig || 'rig')) : 'Shielded credit',
+          amount: d.toString(), peer: rig ? (rig.rig||'') : 'shielded pool', status:'confirmed'
+        });
+      } else if(d < 0n){
+        var recent = load().slice(-6);
+        var signedJustNow = recent.some(function(e){ return e.src==='signed' && (Date.now()-e.ts) < 180000; });
+        if(!signedJustNow){
+          add({ cat:'out', dir:'out', src:'observed', shielded:true,
+                label:'Shielded spend', amount:(-d).toString(), status:'confirmed' });
+        }
+      }
+    }
+    try{ localStorage.setItem(skey(), raw); }catch(e){}
   }
 
   /* ── VERIFY: resolve pending txids against the chain ────────────────────── */
@@ -6761,32 +7024,46 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     });
     return l;
   }
+  // Bank-statement row. Sizes are deliberate: 17px title / 15px subline /
+  // 19px amount, 76px row height, 46px icon. Signed amounts use '+' green for
+  // inbound and a NEUTRAL colour for outbound — an ordinary payment is not an
+  // error and should not be painted red.
   function row(e){
     var c = cat(e.cat), inbound = e.dir === 'in';
-    var sign = inbound ? '+' : '−', col = inbound ? '#00e0c6' : '#ff9a6c';
-    var prov = e.src === 'signed'
-      ? '<span style="color:#00e0c6;border:1px solid rgba(0,224,198,.35);border-radius:999px;padding:1px 6px;font-size:8.5px;letter-spacing:.6px">SIGNED</span>'
-      : '<span style="color:#fbbf24;border:1px solid rgba(251,191,36,.35);border-radius:999px;padding:1px 6px;font-size:8.5px;letter-spacing:.6px">OBSERVED</span>';
-    var st = e.status === 'confirmed'
-      ? '<span style="color:#00e0c6">● confirmed</span>'
-      : (e.status === 'failed' ? '<span style="color:#ff8a8a">● failed</span>'
-                               : '<span style="color:#fbbf24">◐ '+esc(e.status||'pending')+'</span>');
-    return '<div style="display:flex;align-items:center;gap:12px;padding:11px 2px;border-bottom:1px solid rgba(33,212,253,.08)">'
-      + '<div style="flex:none;width:34px;height:34px;border-radius:11px;display:grid;place-items:center;font-size:14px;'
-      +   'border:1px solid '+c.col+'55;background:'+c.col+'14;color:'+c.col+'">'+c.ico+'</div>'
-      + '<div style="flex:1;min-width:0">'
-      +   '<div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">'
-      +     '<span style="font-family:\'JetBrains Mono\';font-size:12px;color:#d7eef5">'+esc(e.label||c.label)+'</span>'+prov
-      +   '</div>'
-      +   '<div style="font-family:\'JetBrains Mono\';font-size:9.5px;color:#5a93a8;margin-top:3px;overflow-wrap:anywhere">'
-      +     ago(e.ts)+' · '+st + (e.txid ? ' · <span title="'+esc(e.txid)+'">'+esc(shortHex(e.txid))+'</span>' : '')
-      +     (e.peer ? ' · '+esc(shortHex(e.peer)) : '')
-      +   '</div>'
+    var sign = inbound ? '+' : '\u2212';
+    var col  = inbound ? '#37d99a' : '#eaf0f6';
+    var bits = [];
+    bits.push(clockOf(e.ts));
+    if(e.peer) bits.push(esc(shortHex(e.peer)));
+    var tags = '';
+    if(e.status && e.status !== 'confirmed' && e.status !== 'failed')
+      tags += '<span class="ac-tag pend">Pending</span>';
+    if(e.status === 'failed')
+      tags += '<span class="ac-tag pend" style="color:#ff8a8a;border-color:rgba(255,138,138,.4);background:rgba(255,138,138,.09)">Failed</span>';
+    if(e.shielded) tags += '<span class="ac-tag shield">\u25c8 Shielded</span>';
+    return '<div class="ac-row">'
+      + '<div class="ac-ic" style="background:'+c.col+'1f;color:'+c.col+'">'+c.ico+'</div>'
+      + '<div class="ac-mid">'
+      +   '<div class="ac-t1">'+esc(e.label||c.label)+'</div>'
+      +   '<div class="ac-t2">'+bits.join(' <span style="opacity:.5">\u00b7</span> ')+tags+'</div>'
       + '</div>'
-      + '<div style="flex:none;text-align:right;font-family:\'Orbitron\';font-weight:700;font-size:13px;color:'+col+'">'
-      +   sign+amt(e.amount)+'<div style="font-family:\'JetBrains Mono\';font-weight:400;font-size:8.5px;color:#4d7a8a;letter-spacing:.5px">SIGIL</div>'
-      + '</div>'
+      + '<div class="ac-amt" style="color:'+col+'">'+sign+amt(e.amount)+'<small>SIGIL</small></div>'
       + '</div>';
+  }
+  function clockOf(ts){
+    try{ return new Date(ts).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}); }
+    catch(_){ return ago(ts); }
+  }
+  // Today / Yesterday / "Monday, 25 August" — the way a statement breaks up.
+  function dayLabelOf(ts){
+    try{
+      var a=new Date(ts), b=new Date();
+      var f=function(x){ return new Date(x.getFullYear(),x.getMonth(),x.getDate()).getTime(); };
+      var d=Math.round((f(b)-f(a))/86400000);
+      if(d===0) return 'Today';
+      if(d===1) return 'Yesterday';
+      return a.toLocaleDateString('en-GB',{weekday:'long',day:'numeric',month:'long'});
+    }catch(_){ return ''; }
   }
   function render(){
     var host = document.getElementById('acList'); if(!host) return;
@@ -6806,11 +7083,29 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
             : 'Nothing recorded yet for this wallet.<br><br>'
               + 'Activity is captured from the moment you send, swap or shield — those rows carry the real txid the node returns. '
               + 'Incoming and mining credits appear when the balance actually changes on-chain.<br><br>'
-              + '<span style="color:#4d7a8a">There is no history to backfill: sigil-g0 serves no per-address transaction log, and its search index is currently disabled.</span>')
+              + '<span style="color:#4d7a8a">There is no history to backfill: the chain serves no per-address transaction log, and its search index is currently disabled.</span>'
+              + ((window.MINE_ADDR && window.ADDR && String(window.MINE_ADDR).toLowerCase() !== String(window.ADDR).toLowerCase())
+                  ? '<div class="ac-why"><b>Mining pays a different wallet.</b> This node credits '
+                    + esc(shortHex(window.MINE_ADDR)) + ', but you are viewing '
+                    + esc(shortHex(window.ADDR)) + '. Activity is recorded per wallet, so those rewards are on the other ledger.</div>'
+                  : '')
+              + '<div class="ac-why"><b>Mining and see nothing?</b> A shielded miner\'s rewards land in the shielded pool, so the transparent balance never changes. Unlock the wallet so the shielded scanner can run \u2014 it reads those notes by trial-decryption.</div>')
         + '</div>';
       return;
     }
-    host.innerHTML = l.map(row).join('');
+    // Group into day sections. `l` is already in display order.
+    var html='', lastDay=null;
+    for(var i=0;i<l.length;i++){
+      var dl = dayLabelOf(l[i].ts);
+      if(dl !== lastDay){
+        if(lastDay !== null) html += '</div>';
+        html += '<div class="ac-day">'+esc(dl)+'</div><div class="ac-grp">';
+        lastDay = dl;
+      }
+      html += row(l[i]);
+    }
+    if(lastDay !== null) html += '</div>';
+    host.innerHTML = html;
   }
 
   /* ── open / close ───────────────────────────────────────────────────────── */
@@ -7129,5 +7424,249 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
   if(document.readyState!=='loading') boot();
   else document.addEventListener('DOMContentLoaded', boot);
 })();
+</script>
+<!-- ════════════════════════════════════════════════════════════════════════
+     SIGIL NATION modal (2026-08-31) — first section: WELFARE.
+     Citizens draw a periodic stipend from the welfare treasury, financed by
+     the mining dev fee (200 bps of every block from height 900,000; the
+     QUG/QUGUSD leg runs on Quillon Graph). Reads /v1/nation/status +
+     /v1/nation/citizen; claims sign the canonical sigil-rpc/v1 message
+     `welfare_claim|{wallet}|{fee}` exactly like send/swap/shield, POSTed to
+     /v1/nation/welfare/claim_wallet. The attest panel appears ONLY when the
+     open wallet IS the nation authority (the chain's master wallet). -->
+<div id="nation-modal" style="display:none;position:fixed;inset:0;z-index:10000;background:rgba(2,5,9,.82);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:18px">
+  <div style="width:100%;max-width:760px;max-height:88vh;display:flex;flex-direction:column;background:linear-gradient(160deg,#06121c,#04080c);border:1px solid rgba(33,212,253,.32);border-radius:16px;box-shadow:0 0 60px rgba(33,212,253,.18);overflow:hidden;font-family:'Rajdhani',system-ui,sans-serif">
+    <div style="flex:none;display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid rgba(33,212,253,.18);background:rgba(8,16,24,.7)">
+      <div style="font-size:20px">🏛️</div>
+      <div style="min-width:0;flex:1">
+        <div style="font-weight:800;font-size:17px;color:#e8f6fb;letter-spacing:.5px">SIGIL NATION</div>
+        <div style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8">citizens · welfare financed by the mining dev fee</div>
+      </div>
+      <button onclick="closeNation()" style="flex:none;background:none;border:1px solid rgba(33,212,253,.25);border-radius:9px;color:#8fb3c2;font-size:15px;width:32px;height:32px;cursor:pointer">✕</button>
+    </div>
+    <div style="flex:none;display:flex;gap:6px;padding:10px 18px 0">
+      <span style="font-family:'JetBrains Mono';font-size:10px;letter-spacing:1px;padding:5px 12px;border-radius:999px;border:1px solid rgba(0,224,198,.5);color:#00e0c6;background:rgba(0,224,198,.08)">WELFARE</span>
+      <span title="citizenship registry — coming next" style="font-family:'JetBrains Mono';font-size:10px;letter-spacing:1px;padding:5px 12px;border-radius:999px;border:1px solid rgba(90,147,168,.25);color:#5a93a8">CITIZEN ID · soon</span>
+      <span title="tamper-evident receipts — coming next" style="font-family:'JetBrains Mono';font-size:10px;letter-spacing:1px;padding:5px 12px;border-radius:999px;border:1px solid rgba(90,147,168,.25);color:#5a93a8">E-BOKS · soon</span>
+      <a href="/sigil-nation-whitepaper.html" target="_blank" rel="noopener" title="SIGIL Nation welfare whitepaper — how the stipend, the dev-fee carve and the sUSD payout work" style="font-family:'JetBrains Mono';font-size:10px;letter-spacing:1px;padding:5px 12px;border-radius:999px;border:1px solid rgba(251,191,36,.5);color:#fbbf24;background:rgba(251,191,36,.08);text-decoration:none;margin-left:auto">📄 WHITEPAPER</a>
+    </div>
+    <div id="natBody" style="flex:1;overflow-y:auto;padding:14px 18px 18px">
+      <div id="natOffline" style="display:none;margin-bottom:12px;padding:10px 12px;border:1px solid rgba(251,191,36,.35);border-radius:10px;color:#fbbf24;font-size:13px"></div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px">
+        <div style="border:1px solid rgba(33,212,253,.18);border-radius:12px;padding:10px 12px;background:rgba(8,16,24,.5)">
+          <div style="font-family:'JetBrains Mono';font-size:9px;letter-spacing:1px;color:#5a93a8">TREASURY</div>
+          <div id="natTreasury" style="font-family:'JetBrains Mono';font-size:18px;font-weight:700;color:#00e0c6">…</div>
+          <div style="font-family:'JetBrains Mono';font-size:9px;color:#5a93a8">SIGIL held for citizens</div>
+        </div>
+        <div style="border:1px solid rgba(33,212,253,.18);border-radius:12px;padding:10px 12px;background:rgba(8,16,24,.5)">
+          <div style="font-family:'JetBrains Mono';font-size:9px;letter-spacing:1px;color:#5a93a8">STIPEND</div>
+          <div id="natStipend" style="font-family:'JetBrains Mono';font-size:18px;font-weight:700;color:#e8f6fb">…</div>
+          <div style="font-family:'JetBrains Mono';font-size:9px;color:#5a93a8">per claim, per citizen</div>
+        </div>
+        <div style="border:1px solid rgba(33,212,253,.18);border-radius:12px;padding:10px 12px;background:rgba(8,16,24,.5)">
+          <div style="font-family:'JetBrains Mono';font-size:9px;letter-spacing:1px;color:#5a93a8">INTERVAL</div>
+          <div id="natInterval" style="font-family:'JetBrains Mono';font-size:18px;font-weight:700;color:#e8f6fb">…</div>
+          <div style="font-family:'JetBrains Mono';font-size:9px;color:#5a93a8">blocks between claims (≈ daily)</div>
+        </div>
+        <div style="border:1px solid rgba(33,212,253,.18);border-radius:12px;padding:10px 12px;background:rgba(8,16,24,.5)">
+          <div style="font-family:'JetBrains Mono';font-size:9px;letter-spacing:1px;color:#5a93a8">FINANCED BY</div>
+          <div id="natCarve" style="font-family:'JetBrains Mono';font-size:18px;font-weight:700;color:#fbbf24">…</div>
+          <div style="font-family:'JetBrains Mono';font-size:9px;color:#5a93a8">of every block reward (from the dev fee)</div>
+        </div>
+      </div>
+      <div id="natActWrap" style="margin-top:12px;border:1px solid rgba(33,212,253,.18);border-radius:12px;padding:12px;background:rgba(8,16,24,.5)">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
+          <div style="font-family:'JetBrains Mono';font-size:9px;letter-spacing:1px;color:#5a93a8">ACTIVATION</div>
+          <div id="natActLabel" style="font-family:'JetBrains Mono';font-size:11px;color:#8fb3c2">…</div>
+        </div>
+        <div style="margin-top:8px;height:8px;border-radius:999px;background:rgba(33,212,253,.10);overflow:hidden">
+          <div id="natActBar" style="height:100%;width:0%;background:linear-gradient(90deg,#21d4fd,#00e0c6);transition:width .6s"></div>
+        </div>
+      </div>
+      <div style="margin-top:12px;border:1px solid rgba(33,212,253,.18);border-radius:12px;padding:12px;background:rgba(8,16,24,.5)">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <div style="font-family:'JetBrains Mono';font-size:9px;letter-spacing:1px;color:#5a93a8">YOUR CITIZENSHIP</div>
+          <span id="natCitChip" style="font-family:'JetBrains Mono';font-size:10px;padding:2px 10px;border-radius:999px;border:1px solid rgba(90,147,168,.3);color:#8fb3c2">checking…</span>
+        </div>
+        <div id="natCitRows" style="margin-top:8px"></div>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:10px;flex-wrap:wrap">
+          <button id="natClaimBtn" onclick="nationClaim()" disabled style="background:linear-gradient(135deg,#21d4fd,#00e0c6);color:#04080c;font-weight:800;font-size:14px;letter-spacing:1px;border:none;border-radius:10px;padding:10px 22px;cursor:pointer;opacity:.45">CLAIM STIPEND</button>
+          <div id="natMsg" style="font-size:13px;color:#8fb3c2;min-height:18px"></div>
+        </div>
+      </div>
+      <div id="natAttest" style="display:none;margin-top:12px;border:1px solid rgba(251,191,36,.35);border-radius:12px;padding:12px;background:rgba(24,18,8,.35)">
+        <div style="font-family:'JetBrains Mono';font-size:9px;letter-spacing:1px;color:#fbbf24">NATION AUTHORITY · ATTEST A CITIZEN</div>
+        <div style="font-size:12px;color:#8fb3c2;margin-top:4px">Only the master wallet can do this. The civil identity is hashed in your browser — only the hash goes on chain.</div>
+        <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+          <input id="natAtAddr" placeholder="citizen wallet (64-hex)" style="flex:2;min-width:220px;background:rgba(4,8,12,.8);border:1px solid rgba(33,212,253,.25);border-radius:9px;color:#e8f6fb;font-family:'JetBrains Mono';font-size:11px;padding:9px 10px">
+          <input id="natAtCpr" placeholder="civil id / CPR (hashed locally)" style="flex:1;min-width:150px;background:rgba(4,8,12,.8);border:1px solid rgba(33,212,253,.25);border-radius:9px;color:#e8f6fb;font-family:'JetBrains Mono';font-size:11px;padding:9px 10px">
+          <button onclick="nationAttest()" style="background:none;border:1px solid rgba(251,191,36,.5);border-radius:9px;color:#fbbf24;font-weight:700;font-size:12px;letter-spacing:1px;padding:9px 16px;cursor:pointer">ATTEST</button>
+        </div>
+        <div id="natAtMsg" style="font-size:12px;color:#8fb3c2;margin-top:6px;min-height:16px"></div>
+      </div>
+      <div style="margin-top:12px;font-family:'JetBrains Mono';font-size:10px;color:#5a93a8;line-height:1.6">
+        How it works: every block's reward already pays a dev fee to the nation's master wallet. From activation, 2% of each block flows into the welfare treasury, and any attested citizen can draw the stipend once per interval — <b>paid in sUSD</b> (SIGIL's collateral-backed stablecoin), so the stipend is worth the same dollar every time. The claim fee burns from the treasury, so an empty wallet can always claim the full amount. Claims are refused, never minted, when the oracle is unfed or the treasury can't cover the collateral. QUG/QUGUSD welfare is paid on Quillon Graph separately. <a href="/sigil-nation-whitepaper.html" target="_blank" rel="noopener" style="color:#fbbf24">Read the whitepaper →</a>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  'use strict';
+  var NAT={status:null, cit:null};
+  function $(id){ return document.getElementById(id); }
+  function natApi(p){ return (window.API_BASE||'/v1')+p; }
+  function g2s(g){ // glyphs (10-decimal) → SIGIL display
+    var n=Number(g)/1e10; if(!isFinite(n)) return '…';
+    return n>=1000?n.toLocaleString(undefined,{maximumFractionDigits:0}):n.toLocaleString(undefined,{maximumFractionDigits:4});
+  }
+  function row(l,v){ return '<div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid rgba(33,212,253,.09)"><span style="font-family:\'JetBrains Mono\';font-size:10px;letter-spacing:1px;color:#5a93a8;text-transform:uppercase">'+l+'</span><span style="font-family:\'JetBrains Mono\';font-size:11px;color:#cfe9f2;text-align:right;overflow-wrap:anywhere">'+v+'</span></div>'; }
+
+  window.openNation=function(){
+    var m=$('nation-modal'); m.style.display='flex';
+    natRefresh();
+  };
+  window.closeNation=function(){ $('nation-modal').style.display='none'; };
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape'&&$('nation-modal').style.display==='flex') closeNation(); });
+  $('nation-modal').addEventListener('click',function(e){ if(e.target===this) closeNation(); });
+
+  async function natRefresh(){
+    var addr=((window.MINE_ADDR||window.ADDR)||'').toLowerCase();
+    var off=$('natOffline'); off.style.display='none';
+    try{
+      var sr=await fetch(natApi('/nation/status'),{cache:'no-store'});
+      if(!sr.ok) throw new Error('HTTP '+sr.status);
+      var sj=await sr.json(); if(!sj.ok||!sj.data) throw new Error(sj.error||'bad status');
+      NAT.status=sj.data;
+    }catch(e){
+      off.textContent='The Nation API is not live on this node yet (node update pending) — this panel will light up as soon as it restarts. Nothing is wrong with your wallet.';
+      off.style.display='block';
+      $('natTreasury').textContent='—'; $('natStipend').textContent='—'; $('natInterval').textContent='—'; $('natCarve').textContent='—';
+      $('natActLabel').textContent='unknown'; $('natCitChip').textContent='unavailable';
+      return;
+    }
+    var s=NAT.status;
+    $('natTreasury').textContent=g2s(s.treasury_glyphs);
+    var stipendLabel=(s.payout_asset==='USDS'&&s.stipend_usd_e8)?('$'+(Number(s.stipend_usd_e8)/1e8).toFixed(2)+' sUSD'):(g2s(s.stipend_glyphs)+' SIGIL');
+    $('natStipend').textContent=stipendLabel;
+    $('natInterval').textContent=Number(s.claim_interval_blocks).toLocaleString();
+    $('natCarve').textContent=(s.welfare_bps/100)+'%';
+    var h=Number(s.height), a=Number(s.activation_height);
+    if(s.active){
+      $('natActLabel').innerHTML='<b style="color:#00e0c6">LIVE</b> since height '+a.toLocaleString()+' · now H '+h.toLocaleString();
+      $('natActBar').style.width='100%';
+    }else{
+      var left=Math.max(0,a-h);
+      var hrs=left/2.5/3600; // ≈ live rate; label says ≈
+      $('natActLabel').textContent='activates at H '+a.toLocaleString()+' · '+left.toLocaleString()+' blocks to go (≈ '+(hrs>=48?Math.round(hrs/24)+' days':Math.round(hrs)+' h')+')';
+      $('natActBar').style.width=Math.min(100,Math.round(h/a*100))+'%';
+    }
+    // your citizenship
+    if(!addr){ $('natCitChip').textContent='no wallet open'; return; }
+    try{
+      var cr=await fetch(natApi('/nation/citizen?wallet='+addr),{cache:'no-store'});
+      var cj=await cr.json(); if(!cj.ok||!cj.data) throw new Error(cj.error||'bad citizen');
+      NAT.cit=cj.data;
+    }catch(e){ $('natCitChip').textContent='lookup failed'; return; }
+    var c=NAT.cit, chip=$('natCitChip');
+    if(c.citizen){ chip.textContent='CITIZEN ✓'; chip.style.color='#00e0c6'; chip.style.borderColor='rgba(0,224,198,.5)'; }
+    else{ chip.textContent='NOT ATTESTED'; chip.style.color='#fbbf24'; chip.style.borderColor='rgba(251,191,36,.4)'; }
+    $('natCitRows').innerHTML=
+      row('wallet', addr.slice(0,16)+'…'+addr.slice(-8))+
+      row('last claim', c.last_claim_height>0?('height '+Number(c.last_claim_height).toLocaleString()):'never')+
+      row('next claim from', 'height '+Number(c.next_claim_height).toLocaleString());
+    var btn=$('natClaimBtn'), msg=$('natMsg');
+    if(c.claimable_now){ btn.disabled=false; btn.style.opacity='1'; msg.textContent='You can claim '+((s.payout_asset==='USDS'&&s.stipend_usd_e8)?('$'+(Number(s.stipend_usd_e8)/1e8).toFixed(2)+' sUSD'):(g2s(s.stipend_glyphs)+' SIGIL'))+' now.'; msg.style.color='#00e0c6'; }
+    else{
+      btn.disabled=true; btn.style.opacity='.45';
+      if(!s.active) msg.textContent='Welfare activates at height '+a.toLocaleString()+'.';
+      else if(!c.citizen) msg.textContent='This wallet is not an attested citizen yet — the nation authority must attest it.';
+      else if(Number(c.next_claim_height)>h) msg.textContent='Cooldown — next claim opens at height '+Number(c.next_claim_height).toLocaleString()+'.';
+      else msg.textContent='The treasury cannot cover the stipend right now — it refills with every block.';
+      msg.style.color='#8fb3c2';
+    }
+    // authority-only attest panel
+    $('natAttest').style.display = (s.authority_wallet && addr===String(s.authority_wallet).toLowerCase()) ? 'block' : 'none';
+  }
+
+  function natKey(from,msgEl){
+    if(!window.sigilCryptoReady){ msgEl.textContent='Signer still loading — try again in a moment.'; return null; }
+    var mn=window.__sigilMnemonic||((window.sigilLoadSecret&&sigilLoadSecret())||null);
+    if(!mn){
+      mn=(prompt('Enter your recovery phrase (or 64-hex mining seed) to sign.\nSaved in THIS browser until you press LOG OUT.')||'').trim();
+      if(!mn){ msgEl.textContent='Cancelled — recovery phrase required to sign.'; msgEl.style.color='#fbbf24'; return null; }
+    }
+    var kp; try{ kp=window.sigilDeriveAuto(mn,from); }catch(e){ msgEl.textContent='Could not derive a key from that phrase.'; msgEl.style.color='#ff8a8a'; return null; }
+    if(kp.address!==from){ msgEl.textContent='That phrase belongs to '+kp.address.slice(0,10)+'… but this wallet is '+from.slice(0,10)+'….'; msgEl.style.color='#ff8a8a'; return null; }
+    window.__sigilMnemonic=mn; if(window.sigilSaveSecret) sigilSaveSecret(mn);
+    return kp;
+  }
+
+  window.nationClaim=async function(){
+    var from=((window.MINE_ADDR||window.ADDR)||'').toLowerCase();
+    var msg=$('natMsg'); if(!from){ msg.textContent='Open a wallet first.'; return; }
+    var kp=natKey(from,msg); if(!kp) return;
+    var reqNonce=Date.now();
+    var sig; try{ sig=window.sigilSign(kp.priv,'welfare_claim',[from,'0'],reqNonce); }catch(e){ msg.textContent='Signing failed.'; msg.style.color='#ff8a8a'; return; }
+    msg.textContent='Submitting claim…'; msg.style.color='#8fb3c2';
+    try{
+      var r=await fetch(natApi('/nation/welfare/claim_wallet'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({wallet:from,fee:0,sig:sig,req_nonce:reqNonce})});
+      var j=await r.json();
+      if(j.ok){ msg.innerHTML='Claim queued ✓ — settles with finality (~10 min). tx <span style="font-family:\'JetBrains Mono\';font-size:10px">'+String(j.txid).slice(0,16)+'…</span>'; msg.style.color='#00e0c6'; setTimeout(natRefresh,4000); }
+      else{ msg.textContent=j.error||'Claim refused.'; msg.style.color='#ff8a8a'; }
+    }catch(e){ msg.textContent='Network error — claim not submitted.'; msg.style.color='#ff8a8a'; }
+  };
+
+  window.nationAttest=async function(){
+    var from=((window.MINE_ADDR||window.ADDR)||'').toLowerCase();
+    var msg=$('natAtMsg');
+    var cit=($('natAtAddr').value||'').trim().toLowerCase().replace(/^0x/,'');
+    var cpr=($('natAtCpr').value||'').trim();
+    if(!/^[0-9a-f]{64}$/.test(cit)){ msg.textContent='Citizen wallet must be 64-hex.'; msg.style.color='#ff8a8a'; return; }
+    if(!cpr){ msg.textContent='Enter the civil id to hash.'; msg.style.color='#ff8a8a'; return; }
+    var kp=natKey(from,msg); if(!kp) return;
+    // Domain-tagged local hash — the raw identity NEVER leaves this browser.
+    var dig=await crypto.subtle.digest('SHA-256', new TextEncoder().encode('sigil-cpr|'+cpr));
+    var cprHash=Array.from(new Uint8Array(dig)).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
+    var reqNonce=Date.now();
+    var sig; try{ sig=window.sigilSign(kp.priv,'citizen_attest',[from,cit,cprHash,'0'],reqNonce); }catch(e){ msg.textContent='Signing failed.'; msg.style.color='#ff8a8a'; return; }
+    msg.textContent='Submitting attestation…'; msg.style.color='#8fb3c2';
+    try{
+      var r=await fetch(natApi('/nation/attest_wallet'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({authority:from,citizen:cit,cpr_hash:cprHash,fee:0,sig:sig,req_nonce:reqNonce})});
+      var j=await r.json();
+      if(j.ok){ msg.textContent='Attested ✓ — '+cit.slice(0,12)+'… becomes a citizen when the tx settles.'; msg.style.color='#00e0c6'; $('natAtAddr').value=''; $('natAtCpr').value=''; }
+      else{ msg.textContent=j.error||'Attestation refused.'; msg.style.color='#ff8a8a'; }
+    }catch(e){ msg.textContent='Network error — attestation not submitted.'; msg.style.color='#ff8a8a'; }
+  };
+})();
+</script>
+<!-- SIGIL OS modal -->
+<div id="sigilOSModal" style="display:none;position:fixed;inset:0;z-index:20000;background:rgba(4,6,10,.72);backdrop-filter:blur(6px);opacity:0;transition:opacity .18s">
+  <div style="position:absolute;inset:2.2vh 2.2vw;background:#07090d;border:1px solid #1e2836;border-radius:16px;overflow:hidden;box-shadow:0 40px 120px rgba(0,0,0,.7);display:flex;flex-direction:column">
+    <div style="height:40px;display:flex;align-items:center;gap:10px;padding:0 14px;background:linear-gradient(#0b0f16,#0a0d13);border-bottom:1px solid #1e2836;font-family:'Sora',system-ui,sans-serif">
+      <span style="width:11px;height:11px;border-radius:50%;background:#ff5f57;cursor:pointer" onclick="closeSigilOS()" title="Close"></span>
+      <span style="font-size:12.5px;font-weight:700;color:#dfe7f2;letter-spacing:.4px">◆ SIGIL <span style="color:#3ad2ff">OS</span></span>
+      <span style="font-size:11px;color:#5a6678">Nation desktop · runs beside your wallet</span>
+      <span style="margin-left:auto"></span>
+      <a href="/flux-os.html" target="_blank" style="font-size:11px;color:#8695ab;text-decoration:none" title="Open in a full tab">open in tab ↗</a>
+      <button onclick="closeSigilOS()" style="font:inherit;font-size:12px;color:#dfe7f2;background:transparent;border:1px solid #1e2836;border-radius:8px;padding:5px 12px;cursor:pointer">Close ✕</button>
+    </div>
+    <iframe id="sigilOSFrame" title="SIGIL OS" style="flex:1;width:100%;border:0;background:#07090d" allow="autoplay; fullscreen; clipboard-read; clipboard-write"></iframe>
+  </div>
+</div>
+<script>
+function openSigilOS(){
+  var m=document.getElementById('sigilOSModal'), f=document.getElementById('sigilOSFrame');
+  f.src='/flux-os.html?v='+Date.now();              // always load the latest OS (cache-bust)
+  m.style.display='block'; requestAnimationFrame(function(){ m.style.opacity='1'; });
+  document.body.style.overflow='hidden';
+}
+function closeSigilOS(){
+  var m=document.getElementById('sigilOSModal');
+  m.style.opacity='0'; document.body.style.overflow='';
+  setTimeout(function(){ m.style.display='none'; }, 180);
+}
+document.addEventListener('keydown',function(e){ if(e.key==='Escape'){ var m=document.getElementById('sigilOSModal'); if(m&&m.style.display==='block') closeSigilOS(); } });
+document.getElementById('sigilOSModal').addEventListener('click',function(e){ if(e.target===this) closeSigilOS(); });
 </script>
 </body></html>

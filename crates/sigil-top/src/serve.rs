@@ -334,7 +334,10 @@ fn embedded_surface(safe: &str) -> Option<(Vec<u8>, &'static str)> {
     // signs with SIGIL_MINE_SEED and never prompts for a recovery phrase.
     // NOTE: the flux wrapper cache keys only .rs sources, so an edit to the embedded HTML
     // alone does NOT rebuild this unit — touch this file alongside any gui/ change.
-    if names(safe, "sigil-wallet-tron.html") {
+    // 2026-09-02: the gate (gui/enter-sigil.html, imported from sigilgraph.org) redirects
+    // to sigil-wallet-tron-embedded.html, the hosted file name — alias it here or a
+    // fresh wallet created at localhost:9800/enter-sigil.html lands on a 404.
+    if names(safe, "sigil-wallet-tron.html") || names(safe, "sigil-wallet-tron-embedded.html") {
         return Some((
             include_str!("../../../gui/sigil-wallet-tron-embedded.html").as_bytes().to_vec(),
             HTML,
@@ -363,6 +366,40 @@ fn embedded_surface(safe: &str) -> Option<(Vec<u8>, &'static str)> {
     }
     if names(safe, "wasm/sigil_shield_bg.wasm") {
         return Some((include_bytes!("../../../gui/wasm/sigil_shield_bg.wasm").to_vec(), "application/wasm"));
+    }
+    // ── 2026-09-02: parity with sigilgraph.org ──────────────────────────────────
+    // The wallet compiled in here is now the SAME file sigilgraph.org serves (Nation ›
+    // Welfare + SIGIL OS, v2 Argon2id derivation, per-commitment /shielded/has check).
+    // That file pulls these siblings by RELATIVE path, and only what is listed in this
+    // function exists on :9800 — anything missing 404s silently (sigil-metamask.js and
+    // sigil-pq.mjs had been 404ing here since 2026-08-26). Keep this list in step with
+    // `<script src=`/`import` in the three HTML surfaces above.
+    if names(safe, "flux-os.html") {            // SIGIL OS — the Nation › SIGIL OS modal's iframe
+        return Some((include_str!("../../../gui/flux-os.html").as_bytes().to_vec(), HTML));
+    }
+    if names(safe, "sigil-nation-whitepaper.html") {
+        return Some((include_str!("../../../gui/sigil-nation-whitepaper.html").as_bytes().to_vec(), HTML));
+    }
+    if names(safe, "sigil-argon2.mjs") {        // v2 (12-word) key derivation — Send is dead without it
+        return Some((include_str!("../../../gui/sigil-argon2.mjs").as_bytes().to_vec(), JS));
+    }
+    if names(safe, "sigil-ed25519.mjs") {
+        return Some((include_str!("../../../gui/sigil-ed25519.mjs").as_bytes().to_vec(), JS));
+    }
+    if names(safe, "sigil-sha3.mjs") {
+        return Some((include_str!("../../../gui/sigil-sha3.mjs").as_bytes().to_vec(), JS));
+    }
+    if names(safe, "sigil-sha512.mjs") {
+        return Some((include_str!("../../../gui/sigil-sha512.mjs").as_bytes().to_vec(), JS));
+    }
+    if names(safe, "sigil-pq.mjs") {
+        return Some((include_str!("../../../gui/sigil-pq.mjs").as_bytes().to_vec(), JS));
+    }
+    if names(safe, "sigil-metamask.js") {
+        return Some((include_str!("../../../gui/sigil-metamask.js").as_bytes().to_vec(), JS));
+    }
+    if names(safe, "wsigil-market.js") {        // the wSIGIL/USDC ribbon; absent = ribbon shows nothing
+        return Some((include_str!("../../../gui/wsigil-market.js").as_bytes().to_vec(), JS));
     }
     None
 }

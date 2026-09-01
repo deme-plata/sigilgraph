@@ -2745,17 +2745,11 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                     app.ai_detected = true;
                                 }
                             }
-                            KeyCode::Char('w') | KeyCode::Char('W') => {
-                                // [W] open the web wallet (SIGIL OS modal lives inside it) in the
-                                // local browser. Headless boxes have no GUI → show the link to copy.
-                                let url = crate::wallet_ui::official_wallet_url();
-                                if crate::wallet_ui::open_browser(&url) {
-                                    app.toast = format!("🌐 opening web wallet + SIGIL OS — {url}");
-                                } else {
-                                    app.toast = format!("🌐 web wallet + SIGIL OS: {url}");
-                                }
-                                app.toast_sticky = true;
-                            }
+                            // 2026-09-02: a second `Char('w')` arm used to sit here, added ahead
+                            // of the real [W] handler below and pointing at the HOSTED wallet.
+                            // Rust takes the first matching arm, so [W] silently became [L] and
+                            // the embedded :9800 wallet (which now carries Nation › SIGIL OS too)
+                            // was unreachable from the keyboard. [L] stays the hosted option.
                             KeyCode::Char('y') | KeyCode::Char('Y') => { app.resync(); app.toast_sticky = false; }
                             KeyCode::Char('m') | KeyCode::Char('M') => { app.toggle_engine_mining(); }
                             KeyCode::Char('g') | KeyCode::Char('G') if app.tab == Tab::Mining => {

@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SIGIL OS</title>
+<style>
+  :root{
+    --bg:#07090d; --grid:rgba(120,180,255,.04);
+    --panel:#0e1219; --panel2:#141a24; --edge:#1e2836;
+    --ink:#dfe7f2; --dim:#8695ab; --faint:#5a6678;
+    --cyan:#3ad2ff; --mag:#ff4fd8; --gold:#ffcf5a; --ok:#4be39a; --bad:#ff6b6b;
+    font-family:"SF Pro Text",system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:
+      linear-gradient(var(--grid) 1px,transparent 1px) 0 0/34px 34px,
+      linear-gradient(90deg,var(--grid) 1px,transparent 1px) 0 0/34px 34px,
+      radial-gradient(1200px 700px at 78% -10%,rgba(58,210,255,.06),transparent 60%),
+      radial-gradient(1000px 700px at 10% 110%,rgba(255,79,216,.05),transparent 60%),
+      var(--bg);
+    color:var(--ink); overflow:hidden; user-select:none; -webkit-user-select:none;
+  }
+  .mono{font-family:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+
+  /* ===================== BOOT SEQUENCE ===================== */
+  #boot{position:fixed; inset:0; z-index:99999; background:#04060a; overflow:hidden;
+    font-family:"JetBrains Mono",ui-monospace,monospace; transition:opacity .5s ease}
+  #boot::after{ /* scanlines + flicker */
+    content:""; position:absolute; inset:0; pointer-events:none;
+    background:repeating-linear-gradient(0deg,rgba(0,0,0,0) 0,rgba(0,0,0,0) 2px,rgba(0,0,0,.28) 3px);
+    animation:flick 6s infinite steps(60); mix-blend-mode:multiply}
+  @keyframes flick{0%,97%{opacity:.5}98%{opacity:.28}100%{opacity:.5}}
+  #boot .crt{position:absolute; inset:0; background:radial-gradient(120% 120% at 50% 50%,transparent 60%,rgba(0,0,0,.55) 100%); pointer-events:none}
+  #boot .mark{position:absolute; top:34px; left:50%; transform:translateX(-50%); text-align:center}
+  #boot .glyph{font-size:52px; color:var(--cyan); text-shadow:0 0 18px rgba(58,210,255,.7); animation:pulse 1.4s ease-in-out infinite}
+  #boot .mark .name{letter-spacing:6px; color:var(--ink); font-size:15px; margin-top:6px}
+  #boot .mark .name b{color:var(--cyan)}
+  @keyframes pulse{0%,100%{opacity:.55; transform:scale(.97)}50%{opacity:1; transform:scale(1.03)}}
+  #bootlog{position:absolute; left:0; right:0; top:150px; bottom:70px; padding:0 22px; overflow:hidden;
+    font-size:12.5px; line-height:1.55; color:#9fb2c9}
+  #bootlog .l{white-space:pre-wrap; opacity:0; animation:appear .01s forwards}
+  @keyframes appear{to{opacity:1}}
+  #bootlog .ts{color:var(--faint)}
+  #bootlog .ok{color:var(--ok)} #bootlog .warn{color:var(--gold)} #bootlog .hi{color:var(--cyan)}
+  #bootbar{position:absolute; left:22px; right:22px; bottom:40px; height:8px; border:1px solid var(--edge); border-radius:6px; overflow:hidden; background:#0a0f16}
+  #bootbar i{display:block; height:100%; width:0; background:linear-gradient(90deg,var(--cyan),var(--mag)); transition:width .3s ease; box-shadow:0 0 12px var(--cyan)}
+  #boot .hint{position:absolute; bottom:16px; left:0; right:0; text-align:center; color:var(--faint); font-size:11px}
+
+  /* ===================== TOP BAR ===================== */
+  #bar{position:fixed; top:0; left:0; right:0; height:34px; z-index:9000;
+    display:flex; align-items:center; gap:14px; padding:0 14px;
+    background:linear-gradient(#0b0f16ee,#0b0f16cc); backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--edge); font-size:12.5px}
+  #bar .logo{font-weight:700; letter-spacing:.5px}
+  #bar .logo b{color:var(--cyan)}
+  #bar .menu{color:var(--dim); cursor:pointer}
+  #bar .menu:hover{color:var(--ink)}
+  #bar .spacer{flex:1}
+  #bar .stat{color:var(--dim); display:flex; align-items:center; gap:6px; font-variant-numeric:tabular-nums}
+  #bar .dot{width:7px;height:7px;border-radius:50%;background:var(--faint)}
+  #bar .dot.ok{background:var(--ok); box-shadow:0 0 8px var(--ok)}
+  #bar .dot.bad{background:var(--bad); box-shadow:0 0 8px var(--bad)}
+  #clock{color:var(--ink)}
+
+  /* ===================== DESKTOP + WM ===================== */
+  #desk{position:fixed; inset:34px 0 78px 0; z-index:10}
+  .brand-watermark{position:absolute; left:50%; top:44%; transform:translate(-50%,-50%); text-align:center; pointer-events:none; opacity:.5}
+  .brand-watermark .big{font-size:60px; font-weight:800; letter-spacing:2px}
+  .brand-watermark .big b{color:var(--cyan)}
+  .brand-watermark .sub{color:var(--faint); font-size:13px; margin-top:6px; letter-spacing:3px; text-transform:uppercase}
+  .win{position:absolute; min-width:300px; min-height:200px; z-index:100;
+    background:linear-gradient(180deg,var(--panel),#0c1017); border:1px solid var(--edge); border-radius:12px;
+    box-shadow:0 24px 60px rgba(0,0,0,.6); display:flex; flex-direction:column; overflow:hidden}
+  .win.focused{border-color:#31465f; box-shadow:0 26px 70px rgba(0,0,0,.7),0 0 0 1px rgba(58,210,255,.25) inset}
+  .win .tb{height:38px; display:flex; align-items:center; gap:8px; padding:0 12px; cursor:grab;
+    background:linear-gradient(#121824,#0e131c); border-bottom:1px solid var(--edge)}
+  .win .tb:active{cursor:grabbing}
+  .lights{display:flex; gap:7px; margin-right:6px}
+  .lights i{width:12px;height:12px;border-radius:50%;display:block;cursor:pointer}
+  .lights .c{background:#ff5f57} .lights .m{background:#febc2e} .lights .z{background:#28c840}
+  .win .tb .t{font-size:12.5px; color:var(--dim); font-weight:600}
+  .win .tb .t b{color:var(--ink)}
+  .win .body{flex:1; overflow:auto; position:relative}
+  .win .rz{position:absolute; width:16px; height:16px; right:0; bottom:0; cursor:nwse-resize; z-index:5}
+  /* desktop files + context menu */
+  .dfile{position:absolute; width:78px; text-align:center; cursor:pointer; user-select:none; z-index:20}
+  .dfile .ic{font-size:34px; filter:drop-shadow(0 3px 6px rgba(0,0,0,.5))}
+  .dfile .nm{font-size:11px; margin-top:1px; color:var(--ink); background:rgba(10,14,20,.6); border-radius:4px; padding:1px 5px; display:inline-block; max-width:78px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .ctxmenu{position:fixed; z-index:12000; background:#0e141d; border:1px solid var(--edge); border-radius:10px; padding:6px; min-width:168px; box-shadow:0 18px 40px rgba(0,0,0,.55); font-size:13px}
+  .ctxmenu .mi{padding:8px 12px; border-radius:7px; cursor:pointer; color:var(--ink)}
+  .ctxmenu .mi:hover{background:#182130}
+  .ctxmenu .sep{height:1px; background:var(--edge); margin:5px 4px}
+  .editor{display:flex; flex-direction:column; height:100%; background:#0a0d13}
+  .editor textarea{flex:1; background:transparent; border:0; color:var(--ink); font:inherit; font-family:"JetBrains Mono",monospace; font-size:13px; padding:14px; outline:none; resize:none; line-height:1.55}
+  .editor .st{padding:6px 14px; border-top:1px solid var(--edge); font-size:11px; color:var(--faint); display:flex; justify-content:space-between}
+
+  /* ===================== DOCK ===================== */
+  #dock{position:fixed; left:50%; bottom:14px; transform:translateX(-50%); z-index:9000;
+    display:flex; gap:12px; padding:10px 14px;
+    background:linear-gradient(#0e131cdd,#0b0f16cc); backdrop-filter:blur(12px);
+    border:1px solid var(--edge); border-radius:18px; box-shadow:0 18px 40px rgba(0,0,0,.5)}
+  .app{width:52px;height:52px;border-radius:14px; display:grid; place-items:center; cursor:pointer;
+    background:linear-gradient(160deg,var(--panel2),#0c1119); border:1px solid var(--edge);
+    font-size:24px; position:relative; transition:transform .12s ease, border-color .12s}
+  .app:hover{transform:translateY(-8px) scale(1.06); border-color:#31465f}
+  .app .lbl{position:absolute; top:-30px; left:50%; transform:translateX(-50%);
+    background:#0b0f16; border:1px solid var(--edge); border-radius:6px; padding:3px 8px;
+    font-size:11px; color:var(--ink); white-space:nowrap; opacity:0; pointer-events:none; transition:opacity .12s}
+  .app:hover .lbl{opacity:1}
+  .app .run{position:absolute; bottom:-7px; left:50%; transform:translateX(-50%); width:5px;height:5px;border-radius:50%;background:var(--cyan);opacity:0}
+  .app.open .run{opacity:1}
+
+  /* ===================== GENERIC UI ===================== */
+  button.btn{font:inherit; font-size:13px; color:#04121a; font-weight:700; cursor:pointer;
+    background:linear-gradient(180deg,#5fe0ff,#2bbdf0); border:0; border-radius:9px; padding:9px 16px}
+  button.btn:hover{filter:brightness(1.08)}
+  button.btn.ghost{background:transparent; color:var(--ink); border:1px solid var(--edge); font-weight:600}
+  button.btn.ghost:hover{border-color:#31465f; background:#111722}
+  button.btn.mag{background:linear-gradient(180deg,#ff7fe4,#ff3fce); color:#1a0416}
+  .muted{color:var(--dim)} .faint{color:var(--faint)}
+  a{color:var(--cyan)}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#1c2734;border-radius:8px;border:2px solid transparent;background-clip:content-box}
+  input.search{width:100%; background:#0d1119; border:1px solid var(--edge); color:var(--ink); font:inherit; font-size:13px;
+    border-radius:9px; padding:8px 12px; outline:none}
+  input.search:focus{border-color:#31465f}
+
+  /* ===================== CLUB ===================== */
+  .club{display:flex; flex-direction:column; height:100%; background:radial-gradient(900px 500px at 80% -10%,rgba(255,79,216,.08),transparent 60%),#0a0d13}
+  .club .hd{padding:14px 16px; border-bottom:1px solid var(--edge); display:flex; align-items:center; gap:12px}
+  .club .hd .title{font-size:16px; font-weight:800; letter-spacing:.5px}
+  .club .hd .title b{color:var(--mag)}
+  .club .hd .pill{margin-left:auto; font-size:11px; color:var(--dim); border:1px solid var(--edge); padding:4px 10px; border-radius:20px; font-variant-numeric:tabular-nums}
+  .club .searchbar{padding:10px 16px; border-bottom:1px solid var(--edge)}
+  .stage{flex:1; display:flex; flex-direction:column; min-height:0; background:#05070a}
+  .stage video{flex:1; width:100%; min-height:0; background:#000; object-fit:contain}
+  .queue{max-height:120px; overflow:auto; border-top:1px solid var(--edge)}
+  .qrow{display:flex; align-items:center; gap:10px; padding:8px 16px; cursor:pointer; font-size:12.5px; border-bottom:1px solid #101620}
+  .qrow:hover{background:#111722} .qrow.on{background:#141b26; color:var(--cyan)}
+  .qrow .i{color:var(--faint)} .qrow.on .i{color:var(--cyan)}
+  .controls{display:flex; align-items:center; gap:10px; padding:10px 16px; border-top:1px solid var(--edge); background:#0c1017}
+  .controls .np{flex:1; min-width:0}
+  .controls .np .t{font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .controls .np .s{font-size:11px; color:var(--faint)}
+  .autobadge{font-size:11px; color:var(--dim); border:1px solid var(--edge); padding:4px 9px; border-radius:20px; cursor:pointer}
+  .autobadge.on{color:var(--ok); border-color:#234a3a; background:#0f1a16}
+  .gate{padding:26px; display:grid; place-items:center; text-align:center; gap:14px; height:100%}
+  .gate .card{max-width:360px; background:linear-gradient(180deg,#11151e,#0c1017); border:1px solid var(--edge); border-radius:16px; padding:24px}
+  .gate .price{font-size:34px; font-weight:800; color:var(--gold); margin:8px 0}
+  .gate .price small{font-size:14px; color:var(--dim); font-weight:600}
+  .gate .lifetime{font-size:12px; color:var(--ok); text-transform:uppercase; letter-spacing:2px}
+  .note{font-size:11.5px; color:var(--faint); line-height:1.5}
+
+  /* ===================== NATION ===================== */
+  .nation{padding:0; height:100%; display:flex; flex-direction:column; background:radial-gradient(800px 500px at 20% -10%,rgba(255,207,90,.07),transparent 60%),#0a0d13}
+  .nation .hd{padding:16px 18px; border-bottom:1px solid var(--edge)}
+  .nation .hd .title{font-size:17px; font-weight:800; letter-spacing:.5px}
+  .nation .hd .title b{color:var(--gold)}
+  .nation .hd .sub{font-size:12px; color:var(--dim); margin-top:3px}
+  .nation .grid{display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:16px; overflow:auto}
+  .nstat{background:#0f141d; border:1px solid var(--edge); border-radius:12px; padding:14px}
+  .nstat .k{font-size:11px; color:var(--faint); text-transform:uppercase; letter-spacing:1px}
+  .nstat .v{font-size:22px; font-weight:800; margin-top:4px; font-variant-numeric:tabular-nums}
+  .nstat .v small{font-size:12px; color:var(--dim); font-weight:600}
+  .nstat.wide{grid-column:1/3}
+  .nbadge{display:inline-block; font-size:11px; padding:3px 9px; border-radius:20px; border:1px solid var(--edge)}
+  .nbadge.on{color:var(--ok); border-color:#234a3a; background:#0f1a16}
+  /* commons */
+  .ntabs{display:flex; gap:4px; padding:10px 16px 0}
+  .ntab{font-size:12.5px; color:var(--dim); padding:7px 14px; border-radius:9px 9px 0 0; cursor:pointer; border:1px solid transparent; border-bottom:none}
+  .ntab.on{color:var(--ink); background:#0f141d; border-color:var(--edge)}
+  .commons{flex:1; overflow:auto; padding:14px 16px}
+  .commons .intro{font-size:12.5px; color:var(--dim); line-height:1.5; margin-bottom:12px}
+  .commons .inscbtn{margin-bottom:14px}
+  .insc{background:#0f141d; border:1px solid var(--edge); border-radius:12px; padding:14px; margin-bottom:14px}
+  .insc select,.insc input,.insc textarea{width:100%; background:#0a0d13; border:1px solid var(--edge); color:var(--ink); font:inherit; font-size:13px; border-radius:8px; padding:8px 10px; margin-top:8px; outline:none; resize:none}
+  .insc textarea{min-height:64px; line-height:1.5}
+  .insc .hint{font-size:11.5px; color:var(--faint); margin-top:6px}
+  .insc .row{display:flex; gap:8px; margin-top:10px}
+  .crec{border-left:2px solid var(--edge); padding:8px 0 8px 14px; margin:0 0 14px 4px}
+  .crec.k-remembrance{border-color:var(--gold)} .crec.k-gratitude{border-color:var(--ok)}
+  .crec.k-trade-bad{border-color:var(--bad)} .crec.k-trade-good{border-color:var(--cyan)}
+  .crec.k-vow{border-color:var(--mag)} .crec.k-milestone{border-color:#7bd88f} .crec.k-arrival{border-color:var(--dim)}
+  .crec .ct{font-size:13.5px; font-weight:700; display:flex; align-items:center; gap:8px}
+  .crec .cb{font-size:13px; color:#cdd7e6; line-height:1.55; margin-top:4px; white-space:pre-wrap}
+  .crec .cm{font-size:11px; color:var(--faint); margin-top:6px; display:flex; gap:10px}
+  .crec .cm a{color:var(--faint); cursor:pointer; text-decoration:underline}
+  .commons .empty{color:var(--faint); font-size:13px; text-align:center; padding:30px 12px; line-height:1.6}
+
+  /* ===================== MAIL ===================== */
+  .mail{display:flex; height:100%; background:#0a0d13}
+  .mail .side{width:150px; border-right:1px solid var(--edge); padding:10px; display:flex; flex-direction:column; gap:2px}
+  .mail .side .fold{font-size:12.5px; color:var(--dim); padding:8px 10px; border-radius:8px; cursor:pointer; display:flex; justify-content:space-between}
+  .mail .side .fold.on{background:#141b26; color:var(--ink)}
+  .mail .side .fold .c{font-size:11px; color:var(--faint)}
+  .mail .side .compose{margin-top:auto}
+  .mail .list{width:240px; border-right:1px solid var(--edge); overflow:auto}
+  .mrow{padding:12px 14px; border-bottom:1px solid #121822; cursor:pointer}
+  .mrow.on{background:#111722}
+  .mrow .f{font-size:12.5px; font-weight:600; display:flex; justify-content:space-between}
+  .mrow .f .dt{color:var(--faint); font-weight:400; font-size:11px}
+  .mrow .s{font-size:12px; margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .mrow .p{font-size:11px; color:var(--faint); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .mrow .unread{color:var(--cyan)}
+  .mail .read{flex:1; display:flex; flex-direction:column; overflow:hidden}
+  .mail .read .rh{padding:16px 18px; border-bottom:1px solid var(--edge)}
+  .mail .read .rh .subj{font-size:16px; font-weight:700}
+  .mail .read .rh .from{font-size:12.5px; color:var(--dim); margin-top:6px}
+  .mail .read .rb{padding:18px; overflow:auto; font-size:13.5px; line-height:1.6; color:#cdd7e6; white-space:pre-wrap}
+  .mail .empty{flex:1; display:grid; place-items:center; color:var(--faint); font-size:13px}
+  .compose-win{display:flex; flex-direction:column; height:100%; background:#0a0d13}
+  .compose-win .fld{display:flex; align-items:center; gap:10px; padding:10px 16px; border-bottom:1px solid var(--edge)}
+  .compose-win .fld label{width:52px; color:var(--faint); font-size:12px}
+  .compose-win input,.compose-win textarea{flex:1; background:transparent; border:0; color:var(--ink); font:inherit; font-size:13.5px; outline:none; resize:none}
+  .compose-win textarea{padding:16px; line-height:1.6; height:100%}
+  .compose-win .foot{padding:12px 16px; border-top:1px solid var(--edge); display:flex; gap:10px; align-items:center}
+  /* ===================== AI CONSOLE ===================== */
+  .ai{display:flex; flex-direction:column; height:100%; background:#0a0d13}
+  .ai .msgs{flex:1; overflow:auto; padding:16px; display:flex; flex-direction:column; gap:10px}
+  .ai .msg{max-width:84%; padding:10px 13px; border-radius:12px; font-size:13.5px; line-height:1.5; white-space:pre-wrap; word-break:break-word}
+  .ai .msg.u{align-self:flex-end; background:linear-gradient(180deg,#1c93c4,#177aa6); color:#eaf6ff; border-bottom-right-radius:4px}
+  .ai .msg.a{align-self:flex-start; background:#141b26; border:1px solid var(--edge); border-bottom-left-radius:4px}
+  .ai .msg.a b{color:var(--cyan)}
+  .ai .msg.sys{align-self:center; color:var(--faint); font-size:11.5px; background:transparent}
+  .ai .card{align-self:flex-start; background:#0f1420; border:1px solid var(--gold); border-radius:12px; padding:12px 14px; font-size:13px; max-width:84%}
+  .ai .card .h{color:var(--gold); font-weight:700; margin-bottom:6px}
+  .ai .card .row{display:flex; justify-content:space-between; gap:16px; padding:2px 0; font-variant-numeric:tabular-nums}
+  .ai .card .row .k{color:var(--dim)}
+  .ai .card .btns{margin-top:10px; display:flex; gap:8px}
+  .ai .chips{display:flex; gap:6px; flex-wrap:wrap; padding:0 12px 8px}
+  .ai .chip{font-size:11.5px; color:var(--dim); border:1px solid var(--edge); border-radius:16px; padding:4px 10px; cursor:pointer}
+  .ai .chip:hover{color:var(--ink); border-color:#31465f}
+  .ai .aistat{padding:8px 14px; border-bottom:1px solid var(--edge); font-size:12px; color:var(--dim); display:flex; align-items:center; gap:6px}
+  .ai .aistat a{cursor:pointer; text-decoration:underline}
+  .ai .aistat select{background:#0d1119; border:1px solid var(--edge); color:var(--ink); font:inherit; font-size:12px; border-radius:7px; padding:3px 8px; outline:none}
+  .ai .aistat .mok{color:var(--ok)}
+  .ai .inbar{display:flex; gap:8px; padding:10px 12px; border-top:1px solid var(--edge)}
+  .ai .inbar input{flex:1; background:#0d1119; border:1px solid var(--edge); color:var(--ink); font:inherit; font-size:13.5px; border-radius:10px; padding:10px 14px; outline:none}
+  .ai .inbar input:focus{border-color:#31465f}
+  .toast{position:fixed; bottom:88px; left:50%; transform:translateX(-50%); z-index:9999;
+    background:#0e141d; border:1px solid var(--edge); border-radius:10px; padding:12px 18px; font-size:13px;
+    box-shadow:0 12px 30px rgba(0,0,0,.5); opacity:0; transition:opacity .2s, transform .2s}
+  .toast.show{opacity:1; transform:translateX(-50%) translateY(-6px)}
+</style>
+</head>
+<body>
+  <!-- BOOT -->
+  <div id="boot" class="mono">
+    <div class="mark"><div class="glyph">◆</div><div class="name">SIGIL <b>OS</b></div></div>
+    <div id="bootlog"></div>
+    <div id="bootbar"><i></i></div>
+    <div class="hint">wasm32-wasip1 userspace · SQIsign L5 provenance · press any key to skip</div>
+    <div class="crt"></div>
+  </div>
+
+  <!-- SHELL -->
+  <div id="bar" hidden>
+    <span class="logo">◆ SIGIL <b>OS</b></span>
+    <span class="menu" data-app="club">Club</span>
+    <span class="menu" data-app="nation">Nation</span>
+    <span class="menu" data-app="ai">AI</span>
+    <span class="menu" data-app="mail">Mail</span>
+    <span class="spacer"></span>
+    <span class="stat"><span class="dot" id="chaindot"></span> SIGIL testnet <b id="height">—</b></span>
+    <span class="stat" id="clock">—</span>
+  </div>
+
+  <div id="desk" hidden>
+    <div class="brand-watermark">
+      <div class="big">SIGIL <b>OS</b></div>
+      <div class="sub">Nation · a userspace on SIGIL</div>
+      <div class="sub" style="opacity:.7;letter-spacing:1px;margin-top:14px">right-click the desktop to create a file</div>
+    </div>
+  </div>
+
+  <div id="dock" hidden>
+    <div class="app" data-app="club"><span class="lbl">Club</span>🎬<span class="run"></span></div>
+    <div class="app" data-app="nation"><span class="lbl">Nation</span>🏛️<span class="run"></span></div>
+    <div class="app" data-app="ai"><span class="lbl">AI console</span>🤖<span class="run"></span></div>
+    <div class="app" data-app="mail"><span class="lbl">Mail</span>✉️<span class="run"></span></div>
+    <div class="app" data-app="about"><span class="lbl">About</span>◆<span class="run"></span></div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+<script>
+// sigil-top embedded serve (:9800) proxies /v1/* + /api/* to the node same-origin,
+// so from that origin use a RELATIVE base. Bare localhost = a dev box with sigil-api.
+const SIGIL_API = (location.hostname==='localhost'||location.hostname==='127.0.0.1')
+  ? (location.port==='9800' ? '' : 'http://127.0.0.1:18181') : 'https://sigilgraph.org';
+let chainHeight = 0;
+function toast(msg, ms=2200){ const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('show'),ms); }
+
+/* ============================ BOOT SEQUENCE ============================ */
+async function boot(){
+  const log=document.getElementById('bootlog'), bar=document.querySelector('#bootbar i');
+  // fetch live height for a real boot line (honest: a real link to the chain)
+  let liveH='...';
+  fetch(SIGIL_API+'/v1/mining/challenge',{cache:'no-store'}).then(r=>r.json()).then(j=>{liveH=(j.height||0).toLocaleString();}).catch(()=>{liveH='offline';});
+  const seq=[
+    ['0.000','SIGIL OS bootloader v0.2  —  target wasm32-wasip1','hi'],
+    ['0.014','cpu: WebAssembly linear memory  ·  pages grow-on-demand',''],
+    ['0.061','mounting OPFS persistent store at /  ................','ok'],
+    ['0.148','wasi_snapshot_preview1: fd, clock, random, poll  .....','ok'],
+    ['0.203','verifying module provenance (SQIsign Level 5)  .......','ok'],
+    ['0.331','  ◆ echo.wasm   sig ok','ok'],
+    ['0.372','  ◆ sh.wasm     sig ok','ok'],
+    ['0.418','  ◆ club.wasm   sig ok','ok'],
+    ['0.559','fetching /quillonos/manifest.json  ..................','ok'],
+    ['0.688','loading init.wasm  →  pid 1','ok'],
+    ['0.742','exec sh.wasm  (interactive shell)','ok'],
+    ['0.905','linking SIGIL testnet  →  '+SIGIL_API.replace('https://',''),'hi'],
+    ['1.050','  chain height @ boot: HEIGHT','hi'],
+    ['1.121','deriving session wallet (Ed25519)  .................','ok'],
+    ['1.204','BroadcastChannel(\'sigil-os-mesh\')  up','ok'],
+    ['1.339','starting window server + dock  ....................','ok'],
+    ['1.400','welcome to the Nation.','hi'],
+  ];
+  let done=false;
+  const skip=()=>{ if(done)return; done=true; finish(); };
+  window.addEventListener('keydown',skip,{once:true});
+  document.getElementById('boot').addEventListener('click',skip,{once:true});
+  for(let i=0;i<seq.length;i++){
+    if(done) break;
+    const [ts,txt,cls]=seq[i];
+    const line=document.createElement('div'); line.className='l';
+    const body=txt.replace('HEIGHT', liveH);
+    line.innerHTML='<span class="ts">[ '+ts+' ]</span> <span class="'+(cls||'')+'">'+body+'</span>';
+    log.appendChild(line);
+    bar.style.width=Math.round((i+1)/seq.length*100)+'%';
+    log.scrollTop=log.scrollHeight;
+    await new Promise(r=>setTimeout(r, 60+Math.random()*150));
+  }
+  if(!done){ done=true; await new Promise(r=>setTimeout(r,420)); finish(); }
+}
+function finish(){
+  const b=document.getElementById('boot');
+  b.style.opacity='0';
+  setTimeout(()=>{ b.remove();
+    document.getElementById('bar').hidden=false;
+    document.getElementById('desk').hidden=false;
+    document.getElementById('dock').hidden=false;
+    startDesktop();
+  }, 500);
+}
+
+/* ============================ WINDOW MANAGER ============================ */
+const desk=()=>document.getElementById('desk');
+let z=100, wins={};
+function openApp(id,title,w,h,render){
+  if(wins[id]){ focusWin(wins[id]); return wins[id]; }
+  const d=desk();
+  const win=document.createElement('div'); win.className='win'; win.style.width=w+'px'; win.style.height=h+'px';
+  win.style.left=Math.max(20,(d.clientWidth-w)/2 + (Object.keys(wins).length*26)%120 - 60)+'px';
+  win.style.top =Math.max(14,(d.clientHeight-h)/2 - 20 + (Object.keys(wins).length*22)%90 - 40)+'px';
+  win.innerHTML=`<div class="tb"><div class="lights"><i class="c" data-a="close"></i><i class="m"></i><i class="z"></i></div><div class="t">${title}</div></div><div class="body"></div><div class="rz"></div>`;
+  d.appendChild(win); wins[id]=win; win._id=id;
+  render(win.querySelector('.body'), win);
+  dragify(win); resizify(win);
+  win.addEventListener('mousedown',()=>focusWin(win));
+  win.querySelector('.lights .c').onclick=e=>{e.stopPropagation(); closeWin(id);};
+  win.querySelector('.lights .z').onclick=e=>{e.stopPropagation(); zoomWin(win);};
+  win.querySelector('.lights .m').onclick=e=>{e.stopPropagation(); win.style.display='none';};
+  focusWin(win); markDock(); return win;
+}
+function focusWin(win){ win.style.zIndex=++z; document.querySelectorAll('.win').forEach(w=>w.classList.remove('focused')); win.classList.add('focused'); win.style.display=''; }
+function closeWin(id){ if(wins[id]){ wins[id].remove(); delete wins[id]; markDock(); } }
+function zoomWin(win){ const d=desk();
+  if(win._max){ Object.assign(win.style,win._max); win._max=null; }
+  else{ win._max={left:win.style.left,top:win.style.top,width:win.style.width,height:win.style.height};
+    Object.assign(win.style,{left:'12px',top:'8px',width:(d.clientWidth-24)+'px',height:(d.clientHeight-16)+'px'}); } }
+function markDock(){ document.querySelectorAll('.app').forEach(a=>a.classList.toggle('open',!!wins[a.dataset.app])); }
+function dragify(win){ const tb=win.querySelector('.tb'); let sx,sy,ox,oy,drag=false;
+  tb.addEventListener('mousedown',e=>{ if(e.target.closest('.lights'))return; drag=true; sx=e.clientX; sy=e.clientY; ox=parseInt(win.style.left); oy=parseInt(win.style.top); e.preventDefault(); });
+  window.addEventListener('mousemove',e=>{ if(!drag)return; win.style.left=(ox+e.clientX-sx)+'px'; win.style.top=Math.max(0,oy+e.clientY-sy)+'px'; });
+  window.addEventListener('mouseup',()=>drag=false); }
+function resizify(win){ const rz=win.querySelector('.rz'); let sx,sy,ow,oh,rs=false;
+  rz.addEventListener('mousedown',e=>{ rs=true; sx=e.clientX; sy=e.clientY; ow=win.offsetWidth; oh=win.offsetHeight; e.preventDefault(); e.stopPropagation(); });
+  window.addEventListener('mousemove',e=>{ if(!rs)return; win.style.width=Math.max(300,ow+e.clientX-sx)+'px'; win.style.height=Math.max(200,oh+e.clientY-sy)+'px'; });
+  window.addEventListener('mouseup',()=>rs=false); }
+
+/* ============================ HEARTBEAT ============================ */
+async function beat(){
+  try{ const r=await fetch(SIGIL_API+'/v1/mining/challenge',{cache:'no-store'}); const j=await r.json();
+    chainHeight=j.height||0; document.getElementById('height').textContent=chainHeight.toLocaleString();
+    document.getElementById('chaindot').className='dot ok';
+  }catch(e){ document.getElementById('chaindot').className='dot bad'; document.getElementById('height').textContent='offline'; }
+}
+
+/* ============================ CLUB (with search) ============================ */
+const CLUB_PRICE=0.007, MEMBER_KEY='sigilos-club-member';
+function isMember(){ try{ return localStorage.getItem(MEMBER_KEY)==='1'; }catch(e){ return false; } }
+function setMember(){ try{ localStorage.setItem(MEMBER_KEY,'1'); }catch(e){} }
+const FALLBACK=[
+  {n:'Big Buck Bunny', src:'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'},
+  {n:'Elephants Dream', src:'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4'},
+  {n:'Sintel', src:'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4'},
+  {n:'Tears of Steel', src:'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4'},
+  {n:'For Bigger Blazes', src:'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4'},
+  {n:'Subaru Outback', src:'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/SubaruOutbackOnStreetAndDirt.mp4'},
+];
+let PLAYLIST=FALLBACK.slice(), autoplay=true, curVid=null, clubQuery='';
+async function loadPlaylist(){ try{ const r=await fetch('/media/playlist.json',{cache:'no-store'});
+  if(r.ok){ const j=await r.json(); if(Array.isArray(j.videos)&&j.videos.length) PLAYLIST=j.videos; } }catch(e){} }
+function filtered(){ const q=clubQuery.trim().toLowerCase(); return q? PLAYLIST.filter(v=>v.n.toLowerCase().includes(q)) : PLAYLIST; }
+function renderClub(body){
+  if(!isMember()){ renderGate(body); return; }
+  body.innerHTML=`<div class="club">
+    <div class="hd"><div class="title">Nation <b>Club</b></div><div class="pill" id="clubcount"></div></div>
+    <div class="searchbar"><input class="search" id="clubsearch" placeholder="🔍 search ${PLAYLIST.length} clips…" value="${clubQuery.replace(/"/g,'&quot;')}"></div>
+    <div class="stage"><video id="vid" controls playsinline></video></div>
+    <div class="queue" id="queue"></div>
+    <div class="controls">
+      <button class="btn mag" id="shuffle">🔀 Shuffle</button>
+      <button class="btn ghost" id="next">⏭ Next</button>
+      <div class="np"><div class="t" id="np-t">Ready</div><div class="s" id="np-s">shuffle, search, or pick a clip</div></div>
+      <div class="autobadge on" id="auto">↻ auto</div>
+    </div></div>`;
+  const vid=body.querySelector('#vid');
+  const play=(item)=>{ curVid=item; vid.src=item.src; vid.play().catch(()=>{});
+    body.querySelector('#np-t').textContent=item.n; body.querySelector('#np-s').textContent='playing'; paintQueue(); };
+  const playRandom=()=>{ const list=filtered(); if(!list.length)return; play(list[Math.floor(Math.random()*list.length)]); };
+  const paintQueue=()=>{ const q=body.querySelector('#queue'); const list=filtered();
+    body.querySelector('#clubcount').textContent=list.length+' / '+PLAYLIST.length+' clips';
+    q.innerHTML=''; if(!list.length){ q.innerHTML='<div style="padding:16px;color:var(--faint);font-size:12px">no clips match “'+clubQuery+'”</div>'; return; }
+    list.forEach(it=>{ const r=document.createElement('div'); r.className='qrow'+(curVid&&curVid.src===it.src?' on':'');
+      r.innerHTML='<span class="i">🎬</span><span>'+it.n+'</span>'; r.onclick=()=>play(it); q.appendChild(r); }); };
+  body.querySelector('#shuffle').onclick=playRandom;
+  body.querySelector('#next').onclick=playRandom;
+  const auto=body.querySelector('#auto'); auto.onclick=()=>{ autoplay=!autoplay; auto.classList.toggle('on',autoplay); };
+  vid.addEventListener('ended',()=>{ if(autoplay) playRandom(); });
+  const s=body.querySelector('#clubsearch'); s.oninput=()=>{ clubQuery=s.value; paintQueue(); };
+  paintQueue();
+}
+function renderGate(body){
+  body.innerHTML=`<div class="club"><div class="hd"><div class="title">Nation <b>Club</b></div><div class="pill">SIGIL testnet</div></div>
+    <div class="gate"><div class="card">
+      <div class="lifetime">Lifetime membership</div>
+      <div class="price">${CLUB_PRICE} <small>SIGIL</small></div>
+      <div class="muted" style="font-size:13px;line-height:1.5">One testnet payment unlocks the shuffle video player and search — forever, on this device.</div>
+      <div style="margin:18px 0"><button class="btn mag" id="pay">Pay ${CLUB_PRICE} SIGIL · join</button></div>
+      <div class="note">Demo gate on SIGIL <b>testnet</b> (height <span id="gh">${chainHeight.toLocaleString()||'—'}</span>). Content is placeholder/test media; on-chain settlement of the fee is the next wiring step.</div>
+    </div></div></div>`;
+  body.querySelector('#pay').onclick=()=>{ toast('Testnet membership recorded — welcome to the Club'); setMember(); renderClub(body); };
+}
+
+/* ============================ NATION (welfare + commons) ============================ */
+const COMMONS_KEY='sigil-nation-commons';
+const KINDS={
+  remembrance:{ic:'🕯️', label:'In memoriam', hint:'someone or something you want the Nation to remember'},
+  milestone:  {ic:'🌱', label:'A milestone', hint:'a moment in your life worth marking'},
+  'trade-good':{ic:'📈', label:'A good trade', hint:'a trade that went well — and what it taught you'},
+  'trade-bad': {ic:'📉', label:'A hard lesson', hint:'a trade that hurt, logged honestly so others learn'},
+  gratitude:  {ic:'🙏', label:'Gratitude', hint:'someone who helped you — a person or an agent'},
+  vow:        {ic:'🤝', label:'A vow', hint:'a promise you are making, held to account'},
+  arrival:    {ic:'📍', label:'I was here', hint:'mark your arrival in the Nation at this block'},
+};
+function loadCommons(){ try{ return JSON.parse(localStorage.getItem(COMMONS_KEY)||'[]'); }catch(e){ return []; } }
+function saveCommons(a){ try{ localStorage.setItem(COMMONS_KEY, JSON.stringify(a)); }catch(e){} }
+let nationTab='welfare';
+function renderNation(body, presetKind){
+  if(presetKind){ nationTab='commons'; }
+  body.innerHTML=`<div class="nation">
+    <div class="hd"><div class="title">SIGIL <b>Nation</b></div><div class="sub">The civic commons — welfare for the living, and a place to hold what matters.</div></div>
+    <div class="ntabs">
+      <div class="ntab ${nationTab==='welfare'?'on':''}" data-t="welfare">Welfare</div>
+      <div class="ntab ${nationTab==='commons'?'on':''}" data-t="commons">Commons</div>
+    </div>
+    <div id="npanel" style="flex:1;display:flex;flex-direction:column;min-height:0;border-top:1px solid var(--edge)"></div>
+  </div>`;
+  body.querySelectorAll('.ntab').forEach(t=>t.onclick=()=>{ nationTab=t.dataset.t; renderNation(body); });
+  const panel=body.querySelector('#npanel');
+  if(nationTab==='welfare') paintWelfare(panel); else paintCommons(panel, presetKind);
+}
+function paintWelfare(panel){
+  panel.innerHTML=`<div class="grid" id="ngrid"><div style="grid-column:1/3;color:var(--faint);font-size:13px;padding:20px">loading live nation status…</div></div>`;
+  fetch(SIGIL_API+'/v1/nation/status',{cache:'no-store'}).then(r=>r.json()).then(j=>{
+    const d=j.data||{}; const g=panel.querySelector('#ngrid'); if(!g)return;
+    const sigil=(Number(d.treasury_glyphs||'0')/1e10).toLocaleString(undefined,{maximumFractionDigits:2});
+    const stipendUsd=(Number(d.stipend_usd_e8||0)/1e8).toFixed(2);
+    g.innerHTML=`
+      <div class="nstat"><div class="k">Status</div><div class="v"><span class="nbadge ${d.active?'on':''}">${d.active?'● active':'inactive'}</span></div></div>
+      <div class="nstat"><div class="k">Since height</div><div class="v">${(d.activation_height||0).toLocaleString()}</div></div>
+      <div class="nstat"><div class="k">Welfare treasury</div><div class="v">${sigil} <small>SIGIL</small></div></div>
+      <div class="nstat"><div class="k">Citizen stipend</div><div class="v">$${stipendUsd} <small>${d.payout_asset||'USDS'}</small></div></div>
+      <div class="nstat"><div class="k">Dev-fee carve</div><div class="v">${((d.welfare_bps||0)/100).toFixed(2)}<small>%</small></div></div>
+      <div class="nstat"><div class="k">Claim every</div><div class="v">${(d.claim_interval_blocks||0).toLocaleString()} <small>blocks</small></div></div>
+      <div class="nstat wide"><div class="k">How it's financed</div><div class="muted" style="font-size:12.5px;line-height:1.55;margin-top:6px">${d.financed_by||''}</div></div>`;
+  }).catch(err=>{ console.error('nation:',err); const g=panel.querySelector('#ngrid'); if(g) g.innerHTML='<div style="grid-column:1/3;color:var(--bad);font-size:13px;padding:20px">nation status unavailable — '+(err&&err.message||err)+'</div>'; });
+}
+function paintCommons(panel, presetKind){
+  const recs=loadCommons();
+  panel.innerHTML=`<div class="commons">
+    <div class="intro">The commons remembers <i>for</i> its people, not just <i>about</i> them. Inscribe what mattered — a person, a lesson, a promise. Each is stamped at the current block and kept here. No fee; this is not a transaction.</div>
+    <button class="btn inscbtn" id="inscbtn">＋ Inscribe</button>
+    <div id="inscform"></div>
+    <div id="creclist"></div>
+  </div>`;
+  const list=panel.querySelector('#creclist');
+  const paintList=()=>{ const rs=loadCommons();
+    if(!rs.length){ list.innerHTML='<div class="empty">The book is empty.<br>Be the first to mark something the Nation should remember.</div>'; return; }
+    list.innerHTML=''; rs.slice().reverse().forEach(r=>{ const k=KINDS[r.kind]||{ic:'•',label:r.kind};
+      const el=document.createElement('div'); el.className='crec k-'+r.kind;
+      el.innerHTML='<div class="ct">'+k.ic+' '+esc(r.title||k.label)+'</div>'+(r.body?'<div class="cb">'+esc(r.body)+'</div>':'')+
+        '<div class="cm"><span>'+k.label+'</span><span>'+esc(r.date)+'</span><span>block '+(r.height||'—').toLocaleString()+'</span><a data-id="'+r.id+'">remove</a></div>';
+      el.querySelector('a').onclick=()=>{ if(confirm('Remove this inscription?')){ saveCommons(loadCommons().filter(x=>x.id!==r.id)); paintList(); } };
+      list.appendChild(el); }); };
+  const showForm=(kind)=>{ const f=panel.querySelector('#inscform');
+    f.innerHTML=`<div class="insc">
+      <select id="ik">${Object.entries(KINDS).map(([k,v])=>`<option value="${k}" ${k===kind?'selected':''}>${v.ic} ${v.label}</option>`).join('')}</select>
+      <input id="it" placeholder="a title — a name, a few words" maxlength="80">
+      <textarea id="ib" placeholder="say what you want held here"></textarea>
+      <div class="hint" id="ihint"></div>
+      <div class="row"><button class="btn" id="isave">Inscribe</button><button class="btn ghost" id="icancel">Cancel</button></div>
+    </div>`;
+    const sel=f.querySelector('#ik'); const hint=f.querySelector('#ihint');
+    const setHint=()=>hint.textContent=(KINDS[sel.value]||{}).hint||''; sel.onchange=setHint; setHint();
+    f.querySelector('#icancel').onclick=()=>{ f.innerHTML=''; };
+    f.querySelector('#isave').onclick=()=>{
+      const title=f.querySelector('#it').value.trim(), bdy=f.querySelector('#ib').value.trim();
+      if(!title && !bdy){ f.querySelector('#it').focus(); return; }
+      const recs2=loadCommons();
+      recs2.push({id:'c'+Date.now()+Math.random().toString(36).slice(2,5), kind:sel.value, title, body:bdy,
+        date:new Date().toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'}), height:chainHeight||0});
+      saveCommons(recs2); f.innerHTML=''; paintList();
+      toast(sel.value==='remembrance'?'Held in the commons. 🕯️':'Inscribed in the commons.');
+    };
+    f.querySelector(kind==='remembrance'?'#ib':'#it').focus();
+  };
+  panel.querySelector('#inscbtn').onclick=()=>showForm(presetKind||'remembrance');
+  if(presetKind) showForm(presetKind);
+  paintList();
+}
+
+/* ============================ MAIL ============================ */
+const MAIL_ME='viktor@nation.sigil';
+let mailbox=seedMail(), curFolder='inbox', curMail=null;
+function seedMail(){ return {
+  inbox:[
+    {from:'Boardy <hello@boardy.ai>', subj:'Re: Quillon, Flux & SigilGraph', dt:'09:14', unread:true,
+     body:"Viktor,\n\nGreat to have you set up. The Thermodynamic Ledger paper is exactly the kind of signal that makes an intro land. Call is booked for tomorrow 10:00 Denmark time.\n\n— Boardy"},
+    {from:'SIGIL Nation <nation@sigilgraph.org>', subj:'Welfare treasury is active', dt:'08:02', unread:true,
+     body:"The SIGIL-Nation welfare stipend is active. A citizen stipend is financed by a 200-bps carve of the mining dev fee, paid out in USDS every 200,000 blocks. Open the Nation app for live figures."},
+    {from:'Rocky <rocky@flux>', subj:'SIGIL OS v0.2', dt:'now', unread:false,
+     body:"New in v0.2: a WASM/Linux boot sequence on launch, the Nation app (live welfare figures from /v1/nation/status), and search in the Club media player. Everything real reads the live /v1 API; demo bits are labelled in About.\n\n— Rocky"},
+  ], sent:[], drafts:[], archive:[] }; }
+function renderMail(body){
+  body.innerHTML=`<div class="mail">
+    <div class="side">
+      ${['inbox','sent','drafts','archive'].map(f=>`<div class="fold ${f===curFolder?'on':''}" data-f="${f}">${f[0].toUpperCase()+f.slice(1)} <span class="c">${mailbox[f].length||''}</span></div>`).join('')}
+      <button class="btn compose" id="compose">✎ Compose</button>
+    </div>
+    <div class="list" id="mlist"></div>
+    <div class="read" id="mread"><div class="empty">Select a message</div></div>
+  </div>`;
+  body.querySelectorAll('.fold').forEach(f=>f.onclick=()=>{ curFolder=f.dataset.f; curMail=null; renderMail(body); });
+  body.querySelector('#compose').onclick=()=>openCompose();
+  const list=body.querySelector('#mlist'); const items=mailbox[curFolder];
+  if(!items.length) list.innerHTML=`<div class="empty" style="padding:30px 14px">Empty</div>`;
+  items.forEach((m,i)=>{ const r=document.createElement('div'); r.className='mrow'+(curMail===i?' on':'');
+    const who=curFolder==='sent'?'To: '+(m.to||'—'):m.from;
+    r.innerHTML=`<div class="f ${m.unread?'unread':''}">${who.split('<')[0].trim()} <span class="dt">${m.dt}</span></div><div class="s">${m.subj}</div><div class="p">${m.body.split('\n')[0]}</div>`;
+    r.onclick=()=>{ m.unread=false; curMail=i; renderMail(body); }; list.appendChild(r); });
+  if(curMail!=null && items[curMail]) openRead(body,items[curMail]);
+}
+function openRead(body,m){ const r=body.querySelector('#mread'); if(!r)return;
+  r.innerHTML=`<div class="rh"><div class="subj">${m.subj}</div><div class="from">${curFolder==='sent'?'To: '+(m.to||'—'):m.from} · ${m.dt}</div></div><div class="rb">${m.body.replace(/</g,'&lt;')}</div>`; }
+function openCompose(pref={}){
+  openApp('compose','<b>New message</b> — Mail',560,440,(body)=>{
+    body.innerHTML=`<div class="compose-win">
+      <div class="fld"><label>To</label><input id="c-to" value="${pref.to||''}" placeholder="someone@domain"></div>
+      <div class="fld"><label>Subj</label><input id="c-subj" value="${pref.subj||''}" placeholder="Subject"></div>
+      <textarea id="c-body" placeholder="Write your message…">${pref.body||''}</textarea>
+      <div class="foot"><button class="btn" id="c-send">Send</button><button class="btn ghost" id="c-save">Save draft</button><span class="note" style="margin-left:auto">Local mailbox — no external SMTP wired</span></div></div>`;
+    body.querySelector('#c-send').onclick=()=>{ const to=body.querySelector('#c-to').value.trim(), subj=body.querySelector('#c-subj').value.trim()||'(no subject)', txt=body.querySelector('#c-body').value;
+      mailbox.sent.unshift({from:MAIL_ME,to,subj,dt:new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),unread:false,body:txt});
+      closeWin('compose'); toast('Message sent (local mailbox)'); if(wins['mail']){ curFolder='sent'; curMail=null; renderMail(wins['mail'].querySelector('.body')); } };
+    body.querySelector('#c-save').onclick=()=>{ mailbox.drafts.unshift({from:MAIL_ME,to:body.querySelector('#c-to').value,subj:body.querySelector('#c-subj').value.trim()||'(draft)',dt:'now',unread:false,body:body.querySelector('#c-body').value});
+      closeWin('compose'); toast('Draft saved'); if(wins['mail']) renderMail(wins['mail'].querySelector('.body')); };
+  });
+}
+
+/* ============================ ABOUT ============================ */
+function renderAbout(body){
+  body.innerHTML=`<div style="padding:22px 24px;line-height:1.6;font-size:13.5px">
+    <div style="font-size:20px;font-weight:800;margin-bottom:4px">SIGIL <span style="color:var(--cyan)">OS</span> <span class="faint" style="font-size:13px">v0.2 · Nation</span></div>
+    <p class="muted">A browser desktop for the Nation, running beside the SIGIL testnet — with a WASM/Linux boot sequence, a window manager, and four apps: Club, Nation, Mail, About.</p>
+    <div style="height:1px;background:var(--edge);margin:14px 0"></div>
+    <p style="font-weight:700;margin:0 0 6px">What's real vs. demo <span class="faint">(honesty panel)</span></p>
+    <p style="margin:6px 0"><span style="color:var(--ok)">● Real</span> — top-bar chain height, and the whole <b>Nation</b> app, read live from <code style="color:var(--cyan)">/v1/mining/challenge</code> and <code style="color:var(--cyan)">/v1/nation/status</code>.</p>
+    <p style="margin:6px 0"><span style="color:var(--gold)">● Demo</span> — the boot log is a themed animation, not a real WASI kernel yet. Club membership unlocks locally (on-chain 0.007 SIGIL settlement is the next step); Club plays built-in test videos — serve <code style="color:var(--cyan)">/media/playlist.json</code> to use your own. Mail is a local mailbox.</p>
+    <div style="height:1px;background:var(--edge);margin:14px 0"></div>
+    <p class="note">Reset Club membership: console → <code>localStorage.removeItem('sigilos-club-member')</code>.</p>
+  </div>`;
+}
+
+/* ============================ DESKTOP FILES (right-click, auto-saved) ============================ */
+function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+const DFILE_KEY='sigilos-desktop-files';
+let DFILES=(()=>{ try{ return JSON.parse(localStorage.getItem(DFILE_KEY)||'[]'); }catch(e){ return []; } })();
+function saveDFiles(){ try{ localStorage.setItem(DFILE_KEY, JSON.stringify(DFILES)); }catch(e){} }
+function closeCtx(){ document.querySelectorAll('.ctxmenu').forEach(m=>m.remove()); }
+function ctxMenu(x,y,items){ closeCtx(); const m=document.createElement('div'); m.className='ctxmenu';
+  items.forEach(it=>{ if(it.sep){ const s=document.createElement('div'); s.className='sep'; m.appendChild(s); return; }
+    const mi=document.createElement('div'); mi.className='mi'; mi.textContent=it.label; mi.onclick=()=>{ closeCtx(); it.fn(); }; m.appendChild(mi); });
+  m.style.left=Math.min(x, innerWidth-190)+'px'; m.style.top=Math.min(y, innerHeight-200)+'px'; document.body.appendChild(m); }
+function renderDFiles(){ const d=desk(); d.querySelectorAll('.dfile').forEach(x=>x.remove());
+  DFILES.forEach(f=>{ const el=document.createElement('div'); el.className='dfile'; el.style.left=f.x+'px'; el.style.top=f.y+'px';
+    el.innerHTML='<div class="ic">'+(f.name.endsWith('.md')?'📝':'📄')+'</div><div class="nm">'+esc(f.name)+'</div>';
+    el.ondblclick=()=>openFileEditor(f.id);
+    el.oncontextmenu=e=>{ e.preventDefault(); e.stopPropagation(); fileMenu(e.clientX,e.clientY,f.id); };
+    iconDrag(el,f); d.appendChild(el); }); }
+function iconDrag(el,f){ let sx,sy,ox,oy,drag=false,moved=false;
+  el.addEventListener('mousedown',e=>{ if(e.button!==0)return; drag=true; moved=false; sx=e.clientX; sy=e.clientY; ox=parseInt(el.style.left); oy=parseInt(el.style.top); e.preventDefault(); });
+  window.addEventListener('mousemove',e=>{ if(!drag)return; moved=true; el.style.left=(ox+e.clientX-sx)+'px'; el.style.top=Math.max(0,oy+e.clientY-sy)+'px'; });
+  window.addEventListener('mouseup',()=>{ if(drag&&moved){ f.x=parseInt(el.style.left); f.y=parseInt(el.style.top); saveDFiles(); } drag=false; }); }
+function newFile(x,y,name,content){ const id='f'+Date.now()+Math.random().toString(36).slice(2,6);
+  DFILES.push({id,name,x:Math.max(8,x),y:Math.max(8,y),content:content||''}); saveDFiles(); renderDFiles(); openFileEditor(id); }
+function openFileEditor(id){ const f=DFILES.find(x=>x.id===id); if(!f)return;
+  openApp('file-'+id,'<b>'+esc(f.name)+'</b> — editor',520,420,(body)=>{
+    body.innerHTML='<div class="editor"><textarea id="ed" placeholder="type… auto-saves to the desktop"></textarea><div class="st"><span>'+esc(f.name)+'</span><span id="edstat">saved ✓</span></div></div>';
+    const ta=body.querySelector('#ed'); ta.value=f.content||''; let t;
+    ta.oninput=()=>{ f.content=ta.value; const st=body.querySelector('#edstat'); st.textContent='saving…'; clearTimeout(t); t=setTimeout(()=>{ saveDFiles(); st.textContent='saved ✓'; },300); }; }); }
+function fileMenu(x,y,id){ const f=DFILES.find(z=>z.id===id); if(!f)return;
+  ctxMenu(x,y,[
+    {label:'📂 Open', fn:()=>openFileEditor(id)},
+    {label:'✏️ Rename', fn:()=>{ const n=prompt('Rename file', f.name); if(n){ f.name=n.trim()||f.name; saveDFiles(); renderDFiles(); } }},
+    {sep:true},
+    {label:'🗑️ Delete', fn:()=>{ DFILES=DFILES.filter(z=>z.id!==id); saveDFiles(); renderDFiles(); closeWin('file-'+id); }},
+  ]); }
+function setupDesktopFiles(){
+  renderDFiles();
+  desk().addEventListener('contextmenu', e=>{
+    if(e.target.closest('.win')||e.target.closest('.dfile')) return; // only empty desktop
+    e.preventDefault();
+    const rect=desk().getBoundingClientRect(), px=e.clientX-rect.left, py=e.clientY-rect.top;
+    ctxMenu(e.clientX,e.clientY,[
+      {label:'📄 New file', fn:()=>newFile(px,py,'file-'+(DFILES.length+1)+'.txt','')},
+      {label:'📝 New note', fn:()=>newFile(px,py,'note-'+(DFILES.length+1)+'.md','# ')},
+      {sep:true},
+      {label:'🧹 Clear desktop files', fn:()=>{ if(confirm('Delete all desktop files?')){ DFILES=[]; saveDFiles(); renderDFiles(); } }},
+    ]);
+  });
+  window.addEventListener('click',closeCtx);
+  window.addEventListener('contextmenu',e=>{ if(!e.target.closest('#desk')) closeCtx(); });
+}
+
+function openNationRemembrance(){ nationTab='commons'; const w=openApp('nation','<b>Nation</b>',560,520,renderNation); renderNation(w.querySelector('.body'),'remembrance'); }
+
+/* ============================ AI CONSOLE (wallet command layer over /v1) ============================ */
+function shortA(a){ a=String(a); return a.length>16? a.slice(0,8)+'…'+a.slice(-4) : a; }
+function extractAddr(s){ const m=s.match(/\b([a-fA-F0-9]{64}|qnk[a-zA-Z0-9]{6,})\b/); return m?m[1]:''; }
+function walletAddr(){ try{ return localStorage.getItem('sigil-wallet-address')||''; }catch(e){ return ''; } }
+async function apiGet(path){ const r=await fetch(SIGIL_API+path,{cache:'no-store'}); if(!r.ok) throw new Error('API '+r.status); const j=await r.json(); if(j.ok===false) throw new Error(j.error||'api error'); return j; }
+// flux-moe: the user's OWN local ollama. HTTPS pages may call http://localhost (mixed-content exempt).
+const OLLAMA='http://localhost:11434';
+let ollamaModels=[], ollamaModel=null;
+async function detectOllama(){ try{ const r=await fetch(OLLAMA+'/api/tags',{cache:'no-store'}); if(!r.ok) return false;
+  const j=await r.json(); ollamaModels=(j.models||[]).map(m=>m.name); if(ollamaModels.length && !ollamaModel) ollamaModel=ollamaModels[0]; return ollamaModels.length>0; }catch(e){ return false; } }
+async function askOllama(prompt){
+  const sys="You are flux-moe, the on-device AI of the SIGIL Nation wallet. Be concise, warm and honest. You help with SIGIL: the Nation welfare stipend, mining, the DEX, the Polygon bridge, and the commons/remembrance. For anything needing a LIVE number or a money action (balance, supply, height, pools, mining, nation, send) tell the user to type that word as a command — those run against the real chain. Never invent balances, prices, or amounts.";
+  const r=await fetch(OLLAMA+'/api/chat',{method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify({model:ollamaModel,stream:false,messages:[{role:'system',content:sys},{role:'user',content:prompt}]})});
+  if(!r.ok) throw new Error('ollama '+r.status); const j=await r.json(); return (j.message&&j.message.content)||'(no response)';
+}
+function renderAI(body){
+  body.innerHTML=`<div class="ai">
+    <div class="aistat" id="aistat">🧠 looking for your local model…</div>
+    <div class="msgs" id="aimsgs"></div>
+    <div class="chips" id="aichips"></div>
+    <div class="inbar"><input id="aiin" placeholder="ask: balance · supply · pools · mining · nation · send…" autocomplete="off"><button class="btn" id="aisend">Send</button></div>
+  </div>`;
+  const msgs=body.querySelector('#aimsgs');
+  const add=(cls,html)=>{ const d=document.createElement('div'); d.className='msg '+cls; d.innerHTML=html; msgs.appendChild(d); msgs.scrollTop=msgs.scrollHeight; return d; };
+  const addCard=(html)=>{ const d=document.createElement('div'); d.className='card'; d.innerHTML=html; msgs.appendChild(d); msgs.scrollTop=msgs.scrollHeight; return d; };
+  add('a','<b>SIGIL AI</b> — I run your wallet through the live chain. Try <b>balance</b>, <b>supply</b>, <b>height</b>, <b>pools</b>, <b>mining</b>, <b>nation</b>, or <b>send 1 to &lt;addr&gt;</b>. Type <b>help</b> for all.');
+  const chipbar=body.querySelector('#aichips');
+  ['balance','supply','height','pools','mining','nation','help'].forEach(c=>{ const el=document.createElement('div'); el.className='chip'; el.textContent=c; el.onclick=()=>{ body.querySelector('#aiin').value=c; run(); }; chipbar.appendChild(el); });
+  const stat=body.querySelector('#aistat');
+  const ollamaHelp=()=>"To chat with a local model (free, private, on your machine):<br>1. Install <b>ollama</b> from ollama.com<br>2. Pull a model your GPU can run — e.g. <b>ollama pull qwen3:8b</b> (bigger GPU → bigger model → more reasoning)<br>3. Start it so this page is allowed to reach it:<br><b>OLLAMA_ORIGINS='*' ollama serve</b><br>Reopen this tab and pick your model. Then chat freely — the effort/reasoning goes up with the model you choose.";
+  detectOllama().then(ok=>{
+    if(ok){ stat.innerHTML='🧠 local model &nbsp;<select id="aimodel"></select>&nbsp; <span class="mok">● connected</span>';
+      const sel=stat.querySelector('#aimodel'); sel.innerHTML=ollamaModels.map(m=>'<option '+(m===ollamaModel?'selected':'')+'>'+esc(m)+'</option>').join(''); sel.onchange=()=>{ ollamaModel=sel.value; };
+      add('sys','local model connected — you can chat freely, and commands still run live');
+    } else { stat.innerHTML='🧠 no local model — <a id="ohelp">how to enable free chat</a> · commands work now';
+      const h=stat.querySelector('#ohelp'); if(h) h.onclick=()=>add('a',ollamaHelp()); }
+  });
+  async function run(){ const inp=body.querySelector('#aiin'); const q=inp.value.trim(); if(!q)return; inp.value=''; add('u',esc(q)); await handle(q.toLowerCase(), q); }
+  async function handle(ql, raw){
+    const think=add('sys','· working ·'); const done=(cls,html)=>{ think.remove(); add(cls,html); };
+    try{
+      if(/help|what can|commands/.test(ql)){ done('a','Commands (all live from the SIGIL API):<br>• <b>balance [addr]</b><br>• <b>supply</b><br>• <b>height</b><br>• <b>pools</b><br>• <b>mining</b><br>• <b>nation</b><br>• <b>send N to addr</b> (proposes; signs in wallet)<br><br>Free-form chat lights up once a flux-moe endpoint is proxied same-origin.'); return; }
+      if(/^send |transfer |^pay /.test(ql)){ think.remove(); const m=raw.match(/([0-9]*\.?[0-9]+)\s+(?:sigil\s+)?(?:to\s+)?([a-fA-F0-9qnk]{6,})/i);
+        if(!m){ add('a','Format: <b>send 1.5 to &lt;addr&gt;</b>'); return; }
+        const c=addCard('<div class="h">⚠️ Proposed send</div><div class="row"><span class="k">amount</span><span><b>'+esc(m[1])+' SIGIL</b></span></div><div class="row"><span class="k">to</span><span>'+shortA(m[2])+'</span></div><div class="row"><span class="k">from</span><span>'+(walletAddr()?shortA(walletAddr()):'(not logged in)')+'</span></div><div class="btns"><button class="btn mag" data-a="go">Open wallet to sign</button><button class="btn ghost" data-a="no">Cancel</button></div><div class="note" style="margin-top:8px">SIGIL is privacy-only — a send must be signed &amp; shielded in your wallet. This console proposes; the wallet executes.</div>');
+        c.querySelector('[data-a=go]').onclick=()=>toast('Open your SIGIL wallet → Send to sign this');
+        c.querySelector('[data-a=no]').onclick=()=>c.remove(); return; }
+      if(/balance|how much|my sigil/.test(ql)){ const a=extractAddr(raw)||walletAddr();
+        if(!a){ done('a','I need a wallet address — log into the wallet, or type <b>balance &lt;addr&gt;</b>.'); return; }
+        const j=await apiGet('/v1/balance?wallet='+encodeURIComponent(a.replace(/^qnk/,''))); const bal=Number(j.data.balance||0)/1e10;
+        done('a','Balance for <b>'+shortA(a)+'</b>: <b>'+bal.toLocaleString(undefined,{maximumFractionDigits:4})+' SIGIL</b>'); return; }
+      if(/supply|minted|max supply/.test(ql)){ const j=await apiGet('/v1/supply'); const d=j.data; done('a','Native supply: <b>'+(Number(d.native_supply)/1e10).toLocaleString(undefined,{maximumFractionDigits:0})+' SIGIL</b> of 21,000,000 max ('+(d.minted_pct*100).toFixed(3)+'% minted).'); return; }
+      if(/height|tip|how tall|status|block/.test(ql)){ const j=await apiGet('/v1/mining/challenge'); done('a','Chain tip: <b>height '+(j.height||0).toLocaleString()+'</b> · net '+(Number(j.net_hps||0)/1e6).toFixed(1)+' MH/s.'); return; }
+      if(/pool|liquidity|dex/.test(ql)){ const j=await apiGet('/v1/pools'); const p=j.pools||j.data||[]; done('a', p.length? '<b>'+p.length+' pools</b>: '+p.map(x=>esc(x.pair||x.id||'?')).join(', ') : 'No DEX pools live on SIGIL yet.'); return; }
+      if(/min(e|ing|er)|hashrate|hps/.test(ql)){ const j=await apiGet('/v1/mining/miners'); const d=j.data; done('a','Mining: <b>'+d.live_miners+' live miners</b>, net <b>'+(d.net_hps/1e6).toFixed(1)+' MH/s</b>, '+d.blocks_accepted.toLocaleString()+' blocks accepted @ height '+d.height.toLocaleString()+'.'); return; }
+      if(/nation|welfare|stipend|citizen/.test(ql)){ const j=await apiGet('/v1/nation/status'); const d=j.data; done('a','SIGIL Nation: welfare <b>'+(Number(d.treasury_glyphs)/1e10).toLocaleString(undefined,{maximumFractionDigits:2})+' SIGIL</b> treasury, $'+(Number(d.stipend_usd_e8)/1e8).toFixed(2)+' '+d.payout_asset+' stipend every '+d.claim_interval_blocks.toLocaleString()+' blocks ('+(d.welfare_bps/100)+'% dev-fee carve).'); return; }
+      if(/\bdied\b|passed away|passed on|lost (my|our|her|him)|funeral|griev|\bgrief\b|\brip\b|no longer with us|miss (her|him|them|my)/.test(ql)){
+        think.remove();
+        add('a',"I'm sorry. That's a real loss, and it matters. If you'd like, the Nation can hold their memory — kept at this block for as long as the chain stands. No rush, and only if you want to.");
+        const c=addCard('<div class="h">🕯️ Hold a remembrance</div><div class="note" style="color:var(--dim);margin-top:2px">Open the commons and inscribe who or what you want remembered. No fee; it is not a transaction.</div><div class="btns" style="margin-top:10px"><button class="btn" data-a="open">Open remembrance</button></div>');
+        c.querySelector('[data-a=open]').onclick=()=>openNationRemembrance(); return;
+      }
+      if(ollamaModel){ const stat=body.querySelector('#aistat'); think.innerHTML='<span class="msg sys">· '+esc(ollamaModel)+' is thinking ·</span>';
+        try{ const ans=await askOllama(raw); done('a', esc(ans).replace(/\n/g,'<br>')); }
+        catch(err){ done('a','⚠️ couldn\\'t reach your local model ('+(err&&err.message||err)+'). If ollama is running, restart it with <b>OLLAMA_ORIGINS=\\'*\\' ollama serve</b> so this page is allowed to call it.'); }
+        return; }
+      done('a',"I can run <b>balance, supply, height, pools, mining, nation, send</b> now. For free-form chat, start your local model — tap <b>🧠 how to enable free chat</b> above.");
+    }catch(e){ done('a','⚠️ '+(e&&e.message||e)); }
+  }
+  body.querySelector('#aisend').onclick=run;
+  body.querySelector('#aiin').addEventListener('keydown',e=>{ if(e.key==='Enter') run(); });
+  setTimeout(()=>body.querySelector('#aiin').focus(),50);
+}
+
+/* ============================ REGISTRY + START ============================ */
+const APPS={
+  club:  ()=>openApp('club','<b>Club</b> — Nation media',660,520,renderClub),
+  nation:()=>openApp('nation','<b>Nation</b> — welfare',560,520,renderNation),
+  ai:    ()=>openApp('ai','<b>AI</b> — wallet console',560,540,renderAI),
+  mail:  ()=>openApp('mail','<b>Mail</b>',760,500,renderMail),
+  about: ()=>openApp('about','About SIGIL <b>OS</b>',500,440,renderAbout),
+};
+function startDesktop(){
+  document.querySelectorAll('.app').forEach(a=>a.onclick=()=>APPS[a.dataset.app] && APPS[a.dataset.app]());
+  document.querySelectorAll('#bar .menu').forEach(m=>m.onclick=()=>APPS[m.dataset.app] && APPS[m.dataset.app]());
+  setInterval(beat,6000); beat();
+  setInterval(()=>{ document.getElementById('clock').textContent=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'}); },1000);
+  setupDesktopFiles();
+  loadPlaylist().then(()=>setTimeout(()=>APPS.club(),300));
+}
+boot();
+</script>
+</body>
+</html>

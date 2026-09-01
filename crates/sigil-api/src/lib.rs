@@ -200,6 +200,22 @@ pub fn hex32(s: &str) -> Option<WalletId> {
     Some(out)
 }
 
+#[cfg(test)]
+mod hex32_dos_tests {
+    use super::hex32;
+    #[test]
+    fn crafted_input_never_panics() {
+        // The money API decodes wallet ids from requests — a crafted value must return
+        // None, never crash the API thread (the DoS-hardening guard this pins).
+        assert!(hex32(&"a".repeat(64)).is_some());
+        assert!(hex32("").is_none());
+        assert!(hex32(&"z".repeat(64)).is_none());              // 64 chars, non-hex
+        let straddle = format!("a{}", "€".repeat(21));           // 64 BYTES, multibyte
+        assert_eq!(straddle.len(), 64);
+        assert!(hex32(&straddle).is_none());                     // no panic on the boundary
+    }
+}
+
 // ── request/response bodies (serde; flux-api derives their OpenAPI schema) ──
 #[derive(Debug, Deserialize)]
 pub struct BalanceQuery {

@@ -38,6 +38,26 @@ pub(crate) fn trunc(s: &str, n: usize) -> String {
     else { format!("{}…", s.chars().take(n.saturating_sub(1)).collect::<String>()) }
 }
 
+#[cfg(test)]
+mod fmt_tests {
+    use super::{group, trunc};
+    #[test]
+    fn group_thousands() {
+        assert_eq!(group(0), "0");
+        assert_eq!(group(999), "999");
+        assert_eq!(group(1000), "1,000");
+        assert_eq!(group(1_135_287), "1,135,287");
+        assert_eq!(group(1_000_000), "1,000,000");
+    }
+    #[test]
+    fn trunc_counts_chars_not_bytes() {
+        assert_eq!(trunc("hello", 10), "hello");      // fits, unchanged
+        assert_eq!(trunc("hello world", 5), "hell…"); // take n-1, then ellipsis
+        assert_eq!(trunc("café", 3), "ca…");          // multibyte: char-count, never splits a byte
+        assert_eq!(trunc("", 3), "");
+    }
+}
+
 /// Stable per-agent color from an id hash — premium control-panel feel, same agent always same hue.
 pub(crate) fn agent_color(id: &str) -> Color {
     let pal = [C_CYAN, C_VBRIGHT, C_GREEN, C_GOLD, Color::Magenta, Color::LightBlue];

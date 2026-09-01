@@ -2593,6 +2593,34 @@ mod tests {
         }
     }
 
+    /// A tx CLAIMING a not-yet-implemented signature scheme must be REJECTED
+    /// (fail closed), never accepted. If a future stub ever returns `Ok(())` for
+    /// these arms, any tx could set the scheme and bypass signature verification
+    /// entirely — direct theft. This pins the fail-loud posture. Correct-LENGTH
+    /// dummy pubkey + matching wallet id so the scheme arm is actually reached,
+    /// past the length + wallet-binding guards.
+    #[test]
+    fn unimplemented_sig_schemes_fail_closed_not_open() {
+        for scheme in [SigScheme::Dilithium5, SigScheme::HybridSqiEd25519] {
+            let label = format!("{scheme:?}");
+            let pk = vec![0xABu8; scheme.expected_pubkey_len()];
+            let from = wallet_id_from_pubkey(&pk);
+            let signed = SignedTx {
+                tx: SigilTx::Send { from, to: [9u8; 32], amount: 10, token: NATIVE, fee: 1 },
+                from_pubkey: from,
+                nonce: 0,
+                sig_scheme: scheme,
+                sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
+                pubkey: PubKeyBytes(pk),
+            };
+            let got = signed.verify_signature();
+            assert!(
+                matches!(got, Err(TxApplyError::NotImplemented(_))),
+                "{label} must fail closed (NotImplemented), got {got:?}"
+            );
+        }
+    }
+
     /// Ed25519 hot-path + verify-once Mempool end-to-end: keygen → sign → ingest
     /// verifies ONCE (batch-MSM fast path) → pull does NOT re-verify; a tampered
     /// sig is dropped at ingest, and re-ingesting accepted txs is all-dupe with

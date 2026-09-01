@@ -702,6 +702,7 @@ mod tests {
     /// only the two opt-outs, the safe and deterministic half.
     #[test]
     fn maybe_start_opts_out_when_either_flag_is_zero() {
+        let _env = crate::producer::PRODUCER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("SIGIL_TOP_PRODUCER", "0");
         std::env::remove_var("SIGIL_TOP_PRODUCE");
         assert!(

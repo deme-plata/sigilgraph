@@ -152,12 +152,19 @@ pub fn should_produce() -> bool {
     !matches!(std::env::var("SIGIL_TOP_PRODUCE").as_deref(), Ok("0"))
 }
 
+/// Serializes tests (here and in `run`) that mutate the process-global
+/// SIGIL_TOP_PRODUCER / SIGIL_TOP_PRODUCE gate vars — cargo's parallel test runner
+/// otherwise lets two race on them (one sets while another reads the gate).
+#[cfg(test)]
+pub(crate) static PRODUCER_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn gates_read_the_real_env_vars() {
+        let _env = PRODUCER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Unset = ON. Producing is the default posture now; the env vars are an OPT-OUT.
         std::env::remove_var("SIGIL_TOP_PRODUCER");
         std::env::remove_var("SIGIL_TOP_PRODUCE");

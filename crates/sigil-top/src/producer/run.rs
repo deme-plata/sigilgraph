@@ -613,8 +613,14 @@ mod tests {
                 }
             });
 
+            // Budgets are generous on purpose: this test spins up a real server
+            // and a real (CPU-bound) mining ticker, so under `-j8` max-parallel
+            // test load the miner is scheduler-starved and every stage takes
+            // longer in wall-clock. Widening the windows tolerates that load
+            // without weakening any assertion — a genuinely broken pipeline still
+            // fails, just after a longer wait. (API up: up to 10s.)
             let mut up = false;
-            for _ in 0..80 {
+            for _ in 0..200 {
                 if tokio::net::TcpStream::connect(&addr).await.is_ok() { up = true; break; }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
@@ -625,9 +631,9 @@ mod tests {
             let base = mining_api::local_mining_api_url();
             let client = reqwest::Client::new();
 
-            // Wait for a real challenge — needs at least one tick's publish_tip().
+            // First real challenge needs at least one tick's publish_tip() — up to 9s under load.
             let mut challenge: Option<flux_miner::client::Challenge> = None;
-            for _ in 0..100 {
+            for _ in 0..300 {
                 if let Ok(r) = client.get(format!("{base}/v1/mining/challenge?wallet={wallet}")).send().await {
                     if r.status().is_success() {
                         if let Ok(c) = r.json::<flux_miner::client::Challenge>().await {
@@ -662,8 +668,11 @@ mod tests {
             // Give the ticker time to pick the queued solve up (take_creditable_solve)
             // and mint + settle a block that embeds it, then poll the REAL /v1/balance
             // route — proving credit through the whole pipeline, not just acceptance.
+            // Mint + settle a block embedding the solve, then poll the REAL
+            // /v1/balance — up to 30s so a scheduler-starved miner under -j8 has
+            // time to finish the PoW + settlement it genuinely performs.
             let mut credited_raw: Option<String> = None;
-            for _ in 0..200 {
+            for _ in 0..1200 {
                 if let Ok(r) = client.get(format!("{base}/v1/balance?wallet={wallet}")).send().await {
                     if let Ok(v) = r.json::<serde_json::Value>().await {
                         if let Some(bal) = v.get("data").and_then(|d| d.get("balance")).and_then(|b| b.as_str()) {

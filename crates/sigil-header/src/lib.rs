@@ -343,6 +343,21 @@ fn strip_null_topology_commitment_for_hashing(mut json: Vec<u8>) -> Vec<u8> {
 /// schedule a real height, mirroring [`H1_PRODUCER_SIG_ACTIVATION_HEIGHT`].
 pub const TOPOLOGY_COMMITMENT_ACTIVATION_HEIGHT: u64 = u64::MAX;
 
+/// The canonical VDF-input derivation: `BLAKE3(parent_hash || nonce)`.
+///
+/// The producer (`sigil-node`'s `mint::mint_next_block`) and the verifier
+/// ([`SigilBlockHeaderV0::precheck`]) MUST derive this byte-for-byte
+/// identically. If they ever drift, every block a producer mints fails
+/// `precheck` with [`HeaderError::VdfInputMismatch`] and the chain stalls
+/// with no obviously-wrong value anywhere. Defining it once, here in the
+/// crate both sides depend on, makes that drift impossible.
+pub fn vdf_input_from(parent_hash: &[u8; 32], nonce: &[u8]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(parent_hash);
+    h.update(nonce);
+    *h.finalize().as_bytes()
+}
+
 impl SigilBlockHeaderV0 {
     /// Compute the canonical block hash — BLAKE3 over the deterministic
     /// serialization. This is the block's network identity.
@@ -408,10 +423,7 @@ impl SigilBlockHeaderV0 {
             });
         }
         // VDF input MUST = BLAKE3(parent_hash || nonce_sqisign).
-        let mut h = blake3::Hasher::new();
-        h.update(&self.parent_hash);
-        h.update(self.nonce_sqisign.as_bytes());
-        let expected: [u8; 32] = *h.finalize().as_bytes();
+        let expected = vdf_input_from(&self.parent_hash, self.nonce_sqisign.as_bytes());
         if expected != self.vdf_input {
             return Err(HeaderError::VdfInputMismatch);
         }
@@ -567,10 +579,10 @@ mod tests {
     fn fake_header() -> SigilBlockHeaderV0 {
         let parent: [u8; 32] = [9u8; 32];
         let nonce = SqiSignature::from_array([7u8; SQISIGN_L5_LEN]);
-        let mut h = blake3::Hasher::new();
-        h.update(&parent);
-        h.update(nonce.as_bytes());
-        let vdf_input: [u8; 32] = *h.finalize().as_bytes();
+        // Build the field through the SAME shared fn precheck uses, so
+        // `precheck_accepts_well_formed_header` also proves the producer's
+        // derivation is accepted.
+        let vdf_input: [u8; 32] = vdf_input_from(&parent, nonce.as_bytes());
 
         SigilBlockHeaderV0 {
             version: HEADER_VERSION,
@@ -606,6 +618,22 @@ mod tests {
     #[test]
     fn precheck_accepts_well_formed_header() {
         assert!(fake_header().precheck().is_ok());
+    }
+
+    #[test]
+    fn vdf_input_from_is_blake3_of_parent_then_nonce() {
+        let parent = [3u8; 32];
+        let nonce = [5u8; SQISIGN_L5_LEN];
+        // Known-answer: recomputed independently in the canonical order.
+        let mut h = blake3::Hasher::new();
+        h.update(&parent);
+        h.update(&nonce);
+        assert_eq!(vdf_input_from(&parent, &nonce), *h.finalize().as_bytes());
+        // Order matters — parent-then-nonce must NOT equal nonce-then-parent.
+        let mut swapped = blake3::Hasher::new();
+        swapped.update(&nonce);
+        swapped.update(&parent);
+        assert_ne!(vdf_input_from(&parent, &nonce), *swapped.finalize().as_bytes());
     }
 
     #[test]

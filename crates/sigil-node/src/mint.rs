@@ -55,11 +55,9 @@ pub fn mint_next_block(
         Some(s) => SqiSignature::from_array(sigil_api::mining::pack_nonce_carrier(s.nonce, s.blake4_hash)),
         None => SqiSignature::from_array([0u8; SQISIGN_L5_LEN]),
     };
-    // vdf_input MUST satisfy header.precheck: BLAKE3(parent || nonce.0).
-    let mut h = blake3::Hasher::new();
-    h.update(&parent);
-    h.update(nonce.as_bytes());
-    let vdf_input = *h.finalize().as_bytes();
+    // vdf_input MUST satisfy header.precheck — derived through the ONE shared
+    // function precheck itself uses, so the two can never drift.
+    let vdf_input = sigil_header::vdf_input_from(&parent, nonce.as_bytes());
 
     // ONE-CHAIN step 1: the braid mints a REAL coinbase — the producer credits
     // itself block_reward(height) through the shared money chokepoint, so money

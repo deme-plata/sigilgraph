@@ -37,8 +37,8 @@ const SEED_ENV: &str = "SIGIL_PRODUCER_SIGNING_SEED_HEX";
 pub fn configured_signing_key() -> Option<SigningKey> {
     let hex_seed = std::env::var(SEED_ENV).ok()?;
     let hex_seed = hex_seed.trim();
-    if hex_seed.len() != 64 {
-        return None;
+    if hex_seed.len() != 64 || !hex_seed.is_ascii() {
+        return None; // is_ascii: a 64-BYTE multibyte seed would split a UTF-8 boundary below
     }
     let mut seed = [0u8; 32];
     for i in 0..32 {
@@ -91,8 +91,8 @@ pub fn reconcile_producer_wallet(
 
 fn parse_hex64(s: &str) -> Option<[u8; 32]> {
     let s = s.trim();
-    if s.len() != 64 {
-        return None;
+    if s.len() != 64 || !s.is_ascii() {
+        return None; // is_ascii: a 64-BYTE multibyte string would split a UTF-8 boundary below
     }
     let mut out = [0u8; 32];
     for i in 0..32 {
@@ -170,8 +170,8 @@ fn configured_sqisign_keypair() -> Option<(Vec<u8>, Vec<u8>)> {
 fn hex_decode_var(var: &str) -> Option<Vec<u8>> {
     let s = std::env::var(var).ok()?;
     let s = s.trim();
-    if s.len() % 2 != 0 {
-        return None;
+    if s.len() % 2 != 0 || !s.is_ascii() {
+        return None; // is_ascii: an even-BYTE multibyte string could straddle a slice below
     }
     (0..s.len())
         .step_by(2)

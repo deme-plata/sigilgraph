@@ -1823,17 +1823,31 @@ fn main() {
     // of `main()` (dropping it signals the background loop to stop — see
     // `ProducerLoopHandle`'s `Drop` impl) so it is bound here, before the
     // once/interactive dispatch below, and never re-bound to `_`.
+    // v7.5.2 STARTUP FIX (Viktor, "won't start on Windows / loads all blocks from genesis"):
+    // producer mode is DEFAULT-ON, and `maybe_start` → `sync_chain_blocking()` runs a FULL sync
+    // from genesis ON THE CALLING THREAD before returning. Called synchronously here it froze
+    // startup before the TUI ever drew its first frame (reproduced under Wine: the boot trace
+    // stopped right after the producer-mode gates line). Move the whole sync-then-produce
+    // bootstrap onto a BACKGROUND thread so the dashboard opens instantly and the sync runs
+    // behind it — the operator's "full sync first, produce out of the box" intent is preserved
+    // (production still waits for the synced tip inside the loop), just off the UI thread. The
+    // handle is parked in a slot main() holds for its whole life, so its Drop still stops the
+    // loop on exit.
     #[cfg(feature = "producer")]
-    let _producer_handle = {
+    let _producer_handle: std::sync::Arc<std::sync::Mutex<Option<producer::run::ProducerLoopHandle>>> = {
         let tick_ms: u64 = std::env::var("SIGIL_TOP_PRODUCE_TICK_MS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(500);
-        let handle = producer::run::maybe_start(Duration::from_millis(tick_ms));
-        if handle.is_some() {
-            boot_trace("producer-mode: sync-then-produce bootstrap starting (see [producer]/[producer-sync] log lines)");
-        }
-        handle
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let slot_bg = slot.clone();
+        let _ = std::thread::Builder::new().name("producer-bootstrap".into()).spawn(move || {
+            if let Some(handle) = producer::run::maybe_start(Duration::from_millis(tick_ms)) {
+                boot_trace("producer-mode: sync-then-produce bootstrap starting (see [producer]/[producer-sync] log lines)");
+                if let Ok(mut g) = slot_bg.lock() { *g = Some(handle); }
+            }
+        });
+        slot
     };
     // v0.95: the default interactive dashboard runs the pinned updater gate before
     // entering raw-mode TUI so stale channels and bad signatures are visible instead
@@ -4206,6 +4220,17 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                             KeyCode::Char('2') => { app.tab = Tab::SyncLog; }
                             KeyCode::Char('3') => { app.tab = Tab::Mining; }
                             KeyCode::Char('4') => { app.tab = Tab::Queues; }
+                            KeyCode::Char('w') | KeyCode::Char('W') => {
+                                // [W] open the web wallet (SIGIL OS modal lives inside it) in the
+                                // local browser. Headless boxes have no GUI → show the link to copy.
+                                let url = crate::wallet_ui::official_wallet_url();
+                                if crate::wallet_ui::open_browser(&url) {
+                                    app.toast = format!("🌐 opening web wallet + SIGIL OS — {url}");
+                                } else {
+                                    app.toast = format!("🌐 web wallet + SIGIL OS: {url}");
+                                }
+                                app.toast_sticky = true;
+                            }
                             KeyCode::Char('y') | KeyCode::Char('Y') => { app.resync(); app.toast_sticky = false; }
                             KeyCode::Char('m') | KeyCode::Char('M') => { app.toggle_engine_mining(); }
                             KeyCode::Char('g') | KeyCode::Char('G') if app.tab == Tab::Mining => {

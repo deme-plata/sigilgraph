@@ -182,6 +182,62 @@ const TRUSTED_RELEASE_KEYS_HEX: &[&str] = &[
     // "<release-author SQIsign L5 pubkey hex>",
 ];
 
+/// Open the mining-history store, degrading to an in-memory store on any open
+/// failure instead of crashing the node.
+///
+/// The mining-history store is TELEMETRY ONLY — it feeds the wallet's Network
+/// Power modal, not consensus. A failure to open its one subdir (a corrupted
+/// mining-history CF, a permissions glitch on the data dir) must NOT take the
+/// whole node down: the node would then refuse to produce or serve blocks over
+/// a UI convenience. Degrading to an ephemeral (temp-dir) store loses only
+/// persistence across restarts; consensus is untouched. (If even temp_dir is
+/// unwritable the environment is already doomed and `open_ephemeral` will still
+/// surface it — a far rarer, genuinely-fatal condition.)
+fn open_mining_history_or_ephemeral(
+    path: std::path::PathBuf,
+) -> sigil_api::mining_history::MiningHistoryStore {
+    sigil_api::mining_history::MiningHistoryStore::open(path).unwrap_or_else(|e| {
+        eprintln!(
+            "⚠ mining-history store failed to open ({e}) — falling back to an in-memory \
+             store. Network Power history won't persist across restarts; consensus is \
+             unaffected."
+        );
+        sigil_api::mining_history::MiningHistoryStore::open_ephemeral()
+    })
+}
+
+#[cfg(test)]
+mod mining_history_degrade_tests {
+    use super::open_mining_history_or_ephemeral;
+
+    /// A telemetry-store open failure must degrade to an in-memory store, never
+    /// crash the node. We force the durable open to fail by putting a regular
+    /// FILE where the store directory would go: flux_db opens via create_dir_all,
+    /// which errors when a non-directory already occupies the path — the exact
+    /// "can't open my subdir" condition this guard exists for.
+    #[test]
+    fn open_failure_degrades_to_ephemeral_not_panic() {
+        let blocker = std::env::temp_dir().join(format!(
+            "sigil-mh-open-fail-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::write(&blocker, b"not a directory").expect("write blocker file");
+
+        // Must return a WORKING store (ephemeral fallback), not panic...
+        let store = open_mining_history_or_ephemeral(blocker.clone());
+        // ...and it must actually function — record a real sample through it.
+        store
+            .record_sample(1_000, 12.5, 4)
+            .expect("ephemeral fallback store must accept samples");
+
+        let _ = std::fs::remove_file(&blocker);
+    }
+}
+
 /// Build the trusted-release-key allowlist from the compiled-in constant plus
 /// the optional `SIGIL_TRUSTED_RELEASE_KEYS` env (comma-separated hex). Invalid
 /// hex entries are skipped with a warning rather than crashing the node.
@@ -793,10 +849,8 @@ fn run_start() -> Result<()> {
         // succeeds/creates-on-first-run, so this is unconditional (not
         // gated on SIGIL_MONEY_API) the same way mining_bridge is — the
         // sampler itself only ever runs once the money API is up, below.
-        let mining_history_store = Arc::new(
-            sigil_api::mining_history::MiningHistoryStore::open(snap_dir.join("mining-history"))
-                .expect("open mining history store"),
-        );
+        let mining_history_store =
+            Arc::new(open_mining_history_or_ephemeral(snap_dir.join("mining-history")));
         let money_state: Option<Arc<std::sync::RwLock<SigilState>>> =
             std::env::var("SIGIL_MONEY_API").ok().filter(|s| !s.is_empty()).map(|addr| {
                 let shared = Arc::new(std::sync::RwLock::new(chain.state_snapshot()));

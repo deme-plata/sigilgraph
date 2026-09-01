@@ -87,4 +87,38 @@ mod tests {
         req.sig = signer.sign(&req.signing_bytes());
         assert!(!req.verify());
     }
+
+    #[test]
+    fn id_is_deterministic_field_sensitive_and_signature_independent() {
+        // id() is the dedup key the ledger records to make a withdrawal single-
+        // use. It must be stable for the same intent, must NOT depend on the sig
+        // (a re-signed identical request still dedups), and must change if ANY
+        // signed field changes — else a captured request could be replayed with a
+        // substituted amount/dest/nonce under one already-recorded id.
+        let base = WithdrawalRequest {
+            asset: BridgeAsset::Btc, amount: 1000, owner: [3u8; 32],
+            dest: "bc1qexample".into(), nonce: 1, sig: [0u8; 64],
+        };
+        assert_eq!(base.id(), base.clone().id(), "same intent → same id");
+
+        let mut resigned = base.clone();
+        resigned.sig = [9u8; 64];
+        assert_eq!(base.id(), resigned.id(), "id must not depend on the sig bytes");
+
+        let mut amt = base.clone();
+        amt.amount = 1001;
+        assert_ne!(base.id(), amt.id(), "amount change → different id");
+        let mut non = base.clone();
+        non.nonce = 2;
+        assert_ne!(base.id(), non.id(), "nonce change → different id");
+        let mut dst = base.clone();
+        dst.dest = "bc1qother".into();
+        assert_ne!(base.id(), dst.id(), "dest change → different id");
+        let mut ast = base.clone();
+        ast.asset = BridgeAsset::Eth;
+        assert_ne!(base.id(), ast.id(), "asset change → different id");
+        let mut own = base.clone();
+        own.owner = [4u8; 32];
+        assert_ne!(base.id(), own.id(), "owner change → different id");
+    }
 }

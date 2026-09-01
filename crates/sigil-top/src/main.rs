@@ -3458,16 +3458,47 @@ fn boot_marker_path() -> Option<std::path::PathBuf> {
 }
 /// Record a boot attempt for the running VERSION; return the consecutive-unhealed strike count
 /// (1 on a fresh version). Best-effort — any IO failure returns 1 (proceed, just no rollback).
+/// Given the current boot-marker contents (if any) and this binary's version, return
+/// the consecutive-unhealed strike count for the running version. A marker for the SAME
+/// version increments; a marker for a DIFFERENT version, garbage, or no marker resets to
+/// 1 — a fresh binary must start its own count, or an update would inherit the old
+/// version's strikes and could self-revert on its very first boot. Pure; the caller does
+/// the I/O, so this crash-recovery decision is unit-testable in isolation.
+fn next_strike_count(marker: Option<&str>, current_version: &str) -> u32 {
+    match marker.map(str::trim).and_then(|s| s.split_once(':')) {
+        Some((ver, n)) if ver == current_version => n.parse::<u32>().unwrap_or(0) + 1,
+        _ => 1,
+    }
+}
+
 fn record_boot_attempt() -> u32 {
     let path = match boot_marker_path() { Some(p) => p, None => return 1 };
-    let strikes = match std::fs::read_to_string(&path).ok()
-        .as_deref().map(str::trim).and_then(|s| s.split_once(':'))
-    {
-        Some((ver, n)) if ver == VERSION => n.parse::<u32>().unwrap_or(0) + 1,
-        _ => 1, // fresh version / no marker / garbage → reset the counte
-    };
+    let strikes = next_strike_count(std::fs::read_to_string(&path).ok().as_deref(), VERSION);
     let _ = std::fs::write(&path, format!("{VERSION}:{strikes}"));
     strikes
+}
+
+#[cfg(test)]
+mod next_strike_count_tests {
+    use super::next_strike_count;
+
+    #[test]
+    fn same_version_increments_others_reset() {
+        // No marker / empty → first strike.
+        assert_eq!(next_strike_count(None, "7.5.7"), 1);
+        assert_eq!(next_strike_count(Some(""), "7.5.7"), 1);
+        // Same version increments.
+        assert_eq!(next_strike_count(Some("7.5.7:1"), "7.5.7"), 2);
+        assert_eq!(next_strike_count(Some("7.5.7:4"), "7.5.7"), 5);
+        // A DIFFERENT version resets — a fresh binary must not inherit old strikes
+        // (else an update could self-revert on its first boot).
+        assert_eq!(next_strike_count(Some("7.5.6:9"), "7.5.7"), 1);
+        // Garbage / malformed count never panics; resets or restarts the count.
+        assert_eq!(next_strike_count(Some("garbage-no-colon"), "7.5.7"), 1);
+        assert_eq!(next_strike_count(Some("7.5.7:notanumber"), "7.5.7"), 1);
+        // Surrounding whitespace is trimmed before parsing.
+        assert_eq!(next_strike_count(Some("  7.5.7:2\n"), "7.5.7"), 3);
+    }
 }
 /// Clear the boot marker = "this version reached a healthy run".
 fn mark_boot_healthy() {

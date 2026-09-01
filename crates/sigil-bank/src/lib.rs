@@ -182,8 +182,14 @@ pub fn split_mining_reward(
         .checked_mul(COMMONS_MINING_FEE_BPS)
         .ok_or(BankError::MathOverflow)?
         / BPS_DENOMINATOR;
-    // master + operator + commons = 500+10+120 = 630 bps << 100% → always safe.
-    let validator_share = reward - master_share - operator_share - commons_share;
+    // master + operator + commons = 500+10+120 = 630 bps << 100% → always safe
+    // today; checked_sub keeps it a loud MathOverflow (not silent u128 underflow
+    // into a colossal validator_share) if those bps are ever raised past 100%.
+    let validator_share = reward
+        .checked_sub(master_share)
+        .and_then(|v| v.checked_sub(operator_share))
+        .and_then(|v| v.checked_sub(commons_share))
+        .ok_or(BankError::MathOverflow)?;
     Ok(MiningSplit { validator_share, master_share, operator_share, commons_share, welfare_share: 0 })
 }
 
@@ -206,7 +212,11 @@ pub fn split_swap_output(
         .checked_mul(MASTER_SWAP_FEE_BPS)
         .ok_or(BankError::MathOverflow)?
         / BPS_DENOMINATOR;
-    let user_share = amount_out - master_share;
+    // 30-bps fee → user always gets the rest; checked_sub fails loud rather than
+    // underflowing if the swap fee is ever misconfigured past 100%.
+    let user_share = amount_out
+        .checked_sub(master_share)
+        .ok_or(BankError::MathOverflow)?;
     Ok(SwapSplit { user_share, master_share })
 }
 

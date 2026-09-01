@@ -3607,42 +3607,8 @@ impl Drop for ServeTimer<'_> {
     }
 }
 
-fn detect_memory_ceiling_bytes() -> usize {
-    // cgroup v2: the effective high/max for this process's cgroup.
-    for f in ["/sys/fs/cgroup/memory.high", "/sys/fs/cgroup/memory.max"] {
-        if let Ok(txt) = std::fs::read_to_string(f) {
-            let t = txt.trim();
-            if t != "max" {
-                if let Ok(v) = t.parse::<usize>() {
-                    if v > 0 {
-                        return v;
-                    }
-                }
-            }
-        }
-    }
-    // cgroup v1.
-    if let Ok(txt) = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes") {
-        if let Ok(v) = txt.trim().parse::<usize>() {
-            // v1 reports an enormous sentinel when unlimited; ignore that.
-            if v > 0 && v < (1 << 62) {
-                return v;
-            }
-        }
-    }
-    // No cgroup limit: fall back to total system RAM.
-    if let Ok(txt) = std::fs::read_to_string("/proc/meminfo") {
-        for line in txt.lines() {
-            if let Some(rest) = line.strip_prefix("MemTotal:") {
-                if let Some(kb) = rest.split_whitespace().next().and_then(|v| v.parse::<usize>().ok()) {
-                    return kb.saturating_mul(1024);
-                }
-            }
-        }
-    }
-    // Last resort: assume a modest box rather than a generous one.
-    2 * 1024 * 1024 * 1024
-}
+mod mem_ceiling;
+pub(crate) use mem_ceiling::detect_memory_ceiling_bytes;
 
 /// Extra live blocks (beyond the raw `TOPOLOGY_COMMITMENT_WINDOW`) this node
 /// must have personally witnessed via the gossipsub live-block path before

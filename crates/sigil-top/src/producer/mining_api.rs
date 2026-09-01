@@ -99,7 +99,7 @@ pub fn local_mining_api_is_up() -> bool {
 /// Bind-confirmation: `sigil_api::serve` binds and blocks in one call, so there's no
 /// callback point between "bind succeeded" and "now serving" to hook `LOCAL_MINING_API_UP`
 /// from the inside. Instead, a second short-lived task polls the port from the OUTSIDE
-/// with real TCP connects (bounded: ~2s at 50ms) — the same "don't trust it started, go
+/// with real TCP connects (bounded: ~10s at 50ms) — the same "don't trust it started, go
 /// observe it" discipline this session's other work already applied to mesh/producer
 /// startup. If the port never answers within the window, this logs it loudly and leaves
 /// `local_mining_api_is_up()` false — `engine_node_url()` then correctly keeps using the
@@ -116,7 +116,15 @@ pub fn spawn_local_mining_api(app: sigil_api::AppState) {
         LOCAL_MINING_API_UP.store(false, Ordering::SeqCst);
     });
     tokio::spawn(async move {
-        for _ in 0..40 {
+        // ~10s budget, not 2s: this confirmation poller is an ordinary tokio task
+        // competing for the same executor as the serve task and everything else on
+        // the box. Under load it can be scheduled late, and a 2s window was short
+        // enough that a genuinely-serving API sometimes never got its flag set —
+        // leaving `engine_node_url()` pointing the miner at the remote default even
+        // though a working local server was right there. A longer budget only ever
+        // helps the success case; a truly unbindable port still logs failure (just
+        // later), with the flag correctly staying false the whole time.
+        for _ in 0..200 {
             if tokio::net::TcpStream::connect(&addr).await.is_ok() {
                 LOCAL_MINING_API_UP.store(true, Ordering::SeqCst);
                 crate::tlog!(
@@ -127,7 +135,7 @@ pub fn spawn_local_mining_api(app: sigil_api::AppState) {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        crate::tlog!("[producer] \u{26a0} local mining API did not come up on {addr} within 2s");
+        crate::tlog!("[producer] \u{26a0} local mining API did not come up on {addr} within 10s");
     });
 }
 

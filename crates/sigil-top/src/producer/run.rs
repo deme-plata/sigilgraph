@@ -613,19 +613,23 @@ mod tests {
                 }
             });
 
-            // Budgets are generous on purpose: this test spins up a real server
-            // and a real (CPU-bound) mining ticker, so under `-j8` max-parallel
-            // test load the miner is scheduler-starved and every stage takes
-            // longer in wall-clock. Widening the windows tolerates that load
-            // without weakening any assertion — a genuinely broken pipeline still
-            // fails, just after a longer wait. (API up: up to 10s.)
+            // Wait on the AUTHORITATIVE readiness signal — the process flag that
+            // spawn_local_mining_api's confirmation poller flips once it has itself
+            // connected — NOT a raw TCP connect from here. The two race: the serve
+            // task binds the port (so a direct connect succeeds) a beat BEFORE the
+            // separate poller task flips the flag, and under -j8 load that gap
+            // widens, so a port-based break would reach the is_up() assertion while
+            // the flag is still false (the exact intermittent failure this replaces).
+            // The flag implies the port answered — the poller only sets it after a
+            // successful connect — so keying on it is strictly stronger. Budget is
+            // generous (up to 10s) because the poller is itself scheduler-starved
+            // under max-parallel test load.
             let mut up = false;
             for _ in 0..200 {
-                if tokio::net::TcpStream::connect(&addr).await.is_ok() { up = true; break; }
+                if mining_api::local_mining_api_is_up() { up = true; break; }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            assert!(up, "local mining API never came up on {addr}");
-            assert!(mining_api::local_mining_api_is_up());
+            assert!(up, "local mining API never came up (readiness flag never set) on {addr}");
 
             let wallet = "ab".repeat(32); // 64-hex, canonical lowercase
             let base = mining_api::local_mining_api_url();

@@ -764,6 +764,32 @@ mod tests {
         assert_eq!(h.hash(), h.hash());
     }
 
+    #[test]
+    fn hash_commits_to_every_consensus_field() {
+        // The block hash is its NETWORK IDENTITY. If it omitted a field, two
+        // different blocks could collide, or that field could be tampered without
+        // changing the identity. Assert a one-bit flip of each consensus-relevant
+        // field changes the hash.
+        let base = fake_header();
+        let h0 = base.hash();
+
+        let mut h = base.clone(); h.height ^= 1; assert_ne!(h.hash(), h0, "height");
+        let mut h = base.clone(); h.parent_hash[0] ^= 1; assert_ne!(h.hash(), h0, "parent_hash");
+        let mut h = base.clone(); h.vdf_input[0] ^= 1; assert_ne!(h.hash(), h0, "vdf_input");
+        let mut h = base.clone(); h.wallet_state_root[0] ^= 1; assert_ne!(h.hash(), h0, "wallet_state_root");
+        let mut h = base.clone(); h.dex_state_root[0] ^= 1; assert_ne!(h.hash(), h0, "dex_state_root");
+        let mut h = base.clone(); h.event_log_root[0] ^= 1; assert_ne!(h.hash(), h0, "event_log_root");
+        let mut h = base.clone(); h.contract_state_root[0] ^= 1; assert_ne!(h.hash(), h0, "contract_state_root");
+        let mut h = base.clone(); h.txs_merkle_root[0] ^= 1; assert_ne!(h.hash(), h0, "txs_merkle_root");
+        let mut h = base.clone(); h.producer[0] ^= 1; assert_ne!(h.hash(), h0, "producer");
+
+        // A PRESENT topology_commitment is committed too (the None case is stripped
+        // for cross-version stability — covered by the regression test below).
+        let mut h = base.clone();
+        h.topology_commitment = Some([9u8; 32]);
+        assert_ne!(h.hash(), h0, "a present topology_commitment must be committed");
+    }
+
     // ── regression test for the 2026-08-15 snapshot-boot incident ──────────
     // A None `topology_commitment` MUST be omitted from serialization, not
     // emitted as `"topology_commitment":null` — otherwise hash() (which

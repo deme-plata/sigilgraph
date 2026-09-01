@@ -377,6 +377,12 @@ impl CommitPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serializes the tests that mutate the process-global SIGIL_SST_BATCH /
+    /// SIGIL_SST_FSYNC env vars. cargo runs tests in parallel, so without this two
+    /// of them race on the env — one sets+clears while another reads — and the
+    /// loser sees the wrong batch size (an intermittent, parallel-only CI failure).
+    static SST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use crate::block_sync::skel_flux::SkelRec;
     use sigil_header::*;
 
@@ -439,6 +445,7 @@ mod tests {
     /// and never stored. Batching must not change WHICH bodies land — only WHEN.
     #[test]
     fn batched_sink_stores_matching_rejects_tampered() {
+        let _env = SST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // 256 is the clamp FLOOR for SIGIL_SST_BATCH (tiny SST installs are
         // inefficient), so the old value 8 was silently clamped up to 256 — which
         // is what this assertion caught. Use the floor and enough blocks
@@ -489,6 +496,7 @@ mod tests {
     /// `archive::ingest_bodies_verified` — divergence=0 between the slow and fast commit paths.
     #[test]
     fn batched_sink_matches_legacy_height_set() {
+        let _env = SST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("SIGIL_SST_BATCH", "256"); // floor (clamp), exercises multi-install
         std::env::set_var("SIGIL_SST_FSYNC", "0");
         let blocks = chain(300);
@@ -525,6 +533,7 @@ mod tests {
     /// whole contiguous range; `committed_to()` tracks the durable highwater; `finish()` drains.
     #[test]
     fn commit_pipeline_lands_contiguous_range() {
+        let _env = SST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("SIGIL_SST_BATCH", "256");
         std::env::set_var("SIGIL_COMMIT_RING_DEPTH", "8");
         std::env::set_var("SIGIL_COMMIT_MPSC_FLUSH", "37");
@@ -570,6 +579,7 @@ mod tests {
     /// independent; the wait-blocking + 2 s cap is covered by `admit_blocking`'s own logic.
     #[test]
     fn gate_path_admits_and_commits() {
+        let _env = SST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use sigil_synctune::{BackpressureSpine, Stage, VirtualClock};
         std::env::set_var("SIGIL_SST_BATCH", "256");
         std::env::set_var("SIGIL_SST_FSYNC", "0");

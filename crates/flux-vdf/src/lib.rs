@@ -33,6 +33,12 @@ pub trait VdfGroup {
     fn from_seed(&self, seed: &[u8; 32]) -> Self::Elem;
     fn encode(&self, a: &Self::Elem) -> Vec<u8>;
     fn decode(&self, bytes: &[u8]) -> Self::Elem;
+    /// Domain check: is `e` a valid, non-degenerate group element? A Wesolowski
+    /// `verify` MUST reject inputs outside the group, because `decode` is total
+    /// over arbitrary bytes. Without it, an attacker's `decode(empty) == 0` makes
+    /// `0^l · x^r == 0 == y` verify a proof that did ZERO sequential work — a full
+    /// VDF bypass reachable from any network block. See `verify`.
+    fn is_valid_element(&self, e: &Self::Elem) -> bool;
     /// Square-and-multiply exponentiation (used only in *verify*, never in the
     /// sequential eval — verify is allowed to be fast).
     fn exp(&self, base: &Self::Elem, e: &BigUint) -> Self::Elem {
@@ -110,6 +116,14 @@ pub fn eval<G: VdfGroup>(g: &G, x: &G::Elem, t: u64) -> VdfProof {
 pub fn verify<G: VdfGroup>(g: &G, x: &G::Elem, proof: &VdfProof) -> bool {
     let y = g.decode(&proof.y);
     let pi = g.decode(&proof.pi);
+    // Domain check BEFORE the equation: `decode` is total over arbitrary bytes,
+    // so a malformed proof can hand us degenerate elements. The sharp case is the
+    // all-zero proof — decode(empty)==0 and 0^l·x^r == 0 == y would otherwise
+    // verify zero work. Reject anything outside the group. (Regression:
+    // malformed_or_degenerate_proof_is_rejected_never_panics.)
+    if !g.is_valid_element(&y) || !g.is_valid_element(&pi) {
+        return false;
+    }
     let l = challenge_prime(g, x, &y, proof.t);
     let r = BigUint::from(2u32).modpow(&BigUint::from(proof.t), &l); // 2^t mod l, fast
     let lhs = g.mul(&g.exp(&pi, &l), &g.exp(x, &r));
@@ -355,6 +369,12 @@ impl VdfGroup for ModSquaring {
     fn decode(&self, bytes: &[u8]) -> BigUint {
         BigUint::from_bytes_le(bytes)
     }
+    fn is_valid_element(&self, e: &BigUint) -> bool {
+        // A squaring-group element lives in [1, n-1]. Reject 0 (the degenerate
+        // all-zero-proof bypass) and any non-canonical value ≥ n. `from_seed`
+        // already maps into [2, n-1], so every honest y/pi passes.
+        !e.is_zero() && *e < self.n
+    }
 }
 
 #[cfg(test)]
@@ -391,6 +411,28 @@ mod tests {
         let mut bad_pi = proof;
         bad_pi.pi[0] ^= 0x02;
         assert!(!verify(&g, &x, &bad_pi), "forged proof must be rejected");
+    }
+
+    /// Structurally MALFORMED proofs (wrong-LENGTH y/pi, not just wrong-value)
+    /// must be rejected AND never panic. This is the remote-crash / VDF-bypass
+    /// class: a peer's block carries an attacker-chosen VdfProof, and `verify`
+    /// decodes y/pi from raw bytes. The degenerate all-zero shape is the sharp
+    /// one: decode(empty) == 0, and 0^l · x^r == 0 == y would verify a proof
+    /// that did ZERO sequential work — so `verify` must reject non-group / zero
+    /// elements, not just fail the equation by luck.
+    #[test]
+    fn malformed_or_degenerate_proof_is_rejected_never_panics() {
+        let g = ModSquaring::bench_2048();
+        let x = g.from_seed(&[3u8; 32]);
+        for (label, y, pi) in [
+            ("both empty (both decode to 0)", vec![], vec![]),
+            ("both single zero byte", vec![0u8], vec![0u8]),
+            ("y zero, pi tiny", vec![], vec![7u8]),
+            ("absurdly oversized", vec![7u8; 10_000], vec![9u8; 10_000]),
+        ] {
+            let bad = VdfProof { y, pi, t: 3_000 };
+            assert!(!verify(&g, &x, &bad), "malformed/degenerate proof accepted: {label}");
+        }
     }
 
     #[test]

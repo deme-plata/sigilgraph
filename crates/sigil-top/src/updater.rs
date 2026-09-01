@@ -5,6 +5,20 @@
 
 use super::*;
 
+/// Download an update binary over HTTPS (TLS ≥1.2, versioned UA, 120s cap).
+pub(crate) fn fetch_binary_reqwest(url: &str) -> Result<Vec<u8>, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .min_tls_version(reqwest::tls::Version::TLS_1_2)
+        .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("client init: {e}"))?;
+    let resp = client.get(url).send().map_err(|e| format!("request failed: {e}"))?;
+    let resp = resp.error_for_status().map_err(|e| format!("HTTP status: {e}"))?;
+    let bytes = resp.bytes().map_err(|e| format!("read body: {e}"))?;
+    Ok(bytes.to_vec())
+}
+
 /// Pre-flight a freshly-swapped binary with `--selfcheck` BEFORE any handoff.
 /// v0.25 FAIL-SAFE: `exec` destroys this process, so we only ever hand off to a
 /// binary we've CONFIRMED starts and reports a sane version.

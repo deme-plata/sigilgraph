@@ -2478,18 +2478,7 @@ fn maybe_auto_update(argv: &[String]) -> Option<String> {
 /// too. Mirrors the client-builder pattern already used by `fetch_latest` /
 /// `self_update` (timeout + TLS floor + user-agent); a caller embedding this in a
 /// different crate should swap the user-agent literal for its own.
-fn fetch_binary_reqwest(url: &str) -> Result<Vec<u8>, String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .min_tls_version(reqwest::tls::Version::TLS_1_2)
-        .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| format!("client init: {e}"))?;
-    let resp = client.get(url).send().map_err(|e| format!("request failed: {e}"))?;
-    let resp = resp.error_for_status().map_err(|e| format!("HTTP status: {e}"))?;
-    let bytes = resp.bytes().map_err(|e| format!("read body: {e}"))?;
-    Ok(bytes.to_vec())
-}
+// fetch_binary_reqwest moved to updater.rs (god-file split).
 
 fn self_update(rel: &Release) -> Result<String, String> {
     let mut t = rel.for_self();
@@ -2644,7 +2633,7 @@ fn windows_swap_fallback(beside: &std::path::Path, rel: &Release, mb: f64, prov:
 // Self-update subsystem being split into updater.rs (god-file split, 2026-09-01).
 // preflight_binary moved there; more of the cluster follows across ticks.
 mod updater;
-pub(crate) use updater::preflight_binary;
+pub(crate) use updater::{fetch_binary_reqwest, preflight_binary};
 
 /// Relaunch into the just-installed binary after a successful `self_update`. `self_replace`
 /// put the new version at the current exe path, so that's the canonical target; a versioned

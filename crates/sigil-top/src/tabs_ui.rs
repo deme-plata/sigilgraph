@@ -95,8 +95,68 @@ pub(crate) fn render_tab_bar(app: &App) -> Paragraph<'static> {
     spans.extend(tab("Sync Log", "2", Tab::SyncLog));
     spans.extend(tab("Mining", "3", Tab::Mining));
     spans.extend(tab("Queues", "4", Tab::Queues));
+    spans.extend(tab("AI", "5", Tab::Ai));
     spans.push(Span::styled(" · Tab cycles", Style::default().fg(C_DIM)));
     Paragraph::new(Line::from(spans))
+}
+
+/// [A]I tab — flux-moe chat against the user's LOCAL ollama. The chosen model IS
+/// the effort dial (a bigger model on a bigger GPU reasons harder). The model call
+/// runs off the UI thread (`ai_submit`); this only renders state.
+pub(crate) fn draw_ai_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let [status_area, msgs_area, input_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(3),
+    ]).areas(area);
+
+    // status: connected model + count, or the setup hint
+    let status = match &app.ai_model {
+        Some(m) => format!(" 🧠 local model: {m}   ·   {} available   ·   type · Enter sends · Tab leaves",
+                           app.ai_models.len()),
+        None => " 🧠 no local model — run `ollama serve` and `ollama pull qwen3:8b`, then press 5 again".to_string(),
+    };
+    f.render_widget(Paragraph::new(status).style(Style::default().fg(C_DIM)), status_area);
+
+    // transcript
+    let mut lines: Vec<Line> = Vec::new();
+    if app.ai_msgs.is_empty() {
+        lines.push(Line::from(dim("flux-moe — your on-device AI. Ask about mining, the wallet, the Nation, or the node.")));
+        lines.push(Line::from(""));
+        lines.push(Line::from(dim("It never invents balances or prices — those come from the node.")));
+    }
+    for (role, content) in &app.ai_msgs {
+        if role == "user" {
+            lines.push(Line::from(Span::styled("you ›", Style::default().fg(C_NEON_CYAN).add_modifier(Modifier::BOLD))));
+        } else {
+            lines.push(Line::from(Span::styled("moe ›", Style::default().fg(C_NEON_GOLD).add_modifier(Modifier::BOLD))));
+        }
+        for l in content.lines() {
+            lines.push(Line::from(Span::styled(format!("  {l}"), Style::default().fg(Color::White))));
+        }
+        lines.push(Line::from(""));
+    }
+    if app.ai_thinking {
+        lines.push(Line::from(dim("moe is thinking…")));
+    }
+    let total = lines.len() as u16;
+    let inner_h = msgs_area.height.saturating_sub(2); // top border + breathing room
+    let scroll = total.saturating_sub(inner_h);
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .scroll((scroll, 0))
+            .block(Block::default().borders(Borders::TOP).border_style(Style::default().fg(C_DIM))),
+        msgs_area,
+    );
+
+    // input line
+    let cursor = if app.ai_thinking { "" } else { "▏" };
+    f.render_widget(
+        Paragraph::new(format!(" › {}{cursor}", app.ai_input))
+            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(C_NEON_CYAN)).title(" ask flux-moe ")),
+        input_area,
+    );
 }
 
 /// [2] MCP Swarm AI — the live job-index board from the Claude Code sessions.
@@ -245,6 +305,7 @@ pub(crate) fn draw_ui(f: &mut Frame, app: &App) {
         Tab::SyncLog => f.render_widget(render_sync_log(app), body_area),
         Tab::Mining => draw_mining_tab(f, app, body_area),
         Tab::Queues => crate::sync_ui::draw_queues_tab(f, app, body_area),
+        Tab::Ai => draw_ai_tab(f, app, body_area),
     }
 
     f.render_widget(render_footer(app), footer_area);

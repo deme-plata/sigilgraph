@@ -37,6 +37,7 @@ use heroes::*;
 mod mining_ui;  // LANE-U: mining tab + hero renderers
 use mining_ui::*;
 mod sync_ui;    // LANE-U: sync hero + sync-log tab renderers
+mod flux_moe;   // on-device AI brain (local ollama) for the [A]I tab
 use sync_ui::*;
 mod tabs_ui;    // LANE-U: draw_ui dispatcher + tab/card/footer renderers
 use tabs_ui::*;
@@ -2968,6 +2969,15 @@ struct App {
     /// Post-update logo splash (flux updater return UX).
     splash_until: Option<Instant>,
 
+    // === [A]I tab (flux_moe — on-device chat via the user's local ollama) ===
+    ai_detected: bool,                          // have we probed ollama for models yet
+    ai_models: Vec<String>,                     // models the local ollama has pulled
+    ai_model: Option<String>,                   // the chosen model (the effort dial)
+    ai_input: String,                           // the line being typed
+    ai_msgs: Vec<(String, String)>,             // (role, content) chat history
+    ai_thinking: bool,                          // a reply is in flight
+    ai_rx: Option<mpsc::Receiver<String>>,      // model reply lands here (off-UI-thread)
+
     // === CATHEDRAL DAGKNIGHT (wired 2026-06-17) ===
     /// Live vaulted DagKnight view. Ingested from tips/blocks after spine checks.
     /// Surface: health_summary, last certified vault roots, divergence=0, flux proofs.
@@ -3050,6 +3060,8 @@ impl App {
                   let _ = std::env::remove_var("SIGIL_TOP_JUST_UPDATED");
                   Some(Instant::now() + Duration::from_millis(1800))
               } else { None },
+              ai_detected: false, ai_models: Vec::new(), ai_model: None,
+              ai_input: String::new(), ai_msgs: Vec::new(), ai_thinking: false, ai_rx: None,
               splash_frame: 0,
               // LANE-B v0.50: rune animation — first play deferred a full interval
               // (no flash on launch; the post-update splash already covers just-updated).
@@ -4212,6 +4224,13 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                         // through to start sync/mining as usual).
                         if app.welcome_until.is_some() { app.welcome_until = None; }
                         match k.code {
+                            // [A]I tab captures typing — these guarded arms MUST precede the
+                            // global shortcuts so 'q'/Esc/digits type into the chat instead of
+                            // quitting/switching. Tab still cycles out (falls through below).
+                            KeyCode::Enter if app.tab == Tab::Ai => { ai_submit(&mut app); }
+                            KeyCode::Backspace if app.tab == Tab::Ai => { app.ai_input.pop(); }
+                            KeyCode::Esc if app.tab == Tab::Ai => { app.tab = Tab::Node; }
+                            KeyCode::Char(c) if app.tab == Tab::Ai => { app.ai_input.push(c); }
                             KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return Ok(()),
                             KeyCode::Char('r') | KeyCode::Char('R') => { app.refresh(); app.toast_sticky = false; }
                             // v0.13: tab switching — Tab cycles, 1/2/3 jump
@@ -4220,6 +4239,14 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                             KeyCode::Char('2') => { app.tab = Tab::SyncLog; }
                             KeyCode::Char('3') => { app.tab = Tab::Mining; }
                             KeyCode::Char('4') => { app.tab = Tab::Queues; }
+                            KeyCode::Char('5') => {
+                                app.tab = Tab::Ai;
+                                if !app.ai_detected { // one-time local-ollama probe (localhost: instant)
+                                    app.ai_models = crate::flux_moe::list_models();
+                                    app.ai_model = app.ai_models.first().cloned();
+                                    app.ai_detected = true;
+                                }
+                            }
                             KeyCode::Char('w') | KeyCode::Char('W') => {
                                 // [W] open the web wallet (SIGIL OS modal lives inside it) in the
                                 // local browser. Headless boxes have no GUI → show the link to copy.
@@ -4668,6 +4695,14 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                 app.fleet_last_check = Instant::now();
                 check_fleet_health(&mut app.fleet_nodes);
             }
+            // [A]I: the local model's reply lands here (computed off the UI thread)
+            if let Some(rx) = app.ai_rx.as_ref() {
+                if let Ok(reply) = rx.try_recv() {
+                    app.ai_msgs.push(("assistant".to_string(), reply));
+                    app.ai_thinking = false;
+                    app.ai_rx = None;
+                }
+            }
             // v0.7.0: Embedded serve is a thread — no health check needed
             // background self-update result (if any) → toast
             if let Some(rx) = app.update_rx.as_ref() {
@@ -4862,7 +4897,7 @@ fn render_update_splash(frame: u8) -> Paragraph<'static> {
 use flux_miner::engine::{self, MinerStats};
 
 #[derive(Clone, Copy, PartialEq)]
-enum Tab { Node, SyncLog, Mining, Queues }
+enum Tab { Node, SyncLog, Mining, Queues, Ai }
 
 impl Tab {
     fn next(self) -> Tab {
@@ -4870,9 +4905,35 @@ impl Tab {
             Tab::Node => Tab::SyncLog,
             Tab::SyncLog => Tab::Mining,
             Tab::Mining => Tab::Queues,
-            Tab::Queues => Tab::Node,
+            Tab::Queues => Tab::Ai,
+            Tab::Ai => Tab::Node,
         }
     }
+}
+
+/// [A]I: send the typed line to the local model on a BACKGROUND thread; the reply
+/// lands on `app.ai_rx` (drained in the render loop) so a slow model never freezes
+/// the dashboard. With no model chosen, answer with the setup hint instead.
+fn ai_submit(app: &mut App) {
+    let msg = app.ai_input.trim().to_string();
+    if msg.is_empty() { return; }
+    app.ai_input.clear();
+    app.ai_msgs.push(("user".to_string(), msg.clone()));
+    let model = match app.ai_model.clone() {
+        Some(m) => m,
+        None => { app.ai_msgs.push(("assistant".to_string(), flux_moe::setup_hint().to_string())); return; }
+    };
+    let history: Vec<(String, String)> = app.ai_msgs[..app.ai_msgs.len().saturating_sub(1)].to_vec();
+    let (tx, rx) = mpsc::channel();
+    app.ai_rx = Some(rx);
+    app.ai_thinking = true;
+    std::thread::spawn(move || {
+        let reply = match flux_moe::chat(&model, &history, &msg) {
+            Ok(r) => r,
+            Err(e) => format!("⚠ {e}"),
+        };
+        let _ = tx.send(reply);
+    });
 }
 
 #[derive(Default, Clone)]

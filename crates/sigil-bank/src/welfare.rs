@@ -123,13 +123,21 @@ pub fn split_mining_reward_at(
         .checked_mul(WELFARE_MINING_FEE_BPS)
         .ok_or(BankError::MathOverflow)?
         / BPS_DENOMINATOR;
-    // floor(r·750/10k) ≥ floor(r·200/10k) for all r (monotone in bps), so
-    // this subtraction cannot underflow; debug-assert documents it.
-    debug_assert!(master_gross >= welfare_share);
-    // The validator absorbs the fee raise: recompute its share from the new
-    // gross rather than the legacy split's 500-bps one.
-    split.validator_share = reward - master_gross - split.operator_share - split.commons_share;
-    split.master_share = master_gross - welfare_share;
+    // Fail LOUD, never silently. These are money splits: if the dev/operator/
+    // commons fee bps were ever misconfigured to exceed 100% of the reward, a raw
+    // subtraction would underflow u128 into a colossal validator_share — minting
+    // supply from nowhere. checked_sub turns that into a clean MathOverflow the
+    // coinbase path rejects, in release too (unlike the old debug-only assert).
+    // Today the taken shares sum to 880 bps (750 + 10 + 120) and 750 ≥ 200, so
+    // neither of these ever fires — this is a guard against a future bps change.
+    split.validator_share = reward
+        .checked_sub(master_gross)
+        .and_then(|v| v.checked_sub(split.operator_share))
+        .and_then(|v| v.checked_sub(split.commons_share))
+        .ok_or(BankError::MathOverflow)?;
+    split.master_share = master_gross
+        .checked_sub(welfare_share)
+        .ok_or(BankError::MathOverflow)?;
     split.welfare_share = welfare_share;
     Ok(split)
 }

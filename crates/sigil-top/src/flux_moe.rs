@@ -84,8 +84,18 @@ pub(crate) fn chat(model: &str, history: &[(String, String)], user: &str) -> Res
         .json(&body)
         .send()
         .map_err(|e| format!("can't reach your local model — is ollama running? ({e})"))?;
-    if !resp.status().is_success() {
-        return Err(format!("local model returned {}", resp.status()));
+    let status = resp.status();
+    if !status.is_success() {
+        // ollama puts the REAL reason in the body (model not found, not enough VRAM/RAM to
+        // load it, etc.) — surface it so a 500 is diagnosable instead of a dead end.
+        let detail = resp.text().unwrap_or_default();
+        let detail = detail.trim();
+        return Err(if detail.is_empty() {
+            format!("ollama returned {status}")
+        } else {
+            let short: String = detail.chars().take(300).collect();
+            format!("ollama {status} — {short}\n(if it's a memory error, pick a smaller model, e.g. `ollama pull qwen3:4b`)")
+        });
     }
     let json: serde_json::Value = resp.json().map_err(|e| format!("bad model response: {e}"))?;
     json.get("message")

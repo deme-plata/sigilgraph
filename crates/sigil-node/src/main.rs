@@ -4100,13 +4100,10 @@ fn run_wg_list_peers(iface: &str) -> Result<()> {
     Ok(())
 }
 
-fn hex_full(b: &[u8; 32]) -> String {
-    let mut s = String::with_capacity(64);
-    for byte in b {
-        s.push_str(&format!("{:02x}", byte));
-    }
-    s
-}
+// hex_full + hex_short_block extracted to hex_fmt.rs (god-file split, 2026-09-01),
+// re-exported so all call sites are unchanged.
+mod hex_fmt;
+pub(crate) use hex_fmt::{hex_full, hex_short_block};
 
 /// Fire-and-forget chain event to `SIGIL_WEBHOOK_URL` so observers (the flux
 /// MCP webhook collector, a dashboard, an agent) get block-accept /
@@ -4140,16 +4137,7 @@ fn fire_chain_event(event: &str, payload: &serde_json::Value) {
         .spawn();
 }
 
-/// Short 8-char hex prefix + ellipsis — used in receiver logs to keep lines
-/// readable. Same fingerprint shape as the existing chain.rs hex_short.
-fn hex_short_block(b: &[u8; 32]) -> String {
-    let mut s = String::with_capacity(9);
-    for byte in &b[..4] {
-        s.push_str(&format!("{:02x}", byte));
-    }
-    s.push('…');
-    s
-}
+// hex_short_block moved to hex_fmt.rs (see the `mod hex_fmt` re-export above).
 
 #[cfg(test)]
 mod tests {

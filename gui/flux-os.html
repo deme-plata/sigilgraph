@@ -715,7 +715,13 @@ function renderAI(body){
       }
       if(ollamaModel){ const stat=body.querySelector('#aistat'); think.innerHTML='<span class="msg sys">· '+esc(ollamaModel)+' is thinking ·</span>';
         try{ const ans=await askOllama(raw); done('a', esc(ans).replace(/\n/g,'<br>')); }
-        catch(err){ done('a','⚠️ couldn\\'t reach your local model ('+(err&&err.message||err)+'). If ollama is running, restart it with <b>OLLAMA_ORIGINS=\\'*\\' ollama serve</b> so this page is allowed to call it.'); }
+        // NOTE the escaping: this string is single-quoted, so an apostrophe needs ONE
+        // backslash. It previously carried TWO (\\'), which JavaScript reads as an escaped
+        // BACKSLASH followed by a string-terminating quote — so the literal ended early, the
+        // rest of the line became syntax garbage, and the WHOLE 39k-character script block
+        // failed to parse with "missing ) after argument list". `boot()` never ran, so SIGIL
+        // OS sat on its boot screen forever with zero log lines. One character, entire app.
+        catch(err){ done('a','⚠️ couldn\'t reach your local model ('+(err&&err.message||err)+'). If ollama is running, restart it with <b>OLLAMA_ORIGINS=&#39;*&#39; ollama serve</b> so this page is allowed to call it.'); }
         return; }
       done('a',"I can run <b>balance, supply, height, pools, mining, nation, send</b> now. For free-form chat, start your local model — tap <b>🧠 how to enable free chat</b> above.");
     }catch(e){ done('a','⚠️ '+(e&&e.message||e)); }

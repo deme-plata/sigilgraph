@@ -1290,9 +1290,19 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
           <label style="font-family:'JetBrains Mono';font-size:10px;letter-spacing:1px;color:#a78bfa;text-transform:uppercase">Amount to send privately (SIGIL)</label>
           <input id="privAmt" type="text" inputmode="decimal" placeholder="0.00000000"
             style="background:rgba(4,8,12,.7);border:1px solid rgba(167,139,250,.22);border-radius:10px;color:#cfe9f2;font-family:'Orbitron';font-size:16px;padding:9px 11px;outline:none">
+          <label style="font-family:'JetBrains Mono';font-size:10px;letter-spacing:1px;color:#a78bfa;text-transform:uppercase">Private memo (optional — sealed to the recipient, max 512 bytes)</label>
+          <textarea id="privMemo" rows="2" maxlength="512" placeholder="only the recipient can ever read this" spellcheck="false" oninput="var c=document.getElementById('privMemoCount'); if(c) c.textContent=new TextEncoder().encode(this.value).length+' / 512 bytes';"
+            style="background:rgba(4,8,12,.7);border:1px solid rgba(167,139,250,.22);border-radius:10px;color:#cfe9f2;font-family:'JetBrains Mono';font-size:11.5px;padding:9px 11px;outline:none;resize:vertical"></textarea>
+          <div id="privMemoCount" style="font-family:'JetBrains Mono';font-size:9.5px;color:#5a93a8">0 / 512 bytes</div>
           <div id="privNoteInfo" style="font-family:'JetBrains Mono';font-size:9.5px;color:#5a93a8"></div>
           <button id="privGo" onclick="doPrivateSend()" style="border:1px solid rgba(167,139,250,.45);background:linear-gradient(90deg,rgba(167,139,250,.22),rgba(192,132,252,.14));color:#cdbdfa;font-family:'Orbitron';font-weight:700;font-size:13px;letter-spacing:1px;padding:11px;border-radius:10px;cursor:pointer">🔒 SEND PRIVATELY</button>
           <div id="privMsg" style="font-family:'JetBrains Mono';font-size:10.5px;color:#8fb3c2;min-height:14px"></div>
+          <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+            <button onclick="sigilCheckInbox()" style="background:rgba(167,139,250,.1);border:1px solid rgba(167,139,250,.4);color:#cdbdfa;border-radius:10px;padding:6px 12px;font-family:'Rajdhani';font-weight:700;cursor:pointer">PRIVATE INBOX</button>
+            <span style="font-family:'JetBrains Mono';font-size:9.5px;color:#5a93a8">notes and memos sealed to this wallet — opened in your browser, never on the server</span>
+          </div>
+          <div id="privInbox" style="display:flex;flex-direction:column;gap:6px"></div>
+
         </div>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-top:4px">
           <span style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8;text-transform:uppercase;letter-spacing:1px">Saved wallets</span>
@@ -2208,7 +2218,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   window.sigilShieldWasmReady = (async function(){
     var el=document.getElementById('privWasmState');
     try{
-      var mod = await import('./wasm/sigil_shield.js?v=740');
+      var mod = await import('./wasm/sigil_shield.js?v=741');
       await mod.default(); // fetches + instantiates the sibling .wasm
       window.sigilShieldWasm = mod;
       if(el){ el.textContent='prover ready'; el.style.color='#00e0c6'; }
@@ -2436,6 +2446,61 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   // that covers amount+fee, build+prove a real spend_full_v4 STARK client-side (via the
   // WASM module above), seal the recipient's output so they can discover it, and POST
   // the result to /v1/shielded_send — the same real endpoint sigil-api serves.
+  // ── PRIVATE MEMO + INBOX (2026-09-02) ───────────────────────────────────────
+  // The memo travels INSIDE the sealed note ciphertext (sigil_shield::note_cipher v2):
+  // sealed to the recipient's pk_encrypt, padded to a fixed 512 bytes so its presence
+  // and length leak nothing, authenticated by the AEAD tag. Only the recipient's seed
+  // opens it, which is why the inbox below is opened here, in the browser.
+  function sigilPrivMemo(){ var el=document.getElementById('privMemo'); return el?String(el.value||''):''; }
+  function sigilClearPrivMemo(){ var el=document.getElementById('privMemo'); if(el) el.value=''; var c=document.getElementById('privMemoCount'); if(c) c.textContent='0 / 512 bytes'; }
+  function sigilRenderInbox(wasm, seedHex, lj){
+    var box=document.getElementById('privInbox'); if(!box || !wasm || !wasm.openNoteCiphertext) return 0;
+    var cts=(lj&&lj.ciphertexts)||[], base=(lj&&lj.from)||0, found=[];
+    for(var i=0;i<cts.length;i++){
+      var c=cts[i]; if(!c) continue;
+      try{ var o=JSON.parse(wasm.openNoteCiphertext(seedHex, c)); found.push({pos:base+i, value:o.value, memo:o.memo||''}); }catch(_){ /* not ours — the common case */ }
+    }
+    while(box.firstChild) box.removeChild(box.firstChild);
+    if(!found.length) return 0;
+    var h=document.createElement('div'); h.style.cssText="font-family:'JetBrains Mono';font-size:10px;letter-spacing:1px;color:#a78bfa;text-transform:uppercase"; h.textContent='private inbox — '+found.length+' note(s) sealed to you'; box.appendChild(h);
+    found.reverse().forEach(function(f){
+      var row=document.createElement('div'); row.style.cssText="background:rgba(4,8,12,.55);border:1px solid rgba(167,139,250,.18);border-radius:10px;padding:8px 10px";
+      // Note values are GLYPHS. sigilFromGlyphs is the exact BigInt inverse of the amount
+      // parser (see SIGIL MONEY SCALE) — the float path this shipped with divided by a
+      // hard-coded 1e10 and lost digits past ~9e15; trailing zeros are trimmed for reading.
+      var vtxt=sigilFromGlyphs(f.value).replace(/0+$/,'').replace(/\.$/,'');
+      var v=document.createElement('div'); v.style.cssText="font-family:'Orbitron';font-size:13px;color:#cfe9f2"; v.textContent=vtxt+' SIGIL'; row.appendChild(v);
+      var p=document.createElement('div'); p.style.cssText="font-family:'JetBrains Mono';font-size:9.5px;color:#5a93a8"; p.textContent='pool leaf #'+f.pos; row.appendChild(p);
+      if(f.memo){ var m=document.createElement('div'); m.style.cssText="font-family:'JetBrains Mono';font-size:11px;color:#cdbdfa;margin-top:4px;white-space:pre-wrap;word-break:break-word"; m.textContent='\u201c'+f.memo+'\u201d'; row.appendChild(m); }
+      box.appendChild(row);
+    });
+    return found.length;
+  }
+  window.sigilCheckInbox=async function(){
+    var from=(window.MINE_ADDR||window.ADDR||'').toLowerCase();
+    if(!/^[0-9a-f]{64}$/.test(from)){ privMsg('No wallet address loaded.', '#ff8a8a'); return; }
+    var wasm; try{ wasm = window.sigilShieldWasm || await window.sigilShieldWasmReady; }
+    catch(e){ privMsg('Prover failed to load — cannot open notes.', '#ff8a8a'); return; }
+    if(!wasm.openNoteCiphertext){ privMsg('This wallet build cannot open notes yet — reload the page.', '#fbbf24'); return; }
+    var mnemonic = window.__sigilMnemonic || sigilLoadSecret();
+    if(!mnemonic){
+      mnemonic = (prompt('Enter your recovery phrase (or 64-hex mining seed) to open your private inbox.\nSaved in THIS browser until you press LOG OUT.')||'').trim();
+      if(!mnemonic){ privMsg('Cancelled — recovery phrase required.', '#fbbf24'); return; }
+    }
+    // Same purge-on-mismatch discipline as doPrivateSend/doShield: a stored secret for the
+    // WRONG wallet must be forgotten, or persistence turns one bad entry into a permanent
+    // wedge — every later attempt reloads it from localStorage and fails identically.
+    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ window.__sigilMnemonic=null; sigilForgetSecret(); privMsg('Could not derive a key from that phrase.', '#ff8a8a'); return; }
+    if(kp.address!==from){ window.__sigilMnemonic=null; sigilForgetSecret(); privMsg('That phrase belongs to '+kp.address.slice(0,10)+'… but this wallet is '+from.slice(0,10)+'…. Cleared it — press PRIVATE INBOX again to enter the right one.', '#ff8a8a'); return; }
+    window.__sigilMnemonic=mnemonic; sigilSaveSecret(mnemonic);
+    privMsg('Scanning the shielded pool for notes sealed to you…', '#6df3ff');
+    try{
+      var lr=await fetch('/v1/shielded/leaves',{cache:'no-store'}); var lj=await lr.json();
+      if(!lj || !lj.ok){ privMsg('✗ could not load the shielded pool.', '#ff8a8a'); return; }
+      var n=sigilRenderInbox(wasm, bytesToHex(kp.priv), lj);
+      privMsg(n ? ('✓ '+n+' note(s) sealed to you') : 'no notes sealed to you yet', n ? '#00e0c6' : '#8fb3c2');
+    }catch(e){ privMsg('✗ network error — node unreachable.', '#ff8a8a'); }
+  };
   window.doPrivateSend=async function(){
     var recipient=window.__privRecipient;
     if(!recipient){ privMsg('Check a recipient address first.', '#ff8a8a'); return; }
@@ -2462,7 +2527,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       privMsg('Building the private spend locally…', '#6df3ff');
       var candNotes=myNotes(from).filter(function(n){ return !n.spent; }).map(function(n){ return {index:n.index, value:String(n.value)}; });
       var ffr=await fetch('/api/v1/mine-send-private',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({recipient_pk_shield:recipient.pk_shield, recipient_pk_encrypt:recipient.pk_encrypt, amount:amountRaw.toString(), notes:candNotes})});
+        body:JSON.stringify({recipient_pk_shield:recipient.pk_shield, recipient_pk_encrypt:recipient.pk_encrypt, amount:amountRaw.toString(), notes:candNotes, memo:sigilPrivMemo()})});
       if(ffr.ok){
         var ffj=null; try{ ffj=await ffr.json(); }catch(_){}
         if(ffj && ffj.ok && ffj.txid!==undefined){
@@ -2473,7 +2538,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
           }
           saveMyNotes(from, fastUpdated);
           privMsg('✓ sent '+amtStr+' SIGIL privately — txid '+(ffj.txid?String(ffj.txid).slice(0,10)+'…':'(queued)')+'. Lands once the DAG finalizes (check the explorer).', '#00e0c6');
-          var fastAmtEl=document.getElementById('privAmt'); if(fastAmtEl) fastAmtEl.value='';
+          var fastAmtEl=document.getElementById('privAmt'); if(fastAmtEl) fastAmtEl.value=''; sigilClearPrivMemo();
           if(fastPrivBtn)fastPrivBtn.disabled=false;
           // A receipt that says SENT (not SHIELDED), and an EXPLICIT success for the
           // orchestrator. It used to infer success from the receipt pane merely being
@@ -2512,6 +2577,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       var lj=await lr.json();
       if(!lj || !lj.ok){ privMsg('✗ could not load the shielded pool.', '#ff8a8a'); return; }
       var leaves=lj.leaves||[], capacity=lj.capacity;
+      try{ sigilRenderInbox(wasm, seedHex, lj); }catch(_){}
 
       var FEE=100000n; // sigil_state::shielded::SHIELDED_FEE — mirrored in sigil-shield/src/wasm_api.rs:45.
       // NOT a decimals conversion: this is the chain's flat fee in GLYPHS. It read 1000n, which was
@@ -2542,12 +2608,22 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       privMsg('Building + proving the private spend — real zk-STARK, client-side (~0.5-2s)…', '#6df3ff');
       var reqJson;
       try{
-        reqJson = wasm.buildPrivateSend(
-          seedHex, pick.note.index, String(pick.note.value), pick.position,
-          JSON.stringify(leaves), capacity,
-          recipient.pk_shield, recipient.pk_encrypt,
-          amountRaw.toString()
-        );
+        var memo=sigilPrivMemo();
+        if(new TextEncoder().encode(memo).length>512){ privMsg('✗ memo is over 512 bytes — shorten it.', '#ff8a8a'); return; }
+        if(memo && !wasm.buildPrivateSendWithMemo){ privMsg('✗ this wallet build cannot seal memos yet — reload the page.', '#ff8a8a'); return; }
+        reqJson = memo
+          ? wasm.buildPrivateSendWithMemo(
+              seedHex, pick.note.index, String(pick.note.value), pick.position,
+              JSON.stringify(leaves), capacity,
+              recipient.pk_shield, recipient.pk_encrypt,
+              amountRaw.toString(), memo
+            )
+          : wasm.buildPrivateSend(
+              seedHex, pick.note.index, String(pick.note.value), pick.position,
+              JSON.stringify(leaves), capacity,
+              recipient.pk_shield, recipient.pk_encrypt,
+              amountRaw.toString()
+            );
       }catch(e){ privMsg('✗ could not build the spend: '+(e&&e.message||e), '#ff8a8a'); return; }
       var req=JSON.parse(reqJson);
 
@@ -2571,7 +2647,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       saveMyNotes(from, updated);
 
       privMsg('✓ sent '+amtStr+' SIGIL privately — txid '+(sj.txid?String(sj.txid).slice(0,10)+'…':'(queued)')+'. Lands once the DAG finalizes (check the explorer).', '#00e0c6');
-      var amtEl=document.getElementById('privAmt'); if(amtEl) amtEl.value='';
+      var amtEl=document.getElementById('privAmt'); if(amtEl) amtEl.value=''; sigilClearPrivMemo();
       // Receipt says SENT, and an EXPLICIT success is handed back — see the fast
       // path above and the orchestrator for why inferring it was wrong.
       try{ window.showReceipt([{txid:sj.txid,value:amountRaw}], amtStr, from, null, 'send', recipient); }catch(e){}
@@ -7598,7 +7674,9 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
   function $(id){ return document.getElementById(id); }
   function natApi(p){ return (window.API_BASE||'/v1')+p; }
   function g2s(g){ // glyphs (10-decimal) → SIGIL display
-    var n=Number(g)/SIGIL_UNITS_N;  // same value, now from the one constant if(!isFinite(n)) return '…';
+    // glyphs -> whole SIGIL, from the one constant (SIGIL_UNITS_N === 1e10 on g2).
+    var n=Number(g)/SIGIL_UNITS_N;
+    if(!isFinite(n)) return '…';
     return n>=1000?n.toLocaleString(undefined,{maximumFractionDigits:0}):n.toLocaleString(undefined,{maximumFractionDigits:4});
   }
   function row(l,v){ return '<div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid rgba(33,212,253,.09)"><span style="font-family:\'JetBrains Mono\';font-size:10px;letter-spacing:1px;color:#5a93a8;text-transform:uppercase">'+l+'</span><span style="font-family:\'JetBrains Mono\';font-size:11px;color:#cfe9f2;text-align:right;overflow-wrap:anywhere">'+v+'</span></div>'; }

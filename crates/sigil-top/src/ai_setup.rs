@@ -159,14 +159,41 @@ fn ollama_home() -> PathBuf {
     base.join("sigil-top").join("ollama")
 }
 
+/// Where `ollama serve`'s own output is captured. Without this the old code sent
+/// stdout+stderr to /dev/null, so "never answered on :11434" was reported with
+/// the reason (port already taken, missing library, bad permissions) thrown away.
+pub(crate) fn serve_log_path() -> PathBuf {
+    std::env::temp_dir().join("sigil-top-ollama-serve.log")
+}
+
+/// Last few non-empty lines of the serve log — the actual reason a start failed.
+fn serve_log_tail(n: usize) -> String {
+    let text = match std::fs::read_to_string(serve_log_path()) {
+        Ok(t) => t,
+        Err(_) => return String::new(),
+    };
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    lines[lines.len().saturating_sub(n)..]
+        .iter()
+        .map(|l| format!("      {}", l.chars().take(200).collect::<String>()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Spawn `ollama serve` detached and wait (≤45 s) for :11434 to answer.
 fn start_ollama(bin: &PathBuf, tx: &Sender<SetupEvent>) -> Result<(), String> {
     emit(tx, format!("  ▶ starting ollama ({})", bin.display()));
+    let log = serve_log_path();
+    // Capture the server's own words; a failed start must be diagnosable.
+    let (out, err) = match std::fs::File::create(&log) {
+        Ok(f) => match f.try_clone() {
+            Ok(f2) => (std::process::Stdio::from(f), std::process::Stdio::from(f2)),
+            Err(_) => (std::process::Stdio::null(), std::process::Stdio::null()),
+        },
+        Err(_) => (std::process::Stdio::null(), std::process::Stdio::null()),
+    };
     let mut cmd = std::process::Command::new(bin);
-    cmd.arg("serve")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+    cmd.arg("serve").stdin(std::process::Stdio::null()).stdout(out).stderr(err);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -175,16 +202,126 @@ fn start_ollama(bin: &PathBuf, tx: &Sender<SetupEvent>) -> Result<(), String> {
         cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
     }
     // The child outlives us on purpose; dropping the handle does not kill it.
-    let _child = cmd.spawn().map_err(|e| format!("could not start ollama: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        format!("could not start ollama: {e}\n  The binary is at {} — check it is executable, or start it yourself with `ollama serve`.", bin.display())
+    })?;
     let t0 = Instant::now();
     while t0.elapsed() < Duration::from_secs(45) {
         if crate::flux_moe::ollama_reachable() {
             emit(tx, "  ✓ ollama is up on :11434");
             return Ok(());
         }
+        // If it already exited, stop waiting 45 s for a corpse — report now.
+        if let Ok(Some(status)) = child.try_wait() {
+            let tail = serve_log_tail(6);
+            return Err(format!(
+                "ollama exited immediately ({status}).\n{}\n  Full log: {}\n  Most often :11434 is already taken by another ollama — check with `curl {}/api/version`.",
+                if tail.is_empty() { "      (no output captured)".to_string() } else { tail },
+                log.display(),
+                crate::flux_moe::ollama_base()
+            ));
+        }
         std::thread::sleep(Duration::from_millis(750));
     }
-    Err("ollama started but never answered on :11434 within 45 s".into())
+    let tail = serve_log_tail(6);
+    Err(format!(
+        "ollama started but never answered on {} within 45 s.\n{}\n  Full log: {}\n  Try `ollama serve` in a terminal to see what it says.",
+        crate::flux_moe::ollama_base(),
+        if tail.is_empty() { "      (no output captured)".to_string() } else { tail },
+        log.display()
+    ))
+}
+
+// ── disk headroom ──────────────────────────────────────────────────────────
+
+/// Where ollama keeps model blobs. Honours `OLLAMA_MODELS`, else the per-user
+/// default. This matters: on a box whose HOME is on a small system partition, a
+/// multi-GB pull can fill the root filesystem and take services down with it.
+pub(crate) fn models_dir() -> PathBuf {
+    if let Some(d) = std::env::var("OLLAMA_MODELS").ok().filter(|s| !s.trim().is_empty()) {
+        return PathBuf::from(d);
+    }
+    let home = std::env::var("HOME")
+        .ok()
+        .or_else(|| std::env::var("USERPROFILE").ok())
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    home.join(".ollama").join("models")
+}
+
+/// Nearest ancestor of `p` that exists — you cannot stat free space on a path
+/// that has not been created yet.
+fn nearest_existing(p: &PathBuf) -> PathBuf {
+    let mut cur = p.clone();
+    loop {
+        if cur.exists() {
+            return cur;
+        }
+        match cur.parent() {
+            Some(parent) => cur = parent.to_path_buf(),
+            None => return std::env::temp_dir(),
+        }
+    }
+}
+
+/// Free bytes on the filesystem holding `p`. Best-effort and dependency-free:
+/// `None` means "could not measure", which never blocks the pull.
+pub(crate) fn free_disk_bytes(p: &PathBuf) -> Option<u64> {
+    let dir = nearest_existing(p);
+    #[cfg(not(windows))]
+    {
+        let out = std::process::Command::new("df").arg("-kP").arg(&dir).output().ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        // "Filesystem 1024-blocks Used Available Capacity Mounted"
+        let line = text.lines().nth(1)?;
+        let avail_kb: u64 = line.split_whitespace().nth(3)?.parse().ok()?;
+        Some(avail_kb * 1024)
+    }
+    #[cfg(windows)]
+    {
+        let script = format!("(Get-Item -LiteralPath '{}').PSDrive.Free", dir.display());
+        let out = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    }
+}
+
+const GIB: u64 = 1024 * 1024 * 1024;
+
+/// Refuse a pull that would plainly not fit, BEFORE spending the download. The
+/// message names the directory and the override, so the user can redirect the
+/// pull to a bigger disk instead of being stuck.
+fn check_disk_for(model: &str, tx: &Sender<SetupEvent>) -> Result<(), String> {
+    let dir = models_dir();
+    let need = match crate::flux_moe::approx_model_bytes(model) {
+        Some(n) => n,
+        None => return Ok(()), // unknown size ⇒ do not guess, let ollama decide
+    };
+    let free = match free_disk_bytes(&dir) {
+        Some(f) => f,
+        None => return Ok(()), // unmeasurable ⇒ never block
+    };
+    emit(
+        tx,
+        format!(
+            "  · model store {} — {:.1} GB free, {model} needs about {:.1} GB",
+            dir.display(),
+            free as f64 / GIB as f64,
+            need as f64 / GIB as f64
+        ),
+    );
+    // Keep a 2 GB cushion: a filesystem driven to 0 takes other services with it.
+    if free < need + 2 * GIB {
+        return Err(format!(
+            "not enough disk for {model}: {:.1} GB free at {}, need ~{:.1} GB plus headroom.\n  Either free space there, or point ollama at a bigger disk: set OLLAMA_MODELS=/path/with/room, restart ollama, press F5.\n  Or choose a smaller model: SIGIL_AI_MODEL=qwen3:0.6b then press F5.",
+            free as f64 / GIB as f64,
+            dir.display(),
+            need as f64 / GIB as f64
+        ));
+    }
+    Ok(())
 }
 
 // ── verified download + install ────────────────────────────────────────────
@@ -260,7 +397,7 @@ fn download_verified(inst: &Installer, dest: &PathBuf, tx: &Sender<SetupEvent>) 
     if !hex_got.eq_ignore_ascii_case(&inst.sha256) {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!(
-            "SHA-256 MISMATCH — refusing to run the installer\n    manifest {}\n    download {}\n  (download tampered, or the signed manifest is stale — nothing was executed)",
+            "SHA-256 MISMATCH — refusing to run the installer\n  manifest {}\n  download {}\n  (download tampered, or the signed manifest is stale — nothing was executed)",
             inst.sha256, hex_got
         ));
     }
@@ -322,6 +459,9 @@ fn have_model(models: &[String], want: &str) -> bool {
 
 /// Pull `model` through ollama's own API, streaming progress to the transcript.
 pub(crate) fn pull_model(model: &str, tx: &Sender<SetupEvent>) -> Result<(), String> {
+    // Check the disk BEFORE downloading gigabytes onto a filesystem that cannot
+    // hold them — a full root partition breaks far more than this tab.
+    check_disk_for(model, tx)?;
     emit(tx, format!("  ⬇ pulling model {model} (this is a multi-GB download; progress below)"));
     let url = format!("{}/api/pull", crate::flux_moe::ollama_base());
     let body = serde_json::json!({ "name": model, "stream": true });
@@ -397,15 +537,77 @@ fn looks_like_memory_error(e: &str) -> bool {
 /// The whole out-of-the-box flow. Runs on a background thread; every step
 /// reports into `tx`. Ends with exactly one `Done` or `Fail`.
 pub(crate) fn bootstrap(base: String, tx: Sender<SetupEvent>) {
-    let r = bootstrap_inner(&base, &tx);
+    // A panic here would drop the Sender without ever sending Done or Fail. The
+    // TUI only clears `ai_setup_running` when it sees one of those, so the tab
+    // would sit at "running" forever and F5 would silently do nothing — the
+    // worst kind of dead end, because it looks like the key is broken. Catch it
+    // and turn it into a Fail the user can act on.
+    let guard = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bootstrap_inner(&base, &tx)));
+    let r = match guard {
+        Ok(r) => r,
+        Err(p) => {
+            let what = p
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| p.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            Err(format!("auto-setup crashed internally: {what}\n  This is a bug — please report it. You can still set up by hand: `ollama serve` then `ollama pull qwen3:4b`."))
+        }
+    };
     let _ = match r {
         Ok(model) => tx.send(SetupEvent::Done { model }),
         Err(e) => tx.send(SetupEvent::Fail(e)),
     };
 }
 
+/// Prove the chosen model actually LOADS and answers on this machine, before the
+/// tab claims to be ready. Without this, "✓ flux-moe ready" was based only on the
+/// download succeeding — and the first thing the user typed could still come back
+/// as a 500 out-of-memory. This is also what makes the smaller-model fallback
+/// reachable at all: a *pull* never fails for memory reasons, only a *load* does.
+fn smoke_test(model: &str, tx: &Sender<SetupEvent>) -> Result<(), String> {
+    emit(tx, format!("  · loading {model} to prove it runs here (first load reads several GB — can take a few minutes)"));
+    let t0 = Instant::now();
+    // A cold multi-GB load is the one step with no natural progress to report, and
+    // a silent minute reads as a hang. Tick every 15 s so the tab visibly lives.
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let beat = {
+        let (done, tx, model) = (done.clone(), tx.clone(), model.to_string());
+        std::thread::spawn(move || {
+            let start = Instant::now();
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(250));
+                if done.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                let secs = start.elapsed().as_secs();
+                if secs > 0 && secs % 15 == 0 {
+                    let _ = tx.send(SetupEvent::Line(format!("    … still loading {model} ({secs}s)")));
+                    std::thread::sleep(Duration::from_secs(1)); // don't re-fire inside the same second
+                }
+            }
+        })
+    };
+    let result = crate::flux_moe::chat(model, &[], "Reply with the single word: READY", "");
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = beat.join();
+    match result {
+        Ok(reply) => {
+            let peek: String = reply.chars().take(60).collect();
+            emit(tx, format!("  ✓ {model} answered in {:.0}s — \"{}\"", t0.elapsed().as_secs_f64(), peek.replace('\n', " ")));
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 fn bootstrap_inner(base: &str, tx: &Sender<SetupEvent>) -> Result<String, String> {
     emit(tx, "🧠 flux-moe auto-setup — checking your local AI…");
+
+    // 0. What are we actually running on? The answer decides which model is a
+    //    good idea, and it is shown so the choice is never mysterious.
+    let hw = crate::flux_moe::detect_hardware();
+    emit(tx, format!("  · this machine: {}", crate::flux_moe::describe_hardware(hw)));
 
     // 1. The signed manifest first: it tells us WHICH model is correct, and which
     //    installer is trusted. Fail-closed on signature; degrade only if ollama
@@ -424,16 +626,30 @@ fn bootstrap_inner(base: &str, tx: &Sender<SetupEvent>) -> Result<String, String
             emit(tx, "  · ollama is installed but not running");
             start_ollama(&bin, tx)?;
         } else {
-            let m = manifest
-                .as_ref()
-                .ok_or_else(|| "ollama is not installed and the signed AI manifest could not be verified — refusing to fetch an installer from anywhere else".to_string())?;
+            let m = manifest.as_ref().ok_or_else(|| {
+                format!(
+                    "ollama is not installed here, and the signed AI manifest could not be verified — so there is nothing safe to install from.\n  Check this machine's network/DNS, then press F5. Or install ollama yourself from https://ollama.com and press F5 (the manifest is only needed for the download, not for using an ollama you already trust).\n  Release channel tried: {base}"
+                )
+            })?;
             let key = target_key();
-            let inst = m
-                .installers
-                .get(key)
-                .ok_or_else(|| format!("signed manifest has no installer for {key}"))?;
+            let inst = m.installers.get(key).ok_or_else(|| {
+                format!(
+                    "the signed manifest has no ollama installer for {key}, so auto-install cannot proceed.\n  Install ollama by hand from https://ollama.com, then press F5."
+                )
+            })?;
             emit(tx, format!("  · ollama not found — installing v{} from the flux-signed manifest", m.ollama_version));
             let dest = installer_dest(inst);
+            // The installer itself needs room too, on whatever temp dir we use.
+            if let Some(free) = free_disk_bytes(&dest) {
+                if free < inst.size_bytes + GIB {
+                    return Err(format!(
+                        "not enough disk to download the ollama installer: {:.1} GB free at {}, need {:.1} GB.\n  Free some space (or set TMPDIR to a bigger disk) and press F5.",
+                        free as f64 / GIB as f64,
+                        dest.parent().unwrap_or(&dest).display(),
+                        inst.size_bytes as f64 / GIB as f64
+                    ));
+                }
+            }
             download_verified(inst, &dest, tx)?;
             run_installer(&dest, &inst.args, tx)?;
             // The Windows installer launches the app (which serves :11434); give it a
@@ -443,7 +659,9 @@ fn bootstrap_inner(base: &str, tx: &Sender<SetupEvent>) -> Result<String, String
                 std::thread::sleep(Duration::from_millis(750));
             }
             if !crate::flux_moe::ollama_reachable() {
-                let bin = ollama_binary().ok_or_else(|| "installer finished but no ollama binary was found".to_string())?;
+                let bin = ollama_binary().ok_or_else(|| {
+                    "the installer finished but no ollama binary turned up in any known location.\n  Open a terminal and run `ollama serve`; if that works, press F5 here.".to_string()
+                })?;
                 start_ollama(&bin, tx)?;
             }
         }
@@ -451,37 +669,125 @@ fn bootstrap_inner(base: &str, tx: &Sender<SetupEvent>) -> Result<String, String
         emit(tx, "  ✓ ollama is running");
     }
 
-    // 3. The correct model.
+    // 2b. Version drift is a silent source of confusing model errors: an ollama
+    //     older than the manifest's may not know a model tag the manifest names.
+    //     Warn — never fail — because a working older ollama is still working.
+    if let (Some(running), Some(m)) = (crate::flux_moe::ollama_version(), manifest.as_ref()) {
+        emit(tx, format!("  · ollama {running} (the signed manifest was written against {})", m.ollama_version));
+        if !m.ollama_version.is_empty() && version_older(&running, &m.ollama_version) {
+            emit(
+                tx,
+                format!(
+                    "  ⚠ your ollama ({running}) predates the manifest's ({}). Newer model tags may fail to pull or load. \
+                     Upgrade from https://ollama.com if a model refuses to run.",
+                    m.ollama_version
+                ),
+            );
+        }
+    }
+
+    // 3. The right model FOR THIS MACHINE.
     let models = crate::flux_moe::list_models();
-    let want = match &manifest {
-        Some(m) => m.default_model.clone(),
+    let m = match &manifest {
+        Some(m) => m,
         None => {
             // No signed guidance. If the user already has a model, use it — but say so.
-            return models.first().cloned().map(|m| {
-                emit(tx, format!("  ⚠ using your existing model {m} (manifest unavailable, no pull attempted)"));
-                m
-            }).ok_or_else(|| "no local model and the signed manifest is unavailable".to_string());
+            return match models.first().cloned() {
+                Some(m) => {
+                    emit(tx, format!("  ⚠ using your existing model {m} (manifest unavailable, no pull attempted)"));
+                    Ok(m)
+                }
+                None => Err(format!(
+                    "ollama is running but has no models, and the signed manifest is unavailable so there is no trusted tag to pull.\n  Check network access to {base} and press F5 — or pull one yourself: `ollama pull qwen3:4b`, then press F5."
+                )),
+            };
         }
     };
+
+    let (want, why) = crate::flux_moe::pick_model(&m.default_model, m.fallback_model.as_deref(), hw);
+    emit(tx, format!("  · model choice: {why}"));
+
+    // Already there? Still prove it loads before promising the user it works.
     if have_model(&models, &want) {
         emit(tx, format!("  ✓ model {want} already pulled"));
-        return Ok(want);
-    }
-    match pull_model(&want, tx) {
-        Ok(()) => Ok(want),
-        Err(e) => {
-            let fb = manifest.as_ref().and_then(|m| m.fallback_model.clone());
-            match fb {
-                Some(fb) if looks_like_memory_error(&e) && fb != want => {
-                    emit(tx, format!("  ⚠ {e}"));
-                    emit(tx, format!("  · trying the smaller fallback {fb}"));
-                    pull_model(&fb, tx)?;
-                    Ok(fb)
-                }
-                _ => Err(e),
+        match smoke_test(&want, tx) {
+            Ok(()) => return Ok(want),
+            Err(e) => {
+                emit(tx, format!("  ⚠ {want} is present but did not run: {e}"));
+                // fall through to the fallback logic below
+                return fallback_after_failure(m, &want, &models, tx, e);
             }
         }
     }
+
+    match pull_model(&want, tx) {
+        Ok(()) => match smoke_test(&want, tx) {
+            Ok(()) => Ok(want),
+            Err(e) => {
+                emit(tx, format!("  ⚠ {want} downloaded but would not run: {e}"));
+                fallback_after_failure(m, &want, &models, tx, e)
+            }
+        },
+        Err(e) => fallback_after_failure(m, &want, &models, tx, e),
+    }
+}
+
+/// One place for "the model we wanted did not work out". Tries the manifest's
+/// smaller model, then any model the user already has, and only then gives up —
+/// with a message that always names a next action.
+fn fallback_after_failure(
+    m: &AiManifest,
+    want: &str,
+    have: &[String],
+    tx: &Sender<SetupEvent>,
+    err: String,
+) -> Result<String, String> {
+    // 1. The manifest's own smaller model.
+    if let Some(fb) = m.fallback_model.as_deref().filter(|f| *f != want && !f.trim().is_empty()) {
+        emit(tx, format!("  · trying the smaller fallback {fb}"));
+        let pulled = if have_model(have, fb) { Ok(()) } else { pull_model(fb, tx) };
+        if let Ok(()) = pulled {
+            if smoke_test(fb, tx).is_ok() {
+                return Ok(fb.to_string());
+            }
+            emit(tx, format!("  ⚠ {fb} did not run here either"));
+        }
+    }
+    // 2. Anything the user already has, rather than leaving the tab unusable.
+    for existing in have {
+        if existing != want && smoke_test(existing, tx).is_ok() {
+            emit(tx, format!("  ⚠ falling back to your existing model {existing}"));
+            return Ok(existing.clone());
+        }
+    }
+    // 3. Genuinely stuck — say what failed AND what to try.
+    let hint = if looks_like_memory_error(&err) {
+        "This machine ran out of memory for every model tried. `ollama pull qwen3:0.6b` is the smallest useful one; then set SIGIL_AI_MODEL=qwen3:0.6b and press F5."
+    } else {
+        "Nothing else on this machine ran either. Try a small model by hand: `ollama pull qwen3:0.6b`, then SIGIL_AI_MODEL=qwen3:0.6b and press F5."
+    };
+    Err(format!("{err}\n  {hint}"))
+}
+
+/// Dotted-version compare, `true` when `a` is strictly older than `b`. Non-numeric
+/// junk sorts as 0 rather than panicking — a weird version string must not break setup.
+pub(crate) fn version_older(a: &str, b: &str) -> bool {
+    fn parts(v: &str) -> Vec<u64> {
+        v.trim()
+            .trim_start_matches('v')
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.parse().ok())
+            .collect()
+    }
+    let (pa, pb) = (parts(a), parts(b));
+    for i in 0..pa.len().max(pb.len()) {
+        let (x, y) = (pa.get(i).copied().unwrap_or(0), pb.get(i).copied().unwrap_or(0));
+        if x != y {
+            return x < y;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -544,6 +850,49 @@ mod tests {
         assert!(r.is_err(), "must not accept a hash mismatch");
         assert!(!p.exists(), "mismatched file must be deleted");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn version_compare_is_numeric_and_junk_proof() {
+        assert!(version_older("0.20.2", "0.33.2"), "this box's real drift must be detected");
+        assert!(!version_older("0.33.2", "0.33.2"));
+        assert!(!version_older("1.0.0", "0.33.2"), "1.0 is NEWER than 0.33 — no string compare");
+        assert!(version_older("0.9.0", "0.10.0"), "0.9 < 0.10 numerically");
+        assert!(!version_older("garbage", "also-garbage"));
+    }
+
+    #[test]
+    fn models_dir_honours_the_override() {
+        std::env::set_var("OLLAMA_MODELS", "/somewhere/big");
+        assert_eq!(models_dir(), PathBuf::from("/somewhere/big"));
+        std::env::remove_var("OLLAMA_MODELS");
+        // Default must land under the user's home, never a hard-coded root path.
+        let d = models_dir();
+        assert!(d.ends_with("models"), "{d:?}");
+    }
+
+    #[test]
+    fn nearest_existing_walks_up_to_something_real() {
+        let deep = std::env::temp_dir().join("no").join("such").join("dir").join("at").join("all");
+        let found = nearest_existing(&deep);
+        assert!(found.exists(), "must resolve to a real dir, got {found:?}");
+    }
+
+    #[test]
+    fn free_disk_is_measurable_here() {
+        // Best-effort by contract, but on this platform it should actually work —
+        // and it must be a plausible number, not 0.
+        let f = free_disk_bytes(&std::env::temp_dir());
+        if let Some(bytes) = f {
+            assert!(bytes > 0, "free space must be positive when measurable");
+        }
+    }
+
+    #[test]
+    fn serve_log_tail_is_safe_when_absent() {
+        // No log yet must yield "", not a panic — this runs inside error paths.
+        let _ = std::fs::remove_file(serve_log_path());
+        assert_eq!(serve_log_tail(5), "");
     }
 
     #[test]

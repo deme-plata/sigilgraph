@@ -68,12 +68,14 @@ DEFAULT_CRATES="sigil-top sigil-node sigil-api sigil-shield sigil-dagknight sigi
 cd "$REPO" || exit 1
 
 # One capped, polite check. Echoes elapsed seconds, or FAIL.
-timed_check() {  # crate, shape
-  local crate="$1" shape="$2" extra="" t0 rc
+timed_check() {  # crate, shape, [profile]
+  local crate="$1" shape="$2" profile="${3:-dev}" extra="" prof="" t0 rc
   [ "$shape" = tests ] && extra="--tests"
+  # `dev` is cargo's default and takes no flag; anything else is a named profile.
+  [ "$profile" != dev ] && prof="--profile $profile"
   t0=$SECONDS
   systemd-run --scope -q -p MemoryMax=16G -p CPUQuota=600% \
-    bash -c "cd '$REPO' && ionice -c3 nice -n19 '$FLUXC' check -p '$crate' $extra" >/dev/null 2>&1
+    bash -c "cd '$REPO' && ionice -c3 nice -n19 '$FLUXC' check -p '$crate' $extra $prof" >/dev/null 2>&1
   rc=$?
   [ $rc -eq 0 ] && echo $((SECONDS-t0)) || echo FAIL
 }
@@ -143,6 +145,20 @@ fi
 
 read -ra CRATES <<< "${*:-$DEFAULT_CRATES}"
 read -ra SHAPES <<< "${SHAPES:-lib tests}"
+# PROFILES is the third dimension, and it is not decoration — `release-fast` is the GATE
+# profile. It inherits `release`, so `debug_assertions` stays OFF, which is the property the
+# sigil-shield prover tests actually need: in `dev` they are `#[cfg_attr(debug_assertions,
+# ignore)]`d because winterfell 0.9 trips `validate_transition_degrees`, so a green dev run
+# reports them as IGNORED and proves nothing about the prover. Measured 2026-09-02 on
+# sigil-api: dev said "182 passed, 7 ignored"; release-fast said "189 passed, 0 IGNORED".
+# Those seven are the difference between a suite that ran and a suite that looked like it did.
+#
+# It is cheap enough to keep warm: release-fast is opt-level 1, lto off, codegen-units 256, so
+# the sigil-api test build took 1m04s — against the tens of minutes a real `release` relink of
+# sigil-top costs under codegen-units=1 + thin LTO. That is the operator ruling working as
+# intended: release-fast for gates, release for shipping. `release` is deliberately NOT warmed
+# here — it is a shipping profile, it is enormous, and warming it would starve the live node.
+read -ra PROFILES <<< "${PROFILES:-dev release-fast}"
 
 # ── The hybrid loop: `while` converges, `for` enumerates ─────────────────────
 #
@@ -169,6 +185,7 @@ MAX_PASSES="${MAX_PASSES:-3}"   # hard ceiling; a live node shares this box
 echo "▸ prewarm  repo=$REPO"
 echo "  crates: ${CRATES[*]}"
 echo "  shapes: ${SHAPES[*]}"
+echo "  profiles: ${PROFILES[*]}   (release-fast is the GATE profile — prover tests only run there)"
 echo "  converge: every cell <= ${WARM_S}s in one pass (max ${MAX_PASSES} passes)"
 echo
 
@@ -189,16 +206,19 @@ while [ "$pass" -lt "$MAX_PASSES" ]; do
       continue
     fi
     line="  $(printf '%-18s' "$crate")"
-    for shape in "${SHAPES[@]}"; do
-      r=$(timed_check "$crate" "$shape")
-      if [ "$r" = FAIL ]; then
-        failed=$((failed + 1)); mark="✗"
-      elif [ "$r" -le "$WARM_S" ]; then
-        mark="✓"
-      else
-        cold=$((cold + 1)); mark="·"
-      fi
-      line="$line $(printf '%-13s' "$mark $shape=${r}s")"
+    for profile in "${PROFILES[@]}"; do
+      for shape in "${SHAPES[@]}"; do
+        r=$(timed_check "$crate" "$shape" "$profile")
+        if [ "$r" = FAIL ]; then
+          failed=$((failed + 1)); mark="✗"
+        elif [ "$r" -le "$WARM_S" ]; then
+          mark="✓"
+        else
+          cold=$((cold + 1)); mark="·"
+        fi
+        tag="$shape"; [ "$profile" != dev ] && tag="$shape/${profile%%-*}f"
+        line="$line $(printf '%-15s' "$mark $tag=${r}s")"
+      done
     done
     echo "$line"
   done

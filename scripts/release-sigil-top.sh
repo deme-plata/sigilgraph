@@ -24,6 +24,33 @@ BASE="https://sigilgraph.fluxapp.xyz/downloads"
 export PATH="/home/orobit/node/current/bin:$PATH"
 cd "$REPO"
 
+# ── SYNC WITH THE BRANCH TIP **BEFORE** BUILDING ──────────────────────────────
+#
+# Any commit that lands on the branch between the start of a release and its final push
+# makes that push non-fast-forward. That happened on BOTH v8.0.1 and v8.0.2: the channel
+# went live, signed and verified, while the release commit sat on no branch at all — the
+# v7.3.3/v7.3.4 shape, signed binaries that NO REACHABLE COMMIT REPRODUCES. It was caught
+# only because someone read the push output, so do it here instead, before compiling.
+#
+# Merge, never rebase: the branch tip is already published. Cargo.lock is the routine
+# conflict (both sides bump sigil-top's version line) and resolves to OURS, the version
+# actually being released; anything else stops the release.
+_BR=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+if [ "$_BR" != "HEAD" ]; then
+  git fetch -q origin "$_BR" || { echo "✗ REFUSING: cannot fetch origin/$_BR" >&2; exit 1; }
+  if [ "$(git rev-list --count "HEAD..origin/$_BR" 2>/dev/null || echo 0)" -gt 0 ]; then
+    echo "▸ 0/7 branch tip moved — merging BEFORE the build"
+    if ! git merge --no-gpg-sign --no-edit "origin/$_BR" -m "merge: branch tip into the v${VER} release line (pre-build sync)"; then
+      _C=$(git diff --name-only --diff-filter=U)
+      [ "$_C" = "Cargo.lock" ] || { echo "✗ REFUSING: conflicts beyond Cargo.lock:" >&2; echo "$_C" >&2; exit 1; }
+      git checkout --ours Cargo.lock && git add Cargo.lock
+      git -c core.editor=true commit --no-gpg-sign -q
+      echo "  · Cargo.lock conflict auto-resolved to OURS"
+    fi
+    echo "  ok synced: now at $(git rev-parse --short HEAD)"
+  fi
+fi
+
 echo "▸ 1/7 bump version → $VER"
 sed -i "s/^version = \"[0-9.]*\"/version = \"$VER\"/" crates/sigil-top/Cargo.toml
 grep -q "^version = \"$VER\"" crates/sigil-top/Cargo.toml || { echo "✗ version bump failed"; exit 1; }

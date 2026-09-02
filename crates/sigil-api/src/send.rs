@@ -90,6 +90,9 @@ const MAX_AGE: Duration = Duration::from_secs(2_400);
 
 struct Pending {
     tx: SigilTx,
+    /// The on-chain `SigilTx::hash()`. Kept explicitly because the map is keyed by
+    /// `(hash, req_nonce)` — two legitimate identical payments share this hash.
+    tx_hash: [u8; 32],
     attempts: u32,
     first_seen: Instant,
 }
@@ -99,7 +102,20 @@ struct Pending {
 /// same (from,to,amount,token) while it's already pending is a safe no-op
 /// rather than a duplicate entry.
 pub struct SendBridge {
-    pending: Mutex<HashMap<[u8; 32], Pending>>,
+    /// Keyed by `(SigilTx::hash(), req_nonce)` — **not** by the hash alone.
+    ///
+    /// `SigilTx::Send` carries no nonce, so its hash is a pure function of
+    /// `(from, to, amount, token, fee)`: paying the same payee the same amount twice
+    /// produces the SAME hash. Keying on the hash alone made the second payment a
+    /// silent no-op — `submit` returned `Ok(hash)`, the API answered `ok:true` with a
+    /// txid, and only ONE transfer was ever embedded. See
+    /// `two_identical_payments_with_distinct_nonces_both_stay_pending`.
+    ///
+    /// Including `req_nonce` costs nothing and loses no protection: a genuine retry
+    /// that reuses its nonce is already rejected by `nonce_watermark` as
+    /// `ReplayedNonce` before it ever reaches this map, so the only case the old
+    /// content-dedup could fire on was the legitimate repeat payment it was eating.
+    pending: Mutex<HashMap<([u8; 32], u64), Pending>>,
     /// Last-accepted `req_nonce` per sender. The wallet sends `Date.now()`
     /// (milliseconds) as the nonce, so "strictly greater than last accepted"
     /// is both the replay guard and a free per-wallet ordering check — no
@@ -219,8 +235,12 @@ impl SendBridge {
 
         let tx = SigilTx::Send { from, to, amount, token: NATIVE, fee: 0 };
         let tx_hash = tx.hash();
-        self.pending.lock().unwrap().entry(tx_hash).or_insert_with(|| Pending {
+        // `(hash, req_nonce)`: distinct nonces are distinct payments even when the
+        // intent bytes are identical. `or_insert_with` still makes a same-nonce
+        // resubmission idempotent — though the watermark above already rules that out.
+        self.pending.lock().unwrap().entry((tx_hash, req_nonce)).or_insert_with(|| Pending {
             tx,
+            tx_hash,
             attempts: 0,
             first_seen: Instant::now(),
         });
@@ -239,12 +259,12 @@ impl SendBridge {
     pub fn snapshot_for_mint(&self) -> Vec<SignedTx> {
         let mut guard = self.pending.lock().unwrap();
         let mut out = Vec::with_capacity(guard.len());
-        guard.retain(|hash, p| {
+        guard.retain(|(hash, req_nonce), p| {
             if p.attempts >= MAX_ATTEMPTS || p.first_seen.elapsed() >= MAX_AGE {
                 eprintln!(
                     "✗ send gave up after {} attempts / {:.1}s (still not landed — likely stuck on \
-                     insufficient balance) hash={}",
-                    p.attempts, p.first_seen.elapsed().as_secs_f64(), hex::encode(hash)
+                     insufficient balance) hash={} nonce={}",
+                    p.attempts, p.first_seen.elapsed().as_secs_f64(), hex::encode(hash), req_nonce
                 );
                 return false;
             }
@@ -259,11 +279,25 @@ impl SendBridge {
     /// carried by a candidate that's been confirmed on the settled spine.
     /// Anything not in `hashes` (including sends that rode along on an
     /// orphaned sibling of the same height) stays pending for the next tick.
+    /// One settled occurrence retires exactly ONE pending payment.
+    ///
+    /// Two identical payments share a `SigilTx::hash()`, so a blanket `remove(hash)`
+    /// would retire both on the first settlement and the payee would be short an
+    /// invoice. `hashes` is the settled candidate's tx list, so a tx carried twice
+    /// appears twice — retiring per occurrence is what keeps the books straight.
     pub fn confirm_applied(&self, hashes: &[[u8; 32]]) {
         if hashes.is_empty() { return; }
         let mut guard = self.pending.lock().unwrap();
         for h in hashes {
-            guard.remove(h);
+            // Oldest first: settlement order follows submission order.
+            let victim = guard
+                .iter()
+                .filter(|(_, p)| p.tx_hash == *h)
+                .min_by_key(|(_, p)| p.first_seen)
+                .map(|(k, _)| *k);
+            if let Some(k) = victim {
+                guard.remove(&k);
+            }
         }
     }
 
@@ -371,6 +405,74 @@ mod tests {
             assert_eq!(snap[0].tx.hash(), hash);
         }
         assert_eq!(bridge.pending_len(), 1, "still pending — nothing has confirmed it yet");
+    }
+
+    /// **The duplicate-payment defect, pinned.**
+    ///
+    /// `SigilTx::Send { from, to, amount, token, fee }` carries NO nonce, so
+    /// `SigilTx::hash()` is a pure function of the payment's *content*. Two genuine
+    /// payments of the same amount to the same payee therefore hash identically —
+    /// and `pending` was keyed by that hash via `.entry(h).or_insert_with(..)`, so
+    /// the second one was silently swallowed: `submit` returned `Ok(hash)` (the API
+    /// answers `ok:true` with a txid) while only ONE transfer was ever embedded.
+    ///
+    /// With ~78 s to finality (512 blocks / 6.6 blk/s, measured live 2026-09-02) the
+    /// window where a payee's second invoice vanishes is over a minute wide.
+    ///
+    /// The content-dedup could never have been protecting a retry, either: a retry
+    /// reusing its nonce is already rejected by the `nonce_watermark` as
+    /// `ReplayedNonce` before it reaches `pending`. So the ONLY case content-dedup
+    /// could ever fire on is this one — two distinct, strictly-increasing nonces —
+    /// which is precisely the legitimate repeat payment.
+    #[test]
+    fn two_identical_payments_with_distinct_nonces_both_stay_pending() {
+        let (sk, from) = signer();
+        let from_hex = hex::encode(from);
+        let to_hex = "77".repeat(32);
+
+        let bridge = SendBridge::new();
+        // Same payee, same amount, twice — distinct (increasing) nonces, as any real
+        // wallet produces (`Date.now()`).
+        let sig1 = sign_send(&sk, &from_hex, &to_hex, 10, 1);
+        let sig2 = sign_send(&sk, &from_hex, &to_hex, 10, 2);
+        let h1 = bridge.submit(&from_hex, &to_hex, 10, "SIGIL", &sig1, 1).unwrap();
+        let h2 = bridge.submit(&from_hex, &to_hex, 10, "SIGIL", &sig2, 2).unwrap();
+
+        // Both are the same ON-CHAIN tx (no nonce in the intent) — that is expected.
+        assert_eq!(h1, h2, "identical intents share a tx hash by construction");
+
+        // But they are two SEPARATE payments and must both be offered to the producer.
+        assert_eq!(
+            bridge.pending_len(), 2,
+            "second payment was swallowed: caller got ok:true but only one transfer would land"
+        );
+        assert_eq!(
+            bridge.snapshot_for_mint().len(), 2,
+            "both payments must ride the candidate, or the payee is short one invoice"
+        );
+    }
+
+    /// The flip side: `confirm_applied` must retire exactly as many pending entries as
+    /// the settled block actually carried — one occurrence retires one payment, not both.
+    #[test]
+    fn confirming_one_occurrence_retires_only_one_of_two_identical_payments() {
+        let (sk, from) = signer();
+        let from_hex = hex::encode(from);
+        let to_hex = "77".repeat(32);
+        let bridge = SendBridge::new();
+        let sig1 = sign_send(&sk, &from_hex, &to_hex, 10, 1);
+        let sig2 = sign_send(&sk, &from_hex, &to_hex, 10, 2);
+        let h = bridge.submit(&from_hex, &to_hex, 10, "SIGIL", &sig1, 1).unwrap();
+        bridge.submit(&from_hex, &to_hex, 10, "SIGIL", &sig2, 2).unwrap();
+        assert_eq!(bridge.pending_len(), 2);
+
+        // The settled candidate carried the tx ONCE.
+        bridge.confirm_applied(&[h]);
+        assert_eq!(bridge.pending_len(), 1, "one settled occurrence retires exactly one payment");
+
+        // A later candidate carries it again.
+        bridge.confirm_applied(&[h]);
+        assert_eq!(bridge.pending_len(), 0, "the second payment retires on its own settlement");
     }
 
     #[test]

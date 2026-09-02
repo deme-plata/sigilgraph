@@ -131,10 +131,12 @@ pub(crate) fn draw_ai_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect)
     ]).areas(area);
 
     // status: connected model + count, or the setup hint
-    let status = match &app.ai_model {
-        Some(m) => format!(" 🧠 local model: {m}   ·   {} available   ·   type · Enter sends · Tab leaves",
-                           app.ai_models.len()),
-        None => " 🧠 no local model — run `ollama serve` and `ollama pull qwen3:8b`, then press 5 again".to_string(),
+    let skills = if app.ai_skills_note.is_empty() { String::new() } else { format!("   ·   🔏 skills: {}", app.ai_skills_note) };
+    let status = match (&app.ai_model, app.ai_setup_running) {
+        (_, true) => format!(" 🧠 setting up your local AI — progress below{skills}"),
+        (Some(m), false) => format!(" 🧠 local model: {m}   ·   {} available{skills}   ·   Enter sends · F5 re-setup · F6 reload skills · Tab leaves",
+                                    app.ai_models.len()),
+        (None, false) => format!(" 🧠 no local model yet — press F5 to auto-install ollama + pull the model (flux-signed){skills}"),
     };
     f.render_widget(Paragraph::new(status).style(Style::default().fg(C_DIM)), status_area);
 

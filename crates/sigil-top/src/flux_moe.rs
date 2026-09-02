@@ -61,6 +61,13 @@ pub(crate) fn available() -> bool {
     !list_models().is_empty()
 }
 
+/// Is the ollama SERVER up at all (even with zero models pulled)? 2 s cap.
+/// Auto-setup uses this to tell "not installed / not running" from "no model".
+pub(crate) fn ollama_reachable() -> bool {
+    let url = format!("{}/api/version", ollama_base());
+    client_with_timeout(2).get(&url).send().map(|r| r.status().is_success()).unwrap_or(false)
+}
+
 /// The system prompt that turns a plain chat model into "flux-moe": SIGIL-aware,
 /// honest, and deferring live numbers to the node instead of inventing them.
 fn system_prompt() -> &'static str {
@@ -75,8 +82,11 @@ fn system_prompt() -> &'static str {
 /// One turn of chat against the chosen local model. `history` is prior
 /// (role, content) pairs; `user` is the new message. Blocking — the caller runs
 /// it off the UI thread. Returns the assistant's reply or a human error string.
-pub(crate) fn chat(model: &str, history: &[(String, String)], user: &str) -> Result<String, String> {
-    let mut messages = vec![serde_json::json!({"role":"system","content":system_prompt()})];
+/// `extra_system` is appended to the system prompt — the flux-signed skills block
+/// (see `skills::context_block`); empty when no skills are loaded.
+pub(crate) fn chat(model: &str, history: &[(String, String)], user: &str, extra_system: &str) -> Result<String, String> {
+    let system = if extra_system.is_empty() { system_prompt().to_string() } else { format!("{}{}", system_prompt(), extra_system) };
+    let mut messages = vec![serde_json::json!({"role":"system","content":system})];
     for (role, content) in history {
         messages.push(serde_json::json!({"role": role, "content": content}));
     }
@@ -113,11 +123,11 @@ pub(crate) fn chat(model: &str, history: &[(String, String)], user: &str) -> Res
 /// Human guidance shown when no local model is found — kept here so the tab and
 /// any headless helper print the same words.
 pub(crate) fn setup_hint() -> &'static str {
-    "No local model found. To chat here:\n\
-     1. install ollama  (ollama.com)\n\
-     2. pull one your GPU can run:  ollama pull qwen3:8b   (bigger GPU = bigger model = more reasoning)\n\
-     3. run it:  ollama serve\n\
-     Then reopen this tab and pick your model."
+    "No local model yet. Press F5 and flux-moe sets itself up:\n\
+     1. installs ollama from the flux-SIGNED manifest (SHA-256 + size verified before anything runs)\n\
+     2. pulls the manifest's model (qwen3:8b; a smaller fallback if memory is short)\n\
+     3. you chat here.\n\
+     By hand instead: install ollama (ollama.com), `ollama pull qwen3:8b`, `ollama serve`, reopen this tab."
 }
 
 #[cfg(test)]

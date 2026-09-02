@@ -147,27 +147,59 @@ const RELEASE_SIGN_PUBKEY_HEX: &str =
 /// Returns `Err` (fail-closed → no update) on any missing/invalid signature. No runtime bypass:
 /// this check always runs — there is no env var that skips it.
 fn verify_manifest_sig(base: &str, manifest_body: &str) -> Result<(), String> {
+    verify_signed_body(base, "sigil-top-latest.json", manifest_body)
+}
+
+/// Verify `body` against `<base>/<name>.sig` with the pinned release key. Generic so the
+/// [A]I manifest (`sigil-ai-latest.json`) and the skills manifest (`sigil-skills-latest.json`)
+/// share the auto-updater's ONE trust root — no second key, no second code path. Fail-closed.
+pub(crate) fn verify_signed_body(base: &str, name: &str, body: &str) -> Result<(), String> {
     let pk: [u8; 32] = hex::decode(RELEASE_SIGN_PUBKEY_HEX).ok()
         .and_then(|v| v.try_into().ok())
         .ok_or_else(|| "pinned release key malformed".to_string())?;
     let bust = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs()).unwrap_or(0);
-    let sig_url = format!("{base}/sigil-top-latest.json.sig?t={bust}");
+    let sig_url = format!("{base}/{name}.sig?t={bust}");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(8))
         .min_tls_version(reqwest::tls::Version::TLS_1_2)
         .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION")))
         .build().map_err(|e| format!("sig client init: {e}"))?;
     let sig_hex = client.get(&sig_url).send().and_then(|r| r.error_for_status()).and_then(|r| r.text())
-        .map_err(|e| format!("no release-manifest signature ({e}) — refusing update"))?;
+        .map_err(|e| format!("{name}: no signature ({e}) — refusing"))?;
     let sig: [u8; 64] = hex::decode(sig_hex.trim()).ok()
         .and_then(|v| v.try_into().ok())
         .ok_or_else(|| "release-manifest signature malformed (want 128-hex ed25519)".to_string())?;
-    if sigil_oauth::verify_sig(&pk, manifest_body.as_bytes(), &sig) {
+    if sigil_oauth::verify_sig(&pk, body.as_bytes(), &sig) {
         Ok(())
     } else {
-        Err("MANIFEST SIGNATURE INVALID — refusing update (possible compromised release server)".into())
+        // Keep the literal "MANIFEST SIGNATURE INVALID" — self_update.rs + main.rs branch on it.
+        Err(format!("MANIFEST SIGNATURE INVALID ({name}) — refusing (possible compromised release server)"))
     }
+}
+
+/// The release base currently selected by the channel failover.
+pub(crate) fn active_base() -> &'static str {
+    let i = ACTIVE_BASE.load(std::sync::atomic::Ordering::Relaxed);
+    CHANNEL_BASES[i.min(CHANNEL_BASES.len().saturating_sub(1))]
+}
+
+/// Fetch `<base>/<name>` + its detached `.sig`, verify with the pinned release key, return
+/// the body. The [A]I + skills manifests go through here. Fail-closed: no body without a
+/// valid signature, ever.
+pub(crate) fn fetch_signed_text(base: &str, name: &str) -> Result<String, String> {
+    let bust = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs()).unwrap_or(0);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(12))
+        .min_tls_version(reqwest::tls::Version::TLS_1_2)
+        .user_agent(concat!("sigil-top/", env!("CARGO_PKG_VERSION")))
+        .build().map_err(|e| format!("client init: {e}"))?;
+    let body = client.get(format!("{base}/{name}?t={bust}")).send()
+        .and_then(|r| r.error_for_status()).and_then(|r| r.text())
+        .map_err(|e| format!("{name}: {e}"))?;
+    verify_signed_body(base, name, &body)?;
+    Ok(body)
 }
 
 /// Fetch the live release manifest (short timeout — runs on the UI thread). `None`

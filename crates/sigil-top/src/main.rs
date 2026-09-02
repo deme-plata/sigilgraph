@@ -38,6 +38,8 @@ mod mining_ui;  // LANE-U: mining tab + hero renderers
 use mining_ui::*;
 mod sync_ui;    // LANE-U: sync hero + sync-log tab renderers
 mod flux_moe;   // on-device AI brain (local ollama) for the [A]I tab
+mod ai_setup;   // [A]I auto-setup: install/start ollama + pull the model, from a flux-SIGNED manifest
+mod skills;     // flux-signed skill packs (text-only) for flux-moe
 use sync_ui::*;
 mod tabs_ui;    // LANE-U: draw_ui dispatcher + tab/card/footer renderers
 use tabs_ui::*;
@@ -224,15 +226,28 @@ const LATEST: &str = VERSION; // ship cadence, not the 3-part Cargo version
 /// The flux release channel for the lightweight node: `<product>-latest.json` in the
 /// q-flux downloads dir — the SAME manifest `flux_release_check` reads. Fetched at
 /// startup (throttled) and on `[U]`, so the running binary discovers new releases live.
-const UPDATE_MANIFEST: &str = "https://sigilgraph.fluxapp.xyz/downloads/sigil-top-latest.json";
-/// v7.0.26: release-channel BASES, tried in order. The plain-HTTP :8099 mirror is the
-/// escape hatch for operator networks that filter the app's HTTPS (:443) — mining
-/// submits prove :8099 reachable from every rig ("connect failed" on the updater while
-/// GPU shares flowed). manifest+sig+binaries are identical mirrors on all three.
+const UPDATE_MANIFEST: &str = "https://sigilgraph.org/downloads/sigil-top-latest.json";
+/// v8.0.0: release-channel BASES, tried in order — `sigilgraph.org` FIRST.
+///
+/// Two corrections land here, both measured 2026-09-02 rather than assumed:
+///
+/// 1. **`sigilgraph.org` is the canonical SIGIL home** (operator ruling 2026-08-26) and
+///    was missing from this list entirely, so every manifest the client trusts — the
+///    updater's, the [A]I tab's, the skills pack's — was fetched from `fluxapp.xyz`, a
+///    domain whose `/api` + `/v1` still point at the retired `sigil-rpcd`. The release
+///    channel worked there by accident, not by design.
+/// 2. **`:8099` is DEAD, not an escape hatch.** The doc comment this replaces described
+///    it as the fallback for networks filtering :443. That stopped being true when
+///    `sigil-rpcd` was stopped and disabled (2026-08-17, re-confirmed 2026-08-31);
+///    `curl` to it now returns HTTP 000, so it is a guaranteed-wasted retry on every
+///    failover — worse than absent, because it burns the timeout budget before the
+///    client reaches a base that answers.
+///
+/// The remaining two are verified live mirrors (identical manifest + sig bytes).
 const CHANNEL_BASES: &[&str] = &[
+    "https://sigilgraph.org/downloads",
     "https://sigilgraph.fluxapp.xyz/downloads",
     "https://quillon.xyz/downloads",
-    "http://sigilgraph.quillon.xyz:8099/downloads",
 ];
 /// Which base the last successful manifest fetch used — binary downloads follow it.
 static ACTIVE_BASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -1681,6 +1696,11 @@ struct App {
     ai_msgs: Vec<(String, String)>,             // (role, content) chat history
     ai_thinking: bool,                          // a reply is in flight
     ai_rx: Option<mpsc::Receiver<String>>,      // model reply lands here (off-UI-thread)
+    ai_setup_rx: Option<mpsc::Receiver<ai_setup::SetupEvent>>, // auto-setup progress (install/pull), off-UI-thread
+    ai_setup_running: bool,                     // an auto-setup is in flight (F5 is a no-op meanwhile)
+    ai_skills: Vec<skills::LoadedSkill>,        // flux-signed skills loaded this session (text only)
+    ai_skills_rx: Option<mpsc::Receiver<Result<(Vec<skills::LoadedSkill>, Vec<String>), String>>>,
+    ai_skills_note: String,                     // status-line summary of the last skills load
 
     // === CATHEDRAL DAGKNIGHT (wired 2026-06-17) ===
     /// Live vaulted DagKnight view. Ingested from tips/blocks after spine checks.
@@ -1766,6 +1786,8 @@ impl App {
               } else { None },
               ai_detected: false, ai_models: Vec::new(), ai_model: None,
               ai_input: String::new(), ai_msgs: Vec::new(), ai_thinking: false, ai_rx: None,
+              ai_setup_rx: None, ai_setup_running: false, ai_skills: Vec::new(), ai_skills_rx: None,
+              ai_skills_note: String::new(),
               splash_frame: 0,
               // LANE-B v0.50: rune animation — first play deferred a full interval
               // (no flash on launch; the post-update splash already covers just-updated).
@@ -2690,6 +2712,8 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                             // global shortcuts so 'q'/Esc/digits type into the chat instead of
                             // quitting/switching. Tab still cycles out (falls through below).
                             KeyCode::Enter if app.tab == Tab::Ai => { ai_submit(&mut app); }
+                            KeyCode::F(5) if app.tab == Tab::Ai => { ai_setup_start(&mut app); }   // re-run auto-setup
+                            KeyCode::F(6) if app.tab == Tab::Ai => { ai_skills_start(&mut app); }  // reload signed skills
                             KeyCode::Backspace if app.tab == Tab::Ai => { app.ai_input.pop(); }
                             KeyCode::Esc if app.tab == Tab::Ai => { app.tab = Tab::Node; }
                             KeyCode::Char(c) if app.tab == Tab::Ai => { app.ai_input.push(c); }
@@ -2707,6 +2731,10 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                                     app.ai_models = crate::flux_moe::list_models();
                                     app.ai_model = app.ai_models.first().cloned();
                                     app.ai_detected = true;
+                                    // OUT-OF-THE-BOX: no model → install/start ollama + pull the
+                                    // signed manifest's model, off-thread, progress in the transcript.
+                                    if app.ai_model.is_none() { ai_setup_start(&mut app); }
+                                    ai_skills_start(&mut app); // flux-signed skills, off-thread
                                 }
                             }
                             // 2026-09-02: a second `Char('w')` arm used to sit here, added ahead
@@ -3159,6 +3187,51 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                     app.ai_rx = None;
                 }
             }
+            // [A]I auto-setup progress (install / pull) — drain everything pending this frame
+            if let Some(rx) = app.ai_setup_rx.as_ref() {
+                let mut finished = false;
+                while let Ok(ev) = rx.try_recv() {
+                    match ev {
+                        ai_setup::SetupEvent::Line(l) => app.ai_msgs.push(("assistant".to_string(), l)),
+                        ai_setup::SetupEvent::Done { model } => {
+                            app.ai_models = crate::flux_moe::list_models();
+                            app.ai_model = Some(model.clone());
+                            app.ai_msgs.push(("assistant".to_string(), format!("✓ flux-moe ready on {model} — ask me about mining, the wallet, the Nation, or the node")));
+                            finished = true;
+                        }
+                        ai_setup::SetupEvent::Fail(e) => {
+                            app.ai_msgs.push(("assistant".to_string(), format!("⚠ auto-setup stopped: {e}\n  press F5 to retry")));
+                            finished = true;
+                        }
+                    }
+                }
+                if finished { app.ai_setup_rx = None; app.ai_setup_running = false; }
+            }
+            // [A]I flux-signed skills — load result (rejections are shown, never silently dropped)
+            if let Some(rx) = app.ai_skills_rx.as_ref() {
+                if let Ok(res) = rx.try_recv() {
+                    match res {
+                        Ok((ok, rejected)) => {
+                            let names: Vec<String> = ok.iter().map(|s| s.name.clone()).collect();
+                            app.ai_skills = ok;
+                            app.ai_skills_note = if rejected.is_empty() {
+                                format!("{} flux-signed", app.ai_skills.len())
+                            } else {
+                                format!("{} loaded · {} rejected", app.ai_skills.len(), rejected.len())
+                            };
+                            if !names.is_empty() {
+                                app.ai_msgs.push(("assistant".to_string(), format!("🔏 skills loaded (flux-signed, blake3-verified): {}", names.join(", "))));
+                            }
+                            for r in rejected { app.ai_msgs.push(("assistant".to_string(), format!("⚠ skill rejected — {r}"))); }
+                        }
+                        Err(e) => {
+                            app.ai_skills_note = "skills unavailable".into();
+                            app.ai_msgs.push(("assistant".to_string(), format!("⚠ skills: {e}")));
+                        }
+                    }
+                    app.ai_skills_rx = None;
+                }
+            }
             // v0.7.0: Embedded serve is a thread — no health check needed
             // background self-update result (if any) → toast
             if let Some(rx) = app.update_rx.as_ref() {
@@ -3380,16 +3453,37 @@ fn ai_submit(app: &mut App) {
         None => { app.ai_msgs.push(("assistant".to_string(), flux_moe::setup_hint().to_string())); return; }
     };
     let history: Vec<(String, String)> = app.ai_msgs[..app.ai_msgs.len().saturating_sub(1)].to_vec();
+    let extra = skills::context_block(&app.ai_skills); // flux-signed skills → system context
     let (tx, rx) = mpsc::channel();
     app.ai_rx = Some(rx);
     app.ai_thinking = true;
     std::thread::spawn(move || {
-        let reply = match flux_moe::chat(&model, &history, &msg) {
+        let reply = match flux_moe::chat(&model, &history, &msg, &extra) {
             Ok(r) => r,
             Err(e) => format!("⚠ {e}"),
         };
         let _ = tx.send(reply);
     });
+}
+
+/// [A]I OUT-OF-THE-BOX: install/start ollama + pull the flux-signed manifest's model,
+/// on a background thread; progress streams into the transcript via `ai_setup_rx`.
+fn ai_setup_start(app: &mut App) {
+    if app.ai_setup_running { return; }
+    let (tx, rx) = mpsc::channel();
+    app.ai_setup_rx = Some(rx);
+    app.ai_setup_running = true;
+    let base = release::active_base().to_string();
+    std::thread::spawn(move || ai_setup::bootstrap(base, tx));
+}
+
+/// (Re)load flux-signed skills on a background thread; result lands on `ai_skills_rx`.
+fn ai_skills_start(app: &mut App) {
+    let (tx, rx) = mpsc::channel();
+    app.ai_skills_rx = Some(rx);
+    app.ai_skills_note = "loading…".into();
+    let base = release::active_base().to_string();
+    std::thread::spawn(move || { let _ = tx.send(skills::load(&base)); });
 }
 
 // Swarm coordination view (data model + loader for the Swarm/Results tabs)

@@ -78,6 +78,52 @@ timed_check() {  # crate, shape
   [ $rc -eq 0 ] && echo $((SECONDS-t0)) || echo FAIL
 }
 
+# ── Selecting WHAT to warm ───────────────────────────────────────────────────
+#
+# A fixed hot-list is a decent prior, but the crates that matter *right now* are the
+# ones you just touched plus everything that depends on them — those are exactly the
+# units the next build must redo. `--since <ref>` derives that set from git instead of
+# guessing, so the warm-up matches the work actually queued up.
+#
+# Reverse dependencies are resolved from the workspace's own Cargo.toml files (a crate
+# that path-depends on a changed crate must itself recompile). One level is enough in
+# practice here: sigil's graph is wide and shallow, and each extra level costs real
+# minutes on a box shared with a live node.
+changed_crates() {  # ref -> crate names, one per line
+  local ref="$1"
+  git diff --name-only "$ref" -- crates/ 2>/dev/null | cut -d/ -f2 | sort -u
+}
+
+reverse_deps() {  # crate names on stdin -> those crates PLUS their direct dependents
+  local seeds; seeds=$(cat)
+  [ -z "$seeds" ] && return 0
+  {
+    echo "$seeds"
+    for m in crates/*/Cargo.toml; do
+      local me; me=$(basename "$(dirname "$m")")
+      while read -r seed; do
+        [ -z "$seed" ] && continue
+        # a path dependency on the changed crate == this crate rebuilds too
+        grep -qE "^[[:space:]]*${seed}[[:space:]]*=.*path[[:space:]]*=" "$m" && { echo "$me"; break; }
+      done <<< "$seeds"
+    done
+  } | sort -u
+}
+
+if [ "${1:-}" = "--since" ]; then
+  REF="${2:-HEAD~1}"
+  mapfile -t SEEDS < <(changed_crates "$REF")
+  if [ "${#SEEDS[@]}" -eq 0 ] || [ -z "${SEEDS[0]}" ]; then
+    echo "▸ no crate changed since $REF — nothing to warm."
+    exit 0
+  fi
+  mapfile -t SELECTED < <(printf '%s\n' "${SEEDS[@]}" | reverse_deps)
+  echo "▸ changed since $REF: ${SEEDS[*]}"
+  echo "  + dependents        -> ${SELECTED[*]}"
+  echo
+  set -- "${SELECTED[@]}"
+fi
+
 if [ "${1:-}" = "--measure" ]; then
   C="${2:-sigil-fees}"
   load=$(cut -d' ' -f1 /proc/loadavg)

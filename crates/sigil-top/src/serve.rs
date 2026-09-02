@@ -454,6 +454,70 @@ const ONE_ACTION_SEND_JS: &str = r##"
     rc.style.display='flex';
   }
 
+  /* ── THE SIGNED ACCEPTANCE RECEIPT, AND AN HONEST CLOCK ────────────────────
+   *
+   * The node returns a `receipt` object the instant it authenticates and queues a
+   * payment — signed in ~43us with the SAME producer key the chain records in every
+   * block header, so a third party can verify it against a key they read off the
+   * chain rather than taking our word for it.
+   *
+   * What it is NOT is a settlement proof, and that distinction is the whole point of
+   * showing it. Settlement is `depth_blocks` (512) deep — about 80 seconds — and that
+   * depth IS the security: it is the number of blocks that must pile on before a reorg
+   * becomes implausible. No proof system shortens it, because it is not a computation
+   * waiting to be sped up.
+   *
+   * A UI that shows only "sent" for 80 seconds is lying by omission in the direction
+   * that costs money: a user reads it as final, ships goods, and a dropped payment
+   * looks identical to a settled one. So we show BOTH facts at once — the id is real
+   * NOW, the settlement is not yet — and run the clock down so the wait is visible
+   * rather than a mystery. The receipt's own `finality` string is displayed verbatim;
+   * it is a signed field, so weakening the wording here could not survive verification.
+   */
+  function renderReceipt(rcpt){
+    if(!rcpt) return '';
+    var st  = rcpt.settlement || {};
+    var eta = Number(st.eta_seconds_estimate || 0);
+    var id  = 'rcSettle_' + Math.random().toString(36).slice(2);
+    // Count down from the node's own estimate. `eta_is_estimate` is set by the node,
+    // so the "~" is its claim, not ours — an exact-looking countdown on an estimated
+    // quantity is its own small lie.
+    setTimeout(function(){
+      var left = eta, node = document.getElementById(id);
+      if(!node) return;
+      var t = setInterval(function(){
+        left -= 1;
+        var n = document.getElementById(id);
+        if(!n){ clearInterval(t); return; }
+        if(left <= 0){
+          clearInterval(t);
+          n.textContent = 'earliest settlement reached — confirm on chain before treating as final';
+          n.style.color = '#6df3ff';
+        } else {
+          n.textContent = '~' + left + 's to earliest settlement (' + (st.depth_blocks||512) + ' blocks)';
+        }
+      }, 1000);
+    }, 0);
+    var anchored = rcpt.key_provenance && rcpt.key_provenance.indexOf('ephemeral') === -1;
+    return ''
+      + '<div style="margin-top:10px;border:1px solid rgba(109,243,255,.28);border-radius:10px;'
+      +      'padding:10px 12px;background:rgba(109,243,255,.05)">'
+      +   '<div style="font-family:\'JetBrains Mono\';font-size:10px;letter-spacing:1px;'
+      +        'text-transform:uppercase;color:#6df3ff;margin-bottom:6px">signed acceptance receipt</div>'
+      +   '<div style="font-family:\'JetBrains Mono\';font-size:11px;color:#fbbf24;margin-bottom:4px">'
+      +     esc(rcpt.finality || 'accepted, not settled') + '</div>'
+      +   '<div id="' + id + '" style="font-family:\'JetBrains Mono\';font-size:11px;color:#9fb4c7">'
+      +     '~' + eta + 's to earliest settlement (' + (st.depth_blocks||512) + ' blocks)</div>'
+      +   '<div style="font-family:\'JetBrains Mono\';font-size:9.5px;color:#5a93a8;margin-top:6px">'
+      +     (anchored ? 'signed by this node\\'s block-producer key — verifiable against any block it minted'
+                      : 'signed by an ephemeral process key — NOT externally anchorable')
+      +   '</div>'
+      + '</div>';
+  }
+
+  function esc(x){ return String(x==null?'':x).replace(/[&<>"]/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+
   async function post(path, payload){
     var r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'},
                               body: JSON.stringify(payload)});
@@ -512,7 +576,7 @@ const ONE_ACTION_SEND_JS: &str = r##"
       step(2,'done','paid');
       window.__lastTxid = j.txid || '';
       receipt('paid', fmt(amountRaw),
-        row('to', short(addr)) + row('payment txid', short(j.txid), '#c0a8fa'),
+        row('to', short(addr)) + row('payment txid', short(j.txid), '#c0a8fa') + renderReceipt(j.receipt),
         'Paid from a note that was already in your private balance.');
       if(window.refresh) setTimeout(window.refresh, 600);
       done();
@@ -534,7 +598,8 @@ const ONE_ACTION_SEND_JS: &str = r##"
     receipt('pending', fmt(amountRaw),
       row('to', short(addr))
       + (j.shield_txid ? row('shield txid (on-chain now)', short(j.shield_txid), '#00e0c6') : '')
-      + row('payment txid', 'waiting for the note to land…', '#6df3ff'),
+      + row('payment txid', 'waiting for the note to land…', '#6df3ff')
+      + renderReceipt(j.receipt),
       'Your funds are in the private pool. The payment is submitted as soon as that note '
       + 'appears on the DAG — this window updates itself.');
 

@@ -70,6 +70,9 @@ pub mod dagknight;
 pub mod nation;
 /// PV-1 private transfers: shield / shielded-send / unshield.
 pub mod shielded;
+/// Signed ACCEPTANCE receipts returned synchronously by the submit paths.
+/// Acceptance is not settlement — read that module's docs before using it.
+pub mod receipt;
 use dagknight::DagSnapshotBridge;
 
 /// Shared braid state the API reads/writes. `state` is published by the producer
@@ -392,6 +395,20 @@ pub async fn tx_status(
     })
 }
 
+/// The node's own view of its tip height, for the acceptance receipts the submit
+/// handlers return.
+///
+/// `mining.tip()` is the frontier the producer publishes each time it advances
+/// (`MiningBridge::publish_tip`) — the same height `/v1/mining/challenge`
+/// serves, so it is the node's live tip and not a stale cache. `None` on a node
+/// whose producer has never published one (a pure follower); the receipt then
+/// omits `earliest_settlement_height` rather than inventing a number, which is
+/// the honest answer to "when can this settle" from a node that does not know
+/// where the tip is.
+fn observed_tip_height(st: &AppState) -> Option<u64> {
+    st.mining.tip().map(|t| t.height)
+}
+
 /// The wallet-friendly signed-send endpoint. Deliberately returns a FLAT
 /// JSON body (`{ok,txid,height,ts_ms}` / `{ok,error}`), not the generic
 /// `ApiResponse<T>` envelope (whose payload nests under `.data`) — the
@@ -423,13 +440,21 @@ pub async fn send_handler(
             "use_instead": ["/v1/shield", "/v1/shielded_send", "/v1/unshield"],
         }));
     }
-    match st.send.submit(&req.from, &req.to, req.amount, &req.token, &req.sig, req.req_nonce) {
-        Ok(tx_hash) => Json(serde_json::json!({
+    match st.send.submit_with_receipt(
+        &req.from, &req.to, req.amount, &req.token, &req.sig, req.req_nonce,
+        observed_tip_height(&st),
+    ) {
+        Ok((tx_hash, receipt)) => Json(serde_json::json!({
             "ok": true,
             "txid": hex::encode(tx_hash),
             "height": null,
             "ts_ms": now_ms(),
             "note": "queued for the next braid block",
+            // ADDITIVE: existing clients read `txid`/`height`/`ts_ms` and are
+            // unaffected. `receipt` is this node's SIGNED statement that it
+            // accepted the request — see `crate::receipt`. It is not, and can
+            // never be, evidence of settlement.
+            "receipt": receipt,
         })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
     }
@@ -452,6 +477,13 @@ pub async fn shielded_register_handler(
         Ok(h) => Json(serde_json::json!({
             "ok": true, "txid": hex::encode(h), "ts_ms": now_ms(),
             "note": "queued; once it lands, block rewards for this wallet mint as shielded notes",
+            "receipt": receipt::mint(receipt::AcceptanceFacts {
+                kind: receipt::SubmitKind::ShieldedRegister,
+                tx_id: h,
+                wallet: hex32(&req.wallet),
+                req_nonce: Some(req.req_nonce),
+                accepted_at_height: observed_tip_height(&st),
+            }),
         })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
     }
@@ -470,6 +502,13 @@ pub async fn shield_handler(
         Ok(h) => Json(serde_json::json!({
             "ok": true, "txid": hex::encode(h), "ts_ms": now_ms(),
             "note": "queued for the next braid block",
+            "receipt": receipt::mint(receipt::AcceptanceFacts {
+                kind: receipt::SubmitKind::Shield,
+                tx_id: h,
+                wallet: hex32(&req.from),
+                req_nonce: Some(req.req_nonce),
+                accepted_at_height: observed_tip_height(&st),
+            }),
         })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
     }
@@ -492,6 +531,16 @@ pub async fn shielded_send_handler(
         Ok(h) => Json(serde_json::json!({
             "ok": true, "txid": hex::encode(h), "ts_ms": now_ms(),
             "note": "queued for the next braid block",
+            // No wallet and no nonce: a shielded send is authorized by its proof,
+            // not by an address. The receipt says so by omitting both — and the
+            // absence is inside the signed bytes, so it cannot be filled in later.
+            "receipt": receipt::mint(receipt::AcceptanceFacts {
+                kind: receipt::SubmitKind::ShieldedSend,
+                tx_id: h,
+                wallet: None,
+                req_nonce: None,
+                accepted_at_height: observed_tip_height(&st),
+            }),
         })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
     }
@@ -513,6 +562,17 @@ pub async fn unshield_handler(
         Ok(h) => Json(serde_json::json!({
             "ok": true, "txid": hex::encode(h), "ts_ms": now_ms(),
             "note": "queued for the next braid block",
+            // `to` is the PAYEE, not the submitter — an unshield is proof-
+            // authorized like a shielded send, so `wallet` (which means "who
+            // submitted this") stays None rather than being filled with an
+            // address that authorized nothing.
+            "receipt": receipt::mint(receipt::AcceptanceFacts {
+                kind: receipt::SubmitKind::Unshield,
+                tx_id: h,
+                wallet: None,
+                req_nonce: None,
+                accepted_at_height: observed_tip_height(&st),
+            }),
         })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
     }

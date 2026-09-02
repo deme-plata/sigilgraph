@@ -48,6 +48,8 @@ use std::time::{Duration, Instant};
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sigil_header::{PubKeyBytes, SigScheme, SignatureBytes};
+
+use crate::receipt::{self, AcceptanceFacts, AcceptanceReceipt, SubmitKind};
 use sigil_state::{WalletId, NATIVE};
 use sigil_tx::{SigilTx, SignedTx};
 
@@ -299,6 +301,58 @@ impl SendBridge {
                 guard.remove(&k);
             }
         }
+    }
+
+    /// [`SendBridge::submit`], plus a SIGNED ACCEPTANCE RECEIPT for what was
+    /// accepted.
+    ///
+    /// This is the shape a caller should prefer: a bare `[u8; 32]` is only an
+    /// *identifier*, and an identifier is not evidence. Anything — a broken
+    /// proxy, a truncated response, a hostile intermediary — can hand back 32
+    /// plausible bytes. A receipt is a statement, signed by this node, that it
+    /// authenticated this request and put it in the pool the producer actually
+    /// drains.
+    ///
+    /// **The receipt attests acceptance and nothing else.** It is minted at the
+    /// same instant `submit` returns, which is *before* any block exists, before
+    /// the sender's balance has been checked (that happens in `apply_tx` at mint
+    /// time), and roughly 512 blocks — about 91 s at the measured 5.66 blk/s —
+    /// before settlement is even possible. The receipt says so, in a signed
+    /// field, in the settlement block, and in its own type name. See
+    /// [`crate::receipt`].
+    ///
+    /// `accepted_at_height` is the node's observed tip (handlers pass
+    /// `st.mining.tip().map(|t| t.height)`); `None` on a node whose producer has
+    /// never published a frontier, in which case the receipt honestly omits the
+    /// earliest-settlement height instead of guessing one.
+    ///
+    /// Signing happens strictly AFTER `submit` returns, so the pending-pool mutex
+    /// is already released — the Ed25519 signature (tens of microseconds, no I/O)
+    /// never sits inside a lock another request could be waiting on.
+    pub fn submit_with_receipt(
+        &self,
+        from_hex: &str,
+        to_hex: &str,
+        amount: u128,
+        token: &str,
+        sig_hex: &str,
+        req_nonce: u64,
+        accepted_at_height: Option<u64>,
+    ) -> Result<([u8; 32], AcceptanceReceipt), SendError> {
+        let tx_hash = self.submit(from_hex, to_hex, amount, token, sig_hex, req_nonce)?;
+        // `submit` already proved this parses (it is the wallet whose signature
+        // was verified), so the `None` arm is unreachable in practice; encode
+        // that as "omit the field" rather than an unwrap that could panic the
+        // API thread if the invariant ever changes.
+        let wallet = hex32(from_hex);
+        let receipt = receipt::mint(AcceptanceFacts {
+            kind: SubmitKind::Send,
+            tx_id: tx_hash,
+            wallet,
+            req_nonce: Some(req_nonce),
+            accepted_at_height,
+        });
+        Ok((tx_hash, receipt))
     }
 
     pub fn pending_len(&self) -> usize {
@@ -628,6 +682,80 @@ mod tests {
             bridge.submit(&from_hex, &to_hex, 1, "USDX", &sig, 1).unwrap_err(),
             SendError::UnsupportedToken
         );
+    }
+
+    /// A successful submit hands back a receipt that verifies against this
+    /// node's key and describes exactly what was accepted.
+    #[test]
+    fn a_successful_submit_returns_a_verifiable_acceptance_receipt() {
+        use crate::receipt::verify_against;
+        let (sk, from) = signer();
+        let from_hex = hex::encode(from);
+        let to_hex = "22".repeat(32);
+        let sig = sign_send(&sk, &from_hex, &to_hex, 1_000, 7);
+
+        let bridge = SendBridge::new();
+        let (hash, r) = bridge
+            .submit_with_receipt(&from_hex, &to_hex, 1_000, "SIGIL", &sig, 7, Some(2_183_132))
+            .unwrap();
+
+        let node_pk = receipt::global().public_key();
+        let v = verify_against(&r, &node_pk).expect("the node's own receipt must verify");
+        assert_eq!(v.tx_id, hash, "the receipt must attest THIS tx id");
+        assert_eq!(v.wallet, Some(from), "the receipt names the submitting wallet");
+        assert_eq!(v.req_nonce, Some(7));
+        assert_eq!(v.kind, SubmitKind::Send);
+        assert_eq!(v.earliest_settlement_height, Some(2_183_132 + 512));
+
+        // And it is still only acceptance — the whole point.
+        assert!(!r.is_settlement_proof());
+        assert!(!v.is_settled());
+        assert_eq!(r.finality, "accepted, not settled");
+    }
+
+    /// A REJECTED submit must produce no receipt at all. A signed "we took your
+    /// money" for a request that was refused would be the worst possible artifact
+    /// this feature could emit.
+    #[test]
+    fn a_rejected_submit_yields_no_receipt() {
+        let (_sk, from) = signer();
+        let from_hex = hex::encode(from);
+        let to_hex = "22".repeat(32);
+        let bridge = SendBridge::new();
+        let err = bridge
+            .submit_with_receipt(&from_hex, &to_hex, 1_000, "SIGIL", &"00".repeat(64), 1, Some(5))
+            .unwrap_err();
+        assert_eq!(err, SendError::SignatureInvalid);
+        assert_eq!(bridge.pending_len(), 0);
+    }
+
+    /// The receipt path must not regress the duplicate-payment fix: two identical
+    /// payments with distinct nonces get two distinct receipts, and both stay
+    /// pending.
+    #[test]
+    fn two_identical_payments_get_two_distinct_receipts() {
+        let (sk, from) = signer();
+        let from_hex = hex::encode(from);
+        let to_hex = "77".repeat(32);
+        let bridge = SendBridge::new();
+        let sig1 = sign_send(&sk, &from_hex, &to_hex, 10, 1);
+        let sig2 = sign_send(&sk, &from_hex, &to_hex, 10, 2);
+        let (h1, r1) =
+            bridge.submit_with_receipt(&from_hex, &to_hex, 10, "SIGIL", &sig1, 1, None).unwrap();
+        let (h2, r2) =
+            bridge.submit_with_receipt(&from_hex, &to_hex, 10, "SIGIL", &sig2, 2, None).unwrap();
+
+        assert_eq!(h1, h2, "identical intents share a tx hash by construction");
+        assert_ne!(r1.sig, r2.sig, "the two payments must have distinguishable receipts");
+        assert_eq!(r1.req_nonce, Some(1));
+        assert_eq!(r2.req_nonce, Some(2));
+        assert_eq!(bridge.pending_len(), 2, "both payments must still be pending");
+
+        // With no observable tip, the receipt omits the settlement height rather
+        // than inventing one.
+        assert_eq!(r1.accepted_at_height, None);
+        assert_eq!(r1.settlement.earliest_settlement_height, None);
+        assert_eq!(r1.settlement.depth_blocks, 512, "the depth is known even when the tip is not");
     }
 
     #[test]

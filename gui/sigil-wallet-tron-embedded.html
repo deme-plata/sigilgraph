@@ -366,6 +366,52 @@ body.view-desktop .desktop{display:flex}
 
 <div class="caption">SIGIL Wallet · <b>cyan grid</b> · <b>⤢ expand → fullscreen</b></div>
 <script>
+/* ── SIGIL MONEY SCALE — ONE definition, used by every display AND every amount box ─────
+   The chain is 10 decimals: 1 SIGIL = 10^10 base units, and the base unit is a "glyph"
+   (sigil_state::SIGIL_DECIMALS = 10; MAX_SUPPLY = 21_000_000 * 10^10). Every SIGIL figure
+   this wallet receives from the node — /v1/balance, shielded note values, bridge lock
+   amounts — is ALREADY in glyphs, so the only conversion is at the two edges: glyphs→text
+   to show a number, and text→glyphs to read one out of an input.
+
+   Why one constant and not seventeen literals. Until 2026-09-02 this file scaled by 10^8
+   in ~17 places — the g1 value — so every SIGIL figure it printed was 100x the chain's
+   truth. It went unnoticed because display and entry were wrong TOGETHER: a balance shown
+   as "5.00" and an amount typed as "5" agreed with each other, and only disagreed with the
+   TUI, /v1/balance, the explorer and the bridge. That symmetry is also what made the fix
+   dangerous: converting only the display, or only the entry, would have let someone type
+   "5" under a balance reading "5.00" and move 100x what they meant. Deriving both halves
+   from SIGIL_DECIMALS below is the actual fix — changing the number can no longer move one
+   half without the other. Do not reintroduce a bare 1e8/1e10 anywhere below. */
+var SIGIL_DECIMALS  = 10n;
+var SIGIL_UNITS     = 10n ** SIGIL_DECIMALS;   // 10000000000n — glyphs in one SIGIL
+var SIGIL_DP        = Number(SIGIL_DECIMALS);  // 10 — decimal places for padStart/toFixed
+var SIGIL_UNITS_N   = Number(SIGIL_UNITS);     // 1e10 — float divisor, DISPLAY maths only
+var SIGIL_ZEROS     = '0'.repeat(SIGIL_DP);    // right-pad for a typed fractional part
+var SIGIL_AMOUNT_RE = new RegExp('^\\d+(\\.\\d{1,' + SIGIL_DP + '})?$');
+
+/* typed text -> glyphs (BigInt), or null when the text is not a valid amount. */
+function sigilToGlyphs(str){
+  var s = String(str||'').trim();
+  if(!SIGIL_AMOUNT_RE.test(s)) return null;
+  var p = s.split('.');
+  return BigInt(p[0]||'0')*SIGIL_UNITS + BigInt(((p[1]||'')+SIGIL_ZEROS).slice(0,SIGIL_DP));
+}
+/* glyphs -> plain decimal text, full precision, no thousands separators. Use this (never
+   Number(raw)/SIGIL_UNITS_N) whenever the result goes back INTO an input box: it is the
+   exact inverse of sigilToGlyphs, so a MAX button round-trips to the same glyph count,
+   while the float path silently loses digits past ~9e15. */
+function sigilFromGlyphs(raw){
+  var b; try{ b = BigInt(raw||0); }catch(e){ return '0.'+SIGIL_ZEROS; }
+  var neg = b < 0n; if(neg) b = -b;
+  return (neg?'-':'') + (b/SIGIL_UNITS).toString() + '.'
+       + (b%SIGIL_UNITS).toString().padStart(SIGIL_DP,'0');
+}
+window.SIGIL_DECIMALS=SIGIL_DECIMALS; window.SIGIL_UNITS=SIGIL_UNITS; window.SIGIL_DP=SIGIL_DP;
+window.SIGIL_UNITS_N=SIGIL_UNITS_N; window.SIGIL_ZEROS=SIGIL_ZEROS;
+window.SIGIL_AMOUNT_RE=SIGIL_AMOUNT_RE;
+window.sigilToGlyphs=sigilToGlyphs; window.sigilFromGlyphs=sigilFromGlyphs;
+</script>
+<script>
   function setView(v){document.body.classList.toggle('view-desktop',v==='desktop');try{localStorage.setItem('sigil-view',v)}catch(e){}render();}
   // 2026-08-23: pick a view for a visitor who's never chosen one — an explicit
   // ?desktop/?phone param or a saved choice (once you've used the ⤢ toggle)
@@ -405,11 +451,11 @@ body.view-desktop .desktop{display:flex}
   // routes — use this context-aware prefix.
   const API_BASE = /(^|\.)sigilgraph\.org$/.test(location.hostname) ? '/v1' : '/api/v1';
   const NODE='';
-  // v0.58: balance is RAW base units (SIGIL_DECIMALS=8 → 10^8 per whole coin). Keep it
-  // as a BigInt-safe string so 8-decimal precision never rounds (Number loses precision
+  // v0.58: balance is RAW base units (SIGIL_DECIMALS=10 → 10^10 glyphs per whole coin). Keep it
+  // as a BigInt-safe string so 10-decimal precision never rounds (Number loses precision
   // past ~9e15). SIGIL_BAL (whole-coin float) is derived for the $-value / pill only.
   let SIGIL_RAW='0';
-  let SIGIL_BAL=0;            // = Number(SIGIL_RAW)/1e8, for fiat estimate + pill
+  let SIGIL_BAL=0;            // = Number(SIGIL_RAW)/SIGIL_UNITS_N, for fiat estimate + pill
   // LANE-N: mined coins land in the MINING wallet (SIGIL_MINE_WALLET / hostname-hash),
   // NOT necessarily the session/login wallet the page derived. Resolve it from the node
   // so [W] shows the balance the Mining tab shows (the real "balance actually works" fix).
@@ -450,9 +496,9 @@ body.view-desktop .desktop{display:flex}
   // exactly 50.00000000 and the operator sees the FULL decimal climb, no rounding.
   function fmtAmt(raw){
     var r; try{ r=BigInt(raw||0); }catch(e){ r=0n; }
-    var whole=r/100000000n, frac=r%100000000n; if(frac<0n)frac=-frac;
+    var whole=r/SIGIL_UNITS, frac=r%SIGIL_UNITS; if(frac<0n)frac=-frac;
     var ws=whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',');
-    var fs=frac.toString().padStart(8,'0');
+    var fs=frac.toString().padStart(SIGIL_DP,'0');
     return ws+'<small>.'+fs+' SIGIL</small>';
   }
   function assetRows(){
@@ -470,7 +516,7 @@ body.view-desktop .desktop{display:flex}
       if(MINE_ADDR && MINE_ADDR!==ADDR){
         // LANE-Q(a): mining credits a DIFFERENT address than this session wallet — show BOTH, and
         // offer a one-click to redirect future mining to this wallet, so [W] never silently reads 0.
-        const sBal=Number(BigInt(SESSION_RAW||'0')/100000000n);
+        const sBal=Number(BigInt(SESSION_RAW||'0')/SIGIL_UNITS);
         const mShort=MINE_ADDR.slice(0,8)+'…'+MINE_ADDR.slice(-4);
         sub.innerHTML='⛏ mining <b title="'+MINE_ADDR+'">'+mShort+'</b> '+SIGIL_BAL.toLocaleString('en-US',{maximumFractionDigits:2})+' SIGIL'
           +' · 👤 session <b data-addr style="cursor:pointer" title="click to copy: '+ADDR+'" onclick="copyAddr()">'+SHORT+'</b> '+sBal.toLocaleString('en-US',{maximumFractionDigits:2})
@@ -549,7 +595,7 @@ body.view-desktop .desktop{display:flex}
         if(window.PREV_RAW!=null && BigInt(mb)>BigInt(window.PREV_RAW)) coinFlash(BigInt(mb)-BigInt(window.PREV_RAW));
       }catch(e){}
       window.PREV_RAW=mb;
-      SIGIL_RAW=mb; window.SIGIL_RAW=SIGIL_RAW; SIGIL_BAL=Number(BigInt(SIGIL_RAW)/100000000n);
+      SIGIL_RAW=mb; window.SIGIL_RAW=SIGIL_RAW; SIGIL_BAL=Number(BigInt(SIGIL_RAW)/SIGIL_UNITS);
       try{ if(window.bhSample) window.bhSample(mb); }catch(e){}
     }
     if(MINE_ADDR && MINE_ADDR!==ADDR){ const sb=await fetchBal(ADDR); if(sb!=null) SESSION_RAW=sb; }
@@ -558,7 +604,7 @@ body.view-desktop .desktop{display:flex}
   }
   // LANE-AC: green flash + floating "+X.XX SIGIL ⛏ coinbase" on balance raise.
   function coinFlash(deltaRaw){
-    const txt='+'+(Number(deltaRaw)/1e8).toFixed(2)+' SIGIL ⛏ coinbase';
+    const txt='+'+(Number(deltaRaw)/SIGIL_UNITS_N).toFixed(2)+' SIGIL ⛏ coinbase';
     document.querySelectorAll('#amt,#damt').forEach(el=>{
       el.classList.remove('amt-flash'); void el.offsetWidth; el.classList.add('amt-flash');
       const host=el.closest('.balance,.dhero')||el.parentElement; if(!host) return;
@@ -777,7 +823,7 @@ body.view-desktop .desktop{display:flex}
     let seed; try{ seed=window.sigilDeriveFrom(mn).priv; }catch(e){ el.textContent='—'; return; }
     try{
       const r=await _scanAllEpochsFast(seed, M, S);
-      el.textContent=(Number(r.balance)/1e8).toFixed(8)+' SIGIL';
+      el.textContent=(Number(r.balance)/SIGIL_UNITS_N).toFixed(SIGIL_DP)+' SIGIL';
       if(nt){
         // Never present a gross figure as a balance: if spends could not be netted,
         // say so. A number that can only go up is wrong in the direction that matters.
@@ -1355,6 +1401,10 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     return hex+'0'.repeat(48);
   }
   var PK_DOMAIN=0x534947494C5F504Bn;
+  // NOT a decimals site: this ladder is written in GLYPHS, so it is unaffected by
+  // SIGIL_DECIMALS. It is a strict SUBSET of sigil_state::shielded::DENOMINATIONS (which
+  // now runs on to 2e17), so every rung it emits is still a legal denomination — large
+  // shields just split into more notes than they need to. Widening it is a separate change.
   // sigil_state::shielded::DENOMINATIONS — the fixed ramp a Shield deposit must decompose
   // into (1,2,5 x 10^k up to 5e15 raw units). Ported verbatim.
   var DENOMINATIONS=[];
@@ -1479,7 +1529,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   function checkStatus(m,c){ var el=document.getElementById('checkAddrMsg'); if(el){ el.textContent=m; el.style.color=c||'#8fb3c2'; } }
   window.sendStatus=sendStatus;
   window.sendMax=function(){
-    try{ var raw=BigInt(window.SIGIL_RAW||'0'); document.getElementById('sendAmt').value=(Number(raw)/1e8).toFixed(8); }catch(e){}
+    try{ var raw=BigInt(window.SIGIL_RAW||'0'); document.getElementById('sendAmt').value=sigilFromGlyphs(raw); }catch(e){}
   };
   // GET /v1/shielded/address — real, live lookup: does this wallet have a published
   // shielded address? (No proof/signature needed — this is a public read.) 2026-08-25:
@@ -1525,7 +1575,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   }
   window.openSend=function(){
     var m=document.getElementById('send-modal'); if(!m) return;
-    try{ var raw=BigInt(window.SIGIL_RAW||'0'); var w=raw/100000000n, f=(raw%100000000n).toString().padStart(8,'0');
+    try{ var raw=BigInt(window.SIGIL_RAW||'0'); var w=raw/SIGIL_UNITS, f=(raw%SIGIL_UNITS).toString().padStart(SIGIL_DP,'0');
       document.getElementById('sendAvail').textContent=w.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')+'.'+f; }catch(e){}
     sendStatus(''); checkStatus(''); abRender(); m.style.display='flex';
     // ── unified flow reset (2026-08-26) — start clean, mirror the balance, and put
@@ -1644,8 +1694,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   }
   window.doShield=async function(){
     var amtStr=(document.getElementById('sendAmt').value||'').trim();
-    if(!/^\d+(\.\d{1,8})?$/.test(amtStr) || Number(amtStr)<=0){ sendStatus('Amount must be > 0 (max 8 decimals).', '#ff8a8a'); return; }
-    var parts=amtStr.split('.'); var base=BigInt(parts[0]||'0')*100000000n + BigInt(((parts[1]||'')+'00000000').slice(0,8));
+    if(!SIGIL_AMOUNT_RE.test(amtStr) || Number(amtStr)<=0){ sendStatus('Amount must be > 0 (max '+SIGIL_DP+' decimals).', '#ff8a8a'); return; }
+    var base=sigilToGlyphs(amtStr);   // text -> glyphs, the one parser (see SIGIL MONEY SCALE)
     var from=(window.MINE_ADDR||window.ADDR||'').toLowerCase();
     if(!/^[0-9a-f]{64}$/.test(from)){ sendStatus('No wallet address loaded.', '#ff8a8a'); return; }
 
@@ -1786,7 +1836,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         sendStatus('\u2717 could not read the shielded pool \u2014 not submitting blind (a re-used note commitment is rejected forever). Try again in a moment.', '#ff8a8a');
         if(btn)btn.disabled=false; return;
       }
-      if(!slot){ failed='no free note index for '+(Number(value)/1e8).toFixed(8)+' SIGIL in the first 4096 — this wallet has deposited that denomination a lot; try a different amount'; break; }
+      if(!slot){ failed='no free note index for '+(Number(value)/SIGIL_UNITS_N).toFixed(SIGIL_DP)+' SIGIL in the first 4096 — this wallet has deposited that denomination a lot; try a different amount'; break; }
       var index=slot.index;
       var cmHex=slot.cmHex;
       // Keep the legacy counter moving so anything still reading it stays ahead
@@ -1796,7 +1846,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       var reqNonce=Date.now()+i; // strictly increasing per part, same nonce space as register
       var sig; try{ sig=window.sigilSign(kp.priv,'shield',[from,value.toString(),cmHex,fee],reqNonce); }
         catch(e){ failed='signing failed on part '+(i+1); break; }
-      sendStatus('Submitting part '+(i+1)+'/'+denomParts.length+' ('+(Number(value)/1e8).toFixed(8)+' SIGIL)…', '#6df3ff');
+      sendStatus('Submitting part '+(i+1)+'/'+denomParts.length+' ('+(Number(value)/SIGIL_UNITS_N).toFixed(SIGIL_DP)+' SIGIL)…', '#6df3ff');
       try{
         var r=await fetch('/v1/shield',{method:'POST',headers:{'Content-Type':'application/json'},
           // amount/fee are u128 on the wire — sigil_state::u128_str requires a JSON STRING,
@@ -1877,7 +1927,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       _rcRow('notes',landedParts.length+' (denomination-split)')+
       _rcRow('time',new Date().toLocaleString());
     landedParts.forEach(function(p,i){
-      rows+=_rcRow('txid '+(i+1),(p.txid?'<span title="'+p.txid+'">'+short(p.txid)+'</span>':'—')+' — '+(Number(p.value)/1e8).toFixed(8)+' SIGIL');
+      rows+=_rcRow('txid '+(i+1),(p.txid?'<span title="'+p.txid+'">'+short(p.txid)+'</span>':'—')+' — '+(Number(p.value)/SIGIL_UNITS_N).toFixed(SIGIL_DP)+' SIGIL');
     });
     if(warn) rows+=_rcRow('note','⚠ '+warn);
     document.getElementById('rcRows').innerHTML=rows;
@@ -1982,7 +2032,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     el.style.boxShadow   = ok===null ? 'none' : (ok ? '0 0 0 3px rgba(0,224,198,.10)' : '0 0 0 3px rgba(255,138,138,.10)');
   }
   window.uniMax=function(){
-    try{ var raw=BigInt(window.SIGIL_RAW||'0'); document.getElementById('uniAmt').value=(Number(raw)/1e8).toFixed(8); }catch(e){}
+    try{ var raw=BigInt(window.SIGIL_RAW||'0'); document.getElementById('uniAmt').value=sigilFromGlyphs(raw); }catch(e){}
   };
   window.uniToggleAdvanced=function(){
     var a=document.getElementById('sendAdvanced'), u=document.getElementById('sendUnified'), l=document.getElementById('uniAdvLink');
@@ -2044,7 +2094,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     var amtStr=(document.getElementById('uniAmt').value||'').trim();
     uniMsg('');
     if(!/^[0-9a-f]{64}$/.test(addr)){ uniMsg('Enter the recipient\'s 64-character SIGIL address first.', '#ff8a8a'); uniGlow('uniAddr',false); return; }
-    if(!/^\d+(\.\d{1,8})?$/.test(amtStr) || Number(amtStr)<=0){ uniMsg('Enter an amount greater than 0 (up to 8 decimals).', '#ff8a8a'); uniGlow('uniAmt',false); return; }
+    if(!SIGIL_AMOUNT_RE.test(amtStr) || Number(amtStr)<=0){ uniMsg('Enter an amount greater than 0 (up to '+SIGIL_DP+' decimals).', '#ff8a8a'); uniGlow('uniAmt',false); return; }
     uniGlow('uniAmt',null);
     if(!window.__privRecipient){
       uniMsg('Checking the recipient…', '#6df3ff');
@@ -2060,7 +2110,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     if(!/^[0-9a-f]{64}$/.test(from)){ uniMsg('No wallet address loaded.', '#ff8a8a'); return; }
 
     var parts=amtStr.split('.');
-    var amountRaw=BigInt(parts[0]||'0')*100000000n + BigInt(((parts[1]||'')+'00000000').slice(0,8));
+    var amountRaw=sigilToGlyphs(amtStr);   // text -> glyphs, the one parser
 
     document.getElementById('uniSteps').style.display='flex';
     uniStep(1,'todo'); uniStep(2,'todo');
@@ -2073,8 +2123,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       if(have < amountRaw){
         var shortfall = amountRaw - have;
         uniStep(1,'busy');
-        uniMsg('Step 1 of 2 — moving '+(Number(shortfall)/1e8).toFixed(8)+' SIGIL into your private balance…', '#6df3ff');
-        var sa=document.getElementById('sendAmt'); if(sa) sa.value=(Number(shortfall)/1e8).toFixed(8);
+        uniMsg('Step 1 of 2 — moving '+(Number(shortfall)/SIGIL_UNITS_N).toFixed(SIGIL_DP)+' SIGIL into your private balance…', '#6df3ff');
+        var sa=document.getElementById('sendAmt'); if(sa) sa.value=sigilFromGlyphs(shortfall);
         // doShield() ends by switching the modal to the receipt pane; suppress that
         // for the intermediate step so the user stays in one continuous flow and
         // only sees a receipt for the payment they actually asked for.
@@ -2390,9 +2440,9 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     var recipient=window.__privRecipient;
     if(!recipient){ privMsg('Check a recipient address first.', '#ff8a8a'); return; }
     var amtStr=(document.getElementById('privAmt').value||'').trim();
-    if(!/^\d+(\.\d{1,8})?$/.test(amtStr) || Number(amtStr)<=0){ privMsg('Amount must be > 0 (max 8 decimals).', '#ff8a8a'); return; }
+    if(!SIGIL_AMOUNT_RE.test(amtStr) || Number(amtStr)<=0){ privMsg('Amount must be > 0 (max '+SIGIL_DP+' decimals).', '#ff8a8a'); return; }
     var parts=amtStr.split('.');
-    var amountRaw=BigInt(parts[0]||'0')*100000000n + BigInt(((parts[1]||'')+'00000000').slice(0,8));
+    var amountRaw=sigilToGlyphs(amtStr);   // text -> glyphs, the one parser
 
     var from=(window.MINE_ADDR||window.ADDR||'').toLowerCase();
     if(!/^[0-9a-f]{64}$/.test(from)){ privMsg('No wallet address loaded.', '#ff8a8a'); return; }
@@ -2463,7 +2513,11 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       if(!lj || !lj.ok){ privMsg('✗ could not load the shielded pool.', '#ff8a8a'); return; }
       var leaves=lj.leaves||[], capacity=lj.capacity;
 
-      var FEE=1000n; // sigil_state::shielded::SHIELDED_FEE — mirrored in wasm_api.rs too
+      var FEE=100000n; // sigil_state::shielded::SHIELDED_FEE — mirrored in sigil-shield/src/wasm_api.rs:45.
+      // NOT a decimals conversion: this is the chain's flat fee in GLYPHS. It read 1000n, which was
+      // the g1 (8 dp) value; at 10 dp the same fee is 100000n. Only used to pick a covering note —
+      // the fee actually submitted is req.fee, built by the prover — so a low value here silently
+      // picked notes the prover then refused. Keep it equal to the Rust constant, never scaled.
       var candidates=[];
       var notes=myNotes(from).filter(function(n){ return !n.spent; });
       for(var i=0;i<notes.length;i++){
@@ -2483,7 +2537,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       }
       var pick=candidates[0];
       var infoEl=document.getElementById('privNoteInfo');
-      if(infoEl) infoEl.textContent='spending a '+(Number(pick.note.value)/1e8).toFixed(8)+' SIGIL note (pool leaf #'+pick.position+')';
+      if(infoEl) infoEl.textContent='spending a '+(Number(pick.note.value)/SIGIL_UNITS_N).toFixed(SIGIL_DP)+' SIGIL note (pool leaf #'+pick.position+')';
 
       privMsg('Building + proving the private spend — real zk-STARK, client-side (~0.5-2s)…', '#6df3ff');
       var reqJson;
@@ -2641,6 +2695,13 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     if(sel) sel.innerHTML=window.__swapPools.map(function(p){return '<option value="'+p.id+'">'+p.sym_a+' / '+p.sym_b+'</option>';}).join('');
     swapRenderTicker();
   }).catch(function(){ swapRenderTicker(); });
+  // ⚠ DELIBERATELY NOT converted to SIGIL_UNITS. This panel is token-generic and
+  // /v1/pools (PoolSummary) carries NO decimals field, so the wallet cannot know a leg's
+  // scale; meanwhile sigil-dex::registry still declares NATIVE as decimals: 8, which
+  // contradicts sigil_state::SIGIL_DECIMALS = 10. Entry (swapRecalc) and display (fmt8)
+  // are matched at 1e8 here, so the panel stays self-consistent, and /v1/pools returns []
+  // on the live chain so nothing is rendered today. Resolving it needs a decimals field on
+  // the wire + a decision in sigil-dex — not a guess in the browser.
   function fmt8(n){ return (Number(n)/1e8).toLocaleString(undefined,{maximumFractionDigits:6}); }
   function ammQuote(reserveIn,reserveOut,amountIn,feeBps){
     if(amountIn<=0n||reserveIn<=0n||reserveOut<=0n) return 0n;
@@ -2829,6 +2890,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
 <script>
 (function(){
   var WSIGIL_CONTRACT = '0xc224602C32F5c7f68d3Ef002aE4C99e4C7Df25B7'; // Polygon mainnet, chain 137
+  // wSIGIL on Polygon is a standard 18-decimal ERC20 — a foreign token's scale, unrelated
+  // to SIGIL_DECIMALS. Leave at 18.
   var WSIGIL_DECIMALS = 18;
   // Same order/endpoints as sigil-api's Chain::Polygon public_fallbacks().
   var POLY_RPCS = ['https://polygon-bor-rpc.publicnode.com', 'https://1rpc.io/matic'];
@@ -2966,7 +3029,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   function bridgeStatus(msg,color){ var e=document.getElementById('bridgeMsg'); if(e){ e.textContent=msg; e.style.color=color||'#8fb3c2'; } }
   window.openBridge=function(){
     var m=document.getElementById('bridge-modal'); if(!m) return;
-    try{ var raw=BigInt(window.SIGIL_RAW||'0'); var w=raw/100000000n, f=(raw%100000000n).toString().padStart(8,'0');
+    try{ var raw=BigInt(window.SIGIL_RAW||'0'); var w=raw/SIGIL_UNITS, f=(raw%SIGIL_UNITS).toString().padStart(SIGIL_DP,'0');
       document.getElementById('bridgeAvail').textContent=w.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')+'.'+f; }catch(e){}
     bridgeStatus(''); document.getElementById('bridgeForm').style.display='flex'; document.getElementById('bridgeReceipt').style.display='none';
     m.style.display='flex';
@@ -2974,7 +3037,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   };
   window.closeBridge=function(){ var m=document.getElementById('bridge-modal'); if(m)m.style.display='none'; };
   window.bridgeMax=function(){
-    try{ var raw=BigInt(window.SIGIL_RAW||'0'); var w=raw/100000000n, f=(raw%100000000n).toString().padStart(8,'0');
+    try{ var raw=BigInt(window.SIGIL_RAW||'0'); var w=raw/SIGIL_UNITS, f=(raw%SIGIL_UNITS).toString().padStart(SIGIL_DP,'0');
       document.getElementById('bridgeAmt').value=w.toString()+'.'+f; }catch(e){}
   };
   window.bridgeUseMetaMask=async function(){
@@ -3084,8 +3147,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     var destNorm=dest.toLowerCase().replace(/^0x/,'');
     if(!/^[0-9a-f]{40}$/.test(destNorm)){ bridgeStatus('Destination must be a valid Polygon address (0x… 40 hex chars).', '#ff8a8a'); return; }
     var amtStr=(document.getElementById('bridgeAmt').value||'').trim();
-    if(!/^\d+(\.\d{1,8})?$/.test(amtStr) || Number(amtStr)<=0){ bridgeStatus('Amount must be > 0 (max 8 decimals).', '#ff8a8a'); return; }
-    var parts=amtStr.split('.'); var base=BigInt(parts[0]||'0')*100000000n + BigInt(((parts[1]||'')+'00000000').slice(0,8));
+    if(!SIGIL_AMOUNT_RE.test(amtStr) || Number(amtStr)<=0){ bridgeStatus('Amount must be > 0 (max '+SIGIL_DP+' decimals).', '#ff8a8a'); return; }
+    var base=sigilToGlyphs(amtStr);   // text -> glyphs, the one parser
     var from=(window.MINE_ADDR||window.ADDR||'').toLowerCase();
     if(!/^[0-9a-f]{64}$/.test(from)){ bridgeStatus('No wallet address loaded.', '#ff8a8a'); return; }
 
@@ -6175,6 +6238,15 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
 
   /* ── small helpers ─────────────────────────────────────────────────────── */
   function $(id){ return document.getElementById(id); }
+  // ⚠ DELIBERATELY NOT converted to SIGIL_UNITS. This panel's unit is sigil-metamask.js's
+  // "8dp base unit", and that file is shared with enter-sigil.html and sigil-wallet-tron.html.
+  // Its Polygon leg is CORRECT today only by cancellation: base8 * MM.DECIMAL_SHIFT(10^10)
+  // = wei, and MM.balanceOfWei / 10^10 = base8. Converting this half alone would burn 100x
+  // on Polygon. The native half IS wrong (availBase is seeded from window.SIGIL_RAW, which
+  // is glyphs, and the lock POSTs glyphs), so this panel shows the native balance 100x high.
+  // Fixing it means moving sigil-metamask.js to 10 dp (its DECIMAL_SHIFT must become 10^8 to
+  // match sigil-relayer::DECIMAL_SHIFT, which already did) AND updating all three pages in
+  // the same commit. Operator call — see the report. Do not half-convert this.
   function fmt8(base){                       // 8dp base units -> display string
     var b=BigInt(base), w=b/100000000n, f=(b%100000000n).toString().padStart(8,'0');
     return w.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')+'.'+f;
@@ -6806,14 +6878,14 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
   window.SigilActivity = { list: load, add: add, cats: CATS };
 
   /* ── formatting ─────────────────────────────────────────────────────────── */
-  function amt(raw){                                  // SIGIL_DECIMALS = 8
+  function amt(raw){                                  // glyphs -> SIGIL, 10 dp
     try{
-      var n = Number(BigInt(String(raw||'0'))) / 1e8;
+      var n = Number(BigInt(String(raw||'0'))) / SIGIL_UNITS_N;
       if(!isFinite(n)) return '—';
       return n.toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:8});
     }catch(e){ return '—'; }
   }
-  function amtNum(raw){ try{ return Number(BigInt(String(raw||'0')))/1e8; }catch(e){ return 0; } }
+  function amtNum(raw){ try{ return Number(BigInt(String(raw||'0')))/SIGIL_UNITS_N; }catch(e){ return 0; } }
   function shortHex(h){ h=String(h||''); return h.length>20 ? h.slice(0,10)+'…'+h.slice(-8) : (h||'—'); }
   function ago(ts){
     var s = Math.max(0, Math.floor((Date.now()-ts)/1000));
@@ -7255,10 +7327,10 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
   function save(a){ var k=key(); if(!k) return; try{ localStorage.setItem(k, JSON.stringify(a)); }catch(e){} }
 
   function fmt8(raw){
-    try{ var b=BigInt(raw), w=b/100000000n, f=(b%100000000n).toString().padStart(8,'0');
+    try{ var b=BigInt(raw), w=b/SIGIL_UNITS, f=(b%SIGIL_UNITS).toString().padStart(SIGIL_DP,'0');
       return w.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')+'.'+f; }catch(e){ return '0.00000000'; }
   }
-  function num(raw){ try{ return Number(BigInt(raw))/1e8; }catch(e){ return 0; } }
+  function num(raw){ try{ return Number(BigInt(raw))/SIGIL_UNITS_N; }catch(e){ return 0; } }
   function ago(ms){
     var s=Math.max(0,Math.round((Date.now()-ms)/1000));
     if(s<60) return s+'s ago';
@@ -7370,7 +7442,7 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     wrap.innerHTML='<div class="bh-card">'
       + head
       + '<div style="display:flex;align-items:baseline;gap:9px;margin-top:5px">'
-      +   '<span class="bh-delta '+cls+'">'+arrow+' '+sign+diff.toFixed(8)+'</span>'
+      +   '<span class="bh-delta '+cls+'">'+arrow+' '+sign+diff.toFixed(SIGIL_DP)+'</span>'
       +   '<span style="font-family:\'JetBrains Mono\';font-size:10px;color:#5a93a8">SIGIL over '+RLBL[range]
       +     (first!==0?(' &middot; '+sign+pct.toFixed(2)+'%'):'')+'</span>'
       + '</div>'
@@ -7384,8 +7456,8 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
       +   '<line class="bh-guide" x1="0" y1="0" x2="0" y2="'+H+'" stroke="#6df3ff" stroke-width="1" vector-effect="non-scaling-stroke" opacity="0"/>'
       + '</svg>'
       + '<div class="bh-foot">'
-      +   '<span>high <b>'+g.hi.toFixed(8)+'</b></span>'
-      +   '<span>low <b>'+g.lo.toFixed(8)+'</b></span>'
+      +   '<span>high <b>'+g.hi.toFixed(SIGIL_DP)+'</b></span>'
+      +   '<span>low <b>'+g.lo.toFixed(SIGIL_DP)+'</b></span>'
       +   '<span><b>'+pts.length+'</b> of '+all.length+' readings</span>'
       +   '<span>since <b>'+when(pts[0].t)+'</b></span>'
       +   '<span>last <b>'+ago(all[all.length-1].t)+'</b></span>'
@@ -7526,7 +7598,7 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
   function $(id){ return document.getElementById(id); }
   function natApi(p){ return (window.API_BASE||'/v1')+p; }
   function g2s(g){ // glyphs (10-decimal) → SIGIL display
-    var n=Number(g)/1e10; if(!isFinite(n)) return '…';
+    var n=Number(g)/SIGIL_UNITS_N;  // same value, now from the one constant if(!isFinite(n)) return '…';
     return n>=1000?n.toLocaleString(undefined,{maximumFractionDigits:0}):n.toLocaleString(undefined,{maximumFractionDigits:4});
   }
   function row(l,v){ return '<div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid rgba(33,212,253,.09)"><span style="font-family:\'JetBrains Mono\';font-size:10px;letter-spacing:1px;color:#5a93a8;text-transform:uppercase">'+l+'</span><span style="font-family:\'JetBrains Mono\';font-size:11px;color:#cfe9f2;text-align:right;overflow-wrap:anywhere">'+v+'</span></div>'; }
@@ -7556,6 +7628,8 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     }
     var s=NAT.status;
     $('natTreasury').textContent=g2s(s.treasury_glyphs);
+    // stipend_usd_e8 is a USD figure at 8 dp (sigil_usds: $1 == 1e8), NOT glyphs — 1e8 is
+    // correct here and must not become SIGIL_UNITS_N. g2s() below does the glyph half.
     var stipendLabel=(s.payout_asset==='USDS'&&s.stipend_usd_e8)?('$'+(Number(s.stipend_usd_e8)/1e8).toFixed(2)+' sUSD'):(g2s(s.stipend_glyphs)+' SIGIL');
     $('natStipend').textContent=stipendLabel;
     $('natInterval').textContent=Number(s.claim_interval_blocks).toLocaleString();

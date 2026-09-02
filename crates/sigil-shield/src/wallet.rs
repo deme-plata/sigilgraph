@@ -63,6 +63,82 @@ fn derive(seed: &[u8; 32], domain: &str, index: u64) -> BaseElement {
     field_from_bytes(h.finalize().as_bytes())
 }
 
+/// The derivation-index space reserved for SPEND OUTPUTS.
+///
+/// `NoteStore` hands out a sequential counter (0, 1, 2, ...) for shield deposits, whose
+/// blindings have no other source of uniqueness. Spend outputs derive their index from
+/// the spend itself instead (see [`output_derivation_index`]) and live above this base,
+/// so the two schemes can never name the same index.
+pub const OUT_INDEX_BASE: u64 = 1 << 31;
+
+/// Bits of leaf position carried structurally in an output index.
+///
+/// 15 is `sigil_state::POOL_DEPTH` — the shielded pool holds `2^15 = 32,768` leaves, so
+/// every real position fits. It is duplicated rather than imported because `sigil-state`
+/// depends on this crate, not the other way round. If the pool is ever deepened this
+/// number should follow; nothing breaks if it does not (the excess folds into the tag,
+/// see below), uniqueness merely stops being exact and becomes overwhelmingly likely.
+const POSITION_BITS: u32 = 15;
+/// Bits of output slot carried structurally. `N_OUTS` is 2, so one bit.
+const SLOT_BITS: u32 = 1;
+/// What is left of a `u32` once the base bit, the position and the slot are spent.
+const TAG_BITS: u32 = 31 - POSITION_BITS - SLOT_BITS;
+
+/// The derivation index for output `slot` of the spend that consumes the note at leaf
+/// `position` under pool root `anchor`.
+///
+/// # Why this replaces a counter, and why it needs no persistent state
+///
+/// The blinding of an output is `account.blinding(index)`, so two outputs sharing an
+/// index share a blinding — and since a leaf is `compress2(compress2(value, blinding),
+/// pk)`, two payments of the same amount to the same payee then publish the SAME leaf.
+/// That is the whole bug: the index used to come from a `NoteStore` counter that starts
+/// at 0, and the callers that matter build a fresh store per transaction because each is
+/// handed one note and asked to prove one spend.
+///
+/// The fix is to stop asking the caller to remember anything. A spend already contains a
+/// value that cannot repeat: the leaf position of the note it consumes. A note can be
+/// spent exactly once — the chain's nullifier set is what enforces it, since
+/// `nf = compress2(spend_key, position)` — so within one pool generation `position` is
+/// unique across every spend a wallet will ever make. Two payments necessarily consume
+/// two different notes, therefore two different positions, therefore two different
+/// indices. Not with high probability: exactly.
+///
+/// `anchor` covers the one case position alone does not. Positions restart at 0 when the
+/// pool rotates to a new epoch, so leaf 5 of epoch 0 and leaf 5 of epoch 1 are different
+/// notes with the same position. The two spends are proved against different pool roots,
+/// so folding the root in separates them — probabilistically there (one chance in
+/// `2^TAG_BITS`), exactly within an epoch, which is where every spend to date has lived
+/// (`/v1/shielded/anchor` reports `epoch: 0`, `sealed_epochs: []`).
+///
+/// # Why the result is deliberately squeezed into a `u32`
+///
+/// Downstream callers hold this number and re-derive the blinding from it later:
+/// `wasm_api::build_private_send` takes `note_index: u32`, and `sigil-top`'s
+/// `mine_local_api` returns `change_index` as a JSON number that JavaScript parses into
+/// an `f64`. A wider index would be silently truncated by one and rounded by the other,
+/// turning a recoverable change note into an unspendable one — trading this bug for a
+/// worse one. Anything that does not fit the structural layout is folded into the tag
+/// rather than wrapped, because a wrap would recreate exactly the collision this exists
+/// to prevent.
+pub fn output_derivation_index(anchor: &[u8; 32], position: u64, slot: usize) -> u64 {
+    let slot = slot as u64;
+    let mut h = blake3::Hasher::new();
+    h.update(b"sigil-shielded-wallet-v1");
+    h.update(b"out-index");
+    h.update(anchor);
+    h.update(&(position >> POSITION_BITS).to_le_bytes());
+    h.update(&(slot >> SLOT_BITS).to_le_bytes());
+    let mut tag8 = [0u8; 8];
+    tag8.copy_from_slice(&h.finalize().as_bytes()[..8]);
+    let tag = u64::from_le_bytes(tag8) & ((1 << TAG_BITS) - 1);
+
+    OUT_INDEX_BASE
+        | (tag << (POSITION_BITS + SLOT_BITS))
+        | ((position & ((1 << POSITION_BITS) - 1)) << SLOT_BITS)
+        | (slot & ((1 << SLOT_BITS) - 1))
+}
+
 /// A shielded account: one seed, from which every key and blinding descends.
 #[derive(Clone)]
 pub struct ShieldedAccount {
@@ -171,6 +247,14 @@ pub struct OwnedNote {
 pub struct NoteStore {
     pub notes: Vec<OwnedNote>,
     next_index: u64,
+    /// Deliveries already booked, keyed by the ciphertext that carried them.
+    ///
+    /// Rescanning the chain must not book a payment twice, but "I have seen this
+    /// ciphertext before" and "someone paid me the same amount again" are different
+    /// statements and only the first is a duplicate. Keying on the delivery keeps
+    /// rescans idempotent without making a second identical payment invisible — which
+    /// is what keying on `(value, blinding)` did.
+    seen_deliveries: BTreeSet<[u8; 32]>,
 }
 
 impl NoteStore {
@@ -178,7 +262,37 @@ impl NoteStore {
         Self::default()
     }
 
+    /// A store whose next derivation index is `base` rather than 0.
+    ///
+    /// # Why this is necessary, and not a convenience
+    ///
+    /// Output blindings come from `account.blinding(index)`, and the index comes from this
+    /// counter. A caller that builds a fresh `NoteStore` per transaction — which both the
+    /// Android core and `wasm_api` do, because they are handed one note and asked to prove
+    /// one spend — therefore allocates index 0 to the payee's note and index 1 to the
+    /// change, EVERY TIME.
+    ///
+    /// The consequence is not subtle. An output commitment is
+    /// `compress2(compress2(value, blinding), pk)`, so two payments of the same amount to
+    /// the same recipient produce a byte-identical leaf. On a chain whose wallets snap
+    /// balances to a 1/2/5x10^k denomination ladder, equal amounts are the ordinary case,
+    /// and `NoteStore::receive` deduplicates on exactly `(value, blinding)` — so the payee
+    /// books the first payment and the second is invisible to them. Money sent, nothing
+    /// received, no error anywhere.
+    ///
+    /// A caller that keeps its own note counter passes it here and the collision cannot
+    /// occur. A caller that owns a long-lived store never had the problem.
+    pub fn with_next_index(base: u64) -> Self {
+        Self { notes: Vec::new(), next_index: base, seen_deliveries: BTreeSet::new() }
+    }
+
     /// Record a note this wallet is about to create, returning its derivation index.
+    ///
+    /// This is the SHIELD path: a deposit conjures a note out of nothing, so the counter
+    /// is its only source of uniqueness and a caller that resets it collides. Spend
+    /// outputs no longer come through here — they derive their index from the spend
+    /// itself (see [`output_derivation_index`]) precisely because they have a better
+    /// source of uniqueness available and should not depend on caller bookkeeping.
     pub fn allocate_with(&mut self, account: &ShieldedAccount, value: u64) -> u64 {
         let index = self.next_index;
         self.next_index += 1;
@@ -194,10 +308,31 @@ impl NoteStore {
         index
     }
 
+    /// Record an output this wallet created at an index it did NOT draw from the
+    /// sequential counter — a spend output, whose index comes from
+    /// [`output_derivation_index`].
+    ///
+    /// Deliberately does not touch `next_index`: spend-output indices live above
+    /// [`OUT_INDEX_BASE`], and advancing the shield counter to meet them would push every
+    /// future deposit into the same reserved space.
+    pub fn record_derived(&mut self, index: u64, value: u64, blinding: BaseElement) {
+        self.notes.push(OwnedNote {
+            index: Some(index),
+            value,
+            blinding,
+            position: None,
+            spent: false,
+            memo: None,
+        });
+    }
+
     /// Record a note RECEIVED from someone else, whose blinding came out of a ciphertext.
     ///
-    /// Deduplicates on `(value, blinding)`: a wallet re-scans the chain routinely and must
-    /// not book the same payment twice.
+    /// Deduplicates on `(value, blinding)`, which is right for a caller replaying a note
+    /// it already holds. It is NOT how [`scan_ciphertexts`](Self::scan_ciphertexts)
+    /// books deliveries any more: two people (or one person twice) can legitimately send
+    /// the same amount under the same blinding — that is two payments and two leaves,
+    /// and collapsing them into one note loses the second irrecoverably.
     pub fn receive(&mut self, value: u64, blinding: BaseElement) -> bool {
         self.receive_with_memo(value, blinding, None)
     }
@@ -237,10 +372,24 @@ impl NoteStore {
         let mut found = 0;
         for ct in ciphertexts {
             if let Ok(pt) = crate::note_cipher::try_open_note(ct, enc_id) {
-                let memo = (!pt.memo.is_empty()).then(|| pt.memo.text());
-                if self.receive_with_memo(pt.value, pt.blinding, memo) {
-                    found += 1;
+                // Key on the DELIVERY, not on what it contains. Ciphertexts are sealed
+                // with a fresh ephemeral key, so two payments are two distinct
+                // ciphertexts even when their plaintexts are identical — and identical
+                // plaintexts are exactly what a sender running the pre-fix code produced.
+                let id = *blake3::hash(ct.0.as_bytes()).as_bytes();
+                if !self.seen_deliveries.insert(id) {
+                    continue;
                 }
+                let memo = (!pt.memo.is_empty()).then(|| pt.memo.text());
+                self.notes.push(OwnedNote {
+                    index: None,
+                    value: pt.value,
+                    blinding: pt.blinding,
+                    position: None,
+                    spent: false,
+                    memo,
+                });
+                found += 1;
             }
         }
         found
@@ -258,6 +407,11 @@ impl NoteStore {
         account: &ShieldedAccount,
         pool_commitments: &[[u8; 32]],
     ) -> usize {
+        // Positions already spoken for, so two notes never claim one leaf. Two leaves
+        // CAN be byte-identical — every note minted by the pre-fix sender is — and
+        // handing both notes the first match would leave the second unspendable, since
+        // the nullifier binds to the position and would already be spent.
+        let mut claimed: BTreeSet<u64> = self.notes.iter().filter_map(|n| n.position).collect();
         let mut found = 0;
         for n in self.notes.iter_mut().filter(|n| n.position.is_none()) {
             let note = Note {
@@ -266,8 +420,14 @@ impl NoteStore {
                 spend_key: account.spend_key(),
             };
             let cm = to_wire(note.commitment());
-            if let Some(pos) = pool_commitments.iter().position(|c| *c == cm) {
-                n.position = Some(pos as u64);
+            let hit = pool_commitments
+                .iter()
+                .enumerate()
+                .find(|(i, c)| **c == cm && !claimed.contains(&(*i as u64)))
+                .map(|(i, _)| i as u64);
+            if let Some(pos) = hit {
+                n.position = Some(pos);
+                claimed.insert(pos);
                 found += 1;
             }
         }
@@ -436,21 +596,27 @@ pub fn build_spend(
         return Err(SpendBuildError::PositionMismatch);
     }
 
-    // Allocate outputs and derive their blindings. Only outputs bound to THIS account go
-    // into the note store: a note paid to someone else is not ours to track or spend.
+    // Derive the outputs' blindings FROM THIS SPEND rather than from a counter in the
+    // store. A counter that a caller resets per transaction hands index 0 to the payee
+    // every time, and equal value + equal blinding + equal payee key is a byte-identical
+    // leaf — so two ordinary payments of the same amount became one note the payee could
+    // see and one that vanished. See [`output_derivation_index`] for why the leaf
+    // position of the note being consumed cannot repeat.
+    //
+    // Only outputs bound to THIS account go into the note store: a note paid to someone
+    // else is not ours to track or spend. Its preimage is still returned so the caller
+    // can seal it to the recipient.
+    let anchor = to_wire(tree.root());
     let mine = account.public_key();
     let mut outs = [(BaseElement::ZERO, BaseElement::ZERO, BaseElement::ZERO); N_OUTS];
     let mut out_indices = Vec::new();
     let mut out_preimages = Vec::with_capacity(N_OUTS);
     for (i, (v, recipient)) in outs_spec.iter().enumerate() {
-        let idx = store.allocate_with(account, *v);
+        let idx = output_derivation_index(&anchor, position, i);
         let blinding = account.blinding(idx);
         if *recipient == mine {
+            store.record_derived(idx, *v, blinding);
             out_indices.push(idx);
-        } else {
-            // Not ours — drop the placeholder so `balance()` does not count value we
-            // cannot spend. The preimage is still returned so the caller can seal it.
-            store.notes.retain(|n| n.index != Some(idx));
         }
         out_preimages.push((*v, blinding));
         outs[i] = (BaseElement::new(*v), blinding, *recipient);
@@ -488,7 +654,7 @@ pub fn build_spend(
         .expect("a conserving, in-range witness must prove");
 
     Ok(SpendBundle {
-        anchor: to_wire(tree.root()),
+        anchor,
         nullifier: to_wire(note.nullifier(position)),
         extra_nullifiers: Vec::new(),
         // the OWNER-BOUND output commitment: compress2(compress2(value, blinding), pk)
@@ -584,19 +750,20 @@ pub fn build_spend_2(
         notes.push(note);
     }
 
-    // Outputs: identical handling to `build_spend` — only notes bound to THIS account are
-    // tracked, since a note paid to someone else is not ours to spend.
+    // Outputs: identical handling to `build_spend`, including the derivation — the index
+    // comes from the FIRST input's leaf position, which is consumed by this spend and so
+    // cannot be reused, rather than from a resettable counter.
+    let anchor = to_wire(tree.root());
     let mine = account.public_key();
     let mut outs = [(BaseElement::ZERO, BaseElement::ZERO, BaseElement::ZERO); N_OUTS];
     let mut out_indices = Vec::new();
     let mut out_preimages = Vec::with_capacity(N_OUTS);
     for (i, (v, recipient)) in outs_spec.iter().enumerate() {
-        let idx = store.allocate_with(account, *v);
+        let idx = output_derivation_index(&anchor, leaf_positions[0], i);
         let blinding = account.blinding(idx);
         if *recipient == mine {
+            store.record_derived(idx, *v, blinding);
             out_indices.push(idx);
-        } else {
-            store.notes.retain(|n| n.index != Some(idx));
         }
         out_preimages.push((*v, blinding));
         outs[i] = (BaseElement::new(*v), blinding, *recipient);
@@ -619,7 +786,7 @@ pub fn build_spend_2(
         .expect("a conserving, in-range two-note witness must prove");
 
     Ok(SpendBundle {
-        anchor: to_wire(tree.root()),
+        anchor,
         nullifier: to_wire(notes[0].nullifier(leaf_positions[0])),
         extra_nullifiers: vec![to_wire(notes[1].nullifier(leaf_positions[1]))],
         cm_outs: outs
@@ -1153,4 +1320,289 @@ mod tests {
             .expect("a reconstructed coinbase note must be spendable through the general API");
         assert_eq!(bundle.out_indices.len(), 2, "both change outputs are ours");
     }
+
+    /// THE MONEY BUG (2026-09-02): paying the same recipient the same amount twice
+    /// produced a BYTE-IDENTICAL note commitment, and the payee's wallet then discarded
+    /// the second payment as a duplicate. Money left the sender, nothing arrived, and
+    /// nothing anywhere returned an error.
+    ///
+    /// Four links, all of them inside this crate:
+    ///
+    ///   1. `build_spend` took each output's blinding from `NoteStore`'s allocation
+    ///      counter (`allocate_with` -> `account.blinding(index)`);
+    ///   2. `NoteStore::new()` starts that counter at 0, so a caller that builds a FRESH
+    ///      store per transaction hands index 0 to the payee's output EVERY time — and
+    ///      that is exactly what the two live callers do, because each is handed one note
+    ///      and asked to prove one spend: `wasm_api::build_private_send` (the browser)
+    ///      and `sigil-top`'s `mine_local_api` (the desktop TUI's local send endpoint);
+    ///   3. a leaf is `compress2(compress2(value, blinding), pk)`, so equal value + equal
+    ///      blinding + equal payee key is an equal leaf, byte for byte;
+    ///   4. `NoteStore::receive_with_memo` deduplicates on exactly `(value, blinding)`.
+    ///
+    /// Nothing about this is exotic: SIGIL wallets snap amounts to a 1/2/5x10^k
+    /// denomination ladder, so paying the same amount twice is the ORDINARY case, and
+    /// with `SHIELDED_ONLY_HEIGHT == 0` the shielded path is the only payment path there
+    /// is.
+    ///
+    /// This test reproduces the fresh-store-per-transaction shape verbatim and demands
+    /// what a payee is owed: two payments, two distinct leaves, two spendable notes.
+    ///
+    /// IGNORED in debug only — same winterfell 0.9 debug-degree quirk as
+    /// `wallet_built_spend_verifies` (this test proves twice).
+    #[test]
+    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees vs witness-dependent range-bit column degree; release-compiled winter-prover passes."]
+    fn paying_the_same_amount_twice_delivers_two_distinct_spendable_notes() {
+        use crate::note_cipher::{enc_identity_from_seed, seal_note, NotePlaintext};
+
+        let alice_seed = [0xA2u8; 32];
+        let bob_seed = [0xB2u8; 32];
+        let alice = ShieldedAccount::from_seed(alice_seed);
+        let bob = ShieldedAccount::from_seed(bob_seed);
+        let bob_enc = enc_identity_from_seed(&bob_seed);
+        let bob_addr = bob.address(&bob_seed);
+        let bob_pk = bob_addr.shield_key().unwrap();
+
+        // Alice funds herself with TWO separate notes of the SAME value. Two notes,
+        // because one note can only be spent once — paying twice necessarily consumes
+        // two. Same value, because that is the case the denomination ladder produces.
+        let mut funding = NoteStore::new();
+        let (_i0, cm0) = shield_note(&alice, &mut funding, 100).unwrap();
+        let (_i1, cm1) = shield_note(&alice, &mut funding, 100).unwrap();
+        assert_ne!(cm0, cm1, "the two funding notes must themselves be distinct");
+
+        // ── Payment 1: spend the note at leaf 0, pay Bob 50, keep 47, 3 fee. ──
+        //
+        // Built through a FRESH single-note store — `wasm_api::build_private_send`'s
+        // exact construction, copied deliberately rather than paraphrased.
+        let pool_a = padded(&[cm0, cm1]);
+        let mut store1 = NoteStore::new();
+        store1.notes.push(OwnedNote {
+            index: Some(0),
+            value: 100,
+            blinding: alice.blinding(0),
+            position: Some(0),
+            spent: false,
+            memo: None,
+        });
+        let pay1 = build_spend(&alice, &mut store1, &pool_a, 0, 3, &[(50, bob_pk), (47, alice.public_key())])
+            .expect("alice builds the first payment");
+
+        // ── Payment 2: identical in every way a payer controls — same payee, same
+        // amount, same fee — differing only in which note funds it. ──
+        let pool_b = padded(&[cm0, cm1, pay1.cm_outs[0], pay1.cm_outs[1]]);
+        let mut store2 = NoteStore::new();
+        store2.notes.push(OwnedNote {
+            index: Some(1),
+            value: 100,
+            blinding: alice.blinding(1),
+            position: Some(1),
+            spent: false,
+            memo: None,
+        });
+        let pay2 = build_spend(&alice, &mut store2, &pool_b, 0, 3, &[(50, bob_pk), (47, alice.public_key())])
+            .expect("alice builds the second payment");
+
+        // (1) THE LEAVES MUST DIFFER. This is the assertion that failed before the fix.
+        assert_ne!(
+            pay1.cm_outs[0], pay2.cm_outs[0],
+            "two payments of the same amount to the same payee must not publish the SAME leaf"
+        );
+        assert_ne!(
+            pay1.out_preimages[0].1, pay2.out_preimages[0].1,
+            "and the reason must be the blinding, not an accident of value or key"
+        );
+
+        // Alice's own change must be distinct too — colliding change is the sender
+        // losing their OWN money, which is the larger half of every payment.
+        assert_ne!(
+            pay1.cm_outs[1], pay2.cm_outs[1],
+            "the two change notes must not collide either"
+        );
+
+        // The nullifiers were always distinct (they bind to leaf position), which is
+        // exactly why the chain accepted both spends and nothing looked wrong.
+        assert_ne!(pay1.nullifier, pay2.nullifier);
+
+        // (2) THE PAYEE MUST BOOK BOTH. Bob learns of each payment only by
+        // trial-decrypting the ciphertexts the sender published.
+        let ct1 = seal_note(
+            &NotePlaintext::new(pay1.out_preimages[0].0, pay1.out_preimages[0].1),
+            &bob_addr,
+        )
+        .expect("seal payment 1 to bob");
+        let ct2 = seal_note(
+            &NotePlaintext::new(pay2.out_preimages[0].0, pay2.out_preimages[0].1),
+            &bob_addr,
+        )
+        .expect("seal payment 2 to bob");
+
+        let pool_c = padded(&[
+            cm0, cm1, pay1.cm_outs[0], pay1.cm_outs[1], pay2.cm_outs[0], pay2.cm_outs[1],
+        ]);
+        let mut bob_store = NoteStore::new();
+        assert_eq!(
+            bob_store.scan_ciphertexts(&bob_enc, &[ct1, ct2]),
+            2,
+            "Bob was paid twice and must book TWO notes, not one"
+        );
+        assert_eq!(
+            bob_store.scan_owned(&bob, &pool_c),
+            2,
+            "and must locate BOTH of them in the pool, at two different leaves"
+        );
+        let positions: BTreeSet<u64> = bob_store.notes.iter().filter_map(|n| n.position).collect();
+        assert_eq!(positions.len(), 2, "two notes must occupy two distinct leaf positions");
+        assert_eq!(bob_store.balance(), 100, "Bob was paid 50 twice; he is owed 100");
+    }
+
+    /// The uniqueness argument for the fix, stated as an assertion rather than a comment.
+    ///
+    /// Output blindings are derived from the leaf position of the note being SPENT, and a
+    /// note can be spent exactly once — the chain's nullifier set is what enforces that.
+    /// So `(anchor, position, slot)` cannot repeat for a wallet, and no persistent
+    /// per-wallet counter has to exist anywhere for the collision to be impossible.
+    ///
+    /// Fast: no proving, so this one runs in debug too.
+    #[test]
+    fn output_derivation_indices_are_unique_per_spent_note() {
+        let anchor = [7u8; 32];
+        let mut seen = BTreeSet::new();
+        for position in 0..(1u64 << 12) {
+            for slot in 0..N_OUTS {
+                let idx = output_derivation_index(&anchor, position, slot);
+                assert!(
+                    seen.insert(idx),
+                    "index {idx} repeated at position {position} slot {slot}"
+                );
+                assert!(
+                    idx >= OUT_INDEX_BASE,
+                    "spend outputs must live above the sequential shield counter"
+                );
+                assert!(
+                    idx <= u32::MAX as u64,
+                    "must stay inside u32: `wasm_api` takes note_index as u32 and JS \
+                     carries change_index as an f64"
+                );
+            }
+        }
+        // A different pool state gives a different index for the same position, which is
+        // what keeps a position reused after an epoch rotation from colliding.
+        let other = [8u8; 32];
+        assert_ne!(
+            output_derivation_index(&anchor, 3, 0),
+            output_derivation_index(&other, 3, 0)
+        );
+    }
+
+    /// Defence in depth for money ALREADY on chain: notes minted by a sender running the
+    /// old, colliding code are two real leaves worth 2x, and a payee running this code
+    /// must be able to book and spend both.
+    ///
+    /// Two identical `(value, blinding)` deliveries used to collapse into one note — the
+    /// dedup in `receive_with_memo` cannot tell "I have scanned this ciphertext before"
+    /// from "someone paid me the same thing twice". Scanning now keys on the DELIVERY,
+    /// so re-scanning is still idempotent while a second payment is still a second note.
+    #[test]
+    fn two_identical_deliveries_are_two_notes_and_two_leaves() {
+        use crate::note_cipher::{enc_identity_from_seed, seal_note, NotePlaintext};
+
+        let bob_seed = [0xB4u8; 32];
+        let bob = ShieldedAccount::from_seed(bob_seed);
+        let bob_enc = enc_identity_from_seed(&bob_seed);
+        let bob_addr = bob.address(&bob_seed);
+
+        // Exactly what the old sender produced: the same value under the same blinding,
+        // twice — so the same leaf, twice.
+        let value = 50u64;
+        let blinding = ShieldedAccount::from_seed([0xA4u8; 32]).blinding(0);
+        let ct1 = seal_note(&NotePlaintext::new(value, blinding), &bob_addr).unwrap();
+        let ct2 = seal_note(&NotePlaintext::new(value, blinding), &bob_addr).unwrap();
+
+        let leaf = to_wire(
+            Note { value: BaseElement::new(value), blinding, spend_key: bob.spend_key() }
+                .commitment(),
+        );
+        let pool = padded(&[leaf, leaf]);
+
+        let mut store = NoteStore::new();
+        assert_eq!(
+            store.scan_ciphertexts(&bob_enc, &[ct1.clone(), ct2.clone()]),
+            2,
+            "two deliveries of the same amount are two payments, not one"
+        );
+        assert_eq!(
+            store.scan_ciphertexts(&bob_enc, &[ct1, ct2]),
+            0,
+            "but re-scanning the SAME ciphertexts must still book nothing new"
+        );
+        assert_eq!(store.scan_owned(&bob, &pool), 2, "both leaves must be located");
+        let positions: BTreeSet<u64> = store.notes.iter().filter_map(|n| n.position).collect();
+        assert_eq!(
+            positions,
+            BTreeSet::from([0, 1]),
+            "two identical leaves are two DIFFERENT positions; sharing one would make the \
+             second unspendable (its nullifier would already be spent)"
+        );
+        assert_eq!(store.balance(), 100);
+    }
+
+
+    /// The SHIELD path has the same shape of hazard and a different answer, and this is
+    /// the test that says so out loud.
+    ///
+    /// A deposit conjures a note from nothing. There is no note being consumed, so there
+    /// is no leaf position to derive from — the sequential counter really is the only
+    /// source of uniqueness, and a caller that starts a fresh `NoteStore` per deposit
+    /// mints the identical commitment for the identical amount. [`NoteStore::with_next_index`]
+    /// is the fix for THAT caller, and it is the reason the spend path deliberately does
+    /// not use the counter: spends have something better available, deposits do not.
+    ///
+    /// Fast: shielding derives a commitment, it does not prove.
+    #[test]
+    fn a_reset_counter_collides_on_the_shield_path_and_with_next_index_is_the_cure() {
+        let acct = ShieldedAccount::from_seed([0xC0u8; 32]);
+
+        // Two deposits of the same amount, each through a fresh store — a process that
+        // restarted, a browser whose localStorage was cleared, a wallet restored from
+        // seed on a second device.
+        let (_i, first) = shield_note(&acct, &mut NoteStore::new(), 1_000).unwrap();
+        let (_i, again) = shield_note(&acct, &mut NoteStore::new(), 1_000).unwrap();
+        assert_eq!(
+            first, again,
+            "a reset counter really does remint the same leaf — this is not hypothetical"
+        );
+
+        // Told where it left off, the same caller cannot collide.
+        let (_i, resumed) = shield_note(&acct, &mut NoteStore::with_next_index(1), 1_000).unwrap();
+        assert_ne!(first, resumed);
+
+        // And the two schemes never meet: a deposit index is sequential from 0, a spend
+        // output index lives above OUT_INDEX_BASE.
+        assert!(output_derivation_index(&[0u8; 32], 0, 0) >= OUT_INDEX_BASE);
+    }
+
+    /// Spend outputs must not disturb the deposit counter.
+    ///
+    /// If a spend advanced `next_index` to meet an output index (~2^31), the wallet's
+    /// next SHIELD would be minted from that reserved space, and the two schemes would
+    /// start competing for the same numbers.
+    #[test]
+    fn a_spend_does_not_move_the_deposit_counter() {
+        let acct = ShieldedAccount::from_seed([0xC1u8; 32]);
+        let mut store = NoteStore::new();
+        let (i0, _cm) = shield_note(&acct, &mut store, 100).unwrap();
+        assert_eq!(i0, 0);
+
+        // Simulate what a spend records, without paying the prover: the store learns two
+        // outputs at derived indices.
+        let anchor = [3u8; 32];
+        for slot in 0..N_OUTS {
+            let idx = output_derivation_index(&anchor, 0, slot);
+            store.record_derived(idx, 10, acct.blinding(idx));
+        }
+
+        let (i1, _cm) = shield_note(&acct, &mut store, 100).unwrap();
+        assert_eq!(i1, 1, "the next deposit is still the next SMALL index, not 2^31-something");
+    }
+
 }

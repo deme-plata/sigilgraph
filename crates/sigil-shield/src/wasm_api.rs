@@ -184,6 +184,23 @@ pub fn build_private_send_with_memo(
     // A single-note local store: everything build_spend needs to know about the note
     // being spent, addressed by store position 0 (see wallet::build_spend's doc on why
     // it selects by store position, not derivation index).
+    //
+    // `NoteStore::new()` is correct here even though its counter starts at 0 on every
+    // call, and that is a deliberate property rather than an accident. Output blindings
+    // no longer come from this counter — `build_spend` derives them from the leaf
+    // position of the note being consumed, which cannot repeat, so a caller handed one
+    // note and asked to prove one spend does not have to remember anything. Before that
+    // change this line handed derivation index 0 to the payee on EVERY private send, so
+    // two payments of the same amount to the same recipient published a byte-identical
+    // leaf and the payee's wallet dropped the second as a duplicate. See
+    // `wallet::output_derivation_index`.
+    //
+    // Consequence for this module's callers: `change_index` below is now a large number
+    // in `[2^31, 2^32)`, not the little 0/1 it used to be. That is still a real
+    // derivation index — `account.blinding(change_index)` reproduces the change note's
+    // blinding exactly as before — and it is deliberately kept inside `u32` so the page
+    // can hand it straight back as `note_index`, and inside f64-exact range so
+    // `JSON.parse` does not round it. Do not widen it.
     let blinding = account.blinding(note_index as u64);
     let mut store = NoteStore::new();
     store.notes.push(OwnedNote {

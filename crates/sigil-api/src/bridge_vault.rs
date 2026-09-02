@@ -50,6 +50,27 @@
 //!    the SAME commitment, i.e. a duplicate leaf; for a different value it silently
 //!    orphans the earlier note. The ledger below persists every allocation so a restart
 //!    resumes the counter instead of restarting it at zero.
+//!
+//!    A deposit CONSUMES NO NOTE, so unlike a spend — which derives its output indices
+//!    from the tree position of the note it is consuming, and a note is spent exactly once
+//!    — there is no position to hang uniqueness on. The counter is the only source, which
+//!    makes the ledger part of the money path, not bookkeeping: [`BridgeVault::prepare`]
+//!    refuses to issue an allocation it could not fsync, because a leaf is permanent and
+//!    an un-recorded index is not.
+//!
+//!    Two things go wrong when the counter rewinds, and neither is value creation —
+//!    consensus refuses a duplicate commitment outright, and the relayer only mints once a
+//!    lock is `settled`. What breaks is (a) LIVENESS: the re-derived `Shield` is rejected
+//!    at apply time, so that deposit never lands and never mints; and (b) RECOVERABILITY:
+//!    a note replayed at the wrong index carries the wrong blinding, so the vault stops
+//!    recognising a leaf it really owns and can no longer build an `Unshield` against it —
+//!    locked value that cannot be withdrawn.
+//!
+//!    **The ledger must be backed up with the seed.** Losing it entirely resets the
+//!    counter to 0 and re-collides; replay resumes above the highest index still present,
+//!    which makes a PARTIAL loss survivable but not a total one. Chain state cannot
+//!    substitute: an allocation is issued before its leaf lands, and an abandoned lock
+//!    burns an index the chain never sees at all.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -83,6 +104,8 @@ pub enum VaultError {
     /// The spend proof could not be built (bad position, non-conserving outputs, prover
     /// failure). Never silently downgraded — an unlock without a proof is not an unlock.
     SpendFailed { detail: String },
+    /// The allocation could not be written durably, so the lock was NOT issued.
+    LedgerWriteFailed { detail: String },
 }
 
 impl VaultError {
@@ -98,6 +121,10 @@ impl VaultError {
                 format!("vault holds no spendable note of denomination {amount}"),
             VaultError::SpendFailed { detail } =>
                 format!("could not build the vault spend proof: {detail}"),
+            VaultError::LedgerWriteFailed { detail } =>
+                format!("refusing to issue a lock whose derivation index could not be \
+                         recorded durably ({detail}) — a restart would re-derive it and \
+                         publish a duplicate note commitment"),
             VaultError::PartsMismatch { lock_id, .. } =>
                 format!("submitted note commitments do not match those issued for lock {lock_id} \
                          — refusing, since accepting a caller-chosen commitment would mint \
@@ -136,6 +163,14 @@ pub struct BridgeVault {
 impl BridgeVault {
     /// Build a vault from a raw 32-byte seed. Deterministic: the same seed always yields
     /// the same account, which is what makes the notes recoverable.
+    ///
+    /// # This vault has NO LEDGER and is therefore in-memory only
+    ///
+    /// The deposit counter starts at 0 and nothing persists it, so a second process built
+    /// this way re-derives index 0 and republishes a commitment the first one already
+    /// issued. That is the collision [`BridgeVault::open`] exists to prevent, so production
+    /// must use `open`. This constructor is for tests and for callers that genuinely want a
+    /// throwaway vault; it is deliberately not wired into the node.
     pub fn from_seed(seed: [u8; 32]) -> Self {
         Self {
             account: ShieldedAccount::from_seed(seed),
@@ -165,34 +200,109 @@ impl BridgeVault {
         Ok(v)
     }
 
-    /// Re-allocate one note per ledger line so `next_index` advances past everything ever
-    /// issued. Values are re-read from the ledger because `NoteStore` needs them to
-    /// rebuild the note; the blinding itself comes back from the seed.
+    /// Rebuild the note set from the ledger, resuming the deposit counter above the
+    /// highest index the ledger records.
+    ///
+    /// # Why this reads the recorded `index` instead of counting lines
+    ///
+    /// Every line already carries the index it was issued at. Counting lines instead
+    /// assumes the ledger is a gapless sequence starting at 0, and that assumption breaks
+    /// in both directions the moment a line is lost — to a partial write, a truncation, a
+    /// restore from an older snapshot, or a hand edit:
+    ///
+    /// * **the counter rewinds.** With a hole at index 1, three published notes leave two
+    ///   lines, the counter resumes at 2, and index 2 — already a leaf in the pool — is
+    ///   handed out again. A shield commitment is `compress2(compress2(value, blinding),
+    ///   pk)` over a counter-derived blinding, so re-issuing an index for the same amount
+    ///   republishes a byte-identical leaf.
+    ///
+    ///   What that costs, stated precisely: consensus REFUSES the duplicate
+    ///   (`sigil_state::shielded::ShieldedError::DuplicateCommitment`, checked via
+    ///   `has_ever_held` so it spans sealed epochs too), so this is NOT an unbacked mint —
+    ///   the leaf never lands twice, and the relayer only mints once a lock is `settled`.
+    ///   It is a LIVENESS failure: the depositor's `Shield` dies at apply time, the lock
+    ///   never settles, no wrapped SIGIL is ever minted, and because the counter stays
+    ///   rewound every retry of that amount collides again. The deposit is stuck, silently,
+    ///   until the counter climbs back past what was already issued.
+    /// * **the surviving notes are rebuilt wrong.** Sequential re-allocation gives the note
+    ///   recorded at index 2 the blinding of index 1, so its commitment matches nothing in
+    ///   the pool. The vault stops recognising locked value it actually owns, and cannot
+    ///   spend it.
+    ///
+    /// Reading the recorded index fixes both, and for a gapless ledger — everything the
+    /// old code ever wrote — it reconstructs exactly the same notes and the same next
+    /// index, so notes created under the old scheme still open.
+    ///
+    /// A line whose `index` is unreadable still consumes a slot rather than being skipped:
+    /// burning an index is free, re-issuing one is not.
     fn replay_ledger(&mut self, path: &Path) -> std::io::Result<()> {
         let Ok(text) = std::fs::read_to_string(path) else { return Ok(()) };
-        let mut store = self.store.lock().unwrap();
+
+        let mut entries: Vec<(u64, u64)> = Vec::new();
+        let mut high: Option<u64> = None;
         for line in text.lines().filter(|l| !l.trim().is_empty()) {
-            // `{"index":N,"value":V,...}` — parsed leniently on purpose: a ledger line we
-            // cannot read must not take the bridge down, but it MUST still advance the
-            // index counter, so a malformed line allocates a placeholder rather than
-            // being skipped (skipping would risk re-issuing that index).
+            // `{"lock_id":L,"index":N,"value":V,"cm":"…"}`, parsed leniently: one
+            // unreadable line must not take the bridge down.
             let value = json_u64(line, "value").unwrap_or(0);
-            store.allocate_with(&self.account, value);
+            let index = json_u64(line, "index")
+                .unwrap_or_else(|| high.map_or(0, |h| h.saturating_add(1)));
+            high = Some(high.map_or(index, |h| h.max(index)));
+            entries.push((index, value));
         }
+
+        // Resume ABOVE everything the ledger has ever seen, not at how many lines it has.
+        let next = high.map_or(0, |h| h.saturating_add(1));
+        let mut store = NoteStore::with_next_index(next);
+        for (index, value) in entries {
+            // `record_derived` places the note at the index it was ISSUED at and leaves the
+            // counter alone, which is exactly the shape a replay needs.
+            store.record_derived(index, value, self.account.blinding(index));
+        }
+        *self.store.lock().unwrap() = store;
         Ok(())
     }
 
-    fn append_ledger(&self, lock_id: u64, part: &IssuedPart) {
-        let Some(path) = &self.ledger_path else { return };
+    /// Record one allocation durably, or say so.
+    ///
+    /// # Why every step here is fallible on purpose
+    ///
+    /// This used to be best-effort: `create(true)` on the file, and `let _ =` over the
+    /// write. `create` makes the FILE, never the DIRECTORY, so on a node whose
+    /// `/root/.config/sigil/` did not exist the open failed, the error was discarded, and
+    /// `prepare` went on to hand the depositor a commitment to sign that was recorded
+    /// nowhere. The next restart replayed an empty ledger, reset the counter to 0 and
+    /// re-derived index 0 — so the next deposit of that same amount re-published a
+    /// commitment already in the pool. See `replay_ledger` for what that actually costs.
+    ///
+    /// So: create the parent, propagate every error, and **fsync**. A `flush` on
+    /// `std::fs::File` is a no-op (the handle is unbuffered) and leaves the line in the
+    /// page cache, which survives a process exit but not a power cut — and a power cut is
+    /// precisely the restart that rewinds the counter. `sync_all` is what makes the record
+    /// as durable as the leaf it describes.
+    fn append_ledger(&self, lock_id: u64, part: &IssuedPart) -> Result<(), VaultError> {
+        // No ledger path = the in-memory vault from `from_seed`. Nothing to record.
+        let Some(path) = &self.ledger_path else { return Ok(()) };
         use std::io::Write;
         let line = format!(
             "{{\"lock_id\":{},\"index\":{},\"value\":{},\"cm\":\"{}\"}}\n",
             lock_id, part.index, part.amount, part.cm_hex
         );
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = f.write_all(line.as_bytes());
-            let _ = f.flush();
+        let fail = |e: std::io::Error| VaultError::LedgerWriteFailed {
+            detail: format!("{}: {e}", path.display()),
+        };
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir).map_err(fail)?;
         }
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(fail)?;
+        f.write_all(line.as_bytes()).map_err(fail)?;
+        f.flush().map_err(fail)?;
+        // The line must outlive a power cut, not merely this process.
+        f.sync_all().map_err(fail)?;
+        Ok(())
     }
 
     /// The vault's public key, hex. Safe to publish — it is what binds a note to this
@@ -226,8 +336,15 @@ impl BridgeVault {
         }
         drop(store);
 
+        // Fail CLOSED. An index that could not be recorded must never reach a depositor:
+        // the leaf it produces is permanent, but the memory of which index produced it
+        // would not be, and the next restart would re-derive it. The in-memory counter has
+        // already advanced past these indices, which is the safe direction — burning an
+        // index costs nothing, re-issuing one publishes a duplicate leaf. Nothing is
+        // inserted into `issued`, so a submission for this lock is later refused with
+        // `UnknownLock` rather than silently accepted.
         for p in &out {
-            self.append_ledger(lock_id, p);
+            self.append_ledger(lock_id, p)?;
         }
         self.issued.lock().unwrap().insert(lock_id, out.clone());
         Ok(out)
@@ -437,6 +554,28 @@ impl BridgeVault {
         for p in positions {
             in_flight.remove(p);
         }
+    }
+
+    /// `(derivation index, commitment hex)` for every note the vault believes it holds.
+    ///
+    /// The commitment is rebuilt from the blinding actually STORED against the note, not
+    /// re-derived from its index, so this is what an operator uses to reconcile the vault's
+    /// book against the leaves really sitting in the pool. A note that replayed at the
+    /// wrong index shows up here with a commitment the pool does not contain.
+    pub fn note_commitments(&self) -> Vec<(u64, String)> {
+        let store = self.store.lock().unwrap();
+        store
+            .notes
+            .iter()
+            .filter_map(|n| {
+                let index = n.index?;
+                // Take a correctly-shaped note from the account (right value, right spend
+                // key) and substitute the blinding we are actually holding.
+                let mut probe = self.account.note(index, n.value).ok()?;
+                probe.blinding = n.blinding;
+                Some((index, hex::encode(sigil_shield::note_v1::to_wire(probe.commitment()))))
+            })
+            .collect()
     }
 
     /// Leaf positions currently committed to an in-flight unlock. Diagnostics only.
@@ -867,4 +1006,195 @@ mod tests {
             BridgeVault::from_seed([2u8; 32]).public_key_hex()
         );
     }
+
+    // ---------------------------------------------------------------------------
+    // Restart-durability of the deposit counter.
+    //
+    // A shield CONSUMES NO NOTE, so unlike a spend it has no tree position to derive a
+    // unique index from — the counter is the only source of uniqueness, and the ledger is
+    // the only thing that carries that counter across a restart. These tests pin the ways
+    // the ledger can fail to carry it.
+    // ---------------------------------------------------------------------------
+
+    /// Scratch dir unique per test AND per process, so parallel tests cannot share a
+    /// ledger and a crashed run cannot poison the next one.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("sigil-vault-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn seed_file(dir: &Path) -> PathBuf {
+        let p = dir.join("seed");
+        std::fs::write(&p, "5a".repeat(32)).expect("write seed");
+        p
+    }
+
+    /// **THE DEPOSIT COLLISION.** The vault's ledger directory does not exist yet — the
+    /// ordinary state of a node the first time the bridge is enabled, since nothing
+    /// creates `/root/.config/sigil/` for it.
+    ///
+    /// `append_ledger` opened with `create(true)`, which creates the FILE but never the
+    /// DIRECTORY, and then discarded the error. So `prepare` issued a commitment, told the
+    /// depositor to sign it, and recorded nothing. On the next start the counter replayed
+    /// an empty ledger back to 0 and re-derived index 0 — and a shield commitment is
+    /// `compress2(compress2(value, blinding), pk)` with a counter-derived blinding, so the
+    /// SAME amount to the SAME vault key produces a BYTE-IDENTICAL leaf.
+    ///
+    /// Two deposits of equal size either side of a restart therefore derive one leaf.
+    /// Consensus refuses the duplicate, so no value is created — the failure is that the
+    /// second deposit can never land: its `Shield` is rejected, the lock never reaches
+    /// `settled`, nothing is minted on Polygon, and every retry of that amount collides
+    /// again because the counter is still rewound.
+    #[test]
+    fn two_deposits_across_a_restart_must_not_publish_the_same_commitment() {
+        let dir = scratch("collide");
+        let seed_path = seed_file(&dir);
+        // The parent of the ledger does NOT exist. Nothing in the vault creates it.
+        let ledger_path = dir.join("state").join("notes.jsonl");
+        assert!(!ledger_path.parent().unwrap().exists());
+
+        let first = {
+            let v = BridgeVault::open(&seed_path, &ledger_path).expect("open");
+            v.prepare(1, 500).expect("prepare").remove(0)
+        };
+        // Process restart: brand new vault, same seed, same ledger path.
+        let second = {
+            let v = BridgeVault::open(&seed_path, &ledger_path).expect("reopen");
+            v.prepare(2, 500).expect("prepare").remove(0)
+        };
+
+        assert_ne!(
+            first.index, second.index,
+            "the deposit counter rewound across the restart — index {} was issued twice",
+            first.index
+        );
+        assert_ne!(
+            first.cm_hex, second.cm_hex,
+            "two deposits published a byte-identical note commitment: one leaf for two \
+             deposits, and the relayer mints wrapped SIGIL for both"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// If the allocation cannot be made durable, the vault must not hand the depositor a
+    /// commitment to sign. Issuing one anyway is exactly how the collision above happens:
+    /// the note becomes real on chain while the record of which index produced it does not.
+    ///
+    /// The parent path here is a regular FILE, so the directory can never be created — an
+    /// unrecoverable write, standing in for a full disk or a read-only mount.
+    #[test]
+    fn a_vault_that_cannot_record_an_allocation_refuses_to_issue_it() {
+        let dir = scratch("nodurable");
+        let seed_path = seed_file(&dir);
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("write blocker");
+        let ledger_path = blocker.join("notes.jsonl");
+
+        let v = BridgeVault::open(&seed_path, &ledger_path).expect("open");
+        let err = v
+            .prepare(1, 500)
+            .expect_err("an allocation that cannot be recorded must not be issued");
+        assert!(
+            matches!(err, VaultError::LedgerWriteFailed { .. }),
+            "expected a loud durability failure, got {err:?}"
+        );
+        assert!(
+            v.issued_for(1).is_none(),
+            "a refused lock must leave no issued-parts record to check against"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A ledger with a HOLE in it — one line lost to a partial write, a truncation, or a
+    /// hand edit. Replay counted lines instead of reading the `index` each line records,
+    /// which broke two separate things at once:
+    ///
+    /// 1. the counter resumed at the LINE COUNT, so an index already published on chain
+    ///    got handed out again — the same collision as above; and
+    /// 2. every note after the hole was rebuilt at the wrong index, hence with the wrong
+    ///    blinding, hence with a commitment that matches nothing in the pool. Those notes
+    ///    are locked value the vault can no longer recognise or spend.
+    #[test]
+    fn a_gapped_ledger_rebuilds_each_note_at_the_index_it_recorded() {
+        let dir = scratch("gap");
+        let seed_path = seed_file(&dir);
+        let ledger_path = dir.join("notes.jsonl");
+        // Indices 0 and 2 survived; the line for index 1 did not.
+        std::fs::write(
+            &ledger_path,
+            "{\"lock_id\":1,\"index\":0,\"value\":500,\"cm\":\"\"}\n\
+             {\"lock_id\":1,\"index\":2,\"value\":200,\"cm\":\"\"}\n",
+        )
+        .expect("write ledger");
+
+        let v = BridgeVault::open(&seed_path, &ledger_path).expect("open");
+
+        let next = v.prepare(2, 500).expect("prepare").remove(0);
+        assert_eq!(
+            next.index, 3,
+            "index 2 is already published on chain; resuming at the line count reissues it"
+        );
+
+        // The rebuilt notes must carry the blindings of the indices the ledger recorded,
+        // or they no longer match the leaves sitting in the pool.
+        let account = ShieldedAccount::from_seed(SEED);
+        let expect: Vec<(u64, String)> = [(0u64, 500u64), (2, 200)]
+            .iter()
+            .map(|&(i, val)| {
+                let cm = account.note(i, val).expect("note").commitment();
+                (i, hex::encode(sigil_shield::note_v1::to_wire(cm)))
+            })
+            .collect();
+        let held = v.note_commitments();
+        for (index, cm) in expect {
+            assert!(
+                held.contains(&(index, cm.clone())),
+                "the note recorded at index {index} was rebuilt with a different blinding, \
+                 so the vault can no longer recognise its own leaf in the pool"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Backward compatibility: a ledger written by the OLD, purely sequential code must
+    /// replay to exactly the same notes and the same next index. The fix may only change
+    /// behaviour where the old behaviour was wrong.
+    #[test]
+    fn a_sequential_ledger_written_by_the_old_code_replays_identically() {
+        let dir = scratch("compat");
+        let seed_path = seed_file(&dir);
+        let ledger_path = dir.join("notes.jsonl");
+        std::fs::write(
+            &ledger_path,
+            "{\"lock_id\":1,\"index\":0,\"value\":500,\"cm\":\"aa\"}\n\
+             {\"lock_id\":1,\"index\":1,\"value\":200,\"cm\":\"bb\"}\n\
+             {\"lock_id\":2,\"index\":2,\"value\":100,\"cm\":\"cc\"}\n",
+        )
+        .expect("write ledger");
+
+        let v = BridgeVault::open(&seed_path, &ledger_path).expect("open");
+        assert_eq!(
+            v.prepare(3, 500).expect("prepare")[0].index,
+            3,
+            "a gapless ledger must resume exactly where the old line-counting code did"
+        );
+        // (`note_balance` stays 0 here on purpose: it counts only notes that have LANDED,
+        // and a replayed note has no leaf position until `scan_owned` finds it on chain.)
+
+        // The notes themselves open exactly as before: same seed, same index, same
+        // blinding, same commitment.
+        let account = ShieldedAccount::from_seed(SEED);
+        let held = v.note_commitments();
+        for (i, val) in [(0u64, 500u64), (1, 200), (2, 100)] {
+            let cm = hex::encode(sigil_shield::note_v1::to_wire(
+                account.note(i, val).expect("note").commitment(),
+            ));
+            assert!(held.contains(&(i, cm)), "note {i} no longer opens under the old scheme");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }

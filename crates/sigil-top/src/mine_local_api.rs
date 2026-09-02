@@ -330,6 +330,9 @@ mod shield_ops {
             recipient_pk_encrypt: String,
             amount: String,
             notes: Vec<CandidateNote>,
+            /// Optional private message, sealed to the recipient with the note.
+            #[serde(default)]
+            memo: String,
         }
 
         let Some(seed) = crate::miner_seed() else {
@@ -458,6 +461,7 @@ mod shield_ops {
             blinding,
             position: Some(position as u64),
             spent: false,
+            memo: None,
         });
 
         let outs_spec = [(amount, recipient_pk), (change, my_pk)];
@@ -475,13 +479,11 @@ mod shield_ops {
 
         let recipient_addr = ShieldedAddress::new(recipient_pk, &req.recipient_pk_encrypt);
         let (out0_value, out0_blinding) = bundle.out_preimages[0];
-        let ct = match seal_note(
-            &NotePlaintext {
-                value: out0_value,
-                blinding: out0_blinding,
-            },
-            &recipient_addr,
-        ) {
+        let pt = match NotePlaintext::new(out0_value, out0_blinding).with_memo(&req.memo) {
+            Ok(p) => p,
+            Err(e) => return bad_request(format!("memo rejected: {e}")),
+        };
+        let ct = match seal_note(&pt, &recipient_addr) {
             Ok(c) => c,
             Err(e) => return bad_request(format!("could not seal the note to the recipient: {e}")),
         };

@@ -139,6 +139,29 @@ pub fn build_private_send(
     recipient_pk_enc_hex: &str,
     amount_str: &str,
 ) -> Result<String, JsValue> {
+    build_private_send_with_memo(
+        seed_hex, note_index, note_value_str, note_position, unpadded_leaves_json, capacity,
+        recipient_pk_shield_hex, recipient_pk_enc_hex, amount_str, "",
+    )
+}
+
+/// [`buildPrivateSend`] plus a private memo (UTF-8, at most `note_cipher::MEMO_LEN` = 512
+/// bytes) sealed to the recipient alongside the note. A separate export rather than an
+/// extra parameter so pages built against the memo-less signature keep working unchanged.
+#[wasm_bindgen(js_name = buildPrivateSendWithMemo)]
+#[allow(clippy::too_many_arguments)]
+pub fn build_private_send_with_memo(
+    seed_hex: &str,
+    note_index: u32,
+    note_value_str: &str,
+    note_position: u32,
+    unpadded_leaves_json: &str,
+    capacity: u32,
+    recipient_pk_shield_hex: &str,
+    recipient_pk_enc_hex: &str,
+    amount_str: &str,
+    memo: &str,
+) -> Result<String, JsValue> {
     let account = ShieldedAccount::from_seed(hex32(seed_hex)?);
     let note_value = parse_u64(note_value_str, "note_value")?;
     let amount = parse_u64(amount_str, "amount")?;
@@ -169,6 +192,7 @@ pub fn build_private_send(
         blinding,
         position: Some(note_position as u64),
         spent: false,
+        memo: None,
     });
 
     let recipient_pk: BaseElement = from_wire(&hex32(recipient_pk_shield_hex)?)
@@ -194,11 +218,11 @@ pub fn build_private_send(
     // knows `(value, blinding)` without anyone telling it.
     let recipient_addr = ShieldedAddress::new(recipient_pk, recipient_pk_enc_hex);
     let (out0_value, out0_blinding) = bundle.out_preimages[0];
-    let ct = seal_note(
-        &NotePlaintext { value: out0_value, blinding: out0_blinding },
-        &recipient_addr,
-    )
-    .map_err(|e| JsValue::from_str(&format!("could not seal note to recipient: {e}")))?;
+    let pt = NotePlaintext::new(out0_value, out0_blinding)
+        .with_memo(memo)
+        .map_err(|e| JsValue::from_str(&format!("memo rejected: {e}")))?;
+    let ct = seal_note(&pt, &recipient_addr)
+        .map_err(|e| JsValue::from_str(&format!("could not seal note to recipient: {e}")))?;
 
     let (change_value, change_blinding) = bundle.out_preimages[1];
     let change_index = bundle.out_indices.first().copied();
@@ -217,6 +241,26 @@ pub fn build_private_send(
         "change_blinding_hex": hex::encode(to_wire(change_blinding)),
     });
     Ok(result.to_string())
+}
+
+/// Trial-open ONE published note ciphertext with this seed's encryption key.
+///
+/// The receiving half of private payments, in the browser: a page walks every ciphertext
+/// on chain, calls this, and each success is a note that is ours — value, blinding (so the
+/// note can be spent) and the memo the sender wrote. Throws for any ciphertext not sealed
+/// to us, which is the common case and carries no information.
+#[wasm_bindgen(js_name = openNoteCiphertext)]
+pub fn open_note_ciphertext(seed_hex: &str, ciphertext_json: &str) -> Result<String, JsValue> {
+    let id = crate::note_cipher::enc_identity_from_seed(&hex32(seed_hex)?);
+    let ct = crate::note_cipher::NoteCiphertext(ciphertext_json.to_string());
+    let pt = crate::note_cipher::try_open_note(&ct, &id)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    Ok(serde_json::json!({
+        "value": pt.value.to_string(),
+        "blinding_hex": hex::encode(to_wire(pt.blinding)),
+        "memo": pt.memo.text(),
+    })
+    .to_string())
 }
 
 /// Sanity/self-test entry point for the standalone WASM-loading smoke-test page: no

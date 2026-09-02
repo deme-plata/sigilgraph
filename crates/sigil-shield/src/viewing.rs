@@ -219,7 +219,7 @@ mod tests {
         let (acct, address) = addr(&seed);
         let vk = ViewingKey::from_seed(&seed);
 
-        let pt = NotePlaintext { value: 5_000, blinding: BaseElement::new(0xABCD) };
+        let pt = NotePlaintext::new(5_000, BaseElement::new(0xABCD));
         let ct = seal_note(&pt, &address).expect("seal");
 
         // SIGHT: the viewing key recovers the payment in full.
@@ -258,7 +258,7 @@ mod tests {
             .enumerate()
             .map(|(i, v)| {
                 seal_note(
-                    &NotePlaintext { value: *v, blinding: BaseElement::new(100 + i as u64) },
+                    &NotePlaintext::new(*v, BaseElement::new(100 + i as u64)),
                     &address,
                 )
                 .unwrap()
@@ -275,7 +275,7 @@ mod tests {
         let (_a, alice_addr) = addr(&[0xA1u8; 32]);
         let bob_vk = ViewingKey::from_seed(&[0xB0u8; 32]);
         let ct = seal_note(
-            &NotePlaintext { value: 9_999, blinding: BaseElement::new(7) },
+            &NotePlaintext::new(9_999, BaseElement::new(7)),
             &alice_addr,
         )
         .unwrap();

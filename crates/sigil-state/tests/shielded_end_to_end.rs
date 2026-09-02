@@ -691,10 +691,7 @@ fn a_miner_can_open_its_shielded_reward_knowing_only_its_seed() {
     let reward: u128 = 201_881_165;
     let cm = sigil_shield::note_v1::coinbase_commitment_wire(height, &pk, reward).expect("in range");
     let pk_field = sigil_shield::note_v1::from_wire(&pk).expect("pk");
-    let pt = sigil_shield::note_cipher::NotePlaintext {
-        value: reward as u64,
-        blinding: sigil_shield::note_v1::coinbase_blinding(height, pk_field),
-    };
+    let pt = sigil_shield::note_cipher::NotePlaintext::new(reward as u64, sigil_shield::note_v1::coinbase_blinding(height, pk_field));
     let addr = sigil_shield::note_cipher::ShieldedAddress::new(pk_field, &enc_id.public_hex());
     let ct = sigil_shield::note_cipher::seal_note(&pt, &addr).expect("seal").0;
     apply(&mut state, height, vec![StateMutation::ShieldedCoinbase {

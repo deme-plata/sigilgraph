@@ -115,6 +115,11 @@ pub enum ShieldedSubmitError {
     /// output — a length that fits neither shape means the positional alignment with
     /// `cm_outs` cannot be trusted.
     WrongCiphertextCount { expected: usize, got: usize },
+    /// One `note_ciphertexts` entry is larger than any honest sealed note can be
+    /// (`sigil_shield::note_cipher::MAX_NOTE_CIPHERTEXT_LEN`). Every node stores and
+    /// hashes every ciphertext forever; this is the only thing stopping a sender from
+    /// attaching kilobytes of junk to each output.
+    CiphertextTooLong { got: usize, limit: usize },
 }
 
 impl ShieldedSubmitError {
@@ -157,6 +162,11 @@ impl ShieldedSubmitError {
             Self::WrongCiphertextCount { expected, got } => format!(
                 "note_ciphertexts must be empty or have exactly {expected} entries (one per \
                  output), got {got}"
+            ),
+            Self::CiphertextTooLong { got, limit } => format!(
+                "a note ciphertext is {got} bytes; the limit is {limit} (a sealed note with a \
+                 full {}-byte memo is well under it)",
+                sigil_shield::note_cipher::MEMO_LEN
             ),
         }
     }
@@ -514,6 +524,14 @@ impl ShieldedBridge {
                 expected: outs.len(),
                 got: note_ciphertexts.len(),
             });
+        }
+        for ct in note_ciphertexts.iter().flatten() {
+            if ct.len() > sigil_shield::note_cipher::MAX_NOTE_CIPHERTEXT_LEN {
+                return Err(ShieldedSubmitError::CiphertextTooLong {
+                    got: ct.len(),
+                    limit: sigil_shield::note_cipher::MAX_NOTE_CIPHERTEXT_LEN,
+                });
+            }
         }
         self.reject_if_queued(&nf)?;
         for e in &extra {

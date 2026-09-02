@@ -18,7 +18,7 @@ fn main() {
     let enc = sigil_shield::note_cipher::enc_identity_from_seed(&seed);
 
     let blinding = sigil_shield::note_v1::coinbase_blinding(height, pk_field);
-    let pt = sigil_shield::note_cipher::NotePlaintext { value: amount as u64, blinding };
+    let pt = sigil_shield::note_cipher::NotePlaintext::new(amount as u64, blinding);
     let addr = sigil_shield::note_cipher::ShieldedAddress::new(pk_field, &enc.public_hex());
     let ct = sigil_shield::note_cipher::seal_note(&pt, &addr).expect("seal");
     let cm = sigil_shield::note_v1::coinbase_commitment_wire(height, &pk_shield, amount).expect("cm");

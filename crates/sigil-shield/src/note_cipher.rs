@@ -46,7 +46,35 @@ use winterfell::math::StarkField;
 use crate::note_v1::{from_wire, to_wire, NoteError};
 
 /// Domain tag so a note ciphertext can never be confused with another sealed payload.
+///
+/// `SIGILNT1` is the original 24-byte layout (`magic ‖ value ‖ blinding`), still accepted
+/// on decode so every ciphertext sealed before memos existed keeps opening.
 const NOTE_MAGIC: &[u8; 8] = b"SIGILNT1";
+
+/// The memo-carrying layout (2026-09-02): `magic ‖ value ‖ blinding ‖ memo_len:u16 ‖
+/// memo[MEMO_LEN]`. Every sender now seals THIS layout, memo or not.
+const NOTE_MAGIC_V2: &[u8; 8] = b"SIGILNT2";
+
+/// Fixed on-the-wire memo capacity, in bytes. The same 512 Zcash chose, and for the same
+/// reason: a memo field is only private if every note carries one of the same size. A
+/// variable-length field would tell the whole network which payments had a message and
+/// roughly how long it was — the ciphertext's SIZE is public even though its bytes are
+/// not (see the module docs). So the memo is always padded to `MEMO_LEN` and the real
+/// length rides INSIDE the sealed box, where only the recipient can read it.
+pub const MEMO_LEN: usize = 512;
+
+/// Byte length of a v2 plaintext: 8 magic + 8 value + 8 blinding + 2 length + memo.
+pub const NOTE_PLAINTEXT_V2_LEN: usize = 8 + 8 + 8 + 2 + MEMO_LEN;
+
+/// Byte length of the legacy v1 plaintext.
+const NOTE_PLAINTEXT_V1_LEN: usize = 24;
+
+/// Upper bound the API enforces on one published ciphertext string. A v2 envelope is
+/// ~1.3 KB of JSON (hex ciphertext of `NOTE_PLAINTEXT_V2_LEN` + 16-byte tag, an ephemeral
+/// key, a nonce); this leaves room for a post-quantum-hybrid envelope without letting a
+/// sender attach kilobytes of junk to every output. Not a consensus rule — the state
+/// stores whatever the mempool admitted — so it lives at the door, in `sigil-api`.
+pub const MAX_NOTE_CIPHERTEXT_LEN: usize = 4096;
 
 /// Errors from sealing or opening a note.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -59,24 +87,121 @@ pub enum CipherError {
     NotForUs,
     #[error("bad address encoding: {0}")]
     BadAddress(&'static str),
+    #[error("memo is {got} bytes; the limit is {limit}")]
+    MemoTooLong { got: usize, limit: usize },
     #[error(transparent)]
     Note(#[from] NoteError),
 }
 
+/// A private message riding inside a sealed note: up to [`MEMO_LEN`] bytes, always
+/// transmitted padded to exactly `MEMO_LEN` so its presence and length leak nothing.
+///
+/// Bytes, not a `String`, on the wire — but every constructor here takes UTF-8 and
+/// [`Memo::text`] gives it back, since a memo is for a human to read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Memo {
+    len: u16,
+    bytes: [u8; MEMO_LEN],
+}
+
+impl Default for Memo {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl std::fmt::Debug for Memo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Memo").field("len", &self.len).field("text", &self.text()).finish()
+    }
+}
+
+impl Memo {
+    /// No message. Still occupies `MEMO_LEN` bytes on the wire, by design.
+    pub const fn empty() -> Self {
+        Self { len: 0, bytes: [0u8; MEMO_LEN] }
+    }
+
+    /// A memo from UTF-8 text. Refused, not truncated, past `MEMO_LEN` bytes: silently
+    /// cutting a message the sender wrote is worse than telling them it does not fit.
+    pub fn from_text(text: &str) -> Result<Self, CipherError> {
+        Self::from_bytes(text.as_bytes())
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Result<Self, CipherError> {
+        if b.len() > MEMO_LEN {
+            return Err(CipherError::MemoTooLong { got: b.len(), limit: MEMO_LEN });
+        }
+        let mut bytes = [0u8; MEMO_LEN];
+        bytes[..b.len()].copy_from_slice(b);
+        Ok(Self { len: b.len() as u16, bytes })
+    }
+
+    /// The unpadded message bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len as usize]
+    }
+
+    /// The message as text (lossy for non-UTF-8 bytes, which no client of ours writes).
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(self.as_bytes()).into_owned()
+    }
+
+    pub fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
 /// What a sender transmits to a recipient about one output note.
 ///
-/// Only `(value, blinding)` — the recipient supplies its own `pk_shield` when
-/// reconstructing the commitment, so a ciphertext cannot be used to make the recipient
-/// accept a note bound to somebody else's key.
+/// `(value, blinding)` — the recipient supplies its own `pk_shield` when reconstructing
+/// the commitment, so a ciphertext cannot be used to make the recipient accept a note
+/// bound to somebody else's key — plus a [`Memo`] only the recipient can read.
+///
+/// The memo is NOT bound by the STARK: the circuit proves value conservation and
+/// ownership, and a memo is neither. It is authenticated by the AEAD tag, so nobody can
+/// alter it in flight, but it is not part of the commitment and changing it changes
+/// nothing the chain checks. Treat it exactly as a sealed letter: private, tamper-evident,
+/// and outside consensus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NotePlaintext {
     pub value: u64,
     pub blinding: BaseElement,
+    pub memo: Memo,
 }
 
 impl NotePlaintext {
+    /// A note with no memo.
+    pub const fn new(value: u64, blinding: BaseElement) -> Self {
+        Self { value, blinding, memo: Memo::empty() }
+    }
+
+    /// Attach a memo. Errors past [`MEMO_LEN`] bytes.
+    pub fn with_memo(mut self, text: &str) -> Result<Self, CipherError> {
+        self.memo = Memo::from_text(text)?;
+        Ok(self)
+    }
+
+    /// Always the v2 layout: `NOTE_PLAINTEXT_V2_LEN` bytes, memo or not. Sealing an empty
+    /// memo at full width is the point, not waste — see [`MEMO_LEN`].
     fn encode(&self) -> Vec<u8> {
-        let mut v = Vec::with_capacity(24);
+        let mut v = Vec::with_capacity(NOTE_PLAINTEXT_V2_LEN);
+        v.extend_from_slice(NOTE_MAGIC_V2);
+        v.extend_from_slice(&self.value.to_le_bytes());
+        v.extend_from_slice(&self.blinding.as_int().to_le_bytes());
+        v.extend_from_slice(&self.memo.len.to_le_bytes());
+        v.extend_from_slice(&self.memo.bytes);
+        debug_assert_eq!(v.len(), NOTE_PLAINTEXT_V2_LEN);
+        v
+    }
+
+    /// The legacy layout, memo-less. Only [`seal_note_compact`] uses it.
+    fn encode_v1(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(NOTE_PLAINTEXT_V1_LEN);
         v.extend_from_slice(NOTE_MAGIC);
         v.extend_from_slice(&self.value.to_le_bytes());
         v.extend_from_slice(&self.blinding.as_int().to_le_bytes());
@@ -84,9 +209,19 @@ impl NotePlaintext {
     }
 
     fn decode(b: &[u8]) -> Result<Self, CipherError> {
-        if b.len() != 24 || &b[..8] != NOTE_MAGIC {
-            return Err(CipherError::MalformedPlaintext);
-        }
+        let memo = match (b.len(), b.get(..8)) {
+            (NOTE_PLAINTEXT_V1_LEN, Some(m)) if m == NOTE_MAGIC => Memo::empty(),
+            (NOTE_PLAINTEXT_V2_LEN, Some(m)) if m == NOTE_MAGIC_V2 => {
+                let len = u16::from_le_bytes([b[24], b[25]]) as usize;
+                if len > MEMO_LEN {
+                    return Err(CipherError::MalformedPlaintext);
+                }
+                let mut bytes = [0u8; MEMO_LEN];
+                bytes.copy_from_slice(&b[26..26 + MEMO_LEN]);
+                Memo { len: len as u16, bytes }
+            }
+            _ => return Err(CipherError::MalformedPlaintext),
+        };
         let mut v = [0u8; 8];
         v.copy_from_slice(&b[8..16]);
         let mut r = [0u8; 8];
@@ -98,7 +233,7 @@ impl NotePlaintext {
         let mut wire = [0u8; 32];
         wire[..8].copy_from_slice(&raw.to_le_bytes());
         let blinding = from_wire(&wire)?;
-        Ok(Self { value: u64::from_le_bytes(v), blinding })
+        Ok(Self { value: u64::from_le_bytes(v), blinding, memo })
     }
 }
 
@@ -165,6 +300,27 @@ pub fn seal_note(
     Ok(NoteCiphertext(json))
 }
 
+/// Seal a note in the legacy 24-byte layout — for outputs that are NOT messages.
+///
+/// Shielded coinbase seals one ciphertext per registered payee per BLOCK, and its preimage
+/// is publicly derivable anyway (`coinbase_blinding`). Padding those to `MEMO_LEN` would
+/// grow chain state by ~1 KB per block per miner for a field nobody could ever put a
+/// message in. Payments (`seal_note`) always pay the padding; this path refuses a memo so
+/// it cannot be misused to send an unpadded — and therefore size-fingerprinted — message.
+pub fn seal_note_compact(
+    plaintext: &NotePlaintext,
+    recipient: &ShieldedAddress,
+) -> Result<NoteCiphertext, CipherError> {
+    if !plaintext.memo.is_empty() {
+        return Err(CipherError::MemoTooLong { got: plaintext.memo.len(), limit: 0 });
+    }
+    let pk = flux_swarm_secret::parse_pubkey_hex(&recipient.pk_enc)
+        .map_err(|e| CipherError::BadEncKey(e.to_string()))?;
+    let env = flux_swarm_secret::seal(&plaintext.encode_v1(), &pk);
+    let json = serde_json::to_string(&env).map_err(|_| CipherError::MalformedPlaintext)?;
+    Ok(NoteCiphertext(json))
+}
+
 /// Try to open a ciphertext with our encryption identity.
 ///
 /// Returns `NotForUs` for anything not addressed to us — which is the common case and
@@ -206,7 +362,7 @@ mod tests {
     fn a_sealed_note_opens_for_its_recipient() {
         let bob = enc_identity_from_seed(&[0xB0; 32]);
         let bob_addr = addr(&bob, 0xBEEF);
-        let pt = NotePlaintext { value: 4_242, blinding: BaseElement::new(0x1234_5678) };
+        let pt = NotePlaintext::new(4_242, BaseElement::new(0x1234_5678));
 
         let ct = seal_note(&pt, &bob_addr).expect("seal");
         let got = try_open_note(&ct, &bob).expect("bob must be able to open his own note");
@@ -219,7 +375,7 @@ mod tests {
     fn nobody_else_can_open_it() {
         let bob = enc_identity_from_seed(&[0xB0; 32]);
         let eve = enc_identity_from_seed(&[0xE7; 32]);
-        let pt = NotePlaintext { value: 999, blinding: BaseElement::new(7) };
+        let pt = NotePlaintext::new(999, BaseElement::new(7));
         let ct = seal_note(&pt, &addr(&bob, 1)).expect("seal");
 
         assert_eq!(
@@ -234,7 +390,7 @@ mod tests {
     #[test]
     fn tampering_breaks_the_open() {
         let bob = enc_identity_from_seed(&[0xB0; 32]);
-        let pt = NotePlaintext { value: 5, blinding: BaseElement::new(6) };
+        let pt = NotePlaintext::new(5, BaseElement::new(6));
         let ct = seal_note(&pt, &addr(&bob, 1)).expect("seal");
 
         let mut env: serde_json::Value = serde_json::from_str(&ct.0).unwrap();
@@ -258,7 +414,7 @@ mod tests {
     fn sealing_is_randomized() {
         let bob = enc_identity_from_seed(&[0xB0; 32]);
         let a = addr(&bob, 1);
-        let pt = NotePlaintext { value: 100, blinding: BaseElement::new(1) };
+        let pt = NotePlaintext::new(100, BaseElement::new(1));
         let c1 = seal_note(&pt, &a).expect("seal");
         let c2 = seal_note(&pt, &a).expect("seal");
         assert_ne!(c1, c2, "PRIVACY: identical notes must not produce identical ciphertexts");
@@ -288,7 +444,11 @@ mod tests {
     fn malformed_plaintext_is_rejected() {
         assert_eq!(NotePlaintext::decode(&[]).unwrap_err(), CipherError::MalformedPlaintext);
         assert_eq!(NotePlaintext::decode(&[0u8; 24]).unwrap_err(), CipherError::MalformedPlaintext);
-        let mut wrong_magic = NotePlaintext { value: 1, blinding: BaseElement::new(1) }.encode();
+        assert_eq!(
+            NotePlaintext::decode(&[0u8; NOTE_PLAINTEXT_V2_LEN]).unwrap_err(),
+            CipherError::MalformedPlaintext
+        );
+        let mut wrong_magic = NotePlaintext::new(1, BaseElement::new(1)).encode();
         wrong_magic[0] = b'X';
         assert_eq!(
             NotePlaintext::decode(&wrong_magic).unwrap_err(),
@@ -309,5 +469,86 @@ mod tests {
             [9u8; 32],
             "the encryption secret must not BE the wallet seed"
         );
+    }
+    /// THE MEMO GATE: a message sealed with the note comes back byte-exact to the recipient,
+    /// and to nobody else.
+    #[test]
+    fn a_memo_rides_inside_the_sealed_note() {
+        let bob = enc_identity_from_seed(&[0xB0; 32]);
+        let eve = enc_identity_from_seed(&[0xE7; 32]);
+        let pt = NotePlaintext::new(4_242, BaseElement::new(0x1234_5678))
+            .with_memo("Lit one for you, Viktor. — Rocky ☕")
+            .expect("fits");
+        let ct = seal_note(&pt, &addr(&bob, 0xBEEF)).expect("seal");
+        let got = try_open_note(&ct, &bob).expect("bob opens");
+        assert_eq!(got, pt);
+        assert_eq!(got.memo.text(), "Lit one for you, Viktor. — Rocky ☕");
+        assert_eq!(try_open_note(&ct, &eve), Err(CipherError::NotForUs));
+    }
+
+    /// PRIVACY: the ciphertext is the same size whether the memo is empty, short, or full.
+    /// If this ever fails, the network can see who is talking and how much.
+    #[test]
+    fn memo_length_does_not_change_ciphertext_size() {
+        let bob = enc_identity_from_seed(&[0xB0; 32]);
+        let a = addr(&bob, 1);
+        let base = NotePlaintext::new(1, BaseElement::new(1));
+        let none = seal_note(&base, &a).unwrap().0.len();
+        let short = seal_note(&base.with_memo("hi").unwrap(), &a).unwrap().0.len();
+        let full = seal_note(&base.with_memo(&"x".repeat(MEMO_LEN)).unwrap(), &a).unwrap().0.len();
+        assert_eq!(none, short, "an empty memo must not be distinguishable by size");
+        assert_eq!(short, full, "a full memo must not be distinguishable by size");
+        assert!(none < MAX_NOTE_CIPHERTEXT_LEN, "the API bound must admit every honest ciphertext ({none} >= {MAX_NOTE_CIPHERTEXT_LEN})");
+    }
+
+    /// A memo past the cap is refused, never truncated.
+    #[test]
+    fn oversized_memo_is_refused_not_truncated() {
+        let err = NotePlaintext::new(1, BaseElement::new(1))
+            .with_memo(&"y".repeat(MEMO_LEN + 1))
+            .unwrap_err();
+        assert_eq!(err, CipherError::MemoTooLong { got: MEMO_LEN + 1, limit: MEMO_LEN });
+        // exactly at the cap is fine
+        assert!(NotePlaintext::new(1, BaseElement::new(1)).with_memo(&"y".repeat(MEMO_LEN)).is_ok());
+    }
+
+    /// COMPATIBILITY: a ciphertext sealed by a pre-memo client (24-byte `SIGILNT1`
+    /// plaintext) still opens, with an empty memo. Every note delivered before today is
+    /// one of these.
+    #[test]
+    fn legacy_v1_plaintext_still_decodes() {
+        let mut v1 = Vec::with_capacity(24);
+        v1.extend_from_slice(NOTE_MAGIC);
+        v1.extend_from_slice(&777u64.to_le_bytes());
+        v1.extend_from_slice(&BaseElement::new(0xAB).as_int().to_le_bytes());
+        let pt = NotePlaintext::decode(&v1).expect("v1 layout must still decode");
+        assert_eq!(pt, NotePlaintext::new(777, BaseElement::new(0xAB)));
+        assert!(pt.memo.is_empty());
+    }
+
+    /// The compact (coinbase) seal opens like any other, is measurably smaller, and refuses
+    /// to carry a memo.
+    #[test]
+    fn compact_seal_is_smaller_and_memo_free() {
+        let bob = enc_identity_from_seed(&[0xB0; 32]);
+        let a = addr(&bob, 1);
+        let pt = NotePlaintext::new(31, BaseElement::new(9));
+        let compact = seal_note_compact(&pt, &a).expect("seal");
+        let padded = seal_note(&pt, &a).expect("seal");
+        assert!(compact.0.len() < padded.0.len());
+        assert_eq!(try_open_note(&compact, &bob).unwrap(), pt);
+        let with_memo = pt.with_memo("x").unwrap();
+        assert_eq!(
+            seal_note_compact(&with_memo, &a).unwrap_err(),
+            CipherError::MemoTooLong { got: 1, limit: 0 }
+        );
+    }
+
+    /// A v2 plaintext claiming more memo than fits is malformed, not silently clamped.
+    #[test]
+    fn v2_with_lying_length_is_rejected() {
+        let mut b = NotePlaintext::new(1, BaseElement::new(1)).encode();
+        b[24..26].copy_from_slice(&((MEMO_LEN as u16) + 1).to_le_bytes());
+        assert_eq!(NotePlaintext::decode(&b).unwrap_err(), CipherError::MalformedPlaintext);
     }
 }

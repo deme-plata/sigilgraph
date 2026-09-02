@@ -1683,11 +1683,8 @@ fn seal_coinbase_note(
     let enc = work.shielded().encrypt_key(to)?;
     let pk = sigil_shield::note_v1::from_wire(pk_shield_wire).ok()?;
     let value = u64::try_from(amount).ok()?;
-    let pt = sigil_shield::note_cipher::NotePlaintext {
-        value,
-        blinding: sigil_shield::note_v1::coinbase_blinding(height, pk),
-    };
+    let pt = sigil_shield::note_cipher::NotePlaintext::new(value, sigil_shield::note_v1::coinbase_blinding(height, pk));
     let addr = sigil_shield::note_cipher::ShieldedAddress::new(pk, &hex::encode(enc));
-    sigil_shield::note_cipher::seal_note(&pt, &addr).ok().map(|c| c.0)
+    sigil_shield::note_cipher::seal_note_compact(&pt, &addr).ok().map(|c| c.0)
 }
 

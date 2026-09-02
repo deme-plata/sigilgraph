@@ -158,6 +158,9 @@ pub struct OwnedNote {
     /// Leaf position in the pool, once the note has actually landed on chain.
     pub position: Option<u64>,
     pub spent: bool,
+    /// The sealed memo that arrived with a RECEIVED note (`None` for notes this wallet
+    /// created itself, and for pre-memo deliveries). Never on chain in the clear.
+    pub memo: Option<String>,
 }
 
 /// The wallet's local record of its own notes.
@@ -186,6 +189,7 @@ impl NoteStore {
             blinding,
             position: None,
             spent: false,
+            memo: None,
         });
         index
     }
@@ -195,6 +199,16 @@ impl NoteStore {
     /// Deduplicates on `(value, blinding)`: a wallet re-scans the chain routinely and must
     /// not book the same payment twice.
     pub fn receive(&mut self, value: u64, blinding: BaseElement) -> bool {
+        self.receive_with_memo(value, blinding, None)
+    }
+
+    /// [`receive`](Self::receive), keeping the memo that came sealed with the note.
+    pub fn receive_with_memo(
+        &mut self,
+        value: u64,
+        blinding: BaseElement,
+        memo: Option<String>,
+    ) -> bool {
         if self.notes.iter().any(|n| n.value == value && n.blinding == blinding) {
             return false;
         }
@@ -204,6 +218,7 @@ impl NoteStore {
             blinding,
             position: None,
             spent: false,
+            memo,
         });
         true
     }
@@ -222,7 +237,8 @@ impl NoteStore {
         let mut found = 0;
         for ct in ciphertexts {
             if let Ok(pt) = crate::note_cipher::try_open_note(ct, enc_id) {
-                if self.receive(pt.value, pt.blinding) {
+                let memo = (!pt.memo.is_empty()).then(|| pt.memo.text());
+                if self.receive_with_memo(pt.value, pt.blinding, memo) {
                     found += 1;
                 }
             }
@@ -986,7 +1002,7 @@ mod tests {
         let (bob_value, bob_blinding) = bundle.out_preimages[0];
         assert_eq!(bob_value, 50);
         let ct = seal_note(
-            &NotePlaintext { value: bob_value, blinding: bob_blinding },
+            &NotePlaintext::new(bob_value, bob_blinding),
             &bob_addr,
         )
         .expect("seal to bob");

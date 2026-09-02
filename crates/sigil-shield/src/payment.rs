@@ -226,6 +226,7 @@ mod tests {
             blinding: BaseElement::new(7),
             position: if on_chain { Some(0) } else { None },
             spent,
+            memo: None,
         }
     }
 

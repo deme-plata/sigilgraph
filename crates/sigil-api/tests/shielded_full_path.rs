@@ -151,7 +151,7 @@ fn full_production_path_shield_then_private_payment() {
     let bob_addr = bob.address(&[0xB0; 32]);
     let (bob_value, bob_blinding) = bundle.out_preimages[0];
     let bob_ct = sigil_shield::note_cipher::seal_note(
-        &sigil_shield::note_cipher::NotePlaintext { value: bob_value, blinding: bob_blinding },
+        &sigil_shield::note_cipher::NotePlaintext::new(bob_value, bob_blinding),
         &bob_addr,
     )
     .expect("seal to bob");

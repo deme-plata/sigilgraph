@@ -60,18 +60,36 @@ fn serve_loop(
     stop: Arc<AtomicBool>,
     local_api: Option<Arc<LocalApi>>,
 ) {
+    // Accept-poll cadence — see the WouldBlock arm below for why this is not a constant.
+    let mut last_accept = std::time::Instant::now();
     loop {
         if stop.load(Ordering::Relaxed) {
             return;
         }
         match listener.accept() {
             Ok((mut stream, _)) => {
+                last_accept = std::time::Instant::now();
                 let dir = dir.clone();
                 let api = local_api.clone();
                 thread::spawn(move || handle_conn(&mut stream, &dir, api.as_deref()));
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(50));
+                // WHY THIS ISN'T A FLAT 50 ms ANY MORE. The listener is non-blocking so the
+                // `stop` flag can end this loop, and the poll interval is therefore charged
+                // to every single request as pure waiting. At a flat 50 ms that dominated
+                // everything: measured on this box 2026-09-02, `GET /api/v1/mine-wallet`
+                // (answered locally, no node call at all) took 35-53 ms, while the same class
+                // of request straight to `sigil-api` took 0.5 ms — an ~80x tax on every page
+                // load, every balance poll and every Send, and the largest single reason the
+                // wallet felt slow. Re-measured after this change: min 2.7 ms.
+                //
+                // A browser session is a continuous stream of requests, so "was anyone here
+                // recently?" separates the two regimes cleanly: 1 ms while a wallet is open
+                // (~1000 EWOULDBLOCK accepts/second on one thread, far below the noise floor
+                // of a process that also mines and syncs), 25 ms once nobody has connected
+                // for five seconds, so an idle sigil-top on a laptop stays cheap.
+                let hot = last_accept.elapsed() < Duration::from_secs(5);
+                thread::sleep(Duration::from_millis(if hot { 1 } else { 25 }));
             }
             Err(_) => {
                 thread::sleep(Duration::from_millis(100));
@@ -144,7 +162,7 @@ fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Optio
 
     // Preflight for the signing endpoints. Answered before anything else so the generic
     // `*` responses below can never satisfy a private-network preflight by accident.
-    if method == "OPTIONS" && mine_local_api::is_local_path(path) {
+    if method == "OPTIONS" && (mine_local_api::is_local_path(path) || pay::is_local_path(path)) {
         let resp = match pna_allowed_origin(&req) {
             Some(origin) => format!(
                 "HTTP/1.1 204 No Content\r\n\
@@ -165,8 +183,15 @@ fn handle_conn(stream: &mut std::net::TcpStream, dir: &PathBuf, local_api: Optio
         return;
     }
 
-    if method == "POST" && mine_local_api::is_local_path(path) {
-        let (status, resp_body) = mine_local_api::handle(path, &req_body);
+    // `/api/v1/pay` rides the SAME origin-allowlisted, private-network-gated dispatch as
+    // the three `mine_local_api` signing endpoints, and must: it spends with the mining
+    // seed, so it needs exactly that protection and no less.
+    if method == "POST" && (mine_local_api::is_local_path(path) || pay::is_local_path(path)) {
+        let (status, resp_body) = if pay::is_local_path(path) {
+            pay::handle(path, &req_body)
+        } else {
+            mine_local_api::handle(path, &req_body)
+        };
         // Echo the specific allowlisted origin rather than `*`: a response to a request
         // that crossed into the loopback address space must name its origin, and `*` is
         // the wrong answer for a signing endpoint regardless (see `pna_allowed_origin`).
@@ -317,6 +342,262 @@ fn names(safe: &str, name: &str) -> bool {
 // into both because only the surfaces listed below are served on :9800 — an external
 // script-src would 404 there. This comment also exists to bump the .rs mtime: the flux
 // wrapper cache keys only .rs sources, so a gui/-only edit would NOT rebuild this unit.
+/// One-action send, injected into the wallet THIS server hands out.
+///
+/// Not part of `gui/sigil-wallet-tron-embedded.html`: that file is shared with
+/// `sigilgraph.org`, which has no `/api/v1/pay` and no local seed. Injecting here keeps the
+/// hosted copy byte-identical to what it serves today while the copy served from this box —
+/// the one `[W]` opens, the one a user who just downloaded sigil-top sees — gets the
+/// single-call payment path. The script is self-contained and hands control straight back to
+/// the page's own `doUnifiedSend` on a 404, so a build with no seed behaves exactly as before.
+const ONE_ACTION_SEND_JS: &str = r##"
+<script>
+/* ══ ONE-ACTION SEND, INJECTED BY sigil-top's :9800 SERVER ═══════════════════════════
+ *
+ * Injected by crates/sigil-top/src/serve.rs (see `inject_one_action_send`), NOT part of
+ * gui/sigil-wallet-tron-embedded.html. It only ever runs on this box's own :9800, where
+ * /api/v1/pay exists; the hosted copy at sigilgraph.org is untouched and keeps its
+ * current behaviour.
+ *
+ * WHY IT OVERRIDES doUnifiedSend RATHER THAN PATCHING IT. The page's own unified flow
+ * cannot succeed, for two independent SCOPE bugs (both read from source, both in the
+ * shipped file):
+ *
+ *   1. `showReceipt` is declared inside the IIFE that spans the send script — it is NOT
+ *      on `window`. doUnifiedSend's step 1 detects a successful shield by swapping
+ *      `window.showReceipt` for a probe; doShield calls the LEXICAL `showReceipt`, so the
+ *      probe never fires, `shielded` stays false, and step 1 reports FAILURE on every
+ *      shield that actually succeeded.
+ *   2. doPrivateSend lives in a LATER, separate IIFE and calls the same non-global
+ *      `showReceipt` — a ReferenceError, swallowed by its own try/catch. `data-kind="send"`
+ *      is therefore never set on the receipt pane, and step 2's success test
+ *      (`sent && rcPane.getAttribute('data-kind')==='send'`) can never be true.
+ *
+ * So the browser flow reports failure whether or not money moved. Overriding the entry
+ * point sidesteps both, and moves the sequencing to the server where it is one call.
+ *
+ * UNITS. `RAW_PER_UNIT` is 1e8, matching what the REST of this page uses for both display
+ * and entry. The chain is 10 dp (`sigil_state::SIGIL_DECIMALS = 10`), so every SIGIL label
+ * on this page is 100x off — a real, separate bug in the HTML. It is deliberately NOT
+ * "fixed" here: display and entry are consistent with each other today, and changing only
+ * the entry scale would make a typed amount mean 100x what the balance above it claims.
+ */
+(function(){
+  if (window.__sigilOneActionSend) return;
+  window.__sigilOneActionSend = true;
+
+  var RAW_PER_UNIT = 100000000n;   // see UNITS note above
+  var DP = 8;
+  /* The page defines doUnifiedSend in a script ABOVE this one, so it is already
+     here to hand back to on a 404. */
+  var legacy = (typeof window.doUnifiedSend === 'function') ? window.doUnifiedSend : null;
+
+  function el(id){ return document.getElementById(id); }
+  function toRaw(s){
+    var p = String(s).split('.');
+    return BigInt(p[0]||'0')*RAW_PER_UNIT + BigInt(((p[1]||'')+'00000000').slice(0,DP));
+  }
+  function fmt(raw){
+    var b = BigInt(raw), w = b/RAW_PER_UNIT, f = (b%RAW_PER_UNIT).toString().padStart(DP,'0');
+    return w + '.' + f;
+  }
+  function msg(t,c){ var m=el('uniMsg'); if(m){ m.textContent=t||''; m.style.color=c||'#8fb3c2'; } }
+  function step(n,state,label){
+    var e = el('uniStep'+n); if(!e) return;
+    var mark = {todo:'○',busy:'◐',done:'●',fail:'✗'}[state]||'○';
+    var col  = {todo:'#5a93a8',busy:'#6df3ff',done:'#00e0c6',fail:'#ff8a8a'}[state]||'#5a93a8';
+    e.textContent = mark+' '+n+' · '+label; e.style.color = col;
+  }
+  function myNotesRaw(addr){
+    try{
+      var a = JSON.parse(localStorage.getItem('sigil-shielded-notes-'+addr)||'[]');
+      /* Only ONE note is ever spent (the circuit is 1-in/2-out), and serve.rs reads the
+         request in a single 4 KB read, so send the biggest few rather than the lot. */
+      return a.filter(function(n){ return n && !n.spent; })
+              .map(function(n){ return {index:Number(n.index), value:String(n.value)}; })
+              .sort(function(x,y){ return (BigInt(y.value) > BigInt(x.value)) ? 1 : -1; })
+              .slice(0, 24);
+    }catch(e){ return []; }
+  }
+  function recordNote(addr,index,value){
+    try{
+      var k='sigil-shielded-notes-'+addr;
+      var a=JSON.parse(localStorage.getItem(k)||'[]');
+      a.push({index:index, value:String(value), ts:Date.now()});
+      localStorage.setItem(k, JSON.stringify(a));
+    }catch(e){}
+  }
+  function short(h){ return h ? (h.slice(0,10)+'…'+h.slice(-8)) : '—'; }
+  function row(label, value, colour){
+    return '<div style="display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid rgba(33,212,253,.10);font-family:\'JetBrains Mono\';font-size:10.5px">'
+         + '<span style="color:#5a93a8">'+label+'</span>'
+         + '<span style="color:'+(colour||'#cfe9f2')+';word-break:break-all;text-align:right">'+value+'</span></div>';
+  }
+  /* Receipt written straight into the DOM — deliberately NOT via the page's showReceipt,
+     which is unreachable from here (bug 2 above). */
+  function receipt(kind, amtStr, rows, foot){
+    var rc = el('sendReceipt'); if(!rc) return;
+    var icon = el('rcIcon'), head = el('rcHead'), amt = el('rcAmt'),
+        body = el('rcRows'), ft = el('rcFoot');
+    var spec = {
+      pending: ['⏳','PAYMENT STARTED','#6df3ff'],
+      paid:    ['🔒','SENT PRIVATELY','#c0a8fa'],
+      failed:  ['✗','NOT SENT','#fbbf24']
+    }[kind] || ['⏳','PAYMENT STARTED','#6df3ff'];
+    if(icon) icon.textContent = spec[0];
+    if(head){ head.textContent = spec[1]; head.style.color = spec[2]; }
+    if(amt)  amt.textContent = amtStr + ' SIGIL';
+    if(body) body.innerHTML = rows;
+    if(ft)   ft.textContent = foot || '';
+    rc.setAttribute('data-kind', kind === 'paid' ? 'send' : kind);
+    var form = el('sendForm'); if(form) form.style.display='none';
+    rc.style.display='flex';
+  }
+
+  async function post(path, payload){
+    var r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(payload)});
+    var j = null; try{ j = await r.json(); }catch(e){}
+    return {status:r.status, ok:r.ok, json:j};
+  }
+
+  window.doUnifiedSend = async function(){
+    var btn  = el('uniGo');
+    var addr = (el('uniAddr').value||'').trim().toLowerCase();
+    var amtS = (el('uniAmt').value||'').trim();
+    msg('');
+    if(!/^[0-9a-f]{64}$/.test(addr)){ msg("Enter the recipient's 64-character SIGIL address first.", '#ff8a8a'); return; }
+    if(!/^\d+(\.\d{1,8})?$/.test(amtS) || Number(amtS) <= 0){ msg('Enter an amount greater than 0 (up to 8 decimals).', '#ff8a8a'); return; }
+
+    var from = (window.MINE_ADDR||window.ADDR||'').toLowerCase();
+    if(!/^[0-9a-f]{64}$/.test(from)){ msg('No wallet address loaded.', '#ff8a8a'); return; }
+
+    var amountRaw = toRaw(amtS);
+    var steps = el('uniSteps'); if(steps) steps.style.display='flex';
+    step(1,'busy','submitting your payment');
+    step(2,'todo','confirming on the DAG');
+    if(btn){ btn.disabled = true; btn.style.opacity = '.55'; }
+    function done(){ if(btn){ btn.disabled=false; btn.style.opacity='1'; } }
+
+    var res;
+    try{
+      res = await post('/api/v1/pay', {
+        to: addr, amount: amountRaw.toString(), memo: '',
+        from: from, notes: myNotesRaw(from)
+      });
+    }catch(e){ res = {status:0, ok:false, json:null}; }
+
+    /* 404 = this box has no local seed (or an older sigil-top). Hand straight back to the
+       page's own flow — this override is additive, never a required step. */
+    if(res.status === 404 || res.status === 0){
+      step(1,'todo','move funds into your private balance');
+      step(2,'todo','pay the recipient privately');
+      done();
+      if(typeof legacy === 'function') return legacy.apply(this, arguments);
+      msg('Local payment service unavailable on this host.', '#fbbf24');
+      return;
+    }
+
+    var j = res.json || {};
+    if(!j.ok){
+      step(1,'fail','submitting your payment');
+      msg(j.error || 'The payment could not be started.', '#ff8a8a');
+      done();
+      return;
+    }
+
+    /* Already had a covering private note → this IS the payment txid, right now. */
+    if(j.stage === 'paid'){
+      step(1,'done','private balance already covered it');
+      step(2,'done','paid');
+      window.__lastTxid = j.txid || '';
+      receipt('paid', fmt(amountRaw),
+        row('to', short(addr)) + row('payment txid', short(j.txid), '#c0a8fa'),
+        'Paid from a note that was already in your private balance.');
+      if(window.refresh) setTimeout(window.refresh, 600);
+      done();
+      return;
+    }
+
+    /* Otherwise the shield is already on-chain and its txid exists NOW. Show it, then
+       track the payment leg. The receipt never calls this a payment txid. */
+    window.__lastTxid = j.shield_txid || j.txid || '';
+    if(j.stage === 'shielding'){
+      step(1,'done','funds moved into your private balance');
+      if(j.shield_index !== null && j.shield_index !== undefined){
+        recordNote(from, j.shield_index, j.shield_value);
+      }
+    }else{
+      step(1,'done','private balance already covered it');
+    }
+    step(2,'busy','confirming on the DAG, then paying');
+    receipt('pending', fmt(amountRaw),
+      row('to', short(addr))
+      + (j.shield_txid ? row('shield txid (on-chain now)', short(j.shield_txid), '#00e0c6') : '')
+      + row('payment txid', 'waiting for the note to land…', '#6df3ff'),
+      'Your funds are in the private pool. The payment is submitted as soon as that note '
+      + 'appears on the DAG — this window updates itself.');
+
+    var job = j.job, tries = 0;
+    while(tries < 90){
+      tries++;
+      await new Promise(function(r){ setTimeout(r, 2000); });
+      var s;
+      try{ s = await post('/api/v1/pay/status', {job: job}); }catch(e){ continue; }
+      var sj = (s && s.json) || {};
+      if(sj.stage === 'paid'){
+        step(2,'done','paid');
+        window.__lastTxid = sj.txid || '';
+        receipt('paid', fmt(amountRaw),
+          row('to', short(addr))
+          + (sj.shield_txid ? row('shield txid', short(sj.shield_txid), '#00e0c6') : '')
+          + row('payment txid', short(sj.txid), '#c0a8fa'),
+          'Sent privately. Nothing on-chain links the shield above to this payment.');
+        if(window.refresh) setTimeout(window.refresh, 600);
+        done();
+        return;
+      }
+      if(sj.stage === 'failed'){
+        step(2,'fail','payment could not be built');
+        receipt('failed', fmt(amountRaw),
+          row('to', short(addr))
+          + (sj.shield_txid ? row('shield txid', short(sj.shield_txid), '#00e0c6') : '')
+          + row('why', sj.error || 'unknown', '#fbbf24'),
+          'Your money is NOT lost — it is in your private balance. Press SEND again; '
+          + 'the note is already there, so it will pay directly this time.');
+        done();
+        return;
+      }
+    }
+    step(2,'fail','still confirming');
+    msg('Still waiting for the DAG. Your funds are in your private balance — press SEND again in a moment.', '#fbbf24');
+    done();
+  };
+
+})();
+</script>
+"##;
+
+/// Splice [`ONE_ACTION_SEND_JS`] in just before `</body>`, so it runs after every script the
+/// page defines (it needs `window.doUnifiedSend` to already exist in order to capture it as
+/// the fallback). Appends if there is no `</body>` at all rather than dropping the script.
+fn inject_one_action_send(html: &str) -> Vec<u8> {
+    match html.rfind("</body>") {
+        Some(i) => {
+            let mut out = String::with_capacity(html.len() + ONE_ACTION_SEND_JS.len() + 8);
+            out.push_str(&html[..i]);
+            out.push_str(ONE_ACTION_SEND_JS);
+            out.push_str(&html[i..]);
+            out.into_bytes()
+        }
+        None => {
+            let mut out = html.to_string();
+            out.push_str(ONE_ACTION_SEND_JS);
+            out.into_bytes()
+        }
+    }
+}
+
 fn embedded_surface(safe: &str) -> Option<(Vec<u8>, &'static str)> {
     const HTML: &str = "text/html; charset=utf-8";
     const JS: &str = "text/javascript; charset=utf-8";
@@ -339,7 +620,7 @@ fn embedded_surface(safe: &str) -> Option<(Vec<u8>, &'static str)> {
     // fresh wallet created at localhost:9800/enter-sigil.html lands on a 404.
     if names(safe, "sigil-wallet-tron.html") || names(safe, "sigil-wallet-tron-embedded.html") {
         return Some((
-            include_str!("../../../gui/sigil-wallet-tron-embedded.html").as_bytes().to_vec(),
+            inject_one_action_send(include_str!("../../../gui/sigil-wallet-tron-embedded.html")),
             HTML,
         ));
     }
@@ -562,9 +843,701 @@ fn content_type(path: &str) -> &'static str {
     }
 }
 
+
+// ══ ONE-ACTION PAYMENT (`POST /api/v1/pay`) ═════════════════════════════════════════
+//
+// WHY THIS EXISTS. SIGIL has no transparent send — `sigil_tx::SHIELDED_ONLY_HEIGHT == 0`,
+// so `POST /v1/send` refuses unconditionally (sigil-api/src/lib.rs:416). A payment on this
+// chain IS `shield` → `shielded_send`. Mining, meanwhile, pays out as TRANSPARENT coinbase
+// balance. So the very first thing a new user has (mined rewards) is in the one domain from
+// which nothing can be paid, and the wallet asked them to understand and sequence the ramp
+// themselves. That is the whole of "sending is too complicated".
+//
+// `mine_local_api` already performs each leg completely on this box (derive → build → prove
+// a real `spend_full_v4` STARK → sign → submit). What was missing is the ORCHESTRATION: a
+// single call that decides whether a shield is even needed, sizes it correctly, submits it,
+// and then keeps trying the payment leg until the freshly-shielded note is visible in the
+// pool. That is what this module is. It composes `mine_local_api::handle` and adds no
+// crypto of its own — a spend/proof bug cannot be introduced here.
+//
+// ── WHAT "INSTANT TXID" HONESTLY MEANS HERE ──────────────────────────────────────────
+// The payment txid is `blake3(encode(SigilTx::ShieldedSend{ .., proof }))`. The proof cannot
+// exist until the note being spent has LANDED in the pool, which needs a block. So for a
+// user starting from transparent mined balance there is no way — client-side precomputation
+// included — to know the payment txid at the moment Confirm is pressed. What CAN be returned
+// in that instant is the SHIELD txid, which is real, on-chain and checkable at
+// `/v1/transactions/<hash>`. So:
+//
+//   * a covering shielded note already exists  → the payment is done inline and the response
+//     carries the PAYMENT txid (`stage:"paid"`). Cost is one STARK proof.
+//   * no covering note                          → the shield is submitted and the response
+//     returns immediately with the SHIELD txid (`stage:"shielding"`) plus a `job` id; a
+//     background thread finishes the payment leg and `/api/v1/pay/status` reports its txid.
+//
+// The response never calls a shield txid a payment txid. `stage` is the field that says
+// which one you are holding.
+//
+// ── THE 1-IN/2-OUT RULE, WHICH IS WHY "SHIELD THE SHORTFALL" IS WRONG ────────────────
+// The spend circuit takes ONE input note. A payment therefore needs ONE note worth at least
+// `amount + SHIELDED_FEE` — the SUM of your notes is irrelevant. Topping up by the shortfall
+// (`amount - sum(notes)`) can leave a wallet holding plenty of value and still unable to pay,
+// forever. So when a shield is needed this module shields exactly ONE ramp denomination that
+// is >= amount + fee, which by construction produces a single covering note.
+pub mod pay {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
+
+    pub const PAY: &str = "/api/v1/pay";
+    pub const PAY_STATUS: &str = "/api/v1/pay/status";
+
+    /// How long the background leg keeps trying before giving up. A shield lands as soon as
+    /// it is included in a block (measured live 2026-09-02: 6.6 blk/s), not at finality
+    /// (512 blocks ~= 78 s) — but the pool's leaf view updates on commit, so this is sized
+    /// generously past the finality window rather than tightly against block time.
+    const MAX_ATTEMPTS: u32 = 60;
+    const RETRY_EVERY: Duration = Duration::from_secs(2);
+
+    /// Paths `serve.rs` routes here. Deliberately reuses the SAME origin-allowlisted,
+    /// private-network-gated dispatch as `mine_local_api`: this endpoint spends money with
+    /// the mining seed, so it needs exactly that protection and no less.
+    pub fn is_local_path(path: &str) -> bool {
+        path == PAY || path == PAY_STATUS
+    }
+
+    /// Live state of one payment. Serialised verbatim as the `/api/v1/pay/status` body.
+    ///
+    /// SECRET-SAFETY: every field here is a public outcome (a txid, a note index, a
+    /// denomination, an error string) — the same invariant `mine_local_api` documents. The
+    /// seed and anything derived from it never appears in this struct.
+    #[derive(Clone, Default, serde::Serialize)]
+    pub struct Job {
+        /// `shielding` | `waiting` | `paid` | `failed`
+        pub stage: String,
+        pub shield_txid: String,
+        pub shield_index: Option<u64>,
+        pub shield_value: String,
+        pub txid: String,
+        pub attempts: u32,
+        pub error: Option<String>,
+        pub updated_ms: u64,
+    }
+
+    fn jobs() -> &'static Mutex<HashMap<String, Job>> {
+        static J: OnceLock<Mutex<HashMap<String, Job>>> = OnceLock::new();
+        J.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    fn put_job(id: &str, mut job: Job) {
+        job.updated_ms = now_ms();
+        let mut g = jobs().lock().unwrap_or_else(|p| p.into_inner());
+        // A single operator's own box; a few hundred receipts is the whole lifetime of a
+        // session. Trim rather than grow without bound if one is ever left running for weeks.
+        if g.len() > 512 {
+            let oldest = g
+                .iter()
+                .min_by_key(|(_, j)| j.updated_ms)
+                .map(|(k, _)| k.clone());
+            if let Some(k) = oldest {
+                g.remove(&k);
+            }
+        }
+        g.insert(id.to_string(), job);
+    }
+
+    pub fn get_job(id: &str) -> Option<Job> {
+        jobs()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(id)
+            .cloned()
+    }
+
+    fn new_job_id(seed_addr: &str, to: &str, amount: u128) -> String {
+        let mut h = blake3::Hasher::new();
+        h.update(seed_addr.as_bytes());
+        h.update(to.as_bytes());
+        h.update(&amount.to_le_bytes());
+        h.update(&now_ms().to_le_bytes());
+        hex::encode(&h.finalize().as_bytes()[..8])
+    }
+
+    /// The smallest ramp denomination that covers `need`.
+    ///
+    /// `sigil_state::shielded::DENOMINATIONS` is the 1/2/5 x 10^k ladder and is sorted
+    /// ascending, so the first entry >= `need` is the smallest one. Overshoot is at most
+    /// 2.5x and is NOT lost — it becomes change back into this wallet's own shielded
+    /// balance on the very spend it enables.
+    pub fn smallest_denomination_at_least(need: u128) -> Option<u128> {
+        sigil_state::shielded::DENOMINATIONS
+            .iter()
+            .copied()
+            .find(|d| *d >= need)
+    }
+
+    pub fn is_hex64(s: &str) -> bool {
+        s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+
+    #[derive(Clone, serde::Deserialize, serde::Serialize)]
+    pub struct CandidateNote {
+        pub index: u64,
+        /// Raw base units (glyphs) as a decimal string — the wallet's own localStorage shape.
+        pub value: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct PayReq {
+        to: String,
+        /// Raw base units (glyphs), decimal string — same convention as `mine-shield`.
+        amount: String,
+        #[serde(default)]
+        memo: String,
+        /// This wallet's own already-shielded notes, exactly the `{index, value}` pairs the
+        /// browser keeps in `localStorage['sigil-shielded-notes-'+addr]`. Optional: an empty
+        /// list simply means "nothing shielded yet", which is the out-of-the-box case.
+        #[serde(default)]
+        notes: Vec<CandidateNote>,
+        /// The address the CALLER believes it is spending from. Guard, not input: this box
+        /// can only ever spend the wallet its own seed derives, so a mismatch means the
+        /// browser is showing a different wallet and must use the manual flow instead of
+        /// silently moving the miner's money.
+        #[serde(default)]
+        from: Option<String>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct StatusReq {
+        job: String,
+    }
+
+    fn ok_json(v: serde_json::Value) -> (&'static str, String) {
+        ("200 OK", v.to_string())
+    }
+
+    /// Feature-absent / wrong-wallet / no-seed: HTTP 404, mirroring `mine_local_api`'s
+    /// availability contract so the page's existing "fall through to the manual flow"
+    /// branch fires unchanged.
+    fn not_available(reason: &str) -> (&'static str, String) {
+        (
+            "404 Not Found",
+            serde_json::json!({ "ok": false, "error": reason }).to_string(),
+        )
+    }
+
+    /// Understood the request, could not complete it. HTTP 200 with `ok:false` — same
+    /// reasoning as `mine_local_api::bad_request`.
+    fn failed(stage: &str, reason: impl Into<String>) -> (&'static str, String) {
+        ok_json(serde_json::json!({
+            "ok": false, "stage": stage, "error": reason.into(),
+        }))
+    }
+
+    /// One shared client for the whole process.
+    ///
+    /// Measured 2026-09-02 on this box: building a fresh `reqwest::blocking::Client` costs
+    /// ~25 ms because the rustls builder loads the bundled webpki root store every time —
+    /// which dwarfs the actual call (a loopback round-trip to `sigil-api` measured 0.4 ms
+    /// mean over 10 samples). Two builds per `/api/v1/pay` were most of that endpoint's
+    /// latency. Building once removes it and is the difference between "instant" being a
+    /// claim and being true.
+    fn client() -> Result<&'static reqwest::blocking::Client, String> {
+        static C: OnceLock<Option<reqwest::blocking::Client>> = OnceLock::new();
+        C.get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(15))
+                .build()
+                .ok()
+        })
+        .as_ref()
+        .ok_or_else(|| "http client init failed".to_string())
+    }
+
+    /// The wallet this box holds the seed for, lowercase hex. `None` when no seed is
+    /// configured, which is the whole availability gate for this endpoint.
+    fn local_wallet() -> Option<String> {
+        crate::miner_keypair().map(|kp| kp.pubkey_hex().to_ascii_lowercase())
+    }
+
+    /// `(pk_shield, pk_encrypt)` for a recipient, from the node's own registry.
+    ///
+    /// Both halves are required: `pk_shield` binds the output note to the recipient inside
+    /// the proof, `pk_encrypt` is what the note ciphertext is sealed to. A wallet that
+    /// registered only the first can be paid to in the circuit but could never OPEN the
+    /// note, so refusing here is the honest answer, not a limitation to route around.
+    fn recipient_keys(to: &str) -> Result<(String, String), String> {
+        let node = crate::engine_node_url();
+        let url = format!(
+            "{}/v1/shielded/address?wallet={to}",
+            node.trim_end_matches('/')
+        );
+        let c = client()?;
+        let v: serde_json::Value = c
+            .get(&url)
+            .send()
+            .map_err(|e| format!("could not reach the node: {e}"))?
+            .json()
+            .map_err(|e| format!("bad response from the node: {e}"))?;
+        if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+            return Err(v
+                .get("error")
+                .and_then(|x| x.as_str())
+                .unwrap_or("this address cannot receive private payments yet")
+                .to_string());
+        }
+        let pk_shield = v
+            .get("pk_shield")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let pk_encrypt = v
+            .get("pk_encrypt")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if pk_shield.is_empty() || pk_encrypt.is_empty() {
+            return Err(
+                "the recipient has not published an encryption key, so a private note \
+                 could be paid to them but never opened by them"
+                    .into(),
+            );
+        }
+        Ok((pk_shield, pk_encrypt))
+    }
+
+    fn transparent_balance(wallet: &str) -> Result<u128, String> {
+        let node = crate::engine_node_url();
+        let url = format!("{}/v1/balance?wallet={wallet}", node.trim_end_matches('/'));
+        let c = client()?;
+        let v: serde_json::Value = c
+            .get(&url)
+            .send()
+            .map_err(|e| format!("could not reach the node: {e}"))?
+            .json()
+            .map_err(|e| format!("bad response from the node: {e}"))?;
+        v.get("data")
+            .and_then(|d| d.get("balance"))
+            .and_then(|b| b.as_str())
+            .and_then(|s| s.parse::<u128>().ok())
+            .ok_or_else(|| "could not read this wallet's balance".to_string())
+    }
+
+    /// Everything the payment leg needs, cloneable into the background thread.
+    #[derive(Clone)]
+    struct SendCtx {
+        pk_shield: String,
+        pk_encrypt: String,
+        amount: u128,
+        memo: String,
+        notes: Vec<CandidateNote>,
+    }
+
+    /// One attempt at the payment leg. Composes `mine_local_api`'s existing endpoint rather
+    /// than re-deriving any of its crypto.
+    fn send_once(ctx: &SendCtx) -> Result<String, String> {
+        let payload = serde_json::json!({
+            "recipient_pk_shield": ctx.pk_shield,
+            "recipient_pk_encrypt": ctx.pk_encrypt,
+            "amount": ctx.amount.to_string(),
+            "memo": ctx.memo,
+            "notes": ctx.notes,
+        });
+        let (_status, body) =
+            crate::mine_local_api::handle("/api/v1/mine-send-private", &payload.to_string());
+        let v: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| format!("bad local response: {e}"))?;
+        if v.get("ok").and_then(|x| x.as_bool()) == Some(true) {
+            return Ok(v
+                .get("txid")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string());
+        }
+        Err(v
+            .get("error")
+            .and_then(|x| x.as_str())
+            .unwrap_or("unknown error")
+            .to_string())
+    }
+
+    /// Keep trying the payment leg until the note is visible in the pool. Runs detached so
+    /// `POST /api/v1/pay` can return its txid in the same millisecond it obtains one.
+    fn spawn_payment_leg(id: String, ctx: SendCtx, mut job: Job) {
+        std::thread::spawn(move || {
+            for attempt in 1..=MAX_ATTEMPTS {
+                job.attempts = attempt;
+                job.stage = "waiting".into();
+                put_job(&id, job.clone());
+                match send_once(&ctx) {
+                    Ok(txid) => {
+                        job.stage = "paid".into();
+                        job.txid = txid;
+                        job.error = None;
+                        put_job(&id, job);
+                        return;
+                    }
+                    Err(e) => {
+                        job.error = Some(e);
+                    }
+                }
+                std::thread::sleep(RETRY_EVERY);
+            }
+            job.stage = "failed".into();
+            put_job(&id, job);
+        });
+    }
+
+    pub fn handle(path: &str, body: &str) -> (&'static str, String) {
+        match path {
+            PAY => start(body),
+            PAY_STATUS => status(body),
+            _ => not_available("unknown local endpoint"),
+        }
+    }
+
+    fn status(body: &str) -> (&'static str, String) {
+        let req: StatusReq = match serde_json::from_str(body) {
+            Ok(r) => r,
+            Err(e) => return failed("status", format!("bad request body: {e}")),
+        };
+        match get_job(&req.job) {
+            Some(j) => {
+                let mut v = serde_json::to_value(&j).unwrap_or_else(|_| serde_json::json!({}));
+                v["ok"] = serde_json::json!(j.stage != "failed");
+                v["job"] = serde_json::json!(req.job);
+                ok_json(v)
+            }
+            None => failed("status", "no such payment"),
+        }
+    }
+
+    fn start(body: &str) -> (&'static str, String) {
+        let Some(seed_addr) = local_wallet() else {
+            return not_available("no local mining seed configured (SIGIL_MINE_SEED unset)");
+        };
+        let req: PayReq = match serde_json::from_str(body) {
+            Ok(r) => r,
+            Err(e) => return failed("request", format!("bad request body: {e}")),
+        };
+
+        // Wrong-wallet guard — see `PayReq::from`.
+        if let Some(f) = req.from.as_ref() {
+            let f = f.trim().to_ascii_lowercase();
+            if !f.is_empty() && f != seed_addr {
+                return not_available(
+                    "this page's wallet is not the wallet this sigil-top holds the seed for",
+                );
+            }
+        }
+
+        let to = req.to.trim().to_ascii_lowercase();
+        if !is_hex64(&to) {
+            return failed(
+                "recipient",
+                "the recipient must be a 64-character hex SIGIL address",
+            );
+        }
+        if to == seed_addr {
+            return failed("recipient", "that is this wallet's own address");
+        }
+        let amount: u128 = match req.amount.trim().parse() {
+            Ok(a) if a > 0 => a,
+            _ => {
+                return failed(
+                    "amount",
+                    "amount must be a positive base-10 integer string (raw base units)",
+                )
+            }
+        };
+
+        let (pk_shield, pk_encrypt) = match recipient_keys(&to) {
+            Ok(k) => k,
+            Err(e) => return failed("recipient", e),
+        };
+
+        let fee = sigil_state::shielded::SHIELDED_FEE;
+        let need = amount.saturating_add(fee);
+
+        let mut ctx = SendCtx {
+            pk_shield,
+            pk_encrypt,
+            amount,
+            memo: req.memo.clone(),
+            notes: req.notes.clone(),
+        };
+
+        // Does ONE existing note already cover this? (See the 1-in/2-out note in the module
+        // docs — summing the notes is the wrong question and answering it that way is what
+        // leaves a funded wallet permanently unable to pay.)
+        let covered = req
+            .notes
+            .iter()
+            .filter_map(|n| n.value.trim().parse::<u128>().ok())
+            .any(|v| v >= need);
+
+        let id = new_job_id(&seed_addr, &to, amount);
+        let mut job = Job {
+            stage: "waiting".into(),
+            ..Default::default()
+        };
+
+        if covered {
+            // Nothing to shield. The only latency is building + proving the STARK, so do it
+            // inline and hand back the real PAYMENT txid.
+            match send_once(&ctx) {
+                Ok(txid) => {
+                    job.stage = "paid".into();
+                    job.txid = txid.clone();
+                    job.attempts = 1;
+                    put_job(&id, job);
+                    return ok_json(serde_json::json!({
+                        "ok": true, "stage": "paid", "job": id, "txid": txid,
+                        "note": "paid from a note that was already in your private balance",
+                    }));
+                }
+                Err(e) => {
+                    // A covering note exists but is not visible in the pool yet (it was
+                    // shielded moments ago). Do NOT shield again — that would move a second
+                    // helping of money into the pool for one payment. Wait for the one we
+                    // already have.
+                    job.error = Some(e);
+                    spawn_payment_leg(id.clone(), ctx, job);
+                    return ok_json(serde_json::json!({
+                        "ok": true, "stage": "waiting", "job": id, "txid": serde_json::Value::Null,
+                        "note": "your private balance covers this, but the note has not \
+                                 appeared in the pool yet — waiting for it, no new funds moved",
+                    }));
+                }
+            }
+        }
+
+        // ── Shield exactly ONE denomination that covers the payment ──────────────────
+        let Some(denom) = smallest_denomination_at_least(need) else {
+            return failed(
+                "shield",
+                format!("{need} is larger than the largest shield denomination"),
+            );
+        };
+        match transparent_balance(&seed_addr) {
+            Ok(bal) if bal < denom => {
+                return failed(
+                    "shield",
+                    format!(
+                        "this payment needs a single private note of {denom} base units \
+                         (the next step up the ramp ladder from {need}); this wallet holds \
+                         {bal}"
+                    ),
+                )
+            }
+            Ok(_) => {}
+            Err(e) => return failed("shield", e),
+        }
+
+        let (_st, sbody) = crate::mine_local_api::handle(
+            "/api/v1/mine-shield",
+            &serde_json::json!({ "amount": denom.to_string() }).to_string(),
+        );
+        let sv: serde_json::Value = match serde_json::from_str(&sbody) {
+            Ok(v) => v,
+            Err(e) => return failed("shield", format!("bad local response: {e}")),
+        };
+        if sv.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+            return failed(
+                "shield",
+                sv.get("error")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("could not move funds into your private balance")
+                    .to_string(),
+            );
+        }
+        // `decompose` of an exact denomination is a single part, so `landed[0]` IS the note
+        // this payment will spend. Assert that rather than assume it.
+        let landed = sv.get("landed").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+        let Some(first) = landed.first() else {
+            return failed("shield", "the node accepted no part of the shield");
+        };
+        let shield_txid = first.get("txid").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        let shield_index = first.get("index").and_then(|x| x.as_u64());
+        let shield_value = first
+            .get("value")
+            .and_then(|x| x.as_u64())
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| denom.to_string());
+
+        if let (Some(index), Ok(value)) = (shield_index, shield_value.parse::<u128>()) {
+            if value >= need {
+                ctx.notes.push(CandidateNote {
+                    index,
+                    value: shield_value.clone(),
+                });
+            }
+        }
+
+        job.stage = "shielding".into();
+        job.shield_txid = shield_txid.clone();
+        job.shield_index = shield_index;
+        job.shield_value = shield_value.clone();
+        put_job(&id, job.clone());
+        spawn_payment_leg(id.clone(), ctx, job);
+
+        ok_json(serde_json::json!({
+            "ok": true,
+            "stage": "shielding",
+            "job": id,
+            // THE INSTANT TXID. Real, on-chain, checkable at /v1/transactions/<hash>. It is
+            // the SHIELD, not the payment — `stage` says so and the wallet labels it so.
+            "txid": shield_txid,
+            "shield_txid": shield_txid,
+            "shield_index": shield_index,
+            "shield_value": shield_value,
+            "note": "funds are moving into your private balance; the payment follows \
+                     automatically — poll /api/v1/pay/status for its txid",
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ══ ONE-ACTION SEND (/api/v1/pay) ═══════════════════════════════════════════════
+
+    #[test]
+    fn the_wallet_this_server_hands_out_carries_the_one_action_send() {
+        let (body, ct) = embedded_surface("sigil-wallet-tron.html").expect("wallet served");
+        let html = String::from_utf8(body).expect("wallet is utf-8");
+        assert!(ct.starts_with("text/html"));
+        // Injected exactly once — a second copy would re-override the override.
+        assert_eq!(
+            html.matches("__sigilOneActionSend").count(),
+            2,
+            "the guard flag should appear exactly twice (test + set), i.e. one injection"
+        );
+        assert!(html.contains("/api/v1/pay"), "the injected script must call /api/v1/pay");
+        // And it must run AFTER the page's own scripts, or there is nothing to capture as
+        // the fallback and a 404 would dead-end instead of falling back.
+        let injected = html.find("__sigilOneActionSend").expect("injected");
+        let close = html.rfind("</body>").expect("wallet has a </body>");
+        assert!(injected < close, "the script must sit inside <body>");
+        let unified = html
+            .find("window.doUnifiedSend=async function")
+            .expect("the page still defines its own doUnifiedSend");
+        assert!(unified < injected, "the override must come after the definition it replaces");
+    }
+
+    #[test]
+    fn injection_never_silently_drops_the_script() {
+        // A page with no </body> at all still gets it, appended.
+        let out = String::from_utf8(inject_one_action_send("<p>hi</p>")).unwrap();
+        assert!(out.starts_with("<p>hi</p>"));
+        assert!(out.contains("__sigilOneActionSend"));
+        // A page WITH one gets it spliced before the LAST </body>.
+        let out = String::from_utf8(inject_one_action_send("<body>x</body></html>")).unwrap();
+        let i = out.find("__sigilOneActionSend").unwrap();
+        let j = out.rfind("</body>").unwrap();
+        assert!(i < j);
+    }
+
+    #[test]
+    fn pay_paths_route_locally_and_nothing_else_does() {
+        assert!(pay::is_local_path("/api/v1/pay"));
+        assert!(pay::is_local_path("/api/v1/pay/status"));
+        assert!(!pay::is_local_path("/api/v1/payload"));
+        assert!(!pay::is_local_path("/api/v1/pay?x=1"));
+        assert!(!pay::is_local_path("/v1/send"));
+        // Must not collide with the three signing endpoints it rides alongside.
+        for p in ["/api/v1/mine-sign", "/api/v1/mine-shield", "/api/v1/mine-send-private"] {
+            assert!(crate::mine_local_api::is_local_path(p));
+            assert!(!pay::is_local_path(p));
+        }
+    }
+
+    /// The rule that makes a payment possible at all: the spend circuit is 1-in/2-out, so
+    /// ONE note must cover `amount + fee`. Shielding the shortfall (what the browser flow
+    /// did) can leave a funded wallet permanently unable to pay.
+    #[test]
+    fn a_shield_is_sized_to_one_note_that_covers_the_whole_payment() {
+        use pay::smallest_denomination_at_least as up;
+        // An exact denomination is not rounded up past itself.
+        assert_eq!(up(1), Some(1));
+        assert_eq!(up(100), Some(100));
+        assert_eq!(up(5_000_000_000), Some(5_000_000_000));
+        // Anything between rungs takes the next rung, never the one below.
+        assert_eq!(up(3), Some(5));
+        assert_eq!(up(6), Some(10));
+        assert_eq!(up(101), Some(200));
+        // The ladder is 1/2/5 x 10^k, so overshoot is bounded at 2.5x — real, and change
+        // comes straight back to the sender's own shielded balance.
+        for need in [3u128, 7, 11, 23, 4_100, 999_999] {
+            let d = up(need).expect("covered by the ladder");
+            assert!(d >= need, "{d} must cover {need}");
+            assert!(d * 2 <= need * 5, "{d} overshoots {need} by more than 2.5x");
+            assert!(
+                sigil_state::shielded::is_denomination(d),
+                "{d} must be a legal ramp denomination"
+            );
+            // ...and it must decompose to exactly ONE note, or it is not one covering note.
+            assert_eq!(sigil_state::shielded::decompose(d), Some(vec![d]));
+        }
+        // Above the ladder there is no single covering note, and we say so rather than
+        // shielding something that cannot pay.
+        assert_eq!(up(u128::MAX), None);
+    }
+
+    #[test]
+    fn a_payment_needs_amount_plus_the_shielded_fee_not_just_the_amount() {
+        let fee = sigil_state::shielded::SHIELDED_FEE;
+        assert!(fee > 0, "this test is meaningless if the fee is free");
+        // A note worth exactly the amount cannot pay it — the fee comes out of the same note.
+        let amount = 100_000_000u128;
+        let need = amount + fee;
+        assert!(pay::smallest_denomination_at_least(need).unwrap() >= need);
+    }
+
+    #[test]
+    fn addresses_are_validated_before_anything_is_signed_or_spent() {
+        assert!(pay::is_hex64(&"a".repeat(64)));
+        assert!(pay::is_hex64(&"0".repeat(64)));
+        assert!(!pay::is_hex64(&"a".repeat(63)));
+        assert!(!pay::is_hex64(&"a".repeat(65)));
+        assert!(!pay::is_hex64(&"g".repeat(64)));
+        assert!(!pay::is_hex64(""));
+    }
+
+    /// AVAILABILITY CONTRACT (same as `mine_local_api`'s): with no local seed this endpoint
+    /// must answer 404, because that is what makes the injected script hand control back to
+    /// the page's own flow instead of dead-ending.
+    #[test]
+    fn without_a_local_seed_pay_is_a_404_so_the_browser_falls_back() {
+        if std::env::var("SIGIL_MINE_SEED").is_ok() {
+            return; // a real seed in the environment; this assertion isn't the one to make
+        }
+        let (status, body) = pay::handle(
+            "/api/v1/pay",
+            &serde_json::json!({"to": "a".repeat(64), "amount": "1"}).to_string(),
+        );
+        assert_eq!(status, "404 Not Found");
+        assert!(body.contains("SIGIL_MINE_SEED"), "the 404 must say why: {body}");
+    }
+
+    #[test]
+    fn an_unknown_job_is_reported_not_invented() {
+        let (status, body) = pay::handle(
+            "/api/v1/pay/status",
+            &serde_json::json!({"job": "deadbeefdeadbeef"}).to_string(),
+        );
+        assert_eq!(status, "200 OK");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["ok"], serde_json::json!(false));
+        assert!(pay::get_job("deadbeefdeadbeef").is_none());
+    }
 
     #[test]
     fn segment_match_does_not_fire_on_a_name_that_merely_ends_the_same_way() {

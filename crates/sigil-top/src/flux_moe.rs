@@ -431,13 +431,53 @@ pub(crate) fn chat(model: &str, history: &[(String, String)], user: &str, extra_
     let url = format!("{}/api/chat", ollama_base());
     let send = |b: &serde_json::Value| client().post(&url).json(b).send();
 
-    let resp = send(&body).map_err(|e| transport_error_message(&e))?;
+    // SELF-HEAL (v8.0.1): "ollama is installed but not running" is not an error worth
+    // reporting — it is a two-second fix the tab can perform itself, holding the very
+    // binary that fixes it. Telling the user to press F5 turned a solvable state into a
+    // chore, and it is the single most common way this tab appears broken: the server was
+    // simply stopped (a reboot, a `pkill`, a session that tidied up after itself).
+    //
+    // Only a CONNECT failure triggers this, and only once. A timeout means the model is
+    // generating and restarting the server would destroy real work; a 404 means the model
+    // is missing and no restart helps. Installing is NOT attempted here — that is a
+    // multi-GB, hash-verified, consent-shaped action that stays behind the explicit [F5]
+    // keypress in `ai_setup::bootstrap`.
+    let resp = match send(&body) {
+        Ok(r) => r,
+        Err(e) if e.is_connect() && crate::ai_setup::ensure_running() => {
+            send(&body).map_err(|e2| transport_error_message(&e2))?
+        }
+        Err(e) => return Err(transport_error_message(&e)),
+    };
     let status = resp.status();
     let resp = if !status.is_success() {
         let detail = resp.text().unwrap_or_default();
         // A model that does not support the `think` switch must not become a
         // dead end — drop the field and try once more before reporting.
-        if detail.to_ascii_lowercase().contains("think") {
+        // SELF-HEAL (v8.0.1): the model simply is not pulled yet. The tab knows the model
+        // it wants and ollama can fetch it — so fetch it, rather than telling the user to
+        // press F5. This is the other half of "works out of the box": a fresh machine has
+        // a running server and no weights, and that state must resolve itself.
+        //
+        // Bounded on purpose: ONE attempt, and `pull_model`'s own `check_disk_for` still
+        // refuses when the target filesystem cannot hold the weights. A pull is minutes of
+        // multi-GB download, so it happens once and then never again for that model.
+        let lower_once = detail.to_ascii_lowercase();
+        if status == reqwest::StatusCode::NOT_FOUND || lower_once.contains("not found") {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            if crate::ai_setup::pull_model(model, &tx).is_ok() {
+                let r2 = send(&body).map_err(|e| transport_error_message(&e))?;
+                if r2.status().is_success() {
+                    r2
+                } else {
+                    let s2 = r2.status();
+                    let d2 = r2.text().unwrap_or_default();
+                    return Err(http_error_message(s2, &d2, model));
+                }
+            } else {
+                return Err(http_error_message(status, &detail, model));
+            }
+        } else if detail.to_ascii_lowercase().contains("think") {
             let mut retry = body.clone();
             if let Some(o) = retry.as_object_mut() {
                 o.remove("think");

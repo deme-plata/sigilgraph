@@ -180,6 +180,83 @@ fn serve_log_tail(n: usize) -> String {
         .join("\n")
 }
 
+/// The model directory to hand a server we spawn: `SIGIL_OLLAMA_MODELS` first, else an
+/// `OLLAMA_MODELS` already in our own environment (inherited anyway, but being explicit
+/// makes the spawned server's configuration visible in the log rather than implicit).
+pub(crate) fn model_dir_override() -> Option<String> {
+    for k in ["SIGIL_OLLAMA_MODELS", "OLLAMA_MODELS"] {
+        if let Ok(v) = std::env::var(k) {
+            if !v.trim().is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    // Nothing configured. Pick a roomy directory AUTOMATICALLY rather than letting ollama
+    // default to ~/.ollama/models on a root partition that may be nearly full — the failure
+    // that produces is a half-written multi-GB blob and a wedged machine, which is far worse
+    // than a slightly surprising path. Only override when the default is genuinely tight
+    // AND a roomier candidate exists, so a normal machine keeps ollama's own convention.
+    const NEED: u64 = 12 * 1024 * 1024 * 1024; // headroom for a ~9 GB model + slack
+    let default_dir = dirs_home().join(".ollama").join("models");
+    if free_bytes(&default_dir).unwrap_or(u64::MAX) >= NEED {
+        return None;
+    }
+    for cand in ["/home/storage/ollama-models", "/home/ollama-models"] {
+        let p = std::path::Path::new(cand);
+        let probe = if p.exists() { p } else { p.parent().unwrap_or(p) };
+        if probe.exists() && free_bytes(probe).unwrap_or(0) >= NEED {
+            let _ = std::fs::create_dir_all(p);
+            return Some(cand.to_string());
+        }
+    }
+    None
+}
+
+/// This user's home, without pulling in a crate for it.
+fn dirs_home() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/root"))
+}
+
+/// Free bytes on the filesystem holding `path` (or its nearest existing ancestor).
+/// `None` when it cannot be determined — callers must treat that as "do not act".
+fn free_bytes(path: &std::path::Path) -> Option<u64> {
+    let mut p = path;
+    while !p.exists() {
+        p = p.parent()?;
+    }
+    let out = std::process::Command::new("df").arg("-Pk").arg(p).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().nth(1)?;
+    line.split_whitespace().nth(3)?.parse::<u64>().ok().map(|kb| kb * 1024)
+}
+
+/// Make ollama reachable, starting it if it is merely installed-and-stopped. Returns
+/// `true` if it is up when we return.
+///
+/// # Why chat() calls this instead of printing advice
+///
+/// "ollama is installed but not running" was reported to the user as an error telling them
+/// to press F5. That is a chore, not a diagnosis: the tab knows exactly what is wrong and
+/// is holding the binary that fixes it. An [A]I tab that works "out of the box" cannot ask
+/// the user to run a setup step the machine can perform itself in two seconds.
+///
+/// Deliberately does NOT install anything. Installing is a multi-GB, hash-verified,
+/// consent-shaped action that belongs to `bootstrap` behind an explicit keypress; this
+/// only starts something already present. If no binary exists we return false and the
+/// caller's message stands.
+pub(crate) fn ensure_running() -> bool {
+    if crate::flux_moe::ollama_reachable() {
+        return true;
+    }
+    let Some(bin) = ollama_binary() else { return false };
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let _ = start_ollama(&bin, &tx);
+    crate::flux_moe::ollama_reachable()
+}
+
 /// Spawn `ollama serve` detached and wait (≤45 s) for :11434 to answer.
 fn start_ollama(bin: &PathBuf, tx: &Sender<SetupEvent>) -> Result<(), String> {
     emit(tx, format!("  ▶ starting ollama ({})", bin.display()));
@@ -194,6 +271,14 @@ fn start_ollama(bin: &PathBuf, tx: &Sender<SetupEvent>) -> Result<(), String> {
     };
     let mut cmd = std::process::Command::new(bin);
     cmd.arg("serve").stdin(std::process::Stdio::null()).stdout(out).stderr(err);
+    // Where the models live. ollama defaults to ~/.ollama/models, which on this class of
+    // box is the SMALL root partition — the same partition `preflight_disk` refuses to
+    // fill. If the operator put the models somewhere roomy, the server has to be told, or
+    // it starts cleanly and reports zero models: the most confusing possible outcome,
+    // because everything looks healthy and nothing works.
+    if let Some(dir) = model_dir_override() {
+        cmd.env("OLLAMA_MODELS", dir);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -899,5 +984,27 @@ mod tests {
     fn memory_error_heuristic() {
         assert!(looks_like_memory_error("model requires more system memory (8.2 GiB) than is available"));
         assert!(!looks_like_memory_error("pull model manifest: file does not exist"));
+    }
+}
+
+#[cfg(test)]
+mod selfheal_live_tests {
+    /// LIVE: with ollama STOPPED, `ensure_running` must bring it back by itself.
+    ///
+    /// This is the exact state the operator hit in v8.0.0 — installed, not running — where
+    /// the tab reported "can't reach your local model" and asked for a keypress. Gated on
+    /// SIGIL_OLLAMA_LIVE=1 because it starts a real server; skipped in normal runs.
+    #[test]
+    fn ensure_running_restarts_a_stopped_ollama() {
+        if std::env::var("SIGIL_OLLAMA_LIVE").is_err() {
+            eprintln!("skipped (set SIGIL_OLLAMA_LIVE=1 to run)");
+            return;
+        }
+        assert!(
+            !crate::flux_moe::ollama_reachable(),
+            "precondition: this test requires ollama to be STOPPED"
+        );
+        assert!(super::ensure_running(), "ensure_running failed to start a stopped ollama");
+        assert!(crate::flux_moe::ollama_reachable(), "ollama still unreachable after ensure_running");
     }
 }

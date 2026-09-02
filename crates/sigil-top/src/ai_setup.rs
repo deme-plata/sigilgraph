@@ -481,8 +481,25 @@ fn download_verified(inst: &Installer, dest: &PathBuf, tx: &Sender<SetupEvent>) 
     let mut buf = vec![0u8; 1 << 20];
     let mut got: u64 = 0;
     let mut last_bucket: u64 = 0;
+    // Every failure exit from this loop must delete `tmp`. Two branches used to
+    // return through `?` without deleting (the read error and the write error),
+    // unlike their siblings below — measured 2026-09-02 by severing the network
+    // at 40.8 %: a 579,775,224-byte `.part` survived the failure. Not a safety
+    // hole (only `dest` is ever executed, and `dest` is reached solely by the
+    // rename after verification), but up to 1.4 GB was stranded in TMPDIR, AND
+    // `bootstrap_inner`'s headroom check counts that leftover as used — so the
+    // FIRST interrupted attempt could block its own retry on a tight disk.
+    macro_rules! bail_rm {
+        ($tmp:expr, $msg:expr) => {{
+            let _ = std::fs::remove_file($tmp);
+            return Err($msg);
+        }};
+    }
     loop {
-        let n = resp.read(&mut buf).map_err(|e| format!("read: {e}"))?;
+        let n = match resp.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) => { drop(f); bail_rm!(&tmp, format!("read: {e}")); }
+        };
         if n == 0 {
             break;
         }
@@ -492,7 +509,10 @@ fn download_verified(inst: &Installer, dest: &PathBuf, tx: &Sender<SetupEvent>) 
             let _ = std::fs::remove_file(&tmp);
             return Err("installer is LARGER than the signed manifest says — refusing".into());
         }
-        f.write_all(&buf[..n]).map_err(|e| format!("write: {e}"))?;
+        if let Err(e) = f.write_all(&buf[..n]) {
+            drop(f);
+            bail_rm!(&tmp, format!("write: {e}"));
+        }
         hasher.update(&buf[..n]);
         let bucket = got * 20 / inst.size_bytes.max(1); // every 5 %
         if bucket > last_bucket {
@@ -546,14 +566,51 @@ fn run_installer(path: &PathBuf, _args: &[String], tx: &Sender<SetupEvent>) -> R
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
     emit(tx, format!("  ▶ extracting into {}", dir.display()));
     let name = path.to_string_lossy();
-    let mut cmd = std::process::Command::new("tar");
-    if name.ends_with(".zst") {
-        cmd.arg("--zstd");
+
+    // ── zstd is decoded IN-PROCESS, not by shelling out to `tar --zstd` ────────
+    //
+    // Ollama ships Linux as `.tar.zst`, and `tar --zstd` execs a separate `zstd`
+    // binary that bare ubuntu:24.04, debian:12 and most minimal/cloud/container
+    // images DO NOT SHIP. Measured on a pristine ubuntu:24.04 (2026-09-02): the
+    // user paid the full **1.42 GB** verified download and only then hit
+    // `tar (child): zstd: Cannot exec` — a dead end at the most expensive
+    // possible moment, in exactly the "works out of the box" scenario this path
+    // exists to serve.
+    //
+    // `ruzstd` is a PURE-RUST decoder already in this crate's dependencies (it
+    // decodes the sync wire), so the fix costs no new dependency and no C
+    // toolchain — and it keeps the Windows cross-build mingw-clean. `tar` itself
+    // is genuinely everywhere; `zstd` is not, so only the compression layer moves
+    // in-process.
+    let tar_path: PathBuf = if name.ends_with(".zst") {
+        emit(tx, "  ▶ decompressing (in-process, no external zstd needed)…");
+        let src = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+        let mut dec = ruzstd::StreamingDecoder::new(std::io::BufReader::new(src))
+            .map_err(|e| format!("not a valid zstd stream: {e}"))?;
+        let out = path.with_extension("tar");
+        let mut w = std::io::BufWriter::new(
+            std::fs::File::create(&out).map_err(|e| format!("create {}: {e}", out.display()))?,
+        );
+        std::io::copy(&mut dec, &mut w).map_err(|e| format!("zstd decode failed: {e}"))?;
+        use std::io::Write;
+        w.flush().map_err(|e| format!("flush {}: {e}", out.display()))?;
+        out
+    } else {
+        path.clone()
+    };
+
+    // Capture tar's stderr rather than inheriting it: an inherited error prints
+    // OVER the alt-screen and corrupts the TUI (observed with the zstd failure).
+    let out = std::process::Command::new("tar")
+        .arg("-xf").arg(&tar_path).arg("-C").arg(&dir)
+        .output()
+        .map_err(|e| format!("tar not runnable: {e}"))?;
+    if tar_path != *path {
+        let _ = std::fs::remove_file(&tar_path); // the decompressed copy is scratch
     }
-    cmd.arg("-xf").arg(path).arg("-C").arg(&dir);
-    let status = cmd.status().map_err(|e| format!("tar not runnable: {e}"))?;
-    if !status.success() {
-        return Err(format!("tar exited with {status} (is zstd installed?)"));
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("tar exited with {}: {}", out.status, err.trim()));
     }
     emit(tx, "  ✓ ollama extracted");
     Ok(())

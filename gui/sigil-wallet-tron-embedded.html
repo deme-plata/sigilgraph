@@ -1666,7 +1666,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         var ffj=null; try{ ffj=await ffr.json(); }catch(_){}
         if(ffj && ffj.ok && Array.isArray(ffj.landed) && ffj.landed.length){
           var fastLanded=ffj.landed.map(function(p){ noteRecord(from,p.index,p.value); return {txid:p.txid, value:p.value}; });
-          showReceipt(fastLanded, amtStr, from, ffj.warning);
+          window.showReceipt(fastLanded, amtStr, from, ffj.warning);
           setTimeout(function(){ if(window.refresh)refresh(); }, 600);
           if(fastShieldBtn)fastShieldBtn.disabled=false;
           return;
@@ -1817,10 +1817,10 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       });
       if(outcome==='settled'){
         var warn=failed?('partial — '+landed.length+'/'+denomParts.length+' parts landed, then: '+failed):undefined;
-        showReceipt(landed, amtStr, from, warn);
+        window.showReceipt(landed, amtStr, from, warn);
         setTimeout(function(){ if(window.refresh)refresh(); }, 600);
       } else if(outcome==='unknown'){
-        showReceipt(landed, amtStr, from,
+        window.showReceipt(landed, amtStr, from,
           '⚠ could not reach the pool to confirm settlement — this receipt shows what was SUBMITTED, not what settled. Re-check your balance before assuming it landed.');
       } else {
         showReceiptUnconfirmed(amtStr,
@@ -1884,6 +1884,15 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     document.getElementById('sendForm').style.display='none';
     var rc=document.getElementById('sendReceipt'); rc.style.display='flex';
   }
+  // EXPORTED ON PURPOSE — `doUnifiedSend` detects a successful shield by temporarily
+  // swapping `window.showReceipt` for a probe (see the swap below). This function used to
+  // live only in this IIFE's scope, so that probe replaced a property nobody called: the
+  // swap never fired, `shielded` stayed false, and step 1 REPORTED FAILURE ON EVERY SHIELD
+  // THAT ACTUALLY SUCCEEDED. A second IIFE further down calls the bare name too, which was
+  // a ReferenceError swallowed by its own try/catch — so the receipt pane never got
+  // data-kind="send" and the send step could never report success either.
+  // Net effect before this line existed: press SEND, the money moves, the UI says it failed.
+  window.showReceipt = showReceipt;
   window.receiptCopyTx=function(){ if(window.__lastTxid&&navigator.clipboard){ navigator.clipboard.writeText(window.__lastTxid); var b=document.getElementById('rcCopyBtn'); var o=b.textContent; b.textContent='✓ copied'; setTimeout(function(){b.textContent=o;},1000); } };
   window.receiptDone=function(){
     document.getElementById('sendReceipt').style.display='none';
@@ -2420,7 +2429,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
           // orchestrator. It used to infer success from the receipt pane merely being
           // visible — which step 1 had already made true, so it reported DONE for a
           // payment it never made.
-          try{ showReceipt([{txid:ffj.txid,value:amountRaw}], amtStr, from, null, 'send', recipient); }catch(e){}
+          try{ window.showReceipt([{txid:ffj.txid,value:amountRaw}], amtStr, from, null, 'send', recipient); }catch(e){}
           return true;
         }
       }
@@ -2511,7 +2520,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       var amtEl=document.getElementById('privAmt'); if(amtEl) amtEl.value='';
       // Receipt says SENT, and an EXPLICIT success is handed back — see the fast
       // path above and the orchestrator for why inferring it was wrong.
-      try{ showReceipt([{txid:sj.txid,value:amountRaw}], amtStr, from, null, 'send', recipient); }catch(e){}
+      try{ window.showReceipt([{txid:sj.txid,value:amountRaw}], amtStr, from, null, 'send', recipient); }catch(e){}
       return true;
     }catch(e){
       privMsg('✗ network error — node unreachable.', '#ff8a8a');

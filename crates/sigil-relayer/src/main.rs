@@ -13,12 +13,21 @@
 //! `SigilBridgeWrapped.mint()` has no on-chain idempotency guard of its
 //! own; a double-mint is a real, silent, unrecoverable bug if this crate
 //! ever double-processes a lock after a crash/restart). If not already
-//! minted, convert 8-decimal SIGIL base units to 18-decimal Polygon units
-//! and call `mint(dest, amount, lockId)` as the Polygon operator key.
+//! minted, convert 10-decimal SIGIL base units (glyphs) to 18-decimal Polygon
+//! units and call `mint(dest, amount, lockId)` as the Polygon operator key.
+//!
+//! **`lockId` IS the SIGIL lock transaction hash** (2026-08-27 operator decision, re-landed
+//! 2026-09-02 after the first implementation was lost uncommitted). The node's lock ids are
+//! an in-memory counter that restarts at 1 on every node restart — and the chain itself was
+//! reset g0→g1→g2 — so a small sequential id is neither unique nor stable, and keying the
+//! mint dedup on it stranded 1 SIGIL in the vault on 2026-08-27 ("lock 1 already minted,
+//! skipping"). The 32-byte tx hash is content-derived: it cannot be reset, re-used or
+//! collided, and the contract takes `lockId` as an opaque `uint256` with no on-chain
+//! idempotency of its own, so nothing ever required it to be small.
 //!
 //! **Burn -> Unlock**: poll Polygon for `BurnedTo` events since the last
 //! processed block. For each one, convert 18-decimal Polygon units back to
-//! 8-decimal SIGIL units (floor division; a nonzero remainder is logged
+//! 10-decimal SIGIL units (floor division; a nonzero remainder is logged
 //! loudly, never silently dropped) and call `POST /v1/bridge/unlock` on
 //! SIGIL L1, signed by the SIGIL relayer key. Double-unlock protection is
 //! ALREADY enforced server-side here (`bridge.rs::submit_unlock`'s
@@ -28,13 +37,14 @@
 //!
 //! # Persistence
 //!
-//! A small JSON state file (`SIGIL_RELAYER_STATE_FILE`) tracks the last
-//! processed lock id and Polygon block, written durably after each
-//! successful action — so a restart resumes roughly where it left off
-//! without needing to re-scan from genesis. It is a resume optimization,
-//! NOT the safety mechanism (see above: the real safety nets are the
-//! on-chain OperatorMinted check and bridge.rs's processed_burns set).
+//! A small JSON state file (`SIGIL_RELAYER_STATE_FILE`) tracks the SIGIL lock tx hashes
+//! already minted (`minted_lock_txs` — authoritative, restart-proof, checked before any
+//! RPC), an informational lock-id cursor, and the last Polygon block — the block
+//! watermark is written after EVERY successfully processed log chunk, not once per pass,
+//! so a provider 503 halfway through a long catch-up resumes instead of restarting the
+//! crawl (measured 2026-08-27: six minutes of zero progress over a ~5,000-block gap).
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -189,10 +199,30 @@ struct LocksResponse {
     error: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 struct RelayerState {
+    /// Informational only since dedup moved to tx hashes: the highest lock id seen. Never
+    /// used to skip anything — see `poll_locks_and_mint`.
     last_lock_id: u64,
+    /// Next Polygon block to scan for `BurnedTo`. Advanced per successful CHUNK.
     last_polygon_block: u64,
+    /// SIGIL lock tx hashes (hex) whose mint is CONFIRMED on Polygon. The authority for
+    /// "already minted"; the on-chain `OperatorMinted` lookback is only the backstop for the
+    /// crash window between "receipt received" and "state saved".
+    #[serde(default)]
+    minted_lock_txs: BTreeSet<String>,
+}
+
+/// The `lockId` passed to `mint(to, amount, lockId)`: the SIGIL lock tx hash as a big-endian
+/// `uint256`. Same bytes as the `OperatorMinted.lockId` indexed topic, so the on-chain
+/// lookback can filter on it directly.
+fn lock_key(tx_hash_hex: &str) -> Result<U256> {
+    let raw = hex::decode(tx_hash_hex.trim().trim_start_matches("0x"))
+        .with_context(|| format!("lock tx hash {tx_hash_hex:?} is not hex"))?;
+    let arr: [u8; 32] = raw
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("lock tx hash {tx_hash_hex:?} is not 32 bytes"))?;
+    Ok(U256::from_be_bytes(arr))
 }
 
 struct Config {
@@ -206,6 +236,11 @@ struct Config {
     /// Used only when no state file exists yet — avoids scanning the whole
     /// chain for a contract that has no history before this block.
     default_start_block: u64,
+    /// `eth_getLogs` range per request. Alchemy's free tier allows 10; a provider without
+    /// that cap (publicnode, a self-hosted bor) can take thousands, which turns a
+    /// multi-day catch-up from an hour of chunked requests into seconds.
+    /// `SIGIL_RELAYER_LOG_CHUNK`, default `LOG_CHUNK_BLOCKS`.
+    log_chunk_blocks: u64,
 }
 
 impl Config {
@@ -218,6 +253,11 @@ impl Config {
             sigil_relayer_keyfile: std::env::var("SIGIL_RELAYER_KEYFILE").context("SIGIL_RELAYER_KEYFILE must be set")?.into(),
             polygon_relayer_keyfile: std::env::var("POLYGON_RELAYER_KEYFILE").context("POLYGON_RELAYER_KEYFILE must be set")?.into(),
             state_file: std::env::var("SIGIL_RELAYER_STATE_FILE").unwrap_or_else(|_| "/home/orobit/sigil-bridge-relayer/state.json".into()).into(),
+            log_chunk_blocks: std::env::var("SIGIL_RELAYER_LOG_CHUNK")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|n: &u64| *n >= 1)
+                .unwrap_or(LOG_CHUNK_BLOCKS),
             poll_interval: Duration::from_secs(
                 std::env::var("SIGIL_RELAYER_POLL_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(15),
             ),
@@ -227,9 +267,14 @@ impl Config {
 }
 
 fn load_state(path: &PathBuf, default_start_block: u64) -> RelayerState {
+    let fresh = || RelayerState { last_polygon_block: default_start_block, ..Default::default() };
     match std::fs::read_to_string(path) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or(RelayerState { last_lock_id: 0, last_polygon_block: default_start_block }),
-        Err(_) => RelayerState { last_lock_id: 0, last_polygon_block: default_start_block },
+        // A state file that exists but does not parse is NOT silently replaced: that would
+        // forget every minted lock and re-mint all of them on the next pass.
+        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
+            panic!("refusing to start: {} exists but does not parse ({e}) — fix or move it", path.display())
+        }),
+        Err(_) => fresh(),
     }
 }
 
@@ -353,16 +398,53 @@ const CHUNK_DELAY: Duration = Duration::from_millis(150);
 /// still loses the pass), but it removes the failure that actually happens.
 const CHUNK_RETRIES: u32 = 4;
 
+/// The `[from, to]` sub-ranges a chunked crawl visits, in order. Pure, so the arithmetic
+/// that decides which blocks get scanned is testable without a provider.
+fn chunk_bounds(from_block: u64, to_block: u64, chunk: u64) -> Vec<(u64, u64)> {
+    let chunk = chunk.max(1);
+    let mut out = Vec::new();
+    let mut cur = from_block;
+    while cur <= to_block {
+        let end = cur.saturating_add(chunk - 1).min(to_block);
+        out.push((cur, end));
+        if end == u64::MAX {
+            break;
+        }
+        cur = end + 1;
+    }
+    out
+}
+
+/// Collecting form of [`get_logs_chunked_with`] for callers that want the whole range.
 async fn get_logs_chunked(
     provider: &impl Provider,
     base_filter: &Filter,
     from_block: u64,
     to_block: u64,
+    chunk: u64,
 ) -> Result<Vec<alloy::rpc::types::Log>> {
     let mut all = Vec::new();
-    let mut cur = from_block;
-    while cur <= to_block {
-        let chunk_end = (cur + LOG_CHUNK_BLOCKS - 1).min(to_block);
+    get_logs_chunked_with(provider, base_filter, from_block, to_block, chunk, |_, logs| {
+        all.extend(logs);
+        Ok(())
+    })
+    .await?;
+    Ok(all)
+}
+
+/// Crawl `[from_block, to_block]` in `chunk`-sized `eth_getLogs` calls, handing each chunk's
+/// logs to `on_chunk(chunk_end, logs)` as soon as it arrives. The callback is where a caller
+/// CHECKPOINTS: if it persists its watermark at `chunk_end + 1`, a failure in a later chunk
+/// costs one chunk, not the whole pass.
+async fn get_logs_chunked_with(
+    provider: &impl Provider,
+    base_filter: &Filter,
+    from_block: u64,
+    to_block: u64,
+    chunk: u64,
+    mut on_chunk: impl FnMut(u64, Vec<alloy::rpc::types::Log>) -> Result<()>,
+) -> Result<()> {
+    for (cur, chunk_end) in chunk_bounds(from_block, to_block, chunk) {
         let filter = base_filter.clone().from_block(cur).to_block(chunk_end);
 
         let mut attempt = 0;
@@ -393,13 +475,12 @@ async fn get_logs_chunked(
             }
         };
 
-        all.extend(logs);
-        cur = chunk_end + 1;
-        if cur <= to_block {
+        on_chunk(chunk_end, logs)?;
+        if chunk_end < to_block {
             tokio::time::sleep(CHUNK_DELAY).await;
         }
     }
-    Ok(all)
+    Ok(())
 }
 
 /// Bounded lookback for the resume-safety check (see `poll_locks_and_mint`
@@ -411,12 +492,12 @@ async fn get_logs_chunked(
 /// hundreds of chunked requests for no real safety benefit.
 const MINT_CHECK_LOOKBACK_BLOCKS: u64 = 1000;
 
-async fn already_minted(provider: &impl Provider, contract: Address, lock_id: u64) -> Result<bool> {
+async fn already_minted(provider: &impl Provider, contract: Address, lock_id: U256, chunk: u64) -> Result<bool> {
     let latest = provider.get_block_number().await.context("fetching latest block for the resume-safety check failed")?;
     let from = latest.saturating_sub(MINT_CHECK_LOOKBACK_BLOCKS);
-    let lock_id_topic: B256 = B256::from(U256::from(lock_id));
+    let lock_id_topic: B256 = B256::from(lock_id);
     let base = Filter::new().address(contract).event_signature(ISigilBridgeWrapped::OperatorMinted::SIGNATURE_HASH).topic2(lock_id_topic);
-    let logs = get_logs_chunked(provider, &base, from, latest).await?;
+    let logs = get_logs_chunked(provider, &base, from, latest, chunk).await?;
     Ok(!logs.is_empty())
 }
 
@@ -434,42 +515,59 @@ async fn poll_locks_and_mint(
     resume_checked: &mut bool,
     polygon_provider: &(impl Provider + Clone),
 ) -> Result<()> {
-    let locks = fetch_locks_since(&cfg.sigil_api_url, state.last_lock_id)?;
+    // ALWAYS from 0. The node's lock list is small and in-memory, and its ids restart at 1
+    // on every node restart, so a `since=<cursor>` fetch would hide every lock made after a
+    // restart behind a cursor from before it — the exact way 1 SIGIL got stranded on
+    // 2026-08-27. Dedup is on the tx hash (below); the cursor is only reported.
+    let mut locks = fetch_locks_since(&cfg.sigil_api_url, 0)?;
+    locks.sort_by_key(|l| l.id);
     for lock in locks {
-        // Locks are sequential and the watermark is a single id, so an unsettled lock must
-        // STOP the pass rather than be skipped — skipping it would advance the watermark
-        // past it and strand it forever once it does settle.
+        state.last_lock_id = state.last_lock_id.max(lock.id);
+        let tx = lock.tx_hash.trim().trim_start_matches("0x").to_ascii_lowercase();
+        if state.minted_lock_txs.contains(&tx) {
+            continue;
+        }
+        // No watermark to strand any more, so an unsettled lock is simply skipped this
+        // pass and looked at again next pass, while later settled locks still mint.
         if !lock.settled {
             eprintln!(
-                "· lock {} not settled yet ({} SIGIL base units) — waiting, minting nothing",
-                lock.id, lock.amount
+                "· lock {} (sigil tx {}) not settled yet ({} glyphs) — waiting, minting nothing",
+                lock.id, &tx[..tx.len().min(12)], lock.amount
             );
-            break;
+            continue;
         }
         let amount_base: u128 = lock.amount.to_base_units()?;
         let dest: Address = lock.dest_polygon_address.parse()
             .with_context(|| format!("lock {} has an invalid dest_polygon_address {}", lock.id, lock.dest_polygon_address))?;
         let polygon_amount = U256::from(amount_base) * U256::from(DECIMAL_SHIFT);
+        let key = lock_key(&tx)?;
 
+        // Backstop for the crash window between "mint receipt" and "state saved": the first
+        // candidate after a process start is checked on-chain. Everything after it within
+        // this run has provably never been attempted.
         if !*resume_checked {
-            if already_minted(polygon_provider, cfg.contract, lock.id).await? {
-                eprintln!("- lock {} already minted on-chain (resumed after a restart) — skipping, advancing watermark", lock.id);
-                state.last_lock_id = lock.id;
+            *resume_checked = true;
+            if already_minted(polygon_provider, cfg.contract, key, cfg.log_chunk_blocks).await? {
+                eprintln!("- lock {} (sigil tx {}) already minted on-chain (resumed after a restart) — recording, skipping", lock.id, &tx[..12]);
+                state.minted_lock_txs.insert(tx.clone());
                 save_state(&cfg.state_file, state)?;
-                *resume_checked = true;
                 continue;
             }
-            *resume_checked = true;
         }
 
-        eprintln!("+ lock {} from {} amount={} -> mint {polygon_amount} to {dest} (sigil tx {})", lock.id, lock.from, lock.amount, lock.tx_hash);
+        eprintln!("+ lock {} from {} amount={} glyphs -> mint {polygon_amount} to {dest} (lockId = sigil tx {})", lock.id, lock.from, lock.amount, tx);
         let c = ISigilBridgeWrapped::new(cfg.contract, polygon_provider.clone());
-        let pending = c.mint(dest, polygon_amount, U256::from(lock.id)).send().await
-            .with_context(|| format!("mint tx failed to send for lock {}", lock.id))?;
-        let receipt = pending.get_receipt().await.with_context(|| format!("mint tx failed to confirm for lock {}", lock.id))?;
+        let pending = c.mint(dest, polygon_amount, key).send().await
+            .with_context(|| format!("mint tx failed to send for lock {} (sigil tx {tx})", lock.id))?;
+        let receipt = pending.get_receipt().await.with_context(|| format!("mint tx failed to confirm for lock {} (sigil tx {tx})", lock.id))?;
         eprintln!("  minted: tx={:?} status={}", receipt.transaction_hash, receipt.status());
+        if !receipt.status() {
+            // A reverted mint is NOT minted: leave the hash out of the set so it is retried,
+            // and stop the pass so the operator sees the failure at the top of the log.
+            bail!("mint for lock {} (sigil tx {tx}) REVERTED on Polygon: {:?}", lock.id, receipt.transaction_hash);
+        }
 
-        state.last_lock_id = lock.id;
+        state.minted_lock_txs.insert(tx);
         save_state(&cfg.state_file, state)?;
     }
     Ok(())
@@ -486,39 +584,52 @@ async fn poll_burns_and_unlock(
         return Ok(()); // reorg-ish edge case; just wait for the chain to move forward again
     }
     let base = Filter::new().address(cfg.contract).event_signature(ISigilBridgeWrapped::BurnedTo::SIGNATURE_HASH);
-    let logs = get_logs_chunked(polygon_provider, &base, state.last_polygon_block, latest).await
-        .context("querying BurnedTo logs failed")?;
+    let from = state.last_polygon_block;
+    let state_file = cfg.state_file.clone();
+    let api = cfg.sigil_api_url.clone();
+    // PER-CHUNK CHECKPOINT. Each chunk's burns are unlocked and THEN the watermark moves past
+    // that chunk and is persisted. A 503 in chunk N+1 costs chunk N+1, not the crawl since
+    // the last pass. Re-running a chunk after a mid-chunk failure is safe: the node dedups
+    // unlocks on `polygon_burn_tx` (`bridge.rs::submit_unlock`), so an already-unlocked burn
+    // is refused there, not paid twice.
+    get_logs_chunked_with(polygon_provider, &base, from, latest, cfg.log_chunk_blocks, |chunk_end, logs| {
+        for log in logs {
+            let burn_tx = match log.transaction_hash {
+                Some(h) => format!("{h:#x}"),
+                None => continue,
+            };
+            let decoded = log.log_decode::<ISigilBridgeWrapped::BurnedTo>().context("failed to decode BurnedTo log")?;
+            let ev = decoded.inner.data;
+            let amount = ev.amount;
+            let dest: FixedBytes<32> = ev.destSigilAddress;
+            let dest_hex = hex::encode(dest.0);
 
-    for log in logs {
-        let burn_tx = match log.transaction_hash {
-            Some(h) => format!("{h:#x}"),
-            None => continue,
-        };
-        let decoded = log.log_decode::<ISigilBridgeWrapped::BurnedTo>().context("failed to decode BurnedTo log")?;
-        let ev = decoded.inner.data;
-        let amount = ev.amount;
-        let dest: FixedBytes<32> = ev.destSigilAddress;
-        let dest_hex = hex::encode(dest.0);
+            let sigil_amount = amount / U256::from(DECIMAL_SHIFT);
+            let remainder = amount % U256::from(DECIMAL_SHIFT);
+            if remainder != U256::ZERO {
+                eprintln!("! burn {burn_tx}: amount {amount} is not a clean multiple of {DECIMAL_SHIFT} — {remainder} base units of dust cannot be unlocked, floor applied");
+            }
+            if sigil_amount == U256::ZERO {
+                eprintln!("! burn {burn_tx}: rounds to 0 SIGIL after conversion — skipping, nothing to unlock");
+                continue;
+            }
 
-        let sigil_amount = amount / U256::from(DECIMAL_SHIFT);
-        let remainder = amount % U256::from(DECIMAL_SHIFT);
-        if remainder != U256::ZERO {
-            eprintln!("! burn {burn_tx}: amount {amount} is not a clean multiple of {DECIMAL_SHIFT} — {remainder} base units of dust cannot be unlocked, flooring to {sigil_amount}");
+            eprintln!("+ burn {burn_tx} amount={amount} -> unlock {sigil_amount} glyphs to {dest_hex}");
+            let sigil_amount_u128: u128 = sigil_amount.try_into().context("unlock amount overflowed u128")?;
+            match submit_unlock(&api, sigil_signer, &dest_hex, sigil_amount_u128, &burn_tx) {
+                Ok(()) => eprintln!("  unlocked on SIGIL L1"),
+                // The node's own dedup: this burn was paid in an earlier (checkpoint-lost) run.
+                Err(e) if format!("{e:#}").contains("already") => {
+                    eprintln!("  already unlocked on SIGIL L1 (node dedup) — continuing");
+                }
+                Err(e) => return Err(e).with_context(|| format!("unlock failed for burn {burn_tx}")),
+            }
         }
-        if sigil_amount == U256::ZERO {
-            eprintln!("! burn {burn_tx}: rounds to 0 SIGIL after conversion — skipping, nothing to unlock");
-            continue;
-        }
-
-        eprintln!("+ burn {burn_tx} amount={amount} -> unlock {sigil_amount} to {dest_hex}");
-        let sigil_amount_u128: u128 = sigil_amount.try_into().context("unlock amount overflowed u128")?;
-        submit_unlock(&cfg.sigil_api_url, sigil_signer, &dest_hex, sigil_amount_u128, &burn_tx)
-            .with_context(|| format!("unlock failed for burn {burn_tx}"))?;
-        eprintln!("  unlocked on SIGIL L1");
-    }
-
-    state.last_polygon_block = latest + 1;
-    save_state(&cfg.state_file, state)?;
+        state.last_polygon_block = chunk_end + 1;
+        save_state(&state_file, state)
+    })
+    .await
+    .context("querying BurnedTo logs failed")?;
     Ok(())
 }
 
@@ -526,7 +637,10 @@ async fn poll_burns_and_unlock(
 async fn main() -> Result<()> {
     let cfg = Config::from_env()?;
     let mut state = load_state(&cfg.state_file, cfg.default_start_block);
-    eprintln!("sigil-relayer starting — resuming from lock_id={} polygon_block={}", state.last_lock_id, state.last_polygon_block);
+    eprintln!(
+        "sigil-relayer starting — {} lock tx(s) already minted, polygon_block={}, log chunk={} blocks, {} glyphs = 1 wSIGIL unit shift 10^{}",
+        state.minted_lock_txs.len(), state.last_polygon_block, cfg.log_chunk_blocks, DECIMAL_SHIFT, WRAPPED_DECIMALS - SIGIL_DECIMALS_MIRROR
+    );
 
     let sigil_key = read_sigil_key(&cfg.sigil_relayer_keyfile)?;
     let mut sigil_signer = SigilSigner::new(sigil_key);
@@ -603,11 +717,53 @@ mod wire_compat_tests {
         assert_eq!(locks[0].amount.to_base_units().unwrap(), 4_947_260_948u128);
     }
 
-    /// The conversion the mint depends on: SIGIL is 8dp, wrapped SIGIL is 18dp.
-    /// Getting this wrong mints 10^10x too much or too little.
+    /// The conversion the mint depends on: SIGIL is 10dp (g2), wrapped SIGIL is 18dp, so
+    /// the shift is 10^8. Getting this wrong mints 100x too much or too little — the
+    /// pre-g2 binary (built for 8dp) would have minted 100 wSIGIL for a 1 SIGIL lock.
     #[test]
     fn decimal_shift_maps_base_units_to_wrapped_units() {
-        let base = WireAmount(4_947_260_948).to_base_units().unwrap();
-        assert_eq!(base * DECIMAL_SHIFT, 49_472_609_480_000_000_000u128);
+        assert_eq!(DECIMAL_SHIFT, 100_000_000);
+        let one_sigil_glyphs: u128 = 10_000_000_000; // 1 SIGIL at 10dp
+        assert_eq!(one_sigil_glyphs * DECIMAL_SHIFT, 1_000_000_000_000_000_000u128, "1 SIGIL -> 1e18 wei");
+    }
+
+    /// The lock id IS the tx hash: same bytes as the `OperatorMinted.lockId` topic, so a
+    /// resume check can filter on it; and a hash that is not 32 bytes is refused, never
+    /// truncated into a colliding id.
+    #[test]
+    fn lock_key_is_the_tx_hash_and_refuses_junk() {
+        let h = "9e9889972b1552b89f43d8b2c1b4adf0a21d861a5a877a524225c1df13995b34";
+        let k = lock_key(h).unwrap();
+        assert_eq!(B256::from(k), B256::from_slice(&hex::decode(h).unwrap()));
+        assert_eq!(lock_key(&format!("0x{h}")).unwrap(), k, "0x prefix tolerated");
+        assert!(lock_key(&h[..60]).is_err());
+        assert!(lock_key("zz").is_err());
+    }
+
+    /// The live state file as deployed on 2026-08-27 (`minted_lock_txs` present) AND the
+    /// older two-field shape must both load — forgetting the set would re-mint every lock.
+    #[test]
+    fn state_file_round_trips_with_and_without_the_minted_set() {
+        let live = r#"{"last_lock_id": 2, "last_polygon_block": 92719557, "minted_lock_txs": ["9e9889972b1552b89f43d8b2c1b4adf0a21d861a5a877a524225c1df13995b34", "2f4b0a9edc113a94535e589495e792603e53c8e0490c3dd568a3570dc59bc05a"]}"#;
+        let st: RelayerState = serde_json::from_str(live).unwrap();
+        assert_eq!(st.minted_lock_txs.len(), 2);
+        assert!(st.minted_lock_txs.contains("9e9889972b1552b89f43d8b2c1b4adf0a21d861a5a877a524225c1df13995b34"));
+        let old: RelayerState = serde_json::from_str(r#"{"last_lock_id":0,"last_polygon_block":1}"#).unwrap();
+        assert!(old.minted_lock_txs.is_empty());
+        let back: RelayerState = serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
+        assert_eq!(back.minted_lock_txs, st.minted_lock_txs);
+    }
+
+    /// Chunk arithmetic: contiguous, inclusive, never past `to`, never a zero-width loop —
+    /// the per-chunk checkpoint (`chunk_end + 1`) relies on exactly this.
+    #[test]
+    fn chunk_bounds_cover_the_range_exactly_once() {
+        assert_eq!(chunk_bounds(100, 125, 10), vec![(100, 109), (110, 119), (120, 125)]);
+        assert_eq!(chunk_bounds(5, 5, 10), vec![(5, 5)]);
+        assert!(chunk_bounds(6, 5, 10).is_empty());
+        assert_eq!(chunk_bounds(0, 2, 0), vec![(0, 0), (1, 1), (2, 2)], "chunk 0 is treated as 1");
+        let b = chunk_bounds(92_719_557, 92_719_557 + 25_000, 2_000);
+        assert_eq!(b.len(), 13);
+        assert_eq!(b.last().unwrap().1, 92_719_557 + 25_000);
     }
 }

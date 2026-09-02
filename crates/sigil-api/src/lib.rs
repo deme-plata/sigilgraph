@@ -1012,20 +1012,26 @@ pub async fn bridge_rotate_relayer_handler(
 #[derive(Debug, Serialize)]
 pub struct BridgeStatusResponse {
     pub vault: String,
+    /// The vault's TRANSPARENT balance. Always `0` since locks became `Shield` deposits;
+    /// kept for wire compatibility. The backing figure is `vault_note_balance`.
     pub vault_balance: String,
+    /// Glyphs held by the vault as shielded notes — what actually backs the wrapped supply.
+    /// `null` when no vault is attached to this node.
+    pub vault_note_balance: Option<String>,
     pub relayer: Option<String>,
     pub admin: Option<String>,
     pub paused: bool,
     pub lock_count: usize,
 }
 
-#[flux_api_macros::api(GET, "/v1/bridge/status", summary = "Bridge vault balance, relayer/admin wallets, paused state")]
+#[flux_api_macros::api(GET, "/v1/bridge/status", summary = "Bridge vault backing (shielded note balance), relayer/admin wallets, paused state")]
 pub async fn bridge_status_handler(State(st): State<AppState>) -> Json<ApiResponse<BridgeStatusResponse>> {
     let vault = bridge::BRIDGE_VAULT_WALLET;
     let vault_balance = st.state.read().map(|s| s.balance_of(&vault, &NATIVE)).unwrap_or(0);
     ApiResponse::ok(BridgeStatusResponse {
         vault: bridge::BridgeBridge::vault_hex(),
         vault_balance: vault_balance.to_string(),
+        vault_note_balance: st.bridge.vault_note_balance().map(|v| v.to_string()),
         relayer: st.bridge.relayer_hex(),
         admin: st.bridge.admin_hex(),
         paused: st.bridge.is_paused(),

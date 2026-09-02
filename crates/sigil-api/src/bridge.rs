@@ -423,6 +423,14 @@ impl BridgeBridge {
 
     /// Install the shielded vault. Separate from `new` so a node without a vault seed
     /// still constructs, and so the seed is read once at startup rather than per request.
+    /// Value the vault holds as SHIELDED notes, in glyphs — the real backing of every
+    /// wrapped SIGIL, now that a lock is a `Shield` into a vault-owned note. `None` until a
+    /// vault has been attached. The vault's TRANSPARENT balance is 0 by design and says
+    /// nothing about backing.
+    pub fn vault_note_balance(&self) -> Option<u128> {
+        self.vault.lock().unwrap().as_ref().map(|v| v.note_balance())
+    }
+
     pub fn set_vault(&self, vault: std::sync::Arc<crate::bridge_vault::BridgeVault>) {
         *self.vault.lock().unwrap() = Some(vault);
     }

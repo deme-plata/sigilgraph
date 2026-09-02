@@ -379,14 +379,42 @@ const GIB: u64 = 1024 * 1024 * 1024;
 /// message names the directory and the override, so the user can redirect the
 /// pull to a bigger disk instead of being stuck.
 fn check_disk_for(model: &str, tx: &Sender<SetupEvent>) -> Result<(), String> {
-    let dir = models_dir();
     let need = match crate::flux_moe::approx_model_bytes(model) {
         Some(n) => n,
         None => return Ok(()), // unknown size ⇒ do not guess, let ollama decide
     };
-    let free = match free_disk_bytes(&dir) {
-        Some(f) => f,
-        None => return Ok(()), // unmeasurable ⇒ never block
+    // CHECK EVERY DIRECTORY THE BYTES COULD LAND IN, not just the one WE are configured for.
+    //
+    // A pull goes through ollama's HTTP API, so the weights land wherever the RUNNING SERVER
+    // was configured — which is not necessarily where `models_dir()` points. On a box where
+    // someone already started ollama against the default `~/.ollama/models` while sigil-top
+    // has OLLAMA_MODELS aimed at a roomy disk, checking only our own value measures the roomy
+    // disk, reports "plenty of space", and the pull then fills the small one anyway.
+    //
+    // That is worse than having no check at all: a safety check measuring the wrong
+    // filesystem does not merely fail to help, it MANUFACTURES CONFIDENCE. ollama exposes no
+    // endpoint reporting its model path, so the honest move is to require room in every
+    // candidate and refuse if the tightest one cannot hold the model.
+    let mut candidates = vec![models_dir()];
+    let default_dir = dirs_home().join(".ollama").join("models");
+    if !candidates.iter().any(|c| *c == default_dir) {
+        candidates.push(default_dir);
+    }
+    // The tightest measurable candidate decides. Unmeasurable ones are skipped, never
+    // treated as zero — an unknown must not block a legitimate pull.
+    let (dir, free) = {
+        let mut worst: Option<(PathBuf, u64)> = None;
+        for c in candidates {
+            if let Some(f) = free_disk_bytes(&c) {
+                if worst.as_ref().map_or(true, |(_, wf)| f < *wf) {
+                    worst = Some((c, f));
+                }
+            }
+        }
+        match worst {
+            Some(w) => w,
+            None => return Ok(()), // nothing measurable ⇒ never block
+        }
     };
     emit(
         tx,

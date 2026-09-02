@@ -18,10 +18,29 @@
 //! ## Zero behavior change unless explicitly configured
 //!
 //! Reading `SIGIL_PRODUCER_SIGNING_SEED_HEX` is the ONLY way this module does
-//! anything. Unset (today's state on every live node, Epsilon included — it
-//! runs on the `[0xC1;32]` dev-default wallet with no known key) means every
-//! function here returns `None` / is a no-op, and block minting is byte-for-
-//! byte identical to before this file existed.
+//! anything. Unset means every function here returns `None` / is a no-op, and
+//! block minting is byte-for-byte identical to before this file existed.
+//!
+//! ⚠️ **The seed IS set on Epsilon — corrected 2026-09-02.** This paragraph used to
+//! assert it was "unset on every live node, Epsilon included — it runs on the
+//! `[0xC1;32]` dev-default wallet with no known key". That is FALSE and was
+//! actively misleading: `SIGIL_PRODUCER_SIGNING_SEED_HEX` is present in the live
+//! producer's environment, and the key it derives is the one the chain records.
+//! Verified without ever reading the secret — the `producer` field of live blocks
+//! (`GET /v1/dagknight/recent`) is
+//! `73b7745271b6be22dd8ca4be17f6fbff2df794d2d0b3c98ae791b219a6bc33d9`, which
+//! matches the pubkey derived from that seed.
+//!
+//! Why the correction matters beyond tidiness: this node has a REAL, externally
+//! anchorable identity. Anything the node signs can be verified by a third party
+//! against a key they read off a block it minted — no trust in the operator, no
+//! side channel. `sigil-api`'s acceptance receipts depend on exactly that. A
+//! reader who believed the old comment would conclude no such identity existed
+//! and design around a problem that does not exist.
+//!
+//! Re-check rather than trust either version of this comment:
+//!   curl -s http://127.0.0.1:18181/v1/dagknight/recent | python3 -c \
+//!     "import sys,json;print(bytes(json.load(sys.stdin)['data']['blocks'][0]['producer']).hex())"
 
 use ed25519_dalek::{Signer, SigningKey};
 use sigil_header::{SigScheme, SignatureBytes, SigilBlockHeaderV0};

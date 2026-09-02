@@ -33,6 +33,36 @@
 export function buildPrivateSend(seed_hex: string, note_index: number, note_value_str: string, note_position: number, unpadded_leaves_json: string, capacity: number, recipient_pk_shield_hex: string, recipient_pk_enc_hex: string, amount_str: string): string;
 
 /**
+ * [`buildPrivateSend`] plus a private memo (UTF-8, at most `note_cipher::MEMO_LEN` = 512
+ * bytes) sealed to the recipient alongside the note. A separate export rather than an
+ * extra parameter so pages built against the memo-less signature keep working unchanged.
+ */
+export function buildPrivateSendWithMemo(seed_hex: string, note_index: number, note_value_str: string, note_position: number, unpadded_leaves_json: string, capacity: number, recipient_pk_shield_hex: string, recipient_pk_enc_hex: string, amount_str: string, memo: string): string;
+
+/**
+ * Trial-open ONE published note ciphertext with this seed's encryption key.
+ *
+ * The receiving half of private payments, in the browser: a page walks every ciphertext
+ * on chain, calls this, and each success is a note that is ours — value, blinding (so the
+ * note can be spent) and the memo the sender wrote. Throws for any ciphertext not sealed
+ * to us, which is the common case and carries no information.
+ */
+export function openNoteCiphertext(seed_hex: string, ciphertext_json: string): string;
+
+/**
+ * The X25519 note-delivery key ciphertexts are sealed to — the OTHER half of this
+ * wallet's shielded address. `pk_shield` alone makes a wallet payable but not
+ * notifiable: without publishing this key too, nothing can tell the wallet a payment
+ * landed. The wallet page calls this during auto-registration.
+ *
+ * 2026-08-29: this export existed only in an UNCOMMITTED working tree the 08-26 site
+ * build was cut from — the page called it, the committed crate lacked it, and every
+ * fresh WASM build silently broke registration. Re-added from the committed
+ * `ShieldedAccount::address` derivation, the same one the node and MCP use.
+ */
+export function shieldEncryptPublicKey(seed_hex: string): string;
+
+/**
  * The commitment this account would publish for a SELF-CREATED note at `index` holding
  * `value` — deterministic from the seed alone. A wallet shields a deposit by computing
  * this locally (already done in JS on this page for `doShield()`'s fixed-denomination
@@ -60,6 +90,9 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly buildPrivateSend: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
+    readonly buildPrivateSendWithMemo: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number) => [number, number, number, number];
+    readonly openNoteCiphertext: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly shieldEncryptPublicKey: (a: number, b: number) => [number, number, number, number];
     readonly shieldNoteCommitment: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly shieldPublicKey: (a: number, b: number) => [number, number, number, number];
     readonly wasmApiVersion: () => [number, number];

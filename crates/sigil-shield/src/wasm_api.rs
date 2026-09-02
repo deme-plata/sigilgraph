@@ -42,7 +42,7 @@ use winterfell::math::fields::f64::BaseElement;
 /// already ports `DENOMINATIONS` verbatim rather than depending on the crate that owns
 /// it. If the server-side constant ever changes, this wasm module needs rebuilding
 /// anyway (the circuit's public inputs would no longer match).
-const SHIELDED_FEE: u64 = 1_000;
+const SHIELDED_FEE: u64 = 100_000;
 
 fn hex32(s: &str) -> Result<[u8; 32], JsValue> {
     let bytes = hex::decode(s.trim_start_matches("0x"))

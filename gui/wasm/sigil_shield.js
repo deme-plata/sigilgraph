@@ -71,6 +71,123 @@ export function buildPrivateSend(seed_hex, note_index, note_value_str, note_posi
 }
 
 /**
+ * [`buildPrivateSend`] plus a private memo (UTF-8, at most `note_cipher::MEMO_LEN` = 512
+ * bytes) sealed to the recipient alongside the note. A separate export rather than an
+ * extra parameter so pages built against the memo-less signature keep working unchanged.
+ * @param {string} seed_hex
+ * @param {number} note_index
+ * @param {string} note_value_str
+ * @param {number} note_position
+ * @param {string} unpadded_leaves_json
+ * @param {number} capacity
+ * @param {string} recipient_pk_shield_hex
+ * @param {string} recipient_pk_enc_hex
+ * @param {string} amount_str
+ * @param {string} memo
+ * @returns {string}
+ */
+export function buildPrivateSendWithMemo(seed_hex, note_index, note_value_str, note_position, unpadded_leaves_json, capacity, recipient_pk_shield_hex, recipient_pk_enc_hex, amount_str, memo) {
+    let deferred9_0;
+    let deferred9_1;
+    try {
+        const ptr0 = passStringToWasm0(seed_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(note_value_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(unpadded_leaves_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(recipient_pk_shield_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(recipient_pk_enc_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len4 = WASM_VECTOR_LEN;
+        const ptr5 = passStringToWasm0(amount_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len5 = WASM_VECTOR_LEN;
+        const ptr6 = passStringToWasm0(memo, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len6 = WASM_VECTOR_LEN;
+        const ret = wasm.buildPrivateSendWithMemo(ptr0, len0, note_index, ptr1, len1, note_position, ptr2, len2, capacity, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6);
+        var ptr8 = ret[0];
+        var len8 = ret[1];
+        if (ret[3]) {
+            ptr8 = 0; len8 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred9_0 = ptr8;
+        deferred9_1 = len8;
+        return getStringFromWasm0(ptr8, len8);
+    } finally {
+        wasm.__wbindgen_free(deferred9_0, deferred9_1, 1);
+    }
+}
+
+/**
+ * Trial-open ONE published note ciphertext with this seed's encryption key.
+ *
+ * The receiving half of private payments, in the browser: a page walks every ciphertext
+ * on chain, calls this, and each success is a note that is ours — value, blinding (so the
+ * note can be spent) and the memo the sender wrote. Throws for any ciphertext not sealed
+ * to us, which is the common case and carries no information.
+ * @param {string} seed_hex
+ * @param {string} ciphertext_json
+ * @returns {string}
+ */
+export function openNoteCiphertext(seed_hex, ciphertext_json) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(seed_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(ciphertext_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.openNoteCiphertext(ptr0, len0, ptr1, len1);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * The X25519 note-delivery key ciphertexts are sealed to — the OTHER half of this
+ * wallet's shielded address. `pk_shield` alone makes a wallet payable but not
+ * notifiable: without publishing this key too, nothing can tell the wallet a payment
+ * landed. The wallet page calls this during auto-registration.
+ *
+ * 2026-08-29: this export existed only in an UNCOMMITTED working tree the 08-26 site
+ * build was cut from — the page called it, the committed crate lacked it, and every
+ * fresh WASM build silently broke registration. Re-added from the committed
+ * `ShieldedAccount::address` derivation, the same one the node and MCP use.
+ * @param {string} seed_hex
+ * @returns {string}
+ */
+export function shieldEncryptPublicKey(seed_hex) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(seed_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.shieldEncryptPublicKey(ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
  * The commitment this account would publish for a SELF-CREATED note at `index` holding
  * `value` — deterministic from the seed alone. A wallet shields a deposit by computing
  * this locally (already done in JS on this page for `doShield()`'s fixed-denomination

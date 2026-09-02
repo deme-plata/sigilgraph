@@ -2,6 +2,9 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const buildPrivateSend: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
+export const buildPrivateSendWithMemo: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number) => [number, number, number, number];
+export const openNoteCiphertext: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const shieldEncryptPublicKey: (a: number, b: number) => [number, number, number, number];
 export const shieldNoteCommitment: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const shieldPublicKey: (a: number, b: number) => [number, number, number, number];
 export const wasmApiVersion: () => [number, number];

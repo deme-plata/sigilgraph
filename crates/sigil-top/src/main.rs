@@ -789,7 +789,46 @@ fn main() {
         Some("flux-register") => { let _ = flux_register_scheme(); return; }
         Some("flux-unregister") => { let _ = flux_unregister_scheme(); return; }
         // Headless miner (same engine [M] drives): mine N shares to the node, print each. Scriptable.
+        // `mine` USED TO RUN A MINER WHOSE BACKEND NO LONGER EXISTS.
+        //
+        // It drives the legacy BLAKE3 leading-zero-bits path at `mine_url()`, whose default is
+        // the old **sigil-rpcd** `/v1/mine` route. sigil-rpcd was stopped and disabled on
+        // 2026-08-17 and again on 2026-08-31, permanently. Measured 2026-09-02: that endpoint
+        // answers HTTP 000 and nothing listens on :8447 anywhere, so `sigil-top mine` hashed
+        // correctly and threw every share away:
+        //
+        //   ✗ submit: error sending request for url (https://…:8447/v1/mine) (retry 3s)
+        //
+        // The worst possible shape for a user: real hashrate, an honest-looking error, an
+        // infinite retry, and no reward ever — while `mine-rig`, the *other* subcommand, mined
+        // the same chain perfectly (measured the same day: 30 shares accepted, 0 rejected,
+        // ~80 MH/s, one block found). Nothing told the user they had picked the dead one.
+        //
+        // They are NOT one miner with a bad address — they speak different protocols. The live
+        // path is dual-lane (BLAKE4 Φ + VDF Ω) posting `Submission { height, wallet, block }` to
+        // `/v1/mining/submit`; the legacy path posts `{miner_hex, header, pow_nonce}`. Pointing
+        // the old miner at the new endpoint is not a fix — it earns
+        // `missing field 'height'`, which is exactly what happened when it was tried.
+        //
+        // So `mine` now REFUSES rather than pretending, and names the command that works. It
+        // does not silently alias to `mine-rig`: `mine` takes a share COUNT and exits, while
+        // `mine-rig` runs until killed, so aliasing would change what a scripted caller gets.
         Some("mine") => {
+            println!("\n  {RED}✗ `sigil-top mine` is retired — its backend no longer exists.{RESET}");
+            println!("  {DIM}It submits to the old sigil-rpcd /v1/mine route, which has been off since");
+            println!("  2026-08-17. Measured: HTTP 000, nothing listening. It would hash at full speed");
+            println!("  and earn nothing.{RESET}");
+            println!("\n  Use the dual-lane miner, which mines the live braid:");
+            println!("    {GREEN}sigil-top mine-rig{RESET} [wallet-64hex] [node-url]");
+            println!("\n  {DIM}Rewards mint as PRIVATE notes when you pass a seed instead of an address:");
+            println!("    SIGIL_MINE_SEED=<64-hex> sigil-top mine-rig{RESET}\n");
+            return;
+        }
+        // Retained for one release so an operator who scripted it gets the explanation above
+        // rather than a silent behaviour change. Delete `mine`, `mine_url` and `start_mining`
+        // together once nobody is calling it.
+        #[allow(unreachable_patterns)]
+        Some("__mine_legacy") => {
             let n: u64 = argv.get(1).and_then(|s| s.parse().ok()).unwrap_or(3);
             println!("\n  {GOLD}▲ sigil-top miner{RESET} → {} · wallet {}…", mine_url(), &miner_wallet()[..8]);
             let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

@@ -317,11 +317,46 @@ pub(crate) fn pick_model(default_model: &str, fallback_model: Option<&str>, hw: 
         ),
         // GPU present, size of the default unknown → trust the manifest.
         (Some(_), None) => (default_model.to_string(), format!("{default_model} (GPU present; model size not derivable from the tag)")),
-        // No GPU at all → speed, not capacity, is the binding constraint.
-        (None, _) => (
-            fb.to_string(),
-            format!("{fb} — no GPU found, so the smaller model keeps the tab interactive (set SIGIL_AI_MODEL={default_model} to override)"),
-        ),
+        // NO GPU — but "no GPU" is not the same as "not capable", and treating them as
+        // identical silently denied the operator the model the manifest actually names.
+        //
+        // Measured on this class of box (48 cores, 62 GB RAM, no GPU, 2026-09-02): qwen3:8b
+        // answered in 44.7 s with a clean `done_reason: stop`, and qwen3:4b in ~43.8 s at
+        // 7.0 tok/s. The 8b model is not meaningfully slower here — it is roughly the same
+        // wall-clock — so downgrading bought nothing and cost capability. A 2-core, 4 GB VPS
+        // is the case the fallback exists for, and RAM plus core count is what distinguishes
+        // the two; the absence of a GPU does not.
+        //
+        // So: with enough RAM to hold the model with real headroom AND enough cores for CPU
+        // inference to stay interactive, honour the manifest's default. Otherwise fall back,
+        // and SAY WHICH MEASUREMENT decided it — a user who disagrees can then point at the
+        // number rather than guess. `SIGIL_AI_MODEL` still wins over all of this.
+        (None, need_opt) => {
+            const MIN_CORES: usize = 8;
+            // 2.5x the weights: activations, KV cache and the OS all need room, and a model
+            // that swaps is far worse than a smaller model that does not.
+            let ram_ok = match (hw.ram_bytes, need_opt) {
+                (Some(ram), Some(need)) => ram >= need.saturating_mul(5) / 2,
+                // Unmeasurable either way ⇒ do NOT gamble on the bigger model.
+                _ => false,
+            };
+            let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+            if ram_ok && cores >= MIN_CORES {
+                let ram_gb = hw.ram_bytes.unwrap_or(0) as f64 / GIB as f64;
+                (
+                    default_model.to_string(),
+                    format!(
+                        "{default_model} — no GPU, but {cores} cores and {ram_gb:.0} GB RAM run it                          comfortably on CPU (measured: qwen3:8b ~45 s/answer on 48 cores)"
+                    ),
+                )
+            } else {
+                let why = if !ram_ok { "not enough RAM headroom".to_string() } else { format!("only {cores} cores") };
+                (
+                    fb.to_string(),
+                    format!("{fb} — no GPU and {why}, so the smaller model keeps the tab interactive (set SIGIL_AI_MODEL={default_model} to override)"),
+                )
+            }
+        }
     }
 }
 

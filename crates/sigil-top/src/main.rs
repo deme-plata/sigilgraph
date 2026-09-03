@@ -1738,7 +1738,7 @@ struct App {
     ai_setup_rx: Option<mpsc::Receiver<ai_setup::SetupEvent>>, // auto-setup progress (install/pull), off-UI-thread
     ai_setup_running: bool,                     // an auto-setup is in flight (F5 is a no-op meanwhile)
     ai_skills: Vec<skills::LoadedSkill>,        // flux-signed skills loaded this session (text only)
-    ai_skills_rx: Option<mpsc::Receiver<Result<(Vec<skills::LoadedSkill>, Vec<String>), String>>>,
+    ai_skills_rx: Option<mpsc::Receiver<Result<skills::SkillLoad, String>>>,
     ai_skills_note: String,                     // status-line summary of the last skills load
 
     // === CATHEDRAL DAGKNIGHT (wired 2026-06-17) ===
@@ -3250,18 +3250,19 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             if let Some(rx) = app.ai_skills_rx.as_ref() {
                 if let Ok(res) = rx.try_recv() {
                     match res {
-                        Ok((ok, rejected)) => {
-                            let names: Vec<String> = ok.iter().map(|s| s.name.clone()).collect();
-                            app.ai_skills = ok;
-                            app.ai_skills_note = if rejected.is_empty() {
-                                format!("{} flux-signed", app.ai_skills.len())
-                            } else {
-                                format!("{} loaded · {} rejected", app.ai_skills.len(), rejected.len())
-                            };
+                        Ok(res) => {
+                            let names: Vec<String> = res.loaded.iter().map(|s| s.name.clone()).collect();
+                            app.ai_skills_note = res.note();
+                            app.ai_skills = res.loaded;
                             if !names.is_empty() {
                                 app.ai_msgs.push(("assistant".to_string(), format!("🔏 skills loaded (flux-signed, blake3-verified): {}", names.join(", "))));
                             }
-                            for r in rejected { app.ai_msgs.push(("assistant".to_string(), format!("⚠ skill rejected — {r}"))); }
+                            // Withheld is routine — a skill that simply is not for
+                            // this install. Say it once, quietly, and only if the
+                            // user could actually turn it on.
+                            for w in res.withheld { app.ai_msgs.push(("assistant".to_string(), format!("· skill not loaded here — {w}"))); }
+                            // Rejected means a gate FAILED. Loud, always.
+                            for r in res.rejected { app.ai_msgs.push(("assistant".to_string(), format!("⚠ skill rejected — {r}"))); }
                         }
                         Err(e) => {
                             app.ai_skills_note = "skills unavailable".into();

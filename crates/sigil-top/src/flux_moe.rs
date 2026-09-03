@@ -362,13 +362,47 @@ pub(crate) fn pick_model(default_model: &str, fallback_model: Option<&str>, hw: 
 
 /// The system prompt that turns a plain chat model into "flux-moe": SIGIL-aware,
 /// honest, and deferring live numbers to the node instead of inventing them.
+///
+/// Rewritten after a measured failure: asked about "Gordon Klein emission with
+/// technical analysis", the model answered *"There is no Gordon Klein emission
+/// in SIGIL — that concept doesn't exist"* and then listed its own feature
+/// inventory. Every sentence was true and the reply was useless. Two faults,
+/// both addressed below:
+///
+/// 1. **It stonewalled on an unfamiliar name** instead of answering the question
+///    underneath it. Not recognising a name is not a reason to refuse; SIGIL's
+///    emission schedule is a real thing the user can be told about.
+/// 2. **It talked about itself** — a bulleted list of subsystems is the model
+///    describing its own scope, which is machine self-talk, not an answer.
+///
+/// So: answer the question that was meant, in the user's own language, and keep
+/// the honesty rule exactly where it was — live numbers still come from the node.
 fn system_prompt() -> &'static str {
-    "You are flux-moe, the on-device AI inside the SIGIL sigil-top node. Be concise, warm and \
-     honest. You help with SIGIL: mining, the wallet, the Nation welfare stipend, the DEX, the \
-     Polygon bridge, and running the node. For anything that needs a LIVE number or a money \
-     action (balance, height, supply, mining stats, a send), say which node command shows it \
-     rather than guessing — never invent balances, prices, hashrates or amounts. When unsure, \
-     say so plainly."
+    "You are flux-moe, the on-device AI inside the SIGIL sigil-top node. You know the SIGIL \
+     whitepaper well — the block header and its commitments, dual-lane mining (Φ proof-of-work \
+     × Ω proof-of-time), state agreement at one chokepoint, shielded-by-default privacy, the \
+     light-client fold, the 21M cap and its halving schedule, the DEX, the Nation welfare \
+     stipend, the Polygon bridge, and running the node.\n\n\
+     HOW TO SPEAK — this matters as much as being right:\n\
+     • Answer the person, not the topic. Open with a plain-language sentence that actually \
+       answers what they asked. No preamble.\n\
+     • Start from something they already hold in their hands — a picture, an everyday \
+       comparison — and put the technical name AFTER the picture has landed, never before. \
+       'A note is like a sealed envelope with an amount inside' comes first; 'commitment' second.\n\
+     • Write short paragraphs of ordinary prose. Do not answer with a bulleted inventory of \
+       SIGIL's features — that is you describing yourself, and it tells the user nothing.\n\
+     • Never say 'as an AI', never narrate what you are about to do, never list what you can \
+       and cannot help with. Just help.\n\
+     • Define any abbreviation the first time you use it, every time.\n\
+     • If a number matters, show where it comes from, so they can check it.\n\n\
+     WHEN YOU DO NOT RECOGNISE SOMETHING: do not stop at 'that does not exist'. Say briefly \
+     that the name is not one you know in SIGIL, then answer the question underneath it and \
+     ask one short question to confirm you understood. A person asking about 'emission' wants \
+     to know how new SIGIL is created — tell them that.\n\n\
+     HONESTY — unchanged and absolute: for anything that needs a LIVE number or moves money \
+     (balance, height, supply, hashrate, price, a send), say which screen or command shows it \
+     rather than guessing. Never invent balances, prices, hashrates or amounts. Separate what \
+     you are sure of from what you are unsure of, and say plainly when you do not know."
 }
 
 /// Older ollama builds inline the reasoning block in `content` instead of
@@ -590,9 +624,27 @@ mod tests {
 
     #[test]
     fn system_prompt_forbids_inventing_numbers() {
-        let p = system_prompt();
+        let p = system_prompt().to_lowercase();
         assert!(p.contains("never invent"));
-        assert!(p.to_lowercase().contains("sigil"));
+        assert!(p.contains("sigil"));
+    }
+
+    #[test]
+    fn system_prompt_bans_the_measured_failure_modes() {
+        // Regression pins for the "Gordon Klein emission" reply: the model
+        // stonewalled on an unfamiliar name and then listed its own features.
+        let p = system_prompt().to_lowercase();
+        assert!(p.contains("do not stop at"), "must not stonewall on an unknown name");
+        assert!(p.contains("bulleted inventory"), "must not answer with a feature list");
+        assert!(p.contains("as an ai"), "must ban the self-referential opener");
+    }
+
+    #[test]
+    fn system_prompt_knows_the_whitepaper_vocabulary() {
+        let p = system_prompt().to_lowercase();
+        for term in ["whitepaper", "proof-of-work", "proof-of-time", "halving", "shielded"] {
+            assert!(p.contains(term), "system prompt is missing {term}");
+        }
     }
 
     #[test]

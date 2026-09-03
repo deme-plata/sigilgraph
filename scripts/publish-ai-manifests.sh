@@ -63,21 +63,81 @@ cat > "$WORK/sigil-ai-latest.json" <<EOF
 EOF
 python3 -c 'import json,sys;json.load(open(sys.argv[1]))' "$WORK/sigil-ai-latest.json"
 
-echo "▸ 3/5 write sigil-skills-latest.json (first signed skill: slagteren-suensonsvej)"
-[ -s "$SKILL_TGZ" ] || { echo "✗ skill tarball missing: $SKILL_TGZ"; exit 1; }
-mkdir -p "$WORK/skill" && tar xzf "$SKILL_TGZ" -C "$WORK/skill"
-SKILL_MD=$(find "$WORK/skill" -name SKILL.md | head -1); [ -s "$SKILL_MD" ] || { echo "✗ no SKILL.md in tarball"; exit 1; }
-SKILL_NAME=$(awk -F': *' '/^name:/{print $2; exit}' "$SKILL_MD"); [ -n "$SKILL_NAME" ] || { echo "✗ SKILL.md has no name:"; exit 1; }
-SKILL_DESC=$(awk -F': *' '/^description:/{print $2; exit}' "$SKILL_MD")
-SKILL_VER=$(basename "$(readlink -f "$SKILL_TGZ")" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | tr -d v || true); SKILL_VER="${SKILL_VER:-1.0.0}"
-SKILL_B3=$(b3 "$SKILL_MD")
-python3 - "$WORK/sigil-skills-latest.json" "$SKILL_NAME" "$SKILL_VER" "$SKILL_DESC" "$SKILL_B3" "$SKILL_MD" <<'PY'
-import json,sys,time
-out,name,ver,desc,b3,path=sys.argv[1:7]
+echo "▸ 3/5 write sigil-skills-latest.json (public SIGIL skills + operator-gated packs)"
+# Each entry carries an `audience`:
+#   public   — loaded by EVERY sigil-top install. Must be about SIGIL itself.
+#   operator — loaded ONLY where the user set SIGIL_SKILLS=<name>.
+# The gate is client-side (crates/sigil-top/src/skills.rs), so nothing about who
+# is asking ever leaves the machine. Before this existed, the operator's own
+# butcher-shop pack was shipped into every user's model context.
+#
+# Public skills are tracked IN THE REPO under skills/<name>/SKILL.md so a review
+# can see exactly what every user's AI is told. Private packs come from a tarball.
+PUBLIC_SKILLS_DIR="${PUBLIC_SKILLS_DIR:-$REPO/skills}"
+mkdir -p "$WORK/entries"
+
+# collect_skill <name> <version> <audience> <path-to-SKILL.md>
+collect_skill() {
+  local name="$1" ver="$2" aud="$3" md="$4"
+  [ -s "$md" ] || { echo "✗ skill $name: empty/missing $md"; exit 1; }
+  local chars; chars=$(python3 -c 'import sys;print(len(open(sys.argv[1],encoding="utf-8").read()))' "$md")
+  # 8000 = MAX_SKILL_CHARS in skills.rs. A longer body is TRUNCATED client-side,
+  # which silently cuts the end off the instructions — fail here instead.
+  [ "$chars" -le 8000 ] || { echo "✗ skill $name: ${chars} chars > 8000 (client truncates) — shorten it"; exit 1; }
+  local b3; b3=$(b3 "$md")
+  python3 - "$WORK/entries/$name.json" "$name" "$ver" "$aud" "$b3" "$md" <<'ENTRYPY'
+import json,sys
+out,name,ver,aud,b3,path=sys.argv[1:7]
 md=open(path,encoding='utf-8').read()
-json.dump({"product":"sigil-skills","skills":[{"name":name,"version":ver,"description":desc,"blake3_hex":b3,"skill_md":md}],"updated":int(time.time())},open(out,'w'),ensure_ascii=False,indent=1)
-print(f"  {name} v{ver} blake3 {b3[:16]}… ({len(md)} chars)")
-PY
+desc=""
+for line in md.splitlines():
+    if line.lower().startswith("description:"):
+        desc=line.split(":",1)[1].strip(); break
+json.dump({"name":name,"version":ver,"description":desc,"audience":aud,
+           "blake3_hex":b3,"skill_md":md},open(out,'w'),ensure_ascii=False)
+print(f"  + {name:22s} v{ver:8s} audience={aud:9s} blake3 {b3[:16]}… ({len(md)} chars)")
+ENTRYPY
+}
+
+# ── public: every skills/<name>/SKILL.md tracked in the repo ──
+for d in "$PUBLIC_SKILLS_DIR"/*/; do
+  [ -f "$d/SKILL.md" ] || continue
+  n=$(basename "$d")
+  v=$(awk -F': *' '/^version:/{print $2; exit}' "$d/SKILL.md"); v="${v:-1.0.0}"
+  a=$(awk -F': *' '/^audience:/{print $2; exit}' "$d/SKILL.md"); a="${a:-public}"
+  collect_skill "$n" "$v" "$a" "$d/SKILL.md"
+done
+
+# ── operator-gated: the slagteren pack, if its tarball is present ──
+# Optional now — its absence must not block a release of the public skills.
+if [ -s "$SKILL_TGZ" ]; then
+  mkdir -p "$WORK/skill" && tar xzf "$SKILL_TGZ" -C "$WORK/skill"
+  SKILL_MD=$(find "$WORK/skill" -name SKILL.md | head -1)
+  if [ -s "$SKILL_MD" ]; then
+    SKILL_NAME=$(awk -F': *' '/^name:/{print $2; exit}' "$SKILL_MD")
+    [ -n "$SKILL_NAME" ] || { echo "✗ SKILL.md has no name:"; exit 1; }
+    SKILL_VER=$(basename "$(readlink -f "$SKILL_TGZ")" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | tr -d v || true)
+    collect_skill "$SKILL_NAME" "${SKILL_VER:-1.0.0}" "operator" "$SKILL_MD"
+  else
+    echo "  · $SKILL_TGZ has no SKILL.md — skipped"
+  fi
+else
+  echo "  · no operator skill tarball at $SKILL_TGZ — publishing public skills only"
+fi
+
+python3 - "$WORK/sigil-skills-latest.json" "$WORK/entries" <<'MANIFESTPY'
+import json,sys,os,time
+out,d=sys.argv[1],sys.argv[2]
+skills=[json.load(open(os.path.join(d,f),encoding='utf-8')) for f in sorted(os.listdir(d))]
+if not skills: raise SystemExit("✗ no skills collected — refusing to publish an empty manifest")
+# Public first, so a small-context client spends its budget on what everyone needs.
+skills.sort(key=lambda s: (s.get("audience","public") != "public", s["name"]))
+pub=[s["name"] for s in skills if s.get("audience","public")=="public"]
+gated=[f'{s["name"]}({s["audience"]})' for s in skills if s.get("audience","public")!="public"]
+json.dump({"product":"sigil-skills","skills":skills,"updated":int(time.time())},
+          open(out,'w'),ensure_ascii=False,indent=1)
+print(f"  → {len(skills)} skill(s): public={pub or 'none'} gated={gated or 'none'}")
+MANIFESTPY
 
 echo "▸ 4/5 sign both + publish to BOTH roots (additive)"
 for m in sigil-ai-latest.json sigil-skills-latest.json; do

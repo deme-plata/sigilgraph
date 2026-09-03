@@ -123,6 +123,21 @@ pub(crate) fn render_tab_bar(app: &App) -> Paragraph<'static> {
 /// [A]I tab — flux-moe chat against the user's LOCAL ollama. The chosen model IS
 /// the effort dial (a bigger model on a bigger GPU reasons harder). The model call
 /// runs off the UI thread (`ai_submit`); this only renders state.
+/// Suggested opening questions, shown while the transcript is empty.
+///
+/// This exists because of a measured failure: asked about "Gordon Klein emission
+/// with technical analysis", the model replied that the concept did not exist and
+/// listed its own subsystems. Half that fix is the system prompt; the other half
+/// is showing people the shape of a question this thing answers well, so the
+/// first exchange is a good one instead of a dead end.
+pub(crate) const AI_STARTERS: [&str; 5] = [
+    "How is new SIGIL created?",
+    "Why is my block reward getting smaller?",
+    "What makes a private send slow?",
+    "How can a phone verify the whole chain?",
+    "What is the difference between SIGIL and wSIGIL?",
+];
+
 pub(crate) fn draw_ai_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let [status_area, msgs_area, input_area] = Layout::vertical([
         Constraint::Length(1),
@@ -143,9 +158,26 @@ pub(crate) fn draw_ai_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect)
     // transcript
     let mut lines: Vec<Line> = Vec::new();
     if app.ai_msgs.is_empty() {
-        lines.push(Line::from(dim("flux-moe — your on-device AI. Ask about mining, the wallet, the Nation, or the node.")));
+        lines.push(Line::from(dim("flux-moe — your on-device AI. It knows the SIGIL whitepaper, how mining and")));
+        lines.push(Line::from(dim("emission work, the wallet, the Nation and the bridge — and explains them plainly.")));
         lines.push(Line::from(""));
-        lines.push(Line::from(dim("It never invents balances or prices — those come from the node.")));
+        lines.push(Line::from(Span::styled("  try asking:", Style::default().fg(C_NEON_CYAN))));
+        for q in AI_STARTERS {
+            lines.push(Line::from(Span::styled(format!("    › {q}"), Style::default().fg(Color::White))));
+        }
+        lines.push(Line::from(""));
+        // Name the loaded skills, so it is visible WHICH instructions are shaping
+        // the answers — a skill you cannot see is a skill you cannot audit.
+        if !app.ai_skills.is_empty() {
+            let names: Vec<String> = app.ai_skills.iter()
+                .map(|s| if s.audience == "public" { s.name.clone() } else { format!("{} ({})", s.name, s.audience) })
+                .collect();
+            lines.push(Line::from(Span::styled(
+                format!("  🔏 loaded skills: {}", names.join(", ")),
+                Style::default().fg(C_NEON_GOLD),
+            )));
+        }
+        lines.push(Line::from(dim("  It never invents balances or prices — those come from the node.")));
     }
     for (role, content) in &app.ai_msgs {
         if role == "user" {

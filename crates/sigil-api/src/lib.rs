@@ -67,6 +67,7 @@ pub mod eth;
 
 pub mod dagknight;
 /// SIGIL-Nation: citizen attestation + welfare claims (dev-fee financed).
+pub mod aether;
 pub mod nation;
 /// PV-1 private transfers: shield / shielded-send / unshield.
 pub mod shielded;
@@ -88,6 +89,10 @@ pub struct AppState {
     pub mempool: Arc<MempoolBackend>,
     pub state: Arc<RwLock<SigilState>>,
     pub mining: Arc<MiningBridge>,
+    /// The node's user-writable flux-aether artifact store — what the SIGIL OS
+    /// terminal reads and writes. Lives in `<base>/aether-user`, deliberately
+    /// NOT the chain snapshot dir; see the `aether` module docs.
+    pub aether: Arc<aether::AetherStore>,
     /// The wallet-authenticated send queue — see `send` module docs. The
     /// producer drains it once per tick, same shape as `mining`.
     pub send: Arc<SendBridge>,
@@ -158,6 +163,7 @@ impl AppState {
             history: Arc::new(MiningHistoryStore::open_ephemeral()),
             network: None,
             nation: Arc::new(nation::NationBridge::new()),
+            aether: Arc::new(aether::AetherStore::open_from_env()),
         }
     }
 }
@@ -1796,6 +1802,12 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/shielded/has", get(shielded_has_commitment_handler))
         .route("/v1/shielded/address", get(shielded_address_handler))
         .route("/v1/eth/usdc", get(eth_usdc_handler))
+        .route("/v1/aether/root", get(aether::aether_root))
+        .route("/v1/aether/ls", get(aether::aether_ls))
+        .route("/v1/aether/stat", get(aether::aether_stat))
+        .route("/v1/aether/cat", get(aether::aether_cat))
+        .route("/v1/aether/recover", get(aether::aether_recover))
+        .route("/v1/aether/put", post(aether::aether_put))
         .route("/v1/nation/status", get(nation::nation_status))
         .route("/v1/nation/citizen", get(nation::nation_citizen))
         .route("/v1/nation/attest", post(nation::nation_attest))

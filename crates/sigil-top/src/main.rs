@@ -524,7 +524,7 @@ mod http_client;
 pub(crate) use http_client::{fetch, http_get, parse_status};
 
 mod fmt;
-pub(crate) use fmt::{bar, fmt_eta, fmt_supply, fmt_uptime, hex, short_hex, short_root};
+pub(crate) use fmt::{bar, countdown_now, fmt_countdown, fmt_eta, fmt_supply, fmt_uptime, hex, short_hex, short_root, MAINNET_LAUNCH_LABEL, MAINNET_LAUNCH_UNIX};
 
 // ───────────────────────── ST-2: freeze / stall detection ─────────────────────────
 mod stall;

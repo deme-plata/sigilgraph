@@ -14,7 +14,17 @@ pub(crate) fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str
     let state = if online { format!("{GREEN}LIVE{RESET}") } else { format!("{RED}OFFLINE{RESET}") };
 
     // ── brand header — clean Quillon-graph node look (⬡ mark, one status line) ──
-    o.push_str(&format!("\n  {GOLD}◆{RESET} {VBRIGHT}{BOLD}SIGIL{RESET} {DIM}lightweight node{RESET} {VBRIGHT}v{VERSION}{RESET}    {dot} {state}    {DIM}net {net}{RESET}\n"));
+    // The mainnet countdown sits directly after the version, mirroring
+    // sigilgraph.org's panel but WITHOUT seconds (operator request): the TUI does
+    // not repaint at 1 Hz, so a seconds digit would be stale between frames.
+    // Same UTC instant as the site — see fmt::MAINNET_LAUNCH_UNIX.
+    let cd = countdown_now();
+    let cd_badge = if cd == "LIVE" {
+        format!("  {GREEN}◆ MAINNET LIVE{RESET}")
+    } else {
+        format!("  {DIM}·{RESET} {GOLD}T-{cd}{RESET} {DIM}to mainnet{RESET}")
+    };
+    o.push_str(&format!("\n  {GOLD}◆{RESET} {VBRIGHT}{BOLD}SIGIL{RESET} {DIM}lightweight node{RESET} {VBRIGHT}v{VERSION}{RESET}{cd_badge}    {dot} {state}    {DIM}net {net}{RESET}\n"));
     // SELF-DIAGNOSIS: when OFFLINE, show exactly WHY the feed fetch failed (DNS/TLS/connect/HTTP/parse)
     // so the user can read the real cause instead of a blind "offline". This is the dogfood endpoint.
     if !online {

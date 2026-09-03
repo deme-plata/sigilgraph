@@ -912,6 +912,11 @@ fn run_start() -> Result<()> {
                     history: Arc::clone(&mining_history_store),
                     network: Some(Arc::clone(&mgr)),
                     nation: Arc::clone(&nation_bridge),
+                    // The user-writable aether store (SIGIL OS terminal).
+                    // `open_from_env` puts it at `$SIGIL_DB_PATH/aether-user`,
+                    // deliberately BESIDE the chain snapshot dir (`.../aether`)
+                    // and never inside it — see sigil_api::aether module docs.
+                    aether: Arc::new(sigil_api::aether::AetherStore::open_from_env()),
                 };
                 // Samples the live mining aggregate once/minute into the
                 // durable store above. Same "reader of already-published

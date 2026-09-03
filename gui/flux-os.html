@@ -244,6 +244,26 @@
     background:#0e141d; border:1px solid var(--edge); border-radius:10px; padding:12px 18px; font-size:13px;
     box-shadow:0 12px 30px rgba(0,0,0,.5); opacity:0; transition:opacity .2s, transform .2s}
   .toast.show{opacity:1; transform:translateX(-50%) translateY(-6px)}
+/* ── Terminal (flux-aether shell) ───────────────────────────────────────── */
+.term{display:flex;flex-direction:column;height:100%;min-height:0;background:#05070a;font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace}
+.term-out{flex:1;overflow-y:auto;padding:12px 14px;font-size:12.5px;line-height:1.55;color:#c6d3e2}
+.term-out::-webkit-scrollbar{width:8px}
+.term-out::-webkit-scrollbar-thumb{background:#1e2836;border-radius:4px}
+.term .tl{white-space:pre-wrap;word-break:break-all}
+.term .tb{color:#dfe7f2;font-weight:600}
+.term .td{color:#5a6678}
+.term .tc{color:#3ad2ff}
+.term .tn{color:#dfe7f2}
+.term .th{color:#c9a227}
+.term .tg{color:#5bd88a}
+.term .tr{color:#ff6b6b}
+.term .tw{color:#e8b84b}
+.term .tp{color:#8695ab;opacity:.85;margin-top:2px}
+.term .tk{display:inline-block;min-width:200px;color:#5a6678}
+.term .tv{color:#c6d3e2}
+.term-in{display:flex;align-items:center;gap:8px;padding:9px 14px;border-top:1px solid #1e2836;background:#070a0f}
+.term-ps1{color:#3ad2ff;font-weight:600;font-size:12.5px;flex:none}
+.term-in input{flex:1;background:transparent;border:0;outline:0;color:#dfe7f2;font:inherit;font-size:12.5px;caret-color:#3ad2ff}
 </style>
 </head>
 <body>
@@ -263,6 +283,7 @@
     <span class="menu" data-app="nation">Nation</span>
     <span class="menu" data-app="ai">AI</span>
     <span class="menu" data-app="mail">Mail</span>
+    <span class="menu" data-app="term">Terminal</span>
     <span class="spacer"></span>
     <span class="stat"><span class="dot" id="chaindot"></span> SIGIL testnet <b id="height">—</b></span>
     <span class="stat" id="clock">—</span>
@@ -281,6 +302,7 @@
     <div class="app" data-app="nation"><span class="lbl">Nation</span>🏛️<span class="run"></span></div>
     <div class="app" data-app="ai"><span class="lbl">AI console</span>🤖<span class="run"></span></div>
     <div class="app" data-app="mail"><span class="lbl">Mail</span>✉️<span class="run"></span></div>
+    <div class="app" data-app="term"><span class="lbl">Terminal</span>⌨️<span class="run"></span></div>
     <div class="app" data-app="about"><span class="lbl">About</span>◆<span class="run"></span></div>
   </div>
 
@@ -731,12 +753,207 @@ function renderAI(body){
   setTimeout(()=>body.querySelector('#aiin').focus(),50);
 }
 
+/* ============================ TERMINAL — flux-aether ============================
+   A real shell against the node's aether artifact store (/v1/aether/*).
+
+   Aether is NOT a POSIX filesystem and this terminal deliberately does not
+   pretend otherwise: there is no cd, no mkdir, no rm, no rename. What exists is
+   a name -> (version, content-hash) map plus a content-addressed blob store.
+   `put` hashes your bytes, erasure-codes and encrypts them into shards, and
+   authors a signed version entry naming that hash. The name is a label; the
+   hash is the truth.
+
+   Every command below is one HTTP call to the node. Nothing is simulated —
+   if the node is unreachable the command says so instead of inventing output.
+   ============================================================================ */
+const TERM_HELP = [
+  ['help',            'this list'],
+  ['root',            "the store's identity, manifest root and real limits"],
+  ['ls',              'every named artifact this node holds'],
+  ['put <name> <…>',  'write text into aether; prints the content address'],
+  ['cat <name>',      'read the bytes behind a name'],
+  ['stat <name>',     'version entry, signature, shard status'],
+  ['recover <name>',  'rebuild from a SHORT shard set — proves the erasure coding'],
+  ['clear',           'clear the screen'],
+];
+
+let termHist = [], termHistIx = 0;
+
+function renderTerminal(body){
+  body.innerHTML = `<div class="term">
+    <div class="term-out" id="tout"></div>
+    <div class="term-in">
+      <span class="term-ps1">aether ›</span>
+      <input id="tin" autocomplete="off" spellcheck="false" placeholder="type help and press Enter">
+    </div>
+  </div>`;
+  const out = body.querySelector('#tout'), inp = body.querySelector('#tin');
+
+  const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  const line = (html, cls) => {
+    const d = document.createElement('div');
+    d.className = 'tl' + (cls ? ' ' + cls : '');
+    d.innerHTML = html;
+    out.appendChild(d);
+    out.scrollTop = out.scrollHeight;
+    return d;
+  };
+  const kv = (k, v, cls) => line(`<span class="tk">${esc(k)}</span><span class="tv ${cls||''}">${esc(v)}</span>`);
+
+  // Banner. States what this is and — importantly — what it is not.
+  line(`<b>SIGIL aether</b> — the node's artifact store`, 'tb');
+  line(`Content-addressed and versioned, not a POSIX filesystem: no cd, no rm, no rename.`, 'td');
+  line(`A write authors a signed version entry naming the BLAKE3 of your bytes.`, 'td');
+  line(`<b>help</b> lists the commands.`, 'td');
+  line('');
+
+  async function api(path, init){
+    const r = await fetch(SIGIL_API + path, Object.assign({cache:'no-store'}, init||{}));
+    const ct = r.headers.get('content-type') || '';
+    // A 200 with text/html is the SPA fallback — it means the route is ABSENT,
+    // not that it answered. Saying "route not found" beats a JSON parse error.
+    if (!ct.includes('application/json')) {
+      throw new Error(`the node answered HTTP ${r.status} with ${ct.split(';')[0]||'no content-type'} — /v1/aether is not on this host`);
+    }
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || 'the node refused it, without saying why');
+    return j.data;
+  }
+
+  const CMD = {
+    async help(){
+      line('commands', 'tb');
+      TERM_HELP.forEach(([c, d]) => line(`  <span class="tc">${esc(c)}</span> <span class="td">${esc(d)}</span>`));
+      line('');
+      line('  names use a-z 0-9 . _ - / — e.g. <span class="tc">user/notes/hello</span>', 'td');
+      line('  try: <span class="tc">put user/notes/hello it worked</span> then <span class="tc">ls</span>', 'td');
+    },
+
+    async root(){
+      const d = await api('/v1/aether/root');
+      kv('node id', d.node_id);
+      kv('manifest root', d.manifest_root || '(empty store)');
+      kv('entries', `${d.entries} / ${d.max_entries}`);
+      kv('store', `${(d.store_bytes/1024).toFixed(1)} KiB / ${(d.max_store_bytes/1048576)|0} MiB`);
+      kv('max per write', `${(d.max_content_bytes/1024)|0} KiB`);
+      kv('writes', d.writable ? 'accepted' : 'DISABLED on this node', d.writable ? 'tg' : 'tr');
+      // Both of these are the node telling on itself. Show them plainly.
+      kv('signatures', d.sig_kind + '  (keyed hash — authenticates the entry to its author, not to you)', 'tw');
+      kv('gossip', d.gossip + '  (a write lands on THIS node; peer convergence is not wired yet)', 'tw');
+    },
+
+    async ls(){
+      const d = await api('/v1/aether/ls');
+      if (!d.entries.length){ line('the store is empty — write something with <span class="tc">put</span>', 'td'); return; }
+      line(`<span class="tk">${'name'.padEnd(30)}</span><span class="tk">${'ver'.padEnd(9)}</span><span class="tk">content address</span>`, 'tb');
+      d.entries.forEach(e => line(
+        `<span class="tn">${esc(e.name.padEnd(30))}</span><span class="td">${esc(e.version.padEnd(9))}</span><span class="th">${esc(e.content_hash.slice(0,16))}…</span>`
+      ));
+      line('');
+      kv('manifest root', d.manifest_root);
+      kv('entries', String(d.entries.length));
+    },
+
+    async put(args){
+      const name = args[0];
+      const text = args.slice(1).join(' ');
+      if (!name || !text) throw new Error('usage: put <name> <text…>');
+      const d = await api('/v1/aether/put', {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({name, content: text}),
+      });
+      line(`wrote <b>${esc(d.name)}</b> ${esc(d.version)}`, 'tg');
+      kv('content address', d.content_hash);
+      kv('shard merkle root', d.shard_merkle_root);
+      kv('shards', `${d.shards}  (${d.bytes} bytes, erasure-coded + encrypted)`);
+      if (d.deduplicated) kv('note', 'these exact bytes were already stored — same address, no new disk', 'tw');
+      kv('manifest root', `${d.manifest_root}  (${d.manifest_entries} entries)`);
+      line(`the name is a label; <span class="th">${esc(d.content_hash.slice(0,16))}…</span> is what it resolves to`, 'td');
+    },
+
+    async cat(args){
+      if (!args[0]) throw new Error('usage: cat <name>');
+      const d = await api('/v1/aether/cat?name=' + encodeURIComponent(args[0]));
+      if (d.text != null) String(d.text).split('\n').forEach(l => line(esc(l) || '&nbsp;'));
+      else line(`(${d.bytes} bytes, not text) base64: ${esc(String(d.base64).slice(0,120))}…`, 'td');
+      line('');
+      kv('read via', d.read_via === 'shards' ? 'shards (RS-reassembled)' : 'blob');
+      kv('re-hashes to its address', d.verified ? 'yes — server-computed' : 'NO', d.verified ? 'tg' : 'tr');
+      if (d.verified) line('for a check you can watch happen, use <span class="tc">recover</span>', 'td');
+    },
+
+    async stat(args){
+      if (!args[0]) throw new Error('usage: stat <name>');
+      const d = await api('/v1/aether/stat?name=' + encodeURIComponent(args[0]));
+      kv('name', d.entry.name);
+      kv('version', d.entry.version);
+      kv('content address', d.entry.content_hash);
+      kv('producer', d.entry.producer);
+      kv('authored', new Date(d.entry.ts * 1000).toISOString().replace('T',' ').slice(0,19) + ' UTC');
+      kv('fingerprint', d.fingerprint);
+      kv('signature', `${d.sig.slice(0,32)}…  [${d.sig_kind}]`);
+      kv('shards on disk', String(d.shards_on_disk));
+      kv('plaintext blob', d.blob_present ? 'present' : 'absent — reads go through the shards', d.blob_present ? '' : 'tw');
+    },
+
+    async recover(args){
+      if (!args[0]) throw new Error('usage: recover <name>');
+      line('withholding one data shard and rebuilding from the rest…', 'td');
+      const d = await api('/v1/aether/recover?name=' + encodeURIComponent(args[0]));
+      kv('erasure layout', `${d.k} data + parity = ${d.n} shards`);
+      kv('shards withheld', `#${d.withheld_index} — handed ${d.shards_used} of ${d.shards_total} to the reassembler`);
+      kv('bytes rebuilt', String(d.bytes_recovered));
+      kv('address', d.content_hash);
+      if (d.rehash_matches){
+        line(`RECOVERED — the rebuilt bytes re-hash to the original address.`, 'tg');
+        line(`One shard was missing and the content came back anyway. That is the erasure`, 'td');
+        line(`coding doing its job, and it is the same code path the chain snapshot uses.`, 'td');
+      } else {
+        line(`FAILED — rebuilt bytes do NOT match the address. Report this.`, 'tr');
+      }
+    },
+
+    async clear(){ out.innerHTML = ''; },
+  };
+
+  async function exec(raw){
+    const s = raw.trim();
+    if (!s) return;
+    line(`<span class="term-ps1">aether ›</span> ${esc(s)}`, 'tp');
+    const parts = s.split(/\s+/), cmd = parts[0].toLowerCase(), args = parts.slice(1);
+    const fn = CMD[cmd];
+    if (!fn){ line(`no such command: ${esc(cmd)} — try <span class="tc">help</span>`, 'tr'); return; }
+    try { await fn(args); }
+    catch (e) { line(esc(e.message || String(e)), 'tr'); }
+    line('');
+  }
+
+  inp.addEventListener('keydown', async e => {
+    if (e.key === 'Enter'){
+      const v = inp.value;
+      if (v.trim()){ termHist.push(v); termHistIx = termHist.length; }
+      inp.value = '';
+      await exec(v);
+    } else if (e.key === 'ArrowUp'){
+      e.preventDefault();
+      if (termHistIx > 0) inp.value = termHist[--termHistIx] || '';
+    } else if (e.key === 'ArrowDown'){
+      e.preventDefault();
+      if (termHistIx < termHist.length - 1) inp.value = termHist[++termHistIx] || '';
+      else { termHistIx = termHist.length; inp.value = ''; }
+    }
+  });
+  setTimeout(() => inp.focus(), 60);
+}
+
 /* ============================ REGISTRY + START ============================ */
 const APPS={
   club:  ()=>openApp('club','<b>Club</b> — Nation media',660,520,renderClub),
   nation:()=>openApp('nation','<b>Nation</b> — welfare',560,520,renderNation),
   ai:    ()=>openApp('ai','<b>AI</b> — wallet console',560,540,renderAI),
   mail:  ()=>openApp('mail','<b>Mail</b>',760,500,renderMail),
+  term:  ()=>openApp('term','<b>Terminal</b> — flux-aether',820,560,renderTerminal),
   about: ()=>openApp('about','About SIGIL <b>OS</b>',500,440,renderAbout),
 };
 function startDesktop(){

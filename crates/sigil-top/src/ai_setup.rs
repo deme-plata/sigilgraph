@@ -56,6 +56,10 @@ pub(crate) struct AiManifest {
     pub default_model: String,
     #[serde(default)]
     pub fallback_model: Option<String>,
+    /// One rung below `fallback_model`: what a phone (Termux) or a < 6 GB box pulls.
+    /// Optional — an older manifest without it simply has no phone tier.
+    #[serde(default)]
+    pub small_model: Option<String>,
     #[serde(default)]
     pub installers: std::collections::BTreeMap<String, Installer>,
 }
@@ -77,11 +81,18 @@ fn client(total_secs: u64) -> reqwest::blocking::Client {
 }
 
 /// Which installer key this build wants from the manifest.
+///
+/// The architecture is part of the answer: before 2026-09-05 every non-Windows,
+/// non-macOS build said `linux-x64`, so an ARM64 build (a phone under Termux, a
+/// Raspberry Pi) would download and hash-verify 1.4 GB of x86 ollama and then fail
+/// to execute it. Termux does not use the manifest at all (see `install_termux`).
 pub(crate) fn target_key() -> &'static str {
     if cfg!(windows) {
         "windows-x64"
     } else if cfg!(target_os = "macos") {
         "macos"
+    } else if cfg!(target_arch = "aarch64") {
+        "linux-arm64"
     } else {
         "linux-x64"
     }
@@ -131,6 +142,12 @@ pub(crate) fn ollama_binary() -> Option<PathBuf> {
     #[cfg(not(windows))]
     {
         candidates.push(ollama_home().join("bin").join("ollama"));
+        // Termux installs packages under its own prefix, never /usr.
+        if let Ok(prefix) = std::env::var("PREFIX") {
+            if !prefix.trim().is_empty() {
+                candidates.push(PathBuf::from(prefix).join("bin").join("ollama"));
+            }
+        }
         candidates.push(PathBuf::from("/usr/local/bin/ollama"));
         candidates.push(PathBuf::from("/usr/bin/ollama"));
     }
@@ -616,6 +633,37 @@ fn run_installer(path: &PathBuf, _args: &[String], tx: &Sender<SetupEvent>) -> R
     Ok(())
 }
 
+/// Termux (Android) cannot run Ollama's Linux tarball — that is glibc, Android is bionic
+/// — but Termux's own repository packages ollama for aarch64. So on a phone the trusted
+/// installer is the distribution's package manager, exactly as `apt` would be on Debian:
+/// signed by Termux, resolved by `pkg`. Output is captured (an inherited stderr paints
+/// over the alt-screen) and the tail is shown on failure so the user sees the real reason.
+#[cfg(not(windows))]
+fn install_termux(tx: &Sender<SetupEvent>) -> Result<(), String> {
+    let prefix = std::env::var("PREFIX").unwrap_or_else(|_| "/data/data/com.termux/files/usr".to_string());
+    let pkg = PathBuf::from(&prefix).join("bin").join("pkg");
+    let pkg: PathBuf = if pkg.is_file() { pkg } else { PathBuf::from("pkg") };
+    emit(tx, "  ▶ this is a phone under Termux — installing ollama from Termux's own package repo (`pkg install -y ollama`, a ~50 MB download)…");
+    let out = std::process::Command::new(&pkg)
+        .args(["install", "-y", "ollama"])
+        .env("DEBIAN_FRONTEND", "noninteractive")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run `pkg` ({}): {e}\n  Run `pkg install ollama` in Termux yourself, then type `setup` here.", pkg.display()))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let so = String::from_utf8_lossy(&out.stdout);
+        let tail: Vec<&str> = err.lines().chain(so.lines()).filter(|l| !l.trim().is_empty()).collect();
+        let tail = tail[tail.len().saturating_sub(6)..].join("\n      ");
+        return Err(format!(
+            "`pkg install ollama` failed ({}).\n      {tail}\n  Fix: `pkg update` then `pkg install ollama` in Termux, and type `setup` here.",
+            out.status
+        ));
+    }
+    emit(tx, "  ✓ ollama installed by pkg");
+    Ok(())
+}
+
 // ── model pull ─────────────────────────────────────────────────────────────
 
 fn have_model(models: &[String], want: &str) -> bool {
@@ -795,6 +843,13 @@ fn bootstrap_inner(base: &str, tx: &Sender<SetupEvent>) -> Result<String, String
         if let Some(bin) = ollama_binary() {
             emit(tx, "  · ollama is installed but not running");
             start_ollama(&bin, tx)?;
+        } else if cfg!(not(windows)) && crate::flux_moe::is_termux() {
+            #[cfg(not(windows))]
+            install_termux(tx)?;
+            let bin = ollama_binary().ok_or_else(|| {
+                "pkg reported success but no ollama binary turned up under $PREFIX/bin.\n  Run `ollama serve` in another Termux session; if that works, type `setup` here.".to_string()
+            })?;
+            start_ollama(&bin, tx)?;
         } else {
             let m = manifest.as_ref().ok_or_else(|| {
                 format!(
@@ -874,7 +929,12 @@ fn bootstrap_inner(base: &str, tx: &Sender<SetupEvent>) -> Result<String, String
         }
     };
 
-    let (want, why) = crate::flux_moe::pick_model(&m.default_model, m.fallback_model.as_deref(), hw);
+    let (want, why) = crate::flux_moe::pick_model_tiered(
+        &m.default_model,
+        m.fallback_model.as_deref(),
+        m.small_model.as_deref(),
+        hw,
+    );
     emit(tx, format!("  · model choice: {why}"));
 
     // Already there? Still prove it loads before promising the user it works.
@@ -993,6 +1053,29 @@ mod tests {
         assert!(parse_manifest(&http).unwrap_err().contains("not https"));
         let empty = GOOD.replace("\"qwen3:8b\"", "\"\"");
         assert!(parse_manifest(&empty).unwrap_err().contains("default_model"));
+    }
+
+    #[test]
+    fn target_key_names_the_architecture_it_was_built_for() {
+        let k = target_key();
+        if cfg!(windows) {
+            assert_eq!(k, "windows-x64");
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(k, "macos");
+        } else if cfg!(target_arch = "aarch64") {
+            assert_eq!(k, "linux-arm64", "an ARM build must never ask for the x86 tarball");
+        } else {
+            assert_eq!(k, "linux-x64");
+        }
+    }
+
+    #[test]
+    fn manifest_small_model_is_optional() {
+        let m = parse_manifest(GOOD).expect("good manifest");
+        assert_eq!(m.small_model, None, "old manifests carry no phone tier");
+        let with = GOOD.replace("\"fallback_model\": \"qwen3:4b\",", "\"fallback_model\": \"qwen3:4b\", \"small_model\": \"qwen3:1.7b\",");
+        let m2 = parse_manifest(&with).expect("manifest with small_model");
+        assert_eq!(m2.small_model.as_deref(), Some("qwen3:1.7b"));
     }
 
     #[test]

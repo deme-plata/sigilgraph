@@ -567,14 +567,74 @@ pub(crate) fn chat(model: &str, history: &[(String, String)], user: &str, extra_
 }
 
 /// Human guidance shown when no local model is found — kept here so the tab and
-/// any headless helper print the same words.
+/// any headless helper print the same words. Written for a reader who may have NO
+/// function keys (a phone under Termux): the setup starts by itself, and the typed
+/// word `setup` is the universal way to run it again.
 pub(crate) fn setup_hint() -> &'static str {
-    "No local model yet. Press F5 and flux-moe sets itself up:\n\
-     1. installs ollama from the flux-SIGNED manifest (SHA-256 + size verified before anything runs)\n\
-     2. pulls the model that fits YOUR hardware (GPU → qwen3:8b; no GPU → the smaller qwen3:4b, because CPU inference of a big model takes minutes per answer)\n\
+    "No local model yet — flux-moe is setting itself up now (progress appears above):\n\
+     1. installs ollama from the flux-SIGNED manifest (SHA-256 + size verified before anything runs; on a phone under Termux: `pkg install ollama`)\n\
+     2. pulls the model that fits THIS machine (GPU → qwen3:8b · CPU box → qwen3:4b · phone or < 6 GB RAM → qwen3:1.7b)\n\
      3. you chat here.\n\
+     To run it again: type `setup` and press Enter (F5 does the same on a keyboard that has it).\n\
      By hand instead: install ollama (ollama.com), `ollama serve`, `ollama pull qwen3:4b`, reopen this tab.\n\
-     Overrides: SIGIL_AI_MODEL=<tag> forces a model · SIGIL_OLLAMA=<url> points at another host."
+     Overrides: SIGIL_AI_MODEL=<tag> forces a model · SIGIL_OLLAMA=<url> points at another host · SIGIL_AI_AUTOSETUP=0 never installs without being asked."
+}
+
+/// Chat-box words that mean "run the out-of-the-box setup". Function keys are not
+/// universal — a phone has none, some terminals eat F5 — so a typed command must work
+/// everywhere the chat box does.
+pub(crate) fn is_setup_command(s: &str) -> bool {
+    matches!(
+        s.trim().trim_start_matches('/').to_ascii_lowercase().as_str(),
+        "setup" | "set up" | "install" | "retry" | "f5" | "auto-setup" | "autosetup"
+    )
+}
+
+/// `SIGIL_AI_AUTOSETUP=0|false|no|off` turns the unattended install/pull OFF (the probe
+/// still runs; `setup` / F5 still work). Default ON: an [A]I tab that opens and does
+/// nothing is not "out of the box".
+pub(crate) fn autosetup_enabled() -> bool {
+    !matches!(
+        std::env::var("SIGIL_AI_AUTOSETUP").ok().as_deref().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("0") | Some("false") | Some("no") | Some("off")
+    )
+}
+
+/// Running inside Termux on Android. Termux sets `TERMUX_VERSION` and its `PREFIX` is
+/// `/data/data/com.termux/files/usr`; either is proof enough. Matters twice: ollama is
+/// installed with `pkg`, not from a glibc tarball (Android's libc is bionic), and a phone
+/// wants the small model tier.
+pub(crate) fn is_termux() -> bool {
+    std::env::var_os("TERMUX_VERSION").is_some()
+        || std::env::var("PREFIX").map(|p| p.contains("com.termux")).unwrap_or(false)
+}
+
+/// [`pick_model`] with one more rung below the fallback: the manifest's `small_model`
+/// (qwen3:1.7b) for a phone or any box under 6 GB RAM. Measured on a Snapdragon-class
+/// phone a 4b model decodes at ~2 tok/s (a minute per short answer); 1.7b is the largest
+/// that stays conversational there. `SIGIL_AI_MODEL` still wins over everything.
+pub(crate) fn pick_model_tiered(
+    default_model: &str,
+    fallback_model: Option<&str>,
+    small_model: Option<&str>,
+    hw: &Hardware,
+) -> (String, String) {
+    if let Some(forced) = std::env::var("SIGIL_AI_MODEL").ok().filter(|s| !s.trim().is_empty()) {
+        let forced = forced.trim().to_string();
+        return (forced.clone(), format!("SIGIL_AI_MODEL={forced} (your explicit choice)"));
+    }
+    if let Some(small) = small_model.filter(|s| !s.trim().is_empty()) {
+        const SMALL_RAM: u64 = 6 * GIB;
+        if is_termux() {
+            return (small.to_string(), format!("{small} — this is a phone (Termux); the small model keeps answers under a minute on a phone CPU (SIGIL_AI_MODEL=<tag> overrides)"));
+        }
+        if let Some(ram) = hw.ram_bytes {
+            if ram < SMALL_RAM && hw.vram_bytes.is_none() {
+                return (small.to_string(), format!("{small} — only {:.1} GB RAM and no GPU; the small model is the one that fits (SIGIL_AI_MODEL=<tag> overrides)", ram as f64 / GIB as f64));
+            }
+        }
+    }
+    pick_model(default_model, fallback_model, hw)
 }
 
 #[cfg(test)]
@@ -732,5 +792,72 @@ mod tests {
         let e = chat("definitely-not-a-real-model:1b", &[], "hi", "").unwrap_err();
         eprintln!("live missing-model error: {e}");
         assert!(e.contains("not pulled"), "missing model must be diagnosed: {e}");
+    }
+}
+
+#[cfg(test)]
+mod oob_tests {
+    use super::*;
+
+    #[test]
+    fn setup_commands_are_recognised_everywhere_a_keyboard_is_not() {
+        for w in ["setup", "  SETUP ", "/setup", "install", "retry", "f5", "F5", "auto-setup"] {
+            assert!(is_setup_command(w), "{w:?} must trigger setup");
+        }
+        for w in ["", "hello", "set", "setup please", "what is a nullifier"] {
+            assert!(!is_setup_command(w), "{w:?} must NOT trigger setup");
+        }
+    }
+
+    #[test]
+    fn autosetup_is_on_by_default_and_off_only_when_asked() {
+        std::env::remove_var("SIGIL_AI_AUTOSETUP");
+        assert!(autosetup_enabled());
+        for v in ["0", "false", "NO", " off "] {
+            std::env::set_var("SIGIL_AI_AUTOSETUP", v);
+            assert!(!autosetup_enabled(), "{v:?} must disable");
+        }
+        std::env::set_var("SIGIL_AI_AUTOSETUP", "1");
+        assert!(autosetup_enabled());
+        std::env::remove_var("SIGIL_AI_AUTOSETUP");
+    }
+
+    #[test]
+    fn termux_is_detected_from_prefix_or_version() {
+        std::env::remove_var("TERMUX_VERSION");
+        let saved = std::env::var("PREFIX").ok();
+        std::env::set_var("PREFIX", "/usr");
+        assert!(!is_termux());
+        std::env::set_var("PREFIX", "/data/data/com.termux/files/usr");
+        assert!(is_termux());
+        std::env::set_var("PREFIX", "/usr");
+        std::env::set_var("TERMUX_VERSION", "0.118.0");
+        assert!(is_termux());
+        std::env::remove_var("TERMUX_VERSION");
+        match saved { Some(p) => std::env::set_var("PREFIX", p), None => std::env::remove_var("PREFIX") }
+    }
+
+    #[test]
+    fn small_tier_only_for_phones_and_tiny_boxes() {
+        std::env::remove_var("SIGIL_AI_MODEL");
+        std::env::remove_var("TERMUX_VERSION");
+        let saved = std::env::var("PREFIX").ok();
+        std::env::set_var("PREFIX", "/usr");
+        // 4 GB, no GPU → small.
+        let tiny = Hardware { vram_bytes: None, ram_bytes: Some(4 * GIB), gpu_name: None };
+        let (m, why) = pick_model_tiered("qwen3:8b", Some("qwen3:4b"), Some("qwen3:1.7b"), &tiny);
+        assert_eq!(m, "qwen3:1.7b"); assert!(why.contains("RAM"), "{why}");
+        // 64 GB, no GPU → NOT small; defers to pick_model (its own rules decide).
+        let big = Hardware { vram_bytes: None, ram_bytes: Some(64 * GIB), gpu_name: None };
+        let (m, _) = pick_model_tiered("qwen3:8b", Some("qwen3:4b"), Some("qwen3:1.7b"), &big);
+        assert_ne!(m, "qwen3:1.7b");
+        // No small model in the manifest → identical to pick_model.
+        let (m2, _) = pick_model_tiered("qwen3:8b", Some("qwen3:4b"), None, &tiny);
+        assert_eq!(m2, pick_model("qwen3:8b", Some("qwen3:4b"), &tiny).0);
+        // Termux → small regardless of RAM.
+        std::env::set_var("PREFIX", "/data/data/com.termux/files/usr");
+        let (m3, why3) = pick_model_tiered("qwen3:8b", Some("qwen3:4b"), Some("qwen3:1.7b"), &big);
+        assert_eq!(m3, "qwen3:1.7b"); assert!(why3.contains("phone"), "{why3}");
+        match saved { Some(p) => std::env::set_var("PREFIX", p), None => std::env::remove_var("PREFIX") }
     }
 }

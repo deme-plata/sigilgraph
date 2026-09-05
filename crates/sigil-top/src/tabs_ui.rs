@@ -136,7 +136,7 @@ pub(crate) fn draw_ai_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect)
         (_, true) => format!(" 🧠 setting up your local AI — progress below{skills}"),
         (Some(m), false) => format!(" 🧠 local model: {m}   ·   {} available{skills}   ·   Enter sends · F5 re-setup · F6 reload skills · Tab leaves",
                                     app.ai_models.len()),
-        (None, false) => format!(" 🧠 no local model yet — press F5 to auto-install ollama + pull the model (flux-signed){skills}"),
+        (None, false) => format!(" 🧠 no local model yet — auto-setup runs when this tab opens; type `setup` + Enter (or F5) to run it again{skills}"),
     };
     f.render_widget(Paragraph::new(status).style(Style::default().fg(C_DIM)), status_area);
 

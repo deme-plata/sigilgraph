@@ -2676,6 +2676,14 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             // the panic hook logs [PANIC] with file:line — re-init the terminal and keep running;
             // the next frame redraws. The monitor must never die on a single bad render frame.
             let mut frame_panicked = false;
+            // [A]I OUT-OF-THE-BOX (2026-09-05): the tab must set itself up no matter HOW it
+            // was reached. Before this the probe + auto-setup lived only in the `5` key arm,
+            // so a user who cycled here with Tab (the route the header itself advertises)
+            // sat on "press F5" for ever — and a phone keyboard has no F5 at all. Measured on
+            // Viktor's Termux build: banner "no local model yet", empty transcript, every typed
+            // question answered by the same hint. Latching on `ai_detected` keeps this a no-op
+            // on every later frame.
+            if app.tab == Tab::Ai { ai_enter_tab(&mut app); }
             term.draw(|f| {
                 // Catch the panic AROUND draw_ui (the render code, which is the panic source) —
                 // term.draw itself still owns the closure so there's no borrow-escape. A rende
@@ -2768,18 +2776,7 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
                             KeyCode::Char('2') => { app.tab = Tab::SyncLog; }
                             KeyCode::Char('3') => { app.tab = Tab::Mining; }
                             KeyCode::Char('4') => { app.tab = Tab::Queues; }
-                            KeyCode::Char('5') => {
-                                app.tab = Tab::Ai;
-                                if !app.ai_detected { // one-time local-ollama probe (localhost: instant)
-                                    app.ai_models = crate::flux_moe::list_models();
-                                    app.ai_model = app.ai_models.first().cloned();
-                                    app.ai_detected = true;
-                                    // OUT-OF-THE-BOX: no model → install/start ollama + pull the
-                                    // signed manifest's model, off-thread, progress in the transcript.
-                                    if app.ai_model.is_none() { ai_setup_start(&mut app); }
-                                    ai_skills_start(&mut app); // flux-signed skills, off-thread
-                                }
-                            }
+                            KeyCode::Char('5') => { app.tab = Tab::Ai; ai_enter_tab(&mut app); }
                             // 2026-09-02: a second `Char('w')` arm used to sit here, added ahead
                             // of the real [W] handler below and pointing at the HOSTED wallet.
                             // Rust takes the first matching arm, so [W] silently became [L] and
@@ -3491,9 +3488,33 @@ fn ai_submit(app: &mut App) {
     if msg.is_empty() { return; }
     app.ai_input.clear();
     app.ai_msgs.push(("user".to_string(), msg.clone()));
+    // Typed setup commands: `setup` / `install` / `retry` / `f5`. A phone or a terminal
+    // that swallows function keys has no F5, so the keypress can never be the ONLY way to
+    // (re)run the out-of-the-box flow.
+    if flux_moe::is_setup_command(&msg) {
+        if app.ai_setup_running {
+            app.ai_msgs.push(("assistant".to_string(), "Auto-setup is already running — progress is above.".to_string()));
+        } else {
+            app.ai_msgs.push(("assistant".to_string(), "Re-running auto-setup…".to_string()));
+            ai_setup_start(app);
+        }
+        return;
+    }
     let model = match app.ai_model.clone() {
         Some(m) => m,
-        None => { app.ai_msgs.push(("assistant".to_string(), flux_moe::setup_hint().to_string())); return; }
+        None => {
+            // No model yet. Do not hand the user a chore ("press F5") — start the setup
+            // for them, once, and tell them what is happening. If it is already running,
+            // say so instead of restarting it.
+            if app.ai_setup_running {
+                app.ai_msgs.push(("assistant".to_string(),
+                    "Your local AI is still being set up — progress is above. Ask again when it says ✓ ready.".to_string()));
+            } else {
+                app.ai_msgs.push(("assistant".to_string(), flux_moe::setup_hint().to_string()));
+                ai_setup_start(app);
+            }
+            return;
+        }
     };
     let history: Vec<(String, String)> = app.ai_msgs[..app.ai_msgs.len().saturating_sub(1)].to_vec();
     let extra = skills::context_block(&app.ai_skills); // flux-signed skills → system context
@@ -3507,6 +3528,19 @@ fn ai_submit(app: &mut App) {
         };
         let _ = tx.send(reply);
     });
+}
+
+/// First entry into the [A]I tab, by ANY route: one local-ollama probe (localhost, instant),
+/// then — if no model is there — the out-of-the-box setup, off-thread, progress in the
+/// transcript. Idempotent (`ai_detected` latches). `SIGIL_AI_AUTOSETUP=0` keeps the probe
+/// but leaves installing/pulling to an explicit `setup` command or F5.
+fn ai_enter_tab(app: &mut App) {
+    if app.ai_detected { return; }
+    app.ai_detected = true;
+    app.ai_models = crate::flux_moe::list_models();
+    app.ai_model = app.ai_models.first().cloned();
+    if app.ai_model.is_none() && flux_moe::autosetup_enabled() { ai_setup_start(app); }
+    ai_skills_start(app); // flux-signed skills, off-thread
 }
 
 /// [A]I OUT-OF-THE-BOX: install/start ollama + pull the flux-signed manifest's model,

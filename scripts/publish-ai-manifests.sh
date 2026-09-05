@@ -13,6 +13,9 @@ set -euo pipefail
 OLLAMA_VER="${1:-0.33.2}"
 DEFAULT_MODEL="${DEFAULT_MODEL:-qwen3:8b}"
 FALLBACK_MODEL="${FALLBACK_MODEL:-qwen3:4b}"
+# One rung below the fallback: what a phone (Termux) or a < 6 GB box pulls. sigil-top ≥ 8.0.4
+# reads it (`small_model`, optional); older clients ignore the field.
+SMALL_MODEL="${SMALL_MODEL:-qwen3:1.7b}"
 REPO=/home/storage/deepseek-codewhale/sigil
 DL=/home/orobit/q-narwhalknight/dist-fluxapp/downloads
 LEGACY_DL=/home/orobit/q-narwhalknight/dist-final/downloads
@@ -42,21 +45,24 @@ sha_of() { awk -v n="./$1" '$2==n{print $1}' "$WORK/sha256sum.txt"; }
 WIN_SHA=$(sha_of OllamaSetup.exe);           [ -n "$WIN_SHA" ] || { echo "✗ no sha for OllamaSetup.exe"; exit 1; }
 LIN_SHA=$(sha_of ollama-linux-amd64.tar.zst); [ -n "$LIN_SHA" ] || { echo "✗ no sha for ollama-linux-amd64.tar.zst"; exit 1; }
 MAC_SHA=$(sha_of ollama-darwin.tgz);          [ -n "$MAC_SHA" ] || { echo "✗ no sha for ollama-darwin.tgz"; exit 1; }
+ARM_SHA=$(sha_of ollama-linux-arm64.tar.zst); [ -n "$ARM_SHA" ] || { echo "✗ no sha for ollama-linux-arm64.tar.zst"; exit 1; }
 WIN_SZ=$(clen "$GH/OllamaSetup.exe");           [ "${WIN_SZ:-0}" -gt 0 ] || { echo "✗ no size for OllamaSetup.exe"; exit 1; }
 LIN_SZ=$(clen "$GH/ollama-linux-amd64.tar.zst"); [ "${LIN_SZ:-0}" -gt 0 ] || { echo "✗ no size for linux tar"; exit 1; }
 MAC_SZ=$(clen "$GH/ollama-darwin.tgz");          [ "${MAC_SZ:-0}" -gt 0 ] || { echo "✗ no size for darwin tgz"; exit 1; }
-echo "  windows $WIN_SHA $WIN_SZ"; echo "  linux   $LIN_SHA $LIN_SZ"; echo "  macos   $MAC_SHA $MAC_SZ"
+ARM_SZ=$(clen "$GH/ollama-linux-arm64.tar.zst"); [ "${ARM_SZ:-0}" -gt 0 ] || { echo "✗ no size for linux arm64 tar"; exit 1; }
+echo "  windows $WIN_SHA $WIN_SZ"; echo "  linux   $LIN_SHA $LIN_SZ"; echo "  macos   $MAC_SHA $MAC_SZ"; echo "  arm64   $ARM_SHA $ARM_SZ"
 
 echo "▸ 2/5 write sigil-ai-latest.json"
 cat > "$WORK/sigil-ai-latest.json" <<EOF
 {
   "product": "sigil-ai", "ollama_version": "${OLLAMA_VER}",
-  "default_model": "${DEFAULT_MODEL}", "fallback_model": "${FALLBACK_MODEL}",
+  "default_model": "${DEFAULT_MODEL}", "fallback_model": "${FALLBACK_MODEL}", "small_model": "${SMALL_MODEL}",
   "verify": "sha256 below are Ollama's OWN published checksums (${GH}/sha256sum.txt); the client refuses any size/hash mismatch",
   "installers": {
     "windows-x64": { "url": "${GH}/OllamaSetup.exe",            "sha256": "${WIN_SHA}", "size_bytes": ${WIN_SZ}, "args": ["/VERYSILENT", "/NORESTART"] },
     "linux-x64":   { "url": "${GH}/ollama-linux-amd64.tar.zst", "sha256": "${LIN_SHA}", "size_bytes": ${LIN_SZ}, "args": [] },
-    "macos":       { "url": "${GH}/ollama-darwin.tgz",          "sha256": "${MAC_SHA}", "size_bytes": ${MAC_SZ}, "args": [] }
+    "macos":       { "url": "${GH}/ollama-darwin.tgz",          "sha256": "${MAC_SHA}", "size_bytes": ${MAC_SZ}, "args": [] },
+    "linux-arm64": { "url": "${GH}/ollama-linux-arm64.tar.zst", "sha256": "${ARM_SHA}", "size_bytes": ${ARM_SZ}, "args": [] }
   },
   "updated": $(date +%s)
 }

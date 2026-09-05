@@ -7,11 +7,17 @@ import {
 } from './icons';
 
 // sigil-top release channel — same URLs the live signed manifest
-// (sigilgraph.fluxapp.xyz/downloads/sigil-top-latest.json) resolves to,
-// via the stable (unversioned) alias so this never goes stale on a release.
+// (sigilgraph.org/downloads/sigil-top-latest.json) resolves to, via the
+// stable (unversioned) alias so this never goes stale on a release.
+// 2026-09-05: hosted on sigilgraph.org (the canonical SIGIL home per the
+// 2026-08-26 operator ruling; the fluxapp domains are dead ends), and the
+// native Android wallet APK is listed below the node binaries. Its stable
+// alias is rewritten by scripts/release-android.sh on every release; the
+// signed manifest beside it (sigil-wallet-latest.json) names the version.
 const DOWNLOADS = [
-  { label: 'Linux x64', href: 'https://sigilgraph.fluxapp.xyz/downloads/sigil-top-linux-x64' },
-  { label: 'Windows x64', href: 'https://sigilgraph.fluxapp.xyz/downloads/sigil-top-windows-x64.exe' },
+  { label: 'Linux x64', href: 'https://sigilgraph.org/downloads/sigil-top-linux-x64' },
+  { label: 'Windows x64', href: 'https://sigilgraph.org/downloads/sigil-top-windows-x64.exe' },
+  { label: 'Android wallet (APK)', href: 'https://sigilgraph.org/downloads/sigil-wallet-native-latest.apk' },
 ];
 const GITHUB_URL = 'https://github.com/deme-plata/sigilgraph';
 
@@ -76,7 +82,7 @@ function DownloadMenu() {
         ))}
         <a
           className="download-dropdown-sub"
-          href="https://sigilgraph.fluxapp.xyz/downloads/sigil-top-latest.json"
+          href="https://sigilgraph.org/downloads/sigil-top-latest.json"
           role="menuitem"
         >
           Signed release manifest ↗

@@ -255,6 +255,10 @@ static ACTIVE_BASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUs
 const SELF_TARGET: &str = if cfg!(all(windows, feature = "gpu")) { "windows-x64-gpu" }
     else if cfg!(windows) { "windows-x64" }
     else if cfg!(target_os = "macos") { "macos-arm64" }
+    // ARM64 Linux (phones under Termux, Raspberry Pi, Ampere boxes): its own channel key.
+    // Without this an aarch64 build called itself "linux-x64-gpu" and would have
+    // self-replaced with an x86-64 binary — a bricked install on the next [U]pdate.
+    else if cfg!(all(target_os = "linux", target_arch = "aarch64")) { "linux-arm64" }
     else if cfg!(feature = "gpu") { "linux-x64-gpu" }
     else { "linux-x64" };
 /// Live testnet feed (same source flux-node.html uses): status + tip + block stream.

@@ -1,0 +1,13 @@
+[package]
+name = "sigil-apex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sigil Apex — a deterministic terminal battle-royale for SIGIL, in the shape of Quillon's Crown & Ash: wallet-seeded squads, a shrinking ring, turn-based choices, and a BLAKE3 match hash so any round can be replayed and checked byte-for-byte."
+
+[[bin]]
+name = "sigil-apex"
+path = "src/main.rs"
+
+[dependencies]
+blake3 = { workspace = true }

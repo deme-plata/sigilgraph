@@ -859,87 +859,138 @@ mod shield_ops {
             .unwrap_or("")
             .to_string();
 
-        // CONFIRM ON SETTLE — do not call an accepted submission "paid".
+        // CONFIRM ON SETTLE — and the settlement identity is the NULLIFIER, not the txid.
         //
         // `/v1/shielded_send` returns `ok:true` the instant the proof and fee check out and
-        // the tx is QUEUED. That is acceptance, not settlement: the braid can still drop the
-        // tx at apply time (`nullifier already spent`, `unknown anchor`, …). The old code
-        // returned `ok:true` right here, so a rejected payment was reported to the user as a
-        // success with a real-looking txid — the same false-success class as the v8 receipt
-        // bug. We now poll the tx's own status until the chain commits a verdict. At the live
-        // block rate (~5–6 blk/s) `applied`/`rejected` lands within a second or two; we allow
-        // generous headroom and, only if the chain is still silent past it, return an honest
-        // "accepted, not yet settled" that the caller must not mistake for settlement.
-        let status_url = format!(
-            "{}/v1/transactions/{}",
-            node.trim_end_matches('/'),
-            txid
-        );
-        let mut settled_status: Option<String> = None;
-        let mut reject_reason = String::new();
-        for _ in 0..40 {
+        // the tx is QUEUED. That is acceptance, not settlement. But on a DAG braid a shielded
+        // send is relayed (Dandelion++) and may be retried, so the SAME nullifier can ride
+        // more than one candidate tx: one wins and delivers the payment, and a sibling's txid
+        // is then correctly rejected with `nullifier already spent`. If we keyed success on
+        // "did MY txid apply", that sibling rejection reads as a failure for a payment that
+        // actually SETTLED — a false NEGATIVE (measured live 2026-09-05: four payments landed
+        // in the recipient's pool while every job reported "failed"). The v8 bug was the
+        // mirror image (false positive). Both are cured the same way: ask the one question
+        // that is authoritative on this chain — **is OUR nullifier now in the spent set?**
+        //
+        // We only reach here after the selector confirmed our nullifier was NOT already
+        // published (the skip-spent filter let this note through). So if it appears in the
+        // spent set now, WE put it there: the note is spent, the value moved, the payment
+        // is delivered — regardless of which txid carried it or what our own txid's status
+        // says. Only a rejection for some OTHER reason (unknown anchor, bad proof) with our
+        // nullifier still absent is a real failure.
+        let our_nf_hex = hex::encode(bundle.nullifier).to_ascii_lowercase();
+        let status_url = format!("{}/v1/transactions/{}", node.trim_end_matches('/'), txid);
+        let nulls_url = format!("{}/v1/shielded/nullifiers", node.trim_end_matches('/'));
+        let nf_is_spent = |client: &reqwest::blocking::Client| -> bool {
+            client
+                .get(&nulls_url)
+                .send()
+                .ok()
+                .and_then(|r| r.json::<serde_json::Value>().ok())
+                .and_then(|v| v.get("nullifiers").and_then(|n| n.as_array()).cloned())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .any(|s| s.eq_ignore_ascii_case(&our_nf_hex))
+                })
+                .unwrap_or(false)
+        };
+
+        // The one unambiguous settlement test: OUR selected note's nullifier is now in the
+        // spent set. The selector proved it was NOT there when it chose the note (the
+        // skip-spent filter excludes any candidate whose nullifier is already published), so
+        // its APPEARANCE can only mean our own spend landed — the payment is delivered. This
+        // is robust to the DAG braid's Dandelion++ relay, where one send fans out into
+        // several candidate txs: whichever one applies puts our nullifier on chain, and the
+        // others' txids are rejected as "already spent" — but that rejection is about a txid,
+        // not the payment, so we never key success on it. Conversely, if our nullifier never
+        // appears, the payment did NOT settle no matter what any single txid's status says —
+        // which is exactly the false-POSITIVE this avoids (a doomed note whose txid is
+        // rejected must NOT be reported paid).
+        let mut outcome: Option<Result<(), String>> = None; // Some(Ok)=settled, Some(Err)=failed
+        let mut last_reject: Option<String> = None;
+        for _ in 0..60 {
             std::thread::sleep(std::time::Duration::from_millis(500));
-            let Ok(r) = client.get(&status_url).send() else {
-                continue;
-            };
-            let Ok(v) = r.json::<serde_json::Value>() else {
-                continue;
-            };
+            if nf_is_spent(&client) {
+                outcome = Some(Ok(()));
+                break;
+            }
+            let Ok(r) = client.get(&status_url).send() else { continue };
+            let Ok(v) = r.json::<serde_json::Value>() else { continue };
             let data = v.get("data").unwrap_or(&v);
-            let st = data
-                .get("status")
-                .and_then(|s| s.as_str())
-                .unwrap_or("")
-                .to_string();
-            match st.as_str() {
+            let st = data.get("status").and_then(|s| s.as_str()).unwrap_or("");
+            match st {
                 "applied" | "settled" | "confirmed" => {
-                    settled_status = Some(st);
-                    break;
+                    // The status claims applied — but only OUR nullifier on chain proves the
+                    // value moved. Confirm it (short grace for read lag) before trusting it.
+                    for _ in 0..6 {
+                        if nf_is_spent(&client) {
+                            outcome = Some(Ok(()));
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                    }
+                    if outcome.is_some() {
+                        break;
+                    }
                 }
                 "rejected" | "failed" | "dropped" => {
-                    reject_reason = data
-                        .get("reason")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("the chain rejected this transaction")
-                        .to_string();
-                    settled_status = Some(st);
-                    break;
+                    // Record the reason but DON'T decide yet: a sibling relay of our own
+                    // submission may still be carrying our nullifier to a block. Only if the
+                    // nullifier never lands (loop exhausts) is this a real failure.
+                    last_reject = Some(
+                        data.get("reason")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("the chain rejected this transaction")
+                            .to_string(),
+                    );
+                    // One more spent-set check right after the rejection, then keep polling
+                    // in case a sibling wins the race.
+                    if nf_is_spent(&client) {
+                        outcome = Some(Ok(()));
+                        break;
+                    }
                 }
-                // "pending" / unknown → keep polling.
-                _ => {}
+                _ => {} // pending — keep polling
+            }
+        }
+        if outcome.is_none() {
+            // Final authoritative read before giving a verdict.
+            if nf_is_spent(&client) {
+                outcome = Some(Ok(()));
+            } else if let Some(reason) = last_reject.take() {
+                outcome = Some(Err(reason));
             }
         }
 
-        match settled_status.as_deref() {
-            Some("rejected") | Some("failed") | Some("dropped") => {
-                // Submitted, then rejected. `submitted:true` tells the pay orchestrator this
-                // note is spent-or-doomed on chain — a terminal outcome, not a "wait longer".
-                ok_json(serde_json::json!({
-                    "ok": false,
-                    "submitted": true,
-                    "txid": txid,
-                    "error": reject_reason,
-                }))
-            }
-            Some(_) => ok_json(serde_json::json!({
+        match outcome {
+            Some(Ok(())) => ok_json(serde_json::json!({
                 "ok": true,
                 "settled": true,
                 "txid": txid,
+                "nullifier": our_nf_hex,
                 "spent_index": note_index,
                 "change_index": change_index,
                 "change_value": change_value.to_string(),
+            })),
+            Some(Err(reason)) => ok_json(serde_json::json!({
+                "ok": false,
+                "submitted": true,
+                "txid": txid,
+                "error": reason,
             })),
             None => ok_json(serde_json::json!({
                 "ok": true,
                 "settled": false,
                 "submitted": true,
                 "txid": txid,
+                "nullifier": our_nf_hex,
                 "spent_index": note_index,
                 "change_index": change_index,
                 "change_value": change_value.to_string(),
                 "note": "accepted and queued; the chain had not committed a verdict within \
-                         the confirmation window. Check /v1/transactions/<txid> — do NOT \
-                         resubmit, the nullifier is already in flight.",
+                         the confirmation window. The nullifier is in flight — check \
+                         /v1/shielded/nullifiers for it; do NOT resubmit.",
             })),
         }
     }

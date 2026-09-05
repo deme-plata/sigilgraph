@@ -1204,9 +1204,27 @@ pub mod pay {
         notes: Vec<CandidateNote>,
     }
 
+    /// The outcome of one payment attempt. The distinction that matters is whether the tx
+    /// reached the chain: a `Retryable` failure happened BEFORE submission (the freshly
+    /// shielded note has not appeared in the pool yet) and is safe to retry; `Terminal` and
+    /// `Accepted`/`Paid` all mean a proof was built and submitted, so retrying would prove
+    /// and broadcast the SAME nullifier a second time — never do that.
+    enum SendOutcome {
+        /// Submitted AND confirmed applied on chain — the honest "paid".
+        Paid(String),
+        /// Submitted; chain had not committed a verdict within the confirmation window.
+        /// Not settled, not failed — the caller reports it as such, never as paid.
+        Accepted(String),
+        /// Submitted, then rejected by the chain (double-spend, unknown anchor, …). Stop.
+        Terminal(String),
+        /// Failed before submission (note not yet visible in the pool). Safe to retry.
+        Retryable(String),
+    }
+
     /// One attempt at the payment leg. Composes `mine_local_api`'s existing endpoint rather
-    /// than re-deriving any of its crypto.
-    fn send_once(ctx: &SendCtx) -> Result<String, String> {
+    /// than re-deriving any of its crypto. `mine-send-private` now confirms settlement
+    /// before answering, and tags a post-submission failure with `submitted:true`.
+    fn send_once(ctx: &SendCtx) -> SendOutcome {
         let payload = serde_json::json!({
             "recipient_pk_shield": ctx.pk_shield,
             "recipient_pk_encrypt": ctx.pk_encrypt,
@@ -1216,20 +1234,32 @@ pub mod pay {
         });
         let (_status, body) =
             crate::mine_local_api::handle("/api/v1/mine-send-private", &payload.to_string());
-        let v: serde_json::Value =
-            serde_json::from_str(&body).map_err(|e| format!("bad local response: {e}"))?;
+        let v: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(e) => return SendOutcome::Retryable(format!("bad local response: {e}")),
+        };
+        let txid = v
+            .get("txid")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
         if v.get("ok").and_then(|x| x.as_bool()) == Some(true) {
-            return Ok(v
-                .get("txid")
-                .and_then(|x| x.as_str())
-                .unwrap_or_default()
-                .to_string());
+            return if v.get("settled").and_then(|x| x.as_bool()) == Some(true) {
+                SendOutcome::Paid(txid)
+            } else {
+                SendOutcome::Accepted(txid)
+            };
         }
-        Err(v
+        let reason = v
             .get("error")
             .and_then(|x| x.as_str())
             .unwrap_or("unknown error")
-            .to_string())
+            .to_string();
+        if v.get("submitted").and_then(|x| x.as_bool()) == Some(true) {
+            SendOutcome::Terminal(reason)
+        } else {
+            SendOutcome::Retryable(reason)
+        }
     }
 
     /// Keep trying the payment leg until the note is visible in the pool. Runs detached so
@@ -1241,14 +1271,30 @@ pub mod pay {
                 job.stage = "waiting".into();
                 put_job(&id, job.clone());
                 match send_once(&ctx) {
-                    Ok(txid) => {
+                    SendOutcome::Paid(txid) => {
                         job.stage = "paid".into();
                         job.txid = txid;
                         job.error = None;
                         put_job(&id, job);
                         return;
                     }
-                    Err(e) => {
+                    SendOutcome::Accepted(txid) => {
+                        // Submitted, awaiting settlement. Honest, and terminal for this
+                        // thread: the nullifier is in flight, so we must not resubmit.
+                        job.stage = "accepted".into();
+                        job.txid = txid;
+                        job.error = Some("accepted; awaiting settlement".into());
+                        put_job(&id, job);
+                        return;
+                    }
+                    SendOutcome::Terminal(e) => {
+                        job.stage = "failed".into();
+                        job.error = Some(e);
+                        put_job(&id, job);
+                        return;
+                    }
+                    SendOutcome::Retryable(e) => {
+                        // Note not visible in the pool yet — keep waiting.
                         job.error = Some(e);
                     }
                 }
@@ -1354,10 +1400,10 @@ pub mod pay {
         };
 
         if covered {
-            // Nothing to shield. The only latency is building + proving the STARK, so do it
-            // inline and hand back the real PAYMENT txid.
+            // Nothing to shield. The only latency is building + proving the STARK and
+            // confirming it settled, so do it inline and hand back the real PAYMENT txid.
             match send_once(&ctx) {
-                Ok(txid) => {
+                SendOutcome::Paid(txid) => {
                     job.stage = "paid".into();
                     job.txid = txid.clone();
                     job.attempts = 1;
@@ -1367,7 +1413,29 @@ pub mod pay {
                         "note": "paid from a note that was already in your private balance",
                     }));
                 }
-                Err(e) => {
+                SendOutcome::Accepted(txid) => {
+                    job.stage = "accepted".into();
+                    job.txid = txid.clone();
+                    job.attempts = 1;
+                    put_job(&id, job);
+                    return ok_json(serde_json::json!({
+                        "ok": true, "stage": "accepted", "job": id, "txid": txid,
+                        "note": "submitted from your private balance; awaiting settlement — \
+                                 poll /api/v1/pay/status, do not resend",
+                    }));
+                }
+                SendOutcome::Terminal(e) => {
+                    // The covering note was already spent (e.g. by another copy of this
+                    // seed). Report it honestly instead of calling a doomed tx "paid".
+                    job.stage = "failed".into();
+                    job.error = Some(e.clone());
+                    job.attempts = 1;
+                    put_job(&id, job);
+                    return ok_json(serde_json::json!({
+                        "ok": false, "stage": "failed", "job": id, "error": e,
+                    }));
+                }
+                SendOutcome::Retryable(e) => {
                     // A covering note exists but is not visible in the pool yet (it was
                     // shielded moments ago). Do NOT shield again — that would move a second
                     // helping of money into the pool for one payment. Wait for the one we

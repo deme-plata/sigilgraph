@@ -116,30 +116,295 @@ mod shield_ops {
         v.try_into().ok()
     }
 
-    /// Persistent per-wallet note-derivation-index counter, mirroring the browser's own
-    /// `localStorage['sigil-shielded-noteidx-'+addr]` scheme (see the wallet HTML's
-    /// `noteIndexNext`) but on THIS box's filesystem, so repeated `mine-shield` calls
-    /// (even across `sigil-top` restarts) never reuse an index for a DIFFERENT note —
-    /// reusing one would reuse that note's `blinding` too (`derive(seed, "blinding",
-    /// index)` is a pure function of index), which doesn't break fund safety (nullifiers
-    /// are bound to leaf POSITION, not index) but does needlessly weaken the note's
-    /// per-instance randomness. NOT coordinated with the browser's OWN localStorage
-    /// counter for the same wallet — a wallet that shields BOTH via this fast path and
-    /// via the manual browser prompt could in principle allocate the same index from two
-    /// independent counters; low-stakes (same non-issue as above) and out of scope to
-    /// fully unify without a shared server<->browser index-allocation protocol.
-    fn note_index_path(addr: &str) -> String {
-        format!("{}/.flux/sigil-shield-noteidx-{addr}", crate::flux_home())
+    // ── TEST SEAM ───────────────────────────────────────────────────────────────────
+    // In a normal build these three ARE `crate::flux_home()`, `crate::miner_seed()` and
+    // `crate::engine_node_url()` — the indirection compiles away entirely.
+    //
+    // In a `cfg(test)` build they first consult a THREAD-LOCAL override, so a test can
+    // point one handler call at a stub node and a scratch home without touching `HOME` or
+    // `SIGIL_MINE_*`. Those are process-global: setting them from a test corrupts every
+    // other test running concurrently in the same binary. That is not hypothetical — the
+    // first version of the tests below did exactly that and broke
+    // `producer::run::tests::local_mining_api_credits_a_real_solve_into_a_minted_block`,
+    // which reads `engine_node_url()` too. Thread-local, so the tests also stay parallel.
+    #[cfg(not(test))]
+    fn ctx_home() -> String {
+        crate::flux_home()
     }
-    fn load_note_index(addr: &str) -> u64 {
-        std::fs::read_to_string(note_index_path(addr))
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0)
+    #[cfg(not(test))]
+    fn ctx_seed() -> Option<[u8; 32]> {
+        crate::miner_seed()
     }
-    fn save_note_index(addr: &str, next: u64) {
-        let _ = std::fs::create_dir_all(format!("{}/.flux", crate::flux_home()));
-        let _ = std::fs::write(note_index_path(addr), next.to_string());
+    #[cfg(not(test))]
+    fn ctx_node() -> String {
+        crate::engine_node_url()
+    }
+
+    #[cfg(test)]
+    #[derive(Clone)]
+    struct TestCtx {
+        home: String,
+        seed: [u8; 32],
+        node: String,
+    }
+    #[cfg(test)]
+    thread_local! {
+        static TEST_CTX: std::cell::RefCell<Option<TestCtx>> = std::cell::RefCell::new(None);
+    }
+    #[cfg(test)]
+    fn ctx_home() -> String {
+        TEST_CTX
+            .with(|c| c.borrow().as_ref().map(|t| t.home.clone()))
+            .unwrap_or_else(crate::flux_home)
+    }
+    #[cfg(test)]
+    fn ctx_seed() -> Option<[u8; 32]> {
+        TEST_CTX
+            .with(|c| c.borrow().as_ref().map(|t| t.seed))
+            .or_else(crate::miner_seed)
+    }
+    #[cfg(test)]
+    fn ctx_node() -> String {
+        TEST_CTX
+            .with(|c| c.borrow().as_ref().map(|t| t.node.clone()))
+            .unwrap_or_else(crate::engine_node_url)
+    }
+
+    /// Persistent per-wallet note-derivation-index counter — part of the money path, not
+    /// bookkeeping.
+    ///
+    /// # What an index actually decides
+    ///
+    /// `ShieldedAccount::blinding(index) = derive(seed, "blinding", index)` is a pure
+    /// function of the index (`sigil-shield/src/wallet.rs:161`), and a note's commitment is
+    /// `compress2(compress2(value, blinding), pk)`. So the SAME `(index, value)` pair
+    /// always reproduces the SAME commitment, bit for bit.
+    ///
+    /// # The correction (2026-09-02)
+    ///
+    /// This comment used to claim that reusing an index "doesn't break fund safety
+    /// (nullifiers are bound to leaf POSITION, not index) but does needlessly weaken the
+    /// note's per-instance randomness." **The nullifier half is still true; the conclusion
+    /// is wrong, and it has been wrong since 2026-08-25.**
+    ///
+    /// `sigil_state::shielded::append_note_with_delivery` — the ONE entry point every mint
+    /// path funnels through (`Shield`, `Unshield`, `ShieldedSpend` outputs,
+    /// `ShieldedCoinbase`) — rejects any commitment the pool has EVER held, across every
+    /// sealed epoch, with `ShieldedError::DuplicateCommitment`
+    /// (`sigil-state/src/shielded.rs:773`). A reused index therefore does not produce a
+    /// less-random note. It produces a deposit **that never lands**.
+    ///
+    /// And it fails in the worst possible shape, because `/v1/shield` only ENQUEUES
+    /// (`sigil-api/src/shielded.rs::submit_shield` returns a txid the moment the signature
+    /// and nonce check out). The duplicate is not detected until apply time, so:
+    ///
+    /// * this endpoint sees `{"ok":true,"txid":...}` and reports the part as landed;
+    /// * the wallet page calls `noteRecord(addr, index, value)` on that receipt and books
+    ///   a note it does not own;
+    /// * the transparent balance is never debited (`append_note` runs FIRST in the
+    ///   `Shield` arm precisely so a rejection leaves state untouched), so no value is
+    ///   lost — but the user was shown a success receipt for a deposit that silently
+    ///   evaporated, and every later private send that picks that phantom note fails.
+    ///
+    /// That is why every failure below is fail-CLOSED: an index that could not be read, or
+    /// could not be fsynced, is never published. A burned index costs nothing (the space is
+    /// u64); a reused one costs a deposit that looks successful and is not.
+    ///
+    /// # Two allocators, one pool
+    ///
+    /// The wallet page keeps its OWN counter in
+    /// `localStorage['sigil-shielded-noteidx-'+addr]` — per-origin, erasable, and not this
+    /// file. No amount of durability here can see that one. What CAN see it is the chain:
+    /// a commitment the page already published is in the live leaf set. So the counter is
+    /// only a starting HINT, and [`choose_indices`] skips any index the chain says it has
+    /// already seen — via `/v1/shielded/has`, which answers with the very `has_ever_held`
+    /// the mint chokepoint uses, across every epoch. That is the same decision, through the
+    /// same endpoint, that the page's own `freeIndexFor()`/`_cmExists()` pair makes
+    /// (`gui/sigil-wallet-tron-embedded.html:1813`), reached independently — and it is why
+    /// this endpoint refuses to submit at all when it cannot get an answer, exactly as the
+    /// page refuses ("not submitting blind — a re-used note commitment is rejected
+    /// forever").
+    ///
+    /// The residual gap, stated plainly: `has_ever_held` only knows commitments that have
+    /// LANDED. Two deposits of the same denomination issued within one block window — one
+    /// from here, one from the page — can still both be told the index is free, and
+    /// collide. The counter plus [`NOTE_INDEX_LOCK`] closes that window for calls to THIS
+    /// endpoint; nothing closes it across the origin boundary short of a shared allocation
+    /// protocol. That is NOT fixed here.
+    fn note_index_path(addr: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(ctx_home())
+            .join(".flux")
+            .join(format!("sigil-shield-noteidx-{addr}"))
+    }
+
+    /// Read the counter, or say why it could not be read.
+    ///
+    /// A MISSING file is the one benign case: a wallet that has never shielded from this
+    /// box genuinely starts at 0. Everything else — a truncated write, a garbled byte, a
+    /// permission error, `.flux` turned into a regular file — is an ERROR, because the old
+    /// `.ok().and_then(parse).unwrap_or(0)` turned every one of those into "start over at
+    /// index 0", which is the rewind this counter exists to prevent.
+    fn load_note_index(addr: &str) -> Result<u64, String> {
+        let path = note_index_path(addr);
+        match std::fs::read_to_string(&path) {
+            Ok(s) => s.trim().parse::<u64>().map_err(|e| {
+                format!(
+                    "the note-index counter at {} is unreadable ({e}) — refusing to \
+                     re-derive from 0, which would republish commitments the pool already \
+                     holds. Repair or remove the file deliberately.",
+                    path.display()
+                )
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(format!(
+                "could not read the note-index counter at {}: {e}",
+                path.display()
+            )),
+        }
+    }
+
+    /// Record the counter durably, or say why not. Every step is fallible on purpose.
+    ///
+    /// The old version was `let _ = create_dir_all(..); let _ = write(..)`. `write` creates
+    /// the FILE, never the DIRECTORY, so on a box without `~/.flux` both calls failed and
+    /// both errors were discarded — and the deposit went out anyway at an index recorded
+    /// nowhere.
+    ///
+    /// Temp-file-then-rename rather than a straight overwrite: this file holds a SINGLE
+    /// number, so a torn write leaves a SHORTER number, i.e. a smaller one — the exact
+    /// rewind being defended against. `rename` is atomic on POSIX, so a reader sees either
+    /// the old value or the new one, never half of one.
+    ///
+    /// And `sync_all`, not `flush`: `flush` on a `std::fs::File` is a no-op (the handle is
+    /// unbuffered), which leaves the bytes in the page cache — surviving a process exit but
+    /// not a power cut, and a power cut is precisely the restart that rewinds the counter.
+    fn save_note_index(addr: &str, next: u64) -> Result<(), String> {
+        use std::io::Write;
+        let path = note_index_path(addr);
+        let dir = path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let fail = |what: &str, e: std::io::Error| {
+            format!(
+                "could not record note index {next} at {}: {what}: {e}",
+                path.display()
+            )
+        };
+        std::fs::create_dir_all(&dir).map_err(|e| fail("creating the parent directory", e))?;
+        let tmp = dir.join(format!("sigil-shield-noteidx-{addr}.tmp"));
+        {
+            let mut f = std::fs::File::create(&tmp).map_err(|e| fail("creating the temp file", e))?;
+            f.write_all(next.to_string().as_bytes())
+                .map_err(|e| fail("writing", e))?;
+            f.sync_all().map_err(|e| fail("fsync", e))?;
+        }
+        std::fs::rename(&tmp, &path).map_err(|e| fail("renaming into place", e))?;
+        // Best-effort, and only best-effort by necessity: the rename is a DIRECTORY
+        // metadata change, which the file's own fsync does not cover, so this is what makes
+        // the new name durable on Linux. Windows cannot open a directory as a file at all,
+        // so a failure here is not an error — on that platform the rename's durability is
+        // the filesystem's business, not ours.
+        if let Ok(d) = std::fs::File::open(&dir) {
+            let _ = d.sync_all();
+        }
+        Ok(())
+    }
+
+    /// How far past the counter to hunt for an index the pool has not already consumed.
+    /// Same bound the wallet page's `freeIndexFor()` uses, for the same reason: past a few
+    /// thousand collisions on one denomination something is wrong that scanning will not
+    /// fix, and an unbounded loop in a request handler is its own bug.
+    const INDEX_SCAN_LIMIT: u64 = 4096;
+
+    /// Pick one index per part, starting at `base`, skipping any index whose commitment
+    /// the chain has already seen (or that an earlier part in this same call just took).
+    ///
+    /// `taken` is the membership question, injected rather than hard-wired so this stays
+    /// pure and testable without a node. In production it is [`commitment_is_taken`], i.e.
+    /// the chain's own `has_ever_held`. Any error it returns propagates: an unanswerable
+    /// membership question must STOP the deposit, never be guessed at.
+    fn choose_indices<F>(
+        account: &ShieldedAccount,
+        base: u64,
+        parts: &[u128],
+        mut taken: F,
+    ) -> Result<Vec<(u64, u64, String)>, String>
+    where
+        F: FnMut(&str) -> Result<bool, String>,
+    {
+        let ceiling = base.saturating_add(INDEX_SCAN_LIMIT);
+        let mut chosen: Vec<(u64, u64, String)> = Vec::with_capacity(parts.len());
+        let mut idx = base;
+        for value128 in parts {
+            let value = *value128 as u64; // denominations top out at 2e17, well within u64
+            let mut slot = None;
+            while idx < ceiling {
+                let note = account
+                    .note(idx, value)
+                    .map_err(|e| format!("note build failed at index {idx}: {e}"))?;
+                let cm = hex::encode(to_wire(note.commitment()));
+                let used = chosen.iter().any(|(_, _, c)| c == &cm) || taken(&cm)?;
+                idx += 1;
+                if !used {
+                    slot = Some((idx - 1, value, cm));
+                    break;
+                }
+            }
+            match slot {
+                Some(s) => chosen.push(s),
+                None => {
+                    return Err(format!(
+                        "no free note index for a {value}-unit part within {INDEX_SCAN_LIMIT} \
+                         of {base} \u{2014} this wallet has shielded that denomination a great \
+                         many times; try a different amount"
+                    ))
+                }
+            }
+        }
+        Ok(chosen)
+    }
+
+    /// Ask the chain the exact question it will ask itself at apply time: has this
+    /// commitment EVER been held, in any epoch?
+    ///
+    /// `/v1/shielded/has` answers with `ShieldedPool::has_ever_held` directly
+    /// (`sigil-api/src/lib.rs:654`) \u{2014} the same guard `append_note_with_delivery` uses.
+    /// That is why this endpoint and not `/v1/shielded/leaves`: leaves serves ONE epoch
+    /// (the live one, unless `?epoch=` is given), so after a pool rotation a commitment
+    /// sealed in an earlier generation would look free here and still be refused there.
+    ///
+    /// Fail CLOSED on anything ambiguous \u{2014} a network error, a non-200, a body without a
+    /// boolean `present`. Submitting blind is what produces the permanently-stuck deposit;
+    /// declining costs nothing, because the wallet page's manual flow performs this same
+    /// check itself and simply takes over.
+    fn commitment_is_taken(
+        client: &reqwest::blocking::Client,
+        node: &str,
+        cm_hex: &str,
+    ) -> Result<bool, String> {
+        let url = format!("{}/v1/shielded/has?cm={cm_hex}", node.trim_end_matches('/'));
+        let body: serde_json::Value = client
+            .get(&url)
+            .send()
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| {
+                format!(
+                    "could not ask the node whether a commitment is already used ({e}) \u{2014} not \
+                     submitting blind, because a re-used note commitment is rejected forever"
+                )
+            })?
+            .json()
+            .map_err(|e| format!("bad /v1/shielded/has response from the node: {e}"))?;
+        if body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            return Err(format!(
+                "the node refused a commitment-membership query: {}",
+                body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error")
+            ));
+        }
+        body.get("present")
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| "/v1/shielded/has answered without a boolean 'present'".to_string())
     }
 
     /// Serializes concurrent `mine-shield` calls for the SAME process so two overlapping
@@ -156,9 +421,9 @@ mod shield_ops {
     /// `submit_shield_split` and this page's `doShield()` already use), build + sign one
     /// real `Shield` request per part (`account.note(index, value)` — identical math to
     /// `sigil_shield::wallet::shield_note`, just without needing an in-memory `NoteStore`
-    /// since the index comes from the persistent counter above), and submit each to this
-    /// node's `/v1/shield`. Returns `{"ok":true,"landed":[{"txid","value","index"},...]}`
-    /// once ANY part lands — including a `"warning"` field if a LATER part then failed,
+    /// since the indices come from [`choose_indices`] over the durable counter above), and
+    /// submit each to this node's `/v1/shield`. Returns
+    /// `{"ok":true,"landed":[{"txid","value","index"},...]}` once ANY part lands — including a `"warning"` field if a LATER part then failed,
     /// so the caller can show a truthful partial receipt instead of silently discarding
     /// already-shielded value (falling back to the manual flow after a partial success
     /// would re-attempt the WHOLE amount from scratch and double-shield the landed part).
@@ -168,7 +433,7 @@ mod shield_ops {
             amount: String,
         }
 
-        let Some(seed) = crate::miner_seed() else {
+        let Some(seed) = ctx_seed() else {
             return not_available("no local mining seed configured (SIGIL_MINE_SEED unset)");
         };
         let req: Req = match serde_json::from_str(body) {
@@ -200,7 +465,7 @@ mod shield_ops {
         let from = hex::encode(sk.verifying_key().to_bytes());
         let account = ShieldedAccount::from_seed(seed);
 
-        let node = crate::engine_node_url();
+        let node = ctx_node();
         let client = match reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .build()
@@ -209,24 +474,42 @@ mod shield_ops {
             Err(e) => return bad_request(format!("http client init failed: {e}")),
         };
 
+        // ── ALLOCATE FIRST, PUBLISH SECOND ──────────────────────────────────────────
+        // Everything down to the `save_note_index` below happens BEFORE a single byte is
+        // POSTed. That ordering is the fix: a leaf, once published, is permanent, so the
+        // record of which index produced it has to be durable already. The old code saved
+        // AFTER the loop, which meant a crash — or a power cut — anywhere in between left
+        // permanent leaves the counter had never heard of, and the next boot handed the
+        // same indices out again.
+        //
+        // The cost of doing it this way is that a submit failing later BURNS the indices
+        // that were reserved for it. That is the right trade and it is not close: an index
+        // is one number out of 2^64, and burning one costs nothing at all, while reusing
+        // one costs a deposit that returns a txid, shows a success receipt, and is then
+        // silently refused at apply time with `DuplicateCommitment` — value that appears to
+        // move and does not.
         let _guard = NOTE_INDEX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let mut index = load_note_index(&from);
+        let base = match load_note_index(&from) {
+            Ok(b) => b,
+            Err(e) => return bad_request(e),
+        };
+        let chosen = match choose_indices(&account, base, &parts, |cm| {
+            commitment_is_taken(&client, &node, cm)
+        }) {
+            Ok(c) => c,
+            Err(e) => return bad_request(e),
+        };
+        // Reserve the WHOLE span (past the highest index actually taken, so the skipped
+        // ones are burned too) and make it durable, or publish nothing at all.
+        let reserve_to = chosen.last().map(|(i, _, _)| i.saturating_add(1)).unwrap_or(base);
+        if let Err(e) = save_note_index(&from, reserve_to) {
+            return bad_request(e);
+        }
+
         let mut landed: Vec<serde_json::Value> = Vec::new();
         let mut failure: Option<String> = None;
 
-        for value128 in parts {
-            let value = value128 as u64; // denominations top out at 5e15, well within u64
-            let this_index = index;
-            index += 1;
-
-            let note = match account.note(this_index, value) {
-                Ok(n) => n,
-                Err(e) => {
-                    failure = Some(format!("note build failed: {e}"));
-                    break;
-                }
-            };
-            let cm_hex = hex::encode(to_wire(note.commitment()));
+        for (this_index, value, cm_hex) in chosen {
             let fee: u128 = 0;
             // Strictly increasing per part, same idiom as the browser's `Date.now()+i`.
             let req_nonce = now_ms() + this_index;
@@ -272,9 +555,9 @@ mod shield_ops {
             }
         }
 
-        // Persist however far we actually got — never reuse an index, whether we
-        // succeeded, partially succeeded, or failed on the very first part.
-        save_note_index(&from, index);
+        // Nothing to persist here any more: the counter was made durable BEFORE the first
+        // part was published (see the block above), which is the only ordering that
+        // survives a crash mid-loop.
         drop(_guard);
 
         if landed.is_empty() {
@@ -313,10 +596,22 @@ mod shield_ops {
     /// browser, ported here without the wasm boundary (native builds never compile that
     /// module — see `sigil-shield/src/lib.rs`'s `#[cfg(target_arch = "wasm32")]` gate —
     /// so this is a parallel native call site, not a shared function, but it mirrors that
-    /// function's logic step for step, including its own quirk: `build_spend`'s two
-    /// OUTPUT notes are allocated from a FRESH, single-call `NoteStore` (indices 0/1
-    /// every time), same as the browser's WASM path already does — this endpoint doesn't
-    /// invent stricter bookkeeping the manual path doesn't already have).
+    /// function's logic step for step.
+    ///
+    /// NOTE-INDEX SAFETY, re-checked 2026-09-02 (the counter above had the opposite
+    /// problem, so this path was audited alongside it): this handler builds a fresh
+    /// single-call `NoteStore`, and an older version of this comment recorded that as a
+    /// "quirk" — indices 0/1 for the two outputs, every time. That is no longer true and
+    /// it matters, because two payments of the same amount to the same payee with the same
+    /// blinding are one byte-identical leaf, which the chain now refuses forever
+    /// (`ShieldedError::DuplicateCommitment`). `build_spend` stopped taking output indices
+    /// from the store's counter: it derives them with
+    /// `sigil_shield::wallet::output_derivation_index(anchor, position, slot)`, bound to
+    /// the leaf POSITION of the note being consumed — and a note is consumed exactly once,
+    /// so that input cannot repeat. Those indices also live in their own high band
+    /// (`OUT_INDEX_BASE = 2^31`), so they cannot collide with the sequential counter
+    /// `mine-shield` allocates from either. Nothing on this path needs the fix applied
+    /// above; it is already position-derived rather than counter-derived.
     #[allow(clippy::too_many_arguments)]
     pub fn handle_mine_send_private(body: &str) -> (&'static str, String) {
         #[derive(serde::Deserialize)]
@@ -335,7 +630,7 @@ mod shield_ops {
             memo: String,
         }
 
-        let Some(seed) = crate::miner_seed() else {
+        let Some(seed) = ctx_seed() else {
             return not_available("no local mining seed configured (SIGIL_MINE_SEED unset)");
         };
         let req: Req = match serde_json::from_str(body) {
@@ -362,7 +657,7 @@ mod shield_ops {
         let my_pk = account.public_key();
         let fee = sigil_state::shielded::SHIELDED_FEE as u64;
 
-        let node = crate::engine_node_url();
+        let node = ctx_node();
         let client = match reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(20))
             .build()
@@ -401,10 +696,40 @@ mod shield_ops {
             .and_then(|v| v.as_u64())
             .unwrap_or(sigil_state::shielded::POOL_CAPACITY as u64) as usize;
 
-        // Pick the smallest of OUR OWN candidate notes that covers amount+fee AND has
-        // actually landed (its commitment is present in the live leaf set) — same
-        // "prefer the smallest covering note" policy `doPrivateSend()` uses.
+        // The set of nullifiers the chain has ALREADY seen. A note whose nullifier is in
+        // here has been spent — often by another copy of this same seed in an earlier
+        // session (the recurring "same seed elsewhere" trap). Proving a spend of such a
+        // note wastes seconds building a STARK the node is guaranteed to reject with
+        // `nullifier already spent`, and the caller would then be told a payment "went
+        // through" when it never landed. So we skip those notes BEFORE proving — the
+        // native equivalent of the Android wallet's `retireSpentElsewhere`. The endpoint
+        // returns the full list (`nullifiers: [...]`), not just a count.
+        let spent_nullifiers: std::collections::HashSet<String> = {
+            let url = format!("{}/v1/shielded/nullifiers", node.trim_end_matches('/'));
+            match client.get(&url).send().and_then(|r| r.error_for_status()) {
+                Ok(r) => r
+                    .json::<serde_json::Value>()
+                    .ok()
+                    .and_then(|v| v.get("nullifiers").and_then(|n| n.as_array()).cloned())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_ascii_lowercase()))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                // If the list is unreachable we do NOT block the send — the chain is still
+                // the final authority and will reject a real double-spend. We just lose the
+                // pre-flight skip. (Empty set = skip nothing.)
+                Err(_) => std::collections::HashSet::new(),
+            }
+        };
+
+        // Pick the smallest of OUR OWN candidate notes that covers amount+fee, has actually
+        // landed (its commitment is present in the live leaf set), AND has not already been
+        // spent (its nullifier is not in the published set) — same "prefer the smallest
+        // covering note" policy `doPrivateSend()` uses.
         let mut best: Option<(u64, u64, usize)> = None; // (index, value, position)
+        let mut skipped_spent = 0usize;
         for cand in &req.notes {
             let Ok(value) = cand.value.trim().parse::<u64>() else {
                 continue;
@@ -419,6 +744,12 @@ mod shield_ops {
             let Some(pos) = leaves_hex.iter().position(|c| c.eq_ignore_ascii_case(&cm_hex)) else {
                 continue;
             };
+            // nf = compress2(spend_key, position) — the exact value the chain checks.
+            let nf_hex = hex::encode(to_wire(account.nullifier_at(pos as u64)));
+            if spent_nullifiers.contains(&nf_hex) {
+                skipped_spent += 1;
+                continue;
+            }
             let better = match &best {
                 Some((_, best_value, _)) => value < *best_value,
                 None => true,
@@ -428,6 +759,13 @@ mod shield_ops {
             }
         }
         let Some((note_index, note_value, position)) = best else {
+            if skipped_spent > 0 {
+                return bad_request(format!(
+                    "the {skipped_spent} note(s) large enough to cover {amount} + fee {fee} \
+                     have already been spent (their nullifiers are on chain) — likely by \
+                     another copy of this seed. Shield fresh funds and try again."
+                ));
+            }
             return bad_request(format!(
                 "no locally-known landed note covers {amount} + fee {fee}"
             ));
@@ -521,14 +859,512 @@ mod shield_ops {
             .unwrap_or("")
             .to_string();
 
-        ok_json(serde_json::json!({
-            "ok": true,
-            "txid": txid,
-            "spent_index": note_index,
-            "change_index": change_index,
-            "change_value": change_value.to_string(),
-        }))
+        // CONFIRM ON SETTLE — do not call an accepted submission "paid".
+        //
+        // `/v1/shielded_send` returns `ok:true` the instant the proof and fee check out and
+        // the tx is QUEUED. That is acceptance, not settlement: the braid can still drop the
+        // tx at apply time (`nullifier already spent`, `unknown anchor`, …). The old code
+        // returned `ok:true` right here, so a rejected payment was reported to the user as a
+        // success with a real-looking txid — the same false-success class as the v8 receipt
+        // bug. We now poll the tx's own status until the chain commits a verdict. At the live
+        // block rate (~5–6 blk/s) `applied`/`rejected` lands within a second or two; we allow
+        // generous headroom and, only if the chain is still silent past it, return an honest
+        // "accepted, not yet settled" that the caller must not mistake for settlement.
+        let status_url = format!(
+            "{}/v1/transactions/{}",
+            node.trim_end_matches('/'),
+            txid
+        );
+        let mut settled_status: Option<String> = None;
+        let mut reject_reason = String::new();
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let Ok(r) = client.get(&status_url).send() else {
+                continue;
+            };
+            let Ok(v) = r.json::<serde_json::Value>() else {
+                continue;
+            };
+            let data = v.get("data").unwrap_or(&v);
+            let st = data
+                .get("status")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+            match st.as_str() {
+                "applied" | "settled" | "confirmed" => {
+                    settled_status = Some(st);
+                    break;
+                }
+                "rejected" | "failed" | "dropped" => {
+                    reject_reason = data
+                        .get("reason")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("the chain rejected this transaction")
+                        .to_string();
+                    settled_status = Some(st);
+                    break;
+                }
+                // "pending" / unknown → keep polling.
+                _ => {}
+            }
+        }
+
+        match settled_status.as_deref() {
+            Some("rejected") | Some("failed") | Some("dropped") => {
+                // Submitted, then rejected. `submitted:true` tells the pay orchestrator this
+                // note is spent-or-doomed on chain — a terminal outcome, not a "wait longer".
+                ok_json(serde_json::json!({
+                    "ok": false,
+                    "submitted": true,
+                    "txid": txid,
+                    "error": reject_reason,
+                }))
+            }
+            Some(_) => ok_json(serde_json::json!({
+                "ok": true,
+                "settled": true,
+                "txid": txid,
+                "spent_index": note_index,
+                "change_index": change_index,
+                "change_value": change_value.to_string(),
+            })),
+            None => ok_json(serde_json::json!({
+                "ok": true,
+                "settled": false,
+                "submitted": true,
+                "txid": txid,
+                "spent_index": note_index,
+                "change_index": change_index,
+                "change_value": change_value.to_string(),
+                "note": "accepted and queued; the chain had not committed a verdict within \
+                         the confirmation window. Check /v1/transactions/<txid> — do NOT \
+                         resubmit, the nullifier is already in flight.",
+            })),
+        }
     }
+
+    #[cfg(test)]
+    mod note_index_durability_tests {
+        //! What these tests are FOR.
+        //!
+        //! Every one of them drives the real `handle_mine_shield` end to end against a
+        //! stub node, so none of them depends on the private helpers' signatures — they
+        //! assert only on what a caller can observe (the JSON response, and what the node
+        //! actually received). That is deliberate: they were written and RUN against the
+        //! pre-fix code first, where all four fail, before the fix existed to make them
+        //! pass. A test that passes against the broken code proves nothing.
+
+        use super::*;
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        fn seed() -> [u8; 32] {
+            [0x11u8; 32]
+        }
+        fn wallet_addr() -> String {
+            hex::encode(
+                ed25519_dalek::SigningKey::from_bytes(&seed())
+                    .verifying_key()
+                    .to_bytes(),
+            )
+        }
+        /// The commitment this wallet WOULD publish for `(index, value)` — the exact value
+        /// `handle_mine_shield` derives, so a test can predict a collision.
+        fn cm_for(index: u64, value: u64) -> String {
+            let acct = ShieldedAccount::from_seed(seed());
+            hex::encode(to_wire(acct.note(index, value).unwrap().commitment()))
+        }
+
+        struct Scratch(std::path::PathBuf);
+        impl Scratch {
+            fn new(tag: &str) -> Scratch {
+                let p = std::env::temp_dir().join(format!(
+                    "sigil-top-noteidx-{tag}-{}-{:?}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                let _ = std::fs::remove_dir_all(&p);
+                std::fs::create_dir_all(&p).expect("scratch dir");
+                Scratch(p)
+            }
+            fn counter_path(&self) -> std::path::PathBuf {
+                self.0
+                    .join(".flux")
+                    .join(format!("sigil-shield-noteidx-{}", wallet_addr()))
+            }
+        }
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        /// One request the stub node saw, together with the counter file exactly as it
+        /// stood on disk AT THAT MOMENT — which is how the write-ahead test observes
+        /// ordering without needing to kill a process.
+        #[derive(Clone)]
+        struct Hit {
+            path: String,
+            body: String,
+            counter_at_hit: Option<String>,
+        }
+
+        struct Stub {
+            addr: String,
+            hits: Arc<Mutex<Vec<Hit>>>,
+            stop: Arc<AtomicBool>,
+            handle: Option<std::thread::JoinHandle<()>>,
+        }
+
+        fn header_end(buf: &[u8]) -> Option<usize> {
+            buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
+        }
+        fn content_length(buf: &[u8]) -> usize {
+            let text = String::from_utf8_lossy(buf).to_lowercase();
+            text.lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0)
+        }
+
+        impl Stub {
+            /// `leaves` is the shielded pool's live leaf set as this stub reports it.
+            fn start(leaves: Vec<String>, counter_path: std::path::PathBuf) -> Stub {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+                let addr = format!("http://{}", listener.local_addr().unwrap());
+                listener.set_nonblocking(true).expect("nonblocking");
+                let hits: Arc<Mutex<Vec<Hit>>> = Arc::new(Mutex::new(Vec::new()));
+                let stop = Arc::new(AtomicBool::new(false));
+                let handle = {
+                    let hits = hits.clone();
+                    let stop = stop.clone();
+                    std::thread::spawn(move || {
+                        while !stop.load(Ordering::Relaxed) {
+                            match listener.accept() {
+                                Ok((mut s, _)) => {
+                                    let _ = s.set_nonblocking(false);
+                                    let _ = s.set_read_timeout(Some(
+                                        std::time::Duration::from_millis(500),
+                                    ));
+                                    let mut buf: Vec<u8> = Vec::new();
+                                    let mut tmp = [0u8; 4096];
+                                    loop {
+                                        match s.read(&mut tmp) {
+                                            Ok(0) => break,
+                                            Ok(n) => {
+                                                buf.extend_from_slice(&tmp[..n]);
+                                                if let Some(bs) = header_end(&buf) {
+                                                    if buf.len() - bs >= content_length(&buf) {
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            Err(_) => break,
+                                        }
+                                    }
+                                    let head = String::from_utf8_lossy(&buf).to_string();
+                                    let path =
+                                        head.split_whitespace().nth(1).unwrap_or("").to_string();
+                                    let body = header_end(&buf)
+                                        .map(|bs| String::from_utf8_lossy(&buf[bs..]).to_string())
+                                        .unwrap_or_default();
+                                    // Read the counter file BEFORE replying, so the
+                                    // snapshot is "what was durable when the node was
+                                    // asked to mint this leaf".
+                                    let counter_at_hit = std::fs::read_to_string(&counter_path).ok();
+                                    hits.lock().unwrap().push(Hit {
+                                        path: path.clone(),
+                                        body,
+                                        counter_at_hit,
+                                    });
+                                    let payload = if path.starts_with("/v1/shielded/has") {
+                                        // Same contract as the real handler: `present` is
+                                        // `has_ever_held`, across every epoch.
+                                        let asked = path
+                                            .split("cm=")
+                                            .nth(1)
+                                            .unwrap_or("")
+                                            .to_ascii_lowercase();
+                                        serde_json::json!({
+                                            "ok": true,
+                                            "cm": asked,
+                                            "present": leaves
+                                                .iter()
+                                                .any(|l| l.eq_ignore_ascii_case(&asked)),
+                                            "epoch": 0u64,
+                                        })
+                                        .to_string()
+                                    } else if path.contains("leaves") {
+                                        serde_json::json!({
+                                            "leaves": leaves, "capacity": 32768u64
+                                        })
+                                        .to_string()
+                                    } else {
+                                        serde_json::json!({"ok": true, "txid": "de".repeat(32)})
+                                            .to_string()
+                                    };
+                                    let resp = format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                                         Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                                        payload.len()
+                                    );
+                                    let _ = s.write_all(resp.as_bytes());
+                                    let _ = s.flush();
+                                }
+                                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                    std::thread::sleep(std::time::Duration::from_millis(3));
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    })
+                };
+                Stub {
+                    addr,
+                    hits,
+                    stop,
+                    handle: Some(handle),
+                }
+            }
+            fn shield_hits(&self) -> Vec<Hit> {
+                self.hits
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    // EXACT path: `/v1/shielded/has` also has `/v1/shield` as a prefix.
+                    .filter(|h| h.path.split('?').next() == Some("/v1/shield"))
+                    .cloned()
+                    .collect()
+            }
+        }
+        impl Drop for Stub {
+            fn drop(&mut self) {
+                self.stop.store(true, Ordering::Relaxed);
+                if let Some(h) = self.handle.take() {
+                    let _ = h.join();
+                }
+            }
+        }
+
+        /// Point THIS THREAD's handler calls at `home` and `node`. Thread-local, never
+        /// the environment — see the test seam's comment for the test this broke when it
+        /// used `set_var`.
+        fn with_ctx<T>(home: &std::path::Path, node: &str, f: impl FnOnce() -> T) -> T {
+            TEST_CTX.with(|c| {
+                *c.borrow_mut() = Some(TestCtx {
+                    home: home.to_string_lossy().into_owned(),
+                    seed: seed(),
+                    node: node.to_string(),
+                })
+            });
+            let out = f();
+            TEST_CTX.with(|c| *c.borrow_mut() = None);
+            out
+        }
+
+        fn shield(amount: &str) -> serde_json::Value {
+            let (_, body) = handle_mine_shield(&format!("{{\"amount\":\"{amount}\"}}"));
+            serde_json::from_str(&body).expect("response is JSON")
+        }
+
+        /// **An unreadable counter must STOP the deposit, not silently restart it at 0.**
+        ///
+        /// Pre-fix `load_note_index` was
+        /// `read_to_string(..).ok().and_then(parse).unwrap_or(0)`, so a truncated or
+        /// garbled counter rewound the allocator wholesale — every index the wallet had
+        /// ever used was handed out a second time. Reusing `(index, value)` reproduces the
+        /// note bit for bit, and `sigil_state::shielded::append_note_with_delivery`
+        /// refuses a commitment the pool has EVER held
+        /// (`ShieldedError::DuplicateCommitment`), so those deposits are rejected at apply
+        /// time — after `/v1/shield` has already returned a txid.
+        #[test]
+        fn a_corrupt_counter_refuses_the_deposit_instead_of_rewinding_to_zero() {
+            let scratch = Scratch::new("corrupt");
+            std::fs::create_dir_all(scratch.0.join(".flux")).unwrap();
+            std::fs::write(scratch.counter_path(), b"\x00\x00not-a-number").unwrap();
+            let stub = Stub::start(Vec::new(), scratch.counter_path());
+
+            let resp = with_ctx(&scratch.0, &stub.addr, || shield("100"));
+
+            assert_eq!(
+                resp.get("ok").and_then(|v| v.as_bool()),
+                Some(false),
+                "an unreadable counter must fail closed, got: {resp}"
+            );
+            assert!(
+                stub.shield_hits().is_empty(),
+                "nothing may be submitted when the allocator could not be read; saw {:?}",
+                stub.shield_hits().iter().map(|h| h.body.clone()).collect::<Vec<_>>()
+            );
+        }
+
+        /// **An index that could not be RECORDED must not be USED.**
+        ///
+        /// `$HOME/.flux` is made a regular FILE here, so `create_dir_all` and the write
+        /// both fail. Pre-fix both were `let _ = ...`, so the failure was invisible: the
+        /// deposit went out at index 0 and the very next call re-derived index 0 again.
+        #[test]
+        fn an_index_that_cannot_be_persisted_is_never_submitted() {
+            let scratch = Scratch::new("unwritable");
+            // `.flux` as a FILE: create_dir_all and every write beneath it must fail.
+            std::fs::write(scratch.0.join(".flux"), b"not a directory").unwrap();
+            let stub = Stub::start(Vec::new(), scratch.counter_path());
+
+            let resp = with_ctx(&scratch.0, &stub.addr, || shield("100"));
+
+            assert_eq!(
+                resp.get("ok").and_then(|v| v.as_bool()),
+                Some(false),
+                "an unrecordable index must fail closed, got: {resp}"
+            );
+            assert!(
+                stub.shield_hits().is_empty(),
+                "an index that could not be fsynced must never reach the chain"
+            );
+        }
+
+        /// **The counter must be durable BEFORE the leaf is published, not after.**
+        ///
+        /// Pre-fix, `save_note_index` ran at the very end of the handler, after every
+        /// part had already been POSTed. A crash (or power cut) in that window published
+        /// permanent leaves whose indices the counter had no record of, so the next boot
+        /// handed the same indices out again. The stub records the counter file exactly as
+        /// it stood when each `/v1/shield` arrived; write-ahead means it is already past
+        /// the whole reserved span by then.
+        #[test]
+        fn the_counter_is_durable_before_the_first_part_is_submitted() {
+            let scratch = Scratch::new("writeahead");
+            let stub = Stub::start(Vec::new(), scratch.counter_path());
+
+            // 1100 decomposes greedily into [1000, 100] — two parts, two indices.
+            let resp = with_ctx(&scratch.0, &stub.addr, || shield("1100"));
+
+            assert_eq!(
+                resp.get("ok").and_then(|v| v.as_bool()),
+                Some(true),
+                "the happy path must still land: {resp}"
+            );
+            let hits = stub.shield_hits();
+            assert_eq!(hits.len(), 2, "1100 is two denomination parts");
+            for (n, h) in hits.iter().enumerate() {
+                let seen: u64 = h
+                    .counter_at_hit
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("<absent>")
+                    .parse()
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "part {n} was submitted while the counter file read {:?} — \
+                             the index was published before it was recorded",
+                            h.counter_at_hit
+                        )
+                    });
+                assert!(
+                    seen >= 2,
+                    "part {n} was submitted with the counter at {seen}; the whole span of \
+                     2 indices must already be durable before ANY part is published"
+                );
+            }
+        }
+
+        /// **An index whose commitment is already in the pool must be skipped.**
+        ///
+        /// This is the browser-divergence case made concrete. The wallet page keeps its
+        /// own `localStorage['sigil-shielded-noteidx-'+addr]` counter, per-origin and
+        /// erasable, and it is NOT this file. If the page already shielded value `V` at
+        /// index 0, this counter — starting from its own 0 on a fresh box — derives the
+        /// identical commitment, which the chain refuses forever. `/v1/shielded/has` —
+        /// the chain's own `has_ever_held` — is the only shared truth between the two
+        /// allocators, so it is what decides.
+        #[test]
+        fn an_index_the_browser_already_used_is_skipped() {
+            let scratch = Scratch::new("collision");
+            let taken = cm_for(0, 100);
+            let stub = Stub::start(vec![taken.clone()], scratch.counter_path());
+
+            let resp = with_ctx(&scratch.0, &stub.addr, || shield("100"));
+
+            assert_eq!(
+                resp.get("ok").and_then(|v| v.as_bool()),
+                Some(true),
+                "it must still deposit, just at a free index: {resp}"
+            );
+            let hits = stub.shield_hits();
+            assert_eq!(hits.len(), 1, "100 is a single denomination part");
+            let sent: serde_json::Value = serde_json::from_str(&hits[0].body).expect("json body");
+            let sent_cm = sent.get("cm").and_then(|v| v.as_str()).unwrap_or("");
+            assert_ne!(
+                sent_cm.to_lowercase(),
+                taken.to_lowercase(),
+                "re-published a commitment the pool already holds — the chain will reject \
+                 this at apply time with DuplicateCommitment"
+            );
+            let landed_index = resp["landed"][0]["index"].as_u64().expect("landed index");
+            assert_ne!(landed_index, 0, "index 0 was already taken by the browser");
+        }
+
+        /// The allocation rule on its own, with no node in the way: start at the counter,
+        /// never hand out an index the pool has consumed, and never hand the same index to
+        /// two parts of one deposit.
+        #[test]
+        fn choose_indices_starts_at_the_counter_and_skips_what_the_pool_holds() {
+            let acct = ShieldedAccount::from_seed(seed());
+
+            let never = |_: &str| Ok(false);
+            let picked = choose_indices(&acct, 7, &[1000u128, 100u128], never).unwrap();
+            assert_eq!(
+                picked.iter().map(|(i, _, _)| *i).collect::<Vec<_>>(),
+                vec![7, 8],
+                "a clean pool allocates straight up from the counter"
+            );
+
+            // 7 and 8 already consumed for a 1000-unit part; 9 must be the first free one.
+            let pool: std::collections::HashSet<String> =
+                [cm_for(7, 1000), cm_for(8, 1000)].into_iter().collect();
+            let picked =
+                choose_indices(&acct, 7, &[1000u128], |cm| Ok(pool.contains(cm))).unwrap();
+            assert_eq!(picked[0].0, 9);
+            assert_eq!(picked[0].2, cm_for(9, 1000));
+
+            // A duplicated denomination inside ONE deposit must still get two distinct
+            // indices — otherwise the second part is a duplicate of the first.
+            let picked = choose_indices(&acct, 0, &[100u128, 100u128], never).unwrap();
+            assert_ne!(picked[0].0, picked[1].0);
+            assert_ne!(picked[0].2, picked[1].2);
+        }
+
+        /// An unanswerable membership question must abort the whole allocation.
+        #[test]
+        fn choose_indices_propagates_an_unanswerable_membership_question() {
+            let acct = ShieldedAccount::from_seed(seed());
+            let err = choose_indices(&acct, 0, &[100u128], |_| {
+                Err("node unreachable".to_string())
+            })
+            .unwrap_err();
+            assert_eq!(err, "node unreachable");
+        }
+
+        /// Exhausting the scan must be an ERROR, not a wrap-around to something reused.
+        #[test]
+        fn choose_indices_fails_closed_when_every_scanned_index_is_taken() {
+            let acct = ShieldedAccount::from_seed(seed());
+            let pool: std::collections::HashSet<String> =
+                (0..INDEX_SCAN_LIMIT).map(|i| cm_for(i, 100)).collect();
+            let err =
+                choose_indices(&acct, 0, &[100u128], |cm| Ok(pool.contains(cm))).unwrap_err();
+            assert!(
+                err.contains("no free note index"),
+                "unexpected error text: {err}"
+            );
+        }
+    }
+
 }
 
 fn ok_json(v: serde_json::Value) -> (&'static str, String) {

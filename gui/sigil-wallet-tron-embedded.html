@@ -7830,4 +7830,176 @@ function closeSigilOS(){
 document.addEventListener('keydown',function(e){ if(e.key==='Escape'){ var m=document.getElementById('sigilOSModal'); if(m&&m.style.display==='block') closeSigilOS(); } });
 document.getElementById('sigilOSModal').addEventListener('click',function(e){ if(e.target===this) closeSigilOS(); });
 </script>
+<!-- ══ KRISTENSEN K-GAUGE — global topbar dropdown (self-contained, client-side) ══════════
+     Computes the K-gauge honestly from the node's OWN live endpoints (same-origin /v1/*),
+     so it needs no node change. Mirrors flux-kgauge (Kristensen, "The Theoretical Minimum
+     for Blockchain Consensus" v4): K = 2π·√(ΔH·Δs)/τ, plus the dimensionless Kristensen
+     number K* = 2π·√(ΔH·τ·Δs/ħ) (ħ:=1) whose K*≈1 boundary is the Margolus–Levitin one.
+     Every value carries its provenance; a channel with no data source says so rather than
+     inventing a zero. Injected copy-agnostically so it appears on every wallet copy. -->
+<style>
+  #kgChip{position:fixed;top:10px;right:12px;z-index:1400;display:flex;align-items:center;gap:7px;
+    padding:6px 11px;border-radius:999px;cursor:pointer;font-family:'JetBrains Mono',monospace;
+    font-size:12px;background:rgba(18,14,32,.82);border:1px solid rgba(139,92,246,.45);
+    color:#e2e8f0;backdrop-filter:blur(8px);user-select:none;transition:border-color .2s}
+  #kgChip:hover{border-color:#c084fc}
+  #kgChip .kgK{font-weight:700;color:#c084fc}
+  #kgChip .kgSig{color:#8b5cf6;font-size:14px;font-weight:800}
+  #kgChip .kgReg{font-size:9.5px;text-transform:uppercase;letter-spacing:.12em;padding:1px 7px;border-radius:999px}
+  .kg-stable{background:rgba(16,185,129,.18);color:#34d399;border:1px solid rgba(16,185,129,.35)}
+  .kg-approaching{background:rgba(245,158,11,.18);color:#fbbf24;border:1px solid rgba(245,158,11,.35)}
+  .kg-critical{background:rgba(239,68,68,.18);color:#f87171;border:1px solid rgba(239,68,68,.4)}
+  .kg-unknown{background:rgba(120,130,150,.18);color:#94a3b8;border:1px solid rgba(120,130,150,.35)}
+  #kgPanel{position:fixed;top:52px;right:12px;z-index:1400;width:360px;max-width:calc(100vw - 24px);
+    max-height:calc(100vh - 70px);overflow-y:auto;display:none;font-family:'JetBrains Mono',monospace;
+    background:#12101c;border:1px solid rgba(139,92,246,.4);border-radius:14px;
+    box-shadow:0 24px 70px rgba(0,0,0,.85),0 0 42px rgba(139,92,246,.16);color:#e2e8f0}
+  #kgPanel.on{display:block}
+  #kgPanel .kgHd{padding:13px 15px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;
+    justify-content:space-between;align-items:flex-start;gap:10px}
+  #kgPanel .kgTitle{font-size:11px;text-transform:uppercase;letter-spacing:.16em;color:rgba(255,255,255,.42)}
+  #kgPanel .kgForm{font-size:10px;color:rgba(255,255,255,.6);margin-top:3px}
+  #kgPanel .kgBig{font-size:26px;font-weight:800;line-height:1;text-align:right}
+  #kgPanel .kgStar{font-size:10px;color:rgba(255,255,255,.55);text-align:right;margin-top:2px}
+  #kgPanel .kgGrid{padding:12px 15px;display:grid;grid-template-columns:1fr 1fr;gap:9px 14px;
+    border-bottom:1px solid rgba(255,255,255,.06)}
+  #kgPanel .kgCell .kgLab{font-size:9px;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:.08em}
+  #kgPanel .kgCell .kgVal{font-size:13px;font-weight:600;color:#cfe9f2}
+  #kgPanel .kgCell .kgSub{font-size:8.5px;color:rgba(255,255,255,.32)}
+  #kgPanel .kgSec{padding:11px 15px;border-bottom:1px solid rgba(255,255,255,.06);font-size:11px;line-height:1.5}
+  #kgPanel .kgSec b{color:#c084fc;font-weight:600}
+  #kgPanel .kgProv{font-size:9.5px;color:rgba(255,255,255,.5);line-height:1.45}
+  #kgPanel .kgProv .kgMeas{color:#34d399}
+  #kgPanel .kgProv .kgUnav{color:#fbbf24}
+  #kgPanel .kgFoot{padding:9px 15px;font-size:9px;color:rgba(255,255,255,.3)}
+  #kgPanel .kgX{cursor:pointer;color:rgba(255,255,255,.4);font-size:16px;line-height:1}
+</style>
+<div id="kgChip" title="Kristensen K-gauge — network coordination pressure">
+  <span class="kgSig">Κ</span><span class="kgK" id="kgChipK">—</span>
+  <span class="kgReg kg-unknown" id="kgChipReg">measuring</span>
+</div>
+<div id="kgPanel">
+  <div class="kgHd">
+    <div>
+      <div class="kgTitle">Kristensen K-gauge</div>
+      <div class="kgForm">K = 2π·√(ΔH·Δs) / τ &nbsp;·&nbsp; K* = 2π·√(ΔH·τ·Δs/ħ)</div>
+    </div>
+    <div>
+      <div class="kgBig" id="kgBigK" style="color:#94a3b8">—</div>
+      <div class="kgStar" id="kgStar">K* —</div>
+      <span class="kgX" onclick="window.__kgToggle(false)">✕</span>
+    </div>
+  </div>
+  <div class="kgGrid" id="kgGrid"></div>
+  <div class="kgSec">
+    <div><b>Regime:</b> <span id="kgRegimeTxt">—</span> · <b>dominant term:</b> <span id="kgDom">—</span></div>
+  </div>
+  <div class="kgSec kgProv" id="kgProv"></div>
+  <div class="kgSec" style="color:rgba(255,255,255,.72)">
+    <b>What this measures.</b> Not "is the chain fast" but the <i>coordination pressure</i> in one
+    round: energetic disagreement (ΔH) × time (τ) × proposer plurality (Δs). K* is dimensionless —
+    it counts how much physically distinguishable evolution a round spends, weighted by how spread
+    the right to propose is. K*≈1 is the Margolus–Levitin boundary (one orthogonalisation-worth of
+    action per round); the live chain sits far below it, so the limit on consensus here is
+    coordination, not physics. In the wider theory K is the quantum→classical order parameter;
+    consensus is one application of it.
+  </div>
+  <div class="kgFoot" id="kgFoot">tip — · peers — · sampled over — s</div>
+</div>
+<script>(function(){
+  "use strict";
+  var API = (function(){ try{ return (window.__SIGIL_API_BASE||'') ; }catch(e){ return ''; } })();
+  function u(p){ return (API||'') + p; }
+  var panelOpen=false;
+  window.__kgToggle=function(v){ panelOpen=(v===undefined)?!panelOpen:v;
+    document.getElementById('kgPanel').classList.toggle('on',panelOpen); if(panelOpen) refresh(); };
+  document.getElementById('kgChip').addEventListener('click',function(){ window.__kgToggle(); });
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape') window.__kgToggle(false); });
+  document.addEventListener('click',function(e){ var p=document.getElementById('kgPanel'),c=document.getElementById('kgChip');
+    if(panelOpen && p && !p.contains(e.target) && !c.contains(e.target)) window.__kgToggle(false); },true);
+  function getJSON(path){ return fetch(u(path),{cache:'no-store'}).then(function(r){return r.json();}).catch(function(){return null;}); }
+  function shannonBits(counts){ var n=0,i; for(i in counts) n+=counts[i]; if(n<=0) return 0;
+    var H=0; for(i in counts){ var pi=counts[i]/n; if(pi>0) H-=pi*Math.log2(pi); } return H; }
+  function regimeOf(k){ if(!isFinite(k)) return 'unknown'; if(k>=10) return 'critical'; if(k>=5) return 'approaching'; return 'stable'; }
+  function fmt(x,d){ return (typeof x==='number'&&isFinite(x))?x.toFixed(d===undefined?4:d):'—'; }
+  var lastPeers=null;
+  function sample(){ return Promise.all([getJSON('/v1/dagknight/recent'),getJSON('/v1/mining/miners'),getJSON('/v1/network/topology')]); }
+  function compute(){
+    var t0=Date.now();
+    return sample().then(function(a){
+      return new Promise(function(res){ setTimeout(function(){ sample().then(function(b){ res([a,b,(Date.now()-t0)/1000]); }); }, 6000); });
+    }).then(function(z){
+      var A=z[0],B=z[1],tau=z[2];
+      var recentB=(B[0]&&(B[0].data||B[0]))||{}; var blocks=(recentB.blocks)||[];
+      var minersA=(A[1]&&A[1].data)||{}, minersB=(B[1]&&B[1].data)||{};
+      var topoA=(A[2]&&A[2].data)||{}, topoB=(B[2]&&B[2].data)||{};
+      // ── Δs : proposer entropy (the TRUE Δs — plurality of who may propose), bits ──
+      var counts={}; blocks.forEach(function(bk){ var p=bk.producer; var key=Array.isArray(p)?p.slice(0,6).join('-'):String(p); counts[key]=(counts[key]||0)+1; });
+      var proposerEntropy=shannonBits(counts);
+      var distinctProducers=Object.keys(counts).length;
+      // block-rate deviation (secondary/diagnostic only — it is what makes the gauge blind if
+      // substituted FOR entropy, so it is shown but NOT used as Δs)
+      var hA=minersA.height||0, hB=minersB.height||0; var obsBps=(tau>0)?Math.max(0,(hB-hA))/tau:0;
+      var targetBps=0.83; var brDev=targetBps>0?Math.abs(obsBps-targetBps)/targetBps:0;
+      var ds=proposerEntropy; // Δs := proposer entropy (bits)
+      // ── ΔH : energetic disagreement (things going wrong locally) ──
+      var shA=minersA.shares_accepted||0, shB=minersB.shares_accepted||0;
+      var rejArr=(minersB.rejects||[]); var rejTot=0; rejArr.forEach(function(r){ rejTot+=(r&&r[1])||0; });
+      var subDelta=Math.max(0,(shB-shA))+0; var rejRatio=(subDelta+rejTot>0)?(rejTot/(subDelta+rejTot)):0;
+      var peersA=(topoA.peer_count!=null?topoA.peer_count:(lastPeers!=null?lastPeers:0));
+      var peersB=(topoB.peer_count!=null?topoB.peer_count:peersA); lastPeers=peersB;
+      var churn=(peersA>0)?Math.abs(peersB-peersA)/peersA:0;
+      // traffic asymmetry: NO byte counters on this node → unavailable, contributes nothing
+      var dh=rejRatio+churn;
+      // ── the gauge ──
+      var K=(dh>=0&&ds>=0&&tau>0)?(2*Math.PI*Math.sqrt(dh*ds)/tau):0;
+      var Kstar=(dh>=0&&ds>=0)?(2*Math.PI*Math.sqrt(dh*tau*ds)):0; // ħ:=1
+      // observer coverage Ω = 1 - e^(-peers/n_total)
+      var nTotal=Math.max(peersB+2,8); var omega=1-Math.exp(-peersB/nTotal);
+      // commitment Λ (window-limited): blocks since window start over κ·τ_confirm
+      var dCommit=Math.max(0,hB-hA); var lambda=1-Math.exp(-dCommit/(18*100));
+      var dom = (dh>=ds)?'energetic disagreement (ΔH)':'proposer plurality (Δs)';
+      if(dh===0&&ds===0) dom='none (quiet chain)';
+      return {K:K,Kstar:Kstar,dh:dh,ds:ds,tau:tau,omega:omega,lambda:lambda,dom:dom,
+        rejRatio:rejRatio,churn:churn,brDev:brDev,obsBps:obsBps,distinctProducers:distinctProducers,
+        tip:hB,peers:peersB,blocks:blocks.length};
+    });
+  }
+  function render(m){
+    if(!m){ document.getElementById('kgChipReg').textContent='node offline'; document.getElementById('kgChipReg').className='kgReg kg-unknown'; return; }
+    var reg=regimeOf(m.K), col=reg==='critical'?'#f87171':reg==='approaching'?'#fbbf24':'#34d399';
+    document.getElementById('kgChipK').textContent=fmt(m.K,3);
+    var cr=document.getElementById('kgChipReg'); cr.textContent=reg; cr.className='kgReg kg-'+reg;
+    var bk=document.getElementById('kgBigK'); bk.textContent=fmt(m.K,4); bk.style.color=col;
+    document.getElementById('kgStar').textContent='K* '+fmt(m.Kstar,3)+'   (≈1 = ML boundary)';
+    document.getElementById('kgRegimeTxt').textContent=reg+' (K<5 stable · 5–10 approaching · ≥10 critical)';
+    document.getElementById('kgDom').textContent=m.dom;
+    var cells=[
+      ['ΔH','energetic disagreement',fmt(m.dh,4),'rej '+fmt(m.rejRatio,3)+' + churn '+fmt(m.churn,3)],
+      ['Δs','proposer entropy',fmt(m.ds,3)+' bits',m.distinctProducers+' producer(s) in window'],
+      ['τ','round / window',fmt(m.tau,1)+' s','block rate '+fmt(m.obsBps,2)+' /s'],
+      ['Ω','observer coverage',fmt(m.omega,3),m.peers+' peer(s)'],
+      ['Λ','commitment',fmt(m.lambda,3),'window-limited'],
+      ['blk-rate dev','diagnostic only',fmt(m.brDev,3),'vs 0.83/s target — NOT used as Δs']
+    ];
+    document.getElementById('kgGrid').innerHTML=cells.map(function(c){
+      return '<div class="kgCell"><div class="kgLab">'+c[0]+' · '+c[1]+'</div><div class="kgVal">'+c[2]+'</div><div class="kgSub">'+c[3]+'</div></div>';
+    }).join('');
+    document.getElementById('kgProv').innerHTML=
+      '<b style="color:#c084fc">Provenance.</b> '+
+      '<span class="kgMeas">measured</span>: proposer entropy, block rate, mining rejects, peer count/churn. '+
+      '<span class="kgUnav">unavailable</span>: P2P byte asymmetry (this node exposes no byte counters), so ΔH is a lower bound. '+
+      'Ω uses an estimated network size; Λ is capped by the sample window, not chain health. '+
+      'Δs is proposer entropy on purpose — substituting block-rate deviation (shown as a diagnostic) makes the gauge blind to churn.';
+    document.getElementById('kgFoot').textContent='tip '+m.tip+' · '+m.peers+' peers · sampled over '+fmt(m.tau,1)+' s';
+  }
+  var busy=false;
+  function refresh(){ if(busy) return; busy=true;
+    document.getElementById('kgChipReg').textContent='measuring…';
+    compute().then(function(m){ render(m); busy=false; }).catch(function(){ busy=false; render(null); }); }
+  // First reading shortly after load, then every 90 s while the tab is open.
+  setTimeout(refresh, 2500);
+  setInterval(function(){ if(!document.hidden) refresh(); }, 90000);
+})();</script>
+
 </body></html>

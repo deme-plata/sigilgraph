@@ -83,6 +83,10 @@ const LEGACY_SELF_KEYS: &[&str] = if cfg!(all(windows, feature = "gpu")) {
     &["windows-x64", "x86_64-pc-windows-gnu"]
 } else if cfg!(target_os = "macos") {
     &["macos-arm64", "aarch64-apple-darwin"]
+} else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+    // Never the x64 keys: an ARM build must fail closed ("no build for linux-arm64")
+    // rather than download an x86-64 binary it cannot run.
+    &["linux-arm64", "aarch64-unknown-linux-musl"]
 } else if cfg!(feature = "gpu") {
     &["linux-x64-gpu"]
 } else {

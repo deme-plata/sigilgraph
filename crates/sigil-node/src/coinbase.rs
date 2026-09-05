@@ -17,6 +17,72 @@ use sigil_header::BlockHash;
 use sigil_state::{SigilState, StateMutation, StateRoots, StateTransition, TokenId, WalletId};
 use sigil_tx::SignedTx;
 
+/// A transaction the candidate builder could not apply, with the builder's verdict on
+/// whether trying again could ever help.
+///
+/// Why this exists (2026-09-05, measured on g2): a wallet posted 56 shield deposits in two
+/// seconds; the chain applied 8 and refused 48 with `InsufficientBalance`. The pending pool
+/// kept re-offering all 48 on EVERY candidate for the full 40-minute `MAX_AGE` — ~9,000
+/// futile applies and log lines per deposit — and `/v1/transactions/:hash` answered
+/// "unknown" the whole time, so the wallet showed them as "settling" for 15 minutes before
+/// giving up on a timer. The builder KNOWS the verdict the moment apply fails; it just had
+/// no way to say it. Now it records it here, and the mint loop hands it to the bridge.
+#[derive(Debug, Clone)]
+pub struct Rejection {
+    pub hash: [u8; 32],
+    pub reason: String,
+    /// True when no later candidate could apply this tx either (the money is not there,
+    /// the note is already spent, the anchor is not one the pool ever held, the signature
+    /// is wrong). False for conditions that a later block can change (pool full, mempool
+    /// full).
+    pub permanent: bool,
+}
+
+static REJECTIONS: std::sync::Mutex<Vec<Rejection>> = std::sync::Mutex::new(Vec::new());
+
+fn record_rejection(hash: [u8; 32], reason: String, permanent: bool) {
+    if let Ok(mut g) = REJECTIONS.lock() {
+        // Bounded: the mint loop drains this after every candidate; if it ever stops
+        // draining, the sink must not become a leak.
+        if g.len() < 4096 { g.push(Rejection { hash, reason, permanent }); }
+    }
+}
+
+/// Take every rejection recorded since the last call. Called by the mint loop once per
+/// candidate; the bridge evicts the permanent ones.
+pub fn take_rejections() -> Vec<Rejection> {
+    REJECTIONS.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default()
+}
+
+/// Is this apply failure one that no later candidate can cure?
+pub fn apply_error_is_permanent(e: &sigil_tx::TxApplyError) -> bool {
+    use sigil_tx::TxApplyError as E;
+    matches!(
+        e,
+        E::InsufficientBalance { .. }
+            | E::ShieldedRejected(_)
+            | E::TransparentSendRetired { .. }
+            | E::SignerNotPayer
+            | E::SigLengthMismatch { .. }
+            | E::PubKeyLengthMismatch { .. }
+            | E::WalletBindingMismatch
+            | E::SignatureInvalid
+            | E::SignatureMalformed(_)
+    )
+}
+
+/// Same question for the commit step.
+pub fn commit_error_is_permanent(e: &sigil_state::CommitError) -> bool {
+    use sigil_state::CommitError as C;
+    match e {
+        // A full pool is cured by epoch rotation; everything else in the shielded family
+        // (nullifier already spent, wrong fee, value overflow, proof rejected) is final.
+        C::Shielded(sigil_state::shielded::ShieldedError::PoolFull) => false,
+        C::Shielded(_) | C::UnknownAnchor { .. } | C::ShieldedProofRejected { .. } => true,
+        _ => false,
+    }
+}
+
 /// Native SIGIL token id (matches sigil_state::NATIVE).
 const NATIVE: TokenId = [0u8; 32];
 
@@ -328,6 +394,7 @@ pub fn build_block_body_for_shares(
                 // symptom went undiagnosed. tx.hash() is cheap and lets an operator
                 // correlate this against the txid their wallet displayed.
                 eprintln!("✗ tx dropped at h={height} (apply_tx: {e:?}) hash={}", hex::encode(tx.tx.hash()));
+                record_rejection(tx.tx.hash(), format!("apply_tx: {e}"), apply_error_is_permanent(&e));
                 continue;
             }
         };
@@ -341,6 +408,7 @@ pub fn build_block_body_for_shares(
             }
             Err(e) => {
                 eprintln!("✗ tx dropped at h={height} (commit_state_transition: {e:?}) hash={}", hex::encode(tx.tx.hash()));
+                record_rejection(tx.tx.hash(), format!("commit: {e}"), commit_error_is_permanent(&e));
             }
         }
     }

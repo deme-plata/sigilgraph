@@ -71,6 +71,27 @@ struct Pending {
     tx: SigilTx,
     attempts: u32,
     first_seen: Instant,
+    /// Candidates in which the builder reported a PERMANENT apply failure for this tx.
+    /// On a braid one candidate's ordering is not the last word, so eviction waits for
+    /// `REJECT_AFTER` independent verdicts rather than the first.
+    permanent_fails: u32,
+}
+
+/// How many candidates must refuse a tx for a permanent reason before it is evicted.
+const REJECT_AFTER: u32 = 3;
+/// How long a settled or rejected outcome stays answerable via `/v1/transactions/:hash`.
+const OUTCOME_TTL: Duration = Duration::from_secs(6 * 3600);
+const OUTCOME_CAP: usize = 16_384;
+
+/// What the bridge knows about a shielded tx it has seen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TxOutcome {
+    /// Still being offered to candidates.
+    Pending { attempts: u32, permanent_fails: u32 },
+    /// Settled at finality.
+    Applied,
+    /// Evicted after `REJECT_AFTER` permanent apply failures; the builder's reason.
+    Rejected(String),
 }
 
 /// Why a shielded submission was refused at the door.
@@ -241,6 +262,9 @@ pub enum ShieldedOp {
 #[derive(Default)]
 pub struct ShieldedBridge {
     pending: Mutex<HashMap<[u8; 32], Pending>>,
+    /// Terminal outcomes, so a wallet asking about a hash gets an answer instead of
+    /// "unknown": `(outcome, when)`, pruned by age and size.
+    outcomes: Mutex<HashMap<[u8; 32], (TxOutcome, Instant)>>,
     /// Nullifiers already represented in the queue, so a duplicate submission does not
     /// occupy two slots and waste two verifications per block.
     queued_nullifiers: Mutex<HashMap<[u8; 32], [u8; 32]>>,
@@ -663,7 +687,7 @@ impl ShieldedBridge {
         }
         self.pending.lock().unwrap().insert(
             hash,
-            Pending { tx, attempts: 0, first_seen: Instant::now() },
+            Pending { tx, attempts: 0, first_seen: Instant::now(), permanent_fails: 0 },
         );
         hash
     }
@@ -702,13 +726,67 @@ impl ShieldedBridge {
         if hashes.is_empty() {
             return;
         }
-        {
+        let landed: Vec<[u8; 32]> = {
             let mut guard = self.pending.lock().unwrap();
-            for h in hashes {
-                guard.remove(h);
-            }
-        }
+            hashes.iter().filter(|h| guard.remove(*h).is_some()).copied().collect()
+        };
         self.forget_nullifiers(hashes);
+        if !landed.is_empty() {
+            self.remember(landed.iter().map(|h| (*h, TxOutcome::Applied)));
+        }
+    }
+
+    /// The candidate builder could not apply `hash` for a reason no later candidate can
+    /// cure. After `REJECT_AFTER` such verdicts the tx is evicted, its nullifier freed, and
+    /// the reason kept for `/v1/transactions/:hash`. Non-permanent failures never reach here.
+    pub fn note_rejection(&self, hash: [u8; 32], reason: &str) {
+        let evicted = {
+            let mut guard = self.pending.lock().unwrap();
+            match guard.get_mut(&hash) {
+                None => false,
+                Some(p) => {
+                    p.permanent_fails += 1;
+                    if p.permanent_fails >= REJECT_AFTER {
+                        eprintln!(
+                            "✗ shielded tx evicted after {} permanent refusals ({reason}) hash={}",
+                            p.permanent_fails, hex::encode(hash)
+                        );
+                        guard.remove(&hash);
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+        };
+        if evicted {
+            self.forget_nullifiers(&[hash]);
+            self.remember(std::iter::once((hash, TxOutcome::Rejected(reason.to_string()))));
+        }
+    }
+
+    /// What is known about `hash`: pending, applied, rejected — or nothing.
+    pub fn status(&self, hash: &[u8; 32]) -> Option<TxOutcome> {
+        if let Some(p) = self.pending.lock().unwrap().get(hash) {
+            return Some(TxOutcome::Pending { attempts: p.attempts, permanent_fails: p.permanent_fails });
+        }
+        self.outcomes.lock().unwrap().get(hash).map(|(o, _)| o.clone())
+    }
+
+    fn remember(&self, items: impl Iterator<Item = ([u8; 32], TxOutcome)>) {
+        let mut g = self.outcomes.lock().unwrap();
+        let now = Instant::now();
+        for (h, o) in items { g.insert(h, (o, now)); }
+        if g.len() > OUTCOME_CAP || g.len() % 256 == 0 {
+            g.retain(|_, (_, t)| t.elapsed() < OUTCOME_TTL);
+        }
+        if g.len() > OUTCOME_CAP {
+            // Oldest first, never the whole map: an answer is worth more than a byte.
+            let mut v: Vec<([u8; 32], Instant)> = g.iter().map(|(h, (_, t))| (*h, *t)).collect();
+            v.sort_by_key(|(_, t)| *t);
+            let excess = g.len() - OUTCOME_CAP;
+            for (h, _) in v.into_iter().take(excess) { g.remove(&h); }
+        }
     }
 
     /// Release the queued-nullifier reservations held by these tx hashes, so a note whose
@@ -818,6 +896,34 @@ pub struct UnshieldRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tx the builder refuses for a permanent reason is evicted after `REJECT_AFTER`
+    /// verdicts, its nullifier is released, and the reason is answerable afterwards.
+    #[test]
+    fn permanent_rejections_evict_and_are_remembered() {
+        let b = ShieldedBridge::new();
+        let tx = SigilTx::Shield { from: [7u8; 32], amount: 200_000, cm: [9u8; 32], fee: 0 };
+        let h = b.enqueue(tx, Some([5u8; 32]));
+        assert!(matches!(b.status(&h), Some(TxOutcome::Pending { .. })));
+        for _ in 0..(REJECT_AFTER - 1) { b.note_rejection(h, "apply_tx: insufficient balance"); }
+        assert_eq!(b.pending_len(), 1, "one verdict short of eviction must still be pending");
+        b.note_rejection(h, "apply_tx: insufficient balance");
+        assert_eq!(b.pending_len(), 0);
+        assert_eq!(b.status(&h), Some(TxOutcome::Rejected("apply_tx: insufficient balance".into())));
+        assert!(b.queued_nullifiers.lock().unwrap().is_empty(), "the note must be respendable");
+        b.note_rejection([1u8; 32], "x");
+        assert_eq!(b.status(&[1u8; 32]), None);
+    }
+
+    #[test]
+    fn applied_is_remembered_after_confirm() {
+        let b = ShieldedBridge::new();
+        let tx = SigilTx::Shield { from: [7u8; 32], amount: 200_000, cm: [8u8; 32], fee: 0 };
+        let h = b.enqueue(tx, None);
+        b.confirm_applied(&[h]);
+        assert_eq!(b.status(&h), Some(TxOutcome::Applied));
+        assert_eq!(b.pending_len(), 0);
+    }
 
     /// Guard-rail for the defect that silently disabled this whole path: `MAX_AGE` must
     /// exceed the time a candidate needs to become eligible to SETTLE, or nothing

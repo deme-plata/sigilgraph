@@ -1626,7 +1626,15 @@ fn run_start() -> Result<()> {
                             (w.len().max(1) as u32, sh_n, pct)
                         }
                     };
-                    match mint_next_block(mint_ref, mp, &block_txs, reward_override, solve.as_ref(), topology_commitment, share_pool) {
+                    let minted = mint_next_block(mint_ref, mp, &block_txs, reward_override, solve.as_ref(), topology_commitment, share_pool);
+                    // The builder's verdicts on the txs it could not apply. Permanent ones go
+                    // to the bridge, which evicts after REJECT_AFTER candidates and answers
+                    // `/v1/transactions/:hash` with the reason. Drained every candidate so the
+                    // sink cannot grow.
+                    for r in coinbase::take_rejections() {
+                        if r.permanent { shielded_bridge.note_rejection(r.hash, &r.reason); }
+                    }
+                    match minted {
                         Ok((block, minted_tx_hashes)) => {
                             let h = block.header.height;
                             sigil_api::attribution::record(

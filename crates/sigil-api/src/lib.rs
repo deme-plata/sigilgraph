@@ -279,9 +279,14 @@ pub struct SendRequest {
 #[derive(Debug, Serialize)]
 pub struct TxStatusResponse {
     pub tx_hash: String,
-    /// "mempool" (waiting) | "unknown" (not seen). "applied" arrives when block
-    /// indexing lands (follow-on).
+    /// "mempool" (waiting in the transparent mempool) | "pending" (a shielded tx still
+    /// being offered to candidates) | "applied" (shielded, settled at finality) |
+    /// "rejected" (shielded, evicted after repeated permanent apply failures; see
+    /// `reason`) | "unknown" (never seen by this node).
     pub status: String,
+    /// The builder's reason when `status == "rejected"`; pending progress otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 // ── handlers (annotated → OpenAPI + SDKs) ───────────────────────────────────
@@ -394,11 +399,21 @@ pub async fn tx_status(
     let Some(h) = hex32(&hash) else {
         return ApiResponse::err("hash must be 64-hex");
     };
-    let in_pool = st.mempool.contains(&h);
-    ApiResponse::ok(TxStatusResponse {
-        tx_hash: hash,
-        status: if in_pool { "mempool".into() } else { "unknown".into() },
-    })
+    // Shielded txs live in the bridge's pending pool, not the transparent mempool. Until
+    // 2026-09-05 this answered "unknown" for every one of them, so a wallet whose deposit
+    // the chain had refused could only find out by waiting 15 minutes for its own timer.
+    use shielded::TxOutcome;
+    let (status, reason) = match st.shielded.status(&h) {
+        Some(TxOutcome::Pending { attempts, permanent_fails }) => (
+            "pending".to_string(),
+            Some(format!("offered to {attempts} candidate(s), {permanent_fails} permanent refusal(s)")),
+        ),
+        Some(TxOutcome::Applied) => ("applied".to_string(), None),
+        Some(TxOutcome::Rejected(r)) => ("rejected".to_string(), Some(r)),
+        None if st.mempool.contains(&h) => ("mempool".to_string(), None),
+        None => ("unknown".to_string(), None),
+    };
+    ApiResponse::ok(TxStatusResponse { tx_hash: hash, status, reason })
 }
 
 /// The node's own view of its tip height, for the acceptance receipts the submit

@@ -37,6 +37,7 @@ use heroes::*;
 mod mining_ui;  // LANE-U: mining tab + hero renderers
 use mining_ui::*;
 mod sync_ui;    // LANE-U: sync hero + sync-log tab renderers
+mod kgauge_ui;  // Kristensen K-gauge card (Node tab) — proposer entropy, never block-rate deviation
 mod flux_moe;   // on-device AI brain (local ollama) for the [A]I tab
 mod ai_setup;   // [A]I auto-setup: install/start ollama + pull the model, from a flux-SIGNED manifest
 mod skills;     // flux-signed skill packs (text-only) for flux-moe
@@ -2123,6 +2124,10 @@ impl App {
         if want_eclipse { self.last_eclipse = Instant::now(); }
         let feed = self.cfg.feed.clone();
         let api = self.cfg.api.clone();
+        // Start the K-gauge sampler on the first refresh, once `cfg.api` is settled (flags
+        // and env have been applied by then). `spawn` is idempotent, so calling it every
+        // cycle costs one atomic and cannot produce a second sampling thread.
+        crate::kgauge_ui::spawn(crate::kgauge_ui::api_base_of(&api));
         let prior_synced = self.synced_height;
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {

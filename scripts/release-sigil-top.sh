@@ -118,8 +118,18 @@ tar --sort=name --mtime='2026-01-01 00:00:00' --owner=0 --group=0 --numeric-owne
     gui/enter-sigil.html gui/sigil-explorer.html gui/vite-engine-embedded.html
 for t in "linux-x64" "windows-x64.exe"; do
   f="$S/sigil-top-v${VER}-${t}"
-  "$FLUXC" sign-artifact "$f" --source "$S/sigil-top-v${VER}-src.tar.gz" -o "$f.proof" | grep -q "require-both" || { echo "✗ sign failed $t"; exit 1; }
-  "$FLUXC" verify-proof "$f" "$f.proof" | grep -q "✓ require-both" || { echo "✗ verify failed $t"; exit 1; }
+  # Capture, THEN grep. `fluxc ... | grep -q` is a SIGPIPE race: grep -q exits on the
+  # first match and closes the pipe while fluxc is still printing, fluxc panics with
+  # "failed printing to stdout: Broken pipe", and under `set -o pipefail` the whole
+  # pipeline fails — reporting a PERFECTLY GOOD signature as "✗ verify failed" and
+  # aborting the release at step 3 after a 10-minute build (hit on v8.0.7, 2026-09-06;
+  # the same proof verified clean by hand seconds later). Nothing here needs streaming.
+  sign_out=$("$FLUXC" sign-artifact "$f" --source "$S/sigil-top-v${VER}-src.tar.gz" -o "$f.proof" 2>&1) \
+    || { echo "✗ sign failed $t"; echo "$sign_out"; exit 1; }
+  grep -q "require-both" <<<"$sign_out" || { echo "✗ sign failed $t"; echo "$sign_out"; exit 1; }
+  verify_out=$("$FLUXC" verify-proof "$f" "$f.proof" 2>&1) \
+    || { echo "✗ verify failed $t"; echo "$verify_out"; exit 1; }
+  grep -q "✓ require-both" <<<"$verify_out" || { echo "✗ verify failed $t"; echo "$verify_out"; exit 1; }
 done
 LB3=$(b3sum "$S/sigil-top-v${VER}-linux-x64" | awk '{print $1}'); LSZ=$(stat -c %s "$S/sigil-top-v${VER}-linux-x64")
 WB3=$(b3sum "$S/sigil-top-v${VER}-windows-x64.exe" | awk '{print $1}'); WSZ=$(stat -c %s "$S/sigil-top-v${VER}-windows-x64.exe")

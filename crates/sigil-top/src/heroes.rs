@@ -206,6 +206,7 @@ pub(crate) fn draw_node_body(f: &mut Frame, app: &App, body_area: ratatui::layou
         Constraint::Length(6), // Node
         Constraint::Length(6), // StateRoots
         Constraint::Length(6), // Network (L-F 0.77.5: supply + produced blocks + SIGIL/s)
+        Constraint::Length(9), // Kristensen K-gauge
         Constraint::Min(0),    // spacer (v0.36.1: MINING promoted to a top hero band)
     ])
     .split(left_area);
@@ -213,6 +214,7 @@ pub(crate) fn draw_node_body(f: &mut Frame, app: &App, body_area: ratatui::layou
     f.render_widget(render_node_card(app), left_v[0]);
     f.render_widget(render_state_roots(app), left_v[1]);
     f.render_widget(render_supply(app), left_v[2]);
+    f.render_widget(crate::kgauge_ui::render_kgauge_card(app), left_v[3]);
 
     let right_v = Layout::vertical([Constraint::Length(5), Constraint::Length(5), Constraint::Length(7), Constraint::Min(0)])
         .spacing(1)

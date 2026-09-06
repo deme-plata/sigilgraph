@@ -977,7 +977,7 @@ pub mod pay {
     /// seed and anything derived from it never appears in this struct.
     #[derive(Clone, Default, serde::Serialize)]
     pub struct Job {
-        /// `shielding` | `waiting` | `paid` | `failed`
+        /// `shielding` | `waiting` | `settling` | `paid` | `failed`
         pub stage: String,
         pub shield_txid: String,
         pub shield_index: Option<u64>,
@@ -986,6 +986,27 @@ pub mod pay {
         pub attempts: u32,
         pub error: Option<String>,
         pub updated_ms: u64,
+        /// Honest finality signal, set ONLY at the `paid` transition (the payment's
+        /// nullifier has landed in a block). Serialised as the JSON key `final` — a Rust
+        /// keyword, hence the field rename. On SIGIL's single-producer topology a
+        /// nullifier reaching a block IS finality (no competing block can reorg it), so
+        /// this is INCLUSION-finality, not Byzantine finality; `finality_basis` says so
+        /// in words and must not be strengthened past what the topology guarantees.
+        #[serde(rename = "final")]
+        pub is_final: bool,
+        /// Why `is_final` is true, in plain language. Empty until `paid`.
+        pub finality_basis: String,
+    }
+
+    impl Job {
+        /// Stamp the honest finality signal at the `paid` transition — called ONLY once a
+        /// payment reaches `paid` (its nullifier is in a block). Purely additive: it
+        /// records the BASIS for a settlement decision already made elsewhere; it does not
+        /// make, gate, or alter that decision.
+        fn mark_final(&mut self) {
+            self.is_final = true;
+            self.finality_basis = "single-producer block inclusion".into();
+        }
     }
 
     fn jobs() -> &'static Mutex<HashMap<String, Job>> {
@@ -1298,6 +1319,7 @@ pub mod pay {
                     job.stage = "paid".into();
                     job.txid = txid;
                     job.error = None;
+                    job.mark_final();
                     put_job(&id, job);
                     return;
                 }
@@ -1328,6 +1350,7 @@ pub mod pay {
                         job.stage = "paid".into();
                         job.txid = txid;
                         job.error = None;
+                        job.mark_final();
                         put_job(&id, job);
                         return;
                     }
@@ -1457,9 +1480,12 @@ pub mod pay {
                     job.stage = "paid".into();
                     job.txid = txid.clone();
                     job.attempts = 1;
+                    job.mark_final();
                     put_job(&id, job);
                     return ok_json(serde_json::json!({
                         "ok": true, "stage": "paid", "job": id, "txid": txid,
+                        "final": true,
+                        "finality_basis": "single-producer block inclusion",
                         "note": "paid from a note that was already in your private balance",
                     }));
                 }

@@ -51,6 +51,23 @@ if [ "$_BR" != "HEAD" ]; then
   fi
 fi
 
+# ── REFUSE A VERSION THAT IS ALREADY LIVE (2026-09-06) ──────────────────────
+# Two sessions released 8.0.6 twenty minutes apart today. The second overwrote the
+# first's artifacts with different bytes while a signed manifest naming the first's
+# hashes was already published and had been pulled by clients. Nothing detected it;
+# both runs reported success. A version number is a promise about content, so the
+# channel is asked BEFORE anything is built.
+LIVE_VER=$(curl -s --max-time 20 "https://sigilgraph.org/downloads/sigil-top-latest.json" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("version",""))' 2>/dev/null || echo "")
+if [ -n "$LIVE_VER" ] && [ "$LIVE_VER" = "$VER" ]; then
+  echo "  x REFUSING: v$VER is ALREADY the live channel version." >&2
+  echo "    Releasing it again overwrites artifacts whose hashes are already signed and" >&2
+  echo "    published, and every install that pulled v$VER then holds a binary the channel" >&2
+  echo "    no longer matches. Bump the version, or set ALLOW_REPUBLISH=1 deliberately." >&2
+  [ "${ALLOW_REPUBLISH:-0}" = "1" ] || exit 1
+  echo "  ! ALLOW_REPUBLISH=1 — republishing over the live v$VER on purpose" >&2
+fi
+
 echo "▸ 1/7 bump version → $VER"
 sed -i "s/^version = \"[0-9.]*\"/version = \"$VER\"/" crates/sigil-top/Cargo.toml
 grep -q "^version = \"$VER\"" crates/sigil-top/Cargo.toml || { echo "✗ version bump failed"; exit 1; }
@@ -179,6 +196,16 @@ bash scripts/sign-manifest.sh "$DL/sigil-top-latest.json"
 # legacy channel + canonical home get the identical signed manifest
 cp "$DL/sigil-top-latest.json" "$DL/sigil-top-latest.json.sig" "$LEGACY_DL/"
 cp "$DL/sigil-top-latest.json" "$DL/sigil-top-latest.json.sig" "$ORG_DL/"
+
+# ── THE ARM64 GAP, SAID OUT LOUD (2026-09-06) ───────────────────────────────
+# This script writes four targets. A phone or SBC running the aarch64 build looks for
+# `linux-arm64`, finds nothing, and its [U] fails CLOSED — it cannot update, and the
+# only symptom is an update that never arrives. That happened twice today: once on
+# v8.0.6, and again twenty minutes later when a second release overwrote the manifest
+# and removed the entry that had just been added by hand.
+echo "  ! ARM64 IS NOT IN THIS MANIFEST — [U] on aarch64 installs will fail closed."
+echo "    Publish it after this run:  bash /home/storage/claude-code/publish-arm64.sh $VER"
+echo "    (build first: see project_sigil_top_arm64_build_recipe_2026_09_05)"
 
 echo "▸ 6/7 verify LIVE manifest+sig against pinned key"
 python3 - "$PINNED_PUB" <<'PY'

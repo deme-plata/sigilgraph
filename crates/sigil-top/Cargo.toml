@@ -90,7 +90,9 @@ flux-optimize = { path = "../../../flux/crates/flux-optimize" }
 # wrote it — not that what they wrote is safe for a model to obey. flux-moe::antivirus
 # scans every skill body for injection / exfiltration / destruction / credentials /
 # obfuscation before it is allowed into the model's context.
-flux-moe = { path = "../../../flux/crates/flux-moe" }
+# default-features = false: flux-moe's fluxc-core/fluxc-serve half is Unix-only and would
+# break the windows-gnu cross build (E0433, v8.0.6). `antivirus` needs none of it.
+flux-moe = { path = "../../../flux/crates/flux-moe", default-features = false }
 # v0.6.0: P2P mesh + swarm coordination + content-addressed version control
 flux-p2p = { path = "../../../flux/crates/flux-p2p" }
 flux-rev = { path = "../../../flux/crates/flux-rev" }
@@ -146,6 +148,11 @@ winterfell = { version = "0.9", optional = true }
 # a normal binary crate too (this dependency only pulls its lib target); the live
 # Epsilon producer binary itself is unaffected by sigil-top depending on it.
 sigil-node = { path = "../sigil-node", optional = true }
+# 2026-09-06 (`producer/realization.rs`): the Kristensen Realization Functional,
+# evaluated per tick from the producer's OWN observables so the node can say which
+# constraint is limiting block realization instead of only that it is slow. Pure
+# arithmetic, zero chain deps, read-only with respect to consensus.
+flux-realization = { path = "../flux-realization", optional = true }
 # 2026-08-23 (Phase 3/5 producer loop, `producer/run.rs`): mint_next_block's Result
 # type is anyhow::Result — sigil-top itself doesn't use anyhow anywhere outside the
 # producer feature, so this stays optional and producer-only, same as sigil-node above.
@@ -197,7 +204,7 @@ producer = [
     "dep:sigil-dagknight", "dep:sigil-api", "dep:sigil-emission",
     "dep:sigil-handshake", "dep:sigil-narwhal-mempool", "dep:flux-topology",
     "dep:sigil-tx", "dep:sigil-bank", "dep:sigil-events", "dep:ed25519-dalek",
-    "dep:sigil-node", "dep:anyhow",
+    "dep:sigil-node", "dep:anyhow", "dep:flux-realization",
 ]
 
 [[bin]]

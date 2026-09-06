@@ -221,7 +221,7 @@ body.view-desktop .desktop{display:flex}
   <div class="bh-wrap" id="bhWrapPhone" data-bh="1"></div>
   <div id="mineNotice" style="display:none;margin:8px 8px 0;border:1px solid rgba(251,191,36,.32);background:rgba(251,191,36,.06);border-radius:14px;padding:10px 12px;font-family:'JetBrains Mono';font-size:11px;color:var(--gold);line-height:1.5"></div>
   <div style="display:flex;gap:9px;flex-wrap:wrap;justify-content:center;margin:12px 8px 2px;font-family:'JetBrains Mono';font-size:11px">
-    <a href="flux://enter" style="color:var(--cyan);text-decoration:none;border:1px solid var(--line);background:rgba(33,212,253,.05);border-radius:999px;padding:5px 13px">＋ new wallet</a>
+    <a href="enter-sigil.html" style="color:var(--cyan);text-decoration:none;border:1px solid var(--line);background:rgba(33,212,253,.05);border-radius:999px;padding:5px 13px">＋ new wallet</a>
     <a href="#stats" onclick="window.openStats&&window.openStats();return false" style="color:var(--teal);text-decoration:none;border:1px solid var(--line);background:rgba(0,224,198,.05);border-radius:999px;padding:5px 13px">◈ node stats</a>
     <a href="#power" onclick="window.openPower&&window.openPower();return false" style="color:var(--gold);text-decoration:none;border:1px solid var(--line);background:rgba(251,191,36,.05);border-radius:999px;padding:5px 13px">⚡ network power</a>
   </div>
@@ -231,6 +231,7 @@ body.view-desktop .desktop{display:flex}
     <div class="act" onclick="openSwap()"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div>
     <div class="act" onclick="openMine()"><i class="lic" data-lucide="pickaxe"></i><span class="t">Mine</span></div>
     <div class="act" onclick="openBook()"><i class="lic" data-lucide="book-user"></i><span class="t">Book</span></div>
+    <div class="act" onclick="makeAllPrivate()" title="Turn the whole transparent balance into spendable private coin"><i class="lic" data-lucide="shield-check"></i><span class="t">Private</span></div>
   </div>
   <div class="sect" style="margin:18px 16px 8px"><span>Assets</span><span style="color:var(--cyan)" id="passetsN"></span></div>
   <div class="list" id="passets"></div>
@@ -302,6 +303,7 @@ body.view-desktop .desktop{display:flex}
         <a onclick="openSwap();return false" style="cursor:pointer"><i class="lic" data-lucide="arrow-left-right"></i>Swap</a>
         <a onclick="openXChain();return false" style="cursor:pointer"><i class="lic" data-lucide="arrow-right-left"></i>Bridge</a>
         <a onclick="openBook();return false" style="cursor:pointer"><i class="lic" data-lucide="book-user"></i>Address book</a>
+        <a onclick="makeAllPrivate();return false" style="cursor:pointer" title="SIGIL has no transparent send — coins are only spendable once they are in your private pool. This shields the whole balance in one step."><i class="lic" data-lucide="shield-check"></i>Make private</a>
         <a id="mmNavChip" onclick="xcConnectMM();return false" style="cursor:pointer" title="Connect MetaMask (Polygon)">🦊 <span id="mmNavTxt">Connect MetaMask</span></a>
         <div class="grp">Earn</div>
         <a class="soon" title="staking not live on sigil-g0 yet"><i class="lic" data-lucide="layers"></i>Stake<span class="soonchip">soon</span></a>
@@ -310,8 +312,8 @@ body.view-desktop .desktop{display:flex}
         <a id="navNation" onclick="openNation();return false" style="cursor:pointer" title="SIGIL-Nation welfare — a citizen stipend financed by the mining dev fee"><i class="lic" data-lucide="landmark"></i>Welfare</a>
         <a id="navSigilOS" onclick="openSigilOS();return false" style="cursor:pointer" title="SIGIL OS — a browser desktop for the Nation"><i class="lic" data-lucide="monitor"></i>SIGIL OS</a>
         <div class="grp">System</div>
-        <a href="flux://stats"><i class="lic" data-lucide="activity"></i>Node stats</a>
-        <a href="flux://enter"><i class="lic" data-lucide="user-plus"></i>New wallet</a>
+        <a onclick="window.openStats&&window.openStats();return false" style="cursor:pointer"><i class="lic" data-lucide="activity"></i>Node stats</a>
+        <a href="enter-sigil.html"><i class="lic" data-lucide="user-plus"></i>New wallet</a>
         <a onclick="openSettings();return false" style="cursor:pointer"><i class="lic" data-lucide="settings"></i>Settings</a>
         <a onclick="openResearch();return false" style="cursor:pointer"><i class="lic" data-lucide="box"></i>Research</a>
       </div>
@@ -329,6 +331,7 @@ body.view-desktop .desktop{display:flex}
           <div class="act" onclick="openSwap()"><i class="lic" data-lucide="arrow-left-right"></i><span class="t">Swap</span></div>
           <div class="act" onclick="openMine()"><i class="lic" data-lucide="pickaxe"></i><span class="t">Mine</span></div>
           <div class="act" onclick="openBook()"><i class="lic" data-lucide="book-user"></i><span class="t">Book</span></div>
+    <div class="act" onclick="makeAllPrivate()" title="Turn the whole transparent balance into spendable private coin"><i class="lic" data-lucide="shield-check"></i><span class="t">Private</span></div>
         </div>
       </div>
       <div class="bh-wrap" id="bhWrapDesk" data-bh="1"></div>
@@ -1702,6 +1705,54 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       localStorage.setItem(key,JSON.stringify(arr));
     }catch(e){}
   }
+  /* ══ MAKE PRIVATE — one tap turns the WHOLE balance into SPENDABLE coin ══════
+     Why this button has to exist. SIGIL has no transparent send at all
+     (sigil-tx: SHIELDED_ONLY_HEIGHT = 0), so coin sitting in the transparent
+     balance is not merely "less private" — it is UNSPENDABLE. It becomes
+     spendable only once a Shield deposit moves it into this wallet's own private
+     pool. Mining pays out transparently, so a miner's entire balance sits in
+     exactly that unspendable state, and until now the only way out was Send →
+     advanced → Shield → type the amount by hand.
+
+     It DRIVES the existing doShield() rather than reimplementing anything.
+     Registration, the denomination ladder, free-index selection against the
+     chain, the settlement gate and the receipt are all the already-audited path;
+     this function only decides the AMOUNT, so it cannot introduce a spend or
+     proof bug. Worst case it mis-drives a step and doShield reports its own error.
+
+     Honest about cost: the chain accepts only fixed note denominations
+     (sigil_state::shielded::DENOMINATIONS, 1/2/5 x 10^k), so an arbitrary balance
+     greedily decomposes into several notes and EACH note is its own signed
+     deposit. We count them first and say so before starting a long one, rather
+     than opening a modal that then grinds for minutes with no explanation.
+     (On the node-local wallet at :9800 the /api/v1/mine-shield fast path inside
+     doShield does the whole thing server-side in one call instead.) */
+  window.makeAllPrivate=async function(){
+    var raw; try{ raw=BigInt(window.SIGIL_RAW||'0'); }catch(e){ raw=0n; }
+    if(raw<=0n){
+      alert('Nothing to make private.\n\nThis wallet’s transparent balance is 0. Mining rewards and incoming transparent coin land there first — press this again once some has arrived.');
+      return;
+    }
+    var amtStr=window.sigilFromGlyphs(raw);          // exact inverse of sigilToGlyphs
+    var parts=null;
+    try{ parts=window.__sigilShield && window.__sigilShield.decompose(raw); }catch(e){}
+    if(!parts || !parts.length){
+      alert('Could not split '+amtStr+' SIGIL into legal note denominations. Nothing was submitted.');
+      return;
+    }
+    var n=parts.length;
+    if(n>8 && !confirm('Make ALL '+amtStr+' SIGIL private?\n\nThe chain only accepts fixed note denominations, so this balance becomes '+n+' separate deposits — '+n+' signatures, submitted one after another. That can take a few minutes and this tab must stay open.\n\nStart?')) return;
+    if(window.openSend) window.openSend();
+    var adv=document.getElementById('sendAdvanced'), uni=document.getElementById('sendUnified');
+    if(adv) adv.style.display='flex';
+    if(uni) uni.style.display='none';
+    if(window.sendShowTab) window.sendShowTab('shield');
+    if(adv) adv.dataset.init='1';
+    var box=document.getElementById('sendAmt');
+    if(!box){ alert('The shield pane is not available on this page.'); return; }
+    box.value=amtStr;
+    await window.doShield();
+  };
   window.doShield=async function(){
     var amtStr=(document.getElementById('sendAmt').value||'').trim();
     if(!SIGIL_AMOUNT_RE.test(amtStr) || Number(amtStr)<=0){ sendStatus('Amount must be > 0 (max '+SIGIL_DP+' decimals).', '#ff8a8a'); return; }

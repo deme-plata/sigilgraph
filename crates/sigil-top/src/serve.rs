@@ -509,7 +509,7 @@ const ONE_ACTION_SEND_JS: &str = r##"
       +   '<div id="' + id + '" style="font-family:\'JetBrains Mono\';font-size:11px;color:#9fb4c7">'
       +     '~' + eta + 's to earliest settlement (' + (st.depth_blocks||512) + ' blocks)</div>'
       +   '<div style="font-family:\'JetBrains Mono\';font-size:9.5px;color:#5a93a8;margin-top:6px">'
-      +     (anchored ? 'signed by this node\\'s block-producer key — verifiable against any block it minted'
+      +     (anchored ? 'signed by this node\'s block-producer key — verifiable against any block it minted'
                       : 'signed by an ephemeral process key — NOT externally anchorable')
       +   '</div>'
       + '</div>';

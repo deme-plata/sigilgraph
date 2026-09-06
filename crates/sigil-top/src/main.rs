@@ -2424,6 +2424,27 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
         }
     }
     flux_webhook("boot", concat!("sigil-top v", env!("CARGO_PKG_VERSION"), " starting"));
+    // 2026-09-06 PAYABLE OUT OF THE BOX: a wallet that never PUBLISHES its shielded receiving
+    // key cannot be paid at all — SIGIL has no public transfers to fall back on, so a phone
+    // paying it gets "that wallet has not published a private receiving key". Registration
+    // used to happen only inside [M]ine (`start_mining`), so a node that merely watched the
+    // chain kept an unpayable address in its own header. If this process holds the wallet's
+    // seed, publish the key at boot: idempotent (the keeper asks the chain first), off-thread,
+    // once per process. Same feature gate and same keeper as the [M] path.
+    #[cfg(feature = "shield-register")]
+    {
+        static BOOT_REG: std::sync::Once = std::sync::Once::new();
+        if let Ok(seed_hex) = std::env::var("SIGIL_MINE_SEED") {
+            if miner_seed().is_some() {
+                BOOT_REG.call_once(|| {
+                    boot_trace("shield-register: publishing this wallet's receiving key (boot keeper)");
+                    shield_setup::spawn_registration_keeper(&engine_node_url(), &seed_hex, |line| {
+                        log_line(format!("shield-register: {line}"));
+                    });
+                });
+            }
+        }
+    }
     // v0.71.1 LANE-V: resume the operator's chosen sync mode after update/restart.
     // Only "full" does anything; no file (fresh install) = safe light monitor.
     if false && read_sync_mode().as_deref() == Some("full") && app.p2p_sync.is_none() {

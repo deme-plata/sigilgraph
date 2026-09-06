@@ -1920,8 +1920,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     if(kind==='send'){
       if(icon) icon.textContent='🔒';
       if(head){ head.textContent='SENT PRIVATELY'; head.style.color='#c0a8fa'; }
-      if(foot) foot.innerHTML='<b style="color:#00e0c6">✓ Final</b> — single-producer chain: '
-        +'final at block inclusion; deep settlement continues in the background.';
+      if(foot) foot.innerHTML='<b style="color:#00e0c6">✓ Sent privately</b> — single-producer chain, '
+        +'so it finalizes at the next block (block inclusion is final here); deep settlement continues in the background.';
     } else {
       if(icon) icon.textContent='🛡';
       if(head){ head.textContent='SHIELDED — NOT SENT YET'; head.style.color='#00e0c6'; }

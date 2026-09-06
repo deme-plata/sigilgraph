@@ -497,6 +497,14 @@ pub(crate) fn draw_queues_tab(f: &mut Frame, app: &App, area: ratatui::layout::R
         dim("   tip "), Span::styled(group(tip), Style::default().fg(C_VBRIGHT)),
         dim("   gap "), Span::styled(group(gap), Style::default().fg(if gap > 100_000 { C_NEON_PINK } else { C_DIM })),
         dim("   peers "), Span::styled(format!("{}", s.peer_count), Style::default().fg(if s.peer_count > 0 { C_NEON_GREEN } else { C_RED })),
+        // "peers 0" on its own is mute: it cannot distinguish "the dials are being
+        // REFUSED by this network" from "we simply have not dialled yet". Both look
+        // identical and both stall the queue below at "nothing in flight", which is
+        // exactly how an operator ends up staring at a frozen sync with no lead
+        // (2026-09-06). flux-p2p already retries the bootstrap set at 1/2/4s while the
+        // pool is empty and block_sync already records the failure count + newest error
+        // — this just says it out loud on the panel the operator is actually looking at.
+        Span::styled(zero_peer_reason(s), Style::default().fg(C_NEON_PINK)),
     ]));
     // frontier bar: verified → fetched → tip, so the two watermarks are visible as one picture
     {
@@ -874,4 +882,30 @@ pub(crate) fn render_sync_log(app: &App) -> Paragraph<'static> {
         lines.push(Line::from(Span::styled(format!("  {}", trunc(t, 116)), Style::default().fg(col))));
     }
     Paragraph::new(lines)
+}
+
+/// The one-line explanation that turns a mute `peers 0` into a diagnosis.
+///
+/// Empty string whenever we have peers — the caller renders it unconditionally, so the
+/// healthy case must cost nothing visually.
+///
+/// With no peers there are exactly two situations worth telling apart:
+///   * `dial_failures > 0` — we ARE dialling and the network is REFUSING us. This is the
+///     firewalled-client case (outbound 9501/853 blocked); the newest error says why.
+///   * `dial_failures == 0` — no dial has failed yet, so the mesh is simply still coming
+///     up. Nothing is wrong; wait.
+fn zero_peer_reason(s: &crate::block_sync::P2PSyncState) -> String {
+    if s.peer_count > 0 {
+        return String::new();
+    }
+    if s.dial_failures > 0 {
+        let why = s.stall_reason.trim();
+        if why.is_empty() {
+            format!("   ⚠ {} dial(s) refused — mesh unreachable", s.dial_failures)
+        } else {
+            format!("   ⚠ {} dial(s) refused — {why}", s.dial_failures)
+        }
+    } else {
+        "   … dialling bootstrap (retry 1/2/4s)".to_string()
+    }
 }

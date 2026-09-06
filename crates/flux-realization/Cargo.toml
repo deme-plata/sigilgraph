@@ -1,0 +1,13 @@
+[package]
+name = "flux-realization"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "flux-realization — the Kristensen Realization Functional K_R (Kristensen 2026), the engineering counterpart to the K-gauge. Where flux-kgauge asks 'how stressed is this consensus right now', K_R asks 'of everything this system COULD be, which configuration is physically realizable, and what single constraint is stopping it'. Implements the physical-feasibility gate Theta_phys (the Landscape/Swampland split applied to engineering designs), the five capability terms (compute, energy, verifiability, availability, expandability) combined as a geometric mean over only the terms that were actually measured, the effective-peer amplification ln(1 + sum u_i v_i r_i), the bottleneck pressure B = max_j (r_j - a_j)/r_j which NAMES the binding constraint, and the realization velocity Gamma_R. Pure arithmetic, zero chain deps; every term carries a flux-kgauge epistemic provenance tag."
+
+[dependencies]
+serde = { workspace = true }
+flux-kgauge = { path = "../flux-kgauge" }
+
+[dev-dependencies]
+serde_json = { workspace = true }

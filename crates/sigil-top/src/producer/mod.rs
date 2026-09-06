@@ -79,6 +79,7 @@ pub mod coinbase;
 pub mod dag;
 pub mod mining_api;
 pub mod mint;
+pub mod realization;
 pub mod run;
 pub mod sync;
 

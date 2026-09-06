@@ -155,7 +155,13 @@ fn main() {
     assert!(funded.len() >= 2, "need ≥2 funded wallets to drive transfers");
     let mut node = SigilSimNode::new("footprint-producer", NodeId(0), vec![], true, 1_000, &g);
 
-    let mut json_chain: Vec<Block> = Vec::with_capacity(n as usize);
+    // The JSON-snapshot model is accounted incrementally rather than by holding the
+    // whole chain in memory and re-serialising it at every step: that was O(n) RAM and
+    // O(n^2) time, fine at 20k blocks and fatal at the millions a multi-hour run
+    // reaches. `[` + blocks joined by `,` + `]` is exactly what the old
+    // `serde_json::to_vec(&Vec<Block>)` produced, so the number is unchanged.
+    let mut produced: u64 = 0;
+    let mut json_bytes: u64 = 2; // "[" + "]"
     let mut curve = Vec::new();
 
     println!("=== chronos footprint sim — producing {} real blocks ===\n", n);
@@ -176,13 +182,13 @@ fn main() {
             .put_block(h, &HistoryBlock { core: core.clone(), transition: &block.transition, events: &block.events })
             .expect("put history");
         pruned.put_pruned(h, &core).expect("put pruned");
-        json_chain.push(block);
+        json_bytes += serde_json::to_vec(&block).unwrap().len() as u64 + u64::from(h > 1);
+        produced += 1;
 
         if h % step == 0 || h == n {
             full.compact();
             history.compact();
             pruned.compact();
-            let json_bytes = serde_json::to_vec(&json_chain).unwrap().len() as u64;
             let json_rs = (json_bytes as f64 * 24.0 / 16.0) as u64; // RS K=16,PARITY=8
             let full_disk = full.disk_bytes();
             let history_disk = history.disk_bytes();
@@ -203,8 +209,8 @@ fn main() {
         }
     }
 
-    let produced = json_chain.len() as f64;
-    let json_total = serde_json::to_vec(&json_chain).unwrap().len() as f64;
+    let produced = produced as f64;
+    let json_total = json_bytes as f64;
     let full_total = full.disk_bytes() as f64;
     let history_total = history.disk_bytes() as f64;
     let pruned_total = pruned.disk_bytes() as f64;

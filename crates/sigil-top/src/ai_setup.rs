@@ -60,8 +60,30 @@ pub(crate) struct AiManifest {
     /// Optional — an older manifest without it simply has no phone tier.
     #[serde(default)]
     pub small_model: Option<String>,
+    /// The model LADDER, largest first (2026-09-06, sigil-top ≥ 8.0.6): the client takes
+    /// the biggest rung its hardware fits and walks DOWN on any failure, so one signed
+    /// list serves a 24 GB GPU (`qwen3.8:27b`), an 8 GB card or a strong CPU box
+    /// (`qwen3.5:9b`), a laptop (`qwen3.5:4b`) and a phone (`qwen3.5:2b`). The three
+    /// legacy fields above stay for older clients and are appended below the ladder as
+    /// the last rungs (a `qwen3` tag still pulls on an ollama too old for `qwen3.5`).
+    #[serde(default)]
+    pub models: Vec<String>,
     #[serde(default)]
     pub installers: std::collections::BTreeMap<String, Installer>,
+}
+
+/// The full ladder to try, largest first, duplicates removed: `models` as published,
+/// then the legacy `default_model` / `fallback_model` / `small_model`.
+pub(crate) fn ladder(m: &AiManifest) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let legacy = [Some(m.default_model.as_str()), m.fallback_model.as_deref(), m.small_model.as_deref()];
+    for tag in m.models.iter().map(|s| s.as_str()).chain(legacy.into_iter().flatten()) {
+        let t = tag.trim();
+        if !t.is_empty() && !out.iter().any(|o| o == t) {
+            out.push(t.to_string());
+        }
+    }
+    out
 }
 
 pub(crate) const MANIFEST_NAME: &str = "sigil-ai-latest.json";
@@ -755,12 +777,23 @@ fn looks_like_memory_error(e: &str) -> bool {
 /// The whole out-of-the-box flow. Runs on a background thread; every step
 /// reports into `tx`. Ends with exactly one `Done` or `Fail`.
 pub(crate) fn bootstrap(base: String, tx: Sender<SetupEvent>) {
+    bootstrap_with(base, tx, false)
+}
+
+/// The start-up variant (2026-09-06): same steps, but a model that is already pulled is
+/// taken as ready WITHOUT the load-and-answer smoke test — that test costs a multi-GB
+/// model load, which is fine once when the tab is opened and wrong on every launch.
+pub(crate) fn bootstrap_at_boot(base: String, tx: Sender<SetupEvent>) {
+    bootstrap_with(base, tx, true)
+}
+
+fn bootstrap_with(base: String, tx: Sender<SetupEvent>, boot: bool) {
     // A panic here would drop the Sender without ever sending Done or Fail. The
     // TUI only clears `ai_setup_running` when it sees one of those, so the tab
     // would sit at "running" forever and F5 would silently do nothing — the
     // worst kind of dead end, because it looks like the key is broken. Catch it
     // and turn it into a Fail the user can act on.
-    let guard = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bootstrap_inner(&base, &tx)));
+    let guard = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bootstrap_inner(&base, &tx, boot)));
     let r = match guard {
         Ok(r) => r,
         Err(p) => {
@@ -819,8 +852,8 @@ fn smoke_test(model: &str, tx: &Sender<SetupEvent>) -> Result<(), String> {
     }
 }
 
-fn bootstrap_inner(base: &str, tx: &Sender<SetupEvent>) -> Result<String, String> {
-    emit(tx, "🧠 flux-moe auto-setup — checking your local AI…");
+fn bootstrap_inner(base: &str, tx: &Sender<SetupEvent>, boot: bool) -> Result<String, String> {
+    emit(tx, if boot { "🧠 flux-moe — getting your local AI ready in the background…" } else { "🧠 flux-moe auto-setup — checking your local AI…" });
 
     // 0. What are we actually running on? The answer decides which model is a
     //    good idea, and it is shown so the choice is never mysterious.
@@ -929,25 +962,26 @@ fn bootstrap_inner(base: &str, tx: &Sender<SetupEvent>) -> Result<String, String
         }
     };
 
-    let (want, why) = crate::flux_moe::pick_model_tiered(
-        &m.default_model,
-        m.fallback_model.as_deref(),
-        m.small_model.as_deref(),
-        hw,
-    );
+    // 3b. The ladder: every rung the signed manifest offers, largest first, then the
+    //     legacy triple. Take the best fit for this machine and walk DOWN on failure.
+    let rungs = ladder(m);
+    let (want, why) = crate::flux_moe::pick_from_ladder(&rungs, hw);
     emit(tx, format!("  · model choice: {why}"));
 
-    // Already there? Still prove it loads before promising the user it works.
     if have_model(&models, &want) {
         emit(tx, format!("  ✓ model {want} already pulled"));
-        match smoke_test(&want, tx) {
-            Ok(()) => return Ok(want),
+        if boot {
+            // Proven on an earlier run; do not pay a multi-GB load on every launch to say so.
+            return Ok(want);
+        }
+        // Still prove it loads before promising the user it works.
+        return match smoke_test(&want, tx) {
+            Ok(()) => Ok(want),
             Err(e) => {
                 emit(tx, format!("  ⚠ {want} is present but did not run: {e}"));
-                // fall through to the fallback logic below
-                return fallback_after_failure(m, &want, &models, tx, e);
+                walk_down(&rungs, &want, &models, tx, e)
             }
-        }
+        };
     }
 
     match pull_model(&want, tx) {
@@ -955,52 +989,62 @@ fn bootstrap_inner(base: &str, tx: &Sender<SetupEvent>) -> Result<String, String
             Ok(()) => Ok(want),
             Err(e) => {
                 emit(tx, format!("  ⚠ {want} downloaded but would not run: {e}"));
-                fallback_after_failure(m, &want, &models, tx, e)
+                walk_down(&rungs, &want, &models, tx, e)
             }
         },
-        Err(e) => fallback_after_failure(m, &want, &models, tx, e),
+        Err(e) => walk_down(&rungs, &want, &models, tx, e),
     }
 }
 
-/// One place for "the model we wanted did not work out". Tries the manifest's
-/// smaller model, then any model the user already has, and only then gives up —
-/// with a message that always names a next action.
-fn fallback_after_failure(
-    m: &AiManifest,
-    want: &str,
+/// One place for "the model we wanted did not work out": every smaller rung of the
+/// ladder in turn (an ollama too old for a `qwen3.5` tag reaches the `qwen3` rungs this
+/// way), then any model the user already has, and only then give up — with a message
+/// that always names a next action.
+fn walk_down(
+    rungs: &[String],
+    failed: &str,
     have: &[String],
     tx: &Sender<SetupEvent>,
     err: String,
 ) -> Result<String, String> {
-    // 1. The manifest's own smaller model.
-    if let Some(fb) = m.fallback_model.as_deref().filter(|f| *f != want && !f.trim().is_empty()) {
-        emit(tx, format!("  · trying the smaller fallback {fb}"));
+    // Rungs BELOW the one that failed; a forced SIGIL_AI_MODEL is not on the ladder, so
+    // then the whole ladder is fair game.
+    let below: Vec<&String> = match rungs.iter().position(|r| r == failed) {
+        Some(i) => rungs[i + 1..].iter().collect(),
+        None => rungs.iter().collect(),
+    };
+    for fb in below {
+        if fb == failed {
+            continue;
+        }
+        emit(tx, format!("  · trying the smaller {fb}"));
         let pulled = if have_model(have, fb) { Ok(()) } else { pull_model(fb, tx) };
-        if let Ok(()) = pulled {
-            if smoke_test(fb, tx).is_ok() {
-                return Ok(fb.to_string());
+        match pulled {
+            Ok(()) => {
+                if smoke_test(fb, tx).is_ok() {
+                    return Ok(fb.clone());
+                }
+                emit(tx, format!("  ⚠ {fb} did not run here either"));
             }
-            emit(tx, format!("  ⚠ {fb} did not run here either"));
+            Err(e) => emit(tx, format!("  ⚠ {fb}: {}", e.lines().next().unwrap_or("pull failed"))),
         }
     }
-    // 2. Anything the user already has, rather than leaving the tab unusable.
+    // Anything the user already has, rather than leaving the tab unusable.
     for existing in have {
-        if existing != want && smoke_test(existing, tx).is_ok() {
+        if existing != failed && !rungs.iter().any(|r| r == existing) && smoke_test(existing, tx).is_ok() {
             emit(tx, format!("  ⚠ falling back to your existing model {existing}"));
             return Ok(existing.clone());
         }
     }
-    // 3. Genuinely stuck — say what failed AND what to try.
+    // Genuinely stuck — say what failed AND what to try.
     let hint = if looks_like_memory_error(&err) {
-        "This machine ran out of memory for every model tried. `ollama pull qwen3:0.6b` is the smallest useful one; then set SIGIL_AI_MODEL=qwen3:0.6b and press F5."
+        "This machine ran out of memory for every model tried. `ollama pull qwen3.5:0.8b` is the smallest useful one; then set SIGIL_AI_MODEL=qwen3.5:0.8b and type `setup` in the AI tab."
     } else {
-        "Nothing else on this machine ran either. Try a small model by hand: `ollama pull qwen3:0.6b`, then SIGIL_AI_MODEL=qwen3:0.6b and press F5."
+        "Nothing on the ladder ran here. Try a small model by hand: `ollama pull qwen3.5:0.8b`, then SIGIL_AI_MODEL=qwen3.5:0.8b and type `setup` in the AI tab."
     };
     Err(format!("{err}\n  {hint}"))
 }
 
-/// Dotted-version compare, `true` when `a` is strictly older than `b`. Non-numeric
-/// junk sorts as 0 rather than panicking — a weird version string must not break setup.
 pub(crate) fn version_older(a: &str, b: &str) -> bool {
     fn parts(v: &str) -> Vec<u64> {
         v.trim()
@@ -1153,15 +1197,6 @@ mod tests {
         assert!(looks_like_memory_error("model requires more system memory (8.2 GiB) than is available"));
         assert!(!looks_like_memory_error("pull model manifest: file does not exist"));
     }
-}
-
-#[cfg(test)]
-mod selfheal_live_tests {
-    /// LIVE: with ollama STOPPED, `ensure_running` must bring it back by itself.
-    ///
-    /// This is the exact state the operator hit in v8.0.0 — installed, not running — where
-    /// the tab reported "can't reach your local model" and asked for a keypress. Gated on
-    /// SIGIL_OLLAMA_LIVE=1 because it starts a real server; skipped in normal runs.
     #[test]
     fn ensure_running_restarts_a_stopped_ollama() {
         if std::env::var("SIGIL_OLLAMA_LIVE").is_err() {
@@ -1175,4 +1210,23 @@ mod selfheal_live_tests {
         assert!(super::ensure_running(), "ensure_running failed to start a stopped ollama");
         assert!(crate::flux_moe::ollama_reachable(), "ollama still unreachable after ensure_running");
     }
+    #[test]
+    fn manifest_ladder_parses_and_orders() {
+        let with = GOOD.replace(
+            "\"fallback_model\": \"qwen3:4b\",",
+            "\"fallback_model\": \"qwen3:4b\", \"small_model\": \"qwen3:1.7b\", \"models\": [\"qwen3.8:27b\", \"qwen3.5:9b\", \" qwen3.5:4b \", \"qwen3.5:9b\", \"\"],",
+        );
+        let m = parse_manifest(&with).expect("ladder manifest parses");
+        assert_eq!(m.models.len(), 5);
+        // largest first, blanks and duplicates gone, legacy triple appended last
+        assert_eq!(
+            ladder(&m),
+            vec!["qwen3.8:27b", "qwen3.5:9b", "qwen3.5:4b", "qwen3:8b", "qwen3:4b", "qwen3:1.7b"]
+        );
+        // an old manifest without `models` is just the legacy triple
+        let m = parse_manifest(GOOD).expect("legacy manifest parses");
+        assert!(m.models.is_empty());
+        assert_eq!(ladder(&m), vec!["qwen3:8b", "qwen3:4b"]);
+    }
+
 }

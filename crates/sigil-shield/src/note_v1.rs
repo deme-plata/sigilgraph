@@ -700,7 +700,6 @@ mod tests {
     /// 10752`. Here the shared depth is the point, not the flaw: with arity dispatch, the
     /// declared nullifier count decides, and the depth is irrelevant.
     #[test]
-    #[ignore = "proves two circuits; winterfell 0.9 debug-only validate_transition_degrees. Run release-compiled."]
     fn a_v5_and_a_v6_proof_of_the_same_depth_are_never_confused() {
         use crate::mimc::compress2;
         use crate::membership::CompressTree;
@@ -846,7 +845,6 @@ mod tests {
     /// degree) — not a soundness gap, and confirmed empirically (panics in debug,
     /// passes release).
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees vs witness-dependent range-bit column degree (same family as spend_full_v4); release-compiled winter-prover passes."]
     fn off_circuit_matches_in_circuit_spend_full() {
         // depth 3 ⇒ 8 leaves, and depth+1 = 4 is a power of two as spend_full requires.
         let spender = Note::new(100, 4242, 0xDEAD).expect("in range");

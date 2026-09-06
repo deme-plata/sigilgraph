@@ -266,6 +266,13 @@ pub fn spawn_producer_loop(chain: ChainTip, tick_interval: Duration) -> Producer
     let stop_flag_bg = stop_flag.clone();
     let thread = std::thread::spawn(move || {
         let mut state = ProducerState::new(chain);
+        // Opt-in realization telemetry (`SIGIL_REALIZATION_EVERY_TICKS`). `None`
+        // when unset, so an operator who did not ask for it pays nothing — not a
+        // branch per tick, not a lock, not a byte on the wire.
+        let mut meter = super::realization::RealizationMeter::from_env();
+        if meter.is_some() {
+            crate::tlog!("[producer] realization meter ON — K_R + binding constraint every N ticks");
+        }
         crate::tlog!("[producer] loop started (local-mint-only — no network broadcast)");
         while !stop_flag_bg.load(Ordering::Relaxed) {
             let mut noop = |_: &[u8]| {};
@@ -276,6 +283,11 @@ pub fn spawn_producer_loop(chain: ChainTip, tick_interval: Duration) -> Producer
                             "[producer] tick: minted h={} → settled h={} (applied={} skipped={} failed={})",
                             o.minted_height, o.settled_height, o.applied, o.skipped, o.failed
                         );
+                    }
+                    if let Some(m) = meter.as_mut() {
+                        if let Some(r) = m.observe(&o, &state.api.mining, &state.braid) {
+                            crate::tlog!("[producer] {}", super::realization::RealizationMeter::summarize(&r));
+                        }
                     }
                 }
                 Err(e) => crate::tlog!("[producer] ⚠ tick failed: {e}"),
@@ -338,6 +350,15 @@ fn spawn_networked_loop(chain: ChainTip, tick_interval: Duration) -> ProducerLoo
             // AND SIGIL_TOP_PRODUCE=1 are set — `maybe_start`'s existing contract,
             // unchanged by this addition).
             super::mining_api::spawn_local_mining_api(state.api.clone());
+            // Realization telemetry, opt-in — see the local loop for the contract.
+            // On the networked loop this is the more interesting of the two: the
+            // proposer entropy it measures is real (other producers are gossiping
+            // in), so K* here is the same quantity flux_sigil_kgauge reports over
+            // HTTP, computed one window earlier and with no round trip.
+            let mut meter = super::realization::RealizationMeter::from_env();
+            if meter.is_some() {
+                crate::tlog!("[producer] realization meter ON — K_R + binding constraint every N ticks");
+            }
             crate::tlog!("[producer] networked loop started — publishing candidates to {}", sigil_net::TOPIC_BLOCKS);
 
             const INGEST_CAP: u32 = 64; // bounded per tick — mirrors the light client's own gossip-flood discipline
@@ -358,9 +379,14 @@ fn spawn_networked_loop(chain: ChainTip, tick_interval: Duration) -> ProducerLoo
 
                 let mut noop = |_: &[u8]| {};
                 match state.tick(&mut noop) {
-                    Ok(o) => {
-                        if !o.minted_block_bytes.is_empty() {
-                            if let Err(e) = net.publish(sigil_net::TOPIC_BLOCKS, o.minted_block_bytes) {
+                    Ok(mut o) => {
+                        // `publish` takes the bytes by value; take them out rather
+                        // than consuming `o`, so the outcome's cheap scalar fields
+                        // stay readable below (the realization meter reads
+                        // minted/settled heights and `applied`, never the payload).
+                        let minted_bytes = std::mem::take(&mut o.minted_block_bytes);
+                        if !minted_bytes.is_empty() {
+                            if let Err(e) = net.publish(sigil_net::TOPIC_BLOCKS, minted_bytes) {
                                 crate::tlog!("[producer] ⚠ publish h={} failed: {e}", o.minted_height);
                             }
                         }
@@ -369,6 +395,11 @@ fn spawn_networked_loop(chain: ChainTip, tick_interval: Duration) -> ProducerLoo
                                 "[producer] tick: minted h={} → settled h={} (applied={} skipped={} failed={} peers={})",
                                 o.minted_height, o.settled_height, o.applied, o.skipped, o.failed, net.peer_count()
                             );
+                        }
+                        if let Some(m) = meter.as_mut() {
+                            if let Some(r) = m.observe(&o, &state.api.mining, &state.braid) {
+                                crate::tlog!("[producer] {}", super::realization::RealizationMeter::summarize(&r));
+                            }
                         }
                     }
                     Err(e) => crate::tlog!("[producer] ⚠ tick failed: {e}"),

@@ -115,7 +115,10 @@ pub(crate) fn render_tab_bar(app: &App) -> Paragraph<'static> {
     spans.extend(tab("Sync Log", "2", Tab::SyncLog));
     spans.extend(tab("Mining", "3", Tab::Mining));
     spans.extend(tab("Queues", "4", Tab::Queues));
-    spans.extend(tab("AI", "5", Tab::Ai));
+    // The AI tab wears its state: ⏳ while the boot-time auto-setup pulls the model,
+    // ✓ once a local model answers — so nobody has to open it to learn whether it works.
+    let ai_label: &'static str = if app.ai_setup_running { "AI ⏳" } else if app.ai_model.is_some() { "AI ✓" } else { "AI" };
+    spans.extend(tab(ai_label, "5", Tab::Ai));
     spans.push(Span::styled(" · Tab cycles", Style::default().fg(C_DIM)));
     Paragraph::new(Line::from(spans))
 }
@@ -151,7 +154,7 @@ pub(crate) fn draw_ai_tab(f: &mut Frame, app: &App, area: ratatui::layout::Rect)
         (_, true) => format!(" 🧠 setting up your local AI — progress below{skills}"),
         (Some(m), false) => format!(" 🧠 local model: {m}   ·   {} available{skills}   ·   Enter sends · F5 re-setup · F6 reload skills · Tab leaves",
                                     app.ai_models.len()),
-        (None, false) => format!(" 🧠 no local model yet — auto-setup runs when this tab opens; type `setup` + Enter (or F5) to run it again{skills}"),
+        (None, false) => format!(" 🧠 no local model yet — auto-setup runs at start-up and when this tab opens; type `setup` + Enter (or F5) to run it again{skills}"),
     };
     f.render_widget(Paragraph::new(status).style(Style::default().fg(C_DIM)), status_area);
 

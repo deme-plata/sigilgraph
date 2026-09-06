@@ -8,14 +8,23 @@
 # Signing = scripts/sign-manifest.sh (pinned release ed25519 seed, root-only). The client
 # verifies both manifests with RELEASE_SIGN_PUBKEY_HEX — the same key the auto-updater uses.
 #
-# Usage: publish-ai-manifests.sh [OLLAMA_VER]      (default 0.33.2)
+# Usage: publish-ai-manifests.sh [OLLAMA_VER]      (default 0.33.3)
 set -euo pipefail
-OLLAMA_VER="${1:-0.33.2}"
+OLLAMA_VER="${1:-0.33.3}"
+# LEGACY TRIPLE — what sigil-top ≤ 8.0.5 reads. Kept on the qwen3 family on purpose: an
+# older client walks default → fallback → nothing, so these must stay tags that pull on
+# any ollama those clients are likely to have.
 DEFAULT_MODEL="${DEFAULT_MODEL:-qwen3:8b}"
 FALLBACK_MODEL="${FALLBACK_MODEL:-qwen3:4b}"
 # One rung below the fallback: what a phone (Termux) or a < 6 GB box pulls. sigil-top ≥ 8.0.4
 # reads it (`small_model`, optional); older clients ignore the field.
 SMALL_MODEL="${SMALL_MODEL:-qwen3:1.7b}"
+# THE LADDER (sigil-top ≥ 8.0.6), largest first. The client takes the biggest rung its
+# measured hardware fits and walks DOWN on any failure, ending on the legacy triple above.
+# Measured 2026-09-06: qwen3.5:9b (6.6 GB) pulls and answers on ollama 0.20.2 AND 0.33.3;
+# qwen3.8 exists only as 27b (18 GB) — a 24 GB-GPU rung. Comma-separated to override.
+MODELS="${MODELS:-qwen3.8:27b,qwen3.5:9b,qwen3.5:4b,qwen3.5:2b,qwen3.5:0.8b}"
+MODELS_JSON=$(python3 -c 'import sys,json;print(json.dumps([t.strip() for t in sys.argv[1].split(",") if t.strip()]))' "$MODELS")
 REPO=/home/storage/deepseek-codewhale/sigil
 DL=/home/orobit/q-narwhalknight/dist-fluxapp/downloads
 LEGACY_DL=/home/orobit/q-narwhalknight/dist-final/downloads
@@ -57,6 +66,7 @@ cat > "$WORK/sigil-ai-latest.json" <<EOF
 {
   "product": "sigil-ai", "ollama_version": "${OLLAMA_VER}",
   "default_model": "${DEFAULT_MODEL}", "fallback_model": "${FALLBACK_MODEL}", "small_model": "${SMALL_MODEL}",
+  "models": ${MODELS_JSON},
   "verify": "sha256 below are Ollama's OWN published checksums (${GH}/sha256sum.txt); the client refuses any size/hash mismatch",
   "installers": {
     "windows-x64": { "url": "${GH}/OllamaSetup.exe",            "sha256": "${WIN_SHA}", "size_bytes": ${WIN_SZ}, "args": ["/VERYSILENT", "/NORESTART"] },
@@ -172,7 +182,7 @@ for base in BASES:
         try:
             body=g(n); sig=bytes.fromhex(g(n+".sig").decode().strip())
             pk.verify(sig,body); d=json.loads(body)
-            what=d.get("default_model") or [s["name"] for s in d.get("skills",[])]
+            what=(d.get("models") or d.get("default_model")) or [s["name"] for s in d.get("skills",[])]
             print(f"  ✓ {base.split('//')[1].split('/')[0]:28s} {n:26s} sig OK ({len(body)} B) {what}")
         except Exception as e:
             bad+=1; print(f"  ✗ {base} {n}: {type(e).__name__}: {e}")

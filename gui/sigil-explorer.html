@@ -131,7 +131,7 @@ body{min-height:100vh;background:var(--bg);color:var(--text);font-family:'Rajdha
   <!-- Flux Rev tab: the flux-rev provenance / version-control view. Loaded from the sigilgraph
        host so it works on any client (the local sigil-top serve doesn't embed this page). -->
   <div id="tab-fluxrev" style="display:none">
-    <iframe id="fluxrevFrame" data-src="https://sigilgraph.fluxapp.xyz/flux-versions.html" title="Flux Version Control — flux-rev provenance" loading="lazy" style="width:100%;height:80vh;border:1px solid var(--line);border-radius:12px;background:var(--bg)"></iframe>
+    <iframe id="fluxrevFrame" data-src="/flux-versions.html" title="Flux Version Control — flux-rev provenance" loading="lazy" style="width:100%;height:80vh;border:1px solid var(--line);border-radius:12px;background:var(--bg)"></iframe>
   </div>
 </div>
 
@@ -230,15 +230,19 @@ async function load(){
   try{ let fr=await fetch('/sigil-recent-blocks.json',{cache:'no-store'}); dag=await fr.json(); }catch(e){}
   window._dag=dag;
 
-  // node status via the same-origin /api proxy → stats bar
+  // node status. The retired sigil-rpcd /api/v1/status now falls through to the SPA
+  // fallback (200 text/html), so a plain fetch().json() there throws and used to paint a
+  // false "node unreachable" badge over a perfectly live block feed. The DAG feed is the
+  // authority; sigil-api /v1/mining/challenge is the live enrichment. Both are guarded on
+  // content-type so an HTML fallback can never masquerade as node state. (2026-09-05)
   try{
-    let r=await fetch('/api/v1/status',{cache:'no-store'}); let d=await r.json();
-    // DAG feed height is authoritative for the headline (the live tip); status height
-    // is a sub-counter. Fall back to status only if the feed is unavailable.
-    var height=(d.height!=null?d.height:(d.data&&d.data.height))||(dag&&dag.height)||0;
-    var peers=(d.peers!=null?d.peers:(d.data&&d.data.peer_count))||0;
-    var net=(dag&&dag.network)||d.network||(d.data&&d.data.network_id)||'sigil-g0';
-    var status=d.status||(d.data&&d.data.status)||'producing';
+    var d={};
+    try{ let r=await fetch('/v1/mining/challenge',{cache:'no-store'});
+      if((r.headers.get('content-type')||'').indexOf('json')>=0){ let j=await r.json(); d=j.data||j; } }catch(e){}
+    var height=(dag&&dag.height)||(d.height!=null?d.height:0)||0;
+    var peers=(d.peers!=null?d.peers:(d.peer_count||0))||0;
+    var net=(dag&&dag.network)||'sigil-g0';
+    var status=(dag&&dag.results&&dag.results.length)?'producing':(d.status||'producing');
     // v0.11: when sigil-top answers from its LOCAL verified spine it tags source +
     // exposes the cryptographically-verified watermark + break alarm.
     var local=d.source==='sigil-top-local';
@@ -256,7 +260,14 @@ async function load(){
       '<div class="stat"><div class="lbl">Status</div><div class="val t">'+status+'</div></div>'+
       verTile+
       '<div class="stat"><div class="lbl">Store</div><div class="val v">flux-db'+(local?' · local':'')+'</div></div>';
-  }catch(e){ document.getElementById('live-txt').textContent='node unreachable'; }
+  }catch(e){
+    // Only truly unreachable when even the DAG feed gave us nothing.
+    if(dag&&dag.results&&dag.results.length){
+      document.getElementById('live-txt').textContent=((dag&&dag.network)||'sigil-g0')+' · h '+Number((dag&&dag.height)||0).toLocaleString()+' · live';
+    }else{
+      document.getElementById('live-txt').textContent='node unreachable';
+    }
+  }
 
   // Recent Blocks ← LIVE DAG producer feed (millions height). Falls back to the
   // rpcd mining-chain /api/v1/recent only if the feed is unavailable.

@@ -358,12 +358,12 @@ impl Air for SpendFullV6Air {
             TransitionConstraintDegree::with_cycles(1, vec![trace_len]),      // first·(acc−ny)
             // ── owner binding ──
             TransitionConstraintDegree::new(1),                               // hi constant
-            TransitionConstraintDegree::with_cycles(7, vec![SEG]),            // inner lane x
+            TransitionConstraintDegree::new(7),                               // inner lane x
             TransitionConstraintDegree::new(1),                               // inner lane y
             TransitionConstraintDegree::with_cycles(1, vec![trace_len]),      // selr·(ix−hi)
             TransitionConstraintDegree::with_cycles(1, vec![trace_len]),      // first·(x−hi)
             TransitionConstraintDegree::new(1),                               // hp constant
-            TransitionConstraintDegree::with_cycles(7, vec![SEG]),            // pk lane x
+            TransitionConstraintDegree::new(7),                               // pk lane x
             TransitionConstraintDegree::new(1),                               // pk lane y
             TransitionConstraintDegree::with_cycles(1, vec![trace_len]),      // selr·(px−hp)
             TransitionConstraintDegree::with_cycles(1, vec![trace_len]),      // first·(y−hp)
@@ -383,12 +383,12 @@ impl Air for SpendFullV6Air {
             TransitionConstraintDegree::with_cycles(1, vec![SEG, trace_len]), // acc
             TransitionConstraintDegree::with_cycles(1, vec![trace_len]),      // first·(acc−ny)
             TransitionConstraintDegree::new(1),                               // hi constant
-            TransitionConstraintDegree::with_cycles(7, vec![SEG]),            // inner lane x
+            TransitionConstraintDegree::new(7),                               // inner lane x
             TransitionConstraintDegree::new(1),                               // inner lane y
             TransitionConstraintDegree::with_cycles(1, vec![trace_len]),      // selr·(ix−hi)
             TransitionConstraintDegree::with_cycles(1, vec![trace_len]),      // first·(x−hi)
             TransitionConstraintDegree::new(1),                               // hp constant
-            TransitionConstraintDegree::with_cycles(7, vec![SEG]),            // pk lane x
+            TransitionConstraintDegree::new(7),                               // pk lane x
             TransitionConstraintDegree::new(1),                               // pk lane y
             TransitionConstraintDegree::with_cycles(1, vec![trace_len]),      // selr·(px−hp)
             TransitionConstraintDegree::with_cycles(1, vec![trace_len]),      // first·(y−hp)
@@ -397,14 +397,14 @@ impl Air for SpendFullV6Air {
         debug_assert_eq!(degrees.len(), OUT_BASE, "input-1 block must land exactly at OUT_BASE");
         for _ in 0..N_OUTS {
             degrees.push(TransitionConstraintDegree::new(1));                          // hv constant
-            degrees.push(TransitionConstraintDegree::with_cycles(7, vec![SEG]));       // iox Feistel
+            degrees.push(TransitionConstraintDegree::new(7));                          // iox Feistel
             degrees.push(TransitionConstraintDegree::new(1));                          // ioy' = iox
             degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // first·(iox−hv)
             degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // osel·(out−hv)
             degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // selr·(iox−hio)
             degrees.push(TransitionConstraintDegree::new(1));                          // hio constant
             degrees.push(TransitionConstraintDegree::new(1));                          // hpo constant
-            degrees.push(TransitionConstraintDegree::with_cycles(7, vec![SEG]));       // oox Feistel
+            degrees.push(TransitionConstraintDegree::new(7));                          // oox Feistel
             degrees.push(TransitionConstraintDegree::new(1));                          // ooy' = oox
             degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // first·(oox−hio)
             degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // first·(ooy−hpo)
@@ -1381,7 +1381,6 @@ mod tests {
     /// witness-dependent range-bit columns. Run with `--profile release-fast`, which
     /// inherits `release` and so keeps `debug_assertions` off.
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees vs witness-dependent range-bit column degree (same family as v4/v5); passes release-compiled."]
     fn two_notes_merge_into_one_bigger_than_either() {
         let sk = e(0xDEAD);
         let me = pk_of(sk);
@@ -1411,7 +1410,6 @@ mod tests {
     /// The realistic payment: two notes fund one payment to someone else plus change,
     /// where NEITHER note alone could have covered the payment.
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees; passes release-compiled."]
     fn two_small_notes_fund_a_payment_neither_could_cover() {
         let sk = e(0xC0FFEE);
         let me = pk_of(sk);
@@ -1600,7 +1598,6 @@ mod tests {
     /// value — either note's amount, blinding or key — may appear in the proof bytes.
     /// v6 doubles the number of secrets in the trace, so it doubles what can leak.
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees; passes release-compiled."]
     fn a_two_input_proof_does_not_contain_either_witness() {
         let sk = e(0xDEAD);
         let me = pk_of(sk);
@@ -1638,7 +1635,6 @@ mod tests {
     /// This test exists to pin the fact that the CIRCUIT does not stop it, so nobody later
     /// removes the check that does. Raised in review by the operator.
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees; run release-compiled."]
     fn the_same_note_twice_is_accepted_by_the_circuit_and_must_be_caught_outside_it() {
         let sk = e(0xDEAD);
         let me = pk_of(sk);
@@ -1688,7 +1684,6 @@ mod tests {
     /// of places that mistake can be made — two nullifier lanes, two Merkle lanes — so the
     /// invariant is pinned rather than argued.
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees; run release-compiled."]
     fn masking_changes_the_proof_and_nothing_that_is_published() {
         let sk = e(0xDEAD);
         let me = pk_of(sk);

@@ -1189,6 +1189,8 @@ pub enum TxApplyError {
     /// R1: this AuthorizedBatch is already in the mempool (dedup by signed auth message).
     #[error("duplicate batch: already in the mempool")]
     DuplicateBatch,
+    #[error("mempool full: batch lane at capacity ({cap}) — resubmit later")]
+    MempoolFull { cap: usize },
 
     /// Signature bytes were the wrong length for the declared scheme.
     #[error("sig length mismatch: scheme {scheme:?} expected {expected}, got {got}")]

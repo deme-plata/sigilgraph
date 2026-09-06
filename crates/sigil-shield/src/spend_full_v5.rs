@@ -266,12 +266,12 @@ impl Air for SpendFullV5Air {
             TransitionConstraintDegree::with_cycles(1, vec![trace_len]),      // first·(acc−ny)
             // ── owner binding ──
             TransitionConstraintDegree::new(1),                               // hi constant
-            TransitionConstraintDegree::with_cycles(7, vec![SEG]),            // inner lane x
+            TransitionConstraintDegree::new(7),                               // inner lane x
             TransitionConstraintDegree::new(1),                               // inner lane y
             TransitionConstraintDegree::with_cycles(1, vec![trace_len]),      // selr·(ix−hi)
             TransitionConstraintDegree::with_cycles(1, vec![trace_len]),      // first·(x−hi)
             TransitionConstraintDegree::new(1),                               // hp constant
-            TransitionConstraintDegree::with_cycles(7, vec![SEG]),            // pk lane x
+            TransitionConstraintDegree::new(7),                               // pk lane x
             TransitionConstraintDegree::new(1),                               // pk lane y
             TransitionConstraintDegree::with_cycles(1, vec![trace_len]),      // selr·(px−hp)
             TransitionConstraintDegree::with_cycles(1, vec![trace_len]),      // first·(y−hp)
@@ -279,14 +279,14 @@ impl Air for SpendFullV5Air {
         ];
         for _ in 0..N_OUTS {
             degrees.push(TransitionConstraintDegree::new(1));                          // hv constant
-            degrees.push(TransitionConstraintDegree::with_cycles(7, vec![SEG]));       // iox Feistel
+            degrees.push(TransitionConstraintDegree::new(7));                          // iox Feistel
             degrees.push(TransitionConstraintDegree::new(1));                          // ioy' = iox
             degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // first·(iox−hv)
             degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // osel·(out−hv)
             degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // selr·(iox−hio)
             degrees.push(TransitionConstraintDegree::new(1));                          // hio constant
             degrees.push(TransitionConstraintDegree::new(1));                          // hpo constant
-            degrees.push(TransitionConstraintDegree::with_cycles(7, vec![SEG]));       // oox Feistel
+            degrees.push(TransitionConstraintDegree::new(7));                          // oox Feistel
             degrees.push(TransitionConstraintDegree::new(1));                          // ooy' = oox
             degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // first·(oox−hio)
             degrees.push(TransitionConstraintDegree::with_cycles(1, vec![trace_len])); // first·(ooy−hpo)
@@ -958,7 +958,6 @@ mod tests {
     /// runs in debug because it expects `Err` either way (a genuine verifier
     /// rejection or this same debug panic caught by `catch_unwind`).
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees vs witness-dependent range-bit column degree (same family as membership/range/spend); release-compiled winter-prover passes."]
     fn owner_bound_outputs_verify_without_naming_the_recipient() {
         let (value, blinding, sk) = (e(100), e(4242), e(0xDEAD));
         let bob = pk_of(e(0xB0B));
@@ -1015,7 +1014,6 @@ mod tests {
     /// `owner_bound_outputs_verify_without_naming_the_recipient` above (this test also
     /// proves an honest witness before checking the wrong-shape public input).
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees vs witness-dependent range-bit column degree (same family as membership/range/spend); release-compiled winter-prover passes."]
     fn unowned_output_commitment_is_rejected() {
         let (value, blinding, sk) = (e(100), e(4242), e(0xDEAD));
         let me = pk_of(sk);
@@ -1043,7 +1041,6 @@ mod tests {
     /// IGNORED in debug only — same winterfell 0.9 debug-degree quirk as
     /// `owner_bound_outputs_verify_without_naming_the_recipient` above.
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees vs witness-dependent range-bit column degree (same family as membership/range/spend); release-compiled winter-prover passes."]
     fn inflated_output_commitment_still_rejected() {
         let (value, blinding, sk) = (e(100), e(4242), e(0xDEAD));
         let me = pk_of(sk);
@@ -1071,7 +1068,6 @@ mod tests {
     /// panicked inside `SpendFullV5Prover::prove`, not in any assertion of this test's
     /// own).
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees vs witness-dependent range-bit column degree (same family as membership/range/spend); release-compiled winter-prover passes."]
     fn root_conservation_and_range_still_enforced() {
         let (value, blinding, sk) = (e(100), e(4242), e(0xDEAD));
         let me = pk_of(sk);
@@ -1104,7 +1100,6 @@ mod tests {
     ///
     /// Runs in release only, for the same winterfell 0.9 debug-assert reason as its neighbours.
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees; release-compiled winter-prover passes."]
     fn zk_proof_does_not_contain_its_own_witness() {
         use crate::zk_mask::{scan_proof_for_secrets, HidingProver};
         let (value, blinding, sk) = (e(100), e(4242), e(0xDEAD));
@@ -1143,7 +1138,6 @@ mod tests {
     /// Two proofs of the SAME spend must differ, or the randomness is not doing its job and
     /// an observer could confirm a guess by re-deriving the proof.
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees; release-compiled winter-prover passes."]
     fn two_proofs_of_the_same_spend_differ() {
         let (value, blinding, sk) = (e(100), e(4242), e(0xDEAD));
         let bob = pk_of(e(0xB0B));

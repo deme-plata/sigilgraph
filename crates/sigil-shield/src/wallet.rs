@@ -902,7 +902,6 @@ mod tests {
     /// `validate_transition_degrees` quirk documented on the circuit tests — not a
     /// soundness gap; release-compiled winter-prover passes.
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees vs witness-dependent range-bit column degree; release-compiled winter-prover passes."]
     fn wallet_built_spend_verifies() {
         let acct = ShieldedAccount::from_seed([42u8; 32]);
         let mut store = NoteStore::new();
@@ -935,7 +934,6 @@ mod tests {
     /// chokepoint calls — rather than naming a circuit, so it tests the path a real spend
     /// takes and not a circuit I happened to pick.
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees; release-compiled winter-prover passes."]
     fn two_notes_merge_into_one_the_wallet_could_not_have_made_before() {
         let acct = ShieldedAccount::from_seed([42u8; 32]);
         let mut store = NoteStore::new();
@@ -967,7 +965,6 @@ mod tests {
     /// Two small notes fund a payment to a third party that NEITHER could cover — the case
     /// a user actually hits, and the one a one-input wallet has to refuse.
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees; release-compiled winter-prover passes."]
     fn two_notes_fund_a_payment_neither_could_cover_and_hide_the_payee() {
         let acct = ShieldedAccount::from_seed([7u8; 32]);
         let bob = ShieldedAccount::from_seed([0xB0u8; 32]);
@@ -1061,7 +1058,6 @@ mod tests {
     /// asks the only question that matters: is any secret in the bytes the wallet is about
     /// to broadcast? Revert `build_spend` to v4 and it fails immediately.
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees; release-compiled winter-prover passes."]
     fn a_wallet_built_spend_does_not_publish_its_witness() {
         let acct = ShieldedAccount::from_seed([42u8; 32]);
         let bob = ShieldedAccount::from_seed([0xB0u8; 32]);
@@ -1099,7 +1095,6 @@ mod tests {
     /// IGNORED in debug only — same winterfell 0.9 debug-degree quirk as
     /// `wallet_built_spend_verifies` above (this test also calls `build_spend`).
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees vs witness-dependent range-bit column degree (same family as spend_full_v4); release-compiled winter-prover passes."]
     fn a_note_paid_to_someone_else_is_not_our_balance() {
         let me = ShieldedAccount::from_seed([42u8; 32]);
         let bob = ShieldedAccount::from_seed([0xB0u8; 32]);
@@ -1140,7 +1135,6 @@ mod tests {
     /// `wallet_built_spend_verifies` above (this test proves THREE times: Alice's send,
     /// Bob's spend of the received note, and Alice's failed attempt).
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees vs witness-dependent range-bit column degree (same family as spend_full_v4); release-compiled winter-prover passes."]
     fn alice_pays_bob_and_bob_can_spend_it() {
         use crate::note_cipher::{enc_identity_from_seed, seal_note, NotePlaintext};
 
@@ -1279,7 +1273,6 @@ mod tests {
     /// IGNORED in debug only — same winterfell 0.9 debug-degree quirk as
     /// `wallet_built_spend_verifies` above.
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees vs witness-dependent range-bit column degree (same family as spend_full_v4); release-compiled winter-prover passes."]
     fn coinbase_reward_is_reconstructible_and_spendable_with_no_registration_bookkeeping() {
         let miner = ShieldedAccount::from_seed([0xC0u8; 32]);
         let height = 2_003_809u64;
@@ -1350,7 +1343,6 @@ mod tests {
     /// IGNORED in debug only — same winterfell 0.9 debug-degree quirk as
     /// `wallet_built_spend_verifies` (this test proves twice).
     #[test]
-    #[ignore = "winterfell 0.9 debug-only validate_transition_degrees vs witness-dependent range-bit column degree; release-compiled winter-prover passes."]
     fn paying_the_same_amount_twice_delivers_two_distinct_spendable_notes() {
         use crate::note_cipher::{enc_identity_from_seed, seal_note, NotePlaintext};
 

@@ -88,7 +88,23 @@ fn client() -> reqwest::blocking::Client { client_with_timeout(chat_timeout_secs
 /// The models the local ollama has pulled, newest first. Empty ⇒ ollama not
 /// running (or no models). The caller shows the "install a model" hint then.
 pub(crate) fn list_models() -> Vec<String> {
-    let url = format!("{}/api/tags", ollama_base());
+    list_models_at(&ollama_base())
+}
+
+/// The pure half — same split, same reason, as [`pick_from_ladder_with`] and
+/// [`pick_model_with`]: the host is an argument, so a test does not have to set a
+/// PROCESS-GLOBAL env var that races every other test in the binary.
+///
+/// `no_model_when_ollama_down` did exactly that: `set_var("SIGIL_OLLAMA", <closed
+/// port>)`, assert empty, `remove_var`. Two tests either side of it also touch that
+/// variable, and THIS BOX RUNS A REAL OLLAMA on :11434 — so whenever the removal
+/// landed inside this test's window, `list_models()` reached the live daemon,
+/// returned real models, and the assertion failed. It passed in isolation and
+/// failed in the suite, which is the signature of a schedule-dependent flake, and
+/// it surfaced on 2026-09-06 only because adding tests elsewhere moved the timing.
+/// Nothing about the production path changes: `list_models()` still reads the env.
+pub(crate) fn list_models_at(base: &str) -> Vec<String> {
+    let url = format!("{}/api/tags", base);
     // Detection runs on the UI thread (the [5] keypress), so cap it hard: a hung ollama
     // that accepts the connection but never answers must NOT freeze the dashboard.
     let resp = match client_with_timeout(4).get(&url).send() {
@@ -281,18 +297,39 @@ pub(crate) fn approx_model_bytes(tag: &str) -> Option<u64> {
 /// * A GPU that fits the big model → big model. This is the case it was written for.
 /// * A GPU too small → the smaller model, because spilling to host RAM is slower
 ///   than just running the smaller one.
-/// * **No GPU → the smaller model.** Not a capacity limit (this box has 44 GB
-///   free and would happily *load* 8b) but a SPEED one: measured on 48 CPU cores,
-///   `qwen3:4b` decodes at 7.0 tok/s — ~43 s for one short answer. `qwen3:8b` has
-///   ~2x the parameters and is memory-bandwidth bound, so it lands near 1.5 min
-///   per turn before the cold 5 GB load. An [A]I tab that takes minutes per turn
-///   is a dead end with extra steps.
+/// * **No GPU → it depends on the CPU box, and that is the point.** This bullet
+///   used to read "no GPU → the smaller model", on the reasoning that 8b would be
+///   memory-bandwidth bound and land near 1.5 min per turn. Re-measured 2026-09-02
+///   on 48 cores / 62 GB and that turned out to be wrong: `qwen3:8b` answered in
+///   44.7 s and `qwen3:4b` in ~43.8 s — the same wall clock — so downgrading cost
+///   capability and bought nothing. The distinguishing measurement is not the
+///   absence of a GPU, it is RAM headroom and core count. A 2-core 4 GB VPS is the
+///   case the fallback exists for. See the no-GPU arm below for the exact gate.
 /// * Anything unmeasurable → the manifest default, never a silent downgrade.
 pub(crate) fn pick_model(default_model: &str, fallback_model: Option<&str>, hw: &Hardware) -> (String, String) {
     if let Some(forced) = std::env::var("SIGIL_AI_MODEL").ok().filter(|s| !s.trim().is_empty()) {
         let forced = forced.trim().to_string();
         return (forced.clone(), format!("SIGIL_AI_MODEL={forced} (your explicit choice)"));
     }
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    pick_model_with(default_model, fallback_model, hw, cores)
+}
+
+/// The pure half — same split, and for the same reason, as
+/// [`pick_from_ladder_with`]: every input is an argument, nothing is probed.
+///
+/// This existed as one function until 2026-09-06 and the CPU arm read the core
+/// count straight off the host with `available_parallelism()`. That made the
+/// choice depend on WHICH MACHINE ASKED, which is fine in production and fatal in
+/// a test: `cpu_only_box_gets_the_smaller_model` passed on a small runner and
+/// failed on this 48-core box, for the same source. A test whose verdict depends
+/// on the runner is worse than a failing one — it goes green somewhere and hides.
+pub(crate) fn pick_model_with(
+    default_model: &str,
+    fallback_model: Option<&str>,
+    hw: &Hardware,
+    cores: usize,
+) -> (String, String) {
     let fb = match fallback_model.filter(|f| !f.trim().is_empty() && *f != default_model) {
         Some(f) => f,
         // Nothing to fall back TO — say so rather than pretending we chose.
@@ -340,7 +377,6 @@ pub(crate) fn pick_model(default_model: &str, fallback_model: Option<&str>, hw: 
                 // Unmeasurable either way ⇒ do NOT gamble on the bigger model.
                 _ => false,
             };
-            let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
             if ram_ok && cores >= MIN_CORES {
                 let ram_gb = hw.ram_bytes.unwrap_or(0) as f64 / GIB as f64;
                 (
@@ -857,11 +893,10 @@ mod tests {
 
     #[test]
     fn no_model_when_ollama_down() {
-        // Point at a closed port; list must be empty, not panic.
-        std::env::set_var("SIGIL_OLLAMA", "http://127.0.0.1:1");
-        assert!(list_models().is_empty());
-        assert!(!available());
-        std::env::remove_var("SIGIL_OLLAMA");
+        // Point at a closed port; list must be empty, not panic. Passed as an
+        // ARGUMENT, not through SIGIL_OLLAMA — see list_models_at for the race
+        // that the env-var version lost against this box's live ollama.
+        assert!(list_models_at("http://127.0.0.1:1").is_empty());
     }
 
     #[test]
@@ -921,14 +956,52 @@ mod tests {
         assert!(b > 5 * GIB && b < 8 * GIB, "got {b}");
     }
 
+    /// RENAMED AND INVERTED 2026-09-06, deliberately, after it failed on this box.
+    ///
+    /// It used to assert `no GPU => the smaller model`, which matched the rule as
+    /// first written. The rule then changed on EVIDENCE (see the no-GPU arm: 8b
+    /// measured 44.7 s against 4b's 43.8 s on 48 cores — the same wall clock), and
+    /// the test was not updated with it. So the failure was the test being stale,
+    /// not the code regressing. Correcting it in the direction of the measurement.
+    ///
+    /// It also read the host's core count, so it answered differently depending on
+    /// which machine ran it. Both cases below now pin `cores` explicitly through
+    /// `pick_model_with`, so the verdict is a property of the rule and nothing else.
     #[test]
-    fn cpu_only_box_gets_the_smaller_model() {
-        std::env::remove_var("SIGIL_AI_MODEL");
-        // This is EXACTLY the measured Epsilon shape: no GPU, plenty of RAM.
+    fn a_capable_cpu_box_keeps_the_default_model() {
+        // EXACTLY the measured Epsilon shape: no GPU, plenty of RAM, plenty of cores.
         let hw = Hardware { vram_bytes: None, ram_bytes: Some(62 * GIB), gpu_name: None };
-        let (m, why) = pick_model("qwen3:8b", Some("qwen3:4b"), &hw);
-        assert_eq!(m, "qwen3:4b", "no GPU ⇒ smaller model, for SPEED not capacity");
-        assert!(why.contains("no GPU"), "the reason must be shown: {why}");
+        let (m, why) = pick_model_with("qwen3:8b", Some("qwen3:4b"), &hw, 48);
+        assert_eq!(m, "qwen3:8b", "62 GB and 48 cores run 8b in ~45 s — downgrading buys nothing");
+        assert!(why.contains("48 cores"), "the deciding measurement must be shown: {why}");
+    }
+
+    #[test]
+    fn a_small_vps_still_gets_the_smaller_model() {
+        let hw = Hardware { vram_bytes: None, ram_bytes: Some(62 * GIB), gpu_name: None };
+        // Same generous RAM, but only 2 cores: CPU decode is the binding constraint.
+        let (m, why) = pick_model_with("qwen3:8b", Some("qwen3:4b"), &hw, 2);
+        assert_eq!(m, "qwen3:4b", "2 cores cannot keep an 8b tab interactive");
+        assert!(why.contains("only 2 cores"), "say WHICH measurement decided it: {why}");
+
+        // And the other way the fallback triggers: cores fine, RAM too tight for
+        // 2.5x the weights (8b needs ~6.2 GB, so ~15.5 GB with headroom).
+        let tight = Hardware { vram_bytes: None, ram_bytes: Some(8 * GIB), gpu_name: None };
+        let (m2, why2) = pick_model_with("qwen3:8b", Some("qwen3:4b"), &tight, 48);
+        assert_eq!(m2, "qwen3:4b");
+        assert!(why2.contains("RAM"), "{why2}");
+    }
+
+    /// The host-dependence guard. `pick_model_with` must be a pure function of its
+    /// arguments — if this ever fails, someone has reintroduced a probe inside it
+    /// and the suite's verdict silently depends on the runner again.
+    #[test]
+    fn the_pure_picker_ignores_the_machine_it_runs_on() {
+        let hw = Hardware { vram_bytes: None, ram_bytes: Some(62 * GIB), gpu_name: None };
+        for _ in 0..3 {
+            assert_eq!(pick_model_with("qwen3:8b", Some("qwen3:4b"), &hw, 2).0, "qwen3:4b");
+            assert_eq!(pick_model_with("qwen3:8b", Some("qwen3:4b"), &hw, 48).0, "qwen3:8b");
+        }
     }
 
     #[test]

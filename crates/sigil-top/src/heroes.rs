@@ -226,7 +226,7 @@ pub(crate) fn draw_node_body(f: &mut Frame, app: &App, body_area: ratatui::layou
 /// v0.33.2 BOLD NEON card: rounded obsidian card with a bright neon title chip glowing in
 /// the accent color, and a border tinted toward the accent instead of flat grey. The title
 /// is a filled chip (` ◆ NODE `) so it reads as a label, not glued to the corner.
-pub(crate) fn card_block(title: &'static str, color: Color) -> Block<'static> {
+pub(crate) fn card_block(title: &str, color: Color) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         // v0.33.5: light box-drawing (┌─┐│└┘) IS in CP437 → renders on classic raster conhost;

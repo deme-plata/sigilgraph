@@ -114,6 +114,14 @@ cp "$S"/sigil-top-v${VER}-* "$DL/"
 # date FOREVER. Every release publishes binaries+manifest+sig to BOTH roots now.
 LEGACY_DL="/home/orobit/q-narwhalknight/dist-final/downloads"
 cp "$S"/sigil-top-v${VER}-* "$LEGACY_DL/"
+# CANONICAL HOME (2026-09-06): sigilgraph.org is the SIGIL home per the 2026-08-26
+# operator ruling, and the landing page's download dropdown links its stable names.
+# v8.0.5 shipped on 2026-09-06 03:47 to the two roots above and NOT here, so
+# sigilgraph.org/downloads/sigil-top-windows-x64.exe kept serving v8.0.3 (and the
+# versioned v8.0.5 name answered the SPA fallback: HTTP 200, text/html). Three roots.
+ORG_DL="/home/orobit/sigilgraph-org-site/downloads"
+ORG_BASE="https://sigilgraph.org/downloads"
+cp "$S"/sigil-top-v${VER}-* "$ORG_DL/"
 
 # ── STABLE-NAME LINKS (2026-08-26, rocky) ────────────────────────────────────
 # The two cp's above publish the VERSIONED artifacts, which is what the signed
@@ -134,7 +142,7 @@ cp "$S"/sigil-top-v${VER}-* "$LEGACY_DL/"
 # is atomic within a filesystem, and an already-open fd keeps the old inode).
 # The .proof rides along, or the stable binary would be unverifiable.
 # ADDITIVE ONLY — nothing is ever deleted from downloads/ (CLAUDE.md rule 9).
-for root in "$DL" "$LEGACY_DL"; do
+for root in "$DL" "$LEGACY_DL" "$ORG_DL"; do
   for t in "linux-x64" "windows-x64.exe"; do
     src="$root/sigil-top-v${VER}-${t}"; dst="$root/sigil-top-${t}"
     [ -s "$src" ] || { echo "✗ stable-link source missing or empty: $src"; exit 1; }
@@ -168,8 +176,9 @@ cat > "$DL/sigil-top-latest.json" <<EOF
 }
 EOF
 bash scripts/sign-manifest.sh "$DL/sigil-top-latest.json"
-# legacy channel gets the identical signed manifest
+# legacy channel + canonical home get the identical signed manifest
 cp "$DL/sigil-top-latest.json" "$DL/sigil-top-latest.json.sig" "$LEGACY_DL/"
+cp "$DL/sigil-top-latest.json" "$DL/sigil-top-latest.json.sig" "$ORG_DL/"
 
 echo "▸ 6/7 verify LIVE manifest+sig against pinned key"
 python3 - "$PINNED_PUB" <<'PY'
@@ -190,10 +199,12 @@ PY
 echo "  ▸ verifying LIVE stable links match v$VER"
 for t in "linux-x64" "windows-x64.exe"; do
   want=$(stat -c %s "$DL/sigil-top-v${VER}-${t}")
-  got=$(curl -sfL -o /dev/null -w '%{size_download}' --max-time 120 "$BASE/sigil-top-${t}?t=$(date +%s)" || echo 0)
-  [ "$got" = "$want" ] \
-    || { echo "✗ LIVE stable link $BASE/sigil-top-${t} served ${got}B, expected ${want}B (v$VER)"; exit 1; }
-  echo "    ✓ $BASE/sigil-top-${t} = ${got}B (v$VER)"
+  for base in "$BASE" "$ORG_BASE"; do
+    got=$(curl -sfL -o /dev/null -w '%{size_download}' --max-time 120 "$base/sigil-top-${t}?t=$(date +%s)" || echo 0)
+    [ "$got" = "$want" ] \
+      || { echo "✗ LIVE stable link $base/sigil-top-${t} served ${got}B, expected ${want}B (v$VER)"; exit 1; }
+    echo "    ✓ $base/sigil-top-${t} = ${got}B (v$VER)"
+  done
 done
 
 echo "▸ 7/7 commit + tag + push"

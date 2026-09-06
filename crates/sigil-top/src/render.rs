@@ -95,7 +95,7 @@ pub(crate) fn render_full(st: &NodeStatus, online: bool, api: &str, source: &str
     if let Some(tip) = st.tip.as_ref() {
         let v = verify_tip(tip);
         let badge = if v.ok { format!("{GREEN}✓ VERIFIED{RESET}") } else { format!("{RED}✗ FAILED{RESET}") };
-        o.push_str(&mid_title(&format!("4 STATE ROOTS  {badge}  (tip-proof · sigil-g0)")));
+        o.push_str(&mid_title(&format!("4 STATE ROOTS  {badge}  (tip-proof · {})", build_network_id())));
         o.push_str(&row("wallet", &short_hex(&tip.roots.wallet_state_root)));
         o.push_str(&row("dex", &short_hex(&tip.roots.dex_state_root)));
         o.push_str(&row("events", &short_hex(&tip.roots.event_log_root)));

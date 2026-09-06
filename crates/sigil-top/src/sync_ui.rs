@@ -103,7 +103,10 @@ pub(crate) fn draw_sync_hero(f: &mut Frame, app: &App, area: ratatui::layout::Re
     } else { (vtext, vcol) };
 
     // state-themed border; title chip stays neon-cyan
-    let block = card_block(" ◇ SYNC · sigil-g0", C_NEON_CYAN)
+    // The chain this build follows — not a hard-coded "sigil-g0": the header bar says
+    // sigil-g2 and this card said sigil-g0 on the same screen (operator screenshot 2026-09-06).
+    let sync_title = format!(" ◇ SYNC · {}", crate::build_network_id());
+    let block = card_block(&sync_title, C_NEON_CYAN)
         .border_style(Style::default().fg(vcol));
     let inner = block.inner(area);
     f.render_widget(block, area);

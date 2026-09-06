@@ -674,7 +674,7 @@ impl P2PBlockSync {
                     crate::tlog!("[p2p-sync] start failed: {e}");
                     return;
                 }
-                crate::tlog!("[p2p-sync] started on sigil-g0 mesh (port 9501)");
+                crate::tlog!("[p2p-sync] started on {} mesh (port 9501)", crate::build_network_id());
                 // Share net into the spawned request tasks. All hot methods are &self;
                 // start() (the only &mut) already ran. Arc → Send + 'static for tokio::spawn.
                 let net = std::sync::Arc::new(net);

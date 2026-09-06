@@ -1204,26 +1204,32 @@ pub mod pay {
         notes: Vec<CandidateNote>,
     }
 
-    /// The outcome of one payment attempt. The distinction that matters is whether the tx
-    /// reached the chain: a `Retryable` failure happened BEFORE submission (the freshly
-    /// shielded note has not appeared in the pool yet) and is safe to retry; `Terminal` and
-    /// `Accepted`/`Paid` all mean a proof was built and submitted, so retrying would prove
-    /// and broadcast the SAME nullifier a second time — never do that.
+    /// How long to WATCH an already-submitted spend for settlement before giving up. This is
+    /// the patient wait, NOT a retry: measured live 2026-09-06, a shielded send at
+    /// steady-state block production (~0.83 blk/s) commonly needs well over a minute to reach
+    /// the spent set (a shield block, then the spend's own block, then finality visibility).
+    /// The watch NEVER resubmits — it only asks "is my nullifier on chain yet".
+    const WATCH_MAX_ATTEMPTS: u32 = 120; // × WATCH_EVERY
+    const WATCH_EVERY: Duration = Duration::from_secs(3); // → 6 min ceiling
+
+    /// The outcome of one payment attempt. What matters is whether the tx reached the chain:
+    /// `Retryable` happened BEFORE submission (the freshly shielded note is not in the pool
+    /// yet) and is safe to retry; `Pending`/`Terminal`/`Paid` all mean a proof was built and
+    /// SUBMITTED, so retrying would broadcast the SAME nullifier again — never do that.
     enum SendOutcome {
-        /// Submitted AND confirmed applied on chain — the honest "paid".
+        /// Submitted AND our nullifier confirmed on chain — the honest "paid".
         Paid(String),
-        /// Submitted; chain had not committed a verdict within the confirmation window.
-        /// Not settled, not failed — the caller reports it as such, never as paid.
-        Accepted(String),
-        /// Submitted, then rejected by the chain (double-spend, unknown anchor, …). Stop.
+        /// Submitted, proof valid, no hard rejection — but the block carrying our nullifier
+        /// has not landed yet. Carries (nullifier, txid) so the caller can WATCH it.
+        Pending { nf: String, txid: String },
+        /// Submitted, then HARD-rejected (bad proof, unknown anchor, insufficient). Terminal.
         Terminal(String),
         /// Failed before submission (note not yet visible in the pool). Safe to retry.
         Retryable(String),
     }
 
-    /// One attempt at the payment leg. Composes `mine_local_api`'s existing endpoint rather
-    /// than re-deriving any of its crypto. `mine-send-private` now confirms settlement
-    /// before answering, and tags a post-submission failure with `submitted:true`.
+    /// One attempt at the payment leg. Composes `mine_local_api`'s endpoint (in-process — no
+    /// HTTP timeout) rather than re-deriving any crypto.
     fn send_once(ctx: &SendCtx) -> SendOutcome {
         let payload = serde_json::json!({
             "recipient_pk_shield": ctx.pk_shield,
@@ -1238,16 +1244,13 @@ pub mod pay {
             Ok(v) => v,
             Err(e) => return SendOutcome::Retryable(format!("bad local response: {e}")),
         };
-        let txid = v
-            .get("txid")
-            .and_then(|x| x.as_str())
-            .unwrap_or_default()
-            .to_string();
+        let txid = v.get("txid").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        let nf = v.get("nullifier").and_then(|x| x.as_str()).unwrap_or_default().to_string();
         if v.get("ok").and_then(|x| x.as_bool()) == Some(true) {
             return if v.get("settled").and_then(|x| x.as_bool()) == Some(true) {
                 SendOutcome::Paid(txid)
             } else {
-                SendOutcome::Accepted(txid)
+                SendOutcome::Pending { nf, txid }
             };
         }
         let reason = v
@@ -1262,8 +1265,58 @@ pub mod pay {
         }
     }
 
-    /// Keep trying the payment leg until the note is visible in the pool. Runs detached so
-    /// `POST /api/v1/pay` can return its txid in the same millisecond it obtains one.
+    /// Is this nullifier in the chain's spent set? The one authoritative "did it settle".
+    fn nullifier_is_spent(nf_hex: &str) -> bool {
+        if nf_hex.is_empty() {
+            return false;
+        }
+        let node = crate::engine_node_url();
+        let url = format!("{}/v1/shielded/nullifiers", node.trim_end_matches('/'));
+        let Ok(c) = client() else { return false };
+        c.get(&url)
+            .send()
+            .ok()
+            .and_then(|r| r.json::<serde_json::Value>().ok())
+            .and_then(|v| v.get("nullifiers").and_then(|n| n.as_array()).cloned())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .any(|s| s.eq_ignore_ascii_case(nf_hex))
+            })
+            .unwrap_or(false)
+    }
+
+    /// WATCH an already-submitted spend to settlement. Polls the nullifier, never resubmits.
+    fn spawn_settlement_watch(id: String, nf: String, txid: String, mut job: Job) {
+        std::thread::spawn(move || {
+            job.stage = "settling".into();
+            job.txid = txid.clone();
+            job.error = None;
+            put_job(&id, job.clone());
+            for _ in 0..WATCH_MAX_ATTEMPTS {
+                if nullifier_is_spent(&nf) {
+                    job.stage = "paid".into();
+                    job.txid = txid;
+                    job.error = None;
+                    put_job(&id, job);
+                    return;
+                }
+                std::thread::sleep(WATCH_EVERY);
+            }
+            // Never settled within the ceiling. Honest failure — but the nullifier is public
+            // in flight, so the operator can still confirm it later; we do NOT resubmit.
+            job.stage = "failed".into();
+            job.error = Some(
+                "submitted, but the chain did not carry this nullifier to a block within the \
+                 watch window — check /v1/shielded/nullifiers before retrying"
+                    .into(),
+            );
+            put_job(&id, job);
+        });
+    }
+
+    /// Keep trying the payment leg until the note is visible in the pool, then hand off to the
+    /// settlement watch. Runs detached so `POST /api/v1/pay` returns immediately.
     fn spawn_payment_leg(id: String, ctx: SendCtx, mut job: Job) {
         std::thread::spawn(move || {
             for attempt in 1..=MAX_ATTEMPTS {
@@ -1278,13 +1331,10 @@ pub mod pay {
                         put_job(&id, job);
                         return;
                     }
-                    SendOutcome::Accepted(txid) => {
-                        // Submitted, awaiting settlement. Honest, and terminal for this
-                        // thread: the nullifier is in flight, so we must not resubmit.
-                        job.stage = "accepted".into();
-                        job.txid = txid;
-                        job.error = Some("accepted; awaiting settlement".into());
-                        put_job(&id, job);
+                    SendOutcome::Pending { nf, txid } => {
+                        // Submitted; the nullifier is in flight. Hand off to the patient watch
+                        // — do NOT loop (that would resubmit the same nullifier).
+                        spawn_settlement_watch(id.clone(), nf, txid, job);
                         return;
                     }
                     SendOutcome::Terminal(e) => {
@@ -1413,15 +1463,15 @@ pub mod pay {
                         "note": "paid from a note that was already in your private balance",
                     }));
                 }
-                SendOutcome::Accepted(txid) => {
-                    job.stage = "accepted".into();
-                    job.txid = txid.clone();
+                SendOutcome::Pending { nf, txid } => {
+                    // Submitted; the block carrying the nullifier has not landed yet. Hand off
+                    // to the patient watch and tell the caller to poll — never resend.
                     job.attempts = 1;
-                    put_job(&id, job);
+                    spawn_settlement_watch(id.clone(), nf, txid.clone(), job);
                     return ok_json(serde_json::json!({
-                        "ok": true, "stage": "accepted", "job": id, "txid": txid,
-                        "note": "submitted from your private balance; awaiting settlement — \
-                                 poll /api/v1/pay/status, do not resend",
+                        "ok": true, "stage": "settling", "job": id, "txid": txid,
+                        "note": "submitted from your private balance; awaiting the block that \
+                                 carries it — poll /api/v1/pay/status, do not resend",
                     }));
                 }
                 SendOutcome::Terminal(e) => {

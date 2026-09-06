@@ -907,64 +907,61 @@ mod shield_ops {
         // appears, the payment did NOT settle no matter what any single txid's status says —
         // which is exactly the false-POSITIVE this avoids (a doomed note whose txid is
         // rejected must NOT be reported paid).
-        let mut outcome: Option<Result<(), String>> = None; // Some(Ok)=settled, Some(Err)=failed
-        let mut last_reject: Option<String> = None;
-        for _ in 0..60 {
+        // A SHORT in-handler confirm. Measured live 2026-09-06: at steady-state block
+        // production (~0.83 blk/s) a shielded send commonly needs a MINUTE-PLUS to reach the
+        // spent set — a shield block, then the spend's own block. Blocking this handler that
+        // long is wrong (the browser fast-path calls it over HTTP), so we only wait briefly
+        // here and hand a still-pending payment to the caller to WATCH, rather than deciding
+        // failure prematurely. That premature verdict was the last false-negative: eight test
+        // payments ALL delivered, yet the short window made the job say "failed".
+        //
+        // Verdict rules:
+        //   * our nullifier in the spent set        -> SETTLED (value moved; authoritative).
+        //   * a HARD rejection (bad proof, unknown  -> FAILED. These are terminal: the note
+        //     anchor, insufficient, …) with the        cannot be spent as submitted.
+        //     nullifier still absent
+        //   * "nullifier already spent" / anything  -> PENDING. On the braid a send is relayed
+        //     else, or the window simply expires        into several candidate txs (Dandelion++);
+        //                                               a losing sibling's txid is rejected with
+        //     exactly that reason while the WINNER is still riding to a block. So this is not a
+        //     failure — the caller keeps watching the nullifier (never resubmitting).
+        let is_hard_reject = |reason: &str| {
+            let r = reason.to_ascii_lowercase();
+            !(r.contains("already spent") || r.contains("nullifier") || r.is_empty())
+        };
+        let mut settled = false;
+        let mut hard_fail: Option<String> = None;
+        for _ in 0..24 {
             std::thread::sleep(std::time::Duration::from_millis(500));
             if nf_is_spent(&client) {
-                outcome = Some(Ok(()));
+                settled = true;
                 break;
             }
             let Ok(r) = client.get(&status_url).send() else { continue };
             let Ok(v) = r.json::<serde_json::Value>() else { continue };
             let data = v.get("data").unwrap_or(&v);
             let st = data.get("status").and_then(|s| s.as_str()).unwrap_or("");
-            match st {
-                "applied" | "settled" | "confirmed" => {
-                    // The status claims applied — but only OUR nullifier on chain proves the
-                    // value moved. Confirm it (short grace for read lag) before trusting it.
-                    for _ in 0..6 {
-                        if nf_is_spent(&client) {
-                            outcome = Some(Ok(()));
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(400));
-                    }
-                    if outcome.is_some() {
-                        break;
-                    }
+            if matches!(st, "applied" | "settled" | "confirmed") {
+                if nf_is_spent(&client) {
+                    settled = true;
+                    break;
                 }
-                "rejected" | "failed" | "dropped" => {
-                    // Record the reason but DON'T decide yet: a sibling relay of our own
-                    // submission may still be carrying our nullifier to a block. Only if the
-                    // nullifier never lands (loop exhausts) is this a real failure.
-                    last_reject = Some(
-                        data.get("reason")
-                            .and_then(|x| x.as_str())
-                            .unwrap_or("the chain rejected this transaction")
-                            .to_string(),
-                    );
-                    // One more spent-set check right after the rejection, then keep polling
-                    // in case a sibling wins the race.
-                    if nf_is_spent(&client) {
-                        outcome = Some(Ok(()));
-                        break;
-                    }
+            } else if matches!(st, "rejected" | "failed" | "dropped") {
+                let reason = data
+                    .get("reason")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if is_hard_reject(&reason) && !nf_is_spent(&client) {
+                    hard_fail = Some(reason);
+                    break;
                 }
-                _ => {} // pending — keep polling
-            }
-        }
-        if outcome.is_none() {
-            // Final authoritative read before giving a verdict.
-            if nf_is_spent(&client) {
-                outcome = Some(Ok(()));
-            } else if let Some(reason) = last_reject.take() {
-                outcome = Some(Err(reason));
+                // else: a losing braid sibling — keep watching, the winner may still land.
             }
         }
 
-        match outcome {
-            Some(Ok(())) => ok_json(serde_json::json!({
+        if settled || nf_is_spent(&client) {
+            ok_json(serde_json::json!({
                 "ok": true,
                 "settled": true,
                 "txid": txid,
@@ -972,26 +969,30 @@ mod shield_ops {
                 "spent_index": note_index,
                 "change_index": change_index,
                 "change_value": change_value.to_string(),
-            })),
-            Some(Err(reason)) => ok_json(serde_json::json!({
+            }))
+        } else if let Some(reason) = hard_fail {
+            ok_json(serde_json::json!({
                 "ok": false,
                 "submitted": true,
                 "txid": txid,
                 "error": reason,
-            })),
-            None => ok_json(serde_json::json!({
+            }))
+        } else {
+            // Submitted, proof valid, no hard rejection — the spend is in flight but the
+            // block carrying it has not landed yet. Hand the caller the nullifier to watch.
+            ok_json(serde_json::json!({
                 "ok": true,
                 "settled": false,
+                "pending": true,
                 "submitted": true,
                 "txid": txid,
                 "nullifier": our_nf_hex,
                 "spent_index": note_index,
                 "change_index": change_index,
                 "change_value": change_value.to_string(),
-                "note": "accepted and queued; the chain had not committed a verdict within \
-                         the confirmation window. The nullifier is in flight — check \
-                         /v1/shielded/nullifiers for it; do NOT resubmit.",
-            })),
+                "note": "submitted; awaiting the block that carries this nullifier. Watch \
+                         /v1/shielded/nullifiers for it — do NOT resubmit.",
+            }))
         }
     }
 

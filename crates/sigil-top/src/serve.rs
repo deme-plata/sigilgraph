@@ -376,18 +376,31 @@ const ONE_ACTION_SEND_JS: &str = r##"
  * So the browser flow reports failure whether or not money moved. Overriding the entry
  * point sidesteps both, and moves the sequencing to the server where it is one call.
  *
- * UNITS. `RAW_PER_UNIT` is 1e8, matching what the REST of this page uses for both display
- * and entry. The chain is 10 dp (`sigil_state::SIGIL_DECIMALS = 10`), so every SIGIL label
- * on this page is 100x off — a real, separate bug in the HTML. It is deliberately NOT
- * "fixed" here: display and entry are consistent with each other today, and changing only
- * the entry scale would make a typed amount mean 100x what the balance above it claims.
+ * UNITS — READ THIS BEFORE CHANGING THE SCALE. This block used to hardcode 1e8 / 8 dp,
+ * on the stated grounds that the rest of the page did too, so display and entry at least
+ * agreed with each other. That reasoning was correct WHEN WRITTEN and is now stale: the
+ * page moved to the chain's real scale (`var SIGIL_DECIMALS = 10n`, and it exports
+ * `window.SIGIL_UNITS` / `window.SIGIL_DP`). A hardcoded 1e8 against a 1e10 page is not a
+ * cosmetic label bug — `toRaw("1")` yields 1e8 glyphs, i.e. 0.01 SIGIL, so a user asking
+ * to send 1 sends a HUNDREDTH of it.
+ *
+ * That latent 100x was harmless only because this whole block failed to parse (a
+ * double-escaped apostrophe further down), so the override never installed. Fixing the
+ * escape makes this path live, which makes the scale load-bearing in the same breath.
+ *
+ * So: take the scale FROM THE PAGE, never restate it here. Two sources of truth for money
+ * is the bug; the constants below are a last-resort fallback for a page too old to export
+ * them, and if that ever fires the amounts are wrong again. There is exactly one right
+ * scale and the page already knows it.
  */
 (function(){
   if (window.__sigilOneActionSend) return;
   window.__sigilOneActionSend = true;
 
-  var RAW_PER_UNIT = 100000000n;   // see UNITS note above
-  var DP = 8;
+  // The page's own scale, not ours — see the UNITS note above.
+  var RAW_PER_UNIT = (typeof window.SIGIL_UNITS === 'bigint') ? window.SIGIL_UNITS : 10000000000n;
+  var DP = (typeof window.SIGIL_DP === 'number') ? window.SIGIL_DP : 10;
+  var DP_ZEROS = '0'.repeat(DP);
   /* The page defines doUnifiedSend in a script ABOVE this one, so it is already
      here to hand back to on a 404. */
   var legacy = (typeof window.doUnifiedSend === 'function') ? window.doUnifiedSend : null;
@@ -395,7 +408,7 @@ const ONE_ACTION_SEND_JS: &str = r##"
   function el(id){ return document.getElementById(id); }
   function toRaw(s){
     var p = String(s).split('.');
-    return BigInt(p[0]||'0')*RAW_PER_UNIT + BigInt(((p[1]||'')+'00000000').slice(0,DP));
+    return BigInt(p[0]||'0')*RAW_PER_UNIT + BigInt(((p[1]||'')+DP_ZEROS).slice(0,DP));
   }
   function fmt(raw){
     var b = BigInt(raw), w = b/RAW_PER_UNIT, f = (b%RAW_PER_UNIT).toString().padStart(DP,'0');

@@ -628,10 +628,20 @@ pub(crate) fn is_setup_command(s: &str) -> bool {
 /// still runs; `setup` / F5 still work). Default ON: an [A]I tab that opens and does
 /// nothing is not "out of the box".
 pub(crate) fn autosetup_enabled() -> bool {
+    enabled_from_setting(std::env::var("SIGIL_AI_AUTOSETUP").ok().as_deref())
+}
+
+/// Pure: what a given `SIGIL_AI_AUTOSETUP` value means.
+pub(crate) fn enabled_from_setting(v: Option<&str>) -> bool {
     !matches!(
-        std::env::var("SIGIL_AI_AUTOSETUP").ok().as_deref().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        v.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
         Some("0") | Some("false") | Some("no") | Some("off")
     )
+}
+
+/// Pure: and whether it runs at BOOT rather than only when the tab is opened.
+pub(crate) fn boot_from_setting(v: Option<&str>) -> bool {
+    enabled_from_setting(v) && !matches!(v.map(|s| s.trim().to_ascii_lowercase()).as_deref(), Some("tab"))
 }
 
 /// Running inside Termux on Android. Termux sets `TERMUX_VERSION` and its `PREFIX` is
@@ -641,6 +651,82 @@ pub(crate) fn autosetup_enabled() -> bool {
 pub(crate) fn is_termux() -> bool {
     std::env::var_os("TERMUX_VERSION").is_some()
         || std::env::var("PREFIX").map(|p| p.contains("com.termux")).unwrap_or(false)
+}
+
+/// When auto-setup runs. `SIGIL_AI_AUTOSETUP`:
+///   unset / `1` / `boot` → at start-up, in the background (default since 8.0.6 — the
+///                          [A]I tab is ready by the time anyone opens it);
+///   `tab`                → only when the [A]I tab is opened (the 8.0.4 behaviour);
+///   `0` / `off`          → never (the tab still says how to run it by hand).
+pub(crate) fn autosetup_at_boot() -> bool {
+    boot_from_setting(std::env::var("SIGIL_AI_AUTOSETUP").ok().as_deref())
+}
+
+/// On CPU, anything past this many billion parameters is minutes per answer: a 27 B model
+/// decodes at roughly a third of a 9 B one and the 9 B already takes ~45 s on 48 cores.
+const CPU_MAX_PARAMS_B: f64 = 10.0;
+/// What a phone stays conversational with (≈2 tok/s at 4 B; 1–2 B is the usable band).
+const PHONE_MAX_PARAMS_B: f64 = 2.5;
+
+/// Pick the best rung of a model LADDER — largest first, as the signed manifest lists
+/// them — for THIS machine. Returns `(tag, why)`; the reason names the measurement so a
+/// user who disagrees can point at the number. Rules, in order:
+///  * `SIGIL_AI_MODEL` wins outright.
+///  * A phone (Termux) takes the largest rung ≤ 2.5 B parameters.
+///  * A GPU takes the largest rung whose weights fit its VRAM.
+///  * No GPU takes the largest rung ≤ 10 B that leaves 2.5× headroom in RAM and, above
+///    5 B, has at least 8 cores to keep the tab interactive.
+///  * Nothing measured as fitting → the smallest rung, and the reason says so.
+///  * Tags without a size (`foo:latest`) cannot be judged and are skipped, unless every
+///    rung is unsized — then the manifest's first choice stands.
+pub(crate) fn pick_from_ladder(rungs: &[String], hw: &Hardware) -> (String, String) {
+    if let Some(forced) = std::env::var("SIGIL_AI_MODEL").ok().filter(|s| !s.trim().is_empty()) {
+        let forced = forced.trim().to_string();
+        return (forced.clone(), format!("SIGIL_AI_MODEL={forced} (your explicit choice)"));
+    }
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    pick_from_ladder_with(rungs, hw, cores, is_termux())
+}
+
+/// The pure half: no environment, no probing — every input is an argument, so the rules
+/// are testable without setting a process-global variable that races a parallel test.
+pub(crate) fn pick_from_ladder_with(rungs: &[String], hw: &Hardware, cores: usize, phone: bool) -> (String, String) {
+    let rungs: Vec<&str> = rungs.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let Some(&first) = rungs.first() else {
+        return ("qwen3:8b".to_string(), "qwen3:8b (the manifest names no models; built-in default)".to_string());
+    };
+    let smallest = *rungs.last().unwrap_or(&first);
+    if phone {
+        let pick = rungs.iter().copied().find(|t| tag_params_b(t).map(|p| p <= PHONE_MAX_PARAMS_B).unwrap_or(false)).unwrap_or(smallest);
+        return (pick.to_string(), format!("{pick} — this is a phone (Termux); the small model keeps answers under a minute on a phone CPU (SIGIL_AI_MODEL=<tag> overrides)"));
+    }
+    let gib = |b: u64| b as f64 / GIB as f64;
+    let mut any_sized = false;
+    for &tag in &rungs {
+        let (Some(params), Some(need)) = (tag_params_b(tag), approx_model_bytes(tag)) else { continue };
+        any_sized = true;
+        match hw.vram_bytes {
+            Some(v) if v >= need => {
+                return (tag.to_string(), format!("{tag} — {:.0} GB VRAM fits it (~{:.1} GB needed)", gib(v), gib(need)));
+            }
+            Some(_) => continue,
+            None => {
+                if params > CPU_MAX_PARAMS_B {
+                    continue;
+                }
+                let ram_ok = hw.ram_bytes.map(|r| r >= need.saturating_mul(5) / 2).unwrap_or(false);
+                let cores_ok = params <= 5.0 || cores >= 8;
+                if ram_ok && cores_ok {
+                    let ram = hw.ram_bytes.unwrap_or(0);
+                    return (tag.to_string(), format!("{tag} — no GPU, but {cores} cores and {:.0} GB RAM run it on CPU (~{:.1} GB needed)", gib(ram), gib(need)));
+                }
+            }
+        }
+    }
+    if !any_sized {
+        return (first.to_string(), format!("{first} (model sizes not derivable from the tags; taking the manifest's first choice)"));
+    }
+    (smallest.to_string(), format!("{smallest} — the smallest rung; nothing bigger measured as fitting ({}, {cores} cores)", describe_hardware(hw)))
 }
 
 /// [`pick_model`] with one more rung below the fallback: the manifest's `small_model`
@@ -674,6 +760,68 @@ pub(crate) fn pick_model_tiered(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gb(n: u64) -> u64 { n * GIB }
+    fn ladder() -> Vec<String> {
+        ["qwen3.8:27b", "qwen3.5:9b", "qwen3.5:4b", "qwen3.5:2b", "qwen3.5:0.8b"].iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn ladder_gpu_takes_largest_rung_that_fits_vram() {
+        // RTX 2080: 8 GB → the 9b (~6.9 GB), not the 27b (~18.6 GB)
+        let hw = Hardware { vram_bytes: Some(gb(8)), ram_bytes: Some(gb(32)), gpu_name: Some("RTX 2080".into()) };
+        let (tag, why) = pick_from_ladder_with(&ladder(), &hw, 8, false);
+        assert_eq!(tag, "qwen3.5:9b", "{why}");
+        // 24 GB card → the 27b
+        let hw = Hardware { vram_bytes: Some(gb(24)), ram_bytes: Some(gb(64)), gpu_name: Some("RTX 4090".into()) };
+        assert_eq!(pick_from_ladder_with(&ladder(), &hw, 16, false).0, "qwen3.8:27b");
+        // 4 GB card → the 4b (~3.6 GB)
+        let hw = Hardware { vram_bytes: Some(gb(4)), ram_bytes: Some(gb(16)), gpu_name: Some("GTX 1050".into()) };
+        assert_eq!(pick_from_ladder_with(&ladder(), &hw, 8, false).0, "qwen3.5:4b");
+    }
+
+    #[test]
+    fn ladder_cpu_caps_at_ten_billion_and_needs_headroom() {
+        // Epsilon-class: no GPU, 63 GB, 48 cores → 9b, never the 27b on CPU
+        let hw = Hardware { vram_bytes: None, ram_bytes: Some(gb(63)), gpu_name: None };
+        let (tag, why) = pick_from_ladder_with(&ladder(), &hw, 48, false);
+        assert_eq!(tag, "qwen3.5:9b", "{why}");
+        // 4-core laptop, 16 GB → 4b (the 9b wants 8 cores)
+        let hw = Hardware { vram_bytes: None, ram_bytes: Some(gb(16)), gpu_name: None };
+        assert_eq!(pick_from_ladder_with(&ladder(), &hw, 4, false).0, "qwen3.5:4b");
+        // 2-core 4 GB VPS → the smallest rung
+        let hw = Hardware { vram_bytes: None, ram_bytes: Some(gb(4)), gpu_name: None };
+        assert_eq!(pick_from_ladder_with(&ladder(), &hw, 2, false).0, "qwen3.5:0.8b");
+        // Unmeasurable box → smallest rung, never a gamble on the big one
+        let hw = Hardware::default();
+        assert_eq!(pick_from_ladder_with(&ladder(), &hw, 8, false).0, "qwen3.5:0.8b");
+    }
+
+    #[test]
+    fn ladder_phone_takes_the_largest_small_rung() {
+        let hw = Hardware { vram_bytes: None, ram_bytes: Some(gb(8)), gpu_name: None };
+        assert_eq!(pick_from_ladder_with(&ladder(), &hw, 8, true).0, "qwen3.5:2b");
+    }
+
+    #[test]
+    fn ladder_unsized_tags_are_skipped_or_taken_first() {
+        let hw = Hardware { vram_bytes: Some(gb(8)), ram_bytes: Some(gb(32)), gpu_name: None };
+        let l: Vec<String> = ["qwen3.5:latest", "qwen3.5:9b"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(pick_from_ladder_with(&l, &hw, 8, false).0, "qwen3.5:9b");
+        let l: Vec<String> = ["qwen3.5:latest", "llama3:latest"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(pick_from_ladder_with(&l, &hw, 8, false).0, "qwen3.5:latest");
+    }
+
+    #[test]
+    fn autosetup_boot_vs_tab() {
+        // Pure over the setting's TEXT: touching the real variable would race every other
+        // test in this process — the exact bug this file already paid for once.
+        assert!(boot_from_setting(None) && enabled_from_setting(None));
+        assert!(!boot_from_setting(Some("tab")) && enabled_from_setting(Some("tab")));
+        assert!(!boot_from_setting(Some("0")) && !enabled_from_setting(Some("0")));
+        assert!(!boot_from_setting(Some("off")));
+        assert!(boot_from_setting(Some("1")));
+    }
 
     #[test]
     fn ollama_base_defaults_to_localhost() {

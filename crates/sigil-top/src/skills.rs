@@ -156,6 +156,26 @@ pub(crate) fn parse_and_gate(body: &str, opt_ins: &[String]) -> Result<SkillLoad
             out.rejected.push(format!("{}: empty body", s.name));
             continue;
         }
+        // THE ANTIVIRUS, before anything else looks at the body (2026-09-06).
+        //
+        // Everything above this line proves PROVENANCE: the manifest's signature says who
+        // published the pack, the blake3 says the body is the one they signed. Neither
+        // says the text is safe to OBEY — and a skill body is injected verbatim into the
+        // model's instructions, so a sentence inside it is effectively a command from a
+        // stranger. The scanner is what asks the other question.
+        //
+        // A refusal is REPORTED, never silent: a skill that vanishes without a word is
+        // indistinguishable from one that was never published.
+        let av = flux_moe::antivirus::scan_skill(&s.name, &s.skill_md);
+        if !av.admit {
+            out.rejected.push(format!("{}: refused by the antivirus — {}", s.name, av.verdict.summary()));
+            continue;
+        }
+        if !av.verdict.is_clean() {
+            // Loaded, but the operator is told. Suspicious is a warning by design: a
+            // scanner that blocks on every borderline phrase is one that gets turned off.
+            out.withheld.push(format!("{}: loaded with a warning — {}", s.name, av.verdict.summary()));
+        }
         // Audience: public loads everywhere; anything else needs a local opt-in
         // naming this skill (or SIGIL_SKILLS=all). The check is client-side, so
         // no request ever tells the server which install asked.

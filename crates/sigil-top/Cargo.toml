@@ -86,6 +86,11 @@ sigil-sync = { path = "../sigil-sync" }
 flux-cortex = { path = "../../../flux/crates/flux-cortex" }
 flux-graph = { path = "../../../flux/crates/flux-graph" }
 flux-optimize = { path = "../../../flux/crates/flux-optimize" }
+# 2026-09-06 (operator ask): the AI antivirus. A skill pack is SIGNED, which proves who
+# wrote it — not that what they wrote is safe for a model to obey. flux-moe::antivirus
+# scans every skill body for injection / exfiltration / destruction / credentials /
+# obfuscation before it is allowed into the model's context.
+flux-moe = { path = "../../../flux/crates/flux-moe" }
 # v0.6.0: P2P mesh + swarm coordination + content-addressed version control
 flux-p2p = { path = "../../../flux/crates/flux-p2p" }
 flux-rev = { path = "../../../flux/crates/flux-rev" }

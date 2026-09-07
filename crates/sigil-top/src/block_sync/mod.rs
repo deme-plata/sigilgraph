@@ -1079,9 +1079,10 @@ impl P2PBlockSync {
                             wallet_state_root: hdr.as_ref().map(|h| h.wallet_state_root),
                             finalized: None, // a light client applies no finality rule of its own
                         };
-                        if settled > 0 {
-                            let _ = net.publish(sigil_net::TOPIC_PEER_HEIGHTS, hb.encode());
-                        }
+                        // Publish from the first tick, even at height 0: a node records the view
+                        // as "syncing" (its gauge excludes peers > 2 finality-depths away), and
+                        // the miner is visible in peer_views from the moment it connects.
+                        let _ = net.publish(sigil_net::TOPIC_PEER_HEIGHTS, hb.encode());
                     }
 
                     // LANE-A snapshot-pull (one-shot, gated). No-op until dns_anchor_tip() is real

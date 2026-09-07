@@ -30,6 +30,7 @@ mod search_index;
 mod serve_read; // header-only reads for the backfill SERVE path — see its module doc
 mod producer_signing;
 mod finality_wire; // Phase 2 finality observer plumbing — zero consensus effect, see its module doc
+mod peer_view; // 2026-09-07: tip hash + wallet state root + finalized on the peer-heights heartbeat; per-peer agreement verdicts for the K-gauge v2
 
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1844,15 +1845,23 @@ fn run_start() -> Result<()> {
                             .duration_since(UNIX_EPOCH)
                             .map(|d| d.as_millis())
                             .unwrap_or(0);
-                        let hb = serde_json::json!({
-                            "node":     node_id,
-                            "network":  NETWORK_ID_STR,
-                            "ts":       ts,
-                            "peers":    sum.peer_count,
-                            "started":  sum.started,
-                            "height":   chain.height(),
-                        });
-                        let bytes = serde_json::to_vec(&hb).unwrap_or_default();
+                        // 2026-09-07 (K-gauge v2): the heartbeat now also says WHICH chain
+                        // we are on — tip hash, the wallet state root that tip committed,
+                        // and our finalized height — so peers can record agreement, not
+                        // just height. Older receivers keep reading `height` unchanged.
+                        let hb = peer_view::Heartbeat {
+                            node: node_id.to_string(),
+                            network: NETWORK_ID_STR.to_string(),
+                            ts_ms: ts as u64,
+                            peers: sum.peer_count as u64,
+                            started: sum.started,
+                            height: chain.height(),
+                            tip_hash: chain.tip_header().map(|_| chain.parent_hash()),
+                            wallet_state_root: chain.tip_header().map(|h| h.wallet_state_root),
+                            finalized: braid.as_ref().map(|b| b.finalized_height()),
+                        };
+                        mgr.set_local_view(peer_view::to_view(&hb, ts as u64, None, None));
+                        let bytes = hb.encode();
                         if let Err(e) = mgr.publish(TOPIC_PEER_HEIGHTS, bytes) {
                             eprintln!("⚠ publish peer-heights failed: {}", e);
                         }
@@ -2894,6 +2903,20 @@ fn run_start() -> Result<()> {
                                 // gap — even if we receive NO live blocks (e.g. not grafted
                                 // into the block-gossip mesh after a restart/rejoin). This is
                                 // what makes a connected-but-idle node recover on its own.
+                                //
+                                // 2026-09-07 (K-gauge v2): first, keep what the peer said about
+                                // ITS chain and compare it with OUR block at that height, so
+                                // /v1/network/topology exposes real cross-node agreement
+                                // (state root + tip) instead of an empty map. A peer ahead of
+                                // us, or a height already pruned from RAM, records `None`.
+                                if let Some(hb) = peer_view::Heartbeat::decode(&data) {
+                                    let local = hb.height.checked_sub(1)
+                                        .and_then(|h| chain.get(h))
+                                        .map(|b| (b.hash(), b.header.wallet_state_root));
+                                    let (tip_ok, root_ok) = peer_view::compare(&hb, local);
+                                    let seen_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+                                    mgr.record_peer_view(&from.to_string(), peer_view::to_view(&hb, seen_ms, tip_ok, root_ok));
+                                }
                                 if diverged { continue; }
                                 let peer_h = serde_json::from_slice::<serde_json::Value>(&data)
                                     .ok()

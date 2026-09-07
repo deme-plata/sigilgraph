@@ -1664,6 +1664,13 @@ pub struct NetworkTopologyResponse {
     /// Each peer's last-known chain height, keyed by peer_id — lets the map
     /// color a peer by how caught-up it is instead of just "connected: yes".
     pub peer_heights: std::collections::HashMap<String, u64>,
+    /// 2026-09-07 (K-gauge v2): what each peer last said about its chain — height, tip
+    /// hash, wallet state root, finalized — and whether that AGREES with this node's own
+    /// block at that height (`tip_matches_local`, `state_root_matches_local`; `None` when
+    /// the comparison was not possible). This is the consensus gauge's cross-node channel.
+    pub peer_views: std::collections::HashMap<String, flux_p2p::PeerChainView>,
+    /// This node's own view, refreshed every heartbeat — what peers compare against.
+    pub local_view: Option<flux_p2p::PeerChainView>,
 }
 
 #[flux_api_macros::api(GET, "/v1/network/topology", summary = "Real peer connections + mesh health, for the network map UI")]
@@ -1689,6 +1696,8 @@ pub async fn network_topology(State(st): State<AppState>) -> Json<ApiResponse<Ne
         bootstrap_peers: summary.bootstrap_peers,
         peers: net.connected_peer_infos(),
         peer_heights: health.peer_heights,
+        peer_views: health.peer_views,
+        local_view: health.local_view,
     })
 }
 

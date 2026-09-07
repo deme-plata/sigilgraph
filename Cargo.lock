@@ -8799,6 +8799,7 @@ dependencies = [
 name = "sigil-net"
 version = "5.1.1"
 dependencies = [
+ "hex",
  "serde",
  "serde_json",
  "sigil-header",

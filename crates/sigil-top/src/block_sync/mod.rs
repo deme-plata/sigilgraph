@@ -984,6 +984,12 @@ impl P2PBlockSync {
                 let mut pos_window: Vec<sigil_header::SigilBlockHeaderV0> = Vec::new();
                 let mut pos_window_base: u64 = 0;
                 let mut ckpt_t = Instant::now();
+                // v8.0.11 (2026-09-08): publish the peer-heights HEARTBEAT like sigil-node does, so a
+                // miner shows up in every node's `/v1/network/topology.peer_views` with a height, a
+                // tip hash and a wallet state root the node can verify against its own block — the
+                // SIGIL K-gauge's cross-node channels. Until now only sigil-node published one, so a
+                // node whose peers were all miners read those channels as "unavailable".
+                let mut hb_t = Instant::now() - Duration::from_secs(5);
                 let mut pos_bytes: Vec<u8> = Vec::new(); // v0.29.5 cached window-digest buffer for SIMD blake3
                 // v7.1.32 (grogu-sync-perf): last time the idle useful-hashrate scan came up
                 // completely empty (found 0 real headers in [lo, hi]). Backs off re-scanning a
@@ -1051,6 +1057,31 @@ impl P2PBlockSync {
                     if stop_rx.try_recv().is_ok() {
                         let _ = net.stop().await;
                         break;
+                    }
+
+                    if hb_t.elapsed() >= Duration::from_secs(5) {
+                        hb_t = Instant::now();
+                        // Our synced tip is the FRONTIER; nodes publish their settled spine
+                        // (`chain.height()`), which sits final_depth (512) behind it. Publish the
+                        // spine-equivalent so a node compares like with like (a frontier height
+                        // here would read as a full finality-depth of "divergence").
+                        let settled = store.synced_to().saturating_sub(512);
+                        let hdr = if settled >= 1 { store.get_header_at_height(settled - 1) } else { None };
+                        let sum = net.summary();
+                        let hb = sigil_net::peer_view::Heartbeat {
+                            node: sum.node_id.clone(),
+                            network: sigil_net::NETWORK_ID_STR.to_string(),
+                            ts_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
+                            peers: sum.peer_count as u64,
+                            started: sum.started,
+                            height: settled,
+                            tip_hash: hdr.as_ref().map(|h| h.hash()),
+                            wallet_state_root: hdr.as_ref().map(|h| h.wallet_state_root),
+                            finalized: None, // a light client applies no finality rule of its own
+                        };
+                        if settled > 0 {
+                            let _ = net.publish(sigil_net::TOPIC_PEER_HEIGHTS, hb.encode());
+                        }
                     }
 
                     // LANE-A snapshot-pull (one-shot, gated). No-op until dns_anchor_tip() is real

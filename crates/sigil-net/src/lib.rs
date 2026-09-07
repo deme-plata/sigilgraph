@@ -35,6 +35,8 @@ pub use tor_policy::{route_egress, EgressClass, EgressRoute};
 
 /// SIGIL network identifier. Bytes form, used wherever Quillon uses the same
 /// shape for `network_id`. Lives in block headers (per SIGIL_GENESIS_v0.md §2).
+pub mod peer_view;
+
 pub const NETWORK_ID: &[u8] = b"sigil-g2";
 
 /// String form of [`NETWORK_ID`], for paths/topics/log messages.

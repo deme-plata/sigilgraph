@@ -66,7 +66,12 @@ sol! {
     interface ISigilBridgeWrapped {
         function mint(address to, uint256 amount, uint256 lockId) external;
 
+        /// Emitted by the ORIGINAL SigilBridgeWrapped (legacy token 0xc224602C…).
         event OperatorMinted(address indexed to, uint256 amount, uint256 indexed lockId);
+        /// Emitted by SigilBridgeWrappedG3 (wSIGIL3, 0x3FCED760…, deployed 2026-09-06). Same
+        /// indexed layout, different name — the lookback must accept BOTH or a g3 mint is
+        /// invisible to the crash-window backstop (found 2026-09-08, sigil-pipeline eth_out.rs).
+        event Minted(address indexed to, uint256 amount, uint256 indexed lockId);
         event BurnedTo(address indexed from, uint256 amount, bytes32 indexed destSigilAddress);
     }
 }
@@ -496,7 +501,14 @@ async fn already_minted(provider: &impl Provider, contract: Address, lock_id: U2
     let latest = provider.get_block_number().await.context("fetching latest block for the resume-safety check failed")?;
     let from = latest.saturating_sub(MINT_CHECK_LOOKBACK_BLOCKS);
     let lock_id_topic: B256 = B256::from(lock_id);
-    let base = Filter::new().address(contract).event_signature(ISigilBridgeWrapped::OperatorMinted::SIGNATURE_HASH).topic2(lock_id_topic);
+    // Both mint events: `OperatorMinted` (legacy contract) and `Minted` (wSIGIL3 / g3).
+    let base = Filter::new()
+        .address(contract)
+        .event_signature(vec![
+            ISigilBridgeWrapped::Minted::SIGNATURE_HASH,
+            ISigilBridgeWrapped::OperatorMinted::SIGNATURE_HASH,
+        ])
+        .topic2(lock_id_topic);
     let logs = get_logs_chunked(provider, &base, from, latest, chunk).await?;
     Ok(!logs.is_empty())
 }

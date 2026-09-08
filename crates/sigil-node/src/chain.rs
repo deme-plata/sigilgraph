@@ -95,6 +95,14 @@ impl ChainTip {
         self.blocks.back().map(|b| &b.header)
     }
 
+    /// The tip block itself (not just its header). `follower_reorg` clones this
+    /// into a checkpoint so a rollback can rebuild a minimal one-block window
+    /// (`from_parts(state, [tip_block], tip_height)`) whose `parent_hash()` is
+    /// correct for applying the next canonical block. `None` on an empty chain.
+    pub fn tip_block(&self) -> Option<&Block> {
+        self.blocks.back()
+    }
+
     /// Snapshot of the current state, for use by block builders that need to
     /// dry-run a transition before producing the block whose header will
     /// commit those roots. Cloning is fine in P0 (BTreeMap-backed state); P3

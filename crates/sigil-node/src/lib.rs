@@ -46,6 +46,12 @@ pub mod genesis;
 pub mod mint;
 pub mod dag;
 
+/// 2026-09-08 (follower fork-recovery): dual-declared here so the chronos
+/// integration test can drive the real reorg against the real `ChainTip::apply`
+/// chokepoint. Depends only on `crate::block::Block` + `crate::chain::ChainTip`
+/// + `sigil_state::SigilState`. See its module doc.
+pub mod follower_reorg;
+
 /// 2026-08-24 (sync-then-produce bridge): same dual-declaration pattern as the
 /// modules above. Depends only on `crate::block::Block` + `crate::chain::ChainTip`,
 /// both already exposed, so this is safe by the same test. Exposed so `sigil-top`'s

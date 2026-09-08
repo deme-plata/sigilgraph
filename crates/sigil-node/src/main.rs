@@ -31,6 +31,7 @@ mod serve_read; // header-only reads for the backfill SERVE path — see its mod
 mod producer_signing;
 mod finality_wire; // Phase 2 finality observer plumbing — zero consensus effect, see its module doc
 mod peer_view; // 2026-09-07: tip hash + wallet state root + finalized on the peer-heights heartbeat; per-peer agreement verdicts for the K-gauge v2
+mod follower_reorg; // 2026-09-08: roll a forked follower back to a checkpoint below the fork so it can rejoin canonical (SIGIL_FOLLOWER_REORG=1); see its module doc
 
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1038,6 +1039,12 @@ fn run_start() -> Result<()> {
         // None ⇒ SIGIL_DAG=0 behavior-identical (design §3.1). Seeded from the
         // local chain's in-RAM window so the producer's own spine is known.
         let mut braid: Option<Braid> = dag_mode.then(|| dag_seed_braid(&chain));
+        // 2026-09-08: follower fork-recovery ring (SIGIL_FOLLOWER_REORG=1, else
+        // None → inert). A producer restart rewinds+re-mints and orphans a
+        // follower whose tip can no longer chain onto canonical; this rolls the
+        // chain back to a checkpoint below the fork so ordinary catch-up rejoins.
+        // See follower_reorg's module doc.
+        let mut reorg_ring = follower_reorg::ReorgRing::from_env();
         // QTFT-2: receipt-side topology-commitment verification. Default is
         // OBSERVE ONLY (recompute + count + loudly log a genuine mismatch,
         // never refuse the block) — this is deliberately NOT gated by
@@ -1890,6 +1897,11 @@ fn run_start() -> Result<()> {
                             finalized: braid.as_ref().map(|b| b.finalized_height()),
                         };
                         mgr.set_local_view(peer_view::to_view(&hb, ts as u64, None, None));
+                        // 2026-09-08: capture a state checkpoint for follower fork-recovery
+                        // on this periodic pulse. `maybe_capture` triggers on DISTANCE
+                        // advanced (>= cadence), so a coarse heartbeat never misses a
+                        // checkpoint. Inert unless SIGIL_FOLLOWER_REORG=1.
+                        if let Some(r) = reorg_ring.as_mut() { r.maybe_capture(&chain); }
                         let bytes = hb.encode();
                         if let Err(e) = mgr.publish(TOPIC_PEER_HEIGHTS, bytes) {
                             eprintln!("⚠ publish peer-heights failed: {}", e);
@@ -3117,6 +3129,7 @@ fn run_start() -> Result<()> {
                             let h = block.header.height;
                             pending_insert(&mut pending, chain.height(), h, block);
                         }
+                        let mut fork_at_tip = false;
                         while let Some(b) = pending.remove(&chain.height()) {
                             let bhash = b.hash();
                             let view = BlockView::from(&b.header);
@@ -3126,6 +3139,7 @@ fn run_start() -> Result<()> {
                                     let _ = chain_log.append_bytes(&braw);
                                     applied += 1;
                                     backfilled += 1;
+                                    if let Some(r) = reorg_ring.as_mut() { r.clear_fork_hits(); }
                                     if matches!(br.insert(view), InsertOutcome::Inserted { .. }) {
                                         dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, b);
                                     }
@@ -3139,12 +3153,40 @@ fn run_start() -> Result<()> {
                                     // range — and because n=2 certificates need BOTH nodes at
                                     // the tip, ALL finality freezes with no operator signal.
                                     // Surface the real cause, rate-limited.
+                                    let is_fork = e.to_string().contains("parent_hash mismatch");
                                     dag_missing_parents_logged += 1;
                                     if dag_missing_parents_logged % 64 == 1 {
                                         eprintln!("🔴 rr-backfill(braid): cannot extend tip at H={} (chain.height={}) — {}",
                                             b.header.height, chain.height(), e);
                                     }
+                                    // A parent-hash mismatch at our next height is the fork
+                                    // signal: the peer's canonical block for our slot does not
+                                    // chain onto our tip. Handle recovery AFTER the loop so the
+                                    // `chain`/`br` borrows here are clean.
+                                    if is_fork { fork_at_tip = true; }
                                     break;
+                                }
+                            }
+                        }
+                        // Follower fork-recovery (SIGIL_FOLLOWER_REORG=1). On a persistent
+                        // parent-hash mismatch, roll back to the newest checkpoint below the
+                        // fork; ordinary catch-up then pulls the canonical suffix forward. A
+                        // repeat fork at the restored tip walks to a strictly older checkpoint
+                        // (the rollback self-corrects). Ring exhausted ⇒ needs a peer re-sync.
+                        if fork_at_tip {
+                            if let Some(ring) = reorg_ring.as_mut() {
+                                if ring.note_fork_hit() {
+                                    let was = chain.height().saturating_sub(1);
+                                    match ring.reorg(&mut chain) {
+                                        Some(h) => {
+                                            eprintln!("🧊 follower reorg: forked at tip H={} — rolled back to checkpoint H={}; resuming canonical catch-up", was, h);
+                                            pending.clear();
+                                            *br = dag_seed_braid(&chain);
+                                        }
+                                        None => {
+                                            eprintln!("🧊 follower reorg: forked at tip H={} but ring is exhausted (fork deeper than ~{} blocks) — needs a peer re-sync", was, ring.span());
+                                        }
+                                    }
                                 }
                             }
                         }

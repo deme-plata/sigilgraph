@@ -3819,7 +3819,11 @@ fn fire_chain_event(event: &str, payload: &serde_json::Value) {
     };
     let body = serde_json::json!({
         "event": event,
-        "network": "sigil-g0",
+        // Derive from the real network id, never a hardcoded literal — this
+        // field said "sigil-g0" for the whole g2 lifetime, so every webhook
+        // observer (the flux MCP collector, dashboards) was told the wrong
+        // chain generation. 2026-09-08.
+        "network": sigil_net::NETWORK_ID_STR,
         "ts_ms": now_ms(),
         "data": payload,
     });

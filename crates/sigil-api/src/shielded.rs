@@ -75,8 +75,7 @@ const MAX_AGE: Duration = Duration::from_secs(2_400);
 /// or the index-0 same-amount collision the browser wallet had) leaves at least one of
 /// those false, so it is still offered and still honestly refused by the chokepoint.
 ///
-/// `RegisterShieldedAddress` is idempotent and cheap; it is never reported as carried and
-/// keeps riding candidates until `confirm_applied`, exactly as before.
+/// `RegisterShieldedAddress` counts as carried once the pool publishes its keys.
 pub fn already_in_pool(pool: &sigil_state::shielded::ShieldedPool, tx: &SigilTx) -> bool {
     match tx {
         SigilTx::Shield { cm, .. } => pool.has_ever_held(cm),
@@ -87,6 +86,14 @@ pub fn already_in_pool(pool: &sigil_state::shielded::ShieldedPool, tx: &SigilTx)
         }
         SigilTx::Unshield { nullifier, cm_outs, .. } => {
             pool.is_spent(nullifier) && cm_outs.iter().all(|cm| pool.has_ever_held(cm))
+        }
+        // A registration is carried once the pool publishes exactly these keys for the
+        // wallet. Idempotent to re-apply, so this is about honesty, not safety: without it
+        // `/v1/transactions/:hash` never said "in flight" for a registration, and the
+        // address lookup below could not tell "unregistered" from "publishing right now".
+        SigilTx::RegisterShieldedAddress { wallet, pk_shield, pk_encrypt, .. } => {
+            pool.shielded_address(wallet) == Some(*pk_shield)
+                && pk_encrypt.as_ref().map_or(true, |e| pool.encrypt_key(wallet) == Some(*e))
         }
         _ => false,
     }
@@ -904,6 +911,23 @@ impl ShieldedBridge {
     pub fn pending_len(&self) -> usize {
         self.pending.lock().unwrap().len()
     }
+
+    /// Is a `RegisterShieldedAddress` for `wallet` still in this bridge? Lets the address
+    /// lookup say "publishing right now, wait" instead of "unregistered" during the
+    /// ~90 s between a wallet's first open and its registration crossing finality — the
+    /// exact window in which a phone tried to pay a freshly opened browser wallet
+    /// (2026-09-08 13:47) and was told, truthfully but uselessly, that it had no key.
+    pub fn pending_registration(&self, wallet: &WalletId) -> Option<TxOutcome> {
+        let guard = self.pending.lock().unwrap();
+        guard.values().find_map(|p| match &p.tx {
+            SigilTx::RegisterShieldedAddress { wallet: w, .. } if w == wallet => Some(TxOutcome::Pending {
+                attempts: p.attempts,
+                permanent_fails: p.permanent_fails,
+                in_flight: p.in_flight,
+            }),
+            _ => None,
+        })
+    }
 }
 
 // ── request shapes ──────────────────────────────────────────────────────────────────
@@ -1452,6 +1476,46 @@ mod tests {
                 fee: 0,
             }
         ));
+    }
+
+    /// The 13:47 incident: a phone paying a wallet whose registration is still in flight
+    /// must be able to learn that it is in flight. And once the pool publishes the keys,
+    /// the registration counts as carried (no more re-offering, honest in-flight status).
+    #[test]
+    fn a_pending_registration_is_visible_and_counts_as_carried_once_published() {
+        use sigil_state::{commit_state_transition, SigilState, StateMutation, StateTransition, NATIVE};
+        let b = ShieldedBridge::new();
+        let (sk, from) = signer();
+        let wallet: [u8; 32] = hex::decode(&from).unwrap().try_into().unwrap();
+        assert!(b.pending_registration(&wallet).is_none());
+
+        let pk_shield = "11".repeat(32);
+        let pk_enc = "22".repeat(32);
+        let msg = format!("sigil-rpc/v1|shield-register|{from}|{pk_shield}|{pk_enc}|0|nonce=1");
+        use ed25519_dalek::Signer as _;
+        let sig = hex::encode(sk.sign(msg.as_bytes()).to_bytes());
+        b.submit_register(&from, &pk_shield, &pk_enc, 0, &sig, 1, None, None).expect("queued");
+        assert!(matches!(b.pending_registration(&wallet), Some(TxOutcome::Pending { in_flight: false, .. })));
+
+        let tx = b.snapshot_for_mint()[0].tx.clone();
+        let mut state = SigilState::default();
+        commit_state_transition(
+            &mut state,
+            &StateTransition { at_height: 1, mutations: vec![StateMutation::SetBalance { wallet, token: NATIVE, amount: 10 }] },
+            1,
+        ).unwrap();
+        assert!(!already_in_pool(state.shielded(), &tx), "not published yet");
+        let res = sigil_tx::apply_tx_at(&state, &to_signed(tx.clone()), 2).expect("apply");
+        commit_state_transition(&mut state, &StateTransition { at_height: 2, mutations: res.mutations }, 2).unwrap();
+        assert!(already_in_pool(state.shielded(), &tx), "published: carried");
+
+        // The frontier now carries it → not re-offered, reported in flight.
+        let fp = state.shielded();
+        assert!(b.snapshot_for_mint_excluding(|t| already_in_pool(fp, t)).is_empty());
+        assert!(matches!(b.pending_registration(&wallet), Some(TxOutcome::Pending { in_flight: true, .. })));
+        // Settled → retired, no longer pending.
+        assert_eq!(b.retire_settled(|t| already_in_pool(fp, t)), 1);
+        assert!(b.pending_registration(&wallet).is_none());
     }
 
     /// THE LIVE INCIDENT (2026-08-24/25), reproduced through the REAL retry/re-embed

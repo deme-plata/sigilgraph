@@ -842,8 +842,18 @@ pub async fn shielded_address_handler(
     };
     let pool = guard.shielded();
     let Some(pk_shield) = pool.shielded_address(&wallet) else {
+        // "Unregistered" and "publishing right now" are different answers to a payer:
+        // the first means ask the owner, the second means wait about a minute and a half.
+        // `registration` is "pending" (accepted, not yet in a block), "in_flight" (in a
+        // candidate block awaiting finality) or absent (nothing queued).
+        let registration = match st.shielded.pending_registration(&wallet) {
+            Some(shielded::TxOutcome::Pending { in_flight: true, .. }) => Some("in_flight"),
+            Some(shielded::TxOutcome::Pending { .. }) => Some("pending"),
+            _ => None,
+        };
         return Json(serde_json::json!({
             "ok": false, "error": "wallet has not registered a shielded address",
+            "registration": registration,
         }));
     };
     Json(serde_json::json!({

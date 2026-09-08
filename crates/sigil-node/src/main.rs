@@ -2640,11 +2640,24 @@ fn run_start() -> Result<()> {
                                     }
                                     match br.insert(BlockView::from(&block.header)) {
                                         InsertOutcome::Inserted { .. } => {
+                                            let topo = block.header.topology_commitment;
                                             dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, block);
                                             // legacy tips deque stays fed for one release
                                             // (harmless; unused when braid is Some).
                                             peer_tips.push_back(bhash);
                                             while peer_tips.len() > 4 { peer_tips.pop_front(); }
+                                            // Phase 3 (2026-09-08): a KEYED validator votes for every
+                                            // block it accepts into its braid, with the block's own
+                                            // order hash, so a committee larger than the producer can
+                                            // form certificates. Until now only the mint path voted, so
+                                            // a follower could never be a committee member. A pure
+                                            // observer (no seed) gets None here and nothing changes.
+                                            if let Some(vb) = finality.on_block(bheight, bhash, topo, finality_wire::now_ms()) {
+                                                if let Err(e) = mgr.publish(sigil_net::TOPIC_FINALITY_VOTES, vb) {
+                                                    eprintln!("⚠ publish finality vote H={} failed: {}", bheight, e);
+                                                }
+                                            }
+                                            apply_finality_gate(&finality, Some(&mut *br), &finality_view);
                                         }
                                         InsertOutcome::MissingParents(_missing) => {
                                             // Park the body for the braid AND buffer it for the

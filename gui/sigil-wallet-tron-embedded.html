@@ -210,7 +210,7 @@ body.view-desktop .desktop{display:flex}
 
 <div class="phone">
   <div class="notch"></div>
-  <div class="statusbar"><span>9:41</span><span>SIGIL·g0 · <b data-blockcount>H …</b></span><span>▮▮▮ 5G</span></div>
+  <div class="statusbar"><span>9:41</span><span>SIGIL·g0 · <b data-blockcount>H …</b></span><span id="pxPhone" style="color:#c4b5fd">▮▮▮ 5G</span></div>
   <div class="phead"><img class="markimg" data-brand="flat" alt="SIGIL" style="width:78px;height:78px"><div class="brand">SIGIL<span>·</span>WALLET</div><button class="expand" onclick="setView('desktop')">⤢ desktop</button></div>
   <div class="pscroll">
   <div class="dex-ticker dex-ticker-global" aria-label="Open live DEX markets" role="button" tabindex="0" onclick="openSwap()" onkeydown="if(event.key==='Enter'||event.key===' '){openSwap();event.preventDefault()}">
@@ -264,6 +264,18 @@ body.view-desktop .desktop{display:flex}
     <div class="gspacer"></div>
     <div class="gright">
       <div class="net">grid online</div>
+      <!-- SIGIL/USDC from the Uniswap V2 pool on Polygon. Read straight from the
+           pair's getReserves(), never a cached constant, and badged TESTNET because
+           the pool holds about two tenths of a cent — see #pxTestnet. -->
+      <div class="pill" id="pxPill" title="SIGIL/USDC — live from the Uniswap V2 pool on Polygon. Click to trade."
+           onclick="window.openBridge&&window.openBridge()"
+           style="border-color:rgba(167,139,250,.45);cursor:pointer;display:none">
+        <b id="pxVal" style="color:#c4b5fd">$—</b>
+        <span id="pxChg" style="font-size:10px;margin-left:5px;opacity:.85"></span>
+        <span id="pxTestnet" style="font-size:8.5px;margin-left:6px;padding:1px 5px;border-radius:999px;
+              background:rgba(251,191,36,.18);color:#fbbf24;border:1px solid rgba(251,191,36,.4);
+              letter-spacing:.09em;font-weight:700">TESTNET</span>
+      </div>
       <div class="pill" title="live mine-chain height · click for network stats" onclick="window.openStats&&window.openStats()" style="border-color:rgba(0,224,198,.4);cursor:pointer"><i class="lic" data-lucide="box" style="width:14px;height:14px;filter:none"></i><b data-blockcount style="color:var(--teal)">H …</b></div>
       <div class="pill" title="network hashrate — click for the Network Power graph" onclick="window.openPower&&window.openPower()" style="border-color:rgba(251,191,36,.4);cursor:pointer"><i class="lic" data-lucide="activity" style="width:14px;height:14px;filter:none"></i><b data-nethps>…</b></div>
       <div class="pill" title="live miners — wallets with an unexpired hashrate report in the pool window"><i class="lic" data-lucide="users" style="width:14px;height:14px;filter:none"></i><b data-peercount>…</b></div>
@@ -369,52 +381,6 @@ body.view-desktop .desktop{display:flex}
 
 <div class="caption">SIGIL Wallet · <b>cyan grid</b> · <b>⤢ expand → fullscreen</b></div>
 <script>
-/* ── SIGIL MONEY SCALE — ONE definition, used by every display AND every amount box ─────
-   The chain is 10 decimals: 1 SIGIL = 10^10 base units, and the base unit is a "glyph"
-   (sigil_state::SIGIL_DECIMALS = 10; MAX_SUPPLY = 21_000_000 * 10^10). Every SIGIL figure
-   this wallet receives from the node — /v1/balance, shielded note values, bridge lock
-   amounts — is ALREADY in glyphs, so the only conversion is at the two edges: glyphs→text
-   to show a number, and text→glyphs to read one out of an input.
-
-   Why one constant and not seventeen literals. Until 2026-09-02 this file scaled by 10^8
-   in ~17 places — the g1 value — so every SIGIL figure it printed was 100x the chain's
-   truth. It went unnoticed because display and entry were wrong TOGETHER: a balance shown
-   as "5.00" and an amount typed as "5" agreed with each other, and only disagreed with the
-   TUI, /v1/balance, the explorer and the bridge. That symmetry is also what made the fix
-   dangerous: converting only the display, or only the entry, would have let someone type
-   "5" under a balance reading "5.00" and move 100x what they meant. Deriving both halves
-   from SIGIL_DECIMALS below is the actual fix — changing the number can no longer move one
-   half without the other. Do not reintroduce a bare 1e8/1e10 anywhere below. */
-var SIGIL_DECIMALS  = 10n;
-var SIGIL_UNITS     = 10n ** SIGIL_DECIMALS;   // 10000000000n — glyphs in one SIGIL
-var SIGIL_DP        = Number(SIGIL_DECIMALS);  // 10 — decimal places for padStart/toFixed
-var SIGIL_UNITS_N   = Number(SIGIL_UNITS);     // 1e10 — float divisor, DISPLAY maths only
-var SIGIL_ZEROS     = '0'.repeat(SIGIL_DP);    // right-pad for a typed fractional part
-var SIGIL_AMOUNT_RE = new RegExp('^\\d+(\\.\\d{1,' + SIGIL_DP + '})?$');
-
-/* typed text -> glyphs (BigInt), or null when the text is not a valid amount. */
-function sigilToGlyphs(str){
-  var s = String(str||'').trim();
-  if(!SIGIL_AMOUNT_RE.test(s)) return null;
-  var p = s.split('.');
-  return BigInt(p[0]||'0')*SIGIL_UNITS + BigInt(((p[1]||'')+SIGIL_ZEROS).slice(0,SIGIL_DP));
-}
-/* glyphs -> plain decimal text, full precision, no thousands separators. Use this (never
-   Number(raw)/SIGIL_UNITS_N) whenever the result goes back INTO an input box: it is the
-   exact inverse of sigilToGlyphs, so a MAX button round-trips to the same glyph count,
-   while the float path silently loses digits past ~9e15. */
-function sigilFromGlyphs(raw){
-  var b; try{ b = BigInt(raw||0); }catch(e){ return '0.'+SIGIL_ZEROS; }
-  var neg = b < 0n; if(neg) b = -b;
-  return (neg?'-':'') + (b/SIGIL_UNITS).toString() + '.'
-       + (b%SIGIL_UNITS).toString().padStart(SIGIL_DP,'0');
-}
-window.SIGIL_DECIMALS=SIGIL_DECIMALS; window.SIGIL_UNITS=SIGIL_UNITS; window.SIGIL_DP=SIGIL_DP;
-window.SIGIL_UNITS_N=SIGIL_UNITS_N; window.SIGIL_ZEROS=SIGIL_ZEROS;
-window.SIGIL_AMOUNT_RE=SIGIL_AMOUNT_RE;
-window.sigilToGlyphs=sigilToGlyphs; window.sigilFromGlyphs=sigilFromGlyphs;
-</script>
-<script>
   function setView(v){document.body.classList.toggle('view-desktop',v==='desktop');try{localStorage.setItem('sigil-view',v)}catch(e){}render();}
   // 2026-08-23: pick a view for a visitor who's never chosen one — an explicit
   // ?desktop/?phone param or a saved choice (once you've used the ⤢ toggle)
@@ -454,11 +420,55 @@ window.sigilToGlyphs=sigilToGlyphs; window.sigilFromGlyphs=sigilFromGlyphs;
   // routes — use this context-aware prefix.
   const API_BASE = /(^|\.)sigilgraph\.org$/.test(location.hostname) ? '/v1' : '/api/v1';
   const NODE='';
-  // v0.58: balance is RAW base units (SIGIL_DECIMALS=10 → 10^10 glyphs per whole coin). Keep it
-  // as a BigInt-safe string so 10-decimal precision never rounds (Number loses precision
+  // v0.58: balance is RAW base units (SIGIL_DECIMALS=8 → 10^8 per whole coin). Keep it
+  // as a BigInt-safe string so 8-decimal precision never rounds (Number loses precision
   // past ~9e15). SIGIL_BAL (whole-coin float) is derived for the $-value / pill only.
   let SIGIL_RAW='0';
-  let SIGIL_BAL=0;            // = Number(SIGIL_RAW)/SIGIL_UNITS_N, for fiat estimate + pill
+  // Shielded balance in glyphs, or null while unknown (not scanned, locked, failed).
+  // null is NOT zero: printing 0 for "we have not looked yet" is a lie that happens
+  // to look like poverty, and this wallet has told it before.
+  let SHIELD_RAW=null;
+  function totalRaw(){
+    try{ return (BigInt(SIGIL_RAW||'0') + (SHIELD_RAW==null?0n:BigInt(SHIELD_RAW))).toString(); }
+    catch(e){ return SIGIL_RAW||'0'; }
+  }
+  try{ window.totalRaw=totalRaw; }catch(e){}
+  let SIGIL_BAL=0;            // = Number(SIGIL_RAW)/1e10, for fiat estimate + pill
+
+  // ── THE UNIT (fixed 2026-09-06) ────────────────────────────────────────────
+  //
+  // Native SIGIL on sigil-g2 has TEN decimals. The base unit is a *glyph*:
+  // 1 SIGIL = 10^10 glyphs (`sigil_state::SIGIL_DECIMALS`; the g1 chain had 8 and
+  // the reset on 2026-08-29 changed it). This page was still dividing by 1e8
+  // everywhere, so every figure it displayed was 100x TOO LARGE and every amount
+  // it parsed from a text box was 100x TOO SMALL. Both halves agreed with each
+  // other, which is exactly why it looked fine: type 1, send 0.01.
+  //
+  // Reported 2026-09-06: the phone said ~30 SIGIL, this page said 0.00174543 —
+  // which was the transparent dust balance (175,460 glyphs) shown 100x large.
+  // The Android wallet fixed the same bug in 1.8.1; the browser never did.
+  //
+  // Use these three and nothing else for native SIGIL.
+  const SIGIL_DECIMALS = 10;
+  const GLYPH = 10000000000n;                 // glyphs per whole SIGIL
+  // glyphs -> display string, exact (never via Number: a Double loses whole
+  // glyphs above ~9e15, well inside real balances).
+  function glyphStr(raw, dp){
+    var b; try{ b=BigInt(raw||0); }catch(e){ b=0n; }
+    var neg=b<0n; if(neg) b=-b;
+    var w=b/GLYPH, f=(b%GLYPH).toString().padStart(SIGIL_DECIMALS,'0');
+    if(dp!=null) f=f.slice(0,dp);
+    return (neg?'-':'')+w.toString()+(f.length?('.'+f):'');
+  }
+  // display string -> glyphs, exact. Returns null on anything it does not fully
+  // understand, because a wallet must never silently reinterpret an amount.
+  function strGlyphs(t){
+    t=String(t==null?'':t).trim().replace(',','.');
+    if(!/^\d+(\.\d{1,10})?$/.test(t)) return null;
+    var parts=t.split('.');
+    return BigInt(parts[0]||'0')*GLYPH + BigInt(((parts[1]||'')+'0000000000').slice(0,SIGIL_DECIMALS));
+  }
+  try{ window.glyphStr=glyphStr; window.strGlyphs=strGlyphs; window.GLYPH=GLYPH; }catch(e){}
   // LANE-N: mined coins land in the MINING wallet (SIGIL_MINE_WALLET / hostname-hash),
   // NOT necessarily the session/login wallet the page derived. Resolve it from the node
   // so [W] shows the balance the Mining tab shows (the real "balance actually works" fix).
@@ -499,38 +509,166 @@ window.sigilToGlyphs=sigilToGlyphs; window.sigilFromGlyphs=sigilFromGlyphs;
   // exactly 50.00000000 and the operator sees the FULL decimal climb, no rounding.
   function fmtAmt(raw){
     var r; try{ r=BigInt(raw||0); }catch(e){ r=0n; }
-    var whole=r/SIGIL_UNITS, frac=r%SIGIL_UNITS; if(frac<0n)frac=-frac;
+    var whole=r/GLYPH, frac=r%GLYPH; if(frac<0n)frac=-frac;
     var ws=whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',');
-    var fs=frac.toString().padStart(SIGIL_DP,'0');
+    var fs=frac.toString().padStart(SIGIL_DECIMALS,'0');
     return ws+'<small>.'+fs+' SIGIL</small>';
   }
-  function assetRows(){
-    const a=['◈','SIGIL','native · grid',SIGIL_BAL.toLocaleString('en-US',{maximumFractionDigits:2}),SIGIL_BAL>0?'':'fresh','','linear-gradient(135deg,#21d4fd,#1ba1e2)','#04080c'];
-    return `<div class="row"><div class="coin" style="background:${a[6]};color:${a[7]}">${a[0]}</div><div><div class="nm">${a[1]}</div><div class="tk">${a[2]}</div></div><div class="rt"><div class="bal">${a[3]}</div><div class="chg">${a[4]}</div></div></div>`;
+  // Polygon-side holdings, read from MetaMask when it is connected. They are NOT
+  // native SIGIL — different chain, different custody, and the bridge between them is
+  // offline — so they are labelled by chain and kept visually distinct rather than
+  // added into the SIGIL headline. Showing them is still right: they are the same
+  // person's money, and until now the only way to see them was to open MetaMask.
+  var POLY = { wsigil3: null, wsigil: null, usdc: null, addr: null };
+  var WSIGIL3   = '0x3fced760b0de6d57f96835c6110b1227941ec2e9'; // g3, deployed 2026-09-06
+  var WSIGIL_L  = '0xc224602c32f5c7f68d3ef002ae4c99e4c7df25b7'; // the legacy wrapped token
+  var POLY_USDC = '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359'; // native USDC, 6dp
+  async function refreshPolygonAssets(){
+    try{
+      var MM = window.SigilMM; if(!MM || !MM.rawCall) return;
+      // DO NOT require a live MetaMask session. Reading a balance is a public call —
+      // `rawCall` falls back to public Polygon RPCs on its own — so the only thing
+      // actually needed is the ADDRESS. Gating the rows on `st.connected` is what kept
+      // them invisible: MetaMask is connected per tab, the extension can be locked, and
+      // a resume can simply not have happened yet, and in every one of those cases the
+      // wallet knew perfectly well which account it was and refused to look anyway.
+      var st = (MM.getState && MM.getState()) || {};
+      var acct = st.account || null;
+      if(!acct){ try{ acct = localStorage.getItem('sigil-mm-account') || null; }catch(e){} }
+      if(!acct || !/^0x[0-9a-fA-F]{40}$/.test(acct)) return;
+      try{ localStorage.setItem('sigil-mm-account', acct); }catch(e){}
+      POLY.addr = acct;
+      var data = '0x70a08231' + '0'.repeat(24) + acct.toLowerCase().replace(/^0x/,'');
+      async function bal(token){
+        try{ var r = await MM.rawCall(token, data); return (r && r!=='0x') ? BigInt(r) : 0n; }
+        catch(e){ return null; }                    // null = unknown, and renders as "—", never as 0
+      }
+      POLY.wsigil3 = await bal(WSIGIL3);
+      POLY.wsigil  = await bal(WSIGIL_L);
+      POLY.usdc    = await bal(POLY_USDC);
+      render();
+    }catch(e){}
   }
+  try{ window.refreshPolygonAssets=refreshPolygonAssets; }catch(e){}
 
+  // ── SIGIL/USDC PRICE TICKER (2026-09-06) ───────────────────────────────────
+  //
+  // The first price SIGIL has had that anybody can actually trade against, so it
+  // belongs in the top bar next to the height and the hashrate rather than buried
+  // in a modal. Read from the pair's own getReserves() every time — no cached
+  // constant, no seeded figure — and through `rawCall`, which falls back to public
+  // Polygon RPCs, so it works with MetaMask locked, absent, or on another network.
+  //
+  // BADGED TESTNET, and that is not decoration. The pool holds ~1 wSIGIL3 and
+  // ~0.001 USDC: about two tenths of a cent in total. It is a real market in the
+  // sense that the arithmetic is real and a trade settles — and it is nowhere near
+  // a price DISCOVERY mechanism, because one dollar would move it a thousandfold.
+  // A number in a top bar reads as authoritative, so the badge has to travel with it.
+  var PX_PAIR = '0x7e9c5d73104ed2fc2bc55139ac0999036eaf41d7';
+  var PX_LAST = null;
+  async function refreshPrice(){
+    try{
+      var MM = window.SigilMM; if(!MM || !MM.rawCall) return;
+      var r = await MM.rawCall(PX_PAIR, '0x0902f1ac');          // getReserves()
+      var d = String(r).replace(/^0x/,''); if(d.length < 128) return;
+      // token0 = USDC (6dp), token1 = wSIGIL3 (18dp). Getting this ordering backwards
+      // is a 10^12 error that still looks like a plausible price, so it is asserted by
+      // construction here rather than inferred.
+      var rU = BigInt('0x'+d.slice(0,64)), rS = BigInt('0x'+d.slice(64,128));
+      if(rS === 0n) return;
+      // price in USDC per whole SIGIL, kept in integers until the last step:
+      // (rU / 1e6) / (rS / 1e18) = rU * 1e12 / rS
+      var micro = (rU * 1000000000000n * 1000000n) / rS;        // $ * 1e6
+      var px = Number(micro) / 1e6;
+      var el = document.getElementById('pxVal'), pill = document.getElementById('pxPill');
+      if(pill) pill.style.display='';
+      if(el) el.textContent = '$' + (px >= 0.01 ? px.toFixed(4) : px.toPrecision(3));
+      var chg = document.getElementById('pxChg');
+      if(chg && PX_LAST !== null && PX_LAST > 0){
+        var pct = (px - PX_LAST) / PX_LAST * 100;
+        chg.textContent = (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%';
+        chg.style.color = pct > 0 ? '#37d99a' : (pct < 0 ? '#ff8a8a' : '#8fb3c2');
+      }
+      var ph = document.getElementById('pxPhone');
+      if(ph) ph.textContent = '$' + (px >= 0.01 ? px.toFixed(4) : px.toPrecision(3)) + ' ⚠';
+      if(pill) pill.title = 'SIGIL/USDC $' + px.toPrecision(6)
+        + ' — live from the Uniswap V2 pool on Polygon (reserves '
+        + (Number(rS)/1e18).toFixed(6) + ' wSIGIL3 + ' + (Number(rU)/1e6).toFixed(6)
+        + ' USDC \u2248 $' + (2*Number(rU)/1e6).toFixed(4) + ' total). TESTNET-thin: your own trade moves it. Click to trade.';
+      PX_LAST = px;
+    }catch(e){}
+  }
+  try{ window.refreshPrice=refreshPrice; }catch(e){}
+  // This script runs BEFORE <script src="sigil-metamask.js"> further down the document,
+  // so the very first call finds no window.SigilMM and returns silently — the pill then
+  // sat at "$—" until the 30 s tick, which reads as broken. Retry on a short ramp first.
+  [0, 800, 2000, 4500, 9000].forEach(function(d){ setTimeout(refreshPrice, d); });
+  setInterval(refreshPrice, 30000);
+  // Balances move when the user trades in another tab; a slow poll keeps the rows honest
+  // without hammering a public RPC.
+  setInterval(function(){ try{ refreshPolygonAssets(); }catch(e){} }, 45000);
+  function fmtUnits(v, dp, maxfrac){
+    if(v==null) return null;
+    var d=BigInt(10)**BigInt(dp), w=v/d, f=(v%d).toString().padStart(dp,'0').slice(0,maxfrac||4);
+    return w.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')+(f?('.'+f):'');
+  }
+  function assetRow(sym, sub, bal, note, bg, fg, glyph){
+    return '<div class="row"><div class="coin" style="background:'+bg+';color:'+fg+'">'+glyph+'</div>'
+      + '<div><div class="nm">'+sym+'</div><div class="tk">'+sub+'</div></div>'
+      + '<div class="rt"><div class="bal">'+(bal==null?'—':bal)+'</div><div class="chg">'+(note||'')+'</div></div></div>';
+  }
+  function assetRows(){
+    var out = assetRow('SIGIL','native \u00b7 grid',
+      SIGIL_BAL.toLocaleString('en-US',{maximumFractionDigits:2}),
+      SIGIL_BAL>0?'':'fresh','linear-gradient(135deg,#21d4fd,#1ba1e2)','#04080c','\u25c8');
+    if(POLY.addr){
+      // Only show a wrapped row that actually holds something — an empty legacy row on
+      // every wallet is noise, and an empty NEW row reads as "the deploy failed".
+      if(POLY.wsigil3 == null || POLY.wsigil3 > 0n)
+        out += assetRow('wSIGIL3','wrapped \u00b7 <span style="color:#a78bfa">Polygon</span>',
+          fmtUnits(POLY.wsigil3,18,4), 'bridge offline',
+          'linear-gradient(135deg,#a78bfa,#7c3aed)','#0b0416','\u2b1f');
+      if(POLY.wsigil == null || POLY.wsigil > 0n)
+        out += assetRow('wSIGIL','legacy wrapped \u00b7 <span style="color:#a78bfa">Polygon</span>',
+          fmtUnits(POLY.wsigil,18,4), 'unbacked \u00b7 pre-g2',
+          'linear-gradient(135deg,#8b7bb8,#5b4a86)','#0b0416','\u2b1f');
+      out += assetRow('USDC','stablecoin \u00b7 <span style="color:#a78bfa">Polygon</span>',
+        fmtUnits(POLY.usdc,6,2), '', 'linear-gradient(135deg,#2775ca,#1a5fa0)','#eaf3ff','$');
+    } else {
+      // An empty space is indistinguishable from a bug. Say why the Polygon side is
+      // missing and how to make it appear.
+      out += '<div class="row" style="opacity:.72;cursor:pointer" onclick="xcConnectMM()">'
+        + '<div class="coin" style="background:linear-gradient(135deg,#3a3350,#241d38);color:#a78bfa">\u2b1f</div>'
+        + '<div><div class="nm">Polygon assets</div><div class="tk">wSIGIL \u00b7 USDC \u2014 connect MetaMask to show them</div></div>'
+        + '<div class="rt"><div class="bal">\u2014</div><div class="chg" style="color:#a78bfa">connect \u25b8</div></div></div>';
+    }
+    return out;
+  }
   function render(){
     const pa=document.getElementById('passets'); if(pa) pa.innerHTML=assetRows();
     const da=document.getElementById('dassets'); if(da) da.innerHTML=assetRows();
-    document.querySelectorAll('#amt,#damt').forEach(el=>el.innerHTML=fmtAmt(SIGIL_RAW));
+    document.querySelectorAll('#amt,#damt').forEach(el=>el.innerHTML=fmtAmt(totalRaw()));
     // phone balance sub → the user's real address (copyable) + fresh badge
     const sub=document.querySelector('.balance .sub');
     if(sub){
       if(MINE_ADDR && MINE_ADDR!==ADDR){
         // LANE-Q(a): mining credits a DIFFERENT address than this session wallet — show BOTH, and
         // offer a one-click to redirect future mining to this wallet, so [W] never silently reads 0.
-        const sBal=Number(BigInt(SESSION_RAW||'0')/SIGIL_UNITS);
+        const sBal=Number(BigInt(SESSION_RAW||'0'))/1e10;
         const mShort=MINE_ADDR.slice(0,8)+'…'+MINE_ADDR.slice(-4);
         sub.innerHTML='⛏ mining <b title="'+MINE_ADDR+'">'+mShort+'</b> '+SIGIL_BAL.toLocaleString('en-US',{maximumFractionDigits:2})+' SIGIL'
           +' · 👤 session <b data-addr style="cursor:pointer" title="click to copy: '+ADDR+'" onclick="copyAddr()">'+SHORT+'</b> '+sBal.toLocaleString('en-US',{maximumFractionDigits:2})
           +' · <a style="color:var(--cyan);cursor:pointer;text-decoration:none" onclick="useMyWalletForMining()">credit my wallet ▸</a>';
       } else {
-        sub.innerHTML='wallet <b data-addr style="cursor:pointer" title="click to copy: '+ADDR+'" onclick="copyAddr()">'+SHORT+'</b>'+(SIGIL_BAL>0?'':' · <span style="color:var(--teal)">fresh wallet</span>');
+        sub.innerHTML='wallet <b data-addr style="cursor:pointer" title="click to copy: '+ADDR+'" onclick="copyAddr()">'+SHORT+'</b>'
+          +(SHIELD_RAW==null ? ' · <span style="opacity:.7">private balance not scanned yet</span>'
+              : ' · 🛡 '+glyphStr(SHIELD_RAW,4)+' private + '+glyphStr(SIGIL_RAW,4)+' public')+(SIGIL_BAL>0?'':' · <span style="color:var(--teal)">fresh wallet</span>');
       }
     }
     // desktop gbar pill + sidecard + portfolio
     document.querySelectorAll('.pill b[data-balance]').forEach(el=>el.textContent=SIGIL_BAL.toLocaleString('en-US'));
-    document.querySelectorAll('#passetsN,#dassetsN').forEach(el=>el.textContent='1 asset');
+    var _n = 1 + (POLY.addr ? (((POLY.wsigil3==null||POLY.wsigil3>0n)?1:0) + ((POLY.wsigil==null||POLY.wsigil>0n)?1:0) + 1) : 0);
+    document.querySelectorAll('#passetsN,#dassetsN').forEach(el=>el.textContent=_n+(_n===1?' asset':' assets'));
     // address chip in the desktop top bar (replace the static net text once)
     const heroAddrEl=document.getElementById('daddr'); if(heroAddrEl){ heroAddrEl.style.display='inline-flex'; heroAddrEl.title='click to copy: '+ADDR; heroAddrEl.innerHTML='◈ '+SHORT+' <span class="cpy">⧉</span>'; }
     // (Activity opens the SIGIL Explorer IN the main content — see showExplorer.)
@@ -598,7 +736,12 @@ window.sigilToGlyphs=sigilToGlyphs; window.sigilFromGlyphs=sigilFromGlyphs;
         if(window.PREV_RAW!=null && BigInt(mb)>BigInt(window.PREV_RAW)) coinFlash(BigInt(mb)-BigInt(window.PREV_RAW));
       }catch(e){}
       window.PREV_RAW=mb;
-      SIGIL_RAW=mb; window.SIGIL_RAW=SIGIL_RAW; SIGIL_BAL=Number(BigInt(SIGIL_RAW)/SIGIL_UNITS);
+      SIGIL_RAW=mb; window.SIGIL_RAW=SIGIL_RAW;
+      // NOT BigInt division — that truncates, and 9.688 SIGIL then renders as "9".
+      // Float is fine HERE and only here: this value feeds the fiat estimate and the
+      // rounded pill, never an amount that gets signed. Every figure that matters goes
+      // through glyphStr/strGlyphs on exact BigInts.
+      SIGIL_BAL=Number(BigInt(SIGIL_RAW))/1e10;
       try{ if(window.bhSample) window.bhSample(mb); }catch(e){}
     }
     if(MINE_ADDR && MINE_ADDR!==ADDR){ const sb=await fetchBal(ADDR); if(sb!=null) SESSION_RAW=sb; }
@@ -607,7 +750,7 @@ window.sigilToGlyphs=sigilToGlyphs; window.sigilFromGlyphs=sigilFromGlyphs;
   }
   // LANE-AC: green flash + floating "+X.XX SIGIL ⛏ coinbase" on balance raise.
   function coinFlash(deltaRaw){
-    const txt='+'+(Number(deltaRaw)/SIGIL_UNITS_N).toFixed(2)+' SIGIL ⛏ coinbase';
+    const txt='+'+glyphStr(deltaRaw,4)+' SIGIL ⛏ coinbase';
     document.querySelectorAll('#amt,#damt').forEach(el=>{
       el.classList.remove('amt-flash'); void el.offsetWidth; el.classList.add('amt-flash');
       const host=el.closest('.balance,.dhero')||el.parentElement; if(!host) return;
@@ -826,7 +969,12 @@ window.sigilToGlyphs=sigilToGlyphs; window.sigilFromGlyphs=sigilFromGlyphs;
     let seed; try{ seed=window.sigilDeriveFrom(mn).priv; }catch(e){ el.textContent='—'; return; }
     try{
       const r=await _scanAllEpochsFast(seed, M, S);
-      el.textContent=(Number(r.balance)/SIGIL_UNITS_N).toFixed(SIGIL_DP)+' SIGIL';
+      el.textContent=glyphStr(r.balance)+' SIGIL';
+      // Fold it into the headline. Until 2026-09-06 this number lived only in the
+      // small line below and the big figure showed transparent-only, so a wallet
+      // whose entire balance was private read as almost empty.
+      SHIELD_RAW = r.balance;
+      try{ render(); }catch(_){}
       if(nt){
         // Never present a gross figure as a balance: if spends could not be netted,
         // say so. A number that can only go up is wrong in the direction that matters.
@@ -1414,10 +1562,6 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     return hex+'0'.repeat(48);
   }
   var PK_DOMAIN=0x534947494C5F504Bn;
-  // NOT a decimals site: this ladder is written in GLYPHS, so it is unaffected by
-  // SIGIL_DECIMALS. It is a strict SUBSET of sigil_state::shielded::DENOMINATIONS (which
-  // now runs on to 2e17), so every rung it emits is still a legal denomination — large
-  // shields just split into more notes than they need to. Widening it is a separate change.
   // sigil_state::shielded::DENOMINATIONS — the fixed ramp a Shield deposit must decompose
   // into (1,2,5 x 10^k up to 5e15 raw units). Ported verbatim.
   var DENOMINATIONS=[];
@@ -1541,14 +1685,18 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   function sendStatus(m,c){ var el=document.getElementById('sendMsg'); if(el){ el.textContent=m; el.style.color=c||'#8fb3c2'; } }
   function checkStatus(m,c){ var el=document.getElementById('checkAddrMsg'); if(el){ el.textContent=m; el.style.color=c||'#8fb3c2'; } }
   window.sendStatus=sendStatus;
+  // Exported so the node's injected one-action-send can wrap it (the gui lane's seam).
+  try{ window.showReceipt=showReceipt; }catch(e){}
   window.sendMax=function(){
-    try{ var raw=BigInt(window.SIGIL_RAW||'0'); document.getElementById('sendAmt').value=sigilFromGlyphs(raw); }catch(e){}
+    try{ document.getElementById('sendAmt').value=glyphStr(window.SIGIL_RAW||'0'); }catch(e){}
   };
   // GET /v1/shielded/address — real, live lookup: does this wallet have a published
   // shielded address? (No proof/signature needed — this is a public read.) 2026-08-25:
   // a successful, fully-registered lookup now reveals the real private-send panel below
   // (window.__privRecipient + #privSendBox) — see doPrivateSend().
   window.__privRecipient=null;
+  // Wait at most 4 minutes per address for an in-flight registration, then say 'not registered'.
+  function regWaitAllowed(addr){ if(window.__regWaitAddr!==addr){ window.__regWaitAddr=addr; window.__regWaitUntil=Date.now()+240000; } return Date.now()<window.__regWaitUntil; }
   window.checkShieldedAddr=async function(){
     var addr=(document.getElementById('checkAddr').value||'').trim().toLowerCase();
     var box=document.getElementById('privSendBox'); if(box) box.style.display='none';
@@ -1564,6 +1712,12 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         if(box) box.style.display='flex';
       } else if(j && j.ok){
         checkStatus('✗ this wallet published a shield key but no delivery (encryption) key — it cannot receive a note ciphertext yet, so a private send would be unrecoverable for them.', '#fbbf24');
+      } else if(j && (j.registration==='pending' || j.registration==='in_flight') && regWaitAllowed(addr)){
+        // The node holds a registration for this wallet that has not crossed finality
+        // yet (a wallet publishes its key on first open; that takes ~90 s). Say so and
+        // look again, rather than tell the payer it cannot be paid (2026-09-08 13:47).
+        checkStatus('⏳ this wallet is publishing its private receiving key right now — waiting for it to settle (about a minute and a half)…', '#6df3ff');
+        setTimeout(function(){ try{ if((document.getElementById('checkAddr').value||'').trim().toLowerCase()===addr) window.checkShieldedAddr(); }catch(e){} }, 5000);
       } else { checkStatus('✗ not registered — this wallet hasn\'t published a shielded address yet.', '#fbbf24'); }
     }catch(e){ checkStatus('✗ network error — node unreachable.', '#ff8a8a'); }
   };
@@ -1588,7 +1742,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   }
   window.openSend=function(){
     var m=document.getElementById('send-modal'); if(!m) return;
-    try{ var raw=BigInt(window.SIGIL_RAW||'0'); var w=raw/SIGIL_UNITS, f=(raw%SIGIL_UNITS).toString().padStart(SIGIL_DP,'0');
+    try{ var raw=BigInt(window.SIGIL_RAW||'0'); var w=raw/GLYPH, f=(raw%GLYPH).toString().padStart(SIGIL_DECIMALS,'0');
       document.getElementById('sendAvail').textContent=w.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')+'.'+f; }catch(e){}
     sendStatus(''); checkStatus(''); abRender(); m.style.display='flex';
     // ── unified flow reset (2026-08-26) — start clean, mirror the balance, and put
@@ -1656,11 +1810,22 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   // node is still genuinely retrying.
   var SETTLE_TIMEOUT_MS=125000, SETTLE_POLL_MS=3000;
 
-  async function awaitSettlement(baseline, wantParts, onTick){
-    if(baseline===null) return 'unknown';   // couldn't read a baseline — don't claim either way
+  async function awaitSettlement(baseline, wantParts, onTick, txids){
     var deadline=Date.now()+SETTLE_TIMEOUT_MS;
     while(Date.now()<deadline){
       await new Promise(function(r){ setTimeout(r, SETTLE_POLL_MS); });
+      // 2026-09-08: the node's own word first. /v1/transactions/:hash is truthful for
+      // shielded txs now — 'applied' at finality, 'rejected' with the builder's reason.
+      // The note-count heuristic below stays as the fallback for older nodes.
+      if(txids && txids.length){
+        try{
+          var tj=await fetch('/v1/transactions/'+txids[0],{cache:'no-store'}).then(function(r){return r.json();});
+          var td=(tj&&tj.data)||{};
+          if(td.status==='applied') return 'settled';
+          if(td.status==='rejected') return 'rejected:'+(td.reason||'refused by the network');
+        }catch(_){}
+      }
+      if(baseline===null){ if(onTick) onTick(Math.max(0,Math.round((deadline-Date.now())/1000))); continue; }
       var now=await poolNoteCount();
       if(now!==null && now>=baseline+wantParts) return 'settled';
       if(onTick) onTick(Math.max(0,Math.round((deadline-Date.now())/1000)));
@@ -1755,8 +1920,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   };
   window.doShield=async function(){
     var amtStr=(document.getElementById('sendAmt').value||'').trim();
-    if(!SIGIL_AMOUNT_RE.test(amtStr) || Number(amtStr)<=0){ sendStatus('Amount must be > 0 (max '+SIGIL_DP+' decimals).', '#ff8a8a'); return; }
-    var base=sigilToGlyphs(amtStr);   // text -> glyphs, the one parser (see SIGIL MONEY SCALE)
+    if(!/^\d+(\.\d{1,10})?$/.test(amtStr) || Number(amtStr)<=0){ sendStatus('Amount must be > 0 (max 10 decimals).', '#ff8a8a'); return; }
+    var parts=amtStr.split('.'); var base=BigInt(parts[0]||'0')*GLYPH + BigInt(((parts[1]||'')+'0000000000').slice(0,SIGIL_DECIMALS));
     var from=(window.MINE_ADDR||window.ADDR||'').toLowerCase();
     if(!/^[0-9a-f]{64}$/.test(from)){ sendStatus('No wallet address loaded.', '#ff8a8a'); return; }
 
@@ -1777,7 +1942,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         var ffj=null; try{ ffj=await ffr.json(); }catch(_){}
         if(ffj && ffj.ok && Array.isArray(ffj.landed) && ffj.landed.length){
           var fastLanded=ffj.landed.map(function(p){ noteRecord(from,p.index,p.value); return {txid:p.txid, value:p.value}; });
-          window.showReceipt(fastLanded, amtStr, from, ffj.warning);
+          showReceipt(fastLanded, amtStr, from, ffj.warning);
           setTimeout(function(){ if(window.refresh)refresh(); }, 600);
           if(fastShieldBtn)fastShieldBtn.disabled=false;
           return;
@@ -1897,7 +2062,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         sendStatus('\u2717 could not read the shielded pool \u2014 not submitting blind (a re-used note commitment is rejected forever). Try again in a moment.', '#ff8a8a');
         if(btn)btn.disabled=false; return;
       }
-      if(!slot){ failed='no free note index for '+(Number(value)/SIGIL_UNITS_N).toFixed(SIGIL_DP)+' SIGIL in the first 4096 — this wallet has deposited that denomination a lot; try a different amount'; break; }
+      if(!slot){ failed='no free note index for '+glyphStr(value)+' SIGIL in the first 4096 — this wallet has deposited that denomination a lot; try a different amount'; break; }
       var index=slot.index;
       var cmHex=slot.cmHex;
       // Keep the legacy counter moving so anything still reading it stays ahead
@@ -1907,7 +2072,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       var reqNonce=Date.now()+i; // strictly increasing per part, same nonce space as register
       var sig; try{ sig=window.sigilSign(kp.priv,'shield',[from,value.toString(),cmHex,fee],reqNonce); }
         catch(e){ failed='signing failed on part '+(i+1); break; }
-      sendStatus('Submitting part '+(i+1)+'/'+denomParts.length+' ('+(Number(value)/SIGIL_UNITS_N).toFixed(SIGIL_DP)+' SIGIL)…', '#6df3ff');
+      sendStatus('Submitting part '+(i+1)+'/'+denomParts.length+' ('+glyphStr(value)+' SIGIL)…', '#6df3ff');
       try{
         var r=await fetch('/v1/shield',{method:'POST',headers:{'Content-Type':'application/json'},
           // amount/fee are u128 on the wire — sigil_state::u128_str requires a JSON STRING,
@@ -1925,13 +2090,15 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       sendStatus('Submitted — waiting for the network to accept it…', '#6df3ff');
       var outcome=await awaitSettlement(settleBaseline, landed.length, function(left){
         sendStatus('Submitted — waiting for the network to accept it… '+left+'s', '#6df3ff');
-      });
-      if(outcome==='settled'){
+      }, landed.map(function(p){ return p.txid; }).filter(function(t){ return /^[0-9a-f]{64}$/i.test(String(t||'')); }));
+      if(typeof outcome==='string' && outcome.indexOf('rejected:')===0){
+        showReceiptUnconfirmed(amtStr, 'The network refused this deposit — '+outcome.slice(9)+'. Nothing moved; your balance is unchanged.', bookedIndices, from);
+      } else if(outcome==='settled'){
         var warn=failed?('partial — '+landed.length+'/'+denomParts.length+' parts landed, then: '+failed):undefined;
-        window.showReceipt(landed, amtStr, from, warn);
+        showReceipt(landed, amtStr, from, warn);
         setTimeout(function(){ if(window.refresh)refresh(); }, 600);
       } else if(outcome==='unknown'){
-        window.showReceipt(landed, amtStr, from,
+        showReceipt(landed, amtStr, from,
           '⚠ could not reach the pool to confirm settlement — this receipt shows what was SUBMITTED, not what settled. Re-check your balance before assuming it landed.');
       } else {
         showReceiptUnconfirmed(amtStr,
@@ -1988,22 +2155,13 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       _rcRow('notes',landedParts.length+' (denomination-split)')+
       _rcRow('time',new Date().toLocaleString());
     landedParts.forEach(function(p,i){
-      rows+=_rcRow('txid '+(i+1),(p.txid?'<span title="'+p.txid+'">'+short(p.txid)+'</span>':'—')+' — '+(Number(p.value)/SIGIL_UNITS_N).toFixed(SIGIL_DP)+' SIGIL');
+      rows+=_rcRow('txid '+(i+1),(p.txid?'<span title="'+p.txid+'">'+short(p.txid)+'</span>':'—')+' — '+glyphStr(p.value)+' SIGIL');
     });
     if(warn) rows+=_rcRow('note','⚠ '+warn);
     document.getElementById('rcRows').innerHTML=rows;
     document.getElementById('sendForm').style.display='none';
     var rc=document.getElementById('sendReceipt'); rc.style.display='flex';
   }
-  // EXPORTED ON PURPOSE — `doUnifiedSend` detects a successful shield by temporarily
-  // swapping `window.showReceipt` for a probe (see the swap below). This function used to
-  // live only in this IIFE's scope, so that probe replaced a property nobody called: the
-  // swap never fired, `shielded` stayed false, and step 1 REPORTED FAILURE ON EVERY SHIELD
-  // THAT ACTUALLY SUCCEEDED. A second IIFE further down calls the bare name too, which was
-  // a ReferenceError swallowed by its own try/catch — so the receipt pane never got
-  // data-kind="send" and the send step could never report success either.
-  // Net effect before this line existed: press SEND, the money moves, the UI says it failed.
-  window.showReceipt = showReceipt;
   window.receiptCopyTx=function(){ if(window.__lastTxid&&navigator.clipboard){ navigator.clipboard.writeText(window.__lastTxid); var b=document.getElementById('rcCopyBtn'); var o=b.textContent; b.textContent='✓ copied'; setTimeout(function(){b.textContent=o;},1000); } };
   window.receiptDone=function(){
     document.getElementById('sendReceipt').style.display='none';
@@ -2093,7 +2251,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     el.style.boxShadow   = ok===null ? 'none' : (ok ? '0 0 0 3px rgba(0,224,198,.10)' : '0 0 0 3px rgba(255,138,138,.10)');
   }
   window.uniMax=function(){
-    try{ var raw=BigInt(window.SIGIL_RAW||'0'); document.getElementById('uniAmt').value=sigilFromGlyphs(raw); }catch(e){}
+    try{ document.getElementById('uniAmt').value=glyphStr(window.SIGIL_RAW||'0'); }catch(e){}
   };
   window.uniToggleAdvanced=function(){
     var a=document.getElementById('sendAdvanced'), u=document.getElementById('sendUnified'), l=document.getElementById('uniAdvLink');
@@ -2155,7 +2313,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     var amtStr=(document.getElementById('uniAmt').value||'').trim();
     uniMsg('');
     if(!/^[0-9a-f]{64}$/.test(addr)){ uniMsg('Enter the recipient\'s 64-character SIGIL address first.', '#ff8a8a'); uniGlow('uniAddr',false); return; }
-    if(!SIGIL_AMOUNT_RE.test(amtStr) || Number(amtStr)<=0){ uniMsg('Enter an amount greater than 0 (up to '+SIGIL_DP+' decimals).', '#ff8a8a'); uniGlow('uniAmt',false); return; }
+    if(!/^\d+(\.\d{1,10})?$/.test(amtStr) || Number(amtStr)<=0){ uniMsg('Enter an amount greater than 0 (up to 10 decimals).', '#ff8a8a'); uniGlow('uniAmt',false); return; }
     uniGlow('uniAmt',null);
     if(!window.__privRecipient){
       uniMsg('Checking the recipient…', '#6df3ff');
@@ -2171,7 +2329,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     if(!/^[0-9a-f]{64}$/.test(from)){ uniMsg('No wallet address loaded.', '#ff8a8a'); return; }
 
     var parts=amtStr.split('.');
-    var amountRaw=sigilToGlyphs(amtStr);   // text -> glyphs, the one parser
+    var amountRaw=BigInt(parts[0]||'0')*GLYPH + BigInt(((parts[1]||'')+'0000000000').slice(0,SIGIL_DECIMALS));
 
     document.getElementById('uniSteps').style.display='flex';
     uniStep(1,'todo'); uniStep(2,'todo');
@@ -2184,8 +2342,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       if(have < amountRaw){
         var shortfall = amountRaw - have;
         uniStep(1,'busy');
-        uniMsg('Step 1 of 2 — moving '+(Number(shortfall)/SIGIL_UNITS_N).toFixed(SIGIL_DP)+' SIGIL into your private balance…', '#6df3ff');
-        var sa=document.getElementById('sendAmt'); if(sa) sa.value=sigilFromGlyphs(shortfall);
+        uniMsg('Step 1 of 2 — moving '+glyphStr(shortfall)+' SIGIL into your private balance…', '#6df3ff');
+        var sa=document.getElementById('sendAmt'); if(sa) sa.value=glyphStr(shortfall);
         // doShield() ends by switching the modal to the receipt pane; suppress that
         // for the intermediate step so the user stays in one continuous flow and
         // only sees a receipt for the payment they actually asked for.
@@ -2225,10 +2383,18 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         // stamped data-kind="send".
         var rcPane=document.getElementById('sendReceipt');
         if(rcPane){ rcPane.style.display='none'; rcPane.removeAttribute('data-kind'); }
-        var sent=false;
-        try{ sent = (await window.doPrivateSend())===true; }catch(e){ sent=false; }
-        var pm=(document.getElementById('privMsg')||{}).textContent||'';
-        if(sent && rcPane && rcPane.getAttribute('data-kind')==='send'){ ok=true; break; }
+        var res=null;
+        try{ res = await window.doPrivateSend(); }catch(e){ res=false; }
+        // `true` = the node ACCEPTED a submission. That ends this loop no matter what
+        // the receipt pane says: calling doPrivateSend() again picks ANOTHER note and
+        // pays the recipient a SECOND time (a fresh proof, a fresh nullifier, and the
+        // chain accepts every one). Until 2026-09-08 the exit ALSO required the receipt
+        // pane to be stamped 'send' — but showReceipt() was not reachable from
+        // doPrivateSend()'s scope on this page, so the stamp never appeared and one
+        // click could pay up to MAXT times. 'retry' = nothing was submitted and the
+        // cause is time (a note still settling); anything else is a real failure.
+        if(res===true){ ok=true; break; }
+        if(res!=='retry'){ break; }
         if(attempts<MAXT) await new Promise(function(r){ setTimeout(r,3000); });
       }
       if(ok){ uniStep(2,'done'); uniMsg(''); }
@@ -2254,6 +2420,10 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   document.getElementById('send-modal').addEventListener('click',function(e){ if(e.target===this) window.closeSend(); });
   window.addEventListener('keydown',function(e){ if(e.key==='Escape') window.closeSend(); });
   if(document.readyState!=='loading') wireSend(); else document.addEventListener('DOMContentLoaded',wireSend);
+  // 2026-09-08: doPrivateSend() lives in ANOTHER script block and calls showReceipt()
+  // by bare name. Without this export that call was a swallowed ReferenceError: no
+  // receipt, no data-kind='send' stamp, and doUnifiedSend() then re-ran the payment.
+  try{ window.showReceipt=showReceipt; window.showReceiptUnconfirmed=showReceiptUnconfirmed; }catch(e){}
 })();
 </script>
 
@@ -2491,6 +2661,56 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   // writes (sigil-shielded-notes-<addr>: [{index,value,ts}]), extended here with an
   // optional `spent` flag so this wallet does not try to reuse a note it already spent.
   function myNotes(addr){ try{ return JSON.parse(localStorage.getItem('sigil-shielded-notes-'+addr)||'[]'); }catch(e){ return []; } }
+  /* ── SETTLE WATCH (2026-09-08) ─────────────────────────────────────────────
+     'Accepted' is not 'settled'. Since the node fix of the same day
+     /v1/transactions/:hash is truthful for a shielded send: "pending … awaiting
+     finality" the moment a block carries it, "applied" at finality, "rejected" only
+     for a refusal no later block can cure. The nullifier set stays the ground truth
+     (a seen nullifier wins over any status). Runs in the background: updates the
+     message and the receipt footer, and on a refusal — or a node that has forgotten
+     the payment for a minute — rolls back the local booking, so this wallet does not
+     keep a note marked spent for money that never moved. */
+  function privFoot(html){ try{ var p=document.getElementById('sendReceipt'); var f=document.getElementById('rcFoot'); if(p&&f&&p.getAttribute('data-kind')==='send') f.innerHTML=html; }catch(e){} }
+  function privRollback(from, pick, changeIndex){
+    try{
+      var arr=myNotes(from);
+      if(pick && pick.kind!=='recv' && pick.note){ for(var k=0;k<arr.length;k++){ if(arr[k].index===pick.note.index) arr[k].spent=false; } }
+      if(changeIndex!==null && changeIndex!==undefined){ arr=arr.filter(function(n){ return n.index!==changeIndex; }); }
+      saveMyNotes(from, arr);
+    }catch(e){}
+  }
+  async function sigilWatchPrivateSend(txid, nullifier, from, pick, changeIndex, amtStr){
+    if(!txid) return;
+    var nf=String(nullifier||'').toLowerCase(), deadline=Date.now()+15*60*1000, announced=false, unknowns=0;
+    while(Date.now()<deadline){
+      await new Promise(function(r){ setTimeout(r,5000); });
+      var seen=false, st=null, reason='';
+      try{ var nl=await fetch('/v1/shielded/nullifiers',{cache:'no-store'}).then(function(r){return r.json();});
+           if(nl&&nl.nullifiers) seen=nl.nullifiers.map(function(h){return String(h).toLowerCase();}).indexOf(nf)>=0; }catch(_){}
+      try{ var tj=await fetch('/v1/transactions/'+txid,{cache:'no-store'}).then(function(r){return r.json();});
+           var d=(tj&&tj.data)||{}; st=d.status||null; reason=d.reason||''; }catch(_){}
+      unknowns=(st==='unknown')?unknowns+1:0;
+      if(seen || st==='applied'){
+        privMsg('✓ '+amtStr+' SIGIL sent privately — settled (final).', '#00e0c6');
+        privFoot('<b style="color:#00e0c6">✓ Settled — final.</b> The payment crossed the DAG\'s finality depth; the recipient\'s wallet can find the note now.');
+        setTimeout(function(){ if(window.refresh)refresh(); }, 600);
+        return;
+      }
+      if(st==='rejected' || unknowns>=12){
+        privRollback(from, pick, changeIndex);
+        var why = st==='rejected' ? ('the network refused it: '+(reason||'no reason given')) : 'the node no longer knows it (it may have restarted) and it never landed';
+        privMsg('✗ not sent — '+why+'. Nothing moved; your note is yours again.', '#ff8a8a');
+        privFoot('<b style="color:#ff8a8a">✗ Not sent</b> — '+why+'. Nothing moved; your note is spendable again.');
+        return;
+      }
+      if(st==='pending' && /awaiting finality/.test(reason) && !announced){
+        announced=true;
+        privMsg('In a block — waiting for finality (about a minute and a half)…', '#6df3ff');
+        privFoot('<b style="color:#6df3ff">In a block</b> — waiting for finality (about a minute and a half). This footer turns green when it is final.');
+      }
+    }
+    privMsg('⚠ not seen to settle within 15 minutes — check Activity before paying again.', '#fbbf24');
+  }
   function saveMyNotes(addr,arr){ try{ localStorage.setItem('sigil-shielded-notes-'+addr, JSON.stringify(arr)); }catch(e){} }
 
   // Real end-to-end private send: pick one of this wallet's own LANDED shielded notes
@@ -2516,11 +2736,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     var h=document.createElement('div'); h.style.cssText="font-family:'JetBrains Mono';font-size:10px;letter-spacing:1px;color:#a78bfa;text-transform:uppercase"; h.textContent='private inbox — '+found.length+' note(s) sealed to you'; box.appendChild(h);
     found.reverse().forEach(function(f){
       var row=document.createElement('div'); row.style.cssText="background:rgba(4,8,12,.55);border:1px solid rgba(167,139,250,.18);border-radius:10px;padding:8px 10px";
-      // Note values are GLYPHS. sigilFromGlyphs is the exact BigInt inverse of the amount
-      // parser (see SIGIL MONEY SCALE) — the float path this shipped with divided by a
-      // hard-coded 1e10 and lost digits past ~9e15; trailing zeros are trimmed for reading.
-      var vtxt=sigilFromGlyphs(f.value).replace(/0+$/,'').replace(/\.$/,'');
-      var v=document.createElement('div'); v.style.cssText="font-family:'Orbitron';font-size:13px;color:#cfe9f2"; v.textContent=vtxt+' SIGIL'; row.appendChild(v);
+      var v=document.createElement('div'); v.style.cssText="font-family:'Orbitron';font-size:13px;color:#cfe9f2"; v.textContent=(Number(f.value)/1e10).toFixed(10).replace(/0+$/,'').replace(/\.$/,'')+' SIGIL'; row.appendChild(v);
       var p=document.createElement('div'); p.style.cssText="font-family:'JetBrains Mono';font-size:9.5px;color:#5a93a8"; p.textContent='pool leaf #'+f.pos; row.appendChild(p);
       if(f.memo){ var m=document.createElement('div'); m.style.cssText="font-family:'JetBrains Mono';font-size:11px;color:#cdbdfa;margin-top:4px;white-space:pre-wrap;word-break:break-word"; m.textContent='\u201c'+f.memo+'\u201d'; row.appendChild(m); }
       box.appendChild(row);
@@ -2538,11 +2754,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       mnemonic = (prompt('Enter your recovery phrase (or 64-hex mining seed) to open your private inbox.\nSaved in THIS browser until you press LOG OUT.')||'').trim();
       if(!mnemonic){ privMsg('Cancelled — recovery phrase required.', '#fbbf24'); return; }
     }
-    // Same purge-on-mismatch discipline as doPrivateSend/doShield: a stored secret for the
-    // WRONG wallet must be forgotten, or persistence turns one bad entry into a permanent
-    // wedge — every later attempt reloads it from localStorage and fails identically.
-    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ window.__sigilMnemonic=null; sigilForgetSecret(); privMsg('Could not derive a key from that phrase.', '#ff8a8a'); return; }
-    if(kp.address!==from){ window.__sigilMnemonic=null; sigilForgetSecret(); privMsg('That phrase belongs to '+kp.address.slice(0,10)+'… but this wallet is '+from.slice(0,10)+'…. Cleared it — press PRIVATE INBOX again to enter the right one.', '#ff8a8a'); return; }
+    var kp; try{ kp=window.sigilDeriveAuto(mnemonic, from); }catch(e){ privMsg('Could not derive a key from that phrase.', '#ff8a8a'); return; }
+    if(kp.address!==from){ privMsg('That phrase belongs to '+kp.address.slice(0,10)+'… but this wallet is '+from.slice(0,10)+'…', '#ff8a8a'); return; }
     window.__sigilMnemonic=mnemonic; sigilSaveSecret(mnemonic);
     privMsg('Scanning the shielded pool for notes sealed to you…', '#6df3ff');
     try{
@@ -2556,9 +2769,9 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     var recipient=window.__privRecipient;
     if(!recipient){ privMsg('Check a recipient address first.', '#ff8a8a'); return; }
     var amtStr=(document.getElementById('privAmt').value||'').trim();
-    if(!SIGIL_AMOUNT_RE.test(amtStr) || Number(amtStr)<=0){ privMsg('Amount must be > 0 (max '+SIGIL_DP+' decimals).', '#ff8a8a'); return; }
+    if(!/^\d+(\.\d{1,10})?$/.test(amtStr) || Number(amtStr)<=0){ privMsg('Amount must be > 0 (max 10 decimals).', '#ff8a8a'); return; }
     var parts=amtStr.split('.');
-    var amountRaw=sigilToGlyphs(amtStr);   // text -> glyphs, the one parser
+    var amountRaw=BigInt(parts[0]||'0')*GLYPH + BigInt(((parts[1]||'')+'0000000000').slice(0,SIGIL_DECIMALS));
 
     var from=(window.MINE_ADDR||window.ADDR||'').toLowerCase();
     if(!/^[0-9a-f]{64}$/.test(from)){ privMsg('No wallet address loaded.', '#ff8a8a'); return; }
@@ -2595,7 +2808,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
           // orchestrator. It used to infer success from the receipt pane merely being
           // visible — which step 1 had already made true, so it reported DONE for a
           // payment it never made.
-          try{ window.showReceipt([{txid:ffj.txid,value:amountRaw}], amtStr, from, null, 'send', recipient); }catch(e){}
+          try{ showReceipt([{txid:ffj.txid,value:amountRaw}], amtStr, from, null, 'send', recipient); }catch(e){}
           return true;
         }
       }
@@ -2630,31 +2843,84 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       var leaves=lj.leaves||[], capacity=lj.capacity;
       try{ sigilRenderInbox(wasm, seedHex, lj); }catch(_){}
 
-      var FEE=100000n; // sigil_state::shielded::SHIELDED_FEE — mirrored in sigil-shield/src/wasm_api.rs:45.
-      // NOT a decimals conversion: this is the chain's flat fee in GLYPHS. It read 1000n, which was
-      // the g1 (8 dp) value; at 10 dp the same fee is 100000n. Only used to pick a covering note —
-      // the fee actually submitted is req.fee, built by the prover — so a low value here silently
-      // picked notes the prover then refused. Keep it equal to the Rust constant, never scaled.
-      var candidates=[];
+      var FEE=100000n; // sigil_state::shielded::SHIELDED_FEE (g2: 100_000 glyphs; was 1000 on g1) — mirrored in wasm_api.rs too
+      var candidates=[], unlanded=0;
+
+      // ── (a) SELF-CREATED notes, from this browser's own bookkeeping ──────────
+      // Addressed by derivation index: the blinding is blinding(seed, index), so the
+      // index is the whole record, and only this browser can know it.
       var notes=myNotes(from).filter(function(n){ return !n.spent; });
       for(var i=0;i<notes.length;i++){
         var n=notes[i];
         if(BigInt(n.value) < amountRaw+FEE) continue; // this note alone can't cover it
         var cm; try{ cm=wasm.shieldNoteCommitment(seedHex, n.index, String(n.value)); }catch(e){ continue; }
         var pos=leaves.indexOf(cm);
-        if(pos<0) continue; // not landed yet (still finalizing) — skip, don't fail the whole send
-        candidates.push({note:n, position:pos});
+        if(pos<0){ unlanded++; continue; } // not landed yet (still finalizing) — skip, don't fail the whole send
+        candidates.push({note:n, position:pos, value:BigInt(n.value), kind:'self'});
       }
+
+      // ── (b) RECEIVED / MINED notes, from the CHAIN ───────────────────────────
+      //
+      // THE BUG THIS FIXES (2026-09-06). Everything above reads `myNotes()`, which is
+      // localStorage — a list of notes THIS BROWSER created. A wallet that mined on a
+      // phone, or was paid by somebody else, has an empty list here, so Send could never
+      // find a note while the balance beside it correctly showed the money. Two sources
+      // of truth, and the sender was using the one that is not the chain.
+      //
+      // A received note has no derivation index on this side: its blinding was chosen by
+      // whoever sealed it and exists only inside the ciphertext. `openNoteCiphertext`
+      // returns it, and `buildPrivateSendReceived*` (added to the WASM the same day)
+      // spends by explicit blinding. The PROOF is identical either way — build_spend uses
+      // the blinding and the leaf position, and never looks at an index.
+      var cts = lj.ciphertexts || [];
+      var seenPos = {};
+      for(var sp=0; sp<candidates.length; sp++) seenPos[candidates[sp].position]=1;
+      if(cts.length && wasm.buildPrivateSendReceived){
+        // Which of ours are already spent? Nullifiers are public; derive ours the way the
+        // balance scan does. If that helper is not loaded we simply do not net — the node
+        // then refuses with "nullifier already spent", a loud honest failure rather than
+        // a silently wrong balance.
+        var spentSet=null, spendKey=null, M=window.__sigilShield;
+        try{
+          var nl=await fetch('/v1/shielded/nullifiers',{cache:'no-store'}).then(function(r){return r.json();});
+          if(nl && nl.ok && nl.nullifiers && M){
+            spentSet=new Set(nl.nullifiers.map(function(h){return String(h).toLowerCase();}));
+            spendKey=M.deriveField(seedHex,'spend-key',0);
+          }
+        }catch(_){}
+        for(var ci=0; ci<cts.length; ci++){
+          if(!cts[ci] || seenPos[ci]) continue;
+          var op=null;
+          try{ op=JSON.parse(wasm.openNoteCiphertext(seedHex, typeof cts[ci]==='string'?cts[ci]:JSON.stringify(cts[ci]))); }
+          catch(_){ continue; }              // not ours — the AEAD tag IS the ownership proof
+          if(!op || op.blinding_hex==null) continue;
+          var rv; try{ rv=BigInt(op.value); }catch(_){ continue; }
+          if(rv < amountRaw+FEE) continue;
+          if(spentSet && spendKey){
+            try{
+              var rawNf=M.toWireHex(M.compress2(spendKey, BigInt(ci))).toLowerCase();
+              if(spentSet.has(rawNf)) continue;   // live epoch is 0, where scoping is the identity
+            }catch(_){}
+          }
+          candidates.push({recv:{value:String(op.value), blinding:op.blinding_hex}, position:ci, value:rv, kind:'recv'});
+        }
+      }
+
       // Prefer the SMALLEST covering note — leaves bigger notes free for bigger sends
       // later. This wallet does not yet combine multiple notes into one spend.
-      candidates.sort(function(a,b){ return Number(BigInt(a.note.value)-BigInt(b.note.value)); });
+      candidates.sort(function(a,b){ return Number(a.value-b.value); });
+      if(!candidates.length && unlanded>0){
+        privMsg('⏳ your private balance is still settling on the DAG ('+unlanded+' note'+(unlanded===1?'':'s')+' not landed yet) — about a minute and a half after shielding.', '#fbbf24');
+        return 'retry';
+      }
       if(!candidates.length){
-        privMsg('✗ no landed shielded note covers '+amtStr+' SIGIL + fee. Shield more, wait for a pending deposit to finalize, or send a smaller amount.', '#fbbf24');
+        privMsg('✗ no landed shielded note covers '+amtStr+' SIGIL + fee. Every note is spent, still settling, or smaller than the amount — this wallet cannot yet combine two notes into one payment, so try a smaller amount.', '#fbbf24');
         return;
       }
       var pick=candidates[0];
       var infoEl=document.getElementById('privNoteInfo');
-      if(infoEl) infoEl.textContent='spending a '+(Number(pick.note.value)/SIGIL_UNITS_N).toFixed(SIGIL_DP)+' SIGIL note (pool leaf #'+pick.position+')';
+      if(infoEl) infoEl.textContent='spending a '+glyphStr(pick.value.toString())+' SIGIL '
+        +(pick.kind==='recv'?'received/mined':'self-made')+' note (pool leaf #'+pick.position+')';
 
       privMsg('Building + proving the private spend — real zk-STARK, client-side (~0.5-2s)…', '#6df3ff');
       var reqJson;
@@ -2662,19 +2928,28 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         var memo=sigilPrivMemo();
         if(new TextEncoder().encode(memo).length>512){ privMsg('✗ memo is over 512 bytes — shorten it.', '#ff8a8a'); return; }
         if(memo && !wasm.buildPrivateSendWithMemo){ privMsg('✗ this wallet build cannot seal memos yet — reload the page.', '#ff8a8a'); return; }
-        reqJson = memo
-          ? wasm.buildPrivateSendWithMemo(
-              seedHex, pick.note.index, String(pick.note.value), pick.position,
-              JSON.stringify(leaves), capacity,
-              recipient.pk_shield, recipient.pk_encrypt,
-              amountRaw.toString(), memo
-            )
-          : wasm.buildPrivateSend(
-              seedHex, pick.note.index, String(pick.note.value), pick.position,
-              JSON.stringify(leaves), capacity,
-              recipient.pk_shield, recipient.pk_encrypt,
-              amountRaw.toString()
-            );
+        if(pick.kind==='recv'){
+          // Received/mined: addressed by its BLINDING, straight out of the ciphertext.
+          reqJson = memo
+            ? wasm.buildPrivateSendReceivedWithMemo(
+                seedHex, pick.recv.blinding, pick.recv.value, pick.position,
+                JSON.stringify(leaves), capacity,
+                recipient.pk_shield, recipient.pk_encrypt, amountRaw.toString(), memo)
+            : wasm.buildPrivateSendReceived(
+                seedHex, pick.recv.blinding, pick.recv.value, pick.position,
+                JSON.stringify(leaves), capacity,
+                recipient.pk_shield, recipient.pk_encrypt, amountRaw.toString());
+        } else {
+          reqJson = memo
+            ? wasm.buildPrivateSendWithMemo(
+                seedHex, pick.note.index, String(pick.note.value), pick.position,
+                JSON.stringify(leaves), capacity,
+                recipient.pk_shield, recipient.pk_encrypt, amountRaw.toString(), memo)
+            : wasm.buildPrivateSend(
+                seedHex, pick.note.index, String(pick.note.value), pick.position,
+                JSON.stringify(leaves), capacity,
+                recipient.pk_shield, recipient.pk_encrypt, amountRaw.toString());
+        }
       }catch(e){ privMsg('✗ could not build the spend: '+(e&&e.message||e), '#ff8a8a'); return; }
       var req=JSON.parse(reqJson);
 
@@ -2691,7 +2966,11 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       // never tries to reuse it, and record the change so it becomes spendable —
       // same schema/pattern doShield()'s noteRecord() already writes.
       var updated=myNotes(from);
-      for(var k=0;k<updated.length;k++){ if(updated[k].index===pick.note.index){ updated[k].spent=true; } }
+      // A received note is not in this list to mark — its nullifier is now on chain,
+      // which IS the authoritative "spent", and the scan above nets it out from there.
+      if(pick.kind!=='recv'){
+        for(var k=0;k<updated.length;k++){ if(updated[k].index===pick.note.index){ updated[k].spent=true; } }
+      }
       if(req.change_index!==null && req.change_index!==undefined){
         updated.push({index:req.change_index, value:Number(req.change_value), ts:Date.now()});
       }
@@ -2701,7 +2980,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       var amtEl=document.getElementById('privAmt'); if(amtEl) amtEl.value=''; sigilClearPrivMemo();
       // Receipt says SENT, and an EXPLICIT success is handed back — see the fast
       // path above and the orchestrator for why inferring it was wrong.
-      try{ window.showReceipt([{txid:sj.txid,value:amountRaw}], amtStr, from, null, 'send', recipient); }catch(e){}
+      try{ showReceipt([{txid:sj.txid,value:amountRaw}], amtStr, from, null, 'send', recipient); }catch(e){}
+      try{ sigilWatchPrivateSend(sj.txid, req.nullifier, from, pick, req.change_index, amtStr); }catch(e){}
       return true;
     }catch(e){
       privMsg('✗ network error — node unreachable.', '#ff8a8a');
@@ -2822,14 +3102,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     if(sel) sel.innerHTML=window.__swapPools.map(function(p){return '<option value="'+p.id+'">'+p.sym_a+' / '+p.sym_b+'</option>';}).join('');
     swapRenderTicker();
   }).catch(function(){ swapRenderTicker(); });
-  // ⚠ DELIBERATELY NOT converted to SIGIL_UNITS. This panel is token-generic and
-  // /v1/pools (PoolSummary) carries NO decimals field, so the wallet cannot know a leg's
-  // scale; meanwhile sigil-dex::registry still declares NATIVE as decimals: 8, which
-  // contradicts sigil_state::SIGIL_DECIMALS = 10. Entry (swapRecalc) and display (fmt8)
-  // are matched at 1e8 here, so the panel stays self-consistent, and /v1/pools returns []
-  // on the live chain so nothing is rendered today. Resolving it needs a decimals field on
-  // the wire + a decision in sigil-dex — not a guess in the browser.
-  function fmt8(n){ return (Number(n)/1e8).toLocaleString(undefined,{maximumFractionDigits:6}); }
+  function fmt8(n){ return (Number(n)/1e10).toLocaleString(undefined,{maximumFractionDigits:6}); }
   function ammQuote(reserveIn,reserveOut,amountIn,feeBps){
     if(amountIn<=0n||reserveIn<=0n||reserveOut<=0n) return 0n;
     var feeComplement=10000n-BigInt(feeBps);
@@ -2881,8 +3154,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     var L=legs(); var msgEl=document.getElementById('swapMeta'); var out=document.getElementById('swapOut'); var go=document.getElementById('swapGo');
     if(!L){ out.textContent='0.0'; msgEl.textContent=''; if(go)go.disabled=true; return; }
     var amtStr=(document.getElementById('swapAmt').value||'').trim();
-    if(!/^\d+(\.\d{1,8})?$/.test(amtStr)||Number(amtStr)<=0){ out.textContent='0.0'; msgEl.textContent=''; if(go)go.disabled=true; return; }
-    var parts=amtStr.split('.'); var amountIn=BigInt(parts[0]||'0')*100000000n+BigInt(((parts[1]||'')+'00000000').slice(0,8));
+    if(!/^\d+(\.\d{1,10})?$/.test(amtStr)||Number(amtStr)<=0){ out.textContent='0.0'; msgEl.textContent=''; if(go)go.disabled=true; return; }
+    var parts=amtStr.split('.'); var amountIn=BigInt(parts[0]||'0')*GLYPH+BigInt(((parts[1]||'')+'0000000000').slice(0,SIGIL_DECIMALS));
     var grossOut=ammQuote(L.reserveIn,L.reserveOut,amountIn,L.feeBps);
     if(grossOut<=0n){ out.textContent='0.0'; msgEl.textContent='amount too small for this pool'; if(go)go.disabled=true; return; }
     var split=splitMasterFee(grossOut);
@@ -3017,8 +3290,6 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
 <script>
 (function(){
   var WSIGIL_CONTRACT = '0xc224602C32F5c7f68d3Ef002aE4C99e4C7Df25B7'; // Polygon mainnet, chain 137
-  // wSIGIL on Polygon is a standard 18-decimal ERC20 — a foreign token's scale, unrelated
-  // to SIGIL_DECIMALS. Leave at 18.
   var WSIGIL_DECIMALS = 18;
   // Same order/endpoints as sigil-api's Chain::Polygon public_fallbacks().
   var POLY_RPCS = ['https://polygon-bor-rpc.publicnode.com', 'https://1rpc.io/matic'];
@@ -3073,16 +3344,50 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     }
   };
 
-  window.polyBridgeUseMetaMask = async function(inputId){
+  /* ── one account-picker for both 🦊 buttons ─────────────────────────────
+     These used to call eth_requestAccounts directly and swallow every error.
+     That is how the origin got wedged: the popup opens, the user clicks away
+     without answering, MetaMask keeps the request pending FOR THE WHOLE
+     ORIGIN, and the next connect anywhere on sigilgraph.org — including the
+     login gate — dies with
+       -32002 "Request of type 'wallet_requestPermissions' already pending".
+     Silence made it invisible here and someone else's bug over there. So:
+     ask eth_accounts first (never prompts), and when a request really is
+     already pending, say so and wait for the user to answer it. ───────────*/
+  async function sigilPickMetaMaskAccount(onWait){
+    var eth = window.ethereum;
+    if (!eth) { alert('MetaMask (or another injected wallet) was not detected in this browser.'); return null; }
+    try { var have = await eth.request({ method: 'eth_accounts' });
+          if (have && have[0]) return have[0]; } catch (e) {}
     try {
-      var eth = window.ethereum;
-      if (!eth) { alert('MetaMask (or another injected wallet) was not detected in this browser.'); return; }
       var accts = await eth.request({ method: 'eth_requestAccounts' });
-      if (accts && accts[0]) {
-        var input = document.getElementById(inputId);
-        if (input) { input.value = accts[0]; window.polyBridgeCheck(inputId); }
+      return (accts && accts[0]) || null;
+    } catch (e) {
+      var code = e && (e.code != null ? e.code : (e.data && e.data.originalError && e.data.originalError.code));
+      var pending = code === -32002 || /already pending/i.test(String((e && e.message) || ''));
+      if (!pending) return null;                       // 4001 = user said no
+      if (onWait) onWait();
+      // The popup is already open. Poll the non-prompting call until answered.
+      var deadline = Date.now() + 180000;
+      while (Date.now() < deadline) {
+        await new Promise(function(r){ setTimeout(r, 1000); });
+        try { var a = await eth.request({ method: 'eth_accounts' });
+              if (a && a[0]) return a[0]; } catch (e2) {}
       }
-    } catch (e) { /* user rejected the connection, or no provider — leave the field as-is */ }
+      return null;
+    }
+  }
+
+  window.polyBridgeUseMetaMask = async function(inputId){
+    var acct = await sigilPickMetaMaskAccount(function(){
+      alert('MetaMask already has a connection request open for this site.\n\n' +
+            'Click the MetaMask fox in your browser toolbar and approve it — ' +
+            'this page will fill the field in by itself once you do.');
+    });
+    if (acct) {
+      var input = document.getElementById(inputId);
+      if (input) { input.value = acct; window.polyBridgeCheck(inputId); }
+    }
   };
 
   // Opens the BRIDGE modal (defined below) pre-filled with whatever address
@@ -3156,7 +3461,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   function bridgeStatus(msg,color){ var e=document.getElementById('bridgeMsg'); if(e){ e.textContent=msg; e.style.color=color||'#8fb3c2'; } }
   window.openBridge=function(){
     var m=document.getElementById('bridge-modal'); if(!m) return;
-    try{ var raw=BigInt(window.SIGIL_RAW||'0'); var w=raw/SIGIL_UNITS, f=(raw%SIGIL_UNITS).toString().padStart(SIGIL_DP,'0');
+    try{ var raw=BigInt(window.SIGIL_RAW||'0'); var w=raw/GLYPH, f=(raw%GLYPH).toString().padStart(SIGIL_DECIMALS,'0');
       document.getElementById('bridgeAvail').textContent=w.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')+'.'+f; }catch(e){}
     bridgeStatus(''); document.getElementById('bridgeForm').style.display='flex'; document.getElementById('bridgeReceipt').style.display='none';
     m.style.display='flex';
@@ -3164,16 +3469,15 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   };
   window.closeBridge=function(){ var m=document.getElementById('bridge-modal'); if(m)m.style.display='none'; };
   window.bridgeMax=function(){
-    try{ var raw=BigInt(window.SIGIL_RAW||'0'); var w=raw/SIGIL_UNITS, f=(raw%SIGIL_UNITS).toString().padStart(SIGIL_DP,'0');
-      document.getElementById('bridgeAmt').value=w.toString()+'.'+f; }catch(e){}
+    try{ document.getElementById('bridgeAmt').value=glyphStr(window.SIGIL_RAW||'0'); }catch(e){}
   };
   window.bridgeUseMetaMask=async function(){
-    try{
-      var eth=window.ethereum;
-      if(!eth){ alert('MetaMask (or another injected wallet) was not detected in this browser.'); return; }
-      var accts=await eth.request({method:'eth_requestAccounts'});
-      if(accts && accts[0]) document.getElementById('bridgeDest').value=accts[0];
-    }catch(e){ /* user rejected — leave the field as-is */ }
+    var acct = await sigilPickMetaMaskAccount(function(){
+      alert('MetaMask already has a connection request open for this site.\n\n' +
+            'Click the MetaMask fox in your browser toolbar and approve it — ' +
+            'this page will fill the field in by itself once you do.');
+    });
+    if (acct) document.getElementById('bridgeDest').value = acct;
   };
   async function submitBridgeLockSigned(from,base,dest,amtStr,reqNonce,sig,lockId,parts){
     bridgeStatus('Submitting…', '#6df3ff'); var btn=document.getElementById('bridgeGo'); if(btn)btn.disabled=true;
@@ -3274,8 +3578,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     var destNorm=dest.toLowerCase().replace(/^0x/,'');
     if(!/^[0-9a-f]{40}$/.test(destNorm)){ bridgeStatus('Destination must be a valid Polygon address (0x… 40 hex chars).', '#ff8a8a'); return; }
     var amtStr=(document.getElementById('bridgeAmt').value||'').trim();
-    if(!SIGIL_AMOUNT_RE.test(amtStr) || Number(amtStr)<=0){ bridgeStatus('Amount must be > 0 (max '+SIGIL_DP+' decimals).', '#ff8a8a'); return; }
-    var base=sigilToGlyphs(amtStr);   // text -> glyphs, the one parser
+    if(!/^\d+(\.\d{1,10})?$/.test(amtStr) || Number(amtStr)<=0){ bridgeStatus('Amount must be > 0 (max 10 decimals).', '#ff8a8a'); return; }
+    var parts=amtStr.split('.'); var base=BigInt(parts[0]||'0')*GLYPH + BigInt(((parts[1]||'')+'0000000000').slice(0,SIGIL_DECIMALS));
     var from=(window.MINE_ADDR||window.ADDR||'').toLowerCase();
     if(!/^[0-9a-f]{64}$/.test(from)){ bridgeStatus('No wallet address loaded.', '#ff8a8a'); return; }
 
@@ -6338,6 +6642,40 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
 
       <div class="xc-warn" id="xcNote"></div>
       <button class="xc-go" id="xcGo" onclick="xcGo()">BRIDGE</button>
+
+      <!-- ── DIRECT UNISWAP V2 ─────────────────────────────────────────────
+           app.uniswap.org answered "Token approval failed — a network or
+           connection issue likely caused your approval to fail", and it was
+           telling the truth: no approval ever reached the chain (allowance to
+           Permit2, the V2 router and both Universal Routers all read zero).
+           Their app routes through Permit2 + the Universal Router + their own
+           backend; that is three things that can fail for a brand-new unlisted
+           pair. This goes straight to the canonical V2 router. -->
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid rgba(120,150,170,.22)">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:1.4px;
+                    text-transform:uppercase;color:#a78bfa;margin-bottom:8px">⇄ Trade on Uniswap — direct</div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <select id="uniDir" onchange="uniQuoteRefresh()" style="flex:0 0 auto;padding:9px 10px;border-radius:9px;
+                  background:rgba(255,255,255,.05);border:1px solid rgba(120,150,170,.32);color:#cfe6ee;font-size:12px">
+            <option value="buy">USDC → wSIGIL3</option>
+            <option value="sell">wSIGIL3 → USDC</option>
+          </select>
+          <input id="uniAmtIn" oninput="uniQuoteRefresh()" placeholder="amount in" autocomplete="off"
+                 style="flex:1 1 120px;min-width:110px;padding:9px 11px;border-radius:9px;background:rgba(255,255,255,.05);
+                        border:1px solid rgba(120,150,170,.32);color:#eaf3ff;font-family:'JetBrains Mono',monospace;font-size:12px">
+        </div>
+        <div id="uniQuoteMsg" style="margin-top:7px;font-size:11.5px;color:#8fb3c2;min-height:15px;line-height:1.5"></div>
+        <button id="uniGo" onclick="uniTrade()" style="width:100%;margin-top:9px;padding:11px;border-radius:10px;cursor:pointer;
+                font-weight:700;font-size:12.5px;background:rgba(167,139,250,.16);border:1px solid rgba(167,139,250,.5);color:#c4b5fd">
+          ⇄ SWAP DIRECT
+        </button>
+        <div style="margin-top:7px;font-size:11px;color:#7fa3b3;line-height:1.5">
+          Goes to the Uniswap <b>V2 router</b> itself — no Permit2, no Universal Router, no routing API.
+          Two transactions: approve the exact amount, then swap.
+          <b style="color:#fbbf24">This pool holds about $0.002</b>, so your own trade moves the price a lot.
+          That is the pool being small, not a bug — the quote below already accounts for it.
+        </div>
+      </div>
       <div class="xc-msg" id="xcMsg"></div>
     </div>
   </div>
@@ -6365,15 +6703,6 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
 
   /* ── small helpers ─────────────────────────────────────────────────────── */
   function $(id){ return document.getElementById(id); }
-  // ⚠ DELIBERATELY NOT converted to SIGIL_UNITS. This panel's unit is sigil-metamask.js's
-  // "8dp base unit", and that file is shared with enter-sigil.html and sigil-wallet-tron.html.
-  // Its Polygon leg is CORRECT today only by cancellation: base8 * MM.DECIMAL_SHIFT(10^10)
-  // = wei, and MM.balanceOfWei / 10^10 = base8. Converting this half alone would burn 100x
-  // on Polygon. The native half IS wrong (availBase is seeded from window.SIGIL_RAW, which
-  // is glyphs, and the lock POSTs glyphs), so this panel shows the native balance 100x high.
-  // Fixing it means moving sigil-metamask.js to 10 dp (its DECIMAL_SHIFT must become 10^8 to
-  // match sigil-relayer::DECIMAL_SHIFT, which already did) AND updating all three pages in
-  // the same commit. Operator call — see the report. Do not half-convert this.
   function fmt8(base){                       // 8dp base units -> display string
     var b=BigInt(base), w=b/100000000n, f=(b%100000000n).toString().padStart(8,'0');
     return w.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')+'.'+f;
@@ -6387,6 +6716,51 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
   function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){
     return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
   function msg(t,c){ var e=$('xcMsg'); if(e){ e.textContent=t||''; e.style.color=c||'#8fb3c2'; } }
+
+  // ── WHY THE FOX LOOKED DEAD (fixed 2026-09-06) ─────────────────────────────
+  //
+  // `msg()` writes into #xcMsg, which lives INSIDE the cross-chain modal. The
+  // 🦊 chip in the top menu calls xcConnectMM() with that modal CLOSED, so every
+  // line it produced — "Waiting for MetaMask…", "No browser wallet detected",
+  // the -32002 explanation, the error — was painted into a hidden element.
+  // The handler ran correctly and reported faithfully, into a box nobody could
+  // see. From the outside that is indistinguishable from a dead button, and it
+  // is what "nothing happens" meant.
+  //
+  // Worse in the wedged case: MM.connect() polls eth_accounts for up to 180 s
+  // waiting for an already-open MetaMask popup to be answered, and xcConnectMM
+  // passed NO onWait callback — so the click sat silent for three minutes while
+  // the dedup latch made every further click a no-op on the same promise.
+  //
+  // So: speak somewhere that exists whether or not a modal is open, and always
+  // name the next action.
+  function mmToast(t, kind){
+    var el = document.getElementById('mmToast');
+    if(!el){
+      el = document.createElement('div');
+      el.id = 'mmToast';
+      el.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:26px;z-index:100000;'
+        + 'max-width:min(560px,calc(100vw - 28px));padding:12px 16px;border-radius:12px;'
+        + "font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;line-height:1.55;"
+        + 'background:rgba(6,20,28,.97);color:#cfe6ee;border:1px solid rgba(109,243,255,.4);'
+        + 'box-shadow:0 10px 34px rgba(0,0,0,.55);display:none;text-align:left;cursor:pointer';
+      el.onclick = function(){ el.style.display='none'; };
+      document.body.appendChild(el);
+    }
+    if(!t){ el.style.display='none'; return; }
+    el.innerHTML = t;
+    el.style.borderColor = kind==='err' ? 'rgba(255,138,138,.55)'
+                          : kind==='ok' ? 'rgba(0,224,198,.55)' : 'rgba(109,243,255,.4)';
+    el.style.color = kind==='err' ? '#ffb9b9' : kind==='ok' ? '#8ff5e6' : '#cfe6ee';
+    el.style.display = 'block';
+    if(kind==='ok'){ setTimeout(function(){ if(el.textContent===el.textContent) el.style.display='none'; }, 4000); }
+  }
+  // Say it in BOTH places: the modal line (when open) and the toast (always).
+  function mmSay(t, kind){
+    msg(t, kind==='err' ? '#ff8a8a' : kind==='ok' ? '#00e0c6' : '#6df3ff');
+    mmToast(t, kind);
+  }
+  try{ window.mmToast=mmToast; }catch(e){}
 
   /* ── state ─────────────────────────────────────────────────────────────── */
   var dir='to_polygon';           // 'to_polygon' = lock native | 'to_sigil' = burn wrapped
@@ -6415,22 +6789,55 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
   }
 
   window.xcConnectMM = async function(){
-    if(!MM){ msg('MetaMask helper failed to load — reload the page.','#ff8a8a'); return; }
+    var nav=$('mmNavTxt'), navWas = nav ? nav.textContent : null;
+    function navSay(t){ if(nav) nav.textContent=t; }
+    if(!MM){
+      mmSay('The MetaMask helper script did not load (sigil-metamask.js). Reload the page; if it persists, an extension or network filter is blocking it.','err');
+      return;
+    }
     if(!MM.available()){
-      msg('No browser wallet detected. Install MetaMask, then reload this page.','#ff8a8a');
+      mmSay('No browser wallet is injected into this page.<br>'
+        + 'Install MetaMask and <b>reload</b> — extensions only attach at page load. '
+        + 'In a private window, MetaMask must be explicitly allowed in incognito.','err');
       paintMM(); return;
     }
     try{
       var st=MM.getState();
-      if(!st.connected){ msg('Waiting for MetaMask…','#6df3ff'); await MM.connect(); }
-      msg('Switching to Polygon…','#6df3ff');
+      if(!st.connected){
+        mmSay('Waiting for MetaMask… <span style="opacity:.75">approve the connection in the extension popup.</span>');
+        navSay('waiting…');
+        // onWait fires when the origin already has an un-answered request open.
+        // MetaMask will NOT raise a second popup in that state, so the only way
+        // out is for the user to open the one already sitting behind the fox.
+        await MM.connect(function(){
+          mmSay('🦊 <b>MetaMask already has a request open for this site.</b><br>'
+            + 'Click the fox in your browser toolbar and approve (or reject) it — '
+            + 'this page will continue by itself the moment you do.<br>'
+            + '<span style="opacity:.7">Dismissing the popup does not cancel it; the request stays pending for the whole site.</span>','err');
+          navSay('check MetaMask');
+        });
+      }
+      mmSay('Switching to Polygon…');
       try{ await MM.ensurePolygon(); }catch(e){}
-      msg('Adding the wrapped SIGIL token…','#6df3ff');
+      mmSay('Adding the wrapped SIGIL token…');
       try{ await MM.watchToken(); }catch(e){}
-      msg('');
+      var s2=MM.getState();
+      mmSay('🦊 Connected — <b>'+(s2.account||'').slice(0,6)+'…'+(s2.account||'').slice(-4)+'</b>'
+        + (s2.onPolygon?' on Polygon ✓':' <span style="color:#fbbf24">(wrong network — open Bridge and press SWITCH)</span>'),'ok');
       paintMM(); xcFillDest(); refreshAvail();
+      try{ refreshPolygonAssets(); }catch(_){}
     }catch(e){
-      msg(e && e.code===4001 ? 'Cancelled in MetaMask.' : ('MetaMask: '+((e&&e.message)||e)),'#ff8a8a');
+      var code = e && e.code;
+      if(code===4001){
+        mmSay('Cancelled in MetaMask. Nothing was connected — press 🦊 again when you are ready.','err');
+      } else if(code===-32002 || (MM.isPendingErr && MM.isPendingErr(e))){
+        mmSay('🦊 <b>MetaMask still has an un-answered request for this site.</b><br>'
+          + 'Open the extension and approve or reject it, then press 🦊 again.<br>'
+          + '<span style="opacity:.7">If the popup is nowhere to be found, lock and unlock MetaMask — that clears a stuck request.</span>','err');
+      } else {
+        mmSay('MetaMask: '+((e&&e.message)||e),'err');
+      }
+      if(nav && navWas!=null && nav.textContent==='waiting…') navSay(navWas);
       paintMM();
     }
   };
@@ -6444,14 +6851,87 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     $('xcTo').innerHTML   = toPoly ? '⬟ Polygon' : '◈ SIGIL';
     $('xcDestLbl').textContent = toPoly ? 'Destination — Polygon address' : 'Destination — SIGIL address';
     $('xcDest').placeholder = toPoly ? '0x… 40-hex Polygon address' : '64-hex SIGIL address';
-    $('xcGo').textContent = toPoly ? '🌉 LOCK & BRIDGE' : '🔥 BURN & BRIDGE';
+    var burnOff = (!toPoly && MM && MM.burnEnabled && !MM.burnEnabled());
+    $('xcGo').textContent = toPoly ? '🌉 LOCK & BRIDGE' : (burnOff ? '🚫 BURNING DISABLED' : '🔥 BURN & BRIDGE');
+    $('xcGo').disabled = !!burnOff;
+    $('xcGo').style.opacity = burnOff ? '.5' : '';
+    $('xcGo').style.cursor  = burnOff ? 'not-allowed' : '';
     $('xcNote').innerHTML = toPoly
-      ? 'Locks native SIGIL you already hold into the chain’s bridge vault. SIGIL is privacy-only, so the lock is a shield into notes only the vault can spend — large amounts are split into several standard denominations, which is why you may see more than one transaction. The relayer mints the same total of wrapped SIGIL to your Polygon address once every part has SETTLED, not when this screen says submitted. Not instant, and not reversible from here.'
-      : 'Burns wrapped SIGIL on Polygon (a real Polygon transaction — you pay POL gas). The relayer sees the burn and releases the same amount of native SIGIL to the address below. <b>Burning is irreversible.</b>';
+      ? 'Locks native SIGIL you already hold into the chain\u2019s bridge vault. SIGIL is privacy-only, so the lock is a shield into notes only the vault can spend.'
+      : (burnOff
+          // Never leave a promise on screen that the system cannot keep. The old text
+          // said the relayer "releases the same amount of native SIGIL" — it is masked
+          // (unbacked-mint hazard), so a burn would destroy the wrapped tokens and
+          // release nothing at all. Burn is irreversible by definition; there is no
+          // undo and no support desk.
+          ? '<b style="color:#ff9d9d">Burning is turned off.</b> The bridge relayer is offline, so nothing is watching for burn events \u2014 a burn would destroy your wrapped SIGIL on Polygon and release <b>nothing</b> on the SIGIL side. Your tokens are safe where they are. Trade them on Uniswap, or hold until the relayer is live.'
+          : 'Burns wrapped SIGIL on Polygon (a real Polygon transaction \u2014 you pay POL gas). The relayer sees the burn and releases the same amount of native SIGIL to the address below. <b>Burning is irreversible.</b>');
     $('xcAmt').value=''; $('xcRange').value=0; paintRange(0);
     msg(''); xcFillDest(); refreshAvail();
   };
   window.xcFlip=function(){ xcSetDir(dir==='to_polygon'?'to_sigil':'to_polygon'); };
+
+  /* ── direct Uniswap V2 trade ─────────────────────────────────────────────── */
+  var UNI_USDC='0x3c499c542cef5e3811e1192ce70d8cc03d5c3359';
+  var UNI_TOK ='0x3fced760b0de6d57f96835c6110b1227941ec2e9';
+  function uniPath(){ return $('uniDir').value==='sell' ? [UNI_TOK,UNI_USDC] : [UNI_USDC,UNI_TOK]; }
+  function uniDp(){ return $('uniDir').value==='sell' ? [18,6] : [6,18]; }
+  function uniSym(){ return $('uniDir').value==='sell' ? ['wSIGIL3','USDC'] : ['USDC','wSIGIL3']; }
+  function uniParse(t, dp){
+    t=String(t||'').trim().replace(',','.');
+    if(!/^\d*(\.\d+)?$/.test(t) || t==='' || t==='.') return null;
+    var pr=t.split('.'); var frac=((pr[1]||'')+'0'.repeat(dp)).slice(0,dp);
+    var v=BigInt(pr[0]||'0')*(BigInt(10)**BigInt(dp))+BigInt(frac||'0');
+    return v>0n ? v : null;
+  }
+  function uniFmt(v,dp,keep){
+    var d=BigInt(10)**BigInt(dp), w=v/d;
+    var f=(v%d).toString().padStart(dp,'0').slice(0,keep||8).replace(/0+$/,'');
+    return w.toString()+(f?('.'+f):'');
+  }
+  var _uniT=null;
+  window.uniQuoteRefresh=function(){
+    clearTimeout(_uniT); _uniT=setTimeout(async function(){
+      var el=$('uniQuoteMsg'); if(!el) return;
+      var dps=uniDp(), syms=uniSym();
+      var amt=uniParse($('uniAmtIn').value, dps[0]);
+      if(!amt){ el.textContent=''; return; }
+      if(!MM || !MM.uniQuote){ el.textContent='MetaMask helper not loaded.'; return; }
+      el.textContent='quoting…';
+      try{
+        var outs=await MM.uniQuote(amt, uniPath());
+        var out=outs[outs.length-1];
+        if(out<=0n){ el.innerHTML='<span style="color:#ff8a8a">The pool cannot fill that.</span>'; return; }
+        var px = Number(amt)/Math.pow(10,dps[0]) / (Number(out)/Math.pow(10,dps[1]));
+        el.innerHTML='→ <b style="color:#c4b5fd">'+uniFmt(out,dps[1],8)+' '+syms[1]+'</b>'
+          + '<span style="opacity:.7"> · effective rate '+(syms[0]==='USDC'?('$'+px.toFixed(6)+' per wSIGIL3'):('$'+(1/px).toFixed(6)+' per wSIGIL3'))+'</span>';
+      }catch(e){ el.innerHTML='<span style="color:#ff8a8a">quote failed: '+String(e&&e.message||e)+'</span>'; }
+    }, 250);
+  };
+  window.uniTrade=async function(){
+    var el=$('uniQuoteMsg'), btn=$('uniGo');
+    var dps=uniDp(), syms=uniSym();
+    var amt=uniParse($('uniAmtIn').value, dps[0]);
+    if(!amt){ mmSay('Enter an amount to swap.','err'); return; }
+    if(!MM || !MM.uniSwap){ mmSay('MetaMask helper not loaded — reload the page.','err'); return; }
+    try{
+      btn.disabled=true;
+      var r=await MM.uniSwap(amt, uniPath(), 100, function(step, tx){
+        if(step==='approve')      mmSay('Approving '+uniFmt(amt,dps[0],8)+' '+syms[0]+' — confirm in MetaMask…');
+        if(step==='approve-sent') mmSay('Approval sent, waiting for it to land on Polygon… <span style="opacity:.7">'+String(tx).slice(0,12)+'…</span>');
+        if(step==='swap')         mmSay('Approved. Now confirm the swap in MetaMask…');
+      });
+      mmSay('⇄ Swapped — expected <b>'+uniFmt(r.expectedOut,dps[1],8)+' '+syms[1]+'</b>. '
+        + '<a href="https://polygonscan.com/tx/'+r.swapTx+'" target="_blank" rel="noopener" style="color:#6df3ff">view on Polygonscan</a>','ok');
+      if(el) el.textContent='';
+      $('uniAmtIn').value='';
+      try{ refreshPolygonAssets(); }catch(_){}
+      try{ if(window.SigilActivity && window.SigilActivity.pullPolygon) window.SigilActivity.pullPolygon(); }catch(_){}
+    }catch(e){
+      var m=(e&&e.message)||String(e);
+      mmSay(e&&e.code===4001 ? 'Cancelled in MetaMask — nothing was swapped.' : ('Swap failed: '+m), 'err');
+    }finally{ btn.disabled=false; }
+  };
 
   window.xcFillDest=function(){
     var st = MM ? MM.getState() : {};
@@ -6468,7 +6948,8 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     var el=$('xcAvail'); if(el) el.textContent='…';
     try{
       if(dir==='to_polygon'){
-        availBase = BigInt(window.SIGIL_RAW||'0');
+        // SIGIL_RAW is glyphs (10dp); this bridge speaks 8dp base units end to end.
+        availBase = BigInt(window.SIGIL_RAW||'0') / 100n;
         if(el) el.textContent=fmt8(availBase)+' SIGIL';
       } else {
         var st = MM ? MM.getState() : {};
@@ -6532,41 +7013,85 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     btn.disabled=true;
     try{
       if(dir==='to_polygon'){
-        /* ── native SIGIL -> Polygon: lock, signed with the SIGIL key ──────
-           Deliberately reuses the wallet's existing signer + the same
-           POST /v1/bridge/lock body the original bridge modal sends. */
+        /* ── native SIGIL -> Polygon: TWO-PHASE shielded lock (fixed 2026-09-08) ──
+           The vault, never the caller, chooses the note commitments the deposit is
+           shielded into — a caller-chosen cm would leave the value spendable by the
+           caller while wSIGIL was minted against it (a free mint). So:
+             1. POST /v1/bridge/lock/prepare {amount}  -> {lock_id, parts:[{amount,cm}…]}
+             2. sign  sigil-rpc/v1|bridge_lock_shielded|from|amount|dest|amt0|cm0|…|nonce=N
+             3. POST /v1/bridge/lock {lock_id, parts, from, amount, dest, sig, req_nonce}
+           The previous one-phase body (no lock_id, no parts, action 'bridge_lock')
+           made the server default lock_id to 0 -> "no prepared lock with this id".
+           UNITS: this modal works in 8dp base units (MM.parseAmount8 / availBase);
+           the chain is 10dp (glyphs). Convert ONCE here — never send 8dp to the node,
+           it would lock 100x less than the user typed. */
         var destN=dest.toLowerCase().replace(/^0x/,'');
         if(!/^[0-9a-f]{40}$/.test(destN)){ msg('Destination must be a valid Polygon address (0x… 40 hex).','#ff8a8a'); return; }
         var from=sigilAddr();
         if(!/^[0-9a-f]{64}$/.test(from)){ msg('No SIGIL wallet address loaded.','#ff8a8a'); return; }
-        if(!window.sigilCryptoReady){ msg('Signer still loading — try again in a moment.','#fbbf24'); return; }
+        var glyphs=base*100n;                       // 8dp -> 10dp: 1 SIGIL = 10^10 glyphs
 
-        var mn=window.__sigilMnemonic||(window.sigilLoadSecret&&window.sigilLoadSecret());
-        if(!mn){
-          mn=(prompt('Enter your recovery phrase (or 64-hex mining seed) to sign this bridge lock.\nSaved in THIS browser until you press LOG OUT.')||'').trim();
-          if(!mn){ msg('Cancelled — recovery phrase required to sign.','#fbbf24'); return; }
-        }
-        var kp; try{ kp=window.sigilDeriveAuto(mn, from); }
-        catch(e){ window.__sigilMnemonic=null; if(window.sigilForgetSecret) sigilForgetSecret(); msg('Could not derive a key from that phrase.','#ff8a8a'); return; }
-        if(kp.address!==from){
-          window.__sigilMnemonic=null; if(window.sigilForgetSecret) sigilForgetSecret();
-          msg('That phrase belongs to '+kp.address.slice(0,10)+'… but this wallet is '+from.slice(0,10)+'…. Cleared it — press BRIDGE again.','#ff8a8a'); return;
-        }
-        window.__sigilMnemonic=mn; if(window.sigilSaveSecret) sigilSaveSecret(mn);
-
+        msg('Preparing lock — asking the vault which notes to shield into…','#6df3ff');
+        var pr=await fetch('/v1/bridge/lock/prepare',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({amount:Number(glyphs)})});
+        var pj=null; try{ pj=await pr.json(); }catch(_){}
+        if(!(pr.ok && pj && pj.ok)){ msg('✗ '+((pj&&(pj.error||pj.message))||('HTTP '+pr.status)),'#ff8a8a'); return; }
+        var parts=pj.parts||[]; if(!parts.length){ msg('✗ prepare returned no note commitments','#ff8a8a'); return; }
+        var lockId=pj.lock_id;
+        // Order is load-bearing: the server compares the parts POSITIONALLY and rebuilds
+        // exactly this message to verify the signature.
+        var fields=[from,glyphs.toString(),dest];
+        for(var pi=0;pi<parts.length;pi++){ fields.push(String(parts[pi].amount)); fields.push(parts[pi].cm); }
         var nonce=Date.now();
-        var sig=window.sigilSign(kp.priv,'bridge_lock',[from,base.toString(),dest],nonce);
+
+        // FAST PATH: a locally running sigil-top (same origin when the wallet was opened from
+        // it, else 127.0.0.1:9800) signs with the mining seed it already holds — zero prompt.
+        // text/plain keeps it a CORS simple request (sigil-top's OPTIONS advertises no
+        // Allow-Headers). The signer must be THIS wallet. Any failure falls through to the phrase.
+        var sig=null, signBases=['', 'http://127.0.0.1:9800'];
+        for(var bi=0;bi<signBases.length && !sig;bi++){
+          try{
+            var fr=await fetch(signBases[bi]+'/api/v1/mine-sign',{method:'POST',headers:{'Content-Type':'text/plain'},
+              body:JSON.stringify({action:'bridge_lock_shielded',fields:fields,nonce:nonce})});
+            if(!fr.ok) continue;
+            var fj=null; try{ fj=await fr.json(); }catch(_){ continue; }
+            if(fj && fj.ok && fj.signature && fj.address===from) sig=fj.signature;
+          }catch(_){ /* unreachable base — try the next */ }
+        }
+        if(!sig){
+          if(!window.sigilCryptoReady){ msg('Signer still loading — try again in a moment.','#fbbf24'); return; }
+          var mn=window.__sigilMnemonic||(window.sigilLoadSecret&&window.sigilLoadSecret());
+          if(!mn){
+            mn=(prompt('Enter your recovery phrase (or 64-hex mining seed) to sign this bridge lock.\nSaved in THIS browser until you press LOG OUT.')||'').trim();
+            if(!mn){ msg('Cancelled — recovery phrase required to sign.','#fbbf24'); return; }
+          }
+          var kp; try{ kp=window.sigilDeriveAuto(mn, from); }
+          catch(e){ window.__sigilMnemonic=null; if(window.sigilForgetSecret) sigilForgetSecret(); msg('Could not derive a key from that phrase.','#ff8a8a'); return; }
+          if(kp.address!==from){
+            window.__sigilMnemonic=null; if(window.sigilForgetSecret) sigilForgetSecret();
+            msg('That phrase belongs to '+kp.address.slice(0,10)+'… but this wallet is '+from.slice(0,10)+'…. Cleared it — press BRIDGE again.','#ff8a8a'); return;
+          }
+          window.__sigilMnemonic=mn; if(window.sigilSaveSecret) sigilSaveSecret(mn);
+          try{ sig=window.sigilSign(kp.priv,'bridge_lock_shielded',fields,nonce); }
+          catch(e){ msg('Signing failed.','#ff8a8a'); return; }
+        }
+
         msg('Submitting lock…','#6df3ff');
         var r=await fetch('/v1/bridge/lock',{method:'POST',headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({from:from,amount:Number(base),dest_polygon_address:dest,sig:sig,req_nonce:nonce})});
+          body:JSON.stringify({lock_id:lockId,from:from,amount:Number(glyphs),dest_polygon_address:dest,
+                               parts:parts.map(function(p){ return [Number(p.amount),p.cm]; }),
+                               sig:sig,req_nonce:nonce})});
         var j=null; try{ j=await r.json(); }catch(_){}
         if(!(r.ok && j && j.ok)){ msg('✗ '+((j&&(j.error||j.message))||('HTTP '+r.status)),'#ff8a8a'); return; }
+        var vaultH=j.vault||(j.data&&j.data.vault)||'';
         receipt('LOCKED — QUEUED FOR MINT', fmt8(base)+' SIGIL', [
           ['direction','SIGIL → Polygon'],
           ['from', esc(shortH(from))],
           ['to', esc(dest)],
-          ['vault', esc(shortH((j.data&&j.data.vault)||''))]
-        ], 'The lock is submitted, not the mint. The relayer mints wrapped SIGIL to your Polygon address once this settles — check the Polygon balance again in a few minutes, not instantly.');
+          ['lock id', esc(String(j.lock_id!=null?j.lock_id:lockId))],
+          ['lock tx', j.tx_hash?'<span title="'+esc(j.tx_hash)+'">'+esc(shortH(j.tx_hash))+'</span>':'—'],
+          ['vault', esc(shortH(vaultH))]
+        ], 'The lock is submitted, not the mint. Your SIGIL is being shielded into vault-owned notes; the relayer mints wrapped SIGIL to your Polygon address only once every part has SETTLED on the finalized spine (≈512 blocks) — allow several minutes, not seconds. Nothing is minted for an unsettled lock.');
 
       } else {
         /* ── Polygon -> native SIGIL: burn wrapped, relayer unlocks ──────── */
@@ -6591,8 +7116,26 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
   window.openBridge = function(){ openXChain('to_polygon'); };
   window.openBridgeFrom = function(){ openXChain('to_polygon'); };
 
-  if(MM && MM.on) MM.on('change', function(){ paintMM(); refreshAvail(); });
-  if(MM && MM.resume) MM.resume().then(paintMM).catch(function(){});
+  // The Polygon asset rows have to be refreshed from EVERY route into a connected
+  // state, not just from the 🦊 button. Reported 2026-09-06: "can't find my assets in
+  // frontpage" — because `refreshPolygonAssets()` was only wired to xcConnectMM(), and a
+  // returning visitor never presses that: MetaMask resumes silently on load
+  // (`eth_accounts`, no popup), so the wallet knew the account and never went to look at
+  // what it holds. Same for an account switch inside the extension.
+  if(MM && MM.on) MM.on('change', function(){
+    paintMM(); refreshAvail();
+    // Remember the account so the asset rows survive a locked extension or a fresh tab —
+    // reading a public balance needs the address, not a session.
+    try{ var a=(MM.getState()||{}).account; if(a) localStorage.setItem('sigil-mm-account', a); }catch(e){}
+    try{ refreshPolygonAssets(); }catch(e){}
+  });
+  if(MM && MM.resume) MM.resume().then(function(st){
+    paintMM();
+    try{ refreshPolygonAssets(); }catch(e){}
+  }).catch(function(){});
+  // A late-arriving extension (MetaMask injects after DOMContentLoaded on some
+  // installs) would miss both hooks above, so look once more shortly after load.
+  setTimeout(function(){ try{ refreshPolygonAssets(); }catch(e){} }, 2500);
 
   /* ══ miner drill-down ═════════════════════════════════════════════════════
      Every figure below is read from /v1/mining/miners, or derived from it by
@@ -7002,17 +7545,125 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     updateCard();
     return entry;
   }
-  window.SigilActivity = { list: load, add: add, cats: CATS };
+  /* ── POLYGON-SIDE ACTIVITY (2026-09-06) ──────────────────────────────────
+     The capture hook below wraps `fetch`, so it sees every mutation this wallet
+     sends to the SIGIL NODE — and nothing else. A Uniswap trade is not a fetch:
+     it is a MetaMask transaction on Polygon, signed in the extension and never
+     touching this origin. So buying wSIGIL left the Activity modal completely
+     empty, which reads as "activity is broken" when it is really "activity was
+     only ever watching one of the two chains this wallet lives on".
+
+     Read the other chain the way the chain itself records it: ERC-20 `Transfer`
+     logs where this account is the sender or the receiver. A transfer whose
+     counterparty is the Uniswap PAIR is a swap (that is what a V2 swap looks
+     like on the wire — tokens in to the pair, tokens out of it); anything else
+     is an ordinary transfer. Read-only, public RPC, no key involved.          */
+  var POLY_TOPIC_XFER = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+  // BOTH wrapped tokens. wSIGIL3 is the new one (2026-09-06); the LEGACY token is
+  // where the balance actually is — 0.88 held and bought on the old pool — so listing
+  // only the new one showed an empty history for trades that really happened.
+  var POLY_TOKENS = [
+    {addr:'0x3fced760b0de6d57f96835c6110b1227941ec2e9', sym:'wSIGIL3', dp:18, from:93331958},
+    {addr:'0xc224602c32f5c7f68d3ef002ae4c99e4c7df25b7', sym:'wSIGIL',  dp:18, from:93331958},
+    {addr:'0x3c499c542cef5e3811e1192ce70d8cc03d5c3359', sym:'USDC',    dp:6,  from:93331958}
+  ];
+  // A Uniswap V2 swap on the wire is a transfer to/from the PAIR, so a counterparty
+  // matching one of these is a trade rather than a plain send.
+  var POLY_PAIRS = {
+    '0x7e9c5d73104ed2fc2bc55139ac0999036eaf41d7': 'wSIGIL3/USDC',
+    '0x06895e77a192ce525c7bb5f25c52d2ce19c052d1': 'wSIGIL/USDC (legacy)'
+  };
+  function polyUnits(hexv, dp){
+    try{
+      var v=BigInt(hexv), d=BigInt(10)**BigInt(dp);
+      var w=v/d, f=(v%d).toString().padStart(dp,'0').slice(0,6).replace(/0+$/,'');
+      return w.toString()+(f?('.'+f):'');
+    }catch(e){ return '?'; }
+  }
+  var _polyPulled = 0, POLY_HEAD = 0, POLY_HEAD_AT = 0;
+  // Current Polygon head, cached for a minute — every chunked scan needs it and it
+  // changes by ~30 blocks in that time, which does not matter for a history walk.
+  async function polyHead(MM){
+    if(POLY_HEAD && Date.now()-POLY_HEAD_AT < 60000) return POLY_HEAD;
+    for(var i=0;i<POLY_RPCS.length;i++){
+      try{
+        var r=await fetch(POLY_RPCS[i],{method:'POST',headers:{'content-type':'application/json'},
+          body:JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_blockNumber',params:[]})});
+        var j=await r.json();
+        if(j && j.result){ POLY_HEAD=parseInt(j.result,16); POLY_HEAD_AT=Date.now(); return POLY_HEAD; }
+      }catch(e){}
+    }
+    return 0;
+  }
+  var POLY_RPCS = ['https://polygon-bor-rpc.publicnode.com','https://polygon-rpc.com'];
+  async function pullPolygon(){
+    var MM = window.SigilMM;
+    if(!MM || !MM.rawCall) return;                       // helper not loaded
+    var st = MM.getState ? MM.getState() : null;
+    if(!st || !st.connected || !st.account) return;      // nothing to look up
+    if(Date.now() - _polyPulled < 30000) return;         // public RPCs are not free
+    _polyPulled = Date.now();
+    var me = st.account.toLowerCase().replace(/^0x/,'');
+    var meTopic = '0x' + '0'.repeat(24) + me;
+    for(var t=0; t<POLY_TOKENS.length; t++){
+      var tok = POLY_TOKENS[t];
+      for(var side=0; side<2; side++){                   // 0 = sent by me, 1 = sent to me
+        var topics = side===0 ? [POLY_TOPIC_XFER, meTopic, null]
+                              : [POLY_TOPIC_XFER, null, meTopic];
+        // Public Polygon RPCs cap eth_getLogs at 10,000 blocks per call (measured:
+        // 100,000 returns "exceed maximum block range: 10000"). Polygon makes a block
+        // roughly every 2 s, so one chunk is about five and a half hours. Walk backwards
+        // in chunks rather than asking for the whole history and getting an error that
+        // reads, unhelpfully, like "no activity".
+        var logs = [];
+        var tip = await polyHead(MM);
+        if(!tip) continue;
+        var CHUNK = 10000, MAX_CHUNKS = 12;             // ~2.7 days of history
+        var hi = tip;
+        for(var ch=0; ch<MAX_CHUNKS && hi > tok.from; ch++){
+          var lo = Math.max(tok.from, hi - CHUNK + 1);
+          try{
+            var part = await MM.getLogs({address:tok.addr, topics:topics,
+              fromBlock:'0x'+lo.toString(16), toBlock:'0x'+hi.toString(16)});
+            if(part && part.length) logs = logs.concat(part);
+          }catch(e){ /* one bad chunk must not lose the others */ }
+          hi = lo - 1;
+        }
+        if(!logs.length) continue;
+        for(var i=0;i<logs.length;i++){
+          var L=logs[i];
+          var other = '0x' + String(side===0 ? L.topics[2] : L.topics[1]).slice(26).toLowerCase();
+          var isSwap = !!POLY_PAIRS[other];
+          var incoming = (side===1);
+          add({
+            cat: isSwap ? 'swap' : (incoming?'in':'out'),
+            dir: incoming ? 'in' : 'out',
+            src: 'polygon',
+            label: (isSwap ? ('Uniswap swap \u00b7 ' + POLY_PAIRS[other]) : 'Polygon transfer') + ' \u00b7 ' + tok.sym,
+            amount: null,
+            amountText: polyUnits(L.data, tok.dp) + ' ' + tok.sym,
+            peer: other,
+            txid: L.transactionHash,
+            status: 'confirmed',
+            chain: 'polygon',
+            ts: Date.now()
+          });
+        }
+      }
+    }
+    if(isOpen()){ renderCats(); render(); }
+  }
+  window.SigilActivity = { list: load, add: add, cats: CATS, pullPolygon: pullPolygon };
 
   /* ── formatting ─────────────────────────────────────────────────────────── */
-  function amt(raw){                                  // glyphs -> SIGIL, 10 dp
+  function amt(raw){                                  // SIGIL_DECIMALS = 8
     try{
-      var n = Number(BigInt(String(raw||'0'))) / SIGIL_UNITS_N;
+      var n = Number(BigInt(String(raw||'0'))) / 1e10;
       if(!isFinite(n)) return '—';
       return n.toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:8});
     }catch(e){ return '—'; }
   }
-  function amtNum(raw){ try{ return Number(BigInt(String(raw||'0')))/SIGIL_UNITS_N; }catch(e){ return 0; } }
+  function amtNum(raw){ try{ return Number(BigInt(String(raw||'0')))/1e10; }catch(e){ return 0; } }
   function shortHex(h){ h=String(h||''); return h.length>20 ? h.slice(0,10)+'…'+h.slice(-8) : (h||'—'); }
   function ago(ts){
     var s = Math.max(0, Math.floor((Date.now()-ts)/1000));
@@ -7176,7 +7827,12 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
       try{
         var r = await _f(API+'/v1/transactions/'+e.txid, {cache:'no-store'});
         var j = await r.json();
-        if(j && j.ok){ e.status = 'confirmed'; changed = true; }
+        // 2026-09-08: the node now says WHICH state a tx is in. 'ok' alone used to
+        // mark everything confirmed — including refused sends and txs still in flight.
+        var d = (j && j.data) || {}, s = d.status;
+        if(s === 'applied'){ e.status = 'confirmed'; changed = true; }
+        else if(s === 'rejected'){ e.status = 'failed'; e.note = d.reason || 'refused by the network'; changed = true; }
+        else if(!s && j && j.ok){ e.status = 'confirmed'; changed = true; } // older node: no status field
       }catch(_){}
     }
     if(changed){ save(list); if(isOpen()) render(); updateCard(); }
@@ -7216,7 +7872,7 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     if(active !== 'all') l = l.filter(function(e){ return e.cat === active; });
     var s = q.trim().toLowerCase();
     if(s) l = l.filter(function(e){
-      return [e.label, e.peer, e.txid, e.cat, e.src, amt(e.amount)]
+      return [e.label, e.peer, e.txid, e.cat, e.src, e.amountText || amt(e.amount)]
         .join(' ').toLowerCase().indexOf(s) >= 0;
     });
     l.sort(function(a,b){
@@ -7249,13 +7905,21 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     if(e.status === 'failed')
       tags += '<span class="ac-tag pend" style="color:#ff8a8a;border-color:rgba(255,138,138,.4);background:rgba(255,138,138,.09)">Failed</span>';
     if(e.shielded) tags += '<span class="ac-tag shield">\u25c8 Shielded</span>';
+    // A Polygon row is a DIFFERENT chain and a different token — 18dp wSIGIL3 or 6dp
+    // USDC, never 10dp native SIGIL. Printing it through amt() would divide by 10^10
+    // and stamp "SIGIL" on it, which is the same class of error as the 8-vs-10 decimal
+    // bug: a number that looks right and means something else. It carries its own
+    // pre-formatted text and its own chain badge instead.
+    if(e.chain === 'polygon')
+      tags += '<span class="ac-tag" style="color:#a78bfa;border-color:rgba(167,139,250,.35);background:rgba(167,139,250,.09)">\u2b1f Polygon</span>';
     return '<div class="ac-row">'
       + '<div class="ac-ic" style="background:'+c.col+'1f;color:'+c.col+'">'+c.ico+'</div>'
       + '<div class="ac-mid">'
       +   '<div class="ac-t1">'+esc(e.label||c.label)+'</div>'
       +   '<div class="ac-t2">'+bits.join(' <span style="opacity:.5">\u00b7</span> ')+tags+'</div>'
       + '</div>'
-      + '<div class="ac-amt" style="color:'+col+'">'+sign+amt(e.amount)+'<small>SIGIL</small></div>'
+      + '<div class="ac-amt" style="color:'+col+'">'+sign
+      +   (e.amountText ? esc(e.amountText) : (amt(e.amount)+'<small>SIGIL</small>'))+'</div>'
       + '</div>';
   }
   function clockOf(ts){
@@ -7322,6 +7986,9 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     m.style.display = 'flex';
     renderCats(); render();
     pollBalance().then(verifyPending).then(function(){ if(isOpen()){ renderCats(); render(); } });
+    // The Polygon half — Uniswap trades and token transfers, which never pass
+    // through this origin's fetch and so were invisible until now.
+    try{ pullPolygon(); }catch(e){}
   };
   window.closeActivity = function(){
     var m = document.getElementById('activity-modal'); if(m) m.style.display = 'none';
@@ -7454,10 +8121,10 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
   function save(a){ var k=key(); if(!k) return; try{ localStorage.setItem(k, JSON.stringify(a)); }catch(e){} }
 
   function fmt8(raw){
-    try{ var b=BigInt(raw), w=b/SIGIL_UNITS, f=(b%SIGIL_UNITS).toString().padStart(SIGIL_DP,'0');
-      return w.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')+'.'+f; }catch(e){ return '0.00000000'; }
+    try{ var b=BigInt(raw), w=b/10000000000n, f=(b%10000000000n).toString().padStart(10,'0');
+      return w.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')+'.'+f; }catch(e){ return '0.0000000000'; }
   }
-  function num(raw){ try{ return Number(BigInt(raw))/SIGIL_UNITS_N; }catch(e){ return 0; } }
+  function num(raw){ try{ return Number(BigInt(raw))/1e10; }catch(e){ return 0; } }
   function ago(ms){
     var s=Math.max(0,Math.round((Date.now()-ms)/1000));
     if(s<60) return s+'s ago';
@@ -7569,7 +8236,7 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     wrap.innerHTML='<div class="bh-card">'
       + head
       + '<div style="display:flex;align-items:baseline;gap:9px;margin-top:5px">'
-      +   '<span class="bh-delta '+cls+'">'+arrow+' '+sign+diff.toFixed(SIGIL_DP)+'</span>'
+      +   '<span class="bh-delta '+cls+'">'+arrow+' '+sign+diff.toFixed(8)+'</span>'
       +   '<span style="font-family:\'JetBrains Mono\';font-size:10px;color:#5a93a8">SIGIL over '+RLBL[range]
       +     (first!==0?(' &middot; '+sign+pct.toFixed(2)+'%'):'')+'</span>'
       + '</div>'
@@ -7583,8 +8250,8 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
       +   '<line class="bh-guide" x1="0" y1="0" x2="0" y2="'+H+'" stroke="#6df3ff" stroke-width="1" vector-effect="non-scaling-stroke" opacity="0"/>'
       + '</svg>'
       + '<div class="bh-foot">'
-      +   '<span>high <b>'+g.hi.toFixed(SIGIL_DP)+'</b></span>'
-      +   '<span>low <b>'+g.lo.toFixed(SIGIL_DP)+'</b></span>'
+      +   '<span>high <b>'+g.hi.toFixed(8)+'</b></span>'
+      +   '<span>low <b>'+g.lo.toFixed(8)+'</b></span>'
       +   '<span><b>'+pts.length+'</b> of '+all.length+' readings</span>'
       +   '<span>since <b>'+when(pts[0].t)+'</b></span>'
       +   '<span>last <b>'+ago(all[all.length-1].t)+'</b></span>'
@@ -7725,9 +8392,7 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
   function $(id){ return document.getElementById(id); }
   function natApi(p){ return (window.API_BASE||'/v1')+p; }
   function g2s(g){ // glyphs (10-decimal) → SIGIL display
-    // glyphs -> whole SIGIL, from the one constant (SIGIL_UNITS_N === 1e10 on g2).
-    var n=Number(g)/SIGIL_UNITS_N;
-    if(!isFinite(n)) return '…';
+    var n=Number(g)/1e10; if(!isFinite(n)) return '…';
     return n>=1000?n.toLocaleString(undefined,{maximumFractionDigits:0}):n.toLocaleString(undefined,{maximumFractionDigits:4});
   }
   function row(l,v){ return '<div style="display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid rgba(33,212,253,.09)"><span style="font-family:\'JetBrains Mono\';font-size:10px;letter-spacing:1px;color:#5a93a8;text-transform:uppercase">'+l+'</span><span style="font-family:\'JetBrains Mono\';font-size:11px;color:#cfe9f2;text-align:right;overflow-wrap:anywhere">'+v+'</span></div>'; }
@@ -7757,8 +8422,6 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     }
     var s=NAT.status;
     $('natTreasury').textContent=g2s(s.treasury_glyphs);
-    // stipend_usd_e8 is a USD figure at 8 dp (sigil_usds: $1 == 1e8), NOT glyphs — 1e8 is
-    // correct here and must not become SIGIL_UNITS_N. g2s() below does the glyph half.
     var stipendLabel=(s.payout_asset==='USDS'&&s.stipend_usd_e8)?('$'+(Number(s.stipend_usd_e8)/1e8).toFixed(2)+' sUSD'):(g2s(s.stipend_glyphs)+' SIGIL');
     $('natStipend').textContent=stipendLabel;
     $('natInterval').textContent=Number(s.claim_interval_blocks).toLocaleString();
@@ -7881,13 +8544,24 @@ function closeSigilOS(){
 document.addEventListener('keydown',function(e){ if(e.key==='Escape'){ var m=document.getElementById('sigilOSModal'); if(m&&m.style.display==='block') closeSigilOS(); } });
 document.getElementById('sigilOSModal').addEventListener('click',function(e){ if(e.target===this) closeSigilOS(); });
 </script>
-<!-- ══ KRISTENSEN K-GAUGE — global topbar dropdown (self-contained, client-side) ══════════
-     Computes the K-gauge honestly from the node's OWN live endpoints (same-origin /v1/*),
-     so it needs no node change. Mirrors flux-kgauge (Kristensen, "The Theoretical Minimum
-     for Blockchain Consensus" v4): K = 2π·√(ΔH·Δs)/τ, plus the dimensionless Kristensen
-     number K* = 2π·√(ΔH·τ·Δs/ħ) (ħ:=1) whose K*≈1 boundary is the Margolus–Levitin one.
-     Every value carries its provenance; a channel with no data source says so rather than
-     inventing a zero. Injected copy-agnostically so it appears on every wallet copy. -->
+<!-- ══ KRISTENSEN K-GAUGE — global topbar dropdown (self-contained, client-side) · v2 2026-09-07 ═══
+     Computes the CONSENSUS gauge honestly from the node's OWN live endpoints (same-origin /v1/*),
+     so it needs no node change. v2 replaces v1's ΔH = reject ratio + peer churn — measured on
+     2026-09-06 to be a reject/churn DETECTOR (two peers joining sent K* to its all-time max with
+     nothing in dispute; 94 % of another reading was `stale_height`, a late share) — with STATE
+     DISAGREEMENT over four channels, and reports proposer structure and network diagnostics as
+     what they are instead of feeding them into the Hamiltonian.
+
+         K_C = 2π·√( ΔH_c · (τ/τ₀) · [ε + (1−ε)·H_norm] )       ε = 0.1
+         ΔH_c = 0.20·D_tip + 0.35·D_state + 0.20·D_finality + 0.25·D_conflict   (available channels → LOWER bound)
+         τ    = final_depth(512) / measured block rate  (real convergence time),  τ₀ = 100 s
+         H_norm = Δs / log₂(N_producers) ;  N_eff = 2^Δs ;  Ω sets the confidence band, never multiplies K_C
+
+     Dimensionless ENGINEERING score, no ħ — NOT a Margolus–Levitin comparison (ΔH here is not an
+     energy). v1's K/K* are kept in the panel foot for continuity, labelled as the legacy detector.
+     Every channel says whether it was measured or is unavailable; a missing source is never a zero.
+     Injected copy-agnostically so it appears on every wallet copy. Mirrors fluxc-mcp's
+     `flux_sigil_kgauge` v2 exactly, so the phone, the browser and the MCP agree. -->
 <style>
   #kgChip{position:fixed;top:10px;right:12px;z-index:1400;display:flex;align-items:center;gap:7px;
     padding:6px 11px;border-radius:999px;cursor:pointer;font-family:'JetBrains Mono',monospace;
@@ -7898,10 +8572,10 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
   #kgChip .kgSig{color:#8b5cf6;font-size:14px;font-weight:800}
   #kgChip .kgReg{font-size:9.5px;text-transform:uppercase;letter-spacing:.12em;padding:1px 7px;border-radius:999px}
   .kg-stable{background:rgba(16,185,129,.18);color:#34d399;border:1px solid rgba(16,185,129,.35)}
-  .kg-approaching{background:rgba(245,158,11,.18);color:#fbbf24;border:1px solid rgba(245,158,11,.35)}
+  .kg-elevated{background:rgba(245,158,11,.18);color:#fbbf24;border:1px solid rgba(245,158,11,.35)}
   .kg-critical{background:rgba(239,68,68,.18);color:#f87171;border:1px solid rgba(239,68,68,.4)}
   .kg-unknown{background:rgba(120,130,150,.18);color:#94a3b8;border:1px solid rgba(120,130,150,.35)}
-  #kgPanel{position:fixed;top:52px;right:12px;z-index:1400;width:360px;max-width:calc(100vw - 24px);
+  #kgPanel{position:fixed;top:52px;right:12px;z-index:1400;width:380px;max-width:calc(100vw - 24px);
     max-height:calc(100vh - 70px);overflow-y:auto;display:none;font-family:'JetBrains Mono',monospace;
     background:#12101c;border:1px solid rgba(139,92,246,.4);border-radius:14px;
     box-shadow:0 24px 70px rgba(0,0,0,.85),0 0 42px rgba(139,92,246,.16);color:#e2e8f0}
@@ -7909,51 +8583,64 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
   #kgPanel .kgHd{padding:13px 15px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;
     justify-content:space-between;align-items:flex-start;gap:10px}
   #kgPanel .kgTitle{font-size:11px;text-transform:uppercase;letter-spacing:.16em;color:rgba(255,255,255,.42)}
-  #kgPanel .kgForm{font-size:10px;color:rgba(255,255,255,.6);margin-top:3px}
+  #kgPanel .kgForm{font-size:9.5px;color:rgba(255,255,255,.6);margin-top:3px;line-height:1.4}
   #kgPanel .kgBig{font-size:26px;font-weight:800;line-height:1;text-align:right}
-  #kgPanel .kgStar{font-size:10px;color:rgba(255,255,255,.55);text-align:right;margin-top:2px}
-  #kgPanel .kgGrid{padding:12px 15px;display:grid;grid-template-columns:1fr 1fr;gap:9px 14px;
+  #kgPanel .kgStar{font-size:10px;color:rgba(255,255,255,.55);text-align:right;margin-top:2px;white-space:nowrap}
+  #kgPanel .kgSecT{padding:9px 15px 0;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#a78bfa}
+  #kgPanel .kgGrid{padding:8px 15px 11px;display:grid;grid-template-columns:1fr 1fr;gap:8px 14px;
     border-bottom:1px solid rgba(255,255,255,.06)}
   #kgPanel .kgCell .kgLab{font-size:9px;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:.08em}
+  #kgPanel .kgCell .kgLab i{font-style:normal;text-transform:none}
+  #kgPanel .kgSecT i{font-style:normal;text-transform:none}
   #kgPanel .kgCell .kgVal{font-size:13px;font-weight:600;color:#cfe9f2}
+  #kgPanel .kgCell .kgVal.kgNa{color:#fbbf24;font-weight:500}
   #kgPanel .kgCell .kgSub{font-size:8.5px;color:rgba(255,255,255,.32)}
   #kgPanel .kgSec{padding:11px 15px;border-bottom:1px solid rgba(255,255,255,.06);font-size:11px;line-height:1.5}
   #kgPanel .kgSec b{color:#c084fc;font-weight:600}
   #kgPanel .kgProv{font-size:9.5px;color:rgba(255,255,255,.5);line-height:1.45}
   #kgPanel .kgProv .kgMeas{color:#34d399}
   #kgPanel .kgProv .kgUnav{color:#fbbf24}
-  #kgPanel .kgFoot{padding:9px 15px;font-size:9px;color:rgba(255,255,255,.3)}
+  #kgPanel .kgFoot{padding:9px 15px;font-size:9px;color:rgba(255,255,255,.3);line-height:1.5}
   #kgPanel .kgX{cursor:pointer;color:rgba(255,255,255,.4);font-size:16px;line-height:1}
 </style>
-<div id="kgChip" title="Kristensen K-gauge — network coordination pressure">
-  <span class="kgSig">Κ</span><span class="kgK" id="kgChipK">—</span>
+<div id="kgChip" title="Kristensen consensus gauge — how hard it currently is for distributed views to become one shared state">
+  <span class="kgSig">Κ<sub style="font-size:9px">c</sub></span><span class="kgK" id="kgChipK">—</span>
   <span class="kgReg kg-unknown" id="kgChipReg">measuring</span>
 </div>
 <div id="kgPanel">
   <div class="kgHd">
     <div>
-      <div class="kgTitle">Kristensen K-gauge</div>
-      <div class="kgForm">K = 2π·√(ΔH·Δs) / τ &nbsp;·&nbsp; K* = 2π·√(ΔH·τ·Δs/ħ)</div>
+      <div class="kgTitle">Kristensen consensus gauge</div>
+      <div class="kgForm">K<sub>C</sub> = 2π·√(ΔH<sub>c</sub> · τ/τ₀ · [ε + (1−ε)·H<sub>norm</sub>])<br>ε = 0.1 · τ = finality time · no ħ</div>
     </div>
     <div>
       <div class="kgBig" id="kgBigK" style="color:#94a3b8">—</div>
-      <div class="kgStar" id="kgStar">K* —</div>
+      <div class="kgStar" id="kgStar">band — · Ω —</div>
       <span class="kgX" onclick="window.__kgToggle(false)">✕</span>
     </div>
   </div>
-  <div class="kgGrid" id="kgGrid"></div>
+  <div class="kgSecT">State disagreement · <i>ΔH<sub>c</sub></i> <span id="kgDHc"></span></div>
+  <div class="kgGrid" id="kgGridState"></div>
+  <div class="kgSecT">Proposer structure</div>
+  <div class="kgGrid" id="kgGridProp"></div>
+  <div class="kgSecT">Network diagnostics · shown, NOT in <i>ΔH<sub>c</sub></i></div>
+  <div class="kgGrid" id="kgGridNet"></div>
+  <div class="kgSecT">Confidence</div>
+  <div class="kgGrid" id="kgGridConf"></div>
   <div class="kgSec">
     <div><b>Regime:</b> <span id="kgRegimeTxt">—</span> · <b>dominant term:</b> <span id="kgDom">—</span></div>
   </div>
   <div class="kgSec kgProv" id="kgProv"></div>
   <div class="kgSec" style="color:rgba(255,255,255,.72)">
-    <b>What this measures.</b> Not "is the chain fast" but the <i>coordination pressure</i> in one
-    round: energetic disagreement (ΔH) × time (τ) × proposer plurality (Δs). K* is dimensionless —
-    it counts how much physically distinguishable evolution a round spends, weighted by how spread
-    the right to propose is. K*≈1 is the Margolus–Levitin boundary (one orthogonalisation-worth of
-    action per round); the live chain sits far below it, so the limit on consensus here is
-    coordination, not physics. In the wider theory K is the quantum→classical order parameter;
-    consensus is one application of it.
+    <b>What this measures.</b> Not "is the chain fast" and not "did a peer connect", but how difficult it
+    currently is for the network's distributed views to become one shared state. ΔH<sub>c</sub> is
+    <i>actual observer disagreement</i> — diverging tips, mismatched state roots, disagreement about what is
+    final, competing state transitions. Producer plurality (H<sub>norm</sub>) amplifies that difficulty, but the
+    ε floor means one producer cannot zero out a real fork. τ is the real convergence time (512 blocks ÷ block
+    rate), not the sampling window. K<sub>C</sub> is a dimensionless engineering score with no ħ in it — it is
+    <i>not</i> a Margolus–Levitin number; the physical speed limit is a different quantity and this node
+    does not have the inputs to state it. A channel without a data source widens the upper bound instead of
+    reading zero.
   </div>
   <div class="kgFoot" id="kgFoot">tip — · peers — · sampled over — s</div>
 </div>
@@ -7961,6 +8648,7 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
   "use strict";
   var API = (function(){ try{ return (window.__SIGIL_API_BASE||'') ; }catch(e){ return ''; } })();
   function u(p){ return (API||'') + p; }
+  var FINAL_DEPTH=512, TAU0=100, EPS=0.1, W={tip:0.20,state:0.35,fin:0.20,conf:0.25};
   var panelOpen=false;
   window.__kgToggle=function(v){ panelOpen=(v===undefined)?!panelOpen:v;
     document.getElementById('kgPanel').classList.toggle('on',panelOpen); if(panelOpen) refresh(); };
@@ -7970,9 +8658,19 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
     if(panelOpen && p && !p.contains(e.target) && !c.contains(e.target)) window.__kgToggle(false); },true);
   function getJSON(path){ return fetch(u(path),{cache:'no-store'}).then(function(r){return r.json();}).catch(function(){return null;}); }
   function shannonBits(counts){ var n=0,i; for(i in counts) n+=counts[i]; if(n<=0) return 0;
-    var H=0; for(i in counts){ var pi=counts[i]/n; if(pi>0) H-=pi*Math.log2(pi); } return H; }
-  function regimeOf(k){ if(!isFinite(k)) return 'unknown'; if(k>=10) return 'critical'; if(k>=5) return 'approaching'; return 'stable'; }
+    var H=0; for(i in counts){ var pi=counts[i]/n; if(pi>0) H-=pi*Math.log2(pi); } return Math.max(0,H); }
+  function resolutionBits(n){ return n<2?0:shannonBits({a:n-1,b:1}); }
+  // stale_height / duplicate / no_tip = network timing (noise); verify_mismatch / non_canonical_wallet =
+  // an invalid or competing claim about state (semantic). Anything new is 'unclassified' and only widens the band.
+  function rejectClass(k){ if(k==='stale_height'||k==='duplicate'||k==='already_known'||k==='late'||k==='no_tip') return 'noise';
+    if(k==='verify_mismatch'||k==='non_canonical_wallet'||k==='invalid_signature'||k==='bad_proof'||k==='invalid_state'||k==='state_root_mismatch'||k==='conflicting_spend'||k==='wrong_parent'||k==='consensus_rule') return 'semantic';
+    return 'unclassified'; }
+  function kC(d,tauRatio,hNorm){ var plur=EPS+(1-EPS)*Math.min(1,Math.max(0,hNorm)); return 2*Math.PI*Math.sqrt(Math.max(0,d)*Math.max(0,tauRatio)*plur); }
+  function regimeOf(k){ if(!isFinite(k)) return 'unknown'; if(k>=3) return 'critical'; if(k>=1) return 'elevated'; return 'stable'; }
+  // Ω = 1−e^(−peers/n_total), n_total = max(peers+2, 8) — saturates at 0.632, so the labels live inside that range.
+  function confidenceOf(om){ return om>=0.55?'high':(om>=0.40?'medium':'low'); }
   function fmt(x,d){ return (typeof x==='number'&&isFinite(x))?x.toFixed(d===undefined?4:d):'—'; }
+  function rejMap(arr){ var m={}; (arr||[]).forEach(function(r){ if(r&&r[0]!=null) m[String(r[0])]=(m[String(r[0])]||0)+((r[1]|0)||0); }); return m; }
   var lastPeers=null;
   function sample(){ return Promise.all([getJSON('/v1/dagknight/recent'),getJSON('/v1/mining/miners'),getJSON('/v1/network/topology')]); }
   function compute(){
@@ -7980,77 +8678,340 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
     return sample().then(function(a){
       return new Promise(function(res){ setTimeout(function(){ sample().then(function(b){ res([a,b,(Date.now()-t0)/1000]); }); }, 6000); });
     }).then(function(z){
-      var A=z[0],B=z[1],tau=z[2];
-      var recentB=(B[0]&&(B[0].data||B[0]))||{}; var blocks=(recentB.blocks)||[];
+      var A=z[0],B=z[1],tauW=z[2];
+      var recentB=(B[0]&&(B[0].data||B[0]))||{}; var all=(recentB.blocks)||[];
       var minersA=(A[1]&&A[1].data)||{}, minersB=(B[1]&&B[1].data)||{};
       var topoA=(A[2]&&A[2].data)||{}, topoB=(B[2]&&B[2].data)||{};
-      // ── Δs : proposer entropy (the TRUE Δs — plurality of who may propose), bits ──
+      var hA=minersA.height||0, hB=minersB.height||0;
+      var inWin=all.filter(function(bk){ return (bk.height||0)>hA; }); var windowOnly=inWin.length>=2; var blocks=windowOnly?inWin:all;
+      var nB=blocks.length||1;
+      // ── proposer structure ──
       var counts={}; blocks.forEach(function(bk){ var p=bk.producer; var key=Array.isArray(p)?p.slice(0,6).join('-'):String(p); counts[key]=(counts[key]||0)+1; });
-      var proposerEntropy=shannonBits(counts);
-      var distinctProducers=Object.keys(counts).length;
-      // block-rate deviation (secondary/diagnostic only — it is what makes the gauge blind if
-      // substituted FOR entropy, so it is shown but NOT used as Δs)
-      var hA=minersA.height||0, hB=minersB.height||0; var obsBps=(tau>0)?Math.max(0,(hB-hA))/tau:0;
-      var targetBps=0.83; var brDev=targetBps>0?Math.abs(obsBps-targetBps)/targetBps:0;
-      var ds=proposerEntropy; // Δs := proposer entropy (bits)
-      // ── ΔH : energetic disagreement (things going wrong locally) ──
-      var shA=minersA.shares_accepted||0, shB=minersB.shares_accepted||0;
-      var rejArr=(minersB.rejects||[]); var rejTot=0; rejArr.forEach(function(r){ rejTot+=(r&&r[1])||0; });
-      var subDelta=Math.max(0,(shB-shA))+0; var rejRatio=(subDelta+rejTot>0)?(rejTot/(subDelta+rejTot)):0;
+      var ds=shannonBits(counts), distinct=Object.keys(counts).length, dominant=0; for(var k in counts) if(counts[k]>dominant) dominant=counts[k];
+      var hNorm=distinct>=2?Math.min(1,Math.max(0,ds/Math.log2(distinct))):0; var nEff=Math.pow(2,ds); var domShare=blocks.length?dominant/nB:0;
+      // ── DAG shape: merges = the frontier had >1 tip; red = colouring refused the block ──
+      var merging=blocks.filter(function(bk){ return Array.isArray(bk.merge_parents)&&bk.merge_parents.length>0; }).length;
+      var red=blocks.filter(function(bk){ return bk.is_blue===false; }).length;
+      // ── rejects by kind, delta-over-delta (both counters are cumulative) ──
+      var rA=rejMap(minersA.rejects), rB=rejMap(minersB.rejects), byKind={}, noise=0, semantic=0, uncl=0;
+      for(var kk in rB){ var d=Math.max(0,rB[kk]-(rA[kk]||0)); if(d>0){ var c=rejectClass(kk); byKind[kk]={delta:d,cls:c}; if(c==='noise') noise+=d; else if(c==='semantic') semantic+=d; else uncl+=d; } }
+      var subDelta=Math.max(0,(minersB.shares_accepted||0)-(minersA.shares_accepted||0)); var denom=subDelta+noise+semantic+uncl;
+      var rate=function(x){ return denom>0?x/denom:0; };
+      // ── peers (diagnostic) + peer heights (finality channel, if the node publishes them) ──
       var peersA=(topoA.peer_count!=null?topoA.peer_count:(lastPeers!=null?lastPeers:0));
       var peersB=(topoB.peer_count!=null?topoB.peer_count:peersA); lastPeers=peersB;
       var churn=(peersA>0)?Math.abs(peersB-peersA)/peersA:0;
-      // traffic asymmetry: NO byte counters on this node → unavailable, contributes nothing
-      var dh=rejRatio+churn;
-      // ── the gauge ──
-      var K=(dh>=0&&ds>=0&&tau>0)?(2*Math.PI*Math.sqrt(dh*ds)/tau):0;
-      var Kstar=(dh>=0&&ds>=0)?(2*Math.PI*Math.sqrt(dh*tau*ds)):0; // ħ:=1
-      // observer coverage Ω = 1 - e^(-peers/n_total)
+      var ph=[]; var phm=topoB.peer_heights||{}; for(var pk in phm){ var hv=phm[pk]; if(pk!=='last'&&typeof hv==='number'&&hv>0) ph.push(hv); }
+      // state-root verdicts: the node compared each peer's wallet_state_root (at the peer's tip height) with its own block there
+      var sv=[]; var pvm=topoB.peer_views||{}; for(var pv in pvm){ var m=pvm[pv]&&pvm[pv].state_root_matches_local; if(m===true||m===false) sv.push(m); }
+      // ── the four channels ──
+      var dTip=merging/nB;
+      var dConf=Math.min(1,red/nB+rate(semantic));
+      // peers publish their SETTLED chain.height(); compare with OUR settled height (local_view), never the mining frontier (~512 ahead)
+      var hLocal=(topoB.local_view&&typeof topoB.local_view.height==='number')?topoB.local_view.height:hB;
+      // a peer > 2 finality-depths away is CATCHING UP (fresh sigil-top syncs from genesis), not disagreeing about what is final: shown, excluded
+      var conv=ph.filter(function(h){ return Math.abs(h-hLocal)<=2*FINAL_DEPTH; }); var syncing=ph.length-conv.length;
+      var dFin=conv.length?conv.reduce(function(s,h){ return s+Math.min(1,Math.abs(h-hLocal)/FINAL_DEPTH); },0)/conv.length:null;
+      var dState=sv.length?sv.filter(function(ok){ return !ok; }).length/sv.length:null;
+      var ch=[
+        {n:'tip divergence',w:W.tip,v:dTip,b:merging+'/'+blocks.length+' merge-parent blocks'},
+        {n:'state-root mismatch',w:W.state,v:dState,b:sv.length?(sv.filter(function(ok){return !ok;}).length+'/'+sv.length+' comparable peer(s) disagree'):'no comparable peer view (peers must run node ≥ 2026-09-07)'},
+        {n:'finality divergence',w:W.fin,v:dFin,b:conv.length?conv.length+' converged peer(s), spine gap '+conv.map(function(h){ return Math.abs(h-hLocal); }).join('/')+' blk ÷ 512'+(syncing?' · '+syncing+' syncing (excluded)':''):(syncing?syncing+' peer(s) still syncing — catching up is not disagreement':'no peer heartbeat yet (node ≥ 2026-09-07, sigil-top ≥ 8.0.11 publish one)')},
+        {n:'semantic conflicts',w:W.conf,v:dConf,b:red+' red blk + '+semantic+' verify_mismatch'}
+      ];
+      var dh=0, missing=0; ch.forEach(function(c){ if(c.v==null) missing+=c.w; else dh+=c.w*c.v; });
+      // ── τ = real convergence time ──
+      var obsBps=(tauW>0)?Math.max(0,(hB-hA))/tauW:0; var tauFin=obsBps>0?FINAL_DEPTH/obsBps:tauW; var tauRatio=tauFin/TAU0;
+      // ── Ω → confidence band ──
       var nTotal=Math.max(peersB+2,8); var omega=1-Math.exp(-peersB/nTotal);
-      // commitment Λ (window-limited): blocks since window start over κ·τ_confirm
-      var dCommit=Math.max(0,hB-hA); var lambda=1-Math.exp(-dCommit/(18*100));
-      var dom = (dh>=ds)?'energetic disagreement (ΔH)':'proposer plurality (Δs)';
-      if(dh===0&&ds===0) dom='none (quiet chain)';
-      return {K:K,Kstar:Kstar,dh:dh,ds:ds,tau:tau,omega:omega,lambda:lambda,dom:dom,
-        rejRatio:rejRatio,churn:churn,brDev:brDev,obsBps:obsBps,distinctProducers:distinctProducers,
-        tip:hB,peers:peersB,blocks:blocks.length};
+      var seen=Math.min(1,dh+missing+rate(uncl)*W.conf); var dHi=Math.min(1,seen+(1-omega)*(1-seen)); var dLo=dh*omega;
+      var K=kC(dh,tauRatio,hNorm), Klo=kC(dLo,tauRatio,hNorm), Khi=kC(dHi,tauRatio,hNorm);
+      // ── legacy v1 (retained, labelled) ──
+      var dhV1=rate(noise+semantic+uncl)+churn; var Kv1=(tauW>0)?(2*Math.PI*Math.sqrt(dhV1*ds)/tauW):0; var KstarV1=2*Math.PI*Math.sqrt(dhV1*tauW*ds);
+      var dom=dh>0?'state disagreement (ΔHc)':(ds>0?'proposer plurality (Δs)':'none (quiet chain)');
+      return {K:K,Klo:Klo,Khi:Khi,dh:dh,missing:missing,ch:ch,ds:ds,hNorm:hNorm,nEff:nEff,domShare:domShare,distinct:distinct,
+        resBits:resolutionBits(blocks.length),tauFin:tauFin,tauRatio:tauRatio,tauW:tauW,obsBps:obsBps,omega:omega,conf:confidenceOf(omega),
+        peers:peersB,churn:churn,rejRate:rate(noise+semantic+uncl),rejSem:rate(semantic),noise:noise,semantic:semantic,uncl:uncl,byKind:byKind,
+        Kv1:Kv1,KstarV1:KstarV1,dhV1:dhV1,dom:dom,tip:hB,blocks:blocks.length,windowOnly:windowOnly,svLen:sv.length,phLen:ph.length,syncing:syncing};
     });
   }
+  function cell(lab,sub,val,note,na){ return '<div class="kgCell"><div class="kgLab">'+lab+' · '+sub+'</div><div class="kgVal'+(na?' kgNa':'')+'">'+val+'</div><div class="kgSub">'+note+'</div></div>'; }
   function render(m){
     if(!m){ document.getElementById('kgChipReg').textContent='node offline'; document.getElementById('kgChipReg').className='kgReg kg-unknown'; return; }
-    var reg=regimeOf(m.K), col=reg==='critical'?'#f87171':reg==='approaching'?'#fbbf24':'#34d399';
-    document.getElementById('kgChipK').textContent=fmt(m.K,3);
+    var reg=regimeOf(m.K), col=reg==='critical'?'#f87171':reg==='elevated'?'#fbbf24':'#34d399';
+    document.getElementById('kgChipK').textContent=fmt(m.K,2);
     var cr=document.getElementById('kgChipReg'); cr.textContent=reg; cr.className='kgReg kg-'+reg;
-    var bk=document.getElementById('kgBigK'); bk.textContent=fmt(m.K,4); bk.style.color=col;
-    document.getElementById('kgStar').textContent='K* '+fmt(m.Kstar,3)+'   (≈1 = ML boundary)';
-    document.getElementById('kgRegimeTxt').textContent=reg+' (K<5 stable · 5–10 approaching · ≥10 critical)';
+    var bk=document.getElementById('kgBigK'); bk.textContent=fmt(m.K,3); bk.style.color=col;
+    document.getElementById('kgStar').textContent='['+fmt(m.Klo,2)+', '+fmt(m.Khi,2)+'] · Ω '+fmt(m.omega,3)+' '+m.conf;
+    document.getElementById('kgDHc').textContent='= '+fmt(m.dh,4)+' (lower bound, '+Math.round(m.missing*100)+'% unmeasured)';
+    document.getElementById('kgRegimeTxt').textContent=reg+' (K<sub>C</sub><1 stable · 1–3 elevated · ≥3 critical, provisional)';
+    document.getElementById('kgRegimeTxt').innerHTML=reg+' (K<sub>C</sub>&lt;1 stable · 1–3 elevated · ≥3 critical, provisional)';
     document.getElementById('kgDom').textContent=m.dom;
-    var cells=[
-      ['ΔH','energetic disagreement',fmt(m.dh,4),'rej '+fmt(m.rejRatio,3)+' + churn '+fmt(m.churn,3)],
-      ['Δs','proposer entropy',fmt(m.ds,3)+' bits',m.distinctProducers+' producer(s) in window'],
-      ['τ','round / window',fmt(m.tau,1)+' s','block rate '+fmt(m.obsBps,2)+' /s'],
-      ['Ω','observer coverage',fmt(m.omega,3),m.peers+' peer(s)'],
-      ['Λ','commitment',fmt(m.lambda,3),'window-limited'],
-      ['blk-rate dev','diagnostic only',fmt(m.brDev,3),'vs 0.83/s target — NOT used as Δs']
-    ];
-    document.getElementById('kgGrid').innerHTML=cells.map(function(c){
-      return '<div class="kgCell"><div class="kgLab">'+c[0]+' · '+c[1]+'</div><div class="kgVal">'+c[2]+'</div><div class="kgSub">'+c[3]+'</div></div>';
-    }).join('');
+    document.getElementById('kgGridState').innerHTML=m.ch.map(function(c){ return cell(c.n,'w '+c.w.toFixed(2),c.v==null?'n/a':fmt(c.v,3),c.b,c.v==null); }).join('');
+    document.getElementById('kgGridProp').innerHTML=
+      cell('entropy','<i>Δs</i>',fmt(m.ds,3)+' bits','step '+fmt(m.resBits,4)+' over '+m.blocks+' blk')+
+      cell('effective producers','<i>2^Δs</i>',fmt(m.nEff,2),m.distinct+' active producer(s)')+
+      cell('dominant producer','share',(m.domShare*100).toFixed(1)+'%','H_norm '+fmt(m.hNorm,3))+
+      cell('<i>τ</i>','finality time',fmt(m.tauFin,0)+' s','512 ÷ '+fmt(m.obsBps,2)+'/s · τ/τ₀ '+fmt(m.tauRatio,2));
+    var kinds=Object.keys(m.byKind).map(function(k){ return k+' '+m.byKind[k].delta+' ('+m.byKind[k].cls+')'; }).join(', ')||'none in window';
+    document.getElementById('kgGridNet').innerHTML=
+      cell('peers','count',String(m.peers),'churn '+fmt(m.churn,3)+(m.syncing?' · '+m.syncing+' syncing':'')+' — topology, not disagreement')+
+      cell('reject rate','all kinds',fmt(m.rejRate,3),'semantic '+fmt(m.rejSem,3)+' · noise '+m.noise+' · unclassified '+m.uncl)+
+      cell('block rate','observed',fmt(m.obsBps,2)+' /s','sampled over '+fmt(m.tauW,1)+' s')+
+      cell('rejects','by kind',m.semantic+' sem / '+m.noise+' noise',kinds);
+    document.getElementById('kgGridConf').innerHTML=
+      cell('<i>Ω</i>','observer coverage',fmt(m.omega,3),m.conf+' confidence · 1−e^(−peers/n)')+
+      cell('band','K_C low … high',fmt(m.Klo,2)+' … '+fmt(m.Khi,2),'unmeasured weight '+Math.round(m.missing*100)+'% + unseen network');
     document.getElementById('kgProv').innerHTML=
       '<b style="color:#c084fc">Provenance.</b> '+
-      '<span class="kgMeas">measured</span>: proposer entropy, block rate, mining rejects, peer count/churn. '+
-      '<span class="kgUnav">unavailable</span>: P2P byte asymmetry (this node exposes no byte counters), so ΔH is a lower bound. '+
-      'Ω uses an estimated network size; Λ is capped by the sample window, not chain health. '+
-      'Δs is proposer entropy on purpose — substituting block-rate deviation (shown as a diagnostic) makes the gauge blind to churn.';
-    document.getElementById('kgFoot').textContent='tip '+m.tip+' · '+m.peers+' peers · sampled over '+fmt(m.tau,1)+' s';
+      '<span class="kgMeas">measured</span>: proposer entropy, DAG merge-parents (tip divergence), red blocks + verify_mismatch (semantic conflicts), block rate → finality time, rejects by kind, peers/churn (diagnostic). '+
+      (m.svLen?'<span class="kgMeas">measured</span>: state-root agreement over '+m.svLen+' peer(s). ':'<span class="kgUnav">unavailable</span>: state-root agreement — no connected peer sent a comparable heartbeat (sigil-node ≥ 2026-09-07 publishes one; miners do not), so that channel widens the upper bound rather than reading 0. ')+
+      (m.windowOnly?'Blocks counted are exactly those produced inside the window. ':'Fewer than 2 blocks landed in the window; DAG channels use the recent-block feed. ')+
+      'Legacy v1 (reject+churn detector, kept for continuity, not a Margolus–Levitin number): K '+fmt(m.Kv1,4)+' · K* '+fmt(m.KstarV1,3)+' · ΔH '+fmt(m.dhV1,3)+'.';
+    document.getElementById('kgFoot').textContent='tip '+m.tip+' · '+m.peers+' peers · '+m.blocks+' blocks · gauge v2';
   }
   var busy=false;
   function refresh(){ if(busy) return; busy=true;
     document.getElementById('kgChipReg').textContent='measuring…';
-    compute().then(function(m){ render(m); busy=false; }).catch(function(){ busy=false; render(null); }); }
+    compute().then(function(m){ render(m); busy=false; }).catch(function(e){ try{ console.error('kgauge v2 refresh failed:', e&&(e.stack||e.message||e)); }catch(_){} busy=false; render(null); }); }
   // First reading shortly after load, then every 90 s while the tab is open.
   setTimeout(refresh, 2500);
   setInterval(function(){ if(!document.hidden) refresh(); }, 90000);
 })();</script>
+
+
+<!-- ══ SKYSKRABEREN — K_DC campus gauge · global topbar dropdown ═══════════════════════
+     The Quillon Graph tower's coordination gauge, driven here by SIGIL's own live
+     endpoints because SIGIL is the network actually running today. Same discipline as the
+     K-gauge beside it: every number is computed from a same-origin /v1/* reading, and a
+     channel with no data says so instead of showing a zero.
+
+     K_DC = 2π·√(ΔH·Δs·τ/τ₀)   — dimensionless, engineering scale, NO ħ.
+     ΔH = Σ pᵢ(1−readinessᵢ)   how far the campus is from being one working whole
+     Δs = −Σ pᵢ ln pᵢ           how FRAGMENTED the reason is
+     pᵢ ∝ exp(−slackᵢ/θ)·wᵢ·deficitᵢ   derived from slack, never asserted
+
+     The unit shown as "work" is months-equivalent pulled off the ready date, NOT −ΔK.
+     Measured in the Rust crate (flux-skyskraber::kdc): a grid slip from 30 to 44 months
+     made K FALL, because one dominant constraint is a clearer cause. Clarity is not
+     progress, so ΔK is never the thing you pay on. -->
+<style>
+  #skChip{position:fixed;top:10px;right:150px;z-index:1400;display:flex;align-items:center;gap:7px;
+    padding:6px 11px;border-radius:999px;cursor:pointer;font-family:'JetBrains Mono',monospace;
+    font-size:12px;background:rgba(4,22,30,.82);border:1px solid rgba(45,212,191,.45);
+    color:#e2e8f0;backdrop-filter:blur(8px);user-select:none;transition:border-color .2s}
+  #skChip:hover{border-color:#5eead4}
+  #skChip .skSig{color:#2dd4bf;font-size:14px;font-weight:800}
+  #skChip .skK{font-weight:700;color:#5eead4}
+  #skChip .skReg{font-size:9.5px;text-transform:uppercase;letter-spacing:.12em;padding:1px 7px;border-radius:999px}
+  .sk-ready{background:rgba(16,185,129,.18);color:#34d399;border:1px solid rgba(16,185,129,.35)}
+  .sk-building{background:rgba(45,212,191,.15);color:#5eead4;border:1px solid rgba(45,212,191,.35)}
+  .sk-blocked{background:rgba(245,158,11,.18);color:#fbbf24;border:1px solid rgba(245,158,11,.35)}
+  .sk-unknown{background:rgba(120,130,150,.18);color:#94a3b8;border:1px solid rgba(120,130,150,.35)}
+  #skPanel{position:fixed;top:52px;right:12px;z-index:1400;width:392px;max-width:calc(100vw - 24px);
+    max-height:calc(100vh - 70px);overflow-y:auto;display:none;font-family:'JetBrains Mono',monospace;
+    background:#04161e;border:1px solid rgba(45,212,191,.4);border-radius:14px;
+    box-shadow:0 24px 70px rgba(0,0,0,.85),0 0 42px rgba(45,212,191,.14);color:#e2e8f0}
+  #skPanel.on{display:block}
+  #skPanel .skHd{padding:13px 15px;border-bottom:1px solid rgba(255,255,255,.06);display:flex;
+    justify-content:space-between;align-items:flex-start;gap:10px}
+  #skPanel .skTitle{font-size:11px;text-transform:uppercase;letter-spacing:.16em;color:rgba(255,255,255,.42)}
+  #skPanel .skForm{font-size:10px;color:rgba(255,255,255,.6);margin-top:3px}
+  #skPanel .skBig{font-size:26px;font-weight:800;line-height:1;text-align:right;color:#5eead4}
+  #skPanel .skSub2{font-size:10px;color:rgba(255,255,255,.55);text-align:right;margin-top:2px}
+  #skPanel .skGrid{padding:12px 15px;display:grid;grid-template-columns:1fr 1fr;gap:9px 14px;
+    border-bottom:1px solid rgba(255,255,255,.06)}
+  #skPanel .skLab{font-size:9px;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:.08em}
+  #skPanel .skVal{font-size:13px;font-weight:600;color:#cfe9f2}
+  #skPanel .skSub{font-size:8.5px;color:rgba(255,255,255,.32)}
+  #skPanel .skSec{padding:11px 15px;border-bottom:1px solid rgba(255,255,255,.06);font-size:11px;line-height:1.5}
+  #skPanel .skSec b{color:#5eead4;font-weight:600}
+  #skPanel .skBar{height:5px;border-radius:3px;background:rgba(255,255,255,.07);overflow:hidden;margin-top:4px}
+  #skPanel .skBar i{display:block;height:100%;background:linear-gradient(90deg,#2dd4bf,#5eead4)}
+  #skPanel .skRow{display:flex;justify-content:space-between;gap:8px;font-size:10.5px;padding:3px 0}
+  #skPanel .skRow .skNm{color:rgba(255,255,255,.72)}
+  #skPanel .skRow .skPct{color:#cfe9f2;font-weight:600}
+  #skPanel .skBind{color:#fbbf24;font-weight:700}
+  #skPanel .skFoot{padding:9px 15px;font-size:9px;color:rgba(255,255,255,.3);line-height:1.5}
+  #skPanel .skX{cursor:pointer;color:rgba(255,255,255,.4);font-size:16px;line-height:1}
+  @media(max-width:640px){#skChip{right:12px;top:46px}}
+</style>
+<script>
+(function(){
+  var PANEL_HTML=`
+  <div class="skHd">
+    <div>
+      <div class="skTitle">Skyskraberen · K_DC</div>
+      <div class="skForm">K_DC = 2π·√(ΔH·Δs·τ/τ₀) &nbsp;·&nbsp; no ħ</div>
+    </div>
+    <div>
+      <div class="skBig" id="skBigK">—</div>
+      <div class="skSub2" id="skReady">—</div>
+      <span class="skX" onclick="window.__skToggle(false)">✕</span>
+    </div>
+  </div>
+  <div class="skGrid">
+    <div><div class="skLab">ΔH — distance</div><div class="skVal" id="skDH">—</div><div class="skSub">how far from one working whole</div></div>
+    <div><div class="skLab">Δs — fragmentation</div><div class="skVal" id="skDS">—</div><div class="skSub">how scattered the cause is</div></div>
+    <div><div class="skLab">Bottleneck</div><div class="skVal skBind" id="skBind">—</div><div class="skSub">what everything waits on</div></div>
+    <div><div class="skLab">Work rate</div><div class="skVal" id="skRate">—</div><div class="skSub">months-equiv pulled in / hour</div></div>
+  </div>
+  <div class="skSec">
+    <div class="skLab" style="margin-bottom:6px">Constraints — readiness, and the weight each carries as the NEXT wall</div>
+    <div id="skRows"></div>
+  </div>
+  <div class="skSec" id="skVerdict" style="font-size:10.5px;color:rgba(255,255,255,.75)">—</div>
+  <div class="skFoot">
+    Readiness is MEASURED from this node's own /v1 endpoints. The month figures are a MODEL
+    over those readings, not a delivery date anyone committed to. pᵢ is derived from slack,
+    so the entropy is a measurement rather than an opinion. ΔK is shown for honesty but is
+    never the work: a bottleneck getting worse can make the cause clearer and K fall.
+    <span style="color:#f87171">physical_datacenter_commissioned: false</span> — the campus is a model until steel says otherwise.
+  </div>`;
+
+  var $=function(id){return document.getElementById(id)};
+  var open=false;
+  window.__skToggle=function(v){open=(v===undefined)?!open:v;$('skPanel').classList.toggle('on',open);};
+  // (the click handler is attached in host(), which is what CREATES the chip)
+
+  var J=function(p){return fetch(p,{cache:'no-store'}).then(function(r){return r.ok?r.json():null}).catch(function(){return null});};
+
+  // The campus, expressed as constraints over what SIGIL actually reports. Each row has a
+  // TARGET that is stated, not hidden — you are entitled to disagree with a target, but
+  // not to wonder what it was.
+  function constraints(mine,mesh,anchor,supply){
+    var c=[];
+    if(mine){
+      // Compute: the network's own hash rate against a 1 GH/s build-out target.
+      c.push({n:'compute capacity',b:'build',req:1e9,av:mine.net_hps||0,months:14,w:1.0,
+              note:((mine.net_hps||0)/1e6).toFixed(1)+' MH/s of 1000'});
+      c.push({n:'rig fleet',b:'build',req:32,av:mine.live_miners||0,months:10,w:0.8,
+              note:(mine.live_miners||0)+' of 32 rigs'});
+    }
+    if(mesh){
+      // Mesh: the analogue of fibre. Reachability nobody on the node can force.
+      c.push({n:'mesh reachability',b:'grid',req:16,av:mesh.peer_count||0,months:20,w:2.0,
+              note:(mesh.peer_count||0)+' of 16 peers'});
+    }
+    if(anchor){
+      // Settlement: the shielded pool is the campus's usable privacy capacity.
+      c.push({n:'settlement pool',b:'procurement',req:anchor.capacity||32768,av:anchor.notes||0,months:18,w:1.5,
+              note:(anchor.notes||0).toLocaleString()+' of '+(anchor.capacity||32768).toLocaleString()+' notes'});
+      c.push({n:'published keys',b:'procurement',req:64,av:anchor.registered||0,months:6,w:0.7,
+              note:(anchor.registered||0)+' of 64 wallets payable'});
+    }
+    if(supply){
+      c.push({n:'commissioning',b:'commissioning',req:100,av:(supply.minted_pct||0)*100,months:4,w:1.0,
+              note:((supply.minted_pct||0)).toFixed(3)+'% of cap minted'});
+    }
+    return c;
+  }
+
+  function gauge(cs){
+    if(!cs.length) return null;
+    cs.forEach(function(c){ c.ready=c.req>0?Math.max(0,Math.min(1,c.av/c.req)):1; c.def=1-c.ready; });
+    // months remaining scales with how much is left — a constraint 90% done is nearly done.
+    cs.forEach(function(c){ c.rem=c.months*c.def; });
+    var branch={};
+    cs.forEach(function(c){ branch[c.b]=(branch[c.b]||0)+c.rem; });
+    var par=['build','grid','procurement'].map(function(b){return [b,branch[b]||0]});
+    var crit=par.reduce(function(a,b){return b[1]>a[1]?b:a},['build',-1]);
+    var comm=branch['commissioning']||0;
+    var months=Math.max(0,crit[1])+comm;
+    var sorted=par.map(function(p){return p[1]}).sort(function(a,b){return b-a});
+    var headroom=sorted.length>1?Math.max(0,sorted[0]-sorted[1]):0;
+    // p_i from SLACK — the whole point. theta = 6 months of softness.
+    var theta=6;
+    var raw=cs.map(function(c){
+      var slack=(c.b==='commissioning')?0:Math.max(0,crit[1]-(branch[c.b]||0));
+      return Math.exp(-slack/theta)*Math.max(0,c.w)*c.def;
+    });
+    var tot=raw.reduce(function(a,b){return a+b},0);
+    var p=tot>0?raw.map(function(r){return r/tot}):raw.map(function(){return 0});
+    var dH=0,dS=0;
+    p.forEach(function(pi,i){ dH+=pi*cs[i].def; if(pi>0) dS+=-pi*Math.log(pi); });
+    // tau/tau0: one observation window against a one-month construction reference.
+    var K=2*Math.PI*Math.sqrt(Math.max(0,dH*dS*1.0));
+    var top=p.reduce(function(a,v,i){return v>a[1]?[i,v]:a},[0,-1]);
+    return {cs:cs,p:p,dH:dH,dS:dS,K:K,months:months,headroom:headroom,
+            bind:cs[top[0]]?cs[top[0]].n:'—',bindW:top[1],critBranch:crit[0]};
+  }
+
+  var LS='sigil.skyskraber.last';
+  function work(g){
+    try{
+      var prev=JSON.parse(localStorage.getItem(LS)||'null');
+      var now=Date.now();
+      localStorage.setItem(LS,JSON.stringify({K:g.K,months:g.months,t:now}));
+      if(!prev||!prev.t||now<=prev.t) return null;
+      var hours=(now-prev.t)/3.6e6;
+      if(hours<0.002) return null;               // too short to mean anything
+      return {dm:prev.months-g.months,dk:prev.K-g.K,hours:hours,rate:(prev.months-g.months)/hours};
+    }catch(e){ return null; }
+  }
+
+  function paint(g){
+    if(!g){ $('skChipReg').textContent='no data'; $('skChipReg').className='skReg sk-unknown';
+            $('skVerdict').textContent='The node is not answering, so there is nothing to measure. This says nothing about the campus — only that this page cannot see it.'; return; }
+    $('skChipK').textContent=g.K.toFixed(2);
+    $('skBigK').textContent=g.K.toFixed(2);
+    $('skDH').textContent=g.dH.toFixed(3);
+    $('skDS').textContent=g.dS.toFixed(3);
+    $('skBind').textContent=g.bind;
+    $('skReady').textContent=g.months<=0?'ready':('~'+g.months.toFixed(1)+' months to ready');
+    var reg = g.months<=0 ? ['ready','sk-ready'] : (g.headroom<=0.5 ? ['blocked','sk-blocked'] : ['building','sk-building']);
+    $('skChipReg').textContent=reg[0]; $('skChipReg').className='skReg '+reg[1];
+    var rows='';
+    g.cs.forEach(function(c,i){
+      var pct=(c.ready*100);
+      rows+='<div class="skRow"><span class="skNm">'+(c.n===g.bind?'▸ ':'')+c.n+' <span style="color:rgba(255,255,255,.3)">'+c.note+'</span></span>'+
+            '<span class="skPct">'+pct.toFixed(0)+'% · p '+(g.p[i]*100).toFixed(0)+'%</span></div>'+
+            '<div class="skBar"><i style="width:'+pct.toFixed(1)+'%"></i></div>';
+    });
+    $('skRows').innerHTML=rows;
+    var w=work(g);
+    $('skRate').textContent = w ? (w.rate>=0?'+':'')+w.rate.toFixed(3)+' mo/h' : 'first reading';
+    var v='<b>'+g.bind+'</b> is what everything else is waiting on'+
+          (g.headroom>0.5?(' — shortening it is worth at most <b>'+g.headroom.toFixed(1)+' months</b> before the next wall arrives.')
+                         :' — and the runner-up is level with it, so speeding it up buys almost nothing on its own.');
+    if(g.dS>1.0) v+=' The cause is <b>fragmented</b> (Δs '+g.dS.toFixed(2)+'): several constraints could each be the delay, so reduce the ambiguity before optimising anything.';
+    else v+=' The cause is <b>concentrated</b> (Δs '+g.dS.toFixed(2)+'): one thing decides the date.';
+    if(w&&w.dm<0) v+=' <span style="color:#f87171">Since the last reading the date slipped '+Math.abs(w.dm).toFixed(2)+' months.</span>';
+    $('skVerdict').innerHTML=v;
+  }
+
+  function tick(){
+    Promise.all([J('/v1/mining/miners'),J('/v1/network/topology'),J('/v1/shielded/anchor'),J('/v1/supply')])
+      .then(function(r){
+        var mine=r[0]&&r[0].data, mesh=r[1]&&r[1].data, anchor=r[2], supply=r[3]&&r[3].data;
+        paint(gauge(constraints(mine,mesh,anchor,supply)));
+      }).catch(function(){ paint(null); });
+  }
+
+  // ── SURVIVE THE GATE ──────────────────────────────────────────────────────────
+  // This page renders a login gate first and REPLACES document.body when it hands over
+  // to the wallet. Anything parked inside <body> is destroyed at that moment — which is
+  // why the K-gauge chip and this one were both absent from the live DOM despite being
+  // present in the HTML. So the chip is built in JS and attached to <html>, which no body
+  // swap can touch, and re-attached if anything removes it anyway.
+  function host(){
+    var el=document.getElementById('skChip');
+    if(el&&el.isConnected&&document.getElementById('skPanel')) return;
+    var chip=document.createElement('div'); chip.id='skChip';
+    chip.title='Skyskraberen — K_DC campus coordination gauge';
+    chip.innerHTML='<span class="skSig">\u2302</span><span class="skK" id="skChipK">\u2014</span>'+
+      '<span class="skReg sk-unknown" id="skChipReg">measuring</span>';
+    var panel=document.createElement('div'); panel.id='skPanel'; panel.innerHTML=PANEL_HTML;
+    document.documentElement.appendChild(chip);
+    document.documentElement.appendChild(panel);
+    chip.addEventListener('click',function(){window.__skToggle();});
+    var x=panel.querySelector('.skX'); if(x) x.addEventListener('click',function(){window.__skToggle(false);});
+  }
+  host();
+  setInterval(host,3000);   // cheap, and the only thing that survives an arbitrary DOM swap
+
+  tick(); setInterval(tick,20000);
+})();
+</script>
 
 </body></html>

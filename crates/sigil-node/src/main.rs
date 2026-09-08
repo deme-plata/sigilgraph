@@ -1177,6 +1177,7 @@ fn run_start() -> Result<()> {
         // Inert unless SIGIL_FINALITY_COMMITTEE is set; nothing it returns is
         // read by production, validation, or fork choice. See finality_wire.rs.
         let mut finality = finality_wire::FinalityWire::from_env();
+        eprintln!("{}", finality.gate_mode().banner());
         // Fail-loud finality monitoring (2026-08-15, the P=6 k=1 investigation):
         // `below_final` was already tracked in BraidStats but nothing ever
         // surfaced it to an operator — a node could be silently orphaning
@@ -1802,6 +1803,9 @@ fn run_start() -> Result<()> {
                                             eprintln!("⚠ publish finality vote H={} failed: {}", h, e);
                                         }
                                     }
+                                    // Phase 3 (2026-09-08): a certificate (with n=1, our own vote
+                                    // just completed it) raises the braid's finality line — gated.
+                                    apply_finality_gate(&finality, braid.as_mut());
                                     if produced % 100 == 0 {
                                         let secs = t_start.elapsed().as_secs_f64().max(1e-6);
                                         eprintln!("🏭 produced {} blocks ({:.1}/s) · {} txs ({:.0} TPS verify-once) — tip H={}",
@@ -3011,6 +3015,9 @@ fn run_start() -> Result<()> {
                                 if let Some(line) = finality.on_gossip(&data, finality_wire::now_ms()) {
                                     eprintln!("{}", line);
                                 }
+                                // Phase 3: a certificate assembled from peers' votes gates
+                                // settlement when SIGIL_FINALITY_GATE says so.
+                                apply_finality_gate(&finality, braid.as_mut());
                             } else {
                                 let preview = std::str::from_utf8(&data)
                                     .map(|s| s.chars().take(120).collect::<String>())
@@ -4303,5 +4310,32 @@ mod dag_wiring_tests {
         // verdict now — it'll be Mismatch (claimed value is a dummy), which
         // is the correct, expected outcome once completeness is satisfied.
         assert_eq!(verdict2, TopoVerdict::Mismatch, "a complete window with a wrong claim IS a real mismatch");
+    }
+}
+
+/// Phase 3 of SIGIL instant finality (2026-09-08): hand the newest quorum certificate to
+/// the braid, which raises its enforced finality line to the certified spine block, so
+/// `dag_drain_apply` settles it on the next tick instead of `final_depth` blocks later.
+/// Off unless `SIGIL_FINALITY_GATE` is set — see `FinalityWire::gate_mode`.
+fn apply_finality_gate(finality: &finality_wire::FinalityWire, braid: Option<&mut sigil_dagknight::Braid>) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST_WARNED: AtomicU64 = AtomicU64::new(0);
+    if !finality.gate_mode().active() {
+        return;
+    }
+    let Some(br) = braid else { return };
+    let Some((h, hash)) = finality.latest_certificate() else { return };
+    match br.set_certified(h, hash) {
+        sigil_dagknight::CertifyOutcome::Raised => {
+            eprintln!("🔒 finality gate: settlement line → H={h} by certificate (depth rule would be H={})",
+                h.saturating_sub(sigil_dagknight::BraidConfig::from_env().final_depth));
+        }
+        sigil_dagknight::CertifyOutcome::NotOnSpine => {
+            if LAST_WARNED.swap(h, Ordering::Relaxed) != h {
+                eprintln!("⚠ finality gate: certificate at H={h} names a block NOT on this node's spine — ignored. \
+                           If this repeats, this node is on a fork the committee did not finalize.");
+            }
+        }
+        _ => {}
     }
 }

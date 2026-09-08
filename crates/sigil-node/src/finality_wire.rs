@@ -240,6 +240,82 @@ impl FinalityWire {
     pub fn announced(&self) -> bool {
         self.announced
     }
+
+    /// The newest quorum certificate this node holds: `(height, spine block hash)`.
+    /// Phase 3 feeds this to `Braid::set_certified` when the gate is on.
+    pub fn latest_certificate(&self) -> Option<(u64, BlockHash)> {
+        let h = self.observer.finalized_height()?;
+        let c = self.observer.certificate_for(h)?;
+        Some((h, c.spine_block_hash))
+    }
+
+    /// Committee size, for the gate's safety check.
+    pub fn committee_size(&self) -> usize {
+        self.observer.report(0).committee_size
+    }
+
+    /// Should certificates GATE settlement (Phase 3), and under which honesty label?
+    ///
+    /// `SIGIL_FINALITY_GATE` =
+    ///   * unset / `0`   — off (Phase 2 observe-only, today's behaviour)
+    ///   * `1` / `bft`   — on, but ONLY with a committee large enough for Byzantine
+    ///                     fault tolerance (n ≥ 4); a smaller committee logs and stays off
+    ///   * `solo`        — on regardless of committee size. This is the operator saying
+    ///                     out loud that on a chain with one producer, that producer's
+    ///                     signature IS the only source of truth there is, and a 512-block
+    ///                     wait protects against nobody. It is not Byzantine safety and
+    ///                     the log line says so on every boot.
+    pub fn gate_mode(&self) -> GateMode {
+        let raw = std::env::var("SIGIL_FINALITY_GATE").unwrap_or_default();
+        let raw = raw.trim().to_ascii_lowercase();
+        if !self.enabled() || raw.is_empty() || raw == "0" || raw == "off" {
+            return GateMode::Off;
+        }
+        let n = self.committee_size();
+        match raw.as_str() {
+            "solo" => GateMode::Solo { committee: n },
+            "1" | "bft" | "on" => {
+                if sigil_finality::bft_active_for(n) {
+                    GateMode::Bft { committee: n }
+                } else {
+                    GateMode::RefusedTooSmall { committee: n }
+                }
+            }
+            _ => GateMode::Off,
+        }
+    }
+}
+
+/// See [`FinalityWire::gate_mode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateMode {
+    Off,
+    Solo { committee: usize },
+    Bft { committee: usize },
+    RefusedTooSmall { committee: usize },
+}
+
+impl GateMode {
+    pub fn active(self) -> bool {
+        matches!(self, GateMode::Solo { .. } | GateMode::Bft { .. })
+    }
+    pub fn banner(self) -> String {
+        match self {
+            GateMode::Off => "finality gate: OFF — certificates are observed, settlement follows the depth rule".into(),
+            GateMode::Solo { committee } => format!(
+                "🔒 finality gate: SOLO (committee n={committee}) — settlement follows certificates. \
+                 NOT Byzantine-fault-tolerant: this trusts the committee's signatures outright."
+            ),
+            GateMode::Bft { committee } => format!(
+                "🔒 finality gate: BFT (committee n={committee}, f={}) — settlement follows quorum certificates",
+                sigil_finality::max_byzantine_for(committee)
+            ),
+            GateMode::RefusedTooSmall { committee } => format!(
+                "⚠ finality gate: REFUSED — SIGIL_FINALITY_GATE=1 needs a committee of ≥4 for BFT, have {committee}. \
+                 Set SIGIL_FINALITY_GATE=solo to gate on a small committee knowingly. Depth rule stays in force."
+            ),
+        }
+    }
 }
 
 /// Wire encoding for a vote: `serde_json`, matching the precedent already

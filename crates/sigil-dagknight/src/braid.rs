@@ -65,6 +65,20 @@ enum Accept {
 /// Composition: the lane-A [`BitfieldDag`] substrate (edges, transitive
 /// causality, hard sliding window) + a ready-frontier + a parked/pending set
 /// + the frozen (finalized) prefix. See the module doc for the ordering rule.
+/// What [`Braid::set_certified`] did with a certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CertifyOutcome {
+    /// The finality line now sits at the certified height.
+    Raised,
+    /// A certificate at or below the one already adopted — nothing to do.
+    AlreadyCovered,
+    /// Names a height above this braid's selected tip — not seen yet, ignored.
+    AheadOfTip,
+    /// Names a block that is NOT on this braid's selected spine at that height —
+    /// either a sibling fork or a block outside the retention window. Refused.
+    NotOnSpine,
+}
+
 pub struct Braid {
     cfg: BraidConfig,
     /// Lane-A substrate: kept in lock-step with `recs` (same membership, same
@@ -92,6 +106,10 @@ pub struct Braid {
     /// the finalized height; merge parents older than that are treated as
     /// unknown (parked → pending-capped) — bounded-memory honesty.
     emitted_at: HashMap<BlockHash, u64>,
+    /// Phase 3 finality (2026-09-08): the highest committee certificate that names a
+    /// block on THIS braid's selected spine — `(height, hash)`. Raises the finality
+    /// line above the depth rule; see [`Braid::set_certified`].
+    certified: Option<(u64, BlockHash)>,
     /// The frozen (finalized) linear order, append-only.
     frozen: Vec<BlockHash>,
     /// Running chained-BLAKE3 accumulator over `frozen`.
@@ -142,6 +160,7 @@ impl Braid {
             pending_heights: BTreeMap::new(),
             waiters: HashMap::new(),
             emitted_at: HashMap::new(),
+            certified: None,
             frozen: Vec::new(),
             frozen_acc: [0u8; 32],
             drained: 0,
@@ -479,7 +498,7 @@ impl Braid {
     /// pull the line more than `max_window` heights below the tip — past that
     /// the parked view is outside the retention band anyway and is dropped by
     /// the existing `cleanup` path.
-    fn computed_final(&self) -> Option<u64> {
+    fn depth_rule_final(&self) -> Option<u64> {
         let tip = self.selected_tip()?;
         let tip_height = self.recs.get(&tip)?.view.height;
         let tip_line = match (&self.ghostdag, self.cfg.final_blue_depth) {
@@ -510,6 +529,75 @@ impl Braid {
         };
         let hard_floor = tip_height.saturating_sub(window as u64);
         Some(clamped.max(hard_floor).min(tip_line))
+    }
+
+    /// The finality line the braid enforces: the depth rule, RAISED to the highest
+    /// committee certificate that names a block on this braid's own selected spine
+    /// (Phase 3 of SIGIL instant finality, 2026-09-08 — see `docs/research/
+    /// SIGIL_INSTANT_FINALITY_v0.tex`, `git show 033bb594:…`).
+    ///
+    /// Why `max` and not "replace": the depth rule is what every node computes alone
+    /// and is the floor that keeps a braid with NO committee behaving exactly as
+    /// before. A certificate can only pull the line UP, and only to a block this braid
+    /// itself holds on its spine ([`Braid::set_certified`] refuses anything else), so a
+    /// node can never be talked into freezing an order it has not seen. The pending
+    /// clamp inside the depth rule is deliberately NOT applied to the certified height:
+    /// anything still parked at or below a certified height is by definition not on
+    /// the finalized spine, and holding the line under it would let one missing parent
+    /// veto the committee.
+    fn computed_final(&self) -> Option<u64> {
+        let depth = self.depth_rule_final();
+        match self.certified {
+            None => depth,
+            Some((h, _)) => {
+                let tip = self.selected_tip()?;
+                let tip_height = self.recs.get(&tip)?.view.height;
+                if h > tip_height {
+                    return depth;
+                }
+                Some(depth.unwrap_or(0).max(h))
+            }
+        }
+    }
+
+    /// Adopt a committee certificate for `(height, hash)` as this braid's finality
+    /// line, if — and only if — that block is on the selected spine right now. Returns
+    /// what happened; the caller (the node's finality wire) logs the interesting ones.
+    /// Never lowers the line. A certificate above our tip is ignored rather than
+    /// remembered: we have not seen that block, so there is nothing to freeze yet, and
+    /// the next checkpoint's certificate will arrive after we have.
+    pub fn set_certified(&mut self, height: u64, hash: BlockHash) -> CertifyOutcome {
+        if let Some((have, _)) = self.certified {
+            if height <= have {
+                return CertifyOutcome::AlreadyCovered;
+            }
+        }
+        let Some(tip) = self.selected_tip() else { return CertifyOutcome::AheadOfTip };
+        let Some(tip_rec) = self.recs.get(&tip) else { return CertifyOutcome::AheadOfTip };
+        if height > tip_rec.view.height {
+            return CertifyOutcome::AheadOfTip;
+        }
+        let mut cur = tip;
+        loop {
+            let Some(rec) = self.recs.get(&cur) else { return CertifyOutcome::NotOnSpine };
+            if rec.view.height == height {
+                if rec.view.hash != hash {
+                    return CertifyOutcome::NotOnSpine;
+                }
+                break;
+            }
+            if rec.view.height < height {
+                return CertifyOutcome::NotOnSpine;
+            }
+            cur = rec.view.parent;
+        }
+        self.certified = Some((height, hash));
+        CertifyOutcome::Raised
+    }
+
+    /// The certificate currently raising the finality line, if any.
+    pub fn certified_line(&self) -> Option<(u64, BlockHash)> {
+        self.certified
     }
 
     /// v2.1 finality line: walk the selected-parent spine back from `tip`
@@ -1951,5 +2039,76 @@ mod tests {
              exactly as before this fix — the tighter window must not \
              leak into the normal case"
         );
+    }
+}
+
+#[cfg(test)]
+mod certified_tests {
+    use super::*;
+
+    fn hh(n: u8) -> BlockHash { [n + 1; 32] }
+    fn view(hash: BlockHash, parent: BlockHash, height: u64) -> BlockView {
+        BlockView { hash, parent, merge_parents: vec![], height, producer: [0xAA; 32], difficulty: 0 }
+    }
+    fn chain(n: u8, final_depth: u64) -> Braid {
+        let mut b = Braid::new(BraidConfig { final_depth, ..BraidConfig::default() });
+        b.insert(view(hh(0), [0u8; 32], 0));
+        for i in 1..=n { b.insert(view(hh(i), hh(i - 1), i as u64)); }
+        b
+    }
+
+    /// The whole point of Phase 3: with the production depth rule (512) a 20-block braid
+    /// finalizes NOTHING; one certificate for a spine block finalizes through it.
+    #[test]
+    fn a_certificate_for_a_spine_block_raises_the_line_past_the_depth_rule() {
+        let mut b = chain(20, 512);
+        assert_eq!(b.finalized_height(), 0, "depth rule alone: nothing final on a 20-block braid");
+        assert_eq!(b.set_certified(15, hh(15)), CertifyOutcome::Raised);
+        assert_eq!(b.finalized_height(), 15);
+        assert_eq!(b.certified_line(), Some((15, hh(15))));
+        // The line is ENFORCED, not just reported: a late sibling below it is refused.
+        assert!(matches!(b.insert(view([0xEE; 32], hh(9), 10)), InsertOutcome::BelowFinal { finalized: 15 }));
+        // …and the frozen order hands out everything through the certified height.
+        let out = b.drain_ordered();
+        assert!(out.contains(&hh(15)) && !out.contains(&hh(16)), "frozen through 15, not past it: {}", out.len());
+    }
+
+    #[test]
+    fn a_certificate_never_lowers_and_refuses_what_it_cannot_see() {
+        let mut b = chain(20, 512);
+        assert_eq!(b.set_certified(15, hh(15)), CertifyOutcome::Raised);
+        assert_eq!(b.set_certified(10, hh(10)), CertifyOutcome::AlreadyCovered, "never lowers");
+        assert_eq!(b.set_certified(25, hh(25)), CertifyOutcome::AheadOfTip, "not seen yet");
+        assert_eq!(b.set_certified(18, [0xEE; 32]), CertifyOutcome::NotOnSpine, "a sibling fork is not our spine");
+        assert_eq!(b.finalized_height(), 15, "the refused ones left the line alone");
+        // A certificate for a block we DO hold but on a fork off the spine: also refused.
+        b.insert(view([0xDD; 32], hh(16), 17)); // sibling of hh(17)
+        assert_eq!(b.set_certified(17, [0xDD; 32]), CertifyOutcome::NotOnSpine);
+        assert_eq!(b.set_certified(17, hh(17)), CertifyOutcome::Raised);
+        assert_eq!(b.finalized_height(), 17);
+    }
+
+    /// A block parked at height 12 (parent unknown) clamps the DEPTH rule below 12 —
+    /// the certificate must not be vetoed by it: what is parked below a certified
+    /// height is by definition not on the finalized spine.
+    #[test]
+    fn a_parked_block_below_the_certificate_does_not_hold_the_line() {
+        // 30 blocks, depth 4 → line 26. Park a block at 28 (above the line, parent never
+        // arrives), then grow the chain to 40: the depth rule would reach 36 but clamps
+        // under the parked height (<28).
+        let mut b = chain(30, 4);
+        let _ = b.insert(view([0xCC; 32], [0x77; 32], 28));
+        for i in 31..=40u8 { b.insert(view(hh(i), hh(i - 1), i as u64)); }
+        assert!(b.finalized_height() < 28, "depth rule clamped under the parked height: {}", b.finalized_height());
+        assert_eq!(b.set_certified(35, hh(35)), CertifyOutcome::Raised);
+        assert_eq!(b.finalized_height(), 35);
+    }
+
+    /// No certificate ⇒ byte-for-byte the old behaviour.
+    #[test]
+    fn without_a_certificate_the_depth_rule_is_unchanged() {
+        let b = chain(20, 4);
+        assert_eq!(b.finalized_height(), 16);
+        assert_eq!(b.certified_line(), None);
     }
 }

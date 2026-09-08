@@ -60,6 +60,9 @@ struct Harness {
     mint_map: HashMap<BlockHash, Vec<[u8; 32]>>,
     api: sigil_api::AppState,
     policy: OfferPolicy,
+    /// Phase 3 finality gate (2026-09-08): after each mint, adopt a solo certificate for
+    /// the block just minted — what `apply_finality_gate` does with a one-node committee.
+    gate: bool,
     /// Every shielded tx handed to the builder, per tick — the "offered ONCE" gauge.
     offered: Vec<[u8; 32]>,
     /// Every verdict the builder recorded — the "never refused against itself" gauge.
@@ -81,6 +84,7 @@ impl Harness {
             mint_map: HashMap::new(),
             api,
             policy,
+            gate: false,
             offered: Vec::new(),
             rejections: Vec::new(),
             ticks: 0,
@@ -116,9 +120,14 @@ impl Harness {
         let view = BlockView::from(&block.header);
         let vh = view.hash;
         let _ = self.braid.insert(view);
+        let minted_height = self.dag_bodies.get(&vh).map(|b| b.header.height).unwrap_or(0);
         dag_store_body(&mut self.dag_bodies, DAG_BODIES_CAP, vh, block);
+        let minted_height = self.dag_bodies.get(&vh).map(|b| b.header.height).unwrap_or(minted_height);
         if !minted.is_empty() {
             self.mint_map.insert(vh, minted);
+        }
+        if self.gate {
+            let _ = self.braid.set_certified(minted_height, vh);
         }
         let (_applied, _skipped, failed) = dag_drain_apply(
             &mut self.braid,
@@ -311,6 +320,40 @@ fn chronos_shielded_send_lands_once_and_the_status_never_lies() {
     assert_eq!(h.api.shielded.pending_len(), 0, "nothing left pending after finality");
     eprintln!(
         "chronos[fixed loop]: offered 1x, in flight for {in_flight_ticks} candidate(s), applied at tick {settled_at} (final_depth={FINAL_DEPTH})"
+    );
+
+    // ═══════════ PHASE 3 FINALITY GATE — production depth, solo certificate ═══════════
+    //
+    // At the real final_depth (512) the depth rule alone would settle NOTHING inside
+    // this test. With the gate, the producer's own certificate for each minted block
+    // raises the braid's line to that block, so the shielded send settles in the SAME
+    // tick it is carried: instant finality, measured rather than promised.
+    std::env::set_var("SIGIL_DAG_FINAL_DEPTH", "512");
+    let mut g = Harness::new(OfferPolicy::Fixed);
+    g.gate = true;
+    let mut store = NoteStore::new();
+    let (send_hash, nf) = shield_then_send(&mut g, &alice_sk, alice_addr, &alice, &bob, &bob_seed, &mut store);
+    let submitted_at = g.ticks;
+    let mut applied_at: Option<u64> = None;
+    for _ in 0..8 {
+        g.tick();
+        match g.status(&send_hash) {
+            Some(TxOutcome::Applied) => { applied_at = Some(g.ticks); break; }
+            Some(TxOutcome::Rejected(r)) => panic!("GATE: a landed send was reported rejected: {r}"),
+            _ => {}
+        }
+    }
+    let applied_at = applied_at.expect("with the finality gate the send must settle within a few ticks at depth 512");
+    assert!(applied_at - submitted_at <= 2, "settled {} tick(s) after submission — expected ≤2 at final_depth=512", applied_at - submitted_at);
+    assert!(g.chain.state().shielded().is_spent(&nf));
+    assert_eq!(g.offered_count(&send_hash), 1);
+    // At final_depth=512 the depth rule alone would have settled NOTHING (h=0): every
+    // settled block here is the certificate's doing.
+    assert!(g.chain.height() >= 2, "the gate settled blocks the depth rule never would (h={})", g.chain.height());
+    assert!(g.braid.certified_line().is_some(), "the braid's line is held by a certificate");
+    eprintln!(
+        "chronos[finality gate]: final_depth=512, send applied {} tick(s) after submission (settled h={}, certified line={:?})",
+        applied_at - submitted_at, g.chain.height(), g.braid.certified_line().map(|c| c.0)
     );
     std::env::remove_var("SIGIL_DAG_FINAL_DEPTH");
     std::env::remove_var("SIGIL_PRODUCER_WALLET");

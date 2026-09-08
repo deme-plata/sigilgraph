@@ -34,7 +34,7 @@ pub mod sim;
 pub mod view;
 
 pub use bitset::{BitfieldDag, BitfieldDagStats, VertexBitfield, VertexIndexMap};
-pub use braid::{Braid, BraidStats, BlockSummary};
+pub use braid::{Braid, BraidStats, BlockSummary, CertifyOutcome};
 pub use ghostdag::{BlockGhostdagData, GhostdagStore};
 pub use present::BraidPresentation;
 pub use sim::BraidSimReport;

@@ -516,6 +516,15 @@ mod shield_ops {
             let msg =
                 format!("sigil-rpc/v1|shield|{from}|{value}|{cm_hex}|{fee}|nonce={req_nonce}");
             let sig = hex::encode(sk.sign(msg.as_bytes()).to_bytes());
+            // 2026-09-08: seal the note to OUR OWN delivery key so every client of this
+            // seed (phone, browser, MCP) finds this deposit by trial-decryption instead of
+            // guessing the derivation index its own way. Optional on the wire; an older
+            // node simply ignores it.
+            let note_ciphertext: Option<String> = u64::try_from(value).ok().and_then(|v| {
+                seal_note(&NotePlaintext::new(v, account.blinding(this_index)), &account.address(&seed))
+                    .ok()
+                    .map(|c| c.0)
+            });
             let payload = serde_json::json!({
                 "from": from,
                 "amount": value.to_string(),
@@ -523,6 +532,7 @@ mod shield_ops {
                 "fee": fee.to_string(),
                 "sig": sig,
                 "req_nonce": req_nonce,
+                "note_ciphertext": note_ciphertext,
             });
             let url = format!("{}/v1/shield", node.trim_end_matches('/'));
             match client.post(&url).json(&payload).send() {

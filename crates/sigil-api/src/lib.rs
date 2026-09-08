@@ -88,6 +88,10 @@ use dagknight::DagSnapshotBridge;
 pub struct AppState {
     pub mempool: Arc<MempoolBackend>,
     pub state: Arc<RwLock<SigilState>>,
+    /// The newest finality certificate this node adopted (Phase 3, 2026-09-08), as the
+    /// JSON a client can VERIFY: height, spine block hash, order hash and every
+    /// validator's Ed25519 vote. `None` until the gate has raised the line once.
+    pub finality: Arc<RwLock<Option<serde_json::Value>>>,
     pub mining: Arc<MiningBridge>,
     /// The node's user-writable flux-aether artifact store — what the SIGIL OS
     /// terminal reads and writes. Lives in `<base>/aether-user`, deliberately
@@ -147,6 +151,7 @@ impl AppState {
         Self {
             mempool,
             state,
+            finality: Arc::new(RwLock::new(None)),
             mining: Arc::new(MiningBridge::new()),
             send: Arc::new(SendBridge::new()),
             shielded: Arc::new(shielded::ShieldedBridge::new()),
@@ -1690,6 +1695,24 @@ pub struct NetworkTopologyResponse {
     pub local_view: Option<flux_p2p::PeerChainView>,
 }
 
+/// The newest finality certificate this node settled on — the thing a wallet can check
+/// for itself instead of trusting "applied". Each vote is an Ed25519 signature over
+/// `b"SIGIL_FINALITY_VOTE_V0" ‖ height (u64 LE) ‖ spine_block_hash ‖ order_hash` by the
+/// listed validator (a committee member's public key; on today's chain the producer's,
+/// the same key that signs blocks and acceptance receipts). `gate` says under which
+/// honesty label this node lets certificates drive settlement — see
+/// `FinalityWire::gate_mode` in sigil-node.
+#[flux_api_macros::api(GET, "/v1/finality/certificate", summary = "Newest finality certificate this node settled on, with every validator's signed vote")]
+pub async fn finality_certificate_handler(State(st): State<AppState>) -> Json<serde_json::Value> {
+    let cert = st.finality.read().ok().and_then(|g| g.clone());
+    Json(serde_json::json!({
+        "ok": true,
+        "certificate": cert,
+        "vote_signing_bytes": "SIGIL_FINALITY_VOTE_V0 || height u64 LE || spine_block_hash[32] || order_hash[32]",
+        "ts_ms": now_ms(),
+    }))
+}
+
 #[flux_api_macros::api(GET, "/v1/network/topology", summary = "Real peer connections + mesh health, for the network map UI")]
 pub async fn network_topology(State(st): State<AppState>) -> Json<ApiResponse<NetworkTopologyResponse>> {
     let Some(net) = st.network.as_ref() else {
@@ -1863,6 +1886,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/mining/hashrate/history", get(mining_hashrate_history))
         .route("/v1/dagknight/recent", get(dagknight_recent))
         .route("/v1/network/topology", get(network_topology))
+        .route("/v1/finality/certificate", get(finality_certificate_handler))
         .route("/v1/bridge/lock", post(bridge_lock_handler))
         .route("/v1/bridge/lock/prepare", post(bridge_lock_prepare_handler))
         .route("/v1/bridge/locks", get(bridge_locks_handler))

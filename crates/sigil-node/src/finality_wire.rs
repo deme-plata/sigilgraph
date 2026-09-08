@@ -249,6 +249,29 @@ impl FinalityWire {
         Some((h, c.spine_block_hash))
     }
 
+    /// The newest certificate as the JSON `/v1/finality` publishes — everything a client
+    /// needs to re-verify every vote. `gate` is the honesty label the node runs under.
+    pub fn certificate_view(&self, gate: GateMode) -> Option<serde_json::Value> {
+        let h = self.observer.finalized_height()?;
+        let c = self.observer.certificate_for(h)?;
+        let report = self.observer.report(0);
+        let votes: Vec<serde_json::Value> = c.votes.iter().map(|v| serde_json::json!({
+            "validator_id": hex::encode(v.validator_id),
+            "signature": hex::encode(&v.signature),
+        })).collect();
+        Some(serde_json::json!({
+            "height": c.height,
+            "spine_block_hash": hex::encode(c.spine_block_hash),
+            "order_hash": hex::encode(c.order_hash),
+            "votes": votes,
+            "committee_size": report.committee_size,
+            "quorum": report.quorum,
+            "bft": report.bft_active,
+            "gate": match gate { GateMode::Solo { .. } => "solo", GateMode::Bft { .. } => "bft", _ => "off" },
+            "certified_at_ms": now_ms(),
+        }))
+    }
+
     /// Committee size, for the gate's safety check.
     pub fn committee_size(&self) -> usize {
         self.observer.report(0).committee_size

@@ -895,12 +895,15 @@ fn run_start() -> Result<()> {
         // sampler itself only ever runs once the money API is up, below.
         let mining_history_store =
             Arc::new(open_mining_history_or_ephemeral(snap_dir.join("mining-history")));
+        // Phase 3 (2026-09-08): the newest adopted certificate, published on /v1/finality.
+        let finality_view: Arc<std::sync::RwLock<Option<serde_json::Value>>> = Arc::new(std::sync::RwLock::new(None));
         let money_state: Option<Arc<std::sync::RwLock<SigilState>>> =
             std::env::var("SIGIL_MONEY_API").ok().filter(|s| !s.is_empty()).map(|addr| {
                 let shared = Arc::new(std::sync::RwLock::new(chain.state_snapshot()));
                 let app = sigil_api::AppState {
                     mempool: Arc::clone(&mempool),
                     state: Arc::clone(&shared),
+                    finality: Arc::clone(&finality_view),
                     mining: Arc::clone(&mining_bridge),
                     send: Arc::clone(&send_bridge),
                     shielded: Arc::clone(&shielded_bridge),
@@ -1805,7 +1808,7 @@ fn run_start() -> Result<()> {
                                     }
                                     // Phase 3 (2026-09-08): a certificate (with n=1, our own vote
                                     // just completed it) raises the braid's finality line — gated.
-                                    apply_finality_gate(&finality, braid.as_mut());
+                                    apply_finality_gate(&finality, braid.as_mut(), &finality_view);
                                     if produced % 100 == 0 {
                                         let secs = t_start.elapsed().as_secs_f64().max(1e-6);
                                         eprintln!("🏭 produced {} blocks ({:.1}/s) · {} txs ({:.0} TPS verify-once) — tip H={}",
@@ -3017,7 +3020,7 @@ fn run_start() -> Result<()> {
                                 }
                                 // Phase 3: a certificate assembled from peers' votes gates
                                 // settlement when SIGIL_FINALITY_GATE says so.
-                                apply_finality_gate(&finality, braid.as_mut());
+                                apply_finality_gate(&finality, braid.as_mut(), &finality_view);
                             } else {
                                 let preview = std::str::from_utf8(&data)
                                     .map(|s| s.chars().take(120).collect::<String>())
@@ -4317,18 +4320,32 @@ mod dag_wiring_tests {
 /// the braid, which raises its enforced finality line to the certified spine block, so
 /// `dag_drain_apply` settles it on the next tick instead of `final_depth` blocks later.
 /// Off unless `SIGIL_FINALITY_GATE` is set — see `FinalityWire::gate_mode`.
-fn apply_finality_gate(finality: &finality_wire::FinalityWire, braid: Option<&mut sigil_dagknight::Braid>) {
+fn apply_finality_gate(
+    finality: &finality_wire::FinalityWire,
+    braid: Option<&mut sigil_dagknight::Braid>,
+    view: &Arc<std::sync::RwLock<Option<serde_json::Value>>>,
+) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static LAST_WARNED: AtomicU64 = AtomicU64::new(0);
-    if !finality.gate_mode().active() {
+    let mode = finality.gate_mode();
+    if !mode.active() {
         return;
     }
     let Some(br) = braid else { return };
     let Some((h, hash)) = finality.latest_certificate() else { return };
     match br.set_certified(h, hash) {
         sigil_dagknight::CertifyOutcome::Raised => {
-            eprintln!("🔒 finality gate: settlement line → H={h} by certificate (depth rule would be H={})",
-                h.saturating_sub(sigil_dagknight::BraidConfig::from_env().final_depth));
+            // Once a second is plenty for a log; the view is refreshed on every raise.
+            static LAST_LOGGED: AtomicU64 = AtomicU64::new(0);
+            let now = finality_wire::now_ms();
+            if now.saturating_sub(LAST_LOGGED.load(Ordering::Relaxed)) >= 1000 {
+                LAST_LOGGED.store(now, Ordering::Relaxed);
+                eprintln!("🔒 finality gate: settlement line → H={h} by certificate (depth rule would be H={})",
+                    h.saturating_sub(sigil_dagknight::BraidConfig::from_env().final_depth));
+            }
+            if let Some(v) = finality.certificate_view(mode) {
+                if let Ok(mut w) = view.write() { *w = Some(v); }
+            }
         }
         sigil_dagknight::CertifyOutcome::NotOnSpine => {
             if LAST_WARNED.swap(h, Ordering::Relaxed) != h {

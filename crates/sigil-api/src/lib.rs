@@ -531,7 +531,7 @@ pub async fn shield_handler(
     State(st): State<AppState>,
     Json(req): Json<shielded::ShieldRequest>,
 ) -> Json<serde_json::Value> {
-    match st.shielded.submit_shield(&req.from, req.amount, &req.cm, req.fee, &req.sig, req.req_nonce) {
+    match st.shielded.submit_shield_with_delivery(&req.from, req.amount, &req.cm, req.fee, &req.sig, req.req_nonce, req.note_ciphertext.as_deref()) {
         Ok(h) => Json(serde_json::json!({
             "ok": true, "txid": hex::encode(h), "ts_ms": now_ms(),
             "note": "queued for the next braid block",

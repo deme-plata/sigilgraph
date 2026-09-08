@@ -22,6 +22,7 @@
 /// the O(n) whole-map rehash (73% of wall-clock per chronos) with O(1)
 /// per-touched-leaf updates. Standalone + fully tested; `roots()` wiring is
 /// a follow-up patch (see SIGIL_STARGATE_INCREMENTAL_ROOTS.md).
+pub mod token_registry;
 pub mod acc;
 /// Shielded-pool consensus state: note commitments + nullifier set (PV-1).
 pub mod shielded;
@@ -625,6 +626,9 @@ pub enum StateMutation {
         amount: u128,
         /// `compress2(amount, blinding)` — the note the depositor can later spend.
         cm: [u8; 32],
+        /// Sealed to the depositor's own delivery key (2026-09-08); see `SigilTx::Shield`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note_ciphertext: Option<String>,
     },
 
     /// PV-1: mint a block reward DIRECTLY into the shielded pool.
@@ -1205,7 +1209,7 @@ pub fn commit_state_transition(
                 }
             }
 
-            StateMutation::Shield { from, amount, cm } => {
+            StateMutation::Shield { from, amount, cm, note_ciphertext } => {
                 // RAMP DENOMINATION. The transparent side of a ramp names a wallet and an
                 // amount, so an unusual amount links the two sides without touching any
                 // proof. Standard denominations turn an amount into a bucket.
@@ -1234,7 +1238,7 @@ pub fn commit_state_transition(
                 // rejection (duplicate commitment, or the pre-existing pool-full case)
                 // leaves state completely untouched, matching every other refused
                 // mutation in this function.
-                state.shielded.append_note(cm)?;
+                state.shielded.append_note_with_delivery(cm, note_ciphertext)?;
                 state.shielded.lock_value(amount)?;
                 state.set_balance(from, NATIVE, after);
                 state.shielded.remember_anchor_dirty();

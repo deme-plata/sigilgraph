@@ -76,16 +76,6 @@ export function buildPrivateSendReceivedWithMemo(seed_hex: string, note_blinding
  */
 export function buildPrivateSendWithMemo(seed_hex: string, note_index: number, note_value_str: string, note_position: number, unpadded_leaves_json: string, capacity: number, recipient_pk_shield_hex: string, recipient_pk_enc_hex: string, amount_str: string, memo: string): string;
 
-/**
- * The nullifier this wallet's note at pool leaf `position` publishes when spent —
- * `compress2(spend_key, position)`, byte-identical to `note_v1::nullifier` and
- * `wallet::nullifier_at`, wire-encoded like `/v1/shielded/nullifiers` lists them.
- *
- * Exported 2026-09-08 because the page's JS port of this derivation disagreed with the
- * crate (leaf 2438: JS `43cc93…`, chain `1f2a01…`), so the browser never recognised its
- * own spent notes: balances netted nothing and Send kept offering spent notes, which the
- * node refused as "nullifier already spent". One derivation, this one.
- */
 export function noteNullifier(seed_hex: string, position: number): string;
 
 /**
@@ -97,6 +87,23 @@ export function noteNullifier(seed_hex: string, position: number): string;
  * to us, which is the common case and carries no information.
  */
 export function openNoteCiphertext(seed_hex: string, ciphertext_json: string): string;
+
+/**
+ * The nullifier this wallet's note at pool leaf `position` publishes when spent —
+ * `compress2(spend_key, position)`, byte-identical to `note_v1::nullifier` and
+ * `wallet::nullifier_at`, wire-encoded like `/v1/shielded/nullifiers` lists them.
+ *
+ * Exported 2026-09-08 because the page's JS port of this derivation disagreed with the
+ * crate (leaf 2438: JS `43cc93…`, chain `1f2a01…`), so the browser never recognised its
+ * own spent notes: balances netted nothing and Send kept offering spent notes, which the
+ * node refused as "nullifier already spent". One derivation, this one.
+ * Seal a SELF-CREATED note (derivation `index`, `value`) to this wallet's OWN delivery
+ * key, for `POST /v1/shield`'s `note_ciphertext` (2026-09-08). With it attached, every
+ * client of the seed — phone, MCP, sigil-top, this page — finds the deposit by
+ * trial-decryption, the way a received payment is found, instead of each guessing the
+ * index its own way and going blind to the others' deposits.
+ */
+export function sealNoteToSelf(seed_hex: string, index: number, value_str: string): string;
 
 /**
  * The X25519 note-delivery key ciphertexts are sealed to — the OTHER half of this
@@ -144,6 +151,7 @@ export interface InitOutput {
     readonly buildPrivateSendWithMemo: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number) => [number, number, number, number];
     readonly noteNullifier: (a: number, b: number, c: number) => [number, number, number, number];
     readonly openNoteCiphertext: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly sealNoteToSelf: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly shieldEncryptPublicKey: (a: number, b: number) => [number, number, number, number];
     readonly shieldNoteCommitment: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly shieldPublicKey: (a: number, b: number) => [number, number, number, number];

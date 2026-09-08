@@ -2115,7 +2115,11 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
           // amount/fee are u128 on the wire — sigil_state::u128_str requires a JSON STRING,
           // not a number (a plain number 422s: "expected a string"). Caught live testing
           // against the real backend before this shipped.
-          body:JSON.stringify({from:from,amount:value.toString(),cm:cmHex,fee:String(fee),sig:sig,req_nonce:reqNonce})});
+          // 2026-09-08: seal the note to OUR OWN delivery key so every client of this seed
+          // (phone, MCP, sigil-top, this page) finds the deposit by trial-decryption —
+          // no more index guessing that left each client blind to the others' deposits.
+          body:JSON.stringify({from:from,amount:value.toString(),cm:cmHex,fee:String(fee),sig:sig,req_nonce:reqNonce,
+            note_ciphertext:(function(){ try{ var W=window.sigilShieldWasm; if(!W||!W.sealNoteToSelf) return undefined; var sh=Array.from(kp.priv).map(function(b){ return ('0'+b.toString(16)).slice(-2); }).join(''); return W.sealNoteToSelf(sh, index, value.toString()); }catch(_){ return undefined; } })()})});
         var j=null; try{ j=await r.json(); }catch(_){}
         if(r.ok && j && j.ok){ noteRecord(from,index,Number(value)); bookedIndices.push(index); landed.push({txid:j.txid,value:value}); }
         else { failed=(j&&(j.error||j.message))||('HTTP '+r.status); break; }
@@ -2499,7 +2503,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   window.sigilShieldWasmReady = (async function(){
     var el=document.getElementById('privWasmState');
     try{
-      var mod = await import('./wasm/sigil_shield.js?v=908');
+      var mod = await import('./wasm/sigil_shield.js?v=909');
       await mod.default(); // fetches + instantiates the sibling .wasm
       window.sigilShieldWasm = mod;
       if(el){ el.textContent='prover ready'; el.style.color='#00e0c6'; }

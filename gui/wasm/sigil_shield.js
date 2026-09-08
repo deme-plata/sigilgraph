@@ -242,14 +242,6 @@ export function buildPrivateSendWithMemo(seed_hex, note_index, note_value_str, n
 }
 
 /**
- * The nullifier this wallet's note at pool leaf `position` publishes when spent —
- * `compress2(spend_key, position)`, byte-identical to `note_v1::nullifier` and
- * `wallet::nullifier_at`, wire-encoded like `/v1/shielded/nullifiers` lists them.
- *
- * Exported 2026-09-08 because the page's JS port of this derivation disagreed with the
- * crate (leaf 2438: JS `43cc93…`, chain `1f2a01…`), so the browser never recognised its
- * own spent notes: balances netted nothing and Send kept offering spent notes, which the
- * node refused as "nullifier already spent". One derivation, this one.
  * @param {string} seed_hex
  * @param {number} position
  * @returns {string}
@@ -295,6 +287,48 @@ export function openNoteCiphertext(seed_hex, ciphertext_json) {
         const ptr1 = passStringToWasm0(ciphertext_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
         const ret = wasm.openNoteCiphertext(ptr0, len0, ptr1, len1);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * The nullifier this wallet's note at pool leaf `position` publishes when spent —
+ * `compress2(spend_key, position)`, byte-identical to `note_v1::nullifier` and
+ * `wallet::nullifier_at`, wire-encoded like `/v1/shielded/nullifiers` lists them.
+ *
+ * Exported 2026-09-08 because the page's JS port of this derivation disagreed with the
+ * crate (leaf 2438: JS `43cc93…`, chain `1f2a01…`), so the browser never recognised its
+ * own spent notes: balances netted nothing and Send kept offering spent notes, which the
+ * node refused as "nullifier already spent". One derivation, this one.
+ * Seal a SELF-CREATED note (derivation `index`, `value`) to this wallet's OWN delivery
+ * key, for `POST /v1/shield`'s `note_ciphertext` (2026-09-08). With it attached, every
+ * client of the seed — phone, MCP, sigil-top, this page — finds the deposit by
+ * trial-decryption, the way a received payment is found, instead of each guessing the
+ * index its own way and going blind to the others' deposits.
+ * @param {string} seed_hex
+ * @param {number} index
+ * @param {string} value_str
+ * @returns {string}
+ */
+export function sealNoteToSelf(seed_hex, index, value_str) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(seed_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(value_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.sealNoteToSelf(ptr0, len0, index, ptr1, len1);
         var ptr3 = ret[0];
         var len3 = ret[1];
         if (ret[3]) {

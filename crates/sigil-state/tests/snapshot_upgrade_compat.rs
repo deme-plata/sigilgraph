@@ -79,7 +79,7 @@ fn current_snapshot_round_trips() {
             at_height: 1,
             mutations: vec![
                 StateMutation::SetBalance { wallet: ALICE, token: NATIVE, amount: 1_000 },
-                StateMutation::Shield { from: ALICE, amount: 1_000, cm: [9u8; 32] },
+                StateMutation::Shield { from: ALICE, amount: 1_000, cm: [9u8; 32], note_ciphertext: None },
             ],
         },
         1,

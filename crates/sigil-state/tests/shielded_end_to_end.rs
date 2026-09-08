@@ -81,6 +81,7 @@ fn shielded_fixture(value: u64, blinding: u64, key: u64) -> (SigilState, Note, u
             from: ALICE,
             amount: value as u128,
             cm: to_wire(note.commitment()),
+            note_ciphertext: None,
         }],
     )
     .expect("shield must succeed");
@@ -471,7 +472,7 @@ fn an_unusual_shield_amount_is_refused() {
     let err = apply(
         &mut state,
         2,
-        vec![StateMutation::Shield { from: ALICE, amount: 7_431_902, cm: [1u8; 32] }],
+        vec![StateMutation::Shield { from: ALICE, amount: 7_431_902, cm: [1u8; 32], note_ciphertext: None }],
     )
     .expect_err("SECURITY: a correlatable amount must be refused at the ramp");
     assert!(matches!(err, CommitError::Shielded(_)), "got {err:?}");
@@ -486,7 +487,7 @@ fn an_unusual_shield_amount_is_refused() {
         apply(
             &mut state,
             3 + i as u64,
-            vec![StateMutation::Shield { from: ALICE, amount: *amt, cm: [(i as u8) + 2; 32] }],
+            vec![StateMutation::Shield { from: ALICE, amount: *amt, cm: [(i as u8) + 2; 32], note_ciphertext: None }],
         )
         .unwrap_or_else(|e| panic!("denomination {amt} must be accepted: {e}"));
     }
@@ -534,6 +535,7 @@ fn an_entire_accumulated_balance_can_be_shielded() {
             from: ALICE,
             amount: *amount,
             cm: to_wire(Note::new(*amount as u64, 1_000 + i as u64, 7).unwrap().commitment()),
+            note_ciphertext: None,
         })
         .collect();
     apply(&mut state, 2, muts).expect("the whole balance must shield");
@@ -612,7 +614,7 @@ fn replaying_a_shield_at_a_later_height_is_refused_not_double_applied() {
     .expect("fixture funding");
 
     let cm = [0x42; 32];
-    let shield = || StateMutation::Shield { from: ALICE, amount: 100, cm };
+    let shield = || StateMutation::Shield { from: ALICE, amount: 100, cm, note_ciphertext: None };
 
     // First landing — the honest, original application. Must behave exactly like any
     // other Shield (see `shielded_fixture`'s own assertions).

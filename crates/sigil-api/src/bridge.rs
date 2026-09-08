@@ -356,6 +356,7 @@ impl BridgeBridge {
                     amount: *part_amount,
                     cm: cm_b,
                     fee: 0,
+                    note_ciphertext: None,
                 };
                 let tx_hash = tx.hash();
                 tx_hashes.push(tx_hash);

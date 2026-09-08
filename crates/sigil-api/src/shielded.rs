@@ -462,6 +462,31 @@ impl ShieldedBridge {
         sig: &str,
         req_nonce: u64,
     ) -> Result<[u8; 32], ShieldedSubmitError> {
+        self.submit_shield_with_delivery(from, amount, cm, fee, sig, req_nonce, None)
+    }
+
+    /// `submit_shield` with the note sealed to the depositor's OWN delivery key attached
+    /// (2026-09-08). Any client of the seed then finds the deposit by trial-decryption,
+    /// the way it finds a received payment — no index guessing, no client-local journal.
+    /// Not signed into the wallet signature (every existing client keeps working); a
+    /// tampered ciphertext can only make the owner's own note harder to FIND, never move it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_shield_with_delivery(
+        &self,
+        from: &str,
+        amount: u128,
+        cm: &str,
+        fee: u128,
+        sig: &str,
+        req_nonce: u64,
+        note_ciphertext: Option<&str>,
+    ) -> Result<[u8; 32], ShieldedSubmitError> {
+        if let Some(ct) = note_ciphertext {
+            let limit = sigil_shield::note_cipher::MAX_NOTE_CIPHERTEXT_LEN;
+            if ct.len() > limit {
+                return Err(ShieldedSubmitError::CiphertextTooLong { got: ct.len(), limit });
+            }
+        }
         if amount == 0 {
             return Err(ShieldedSubmitError::ZeroAmount);
         }
@@ -473,10 +498,11 @@ impl ShieldedBridge {
         let msg = format!("sigil-rpc/v1|shield|{from}|{amount}|{cm}|{fee}|nonce={req_nonce}");
         verify_wallet_sig(&from_b, &msg, sig)?;
         self.check_nonce(&from_b, req_nonce)?;
-        let tx = SigilTx::Shield { from: from_b, amount, cm: cm_b, fee };
+        let tx = SigilTx::Shield { from: from_b, amount, cm: cm_b, fee, note_ciphertext: note_ciphertext.map(|s| s.to_string()) };
         let id = self.enqueue(tx, None);
         self.fire_relay_hook(id, ShieldedOp::Shield(ShieldRequest {
             from: from.to_string(), amount, cm: cm.to_string(), fee, sig: sig.to_string(), req_nonce,
+            note_ciphertext: note_ciphertext.map(|s| s.to_string()),
         }));
         Ok(id)
     }
@@ -534,7 +560,7 @@ impl ShieldedBridge {
             .map(|(i, (amount, cm))| {
                 // the fee is charged once, on the first part
                 let f = if i == 0 { fee } else { 0 };
-                self.enqueue(SigilTx::Shield { from: from_b, amount, cm, fee: f }, None)
+                self.enqueue(SigilTx::Shield { from: from_b, amount, cm, fee: f, note_ciphertext: None }, None)
             })
             .collect())
     }
@@ -980,6 +1006,9 @@ pub struct ShieldRequest {
     pub sig: String,
     /// Client-chosen strictly-increasing nonce, same convention as `/v1/send`.
     pub req_nonce: u64,
+    /// Optional: the note sealed to the depositor's own delivery key (see `submit_shield_with_delivery`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_ciphertext: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1030,7 +1059,7 @@ mod tests {
     #[test]
     fn permanent_rejections_evict_and_are_remembered() {
         let b = ShieldedBridge::new();
-        let tx = SigilTx::Shield { from: [7u8; 32], amount: 200_000, cm: [9u8; 32], fee: 0 };
+        let tx = SigilTx::Shield { from: [7u8; 32], amount: 200_000, cm: [9u8; 32], fee: 0, note_ciphertext: None };
         let h = b.enqueue(tx, Some([5u8; 32]));
         assert!(matches!(b.status(&h), Some(TxOutcome::Pending { .. })));
         for _ in 0..(REJECT_AFTER - 1) { b.note_rejection(h, "apply_tx: insufficient balance"); }
@@ -1046,7 +1075,7 @@ mod tests {
     #[test]
     fn applied_is_remembered_after_confirm() {
         let b = ShieldedBridge::new();
-        let tx = SigilTx::Shield { from: [7u8; 32], amount: 200_000, cm: [8u8; 32], fee: 0 };
+        let tx = SigilTx::Shield { from: [7u8; 32], amount: 200_000, cm: [8u8; 32], fee: 0, note_ciphertext: None };
         let h = b.enqueue(tx, None);
         b.confirm_applied(&[h]);
         assert_eq!(b.status(&h), Some(TxOutcome::Applied));

@@ -317,7 +317,7 @@ fn chain_pool_view_matches_what_a_prover_builds() {
             at_height: 1,
             mutations: vec![
                 StateMutation::SetBalance { wallet: ALICE, token: NATIVE, amount: 1_000 },
-                StateMutation::Shield { from: ALICE, amount: 1_000, cm },
+                StateMutation::Shield { from: ALICE, amount: 1_000, cm, note_ciphertext: None },
             ],
         },
         1,

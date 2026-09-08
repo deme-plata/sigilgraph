@@ -7,6 +7,7 @@ export const buildPrivateSendReceivedWithMemo: (a: number, b: number, c: number,
 export const buildPrivateSendWithMemo: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number) => [number, number, number, number];
 export const noteNullifier: (a: number, b: number, c: number) => [number, number, number, number];
 export const openNoteCiphertext: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const sealNoteToSelf: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const shieldEncryptPublicKey: (a: number, b: number) => [number, number, number, number];
 export const shieldNoteCommitment: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const shieldPublicKey: (a: number, b: number) => [number, number, number, number];

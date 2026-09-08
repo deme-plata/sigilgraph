@@ -92,6 +92,7 @@ pub fn measure_anchor_cost(target: usize, seed: u64) -> ScaleSample {
             from: alice,
             amount: DENOMINATIONS[0],
             cm: to_wire(n.commitment()),
+                    note_ciphertext: None,
         });
         let _ = i;
     }

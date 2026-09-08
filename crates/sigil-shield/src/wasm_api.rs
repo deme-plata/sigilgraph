@@ -75,6 +75,23 @@ pub fn shield_public_key(seed_hex: &str) -> Result<String, JsValue> {
 /// crate (leaf 2438: JS `43cc93…`, chain `1f2a01…`), so the browser never recognised its
 /// own spent notes: balances netted nothing and Send kept offering spent notes, which the
 /// node refused as "nullifier already spent". One derivation, this one.
+/// Seal a SELF-CREATED note (derivation `index`, `value`) to this wallet's OWN delivery
+/// key, for `POST /v1/shield`'s `note_ciphertext` (2026-09-08). With it attached, every
+/// client of the seed — phone, MCP, sigil-top, this page — finds the deposit by
+/// trial-decryption, the way a received payment is found, instead of each guessing the
+/// index its own way and going blind to the others' deposits.
+#[wasm_bindgen(js_name = sealNoteToSelf)]
+pub fn seal_note_to_self(seed_hex: &str, index: u32, value_str: &str) -> Result<String, JsValue> {
+    let seed = hex32(seed_hex)?;
+    let account = ShieldedAccount::from_seed(seed);
+    let value = parse_u64(value_str, "value")?;
+    let blinding = account.blinding(index as u64);
+    let addr = account.address(&seed);
+    let ct = seal_note(&NotePlaintext::new(value, blinding), &addr)
+        .map_err(|e| JsValue::from_str(&format!("seal: {e}")))?;
+    Ok(ct.0)
+}
+
 #[wasm_bindgen(js_name = noteNullifier)]
 pub fn note_nullifier(seed_hex: &str, position: u32) -> Result<String, JsValue> {
     let account = ShieldedAccount::from_seed(hex32(seed_hex)?);

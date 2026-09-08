@@ -145,6 +145,14 @@ pub enum SigilTx {
         cm: [u8; 32],
         #[serde(with = "sigil_state::u128_str")]
         fee: u128,
+        /// The note sealed to the depositor's OWN delivery key (2026-09-08), so any client
+        /// holding the seed finds it by trial-decryption exactly like a received payment —
+        /// instead of each client guessing derivation indices its own way and going blind
+        /// to the others' deposits (browser could not spend MCP deposits, MCP could not see
+        /// the browser's). Optional and absent from the wire when unset, so every Shield
+        /// already in the chain log serializes byte-identically and keeps its hash.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note_ciphertext: Option<String>,
     },
 
     /// PV-1: a shielded-to-shielded transfer. Amounts and linkage stay private.
@@ -1603,7 +1611,7 @@ fn apply_tx_inner(
             });
         }
 
-        SigilTx::Shield { from, amount, cm, fee } => {
+        SigilTx::Shield { from, amount, cm, fee, note_ciphertext } => {
             let have = state.balance_of(from, &NATIVE);
             let need = amount.checked_add(*fee).ok_or(TxApplyError::Overflow)?;
             if have < need {
@@ -1613,6 +1621,7 @@ fn apply_tx_inner(
                 from: *from,
                 amount: *amount,
                 cm: *cm,
+                note_ciphertext: note_ciphertext.clone(),
             });
         }
 
@@ -2514,6 +2523,28 @@ pub fn lp_token_id(pool: &PoolId) -> TokenId {
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+mod shield_delivery_wire_compat {
+    use super::*;
+    /// A Shield without a delivery ciphertext must serialize EXACTLY as it did before the
+    /// field existed: every Shield already in the chain log keeps its bytes and its hash.
+    #[test]
+    fn a_shield_without_delivery_serializes_without_the_field() {
+        let tx = SigilTx::Shield { from: [1u8; 32], amount: 1_000, cm: [2u8; 32], fee: 0, note_ciphertext: None };
+        let json = String::from_utf8(tx.encode()).unwrap();
+        assert!(!json.contains("note_ciphertext"), "absent field must not appear: {json}");
+        let back: SigilTx = serde_json::from_slice(&tx.encode()).unwrap();
+        assert_eq!(back, tx);
+        // An OLD-shape JSON (no field) still decodes.
+        let old = json.clone();
+        let decoded: SigilTx = serde_json::from_str(&old).unwrap();
+        assert!(matches!(decoded, SigilTx::Shield { note_ciphertext: None, .. }));
+        // With a ciphertext the hash differs (a different transaction), as it must.
+        let with = SigilTx::Shield { from: [1u8; 32], amount: 1_000, cm: [2u8; 32], fee: 0, note_ciphertext: Some("abc".into()) };
+        assert_ne!(with.hash(), tx.hash());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use sigil_header::{SqiSignature, SQISIGN_L5_LEN};
@@ -3141,6 +3172,7 @@ mod tests {
 
         let shield = dummy_signed(SigilTx::Shield {
             from: alice, amount: 500, cm: [7u8; 32], fee: 0,
+                    note_ciphertext: None,
         });
         assert!(
             apply_tx_at(&s, &shield, SHIELDED_ONLY_HEIGHT + 10_000).is_ok(),
@@ -3745,7 +3777,7 @@ mod r2_apply_tests {
         };
         assert_eq!(tx.shielded_send_nullifiers(), Some(vec![[2u8; 32], [3u8; 32]]));
         assert_eq!(
-            SigilTx::Shield { from: [0u8; 32], amount: 1, cm: [0u8; 32], fee: 0 }
+            SigilTx::Shield { from: [0u8; 32], amount: 1, cm: [0u8; 32], fee: 0, note_ciphertext: None }
                 .shielded_send_nullifiers(),
             None,
             "only a shielded spend has nullifiers"

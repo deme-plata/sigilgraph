@@ -37,6 +37,7 @@ use sigil_tx::SignedTx;
 
 use sigil_node::block::Block;
 use sigil_node::chain::ChainTip;
+use sigil_api::shielded::already_in_pool;
 use sigil_node::dag::{
     compute_topology_commitment, dag_build_frontier, dag_drain_apply, dag_seed_braid,
     dag_store_body,
@@ -149,7 +150,15 @@ impl ProducerState {
             v.extend(self.api.dex.snapshot_for_mint());
             v.extend(self.api.usds.snapshot_for_mint());
             v.extend(self.api.usds_bridge.snapshot_for_mint());
-            v.extend(self.api.shielded.snapshot_for_mint());
+            // 2026-09-08 — same two rules `sigil-node`'s own loop applies (main.rs, the
+            // "shielded family is NOT re-offered blindly" comment): retire what the
+            // SETTLED pool already holds, skip what the FRONTIER spine already carries.
+            // Without this a landed shielded send was refused by its own next candidate
+            // and reported as rejected. See `ShieldedBridge::snapshot_for_mint_excluding`.
+            let settled_pool = self.chain.state().shielded();
+            let _ = self.api.shielded.retire_settled(|tx| already_in_pool(settled_pool, tx));
+            let frontier_pool = frontier.state().shielded();
+            v.extend(self.api.shielded.snapshot_for_mint_excluding(|tx| already_in_pool(frontier_pool, tx)));
             v
         };
 
@@ -167,6 +176,13 @@ impl ProducerState {
         };
         let (block, minted_tx_hashes) =
             mint_next_block(&frontier, merge_parents, &txs, None, solve.as_ref(), topology_commitment, share_pool)?;
+        // The builder's verdicts on txs it could not apply — hand the PERMANENT ones to
+        // the bridge so `/v1/transactions/:hash` can answer "rejected" with the reason,
+        // exactly as `sigil-node`'s loop does. This loop never drained them before, so
+        // a sigil-top producer left refused txs pending for the full MAX_AGE.
+        for r in sigil_node::coinbase::take_rejections() {
+            if r.permanent { self.api.shielded.note_rejection(r.hash, &r.reason); }
+        }
         let minted_height = block.header.height;
         // Same wire shape sigil-node's own TOPIC_BLOCKS publisher uses (plain
         // serde_json::to_vec — confirmed by reading its actual publish call

@@ -67,6 +67,31 @@ const MAX_ATTEMPTS: u32 = 30_000;
 /// How long a shielded tx may stay pending before it is dropped.
 const MAX_AGE: Duration = Duration::from_secs(2_400);
 
+/// Does `pool` already contain the effects of `tx`? True means the tx is in a block
+/// whose state `pool` reflects — on the frontier: "in flight, awaiting finality"; on the
+/// settled chain: "applied". The predicate is deliberately the tx's OWN fingerprint, not
+/// just its nullifier: a `ShieldedSend` counts only when every input nullifier is spent
+/// AND every output commitment is held. A different spend of the same note (stale client,
+/// or the index-0 same-amount collision the browser wallet had) leaves at least one of
+/// those false, so it is still offered and still honestly refused by the chokepoint.
+///
+/// `RegisterShieldedAddress` is idempotent and cheap; it is never reported as carried and
+/// keeps riding candidates until `confirm_applied`, exactly as before.
+pub fn already_in_pool(pool: &sigil_state::shielded::ShieldedPool, tx: &SigilTx) -> bool {
+    match tx {
+        SigilTx::Shield { cm, .. } => pool.has_ever_held(cm),
+        SigilTx::ShieldedSend { nullifier, extra_nullifiers, cm_outs, .. } => {
+            pool.is_spent(nullifier)
+                && extra_nullifiers.iter().all(|nf| pool.is_spent(nf))
+                && cm_outs.iter().all(|cm| pool.has_ever_held(cm))
+        }
+        SigilTx::Unshield { nullifier, cm_outs, .. } => {
+            pool.is_spent(nullifier) && cm_outs.iter().all(|cm| pool.has_ever_held(cm))
+        }
+        _ => false,
+    }
+}
+
 struct Pending {
     tx: SigilTx,
     attempts: u32,
@@ -75,6 +100,10 @@ struct Pending {
     /// On a braid one candidate's ordering is not the last word, so eviction waits for
     /// `REJECT_AFTER` independent verdicts rather than the first.
     permanent_fails: u32,
+    /// True while the tx is already carried by the candidate spine the NEXT candidate is
+    /// being built on — i.e. it is in a block, that block just has not crossed finality
+    /// yet. Set by `snapshot_for_mint_excluding`; read by `status`.
+    in_flight: bool,
 }
 
 /// How many candidates must refuse a tx for a permanent reason before it is evicted.
@@ -86,8 +115,9 @@ const OUTCOME_CAP: usize = 16_384;
 /// What the bridge knows about a shielded tx it has seen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TxOutcome {
-    /// Still being offered to candidates.
-    Pending { attempts: u32, permanent_fails: u32 },
+    /// Still being offered to candidates — or, when `in_flight`, already inside a
+    /// candidate on the DAG frontier and simply waiting for that block to finalize.
+    Pending { attempts: u32, permanent_fails: u32, in_flight: bool },
     /// Settled at finality.
     Applied,
     /// Evicted after `REJECT_AFTER` permanent apply failures; the builder's reason.
@@ -687,7 +717,7 @@ impl ShieldedBridge {
         }
         self.pending.lock().unwrap().insert(
             hash,
-            Pending { tx, attempts: 0, first_seen: Instant::now(), permanent_fails: 0 },
+            Pending { tx, attempts: 0, first_seen: Instant::now(), permanent_fails: 0, in_flight: false },
         );
         hash
     }
@@ -695,7 +725,46 @@ impl ShieldedBridge {
     /// Re-embed every still-pending shielded tx into the next candidate block. Called once
     /// per candidate, NOT once per settled height — same non-destructive contract as
     /// `SendBridge::snapshot_for_mint`.
+    ///
+    /// Offers EVERYTHING, unconditionally. Production loops must use
+    /// [`Self::snapshot_for_mint_excluding`] with the frontier state instead — see its
+    /// doc for the money bug the unconditional form causes on a braid.
     pub fn snapshot_for_mint(&self) -> Vec<SignedTx> {
+        self.snapshot_for_mint_excluding(|_| false)
+    }
+
+    /// Re-embed every still-pending shielded tx EXCEPT those the candidate spine already
+    /// carries. `carried(tx)` answers "does the state this candidate is built on already
+    /// contain this tx's effects?" — pass [`already_in_pool`] over the FRONTIER state.
+    ///
+    /// ## The bug this exists for (2026-09-05 live, root-caused 2026-09-08)
+    ///
+    /// On the braid a candidate is built on the FRONTIER: the settled state plus every
+    /// unsettled block on the selected spine. Candidate N includes a `ShieldedSend`; its
+    /// nullifier is now in the frontier. Candidate N+1 is built one tick later on that
+    /// frontier, and the unconditional `snapshot_for_mint` re-offered the still-pending
+    /// tx (nothing retires it until N crosses finality, ~512 blocks ≈ 80 s later). The
+    /// builder applied it against a state that already held its nullifier, got
+    /// `ShieldedRejected("nullifier already spent")`, classified that as PERMANENT, and
+    /// after `REJECT_AFTER` = 3 such candidates — under a second — `note_rejection`
+    /// evicted the tx and `/v1/transactions/:hash` answered **rejected** for a payment
+    /// that had landed. When N finally settled, `confirm_applied` found nothing to
+    /// retire, so the lie was permanent. Every client that trusted the status (Android,
+    /// the MCP, sigil-top before `01eaf403`) reported failure, users retried, and the
+    /// same payee was paid twice. Measured: nullifiers 7→9 for "two rejected sends".
+    /// Side cost: each re-offer re-verified the STARK, hundreds of ms × every candidate
+    /// until finality.
+    ///
+    /// The `Shield` variant had already been given exactly this treatment inside the
+    /// builder (`has_ever_held(cm)` → skip quietly, 2026-08-29). This generalises it to
+    /// the whole shielded family and moves it to the ONE place that knows both the tx
+    /// and the frontier: a tx already on the spine is not re-offered (it would only be
+    /// refused), is not counted as an attempt, and is marked `in_flight` so the status
+    /// endpoint can say "in a block, awaiting finality". If the carrying block is later
+    /// orphaned the next tick's frontier no longer contains it, `carried` turns false,
+    /// and the tx is offered again — the orphan-safety `snapshot_for_mint` was written
+    /// for is preserved exactly.
+    pub fn snapshot_for_mint_excluding(&self, carried: impl Fn(&SigilTx) -> bool) -> Vec<SignedTx> {
         let mut guard = self.pending.lock().unwrap();
         let mut expired: Vec<[u8; 32]> = Vec::new();
         let mut out = Vec::with_capacity(guard.len());
@@ -710,6 +779,13 @@ impl ShieldedBridge {
                 expired.push(*hash);
                 return false;
             }
+            if carried(&p.tx) {
+                // Already in a candidate on the spine we are extending. Offering it
+                // again can only produce a refusal against its own effects.
+                p.in_flight = true;
+                return true;
+            }
+            p.in_flight = false;
             p.attempts += 1;
             out.push(to_signed(p.tx.clone()));
             true
@@ -719,6 +795,30 @@ impl ShieldedBridge {
             self.forget_nullifiers(&expired);
         }
         out
+    }
+
+    /// Retire every pending tx whose effects are in the SETTLED state — pass
+    /// [`already_in_pool`] over the settled chain's pool. This is the finality confirm
+    /// for the case `confirm_applied` cannot see: a tx that landed inside a block THIS
+    /// node did not mint (a peer's candidate carried the relayed copy), which never gets
+    /// an entry in the producer's mint-hash → tx-hash map and so used to sit pending for
+    /// the full `MAX_AGE` (40 min) before being reported as "gave up" — for money that
+    /// had settled. Returns how many were retired.
+    pub fn retire_settled(&self, settled: impl Fn(&SigilTx) -> bool) -> usize {
+        let landed: Vec<[u8; 32]> = {
+            let mut guard = self.pending.lock().unwrap();
+            let landed: Vec<[u8; 32]> =
+                guard.iter().filter(|(_, p)| settled(&p.tx)).map(|(h, _)| *h).collect();
+            for h in &landed {
+                guard.remove(h);
+            }
+            landed
+        };
+        if !landed.is_empty() {
+            self.forget_nullifiers(&landed);
+            self.remember(landed.iter().map(|h| (*h, TxOutcome::Applied)));
+        }
+        landed.len()
     }
 
     /// Retire landed shielded txs.
@@ -768,7 +868,11 @@ impl ShieldedBridge {
     /// What is known about `hash`: pending, applied, rejected — or nothing.
     pub fn status(&self, hash: &[u8; 32]) -> Option<TxOutcome> {
         if let Some(p) = self.pending.lock().unwrap().get(hash) {
-            return Some(TxOutcome::Pending { attempts: p.attempts, permanent_fails: p.permanent_fails });
+            return Some(TxOutcome::Pending {
+                attempts: p.attempts,
+                permanent_fails: p.permanent_fails,
+                in_flight: p.in_flight,
+            });
         }
         self.outcomes.lock().unwrap().get(hash).map(|(o, _)| o.clone())
     }
@@ -1235,6 +1339,119 @@ mod tests {
         let (_sk, from) = signer();
         let _ = b.submit_shield(&from, 5_000, &"dd".repeat(32), 0, "", 1); // no signature -> refused
         assert!(!*fired.lock().unwrap(), "hook must not fire for a rejected submit");
+    }
+
+    /// 2026-09-08 — the shielded half of the v8.0.0 duplicate-payment bug. A tx the
+    /// candidate spine already carries must NOT be offered again (offering it produces
+    /// a refusal against its own nullifier, and three of those used to evict it as
+    /// "rejected" for a payment that had landed). It must be reported `in_flight`, its
+    /// attempt count must not move, and it must be offered again the moment the spine
+    /// no longer carries it (the carrying candidate was orphaned).
+    #[test]
+    fn a_tx_the_spine_already_carries_is_not_reoffered_but_stays_pending_in_flight() {
+        let b = ShieldedBridge::new();
+        let (sk, from) = signer();
+        let cm = "cc".repeat(32);
+        let sig = sign_shield(&sk, &from, 100, &cm, 0, 1);
+        let h = b.submit_shield(&from, 100, &cm, 0, &sig, 1).expect("queued");
+
+        // Tick 1: not on the spine yet → offered.
+        let t1 = b.snapshot_for_mint_excluding(|_| false);
+        assert_eq!(t1.len(), 1);
+        assert_eq!(b.status(&h), Some(TxOutcome::Pending { attempts: 1, permanent_fails: 0, in_flight: false }));
+
+        // Ticks 2..: the candidate that carried it is on the spine → NOT offered, no
+        // attempt counted, reported in flight. Still pending: finality has not happened.
+        for _ in 0..3 {
+            let t = b.snapshot_for_mint_excluding(|_| true);
+            assert!(t.is_empty(), "a carried tx must not be re-offered");
+        }
+        assert_eq!(b.status(&h), Some(TxOutcome::Pending { attempts: 1, permanent_fails: 0, in_flight: true }));
+        assert_eq!(b.pending_len(), 1);
+
+        // The carrying candidate was orphaned: the new spine does not hold it → offered
+        // again, exactly the orphan-safety `snapshot_for_mint` was written for.
+        let t = b.snapshot_for_mint_excluding(|_| false);
+        assert_eq!(t.len(), 1);
+        assert_eq!(b.status(&h), Some(TxOutcome::Pending { attempts: 2, permanent_fails: 0, in_flight: false }));
+
+        // Finality on a candidate this node minted → the usual confirm path.
+        b.confirm_applied(&[h]);
+        assert_eq!(b.status(&h), Some(TxOutcome::Applied));
+        assert_eq!(b.pending_len(), 0);
+    }
+
+    /// A tx that settled inside a PEER's block never gets a `confirm_applied` (that map
+    /// only knows candidates this node minted). `retire_settled` over the settled pool is
+    /// what retires it as applied instead of letting it age out as "gave up".
+    #[test]
+    fn retire_settled_marks_a_peer_carried_tx_applied_and_frees_its_nullifier() {
+        let b = ShieldedBridge::new();
+        let (sk, from) = signer();
+        let cm = "cc".repeat(32);
+        let sig = sign_shield(&sk, &from, 100, &cm, 0, 1);
+        let h = b.submit_shield(&from, 100, &cm, 0, &sig, 1).expect("queued");
+        assert_eq!(b.retire_settled(|_| false), 0, "not settled yet → nothing retired");
+        assert_eq!(b.pending_len(), 1);
+        assert_eq!(b.retire_settled(|_| true), 1);
+        assert_eq!(b.status(&h), Some(TxOutcome::Applied));
+        assert_eq!(b.pending_len(), 0);
+        assert_eq!(b.snapshot_for_mint().len(), 0);
+    }
+
+    /// `already_in_pool` is the tx's OWN fingerprint against a real pool: a landed
+    /// `Shield` is recognised by its commitment; a `ShieldedSend` only when every
+    /// nullifier is spent AND every output is held — so a different spend of the same
+    /// note (stale client, same-amount index collision) is still offered and still
+    /// honestly refused, never silently reported as applied.
+    #[test]
+    fn already_in_pool_is_the_txs_own_fingerprint_not_just_its_nullifier() {
+        use sigil_state::{commit_state_transition, SigilState, StateMutation, StateTransition, NATIVE};
+        let (sk, from) = signer();
+        let wallet: [u8; 32] = hex::decode(&from).unwrap().try_into().unwrap();
+        let mut state = SigilState::default();
+        commit_state_transition(
+            &mut state,
+            &StateTransition {
+                at_height: 1,
+                mutations: vec![StateMutation::SetBalance { wallet, token: NATIVE, amount: 100_000 }],
+            },
+            1,
+        )
+        .unwrap();
+        let b = ShieldedBridge::new();
+        let cm = "cc".repeat(32);
+        let sig = sign_shield(&sk, &from, 100, &cm, 0, 1);
+        b.submit_shield(&from, 100, &cm, 0, &sig, 1).expect("queued");
+        let shield_tx = b.snapshot_for_mint()[0].tx.clone();
+        assert!(!already_in_pool(state.shielded(), &shield_tx), "before landing: not in the pool");
+
+        let res = sigil_tx::apply_tx_at(&state, &to_signed(shield_tx.clone()), 2).expect("apply");
+        commit_state_transition(&mut state, &StateTransition { at_height: 2, mutations: res.mutations }, 2).unwrap();
+        assert!(already_in_pool(state.shielded(), &shield_tx), "after landing: recognised by its commitment");
+
+        // A send whose nullifier is unspent and whose outputs are fresh is not "in the pool".
+        let send = SigilTx::ShieldedSend {
+            anchor: [0u8; 32],
+            nullifier: [7u8; 32],
+            extra_nullifiers: vec![],
+            cm_outs: vec![[8u8; 32], [9u8; 32]],
+            fee: sigil_state::shielded::SHIELDED_FEE,
+            proof: vec![],
+            note_ciphertexts: vec![],
+        };
+        assert!(!already_in_pool(state.shielded(), &send));
+        // Registration is idempotent and never reported as carried.
+        assert!(!already_in_pool(
+            state.shielded(),
+            &SigilTx::RegisterShieldedAddress {
+                wallet,
+                pk_shield: [1u8; 32],
+                pk_encrypt: Some([2u8; 32]),
+                pk_sqi: None,
+                fee: 0,
+            }
+        ));
     }
 
     /// THE LIVE INCIDENT (2026-08-24/25), reproduced through the REAL retry/re-embed

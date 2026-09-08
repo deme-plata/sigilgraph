@@ -1548,7 +1548,25 @@ fn run_start() -> Result<()> {
                             if txgen > 0 { mempool.pull(txgen) } else { Vec::new() };
                         v.extend(send_bridge.snapshot_for_mint());
                         v.extend(nation_bridge.snapshot_for_mint());
-                        v.extend(shielded_bridge.snapshot_for_mint());
+                        // 2026-09-08 — the shielded family is NOT re-offered blindly.
+                        // (1) Anything whose effects are already in the SETTLED pool
+                        // is retired as applied here (a peer's block carried it, so
+                        // `confirm_applied` below would never see its hash).
+                        // (2) Anything already carried by the unsettled spine this
+                        // candidate extends is skipped — offering it again only
+                        // produces "nullifier already spent" against ITSELF, three of
+                        // which used to evict the tx and report a landed payment as
+                        // rejected. See `ShieldedBridge::snapshot_for_mint_excluding`.
+                        let settled_pool = chain.state().shielded();
+                        let n_settled = shielded_bridge
+                            .retire_settled(|tx| sigil_api::shielded::already_in_pool(settled_pool, tx));
+                        if n_settled > 0 {
+                            eprintln!("✓ shielded: {n_settled} pending tx(s) found settled on chain, retired as applied");
+                        }
+                        let frontier_pool = mint_ref.state().shielded();
+                        v.extend(shielded_bridge.snapshot_for_mint_excluding(|tx| {
+                            sigil_api::shielded::already_in_pool(frontier_pool, tx)
+                        }));
                         v.extend(bridge_bridge.snapshot_for_mint());
                         v.extend(dex_bridge.snapshot_for_mint());
                         v.extend(usds_bridge.snapshot_for_mint());

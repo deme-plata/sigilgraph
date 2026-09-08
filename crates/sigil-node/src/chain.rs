@@ -103,6 +103,14 @@ impl ChainTip {
         self.state.clone()
     }
 
+    /// Borrow the settled state without cloning it. `state_snapshot` copies the whole
+    /// map every call — fine for a once-per-settle publish, wasteful for the per-tick
+    /// "is this note already spent on the frontier" question the shielded bridge asks
+    /// (2026-09-08, see `ShieldedBridge::snapshot_for_mint_excluding`).
+    pub fn state(&self) -> &SigilState {
+        &self.state
+    }
+
     /// Apply a block. Runs header precheck, applies the state transition
     /// through the chokepoint, verifies the resulting roots match the
     /// header's declared roots, and appends on success.

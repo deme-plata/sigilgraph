@@ -404,7 +404,14 @@ pub async fn tx_status(
     // the chain had refused could only find out by waiting 15 minutes for its own timer.
     use shielded::TxOutcome;
     let (status, reason) = match st.shielded.status(&h) {
-        Some(TxOutcome::Pending { attempts, permanent_fails }) => (
+        Some(TxOutcome::Pending { attempts, permanent_fails, in_flight: true }) => (
+            "pending".to_string(),
+            Some(format!(
+                "in a candidate block on the DAG frontier, awaiting finality \
+                 (offered to {attempts} candidate(s), {permanent_fails} permanent refusal(s))"
+            )),
+        ),
+        Some(TxOutcome::Pending { attempts, permanent_fails, in_flight: false }) => (
             "pending".to_string(),
             Some(format!("offered to {attempts} candidate(s), {permanent_fails} permanent refusal(s)")),
         ),

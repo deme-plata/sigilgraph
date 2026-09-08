@@ -1,0 +1,22 @@
+[package]
+name = "sigil-pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "public Bitcoin → private SIGIL computation → public Ethereum settlement. Three legs, one attestation chain: a PoW-verified BTC SPV deposit (sigil-bridge) mints a hidden note to the shield key the BTC tx named; value then moves under a real v5 hiding STARK spend (sigil-shield) to the exit vault, with the Ethereum destination sealed inside the note ciphertext so it is never on any public chain; the settled exit is ABI-encoded as the exact wSIGIL3 mint(address,uint256,uint256) call the Polygon contract accepts. Library + demo. NOT yet wired into sigil-node consensus — see lib.rs docs."
+
+[dependencies]
+sigil-bridge = { path = "../sigil-bridge" }
+sigil-shield = { path = "../sigil-shield" }
+flux-swarm-secret = { path = "../../../flux/crates/flux-swarm-secret" }
+winterfell = "0.9"
+blake3 = { workspace = true }
+sha3 = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[[bin]]
+name = "sigil-pipeline-demo"
+path = "src/bin/sigil-pipeline-demo.rs"

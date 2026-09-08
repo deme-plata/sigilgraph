@@ -8906,6 +8906,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-pipeline"
+version = "5.1.1"
+dependencies = [
+ "blake3",
+ "flux-swarm-secret",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha3 0.10.9",
+ "sigil-bridge",
+ "sigil-shield",
+ "thiserror 1.0.69",
+ "winterfell",
+]
+
+[[package]]
 name = "sigil-relayer"
 version = "5.1.1"
 dependencies = [

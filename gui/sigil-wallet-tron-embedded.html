@@ -1166,6 +1166,8 @@ window.lucide={createIcons:render};render();})();</script>
       }
       return window.sigilDeriveFrom(s);
     };
+    // 2026-09-08: verify, for finality certificates (/v1/finality/certificate).
+    window.sigilVerifyEd25519 = (msgBytes, sigHex, pkHex) => { try { return ed.verify(sigHex, msgBytes, pkHex); } catch (e) { return false; } };
     window.sigilSign = (priv, action, fields, reqNonce) =>
       hex(ed.sign(new TextEncoder().encode(`sigil-rpc/v1|${action}|${fields.join('|')}|nonce=${reqNonce}`), priv));
     window.sigilCryptoReady = true;
@@ -2737,6 +2739,23 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       saveMyNotes(from, arr);
     }catch(e){}
   }
+  async function sigilCertificateLine(){
+    try{
+      var r=await fetch('/v1/finality/certificate',{cache:'no-store'}); if(!r.ok) return '';
+      var j=await r.json(); var c=j&&j.certificate; if(!c) return '';
+      var ok=0, n=(c.votes||[]).length;
+      if(window.sigilVerifyEd25519 && n){
+        // msg = 'SIGIL_FINALITY_VOTE_V0' || height u64 LE || spine_block_hash || order_hash
+        var tag=new TextEncoder().encode('SIGIL_FINALITY_VOTE_V0');
+        var hb=new Uint8Array(8); var hv=BigInt(c.height); for(var i=0;i<8;i++){ hb[i]=Number((hv>>BigInt(8*i))&255n); }
+        var hx=function(h){ var a=new Uint8Array(h.length/2); for(var k=0;k<a.length;k++) a[k]=parseInt(h.substr(k*2,2),16); return a; };
+        var msg=new Uint8Array(tag.length+8+64); msg.set(tag,0); msg.set(hb,tag.length); msg.set(hx(c.spine_block_hash),tag.length+8); msg.set(hx(c.order_hash),tag.length+40);
+        for(var v=0;v<n;v++){ if(window.sigilVerifyEd25519(msg, c.votes[v].signature, c.votes[v].validator_id)) ok++; }
+      }
+      var label = c.gate==='bft' ? 'BFT committee' : ('committee of '+c.committee_size+' — not Byzantine-fault-tolerant');
+      return 'Certificate at H='+c.height+' ('+ok+'/'+n+' validator signature'+(n===1?'':'s')+' verified in this browser; '+label+').';
+    }catch(_){ return ''; }
+  }
   async function sigilWatchPrivateSend(txid, nullifier, from, pick, changeIndex, amtStr){
     if(!txid) return;
     var nf=String(nullifier||'').toLowerCase(), deadline=Date.now()+15*60*1000, announced=false, unknowns=0;
@@ -2760,6 +2779,9 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       if(seen || st==='applied'){
         privMsg('✓ '+amtStr+' SIGIL sent privately — settled (final).', '#00e0c6');
         privFoot('<b style="color:#00e0c6">✓ Settled — final.</b> The payment crossed the DAG\'s finality depth; the recipient\'s wallet can find the note now.');
+        // Phase 3 (2026-09-08): say WHICH certificate it settled under, and check the
+        // validator's signature here — the client's own verification, not the node's word.
+        sigilCertificateLine().then(function(line){ if(line) privFoot('<b style="color:#00e0c6">✓ Settled — final.</b> '+line); }).catch(function(){});
         setTimeout(function(){ if(window.refresh)refresh(); }, 600);
         return;
       }

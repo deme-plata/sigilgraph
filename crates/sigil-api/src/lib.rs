@@ -92,6 +92,9 @@ pub struct AppState {
     /// JSON a client can VERIFY: height, spine block hash, order hash and every
     /// validator's Ed25519 vote. `None` until the gate has raised the line once.
     pub finality: Arc<RwLock<Option<serde_json::Value>>>,
+    /// The certified tip signed with the producer's SQIsign L5 key (tip-proof flavor
+    /// `SqiSignBlob`, P4.1), refreshed at most once a second — see `/v1/finality/tip-proof`.
+    pub tip_proof: Arc<RwLock<Option<serde_json::Value>>>,
     pub mining: Arc<MiningBridge>,
     /// The node's user-writable flux-aether artifact store — what the SIGIL OS
     /// terminal reads and writes. Lives in `<base>/aether-user`, deliberately
@@ -152,6 +155,7 @@ impl AppState {
             mempool,
             state,
             finality: Arc::new(RwLock::new(None)),
+            tip_proof: Arc::new(RwLock::new(None)),
             mining: Arc::new(MiningBridge::new()),
             send: Arc::new(SendBridge::new()),
             shielded: Arc::new(shielded::ShieldedBridge::new()),
@@ -1695,6 +1699,17 @@ pub struct NetworkTopologyResponse {
     pub local_view: Option<flux_p2p::PeerChainView>,
 }
 
+/// The certified tip as a post-quantum tip proof: `sigil-tip-proof` flavor `SqiSignBlob` —
+/// the producer's SQIsign L5 signature over `version || network_id || height || the four
+/// header roots` of the newest certified spine block. A light client verifies it with
+/// `TipProof::verify_sqisign(network_id, producer_pk_sqisign)` and needs neither the chain
+/// nor this node's word. Refreshed at most once a second (SQIsign signing is not free).
+#[flux_api_macros::api(GET, "/v1/finality/tip-proof", summary = "Certified tip signed with the producer's SQIsign L5 key (tip-proof flavor SqiSignBlob)")]
+pub async fn finality_tip_proof_handler(State(st): State<AppState>) -> Json<serde_json::Value> {
+    let tp = st.tip_proof.read().ok().and_then(|g| g.clone());
+    Json(serde_json::json!({ "ok": tp.is_some(), "tip_proof": tp, "ts_ms": now_ms() }))
+}
+
 /// The newest finality certificate this node settled on — the thing a wallet can check
 /// for itself instead of trusting "applied". Each vote is an Ed25519 signature over
 /// `b"SIGIL_FINALITY_VOTE_V0" ‖ height (u64 LE) ‖ spine_block_hash ‖ order_hash` by the
@@ -1887,6 +1902,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/dagknight/recent", get(dagknight_recent))
         .route("/v1/network/topology", get(network_topology))
         .route("/v1/finality/certificate", get(finality_certificate_handler))
+        .route("/v1/finality/tip-proof", get(finality_tip_proof_handler))
         .route("/v1/bridge/lock", post(bridge_lock_handler))
         .route("/v1/bridge/lock/prepare", post(bridge_lock_prepare_handler))
         .route("/v1/bridge/locks", get(bridge_locks_handler))

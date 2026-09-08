@@ -20,3 +20,7 @@ thiserror = { workspace = true }
 [[bin]]
 name = "sigil-pipeline-demo"
 path = "src/bin/sigil-pipeline-demo.rs"
+
+[[bin]]
+name = "sigil-pipeline-bench"
+path = "src/bin/sigil-pipeline-bench.rs"

@@ -151,6 +151,22 @@ pub fn build_private_exit(
     vault: &ShieldedAddress,
     intent: &ExitIntent,
 ) -> Result<PrivateExit, PipelineError> {
+    build_private_exit_memo(depositor, store, pool, note_index, exit_glyphs, fee_glyphs, vault, &intent.encode())
+}
+
+/// Memo-generic form: the sealed memo is whatever the caller encodes (v0 `ExitIntent`, v1
+/// `intent::ExitIntentV1`, …). The circuit does not care; only the vault reads it.
+#[allow(clippy::too_many_arguments)]
+pub fn build_private_exit_memo(
+    depositor: &ShieldedAccount,
+    store: &mut NoteStore,
+    pool: &[[u8; 32]],
+    note_index: u64,
+    exit_glyphs: u64,
+    fee_glyphs: u64,
+    vault: &ShieldedAddress,
+    memo: &str,
+) -> Result<PrivateExit, PipelineError> {
     // Resolve the note's leaf position — the nullifier binds to it.
     if store.scan_owned(depositor, pool) == 0 && store.notes.iter().all(|n| n.position.is_none()) {
         return Err(PipelineError::NoteNotInPool);
@@ -177,7 +193,7 @@ pub fn build_private_exit(
     .map_err(PipelineError::Spend)?;
     let (v0, b0) = bundle.out_preimages[0];
     debug_assert_eq!(v0, exit_glyphs);
-    let pt = NotePlaintext::new(v0, b0).with_memo(&intent.encode()).map_err(PipelineError::Cipher)?;
+    let pt = NotePlaintext::new(v0, b0).with_memo(memo).map_err(PipelineError::Cipher)?;
     let sealed_to_vault = seal_note(&pt, vault).map_err(PipelineError::Cipher)?;
     Ok(PrivateExit { bundle, sealed_to_vault, fee_glyphs })
 }
@@ -203,14 +219,23 @@ pub fn vault_open_exit(
     vault_enc: &flux_swarm_secret::SecretIdentity,
     exit: &PrivateExit,
 ) -> Result<(u64, ExitIntent), PipelineError> {
+    let (value, memo) = vault_open_exit_memo(vault, vault_enc, exit)?;
+    Ok((value, ExitIntent::decode(&memo)?))
+}
+
+/// Memo-generic vault open: `(value, memo text)` after the owner-bound commitment check.
+pub fn vault_open_exit_memo(
+    vault: &ShieldedAccount,
+    vault_enc: &flux_swarm_secret::SecretIdentity,
+    exit: &PrivateExit,
+) -> Result<(u64, String), PipelineError> {
     let pt = try_open_note(&exit.sealed_to_vault, vault_enc).map_err(PipelineError::Cipher)?;
     let note = Note { value: BaseElement::new(pt.value), blinding: pt.blinding, spend_key: vault.spend_key() };
     let cm = to_wire(note.commitment());
     if !exit.bundle.cm_outs.iter().any(|c| *c == cm) {
         return Err(PipelineError::NotVaultNote);
     }
-    let intent = ExitIntent::decode(&pt.memo.text())?;
-    Ok((pt.value, intent))
+    Ok((pt.value, pt.memo.text()))
 }
 
 #[allow(dead_code)]

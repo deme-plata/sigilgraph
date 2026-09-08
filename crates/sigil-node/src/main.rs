@@ -2692,8 +2692,27 @@ fn run_start() -> Result<()> {
                                                     // (`FETCH_CHUNK`, defined above in this fn) — a deep
                                                     // gap now closes incrementally over many requests
                                                     // instead of one unbounded one.
+                                                    // 2026-09-08 (n=2 finality committee lost after a producer
+                                                    // restart): FETCH_CHUNK (8192) bounds MEMORY, not TIME. The
+                                                    // request-response timeout is 8 s (flux-p2p swarm.rs), and a
+                                                    // FULL-block serve of a ~2,000-block gap (disk read + serialize
+                                                    // + zstd + WireGuard transfer, ~1.6 KB/block raw) does not fit
+                                                    // in it. Measured live: happysrv asked for [5128373..=tip]
+                                                    // 833 times, Epsilon served 2,076–2,564 blocks per answer,
+                                                    // EVERY answer timed out on the requester, and because the
+                                                    // request always restarts at chain.height() nothing was ever
+                                                    // applied — the gap only grew (+6.6 blk/s). Certificates need
+                                                    // both validators at the tip, so finality silently fell back
+                                                    // to the 512-deep depth rule. Bound the request to what fits
+                                                    // in one timeout: 512 full blocks ≈ 0.8 MB raw, sub-second to
+                                                    // serve. The gap then closes at ≥512 blocks per round trip
+                                                    // instead of never. SIGIL_BRAID_GAP_CHUNK overrides.
+                                                    let gap_chunk: u64 = std::env::var("SIGIL_BRAID_GAP_CHUNK").ok()
+                                                        .and_then(|v| v.trim().parse::<u64>().ok())
+                                                        .map(|n| n.clamp(16, FETCH_CHUNK))
+                                                        .unwrap_or(512);
                                                     let req_to = chain.height()
-                                                        .saturating_add(FETCH_CHUNK)
+                                                        .saturating_add(gap_chunk)
                                                         .min(bheight.saturating_add(1));
                                                     let req = BackfillReq {
                                                         from: chain.height(),
@@ -3111,7 +3130,22 @@ fn run_start() -> Result<()> {
                                         dag_store_body(&mut dag_bodies, dag_max_bodies, bhash, b);
                                     }
                                 }
-                                Err(_) => { dag_apply_failed += 1; break; }
+                                Err(e) => {
+                                    dag_apply_failed += 1;
+                                    // 2026-09-08: this arm used to swallow the error and
+                                    // break silently. A single follower that cannot extend
+                                    // its tip (parent/height/roots mismatch after a producer
+                                    // rewind) then wedges forever, re-requesting the same
+                                    // range — and because n=2 certificates need BOTH nodes at
+                                    // the tip, ALL finality freezes with no operator signal.
+                                    // Surface the real cause, rate-limited.
+                                    dag_missing_parents_logged += 1;
+                                    if dag_missing_parents_logged % 64 == 1 {
+                                        eprintln!("🔴 rr-backfill(braid): cannot extend tip at H={} (chain.height={}) — {}",
+                                            b.header.height, chain.height(), e);
+                                    }
+                                    break;
+                                }
                             }
                         }
                         // Wedge self-heal: after sustained rejects AND real catch-up

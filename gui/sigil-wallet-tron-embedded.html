@@ -888,6 +888,7 @@ body.view-desktop .desktop{display:flex}
   // nothing new arrived costs one small `/v1/shielded/anchor` GET.
   var _shieldCache = { epochs:Object.create(null), spentSeen:0 };
 
+  function _seedHexOf(seed){ try{ if(typeof seed==='string') return seed; return Array.from(seed).map(function(b){ return ('0'+b.toString(16)).slice(-2); }).join(''); }catch(_){ return ''; } }
   async function _scanEpochTail(e, live, seed, M, S, spent){
     var c=_shieldCache.epochs[e];
     if(!c){ c={ scanned:0, mine:[], gross:0n }; _shieldCache.epochs[e]=c; }
@@ -906,7 +907,17 @@ body.view-desktop .desktop{display:flex}
     for(var k=0;k<cts.length;k++){
       var ct=cts[k]; if(!ct) continue;
       var opened=null;
-      try{ opened=S.decodeNote(S.openEnvelope(ct, S.__enc)); }catch(_){ opened=null; }
+      // 2026-09-08: open with the SAME decoder the send path uses (the WASM crate that
+      // sealed these notes). The JS scanner's own envelope opener no longer understands
+      // the current note ciphertext, so the balance read 0 for wallets holding real
+      // received notes (25 sealed notes in the pool, none opened) while doPrivateSend
+      // — using the WASM opener — could spend them. One decoder, not two.
+      var W=window.sigilShieldWasm;
+      if(W && W.openNoteCiphertext){
+        try{ var oj=JSON.parse(W.openNoteCiphertext(_seedHexOf(seed), typeof ct==='string'?ct:JSON.stringify(ct))); if(oj && oj.value!=null) opened={ value: BigInt(oj.value) }; }catch(_){ opened=null; }
+      } else {
+        try{ opened=S.decodeNote(S.openEnvelope(ct, S.__enc)); }catch(_){ opened=null; }
+      }
       if(!opened) continue;                 // not ours — the AEAD tag IS the proof
       c.mine.push({ pos: base+k, value: opened.value });
       c.gross += opened.value;
@@ -944,7 +955,12 @@ body.view-desktop .desktop{display:flex}
       for(var i=0;i<c.mine.length;i++){
         var n=c.mine[i], isSpent=false;
         if(spent){
-          var raw=M.toWireHex(M.compress2(spendKey, BigInt(n.pos))).toLowerCase();
+          // 2026-09-08: the crate's derivation, not the JS port's (they disagreed:
+          // leaf 2438 JS 43cc93… vs chain 1f2a01…), so spent notes were never netted.
+          var raw;
+          var W2=window.sigilShieldWasm;
+          if(W2 && W2.noteNullifier){ try{ raw=String(W2.noteNullifier(_seedHexOf(seed), n.pos)).toLowerCase(); }catch(_){ raw=null; } }
+          if(!raw){ raw=M.toWireHex(M.compress2(spendKey, BigInt(n.pos))).toLowerCase(); }
           isSpent=spent.has(_scopedNullifier(M, ee, raw));
         }
         if(!isSpent){ balance+=n.value; notes++; }
@@ -966,7 +982,13 @@ body.view-desktop .desktop{display:flex}
     if(!S||!M){ el.textContent='—'; if(nt) nt.textContent='scanner unavailable'; return; }
     let mn=window.__sigilMnemonic; if(!mn){ try{ mn=localStorage.getItem('sigil-wallet-mnemonic'); }catch(e){} }
     if(!mn){ el.textContent='locked'; if(nt) nt.textContent='unlock to view'; return; }
-    let seed; try{ seed=window.sigilDeriveFrom(mn).priv; }catch(e){ el.textContent='—'; return; }
+    // 2026-09-08: derive the way the ADDRESS was derived. sigilDeriveFrom() treats a 64-hex
+    // raw seed as a phrase, so a wallet opened from a raw seed (MCP, sigil-top, mine-rig)
+    // scanned the pool with the WRONG key and showed 0 private balance while holding
+    // hundreds of SIGIL; sigilDeriveAuto() is the dispatcher every send path already uses.
+    let seed; try{ var _a=((window.MINE_ADDR||window.ADDR)||'').toLowerCase(); seed=(window.sigilDeriveAuto?window.sigilDeriveAuto(mn,_a):window.sigilDeriveFrom(mn)).priv; }catch(e){ el.textContent='—'; return; }
+    // The scan opens notes with the WASM decoder; make sure it is loaded first.
+    try{ if(!window.sigilShieldWasm && window.sigilShieldWasmReady) await window.sigilShieldWasmReady; }catch(_){}
     try{
       const r=await _scanAllEpochsFast(seed, M, S);
       el.textContent=glyphStr(r.balance)+' SIGIL';
@@ -974,6 +996,7 @@ body.view-desktop .desktop{display:flex}
       // small line below and the big figure showed transparent-only, so a wallet
       // whose entire balance was private read as almost empty.
       SHIELD_RAW = r.balance;
+      try{ window.__sigilShieldRaw = r.balance; }catch(_){}
       try{ render(); }catch(_){}
       if(nt){
         // Never present a gross figure as a balance: if spends could not be netted,
@@ -1363,7 +1386,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
             <label style="font-family:'JetBrains Mono';font-size:10px;letter-spacing:1.4px;color:#6df3ff;text-transform:uppercase">① Send to</label>
             <span id="uniAddrChip" style="font-family:'JetBrains Mono';font-size:9.5px;color:#5a93a8"></span>
           </div>
-          <input id="uniAddr" placeholder="SIGIL address (64 hex characters)" autocomplete="off" spellcheck="false"
+          <input id="uniAddr" placeholder="SIGIL address or payment code" autocomplete="off" spellcheck="false"
             style="width:100%;box-sizing:border-box;background:rgba(4,8,12,.72);border:1px solid rgba(33,212,253,.26);border-radius:12px;color:#cfe9f2;font-family:'JetBrains Mono';font-size:12.5px;padding:13px 14px;outline:none;transition:border-color .18s,box-shadow .18s">
           <div id="uniAddrMsg" style="font-family:'JetBrains Mono';font-size:10.5px;color:#8fb3c2;min-height:15px;margin-top:6px"></div>
         </div>
@@ -1698,10 +1721,22 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   // Wait at most 4 minutes per address for an in-flight registration, then say 'not registered'.
   function regWaitAllowed(addr){ if(window.__regWaitAddr!==addr){ window.__regWaitAddr=addr; window.__regWaitUntil=Date.now()+240000; } return Date.now()<window.__regWaitUntil; }
   window.checkShieldedAddr=async function(){
-    var addr=(document.getElementById('checkAddr').value||'').trim().toLowerCase();
+    var rawIn=(document.getElementById('checkAddr').value||'').trim();
     var box=document.getElementById('privSendBox'); if(box) box.style.display='none';
     window.__privRecipient=null;
-    if(!/^[0-9a-f]{64}$/.test(addr)){ checkStatus('Enter a valid 64-hex address.', '#ff8a8a'); return; }
+    var pp=window.sigilParsePayee?window.sigilParsePayee(rawIn):null;
+    if(!pp){ checkStatus('Enter a 64-hex SIGIL address or a payment code (sigil:… / sigil1s:…).', '#ff8a8a'); return; }
+    var addr=pp.wallet;
+    if(pp.keyed){
+      // The code carries the keys: no lookup needed. If the chain HAS published keys
+      // for this wallet they are the authority — a mismatch is a tampered or wrong code.
+      if(addr){ try{ var rr=await fetch('/v1/shielded/address?wallet='+addr,{cache:'no-store'}); var jj=await rr.json();
+        if(jj&&jj.ok&&jj.pk_shield&&(String(jj.pk_shield).toLowerCase()!==pp.pk_shield||String(jj.pk_encrypt||'').toLowerCase()!==pp.pk_encrypt)){
+          checkStatus('✗ this payment code carries keys that do NOT match the keys published on chain for that wallet — tampered, or made for a different wallet. Refusing.', '#ff8a8a'); return; } }catch(_){} }
+      window.__privRecipient={wallet:addr||pp.pk_shield, pk_shield:pp.pk_shield, pk_encrypt:pp.pk_encrypt};
+      checkStatus('✓ payment code carries the receiving key — pick an amount below to pay them privately.', '#00e0c6');
+      if(box) box.style.display='flex'; return;
+    }
     checkStatus('Checking…', '#6df3ff');
     try{
       var r=await fetch('/v1/shielded/address?wallet='+addr,{cache:'no-store'});
@@ -1718,7 +1753,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         // look again, rather than tell the payer it cannot be paid (2026-09-08 13:47).
         checkStatus('⏳ this wallet is publishing its private receiving key right now — waiting for it to settle (about a minute and a half)…', '#6df3ff');
         setTimeout(function(){ try{ if((document.getElementById('checkAddr').value||'').trim().toLowerCase()===addr) window.checkShieldedAddr(); }catch(e){} }, 5000);
-      } else { checkStatus('✗ not registered — this wallet hasn\'t published a shielded address yet.', '#fbbf24'); }
+      } else { checkStatus('✗ this wallet has never opened a SIGIL wallet app, so it has no private receiving key yet — there is nowhere to deliver a private note. Ask them for their PAYMENT CODE (Receive tab: it carries the key), or have them open the wallet once with its recovery phrase — the app publishes the key by itself.', '#fbbf24'); }
     }catch(e){ checkStatus('✗ network error — node unreachable.', '#ff8a8a'); }
   };
   try{ if(!window.__sigilMnemonic){ var _pm=localStorage.getItem('sigil-wallet-mnemonic')||localStorage.getItem('sigil-wallet-seed'); if(_pm) window.__sigilMnemonic=_pm; } }catch(e){}
@@ -2266,15 +2301,18 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   // requires); we just mirror its verdict into the unified box's own status line.
   var uniAddrTimer=null;
   window.uniValidateAddr=function(){
-    var v=(document.getElementById('uniAddr').value||'').trim().toLowerCase();
+    var vRaw=(document.getElementById('uniAddr').value||'').trim();
+    var v=vRaw.toLowerCase();
     var chip=document.getElementById('uniAddrChip');
     window.__privRecipient=null; uniGlow('uniAddr',null);
     if(chip) chip.textContent='';
     document.getElementById('uniAddrMsg').textContent='';
     if(uniAddrTimer) clearTimeout(uniAddrTimer);
     if(!v) return;
-    if(!/^[0-9a-f]{64}$/.test(v)){
-      var msg = v.length<64 ? ('needs '+(64-v.length)+' more character'+((64-v.length)===1?'':'s')) : 'not a valid 64-character hex address';
+    var pp=window.sigilParsePayee?window.sigilParsePayee(vRaw):null;
+    if(pp && pp.amount){ try{ var ua2=document.getElementById('uniAmt'); if(ua2&&!ua2.value) ua2.value=glyphStr(pp.amount); }catch(_){} }
+    if(!pp){
+      var msg = (/^[0-9a-f]*$/i.test(v) && v.length<64) ? ('needs '+(64-v.length)+' more character'+((64-v.length)===1?'':'s')) : 'not a valid 64-character hex address or payment code';
       document.getElementById('uniAddrMsg').textContent=msg;
       document.getElementById('uniAddrMsg').style.color='#7c98a3';
       return;
@@ -2282,13 +2320,13 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     document.getElementById('uniAddrMsg').textContent='checking this address can receive private payments…';
     document.getElementById('uniAddrMsg').style.color='#6df3ff';
     uniAddrTimer=setTimeout(async function(){
-      var ck=document.getElementById('checkAddr'); if(ck) ck.value=v;
+      var ck=document.getElementById('checkAddr'); if(ck) ck.value=vRaw;
       try{ await window.checkShieldedAddr(); }catch(e){}
       var el=document.getElementById('uniAddrMsg');
       if(window.__privRecipient){
-        el.textContent='✓ ready to receive a private payment'; el.style.color='#00e0c6';
+        el.textContent=(pp&&pp.keyed)?'✓ payment code — ready to pay privately, no lookup needed':'✓ ready to receive a private payment'; el.style.color='#00e0c6';
         uniGlow('uniAddr',true);
-        if(chip){ chip.textContent=v.slice(0,8)+'…'+v.slice(-6); chip.style.color='#00e0c6'; }
+        var idv=(window.__privRecipient.wallet||v); if(chip){ chip.textContent=idv.slice(0,8)+'…'+idv.slice(-6); chip.style.color='#00e0c6'; }
       }else{
         // surface checkShieldedAddr's own verdict rather than inventing one
         var src=document.getElementById('checkAddrMsg');
@@ -2309,15 +2347,19 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   }
   window.doUnifiedSend=async function(){
     var btn=document.getElementById('uniGo');
-    var addr=(document.getElementById('uniAddr').value||'').trim().toLowerCase();
+    var addrRaw=(document.getElementById('uniAddr').value||'').trim();
     var amtStr=(document.getElementById('uniAmt').value||'').trim();
     uniMsg('');
-    if(!/^[0-9a-f]{64}$/.test(addr)){ uniMsg('Enter the recipient\'s 64-character SIGIL address first.', '#ff8a8a'); uniGlow('uniAddr',false); return; }
+    // 2026-09-08: a payment code (sigil:<addr>?s=&e= / sigil1s:) is a valid recipient —
+    // the validation above already accepted it; the button must not then refuse it.
+    var ppSend=window.sigilParsePayee?window.sigilParsePayee(addrRaw):null;
+    if(!ppSend){ uniMsg('Enter the recipient\'s SIGIL address or payment code first.', '#ff8a8a'); uniGlow('uniAddr',false); return; }
+    var addr=(ppSend.wallet||ppSend.pk_shield||'').toLowerCase();
     if(!/^\d+(\.\d{1,10})?$/.test(amtStr) || Number(amtStr)<=0){ uniMsg('Enter an amount greater than 0 (up to 10 decimals).', '#ff8a8a'); uniGlow('uniAmt',false); return; }
     uniGlow('uniAmt',null);
     if(!window.__privRecipient){
       uniMsg('Checking the recipient…', '#6df3ff');
-      var ck=document.getElementById('checkAddr'); if(ck) ck.value=addr;
+      var ck=document.getElementById('checkAddr'); if(ck) ck.value=addrRaw;
       try{ await window.checkShieldedAddr(); }catch(e){}
       if(!window.__privRecipient){
         var src=document.getElementById('checkAddrMsg');
@@ -2339,8 +2381,17 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     try{
       // ── STEP 1 — top up the private balance ONLY if it's short ───────────────
       var have=uniUnspentRaw(from);
-      if(have < amountRaw){
-        var shortfall = amountRaw - have;
+      // The chain's own view of this wallet's private balance (mined + received notes
+      // this browser never created) counts too — until 2026-09-08 only localStorage
+      // notes did, so a wallet paid by phone or mining was shielded AGAIN from its
+      // transparent balance (or refused) even though the private money was there.
+      try{ if(window.__sigilShieldRaw!=null){ var hc=BigInt(window.__sigilShieldRaw); if(hc>have) have=hc; } }catch(_){}
+      // The payment also pays the fixed private fee; a top-up of exactly the amount
+      // leaves a note that can never cover amount+fee (2026-09-08 e2e: step 1 shielded
+      // 0.02, step 2 needed 0.02001 and fell back to another note).
+      var FEE_RAW=100000n; // sigil_state::shielded::SHIELDED_FEE
+      if(have < amountRaw + FEE_RAW){
+        var shortfall = amountRaw + FEE_RAW - have;
         uniStep(1,'busy');
         uniMsg('Step 1 of 2 — moving '+glyphStr(shortfall)+' SIGIL into your private balance…', '#6df3ff');
         var sa=document.getElementById('sendAmt'); if(sa) sa.value=glyphStr(shortfall);
@@ -2348,8 +2399,15 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         // for the intermediate step so the user stays in one continuous flow and
         // only sees a receipt for the payment they actually asked for.
         var realReceipt=window.showReceipt; var shielded=false;
+        // doShield() calls showReceipt by its LOCAL name, so a stub on window never
+        // intercepts it — step 1 was judged failed after every successful shield
+        // (2026-09-08 e2e: receipt stamped 'shield', flag false). Read the stamp the
+        // receipt itself leaves instead; the stub stays only to keep the pane hidden.
+        var rcPane1=document.getElementById('sendReceipt');
+        if(rcPane1){ rcPane1.removeAttribute('data-kind'); }
         window.showReceipt=function(){ shielded=true; };
         try{ await window.doShield(); } finally { window.showReceipt=realReceipt; }
+        if(!shielded && rcPane1 && rcPane1.getAttribute('data-kind')==='shield'){ shielded=true; rcPane1.style.display='none'; }
         if(!shielded){
           uniStep(1,'fail');
           var sm=document.getElementById('sendMsg');
@@ -2439,7 +2497,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   window.sigilShieldWasmReady = (async function(){
     var el=document.getElementById('privWasmState');
     try{
-      var mod = await import('./wasm/sigil_shield.js?v=741');
+      var mod = await import('./wasm/sigil_shield.js?v=908');
       await mod.default(); // fetches + instantiates the sibling .wasm
       window.sigilShieldWasm = mod;
       if(el){ el.textContent='prover ready'; el.style.color='#00e0c6'; }
@@ -2690,6 +2748,15 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       try{ var tj=await fetch('/v1/transactions/'+txid,{cache:'no-store'}).then(function(r){return r.json();});
            var d=(tj&&tj.data)||{}; st=d.status||null; reason=d.reason||''; }catch(_){}
       unknowns=(st==='unknown')?unknowns+1:0;
+      // A refusal is authoritative (since the 2026-09-08 node fix a 'rejected' is real).
+      // It must beat a seen nullifier: if the note was ALREADY spent by an older
+      // transaction its nullifier is on chain and would read as 'our' success.
+      if(st==='rejected'){
+        privRollback(from, pick, changeIndex);
+        privMsg('✗ not sent — the network refused it: '+(reason||'no reason given')+'. Nothing moved; your note is yours again.', '#ff8a8a');
+        privFoot('<b style="color:#ff8a8a">✗ Not sent</b> — the network refused it: '+(reason||'no reason given')+'.');
+        return;
+      }
       if(seen || st==='applied'){
         privMsg('✓ '+amtStr+' SIGIL sent privately — settled (final).', '#00e0c6');
         privFoot('<b style="color:#00e0c6">✓ Settled — final.</b> The payment crossed the DAG\'s finality depth; the recipient\'s wallet can find the note now.');
@@ -2883,9 +2950,9 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         var spentSet=null, spendKey=null, M=window.__sigilShield;
         try{
           var nl=await fetch('/v1/shielded/nullifiers',{cache:'no-store'}).then(function(r){return r.json();});
-          if(nl && nl.ok && nl.nullifiers && M){
+          if(nl && nl.ok && nl.nullifiers){
             spentSet=new Set(nl.nullifiers.map(function(h){return String(h).toLowerCase();}));
-            spendKey=M.deriveField(seedHex,'spend-key',0);
+            if(M){ try{ spendKey=M.deriveField(seedHex,'spend-key',0); }catch(_){ spendKey=null; } }
           }
         }catch(_){}
         for(var ci=0; ci<cts.length; ci++){
@@ -2896,9 +2963,11 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
           if(!op || op.blinding_hex==null) continue;
           var rv; try{ rv=BigInt(op.value); }catch(_){ continue; }
           if(rv < amountRaw+FEE) continue;
-          if(spentSet && spendKey){
+          if(spentSet){
             try{
-              var rawNf=M.toWireHex(M.compress2(spendKey, BigInt(ci))).toLowerCase();
+              // The crate's nullifier (see the balance scan): the JS port's disagreed
+              // with the chain, so this filter passed spent notes straight to the node.
+              var rawNf = (wasm.noteNullifier ? String(wasm.noteNullifier(seedHex, ci)) : M.toWireHex(M.compress2(spendKey, BigInt(ci)))).toLowerCase();
               if(spentSet.has(rawNf)) continue;   // live epoch is 0, where scoping is the identity
             }catch(_){}
           }
@@ -3637,7 +3706,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     <div style="display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid rgba(33,212,253,.18);background:rgba(8,16,24,.7)">
       <div style="font-size:20px">↘</div>
       <div style="flex:1"><div style="font-family:'Orbitron';font-weight:700;letter-spacing:1px;color:#6df3ff;font-size:15px">RECEIVE SIGIL</div>
-        <div style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8">share this address — mining rewards and sends land here</div></div>
+        <div id="rcvSub" style="font-family:'JetBrains Mono';font-size:10px;color:#5a93a8">share this address — mining rewards and sends land here</div></div>
       <button onclick="closeModal('receive-modal')" style="background:rgba(33,212,253,.08);border:1px solid rgba(33,212,253,.3);color:#6df3ff;border-radius:8px;width:30px;height:30px;cursor:pointer;font-size:15px">✕</button>
     </div>
     <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px">
@@ -5990,10 +6059,61 @@ var qrcode = function() {
 // Receive / Mine / Settings modal handlers (+ Assets scroll). Vanilla, same scope rules as send.
 function closeModal(id){ var m=document.getElementById(id); if(m)m.style.display='none'; }
 function _activeAddr(){ return ((window.MINE_ADDR||window.ADDR)||'').toLowerCase(); }
+/* ── PAYMENT CODES (2026-09-08) ─────────────────────────────────────────────
+   A bare address is NOT enough to pay someone privately: the payer needs the
+   recipient's pk_shield + pk_encrypt, which derive from the recipient's SEED and
+   cannot be computed from the address. Until the recipient's wallet has published
+   them on chain (first open in any wallet app, ~90 s to finality) a send to the bare
+   address fails — the wall every 'send' release kept hitting. The phone already
+   shares `sigil:<addr>?s=<pk_shield>&e=<pk_encrypt>`; this page now does the same
+   (Receive) and accepts it (Send), so a code needs no lookup and no registration. */
+function sigilParsePayee(v){
+  v=(v||'').trim(); var m;
+  if((m=/^sigil1s:([0-9a-f]{64}):([0-9a-f]{64})$/i.exec(v))) return {wallet:null, pk_shield:m[1].toLowerCase(), pk_encrypt:m[2].toLowerCase(), keyed:true};
+  if(/^sigil:/i.test(v)){
+    var rest=v.slice(6).replace(/^\/\//,''); var q=rest.indexOf('?');
+    var addr=(q<0?rest:rest.slice(0,q)).trim().toLowerCase();
+    if(!/^[0-9a-f]{64}$/.test(addr)) return null;
+    var out={wallet:addr, keyed:false};
+    if(q>=0){ rest.slice(q+1).split('&').forEach(function(p){ var i=p.indexOf('='); if(i<=0) return; var k=p.slice(0,i).toLowerCase(), val=''; try{ val=decodeURIComponent(p.slice(i+1)); }catch(_){ val=p.slice(i+1); }
+      if(k==='s'&&/^[0-9a-f]{64}$/i.test(val)) out.pk_shield=val.toLowerCase();
+      if(k==='e'&&/^[0-9a-f]{64}$/i.test(val)) out.pk_encrypt=val.toLowerCase();
+      if(k==='amount'&&/^\d+$/.test(val)) out.amount=val; }); }
+    out.keyed=!!(out.pk_shield&&out.pk_encrypt); return out;
+  }
+  if(/^[0-9a-f]{64}$/i.test(v)) return {wallet:v.toLowerCase(), keyed:false};
+  return null;
+}
+window.sigilParsePayee=sigilParsePayee;
+async function sigilPaymentCode(){
+  var a=_activeAddr(); if(!a) return {addr:'', code:'', keyed:false};
+  var s=null,e=null;
+  try{ var r=await fetch('/v1/shielded/address?wallet='+a,{cache:'no-store'}); var j=await r.json();
+       if(j&&j.ok&&j.pk_shield&&j.pk_encrypt){ s=String(j.pk_shield).toLowerCase(); e=String(j.pk_encrypt).toLowerCase(); } }catch(_){}
+  if(!s){
+    // Not published yet — derive from the phrase this browser holds, and publish it
+    // in the background so a bare-address payer can find it in ~90 s too.
+    try{
+      var mn=window.__sigilMnemonic||null; if(!mn){ try{ mn=localStorage.getItem('sigil-wallet-mnemonic')||localStorage.getItem('sigil-wallet-seed'); }catch(_){} }
+      if(mn&&window.sigilDeriveAuto){ var kp=window.sigilDeriveAuto(mn,a);
+        if(kp&&kp.address===a&&kp.priv){ var wasm=window.sigilShieldWasm||await window.sigilShieldWasmReady;
+          var hx=Array.from(kp.priv).map(function(b){ return ('0'+b.toString(16)).slice(-2); }).join('');
+          s=String(wasm.shieldPublicKey(hx)).toLowerCase(); e=String(wasm.shieldEncryptPublicKey(hx)).toLowerCase();
+          if(window.sigilEnsureRegistered) window.sigilEnsureRegistered(a, kp.priv); } }
+    }catch(_){}
+  }
+  return {addr:a, code:(s&&e)?('sigil:'+a+'?s='+s+'&e='+e):a, keyed:!!(s&&e)};
+}
+window.sigilPaymentCode=sigilPaymentCode;
 function openReceive(){ var a=_activeAddr(); if(!a)return; document.getElementById('rcvAddr').textContent=a;
+  // Upgrade to the payment code (carries the receiving key) as soon as it is known.
+  sigilPaymentCode().then(function(pc){ try{ if(!pc||!pc.keyed) return; window.__rcvCode=pc.code; document.getElementById('rcvAddr').textContent=pc.code;
+    var q2=qrcode(0,'M'); q2.addData(pc.code); q2.make(); document.getElementById('rcvQr').innerHTML='<div style="background:#fff;padding:10px;border-radius:12px;line-height:0">'+q2.createSvgTag({cellSize:3,margin:0})+'</div>';
+    var sub=document.getElementById('rcvSub'); if(sub) sub.textContent='share this payment code — it carries your private receiving key, so anyone can pay you privately right away (the bare address alone works only once your key is published on chain)'; }catch(_){} }).catch(function(){});
+  window.__rcvCode=null;
   try{ var q=qrcode(0,'M'); q.addData(a); q.make(); document.getElementById('rcvQr').innerHTML='<div style="background:#fff;padding:10px;border-radius:12px;line-height:0">'+q.createSvgTag({cellSize:3,margin:0})+'</div>'; }catch(e){}
   document.getElementById('receive-modal').style.display='flex'; }
-function copyReceive(){ var a=_activeAddr(); if(a&&navigator.clipboard){ navigator.clipboard.writeText(a); var b=document.getElementById('rcvCopy'); var o=b.textContent; b.textContent='✓ COPIED'; setTimeout(function(){b.textContent=o;},1000); } }
+function copyReceive(){ var a=window.__rcvCode||_activeAddr(); if(a&&navigator.clipboard){ navigator.clipboard.writeText(a); var b=document.getElementById('rcvCopy'); var o=b.textContent; b.textContent='✓ COPIED'; setTimeout(function(){b.textContent=o;},1000); } }
 function openMine(){ var a=_activeAddr(); if(!a)return; document.getElementById('mineCmd').textContent='sigil-top mine-rig '+a; document.getElementById('mine-modal').style.display='flex'; }
 function copyMineCmd(){ var t=document.getElementById('mineCmd').textContent; if(t&&navigator.clipboard){ navigator.clipboard.writeText(t); var b=document.getElementById('mineCopy'); var o=b.textContent; b.textContent='✓ COPIED'; setTimeout(function(){b.textContent=o;},1000); } }
 function openSettings(){ var el=document.getElementById('setAddr'); var a=_activeAddr(); if(el)el.textContent=a?(a.slice(0,10)+'…'+a.slice(-8)):''; document.getElementById('settings-modal').style.display='flex'; }

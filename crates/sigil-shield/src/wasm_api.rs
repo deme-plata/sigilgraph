@@ -67,6 +67,20 @@ pub fn shield_public_key(seed_hex: &str) -> Result<String, JsValue> {
     Ok(hex::encode(to_wire(account.public_key())))
 }
 
+/// The nullifier this wallet's note at pool leaf `position` publishes when spent —
+/// `compress2(spend_key, position)`, byte-identical to `note_v1::nullifier` and
+/// `wallet::nullifier_at`, wire-encoded like `/v1/shielded/nullifiers` lists them.
+///
+/// Exported 2026-09-08 because the page's JS port of this derivation disagreed with the
+/// crate (leaf 2438: JS `43cc93…`, chain `1f2a01…`), so the browser never recognised its
+/// own spent notes: balances netted nothing and Send kept offering spent notes, which the
+/// node refused as "nullifier already spent". One derivation, this one.
+#[wasm_bindgen(js_name = noteNullifier)]
+pub fn note_nullifier(seed_hex: &str, position: u32) -> Result<String, JsValue> {
+    let account = ShieldedAccount::from_seed(hex32(seed_hex)?);
+    Ok(hex::encode(to_wire(account.nullifier_at(position as u64))))
+}
+
 /// The X25519 note-delivery key ciphertexts are sealed to — the OTHER half of this
 /// wallet's shielded address. `pk_shield` alone makes a wallet payable but not
 /// notifiable: without publishing this key too, nothing can tell the wallet a payment
@@ -164,6 +178,121 @@ pub fn build_private_send_with_memo(
 ) -> Result<String, JsValue> {
     let account = ShieldedAccount::from_seed(hex32(seed_hex)?);
     let note_value = parse_u64(note_value_str, "note_value")?;
+    // A SELF-CREATED note: the blinding is a pure function of (seed, index), so the
+    // index is all the caller has to remember.
+    let blinding = account.blinding(note_index as u64);
+    let note = OwnedNote {
+        index: Some(note_index as u64),
+        value: note_value,
+        blinding,
+        position: Some(note_position as u64),
+        spent: false,
+        memo: None,
+    };
+    build_private_send_core(
+        seed_hex, note, unpadded_leaves_json, capacity,
+        recipient_pk_shield_hex, recipient_pk_enc_hex, amount_str, memo,
+    )
+}
+
+/// Spend a note this wallet **received** rather than created — a private payment from
+/// someone else, or a mining reward the chain minted straight into the shielded pool.
+///
+/// ## Why this had to exist
+///
+/// [`buildPrivateSend`] addresses the note being spent by its DERIVATION INDEX, and
+/// re-derives the blinding as `blinding(seed, index)`. That works only for notes this
+/// wallet minted itself, because only then does an index exist on this side. A received
+/// note's blinding was chosen by whoever sealed it; the only place it exists is inside
+/// the ciphertext, which [`openNoteCiphertext`] already returns as `blinding_hex`.
+///
+/// So until now the browser could SEE a received or mined note — the balance scan
+/// trial-decrypts the whole pool and adds it up correctly — and had no way to SPEND it.
+/// Reported 2026-09-06 as a wallet showing a real mined balance whose Send button could
+/// never find a note: the balance came from the chain, the spend candidates came from a
+/// localStorage list of self-created notes, and for a wallet that mined on a phone that
+/// list is empty. The native Android wallet never had the gap because it calls
+/// `wallet::build_spend` directly, and `OwnedNote::index` is `Option<u64>` precisely so
+/// a received note can be held with `None`.
+///
+/// Nothing about the PROOF differs: `build_spend` uses the note's blinding and leaf
+/// position and never looks at the index. This is the same circuit, the same fee, the
+/// same output sealing — only the way the input note is addressed changes.
+///
+/// - `note_blinding_hex`: the note's blinding, wire-encoded — exactly the `blinding_hex`
+///   field [`openNoteCiphertext`] returned for this ciphertext.
+/// - `note_position`: its leaf position in the pool, i.e. its index in `GET
+///   /v1/shielded/leaves`'s `leaves` array.
+#[wasm_bindgen(js_name = buildPrivateSendReceivedWithMemo)]
+#[allow(clippy::too_many_arguments)]
+pub fn build_private_send_received_with_memo(
+    seed_hex: &str,
+    note_blinding_hex: &str,
+    note_value_str: &str,
+    note_position: u32,
+    unpadded_leaves_json: &str,
+    capacity: u32,
+    recipient_pk_shield_hex: &str,
+    recipient_pk_enc_hex: &str,
+    amount_str: &str,
+    memo: &str,
+) -> Result<String, JsValue> {
+    let blinding: BaseElement = from_wire(&hex32(note_blinding_hex)?)
+        .map_err(|e| JsValue::from_str(&format!("bad note_blinding_hex: {e}")))?;
+    let note = OwnedNote {
+        // No derivation index: this wallet did not choose it. That is exactly what
+        // `Option` is for here — see the struct's own doc comment.
+        index: None,
+        value: parse_u64(note_value_str, "note_value")?,
+        blinding,
+        position: Some(note_position as u64),
+        spent: false,
+        memo: None,
+    };
+    build_private_send_core(
+        seed_hex, note, unpadded_leaves_json, capacity,
+        recipient_pk_shield_hex, recipient_pk_enc_hex, amount_str, memo,
+    )
+}
+
+/// [`buildPrivateSendReceivedWithMemo`] without a memo.
+#[wasm_bindgen(js_name = buildPrivateSendReceived)]
+#[allow(clippy::too_many_arguments)]
+pub fn build_private_send_received(
+    seed_hex: &str,
+    note_blinding_hex: &str,
+    note_value_str: &str,
+    note_position: u32,
+    unpadded_leaves_json: &str,
+    capacity: u32,
+    recipient_pk_shield_hex: &str,
+    recipient_pk_enc_hex: &str,
+    amount_str: &str,
+) -> Result<String, JsValue> {
+    build_private_send_received_with_memo(
+        seed_hex, note_blinding_hex, note_value_str, note_position, unpadded_leaves_json,
+        capacity, recipient_pk_shield_hex, recipient_pk_enc_hex, amount_str, "",
+    )
+}
+
+/// The shared body: prove one spend of `note`, paying `amount` out and the rest back as
+/// change. Identical for self-created and received notes — only how `note` was built
+/// differs.
+#[allow(clippy::too_many_arguments)]
+fn build_private_send_core(
+    seed_hex: &str,
+    note: OwnedNote,
+    unpadded_leaves_json: &str,
+    capacity: u32,
+    recipient_pk_shield_hex: &str,
+    recipient_pk_enc_hex: &str,
+    amount_str: &str,
+    memo: &str,
+) -> Result<String, JsValue> {
+    let account = ShieldedAccount::from_seed(hex32(seed_hex)?);
+    let note_value = note.value;
+    let note_position = note.position.unwrap_or(0) as u32;
+    let _ = note_position;
     let amount = parse_u64(amount_str, "amount")?;
 
     // Rebuild the padded pool the chain is anchored on: real leaves as sent, then the
@@ -201,16 +330,8 @@ pub fn build_private_send_with_memo(
     // blinding exactly as before — and it is deliberately kept inside `u32` so the page
     // can hand it straight back as `note_index`, and inside f64-exact range so
     // `JSON.parse` does not round it. Do not widen it.
-    let blinding = account.blinding(note_index as u64);
     let mut store = NoteStore::new();
-    store.notes.push(OwnedNote {
-        index: Some(note_index as u64),
-        value: note_value,
-        blinding,
-        position: Some(note_position as u64),
-        spent: false,
-        memo: None,
-    });
+    store.notes.push(note);
 
     let recipient_pk: BaseElement = from_wire(&hex32(recipient_pk_shield_hex)?)
         .map_err(|e| JsValue::from_str(&format!("bad recipient_pk_shield_hex: {e}")))?;

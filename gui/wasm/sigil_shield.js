@@ -71,6 +71,128 @@ export function buildPrivateSend(seed_hex, note_index, note_value_str, note_posi
 }
 
 /**
+ * [`buildPrivateSendReceivedWithMemo`] without a memo.
+ * @param {string} seed_hex
+ * @param {string} note_blinding_hex
+ * @param {string} note_value_str
+ * @param {number} note_position
+ * @param {string} unpadded_leaves_json
+ * @param {number} capacity
+ * @param {string} recipient_pk_shield_hex
+ * @param {string} recipient_pk_enc_hex
+ * @param {string} amount_str
+ * @returns {string}
+ */
+export function buildPrivateSendReceived(seed_hex, note_blinding_hex, note_value_str, note_position, unpadded_leaves_json, capacity, recipient_pk_shield_hex, recipient_pk_enc_hex, amount_str) {
+    let deferred9_0;
+    let deferred9_1;
+    try {
+        const ptr0 = passStringToWasm0(seed_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(note_blinding_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(note_value_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(unpadded_leaves_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(recipient_pk_shield_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len4 = WASM_VECTOR_LEN;
+        const ptr5 = passStringToWasm0(recipient_pk_enc_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len5 = WASM_VECTOR_LEN;
+        const ptr6 = passStringToWasm0(amount_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len6 = WASM_VECTOR_LEN;
+        const ret = wasm.buildPrivateSendReceived(ptr0, len0, ptr1, len1, ptr2, len2, note_position, ptr3, len3, capacity, ptr4, len4, ptr5, len5, ptr6, len6);
+        var ptr8 = ret[0];
+        var len8 = ret[1];
+        if (ret[3]) {
+            ptr8 = 0; len8 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred9_0 = ptr8;
+        deferred9_1 = len8;
+        return getStringFromWasm0(ptr8, len8);
+    } finally {
+        wasm.__wbindgen_free(deferred9_0, deferred9_1, 1);
+    }
+}
+
+/**
+ * Spend a note this wallet **received** rather than created — a private payment from
+ * someone else, or a mining reward the chain minted straight into the shielded pool.
+ *
+ * ## Why this had to exist
+ *
+ * [`buildPrivateSend`] addresses the note being spent by its DERIVATION INDEX, and
+ * re-derives the blinding as `blinding(seed, index)`. That works only for notes this
+ * wallet minted itself, because only then does an index exist on this side. A received
+ * note's blinding was chosen by whoever sealed it; the only place it exists is inside
+ * the ciphertext, which [`openNoteCiphertext`] already returns as `blinding_hex`.
+ *
+ * So until now the browser could SEE a received or mined note — the balance scan
+ * trial-decrypts the whole pool and adds it up correctly — and had no way to SPEND it.
+ * Reported 2026-09-06 as a wallet showing a real mined balance whose Send button could
+ * never find a note: the balance came from the chain, the spend candidates came from a
+ * localStorage list of self-created notes, and for a wallet that mined on a phone that
+ * list is empty. The native Android wallet never had the gap because it calls
+ * `wallet::build_spend` directly, and `OwnedNote::index` is `Option<u64>` precisely so
+ * a received note can be held with `None`.
+ *
+ * Nothing about the PROOF differs: `build_spend` uses the note's blinding and leaf
+ * position and never looks at the index. This is the same circuit, the same fee, the
+ * same output sealing — only the way the input note is addressed changes.
+ *
+ * - `note_blinding_hex`: the note's blinding, wire-encoded — exactly the `blinding_hex`
+ *   field [`openNoteCiphertext`] returned for this ciphertext.
+ * - `note_position`: its leaf position in the pool, i.e. its index in `GET
+ *   /v1/shielded/leaves`'s `leaves` array.
+ * @param {string} seed_hex
+ * @param {string} note_blinding_hex
+ * @param {string} note_value_str
+ * @param {number} note_position
+ * @param {string} unpadded_leaves_json
+ * @param {number} capacity
+ * @param {string} recipient_pk_shield_hex
+ * @param {string} recipient_pk_enc_hex
+ * @param {string} amount_str
+ * @param {string} memo
+ * @returns {string}
+ */
+export function buildPrivateSendReceivedWithMemo(seed_hex, note_blinding_hex, note_value_str, note_position, unpadded_leaves_json, capacity, recipient_pk_shield_hex, recipient_pk_enc_hex, amount_str, memo) {
+    let deferred10_0;
+    let deferred10_1;
+    try {
+        const ptr0 = passStringToWasm0(seed_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(note_blinding_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(note_value_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(unpadded_leaves_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(recipient_pk_shield_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len4 = WASM_VECTOR_LEN;
+        const ptr5 = passStringToWasm0(recipient_pk_enc_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len5 = WASM_VECTOR_LEN;
+        const ptr6 = passStringToWasm0(amount_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len6 = WASM_VECTOR_LEN;
+        const ptr7 = passStringToWasm0(memo, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len7 = WASM_VECTOR_LEN;
+        const ret = wasm.buildPrivateSendReceivedWithMemo(ptr0, len0, ptr1, len1, ptr2, len2, note_position, ptr3, len3, capacity, ptr4, len4, ptr5, len5, ptr6, len6, ptr7, len7);
+        var ptr9 = ret[0];
+        var len9 = ret[1];
+        if (ret[3]) {
+            ptr9 = 0; len9 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred10_0 = ptr9;
+        deferred10_1 = len9;
+        return getStringFromWasm0(ptr9, len9);
+    } finally {
+        wasm.__wbindgen_free(deferred10_0, deferred10_1, 1);
+    }
+}
+
+/**
  * [`buildPrivateSend`] plus a private memo (UTF-8, at most `note_cipher::MEMO_LEN` = 512
  * bytes) sealed to the recipient alongside the note. A separate export rather than an
  * extra parameter so pages built against the memo-less signature keep working unchanged.
@@ -116,6 +238,40 @@ export function buildPrivateSendWithMemo(seed_hex, note_index, note_value_str, n
         return getStringFromWasm0(ptr8, len8);
     } finally {
         wasm.__wbindgen_free(deferred9_0, deferred9_1, 1);
+    }
+}
+
+/**
+ * The nullifier this wallet's note at pool leaf `position` publishes when spent —
+ * `compress2(spend_key, position)`, byte-identical to `note_v1::nullifier` and
+ * `wallet::nullifier_at`, wire-encoded like `/v1/shielded/nullifiers` lists them.
+ *
+ * Exported 2026-09-08 because the page's JS port of this derivation disagreed with the
+ * crate (leaf 2438: JS `43cc93…`, chain `1f2a01…`), so the browser never recognised its
+ * own spent notes: balances netted nothing and Send kept offering spent notes, which the
+ * node refused as "nullifier already spent". One derivation, this one.
+ * @param {string} seed_hex
+ * @param {number} position
+ * @returns {string}
+ */
+export function noteNullifier(seed_hex, position) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(seed_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.noteNullifier(ptr0, len0, position);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
     }
 }
 

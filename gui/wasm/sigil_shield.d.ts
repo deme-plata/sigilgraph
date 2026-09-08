@@ -33,11 +33,60 @@
 export function buildPrivateSend(seed_hex: string, note_index: number, note_value_str: string, note_position: number, unpadded_leaves_json: string, capacity: number, recipient_pk_shield_hex: string, recipient_pk_enc_hex: string, amount_str: string): string;
 
 /**
+ * [`buildPrivateSendReceivedWithMemo`] without a memo.
+ */
+export function buildPrivateSendReceived(seed_hex: string, note_blinding_hex: string, note_value_str: string, note_position: number, unpadded_leaves_json: string, capacity: number, recipient_pk_shield_hex: string, recipient_pk_enc_hex: string, amount_str: string): string;
+
+/**
+ * Spend a note this wallet **received** rather than created — a private payment from
+ * someone else, or a mining reward the chain minted straight into the shielded pool.
+ *
+ * ## Why this had to exist
+ *
+ * [`buildPrivateSend`] addresses the note being spent by its DERIVATION INDEX, and
+ * re-derives the blinding as `blinding(seed, index)`. That works only for notes this
+ * wallet minted itself, because only then does an index exist on this side. A received
+ * note's blinding was chosen by whoever sealed it; the only place it exists is inside
+ * the ciphertext, which [`openNoteCiphertext`] already returns as `blinding_hex`.
+ *
+ * So until now the browser could SEE a received or mined note — the balance scan
+ * trial-decrypts the whole pool and adds it up correctly — and had no way to SPEND it.
+ * Reported 2026-09-06 as a wallet showing a real mined balance whose Send button could
+ * never find a note: the balance came from the chain, the spend candidates came from a
+ * localStorage list of self-created notes, and for a wallet that mined on a phone that
+ * list is empty. The native Android wallet never had the gap because it calls
+ * `wallet::build_spend` directly, and `OwnedNote::index` is `Option<u64>` precisely so
+ * a received note can be held with `None`.
+ *
+ * Nothing about the PROOF differs: `build_spend` uses the note's blinding and leaf
+ * position and never looks at the index. This is the same circuit, the same fee, the
+ * same output sealing — only the way the input note is addressed changes.
+ *
+ * - `note_blinding_hex`: the note's blinding, wire-encoded — exactly the `blinding_hex`
+ *   field [`openNoteCiphertext`] returned for this ciphertext.
+ * - `note_position`: its leaf position in the pool, i.e. its index in `GET
+ *   /v1/shielded/leaves`'s `leaves` array.
+ */
+export function buildPrivateSendReceivedWithMemo(seed_hex: string, note_blinding_hex: string, note_value_str: string, note_position: number, unpadded_leaves_json: string, capacity: number, recipient_pk_shield_hex: string, recipient_pk_enc_hex: string, amount_str: string, memo: string): string;
+
+/**
  * [`buildPrivateSend`] plus a private memo (UTF-8, at most `note_cipher::MEMO_LEN` = 512
  * bytes) sealed to the recipient alongside the note. A separate export rather than an
  * extra parameter so pages built against the memo-less signature keep working unchanged.
  */
 export function buildPrivateSendWithMemo(seed_hex: string, note_index: number, note_value_str: string, note_position: number, unpadded_leaves_json: string, capacity: number, recipient_pk_shield_hex: string, recipient_pk_enc_hex: string, amount_str: string, memo: string): string;
+
+/**
+ * The nullifier this wallet's note at pool leaf `position` publishes when spent —
+ * `compress2(spend_key, position)`, byte-identical to `note_v1::nullifier` and
+ * `wallet::nullifier_at`, wire-encoded like `/v1/shielded/nullifiers` lists them.
+ *
+ * Exported 2026-09-08 because the page's JS port of this derivation disagreed with the
+ * crate (leaf 2438: JS `43cc93…`, chain `1f2a01…`), so the browser never recognised its
+ * own spent notes: balances netted nothing and Send kept offering spent notes, which the
+ * node refused as "nullifier already spent". One derivation, this one.
+ */
+export function noteNullifier(seed_hex: string, position: number): string;
 
 /**
  * Trial-open ONE published note ciphertext with this seed's encryption key.
@@ -90,7 +139,10 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly buildPrivateSend: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
+    readonly buildPrivateSendReceived: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number) => [number, number, number, number];
+    readonly buildPrivateSendReceivedWithMemo: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number) => [number, number, number, number];
     readonly buildPrivateSendWithMemo: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number) => [number, number, number, number];
+    readonly noteNullifier: (a: number, b: number, c: number) => [number, number, number, number];
     readonly openNoteCiphertext: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly shieldEncryptPublicKey: (a: number, b: number) => [number, number, number, number];
     readonly shieldNoteCommitment: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

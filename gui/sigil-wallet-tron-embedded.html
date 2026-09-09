@@ -2530,7 +2530,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   window.sigilShieldWasmReady = (async function(){
     var el=document.getElementById('privWasmState');
     try{
-      var mod = await import('./wasm/sigil_shield.js?v=909');
+      var mod = await import('./wasm/sigil_shield.js?v=910');
       await mod.default(); // fetches + instantiates the sibling .wasm
       window.sigilShieldWasm = mod;
       if(el){ el.textContent='prover ready'; el.style.color='#00e0c6'; }
@@ -2765,7 +2765,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   function privRollback(from, pick, changeIndex){
     try{
       var arr=myNotes(from);
-      if(pick && pick.kind!=='recv' && pick.note){ for(var k=0;k<arr.length;k++){ if(arr[k].index===pick.note.index) arr[k].spent=false; } }
+      var ins = pick && pick.kind==='multi' ? pick.notes : [pick];
+      for(var pi=0; pi<ins.length; pi++){ var p=ins[pi]; if(p && p.kind!=='recv' && p.note){ for(var k=0;k<arr.length;k++){ if(arr[k].index===p.note.index) arr[k].spent=false; } } }
       if(changeIndex!==null && changeIndex!==undefined){ arr=arr.filter(function(n){ return n.index!==changeIndex; }); }
       saveMyNotes(from, arr);
     }catch(e){}
@@ -2791,7 +2792,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     if(!txid) return;
     var nf=String(nullifier||'').toLowerCase(), deadline=Date.now()+15*60*1000, announced=false, unknowns=0;
     while(Date.now()<deadline){
-      await new Promise(function(r){ setTimeout(r,5000); });
+      await new Promise(function(r){ setTimeout(r,2000); }); // 2026-09-09: certificates settle in ~1 s now; a 5 s poll made 'final' read 20 s late
       var seen=false, st=null, reason='';
       try{ var nl=await fetch('/v1/shielded/nullifiers',{cache:'no-store'}).then(function(r){return r.json();});
            if(nl&&nl.nullifiers) seen=nl.nullifiers.map(function(h){return String(h).toLowerCase();}).indexOf(nf)>=0; }catch(_){}
@@ -2965,6 +2966,10 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
 
       var FEE=100000n; // sigil_state::shielded::SHIELDED_FEE (g2: 100_000 glyphs; was 1000 on g1) — mirrored in wasm_api.rs too
       var candidates=[], unlanded=0;
+      // 2026-09-09: notes too small to cover the payment ALONE are kept here; two of them
+      // can fund it together through the two-input circuit (buildPrivateSend2 — the phone
+      // has done this since 1.8.0; this page could not pay more than its largest note).
+      var small=[];
 
       // ── (a) SELF-CREATED notes, from this browser's own bookkeeping ──────────
       // Addressed by derivation index: the blinding is blinding(seed, index), so the
@@ -2972,10 +2977,10 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       var notes=myNotes(from).filter(function(n){ return !n.spent; });
       for(var i=0;i<notes.length;i++){
         var n=notes[i];
-        if(BigInt(n.value) < amountRaw+FEE) continue; // this note alone can't cover it
         var cm; try{ cm=wasm.shieldNoteCommitment(seedHex, n.index, String(n.value)); }catch(e){ continue; }
         var pos=leaves.indexOf(cm);
         if(pos<0){ unlanded++; continue; } // not landed yet (still finalizing) — skip, don't fail the whole send
+        if(BigInt(n.value) < amountRaw+FEE){ small.push({note:n, position:pos, value:BigInt(n.value), kind:'self'}); continue; } // alone it can't cover it
         candidates.push({note:n, position:pos, value:BigInt(n.value), kind:'self'});
       }
 
@@ -3015,7 +3020,6 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
           catch(_){ continue; }              // not ours — the AEAD tag IS the ownership proof
           if(!op || op.blinding_hex==null) continue;
           var rv; try{ rv=BigInt(op.value); }catch(_){ continue; }
-          if(rv < amountRaw+FEE) continue;
           if(spentSet){
             try{
               // The crate's nullifier (see the balance scan): the JS port's disagreed
@@ -3024,6 +3028,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
               if(spentSet.has(rawNf)) continue;   // live epoch is 0, where scoping is the identity
             }catch(_){}
           }
+          if(rv < amountRaw+FEE){ small.push({recv:{value:String(op.value), blinding:op.blinding_hex}, position:ci, value:rv, kind:'recv'}); continue; }
           candidates.push({recv:{value:String(op.value), blinding:op.blinding_hex}, position:ci, value:rv, kind:'recv'});
         }
       }
@@ -3031,6 +3036,16 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       // Prefer the SMALLEST covering note — leaves bigger notes free for bigger sends
       // later. This wallet does not yet combine multiple notes into one spend.
       candidates.sort(function(a,b){ return Number(a.value-b.value); });
+      if(!candidates.length && small.length>=2 && wasm.buildPrivateSend2){
+        small.sort(function(a,b){ return Number(b.value-a.value); });
+        var x=small[0], y=small[1];
+        if(x.value+y.value >= amountRaw+FEE){
+          var xb=null, yb=null;
+          try{ xb = x.kind==='recv' ? x.recv.blinding : String(wasm.noteBlinding(seedHex, x.note.index)); }catch(_){ xb=null; }
+          try{ yb = y.kind==='recv' ? y.recv.blinding : String(wasm.noteBlinding(seedHex, y.note.index)); }catch(_){ yb=null; }
+          if(xb && yb) candidates.push({kind:'multi', notes:[x,y], blindings:[xb,yb], position:x.position, value:x.value+y.value});
+        }
+      }
       if(!candidates.length && unlanded>0){
         privMsg('⏳ your private balance is still settling on the DAG ('+unlanded+' note'+(unlanded===1?'':'s')+' not landed yet) — about a minute and a half after shielding.', '#fbbf24');
         return 'retry';
@@ -3041,8 +3056,9 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       }
       var pick=candidates[0];
       var infoEl=document.getElementById('privNoteInfo');
-      if(infoEl) infoEl.textContent='spending a '+glyphStr(pick.value.toString())+' SIGIL '
-        +(pick.kind==='recv'?'received/mined':'self-made')+' note (pool leaf #'+pick.position+')';
+      if(infoEl) infoEl.textContent = pick.kind==='multi'
+        ? ('combining two notes — '+glyphStr(pick.notes[0].value.toString())+' + '+glyphStr(pick.notes[1].value.toString())+' SIGIL (pool leaves #'+pick.notes[0].position+' + #'+pick.notes[1].position+')')
+        : ('spending a '+glyphStr(pick.value.toString())+' SIGIL '+(pick.kind==='recv'?'received/mined':'self-made')+' note (pool leaf #'+pick.position+')');
 
       privMsg('Building + proving the private spend — real zk-STARK, client-side (~0.5-2s)…', '#6df3ff');
       var reqJson;
@@ -3050,7 +3066,14 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         var memo=sigilPrivMemo();
         if(new TextEncoder().encode(memo).length>512){ privMsg('✗ memo is over 512 bytes — shorten it.', '#ff8a8a'); return; }
         if(memo && !wasm.buildPrivateSendWithMemo){ privMsg('✗ this wallet build cannot seal memos yet — reload the page.', '#ff8a8a'); return; }
-        if(pick.kind==='recv'){
+        if(pick.kind==='multi'){
+          var xn=pick.notes[0], yn=pick.notes[1];
+          reqJson = wasm.buildPrivateSend2(
+                seedHex, xn.value.toString(), pick.blindings[0], xn.position,
+                yn.value.toString(), pick.blindings[1], yn.position,
+                JSON.stringify(leaves), capacity,
+                recipient.pk_shield, recipient.pk_encrypt, amountRaw.toString(), memo||'');
+        } else if(pick.kind==='recv'){
           // Received/mined: addressed by its BLINDING, straight out of the ciphertext.
           reqJson = memo
             ? wasm.buildPrivateSendReceivedWithMemo(
@@ -3094,7 +3117,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       privMsg('Submitting…', '#6df3ff');
       var sr=await fetch('/v1/shielded_send',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({
-          anchor:req.anchor, nullifier:req.nullifier, cm_outs:req.cm_outs,
+          anchor:req.anchor, nullifier:req.nullifier, extra_nullifiers:req.extra_nullifiers||[], cm_outs:req.cm_outs,
           fee:req.fee, proof:req.proof, note_ciphertexts:req.note_ciphertexts
         })});
       var sj=null; try{ sj=await sr.json(); }catch(_){}
@@ -3106,8 +3129,10 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       var updated=myNotes(from);
       // A received note is not in this list to mark — its nullifier is now on chain,
       // which IS the authoritative "spent", and the scan above nets it out from there.
-      if(pick.kind!=='recv'){
-        for(var k=0;k<updated.length;k++){ if(updated[k].index===pick.note.index){ updated[k].spent=true; } }
+      var spentInputs = pick.kind==='multi' ? pick.notes : [pick];
+      for(var si=0; si<spentInputs.length; si++){
+        var sn=spentInputs[si]; if(sn.kind==='recv' || !sn.note) continue;
+        for(var k=0;k<updated.length;k++){ if(updated[k].index===sn.note.index){ updated[k].spent=true; } }
       }
       if(req.change_index!==null && req.change_index!==undefined){
         updated.push({index:req.change_index, value:Number(req.change_value), ts:Date.now()});

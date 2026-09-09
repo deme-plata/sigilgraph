@@ -33,6 +33,18 @@
 export function buildPrivateSend(seed_hex: string, note_index: number, note_value_str: string, note_position: number, unpadded_leaves_json: string, capacity: number, recipient_pk_shield_hex: string, recipient_pk_enc_hex: string, amount_str: string): string;
 
 /**
+ * 2026-09-09: TWO-INPUT private send — the v6 two-input circuit the phone has used since
+ * wallet 1.8.0. The browser never had it, so a wallet full of small notes (mining rewards,
+ * received payments, its own change) could not pay more than its largest single note:
+ * "no landed shielded note covers 0.02 SIGIL" with 0.06 SIGIL in the pool. Both inputs are
+ * addressed by BLINDING + leaf position (received notes and sealed change straight out of
+ * their ciphertext; self-made notes via `noteBlinding`). Same output shape as
+ * `buildPrivateSend*`, plus `extra_nullifiers` (the second input's), which the POST body
+ * must carry. The change is sealed to ourselves like every other builder since today.
+ */
+export function buildPrivateSend2(seed_hex: string, a_value_str: string, a_blinding_hex: string, a_position: number, b_value_str: string, b_blinding_hex: string, b_position: number, unpadded_leaves_json: string, capacity: number, recipient_pk_shield_hex: string, recipient_pk_enc_hex: string, amount_str: string, memo: string): string;
+
+/**
  * [`buildPrivateSendReceivedWithMemo`] without a memo.
  */
 export function buildPrivateSendReceived(seed_hex: string, note_blinding_hex: string, note_value_str: string, note_position: number, unpadded_leaves_json: string, capacity: number, recipient_pk_shield_hex: string, recipient_pk_enc_hex: string, amount_str: string): string;
@@ -75,6 +87,13 @@ export function buildPrivateSendReceivedWithMemo(seed_hex: string, note_blinding
  * extra parameter so pages built against the memo-less signature keep working unchanged.
  */
 export function buildPrivateSendWithMemo(seed_hex: string, note_index: number, note_value_str: string, note_position: number, unpadded_leaves_json: string, capacity: number, recipient_pk_shield_hex: string, recipient_pk_enc_hex: string, amount_str: string, memo: string): string;
+
+/**
+ * 2026-09-09: the blinding of a self-made note, `account.blinding(index)` — so the page can
+ * address one of its own index-booked notes by blinding exactly like a received one and
+ * hand it to `buildPrivateSend2` beside a received/change note.
+ */
+export function noteBlinding(seed_hex: string, index: number): string;
 
 export function noteNullifier(seed_hex: string, position: number): string;
 
@@ -146,9 +165,11 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly buildPrivateSend: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
+    readonly buildPrivateSend2: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number) => [number, number, number, number];
     readonly buildPrivateSendReceived: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number) => [number, number, number, number];
     readonly buildPrivateSendReceivedWithMemo: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number) => [number, number, number, number];
     readonly buildPrivateSendWithMemo: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number) => [number, number, number, number];
+    readonly noteBlinding: (a: number, b: number, c: number) => [number, number, number, number];
     readonly noteNullifier: (a: number, b: number, c: number) => [number, number, number, number];
     readonly openNoteCiphertext: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly sealNoteToSelf: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

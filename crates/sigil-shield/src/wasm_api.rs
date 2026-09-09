@@ -31,7 +31,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::note_cipher::{seal_note, NotePlaintext, ShieldedAddress};
 use crate::note_v1::{from_wire, padding_leaf_wire, to_wire};
-use crate::wallet::{build_spend, NoteStore, OwnedNote, ShieldedAccount};
+use crate::wallet::{build_spend, build_spend_2, NoteStore, OwnedNote, ShieldedAccount};
 use winterfell::math::fields::f64::BaseElement;
 
 /// `sigil_state::shielded::SHIELDED_FEE` — a shielded send must pay exactly this (a
@@ -90,6 +90,126 @@ pub fn seal_note_to_self(seed_hex: &str, index: u32, value_str: &str) -> Result<
     let ct = seal_note(&NotePlaintext::new(value, blinding), &addr)
         .map_err(|e| JsValue::from_str(&format!("seal: {e}")))?;
     Ok(ct.0)
+}
+
+/// 2026-09-09: the blinding of a self-made note, `account.blinding(index)` — so the page can
+/// address one of its own index-booked notes by blinding exactly like a received one and
+/// hand it to `buildPrivateSend2` beside a received/change note.
+#[wasm_bindgen(js_name = noteBlinding)]
+pub fn note_blinding(seed_hex: &str, index: u32) -> Result<String, JsValue> {
+    let account = ShieldedAccount::from_seed(hex32(seed_hex)?);
+    Ok(hex::encode(to_wire(account.blinding(index as u64))))
+}
+
+/// 2026-09-09: TWO-INPUT private send — the v6 two-input circuit the phone has used since
+/// wallet 1.8.0. The browser never had it, so a wallet full of small notes (mining rewards,
+/// received payments, its own change) could not pay more than its largest single note:
+/// "no landed shielded note covers 0.02 SIGIL" with 0.06 SIGIL in the pool. Both inputs are
+/// addressed by BLINDING + leaf position (received notes and sealed change straight out of
+/// their ciphertext; self-made notes via `noteBlinding`). Same output shape as
+/// `buildPrivateSend*`, plus `extra_nullifiers` (the second input's), which the POST body
+/// must carry. The change is sealed to ourselves like every other builder since today.
+#[wasm_bindgen(js_name = buildPrivateSend2)]
+#[allow(clippy::too_many_arguments)]
+pub fn build_private_send_2(
+    seed_hex: &str,
+    a_value_str: &str,
+    a_blinding_hex: &str,
+    a_position: u32,
+    b_value_str: &str,
+    b_blinding_hex: &str,
+    b_position: u32,
+    unpadded_leaves_json: &str,
+    capacity: u32,
+    recipient_pk_shield_hex: &str,
+    recipient_pk_enc_hex: &str,
+    amount_str: &str,
+    memo: &str,
+) -> Result<String, JsValue> {
+    if a_position == b_position {
+        return Err(JsValue::from_str("both inputs name the same on-chain note"));
+    }
+    let seed = hex32(seed_hex)?;
+    let account = ShieldedAccount::from_seed(seed);
+    let amount = parse_u64(amount_str, "amount")?;
+
+    let leaves_hex: Vec<String> = serde_json::from_str(unpadded_leaves_json)
+        .map_err(|e| JsValue::from_str(&format!("bad unpadded_leaves_json: {e}")))?;
+    if leaves_hex.len() as u32 > capacity {
+        return Err(JsValue::from_str("more real leaves than the given capacity"));
+    }
+    let mut pool_commitments: Vec<[u8; 32]> = Vec::with_capacity(capacity as usize);
+    for h in &leaves_hex {
+        pool_commitments.push(hex32(h)?);
+    }
+    for i in pool_commitments.len() as u64..capacity as u64 {
+        pool_commitments.push(padding_leaf_wire(i));
+    }
+
+    let mut store = NoteStore::new();
+    let mut in_sum: u64 = 0;
+    for (v, bh, pos) in [
+        (a_value_str, a_blinding_hex, a_position),
+        (b_value_str, b_blinding_hex, b_position),
+    ] {
+        let value = parse_u64(v, "note_value")?;
+        in_sum = in_sum
+            .checked_add(value)
+            .ok_or_else(|| JsValue::from_str("note values overflow"))?;
+        let blinding: BaseElement = from_wire(&hex32(bh)?)
+            .map_err(|e| JsValue::from_str(&format!("bad note_blinding_hex: {e}")))?;
+        store.notes.push(OwnedNote {
+            index: None,
+            value,
+            blinding,
+            position: Some(pos as u64),
+            spent: false,
+            memo: None,
+        });
+    }
+
+    let recipient_pk: BaseElement = from_wire(&hex32(recipient_pk_shield_hex)?)
+        .map_err(|e| JsValue::from_str(&format!("bad recipient_pk_shield_hex: {e}")))?;
+    let my_pk = account.public_key();
+    let change = in_sum
+        .checked_sub(SHIELDED_FEE)
+        .and_then(|v| v.checked_sub(amount))
+        .ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "two notes worth {in_sum} cannot cover amount {amount} + fee {SHIELDED_FEE}"
+            ))
+        })?;
+    let outs_spec = [(amount, recipient_pk), (change, my_pk)];
+    let bundle = build_spend_2(&account, &mut store, &pool_commitments, [0, 1], SHIELDED_FEE, &outs_spec)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let recipient_addr = ShieldedAddress::new(recipient_pk, recipient_pk_enc_hex);
+    let (out0_value, out0_blinding) = bundle.out_preimages[0];
+    let pt = NotePlaintext::new(out0_value, out0_blinding)
+        .with_memo(memo)
+        .map_err(|e| JsValue::from_str(&format!("memo rejected: {e}")))?;
+    let ct = seal_note(&pt, &recipient_addr)
+        .map_err(|e| JsValue::from_str(&format!("could not seal note to recipient: {e}")))?;
+    let (change_value, change_blinding) = bundle.out_preimages[1];
+    let change_index = bundle.out_indices.first().copied();
+    let change_ct = seal_note(&NotePlaintext::new(change_value, change_blinding), &account.address(&seed))
+        .map(|c| serde_json::Value::String(c.0))
+        .unwrap_or(serde_json::Value::Null);
+    let extra: Vec<String> = bundle.extra_nullifiers.iter().map(hex::encode).collect();
+
+    Ok(serde_json::json!({
+        "anchor": hex::encode(bundle.anchor),
+        "nullifier": hex::encode(bundle.nullifier),
+        "extra_nullifiers": extra,
+        "cm_outs": [hex::encode(bundle.cm_outs[0]), hex::encode(bundle.cm_outs[1])],
+        "fee": SHIELDED_FEE.to_string(),
+        "proof": hex::encode(bundle.proof),
+        "note_ciphertexts": [ct.0, change_ct],
+        "change_index": change_index,
+        "change_value": change_value.to_string(),
+        "change_blinding_hex": hex::encode(to_wire(change_blinding)),
+    })
+    .to_string())
 }
 
 #[wasm_bindgen(js_name = noteNullifier)]
@@ -381,6 +501,12 @@ fn build_private_send_core(
 
     let (change_value, change_blinding) = bundle.out_preimages[1];
     let change_index = bundle.out_indices.first().copied();
+    // 2026-09-09: seal the change to ourselves too (see buildPrivateSend2). The page used
+    // to do this itself with sealNoteToSelf(change_index, …); doing it here makes every
+    // caller of this module produce recoverable change, not just one script block.
+    let change_ct = seal_note(&NotePlaintext::new(change_value, change_blinding), &account.address(&hex32(seed_hex)?))
+        .map(|c| serde_json::Value::String(c.0))
+        .unwrap_or(serde_json::Value::Null);
 
     let result = serde_json::json!({
         "anchor": hex::encode(bundle.anchor),
@@ -388,7 +514,7 @@ fn build_private_send_core(
         "cm_outs": [hex::encode(bundle.cm_outs[0]), hex::encode(bundle.cm_outs[1])],
         "fee": SHIELDED_FEE.to_string(),
         "proof": hex::encode(bundle.proof),
-        "note_ciphertexts": [ct.0, serde_json::Value::Null],
+        "note_ciphertexts": [ct.0, change_ct],
         // Not part of the POST body — the caller (JS) uses these to book the change
         // note locally, same shape as this page's existing `noteRecord()`.
         "change_index": change_index,

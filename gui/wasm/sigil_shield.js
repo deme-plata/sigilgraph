@@ -71,6 +71,69 @@ export function buildPrivateSend(seed_hex, note_index, note_value_str, note_posi
 }
 
 /**
+ * 2026-09-09: TWO-INPUT private send — the v6 two-input circuit the phone has used since
+ * wallet 1.8.0. The browser never had it, so a wallet full of small notes (mining rewards,
+ * received payments, its own change) could not pay more than its largest single note:
+ * "no landed shielded note covers 0.02 SIGIL" with 0.06 SIGIL in the pool. Both inputs are
+ * addressed by BLINDING + leaf position (received notes and sealed change straight out of
+ * their ciphertext; self-made notes via `noteBlinding`). Same output shape as
+ * `buildPrivateSend*`, plus `extra_nullifiers` (the second input's), which the POST body
+ * must carry. The change is sealed to ourselves like every other builder since today.
+ * @param {string} seed_hex
+ * @param {string} a_value_str
+ * @param {string} a_blinding_hex
+ * @param {number} a_position
+ * @param {string} b_value_str
+ * @param {string} b_blinding_hex
+ * @param {number} b_position
+ * @param {string} unpadded_leaves_json
+ * @param {number} capacity
+ * @param {string} recipient_pk_shield_hex
+ * @param {string} recipient_pk_enc_hex
+ * @param {string} amount_str
+ * @param {string} memo
+ * @returns {string}
+ */
+export function buildPrivateSend2(seed_hex, a_value_str, a_blinding_hex, a_position, b_value_str, b_blinding_hex, b_position, unpadded_leaves_json, capacity, recipient_pk_shield_hex, recipient_pk_enc_hex, amount_str, memo) {
+    let deferred12_0;
+    let deferred12_1;
+    try {
+        const ptr0 = passStringToWasm0(seed_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(a_value_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(a_blinding_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(b_value_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(b_blinding_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len4 = WASM_VECTOR_LEN;
+        const ptr5 = passStringToWasm0(unpadded_leaves_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len5 = WASM_VECTOR_LEN;
+        const ptr6 = passStringToWasm0(recipient_pk_shield_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len6 = WASM_VECTOR_LEN;
+        const ptr7 = passStringToWasm0(recipient_pk_enc_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len7 = WASM_VECTOR_LEN;
+        const ptr8 = passStringToWasm0(amount_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len8 = WASM_VECTOR_LEN;
+        const ptr9 = passStringToWasm0(memo, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len9 = WASM_VECTOR_LEN;
+        const ret = wasm.buildPrivateSend2(ptr0, len0, ptr1, len1, ptr2, len2, a_position, ptr3, len3, ptr4, len4, b_position, ptr5, len5, capacity, ptr6, len6, ptr7, len7, ptr8, len8, ptr9, len9);
+        var ptr11 = ret[0];
+        var len11 = ret[1];
+        if (ret[3]) {
+            ptr11 = 0; len11 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred12_0 = ptr11;
+        deferred12_1 = len11;
+        return getStringFromWasm0(ptr11, len11);
+    } finally {
+        wasm.__wbindgen_free(deferred12_0, deferred12_1, 1);
+    }
+}
+
+/**
  * [`buildPrivateSendReceivedWithMemo`] without a memo.
  * @param {string} seed_hex
  * @param {string} note_blinding_hex
@@ -238,6 +301,35 @@ export function buildPrivateSendWithMemo(seed_hex, note_index, note_value_str, n
         return getStringFromWasm0(ptr8, len8);
     } finally {
         wasm.__wbindgen_free(deferred9_0, deferred9_1, 1);
+    }
+}
+
+/**
+ * 2026-09-09: the blinding of a self-made note, `account.blinding(index)` — so the page can
+ * address one of its own index-booked notes by blinding exactly like a received one and
+ * hand it to `buildPrivateSend2` beside a received/change note.
+ * @param {string} seed_hex
+ * @param {number} index
+ * @returns {string}
+ */
+export function noteBlinding(seed_hex, index) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(seed_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.noteBlinding(ptr0, len0, index);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
     }
 }
 

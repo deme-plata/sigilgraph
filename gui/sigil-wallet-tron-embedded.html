@@ -1748,6 +1748,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   // (window.__privRecipient + #privSendBox) — see doPrivateSend().
   window.__privRecipient=null;
   // Wait at most 4 minutes per address for an in-flight registration, then say 'not registered'.
+  function freshWaitAllowed(addr){ if(window.__freshWaitAddr!==addr){ window.__freshWaitAddr=addr; window.__freshWaitUntil=Date.now()+45000; } return Date.now()<window.__freshWaitUntil; }
   function regWaitAllowed(addr){ if(window.__regWaitAddr!==addr){ window.__regWaitAddr=addr; window.__regWaitUntil=Date.now()+240000; } return Date.now()<window.__regWaitUntil; }
   window.checkShieldedAddr=async function(){
     var rawIn=(document.getElementById('checkAddr').value||'').trim();
@@ -1780,8 +1781,15 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         // The node holds a registration for this wallet that has not crossed finality
         // yet (a wallet publishes its key on first open; that takes ~90 s). Say so and
         // look again, rather than tell the payer it cannot be paid (2026-09-08 13:47).
-        checkStatus('⏳ this wallet is publishing its private receiving key right now — waiting for it to settle (about a minute and a half)…', '#6df3ff');
-        setTimeout(function(){ try{ if((document.getElementById('checkAddr').value||'').trim().toLowerCase()===addr) window.checkShieldedAddr(); }catch(e){} }, 5000);
+        checkStatus('⏳ this wallet is publishing its private receiving key right now — waiting for it (seconds; up to two minutes if the validators cannot agree)…', '#6df3ff');
+        setTimeout(function(){ try{ if((document.getElementById('checkAddr').value||'').trim().toLowerCase()===addr) window.checkShieldedAddr(); }catch(e){} }, 3000);
+      } else if(j && freshWaitAllowed(addr)){
+        // 2026-09-09: nothing queued on the node is, nearly always, a wallet created seconds ago
+        // whose app has not finished posting its key (every wallet publishes on first open).
+        // Give it 45 s before calling it unregistered — paying a brand-new wallet must work
+        // out of the box, without the payer knowing what 'published' means.
+        checkStatus('⏳ waiting for that wallet to publish its private receiving key (a new wallet does this the moment it opens)…', '#6df3ff');
+        setTimeout(function(){ try{ if((document.getElementById('checkAddr').value||'').trim().toLowerCase()===addr) window.checkShieldedAddr(); }catch(e){} }, 3000);
       } else { checkStatus('✗ this wallet has never opened a SIGIL wallet app, so it has no private receiving key yet — there is nowhere to deliver a private note. Ask them for their PAYMENT CODE (Receive tab: it carries the key), or have them open the wallet once with its recovery phrase — the app publishes the key by itself.', '#fbbf24'); }
     }catch(e){ checkStatus('✗ network error — node unreachable.', '#ff8a8a'); }
   };

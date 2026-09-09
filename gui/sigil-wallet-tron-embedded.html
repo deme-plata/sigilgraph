@@ -3074,6 +3074,22 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         }
       }catch(e){ privMsg('✗ could not build the spend: '+(e&&e.message||e), '#ff8a8a'); return; }
       var req=JSON.parse(reqJson);
+      // 2026-09-09: seal the CHANGE to ourselves too. The builder leaves output 1 with no
+      // ciphertext (its blinding is account.blinding(change_index), so THIS browser can
+      // re-derive it from localStorage) — but every other client of the same seed, and
+      // this browser after a cleared localStorage, saw the change vanish: leaves 2472/74/
+      // 76/78/80 in the live pool carry no ciphertext and 18.98 SIGIL of change from one
+      // payment was invisible to the balance card. sealNoteToSelf(index, value) reproduces
+      // exactly that blinding, so the sealed note IS the change commitment — the scanner
+      // opens it like a received payment and buildPrivateSendReceived can spend it.
+      // Strictly additive: on any failure the change stays index-only as before.
+      try{
+        var Wc=window.sigilShieldWasm;
+        if(Wc && Wc.sealNoteToSelf && req.change_index!==null && req.change_index!==undefined
+           && Array.isArray(req.note_ciphertexts) && req.note_ciphertexts.length>1 && !req.note_ciphertexts[1]){
+          req.note_ciphertexts[1]=Wc.sealNoteToSelf(seedHex, req.change_index, String(req.change_value));
+        }
+      }catch(e){ try{ console.warn('change not sealed to self:', e&&e.message||e); }catch(_){} }
 
       privMsg('Submitting…', '#6df3ff');
       var sr=await fetch('/v1/shielded_send',{method:'POST',headers:{'Content-Type':'application/json'},

@@ -2826,8 +2826,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       }
       if(st==='pending' && /awaiting finality/.test(reason) && !announced){
         announced=true;
-        privMsg('In a block — waiting for finality (about a minute and a half)…', '#6df3ff');
-        privFoot('<b style="color:#6df3ff">In a block</b> — waiting for finality (about a minute and a half). This footer turns green when it is final.');
+        privMsg('In a block — waiting for the validators’ certificate (seconds — up to two minutes if they cannot agree)…', '#6df3ff');
+        privFoot('<b style="color:#6df3ff">In a block</b> — waiting for the validators’ certificate — seconds, or up to two minutes if they cannot agree. This footer turns green when it is final.');
       }
     }
     privMsg('⚠ not seen to settle within 15 minutes — check Activity before paying again.', '#fbbf24');
@@ -3047,7 +3047,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         }
       }
       if(!candidates.length && unlanded>0){
-        privMsg('⏳ your private balance is still settling on the DAG ('+unlanded+' note'+(unlanded===1?'':'s')+' not landed yet) — about a minute and a half after shielding.', '#fbbf24');
+        privMsg('⏳ your private balance is still settling on the DAG ('+unlanded+' note'+(unlanded===1?'':'s')+' not landed yet) — a few seconds after shielding — up to two minutes if the validators cannot agree.', '#fbbf24');
         return 'retry';
       }
       if(!candidates.length){

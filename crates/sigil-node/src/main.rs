@@ -1142,6 +1142,25 @@ fn run_start() -> Result<()> {
         // see sigil_api::dagknight module docs.
         let mut dag_snapshot_tick = tokio::time::interval(std::time::Duration::from_secs(5));
         dag_snapshot_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // ── 2026-09-09 GRACEFUL SHUTDOWN ─────────────────────────────────────────────
+        // systemd stops this unit with SIGTERM (KillSignal=15) and until today the process
+        // simply died. The braid frontier — every block above the settled line, ~30 blocks
+        // with certificates, up to 512 on the depth rule — lives only in RAM, so the
+        // producer came back at its SETTLED tip and re-minted DIFFERENT blocks for those
+        // heights. A follower that had already applied (and, as a validator, CERTIFIED)
+        // the original blocks was left on an orphaned fork with no way back — verified
+        // live 2026-09-08 15:59: happysrv wedged at 5,128,373, every n=2 certificate
+        // stopped, and settlement fell back to the 512-block wait for 18 hours.
+        //
+        // Now SIGTERM/SIGINT means: stop minting, keep ingesting the committee's votes so
+        // the last blocks get certified, drain everything settled to chain.log, write a
+        // fresh state snapshot, then exit. The next boot resumes at the exact tip: nothing
+        // to re-mint, nothing to orphan. Bounded by SIGIL_SHUTDOWN_GRACE_MS (default
+        // 15000) so a silent committee cannot hold the stop open past TimeoutStopSec.
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+        let mut shutting_down: Option<std::time::Instant> = None;
+        let shutdown_grace_ms: u64 = std::env::var("SIGIL_SHUTDOWN_GRACE_MS")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(15_000);
         let mut produced: u64 = 0;
         let mut received: u64 = 0;
         let mut applied: u64 = 0;
@@ -1421,6 +1440,40 @@ fn run_start() -> Result<()> {
             }
             tokio::select! {
                 _ = produce_tick.tick(), if produce => {
+                    if let Some(t0) = shutting_down {
+                        // Settle whatever the committee has certified since the last tick;
+                        // the votes arm below keeps raising the line while we wait.
+                        let mut settled_to_tip = true;
+                        if let Some(br) = braid.as_mut() {
+                            let (a, s, f) = dag_drain_apply(br, &mut dag_bodies, &mut chain,
+                                &mut |braw| { let _ = chain_log.append_bytes(braw); },
+                                &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge,
+                                &shielded_bridge, &mut mint_hash_to_tx_hashes);
+                            applied += a; dag_ord_skipped += s; dag_apply_failed += f;
+                            let tip_h = br.selected_tip().and_then(|h| dag_bodies.get(&h)).map(|b| b.header.height);
+                            // chain.height() is the NEXT height (tip + 1).
+                            settled_to_tip = tip_h.map(|t| chain.height() > t).unwrap_or(true);
+                        }
+                        if settled_to_tip || t0.elapsed().as_millis() as u64 >= shutdown_grace_ms {
+                            let settled_tip = chain.height().saturating_sub(1);
+                            let unsettled = braid.as_ref()
+                                .and_then(|br| br.selected_tip().and_then(|h| dag_bodies.get(&h)).map(|b| b.header.height))
+                                .map(|t| t.saturating_add(1).saturating_sub(chain.height()))
+                                .unwrap_or(0);
+                            if unsettled > 0 {
+                                eprintln!("⏹ graceful shutdown: {} frontier block(s) above H={} were NOT certified within {} ms — \
+                                           they will be re-minted on restart; a follower that applied them needs SIGIL_FOLLOWER_REORG=1 to rejoin",
+                                    unsettled, settled_tip, shutdown_grace_ms);
+                            } else {
+                                eprintln!("⏹ graceful shutdown: frontier fully settled at H={} ({:.1}s)",
+                                    settled_tip, t0.elapsed().as_secs_f64());
+                            }
+                            shutdown_snapshot(&chain, &snap_dir);
+                            let _ = mgr.stop().await;
+                            return Ok::<(), anyhow::Error>(());
+                        }
+                        continue;
+                    }
                     // Gate production on (a) having a peer and (b) a grace
                     // period after the first peer so the gossipsub mesh grafts
                     // — otherwise the receiver joins mid-stream and gaps
@@ -1868,9 +1921,36 @@ fn run_start() -> Result<()> {
                     }
                 }
                 _ = tokio::signal::ctrl_c() => {
-                    eprintln!("⏹ sigil-node — SIGINT received, shutting down");
-                    let _ = mgr.stop().await;
-                    return Ok::<(), anyhow::Error>(());
+                    if produce && shutting_down.is_none() {
+                        eprintln!("⏹ sigil-node — SIGINT: minting stopped, settling the frontier before exit (≤{} ms)", shutdown_grace_ms);
+                        shutting_down = Some(std::time::Instant::now());
+                        producing = false;
+                    } else if !produce {
+                        eprintln!("⏹ sigil-node — SIGINT received, writing a state snapshot and shutting down");
+                        shutdown_snapshot(&chain, &snap_dir);
+                        let _ = mgr.stop().await;
+                        return Ok::<(), anyhow::Error>(());
+                    } else {
+                        eprintln!("⏹ sigil-node — second signal, exiting now");
+                        let _ = mgr.stop().await;
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                }
+                _ = async { match sigterm.as_mut() { Some(s) => { s.recv().await; } None => std::future::pending::<()>().await } } => {
+                    if produce && shutting_down.is_none() {
+                        eprintln!("⏹ sigil-node — SIGTERM: minting stopped, settling the frontier before exit (≤{} ms)", shutdown_grace_ms);
+                        shutting_down = Some(std::time::Instant::now());
+                        producing = false;
+                    } else if !produce {
+                        eprintln!("⏹ sigil-node — SIGTERM received, writing a state snapshot and shutting down");
+                        shutdown_snapshot(&chain, &snap_dir);
+                        let _ = mgr.stop().await;
+                        return Ok::<(), anyhow::Error>(());
+                    } else {
+                        eprintln!("⏹ sigil-node — second signal, exiting now");
+                        let _ = mgr.stop().await;
+                        return Ok::<(), anyhow::Error>(());
+                    }
                 }
                 _ = tick.tick() => {
                     // Heartbeat + peer-height publish stays on a 5s cadence.
@@ -4417,6 +4497,23 @@ mod dag_wiring_tests {
 /// the braid, which raises its enforced finality line to the certified spine block, so
 /// `dag_drain_apply` settles it on the next tick instead of `final_depth` blocks later.
 /// Off unless `SIGIL_FINALITY_GATE` is set — see `FinalityWire::gate_mode`.
+/// 2026-09-09: write the state snapshot synchronously at shutdown so the next boot restores
+/// at the exact tip instead of replaying the log tail — and, for a follower whose periodic
+/// snapshot is millions of blocks stale (happysrv: 4,099,999 vs a 5.1M tip), instead of a
+/// multi-minute full replay. Failure is logged and non-fatal: boot falls back to the log.
+fn shutdown_snapshot(chain: &ChainTip, dir: &std::path::Path) {
+    let t0 = std::time::Instant::now();
+    match snapshot::StateSnapshot::capture(chain) {
+        Some(snap) => match snapshot::save_state(&snap, dir) {
+            Ok(bytes) => eprintln!("📸 shutdown snapshot @ H={} ({} B, {:.2}s)",
+                snap.snapshot_height, bytes, t0.elapsed().as_secs_f64()),
+            Err(e) => eprintln!("⚠ shutdown snapshot @ H={} failed: {} (boot will replay the log tail)",
+                snap.snapshot_height, e),
+        },
+        None => eprintln!("⚠ shutdown snapshot: nothing to capture (chain window empty)"),
+    }
+}
+
 fn apply_finality_gate(
     finality: &finality_wire::FinalityWire,
     braid: Option<&mut sigil_dagknight::Braid>,

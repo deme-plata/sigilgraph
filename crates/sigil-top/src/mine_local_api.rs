@@ -836,7 +836,15 @@ mod shield_ops {
             Err(e) => return bad_request(format!("could not seal the note to the recipient: {e}")),
         };
         let change_index = bundle.out_indices.first().copied();
-        let (change_value, _change_blinding) = bundle.out_preimages[1];
+        let (change_value, change_blinding) = bundle.out_preimages[1];
+        // 2026-09-09: seal the change to OURSELVES. Output 1 shipped with no ciphertext, so
+        // only this rig's own bookkeeping ever knew the change existed — every other client
+        // of the seed (phone, browser, MCP) saw it vanish. The sealed plaintext IS the change
+        // preimage the proof committed to, so any scanner opens it like a received payment.
+        // Additive: a sealing failure leaves the change index-only, as before.
+        let change_ct = seal_note(&NotePlaintext::new(change_value, change_blinding), &account.address(&seed))
+            .map(|c| serde_json::Value::String(c.0))
+            .unwrap_or(serde_json::Value::Null);
 
         let payload = serde_json::json!({
             "anchor": hex::encode(bundle.anchor),
@@ -844,7 +852,7 @@ mod shield_ops {
             "cm_outs": [hex::encode(bundle.cm_outs[0]), hex::encode(bundle.cm_outs[1])],
             "fee": fee.to_string(),
             "proof": hex::encode(bundle.proof),
-            "note_ciphertexts": [ct.0, serde_json::Value::Null],
+            "note_ciphertexts": [ct.0, change_ct],
         });
         let send_url = format!("{}/v1/shielded_send", node.trim_end_matches('/'));
         let resp = match client.post(&send_url).json(&payload).send() {

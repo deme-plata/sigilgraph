@@ -892,6 +892,14 @@ body.view-desktop .desktop{display:flex}
   async function _scanEpochTail(e, live, seed, M, S, spent){
     var c=_shieldCache.epochs[e];
     if(!c){ c={ scanned:0, mine:[], gross:0n }; _shieldCache.epochs[e]=c; }
+    // 2026-09-09: the first refresh fires ~200 ms BEFORE the WASM decoder finishes loading
+    // (measured 3/3 fresh loads: wasm=false at 1.4 s, scanned=2482, mine=0). The old JS
+    // opener understands none of the current ciphertexts, so that pass opened 0 notes and
+    // then marked the whole pool as scanned — every later (incremental) pass skipped the
+    // old leaves and the balance read 0 for the life of the page ('no landed shielded
+    // note covers …' on a wallet holding 1.5 SIGIL). No decoder ⇒ do not scan, do not
+    // advance `scanned`; the caller reports 'scanning…' and the next tick retries.
+    if(!(window.sigilShieldWasm && window.sigilShieldWasm.openNoteCiphertext)) return c;
     var url='/v1/shielded/leaves?from='+c.scanned+(e===live?'':('&epoch='+e));
     var page=await fetch(url,{cache:'no-store'}).then(function(r){return r.json();}).catch(function(){return null;});
     if(!page || page.ok===false) return c;
@@ -929,6 +937,24 @@ body.view-desktop .desktop{display:flex}
   }
 
   async function _scanAllEpochsFast(seed, M, S){
+    // 2026-09-09: one cache, one seed, one scan at a time. Two callers (the balance card
+    // and the activity poller) used to scan concurrently — with different keys — into the
+    // same cache; whichever finished first decided what 'scanned' meant for the other.
+    var key=_seedHexOf(seed);
+    if(_shieldCache.inflight){
+      if(_shieldCache.inflightKey===key) return _shieldCache.inflight;   // coalesce
+      try{ await _shieldCache.inflight; }catch(_){}                        // wait, then run ours
+    }
+    if(_shieldCache.seedKey!==key){ _shieldCache.epochs=Object.create(null); _shieldCache.seedKey=key; }
+    _shieldCache.inflightKey=key;
+    _shieldCache.inflight=_scanAllEpochsFastInner(seed, M, S).finally(function(){ _shieldCache.inflight=null; _shieldCache.inflightKey=null; });
+    return _shieldCache.inflight;
+  }
+  async function _scanAllEpochsFastInner(seed, M, S){
+    if(!window.sigilShieldWasm){
+      try{ if(window.sigilShieldWasmReady) await window.sigilShieldWasmReady; }catch(_){}
+      if(!window.sigilShieldWasm) return { balance:0n, gross:0n, notes:0, netted:false, epochs:0, sealed:0, pending:true };
+    }
     var enc=S.encIdentityFromSeed(seed);
     S.__enc=enc;
     var spendKey=M.deriveField(seed,'spend-key',0);
@@ -991,6 +1017,7 @@ body.view-desktop .desktop{display:flex}
     try{ if(!window.sigilShieldWasm && window.sigilShieldWasmReady) await window.sigilShieldWasmReady; }catch(_){}
     try{
       const r=await _scanAllEpochsFast(seed, M, S);
+      if(r.pending){ el.textContent='scanning…'; if(nt) nt.textContent='loading the note decoder'; return; }
       el.textContent=glyphStr(r.balance)+' SIGIL';
       // Fold it into the headline. Until 2026-09-06 this number lived only in the
       // small line below and the big figure showed transparent-only, so a wallet
@@ -7933,7 +7960,13 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     if(!mn) return;                                   // locked — cannot decrypt, stay silent
     var raw;
     try{
-      var seed = window.sigilDeriveFrom(mn).priv;
+      // 2026-09-09: sigilDeriveFrom() treats a 64-hex RAW seed as a phrase and yields a
+      // different key than the one this wallet's address came from. This poller shared
+      // _shieldCache with refreshShielded(), so its wrong-key pass (0 notes) raced the
+      // right one and, when it ran first, marked the whole pool scanned with nothing in
+      // it: the balance card read 0 and Send found 'no landed shielded note' on a wallet
+      // holding 1.5 SIGIL (measured 2026-09-09, the two seeds logged side by side).
+      var seed = (window.sigilDeriveAuto ? window.sigilDeriveAuto(mn, addr()) : window.sigilDeriveFrom(mn)).priv;
       var r = await window._scanAllEpochsFast(seed, M, S);
       // A gross figure that can only ever rise is worse than no figure: it would
       // manufacture phantom incoming rows on every spend. Skip unless netted.

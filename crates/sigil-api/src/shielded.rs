@@ -954,6 +954,21 @@ impl ShieldedBridge {
             _ => None,
         })
     }
+
+    /// 2026-09-09: the keys a still-pending registration carries, so `/v1/shielded/address`
+    /// can answer a payer BEFORE the registration settles. The registration was signed by
+    /// the wallet itself when this pool accepted it, so paying these keys pays that wallet
+    /// whether or not the registration has landed yet — a shielded payment needs only the
+    /// keys, never the settled registration. Returns (pk_shield, pk_encrypt, in_flight).
+    pub fn pending_registration_keys(&self, wallet: &WalletId) -> Option<([u8; 32], Option<[u8; 32]>, bool)> {
+        let guard = self.pending.lock().unwrap();
+        guard.values().find_map(|p| match &p.tx {
+            SigilTx::RegisterShieldedAddress { wallet: w, pk_shield, pk_encrypt, .. } if w == wallet => {
+                Some((*pk_shield, *pk_encrypt, p.in_flight))
+            }
+            _ => None,
+        })
+    }
 }
 
 // ── request shapes ──────────────────────────────────────────────────────────────────

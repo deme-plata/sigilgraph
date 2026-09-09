@@ -855,6 +855,22 @@ pub async fn shielded_address_handler(
         // the first means ask the owner, the second means wait about a minute and a half.
         // `registration` is "pending" (accepted, not yet in a block), "in_flight" (in a
         // candidate block awaiting finality) or absent (nothing queued).
+        // 2026-09-09 OUT OF THE BOX (operator: "it should work automatically and dynamically").
+        // A wallet publishes its receiving key the moment it is created; until that
+        // registration settles (seconds under a certificate, up to two minutes on the depth
+        // rule) a payer used to be told "not published" and had to wait. The keys already sit
+        // in this node's pending pool, signed by the wallet itself — hand them over now.
+        if let Some((pk_shield, pk_encrypt, in_flight)) = st.shielded.pending_registration_keys(&wallet) {
+            return Json(serde_json::json!({
+                "ok": true,
+                "wallet": hex::encode(wallet),
+                "pk_shield": hex::encode(pk_shield),
+                "pk_encrypt": pk_encrypt.map(hex::encode),
+                "status": "pending",
+                "registration": if in_flight { "in_flight" } else { "pending" },
+                "ts_ms": now_ms(),
+            }));
+        }
         let registration = match st.shielded.pending_registration(&wallet) {
             Some(shielded::TxOutcome::Pending { in_flight: true, .. }) => Some("in_flight"),
             Some(shielded::TxOutcome::Pending { .. }) => Some("pending"),

@@ -1447,6 +1447,24 @@ fn run_start() -> Result<()> {
         ));
         // Lowest `from` whose request failed; u64::MAX means "nothing to redo".
         let refetch_from = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+        // 2026-09-11 — WHICH PEER WE ASK.
+        //
+        // This fetcher used to take `connected_peers().into_iter().next()` — always the FIRST
+        // peer, for every request, forever. If that peer cannot serve backfill, nothing else is
+        // ever tried and the node never syncs no matter how correct the rest of the loop is.
+        // Measured on happysrv 2026-09-11 with the adaptive chunk already working: the chunk had
+        // correctly collapsed to the 256 floor and the frontier was sweeping the whole chain, yet
+        // the tip sat at 7,183 because every single request went to one peer that answered
+        // "Connection was closed before ..." every time — while Epsilon, connected and serving
+        // other nodes happily, was never asked once.
+        //
+        // Two changes: rotate across connected peers so no single peer owns the fetch, and score
+        // them so one that keeps failing is tried last rather than first. A peer is never
+        // permanently banned — scores decay toward zero on success — because "this peer is bad"
+        // is usually "this peer was busy".
+        let peer_scores: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, i32>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let mut peer_rr: usize = 0;
         const FETCH_MAX_AHEAD: u64 = 131_072; // keep ~16 ranges in flight ahead of the applied tip
         loop {
             // Slide the window: fire consecutive range-requests until req_frontier is
@@ -1465,7 +1483,24 @@ fn run_start() -> Result<()> {
                     }
                 }
                 while req_frontier < net_tip && req_frontier < tip + FETCH_MAX_AHEAD {
-                    if let Some(peer) = mgr.connected_peers().into_iter().next() {
+                    // Order peers best-score-first, then rotate the starting point so a healthy
+                    // peer set shares the load instead of one peer carrying every request.
+                    let chosen = {
+                        let mut ps: Vec<_> = mgr.connected_peers();
+                        if ps.is_empty() {
+                            None
+                        } else {
+                            let scores = match peer_scores.lock() { Ok(g) => g, Err(e) => e.into_inner() };
+                            ps.sort_by_key(|p| *scores.get(&p.to_string()).unwrap_or(&0));
+                            drop(scores);
+                            peer_rr = peer_rr.wrapping_add(1);
+                            // Rotate only among peers sharing the best score, so rotation never
+                            // hands work back to a peer we already know is failing.
+                            let best = ps.len().min(3);
+                            Some(ps[peer_rr % best])
+                        }
+                    };
+                    if let Some(peer) = chosen {
                         let from = req_frontier;
                         let chunk = fetch_chunk.load(std::sync::atomic::Ordering::Relaxed).max(FETCH_CHUNK_MIN);
                         let to = (from + chunk).min(net_tip);
@@ -1474,6 +1509,8 @@ fn run_start() -> Result<()> {
                         let bf_tx2 = bf_tx.clone();
                         let chunk_ad = std::sync::Arc::clone(&fetch_chunk);
                         let redo_ad = std::sync::Arc::clone(&refetch_from);
+                        let scores_ad = std::sync::Arc::clone(&peer_scores);
+                        let peer_key_ad = peer.to_string();
                         tokio::spawn(async move {
                             use std::sync::atomic::Ordering as AOrd;
                             // Called on every branch that did NOT return usable blocks: halve the
@@ -1488,6 +1525,16 @@ fn run_start() -> Result<()> {
                                     eprintln!("⇩ rr-backfill: {why} for [{from}..={to}) — fetch chunk {cur} → {next}");
                                 }
                                 redo_ad.fetch_min(from, AOrd::Relaxed);
+                                // Penalise the peer that failed, bounded so it can recover.
+                                let mut g = match scores_ad.lock() { Ok(g) => g, Err(e) => e.into_inner() };
+                                let e = g.entry(peer_key_ad.clone()).or_insert(0);
+                                *e = (*e + 1).min(64);
+                            };
+                            // Reward the peer that delivered, so a temporary stumble decays away.
+                            let win = || {
+                                let mut g = match scores_ad.lock() { Ok(g) => g, Err(e) => e.into_inner() };
+                                let e = g.entry(peer_key_ad.clone()).or_insert(0);
+                                *e = (*e - 1).max(0);
                             };
                             // 2026-08-19 (deep-catchup stall investigation): every failure
                             // branch here used to be silent (`unwrap_or_default()` /
@@ -1513,6 +1560,7 @@ fn run_start() -> Result<()> {
                                                 let cur = chunk_ad.load(AOrd::Relaxed);
                                                 let next = (cur + cur / 4).min(FETCH_CHUNK);
                                                 if next != cur { chunk_ad.store(next, AOrd::Relaxed); }
+                                                win();
                                             }
                                             r.blocks
                                         }

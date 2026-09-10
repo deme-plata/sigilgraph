@@ -330,6 +330,17 @@ pub struct CourtStatus {
     pub archive_from: Option<u64>,
     pub archive_to: Option<u64>,
     pub archive_blocks: usize,
+    /// True only if EVERY height between `archive_from` and `archive_to` is held. A catching-up
+    /// follower applies out of order, so the min/max pair reads like a range it does not actually
+    /// cover; without this flag a caller sees `5524543 -> 5525157` and reasonably concludes all
+    /// 615 heights are witnessable when 36 of them are absent.
+    pub archive_contiguous: bool,
+    /// How many heights inside that span are missing.
+    pub archive_gaps: u64,
+    /// Heights held whose block carried NO events. Their `event_log_root` is all-zero by the
+    /// chain's own rule, so two nodes "agreeing" on it proves nothing — every empty block has the
+    /// same root. Witness agreement is only evidence on heights that carried events.
+    pub archive_empty_blocks: usize,
     pub archive_capacity: usize,
     pub packets_held: usize,
     /// Seats named by the operator via `SIGIL_COURT_BENCH`.
@@ -347,7 +358,20 @@ pub struct CourtStatus {
 pub async fn court_status(State(s): State<AppState>) -> Json<ApiResponse<CourtStatus>> {
     let c = match s.court.court.read() { Ok(c) => c, Err(_) => return ApiResponse::err("court lock poisoned") };
     let (from, to) = match s.court.coverage() { Some((a, b)) => (Some(a), Some(b)), None => (None, None) };
-    let archive_blocks = s.court.archive.read().map(|a| a.len()).unwrap_or(0);
+    let (archive_blocks, archive_gaps, archive_empty_blocks) = s
+        .court
+        .archive
+        .read()
+        .map(|a| {
+            let n = a.len();
+            let span = match (a.keys().next(), a.keys().next_back()) {
+                (Some(f), Some(t)) => t - f + 1,
+                _ => 0,
+            };
+            let empty = a.values().filter(|b| b.events.is_empty()).count();
+            (n, span.saturating_sub(n as u64), empty)
+        })
+        .unwrap_or((0, 0, 0));
     ApiResponse::ok(CourtStatus {
         constitution_version: CONSTITUTION_VERSION,
         constitution_hash: constitution_hash_hex(),
@@ -364,6 +388,9 @@ pub async fn court_status(State(s): State<AppState>) -> Json<ApiResponse<CourtSt
         archive_from: from,
         archive_to: to,
         archive_blocks,
+        archive_contiguous: archive_gaps == 0,
+        archive_gaps,
+        archive_empty_blocks,
         archive_capacity: s.court.max_blocks,
         packets_held: s.court.packets.read().map(|p| p.len()).unwrap_or(0),
         named_seats: s.court.named_seats,
@@ -374,6 +401,7 @@ pub async fn court_status(State(s): State<AppState>) -> Json<ApiResponse<CourtSt
             "court_root is computed and served but NOT yet committed into contract_state_root; that changes what the producer emits and needs an operator decision.",
             "The docket and the block archive are in memory: a node restart empties both.",
             "A share link is a bearer capability. Anyone holding the URL can read the packet until it expires or is revoked.",
+            "An all-zero event_log_root means the block carried NO events. Two witnesses agreeing on it is not evidence: every empty block has that same root. Cross-check agreement counts only on heights where events > 0.",
         ],
     })
 }

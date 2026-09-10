@@ -1,0 +1,25 @@
+[package]
+name = "sigil-court"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SIGIL Nation SUPREME COURT v3 — code is law. The highest bench of the nation: a hash-chained, Merkle-rooted docket (the court's event database), a bench with exam-gated + quorum-gated promotion (the highest place to be educated and promoted), rulings + binding precedent + en-banc appeal, and court-sealed DISCLOSURE PACKETS — the one lawful way chain records (tax events, bank events, a viewing key — never a spend key) leave the nation for a foreign authority, minimized, inclusion-proven, SQIsign-sealed. Pure functions, no I/O; court_root commits into contract_state_root like the Nation does."
+
+[[bin]]
+name = "sigil-court"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+# The chain's own typed events + inclusion proofs (Art. V: every record is proven).
+sigil-events = { path = "../sigil-events" }
+# WalletId/TokenId shapes + the contract-slot commit path (court_root rides contract_state_root).
+sigil-state = { path = "../sigil-state" }
+# The registrar of the nation's education: a graduate earns a court credential.
+sigil-university = { path = "../sigil-university" }
+# The court seal: SQIsign L5 (post-quantum) over the packet root.
+flux-sqisign = { workspace = true }

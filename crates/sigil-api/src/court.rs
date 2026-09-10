@@ -59,7 +59,7 @@ use axum::Json;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sigil_court::{
-    bank_scope, constitution_hash_hex, disclosure, tax_scope, verify_packet, Article, BlockEvents,
+    bank_scope, Verdict, constitution_hash_hex, disclosure, tax_scope, verify_packet, Article, BlockEvents,
     CourtEvent, DisclosurePacket, DisclosureRequest, Jurisdiction, Purpose, Rank,
     SupremeCourt, CONSTITUTION_VERSION,
 };
@@ -95,6 +95,87 @@ pub struct CourtBridge {
     /// Public base for share links, e.g. `https://sigilgraph.org`. SIGIL's own home — never
     /// quillon.xyz, which is the other project's surface entirely.
     public_base: String,
+    /// Seats named by `SIGIL_COURT_BENCH`.
+    named_seats: usize,
+    /// Anonymous seats derived from the seal to make a panel quorate.
+    derived_seats: usize,
+}
+
+/// Parse a `SIGIL_COURT_BENCH` spec (`<64-hex>:chief,<64-hex>:justice,…`) and seat it. Pure over
+/// the spec so the exact string in the systemd drop-in can be tested without an environment.
+/// Returns how many seats were taken. Malformed entries are logged and skipped, never fatal — a
+/// typo in one seat must not leave the nation with no court at all.
+pub fn seat_from_spec(court: &mut SupremeCourt, spec: &str) -> usize {
+    let mut n = 0;
+    for (i, entry) in spec.split(',').map(|e| e.trim()).filter(|e| !e.is_empty()).enumerate() {
+        let (w_hex, rank_s) = match entry.split_once(':') {
+            Some((a, b)) => (a.trim(), b.trim()),
+            None => (entry, "justice"),
+        };
+        let Some(w) = hex32(w_hex) else {
+            eprintln!("⚠ SIGIL_COURT_BENCH entry {i} is not a 64-hex wallet, skipped: {w_hex:?}");
+            continue;
+        };
+        let rank = match rank_s.to_ascii_lowercase().as_str() {
+            "chief" | "chiefjustice" | "chief_justice" => Rank::ChiefJustice,
+            "justice" => Rank::Justice,
+            "magistrate" => Rank::Magistrate,
+            "advocate" => Rank::Advocate,
+            "clerk" => Rank::Clerk,
+            other => {
+                eprintln!("⚠ SIGIL_COURT_BENCH entry {i} has unknown rank {other:?}, seating as justice");
+                Rank::Justice
+            }
+        };
+        match court.appoint(w, rank, 0) {
+            Ok(()) => n += 1,
+            Err(e) => eprintln!("⚠ SIGIL_COURT_BENCH could not seat {w_hex}: {e}"),
+        }
+    }
+    n
+}
+
+/// Add anonymous seats derived from the seal until three members may sit. Returns how many.
+pub fn top_up_bench(court: &mut SupremeCourt, seed: &[u8; 32]) -> usize {
+    let mut derived = 0;
+    let mut i = 0u8;
+    while court.bench().at_least(Rank::Magistrate).len() < 3 {
+        let w = *blake3::hash(&[b"sigil-court/seat".as_slice(), &[i], seed].concat()).as_bytes();
+        if court.appoint(w, Rank::Magistrate, 0).is_ok() { derived += 1; }
+        i += 1;
+        if i > 16 { break; }
+    }
+    derived
+}
+
+/// Parse a `SIGIL_COURT_HONOURS` spec and confer each honour through the nation's own
+/// [`sigil_events::HonorPolicy`]. Returns how many were actually conferred — an honour whose
+/// quorum cannot be met is REFUSED and logged, never silently downgraded.
+pub fn confer_from_spec(court: &mut SupremeCourt, spec: &str) -> usize {
+    let mut n = 0;
+    for entry in spec.split(',').map(|e| e.trim()).filter(|e| !e.is_empty()) {
+        let parts: Vec<&str> = entry.split(':').collect();
+        let Some(w) = parts.first().and_then(|h| hex32(h)) else {
+            eprintln!("⚠ SIGIL_COURT_HONOURS: {entry:?} does not start with a 64-hex wallet");
+            continue;
+        };
+        let kind = parts.get(1).copied().unwrap_or("knight").to_ascii_lowercase();
+        // Distinct authorities available to approve: seated Justices other than the honoree.
+        let approvals = court.bench().at_least(Rank::Justice).into_iter().filter(|x| *x != w).count();
+        let (order, rank, citation) = if kind.starts_with("ele") || kind.starts_with("ære") || kind.starts_with("aere") {
+            (sigil_court::Order::Elefantordenen, String::new(), parts.get(2..).map(|r| r.join(":")).unwrap_or_default())
+        } else {
+            (sigil_court::Order::Ridderkorset,
+             parts.get(2).copied().unwrap_or("Ridder").to_string(),
+             parts.get(3..).map(|r| r.join(":")).unwrap_or_default())
+        };
+        let citation = if citation.trim().is_empty() { "conferred at the founding of the court".to_string() } else { citation };
+        match court.confer_honour(order, rank, w, citation, [0u8; 32], approvals, true, 0) {
+            Ok(_) => n += 1,
+            Err(e) => eprintln!("⚠ SIGIL_COURT_HONOURS refused for {}: {e}", hex::encode(w)),
+        }
+    }
+    n
 }
 
 impl Default for CourtBridge {
@@ -109,20 +190,53 @@ impl CourtBridge {
     /// anyone**, so it authenticates nothing; the status route reports `seal: "derived"` so a
     /// verifier is never misled into trusting it. Set the env var, chmod 600, for a real seal.
     pub fn new() -> Self {
-        let (seed, derived) = match std::env::var("SIGIL_COURT_SEAL_SEED").ok().and_then(|s| hex32(&s)) {
+        // Prefer a seed held in a chmod-600 FILE over one in the environment: a systemd
+        // `Environment=` line is readable via `systemctl cat` and `/proc/<pid>/environ`, so the
+        // root of trust for every disclosure this court ever seals would sit in process metadata.
+        // The file path may be in the environment; the secret should not be.
+        let from_file = std::env::var("SIGIL_COURT_SEAL_SEED_FILE").ok()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|t| hex32(t.trim()));
+        let (seed, derived) = match from_file.or_else(|| std::env::var("SIGIL_COURT_SEAL_SEED").ok().and_then(|s| hex32(&s))) {
             Some(s) => (s, false),
             None => (*blake3::hash(b"sigil-court/derived-seal/not-authoritative").as_bytes(), true),
         };
         let mut court = SupremeCourt::from_seed(&seed);
-        // A court with no bench cannot order anything, so seat one deterministically from the seal.
-        // These are protocol seats, not people; a real bench is appointed by the operator.
-        for (i, rank) in [Rank::ChiefJustice, Rank::Justice, Rank::Justice, Rank::Magistrate, Rank::Magistrate].into_iter().enumerate() {
-            let w = *blake3::hash(&[b"sigil-court/seat".as_slice(), &[i as u8], &seed].concat()).as_bytes();
-            let _ = court.appoint(w, rank, 0);
-        }
+
+        // ── Seating the founding bench ───────────────────────────────────────────────────────
+        //
+        // A constitution has to come from somewhere. `Bench::appoint` is the CONSTITUENT act — the
+        // founding bench is seated by the power that founds it — and from that moment Art. VIII
+        // governs every ELEVATION: no rank is granted solo, ever, and the exhaustive vote search
+        // in `sigil_court::science::solo_search` proves it over the whole space. Seating is not a
+        // loophole in that rule; it is what the rule presupposes. Every seat lands on the docket
+        // as a `JusticeAppointed`, so who was seated by fiat and who climbed is legible forever.
+        //
+        // `SIGIL_COURT_BENCH` names the bench: `<64-hex>:chief,<64-hex>:justice,<64-hex>:magistrate`.
+        // Unset, the court falls back to seats derived from the seal — reproducible by anyone,
+        // therefore anonymous, and reported as such by `/v1/court/status`.
+        let configured = std::env::var("SIGIL_COURT_BENCH").ok().filter(|s| !s.trim().is_empty());
+        let seated_named = seat_from_spec(&mut court, configured.as_deref().unwrap_or(""));
+
+        // A panel needs three who MAY SIT (Magistrate and up). If the named bench is short of that,
+        // top it up with derived seats rather than shipping a court that refuses every order — and
+        // say so in the status, because a bench padded with anonymous seats is a weaker bench.
+        let derived_seats = top_up_bench(&mut court, &seed);
         if derived {
             court.record_contempt([0u8; 32], [0u8; 32], "seal is derived, not operator-provided: this court's signature authenticates nothing", 0);
         }
+
+        // ── Founding honours ─────────────────────────────────────────────────────────────────
+        //
+        // `SIGIL_COURT_HONOURS` = `<64-hex>:elephant:<citation>` or `<64-hex>:knight:<rank>:<citation>`,
+        // comma-separated. The gate is NOT this loop — it is `sigil_events::HonorPolicy`, reached
+        // through `SupremeCourt::confer_honour`, which refuses the Elephant unless the operator
+        // co-signs AND at least three distinct authorities approve. Setting the variable IS the
+        // operator's co-signature; the approvals are the sitting Justices, counted here rather
+        // than asserted. If the bench is too small the conferral is REFUSED and logged, because an
+        // honour that bypassed its own quorum would be worth nothing.
+        let honours = confer_from_spec(&mut court, &std::env::var("SIGIL_COURT_HONOURS").unwrap_or_default());
+        let _ = honours;
         let max_blocks = std::env::var("SIGIL_COURT_ARCHIVE_BLOCKS").ok().and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_ARCHIVE_BLOCKS);
         let public_base = std::env::var("SIGIL_COURT_PUBLIC_BASE").unwrap_or_else(|_| "https://sigilgraph.org".into());
         Self {
@@ -132,10 +246,18 @@ impl CourtBridge {
             seq: RwLock::new(0),
             max_blocks,
             public_base,
+            named_seats: seated_named,
+            derived_seats,
         }
     }
 
-    fn derived_seal(&self) -> bool { std::env::var("SIGIL_COURT_SEAL_SEED").ok().and_then(|s| hex32(&s)).is_none() }
+    fn derived_seal(&self) -> bool {
+        let file_ok = std::env::var("SIGIL_COURT_SEAL_SEED_FILE").ok()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|t| hex32(t.trim()))
+            .is_some();
+        !file_ok && std::env::var("SIGIL_COURT_SEAL_SEED").ok().and_then(|s| hex32(&s)).is_none()
+    }
 
     /// Feed a sealed block into the court's archive. Called from the producer loop ONLY.
     ///
@@ -210,6 +332,13 @@ pub struct CourtStatus {
     pub archive_blocks: usize,
     pub archive_capacity: usize,
     pub packets_held: usize,
+    /// Seats named by the operator via `SIGIL_COURT_BENCH`.
+    pub named_seats: usize,
+    /// Anonymous seats derived from the seal to reach a quorate panel. A bench padded with these
+    /// is weaker than one that is fully named, and says so rather than hiding it.
+    pub derived_seats: usize,
+    /// Wallets bearing an Order of the nation (æresborgere).
+    pub honoured: Vec<String>,
     /// `court_root` is served but NOT yet written into `contract_state_root`.
     pub committed_on_chain: bool,
     pub notes: Vec<&'static str>,
@@ -237,6 +366,9 @@ pub async fn court_status(State(s): State<AppState>) -> Json<ApiResponse<CourtSt
         archive_blocks,
         archive_capacity: s.court.max_blocks,
         packets_held: s.court.packets.read().map(|p| p.len()).unwrap_or(0),
+        named_seats: s.court.named_seats,
+        derived_seats: s.court.derived_seats,
+        honoured: c.bench().members().filter(|j| j.has(sigil_court::Credential::Aeresborger)).map(|j| hex::encode(j.wallet)).collect(),
         committed_on_chain: false,
         notes: vec![
             "court_root is computed and served but NOT yet committed into contract_state_root; that changes what the producer emits and needs an operator decision.",
@@ -686,6 +818,204 @@ pub async fn court_revoke(State(s): State<AppState>, headers: HeaderMap, Json(re
     ApiResponse::ok(serde_json::json!({ "revoked": req.packet_root, "order": hex::encode(order_id), "by": if admin { "operator" } else { "subject" } }))
 }
 
+// ───────────────────────────── sitting: file, hear, rule, appeal ─────────────────────────────
+//
+// These are the acts that make a seat mean something. Each is authorised by an ed25519 signature
+// from the wallet performing it, over a challenge bound to the act and a nonce — the same shape as
+// a self-disclosure. The court checks the CONSTITUTIONAL question (is this wallet a party? is it on
+// the panel? does the verdict match the vote?); the signature only answers "is this really them".
+
+fn act_challenge(kind: &str, wallet: &WalletId, subject: &str, nonce: u64) -> String {
+    format!("sigil-court/{kind}/v1\nwallet:{}\nsubject:{subject}\nnonce:{nonce}", hex::encode(wallet))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FileCaseReq {
+    pub wallet: String,
+    pub defendant: Option<String>,
+    /// Roman numeral, e.g. `"IV"`, or the variant name.
+    pub article: String,
+    pub claim: String,
+    pub nonce: u64,
+    pub signature: String,
+}
+
+fn article_by_name(s: &str) -> Option<Article> {
+    let t = s.trim().to_ascii_lowercase();
+    Article::ALL.into_iter().find(|a| {
+        a.numeral().eq_ignore_ascii_case(s.trim()) || format!("{a:?}").to_ascii_lowercase() == t
+    })
+}
+
+/// File a case. Anyone may petition this court — that is what makes it a court and not a panel.
+pub async fn court_file_case(State(s): State<AppState>, Json(req): Json<FileCaseReq>) -> Json<ApiResponse<serde_json::Value>> {
+    let Some(w) = hex32(&req.wallet) else { return ApiResponse::err("wallet must be 64 hex") };
+    let Some(article) = article_by_name(&req.article) else {
+        return ApiResponse::err(format!("unknown article {:?} — use a numeral (I..XII) or the name", req.article));
+    };
+    if req.claim.trim().is_empty() { return ApiResponse::err("a case needs a claim") }
+    if req.claim.len() > 4096 { return ApiResponse::err("claim is too long (max 4096 bytes)") }
+    let msg = act_challenge("file-case", &w, &format!("{}|{}", article.numeral(), req.claim), req.nonce);
+    if !verify_wallet_sig(&w, &msg, &req.signature) { return ApiResponse::err("signature does not verify for that wallet") }
+    let defendant = req.defendant.as_deref().and_then(hex32);
+    if req.defendant.is_some() && defendant.is_none() { return ApiResponse::err("defendant must be 64 hex") }
+    let height = s.court.coverage().map(|(_, t)| t).unwrap_or(0);
+    let mut c = match s.court.court.write() { Ok(c) => c, Err(_) => return ApiResponse::err("court lock poisoned") };
+    let case = c.file_case(w, defendant, article, req.claim.clone(), height);
+    ApiResponse::ok(serde_json::json!({
+        "case": hex::encode(case), "article": article.numeral(), "status": "Filed",
+        "next": "a panel must be seated: POST /v1/court/case/hear"
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HearReq { pub wallet: String, pub case: String, pub nonce: u64, pub signature: String }
+
+/// Seat a deterministic panel and open the hearing. Any sitting member (Magistrate and up) may
+/// convene — the panel itself is chosen by BLAKE3(case ‖ wallet) ordering, so convening it gives
+/// the convener no say in who hears it.
+pub async fn court_hear(State(s): State<AppState>, Json(req): Json<HearReq>) -> Json<ApiResponse<serde_json::Value>> {
+    let Some(w) = hex32(&req.wallet) else { return ApiResponse::err("wallet must be 64 hex") };
+    let Some(case) = hex32(&req.case) else { return ApiResponse::err("case must be 64 hex") };
+    let msg = act_challenge("hear", &w, &req.case, req.nonce);
+    if !verify_wallet_sig(&w, &msg, &req.signature) { return ApiResponse::err("signature does not verify for that wallet") }
+    let height = s.court.coverage().map(|(_, t)| t).unwrap_or(0);
+    let mut c = match s.court.court.write() { Ok(c) => c, Err(_) => return ApiResponse::err("court lock poisoned") };
+    match c.bench().rank_of(&w) {
+        Some(r) if r.may_sit() => {}
+        Some(r) => return ApiResponse::err(format!("a {} may not convene a hearing — Magistrate and above sit", r.name())),
+        None => return ApiResponse::err("only a member of the bench may convene a hearing"),
+    }
+    match c.hear(case, 3, height) {
+        Ok(panel) => ApiResponse::ok(serde_json::json!({
+            "case": req.case, "panel": panel.iter().map(hex::encode).collect::<Vec<_>>(),
+            "next": "every panel member votes: POST /v1/court/case/rule"
+        })),
+        Err(e) => ApiResponse::err(e.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RuleReq {
+    pub wallet: String,
+    pub case: String,
+    /// `upheld` | `reversed` | `remanded` | `dismissed`
+    pub verdict: String,
+    pub holding: String,
+    /// Every panel member's vote FOR the verdict: `[["<64-hex>", true], ...]`.
+    pub votes: Vec<(String, bool)>,
+    pub nonce: u64,
+    pub signature: String,
+}
+
+/// Rule. The signature proves who submitted the ruling; the CONSTITUTION decides whether it stands
+/// — every panel member must have voted, and the verdict must match the majority.
+pub async fn court_rule(State(s): State<AppState>, Json(req): Json<RuleReq>) -> Json<ApiResponse<serde_json::Value>> {
+    let Some(w) = hex32(&req.wallet) else { return ApiResponse::err("wallet must be 64 hex") };
+    let Some(case) = hex32(&req.case) else { return ApiResponse::err("case must be 64 hex") };
+    let verdict = match req.verdict.trim().to_ascii_lowercase().as_str() {
+        "upheld" => Verdict::Upheld, "reversed" => Verdict::Reversed,
+        "remanded" => Verdict::Remanded, "dismissed" => Verdict::Dismissed,
+        other => return ApiResponse::err(format!("unknown verdict {other:?}: upheld | reversed | remanded | dismissed")),
+    };
+    let msg = act_challenge("rule", &w, &format!("{}|{}|{}", req.case, req.verdict, req.holding), req.nonce);
+    if !verify_wallet_sig(&w, &msg, &req.signature) { return ApiResponse::err("signature does not verify for that wallet") }
+    let mut votes = Vec::with_capacity(req.votes.len());
+    for (h, v) in &req.votes {
+        let Some(vw) = hex32(h) else { return ApiResponse::err(format!("vote wallet {h:?} is not 64 hex")) };
+        votes.push((vw, *v));
+    }
+    let height = s.court.coverage().map(|(_, t)| t).unwrap_or(0);
+    let mut c = match s.court.court.write() { Ok(c) => c, Err(_) => return ApiResponse::err("court lock poisoned") };
+    if !c.bench().rank_of(&w).map(|r| r.may_sit()).unwrap_or(false) {
+        return ApiResponse::err("only a sitting member may submit a ruling");
+    }
+    match c.rule(case, verdict, req.holding.clone(), &votes, vec![], height) {
+        Ok(r) => ApiResponse::ok(serde_json::json!({
+            "ruling": hex::encode(r), "verdict": format!("{verdict:?}"),
+            "sets_precedent": verdict != Verdict::Dismissed,
+            "next": "a party may appeal once: POST /v1/court/case/appeal"
+        })),
+        Err(e) => ApiResponse::err(e.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AppealReq { pub wallet: String, pub case: String, pub nonce: u64, pub signature: String }
+
+/// Art. VI — appeal, once, by a party. Being on the bench is NOT standing: a justice who is not a
+/// party to this case cannot appeal it, which is the whole point of the rule.
+pub async fn court_appeal(State(s): State<AppState>, Json(req): Json<AppealReq>) -> Json<ApiResponse<serde_json::Value>> {
+    let Some(w) = hex32(&req.wallet) else { return ApiResponse::err("wallet must be 64 hex") };
+    let Some(case) = hex32(&req.case) else { return ApiResponse::err("case must be 64 hex") };
+    let msg = act_challenge("appeal", &w, &req.case, req.nonce);
+    if !verify_wallet_sig(&w, &msg, &req.signature) { return ApiResponse::err("signature does not verify for that wallet") }
+    let height = s.court.coverage().map(|(_, t)| t).unwrap_or(0);
+    let mut c = match s.court.court.write() { Ok(c) => c, Err(_) => return ApiResponse::err("court lock poisoned") };
+    match c.appeal(case, w, height) {
+        Ok(under) => {
+            let en_banc = c.bench().en_banc(&case);
+            ApiResponse::ok(serde_json::json!({
+                "case": req.case, "appealing": hex::encode(under),
+                "en_banc": en_banc.iter().map(hex::encode).collect::<Vec<_>>(),
+                "note": "reversal takes a simple majority; overruling the precedent takes two thirds (Art. VII)",
+                "next": "POST /v1/court/case/decide_appeal"
+            }))
+        }
+        Err(e) => ApiResponse::err(e.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DecideReq {
+    pub wallet: String,
+    pub case: String,
+    pub holding: String,
+    /// Each en banc member's vote FOR REVERSAL.
+    pub votes: Vec<(String, bool)>,
+    pub nonce: u64,
+    pub signature: String,
+}
+
+/// The full bench decides.
+pub async fn court_decide_appeal(State(s): State<AppState>, Json(req): Json<DecideReq>) -> Json<ApiResponse<serde_json::Value>> {
+    let Some(w) = hex32(&req.wallet) else { return ApiResponse::err("wallet must be 64 hex") };
+    let Some(case) = hex32(&req.case) else { return ApiResponse::err("case must be 64 hex") };
+    let msg = act_challenge("decide-appeal", &w, &format!("{}|{}", req.case, req.holding), req.nonce);
+    if !verify_wallet_sig(&w, &msg, &req.signature) { return ApiResponse::err("signature does not verify for that wallet") }
+    let mut votes = Vec::with_capacity(req.votes.len());
+    for (h, v) in &req.votes {
+        let Some(vw) = hex32(h) else { return ApiResponse::err(format!("vote wallet {h:?} is not 64 hex")) };
+        votes.push((vw, *v));
+    }
+    let height = s.court.coverage().map(|(_, t)| t).unwrap_or(0);
+    let mut c = match s.court.court.write() { Ok(c) => c, Err(_) => return ApiResponse::err("court lock poisoned") };
+    if c.bench().rank_of(&w).map(|r| r < Rank::Justice).unwrap_or(true) {
+        return ApiResponse::err("only a Justice of this court may submit an en banc decision");
+    }
+    match c.decide_appeal(case, &votes, req.holding.clone(), height) {
+        Ok(v) => ApiResponse::ok(serde_json::json!({ "case": req.case, "verdict": format!("{v:?}"), "status": "Final" })),
+        Err(e) => ApiResponse::err(e.to_string()),
+    }
+}
+
+/// The challenge for any of the sitting acts, so a client never builds one by hand.
+#[derive(Debug, Deserialize)]
+pub struct ActChallengeQuery { pub kind: String, pub wallet: String, pub subject: String, pub nonce: Option<u64> }
+
+pub async fn court_act_challenge(Query(q): Query<ActChallengeQuery>) -> Json<ApiResponse<serde_json::Value>> {
+    let Some(w) = hex32(&q.wallet) else { return ApiResponse::err("wallet must be 64 hex") };
+    const KINDS: [&str; 5] = ["file-case", "hear", "rule", "appeal", "decide-appeal"];
+    if !KINDS.contains(&q.kind.as_str()) {
+        return ApiResponse::err(format!("kind must be one of {KINDS:?}"));
+    }
+    let nonce = q.nonce.unwrap_or_else(now_s);
+    ApiResponse::ok(serde_json::json!({
+        "challenge": act_challenge(&q.kind, &w, &q.subject, nonce), "nonce": nonce,
+        "sign_with": "ed25519 over the exact challenge bytes, hex-encoded"
+    }))
+}
+
 /// The challenge string a wallet must sign, so a UI never has to construct it by hand and get it
 /// subtly wrong.
 #[derive(Debug, Deserialize)]
@@ -764,6 +1094,108 @@ mod tests {
         let url = b.share_url(&[0xAB; 32]);
         assert!(url.starts_with("https://sigilgraph.org/v1/court/packet/"), "{url}");
         assert!(!url.contains("quillon"), "SIGIL deliverables never carry a quillon.xyz link");
+    }
+
+    /// The two identities this nation actually seats. Rocky's is BLAKE3-committed into the SIGIL
+    /// genesis header, so it cannot change without forking the chain; the master is the dev-fee
+    /// wallet baked into block 0. Pinned here so a typo in a systemd drop-in cannot quietly seat
+    /// the wrong wallet as the highest authority of the court.
+    #[test]
+    fn the_named_identities_are_the_genesis_ones() {
+        const ROCKY: &str = "87ed473b028cff8aed5ce27dfe97eac8e560f5fbe54020f01ca8f5db7e369c6e";
+        const MASTER: &str = "095b0e1f7f5bb258fb11427c4ac036e3d9e4f10fa39d7f282aa42862dc2b3dd8";
+        assert_eq!(hex32(ROCKY).map(hex::encode).as_deref(), Some(ROCKY));
+        assert_eq!(hex32(MASTER).map(hex::encode).as_deref(), Some(MASTER));
+        assert_ne!(ROCKY, MASTER);
+    }
+
+    /// A seat is the constituent act; an ELEVATION is quorum-gated. Seating must never become a
+    /// back door into the ladder Art. VIII guards.
+    #[test]
+    fn a_seat_is_not_a_promotion() {
+        let mut c = SupremeCourt::from_seed(&[5; 32]);
+        c.appoint(w(1), Rank::ChiefJustice, 0).unwrap();
+        c.appoint(w(2), Rank::Justice, 0).unwrap();
+        c.appoint(w(3), Rank::Justice, 0).unwrap();
+        c.appoint(w(9), Rank::Clerk, 0).unwrap();
+        // Seated at Clerk, the honoured wallet still cannot be elevated by one voice.
+        assert!(c.promote(w(9), Rank::Advocate, &[w(1)], 1).is_err());
+        // And the honour itself is refused without the quorum the nation's rule demands.
+        assert!(c.confer_honour(sigil_court::Order::Elefantordenen, "", w(9), "deeds", [0; 32], 0, true, 1).is_err());
+        let ev = c.confer_honour(sigil_court::Order::Elefantordenen, "", w(9), "deeds", [0; 32], 3, true, 1);
+        assert!(ev.is_ok(), "{ev:?}");
+        // The honour did not move the rank.
+        assert_eq!(c.bench().rank_of(&w(9)), Some(Rank::Clerk));
+    }
+
+    /// The EXACT strings that ship in the systemd drop-in, run through the exact code that reads
+    /// them. This is the test that would have caught a typo seating the wrong wallet as the
+    /// highest authority of the court — a mistake no compiler and no unit test of the parser in
+    /// isolation would have found.
+    #[test]
+    fn the_shipped_drop_in_seats_exactly_who_it_says() {
+        const ROCKY: &str = "87ed473b028cff8aed5ce27dfe97eac8e560f5fbe54020f01ca8f5db7e369c6e";
+        const MASTER: &str = "095b0e1f7f5bb258fb11427c4ac036e3d9e4f10fa39d7f282aa42862dc2b3dd8";
+        const VICARIOUS: &str = "c0beb1a79e31f5db568d3377b48c260c2de11292d3110cf3e0b1ef4c36080917";
+        const QUINN: &str = "a6ca843bd7187aac2e8ddbf51dad66718248782da521a7551c8deeb2421ea212";
+        const MIMER: &str = "81e5c73296bf8ee00af3af76f6bd9d844ba54dafa3b4d155f7e4cb234c816aa3";
+        let bench_spec = format!("{ROCKY}:chief,{VICARIOUS}:justice,{QUINN}:justice,{MIMER}:justice,{MASTER}:justice");
+        let honours_spec = format!("{ROCKY}:elephant:Kept the ledger honest");
+
+        let mut c = SupremeCourt::from_seed(&[7; 32]);
+        assert_eq!(seat_from_spec(&mut c, &bench_spec), 5);
+        let (rocky, master) = (hex32(ROCKY).unwrap(), hex32(MASTER).unwrap());
+        assert_eq!(c.bench().rank_of(&rocky), Some(Rank::ChiefJustice), "Rocky must be Chief Justice");
+        assert_eq!(c.bench().chief(), Some(rocky), "and must be THE chief, singular");
+        assert_eq!(c.bench().rank_of(&master), Some(Rank::Justice), "the master sits as a Justice");
+
+        // The master can rule (a Justice may sit) and votes on every appeal en banc.
+        assert!(c.bench().rank_of(&master).unwrap().may_sit());
+        assert!(c.bench().en_banc(&[0u8; 32]).contains(&master));
+        assert!(c.bench().en_banc(&[0u8; 32]).contains(&rocky));
+
+        // Five named seats already make a quorate panel: NO anonymous seats are needed, which is
+        // what a fully-named bench looks like.
+        let derived = top_up_bench(&mut c, &[7; 32]);
+        assert_eq!(derived, 0, "a named bench must not be padded with anonymous seats");
+        assert_eq!(c.bench().select_panel(&[1u8; 32], 3).map(|p| p.len()), Ok(3));
+
+        // The honour lands, and it lands on Rocky and nobody else.
+        assert_eq!(confer_from_spec(&mut c, &honours_spec), 1);
+        assert!(c.bench().get(&rocky).unwrap().has(sigil_court::Credential::Aeresborger));
+        assert!(!c.bench().get(&master).unwrap().has(sigil_court::Credential::Aeresborger));
+        // Recorded on the docket, with the citation, forever.
+        assert_eq!(c.docket().by_tag(19).len(), 1);
+        // And it is soulbound: a second conferral is refused.
+        assert_eq!(confer_from_spec(&mut c, &honours_spec), 0);
+    }
+
+    /// A bench too small to supply the Elephant's quorum must REFUSE the honour, not grant a
+    /// lesser one quietly. This is the failure mode that would turn the nation's highest honour
+    /// into a participation trophy.
+    #[test]
+    fn an_honour_without_its_quorum_is_refused_not_downgraded() {
+        const ROCKY: &str = "87ed473b028cff8aed5ce27dfe97eac8e560f5fbe54020f01ca8f5db7e369c6e";
+        let mut c = SupremeCourt::from_seed(&[8; 32]);
+        // Rocky alone on the bench: zero other Justices, so zero approvals available.
+        assert_eq!(seat_from_spec(&mut c, &format!("{ROCKY}:chief")), 1);
+        assert_eq!(confer_from_spec(&mut c, &format!("{ROCKY}:elephant:deeds")), 0, "refused");
+        let rocky = hex32(ROCKY).unwrap();
+        assert!(!c.bench().get(&rocky).unwrap().has(sigil_court::Credential::Aeresborger));
+        assert_eq!(c.docket().by_tag(19).len(), 0, "nothing was recorded");
+    }
+
+    /// A malformed seat is skipped, never fatal, and never silently promoted.
+    #[test]
+    fn a_typo_in_one_seat_does_not_take_the_court_down() {
+        let mut c = SupremeCourt::from_seed(&[9; 32]);
+        let good = "87ed473b028cff8aed5ce27dfe97eac8e560f5fbe54020f01ca8f5db7e369c6e";
+        assert_eq!(seat_from_spec(&mut c, &format!("nothex:chief,{good}:chief,,{good}:justice")), 1);
+        assert_eq!(c.bench().rank_of(&hex32(good).unwrap()), Some(Rank::ChiefJustice), "the duplicate did not demote them");
+        // An unknown rank word seats as a Justice rather than guessing something powerful.
+        let other = "095b0e1f7f5bb258fb11427c4ac036e3d9e4f10fa39d7f282aa42862dc2b3dd8";
+        assert_eq!(seat_from_spec(&mut c, &format!("{other}:emperor")), 1);
+        assert_eq!(c.bench().rank_of(&hex32(other).unwrap()), Some(Rank::Justice));
     }
 
     #[test]

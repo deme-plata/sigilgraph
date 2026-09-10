@@ -86,6 +86,14 @@ pub enum Credential {
     Course(Course),
     UniversityGraduate,
     BarAdmitted,
+    /// **Æresborger** — honorary citizen of the SIGIL Nation, the court's recognition that this
+    /// wallet bears an Order of the nation (`sigil_events::SigilOrder`). Soulbound: earned by
+    /// deeds, never bought, never transferred.
+    ///
+    /// It is NOT a rank and confers no power to rule — an æresborger who is not a Magistrate still
+    /// cannot sit on a panel. Honour and authority are deliberately different axes here; conflating
+    /// them is how an honours system becomes a peerage.
+    Aeresborger,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,6 +304,17 @@ impl Bench {
         Ok((from, to, votes, n))
     }
 
+    /// Record that `w` bears an Order of the nation. Called ONLY after
+    /// [`sigil_events::HonorPolicy`] has already accepted the conferral — this method is the
+    /// bookkeeping, not the gate.
+    pub fn record_honour(&mut self, w: &WalletId) -> Result<Credential, BenchError> {
+        let j = self.members.get_mut(w).ok_or(BenchError::NotMember)?;
+        if !j.credentials.insert(Credential::Aeresborger) {
+            return Err(BenchError::AlreadyHolds(Credential::Aeresborger));
+        }
+        Ok(Credential::Aeresborger)
+    }
+
     pub fn recuse(&mut self, w: &WalletId, case: CaseId) -> Result<(), BenchError> {
         let j = self.members.get_mut(w).ok_or(BenchError::NotMember)?;
         j.recused.insert(case);
@@ -383,6 +402,7 @@ fn credential_tag(c: Credential) -> [u8; 2] {
         Credential::Course(course) => [1, course as u8],
         Credential::UniversityGraduate => [2, 0],
         Credential::BarAdmitted => [3, 0],
+        Credential::Aeresborger => [4, 0],
     }
 }
 
@@ -471,6 +491,24 @@ mod tests {
     /// The regression for the silent-constant root. Each of these is a real change to the bench,
     /// and each MUST move the root — a root that only moves for some of them is worse than none,
     /// because `court_root` would then attest a bench that had quietly changed underneath it.
+    /// Honour and authority are separate axes. An æresborger who is a Clerk still cannot sit, and
+    /// the honour does not substitute for any credential a promotion demands.
+    #[test]
+    fn an_honour_is_not_a_rank_and_opens_no_door() {
+        let mut b = seeded(); // seeded() already sits w(9) as a Clerk
+        assert_eq!(b.rank_of(&w(9)), Some(Rank::Clerk));
+        assert_eq!(b.record_honour(&w(9)), Ok(Credential::Aeresborger));
+        assert_eq!(b.record_honour(&w(9)), Err(BenchError::AlreadyHolds(Credential::Aeresborger)));
+        assert!(b.get(&w(9)).unwrap().has(Credential::Aeresborger));
+        assert!(!b.rank_of(&w(9)).unwrap().may_sit(), "an honour does not seat anyone");
+        // Still refused for lack of the bar — the honour buys no shortcut up the ladder.
+        assert_eq!(
+            b.promote(&w(9), Rank::Advocate, &[w(1), w(4)]),
+            Err(BenchError::MissingCredential(Credential::BarAdmitted))
+        );
+        assert_eq!(b.record_honour(&w(77)), Err(BenchError::NotMember));
+    }
+
     #[test]
     fn root_moves_for_every_kind_of_change() {
         let empty = Bench::new().root();

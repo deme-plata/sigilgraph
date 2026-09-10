@@ -52,6 +52,10 @@ pub enum CourtEvent {
     ContemptRecorded { wallet: WalletId, case: CaseId, reason: String },
     /// Art. IX — a prior entry is wrong; this one supersedes it. The old entry stays.
     Superseded { seq: u64, reason: String },
+    /// An Order of the nation conferred — **æresborger**. Soulbound, earned by the cited deeds,
+    /// and gated by `sigil_events::HonorPolicy`: the Elephant needs the operator AND a quorum, so
+    /// not even the operator can confer it alone.
+    HonourConferred { order: String, rank: String, recipient: WalletId, citation: String, conferred_by: WalletId, approvals: u32, operator_cosigned: bool },
 }
 
 impl CourtEvent {
@@ -77,6 +81,7 @@ impl CourtEvent {
             CourtEvent::DisclosureRevoked { .. } => 16,
             CourtEvent::ContemptRecorded { .. } => 17,
             CourtEvent::Superseded { .. } => 18,
+            CourtEvent::HonourConferred { .. } => 19,
         }
     }
 
@@ -102,6 +107,7 @@ impl CourtEvent {
             CourtEvent::DisclosureRevoked { .. } => "DisclosureRevoked",
             CourtEvent::ContemptRecorded { .. } => "ContemptRecorded",
             CourtEvent::Superseded { .. } => "Superseded",
+            CourtEvent::HonourConferred { .. } => "HonourConferred",
         }
     }
 
@@ -145,6 +151,7 @@ impl CourtEvent {
             CourtEvent::ExamSat { candidate, .. } => vec![*candidate],
             CourtEvent::CredentialConferred { holder, .. } => vec![*holder],
             CourtEvent::ContemptRecorded { wallet, .. } => vec![*wallet],
+            CourtEvent::HonourConferred { recipient, conferred_by, .. } => vec![*recipient, *conferred_by],
             _ => Vec::new(),
         }
     }

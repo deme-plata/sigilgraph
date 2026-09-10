@@ -28,7 +28,7 @@ pub mod science;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use sigil_events::{MerkleProof, SigilEvent};
+use sigil_events::{HonorPolicy, MerkleProof, SigilEvent, SigilOrder};
 use sigil_state::WalletId;
 use sigil_university::UniversityRegistry;
 
@@ -39,6 +39,7 @@ pub use disclosure::{
     DisclosurePacket, DisclosureRequest, Jurisdiction, KeyKind, Minimization, Purpose, Scope, Seal, Summary, Verified,
     ViewingGrant, PACKET_SCHEMA,
 };
+pub use sigil_events::SigilOrder as Order;
 pub use docket::{CaseId, CourtEvent, Docket, DocketEntry, DocketError, OrderId, RulingHash};
 pub use ruling::{AppealOutcome, Case, CaseStatus, Evidence, Precedent, Register, Ruling, RulingError, Verdict};
 
@@ -118,6 +119,49 @@ impl SupremeCourt {
         let (from, to, votes_for, electorate) = self.bench.promote(&candidate, to, voters)?;
         self.docket.append(height, CourtEvent::Promoted { justice: candidate, from, to, votes_for, electorate });
         Ok(())
+    }
+
+    /// Confer an **Order of the nation** — æresborger. The gate is
+    /// [`sigil_events::HonorPolicy`], not this method: `SigilEvent::confer_honor` returns `None`
+    /// unless the rank is valid for the order AND the conferral quorum is met. The Elephant needs
+    /// the operator's co-signature AND at least three approvals, so the supreme honour of this
+    /// nation cannot be handed out by one person — including the operator. Honour over power.
+    ///
+    /// Returns the chain event to emit, so the honour lands in the block's event log and not only
+    /// on the court's docket. The recipient must already hold a seat; the court can only decorate
+    /// someone it can name.
+    #[allow(clippy::too_many_arguments)]
+    pub fn confer_honour(
+        &mut self,
+        order: SigilOrder,
+        rank: impl Into<String>,
+        recipient: WalletId,
+        citation: impl Into<String>,
+        conferred_by: WalletId,
+        approvals: usize,
+        operator_cosigned: bool,
+        height: u64,
+    ) -> Result<SigilEvent, CourtError> {
+        let (rank, citation) = (rank.into(), citation.into());
+        let ev = SigilEvent::confer_honor(
+            order.clone(), rank.clone(), recipient, citation.clone(), conferred_by, approvals, operator_cosigned,
+        )
+        .ok_or(CourtError::Unconstitutional {
+            article: Article::PromotionByDeeds,
+            reason: format!(
+                "the conferral rule refuses this: {:?} needs {} distinct approvals{} and a rank valid for the order (got {} approvals, operator_cosigned={}, rank={:?})",
+                order,
+                HonorPolicy::quorum_required(&order),
+                if matches!(order, SigilOrder::Elefantordenen) { " AND the operator's co-signature" } else { " OR the operator's co-signature" },
+                approvals, operator_cosigned, rank
+            ),
+        })?;
+        self.bench.record_honour(&recipient)?;
+        self.docket.append(height, CourtEvent::HonourConferred {
+            order: format!("{order:?}"), rank, recipient, citation, conferred_by,
+            approvals: approvals as u32, operator_cosigned,
+        });
+        Ok(ev)
     }
 
     pub fn recuse(&mut self, justice: WalletId, case: CaseId, reason: impl Into<String>, height: u64) -> Result<(), CourtError> {
@@ -425,6 +469,35 @@ mod tests {
         assert_eq!(a.bench().rank_of(&w(9)), Some(Rank::Advocate));
         assert!(a.bench().get(&w(9)).unwrap().has(Credential::UniversityGraduate));
         assert_eq!(a.docket().by_wallet(&w(9)).len(), 9, "appoint + 3 exams + 3 credentials (2 courses + bar) + graduate credential + promotion");
+    }
+
+    /// The supreme honour is quorum-gated, and the gate is the nation's own rule — not the
+    /// court's opinion of it. Even the operator cannot confer the Elephant alone.
+    #[test]
+    fn the_supreme_honour_cannot_be_conferred_alone_not_even_by_the_operator() {
+        let mut c = seated();
+        let rocky = w(1);
+        // Operator alone: refused.
+        let e = c.confer_honour(Order::Elefantordenen, "", rocky, "deeds", w(99), 0, true, 5).unwrap_err();
+        assert!(matches!(e, CourtError::Unconstitutional { article: Article::PromotionByDeeds, .. }), "{e:?}");
+        // Quorum without the operator: still refused.
+        assert!(c.confer_honour(Order::Elefantordenen, "", rocky, "deeds", w(99), 3, false, 5).is_err());
+        // A rank on the Elephant is malformed — the Elephant IS the rank.
+        assert!(c.confer_honour(Order::Elefantordenen, "Ridder", rocky, "deeds", w(99), 3, true, 5).is_err());
+        // Operator AND three approvals: conferred, on the docket, and on the chain event.
+        let ev = c.confer_honour(Order::Elefantordenen, "", rocky, "kept the ledger honest", w(99), 3, true, 5).unwrap();
+        assert!(matches!(ev, SigilEvent::HonorConferred { .. }));
+        assert!(c.bench().get(&rocky).unwrap().has(Credential::Aeresborger));
+        assert_eq!(c.docket().by_tag(19).len(), 1);
+        // Soulbound: it cannot be conferred twice.
+        assert!(c.confer_honour(Order::Elefantordenen, "", rocky, "again", w(99), 3, true, 6).is_err());
+        // The working honour needs only one authority — a different rule, correctly applied.
+        assert!(c.confer_honour(Order::Ridderkorset, "Ridder", w(2), "shipped the thing", w(99), 0, true, 7).is_ok());
+        // And it cannot decorate someone with no seat.
+        assert!(matches!(
+            c.confer_honour(Order::Ridderkorset, "Ridder", w(200), "x", w(99), 0, true, 8),
+            Err(CourtError::Bench(BenchError::NotMember))
+        ));
     }
 
     #[test]

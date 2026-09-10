@@ -1391,6 +1391,29 @@ fn run_start() -> Result<()> {
         let serve_full_inflight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let serve_full_inflight_cap: usize = std::env::var("SIGIL_SERVE_FULL_INFLIGHT")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+        // 2026-09-10 — BACKFILL GETS ITS OWN FAIR BUDGET.
+        //
+        // The global cap above protects the box from unbounded disk readers and does that job
+        // well. What it does NOT do is share. It is one counter for every peer, and the deep
+        // full-block path deliberately BYPASSES the per-peer expensive throttle (see the comment
+        // at the serve site), so a peer that keeps N requests in flight holds every slot and every
+        // other peer's request hits the cap and is dropped. The per-peer fix of 2026-08-23 covered
+        // the INLINE path and left this one — the one a syncing node actually needs — unshared.
+        //
+        // Measured on Epsilon 2026-09-10: a fresh happysrv resync stalled DEAD at height 7,183
+        // (not slow — zero blocks in 100 s) while one peer accounted for 453 of 453 served ranges
+        // in ten minutes and Epsilon's own counter showed 8,679 requests discarded, climbing ~0.8/s.
+        // A node that cannot fetch history cannot join, which is a harder limit on decentralisation
+        // than the validator count.
+        //
+        // The budget: at most `SIGIL_SERVE_FULL_PER_PEER` (default 1) concurrent full-block serves
+        // per peer, under the same global ceiling. One greedy peer now occupies exactly one slot
+        // and the remaining slots stay available, so up to `SIGIL_SERVE_FULL_INFLIGHT` distinct
+        // peers sync at once. The protection is unchanged; only the sharing is fixed.
+        let serve_full_by_peer: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let serve_full_per_peer_cap: usize = std::env::var("SIGIL_SERVE_FULL_PER_PEER")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(1);
         // === request-ahead fetch pipeline (windowed backfill — overlaps fetch with apply) ===
         let mut req_frontier: u64 = chain.height();
         let mut net_tip: u64 = 0;
@@ -2338,6 +2361,22 @@ fn run_start() -> Result<()> {
                                     expensive_throttled += 1;
                                     continue;
                                 }
+                                // Fair share: this peer may hold only its own slot, so it cannot
+                                // sit on the whole global budget and starve everyone else out.
+                                let full_peer_key = peer.to_string();
+                                {
+                                    let mut m = match serve_full_by_peer.lock() {
+                                        Ok(m) => m,
+                                        Err(e) => e.into_inner(),
+                                    };
+                                    let slot = m.entry(full_peer_key.clone()).or_insert(0);
+                                    if *slot >= serve_full_per_peer_cap {
+                                        drop(m);
+                                        expensive_throttled += 1;
+                                        continue;
+                                    }
+                                    *slot += 1;
+                                }
                                 serve_full_inflight.fetch_add(1, Ordering::Relaxed);
                                 let window_blocks: Vec<crate::block::Block> =
                                     (lo.max(wbase)..=hi).filter_map(|h| chain.get(h).cloned()).collect();
@@ -2346,6 +2385,8 @@ fn run_start() -> Result<()> {
                                 let mgr2 = std::sync::Arc::clone(&mgr);
                                 let done = serve_done_tx.clone();
                                 let inflight = std::sync::Arc::clone(&serve_full_inflight);
+                                let by_peer = std::sync::Arc::clone(&serve_full_by_peer);
+                                let release_key = full_peer_key;
                                 let peer2 = peer;
                                 tokio::task::spawn_blocking(move || {
                                     let mut blocks = crate::serve_read::read_blocks_range(&dir, lo, disk_hi);
@@ -2361,6 +2402,13 @@ fn run_start() -> Result<()> {
                                         n, lo, hi, peer2, blob.len());
                                     let _ = done.try_send((ckey, immutable, hot_eligible, blob));
                                     inflight.fetch_sub(1, Ordering::Relaxed);
+                                    // Release the peer's slot. Removing the entry at zero keeps the
+                                    // map bounded by CONCURRENT servers, not by lifetime peer churn.
+                                    let mut m = match by_peer.lock() { Ok(m) => m, Err(e) => e.into_inner() };
+                                    if let Some(slot) = m.get_mut(&release_key) {
+                                        *slot = slot.saturating_sub(1);
+                                        if *slot == 0 { m.remove(&release_key); }
+                                    }
                                 });
                                 continue;
                             }
@@ -4007,6 +4055,61 @@ mod tests {
     /// coinbase.rs) is correct: solve.shares reaches the minted block's coinbase,
     /// and every credited wallet's balance is visible after `chain.apply()`.
     #[test]
+    /// The fairness property the backfill budget exists for, as arithmetic rather than as a
+    /// hope. Models the exact admission rule at the full-block serve site: a request is served
+    /// only if the GLOBAL in-flight count is under its cap AND this peer is under its own.
+    ///
+    /// Without the per-peer half (cap = usize::MAX) a single greedy peer takes every slot and a
+    /// second peer is served ZERO times — which is precisely what stalled a fresh happysrv resync
+    /// dead at height 7,183 on 2026-09-10 while Epsilon discarded 8,679 requests.
+    #[test]
+    fn backfill_budget_keeps_one_peer_from_starving_another() {
+        use std::collections::HashMap;
+
+        /// Returns (served_greedy, served_victim). Models the admission rule at the serve site.
+        /// The greedy peer issues `burst` requests per tick and the victim one — that asymmetry
+        /// IS what makes a peer greedy, and modelling both as one-per-tick (my first attempt)
+        /// hides the bug entirely: with free slots available, everyone gets served and the test
+        /// passes while production starves. Measured shape on 2026-09-10: one peer 453 served
+        /// ranges in ten minutes, happysrv 0.
+        fn simulate(global_cap: usize, per_peer_cap: usize, ticks: usize, hold: usize, burst: usize) -> (u32, u32) {
+            let mut inflight: Vec<(&str, usize)> = Vec::new(); // (peer, ticks remaining)
+            let (mut greedy, mut victim) = (0u32, 0u32);
+            let mut admit = |inflight: &mut Vec<(&'static str, usize)>, who: &'static str| -> bool {
+                let held = inflight.iter().filter(|(p, _)| *p == who).count();
+                if inflight.len() >= global_cap || held >= per_peer_cap {
+                    return false;
+                }
+                inflight.push((who, hold));
+                true
+            };
+            for _ in 0..ticks {
+                for e in inflight.iter_mut() { e.1 = e.1.saturating_sub(1); }
+                inflight.retain(|e| e.1 > 0);
+                // The greedy peer gets its whole burst in before the victim is heard at all.
+                for _ in 0..burst {
+                    if admit(&mut inflight, "greedy") { greedy += 1; }
+                }
+                if admit(&mut inflight, "victim") { victim += 1; }
+            }
+            (greedy, victim)
+        }
+
+        // The OLD behaviour: global cap only. The greedy burst takes every slot, every tick.
+        let (g_old, v_old) = simulate(3, usize::MAX, 200, 3, 5);
+        assert_eq!(v_old, 0, "without a per-peer budget the victim must starve — it did, live");
+        assert!(g_old > 0);
+
+        // The FIX: same global ceiling, one slot per peer. The burst buys the greedy peer nothing.
+        let (g_new, v_new) = simulate(3, 1, 200, 3, 5);
+        assert!(v_new > 0, "the victim must now get served");
+        assert_eq!(g_new, v_new, "and a burst must not out-compete a single polite request");
+
+        // The global ceiling is still a real ceiling — that protection must not have been traded away.
+        let (g_cap, v_cap) = simulate(1, 1, 60, 3, 5);
+        assert!(g_cap + v_cap <= 60 / 3 + 1, "total serves stay bounded by the global cap");
+    }
+
     fn mint_next_block_credits_a_real_pool_share_solve() {
         let mut chain = ChainTip::new();
         chain.apply(build_genesis().unwrap()).expect("genesis applies");

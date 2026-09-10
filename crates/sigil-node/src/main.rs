@@ -1465,6 +1465,21 @@ fn run_start() -> Result<()> {
         let peer_scores: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, i32>>> =
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let mut peer_rr: usize = 0;
+        // 2026-09-11 — CONCURRENCY MUST BE COUNTED IN REQUESTS, NOT IN BLOCKS.
+        //
+        // The window was bounded only by FETCH_MAX_AHEAD (131,072 blocks), so the number of
+        // simultaneous requests was `FETCH_MAX_AHEAD / chunk` — an accident that happened to equal
+        // 16 while the chunk was fixed at 8,192. The moment the adaptive chunk did its job and
+        // collapsed to the 256 floor, that same window became FIVE HUNDRED AND TWELVE concurrent
+        // requests. happysrv promptly flooded Epsilon (21,418 requests in three minutes), the
+        // connection was closed under the load, and the node ended up with no peers at all —
+        // a worse failure than the stall the adaptive chunk had just fixed.
+        //
+        // A fix that makes its own new bug is not finished. Bound the thing that actually costs:
+        // requests in flight.
+        let inflight_reqs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let inflight_cap: usize = std::env::var("SIGIL_FETCH_INFLIGHT")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(16);
         const FETCH_MAX_AHEAD: u64 = 131_072; // keep ~16 ranges in flight ahead of the applied tip
         loop {
             // Slide the window: fire consecutive range-requests until req_frontier is
@@ -1482,7 +1497,10 @@ fn run_start() -> Result<()> {
                         req_frontier = redo;
                     }
                 }
-                while req_frontier < net_tip && req_frontier < tip + FETCH_MAX_AHEAD {
+                while req_frontier < net_tip
+                    && req_frontier < tip + FETCH_MAX_AHEAD
+                    && inflight_reqs.load(std::sync::atomic::Ordering::Relaxed) < inflight_cap
+                {
                     // Order peers best-score-first, then rotate the starting point so a healthy
                     // peer set shares the load instead of one peer carrying every request.
                     let chosen = {
@@ -1511,6 +1529,8 @@ fn run_start() -> Result<()> {
                         let redo_ad = std::sync::Arc::clone(&refetch_from);
                         let scores_ad = std::sync::Arc::clone(&peer_scores);
                         let peer_key_ad = peer.to_string();
+                        let inflight_ad = std::sync::Arc::clone(&inflight_reqs);
+                        inflight_reqs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tokio::spawn(async move {
                             use std::sync::atomic::Ordering as AOrd;
                             // Called on every branch that did NOT return usable blocks: halve the
@@ -1583,6 +1603,7 @@ fn run_start() -> Result<()> {
                                 }
                             };
                             let _ = bf_tx2.send(blocks).await;
+                            inflight_ad.fetch_sub(1, AOrd::Relaxed);
                         });
                         req_frontier += chunk;
                     } else { break; }

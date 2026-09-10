@@ -999,6 +999,81 @@ pub async fn court_decide_appeal(State(s): State<AppState>, Json(req): Json<Deci
     }
 }
 
+// ───────────────────────────── witnesses: the roots, per height ─────────────────────────────
+//
+// The one endpoint that turns "verified against the roots THIS node holds" into a real second
+// opinion. A recipient of a disclosure packet, or another node, can ask any witness for the
+// event-log root at a height and compare. Two independent nodes publishing the same root is not
+// BFT — with n < 4 nothing here is — but it is the difference between one machine's word and a
+// cross-check, and for evidence a cross-check is the thing that counts.
+
+#[derive(Debug, Deserialize)]
+pub struct RootsQuery {
+    pub from: Option<u64>,
+    pub to: Option<u64>,
+    pub height: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HeightRoot {
+    pub height: u64,
+    pub event_log_root: String,
+    pub events: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RootsView {
+    pub node: String,
+    pub archive_from: Option<u64>,
+    pub archive_to: Option<u64>,
+    pub roots: Vec<HeightRoot>,
+    /// Heights asked for that this witness does not hold. Named rather than silently omitted:
+    /// a short answer and an honest gap look identical otherwise.
+    pub missing: Vec<u64>,
+    pub note: &'static str,
+}
+
+/// `GET /v1/court/roots?from=&to=` (or `?height=`) — the event-log root this node committed at
+/// each height, straight from the court's archive. Capped at 512 heights per call.
+pub async fn court_roots(State(s): State<AppState>, Query(q): Query<RootsQuery>) -> Json<ApiResponse<RootsView>> {
+    let (cf, ct) = match s.court.coverage() {
+        Some(c) => c,
+        None => return ApiResponse::err("this node holds no blocks yet, so it can witness nothing"),
+    };
+    let (from, to) = match q.height {
+        Some(h) => (h, h),
+        None => (q.from.unwrap_or(cf), q.to.unwrap_or(ct)),
+    };
+    if to < from {
+        return ApiResponse::err("to is below from");
+    }
+    if to - from >= 512 {
+        return ApiResponse::err(format!("at most 512 heights per call, asked for {}", to - from + 1));
+    }
+    let (mut roots, mut missing) = (Vec::new(), Vec::new());
+    {
+        let a = match s.court.archive.read() { Ok(a) => a, Err(_) => return ApiResponse::err("archive lock poisoned") };
+        for h in from..=to {
+            match a.get(&h) {
+                Some(b) => roots.push(HeightRoot {
+                    height: h,
+                    event_log_root: hex::encode(b.event_log_root),
+                    events: b.events.len() as u32,
+                }),
+                None => missing.push(h),
+            }
+        }
+    }
+    ApiResponse::ok(RootsView {
+        node: std::env::var("SIGIL_NODE_ID").unwrap_or_else(|_| "unknown".into()),
+        archive_from: Some(cf),
+        archive_to: Some(ct),
+        roots,
+        missing,
+        note: "Each root is what THIS node committed at that height. Ask a second, independently-operated node the same question and compare; agreement across operators is the cross-check. It is not BFT while n < 4.",
+    })
+}
+
 /// The challenge for any of the sitting acts, so a client never builds one by hand.
 #[derive(Debug, Deserialize)]
 pub struct ActChallengeQuery { pub kind: String, pub wallet: String, pub subject: String, pub nonce: Option<u64> }

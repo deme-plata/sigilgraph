@@ -47,6 +47,19 @@ use sigil_header::{SigScheme, SignatureBytes, SigilBlockHeaderV0};
 use sigil_state::WalletId;
 
 const SEED_ENV: &str = "SIGIL_PRODUCER_SIGNING_SEED_HEX";
+/// Path to a file holding the same 64 hex chars. **Preferred over [`SEED_ENV`].**
+///
+/// This is the node's validator identity. Held in `Environment=` it is readable by anyone who can
+/// run `systemctl cat <unit>` or read `/proc/<pid>/environ` — it appears in process metadata, in
+/// journal dumps of the unit, and in any support bundle that captures either. A `chmod 600` file
+/// keeps it out of all three while deriving the byte-identical key.
+///
+/// ⚠️ RELOCATE, DO NOT ROTATE. Changing the seed changes the node's on-chain identity: the
+/// `producer` field of the blocks it mints, and the key its finality co-signatures verify against.
+/// A node that "rotates" this silently leaves the committee it was in. Copy the SAME value into
+/// the file, drop the `Environment=` line, restart, and confirm the producer pubkey is unchanged
+/// (see the module doc's `dagknight/recent` recipe) before believing the move was clean.
+const SEED_ENV_FILE: &str = "SIGIL_PRODUCER_SIGNING_SEED_FILE";
 
 /// The operator-configured signing key, if any. `SIGIL_PRODUCER_SIGNING_SEED_HEX`
 /// must be exactly 64 hex chars (32 raw bytes) — the ed25519-dalek `SigningKey`
@@ -54,7 +67,15 @@ const SEED_ENV: &str = "SIGIL_PRODUCER_SIGNING_SEED_HEX";
 /// legacy unsigned path) rather than a hard panic — an operator typo should
 /// degrade to "not signed yet," not take the producer down.
 pub fn configured_signing_key() -> Option<SigningKey> {
-    let hex_seed = std::env::var(SEED_ENV).ok()?;
+    // File first: it is the form that keeps the secret out of process metadata. The env var stays
+    // supported so an existing node keeps working across the upgrade with no config change.
+    let from_file = std::env::var(SEED_ENV_FILE)
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok());
+    let hex_seed = match from_file {
+        Some(t) => t,
+        None => std::env::var(SEED_ENV).ok()?,
+    };
     let hex_seed = hex_seed.trim();
     if hex_seed.len() != 64 || !hex_seed.is_ascii() {
         return None; // is_ascii: a 64-BYTE multibyte seed would split a UTF-8 boundary below

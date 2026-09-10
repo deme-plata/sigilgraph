@@ -1916,6 +1916,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/court/precedents", get(court::court_precedents))
         .route("/v1/court/challenge", get(court::court_challenge))
         .route("/v1/court/act_challenge", get(court::court_act_challenge))
+        .route("/v1/court/roots", get(court::court_roots))
         .route("/v1/court/case", post(court::court_file_case))
         .route("/v1/court/case/hear", post(court::court_hear))
         .route("/v1/court/case/rule", post(court::court_rule))

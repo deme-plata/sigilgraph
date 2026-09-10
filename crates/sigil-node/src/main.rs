@@ -1417,7 +1417,36 @@ fn run_start() -> Result<()> {
         // === request-ahead fetch pipeline (windowed backfill — overlaps fetch with apply) ===
         let mut req_frontier: u64 = chain.height();
         let mut net_tip: u64 = 0;
+        // 2026-09-11 — WHY THIS IS ADAPTIVE, AND WHY THE FRONTIER REWINDS.
+        //
+        // A fixed 8192-block request is a bet that the peer can read, serialize and ship that many
+        // blocks inside libp2p's request timeout (8 s, flux-p2p swarm.rs). Early in the chain that
+        // is trivially true — genesis-era blocks are tiny. It stops being true the moment the
+        // average block grows, and then it is false FOREVER at that height, because the request is
+        // identical every retry.
+        //
+        // Measured on happysrv 2026-09-10/11: a fresh resync froze at EXACTLY height 7,183, twice,
+        // reproducibly. Epsilon served the range — `served 8193 BLOCKS [7183..=15375]
+        // (11956486 B)` — and took ~9 s to do it. The client timed out at 8 s, closed the stream,
+        // logged `decode failed … unexpected end of file`, threw away all 11.4 MB, and asked for
+        // the identical range again. 7,183 is not a magic number; it is the first height where
+        // 8,192 blocks stopped fitting in the timeout.
+        //
+        // Raising the timeout only moves the cliff to a larger block size later. Two changes make
+        // it self-correcting instead, and BOTH are needed — either alone is a half-fix:
+        //   (a) shrink the chunk when a range fails and grow it back when ranges succeed, so the
+        //       node finds a size that fits whatever the link and the block sizes currently are;
+        //   (b) REWIND the frontier over a failed range. `req_frontier += FETCH_CHUNK` advanced
+        //       unconditionally, so a range that failed was never re-requested by this path at
+        //       all — the windowed fetcher walked straight past the hole it had just made. That
+        //       is why the tip did not merely slow down, it stopped dead.
         const FETCH_CHUNK: u64 = 8192;
+        const FETCH_CHUNK_MIN: u64 = 256;
+        let fetch_chunk = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+            std::env::var("SIGIL_FETCH_CHUNK").ok().and_then(|v| v.parse().ok()).unwrap_or(2048),
+        ));
+        // Lowest `from` whose request failed; u64::MAX means "nothing to redo".
+        let refetch_from = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
         const FETCH_MAX_AHEAD: u64 = 131_072; // keep ~16 ranges in flight ahead of the applied tip
         loop {
             // Slide the window: fire consecutive range-requests until req_frontier is
@@ -1426,14 +1455,40 @@ fn run_start() -> Result<()> {
             if !produce && !diverged {
                 let tip = chain.height();
                 if tip > req_frontier { req_frontier = tip; }
+                // Redo anything that failed before opening new ground — otherwise the window
+                // marches past the gap and the chain can never become contiguous.
+                {
+                    use std::sync::atomic::Ordering;
+                    let redo = refetch_from.swap(u64::MAX, Ordering::Relaxed);
+                    if redo != u64::MAX && redo < req_frontier && redo >= tip {
+                        req_frontier = redo;
+                    }
+                }
                 while req_frontier < net_tip && req_frontier < tip + FETCH_MAX_AHEAD {
                     if let Some(peer) = mgr.connected_peers().into_iter().next() {
                         let from = req_frontier;
-                        let to = (from + FETCH_CHUNK).min(net_tip);
+                        let chunk = fetch_chunk.load(std::sync::atomic::Ordering::Relaxed).max(FETCH_CHUNK_MIN);
+                        let to = (from + chunk).min(net_tip);
                         let req = BackfillReq { from, to, headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()) };
                         let mgr2 = std::sync::Arc::clone(&mgr);
                         let bf_tx2 = bf_tx.clone();
+                        let chunk_ad = std::sync::Arc::clone(&fetch_chunk);
+                        let redo_ad = std::sync::Arc::clone(&refetch_from);
                         tokio::spawn(async move {
+                            use std::sync::atomic::Ordering as AOrd;
+                            // Called on every branch that did NOT return usable blocks: halve the
+                            // request size and mark this range for a redo. Halving is what makes
+                            // the node converge on a size that fits, instead of retrying a size
+                            // that has already been proven not to.
+                            let fail = |why: &str| {
+                                let cur = chunk_ad.load(AOrd::Relaxed);
+                                let next = (cur / 2).max(FETCH_CHUNK_MIN);
+                                if next != cur {
+                                    chunk_ad.store(next, AOrd::Relaxed);
+                                    eprintln!("⇩ rr-backfill: {why} for [{from}..={to}) — fetch chunk {cur} → {next}");
+                                }
+                                redo_ad.fetch_min(from, AOrd::Relaxed);
+                            };
                             // 2026-08-19 (deep-catchup stall investigation): every failure
                             // branch here used to be silent (`unwrap_or_default()` /
                             // `Err(_) => Vec::new()`), so a genuinely stuck request-ahead
@@ -1448,27 +1503,40 @@ fn run_start() -> Result<()> {
                                         Ok(r) => {
                                             if r.blocks.is_empty() {
                                                 eprintln!("⚠ rr-backfill(windowed): peer {peer} returned an EMPTY response for [{from}..={to}) — request-ahead slot stuck");
+                                                fail("empty response");
+                                            } else {
+                                                // Success: creep the chunk back up so a transient
+                                                // stall does not pin the node at the floor forever.
+                                                // Growth is slower than the halving on failure,
+                                                // which is what keeps it stable rather than
+                                                // oscillating between two bad sizes.
+                                                let cur = chunk_ad.load(AOrd::Relaxed);
+                                                let next = (cur + cur / 4).min(FETCH_CHUNK);
+                                                if next != cur { chunk_ad.store(next, AOrd::Relaxed); }
                                             }
                                             r.blocks
                                         }
                                         Err(e) => {
                                             eprintln!("⚠ rr-backfill(windowed): decode failed for [{from}..={to}) from {peer}: {e}");
+                                            fail("decode failed");
                                             Vec::new()
                                         }
                                     },
                                     Err(e) => {
                                         eprintln!("⚠ rr-backfill(windowed): send_request failed for [{from}..={to}) to {peer}: {e}");
+                                        fail("send failed");
                                         Vec::new()
                                     }
                                 },
                                 Err(e) => {
                                     eprintln!("⚠ rr-backfill(windowed): request serialize failed: {e}");
+                                    fail("serialize failed");
                                     Vec::new()
                                 }
                             };
                             let _ = bf_tx2.send(blocks).await;
                         });
-                        req_frontier += FETCH_CHUNK;
+                        req_frontier += chunk;
                     } else { break; }
                 }
             }
@@ -4055,6 +4123,67 @@ mod tests {
     /// coinbase.rs) is correct: solve.shares reaches the minted block's coinbase,
     /// and every credited wallet's balance is visible after `chain.apply()`.
     #[test]
+    /// The property that unsticks a frozen resync, as arithmetic. Models the windowed fetcher:
+    /// a peer can only deliver a range if it fits inside the request timeout, i.e. if the chunk is
+    /// at or below `max_ok`. Anything larger fails.
+    ///
+    /// The OLD loop used a fixed chunk and advanced the frontier unconditionally, so once the
+    /// chunk exceeded what fits, every request failed AND the gap was never revisited — the tip
+    /// froze at exactly the height where that first happened. Live: happysrv stopped dead at
+    /// 7,183, twice, asking for [7183..=15375] (8,193 blocks, 11.4 MB, ~9 s) against an 8 s
+    /// timeout, forever.
+    #[test]
+    fn adaptive_fetch_unsticks_a_frozen_resync() {
+        const CHUNK_MIN: u64 = 256;
+        const CHUNK_MAX: u64 = 8192;
+
+        /// Returns the tip reached after `rounds`. `max_ok` = the largest chunk the link can
+        /// deliver in time.
+        fn run(adaptive: bool, rewind: bool, max_ok: u64, rounds: usize, target: u64) -> u64 {
+            let (mut tip, mut frontier, mut chunk) = (0u64, 0u64, CHUNK_MAX);
+            for _ in 0..rounds {
+                if tip >= target { break; }
+                if frontier < tip { frontier = tip; }
+                let from = frontier;
+                let use_chunk = if adaptive { chunk.max(CHUNK_MIN) } else { CHUNK_MAX };
+                let ok = use_chunk <= max_ok;
+                if ok {
+                    // A chain applies CONTIGUOUSLY. A range fetched beyond the tip lands in the
+                    // pending buffer and moves the tip nowhere until the hole before it is
+                    // filled. Modelling `tip = from + chunk` regardless (my first attempt) lets
+                    // the tip teleport over gaps and hides the entire bug.
+                    if from <= tip {
+                        tip = (from + use_chunk).min(target);
+                    }
+                    if adaptive { chunk = (chunk + chunk / 4).min(CHUNK_MAX); }
+                } else if adaptive {
+                    chunk = (chunk / 2).max(CHUNK_MIN);
+                }
+                // The frontier always advanced in the old code, failure or not.
+                frontier = from + use_chunk;
+                if !ok && rewind { frontier = from; }
+            }
+            tip
+        }
+
+        // A link that can carry 2,000 blocks per request but not 8,192 — the live shape.
+        let target = 100_000;
+
+        // OLD: fixed chunk, frontier always advances. Frozen at zero progress, forever.
+        assert_eq!(run(false, false, 2_000, 500, target), 0, "the old loop must freeze — it did, live");
+
+        // Adaptive size alone, still no rewind: it finds a workable size but walks past the holes
+        // it made, so the contiguous tip still cannot reach the target. Half a fix is not a fix.
+        let half = run(true, false, 2_000, 500, target);
+        assert!(half < target, "adaptive alone still leaves gaps ({half})");
+
+        // BOTH: converges on a size the link can carry and re-requests what failed.
+        assert_eq!(run(true, true, 2_000, 500, target), target, "both halves must reach the tip");
+
+        // And it works on a link that is far worse than expected, down to the floor.
+        assert_eq!(run(true, true, CHUNK_MIN, 2_000, 50_000), 50_000, "must survive a slow link");
+    }
+
     /// The fairness property the backfill budget exists for, as arithmetic rather than as a
     /// hope. Models the exact admission rule at the full-block serve site: a request is served
     /// only if the GLOBAL in-flight count is under its cap AND this peer is under its own.

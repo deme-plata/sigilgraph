@@ -887,9 +887,14 @@ fn run_start() -> Result<()> {
         // writing (dag_mode off ⇒ stays at its zero-value default forever).
         let dag_snapshot_bridge = Arc::new(sigil_api::dagknight::DagSnapshotBridge::new());
         // The SIGIL Nation Supreme Court. Its block archive is fed from the produce arm below
-        // (`court_bridge.record_block`), which is the ONLY writer — same "producer publishes,
-        // handlers only read" contract as dag_snapshot_bridge. A court with no blocks can order
-        // nothing, and says so, rather than exporting an empty packet that looks like innocence.
+        // (`court_bridge.record_block`) — from the produce arm when this node MINTS, and from all
+        // three follower apply paths when it RECEIVES. Both matter: a follower that never recorded
+        // would answer /v1/court/roots with "I hold nothing", and the cross-check between two
+        // independently-operated nodes — the entire reason the endpoint exists — would only ever
+        // work on the single node that produces. Request handlers never write; same "producer
+        // publishes, handlers only read" contract as dag_snapshot_bridge. A court with no blocks
+        // can order nothing, and says so, rather than exporting an empty packet that looks like
+        // innocence.
         let court_bridge = Arc::new(sigil_api::court::CourtBridge::new());
         // Durable hashrate/miner-count time series for the wallet's Network
         // Power modal (24h/7d/30d/1y/all) — see
@@ -2964,9 +2969,16 @@ fn run_start() -> Result<()> {
                                 while let Some(b) = next.take() {
                                     let bh = b.header.height;
                                     let braw = chain_log::encode_record(&b).unwrap_or_default();
+                                    let witness = (b.header.height, b.header.event_log_root, b.events.clone());
                                     match chain.apply(b) {
                                         Ok(_) => {
                                             let _ = chain_log.append_bytes(&braw);
+                                    // The court's witness archive. A FOLLOWER never mints, so the
+                                    // hook in the produce arm never fires here — without this line a
+                                    // follower's /v1/court/roots would answer "I hold nothing" and the
+                                    // whole cross-check idea would only ever work on the one node that
+                                    // produces, which is the opposite of the point.
+                                            court_bridge.record_block(witness.0, witness.1, witness.2);
                                             applied += 1;
                                             if bh != h { backfilled += 1; }
                                             if applied % 100 == 0 {
@@ -3235,9 +3247,11 @@ fn run_start() -> Result<()> {
                             let bhash = b.hash();
                             let view = BlockView::from(&b.header);
                             let braw = chain_log::encode_record(&b).unwrap_or_default();
+                            let witness = (b.header.height, b.header.event_log_root, b.events.clone());
                             match chain.apply(b.clone()) {
                                 Ok(_) => {
                                     let _ = chain_log.append_bytes(&braw);
+                                    court_bridge.record_block(witness.0, witness.1, witness.2);
                                     applied += 1;
                                     backfilled += 1;
                                     if let Some(r) = reorg_ring.as_mut() { r.clear_fork_hits(); }
@@ -3324,9 +3338,11 @@ fn run_start() -> Result<()> {
                         while let Some(b) = pending.remove(&chain.height()) {
                             let bh = b.header.height;
                             let braw = chain_log::encode_record(&b).unwrap_or_default();
+                            let witness = (b.header.height, b.header.event_log_root, b.events.clone());
                             match chain.apply(b) {
                                 Ok(_) => {
                                     let _ = chain_log.append_bytes(&braw);
+                                    court_bridge.record_block(witness.0, witness.1, witness.2);
                                     applied += 1;
                                     backfilled += 1;
                                     if applied % 100 == 0 {

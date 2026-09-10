@@ -68,6 +68,7 @@ pub mod eth;
 pub mod dagknight;
 /// SIGIL-Nation: citizen attestation + welfare claims (dev-fee financed).
 pub mod aether;
+pub mod court;
 pub mod nation;
 /// PV-1 private transfers: shield / shielded-send / unshield.
 pub mod shielded;
@@ -145,6 +146,10 @@ pub struct AppState {
     /// SIGIL-Nation wallet-authenticated claim/attest queue — same drain
     /// contract as `send`; see the `nation` module docs.
     pub nation: Arc<nation::NationBridge>,
+    /// The SIGIL Nation Supreme Court, live: constitution, docket, bench, precedent, and the
+    /// sealed-disclosure share links. Its block archive is fed by the producer via
+    /// `court::CourtBridge::record_block` — never from a request handler.
+    pub court: Arc<court::CourtBridge>,
 }
 
 impl AppState {
@@ -172,6 +177,7 @@ impl AppState {
             history: Arc::new(MiningHistoryStore::open_ephemeral()),
             network: None,
             nation: Arc::new(nation::NationBridge::new()),
+            court: Arc::new(court::CourtBridge::new()),
             aether: Arc::new(aether::AetherStore::open_from_env()),
         }
     }
@@ -1903,6 +1909,18 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/aether/cat", get(aether::aether_cat))
         .route("/v1/aether/recover", get(aether::aether_recover))
         .route("/v1/aether/put", post(aether::aether_put))
+        .route("/v1/court/status", get(court::court_status))
+        .route("/v1/court/constitution", get(court::court_constitution))
+        .route("/v1/court/docket", get(court::court_docket))
+        .route("/v1/court/bench", get(court::court_bench))
+        .route("/v1/court/precedents", get(court::court_precedents))
+        .route("/v1/court/challenge", get(court::court_challenge))
+        .route("/v1/court/disclosure/self", post(court::court_self_disclosure))
+        .route("/v1/court/disclosure/order", post(court::court_order))
+        .route("/v1/court/disclosure/revoke", post(court::court_revoke))
+        .route("/v1/court/packet/:root", get(court::court_packet))
+        .route("/v1/court/packet/:root/csv", get(court::court_packet_csv))
+        .route("/v1/court/packet/:root/verify", get(court::court_packet_verify))
         .route("/v1/nation/status", get(nation::nation_status))
         .route("/v1/nation/citizen", get(nation::nation_citizen))
         .route("/v1/nation/attest", post(nation::nation_attest))

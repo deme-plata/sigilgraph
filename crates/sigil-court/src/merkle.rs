@@ -115,6 +115,30 @@ mod tests {
         assert_eq!(root(&[]), [0u8; 32]);
     }
 
+    /// THE LINCHPIN. The court recomputes a block's event-log root and refuses any block whose
+    /// supplied root disagrees. If this crate's Merkle rule ever diverged from
+    /// `sigil_state::hash_event_log` — the rule the block HEADER commits — the court would refuse
+    /// every real block and its archive would silently stay empty. Pin the two together against the
+    /// chain's own chokepoint, not against our own reimplementation of it.
+    #[test]
+    fn our_root_equals_the_chains_event_log_root() {
+        use sigil_state::{commit_state_transition, SigilState, StateMutation, StateTransition};
+        for n in [1usize, 2, 3, 5, 8, 9] {
+            let ev: Vec<SigilEvent> = (0..n as u64)
+                .map(|i| SigilEvent::MintReward { miner: [i as u8; 32], height: i, amount: 7 + i as u128 })
+                .collect();
+            let mut st = SigilState::new();
+            let mutations = ev.iter().map(|e| StateMutation::PushEventHash(e.leaf_hash())).collect();
+            let roots = commit_state_transition(&mut st, &StateTransition { at_height: 1, mutations }, 1)
+                .expect("chokepoint accepts the transition");
+            let leaves: Vec<[u8; 32]> = ev.iter().map(|e| e.leaf_hash()).collect();
+            assert_eq!(
+                root(&leaves), roots.event_log_root,
+                "court Merkle rule diverged from the chain's event_log_root at n={n}"
+            );
+        }
+    }
+
     #[test]
     fn tampered_leaf_fails() {
         let ev = events();

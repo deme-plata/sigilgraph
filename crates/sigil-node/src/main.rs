@@ -886,6 +886,11 @@ fn run_start() -> Result<()> {
         // Always constructed, inert until the dag-snapshot tick starts
         // writing (dag_mode off ⇒ stays at its zero-value default forever).
         let dag_snapshot_bridge = Arc::new(sigil_api::dagknight::DagSnapshotBridge::new());
+        // The SIGIL Nation Supreme Court. Its block archive is fed from the produce arm below
+        // (`court_bridge.record_block`), which is the ONLY writer — same "producer publishes,
+        // handlers only read" contract as dag_snapshot_bridge. A court with no blocks can order
+        // nothing, and says so, rather than exporting an empty packet that looks like innocence.
+        let court_bridge = Arc::new(sigil_api::court::CourtBridge::new());
         // Durable hashrate/miner-count time series for the wallet's Network
         // Power modal (24h/7d/30d/1y/all) — see
         // sigil_api::mining_history module docs. Lives in its own subdir of
@@ -921,6 +926,7 @@ fn run_start() -> Result<()> {
                     history: Arc::clone(&mining_history_store),
                     network: Some(Arc::clone(&mgr)),
                     nation: Arc::clone(&nation_bridge),
+                    court: Arc::clone(&court_bridge),
                     // The user-writable aether store (SIGIL OS terminal).
                     // `open_from_env` puts it at `$SIGIL_DB_PATH/aether-user`,
                     // deliberately BESIDE the chain snapshot dir (`.../aether`)
@@ -1724,6 +1730,21 @@ fn run_start() -> Result<()> {
                     match minted {
                         Ok((block, minted_tx_hashes)) => {
                             let h = block.header.height;
+                            // Feed the court's evidence archive. We hand it the HEADER's root and
+                            // the block's own events; `record_block` recomputes the root from those
+                            // events and REFUSES a mismatch, so a divergence between the header
+                            // rule and the court's Merkle rule shows up as an empty archive and a
+                            // loud log line, never as a packet built on unverified evidence.
+                            if !court_bridge.record_block(
+                                h,
+                                block.header.event_log_root,
+                                block.events.clone(),
+                            ) {
+                                eprintln!(
+                                    "⚠ court archive REFUSED block H={} — its events do not hash to header.event_log_root; disclosure coverage will not advance",
+                                    h
+                                );
+                            }
                             sigil_api::attribution::record(
                                 h,
                                 payout_source,

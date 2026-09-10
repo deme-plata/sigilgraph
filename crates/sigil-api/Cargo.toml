@@ -25,6 +25,11 @@ blake3 = { workspace = true }
 flux-aether   = { path = "../../../flux/crates/flux-aether" }
 
 sigil-state = { path = "../sigil-state" }
+# court.rs: the Supreme Court — constitution, docket, bench, precedent, and the sealed
+# disclosure packets that are the ONE lawful way records leave the nation.
+sigil-court = { path = "../sigil-court" }
+# court.rs: the typed event the producer hands to the court's evidence archive.
+sigil-events = { path = "../sigil-events" }
 sigil-tx = { path = "../sigil-tx" }
 sigil-bank = { path = "../sigil-bank" }
 # Door-level shielded-proof precheck (a DoS guard; the chokepoint is the authority).

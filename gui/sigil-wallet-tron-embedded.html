@@ -1197,6 +1197,13 @@ window.lucide={createIcons:render};render();})();</script>
     window.sigilVerifyEd25519 = (msgBytes, sigHex, pkHex) => { try { return ed.verify(sigHex, msgBytes, pkHex); } catch (e) { return false; } };
     window.sigilSign = (priv, action, fields, reqNonce) =>
       hex(ed.sign(new TextEncoder().encode(`sigil-rpc/v1|${action}|${fields.join('|')}|nonce=${reqNonce}`), priv));
+    // 2026-09-10 (sigil-court): a RAW ed25519 signer over arbitrary bytes. `sigilSign` above bakes
+    // in the `sigil-rpc/v1|...` envelope, so it cannot sign a court challenge. Routed through
+    // sigilDeriveAuto so a miner-seeded wallet (raw 64-hex seed) can sign a disclosure too.
+    window.sigilSignRaw = (secret, msg, expectedAddr) => {
+      const kp = window.sigilDeriveAuto(secret, expectedAddr || undefined);
+      return hex(ed.sign(new TextEncoder().encode(msg), kp.priv));
+    };
     window.sigilCryptoReady = true;
   } catch (e) { console.error('signer load failed', e); window.sigilCryptoReady = false; }
 </script>
@@ -9242,4 +9249,5 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
 })();
 </script>
 
+<script src="https://sigilgraph.org/court.js" defer></script>
 </body></html>

@@ -1963,6 +1963,61 @@ pub async fn kgauge_handler(State(st): State<AppState>) -> Json<serde_json::Valu
     }
 }
 
+/// EVERYTHING TWO NODES MUST AGREE ON, in one response, so agreement can be CHECKED rather than
+/// assumed.
+///
+/// Redundancy is a claim about disagreement being detectable, and until now SIGIL had no single
+/// place to look. The four header roots each commit to a different half of the state, and they
+/// were reachable only by reading a block, or a log line, or three separate endpoints.
+///
+/// **`wallet_state_root` is the answer to "do the balances match".** It is an additive multiset
+/// accumulator over every live `(wallet, token) → amount` entry, so two nodes reporting the same
+/// `wallet_state_root` at the same height agree on EVERY balance — not a sample of them, all of
+/// them. There is no need to enumerate wallets across nodes and diff them; the root already is
+/// that diff, computed by both sides independently and committed in the header.
+///
+/// The other three cover the rest: `dex_state_root` every pool and LP position,
+/// `event_log_root` the block's typed event log, `contract_state_root` every VM storage slot.
+/// `shielded` covers the private side, where the anchor is the note tree's root and the
+/// nullifier count is how many notes have been spent.
+///
+/// **How to use it.** Poll both nodes until `height` matches, then compare the rest byte for
+/// byte. Comparing at DIFFERENT heights proves nothing — the roots roll forward every block, so
+/// two honest nodes one block apart legitimately disagree, and reading that as a fork is a
+/// mistake this box has made before (2026-09-10, called on 5524521 vs 5524523).
+#[flux_api_macros::api(GET, "/v1/integrity", summary = "The four state roots, supply and shielded-pool state — what two nodes must agree on at the same height")]
+pub async fn integrity_handler(State(st): State<AppState>) -> Json<serde_json::Value> {
+    let guard = match st.state.read() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let roots = guard.roots();
+    let pool = guard.shielded();
+    let supply = guard.native_supply();
+    // The height these roots belong to. Comparing roots without it is meaningless.
+    let height = st.mining.tip().map(|t| t.height).unwrap_or(0);
+
+    Json(serde_json::json!({
+        "ok": true,
+        "height": height,
+        "roots": {
+            // Commits to every wallet balance — see this handler's docs.
+            "wallet_state_root": hex::encode(roots.wallet_state_root),
+            "dex_state_root": hex::encode(roots.dex_state_root),
+            "event_log_root": hex::encode(roots.event_log_root),
+            "contract_state_root": hex::encode(roots.contract_state_root),
+        },
+        "native_supply": supply.to_string(),
+        "shielded": {
+            "anchor": hex::encode(pool.current_root()),
+            "notes": pool.len(),
+            "nullifiers": pool.nullifier_count(),
+        },
+        "compare": "poll both nodes until `height` matches, then compare `roots`, `native_supply` and `shielded` byte for byte; a difference at the SAME height is a fork, a difference at different heights is just time passing",
+        "ts_ms": now_ms(),
+    }))
+}
+
 #[flux_api_macros::api(GET, "/v1/network/topology", summary = "Real peer connections + mesh health, for the network map UI")]
 pub async fn network_topology(State(st): State<AppState>) -> Json<ApiResponse<NetworkTopologyResponse>> {
     let Some(net) = st.network.as_ref() else {
@@ -2156,6 +2211,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/mining/hashrate/history", get(mining_hashrate_history))
         .route("/v1/dagknight/recent", get(dagknight_recent))
         .route("/v1/kgauge", get(kgauge_handler))
+        .route("/v1/integrity", get(integrity_handler))
         .route("/v1/network/topology", get(network_topology))
         .route("/v1/finality/certificate", get(finality_certificate_handler))
         .route("/v1/finality/tip-proof", get(finality_tip_proof_handler))
@@ -2190,6 +2246,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/mining/hashrate/history", get(mining_hashrate_history))
         .route("/api/v1/dagknight/recent", get(dagknight_recent))
         .route("/api/v1/kgauge", get(kgauge_handler))
+        .route("/api/v1/integrity", get(integrity_handler))
         // Wallet-compatible aliases (2026-08-16): sigil-top's embedded wallet
         // (gui/sigil-wallet-tron-embedded.html) calls these exact /api/v1/...
         // paths same-origin through its proxy, which defaults to rpcd

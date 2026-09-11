@@ -3299,10 +3299,40 @@ fn run_start() -> Result<()> {
                                     && last_req.elapsed() >= std::time::Duration::from_millis(15)
                                 {
                                     last_req = std::time::Instant::now();
-                                    if let Some(peer) = mgr.connected_peers().into_iter().next() {
+                                    // 2026-09-11 — THE SECOND BACKFILL LOOP.
+                                    //
+                                    // The windowed fetcher above was made adaptive and
+                                    // peer-rotating on 2026-09-11 and it still did not unstick
+                                    // happysrv, because THIS path — the peer-heights catch-up — is
+                                    // a separate loop with its own hardcoded 8192 and its own
+                                    // `connected_peers().next()`. It is the one that was actually
+                                    // driving the stall: 11 hours of `requesting [7504..=15696]`
+                                    // and `decode failed … unexpected end of file`, 321 blocks of
+                                    // progress overnight. Fixing one fetcher and not the other is
+                                    // why the symptom survived four correct fixes.
+                                    //
+                                    // Same two corrections, same reasoning as above: ask for a
+                                    // size that has not already been proven too large for the
+                                    // request timeout, and do not hand every request to whichever
+                                    // peer happens to sort first.
+                                    let ph_peer = {
+                                        let mut ps: Vec<_> = mgr.connected_peers();
+                                        if ps.is_empty() { None } else {
+                                            let scores = match peer_scores.lock() { Ok(g) => g, Err(e) => e.into_inner() };
+                                            ps.sort_by_key(|p| *scores.get(&p.to_string()).unwrap_or(&0));
+                                            drop(scores);
+                                            peer_rr = peer_rr.wrapping_add(1);
+                                            let best = ps.len().min(3);
+                                            Some(ps[peer_rr % best])
+                                        }
+                                    };
+                                    if let Some(peer) = ph_peer {
+                                        let ph_chunk = fetch_chunk
+                                            .load(std::sync::atomic::Ordering::Relaxed)
+                                            .max(FETCH_CHUNK_MIN);
                                         let req = BackfillReq {
                                             from: expected,
-                                            to: expected.saturating_add(8192),
+                                            to: expected.saturating_add(ph_chunk),
                                             headers_only: false,
                                             codec: 0, // node-to-node needs full blocks; raw JSON path
                                             handshake: Some((*sync_hs).clone()),
@@ -3312,7 +3342,30 @@ fn run_start() -> Result<()> {
                                         let mgr2 = std::sync::Arc::clone(&mgr);
                                         let bf_tx2 = bf_tx.clone();
                                         let (req_from, req_to) = (req.from, req.to);
+                                        let ph_chunk_ad = std::sync::Arc::clone(&fetch_chunk);
+                                        let ph_scores = std::sync::Arc::clone(&peer_scores);
+                                        let ph_peer_key = peer.to_string();
                                         tokio::spawn(async move {
+                                            use std::sync::atomic::Ordering as AOrd2;
+                                            let ph_fail = |why: &str| {
+                                                let cur = ph_chunk_ad.load(AOrd2::Relaxed);
+                                                let next = (cur / 2).max(FETCH_CHUNK_MIN);
+                                                if next != cur {
+                                                    ph_chunk_ad.store(next, AOrd2::Relaxed);
+                                                    eprintln!("⇩ rr-backfill(peer-heights): {why} for [{req_from}..={req_to}) — fetch chunk {cur} → {next}");
+                                                }
+                                                let mut g = match ph_scores.lock() { Ok(g) => g, Err(e) => e.into_inner() };
+                                                let e = g.entry(ph_peer_key.clone()).or_insert(0);
+                                                *e = (*e + 1).min(64);
+                                            };
+                                            let ph_win = || {
+                                                let cur = ph_chunk_ad.load(AOrd2::Relaxed);
+                                                let next = (cur + cur / 4).min(FETCH_CHUNK);
+                                                if next != cur { ph_chunk_ad.store(next, AOrd2::Relaxed); }
+                                                let mut g = match ph_scores.lock() { Ok(g) => g, Err(e) => e.into_inner() };
+                                                let e = g.entry(ph_peer_key.clone()).or_insert(0);
+                                                *e = (*e - 1).max(0);
+                                            };
                                             // 2026-08-19 (deep-catchup stall investigation): same
                                             // silent-failure gap as the windowed pipeline above —
                                             // every `if let Ok(...)` here dropped the request on
@@ -3326,14 +3379,26 @@ fn run_start() -> Result<()> {
                                                         Ok(resp) => {
                                                             if resp.blocks.is_empty() {
                                                                 eprintln!("⚠ rr-backfill(peer-heights): peer {peer} returned an EMPTY response for [{req_from}..={req_to}) — the repeating-request-no-progress symptom");
+                                                                ph_fail("empty response");
+                                                            } else {
+                                                                ph_win();
                                                             }
                                                             let _ = bf_tx2.send(resp.blocks).await;
                                                         }
-                                                        Err(e) => eprintln!("⚠ rr-backfill(peer-heights): decode failed for [{req_from}..={req_to}) from {peer}: {e}"),
+                                                        Err(e) => {
+                                                            eprintln!("⚠ rr-backfill(peer-heights): decode failed for [{req_from}..={req_to}) from {peer}: {e}");
+                                                            ph_fail("decode failed");
+                                                        }
                                                     },
-                                                    Err(e) => eprintln!("⚠ rr-backfill(peer-heights): send_request failed for [{req_from}..={req_to}) to {peer}: {e}"),
+                                                    Err(e) => {
+                                                        eprintln!("⚠ rr-backfill(peer-heights): send_request failed for [{req_from}..={req_to}) to {peer}: {e}");
+                                                        ph_fail("send failed");
+                                                    }
                                                 },
-                                                Err(e) => eprintln!("⚠ rr-backfill(peer-heights): request serialize failed: {e}"),
+                                                Err(e) => {
+                                                    eprintln!("⚠ rr-backfill(peer-heights): request serialize failed: {e}");
+                                                    ph_fail("serialize failed");
+                                                }
                                             }
                                         });
                                     }

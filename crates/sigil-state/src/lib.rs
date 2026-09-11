@@ -536,6 +536,37 @@ impl SigilState {
         self.events_acc = acc_add(self.events_acc, event_leaf(&h));
     }
 
+    /// Restore the block-scoped event log to `leaves`. This is the ONLY supported way for a
+    /// block PRODUCER to compute a header `event_log_root` that its followers will agree with,
+    /// and it exists because the producer and the follower do not commit the same way.
+    ///
+    /// [`commit_state_transition`] clears the block-scoped event log on every call — correctly,
+    /// because one call is meant to be one block. A FOLLOWER applies a whole block in exactly
+    /// one call (`ChainTip::apply`), so its event log ends up holding every event in the block.
+    /// A PRODUCER builds the body by committing ONE TRANSACTION AT A TIME, so each commit wipes
+    /// the previous transaction's events, and `roots()` at the end of the loop sees at most the
+    /// final transaction's — in practice an empty log, which hashes to all-zero.
+    ///
+    /// While no transaction emitted any event, both sides computed all-zero and the asymmetry
+    /// was invisible. That is the dangerous kind of dormant bug: it is not latent in a rare
+    /// branch, it is latent in the *absence* of data. The moment a single event existed, the
+    /// producer published all-zero and every follower computed something else, and because
+    /// `Block::check_roots_match` covers `event_log_root`, the follower refused the block.
+    /// Measured 2026-09-10: happysrv froze at h=5,525,905 with `STATE DIVERGENCE`, and since the
+    /// producer had already minted those blocks, reinstalling the previous binary did not heal
+    /// it — a producer cannot be rolled back out of its own history.
+    ///
+    /// Pass the `PushEventHash` leaves taken from the accumulated mutation list, in order: that
+    /// is the exact list, in the exact order, the follower will apply, so the two roots agree by
+    /// construction rather than by coincidence.
+    pub fn restore_block_event_log(&mut self, leaves: &[[u8; 32]]) {
+        self.block_events.clear();
+        self.events_acc = [0u64; 4];
+        for h in leaves {
+            self.push_event_hash(*h);
+        }
+    }
+
     pub(crate) fn set_contract_slot(
         &mut self,
         contract: ContractId,
@@ -1803,6 +1834,84 @@ mod tests {
         // to any individual leaf.
         assert_ne!(roots.event_log_root, [0u8; 32]);
         assert_ne!(roots.event_log_root, [1u8; 32]);
+    }
+
+    /// THE 2026-09-10 CONSENSUS BREAK, as a unit test.
+    ///
+    /// A block PRODUCER commits one transaction at a time; a FOLLOWER commits the whole block
+    /// in one call. Each commit clears the block-scoped event log, so without
+    /// `restore_block_event_log` the producer's `event_log_root` is all-zero while the
+    /// follower's is a real Merkle root over every event — and `check_roots_match` covers that
+    /// field, so the follower refuses the block and the chain forks. It hid for months because
+    /// nothing emitted events, so both shapes agreed at all-zero.
+    ///
+    /// The `assert_ne!` is the part with teeth: it fails if someone deletes the restore step,
+    /// which is what makes this a regression rather than a description.
+    #[test]
+    fn producer_per_tx_commits_and_follower_single_commit_agree_on_event_log_root() {
+        let a = [0xAAu8; 32];
+        let b = [0xBBu8; 32];
+
+        // FOLLOWER shape: one commit carrying both events (what ChainTip::apply does).
+        let mut follower = SigilState::new();
+        let follower_roots = commit_state_transition(
+            &mut follower,
+            &StateTransition {
+                at_height: 1,
+                mutations: vec![
+                    StateMutation::PushEventHash(a),
+                    StateMutation::PushEventHash(b),
+                ],
+            },
+            1,
+        )
+        .unwrap();
+        assert_ne!(
+            follower_roots.event_log_root, [0u8; 32],
+            "a block with two events must not hash to the empty root"
+        );
+
+        // PRODUCER shape: one commit per transaction. Each wipes the log.
+        let mut producer = SigilState::new();
+        for leaf in [a, b] {
+            commit_state_transition(
+                &mut producer,
+                &StateTransition { at_height: 1, mutations: vec![StateMutation::PushEventHash(leaf)] },
+                1,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            producer.roots().event_log_root,
+            [0u8; 32],
+            "this is the bug: after per-tx commits the producer's event log is EMPTY"
+        );
+
+        // The fix: rebuild the log from the same leaves, in the same order, that the follower
+        // applied — then the two agree by construction.
+        producer.restore_block_event_log(&[a, b]);
+        assert_eq!(
+            producer.roots().event_log_root, follower_roots.event_log_root,
+            "producer and follower must compute the SAME event_log_root or the chain forks"
+        );
+    }
+
+    /// Order is load-bearing: the event log is an ordered, position-bound Merkle list, so
+    /// restoring the same leaves in the wrong order yields a different root and forks just as
+    /// hard as dropping them. Pinned so nobody "optimises" the leaf collection into a set.
+    #[test]
+    fn restored_event_log_is_order_sensitive() {
+        let a = [1u8; 32];
+        let b = [2u8; 32];
+        let mut s1 = SigilState::new();
+        s1.restore_block_event_log(&[a, b]);
+        let mut s2 = SigilState::new();
+        s2.restore_block_event_log(&[b, a]);
+        assert_ne!(
+            s1.roots().event_log_root,
+            s2.roots().event_log_root,
+            "event_log_root must depend on order"
+        );
     }
 
     #[test]

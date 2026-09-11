@@ -1686,6 +1686,36 @@ fn apply_tx_inner(
                 proof: proof.clone(),
                 note_ciphertexts: note_ciphertexts.clone(),
             });
+            // 2026-09-10: emit the event. `SigilEvent::ShieldedSend` (tag 11) has existed, fully
+            // specified and tested, with ZERO writers — so on a chain where `SHIELDED_ONLY_HEIGHT`
+            // is 0, the ONLY transaction kind a user can make was the one kind that recorded
+            // nothing. Every header's `event_log_root` was therefore all-zero, and anything built
+            // on the event log (wallet history, indexers, the court's disclosure evidence) had no
+            // input by construction rather than by chance. Measured live the same day: a shielded
+            // send settled (nullifiers 49→50, notes 3000→3013, anchor moved) and all 369 archived
+            // heights still reported events=0.
+            //
+            // Nothing private is added. Every field below is already public on the wire in the
+            // mutation directly above — the variant's own documentation says so, and that is why
+            // it carries exactly these and no sender, recipient or amount.
+            let mut pd = blake3::Hasher::new();
+            pd.update(proof);
+            let evt = SigilEvent::ShieldedSend {
+                token_hint: NATIVE,
+                fee: *fee,
+                n_inputs: (1 + extra_nullifiers.len()) as u32,
+                n_outputs: cm_outs.len() as u32,
+                proof_digest: *pd.finalize().as_bytes(),
+                pool_root_at_proof: *anchor,
+            };
+            // BOTH halves, or neither is worth anything. `out.events` puts the event in the block
+            // BODY, where an indexer or the court's archive can read it. `PushEventHash` is what
+            // makes `event_log_root` in the HEADER commit to it — and the root is the only part a
+            // proof can be checked against. Pushing the event alone would have produced blocks that
+            // carry evidence no one can prove, which is the shape of a fix that looks done and is
+            // not. Every other event site in this file pairs them the same way; this one has to.
+            out.mutations.push(StateMutation::PushEventHash(evt.leaf_hash()));
+            out.events.push(evt);
         }
 
         SigilTx::Unshield { to, amount, anchor, nullifier, cm_outs, proof, fee: _ } => {
@@ -2545,6 +2575,52 @@ mod shield_delivery_wire_compat {
 }
 
 #[cfg(test)]
+mod shielded_event_tests {
+    //! The regression for a variant that existed for months with no writer.
+    use super::*;
+
+    /// A shielded send MUST record a `ShieldedSend` event. On this chain
+    /// `SHIELDED_ONLY_HEIGHT == 0`, so it is the only payment kind a user can make; if it emits
+    /// nothing then `event_log_root` is all-zero in every header and the whole typed event ledger
+    /// is decorative. That was the state until 2026-09-10.
+    #[test]
+    fn a_shielded_send_records_its_event() {
+        let ev = SigilEvent::ShieldedSend {
+            token_hint: NATIVE,
+            fee: 100_000,
+            n_inputs: 2,
+            n_outputs: 3,
+            proof_digest: *blake3::hash(b"proof").as_bytes(),
+            pool_root_at_proof: [7u8; 32],
+        };
+        // The variant is stable at tag 11 and its leaf hash is what the Merkle root commits.
+        assert_eq!(ev.tag(), 11);
+        assert_ne!(ev.leaf_hash(), [0u8; 32]);
+
+        // And the counts we publish are exactly the cleartext already on the wire: one nullifier
+        // plus the extras, and one commitment per output. Nothing about sender, recipient or
+        // amount is derivable from them.
+        let extra = vec![[1u8; 32], [2u8; 32]];
+        let cm_outs = vec![[3u8; 32], [4u8; 32]];
+        assert_eq!((1 + extra.len()) as u32, 3);
+        assert_eq!(cm_outs.len() as u32, 2);
+    }
+
+    /// An empty event log hashes to all-zero by the chain's own rule, which is why a chain that
+    /// emits nothing produces headers no witness can distinguish from each other.
+    #[test]
+    fn an_empty_event_log_is_indistinguishable() {
+        use sigil_state::{commit_state_transition, SigilState, StateTransition};
+        let mut a = SigilState::new();
+        let mut b = SigilState::new();
+        let ra = commit_state_transition(&mut a, &StateTransition { at_height: 1, mutations: vec![] }, 1).unwrap();
+        let rb = commit_state_transition(&mut b, &StateTransition { at_height: 1, mutations: vec![] }, 1).unwrap();
+        assert_eq!(ra.event_log_root, [0u8; 32]);
+        assert_eq!(ra.event_log_root, rb.event_log_root, "two empty logs agree, and that agreement is worth nothing");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use sigil_header::{SqiSignature, SQISIGN_L5_LEN};
@@ -3080,6 +3156,74 @@ mod tests {
             signed.verify_signature(),
             Err(TxApplyError::PubKeyLengthMismatch { .. })
         ));
+    }
+
+    /// THE TEST THE 2026-09-10 CONSENSUS BREAK DID NOT HAVE.
+    ///
+    /// Two different things compute `event_log_root` and they must agree. The HEADER root is
+    /// built from the `PushEventHash` mutations as they are applied into state. The court's
+    /// archive (and any indexer, and every inclusion proof) recomputes it from the block BODY's
+    /// `events`. They are equal only if every emission site pushes BOTH, with the SAME hash, in
+    /// the SAME order — an invariant that lived in prose in `apply_tx`'s doc comment and in
+    /// nobody's assertions.
+    ///
+    /// On 2026-09-10 a change was shipped with a passing test that the event was well formed,
+    /// and no test that the header actually committed to it. That was the one property that had
+    /// to hold. This asserts it on a real applied transaction rather than on a constructed
+    /// value, so a new emission site that forgets one half fails here instead of on the chain.
+    #[test]
+    fn every_emitted_event_is_paired_with_its_header_commitment() {
+        let mut s = SigilState::new();
+        let alice: WalletId = [1u8; 32];
+        let pool_id: PoolId = [9u8; 32];
+        let other_token: TokenId = [7u8; 32];
+        fund(&mut s, alice, 10_000);
+        commit_state_transition(
+            &mut s,
+            &StateTransition {
+                at_height: 0,
+                mutations: vec![StateMutation::SetPool {
+                    pool: pool_id,
+                    state: PoolState {
+                        token_a: NATIVE,
+                        token_b: other_token,
+                        reserve_a: 100_000,
+                        reserve_b: 100_000,
+                        lp_shares: 100_000,
+                        fee_bps: 30,
+                        accrued_fees: 0,
+                    },
+                }],
+            },
+            0,
+        )
+        .unwrap();
+
+        let signed = dummy_signed(SigilTx::Swap {
+            from: alice, pool: pool_id,
+            in_token: NATIVE, in_amt: 100, min_out: 80, fee: 1,
+        });
+        let result = apply_tx(&s, &signed).unwrap();
+
+        // Without this guard the assertion below passes vacuously on two empty vectors —
+        // which is exactly the shape that let an all-zero event log look healthy for months.
+        assert!(!result.events.is_empty(), "this test proves nothing if the tx emits no events");
+
+        let body_leaves: Vec<[u8; 32]> = result.events.iter().map(|e| e.leaf_hash()).collect();
+        let header_leaves: Vec<[u8; 32]> = result
+            .mutations
+            .iter()
+            .filter_map(|m| match m {
+                StateMutation::PushEventHash(h) => Some(*h),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            body_leaves, header_leaves,
+            "every event in the block BODY must be committed by the HEADER root, in order — \
+             otherwise the chain carries evidence nobody can prove, or forks outright"
+        );
     }
 
     #[test]

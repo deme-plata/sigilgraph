@@ -223,8 +223,13 @@ pub fn coinbase_for_reward(
 ///   AND the `PushEventHash` event commitments). An invalid tx (bad sig already
 ///   filtered at ingest; here: insufficient balance / overflow) is SKIPPED, never
 ///   included — the block only carries txs that cleanly applied.
-/// - `work.roots()` after the sequence == exactly what `ChainTip::apply` computes
-///   when it re-applies the accumulated transition, so the header roots match.
+/// - The returned roots == exactly what `ChainTip::apply` computes when it re-applies the
+///   accumulated transition, so the header roots match. This is NOT automatic: a bare
+///   `work.roots()` here is wrong for `event_log_root`, because the per-transaction commits
+///   above clear the block-scoped event log while a follower applies the whole block in one
+///   commit. The tail of this function rebuilds that log from the mutation list before taking
+///   roots; removing that step forks the chain the moment any transaction emits an event
+///   (measured 2026-09-10). See `SigilState::restore_block_event_log`.
 pub fn build_block_body(
     state: &SigilState,
     height: u64,
@@ -319,7 +324,35 @@ pub fn build_block_body_for(
         }
     }
 
-    (StateTransition { at_height: height, mutations }, work.roots(), events, included)
+    // THE HEADER ROOT MUST BE THE ROOT A FOLLOWER COMPUTES, and until 2026-09-11 it was not.
+    //
+    // Every `commit_state_transition` in the loop above clears the block-scoped event log,
+    // because one commit is meant to be one block. This loop calls it once per TRANSACTION, so
+    // by the time we get here `work.block_events` holds at most the last transaction's events
+    // and in practice is empty. A follower applies this whole transition in ONE commit
+    // (`ChainTip::apply`), so its log holds every event in the block. Taking `work.roots()`
+    // here therefore publishes an all-zero `event_log_root` against a follower that computes a
+    // real one, and `Block::check_roots_match` covers that field — so the two fork.
+    //
+    // It stayed invisible for as long as nothing emitted an event: both sides agreed at
+    // all-zero. That is exactly why the doc comment on `build_block_body` could claim
+    // "`work.roots()` … == exactly what `ChainTip::apply` computes" and be true of three roots
+    // and false of the fourth, with no test catching it — the nearest test
+    // (`send_applies_in_block_and_is_deterministic`) compared `wallet_state_root` alone.
+    //
+    // Rebuild the log from the accumulated mutation list rather than from `events`: that list
+    // is what the follower will actually apply, in that order, so the roots agree by
+    // construction. See `SigilState::restore_block_event_log`.
+    let event_leaves: Vec<[u8; 32]> = mutations
+        .iter()
+        .filter_map(|m| match m {
+            StateMutation::PushEventHash(h) => Some(*h),
+            _ => None,
+        })
+        .collect();
+    work.restore_block_event_log(&event_leaves);
+    let roots = work.roots();
+    (StateTransition { at_height: height, mutations }, roots, events, included)
 }
 
 /// [`build_block_body_for`], but the coinbase is [`split_coinbase_mutations`]
@@ -413,7 +446,35 @@ pub fn build_block_body_for_shares(
         }
     }
 
-    (StateTransition { at_height: height, mutations }, work.roots(), events, included)
+    // THE HEADER ROOT MUST BE THE ROOT A FOLLOWER COMPUTES, and until 2026-09-11 it was not.
+    //
+    // Every `commit_state_transition` in the loop above clears the block-scoped event log,
+    // because one commit is meant to be one block. This loop calls it once per TRANSACTION, so
+    // by the time we get here `work.block_events` holds at most the last transaction's events
+    // and in practice is empty. A follower applies this whole transition in ONE commit
+    // (`ChainTip::apply`), so its log holds every event in the block. Taking `work.roots()`
+    // here therefore publishes an all-zero `event_log_root` against a follower that computes a
+    // real one, and `Block::check_roots_match` covers that field — so the two fork.
+    //
+    // It stayed invisible for as long as nothing emitted an event: both sides agreed at
+    // all-zero. That is exactly why the doc comment on `build_block_body` could claim
+    // "`work.roots()` … == exactly what `ChainTip::apply` computes" and be true of three roots
+    // and false of the fourth, with no test catching it — the nearest test
+    // (`send_applies_in_block_and_is_deterministic`) compared `wallet_state_root` alone.
+    //
+    // Rebuild the log from the accumulated mutation list rather than from `events`: that list
+    // is what the follower will actually apply, in that order, so the roots agree by
+    // construction. See `SigilState::restore_block_event_log`.
+    let event_leaves: Vec<[u8; 32]> = mutations
+        .iter()
+        .filter_map(|m| match m {
+            StateMutation::PushEventHash(h) => Some(*h),
+            _ => None,
+        })
+        .collect();
+    work.restore_block_event_log(&event_leaves);
+    let roots = work.roots();
+    (StateTransition { at_height: height, mutations }, roots, events, included)
 }
 
 /// Full pool-share coinbase: split `reward` proportionally over `shares`
@@ -1408,6 +1469,71 @@ mod tests {
     /// Rewritten to assert what the chain really does, keeping the property this test is
     /// FOR — determinism. Refusal is a consensus outcome like any other: both nodes must
     /// drop the same transaction and land on the same root, or they fork on invalid input.
+    /// END-TO-END GATE FOR THE 2026-09-10 FORK.
+    ///
+    /// A block that carries an event must be ACCEPTED by a follower. That sounds trivial and was
+    /// false on this chain for as long as any event existed: the producer committed one
+    /// transaction at a time (each commit clearing the block-scoped event log) and published an
+    /// all-zero `event_log_root`, while the follower applied the whole block in ONE commit and
+    /// computed a real one. `Block::check_roots_match` covers that field, so happysrv refused
+    /// the block and froze at h=5,525,905 — and because the blocks were already minted,
+    /// reinstalling the old binary did not heal it.
+    ///
+    /// This drives the real builder and then does exactly what `ChainTip::apply` does, and
+    /// asserts on ALL FOUR roots. The nearest pre-existing test compared `wallet_state_root`
+    /// alone, which is precisely why it stayed green through the break.
+    #[test]
+    fn a_block_carrying_events_is_accepted_by_a_follower() {
+        use sigil_tx::{ed25519_keygen, ed25519_sign_tx, SigilTx};
+        use sigil_state::PoolState;
+
+        let (sk, pk, alice) = ed25519_keygen();
+        let pool_id = [9u8; 32];
+        let other_token = [7u8; 32];
+
+        let mut base = SigilState::new();
+        sigil_state::commit_state_transition(
+            &mut base,
+            &StateTransition { at_height: 0, mutations: vec![
+                StateMutation::SetBalance { wallet: alice, token: NATIVE, amount: 10_000 },
+                StateMutation::SetPool { pool: pool_id, state: PoolState {
+                    token_a: NATIVE, token_b: other_token,
+                    reserve_a: 100_000, reserve_b: 100_000,
+                    lp_shares: 100_000, fee_bps: 30, accrued_fees: 0,
+                } },
+            ] }, 0,
+        ).unwrap();
+
+        // A Swap emits `SwapExecuted` — a transaction kind that actually populates the event log.
+        let tx = ed25519_sign_tx(
+            SigilTx::Swap { from: alice, pool: pool_id, in_token: NATIVE, in_amt: 100, min_out: 80, fee: 1 },
+            &sk, &pk,
+        );
+
+        let (transition, roots, events, included) = build_block_body(&base, 1, Some(0), &[tx]);
+
+        // Guard first: with no events this whole test passes vacuously at all-zero, which is the
+        // exact blindness that hid the bug.
+        assert_eq!(included.len(), 1, "the swap must be included or this proves nothing");
+        assert!(!events.is_empty(), "the block must actually carry an event");
+        assert_ne!(
+            roots.event_log_root, [0u8; 32],
+            "a block carrying events must NOT publish the empty-log root — that was the bug"
+        );
+
+        // Now be the follower: one commit of the whole transition, then the real refusal check.
+        let mut follower = base.clone();
+        let computed = sigil_state::commit_state_transition(&mut follower, &transition, 1)
+            .expect("a follower must be able to apply the block the producer built");
+        assert_eq!(
+            computed.event_log_root, roots.event_log_root,
+            "producer and follower disagree on event_log_root — this is the fork, exactly"
+        );
+        assert_eq!(computed.wallet_state_root, roots.wallet_state_root);
+        assert_eq!(computed.dex_state_root, roots.dex_state_root);
+        assert_eq!(computed.contract_state_root, roots.contract_state_root);
+    }
+
     #[test]
     fn send_applies_in_block_and_is_deterministic() {
         use sigil_tx::{ed25519_keygen, ed25519_sign_tx, SigilTx};

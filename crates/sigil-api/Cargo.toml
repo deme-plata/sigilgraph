@@ -44,6 +44,9 @@ sigil-oracle = { path = "../sigil-oracle" }
 # PubKeyBytes) live here; sigil-tx doesn't re-export them.
 sigil-header = { path = "../sigil-header" }
 sigil-dagknight = { path = "../sigil-dagknight" }
+# The K-gauge itself. It lived in this workspace with no caller on the node; `src/kgauge.rs`
+# makes the node compute K once, at the source, instead of every client guessing separately.
+flux-kgauge = { path = "../flux-kgauge" }
 # send.rs: verifies the wallet's own ed25519 `sigil-rpc/v1` RPC-auth
 # signature (the SAME scheme flux-miner's challenge/submit flow already
 # trusts) — NOT SignedTx::verify_signature (that expects a signature over

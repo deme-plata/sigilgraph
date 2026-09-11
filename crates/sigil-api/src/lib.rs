@@ -69,6 +69,8 @@ pub mod dagknight;
 /// SIGIL-Nation: citizen attestation + welfare claims (dev-fee financed).
 pub mod aether;
 pub mod court;
+/// The K-gauge, computed by the node and published with its inputs — see the module docs.
+pub mod kgauge;
 pub mod nation;
 /// PV-1 private transfers: shield / shielded-send / unshield.
 pub mod shielded;
@@ -1750,6 +1752,85 @@ pub async fn finality_certificate_handler(State(st): State<AppState>) -> Json<se
     }))
 }
 
+/// The K-gauge as THIS NODE measures it, published together with the observables it was computed
+/// from — see `kgauge`'s module docs for why that pairing is the whole point.
+///
+/// `ready` is false on the first call after a restart: K is defined over a window and one sample
+/// is not a window. Callers should poll on whatever cadence they care about; the window is simply
+/// the wall-clock gap between consecutive calls, and it is reported as `window_secs` so a reader
+/// can see the interval their own polling produced rather than assume a configured one.
+///
+/// `caveats` is not decoration. It names every channel the gauge could not answer, and on this
+/// node it will always contain the P2P-bytes entry, because `flux-p2p` counts gossip messages and
+/// not bytes and this node refuses to pass one off as the other.
+#[flux_api_macros::api(GET, "/v1/kgauge", summary = "The K-gauge computed by this node, published with the observables behind it")]
+pub async fn kgauge_handler(State(st): State<AppState>) -> Json<serde_json::Value> {
+    use flux_kgauge::observables::{CounterSample, NetworkSize};
+
+    let now = now_ms();
+    let snap = st.dagknight.get();
+    let window = kgauge::window_from_blocks(&snap.blocks);
+
+    let (peer_count, network_height) = match st.network.as_ref() {
+        Some(net) => {
+            let summary = net.summary();
+            let health = summary.mesh_health.unwrap_or_default();
+            // The best height any peer claims. Zero means "nobody told us", which the gauge
+            // treats as unavailable rather than as "we are fully synced" — the difference
+            // between those two is the entire value of the channel.
+            let best = health.peer_heights.values().copied().max().unwrap_or(0);
+            (u64::from(summary.peer_count), best)
+        }
+        None => (0, 0),
+    };
+
+    let local_height = st.mining.tip().map(|t| t.height).unwrap_or(0);
+
+    // Accepted work is what the bridge counts directly. SUBMITTED has no counter of its own, so
+    // it is reconstructed as accepted + everything that was rejected, by reason. That is a real
+    // derivation from real counters; setting submitted = accepted would have been easier and
+    // would have asserted a 100% acceptance rate this node never measured.
+    let (_net_hps, _live_rigs, accepted_blocks, accepted_shares, rejects) = st.mining.stats(now);
+    let rejected: u64 = rejects.iter().map(|(_, n)| *n).sum();
+    let mining_accepted = accepted_blocks.saturating_add(accepted_shares);
+    let mining_submitted = mining_accepted.saturating_add(rejected);
+
+    let current = CounterSample {
+        mining_submitted,
+        mining_accepted,
+        // Deliberately absent, not approximated — see the module docs.
+        p2p_bytes_in: 0,
+        p2p_bytes_out: 0,
+        peer_count,
+        local_height,
+        network_height,
+    };
+
+    // This node plus the peers it can currently see. An estimate, and labelled as one.
+    let network_size = NetworkSize::Estimated(peer_count.saturating_add(1));
+
+    match kgauge::observe(current, window, network_size, now) {
+        Some(r) => Json(serde_json::json!({
+            "ok": true,
+            "ready": true,
+            "k_enhanced": r.report.k_enhanced,
+            "driving_value": r.report.driving_value(),
+            "actionable": r.report.is_actionable(),
+            "enhancement_ratio": r.report.enhancement_ratio(),
+            "report": r.report,
+            "observables": r.observables,
+            "reject_reasons": rejects,
+            "ts_ms": now,
+        })),
+        None => Json(serde_json::json!({
+            "ok": true,
+            "ready": false,
+            "reason": "a window needs two samples; this call established the baseline. Poll again.",
+            "ts_ms": now,
+        })),
+    }
+}
+
 #[flux_api_macros::api(GET, "/v1/network/topology", summary = "Real peer connections + mesh health, for the network map UI")]
 pub async fn network_topology(State(st): State<AppState>) -> Json<ApiResponse<NetworkTopologyResponse>> {
     let Some(net) = st.network.as_ref() else {
@@ -1941,6 +2022,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/mining/attribution", get(mining_attribution))
         .route("/v1/mining/hashrate/history", get(mining_hashrate_history))
         .route("/v1/dagknight/recent", get(dagknight_recent))
+        .route("/v1/kgauge", get(kgauge_handler))
         .route("/v1/network/topology", get(network_topology))
         .route("/v1/finality/certificate", get(finality_certificate_handler))
         .route("/v1/finality/tip-proof", get(finality_tip_proof_handler))
@@ -1972,6 +2054,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/mining/attribution", get(mining_attribution))
         .route("/api/v1/mining/hashrate/history", get(mining_hashrate_history))
         .route("/api/v1/dagknight/recent", get(dagknight_recent))
+        .route("/api/v1/kgauge", get(kgauge_handler))
         // Wallet-compatible aliases (2026-08-16): sigil-top's embedded wallet
         // (gui/sigil-wallet-tron-embedded.html) calls these exact /api/v1/...
         // paths same-origin through its proxy, which defaults to rpcd

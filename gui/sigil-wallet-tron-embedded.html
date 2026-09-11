@@ -9339,7 +9339,7 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
     }
     // The proof that this is YOUR backup: the secret must derive the address you are logged in as.
     var derived=null, err=null;
-    try{ if(!window.sigilDeriveAuto) throw new Error('derivation helper not loaded'); var kp=window.sigilDeriveAuto(s,a); derived=kp&&kp.address?String(kp.address).toLowerCase():null; }catch(e){ err=e&&e.message?e.message:String(e); }
+    var rigSeed=null; try{ if(!window.sigilDeriveAuto) throw new Error('derivation helper not loaded'); var kp=window.sigilDeriveAuto(s,a); derived=kp&&kp.address?String(kp.address).toLowerCase():null; if(kp&&kp.priv&&kp.priv.length===32) rigSeed=Array.from(kp.priv).map(function(b){ return ('0'+b.toString(16)).slice(-2); }).join(''); }catch(e){ err=e&&e.message?e.message:String(e); }
     if(err){
       b.innerHTML='<div class="warn">Could not verify the phrase yet: '+esc(err)+'</div><div class="note">Nothing is shown until the phrase has been checked against your address — try again in a moment.</div><button class="btn g" onclick="sigilRevealShow()">TRY AGAIN</button><button class="btn g" onclick="sigilRevealClose()">CLOSE</button>';
       return;
@@ -9362,10 +9362,21 @@ document.getElementById('sigilOSModal').addEventListener('click',function(e){ if
       html+='<div class="note">'+c.words.length+' words · scheme v'+c.v+(c.v===2?' (12-word, Argon2id-hardened)':' (legacy short phrase)')+'. Write them down in this order; the numbers are only to help you keep the order.</div>'
         +'<div class="grid">'+c.words.map(function(w,i){ return '<div class="w"><i>'+(i+1)+'</i>'+esc(w)+'</div>'; }).join('')+'</div>';
     }
+    if(rigSeed && c.kind!=='hex'){
+      // The same key in the form a mining rig takes: sigil-top's SIGIL_MINE_SEED is the raw
+      // 32-byte private key as 64 hex, and the phrase above derives exactly that key. With it
+      // the rig mines AS this wallet and can open the private notes it earns; without it the
+      // rig only credits the address and its balance line stays at zero.
+      html+='<details style="border:1px solid rgba(255,190,60,.22);border-radius:10px;padding:8px 10px"><summary style="cursor:pointer;font-family:\'Orbitron\';font-size:11px;letter-spacing:1px;color:#ffd166">⛏ RIG SEED (SIGIL_MINE_SEED) — same wallet, 64 hex</summary>'
+        +'<div class="note" style="margin-top:6px">For <span style="font-family:\'JetBrains Mono\'">sigil-top mine-rig</span>: <span style="font-family:\'JetBrains Mono\'">export SIGIL_MINE_SEED=…</span> makes the rig mine as this wallet and open the private rewards it earns. It is your private key in another form — protect it exactly like the words.</div>'
+        +'<div class="hex" style="margin-top:6px" id="sigilRevealRig">'+esc(rigSeed)+'</div>'
+        +'<button class="btn g" style="width:100%;margin-top:6px" id="sigilRevealRigCopy">COPY RIG SEED</button></details>';
+    }
     html+='<div style="display:flex;gap:9px"><button class="btn g" style="flex:1" id="sigilRevealCopy">COPY</button><button class="btn g" style="flex:1" onclick="sigilRevealClose()">HIDE NOW</button></div>'
       +'<div class="note" id="sigilRevealCountdown">hides by itself in '+HIDE_AFTER_S+' s, and the moment this tab leaves the front. Copying puts the secret on your clipboard — paste it only where you meant to, then copy something else.</div>';
     b.innerHTML=html;
     var cp=document.getElementById('sigilRevealCopy'); if(cp) cp.onclick=function(){ try{ navigator.clipboard.writeText(copyText).then(function(){ cp.textContent='✓ COPIED'; setTimeout(function(){ cp.textContent='COPY'; },1200); }); }catch(e){} };
+    var rc=document.getElementById('sigilRevealRigCopy'); if(rc&&rigSeed) rc.onclick=function(){ try{ navigator.clipboard.writeText(rigSeed).then(function(){ rc.textContent='✓ COPIED'; setTimeout(function(){ rc.textContent='COPY RIG SEED'; },1200); }); }catch(e){} };
     clearTimers(); var left=HIDE_AFTER_S;
     tick=setInterval(function(){ left--; var el=document.getElementById('sigilRevealCountdown'); if(el&&left>=0) el.textContent='hides by itself in '+left+' s, and the moment this tab leaves the front.'; },1000);
     timer=setTimeout(sigilRevealClose, HIDE_AFTER_S*1000);

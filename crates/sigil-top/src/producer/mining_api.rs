@@ -42,7 +42,14 @@ use std::time::Duration;
 /// `SIGIL_MONEY_API`) — a local producer's own mining API needs its own port so running
 /// `sigil-top` producer mode alongside a real local `sigil-node` (or the embedded wallet
 /// server) on the same box can never collide.
-pub const LOCAL_MINING_API_PORT: u16 = 18183;
+// 2026-09-11: was 18183, which COLLIDES with a sigil-node's raw tx-ingest bridge (it binds
+// 18183 too). On a box running both — the common case, an operator mining against their own
+// node — sigil-top's local mining API failed to bind, yet the old bare-TCP "is it up?" probe
+// connected to the node's ingest listener on that port and declared the local API up. The
+// miner was then pointed at 18183, whose /v1/mining/challenge answers {"error":"not found"},
+// and mining silently produced nothing ("challenge: error decoding response body"). Moved off
+// the node's ports entirely, AND the probe now checks IDENTITY, not just a TCP accept.
+pub const LOCAL_MINING_API_PORT: u16 = 18185;
 
 /// Flips to `true` only once [`spawn_local_mining_api`]'s bind-confirmation probe has
 /// actually observed the listener accepting connections — not merely "we asked it to
@@ -51,7 +58,7 @@ pub const LOCAL_MINING_API_PORT: u16 = 18183;
 /// beyond what it already uses for the probe itself).
 static LOCAL_MINING_API_UP: AtomicBool = AtomicBool::new(false);
 
-/// The local mining API port. Defaults to [`LOCAL_MINING_API_PORT`] (18183) but is
+/// The local mining API port. Defaults to [`LOCAL_MINING_API_PORT`] (18185) but is
 /// overridable via `SIGIL_LOCAL_MINING_API_PORT`. The default was chosen to be distinct
 /// from the node's own ports, but a sigil-node's raw tx-ingest bridge ALSO binds 18183 —
 /// so a sigil-top producer sharing a box with a node (or a test running on such a box)
@@ -125,7 +132,12 @@ pub fn spawn_local_mining_api(app: sigil_api::AppState) {
         // helps the success case; a truly unbindable port still logs failure (just
         // later), with the flag correctly staying false the whole time.
         for _ in 0..200 {
-            if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+            // IDENTITY, not just a TCP accept. A bare connect cannot tell OUR sigil-api from
+            // some other process holding the same port (a sigil-node's ingest bridge answers
+            // {"error":"not found"} for /v1/mining/challenge). Requiring a real mining
+            // challenge back — height + blake4 target — is what stops `engine_node_url()`
+            // from pointing the miner at a foreign, non-mining listener (the 18183 bug).
+            if responds_as_our_mining_api(&addr).await {
                 LOCAL_MINING_API_UP.store(true, Ordering::SeqCst);
                 crate::tlog!(
                     "[producer] \u{26cf} local mining API confirmed up on {addr} — \
@@ -135,8 +147,48 @@ pub fn spawn_local_mining_api(app: sigil_api::AppState) {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        crate::tlog!("[producer] \u{26a0} local mining API did not come up on {addr} within 10s");
+        crate::tlog!(
+            "[producer] \u{26a0} local mining API did not answer a valid challenge on {addr} \
+             within 10s — the miner will use the remote node instead"
+        );
     });
+}
+
+/// Is the responder on `addr` actually OUR mining API? Does a minimal HTTP/1.0 GET of the
+/// mining challenge and requires the response body to look like a real challenge (`height`
+/// and `blake4_target`). A sigil-node's tx-ingest bridge — which binds a nearby port and
+/// answers `{"error":"not found"}` — fails this, so it can never be mistaken for the local
+/// mining server. Raw HTTP over the existing tokio TcpStream keeps this module free of an
+/// extra HTTP-client dependency.
+async fn responds_as_our_mining_api(addr: &str) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream =
+        match tokio::time::timeout(Duration::from_millis(500), tokio::net::TcpStream::connect(addr))
+            .await
+        {
+            Ok(Ok(s)) => s,
+            _ => return false,
+        };
+    let req = format!(
+        "GET /v1/mining/challenge?wallet={z} HTTP/1.0\r\nHost: {addr}\r\nConnection: close\r\n\r\n",
+        z = "0".repeat(64),
+    );
+    if tokio::time::timeout(Duration::from_millis(500), stream.write_all(req.as_bytes()))
+        .await
+        .map(|r| r.is_err())
+        .unwrap_or(true)
+    {
+        return false;
+    }
+    let mut buf = Vec::new();
+    if tokio::time::timeout(Duration::from_millis(1500), stream.read_to_end(&mut buf))
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    let body = String::from_utf8_lossy(&buf);
+    body.contains("\"height\"") && body.contains("blake4_target")
 }
 
 #[cfg(test)]
@@ -157,7 +209,8 @@ mod tests {
         std::env::remove_var("SIGIL_LOCAL_MINING_API_PORT"); // assert the DEFAULT
         assert_ne!(LOCAL_MINING_API_PORT, 9800, "must not collide with the embedded wallet server");
         assert_ne!(LOCAL_MINING_API_PORT, 18181, "must not collide with the conventional remote sigil-api port");
-        assert_eq!(local_mining_api_addr(), "127.0.0.1:18183");
-        assert_eq!(local_mining_api_url(), "http://127.0.0.1:18183");
+        assert_ne!(LOCAL_MINING_API_PORT, 18183, "must not collide with a sigil-node's raw tx-ingest bridge (the 18183 bug)");
+        assert_eq!(local_mining_api_addr(), "127.0.0.1:18185");
+        assert_eq!(local_mining_api_url(), "http://127.0.0.1:18185");
     }
 }

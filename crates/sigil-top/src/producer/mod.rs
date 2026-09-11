@@ -146,7 +146,7 @@ pub fn should_produce() -> bool {
     //
     // Knock-on effect, and the second half of the same operator request ("fix miners server
     // to point to it self localhost"): once this starts, `mining_api` binds
-    // 127.0.0.1:18183 and `engine_node_url()` returns the LOCAL url instead of the central
+    // 127.0.0.1:18185 and `engine_node_url()` returns the LOCAL url instead of the central
     // node. A rig therefore mines against its own node automatically, with no
     // configuration — that wiring already existed and was simply unreachable while
     // production was opt-in.

@@ -617,9 +617,10 @@ mod tests {
         std::env::set_var("SIGIL_MINING_BLAKE4_BITS", "8");
         std::env::set_var("SIGIL_MINING_VDF_T", "4");
 
-        // The live sigil-node on this box binds 18183 (its raw tx-ingest port), which
-        // is our DEFAULT local-mining-API port — relocate to a free ephemeral port so
-        // the test is isolated from any co-located node. Serialized against the
+        // The live sigil-node on this box binds 18183 (its raw tx-ingest port); the local
+        // mining API default moved off it to 18185 for exactly that reason, but relocate to
+        // a free ephemeral port anyway so the test is isolated from any co-located node,
+        // whatever it binds. Serialized against the
         // addr-default assertion in mining_api via PORT_ENV_LOCK.
         let _port_g = mining_api::PORT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let free_port = {

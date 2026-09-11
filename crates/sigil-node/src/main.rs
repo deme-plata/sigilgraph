@@ -2074,11 +2074,20 @@ fn run_start() -> Result<()> {
                                     &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge,
                                     &shielded_bridge, &mut mint_hash_to_tx_hashes);
                                 applied += a; dag_ord_skipped += s; dag_apply_failed += f;
+                                // THE LIVE FOLLOW PATH. Instrumenting the backfill apply sites
+                                // alone left a follower's reported height frozen at the last
+                                // BACKFILLED block: happysrv caught up, tracked the tip at 17 ms
+                                // with zero equivocations, and still reported 6,052,793 forever,
+                                // so nothing could ever be compared at a matched height. Read it
+                                // from `chain.height()` rather than from whatever local variable
+                                // is nearby — the chain's own answer cannot drift from the chain.
+                                sigil_api::height::set(chain.height());
                                 ph_drain_us += _t_drain.elapsed().as_micros() as u64;
                                 true
                             } else {
                                 match chain.apply(block) {
                                     Ok(_) => {
+                                        sigil_api::height::set(chain.height());
                                         let _ = chain_log.append_bytes(&bytes);
                                         // Linear mode applies its own block synchronously, right
                                         // here — no candidate-racing, so no lookup needed: these

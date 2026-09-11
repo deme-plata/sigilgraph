@@ -715,7 +715,15 @@ pub enum StateMutation {
         /// `compress2(amount, blinding)` — the note the depositor can later spend.
         cm: [u8; 32],
         /// Sealed to the depositor's own delivery key (2026-09-08); see `SigilTx::Shield`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// 2026-09-11 — `skip_serializing_if` REMOVED for bincode symmetry. `StateMutation`
+        /// travels inside `Block.transition` on the bincode backfill wire, and bincode has no
+        /// field names to skip by: a skipped `None` writes zero bytes while the decoder still
+        /// reads a one-byte `Option` tag, desynchronising the stream from that record on. See
+        /// `SigilTx::Shield::note_ciphertext` and `SigilBlockHeaderV0::topology_commitment` —
+        /// same bug, third and fourth occurrence. Nothing here is hashed (no state root
+        /// serializes mutations; the chain log is JSON/MessagePack and both are
+        /// self-describing), so the attribute bought nothing and cost the second node its sync.
+        #[serde(default)]
         note_ciphertext: Option<String>,
     },
 
@@ -763,10 +771,18 @@ pub enum StateMutation {
         /// attributable at MINT time by design, private only at SPEND time. This makes
         /// discovery practical, not the note more visible.
         ///
-        /// `Option` + `skip_serializing_if` so a `None` serializes byte-identically to
-        /// every block minted before this field existed — historical bodies, and the
-        /// roots computed over them, are untouched.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// `Option` + `#[serde(default)]` so a `None` still reads back from every block minted
+        /// before this field existed — historical bodies, and the roots computed over them, are
+        /// untouched, because nothing hashes a mutation and the chain log is self-describing.
+        /// 2026-09-11 — `skip_serializing_if` REMOVED for bincode symmetry. `StateMutation`
+        /// travels inside `Block.transition` on the bincode backfill wire, and bincode has no
+        /// field names to skip by: a skipped `None` writes zero bytes while the decoder still
+        /// reads a one-byte `Option` tag, desynchronising the stream from that record on. See
+        /// `SigilTx::Shield::note_ciphertext` and `SigilBlockHeaderV0::topology_commitment` —
+        /// same bug, third and fourth occurrence. Nothing here is hashed (no state root
+        /// serializes mutations; the chain log is JSON/MessagePack and both are
+        /// self-describing), so the attribute bought nothing and cost the second node its sync.
+        #[serde(default)]
         ct: Option<String>,
     },
 

@@ -706,3 +706,99 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
+
+// ── THE BLOCK-BODY WIRE ─────────────────────────────────────────────────────────────────
+//
+// `BackfillResp` was bincode. `Block` carries `Vec<SigilEvent>`, and `SigilEvent` is declared
+// `#[serde(tag = "kind")]` — an INTERNALLY TAGGED enum. serde implements those by buffering the
+// input and calling `deserialize_any`, and bincode, not being self-describing, cannot answer
+// that. It never could. So a block carrying any event could be ENCODED and never DECODED.
+//
+// It went unnoticed because on a shielded-only chain almost no block carried an event: the one
+// transaction kind users can make emitted nothing (that was itself a bug, fixed the same day).
+// The failure therefore looked like a flaky link — `io error: unexpected end of file`, on a
+// payload that arrived complete and intact. happysrv sat at height 7,504 for days, receiving
+// every one of the 375,216 bytes Epsilon sent it, unable to read them.
+//
+// `chain_log` already faced this exact choice for storage and wrote down the answer in its own
+// module docs: MessagePack, "compact AND self-describing", explicitly NOT bincode. The wire now
+// makes the same choice, for the same reason.
+//
+// Framing: an 8-byte magic, then MessagePack. A legacy bincode payload begins with the block
+// count as a u64 little-endian, so for it to be mistaken for this magic it would have to claim
+// roughly 1.4e16 blocks — the two can never be confused, and a node still running the old code
+// is read correctly by the fallback below rather than misparsed.
+const BACKFILL_BODY_MAGIC: &[u8; 8] = b"SIGILM1\0";
+
+/// Encode a block-range response. MessagePack behind a magic prefix.
+pub fn encode_backfill_resp(resp: &crate::BackfillResp) -> Vec<u8> {
+    match rmp_serde::to_vec_named(resp) {
+        Ok(body) => {
+            let mut out = Vec::with_capacity(body.len() + BACKFILL_BODY_MAGIC.len());
+            out.extend_from_slice(BACKFILL_BODY_MAGIC);
+            out.extend_from_slice(&body);
+            out
+        }
+        Err(e) => {
+            // Never `unwrap_or_default()` here. An empty body is a VALID-LOOKING response that
+            // the peer will cache and serve forever, turning one transient failure into a
+            // permanent hole at that height. Say so and send nothing.
+            eprintln!("🚨 rr-backfill: could not encode {} blocks for the wire: {e} — sending nothing rather than an empty response that would be cached as if it were correct", resp.blocks.len());
+            Vec::new()
+        }
+    }
+}
+
+/// Decode a block-range response: MessagePack when the magic is present, legacy bincode
+/// otherwise, so a peer that has not been upgraded yet is still read correctly.
+pub fn decode_backfill_resp(bytes: &[u8]) -> Result<crate::BackfillResp, String> {
+    if bytes.len() >= BACKFILL_BODY_MAGIC.len() && &bytes[..BACKFILL_BODY_MAGIC.len()] == BACKFILL_BODY_MAGIC {
+        return rmp_serde::from_slice(&bytes[BACKFILL_BODY_MAGIC.len()..]).map_err(|e| e.to_string());
+    }
+    bincode::deserialize(bytes).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod backfill_body_wire {
+    use super::*;
+
+    /// The magic must be unmistakable for a legacy payload. A bincode `Vec` begins with its
+    /// length as u64 LE; reading this magic as that length gives a block count no chain will
+    /// ever have, which is what makes the fallback safe rather than lucky.
+    #[test]
+    fn the_magic_cannot_be_a_plausible_legacy_length() {
+        let as_len = u64::from_le_bytes(*BACKFILL_BODY_MAGIC);
+        assert!(as_len > 1_000_000_000_000_000, "magic must be an absurd block count, got {as_len}");
+    }
+
+    /// A response carrying events must survive the round trip. Under bincode this was
+    /// impossible; that is the whole reason this module exists.
+    #[test]
+    fn a_response_with_events_round_trips() {
+        use sigil_events::SigilEvent;
+        let ev = SigilEvent::ShieldedSend {
+            token_hint: [0u8; 32], fee: 1, n_inputs: 1, n_outputs: 2,
+            proof_digest: [1u8; 32], pool_root_at_proof: [2u8; 32],
+        };
+        let blk = crate::block::Block {
+            header: sigil_header::SigilBlockHeaderV0::default(),
+            transition: sigil_state::StateTransition { at_height: 1, mutations: vec![] },
+            events: vec![ev],
+        };
+        let resp = crate::BackfillResp { blocks: vec![blk] };
+        let bytes = encode_backfill_resp(&resp);
+        assert!(!bytes.is_empty(), "encoding must not silently produce an empty body");
+        let back = decode_backfill_resp(&bytes).expect("a block with events must decode");
+        assert_eq!(back.blocks.len(), 1);
+        assert_eq!(back.blocks[0].events.len(), 1);
+    }
+
+    /// A legacy bincode payload from a not-yet-upgraded peer still reads.
+    #[test]
+    fn a_legacy_bincode_payload_still_decodes() {
+        let resp = crate::BackfillResp { blocks: vec![] };
+        let legacy = bincode::serialize(&resp).expect("legacy encode");
+        let back = decode_backfill_resp(&legacy).expect("legacy peers must still be readable");
+        assert_eq!(back.blocks.len(), 0);
+    }
+}

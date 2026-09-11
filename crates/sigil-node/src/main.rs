@@ -30,6 +30,7 @@ mod search_index;
 mod serve_read; // header-only reads for the backfill SERVE path — see its module doc
 mod producer_signing;
 mod finality_wire; // Phase 2 finality observer plumbing — zero consensus effect, see its module doc
+mod peer_pick; // 2026-09-11: ask only peers whose advertised height covers the range — see its module doc
 mod peer_view; // 2026-09-07: tip hash + wallet state root + finalized on the peer-heights heartbeat; per-peer agreement verdicts for the K-gauge v2
 mod follower_reorg; // 2026-09-08: roll a forked follower back to a checkpoint below the fork so it can rejoin canonical (SIGIL_FOLLOWER_REORG=1); see its module doc
 
@@ -86,8 +87,8 @@ struct BackfillReq {
 /// Point-to-point backfill response: the requested block range serialized as
 /// JSON values (each element = `serde_json::to_value(&Block)`).
 #[derive(serde::Serialize, serde::Deserialize)]
-struct BackfillResp {
-    blocks: Vec<crate::block::Block>,
+pub(crate) struct BackfillResp {
+    pub(crate) blocks: Vec<crate::block::Block>,
 }
 
 // ── codec=2 SNAPSHOT WIRE — server side (LANE-B, rocky-sync-B; v3 sync sprint) ──────────
@@ -1478,6 +1479,24 @@ fn run_start() -> Result<()> {
         // A fix that makes its own new bug is not finished. Bound the thing that actually costs:
         // requests in flight.
         let inflight_reqs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // 2026-09-11 — ONE REQUEST PER RANGE, AND BACK OFF WHEN IT FAILS.
+        //
+        // `inflight_reqs` bounds how many requests are open; it says nothing about WHICH. When a
+        // range failed, `refetch_from` rewound the frontier to it and the loop re-issued it on the
+        // very next pass, so every open slot piled onto the SAME range and each failure produced
+        // an immediate retry. Measured on happysrv: `decode failed for [7504..=7760)` roughly ten
+        // times a SECOND, against a server that answers that range from cache in microseconds —
+        // 2,174 cache hits to 28 misses. The payload was never the problem: Epsilon serves it as a
+        // healthy 257 blocks / 375,216 B, and the same node was concurrently pulling [17360..],
+        // [21360..], [26360..] and [32610..] just fine.
+        //
+        // What it was, was a hammer. A stall that retries without backoff turns one failure into a
+        // storm, and the storm is then indistinguishable from the fault that started it — which is
+        // exactly why four correct fixes to sizing and peer choice never moved this number.
+        let inflight_ranges: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<(u64, u64)>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let range_fails: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<(u64, u64), (u32, std::time::Instant)>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let inflight_cap: usize = std::env::var("SIGIL_FETCH_INFLIGHT")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(16);
         const FETCH_MAX_AHEAD: u64 = 131_072; // keep ~16 ranges in flight ahead of the applied tip
@@ -1501,27 +1520,74 @@ fn run_start() -> Result<()> {
                     && req_frontier < tip + FETCH_MAX_AHEAD
                     && inflight_reqs.load(std::sync::atomic::Ordering::Relaxed) < inflight_cap
                 {
-                    // Order peers best-score-first, then rotate the starting point so a healthy
-                    // peer set shares the load instead of one peer carrying every request.
+                    // WHICH RANGE, decided before WHICH PEER — because the peer has to be one
+                    // that actually holds it.
+                    let from = req_frontier;
+                    let chunk = fetch_chunk.load(std::sync::atomic::Ordering::Relaxed).max(FETCH_CHUNK_MIN);
+                    let to = (from + chunk).min(net_tip);
+
+                    // A peer can only serve a range it HAS, and until 2026-09-11 this loop never
+                    // asked. It sorted every connected peer by score and rotated among the top
+                    // three, so a peer we had never heard a height from ranked exactly like one
+                    // we had measured serving 400 KB chunks a second ago.
+                    //
+                    // Measured live on happysrv, which is the whole redundancy story of this
+                    // chain: it knew exactly ONE peer's height — Epsilon, 6M blocks ahead and
+                    // demonstrably serving — and spent its requests on two OTHER peers whose
+                    // heights it had never heard. Those answered with timeouts and short frames
+                    // that the decoder reported as "io error: unexpected end of file", which
+                    // reads like a transport fault and is nothing of the kind: it is the shape of
+                    // asking someone a question they cannot answer. Meanwhile the same node was
+                    // serving `0 HEADERS [6010000..=7503]` many times a second to a peer asking
+                    // IT for history 6M blocks above its tip — the identical mistake, inbound.
+                    //
+                    // A node that cannot fetch history cannot join, and a chain whose second node
+                    // cannot join has no redundancy however many nodes are listed in it.
                     let chosen = {
-                        let mut ps: Vec<_> = mgr.connected_peers();
-                        if ps.is_empty() {
-                            None
-                        } else {
-                            let scores = match peer_scores.lock() { Ok(g) => g, Err(e) => e.into_inner() };
-                            ps.sort_by_key(|p| *scores.get(&p.to_string()).unwrap_or(&0));
-                            drop(scores);
-                            peer_rr = peer_rr.wrapping_add(1);
-                            // Rotate only among peers sharing the best score, so rotation never
-                            // hands work back to a peer we already know is failing.
-                            let best = ps.len().min(3);
-                            Some(ps[peer_rr % best])
-                        }
+                        let ps: Vec<String> = mgr.connected_peers().iter().map(|p| p.to_string()).collect();
+                        // Advertised heights arrive on the peer-heights gossip topic, keyed by
+                        // real peer id. See `peer_pick` for why capability, not score, comes first.
+                        let heights = mgr
+                            .summary()
+                            .mesh_health
+                            .map(|h| h.peer_heights)
+                            .unwrap_or_default();
+                        let scores = match peer_scores.lock() { Ok(g) => g.clone(), Err(e) => e.into_inner().clone() };
+                        peer_rr = peer_rr.wrapping_add(1);
+                        crate::peer_pick::choose_capable_peer(&ps, &heights, &scores, to, peer_rr)
+                            .and_then(|want| mgr.connected_peers().into_iter().find(|p| p.to_string() == want))
                     };
+                    // No peer can serve this range right now. Stop the pass rather than spin:
+                    // nothing in the loop condition changes on its own, so continuing here is a
+                    // busy-wait that also floods the mesh.
+                    if chosen.is_none() {
+                        break;
+                    }
+                    // Already asking for exactly this range? Then asking again is not redundancy,
+                    // it is a hammer. And a range that just failed gets a widening pause before it
+                    // is tried again, so one stall cannot turn into a request storm.
+                    {
+                        let key = (from, to);
+                        let mut infl = match inflight_ranges.lock() { Ok(g) => g, Err(e) => e.into_inner() };
+                        if infl.contains(&key) {
+                            break;
+                        }
+                        let hold = {
+                            let f = match range_fails.lock() { Ok(g) => g, Err(e) => e.into_inner() };
+                            match f.get(&key) {
+                                // 250 ms, 500 ms, 1 s, 2 s … capped at 8 s. Long enough that a
+                                // failing range stops drowning the link, short enough that a
+                                // genuinely transient fault costs almost nothing.
+                                Some((n, at)) => at.elapsed() < crate::peer_pick::retry_hold(*n),
+                                None => false,
+                            }
+                        };
+                        if hold {
+                            break;
+                        }
+                        infl.insert(key);
+                    }
                     if let Some(peer) = chosen {
-                        let from = req_frontier;
-                        let chunk = fetch_chunk.load(std::sync::atomic::Ordering::Relaxed).max(FETCH_CHUNK_MIN);
-                        let to = (from + chunk).min(net_tip);
                         let req = BackfillReq { from, to, headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()) };
                         let mgr2 = std::sync::Arc::clone(&mgr);
                         let bf_tx2 = bf_tx.clone();
@@ -1530,6 +1596,8 @@ fn run_start() -> Result<()> {
                         let scores_ad = std::sync::Arc::clone(&peer_scores);
                         let peer_key_ad = peer.to_string();
                         let inflight_ad = std::sync::Arc::clone(&inflight_reqs);
+                        let infl_ranges_ad = std::sync::Arc::clone(&inflight_ranges);
+                        let range_fails_ad = std::sync::Arc::clone(&range_fails);
                         inflight_reqs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tokio::spawn(async move {
                             use std::sync::atomic::Ordering as AOrd;
@@ -1545,6 +1613,14 @@ fn run_start() -> Result<()> {
                                     eprintln!("⇩ rr-backfill: {why} for [{from}..={to}) — fetch chunk {cur} → {next}");
                                 }
                                 redo_ad.fetch_min(from, AOrd::Relaxed);
+                                // Count this range's consecutive failures so the next attempt at it
+                                // waits longer. Without this the rewind below re-issues instantly.
+                                {
+                                    let mut f = match range_fails_ad.lock() { Ok(g) => g, Err(e) => e.into_inner() };
+                                    let e = f.entry((from, to)).or_insert((0, std::time::Instant::now()));
+                                    e.0 = e.0.saturating_add(1);
+                                    e.1 = std::time::Instant::now();
+                                }
                                 // Penalise the peer that failed, bounded so it can recover.
                                 let mut g = match scores_ad.lock() { Ok(g) => g, Err(e) => e.into_inner() };
                                 let e = g.entry(peer_key_ad.clone()).or_insert(0);
@@ -1555,6 +1631,11 @@ fn run_start() -> Result<()> {
                                 let mut g = match scores_ad.lock() { Ok(g) => g, Err(e) => e.into_inner() };
                                 let e = g.entry(peer_key_ad.clone()).or_insert(0);
                                 *e = (*e - 1).max(0);
+                                drop(g);
+                                // The range worked — forget its history so a later, unrelated
+                                // failure starts from a short pause rather than a long one.
+                                let mut f = match range_fails_ad.lock() { Ok(g) => g, Err(e) => e.into_inner() };
+                                f.remove(&(from, to));
                             };
                             // 2026-08-19 (deep-catchup stall investigation): every failure
                             // branch here used to be silent (`unwrap_or_default()` /
@@ -1566,7 +1647,7 @@ fn run_start() -> Result<()> {
                             // that isn't a clean non-empty success.
                             let blocks = match serde_json::to_vec(&req) {
                                 Ok(payload) => match mgr2.send_request(peer, payload).await {
-                                    Ok(bytes) => match bincode::deserialize::<BackfillResp>(&bytes) {
+                                    Ok(bytes) => match crate::serve_read::decode_backfill_resp(&bytes) {
                                         Ok(r) => {
                                             if r.blocks.is_empty() {
                                                 eprintln!("⚠ rr-backfill(windowed): peer {peer} returned an EMPTY response for [{from}..={to}) — request-ahead slot stuck");
@@ -1585,7 +1666,16 @@ fn run_start() -> Result<()> {
                                             r.blocks
                                         }
                                         Err(e) => {
-                                            eprintln!("⚠ rr-backfill(windowed): decode failed for [{from}..={to}) from {peer}: {e}");
+                                            // SAY WHAT ARRIVED. "decode failed" alone cannot tell
+                                            // an empty response from a truncated one from a
+                                            // well-formed message in the wrong format, and those
+                                            // three have completely different causes. Epsilon logs
+                                            // this exact range as 257 blocks / 375,216 B, so the
+                                            // byte count here is the one number that settles it.
+                                            let head: String = bytes.iter().take(8)
+                                                .map(|b| format!("{b:02x}")).collect();
+                                            eprintln!("⚠ rr-backfill(windowed): decode failed for [{from}..={to}) from {peer}: {e} · received {} B, first bytes {}",
+                                                bytes.len(), if head.is_empty() { "(none)".into() } else { head });
                                             fail("decode failed");
                                             Vec::new()
                                         }
@@ -1604,6 +1694,12 @@ fn run_start() -> Result<()> {
                             };
                             let _ = bf_tx2.send(blocks).await;
                             inflight_ad.fetch_sub(1, AOrd::Relaxed);
+                            // Release the range so it can be retried (after its backoff) or
+                            // advanced past. Held for the life of the request, never longer.
+                            {
+                                let mut infl = match infl_ranges_ad.lock() { Ok(g) => g, Err(e) => e.into_inner() };
+                                infl.remove(&(from, to));
+                            }
                         });
                         req_frontier += chunk;
                     } else { break; }
@@ -2327,6 +2423,32 @@ fn run_start() -> Result<()> {
                                     .map(|n| n.clamp(8192, 262_144)).unwrap_or(32_768)
                             } else { 8192 };
                             let hi = req.to.min(top).min(lo.saturating_add(serve_cap));
+
+                            // WE DO NOT HAVE IT — say so at once instead of doing the work to
+                            // answer "nothing". When `req.from` is above our tip the clamp above
+                            // leaves the range INVERTED (lo > hi) and the reader below dutifully
+                            // produces an empty body. Live on 2026-09-11 that was
+                            // `served 0 HEADERS [6010000..=7503]`, several times a second, from a
+                            // node 6M blocks behind being asked for blocks near the tip.
+                            //
+                            // Each of those costs a request-response slot on both sides, and the
+                            // same node's OWN catch-up requests were timing out behind exactly
+                            // this traffic — the stall was partly self-inflicted, inbound. The
+                            // requester-side fix (ask only peers whose advertised height covers
+                            // the range) is the real cure; this is the other half, so that a peer
+                            // running older code cannot do it to us either.
+                            if lo > top {
+                                static ABOVE_TIP: std::sync::atomic::AtomicU64 =
+                                    std::sync::atomic::AtomicU64::new(0);
+                                let n = ABOVE_TIP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                if n % 256 == 0 {
+                                    eprintln!(
+                                        "↩ rr-backfill: REFUSED [{}..={}] from {} — starts above our tip {} (we do not have it; {} such requests so far)",
+                                        req.from, req.to, peer, top, n + 1
+                                    );
+                                }
+                                continue;
+                            }
                             let wbase = chain.window_base();
                             // v0.33.6: a range entirely BELOW the live window is FINALIZED — its
                             // bytes never change, so cache + replay them. The tip/window chunk is
@@ -2531,7 +2653,7 @@ fn run_start() -> Result<()> {
                                     let n = blocks.len();
                                     let resp = BackfillResp { blocks };
                                     let blob = std::sync::Arc::new(
-                                        bincode::serialize(&resp).unwrap_or_default(),
+                                        crate::serve_read::encode_backfill_resp(&resp),
                                     );
                                     // Respond FIRST — the peer must not wait on our caching.
                                     mgr2.respond(request_id, blob.as_ref().clone());
@@ -2777,7 +2899,7 @@ fn run_start() -> Result<()> {
                                 };
                                 eprintln!("↩ rr-backfill: served {} blocks [{}..={}] to {}",
                                     resp.blocks.len(), lo, hi, peer);
-                                bincode::serialize(&resp).unwrap_or_default()
+                                crate::serve_read::encode_backfill_resp(&resp)
                             };
                             // ── CACHE FILL (finalized ranges only), FIFO-capped ──
                             if immutable && !out.is_empty() {
@@ -3054,7 +3176,7 @@ fn run_start() -> Result<()> {
                                                             let _permit = permit; // held until this task ends
                                                             if let Ok(payload) = serde_json::to_vec(&req) {
                                                                 if let Ok(bytes) = mgr2.send_request(peer, payload).await {
-                                                                    if let Ok(resp) = bincode::deserialize::<BackfillResp>(&bytes) {
+                                                                    if let Ok(resp) = crate::serve_read::decode_backfill_resp(&bytes) {
                                                                         let _ = bf_tx2.send(resp.blocks).await;
                                                                     }
                                                                 }
@@ -3140,7 +3262,7 @@ fn run_start() -> Result<()> {
                                                     Err(_) => return,
                                                 };
                                                 if let Ok(bytes) = mgr2.send_request(peer, payload).await {
-                                                    if let Ok(resp) = bincode::deserialize::<BackfillResp>(&bytes) {
+                                                    if let Ok(resp) = crate::serve_read::decode_backfill_resp(&bytes) {
                                                         let _ = bf_tx2.send(resp.blocks).await;
                                                     }
                                                 }
@@ -3315,24 +3437,33 @@ fn run_start() -> Result<()> {
                                     // size that has not already been proven too large for the
                                     // request timeout, and do not hand every request to whichever
                                     // peer happens to sort first.
+                                    // 2026-09-11, THE THIRD CORRECTION TO THIS LOOP — and the one
+                                    // that was actually load-bearing. Adaptive sizing and peer
+                                    // rotation both landed here and happysrv still did not move,
+                                    // because neither asked the only question that matters: does
+                                    // this peer HAVE the blocks? It knew Epsilon's height (6M, and
+                                    // serving) and sent these requests to two peers whose heights
+                                    // it had never heard. Range first, then a peer that holds it.
+                                    let ph_chunk = fetch_chunk
+                                        .load(std::sync::atomic::Ordering::Relaxed)
+                                        .max(FETCH_CHUNK_MIN);
+                                    let ph_to = expected.saturating_add(ph_chunk);
                                     let ph_peer = {
-                                        let mut ps: Vec<_> = mgr.connected_peers();
-                                        if ps.is_empty() { None } else {
-                                            let scores = match peer_scores.lock() { Ok(g) => g, Err(e) => e.into_inner() };
-                                            ps.sort_by_key(|p| *scores.get(&p.to_string()).unwrap_or(&0));
-                                            drop(scores);
-                                            peer_rr = peer_rr.wrapping_add(1);
-                                            let best = ps.len().min(3);
-                                            Some(ps[peer_rr % best])
-                                        }
+                                        let ps: Vec<String> = mgr.connected_peers().iter().map(|p| p.to_string()).collect();
+                                        let heights = mgr
+                                            .summary()
+                                            .mesh_health
+                                            .map(|h| h.peer_heights)
+                                            .unwrap_or_default();
+                                        let scores = match peer_scores.lock() { Ok(g) => g.clone(), Err(e) => e.into_inner().clone() };
+                                        peer_rr = peer_rr.wrapping_add(1);
+                                        crate::peer_pick::choose_capable_peer(&ps, &heights, &scores, ph_to, peer_rr)
+                                            .and_then(|want| mgr.connected_peers().into_iter().find(|p| p.to_string() == want))
                                     };
                                     if let Some(peer) = ph_peer {
-                                        let ph_chunk = fetch_chunk
-                                            .load(std::sync::atomic::Ordering::Relaxed)
-                                            .max(FETCH_CHUNK_MIN);
                                         let req = BackfillReq {
                                             from: expected,
-                                            to: expected.saturating_add(ph_chunk),
+                                            to: ph_to,
                                             headers_only: false,
                                             codec: 0, // node-to-node needs full blocks; raw JSON path
                                             handshake: Some((*sync_hs).clone()),
@@ -3375,7 +3506,7 @@ fn run_start() -> Result<()> {
                                             // by hand from the source.
                                             match serde_json::to_vec(&req) {
                                                 Ok(payload) => match mgr2.send_request(peer, payload).await {
-                                                    Ok(bytes) => match bincode::deserialize::<BackfillResp>(&bytes) {
+                                                    Ok(bytes) => match crate::serve_read::decode_backfill_resp(&bytes) {
                                                         Ok(resp) => {
                                                             if resp.blocks.is_empty() {
                                                                 eprintln!("⚠ rr-backfill(peer-heights): peer {peer} returned an EMPTY response for [{req_from}..={req_to}) — the repeating-request-no-progress symptom");

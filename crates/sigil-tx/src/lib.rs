@@ -151,7 +151,26 @@ pub enum SigilTx {
         /// to the others' deposits (browser could not spend MCP deposits, MCP could not see
         /// the browser's). Optional and absent from the wire when unset, so every Shield
         /// already in the chain log serializes byte-identically and keeps its hash.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// 2026-09-11 — `skip_serializing_if` REMOVED. It was added here on 2026-09-08 to keep
+        /// historical `Shield` hashes stable, and it did that, but `SigilTx` is ALSO
+        /// bincode-serialized on the backfill wire (`BackfillResp`), and bincode is not
+        /// self-describing: it has no field names to skip by. A skipped `None` wrote ZERO bytes
+        /// while the decoder still read a one-byte `Option` tag, so the whole stream shifted by
+        /// one byte from that record onward and ran off the end — `io error: unexpected end of
+        /// file`, with the buffer fully received and intact.
+        ///
+        /// That is precisely the second 2026-08-15 incident on
+        /// `SigilBlockHeaderV0::topology_commitment`, whose doc comment spells the whole thing
+        /// out and ends "bincode must never see field-skipping". Three weeks later the same
+        /// attribute went into this crate and sigil-state twice more, and nothing caught it
+        /// because the chain log is JSON/MessagePack — both self-describing, both perfectly happy
+        /// with a skipped field. Only the bincode wire breaks, so it only breaks for a node
+        /// fetching HISTORY, which is to say: only the second node, only the thing redundancy is
+        /// made of. happysrv sat at height 7,504 for days on this.
+        ///
+        /// Hash stability is kept the way the header keeps it — explicitly, inside [`encode`],
+        /// not by deforming this struct's general Serialize impl.
+        #[serde(default)]
         note_ciphertext: Option<String>,
     },
 
@@ -521,6 +540,25 @@ pub enum SigilTx {
         #[serde(with = "u128_str")]
         fee: u128,
     },
+    /// USDS-live (2026-09-11) — the master wallet appoints a **feeder**
+    /// wallet that may push oracle prices in its stead. Written into
+    /// `sigil_oracle::FEEDER_SLOT` (state-committed, so every node agrees on
+    /// who the feeder is). Delegating to the all-zero wallet revokes. Signer
+    /// must be the state-committed master wallet. Refused before
+    /// `sigil_usds::USDS_LIVE_HEIGHT`.
+    ///
+    /// Appended LAST so every existing variant keeps its bincode index — the
+    /// backfill wire is bincode and is not self-describing (see the
+    /// `note_ciphertext` doc comment for what a shifted variant does to it).
+    OracleDelegate {
+        /// The delegating authority — must equal the chain's master wallet.
+        authority: WalletId,
+        /// The wallet being granted push rights (all-zero = revoke).
+        feeder: WalletId,
+        /// Fee in native SIGIL, paid by the authority.
+        #[serde(with = "u128_str")]
+        fee: u128,
+    },
 }
 
 /// Compact tag for indexing — matches [`SigilEvent::tag`] convention. The
@@ -554,6 +592,7 @@ impl SigilTx {
             SigilTx::CitizenAttest   { .. } => 20,
             SigilTx::WelfareClaim    { .. } => 21,
             SigilTx::OraclePush      { .. } => 22,
+            SigilTx::OracleDelegate  { .. } => 23,
         }
     }
 
@@ -583,7 +622,8 @@ impl SigilTx {
             SigilTx::BankExecute     { fee, .. } |
             SigilTx::CitizenAttest   { fee, .. } |
             SigilTx::WelfareClaim    { fee, .. } |
-            SigilTx::OraclePush      { fee, .. } => *fee,
+            SigilTx::OraclePush      { fee, .. } |
+            SigilTx::OracleDelegate  { fee, .. } => *fee,
         }
     }
 
@@ -621,6 +661,7 @@ impl SigilTx {
             SigilTx::CitizenAttest { authority, .. } => *authority,
             SigilTx::WelfareClaim { citizen, .. } => *citizen,
             SigilTx::OraclePush { authority, .. } => *authority,
+            SigilTx::OracleDelegate { authority, .. } => *authority,
         }
     }
 
@@ -647,13 +688,123 @@ impl SigilTx {
     /// Deterministic bytes for signing — canonical JSON in P0, swaps to
     /// bincode with [`sigil_events`] in P3.
     pub fn encode(&self) -> Vec<u8> {
-        serde_json::to_vec(self).unwrap_or_default()
+        strip_null_note_ciphertext_for_hashing(serde_json::to_vec(self).unwrap_or_default())
     }
 
     /// BLAKE3 of the encoded bytes — the tx hash. Stable identifier across
     /// mempool, gossip, indexers, RPC.
     pub fn hash(&self) -> [u8; 32] {
         *blake3::hash(&self.encode()).as_bytes()
+    }
+}
+
+/// The exact JSON fragment `serde_json` emits for a `None` `note_ciphertext` now that the field
+/// carries plain `#[serde(default)]` and no `skip_serializing_if`.
+const NULL_NOTE_CIPHERTEXT_JSON_FRAGMENT: &str = ",\"note_ciphertext\":null";
+
+/// Strip [`NULL_NOTE_CIPHERTEXT_JSON_FRAGMENT`] so [`SigilTx::encode`] — and therefore
+/// [`SigilTx::hash`] — produces byte-identical output to what it produced before the field
+/// existed. Every `Shield` already in the chain keeps its txid.
+///
+/// This is deliberately surgery on `encode`'s own output rather than an attribute on the struct:
+/// an attribute changes what EVERY serializer does, including the bincode one that cannot cope
+/// with it. Hash stability is a property of this function; wire correctness is a property of the
+/// plain, uniform derive. Same split, same reasoning, as
+/// `sigil_header::strip_null_topology_commitment_for_hashing`.
+fn strip_null_note_ciphertext_for_hashing(mut json: Vec<u8>) -> Vec<u8> {
+    if let Ok(text) = std::str::from_utf8(&json) {
+        if let Some(pos) = text.find(NULL_NOTE_CIPHERTEXT_JSON_FRAGMENT) {
+            json.drain(pos..pos + NULL_NOTE_CIPHERTEXT_JSON_FRAGMENT.len());
+        }
+    }
+    json
+}
+
+#[cfg(test)]
+mod wire_symmetry {
+    //! What this type can and cannot travel on, established by measurement rather than belief.
+    //!
+    //! `SigilTx` is `#[serde(tag = "kind")]` — INTERNALLY TAGGED. serde implements those by
+    //! buffering and calling `deserialize_any`, which bincode (not self-describing) cannot
+    //! answer. So `SigilTx` has never been bincode-decodable and never will be while that
+    //! attribute stands. That is fine, and load-bearing to know: it must never be put on a
+    //! bincode wire. The block-backfill wire carries `StateMutation` and `SigilEvent`, not this
+    //! type, and `SigilEvent` had the same attribute with the opposite outcome — it IS on that
+    //! wire, which is what stalled the second node for days (see `serve_read`).
+    use super::*;
+
+    fn shield(ct: Option<String>) -> SigilTx {
+        SigilTx::Shield { from: [9u8; 32], amount: 1_000, cm: [3u8; 32], fee: 100, note_ciphertext: ct }
+    }
+
+    /// Pinned so nobody "optimises" a bincode wire into carrying this type and then spends days
+    /// reading `unexpected end of file` as a network fault.
+    #[test]
+    fn sigil_tx_is_internally_tagged_and_therefore_not_bincode_decodable() {
+        let bytes = bincode::serialize(&shield(None)).expect("encoding succeeds — decoding is the problem");
+        assert!(
+            bincode::deserialize::<SigilTx>(&bytes).is_err(),
+            "if this passes, the `tag = \"kind\"` attribute is gone and a bincode wire became possible"
+        );
+    }
+
+    /// …and it round-trips fine on a self-describing codec, which is what every path that
+    /// actually carries it uses (JSON on the chain log and the API, MessagePack on disk).
+    #[test]
+    fn sigil_tx_round_trips_on_a_self_describing_codec() {
+        for ct in [None, Some("sealed".to_string())] {
+            let tx = shield(ct);
+            let json = serde_json::to_vec(&tx).unwrap();
+            let back: SigilTx = serde_json::from_slice(&json).expect("json round-trip");
+            assert_eq!(tx, back);
+        }
+    }
+
+    /// Removing `skip_serializing_if` must NOT re-hash history. `hash()` is BLAKE3 over
+    /// `encode()`, and `encode()` strips the null fragment, so a `None` Shield keeps the txid it
+    /// has had since before the field existed. Wire correctness and hash stability, both — which
+    /// is the whole reason the surgery lives in `encode` and not on the struct.
+    #[test]
+    fn a_none_ciphertext_keeps_its_historical_txid() {
+        let tx = shield(None);
+        let raw = String::from_utf8(serde_json::to_vec(&tx).unwrap()).unwrap();
+        assert!(
+            raw.contains("\"note_ciphertext\":null"),
+            "the derive must now EMIT the field — that emission is what keeps every serializer uniform"
+        );
+        let historical = raw.replace(NULL_NOTE_CIPHERTEXT_JSON_FRAGMENT, "");
+        assert_eq!(
+            tx.hash(),
+            *blake3::hash(historical.as_bytes()).as_bytes(),
+            "a None Shield must keep the txid it had before this field existed"
+        );
+        let some = shield(Some("x".into()));
+        assert_eq!(some.hash(), *blake3::hash(&serde_json::to_vec(&some).unwrap()).as_bytes());
+    }
+
+    /// THE PREVENTATIVE. This attribute has now caused four incidents in three crates — the
+    /// header's `topology_commitment` twice on 2026-08-15, this field, and two in sigil-state —
+    /// every one added in good faith for byte-stability, every one invisible until a node tried
+    /// to fetch history. Only a source-level guard would have caught all four.
+    ///
+    /// It inspects ATTRIBUTE lines specifically: a substring search over the whole file matches
+    /// this test's own explanation, which is how the first version of this guard failed.
+    #[test]
+    fn no_serde_attribute_in_this_crate_skips_a_field() {
+        let src = include_str!("lib.rs");
+        for (n, line) in src.lines().enumerate() {
+            let t = line.trim();
+            if !t.starts_with("#[serde(") {
+                continue;
+            }
+            assert!(
+                !t.contains("skip_serializing_if"),
+                "line {}: a skipped field writes nothing while a non-self-describing decoder \
+                 still reads it, desynchronising every value after it. Keep hash stability in \
+                 `encode()` instead — see `note_ciphertext`.",
+                n + 1
+            );
+        }
     }
 }
 
@@ -1323,6 +1474,19 @@ pub enum TxApplyError {
     #[error("nation feature not active: activates at height {activates_at}, tx at {height}")]
     NationNotActive { height: u64, activates_at: u64 },
 
+    /// USDS mint/redeem/delegate before `sigil_usds::USDS_LIVE_HEIGHT`. The
+    /// whole feature set flips on at one height so every node agrees.
+    #[error("USDS not active: activates at height {activates_at}, tx at {height}")]
+    UsdsNotActive { height: u64, activates_at: u64 },
+    /// A transparent Send of a NON-native token before `USDS_LIVE_HEIGHT`.
+    /// (A native Send is `TransparentSendRetired`, forever.)
+    #[error("token transfers not active: activates at height {activates_at}, tx at {height}")]
+    TokenSendNotActive { height: u64, activates_at: u64 },
+    /// OraclePush signed by a wallet that is neither the master nor the
+    /// state-committed feeder.
+    #[error("oracle push refused: signer is neither the master wallet nor the delegated feeder")]
+    NotOracleAuthority,
+
     /// CitizenAttest signed by a wallet that is not the chain's master
     /// wallet (or the chain has no master wallet committed).
     #[error("attest refused: signer is not the nation authority (master wallet)")]
@@ -1576,11 +1740,26 @@ fn apply_tx_inner(
     // PRIVACY-ONLY GATE. Checked before anything else so a rejected transparent send
     // cannot have partially mutated anything.
     if let Some(height) = at_height {
-        if height >= SHIELDED_ONLY_HEIGHT {
-            if let SigilTx::Send { .. } = &signed.tx {
-                return Err(TxApplyError::TransparentSendRetired {
+        if let SigilTx::Send { token, .. } = &signed.tx {
+            if *token == NATIVE {
+                // Native SIGIL is shielded-only, forever.
+                if height >= SHIELDED_ONLY_HEIGHT {
+                    return Err(TxApplyError::TransparentSendRetired {
+                        height,
+                        activated_at: SHIELDED_ONLY_HEIGHT,
+                    });
+                }
+            } else if !sigil_usds::usds_active(height) {
+                // USDS-live (2026-09-11): a NON-native token (USDS, or any
+                // TokenDeploy'd token) moves transparently from
+                // USDS_LIVE_HEIGHT on. It has no shielded representation —
+                // the pool's notes carry native value only — so "shielded
+                // only" for it would mean "cannot move", which is what the
+                // stablecoin was stuck as. Before activation every node
+                // refuses it, exactly as before this change.
+                return Err(TxApplyError::TokenSendNotActive {
                     height,
-                    activated_at: SHIELDED_ONLY_HEIGHT,
+                    activates_at: sigil_usds::USDS_LIVE_HEIGHT,
                 });
             }
         }
@@ -2217,7 +2396,8 @@ fn apply_tx_inner(
             // All the math (buffer + protocol fee) lives in sigil_usds::plan_mint
             // — same "pure planner, caller commits" shape sigil_dex::swap
             // already uses for SigilTx::Swap above.
-            let plan = sigil_usds::plan_mint(state, *from, *sigil_amount)?;
+            let height = usds_height_gate(at_height)?;
+            let plan = sigil_usds::plan_mint(state, *from, *sigil_amount, height)?;
             let evt = SigilEvent::UsdsMinted {
                 wallet: *from, sigil_locked: *sigil_amount, usds_minted: plan.usds_to_user,
             };
@@ -2226,7 +2406,8 @@ fn apply_tx_inner(
             out.events.push(evt);
         }
         SigilTx::UsdsRedeem { from, usds_amount, .. } => {
-            let plan = sigil_usds::plan_redeem(state, *from, *usds_amount)?;
+            let height = usds_height_gate(at_height)?;
+            let plan = sigil_usds::plan_redeem(state, *from, *usds_amount, height)?;
             let evt = SigilEvent::UsdsRedeemed {
                 wallet: *from, usds_burned: *usds_amount, sigil_released: plan.sigil_to_user,
             };
@@ -2386,7 +2567,7 @@ fn apply_tx_inner(
                 return Err(TxApplyError::InsufficientBalance { have: wf::WELFARE_STIPEND_GLYPHS, need: *fee });
             }
             let plan = match sigil_usds::plan_welfare_mint(
-                state, wf::WELFARE_WALLET, *citizen, wf::WELFARE_STIPEND_USD_E8, *fee,
+                state, wf::WELFARE_WALLET, *citizen, wf::WELFARE_STIPEND_USD_E8, *fee, height,
             ) {
                 Ok(p) => p,
                 Err(sigil_usds::UsdsError::WelfarePayerUnderfunded { have, need }) => {
@@ -2414,10 +2595,20 @@ fn apply_tx_inner(
             }
             // Same authority rule as CitizenAttest: the state-committed
             // master wallet, because the genesis ORACLE_AUTHORITY
-            // placeholder has no keyholder.
-            match state.master_wallet() {
-                Some(m) if m == *authority => {}
-                _ => return Err(TxApplyError::NotNationAuthority),
+            // placeholder has no keyholder. From USDS_LIVE_HEIGHT the
+            // master's DELEGATED feeder (sigil_oracle::FEEDER_SLOT, written
+            // by a master-signed OracleDelegate) may push too — that is what
+            // lets a daemon keep the price fresh without holding the
+            // operator's key.
+            let is_master = matches!(state.master_wallet(), Some(m) if m == *authority);
+            let is_feeder = sigil_usds::usds_active(height)
+                && matches!(sigil_oracle::read_feeder(state), Some(f) if f == *authority);
+            if !is_master && !is_feeder {
+                return Err(if sigil_usds::usds_active(height) {
+                    TxApplyError::NotOracleAuthority
+                } else {
+                    TxApplyError::NotNationAuthority
+                });
             }
             if *price_usd_e8 == 0 {
                 return Err(TxApplyError::ZeroOraclePrice);
@@ -2434,17 +2625,66 @@ fn apply_tx_inner(
                     amount: have.checked_sub(*fee).ok_or(TxApplyError::InsufficientBalance { have, need: *fee })?,
                 });
             }
-            // Byte-identical encoding to sigil_oracle::update_price, so
-            // read_price sees exactly what a direct push would have written.
-            let mut value = [0u8; 32];
-            value[..16].copy_from_slice(&price_usd_e8.to_le_bytes());
-            out.mutations.push(StateMutation::SetContractSlot {
-                contract: sigil_oracle::ORACLE_CONTRACT, slot: sigil_oracle::PRICE_SLOT, value,
-            });
+            if sigil_usds::usds_active(height) {
+                // Price + height stamp — the stamp is what lets sigil-usds
+                // refuse a stale price. One encoder shared with the direct
+                // path (sigil_oracle::update_price), so read_price /
+                // read_price_height see exactly what either wrote.
+                out.mutations.extend(sigil_oracle::price_mutations(*price_usd_e8, height));
+            } else {
+                // Pre-activation shape, byte-identical to every historical
+                // push: the price slot only. Do not touch — this is what
+                // every node already computed for the blocks behind us.
+                out.mutations.push(StateMutation::SetContractSlot {
+                    contract: sigil_oracle::ORACLE_CONTRACT,
+                    slot: sigil_oracle::PRICE_SLOT,
+                    value: sigil_oracle::encode_price(*price_usd_e8),
+                });
+            }
+        }
+
+        SigilTx::OracleDelegate { authority, feeder, fee } => {
+            let height = usds_height_gate(at_height)?;
+            // Only the master may (re)appoint the feeder. Unlike OraclePush,
+            // the feeder itself may NOT re-delegate — delegation is not
+            // transitive, or a leaked feeder key would be a leaked master.
+            match state.master_wallet() {
+                Some(m) if m == *authority => {}
+                _ => return Err(TxApplyError::NotNationAuthority),
+            }
+            if feeder == authority {
+                // Pointless (the master can always push) and it would let a
+                // later master rotation strand push rights on the old key.
+                return Err(TxApplyError::NotOracleAuthority);
+            }
+            let have = state.balance_of(authority, &NATIVE);
+            if have < *fee {
+                return Err(TxApplyError::InsufficientBalance { have, need: *fee });
+            }
+            if *fee > 0 {
+                out.mutations.push(StateMutation::SetBalance {
+                    wallet: *authority, token: NATIVE,
+                    amount: have.checked_sub(*fee).ok_or(TxApplyError::InsufficientBalance { have, need: *fee })?,
+                });
+            }
+            let _ = height;
+            out.mutations.push(sigil_oracle::delegate_mutation(*feeder));
         }
     }
 
     Ok(out)
+}
+
+/// The USDS activation gate: the block height this tx is being applied at,
+/// or the reason it may not be. `None` (a height-less dry run) is refused —
+/// a USDS tx's validity DEPENDS on the height (activation + price freshness),
+/// so there is no honest answer without one.
+fn usds_height_gate(at_height: Option<u64>) -> Result<u64, TxApplyError> {
+    let height = at_height.unwrap_or(0);
+    if !sigil_usds::usds_active(height) {
+        return Err(TxApplyError::UsdsNotActive { height, activates_at: sigil_usds::USDS_LIVE_HEIGHT });
+    }
+    Ok(height)
 }
 
 /// Combine N applied txs into a single block-shaped [`StateTransition`].

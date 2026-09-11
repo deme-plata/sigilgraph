@@ -98,3 +98,53 @@ pub(crate) fn __test_chain(n: u64) -> Vec<Block> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod bincode_wire_reality {
+    //! WHAT THE BACKFILL WIRE CAN AND CANNOT CARRY.
+    //!
+    //! `BackfillResp` is bincode. `Block` carries `Vec<SigilEvent>`, and `SigilEvent` is declared
+    //! `#[serde(tag = "kind")]` — an INTERNALLY TAGGED enum. serde implements those by buffering
+    //! the input and asking the deserializer for `deserialize_any`, and bincode, being a
+    //! non-self-describing format, cannot answer that. It never could.
+    //!
+    //! So the wire worked only for as long as no block carried an event. On a shielded-only
+    //! chain that was almost every block, which is exactly the kind of coincidence that makes a
+    //! structural fault look like a flaky link for months.
+    use super::*;
+    use sigil_events::SigilEvent;
+
+    fn event() -> SigilEvent {
+        SigilEvent::ShieldedSend {
+            token_hint: [0u8; 32],
+            fee: 100,
+            n_inputs: 1,
+            n_outputs: 2,
+            proof_digest: [7u8; 32],
+            pool_root_at_proof: [9u8; 32],
+        }
+    }
+
+    /// The isolated fact, stated as a test so it cannot be argued with.
+    #[test]
+    fn a_single_event_cannot_round_trip_on_bincode() {
+        let evs = vec![event()];
+        let bytes = bincode::serialize(&evs).expect("encoding works — it is DECODING that cannot");
+        let back = bincode::deserialize::<Vec<SigilEvent>>(&bytes);
+        assert!(
+            back.is_err(),
+            "if this ever passes, SigilEvent stopped being internally tagged and the              MessagePack framing below can be reconsidered"
+        );
+    }
+
+    /// …and the same values DO round-trip on a self-describing codec, which is the whole basis
+    /// of the fix. MessagePack is what `chain_log` already chose, for this same reason, with its
+    /// own comment explaining why not bincode.
+    #[test]
+    fn the_same_events_round_trip_on_messagepack() {
+        let evs = vec![event(), event()];
+        let bytes = rmp_serde::to_vec_named(&evs).expect("encode");
+        let back: Vec<SigilEvent> = rmp_serde::from_slice(&bytes).expect("self-describing decodes");
+        assert_eq!(evs, back);
+    }
+}

@@ -780,11 +780,8 @@ mod backfill_body_wire {
             token_hint: [0u8; 32], fee: 1, n_inputs: 1, n_outputs: 2,
             proof_digest: [1u8; 32], pool_root_at_proof: [2u8; 32],
         };
-        let blk = crate::block::Block {
-            header: sigil_header::SigilBlockHeaderV0::default(),
-            transition: sigil_state::StateTransition { at_height: 1, mutations: vec![] },
-            events: vec![ev],
-        };
+        let mut blk = crate::block::__test_chain(1).remove(0);
+        blk.events = vec![ev];
         let resp = crate::BackfillResp { blocks: vec![blk] };
         let bytes = encode_backfill_resp(&resp);
         assert!(!bytes.is_empty(), "encoding must not silently produce an empty body");

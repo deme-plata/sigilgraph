@@ -17,6 +17,10 @@ set -uo pipefail
 A="${1:-http://127.0.0.1:18181}"
 B="${2:-http://10.77.0.5:18181}"
 MAX="${3:-60}"
+# How many independent matched-height samples must agree (or disagree) before saying so.
+NEED="${4:-3}"
+agreed=0
+mismatches=0
 
 get() { curl -s --max-time 10 "$1/v1/integrity" 2>/dev/null; }
 field() { python3 -c "import sys,json;d=json.load(sys.stdin);print(d$2)" 2>/dev/null <<<"$1"; }
@@ -31,7 +35,12 @@ for i in $(seq 1 "$MAX"); do
   [ -z "$ja" ] && { echo "A did not answer"; exit 2; }
   [ -z "$jb" ] && { echo "B did not answer"; exit 2; }
   ha=$(field "$ja" "['height']"); hb=$(field "$jb" "['height']")
-  if [ "$ha" = "$hb" ] && [ -n "$ha" ]; then
+  if [ "$ha" = "null" ] || [ "$hb" = "null" ] || [ -z "$ha" ] || [ -z "$hb" ]; then
+    echo "  a node does not know its tip yet (A=$ha B=$hb) — refusing to compare [$i/$MAX]"
+    sleep 10
+    continue
+  fi
+  if [ "$ha" = "$hb" ]; then
     echo "matched at height $ha — comparing"
     echo
     fail=0
@@ -50,12 +59,29 @@ for i in $(seq 1 "$MAX"); do
     done
     echo
     if [ "$fail" -eq 0 ]; then
-      echo "RESULT: the two nodes agree on every committed value at height $ha."
+      agreed=$((agreed + 1))
+      echo "RESULT: the two nodes agree on every committed value at height $ha  [$agreed/$NEED]"
       echo "        wallet_state_root matching means EVERY wallet balance matches."
-      exit 0
+      if [ "$agreed" -ge "$NEED" ]; then
+        echo
+        echo "CONFIRMED over $NEED independent matched-height samples."
+        exit 0
+      fi
+      sleep 5
+      continue
     fi
-    echo "RESULT: FORK — the nodes disagree at the SAME height. Stop and investigate."
-    exit 1
+    # A single mismatch is NOT proof. `height` is the published mining tip while the roots come
+    # from live state, so under load the pair can be a block apart and produce one honest
+    # disagreement. Only a mismatch that survives re-sampling is a fork.
+    mismatches=$((mismatches + 1))
+    echo "  mismatch at height $ha [$mismatches/$NEED] — re-sampling before calling it"
+    if [ "$mismatches" -ge "$NEED" ]; then
+      echo
+      echo "RESULT: FORK — the nodes disagreed at the same height $NEED times. Stop and investigate."
+      exit 1
+    fi
+    sleep 5
+    continue
   fi
   echo "  heights differ (A=$ha B=$hb) — waiting for them to meet [$i/$MAX]"
   sleep 10

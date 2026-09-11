@@ -1,0 +1,16 @@
+[package]
+name = "sigil-stake"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SHIELDED STAKING — stake without revealing how much. A stake is a note you cannot spend but can prove: its nullifier enters a stake set that the spend guard also honours, so the value is frozen without ever being disclosed. Weight is TIER-quantised, never continuous, because a unique amount is a fingerprint no proof system can hide. Pure functions, no I/O; the chain layer and the two-button UI both call in here."
+
+[dependencies]
+serde = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+sigil-state = { path = "../sigil-state" }
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -1996,6 +1996,9 @@ fn run_start() -> Result<()> {
                             // events and REFUSES a mismatch, so a divergence between the header
                             // rule and the court's Merkle rule shows up as an empty archive and a
                             // loud log line, never as a packet built on unverified evidence.
+                            // The height whose roots this node now holds — what /v1/integrity
+                            // reports, and the only number a cross-node comparison may use.
+                            sigil_api::height::set(h);
                             if !court_bridge.record_block(
                                 h,
                                 block.header.event_log_root,
@@ -3285,6 +3288,7 @@ fn run_start() -> Result<()> {
                                     // follower's /v1/court/roots would answer "I hold nothing" and the
                                     // whole cross-check idea would only ever work on the one node that
                                     // produces, which is the opposite of the point.
+                                            sigil_api::height::set(witness.0);
                                             court_bridge.record_block(witness.0, witness.1, witness.2);
                                             applied += 1;
                                             if bh != h { backfilled += 1; }
@@ -3632,7 +3636,8 @@ fn run_start() -> Result<()> {
                             match chain.apply(b.clone()) {
                                 Ok(_) => {
                                     let _ = chain_log.append_bytes(&braw);
-                                    court_bridge.record_block(witness.0, witness.1, witness.2);
+                                    sigil_api::height::set(witness.0);
+                                            court_bridge.record_block(witness.0, witness.1, witness.2);
                                     applied += 1;
                                     backfilled += 1;
                                     if let Some(r) = reorg_ring.as_mut() { r.clear_fork_hits(); }
@@ -3723,7 +3728,8 @@ fn run_start() -> Result<()> {
                             match chain.apply(b) {
                                 Ok(_) => {
                                     let _ = chain_log.append_bytes(&braw);
-                                    court_bridge.record_block(witness.0, witness.1, witness.2);
+                                    sigil_api::height::set(witness.0);
+                                            court_bridge.record_block(witness.0, witness.1, witness.2);
                                     applied += 1;
                                     backfilled += 1;
                                     if applied % 100 == 0 {

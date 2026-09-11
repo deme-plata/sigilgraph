@@ -71,6 +71,8 @@ pub mod aether;
 pub mod court;
 /// The K-gauge, computed by the node and published with its inputs — see the module docs.
 pub mod kgauge;
+/// The last block height this node applied — see the module docs for why it is not the mining tip.
+pub mod height;
 pub mod nation;
 /// PV-1 private transfers: shield / shielded-send / unshield.
 pub mod shielded;
@@ -1999,7 +2001,8 @@ pub async fn integrity_handler(State(st): State<AppState>) -> Json<serde_json::V
     // would both say 0, match, and be compared at heights that are not the same height. A
     // measuring instrument that can report false agreement is not a measuring instrument. So an
     // unknown height is `null` and `ok` is false, and the checker refuses to compare.
-    let height = st.mining.tip().map(|t| t.height);
+    // The APPLIED height, which a follower knows and a mining tip does not. See `height`.
+    let height = crate::height::get();
 
     Json(serde_json::json!({
         "ok": height.is_some(),
@@ -2018,7 +2021,7 @@ pub async fn integrity_handler(State(st): State<AppState>) -> Json<serde_json::V
             "nullifiers": pool.nullifier_count(),
         },
         "compare": "poll both nodes until `height` matches, then compare `roots`, `native_supply` and `shielded`. A difference at DIFFERENT heights is just time passing, not a fork.",
-        "caveat": "`height` is the published mining tip and the roots are read from live state; SigilState does not carry its own applied height, so under load the pair can be a block or two apart. Agreement is therefore strong evidence, but a SINGLE mismatch is inconclusive — re-sample, and treat only a mismatch that persists across several matched-height samples as a fork. `height: null` means this node does not yet know its tip and nothing here may be compared.",
+        "caveat": "`height` is the last APPLIED block and the roots are read from live state; SigilState does not carry its own applied height, so under load the pair can be a block or two apart. Agreement is therefore strong evidence, but a SINGLE mismatch is inconclusive — re-sample, and treat only a mismatch that persists across several matched-height samples as a fork. `height: null` means this node does not yet know its tip and nothing here may be compared.",
         "ts_ms": now_ms(),
     }))
 }

@@ -2432,6 +2432,30 @@ fn run_tui(cfg: Config) -> std::io::Result<()> {
             boot_trace("AUTOFULLSYNC: full archive started");
         }
     }
+    // ── [A]I READY BEFORE ANYONE ASKS (wired 2026-09-06) ─────────────────────
+    //
+    // `flux_moe::autosetup_at_boot()` has existed since 8.0.6, is unit-tested, and its
+    // own doc comment says "at start-up, in the background (default since 8.0.6 — the
+    // [A]I tab is ready by the time anyone opens it)". It had **zero production
+    // callers**. Nothing ran until `ai_enter_tab` fired, and that only fires when
+    // somebody opens the tab — so ollama was never installed, never started and the
+    // model was never pulled "behind the scenes", exactly as reported. Specified,
+    // tested, documented, never called: grep for a caller before believing a fix ships.
+    //
+    // Pulling a model is hundreds of megabytes, so this is deliberately NOT silent —
+    // `ai_setup_start` streams progress into the [A]I transcript, and the tab shows it
+    // whenever the user gets there. Opt out with SIGIL_AI_AUTOSETUP=tab (tab-only, the
+    // 8.0.4 behaviour) or =0 (never).
+    if flux_moe::autosetup_at_boot() {
+        app.ai_models = crate::flux_moe::list_models();
+        app.ai_model = app.ai_models.first().cloned();
+        if app.ai_model.is_none() {
+            boot_trace("AI: autosetup at boot — installing/starting ollama and pulling the model");
+            ai_setup_start(&mut app);
+        } else {
+            boot_trace("AI: model already present, no setup needed");
+        }
+    }
     flux_webhook("boot", concat!("sigil-top v", env!("CARGO_PKG_VERSION"), " starting"));
     // 2026-09-06 PAYABLE OUT OF THE BOX: a wallet that never PUBLISHES its shielded receiving
     // key cannot be paid at all — SIGIL has no public transfers to fall back on, so a phone

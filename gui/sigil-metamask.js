@@ -63,6 +63,9 @@
   var PUBLIC_RPCS = ['https://polygon-bor-rpc.publicnode.com', 'https://1rpc.io/matic'];
 
   var SEL_BURN      = '0xbcf64e05'; // burn(uint256,bytes32)
+  // Set to true ONLY when sigil-bridge-relayer is live and watching BurnedTo events.
+  // See the long note in burnToSigil() for why this exists.
+  var BRIDGE_BURN_ENABLED = false;
   var SEL_BALANCEOF = '0x70a08231'; // balanceOf(address)
 
   var DECIMAL_SHIFT = 10000000000n; // 10^10 — native 8dp -> wrapped 18dp
@@ -120,7 +123,7 @@
     return all[0];
   }
 
-  var state = { provider: null, account: null, chainId: null, label: null };
+  var state = { provider: null, account: null, chainId: null, label: null, pending: null };
   var listeners = {};
 
   function emit(name, payload) {
@@ -162,24 +165,107 @@
     };
   }
 
-  /** Connect (prompts MetaMask). Returns the new state. */
-  async function connect() {
-    var sel = pick();
-    if (!sel) {
-      var err = new Error('No browser wallet detected. Install MetaMask, then reload this page.');
-      err.code = 'NO_PROVIDER';
-      throw err;
-    }
-    state.provider = sel.provider;
-    state.label = sel.info.name || 'Injected wallet';
-    bind(state.provider);
-    var accts = await req('eth_requestAccounts');
-    if (!accts || !accts.length) throw new Error('No account was authorized.');
-    state.account = accts[0].toLowerCase();
-    try { state.chainId = await req('eth_chainId'); } catch (e) {}
-    try { localStorage.setItem('sigil-mm-connected', '1'); } catch (e) {}
-    emit('change', getState());
-    return getState();
+  /* ── The "already pending" trap ────────────────────────────────────────
+     MetaMask keeps at most ONE permission request per origin, and that
+     request OUTLIVES the page. Dismissing the popup — clicking away, closing
+     the notification window, or having MetaMask locked when it fires —
+     neither approves nor rejects it; it just hides. Any later
+     eth_requestAccounts then rejects with
+
+       code -32002  "Request of type 'wallet_requestPermissions' already
+                     pending for origin https://sigilgraph.org. Please wait."
+
+     which is a true statement the user cannot act on as written: nothing on
+     the page is pending, the popup they must answer is hidden behind the
+     extension icon. Three guards, in order of how much they help:
+
+       1. eth_accounts FIRST — never prompts, so a returning user who already
+          authorised this site never opens a request at all.
+       2. in-flight dedup — this page cannot queue a second request over its
+          own first one.
+       3. on -32002, poll eth_accounts until the popup that is ALREADY open
+          gets approved, so the page recovers by itself instead of dead-ending
+          on an error string.
+     ─────────────────────────────────────────────────────────────────────── */
+  var PENDING_MSG =
+    'MetaMask already has a connection request open for this site. Click the ' +
+    'MetaMask fox in your browser toolbar and approve it — this page then ' +
+    'continues on its own. (If no popup appears, unlock MetaMask first.)';
+
+  function isPendingErr(e) {
+    var c = e && (e.code != null ? e.code
+              : (e.data && e.data.originalError && e.data.originalError.code));
+    if (c === -32002) return true;
+    return /already pending/i.test(String((e && e.message) || ''));
+  }
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  /** Wait for a popup the user already has open. Resolves to accounts, or []. */
+  function awaitPendingApproval(onWait, timeoutMs) {
+    if (onWait) { try { onWait(PENDING_MSG); } catch (e) {} }
+    var deadline = Date.now() + (timeoutMs || 180000);
+    return (function poll() {
+      if (Date.now() >= deadline) return Promise.resolve([]);
+      return sleep(1000).then(function () {
+        return req('eth_accounts').then(function (a) {
+          return (a && a.length) ? a : poll();
+        }, poll);
+      });
+    })();
+  }
+
+  /**
+   * Connect (prompts MetaMask). Returns the new state.
+   * @param onWait optional callback(msg) used to tell the user that a popup
+   *               they already have open is what is being waited on.
+   */
+  function connect(onWait) {
+    if (state.pending) return state.pending;          // one request per origin
+    state.pending = (async function () {
+      var sel = pick();
+      if (!sel) {
+        var err = new Error('No browser wallet detected. Install MetaMask, then reload this page.');
+        err.code = 'NO_PROVIDER';
+        throw err;
+      }
+      state.provider = sel.provider;
+      state.label = sel.info.name || 'Injected wallet';
+      bind(state.provider);
+
+      var accts = null;
+      // (1) silent path — already authorised, no popup, no pending request.
+      try {
+        var have = await req('eth_accounts');
+        if (have && have.length) accts = have;
+      } catch (e) { /* not fatal: fall through to the prompting path */ }
+
+      if (!accts) {
+        try {
+          accts = await req('eth_requestAccounts');
+        } catch (e) {
+          if (!isPendingErr(e)) throw e;
+          // (3) a popup is already open — wait for the user to answer it.
+          accts = await awaitPendingApproval(onWait);
+          if (!accts.length) {
+            var pe = new Error(PENDING_MSG);
+            pe.code = -32002;
+            throw pe;
+          }
+        }
+      }
+
+      if (!accts || !accts.length) throw new Error('No account was authorized.');
+      state.account = accts[0].toLowerCase();
+      try { state.chainId = await req('eth_chainId'); } catch (e) {}
+      try { localStorage.setItem('sigil-mm-connected', '1'); } catch (e) {}
+      emit('change', getState());
+      return getState();
+    })();
+    // (2) clear the dedup slot once it settles, either way.
+    state.pending.then(function () { state.pending = null; },
+                       function () { state.pending = null; });
+    return state.pending;
   }
 
   /**
@@ -270,6 +356,133 @@
     return '0'.repeat(64 - h.length) + h;
   }
 
+  /** eth_getLogs against the user's provider, falling back to the public RPCs.
+      Read-only and key-free — used to show Polygon-side activity (Uniswap trades,
+      token transfers) that never passes through this origin. */
+  async function getLogs(filter) {
+    var body = { jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [filter] };
+    if (state.provider) {
+      try { return await req('eth_getLogs', [filter]); } catch (e) { /* fall through */ }
+    }
+    var lastErr = null;
+    for (var i = 0; i < PUBLIC_RPCS.length; i++) {
+      try {
+        var r = await fetch(PUBLIC_RPCS[i], {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
+        });
+        var j = await r.json();
+        if (j && j.result) return j.result;
+        lastErr = new Error((j && j.error && j.error.message) || 'RPC returned no result');
+      } catch (e) { lastErr = e; }
+    }
+    throw lastErr || new Error('every Polygon RPC endpoint failed');
+  }
+
+  /* ── DIRECT UNISWAP V2 (2026-09-06) ────────────────────────────────────────
+     Why this exists rather than "just use app.uniswap.org".
+
+     Reported 2026-09-06: the Uniswap interface answered "Token approval failed —
+     A network or connection issue likely caused your approval to fail." Checked
+     on chain afterwards: the account's allowance to Permit2, to the V2 router and
+     to both Universal Routers was ZERO — no approval transaction was ever mined,
+     so the message was literally true and nothing was wrong with the token. The
+     same swap, sent straight to the canonical V2 router from a script, went
+     through and returned EXACTLY the quoted amount.
+
+     The modern Uniswap app routes through Permit2 + the Universal Router and
+     leans on its own backend for routing and for watching the approval land.
+     That is three moving parts more than a V2 swap needs, and each of them can
+     fail for a brand-new unlisted pair with two-tenths of a cent in it. So this
+     talks to the V2 router directly: approve exactly the amount, then
+     swapExactTokensForTokens. No Permit2, no Universal Router, no routing API.
+
+     Hand-encoded because it is two static call shapes and pulling in an ABI coder
+     for them would be the larger dependency. Both verified against the live
+     router before shipping.                                                     */
+  var UNI_V2_ROUTER = '0xedf6066a2b290C185783862C7F4776A2C8077AD1';
+  var SEL_ALLOWANCE = '0xdd62ed3e'; // allowance(address,address)
+  var SEL_APPROVE   = '0x095ea7b3'; // approve(address,uint256)
+  var SEL_AMTS_OUT  = '0xd06ca61f'; // getAmountsOut(uint256,address[])
+  var SEL_SWAP_EXACT= '0x38ed1739'; // swapExactTokensForTokens(uint256,uint256,address[],address,uint256)
+  function n32(v) { return pad32(BigInt(v).toString(16)); }
+  function a32(a) { return pad32(String(a).replace(/^0x/, '').toLowerCase()); }
+
+  /** How much `path[last]` comes out for `amountIn` of `path[0]`. Read-only. */
+  async function uniQuote(amountIn, path) {
+    var data = SEL_AMTS_OUT + n32(amountIn) + n32(64) + n32(path.length) +
+               path.map(a32).join('');
+    var res = await rawCall(UNI_V2_ROUTER, data);
+    var d = String(res).replace(/^0x/, '');
+    var len = parseInt(d.slice(64, 128), 16);
+    var outs = [];
+    for (var i = 0; i < len; i++) outs.push(BigInt('0x' + d.slice(128 + i * 64, 192 + i * 64)));
+    return outs;
+  }
+
+  /**
+   * Approve (only if the current allowance is short) and swap, through MetaMask.
+   * `slippageBps` guards the minimum out; on a pool this thin the price moves a lot
+   * with your own trade, which is not slippage — the quote already accounts for it.
+   * Returns { approveTx, swapTx, expectedOut, minOut }.
+   *
+   * SPENDS REAL TOKENS. The caller confirms first.
+   */
+  async function uniSwap(amountIn, path, slippageBps, onStep) {
+    if (!state.account) await connect();
+    if (!(await ensurePolygon())) throw new Error('MetaMask must be on Polygon mainnet.');
+    var amt = BigInt(amountIn);
+    if (amt <= 0n) throw new Error('Amount must be greater than zero.');
+
+    var outs = await uniQuote(amt, path);
+    var expected = outs[outs.length - 1];
+    if (expected <= 0n) throw new Error('The pool cannot fill that trade.');
+    var minOut = expected * BigInt(10000 - (slippageBps || 100)) / 10000n;
+
+    var approveTx = null;
+    var cur = BigInt(await rawCall(path[0], SEL_ALLOWANCE + a32(state.account) + a32(UNI_V2_ROUTER)));
+    if (cur < amt) {
+      if (onStep) onStep('approve');
+      // Exact amount, not MAX: a brand-new token with no live bridge behind it has
+      // not earned an unlimited standing allowance.
+      approveTx = await req('eth_sendTransaction', [{
+        from: state.account, to: path[0],
+        data: SEL_APPROVE + a32(UNI_V2_ROUTER) + n32(amt)
+      }]);
+      if (onStep) onStep('approve-sent', approveTx);
+      // The swap must not be signed until the approval is actually mined, or it
+      // reverts on TRANSFER_FROM_FAILED — which is exactly the confusing failure
+      // this whole function exists to avoid.
+      await waitMined(approveTx);
+    }
+
+    if (onStep) onStep('swap');
+    var deadline = Math.floor(Date.now() / 1000) + 900;
+    var data = SEL_SWAP_EXACT + n32(amt) + n32(minOut) + n32(160) +
+               a32(state.account) + n32(deadline) +
+               n32(path.length) + path.map(a32).join('');
+    var swapTx = await req('eth_sendTransaction', [{
+      from: state.account, to: UNI_V2_ROUTER, data: data
+    }]);
+    if (onStep) onStep('swap-sent', swapTx);
+    return { approveTx: approveTx, swapTx: swapTx, expectedOut: expected, minOut: minOut };
+  }
+
+  /** Poll until a tx has a receipt. Polygon blocks are ~2 s; 3 minutes is generous. */
+  async function waitMined(hash, timeoutMs) {
+    var until = Date.now() + (timeoutMs || 180000);
+    while (Date.now() < until) {
+      try {
+        var r = await req('eth_getTransactionReceipt', [hash]);
+        if (r && r.blockNumber) {
+          if (r.status && BigInt(r.status) === 0n) throw new Error('Transaction reverted on chain: ' + hash);
+          return r;
+        }
+      } catch (e) { if (String(e && e.message).indexOf('reverted') >= 0) throw e; }
+      await new Promise(function (r2) { setTimeout(r2, 2500); });
+    }
+    throw new Error('Timed out waiting for ' + hash + ' — it may still land; check Polygonscan.');
+  }
+
   async function rawCall(to, data) {
     var body = { jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: to, data: data }, 'latest'] };
     if (state.provider) {
@@ -308,6 +521,32 @@
    * THIS SPENDS REAL TOKENS AND IS NOT REVERSIBLE. Callers must confirm first.
    */
   async function burnToSigil(amountBase8, sigilAddr64hex) {
+    // ── BURNING IS DISABLED (2026-09-06) ────────────────────────────────────
+    //
+    // The button above this call promises: "the relayer sees the burn and releases
+    // the same amount of native SIGIL". That sentence is currently FALSE. The
+    // sigil-bridge-relayer is deliberately masked (DO-NOT-START-README.md, an
+    // unbacked-mint hazard), so nothing is watching for burn events. A burn today
+    // destroys wrapped SIGIL on Polygon — irreversibly, by design, that is what burn
+    // MEANS — and releases nothing on the SIGIL side. There is no undo and no
+    // support desk.
+    //
+    // The token this helper points at (0xc224602C…25B7) is also the OLD wSIGIL, whose
+    // backing did not survive the g2 chain reset and whose pool is ~99% drained. Its
+    // replacement wSIGIL3 (0x3FCED760…C2e9, deployed 2026-09-06) is tradeable on
+    // Uniswap but likewise has no live bridge behind it yet.
+    //
+    // So the guard is here, in the ONE function every caller funnels through, rather
+    // than in a button handler that a second caller could bypass. Lift it in the same
+    // commit that unmasks the relayer — not before, and not "temporarily".
+    if (!BRIDGE_BURN_ENABLED) {
+      var e = new Error(
+        'Burning is disabled: the bridge relayer is offline, so a burn would destroy ' +
+        'your wrapped SIGIL on Polygon and release nothing on the SIGIL side. ' +
+        'Your tokens are safe where they are — sell or hold them on Uniswap instead.');
+      e.code = 'BRIDGE_DISABLED';
+      throw e;
+    }
     if (!state.account) await connect();
     var ok = await ensurePolygon();
     if (!ok) throw new Error('MetaMask must be on Polygon mainnet to burn wrapped SIGIL.');
@@ -346,6 +585,8 @@
   }
 
   root.SigilMM = {
+    PENDING_MSG: PENDING_MSG,
+    isPendingErr: isPendingErr,
     POLYGON_PARAMS: POLYGON_PARAMS,
     TOKEN: TOKEN,
     DECIMAL_SHIFT: DECIMAL_SHIFT,
@@ -360,6 +601,16 @@
     signMessage: signMessage,
     balanceOfWei: balanceOfWei,
     burnToSigil: burnToSigil,
+    burnEnabled: function () { return BRIDGE_BURN_ENABLED; },
+    // Read any Polygon ERC-20 (falls back to public RPCs when MetaMask is absent),
+    // so the wallet's asset list can show the Polygon side without a second RPC client.
+    rawCall: rawCall,
+    getLogs: getLogs,
+    pad32: pad32,
+    uniQuote: uniQuote,
+    uniSwap: uniSwap,
+    waitMined: waitMined,
+    UNI_V2_ROUTER: UNI_V2_ROUTER,
     formatWei: formatWei,
     parseAmount8: parseAmount8,
     getState: getState,

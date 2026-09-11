@@ -163,7 +163,22 @@ pub const MAX_SUPPLY: u128 = 21_000_000 * 10u128.pow(SIGIL_DECIMALS);
 /// day at 6.6 blk/s), and never let the live producer be the first to mint it — the
 /// `sigil-node` tests drive the real builder and the real follower through a scheduled
 /// height first.
-pub const MASTER_WALLET_ROTATIONS: &[(u64, WalletId)] = &[];
+pub const MASTER_WALLET_ROTATIONS: &[(u64, WalletId)] = &[
+    // 2026-09-11 (operator, Viktor): move the 7.5% mining dev fee off the genesis master
+    // (095b0e1f…) to 78dc76f2…0870c837 at height 6_591_477 — scheduled at tip 6_021_477 +
+    // 570_000 (~24 h at 6.6 blk/s) so happysrv and every sigil-top can update before it.
+    // A follower on a pre-schedule binary FORKS at this height; the producer MUST be on this
+    // binary by then too, or it will not emit the required opening rotation and updated
+    // followers will refuse the block.
+    (
+        6_591_477,
+        [
+            0x78, 0xdc, 0x76, 0xf2, 0xe0, 0x03, 0x32, 0x82, 0x34, 0xa0, 0xa1, 0xdd, 0xec, 0x3b,
+            0xe3, 0xb6, 0xe9, 0x4b, 0xda, 0xc8, 0xc6, 0x69, 0x67, 0x45, 0xa1, 0xdf, 0x9f, 0x4a,
+            0x08, 0x70, 0xc8, 0x37,
+        ],
+    ),
+];
 
 /// The master wallet scheduled to take over at exactly `height` under `schedule`, if any.
 /// Pure and total — the same answer on every node for the same height.
@@ -2463,18 +2478,37 @@ mod master_rotation_tests {
         StateTransition { at_height: at, mutations: vec![StateMutation::RotateMasterWallet { wallet: w }] }
     }
 
-    /// The live table is empty until the operator schedules a rotation — and while it is
-    /// empty, a `RotateMasterWallet` from ANY producer at ANY height is refused. This is the
-    /// theft-vector test: the dev fee cannot be redirected by whoever mints a block.
+    /// A `RotateMasterWallet` for a pair NOT on the schedule is refused at any height — the
+    /// theft-vector guard: the dev fee cannot be redirected by whoever mints a block.
+    /// NEW_MASTER (0x78 repeated) is deliberately not the real scheduled wallet, so every
+    /// height here is off-schedule regardless of what the live table contains.
     #[test]
-    fn rotation_is_refused_when_nothing_is_scheduled() {
-        assert!(MASTER_WALLET_ROTATIONS.is_empty(), "this test pins the un-scheduled state; update it when a rotation is scheduled");
+    fn rotation_is_refused_for_an_unscheduled_pair() {
         let mut st = state_with_master(OLD_MASTER);
         for h in [1u64, 2, 1_000_000, u64::MAX] {
             let err = commit_state_transition(&mut st, &rotate(h, NEW_MASTER), h).unwrap_err();
             assert!(matches!(err, CommitError::UnscheduledMasterRotation { at_height, wallet } if at_height == h && wallet == NEW_MASTER), "{err}");
         }
         assert_eq!(st.master_wallet(), Some(OLD_MASTER), "a refused rotation must leave the master untouched");
+    }
+
+    /// The live schedule has exactly the one operator-approved rotation, applied at its
+    /// scheduled height through the compiled-in table (not a test schedule). Pins the real
+    /// target wallet + height so a careless edit to MASTER_WALLET_ROTATIONS fails CI.
+    #[test]
+    fn the_live_schedule_rotates_to_78dc_at_its_height() {
+        const H: u64 = 6_591_477;
+        let want: WalletId = [
+            0x78, 0xdc, 0x76, 0xf2, 0xe0, 0x03, 0x32, 0x82, 0x34, 0xa0, 0xa1, 0xdd, 0xec, 0x3b,
+            0xe3, 0xb6, 0xe9, 0x4b, 0xda, 0xc8, 0xc6, 0x69, 0x67, 0x45, 0xa1, 0xdf, 0x9f, 0x4a,
+            0x08, 0x70, 0xc8, 0x37,
+        ];
+        assert_eq!(scheduled_master_rotation(H), Some(want), "the live table must schedule 78dc… at H");
+        assert_eq!(scheduled_master_rotation(H - 1), None, "nothing scheduled the block before");
+        assert_eq!(scheduled_master_rotation(H + 1), None, "nothing scheduled the block after");
+        let mut st = state_with_master(OLD_MASTER);
+        commit_state_transition(&mut st, &rotate(H, want), H).unwrap();
+        assert_eq!(st.master_wallet(), Some(want), "the scheduled pair applies through the compiled-in table");
     }
 
     /// The scheduled pair is accepted at exactly its height and nowhere else; the wrong

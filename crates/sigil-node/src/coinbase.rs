@@ -230,6 +230,37 @@ pub fn coinbase_for_reward(
 ///   commit. The tail of this function rebuilds that log from the mutation list before taking
 ///   roots; removing that step forks the chain the moment any transaction emits an event
 ///   (measured 2026-09-10). See `SigilState::restore_block_event_log`.
+/// v9: if `schedule` names a master-wallet rotation at exactly `height`, commit it into
+/// `work` and record it as the FIRST mutation of the block. Anything else at this height is
+/// left alone. Mirrors the follower rule in `ChainTip::apply_with_schedule`, and goes through
+/// the chokepoint (with the same schedule) so the producer can never build a body it would
+/// itself refuse to apply.
+fn apply_scheduled_rotation(
+    work: &mut SigilState,
+    mutations: &mut Vec<StateMutation>,
+    height: u64,
+    schedule: &[(u64, WalletId)],
+) {
+    let Some(wallet) = sigil_state::scheduled_master_rotation_in(schedule, height) else { return };
+    let m = StateMutation::RotateMasterWallet { wallet };
+    match sigil_state::commit_state_transition_with_master_schedule(
+        work,
+        &StateTransition { at_height: height, mutations: vec![m.clone()] },
+        height,
+        schedule,
+    ) {
+        Ok(_) => {
+            eprintln!(
+                "🔑 MASTER WALLET ROTATION at h={height} → {} (scheduled in sigil_state::MASTER_WALLET_ROTATIONS)",
+                hex::encode(wallet)
+            );
+            mutations.push(m);
+        }
+        // Unreachable by construction (the pair came FROM the schedule), but never silent.
+        Err(e) => eprintln!("🚨 scheduled master rotation at h={height} refused by the chokepoint: {e:?}"),
+    }
+}
+
 pub fn build_block_body(
     state: &SigilState,
     height: u64,
@@ -257,10 +288,30 @@ pub fn build_block_body_for(
     txs: &[SignedTx],
     producer: WalletId,
 ) -> (StateTransition, StateRoots, Vec<sigil_events::SigilEvent>, Vec<SignedTx>) {
+    build_block_body_for_with_schedule(state, height, reward, txs, producer, sigil_state::MASTER_WALLET_ROTATIONS)
+}
+
+/// [`build_block_body_for`] with an explicit master-wallet rotation `schedule` — the test
+/// seam that lets the REAL builder be driven through a scheduled height before an entry is
+/// added to the live table. Production calls the wrapper above.
+pub fn build_block_body_for_with_schedule(
+    state: &SigilState,
+    height: u64,
+    reward: Option<u128>,
+    txs: &[SignedTx],
+    producer: WalletId,
+    schedule: &[(u64, WalletId)],
+) -> (StateTransition, StateRoots, Vec<sigil_events::SigilEvent>, Vec<SignedTx>) {
     let mut work = state.clone();
     let mut mutations: Vec<StateMutation> = Vec::new();
     let mut events: Vec<sigil_events::SigilEvent> = Vec::new();
     let mut included: Vec<SignedTx> = Vec::new();
+
+    // 0. v9: a scheduled master-wallet rotation opens the block, BEFORE the coinbase, so this
+    //    very block's dev-fee cut already goes to the new master. `ChainTip::apply` requires
+    //    it to be the first mutation at the scheduled height — omitting it here would make
+    //    every follower refuse this block.
+    apply_scheduled_rotation(&mut work, &mut mutations, height, schedule);
 
     // 1. coinbase first
     let reward = reward.unwrap_or_else(|| sigil_emission::block_reward(height));
@@ -373,8 +424,21 @@ pub fn build_block_body_for_shares(
     winner: WalletId,
     shares: &std::collections::HashMap<WalletId, u64>,
 ) -> (StateTransition, StateRoots, Vec<sigil_events::SigilEvent>, Vec<SignedTx>) {
+    build_block_body_for_shares_with_schedule(state, height, reward, txs, winner, shares, sigil_state::MASTER_WALLET_ROTATIONS)
+}
+
+/// [`build_block_body_for_shares`] with an explicit master-wallet rotation `schedule` (test
+/// seam, see [`build_block_body_for_with_schedule`]).
+pub fn build_block_body_for_shares_with_schedule(
+    state: &SigilState,
+    height: u64,
+    reward: Option<u128>,
+    txs: &[SignedTx],
+    winner: WalletId,
+    shares: &std::collections::HashMap<WalletId, u64>,
+    schedule: &[(u64, WalletId)],
+) -> (StateTransition, StateRoots, Vec<sigil_events::SigilEvent>, Vec<SignedTx>) {
     let reward = reward.unwrap_or_else(|| sigil_emission::block_reward(height));
-    let cb_mutations = split_coinbase_mutations(state, height, reward, winner, shares);
 
     // Re-apply the coinbase mutations against a fresh evolving clone (mirrors
     // build_block_body_for's pattern exactly) so txs see the post-coinbase
@@ -383,6 +447,12 @@ pub fn build_block_body_for_shares(
     let mut mutations: Vec<StateMutation> = Vec::new();
     let mut events: Vec<sigil_events::SigilEvent> = Vec::new();
     let mut included: Vec<SignedTx> = Vec::new();
+
+    // 0. v9: the rotation opens the block. The coinbase split below is computed against
+    //    `work`, which already carries it, so the master's cut of THIS block's reward goes to
+    //    the new wallet — the same thing every follower computes when it applies the block.
+    apply_scheduled_rotation(&mut work, &mut mutations, height, schedule);
+    let cb_mutations = split_coinbase_mutations(&work, height, reward, winner, shares);
 
     if !cb_mutations.is_empty() {
         // FAIL LOUD, not silent. This used to be a bare `.is_ok()` with no `else`: when the

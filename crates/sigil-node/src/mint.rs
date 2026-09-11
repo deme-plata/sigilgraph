@@ -42,6 +42,24 @@ pub fn mint_next_block(
     // See the `None` arm below and `MiningBridge::take_share_pool`.
     share_pool: Option<std::collections::HashMap<WalletId, u64>>,
 ) -> Result<(Block, Vec<[u8; 32]>)> {
+    mint_next_block_with_schedule(
+        chain, merge_parents, txs, reward_override, solve, topology_commitment, share_pool,
+        sigil_state::MASTER_WALLET_ROTATIONS,
+    )
+}
+
+/// [`mint_next_block`] with an explicit master-wallet rotation `schedule` (v9 test seam: the
+/// REAL minter driven through a scheduled height before the live table carries an entry).
+pub fn mint_next_block_with_schedule(
+    chain: &ChainTip,
+    merge_parents: Vec<BlockHash>,
+    txs: &[SignedTx],
+    reward_override: Option<u128>,
+    solve: Option<&sigil_api::mining::AcceptedSolve>,
+    topology_commitment: Option<[u8; 32]>,
+    share_pool: Option<std::collections::HashMap<WalletId, u64>>,
+    schedule: &[(u64, WalletId)],
+) -> Result<(Block, Vec<[u8; 32]>)> {
     let height = chain.height();
     let parent = chain.parent_hash();
     // P1 mining-onto-the-braid: when this block is minted for a verified
@@ -107,7 +125,7 @@ pub fn mint_next_block(
         }
     };
     let (transition, roots, block_events, included_txs) =
-        crate::coinbase::build_block_body_for_shares(&state, height, reward, txs, winner, &shares);
+        crate::coinbase::build_block_body_for_shares_with_schedule(&state, height, reward, txs, winner, &shares, schedule);
     // Commit the verify-once txs: a sequential BLAKE3 root over their intent
     // hashes + the count. The signatures were verified ONCE at mempool ingest;
     // the producer-sig over this header binds the producer to this exact set.

@@ -5,7 +5,7 @@
 use anyhow::{anyhow, Context, Result};
 
 use sigil_header::{BlockHash, SigilBlockHeaderV0};
-use sigil_state::{commit_state_transition, SigilState, StateRoots, StateTransition};
+use sigil_state::{commit_state_transition_with_master_schedule, SigilState, StateMutation, StateRoots, StateTransition, WalletId};
 
 use std::collections::VecDeque;
 
@@ -126,6 +126,13 @@ impl ChainTip {
     /// Phase 0 omits crypto verification (SQIsign nonce, producer sig, VDF,
     /// STARK). Those land in P1+ when the relevant crates port.
     pub fn apply(&mut self, block: Block) -> Result<()> {
+        self.apply_with_schedule(block, sigil_state::MASTER_WALLET_ROTATIONS)
+    }
+
+    /// [`apply`] with an explicit master-wallet rotation `schedule` — the test seam that
+    /// drives the REAL follower through a scheduled height before the live table carries an
+    /// entry. Production goes through [`apply`].
+    pub fn apply_with_schedule(&mut self, block: Block, schedule: &[(u64, WalletId)]) -> Result<()> {
         block.header.precheck().with_context(|| "header precheck failed")?;
 
         let expected_height = self.height();
@@ -149,7 +156,25 @@ impl ChainTip {
             ));
         }
 
-        let computed = commit_state_transition(&mut self.state, &block.transition, expected_height)
+        // v9: at a scheduled rotation height the block MUST open with exactly the scheduled
+        // rotation. The chokepoint below already refuses a rotation that is not on the
+        // schedule (wrong height / wrong wallet); this is the other half — a producer cannot
+        // SKIP the rotation, or bury it after a coinbase that still paid the old master.
+        if let Some(wallet) = sigil_state::scheduled_master_rotation_in(schedule, expected_height) {
+            match block.transition.mutations.first() {
+                Some(StateMutation::RotateMasterWallet { wallet: w }) if *w == wallet => {}
+                other => {
+                    return Err(anyhow!(
+                        "block at height {} must open with the scheduled master-wallet rotation to {} — first mutation is {}",
+                        expected_height,
+                        hex_short(&wallet),
+                        match other { Some(m) => format!("{:?}", std::mem::discriminant(m)), None => "none (empty transition)".to_string() },
+                    ));
+                }
+            }
+        }
+
+        let computed = commit_state_transition_with_master_schedule(&mut self.state, &block.transition, expected_height, schedule)
             .map_err(|e| anyhow!("state commit failed: {}", e))?;
 
         if !block.check_roots_match(&computed) {

@@ -4036,6 +4036,8 @@ use dag::{
     TOPOLOGY_COMMITMENT_WINDOW,
 };
 use mint::mint_next_block;
+#[cfg(test)]
+use mint::mint_next_block_with_schedule;
 // 2026-08-26 REVERTED (production stall, this session): the frontier-memo
 // adoption above this comment stalled the live producer within ~2 minutes of
 // boot — zero blocks minted, sustained high CPU, `/mining/challenge` 503ing —
@@ -4408,6 +4410,112 @@ mod tests {
             reward,
             "every unit of the block reward must land in exactly one of these four wallets"
         );
+    }
+
+    // ── v9: master-wallet rotation, driven through the REAL minter and the REAL follower ──
+
+    const V9_NEW_MASTER: WalletId = [0x78u8; 32];
+
+    fn pool_solve(chain: &ChainTip, winner: WalletId) -> sigil_api::mining::AcceptedSolve {
+        sigil_api::mining::AcceptedSolve {
+            wallet: winner,
+            height: chain.height(),
+            parent_hash: chain.parent_hash(),
+            nonce: 0,
+            blake4_hash: 0,
+            vdf: flux_vdf::VdfProof { y: vec![], pi: vec![], t: 0 },
+            bits: 16,
+            shares: std::collections::HashMap::from([(winner, 1u64)]),
+        }
+    }
+
+    /// The whole v9 property in one run: at the scheduled height the producer opens the block
+    /// with the rotation, the SAME block's dev-fee cut already lands on the new master and
+    /// nothing on the old one, and a follower applying the block agrees on all four roots.
+    /// Before the height the old master is still paid — the schedule is exact, not "from now".
+    #[test]
+    fn scheduled_rotation_moves_the_dev_fee_in_its_own_block_and_the_follower_agrees() {
+        let schedule: &[(u64, WalletId)] = &[(2, V9_NEW_MASTER)];
+        let winner: WalletId = [0x11; 32];
+
+        let mut producer = ChainTip::new();
+        producer.apply(build_genesis().unwrap()).unwrap();
+        let mut follower = ChainTip::new();
+        follower.apply(build_genesis().unwrap()).unwrap();
+
+        // h=1: no rotation yet — the genesis master takes the cut.
+        let solve1 = pool_solve(&producer, winner);
+        let (b1, _) = mint_next_block_with_schedule(&producer, Vec::new(), &[], None, Some(&solve1), None, None, schedule).unwrap();
+        assert!(!matches!(b1.transition.mutations.first(), Some(StateMutation::RotateMasterWallet { .. })), "no rotation before the height");
+        producer.apply_with_schedule(b1.clone(), schedule).unwrap();
+        follower.apply_with_schedule(b1, schedule).unwrap();
+        let old_after_1 = producer.state().balance_of(&MASTER_WALLET_GENESIS, &sigil_state::NATIVE);
+        assert!(old_after_1 > 0, "genesis master is paid at h=1");
+        assert_eq!(producer.state().balance_of(&V9_NEW_MASTER, &sigil_state::NATIVE), 0);
+
+        // h=2: the scheduled height.
+        let solve2 = pool_solve(&producer, winner);
+        let (b2, _) = mint_next_block_with_schedule(&producer, Vec::new(), &[], None, Some(&solve2), None, None, schedule).unwrap();
+        assert_eq!(
+            b2.transition.mutations.first(),
+            Some(&StateMutation::RotateMasterWallet { wallet: V9_NEW_MASTER }),
+            "the block at the scheduled height must OPEN with the rotation"
+        );
+        producer.apply_with_schedule(b2.clone(), schedule).expect("producer applies its own rotation block");
+        follower.apply_with_schedule(b2, schedule).expect("a follower on the same schedule agrees on all four roots");
+        for (who, tip) in [("producer", &producer), ("follower", &follower)] {
+            let st = tip.state();
+            assert_eq!(st.master_wallet(), Some(V9_NEW_MASTER), "{who}: master rotated");
+            assert_eq!(
+                st.balance_of(&MASTER_WALLET_GENESIS, &sigil_state::NATIVE), old_after_1,
+                "{who}: the old master must receive NOTHING from the rotation block itself"
+            );
+            assert!(st.balance_of(&V9_NEW_MASTER, &sigil_state::NATIVE) > 0, "{who}: the new master takes this block's cut");
+        }
+        assert_eq!(producer.parent_hash(), follower.parent_hash(), "same chain");
+
+        // h=3: the rotation is durable — the next block pays the new master again, no rotation mutation.
+        let solve3 = pool_solve(&producer, winner);
+        let (b3, _) = mint_next_block_with_schedule(&producer, Vec::new(), &[], None, Some(&solve3), None, None, schedule).unwrap();
+        assert!(!matches!(b3.transition.mutations.first(), Some(StateMutation::RotateMasterWallet { .. })));
+        let new_before = producer.state().balance_of(&V9_NEW_MASTER, &sigil_state::NATIVE);
+        producer.apply_with_schedule(b3.clone(), schedule).unwrap();
+        follower.apply_with_schedule(b3, schedule).unwrap();
+        assert!(producer.state().balance_of(&V9_NEW_MASTER, &sigil_state::NATIVE) > new_before);
+        assert_eq!(producer.state().balance_of(&MASTER_WALLET_GENESIS, &sigil_state::NATIVE), old_after_1);
+    }
+
+    /// The two ways a node can be on the wrong side of a rotation, and both must be LOUD:
+    /// (a) a follower whose binary has no such rotation scheduled refuses the block that
+    ///     carries one (it will not pay a wallet its own code does not name);
+    /// (b) a follower whose binary DOES schedule it refuses a block at that height that skipped
+    ///     it (a producer cannot quietly keep paying the old master).
+    #[test]
+    fn rotation_mismatch_between_producer_and_follower_is_refused_not_absorbed() {
+        let scheduled: &[(u64, WalletId)] = &[(1, V9_NEW_MASTER)];
+        let none: &[(u64, WalletId)] = &[];
+        let winner: WalletId = [0x11; 32];
+
+        let mut chain = ChainTip::new();
+        chain.apply(build_genesis().unwrap()).unwrap();
+        let solve = pool_solve(&chain, winner);
+
+        // (a) producer rotates, follower has no schedule.
+        let (with_rot, _) = mint_next_block_with_schedule(&chain, Vec::new(), &[], None, Some(&solve), None, None, scheduled).unwrap();
+        let mut unscheduled_follower = ChainTip::new();
+        unscheduled_follower.apply(build_genesis().unwrap()).unwrap();
+        let err = unscheduled_follower.apply_with_schedule(with_rot, none).unwrap_err();
+        assert!(format!("{err}").contains("unscheduled master-wallet rotation"), "{err}");
+        assert_eq!(unscheduled_follower.height(), 1, "the block is dropped, the tip does not move");
+        assert_eq!(unscheduled_follower.state().master_wallet(), Some(MASTER_WALLET_GENESIS));
+
+        // (b) producer skipped it, follower expects it.
+        let (without_rot, _) = mint_next_block_with_schedule(&chain, Vec::new(), &[], None, Some(&solve), None, None, none).unwrap();
+        let mut scheduled_follower = ChainTip::new();
+        scheduled_follower.apply(build_genesis().unwrap()).unwrap();
+        let err = scheduled_follower.apply_with_schedule(without_rot, scheduled).unwrap_err();
+        assert!(format!("{err}").contains("must open with the scheduled master-wallet rotation"), "{err}");
+        assert_eq!(scheduled_follower.height(), 1);
     }
 
     #[test]

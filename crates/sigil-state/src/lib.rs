@@ -134,6 +134,48 @@ pub const BASE_UNIT_NAME_PLURAL: &str = "glyphs";
 /// hard invariant at the chokepoint rather than emission-controller bookkeeping.)
 pub const MAX_SUPPLY: u128 = 21_000_000 * 10u128.pow(SIGIL_DECIMALS);
 
+/// ── MASTER-WALLET ROTATION SCHEDULE (protocol constant, v9) ─────────────────────────────
+///
+/// `(activation_height, new_master)` pairs. The master wallet is the dev-fee recipient the
+/// coinbase split and the DEX skim read from state (`SigilState::master_wallet`). It is
+/// installed once, in block 0, by [`StateMutation::SetMasterWallet`], and the chokepoint
+/// refuses a second install — so until v9 there was no way to move the fee flow short of
+/// a fresh genesis.
+///
+/// A rotation is a CONSENSUS change: every node's coinbase for every block after the
+/// activation height credits the new wallet, so a follower that has not applied it computes a
+/// different `wallet_state_root` from the first post-rotation block and stops with STATE
+/// DIVERGENCE. That is the intended, loud failure for a stale binary. Hence the shape:
+///
+/// - The schedule is COMPILED IN, not read from an env var or a file. Both the producer and
+///   every follower carry the same table, the way `MASTER_WALLET_GENESIS` is carried, so no
+///   node can be misconfigured into a different fee recipient.
+/// - The block at `activation_height` MUST open with `RotateMasterWallet { wallet }` for
+///   exactly that wallet (`ChainTip::apply` enforces presence; the chokepoint enforces the
+///   pair). A producer cannot skip it, delay it, or point it anywhere else — and any
+///   `RotateMasterWallet` at an unscheduled height, or for an unscheduled wallet, is rejected
+///   outright. There is no signature to forge because there is no authority to exercise: the
+///   binary is the authority, exactly as it is for genesis.
+/// - It goes first in the block so the SAME block's coinbase already pays the new master.
+///
+/// Empty = nothing scheduled; `RotateMasterWallet` is then never valid. Adding an entry is a
+/// v9-class release: ship it to every follower BEFORE the height arrives (≈570k blocks per
+/// day at 6.6 blk/s), and never let the live producer be the first to mint it — the
+/// `sigil-node` tests drive the real builder and the real follower through a scheduled
+/// height first.
+pub const MASTER_WALLET_ROTATIONS: &[(u64, WalletId)] = &[];
+
+/// The master wallet scheduled to take over at exactly `height` under `schedule`, if any.
+/// Pure and total — the same answer on every node for the same height.
+pub fn scheduled_master_rotation_in(schedule: &[(u64, WalletId)], height: u64) -> Option<WalletId> {
+    schedule.iter().find(|(h, _)| *h == height).map(|(_, w)| *w)
+}
+
+/// [`scheduled_master_rotation_in`] against the compiled-in [`MASTER_WALLET_ROTATIONS`].
+pub fn scheduled_master_rotation(height: u64) -> Option<WalletId> {
+    scheduled_master_rotation_in(MASTER_WALLET_ROTATIONS, height)
+}
+
 /// ⚠️ THE DECIMAL CEILING, enforced at compile time.
 ///
 /// Shielded note amounts are range-constrained to `2^RANGE_BITS` inside the STARK, over the
@@ -844,6 +886,16 @@ pub enum StateMutation {
     /// — once the bank is installed it stays installed for the lifetime of
     /// the chain.
     SetMasterWallet { wallet: WalletId },
+
+    /// v9: move the protocol-fee recipient to `wallet` — accepted ONLY when
+    /// `(transition.at_height, wallet)` is an entry of the compiled-in
+    /// [`MASTER_WALLET_ROTATIONS`] schedule; anything else is refused with
+    /// [`CommitError::UnscheduledMasterRotation`]. Appended as the LAST variant on purpose:
+    /// blocks are bincode-encoded by variant index, so every block already on disk or on
+    /// the wire keeps its bytes. A pre-v9 follower cannot decode a block carrying this
+    /// variant and stops there, loudly, which is the correct behaviour for a binary that
+    /// would otherwise pay the wrong wallet.
+    RotateMasterWallet { wallet: WalletId },
 }
 
 /// A batched, atomic state transition. Always processed by
@@ -927,6 +979,12 @@ pub enum CommitError {
     /// re-assigned without a hard fork.
     #[error("master wallet already set; cannot re-install without consensus upgrade")]
     MasterWalletAlreadySet,
+
+    /// v9: a `RotateMasterWallet` that is not on the compiled-in schedule — wrong height,
+    /// wrong wallet, or no rotation scheduled at all. A producer that emits one is buggy or
+    /// trying to redirect the dev fee; the block is rejected.
+    #[error("unscheduled master-wallet rotation at height {at_height} to {wallet:02x?}")]
+    UnscheduledMasterRotation { at_height: u64, wallet: WalletId },
 }
 
 // ── P5-C delta application helpers ────────────────────────────────────────
@@ -1201,6 +1259,21 @@ pub fn commit_state_transition(
     transition: &StateTransition,
     expected_height: u64,
 ) -> Result<StateRoots, CommitError> {
+    commit_state_transition_with_master_schedule(state, transition, expected_height, MASTER_WALLET_ROTATIONS)
+}
+
+/// [`commit_state_transition`] with an explicit master-wallet rotation `schedule` in place of
+/// the compiled-in [`MASTER_WALLET_ROTATIONS`]. This exists so a test or a simulator (chronos,
+/// the sigil-node producer/follower agreement tests) can drive a rotation through the REAL
+/// builder and the REAL follower before any entry is added to the live table. Production
+/// callers use [`commit_state_transition`]; there is nothing this can do that the schedule
+/// table cannot, so there is no second authority here — only a second test seam.
+pub fn commit_state_transition_with_master_schedule(
+    state: &mut SigilState,
+    transition: &StateTransition,
+    expected_height: u64,
+    schedule: &[(u64, WalletId)],
+) -> Result<StateRoots, CommitError> {
     if transition.at_height != expected_height {
         return Err(CommitError::WrongHeight {
             expected: expected_height,
@@ -1430,6 +1503,18 @@ pub fn commit_state_transition(
             StateMutation::SetMasterWallet { wallet } => {
                 if state.master_wallet.is_some() {
                     return Err(CommitError::MasterWalletAlreadySet);
+                }
+                state.set_master_wallet(wallet);
+            }
+            StateMutation::RotateMasterWallet { wallet } => {
+                // The schedule IS the authority: the pair must match exactly, at exactly this
+                // height. No signature, no env, no "operator" flag — a rotation is valid on
+                // every node or on none.
+                if scheduled_master_rotation_in(schedule, transition.at_height) != Some(wallet) {
+                    return Err(CommitError::UnscheduledMasterRotation {
+                        at_height: transition.at_height,
+                        wallet,
+                    });
                 }
                 state.set_master_wallet(wallet);
             }
@@ -2352,5 +2437,109 @@ mod r0_nonce_tests {
         eprintln!("║  This is the money-TPS wall REGARDLESS of block structure ║");
         eprintln!("╚═══════════════════════════════════════════════════════════╝\n");
         assert!(tps > 0.0);
+    }
+}
+
+#[cfg(test)]
+mod master_rotation_tests {
+    use super::*;
+    // ── v9 master-wallet rotation ────────────────────────────────────────────────────────
+
+    const OLD_MASTER: WalletId = [0x09u8; 32];
+    const NEW_MASTER: WalletId = [0x78u8; 32];
+
+    fn state_with_master(m: WalletId) -> SigilState {
+        let mut st = SigilState::new();
+        commit_state_transition(
+            &mut st,
+            &StateTransition { at_height: 0, mutations: vec![StateMutation::SetMasterWallet { wallet: m }] },
+            0,
+        )
+        .unwrap();
+        st
+    }
+
+    fn rotate(at: u64, w: WalletId) -> StateTransition {
+        StateTransition { at_height: at, mutations: vec![StateMutation::RotateMasterWallet { wallet: w }] }
+    }
+
+    /// The live table is empty until the operator schedules a rotation — and while it is
+    /// empty, a `RotateMasterWallet` from ANY producer at ANY height is refused. This is the
+    /// theft-vector test: the dev fee cannot be redirected by whoever mints a block.
+    #[test]
+    fn rotation_is_refused_when_nothing_is_scheduled() {
+        assert!(MASTER_WALLET_ROTATIONS.is_empty(), "this test pins the un-scheduled state; update it when a rotation is scheduled");
+        let mut st = state_with_master(OLD_MASTER);
+        for h in [1u64, 2, 1_000_000, u64::MAX] {
+            let err = commit_state_transition(&mut st, &rotate(h, NEW_MASTER), h).unwrap_err();
+            assert!(matches!(err, CommitError::UnscheduledMasterRotation { at_height, wallet } if at_height == h && wallet == NEW_MASTER), "{err}");
+        }
+        assert_eq!(st.master_wallet(), Some(OLD_MASTER), "a refused rotation must leave the master untouched");
+    }
+
+    /// The scheduled pair is accepted at exactly its height and nowhere else; the wrong
+    /// wallet at the right height is refused too. Height and wallet are both load-bearing.
+    #[test]
+    fn rotation_is_accepted_only_for_the_exact_scheduled_pair() {
+        let schedule: &[(u64, WalletId)] = &[(500, NEW_MASTER)];
+        // wrong height
+        let mut st = state_with_master(OLD_MASTER);
+        let err = commit_state_transition_with_master_schedule(&mut st, &rotate(499, NEW_MASTER), 499, schedule).unwrap_err();
+        assert!(matches!(err, CommitError::UnscheduledMasterRotation { .. }), "{err}");
+        let err = commit_state_transition_with_master_schedule(&mut st, &rotate(501, NEW_MASTER), 501, schedule).unwrap_err();
+        assert!(matches!(err, CommitError::UnscheduledMasterRotation { .. }), "{err}");
+        // right height, wrong wallet
+        let err = commit_state_transition_with_master_schedule(&mut st, &rotate(500, [0xEEu8; 32]), 500, schedule).unwrap_err();
+        assert!(matches!(err, CommitError::UnscheduledMasterRotation { .. }), "{err}");
+        assert_eq!(st.master_wallet(), Some(OLD_MASTER));
+        // the exact pair
+        commit_state_transition_with_master_schedule(&mut st, &rotate(500, NEW_MASTER), 500, schedule).unwrap();
+        assert_eq!(st.master_wallet(), Some(NEW_MASTER));
+        // and the old one-shot install is still refused afterwards
+        let err = commit_state_transition_with_master_schedule(
+            &mut st,
+            &StateTransition { at_height: 501, mutations: vec![StateMutation::SetMasterWallet { wallet: OLD_MASTER }] },
+            501,
+            schedule,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommitError::MasterWalletAlreadySet));
+    }
+
+    /// A refused transition must be atomic: a rotation that fails AFTER an earlier mutation in
+    /// the same transition must not leave that earlier mutation applied. (The chokepoint
+    /// applies in order and returns on the first error, so this pins that the caller's state
+    /// is what it was — the follower drops the whole block.)
+    #[test]
+    fn refused_rotation_does_not_leak_earlier_mutations_of_the_same_block() {
+        let mut st = state_with_master(OLD_MASTER);
+        let before = st.roots();
+        let t = StateTransition {
+            at_height: 7,
+            mutations: vec![
+                StateMutation::SetBalance { wallet: [0x11u8; 32], token: NATIVE, amount: 5 },
+                StateMutation::RotateMasterWallet { wallet: NEW_MASTER },
+            ],
+        };
+        let mut scratch = st.clone();
+        assert!(commit_state_transition(&mut scratch, &t, 7).is_err());
+        // Caller discipline: a failed commit is applied to a scratch clone and dropped. The
+        // original state is untouched — which is what ChainTip::apply relies on when it
+        // rejects a block: it never commits into its canonical state without a match.
+        assert_eq!(st.roots(), before);
+        assert_eq!(st.master_wallet(), Some(OLD_MASTER));
+    }
+
+    /// Wire compatibility: the new variant is LAST, so every pre-existing variant keeps its
+    /// bincode index and every block already on disk decodes byte-for-byte as before.
+    #[test]
+    fn rotate_master_wallet_is_the_last_variant_and_old_encodings_are_stable() {
+        let set = bincode::serialize(&StateMutation::SetMasterWallet { wallet: OLD_MASTER }).unwrap();
+        let rot = bincode::serialize(&StateMutation::RotateMasterWallet { wallet: NEW_MASTER }).unwrap();
+        let set_idx = u32::from_le_bytes(set[..4].try_into().unwrap());
+        let rot_idx = u32::from_le_bytes(rot[..4].try_into().unwrap());
+        assert_eq!(rot_idx, set_idx + 1, "RotateMasterWallet must directly follow SetMasterWallet — never insert a variant before it");
+        let back: StateMutation = bincode::deserialize(&rot).unwrap();
+        assert_eq!(back, StateMutation::RotateMasterWallet { wallet: NEW_MASTER });
     }
 }

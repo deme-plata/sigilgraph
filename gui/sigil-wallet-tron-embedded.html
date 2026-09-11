@@ -8124,7 +8124,13 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
   function counts(){
     var l = load(), c = {all:l.length};
     CATS.forEach(function(x){ if(x.k!=='all') c[x.k] = 0; });
-    l.forEach(function(e){ if(c[e.cat] != null) c[e.cat]++; });
+    l.forEach(function(e){
+      if(c[e.cat] != null) c[e.cat]++;
+      // A shielded RECEIVE is an incoming payment too, so it counts under In as well as
+      // Shield — otherwise someone looking at the ↙ In tab for a payment they received
+      // privately sees nothing (reported 2026-09-11).
+      if(e.cat === 'shield' && e.dir === 'in' && c.in != null) c.in++;
+    });
     return c;
   }
   function renderCats(){
@@ -8145,7 +8151,9 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
   }
   function apply(){
     var l = load().slice();
-    if(active !== 'all') l = l.filter(function(e){ return e.cat === active; });
+    if(active !== 'all') l = l.filter(function(e){
+      return e.cat === active || (active === 'in' && e.cat === 'shield' && e.dir === 'in');
+    });
     var s = q.trim().toLowerCase();
     if(s) l = l.filter(function(e){
       return [e.label, e.peer, e.txid, e.cat, e.src, e.amountText || amt(e.amount)]

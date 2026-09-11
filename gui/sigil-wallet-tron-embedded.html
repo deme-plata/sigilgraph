@@ -2622,16 +2622,33 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       var r = await fetch('/v1/shielded/address?wallet='+addr, {cache:'no-store'});
       var j = null; try{ j = await r.json(); }catch(_){}
       if(j && j.ok && j.pk_shield){
-        if(String(j.pk_shield).toLowerCase() === String(pkShield).toLowerCase()){
+        var pkShieldMatch  = String(j.pk_shield).toLowerCase()  === String(pkShield).toLowerCase();
+        var pkEncryptMatch = String(j.pk_encrypt||'').toLowerCase() === String(pkEncrypt).toLowerCase();
+        if(pkShieldMatch && pkEncryptMatch){
           st[addr] = 'ours';
           return {ok:true, already:true};
         }
-        // Registered to a DIFFERENT shield key: rewards and payments would mint
-        // into notes THIS seed cannot spend — strictly worse than unregistered.
-        // Say so loudly and stop, rather than fight whoever holds the other seed.
-        st[addr] = 'foreign';
-        log('⚠ '+addr.slice(0,10)+'… is already registered to a DIFFERENT shield key — private payments to it cannot be spent by this wallet.');
-        return {ok:false, reason:'registered to a foreign shield key'};
+        if(pkShieldMatch && !pkEncryptMatch){
+          // SAME shield key (so the SAME seed — pk_shield matching proves it), but the
+          // published DELIVERY key is stale or was never set. This is silent and total:
+          // a payer seals every note ciphertext to the chain's published pk_encrypt, so
+          // payments confirm on chain and this wallet — scanning with its real, DERIVED
+          // pk_encrypt — can never DISCOVER them. Balance reads 0 while money arrives.
+          // (2026-09-11: the guard used to compare pk_shield ONLY, declare "ours" here,
+          // and never repair the delivery key — the "confirmed but zero balance" report.)
+          // We hold the seed and the keys agree, so republish the correct pair (the node
+          // OVERWRITES on register); future payments then land. Notes already sealed to
+          // the old key stay unrecoverable — nothing but the old key could open them.
+          log('⟳ '+addr.slice(0,10)+'… had a stale delivery key — republishing so payments can be received.');
+          // fall through to the register call below with the correct pk_shield+pk_encrypt
+        } else {
+          // Registered to a DIFFERENT shield key: rewards and payments would mint
+          // into notes THIS seed cannot spend — strictly worse than unregistered.
+          // Say so loudly and stop, rather than fight whoever holds the other seed.
+          st[addr] = 'foreign';
+          log('⚠ '+addr.slice(0,10)+'… is already registered to a DIFFERENT shield key — private payments to it cannot be spent by this wallet.');
+          return {ok:false, reason:'registered to a foreign shield key'};
+        }
       }
     }catch(e){
       return {ok:false, reason:'node unreachable — not submitting on an unknown state'};

@@ -7771,7 +7771,24 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
 
   function load(){
     if(!addr()) return [];
-    try{ var v = JSON.parse(localStorage.getItem(lkey()) || '[]'); return Array.isArray(v) ? v : []; }
+    try{
+      var v = JSON.parse(localStorage.getItem(lkey()) || '[]'); if(!Array.isArray(v)) return [];
+      // One-time re-tag (2026-09-11): a SHIELDED credit stored as 'miner' is a receive
+      // that the old classifier mislabeled as a mining reward (g2 pays coinbase
+      // transparently, so a shielded note is never a reward). Fix it in place so past
+      // rows land under In/Shield, not Miner. Transparent 'miner' credits are untouched.
+      var fixed = false;
+      for(var i=0;i<v.length;i++){
+        if(v[i] && v[i].shielded && v[i].cat === 'miner'){
+          v[i].cat = 'shield'; v[i].dir = 'in';
+          if(/^Mining reward/.test(String(v[i].label||''))) v[i].label = 'Shielded credit';
+          if(v[i].peer && /rig|seedhost|cs30067/i.test(String(v[i].peer))) v[i].peer = 'shielded pool';
+          fixed = true;
+        }
+      }
+      if(fixed){ try{ localStorage.setItem(lkey(), JSON.stringify(v.slice(-MAXN))); }catch(e){} }
+      return v;
+    }
     catch(e){ return []; }
   }
   function save(list){
@@ -8051,11 +8068,18 @@ window.copyReceive=copyReceive; window.copyMineCmd=copyMineCmd; window.sigilLogo
     if(prev !== null && prev !== raw){
       var d; try{ d = BigInt(raw) - BigInt(prev); }catch(e){ d = 0n; }
       if(d > 0n){
-        var rig = await checkMining(addr());
+        // A RISE in the SHIELDED balance is an incoming PRIVATE PAYMENT, always. On g2
+        // coinbase is paid TRANSPARENTLY (past the node's dust-gate / TRANSPARENT_COINBASE
+        // height), so mining no longer mints a shielded note at all — a shielded increase
+        // can only be a note someone DELIVERED to us. The old code labeled it "Mining
+        // reward" whenever THIS wallet happened to be a miner, which mislabeled a real
+        // 69-SIGIL receive on a mining wallet as a reward and hid it from the In/Shield
+        // filters (reported 2026-09-11). Classify by what produced the note, not by whether
+        // the wallet mines. (Transparent mining CREDITS are still tagged 'miner' by the
+        // transparent poller above, which is correct — those really are coinbase.)
         add({
-          cat: rig ? 'miner' : 'shield', dir:'in', src:'observed', shielded:true,
-          label: rig ? ('Mining reward \u00b7 ' + (rig.rig || 'rig')) : 'Shielded credit',
-          amount: d.toString(), peer: rig ? (rig.rig||'') : 'shielded pool', status:'confirmed'
+          cat:'shield', dir:'in', src:'observed', shielded:true,
+          label:'Shielded credit', amount: d.toString(), peer:'shielded pool', status:'confirmed'
         });
       } else if(d < 0n){
         var recent = load().slice(-6);

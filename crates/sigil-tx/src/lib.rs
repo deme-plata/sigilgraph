@@ -547,9 +547,10 @@ pub enum SigilTx {
     /// must be the state-committed master wallet. Refused before
     /// `sigil_usds::USDS_LIVE_HEIGHT`.
     ///
-    /// Appended LAST so every existing variant keeps its bincode index — the
-    /// backfill wire is bincode and is not self-describing (see the
-    /// `note_ciphertext` doc comment for what a shifted variant does to it).
+    /// Appended LAST: the wire is JSON tagged by variant NAME (`kind`), so
+    /// order does not matter there, but [`SigilTx::tag`] is a dense index
+    /// used by the `txs_by_kind` CF and must stay stable — new kinds go on
+    /// the end, never in the middle.
     OracleDelegate {
         /// The delegating authority — must equal the chain's master wallet.
         authority: WalletId,
@@ -4251,7 +4252,13 @@ mod nation_welfare_tests {
     const MASTER: WalletId = [0xAA; 32];
     const ALICE: WalletId = [0x11; 32];
     const CPR: [u8; 32] = [0x42; 32];
-    const H: u64 = wf::WELFARE_FROM_HEIGHT;
+    /// The nation arms activate at WELFARE_FROM_HEIGHT; since USDS-live the
+    /// stipend ALSO needs a height-stamped, fresh oracle price, which only
+    /// exists from USDS_LIVE_HEIGHT on — so the fixture runs there (it is the
+    /// later of the two). The below-activation checks name the nation height
+    /// explicitly.
+    const H: u64 = sigil_usds::USDS_LIVE_HEIGHT;
+    const FEEDER: WalletId = [0xFE; 32];
 
     fn signed(tx: SigilTx) -> SignedTx {
         let from = tx.fee_payer();
@@ -4276,8 +4283,9 @@ mod nation_welfare_tests {
             StateMutation::SetBalance { wallet: MASTER, token: NATIVE, amount: 1_000_000 },
             StateMutation::SetBalance { wallet: wf::WELFARE_WALLET, token: NATIVE, amount: treasury },
         ] }, 0).unwrap();
-        // $2.00/SIGIL — the sUSD stipend needs a live oracle price.
-        sigil_oracle::update_price(&mut s, 0, sigil_oracle::ORACLE_AUTHORITY, 200_000_000).unwrap();
+        // $2.00/SIGIL — the sUSD stipend needs a live, FRESH oracle price
+        // (stamped one block before the fixture height).
+        sigil_oracle::update_price(&mut s, H - 1, sigil_oracle::ORACLE_AUTHORITY, 200_000_000).unwrap();
         s
     }
 
@@ -4307,8 +4315,16 @@ mod nation_welfare_tests {
         let err = apply_tx_at(&s, &signed(SigilTx::WelfareClaim { citizen: ALICE, fee: 0 }), H + 2).unwrap_err();
         assert!(matches!(err, TxApplyError::WelfareCooldown { next_height } if next_height == H + 1 + wf::WELFARE_CLAIM_INTERVAL_BLOCKS));
 
-        // After the interval the claim opens again — another $1.00.
-        apply_commit(&mut s, SigilTx::WelfareClaim { citizen: ALICE, fee: 0 }, H + 1 + wf::WELFARE_CLAIM_INTERVAL_BLOCKS).unwrap();
+        // After the interval the claim opens again — but the fixture price is
+        // now 200k blocks old, and a stale price freezes the stipend (fail
+        // closed), so the feed must be refreshed first.
+        let again = H + 1 + wf::WELFARE_CLAIM_INTERVAL_BLOCKS;
+        assert!(matches!(
+            apply_tx_at(&s, &signed(SigilTx::WelfareClaim { citizen: ALICE, fee: 0 }), again).unwrap_err(),
+            TxApplyError::Usds(sigil_usds::UsdsError::StalePrice { .. })
+        ));
+        apply_commit(&mut s, SigilTx::OraclePush { authority: MASTER, price_usd_e8: 200_000_000, fee: 0 }, again - 1).unwrap();
+        apply_commit(&mut s, SigilTx::WelfareClaim { citizen: ALICE, fee: 0 }, again).unwrap();
         assert_eq!(s.balance_of(&ALICE, &sigil_usds::USDS), wf::WELFARE_STIPEND_USD_E8 * 2);
         assert_eq!(s.balance_of(&sigil_usds::VAULT, &NATIVE), LOCK_AT_2USD * 2);
     }
@@ -4317,9 +4333,9 @@ mod nation_welfare_tests {
     fn nation_txs_refused_below_activation() {
         let s = nation_state(wf::WELFARE_STIPEND_GLYPHS);
         let att = signed(SigilTx::CitizenAttest { authority: MASTER, citizen: ALICE, cpr_hash: CPR, fee: 0 });
-        assert!(matches!(apply_tx_at(&s, &att, H - 1), Err(TxApplyError::NationNotActive { .. })));
+        assert!(matches!(apply_tx_at(&s, &att, wf::WELFARE_FROM_HEIGHT - 1), Err(TxApplyError::NationNotActive { .. })));
         let clm = signed(SigilTx::WelfareClaim { citizen: ALICE, fee: 0 });
-        assert!(matches!(apply_tx_at(&s, &clm, H - 1), Err(TxApplyError::NationNotActive { .. })));
+        assert!(matches!(apply_tx_at(&s, &clm, wf::WELFARE_FROM_HEIGHT - 1), Err(TxApplyError::NationNotActive { .. })));
         // The legacy no-height entry point refuses too (unwrap_or(0)).
         assert!(matches!(apply_tx(&s, &att), Err(TxApplyError::NationNotActive { .. })));
     }
@@ -4398,18 +4414,150 @@ mod nation_welfare_tests {
     #[test]
     fn oracle_push_requires_master_nonzero_price_and_activation() {
         let mut s = nation_state(0);
-        // Rogue pusher refused.
+        // Rogue pusher refused — before USDS-live as "not the nation
+        // authority", after it as "neither master nor feeder".
         let rogue = signed(SigilTx::OraclePush { authority: ALICE, price_usd_e8: 100, fee: 0 });
-        assert!(matches!(apply_tx_at(&s, &rogue, H).unwrap_err(), TxApplyError::NotNationAuthority));
+        assert!(matches!(apply_tx_at(&s, &rogue, wf::WELFARE_FROM_HEIGHT).unwrap_err(), TxApplyError::NotNationAuthority));
+        assert!(matches!(apply_tx_at(&s, &rogue, H).unwrap_err(), TxApplyError::NotOracleAuthority));
         // Zero price refused — it would re-brick every claim.
         let zero = signed(SigilTx::OraclePush { authority: MASTER, price_usd_e8: 0, fee: 0 });
         assert!(matches!(apply_tx_at(&s, &zero, H).unwrap_err(), TxApplyError::ZeroOraclePrice));
         // Below activation refused, and the no-height entry point refuses too.
         let push = signed(SigilTx::OraclePush { authority: MASTER, price_usd_e8: 300_000_000, fee: 0 });
-        assert!(matches!(apply_tx_at(&s, &push, H - 1), Err(TxApplyError::NationNotActive { .. })));
+        assert!(matches!(apply_tx_at(&s, &push, wf::WELFARE_FROM_HEIGHT - 1), Err(TxApplyError::NationNotActive { .. })));
         assert!(matches!(apply_tx(&s, &push), Err(TxApplyError::NationNotActive { .. })));
-        // A valid push lands and read_price sees it (byte-identical encoding).
+        // A valid push lands and read_price sees it (byte-identical encoding),
+        // and — post USDS-live — carries its height stamp.
         apply_commit(&mut s, SigilTx::OraclePush { authority: MASTER, price_usd_e8: 300_000_000, fee: 0 }, H).unwrap();
         assert_eq!(sigil_oracle::read_price(&s), 300_000_000);
+        assert_eq!(sigil_oracle::read_price_height(&s), H);
+    }
+
+    // ── USDS-live (2026-09-11): activation gate, delegation, transfers ──────
+
+    #[test]
+    fn a_pre_activation_oracle_push_writes_the_price_slot_only() {
+        // Between the nation activation and USDS activation an OraclePush is
+        // accepted (master only) and writes EXACTLY what every historical
+        // push wrote — the price slot, no stamp. This is the shape every node
+        // already computes for the blocks behind us; changing it would fork.
+        let mut s = nation_state(0);
+        let h = wf::WELFARE_FROM_HEIGHT + 10;
+        let before = s.contract_slot(&sigil_oracle::ORACLE_CONTRACT, &sigil_oracle::PRICE_HEIGHT_SLOT);
+        let r = apply_tx_at(&s, &signed(SigilTx::OraclePush { authority: MASTER, price_usd_e8: 5, fee: 0 }), h).unwrap();
+        assert_eq!(r.mutations.len(), 1, "price slot only — no stamp, no fee write (fee 0)");
+        commit_state_transition(&mut s, &StateTransition { at_height: h, mutations: r.mutations }, h).unwrap();
+        assert_eq!(sigil_oracle::read_price(&s), 5);
+        assert_eq!(s.contract_slot(&sigil_oracle::ORACLE_CONTRACT, &sigil_oracle::PRICE_HEIGHT_SLOT), before, "stamp untouched");
+        // And a delegated feeder is NOT accepted before activation, even if
+        // (somehow) a feeder slot were set.
+        commit_state_transition(&mut s, &StateTransition { at_height: h, mutations: vec![sigil_oracle::delegate_mutation(FEEDER)] }, h).unwrap();
+        let fp = signed(SigilTx::OraclePush { authority: FEEDER, price_usd_e8: 6, fee: 0 });
+        assert!(matches!(apply_tx_at(&s, &fp, h + 1).unwrap_err(), TxApplyError::NotNationAuthority));
+    }
+
+    #[test]
+    fn master_delegates_a_feeder_and_the_feeder_can_push_after_activation() {
+        let mut s = nation_state(0);
+        // Delegation is refused before activation…
+        let del = signed(SigilTx::OracleDelegate { authority: MASTER, feeder: FEEDER, fee: 0 });
+        assert!(matches!(apply_tx_at(&s, &del, H - 1).unwrap_err(), TxApplyError::UsdsNotActive { .. }));
+        assert!(matches!(apply_tx(&s, &del).unwrap_err(), TxApplyError::UsdsNotActive { .. }));
+        // …and only the master may delegate.
+        let rogue = signed(SigilTx::OracleDelegate { authority: ALICE, feeder: FEEDER, fee: 0 });
+        assert!(matches!(apply_tx_at(&s, &rogue, H).unwrap_err(), TxApplyError::NotNationAuthority));
+        // The master delegating to itself is refused (pointless + rotation trap).
+        let selfd = signed(SigilTx::OracleDelegate { authority: MASTER, feeder: MASTER, fee: 0 });
+        assert!(matches!(apply_tx_at(&s, &selfd, H).unwrap_err(), TxApplyError::NotOracleAuthority));
+        // Before delegation the feeder cannot push.
+        let fp = signed(SigilTx::OraclePush { authority: FEEDER, price_usd_e8: 250_000_000, fee: 0 });
+        assert!(matches!(apply_tx_at(&s, &fp, H).unwrap_err(), TxApplyError::NotOracleAuthority));
+        // Delegate (with a fee, to prove the fee debits the master).
+        apply_commit(&mut s, SigilTx::OracleDelegate { authority: MASTER, feeder: FEEDER, fee: 7 }, H).unwrap();
+        assert_eq!(sigil_oracle::read_feeder(&s), Some(FEEDER));
+        assert_eq!(s.balance_of(&MASTER, &NATIVE), 1_000_000 - 7);
+        // Now the feeder pushes, height-stamped; the master still can too.
+        apply_commit(&mut s, SigilTx::OraclePush { authority: FEEDER, price_usd_e8: 250_000_000, fee: 0 }, H + 1).unwrap();
+        assert_eq!(sigil_oracle::read_price(&s), 250_000_000);
+        assert_eq!(sigil_oracle::read_price_height(&s), H + 1);
+        apply_commit(&mut s, SigilTx::OraclePush { authority: MASTER, price_usd_e8: 260_000_000, fee: 0 }, H + 2).unwrap();
+        assert_eq!(sigil_oracle::read_price(&s), 260_000_000);
+        // The feeder may NOT re-delegate (delegation is not transitive).
+        let chain = signed(SigilTx::OracleDelegate { authority: FEEDER, feeder: ALICE, fee: 0 });
+        assert!(matches!(apply_tx_at(&s, &chain, H + 3).unwrap_err(), TxApplyError::NotNationAuthority));
+        // Revoke: delegate to zero → the feeder is locked out again.
+        apply_commit(&mut s, SigilTx::OracleDelegate { authority: MASTER, feeder: [0u8; 32], fee: 0 }, H + 3).unwrap();
+        assert_eq!(sigil_oracle::read_feeder(&s), None);
+        let fp = signed(SigilTx::OraclePush { authority: FEEDER, price_usd_e8: 1, fee: 0 });
+        assert!(matches!(apply_tx_at(&s, &fp, H + 4).unwrap_err(), TxApplyError::NotOracleAuthority));
+    }
+
+    #[test]
+    fn usds_mint_redeem_gate_on_activation_and_track_supply() {
+        let mut s = nation_state(0);
+        commit_state_transition(&mut s, &StateTransition { at_height: 0, mutations: vec![
+            StateMutation::SetBalance { wallet: ALICE, token: NATIVE, amount: 21 * sigil_usds::GLYPHS_PER_SIGIL },
+        ] }, 0).unwrap();
+        let mint = signed(SigilTx::UsdsMint { from: ALICE, sigil_amount: sigil_usds::GLYPHS_PER_SIGIL, fee: 0 });
+        assert!(matches!(apply_tx_at(&s, &mint, H - 1).unwrap_err(), TxApplyError::UsdsNotActive { height, activates_at }
+            if height == H - 1 && activates_at == sigil_usds::USDS_LIVE_HEIGHT));
+        assert!(matches!(apply_tx(&s, &mint).unwrap_err(), TxApplyError::UsdsNotActive { .. }));
+        // At activation, with the fresh $2.00 fixture price, 1 SIGIL mints
+        // $2.00 / 1.05 gross = 190_476_190 base, minus the protocol fee.
+        apply_commit(&mut s, SigilTx::UsdsMint { from: ALICE, sigil_amount: sigil_usds::GLYPHS_PER_SIGIL, fee: 0 }, H).unwrap();
+        let gross = 200_000_000u128 * 10_000 / 10_500;
+        assert_eq!(sigil_usds::read_supply(&s), gross, "committed supply = gross minted");
+        assert_eq!(
+            s.balance_of(&ALICE, &sigil_usds::USDS) + s.balance_of(&sigil_bank::DEV_MASTER_WALLET, &sigil_usds::USDS),
+            gross,
+            "and it equals what the wallets hold"
+        );
+        assert_eq!(s.balance_of(&sigil_usds::VAULT, &NATIVE), sigil_usds::GLYPHS_PER_SIGIL);
+        // Redeem half; supply follows.
+        let half = s.balance_of(&ALICE, &sigil_usds::USDS) / 2;
+        apply_commit(&mut s, SigilTx::UsdsRedeem { from: ALICE, usds_amount: half, fee: 0 }, H + 1).unwrap();
+        assert_eq!(sigil_usds::read_supply(&s), gross - half);
+        // A stale price freezes both directions.
+        let late = H + sigil_oracle::MAX_PRICE_AGE_BLOCKS + 10;
+        let rd = signed(SigilTx::UsdsRedeem { from: ALICE, usds_amount: 1, fee: 0 });
+        assert!(matches!(apply_tx_at(&s, &rd, late).unwrap_err(), TxApplyError::Usds(sigil_usds::UsdsError::StalePrice { .. })));
+    }
+
+    #[test]
+    fn a_usds_transfer_is_refused_before_activation_and_moves_after() {
+        // The bug this whole change exists for: a stablecoin nobody could move.
+        let mut s = nation_state(0);
+        commit_state_transition(&mut s, &StateTransition { at_height: 0, mutations: vec![
+            StateMutation::SetBalance { wallet: ALICE, token: NATIVE, amount: 1_000 },
+            StateMutation::SetBalance { wallet: ALICE, token: sigil_usds::USDS, amount: 500 },
+        ] }, 0).unwrap();
+        const BOB: WalletId = [0x22; 32];
+        let xfer = signed(SigilTx::Send { from: ALICE, to: BOB, amount: 200, token: sigil_usds::USDS, fee: 10 });
+        assert!(matches!(apply_tx_at(&s, &xfer, H - 1).unwrap_err(), TxApplyError::TokenSendNotActive { height, activates_at }
+            if height == H - 1 && activates_at == sigil_usds::USDS_LIVE_HEIGHT));
+        apply_commit(&mut s, SigilTx::Send { from: ALICE, to: BOB, amount: 200, token: sigil_usds::USDS, fee: 10 }, H).unwrap();
+        assert_eq!(s.balance_of(&ALICE, &sigil_usds::USDS), 300);
+        assert_eq!(s.balance_of(&BOB, &sigil_usds::USDS), 200);
+        assert_eq!(s.balance_of(&ALICE, &NATIVE), 990, "the fee is native and burns");
+        assert_eq!(s.balance_of(&BOB, &NATIVE), 0, "no native moved");
+        // Native stays shielded-only at EVERY height, activation or not.
+        let native = signed(SigilTx::Send { from: ALICE, to: BOB, amount: 1, token: NATIVE, fee: 0 });
+        assert!(matches!(apply_tx_at(&s, &native, H).unwrap_err(), TxApplyError::TransparentSendRetired { .. }));
+        assert!(matches!(apply_tx_at(&s, &native, H + 1_000_000).unwrap_err(), TxApplyError::TransparentSendRetired { .. }));
+    }
+
+    #[test]
+    fn oracle_delegate_is_the_last_variant_and_hashes_stably() {
+        // Appended last: tag 23, and the JSON encoding names the variant so a
+        // wire peer that does not know it fails loudly rather than misreading.
+        let tx = SigilTx::OracleDelegate { authority: MASTER, feeder: FEEDER, fee: 3 };
+        assert_eq!(tx.tag(), 23);
+        assert_eq!(tx.fee(), 3);
+        assert_eq!(tx.fee_payer(), MASTER);
+        let json = String::from_utf8(tx.encode()).unwrap();
+        assert!(json.contains("\"kind\":\"OracleDelegate\""), "{json}");
+        let back: SigilTx = serde_json::from_slice(&tx.encode()).unwrap();
+        assert_eq!(back, tx);
+        assert_eq!(tx.hash(), *blake3::hash(&tx.encode()).as_bytes());
     }
 }

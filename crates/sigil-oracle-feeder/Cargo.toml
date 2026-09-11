@@ -1,0 +1,24 @@
+[package]
+name = "sigil-oracle-feeder"
+version.workspace = true
+edition = "2021"
+description = "The SIGIL/USD price feeder: reads the wSIGIL3/USDC Uniswap V2 pair on Polygon, sanity-bounds it, and pushes height-stamped OraclePush txs to sigil-api as the master-delegated feeder wallet. Without this running, USDS mint/redeem/welfare refuse (stale price) — by design."
+
+[[bin]]
+name = "sigil-oracle-feeder"
+path = "src/main.rs"
+
+[dependencies]
+# SIGIL-side signing — same primitives/message scheme as sigil-api's nation.rs
+# (`sigil-rpc/v1|oracle_push|…`), so what this signs is what it verifies.
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+hex = "0.4"
+# SIGIL-side HTTP — GET /v1/usds/status, POST /v1/nation/oracle/push_wallet.
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+serde = { workspace = true }
+serde_json = "1"
+# Polygon-side read-only RPC: getReserves()/token0() on the V2 pair.
+alloy = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+anyhow = "1"
+rand = "0.8"

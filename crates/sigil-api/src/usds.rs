@@ -60,15 +60,23 @@ const MAX_AGE: Duration = Duration::from_secs(2_400);
 
 struct Pending {
     tx: SigilTx,
+    tx_hash: [u8; 32],
     attempts: u32,
     first_seen: Instant,
 }
 
-/// Authenticated, not-yet-confirmed USDS mint/redeem actions, plus the
-/// per-wallet replay guard (shared across both actions — same "one
+/// Authenticated, not-yet-confirmed USDS mint/redeem/transfer actions, plus
+/// the per-wallet replay guard (shared across all actions — same "one
 /// watermark per wallet" reasoning as `DexBridge`).
+///
+/// **Keyed by `(tx_hash, req_nonce)`, not by `tx_hash` alone** — the same
+/// fix `send.rs` took on 2026-09-02. A `SigilTx` carries no nonce, so two
+/// identical actions (same wallet, same amount) hash identically; keying on
+/// the hash alone made the second one a silent no-op that still answered
+/// `ok:true` with a real-looking txid. Two receipts, one transfer.
+/// `confirm_applied` retires ONE entry per settled hash, oldest first.
 pub struct UsdsBridge {
-    pending: Mutex<HashMap<[u8; 32], Pending>>,
+    pending: Mutex<HashMap<([u8; 32], u64), Pending>>,
     nonce_watermark: Mutex<HashMap<WalletId, u64>>,
 }
 
@@ -81,6 +89,7 @@ impl Default for UsdsBridge {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsdsBridgeError {
     BadFromAddress,
+    BadToAddress,
     ZeroAmount,
     BadSignatureEncoding,
     SignatureInvalid,
@@ -91,6 +100,7 @@ impl UsdsBridgeError {
     pub fn message(self) -> &'static str {
         match self {
             UsdsBridgeError::BadFromAddress => "from must be a 64-hex address",
+            UsdsBridgeError::BadToAddress => "to must be a 64-hex address",
             UsdsBridgeError::ZeroAmount => "amount must be > 0",
             UsdsBridgeError::BadSignatureEncoding => "sig must be 128 hex chars (64 bytes)",
             UsdsBridgeError::SignatureInvalid => "signature does not match the sending wallet",
@@ -152,7 +162,34 @@ impl UsdsBridge {
         check_nonce(&self.nonce_watermark, from, req_nonce)?;
 
         let tx = SigilTx::UsdsMint { from, sigil_amount, fee: 0 };
-        Ok(self.queue(tx))
+        Ok(self.queue(tx, req_nonce))
+    }
+
+    /// A plain USDS transfer, wallet-signed. Consensus accepts a transparent
+    /// non-native `Send` from `sigil_usds::USDS_LIVE_HEIGHT` on (before that
+    /// `apply_tx` refuses it as `TokenSendNotActive`, and the producer never
+    /// includes it). Fee 0: the fee is native and this route exists for
+    /// wallets that hold only USDS (a welfare recipient, a coin claimant).
+    /// Message: `sigil-rpc/v1|usds_transfer|{from}|{to}|{amount}|nonce={req_nonce}`.
+    pub fn submit_transfer(
+        &self,
+        from_hex: &str,
+        to_hex: &str,
+        amount: u128,
+        sig_hex: &str,
+        req_nonce: u64,
+    ) -> Result<[u8; 32], UsdsBridgeError> {
+        let from = hex32(from_hex).ok_or(UsdsBridgeError::BadFromAddress)?;
+        let to = hex32(to_hex).ok_or(UsdsBridgeError::BadToAddress)?;
+        if amount == 0 {
+            return Err(UsdsBridgeError::ZeroAmount);
+        }
+        let msg = format!("sigil-rpc/v1|usds_transfer|{from_hex}|{to_hex}|{amount}|nonce={req_nonce}");
+        verify_sig(&from, &msg, sig_hex)?;
+        check_nonce(&self.nonce_watermark, from, req_nonce)?;
+
+        let tx = SigilTx::Send { from, to, amount, token: sigil_usds::USDS, fee: 0 };
+        Ok(self.queue(tx, req_nonce))
     }
 
     /// `sigil-rpc/v1|usds_redeem|{from}|{usds_amount}|nonce={req_nonce}`
@@ -172,13 +209,16 @@ impl UsdsBridge {
         check_nonce(&self.nonce_watermark, from, req_nonce)?;
 
         let tx = SigilTx::UsdsRedeem { from, usds_amount, fee: 0 };
-        Ok(self.queue(tx))
+        Ok(self.queue(tx, req_nonce))
     }
 
-    fn queue(&self, tx: SigilTx) -> [u8; 32] {
+    fn queue(&self, tx: SigilTx, req_nonce: u64) -> [u8; 32] {
         let tx_hash = tx.hash();
-        self.pending.lock().unwrap().entry(tx_hash).or_insert_with(|| Pending {
+        // `check_nonce` already guarantees (wallet, req_nonce) is fresh, so
+        // (hash, req_nonce) is fresh too: this insert never no-ops.
+        self.pending.lock().unwrap().insert((tx_hash, req_nonce), Pending {
             tx,
+            tx_hash,
             attempts: 0,
             first_seen: Instant::now(),
         });
@@ -190,7 +230,7 @@ impl UsdsBridge {
     pub fn snapshot_for_mint(&self) -> Vec<SignedTx> {
         let mut guard = self.pending.lock().unwrap();
         let mut out = Vec::with_capacity(guard.len());
-        guard.retain(|hash, p| {
+        guard.retain(|(hash, _), p| {
             if p.attempts >= MAX_ATTEMPTS || p.first_seen.elapsed() >= MAX_AGE {
                 eprintln!(
                     "\u{2717} usds action gave up after {} attempts / {:.1}s (still not landed) hash={}",
@@ -205,13 +245,22 @@ impl UsdsBridge {
         out
     }
 
+    /// Retire ONE pending entry per settled hash (oldest first) — two
+    /// identical actions are two entries, and one settlement retires one.
     pub fn confirm_applied(&self, hashes: &[[u8; 32]]) {
         if hashes.is_empty() {
             return;
         }
         let mut guard = self.pending.lock().unwrap();
         for h in hashes {
-            guard.remove(h);
+            let victim = guard
+                .iter()
+                .filter(|(_, p)| p.tx_hash == *h)
+                .min_by_key(|(_, p)| p.first_seen)
+                .map(|(k, _)| *k);
+            if let Some(k) = victim {
+                guard.remove(&k);
+            }
         }
     }
 
@@ -354,6 +403,53 @@ mod tests {
             bridge.submit_mint(&from_hex, 0, &sig, 1).unwrap_err(),
             UsdsBridgeError::ZeroAmount
         );
+    }
+
+    #[test]
+    fn two_identical_mints_are_two_entries_and_settle_one_at_a_time() {
+        // The duplicate-payment bug class (send.rs, 2026-09-02): same wallet,
+        // same amount, two nonces → two DISTINCT pending entries, and one
+        // settlement retires exactly one of them.
+        let (sk, from) = signer();
+        let from_hex = hex::encode(from);
+        let bridge = UsdsBridge::new();
+        let h1 = bridge.submit_mint(&from_hex, 10, &sign(&sk, &format!("sigil-rpc/v1|usds_mint|{from_hex}|10|nonce=1")), 1).unwrap();
+        let h2 = bridge.submit_mint(&from_hex, 10, &sign(&sk, &format!("sigil-rpc/v1|usds_mint|{from_hex}|10|nonce=2")), 2).unwrap();
+        assert_eq!(h1, h2, "content-addressed: identical actions hash identically");
+        assert_eq!(bridge.pending_len(), 2, "…but they are two actions");
+        assert_eq!(bridge.snapshot_for_mint().len(), 2);
+        bridge.confirm_applied(&[h1]);
+        assert_eq!(bridge.pending_len(), 1, "one settlement retires ONE");
+        bridge.confirm_applied(&[h1]);
+        assert_eq!(bridge.pending_len(), 0);
+    }
+
+    #[test]
+    fn a_correctly_signed_transfer_queues_a_usds_send() {
+        let (sk, from) = signer();
+        let from_hex = hex::encode(from);
+        let to_hex = "22".repeat(32);
+        let msg = format!("sigil-rpc/v1|usds_transfer|{from_hex}|{to_hex}|250|nonce=1");
+        let sig = sign(&sk, &msg);
+        let bridge = UsdsBridge::new();
+        let hash = bridge.submit_transfer(&from_hex, &to_hex, 250, &sig, 1).unwrap();
+        let snap = bridge.snapshot_for_mint();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].tx.hash(), hash);
+        match &snap[0].tx {
+            SigilTx::Send { from: f, to, amount, token, fee } => {
+                assert_eq!(*f, from);
+                assert_eq!(hex::encode(to), to_hex);
+                assert_eq!(*amount, 250);
+                assert_eq!(*token, sigil_usds::USDS, "must move USDS, never native");
+                assert_eq!(*fee, 0);
+            }
+            other => panic!("expected Send, got {other:?}"),
+        }
+        // A mint signature cannot authorize a transfer (distinct message tag).
+        let mint_sig = sign(&sk, &format!("sigil-rpc/v1|usds_mint|{from_hex}|250|nonce=2"));
+        assert_eq!(bridge.submit_transfer(&from_hex, &to_hex, 250, &mint_sig, 2).unwrap_err(), UsdsBridgeError::SignatureInvalid);
+        assert_eq!(bridge.submit_transfer(&from_hex, "nope", 1, &sig, 3).unwrap_err(), UsdsBridgeError::BadToAddress);
     }
 
     #[test]

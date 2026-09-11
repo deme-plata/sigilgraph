@@ -88,6 +88,79 @@ const SIGIL_DECIMALS_MIRROR: u32 = 10;
 const WRAPPED_DECIMALS: u32 = 18;
 const DECIMAL_SHIFT: u128 = 10u128.pow(WRAPPED_DECIMALS - SIGIL_DECIMALS_MIRROR);
 
+/// Which SIGIL asset this relayer instance bridges. ONE binary, two
+/// services (`sigil-bridge-relayer` for native, `sigil-usds-relayer` for
+/// USDS), each with its own contract, keys, state file and vault — the two
+/// bridges never share a trust boundary (see `sigil-api/src/usds_bridge.rs`).
+///
+/// `SIGIL_RELAYER_ASSET=native|usds`, default `native`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asset {
+    /// Native SIGIL (10 dp) ↔ wSIGIL3 (18 dp): shift ×10^8.
+    Native,
+    /// USDS (8 dp) ↔ Sigil Graph USD on Polygon (8 dp): shift ×1, base
+    /// units are identical on both sides — no rounding, no dust, by design.
+    Usds,
+}
+
+impl Asset {
+    fn from_env() -> Result<Self> {
+        match std::env::var("SIGIL_RELAYER_ASSET").unwrap_or_else(|_| "native".into()).to_ascii_lowercase().as_str() {
+            "native" | "sigil" => Ok(Asset::Native),
+            "usds" => Ok(Asset::Usds),
+            other => bail!("SIGIL_RELAYER_ASSET={other:?} — expected native or usds"),
+        }
+    }
+    /// Base units on SIGIL × shift = base units on Polygon.
+    fn shift(self) -> u128 {
+        match self {
+            Asset::Native => DECIMAL_SHIFT,
+            Asset::Usds => USDS_SHIFT,
+        }
+    }
+    fn locks_path(self) -> &'static str {
+        match self {
+            Asset::Native => "/v1/bridge/locks",
+            Asset::Usds => "/v1/usds_bridge/locks",
+        }
+    }
+    fn unlock_path(self) -> &'static str {
+        match self {
+            Asset::Native => "/v1/bridge/unlock",
+            Asset::Usds => "/v1/usds_bridge/unlock",
+        }
+    }
+    /// The signed-message tag the node verifies — DIFFERENT per bridge so a
+    /// signature for one vault can never be replayed against the other.
+    fn unlock_tag(self) -> &'static str {
+        match self {
+            Asset::Native => "bridge_unlock",
+            Asset::Usds => "usds_bridge_unlock",
+        }
+    }
+    fn unit(self) -> &'static str {
+        match self {
+            Asset::Native => "glyphs",
+            Asset::Usds => "USDS-base (1e8=$1)",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Asset::Native => "wSIGIL",
+            Asset::Usds => "USDS",
+        }
+    }
+    fn default_state_file(self) -> &'static str {
+        match self {
+            Asset::Native => "/home/orobit/sigil-bridge-relayer/state.json",
+            Asset::Usds => "/home/orobit/sigil-usds-relayer/state.json",
+        }
+    }
+}
+
+/// USDS is 8 dp on SIGIL and 8 dp on Polygon (deliberate — see `Asset::Usds`).
+const USDS_SHIFT: u128 = 1;
+
 /// `amount` as it arrives on the wire.
 ///
 /// **Why this exists.** `sigil-api`'s `bridge::LockRecord.amount` is a `u128` with
@@ -231,6 +304,7 @@ fn lock_key(tx_hash_hex: &str) -> Result<U256> {
 }
 
 struct Config {
+    asset: Asset,
     sigil_api_url: String,
     polygon_rpc_url: String,
     contract: Address,
@@ -250,14 +324,16 @@ struct Config {
 
 impl Config {
     fn from_env() -> Result<Self> {
+        let asset = Asset::from_env()?;
         Ok(Self {
+            asset,
             sigil_api_url: std::env::var("SIGIL_API_URL").unwrap_or_else(|_| "http://127.0.0.1:18181".into()),
             polygon_rpc_url: std::env::var("POLYGON_RPC_URL").context("POLYGON_RPC_URL must be set")?,
             contract: std::env::var("SIGIL_BRIDGE_CONTRACT").context("SIGIL_BRIDGE_CONTRACT must be set")?.parse()
                 .context("SIGIL_BRIDGE_CONTRACT is not a valid address")?,
             sigil_relayer_keyfile: std::env::var("SIGIL_RELAYER_KEYFILE").context("SIGIL_RELAYER_KEYFILE must be set")?.into(),
             polygon_relayer_keyfile: std::env::var("POLYGON_RELAYER_KEYFILE").context("POLYGON_RELAYER_KEYFILE must be set")?.into(),
-            state_file: std::env::var("SIGIL_RELAYER_STATE_FILE").unwrap_or_else(|_| "/home/orobit/sigil-bridge-relayer/state.json".into()).into(),
+            state_file: std::env::var("SIGIL_RELAYER_STATE_FILE").unwrap_or_else(|_| asset.default_state_file().into()).into(),
             log_chunk_blocks: std::env::var("SIGIL_RELAYER_LOG_CHUNK")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -337,6 +413,7 @@ impl SigilSigner {
 }
 
 fn submit_unlock(
+    asset: Asset,
     sigil_api_url: &str,
     signer: &mut SigilSigner,
     to_hex: &str,
@@ -344,7 +421,7 @@ fn submit_unlock(
     polygon_burn_tx: &str,
 ) -> Result<()> {
     let nonce = signer.next_nonce();
-    let msg = format!("sigil-rpc/v1|bridge_unlock|{to_hex}|{amount}|{polygon_burn_tx}|nonce={nonce}");
+    let msg = format!("sigil-rpc/v1|{}|{to_hex}|{amount}|{polygon_burn_tx}|nonce={nonce}", asset.unlock_tag());
     let sig = signer.sign(&msg);
     let body = serde_json::json!({
         "relayer": signer.address_hex,
@@ -354,9 +431,9 @@ fn submit_unlock(
         "sig": sig,
         "req_nonce": nonce,
     });
-    let resp: serde_json::Value = ureq::post(&format!("{sigil_api_url}/v1/bridge/unlock"))
+    let resp: serde_json::Value = ureq::post(&format!("{sigil_api_url}{}", asset.unlock_path()))
         .send_json(body)
-        .context("POST /v1/bridge/unlock failed")?
+        .with_context(|| format!("POST {} failed", asset.unlock_path()))?
         .into_json()
         .context("unlock response was not valid JSON")?;
     if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
@@ -365,10 +442,10 @@ fn submit_unlock(
     Ok(())
 }
 
-fn fetch_locks_since(sigil_api_url: &str, since: u64) -> Result<Vec<LockRecord>> {
-    let resp: LocksResponse = ureq::get(&format!("{sigil_api_url}/v1/bridge/locks?since={since}"))
+fn fetch_locks_since(asset: Asset, sigil_api_url: &str, since: u64) -> Result<Vec<LockRecord>> {
+    let resp: LocksResponse = ureq::get(&format!("{sigil_api_url}{}?since={since}", asset.locks_path()))
         .call()
-        .context("GET /v1/bridge/locks failed")?
+        .with_context(|| format!("GET {} failed", asset.locks_path()))?
         .into_json()
         .context("locks response was not valid JSON")?;
     if !resp.ok {
@@ -531,7 +608,7 @@ async fn poll_locks_and_mint(
     // on every node restart, so a `since=<cursor>` fetch would hide every lock made after a
     // restart behind a cursor from before it — the exact way 1 SIGIL got stranded on
     // 2026-08-27. Dedup is on the tx hash (below); the cursor is only reported.
-    let mut locks = fetch_locks_since(&cfg.sigil_api_url, 0)?;
+    let mut locks = fetch_locks_since(cfg.asset, &cfg.sigil_api_url, 0)?;
     locks.sort_by_key(|l| l.id);
     for lock in locks {
         state.last_lock_id = state.last_lock_id.max(lock.id);
@@ -543,15 +620,15 @@ async fn poll_locks_and_mint(
         // pass and looked at again next pass, while later settled locks still mint.
         if !lock.settled {
             eprintln!(
-                "· lock {} (sigil tx {}) not settled yet ({} glyphs) — waiting, minting nothing",
-                lock.id, &tx[..tx.len().min(12)], lock.amount
+                "· lock {} (sigil tx {}) not settled yet ({} {}) — waiting, minting nothing",
+                lock.id, &tx[..tx.len().min(12)], lock.amount, cfg.asset.unit()
             );
             continue;
         }
         let amount_base: u128 = lock.amount.to_base_units()?;
         let dest: Address = lock.dest_polygon_address.parse()
             .with_context(|| format!("lock {} has an invalid dest_polygon_address {}", lock.id, lock.dest_polygon_address))?;
-        let polygon_amount = U256::from(amount_base) * U256::from(DECIMAL_SHIFT);
+        let polygon_amount = U256::from(amount_base) * U256::from(cfg.asset.shift());
         let key = lock_key(&tx)?;
 
         // Backstop for the crash window between "mint receipt" and "state saved": the first
@@ -567,7 +644,7 @@ async fn poll_locks_and_mint(
             }
         }
 
-        eprintln!("+ lock {} from {} amount={} glyphs -> mint {polygon_amount} to {dest} (lockId = sigil tx {})", lock.id, lock.from, lock.amount, tx);
+        eprintln!("+ lock {} from {} amount={} {} -> mint {polygon_amount} {} to {dest} (lockId = sigil tx {})", lock.id, lock.from, lock.amount, cfg.asset.unit(), cfg.asset.label(), tx);
         let c = ISigilBridgeWrapped::new(cfg.contract, polygon_provider.clone());
         let pending = c.mint(dest, polygon_amount, key).send().await
             .with_context(|| format!("mint tx failed to send for lock {} (sigil tx {tx})", lock.id))?;
@@ -616,19 +693,20 @@ async fn poll_burns_and_unlock(
             let dest: FixedBytes<32> = ev.destSigilAddress;
             let dest_hex = hex::encode(dest.0);
 
-            let sigil_amount = amount / U256::from(DECIMAL_SHIFT);
-            let remainder = amount % U256::from(DECIMAL_SHIFT);
+            let shift = U256::from(cfg.asset.shift());
+            let sigil_amount = amount / shift;
+            let remainder = amount % shift;
             if remainder != U256::ZERO {
-                eprintln!("! burn {burn_tx}: amount {amount} is not a clean multiple of {DECIMAL_SHIFT} — {remainder} base units of dust cannot be unlocked, floor applied");
+                eprintln!("! burn {burn_tx}: amount {amount} is not a clean multiple of {shift} — {remainder} base units of dust cannot be unlocked, floor applied");
             }
             if sigil_amount == U256::ZERO {
                 eprintln!("! burn {burn_tx}: rounds to 0 SIGIL after conversion — skipping, nothing to unlock");
                 continue;
             }
 
-            eprintln!("+ burn {burn_tx} amount={amount} -> unlock {sigil_amount} glyphs to {dest_hex}");
+            eprintln!("+ burn {burn_tx} amount={amount} -> unlock {sigil_amount} {} to {dest_hex}", cfg.asset.unit());
             let sigil_amount_u128: u128 = sigil_amount.try_into().context("unlock amount overflowed u128")?;
-            match submit_unlock(&api, sigil_signer, &dest_hex, sigil_amount_u128, &burn_tx) {
+            match submit_unlock(cfg.asset, &api, sigil_signer, &dest_hex, sigil_amount_u128, &burn_tx) {
                 Ok(()) => eprintln!("  unlocked on SIGIL L1"),
                 // The node's own dedup: this burn was paid in an earlier (checkpoint-lost) run.
                 Err(e) if format!("{e:#}").contains("already") => {
@@ -650,8 +728,8 @@ async fn main() -> Result<()> {
     let cfg = Config::from_env()?;
     let mut state = load_state(&cfg.state_file, cfg.default_start_block);
     eprintln!(
-        "sigil-relayer starting — {} lock tx(s) already minted, polygon_block={}, log chunk={} blocks, {} glyphs = 1 wSIGIL unit shift 10^{}",
-        state.minted_lock_txs.len(), state.last_polygon_block, cfg.log_chunk_blocks, DECIMAL_SHIFT, WRAPPED_DECIMALS - SIGIL_DECIMALS_MIRROR
+        "sigil-relayer starting [asset={:?}] — {} lock tx(s) already minted, polygon_block={}, log chunk={} blocks, contract={}, shift ×{} ({} → {})",
+        cfg.asset, state.minted_lock_txs.len(), state.last_polygon_block, cfg.log_chunk_blocks, cfg.contract, cfg.asset.shift(), cfg.asset.unit(), cfg.asset.label()
     );
 
     let sigil_key = read_sigil_key(&cfg.sigil_relayer_keyfile)?;
@@ -735,8 +813,25 @@ mod wire_compat_tests {
     #[test]
     fn decimal_shift_maps_base_units_to_wrapped_units() {
         assert_eq!(DECIMAL_SHIFT, 100_000_000);
+        assert_eq!(Asset::Native.shift(), DECIMAL_SHIFT);
         let one_sigil_glyphs: u128 = 10_000_000_000; // 1 SIGIL at 10dp
         assert_eq!(one_sigil_glyphs * DECIMAL_SHIFT, 1_000_000_000_000_000_000u128, "1 SIGIL -> 1e18 wei");
+    }
+
+    /// USDS is 8dp on BOTH sides (the Polygon token was deployed with 8 decimals for
+    /// exactly this reason): shift ×1, so $1.00 = 1e8 base here = 1e8 base there, no
+    /// dust in either direction. And the two assets never share a route or a message
+    /// tag — a native-bridge signature cannot unlock the USDS vault.
+    #[test]
+    fn usds_is_one_to_one_and_fully_separated_from_native() {
+        assert_eq!(Asset::Usds.shift(), 1);
+        assert_eq!(100_000_000u128 * Asset::Usds.shift(), 100_000_000);
+        assert_ne!(Asset::Usds.locks_path(), Asset::Native.locks_path());
+        assert_ne!(Asset::Usds.unlock_path(), Asset::Native.unlock_path());
+        assert_ne!(Asset::Usds.unlock_tag(), Asset::Native.unlock_tag());
+        assert_eq!(Asset::Usds.unlock_tag(), "usds_bridge_unlock", "must match sigil-api usds_bridge.rs verbatim");
+        assert_eq!(Asset::Native.unlock_tag(), "bridge_unlock", "must match sigil-api bridge.rs verbatim");
+        assert_ne!(Asset::Usds.default_state_file(), Asset::Native.default_state_file());
     }
 
     /// The lock id IS the tx hash: same bytes as the `OperatorMinted.lockId` topic, so a

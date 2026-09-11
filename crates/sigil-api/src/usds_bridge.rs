@@ -116,6 +116,14 @@ pub struct UsdsLockRecord {
     pub dest_polygon_address: String,
     pub tx_hash: String,
     pub ts_ms: u64,
+    /// True once the lock's `Send{token: USDS}` has landed on the SETTLED
+    /// spine. **A record exists the instant a request is accepted — it is
+    /// not a receipt.** The relayer mints on Polygon ONLY against
+    /// `settled: true`; the native bridge learned this on 2026-08-26 when a
+    /// relayer was one 503 away from minting 59.53 wSIGIL against a vault
+    /// that held 0. Stored `false`; `locks_since` overlays the live value.
+    #[serde(default)]
+    pub settled: bool,
 }
 
 fn verify_sig(actor: &WalletId, msg: &str, sig_hex: &str) -> Result<(), UsdsBridgeError> {
@@ -144,6 +152,9 @@ pub struct UsdsBridgeBridge {
     unlock_pending: Mutex<HashMap<[u8; 32], Pending>>,
     nonce_watermark: Mutex<HashMap<WalletId, u64>>,
     locks: Mutex<Vec<UsdsLockRecord>>,
+    /// Tx hashes confirmed on the settled spine — the ONLY source of
+    /// `settled: true` in the locks feed.
+    settled_tx: Mutex<HashSet<[u8; 32]>>,
     next_lock_id: AtomicU64,
     processed_burns: Mutex<HashSet<String>>,
     relayer_wallet: Mutex<Option<WalletId>>,
@@ -162,6 +173,7 @@ impl UsdsBridgeBridge {
             unlock_pending: Mutex::new(HashMap::new()),
             nonce_watermark: Mutex::new(HashMap::new()),
             locks: Mutex::new(Vec::new()),
+            settled_tx: Mutex::new(HashSet::new()),
             next_lock_id: AtomicU64::new(1),
             processed_burns: Mutex::new(HashSet::new()),
             relayer_wallet: Mutex::new(relayer_wallet),
@@ -227,6 +239,7 @@ impl UsdsBridgeBridge {
             dest_polygon_address: dest.to_string(),
             tx_hash: hex::encode(tx_hash),
             ts_ms: crate::now_ms(),
+            settled: false,
         };
         self.locks.lock().unwrap().push(rec.clone());
         Ok(rec)
@@ -310,8 +323,23 @@ impl UsdsBridgeBridge {
         Ok(())
     }
 
+    /// Every lock with `id > since_id`, `settled` overlaid from the
+    /// confirmed-on-spine set. `since=0` returns them all — the relayer
+    /// always fetches from 0 and dedups on the tx hash (lock ids are an
+    /// in-memory counter that restarts at 1 on every node restart).
     pub fn locks_since(&self, since_id: u64) -> Vec<UsdsLockRecord> {
-        self.locks.lock().unwrap().iter().filter(|r| r.id > since_id).cloned().collect()
+        let settled = self.settled_tx.lock().unwrap();
+        self.locks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.id > since_id)
+            .cloned()
+            .map(|mut r| {
+                r.settled = crate::hex32(&r.tx_hash).map(|h| settled.contains(&h)).unwrap_or(false);
+                r
+            })
+            .collect()
     }
 
     pub fn is_paused(&self) -> bool { self.paused.load(Ordering::SeqCst) }
@@ -342,8 +370,18 @@ impl UsdsBridgeBridge {
         out
     }
 
+    /// Called by the producer ONLY for hashes carried by a candidate
+    /// confirmed on the settled spine — so `settled_tx` (and therefore the
+    /// `settled` flag the relayer mints against) means backed by settled
+    /// value, never merely requested.
     pub fn confirm_applied(&self, hashes: &[[u8; 32]]) {
         if hashes.is_empty() { return; }
+        {
+            let mut settled = self.settled_tx.lock().unwrap();
+            for h in hashes {
+                settled.insert(*h);
+            }
+        }
         for pool in [&self.lock_pending, &self.unlock_pending] {
             let mut guard = pool.lock().unwrap();
             for h in hashes {
@@ -392,6 +430,25 @@ mod tests {
             }
             other => panic!("expected Send, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_lock_reports_settled_only_after_its_tx_is_confirmed_on_the_spine() {
+        // The anti-unbacked-mint invariant: the feed says `settled: false`
+        // until the producer confirms the hash, and the relayer mints only
+        // against `true`.
+        let (sk, from) = signer();
+        let from_hex = hex::encode(from);
+        let (_rk, relayer) = signer();
+        let bridge = UsdsBridgeBridge::new(None, Some(relayer));
+        let sig = sign(&sk, &format!("sigil-rpc/v1|usds_bridge_lock|{from_hex}|1000|{DEST}|nonce=1"));
+        let rec = bridge.submit_lock(&from_hex, 1000, DEST, &sig, 1).unwrap();
+        assert!(!rec.settled);
+        assert!(!bridge.locks_since(0)[0].settled, "a record is not a receipt");
+        let h = crate::hex32(&rec.tx_hash).unwrap();
+        bridge.confirm_applied(&[h]);
+        assert!(bridge.locks_since(0)[0].settled, "confirmed on the spine → settled");
+        assert_eq!(bridge.snapshot_for_mint().len(), 0, "and it left the pending pool");
     }
 
     #[test]

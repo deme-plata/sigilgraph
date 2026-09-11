@@ -54,6 +54,21 @@ pub struct NationStatusResponse {
     /// the authority pushes a price (`SigilTx::OraclePush` /
     /// `POST /v1/nation/oracle/push_wallet`).
     pub oracle_price_usd_e8: String,
+    /// Height the current price was pushed at (0 = never height-stamped —
+    /// pre-USDS-live pushes carry no stamp and are treated as stale).
+    pub oracle_price_height: u64,
+    /// Is the committed price usable at the current tip? (non-zero, stamped,
+    /// and younger than `sigil_oracle::MAX_PRICE_AGE_BLOCKS`). When false,
+    /// every USDS mint/redeem and every welfare claim refuses — fail closed.
+    pub oracle_price_fresh: bool,
+    /// The wallet the master has delegated price pushes to (64-hex), or
+    /// empty. Set by a master-signed `OracleDelegate`
+    /// (`POST /v1/nation/oracle/delegate_wallet`), accepted from
+    /// `sigil_usds::USDS_LIVE_HEIGHT`.
+    pub oracle_feeder: String,
+    /// The USDS-live activation height (token transfers, delegation,
+    /// height-stamped pushes, supply tracking all switch on here).
+    pub usds_live_height: u64,
     /// Minimum blocks between two claims by the same citizen.
     pub claim_interval_blocks: u64,
     /// Mining-reward welfare carve in basis points (taken out of the dev fee).
@@ -70,7 +85,7 @@ pub struct NationStatusResponse {
 #[flux_api_macros::api(GET, "/v1/nation/status", summary = "SIGIL-Nation welfare treasury + policy status")]
 pub async fn nation_status(State(st): State<AppState>) -> Json<ApiResponse<NationStatusResponse>> {
     let height = st.mining.tip().map(|t| t.height).unwrap_or(0);
-    let (treasury, authority, oracle_price) = st
+    let (treasury, authority, oracle_price, price_height, fresh, feeder) = st
         .state
         .read()
         .map(|s| {
@@ -78,9 +93,12 @@ pub async fn nation_status(State(st): State<AppState>) -> Json<ApiResponse<Natio
                 s.balance_of(&wf::WELFARE_WALLET, &NATIVE),
                 s.master_wallet(),
                 sigil_oracle::read_price(&s),
+                sigil_oracle::read_price_height(&s),
+                sigil_oracle::price_is_fresh(&s, height),
+                sigil_oracle::read_feeder(&s),
             )
         })
-        .unwrap_or((0, None, 0));
+        .unwrap_or((0, None, 0, 0, false, None));
     ApiResponse::ok(NationStatusResponse {
         active: wf::welfare_active(height),
         activation_height: wf::WELFARE_FROM_HEIGHT,
@@ -91,6 +109,10 @@ pub async fn nation_status(State(st): State<AppState>) -> Json<ApiResponse<Natio
         payout_asset: "USDS",
         stipend_usd_e8: wf::WELFARE_STIPEND_USD_E8.to_string(),
         oracle_price_usd_e8: oracle_price.to_string(),
+        oracle_price_height: price_height,
+        oracle_price_fresh: fresh,
+        oracle_feeder: feeder.map(hex::encode).unwrap_or_default(),
+        usds_live_height: sigil_usds::USDS_LIVE_HEIGHT,
         claim_interval_blocks: wf::WELFARE_CLAIM_INTERVAL_BLOCKS,
         welfare_bps: wf::WELFARE_MINING_FEE_BPS as u64,
         authority_wallet: authority.map(hex::encode).unwrap_or_default(),
@@ -364,6 +386,28 @@ impl NationBridge {
         Ok(self.queue(SigilTx::OraclePush { authority, price_usd_e8, fee }))
     }
 
+    /// Authenticate + queue an oracle DELEGATION, signed by the master wallet
+    /// (consensus enforces authority == master at apply, and refuses it
+    /// before `sigil_usds::USDS_LIVE_HEIGHT`). `feeder` all-zero revokes.
+    /// Message:
+    /// `sigil-rpc/v1|oracle_delegate|{authority}|{feeder}|{fee}|nonce={req_nonce}`.
+    pub fn submit_oracle_delegate(
+        &self,
+        authority_hex: &str,
+        feeder_hex: &str,
+        fee: u128,
+        sig_hex: &str,
+        req_nonce: u64,
+    ) -> Result<[u8; 32], NationSubmitError> {
+        let authority = crate::hex32(authority_hex).ok_or(NationSubmitError::BadAddress)?;
+        let feeder = crate::hex32(feeder_hex).ok_or(NationSubmitError::BadAddress)?;
+        let msg = format!(
+            "sigil-rpc/v1|oracle_delegate|{authority_hex}|{feeder_hex}|{fee}|nonce={req_nonce}"
+        );
+        self.verify_and_watermark(&authority, &msg, sig_hex, req_nonce)?;
+        Ok(self.queue(SigilTx::OracleDelegate { authority, feeder, fee }))
+    }
+
     /// Snapshot every still-pending nation tx for the producer's CURRENT
     /// mint attempt — non-destructive, same contract as
     /// `SendBridge::snapshot_for_mint` (see its docs for why).
@@ -527,6 +571,45 @@ pub async fn nation_oracle_push_wallet(
         return Json(serde_json::json!({ "ok": false, "error": reason }));
     }
     match st.nation.submit_oracle_push(&req.authority, req.price_usd_e8 as u128, req.fee as u128, &req.sig, req.req_nonce) {
+        Ok(tx_hash) => Json(serde_json::json!({
+            "ok": true,
+            "txid": hex::encode(tx_hash),
+            "note": "queued for the next braid block",
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
+/// Body for `POST /v1/nation/oracle/delegate_wallet`.
+#[derive(Debug, Deserialize)]
+pub struct WalletOracleDelegateRequest {
+    /// 64-hex authority wallet — must be the chain's master wallet.
+    pub authority: String,
+    /// 64-hex wallet being granted push rights. All-zero revokes.
+    pub feeder: String,
+    /// Fee in glyphs, paid by the authority. The wallet sends 0.
+    #[serde(default)]
+    pub fee: u64,
+    /// 128-hex Ed25519 signature over
+    /// `sigil-rpc/v1|oracle_delegate|{authority}|{feeder}|{fee}|nonce={req_nonce}`.
+    pub sig: String,
+    /// Client-chosen strictly-increasing nonce.
+    pub req_nonce: u64,
+}
+
+#[flux_api_macros::api(POST, "/v1/nation/oracle/delegate_wallet", summary = "Master-wallet-signed: delegate SIGIL/USD oracle pushes to a feeder wallet (all-zero feeder revokes); accepted from USDS_LIVE_HEIGHT")]
+pub async fn nation_oracle_delegate_wallet(
+    State(st): State<AppState>,
+    Json(req): Json<WalletOracleDelegateRequest>,
+) -> Json<serde_json::Value> {
+    let (Some(authority), Some(feeder)) = (hex32(&req.authority), hex32(&req.feeder)) else {
+        return Json(serde_json::json!({ "ok": false, "error": "authority and feeder must be 64-hex" }));
+    };
+    let tx = SigilTx::OracleDelegate { authority, feeder, fee: req.fee as u128 };
+    if let Some(reason) = dry_run_reason(&st, &tx) {
+        return Json(serde_json::json!({ "ok": false, "error": reason }));
+    }
+    match st.nation.submit_oracle_delegate(&req.authority, &req.feeder, req.fee as u128, &req.sig, req.req_nonce) {
         Ok(tx_hash) => Json(serde_json::json!({
             "ok": true,
             "txid": hex::encode(tx_hash),

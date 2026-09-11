@@ -1343,28 +1343,160 @@ pub async fn remove_liquidity_handler(
 pub struct UsdsStatusResponse {
     /// Committed oracle price (USD×1e8 per SIGIL). `"0"` if never set.
     pub price: String,
-    /// SIGIL currently locked in the collateral vault.
+    /// Height the price was pushed at (0 = never height-stamped).
+    pub price_height: u64,
+    /// Is the price usable at the current tip (non-zero, stamped, younger
+    /// than `max_price_age_blocks`)? When false, mint/redeem/welfare refuse.
+    pub price_fresh: bool,
+    pub max_price_age_blocks: u64,
+    /// The delegated feeder wallet (64-hex) or empty.
+    pub feeder: String,
+    /// SIGIL currently locked in the collateral vault (glyphs).
     pub vault_sigil: String,
-    /// Total USDS in circulation.
+    /// Total USDS in circulation, from the committed supply slot (base
+    /// units, 1e8 = $1). In the roots, not summed from an index.
     pub usds_supply: String,
+    /// Collateral ratio in basis points: vault value at the current price
+    /// over outstanding USDS (10_000 = 100 %). `0` when nothing is minted.
+    pub collateral_bps: u64,
+    /// Current tip height, the USDS activation height, and whether the
+    /// feature set is live at the tip.
+    pub height: u64,
+    pub live_height: u64,
+    pub live: bool,
+    /// Constants clients need to render amounts honestly.
+    pub usds_decimals: u8,
+    pub mint_buffer_bps: u64,
+    pub fee_bps: u64,
+    pub vault_wallet: String,
+    pub token_id: String,
 }
 
-#[flux_api_macros::api(GET, "/v1/usds/status", summary = "USDS oracle price, vault collateral, and circulating supply")]
+#[flux_api_macros::api(GET, "/v1/usds/status", summary = "USDS oracle price + freshness, feeder, vault collateral, committed supply, collateral ratio, activation")]
 pub async fn usds_status_handler(State(st): State<AppState>) -> Json<ApiResponse<UsdsStatusResponse>> {
-    let (price, vault_sigil, usds_supply) = st.state.read().map(|s| {
+    let height = st.mining.tip().map(|t| t.height).unwrap_or(0);
+    let (price, price_height, fresh, feeder, vault_sigil, supply) = st.state.read().map(|s| {
         (
-            sigil_oracle::read_price(&s).to_string(),
-            s.balance_of(&sigil_usds::VAULT, &NATIVE).to_string(),
-            s.balance_of(&sigil_usds::VAULT, &sigil_usds::USDS).to_string(),
+            sigil_oracle::read_price(&s),
+            sigil_oracle::read_price_height(&s),
+            sigil_oracle::price_is_fresh(&s, height),
+            sigil_oracle::read_feeder(&s),
+            s.balance_of(&sigil_usds::VAULT, &NATIVE),
+            sigil_usds::read_supply(&s),
         )
-    }).unwrap_or_else(|_| ("0".into(), "0".into(), "0".into()));
-    // NOTE: `usds_supply` above reads the VAULT's own USDS balance (always
-    // 0 — the vault never holds USDS, only the SIGIL backing it); circulating
-    // supply is the sum over every OTHER holder, which this crate has no
-    // index over yet. Report price + vault collateral now (both real,
-    // useful); supply is a real follow-up once an index exists, not faked
-    // here in the meantime.
-    ApiResponse::ok(UsdsStatusResponse { price, vault_sigil, usds_supply })
+    }).unwrap_or((0, 0, false, None, 0, 0));
+    // vault value in USD-e8 = glyphs × price / GLYPHS_PER_SIGIL; ratio vs supply.
+    let collateral_bps = if supply == 0 || price == 0 {
+        0
+    } else {
+        vault_sigil
+            .checked_mul(price)
+            .map(|v| v / sigil_usds::GLYPHS_PER_SIGIL)
+            .and_then(|v| v.checked_mul(10_000))
+            .map(|v| (v / supply).min(u64::MAX as u128) as u64)
+            .unwrap_or(0)
+    };
+    ApiResponse::ok(UsdsStatusResponse {
+        price: price.to_string(),
+        price_height,
+        price_fresh: fresh,
+        max_price_age_blocks: sigil_oracle::MAX_PRICE_AGE_BLOCKS,
+        feeder: feeder.map(hex::encode).unwrap_or_default(),
+        vault_sigil: vault_sigil.to_string(),
+        usds_supply: supply.to_string(),
+        collateral_bps,
+        height,
+        live_height: sigil_usds::USDS_LIVE_HEIGHT,
+        live: sigil_usds::usds_active(height),
+        usds_decimals: 8,
+        mint_buffer_bps: sigil_usds::MINT_BUFFER_BPS as u64,
+        fee_bps: sigil_bank::MASTER_SWAP_FEE_BPS as u64,
+        vault_wallet: hex::encode(sigil_usds::VAULT),
+        token_id: hex::encode(sigil_usds::USDS),
+    })
+}
+
+/// Query for `GET /v1/usds/quote` — exactly one of the two amounts.
+#[derive(Debug, Deserialize)]
+pub struct UsdsQuoteQuery {
+    /// 64-hex wallet the quote is for (balances are checked, nothing moves).
+    pub wallet: String,
+    /// Glyphs to lock → how much USDS that mints.
+    #[serde(default)]
+    pub sigil_amount: Option<u128>,
+    /// USDS base units to burn → how much SIGIL that releases.
+    #[serde(default)]
+    pub usds_amount: Option<u128>,
+}
+
+#[flux_api_macros::api(GET, "/v1/usds/quote", summary = "Dry-run a USDS mint (sigil_amount) or redeem (usds_amount) for a wallet at the tip: the exact figure the chain would credit, or the exact reason it would refuse")]
+pub async fn usds_quote_handler(
+    State(st): State<AppState>,
+    Query(q): Query<UsdsQuoteQuery>,
+) -> Json<serde_json::Value> {
+    let Some(wallet) = hex32(&q.wallet) else {
+        return Json(serde_json::json!({ "ok": false, "error": "wallet must be 64-hex" }));
+    };
+    let height = st.mining.tip().map(|t| t.height).unwrap_or(0);
+    let Ok(s) = st.state.read() else {
+        return Json(serde_json::json!({ "ok": false, "error": "state lock poisoned" }));
+    };
+    let price = sigil_oracle::read_price(&s);
+    match (q.sigil_amount, q.usds_amount) {
+        (Some(g), None) => match sigil_usds::plan_mint(&s, wallet, g, height) {
+            Ok(plan) => Json(serde_json::json!({
+                "ok": true, "action": "mint", "height": height, "price": price.to_string(),
+                "sigil_locked": g.to_string(), "usds_to_wallet": plan.usds_to_user.to_string(),
+                "live": sigil_usds::usds_active(height),
+            })),
+            Err(e) => Json(serde_json::json!({ "ok": false, "action": "mint", "height": height, "error": e.to_string() })),
+        },
+        (None, Some(u)) => match sigil_usds::plan_redeem(&s, wallet, u, height) {
+            Ok(plan) => Json(serde_json::json!({
+                "ok": true, "action": "redeem", "height": height, "price": price.to_string(),
+                "usds_burned": u.to_string(), "sigil_to_wallet": plan.sigil_to_user.to_string(),
+                "live": sigil_usds::usds_active(height),
+            })),
+            Err(e) => Json(serde_json::json!({ "ok": false, "action": "redeem", "height": height, "error": e.to_string() })),
+        },
+        _ => Json(serde_json::json!({ "ok": false, "error": "pass exactly one of sigil_amount or usds_amount" })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UsdsTransferRequest {
+    pub from: String,
+    pub to: String,
+    pub amount: u128,
+    pub sig: String,
+    pub req_nonce: u64,
+}
+
+#[flux_api_macros::api(POST, "/v1/usds/transfer", summary = "Wallet-signed: send USDS to another wallet (transparent token transfer; accepted by consensus from USDS_LIVE_HEIGHT)")]
+pub async fn usds_transfer_handler(
+    State(st): State<AppState>,
+    Json(req): Json<UsdsTransferRequest>,
+) -> Json<serde_json::Value> {
+    // Dry-run at the tip first so a pre-activation or underfunded transfer
+    // is refused with the chain's own reason instead of sitting in the
+    // pending pool until MAX_AGE.
+    if let (Some(from), Some(to)) = (hex32(&req.from), hex32(&req.to)) {
+        let height = st.mining.tip().map(|t| t.height).unwrap_or(0);
+        let tx = sigil_tx::SigilTx::Send { from, to, amount: req.amount, token: sigil_usds::USDS, fee: 0 };
+        if let Some(reason) = st.state.read().ok().and_then(|s| {
+            sigil_tx::apply_tx_at(&s, &send::to_signed(tx), height).err().map(|e| e.to_string())
+        }) {
+            return Json(serde_json::json!({ "ok": false, "error": reason, "height": height }));
+        }
+    }
+    match st.usds.submit_transfer(&req.from, &req.to, req.amount, &req.sig, req.req_nonce) {
+        Ok(tx_hash) => Json(serde_json::json!({
+            "ok": true,
+            "tx_hash": hex::encode(tx_hash),
+            "note": "queued for the next braid block",
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2016,6 +2148,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/nation/attest_wallet", post(nation::nation_attest_wallet))
         .route("/v1/nation/welfare/claim_wallet", post(nation::nation_claim_wallet))
         .route("/v1/nation/oracle/push_wallet", post(nation::nation_oracle_push_wallet))
+        .route("/v1/nation/oracle/delegate_wallet", post(nation::nation_oracle_delegate_wallet))
         .route("/v1/mining/challenge", get(mining_challenge))
         .route("/v1/mining/submit", post(mining_submit))
         .route("/v1/mining/miners", get(mining_miners))
@@ -2038,8 +2171,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/add_liquidity", post(add_liquidity_handler))
         .route("/v1/remove_liquidity", post(remove_liquidity_handler))
         .route("/v1/usds/status", get(usds_status_handler))
+        .route("/v1/usds/quote", get(usds_quote_handler))
         .route("/v1/usds/mint", post(usds_mint_handler))
         .route("/v1/usds/redeem", post(usds_redeem_handler))
+        .route("/v1/usds/transfer", post(usds_transfer_handler))
         .route("/v1/usds_bridge/lock", post(usds_bridge_lock_handler))
         .route("/v1/usds_bridge/locks", get(usds_bridge_locks_handler))
         .route("/v1/usds_bridge/unlock", post(usds_bridge_unlock_handler))
@@ -2086,8 +2221,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/add_liquidity", post(add_liquidity_handler))
         .route("/api/v1/remove_liquidity", post(remove_liquidity_handler))
         .route("/api/v1/usds/status", get(usds_status_handler))
+        .route("/api/v1/usds/quote", get(usds_quote_handler))
         .route("/api/v1/usds/mint", post(usds_mint_handler))
         .route("/api/v1/usds/redeem", post(usds_redeem_handler))
+        .route("/api/v1/usds/transfer", post(usds_transfer_handler))
+        .route("/api/v1/nation/oracle/delegate_wallet", post(nation::nation_oracle_delegate_wallet))
         .route("/api/v1/usds_bridge/lock", post(usds_bridge_lock_handler))
         .route("/api/v1/usds_bridge/locks", get(usds_bridge_locks_handler))
         .route("/api/v1/usds_bridge/unlock", post(usds_bridge_unlock_handler))

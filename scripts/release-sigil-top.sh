@@ -20,7 +20,12 @@ PINNED_PUB="150fb84d4b2c83e6e81a27f629e60686acf8663be5ce73f46208cce4f5686402"
 REPO="/home/storage/deepseek-codewhale/sigil"
 FLUXC="${FLUXC:-/home/storage/deepseek-codewhale/flux/target/debug/fluxc}"
 DL="/home/orobit/q-narwhalknight/dist-fluxapp/downloads"
-BASE="https://sigilgraph.fluxapp.xyz/downloads"
+# v9 (2026-09-11): artifact URLs inside the SIGNED manifest point at the canonical SIGIL home.
+# sigilgraph.org has served every artifact since v8.0.0 (verified: builder keys, src tarball,
+# proofs all 200 there), and the fluxapp domain is a dead end for everything but downloads
+# (its /v1 routes hit the retired :8099). Binaries are still PUBLISHED to all three roots, so
+# every older URL keeps working; only what a fresh client is TOLD to fetch changes.
+BASE="https://sigilgraph.org/downloads"
 export PATH="/home/orobit/node/current/bin:$PATH"
 cd "$REPO"
 
@@ -99,24 +104,56 @@ WLOG="/home/orobit/tmp/release-${VER}-build-windows.log"
 LPID=$!
 CARGO_TARGET_DIR="$WIN_TARGET_DIR" "$FLUXC" build --release -p sigil-top --target x86_64-pc-windows-gnu > "$WLOG" 2>&1 &
 WPID=$!
+# ── ARM64 (v9, 2026-09-11): a THIRD parallel leg, so the manifest carries `linux-arm64` in
+# the same signed run instead of an after-the-fact publish-arm64.sh that was easy to forget
+# (it was forgotten: 8.0.4 → 8.0.12 all shipped without it, so [U] on a Termux install
+# failed closed the whole time). Recipe from project_sigil_top_arm64_build_recipe_2026_09_05:
+# zig cc as the musl linker, -C link-self-contained=no (Rust's own crt objects collide with
+# zig's musl ones), static crt. Mandatory when the toolchain is present; SIGIL_RELEASE_ARM64=0
+# skips it explicitly, and the manifest then honestly omits the key.
+ZCC="/home/storage/tools/zig/zcc-aarch64-musl"
+ARM_TARGET_DIR="${ARM_TARGET_DIR:-/home/storage/sigil-scratch/target-aarch64-musl}"
+ALOG="/home/orobit/tmp/release-${VER}-build-arm64.log"
+WANT_ARM=0
+if [ "${SIGIL_RELEASE_ARM64:-1}" != "0" ] && [ -x "$ZCC" ]; then
+  WANT_ARM=1
+  CARGO_TARGET_DIR="$ARM_TARGET_DIR" \
+  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$ZCC" \
+  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C link-self-contained=no -C target-feature=+crt-static" \
+  CC_aarch64_unknown_linux_musl="$ZCC" AR_aarch64_unknown_linux_musl="/home/storage/tools/zig/zar" \
+  "$FLUXC" build --release -p sigil-top --target aarch64-unknown-linux-musl > "$ALOG" 2>&1 &
+  APID=$!
+else
+  echo "  ! arm64 leg SKIPPED ($([ -x "$ZCC" ] && echo SIGIL_RELEASE_ARM64=0 || echo "no $ZCC")) — manifest will have no linux-arm64 key"
+fi
 wait "$LPID" || { echo "✗ linux build failed:"; tail -25 "$LLOG"; exit 1; }
 wait "$WPID" || { echo "✗ windows build failed:"; tail -25 "$WLOG"; exit 1; }
+if [ "$WANT_ARM" = 1 ]; then wait "$APID" || { echo "✗ arm64 build failed:"; tail -25 "$ALOG"; exit 1; }; fi
 echo "  build wall clock: $((SECONDS-T_BUILD))s (serial baseline v7.1.9/v7.1.10: ~200s)"
 LBIN="target/release/sigil-top"; WBIN="$WIN_TARGET_DIR/x86_64-pc-windows-gnu/release/sigil-top.exe"
 [ -x "$LBIN" ] || { echo "✗ missing $LBIN"; exit 1; }
 [ -s "$WBIN" ] || { echo "✗ missing $WBIN"; exit 1; }
 "$LBIN" version 2>/dev/null | grep -q "v$VER" || { echo "✗ built binary is not v$VER"; exit 1; }
+ABIN="$ARM_TARGET_DIR/aarch64-unknown-linux-musl/release/sigil-top"
+if [ "$WANT_ARM" = 1 ]; then
+  [ -s "$ABIN" ] || { echo "✗ missing $ABIN"; exit 1; }
+  file "$ABIN" | grep -q aarch64 || { echo "✗ $ABIN is not an aarch64 binary"; exit 1; }
+fi
+# One list of (artifact suffix) drives staging, signing, stable links and the live check —
+# a target that exists in one loop and not another is exactly how a key goes missing.
+TARGETS=("linux-x64" "windows-x64.exe"); [ "$WANT_ARM" = 1 ] && TARGETS+=("linux-arm64")
 
 echo "▸ 3/7 stage + sign (require-both) + verify"
 S="/home/orobit/tmp/sigil-v${VER}-release"; rm -rf "$S"; mkdir -p "$S"
 cp "$LBIN" "$S/sigil-top-v${VER}-linux-x64"
 cp "$WBIN" "$S/sigil-top-v${VER}-windows-x64.exe"
+[ "$WANT_ARM" = 1 ] && cp "$ABIN" "$S/sigil-top-v${VER}-linux-arm64"
 tar --sort=name --mtime='2026-01-01 00:00:00' --owner=0 --group=0 --numeric-owner \
     -czf "$S/sigil-top-v${VER}-src.tar.gz" \
     -C crates sigil-top/src sigil-top/Cargo.toml \
     -C .. gui/sigil-wallet-tron-embedded.html gui/sigil-wallet-codex.css \
     gui/enter-sigil.html gui/sigil-explorer.html gui/vite-engine-embedded.html
-for t in "linux-x64" "windows-x64.exe"; do
+for t in "${TARGETS[@]}"; do
   f="$S/sigil-top-v${VER}-${t}"
   # Capture, THEN grep. `fluxc ... | grep -q` is a SIGPIPE race: grep -q exits on the
   # first match and closes the pipe while fluxc is still printing, fluxc panics with
@@ -133,6 +170,13 @@ for t in "linux-x64" "windows-x64.exe"; do
 done
 LB3=$(b3sum "$S/sigil-top-v${VER}-linux-x64" | awk '{print $1}'); LSZ=$(stat -c %s "$S/sigil-top-v${VER}-linux-x64")
 WB3=$(b3sum "$S/sigil-top-v${VER}-windows-x64.exe" | awk '{print $1}'); WSZ=$(stat -c %s "$S/sigil-top-v${VER}-windows-x64.exe")
+AB3=""; ASZ=0
+if [ "$WANT_ARM" = 1 ]; then
+  AB3=$(b3sum "$S/sigil-top-v${VER}-linux-arm64" | awk '{print $1}'); ASZ=$(stat -c %s "$S/sigil-top-v${VER}-linux-arm64")
+  # The Termux launcher (sigil-top-arm64.sh) verifies sha256, not blake3 — publish both.
+  ASHA=$(sha256sum "$S/sigil-top-v${VER}-linux-arm64" | awk '{print $1}')
+  echo "$ASHA  sigil-top-v${VER}-linux-arm64" > "$S/sigil-top-v${VER}-linux-arm64.sha256"
+fi
 
 echo "▸ 4/7 publish to $DL (+ legacy channel)"
 cp "$S"/sigil-top-v${VER}-* "$DL/"
@@ -170,7 +214,11 @@ cp "$S"/sigil-top-v${VER}-* "$ORG_DL/"
 # The .proof rides along, or the stable binary would be unverifiable.
 # ADDITIVE ONLY — nothing is ever deleted from downloads/ (CLAUDE.md rule 9).
 for root in "$DL" "$LEGACY_DL" "$ORG_DL"; do
-  for t in "linux-x64" "windows-x64.exe"; do
+  if [ "$WANT_ARM" = 1 ]; then
+    echo "$ASHA  sigil-top-linux-arm64" > "$root/sigil-top-linux-arm64.sha256"
+    [ -s /home/storage/claude-code/sigil-top-arm64.sh ] && cp -f /home/storage/claude-code/sigil-top-arm64.sh "$root/sigil-top-arm64.sh"
+  fi
+  for t in "${TARGETS[@]}"; do
     src="$root/sigil-top-v${VER}-${t}"; dst="$root/sigil-top-${t}"
     [ -s "$src" ] || { echo "✗ stable-link source missing or empty: $src"; exit 1; }
     cp -f "$src" "$dst.tmp" && mv -f "$dst.tmp" "$dst"
@@ -185,6 +233,13 @@ done
 
 echo "▸ 5/7 write + SIGN manifest (mandatory — updater fails closed without a valid .sig)"
 REV=$(git rev-parse --short HEAD)
+# The updater key on aarch64 Linux is `linux-arm64` (SELF_TARGET in sigil-top). Emitted only
+# when the leg ran: a key pointing at a file that was not built is worse than no key.
+ARM_TARGET_JSON=""
+if [ "$WANT_ARM" = 1 ]; then
+  ARM_TARGET_JSON=",
+    \"linux-arm64\":     { \"url\": \"$BASE/sigil-top-v${VER}-linux-arm64\",     \"proof_url\": \"$BASE/sigil-top-v${VER}-linux-arm64.proof\",     \"blake3_hex\": \"$AB3\", \"size_bytes\": $ASZ }"
+fi
 cat > "$DL/sigil-top-latest.json" <<EOF
 {
   "product": "sigil-top", "version": "$VER", "channel": "stable",
@@ -198,7 +253,7 @@ cat > "$DL/sigil-top-latest.json" <<EOF
     "linux-x64":       { "url": "$BASE/sigil-top-v${VER}-linux-x64",       "proof_url": "$BASE/sigil-top-v${VER}-linux-x64.proof",       "blake3_hex": "$LB3", "size_bytes": $LSZ },
     "linux-x64-gpu":   { "url": "$BASE/sigil-top-v${VER}-linux-x64",       "proof_url": "$BASE/sigil-top-v${VER}-linux-x64.proof",       "blake3_hex": "$LB3", "size_bytes": $LSZ },
     "windows-x64":     { "url": "$BASE/sigil-top-v${VER}-windows-x64.exe", "proof_url": "$BASE/sigil-top-v${VER}-windows-x64.exe.proof", "blake3_hex": "$WB3", "size_bytes": $WSZ },
-    "windows-x64-gpu": { "url": "$BASE/sigil-top-v${VER}-windows-x64.exe", "proof_url": "$BASE/sigil-top-v${VER}-windows-x64.exe.proof", "blake3_hex": "$WB3", "size_bytes": $WSZ }
+    "windows-x64-gpu": { "url": "$BASE/sigil-top-v${VER}-windows-x64.exe", "proof_url": "$BASE/sigil-top-v${VER}-windows-x64.exe.proof", "blake3_hex": "$WB3", "size_bytes": $WSZ }$ARM_TARGET_JSON
   }
 }
 EOF
@@ -213,9 +268,7 @@ cp "$DL/sigil-top-latest.json" "$DL/sigil-top-latest.json.sig" "$ORG_DL/"
 # only symptom is an update that never arrives. That happened twice today: once on
 # v8.0.6, and again twenty minutes later when a second release overwrote the manifest
 # and removed the entry that had just been added by hand.
-echo "  ! ARM64 IS NOT IN THIS MANIFEST — [U] on aarch64 installs will fail closed."
-echo "    Publish it after this run:  bash /home/storage/claude-code/publish-arm64.sh $VER"
-echo "    (build first: see project_sigil_top_arm64_build_recipe_2026_09_05)"
+if [ "$WANT_ARM" = 1 ]; then echo "  ✓ linux-arm64 is in this manifest ($ASZ B)"; else echo "  ! ARM64 IS NOT IN THIS MANIFEST — [U] on aarch64 installs will fail closed (SIGIL_RELEASE_ARM64=0 or toolchain missing)"; fi
 
 echo "▸ 6/7 verify LIVE manifest+sig against pinned key"
 python3 - "$PINNED_PUB" <<'PY'
@@ -234,7 +287,7 @@ PY
 # the versioned artifact the manifest points at. Fail the release if not: a
 # release whose published download link serves a stale binary is not released.
 echo "  ▸ verifying LIVE stable links match v$VER"
-for t in "linux-x64" "windows-x64.exe"; do
+for t in "${TARGETS[@]}"; do
   want=$(stat -c %s "$DL/sigil-top-v${VER}-${t}")
   for base in "$BASE" "$ORG_BASE"; do
     got=$(curl -sfL -o /dev/null -w '%{size_download}' --max-time 120 "$base/sigil-top-${t}?t=$(date +%s)" || echo 0)
@@ -252,8 +305,9 @@ $NOTE
 
   linux-x64   blake3 $LB3
   windows-x64 blake3 $WB3
+  linux-arm64 blake3 ${AB3:-not built}
 
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>" || echo "  (nothing new to commit besides version — continuing)"
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>" || echo "  (nothing new to commit besides version — continuing)"
 git tag -a "v${VER}" -m "sigil-top v${VER}" 2>/dev/null || echo "  (tag v${VER} exists)"
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 git push origin "$BRANCH" "v${VER}"
@@ -266,3 +320,4 @@ echo ""
 echo "✅ RELEASED sigil-top v${VER} — channel live, signed, tagged. Nodes pull it on next update check."
 echo "   linux   $LB3"
 echo "   windows $WB3"
+echo "   arm64   ${AB3:-not built}"

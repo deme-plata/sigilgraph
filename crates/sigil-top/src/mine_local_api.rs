@@ -949,14 +949,59 @@ mod shield_ops {
         };
         let mut settled = false;
         let mut hard_fail: Option<String> = None;
-        for _ in 0..24 {
-            std::thread::sleep(std::time::Duration::from_millis(500));
+        // 2026-09-12: PUSH, not poll. `/v1/transactions/:hash/wait` holds the request open on
+        // the node and answers the instant the tx is retired (applied / rejected) — measured
+        // live the same day: accepted → applied in 0.9 s, delivered ~5 ms later. The old
+        // 500 ms × 24 loop sampled that on its own clock and added up to half a second for
+        // nothing. Same 12 s budget; the nullifier set stays the authority (checked after
+        // every wake, exactly as before). A node without the route (404 / `ok:false`) or a
+        // proxy that cannot hold the request drops us back to the old sample loop.
+        let wait_url = format!("{}/wait", status_url);
+        let budget = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        let mut long_poll = true;
+        let mut wait_misses = 0u8;
+        loop {
+            if std::time::Instant::now() >= budget { break; }
+            let mut got_from_wait: Option<serde_json::Value> = None;
+            if long_poll {
+                let remaining = budget.saturating_duration_since(std::time::Instant::now());
+                let ms = remaining.as_millis().min(10_000).max(500) as u64;
+                let r = client
+                    .get(&wait_url)
+                    .query(&[("timeout_ms", ms.to_string())])
+                    .timeout(std::time::Duration::from_millis(ms + 5_000))
+                    .send();
+                match r {
+                    Ok(r) if r.status().as_u16() == 404 || r.status().as_u16() == 405 => long_poll = false,
+                    Ok(r) => match r.json::<serde_json::Value>() {
+                        Ok(v) if v.get("ok").and_then(|b| b.as_bool()) == Some(true) && v.get("data").is_some() => {
+                            wait_misses = 0;
+                            got_from_wait = Some(v);
+                        }
+                        Ok(v) if v.get("ok").and_then(|b| b.as_bool()) == Some(false) => long_poll = false,
+                        _ => { wait_misses += 1; if wait_misses >= 3 { long_poll = false; } }
+                    },
+                    Err(_) => { wait_misses += 1; if wait_misses >= 3 { long_poll = false; } }
+                }
+            }
+            let v = match got_from_wait {
+                Some(v) => v,
+                None => {
+                    // fallback: the pre-2026-09-12 sample loop, one step
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    if nf_is_spent(&client) {
+                        settled = true;
+                        break;
+                    }
+                    let Ok(r) = client.get(&status_url).send() else { continue };
+                    let Ok(v) = r.json::<serde_json::Value>() else { continue };
+                    v
+                }
+            };
             if nf_is_spent(&client) {
                 settled = true;
                 break;
             }
-            let Ok(r) = client.get(&status_url).send() else { continue };
-            let Ok(v) = r.json::<serde_json::Value>() else { continue };
             let data = v.get("data").unwrap_or(&v);
             let st = data.get("status").and_then(|s| s.as_str()).unwrap_or("");
             if matches!(st, "applied" | "settled" | "confirmed") {

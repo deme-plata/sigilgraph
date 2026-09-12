@@ -816,10 +816,15 @@ pub fn save_controller(dir: &std::path::Path, c: &EmissionController) {
     // write + rename on a helper thread. MEASURED at 81 blk/s: the rename alone was
     // ~1.3 ms on the RAID array and this was ~5% of the produce loop even at one
     // save per 32 blocks. Same file, same atomic tmp→rename; best-effort as before.
+    // 22:15: the serialisation itself is 2.5 MB of JSON (the 30-minute `rate_samples`
+    // window is ~180k entries at 100 blk/s) — MEASURED 8.8% of the loop even at one save
+    // per 32 blocks. Clone the controller (a memcpy of the window, ~0.3 ms) and serialise
+    // on the helper thread too.
     let p = controller_path(dir);
     let tmp = p.with_extension("json.tmp");
-    let bytes = c.serialize_state();
+    let snapshot = c.clone();
     let _ = std::thread::Builder::new().name("sigil-emission-save".into()).spawn(move || {
+        let bytes = snapshot.serialize_state();
         if std::fs::write(&tmp, bytes).is_ok() {
             let _ = std::fs::rename(&tmp, &p);
         }

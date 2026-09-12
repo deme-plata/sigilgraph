@@ -122,3 +122,16 @@ operator of AI — not a messiah (track 017 says so in the title).
 Rules carried from Vol. II, still binding: (1) no number in a lyric that is not in the paper
 (`numbers.json` ships beside the PDF); (2) every track admits its own limit inside the song
 (015 sings "BFT: false"; 016 sings "the price isn't agreed yet").
+
+### Vol. IV — The Ledger and the Levee (2026-09-12) — **three tracks, Zeppelin / Plant / Hellborg**
+
+Operator brief: *"style led zeppelin robert plant and jonas hellborg bass… great guitar and drums and bass and lyrics."*
+Same rules as Vol. II/III: every number comes from `SIGIL Eternal` or the K-parameter paper §10; each song admits its own
+limit. Hellborg's fretless bass is written as a second lead voice in all three (raga interlude, blues duet, tapped-harmonic
+break), Bonham as the engine, Page as the riff and the solo, Plant as the wail.
+
+| # | Track | Zeppelin architecture | Sings |
+|---|---|---|---|
+| 018 | **Sixty-Four Eras (Kashmir of the Ledger)** | Kashmir: one ascending riff until it is a landscape; 7/8 fretless raga interlude with konnakol | 64 eras × 4 yr, cap 21M, 1,755 B/block → 5.2 TB, the three clocks, 2.8 pK (analogy) |
+| 019 | **Two Photons Blues** | Since I've Been Loving You: 12/8 slow blues, three-minute solo, bass-and-voice duet | Landauer: 32 bytes = two green photons to erase; Quillon's 1–13M prune; "it's the lie that's expensive" |
+| 020 | **First Tap Wins (The Nullifier Stomp)** | Black Dog call-and-response + Rock and Roll drums + Immigrant Song war-cry; tapped-harmonic bass break; Moby Dick drum break | 59 nullifiers, $0.16 sticker = cash, four places guard the double spend, committee 2 / BFT false, 512 blocks ≈ 23 min |

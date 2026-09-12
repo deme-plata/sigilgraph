@@ -116,6 +116,31 @@ impl CourtEvent {
         serde_json::to_vec(self).unwrap_or_default()
     }
 
+    /// Is this act **authoritative** — something the whole nation's court should hold,
+    /// regardless of which replica it was filed against — so it belongs on the
+    /// `/sigil/g2/court` gossip topic? Excludes [`CourtEvent::JusticeAppointed`], which each
+    /// node derives deterministically by seeding its own bench from its own block archive at
+    /// boot: gossiping those would sum the benches (5 + 3 = 8 justices), not converge them.
+    /// Every other act — rulings, appeals, precedents, promotions, exams, credentials,
+    /// disclosure orders/exports, contempt, supersessions and honours — is a real decision
+    /// that must reach every replica.
+    pub fn is_gossipable(&self) -> bool {
+        !matches!(self, CourtEvent::JusticeAppointed { .. })
+    }
+
+    /// Order-independent content id for cross-node convergence: BLAKE3 over the chain height
+    /// the origin recorded the act at, joined with its canonical bytes. Two replicas that hold
+    /// the same (height, act) compute the same id — the id carries NO seq/prev, so it does not
+    /// depend on the local docket order. This is the leaf of [`Docket::set_root`] and the dedup
+    /// key for [`Docket::apply_external`].
+    pub fn gossip_id(&self, height: u64) -> [u8; 32] {
+        let mut h = blake3::Hasher::new();
+        h.update(b"sigil-court/gossip-id");
+        h.update(&height.to_le_bytes());
+        h.update(&self.encode());
+        *h.finalize().as_bytes()
+    }
+
     /// The case this event belongs to, if any (for the per-case index).
     pub fn case(&self) -> Option<CaseId> {
         match self {
@@ -293,6 +318,45 @@ impl Docket {
         self.entries.iter().filter(|e| e.event.tag() == tag).collect()
     }
 
+    /// The set of gossip ids currently held (authoritative acts only), sorted. The basis of
+    /// [`Docket::set_root`]; also the "have" set a node advertises so peers send only what is missing.
+    pub fn gossip_ids(&self) -> Vec<[u8; 32]> {
+        let mut ids: Vec<[u8; 32]> = self.entries.iter()
+            .filter(|e| e.event.is_gossipable())
+            .map(|e| e.event.gossip_id(e.height))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// **Order-independent** commitment over the authoritative acts: a balanced Merkle root over
+    /// the SORTED gossip ids. Unlike [`Docket::root`]/[`Docket::head`] (which fix insertion order),
+    /// two replicas that hold the same SET of acts commit to the same `set_root` no matter what
+    /// order the acts arrived in. This is the value two nodes must match to be "one court", and
+    /// what the `/sigil/g2/court` gossip topic drives to agreement.
+    pub fn set_root(&self) -> [u8; 32] {
+        merkle::root(&self.gossip_ids())
+    }
+
+    /// Does the docket already hold this authoritative act (by gossip id)?
+    pub fn contains_gossip(&self, height: u64, event: &CourtEvent) -> bool {
+        let id = event.gossip_id(height);
+        self.entries.iter().any(|e| e.event.is_gossipable() && e.event.gossip_id(e.height) == id)
+    }
+
+    /// Apply an act received from a peer. Appends it (preserving the origin's `height`) iff it is
+    /// gossipable and not already held. Returns `true` when it was NEW — so the caller knows to
+    /// re-broadcast and log. Idempotent: a duplicate is a no-op returning `false`. Never fails; an
+    /// append-only log has no invalid append, and the caller has already checked authenticity.
+    pub fn apply_external(&mut self, height: u64, event: CourtEvent) -> bool {
+        if !event.is_gossipable() || self.contains_gossip(height, &event) {
+            return false;
+        }
+        self.append(height, event);
+        true
+    }
+
     /// Count per event name — the docket's own statistics.
     pub fn histogram(&self) -> BTreeMap<&'static str, u32> {
         let mut m = BTreeMap::new();
@@ -348,4 +412,39 @@ mod tests {
         assert_eq!(back.by_wallet(&w(9)).len(), 1);
         assert_eq!(back.root(), d.root());
     }
+    #[test]
+    fn set_root_converges_regardless_of_arrival_order() {
+        // Three authoritative acts, recorded at fixed heights.
+        let a = CourtEvent::HonourConferred { order: "Elephant".into(), rank: "Aeresborger".into(), recipient: w(7), citation: "for the chain".into(), conferred_by: w(1), approvals: 4, operator_cosigned: true };
+        let b = CourtEvent::ContemptRecorded { wallet: w(9), case: [3; 32], reason: "no-show".into() };
+        let c = CourtEvent::RulingIssued { case: [5; 32], ruling: [6; 32], verdict: Verdict::Upheld, article: Article::PrivacyByDefault, votes_for: 3, votes_against: 0, cites: vec![] };
+
+        // Node 1 records a,b,c ; node 2 receives them c,a,b (different order) plus its own local bench.
+        let mut d1 = Docket::new();
+        d1.append(100, a.clone()); d1.append(101, b.clone()); d1.append(102, c.clone());
+
+        let mut d2 = Docket::new();
+        d2.append(1, CourtEvent::JusticeAppointed { justice: w(50), rank: Rank::Justice }); // node-local, must NOT affect set_root
+        assert!(d2.apply_external(102, c.clone()));
+        assert!(d2.apply_external(100, a.clone()));
+        assert!(d2.apply_external(101, b.clone()));
+
+        // Heads/roots differ (order + the local bench entry); the SET root converges.
+        assert_ne!(d1.head(), d2.head(), "insertion-ordered head is expectedly local");
+        assert_eq!(d1.set_root(), d2.set_root(), "same authoritative SET => same set_root");
+    }
+
+    #[test]
+    fn apply_external_is_idempotent_and_excludes_bench() {
+        let mut d = Docket::new();
+        let h = CourtEvent::HonourConferred { order: "Elephant".into(), rank: "Aeresborger".into(), recipient: w(7), citation: "x".into(), conferred_by: w(1), approvals: 4, operator_cosigned: true };
+        assert!(d.apply_external(100, h.clone()), "first apply is new");
+        let r1 = d.set_root();
+        assert!(!d.apply_external(100, h.clone()), "duplicate is a no-op");
+        assert_eq!(d.set_root(), r1, "duplicate does not move set_root");
+        // A bench appointment is not gossipable and must be refused by apply_external.
+        assert!(!d.apply_external(5, CourtEvent::JusticeAppointed { justice: w(2), rank: Rank::Justice }));
+        assert_eq!(d.set_root(), r1, "non-gossipable act never enters the set");
+    }
+
 }

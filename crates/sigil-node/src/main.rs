@@ -962,6 +962,20 @@ fn run_start() -> Result<()> {
                     bridge_bridge.relayer_hex().unwrap_or_else(|| "UNSET (locks will be rejected)".into()));
                 shared
             });
+        // Keep the money API's SigilState (`shared`, read by /v1/integrity, /v1/balance and the
+        // court/nation bridges) in step with the applied chain on EVERY apply path — not just the
+        // producer self-apply at the mint site. Before 2026-09-12 only the producer path
+        // re-snapshotted `shared`, so a caught-up FOLLOWER advanced its internal `chain` to the tip
+        // while its money API stayed frozen at the boot snapshot: /v1/integrity served stale roots
+        // and a stale height forever, and two nodes could never be shown to agree on balances.
+        // `chain.state_snapshot()` is the same call the producer path already makes; guarded on
+        // `a > 0` so it fires once per drain that actually applied something, never per idle tick.
+        macro_rules! publish_money { () => {{
+            if let Some(ms) = money_state.as_ref() {
+                if let Ok(mut w) = ms.write() { *w = chain.state_snapshot(); }
+            }
+            sigil_api::height::set(chain.height());
+        }}; }
         // When gated, a braid block is minted ONLY for a verified dual-lane solve —
         // the braid stops being a free-running dyno and starts costing power+time.
         let mining_gated = std::env::var("SIGIL_MINING_GATED")
@@ -1717,6 +1731,7 @@ fn run_start() -> Result<()> {
                                 &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge,
                                 &shielded_bridge, &mut mint_hash_to_tx_hashes);
                             applied += a; dag_ord_skipped += s; dag_apply_failed += f;
+                            if a > 0 { publish_money!(); }
                             let tip_h = br.selected_tip().and_then(|h| dag_bodies.get(&h)).map(|b| b.header.height);
                             // chain.height() is the NEXT height (tip + 1).
                             settled_to_tip = tip_h.map(|t| chain.height() > t).unwrap_or(true);
@@ -2074,6 +2089,7 @@ fn run_start() -> Result<()> {
                                     &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge,
                                     &shielded_bridge, &mut mint_hash_to_tx_hashes);
                                 applied += a; dag_ord_skipped += s; dag_apply_failed += f;
+                                if a > 0 { publish_money!(); }
                                 // THE LIVE FOLLOW PATH. Instrumenting the backfill apply sites
                                 // alone left a follower's reported height frozen at the last
                                 // BACKFILLED block: happysrv caught up, tracked the tip at 17 ms
@@ -3234,6 +3250,7 @@ fn run_start() -> Result<()> {
                                     applied += a;
                                     dag_ord_skipped += s;
                                     dag_apply_failed += f;
+                                    if a > 0 { publish_money!(); }
                                     if received % 200 == 0 {
                                         let secs = t_start.elapsed().as_secs_f64().max(1e-6);
                                         let st = br.stats();
@@ -3722,6 +3739,7 @@ fn run_start() -> Result<()> {
                         backfilled += a;
                         dag_ord_skipped += s;
                         dag_apply_failed += f;
+                        if a > 0 { publish_money!(); }
                     } else if !diverged {
                         for v in vals {
                             if let Ok(block) = Ok::<crate::block::Block, ()>(v) {

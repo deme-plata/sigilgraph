@@ -2004,9 +2004,31 @@ pub async fn integrity_handler(State(st): State<AppState>) -> Json<serde_json::V
     // The APPLIED height, which a follower knows and a mining tip does not. See `height`.
     let height = crate::height::get();
 
+    // The height this node CERTIFIES as final (from the adopted committee certificate). On a
+    // healthy node this tracks the tip; on a follower whose state-apply has stalled it can run
+    // far ahead of `height` (the APPLIED height). That gap is the one integrity fact this
+    // endpoint used to hide: a node can certify H as final while its four state roots still
+    // reflect an earlier block M < H, so its roots are NOT the finalized state. We surface it
+    // rather than let a consumer read `finalized` and assume the roots below match it.
+    let finalized_height: Option<u64> = st.finality.read().ok().and_then(|g| g.clone()).and_then(|v| {
+        v.get("height").and_then(|x| x.as_u64())
+            .or_else(|| v.get("certificate").and_then(|c| c.get("height")).and_then(|x| x.as_u64()))
+    });
+    // Blocks certified-final but NOT yet applied to the state these roots come from.
+    let unapplied_finalized_gap: Option<u64> = match (finalized_height, height) {
+        (Some(f), Some(h)) => Some(f.saturating_sub(h)),
+        _ => None,
+    };
+    // The roots below are the FINALIZED state only when nothing final is still unapplied.
+    let roots_are_finalized_state = unapplied_finalized_gap.map(|g| g == 0);
+
     Json(serde_json::json!({
         "ok": height.is_some(),
         "height": height,
+        "applied_height": height,
+        "finalized_height": finalized_height,
+        "unapplied_finalized_gap": unapplied_finalized_gap,
+        "roots_are_finalized_state": roots_are_finalized_state,
         "roots": {
             // Commits to every wallet balance — see this handler's docs.
             "wallet_state_root": hex::encode(roots.wallet_state_root),
@@ -2021,7 +2043,7 @@ pub async fn integrity_handler(State(st): State<AppState>) -> Json<serde_json::V
             "nullifiers": pool.nullifier_count(),
         },
         "compare": "poll both nodes until `height` matches, then compare `roots`, `native_supply` and `shielded`. A difference at DIFFERENT heights is just time passing, not a fork.",
-        "caveat": "`height` is the last APPLIED block and the roots are read from live state; SigilState does not carry its own applied height, so under load the pair can be a block or two apart. Agreement is therefore strong evidence, but a SINGLE mismatch is inconclusive — re-sample, and treat only a mismatch that persists across several matched-height samples as a fork. `height: null` means this node does not yet know its tip and nothing here may be compared.",
+        "caveat": "`height` is the last APPLIED block and the roots are read from live state; SigilState does not carry its own applied height, so under load the pair can be a block or two apart. Agreement is therefore strong evidence, but a SINGLE mismatch is inconclusive — re-sample, and treat only a mismatch that persists across several matched-height samples as a fork. `height: null` means this node does not yet know its tip and nothing here may be compared. If `unapplied_finalized_gap` > 0 the node certifies a higher `finalized_height` than it has APPLIED: these roots reflect `applied_height`, NOT the finalized tip, so do not treat them as this node's finalized state until it catches up.",
         "ts_ms": now_ms(),
     }))
 }

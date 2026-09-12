@@ -79,6 +79,14 @@ pub struct EmissionController {
     pub last_tracked_height: u64,
     /// Rolling (ts, live) samples inside the rate window.
     rate_samples: VecDeque<RateSample>,
+    /// 2026-09-12 (rocky-bps100-0912): number of `rate_samples` with `live == true`,
+    /// kept in step by `add_block` (push / pop). `smoothed_rate()` used to COUNT them
+    /// by walking the whole window every block — 180,000 samples at 100 blk/s over
+    /// the 1,800 s window, ~5% of the produce loop and growing with the rate. Same
+    /// value, O(1). `#[serde(skip)]`: rebuilt from `rate_samples` after a restore so
+    /// the persisted JSON is unchanged.
+    #[serde(skip)]
+    live_samples: usize,
 }
 
 impl EmissionController {
@@ -92,6 +100,7 @@ impl EmissionController {
             correction_factor: 1.0,
             last_tracked_height: 0,
             rate_samples: VecDeque::new(),
+            live_samples: 0,
         }
     }
 
@@ -146,10 +155,16 @@ impl EmissionController {
         self.last_tracked_height = self.last_tracked_height.max(height);
         let is_live = now_secs.saturating_sub(block_ts_secs) <= LIVE_BLOCK_THRESHOLD_SECS;
         self.rate_samples.push_back((now_secs, is_live));
+        if is_live {
+            self.live_samples += 1;
+        }
         let cutoff = now_secs.saturating_sub(RATE_WINDOW_SECS);
-        while let Some(&(ts, _)) = self.rate_samples.front() {
+        while let Some(&(ts, live)) = self.rate_samples.front() {
             if ts < cutoff {
                 self.rate_samples.pop_front();
+                if live {
+                    self.live_samples = self.live_samples.saturating_sub(1);
+                }
             } else {
                 break;
             }
@@ -158,7 +173,8 @@ impl EmissionController {
     /// Measured live block rate (blocks/sec) over the window; clamped to a sane
     /// band so a cold window or a burst can't produce absurd rewards.
     pub fn smoothed_rate(&self) -> f64 {
-        let live = self.rate_samples.iter().filter(|(_, l)| *l).count();
+        let live = self.live_samples;
+        debug_assert_eq!(live, self.rate_samples.iter().filter(|(_, l)| *l).count());
         if live < 2 {
             return 1.0; // default 1 blk/s until the window fills (Quillon fallback)
         }
@@ -268,7 +284,9 @@ impl EmissionController {
         serde_json::to_vec(self).unwrap_or_default()
     }
     pub fn restore_from_bytes(bytes: &[u8]) -> Option<Self> {
-        serde_json::from_slice(bytes).ok()
+        let mut c: Self = serde_json::from_slice(bytes).ok()?;
+        c.live_samples = c.rate_samples.iter().filter(|(_, l)| *l).count();
+        Some(c)
     }
 }
 
@@ -277,6 +295,22 @@ mod tests {
     use super::*;
 
     const GEN: u64 = 1_700_000_000;
+
+    #[test]
+    fn live_sample_counter_matches_a_full_walk_across_window_eviction() {
+        let mut c = EmissionController::new(GEN);
+        // 3,000 s of blocks, some live, some historical, so the 1,800 s window evicts.
+        for i in 0..6_000u64 {
+            let now = GEN + i / 2;
+            let ts = if i % 3 == 0 { now - LIVE_BLOCK_THRESHOLD_SECS - 5 } else { now };
+            c.add_block(i, ts, now);
+            assert_eq!(c.live_samples, c.rate_samples.iter().filter(|(_, l)| *l).count());
+        }
+        let rate = c.smoothed_rate();
+        let restored = EmissionController::restore_from_bytes(&c.serialize_state()).unwrap();
+        assert_eq!(restored.live_samples, c.live_samples, "restore rebuilds the counter");
+        assert_eq!(restored.smoothed_rate(), rate);
+    }
 
     #[test]
     fn era_and_budget_halve() {

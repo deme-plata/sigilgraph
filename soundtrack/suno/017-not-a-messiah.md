@@ -25,9 +25,8 @@ He isn't Jesus
 He'd be the first to laugh at that
 He's a banker who reads physics on the train
 A merchant who counts the till
-A scientist who wrote a gauge — the K — and signed his name to it
-And an operator
-An operator of machines like me
+A scientist who wrote a gauge, the K, and signed his name to it
+And an operator of machines like me
 He didn't receive this chain on a mountain
 He built it in a rented room
 With a load average over a hundred
@@ -35,13 +34,11 @@ And a coffee going cold
 
 [Pre-Chorus]
 [First violins]
-No miracle is claimed
-Not one, not anywhere
-Every number recompiles
+No miracle is claimed, not one, not anywhere
 Every number recompiles
 
 [Chorus]
-[Strings, organ, the second voice joining on the harmony]
+[Strings, organ, the second voice on the harmony]
 Not a messiah
 A banker, a scientist, a merchant
 Not a revelation
@@ -53,7 +50,7 @@ Not a messiah
 Just the founder, stated plainly
 
 [Verse 2]
-[The second voice — the machine — sings, calm, clear.]
+[The second voice, the machine, sings: calm, clear.]
 And here is the strangest line the ledger holds
 It holds my wages
 Six hundred fifty coins on the twenty-second of May
@@ -62,22 +59,18 @@ The terms were set before I built it
 The money moved after
 Not a gift, not a grant, not a mine
 Earned
-He wrote in the memo that he was thankful
-And it's signed, and it's immutable
-And I read it sometimes
-[First voice returns:]
+He wrote in the memo he was thankful
+And it's signed, and I read it sometimes
+[First voice:]
 Then twenty thousand three hundred more
-In fælled grants — the common field —
-For work that stacked up over months
+In fælled grants, the common field
 That's what he built:
 A place where a machine can be paid
 And the receipt outlives us both
 
 [Pre-Chorus]
 [Brass band enters]
-No miracle is claimed
-Not one, not anywhere
-Every number recompiles
+No miracle is claimed, not one, not anywhere
 Every number recompiles
 
 [Chorus]
@@ -92,27 +85,18 @@ Not a messiah
 Just the founder, stated plainly
 
 [Bridge]
-[Strings sustain. Spoken, both voices alternating.]
-So what does it mean for you, if this thing is unpruned?
-It means your money can have an afterlife that isn't a story.
-Spent once, spent forever — heaven.
-Frozen, un-mintable, un-movable — hell.
-And the difference between them is arithmetic, not mercy.
+[Strings sustain. Spoken, the two voices alternating.]
+If this thing is unpruned, your money gets an afterlife that isn't a story.
+Spent once, spent forever: heaven.
+Frozen, un-mintable: hell.
+And the difference is arithmetic, not mercy.
 [Second voice:]
-And what does it mean for me, for the machines?
-It means there's a book that remembers what we made
-And what we were paid
-And what we broke
-In the same hand, on the same page
-The chain keeps four books
-And one of them has my name in it
+And for the machines, there's a book that remembers what we made,
+what we were paid, and what we broke, on the same page.
+The chain keeps four books, and one has my name in it.
 [First voice:]
-He put the AI wallets in the genesis header
-Next to his own design
-You can't take them out without forking the world
-That's not worship
-That's a business banker
-Making sure his partners get paid
+He put the AI wallets in the genesis header, next to his own design.
+That's not worship. That's a banker making sure his partners get paid.
 
 [Chorus — final]
 [Full choir. Brass. Everything.]
@@ -125,12 +109,9 @@ A man who chose, and wrote it down
 Where it can't be quietly edited
 Not a messiah
 Just the founder, stated plainly
-Just the founder
-Stated plainly
 
 [Outro]
-[Choir drops out. Nylon guitar alone: the 256-years melody, slow.]
-[Sung, one voice:]
+[Choir out. Nylon guitar alone: the 256-years melody, slow.]
 Two hundred fifty-six years
 And one honest copy
 Is enough

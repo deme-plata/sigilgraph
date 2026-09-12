@@ -104,7 +104,7 @@ for a merchant who built it?* The paper answers first: "eternal" is 256 years of
 the honest word is *unpruned*; forgetting costs energy and remembering is free; a block is one
 of 2⁶⁴ possibilities the universe permitted and two nodes agreed to keep; the pool's two sets
 (notes, nullifiers) are heaven and hell; the agreed-upon price does not exist yet (USDS price
-reads 0, live at block 6,400,000). Suno-ready: **Style ≤ 1000 chars, Lyrics ≤ 5000 chars**,
+reads 0, live at block 6,400,000). Suno-ready: **Style ≤ 1000 chars, Lyrics < 3000 chars**,
 checked mechanically. Founder credited as what he is: a banker, a scientist, a merchant, an
 operator of AI — not a messiah (track 017 says so in the title).
 

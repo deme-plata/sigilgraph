@@ -2823,13 +2823,31 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
   async function sigilWatchPrivateSend(txid, nullifier, from, pick, changeIndex, amtStr){
     if(!txid) return;
     var nf=String(nullifier||'').toLowerCase(), deadline=Date.now()+15*60*1000, announced=false, unknowns=0;
+    // 2026-09-12: PUSH, not poll. /v1/transactions/:hash/wait holds the request open and
+    // answers the instant the node retires the tx (applied / rejected) — the certificate
+    // is ~1 block behind the tip, so 'final' now arrives when it happens, not on the
+    // next 2 s sample. Falls back to the old 2 s poll on a node without the route.
+    var waitOk=true, waitFails=0;
     while(Date.now()<deadline){
-      await new Promise(function(r){ setTimeout(r,2000); }); // 2026-09-09: certificates settle in ~1 s now; a 5 s poll made 'final' read 20 s late
-      var seen=false, st=null, reason='';
+      var seen=false, st=null, reason='', gotWait=false;
+      if(waitOk){
+        try{
+          var wr=await fetch('/v1/transactions/'+txid+'/wait?timeout_ms=20000',{cache:'no-store'});
+          if(wr.status===404||wr.status===405){ waitOk=false; }
+          else { var wj=await wr.json(); var wd=(wj&&wj.ok&&wj.data)||null;
+                 if(wd&&wd.status){ st=wd.status; reason=wd.reason||''; gotWait=true; waitFails=0; }
+                 else if(wj&&wj.ok===false){ waitOk=false; }
+                 else if(++waitFails>=3){ waitOk=false; } }
+        }catch(_){ if(++waitFails>=3) waitOk=false; }
+      }
+      if(!gotWait){
+        await new Promise(function(r){ setTimeout(r,2000); }); // 2026-09-09: certificates settle in ~1 s now; a 5 s poll made 'final' read 20 s late
+        try{ var tj=await fetch('/v1/transactions/'+txid,{cache:'no-store'}).then(function(r){return r.json();});
+             var d=(tj&&tj.data)||{}; st=d.status||null; reason=d.reason||''; }catch(_){}
+      }
+      // The nullifier set stays the ground truth; one read per wake is cheap.
       try{ var nl=await fetch('/v1/shielded/nullifiers',{cache:'no-store'}).then(function(r){return r.json();});
            if(nl&&nl.nullifiers) seen=nl.nullifiers.map(function(h){return String(h).toLowerCase();}).indexOf(nf)>=0; }catch(_){}
-      try{ var tj=await fetch('/v1/transactions/'+txid,{cache:'no-store'}).then(function(r){return r.json();});
-           var d=(tj&&tj.data)||{}; st=d.status||null; reason=d.reason||''; }catch(_){}
       unknowns=(st==='unknown')?unknowns+1:0;
       // A refusal is authoritative (since the 2026-09-08 node fix a 'rejected' is real).
       // It must beat a seen nullifier: if the note was ALREADY spent by an older

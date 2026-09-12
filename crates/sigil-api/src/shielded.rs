@@ -25,7 +25,7 @@
 //! if these two ever disagree, the chokepoint wins and this layer is the bug.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -316,11 +316,31 @@ pub struct ShieldedBridge {
     /// default) is a complete no-op, so every existing caller (tests, any
     /// caller that never wires this) is unaffected.
     relay_hook: Mutex<Option<Box<dyn Fn([u8; 32], ShieldedOp) + Send + Sync>>>,
+    /// Where status changes are PUSHED (2026-09-12, instant confirm delivery): the
+    /// same transitions `status()` reports — `accepted` at enqueue, `in_block` when a
+    /// candidate on the spine carries the tx, `applied` / `rejected` from
+    /// `remember()`. `None` (the default) publishes nothing, so every existing caller
+    /// and test is unaffected; sigil-node wires the node's bus at startup.
+    events: Mutex<Option<Arc<crate::events::EventBus>>>,
 }
 
 impl ShieldedBridge {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Wire the bus that `/v1/events`, `/v1/transactions/:hash/wait` and the webhook
+    /// dispatcher all read. Additive: the bridge's own bookkeeping is unchanged.
+    pub fn set_events(&self, bus: Arc<crate::events::EventBus>) {
+        *self.events.lock().unwrap() = Some(bus);
+    }
+
+    fn emit(&self, hash: &[u8; 32], status: &str, reason: Option<String>) {
+        // Clone the Arc out so the publish never runs under this mutex.
+        let bus = self.events.lock().unwrap().clone();
+        if let Some(b) = bus {
+            b.tx_event(hash, status, reason);
+        }
     }
 
     /// Wire a hook to be called `(id, op)` after every successful submit —
@@ -743,6 +763,13 @@ impl ShieldedBridge {
             .map_err(|e| ShieldedSubmitError::ProofRejected(e.to_string()))
     }
 
+    /// Test seam: queue a tx past the door checks, exactly as `submit_*` would after
+    /// verifying it. Compiled only for tests so the door stays the only production entry.
+    #[cfg(test)]
+    pub fn test_enqueue(&self, tx: SigilTx) -> [u8; 32] {
+        self.enqueue(tx, None)
+    }
+
     fn enqueue(&self, tx: SigilTx, nf: Option<[u8; 32]>) -> [u8; 32] {
         let hash = tx.hash();
         if let Some(nf) = nf {
@@ -752,6 +779,7 @@ impl ShieldedBridge {
             hash,
             Pending { tx, attempts: 0, first_seen: Instant::now(), permanent_fails: 0, in_flight: false },
         );
+        self.emit(&hash, "accepted", None);
         hash
     }
 
@@ -800,6 +828,7 @@ impl ShieldedBridge {
     pub fn snapshot_for_mint_excluding(&self, carried: impl Fn(&SigilTx) -> bool) -> Vec<SignedTx> {
         let mut guard = self.pending.lock().unwrap();
         let mut expired: Vec<[u8; 32]> = Vec::new();
+        let mut entered_block: Vec<[u8; 32]> = Vec::new();
         let mut out = Vec::with_capacity(guard.len());
         guard.retain(|hash, p| {
             if p.attempts >= MAX_ATTEMPTS || p.first_seen.elapsed() >= MAX_AGE {
@@ -815,6 +844,9 @@ impl ShieldedBridge {
             if carried(&p.tx) {
                 // Already in a candidate on the spine we are extending. Offering it
                 // again can only produce a refusal against its own effects.
+                if !p.in_flight {
+                    entered_block.push(*hash);
+                }
                 p.in_flight = true;
                 return true;
             }
@@ -826,6 +858,12 @@ impl ShieldedBridge {
         drop(guard);
         if !expired.is_empty() {
             self.forget_nullifiers(&expired);
+            for h in &expired {
+                self.emit(h, "rejected", Some("gave up: not included before the pending limit".into()));
+            }
+        }
+        for h in &entered_block {
+            self.emit(h, "in_block", None);
         }
         out
     }
@@ -911,9 +949,10 @@ impl ShieldedBridge {
     }
 
     fn remember(&self, items: impl Iterator<Item = ([u8; 32], TxOutcome)>) {
+        let items: Vec<([u8; 32], TxOutcome)> = items.collect();
         let mut g = self.outcomes.lock().unwrap();
         let now = Instant::now();
-        for (h, o) in items { g.insert(h, (o, now)); }
+        for (h, o) in &items { g.insert(*h, (o.clone(), now)); }
         if g.len() > OUTCOME_CAP || g.len() % 256 == 0 {
             g.retain(|_, (_, t)| t.elapsed() < OUTCOME_TTL);
         }
@@ -923,6 +962,14 @@ impl ShieldedBridge {
             v.sort_by_key(|(_, t)| *t);
             let excess = g.len() - OUTCOME_CAP;
             for (h, _) in v.into_iter().take(excess) { g.remove(&h); }
+        }
+        drop(g);
+        for (h, o) in &items {
+            match o {
+                TxOutcome::Applied => self.emit(h, "applied", None),
+                TxOutcome::Rejected(r) => self.emit(h, "rejected", Some(r.clone())),
+                TxOutcome::Pending { .. } => {}
+            }
         }
     }
 
@@ -1095,6 +1142,53 @@ mod tests {
         b.confirm_applied(&[h]);
         assert_eq!(b.status(&h), Some(TxOutcome::Applied));
         assert_eq!(b.pending_len(), 0);
+    }
+
+    /// The push side (2026-09-12): every transition `status()` can report is also
+    /// published, in order, on the wired bus — accepted at the door, in_block when the
+    /// frontier carries it, applied when it settles. A wallet on `/wait` or `/v1/events`
+    /// therefore never learns less, or later, than one that polls.
+    #[tokio::test]
+    async fn every_status_transition_is_pushed_on_the_bus_in_order() {
+        use crate::events::{Event, EventBus};
+        let b = ShieldedBridge::new();
+        let bus = Arc::new(EventBus::new());
+        b.set_events(bus.clone());
+        let mut rx = bus.subscribe();
+        let tx = SigilTx::Shield { from: [7u8; 32], amount: 200_000, cm: [8u8; 32], fee: 0, note_ciphertext: None };
+        let h = b.enqueue(tx, None);
+        // first candidate: offered (not yet carried) → no in_block yet
+        assert_eq!(b.snapshot_for_mint_excluding(|_| false).len(), 1);
+        // second candidate: the frontier now carries it → in_block, exactly once
+        assert_eq!(b.snapshot_for_mint_excluding(|_| true).len(), 0);
+        assert_eq!(b.snapshot_for_mint_excluding(|_| true).len(), 0);
+        b.confirm_applied(&[h]);
+        let mut seen = Vec::new();
+        while let Ok(item) = rx.try_recv() {
+            if let Event::Tx { tx_hash, status, .. } = &item.event {
+                assert_eq!(tx_hash, &hex::encode(h));
+                seen.push(status.clone());
+            }
+        }
+        assert_eq!(seen, vec!["accepted", "in_block", "applied"]);
+    }
+
+    #[tokio::test]
+    async fn an_eviction_is_pushed_as_rejected_with_the_reason() {
+        use crate::events::{Event, EventBus};
+        let b = ShieldedBridge::new();
+        let bus = Arc::new(EventBus::new());
+        b.set_events(bus.clone());
+        let mut rx = bus.subscribe();
+        let tx = SigilTx::Shield { from: [1u8; 32], amount: 200_000, cm: [2u8; 32], fee: 0, note_ciphertext: None };
+        let h = b.enqueue(tx, None);
+        for _ in 0..REJECT_AFTER { b.note_rejection(h, "unknown anchor"); }
+        let mut last = None;
+        while let Ok(item) = rx.try_recv() {
+            if let Event::Tx { status, reason, .. } = &item.event { last = Some((status.clone(), reason.clone())); }
+        }
+        assert_eq!(last, Some(("rejected".to_string(), Some("unknown anchor".to_string()))));
+        assert!(matches!(b.status(&h), Some(TxOutcome::Rejected(_))));
     }
 
     /// Guard-rail for the defect that silently disabled this whole path: `MAX_AGE` must

@@ -731,6 +731,7 @@ fn run_start() -> Result<()> {
         }
         let mut first_peer_at: Option<std::time::Instant> = None;
         let mut producing = false;
+        let mut last_tip_event: u64 = 0;
         // Short producer tag for the per-block dag.html feed line.
         let prod_tag = if node_id.contains("eps") { "E" }
             else if node_id.contains("delta") { "D" }
@@ -817,6 +818,13 @@ fn run_start() -> Result<()> {
         // PV-1 private transfers. Drained on the same contract as `send_bridge`:
         // re-embedded into every candidate, retired only when one lands on the spine.
         let shielded_bridge = Arc::new(sigil_api::shielded::ShieldedBridge::new());
+        // Instant confirm DELIVERY (2026-09-12): the bus `/v1/events`, `/v1/transactions/:hash/wait`
+        // and the webhook dispatcher read. The shielded bridge publishes accepted/in_block/
+        // applied/rejected; the finality gate publishes certificates; the producer tips.
+        // Constructed unconditionally (like the bridges) so a gate raise on a node without
+        // the money API is still a no-op publish, never a missing handle.
+        let events_bus = Arc::new(sigil_api::events::EventBus::new());
+        shielded_bridge.set_events(Arc::clone(&events_bus));
         // Dandelion++ tx-gossip privacy relay (dandelion_relay.rs): one actor
         // task owns the DandelionRouter; everything else just sends it a Cmd.
         // Always on — no env gate, since it degrades to normal fluff-only
@@ -920,6 +928,8 @@ fn run_start() -> Result<()> {
                     state: Arc::clone(&shared),
                     finality: Arc::clone(&finality_view),
                     tip_proof: Arc::clone(&tip_proof_view),
+                    events: Arc::clone(&events_bus),
+                    webhooks: Arc::new(sigil_api::events::WebhookRegistry::from_env()),
                     mining: Arc::clone(&mining_bridge),
                     send: Arc::clone(&send_bridge),
                     shielded: Arc::clone(&shielded_bridge),
@@ -948,6 +958,11 @@ fn run_start() -> Result<()> {
                     Arc::clone(&mining_history_store),
                     std::time::Duration::from_secs(60),
                 );
+                // Webhook delivery: one subscriber on the bus, POSTs on blocking threads.
+                tokio::spawn(sigil_api::events::run_dispatcher(
+                    Arc::clone(&app.events),
+                    Arc::clone(&app.webhooks),
+                ));
                 tokio::spawn(async move {
                     if let Err(e) = sigil_api::serve(&addr, app).await {
                         eprintln!("\u{26a0} sigil-api serve failed: {e}");
@@ -1823,6 +1838,13 @@ fn run_start() -> Result<()> {
                     // This is the parent THIS block will carry, so a solve issued
                     // now is valid for exactly this block and no other.
                     mining_bridge.publish_tip(mint_ref.height(), mint_ref.parent_hash());
+                    if last_tip_event != mint_ref.height() {
+                        last_tip_event = mint_ref.height();
+                        events_bus.publish(sigil_api::events::Event::Tip {
+                            height: last_tip_event,
+                            ts_ms: sigil_api::events::now_ms(),
+                        });
+                    }
                     // Gated production: mint only when a verified solve is waiting.
                     // An EXACT match (this frontier) embeds real PoW into the header,
                     // same as always. A NEAR-MISS (already verified by
@@ -2182,7 +2204,7 @@ fn run_start() -> Result<()> {
                                     }
                                     // Phase 3 (2026-09-08): a certificate (with n=1, our own vote
                                     // just completed it) raises the braid's finality line — gated.
-                                    apply_finality_gate(&finality, braid.as_mut(), &finality_view, &dag_bodies, &tip_proof_view, sqisign_key.as_ref());
+                                    apply_finality_gate(&finality, braid.as_mut(), &finality_view, &dag_bodies, &tip_proof_view, sqisign_key.as_ref(), &events_bus);
                                     if produced % 100 == 0 {
                                         let secs = t_start.elapsed().as_secs_f64().max(1e-6);
                                         eprintln!("🏭 produced {} blocks ({:.1}/s) · {} txs ({:.0} TPS verify-once) — tip H={}",
@@ -3114,7 +3136,7 @@ fn run_start() -> Result<()> {
                                                     eprintln!("⚠ publish finality vote H={} failed: {}", bheight, e);
                                                 }
                                             }
-                                            apply_finality_gate(&finality, Some(&mut *br), &finality_view, &dag_bodies, &tip_proof_view, sqisign_key.as_ref());
+                                            apply_finality_gate(&finality, Some(&mut *br), &finality_view, &dag_bodies, &tip_proof_view, sqisign_key.as_ref(), &events_bus);
                                         }
                                         InsertOutcome::MissingParents(_missing) => {
                                             // Park the body for the braid AND buffer it for the
@@ -3592,7 +3614,7 @@ fn run_start() -> Result<()> {
                                 }
                                 // Phase 3: a certificate assembled from peers' votes gates
                                 // settlement when SIGIL_FINALITY_GATE says so.
-                                apply_finality_gate(&finality, braid.as_mut(), &finality_view, &dag_bodies, &tip_proof_view, sqisign_key.as_ref());
+                                apply_finality_gate(&finality, braid.as_mut(), &finality_view, &dag_bodies, &tip_proof_view, sqisign_key.as_ref(), &events_bus);
                             } else {
                                 let preview = std::str::from_utf8(&data)
                                     .map(|s| s.chars().take(120).collect::<String>())
@@ -5196,6 +5218,7 @@ fn apply_finality_gate(
     dag_bodies: &std::collections::HashMap<BlockHash, Block>,
     tip_proof_view: &Arc<std::sync::RwLock<Option<serde_json::Value>>>,
     sqisign_key: Option<&(Vec<u8>, Vec<u8>)>,
+    events: &sigil_api::events::EventBus,
 ) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static LAST_WARNED: AtomicU64 = AtomicU64::new(0);
@@ -5216,6 +5239,16 @@ fn apply_finality_gate(
                     h.saturating_sub(sigil_dagknight::BraidConfig::from_env().final_depth));
             }
             if let Some(v) = finality.certificate_view(mode) {
+                // Push the certificate to every `/v1/events` reader and webhook the
+                // instant the line moves — the same JSON the route serves, minus votes.
+                events.publish(sigil_api::events::Event::Certificate {
+                    height: v.get("height").and_then(|x| x.as_u64()).unwrap_or(h),
+                    spine_block_hash: v.get("spine_block_hash").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+                    votes: v.get("votes").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0),
+                    committee_size: v.get("committee_size").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
+                    quorum: v.get("quorum").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
+                    ts_ms: now,
+                });
                 if let Ok(mut w) = view.write() { *w = Some(v); }
             }
             // P4.1 (2026-09-08): the certified tip as a SQIsign-signed tip proof, at most

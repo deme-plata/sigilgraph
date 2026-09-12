@@ -76,6 +76,8 @@ pub mod height;
 pub mod nation;
 /// PV-1 private transfers: shield / shielded-send / unshield.
 pub mod shielded;
+/// Push delivery of settlement: event bus, SSE, long-poll wait, signed webhooks.
+pub mod events;
 /// Signed ACCEPTANCE receipts returned synchronously by the submit paths.
 /// Acceptance is not settlement — read that module's docs before using it.
 pub mod receipt;
@@ -100,6 +102,13 @@ pub struct AppState {
     /// The certified tip signed with the producer's SQIsign L5 key (tip-proof flavor
     /// `SqiSignBlob`, P4.1), refreshed at most once a second — see `/v1/finality/tip-proof`.
     pub tip_proof: Arc<RwLock<Option<serde_json::Value>>>,
+    /// The push side of settlement (2026-09-12): every tx status change the shielded
+    /// bridge records, every certificate the gate adopts and every tip the producer
+    /// publishes goes through here to `/v1/events`, `/v1/transactions/:hash/wait`
+    /// and the webhook dispatcher. See the `events` module docs.
+    pub events: Arc<events::EventBus>,
+    /// Registered settlement webhooks (in RAM, bounded, TTL) — `/v1/webhooks`.
+    pub webhooks: Arc<events::WebhookRegistry>,
     pub mining: Arc<MiningBridge>,
     /// The node's user-writable flux-aether artifact store — what the SIGIL OS
     /// terminal reads and writes. Lives in `<base>/aether-user`, deliberately
@@ -160,14 +169,19 @@ impl AppState {
     /// Build the shared state from the producer's mempool + state handles, with
     /// a fresh mining bridge and an unconfigured (inert) money bridge.
     pub fn new(mempool: Arc<MempoolBackend>, state: Arc<RwLock<SigilState>>) -> Self {
+        let events = Arc::new(events::EventBus::new());
+        let shielded = Arc::new(shielded::ShieldedBridge::new());
+        shielded.set_events(events.clone());
         Self {
             mempool,
             state,
             finality: Arc::new(RwLock::new(None)),
             tip_proof: Arc::new(RwLock::new(None)),
+            events,
+            webhooks: Arc::new(events::WebhookRegistry::from_env()),
             mining: Arc::new(MiningBridge::new()),
             send: Arc::new(SendBridge::new()),
-            shielded: Arc::new(shielded::ShieldedBridge::new()),
+            shielded,
             bridge: Arc::new(BridgeBridge::new(None, None)),
             dex: Arc::new(DexBridge::new()),
             usds: Arc::new(UsdsBridge::new()),
@@ -421,8 +435,14 @@ pub async fn tx_status(
     // Shielded txs live in the bridge's pending pool, not the transparent mempool. Until
     // 2026-09-05 this answered "unknown" for every one of them, so a wallet whose deposit
     // the chain had refused could only find out by waiting 15 minutes for its own timer.
+    ApiResponse::ok(tx_status_of(&st, &h, &hash))
+}
+
+/// Shared by `tx_status` and `tx_wait`: one place that turns the bridges' view of a
+/// hash into the wire vocabulary, so the long-poll can never disagree with the poll.
+fn tx_status_of(st: &AppState, h: &[u8; 32], hash: &str) -> TxStatusResponse {
     use shielded::TxOutcome;
-    let (status, reason) = match st.shielded.status(&h) {
+    let (status, reason) = match st.shielded.status(h) {
         Some(TxOutcome::Pending { attempts, permanent_fails, in_flight: true }) => (
             "pending".to_string(),
             Some(format!(
@@ -436,10 +456,216 @@ pub async fn tx_status(
         ),
         Some(TxOutcome::Applied) => ("applied".to_string(), None),
         Some(TxOutcome::Rejected(r)) => ("rejected".to_string(), Some(r)),
-        None if st.mempool.contains(&h) => ("mempool".to_string(), None),
+        None if st.mempool.contains(h) => ("mempool".to_string(), None),
         None => ("unknown".to_string(), None),
     };
-    ApiResponse::ok(TxStatusResponse { tx_hash: hash, status, reason })
+    TxStatusResponse { tx_hash: hash.to_string(), status, reason }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TxWaitQuery {
+    /// How long to hold the request open, milliseconds. Clamped to
+    /// [`TX_WAIT_MAX_MS`] — the router's own timeout is 30 s and a proxy in front
+    /// of the node may be tighter, so a client that needs longer simply calls again.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// Longest a `/wait` holds a connection. Under the 30 s `TimeoutLayer` with margin.
+pub const TX_WAIT_MAX_MS: u64 = 25_000;
+pub const TX_WAIT_DEFAULT_MS: u64 = 20_000;
+
+#[derive(Debug, Serialize)]
+pub struct TxWaitResponse {
+    #[serde(flatten)]
+    pub status: TxStatusResponse,
+    /// True when the wait ended because the tx reached `applied` or `rejected`
+    /// (or was already there). False means the timeout elapsed: call again.
+    pub terminal: bool,
+    /// How long this request actually waited.
+    pub waited_ms: u64,
+    /// The newest certificate height this node had when the answer was produced —
+    /// what "applied" is settled BY. A client verifies it at `/v1/finality/certificate`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub certified_height: Option<u64>,
+}
+
+/// Long-poll form of `/v1/transactions/:hash`: answers the instant the transaction
+/// becomes terminal, else on timeout with the current status. This is what turns
+/// certificate finality (≈ one block behind the tip) into a confirmation the wallet
+/// actually receives at that moment, instead of on its next 2-second poll.
+///
+/// Subscribes to the bus BEFORE reading the status, so a transition that lands
+/// between the two cannot be missed.
+#[flux_api_macros::api(GET, "/v1/transactions/:hash/wait", summary = "Long-poll: returns the moment the transaction settles or is rejected (≤ 25 s), else its current status")]
+pub async fn tx_wait(
+    State(st): State<AppState>,
+    axum::extract::Path(hash): axum::extract::Path<String>,
+    Query(q): Query<TxWaitQuery>,
+) -> Json<ApiResponse<TxWaitResponse>> {
+    let Some(h) = hex32(&hash) else {
+        return ApiResponse::err("hash must be 64-hex");
+    };
+    let want = hex::encode(h);
+    let budget = Duration::from_millis(q.timeout_ms.unwrap_or(TX_WAIT_DEFAULT_MS).min(TX_WAIT_MAX_MS));
+    let started = std::time::Instant::now();
+    let mut rx = st.events.subscribe();
+    let certified = |st: &AppState| {
+        st.finality.read().ok().and_then(|g| g.as_ref().and_then(|v| v.get("height").and_then(|h| h.as_u64())))
+    };
+    let mut status = tx_status_of(&st, &h, &want);
+    let is_terminal = |s: &str| s == "applied" || s == "rejected";
+    if !is_terminal(&status.status) {
+        let deadline = tokio::time::Instant::now() + budget;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() { break; }
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Ok(item)) => {
+                    let ours = item.event.tx_hash() == Some(want.as_str());
+                    if ours && item.event.is_terminal_tx() {
+                        status = tx_status_of(&st, &h, &want);
+                        break;
+                    }
+                }
+                // Lagged: re-read the status rather than assume anything about what was missed.
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                    status = tx_status_of(&st, &h, &want);
+                    if is_terminal(&status.status) { break; }
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+                Err(_elapsed) => break,
+            }
+        }
+        if !is_terminal(&status.status) {
+            status = tx_status_of(&st, &h, &want);
+        }
+    }
+    let terminal = is_terminal(&status.status);
+    ApiResponse::ok(TxWaitResponse {
+        status,
+        terminal,
+        waited_ms: started.elapsed().as_millis() as u64,
+        certified_height: certified(&st),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EventsQuery {
+    /// Only events about this transaction (64-hex). Certificate/tip events are
+    /// still delivered unless `kinds` excludes them.
+    #[serde(default)]
+    pub tx: Option<String>,
+    /// Comma-separated subset of `tx,certificate,tip`. Default: all three.
+    #[serde(default)]
+    pub kinds: Option<String>,
+}
+
+/// Server-Sent Events: every settlement-relevant thing this node learns, as it
+/// learns it. `event:` is the kind, `id:` the node-local sequence number, `data:` the
+/// JSON. A 15 s keep-alive comment keeps proxies from closing an idle stream.
+#[flux_api_macros::api(GET, "/v1/events", summary = "Server-Sent Events stream of tx status changes, finality certificates and tips")]
+pub async fn events_stream(
+    State(st): State<AppState>,
+    Query(q): Query<EventsQuery>,
+) -> axum::response::sse::Sse<impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+    use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+    use futures_util::StreamExt;
+    use tokio_stream::wrappers::BroadcastStream;
+    let want_tx = q.tx.as_deref().and_then(hex32).map(hex::encode);
+    let kinds: Option<Vec<String>> = q.kinds.as_deref().map(|k| {
+        k.split(',').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect()
+    });
+    let rx = st.events.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(move |item| {
+        let want_tx = want_tx.clone();
+        let kinds = kinds.clone();
+        async move {
+            match item {
+                Ok(item) => {
+                    if let Some(ks) = &kinds {
+                        if !ks.iter().any(|k| k == item.event.kind()) { return None; }
+                    }
+                    if let (Some(w), Some(h)) = (&want_tx, item.event.tx_hash()) {
+                        if h != w { return None; }
+                    }
+                    let data = serde_json::to_string(&*item).unwrap_or_else(|_| "{}".into());
+                    Some(Ok(SseEvent::default().event(item.event.kind()).id(item.seq.to_string()).data(data)))
+                }
+                Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+                    Some(Ok(SseEvent::default().event("lagged").data(format!("{{\"missed\":{n}}}"))))
+                }
+            }
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keep-alive"))
+}
+
+#[derive(Debug, Serialize)]
+pub struct WebhookCreated {
+    #[serde(flatten)]
+    pub record: events::WebhookRecord,
+    /// The HMAC key. Returned exactly once; the node keeps only what it needs to sign.
+    pub secret: String,
+    /// The header the receiver must verify: `sha256=<hex HMAC-SHA256 of the raw body>`.
+    pub signature_header: &'static str,
+}
+
+/// Register a settlement webhook: the node POSTs the matching events to `url`, body
+/// = the same JSON `/v1/events` streams plus `webhook_id`, signed with HMAC-SHA256
+/// in `X-Sigil-Signature`. Lives one hour or until its terminal event (`once`).
+#[flux_api_macros::api(POST, "/v1/webhooks", summary = "Register a signed settlement webhook (in-RAM, 1 h TTL, at-most-once + one retry)")]
+pub async fn webhook_register(
+    State(st): State<AppState>,
+    Json(req): Json<events::WebhookRequest>,
+) -> Json<ApiResponse<WebhookCreated>> {
+    match st.webhooks.register(req) {
+        Ok((record, secret)) => ApiResponse::ok(WebhookCreated {
+            record,
+            secret,
+            signature_header: events::SIGNATURE_HEADER,
+        }),
+        Err(e) => ApiResponse::err(e.message()),
+    }
+}
+
+#[flux_api_macros::api(GET, "/v1/webhooks/:id", summary = "Delivery counters for one webhook registration")]
+pub async fn webhook_get(
+    State(st): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<ApiResponse<events::WebhookRecord>> {
+    match st.webhooks.get(&id) {
+        Some(r) => ApiResponse::ok(r),
+        None => ApiResponse::err("no such webhook (expired, delivered its terminal event, or never registered)"),
+    }
+}
+
+#[flux_api_macros::api(DELETE, "/v1/webhooks/:id", summary = "Remove a webhook registration")]
+pub async fn webhook_delete(
+    State(st): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<ApiResponse<bool>> {
+    ApiResponse::ok(st.webhooks.remove(&id))
+}
+
+#[derive(Debug, Serialize)]
+pub struct EventsStatus {
+    pub subscribers: usize,
+    pub published: u64,
+    pub webhooks: usize,
+    pub bus_capacity: usize,
+    pub wait_max_ms: u64,
+}
+
+#[flux_api_macros::api(GET, "/v1/events/status", summary = "Counters for the push-delivery bus")]
+pub async fn events_status(State(st): State<AppState>) -> Json<ApiResponse<EventsStatus>> {
+    ApiResponse::ok(EventsStatus {
+        subscribers: st.events.subscribers(),
+        published: st.events.published(),
+        webhooks: st.webhooks.len(),
+        bus_capacity: events::BUS_CAPACITY,
+        wait_max_ms: TX_WAIT_MAX_MS,
+    })
 }
 
 /// The node's own view of its tip height, for the acceptance receipts the submit
@@ -2190,6 +2416,14 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/supply", get(supply))
         .route("/v1/transactions", post(submit_transaction))
         .route("/v1/transactions/:hash", get(tx_status))
+        .route("/v1/transactions/:hash/wait", get(tx_wait))
+        .route("/v1/events", get(events_stream))
+        .route("/v1/events/status", get(events_status))
+        .route("/v1/webhooks", post(webhook_register))
+        .route("/v1/webhooks/:id", get(webhook_get).delete(webhook_delete))
+        .route("/api/v1/transactions/:hash", get(tx_status))
+        .route("/api/v1/transactions/:hash/wait", get(tx_wait))
+        .route("/api/v1/events", get(events_stream))
         .route("/v1/send", post(send_handler))
         .route("/v1/shielded/register", post(shielded_register_handler))
         .route("/v1/shield", post(shield_handler))
@@ -2330,6 +2564,244 @@ pub fn router(state: AppState) -> Router {
 pub async fn serve(addr: &str, state: AppState) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router(state).into_make_service()).await
+}
+
+#[cfg(test)]
+mod tx_wait_tests {
+    use super::*;
+    use sigil_tx::SigilTx;
+
+    fn st() -> AppState {
+        AppState::new(
+            Arc::new(sigil_narwhal_mempool::MempoolBackend::legacy()),
+            Arc::new(RwLock::new(SigilState::new())),
+        )
+    }
+
+    fn queue(st: &AppState, from: u8) -> [u8; 32] {
+        // The bridge's door is signature-checked; go in through the same pending
+        // insertion `submit_*` ends in, which is what `/wait` observes.
+        st.shielded.test_enqueue(SigilTx::Shield {
+            from: [from; 32], amount: 200_000, cm: [from ^ 0xff; 32], fee: 0, note_ciphertext: None,
+        })
+    }
+
+    async fn wait(st: &AppState, h: &[u8; 32], timeout_ms: u64) -> TxWaitResponse {
+        tx_wait(
+            State(st.clone()),
+            axum::extract::Path(hex::encode(h)),
+            Query(TxWaitQuery { timeout_ms: Some(timeout_ms) }),
+        )
+        .await
+        .0
+        .data
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn wait_returns_at_once_when_already_terminal() {
+        let st = st();
+        let h = queue(&st, 3);
+        st.shielded.confirm_applied(&[h]);
+        let r = wait(&st, &h, 5_000).await;
+        assert!(r.terminal);
+        assert_eq!(r.status.status, "applied");
+        assert!(r.waited_ms < 1_000, "must not sit out the timeout: {}ms", r.waited_ms);
+    }
+
+    #[tokio::test]
+    async fn wait_wakes_the_instant_the_tx_settles() {
+        let st = st();
+        let h = queue(&st, 4);
+        let st2 = st.clone();
+        let settle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            st2.shielded.confirm_applied(&[h]);
+        });
+        let t0 = std::time::Instant::now();
+        let r = wait(&st, &h, 10_000).await;
+        let took = t0.elapsed();
+        settle.await.unwrap();
+        assert!(r.terminal);
+        assert_eq!(r.status.status, "applied");
+        assert!(took >= Duration::from_millis(140), "returned before settlement: {took:?}");
+        assert!(took < Duration::from_millis(1_500), "did not wake on the event, waited {took:?}");
+    }
+
+    #[tokio::test]
+    async fn wait_times_out_with_the_current_status_and_says_so() {
+        let st = st();
+        let h = queue(&st, 5);
+        let t0 = std::time::Instant::now();
+        let r = wait(&st, &h, 200).await;
+        assert!(!r.terminal);
+        assert_eq!(r.status.status, "pending");
+        assert!(t0.elapsed() >= Duration::from_millis(190));
+        assert!(r.waited_ms >= 190);
+    }
+
+    #[tokio::test]
+    async fn wait_clamps_the_timeout_under_the_router_deadline() {
+        assert!(TX_WAIT_MAX_MS < 30_000, "the router's TimeoutLayer is 30 s");
+        let st = st();
+        let r = tx_wait(
+            State(st.clone()),
+            axum::extract::Path("zz".into()),
+            Query(TxWaitQuery { timeout_ms: Some(999_999) }),
+        )
+        .await;
+        assert!(!r.0.ok, "bad hex is refused, not waited on");
+    }
+
+    #[tokio::test]
+    async fn wait_ignores_other_transactions_events() {
+        let st = st();
+        let ours = queue(&st, 6);
+        let other = queue(&st, 7);
+        let st2 = st.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            st2.shielded.confirm_applied(&[other]);
+        });
+        let r = wait(&st, &ours, 300).await;
+        assert!(!r.terminal, "another tx settling must not end our wait");
+        assert_eq!(r.status.status, "pending");
+    }
+}
+
+#[cfg(test)]
+mod events_wire_tests {
+    //! The routes on a real socket: what a wallet, sigil-top or a curl actually receives.
+    use super::*;
+    use std::io::{Read, Write};
+
+    fn st() -> AppState {
+        AppState::new(
+            Arc::new(sigil_narwhal_mempool::MempoolBackend::legacy()),
+            Arc::new(RwLock::new(SigilState::new())),
+        )
+    }
+
+    async fn serve_on_ephemeral(st: AppState) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, router(st).into_make_service()).await.unwrap();
+        });
+        port
+    }
+
+    fn raw_get(port: u16, path: &str, read_for: Duration) -> String {
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(read_for)).unwrap();
+        write!(s, "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+        let mut out = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            match s.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&out).to_string()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sse_stream_carries_tx_and_certificate_frames_in_wire_format() {
+        let st = st();
+        let port = serve_on_ephemeral(st.clone()).await;
+        let bus = st.events.clone();
+        let h = [0xabu8; 32];
+        let reader = std::thread::spawn(move || raw_get(port, "/v1/events", Duration::from_millis(1200)));
+        tokio::time::sleep(Duration::from_millis(300)).await; // let the subscriber attach
+        bus.tx_event(&h, "applied", None);
+        bus.publish(events::Event::Certificate {
+            height: 42, spine_block_hash: "00".repeat(32), votes: 2, committee_size: 2, quorum: 2, ts_ms: 1,
+        });
+        let body = reader.join().unwrap();
+        assert!(body.starts_with("HTTP/1.1 200"), "{body}");
+        assert!(body.to_ascii_lowercase().contains("content-type: text/event-stream"), "{body}");
+        assert!(body.contains("event: tx\n"), "{body}");
+        assert!(body.contains(&format!("\"tx_hash\":\"{}\"", hex::encode(h))), "{body}");
+        assert!(body.contains("\"status\":\"applied\""), "{body}");
+        assert!(body.contains("event: certificate\n"), "{body}");
+        assert!(body.contains("\"height\":42"), "{body}");
+        assert!(body.contains("id: 1\n") && body.contains("id: 2\n"), "seq ids as SSE ids: {body}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sse_tx_filter_drops_other_transactions() {
+        let st = st();
+        let port = serve_on_ephemeral(st.clone()).await;
+        let bus = st.events.clone();
+        let ours = [1u8; 32];
+        let other = [2u8; 32];
+        let path = format!("/v1/events?tx={}&kinds=tx", hex::encode(ours));
+        let reader = std::thread::spawn(move || raw_get(port, &path, Duration::from_millis(1000)));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        bus.tx_event(&other, "applied", None);
+        bus.publish(events::Event::Tip { height: 7, ts_ms: 0 });
+        bus.tx_event(&ours, "in_block", None);
+        let body = reader.join().unwrap();
+        assert!(!body.contains(&hex::encode(other)), "{body}");
+        assert!(!body.contains("event: tip"), "{body}");
+        assert!(body.contains("\"status\":\"in_block\""), "{body}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wait_route_answers_on_settlement_over_http() {
+        let st = st();
+        let port = serve_on_ephemeral(st.clone()).await;
+        let h = st.shielded.test_enqueue(sigil_tx::SigilTx::Shield {
+            from: [9u8; 32], amount: 200_000, cm: [10u8; 32], fee: 0, note_ciphertext: None,
+        });
+        let path = format!("/v1/transactions/{}/wait?timeout_ms=5000", hex::encode(h));
+        let t0 = std::time::Instant::now();
+        let reader = std::thread::spawn(move || raw_get(port, &path, Duration::from_secs(8)));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        st.shielded.confirm_applied(&[h]);
+        let body = reader.join().unwrap();
+        let took = t0.elapsed();
+        assert!(body.starts_with("HTTP/1.1 200"), "{body}");
+        let json = &body[body.find("\r\n\r\n").unwrap() + 4..];
+        // chunked or not, the JSON is the last brace-delimited run
+        let start = json.find('{').unwrap();
+        let end = json.rfind('}').unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json[start..=end]).unwrap();
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["data"]["status"], "applied", "{v}");
+        assert_eq!(v["data"]["terminal"], true, "{v}");
+        assert!(took < Duration::from_millis(2500), "woke on the event, not the timeout: {took:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn webhook_routes_register_report_and_delete() {
+        let st = st();
+        let port = serve_on_ephemeral(st.clone()).await;
+        let body = "{\"url\":\"https://sigilgraph.org/hooks/x\",\"secret\":\"k\",\"tx_hash\":\"".to_string() + &"c".repeat(64) + "\"}";
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(s, "POST /v1/webhooks HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        let json = &out[out.find('{').unwrap()..=out.rfind('}').unwrap()];
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(v["ok"], true, "{v}");
+        let id = v["data"]["id"].as_str().unwrap().to_string();
+        assert_eq!(v["data"]["secret"], "k");
+        assert_eq!(v["data"]["once"], true);
+        assert_eq!(v["data"]["signature_header"], "X-Sigil-Signature");
+        let got = raw_get(port, &format!("/v1/webhooks/{id}"), Duration::from_secs(3));
+        assert!(got.contains("\"delivered\":0"), "{got}");
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(s, "DELETE /v1/webhooks/{id} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        assert!(out.contains("\"data\":true"), "{out}");
+        assert!(st.webhooks.get(&id).is_none());
+    }
 }
 
 #[cfg(test)]

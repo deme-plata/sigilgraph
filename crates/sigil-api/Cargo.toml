@@ -64,6 +64,14 @@ ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 # async runtime, no default-feature bundle) used for exactly one occasional,
 # low-volume, read-only outbound call, not a general HTTP stack.
 ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+# events.rs: HMAC-SHA256 over the exact webhook body (`X-Sigil-Signature`) so a
+# receiver can verify a settlement notice came from the node it registered with.
+# `sha2` is already the workspace pin; `hmac` is the RustCrypto wrapper over it.
+hmac = "0.12"
+sha2 = { workspace = true }
+# events.rs: `/v1/events` wraps the broadcast bus as an SSE stream.
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = { version = "0.3", default-features = false }
 
 # Backend-aware mempool handle (SIGIL_BRAIDPOOL_v1_1.md Phase B): AppState
 # holds the SAME Arc<MempoolBackend> sigil-node's producer loop holds, so

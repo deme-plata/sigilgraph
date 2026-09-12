@@ -1184,7 +1184,19 @@ fn run_start() -> Result<()> {
             .unwrap_or(produce_us);
         let mut produce_tick =
             tokio::time::interval(std::time::Duration::from_micros(initial_produce_us.max(50)));
-        produce_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // 2026-09-12 (rocky-bps100-0912): Skip → Burst. With Skip, every tick whose
+        // processing overran the period forfeited a WHOLE period (the next fire snaps to
+        // the following boundary), so a 10 ms target with ~8 ms average work and normal
+        // jitter delivered 78 blk/s at 61% CPU — the loop was idle 39% of the time and
+        // still short. Burst fires the missed ticks back-to-back until the schedule is
+        // caught up, so the AVERAGE rate is the governor's rate whenever average work
+        // fits the period. `SIGIL_TICK_MISSED=skip` restores the old behaviour.
+        let missed = if std::env::var("SIGIL_TICK_MISSED").map(|v| v.eq_ignore_ascii_case("skip")).unwrap_or(false) {
+            tokio::time::MissedTickBehavior::Skip
+        } else {
+            tokio::time::MissedTickBehavior::Burst
+        };
+        produce_tick.set_missed_tick_behavior(missed);
         // DagKnight visualization: copy the last 200 finalized blocks + their
         // GHOSTDAG coloring out of `braid` every 5s. Cheap in-memory copy on
         // this same single-threaded loop — never a lock on `braid` itself,
@@ -2172,8 +2184,13 @@ fn run_start() -> Result<()> {
                                         if produced % 16 == 0 {
                                             let backlog = mempool.len();
                                             let iv = g.update(backlog);
-                                            produce_tick = tokio::time::interval_at(tokio::time::Instant::now() + iv, iv);
-                                            produce_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                                            // Re-arm only when the governor actually moved: re-creating
+                                            // the interval from `now` (the END of this tick's work) stretched
+                                            // every 16th period by the tick's processing time for nothing.
+                                            if iv != produce_tick.period() {
+                                                produce_tick = tokio::time::interval_at(tokio::time::Instant::now() + iv, iv);
+                                                produce_tick.set_missed_tick_behavior(missed);
+                                            }
                                         }
                                     }
                                     produced_tx += block_txs.len() as u64;

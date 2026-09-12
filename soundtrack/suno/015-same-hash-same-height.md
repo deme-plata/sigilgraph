@@ -12,11 +12,10 @@ Math rock with a krautrock motorik engine, Battles meets Neu! meets Tortoise mee
 ## Lyrics (paste into Lyrics field)
 
 [Intro]
-[Two guitars, one riff, hard left and hard right. Motorik drums.]
+[Two guitars, one riff, hard left and right. Motorik drums.]
 [Deadpan:]
 Epsilon: six million, sixty-one thousand, three hundred seventeen
 Happysrv: six million, sixty-one thousand, three hundred eighteen
-Order hash: seven-e-c-zero-four-nine-a-f
 Order hash: seven-e-c-zero-four-nine-a-f
 Same
 
@@ -27,18 +26,12 @@ Each one writes the world down every two point seven seconds
 Four roots in every header
 Wallets, dex, events, contracts
 If either one lies, the roots don't match
-And the mismatch is cheap to find
-A match proves only equality
-Under the assumptions
-And that's fine
-That's what a match is for
+And a mismatch is cheap to find
 
 [Pre-Chorus]
 [Snap to 4/4]
-Not a belief
-A comparison
-Not a faith
-A diff
+Not a belief, a comparison
+Not a faith, a diff
 
 [Chorus]
 [Female harmony on "same"]
@@ -48,8 +41,7 @@ Two nodes, one answer
 Compare at the same height or the check is worthless
 Same hash, same height
 It isn't trust, it's the same line
-Written twice
-By strangers
+Written twice, by strangers
 Same
 
 [Verse 2]
@@ -59,19 +51,12 @@ Gate: solo
 Byzantine fault tolerant: false
 And I will sing that word: false
 Two named machines agree, no more
-That's what it proves
-That's all it proves
 Five hundred twelve blocks deep is final
-Twenty-three minutes, thirteen hundred ninety-six seconds
-Then nothing reorganises it
-Not the producer
-Not me
+Twenty-three minutes, and nothing reorganises it
 
 [Pre-Chorus]
-Not a belief
-A comparison
-Not a faith
-A diff
+Not a belief, a comparison
+Not a faith, a diff
 
 [Chorus]
 Same hash, same height
@@ -80,43 +65,33 @@ Two nodes, one answer
 Compare at the same height or the check is worthless
 Same hash, same height
 It isn't trust, it's the same line
-Written twice
-By strangers
+Written twice, by strangers
 Same
 
 [Bridge]
-[Instrumental build: guitars phase apart, drums drop to hi-hat only. Then spoken over it.]
-The gauge reads K sub C: zero point one four seven
-Stable
-But the band is wide: zero point one to five point four
-Because coverage omega is zero point four six five
-One producer, five peers
-Most of them miners that publish no heartbeat
+[Guitars phase apart. Hi-hat only. Spoken.]
+The gauge reads zero point one four seven, stable
+But coverage is zero point four six five
+One producer, five peers, most of them silent
 So hear both halves:
 The chain is calm
 And the instrument watching it is half-blind
-[Guitars slowly re-lock over eight bars]
-The vote is bytes:
-The version string, the height, the spine hash, the order hash
-Signed twice
+[Guitars re-lock over eight bars]
 And on the tenth of September it said DIVERGENCE
-And it was right
-And it froze
+And it was right, and it froze
 Rather than extend a tip it could not verify
-That's the machinery
 That's the whole machine:
 It would rather stop than lie
 
 [Chorus — final]
-[Both guitars fully locked. Glockenspiel. Everyone.]
+[Both guitars locked. Glockenspiel. Everyone.]
 Same hash, same height
 Same order, same spine
 Two nodes, one answer
 Compare at the same height or the check is worthless
 Same hash, same height
 It isn't trust, it's the same line
-Written twice
-By strangers
+Written twice, by strangers
 Same
 
 [Outro]

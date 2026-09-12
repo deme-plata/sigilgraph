@@ -1,0 +1,117 @@
+# Hell Is Wealth That Cannot Move — SUNO READY
+
+> **Source:** `SIGIL Eternal` §5 (the g1 dust hell + the producer's hell). sigil-g1: shielded coinbase, one dust
+> note per payee per block → 1,266,227 notes and ONE nullifier ever (spent ratio 8×10⁻⁷). Real balances, almost
+> none spendable; the spend circuit moves one note at a time. Choosing privacy is what broke spending — and bought
+> nothing (620/620 coinbase notes attributable at mint). 2026-09-10: a producer minted blocks whose bodies did not
+> hash to their headers; rolling the binary back on both nodes did not fix it. A rollback plan is a HEIGHT, never a binary.
+
+## Style (paste into Style field)
+Doom blues and dark Americana, Nick Cave and the Bad Seeds meets Chelsea Wolfe meets Swans meets early Tom Waits, 58 BPM, dropped-D minor, baritone guitar through a tremolo amp, a bowed double bass, funeral floor toms, church bells sampled and pitched down, a low male baritone that speaks more than sings in the verses and howls in the chorus, a female voice as a ghostly counter-line, feedback swells, the second half doubles in intensity with a distorted wall of guitars and a marching snare, a slow-burn dirge that becomes a riot, then collapses to bells and bowed bass, bleak, honest, no redemption offered in the music itself
+
+## Lyrics (paste into Lyrics field)
+
+[Intro]
+[Church bells, pitched down. Tremolo baritone guitar. Bowed bass.]
+[Spoken, low:]
+I've seen two hells on this chain
+Neither one is fire
+
+[Verse 1]
+[Floor toms, slow]
+The first hell was the first chain
+g-one, they called it, before the reset
+We shielded the coinbase, for privacy
+One note, per miner, per block
+And the notes came like snow
+One million, two hundred sixty-six thousand, two hundred twenty-seven of them
+And in all that time
+One nullifier
+One
+Point eight of a millionth ever spent
+
+[Pre-Chorus]
+[Female ghost line under]
+The balances were real
+Every one of them was real
+And almost none of them could move
+
+[Chorus]
+[Howled. Guitars swell.]
+Hell is wealth that cannot move
+Hell is a number you can see and cannot touch
+Hell is every coin you earned
+Frozen in a tree, one at a time
+Hell is wealth that cannot move
+And you chose it
+You chose it for privacy
+And privacy was never there
+
+[Verse 2]
+[Bass and toms. Spoken-sung.]
+'Cause the circuit spends one note, one, per proof
+So a miner with a mountain of dust
+Is a rich man with a spoon at a flood
+And here's the joke the bells are ringing:
+The unregistered miner
+The one who never asked for privacy
+Got a plain balance that added up and could spend it all
+Choosing the shield is what broke him
+And it bought nothing, nothing at all
+Six hundred twenty of six hundred twenty coinbase notes
+Named their miner at the moment they were minted
+Anonymity is counted in owners
+Not in notes
+
+[Chorus]
+Hell is wealth that cannot move
+Hell is a number you can see and cannot touch
+Hell is every coin you earned
+Frozen in a tree, one at a time
+Hell is wealth that cannot move
+And you chose it
+You chose it for privacy
+And privacy was never there
+
+[Bridge]
+[Wall of guitars. Marching snare. Baritone, urgent.]
+The second hell is the producer's
+The tenth of September, this year
+A change went live, follower first, fork-checked, clean
+Then a payment went through it
+And the producer began to mint blocks
+Whose bodies did not hash to their own headers
+The follower said: STATE DIVERGENCE, cannot extend tip
+And froze
+We rolled the binary back on both machines
+Same old binary, both sides
+And it was still stuck
+Because the bad blocks were in the chain
+Not in the code
+There is no binary you can install
+That un-mints a block
+[Guitars drop to feedback]
+So learn the shape of hell:
+A rollback plan is a height
+Never a binary
+A rollback plan is a height
+Never a binary
+
+[Chorus — final]
+[Riot, then collapsing to bells and bowed bass by the last line]
+Hell is wealth that cannot move
+Hell is a block you cannot un-mint
+Hell is every coin you earned
+Frozen in a tree, one at a time
+Hell is wealth that cannot move
+And you chose it
+You chose it for privacy
+And privacy was never there
+
+[Outro]
+[Bells. Bowed bass. Spoken:]
+On g-two the coinbase is plain
+And the balances add
+Fifty-nine spent of three thousand
+It's a start
+It's a start

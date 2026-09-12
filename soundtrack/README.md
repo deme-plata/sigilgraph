@@ -93,3 +93,32 @@ is doing structural work here rather than being a coat of paint. Two hard rules 
   A soundtrack for an epistemic instrument does not get to be triumphalist.
 
 Structural callback: 009 closes on the four-chord piano figure from 004, at half speed.
+
+### Vol. III — Heaven & Hell (2026-09-12) — **eight tracks, eight genres, one paper**
+
+Sung from a paper generated *first*: `SIGIL Eternal — Heaven, Hell, and the Arithmetic of a
+Ledger That Refuses to Forget` (`flux-arxiv-latex` bin `sigil_eternal`, CODATA 2022 via
+`flux-science`, every figure computed from a live `sigil-g2` snapshot at height 6,061,317).
+The question the volume asks: *if SIGIL is eternal, what does that mean — for people, for AI,
+for a merchant who built it?* The paper answers first: "eternal" is 256 years of emission,
+the honest word is *unpruned*; forgetting costs energy and remembering is free; a block is one
+of 2⁶⁴ possibilities the universe permitted and two nodes agreed to keep; the pool's two sets
+(notes, nullifiers) are heaven and hell; the agreed-upon price does not exist yet (USDS price
+reads 0, live at block 6,400,000). Suno-ready: **Style ≤ 1000 chars, Lyrics ≤ 5000 chars**,
+checked mechanically. Founder credited as what he is: a banker, a scientist, a merchant, an
+operator of AI — not a messiah (track 017 says so in the title).
+
+| # | Track | Genre | Paper § | What it sings |
+|---|---|---|---|---|
+| 010 | **Two Hundred Fifty-Six Years** | cinematic gospel-electronic | §2 | 64 eras × 4 yr; 21 M cap; 0.74 % minted; 2.96 B blocks; 5.2 TB = one drive; not eternal — *unpruned* |
+| 011 | **Two Green Photons** | neoclassical electronica | §3 | Landauer: 2.87×10⁻²¹ J/bit; a 32-byte note costs ≈ 2 green photons to *forget*; Quillon's 1–13 M prune |
+| 012 | **One of Eighteen Quintillion** | industrial synthwave techno | §4 | 2⁶⁴ nonces, 2³⁰ target, 17.2 B tries, 176.7 MH/s; Margolus–Levitin 2.47×10³⁵ states — existence = selection + consent |
+| 013 | **Heaven Is a Spent Thing** | modern gospel soul | §5 | 3,288 notes / 32,768 leaves, 59 nullifiers, 49 owners; first tap wins; a $0.16 coin is *cash*, not "secure" |
+| 014 | **Hell Is Wealth That Cannot Move** | doom blues / dark Americana | §5 | g1: 1,266,227 notes, ONE nullifier; 620/620 attributable; 2026-09-10 un-mintable blocks — rollback is a height |
+| 015 | **Same Hash, Same Height** | math rock / krautrock motorik | §1, §5 | order hash 7ec049af on both nodes; committee 2, quorum 2, gate solo, BFT = *false*; K_C 0.147, Ω 0.465 |
+| 016 | **Velstand (An Agreed-Upon Price)** | Scandinavian melancholic electro-pop | §6 | USDS 105 % / 0.30 % / 40,000-block price TTL; price 0; live at 6.4 M; $0.001 → $155 mcap; 200 bps welfare |
+| 017 | **Not a Messiah (A Banker, a Scientist, a Merchant)** | orchestral folk hymn → Arcade Fire | §6–7 | 650 QUG earned 2026-05-22, 20,300 QUG fælled; AI wallets in the genesis header; closer, 256-years callback |
+
+Rules carried from Vol. II, still binding: (1) no number in a lyric that is not in the paper
+(`numbers.json` ships beside the PDF); (2) every track admits its own limit inside the song
+(015 sings "BFT: false"; 016 sings "the price isn't agreed yet").

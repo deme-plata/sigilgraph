@@ -41,6 +41,7 @@ use std::collections::{BTreeSet, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::WalletId;
+use crate::cow::CowVec;
 
 /// Tree depth for the shielded pool. `DEPTH + 1` must be a power of two because the
 /// spend AIR's trace length is `(DEPTH+1)·64`; 15 gives a 32,768-note anonymity set.
@@ -227,7 +228,7 @@ pub enum ShieldedError {
 pub struct ShieldedPool {
     /// Note commitments in insertion order. Index IS the leaf position the nullifier
     /// binds to, so this vector must never be reordered or compacted.
-    pub(crate) notes: Vec<[u8; 32]>,
+    pub(crate) notes: CowVec<[u8; 32]>,
     /// Every nullifier ever revealed. Membership here means "already spent".
     pub(crate) nullifiers: BTreeSet<[u8; 32]>,
     /// Total value currently locked in the pool. Increased by shield, decreased by
@@ -279,7 +280,7 @@ pub struct ShieldedPool {
     /// wallet trial-decrypts every entry here against its own key, and a successful open
     /// IS the ownership proof (`sigil_shield::note_cipher`).
     #[serde(default)]
-    pub(crate) note_ciphertexts: Vec<Option<String>>,
+    pub(crate) note_ciphertexts: CowVec<Option<String>>,
 
     /// Derived index over `notes`, rebuilt on demand. `serde(skip)` because it is a cache:
     /// persisting it would create a second copy of the truth that could drift from
@@ -297,7 +298,7 @@ pub struct ShieldedPool {
     /// chain lives: its owner proves membership against `root`, and a wallet that has
     /// never scanned still needs `notes`/`ciphertexts` to find and open it.
     #[serde(default)]
-    pub(crate) archive: Vec<EpochArchive>,
+    pub(crate) archive: CowVec<EpochArchive>,
 
     /// Which epoch each windowed anchor belonged to, so a spend arriving against a root
     /// from before a rotation is scoped to the right generation. Absent ⇒ epoch 0, which
@@ -521,8 +522,8 @@ impl ShieldedPool {
         let root = self.current_root_fast();
         self.archive.push(EpochArchive {
             root,
-            notes: std::mem::take(&mut self.notes),
-            ciphertexts: std::mem::take(&mut self.note_ciphertexts),
+            notes: self.notes.take(),
+            ciphertexts: self.note_ciphertexts.take(),
         });
         // The sealed root stays spendable forever; record its epoch before bumping.
         self.anchor_epoch.insert(root, self.epoch);
@@ -700,7 +701,7 @@ impl ShieldedPool {
     /// `value = 0, blinding = 0`, which would let them "prove membership" of a note nobody
     /// ever inserted.
     pub fn padded_leaves(&self, filler: impl Fn(u64) -> [u8; 32]) -> Vec<[u8; 32]> {
-        let mut leaves = self.notes.clone();
+        let mut leaves: Vec<[u8; 32]> = self.notes.to_vec();
         for i in leaves.len()..POOL_CAPACITY {
             leaves.push(filler(i as u64));
         }

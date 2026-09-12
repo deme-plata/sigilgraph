@@ -57,7 +57,8 @@ pub fn dag_build_frontier(
     // frontier would cap one above the settled tip and re-mint the same height
     // forever. Walking the ONE selected spine gives a connected parent->child
     // path, so minting extends it by one and finality can advance.
-    let mut frontier = chain.clone();
+    // 2026-09-12: one-block window, not the 8192-block clone — see ChainTip::fork_for_frontier.
+    let mut frontier = chain.fork_for_frontier();
     let Some(tip) = braid.selected_tip() else {
         return FrontierBuild { frontier, path_len: 0, applied: 0, fail_reason: "no-tip" };
     };

@@ -257,10 +257,27 @@ pub struct FinalityObserver {
     /// Per-height count of equivocations already added to the running
     /// total, so re-assembling the same votes never double-counts.
     equivocation_counts: BTreeMap<u64, u64>,
-    latencies: Vec<u64>,
+    /// 2026-09-12 (rocky-bps100-0912): was `latencies: Vec<u64>` — one entry per
+    /// certificate for the life of the process, summed in full by `report()`, which
+    /// the node calls at least twice per block (`committee_size`, `certificate_view`).
+    /// O(certificates) per block, growing forever: 4.9% of the produce loop after 4k
+    /// certificates, seconds per block after a day at 100 blk/s. Same mean, O(1).
+    latency_sum_ms: u128,
+    latency_n: u64,
     equivocations_seen: u64,
     rejected_seen: u64,
+    /// 2026-09-12 (rocky-bps100-0912): `prune()` ran on EVERY observed vote — four
+    /// `BTreeMap::retain` walks over the whole retention band plus a full
+    /// `retained_votes()` sum, ~6% of the producer's loop at 70 blk/s (perf). The
+    /// floor only moves when finality moves, so prune when it has, and otherwise
+    /// at most every `PRUNE_EVERY` votes for the hard cap. Same retained set at
+    /// every decision point — the floor check is re-applied on the same inputs.
+    last_prune_floor: Option<u64>,
+    votes_since_prune: u32,
 }
+
+/// See `last_prune_floor`.
+const PRUNE_EVERY: u32 = 64;
 
 impl FinalityObserver {
     /// Build an observer. An empty `committee` yields a permanently inert
@@ -274,9 +291,12 @@ impl FinalityObserver {
             certificates: BTreeMap::new(),
             timings: HashMap::new(),
             equivocation_counts: BTreeMap::new(),
-            latencies: Vec::new(),
+            latency_sum_ms: 0,
+            latency_n: 0,
             equivocations_seen: 0,
             rejected_seen: 0,
+            last_prune_floor: None,
+            votes_since_prune: 0,
         }
     }
 
@@ -390,7 +410,13 @@ impl FinalityObserver {
         self.timings.entry(height).or_default().first_seen_ms.get_or_insert(now_ms);
 
         let newly_certified = self.try_assemble(height, now_ms);
-        self.prune();
+        self.votes_since_prune += 1;
+        let floor = self.retention_floor();
+        if floor != self.last_prune_floor || self.votes_since_prune >= PRUNE_EVERY {
+            self.prune();
+            self.last_prune_floor = floor;
+            self.votes_since_prune = 0;
+        }
 
         if newly_certified {
             ObserveOutcome::Certified { height, latency_ms: self.latency_ms(height) }
@@ -425,7 +451,8 @@ impl FinalityObserver {
         let timing = self.timings.entry(height).or_default();
         timing.certified_ms.get_or_insert(now_ms);
         if let Some(l) = self.latency_ms(height) {
-            self.latencies.push(l);
+            self.latency_sum_ms = self.latency_sum_ms.saturating_add(l as u128);
+            self.latency_n = self.latency_n.saturating_add(1);
         }
         true
     }
@@ -471,11 +498,10 @@ impl FinalityObserver {
     /// Build the Phase 2 report for logging.
     pub fn report(&self, tip_height: u64) -> ObserverReport {
         let finalized_height = self.finalized_height();
-        let mean_latency_ms = if self.latencies.is_empty() {
+        let mean_latency_ms = if self.latency_n == 0 {
             None
         } else {
-            let sum: u128 = self.latencies.iter().map(|l| *l as u128).sum();
-            Some((sum / self.latencies.len() as u128) as u64)
+            Some((self.latency_sum_ms / self.latency_n as u128) as u64)
         };
         ObserverReport {
             tip_height,

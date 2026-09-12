@@ -29,6 +29,7 @@ mod sync_auth;
 mod search_index;
 mod serve_read; // header-only reads for the backfill SERVE path — see its module doc
 mod producer_signing;
+mod tip_proof_signer; // 2026-09-12: SQIsign tip-proof signing OFF the produce loop — see its module doc (the 0.33 blk/s wall)
 mod finality_wire; // Phase 2 finality observer plumbing — zero consensus effect, see its module doc
 mod peer_pick; // 2026-09-11: ask only peers whose advertised height covers the range — see its module doc
 mod peer_view; // 2026-09-07: tip hash + wallet state root + finalized on the peer-heights heartbeat; per-peer agreement verdicts for the K-gauge v2
@@ -918,8 +919,15 @@ fn run_start() -> Result<()> {
         // Phase 3 (2026-09-08): the newest adopted certificate, published on /v1/finality.
         let finality_view: Arc<std::sync::RwLock<Option<serde_json::Value>>> = Arc::new(std::sync::RwLock::new(None));
         let tip_proof_view: Arc<std::sync::RwLock<Option<serde_json::Value>>> = Arc::new(std::sync::RwLock::new(None));
-        let sqisign_key = load_sqisign_key();
-        if sqisign_key.is_none() { eprintln!("tip-proof: no SQIsign key (SIGIL_TIP_PROOF_KEY / ~/.flux-agent-key.json) — /v1/finality/tip-proof stays empty"); }
+        // 2026-09-12: the key lives on a dedicated signer thread; the produce loop
+        // only ever offers it a job (see tip_proof_signer's module doc).
+        let tip_signer: Option<tip_proof_signer::TipProofSigner> = match load_sqisign_key() {
+            Some((sk, pk)) => Some(tip_proof_signer::TipProofSigner::spawn(sk, pk, Arc::clone(&tip_proof_view))),
+            None => {
+                eprintln!("tip-proof: no SQIsign key (SIGIL_TIP_PROOF_KEY / ~/.flux-agent-key.json) — /v1/finality/tip-proof stays empty");
+                None
+            }
+        };
         let money_state: Option<Arc<std::sync::RwLock<SigilState>>> =
             std::env::var("SIGIL_MONEY_API").ok().filter(|s| !s.is_empty()).map(|addr| {
                 let shared = Arc::new(std::sync::RwLock::new(chain.state_snapshot()));
@@ -1950,7 +1958,7 @@ fn run_start() -> Result<()> {
                     // exact amount into the coinbase; else the pure height schedule.
                     let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
                     let reward_override: Option<u128> = emission.as_mut().map(|c| {
-                        let supply = mint_ref.state_snapshot().native_supply();
+                        let supply = mint_ref.state().native_supply(); // borrow — was a full state clone per tick
                         c.calculate_block_reward(now_secs, supply)
                     });
                     let topology_commitment = compute_topology_commitment(braid.as_ref(), mint_ref.height());
@@ -2002,8 +2010,7 @@ fn run_start() -> Result<()> {
                         None => (1u32, 0u32, 0.0f32),
                         Some(w) if w.is_empty() => (1u32, 0u32, 0.0f32),
                         Some(w) => {
-                            let snap = mint_ref.state_snapshot();
-                            let pool = snap.shielded();
+                            let pool = mint_ref.state().shielded(); // borrow — was a full state clone per tick
                             let total: u128 = w.values().map(|v| *v as u128).sum();
                             let mut sh_n = 0u32;
                             let mut sh_w: u128 = 0;
@@ -2204,7 +2211,7 @@ fn run_start() -> Result<()> {
                                     }
                                     // Phase 3 (2026-09-08): a certificate (with n=1, our own vote
                                     // just completed it) raises the braid's finality line — gated.
-                                    apply_finality_gate(&finality, braid.as_mut(), &finality_view, &dag_bodies, &tip_proof_view, sqisign_key.as_ref(), &events_bus);
+                                    apply_finality_gate(&finality, braid.as_mut(), &finality_view, &dag_bodies, tip_signer.as_ref(), &events_bus);
                                     if produced % 100 == 0 {
                                         let secs = t_start.elapsed().as_secs_f64().max(1e-6);
                                         eprintln!("🏭 produced {} blocks ({:.1}/s) · {} txs ({:.0} TPS verify-once) — tip H={}",
@@ -3136,7 +3143,7 @@ fn run_start() -> Result<()> {
                                                     eprintln!("⚠ publish finality vote H={} failed: {}", bheight, e);
                                                 }
                                             }
-                                            apply_finality_gate(&finality, Some(&mut *br), &finality_view, &dag_bodies, &tip_proof_view, sqisign_key.as_ref(), &events_bus);
+                                            apply_finality_gate(&finality, Some(&mut *br), &finality_view, &dag_bodies, tip_signer.as_ref(), &events_bus);
                                         }
                                         InsertOutcome::MissingParents(_missing) => {
                                             // Park the body for the braid AND buffer it for the
@@ -3614,7 +3621,7 @@ fn run_start() -> Result<()> {
                                 }
                                 // Phase 3: a certificate assembled from peers' votes gates
                                 // settlement when SIGIL_FINALITY_GATE says so.
-                                apply_finality_gate(&finality, braid.as_mut(), &finality_view, &dag_bodies, &tip_proof_view, sqisign_key.as_ref(), &events_bus);
+                                apply_finality_gate(&finality, braid.as_mut(), &finality_view, &dag_bodies, tip_signer.as_ref(), &events_bus);
                             } else {
                                 let preview = std::str::from_utf8(&data)
                                     .map(|s| s.chars().take(120).collect::<String>())
@@ -5216,8 +5223,7 @@ fn apply_finality_gate(
     braid: Option<&mut sigil_dagknight::Braid>,
     view: &Arc<std::sync::RwLock<Option<serde_json::Value>>>,
     dag_bodies: &std::collections::HashMap<BlockHash, Block>,
-    tip_proof_view: &Arc<std::sync::RwLock<Option<serde_json::Value>>>,
-    sqisign_key: Option<&(Vec<u8>, Vec<u8>)>,
+    tip_signer: Option<&tip_proof_signer::TipProofSigner>,
     events: &sigil_api::events::EventBus,
 ) {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -5251,34 +5257,19 @@ fn apply_finality_gate(
                 });
                 if let Ok(mut w) = view.write() { *w = Some(v); }
             }
-            // P4.1 (2026-09-08): the certified tip as a SQIsign-signed tip proof, at most
-            // once a second. The roots are the certified block's own header roots.
-            static LAST_SIGNED: AtomicU64 = AtomicU64::new(0);
-            if let Some((sk, pk)) = sqisign_key {
-                if now.saturating_sub(LAST_SIGNED.load(Ordering::Relaxed)) >= 1000 {
-                    if let Some(body) = dag_bodies.get(&hash) {
-                        let roots = sigil_state::StateRoots {
-                            wallet_state_root: body.header.wallet_state_root,
-                            dex_state_root: body.header.dex_state_root,
-                            event_log_root: body.header.event_log_root,
-                            contract_state_root: body.header.contract_state_root,
-                        };
-                        match sigil_tip_proof::TipProof::new_sqisign(h, roots, sk, pk) {
-                            Ok(tp) => {
-                                LAST_SIGNED.store(now, Ordering::Relaxed);
-                                let v = serde_json::json!({
-                                    "flavor": "SqiSignBlob",
-                                    "height": h,
-                                    "spine_block_hash": hex::encode(hash),
-                                    "producer_pk_sqisign": hex::encode(pk),
-                                    "proof": serde_json::from_slice::<serde_json::Value>(&tp.encode_json()).unwrap_or(serde_json::Value::Null),
-                                    "signed_at_ms": now,
-                                });
-                                if let Ok(mut w) = tip_proof_view.write() { *w = Some(v); }
-                            }
-                            Err(e) => eprintln!("⚠ tip-proof: SQIsign signing failed at H={h}: {e:?}"),
-                        }
-                    }
+            // P4.1 (2026-09-08) → off-loop (2026-09-12): the certified tip as a
+            // SQIsign-signed tip proof. The sign (1–3 s measured) used to run HERE,
+            // on the produce loop, and capped the chain at 0.33 blk/s. Now it is a
+            // non-blocking hand-off; the signer thread coalesces to the newest tip.
+            if let Some(signer) = tip_signer {
+                if let Some(body) = dag_bodies.get(&hash) {
+                    let roots = sigil_state::StateRoots {
+                        wallet_state_root: body.header.wallet_state_root,
+                        dex_state_root: body.header.dex_state_root,
+                        event_log_root: body.header.event_log_root,
+                        contract_state_root: body.header.contract_state_root,
+                    };
+                    signer.offer(tip_proof_signer::TipJob { height: h, hash, roots });
                 }
             }
         }

@@ -63,7 +63,18 @@ impl Braid {
     /// Extract the braid word for the window `[from_height, to_height]`
     /// (inclusive) per the module-doc convention. Deterministic: a pure
     /// function of the DAG contents and the window bounds.
+    /// The pre-2026-09-12 algorithm (full `linearize()` walk) — kept as the test
+    /// reference for `braid_word`, never called in production.
+    #[cfg(test)]
+    pub(crate) fn braid_word_reference(&self, from_height: u64, to_height: u64) -> BraidPresentation {
+        self.braid_word_impl(from_height, to_height, true)
+    }
+
     pub fn braid_word(&self, from_height: u64, to_height: u64) -> BraidPresentation {
+        self.braid_word_impl(from_height, to_height, false)
+    }
+
+    fn braid_word_impl(&self, from_height: u64, to_height: u64, full_walk: bool) -> BraidPresentation {
         if from_height > to_height {
             return BraidPresentation {
                 strands: 0,
@@ -75,8 +86,11 @@ impl Braid {
 
         // Window blocks in deterministic linearized order, resident only.
         let in_window = |h: u64| h >= from_height && h <= to_height;
-        let ordered: Vec<_> = self
-            .linearize()
+        // 2026-09-12: start from the first frozen entry at `from_height` instead of
+        // walking (and cloning) the entire finalized order — see
+        // `Braid::order_from_height`. Same blocks, same order.
+        let source: Vec<crate::BlockHash> = if full_walk { self.linearize() } else { self.order_from_height(from_height) };
+        let ordered: Vec<_> = source
             .into_iter()
             .filter_map(|hash| self.view_of(&hash))
             .filter(|v| in_window(v.height))
@@ -197,6 +211,57 @@ mod tests {
             b.insert(view.clone());
         }
         b
+    }
+
+    /// 2026-09-12: `braid_word` reads `order_from_height` (binary-searched start into
+    /// the frozen order) instead of the full `linearize()`. Pin equality against the
+    /// reference on a THREE-producer braid with merge edges, drained through finality so
+    /// most of the window is frozen, over every window position — the exact shape the
+    /// live producer commits to in `topology_commitment`.
+    #[test]
+    fn order_from_height_matches_linearize_filtered_on_every_window() {
+        let mut views = vec![v(h(0), [0u8; 32], vec![], 0, PA)];
+        let prods = [PA, PB, PC];
+        // heights 1..=120: each height has one spine block; every 3rd height also gets a
+        // sibling from another producer that later blocks merge in.
+        let mut n: u8 = 1;
+        let mut spine_prev = h(0);
+        let mut last_sibling: Option<BlockHash> = None;
+        for height in 1..=120u64 {
+            let p = prods[(height % 3) as usize];
+            let mp = if height % 4 == 0 { last_sibling.take().into_iter().collect() } else { vec![] };
+            let hs = h(n); n = n.wrapping_add(1);
+            views.push(v(hs, spine_prev, mp, height, p));
+            if height % 3 == 0 {
+                let sib = h(n); n = n.wrapping_add(1);
+                views.push(v(sib, spine_prev, vec![], height, prods[((height + 1) % 3) as usize]));
+                last_sibling = Some(sib);
+            }
+            spine_prev = hs;
+        }
+        let mut b = Braid::new(BraidConfig { final_depth: 8, ..BraidConfig::default() });
+        for view in &views {
+            b.insert(view.clone());
+            let _ = b.drain_ordered(); // freeze as we go, like the live node
+        }
+        for from in 0..=120u64 {
+            let fast = b.order_from_height(from);
+            let slow: Vec<BlockHash> = b
+                .linearize()
+                .into_iter()
+                .filter(|hs| b.view_of(hs).map(|vw| vw.height >= from).unwrap_or(false))
+                .collect();
+            let fast_f: Vec<BlockHash> = fast
+                .into_iter()
+                .filter(|hs| b.view_of(hs).map(|vw| vw.height >= from).unwrap_or(false))
+                .collect();
+            assert_eq!(fast_f, slow, "order_from_height({from}) must equal linearize() filtered");
+            let to = (from + 31).min(120);
+            let a = b.braid_word(from, to);
+            let r = b.braid_word_reference(from, to);
+            assert_eq!((a.strands, a.word, a.producers, a.heights_resident), (r.strands, r.word, r.producers, r.heights_resident), "braid_word window [{from},{to}]");
+        }
+        assert_eq!(b.selected_tip(), b.selected_tip_uncached(), "selected_tip memo must agree");
     }
 
     #[test]

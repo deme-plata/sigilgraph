@@ -26,6 +26,7 @@ pub mod token_registry;
 pub mod acc;
 /// Shielded-pool consensus state: note commitments + nullifier set (PV-1).
 pub mod shielded;
+pub mod cow; // 2026-09-12: CowVec — clone-by-reference vectors for the per-block state clones
 pub use acc::Accumulator;
 
 /// Sparse Merkle Tree — the COMPLEMENT to `acc`. Where `acc` (LtHash multiset)

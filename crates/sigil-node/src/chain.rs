@@ -29,6 +29,14 @@ pub struct ChainTip {
     state: SigilState,
     blocks: VecDeque<Block>,
     base_height: u64,
+    /// 2026-09-12 (rocky-bps100-0912): `blocks.back().hash()`, memoised. A header
+    /// hash is a serde_json serialisation of the whole header (nonce carrier, proof
+    /// bundle, signatures — as JSON arrays of numbers) plus BLAKE3; `parent_hash()`
+    /// is asked several times per produce tick (two applies, the mint, the
+    /// frontier walk) and MEASURED at 72 blk/s the re-serialisation was ~19% of the
+    /// loop. Maintained by the only two writers of `blocks`: `apply_with_schedule`
+    /// and the constructors. `None` == empty chain (all-zero parent, as before).
+    tip_hash: Option<BlockHash>,
 }
 
 impl Default for ChainTip {
@@ -40,7 +48,7 @@ impl Default for ChainTip {
 impl ChainTip {
     /// Fresh chain — no genesis seeded yet.
     pub fn new() -> Self {
-        Self { state: SigilState::new(), blocks: VecDeque::new(), base_height: 0 }
+        Self { state: SigilState::new(), blocks: VecDeque::new(), base_height: 0, tip_hash: None }
     }
 
     /// v0.36.1: reconstruct a ChainTip from snapshot parts — the accumulated
@@ -53,7 +61,8 @@ impl ChainTip {
     /// in `crate::snapshot::load_state` / `run_start`) — this constructor
     /// trusts its inputs.
     pub fn from_parts(state: SigilState, blocks: VecDeque<Block>, base_height: u64) -> Self {
-        Self { state, blocks, base_height }
+        let tip_hash = blocks.back().map(|b| b.hash());
+        Self { state, blocks, base_height, tip_hash }
     }
 
     /// v0.36.1: borrow the three snapshot parts (state, RAM window, window
@@ -61,6 +70,30 @@ impl ChainTip {
     /// it persists.
     pub fn snapshot_parts(&self) -> (&SigilState, &VecDeque<Block>, u64) {
         (&self.state, &self.blocks, self.base_height)
+    }
+
+    /// 2026-09-12 (rocky-bps100-0912): a copy of this tip for the producer's
+    /// speculative FRONTIER — the state plus a ONE-block window holding only the
+    /// tip block. `height()`, `parent_hash()`, `tip_header()`, `tip_block()`,
+    /// `state()` and `apply()` behave exactly as on a full clone; only `get()`
+    /// of older heights differs (None), and no frontier consumer reads those.
+    ///
+    /// WHY: `dag_build_frontier` ran `chain.clone()` per mint tick, and a ChainTip
+    /// carries `WINDOW` = 8192 recent blocks. MEASURED on Epsilon (perf, produce
+    /// thread): drop_in_place<ChainTip> 42% + drop_in_place<Block> 35% + memmove
+    /// 21% of the loop — ~50 ms per tick spent cloning and freeing 8191 blocks the
+    /// mint path never looks at. This is NOT the memoised frontier that stalled
+    /// production twice (2026-08-23, 08-26): the frontier is still rebuilt from
+    /// the settled tip every tick; only the dead weight is gone.
+    pub fn fork_for_frontier(&self) -> ChainTip {
+        match self.blocks.back() {
+            Some(tip) => {
+                let mut blocks = VecDeque::with_capacity(4);
+                blocks.push_back(tip.clone());
+                ChainTip { state: self.state.clone(), blocks, base_height: self.height() - 1, tip_hash: self.tip_hash }
+            }
+            None => self.clone(),
+        }
     }
 
     /// Read-only snapshot of the four state roots at the current tip.
@@ -86,7 +119,7 @@ impl ChainTip {
     /// Parent hash to set on the next block. All-zero before genesis is
     /// applied (genesis itself uses this as `parent_hash`).
     pub fn parent_hash(&self) -> BlockHash {
-        self.blocks.back().map(|b| b.hash()).unwrap_or([0u8; 32])
+        self.tip_hash.unwrap_or([0u8; 32])
     }
 
     /// Hand-back of the tip header for callers building auto-update
@@ -183,6 +216,8 @@ impl ChainTip {
             ));
         }
 
+        // Hash once, here, while the header is fresh — `parent_hash()` serves it from now on.
+        self.tip_hash = Some(block.hash());
         self.blocks.push_back(block);
         while self.blocks.len() > WINDOW {
             self.blocks.pop_front();
@@ -230,6 +265,31 @@ mod window_accounting_tests {
         assert!(t.get(100).is_some(), "window base resolves");
         assert!(t.get(105).is_some());
         assert!(t.get(109).is_some(), "window tip resolves");
+    }
+
+    #[test]
+    fn parent_hash_memo_matches_recomputed_tip_hash() {
+        let t = tip_with(10, 100);
+        assert_eq!(t.parent_hash(), t.tip_block().map(|b| b.hash()).unwrap());
+        assert_eq!(ChainTip::new().parent_hash(), [0u8; 32]);
+        let f = t.fork_for_frontier();
+        assert_eq!(f.parent_hash(), t.parent_hash());
+    }
+
+    #[test]
+    fn fork_for_frontier_keeps_tip_semantics_with_one_block_window() {
+        let t = tip_with(10, 100);
+        let f = t.fork_for_frontier();
+        assert_eq!(f.height(), t.height(), "height preserved");
+        assert_eq!(f.parent_hash(), t.parent_hash(), "next parent preserved");
+        assert_eq!(f.roots(), t.roots(), "state roots preserved");
+        assert_eq!(f.window_base(), t.height() - 1, "window holds exactly the tip");
+        assert!(f.get(t.height() - 1).is_some(), "tip block resolves");
+        assert!(f.get(t.height() - 2).is_none(), "older heights are not carried");
+        assert_eq!(f.tip_header().map(|h| h.height), t.tip_header().map(|h| h.height));
+        // An empty chain forks to an empty chain, not a panic.
+        let e = ChainTip::new().fork_for_frontier();
+        assert_eq!(e.height(), 0);
     }
 
     #[test]

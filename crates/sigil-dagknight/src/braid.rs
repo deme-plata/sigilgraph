@@ -116,6 +116,17 @@ pub struct Braid {
     frozen_acc: [u8; 32],
     /// How many of `frozen` have been handed out by `drain_ordered`.
     drained: usize,
+    /// 2026-09-12 (rocky-bps100-0912): bumped on every change to `recs` or the
+    /// GHOSTDAG store — the two inputs of `selected_tip()`. `selected_tip()` is an
+    /// O(window) reduce over every resident block (16,384 here, two blue-work
+    /// lookups each) and the producer asks for it ~5 times per tick; MEASURED at
+    /// 72 blk/s it was ~10% of the produce loop. The memo below answers all but
+    /// the first call per generation. Output-identical: the function is pure in
+    /// (recs, ghostdag), and both bump `gen` at every mutation site.
+    gen: u64,
+    sel_tip_memo: std::cell::Cell<Option<(u64, Option<BlockHash>)>>,
+    /// Finality height at the last O(window) cleanup pass — see `cleanup`.
+    last_heavy_cleanup_f: u64,
     /// Blocks REFUSED at the door because they arrived at or below the finality
     /// line. This is the guard working as designed — a stale re-offer, a gossip
     /// echo, or a peer replaying history it is backfilling from us. Nothing is
@@ -160,6 +171,9 @@ impl Braid {
             pending_heights: BTreeMap::new(),
             waiters: HashMap::new(),
             emitted_at: HashMap::new(),
+            gen: 0,
+            sel_tip_memo: std::cell::Cell::new(None),
+            last_heavy_cleanup_f: 0,
             certified: None,
             frozen: Vec::new(),
             frozen_acc: [0u8; 32],
@@ -432,6 +446,7 @@ impl Braid {
             self.frontier.insert(rec.key());
         }
         self.recs.insert(view.hash, rec);
+        self.gen += 1; // recs changed → selected_tip memo invalid
         Accept::Ok
     }
 
@@ -663,11 +678,49 @@ impl Braid {
     /// (`cfg.ghostdag_k` set): max blue score, min-hash tie-break — see the
     /// `ghostdag` module doc.
     pub fn selected_tip(&self) -> Option<BlockHash> {
+        if let Some((g, tip)) = self.sel_tip_memo.get() {
+            if g == self.gen {
+                return tip;
+            }
+        }
+        let tip = if let Some(store) = &self.ghostdag {
+            store.select_tip(self.recs.keys())
+        } else {
+            self.selected_tip_key().map(|k| k.2)
+        };
+        self.sel_tip_memo.set(Some((self.gen, tip)));
+        tip
+    }
+
+    /// The un-memoised `selected_tip` — the reference the memo is tested against.
+    #[cfg(test)]
+    pub(crate) fn selected_tip_uncached(&self) -> Option<BlockHash> {
         if let Some(store) = &self.ghostdag {
             store.select_tip(self.recs.keys())
         } else {
             self.selected_tip_key().map(|k| k.2)
         }
+    }
+
+    /// 2026-09-12: the finalized order restricted to blocks at height ≥ `from_height`,
+    /// in `frozen` order, followed by the fluid suffix — everything `linearize()` would
+    /// return from the first block of that height onward. `frozen` is emitted by a
+    /// Kahn walk that always pops the minimum `(height, producer, hash)` key, and every
+    /// parent is lower than its child, so heights along `frozen` are non-decreasing
+    /// (a ready lower block would have popped first); that is what makes the binary
+    /// search valid. `braid_word` used to `linearize()` the WHOLE frozen vector — a
+    /// clone plus one `view_of` per entry — every produce tick, and `frozen` grows for
+    /// the life of the process (append-only), so the tick got slower with uptime.
+    /// Output-identical to filtering `linearize()` on height (pinned by a test).
+    pub(crate) fn order_from_height(&self, from_height: u64) -> Vec<BlockHash> {
+        let start = self.frozen.partition_point(|h| {
+            // Entries pruned from `emitted_at` are older than max_window below final —
+            // far below any window a caller asks for; treat as "before".
+            self.emitted_at.get(h).map(|&x| x < from_height).unwrap_or(true)
+        });
+        let mut out: Vec<BlockHash> = self.frozen[start..].to_vec();
+        out.extend(self.suffix_order());
+        out
     }
 
     /// True iff `h` lies on the selected chain back from the selected tip
@@ -865,6 +918,25 @@ impl Braid {
     /// below the finalized height (the retention band keeps freshly finalized
     /// blocks spine-checkable), prune stale pendings, bound `emitted_at`.
     fn cleanup(&mut self, f: u64) {
+        // 2026-09-12 (rocky-bps100-0912): the O(window) half of cleanup — a scan of
+        // every resident record for `min_unemitted`, `BitfieldDag::cleanup_below_height`
+        // (one pass over every bitfield array), the GHOSTDAG forget and two `retain`s
+        // — ran on EVERY drain, i.e. once per block, to retire ~one block. MEASURED at
+        // 70 blk/s: ~9% of the produce loop in `cleanup_below_height` alone. It is a
+        // memory bound, not a consensus rule (the retention band is what `is_on_spine`
+        // can see; nothing below `final_depth` under the line is ever a tip or a
+        // parent of an accepted block), so it now runs once every CLEANUP_STRIDE
+        // heights and retires a batch. The cheap, correctness-relevant tail below
+        // (pending at/below the line, waiters, emitted_at bound) still runs every time.
+        const CLEANUP_STRIDE: u64 = 32;
+        if self.last_heavy_cleanup_f == 0 || f >= self.last_heavy_cleanup_f.saturating_add(CLEANUP_STRIDE) {
+            self.last_heavy_cleanup_f = f;
+            self.cleanup_heavy(f);
+        }
+        self.cleanup_light(f);
+    }
+
+    fn cleanup_heavy(&mut self, f: u64) {
         let keep_from = f.saturating_sub(self.cfg.final_depth);
         let min_unemitted = self
             .recs
@@ -885,11 +957,34 @@ impl Braid {
                 store.forget(&removed);
             }
             self.recs.retain(|_, r| r.view.height >= cutoff);
+            self.gen += 1; // recs + ghostdag changed → selected_tip memo invalid
             self.children.retain(|p, _| self.recs.contains_key(p));
             for kids in self.children.values_mut() {
                 kids.retain(|k| self.recs.contains_key(k));
             }
         }
+        // 2026-09-12: bound `frozen` too. It was append-only for the life of the
+        // process (32 B per block: ~280 MB/day at 100 blk/s) and `linearize()`
+        // cloned all of it per produce tick. Keep the newest 2×max_window entries
+        // once everything has been drained — nothing reads deeper than max_window
+        // (`order_from_height`, `order_hash` via `frozen_acc`, spine checks all stay
+        // within the retention band). `drained` is an index into `frozen`, so it
+        // moves with the front.
+        let keep = self.cfg.max_window.saturating_mul(2).max(1);
+        if self.drained == self.frozen.len() && self.frozen.len() > keep.saturating_mul(2) {
+            let n = self.frozen.len() - keep;
+            self.frozen.drain(..n);
+            self.drained -= n;
+        }
+        // Bound the emitted-hash memory (merge parents deeper than
+        // max_window heights below final are treated as unknown).
+        let emitted_cutoff = f.saturating_sub(self.cfg.max_window as u64);
+        if emitted_cutoff > 0 {
+            self.emitted_at.retain(|_, h| *h >= emitted_cutoff);
+        }
+    }
+
+    fn cleanup_light(&mut self, f: u64) {
         // Pendings at or below the finality line can never be accepted.
         let before = self.pending.len();
         self.pending.retain(|_, v| v.height > f);
@@ -902,12 +997,6 @@ impl Braid {
             kids.retain(|k| self.pending.contains_key(k));
         }
         self.waiters.retain(|_, kids| !kids.is_empty());
-        // Bound the emitted-hash memory (merge parents deeper than
-        // max_window heights below final are treated as unknown).
-        let emitted_cutoff = f.saturating_sub(self.cfg.max_window as u64);
-        if emitted_cutoff > 0 {
-            self.emitted_at.retain(|_, h| *h >= emitted_cutoff);
-        }
     }
 
     /// Finalized height — 0 until the selected tip has cleared `final_depth`

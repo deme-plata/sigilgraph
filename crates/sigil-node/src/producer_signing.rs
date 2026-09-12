@@ -263,12 +263,35 @@ pub fn configured_hybrid_producer_wallet() -> Option<WalletId> {
 /// reviewable constant, same posture as the activation height.
 pub const HYBRID_CHECKPOINT_INTERVAL: u64 = 128;
 
+/// 2026-09-12 (rocky-bps100-0912): the interval is now env-tunable —
+/// `SIGIL_HYBRID_CHECKPOINT_INTERVAL` (blocks, default 128, min 1). WHY: the
+/// hybrid sign runs INLINE on the produce loop (a block cannot be broadcast
+/// before it is signed, and children hash over the parent's signature), and
+/// costs 1–3 s measured on Epsilon. At the 128 default that is one 1–3 s stall
+/// every 128 blocks: harmless at 5 blk/s (every ~25 s), fatal at 100 blk/s
+/// (every 1.28 s — the loop would sign continuously). The follower does NOT
+/// enforce checkpoint heights — only `mint.rs` consults this — so which heights
+/// carry the post-quantum leg is producer POLICY, not consensus; raising the
+/// interval changes no acceptance rule anywhere. Set it so that
+/// interval / rate ≫ sign cost (e.g. 8192 at 100 blk/s → one stall per 82 s).
+/// Read once per process (the produce loop calls this per block).
+pub fn hybrid_checkpoint_interval() -> u64 {
+    static INTERVAL: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *INTERVAL.get_or_init(|| {
+        std::env::var("SIGIL_HYBRID_CHECKPOINT_INTERVAL")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|&n| n >= 1)
+            .unwrap_or(HYBRID_CHECKPOINT_INTERVAL)
+    })
+}
+
 /// True if `height` is a hybrid-checkpoint height (`height % INTERVAL == 0`
 /// — includes height 0, which is fine, genesis isn't self-mined through this
 /// path). Callers use this to decide whether to even ATTEMPT the ~1.16s
 /// hybrid signing path for this block, before touching `header.producer`.
 pub fn is_hybrid_checkpoint(height: u64) -> bool {
-    height % HYBRID_CHECKPOINT_INTERVAL == 0
+    height % hybrid_checkpoint_interval() == 0
 }
 
 /// Sign `header` with the REAL post-quantum-safe hybrid scheme in place, if

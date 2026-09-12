@@ -77,7 +77,8 @@ pub fn dag_build_frontier(
     braid: &Braid,
     dag_bodies: &HashMap<BlockHash, Block>,
 ) -> ChainTip {
-    let mut frontier = chain.clone();
+    // 2026-09-12: one-block window, not the 8192-block clone — see ChainTip::fork_for_frontier.
+    let mut frontier = chain.fork_for_frontier();
     // Follow the braid's SELECTED SPINE — the `parent_hash` walk back from
     // `selected_tip()` (max-height, min-hash). A greedy "first block that fits"
     // walk fails to deepen: with two producers, height-N siblings are built on

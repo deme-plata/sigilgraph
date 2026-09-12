@@ -1,0 +1,45 @@
+# Same Height — SUNO READY (v6 test)
+
+> **Vol. V — The Agreed Clock, track 1.** Source: `SIGIL Eternal` §1 (two nodes, one order hash, same height). Uplifting
+> trance in the Armin van Buuren mould — 138 BPM, a long breakdown, a supersaw wall — with almost no words: the hook is
+> the whole consensus rule.
+
+## Style (paste into Style field)
+Uplifting trance, Armin van Buuren A State of Trance anthem, 138 BPM, F# minor, rolling offbeat bass, layered supersaw lead with wide detune, a 64-bar breakdown with piano and strings that builds through a snare roll and white-noise riser into a euphoric drop, plucks and arpeggios in the intro, sidechained pads, one female vocal line used sparingly as a hook with long reverb tails and a vocoded echo on the word same, mostly instrumental, festival mainstage energy, clean modern trance production
+
+## Lyrics (paste into Lyrics field)
+
+[Intro — instrumental, plucks and arpeggio, 32 bars]
+
+[Build]
+[Whispered, echoed:]
+Two machines
+One line
+
+[Breakdown — piano and strings]
+[Female vocal, sparse, long tails:]
+Same hash
+Same height
+Don't believe me
+Compare
+
+[Riser — snare roll]
+
+[Drop — full supersaw lead, instrumental, 32 bars]
+
+[Hook, vocoded over the drop:]
+Same — same — same
+
+[Breakdown 2]
+[Female vocal:]
+Two nodes, one answer
+Written twice
+By strangers
+
+[Riser]
+
+[Drop 2 — instrumental]
+
+[Outro — arpeggio and pads, fading]
+[Whispered:]
+Same height

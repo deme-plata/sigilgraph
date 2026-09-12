@@ -135,3 +135,15 @@ break), Bonham as the engine, Page as the riff and the solo, Plant as the wail.
 | 018 | **Sixty-Four Eras (Kashmir of the Ledger)** | Kashmir: one ascending riff until it is a landscape; 7/8 fretless raga interlude with konnakol | 64 eras × 4 yr, cap 21M, 1,755 B/block → 5.2 TB, the three clocks, 2.8 pK (analogy) |
 | 019 | **Two Photons Blues** | Since I've Been Loving You: 12/8 slow blues, three-minute solo, bass-and-voice duet | Landauer: 32 bytes = two green photons to erase; Quillon's 1–13M prune; "it's the lie that's expensive" |
 | 020 | **First Tap Wins (The Nullifier Stomp)** | Black Dog call-and-response + Rock and Roll drums + Immigrant Song war-cry; tapped-harmonic bass break; Moby Dick drum break | 59 nullifiers, $0.16 sticker = cash, four places guard the double spend, committee 2 / BFT false, 512 blocks ≈ 23 min |
+
+### Vol. V — The Agreed Clock (2026-09-12) — **four trance tracks, Suno v6 test, almost no words**
+
+Operator brief: *"trance style… armin van buuren, ahmed helmy, david guetta and matt fax but use much less lyric."*
+25–38 sung words per track; the hook IS the rule. Numbers from the papers as always.
+
+| # | Track | Mould | Hook |
+|---|---|---|---|
+| 021 | **Same Height** | Armin van Buuren uplifting, 138 BPM, 64-bar breakdown | "Same hash / same height / don't believe me / compare" |
+| 022 | **Two Point Seven Seconds** | Matt Fax progressive, 126 BPM, bloom instead of drop | "One tick, two point seven seconds, and the whole world says yes" · "five hundred twelve, then it's final" |
+| 023 | **Picokelvin** | Ahmed Helmy progressive with Middle-Eastern motifs, 132 BPM | "Pico — kelvin" · "the coldest clock, if you take it as a clock of heat" |
+| 024 | **First Tap** | David Guetta big-room, 128 BPM, crowd chant | "First tap! First tap! First tap wins!" · "fifty-nine crossed the river" |

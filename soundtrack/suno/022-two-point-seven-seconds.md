@@ -1,0 +1,44 @@
+# Two Point Seven Seconds — SUNO READY (v6 test)
+
+> **Vol. V, track 2.** Source: K-parameter paper §10 (the agreed clock: one tick every 2.73 s at the measured block
+> rate; 512 ticks ≈ 23 min to irreversibility). Matt Fax progressive trance: deep, melodic, patient, a groove that never
+> hurries — like a clock that only moves when everyone agrees.
+
+## Style (paste into Style field)
+Progressive trance, Matt Fax and Anjunabeats style, 126 BPM, D minor, deep rolling bassline, warm analog pads, a melodic pluck motif that repeats and slowly evolves, subtle tension chords, long filtered builds instead of big risers, crisp hi-hats and a soft clap, one male vocal used as a texture with heavy reverb and delay, a spoken-word count in the breakdown, no big drop, instead a gradual bloom, mostly instrumental, late-night driving feel, polished melodic progressive production
+
+## Lyrics (paste into Lyrics field)
+
+[Intro — deep bass and pads, instrumental, 32 bars]
+
+[Pluck motif enters — instrumental]
+
+[Breakdown]
+[Spoken, calm, heavy delay:]
+One tick
+Two point seven seconds
+And the whole world says yes
+
+[Filtered build]
+
+[Bloom — full pads, pluck motif, instrumental]
+
+[Vocal texture, sung softly, repeated:]
+Five hundred twelve
+Then it's final
+
+[Breakdown 2]
+[Spoken:]
+Three clocks
+The sun
+The fire
+And the one that only moves
+When two strangers agree
+
+[Build]
+
+[Bloom 2 — instrumental, evolving motif, 48 bars]
+
+[Outro — pads only]
+[Whispered:]
+Final

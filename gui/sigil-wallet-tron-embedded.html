@@ -315,7 +315,7 @@ body.view-desktop .desktop{display:flex}
         <a onclick="openSwap();return false" style="cursor:pointer"><i class="lic" data-lucide="arrow-left-right"></i>Swap</a>
         <a onclick="openXChain();return false" style="cursor:pointer"><i class="lic" data-lucide="arrow-right-left"></i>Bridge</a>
         <a onclick="openBook();return false" style="cursor:pointer"><i class="lic" data-lucide="book-user"></i>Address book</a>
-        <a onclick="makeAllPrivate();return false" style="cursor:pointer" title="SIGIL has no transparent send — coins are only spendable once they are in your private pool. This shields the whole balance in one step."><i class="lic" data-lucide="shield-check"></i>Make private</a>
+        <!-- 2026-09-12: the "Make private" step is automatic now (sigilAutoShield) — a mined balance moves into private notes by itself. -->
         <a id="mmNavChip" onclick="xcConnectMM();return false" style="cursor:pointer" title="Connect MetaMask (Polygon)">🦊 <span id="mmNavTxt">Connect MetaMask</span></a>
         <div class="grp">Earn</div>
         <a class="soon" title="staking not live on sigil-g0 yet"><i class="lic" data-lucide="layers"></i>Stake<span class="soonchip">soon</span></a>
@@ -747,6 +747,8 @@ body.view-desktop .desktop{display:flex}
     if(MINE_ADDR && MINE_ADDR!==ADDR){ const sb=await fetchBal(ADDR); if(sb!=null) SESSION_RAW=sb; }
     render();
     refreshShielded();
+    // 2026-09-12: mined / received transparent coin becomes spendable on its own.
+    try{ if(window.sigilAutoShield) window.sigilAutoShield(); }catch(e){}
   }
   // LANE-AC: green flash + floating "+X.XX SIGIL ⛏ coinbase" on balance raise.
   function coinFlash(deltaRaw){
@@ -1971,13 +1973,57 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
      than opening a modal that then grinds for minutes with no explanation.
      (On the node-local wallet at :9800 the /api/v1/mine-shield fast path inside
      doShield does the whole thing server-side in one call instead.) */
+  /* ══ AUTO-SHIELD (2026-09-12) — no button. ════════════════════════════════
+     Viktor: "when I mine and receive 100 I can spend that 100 without any
+     configuration or button — it just works". A transparent balance on this chain is
+     not a choice, it is a stage money passes through (transparent sends are retired),
+     so the wallet moves it into private notes the moment the balance poll sees it,
+     headlessly, driving the same doShield() as the old link did. Guards: one run at a
+     time; only with the phrase already in this browser (never prompts); only above a
+     floor so dust is not minted; and not again within 2 min unless the balance grew
+     (doShield waits for its own settlement, so the balance drops before the next poll
+     sees it). The send modal stays closed: the panes doShield touches are reset after. */
+  window.sigilAutoShield=async function(){
+    if(window.__autoShieldBusy) return false;
+    var raw; try{ raw=BigInt(window.SIGIL_RAW||'0'); }catch(e){ return false; }
+    var FLOOR=10000000n;                                  // 0.001 SIGIL — smallest note worth minting
+    raw = raw - (raw % FLOOR);
+    if(raw < 100000000n) return false;                     // < 0.01 SIGIL: leave it
+    var addr=(window.MINE_ADDR||window.ADDR||'').toLowerCase(); if(!/^[0-9a-f]{64}$/.test(addr)) return false;
+    var secret=window.__sigilMnemonic||null;
+    if(!secret){ try{ secret=(window.sigilLoadSecret&&window.sigilLoadSecret())||localStorage.getItem('sigil-wallet-mnemonic')||localStorage.getItem('sigil-wallet-seed'); }catch(_){} }
+    if(!secret) return false;                              // doShield would prompt — never from the background
+    var key='sigil-autoshield-'+addr, last=null; try{ last=JSON.parse(localStorage.getItem(key)||'null'); }catch(_){}
+    if(last && Date.now()-last.ts<120000 && raw<=BigInt(last.raw||'0')) return false;
+    var parts=null; try{ parts=window.__sigilShield && window.__sigilShield.decompose(raw); }catch(e){}
+    if(!parts||!parts.length) return false;
+    window.__autoShieldBusy=true;
+    try{ localStorage.setItem(key, JSON.stringify({ts:Date.now(), raw:raw.toString()})); }catch(_){}
+    var adv=document.getElementById('sendAdvanced'), uni=document.getElementById('sendUnified'), box=document.getElementById('sendAmt');
+    var advWas=adv?adv.style.display:'', uniWas=uni?uni.style.display:'';
+    try{
+      if(!box) return false;
+      if(adv) adv.style.display='flex'; if(uni) uni.style.display='none';
+      if(window.sendShowTab) window.sendShowTab('shield'); if(adv) adv.dataset.init='1';
+      box.value=window.glyphStr(raw);   // (sigilFromGlyphs never existed on this page — the old Make-private link threw here)
+      try{ console.log('[auto-shield] moving '+box.value+' SIGIL into '+parts.length+' private note(s)'); }catch(_){}
+      await window.doShield();
+      return true;
+    }catch(e){ try{ console.warn('[auto-shield] failed:', e&&e.message||e); }catch(_){} return false; }
+    finally{
+      window.__autoShieldBusy=false;
+      try{ var rc=document.getElementById('sendReceipt'); if(rc){ rc.style.display='none'; rc.removeAttribute('data-kind'); } }catch(_){}
+      if(adv) adv.style.display=advWas; if(uni) uni.style.display=uniWas;
+      try{ if(window.refreshShielded) window.refreshShielded(); }catch(_){}
+    }
+  };
   window.makeAllPrivate=async function(){
     var raw; try{ raw=BigInt(window.SIGIL_RAW||'0'); }catch(e){ raw=0n; }
     if(raw<=0n){
       alert('Nothing to make private.\n\nThis wallet’s transparent balance is 0. Mining rewards and incoming transparent coin land there first — press this again once some has arrived.');
       return;
     }
-    var amtStr=window.sigilFromGlyphs(raw);          // exact inverse of sigilToGlyphs
+    var amtStr=window.glyphStr(raw);   // exact inverse of strGlyphs (sigilFromGlyphs never existed)
     var parts=null;
     try{ parts=window.__sigilShield && window.__sigilShield.decompose(raw); }catch(e){}
     if(!parts || !parts.length){
@@ -2244,9 +2290,12 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     document.getElementById('rcRows').innerHTML=rows;
     document.getElementById('sendForm').style.display='none';
     var rc=document.getElementById('sendReceipt'); rc.style.display='flex';
+    // 2026-09-12: a SENT receipt carries a live confirmation counter (see sigilStartConfirmCounter).
+    if(kind==='send'){ try{ window.sigilStopConfirmCounter(); window.sigilConfPending(); }catch(_){} }
   }
   window.receiptCopyTx=function(){ if(window.__lastTxid&&navigator.clipboard){ navigator.clipboard.writeText(window.__lastTxid); var b=document.getElementById('rcCopyBtn'); var o=b.textContent; b.textContent='✓ copied'; setTimeout(function(){b.textContent=o;},1000); } };
   window.receiptDone=function(){
+    try{ window.sigilStopConfirmCounter(); }catch(_){}
     document.getElementById('sendReceipt').style.display='none';
     document.getElementById('sendForm').style.display='flex';
     var a=document.getElementById('sendAmt'); if(a)a.value='';
@@ -2474,7 +2523,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       // with a confusing error the moment step 1 finishes.
       uniStep(2,'busy');
       var pa=document.getElementById('privAmt'); if(pa) pa.value=amtStr;
-      var attempts=0, MAXT=10, ok=false;
+      var attempts=0, MAXT=16, ok=false;   // 2026-09-12: room for a shield + several combines before the payment
       while(attempts<MAXT && !ok){
         attempts++;
         uniMsg(attempts===1 ? 'Step 2 of 2 — building the private payment…'
@@ -2501,7 +2550,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         // cause is time (a note still settling); anything else is a real failure.
         if(res===true){ ok=true; break; }
         if(res!=='retry'){ break; }
-        if(attempts<MAXT) await new Promise(function(r){ setTimeout(r,3000); });
+        if(attempts<MAXT) await new Promise(function(r){ setTimeout(r,1500); });
       }
       if(ok){ uniStep(2,'done'); uniMsg(''); }
       else{
@@ -2820,6 +2869,45 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       return 'Certificate at H='+c.height+' ('+ok+'/'+n+' validator signature'+(n===1?'':'s')+' verified in this browser; '+label+').';
     }catch(_){ return ''; }
   }
+
+  // ── LIVE CONFIRMATION COUNTER (2026-09-12, operator ask) ─────────────────────
+  // After a send settles, the receipt shows how many certified blocks now sit on top
+  // of the block that carried it, and the number keeps rising while the receipt is
+  // open. Source of truth = the node's finality certificates, PUSHED over /v1/events
+  // (SSE, one event per certificate); falls back to polling /v1/finality/certificate
+  // once a second if SSE is unavailable. Stops when the receipt is dismissed.
+  var __sigilConf={es:null,timer:null,applied:0,tip:0,alive:false};
+  function sigilConfRow(){ var rows=document.getElementById('rcRows'); if(!rows) return null; var el=document.getElementById('rcConfirms'); if(!el){ rows.insertAdjacentHTML('beforeend', '<div style="display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid rgba(33,212,253,.09)"><span style="font-family:\'JetBrains Mono\';font-size:10px;letter-spacing:1px;color:#5a93a8;text-transform:uppercase">confirmations</span><span style="font-family:\'JetBrains Mono\';font-size:11px;color:#cfe9f2;overflow-wrap:anywhere;text-align:right" id="rcConfirms">…</span></div>'); el=document.getElementById('rcConfirms'); } return el; }
+  function sigilConfRender(){ var el=sigilConfRow(); if(!el) return;
+    if(!__sigilConf.applied){ el.innerHTML='<span style="color:#6df3ff">waiting for the certificate…</span>'; return; }
+    var n=Math.max(0,__sigilConf.tip-__sigilConf.applied+1);
+    el.innerHTML='<b style="color:#00e0c6;font-size:14px;font-family:\'Orbitron\'">'+n.toLocaleString()+'</b> <span style="color:#5a93a8">block'+(n===1?'':'s')+' certified · in H='+__sigilConf.applied.toLocaleString()+' · tip H='+__sigilConf.tip.toLocaleString()+'</span>'; }
+  function sigilConfPending(){ __sigilConf.applied=0; __sigilConf.tip=0; sigilConfRender(); }
+  function sigilConfSetTip(h){ h=Number(h)||0; if(h>__sigilConf.tip){ __sigilConf.tip=h; sigilConfRender(); } }
+  function sigilStopConfirmCounter(){ __sigilConf.alive=false; try{ if(__sigilConf.es) __sigilConf.es.close(); }catch(_){} __sigilConf.es=null; if(__sigilConf.timer){ clearInterval(__sigilConf.timer); __sigilConf.timer=null; } }
+  function sigilConfPollOnce(){ fetch('/v1/finality/certificate',{cache:'no-store'}).then(function(r){return r.json();}).then(function(j){ var c=j&&j.certificate; if(c&&c.height) sigilConfSetTip(c.height); }).catch(function(){}); }
+  function sigilStartConfirmCounter(appliedHeight){
+    sigilStopConfirmCounter();
+    __sigilConf.applied=Number(appliedHeight)||0; __sigilConf.tip=__sigilConf.applied; __sigilConf.alive=true; sigilConfRender();
+    var sse=false;
+    try{
+      if(window.EventSource){
+        var es=new EventSource('/v1/events?kinds=certificate'); __sigilConf.es=es; sse=true;
+        es.addEventListener('certificate', function(ev){ try{ var d=JSON.parse(ev.data); if(d&&d.height) sigilConfSetTip(d.height); }catch(_){} });
+        es.onerror=function(){ if(!__sigilConf.alive) return; try{ es.close(); }catch(_){} __sigilConf.es=null; if(!__sigilConf.timer) __sigilConf.timer=setInterval(sigilConfPollOnce,1000); };
+      }
+    }catch(_){ sse=false; }
+    if(!sse && !__sigilConf.timer) __sigilConf.timer=setInterval(sigilConfPollOnce,1000);
+    sigilConfPollOnce();
+  }
+  // showReceipt()/receiptDone() live in another IIFE — reach these through window.
+  try{ window.sigilStartConfirmCounter=sigilStartConfirmCounter; window.sigilStopConfirmCounter=sigilStopConfirmCounter; window.sigilConfPending=sigilConfPending; }catch(_){}
+  // The height the payment settled at: /wait reports it; otherwise the certificate now.
+  async function sigilConfAppliedHeight(hint){
+    if(hint) return Number(hint);
+    try{ var r=await fetch('/v1/finality/certificate',{cache:'no-store'}); var j=await r.json(); var c=j&&j.certificate; if(c&&c.height) return Number(c.height); }catch(_){}
+    return 0;
+  }
   async function sigilWatchPrivateSend(txid, nullifier, from, pick, changeIndex, amtStr){
     if(!txid) return;
     var nf=String(nullifier||'').toLowerCase(), deadline=Date.now()+15*60*1000, announced=false, unknowns=0;
@@ -2827,7 +2915,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
     // answers the instant the node retires the tx (applied / rejected) — the certificate
     // is ~1 block behind the tip, so 'final' now arrives when it happens, not on the
     // next 2 s sample. Falls back to the old 2 s poll on a node without the route.
-    var waitOk=true, waitFails=0;
+    var waitOk=true, waitFails=0, certHint=0;
     while(Date.now()<deadline){
       var seen=false, st=null, reason='', gotWait=false;
       if(waitOk){
@@ -2835,7 +2923,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
           var wr=await fetch('/v1/transactions/'+txid+'/wait?timeout_ms=20000',{cache:'no-store'});
           if(wr.status===404||wr.status===405){ waitOk=false; }
           else { var wj=await wr.json(); var wd=(wj&&wj.ok&&wj.data)||null;
-                 if(wd&&wd.status){ st=wd.status; reason=wd.reason||''; gotWait=true; waitFails=0; }
+                 if(wd&&wd.status){ st=wd.status; reason=wd.reason||''; gotWait=true; waitFails=0; if(wd.certified_height) certHint=Number(wd.certified_height); }
                  else if(wj&&wj.ok===false){ waitOk=false; }
                  else if(++waitFails>=3){ waitOk=false; } }
         }catch(_){ if(++waitFails>=3) waitOk=false; }
@@ -2864,6 +2952,8 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         // Phase 3 (2026-09-08): say WHICH certificate it settled under, and check the
         // validator's signature here — the client's own verification, not the node's word.
         sigilCertificateLine().then(function(line){ if(line) privFoot('<b style="color:#00e0c6">✓ Settled — final.</b> '+line); }).catch(function(){});
+        // 2026-09-12: live "confirmed by N blocks" counter in the receipt, rising per certificate.
+        try{ sigilConfAppliedHeight(certHint).then(function(h){ sigilStartConfirmCounter(h); }); }catch(_){}
         setTimeout(function(){ if(window.refresh)refresh(); }, 600);
         return;
       }
@@ -3084,7 +3174,7 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
       }
 
       // Prefer the SMALLEST covering note — leaves bigger notes free for bigger sends
-      // later. This wallet does not yet combine multiple notes into one spend.
+      // later. Two notes can fund one payment; more than two are combined first (below).
       candidates.sort(function(a,b){ return Number(a.value-b.value); });
       if(!candidates.length && small.length>=2 && wasm.buildPrivateSend2){
         small.sort(function(a,b){ return Number(b.value-a.value); });
@@ -3101,7 +3191,60 @@ document.addEventListener('click',function(e){ if(!e.target.closest('#wsearchWra
         return 'retry';
       }
       if(!candidates.length){
-        privMsg('✗ no landed shielded note covers '+amtStr+' SIGIL + fee. Every note is spent, still settling, or smaller than the amount — this wallet cannot yet combine two notes into one payment, so try a smaller amount.', '#fbbf24');
+        // 2026-09-12: no "cannot combine" — combine. Two notes fund a payment; when even the
+        // two biggest do not cover it but the wallet as a whole does, merge the two biggest
+        // into one note TO OURSELVES, wait for it to land (~1 s with certificate finality),
+        // and let the orchestrator's retry pick the bigger note up. If the shortfall sits
+        // in the transparent (mined) balance, shield it first. Same sequencing the phone
+        // does in Wallet.prepareFunds; the user sees "preparing your coins", never a note.
+        var landedTotal=0n; for(var lt=0; lt<small.length; lt++) landedTotal+=small[lt].value;
+        var mergesToOne=BigInt(Math.max(0, small.length-1));
+        var reachable = landedTotal - FEE*mergesToOne;
+        var transparent=0n; try{ transparent=BigInt(window.SIGIL_RAW||'0'); }catch(_){}
+        var need=amountRaw+FEE;
+        if(small.length>=2 && reachable>=need && wasm.buildPrivateSend2){
+          small.sort(function(a,b){ return Number(b.value-a.value); });
+          var mx=small[0], my=small[1];
+          var mxb=null, myb=null;
+          try{ mxb = mx.kind==='recv' ? mx.recv.blinding : String(wasm.noteBlinding(seedHex, mx.note.index)); }catch(_){}
+          try{ myb = my.kind==='recv' ? my.recv.blinding : String(wasm.noteBlinding(seedHex, my.note.index)); }catch(_){}
+          if(!mxb||!myb){ privMsg('✗ could not read two of your notes to combine them — reload the page and try again.', '#ff8a8a'); return; }
+          var merged = mx.value+my.value-FEE;
+          privMsg('Preparing your coins — combining notes ('+small.length+' → '+(small.length-1)+')… this takes a few seconds per step.', '#6df3ff');
+          var mePkS, mePkE; try{ mePkS=String(wasm.shieldPublicKey(seedHex)).toLowerCase(); mePkE=String(wasm.shieldEncryptPublicKey(seedHex)).toLowerCase(); }
+          catch(e){ privMsg('✗ could not derive this wallet\'s own keys: '+(e&&e.message||e), '#ff8a8a'); return; }
+          var mreq;
+          try{
+            mreq=JSON.parse(wasm.buildPrivateSend2(
+                  seedHex, mx.value.toString(), mxb, mx.position,
+                  my.value.toString(), myb, my.position,
+                  JSON.stringify(leaves), capacity, mePkS, mePkE, merged.toString(), ''));
+          }catch(e){ privMsg('✗ could not build the combine: '+(e&&e.message||e), '#ff8a8a'); return; }
+          var mr=await fetch('/v1/shielded_send',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({anchor:mreq.anchor, nullifier:mreq.nullifier, extra_nullifiers:mreq.extra_nullifiers||[], cm_outs:mreq.cm_outs, fee:mreq.fee, proof:mreq.proof, note_ciphertexts:mreq.note_ciphertexts})});
+          var mj=null; try{ mj=await mr.json(); }catch(_){}
+          if(!mr.ok||!mj||!mj.ok){ privMsg('✗ the network refused the combine: '+((mj&&(mj.error||mj.message))||('HTTP '+mr.status)), '#ff8a8a'); return; }
+          // book the two inputs as spent locally (self-made ones; received ones are netted by the chain's nullifiers)
+          try{ var upd=myNotes(from); [mx,my].forEach(function(sn){ if(sn.kind==='recv'||!sn.note) return; for(var k=0;k<upd.length;k++){ if(upd[k].index===sn.note.index) upd[k].spent=true; } }); saveMyNotes(from, upd); }catch(_){}
+          // wait for it to land — pushed by the node the instant it settles
+          var deadline=Date.now()+45000, done=false;
+          while(Date.now()<deadline && !done){
+            try{ var wr=await fetch('/v1/transactions/'+mj.txid+'/wait?timeout_ms=20000',{cache:'no-store'}); var wj=await wr.json();
+                 var wd=(wj&&wj.data)||{}; if(wd.status==='applied'){ done=true; break; }
+                 if(wd.status==='rejected'){ privMsg('✗ the combine was refused: '+(wd.reason||'no reason'), '#ff8a8a'); return; }
+                 if(!wj||wj.ok===false) await new Promise(function(r){ setTimeout(r,2000); });
+            }catch(_){ await new Promise(function(r){ setTimeout(r,2000); }); }
+          }
+          if(!done){ privMsg('⏳ still combining your notes — the chain has not settled the merge yet; the payment retries by itself.', '#fbbf24'); }
+          return 'retry';
+        }
+        if(transparent>=100000000n && landedTotal+transparent>=need && window.sigilAutoShield){
+          privMsg('Preparing your coins — moving your mined balance into private notes first…', '#6df3ff');
+          var shielded=false; try{ shielded=await window.sigilAutoShield(); }catch(_){}
+          return 'retry';
+        }
+        var avail = landedTotal+transparent;
+        privMsg('✗ this wallet holds '+glyphStr(avail.toString())+' SIGIL spendable'+(unlanded>0?' (+ '+unlanded+' note'+(unlanded===1?'':'s')+' still settling)':'')+' and this payment needs '+glyphStr(need.toString())+' including the fee. Send a smaller amount, or wait for more to arrive.', '#fbbf24');
         return;
       }
       var pick=candidates[0];

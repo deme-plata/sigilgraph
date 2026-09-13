@@ -1,0 +1,42 @@
+SIGIL Soundtrack Vol. VI - The Small Print (progressive tech house)
+TRACK 028: Fifty-Eight Bits
+
+===== STYLE (paste into Suno Style field, 462 chars) =====
+Deep progressive tech house, Solomun and Adriatique and Mind Against style, 122 BPM, D minor, deep kick, heavy sub bass, crisp rolling hi-hats, dark wide pads, a low male spoken voice close and intimate, a dark female sung hook with wide stereo reverb, slow filter builds without risers, a hypnotic 16-bar breakdown of pads only, a rolling drop with a subtle detuned lead, Diynamic and Afterlife after-hours feel, mostly instrumental, warm analog-sounding master
+
+===== LYRICS (paste into Suno Lyrics field, 878 chars) =====
+[Intro - deep kick, sub bass, hi-hats, instrumental, 32 bars]
+
+[Spoken, low, close:]
+A note is thirty-two bytes.
+Sealed. Nobody reads it.
+Inside, the amount has fifty-eight bits.
+That is the ceiling. Nobody chose it. The field did.
+
+[Build - slow filter]
+[Sung hook, dark, wide:]
+Fifty-eight bits
+One point three seven
+Fifty-eight bits
+That's the room
+
+[Drop - rolling bass, detuned lead, instrumental, 32 bars]
+
+[Breakdown - pads only, 16 bars]
+[Spoken:]
+Ten decimals. Twenty-one million. It fits - with one point three seven to spare.
+Two more decimals and the ceiling drops below the cap.
+Eighteen, and it cannot hold one coin.
+Privacy and small change pull in opposite directions.
+The build fails if anyone forgets.
+
+[Build]
+[Hook:]
+Fifty-eight bits
+That's the room
+
+[Drop 2 - instrumental, 32 bars]
+
+[Outro - sub bass, fading]
+[Whispered:]
+You can't have both. So we chose.

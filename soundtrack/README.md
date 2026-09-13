@@ -147,3 +147,16 @@ Operator brief: *"trance style… armin van buuren, ahmed helmy, david guetta an
 | 022 | **Two Point Seven Seconds** | Matt Fax progressive, 126 BPM, bloom instead of drop | "One tick, two point seven seconds, and the whole world says yes" · "five hundred twelve, then it's final" |
 | 023 | **Picokelvin** | Ahmed Helmy progressive with Middle-Eastern motifs, 132 BPM | "Pico — kelvin" · "the coldest clock, if you take it as a clock of heat" |
 | 024 | **First Tap** | David Guetta big-room, 128 BPM, crowd chant | "First tap! First tap! First tap wins!" · "fifty-nine crossed the river" |
+
+### Vol. VI — The Small Print (2026-09-13) — **four progressive tech house tracks, the numbers spoken dry**
+
+Operator brief: *"now create 4 songs with progressive tech house style."* Tech house is club music that reads the fine
+print: every track speaks a number the chain admits about itself, then sings the one line that survives. 85–100 words
+per track, all from `SIGIL Eternal` (`numbers.json`); each track admits its own limit.
+
+| # | Track | Mould | Hook |
+|---|---|---|---|
+| 025 | **Twenty-Five Orders** | Anyma / Tale of Us melodic tech house, 124 BPM | "Twenty-five orders / room to spare" · "the bound is a ceiling, it is not a speed" |
+| 026 | **Point Seven Three Seven** | Yotto / Cristoph progressive house, 125 BPM | "Point seven three seven / ninety-nine point three still in the ground" · "the calendar is fixed, the day is not" |
+| 027 | **Six Point Four Million** | Camelphat / Eli Brown peak-time tech house, 126 BPM | "Six — point — four — million" · "a dollar here is a rule on a chain, not a promise from a bank" |
+| 028 | **Fifty-Eight Bits** | Solomun / Adriatique deep progressive, 122 BPM | "Fifty-eight bits / that's the room" · "you can't have both, so we chose" |

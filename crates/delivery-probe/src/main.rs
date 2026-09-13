@@ -38,6 +38,10 @@ struct BackfillReq {
     to: u64,
     headers_only: bool,
     codec: u8,
+    /// 2026-09-13: ask a new sigil-node for one zstd frame over the block body (old servers
+    /// ignore the field and answer raw MessagePack). See sigil-node/src/serve_read.rs.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    zstd: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -65,6 +69,7 @@ fn main() {
         }
         "serve" => serve(),
         "probe" => probe(),
+        "fetch" => fetch(),
         _ => {
             eprintln!("usage: delivery-probe serve|probe|peer-id [args]");
             std::process::exit(2);
@@ -222,6 +227,7 @@ fn probe() {
                     to: from + span,
                     headers_only: true,
                     codec: 1,
+                    zstd: false,
                 };
                 let payload = serde_json::to_vec(&req).unwrap();
                 let started = Instant::now();
@@ -281,4 +287,133 @@ fn probe() {
             (d_hat - d_law) * 100.0
         );
     });
+}
+
+/// `delivery-probe fetch` — ONE real backfill request against ONE live node, timed.
+///
+/// 2026-09-13, the bps100 stall: the follower had asked the producer for the same 8,193-block
+/// range every 5 s for 30 minutes and every answer arrived truncated. Nothing in either node's
+/// log said how long the answer took to *arrive* or how big it was on the wire — the producer
+/// logged "served 29,802,056 B", the follower logged "unexpected end of file", and the 8-second
+/// request-response timeout between them was invisible. This is the instrument that shows it:
+/// dial the peer, send `BackfillReq{from,to,headers_only,codec,zstd}`, report bytes, elapsed,
+/// the body's magic, and the block/header count it decodes to. No node types needed —
+/// the MessagePack body is read as a generic value.
+///
+///   delivery-probe fetch --peer /ip4/10.77.0.1/tcp/9501/p2p/<id> --from H --to H+1024 [--zstd] [--headers] [--codec 1] [--n 3]
+fn fetch() {
+    let peer_addr = arg("--peer").expect("--peer /ip4/../tcp/9501/p2p/<peer-id>");
+    let from: u64 = arg("--from").map(|s| s.parse().expect("--from")).expect("--from");
+    let to: u64 = arg("--to").map(|s| s.parse().expect("--to")).unwrap_or(from + 512);
+    let headers_only = std::env::args().any(|a| a == "--headers");
+    let zstd = std::env::args().any(|a| a == "--zstd");
+    let codec: u8 = arg("--codec").map(|s| s.parse().expect("--codec")).unwrap_or(0);
+    let n: u32 = arg("--n").map(|s| s.parse().expect("--n")).unwrap_or(1);
+    let settle_secs: u64 = arg("--settle-secs").map(|s| s.parse().unwrap()).unwrap_or(15);
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio rt");
+    rt.block_on(async move {
+        let mut config = flux_p2p::NetworkConfig::default();
+        config.node_id = format!("dp-fetch-{}", std::process::id());
+        config.listen_addr = "/ip4/0.0.0.0/tcp/0".into();
+        config.bootstrap_peers = vec![peer_addr.clone()];
+        config.dagknight_enabled = false;
+        config.sap_enabled = false;
+        config.x_algo_enabled = false;
+        config.entanglement_enabled = false;
+        // `--topics a,b` subscribes to real topics so the fetch is measured UNDER the same
+        // gossip flood a real follower's connection carries (the quiet default isolates the wire).
+        config.gossipsub_topics = arg("--topics")
+            .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_else(|| vec!["/sigil/g0/dp-probe-quiet".to_string()]);
+        let gap_ms: u64 = arg("--gap-ms").map(|s| s.parse().unwrap()).unwrap_or(0);
+        let mut mgr = flux_p2p::NetworkManager::new(config);
+        mgr.start().await.expect("swarm start");
+        let want = peer_addr.rsplit_once("/p2p/").map(|(_, id)| id.to_string()).unwrap_or_default();
+        let deadline = Instant::now() + Duration::from_secs(settle_secs.max(3));
+        let peer = loop {
+            if let Some(p) = mgr.connected_peers().into_iter().find(|p| p.to_string() == want) {
+                break p;
+            }
+            if Instant::now() > deadline {
+                eprintln!("FETCH: could not connect to {want} within {settle_secs}s");
+                std::process::exit(3);
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        eprintln!("FETCH: connected to {peer}");
+        let mut gossip_seen: u64 = 0;
+        for i in 0..n {
+            if gap_ms > 0 {
+                let t_gap = Instant::now();
+                while t_gap.elapsed() < Duration::from_millis(gap_ms) {
+                    gossip_seen += mgr.drain_events().iter().filter(|e| matches!(e, flux_p2p::SwarmAppEvent::GossipsubMessage { .. })).count() as u64;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                eprintln!("FETCH: gossip messages drained so far: {gossip_seen}");
+            }
+            let req = BackfillReq { from, to, headers_only, codec, zstd };
+            let payload = serde_json::to_vec(&req).unwrap();
+            let t0 = Instant::now();
+            let res = mgr.send_request(peer, payload).await;
+            let ms = t0.elapsed().as_millis();
+            match res {
+                Err(e) => println!("FETCH #{i} [{from}..={to}] headers={headers_only} zstd={zstd} codec={codec}: ERR after {ms} ms: {e}"),
+                Ok(bytes) => {
+                    let magic = if bytes.len() >= 8 { String::from_utf8_lossy(&bytes[..7]).to_string() } else { "?".into() };
+                    let (count, decode) = describe_body(&bytes);
+                    println!(
+                        "FETCH #{i} [{from}..={to}] headers={headers_only} zstd={zstd} codec={codec}: {} B in {ms} ms ({:.2} MB/s) magic={magic:?} items={count} decode={decode}",
+                        bytes.len(),
+                        bytes.len() as f64 / 1.048576e6 / (ms.max(1) as f64 / 1000.0)
+                    );
+                }
+            }
+        }
+        let _ = mgr.stop().await;
+    });
+}
+
+/// (item count, decode verdict) for a backfill body — full blocks as MessagePack (`SIGILM1`),
+/// zstd-wrapped MessagePack (`SIGILZ1`), or a header body (`H`/`Z`/`S`, counted by bincode length prefix).
+fn describe_body(bytes: &[u8]) -> (i64, String) {
+    fn count_blocks(mp: &[u8]) -> (i64, String) {
+        match rmp_serde::from_slice::<serde_json::Value>(mp) {
+            Ok(v) => (
+                v.get("blocks").and_then(|b| b.as_array()).map(|a| a.len() as i64).unwrap_or(-1),
+                "ok".into(),
+            ),
+            Err(e) => (-1, format!("msgpack error: {e}")),
+        }
+    }
+    if bytes.len() >= 8 && &bytes[..8] == b"SIGILM1\0" {
+        return count_blocks(&bytes[8..]);
+    }
+    if bytes.len() >= 8 && &bytes[..8] == b"SIGILZ1\0" {
+        return match zstd::decode_all(&bytes[8..]) {
+            Ok(raw) => {
+                let (c, d) = count_blocks(&raw);
+                (c, format!("{d} (zstd → {} B raw)", raw.len()))
+            }
+            Err(e) => (-1, format!("zstd error: {e}")),
+        };
+    }
+    match bytes.first() {
+        Some(b'H') | Some(b'S') if bytes.len() >= 9 => {
+            (u64::from_le_bytes(bytes[1..9].try_into().unwrap()) as i64, "bincode header body".into())
+        }
+        Some(b'Z') => match zstd::decode_all(&bytes[1..]) {
+            Ok(raw) if raw.len() >= 8 => (
+                u64::from_le_bytes(raw[..8].try_into().unwrap()) as i64,
+                format!("zstd header body ({} B raw)", raw.len()),
+            ),
+            Ok(_) => (-1, "zstd header body: too short".into()),
+            Err(e) => (-1, format!("zstd error: {e}")),
+        },
+        _ => (-1, "unknown body".into()),
+    }
 }

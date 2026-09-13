@@ -10,3 +10,5 @@ flux-p2p = { path = "../../../flux/crates/flux-p2p" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+rmp-serde = "1"
+zstd = { workspace = true }

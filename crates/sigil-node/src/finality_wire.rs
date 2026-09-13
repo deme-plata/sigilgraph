@@ -422,6 +422,7 @@ mod tests {
             signing_key: Some(key(99)),
             announced: true,
             last_vote_height: 0,
+            last_cert_log_ms: 0,
         };
         assert!(w.enabled());
         assert_eq!(w.on_block(321, [1u8; 32], None, 0), None, "not a checkpoint height");
@@ -442,6 +443,7 @@ mod tests {
             signing_key: Some(ks[0].clone()),
             announced: true,
             last_vote_height: 0,
+            last_cert_log_ms: 0,
         };
         let bytes = w.on_block(320, [7u8; 32], Some([9u8; 32]), 1_000).expect("validator must publish");
         assert!(decode_vote(&bytes).is_some());
@@ -489,6 +491,7 @@ mod tests {
             signing_key: Some(k),
             announced: true,
             last_vote_height: 0,
+            last_cert_log_ms: 0,
         };
 
         // The live shape: a certificate at the mint height, while the caller
@@ -540,6 +543,7 @@ mod tests {
             signing_key: Some(ks[0].clone()),
             announced: true,
             last_vote_height: 0,
+            last_cert_log_ms: 0,
         };
         let bytes = w.on_block(320, [7u8; 32], None, 0).unwrap();
         let v = decode_vote(&bytes).unwrap();

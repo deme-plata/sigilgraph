@@ -730,6 +730,42 @@ mod tests {
 // is read correctly by the fallback below rather than misparsed.
 const BACKFILL_BODY_MAGIC: &[u8; 8] = b"SIGILM1\0";
 
+// 2026-09-13 (bps100 stall): the same MessagePack body, zstd-compressed, behind its own magic.
+//
+// MEASURED on Epsilon at 110 blk/s: a full-block reply for 8,193 blocks is 29,802,056 B raw
+// MessagePack — 3,637 B per block, mostly repeated field names, zero roots and a 292-B SQIsign
+// per block. flux-p2p's request-response timeout is 8 s and it bounds the SEND of the reply as
+// much as the wait for it, so over the 10.77.0.x WireGuard link (one yamux stream, ~19 ms RTT)
+// that reply was cut off mid-body every single time — the follower read `unexpected end of
+// file` on a payload the producer had served in full, and could not fill a 512-block gossip
+// gap for 30 minutes. Same records on disk are 896 B/blk zstd'd one at a time (chain_log);
+// one zstd frame over the whole batch does better still because the dictionary is shared.
+//
+// Opt-in per REQUEST (`BackfillReq.zstd`), so a client that has not been upgraded — a
+// producer-mode sigil-top on Windows decodes with pure-Rust ruzstd and still knows only the
+// two shapes above — keeps receiving exactly what it received before.
+const BACKFILL_ZSTD_MAGIC: &[u8; 8] = b"SIGILZ1\0";
+const BACKFILL_ZSTD_LEVEL: i32 = 3;
+
+/// Encode a block-range response. MessagePack behind a magic prefix; `zstd` wraps the body in
+/// one zstd frame behind [`BACKFILL_ZSTD_MAGIC`] (only for peers that asked for it).
+pub fn encode_backfill_resp_opts(resp: &crate::BackfillResp, zstd: bool) -> Vec<u8> {
+    let raw = encode_backfill_resp(resp);
+    if !zstd || raw.is_empty() {
+        return raw;
+    }
+    match zstd::encode_all(&raw[BACKFILL_BODY_MAGIC.len()..], BACKFILL_ZSTD_LEVEL) {
+        Ok(z) => {
+            let mut out = Vec::with_capacity(z.len() + BACKFILL_ZSTD_MAGIC.len());
+            out.extend_from_slice(BACKFILL_ZSTD_MAGIC);
+            out.extend_from_slice(&z);
+            out
+        }
+        // A compressor failure is not a reason to send nothing: the raw body is still correct.
+        Err(_) => raw,
+    }
+}
+
 /// Encode a block-range response. MessagePack behind a magic prefix.
 pub fn encode_backfill_resp(resp: &crate::BackfillResp) -> Vec<u8> {
     match rmp_serde::to_vec_named(resp) {
@@ -755,6 +791,10 @@ pub fn decode_backfill_resp(bytes: &[u8]) -> Result<crate::BackfillResp, String>
     if bytes.len() >= BACKFILL_BODY_MAGIC.len() && &bytes[..BACKFILL_BODY_MAGIC.len()] == BACKFILL_BODY_MAGIC {
         return rmp_serde::from_slice(&bytes[BACKFILL_BODY_MAGIC.len()..]).map_err(|e| e.to_string());
     }
+    if bytes.len() >= BACKFILL_ZSTD_MAGIC.len() && &bytes[..BACKFILL_ZSTD_MAGIC.len()] == BACKFILL_ZSTD_MAGIC {
+        let raw = zstd::decode_all(&bytes[BACKFILL_ZSTD_MAGIC.len()..]).map_err(|e| format!("zstd: {e}"))?;
+        return rmp_serde::from_slice(&raw).map_err(|e| e.to_string());
+    }
     bincode::deserialize(bytes).map_err(|e| e.to_string())
 }
 
@@ -773,6 +813,23 @@ mod backfill_body_wire {
 
     /// A response carrying events must survive the round trip. Under bincode this was
     /// impossible; that is the whole reason this module exists.
+    #[test]
+    fn zstd_body_round_trips_and_is_smaller_and_opt_in() {
+        let blocks: Vec<crate::block::Block> = crate::block::__test_chain(64);
+        let resp = crate::BackfillResp { blocks };
+        let raw = encode_backfill_resp_opts(&resp, false);
+        let z = encode_backfill_resp_opts(&resp, true);
+        assert_eq!(&raw[..8], BACKFILL_BODY_MAGIC, "opt-out keeps the old shape byte-for-byte");
+        assert_eq!(raw, encode_backfill_resp(&resp));
+        assert_eq!(&z[..8], BACKFILL_ZSTD_MAGIC);
+        assert!(z.len() * 2 < raw.len(), "zstd body must at least halve the wire: {} vs {}", z.len(), raw.len());
+        let back = decode_backfill_resp(&z).expect("zstd body decodes");
+        assert_eq!(back.blocks.len(), 64);
+        assert_eq!(back.blocks[63].header.height, resp.blocks[63].header.height);
+        let back_raw = decode_backfill_resp(&raw).expect("raw body decodes");
+        assert_eq!(back_raw.blocks.len(), 64);
+    }
+
     #[test]
     fn a_response_with_events_round_trips() {
         use sigil_events::SigilEvent;

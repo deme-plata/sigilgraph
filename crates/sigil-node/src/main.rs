@@ -83,6 +83,11 @@ struct BackfillReq {
     /// field; old clients omit it → `None`. See `sync_auth`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     handshake: Option<sigil_handshake::EphemeralSessionHandshakeV0>,
+    /// 2026-09-13: full-block replies as ONE zstd frame over the MessagePack body
+    /// (`serve_read::BACKFILL_ZSTD_MAGIC`). Old servers ignore the field and answer raw;
+    /// old clients omit it (default false) and get raw. Node-to-node sets it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    zstd: bool,
 }
 
 /// Point-to-point backfill response: the requested block range serialized as
@@ -1490,10 +1495,15 @@ fn run_start() -> Result<()> {
         //       unconditionally, so a range that failed was never re-requested by this path at
         //       all — the windowed fetcher walked straight past the hole it had just made. That
         //       is why the tip did not merely slow down, it stopped dead.
-        const FETCH_CHUNK: u64 = 8192;
+        // 2026-09-13: 8192 → 1024. Every request here is FULL BLOCKS (node-to-node), and
+        // MEASURED on the live link 8,193 blocks is a 29.8 MB reply that the 8 s
+        // request-response timeout cannot carry once a second one is in flight; the
+        // server now caps at 1,024 anyway (`SIGIL_SERVE_FULL_CAP`), so asking for more
+        // only made the adaptive sizing oscillate. 1,024 zstd'd is ~0.7 MB: sub-second.
+        const FETCH_CHUNK: u64 = 1024;
         const FETCH_CHUNK_MIN: u64 = 256;
         let fetch_chunk = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
-            std::env::var("SIGIL_FETCH_CHUNK").ok().and_then(|v| v.parse().ok()).unwrap_or(2048),
+            std::env::var("SIGIL_FETCH_CHUNK").ok().and_then(|v| v.parse().ok()).unwrap_or(FETCH_CHUNK).clamp(FETCH_CHUNK_MIN, FETCH_CHUNK),
         ));
         // Lowest `from` whose request failed; u64::MAX means "nothing to redo".
         let refetch_from = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
@@ -1637,7 +1647,7 @@ fn run_start() -> Result<()> {
                         infl.insert(key);
                     }
                     if let Some(peer) = chosen {
-                        let req = BackfillReq { from, to, headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()) };
+                        let req = BackfillReq { from, to, headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()), zstd: true };
                         let mgr2 = std::sync::Arc::clone(&mgr);
                         let bf_tx2 = bf_tx.clone();
                         let chunk_ad = std::sync::Arc::clone(&fetch_chunk);
@@ -2492,11 +2502,24 @@ fn run_start() -> Result<()> {
                             // ~160 KB zstd) and cut round-trips on a thin/lossy mesh — the
                             // ~200 headers/s bottleneck was the round-trip-bound 8192 cap. Full-block
                             // serves stay at 8192 (≈8 MB — the WAN-burst-stall limit). Env-tunable.
+                            // 2026-09-13 (bps100 stall): full-block replies are capped by WHAT THE
+                            // TIMEOUT CAN CARRY, not by what fits in RAM. MEASURED: 8,193 blocks =
+                            // 29.8 MB raw MessagePack; flux-p2p's request-response timeout is 8 s
+                            // and bounds the send as well as the wait, and it fires per request
+                            // while N of them share one yamux connection — so the follower asking
+                            // for 8,192 every 5 s got every reply truncated ("unexpected end of
+                            // file") for 45 minutes. 1,024 blocks = 3.5 MB raw / ~0.7 MB zstd —
+                            // 0.6 s on the WireGuard link with headroom for four in flight.
+                            // The client grows its ask on success; this is the ceiling it meets.
                             let serve_cap: u64 = if req.headers_only {
                                 std::env::var("SIGIL_SERVE_HEADERS_CAP").ok()
                                     .and_then(|v| v.parse::<u64>().ok())
                                     .map(|n| n.clamp(8192, 262_144)).unwrap_or(32_768)
-                            } else { 8192 };
+                            } else {
+                                std::env::var("SIGIL_SERVE_FULL_CAP").ok()
+                                    .and_then(|v| v.parse::<u64>().ok())
+                                    .map(|n| n.clamp(256, 8192)).unwrap_or(1024)
+                            };
                             let hi = req.to.min(top).min(lo.saturating_add(serve_cap));
 
                             // WE DO NOT HAVE IT — say so at once instead of doing the work to
@@ -2533,7 +2556,9 @@ fn run_start() -> Result<()> {
                             // codec=2 ('S') of a finalized range IS immutable (skeletons of
                             // finalized blocks never change) → cacheable like 'H'/'Z'.
                             let immutable = hi >= lo && hi < wbase && req.codec < 3;
-                            let ckey = (lo, hi, req.headers_only, req.codec as u32);
+                            // The zstd flag lives in the key: a compressed body replayed to a peer
+                            // that asked for raw would be undecodable to it (and vice versa).
+                            let ckey = (lo, hi, req.headers_only, req.codec as u32 | if req.zstd { 0x100 } else { 0 });
 
                             // ── Drain off-thread serves that finished since the last request,
                             // so their bytes populate the caches checked immediately below.
@@ -2722,13 +2747,14 @@ fn run_start() -> Result<()> {
                                 let by_peer = std::sync::Arc::clone(&serve_full_by_peer);
                                 let release_key = full_peer_key;
                                 let peer2 = peer;
+                                let want_zstd = req.zstd;
                                 tokio::task::spawn_blocking(move || {
                                     let mut blocks = crate::serve_read::read_blocks_range(&dir, lo, disk_hi);
                                     blocks.extend(window_blocks);
                                     let n = blocks.len();
                                     let resp = BackfillResp { blocks };
                                     let blob = std::sync::Arc::new(
-                                        crate::serve_read::encode_backfill_resp(&resp),
+                                        crate::serve_read::encode_backfill_resp_opts(&resp, want_zstd),
                                     );
                                     // Respond FIRST — the peer must not wait on our caching.
                                     mgr2.respond(request_id, blob.as_ref().clone());
@@ -2972,9 +2998,10 @@ fn run_start() -> Result<()> {
                                 let resp = BackfillResp {
                                     blocks,
                                 };
-                                eprintln!("↩ rr-backfill: served {} blocks [{}..={}] to {}",
-                                    resp.blocks.len(), lo, hi, peer);
-                                crate::serve_read::encode_backfill_resp(&resp)
+                                let out = crate::serve_read::encode_backfill_resp_opts(&resp, req.zstd);
+                                eprintln!("↩ rr-backfill: served {} blocks [{}..={}] to {} ({} B{})",
+                                    resp.blocks.len(), lo, hi, peer, out.len(), if req.zstd { ", zstd" } else { "" });
+                                out
                             };
                             // ── CACHE FILL (finalized ranges only), FIFO-capped ──
                             if immutable && !out.is_empty() {
@@ -3221,6 +3248,7 @@ fn run_start() -> Result<()> {
                                                         headers_only: false,
                                                         codec: 0,
                                                         handshake: Some((*sync_hs).clone()),
+                                                        zstd: true,
                                                     };
                                                     // 2026-08-19 (deep-catchup freeze investigation): this used to fire
                                                     // unconditionally every time the 15ms request-throttle allowed a
@@ -3248,14 +3276,36 @@ fn run_start() -> Result<()> {
                                                     if let Ok(permit) = std::sync::Arc::clone(&gap_fetch_permits).try_acquire_owned() {
                                                         let mgr2 = std::sync::Arc::clone(&mgr);
                                                         let bf_tx2 = bf_tx.clone();
+                                                        let (gf_from, gf_to) = (req.from, req.to);
                                                         tokio::spawn(async move {
                                                             let _permit = permit; // held until this task ends
-                                                            if let Ok(payload) = serde_json::to_vec(&req) {
-                                                                if let Ok(bytes) = mgr2.send_request(peer, payload).await {
-                                                                    if let Ok(resp) = crate::serve_read::decode_backfill_resp(&bytes) {
-                                                                        let _ = bf_tx2.send(resp.blocks).await;
-                                                                    }
+                                                            // 2026-09-13: every failure here used to be silent
+                                                            // (`if let Ok`), and the permit was held for as long
+                                                            // as the request future lived. MEASURED on happysrv:
+                                                            // 105,345 "requesting" lines, ~0.2 requests/s
+                                                            // actually reaching the producer's cache — this lane
+                                                            // was dead for hours and nothing said so. Bound the
+                                                            // wait above flux-p2p's own 8 s (so a permit can never
+                                                            // outlive a lost request) and say what failed, sampled.
+                                                            static GAP_FAILS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                                                            let fail = |why: String| {
+                                                                let n = GAP_FAILS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                                if n % 32 == 0 {
+                                                                    eprintln!("⚠ rr-backfill(braid): gap fill [{gf_from}..={gf_to}] from {peer} failed: {why} ({} failures so far)", n + 1);
                                                                 }
+                                                            };
+                                                            let payload = match serde_json::to_vec(&req) {
+                                                                Ok(p) => p,
+                                                                Err(e) => { fail(format!("serialize: {e}")); return; }
+                                                            };
+                                                            match tokio::time::timeout(std::time::Duration::from_secs(12), mgr2.send_request(peer, payload)).await {
+                                                                Err(_) => fail("no answer in 12s (flux-p2p never resolved the request)".into()),
+                                                                Ok(Err(e)) => fail(format!("send_request: {e}")),
+                                                                Ok(Ok(bytes)) => match crate::serve_read::decode_backfill_resp(&bytes) {
+                                                                    Ok(resp) if resp.blocks.is_empty() => fail(format!("empty response ({} B)", bytes.len())),
+                                                                    Ok(resp) => { let _ = bf_tx2.send(resp.blocks).await; }
+                                                                    Err(e) => fail(format!("decode ({} B): {e}", bytes.len())),
+                                                                },
                                                             }
                                                         });
                                                     }
@@ -3328,7 +3378,7 @@ fn run_start() -> Result<()> {
                                     if last_req.elapsed() >= std::time::Duration::from_millis(15) {
                                         last_req = std::time::Instant::now();
                                         if let Some(peer) = mgr.connected_peers().into_iter().next() {
-                                            let req = BackfillReq { from: expected, to: expected.saturating_add(8192), headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()) };
+                                            let req = BackfillReq { from: expected, to: expected.saturating_add(FETCH_CHUNK), headers_only: false, codec: 0, handshake: Some((*sync_hs).clone()), zstd: true };
                                             eprintln!("⇪ rr-backfill: gap (have {}, saw {}) — requesting [{}..={}] from {}",
                                                 expected, h, req.from, req.to, peer);
                                             let mgr2 = std::sync::Arc::clone(&mgr);
@@ -3538,13 +3588,21 @@ fn run_start() -> Result<()> {
                                         crate::peer_pick::choose_capable_peer(&ps, &heights, &scores, ph_to, peer_rr)
                                             .and_then(|want| mgr.connected_peers().into_iter().find(|p| p.to_string() == want))
                                     };
+                                    // 2026-09-13: at most two of these in flight. This path fired
+                                    // every 5 s (each peer-heights heartbeat) with no idea whether the
+                                    // previous ask had been answered — MEASURED: five 29.8 MB replies
+                                    // sharing one connection, every one of them timing out at 8 s.
+                                    static PH_INFLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                                    let ph_peer = ph_peer.filter(|_| PH_INFLIGHT.load(std::sync::atomic::Ordering::Relaxed) < 2);
                                     if let Some(peer) = ph_peer {
+                                        PH_INFLIGHT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                         let req = BackfillReq {
                                             from: expected,
                                             to: ph_to,
                                             headers_only: false,
                                             codec: 0, // node-to-node needs full blocks; raw JSON path
                                             handshake: Some((*sync_hs).clone()),
+                                            zstd: true,
                                         };
                                         eprintln!("⇪ rr-backfill: behind via peer-heights (have {}, net {}) — requesting [{}..={}]",
                                             expected, peer_h, req.from, req.to);
@@ -3583,8 +3641,8 @@ fn run_start() -> Result<()> {
                                             // request for the same range was invisible until read
                                             // by hand from the source.
                                             match serde_json::to_vec(&req) {
-                                                Ok(payload) => match mgr2.send_request(peer, payload).await {
-                                                    Ok(bytes) => match crate::serve_read::decode_backfill_resp(&bytes) {
+                                                Ok(payload) => match tokio::time::timeout(std::time::Duration::from_secs(12), mgr2.send_request(peer, payload)).await {
+                                                    Ok(Ok(bytes)) => match crate::serve_read::decode_backfill_resp(&bytes) {
                                                         Ok(resp) => {
                                                             if resp.blocks.is_empty() {
                                                                 eprintln!("⚠ rr-backfill(peer-heights): peer {peer} returned an EMPTY response for [{req_from}..={req_to}) — the repeating-request-no-progress symptom");
@@ -3595,13 +3653,17 @@ fn run_start() -> Result<()> {
                                                             let _ = bf_tx2.send(resp.blocks).await;
                                                         }
                                                         Err(e) => {
-                                                            eprintln!("⚠ rr-backfill(peer-heights): decode failed for [{req_from}..={req_to}) from {peer}: {e}");
+                                                            eprintln!("⚠ rr-backfill(peer-heights): decode failed for [{req_from}..={req_to}) from {peer}: {e} ({} B received)", bytes.len());
                                                             ph_fail("decode failed");
                                                         }
                                                     },
-                                                    Err(e) => {
+                                                    Ok(Err(e)) => {
                                                         eprintln!("⚠ rr-backfill(peer-heights): send_request failed for [{req_from}..={req_to}) to {peer}: {e}");
                                                         ph_fail("send failed");
+                                                    }
+                                                    Err(_) => {
+                                                        eprintln!("⚠ rr-backfill(peer-heights): no answer in 12s for [{req_from}..={req_to}) from {peer} (flux-p2p never resolved the request)");
+                                                        ph_fail("no answer in 12s");
                                                     }
                                                 },
                                                 Err(e) => {
@@ -3609,6 +3671,7 @@ fn run_start() -> Result<()> {
                                                     ph_fail("serialize failed");
                                                 }
                                             }
+                                            PH_INFLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                                         });
                                     }
                                 }

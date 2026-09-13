@@ -56,6 +56,8 @@ pub struct FinalityWire {
     /// Set once so the operator gets one clear line about what finality is
     /// doing, rather than silence they have to infer meaning from.
     announced: bool,
+    /// Wall clock of the last "certificate at H=" log line (rate-limited to 1/s).
+    last_cert_log_ms: u64,
     /// Highest height ever handed to [`FinalityWire::on_block`] — i.e. the
     /// MINT clock.
     ///
@@ -99,7 +101,7 @@ impl FinalityWire {
                     cfg.checkpoint_interval,
                     if key.is_some() { "VALIDATOR" } else { "observer" }
                 );
-                Self { observer, signing_key: key, announced: true, last_vote_height: 0 }
+                Self { observer, signing_key: key, announced: true, last_cert_log_ms: 0, last_vote_height: 0 }
             }
             Err(env_config::ConfigError::Disabled) => Self::disabled(),
             Err(e) => {
@@ -123,6 +125,7 @@ impl FinalityWire {
             observer: FinalityObserver::new(Default::default(), ObserverConfig::default()),
             signing_key: None,
             announced: false,
+            last_cert_log_ms: 0,
             last_vote_height: 0,
         }
     }
@@ -196,10 +199,20 @@ impl FinalityWire {
         }
         let vote = decode_vote(data)?;
         match self.observer.observe(vote, now_ms) {
-            ObserveOutcome::Certified { height, latency_ms } => Some(format!(
-                "🔒 finality: certificate at H={height} (assembled in {})",
-                latency_ms.map(|m| format!("{m}ms")).unwrap_or_else(|| "unknown".into())
-            )),
+            ObserveOutcome::Certified { height, latency_ms } => {
+                // 2026-09-13 (rocky-bps100-0912): one certificate per block at 100+ blk/s
+                // was 7,500 journal lines a minute — half the node's whole log volume
+                // (the volatile journal held ~15 minutes). Once a second is a heartbeat;
+                // the per-block numbers are on /v1/finality/certificate and /v1/events.
+                if now_ms.saturating_sub(self.last_cert_log_ms) < 1000 {
+                    return None;
+                }
+                self.last_cert_log_ms = now_ms;
+                Some(format!(
+                    "🔒 finality: certificate at H={height} (assembled in {})",
+                    latency_ms.map(|m| format!("{m}ms")).unwrap_or_else(|| "unknown".into())
+                ))
+            }
             _ => None,
         }
     }

@@ -143,6 +143,37 @@ pub(super) fn ingest_block_value(
         Some(h) => h,
         None => return false,
     };
+    ingest_header(header, store, state, net, new_blocks)
+}
+
+/// A record off the live topic: the node gossips the SAME `[0xB5]…` MessagePack+zstd
+/// record its chain log stores (`sigil-record`), so the light client reads it with the
+/// pure-Rust decoder into just the header — no JSON detour, no node `Block` type. Legacy
+/// JSON and `Z`-frames still take `ingest_block_value` above.
+pub(super) fn ingest_record(
+    payload: &[u8],
+    store: &mut BlockStore,
+    state: &Arc<Mutex<P2PSyncState>>,
+    net: &flux_p2p::NetworkManager,
+    new_blocks: &Arc<Mutex<Vec<StoredBlock>>>,
+) -> bool {
+    #[derive(serde::Deserialize)]
+    struct HeaderOnly { header: SigilBlockHeaderV0 }
+    match sigil_record::pure::decode_record::<HeaderOnly>(payload) {
+        Some(ho) => ingest_header(ho.header, store, state, net, new_blocks),
+        None => false,
+    }
+}
+
+/// The shared tail of both ingest paths: store the header, and on a fresh insert bump the
+/// sync counters, push a progress event, and enqueue the stored block for the TUI.
+pub(super) fn ingest_header(
+    header: SigilBlockHeaderV0,
+    store: &mut BlockStore,
+    state: &Arc<Mutex<P2PSyncState>>,
+    net: &flux_p2p::NetworkManager,
+    new_blocks: &Arc<Mutex<Vec<StoredBlock>>>,
+) -> bool {
     let height = header.height;
     let hash_hex = hex::encode(header.hash());
     if store.put_block(header).unwrap_or(false) {
@@ -634,6 +665,28 @@ mod fast_path_tests {
             producer_sig: SignatureBytes(vec![0u8; scheme.expected_sig_len()]),
             topology_commitment: None,
         }
+    }
+
+    /// The live topic carries the node's `[0xB5]…` record (MessagePack + zstd, v2 with the
+    /// trained dictionary). Encoded here with the SAME C-backed encoder the producer uses,
+    /// decoded with the pure-Rust path the shipped light client uses: the header that
+    /// comes out is the header that went in, and the framing gives the height for free.
+    #[test]
+    fn live_record_decodes_to_the_header_with_the_pure_rust_decoder() {
+        #[derive(serde::Serialize)]
+        struct Block<'a> { header: &'a SigilBlockHeaderV0, txs: Vec<u32>, events: Vec<u8> }
+        #[derive(serde::Deserialize)]
+        struct HeaderOnly { header: SigilBlockHeaderV0 }
+        let h = mk_header(6_120_007, [3u8; 32]);
+        let rec = sigil_record::encode_record(h.height, &Block { header: &h, txs: vec![1, 2, 3], events: vec![] })
+            .expect("node-side encode");
+        assert_eq!(rec[0], sigil_record::REC_MAGIC);
+        assert_eq!(sigil_record::split(&rec).map(|(_, height, _)| height), Some(6_120_007));
+        let ho: HeaderOnly = sigil_record::pure::decode_record(&rec).expect("light-client decode");
+        assert_eq!(ho.header.height, h.height);
+        assert_eq!(ho.header.hash(), h.hash(), "the content address survives the codec");
+        // A JSON block (an un-upgraded peer) is not a record: the JSON path keeps it.
+        assert!(sigil_record::split(br#"{"header":{}}"#).is_none());
     }
 
     fn mk_chain(n: u64) -> Vec<SigilBlockHeaderV0> {

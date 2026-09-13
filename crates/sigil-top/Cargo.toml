@@ -72,6 +72,10 @@ self-replace = "1"
 sigil-dns-anchor = { path = "../sigil-dns-anchor" }
 # v0.6.5: Block sync — SIGIL header types + local block storage via flux-db
 sigil-header = { path = "../sigil-header" }
+# 2026-09-14: the block-record codec the node gossips + stores, decoded here with the
+# pure-Rust zstd (no C in the Windows cross-build). Before this the light client could
+# not read a live block at all.
+sigil-record = { path = "../sigil-record", default-features = false, features = ["pure"] }
 flux-db = { path = "../../../flux/crates/flux-db" }
 # 2026-08-24: local block storage, extracted to its own crate so sigil-chronos (which
 # cannot import a binary-only crate) can drive the REAL height-index conflict logic.
@@ -163,6 +167,9 @@ anyhow = { workspace = true, optional = true }
 # Interop test only: encode with the SAME C-backed zstd the server uses, decode with
 # our pure-Rust ruzstd — proves the exact cross-implementation wire roundtrip.
 zstd = "0.13"
+# Same idea one level up: the node-side record ENCODER (C zstd + dictionary) for the test
+# that proves the shipped pure-Rust decoder reads a live block record.
+sigil-record = { path = "../sigil-record", features = ["c-zstd", "pure"] }
 # 2026-08-25 (local-mining-API test): `producer::run`'s offline end-to-end test needs a
 # real `VdfGroup` impl to actually solve a `Challenge` via `flux_miner::client::solve` —
 # `ModSquaring::bench_2048()` is the SAME group `sigil-api::mining` verifies against

@@ -1,0 +1,24 @@
+[package]
+name = "sigil-record"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The ONE block-record codec: [0xB5][version][height u64 LE][zstd(MessagePack(block))] with the trained v2 dictionary. Written by sigil-node's chain_log and gossiped on TOPIC_BLOCKS; read by the node (C zstd) and by sigil-top (pure-Rust ruzstd, Windows-cross clean). Before 2026-09-14 this lived inside the node binary, so the light client could not decode live gossip at all."
+
+[features]
+default = ["c-zstd"]
+# Encoder + fast decoder on the C-backed zstd crate (the node; linux-only servers).
+c-zstd = ["dep:zstd"]
+# Pure-Rust decoder (sigil-top: no C in the Windows cross-build). Decode only.
+pure = ["dep:ruzstd"]
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+rmp-serde  = "1"
+zstd       = { version = "0.13", optional = true }
+ruzstd     = { version = "0.7", optional = true }
+
+[dev-dependencies]
+zstd   = "0.13"
+ruzstd = "0.7"

@@ -1069,8 +1069,16 @@ pub struct ShieldRequest {
     /// Client-chosen strictly-increasing nonce, same convention as `/v1/send`.
     pub req_nonce: u64,
     /// Optional: the note sealed to the depositor's own delivery key (see `submit_shield_with_delivery`).
-    // flux-wire: allow — /v1/shield HTTP JSON request body; the node re-encodes the tx itself
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// `default` only — NEVER `skip_serializing_if`. This struct is the JSON body of
+    /// `/v1/shield`, but it ALSO rides TOPIC_TXS and the Dandelion stem hops as bincode
+    /// inside `RelayedTx::Shielded(ShieldedOp::Shield(..))`, and bincode cannot decode a
+    /// skipped field: with `None` the encoder wrote zero bytes, the peer's decoder read an
+    /// Option tag past the end (`unexpected end of file`) and dropped the deposit at
+    /// `apply_locally`'s `else { return }` — a deposit submitted at a follower never reached
+    /// the producer. Added 6dde106c (2026-09-08), found by `fluxc wire-audit` 2026-09-13,
+    /// pinned by `dandelion_relay::wire_tests`. A JSON `null` here costs 22 bytes.
+    #[serde(default)]
     pub note_ciphertext: Option<String>,
 }
 

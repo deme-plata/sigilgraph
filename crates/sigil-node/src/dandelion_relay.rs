@@ -289,3 +289,55 @@ fn apply_shielded_op(shielded: &ShieldedBridge, op: ShieldedOp) -> Result<[u8; 3
         }
     }
 }
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+    use sigil_api::shielded::ShieldRequest;
+
+    fn shield_req(note_ciphertext: Option<String>) -> ShieldRequest {
+        ShieldRequest {
+            from: "sigil1abc".into(),
+            amount: 10_000_000_000,
+            cm: "ab".repeat(32),
+            fee: 100_000,
+            sig: "cd".repeat(64),
+            req_nonce: 7,
+            note_ciphertext,
+        }
+    }
+
+    /// Every `ShieldedOp` rides TOPIC_TXS and the stem hops as bincode inside
+    /// `RelayedTx::Shielded`. A `skip_serializing_if` on any field of any request
+    /// struct inside it writes ZERO bytes for the skipped value while the peer's
+    /// decoder still reads one — the relayed deposit is then dropped silently at
+    /// `apply_locally`'s `else { return }`, and a deposit submitted at a FOLLOWER
+    /// never reaches the producer's pending pool. Found by `fluxc wire-audit` on
+    /// 2026-09-13 (W4, sigil-api/src/shielded.rs, attribute added 6dde106c 09-08).
+    #[test]
+    fn a_shield_deposit_without_a_sealed_note_round_trips_on_the_relay_wire() {
+        for ct in [None, Some("ef".repeat(40))] {
+            let (id, bytes) = wrap(RelayedTx::Shielded(ShieldedOp::Shield(shield_req(ct.clone()))))
+                .expect("wrap encodes");
+            assert_eq!(id, id_of(&bytes));
+            let back: RelayedTx = bincode::deserialize(&bytes)
+                .unwrap_or_else(|e| panic!("relay wire must decode what it encoded (note_ciphertext={ct:?}): {e}"));
+            let RelayedTx::Shielded(ShieldedOp::Shield(r)) = back else { panic!("wrong variant") };
+            assert_eq!(r.note_ciphertext, ct);
+            assert_eq!(r.req_nonce, 7);
+        }
+    }
+
+    /// Guard for the whole enum, not just the field that bit today: a field-skipping or
+    /// tagged attribute anywhere inside `ShieldedOp` makes bincode encode-only.
+    #[test]
+    fn no_shielded_op_request_struct_skips_fields_on_the_wire() {
+        let src = include_str!("../../sigil-api/src/shielded.rs");
+        let offenders: Vec<(usize, &str)> = src.lines().enumerate()
+            .filter(|(_, l)| l.trim_start().starts_with("#[serde(") && l.contains("skip_serializing_if"))
+            .map(|(i, l)| (i + 1, l.trim()))
+            .collect();
+        assert!(offenders.is_empty(),
+            "sigil-api/src/shielded.rs carries skip_serializing_if — bincode (RelayedTx) cannot decode a skipped field: {offenders:?}");
+    }
+}

@@ -18,7 +18,10 @@ tokio = { workspace = true }
 serde = { workspace = true }
 flux-p2p = { workspace = true }
 serde_json = "1"
-tower-http = { version = "0.5", features = ["cors", "trace", "timeout"] }
+# compression-gzip/zstd: /v1/shielded/leaves is 20.8 MB of JSON (hex ciphertexts) and was
+# served raw to every phone and browser — gzip 1.93x, zstd 2.12x, measured 2026-09-14.
+# tower-http's default predicate leaves text/event-stream (SSE) and tiny bodies alone.
+tower-http = { version = "0.5", features = ["cors", "trace", "timeout", "compression-gzip", "compression-zstd"] }
 hex = "0.4"
 blake3 = { workspace = true }
 # The node's artifact store — same crate sigil-node/snapshot.rs uses for chain durability.
@@ -104,3 +107,4 @@ flux-search = { path = "../../../flux/crates/flux-search" }
 
 [dev-dependencies]
 rand = { workspace = true }
+flate2 = "1"   # decode the gzip the compression layer emits, in the test that pins it

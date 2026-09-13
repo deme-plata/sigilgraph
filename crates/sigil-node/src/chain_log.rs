@@ -79,176 +79,26 @@ struct HeaderHeightProbe {
     height: u64,
 }
 
-/// Fast height extraction: find the first `"height":<digits>` in the record's
-/// leading bytes. `header` is the block's first field and `height` its third,
-/// so the first occurrence IS `header.height` (the only other height-ish key,
-/// `"at_height"`, has no quote before the `h` and can't match). Used to skip
-/// pre-`from_height` records during tail-replay catch-up without paying a full
-/// serde_json decode per skipped block (~0.5 ms each → seconds per stride).
-/// Returns `None` on any doubt — callers then fall back to a real parse, so a
-/// wrong/missing probe can never change which blocks are applied.
-fn probe_height_fast(bytes: &[u8]) -> Option<u64> {
-    const KEY: &[u8] = b"\"height\":";
-    let window = &bytes[..bytes.len().min(PROBE_WINDOW)];
-    let at = window.windows(KEY.len()).position(|w| w == KEY)? + KEY.len();
-    let mut val: u64 = 0;
-    let mut any = false;
-    let mut terminated = false;
-    for &c in &window[at..] {
-        if c.is_ascii_digit() {
-            val = val.checked_mul(10)?.checked_add((c - b'0') as u64)?;
-            any = true;
-        } else {
-            terminated = true;
-            break;
-        }
-    }
-    // Digits must END inside the window — a digit run cut off by the window
-    // edge (probe fed only a record prefix) would yield a truncated, too-small
-    // height and could skip a block we must apply. Refuse instead.
-    if any && terminated { Some(val) } else { None }
-}
-
-/// How many leading bytes of a record the skip-probe reads/searches.
-/// `header.height` sits ~40-80 bytes in (header is the block's first field;
-/// only `version` and the 8-byte `network_id` array precede it), so 256 bytes
-/// is generous headroom while keeping the per-record probe cost trivial — the
-/// catch-up scan `seek_relative`s over the rest of each skipped record. If the
-/// key ever moves past the window the probe returns `None` and the scan falls
-/// back to a full decode for that record (slower, never wrong).
-const PROBE_WINDOW: usize = 256;
-
 /// ── RECORD CODEC ────────────────────────────────────────────────────────────────
 ///
-/// A record's framing is unchanged — `[u32 LE len][payload]`. Only the PAYLOAD encoding
-/// is versioned, and both forms coexist in one log forever:
-///
-/// * **legacy**: the payload IS `serde_json` and therefore starts with `{` (0x7B).
-/// * **v1**: `[MAGIC][VERSION][height: u64 LE][zstd(MessagePack(Block))]`.
-///
-/// # Why this changed
-///
-/// JSON measured **3,940 bytes per block** on blocks carrying essentially zero
-/// transactions, because every 32-byte hash is written as a decimal array
-/// (`[153,13,136,…]` — up to 4 characters per byte). At 26 blk/s that is **3.23 TB/year**,
-/// ~44× Bitcoin's bytes/day for a chain recording nothing. Nobody volunteers to keep an
-/// archival copy of that, and an archive nobody keeps is the thing that makes a ledger
-/// die. Size here is a decentralisation property, not a micro-optimisation.
-///
-/// # Why MessagePack and NOT bincode
-///
-/// Measured on 4,000 real blocks (`examples/chainlog_codec_bench.rs`):
-///
-/// | codec | bytes/block | vs JSON | self-describing |
-/// |---|---|---|---|
-/// | JSON (was) | 3,940 | 1.00× | yes |
-/// | MessagePack + zstd | **896** | **4.40×** | **yes** |
-/// | bincode + zstd | 428 | 9.21× | **NO** |
-///
-/// bincode is half the size again and was still rejected, deliberately. bincode is not
-/// self-describing: it stores field ORDER and nothing else, so adding one field to `Block`
-/// or `SigilBlockHeaderV0` makes every previously-written record undecodable. This chain
-/// already depends on the opposite property — `sigil-header` carries several
-/// `#[serde(default)]` fields whose comments say exactly that, e.g. *"keeps pre-tx-count
-/// blocks decoding to 0"*. Historical blocks are ALREADY being read back through a struct
-/// that has grown since they were written. Choosing bincode would trade 2× on disk for the
-/// guarantee that the next header field silently bricks the archive — the precise opposite
-/// of the durability this change exists to buy.
-///
-/// MessagePack keeps field names, so an old record still round-trips through a newer
-/// struct exactly as JSON does today, and `zstd` recovers most of what the names cost.
-const REC_MAGIC: u8 = 0xB5;
-const REC_VERSION_V1: u8 = 1;
-// ── v2: the same MessagePack body, zstd'd WITH A TRAINED DICTIONARY ────────────────────
-//
-// 2026-09-13, Viktor: "det er for meget plads … node operator brugerne blir skræmt væk"
-// — and no pruning, a node must simply carry the chain. So the block itself has to be
-// small. MEASURED on 20,752 live g2 blocks (examples/chainlog_batch_bench.rs, tail of the
-// real log, dictionary trained on the OLDER half and measured on the NEWER half):
-//
-// | on disk                                     | B/blk |
-// |---------------------------------------------|-------|
-// | v1: per record, zstd3, no dictionary (today)| 1,105 |
-// | v2: per record, zstd3, 64 KB trained dict   |   337 |
-// | one zstd19 frame over 5,140 records (bound) |   278 |
-//
-// Why a dictionary works this well: an "empty" block is ~1.9 KB of MessagePack, and
-// almost all of it is the same every block — nine SetBalance mutations to the same
-// handful of wallets (producer, dev fee, welfare, nation…), field names, three all-zero
-// roots, a 292-byte all-zero SQIsign nonce. zstd on a 2 KB record alone has no history
-// to match against; the dictionary IS that history. What remains (~340 B) is the part
-// that is genuinely different per block: the wallet root, the producer signature, the
-// topology commitment, timestamps, and the low digits of nine balances.
-//
-// Random access per record is unchanged (still one record = one zstd frame), v1 and
-// legacy JSON records still decode, and the dictionary is compiled into the binary
-// (`dict/chainlog-v2.zdict`, 64 KB) — so a v2 record is readable by every future build
-// as long as that file never changes. It must never change: a new dictionary is a new
-// version byte, never an edit of this one.
-const REC_VERSION_V2: u8 = 2;
-const CHAINLOG_DICT_V2: &[u8] = include_bytes!("../dict/chainlog-v2.zdict");
-
-thread_local! {
-    static V2_COMPRESSOR: std::cell::RefCell<Option<zstd::bulk::Compressor<'static>>> = const { std::cell::RefCell::new(None) };
-    static V2_DECOMPRESSOR: std::cell::RefCell<Option<zstd::bulk::Decompressor<'static>>> = const { std::cell::RefCell::new(None) };
-}
-
-fn v2_compress(raw: &[u8]) -> std::io::Result<Vec<u8>> {
-    V2_COMPRESSOR.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.is_none() {
-            *c = Some(zstd::bulk::Compressor::with_dictionary(REC_ZSTD_LEVEL, CHAINLOG_DICT_V2)?);
-        }
-        c.as_mut().expect("just set").compress(raw)
-    })
-}
-
-fn v2_decompress(body: &[u8]) -> std::io::Result<Vec<u8>> {
-    V2_DECOMPRESSOR.with(|d| {
-        let mut d = d.borrow_mut();
-        if d.is_none() {
-            *d = Some(zstd::bulk::Decompressor::with_dictionary(CHAINLOG_DICT_V2)?);
-        }
-        // `bulk::Decompressor::decompress` ALLOCATES AND ZERO-FILLS `capacity` bytes up front,
-        // so a lazy 64 MiB ceiling here cost ~120 ms per record (MEASURED: the replay tests'
-        // 10 ms seek budget blew to 123 ms). The frame carries its own content size — use it,
-        // and fall back to a bounded multiple of the compressed length if it doesn't.
-        let cap = zstd::zstd_safe::get_frame_content_size(body)
-            .ok()
-            .flatten()
-            .map(|n| n as usize)
-            .unwrap_or(body.len().saturating_mul(16))
-            .clamp(1024, 64 << 20);
-        d.as_mut().expect("just set").decompress(body, cap)
-    })
-}
-/// `MAGIC | VERSION | height(8)` — the fixed part before the compressed body.
-const REC_V1_HEADER: usize = 10;
-/// zstd level 3: measured 896 B/blk. Higher levels gain little on records this small and
-/// cost append latency on the settlement path, which is the one place that must stay hot.
-const REC_ZSTD_LEVEL: i32 = 3;
+/// The codec — `[0xB5][version][height u64 LE][zstd(MessagePack(Block))]`, the trained v2
+/// dictionary, the legacy-JSON probe — lives in the `sigil-record` crate since 2026-09-14,
+/// because the light client (`sigil-top`, pure-Rust zstd, Windows-cross) must read the very
+/// same records off TOPIC_BLOCKS, and it could not while the codec was locked inside this
+/// binary. The design notes (why MessagePack and NOT bincode: bincode cannot decode the
+/// internally-tagged `SigilEvent`, and stores field order only) are on that crate's docs.
+/// The names below are kept so every reader in this binary — and the tests — are unchanged.
+pub(crate) use sigil_record::{
+    probe_height_fast, v2_compress, v2_decompress, CHAINLOG_DICT_V2, PROBE_WINDOW, REC_MAGIC,
+    REC_VERSION_V1, REC_VERSION_V2, REC_ZSTD_LEVEL,
+};
+#[allow(dead_code)]
+pub(crate) const REC_V1_HEADER: usize = sigil_record::REC_HEADER;
 
 /// Encode a block into a record payload. **The single encoder** — every writer goes through
 /// here so a format change can never be applied to only some call sites.
 pub fn encode_record(block: &Block) -> std::io::Result<Vec<u8>> {
-    // Escape hatch: keeps the old format writable for bisecting a suspected codec bug
-    // against a known-good reader. Reading never needs it — both forms always decode.
-    if std::env::var("SIGIL_CHAINLOG_JSON").as_deref() == Ok("1") {
-        return serde_json::to_vec(block)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e));
-    }
-    let packed = rmp_serde::to_vec_named(block)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    // v1 stays writable behind an escape hatch (bisecting a suspected dictionary/codec
-    // bug against a known-good reader); readers never need it.
-    let v1 = std::env::var("SIGIL_CHAINLOG_V1").as_deref() == Ok("1");
-    let body = if v1 { zstd::encode_all(&packed[..], REC_ZSTD_LEVEL)? } else { v2_compress(&packed)? };
-    let mut out = Vec::with_capacity(REC_V1_HEADER + body.len());
-    out.push(REC_MAGIC);
-    out.push(if v1 { REC_VERSION_V1 } else { REC_VERSION_V2 });
-    out.extend_from_slice(&block.header.height.to_le_bytes());
-    out.extend_from_slice(&body);
-    Ok(out)
+    sigil_record::encode_record(block.header.height, block)
 }
 
 /// Decode a record payload written in EITHER format. **The single decoder.**
@@ -257,42 +107,16 @@ pub fn encode_record(block: &Block) -> std::io::Result<Vec<u8>> {
 /// treats a failed decode as "stop the scan here", which is the correct behaviour for an
 /// append-only log whose tail may be a partial write after a crash.
 pub fn decode_record(payload: &[u8]) -> Option<Block> {
-    match payload.first()? {
-        // Legacy JSON — every record written before 2026-08-27.
-        b'{' => serde_json::from_slice(payload).ok(),
-        &REC_MAGIC => {
-            if payload.len() < REC_V1_HEADER {
-                return None;
-            }
-            let raw = match payload[1] {
-                REC_VERSION_V1 => zstd::decode_all(&payload[REC_V1_HEADER..]).ok()?,
-                REC_VERSION_V2 => v2_decompress(&payload[REC_V1_HEADER..]).ok()?,
-                _ => return None,
-            };
-            rmp_serde::from_slice(&raw).ok()
-        }
-        _ => None,
-    }
+    sigil_record::decode_record(payload)
 }
 
-/// Extract `header.height` from a record payload without decoding the whole block.
-///
-/// For v1 this is exact and O(1) — the height is stored in the record header precisely so
-/// the tail-replay skip path never has to decompress a block it is going to discard. For
-/// legacy JSON it falls back to the byte-scan heuristic, which returns `None` on any doubt.
 /// Height of a record, from its framing, without decompressing the body.
 ///
 /// `pub(crate)` as of 2026-08-27 because `serve_read` had its OWN copy that only
 /// understood the legacy JSON form — see that module for what it cost. There is one
 /// record format and there must be one reader of it.
 pub(crate) fn probe_height(payload: &[u8]) -> Option<u64> {
-    match payload.first()? {
-        &REC_MAGIC if payload.len() >= REC_V1_HEADER && (payload[1] == REC_VERSION_V1 || payload[1] == REC_VERSION_V2) => {
-            Some(u64::from_le_bytes(payload[2..10].try_into().ok()?))
-        }
-        b'{' => probe_height_fast(payload),
-        _ => None,
-    }
+    sigil_record::probe_height(payload)
 }
 
 pub struct ChainLog {

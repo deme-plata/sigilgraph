@@ -2567,6 +2567,16 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/usds_bridge/status", get(usds_bridge_status_handler))
         .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024))
         .layer(tower_http::timeout::TimeoutLayer::new(Duration::from_secs(30)))
+        // Response compression, negotiated per request (`Accept-Encoding`). The JSON this
+        // API serves is mostly hex — 4 bits of entropy per byte — so it halves on the wire:
+        // `/v1/shielded/leaves` measured 20.77 MB raw → 10.7 MB gzip / 9.8 MB zstd
+        // (2026-09-14), and it was the body every phone pulled uncompressed on a rescan.
+        // Browsers, OkHttp and reqwest(gzip) decode transparently; a client that sends no
+        // `Accept-Encoding` gets the bytes it always got. SSE (`text/event-stream`) is
+        // excluded by the layer's default predicate, so `/v1/events` still streams frame by
+        // frame. The proxies in front pass `Content-Encoding` through and q-flux checks
+        // `already_encoded` before its own gzip, so nothing double-compresses.
+        .layer(tower_http::compression::CompressionLayer::new())
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -2717,6 +2727,73 @@ mod events_wire_tests {
             }
         }
         String::from_utf8_lossy(&out).to_string()
+    }
+
+    fn raw_get_with(port: u16, path: &str, extra_headers: &str, read_for: Duration) -> Vec<u8> {
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(read_for)).unwrap();
+        write!(s, "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n{extra_headers}\r\n").unwrap();
+        let mut out = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            match s.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+        out
+    }
+
+    fn split_head_body(raw: &[u8]) -> (String, Vec<u8>) {
+        let i = raw.windows(4).position(|w| w == b"\r\n\r\n").expect("header terminator");
+        (String::from_utf8_lossy(&raw[..i]).to_ascii_lowercase(), raw[i + 4..].to_vec())
+    }
+
+    /// A chunked body (tower-http streams the compressed output) → the bytes.
+    fn dechunk(body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut pos = 0;
+        loop {
+            let nl = body[pos..].windows(2).position(|w| w == b"\r\n").expect("chunk size line");
+            let size = usize::from_str_radix(std::str::from_utf8(&body[pos..pos + nl]).unwrap().trim(), 16).unwrap();
+            pos += nl + 2;
+            if size == 0 { break; }
+            out.extend_from_slice(&body[pos..pos + size]);
+            pos += size + 2;
+        }
+        out
+    }
+
+    /// The compression layer: a client that asks for gzip gets gzip and decodes to the very
+    /// bytes a client that asks for nothing gets; SSE is never compressed (it must stream).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn json_is_gzipped_on_request_and_sse_is_not() {
+        let port = serve_on_ephemeral(st()).await;
+        let (head_plain, body_plain) = split_head_body(&raw_get_with(port, "/v1/supply", "", Duration::from_secs(3)));
+        assert!(head_plain.starts_with("http/1.1 200"), "{head_plain}");
+        assert!(!head_plain.contains("content-encoding:"), "no Accept-Encoding → raw bytes: {head_plain}");
+        let plain = if head_plain.contains("transfer-encoding: chunked") { dechunk(&body_plain) } else { body_plain };
+        assert!(plain.starts_with(b"{"), "{}", String::from_utf8_lossy(&plain));
+
+        let (head_gz, body_gz) = split_head_body(&raw_get_with(
+            port, "/v1/supply", "Accept-Encoding: gzip\r\n", Duration::from_secs(3)));
+        assert!(head_gz.contains("content-encoding: gzip"), "{head_gz}");
+        assert!(head_gz.contains("vary: accept-encoding"), "caches must key on the encoding: {head_gz}");
+        let gz = if head_gz.contains("transfer-encoding: chunked") { dechunk(&body_gz) } else { body_gz };
+        let mut inflated = Vec::new();
+        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&gz[..]), &mut inflated).expect("valid gzip");
+        // Same JSON either way, modulo the `ts` the envelope stamps per response.
+        let strip_ts = |b: &[u8]| -> String {
+            let v: serde_json::Value = serde_json::from_slice(b).expect("json");
+            let mut v = v; v.as_object_mut().unwrap().remove("ts"); v.to_string()
+        };
+        assert_eq!(strip_ts(&inflated), strip_ts(&plain));
+
+        let sse = raw_get_with(port, "/v1/events", "Accept-Encoding: gzip\r\n", Duration::from_millis(600));
+        let (head_sse, _) = split_head_body(&sse);
+        assert!(head_sse.contains("content-type: text/event-stream"), "{head_sse}");
+        assert!(!head_sse.contains("content-encoding:"), "SSE must stream uncompressed: {head_sse}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

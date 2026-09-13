@@ -63,22 +63,17 @@ static HTTP_ASYNC: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::n
         .unwrap_or_else(|_| reqwest::Client::new())
 });
 
-pub const BLOCK_SYNC_TOPIC: &str = "/sigil/g0/blocks";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-// flux-wire: allow — DEAD — 0 uses in the tree (2026-09-13); if it is ever put on a wire, JSON or drop the tag
-#[serde(tag = "t")]
-pub enum SyncMsg {
-    Req { from: u64, to: u64 },
-    Block { height: u64, hash_hex: String, header_json: String },
-    Have { best_height: u64, best_hash_hex: String },
-}
+// `SyncMsg` (the g0 `/sigil/g0/blocks` JSON topic message: Req/Block/Have) lived here
+// until 2026-09-14 with zero users — the live block topic is `sigil_net::TOPIC_BLOCKS`
+// (g2, msgpack+zstd records) and backfill is request-response below. Removed after
+// `fluxc wire-audit` flagged its internally-tagged enum as undecodable on bincode.
+//
 // v0.7.7: point-to-point backfill over the flux-p2p request-response channel.
 // Wire format is shared byte-for-byte with sigil-node's server: the request is
 // `serde_json::to_vec(&BackfillReq { from, to })` and the response is
 // `serde_json::to_vec(&BackfillResp { blocks })`, where each element of `blocks`
-// is a full Block serialized as a JSON value (same `{"header":…}` shape that's
-// gossiped live on BLOCK_SYNC_TOPIC). DO NOT change these shapes.
+// is a full Block serialized as a JSON value (same `{"header":…}` shape the
+// block topic once gossiped as JSON). DO NOT change these shapes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackfillReq {
     pub from: u64,
@@ -752,8 +747,12 @@ impl P2PBlockSync {
                     }
                 }
 
-                // Subscribe to blocks — event-driven, no polling
-                let mut block_rx = net.subscribe(BLOCK_SYNC_TOPIC);
+                // Subscribe to blocks — event-driven, no polling. 2026-09-14: the LIVE topic
+                // (`/sigil/g2/blocks`). Until today this subscribed to the g0 topic and parsed
+                // JSON, while the producer had published msgpack+zstd records on g2 since
+                // 2026-08-27 — so no live block ever arrived here and every "live tip from
+                // gossip" line below was dead code. The backfill path hid it.
+                let mut block_rx = net.subscribe(sigil_net::TOPIC_BLOCKS);
 
                 // ── v0.9.5 PIPELINED SLIDING-WINDOW BACKFILL ──────────────────────────
                 // The v0.7.x design fired one request per peer then `join_all`-BARRIERED on
@@ -1243,6 +1242,17 @@ impl P2PBlockSync {
                     while gdrained < HEAD_SCAN_CAP {
                         let (_topic, data) = match block_rx.try_recv() { Ok(x) => x, Err(_) => break };
                         gdrained += 1;
+                        // The producer's record form (`0xB5`): height is in the framing, so
+                        // the head advances for free; the header itself decodes only within
+                        // the ingest budget — same two-tier discipline as the JSON path.
+                        if let Some(h) = sigil_record::split(&data).map(|(_, h, _)| h) {
+                            if h > head_seen { head_seen = h; }
+                            if ingested < INGEST_CAP {
+                                ingested += 1;
+                                ingest_record(&data, &mut store, &state_clone, &net, &new_blocks_clone);
+                            }
+                            continue;
+                        }
                         // v0.34: transparently inflate a `'Z'`-tagged zstd gossip frame
                         // (legacy `{…}` JSON passes through zero-copy). Lets the light node
                         // ingest compressed live gossip — ~14× less inbound wire once a

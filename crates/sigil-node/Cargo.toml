@@ -37,6 +37,7 @@ bincode    = "1"
 # on real header chunks. Server is linux-only, so the C-backed zstd crate is fine here
 # (the Windows-cross client decodes with pure-Rust ruzstd).
 zstd       = "0.13"
+sigil-record = { path = "../sigil-record" }   # the block-record codec, shared with sigil-top
 rmp-serde  = "1"   # MessagePack — compact AND self-describing, so it round-trips
                    # SIGIL's internally-tagged enums (SigilEvent/SigilTx tag="kind")
                    # that bincode cannot decode. The store codec.

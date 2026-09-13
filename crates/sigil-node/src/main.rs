@@ -3639,6 +3639,23 @@ fn run_start() -> Result<()> {
                                 // Phase 3: a certificate assembled from peers' votes gates
                                 // settlement when SIGIL_FINALITY_GATE says so.
                                 apply_finality_gate(&finality, braid.as_mut(), &finality_view, &dag_bodies, tip_signer.as_ref(), &events_bus);
+                                // 2026-09-13 (rocky-bps100-0912, asked by rocky-instant-confirm-0912):
+                                // settle NOW, not on the next produce tick. The certificate is what
+                                // moves the line; draining here delivers `applied` (and the money
+                                // API's fresh state) the moment the certificate exists rather than
+                                // up to a tick later — and with the Burst tick, ticks can run
+                                // back-to-back, so "the next tick" is not a bounded wait. Same
+                                // drain, same order, same chokepoint as the tick's own call.
+                                if produce {
+                                    if let Some(br) = braid.as_mut() {
+                                        let (a, s, f) = dag_drain_apply(br, &mut dag_bodies, &mut chain,
+                                            &mut |braw| { let _ = chain_log.append_bytes(braw); },
+                                            &send_bridge, &bridge_bridge, &dex_bridge, &usds_bridge, &usds_polygon_bridge,
+                                            &shielded_bridge, &mut mint_hash_to_tx_hashes);
+                                        applied += a; dag_ord_skipped += s; dag_apply_failed += f;
+                                        if a > 0 { publish_money!(); sigil_api::height::set(chain.height()); }
+                                    }
+                                }
                             } else {
                                 let preview = std::str::from_utf8(&data)
                                     .map(|s| s.chars().take(120).collect::<String>())

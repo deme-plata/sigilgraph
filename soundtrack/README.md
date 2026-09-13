@@ -44,6 +44,20 @@ Each `suno/NNN-title.md` is one song:
 [Chorus] …
 ```
 
+## The two kinds of number (rule since Vol. VII, Viktor 2026-09-13)
+
+*"The numbers in the songs don't match reality or vision… 81 seconds finality when we try so hard in code to make it
+instant confirm delivery… we underestimate potential… blocks will reach many orders of magnitude faster."*
+
+| kind | examples | how it may be sung |
+|---|---|---|
+| **design constants** | 2⁶⁴−2³²+1, 58 bits, 32-byte note, 21 M, 256 years, 600 squarings, two photons, 25 orders of ML room, certificate = one block behind the tip, pushed delivery | as truth, in any tense |
+| **weather** | a block rate (0.367 blk/s → "2.7 s"), 512-deep fallback → "23 min", $155, 49 registered, 3,288 notes, 1.16 nodes | only AS weather — dated, or "that afternoon it read…" — never as the promise |
+
+The 512-block / 23-minute lines in 015, 020 and 022 describe the depth-rule FALLBACK, not the design (Phase 3 certificates
+follow the tip one block behind; `/wait`, SSE and webhooks deliver it the same second). Vision edition of a track = design
+numbers only; 033 "The Same Second" is the first.
+
 ## Structure
 
 ```
@@ -176,4 +190,4 @@ each track admits its own limit.
 | 030 | **Six Hundred and Twenty** | Levee stairwell drums, slide, harmonica | g1: 1,266,227 notes, 1 spent, 620/620 attributable; g2: 3,288 / 59 / 49 | "We tore it down in a day — built it again" |
 | 031 | **The Clock on the Mountain** | Battle of Evermore mandolin + Sandy Denny duet | 3.3×10⁻¹⁴ K/m; ITER 8×10²³× colder than Planck; 2.73 s; 2.8 pK (analogy) | "The clock on the ledger runs when we agree" |
 | 032 | **Six Hundred Steps** | The Ocean count-in, Achilles gallop, Black Dog displacement | VDF t = 600 sequential squarings; the 0 == 0 bypass, fixed | "Six hundred! Nobody skips!" |
-| 033 | **A Hundred and Fifty-Five Dollars** | Rock and Roll boogie, Custard Pie harmonica | $0.001 → $155 mcap, $21k FDV, 1,467 locked | "And I wouldn't sell it for the town" |
+| 033 | **The Same Second** (vision edition) | Rock and Roll boogie, Custard Pie harmonica | receipt signed instantly; certificate one block behind the tip; pushed delivery; 25 orders of physical room; $155 sung AS weather | "It's final when the certificate lands" · "that's the weather, not the sky" |

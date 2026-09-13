@@ -2098,6 +2098,7 @@ fn run_start() -> Result<()> {
                             let roots_json = serde_json::to_string(&header_roots).unwrap_or_else(|_| "null".into());
                             let tiphash = hex_full(&bhash);
                             let bytes = chain_log::encode_record(&block).unwrap_or_default();
+                            chain_log::remember_raw(bhash, bytes.clone()); // settle reuses these bytes
                             // SIGIL_DAG=1: capture view + body BEFORE apply moves
                             // the block, so our own blocks enter the braid (§3.3).
                             let dag_own: Option<(BlockView, crate::block::Block)> =
@@ -3086,6 +3087,7 @@ fn run_start() -> Result<()> {
                                     }
                                     let bhash = block.hash();
                                     let bheight = block.header.height;
+                                    chain_log::remember_raw(bhash, data.clone()); // arrived encoded — settle reuses it
                                     let block_producer = block.header.producer;
                                     if bheight > net_tip { net_tip = bheight; }
                                     // QTFT Path C (SIGIL-level v1): note which peer relayed which

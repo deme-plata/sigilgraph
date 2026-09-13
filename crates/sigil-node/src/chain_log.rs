@@ -19,6 +19,33 @@ use std::path::{Path, PathBuf};
 
 use crate::block::Block;
 
+// ── raw-record cache (2026-09-13, rocky-bps100-0912) ──────────────────────────
+// A block was encoded (msgpack + zstd) TWICE on the producer: once at mint for gossip,
+// once again at settle for the chain log — and a received block, which arrived AS the
+// encoded record, was re-encoded at settle too. MEASURED at 110 blk/s: zstd 7% +
+// encode 6% of the produce loop. Remember the bytes by block hash at the point they
+// already exist; the settle path takes them back. Bounded: past `RAW_CACHE_CAP` entries
+// the cache is simply cleared (a miss only costs the encode it used to cost anyway).
+static RAW_CACHE: std::sync::Mutex<Option<std::collections::HashMap<sigil_header::BlockHash, Vec<u8>>>> =
+    std::sync::Mutex::new(None);
+const RAW_CACHE_CAP: usize = 16_384;
+
+/// Keep the encoded record for `hash` until the block settles.
+pub fn remember_raw(hash: sigil_header::BlockHash, bytes: Vec<u8>) {
+    if let Ok(mut g) = RAW_CACHE.lock() {
+        let m = g.get_or_insert_with(std::collections::HashMap::new);
+        if m.len() >= RAW_CACHE_CAP {
+            m.clear();
+        }
+        m.insert(hash, bytes);
+    }
+}
+
+/// The encoded record remembered for `hash`, if still cached (removed on take).
+pub fn take_raw(hash: &sigil_header::BlockHash) -> Option<Vec<u8>> {
+    RAW_CACHE.lock().ok().and_then(|mut g| g.as_mut().and_then(|m| m.remove(hash)))
+}
+
 /// `chain.idx` — sparse on-disk height→offset index alongside `chain.log`.
 ///
 /// Layout: 8-byte header (`b"SGLIDX\0"` + 1 version byte) followed by

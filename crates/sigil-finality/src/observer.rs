@@ -434,7 +434,8 @@ impl FinalityObserver {
     /// its length each call would inflate the counter without bound.
     fn try_assemble(&mut self, height: u64, now_ms: u64) -> bool {
         let Some(votes) = self.votes.get(&height) else { return false };
-        let report = assemble(&self.committee, votes);
+        // Every retained vote passed `verify()` in `observe` — see assemble_verified.
+        let report = crate::assemble_verified(&self.committee, votes);
 
         let already = self.equivocations_at(height);
         let now_count = report.equivocations.len() as u64;

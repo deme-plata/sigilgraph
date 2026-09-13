@@ -214,7 +214,10 @@ pub fn dag_drain_apply(
         // Persisted form goes through the ONE chain-log encoder (msgpack+zstd, 4.4x
         // smaller than the JSON this used to write). The P2P wire is unaffected — that
         // still speaks JSON, and is encoded separately at its own call sites.
-        let braw = crate::chain_log::encode_record(body).unwrap_or_default();
+        // The bytes already exist for every block that reached here (minted or received);
+        // encode again only on a cache miss — see chain_log::remember_raw.
+        let braw = crate::chain_log::take_raw(&oh)
+            .unwrap_or_else(|| crate::chain_log::encode_record(body).unwrap_or_default());
         match chain.apply(body.clone()) {
             Ok(()) => {
                 persist(&braw);

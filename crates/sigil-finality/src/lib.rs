@@ -270,6 +270,22 @@ impl AssemblyReport {
 ///     count reaches `committee`'s `availability_quorum` becomes a
 ///     certificate.
 pub fn assemble(committee: &Committee, votes: &[FinalityVote]) -> AssemblyReport {
+    assemble_impl(committee, votes, true)
+}
+
+/// [`assemble`] for votes the caller has ALREADY signature-checked — the observer's
+/// retained set, which only ever holds votes that passed `verify()` in `observe`.
+///
+/// 2026-09-13 (rocky-bps100-0912): `try_assemble` re-verified every retained vote on
+/// every observe — with two validators that was five Ed25519 verifications per block
+/// (observe + assemble of one vote, then observe + assemble of two), ~7% of the produce
+/// loop at 110 blk/s. The membership check and the equivocation/tally logic are
+/// unchanged; only the redundant signature pass is skipped.
+pub fn assemble_verified(committee: &Committee, votes: &[FinalityVote]) -> AssemblyReport {
+    assemble_impl(committee, votes, false)
+}
+
+fn assemble_impl(committee: &Committee, votes: &[FinalityVote], check_sigs: bool) -> AssemblyReport {
     let mut report = AssemblyReport::default();
     if committee.is_empty() {
         // A zero-member committee cannot mean anything as a finality
@@ -285,9 +301,11 @@ pub fn assemble(committee: &Committee, votes: &[FinalityVote]) -> AssemblyReport
     let mut per_validator: HashMap<(u64, ValidatorId), Vec<FinalityVote>> = HashMap::new();
 
     for v in votes {
-        if let Err(e) = v.verify() {
-            report.rejected.push((v.clone(), e));
-            continue;
+        if check_sigs {
+            if let Err(e) = v.verify() {
+                report.rejected.push((v.clone(), e));
+                continue;
+            }
         }
         if !committee.contains(&v.validator_id) {
             report.rejected.push((v.clone(), FinalityError::NotCommitteeMember));

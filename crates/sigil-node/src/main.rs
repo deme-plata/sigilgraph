@@ -349,13 +349,14 @@ fn main() -> ExitCode {
         // 2026-09-13: `chainlog-recompress <dir>` — rewrite chain.log in the v2 (dictionary)
         // record format. OFFLINE: stop the node first. See chain_log::recompress_offline.
         Some("chainlog-recompress") => {
-            let dir = match args.get(2) {
+            let live = args.iter().any(|a| a == "--live");
+            let dir = match args.iter().skip(2).find(|a| !a.starts_with("--")) {
                 Some(d) => std::path::PathBuf::from(d),
-                None => { eprintln!("usage: sigil-node chainlog-recompress <dir containing chain.log>"); return ExitCode::from(64); }
+                None => { eprintln!("usage: sigil-node chainlog-recompress [--live] <dir containing chain.log>\n  --live: first pass while the node runs (no swap); rerun without it after stopping the node"); return ExitCode::from(64); }
             };
-            eprintln!("⏳ chainlog-recompress: {} (node must be STOPPED)", dir.display());
+            eprintln!("⏳ chainlog-recompress: {} ({})", dir.display(), if live { "LIVE pass — no swap" } else { "final pass — node must be STOPPED" });
             let t0 = std::time::Instant::now();
-            return match chain_log::recompress_offline(&dir) {
+            return match chain_log::recompress_offline(&dir, live) {
                 Ok((n, before, after)) => {
                     println!("✓ chainlog-recompress: {} records, {:.2} GB → {:.2} GB ({:.1}×, {} → {} B/blk) in {:.0}s; old log kept as chain.log.pre-v2",
                         n, before as f64 / 1e9, after as f64 / 1e9, before as f64 / after.max(1) as f64,

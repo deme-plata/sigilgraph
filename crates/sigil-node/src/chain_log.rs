@@ -1251,6 +1251,50 @@ mod probe_height_tests {
         assert_eq!(&CHAINLOG_DICT_V2[..4], &[0x37, 0xA4, 0x30, 0xEC], "zstd dictionary magic");
     }
 
+    /// `recompress_offline`: a mixed log rewritten in two passes (live, then final with
+    /// resume) replays to the identical block sequence, and shrinks.
+    #[test]
+    fn recompress_two_pass_preserves_the_sequence_and_shrinks() {
+        let dir = std::env::temp_dir().join(format!("sigil-chainlog-recompress-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let blocks = crate::block::__test_chain(40);
+        {
+            let mut log = ChainLog::open(&dir).unwrap();
+            for (i, b) in blocks.iter().take(30).enumerate() {
+                let rec = if i % 2 == 0 { serde_json::to_vec(b).unwrap() } else { encode_v1_for_test(b) };
+                log.append_bytes(&rec).unwrap();
+            }
+        }
+        let before = std::fs::metadata(dir.join("chain.log")).unwrap().len();
+        // pass 1: live (node "still appending")
+        let (n1, _, _) = super::recompress_offline(&dir, true).unwrap();
+        assert_eq!(n1, 30);
+        assert!(dir.join("chain.log.recompress.state").exists());
+        // the node appends 10 more, then stops
+        {
+            let mut log = ChainLog::open(&dir).unwrap();
+            for b in blocks.iter().skip(30) { log.append_bytes(&encode_v1_for_test(b)).unwrap(); }
+        }
+        // make the mtime guard happy without sleeping 10 s: backdate the file
+        let f = std::fs::File::open(dir.join("chain.log")).unwrap();
+        let _ = f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60));
+        let (n2, b2, a2) = super::recompress_offline(&dir, false).unwrap();
+        assert_eq!(n2, 40, "final pass resumes and converts only the tail");
+        assert!(a2 < b2, "recompressed {a2} B must be smaller than {b2} B");
+        assert!(dir.join("chain.log.pre-v2").exists());
+        assert!(!dir.join("chain.log.recompress.state").exists());
+        let after = std::fs::metadata(dir.join("chain.log")).unwrap().len();
+        assert!(after < before);
+        let mut seen = Vec::new();
+        let n = ChainLog::replay(&dir, |b| seen.push(b.hash())).unwrap();
+        assert_eq!(n, 40);
+        assert_eq!(seen, blocks.iter().map(|b| b.hash()).collect::<Vec<_>>());
+        // every record is v2 now, and the fresh index seeks
+        let log = ChainLog::open(&dir).unwrap();
+        assert_eq!(log.get_by_height(blocks[39].header.height).map(|b| b.hash()), Some(blocks[39].hash()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// v1, v2 and legacy JSON records coexist in one log and replay in order.
     #[test]
     fn mixed_v1_v2_json_records_replay_in_order() {
@@ -1397,30 +1441,59 @@ mod probe_height_tests {
 // node first (the tool refuses if `chain.log` was modified in the last 10 s, which is the
 // cheapest honest liveness test available without a lock file).
 /// See the module note above. Returns (records, bytes_before, bytes_after).
-pub fn recompress_offline(dir: &Path) -> std::io::Result<(u64, u64, u64)> {
+///
+/// Two-pass use for a node that must not stop for long (the producer): run once with
+/// `live = true` while the node runs — it converts everything written so far and leaves
+/// `chain.log.recompress` + a `.state` sidecar (source offset, records, output offset) —
+/// then stop the node and run again with `live = false`: it resumes from the sidecar,
+/// converts only the tail written since, and swaps. The stop lasts seconds, not minutes.
+pub fn recompress_offline(dir: &Path, live: bool) -> std::io::Result<(u64, u64, u64)> {
     let src = dir.join("chain.log");
     let meta = std::fs::metadata(&src)?;
-    if let Ok(m) = meta.modified() {
-        if m.elapsed().map(|d| d.as_secs() < 10).unwrap_or(false) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::ResourceBusy,
-                "chain.log was written in the last 10 s — is the node still running? stop it first",
-            ));
+    if !live {
+        if let Ok(m) = meta.modified() {
+            if m.elapsed().map(|d| d.as_secs() < 10).unwrap_or(false) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::ResourceBusy,
+                    "chain.log was written in the last 10 s — is the node still running? stop it first (or pass --live for the first pass)",
+                ));
+            }
         }
     }
     let dst = dir.join("chain.log.recompress");
     let dst_idx = dir.join("chain.idx.recompress");
+    let state = dir.join("chain.log.recompress.state");
+    // Resume: sidecar = "src_off n out_off before". Both output files are truncated to the
+    // recorded lengths first, so a pass killed mid-record can never leave a torn tail behind.
+    let (mut src_off, mut n, mut pos_out, mut before): (u64, u64, u64, u64) = (0, 0, 0, 0);
+    if let Ok(txt) = std::fs::read_to_string(&state) {
+        let v: Vec<u64> = txt.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+        if v.len() == 4 && dst.exists() {
+            src_off = v[0]; n = v[1]; pos_out = v[2]; before = v[3];
+            OpenOptions::new().write(true).open(&dst)?.set_len(pos_out)?;
+            let idx_len = IDX_HEADER_LEN as u64 + n.div_ceil(IDX_EVERY) * IDX_ENTRY_LEN as u64;
+            if let Ok(f) = OpenOptions::new().write(true).open(&dst_idx) { let _ = f.set_len(idx_len); }
+            eprintln!("  resuming: {n} records already converted ({:.2} GB → {:.2} GB)", before as f64 / 1e9, pos_out as f64 / 1e9);
+        }
+    }
+    let fresh = src_off == 0;
     let mut r = BufReader::with_capacity(8 << 20, File::open(&src)?);
-    let mut w = BufWriter::with_capacity(8 << 20, File::create(&dst)?);
-    let mut iw = BufWriter::new(File::create(&dst_idx)?);
-    let mut hdr = [0u8; IDX_HEADER_LEN];
-    hdr[..7].copy_from_slice(&IDX_MAGIC);
-    hdr[7] = IDX_VERSION;
-    iw.write_all(&hdr)?;
-    let (mut n, mut before, mut after) = (0u64, 0u64, 0u64);
-    let mut pos_out: u64 = 0;
+    r.seek(SeekFrom::Start(src_off))?;
+    let mut w = BufWriter::with_capacity(8 << 20, if fresh { File::create(&dst)? } else { OpenOptions::new().append(true).open(&dst)? });
+    let mut iw = BufWriter::new(if fresh { File::create(&dst_idx)? } else { OpenOptions::new().append(true).open(&dst_idx)? });
+    if fresh {
+        let mut hdr = [0u8; IDX_HEADER_LEN];
+        hdr[..7].copy_from_slice(&IDX_MAGIC);
+        hdr[7] = IDX_VERSION;
+        iw.write_all(&hdr)?;
+    }
+    let mut after = pos_out;
     let t0 = std::time::Instant::now();
+    let n0 = n;
+    // Only convert what existed when this pass started: a live producer keeps appending.
+    let src_end = meta.len();
     loop {
+        if src_off >= src_end { break; }
         let mut lb = [0u8; 4];
         if r.read_exact(&mut lb).is_err() { break; }
         let len = u32::from_le_bytes(lb) as usize;
@@ -1450,21 +1523,30 @@ pub fn recompress_offline(dir: &Path) -> std::io::Result<(u64, u64, u64)> {
         w.write_all(&(out.len() as u32).to_le_bytes())?;
         w.write_all(&out)?;
         pos_out += 4 + out.len() as u64;
+        src_off += 4 + len as u64;
         after = pos_out;
         n += 1;
         if n % 500_000 == 0 {
             eprintln!("  … {n} records, {:.1} → {:.1} GB, {:.0} rec/s",
-                before as f64 / 1e9, after as f64 / 1e9, n as f64 / t0.elapsed().as_secs_f64().max(1e-9));
+                before as f64 / 1e9, after as f64 / 1e9, (n - n0) as f64 / t0.elapsed().as_secs_f64().max(1e-9));
+            w.flush()?; iw.flush()?;
+            std::fs::write(&state, format!("{src_off} {n} {pos_out} {before}"))?;
         }
     }
     w.flush()?; w.get_ref().sync_all()?;
     iw.flush()?; iw.get_ref().sync_all()?;
     drop(w); drop(iw);
+    std::fs::write(&state, format!("{src_off} {n} {pos_out} {before}"))?;
+    if live {
+        eprintln!("  live pass done at source offset {src_off} ({n} records); stop the node and run again (without --live) to convert the tail and swap");
+        return Ok((n, before, after));
+    }
     // Swap: old log → chain.log.pre-v2 (kept), new → chain.log; same for the index.
     let keep = dir.join("chain.log.pre-v2");
     std::fs::rename(&src, &keep)?;
     std::fs::rename(&dst, &src)?;
     let _ = std::fs::rename(dir.join("chain.idx"), dir.join("chain.idx.pre-v2"));
     std::fs::rename(&dst_idx, dir.join("chain.idx"))?;
+    let _ = std::fs::remove_file(&state);
     Ok((n, before, after))
 }

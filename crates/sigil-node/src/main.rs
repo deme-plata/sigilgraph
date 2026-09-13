@@ -1734,6 +1734,11 @@ fn run_start() -> Result<()> {
                                             }
                                             r.blocks
                                         }
+                                        Err(e) if e == crate::serve_read::BUSY_ERR => {
+                                            // "not now" — same size next time, no penalty; the slot
+                                            // frees at once instead of after an 8 s timeout.
+                                            Vec::new()
+                                        }
                                         Err(e) => {
                                             // SAY WHAT ARRIVED. "decode failed" alone cannot tell
                                             // an empty response from a truncated one from a
@@ -2784,6 +2789,7 @@ fn run_start() -> Result<()> {
                                 use std::sync::atomic::Ordering;
                                 if serve_full_inflight.load(Ordering::Relaxed) >= serve_full_inflight_cap {
                                     expensive_throttled += 1;
+                                    mgr.respond(request_id, crate::serve_read::busy_reply()); // BUSY — see the throttle note below
                                     continue;
                                 }
                                 // Fair share: this peer may hold only its own slot, so it cannot
@@ -2798,6 +2804,7 @@ fn run_start() -> Result<()> {
                                     if *slot >= serve_full_per_peer_cap {
                                         drop(m);
                                         expensive_throttled += 1;
+                                        mgr.respond(request_id, crate::serve_read::busy_reply()); // BUSY
                                         continue;
                                     }
                                     *slot += 1;
@@ -2839,25 +2846,48 @@ fn run_start() -> Result<()> {
                                 continue;
                             }
 
+                            // 2026-09-13 — two corrections to the throttle, both MEASURED on the
+                            // build-14 producer with RUST_LOG=warn finally on:
+                            //
+                            // (1) A dropped request was never ANSWERED. libp2p then held the
+                            //     inbound stream until its own 8 s timer ("Timeout while receiving
+                            //     request or sending response" — 363 of them from happysrv in
+                            //     20 min) and the requester read 0 bytes eight seconds later.
+                            //     Eight seconds of a held stream, a held gap-fill permit and a
+                            //     held client slot, to say "not now". Say it at once instead: an
+                            //     EMPTY body. Every client already treats an empty response as a
+                            //     failed request and retries on its own cadence; the difference
+                            //     is that the retry can happen 20 ms later instead of 8 s later.
+                            //
+                            // (2) A follower filling a gossip gap asks for FOUR blocks that are
+                            //     in this node's RAM window — microseconds of work — and was
+                            //     throttled like a 32k-header disk read (97 of the last 114
+                            //     served full-block ranges were exactly 4 blocks). The throttle
+                            //     is for disk + big encodes; a small in-RAM range bypasses it.
+                            let cheap_in_ram = lo >= wbase && hi >= lo && hi - lo < 64 && req.codec < 2;
                             let peer_key = peer.to_string();
-                            if last_expensive_by_peer
+                            if !cheap_in_ram && last_expensive_by_peer
                                 .get(&peer_key)
                                 .is_some_and(|t| t.elapsed() < expensive_throttle)
                             {
                                 expensive_throttled += 1;
+                                mgr.respond(request_id, crate::serve_read::busy_reply()); // BUSY
                                 continue;
                             }
                             // Global backstop: far looser than the per-peer interval, so many
                             // honest peers are all served promptly, but the total inline cost
                             // per unit time still has a hard ceiling.
                             let global_floor = expensive_throttle / 8;
-                            if last_expensive_serve.elapsed() < global_floor {
+                            if !cheap_in_ram && last_expensive_serve.elapsed() < global_floor {
                                 expensive_throttled += 1;
+                                mgr.respond(request_id, crate::serve_read::busy_reply()); // BUSY
                                 continue;
                             }
-                            let now_inst = std::time::Instant::now();
-                            last_expensive_serve = now_inst;
-                            last_expensive_by_peer.insert(peer_key, now_inst);
+                            if !cheap_in_ram {
+                                let now_inst = std::time::Instant::now();
+                                last_expensive_serve = now_inst;
+                                last_expensive_by_peer.insert(peer_key, now_inst);
+                            }
                             // Keep the per-peer map bounded regardless of peer churn.
                             if last_expensive_by_peer.len() > 512 {
                                 last_expensive_by_peer
@@ -3372,6 +3402,11 @@ fn run_start() -> Result<()> {
                                                                 Ok(Ok(bytes)) => match crate::serve_read::decode_backfill_resp(&bytes) {
                                                                     Ok(resp) if resp.blocks.is_empty() => fail(format!("empty response ({} B)", bytes.len())),
                                                                     Ok(resp) => { let _ = bf_tx2.send(resp.blocks).await; }
+                                                                    Err(e) if e == crate::serve_read::BUSY_ERR => {
+                                                                        // the producer said "not now" at once; the next
+                                                                        // missing-parent event re-asks (gossip usually
+                                                                        // fills the hole first)
+                                                                    }
                                                                     Err(e) => fail(format!("decode ({} B): {e}", bytes.len())),
                                                                 },
                                                             }
@@ -3719,6 +3754,9 @@ fn run_start() -> Result<()> {
                                                                 ph_win();
                                                             }
                                                             let _ = bf_tx2.send(resp.blocks).await;
+                                                        }
+                                                        Err(e) if e == crate::serve_read::BUSY_ERR => {
+                                                            // "too soon", not "too big": keep the size, ask again next heartbeat
                                                         }
                                                         Err(e) => {
                                                             eprintln!("⚠ rr-backfill(peer-heights): decode failed for [{req_from}..={req_to}) from {peer}: {e} ({} B received)", bytes.len());

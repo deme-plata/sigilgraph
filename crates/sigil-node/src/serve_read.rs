@@ -745,6 +745,17 @@ const BACKFILL_BODY_MAGIC: &[u8; 8] = b"SIGILM1\0";
 // producer-mode sigil-top on Windows decodes with pure-Rust ruzstd and still knows only the
 // two shapes above — keeps receiving exactly what it received before.
 const BACKFILL_ZSTD_MAGIC: &[u8; 8] = b"SIGILZ1\0";
+// 2026-09-13: the explicit "not now" answer. A server that throttles a request used to say
+// nothing, and libp2p turned that silence into an 8-second stream timeout on BOTH ends.
+// Eight bytes, sent at once; `decode_backfill_resp` turns them into `Err(BUSY_ERR)` so a
+// client can tell "too big" (halve the ask) from "too soon" (just ask again later).
+const BACKFILL_BUSY_MAGIC: &[u8; 8] = b"SIGILB1\0";
+pub const BUSY_ERR: &str = "peer busy (throttled) — retry later, same size";
+
+/// The 8-byte BUSY reply (see [`BUSY_ERR`]).
+pub fn busy_reply() -> Vec<u8> {
+    BACKFILL_BUSY_MAGIC.to_vec()
+}
 const BACKFILL_ZSTD_LEVEL: i32 = 3;
 
 /// Encode a block-range response. MessagePack behind a magic prefix; `zstd` wraps the body in
@@ -791,6 +802,9 @@ pub fn decode_backfill_resp(bytes: &[u8]) -> Result<crate::BackfillResp, String>
     if bytes.len() >= BACKFILL_BODY_MAGIC.len() && &bytes[..BACKFILL_BODY_MAGIC.len()] == BACKFILL_BODY_MAGIC {
         return rmp_serde::from_slice(&bytes[BACKFILL_BODY_MAGIC.len()..]).map_err(|e| e.to_string());
     }
+    if bytes == BACKFILL_BUSY_MAGIC {
+        return Err(BUSY_ERR.to_string());
+    }
     if bytes.len() >= BACKFILL_ZSTD_MAGIC.len() && &bytes[..BACKFILL_ZSTD_MAGIC.len()] == BACKFILL_ZSTD_MAGIC {
         let raw = zstd::decode_all(&bytes[BACKFILL_ZSTD_MAGIC.len()..]).map_err(|e| format!("zstd: {e}"))?;
         return rmp_serde::from_slice(&raw).map_err(|e| e.to_string());
@@ -828,6 +842,17 @@ mod backfill_body_wire {
         assert_eq!(back.blocks[63].header.height, resp.blocks[63].header.height);
         let back_raw = decode_backfill_resp(&raw).expect("raw body decodes");
         assert_eq!(back_raw.blocks.len(), 64);
+    }
+
+    #[test]
+    fn busy_reply_is_a_distinct_error_not_an_empty_response() {
+        let e = match decode_backfill_resp(&busy_reply()) {
+            Err(e) => e,
+            Ok(r) => panic!("busy must not decode as a response (got {} blocks)", r.blocks.len()),
+        };
+        assert_eq!(e, BUSY_ERR);
+        // and a genuinely empty body is still a decode error, not silently zero blocks
+        assert!(decode_backfill_resp(&[]).is_err());
     }
 
     #[test]

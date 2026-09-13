@@ -6377,6 +6377,19 @@ async function sigilPaymentCode(){
   var s=null,e=null;
   try{ var r=await fetch('/v1/shielded/address?wallet='+a,{cache:'no-store'}); var j=await r.json();
        if(j&&j.ok&&j.pk_shield&&j.pk_encrypt){ s=String(j.pk_shield).toLowerCase(); e=String(j.pk_encrypt).toLowerCase(); } }catch(_){}
+  // 2026-09-13: the chain's published keys are what a payer seals to. If THIS browser's
+  // seed derives different keys, every payment to the code below is unreadable here —
+  // and until now that was only ever written to the console. Say it on the screen.
+  var mismatch=false;
+  if(s){ try{
+      var mn0=window.__sigilMnemonic||null; if(!mn0){ try{ mn0=localStorage.getItem('sigil-wallet-mnemonic')||localStorage.getItem('sigil-wallet-seed'); }catch(_){} }
+      if(mn0&&window.sigilDeriveAuto){ var kp0=window.sigilDeriveAuto(mn0,a);
+        if(kp0&&kp0.address===a&&kp0.priv){ var w0=window.sigilShieldWasm||await window.sigilShieldWasmReady;
+          var hx0=Array.from(kp0.priv).map(function(b){ return ('0'+b.toString(16)).slice(-2); }).join('');
+          var s0=String(w0.shieldPublicKey(hx0)).toLowerCase(), e0=String(w0.shieldEncryptPublicKey(hx0)).toLowerCase();
+          mismatch=(s0!==s)||(e0!==e); } }
+  }catch(_){} }
+  if(mismatch){ window.__sigilRecvKeyMismatch=true; }
   if(!s){
     // Not published yet — derive from the phrase this browser holds, and publish it
     // in the background so a bare-address payer can find it in ~90 s too.
@@ -6389,12 +6402,13 @@ async function sigilPaymentCode(){
           if(window.sigilEnsureRegistered) window.sigilEnsureRegistered(a, kp.priv); } }
     }catch(_){}
   }
-  return {addr:a, code:(s&&e)?('sigil:'+a+'?s='+s+'&e='+e):a, keyed:!!(s&&e)};
+  return {addr:a, code:(s&&e)?('sigil:'+a+'?s='+s+'&e='+e):a, keyed:!!(s&&e), mismatch:mismatch};
 }
 window.sigilPaymentCode=sigilPaymentCode;
 function openReceive(){ var a=_activeAddr(); if(!a)return; document.getElementById('rcvAddr').textContent=a;
   // Upgrade to the payment code (carries the receiving key) as soon as it is known.
   sigilPaymentCode().then(function(pc){ try{ if(!pc||!pc.keyed) return; window.__rcvCode=pc.code; document.getElementById('rcvAddr').textContent=pc.code;
+    if(pc.mismatch){ var sub0=document.getElementById('rcvSub'); if(sub0){ sub0.innerHTML='<b style="color:#ff8a8a">⚠ The receiving key published on chain for this address is NOT the one this wallet derives.</b> Payments sent to this code cannot be opened here. Import the phrase that registered it, or re-register this wallet from More.'; sub0.style.color='#ff8a8a'; } }
     var q2=qrcode(0,'M'); q2.addData(pc.code); q2.make(); document.getElementById('rcvQr').innerHTML='<div style="background:#fff;padding:10px;border-radius:12px;line-height:0">'+q2.createSvgTag({cellSize:3,margin:0})+'</div>';
     var sub=document.getElementById('rcvSub'); if(sub) sub.textContent='share this payment code — it carries your private receiving key, so anyone can pay you privately right away (the bare address alone works only once your key is published on chain)'; }catch(_){} }).catch(function(){});
   window.__rcvCode=null;

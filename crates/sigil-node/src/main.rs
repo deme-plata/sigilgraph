@@ -346,6 +346,25 @@ fn main() -> ExitCode {
                 Err(e) => { eprintln!("sigil-node: {:#}", e); ExitCode::from(1) }
             };
         }
+        // 2026-09-13: `chainlog-recompress <dir>` — rewrite chain.log in the v2 (dictionary)
+        // record format. OFFLINE: stop the node first. See chain_log::recompress_offline.
+        Some("chainlog-recompress") => {
+            let dir = match args.get(2) {
+                Some(d) => std::path::PathBuf::from(d),
+                None => { eprintln!("usage: sigil-node chainlog-recompress <dir containing chain.log>"); return ExitCode::from(64); }
+            };
+            eprintln!("⏳ chainlog-recompress: {} (node must be STOPPED)", dir.display());
+            let t0 = std::time::Instant::now();
+            return match chain_log::recompress_offline(&dir) {
+                Ok((n, before, after)) => {
+                    println!("✓ chainlog-recompress: {} records, {:.2} GB → {:.2} GB ({:.1}×, {} → {} B/blk) in {:.0}s; old log kept as chain.log.pre-v2",
+                        n, before as f64 / 1e9, after as f64 / 1e9, before as f64 / after.max(1) as f64,
+                        before / n.max(1), after / n.max(1), t0.elapsed().as_secs_f64());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => { eprintln!("sigil-node: chainlog-recompress: {}", e); ExitCode::from(1) }
+            };
+        }
         _ => {}
     }
 
@@ -2264,7 +2283,18 @@ fn run_start() -> Result<()> {
                                     // adaptive rate: retune the tick from mempool backlog every 16 blocks
                                     if let Some(g) = rate_gov.as_mut() {
                                         if produced % 16 == 0 {
-                                            let backlog = mempool.len();
+                                            // 2026-09-13: the governor was fed `mempool.len()` alone —
+                                            // the TRANSPARENT mempool, retired since g2 (SHIELDED_ONLY_HEIGHT
+                                            // = 0), so it read 0 forever and the "demand-responsive" rate
+                                            // could never respond to a real payment. Real demand lives in
+                                            // the bridges: shielded sends, transparent-path sends, DEX,
+                                            // USDS. MEASURED cost of ignoring this: 110 empty blk/s pinned
+                                            // = 1,109 B/blk × 9.5M blk/day = 10.5 GB/day of nothing.
+                                            let backlog = mempool.len()
+                                                + shielded_bridge.pending_len()
+                                                + send_bridge.pending_len()
+                                                + dex_bridge.pending_len()
+                                                + usds_bridge.pending_len();
                                             let iv = g.update(backlog);
                                             // Re-arm only when the governor actually moved: re-creating
                                             // the interval from `now` (the END of this tick's work) stretched

@@ -159,6 +159,69 @@ const PROBE_WINDOW: usize = 256;
 /// struct exactly as JSON does today, and `zstd` recovers most of what the names cost.
 const REC_MAGIC: u8 = 0xB5;
 const REC_VERSION_V1: u8 = 1;
+// ── v2: the same MessagePack body, zstd'd WITH A TRAINED DICTIONARY ────────────────────
+//
+// 2026-09-13, Viktor: "det er for meget plads … node operator brugerne blir skræmt væk"
+// — and no pruning, a node must simply carry the chain. So the block itself has to be
+// small. MEASURED on 20,752 live g2 blocks (examples/chainlog_batch_bench.rs, tail of the
+// real log, dictionary trained on the OLDER half and measured on the NEWER half):
+//
+// | on disk                                     | B/blk |
+// |---------------------------------------------|-------|
+// | v1: per record, zstd3, no dictionary (today)| 1,105 |
+// | v2: per record, zstd3, 64 KB trained dict   |   337 |
+// | one zstd19 frame over 5,140 records (bound) |   278 |
+//
+// Why a dictionary works this well: an "empty" block is ~1.9 KB of MessagePack, and
+// almost all of it is the same every block — nine SetBalance mutations to the same
+// handful of wallets (producer, dev fee, welfare, nation…), field names, three all-zero
+// roots, a 292-byte all-zero SQIsign nonce. zstd on a 2 KB record alone has no history
+// to match against; the dictionary IS that history. What remains (~340 B) is the part
+// that is genuinely different per block: the wallet root, the producer signature, the
+// topology commitment, timestamps, and the low digits of nine balances.
+//
+// Random access per record is unchanged (still one record = one zstd frame), v1 and
+// legacy JSON records still decode, and the dictionary is compiled into the binary
+// (`dict/chainlog-v2.zdict`, 64 KB) — so a v2 record is readable by every future build
+// as long as that file never changes. It must never change: a new dictionary is a new
+// version byte, never an edit of this one.
+const REC_VERSION_V2: u8 = 2;
+const CHAINLOG_DICT_V2: &[u8] = include_bytes!("../dict/chainlog-v2.zdict");
+
+thread_local! {
+    static V2_COMPRESSOR: std::cell::RefCell<Option<zstd::bulk::Compressor<'static>>> = const { std::cell::RefCell::new(None) };
+    static V2_DECOMPRESSOR: std::cell::RefCell<Option<zstd::bulk::Decompressor<'static>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn v2_compress(raw: &[u8]) -> std::io::Result<Vec<u8>> {
+    V2_COMPRESSOR.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.is_none() {
+            *c = Some(zstd::bulk::Compressor::with_dictionary(REC_ZSTD_LEVEL, CHAINLOG_DICT_V2)?);
+        }
+        c.as_mut().expect("just set").compress(raw)
+    })
+}
+
+fn v2_decompress(body: &[u8]) -> std::io::Result<Vec<u8>> {
+    V2_DECOMPRESSOR.with(|d| {
+        let mut d = d.borrow_mut();
+        if d.is_none() {
+            *d = Some(zstd::bulk::Decompressor::with_dictionary(CHAINLOG_DICT_V2)?);
+        }
+        // `bulk::Decompressor::decompress` ALLOCATES AND ZERO-FILLS `capacity` bytes up front,
+        // so a lazy 64 MiB ceiling here cost ~120 ms per record (MEASURED: the replay tests'
+        // 10 ms seek budget blew to 123 ms). The frame carries its own content size — use it,
+        // and fall back to a bounded multiple of the compressed length if it doesn't.
+        let cap = zstd::zstd_safe::get_frame_content_size(body)
+            .ok()
+            .flatten()
+            .map(|n| n as usize)
+            .unwrap_or(body.len().saturating_mul(16))
+            .clamp(1024, 64 << 20);
+        d.as_mut().expect("just set").decompress(body, cap)
+    })
+}
 /// `MAGIC | VERSION | height(8)` — the fixed part before the compressed body.
 const REC_V1_HEADER: usize = 10;
 /// zstd level 3: measured 896 B/blk. Higher levels gain little on records this small and
@@ -176,10 +239,13 @@ pub fn encode_record(block: &Block) -> std::io::Result<Vec<u8>> {
     }
     let packed = rmp_serde::to_vec_named(block)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let body = zstd::encode_all(&packed[..], REC_ZSTD_LEVEL)?;
+    // v1 stays writable behind an escape hatch (bisecting a suspected dictionary/codec
+    // bug against a known-good reader); readers never need it.
+    let v1 = std::env::var("SIGIL_CHAINLOG_V1").as_deref() == Ok("1");
+    let body = if v1 { zstd::encode_all(&packed[..], REC_ZSTD_LEVEL)? } else { v2_compress(&packed)? };
     let mut out = Vec::with_capacity(REC_V1_HEADER + body.len());
     out.push(REC_MAGIC);
-    out.push(REC_VERSION_V1);
+    out.push(if v1 { REC_VERSION_V1 } else { REC_VERSION_V2 });
     out.extend_from_slice(&block.header.height.to_le_bytes());
     out.extend_from_slice(&body);
     Ok(out)
@@ -195,10 +261,14 @@ pub fn decode_record(payload: &[u8]) -> Option<Block> {
         // Legacy JSON — every record written before 2026-08-27.
         b'{' => serde_json::from_slice(payload).ok(),
         &REC_MAGIC => {
-            if payload.len() < REC_V1_HEADER || payload[1] != REC_VERSION_V1 {
+            if payload.len() < REC_V1_HEADER {
                 return None;
             }
-            let raw = zstd::decode_all(&payload[REC_V1_HEADER..]).ok()?;
+            let raw = match payload[1] {
+                REC_VERSION_V1 => zstd::decode_all(&payload[REC_V1_HEADER..]).ok()?,
+                REC_VERSION_V2 => v2_decompress(&payload[REC_V1_HEADER..]).ok()?,
+                _ => return None,
+            };
             rmp_serde::from_slice(&raw).ok()
         }
         _ => None,
@@ -217,7 +287,7 @@ pub fn decode_record(payload: &[u8]) -> Option<Block> {
 /// record format and there must be one reader of it.
 pub(crate) fn probe_height(payload: &[u8]) -> Option<u64> {
     match payload.first()? {
-        &REC_MAGIC if payload.len() >= REC_V1_HEADER && payload[1] == REC_VERSION_V1 => {
+        &REC_MAGIC if payload.len() >= REC_V1_HEADER && (payload[1] == REC_VERSION_V1 || payload[1] == REC_VERSION_V2) => {
             Some(u64::from_le_bytes(payload[2..10].try_into().ok()?))
         }
         b'{' => probe_height_fast(payload),
@@ -1131,9 +1201,10 @@ mod probe_height_tests {
     //! is "return None on ANY doubt" so a wrong/missing probe can never change
     //! which blocks get applied — these tests pin every doubt path.
     use super::{
-        decode_record, encode_record, probe_height, probe_height_fast, PROBE_WINDOW, REC_MAGIC,
-        REC_VERSION_V1,
+        decode_record, encode_record, probe_height, probe_height_fast, ChainLog, PROBE_WINDOW,
+        CHAINLOG_DICT_V2, REC_MAGIC, REC_VERSION_V1, REC_VERSION_V2, REC_ZSTD_LEVEL,
     };
+    use crate::block::Block;
 
     /// A v1 record must survive a full encode→decode round trip unchanged. If this ever
     /// fails, every block written since the switch is unreadable — the failure mode the
@@ -1141,12 +1212,71 @@ mod probe_height_tests {
     #[test]
     fn v1_record_round_trips_byte_identically() {
         let b = crate::genesis::build_genesis().expect("genesis");
-        let rec = encode_record(&b).expect("encode");
+        let rec = encode_v1_for_test(&b);
         assert_eq!(rec[0], REC_MAGIC, "v1 records must carry the magic byte");
         assert_eq!(rec[1], REC_VERSION_V1);
         let back = decode_record(&rec).expect("decode");
         assert_eq!(back.hash(), b.hash(), "round trip must preserve the block hash");
         assert_eq!(back.header.height, b.header.height);
+    }
+
+    /// The v1 shape, exactly as every record written 2026-08-27..2026-09-13 was — kept as
+    /// a test-side encoder so the reader's v1 branch stays covered forever.
+    fn encode_v1_for_test(b: &Block) -> Vec<u8> {
+        let packed = rmp_serde::to_vec_named(b).unwrap();
+        let body = zstd::encode_all(&packed[..], REC_ZSTD_LEVEL).unwrap();
+        let mut out = vec![REC_MAGIC, REC_VERSION_V1];
+        out.extend_from_slice(&b.header.height.to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// v2 (dictionary) is the default writer; it must round-trip, be identifiable, probe
+    /// its height without decompressing, and be materially smaller than v1 on a real-shaped
+    /// block. A dictionary that stopped matching (someone regenerated the file) would show
+    /// up here as the size assertion failing, before it ever reached a node.
+    #[test]
+    fn v2_dictionary_record_round_trips_probes_and_is_smaller() {
+        let b = crate::genesis::build_genesis().expect("genesis");
+        let v2 = encode_record(&b).expect("encode");
+        assert_eq!(v2[0], REC_MAGIC);
+        assert_eq!(v2[1], REC_VERSION_V2, "the default writer is v2");
+        assert_eq!(probe_height(&v2), Some(b.header.height), "height probes from the fixed header");
+        let back = decode_record(&v2).expect("v2 decodes");
+        assert_eq!(back.hash(), b.hash());
+        let v1 = encode_v1_for_test(&b);
+        assert!(v2.len() < v1.len(), "v2 {} B must beat v1 {} B even on genesis", v2.len(), v1.len());
+        // the dictionary is pinned: a changed file is a changed format
+        assert_eq!(CHAINLOG_DICT_V2.len(), 65536);
+        assert_eq!(&CHAINLOG_DICT_V2[..4], &[0x37, 0xA4, 0x30, 0xEC], "zstd dictionary magic");
+    }
+
+    /// v1, v2 and legacy JSON records coexist in one log and replay in order.
+    #[test]
+    fn mixed_v1_v2_json_records_replay_in_order() {
+        let dir = std::env::temp_dir().join(format!("sigil-chainlog-mixed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let blocks = crate::block::__test_chain(6);
+        {
+            let mut log = ChainLog::open(&dir).unwrap();
+            for (i, b) in blocks.iter().enumerate() {
+                let rec = match i % 3 {
+                    0 => serde_json::to_vec(b).unwrap(),
+                    1 => encode_v1_for_test(b),
+                    _ => encode_record(b).unwrap(),
+                };
+                log.append_bytes(&rec).unwrap();
+            }
+        }
+        let mut seen = Vec::new();
+        let n = ChainLog::replay(&dir, |b| seen.push(b.header.height)).unwrap();
+        assert_eq!(n, 6);
+        assert_eq!(seen, blocks.iter().map(|b| b.header.height).collect::<Vec<_>>());
+        let log = ChainLog::open(&dir).unwrap();
+        for b in &blocks {
+            assert_eq!(log.get_by_height(b.header.height).map(|x| x.hash()), Some(b.hash()));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **Legacy JSON records must keep decoding forever.** The log is append-only and
@@ -1251,4 +1381,90 @@ mod probe_height_tests {
         ok.extend_from_slice(b"12,"); // terminator (comma) is inside the window
         assert_eq!(probe_height_fast(&ok), Some(12));
     }
+}
+
+// ── OFFLINE RECOMPRESSION (2026-09-13) ──────────────────────────────────────────────────
+//
+// `sigil-node chainlog-recompress <dir>`: rewrite every record of `<dir>/chain.log` in the
+// current default format (v2, dictionary) into `chain.log.recompress`, with a fresh sparse
+// index beside it, then swap the pair into place and keep the old log as
+// `chain.log.pre-v2` until the operator deletes it. Streaming — RAM is one record at a
+// time. MEASURED on the live g2 log: v1 1,105 B/blk → v2 ~340 B/blk, so a 13 GB log
+// becomes ~4 GB.
+//
+// OFFLINE ONLY. The running node holds an append handle and an in-RAM offset table for
+// the OLD file; swapping under it would corrupt the next append. The caller stops the
+// node first (the tool refuses if `chain.log` was modified in the last 10 s, which is the
+// cheapest honest liveness test available without a lock file).
+/// See the module note above. Returns (records, bytes_before, bytes_after).
+pub fn recompress_offline(dir: &Path) -> std::io::Result<(u64, u64, u64)> {
+    let src = dir.join("chain.log");
+    let meta = std::fs::metadata(&src)?;
+    if let Ok(m) = meta.modified() {
+        if m.elapsed().map(|d| d.as_secs() < 10).unwrap_or(false) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ResourceBusy,
+                "chain.log was written in the last 10 s — is the node still running? stop it first",
+            ));
+        }
+    }
+    let dst = dir.join("chain.log.recompress");
+    let dst_idx = dir.join("chain.idx.recompress");
+    let mut r = BufReader::with_capacity(8 << 20, File::open(&src)?);
+    let mut w = BufWriter::with_capacity(8 << 20, File::create(&dst)?);
+    let mut iw = BufWriter::new(File::create(&dst_idx)?);
+    let mut hdr = [0u8; IDX_HEADER_LEN];
+    hdr[..7].copy_from_slice(&IDX_MAGIC);
+    hdr[7] = IDX_VERSION;
+    iw.write_all(&hdr)?;
+    let (mut n, mut before, mut after) = (0u64, 0u64, 0u64);
+    let mut pos_out: u64 = 0;
+    let t0 = std::time::Instant::now();
+    loop {
+        let mut lb = [0u8; 4];
+        if r.read_exact(&mut lb).is_err() { break; }
+        let len = u32::from_le_bytes(lb) as usize;
+        let mut rec = vec![0u8; len];
+        if r.read_exact(&mut rec).is_err() { break; } // torn tail: stop, like open() does
+        before += 4 + len as u64;
+        // Already v2 → copy verbatim (idempotent re-runs); anything else → decode + re-encode.
+        let out: Vec<u8> = if rec.len() >= REC_V1_HEADER && rec[0] == REC_MAGIC && rec[1] == REC_VERSION_V2 {
+            rec
+        } else {
+            match decode_record(&rec) {
+                Some(b) => encode_record(&b)?,
+                None => {
+                    eprintln!("⚠ chainlog-recompress: record #{n} ({len} B) does not decode — copied verbatim");
+                    rec
+                }
+            }
+        };
+        if n % IDX_EVERY == 0 {
+            if let Some(h) = probe_height(&out) {
+                let mut e = [0u8; IDX_ENTRY_LEN];
+                e[..8].copy_from_slice(&h.to_le_bytes());
+                e[8..].copy_from_slice(&pos_out.to_le_bytes());
+                iw.write_all(&e)?;
+            }
+        }
+        w.write_all(&(out.len() as u32).to_le_bytes())?;
+        w.write_all(&out)?;
+        pos_out += 4 + out.len() as u64;
+        after = pos_out;
+        n += 1;
+        if n % 500_000 == 0 {
+            eprintln!("  … {n} records, {:.1} → {:.1} GB, {:.0} rec/s",
+                before as f64 / 1e9, after as f64 / 1e9, n as f64 / t0.elapsed().as_secs_f64().max(1e-9));
+        }
+    }
+    w.flush()?; w.get_ref().sync_all()?;
+    iw.flush()?; iw.get_ref().sync_all()?;
+    drop(w); drop(iw);
+    // Swap: old log → chain.log.pre-v2 (kept), new → chain.log; same for the index.
+    let keep = dir.join("chain.log.pre-v2");
+    std::fs::rename(&src, &keep)?;
+    std::fs::rename(&dst, &src)?;
+    let _ = std::fs::rename(dir.join("chain.idx"), dir.join("chain.idx.pre-v2"));
+    std::fs::rename(&dst_idx, dir.join("chain.idx"))?;
+    Ok((n, before, after))
 }

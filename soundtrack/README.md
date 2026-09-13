@@ -160,3 +160,20 @@ per track, all from `SIGIL Eternal` (`numbers.json`); each track admits its own 
 | 026 | **Point Seven Three Seven** | Yotto / Cristoph progressive house, 125 BPM | "Point seven three seven / ninety-nine point three still in the ground" · "the calendar is fixed, the day is not" |
 | 027 | **Six Point Four Million** | Camelphat / Eli Brown peak-time tech house, 126 BPM | "Six — point — four — million" · "a dollar here is a rule on a chain, not a promise from a bank" |
 | 028 | **Fifty-Eight Bits** | Solomun / Adriatique deep progressive, 122 BPM | "Fifty-eight bits / that's the room" · "you can't have both, so we chose" |
+
+### Vol. VII — The Study (2026-09-13) — **five tracks, back to Led Zeppelin / Robert Plant, one borrowed invention each**
+
+Operator brief: *"back to rock bands especially robert plant and led zeppelin — he recently went to Tiny Desk and told us
+how much he studied music and artists being innovative, so i want that also into the tracks."* Every track therefore
+borrows ONE named Zeppelin invention on purpose (DADGAD raga + 5/4, the stairwell drums, the mandolin duet, the 7/8
+gallop with Black Dog displacement, the transfigured 12-bar) and sings a verse about innovation itself — a bow on a
+guitar, a prime inside a word, tearing a chain down to build it again. Numbers from `SIGIL Eternal` + K-paper §10;
+each track admits its own limit.
+
+| # | Track | Borrowed invention | Number | Hook |
+|---|---|---|---|---|
+| 029 | **Goldilocks** | Black Mountain Side DADGAD raga → Four Sticks 5/4, strings | p = 2⁶⁴ − 2³² + 1; 58 bits; 1.37× | "Goldilocks! A house the size of a word" |
+| 030 | **Six Hundred and Twenty** | Levee stairwell drums, slide, harmonica | g1: 1,266,227 notes, 1 spent, 620/620 attributable; g2: 3,288 / 59 / 49 | "We tore it down in a day — built it again" |
+| 031 | **The Clock on the Mountain** | Battle of Evermore mandolin + Sandy Denny duet | 3.3×10⁻¹⁴ K/m; ITER 8×10²³× colder than Planck; 2.73 s; 2.8 pK (analogy) | "The clock on the ledger runs when we agree" |
+| 032 | **Six Hundred Steps** | The Ocean count-in, Achilles gallop, Black Dog displacement | VDF t = 600 sequential squarings; the 0 == 0 bypass, fixed | "Six hundred! Nobody skips!" |
+| 033 | **A Hundred and Fifty-Five Dollars** | Rock and Roll boogie, Custard Pie harmonica | $0.001 → $155 mcap, $21k FDV, 1,467 locked | "And I wouldn't sell it for the town" |

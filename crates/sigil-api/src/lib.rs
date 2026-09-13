@@ -963,15 +963,17 @@ pub async fn shielded_leaves_handler(
     // and still needs to be found, and its ciphertext only exists in that epoch's archive.
     let live = pool.epoch();
     let want = q.epoch.unwrap_or(live);
-    let (mut leaves, mut ciphertexts, anchor) = if want == live {
-        (
-            pool.notes().to_vec(),
-            pool.ciphertexts().to_vec(),
-            pool.current_root(),
-        )
+    // 2026-09-13 (rocky-bps100-0912): borrow, do not clone. This handler used to
+    // `.to_vec()` every note AND every delivery ciphertext (14k × 620 B ≈ 9 MB) under the
+    // state read lock on EVERY request, then drain the part the caller did not ask for —
+    // and the web wallet's scanner asks once a second. Slice the tail instead, and let a
+    // prover that only needs commitments skip the ciphertexts entirely
+    // (`?ciphertexts=0`: 32 B per note instead of ~650 B — the proof path never reads them).
+    let (leaves_all, cts_all, anchor): (&[[u8; 32]], &[Option<String>], [u8; 32]) = if want == live {
+        (pool.notes(), pool.ciphertexts(), pool.current_root())
     } else {
         match pool.archive().get(want as usize) {
-            Some(a) => (a.notes.clone(), a.ciphertexts.clone(), a.root),
+            Some(a) => (&a.notes[..], &a.ciphertexts[..], a.root),
             None => {
                 return Json(serde_json::json!({
                     "ok": false,
@@ -986,16 +988,17 @@ pub async fn shielded_leaves_handler(
     // caller can splice what it gets straight onto what it already scanned. `total` is
     // returned unconditionally so a client can tell "nothing new" from "I asked wrong"
     // without a second request.
-    let total = leaves.len() as u64;
+    let total = leaves_all.len() as u64;
     let from = q.from.unwrap_or(0).min(total);
-    if from > 0 {
-        leaves.drain(..from as usize);
-        if (from as usize) < ciphertexts.len() {
-            ciphertexts.drain(..from as usize);
-        } else {
-            ciphertexts.clear();
-        }
-    }
+    let leaves = &leaves_all[from as usize..];
+    let want_cts = q.ciphertexts.map(|v| v != 0).unwrap_or(true);
+    let ciphertexts: &[Option<String>] = if !want_cts {
+        &[]
+    } else if (from as usize) < cts_all.len() {
+        &cts_all[from as usize..]
+    } else {
+        &[]
+    };
     Json(serde_json::json!({
         "ok": true,
         "epoch": want,
@@ -1057,6 +1060,9 @@ pub struct ShieldedHasQuery {
 #[derive(serde::Deserialize)]
 pub struct ShieldedLeavesQuery {
     pub epoch: Option<u32>,
+    /// `0` = commitments only (no delivery ciphertexts) — for a prover that only needs
+    /// the Merkle leaves. Default: include them (the scanner needs them).
+    pub ciphertexts: Option<u8>,
     /// Serve only leaves from this position onward.
     ///
     /// A wallet must trial-decrypt every ciphertext to find its own notes, so it polls this

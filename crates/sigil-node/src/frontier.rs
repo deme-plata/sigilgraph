@@ -221,3 +221,27 @@ pub fn dag_build_frontier_memo(
 // Until then: `main.rs` still runs its OWN inline copy of the original
 // algorithm and is untouched. `dag_build_frontier_memo` is not reachable from
 // the producer. Nothing here changes live behavior.
+
+/// The frontier FAST PATH's reuse test (2026-09-13, V10 block production) — the one
+/// predicate the live producer (`main.rs`, the mint tick) and the chronos soak
+/// (`sigil-chronos/src/frontier_memo.rs`) share, so what is proven is what runs.
+///
+/// Last tick's frontier `cache` may stand in for a full rebuild iff:
+/// * it is ahead of the settled chain (a drain that overtook it means the cache is
+///   stale — the settled state already contains its blocks and possibly more), and
+/// * the braid's selected tip IS the cache's own last-applied block (`parent_hash()`
+///   of a `ChainTip` is the hash of its tip block). Then "settled state + selected
+///   spine" is exactly the block sequence the cache applied, through the same
+///   `ChainTip::apply`, so the state is the same. A reorg, a reseed, a refused own
+///   block or a merge that moved the selected tip all fail this test and rebuild.
+///
+/// Unlike `dag_build_frontier_memo` above (partial extension along a walked path —
+/// stalled production twice), this never extends: it is reuse-or-rebuild, nothing
+/// in between.
+pub fn frontier_reusable(cache: Option<&ChainTip>, chain: &ChainTip, braid: &Braid) -> bool {
+    let Some(c) = cache else { return false };
+    if c.height() <= chain.height() {
+        return false;
+    }
+    braid.selected_tip().is_some_and(|tip| c.parent_hash() == tip)
+}

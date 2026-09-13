@@ -1420,6 +1420,16 @@ fn run_start() -> Result<()> {
         let mint_profile: bool =
             std::env::var("SIGIL_MINT_PROFILE").ok().as_deref() == Some("1");
         let mut ph_frontier_us: u64 = 0;
+        // 2026-09-13 — frontier fast path (see the mint tick): reuse the previous tick's
+        // frontier when the braid's selected tip IS the block we minted on it last tick.
+        // `SIGIL_FRONTIER_FAST=0` disables; `SIGIL_FRONTIER_VERIFY_EVERY` (default 256) is
+        // how often the reused frontier is checked against a full rebuild (height,
+        // parent hash, all four O(1) state roots). One mismatch disables the fast path
+        // for the life of the process and says so.
+        let mut ff_enabled: bool = std::env::var("SIGIL_FRONTIER_FAST").map(|v| v != "0").unwrap_or(true);
+        let ff_verify_every: u64 = std::env::var("SIGIL_FRONTIER_VERIFY_EVERY").ok()
+            .and_then(|v| v.parse().ok()).filter(|n: &u64| *n > 0).unwrap_or(256);
+        let (mut ff_hits, mut ff_rebuilds, mut ff_verified, mut ff_mismatch): (u64, u64, u64, u64) = (0, 0, 0, 0);
         let mut ph_mint_us: u64 = 0;
         let mut ph_drain_us: u64 = 0;
         let ph_serve_us = std::sync::atomic::AtomicU64::new(0);
@@ -1846,10 +1856,55 @@ fn run_start() -> Result<()> {
                     // stable; `frontier_cache` is no longer read, left declared for the next
                     // deliberate, chronos-first re-adoption attempt.
                     let _t_frontier = std::time::Instant::now(); // cheap; only READ when profiling
-                    let _ = &frontier_cache;
-                    let frontier_opt: Option<ChainTip> = braid.as_ref().map(|br| {
-                        dag_build_frontier(&chain, br, &dag_bodies).frontier
-                    });
+                    // 2026-09-13 — THE FRONTIER FAST PATH (V10 block production).
+                    //
+                    // MEASURED on Epsilon this afternoon: with certificates flowing the
+                    // pending spine is 20–60 blocks and the rebuild costs 1.9 ms/tick; when
+                    // the follower stalled and settlement fell back to the 512-block depth
+                    // rule, the same rebuild re-applied 512 blocks every tick — 55 ms — and
+                    // production fell from 110 to 11 blk/s. The cost is O(pending spine)
+                    // because every tick starts over from the settled state.
+                    //
+                    // This is NOT the memoised partial-extension walk that stalled the
+                    // producer on 08-23 and 08-26 (`frontier::dag_build_frontier_memo`).
+                    // It reuses last tick's frontier in exactly ONE case, and it is the case
+                    // that holds on ~every tick of a healthy producer: the braid's selected
+                    // tip is the block WE minted on that frontier last tick. Then the
+                    // frontier we already hold IS "settled state + the selected spine" —
+                    // the same block sequence a rebuild would apply, through the same
+                    // `ChainTip::apply`, so the same state. Anything else (a reorg, a
+                    // reseed, our own block refused by the braid, a settled line that
+                    // overtook the cache) rebuilds from the settled tip as before.
+                    //
+                    // Trust, then verify: every `ff_verify_every` ticks the reused frontier
+                    // is compared with a full rebuild on height, parent hash and all four
+                    // state roots (O(1) accumulators). A mismatch is logged 🔴, drops the
+                    // cache and turns the fast path off for good in this process — the
+                    // failure mode is bounded to at most that many blocks, and the follower
+                    // would refuse them at the first divergent root.
+                    let ff_can_reuse = ff_enabled
+                        && braid.as_ref().is_some_and(|br| crate::frontier::frontier_reusable(frontier_cache.as_ref(), &chain, br));
+                    let frontier_opt: Option<ChainTip> = if ff_can_reuse {
+                        ff_hits += 1;
+                        let reused = frontier_cache.take();
+                        if ff_hits % ff_verify_every == 0 {
+                            if let (Some(br), Some(c)) = (braid.as_ref(), reused.as_ref()) {
+                                let full = dag_build_frontier(&chain, br, &dag_bodies).frontier;
+                                ff_verified += 1;
+                                if full.height() != c.height() || full.parent_hash() != c.parent_hash() || full.roots() != c.roots() {
+                                    ff_mismatch += 1;
+                                    ff_enabled = false;
+                                    eprintln!("🔴 frontier fast path: reused frontier DISAGREES with a full rebuild (reused H={} parent {} vs full H={} parent {}) — fast path DISABLED for this process; minting on the rebuilt frontier",
+                                        c.height(), hex::encode(&c.parent_hash()[..8]), full.height(), hex::encode(&full.parent_hash()[..8]));
+                                    Some(full)
+                                } else { reused }
+                            } else { reused }
+                        } else { reused }
+                    } else {
+                        if braid.is_some() { ff_rebuilds += 1; }
+                        frontier_cache = None;
+                        braid.as_ref().map(|br| dag_build_frontier(&chain, br, &dag_bodies).frontier)
+                    };
                     ph_frontier_us += _t_frontier.elapsed().as_micros() as u64;
                     ph_ticks += 1;
                     let mint_ref: &ChainTip = frontier_opt.as_ref().unwrap_or(&chain);
@@ -2113,6 +2168,15 @@ fn run_start() -> Result<()> {
                             // the block, so our own blocks enter the braid (§3.3).
                             let dag_own: Option<(BlockView, crate::block::Block)> =
                                 braid.is_some().then(|| (BlockView::from(&block.header), block.clone()));
+                            // Frontier fast path: the block we just minted on `frontier_opt`
+                            // extends it; keep the result for next tick. (Dropped again below
+                            // if the braid refuses the block — the reuse test would fail
+                            // anyway since the selected tip won't be it, but be explicit.)
+                            if ff_enabled {
+                                if let Some(mut f) = frontier_opt {
+                                    frontier_cache = f.apply(block.clone()).ok().map(|_| f);
+                                }
+                            }
                             // Settle: DAGKnight uses ONLY the finalized drain (so nodes
                             // converge); linear mode self-applies. In DAG mode our own block
                             // enters the braid like a peer's — it is NOT self-applied — and
@@ -2120,7 +2184,9 @@ fn run_start() -> Result<()> {
                             let settled_ok: bool = if let Some(br) = braid.as_mut() {
                                 if let Some((view, body)) = dag_own {
                                     let vh = view.hash;
-                                    let _ = br.insert(view); // own block joins the DAG
+                                    if matches!(br.insert(view), InsertOutcome::Rejected(_)) { // own block joins the DAG
+                                        frontier_cache = None;
+                                    }
                                     dag_store_body(&mut dag_bodies, dag_max_bodies, vh, body);
                                     // Remember what THIS specific candidate carries, keyed by
                                     // its own hash — dag_drain_apply looks this up ONLY for the
@@ -3054,6 +3120,8 @@ fn run_start() -> Result<()> {
                                             ph_drain_us as f64 / t as f64 / 1000.0,
                                             serve_us_now as f64 / t as f64 / 1000.0,
                                             serve_us_now as f64 * 100.0 / (ph_frontier_us + ph_drain_us + serve_us_now).max(1) as f64);
+                                        eprintln!("⏱ frontier fast path: {} · reused {} · rebuilt {} · verified {} · mismatches {}",
+                                            if ff_enabled { "ON" } else { "OFF" }, ff_hits, ff_rebuilds, ff_verified, ff_mismatch);
                                         ph_frontier_us = 0; ph_drain_us = 0; ph_ticks = 0;
                                         ph_serve_us.store(0, std::sync::atomic::Ordering::Relaxed);
                                         last_phase_log = std::time::Instant::now();

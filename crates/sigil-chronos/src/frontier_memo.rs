@@ -233,6 +233,12 @@ pub struct SoakResult {
     pub memo_applied_total: u64,
     /// Ticks where memo's frontier disagreed with baseline's. MUST be empty.
     pub divergent_ticks: Vec<u64>,
+    /// 2026-09-13 fast-path lane (`frontier::frontier_reusable`, the live producer's
+    /// reuse-or-rebuild): ticks reused, ticks rebuilt, ticks where the reused frontier
+    /// disagreed with baseline (MUST be empty).
+    pub fast_reused: u64,
+    pub fast_rebuilt: u64,
+    pub fast_divergent_ticks: Vec<u64>,
     pub final_settled_height: u64,
     pub final_frontier_height: u64,
 }
@@ -258,6 +264,7 @@ pub fn run_soak(ticks: u64, reorg_every: u64, drain_every: u64, seed: u128) -> S
     let (mut chain, mut braid, mut dag_bodies) = fresh_world();
 
     let mut memo_cached: Option<ChainTip> = None;
+    let mut fast_cached: Option<ChainTip> = None;
     // `prev1` = (the block minted+inserted at the end of the previous tick, the
     // frontier it was minted FROM). `prev2_parent` = the frontier the block minted
     // TWO ticks ago was minted from — i.e. one generation earlier than `prev1`'s
@@ -308,6 +315,18 @@ pub fn run_soak(ticks: u64, reorg_every: u64, drain_every: u64, seed: u128) -> S
         if bfp != mfp {
             r.divergent_ticks.push(tick);
         }
+        // Fast-path lane — exactly the live producer's logic: reuse when the shared
+        // predicate says so, else a full rebuild; after the mint, extend by the block.
+        let fast: ChainTip = if sigil_node::frontier::frontier_reusable(fast_cached.as_ref(), &chain, &braid) {
+            r.fast_reused += 1;
+            fast_cached.take().expect("reusable implies Some")
+        } else {
+            r.fast_rebuilt += 1;
+            dag_build_frontier(&chain, &braid, &dag_bodies).frontier
+        };
+        if fingerprint(&fast) != bfp {
+            r.fast_divergent_ticks.push(tick);
+        }
 
         // (c) Mint this tick's own block on the CORRECTED, canonical frontier —
         // guarantees the chain keeps progressing correctly regardless of what just
@@ -321,6 +340,7 @@ pub fn run_soak(ticks: u64, reorg_every: u64, drain_every: u64, seed: u128) -> S
         dag_store_body(&mut dag_bodies, BODY_CAP, primary.hash(), primary.clone());
 
         prev2_parent = prev1.as_ref().map(|(_, pf)| pf.clone());
+        fast_cached = { let mut f = fast; f.apply(primary.clone()).ok().map(|_| f) };
         prev1 = Some((primary, baseline.frontier.clone()));
         memo_cached = Some(memo.frontier.clone());
 
@@ -390,6 +410,26 @@ mod tests {
              \"reorgs\" tested nothing"
         );
         assert!(r.drains_run > 0, "scenario configuration never exercised a real finality drain");
+        eprintln!(
+            "frontier fast-path lane: reused={} rebuilt={} divergent={}",
+            r.fast_reused, r.fast_rebuilt, r.fast_divergent_ticks.len()
+        );
+        assert!(
+            r.fast_divergent_ticks.is_empty(),
+            "SECURITY: the frontier fast path disagreed with dag_build_frontier at {} of {} ticks (first few: {:?})",
+            r.fast_divergent_ticks.len(), r.ticks,
+            &r.fast_divergent_ticks[..r.fast_divergent_ticks.len().min(10)],
+        );
+        assert!(
+            r.fast_reused > r.ticks / 2,
+            "the fast path must be the common case on a healthy producer: reused {} of {} ticks",
+            r.fast_reused, r.ticks
+        );
+        assert!(
+            r.fast_rebuilt >= r.reorgs_injected,
+            "every injected reorg moves the selected tip off our last block and must force a rebuild: rebuilt {} < reorgs {}",
+            r.fast_rebuilt, r.reorgs_injected
+        );
         assert!(
             r.divergent_ticks.is_empty(),
             "SECURITY: dag_build_frontier_memo disagreed with dag_build_frontier at {} of {} \

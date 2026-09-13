@@ -42,6 +42,7 @@ pub type EventTag = u8;
 /// non-transferable, conferred by DEEDS, never bought; recorded permanently in this ledger.
 /// "What we do in life echoes in eternity" — on an immutable chain, literally.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// flux-wire: allow — nested inside SigilEvent, same wire as below
 #[serde(tag = "order")]
 pub enum SigilOrder {
     /// ⚔️ Ridderkorset — the Knight's Cross. The working honor of the honorable doer
@@ -53,6 +54,7 @@ pub enum SigilOrder {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// flux-wire: allow — THE 2026-09-11 incident type: bincode CANNOT decode it. Blocks travel on MessagePack behind SIGILM1 (sigil-node serve_read) and chain_log; pinned by sigil-node block.rs::a_single_event_cannot_round_trip_on_bincode
 #[serde(tag = "kind")]
 pub enum SigilEvent {
     /// A chivalric Order of the SIGIL Nation conferred on a citizen — a SOULBOUND honor,

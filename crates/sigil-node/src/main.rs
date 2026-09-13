@@ -81,11 +81,13 @@ struct BackfillReq {
     /// (ed25519 over the transcript, `session_pubkey` = requester's libp2p
     /// peer-id string for channel binding). Old servers ignore the unknown
     /// field; old clients omit it → `None`. See `sync_auth`.
+    // flux-wire: allow — BackfillReq is serde_json (from_slice at the responder); only the RESPONSE is bincode/MessagePack
     #[serde(default, skip_serializing_if = "Option::is_none")]
     handshake: Option<sigil_handshake::EphemeralSessionHandshakeV0>,
     /// 2026-09-13: full-block replies as ONE zstd frame over the MessagePack body
     /// (`serve_read::BACKFILL_ZSTD_MAGIC`). Old servers ignore the field and answer raw;
     /// old clients omit it (default false) and get raw. Node-to-node sets it.
+    // flux-wire: allow — BackfillReq is serde_json; a skipped field here is what lets old servers ignore it
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     zstd: bool,
 }

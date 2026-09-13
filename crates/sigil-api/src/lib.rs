@@ -207,8 +207,10 @@ impl AppState {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ApiResponse<T> {
     pub ok: bool,
+    // flux-wire: allow — the HTTP JSON envelope every /v1 route returns; sigil-api has no bincode
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<T>,
+    // flux-wire: allow — the HTTP JSON envelope every /v1 route returns
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub ts: u64,
@@ -318,6 +320,7 @@ pub struct TxStatusResponse {
     /// `reason`) | "unknown" (never seen by this node).
     pub status: String,
     /// The builder's reason when `status == "rejected"`; pending progress otherwise.
+    // flux-wire: allow — /v1/transactions/:hash JSON response
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -477,6 +480,7 @@ pub const TX_WAIT_DEFAULT_MS: u64 = 20_000;
 
 #[derive(Debug, Serialize)]
 pub struct TxWaitResponse {
+    // flux-wire: allow — /v1/transactions/:hash/wait JSON response (Serialize only)
     #[serde(flatten)]
     pub status: TxStatusResponse,
     /// True when the wait ended because the tx reached `applied` or `rejected`
@@ -486,6 +490,7 @@ pub struct TxWaitResponse {
     pub waited_ms: u64,
     /// The newest certificate height this node had when the answer was produced —
     /// what "applied" is settled BY. A client verifies it at `/v1/finality/certificate`.
+    // flux-wire: allow — /v1/transactions/:hash/wait JSON response
     #[serde(skip_serializing_if = "Option::is_none")]
     pub certified_height: Option<u64>,
 }
@@ -603,6 +608,7 @@ pub async fn events_stream(
 
 #[derive(Debug, Serialize)]
 pub struct WebhookCreated {
+    // flux-wire: allow — /v1/webhooks JSON response (Serialize only)
     #[serde(flatten)]
     pub record: events::WebhookRecord,
     /// The HMAC key. Returned exactly once; the node keeps only what it needs to sign.

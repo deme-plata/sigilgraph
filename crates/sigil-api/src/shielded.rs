@@ -1069,6 +1069,7 @@ pub struct ShieldRequest {
     /// Client-chosen strictly-increasing nonce, same convention as `/v1/send`.
     pub req_nonce: u64,
     /// Optional: the note sealed to the depositor's own delivery key (see `submit_shield_with_delivery`).
+    // flux-wire: allow — /v1/shield HTTP JSON request body; the node re-encodes the tx itself
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note_ciphertext: Option<String>,
 }

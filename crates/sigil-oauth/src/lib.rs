@@ -353,6 +353,7 @@ pub struct TokenClaims {
     pub iat: u64,
     pub exp: u64,
     pub epoch: u64, // key-epoch that minted this token
+    // flux-wire: allow — JWT claims — JSON by definition; sigil-oauth has no bincode
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cnf: Option<String>, // hex(holder pubkey) for proof-of-possession
 }

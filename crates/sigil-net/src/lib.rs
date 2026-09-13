@@ -221,6 +221,7 @@ pub struct SigilNetConfig {
 ///   anything that isn't a validator. Belt + suspenders. Use when one
 ///   SIGIL node is acting as both validator and public RPC.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+// flux-wire: allow — node config, JSON (serde_json round-trip test below); never on the p2p wire
 #[serde(tag = "kind")]
 pub enum SigilTransport {
     /// Plain libp2p. The Phase 0 default.

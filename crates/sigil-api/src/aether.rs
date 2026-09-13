@@ -527,9 +527,11 @@ pub struct CatResponse {
     /// Content hash.
     pub content_hash: String,
     /// Content, when it is valid UTF-8.
+    // flux-wire: allow — HTTP JSON response body (/v1/aether/cat); sigil-api has no bincode
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     /// Content base64, when it is not UTF-8.
+    // flux-wire: allow — HTTP JSON response body (/v1/aether/cat); sigil-api has no bincode
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base64: Option<String>,
     /// Byte length.

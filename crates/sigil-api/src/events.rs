@@ -50,6 +50,7 @@ use tokio::sync::broadcast;
 
 /// One thing that happened that a client may be waiting for.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+// flux-wire: allow — /v1/events SSE + webhook JSON only; never on a bincode wire
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
     /// A transaction changed status. `status` is the same vocabulary
@@ -59,6 +60,7 @@ pub enum Event {
     Tx {
         tx_hash: String,
         status: String,
+        // flux-wire: allow — /v1/events SSE + webhook JSON only
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
         ts_ms: u64,
@@ -104,6 +106,7 @@ impl Event {
 #[derive(Clone, Debug, Serialize)]
 pub struct Sequenced {
     pub seq: u64,
+    // flux-wire: allow — SSE/webhook JSON envelope (Serialize only)
     #[serde(flatten)]
     pub event: Event,
 }
@@ -212,8 +215,10 @@ pub struct WebhookRecord {
     pub expires_ms: u64,
     pub delivered: u64,
     pub failed: u64,
+    // flux-wire: allow — /v1/webhooks JSON record
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_status: Option<u16>,
+    // flux-wire: allow — /v1/webhooks JSON record
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
 }
@@ -423,6 +428,7 @@ pub fn verify_signature(secret: &[u8], body: &[u8], header: &str) -> bool {
 #[derive(Serialize)]
 struct Delivery<'a> {
     webhook_id: &'a str,
+    // flux-wire: allow — webhook POST JSON body (Serialize only)
     #[serde(flatten)]
     event: &'a Sequenced,
     node_ts_ms: u64,

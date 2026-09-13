@@ -28,6 +28,7 @@ pub type OrderId = [u8; 32];
 /// Every act the court can record. Canonical JSON, tagged by `kind`; append new variants at the
 /// END — `tag()` numbering is stable for indexers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// flux-wire: allow — canonical JSON (see doc above); sigil-court has no bincode
 #[serde(tag = "kind")]
 pub enum CourtEvent {
     CaseFiled { case: CaseId, plaintiff: WalletId, defendant: Option<WalletId>, article: Article, claim: String },

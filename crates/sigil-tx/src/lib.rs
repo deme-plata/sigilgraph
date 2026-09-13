@@ -99,6 +99,7 @@ fn pool_state_from_dex(
 /// to exactly one `SigilEvent` kind (sometimes two — `Send` produces
 /// `Send` on the sender side and `Receive` on the recipient side).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// flux-wire: allow — JSON (/tx, RelayedTx::Legacy carries the JSON bytes); bincode CANNOT decode it, pinned by sigil_tx_is_internally_tagged_and_therefore_not_bincode_decodable
 #[serde(tag = "kind")]
 pub enum SigilTx {
     /// PV-1: publish this wallet's shielded public key.

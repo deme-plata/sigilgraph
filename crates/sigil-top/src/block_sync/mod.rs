@@ -66,6 +66,7 @@ static HTTP_ASYNC: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::n
 pub const BLOCK_SYNC_TOPIC: &str = "/sigil/g0/blocks";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// flux-wire: allow — DEAD — 0 uses in the tree (2026-09-13); if it is ever put on a wire, JSON or drop the tag
 #[serde(tag = "t")]
 pub enum SyncMsg {
     Req { from: u64, to: u64 },

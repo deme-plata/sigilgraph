@@ -36,8 +36,9 @@ Room to spare
 [Spoken:]
 The bound is a ceiling. It is not a speed.
 Physics says allowed. It never said cheap.
-The network does four hundred eighty million tries a block
-and calls it a day.
+That afternoon the network did four hundred eighty million tries a block.
+That's the weather. The room is the sky.
+When the blocks run orders faster, the room is still there.
 
 [Build — riser]
 [Hook:]
@@ -51,4 +52,4 @@ Room to spare
 Room to spare.
 
 ---
-*Limits: style 533 / 1000 · lyrics 867 / 3000.*
+*Limits: style 533 / 1000 · lyrics 963 / 3000.*

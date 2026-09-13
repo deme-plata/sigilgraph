@@ -1,10 +1,10 @@
 SIGIL Soundtrack Vol. VI - The Small Print (progressive tech house)
-TRACK 025: Twenty-Five Orders
+TRACK 025: Twenty-Five Orders  (vision edition: weather sung as weather)
 
 ===== STYLE (paste into Suno Style field, 533 chars) =====
 Melodic tech house, Anyma and Tale of Us and ARTBAT style, 124 BPM, F minor, punchy kick, rolling sub bass, a hypnotic arpeggio that builds over 32 bars, wide cinematic pads, a distorted analog lead on the drop, filtered white-noise builds, crisp hi-hats and a tight clap, a deep male spoken voice close-mic and dry for the numbers, a female sung hook with long reverb and a pitched-down echo, a long breakdown with the arpeggio alone, dark and euphoric at once, mostly instrumental, Afterlife peak-time production, clean loud master
 
-===== LYRICS (paste into Suno Lyrics field, 867 chars) =====
+===== LYRICS (paste into Suno Lyrics field, 963 chars) =====
 [Intro - kick, rolling bass, arpeggio, instrumental, 32 bars]
 
 [Spoken, dry, close-mic:]
@@ -31,8 +31,9 @@ Room to spare
 [Spoken:]
 The bound is a ceiling. It is not a speed.
 Physics says allowed. It never said cheap.
-The network does four hundred eighty million tries a block
-and calls it a day.
+That afternoon the network did four hundred eighty million tries a block.
+That's the weather. The room is the sky.
+When the blocks run orders faster, the room is still there.
 
 [Build - riser]
 [Hook:]

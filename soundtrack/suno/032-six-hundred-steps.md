@@ -29,11 +29,11 @@ Six hundred! One at a time!
 Six hundred! That's the line!
 
 [Verse 2]
-You can hash it wide, a hundred seventy-six million a second
-Spread across the world like rain
+You can hash it wide as the world
+Spread across the sky like rain
 But the delay stands in the middle of the road
 Single file — and it says it again
-Two point seven seconds for the world to say yes
+One block for the world to say yes
 And a tunnel inside it no one can widen
 Six hundred steps in the dark
 That's where the fairness is hidden
@@ -66,4 +66,4 @@ Six hundred — that's the line
 [Outro — the gallop alone, a last triplet fill, hard stop]
 
 ---
-*Limits: style 446 / 1000 · lyrics 1640 / 3000.*
+*Limits: style 446 / 1000 · lyrics 1597 / 3000.*

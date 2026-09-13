@@ -1,10 +1,10 @@
 SIGIL Soundtrack Vol. VII - The Study (Led Zeppelin / Robert Plant)
-TRACK 030: Six Hundred and Twenty
+TRACK 030: Six Hundred and Twenty  (vision edition: weather sung as weather)
 
 ===== STYLE (paste into Suno Style field, 455 chars) =====
 Heavy Led Zeppelin blues rock, When the Levee Breaks drum sound recorded in a stairwell with one distant microphone, slow massive groove, harmonica with echo, slide guitar in open tuning like In My Time of Dying, Robert Plant's raw howl and moan with backwards echo on the chorus, John Paul Jones bass locked to the kick, a stop-time breakdown with voice alone, guitar and harmonica trading in the outro, Physical Graffiti era production, raw and enormous
 
-===== LYRICS (paste into Suno Lyrics field, 1941 chars) =====
+===== LYRICS (paste into Suno Lyrics field, 1956 chars) =====
 [Intro - drums alone in a stairwell, huge and slow, 8 bars; harmonica enters]
 
 [Verse 1 - Plant low and raw]
@@ -25,9 +25,9 @@ Built it again - and that's the only clever thing I'll say
 
 [Verse 2 - slide guitar]
 Now the coinbase pays in the open, and it adds
-Now the pool holds three thousand two hundred eighty-eight
-Fifty-nine have crossed the river
-One point eight percent - the rest can wait
+Now the pool seals thirty-two thousand at a time
+And turns the page when the page is full
+Spend one once, and it's spent for all time
 And the envelope's still sealed
 But the name's not on the door
 Privacy is counted in owners
@@ -40,10 +40,10 @@ So we tore it down, tore it down in a day
 Built it again - and that's the only clever thing I'll say
 
 [Stop-time - voice alone]
-Forty-nine of us registered
-It's a small crowd - I'll say it plain
-A sealed door in a village of forty-nine
-Is a door, not a hiding place, not yet - but it's a start
+That afternoon, forty-nine of us registered
+A small crowd - I'll say it plain
+A sealed door in a village that small
+Is a door, not a hiding place - the village grows, the door remains
 
 [Harmonica break - 8 bars over the stairwell drums]
 

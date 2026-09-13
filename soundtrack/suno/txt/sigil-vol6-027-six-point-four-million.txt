@@ -1,10 +1,10 @@
 SIGIL Soundtrack Vol. VI - The Small Print (progressive tech house)
-TRACK 027: Six Point Four Million
+TRACK 027: Six Point Four Million  (vision edition: weather sung as weather)
 
 ===== STYLE (paste into Suno Style field, 458 chars) =====
 Peak-time tech house, Camelphat and Eli Brown and Fisher style, 126 BPM, G minor, huge punchy kick, tight clap, chunky bass stab, a chopped and pitched vocal hook repeated as the riff, a deadpan male spoken vocal rhythmic and dry, snare rolls and sirens into a big drop, bouncy groove with swung hi-hats, a filtered breakdown with the spoken part alone, a second drop with an added acid line, festival tent energy, mostly instrumental, loud clean club master
 
-===== LYRICS (paste into Suno Lyrics field, 893 chars) =====
+===== LYRICS (paste into Suno Lyrics field, 975 chars) =====
 [Intro - kick, clap, bass stab, instrumental, 16 bars]
 
 [Spoken, deadpan, on the beat:]
@@ -21,8 +21,9 @@ Six - point - four - million
 [Drop - bass groove, instrumental, 32 bars]
 
 [Spoken over the groove:]
-Three hundred thirty-eight thousand blocks to go.
-Ten point seven days.
+Three hundred thirty-eight thousand blocks to go - that afternoon.
+Days at that pace. Minutes when the blocks run fast.
+The gate is a height, not a date.
 One hundred five percent behind every dollar.
 Point three percent to move it.
 

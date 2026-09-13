@@ -26,8 +26,9 @@ Six — point — four — million
 [Drop — bass groove, instrumental, 32 bars]
 
 [Spoken over the groove:]
-Three hundred thirty-eight thousand blocks to go.
-Ten point seven days.
+Three hundred thirty-eight thousand blocks to go — that afternoon.
+Days at that pace. Minutes when the blocks run fast.
+The gate is a height, not a date.
 One hundred five percent behind every dollar.
 Point three percent to move it.
 
@@ -48,4 +49,4 @@ Six — point — four — million
 An agreed price.
 
 ---
-*Limits: style 458 / 1000 · lyrics 893 / 3000.*
+*Limits: style 458 / 1000 · lyrics 975 / 3000.*

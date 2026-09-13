@@ -1,10 +1,10 @@
 SIGIL Soundtrack Vol. VII - The Study (Led Zeppelin / Robert Plant)
-TRACK 031: The Clock on the Mountain
+TRACK 031: The Clock on the Mountain  (vision edition: weather sung as weather)
 
 ===== STYLE (paste into Suno Style field, 455 chars) =====
 Led Zeppelin folk rock, The Battle of Evermore and Going to California style, mandolin and acoustic twelve-string guitar, a male and female duet in the Robert Plant and Sandy Denny manner with call and response and harmonies, no drums until the final chorus where a tambourine and a soft kick enter, a Celtic-modal melody with Moroccan-inflected vocal ornaments, warm 1971 acoustic production with room reverb, tender then soaring, an a cappella last line
 
-===== LYRICS (paste into Suno Lyrics field, 1849 chars) =====
+===== LYRICS (paste into Suno Lyrics field, 1862 chars) =====
 [Intro - mandolin, twelve-string, 16 bars]
 
 [Verse 1 - Plant, gentle]
@@ -27,7 +27,7 @@ It never said where time begins
 The clock on the mountain runs fast
 The clock in the fire runs faster
 The clock on the ledger runs when we agree
-Two point seven seconds - that's the master
+One tick, one yes - that's the master
 That's the master
 
 [Verse 3 - Plant]
@@ -40,17 +40,17 @@ It ticks because we said
 
 [Verse 4 - her voice]
 Read the ledger as a clock of heat
-Two point eight picokelvin - cold
-It's an analogy - I'll say it now
-And I'll say it again when I'm old
+Picokelvin that afternoon - cold
+And warmer every time the blocks run faster
+It's an analogy - I'll say it now, and again when I'm old
 The coldest clock is the slowest one
-And slow is what we sold
+And agreement is what we sold
 
 [Chorus - duet, harmonies]
 The clock on the mountain runs fast
 The clock in the fire runs faster
 The clock on the ledger runs when we agree
-Two point seven seconds - that's the master
+One tick, one yes - that's the master
 
 [Bridge - mandolin solo, then both voices]
 Bring the tune down from the mountain
@@ -62,8 +62,8 @@ That's the study - that's the hand
 The clock on the mountain runs fast
 The clock in the fire runs faster
 The clock on the ledger runs when we agree
-Two point seven seconds
-Two point seven seconds
+One tick, one yes
+One tick, one yes
 
 [Outro - a cappella, both]
 Physical time passes by itself.

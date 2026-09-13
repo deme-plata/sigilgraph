@@ -2,8 +2,8 @@
 
 > **Vol. VII, track 3.** Source: K-parameter paper §10 "Kristensen Time" — Tolman–Ehrenfest: a clock higher up runs
 > faster, 3.3×10⁻¹⁴ K per metre near Earth (measured by optical clocks); ITER's 1.7×10⁸ K is 8×10²³ times colder than
-> the Planck temperature; heat sets the FASTEST clock, agreement the slowest — one agreed tick every 2.73 s; ledger
-> temperature 2.8 pK, labelled ANALOGY. The borrowed invention: "The Battle of Evermore" mandolin and the Sandy Denny
+> the Planck temperature; heat sets the FASTEST clock, agreement the slowest — one agreed tick per block, however fast the blocks come; the 2.8 pK
+> ledger temperature is that afternoon's block rate read as heat (ANALOGY) and rises as blocks get faster. The borrowed invention: "The Battle of Evermore" mandolin and the Sandy Denny
 > duet, "Going to California" 12-string. The admission is sung twice: it is an analogy, and we'll say it again.
 
 ## Style (paste into Style field)
@@ -33,7 +33,7 @@ It never said where time begins
 The clock on the mountain runs fast
 The clock in the fire runs faster
 The clock on the ledger runs when we agree
-Two point seven seconds — that's the master
+One tick, one yes — that's the master
 That's the master
 
 [Verse 3 — Plant]
@@ -46,17 +46,17 @@ It ticks because we said
 
 [Verse 4 — her voice]
 Read the ledger as a clock of heat
-Two point eight picokelvin — cold
-It's an analogy — I'll say it now
-And I'll say it again when I'm old
+Picokelvin that afternoon — cold
+And warmer every time the blocks run faster
+It's an analogy — I'll say it now, and again when I'm old
 The coldest clock is the slowest one
-And slow is what we sold
+And agreement is what we sold
 
 [Chorus — duet, harmonies]
 The clock on the mountain runs fast
 The clock in the fire runs faster
 The clock on the ledger runs when we agree
-Two point seven seconds — that's the master
+One tick, one yes — that's the master
 
 [Bridge — mandolin solo, then both voices]
 Bring the tune down from the mountain
@@ -68,12 +68,12 @@ That's the study — that's the hand
 The clock on the mountain runs fast
 The clock in the fire runs faster
 The clock on the ledger runs when we agree
-Two point seven seconds
-Two point seven seconds
+One tick, one yes
+One tick, one yes
 
 [Outro — a cappella, both]
 Physical time passes by itself.
 Ours moves when strangers agree.
 
 ---
-*Limits: style 455 / 1000 · lyrics 1849 / 3000.*
+*Limits: style 455 / 1000 · lyrics 1862 / 3000.*

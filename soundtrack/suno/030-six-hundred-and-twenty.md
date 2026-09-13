@@ -2,7 +2,7 @@
 
 > **Vol. VII, track 2.** Source: `SIGIL Eternal` §5 — the g1 dust era: 1,266,227 sealed coinbase notes, ONE nullifier
 > ever spent, 620 of 620 sampled notes attributable to their miner at mint; the reset to g2 (coinbase transparent,
-> balances add); g2 today: 3,288 notes in a pool of 32,768, 59 spent, 1.8 % spent ratio, 49 registered. The borrowed
+> balances add); g2 design: a pool of 32,768 sealed notes per epoch, rotating when full; one nullifier per note, forever. The 49 registered is sung AS weather. The borrowed
 > invention: the "When the Levee Breaks" stairwell drums, slide guitar as in "In My Time of Dying", harmonica. The
 > innovation the song names is the will to tear a chain down and build it again. It admits the crowd is still small.
 
@@ -31,9 +31,9 @@ Built it again — and that's the only clever thing I'll say
 
 [Verse 2 — slide guitar]
 Now the coinbase pays in the open, and it adds
-Now the pool holds three thousand two hundred eighty-eight
-Fifty-nine have crossed the river
-One point eight percent — the rest can wait
+Now the pool seals thirty-two thousand at a time
+And turns the page when the page is full
+Spend one once, and it's spent for all time
 And the envelope's still sealed
 But the name's not on the door
 Privacy is counted in owners
@@ -46,10 +46,10 @@ So we tore it down, tore it down in a day
 Built it again — and that's the only clever thing I'll say
 
 [Stop-time — voice alone]
-Forty-nine of us registered
-It's a small crowd — I'll say it plain
-A sealed door in a village of forty-nine
-Is a door, not a hiding place, not yet — but it's a start
+That afternoon, forty-nine of us registered
+A small crowd — I'll say it plain
+A sealed door in a village that small
+Is a door, not a hiding place — the village grows, the door remains
 
 [Harmonica break — 8 bars over the stairwell drums]
 
@@ -68,4 +68,4 @@ Built it again — built it again — built it again
 [Outro — guitar and harmonica trade, drums thunder, fade]
 
 ---
-*Limits: style 455 / 1000 · lyrics 1941 / 3000.*
+*Limits: style 455 / 1000 · lyrics 1956 / 3000.*

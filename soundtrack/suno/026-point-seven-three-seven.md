@@ -14,7 +14,8 @@ Progressive house, Yotto and Cristoph and Franky Wah style, 125 BPM, A minor, de
 
 [Spoken, calm:]
 Twenty-one million. That's the ceiling.
-One hundred fifty-four thousand, nine hundred eighteen. That's out.
+One hundred fifty-four thousand, nine hundred eighteen. That's out — that afternoon.
+The ceiling is the sky. The count is the weather.
 
 [Build — plucks opening]
 [Sung hook, filtered, opening up:]
@@ -34,7 +35,9 @@ Five point two terabytes — a lifetime fits on a shelf.
 
 [Spoken, quieter:]
 The calendar is fixed. The day is not.
-The chain pays by the clock, not by the block.
+The chain pays by the clock, not by the block —
+so run the blocks a thousand times faster
+and the ceiling doesn't move an inch.
 
 [Build]
 [Hook:]
@@ -46,4 +49,4 @@ Ninety-nine point three still in the ground
 [Outro — pad and shaker, fading]
 
 ---
-*Limits: style 462 / 1000 · lyrics 866 / 3000.*
+*Limits: style 462 / 1000 · lyrics 1014 / 3000.*

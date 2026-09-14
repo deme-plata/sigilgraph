@@ -35,6 +35,11 @@ pub struct AlertRow {
     pub prev_regime: Option<String>,
     pub msg: String,
     pub source: String,
+    /// The interpretation travels with the event (SSE, webhook, file): what to look at first, and a Danish line.
+    #[serde(default)]
+    pub fortolkning: String,
+    #[serde(default)]
+    pub fortolkning_da: String,
 }
 
 pub fn load_state(path: &Path) -> State {
@@ -70,6 +75,16 @@ pub fn evaluate(k: f64, date: &str, p99: f64, p90: f64, st: &State, existing: &[
         prev_regime: prev,
         msg,
         source: source.clone(),
+        fortolkning: match kind {
+            "k_p99" => "K⊕ crossed the empirical p99 of its own three years. Look at the fluids panel first: if the atmosphere or ocean estimate also jumped, it is weather; if not, it is the core or an IERS revision. IERS rapid values are revised for weeks, so this can be revised away.".into(),
+            "k_p99_cleared" => "K⊕ is back below p90; the alert re-arms. Nothing to do.".into(),
+            _ => "The K-family ladder moved a step (stable / elevated / critical). Elevated usually means the day length after a storm season or an ENSO shift; critical means the model does not know what happened.".into(),
+        },
+        fortolkning_da: match kind {
+            "k_p99" => "K⊕ krydsede sin egen empiriske p99 over tre år. Se på væskepanelet først: hvis atmosfære- eller hav-estimatet også sprang, er det vejr; hvis ikke, er det kernen eller en IERS-revision. IERS' hurtige værdier revideres i uger, så alarmen kan blive revideret væk.".into(),
+            "k_p99_cleared" => "K⊕ er tilbage under p90; alarmen genaktiveres. Intet at gøre.".into(),
+            _ => "K-familiens stige rykkede et trin (stabil / forhøjet / kritisk). Forhøjet betyder som regel døgnlængden efter en stormsæson eller et ENSO-skift; kritisk betyder, at modellen ikke ved, hvad der skete.".into(),
+        },
     };
     if k > p99 && next.armed {
         next.armed = false;

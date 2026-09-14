@@ -140,8 +140,8 @@ pub fn with_today(mut tips: Value, c: &TodayCtx) -> Value {
             format!("For {}: {} via IERS-forudsigelsen — {}.{}", d, f2(k), crate::regime(k), g_da));
     }
     if let Some(n) = c.attest_n {
-        set("attest", format!("Row #{} covers this reading; {}.", n, if c.attest_anchored { "its digest is anchored on the SIGIL chain" } else { "the on-chain anchor is pending" }),
-            format!("Række #{} dækker denne aflæsning; {}.", n, if c.attest_anchored { "dens digest er forankret på SIGIL-kæden" } else { "kæde-ankeret afventer" }));
+        set("attest", format!("This publication becomes attestation row #{}; the previous row #{} is {}.", n + 1, n, if c.attest_anchored { "anchored on the SIGIL chain" } else { "signed, its on-chain anchor pending" }),
+            format!("Denne udgivelse bliver attesteringsrække #{}; den forrige række #{} er {}.", n + 1, n, if c.attest_anchored { "forankret på SIGIL-kæden" } else { "signeret, kæde-ankeret afventer" }));
     }
     tips
 }

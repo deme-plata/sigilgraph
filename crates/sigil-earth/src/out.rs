@@ -288,7 +288,7 @@ pub fn run(o: &Opts) -> Result<Value> {
             omega_z_minus: oz - model::OMEGA0, de_per_ms: model::I_EARTH * oz * model::OMEGA0 * (1e-3 / 86400.0),
             fc1_k: forecast.days.first().and_then(|d| d.k_resid_fcst), fc1_k_gfz: forecast.days.first().and_then(|d| d.k_resid_fcst_gfz), fc1_date: forecast.days.first().map(|d| d.date.clone()),
             attest_n: crate::attest::read_chain(&chain_path).iter().rev().find(|r| r.kind == "attest").map(|r| r.n),
-            attest_anchored: crate::attest::read_chain(&chain_path).iter().any(|r| r.kind == "anchor" && r.anchor["executed"] == true),
+            attest_anchored: { let ch = crate::attest::read_chain(&chain_path); let last_n = ch.iter().rev().find(|r| r.kind == "attest").map(|r| r.n); ch.iter().any(|r| r.kind == "anchor" && Some(r.n) == last_n && r.anchor["executed"] == true) },
             armed: next_state.armed,
         }),
         "alerts_recent": open_alerts,

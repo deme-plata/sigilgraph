@@ -47,3 +47,101 @@ pub fn tips() -> Value {
         "alert": {"name": "Alert", "what": "K⊕ above the empirical p99 of the trailing three years (fires once, re-arms below p90), or a step on the K-family ladder.", "read": "One alert means: look at the fluids panel first. If the fluid estimate also jumped, it is weather; if not, it is the core or a data revision.", "not": "Not an earthquake or weather warning. IERS rapid values are revised for weeks; an alert can be revised away.", "da": "K⊕ over det empiriske p99 (udløses én gang, genaktiveres under p90) eller et trin på K-familiens stige. Én alarm betyder: se på væskepanelet først."}
     })
 }
+
+/// What the numbers say *today*: one computed sentence per metric, English and Danish, merged into
+/// the static tips as `today` / `today_da`. This is the fortolkning of the actual reading, not of
+/// the metric in general.
+pub struct TodayCtx {
+    pub date: String,
+    pub k_resid: f64,
+    pub k_raw: f64,
+    pub regime: String,
+    pub p50: f64,
+    pub p90: f64,
+    pub p99: f64,
+    pub lod: f64,
+    pub lod_atm: Option<f64>,
+    pub lod_ocn: Option<f64>,
+    pub lod_hyd: Option<f64>,
+    pub lod_geo: Option<f64>,
+    pub r2_daily: Option<f64>,
+    pub r2_sm31: Option<f64>,
+    pub pole_offset_m: f64,
+    pub xp: f64,
+    pub yp: f64,
+    pub ut1utc: Option<f64>,
+    pub omega_z_minus: f64,
+    pub de_per_ms: f64,
+    pub fc1_k: Option<f64>,
+    pub fc1_k_gfz: Option<f64>,
+    pub fc1_date: Option<String>,
+    pub attest_n: Option<u64>,
+    pub attest_anchored: bool,
+    pub armed: bool,
+}
+
+pub fn with_today(mut tips: Value, c: &TodayCtx) -> Value {
+    let f2 = |v: f64| format!("{v:.2}");
+    let ms = |v: f64| format!("{}{:.3} ms", if v >= 0.0 { "+" } else { "" }, v);
+    let band = if c.k_resid > c.p99 { "above the p99 line — the alert condition" } else if c.k_resid > c.p90 { "between p90 and p99 — watch" } else if c.k_resid > c.p50 { "above the median, inside the usual spread" } else { "below the median — a quiet day" };
+    let band_da = if c.k_resid > c.p99 { "over p99-linjen — alarmbetingelsen" } else if c.k_resid > c.p90 { "mellem p90 og p99 — hold øje" } else if c.k_resid > c.p50 { "over medianen, inden for den sædvanlige spredning" } else { "under medianen — en rolig dag" };
+    let mut set = |key: &str, en: String, da: String| {
+        if let Some(t) = tips.get_mut(key) {
+            t["today"] = json!(en);
+            t["today_da"] = json!(da);
+        }
+    };
+    set("k_resid",
+        format!("{}: {}σ, {} — {} (p50 {}, p90 {}, p99 {}).", c.date, f2(c.k_resid), c.regime, band, f2(c.p50), f2(c.p90), f2(c.p99)),
+        format!("{}: {}σ, {} — {} (p50 {}, p90 {}, p99 {}).", c.date, f2(c.k_resid), c.regime, band_da, f2(c.p50), f2(c.p90), f2(c.p99)));
+    set("k_raw",
+        format!("Raw {} against de-wobbled {}: the cycles {} of the apparent excursion today.", f2(c.k_raw), f2(c.k_resid), if c.k_raw > c.k_resid { "explain part" } else { "explain none" }),
+        format!("Rå {} mod af-vaklet {}: cyklusserne forklarer {} af dagens tilsyneladende udsving.", f2(c.k_raw), f2(c.k_resid), if c.k_raw > c.k_resid { "en del" } else { "intet" }));
+    set("ladder",
+        format!("Today's reading sits {}. The alert is {}.", band, if c.armed { "armed" } else { "disarmed until K⊕ falls below p90" }),
+        format!("Dagens aflæsning ligger {}. Alarmen er {}.", band_da, if c.armed { "aktiv" } else { "deaktiveret, til K⊕ falder under p90" }));
+    let fluids = match (c.lod_geo, c.lod_atm) {
+        (Some(g), Some(a)) => format!(" The fluids account for {} of it (atmosphere {}); the rest is tides and the core.", ms(g), ms(a)),
+        _ => String::new(),
+    };
+    let fluids_da = match (c.lod_geo, c.lod_atm) {
+        (Some(g), Some(a)) => format!(" Væskerne står for {} af det (atmosfæren {}); resten er tidevand og kernen.", ms(g), ms(a)),
+        _ => String::new(),
+    };
+    set("lod",
+        format!("{}: the day was {} {} than 86 400 s.{}", c.date, ms(c.lod.abs()).trim_start_matches('+'), if c.lod >= 0.0 { "longer" } else { "shorter" }, fluids),
+        format!("{}: dagen var {} {} end 86 400 s.{}", c.date, ms(c.lod.abs()).trim_start_matches('+'), if c.lod >= 0.0 { "længere" } else { "kortere" }, fluids_da));
+    if let (Some(a), Some(o), Some(h)) = (c.lod_atm, c.lod_ocn, c.lod_hyd) {
+        set("lod_geo_ms", format!("Atmosphere {}, ocean {}, land water {} → fluids {}.", ms(a), ms(o), ms(h), ms(a + o + h)),
+            format!("Atmosfære {}, hav {}, landvand {} → væsker {}.", ms(a), ms(o), ms(h), ms(a + o + h)));
+        set("lod_atm_ms", format!("{} today — {}.", ms(a), if a.abs() > o.abs() + h.abs() { "the dominant fluid term, as usual" } else { "unusually, not the dominant term today" }),
+            format!("{} i dag — {}.", ms(a), if a.abs() > o.abs() + h.abs() { "det dominerende væskeled, som sædvanligt" } else { "usædvanligt nok ikke det dominerende led i dag" }));
+    }
+    if let (Some(d), Some(s)) = (c.r2_daily, c.r2_sm31) {
+        set("attribution_r2", format!("R² {} daily, {} after the 31-day mean: the fluids explain about {}% of the season-to-season day length this year.", f2(d), f2(s), (s * 100.0).round()),
+            format!("R² {} dagligt, {} efter 31-dages middel: væskerne forklarer ca. {} % af sæsonvariationen i døgnlængden i år.", f2(d), f2(s), (s * 100.0).round()));
+    }
+    set("pole_offset_m", format!("{:.2} m from the reference pole (x_p {:.4}″, y_p {:.4}″) — {}.", c.pole_offset_m, c.xp, c.yp, if c.pole_offset_m > 10.0 { "the outer part of the Chandler-annual beat" } else { "the inner part of the beat" }),
+        format!("{:.2} m fra referencepolen (x_p {:.4}″, y_p {:.4}″) — {}.", c.pole_offset_m, c.xp, c.yp, if c.pole_offset_m > 10.0 { "den ydre del af Chandler-års-svævningen" } else { "den indre del af svævningen" }));
+    set("xp", format!("{:.6}″ toward Greenwich ≈ {:.1} m.", c.xp, c.xp * 30.9), format!("{:.6}″ mod Greenwich ≈ {:.1} m.", c.xp, c.xp * 30.9));
+    set("yp", format!("{:.6}″ toward 90° W ≈ {:.1} m.", c.yp, c.yp * 30.9), format!("{:.6}″ mod 90° V ≈ {:.1} m.", c.yp, c.yp * 30.9));
+    if let Some(u) = c.ut1utc {
+        set("ut1utc", format!("{:+.4} s: Earth's clock is {} atomic time by {:.0} ms and the gap {} at {:.2} ms/day.", u, if u < 0.0 { "behind" } else { "ahead of" }, u.abs() * 1000.0, if (u < 0.0) == (c.lod > 0.0) { "widens" } else { "narrows" }, c.lod.abs()),
+            format!("{:+.4} s: Jordens ur er {} atomtiden med {:.0} ms, og gabet {} med {:.2} ms/dag.", u, if u < 0.0 { "bagud for" } else { "foran" }, u.abs() * 1000.0, if (u < 0.0) == (c.lod > 0.0) { "vokser" } else { "krymper" }, c.lod.abs()));
+    }
+    set("omega", format!("ω_z − Ω₀ = {:.3e} rad/s: {} parts in 10¹³ {} nominal.", c.omega_z_minus, (c.omega_z_minus.abs() / 1e-13).round(), if c.omega_z_minus < 0.0 { "below" } else { "above" }),
+        format!("ω_z − Ω₀ = {:.3e} rad/s: {} dele i 10¹³ {} det nominelle.", c.omega_z_minus, (c.omega_z_minus.abs() / 1e-13).round(), if c.omega_z_minus < 0.0 { "under" } else { "over" }));
+    set("E_rot_J", format!("Today's {} of day length is {:.2e} J {} the rotational store.", ms(c.lod), c.de_per_ms * c.lod.abs(), if c.lod >= 0.0 { "taken out of" } else { "put back into" }),
+        format!("Dagens {} døgnlængde er {:.2e} J {} rotationslageret.", ms(c.lod), c.de_per_ms * c.lod.abs(), if c.lod >= 0.0 { "taget ud af" } else { "lagt tilbage i" }));
+    if let (Some(k), Some(d)) = (c.fc1_k, c.fc1_date.as_ref()) {
+        let g = c.fc1_k_gfz.map(|v| format!(" The fluid opinion says {}.", f2(v))).unwrap_or_default();
+        let g_da = c.fc1_k_gfz.map(|v| format!(" Væskeprognosen siger {}.", f2(v))).unwrap_or_default();
+        set("k_resid_fcst", format!("For {}: {} through the IERS prediction — {}.{}", d, f2(k), crate::regime(k), g),
+            format!("For {}: {} via IERS-forudsigelsen — {}.{}", d, f2(k), crate::regime(k), g_da));
+    }
+    if let Some(n) = c.attest_n {
+        set("attest", format!("Row #{} covers this reading; {}.", n, if c.attest_anchored { "its digest is anchored on the SIGIL chain" } else { "the on-chain anchor is pending" }),
+            format!("Række #{} dækker denne aflæsning; {}.", n, if c.attest_anchored { "dens digest er forankret på SIGIL-kæden" } else { "kæde-ankeret afventer" }));
+    }
+    tips
+}

@@ -15,9 +15,16 @@ use std::time::Duration;
 
 fn get(base: &str, path: &str) -> Result<Vec<u8>> {
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(120)).user_agent(crate::UA).build();
-    let resp = agent.get(&format!("{base}{path}")).call().map_err(|e| anyhow!("GET {path}: {e}"))?;
+    let resp = agent.get(&format!("{base}{path}")).call().map_err(|e| { if std::env::var("SIGIL_EARTH_DEBUG").is_ok() { eprintln!("GET {path}: {e}"); } anyhow!("GET {path}: {e}") })?;
     let mut buf = Vec::new();
-    resp.into_reader().take(64 * 1024 * 1024).read_to_end(&mut buf)?;
+    // The node streams some routes without a content-length and the edge closes the connection
+    // without a TLS close_notify; rustls reports that as UnexpectedEof after the body arrived.
+    // curl tolerates it and so do we — the JSON parse that follows is the real completeness check.
+    match resp.into_reader().take(64 * 1024 * 1024).read_to_end(&mut buf) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && !buf.is_empty() => {}
+        Err(e) => return Err(anyhow!("read {path}: {e}")),
+    }
     Ok(buf)
 }
 
@@ -71,7 +78,7 @@ pub fn verify_remote(base: &str, viewing_key_override: Option<String>) -> Result
     let mut tx_ok = true;
     for a in &anchors {
         let tx = a.anchor["tx_hash"].as_str().unwrap_or("").to_string();
-        let st = get_json(base, &format!("/v1/transactions/{tx}")).ok();
+        let st = match get_json(base, &format!("/v1/transactions/{tx}")) { Ok(v) => Some(v), Err(e) => { if std::env::var("SIGIL_EARTH_DEBUG").is_ok() { eprintln!("tx {tx}: {e}"); } None } };
         let status = st.as_ref().and_then(|s| s.pointer("/data/status")).and_then(|s| s.as_str()).unwrap_or("unknown").to_string();
         let applied = status == "applied";
         if !applied { tx_ok = false; }

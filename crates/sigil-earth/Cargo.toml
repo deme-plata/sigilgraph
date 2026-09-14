@@ -1,0 +1,27 @@
+[package]
+name = "sigil-earth"
+version.workspace = true
+edition = "2021"
+description = "Kristensen Earth Rotation Gauge K⊕ — IERS/GFZ ingest, 10-day forecast, JSON + SSE API, alerts and a signed daily attestation chain for sigilgraph.org"
+
+[[bin]]
+name = "sigil-earth"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP client for IERS / GFZ / the relay / the node — the house daemon client (sigil-oracle-feeder).
+ureq = { version = "2", default-features = false, features = ["tls"] }
+serde = { workspace = true }
+serde_json = "1"
+blake3 = "1"
+hex = "0.4"
+# Attestation signatures + Buzz identity — same primitives as sigil-api's nation.rs.
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+rand = "0.8"
+anyhow = "1"
+# The /v1/earth API + SSE — same stack as sigil-api's /v1/events.
+axum = { version = "0.7", features = ["json", "query"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = { version = "0.3", default-features = false }
+tower-http = { version = "0.5", features = ["cors"] }

@@ -10,22 +10,30 @@
 use crate::attest::{verify_rows, AttestRow};
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
-use std::io::Read;
 use std::time::Duration;
 
 fn get(base: &str, path: &str) -> Result<Vec<u8>> {
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(120)).user_agent(crate::UA).build();
-    let resp = agent.get(&format!("{base}{path}")).call().map_err(|e| { if std::env::var("SIGIL_EARTH_DEBUG").is_ok() { eprintln!("GET {path}: {e}"); } anyhow!("GET {path}: {e}") })?;
-    let mut buf = Vec::new();
-    // The node streams some routes without a content-length and the edge closes the connection
-    // without a TLS close_notify; rustls reports that as UnexpectedEof after the body arrived.
-    // curl tolerates it and so do we — the JSON parse that follows is the real completeness check.
-    match resp.into_reader().take(64 * 1024 * 1024).read_to_end(&mut buf) {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && !buf.is_empty() => {}
-        Err(e) => return Err(anyhow!("read {path}: {e}")),
+    // HTTP/2 on purpose (ALPN): the public edge answers the node's chunked routes with an EMPTY
+    // body over HTTP/1.1 (measured 2026-09-14 with curl --http1.1), while HTTP/2 carries them.
+    let client = reqwest::blocking::Client::builder()
+        .use_rustls_tls()
+        .timeout(Duration::from_secs(180))
+        .user_agent(crate::UA)
+        .build()?;
+    let resp = client.get(format!("{base}{path}")).send().map_err(|e| anyhow!("GET {path}: {e}"))?;
+    let status = resp.status();
+    let version = format!("{:?}", resp.version());
+    let bytes = resp.bytes().map_err(|e| anyhow!("read {path}: {e}"))?;
+    if std::env::var("SIGIL_EARTH_DEBUG").is_ok() {
+        eprintln!("GET {path}: {status} {version} {} bytes", bytes.len());
     }
-    Ok(buf)
+    if !status.is_success() {
+        return Err(anyhow!("GET {path}: HTTP {status}"));
+    }
+    if bytes.is_empty() {
+        return Err(anyhow!("GET {path}: empty body ({version})"));
+    }
+    Ok(bytes.to_vec())
 }
 
 fn get_json(base: &str, path: &str) -> Result<Value> {

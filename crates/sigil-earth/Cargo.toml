@@ -28,5 +28,8 @@ tower-http = { version = "0.5", features = ["cors"] }
 # Public verification: SHA-256 beside BLAKE3 (browsers have SHA-256), and opening the anchor
 # wallet's note ciphertexts with its PUBLISHED viewing key (sight, no authority).
 sha2 = "0.10"
+# The remote verifier must speak HTTP/2: the public edge returns empty bodies over HTTP/1.1 for the
+# node's chunked routes (/v1/transactions, /v1/shielded/leaves). Same client sigil-top uses.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "http2", "rustls-tls-webpki-roots"] }
 sigil-shield = { path = "../sigil-shield" }
 flux-swarm-secret = { path = "../../../flux/crates/flux-swarm-secret" }

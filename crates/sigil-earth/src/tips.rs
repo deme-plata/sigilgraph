@@ -145,3 +145,25 @@ pub fn with_today(mut tips: Value, c: &TodayCtx) -> Value {
     }
     tips
 }
+
+/// The fortolkning as one Markdown document, regenerated with every publication so the `today`
+/// lines stay current. Written to `eop/fortolkning.md` beside the JSON.
+pub fn markdown(tips: &Value, date: &str) -> String {
+    const ORDER: [&str; 23] = ["k_resid", "k_raw", "ladder", "xp", "yp", "lod", "ut1utc", "omega", "pole_offset_m", "E_rot_J", "L_kg_m2_s", "equator_speed_m_s",
+        "lod_atm_ms", "lod_ocn_ms", "lod_hyd_ms", "lod_geo_ms", "attribution_r2", "k_resid_fcst", "k_resid_fcst_gfz", "eam90", "era", "attest", "alert"];
+    let mut out = String::new();
+    out.push_str(&format!("# Fortolkning — Kristensen Earth Rotation Gauge K⊕ (reading of {date})\n\n"));
+    out.push_str("One interpretation per metric, written once in the `sigil-earth` service and served with the data (`/v1/earth/tips`): **what** it is, **today**'s computed sentence, **how to read it**, what it is **not**, the **K family** link, and a **Danish** line. Regenerated on every publication.\n\n");
+    for k in ORDER {
+        let Some(t) = tips.get(k) else { continue };
+        let g = |f: &str| t.get(f).and_then(|v| v.as_str()).unwrap_or("");
+        out.push_str(&format!("## {}  `{}`\n\n", g("name"), k));
+        if !g("today").is_empty() { out.push_str(&format!("- **Today:** {}\n", g("today"))); }
+        if !g("today_da").is_empty() { out.push_str(&format!("- **I dag:** {}\n", g("today_da"))); }
+        out.push_str(&format!("- **What:** {}\n- **How to read it:** {}\n- **Not:** {}\n", g("what"), g("read"), g("not")));
+        if !g("family").is_empty() { out.push_str(&format!("- **K family:** {}\n", g("family"))); }
+        if !g("da").is_empty() { out.push_str(&format!("- **Dansk:** {}\n", g("da"))); }
+        out.push('\n');
+    }
+    out
+}

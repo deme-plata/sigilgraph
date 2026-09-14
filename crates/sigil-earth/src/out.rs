@@ -341,6 +341,7 @@ pub fn run(o: &Opts) -> Result<Value> {
         "anchor": std::fs::read_to_string(o.state_dir.join("anchor.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()),
         "verify": "sigil-earth verify --remote https://sigilgraph.org  (or the page /kristensen-verify.html)",
         "licence_note": "IERS EOP products and GFZ ESMGFZ EAM products are published for open scientific use; no machine-readable licence is attached to the files. Cite: IERS Rapid Service/Prediction Centre (Bulletin A); Dobslaw et al. 2010, doi:10.1029/2009JB007127."}))?)?;
+    write_atomic(&o.out_dir.join("fortolkning.md"), crate::tips::markdown(&latest["tips"], &tr.date).as_bytes())?;
     write_atomic(&o.out_dir.join("latest.json"), &latest_bytes)?;
     // daily archive outside the web root, 60 kept
     let archive = o.state_dir.join("archive");

@@ -313,7 +313,8 @@ for t in "${TARGETS[@]}"; do
 done
 
 echo "▸ 7/7 commit + tag + push"
-git add crates/sigil-top/Cargo.toml Cargo.lock crates/sigil-top/.flux-rev/HEAD
+git add crates/sigil-top/Cargo.toml Cargo.lock
+git add -f crates/sigil-top/.flux-rev/HEAD   # tracked but under an ignored dir: plain add exits 1 (2026-09-14)
 git commit --no-gpg-sign -m "release(sigil-top): v${VER}
 
 $NOTE

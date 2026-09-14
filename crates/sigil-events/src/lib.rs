@@ -498,6 +498,37 @@ pub enum ProofError {
     RootMismatch,
 }
 
+/// The `event_log_root` a block's BODY commits to — computed from the typed events alone,
+/// with the same padding rule as `sigil_state::commit_state_transition` (balanced binary
+/// Merkle over `leaf_hash()`, odd levels padded with the last hash; no events → all-zero).
+///
+/// This is the light-client / gate half of the 2026-09-10 lesson: a producer signs a header
+/// root computed from its state machine, a follower recomputes it from the transition, and
+/// nothing had ever asked whether the typed `events` shipped in the body hash to that same
+/// root. `chronos_header_body_agreement` (sigil-node) asserts
+/// `events_root(&block.events) == block.header.event_log_root` on every minted block.
+pub fn events_root(events: &[SigilEvent]) -> [u8; 32] {
+    if events.is_empty() {
+        return [0u8; 32];
+    }
+    let mut layer: Vec<[u8; 32]> = events.iter().map(|e| e.leaf_hash()).collect();
+    while layer.len() > 1 {
+        if layer.len() % 2 == 1 {
+            let last = *layer.last().unwrap();
+            layer.push(last);
+        }
+        let mut next = Vec::with_capacity(layer.len() / 2);
+        for pair in layer.chunks(2) {
+            let mut h = blake3::Hasher::new();
+            h.update(&pair[0]);
+            h.update(&pair[1]);
+            next.push(*h.finalize().as_bytes());
+        }
+        layer = next;
+    }
+    layer[0]
+}
+
 /// Build a proof that `events[index]` is committed under the Merkle root
 /// produced by hashing `events` with the same padding rule used in
 /// [`sigil_state::commit_state_transition`].
@@ -648,6 +679,31 @@ mod tests {
         // ShieldedSend appended at tag 11 — fixture order matches MintReward
         // (7), Send (0), Receive (1), ValidatorJoined (9), ShieldedSend (11).
         assert_eq!(tags, vec![7, 0, 1, 9, 11]);
+    }
+
+    #[test]
+    fn events_root_is_the_root_every_inclusion_proof_verifies_against() {
+        assert_eq!(events_root(&[]), [0u8; 32]);
+        for n in 1..=9usize {
+            let events: Vec<SigilEvent> = (0..n)
+                .map(|i| SigilEvent::Send {
+                    from: [i as u8; 32], to: [0xEE; 32], amount: 1_000 + i as u128, token: [0; 32], fee: 1,
+                })
+                .collect();
+            let root = events_root(&events);
+            assert_ne!(root, [0u8; 32]);
+            for i in 0..n {
+                let proof = prove_inclusion(&events, i).unwrap();
+                verify_inclusion(&events[i], &proof, root).unwrap_or_else(|e| panic!("n={n} i={i}: {e:?}"));
+            }
+            // Any body change moves the root: drop the last event, or alter one field.
+            if n > 1 {
+                assert_ne!(events_root(&events[..n - 1]), root, "n={n}: a missing event must change the root");
+            }
+            let mut altered = events.clone();
+            if let SigilEvent::Send { amount, .. } = &mut altered[0] { *amount += 1; }
+            assert_ne!(events_root(&altered), root, "n={n}: an altered event must change the root");
+        }
     }
 
     #[test]

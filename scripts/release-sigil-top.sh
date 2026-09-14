@@ -87,6 +87,21 @@ grep -q "^version = \"$VER\"" crates/sigil-top/Cargo.toml || { echo "✗ version
 # So the windows build gets its own CARGO_TARGET_DIR. One-time cost to establish it:
 # 181 s and 888 MB (measured); warm after that.
 # NOTE: two concurrent LTO links — give the wrapping systemd-run scope MemoryMax>=16G.
+# ── flux-rev provenance stamp (2026-09-14). `main.rs` reads SIGIL_TOP_FLUX_REV at compile
+# time and shows it in the header / `provenance` / every webhook event; this script never
+# exported it, so EVERY released binary since v0.38 reported "unstamped" (memory
+# project_sigil_ratatui_cell_budget_and_sigpipe_2026_09_06). Snapshot the crate's content
+# address AFTER the version bump so the stamp names the exact source that ships, and commit
+# .flux-rev/HEAD alongside Cargo.toml so the stamp is reproducible from git.
+FLUX_REV_BIN="${FLUX_REV_BIN:-/home/storage/deepseek-codewhale/flux/target/debug/flux-rev}"
+if [ -x "$FLUX_REV_BIN" ] && "$FLUX_REV_BIN" snapshot crates/sigil-top -m "release v$VER" >/dev/null 2>&1 \
+   && [ -s crates/sigil-top/.flux-rev/HEAD ]; then
+  export SIGIL_TOP_FLUX_REV="full:$(cat crates/sigil-top/.flux-rev/HEAD)"
+else
+  export SIGIL_TOP_FLUX_REV="git:$(git rev-parse --short HEAD)"
+  echo "  ! flux-rev snapshot unavailable — stamping $SIGIL_TOP_FLUX_REV instead"
+fi
+echo "  provenance stamp: $SIGIL_TOP_FLUX_REV"
 WIN_TARGET_DIR="${WIN_TARGET_DIR:-/home/storage/sigil-target-win}"
 echo "▸ 2/7 build linux + windows (release, PARALLEL — windows in $WIN_TARGET_DIR)"
 # NOTE (2026-08-21): sigil-top's Cargo.toml has `default = ["gpu"]` — GPU
@@ -298,7 +313,7 @@ for t in "${TARGETS[@]}"; do
 done
 
 echo "▸ 7/7 commit + tag + push"
-git add crates/sigil-top/Cargo.toml Cargo.lock
+git add crates/sigil-top/Cargo.toml Cargo.lock crates/sigil-top/.flux-rev/HEAD
 git commit --no-gpg-sign -m "release(sigil-top): v${VER}
 
 $NOTE

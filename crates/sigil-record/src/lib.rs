@@ -218,7 +218,10 @@ mod c {
 pub use c::{decode_record, encode_record, v2_compress, v2_decompress};
 
 // ── Pure-Rust zstd: the light client's decoder (no C in the Windows cross-build) ─────────
-#[cfg(feature = "pure")]
+// `test` is included so a plain `cargo test -p sigil-record` (no `--features pure`) still
+// compiles the cross-decoder tests below — the dev-dependency on ruzstd is always linked in
+// test builds. Found 2026-09-14: the default-feature test run failed with E0433 on `pure::`.
+#[cfg(any(feature = "pure", test))]
 pub mod pure {
     use super::*;
     use std::io::Read;

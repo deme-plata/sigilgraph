@@ -72,7 +72,7 @@ async fn index(State(st): State<Arc<App>>) -> Response {
         json!({
             "ok": true, "service": crate::VERSION, "data_dir": st.dir.display().to_string(),
             "routes": ["/v1/earth/latest", "/v1/earth/series?days=433", "/v1/earth/forecast", "/v1/earth/excitation",
-                       "/v1/earth/provenance", "/v1/earth/alerts?last=20", "/v1/earth/attest?last=20", "/v1/earth/health",
+                       "/v1/earth/provenance", "/v1/earth/tips", "/v1/earth/alerts?last=20", "/v1/earth/attest?last=20", "/v1/earth/health",
                        "/v1/earth/stream (text/event-stream: reading | alert | attest)"],
             "pages": ["https://sigilgraph.org/datacenter.html", "https://sigilgraph.org/kristensen-earth.html", "https://sigilgraph.org/kristensen-board.html"]
         }),
@@ -90,6 +90,12 @@ async fn excitation(State(st): State<Arc<App>>) -> Response {
 }
 async fn provenance(State(st): State<Arc<App>>) -> Response {
     file(&st.dir, "provenance.json")
+}
+/// The fortolkning alone: one tip per metric (what · read · not · family · da), from the current feed.
+async fn tips(State(st): State<Arc<App>>) -> Response {
+    let Ok(text) = std::fs::read_to_string(st.dir.join("latest.json")) else { return not_found("latest.json") };
+    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    json_value(StatusCode::OK, json!({"ok": true, "version": crate::VERSION, "count": v["tips"].as_object().map(|o| o.len()).unwrap_or(0), "tips": v["tips"]}))
 }
 
 async fn series(State(st): State<Arc<App>>, Query(q): Query<Days>) -> Response {
@@ -202,6 +208,7 @@ pub async fn run(bind: &str, dir: PathBuf) -> anyhow::Result<()> {
         .route("/v1/earth/forecast", get(forecast))
         .route("/v1/earth/excitation", get(excitation))
         .route("/v1/earth/provenance", get(provenance))
+        .route("/v1/earth/tips", get(tips))
         .route("/v1/earth/alerts", get(alerts))
         .route("/v1/earth/attest", get(attest))
         .route("/v1/earth/health", get(health))

@@ -190,7 +190,19 @@ pub const GENESIS_TIMESTAMP_MS: u64 = 1_748_538_000_000;
 /// fields are Phase-0 placeholders (zeroed nonce + sig of the correct
 /// length), exactly as `sigil-node::build_block_at` does — precheck only
 /// checks lengths + the VDF-input derivation in P0.
-fn build_header(height: u64, parent_hash: BlockHash, roots: StateRoots) -> SigilBlockHeaderV0 {
+/// Producer identity for a simulated node: a stable 32-byte id derived from its
+/// `NodeId`. Before 2026-09-14 every sim block carried `producer: [0u8; 32]`, so
+/// proposer entropy (Δs, the K-gauge's second axis) was identically zero in every
+/// chronos run — a gauge test could not even see two producers. Genesis keeps the
+/// zero id (it has no producer).
+pub fn producer_id_for(id: flux_chronos::NodeId) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"sigil-chronos/producer/v1");
+    h.update(&(id.0 as u64).to_le_bytes());
+    *h.finalize().as_bytes()
+}
+
+fn build_header(height: u64, parent_hash: BlockHash, roots: StateRoots, producer: [u8; 32]) -> SigilBlockHeaderV0 {
     let nonce = SqiSignature::from_array([0u8; SQISIGN_L5_LEN]);
     let mut h = blake3::Hasher::new();
     h.update(&parent_hash);
@@ -222,7 +234,7 @@ fn build_header(height: u64, parent_hash: BlockHash, roots: StateRoots) -> Sigil
             settle_tx: None,
         },
         sig_scheme: SigScheme::SqiSign5,
-        producer: [0u8; 32],
+        producer,
         producer_sig: SignatureBytes(vec![0u8; SQISIGN_L5_LEN]),
         // No Braid in the deterministic sim's header path — informational field.
         topology_commitment: None,
@@ -274,7 +286,7 @@ impl GenesisSpec {
         let mut scratch = SigilState::new();
         let roots = commit_state_transition(&mut scratch, &transition, 0)
             .expect("genesis transition must commit");
-        let header = build_header(0, [0u8; 32], roots);
+        let header = build_header(0, [0u8; 32], roots, [0u8; 32]);
         Block { header, transition, events }
     }
 }
@@ -489,7 +501,7 @@ impl SigilSimNode {
         };
         let mut events = coinbase.events;
         events.extend(result.events);
-        let header = build_header(height, self.parent_hash, roots);
+        let header = build_header(height, self.parent_hash, roots, producer_id_for(self.my_id));
         let block = Block { header, transition, events };
         self.next_height += 1;
         self.parent_hash = block.hash();

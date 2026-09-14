@@ -21,7 +21,7 @@ fn usage() -> ! {
          usage:\n  sigil-earth fetch   [--out DIR] [--cache DIR] [--state DIR] [--attest-key FILE] [--dry-run] [--inject-k X] [--webhook] [--buzz]\n  \
          sigil-earth serve   [--bind HOST:PORT] [--data DIR]\n  \
          sigil-earth alert   --inject-k X [--out DIR] [--dry-run] [--webhook] [--buzz]\n  \
-         sigil-earth verify  [--out DIR]\n  \
+         sigil-earth verify  [--out DIR] | verify --remote https://sigilgraph.org [--viewing-key HEX]\n  \
          sigil-earth attest  --seed-file FILE [--out DIR] [--fluxc PATH] [--amount N] [--dry-run]\n  \
          sigil-earth buzz    --text \"...\" [--channel sigil]",
         sigil_earth::VERSION
@@ -58,6 +58,11 @@ fn main() -> Result<()> {
             rt.block_on(sigil_earth::serve::run(&bind, out_dir))
         }
         "verify" => {
+            if let Some(base) = opt(&args, "--remote") {
+                let rep = sigil_earth::remote::verify_remote(&base, opt(&args, "--viewing-key"))?;
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+                return if rep["ok"] == true { Ok(()) } else { Err(anyhow!("remote verification failed")) };
+            }
             let v = sigil_earth::attest::verify(&sigil_earth::attest::chain_path(&out_dir), Some(&out_dir.join("latest.json")));
             println!("{}", serde_json::to_string_pretty(&v)?);
             if v.chain_intact && v.sigs_bad.is_empty() && v.live_match != Some(false) {
@@ -67,7 +72,7 @@ fn main() -> Result<()> {
             }
         }
         "attest" => {
-            let seed_file = opt(&args, "--seed-file").ok_or_else(|| anyhow!("attest needs --seed-file FILE"))?;
+            let seed_file = opt(&args, "--seed-file").unwrap_or_else(|| "/root/.config/sigil/earth-anchor.seed".into());
             let fluxc = opt(&args, "--fluxc").unwrap_or_else(|| "/home/orobit/flux-sigil-attest/fluxc".into());
             let amount = opt(&args, "--amount").unwrap_or_else(|| "1000".into());
             let dry = flag(&args, "--dry-run");
@@ -97,6 +102,7 @@ fn main() -> Result<()> {
                 ts: sigil_earth::time::iso_now(),
                 subject: "eop/latest.json".into(),
                 blake3: last.blake3.clone(),
+                sha256: last.sha256.clone(),
                 prev: None,
                 msg: String::new(),
                 pubkey: String::new(),

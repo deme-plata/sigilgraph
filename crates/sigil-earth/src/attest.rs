@@ -22,6 +22,9 @@ pub struct AttestRow {
     pub subject: String,
     #[serde(default)]
     pub blake3: String,
+    /// v2 rows (2026-09-14 evening onward): SHA-256 of the same bytes, so a browser can verify.
+    #[serde(default)]
+    pub sha256: String,
     #[serde(default)]
     pub prev: Option<String>,
     #[serde(default)]
@@ -65,6 +68,25 @@ pub fn message(n: u64, date: &str, digest: &str, prev: Option<&str>) -> String {
     format!("{VERSION}|{n}|{date}|{digest}|{}", prev.unwrap_or("null"))
 }
 
+pub const VERSION2: &str = "sigil-earth-attest-v2";
+pub fn message_v2(n: u64, date: &str, blake3: &str, sha256: &str, prev: Option<&str>) -> String {
+    format!("{VERSION2}|{n}|{date}|{blake3}|{sha256}|{}", prev.unwrap_or("null"))
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(bytes))
+}
+
+/// The message a row signed, by its version.
+pub fn expected_message(r: &AttestRow) -> String {
+    if r.v >= 2 {
+        message_v2(r.n, &r.date, &r.blake3, &r.sha256, r.prev.as_deref())
+    } else {
+        message(r.n, &r.date, &r.blake3, r.prev.as_deref())
+    }
+}
+
 /// Sign a new row for `latest_bytes` unless the newest attest row already carries this digest.
 pub fn sign_row(chain_path: &Path, key: &SigningKey, date: &str, latest_bytes: &[u8]) -> Result<Option<AttestRow>> {
     let digest = blake3::hash(latest_bytes).to_hex().to_string();
@@ -77,16 +99,18 @@ pub fn sign_row(chain_path: &Path, key: &SigningKey, date: &str, latest_bytes: &
     }
     let n = last.map(|l| l.n + 1).unwrap_or(1);
     let prev = last.map(|l| l.blake3.clone());
-    let msg = message(n, date, &digest, prev.as_deref());
+    let sha = sha256_hex(latest_bytes);
+    let msg = message_v2(n, date, &digest, &sha, prev.as_deref());
     let sig = key.sign(msg.as_bytes());
     let row = AttestRow {
         kind: "attest".into(),
-        v: 1,
+        v: 2,
         n,
         date: date.into(),
         ts: crate::time::iso_now(),
         subject: "eop/latest.json".into(),
         blake3: digest.clone(),
+        sha256: sha,
         prev,
         msg,
         pubkey: hex::encode(key.verifying_key().to_bytes()),
@@ -123,6 +147,12 @@ pub struct Verification {
 
 pub fn verify(chain_path: &Path, live: Option<&Path>) -> Verification {
     let chain = read_chain(chain_path);
+    let live_bytes = live.and_then(|p| std::fs::read(p).ok());
+    verify_rows(&chain, live_bytes.as_deref())
+}
+
+/// Verify a chain of rows against optional live bytes — the same check locally and remotely.
+pub fn verify_rows(chain: &[AttestRow], live_bytes: Option<&[u8]>) -> Verification {
     let mut prev: Option<String> = None;
     let mut intact = true;
     let mut ok = 0;
@@ -131,7 +161,7 @@ pub fn verify(chain_path: &Path, live: Option<&Path>) -> Verification {
     let mut anchor_rows = 0;
     let mut anchored = 0;
     let mut last_digest = None;
-    for r in &chain {
+    for r in chain {
         if r.kind == "anchor" {
             anchor_rows += 1;
             if r.anchor.get("executed").and_then(|v| v.as_bool()) == Some(true) {
@@ -143,7 +173,7 @@ pub fn verify(chain_path: &Path, live: Option<&Path>) -> Verification {
         if r.prev != prev {
             intact = false;
         }
-        let expect = message(r.n, &r.date, &r.blake3, r.prev.as_deref());
+        let expect = expected_message(r);
         let sig_ok = (|| -> Option<bool> {
             let pk: [u8; 32] = hex::decode(&r.pubkey).ok()?.try_into().ok()?;
             let sg: [u8; 64] = hex::decode(&r.sig).ok()?.try_into().ok()?;
@@ -159,7 +189,7 @@ pub fn verify(chain_path: &Path, live: Option<&Path>) -> Verification {
         prev = Some(r.blake3.clone());
         last_digest = Some(r.blake3.clone());
     }
-    let live_match = live.and_then(|p| std::fs::read(p).ok()).map(|b| Some(blake3::hash(&b).to_hex().to_string()) == last_digest);
+    let live_match = live_bytes.map(|b| Some(blake3::hash(b).to_hex().to_string()) == last_digest);
     Verification { rows: chain.len(), attest_rows, anchor_rows, chain_intact: intact, sigs_ok: ok, sigs_bad: bad, live_match, last_digest, anchored }
 }
 

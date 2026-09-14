@@ -337,6 +337,9 @@ pub fn run(o: &Opts) -> Result<Value> {
     write_atomic(&o.out_dir.join("forecast.json"), &serde_json::to_vec(&forecast_json)?)?;
     write_atomic(&o.out_dir.join("provenance.json"), &serde_json::to_vec(&json!({"version": crate::VERSION, "fetched_at": fetched_at, "provenance": provenance, "sources": sources,
         "attest_pubkey": crate::attest::load_or_create_key(&o.attest_key).ok().map(|k| hex::encode(k.verifying_key().to_bytes())),
+        "attest_message_v2": "sigil-earth-attest-v2|n|date|blake3|sha256|prev — Ed25519 over the UTF-8 bytes; v1 rows omit sha256",
+        "anchor": std::fs::read_to_string(o.state_dir.join("anchor.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()),
+        "verify": "sigil-earth verify --remote https://sigilgraph.org  (or the page /kristensen-verify.html)",
         "licence_note": "IERS EOP products and GFZ ESMGFZ EAM products are published for open scientific use; no machine-readable licence is attached to the files. Cite: IERS Rapid Service/Prediction Centre (Bulletin A); Dobslaw et al. 2010, doi:10.1029/2009JB007127."}))?)?;
     write_atomic(&o.out_dir.join("latest.json"), &latest_bytes)?;
     // daily archive outside the web root, 60 kept

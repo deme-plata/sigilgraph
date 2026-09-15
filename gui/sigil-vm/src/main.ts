@@ -138,6 +138,7 @@ document.addEventListener('click', (ev) => {
   if (ds.hero !== undefined) { heroIdx = Number(ds.hero); renderHero(); return }
   if (btn.id === 'chainChip') { $('#chainMenu').classList.toggle('open'); return }
   if (btn.id === 'panelBtn') { app.classList.toggle('panel-open'); try { localStorage.setItem('sigilvm-panel', app.classList.contains('panel-open') ? 'open' : 'closed') } catch { /* */ } return }
+  if (btn.id === 'bnWallet') { ev.preventDefault(); app.classList.toggle('panel-open'); renderPanel(); return }
   if (btn.id === 'walletBtn') { if (wallet) { app.classList.add('panel-open'); return } openWalletModal(); return }
   if (btn.id === 'pDisconnect') { wallet = null; try { localStorage.removeItem('sigilvm-wallet') } catch { /* */ } for (const k in balances) delete balances[k]; renderChain(); renderPanel(); renderSwap(); return }
   if (btn.id === 'bellBtn') { $('#bellBadge').hidden = true; panelTab = 'activity'; app.classList.add('panel-open'); renderPanel(); return }

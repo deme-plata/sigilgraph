@@ -46,10 +46,10 @@ export function shell(): string {
           <a class="cm" href="https://polygonscan.com/token/0x3FCED760" target="_blank" rel="noopener"><i class="d" style="background:#8247e5;color:#8247e5"></i><div><b>Polygon</b><small>wSIGIL3 · Uniswap pool</small></div><span class="chip derived">external</span></a>
           <div class="cm dis"><i class="d" style="background:#555"></i><div><b>Soneium</b><small>wSIGIL leg · not deployed</small></div><span class="chip bad">blocked</span></div>
         </div></div>
-      <button class="ibtn" id="bellBtn" title="Activity">${I.bell}<i class="badge" id="bellBadge" hidden></i></button>
-      <button class="ibtn" id="cartBtn" title="Cart (coming with listings)">${I.cart}</button>
+      <button class="ibtn" id="bellBtn" title="Activity" aria-label="Activity">${I.bell}<i class="badge" id="bellBadge" hidden></i></button>
+      <button class="ibtn" id="cartBtn" title="Cart (coming with listings)" aria-label="Cart">${I.cart}</button>
       <button class="btn primary" id="walletBtn">${I.wallet}<span id="walletLbl">Connect wallet</span></button>
-      <button class="ibtn" id="panelBtn" title="Toggle wallet panel">${I.panel}</button>
+      <button class="ibtn" id="panelBtn" title="Toggle wallet panel" aria-label="Toggle wallet panel">${I.panel}</button>
     </div>
   </header>
   <aside class="rail">
@@ -70,11 +70,11 @@ export function shell(): string {
       <div id="foryou"></div>
     </section>
     <section id="featured" class="section">
-      <div class="sec-head"><div><h2>Featured Collections</h2><div class="sub">Record families the chain can prove — ranked by items on chain.</div></div><div class="right"><div class="arrows" data-scroll="featuredRow"><button>${I.left}</button><button>${I.right}</button></div><a class="viewall" href="#trending">View all</a></div></div>
+      <div class="sec-head"><div><h2>Featured Collections</h2><div class="sub">Record families the chain can prove — ranked by items on chain.</div></div><div class="right"><div class="arrows" data-scroll="featuredRow"><button aria-label="Scroll left">${I.left}</button><button aria-label="Scroll right">${I.right}</button></div><a class="viewall" href="#trending">View all</a></div></div>
       <div class="row" id="featuredRow">${skeleton(5)}</div>
     </section>
     <section id="drops" class="section">
-      <div class="sec-head"><div><h2>Featured Drops</h2><div class="sub">Activations gated by block height. Countdowns are measured from the live height and block rate.</div></div><div class="right"><div class="arrows" data-scroll="dropsRow"><button>${I.left}</button><button>${I.right}</button></div></div></div>
+      <div class="sec-head"><div><h2>Featured Drops</h2><div class="sub">Activations gated by block height. Countdowns are measured from the live height and block rate.</div></div><div class="right"><div class="arrows" data-scroll="dropsRow"><button aria-label="Scroll left">${I.left}</button><button aria-label="Scroll right">${I.right}</button></div></div></div>
       <div class="row" id="dropsRow">${skeleton(4, 'drop wide')}</div>
     </section>
     <section id="trending" class="section">
@@ -89,11 +89,11 @@ export function shell(): string {
       <div class="trending" id="trendingTable"></div>
     </section>
     <section id="movers" class="section">
-      <div class="sec-head"><div><h2>Top Movers Today</h2><div class="sub">Rigs by hashrate. Change is measured against the first sample this page took today (kept in your browser).</div></div><div class="right"><div class="arrows" data-scroll="moversRow"><button>${I.left}</button><button>${I.right}</button></div></div></div>
+      <div class="sec-head"><div><h2>Top Movers Today</h2><div class="sub">Rigs by hashrate. Change is measured against the first sample this page took today (kept in your browser).</div></div><div class="right"><div class="arrows" data-scroll="moversRow"><button aria-label="Scroll left">${I.left}</button><button aria-label="Scroll right">${I.right}</button></div></div></div>
       <div class="row" id="moversRow">${skeleton(6, 'mover')}</div>
     </section>
     <section id="sales" class="section">
-      <div class="sec-head"><div><h2>Highest Weekly Sales</h2><div class="sub">Settlements the chain can prove this week — each card carries its tx hash or docket leaf. No marketplace sales exist on SIGIL yet; nothing here is a price.</div></div><div class="right"><div class="arrows" data-scroll="salesRow"><button>${I.left}</button><button>${I.right}</button></div></div></div>
+      <div class="sec-head"><div><h2>Highest Weekly Sales</h2><div class="sub">Settlements the chain can prove this week — each card carries its tx hash or docket leaf. No marketplace sales exist on SIGIL yet; nothing here is a price.</div></div><div class="right"><div class="arrows" data-scroll="salesRow"><button aria-label="Scroll left">${I.left}</button><button aria-label="Scroll right">${I.right}</button></div></div></div>
       <div class="row" id="salesRow">${skeleton(6, 'sale')}</div>
     </section>
     <section id="dex" class="section">
@@ -118,6 +118,13 @@ export function shell(): string {
     <div class="pbody" id="panelBody"></div>
     <div class="pf"><button class="btn ghost" id="pSend">Send</button><button class="btn ghost" id="pReceive">Receive</button><button class="btn primary" id="pSwap">Swap</button></div>
   </aside>
+  <nav class="bottomnav" aria-label="Mobile navigation">
+    <a href="#market" data-nav="market" class="on">${I.home}<span>Home</span></a>
+    <a href="#featured" data-nav="featured">${I.compass}<span>Discover</span></a>
+    <a href="#drops" data-nav="drops">${I.rocket}<span>Drops</span></a>
+    <a href="#swap" data-nav="swap">${I.swap}<span>Swap</span></a>
+    <a href="#" id="bnWallet">${I.wallet}<span>Wallet</span></a>
+  </nav>
   <div class="modal" id="modal"><div class="box" id="modalBox"></div></div>
   <div class="toasts" id="toasts"></div>`
 }

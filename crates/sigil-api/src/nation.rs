@@ -412,6 +412,35 @@ impl NationBridge {
         Ok(self.queue(SigilTx::GaugePush { authority, feed, value_e6, reading_date, attest_blake3, fee }))
     }
 
+    /// Authenticate + queue a ROCKY contract call (2026-09-15). The caller signs
+    /// `sigil-rpc/v1|rocky_call|{caller}|{call_name}|{calldata_hex}|{fee}|nonce={req_nonce}`;
+    /// consensus runs `rocky_cover::apply` (owner / master / balance rules live there) and
+    /// refuses everything before `sigil_oracle::GAUGE_LIVE_HEIGHT`.
+    pub fn submit_rocky_call(
+        &self,
+        caller_hex: &str,
+        call: &sigil_vm::contracts::rocky_cover::RockyCall,
+        fee: u128,
+        sig_hex: &str,
+        req_nonce: u64,
+    ) -> Result<[u8; 32], NationSubmitError> {
+        let caller = crate::hex32(caller_hex).ok_or(NationSubmitError::BadAddress)?;
+        let calldata = call.encode();
+        let msg = format!(
+            "sigil-rpc/v1|rocky_call|{caller_hex}|{}|{}|{fee}|nonce={req_nonce}",
+            call.name(), hex::encode(&calldata)
+        );
+        self.verify_and_watermark(&caller, &msg, sig_hex, req_nonce)?;
+        Ok(self.queue(SigilTx::ContractCall {
+            from: caller,
+            contract: sigil_vm::contracts::rocky_cover::ROCKY_CONTRACT,
+            method: call.selector(),
+            calldata,
+            gas_limit: 0,
+            fee,
+        }))
+    }
+
     /// Authenticate + queue an oracle DELEGATION, signed by the master wallet
     /// (consensus enforces authority == master at apply, and refuses it
     /// before `sigil_usds::USDS_LIVE_HEIGHT`). `feeder` all-zero revokes.
@@ -803,6 +832,104 @@ pub async fn gauge_push_wallet(
     }
     match st.nation.submit_gauge_push(&req.authority, &req.feed, value_e6, req.reading_date, &req.attest_blake3, req.fee as u128, &req.sig, req.req_nonce) {
         Ok(tx_hash) => Json(serde_json::json!({ "ok": true, "txid": hex::encode(tx_hash), "note": "queued for the next braid block" })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
+    }
+}
+
+
+// ── ROCKY — Rocky's token + K⊕-p99 cover (sigil-vm native contract, 2026-09-15) ─────────────
+
+#[derive(Debug, Serialize)]
+pub struct RockyPolicyResponse {
+    pub n: u64,
+    pub holder: String,
+    pub cover: String,
+    pub from_date: u32,
+    pub until_date: u32,
+    pub claimed: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RockyStatusResponse {
+    pub symbol: &'static str,
+    pub name: &'static str,
+    pub token: String,
+    pub contract: String,
+    pub decimals: u32,
+    pub live: bool,
+    pub bootstrapped: bool,
+    pub owner: String,
+    pub paused: bool,
+    pub fee_bps: u64,
+    pub total_supply: String,
+    pub circulating: String,
+    pub reflect_pool: String,
+    pub pool_balance: String,
+    pub pool_shares: String,
+    pub nav_per_share_e10: String,
+    pub unstake_cooldown_blocks: u64,
+    pub min_premium_bps: u64,
+    pub policies: Vec<RockyPolicyResponse>,
+    pub trigger: &'static str,
+    pub calls: Vec<&'static str>,
+}
+
+#[flux_api_macros::api(GET, "/v1/rocky", summary = "ROCKY — Rocky's token and the K⊕-p99 cover: owner, supply, reflection, the underwriting pool, every policy")]
+pub async fn rocky_status(State(st): State<AppState>) -> Json<ApiResponse<RockyStatusResponse>> {
+    use sigil_vm::contracts::rocky_cover as rc;
+    let height = st.mining.tip().map(|t| t.height).unwrap_or(0);
+    let r = st.state.read().map(|s| {
+        let n = rc::policy_count(&s);
+        let policies = (n.saturating_sub(50)..n).filter_map(|i| rc::policy(&s, i).map(|p| RockyPolicyResponse {
+            n: i, holder: hex::encode(p.holder), cover: p.cover.to_string(), from_date: p.from_date, until_date: p.until_date, claimed: p.claimed,
+        })).collect();
+        RockyStatusResponse {
+            symbol: rc::ROCKY_SYMBOL, name: rc::ROCKY_NAME, token: hex::encode(rc::ROCKY), contract: hex::encode(rc::ROCKY_CONTRACT), decimals: rc::ROCKY_DECIMALS,
+            live: sigil_oracle::gauge_active(height), bootstrapped: rc::bootstrapped(&s),
+            owner: rc::owner(&s).map(hex::encode).unwrap_or_default(), paused: rc::paused(&s), fee_bps: rc::fee_bps(&s),
+            total_supply: rc::total_supply(&s).to_string(), circulating: rc::circulating(&s).to_string(), reflect_pool: rc::reflect_pool(&s).to_string(),
+            pool_balance: rc::pool_balance(&s).to_string(), pool_shares: rc::pool_shares(&s).to_string(), nav_per_share_e10: rc::nav_per_share_e10(&s).to_string(),
+            unstake_cooldown_blocks: rc::UNSTAKE_COOLDOWN_BLOCKS, min_premium_bps: rc::MIN_PREMIUM_BPS, policies,
+            trigger: "a claim pays min(cover, pool) when the on-chain earth.k_resid reading (GaugePush) exceeds the on-chain earth.k_p99 reading on a date inside the policy window",
+            calls: vec!["bootstrap", "transfer", "mint", "burn", "set_fee_bps", "pause", "airdrop", "transfer_ownership", "stake", "unstake", "buy_cover", "claim", "settle"],
+        }
+    });
+    match r {
+        Ok(v) => ApiResponse::ok(v),
+        Err(_) => ApiResponse::err("state lock poisoned"),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WalletRockyCallRequest {
+    /// 64-hex caller wallet.
+    pub caller: String,
+    /// The call, as `RockyCall` JSON (e.g. {"call":"stake","amount":"5000000000000"}).
+    pub call: sigil_vm::contracts::rocky_cover::RockyCall,
+    #[serde(default)]
+    pub fee: u64,
+    /// 128-hex Ed25519 signature over `sigil-rpc/v1|rocky_call|{caller}|{name}|{calldata_hex}|{fee}|nonce={req_nonce}`.
+    pub sig: String,
+    pub req_nonce: u64,
+}
+
+#[flux_api_macros::api(POST, "/v1/rocky/call_wallet", summary = "Wallet-signed ROCKY contract call: transfer, stake, unstake, buy_cover, claim, settle (owner: mint, airdrop, pause, set_fee_bps, transfer_ownership; master: bootstrap)")]
+pub async fn rocky_call_wallet(
+    State(st): State<AppState>,
+    Json(req): Json<WalletRockyCallRequest>,
+) -> Json<serde_json::Value> {
+    let Some(caller) = hex32(&req.caller) else {
+        return Json(serde_json::json!({ "ok": false, "error": "caller must be 64-hex" }));
+    };
+    let tx = SigilTx::ContractCall {
+        from: caller, contract: sigil_vm::contracts::rocky_cover::ROCKY_CONTRACT,
+        method: req.call.selector(), calldata: req.call.encode(), gas_limit: 0, fee: req.fee as u128,
+    };
+    if let Some(reason) = dry_run_reason(&st, &tx) {
+        return Json(serde_json::json!({ "ok": false, "error": reason }));
+    }
+    match st.nation.submit_rocky_call(&req.caller, &req.call, req.fee as u128, &req.sig, req.req_nonce) {
+        Ok(tx_hash) => Json(serde_json::json!({ "ok": true, "txid": hex::encode(tx_hash), "call": req.call.name(), "note": "queued for the next braid block" })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
     }
 }

@@ -1524,6 +1524,10 @@ pub enum TxApplyError {
     /// every welfare claim.
     #[error("oracle price must be non-zero")]
     ZeroOraclePrice,
+    /// A native contract refused the call (its own error text — owner/master rules, balances,
+    /// the cover trigger). Nothing is written.
+    #[error("contract refused: {0}")]
+    ContractRefused(String),
     /// GaugePush before `sigil_oracle::GAUGE_LIVE_HEIGHT` (dormant until scheduled).
     #[error("gauge feed not active: activates at height {activates_at}, tx at {height}")]
     GaugeNotActive { height: u64, activates_at: u64 },
@@ -2394,13 +2398,40 @@ fn apply_tx_inner(
             out.mutations.push(StateMutation::PushEventHash(evt.leaf_hash()));
             out.events.push(evt);
         }
-        SigilTx::ContractCall { contract, method, .. } => {
-            let evt = SigilEvent::ContractCall {
-                contract: *contract, method: *method,
-                gas_used: 0, result_hash: [0u8; 32],
-            };
-            out.mutations.push(StateMutation::PushEventHash(evt.leaf_hash()));
-            out.events.push(evt);
+        SigilTx::ContractCall { from, contract, method, calldata, fee, .. } => {
+            // 2026-09-15: the first native contract with an execution path. A call to
+            // ROCKY_CONTRACT after the gauge activation height runs `rocky_cover::apply`
+            // (owner/master checks are consensus rules inside it) and commits its mutations in
+            // this same transition; the ONE typed event carries the outcome digest. Every other
+            // contract id keeps the historical shape: an event, no state (the VM lane is not
+            // wired), so nothing already minted is reinterpreted.
+            let height = at_height.unwrap_or(0);
+            if *contract == sigil_vm::contracts::rocky_cover::ROCKY_CONTRACT && sigil_oracle::gauge_active(height) {
+                let call = sigil_vm::contracts::rocky_cover::RockyCall::decode(calldata)
+                    .map_err(|e| TxApplyError::ContractRefused(e.to_string()))?;
+                let outcome = sigil_vm::contracts::rocky_cover::apply(state, from, *method, &call, height)
+                    .map_err(|e| TxApplyError::ContractRefused(e.to_string()))?;
+                // the fee (native) burns, like every authority tx
+                if *fee > 0 {
+                    let have = state.balance_of(from, &NATIVE);
+                    if have < *fee {
+                        return Err(TxApplyError::InsufficientBalance { have, need: *fee });
+                    }
+                    out.mutations.push(StateMutation::SetBalance { wallet: *from, token: NATIVE, amount: have - *fee });
+                }
+                let gas_used = outcome.mutations.len() as u64;
+                out.mutations.extend(outcome.mutations);
+                let evt = SigilEvent::ContractCall { contract: *contract, method: *method, gas_used, result_hash: outcome.result_hash };
+                out.mutations.push(StateMutation::PushEventHash(evt.leaf_hash()));
+                out.events.push(evt);
+            } else {
+                let evt = SigilEvent::ContractCall {
+                    contract: *contract, method: *method,
+                    gas_used: 0, result_hash: [0u8; 32],
+                };
+                out.mutations.push(StateMutation::PushEventHash(evt.leaf_hash()));
+                out.events.push(evt);
+            }
         }
         SigilTx::ContractDeploy { from, bytecode, .. } => {
             let bytecode_hash: [u8; 32] = *blake3::hash(bytecode).as_bytes();
@@ -4628,9 +4659,14 @@ mod nation_welfare_tests {
         assert!(matches!(apply_tx_at(&s, &native, H + 1_000_000).unwrap_err(), TxApplyError::TransparentSendRetired { .. }));
     }
 
+    /// The gauge activation seam is process-global; tests that move it take this lock.
+    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn gauge_push_is_dormant_then_authority_gated_monotone_and_committed() {
         use sigil_oracle::{feed_id, read_gauge};
+        let _g = GATE.lock().unwrap_or_else(|e| e.into_inner());
+        sigil_oracle::chronos_schedule_gauge_live_height(u64::MAX);
         let mut s = nation_state(0);
         // Feeder delegated (USDS-live height), so both authorities exist.
         apply_commit(&mut s, SigilTx::OracleDelegate { authority: MASTER, feeder: FEEDER, fee: 0 }, H).unwrap();
@@ -4670,6 +4706,40 @@ mod nation_welfare_tests {
         assert!(matches!(apply_tx_at(&s2, &signed(SigilTx::GaugePush { authority: FEEDER, feed: feed2, value_e6: 1, reading_date: 20260914, attest_blake3: [1; 32], fee: 7 }), H + 14).unwrap_err(), TxApplyError::InsufficientBalance { have: 6, need: 7 }));
         // The other feed is untouched by pushes to this one.
         assert_eq!(read_gauge(&s2, &feed).unwrap().nonce, 3);
+        sigil_oracle::chronos_schedule_gauge_live_height(u64::MAX);
+    }
+
+    #[test]
+    fn contract_call_to_rocky_runs_the_contract_only_after_activation() {
+        use sigil_vm::contracts::rocky_cover::{self as rc, RockyCall};
+        const BOB: WalletId = [0x22; 32];
+        let _g = GATE.lock().unwrap_or_else(|e| e.into_inner());
+        sigil_oracle::chronos_schedule_gauge_live_height(u64::MAX);
+        let mut s = nation_state(0);
+        let boot = RockyCall::Bootstrap { owner: ALICE, initial_supply: 1_000 * rc::ONE_ROCKY };
+        let call = |from: WalletId, c: &RockyCall| SigilTx::ContractCall { from, contract: rc::ROCKY_CONTRACT, method: c.selector(), calldata: c.encode(), gas_limit: 0, fee: 0 };
+        // dormant: the historical shape — one event, no state
+        let r = apply_tx_at(&s, &signed(call(MASTER, &boot)), H).unwrap();
+        assert_eq!(r.mutations.len(), 1);
+        assert!(matches!(r.events[0], SigilEvent::ContractCall { gas_used: 0, result_hash, .. } if result_hash == [0u8; 32]));
+        assert!(!rc::bootstrapped(&s));
+        sigil_oracle::chronos_schedule_gauge_live_height(H);
+        // active: a stranger cannot bootstrap; the master can; the owner then transfers
+        let e = apply_tx_at(&s, &signed(call(ALICE, &boot)), H).unwrap_err();
+        assert!(matches!(&e, TxApplyError::ContractRefused(m) if m.contains("master")), "{e}");
+        apply_commit(&mut s, call(MASTER, &boot), H).unwrap();
+        assert!(rc::bootstrapped(&s) && rc::owner(&s) == Some(ALICE));
+        let t = RockyCall::Transfer { to: BOB, amount: 100 * rc::ONE_ROCKY };
+        let r = apply_tx_at(&s, &signed(call(ALICE, &t)), H + 1).unwrap();
+        assert!(matches!(r.events[0], SigilEvent::ContractCall { gas_used, result_hash, .. } if gas_used > 0 && result_hash != [0u8; 32]));
+        commit_state_transition(&mut s, &StateTransition { at_height: H + 1, mutations: r.mutations }, H + 1).unwrap();
+        assert_eq!(rc::raw_balance(&s, &BOB), 98 * rc::ONE_ROCKY, "2 % reflection fee");
+        // a wrong selector is refused before anything is written
+        let bad = SigilTx::ContractCall { from: ALICE, contract: rc::ROCKY_CONTRACT, method: rc::selector("mint"), calldata: t.encode(), gas_limit: 0, fee: 0 };
+        assert!(matches!(apply_tx_at(&s, &signed(bad), H + 2).unwrap_err(), TxApplyError::ContractRefused(_)));
+        // any OTHER contract id keeps the no-op shape even when active
+        let other = SigilTx::ContractCall { from: ALICE, contract: [0x77; 32], method: [0; 4], calldata: vec![], gas_limit: 0, fee: 0 };
+        assert_eq!(apply_tx_at(&s, &signed(other), H + 2).unwrap().mutations.len(), 1);
         sigil_oracle::chronos_schedule_gauge_live_height(u64::MAX);
     }
 

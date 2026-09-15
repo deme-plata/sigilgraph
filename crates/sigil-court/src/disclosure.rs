@@ -369,7 +369,7 @@ pub fn involvement(e: &SigilEvent, s: &WalletId) -> Option<&'static str> {
 /// Human name for a gauge feed id — the same derivation as `sigil_oracle::feed_id`, kept
 /// local so the court does not take on the oracle crate for one label.
 fn sigil_oracle_feed_name(feed: &[u8; 32]) -> String {
-    for n in ["earth.k_resid", "bio.k_bio", "bio.breathing_pgc_day", "bio.ops_atp_log10", "bio.ppm"] {
+    for n in ["earth.k_resid", "earth.k_p99", "bio.k_bio", "bio.breathing_pgc_day", "bio.ops_atp_log10", "bio.ppm"] {
         let mut h = blake3::Hasher::new();
         h.update(b"sigil-gauge-v1|");
         h.update(n.as_bytes());

@@ -43,6 +43,7 @@ sigil-emission = { path = "../sigil-emission" }
 # directly from this crate — that only ever happens inside sigil-tx::apply_tx.
 sigil-usds = { path = "../sigil-usds" }
 sigil-oracle = { path = "../sigil-oracle" }
+sigil-vm = { path = "../sigil-vm" }
 # send.rs: SignedTx's sig-scheme wrapper types (SigScheme/SignatureBytes/
 # PubKeyBytes) live here; sigil-tx doesn't re-export them.
 sigil-header = { path = "../sigil-header" }

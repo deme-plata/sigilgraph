@@ -7,4 +7,5 @@
 //! SIGIL. The WASM lane (`crate::execute`) is for user-deployed code; the
 //! contracts here are protocol-level (ported from Quillon's q-vm contracts).
 
+pub mod rocky_cover;
 pub mod sigil_share;

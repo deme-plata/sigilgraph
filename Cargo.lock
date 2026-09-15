@@ -8456,6 +8456,7 @@ dependencies = [
  "sigil-state",
  "sigil-tx",
  "sigil-usds",
+ "sigil-vm",
  "tokio",
  "tokio-stream",
  "tower-http 0.5.2",
@@ -8955,6 +8956,7 @@ dependencies = [
  "sigil-tip-proof",
  "sigil-tx",
  "sigil-updater",
+ "sigil-vm",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -9295,6 +9297,7 @@ dependencies = [
  "sigil-oracle",
  "sigil-state",
  "sigil-usds",
+ "sigil-vm",
  "thiserror 1.0.69",
 ]
 
@@ -9352,6 +9355,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sigil-dex",
+ "sigil-oracle",
  "sigil-state",
  "thiserror 1.0.69",
  "wasmi",

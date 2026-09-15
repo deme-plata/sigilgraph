@@ -53,6 +53,7 @@ flux-vdf      = { workspace = true } # test-only: constructing AcceptedSolve for
 sigil-api = { path = "../sigil-api" }
 sigil-events  = { path = "../sigil-events" }
 sigil-oracle  = { path = "../sigil-oracle" }
+sigil-vm      = { path = "../sigil-vm" }
 sigil-net       = { path = "../sigil-net" }
 sigil-net-wg    = { path = "../sigil-net-wg" }
 sigil-updater   = { path = "../sigil-updater" }

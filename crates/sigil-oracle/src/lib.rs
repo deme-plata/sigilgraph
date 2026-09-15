@@ -195,7 +195,7 @@ pub const MAX_GAUGE_AGE_BLOCKS: u64 = 3_000_000;
 
 /// Canonical feed names. Anything else is refused at apply — an unknown feed is a typo, not
 /// a new gauge; new gauges are added here, in a commit every node runs.
-pub const FEED_NAMES: [&str; 5] = ["earth.k_resid", "bio.k_bio", "bio.breathing_pgc_day", "bio.ops_atp_log10", "bio.ppm"];
+pub const FEED_NAMES: [&str; 6] = ["earth.k_resid", "earth.k_p99", "bio.k_bio", "bio.breathing_pgc_day", "bio.ops_atp_log10", "bio.ppm"];
 
 /// Feed id = BLAKE3("sigil-gauge-v1|" ‖ name). Stable, name-derived, never reordered.
 pub fn feed_id(name: &str) -> [u8; 32] {

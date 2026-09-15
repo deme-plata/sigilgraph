@@ -360,7 +360,22 @@ pub fn involvement(e: &SigilEvent, s: &WalletId) -> Option<&'static str> {
             if eq(citizen) { Some("citizen") } else if eq(authority) { Some("authority") } else { None }
         }
         SigilEvent::SwapExecuted { .. } | SigilEvent::LpDeposited { .. } | SigilEvent::LpWithdrawn { .. } | SigilEvent::ContractCall { .. } | SigilEvent::ShieldedSend { .. } => None,
+        // The court may cite a gauge reading as a fact ("the biosphere was critical on that
+        // date"); the pushing authority is a party to it, nobody else is.
+        SigilEvent::GaugePushed { authority, .. } => eq(authority).then_some("authority"),
     }
+}
+
+/// Human name for a gauge feed id — the same derivation as `sigil_oracle::feed_id`, kept
+/// local so the court does not take on the oracle crate for one label.
+fn sigil_oracle_feed_name(feed: &[u8; 32]) -> String {
+    for n in ["earth.k_resid", "bio.k_bio", "bio.breathing_pgc_day", "bio.ops_atp_log10", "bio.ppm"] {
+        let mut h = blake3::Hasher::new();
+        h.update(b"sigil-gauge-v1|");
+        h.update(n.as_bytes());
+        if h.finalize().as_bytes() == feed { return n.into(); }
+    }
+    "unknown".into()
 }
 
 fn kind_name(e: &SigilEvent) -> &'static str {
@@ -387,6 +402,7 @@ fn kind_name(e: &SigilEvent) -> &'static str {
         SigilEvent::BankExecuted { .. } => "BankExecuted",
         SigilEvent::CitizenAttested { .. } => "CitizenAttested",
         SigilEvent::WelfareClaimed { .. } => "WelfareClaimed",
+        SigilEvent::GaugePushed { .. } => "GaugePushed",
     }
 }
 
@@ -411,6 +427,11 @@ fn fields_of(e: &SigilEvent) -> (BTreeMap<String, String>, Vec<&'static str>, Ve
         SigilEvent::WelfareClaimed { citizen, amount } => {
             f.insert("citizen".into(), hx(citizen)); f.insert("amount".into(), amount.to_string()); f.insert("token".into(), hx(&NATIVE));
             (vec!["citizen"], vec!["amount"])
+        }
+        SigilEvent::GaugePushed { authority, feed, value_e6, reading_date, attest_blake3 } => {
+            f.insert("authority".into(), hx(authority)); f.insert("feed".into(), hx(feed)); f.insert("feed_name".into(), sigil_oracle_feed_name(feed));
+            f.insert("value_e6".into(), value_e6.to_string()); f.insert("reading_date".into(), reading_date.to_string()); f.insert("attest_blake3".into(), hx(attest_blake3));
+            (vec!["authority"], vec![])
         }
         SigilEvent::BankExecuted { id, from, to, token, amount } => {
             f.insert("proposal".into(), id.clone()); f.insert("from".into(), hx(from)); f.insert("to".into(), hx(to)); f.insert("token".into(), hx(token)); f.insert("amount".into(), amount.to_string());

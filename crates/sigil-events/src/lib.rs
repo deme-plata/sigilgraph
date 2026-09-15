@@ -17,6 +17,19 @@
 
 /// Decimal-string codec for `u128` — works around serde_json's lack of
 /// u128 wire support. Apply with `#[serde(with = "u128_str")]`.
+/// Signed twin of [`u128_str`] for gauge readings (the breathing rate is negative while the
+/// biosphere inhales). Same shape: decimal string on the wire.
+pub mod i128_str {
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(v: &i128, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&v.to_string())
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<i128, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse::<i128>().map_err(serde::de::Error::custom)
+    }
+}
+
 pub mod u128_str {
     use serde::{Deserialize, Deserializer, Serializer};
     pub fn serialize<S: Serializer>(v: &u128, s: S) -> Result<S::Ok, S::Error> {
@@ -358,6 +371,22 @@ pub enum SigilEvent {
         #[serde(with = "u128_str")]
         amount: u128,
     },
+    /// GaugePush (2026-09-15): a Kristensen gauge reading was committed to its feed slot —
+    /// K⊕, K_bio, the breathing rate, the ops ladder. `value_e6` is the reading × 1e6
+    /// (signed), `reading_date` YYYYMMDD, `attest_blake3` the sigil-earth attest digest.
+    GaugePushed {
+        /// The pushing authority (master or delegated feeder).
+        authority: WalletId,
+        /// `sigil_oracle::feed_id(name)`.
+        feed: [u8; 32],
+        /// Reading × 1e6, signed.
+        #[serde(with = "i128_str")]
+        value_e6: i128,
+        /// The day the reading describes, YYYYMMDD.
+        reading_date: u32,
+        /// BLAKE3 of the published `latest.json` the reading came from.
+        attest_blake3: [u8; 32],
+    },
 }
 
 impl SigilEvent {
@@ -387,6 +416,7 @@ impl SigilEvent {
             SigilEvent::BankExecuted    { .. } => 19,
             SigilEvent::CitizenAttested { .. } => 20,
             SigilEvent::WelfareClaimed  { .. } => 21,
+            SigilEvent::GaugePushed     { .. } => 22,
         }
     }
 

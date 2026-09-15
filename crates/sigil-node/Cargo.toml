@@ -52,6 +52,7 @@ sigil-bank    = { path = "../sigil-bank" } # pool-share coinbase: master/commons
 flux-vdf      = { workspace = true } # test-only: constructing AcceptedSolve for the mint_next_block integration test
 sigil-api = { path = "../sigil-api" }
 sigil-events  = { path = "../sigil-events" }
+sigil-oracle  = { path = "../sigil-oracle" }
 sigil-net       = { path = "../sigil-net" }
 sigil-net-wg    = { path = "../sigil-net-wg" }
 sigil-updater   = { path = "../sigil-updater" }

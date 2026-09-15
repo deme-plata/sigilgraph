@@ -156,6 +156,200 @@ pub fn price_is_fresh(state: &SigilState, at_height: u64) -> bool {
         && at_height - stamp <= MAX_PRICE_AGE_BLOCKS
 }
 
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// GaugePush — Kristensen gauges (K⊕, K_bio, the breathing, the Lloyd ladder) as committed slots
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//
+// 2026-09-15 (Viktor: "byg GaugePush"). The K gauges are computed off-chain by `sigil-earth`
+// four times a day, signed, and anchored as shielded memos — on-chain, but as text nothing
+// can compute against. A `GaugePush` writes a reading into a contract slot the same way
+// `OraclePush` writes the price, so `contract_state_root` commits what Earth did and a
+// contract (native today, WASM when `ContractCall` executes) can settle on it.
+//
+// One slot per feed holds `value_e6 ‖ reading_date ‖ height ‖ nonce`; a sibling slot holds
+// the BLAKE3 digest of the `latest.json` the reading came from — the same digest the
+// sigil-earth attest chain signs and anchors, so the two records name each other.
+//
+// Who may push: the master wallet or the delegated oracle FEEDER (`FEEDER_SLOT`) — the same
+// trust root as the price. The chain does NOT verify the sigil-earth Ed25519 attest
+// signature (the attest key is not state-committed); the feeder's authority is the consensus
+// rule, the digest is the cross-check anyone can run against /v1/earth/attest.
+//
+// Activation: [`GAUGE_LIVE_HEIGHT`] is DORMANT (`u64::MAX`). A `GaugePush` before it is
+// refused by every node identically, so shipping this binary changes nothing a producer
+// emits. Scheduling the height is an operator commit, after the chronos scenario
+// (`sigil-node/tests/chronos_gauge_push_settles.rs`) and with BOTH nodes on the binary
+// before the height — the v9 master-rotation discipline.
+
+/// The gauge contract's address (storage namespace for every feed).
+pub const GAUGE_CONTRACT: ContractId = [0x0D; 32];
+/// Activation height for `GaugePush`. DORMANT until an operator schedules a real height.
+pub const GAUGE_LIVE_HEIGHT: u64 = u64::MAX;
+/// Fixed-point scale of a gauge value: `value_e6 = round(value × 1e6)`.
+pub const GAUGE_SCALE: i128 = 1_000_000;
+/// Readings older than this (in blocks) are STALE for any consumer; at 8 blk/s idle the
+/// 6-hourly sigil-earth cadence is ~170 k blocks, at 110 blk/s ~2.4 M — so the window is
+/// one missed publication at full speed, three at idle.
+pub const MAX_GAUGE_AGE_BLOCKS: u64 = 3_000_000;
+
+/// Canonical feed names. Anything else is refused at apply — an unknown feed is a typo, not
+/// a new gauge; new gauges are added here, in a commit every node runs.
+pub const FEED_NAMES: [&str; 5] = ["earth.k_resid", "bio.k_bio", "bio.breathing_pgc_day", "bio.ops_atp_log10", "bio.ppm"];
+
+/// Feed id = BLAKE3("sigil-gauge-v1|" ‖ name). Stable, name-derived, never reordered.
+pub fn feed_id(name: &str) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"sigil-gauge-v1|");
+    h.update(name.as_bytes());
+    *h.finalize().as_bytes()
+}
+
+/// Is `feed` one of [`FEED_NAMES`]? Returns the name.
+pub fn feed_name(feed: &[u8; 32]) -> Option<&'static str> {
+    FEED_NAMES.iter().copied().find(|n| feed_id(n) == *feed)
+}
+
+/// The digest slot that pairs with a feed's value slot: the feed id with every byte inverted.
+pub fn digest_slot(feed: &[u8; 32]) -> SlotId {
+    let mut s = *feed;
+    for b in s.iter_mut() {
+        *b = !*b;
+    }
+    s
+}
+
+/// A committed gauge reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GaugeReading {
+    /// value × 1e6 (signed: the breathing rate is negative while the biosphere inhales).
+    pub value_e6: i128,
+    /// The reading's own date as YYYYMMDD (the day the measurement describes, not the push).
+    pub reading_date: u32,
+    /// Block height the push landed at (freshness).
+    pub height: u64,
+    /// Pushes landed for this feed so far (monotone; 0 = never).
+    pub nonce: u32,
+    /// BLAKE3 of the sigil-earth `latest.json` the reading came from.
+    pub attest_blake3: [u8; 32],
+}
+
+/// value_e6 (LE i128, 16 B) ‖ reading_date (LE u32, 4 B) ‖ height (LE u64, 8 B) ‖ nonce (LE u32, 4 B) = 32 B.
+pub fn encode_gauge(value_e6: i128, reading_date: u32, height: u64, nonce: u32) -> [u8; 32] {
+    let mut v = [0u8; 32];
+    v[..16].copy_from_slice(&value_e6.to_le_bytes());
+    v[16..20].copy_from_slice(&reading_date.to_le_bytes());
+    v[20..28].copy_from_slice(&height.to_le_bytes());
+    v[28..32].copy_from_slice(&nonce.to_le_bytes());
+    v
+}
+
+fn decode_gauge(v: &[u8; 32]) -> (i128, u32, u64, u32) {
+    (
+        i128::from_le_bytes(v[..16].try_into().unwrap()),
+        u32::from_le_bytes(v[16..20].try_into().unwrap()),
+        u64::from_le_bytes(v[20..28].try_into().unwrap()),
+        u32::from_le_bytes(v[28..32].try_into().unwrap()),
+    )
+}
+
+/// Is the gauge feature active at `height`?
+pub fn gauge_active(height: u64) -> bool {
+    gauge_active_at(height, gauge_live_height())
+}
+/// The gate as a pure function of both heights (what the chronos scenario drives).
+pub fn gauge_active_at(height: u64, live_height: u64) -> bool {
+    height >= live_height
+}
+
+static GAUGE_LIVE_OVERRIDE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// The effective activation height: the consensus constant, unless a chronos harness has
+/// scheduled an earlier one in THIS process.
+pub fn gauge_live_height() -> u64 {
+    GAUGE_LIVE_HEIGHT.min(GAUGE_LIVE_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Chronos/test seam ONLY — schedule the activation height inside this process so the real
+/// apply path can be driven through it before an operator commits a consensus height. The
+/// live node never calls this (grep for callers before believing otherwise). Same class of
+/// seam as `mint_next_block_with_schedule`.
+pub fn chronos_schedule_gauge_live_height(h: u64) {
+    GAUGE_LIVE_OVERRIDE.store(h, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The two mutations one push writes: the reading and its digest.
+pub fn gauge_mutations(feed: [u8; 32], value_e6: i128, reading_date: u32, height: u64, nonce: u32, attest_blake3: [u8; 32]) -> [StateMutation; 2] {
+    [
+        StateMutation::SetContractSlot { contract: GAUGE_CONTRACT, slot: feed, value: encode_gauge(value_e6, reading_date, height, nonce) },
+        StateMutation::SetContractSlot { contract: GAUGE_CONTRACT, slot: digest_slot(&feed), value: attest_blake3 },
+    ]
+}
+
+/// Read a feed. `None` when nothing has ever been pushed for it.
+pub fn read_gauge(state: &SigilState, feed: &[u8; 32]) -> Option<GaugeReading> {
+    let v = state.contract_slot(&GAUGE_CONTRACT, feed);
+    let (value_e6, reading_date, height, nonce) = decode_gauge(&v);
+    if nonce == 0 {
+        return None; // all-zero slot (never pushed) decodes as nonce 0
+    }
+    let attest_blake3 = state.contract_slot(&GAUGE_CONTRACT, &digest_slot(feed));
+    Some(GaugeReading { value_e6, reading_date, height, nonce, attest_blake3 })
+}
+
+/// A reading is fresh when it landed within [`MAX_GAUGE_AGE_BLOCKS`] of `at_height`.
+pub fn gauge_is_fresh(r: &GaugeReading, at_height: u64) -> bool {
+    at_height.saturating_sub(r.height) <= MAX_GAUGE_AGE_BLOCKS
+}
+
+/// Is `d` a plausible YYYYMMDD? (The chain cannot know the calendar; it can refuse nonsense.)
+pub fn plausible_reading_date(d: u32) -> bool {
+    let (y, m, day) = (d / 10_000, (d / 100) % 100, d % 100);
+    (2000..=2200).contains(&y) && (1..=12).contains(&m) && (1..=31).contains(&day)
+}
+
+#[cfg(test)]
+mod gauge_tests {
+    use super::*;
+
+    #[test]
+    fn feed_ids_are_name_derived_and_the_digest_slot_never_collides() {
+        let k = feed_id("bio.k_bio");
+        assert_eq!(feed_name(&k), Some("bio.k_bio"));
+        assert_eq!(feed_name(&feed_id("bio.nope")), None);
+        assert_ne!(digest_slot(&k), k);
+        for a in FEED_NAMES {
+            for b in FEED_NAMES {
+                assert_ne!(feed_id(a), digest_slot(&feed_id(b)), "{a} value slot == {b} digest slot");
+            }
+        }
+    }
+
+    #[test]
+    fn gauge_round_trips_through_state_and_is_none_before_any_push() {
+        let mut s = SigilState::new();
+        let feed = feed_id("bio.breathing_pgc_day");
+        assert!(read_gauge(&s, &feed).is_none());
+        let m = gauge_mutations(feed, -53_320, 20260913, 18_042_000, 1, [0xAB; 32]);
+        commit_state_transition(&mut s, &StateTransition { at_height: 18_042_000, mutations: m.to_vec() }, 18_042_000).unwrap();
+        let r = read_gauge(&s, &feed).unwrap();
+        assert_eq!(r, GaugeReading { value_e6: -53_320, reading_date: 20260913, height: 18_042_000, nonce: 1, attest_blake3: [0xAB; 32] });
+        assert!(gauge_is_fresh(&r, 18_042_000 + MAX_GAUGE_AGE_BLOCKS));
+        assert!(!gauge_is_fresh(&r, 18_042_001 + MAX_GAUGE_AGE_BLOCKS));
+        // a zero-nonce slot (never pushed) reads as None even if bytes exist
+        commit_state_transition(&mut s, &StateTransition { at_height: 1, mutations: vec![StateMutation::SetContractSlot { contract: GAUGE_CONTRACT, slot: feed, value: encode_gauge(5, 20260101, 1, 0) }] }, 1).unwrap();
+        assert!(read_gauge(&s, &feed).is_none());
+    }
+
+    #[test]
+    fn the_gate_is_dormant_until_scheduled_in_process() {
+        assert_eq!(GAUGE_LIVE_HEIGHT, u64::MAX, "must ship DORMANT — the activation height is an operator commit");
+        assert!(!gauge_active_at(u64::MAX - 1, GAUGE_LIVE_HEIGHT));
+        assert!(gauge_active_at(10, 10) && !gauge_active_at(9, 10));
+        assert!(plausible_reading_date(20260913) && !plausible_reading_date(20261341) && !plausible_reading_date(913));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -386,6 +386,32 @@ impl NationBridge {
         Ok(self.queue(SigilTx::OraclePush { authority, price_usd_e8, fee }))
     }
 
+    /// Authenticate + queue a Kristensen GAUGE reading (2026-09-15), signed by the master or
+    /// the delegated feeder (consensus enforces the authority at apply and refuses everything
+    /// before `sigil_oracle::GAUGE_LIVE_HEIGHT`). Message:
+    /// `sigil-rpc/v1|gauge_push|{authority}|{feed_name}|{value_e6}|{reading_date}|{attest_blake3}|{fee}|nonce={req_nonce}`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_gauge_push(
+        &self,
+        authority_hex: &str,
+        feed_name: &str,
+        value_e6: i128,
+        reading_date: u32,
+        attest_blake3_hex: &str,
+        fee: u128,
+        sig_hex: &str,
+        req_nonce: u64,
+    ) -> Result<[u8; 32], NationSubmitError> {
+        let authority = crate::hex32(authority_hex).ok_or(NationSubmitError::BadAddress)?;
+        let attest_blake3 = crate::hex32(attest_blake3_hex).ok_or(NationSubmitError::BadAddress)?;
+        let msg = format!(
+            "sigil-rpc/v1|gauge_push|{authority_hex}|{feed_name}|{value_e6}|{reading_date}|{attest_blake3_hex}|{fee}|nonce={req_nonce}"
+        );
+        self.verify_and_watermark(&authority, &msg, sig_hex, req_nonce)?;
+        let feed = sigil_oracle::feed_id(feed_name);
+        Ok(self.queue(SigilTx::GaugePush { authority, feed, value_e6, reading_date, attest_blake3, fee }))
+    }
+
     /// Authenticate + queue an oracle DELEGATION, signed by the master wallet
     /// (consensus enforces authority == master at apply, and refuses it
     /// before `sigil_usds::USDS_LIVE_HEIGHT`). `feeder` all-zero revokes.
@@ -662,5 +688,121 @@ mod tests {
         assert_eq!(d.next_claim_height, wf::WELFARE_FROM_HEIGHT);
         let r2 = nation_citizen(State(st), Query(CitizenQuery { wallet: hex::encode([0x22u8; 32]) })).await;
         assert!(!r2.0.data.unwrap().citizen);
+    }
+}
+
+
+// ── Kristensen gauges on-chain (GaugePush, 2026-09-15) ───────────────────────────────────────
+
+/// One committed feed as the API shows it.
+#[derive(Debug, Serialize)]
+pub struct GaugeFeedResponse {
+    pub name: String,
+    pub feed: String,
+    /// Reading as a decimal (value_e6 / 1e6); null until the first push.
+    pub value: Option<f64>,
+    pub value_e6: Option<String>,
+    pub reading_date: Option<u32>,
+    pub height: Option<u64>,
+    pub nonce: u32,
+    pub attest_blake3: Option<String>,
+    pub fresh: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GaugeStatusResponse {
+    pub height: u64,
+    pub live_height: String,
+    pub live: bool,
+    pub max_age_blocks: u64,
+    pub feeder: String,
+    pub feeds: Vec<GaugeFeedResponse>,
+    pub note: &'static str,
+}
+
+#[flux_api_macros::api(GET, "/v1/gauge", summary = "Kristensen gauges committed on-chain (K⊕, K_bio, the breathing, the ops ladder): every feed's last GaugePush, freshness, activation")]
+pub async fn gauge_status(State(st): State<AppState>) -> Json<ApiResponse<GaugeStatusResponse>> {
+    let height = st.mining.tip().map(|t| t.height).unwrap_or(0);
+    let (feeds, feeder) = st
+        .state
+        .read()
+        .map(|s| {
+            let feeds = sigil_oracle::FEED_NAMES
+                .iter()
+                .map(|name| {
+                    let id = sigil_oracle::feed_id(name);
+                    let r = sigil_oracle::read_gauge(&s, &id);
+                    GaugeFeedResponse {
+                        name: name.to_string(),
+                        feed: hex::encode(id),
+                        value: r.map(|g| g.value_e6 as f64 / sigil_oracle::GAUGE_SCALE as f64),
+                        value_e6: r.map(|g| g.value_e6.to_string()),
+                        reading_date: r.map(|g| g.reading_date),
+                        height: r.map(|g| g.height),
+                        nonce: r.map(|g| g.nonce).unwrap_or(0),
+                        attest_blake3: r.map(|g| hex::encode(g.attest_blake3)),
+                        fresh: r.map(|g| sigil_oracle::gauge_is_fresh(&g, height)).unwrap_or(false),
+                    }
+                })
+                .collect();
+            (feeds, sigil_oracle::read_feeder(&s))
+        })
+        .unwrap_or_default();
+    let live_height = sigil_oracle::gauge_live_height();
+    ApiResponse::ok(GaugeStatusResponse {
+        height,
+        live_height: if live_height == u64::MAX { "dormant".into() } else { live_height.to_string() },
+        live: sigil_oracle::gauge_active(height),
+        max_age_blocks: sigil_oracle::MAX_GAUGE_AGE_BLOCKS,
+        feeder: feeder.map(hex::encode).unwrap_or_default(),
+        feeds,
+        note: "value = value_e6 / 1e6; attest_blake3 is the sigil-earth attest digest the reading came from (cross-check /v1/earth/attest). Nothing is committed while live_height is dormant.",
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WalletGaugePushRequest {
+    /// 64-hex authority wallet — the master or the delegated feeder.
+    pub authority: String,
+    /// One of `sigil_oracle::FEED_NAMES`, e.g. "bio.k_bio".
+    pub feed: String,
+    /// Reading × 1e6, signed, as a decimal STRING (i128 on the wire is not JSON-safe).
+    pub value_e6: String,
+    /// The day the reading describes, YYYYMMDD.
+    pub reading_date: u32,
+    /// 64-hex BLAKE3 of the sigil-earth latest.json the reading came from.
+    pub attest_blake3: String,
+    #[serde(default)]
+    pub fee: u64,
+    /// 128-hex Ed25519 signature over the canonical RPC message.
+    pub sig: String,
+    /// Client-chosen strictly-increasing nonce.
+    pub req_nonce: u64,
+}
+
+#[flux_api_macros::api(POST, "/v1/gauge/push_wallet", summary = "Master- or feeder-signed: commit a Kristensen gauge reading (K⊕, K_bio, breathing, ops) to its on-chain feed slot")]
+pub async fn gauge_push_wallet(
+    State(st): State<AppState>,
+    Json(req): Json<WalletGaugePushRequest>,
+) -> Json<serde_json::Value> {
+    let Some(authority) = hex32(&req.authority) else {
+        return Json(serde_json::json!({ "ok": false, "error": "authority must be 64-hex" }));
+    };
+    let Ok(value_e6) = req.value_e6.parse::<i128>() else {
+        return Json(serde_json::json!({ "ok": false, "error": "value_e6 must be a decimal integer string" }));
+    };
+    let Some(attest_blake3) = hex32(&req.attest_blake3) else {
+        return Json(serde_json::json!({ "ok": false, "error": "attest_blake3 must be 64-hex" }));
+    };
+    if sigil_oracle::feed_name(&sigil_oracle::feed_id(&req.feed)).is_none() {
+        return Json(serde_json::json!({ "ok": false, "error": format!("unknown feed {:?} — one of {:?}", req.feed, sigil_oracle::FEED_NAMES) }));
+    }
+    let tx = SigilTx::GaugePush { authority, feed: sigil_oracle::feed_id(&req.feed), value_e6, reading_date: req.reading_date, attest_blake3, fee: req.fee as u128 };
+    if let Some(reason) = dry_run_reason(&st, &tx) {
+        return Json(serde_json::json!({ "ok": false, "error": reason }));
+    }
+    match st.nation.submit_gauge_push(&req.authority, &req.feed, value_e6, req.reading_date, &req.attest_blake3, req.fee as u128, &req.sig, req.req_nonce) {
+        Ok(tx_hash) => Json(serde_json::json!({ "ok": true, "txid": hex::encode(tx_hash), "note": "queued for the next braid block" })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.message() })),
     }
 }

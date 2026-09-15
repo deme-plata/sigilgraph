@@ -2480,6 +2480,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/nation/welfare/claim_wallet", post(nation::nation_claim_wallet))
         .route("/v1/nation/oracle/push_wallet", post(nation::nation_oracle_push_wallet))
         .route("/v1/nation/oracle/delegate_wallet", post(nation::nation_oracle_delegate_wallet))
+        .route("/v1/gauge", get(nation::gauge_status))
+        .route("/v1/gauge/push_wallet", post(nation::gauge_push_wallet))
         .route("/v1/mining/challenge", get(mining_challenge))
         .route("/v1/mining/submit", post(mining_submit))
         .route("/v1/mining/miners", get(mining_miners))

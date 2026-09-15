@@ -561,6 +561,29 @@ pub enum SigilTx {
         #[serde(with = "u128_str")]
         fee: u128,
     },
+    /// GaugePush (2026-09-15) — commit a Kristensen gauge reading (K⊕, K_bio, the
+    /// breathing rate, the ops ladder) to its feed slot, the way `OraclePush` commits the
+    /// price. Signer must be the master wallet or the delegated oracle feeder. Refused
+    /// before `sigil_oracle::GAUGE_LIVE_HEIGHT` (DORMANT until an operator schedules it),
+    /// for an unknown feed, an implausible date, or a reading older than the one already
+    /// committed (readings are monotone per feed — a late re-push cannot roll a gauge back).
+    /// Appended LAST (tag 24): see the note on `OracleDelegate`.
+    GaugePush {
+        /// The pushing authority — master or the state-committed feeder.
+        authority: WalletId,
+        /// `sigil_oracle::feed_id(name)` for a name in `sigil_oracle::FEED_NAMES`.
+        feed: [u8; 32],
+        /// Reading × 1e6, signed.
+        #[serde(with = "sigil_events::i128_str")]
+        value_e6: i128,
+        /// The day the reading describes, YYYYMMDD.
+        reading_date: u32,
+        /// BLAKE3 of the sigil-earth `latest.json` the reading came from (its attest digest).
+        attest_blake3: [u8; 32],
+        /// Fee in native SIGIL, paid by the authority.
+        #[serde(with = "u128_str")]
+        fee: u128,
+    },
 }
 
 /// Compact tag for indexing — matches [`SigilEvent::tag`] convention. The
@@ -595,6 +618,7 @@ impl SigilTx {
             SigilTx::WelfareClaim    { .. } => 21,
             SigilTx::OraclePush      { .. } => 22,
             SigilTx::OracleDelegate  { .. } => 23,
+            SigilTx::GaugePush       { .. } => 24,
         }
     }
 
@@ -625,7 +649,8 @@ impl SigilTx {
             SigilTx::CitizenAttest   { fee, .. } |
             SigilTx::WelfareClaim    { fee, .. } |
             SigilTx::OraclePush      { fee, .. } |
-            SigilTx::OracleDelegate  { fee, .. } => *fee,
+            SigilTx::OracleDelegate  { fee, .. } |
+            SigilTx::GaugePush       { fee, .. } => *fee,
         }
     }
 
@@ -664,6 +689,7 @@ impl SigilTx {
             SigilTx::WelfareClaim { citizen, .. } => *citizen,
             SigilTx::OraclePush { authority, .. } => *authority,
             SigilTx::OracleDelegate { authority, .. } => *authority,
+            SigilTx::GaugePush { authority, .. } => *authority,
         }
     }
 
@@ -1498,6 +1524,19 @@ pub enum TxApplyError {
     /// every welfare claim.
     #[error("oracle price must be non-zero")]
     ZeroOraclePrice,
+    /// GaugePush before `sigil_oracle::GAUGE_LIVE_HEIGHT` (dormant until scheduled).
+    #[error("gauge feed not active: activates at height {activates_at}, tx at {height}")]
+    GaugeNotActive { height: u64, activates_at: u64 },
+    /// GaugePush for a feed id that is not one of `sigil_oracle::FEED_NAMES`.
+    #[error("gauge push refused: unknown feed")]
+    UnknownGaugeFeed,
+    /// GaugePush whose reading_date is not a plausible YYYYMMDD.
+    #[error("gauge push refused: implausible reading date {0}")]
+    ImplausibleGaugeDate(u32),
+    /// GaugePush older than the reading already committed for that feed — a late re-push
+    /// must not roll a gauge back.
+    #[error("gauge push refused: reading {pushed} is older than the committed {committed}")]
+    StaleGaugeReading { pushed: u32, committed: u32 },
 
     /// CitizenAttest with an all-zero cpr_hash — an empty attestation
     /// would be indistinguishable from "not a citizen".
@@ -2643,6 +2682,48 @@ fn apply_tx_inner(
                     value: sigil_oracle::encode_price(*price_usd_e8),
                 });
             }
+        }
+
+        SigilTx::GaugePush { authority, feed, value_e6, reading_date, attest_blake3, fee } => {
+            let height = at_height.unwrap_or(0);
+            if !sigil_oracle::gauge_active(height) {
+                return Err(TxApplyError::GaugeNotActive { height, activates_at: sigil_oracle::gauge_live_height() });
+            }
+            // Same trust root as the price: the state-committed master, or the feeder the
+            // master delegated (a daemon's wallet, never the operator's key).
+            let is_master = matches!(state.master_wallet(), Some(m) if m == *authority);
+            let is_feeder = matches!(sigil_oracle::read_feeder(state), Some(f) if f == *authority);
+            if !is_master && !is_feeder {
+                return Err(TxApplyError::NotOracleAuthority);
+            }
+            if sigil_oracle::feed_name(feed).is_none() {
+                return Err(TxApplyError::UnknownGaugeFeed);
+            }
+            if !sigil_oracle::plausible_reading_date(*reading_date) {
+                return Err(TxApplyError::ImplausibleGaugeDate(*reading_date));
+            }
+            let prev = sigil_oracle::read_gauge(state, feed);
+            if let Some(p) = &prev {
+                if *reading_date < p.reading_date {
+                    return Err(TxApplyError::StaleGaugeReading { pushed: *reading_date, committed: p.reading_date });
+                }
+            }
+            let have = state.balance_of(authority, &NATIVE);
+            if have < *fee {
+                return Err(TxApplyError::InsufficientBalance { have, need: *fee });
+            }
+            if *fee > 0 {
+                // Fee burns, same as OraclePush / CitizenAttest.
+                out.mutations.push(StateMutation::SetBalance {
+                    wallet: *authority, token: NATIVE,
+                    amount: have.checked_sub(*fee).ok_or(TxApplyError::InsufficientBalance { have, need: *fee })?,
+                });
+            }
+            let nonce = prev.map(|p| p.nonce).unwrap_or(0).saturating_add(1);
+            out.mutations.extend(sigil_oracle::gauge_mutations(*feed, *value_e6, *reading_date, height, nonce, *attest_blake3));
+            let evt = SigilEvent::GaugePushed { authority: *authority, feed: *feed, value_e6: *value_e6, reading_date: *reading_date, attest_blake3: *attest_blake3 };
+            out.mutations.push(StateMutation::PushEventHash(evt.leaf_hash()));
+            out.events.push(evt);
         }
 
         SigilTx::OracleDelegate { authority, feeder, fee } => {
@@ -4545,6 +4626,64 @@ mod nation_welfare_tests {
         let native = signed(SigilTx::Send { from: ALICE, to: BOB, amount: 1, token: NATIVE, fee: 0 });
         assert!(matches!(apply_tx_at(&s, &native, H).unwrap_err(), TxApplyError::TransparentSendRetired { .. }));
         assert!(matches!(apply_tx_at(&s, &native, H + 1_000_000).unwrap_err(), TxApplyError::TransparentSendRetired { .. }));
+    }
+
+    #[test]
+    fn gauge_push_is_dormant_then_authority_gated_monotone_and_committed() {
+        use sigil_oracle::{feed_id, read_gauge};
+        let mut s = nation_state(0);
+        // Feeder delegated (USDS-live height), so both authorities exist.
+        apply_commit(&mut s, SigilTx::OracleDelegate { authority: MASTER, feeder: FEEDER, fee: 0 }, H).unwrap();
+        let feed = feed_id("bio.k_bio");
+        let push = |auth: WalletId, date: u32, v: i128| SigilTx::GaugePush { authority: auth, feed, value_e6: v, reading_date: date, attest_blake3: [0x4A; 32], fee: 0 };
+        // DORMANT: refused at any height while the constant is u64::MAX
+        let e = apply_tx_at(&s, &signed(push(MASTER, 20260913, 1_688_887)), H + 5).unwrap_err();
+        assert!(matches!(e, TxApplyError::GaugeNotActive { activates_at: u64::MAX, .. }), "{e}");
+        // The chronos seam schedules activation in-process; the live node never does.
+        sigil_oracle::chronos_schedule_gauge_live_height(H + 10);
+        assert!(matches!(apply_tx_at(&s, &signed(push(MASTER, 20260913, 1)), H + 9).unwrap_err(), TxApplyError::GaugeNotActive { .. }));
+        // Authority: a stranger is refused; the master and the feeder may push.
+        assert!(matches!(apply_tx_at(&s, &signed(push(ALICE, 20260913, 1)), H + 10).unwrap_err(), TxApplyError::NotOracleAuthority));
+        let r = apply_tx_at(&s, &signed(push(FEEDER, 20260913, 1_688_887)), H + 10).unwrap();
+        assert_eq!(r.events.len(), 1, "one GaugePushed event");
+        assert!(matches!(r.events[0], SigilEvent::GaugePushed { feed: f, value_e6: 1_688_887, reading_date: 20260913, .. } if f == feed));
+        assert_eq!(r.mutations.len(), 3, "value slot + digest slot + event hash (fee 0 → no balance write)");
+        commit_state_transition(&mut s, &StateTransition { at_height: H + 10, mutations: r.mutations }, H + 10).unwrap();
+        let g = read_gauge(&s, &feed).unwrap();
+        assert_eq!((g.value_e6, g.reading_date, g.height, g.nonce, g.attest_blake3), (1_688_887, 20260913, H + 10, 1, [0x4A; 32]));
+        // Unknown feed and an implausible date are refused before anything is written.
+        let bad_feed = SigilTx::GaugePush { authority: MASTER, feed: feed_id("bio.nope"), value_e6: 1, reading_date: 20260913, attest_blake3: [0; 32], fee: 0 };
+        assert!(matches!(apply_tx_at(&s, &signed(bad_feed), H + 11).unwrap_err(), TxApplyError::UnknownGaugeFeed));
+        assert!(matches!(apply_tx_at(&s, &signed(push(MASTER, 20261399, 1)), H + 11).unwrap_err(), TxApplyError::ImplausibleGaugeDate(20261399)));
+        // Monotone per feed: an older reading cannot roll the gauge back; the same day may be re-pushed (a revision).
+        assert!(matches!(apply_tx_at(&s, &signed(push(MASTER, 20260912, 9)), H + 11).unwrap_err(), TxApplyError::StaleGaugeReading { pushed: 20260912, committed: 20260913 }));
+        apply_commit(&mut s, push(MASTER, 20260913, 1_700_000), H + 11).unwrap();
+        apply_commit(&mut s, push(MASTER, 20260914, -53_320), H + 12).unwrap();
+        let g = read_gauge(&s, &feed).unwrap();
+        assert_eq!((g.value_e6, g.reading_date, g.nonce), (-53_320, 20260914, 3), "nonce counts every landed push; a negative reading round-trips");
+        // A fee is burned from the pusher.
+        let mut s2 = s.clone();
+        commit_state_transition(&mut s2, &StateTransition { at_height: H + 13, mutations: vec![StateMutation::SetBalance { wallet: FEEDER, token: NATIVE, amount: 10 }] }, H + 13).unwrap();
+        let feed2 = feed_id("earth.k_resid");
+        apply_commit(&mut s2, SigilTx::GaugePush { authority: FEEDER, feed: feed2, value_e6: 2_808_974, reading_date: 20260913, attest_blake3: [1; 32], fee: 4 }, H + 13).unwrap();
+        assert_eq!(s2.balance_of(&FEEDER, &NATIVE), 6);
+        assert!(matches!(apply_tx_at(&s2, &signed(SigilTx::GaugePush { authority: FEEDER, feed: feed2, value_e6: 1, reading_date: 20260914, attest_blake3: [1; 32], fee: 7 }), H + 14).unwrap_err(), TxApplyError::InsufficientBalance { have: 6, need: 7 }));
+        // The other feed is untouched by pushes to this one.
+        assert_eq!(read_gauge(&s2, &feed).unwrap().nonce, 3);
+        sigil_oracle::chronos_schedule_gauge_live_height(u64::MAX);
+    }
+
+    #[test]
+    fn gauge_push_is_the_last_variant_and_hashes_stably() {
+        let tx = SigilTx::GaugePush { authority: MASTER, feed: sigil_oracle::feed_id("bio.breathing_pgc_day"), value_e6: -53_320, reading_date: 20260913, attest_blake3: [7; 32], fee: 3 };
+        assert_eq!(tx.tag(), 24);
+        assert_eq!(tx.fee(), 3);
+        assert_eq!(tx.fee_payer(), MASTER);
+        let json = String::from_utf8(tx.encode()).unwrap();
+        assert!(json.contains("\"kind\":\"GaugePush\"") && json.contains("\"value_e6\":\"-53320\""), "{json}");
+        let back: SigilTx = serde_json::from_slice(&tx.encode()).unwrap();
+        assert_eq!(back, tx);
+        assert_eq!(tx.hash(), *blake3::hash(&tx.encode()).as_bytes());
     }
 
     #[test]

@@ -63,6 +63,10 @@ pub struct Harness {
     pub applied_blocks: Vec<Block>,
     /// Height after genesis — `applied_blocks.len() == chain.height() - genesis_height`.
     pub genesis_height: u64,
+    /// Non-shielded txs handed to the NEXT candidate (what `nation_bridge.snapshot_for_mint`
+    /// contributes on the live node): GaugePush, OraclePush… Drained on the tick they are
+    /// offered; a refused one shows up in `rejections`.
+    pub extra_txs: Vec<SignedTx>,
 }
 
 impl Harness {
@@ -88,6 +92,7 @@ impl Harness {
             follower,
             applied_blocks: Vec::new(),
             genesis_height,
+            extra_txs: Vec::new(),
         }
     }
 
@@ -124,7 +129,7 @@ impl Harness {
         let merge_parents = self.braid.merge_tips(&frontier.parent_hash(), 4);
         let topo = compute_topology_commitment(Some(&self.braid), frontier.height());
 
-        let txs: Vec<SignedTx> = match self.policy {
+        let mut txs: Vec<SignedTx> = match self.policy {
             OfferPolicy::Fixed => {
                 let settled = self.chain.state().shielded();
                 let _ = self.api.shielded.retire_settled(|tx| already_in_pool(settled, tx));
@@ -133,6 +138,7 @@ impl Harness {
             }
             OfferPolicy::OldUnconditional => self.api.shielded.snapshot_for_mint(),
         };
+        txs.append(&mut self.extra_txs);
         self.offered.extend(txs.iter().map(|t| t.tx.hash()));
 
         let (block, minted) =

@@ -127,6 +127,8 @@ export interface Snapshot {
   usds: Usds | null
   offline: boolean
   hashHist: number[]
+  changes: Record<string, Record<string, number | null>>
+  sampleAgeMin: number
 }
 
 // ── rate memory: block rate + per-miner deltas survive reloads ──────────────
@@ -134,6 +136,41 @@ interface Mem { height?: number; at?: number; miners?: Record<string, { hps: num
 const MEM_KEY = 'sigilvm-mem-v1'
 function loadMem(): Mem { try { return JSON.parse(localStorage.getItem(MEM_KEY) || '{}') } catch { return {} } }
 function saveMem(m: Mem) { try { localStorage.setItem(MEM_KEY, JSON.stringify(m)) } catch { /* ignore */ } }
+
+// ── per-collection sample series (items over time) so the 1h/6h/24h/7d tabs measure something ──
+interface Sample { t: number; v: number }
+const SER_KEY = 'sigilvm-series-v1'
+const WINDOWS: Record<string, number> = { '1h': 3600e3, '6h': 6 * 3600e3, '24h': 86400e3, '7d': 7 * 86400e3 }
+function loadSeries(): Record<string, Sample[]> { try { return JSON.parse(localStorage.getItem(SER_KEY) || '{}') } catch { return {} } }
+function saveSeries(x: Record<string, Sample[]>) { try { localStorage.setItem(SER_KEY, JSON.stringify(x)) } catch { /* quota */ } }
+function pushSample(ser: Record<string, Sample[]>, id: string, v: number | null, at: number) {
+  if (v === null || !isFinite(v)) return
+  const arr = ser[id] || (ser[id] = [])
+  const last = arr[arr.length - 1]
+  if (last && at - last.t < 60e3) return                  // one sample a minute at most
+  arr.push({ t: at, v })
+  // compaction: full resolution for 24 h, then one sample an hour, nothing older than 7 d
+  const cut24 = at - 86400e3, cut7 = at - 7 * 86400e3
+  const out: Sample[] = []
+  let lastHour = -1
+  for (const smp of arr) {
+    if (smp.t < cut7) continue
+    if (smp.t >= cut24) { out.push(smp); continue }
+    const hr = Math.floor(smp.t / 3600e3)
+    if (hr !== lastHour) { out.push(smp); lastHour = hr }
+  }
+  ser[id] = out
+}
+function windowChange(arr: Sample[] | undefined, win: string, at: number): number | null {
+  if (!arr || arr.length < 2) return null
+  const start = at - WINDOWS[win]
+  // the oldest sample inside the window, but only if it is at least 40 % of the window old (else "—")
+  const ref = arr.find((x) => x.t >= start)
+  if (!ref) return null
+  const now = arr[arr.length - 1]
+  if (now.t - ref.t < WINDOWS[win] * 0.4) return null
+  return ref.v > 0 ? ((now.v - ref.v) / ref.v) * 100 : null
+}
 
 let lastSnapshot: Snapshot | null = null
 export const getLast = () => lastSnapshot
@@ -163,8 +200,17 @@ export async function buildSnapshot(): Promise<Snapshot> {
   const sales = buildSales(earth, docket, usds, recent, miners)
   saveMem(mem)
 
+  const ser = loadSeries()
+  for (const c of collections) pushSample(ser, c.id, c.items, at)
+  pushSample(ser, 'net_hps', miners?.net_hps ?? null, at)
+  saveSeries(ser)
+  const changes: Record<string, Record<string, number | null>> = {}
+  for (const c of collections) { changes[c.id] = {}; for (const w of Object.keys(WINDOWS)) changes[c.id][w] = windowChange(ser[c.id], w, at) }
+  for (const c of collections) { if (c.id === 'rigs' && head.hashChange !== null) { c.volumeChange = head.hashChange } c.floorChange = changes[c.id]['24h'] }
+  const oldest = Math.min(...Object.values(ser).flat().map((x) => x.t).concat([at]))
+  const sampleAgeMin = Math.round((at - oldest) / 60e3)
   const featured = [...collections].sort((a, b) => (b.items ?? 0) - (a.items ?? 0)).slice(0, 6)
-  lastSnapshot = { at, head, collections, featured, drops, movers, sales, tokens, pools: pools ?? [], miners, docket, recent, earth, rocky, usds, offline, hashHist }
+  lastSnapshot = { at, head, collections, featured, drops, movers, sales, tokens, pools: pools ?? [], miners, docket, recent, earth, rocky, usds, offline, hashHist, changes, sampleAgeMin }
   return lastSnapshot
 }
 

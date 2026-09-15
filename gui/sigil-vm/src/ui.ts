@@ -241,12 +241,15 @@ export function saleCard(x: Sale): string {
 // ── trending table ────────────────────────────────────────────────────────
 export function trending(s: Snapshot, mode: 'trending' | 'top', win: string): string {
   const list = [...s.collections]
-  // "trending" = live record families with the most activity (sales/items), "top" = by items
-  list.sort((a, b) => mode === 'top' ? (b.items ?? -1) - (a.items ?? -1) : ((b.sales ?? 0) * 3 + (b.items ?? 0) * 0.001 + (b.provenance === 'live' ? 1 : 0)) - ((a.sales ?? 0) * 3 + (a.items ?? 0) * 0.001 + (a.provenance === 'live' ? 1 : 0)))
+  const chg = (c: Collection): number | null => c.id === 'rigs' && win === '24h' ? (c.volumeChange ?? s.changes[c.id]?.[win] ?? null) : (s.changes[c.id]?.[win] ?? null)
+  // "trending" = biggest measured growth in the window (items), unmeasured rows after, then by activity; "top" = by items
+  list.sort((a, b) => mode === 'top'
+    ? (b.items ?? -1) - (a.items ?? -1)
+    : ((chg(b) ?? -Infinity) - (chg(a) ?? -Infinity)) || (((b.sales ?? 0) * 3 + (b.provenance === 'live' ? 1 : 0)) - ((a.sales ?? 0) * 3 + (a.provenance === 'live' ? 1 : 0))))
   const half = Math.ceil(list.length / 2)
-  const table = (rows: Collection[], off: number) => `<table><thead><tr><th>#</th><th>Collection</th><th class="r">Floor</th><th class="r">${win} chg</th><th class="r">Volume</th><th class="r">Items</th><th class="r">Owners</th></tr></thead><tbody>
+  const table = (rows: Collection[], off: number) => `<table><thead><tr><th>#</th><th>Collection</th><th class="r">Floor</th><th class="r" title="change in items over the window — sampled in your browser once a minute; shows — until enough samples exist">${win} chg</th><th class="r">Volume</th><th class="r">Items</th><th class="r">Owners</th></tr></thead><tbody>
     ${rows.map((c, i) => `<tr data-coll="${c.id}" data-link="${c.link}"><td class="rank">${off + i + 1}</td><td><div class="coll"><img src="${c.cover}" alt=""><div><div class="n">${esc(c.name)}${ver(c.verified)}</div><div class="s">${prov(c.provenance)}</div></div></div></td>
-      <td class="r num">${esc(c.floor)}</td><td class="r num">${delta(c.floorChange ?? c.volumeChange)}</td><td class="r num">${esc(c.volume)}</td><td class="r num">${c.items === null ? '—' : fmt.int(c.items)}</td><td class="r num">${c.owners === null ? '—' : fmt.int(c.owners)}</td></tr>`).join('')}
+      <td class="r num">${esc(c.floor)}</td><td class="r num" title="items now vs. items ${win} ago, sampled by this browser">${delta(chg(c))}</td><td class="r num">${esc(c.volume)}</td><td class="r num">${c.items === null ? '—' : fmt.int(c.items)}</td><td class="r num">${c.owners === null ? '—' : fmt.int(c.owners)}</td></tr>`).join('')}
   </tbody></table>`
   return `<div class="tcol">${table(list.slice(0, half), 0)}</div><div class="tcol">${table(list.slice(half), half)}</div>`
 }
@@ -411,7 +414,7 @@ export function legend(s: Snapshot): string {
     <div class="l">${prov('live')}<span>read from sigil-api on this poll (${live} collections, every strip figure, tokens SIGIL/USDS/ROCKY, drops, sales proofs)</span></div>
     <div class="l">${prov('derived')}<span>a stated calculation over live numbers (block rate, rig change vs. today's first sample, network hashrate window)</span></div>
     <div class="l">${prov('pretend')}<span>illustrative — no chain source yet (${pretend} collections, wSIGIL3/SSHARE rows, USD prices, the cart)</span></div>
-    <div class="l"><span class="mono">${s.offline ? 'node unreachable — showing shells only' : 'last poll ' + new Date(s.at).toLocaleTimeString()}</span></div>`
+    <div class="l"><span class="mono">${s.offline ? 'node unreachable — showing shells only' : 'last poll ' + new Date(s.at).toLocaleTimeString()} · window changes sampled in this browser for ${s.sampleAgeMin < 60 ? s.sampleAgeMin + ' min' : (s.sampleAgeMin / 60).toFixed(1) + ' h'} (1h needs ≥24 min, 24h ≥ 9.6 h, 7d ≥ 2.8 d)</span></div>`
 }
 
 export { esc, prov, delta, glyphsToSigil }

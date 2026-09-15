@@ -615,7 +615,14 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
   .chain-chip .t { display: none; }
   .brand small { display: none; }
 }
-@media (max-width: 1000px) { .hero .thumbs { display: none; } }
+@media (max-width: 1000px) {
+  .hero .thumbs { display: none; }
+  .hero .stat:last-child { display: none; }
+  .hero .stat { min-width: 84px; padding: 7px 12px; }
+  .strip { grid-template-columns: repeat(3, 1fr); }
+  .actions .ibtn#bellBtn, .actions .ibtn#cartBtn { display: none; }
+  .chain-chip .t { display: none; }
+}
 @media (max-width: 1100px) {
   .app.panel-open .main { margin-right: 0; }
   .panel { width: min(var(--panel), 100vw); box-shadow: -20px 0 60px rgba(0,0,0,.6); }

@@ -50,6 +50,7 @@ export interface Mover {
   value: string
   change: number | null
   provenance: Provenance
+  series?: number[]
 }
 
 export interface Sale {
@@ -104,6 +105,7 @@ export interface ChainHead {
   treasurySigil: number
   ok: boolean
   lagBlocks: number
+  hashChange: number | null
 }
 
 export interface Snapshot {
@@ -123,10 +125,11 @@ export interface Snapshot {
   rocky: Rocky | null
   usds: Usds | null
   offline: boolean
+  hashHist: number[]
 }
 
 // ── rate memory: block rate + per-miner deltas survive reloads ──────────────
-interface Mem { height?: number; at?: number; miners?: Record<string, { hps: number; at: number }>; netHps?: { hps: number; at: number }[] }
+interface Mem { height?: number; at?: number; miners?: Record<string, { hps: number; at: number }>; netHps?: { hps: number; at: number }[]; series?: Record<string, number[]> }
 const MEM_KEY = 'sigilvm-mem-v1'
 function loadMem(): Mem { try { return JSON.parse(localStorage.getItem(MEM_KEY) || '{}') } catch { return {} } }
 function saveMem(m: Mem) { try { localStorage.setItem(MEM_KEY, JSON.stringify(m)) } catch { /* ignore */ } }
@@ -150,7 +153,8 @@ export async function buildSnapshot(): Promise<Snapshot> {
   }
   if (height) { mem.height = height; mem.at = at }
 
-  const head = buildHead(supply, miners, anchor, nation, cert, blkPerSec, !offline)
+  const hashHist = (hist?.history ?? []).map((p) => p.hashrate)
+  const head = buildHead(supply, miners, anchor, nation, cert, blkPerSec, !offline, hashHist)
   const tokens = buildTokens(supply, usds, rocky, anchor, height, pools ?? [])
   const collections = buildCollections(miners, anchor, docket, recent, earth, nation, rocky, bridge, hist ?? null)
   const drops = buildDrops(usds, rocky, gauge, height, blkPerSec, bridge)
@@ -159,12 +163,14 @@ export async function buildSnapshot(): Promise<Snapshot> {
   saveMem(mem)
 
   const featured = [...collections].sort((a, b) => (b.items ?? 0) - (a.items ?? 0)).slice(0, 6)
-  lastSnapshot = { at, head, collections, featured, drops, movers, sales, tokens, pools: pools ?? [], miners, docket, recent, earth, rocky, usds, offline }
+  lastSnapshot = { at, head, collections, featured, drops, movers, sales, tokens, pools: pools ?? [], miners, docket, recent, earth, rocky, usds, offline, hashHist }
   return lastSnapshot
 }
 
-function buildHead(supply: Supply | null, miners: Miners | null, anchor: Anchor | null, nation: Nation | null, cert: Cert | null, blkPerSec: number | null, ok: boolean): ChainHead {
+function buildHead(supply: Supply | null, miners: Miners | null, anchor: Anchor | null, nation: Nation | null, cert: Cert | null, blkPerSec: number | null, ok: boolean, hashHist: number[] = []): ChainHead {
+  const hashChange = hashHist.length > 1 && hashHist[0] > 0 ? ((hashHist[hashHist.length - 1] - hashHist[0]) / hashHist[0]) * 100 : null
   return {
+    hashChange,
     height: miners?.height ?? nation?.height ?? cert?.certificate.height ?? 0,
     blkPerSec,
     netHps: miners?.net_hps ?? 0,
@@ -369,6 +375,8 @@ function buildDrops(usds: Usds | null, rocky: Rocky | null, gauge: Gauge | null,
 function buildMovers(miners: Miners | null, mem: Mem, at: number, hist: { history: HashPoint[] } | null): Mover[] {
   if (!miners) return []
   mem.miners = mem.miners || {}
+  mem.series = mem.series || {}
+  for (const m of miners.miners) { const arr = mem.series[m.wallet] || []; if (!arr.length || arr[arr.length - 1] !== m.hash_rate) arr.push(m.hash_rate); mem.series[m.wallet] = arr.slice(-48) }
   const out: Mover[] = miners.miners
     .slice()
     .sort((a, b) => b.hash_rate - a.hash_rate)
@@ -380,7 +388,7 @@ function buildMovers(miners: Miners | null, mem: Mem, at: number, hist: { histor
       if (!prev || at - prev.at > 86_400_000) mem.miners![m.wallet] = { hps: m.hash_rate, at }
       return {
         id: m.wallet, name: m.rig || fmt.short(m.wallet, 6), sub: `${m.kind.toUpperCase()} · ${m.shielded ? 'shielded' : 'transparent'} · ${fmt.ago(m.last_seen_secs_ago)}`,
-        cover: coverSvg(m.rig || m.wallet, 'rig'), value: fmt.hps(m.hash_rate), change, provenance: change === null ? 'live' : 'derived',
+        cover: coverSvg(m.rig || m.wallet, 'rig'), value: fmt.hps(m.hash_rate), change, provenance: change === null ? 'live' : 'derived', series: mem.series![m.wallet],
       }
     })
   // net hashrate as the first mover when history exists
@@ -390,7 +398,7 @@ function buildMovers(miners: Miners | null, mem: Mem, at: number, hist: { histor
     out.unshift({
       id: 'net', name: 'Network hashrate', sub: `${last.miners} miners · ${fmt.ago((Date.now() / 1000) - first.timestamp)} window`,
       cover: coverSvg('Network hashrate', 'braid'), value: fmt.hps(last.hashrate),
-      change: first.hashrate > 0 ? ((last.hashrate - first.hashrate) / first.hashrate) * 100 : null, provenance: 'derived',
+      change: first.hashrate > 0 ? ((last.hashrate - first.hashrate) / first.hashrate) * 100 : null, provenance: 'derived', series: h.map((p) => p.hashrate),
     })
   }
   return out.slice(0, 8)

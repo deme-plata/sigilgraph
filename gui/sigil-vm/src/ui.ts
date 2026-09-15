@@ -11,6 +11,14 @@ const delta = (n: number | null, d = 1): string => {
   const c = n > 0.05 ? 'up' : n < -0.05 ? 'down' : 'flat'
   return `<span class="${c}">${fmt.pct(n, d)}</span>`
 }
+export function sparkline(values: number[], w = 120, h = 32, cls = 'up'): string {
+  const v = values.filter((x) => isFinite(x))
+  if (v.length < 2) return ''
+  const min = Math.min(...v), max = Math.max(...v), span = max - min || 1
+  const pts = v.map((x, i) => `${((i / (v.length - 1)) * (w - 2) + 1).toFixed(1)},${(h - 2 - ((x - min) / span) * (h - 4)).toFixed(1)}`)
+  const id = 'sp' + Math.abs(v.length * 31 + Math.round(v[0])).toString(36)
+  return `<svg class="spark ${cls}" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" preserveAspectRatio="none"><defs><linearGradient id="${id}" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="currentColor" stop-opacity=".35"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs><path d="M${pts[0]} L${pts.join(' L')} L${w - 1},${h - 1} L1,${h - 1}Z" fill="url(#${id})" stroke="none"/><polyline points="${pts.join(' ')}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/><circle cx="${pts[pts.length - 1].split(',')[0]}" cy="${pts[pts.length - 1].split(',')[1]}" r="2" fill="currentColor"/></svg>`
+}
 const ver = (v: boolean) => (v ? '<span class="verified" title="on-chain record family">✓</span>' : '')
 
 // ── shell ─────────────────────────────────────────────────────────────────
@@ -32,7 +40,12 @@ export function shell(): string {
       <a href="/sigil-explorer.html" target="_blank" rel="noopener">Explorer</a>
     </nav>
     <div class="actions">
-      <div class="chain-chip" id="chainChip" title="sigil-g2 · sigil-api"><i class="d"></i><span class="t">sigil-g2</span><span id="chainHeight">—</span></div>
+      <div class="chain-wrap"><button class="chain-chip" id="chainChip" title="sigil-g2 · sigil-api"><i class="d"></i><span class="t">sigil-g2</span><span id="chainHeight">—</span><span class="car">▾</span></button>
+        <div class="chain-menu" id="chainMenu">
+          <div class="cm on"><i class="d on"></i><div><b>SIGIL g2</b><small>mainnet · sigil-api :18181</small></div><span class="chip live">live</span></div>
+          <a class="cm" href="https://polygonscan.com/token/0x3FCED760" target="_blank" rel="noopener"><i class="d" style="background:#8247e5;color:#8247e5"></i><div><b>Polygon</b><small>wSIGIL3 · Uniswap pool</small></div><span class="chip derived">external</span></a>
+          <div class="cm dis"><i class="d" style="background:#555"></i><div><b>Soneium</b><small>wSIGIL leg · not deployed</small></div><span class="chip bad">blocked</span></div>
+        </div></div>
       <button class="ibtn" id="bellBtn" title="Activity">${I.bell}<i class="badge" id="bellBadge" hidden></i></button>
       <button class="ibtn" id="cartBtn" title="Cart (coming with listings)">${I.cart}</button>
       <button class="btn primary" id="walletBtn">${I.wallet}<span id="walletLbl">Connect wallet</span></button>
@@ -140,11 +153,12 @@ export function hero(s: Snapshot, idx: number): string {
 export function strip(s: Snapshot): string {
   const h = s.head
   const cell = (k: string, v: string, small = '') => `<div class="cell"><div class="k">${k}</div><div class="v">${v}</div>${small ? `<div class="s">${small}</div>` : ''}</div>`
+  void s
   return [
     cell('Height', fmt.int(h.height), h.blkPerSec ? `${h.blkPerSec.toFixed(1)} blk/s` : 'measuring rate…'),
     cell('Finality', h.finalityGate, `h ${fmt.int(h.finalityHeight)} · ${h.committee} validators`),
     cell('Supply', fmt.num(h.supplySigil) + ' SIGIL', `${(h.mintedPct).toFixed(2)}% of 21M`),
-    cell('Hashrate', fmt.hps(h.netHps), `${h.liveMiners} live miners`),
+    cell('Hashrate', fmt.hps(h.netHps) + (s.hashHist.length > 2 ? sparkline(s.hashHist, 90, 22, h.hashChange !== null && h.hashChange < 0 ? 'down' : 'up') : ''), `${h.liveMiners} live miners${h.hashChange !== null ? ' · ' + fmt.pct(h.hashChange) + ' window' : ''}`),
     cell('Shielded pool', fmt.int(h.notes) + ' notes', `${fmt.num(h.valueLocked)} SIGIL locked · ${fmt.int(h.nullifiers)} spent`),
     cell('Treasury', fmt.num(h.treasurySigil) + ' SIGIL', 'nation welfare'),
   ].join('')
@@ -178,7 +192,7 @@ export function forYou(s: Snapshot): string {
 // ── cards ─────────────────────────────────────────────────────────────────
 export function collectionCard(c: Collection): string {
   return `<a class="card" href="${c.link}" target="_blank" rel="noopener" data-coll="${c.id}">
-    <div class="img" style="background-image:url('${c.cover}')"><span class="prov">${prov(c.provenance)}</span></div>
+    <div class="img" style="background-image:url('${c.cover}')"><span class="prov">${prov(c.provenance)}</span><span class="cta">View collection ↗</span></div>
     <div class="meta">
       <div class="name">${esc(c.name)}${ver(c.verified)}</div>
       <div class="blurb">${esc(c.blurb)}</div>
@@ -203,6 +217,7 @@ export function moverCard(m: Mover): string {
   return `<div class="card mover" title="${esc(m.id)}">
     <div class="img" style="background-image:url('${m.cover}')"><span class="prov">${prov(m.provenance)}</span></div>
     <div class="meta"><div class="name">${esc(m.name)}</div><div class="blurb" style="height:auto">${esc(m.sub)}</div>
+      ${m.series && m.series.length > 2 ? `<div class="sparkwrap">${sparkline(m.series, 180, 34, (m.change ?? 0) < 0 ? 'down' : 'up')}</div>` : ''}
       <div class="kv"><div><div class="k">Hashrate</div><div class="v">${esc(m.value)}</div></div><div style="text-align:right"><div class="k">Today</div><div class="delta">${delta(m.change)}</div></div></div>
     </div></div>`
 }

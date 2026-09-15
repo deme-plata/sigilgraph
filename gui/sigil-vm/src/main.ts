@@ -123,6 +123,7 @@ document.addEventListener('click', (ev) => {
   if (!btn) return
   const ds = btn.dataset
   if (ds.hero !== undefined) { heroIdx = Number(ds.hero); renderHero(); return }
+  if (btn.id === 'chainChip') { $('#chainMenu').classList.toggle('open'); return }
   if (btn.id === 'panelBtn') { app.classList.toggle('panel-open'); try { localStorage.setItem('sigilvm-panel', app.classList.contains('panel-open') ? 'open' : 'closed') } catch { /* */ } return }
   if (btn.id === 'walletBtn') { if (wallet) { app.classList.add('panel-open'); return } openWalletModal(); return }
   if (btn.id === 'pDisconnect') { wallet = null; try { localStorage.removeItem('sigilvm-wallet') } catch { /* */ } for (const k in balances) delete balances[k]; renderChain(); renderPanel(); renderSwap(); return }
@@ -172,7 +173,7 @@ document.addEventListener('keydown', (ev) => {
   if (ev.key === '/' && document.activeElement?.tagName !== 'INPUT') { ev.preventDefault(); ($('#q') as HTMLInputElement).focus() }
   if (ev.key === 'Escape') { closeModal(); $('#qres').classList.remove('open') }
 })
-document.addEventListener('click', (ev) => { if (!(ev.target as HTMLElement).closest('.search')) $('#qres').classList.remove('open') })
+document.addEventListener('click', (ev) => { const t = ev.target as HTMLElement; if (!t.closest('.search')) $('#qres').classList.remove('open'); if (!t.closest('.chain-wrap')) $('#chainMenu').classList.remove('open') })
 
 // ── modals ────────────────────────────────────────────────────────────────
 function openModal(html: string): void { $('#modalBox').innerHTML = `<button class="ibtn x" id="modalClose">${I.x}</button>` + html; $('#modal').classList.add('open') }

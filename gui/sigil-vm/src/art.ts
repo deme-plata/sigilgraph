@@ -59,9 +59,14 @@ export function coverSvg(name: string, glyph: Glyph, opts: { w?: number; h?: num
   <defs>
     <linearGradient id="g" gradientTransform="rotate(${angle} .5 .5)"><stop offset="0" stop-color="${a}"/><stop offset="1" stop-color="${b}"/></linearGradient>
     <radialGradient id="v" cx=".5" cy=".5" r=".7"><stop offset="0" stop-color="${bg}" stop-opacity="0"/><stop offset="1" stop-color="${bg}" stop-opacity=".85"/></radialGradient>
+    <radialGradient id="hl" cx="${0.25 + (seed % 50) / 100}" cy="${0.2 + ((seed >> 5) % 40) / 100}" r=".5"><stop offset="0" stop-color="#fff" stop-opacity=".22"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
+    <filter id="grain" x="0" y="0" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency=".9" numOctaves="2" seed="${seed % 97}" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/><feComponentTransfer><feFuncA type="table" tableValues="0 .18"/></feComponentTransfer></filter>
   </defs>
   <rect width="120" height="120" fill="url(#g)"/>
+  <rect width="120" height="120" fill="url(#hl)"/>
   ${tri}${geom}
+  <g opacity=".12" transform="translate(${(seed % 40) - 20} ${((seed >> 4) % 40) - 20}) scale(2.2)">${glyphPath(glyph)}</g>
+  <rect width="120" height="120" filter="url(#grain)" opacity=".8"/>
   <rect width="120" height="120" fill="url(#v)"/>
   <g opacity=".95">${glyphPath(glyph)}</g>
   ${label}

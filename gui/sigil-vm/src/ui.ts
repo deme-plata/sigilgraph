@@ -66,9 +66,9 @@ export function shell(): string {
   <main class="main" id="main">
     <div class="ticker" id="ticker" aria-label="Live chain activity"><div class="tk-track" id="tickerTrack"></div></div>
     <section id="market" class="section" style="margin-top:0">
-      <div class="hero" id="hero"><div class="bg"></div><div class="veil"></div><div class="body"><div class="eyebrow"><span class="chip gold">reading the chain…</span></div><h1>SIGIL VM</h1></div></div>
-      <div class="strip" id="strip"></div>
-      <div id="foryou"></div>
+      <div class="hero skel-hero" id="hero"><div class="bg"></div><div class="veil"></div><div class="body"><div class="eyebrow"><span class="chip gold"><i class="d"></i>reading the chain…</span></div><div class="sk sk-h1"></div><div class="sk sk-p"></div><div class="stats"><div class="stat sk-stat"></div><div class="stat sk-stat"></div><div class="stat sk-stat"></div><div class="stat sk-stat"></div></div><div class="cta"><div class="sk sk-btn"></div><div class="sk sk-btn"></div></div></div></div>
+      <div class="strip" id="strip">${skStrip()}</div>
+      <div id="foryou"><div class="foryou"><div class="fy-col"><div class="sk sk-k"></div><div class="sk sk-p"></div><div class="sk sk-p"></div><div class="sk sk-p short"></div></div><div class="fy-col"><div class="sk sk-k"></div><div class="sk sk-p"></div><div class="sk sk-p"></div><div class="sk sk-p short"></div></div></div></div>
     </section>
     <div class="cats" id="cats">
       <button class="on" data-cat="all">All</button><button data-cat="chain">Chain</button><button data-cat="mining">Mining</button><button data-cat="court">Court</button><button data-cat="shielded">Shielded</button><button data-cat="tokens">Tokens</button><button data-cat="bridge">Bridge</button><button data-cat="science">Science</button><button data-cat="physical">Physical</button><button data-cat="story">Story</button>
@@ -90,7 +90,7 @@ export function shell(): string {
           <a class="viewall" href="/sigil-explorer.html" target="_blank" rel="noopener">View all</a>
         </div>
       </div>
-      <div class="trending" id="trendingTable"></div>
+      <div class="trending" id="trendingTable">${skTrending()}</div>
     </section>
     <section id="movers" class="section">
       <div class="sec-head"><div><h2>Top Movers Today</h2><div class="sub">Rigs by hashrate. Change is measured against the first sample this page took today (kept in your browser).</div></div><div class="right"><div class="arrows" data-scroll="moversRow"><button aria-label="Scroll left">${I.left}</button><button aria-label="Scroll right">${I.right}</button></div></div></div>
@@ -102,7 +102,7 @@ export function shell(): string {
     </section>
     <section id="dex" class="section">
       <div class="sec-head"><div><h2>Swap &amp; Tokens</h2><div class="sub">The Quillon Graph DEX modules, on SIGIL: the swap module and the token list side by side. Signing happens in your wallet.</div></div><div class="right"><a class="viewall" href="/sigil-dex.html" target="_blank" rel="noopener">Trading desk</a></div></div>
-      <div class="dex"><div id="swap"></div><div id="tokens"></div></div>
+      <div class="dex"><div id="swap">${skSwap()}</div><div id="tokens">${skTokens()}</div></div>
     </section>
     <div class="legend" id="legend"></div>
     <footer class="foot">
@@ -132,6 +132,15 @@ export function shell(): string {
   <div class="modal" id="modal"><div class="box" id="modalBox"></div></div>
   <div class="toasts" id="toasts"></div>`
 }
+
+
+function skStrip(): string { return Array.from({ length: 6 }, () => '<div class="cell"><div class="sk sk-k"></div><div class="sk sk-v"></div></div>').join('') }
+function skTrending(): string {
+  const rows = Array.from({ length: 5 }, (_, i) => `<tr><td class="rank">${i + 1}</td><td><div class="coll"><div class="sk sk-av"></div><div><div class="sk sk-k" style="width:140px"></div><div class="sk sk-k short"></div></div></div></td><td class="r"><div class="sk sk-k" style="width:70px;margin-left:auto"></div></td></tr>`).join('')
+  return `<div class="tcol"><table><tbody>${rows}</tbody></table></div><div class="tcol"><table><tbody>${rows}</tbody></table></div>`
+}
+function skSwap(): string { return '<div class="qcard"><div class="inner"><div class="sk sk-h"></div><div class="sk sk-bar"></div><div class="sk sk-input"></div><div class="sk sk-bar"></div><div class="sk sk-input"></div><div class="sk sk-btn full"></div></div></div>' }
+function skTokens(): string { return '<div class="qcard pinkish"><div class="inner"><div class="sk sk-h"></div><div class="sk sk-input"></div>' + Array.from({ length: 5 }, () => '<div class="sk sk-row"></div>').join('') + '</div></div>' }
 
 export function skeleton(n: number, cls = ''): string {
   return Array.from({ length: n }, () => `<div class="card skel ${cls}"><div class="img"></div><div class="meta"><div class="name">&nbsp;</div><div class="blurb"></div></div></div>`).join('')

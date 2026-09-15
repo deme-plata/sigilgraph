@@ -194,6 +194,12 @@ use flux_sqisign::hybrid::{self, SchemeId};
 const SQISIGN_SK_ENV: &str = "SIGIL_PRODUCER_SQISIGN_SK_HEX";
 const SQISIGN_PK_ENV: &str = "SIGIL_PRODUCER_SQISIGN_PK_HEX";
 const TRUSTED_PRODUCER_ID_ENV: &str = "SIGIL_TRUSTED_PRODUCER_ID_HEX";
+/// `SIGIL_HYBRID_ENFORCE`: `0`/unset = OBSERVE-ONLY (every hybrid block is verified on
+/// apply and the verdict is logged, nothing is ever rejected); `1` = a failed
+/// verification REJECTS the block. Same observe-first posture as
+/// `SIGIL_TOPOLOGY_ENFORCE`. Deploy order: followers first, flip to `1` only after a
+/// clean checkpoint has been observed on every node (2026-09-15).
+const HYBRID_ENFORCE_ENV: &str = "SIGIL_HYBRID_ENFORCE";
 
 /// This node's own SQIsign5 keypair, if configured (only set on an actual
 /// signing/producer node — a pure verifier never needs it). `None` on any
@@ -219,13 +225,82 @@ fn hex_decode_var(var: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// The pinned, independently-agreed "this is the real producer" identity —
-/// the EXPECTED value of `header.producer` for a trusted hybrid-signed
+/// The pinned, independently-agreed "this is the real producer" identities —
+/// the EXPECTED values of `header.producer` for a trusted hybrid-signed
 /// block. Every node (signer and verifiers alike) must set this to the SAME
-/// value out-of-band for hybrid verification to mean anything; unset means
-/// no hybrid block can ever be trusted (fails closed, not open).
-fn trusted_producer_id() -> Option<[u8; 32]> {
-    parse_hex64(std::env::var(TRUSTED_PRODUCER_ID_ENV).ok()?.trim())
+/// list out-of-band for hybrid verification to mean anything; unset or
+/// unparseable means no hybrid block can ever be trusted (fails closed, not
+/// open).
+///
+/// 2026-09-15 (producer SQIsign key rotation): a LIST, so a verifier can
+/// accept the checkpoints minted under a retired key AND the current one —
+/// with a single pinned id a fresh sync would reject every pre-rotation
+/// checkpoint. Format: comma-separated 64-hex ids, each optionally suffixed
+/// `@<from_height>` (the id is trusted only at heights >= from_height;
+/// default 0). A bare single hex — the pre-rotation format — still parses.
+/// Any malformed entry poisons the whole list (→ empty → fail closed), so a
+/// typo cannot silently narrow trust to a subset.
+fn trusted_producer_ids() -> Vec<([u8; 32], u64)> {
+    let Ok(raw) = std::env::var(TRUSTED_PRODUCER_ID_ENV) else { return Vec::new() };
+    parse_trusted_producer_ids(&raw)
+}
+
+/// Pure parser for [`trusted_producer_ids`] (unit-tested without env).
+pub fn parse_trusted_producer_ids(raw: &str) -> Vec<([u8; 32], u64)> {
+    let mut out = Vec::new();
+    for entry in raw.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let (id_hex, from) = match entry.split_once('@') {
+            Some((h, f)) => match f.trim().parse::<u64>() {
+                Ok(n) => (h.trim(), n),
+                Err(_) => return Vec::new(),
+            },
+            None => (entry, 0),
+        };
+        match parse_hex64(id_hex) {
+            Some(id) => out.push((id, from)),
+            None => return Vec::new(),
+        }
+    }
+    out
+}
+
+/// Is `producer` a trusted hybrid identity at `height`?
+fn is_trusted_producer(producer: &[u8; 32], height: u64) -> bool {
+    trusted_producer_ids().iter().any(|(id, from)| id == producer && height >= *from)
+}
+
+/// Observe-only (default) vs enforce — see [`HYBRID_ENFORCE_ENV`].
+pub fn hybrid_enforce() -> bool {
+    matches!(std::env::var(HYBRID_ENFORCE_ENV).ok().as_deref().map(str::trim), Some("1") | Some("true"))
+}
+
+/// The apply-side gate for `ChainTip::apply` (2026-09-15 — until today
+/// `verify_self_mined_hybrid` had NO production caller, so the post-quantum
+/// leg was a promise, not a check). Non-hybrid blocks pass untouched. Hybrid
+/// blocks are ALWAYS verified; in observe-only mode a failure is logged and
+/// the block is still applied, in enforce mode it is rejected.
+pub fn check_hybrid_on_apply(header: &SigilBlockHeaderV0) -> Result<(), String> {
+    if header.sig_scheme != SigScheme::HybridSqiEd25519 {
+        return Ok(());
+    }
+    match verify_self_mined_hybrid(header) {
+        Ok(()) => {
+            eprintln!(
+                "🔏 hybrid checkpoint verified at height {} (producer {}…)",
+                header.height,
+                header.producer.iter().take(4).map(|b| format!("{b:02x}")).collect::<String>()
+            );
+            Ok(())
+        }
+        Err(e) if hybrid_enforce() => Err(e),
+        Err(e) => {
+            eprintln!(
+                "⚠ hybrid checkpoint at height {} FAILED verification — observe-only ({HYBRID_ENFORCE_ENV}=0), block applied anyway: {e}",
+                header.height
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Content-address of a (SQIsign pk, Ed25519 pk) pair — what `header.
@@ -345,11 +420,16 @@ pub fn maybe_sign_hybrid(header: &mut SigilBlockHeaderV0) {
 ///   - `hybrid_verify` doesn't return `all_valid` (either leg fails, or the
 ///     bundle's scheme-set isn't exactly {SQIsign, Ed25519}) → reject.
 pub fn verify_self_mined_hybrid(header: &SigilBlockHeaderV0) -> Result<(), String> {
-    let trusted = trusted_producer_id().ok_or_else(|| {
-        format!("{TRUSTED_PRODUCER_ID_ENV} not configured — no hybrid block can be trusted")
-    })?;
-    if header.producer != trusted {
-        return Err("header.producer does not match the pinned trusted producer id".into());
+    if trusted_producer_ids().is_empty() {
+        return Err(format!(
+            "{TRUSTED_PRODUCER_ID_ENV} not configured (or malformed) — no hybrid block can be trusted"
+        ));
+    }
+    if !is_trusted_producer(&header.producer, header.height) {
+        return Err(format!(
+            "header.producer is not a pinned trusted producer id at height {}",
+            header.height
+        ));
     }
     let bundle = hybrid::deserialize_hybrid(&header.producer_sig.0)
         .map_err(|e| format!("malformed hybrid signature bundle: {e}"))?;
@@ -641,5 +721,72 @@ mod tests {
         assert!(!is_hybrid_checkpoint(1));
         assert!(!is_hybrid_checkpoint(HYBRID_CHECKPOINT_INTERVAL - 1));
         assert!(!is_hybrid_checkpoint(HYBRID_CHECKPOINT_INTERVAL + 1));
+    }
+
+    #[test]
+    fn trusted_id_list_parses_single_multi_and_from_height_and_fails_closed_on_garbage() {
+        let a = [0xAA; 32];
+        let b = [0xBB; 32];
+        let ah = hex::encode(a);
+        let bh = hex::encode(b);
+        assert_eq!(parse_trusted_producer_ids(&ah), vec![(a, 0)], "pre-rotation single bare hex");
+        assert_eq!(parse_trusted_producer_ids(&format!("{ah},{bh}")), vec![(a, 0), (b, 0)]);
+        assert_eq!(parse_trusted_producer_ids(&format!(" {ah} , {bh}@18874368 ")), vec![(a, 0), (b, 18874368)]);
+        assert!(parse_trusted_producer_ids("").is_empty());
+        assert!(parse_trusted_producer_ids(&format!("{ah},zz")).is_empty(), "one bad entry poisons the list");
+        assert!(parse_trusted_producer_ids(&format!("{ah}@soon")).is_empty(), "bad from-height poisons the list");
+        assert!(parse_trusted_producer_ids(&ah[..60]).is_empty(), "short hex is not an id");
+    }
+
+    #[test]
+    fn hybrid_rotated_key_verifies_under_a_list_and_from_height_gates_it() {
+        let _guard = locked();
+        // "old" producer keypair signs at height 42; "new" keypair signs at height 43.
+        let (sk_old, pk_old) = flux_sqisign::keygen();
+        let (sk_new, pk_new) = flux_sqisign::keygen();
+        let ed_seed = [66u8; 32];
+
+        set_hybrid_env(&sk_old, &pk_old, ed_seed);
+        let id_old = configured_hybrid_producer_wallet().unwrap();
+        let mut h_old = fake_header(id_old);
+        h_old.height = 42;
+        maybe_sign_hybrid(&mut h_old);
+        assert_eq!(h_old.sig_scheme, SigScheme::HybridSqiEd25519);
+
+        set_hybrid_env(&sk_new, &pk_new, ed_seed);
+        let id_new = configured_hybrid_producer_wallet().unwrap();
+        assert_ne!(id_old, id_new);
+        let mut h_new = fake_header(id_new);
+        h_new.height = 43;
+        maybe_sign_hybrid(&mut h_new);
+
+        // list with both: both epochs verify
+        std::env::set_var(TRUSTED_PRODUCER_ID_ENV, format!("{},{}", hex::encode(id_old), hex::encode(id_new)));
+        verify_self_mined_hybrid(&h_old).expect("retired id still trusted for its epoch");
+        verify_self_mined_hybrid(&h_new).expect("current id trusted");
+        // apply-side gate: hybrid blocks verified, non-hybrid untouched
+        check_hybrid_on_apply(&h_old).expect("gate accepts a listed producer");
+        let plain = fake_header([0x11; 32]);
+        check_hybrid_on_apply(&plain).expect("non-hybrid block is not the gate's business");
+
+        // only the NEW id pinned (the single-id mistake): the old checkpoint is rejected
+        std::env::set_var(TRUSTED_PRODUCER_ID_ENV, hex::encode(id_new));
+        assert!(verify_self_mined_hybrid(&h_old).is_err(), "single pinned id rejects the pre-rotation checkpoint");
+        verify_self_mined_hybrid(&h_new).expect("new still fine");
+
+        // from-height: new id trusted only from 43 → its block at 43 passes, a block at 42 would not
+        std::env::set_var(TRUSTED_PRODUCER_ID_ENV, format!("{}@43", hex::encode(id_new)));
+        verify_self_mined_hybrid(&h_new).expect("height 43 >= from 43");
+        let mut h_new_early = h_new.clone();
+        h_new_early.height = 42; // signature no longer matches either, but the id gate fires first
+        assert!(verify_self_mined_hybrid(&h_new_early).is_err());
+
+        // observe-only vs enforce on a rejected block
+        std::env::remove_var(HYBRID_ENFORCE_ENV);
+        check_hybrid_on_apply(&h_old).expect("observe-only: rejected block is still applied");
+        std::env::set_var(HYBRID_ENFORCE_ENV, "1");
+        assert!(check_hybrid_on_apply(&h_old).is_err(), "enforce: rejected block is refused");
+        std::env::remove_var(HYBRID_ENFORCE_ENV);
+        clear_hybrid_env();
     }
 }

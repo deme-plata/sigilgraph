@@ -167,6 +167,11 @@ impl ChainTip {
     /// entry. Production goes through [`apply`].
     pub fn apply_with_schedule(&mut self, block: Block, schedule: &[(u64, WalletId)]) -> Result<()> {
         block.header.precheck().with_context(|| "header precheck failed")?;
+        // 2026-09-15: the post-quantum leg is finally CHECKED here, at the one chokepoint every
+        // block passes (gossip, backfill, self-mined). Observe-only unless SIGIL_HYBRID_ENFORCE=1;
+        // trusted ids are a list so retired producer keys keep verifying their own epoch.
+        crate::producer_signing::check_hybrid_on_apply(&block.header)
+            .map_err(|e| anyhow!("hybrid producer signature rejected at height {}: {}", block.header.height, e))?;
 
         let expected_height = self.height();
         if block.header.height != expected_height {

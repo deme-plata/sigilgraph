@@ -195,6 +195,22 @@ img { display: block; }
 .hero .dots i.on::after { content: ""; display: block; height: 100%; width: 100%; background: #fff; animation: fill 7s linear; transform-origin: left; }
 @keyframes fill { from { transform: scaleX(0) } to { transform: scaleX(1) } }
 
+/* ── live ticker (marquee of what the chain just did) ───────────────── */
+.ticker { position: relative; overflow: hidden; height: 34px; margin: -6px 0 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent); -webkit-mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent); }
+.tk-track { display: inline-flex; align-items: center; height: 34px; white-space: nowrap; animation: marquee 60s linear infinite; will-change: transform; }
+.ticker:hover .tk-track { animation-play-state: paused; }
+@keyframes marquee { from { transform: translateX(0) } to { transform: translateX(-50%) } }
+.tk-item { display: inline-flex; align-items: center; gap: 7px; padding: 0 18px; font-size: 12px; color: var(--ink-2); border-right: 1px solid var(--line); }
+.tk-item .tk-ic { display: inline-flex; width: 14px; height: 14px; color: var(--muted); }
+.tk-item .tk-ic svg { width: 14px; height: 14px; }
+.tk-item .tk-l { font-weight: 700; color: #fff; }
+.tk-item .tk-v { font-family: var(--mono); color: var(--muted); }
+.tk-item.blue .tk-ic { color: var(--cyan); }
+.tk-item.red .tk-ic { color: var(--bad); }
+.tk-item.gold .tk-ic { color: var(--gold-b); }
+.row.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(236px, 1fr)); overflow: visible; scroll-snap-type: none; }
+.row.grid .card { flex: none; }
+
 /* ── category chips (OpenSea's row under the hero) ──────────────────── */
 .cats { display: flex; gap: 8px; margin-top: 22px; overflow-x: auto; scrollbar-width: none; padding: 8px 0 10px; position: sticky; top: var(--top); z-index: 30; background: var(--bg); box-shadow: 0 10px 14px -10px rgba(0,0,0,.6); }
 .cats::-webkit-scrollbar { display: none; }
@@ -523,6 +539,7 @@ footer.foot a:hover { color: #fff; }
   .rail { display: none; }
   .bottomnav { display: grid; }
   .main { padding: 14px 16px 90px; }
+  .ticker { margin-top: 0; }
   .panel { bottom: 62px; }
   .toasts { bottom: 76px; }
   .actions .ibtn#bellBtn, .actions .ibtn#cartBtn, .actions #panelBtn, .actions .chain-wrap { display: none; }

@@ -64,6 +64,7 @@ export function shell(): string {
     <a href="/sigil-explorer.html" target="_blank" rel="noopener">${I.eye}<span class="tip">Explorer</span></a>
   </aside>
   <main class="main" id="main">
+    <div class="ticker" id="ticker" aria-label="Live chain activity"><div class="tk-track" id="tickerTrack"></div></div>
     <section id="market" class="section" style="margin-top:0">
       <div class="hero" id="hero"><div class="bg"></div><div class="veil"></div><div class="body"><div class="eyebrow"><span class="chip gold">reading the chain…</span></div><h1>SIGIL VM</h1></div></div>
       <div class="strip" id="strip"></div>
@@ -429,6 +430,20 @@ export function collectionModal(c: Collection, s: Snapshot): string {
     <div class="cm-stats"><div class="cell"><div class="k">Floor</div><div class="v">${esc(c.floor)}</div></div><div class="cell"><div class="k">Items</div><div class="v">${c.items === null ? '—' : fmt.int(c.items)}</div></div><div class="cell"><div class="k">Owners</div><div class="v">${c.owners === null ? '—' : fmt.int(c.owners)}</div></div><div class="cell"><div class="k">Volume</div><div class="v">${esc(c.volume)}</div></div></div>
     <div class="cm-body"><p class="blurb">${esc(c.blurb)}</p><div class="cm-items">${items.join('') || '<div class="pempty">Nothing to list.</div>'}</div></div>
     <div class="cm-foot"><a class="btn primary" href="${c.link}" target="_blank" rel="noopener">Open source page ↗</a><button class="btn ghost" id="modalClose2">Close</button></div>`
+}
+
+export function ticker(s: Snapshot): string {
+  const items: string[] = []
+  const it = (icon: string, label: string, val: string, cls = '') => items.push(`<span class="tk-item ${cls}"><span class="tk-ic">${icon}</span><span class="tk-l">${label}</span><span class="tk-v">${val}</span></span>`)
+  for (const b of (s.recent?.blocks ?? []).slice(0, 6)) it(I.grid, `block ${fmt.int(b.height)}`, `${b.is_blue ? 'blue' : 'red'} · score ${fmt.int(b.blue_score)} · ${fmt.short(hex(b.producer), 4)}`, b.is_blue ? 'blue' : 'red')
+  for (const m of (s.miners?.miners ?? []).slice(0, 4)) it(I.coins, m.rig || fmt.short(m.wallet, 6), `${fmt.hps(m.hash_rate)} · ${fmt.ago(m.last_seen_secs_ago)}`)
+  const a = s.earth?.attest_last?.anchor
+  if (a?.tx_hash) it(I.eye, 'K⊕ attest', `${a.amount ?? '—'} glyphs · ${fmt.short(a.tx_hash, 6)}`, 'gold')
+  for (const e of (s.docket?.entries ?? []).slice(-2)) it(I.book, `docket #${e.seq}`, e.kind, 'gold')
+  if (s.head.ok) it(I.swap, 'finality', `${s.head.finalityGate} · ${fmt.int(s.head.lagBlocks)} blk behind tip`)
+  if (!items.length) return ''
+  const row = items.join('')
+  return row + row // duplicated so the marquee loops seamlessly
 }
 
 export function legend(s: Snapshot): string {

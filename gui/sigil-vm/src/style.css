@@ -264,8 +264,16 @@ img { display: block; }
 /* ── DEX (Quillon-shaped) ───────────────────────────────────────────── */
 #dex { container-type: inline-size; }
 .dex { display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; }
-.dex > div:first-child { max-width: 560px; width: 100%; }
-@container (min-width: 1180px) { .dex { grid-template-columns: minmax(380px, 460px) 1fr; } .dex > div:first-child { max-width: none; } }
+#swap { display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; }
+@container (min-width: 900px) { #swap { grid-template-columns: minmax(360px, 560px) 1fr; } }
+@container (min-width: 1180px) { .dex { grid-template-columns: minmax(380px, 460px) 1fr; } #swap { grid-template-columns: 1fr; } }
+.qcard.route .glow { background: linear-gradient(90deg, var(--gold), var(--cyan)); opacity: .2; }
+.qcard.route .inner { border-color: rgba(212,175,55,.22); }
+.route-pair { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 16px; margin: 4px 0 10px; }
+.route-pair img { width: 26px; height: 26px; border-radius: 50%; }
+.route-pair .arr { color: var(--muted); }
+.route-cta { display: flex; gap: 8px; margin-top: 12px; }
+.route-cta .btn { flex: 1; }
 .qcard { position: relative; }
 .qcard .glow { position: absolute; inset: -2px; border-radius: 18px; filter: blur(14px); opacity: .3; transition: opacity .2s; background: linear-gradient(90deg, var(--cyan), var(--purple)); z-index: 0; }
 .qcard.pinkish .glow { background: linear-gradient(90deg, var(--purple), var(--pink)); }

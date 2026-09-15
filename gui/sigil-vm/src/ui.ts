@@ -281,6 +281,28 @@ export function swapModule(s: Snapshot, st: SwapState, balances: Record<string, 
   </div></div>`
 }
 
+export function routeCard(s: Snapshot, st: SwapState): string {
+  const tk = (id: string) => s.tokens.find((t) => t.id === id) || s.tokens[0]
+  const from = tk(st.from), to = tk(st.to)
+  const h = s.head
+  const lagS = h.blkPerSec ? h.lagBlocks / h.blkPerSec : null
+  const free = Math.max(0, h.capacity - h.notes)
+  return `<div class="qcard route"><div class="glow"></div><div class="inner">
+    <div class="head"><h3>Route &amp; pool</h3><span class="chip ${s.pools.length ? 'live' : 'gold'}"><i class="d"></i>${s.pools.length} pool${s.pools.length === 1 ? '' : 's'} on g2</span></div>
+    <div class="route-pair"><img src="${from.icon}" alt=""><span>${esc(from.symbol)}</span><span class="arr">→</span><img src="${to.icon}" alt=""><span>${esc(to.symbol)}</span></div>
+    <div class="info">
+      <div><span class="k">Pool</span><span class="v">${s.pools.length ? 'constant product' : 'none yet'}</span></div>
+      <div><span class="k">Formula</span><span class="v">Δy = y·Δx(1−f) / (x + Δx(1−f))</span></div>
+      <div><span class="k">Fee f</span><span class="v">0.30%</span></div>
+      <div><span class="k">Slippage</span><span class="v">${st.slippage.toFixed(1)}%</span></div>
+      <div><span class="k">Settles in</span><span class="v">${lagS !== null ? (lagS < 1 ? '<1 s' : lagS.toFixed(0) + ' s') : fmt.int(h.lagBlocks) + ' blocks'} · ${esc(h.finalityGate)}</span></div>
+      <div><span class="k">Output lands as</span><span class="v">a shielded note (${fmt.int(free)} free)</span></div>
+    </div>
+    <div class="route-cta"><a class="btn ghost" href="/sigil-wallet-tron-embedded.html" target="_blank" rel="noopener">Add liquidity</a><a class="btn ghost" href="/sigil-dex.html" target="_blank" rel="noopener">Trading desk ↗</a></div>
+    <div class="muted" style="font-size:11.5px;margin-top:10px">Everything above is read from the node this poll. A pool is a ${'`'}PoolState${'`'} in the DEX state root; until one is committed there is nothing to route through.</div>
+  </div></div>`
+}
+
 // ── DEX: token table (Quillon "Available Tokens") ─────────────────────────
 export interface TokenTableState { q: string; filter: 'all' | 'gainers' | 'losers'; sort: keyof Token | 'supply'; dir: 'asc' | 'desc' }
 export function tokenTable(s: Snapshot, st: TokenTableState): string {

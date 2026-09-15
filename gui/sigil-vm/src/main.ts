@@ -77,7 +77,7 @@ function renderSwap(): void {
   host.style.width = ''
   const active = document.activeElement as HTMLInputElement | null
   const keep = active && active.id === 'swapAmt' ? { s: active.selectionStart, e: active.selectionEnd } : null
-  host.innerHTML = ui.swapModule(snap, swapSt, balances, currentQuote())
+  host.innerHTML = ui.swapModule(snap, swapSt, balances, currentQuote()) + ui.routeCard(snap, swapSt)
   if (keep) { const el = $('#swapAmt') as HTMLInputElement; el.focus(); try { el.setSelectionRange(keep.s ?? 0, keep.e ?? 0) } catch { /* */ } }
 }
 function renderTokens(): void { if (snap) $('#tokens').innerHTML = ui.tokenTable(snap, tokSt) }

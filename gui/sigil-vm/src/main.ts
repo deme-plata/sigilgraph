@@ -308,6 +308,21 @@ fetch('/downloads/sigil-wallet-latest.json', { headers: { accept: 'application/j
   if (a && m?.url) { a.href = m.url; a.textContent = `Get the wallet · v${m.version ?? ''}` }
 }).catch(() => { /* keep the stable link */ })
 
+// trending hover preview (OpenSea shows a quick card on hover)
+const pv = document.createElement('div'); pv.className = 'preview'; pv.hidden = true; document.body.appendChild(pv)
+document.addEventListener('mouseover', (ev) => {
+  const tr = (ev.target as HTMLElement).closest('#trendingTable tr[data-coll]') as HTMLElement | null
+  if (!tr || !snap) { return }
+  const c = snap.collections.find((x) => x.id === tr.dataset.coll); if (!c) return
+  pv.innerHTML = `<div class="pv-img" style="background-image:url('${c.cover}')"></div><div class="pv-b"><div class="pv-n">${ui.esc(c.name)}</div><div class="pv-by">${ui.esc(c.by || '')}</div><div class="pv-t">${ui.esc(c.blurb)}</div><div class="pv-kv"><span>Floor <b>${ui.esc(c.floor)}</b></span><span>Items <b>${c.items === null ? '—' : fmt.int(c.items)}</b></span></div></div>`
+  pv.hidden = false
+  const r = tr.getBoundingClientRect(); const w = 300
+  pv.style.top = `${Math.min(innerHeight - 190, r.top)}px`
+  pv.style.left = `${r.right + w + 16 < innerWidth ? r.right + 8 : Math.max(8, r.left - w - 8)}px`
+})
+document.addEventListener('mouseout', (ev) => { if ((ev.target as HTMLElement).closest('#trendingTable tr[data-coll]')) pv.hidden = true })
+document.addEventListener('scroll', () => { pv.hidden = true }, { passive: true })
+
 // ── boot ──────────────────────────────────────────────────────────────────
 try { const w = localStorage.getItem('sigilvm-wallet'); if (w) wallet = w } catch { /* */ }
 try { const qw = new URLSearchParams(location.search).get('wallet'); if (qw && /^[0-9a-f]{64}$/i.test(qw)) { wallet = qw.toLowerCase(); app.classList.add('panel-open') } } catch { /* */ }

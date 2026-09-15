@@ -465,11 +465,14 @@ function buildSales(earth: Earth | null, docket: Docket | null, usds: Usds | nul
     when: a.ts ? new Date(a.ts).toLocaleString() : '—', proof: a.tx_hash, provenance: 'live',
   })
   for (const e of docket?.entries ?? []) {
-    const ev = e.event as { order?: string; citation?: string; kind?: string; name?: string }
+    const ev = e.event as { order?: string; citation?: string; rank?: string; justice?: number[]; recipient?: number[]; approvals?: number; operator_cosigned?: boolean }
+    const who = hex(ev.justice ?? ev.recipient)
+    const rank = (ev.rank || '').replace(/([A-Z])/g, ' $1').trim()
     s.push({
-      id: `docket-${e.seq}`, name: e.kind === 'HonourConferred' ? `${ev.order ?? 'Honour'} conferred` : `${e.kind.replace(/([A-Z])/g, ' $1').trim()}`,
-      collection: e.kind === 'HonourConferred' ? 'Elefantordenen' : 'Justices of the Bench',
-      cover: coverSvg(e.kind + e.seq, e.kind === 'HonourConferred' ? 'seal' : 'shield'), price: `docket #${e.seq}`,
+      id: `docket-${e.seq}`,
+      name: e.kind === 'HonourConferred' ? `${ev.order ?? 'Honour'} · ${fmt.short(who, 4)}` : `${rank || 'Justice'} · ${fmt.short(who, 4)}`,
+      collection: e.kind === 'HonourConferred' ? `Elefantordenen · ${ev.approvals ?? '—'} approvals${ev.operator_cosigned ? ' · co-signed' : ''}` : 'Justices of the Bench',
+      cover: coverSvg(who || e.kind + e.seq, e.kind === 'HonourConferred' ? 'seal' : 'shield'), price: `docket #${e.seq}`,
       when: e.height ? `block ${fmt.int(e.height)}` : 'genesis bench', proof: e.leaf, provenance: 'live',
     })
   }

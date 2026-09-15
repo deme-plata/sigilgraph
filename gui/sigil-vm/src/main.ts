@@ -108,7 +108,19 @@ function renderPanel(): void {
   $('#nNft').textContent = wallet ? String(body.querySelectorAll('.pnft').length || '') : ''
   document.querySelectorAll('#panelTabs button').forEach((b) => b.classList.toggle('on', (b as HTMLElement).dataset.ptab === panelTab))
 }
-function renderAll(): void { renderChain(); renderHero(); renderRows(); renderSwap(); renderTokens(); renderPanel() }
+function renderAll(): void {
+  renderChain()
+  if (snap && snap.offline) { showOffline(true); return } // keep the skeletons; zeros would read as measurements
+  showOffline(false)
+  renderHero(); renderRows(); renderSwap(); renderTokens(); renderPanel()
+}
+function showOffline(on: boolean): void {
+  let el = document.getElementById('offline')
+  if (on) {
+    if (!el) { el = document.createElement('div'); el.id = 'offline'; el.className = 'offline'; $('#main').prepend(el) }
+    el.innerHTML = `<span class="chip bad"><i class="d"></i>node unreachable</span><span>sigil-api did not answer. Nothing on this page is a measurement until it does — retrying every 10 s.</span><button class="btn ghost sm" id="retryNow">Retry now</button><span class="muted mono" style="font-size:11px">or add <code>?api=http://host:18181</code></span>`
+  } else if (el) el.remove()
+}
 
 // ── data ──────────────────────────────────────────────────────────────────
 async function loadBalances(): Promise<void> {
@@ -127,8 +139,7 @@ async function poll(): Promise<void> {
     snap = await buildSnapshot()
     await loadBalances()
     renderAll()
-    if (snap.offline) toast('sigil-api unreachable — showing shells. Add ?api=http://host:18181 to point elsewhere.', 'bad')
-    else if (prevHeight && snap.head.height > prevHeight) { const b = $('#bellBadge'); b.hidden = false }
+    if (!snap.offline && (prevHeight && snap.head.height > prevHeight) { const b = $('#bellBadge'); b.hidden = false }
   } catch (e) {
     toast('poll failed: ' + (e as Error).message, 'bad')
   } finally { polling = false }
@@ -143,6 +154,7 @@ document.addEventListener('click', (ev) => {
   const ds = btn.dataset
   if (ds.hero !== undefined) { heroIdx = Number(ds.hero); renderHero(); return }
   if (btn.id === 'chainChip') { $('#chainMenu').classList.toggle('open'); return }
+  if (btn.id === 'retryNow') { poll(); return }
   if (btn.id === 'panelBtn') { app.classList.toggle('panel-open'); try { localStorage.setItem('sigilvm-panel', app.classList.contains('panel-open') ? 'open' : 'closed') } catch { /* */ } return }
   if (btn.id === 'bnWallet') { ev.preventDefault(); app.classList.toggle('panel-open'); renderPanel(); return }
   if (btn.id === 'walletBtn') { if (wallet) { app.classList.add('panel-open'); return } openWalletModal(); return }

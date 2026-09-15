@@ -154,7 +154,8 @@ img { display: block; }
 .main { margin-left: var(--rail); margin-top: var(--top); padding: 20px 24px 80px; transition: margin-right .25s ease; min-width: 0; overflow-x: clip; }
 .section, .dex > *, .qcard, .qcard .inner, .row, .trending { min-width: 0; }
 .app.panel-open .main { margin-right: var(--panel); }
-.section { margin-top: 38px; animation: rise .35s ease both; }
+.section { margin-top: 38px; animation: rise .35s ease both; scroll-margin-top: calc(var(--top) + 14px); }
+#swap, #tokens { scroll-margin-top: calc(var(--top) + 14px); }
 .sec-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
 .sec-head h2 { margin: 0; font-family: var(--display); font-size: 22px; font-weight: 700; letter-spacing: -.01em; }
 .sec-head .sub { color: var(--muted); font-size: 13px; margin-top: 3px; }
@@ -495,7 +496,11 @@ footer.foot a:hover { color: #fff; }
   .main { padding: 14px 16px 90px; }
   .panel { bottom: 62px; }
   .toasts { bottom: 76px; }
-  .actions .ibtn#bellBtn, .actions .ibtn#cartBtn { display: none; }
+  .actions .ibtn#bellBtn, .actions .ibtn#cartBtn, .actions #panelBtn, .actions .chain-wrap { display: none; }
+  #walletBtn { padding: 0 12px; }
+  #walletBtn span { display: none; }
+  .search { max-width: none; }
+  .search input { height: 40px; padding-left: 38px; }
   .hero { height: 420px; }
   .hero h1 { font-size: 30px; }
   .hero .thumbs { display: none; }

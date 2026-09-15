@@ -551,10 +551,16 @@ footer.foot a:hover { color: #fff; }
   .sec-head .sub { font-size: 12px; }
   .topbar .actions { flex: 0 0 auto; }
   #walletBtn { width: 40px; padding: 0; }
-  .hero { height: 420px; }
+  .hero { height: auto; min-height: 380px; }
+  .hero .body { position: relative; padding: 52px 18px 22px; }
   .hero h1 { font-size: 30px; }
   .hero .thumbs { display: none; }
-  .hero .body { padding: 22px 18px; }
+  .hero .eyebrow .chip:nth-child(3) { display: none; }
+  .hero .stat:last-child { display: none; }
+  .hero .stats { gap: 6px; }
+  .hero .stat { min-width: 0; flex: 1 1 40%; padding: 7px 10px; }
+  .hero .stats .v { font-size: 15px; }
+  .hero .cta .btn { height: 46px; padding: 0 16px; font-size: 14px; }
   .search kbd { display: none; }
   .chain-chip span.t { display: none; }
   .topbar { gap: 10px; padding: 0 12px; }

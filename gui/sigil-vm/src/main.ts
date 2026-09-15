@@ -49,7 +49,9 @@ function swapWithFlash(host: HTMLElement, html: string): void {
   host.querySelectorAll<HTMLElement>('.v, .num, .delta, .price, .r, .fy-col p').forEach((el, i) => before.set(String(i), el.textContent || ''))
   host.innerHTML = html
   if (!before.size) return
-  host.querySelectorAll<HTMLElement>('.v, .num, .delta, .price, .r, .fy-col p').forEach((el, i) => {
+  const after = host.querySelectorAll<HTMLElement>('.v, .num, .delta, .price, .r, .fy-col p')
+  if (after.length !== before.size) return // the list changed shape (filter/sort) — not a value change
+  after.forEach((el, i) => {
     const prev = before.get(String(i))
     if (prev !== undefined && prev !== (el.textContent || '')) { el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1400) }
   })

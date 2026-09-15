@@ -155,7 +155,7 @@ img { display: block; }
 .main { margin-left: var(--rail); margin-top: var(--top); padding: 20px 24px 80px; transition: margin-right .25s ease; min-width: 0; overflow-x: clip; }
 .section, .dex > *, .qcard, .qcard .inner, .row, .trending { min-width: 0; }
 .app.panel-open .main { margin-right: var(--panel); }
-.section { margin-top: 38px; animation: rise .35s ease both; scroll-margin-top: calc(var(--top) + 14px); }
+.section { margin-top: 38px; animation: rise .35s ease both; scroll-margin-top: calc(var(--top) + 76px); }
 #swap, #tokens { scroll-margin-top: calc(var(--top) + 14px); }
 .sec-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
 .sec-head > div:first-child { min-width: 0; }
@@ -196,7 +196,7 @@ img { display: block; }
 @keyframes fill { from { transform: scaleX(0) } to { transform: scaleX(1) } }
 
 /* ── category chips (OpenSea's row under the hero) ──────────────────── */
-.cats { display: flex; gap: 8px; margin-top: 22px; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; position: sticky; top: var(--top); z-index: 30; background: linear-gradient(var(--bg) 85%, transparent); padding-top: 8px; }
+.cats { display: flex; gap: 8px; margin-top: 22px; overflow-x: auto; scrollbar-width: none; padding: 8px 0 10px; position: sticky; top: var(--top); z-index: 30; background: var(--bg); box-shadow: 0 10px 14px -10px rgba(0,0,0,.6); }
 .cats::-webkit-scrollbar { display: none; }
 .cats button { flex: 0 0 auto; padding: 9px 16px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); font-weight: 600; font-size: 13.5px; color: var(--ink-2); transition: .15s; }
 .cats button:hover { background: var(--surface-3); color: #fff; }

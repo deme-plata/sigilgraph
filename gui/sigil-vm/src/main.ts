@@ -25,7 +25,7 @@ let collapsed = false
 
 try { wallet = localStorage.getItem('sigil-wallet-address') } catch { /* blocked */ }
 try { if (localStorage.getItem('sigilvm-panel') === 'open') app.classList.add('panel-open') } catch { /* */ }
-if (innerWidth >= 1400 && !app.classList.contains('panel-open')) app.classList.add('panel-open')
+if (innerWidth >= 1600 && !app.classList.contains('panel-open')) app.classList.add('panel-open')
 
 function toast(msg: string, cls = ''): void {
   const t = document.createElement('div'); t.className = 'toast ' + cls; t.textContent = msg

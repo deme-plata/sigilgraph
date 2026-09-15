@@ -22,6 +22,7 @@ let panelTab: 'tokens' | 'nfts' | 'activity' = 'tokens'
 const swapSt: ui.SwapState = { mode: 'market', from: NATIVE_TOKEN, to: '', amount: '', limitPrice: '', limitDir: 'buy', slippage: 0.5 }
 const tokSt: ui.TokenTableState = { q: '', filter: 'all', sort: 'supply', dir: 'desc', open: null }
 let collapsed = false
+let cat = 'all'
 
 try { wallet = localStorage.getItem('sigil-wallet-address') } catch { /* blocked */ }
 try { if (localStorage.getItem('sigilvm-panel') === 'open') app.classList.add('panel-open') } catch { /* */ }
@@ -55,7 +56,8 @@ function swapWithFlash(host: HTMLElement, html: string): void {
 }
 function renderRows(): void {
   if (!snap) return
-  swapWithFlash($('#featuredRow'), snap.featured.map(ui.collectionCard).join('') || '<div class="pempty">No collections read.</div>')
+  const feat = cat === 'all' ? snap.featured : snap.collections.filter((c) => c.cat === cat)
+  swapWithFlash($('#featuredRow'), feat.map(ui.collectionCard).join('') || '<div class="pempty">No collections in this category.</div>')
   $('#dropsRow').innerHTML = snap.drops.map(ui.dropCard).join('')
   swapWithFlash($('#moversRow'), snap.movers.map(ui.moverCard).join('') || '<div class="pempty">No miners read — node offline?</div>')
   $('#salesRow').innerHTML = snap.sales.map(ui.saleCard).join('') || '<div class="pempty">Nothing settled this week that the node reports.</div>'
@@ -147,6 +149,7 @@ document.addEventListener('click', (ev) => {
   if (btn.id === 'pSend' || btn.id === 'pReceive') { window.open('/sigil-wallet-tron-embedded.html', '_blank', 'noopener'); return }
   if (btn.id === 'pSwap') { location.hash = '#swap'; $('#dex').scrollIntoView({ behavior: 'smooth' }); return }
   if (ds.mode && btn.closest('#trendMode')) { trendMode = ds.mode as typeof trendMode; document.querySelectorAll('#trendMode button').forEach((b) => b.classList.toggle('on', b === btn)); if (snap) $('#trendingTable').innerHTML = ui.trending(snap, trendMode, trendWin); return }
+  if (ds.cat) { cat = ds.cat; document.querySelectorAll('#cats button').forEach((b) => b.classList.toggle('on', b === btn)); renderRows(); $('#featured').scrollIntoView({ behavior: 'smooth', block: 'start' }); return }
   if (ds.win) { trendWin = ds.win; document.querySelectorAll('#trendWin button').forEach((b) => b.classList.toggle('on', b === btn)); if (snap) $('#trendingTable').innerHTML = ui.trending(snap, trendMode, trendWin); return }
   if (ds.coll && !ev.ctrlKey && !ev.metaKey && !(ev as MouseEvent).button) { ev.preventDefault(); openCollection(ds.coll); return }
   const arrows = btn.closest('.arrows') as HTMLElement | null

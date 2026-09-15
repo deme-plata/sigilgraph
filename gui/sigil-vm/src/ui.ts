@@ -69,6 +69,9 @@ export function shell(): string {
       <div class="strip" id="strip"></div>
       <div id="foryou"></div>
     </section>
+    <div class="cats" id="cats">
+      <button class="on" data-cat="all">All</button><button data-cat="chain">Chain</button><button data-cat="mining">Mining</button><button data-cat="court">Court</button><button data-cat="shielded">Shielded</button><button data-cat="tokens">Tokens</button><button data-cat="bridge">Bridge</button><button data-cat="science">Science</button><button data-cat="physical">Physical</button><button data-cat="story">Story</button>
+    </div>
     <section id="featured" class="section">
       <div class="sec-head"><div><h2>Featured Collections</h2><div class="sub">Record families the chain can prove — ranked by items on chain.</div></div><div class="right"><div class="arrows" data-scroll="featuredRow"><button aria-label="Scroll left">${I.left}</button><button aria-label="Scroll right">${I.right}</button></div><a class="viewall" href="#trending">View all</a></div></div>
       <div class="row" id="featuredRow">${skeleton(5)}</div>
@@ -250,7 +253,7 @@ export function trending(s: Snapshot, mode: 'trending' | 'top', win: string): st
   const half = Math.ceil(list.length / 2)
   const table = (rows: Collection[], off: number) => `<table><thead><tr><th>#</th><th>Collection</th><th class="r">Floor</th><th class="r" title="change in items over the window — sampled in your browser once a minute; shows — until enough samples exist">${win} chg</th><th class="r">Volume</th><th class="r">Items</th><th class="r">Owners</th></tr></thead><tbody>
     ${rows.map((c, i) => `<tr data-coll="${c.id}" data-link="${c.link}"><td class="rank">${off + i + 1}</td><td><div class="coll"><img src="${c.cover}" alt=""><div><div class="n">${esc(c.name)}${ver(c.verified)}</div><div class="s">${prov(c.provenance)}</div></div></div></td>
-      <td class="r num">${esc(c.floor)}</td><td class="r num" title="items now vs. items ${win} ago, sampled by this browser">${delta(chg(c))}</td><td class="r num">${esc(c.volume)}</td><td class="r num">${c.items === null ? '—' : fmt.int(c.items)}</td><td class="r num">${c.owners === null ? '—' : fmt.int(c.owners)}</td></tr>`).join('')}
+      <td class="r num">${esc(c.floor)}</td><td class="r num" title="items now vs. items ${win} ago, sampled by this browser">${delta(chg(c))}</td><td class="r num">${esc(c.volume)}</td><td class="r num">${c.items === null ? '—' : fmt.int(c.items)}</td><td class="r num">${c.owners === null ? '—' : fmt.int(c.owners)}<span class="chev">${I.right}</span></td></tr>`).join('')}
   </tbody></table>`
   return `<div class="tcol">${table(list.slice(0, half), 0)}</div><div class="tcol">${table(list.slice(half), half)}</div>`
 }

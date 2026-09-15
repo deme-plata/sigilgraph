@@ -223,6 +223,7 @@ document.addEventListener('keydown', (ev) => {
     if (ev.key === 'g') { window.scrollTo({ top: 0, behavior: 'smooth' }) }
   }
   if (ev.key === 'Escape') { closeModal(); $('#qres').classList.remove('open'); $('#chainMenu').classList.remove('open') }
+  if (ev.key === 'Enter' && document.activeElement?.id === 'q') { const first = $('#qres').querySelector('.r') as HTMLElement | null; if (first) { first.click(); $('#qres').classList.remove('open') } }
   const list = document.querySelector('#modal.open .list') as HTMLElement | null
   if (list && (ev.key === 'ArrowDown' || ev.key === 'ArrowUp' || ev.key === 'Enter')) {
     const items = Array.from(list.querySelectorAll<HTMLButtonElement>('button'))
@@ -327,5 +328,6 @@ document.addEventListener('scroll', () => { pv.hidden = true }, { passive: true 
 try { const w = localStorage.getItem('sigilvm-wallet'); if (w) wallet = w } catch { /* */ }
 try { const qw = new URLSearchParams(location.search).get('wallet'); if (qw && /^[0-9a-f]{64}$/i.test(qw)) { wallet = qw.toLowerCase(); app.classList.add('panel-open') } } catch { /* */ }
 poll()
-setInterval(poll, 10_000)
+setInterval(() => { if (!document.hidden) poll() }, 10_000)
+document.addEventListener('visibilitychange', () => { if (!document.hidden) poll() })
 document.querySelectorAll('.row').forEach((r) => r.addEventListener('wheel', (e) => { const we = e as WheelEvent; if (Math.abs(we.deltaY) > Math.abs(we.deltaX)) { (r as HTMLElement).scrollLeft += we.deltaY; e.preventDefault() } }, { passive: false }))

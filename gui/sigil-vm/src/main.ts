@@ -155,6 +155,7 @@ document.addEventListener('click', (ev) => {
   if (ds.mode && btn.closest('#trendMode')) { trendMode = ds.mode as typeof trendMode; document.querySelectorAll('#trendMode button').forEach((b) => b.classList.toggle('on', b === btn)); if (snap) $('#trendingTable').innerHTML = ui.trending(snap, trendMode, trendWin); return }
   if (ds.cat) { cat = ds.cat; document.querySelectorAll('#cats button').forEach((b) => b.classList.toggle('on', b === btn)); renderRows(); $('#featured').scrollIntoView({ behavior: 'smooth', block: 'start' }); return }
   if (ds.win) { trendWin = ds.win; document.querySelectorAll('#trendWin button').forEach((b) => b.classList.toggle('on', b === btn)); if (snap) $('#trendingTable').innerHTML = ui.trending(snap, trendMode, trendWin); return }
+  if (ds.copy) { ev.preventDefault(); navigator.clipboard?.writeText(ds.copy).then(() => toast('Proof copied.')).catch(() => toast('Clipboard blocked.', 'warn')); return }
   if (ds.coll && !ev.ctrlKey && !ev.metaKey && !(ev as MouseEvent).button) { ev.preventDefault(); openCollection(ds.coll); return }
   const arrows = btn.closest('.arrows') as HTMLElement | null
   if (arrows && btn.tagName === 'BUTTON') { const row = $('#' + arrows.dataset.scroll); const dir = Array.from(arrows.children).indexOf(btn) === 0 ? -1 : 1; row.scrollBy({ left: dir * (row.clientWidth * 0.8), behavior: 'smooth' }); return }
@@ -194,7 +195,16 @@ document.addEventListener('input', (ev) => {
 })
 document.addEventListener('keydown', (ev) => {
   if (ev.key === '/' && document.activeElement?.tagName !== 'INPUT') { ev.preventDefault(); ($('#q') as HTMLInputElement).focus() }
-  if (ev.key === 'Escape') { closeModal(); $('#qres').classList.remove('open') }
+  if (ev.key === 'Escape') { closeModal(); $('#qres').classList.remove('open'); $('#chainMenu').classList.remove('open') }
+  const list = document.querySelector('#modal.open .list') as HTMLElement | null
+  if (list && (ev.key === 'ArrowDown' || ev.key === 'ArrowUp' || ev.key === 'Enter')) {
+    const items = Array.from(list.querySelectorAll<HTMLButtonElement>('button'))
+    const i = items.indexOf(document.activeElement as HTMLButtonElement)
+    if (ev.key === 'Enter' && i >= 0) return // native click
+    ev.preventDefault()
+    const n = ev.key === 'ArrowDown' ? Math.min(items.length - 1, i + 1) : Math.max(0, i - 1)
+    items[n]?.focus()
+  }
 })
 document.addEventListener('click', (ev) => { const t = ev.target as HTMLElement; if (!t.closest('.search')) $('#qres').classList.remove('open'); if (!t.closest('.chain-wrap')) $('#chainMenu').classList.remove('open') })
 
@@ -204,7 +214,7 @@ function closeModal(): void { $('#modal').classList.remove('open') }
 function openCollection(id: string): void { const c = snap?.collections.find((x) => x.id === id); if (c) openModal(ui.collectionModal(c, snap!), 'coll') }
 function openTokenPicker(which: 'from' | 'to'): void {
   if (!snap) return
-  openModal(`<h4>Select a token</h4><div class="list">${snap.tokens.map((t) => `<button data-pick="${t.id}" data-which="${which}"><img src="${t.icon}" alt=""><div><div class="s">${t.symbol}</div><div class="n">${ui.esc(t.name)}</div></div><span class="r">${balances[t.id] === undefined ? '' : fmt.num(balances[t.id], 4)}</span></button>`).join('')}</div>`)
+  openModal(`<h4>Select a token <span class="muted" style="font-size:11px;font-weight:500">↑↓ Enter</span></h4><div class="list">${snap.tokens.map((t) => `<button data-pick="${t.id}" data-which="${which}"><img src="${t.icon}" alt=""><div><div class="s">${t.symbol}</div><div class="n">${ui.esc(t.name)}</div></div><span class="r">${balances[t.id] === undefined ? '' : fmt.num(balances[t.id], 4)}</span></button>`).join('')}</div>`)
 }
 function openSlippage(): void {
   openModal(`<h4>Slippage tolerance</h4><div class="quick">${[0.1, 0.5, 1, 3].map((s) => `<button data-slip="${s}" class="${swapSt.slippage === s ? 'on' : ''}">${s}%</button>`).join('')}</div><p class="muted" style="font-size:12px">Applied by the wallet when it builds the proof. The desk shows the number; it does not sign.</p>`)

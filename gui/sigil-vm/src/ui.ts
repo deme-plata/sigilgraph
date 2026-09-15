@@ -217,12 +217,11 @@ export function dropCard(d: Drop): string {
   const st: Record<Drop['status'], string> = { live: 'chip live', minting: 'chip derived', upcoming: 'chip gold', blocked: 'chip bad' }
   const lbl: Record<Drop['status'], string> = { live: 'live', minting: 'minting', upcoming: 'upcoming', blocked: 'blocked' }
   return `<a class="card drop wide" href="${d.link}" target="_blank" rel="noopener">
-    <div class="img" style="background-image:url('${d.cover}')"><span class="prov">${prov(d.provenance)}</span><span class="status ${st[d.status]}"><i class="d"></i>${lbl[d.status]}</span></div>
+    <div class="img" style="background-image:url('${d.cover}')"><span class="prov">${prov(d.provenance)}</span><span class="status ${st[d.status]}"><i class="d"></i>${lbl[d.status]}</span><span class="cta"><span class="cta-blurb">${esc(d.detail)}</span><span class="cta-btn">Open drop ↗</span></span></div>
     <div class="meta">
       <div class="name">${esc(d.name)}</div>
       <div class="when">${esc(d.when)}</div>
       ${d.progress !== null ? `<div class="bar"><i style="width:${(d.progress * 100).toFixed(2)}%"></i></div>` : ''}
-      <div class="blurb" style="margin-top:8px">${esc(d.detail)}</div>
     </div></a>`
 }
 
@@ -237,9 +236,9 @@ export function moverCard(m: Mover): string {
 
 export function saleCard(x: Sale): string {
   return `<div class="card sale" data-proof="${esc(x.proof)}">
-    <div class="img" style="background-image:url('${x.cover}')"><span class="prov">${prov(x.provenance)}</span></div>
-    <div class="meta"><div class="name">${esc(x.name)}</div><div class="blurb" style="height:auto">${esc(x.collection)} · ${esc(x.when)}</div>
-      <div class="price">${esc(x.price)}</div><div class="proof" title="${esc(x.proof)}">${esc(x.proof)}</div></div></div>`
+    <div class="img" style="background-image:url('${x.cover}')"><span class="prov">${prov(x.provenance)}</span><span class="cta"><span class="cta-blurb mono">${esc(x.proof)}</span><span class="cta-btn" data-copy="${esc(x.proof)}">Copy proof</span></span></div>
+    <div class="meta"><div class="name">${esc(x.name)}</div><div class="byline">${esc(x.collection)} · ${esc(x.when)}</div>
+      <div class="kv"><div><div class="k">Settled</div><div class="v">${esc(x.price)}</div></div><div style="text-align:right"><div class="k">Proof</div><div class="v mono" title="${esc(x.proof)}">${fmt.short(x.proof, 5)}</div></div></div></div></div>`
 }
 
 // ── trending table ────────────────────────────────────────────────────────

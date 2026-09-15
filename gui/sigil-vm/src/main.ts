@@ -139,7 +139,7 @@ async function poll(): Promise<void> {
     snap = await buildSnapshot()
     await loadBalances()
     renderAll()
-    if (!snap.offline && (prevHeight && snap.head.height > prevHeight) { const b = $('#bellBadge'); b.hidden = false }
+    if (!snap.offline && prevHeight && snap.head.height > prevHeight) { const b = $('#bellBadge'); b.hidden = false }
   } catch (e) {
     toast('poll failed: ' + (e as Error).message, 'bad')
   } finally { polling = false }

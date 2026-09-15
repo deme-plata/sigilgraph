@@ -392,6 +392,16 @@ img { display: block; }
 .status-dot.dormant { background: var(--muted-2); }
 .status-dot.external { background: #8247e5; }
 
+.ttable tr.td-row td { padding: 0 8px 12px; text-align: left; font-family: var(--sans); white-space: normal; }
+.ttable tr.td-row:hover { background: transparent; }
+.td-wrap { background: rgba(255,255,255,.03); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; display: grid; gap: 12px; animation: rise .2s ease; }
+.td-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px 16px; }
+.td-cell .k { font-size: 10.5px; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
+.td-cell .v { font-size: 13px; margin-top: 2px; }
+.td-spark .k { font-size: 10.5px; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; }
+.td-spark .spark { display: block; margin: 0; width: 100%; max-width: 420px; height: 48px; }
+.td-links { display: flex; gap: 8px; flex-wrap: wrap; }
+
 /* ── right wallet panel (OpenSea) ───────────────────────────────────── */
 .panel { position: fixed; top: var(--top); right: 0; bottom: 0; width: var(--panel); z-index: 45; background: var(--bg-2); border-left: 1px solid var(--line); display: flex; flex-direction: column; transform: translateX(100%); transition: transform .25s ease; }
 .app.panel-open .panel { transform: none; }

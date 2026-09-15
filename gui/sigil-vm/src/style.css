@@ -355,6 +355,7 @@ img { display: block; }
 #dex { container-type: inline-size; }
 .dex { display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; }
 #swap { display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; }
+@container (max-width: 899px) { #swap .qcard { max-width: 620px; width: 100%; margin: 0 auto; } }
 @container (min-width: 900px) { #swap { grid-template-columns: minmax(360px, 560px) 1fr; } }
 @container (min-width: 1180px) { .dex { grid-template-columns: minmax(380px, 460px) 1fr; } #swap { grid-template-columns: 1fr; } }
 .qcard.route .glow { background: linear-gradient(90deg, var(--gold), var(--cyan)); opacity: .2; }

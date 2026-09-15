@@ -107,14 +107,18 @@ export function shell(): string {
     </section>
     <div class="legend" id="legend"></div>
     <footer class="foot">
-      <span>SIGIL VM · sigilgraph.org</span>
-      <a href="/api.html" target="_blank" rel="noopener">API</a>
-      <a href="/sigil-explorer.html" target="_blank" rel="noopener">Explorer</a>
-      <a href="/sigil-wallet-tron-embedded.html" target="_blank" rel="noopener">Wallet</a>
-      <a href="/sigil-dex.html" target="_blank" rel="noopener">DEX desk</a>
-      <a href="/kristensen-board.html" target="_blank" rel="noopener">K board</a>
-      <a href="/datacenter.html" target="_blank" rel="noopener">Datacenter</a>
-      <span id="footTs" class="mono"></span>
+      <div class="foot-top">
+        <div class="foot-brand"><div class="brand"><span class="cube">🔮</span><span>SIGIL <span class="vm">VM</span></span></div>
+          <p>The marketplace for everything the SIGIL chain can prove. Every figure on this page is read from the node and labelled live, derived or pretend — nothing is a price until an oracle says so.</p>
+          <div class="foot-cta"><a class="btn primary" href="/downloads/sigil-wallet-latest.apk">Get the wallet</a><a class="btn ghost" href="/downloads/sigil-top-latest.json" target="_blank" rel="noopener">sigil-top releases</a></div></div>
+        <div class="foot-cols">
+          <div><h5>Market</h5><a href="#featured">Collections</a><a href="#drops">Drops</a><a href="#trending">Trending</a><a href="#swap">Swap</a><a href="/sigil-dex.html" target="_blank" rel="noopener">Trading desk</a></div>
+          <div><h5>Chain</h5><a href="/sigil-explorer.html" target="_blank" rel="noopener">Explorer</a><a href="/api.html" target="_blank" rel="noopener">API</a><a href="/datacenter.html" target="_blank" rel="noopener">Datacenter</a><a href="/kristensen-board.html" target="_blank" rel="noopener">K board</a><a href="/kristensen-time.html" target="_blank" rel="noopener">Kristensen Time</a></div>
+          <div><h5>Nation</h5><a href="/sigil-nation-whitepaper.html" target="_blank" rel="noopener">Whitepaper</a><a href="/sigil-wallet-tron-embedded.html#court" target="_blank" rel="noopener">Supreme Court</a><a href="/kristensen-earth.html" target="_blank" rel="noopener">Earth K⊕</a><a href="/bridge-slider.html" target="_blank" rel="noopener">Bridge</a></div>
+          <div><h5>Build</h5><a href="/downloads/sigil-vm-src.tar.gz">Page source (.tar.gz)</a><a href="https://github.com/deme-plata/sigilgraph" target="_blank" rel="noopener">GitHub</a><a href="/sigil-top-openapi.json" target="_blank" rel="noopener">OpenAPI</a><a href="/flux-versions.html" target="_blank" rel="noopener">Flux versions</a></div>
+        </div>
+      </div>
+      <div class="foot-bottom"><span>© 2026 SIGIL Graph · sigilgraph.org</span><span id="footTs" class="mono"></span><span class="muted">Built with the Flux Vite engine · shipped through <span class="mono">ship.sh</span></span></div>
     </footer>
   </main>
   <aside class="panel" id="panel">

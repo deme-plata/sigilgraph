@@ -528,8 +528,17 @@ img { display: block; }
 .legend { margin-top: 44px; border-top: 1px solid var(--line); padding-top: 20px; color: var(--muted); font-size: 12.5px; display: grid; gap: 8px; }
 .legend .l { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .legend .l .chip { flex: 0 0 auto; }
-footer.foot { margin-top: 30px; display: flex; flex-wrap: wrap; gap: 14px 24px; color: var(--muted-2); font-size: 12px; }
-footer.foot a:hover { color: #fff; }
+footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 32px; color: var(--muted); font-size: 13px; }
+.foot-top { display: grid; grid-template-columns: 1fr; gap: 28px; }
+@media (min-width: 980px) { .foot-top { grid-template-columns: 1.2fr 2fr; } }
+.foot-brand p { max-width: 460px; margin: 12px 0 16px; line-height: 1.55; }
+.foot-cta { display: flex; gap: 8px; flex-wrap: wrap; }
+.foot-cols { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+@media (min-width: 720px) { .foot-cols { grid-template-columns: repeat(4, 1fr); } }
+.foot-cols h5 { margin: 0 0 10px; font-size: 13px; color: var(--ink); font-weight: 700; }
+.foot-cols a { display: block; padding: 4px 0; color: var(--muted); }
+.foot-cols a:hover { color: var(--ink); }
+.foot-bottom { display: flex; flex-wrap: wrap; gap: 10px 24px; margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted-2); }
 
 /* ── toast / modal ──────────────────────────────────────────────────── */
 .toasts { position: fixed; right: 20px; bottom: 20px; z-index: 100; display: grid; gap: 8px; }

@@ -85,7 +85,8 @@ img { display: block; }
 .brand .cube { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; background: linear-gradient(135deg, var(--gold-b), var(--gold) 55%, #9a7d22); color: #000; font-size: 17px; box-shadow: 0 0 22px rgba(212,175,55,.35); }
 .brand .vm { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .brand small { font-family: var(--mono); font-size: 10px; color: var(--muted); font-weight: 500; letter-spacing: .12em; margin-left: 2px; }
-.search { flex: 1; max-width: 560px; position: relative; }
+.search { flex: 1 1 160px; max-width: 560px; min-width: 0; position: relative; }
+.search input { min-width: 0; }
 .search input { width: 100%; height: 44px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); padding: 0 44px 0 40px; outline: none; transition: .15s; }
 .search input:focus { border-color: rgba(0,217,255,.5); box-shadow: 0 0 0 3px rgba(0,217,255,.12); }
 .search .ico { position: absolute; left: 13px; top: 12px; width: 18px; height: 18px; color: var(--muted); }
@@ -156,10 +157,11 @@ img { display: block; }
 .app.panel-open .main { margin-right: var(--panel); }
 .section { margin-top: 38px; animation: rise .35s ease both; scroll-margin-top: calc(var(--top) + 14px); }
 #swap, #tokens { scroll-margin-top: calc(var(--top) + 14px); }
-.sec-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.sec-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+.sec-head > div:first-child { min-width: 0; }
 .sec-head h2 { margin: 0; font-family: var(--display); font-size: 22px; font-weight: 700; letter-spacing: -.01em; }
 .sec-head .sub { color: var(--muted); font-size: 13px; margin-top: 3px; }
-.sec-head .right { display: flex; align-items: center; gap: 8px; }
+.sec-head .right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .sec-head .viewall { color: var(--ink-2); font-weight: 600; font-size: 13px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); }
 .sec-head .viewall:hover { background: rgba(255,255,255,.06); }
 .arrows { display: flex; gap: 4px; }
@@ -421,7 +423,8 @@ img { display: block; }
 .pnft .m .n { font-weight: 700; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pnft .m .c { font-size: 11px; color: var(--muted); }
 .pempty { text-align: center; color: var(--muted); padding: 40px 16px; font-size: 13px; }
-.pempty .big { font-size: 34px; margin-bottom: 8px; }
+.pempty .big { font-size: 34px; margin-bottom: 8px; color: var(--muted-2); }
+.pempty .big svg { width: 40px; height: 40px; }
 .panel .pf { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; padding: 12px; border-top: 1px solid var(--line); }
 .panel .pf .btn { height: 40px; }
 .pact { display: flex; gap: 10px; align-items: flex-start; padding: 10px 8px; border-bottom: 1px solid var(--line); font-size: 12.5px; }
@@ -500,7 +503,11 @@ footer.foot a:hover { color: #fff; }
   #walletBtn { padding: 0 12px; }
   #walletBtn span { display: none; }
   .search { max-width: none; }
-  .search input { height: 40px; padding-left: 38px; }
+  .search input { height: 40px; padding-left: 38px; padding-right: 10px; }
+  .sec-head h2 { font-size: 19px; }
+  .sec-head .sub { font-size: 12px; }
+  .topbar .actions { flex: 0 0 auto; }
+  #walletBtn { width: 40px; padding: 0; }
   .hero { height: 420px; }
   .hero h1 { font-size: 30px; }
   .hero .thumbs { display: none; }

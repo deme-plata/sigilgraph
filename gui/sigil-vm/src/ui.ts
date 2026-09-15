@@ -349,12 +349,12 @@ export function panelHead(addr: string | null, s: Snapshot, balances: Record<str
 }
 
 export function panelTokens(addr: string | null, s: Snapshot, balances: Record<string, number>): string {
-  if (!addr) return `<div class="pempty"><div class="big">👛</div>Connect a wallet to see your tokens.<br><br><a class="btn primary" href="/enter-sigil.html" target="_blank" rel="noopener">Open the gate</a></div>`
+  if (!addr) return `<div class="pempty"><div class="big">${I.wallet}</div>Connect a wallet to see your tokens.<br><br><a class="btn primary" href="/enter-sigil.html" target="_blank" rel="noopener">Open the gate</a></div>`
   return s.tokens.map((t) => `<div class="prow"><img src="${t.icon}" alt=""><div class="l"><div class="s">${esc(t.symbol)}</div><div class="n">${esc(t.name)}</div></div><div class="r">${balances[t.id] === undefined ? '<span class="muted">—</span>' : fmt.num(balances[t.id], 4)}<div class="u">${t.status === 'live' ? 'on chain' : t.status}</div></div></div>`).join('')
 }
 
 export function panelNfts(addr: string | null, s: Snapshot): string {
-  if (!addr) return `<div class="pempty"><div class="big">🖼️</div>Your on-chain records — honours, seats, rigs, attestations — appear here once a wallet is connected.</div>`
+  if (!addr) return `<div class="pempty"><div class="big">${I.grid}</div>Your on-chain records — honours, seats, rigs, attestations — appear here once a wallet is connected.</div>`
   const mine: { name: string; coll: string; cover: string }[] = []
   const a = addr.toLowerCase()
   for (const e of s.docket?.entries ?? []) {
@@ -365,7 +365,7 @@ export function panelNfts(addr: string | null, s: Snapshot): string {
   for (const m of s.miners?.miners ?? []) if (m.wallet.toLowerCase() === a) mine.push({ name: m.rig || 'rig', coll: "Miners' Rigs", cover: s.collections.find((c) => c.id === 'rigs')!.cover })
   const ew = s.earth?.attest_last?.anchor?.wallet || ''
   if (ew.includes(a)) mine.push({ name: 'K⊕ attester', coll: 'Kristensen Earth', cover: s.collections.find((c) => c.id === 'earth')!.cover })
-  if (!mine.length) return `<div class="pempty"><div class="big">🔮</div>No on-chain records for ${fmt.short(addr, 6)} yet.<br><span class="muted">Mine a block, earn an honour, or anchor an attestation.</span></div>`
+  if (!mine.length) return `<div class="pempty"><div class="big">${I.eye}</div>No on-chain records for ${fmt.short(addr, 6)} yet.<br><span class="muted">Mine a block, earn an honour, or anchor an attestation.</span></div>`
   return `<div class="pgrid">${mine.map((n) => `<div class="pnft"><div class="img" style="background-image:url('${n.cover}')"></div><div class="m"><div class="n">${esc(n.name)}</div><div class="c">${esc(n.coll)}</div></div></div>`).join('')}</div>`
 }
 

@@ -285,6 +285,12 @@ setInterval(() => {
   })
 }, 1000)
 
+// the wallet download button follows the signed manifest (version + exact file), never a guessed filename
+fetch('/downloads/sigil-wallet-latest.json', { headers: { accept: 'application/json' } }).then((r) => (r.headers.get('content-type') || '').includes('json') ? r.json() : null).then((m: { version?: string; url?: string } | null) => {
+  const a = document.getElementById('walletApk') as HTMLAnchorElement | null
+  if (a && m?.url) { a.href = m.url; a.textContent = `Get the wallet · v${m.version ?? ''}` }
+}).catch(() => { /* keep the stable link */ })
+
 // ── boot ──────────────────────────────────────────────────────────────────
 try { const w = localStorage.getItem('sigilvm-wallet'); if (w) wallet = w } catch { /* */ }
 try { const qw = new URLSearchParams(location.search).get('wallet'); if (qw && /^[0-9a-f]{64}$/i.test(qw)) { wallet = qw.toLowerCase(); app.classList.add('panel-open') } } catch { /* */ }

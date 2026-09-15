@@ -110,7 +110,7 @@ export function shell(): string {
       <div class="foot-top">
         <div class="foot-brand"><div class="brand"><span class="cube">🔮</span><span>SIGIL <span class="vm">VM</span></span></div>
           <p>The marketplace for everything the SIGIL chain can prove. Every figure on this page is read from the node and labelled live, derived or pretend — nothing is a price until an oracle says so.</p>
-          <div class="foot-cta"><a class="btn primary" href="/downloads/sigil-wallet-latest.apk">Get the wallet</a><a class="btn ghost" href="/downloads/sigil-top-latest.json" target="_blank" rel="noopener">sigil-top releases</a></div></div>
+          <div class="foot-cta"><a class="btn primary" id="walletApk" href="/downloads/sigil-wallet-native-latest.apk">Get the wallet</a><a class="btn ghost" href="/downloads/sigil-top-latest.json" target="_blank" rel="noopener">sigil-top releases</a></div></div>
         <div class="foot-cols">
           <div><h5>Market</h5><a href="#featured">Collections</a><a href="#drops">Drops</a><a href="#trending">Trending</a><a href="#swap">Swap</a><a href="/sigil-dex.html" target="_blank" rel="noopener">Trading desk</a></div>
           <div><h5>Chain</h5><a href="/sigil-explorer.html" target="_blank" rel="noopener">Explorer</a><a href="/api.html" target="_blank" rel="noopener">API</a><a href="/datacenter.html" target="_blank" rel="noopener">Datacenter</a><a href="/kristensen-board.html" target="_blank" rel="noopener">K board</a><a href="/kristensen-time.html" target="_blank" rel="noopener">Kristensen Time</a></div>

@@ -205,11 +205,10 @@ export function forYou(s: Snapshot): string {
 // ── cards ─────────────────────────────────────────────────────────────────
 export function collectionCard(c: Collection): string {
   return `<a class="card" href="${c.link}" target="_blank" rel="noopener" data-coll="${c.id}">
-    <div class="img" style="background-image:url('${c.cover}')"><span class="prov">${prov(c.provenance)}</span><span class="cta">View collection ↗</span></div>
+    <div class="img" style="background-image:url('${c.cover}')"><span class="prov">${prov(c.provenance)}</span><span class="cta"><span class="cta-blurb">${esc(c.blurb)}</span><span class="cta-btn">View collection ↗</span></span></div>
     <div class="meta">
       <div class="name">${esc(c.name)}${ver(c.verified)}</div>
       ${c.by ? `<div class="byline">${esc(c.by)}</div>` : ''}
-      <div class="blurb">${esc(c.blurb)}</div>
       <div class="kv"><div><div class="k">Floor</div><div class="v">${esc(c.floor)}</div></div><div style="text-align:right"><div class="k">Items</div><div class="v">${c.items === null ? '—' : fmt.int(c.items)}</div></div></div>
     </div></a>`
 }

@@ -1,0 +1,16 @@
+{
+  "name": "sigil-vm",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "SIGIL VM — the OpenSea-shaped marketplace + Quillon-shaped DEX for the SIGIL chain. Built with the Flux Vite engine, never npm.",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vite": "^7.3.3"
+  }
+}

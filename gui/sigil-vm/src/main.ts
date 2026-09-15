@@ -154,7 +154,7 @@ async function poll(): Promise<void> {
 document.addEventListener('click', (ev) => {
   const t = ev.target as HTMLElement
   if (t.id === 'modal') { closeModal(); return }
-  const btn = t.closest('button, a, tr, [data-hero]') as HTMLElement | null
+  const btn = t.closest('button, a, tr, [data-hero], [data-coll], [data-swap]') as HTMLElement | null
   if (!btn) return
   const ds = btn.dataset
   if (ds.hero !== undefined) { heroIdx = Number(ds.hero); renderHero(); return }
@@ -276,7 +276,7 @@ function globalSearch(q: string): void {
   if (!q || !snap) { box.classList.remove('open'); return }
   const rows: string[] = []
   const cs = snap.collections.filter((c) => c.name.toLowerCase().includes(q) || c.blurb.toLowerCase().includes(q)).slice(0, 4)
-  if (cs.length) rows.push('<div class="h">Collections</div>' + cs.map((c) => `<a class="r" href="${c.link}" target="_blank" rel="noopener"><img src="${c.cover}" alt=""><div><div class="n">${ui.esc(c.name)}</div><div class="s">${c.items === null ? '—' : fmt.int(c.items)} items</div></div></a>`).join(''))
+  if (cs.length) rows.push('<div class="h">Collections</div>' + cs.map((c) => `<div class="r" data-coll="${c.id}"><img src="${c.cover}" alt=""><div><div class="n">${ui.esc(c.name)}</div><div class="s">${c.items === null ? '—' : fmt.int(c.items)} items · open</div></div></div>`).join(''))
   const ts = snap.tokens.filter((t) => (t.symbol + t.name).toLowerCase().includes(q)).slice(0, 4)
   if (ts.length) rows.push('<div class="h">Tokens</div>' + ts.map((t) => `<div class="r" data-swap="${t.id}"><img src="${t.icon}" alt=""><div><div class="n">${t.symbol}</div><div class="s">${ui.esc(t.statusNote)}</div></div></div>`).join(''))
   const ms = (snap.miners?.miners ?? []).filter((m) => (m.rig + m.wallet).toLowerCase().includes(q)).slice(0, 4)

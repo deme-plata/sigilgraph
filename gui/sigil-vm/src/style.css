@@ -107,7 +107,7 @@ img { display: block; }
 .ibtn:hover { background: rgba(255,255,255,.08); }
 .ibtn svg { width: 19px; height: 19px; }
 .ibtn .badge { position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--pink); box-shadow: 0 0 8px var(--pink); }
-.chain-chip { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px; border-radius: 10px; background: rgba(255,255,255,.04); font-family: var(--mono); font-size: 12px; }
+.chain-chip { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px; border-radius: 10px; background: rgba(255,255,255,.04); font-family: var(--mono); font-size: 12px; white-space: nowrap; flex: 0 0 auto; }
 .chain-chip .d { width: 8px; height: 8px; border-radius: 50%; background: var(--bad); box-shadow: 0 0 8px currentColor; }
 .chain-chip .d.on { background: var(--ok); color: var(--ok); }
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 40px; padding: 0 16px; border-radius: 10px; font-weight: 700; font-size: 14px; transition: .15s; border: 1px solid transparent; white-space: nowrap; }
@@ -498,8 +498,12 @@ footer.foot a:hover { color: #fff; }
 .bottomnav a.on svg { color: var(--cyan); }
 
 /* ── responsive ─────────────────────────────────────────────────────── */
-@media (max-width: 1100px) {
+@media (max-width: 1320px) {
   .navlinks { display: none; }
+  .chain-chip .t { display: none; }
+  .brand small { display: none; }
+}
+@media (max-width: 1100px) {
   .app.panel-open .main { margin-right: 0; }
   .panel { width: min(var(--panel), 100vw); box-shadow: -20px 0 60px rgba(0,0,0,.6); }
 }

@@ -131,6 +131,8 @@ export interface Snapshot {
   hashHist: number[]
   changes: Record<string, Record<string, number | null>>
   sampleAgeMin: number
+  gaugeFresh: number | null
+  gaugeFeeds: number
 }
 
 // ── rate memory: block rate + per-miner deltas survive reloads ──────────────
@@ -212,7 +214,7 @@ export async function buildSnapshot(): Promise<Snapshot> {
   const oldest = Math.min(...Object.values(ser).flat().map((x) => x.t).concat([at]))
   const sampleAgeMin = Math.round((at - oldest) / 60e3)
   const featured = [...collections].sort((a, b) => (b.items ?? 0) - (a.items ?? 0)).slice(0, 6)
-  lastSnapshot = { at, head, collections, featured, drops, movers, sales, tokens, pools: pools ?? [], miners, docket, recent, earth, rocky, usds, offline, hashHist, changes, sampleAgeMin }
+  lastSnapshot = { at, head, collections, featured, drops, movers, sales, tokens, pools: pools ?? [], miners, docket, recent, earth, rocky, usds, offline, hashHist, changes, sampleAgeMin, gaugeFresh: gauge ? gauge.feeds.filter((f) => f.fresh).length : null, gaugeFeeds: gauge?.feeds.length ?? 0 }
   return lastSnapshot
 }
 

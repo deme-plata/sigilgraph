@@ -193,7 +193,14 @@ export function forYou(s: Snapshot): string {
   const rockyDrop = s.drops.find((d) => d.id === 'rocky')
   const tag = (t: string, cls = '') => `<span class="chip ${cls}">${t}</span>`
   const next: string[] = []
-  if (rockyDrop) next.push(`<li>${tag(rockyDrop.provenance === 'live' ? 'MEASURED' : 'DESIGN', rockyDrop.provenance === 'live' ? 'live' : 'gold')} <b>ROCKY + GaugePush activate</b> — ${esc(rockyDrop.when)}. Cover policies against K⊕ excursions become buyable.</li>`)
+  if (rockyDrop) {
+    const r = s.rocky
+    const txt = r?.live
+      ? (r.bootstrapped ? `activated at block ${esc(rockyDrop.when.replace(/^live at block /, ''))} and bootstrapped — cover policies against K⊕ excursions are buyable.` : `${esc(rockyDrop.when)} — the gate passed; the owner's bootstrap (delegate + bootstrap) has not run yet, so supply is 0 and no policy can be written.`)
+      : `${esc(rockyDrop.when)}. Cover policies against K⊕ excursions become buyable.`
+    next.push(`<li>${tag(rockyDrop.provenance === 'live' ? 'MEASURED' : 'DESIGN', rockyDrop.provenance === 'live' ? 'live' : 'gold')} <b>ROCKY + GaugePush</b> — ${txt}</li>`)
+    if (s.gaugeFresh !== null) next.push(`<li>${tag('MEASURED', 'live')} <b>K⊕ gauge feeds</b> — ${s.gaugeFresh} of ${s.gaugeFeeds} feeds fresh on chain${s.gaugeFresh === 0 ? '; the feeder wallet has not pushed yet' : ''}.</li>`)
+  }
   next.push(`<li>${tag('DESIGN', 'gold')} <b>USDS oracle feed</b> — ${s.usds?.price_fresh ? 'fed and fresh' : 'not fed yet'}; until a feeder pushes a price, USDS mints cannot be quoted in dollars.</li>`)
   next.push(`<li>${tag('MEASURED', 'live')} <b>First DEX pool</b> — <span class="mono">/v1/pools</span> holds ${s.pools.length} pool${s.pools.length === 1 ? '' : 's'}; the swap module below quotes the instant liquidity exists.</li>`)
   next.push(`<li>${tag('DESIGN', 'gold')} <b>SIGIL Coins</b> — first NFC tag written and claimed back on one phone, then a 100-coin batch anchored.</li>`)

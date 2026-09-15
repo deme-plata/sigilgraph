@@ -230,7 +230,7 @@ export function dropCard(d: Drop): string {
     <div class="img" style="background-image:url('${d.cover}')"><span class="prov">${prov(d.provenance)}</span><span class="status ${st[d.status]}"><i class="d"></i>${lbl[d.status]}</span><span class="cta"><span class="cta-blurb">${esc(d.detail)}</span><span class="cta-btn">Open drop ↗</span></span></div>
     <div class="meta">
       <div class="name">${esc(d.name)}</div>
-      <div class="when">${esc(d.when)}</div>
+      <div class="when"${d.countdown ? ` data-cd-target="${d.countdown.target}" data-cd-height="${d.countdown.height}" data-cd-rate="${d.countdown.blkPerSec ?? ''}" data-cd-at="${d.countdown.at}"` : ''}>${esc(d.when)}</div>
       ${d.progress !== null ? `<div class="bar"><i style="width:${(d.progress * 100).toFixed(2)}%"></i></div>` : ''}
     </div></a>`
 }

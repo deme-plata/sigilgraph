@@ -42,6 +42,7 @@ export interface Drop {
   provenance: Provenance
   link: string
   progress: number | null // 0..1 for countdowns
+  countdown?: { target: number; height: number; blkPerSec: number | null; at: number }
 }
 
 export interface Mover {
@@ -393,6 +394,7 @@ function buildDrops(usds: Usds | null, rocky: Rocky | null, gauge: Gauge | null,
     detail: 'GaugePush + ROCKY activate together at GAUGE_LIVE_HEIGHT. Countdown is measured from the live height and block rate.',
     provenance: gauge ? 'live' : 'pretend', link: '/kristensen-board.html',
     progress: rockyLive && height ? Math.min(1, height / rockyLive) : null,
+    countdown: rockyLive && height && !rocky?.live ? { target: rockyLive, height, blkPerSec, at: Date.now() } : undefined,
   })
   d.push({
     id: 'usds', name: 'USDS · SIGIL Dollar', glyph: 'token', cover: coverSvg('USDS drop', 'token', { symbol: 'USDS' }),

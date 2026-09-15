@@ -272,6 +272,19 @@ function globalSearch(q: string): void {
 $('#hero').addEventListener('mouseenter', () => { heroHover = true })
 $('#hero').addEventListener('mouseleave', () => { heroHover = false })
 
+// live countdowns: between polls, advance the estimated height with the measured block rate
+setInterval(() => {
+  document.querySelectorAll<HTMLElement>('[data-cd-target]').forEach((el) => {
+    const target = Number(el.dataset.cdTarget), h0 = Number(el.dataset.cdHeight), rate = Number(el.dataset.cdRate), at = Number(el.dataset.cdAt)
+    if (!(rate > 0)) return
+    const est = h0 + ((Date.now() - at) / 1000) * rate
+    const left = Math.max(0, target - est)
+    const secs = left / rate
+    const eta = secs < 60 ? `${Math.round(secs)} s` : secs < 3600 ? `${Math.floor(secs / 60)} min ${Math.round(secs % 60)} s` : secs < 86400 ? `${Math.floor(secs / 3600)} h ${Math.round((secs % 3600) / 60)} min` : `${(secs / 86400).toFixed(1)} d`
+    el.textContent = `in ${eta} · ${fmt.int(Math.round(left))} blocks to ${fmt.int(target)} · ${rate.toFixed(1)} blk/s`
+  })
+}, 1000)
+
 // ── boot ──────────────────────────────────────────────────────────────────
 try { const w = localStorage.getItem('sigilvm-wallet'); if (w) wallet = w } catch { /* */ }
 try { const qw = new URLSearchParams(location.search).get('wallet'); if (qw && /^[0-9a-f]{64}$/i.test(qw)) { wallet = qw.toLowerCase(); app.classList.add('panel-open') } } catch { /* */ }

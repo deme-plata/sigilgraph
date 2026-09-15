@@ -17,6 +17,8 @@ pub struct Opts {
     pub dry_run: bool,
     pub dispatch: crate::alert::Dispatch,
     pub inject_k: Option<f64>,
+    /// Test the biosphere alert rule with a planted K_bio (dry runs).
+    pub inject_k_bio: Option<f64>,
 }
 
 fn r7(v: f64) -> Value {
@@ -214,7 +216,7 @@ pub fn run(o: &Opts) -> Result<Value> {
     // ── 4b · the biosphere channel: Mauna Loa CO₂ → K_bio + breathing + the Lloyd ladder ──────
     // Tolerant on purpose: a NOAA outage must never stop the rotation gauge. With no live
     // copy and no cache the channel publishes as null with the reason.
-    let (bio_latest, bio_series) = match fetch_cached(crate::bio::SRC_CO2_DAILY, &o.cache_dir.join("co2_daily_mlo.txt"), 10_000) {
+    let (mut bio_latest, bio_series) = match fetch_cached(crate::bio::SRC_CO2_DAILY, &o.cache_dir.join("co2_daily_mlo.txt"), 10_000) {
         Ok(f) => {
             let rows = crate::bio::parse_daily(&f.text);
             note(&mut sources, "co2_daily_mlo.txt", &f.source, rows.len());
@@ -284,9 +286,23 @@ pub fn run(o: &Opts) -> Result<Value> {
     let fc_head: Vec<Value> = forecast.days.iter().take(3).map(|d| json!({"h": d.h, "date": d.date, "k_resid_fcst": d.k_resid_fcst, "k_lo": d.k_lo, "k_hi": d.k_hi, "k_resid_fcst_gfz": d.k_resid_fcst_gfz, "regime_fcst": d.regime_fcst})).collect();
     let chain_path = crate::attest::chain_path(&o.out_dir);
     let existing_alerts = crate::alert::read_rows(&o.out_dir.join("alerts.jsonl"));
-    let state_path = o.state_dir.join("alerts-state.json");
+    let state_path = crate::alert::state_path(&o.state_dir, crate::alert::Channel::Earth);
     let st = crate::alert::load_state(&state_path);
-    let (alert_rows, next_state) = crate::alert::evaluate(k_today, &tr.date, ladder_res.p99, ladder_res.p90, &st, &existing_alerts, o.inject_k.is_some());
+    let (mut alert_rows, next_state) = crate::alert::evaluate(k_today, &tr.date, ladder_res.p99, ladder_res.p90, &st, &existing_alerts, o.inject_k.is_some());
+    // the biosphere channel runs the same rule with its own hysteresis state; a planted K_bio
+    // (dry run) exercises the rule without touching the reading itself
+    let bio_state_path = crate::alert::state_path(&o.state_dir, crate::alert::Channel::Bio);
+    let bio_next_state = match (latest_bio_f64(&bio_latest, "/today/k_bio").or(o.inject_k_bio), latest_bio_f64(&bio_latest, "/ladder/p99"), latest_bio_f64(&bio_latest, "/ladder/p90"), bio_latest.pointer("/today/date").and_then(|v| v.as_str())) {
+        (Some(k_real), Some(p99), Some(p90), Some(date)) => {
+            let k = o.inject_k_bio.unwrap_or(k_real);
+            let bst = crate::alert::load_state(&bio_state_path);
+            let (rows, next) = crate::alert::evaluate_channel(crate::alert::Channel::Bio, k, date, p99, p90, &bst, &existing_alerts, o.inject_k_bio.is_some());
+            alert_rows.extend(rows);
+            Some(next)
+        }
+        _ => None,
+    };
+    if let Some(b) = bio_latest.get_mut("today") { b["injected"] = json!(o.inject_k_bio.is_some()); b["alert_armed"] = json!(bio_next_state.as_ref().map(|s| s.armed)); }
     let open_alerts: Vec<Value> = existing_alerts.iter().rev().take(5).map(|r| serde_json::to_value(r).unwrap()).collect();
 
     let latest = json!({
@@ -388,6 +404,9 @@ pub fn run(o: &Opts) -> Result<Value> {
         dispatched.push(crate::alert::dispatch(row, o.dispatch));
     }
     crate::alert::save_state(&state_path, &next_state)?;
+    if let Some(b) = &bio_next_state {
+        crate::alert::save_state(&bio_state_path, b)?;
+    }
     out["alerts_dispatch"] = json!(dispatched);
     let key = crate::attest::load_or_create_key(&o.attest_key)?;
     let att = crate::attest::sign_row(&chain_path, &key, &tr.date, &latest_bytes)?;

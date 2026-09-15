@@ -18,9 +18,9 @@ fn opt(args: &[String], name: &str) -> Option<String> {
 fn usage() -> ! {
     eprintln!(
         "sigil-earth {}\n\
-         usage:\n  sigil-earth fetch   [--out DIR] [--cache DIR] [--state DIR] [--attest-key FILE] [--dry-run] [--inject-k X] [--webhook] [--buzz]\n  \
+         usage:\n  sigil-earth fetch   [--out DIR] [--cache DIR] [--state DIR] [--attest-key FILE] [--dry-run] [--inject-k X] [--inject-k-bio X] [--webhook] [--buzz]\n  \
          sigil-earth serve   [--bind HOST:PORT] [--data DIR]\n  \
-         sigil-earth alert   --inject-k X [--out DIR] [--dry-run] [--webhook] [--buzz]\n  \
+         sigil-earth alert   --inject-k X | --inject-k-bio X [--out DIR] [--dry-run] [--webhook] [--buzz]\n  \
          sigil-earth verify  [--out DIR] | verify --remote https://sigilgraph.org [--viewing-key HEX]\n  \
          sigil-earth attest  --seed-file FILE [--out DIR] [--fluxc PATH] [--amount N] [--dry-run]\n  \
          sigil-earth buzz    --text \"...\" [--channel sigil]\n  \
@@ -37,8 +37,9 @@ fn main() -> Result<()> {
     match cmd {
         "fetch" | "alert" => {
             let inject_k = opt(&args, "--inject-k").map(|s| s.parse::<f64>()).transpose().map_err(|e| anyhow!("--inject-k: {e}"))?;
-            if cmd == "alert" && inject_k.is_none() {
-                return Err(anyhow!("alert needs --inject-k X"));
+            let inject_k_bio = opt(&args, "--inject-k-bio").map(|s| s.parse::<f64>()).transpose().map_err(|e| anyhow!("--inject-k-bio: {e}"))?;
+            if cmd == "alert" && inject_k.is_none() && inject_k_bio.is_none() {
+                return Err(anyhow!("alert needs --inject-k X and/or --inject-k-bio X"));
             }
             let o = sigil_earth::out::Opts {
                 out_dir,
@@ -48,6 +49,7 @@ fn main() -> Result<()> {
                 dry_run: flag(&args, "--dry-run"),
                 dispatch: sigil_earth::alert::Dispatch { webhook: flag(&args, "--webhook"), buzz: flag(&args, "--buzz") },
                 inject_k,
+                inject_k_bio,
             };
             let summary = sigil_earth::out::run(&o)?;
             println!("{}", serde_json::to_string(&summary)?);

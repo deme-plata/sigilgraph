@@ -25,6 +25,11 @@ let collapsed = false
 let cat = 'all'
 
 try { wallet = localStorage.getItem('sigil-wallet-address') } catch { /* blocked */ }
+// theme: saved choice, else the OS preference; the toggle flips and persists
+function applyTheme(t: 'dark' | 'light'): void { document.documentElement.setAttribute('data-theme', t); const b = document.getElementById('themeBtn'); if (b) b.innerHTML = t === 'dark' ? I.sun : I.moon }
+let theme: 'dark' | 'light' = 'dark'
+try { const saved = localStorage.getItem('sigilvm-theme'); theme = saved === 'light' || saved === 'dark' ? saved : (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark') } catch { /* */ }
+applyTheme(theme)
 try { if (localStorage.getItem('sigilvm-panel') === 'open') app.classList.add('panel-open') } catch { /* */ }
 if (innerWidth >= 1600 && !app.classList.contains('panel-open')) app.classList.add('panel-open')
 
@@ -155,6 +160,7 @@ document.addEventListener('click', (ev) => {
   if (ds.hero !== undefined) { heroIdx = Number(ds.hero); renderHero(); return }
   if (btn.id === 'chainChip') { $('#chainMenu').classList.toggle('open'); return }
   if (btn.id === 'retryNow') { poll(); return }
+  if (btn.id === 'themeBtn') { theme = theme === 'dark' ? 'light' : 'dark'; applyTheme(theme); try { localStorage.setItem('sigilvm-theme', theme) } catch { /* */ } return }
   if (btn.id === 'panelBtn') { app.classList.toggle('panel-open'); try { localStorage.setItem('sigilvm-panel', app.classList.contains('panel-open') ? 'open' : 'closed') } catch { /* */ } return }
   if (btn.id === 'bnWallet') { ev.preventDefault(); app.classList.toggle('panel-open'); renderPanel(); return }
   if (btn.id === 'walletBtn') { if (wallet) { app.classList.add('panel-open'); return } openWalletModal(); return }

@@ -46,6 +46,7 @@ export function shell(): string {
           <a class="cm" href="https://polygonscan.com/token/0x3FCED760" target="_blank" rel="noopener"><i class="d" style="background:#8247e5;color:#8247e5"></i><div><b>Polygon</b><small>wSIGIL3 · Uniswap pool</small></div><span class="chip derived">external</span></a>
           <div class="cm dis"><i class="d" style="background:#555"></i><div><b>Soneium</b><small>wSIGIL leg · not deployed</small></div><span class="chip bad">blocked</span></div>
         </div></div>
+      <button class="ibtn" id="themeBtn" title="Theme" aria-label="Toggle light / dark">${I.sun}</button>
       <button class="ibtn" id="bellBtn" title="Activity" aria-label="Activity">${I.bell}<i class="badge" id="bellBadge" hidden></i></button>
       <button class="ibtn" id="cartBtn" title="Cart (coming with listings)" aria-label="Cart">${I.cart}</button>
       <button class="btn primary" id="walletBtn">${I.wallet}<span id="walletLbl">Connect wallet</span></button>

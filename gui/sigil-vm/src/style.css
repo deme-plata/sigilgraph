@@ -32,7 +32,7 @@
   --sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   --display: "Sora", "Inter", system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
-  --rail: 72px;
+  --rail: 64px;
   --top: 72px;
   --panel: 380px;
   --radius: 12px;
@@ -184,10 +184,10 @@ img { display: block; }
 
 /* ── left rail ──────────────────────────────────────────────────────── */
 .rail { position: fixed; top: var(--top); bottom: 0; left: 0; width: var(--rail); z-index: 40; border-right: 1px solid var(--line); background: var(--bg); display: flex; flex-direction: column; align-items: center; padding: 14px 0; gap: 6px; }
-.rail a { width: 48px; height: 48px; border-radius: 12px; display: grid; place-items: center; color: var(--muted); position: relative; }
+.rail a { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; color: var(--muted); position: relative; }
 .rail a svg { width: 22px; height: 22px; }
 .rail a:hover, .rail a.on { background: rgba(255,255,255,.06); color: #fff; }
-.rail a.on::before { content: ""; position: absolute; left: -12px; top: 12px; bottom: 12px; width: 3px; border-radius: 3px; background: var(--grad); }
+.rail a.on::before { content: ""; position: absolute; left: -10px; top: 12px; bottom: 12px; width: 3px; border-radius: 3px; background: var(--grad); }
 .rail a .tip { position: absolute; left: 58px; top: 50%; transform: translateY(-50%); background: var(--surface-3); color: #fff; font-size: 12px; padding: 5px 9px; border-radius: 7px; white-space: nowrap; opacity: 0; pointer-events: none; transition: .12s; border: 1px solid var(--line-2); }
 .rail a:hover .tip { opacity: 1; }
 .rail .sp { flex: 1; }

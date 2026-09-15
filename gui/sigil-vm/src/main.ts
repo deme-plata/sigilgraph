@@ -131,6 +131,7 @@ async function poll(): Promise<void> {
 // ── events (delegated) ────────────────────────────────────────────────────
 document.addEventListener('click', (ev) => {
   const t = ev.target as HTMLElement
+  if (t.id === 'modal') { closeModal(); return }
   const btn = t.closest('button, a, tr, [data-hero]') as HTMLElement | null
   if (!btn) return
   const ds = btn.dataset
@@ -146,7 +147,7 @@ document.addEventListener('click', (ev) => {
   if (btn.id === 'pSwap') { location.hash = '#swap'; $('#dex').scrollIntoView({ behavior: 'smooth' }); return }
   if (ds.mode && btn.closest('#trendMode')) { trendMode = ds.mode as typeof trendMode; document.querySelectorAll('#trendMode button').forEach((b) => b.classList.toggle('on', b === btn)); if (snap) $('#trendingTable').innerHTML = ui.trending(snap, trendMode, trendWin); return }
   if (ds.win) { trendWin = ds.win; document.querySelectorAll('#trendWin button').forEach((b) => b.classList.toggle('on', b === btn)); if (snap) $('#trendingTable').innerHTML = ui.trending(snap, trendMode, trendWin); return }
-  if (btn.tagName === 'TR' && ds.link) { window.open(ds.link, '_blank', 'noopener'); return }
+  if (ds.coll && !ev.ctrlKey && !ev.metaKey && !(ev as MouseEvent).button) { ev.preventDefault(); openCollection(ds.coll); return }
   const arrows = btn.closest('.arrows') as HTMLElement | null
   if (arrows && btn.tagName === 'BUTTON') { const row = $('#' + arrows.dataset.scroll); const dir = Array.from(arrows.children).indexOf(btn) === 0 ? -1 : 1; row.scrollBy({ left: dir * (row.clientWidth * 0.8), behavior: 'smooth' }); return }
   // swap module
@@ -166,7 +167,7 @@ document.addEventListener('click', (ev) => {
   if (ds.info) { openTokenInfo(ds.info); return }
   const th = btn.closest('th[data-sort]') as HTMLElement | null
   if (th) { const k = th.dataset.sort as ui.TokenTableState['sort']; if (tokSt.sort === k) tokSt.dir = tokSt.dir === 'asc' ? 'desc' : 'asc'; else { tokSt.sort = k; tokSt.dir = 'desc' } renderTokens(); return }
-  if (btn.id === 'modalClose' || btn.closest('#modal') === btn) { closeModal(); return }
+  if (btn.id === 'modalClose' || btn.id === 'modalClose2' || btn.closest('#modal') === btn) { closeModal(); return }
   if (ds.pick && ds.which) { if (ds.which === 'from') { if (swapSt.to === ds.pick) swapSt.to = swapSt.from; swapSt.from = ds.pick } else { if (swapSt.from === ds.pick) swapSt.from = swapSt.to; swapSt.to = ds.pick } closeModal(); renderSwap(); return }
   if (ds.slip) { swapSt.slippage = Number(ds.slip); closeModal(); renderSwap(); return }
   if (btn.id === 'walletUse') { const v = ($('#walletIn') as HTMLInputElement).value.trim().toLowerCase(); if (!/^[0-9a-f]{64}$/.test(v)) { toast('A SIGIL wallet id is 64 hex characters.', 'warn'); return } wallet = v; try { localStorage.setItem('sigilvm-wallet', v) } catch { /* */ } closeModal(); app.classList.add('panel-open'); poll(); return }
@@ -188,8 +189,9 @@ document.addEventListener('keydown', (ev) => {
 document.addEventListener('click', (ev) => { const t = ev.target as HTMLElement; if (!t.closest('.search')) $('#qres').classList.remove('open'); if (!t.closest('.chain-wrap')) $('#chainMenu').classList.remove('open') })
 
 // ── modals ────────────────────────────────────────────────────────────────
-function openModal(html: string): void { $('#modalBox').innerHTML = `<button class="ibtn x" id="modalClose">${I.x}</button>` + html; $('#modal').classList.add('open') }
+function openModal(html: string, cls = ''): void { const box = $('#modalBox'); box.className = 'box ' + cls; box.innerHTML = (cls ? '' : `<button class="ibtn x" id="modalClose">${I.x}</button>`) + html; $('#modal').classList.add('open') }
 function closeModal(): void { $('#modal').classList.remove('open') }
+function openCollection(id: string): void { const c = snap?.collections.find((x) => x.id === id); if (c) openModal(ui.collectionModal(c, snap!), 'coll') }
 function openTokenPicker(which: 'from' | 'to'): void {
   if (!snap) return
   openModal(`<h4>Select a token</h4><div class="list">${snap.tokens.map((t) => `<button data-pick="${t.id}" data-which="${which}"><img src="${t.icon}" alt=""><div><div class="s">${t.symbol}</div><div class="n">${ui.esc(t.name)}</div></div><span class="r">${balances[t.id] === undefined ? '' : fmt.num(balances[t.id], 4)}</span></button>`).join('')}</div>`)

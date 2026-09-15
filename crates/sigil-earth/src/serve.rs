@@ -73,7 +73,7 @@ async fn index(State(st): State<Arc<App>>) -> Response {
             "ok": true, "service": crate::VERSION, "data_dir": st.dir.display().to_string(),
             "routes": ["/v1/earth/latest", "/v1/earth/series?days=433", "/v1/earth/forecast", "/v1/earth/excitation",
                        "/v1/earth/provenance", "/v1/earth/tips", "/v1/earth/alerts?last=20", "/v1/earth/attest?last=20", "/v1/earth/health",
-                       "/v1/earth/stream (text/event-stream: reading | alert | attest)"],
+                       "/v1/earth/stream (text/event-stream: reading | alert | attest)", "/v1/earth/badge.svg (live SVG badge: K⊕ · regime · date)"],
             "pages": ["https://sigilgraph.org/datacenter.html", "https://sigilgraph.org/kristensen-earth.html", "https://sigilgraph.org/kristensen-board.html"]
         }),
     )
@@ -156,6 +156,44 @@ async fn stream(State(st): State<Arc<App>>) -> Sse<impl futures_util::Stream<Ite
     Sse::new(head.chain(live)).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keep-alive"))
 }
 
+/// A live SVG badge of today's K⊕ — embeddable anywhere (README, board, a post). Colour = regime,
+/// text = "K⊕ 2.81σ · elevated · 2026-09-13". Built from latest.json on every request; the browser
+/// may cache it for ten minutes (the feed itself refreshes four times a day).
+async fn badge(State(st): State<Arc<App>>) -> Response {
+    let text = std::fs::read_to_string(st.dir.join("latest.json")).unwrap_or_default();
+    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let k = v["today"]["k_resid"].as_f64();
+    let regime = v["today"]["regime"].as_str().unwrap_or("offline");
+    let date = v["today"]["date"].as_str().unwrap_or("—");
+    let ladder = &v["ladder"]["k_resid"];
+    let (p90, p99) = (ladder["p90"].as_f64(), ladder["p99"].as_f64());
+    (StatusCode::OK, [(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"), (header::CACHE_CONTROL, "public, max-age=600")],
+     badge_svg(k, regime, date, p90, p99)).into_response()
+}
+
+/// Pure function so it can be tested without a server: the badge geometry is a shields.io-style pill.
+pub fn badge_svg(k: Option<f64>, regime: &str, date: &str, p90: Option<f64>, p99: Option<f64>) -> String {
+    let colour = match regime { "stable" => "#2ea44f", "elevated" => "#e0a030", "critical" => "#d0342c", _ => "#6b6b7b" };
+    let value = match k { Some(k) => format!("{k:.2}σ · {regime} · {date}"), None => "offline".to_string() };
+    let ladder = match (p90, p99) { (Some(a), Some(b)) => format!("p90 {a:.2} · p99 {b:.2}"), _ => String::new() };
+    let label = "K⊕ Earth";
+    let (lw, vw) = (7.2 * label.chars().count() as f64 + 14.0, 7.2 * value.chars().count() as f64 + 14.0);
+    let w = lw + vw;
+    format!(concat!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:.0}\" height=\"20\" role=\"img\" aria-label=\"{label}: {value}\">",
+        "<title>{label}: {value}{ladder_t}</title>",
+        "<linearGradient id=\"s\" x2=\"0\" y2=\"100%\"><stop offset=\"0\" stop-color=\"#bbb\" stop-opacity=\".1\"/><stop offset=\"1\" stop-opacity=\".1\"/></linearGradient>",
+        "<clipPath id=\"r\"><rect width=\"{w:.0}\" height=\"20\" rx=\"3\" fill=\"#fff\"/></clipPath>",
+        "<g clip-path=\"url(#r)\"><rect width=\"{lw:.0}\" height=\"20\" fill=\"#555\"/><rect x=\"{lw:.0}\" width=\"{vw:.0}\" height=\"20\" fill=\"{colour}\"/><rect width=\"{w:.0}\" height=\"20\" fill=\"url(#s)\"/></g>",
+        "<g fill=\"#fff\" text-anchor=\"middle\" font-family=\"Verdana,Geneva,DejaVu Sans,sans-serif\" font-size=\"11\">",
+        "<text x=\"{lx:.1}\" y=\"15\" fill=\"#010101\" fill-opacity=\".3\">{label}</text><text x=\"{lx:.1}\" y=\"14\">{label}</text>",
+        "<text x=\"{vx:.1}\" y=\"15\" fill=\"#010101\" fill-opacity=\".3\">{value}</text><text x=\"{vx:.1}\" y=\"14\">{value}</text>",
+        "</g></svg>"),
+        w = w, lw = lw, vw = vw, colour = colour, label = label, value = value,
+        ladder_t = if ladder.is_empty() { String::new() } else { format!(" ({ladder})") },
+        lx = lw / 2.0, vx = lw + vw / 2.0)
+}
+
 async fn fallback() -> Response {
     json_value(StatusCode::NOT_FOUND, json!({"ok": false, "error": "no such earth route", "index": "/v1/earth"}))
 }
@@ -213,6 +251,7 @@ pub async fn run(bind: &str, dir: PathBuf) -> anyhow::Result<()> {
         .route("/v1/earth/attest", get(attest))
         .route("/v1/earth/health", get(health))
         .route("/v1/earth/stream", get(stream))
+        .route("/v1/earth/badge.svg", get(badge))
         .fallback(fallback)
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(app);
@@ -220,4 +259,20 @@ pub async fn run(bind: &str, dir: PathBuf) -> anyhow::Result<()> {
     eprintln!("sigil-earth serve: listening on {bind}");
     axum::serve(listener, router.into_make_service()).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod badge_tests {
+    #[test]
+    fn badge_reports_regime_colour_and_value_and_survives_missing_data() {
+        let s = super::badge_svg(Some(2.8089), "elevated", "2026-09-13", Some(2.45), Some(3.13));
+        assert!(s.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\""));
+        assert!(s.contains("2.81σ · elevated · 2026-09-13"));
+        assert!(s.contains("#e0a030")); // elevated = amber
+        assert!(s.contains("p90 2.45 · p99 3.13"));
+        let c = super::badge_svg(Some(3.5), "critical", "d", None, None);
+        assert!(c.contains("#d0342c") && !c.contains("p90"));
+        let o = super::badge_svg(None, "offline", "—", None, None);
+        assert!(o.contains(">offline<") && o.contains("#6b6b7b"));
+    }
 }

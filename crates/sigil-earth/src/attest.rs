@@ -193,6 +193,29 @@ pub fn verify_rows(chain: &[AttestRow], live_bytes: Option<&[u8]>) -> Verificati
     Verification { rows: chain.len(), attest_rows, anchor_rows, chain_intact: intact, sigs_ok: ok, sigs_bad: bad, live_match, last_digest, anchored }
 }
 
+/// The newest attestation for the live file with its anchor MERGED IN.
+///
+/// The chain stores the signature (`kind == "attest"`) and the on-chain anchor (`kind == "anchor"`)
+/// as two rows, because the anchor lands seconds later and can fail on its own. Reading only the
+/// attest row reports its pre-anchor stub (`executed: false, tx_hash: null`) forever — which is
+/// exactly what `/v1/earth/latest` told its readers about an attestation that WAS anchored
+/// (found 2026-09-15). An anchor row is only borrowed for the same `n`.
+pub fn latest_summary(chain: &[AttestRow]) -> Option<serde_json::Value> {
+    use serde_json::{json, Value};
+    let a = chain.iter().rev().find(|r| r.kind == "attest")?;
+    let anchor_row = chain.iter().rev().find(|r| r.kind == "anchor" && r.n == a.n);
+    let anchor = anchor_row.map(|r| r.anchor.clone()).unwrap_or_else(|| a.anchor.clone());
+    let tx = anchor.get("tx_hash").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+    let anchored = anchor.get("executed").and_then(Value::as_bool).unwrap_or(false) && tx.is_some();
+    Some(json!({
+        "n": a.n, "v": a.v, "date": a.date, "ts": a.ts, "blake3": a.blake3, "sha256": a.sha256,
+        "anchored": anchored,
+        "anchor_tx": if anchored { json!(tx) } else { Value::Null },
+        "anchor": anchor,
+        "note": "the row for the PREVIOUS publication: this file's own row is appended seconds after it is written — /v1/earth/attest has the newest",
+    }))
+}
+
 pub fn chain_path(out_dir: &Path) -> PathBuf {
     out_dir.join("attest.jsonl")
 }
@@ -224,5 +247,36 @@ mod tests {
         let v2 = verify(&chain, None);
         assert_eq!(v2.sigs_bad, vec![2]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn latest_summary_merges_the_anchor_row_for_the_same_n_only() {
+        use serde_json::{json, Value};
+        let mk = |kind: &str, n: u64, anchor: Value| AttestRow {
+            kind: kind.into(), v: 2, n, date: "2026-09-13".into(), ts: "t".into(), subject: String::new(),
+            blake3: format!("b{n}"), sha256: String::new(), prev: None, msg: String::new(), pubkey: String::new(),
+            sig: String::new(), anchor,
+        };
+        // the attest row carries the pre-anchor stub; the anchor row carries the truth
+        let chain = vec![mk("attest", 12, json!({"executed": false, "tx_hash": null})),
+                         mk("anchor", 12, json!({"executed": true, "tx_hash": "abc"}))];
+        let s = latest_summary(&chain).unwrap();
+        assert_eq!(s["n"], 12);
+        assert_eq!(s["anchored"], true);
+        assert_eq!(s["anchor_tx"], "abc");
+        assert_eq!(s["anchor"]["executed"], true);
+        // no anchor row yet: honest false, null tx
+        let s2 = latest_summary(&[mk("attest", 13, json!({"executed": false, "tx_hash": null}))]).unwrap();
+        assert_eq!(s2["anchored"], false);
+        assert!(s2["anchor_tx"].is_null());
+        // an anchor for an OLDER n must not be borrowed by a newer attest
+        let chain3 = vec![mk("attest", 12, json!({})), mk("anchor", 12, json!({"executed": true, "tx_hash": "abc"})),
+                          mk("attest", 13, json!({"executed": false}))];
+        let s3 = latest_summary(&chain3).unwrap();
+        assert_eq!(s3["n"], 13);
+        assert_eq!(s3["anchored"], false);
+        // executed without a tx hash is not an anchor either
+        let s4 = latest_summary(&[mk("attest", 1, json!({})), mk("anchor", 1, json!({"executed": true, "tx_hash": ""}))]).unwrap();
+        assert_eq!(s4["anchored"], false);
     }
 }

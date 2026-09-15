@@ -292,7 +292,7 @@ pub fn run(o: &Opts) -> Result<Value> {
             armed: next_state.armed,
         }),
         "alerts_recent": open_alerts,
-        "attest_last": crate::attest::read_chain(&chain_path).iter().rev().find(|r| r.kind == "attest").map(|r| json!({"n": r.n, "date": r.date, "blake3": r.blake3, "anchor": r.anchor})),
+        "attest_last": crate::attest::latest_summary(&crate::attest::read_chain(&chain_path)),
     });
     let series_json = json!({
         "meta": {"version": crate::VERSION, "fetched_at": fetched_at, "last_observed_mjd": mjd_now, "last_lod_mjd": today.r.mjd, "rows": series.len(),

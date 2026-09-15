@@ -449,7 +449,19 @@ export function collectionModal(c: Collection, s: Snapshot): string {
   return `<div class="cm-head" style="background-image:url('${c.cover}')"><button class="ibtn x" id="modalClose">${I.x}</button></div>
     <div class="cm-title"><img src="${c.cover}" alt=""><div><h3>${esc(c.name)}${ver(c.verified)}</h3><div class="by">${esc(c.by || '')} ${prov(c.provenance)}</div></div></div>
     <div class="cm-stats"><div class="cell"><div class="k">Floor</div><div class="v">${esc(c.floor)}</div></div><div class="cell"><div class="k">Items</div><div class="v">${c.items === null ? '—' : fmt.int(c.items)}</div></div><div class="cell"><div class="k">Owners</div><div class="v">${c.owners === null ? '—' : fmt.int(c.owners)}</div></div><div class="cell"><div class="k">Volume</div><div class="v">${esc(c.volume)}</div></div></div>
-    <div class="cm-body"><p class="blurb">${esc(c.blurb)}</p><div class="cm-items">${items.join('') || '<div class="pempty">Nothing to list.</div>'}</div></div>
+    <div class="cm-tabs"><button class="on" data-cmtab="items">Items <span class="n">${items.length}</span></button><button data-cmtab="activity">Activity</button><button data-cmtab="info">Info</button></div>
+    <div class="cm-body">
+      <div class="cm-pane" data-pane="items"><div class="cm-items">${items.join('') || '<div class="pempty">Nothing to list.</div>'}</div></div>
+      <div class="cm-pane" data-pane="activity" hidden>${collectionActivity(c, s)}</div>
+      <div class="cm-pane" data-pane="info" hidden><p class="blurb">${esc(c.blurb)}</p><div class="td-grid">
+        <div class="td-cell"><div class="k">Provenance</div><div class="v">${prov(c.provenance)} — ${c.provenance === 'live' ? 'read from sigil-api this poll' : c.provenance === 'derived' ? 'calculated over live numbers' : 'illustrative, no chain source yet'}</div></div>
+        <div class="td-cell"><div class="k">Category</div><div class="v">${esc(c.cat)}</div></div>
+        <div class="td-cell"><div class="k">By</div><div class="v">${esc(c.by || '—')}</div></div>
+        <div class="td-cell"><div class="k">Source page</div><div class="v"><a class="mono" href="${c.link}" target="_blank" rel="noopener">${esc(c.link)}</a></div></div>
+        <div class="td-cell"><div class="k">Window changes</div><div class="v mono">${['1h', '6h', '24h', '7d'].map((w) => `${w} ${fmt.pct(s.changes[c.id]?.[w] ?? null)}`).join(' · ')}</div></div>
+        <div class="td-cell"><div class="k">Last poll</div><div class="v mono">${new Date(s.at).toLocaleTimeString()} · height ${fmt.int(s.head.height)}</div></div>
+      </div></div>
+    </div>
     <div class="cm-foot"><a class="btn primary" href="${c.link}" target="_blank" rel="noopener">Open source page ↗</a><button class="btn ghost" id="modalClose2">Close</button></div>`
 }
 
@@ -465,6 +477,20 @@ export function ticker(s: Snapshot): string {
   if (!items.length) return ''
   const row = items.join('')
   return row + row // duplicated so the marquee loops seamlessly
+}
+
+function collectionActivity(c: Collection, s: Snapshot): string {
+  const rows: string[] = []
+  const row = (ic: string, cls: string, main: string, sub: string, t: string) => rows.push(`<div class="pact"><span class="ic ${cls}">${ic}</span><span class="w">${main}<small>${sub}</small></span><span class="t">${t}</span></div>`)
+  switch (c.id) {
+    case 'blocks': for (const b of (s.recent?.blocks ?? []).slice(0, 30)) row(I.grid, b.is_blue ? 'blue' : 'red', `Block ${fmt.int(b.height)}`, `${b.is_blue ? 'blue' : 'red'} · score ${fmt.int(b.blue_score)} · producer ${fmt.short(hex(b.producer), 6)}`, 'now'); break
+    case 'rigs': for (const m of (s.miners?.miners ?? [])) row(I.coins, '', esc(m.rig || fmt.short(m.wallet, 6)), `${fmt.hps(m.hash_rate)} · ${m.kind.toUpperCase()} · ${m.shielded ? 'shielded' : 'transparent'}`, fmt.ago(m.last_seen_secs_ago)); if (s.miners) row(I.swap, '', 'Blocks accepted', `${fmt.int(s.miners.blocks_accepted)} blocks · ${fmt.int(s.miners.shares_accepted)} shares`, 'session'); break
+    case 'honours': case 'bench': for (const e of (s.docket?.entries ?? []).slice().reverse()) row(I.book, 'gold', esc(e.kind.replace(/([A-Z])/g, ' $1').trim()), `docket #${e.seq} · leaf ${fmt.short(e.leaf, 6)}`, e.height ? `blk ${fmt.int(e.height)}` : 'genesis'); break
+    case 'notes': row(I.eye, '', 'Nullifiers', `${fmt.int(s.head.nullifiers)} notes spent, ever`, 'total'); row(I.eye, '', 'Notes in pool', `${fmt.int(s.head.notes)} of ${fmt.int(s.head.capacity)}`, 'now'); break
+    case 'earth': { const a = s.earth?.attest_last?.anchor; if (a?.tx_hash) row(I.eye, 'gold', 'Attestation anchored', `${a.amount ?? '—'} glyphs · tx ${fmt.short(a.tx_hash, 8)}`, a.ts ? new Date(a.ts).toLocaleString() : ''); break }
+    default: break
+  }
+  return rows.join('') || '<div class="pempty">No activity the node reports for this collection.</div>'
 }
 
 export function legend(s: Snapshot): string {

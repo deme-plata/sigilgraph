@@ -571,7 +571,12 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
 .cm-stats .cell { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
 .cm-stats .k { font-size: 10.5px; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
 .cm-stats .v { font-family: var(--mono); font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cm-tabs { display: flex; gap: 2px; padding: 14px 22px 0; border-bottom: 1px solid var(--line); margin-top: 6px; }
+.cm-tabs button { padding: 10px 12px; font-weight: 700; color: var(--muted); border-bottom: 2px solid transparent; font-size: 14px; }
+.cm-tabs button.on { color: var(--ink); border-bottom-color: var(--cyan); }
+.cm-tabs button .n { margin-left: 6px; font-family: var(--mono); font-size: 11px; color: var(--muted-2); }
 .cm-body { padding: 16px 22px 22px; overflow: auto; }
+.cm-pane .pact:last-child { border-bottom: 0; }
 .cm-body p.blurb { color: var(--ink-2); margin: 0 0 14px; font-size: 13.5px; }
 .cm-items { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
 .cm-item { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; min-width: 0; transition: .15s; }

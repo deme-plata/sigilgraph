@@ -138,6 +138,7 @@ export function hero(s: Snapshot, idx: number): string {
     <div class="body">
       <div class="eyebrow">${prov(c.provenance)}<span class="chip gold">featured collection</span>${h.ok ? '<span class="chip live"><i class="d"></i>sigil-g2 · block ' + fmt.int(h.height) + '</span>' : '<span class="chip bad">node unreachable</span>'}</div>
       <h1>${esc(c.name)}${ver(c.verified)}</h1>
+      ${c.by ? `<div class="by">${esc(c.by)}</div>` : ''}
       <p>${esc(c.blurb)}</p>
       <div class="stats">
         <div><div class="k">Floor</div><div class="v">${esc(c.floor)}</div></div>
@@ -195,6 +196,7 @@ export function collectionCard(c: Collection): string {
     <div class="img" style="background-image:url('${c.cover}')"><span class="prov">${prov(c.provenance)}</span><span class="cta">View collection ↗</span></div>
     <div class="meta">
       <div class="name">${esc(c.name)}${ver(c.verified)}</div>
+      ${c.by ? `<div class="byline">${esc(c.by)}</div>` : ''}
       <div class="blurb">${esc(c.blurb)}</div>
       <div class="kv"><div><div class="k">Floor</div><div class="v">${esc(c.floor)}</div></div><div style="text-align:right"><div class="k">Items</div><div class="v">${c.items === null ? '—' : fmt.int(c.items)}</div></div></div>
     </div></a>`

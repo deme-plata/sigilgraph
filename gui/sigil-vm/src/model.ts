@@ -27,6 +27,7 @@ export interface Collection {
   sales: number | null
   provenance: Provenance
   link: string
+  by?: string
 }
 
 export interface Drop {
@@ -252,7 +253,7 @@ function buildCollections(miners: Miners | null, anchor: Anchor | null, docket: 
   })()
 
   c.push({
-    id: 'rigs', name: "Miners' Rigs", glyph: 'rig', verified: true, cover: coverSvg("Miners' Rigs", 'rig'),
+    id: 'rigs', by: miners ? `by ${miners.live_miners} rigs` : undefined, name: "Miners' Rigs", glyph: 'rig', verified: true, cover: coverSvg("Miners' Rigs", 'rig'),
     blurb: 'Every rig submitting shares to the braid right now. Rank = hashrate share.',
     items: miners?.live_miners ?? null, owners: miners ? new Set(miners.miners.map((m) => m.wallet)).size : null,
     floor: miners ? fmt.hps(Math.min(...miners.miners.map((m) => m.hash_rate))) : '—', floorChange: null,
@@ -260,21 +261,21 @@ function buildCollections(miners: Miners | null, anchor: Anchor | null, docket: 
     provenance: miners ? 'live' : 'pretend', link: '/sigil-explorer.html',
   })
   c.push({
-    id: 'honours', name: 'Elefantordenen', glyph: 'seal', verified: true, cover: coverSvg('Elefantordenen', 'seal'),
+    id: 'honours', by: 'by the SIGIL Supreme Court', name: 'Elefantordenen', glyph: 'seal', verified: true, cover: coverSvg('Elefantordenen', 'seal'),
     blurb: 'Honours conferred by the SIGIL Supreme Court. Each is a leaf in a verified docket chain.',
     items: honours, owners: honours, floor: '1 honour', floorChange: null,
     volume: docket ? `${fmt.int(docket.total)} docket entries` : '—', volumeChange: null, sales: honours,
     provenance: docket ? 'live' : 'pretend', link: '/sigil-wallet-tron-embedded.html#court',
   })
   c.push({
-    id: 'bench', name: 'Justices of the Bench', glyph: 'shield', verified: true, cover: coverSvg('Justices of the Bench', 'shield'),
+    id: 'bench', by: 'by the constitution', name: 'Justices of the Bench', glyph: 'shield', verified: true, cover: coverSvg('Justices of the Bench', 'shield'),
     blurb: 'Appointed justices. The bench that hears cases, rules and seals precedents.',
     items: justices, owners: justices, floor: '1 seat', floorChange: null,
     volume: docket?.chain_verified ? 'chain verified ✓' : '—', volumeChange: null, sales: justices,
     provenance: docket ? 'live' : 'pretend', link: '/sigil-wallet-tron-embedded.html#court',
   })
   c.push({
-    id: 'blocks', name: 'DagKnight Blocks', glyph: 'block', verified: true, cover: coverSvg('DagKnight Blocks', 'block'),
+    id: 'blocks', by: recent ? `by ${new Set(recent.blocks.map((b) => hex(b.producer))).size} producer${new Set(recent.blocks.map((b) => hex(b.producer))).size === 1 ? '' : 's'}` : undefined, name: 'DagKnight Blocks', glyph: 'block', verified: true, cover: coverSvg('DagKnight Blocks', 'block'),
     blurb: 'The braid itself. Blue blocks ordered by blue score; every one names its producer.',
     items: miners?.height ?? null, owners: recent ? new Set(recent.blocks.map((b) => hex(b.producer))).size : null,
     floor: recent && recent.blocks.length ? `blue ${fmt.int(recent.blocks[0].blue_score)}` : '—', floorChange: null,
@@ -282,7 +283,7 @@ function buildCollections(miners: Miners | null, anchor: Anchor | null, docket: 
     provenance: recent ? 'live' : 'pretend', link: '/sigil-explorer.html',
   })
   c.push({
-    id: 'notes', name: 'Shielded Notes', glyph: 'eye', verified: true, cover: coverSvg('Shielded Notes', 'eye'),
+    id: 'notes', by: anchor ? `by ${fmt.int(anchor.registered)} registered wallets` : undefined, name: 'Shielded Notes', glyph: 'eye', verified: true, cover: coverSvg('Shielded Notes', 'eye'),
     blurb: 'Sealed 32-byte notes in the shielded pool. First tap wins; a spent note is worth zero everywhere.',
     items: anchor?.notes ?? null, owners: anchor?.registered ?? null,
     floor: anchor ? `${fmt.int(anchor.capacity - anchor.notes)} free` : '—', floorChange: null,
@@ -291,7 +292,7 @@ function buildCollections(miners: Miners | null, anchor: Anchor | null, docket: 
   })
   const attest = earth?.attest_last?.anchor
   c.push({
-    id: 'earth', name: 'Kristensen Earth K⊕', glyph: 'earth', verified: true, cover: coverSvg('Kristensen Earth', 'earth'),
+    id: 'earth', by: 'by sigil-earth · IERS + GFZ', name: 'Kristensen Earth K⊕', glyph: 'earth', verified: true, cover: coverSvg('Kristensen Earth', 'earth'),
     blurb: 'Earth-rotation attestations anchored on SIGIL from a wallet with a published viewing key.',
     items: earth ? (earth.row ?? (attest?.memo && /:(\d+):/.test(attest.memo) ? Number(RegExp.$1) : null)) : null, owners: 1,
     floor: attest?.amount ? `${attest.amount} glyphs` : '—', floorChange: null,
@@ -299,34 +300,34 @@ function buildCollections(miners: Miners | null, anchor: Anchor | null, docket: 
     provenance: earth ? 'live' : 'pretend', link: '/kristensen-earth.html',
   })
   c.push({
-    id: 'coins', name: 'SIGIL Coins (NFC)', glyph: 'coin', verified: false, cover: coverSvg('SIGIL Coins', 'coin', { symbol: 'NTAG215' }),
+    id: 'coins', by: 'by the living room', name: 'SIGIL Coins (NFC)', glyph: 'coin', verified: false, cover: coverSvg('SIGIL Coins', 'coin', { symbol: 'NTAG215' }),
     blurb: 'Physical coins: one shielded note on a 504-byte tag. No batch anchored yet — this collection is empty on chain.',
     items: 0, owners: 0, floor: '—', floorChange: null, volume: '0 batches anchored', volumeChange: null, sales: 0,
     provenance: 'live', link: '/sigil-wallet-tron-embedded.html',
   })
   c.push({
-    id: 'treasury', name: 'Nation Treasury', glyph: 'token', verified: true, cover: coverSvg('Nation Treasury', 'token'),
+    id: 'treasury', by: 'by the mining dev-fee carve', name: 'Nation Treasury', glyph: 'token', verified: true, cover: coverSvg('Nation Treasury', 'token'),
     blurb: 'The welfare treasury financed by the mining dev-fee carve, paid out in USDS.',
     items: 1, owners: 1, floor: nation ? `${fmt.num(glyphsToSigil(nation.treasury_glyphs))} SIGIL` : '—', floorChange: null,
     volume: nation ? `${nation.welfare_bps} bps carve` : '—', volumeChange: null, sales: null,
     provenance: nation ? 'live' : 'pretend', link: '/sigil-nation-whitepaper.html',
   })
   c.push({
-    id: 'rocky', name: rocky?.name ?? 'Rocky K⊕ Cover', glyph: 'shield', verified: true, cover: coverSvg('Rocky Cover', 'shield', { symbol: 'ROCKY' }),
+    id: 'rocky', by: 'by Rocky', name: rocky?.name ?? 'Rocky K⊕ Cover', glyph: 'shield', verified: true, cover: coverSvg('Rocky Cover', 'shield', { symbol: 'ROCKY' }),
     blurb: 'Cover policies underwritten by the ROCKY pool against K⊕ p99 excursions. First native contract that executes.',
     items: rocky?.policies.length ?? null, owners: null, floor: rocky ? `${rocky.fee_bps} bps fee` : '—', floorChange: null,
     volume: rocky ? `${fmt.num(glyphsToSigil(rocky.pool_balance, rocky.decimals))} ROCKY pooled` : '—', volumeChange: null, sales: rocky?.policies.length ?? null,
     provenance: rocky ? 'live' : 'pretend', link: '/kristensen-board.html',
   })
   c.push({
-    id: 'bridge', name: 'Bridge Locks', glyph: 'braid', verified: true, cover: coverSvg('Bridge Locks', 'braid'),
+    id: 'bridge', by: 'by the relayer', name: 'Bridge Locks', glyph: 'braid', verified: true, cover: coverSvg('Bridge Locks', 'braid'),
     blurb: 'SIGIL locked for the Polygon leg. Relayer held; locks are real, mints are not yet.',
     items: bridge?.lock_count ?? null, owners: null, floor: bridge ? `${fmt.num(glyphsToSigil(bridge.vault_balance))} SIGIL vault` : '—', floorChange: null,
     volume: bridge ? (bridge.paused ? 'paused' : 'open') : '—', volumeChange: null, sales: bridge?.lock_count ?? null,
     provenance: bridge ? 'live' : 'pretend', link: '/bridge-slider.html',
   })
   c.push({
-    id: 'book', name: 'Shadows in the Chain', glyph: 'book', verified: false, cover: coverSvg('Shadows in the Chain', 'book'),
+    id: 'book', by: 'by the sigil-book crate', name: 'Shadows in the Chain', glyph: 'book', verified: false, cover: coverSvg('Shadows in the Chain', 'book'),
     blurb: 'The SIGIL novel, chapter by chapter. Not an on-chain record — illustrative listing.',
     items: null, owners: null, floor: '—', floorChange: null, volume: '—', volumeChange: null, sales: null,
     provenance: 'pretend', link: '/downloads/',

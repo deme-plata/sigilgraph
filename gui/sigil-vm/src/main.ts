@@ -33,21 +33,33 @@ function toast(msg: string, cls = ''): void {
 }
 
 // ── render passes ─────────────────────────────────────────────────────────
+let heroHover = false
 function renderHero(): void {
   if (!snap) return
   $('#hero').innerHTML = ui.hero(snap, heroIdx)
-  $('#strip').innerHTML = ui.strip(snap)
-  $('#foryou').innerHTML = ui.forYou(snap)
+  swapWithFlash($('#strip'), ui.strip(snap))
+  swapWithFlash($('#foryou'), ui.forYou(snap))
   clearTimeout(heroTimer)
-  heroTimer = window.setTimeout(() => { heroIdx++; renderHero() }, 7000)
+  heroTimer = window.setTimeout(() => { if (!heroHover) heroIdx++; renderHero() }, 7000)
+}
+// OpenSea flashes a value that changed between polls; we diff the rendered text per cell.
+function swapWithFlash(host: HTMLElement, html: string): void {
+  const before = new Map<string, string>()
+  host.querySelectorAll<HTMLElement>('.v, .num, .delta, .price, .r, .fy-col p').forEach((el, i) => before.set(String(i), el.textContent || ''))
+  host.innerHTML = html
+  if (!before.size) return
+  host.querySelectorAll<HTMLElement>('.v, .num, .delta, .price, .r, .fy-col p').forEach((el, i) => {
+    const prev = before.get(String(i))
+    if (prev !== undefined && prev !== (el.textContent || '')) { el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1400) }
+  })
 }
 function renderRows(): void {
   if (!snap) return
-  $('#featuredRow').innerHTML = snap.featured.map(ui.collectionCard).join('') || '<div class="pempty">No collections read.</div>'
+  swapWithFlash($('#featuredRow'), snap.featured.map(ui.collectionCard).join('') || '<div class="pempty">No collections read.</div>')
   $('#dropsRow').innerHTML = snap.drops.map(ui.dropCard).join('')
-  $('#moversRow').innerHTML = snap.movers.map(ui.moverCard).join('') || '<div class="pempty">No miners read — node offline?</div>'
+  swapWithFlash($('#moversRow'), snap.movers.map(ui.moverCard).join('') || '<div class="pempty">No miners read — node offline?</div>')
   $('#salesRow').innerHTML = snap.sales.map(ui.saleCard).join('') || '<div class="pempty">Nothing settled this week that the node reports.</div>'
-  $('#trendingTable').innerHTML = ui.trending(snap, trendMode, trendWin)
+  swapWithFlash($('#trendingTable'), ui.trending(snap, trendMode, trendWin))
   $('#legend').innerHTML = ui.legend(snap)
   $('#footTs').textContent = `poll ${new Date(snap.at).toLocaleTimeString()} · height ${fmt.int(snap.head.height)}`
 }
@@ -216,6 +228,9 @@ function globalSearch(q: string): void {
   box.classList.add('open')
   const qw = box.querySelector('#qWallet'); if (qw) qw.addEventListener('click', () => { wallet = q; app.classList.add('panel-open'); box.classList.remove('open'); poll() })
 }
+
+$('#hero').addEventListener('mouseenter', () => { heroHover = true })
+$('#hero').addEventListener('mouseleave', () => { heroHover = false })
 
 // ── boot ──────────────────────────────────────────────────────────────────
 try { const w = localStorage.getItem('sigilvm-wallet'); if (w) wallet = w } catch { /* */ }

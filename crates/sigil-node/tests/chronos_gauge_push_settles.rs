@@ -56,8 +56,9 @@ fn chronos_gauge_push_lands_once_on_both_nodes_and_the_header_commits_it() {
     let k_bio = feed_id("bio.k_bio");
     let breathing = feed_id("bio.breathing_pgc_day");
 
-    // ── 1. DORMANT: the constant is u64::MAX; schedule activation a few blocks ahead.
-    assert_eq!(sigil_oracle::GAUGE_LIVE_HEIGHT, u64::MAX, "GaugePush must ship dormant");
+    // ── 1. schedule activation a few blocks ahead (in-process; the committed height is far
+    // above these test heights so the override lowers it — min(const, override)).
+    assert_eq!(sigil_oracle::GAUGE_LIVE_HEIGHT, 19_150_000, "committed activation height");
     let live_at = h.chain.height() + 4;
     sigil_oracle::chronos_schedule_gauge_live_height(live_at);
     let early = push(master, "bio.k_bio", 1_688_887, 20260913, 0xE1);

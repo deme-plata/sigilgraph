@@ -184,8 +184,11 @@ pub fn price_is_fresh(state: &SigilState, at_height: u64) -> bool {
 
 /// The gauge contract's address (storage namespace for every feed).
 pub const GAUGE_CONTRACT: ContractId = [0x0D; 32];
-/// Activation height for `GaugePush`. DORMANT until an operator schedules a real height.
-pub const GAUGE_LIVE_HEIGHT: u64 = u64::MAX;
+/// Activation height for `GaugePush` + the ROCKY contract. Committed 2026-09-15 (operator:
+/// "commit GAUGE_LIVE_HEIGHT så vi kan aktivere det hele"). Chosen at tip 18,966,776 + ~183k
+/// (a safe margin over the deploy window at up to 110 blk/s). Both nodes MUST run this binary
+/// before this height, or they fork at it and cannot be rolled back (the 2026-09-10 rule).
+pub const GAUGE_LIVE_HEIGHT: u64 = 19_150_000;
 /// Fixed-point scale of a gauge value: `value_e6 = round(value × 1e6)`.
 pub const GAUGE_SCALE: i128 = 1_000_000;
 /// Readings older than this (in blocks) are STALE for any consumer; at 8 blk/s idle the
@@ -343,8 +346,9 @@ mod gauge_tests {
 
     #[test]
     fn the_gate_is_dormant_until_scheduled_in_process() {
-        assert_eq!(GAUGE_LIVE_HEIGHT, u64::MAX, "must ship DORMANT — the activation height is an operator commit");
-        assert!(!gauge_active_at(u64::MAX - 1, GAUGE_LIVE_HEIGHT));
+        // Activated 2026-09-15 at a committed height (was u64::MAX / dormant).
+        assert_eq!(GAUGE_LIVE_HEIGHT, 19_150_000, "the committed activation height — changing it is a consensus fork");
+        assert!(!gauge_active_at(GAUGE_LIVE_HEIGHT - 1, GAUGE_LIVE_HEIGHT) && gauge_active_at(GAUGE_LIVE_HEIGHT, GAUGE_LIVE_HEIGHT));
         assert!(gauge_active_at(10, 10) && !gauge_active_at(9, 10));
         assert!(plausible_reading_date(20260913) && !plausible_reading_date(20261341) && !plausible_reading_date(913));
     }

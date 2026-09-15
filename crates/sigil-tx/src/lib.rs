@@ -4674,7 +4674,7 @@ mod nation_welfare_tests {
         let push = |auth: WalletId, date: u32, v: i128| SigilTx::GaugePush { authority: auth, feed, value_e6: v, reading_date: date, attest_blake3: [0x4A; 32], fee: 0 };
         // DORMANT: refused at any height while the constant is u64::MAX
         let e = apply_tx_at(&s, &signed(push(MASTER, 20260913, 1_688_887)), H + 5).unwrap_err();
-        assert!(matches!(e, TxApplyError::GaugeNotActive { activates_at: u64::MAX, .. }), "{e}");
+        assert!(matches!(e, TxApplyError::GaugeNotActive { .. }), "dormant at the shipped height until scheduled lower: {e}");
         // The chronos seam schedules activation in-process; the live node never does.
         sigil_oracle::chronos_schedule_gauge_live_height(H + 10);
         assert!(matches!(apply_tx_at(&s, &signed(push(MASTER, 20260913, 1)), H + 9).unwrap_err(), TxApplyError::GaugeNotActive { .. }));

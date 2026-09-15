@@ -20,7 +20,7 @@ let trendMode: 'trending' | 'top' = 'trending'
 let trendWin = '24h'
 let panelTab: 'tokens' | 'nfts' | 'activity' = 'tokens'
 const swapSt: ui.SwapState = { mode: 'market', from: NATIVE_TOKEN, to: '', amount: '', limitPrice: '', limitDir: 'buy', slippage: 0.5 }
-const tokSt: ui.TokenTableState = { q: '', filter: 'all', sort: 'supply', dir: 'desc' }
+const tokSt: ui.TokenTableState = { q: '', filter: 'all', sort: 'supply', dir: 'desc', open: null }
 let collapsed = false
 
 try { wallet = localStorage.getItem('sigil-wallet-address') } catch { /* blocked */ }
@@ -165,7 +165,9 @@ document.addEventListener('click', (ev) => {
   // token table
   if (ds.filter) { tokSt.filter = ds.filter as typeof tokSt.filter; renderTokens(); return }
   if (ds.swap) { swapSt.to = ds.swap; if (swapSt.from === ds.swap) swapSt.from = NATIVE_TOKEN === ds.swap ? snap!.tokens[1].id : NATIVE_TOKEN; renderSwap(); $('#dex').scrollIntoView({ behavior: 'smooth' }); return }
-  if (ds.info) { openTokenInfo(ds.info); return }
+  if (ds.info) { tokSt.open = tokSt.open === ds.info ? null : ds.info; renderTokens(); return }
+  const trow = btn.closest('tr[data-tok]') as HTMLElement | null
+  if (trow && !ds.swap) { tokSt.open = tokSt.open === trow.dataset.tok ? null : trow.dataset.tok!; renderTokens(); return }
   const th = btn.closest('th[data-sort]') as HTMLElement | null
   if (th) { const k = th.dataset.sort as ui.TokenTableState['sort']; if (tokSt.sort === k) tokSt.dir = tokSt.dir === 'asc' ? 'desc' : 'asc'; else { tokSt.sort = k; tokSt.dir = 'desc' } renderTokens(); return }
   if (btn.id === 'modalClose' || btn.id === 'modalClose2' || btn.closest('#modal') === btn) { closeModal(); return }
@@ -200,7 +202,7 @@ function openTokenPicker(which: 'from' | 'to'): void {
 function openSlippage(): void {
   openModal(`<h4>Slippage tolerance</h4><div class="quick">${[0.1, 0.5, 1, 3].map((s) => `<button data-slip="${s}" class="${swapSt.slippage === s ? 'on' : ''}">${s}%</button>`).join('')}</div><p class="muted" style="font-size:12px">Applied by the wallet when it builds the proof. The desk shows the number; it does not sign.</p>`)
 }
-function openTokenInfo(id: string): void {
+export function openTokenInfo(id: string): void {
   const t = snap?.tokens.find((x) => x.id === id); if (!t) return
   openModal(`<h4>${t.symbol} — ${ui.esc(t.name)}</h4><pre>${ui.esc(JSON.stringify({ token_id: t.id, decimals: t.decimals, status: t.status, note: t.statusNote, supply: t.supply, holders: t.holders, provenance: t.provenance }, null, 2))}</pre><a class="btn ghost" href="/api.html" target="_blank" rel="noopener">${I.ext} API reference</a>`)
 }

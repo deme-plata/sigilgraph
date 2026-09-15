@@ -148,10 +148,11 @@ export function hero(s: Snapshot, idx: number): string {
       ${c.by ? `<div class="by">${esc(c.by)}</div>` : ''}
       <p>${esc(c.blurb)}</p>
       <div class="stats">
-        <div><div class="k">Floor</div><div class="v">${esc(c.floor)}</div></div>
-        <div><div class="k">Items</div><div class="v">${c.items === null ? '—' : fmt.int(c.items)}</div></div>
-        <div><div class="k">Owners</div><div class="v">${c.owners === null ? '—' : fmt.int(c.owners)}</div></div>
-        <div><div class="k">Volume</div><div class="v">${esc(c.volume)}</div></div>
+        <div class="stat"><div class="k">Floor</div><div class="v">${esc(c.floor)}</div></div>
+        <div class="stat"><div class="k">Items</div><div class="v">${c.items === null ? '—' : fmt.int(c.items)}</div></div>
+        <div class="stat"><div class="k">Owners</div><div class="v">${c.owners === null ? '—' : fmt.int(c.owners)}</div></div>
+        <div class="stat"><div class="k">Volume</div><div class="v">${esc(c.volume)}</div></div>
+        <div class="stat"><div class="k">24h</div><div class="v">${delta(s.changes[c.id]?.['24h'] ?? (c.id === 'rigs' ? c.volumeChange : null))}</div></div>
       </div>
       <div class="cta"><a class="btn primary lg" href="${c.link}" target="_blank" rel="noopener">View collection</a><a class="btn ghost lg" href="#swap">Swap SIGIL</a></div>
     </div>
@@ -316,7 +317,7 @@ export function routeCard(s: Snapshot, st: SwapState): string {
 }
 
 // ── DEX: token table (Quillon "Available Tokens") ─────────────────────────
-export interface TokenTableState { q: string; filter: 'all' | 'gainers' | 'losers'; sort: keyof Token | 'supply'; dir: 'asc' | 'desc' }
+export interface TokenTableState { q: string; filter: 'all' | 'gainers' | 'losers'; sort: keyof Token | 'supply'; dir: 'asc' | 'desc'; open: string | null }
 export function tokenTable(s: Snapshot, st: TokenTableState): string {
   let list = s.tokens.filter((t) => !st.q || (t.symbol + ' ' + t.name + ' ' + t.id).toLowerCase().includes(st.q.toLowerCase()))
   if (st.filter === 'gainers') list = list.filter((t) => (t.change24h ?? 0) > 0)
@@ -337,10 +338,30 @@ export function tokenTable(s: Snapshot, st: TokenTableState): string {
         <td>${usd(t.price)}</td><td>${delta(t.change1h)}</td><td>${delta(t.change24h)}</td><td>${delta(t.change7d)}</td><td>${t.volume24h === null ? '<span class="muted">—</span>' : fmt.num(t.volume24h)}</td>
         <td>${t.supply === null ? '<span class="muted">—</span>' : fmt.num(t.supply) + (t.maxSupply ? ` <span class="muted">/ ${fmt.num(t.maxSupply, 0)}</span>` : '')}</td>
         <td>${t.liquidity === null ? '<span class="muted">—</span>' : fmt.num(t.liquidity)}</td><td>${t.holders === null ? '<span class="muted">—</span>' : fmt.int(t.holders)}</td><td>${t.ageBlocks === null ? '<span class="muted">—</span>' : fmt.num(t.ageBlocks, 1) + ' blk'}</td>
-        <td><div class="act"><button class="sw" data-swap="${t.id}">Swap</button><button data-info="${t.id}">Info</button></div></td></tr>`).join('')}
+        <td><div class="act"><button class="sw" data-swap="${t.id}">Swap</button><button data-info="${t.id}">${st.open === t.id ? 'Close' : 'Info'}</button></div></td></tr>${st.open === t.id ? tokenDetailRow(t, s) : ''}`).join('')}
     </tbody></table></div>
     <div class="muted" style="font-size:11.5px;margin-top:10px">Price, 1h/24h/7d and volume read “—” because sigil-g2 has no price oracle feeding these tokens yet (USDS oracle: not fed; ROCKY: gated). Supply, holders, age and liquidity are live from the node.</div>
   </div></div>`
+}
+
+function tokenDetailRow(t: Token, s: Snapshot): string {
+  const cell = (k: string, v: string) => `<div class="td-cell"><div class="k">${k}</div><div class="v">${v}</div></div>`
+  const rows = [
+    cell('Token id', `<span class="mono" title="${esc(t.id)}">${fmt.short(t.id, 10)}</span>`),
+    cell('Decimals', String(t.decimals)),
+    cell('Status', `<span class="status-dot ${t.status}"></span>${esc(t.status)} — ${esc(t.statusNote)}`),
+    cell('Supply', t.supply === null ? '—' : fmt.num(t.supply, 4) + (t.maxSupply ? ` / ${fmt.num(t.maxSupply, 0)}` : '')),
+    cell('Holders', t.holders === null ? '—' : fmt.int(t.holders) + ' registered'),
+    cell('Liquidity', t.liquidity === null ? 'no pool' : fmt.num(t.liquidity)),
+    cell('Provenance', prov(t.provenance)),
+  ]
+  const spark = t.symbol === 'SIGIL' && s.hashHist.length > 2 ? `<div class="td-spark"><div class="k">Network hashrate (mining issuance) · ${fmt.pct(s.head.hashChange)}</div>${sparkline(s.hashHist, 320, 48, (s.head.hashChange ?? 0) < 0 ? 'down' : 'up')}</div>` : ''
+  const links = t.symbol === 'wSIGIL3'
+    ? `<a class="btn ghost sm" href="https://polygonscan.com/token/0x3FCED760" target="_blank" rel="noopener">Polygonscan ↗</a><a class="btn ghost sm" href="/bridge-slider.html" target="_blank" rel="noopener">Bridge ↗</a>`
+    : t.symbol === 'ROCKY' ? `<a class="btn ghost sm" href="/kristensen-board.html" target="_blank" rel="noopener">K board ↗</a><a class="btn ghost sm" href="/api.html" target="_blank" rel="noopener">/v1/rocky ↗</a>`
+    : t.symbol === 'USDS' ? `<a class="btn ghost sm" href="/api.html" target="_blank" rel="noopener">/v1/usds/status ↗</a>`
+    : `<a class="btn ghost sm" href="/sigil-explorer.html" target="_blank" rel="noopener">Explorer ↗</a><a class="btn ghost sm" href="/api.html" target="_blank" rel="noopener">API ↗</a>`
+  return `<tr class="td-row"><td colspan="11"><div class="td-wrap"><div class="td-grid">${rows.join('')}</div>${spark}<div class="td-links">${links}</div></div></td></tr>`
 }
 
 // ── wallet panel ──────────────────────────────────────────────────────────

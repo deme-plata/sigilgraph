@@ -63,18 +63,19 @@ The economy is committed *in the roots* (emission curve, oracle price, the nativ
 
 ## 📦 What's inside
 
-67 crates. The ones that matter, grouped:
+97 crates. The ones that matter, grouped (state of 2026-09-15):
 
 | Cluster | What it does |
 |---|---|
-| ⛓️ **Chain core** | `sigil-header` · `sigil-net` · `sigil-chronos` · `sigil-node` — DagKnight blocks + deterministic network sim + the node |
-| 🔐 **Provenance** | `flux-sigil` (BLAKE3 × SQIsign) · vendored `q-zk-stark` — every block proves itself, ~10ms tip-verify |
-| 🧮 **State** | `sigil-state` — 21M cap (4 enforcement layers) + O(1) multiset-accumulator roots |
-| 💰 **Money keystone** | `sigil-rpc` — the chokepoint: swap · mine · light-verifier credit · bank fee |
-| 📈 **Economy** | `sigil-emission` (halving → 21M) · `sigil-oracle` (price in the root) · `sigil-usds` (native stablecoin) |
-| 🔑 **Identity** | `sigil-oauth` — DNS-anchored, post-quantum OAuth2 (wallet login, offline tokens, DPoP) |
-| 🌐 **Transport** | `sigil-net-wg` (WireGuard mesh) · `flux-p2p` — the live 4-node testnet runs over this |
-| 🖥️ **Apps** | `gui/sigil-wallet` (cyan, in-browser miner + live tip-verify) · lightweight node |
+| ⛓️ **Chain core** | `sigil-header` · `sigil-record` (block codec shared by node and clients) · `sigil-dagknight` (braid, GHOSTDAG colouring, finality certificates) · `sigil-node` — DagKnight blocks, 110 blk/s held in production, certificate-based instant finality |
+| 🔐 **Provenance & privacy** | `flux-sigil` (BLAKE3 × SQIsign) · `sigil-shield` (shielded notes, STARK spend circuits, published viewing keys) · `sigil-tip-proof` — every block proves itself; every payment is shielded (transparent sends are retired) |
+| 🧮 **State** | `sigil-state` — 21M cap (a compile-time `MAX_SUPPLY < 2^58` guard keeps the range proofs honest), O(1) accumulator roots, shielded pool + nullifier set, 10 decimals (base unit: the glyph) |
+| 💰 **Money keystone** | `sigil-api` — embedded in `sigil-node` on `:18181`, the chokepoint: shield · shielded_send · unshield · swap · mining challenge/submit · bridge · USDS · finality certificate · `/wait` long-poll + SSE push. (`sigil-rpc` / `sigil-rpcd` is retired since 2026-08-17.) |
+| 📈 **Economy** | `sigil-emission` (256-year adaptive schedule → 21M) · `sigil-oracle` (price in the root) · `sigil-usds` (native stablecoin, activation-gated) · `sigil-nation` (welfare treasury carved from the dev fee) · `sigil-fees` |
+| 🔑 **Identity & law** | `sigil-oauth` (DNS-anchored, post-quantum OAuth2) · `sigil-court` (sealed orders, public docket) · `sigil-citizenship` |
+| 🌐 **Transport** | `flux-p2p` (gossipsub + zstd backfill) · `sigil-net-wg` (WireGuard mesh) · `sigil-net-tor` — the live g2 network: one producer + two followers (Epsilon, happysrv, happysrv-docker) |
+| 🖥️ **Apps** | `sigil-top` (TUI node / miner / wallet with signed auto-updates) · `gui/sigil-wallet` (browser: shielded send, memo, inbox, bridge) · Android wallet (NFC coins, Bluetooth hand-off) |
+| 🌍 **Instruments** | `sigil-earth` — Kristensen Earth Rotation Gauge K⊕ (IERS/GFZ, signed + on-chain-anchored attestation chain, `/v1/earth`) · `flux-kgauge` (K_fix consensus gauge) · `flux-realization` (K_R design search) · `sigil-chronos` (deterministic chain simulator) |
 
 ---
 
@@ -95,12 +96,12 @@ This is a **research chain**. We measure before we claim.
 
 | Area | State |
 |---|---|
-| DagKnight block production | ✅ **Real** — live 4-node testnet (v0.0.8) over a WireGuard mesh |
+| DagKnight block production | ✅ **Real** — live g2 network (one producer + two followers) at up to 110 blk/s, WireGuard + direct transport |
 | Provenance proofs (BLAKE3 × SQIsign) | ✅ **Real** — tamper-detection tested, ~10ms tip-verify |
 | 21M cap + O(1) roots | ✅ **Real** — 4 enforcement layers, measured 93M× root speedup |
 | 572 KB light client | ✅ **Real** — verifies the live tip in the browser/wallet |
 | Emission / oracle / USDS | ✅ **Real** — committed in the roots |
-| Cross-host gossip at scale | 🟡 **In progress** — 4 nodes proven; larger fabric is landing |
+| Cross-host gossip at scale | 🟡 **In progress** — 3 nodes live; a third peer measurably healed a one-way gossip break (2026-09-15); larger fabric is landing |
 | Day-one Quillon migration | 🧪 **Designed** — signed-snapshot import, not a live bridge yet |
 
 ---

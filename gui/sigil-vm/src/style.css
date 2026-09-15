@@ -316,6 +316,7 @@ img { display: block; }
 .card.mover { flex-basis: 212px; }
 .card.mover .img { aspect-ratio: 4/3; }
 .card.mover .delta { font-family: var(--mono); font-size: 20px; font-weight: 700; margin-top: 4px; }
+.card.mover .delta.share { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .card.sale .img { aspect-ratio: 1; }
 .card.sale .price { font-family: var(--mono); font-weight: 600; font-size: 14px; margin-top: 6px; }
 .card .img .cta .cta-blurb.mono { font-family: var(--mono); font-size: 10.5px; word-break: break-all; -webkit-line-clamp: 3; }

@@ -211,6 +211,27 @@ pub fn run(o: &Opts) -> Result<Value> {
         sources: json!(sources.iter().filter(|s| s["name"].as_str().map(|n| n.contains('F')).unwrap_or(false)).collect::<Vec<_>>()),
     });
 
+    // ── 4b · the biosphere channel: Mauna Loa CO₂ → K_bio + breathing + the Lloyd ladder ──────
+    // Tolerant on purpose: a NOAA outage must never stop the rotation gauge. With no live
+    // copy and no cache the channel publishes as null with the reason.
+    let (bio_latest, bio_series) = match fetch_cached(crate::bio::SRC_CO2_DAILY, &o.cache_dir.join("co2_daily_mlo.txt"), 10_000) {
+        Ok(f) => {
+            let rows = crate::bio::parse_daily(&f.text);
+            note(&mut sources, "co2_daily_mlo.txt", &f.source, rows.len());
+            match crate::bio::channel(&rows, utc_today_mjd) {
+                Ok(ch) => (ch.latest, Some(ch.series)),
+                Err(e) => {
+                    eprintln!("bio channel: {e}");
+                    (json!({"error": e.to_string(), "source": crate::bio::SRC_CO2_DAILY}), None)
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("bio channel unavailable: {e}");
+            (json!({"error": e.to_string(), "source": crate::bio::SRC_CO2_DAILY}), None)
+        }
+    };
+
     // ── 5 · products ──────────────────────────────────────────────────────────────────────────
     let fetched_at = crate::time::iso_now();
     let provenance = json!({
@@ -222,6 +243,7 @@ pub fn run(o: &Opts) -> Result<Value> {
                   "ladder = empirical quantiles of K over the trailing 3 years", "fluids: ECMWF / MPIOM / LSDM effective angular momentum (GFZ), not measurements"],
         "assumed": ["I_earth constant", "components treated as independent in the quadrature sum"],
         "analogy": [],
+        "bio": "see latest.bio.provenance — the biosphere channel carries its own measured / model / reference / derived / assumed lists",
     });
     let meta = json!({
         "version": crate::VERSION, "fetched_at": fetched_at, "rows_total": rows.len(), "observed_rows": obs.len(),
@@ -230,7 +252,7 @@ pub fn run(o: &Opts) -> Result<Value> {
         "conventions": "x_p toward the Greenwich meridian, y_p toward 90°W (IERS); in a right-handed X=Greenwich, Y=90°E, Z=north frame ω_y = −Ω0·y_p. LOD = excess length of day over 86400 s, in ms. UT1−UTC in s.",
         "constants": {"OMEGA0_rad_s": model::OMEGA0, "I_earth_kg_m2": model::I_EARTH, "R_earth_m": model::R_EARTH},
         "provenance": provenance, "sources": sources,
-        "files": {"series": "/v1/earth/series", "forecast": "/v1/earth/forecast", "excitation": "/v1/earth/excitation", "stream": "/v1/earth/stream"},
+        "files": {"series": "/v1/earth/series", "forecast": "/v1/earth/forecast", "excitation": "/v1/earth/excitation", "bio": "/v1/earth/bio", "stream": "/v1/earth/stream"},
     });
     let tr = today.r;
     let today_json = json!({
@@ -279,6 +301,7 @@ pub fn run(o: &Opts) -> Result<Value> {
                        "attribution_365d": attr, "attribution_365d_smoothed31": attr_sm,
                        "note": "attribution_365d: R² over daily values — low because the observed IERS LOD still contains the zonal tides (13.66 d, 27.55 d, ±0.5 ms) that the fluid models do not carry. attribution_365d_smoothed31: the same after a 31-day running mean on both sides, which averages the tides out — the fair number for 'how much of the season-to-season day length is the fluids'. The residual after that is core–mantle coupling, secular tidal braking and model error."},
         "forecast_head": fc_head,
+        "bio": bio_latest,
         "tips": crate::tips::with_today(crate::tips::tips(), &crate::tips::TodayCtx {
             date: tr.date.clone(), k_resid: k_today, k_raw: today.k_raw.unwrap_or(f64::NAN), regime: regime.into(),
             p50: ladder_res.p50, p90: ladder_res.p90, p99: ladder_res.p99, lod: tr.lod.unwrap_or(f64::NAN),
@@ -290,6 +313,11 @@ pub fn run(o: &Opts) -> Result<Value> {
             attest_n: crate::attest::read_chain(&chain_path).iter().rev().find(|r| r.kind == "attest").map(|r| r.n),
             attest_anchored: { let ch = crate::attest::read_chain(&chain_path); let last_n = ch.iter().rev().find(|r| r.kind == "attest").map(|r| r.n); ch.iter().any(|r| r.kind == "anchor" && Some(r.n) == last_n && r.anchor["executed"] == true) },
             armed: next_state.armed,
+            bio_k: latest_bio_f64(&bio_latest, "/today/k_bio"), bio_regime: bio_latest.pointer("/today/regime").and_then(|v| v.as_str()).map(String::from),
+            bio_ppm: latest_bio_f64(&bio_latest, "/today/ppm"), bio_date: bio_latest.pointer("/today/date").and_then(|v| v.as_str()).map(String::from),
+            bio_rate_pgc_day: latest_bio_f64(&bio_latest, "/breathing/rate_pgc_per_day"), bio_index: latest_bio_f64(&bio_latest, "/breathing/index"),
+            bio_amp_ppm: latest_bio_f64(&bio_latest, "/breathing/amplitude_ppm"), bio_trend: latest_bio_f64(&bio_latest, "/breathing/trend_ppm_per_year"),
+            bio_p99: latest_bio_f64(&bio_latest, "/ladder/p99"),
         }),
         "alerts_recent": open_alerts,
         "attest_last": crate::attest::latest_summary(&crate::attest::read_chain(&chain_path)),
@@ -322,6 +350,8 @@ pub fn run(o: &Opts) -> Result<Value> {
         "eam90_issue": eam90.as_ref().map(|(_, d, _)| *d),
         "sources_live": sources.iter().filter(|s| s["source"]["kind"] != "cached").count(), "sources_total": sources.len(),
         "alerts_new": alert_rows.iter().map(|r| r.kind.clone()).collect::<Vec<_>>(),
+        "bio": {"k_bio": bio_latest.pointer("/today/k_bio").cloned(), "regime": bio_latest.pointer("/today/regime").cloned(), "date": bio_latest.pointer("/today/date").cloned(),
+                "ppm": bio_latest.pointer("/today/ppm").cloned(), "rate_pgc_per_day": bio_latest.pointer("/breathing/rate_pgc_per_day").cloned(), "error": bio_latest.get("error").cloned()},
     });
     if o.dry_run {
         let mut s = summary;
@@ -335,6 +365,9 @@ pub fn run(o: &Opts) -> Result<Value> {
     write_atomic(&o.out_dir.join("series.json"), &serde_json::to_vec(&series_json)?)?;
     write_atomic(&o.out_dir.join("excitation.json"), &serde_json::to_vec(&excitation_json)?)?;
     write_atomic(&o.out_dir.join("forecast.json"), &serde_json::to_vec(&forecast_json)?)?;
+    if let Some(b) = &bio_series {
+        write_atomic(&o.out_dir.join("bio.json"), &serde_json::to_vec(b)?)?;
+    }
     write_atomic(&o.out_dir.join("provenance.json"), &serde_json::to_vec(&json!({"version": crate::VERSION, "fetched_at": fetched_at, "provenance": provenance, "sources": sources,
         "attest_pubkey": crate::attest::load_or_create_key(&o.attest_key).ok().map(|k| hex::encode(k.verifying_key().to_bytes())),
         "attest_message_v2": "sigil-earth-attest-v2|n|date|blake3|sha256|prev — Ed25519 over the UTF-8 bytes; v1 rows omit sha256",
@@ -363,6 +396,10 @@ pub fn run(o: &Opts) -> Result<Value> {
         None => json!("unchanged"),
     };
     Ok(out)
+}
+
+fn latest_bio_f64(v: &Value, ptr: &str) -> Option<f64> {
+    v.pointer(ptr).and_then(|x| x.as_f64())
 }
 
 fn prune(dir: &Path, prefix: &str, keep: usize) {

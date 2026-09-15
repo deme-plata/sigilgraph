@@ -71,7 +71,7 @@ async fn index(State(st): State<Arc<App>>) -> Response {
         StatusCode::OK,
         json!({
             "ok": true, "service": crate::VERSION, "data_dir": st.dir.display().to_string(),
-            "routes": ["/v1/earth/latest", "/v1/earth/series?days=433", "/v1/earth/forecast", "/v1/earth/excitation",
+            "routes": ["/v1/earth/latest (incl. .bio = K_bio, breathing, Lloyd ladder)", "/v1/earth/series?days=433", "/v1/earth/forecast", "/v1/earth/excitation", "/v1/earth/bio (3-year Mauna Loa CO₂ series + fit)",
                        "/v1/earth/provenance", "/v1/earth/tips", "/v1/earth/alerts?last=20", "/v1/earth/attest?last=20", "/v1/earth/health",
                        "/v1/earth/stream (text/event-stream: reading | alert | attest)", "/v1/earth/badge.svg (live SVG badge: K⊕ · regime · date)"],
             "pages": ["https://sigilgraph.org/datacenter.html", "https://sigilgraph.org/kristensen-earth.html", "https://sigilgraph.org/kristensen-board.html"]
@@ -87,6 +87,11 @@ async fn forecast(State(st): State<Arc<App>>) -> Response {
 }
 async fn excitation(State(st): State<Arc<App>>) -> Response {
     file(&st.dir, "excitation.json")
+}
+/// The biosphere channel's 3-year daily series (Mauna Loa CO₂, fit, seasonal, residual, z).
+/// The headline reading lives in `latest.bio`.
+async fn bio(State(st): State<Arc<App>>) -> Response {
+    file(&st.dir, "bio.json")
 }
 async fn provenance(State(st): State<Arc<App>>) -> Response {
     file(&st.dir, "provenance.json")
@@ -245,6 +250,7 @@ pub async fn run(bind: &str, dir: PathBuf) -> anyhow::Result<()> {
         .route("/v1/earth/series", get(series))
         .route("/v1/earth/forecast", get(forecast))
         .route("/v1/earth/excitation", get(excitation))
+        .route("/v1/earth/bio", get(bio))
         .route("/v1/earth/provenance", get(provenance))
         .route("/v1/earth/tips", get(tips))
         .route("/v1/earth/alerts", get(alerts))

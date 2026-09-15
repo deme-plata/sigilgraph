@@ -6,6 +6,29 @@ use serde_json::{json, Value};
 
 pub fn tips() -> Value {
     json!({
+        "k_bio": {
+            "name": "K_bio (the breathing)",
+            "what": "Mauna Loa's daily CO₂ after trend + acceleration + annual + semiannual are fitted over six years: the 7-day mean residual in σ. The same construction as K⊕, applied to the planet's breathing instead of its spin.",
+            "read": "Below 1: the biosphere is breathing as its own cycles predicted. 1–3: a warm autumn, an early spring, a fire season, or a Mauna Loa instrument week. Above the p99 line: something the cycles do not know — El Niño drought, a volcanic plume at the intake, a sensor fault — and the sentence to write is 'the biosphere is off its rhythm', not 'CO₂ is high'.",
+            "not": "It is not the CO₂ level and not the climate trend (both are removed before scoring). It is the surprise in the seasonal rhythm, weighted toward the northern hemisphere where Mauna Loa listens.",
+            "family": "A K: disagreement over spread inside the same ladder the pole and the chain use. One channel, so it is a plain |z|, not a quadrature.",
+            "da": "Mauna Loas daglige CO₂ efter trend + acceleration + årlig + halvårlig cyklus er fjernet: 7-dages middelresidual i σ. Under 1: biosfæren trækker vejret som sine egne cyklusser forudsagde. Over p99: noget cyklusserne ikke kender."
+        },
+        "breathing": {
+            "name": "The breathing",
+            "what": "The fitted seasonal derivative of CO₂ today, ppm per day, times 2.124 PgC per ppm: the net rate at which the (mostly northern) biosphere is drawing carbon down or letting it go right now. Amplitude ≈ 7 ppm peak-to-trough, maximum in May, minimum in late September.",
+            "read": "Negative from May to September — the growing season inhales about 15 PgC; positive the rest of the year as leaves and soils exhale it back. The index runs −1…+1 against the steepest part of the cycle.",
+            "not": "Not a global flux inversion and not the oceans: one station, one hemisphere's rhythm, fitted, not measured flux.",
+            "da": "Den tilpassede sæsonafledte af CO₂ i dag, ppm/dag, gange 2,124 PgC/ppm: nettoraten hvormed biosfæren (mest den nordlige) optager eller afgiver kulstof lige nu. Negativ maj–september (indånding), positiv resten af året."
+        },
+        "ops": {
+            "name": "The Lloyd ladder",
+            "what": "Three numbers per second for all living things: 2E/(πħ) on the standing biomass (Margolus–Levitin, what physics allows), P_npp/(kT·ln2) at 288 K (Landauer, what the photosynthetic power could pay for), and P_npp/E_ATP (ATP hydrolyses, the elementary operation life actually performs).",
+            "read": "ATP ≈ 1.6e33 ops/s; Landauer ≈ 4.8e34; Margolus–Levitin ≈ 1.3e56. So life spends ≈ 21 kT per elementary operation — about 30× the Landauer minimum, the ballpark every study of biological computation finds — and sits 23 orders of magnitude below the quantum ceiling. Memory: 1.06e38 bits of DNA. Photosynthesis captures ≈ 0.1 % of absorbed sunlight.",
+            "not": "Not measured ops. Derived from four published totals (NPP 104.9 PgC/yr, biomass 550 GtC, ΔG 478 kJ/mol C, ATP 50 kJ/mol) and two assumptions (NPP ≈ respiration; one ATP = one op). Change a total and every number moves with it — the derivation is the claim, not the digits.",
+            "family": "Seth Lloyd's 'ultimate laptop' bound, applied to the biosphere's energy budget instead of a kilogram of matter.",
+            "da": "Tre tal pr. sekund for alt levende: Margolus–Levitin-loftet på biomassen (~10⁵⁶), Landauer-loftet på fotosyntese-effekten ved 288 K (~5·10³⁴) og ATP-hydrolyser (~1,6·10³³). Livet bruger ≈ 21 kT pr. elementær operation — ca. 30× Landauer-minimum — og ligger 23 størrelsesordener under kvanteloftet. Udledt fra fire publicerede totaler, ikke målt."
+        },
         "k_resid": {
             "name": "K⊕ (de-wobbled)",
             "what": "How far today's rotation vector sits from where the known cycles said it would be, in residual σ: the pole (x_p, y_p) after trend + annual + semiannual + Chandler 433 d, and the day length after trend + annual + semiannual, combined in quadrature like a χ with three degrees of freedom.",
@@ -78,6 +101,15 @@ pub struct TodayCtx {
     pub attest_n: Option<u64>,
     pub attest_anchored: bool,
     pub armed: bool,
+    pub bio_k: Option<f64>,
+    pub bio_regime: Option<String>,
+    pub bio_ppm: Option<f64>,
+    pub bio_date: Option<String>,
+    pub bio_rate_pgc_day: Option<f64>,
+    pub bio_index: Option<f64>,
+    pub bio_amp_ppm: Option<f64>,
+    pub bio_trend: Option<f64>,
+    pub bio_p99: Option<f64>,
 }
 
 pub fn with_today(mut tips: Value, c: &TodayCtx) -> Value {
@@ -139,6 +171,23 @@ pub fn with_today(mut tips: Value, c: &TodayCtx) -> Value {
         set("k_resid_fcst", format!("For {}: {} through the IERS prediction — {}.{}", d, f2(k), crate::regime(k), g),
             format!("For {}: {} via IERS-forudsigelsen — {}.{}", d, f2(k), crate::regime(k), g_da));
     }
+    if let (Some(k), Some(reg), Some(ppm), Some(d), Some(p99)) = (c.bio_k, c.bio_regime.as_ref(), c.bio_ppm, c.bio_date.as_ref(), c.bio_p99) {
+        let band = if k > p99 { "above the p99 line" } else if k >= 3.0 { "critical" } else if k >= 1.0 { "elevated — off its rhythm a little" } else { "inside the rhythm" };
+        let band_da = if k > p99 { "over p99-linjen" } else if k >= 3.0 { "kritisk" } else if k >= 1.0 { "forhøjet — lidt ude af rytme" } else { "inden for rytmen" };
+        let _ = reg;
+        set("k_bio", format!("{}: {}σ — {} (p99 {}); Mauna Loa {:.2} ppm.", d, f2(k), band, f2(p99), ppm),
+            format!("{}: {}σ — {} (p99 {}); Mauna Loa {:.2} ppm.", d, f2(k), band_da, f2(p99), ppm));
+    }
+    if let (Some(r), Some(i), Some(a), Some(t)) = (c.bio_rate_pgc_day, c.bio_index, c.bio_amp_ppm, c.bio_trend) {
+        set("breathing",
+            format!("{} at {:.3} PgC/day (index {:+.2} of the steepest part of the cycle); amplitude {:.2} ppm ≈ {:.1} PgC; the long trend underneath is {:+.2} ppm/yr.", if r < 0.0 { "Inhaling" } else { "Exhaling" }, r.abs(), i, a, a * crate::bio::PGC_PER_PPM, t),
+            format!("{} med {:.3} PgC/dag (indeks {:+.2} af cyklussens stejleste del); amplitude {:.2} ppm ≈ {:.1} PgC; den lange trend nedenunder er {:+.2} ppm/år.", if r < 0.0 { "Indånder" } else { "Udånder" }, r.abs(), i, a, a * crate::bio::PGC_PER_PPM, t));
+    }
+    {
+        let l = crate::bio::lloyd();
+        set("ops", format!("ATP {:.2e}/s · Landauer {:.2e}/s · Margolus–Levitin {:.2e}/s → {:.0} kT per op, {:.1} orders below the ceiling.", l.ops_atp_per_s, l.ops_landauer_per_s, l.ops_ml_per_s, l.kt_per_op, l.orders_below_ml),
+            format!("ATP {:.2e}/s · Landauer {:.2e}/s · Margolus–Levitin {:.2e}/s → {:.0} kT pr. op, {:.1} størrelsesordener under loftet.", l.ops_atp_per_s, l.ops_landauer_per_s, l.ops_ml_per_s, l.kt_per_op, l.orders_below_ml));
+    }
     if let Some(n) = c.attest_n {
         set("attest", format!("This publication becomes attestation row #{}; the previous row #{} is {}.", n + 1, n, if c.attest_anchored { "anchored on the SIGIL chain" } else { "signed, its on-chain anchor pending" }),
             format!("Denne udgivelse bliver attesteringsrække #{}; den forrige række #{} er {}.", n + 1, n, if c.attest_anchored { "forankret på SIGIL-kæden" } else { "signeret, kæde-ankeret afventer" }));
@@ -149,8 +198,8 @@ pub fn with_today(mut tips: Value, c: &TodayCtx) -> Value {
 /// The fortolkning as one Markdown document, regenerated with every publication so the `today`
 /// lines stay current. Written to `eop/fortolkning.md` beside the JSON.
 pub fn markdown(tips: &Value, date: &str) -> String {
-    const ORDER: [&str; 23] = ["k_resid", "k_raw", "ladder", "xp", "yp", "lod", "ut1utc", "omega", "pole_offset_m", "E_rot_J", "L_kg_m2_s", "equator_speed_m_s",
-        "lod_atm_ms", "lod_ocn_ms", "lod_hyd_ms", "lod_geo_ms", "attribution_r2", "k_resid_fcst", "k_resid_fcst_gfz", "eam90", "era", "attest", "alert"];
+    const ORDER: [&str; 26] = ["k_resid", "k_raw", "ladder", "xp", "yp", "lod", "ut1utc", "omega", "pole_offset_m", "E_rot_J", "L_kg_m2_s", "equator_speed_m_s",
+        "lod_atm_ms", "lod_ocn_ms", "lod_hyd_ms", "lod_geo_ms", "attribution_r2", "k_resid_fcst", "k_resid_fcst_gfz", "eam90", "era", "k_bio", "breathing", "ops", "attest", "alert"];
     let mut out = String::new();
     out.push_str(&format!("# Fortolkning — Kristensen Earth Rotation Gauge K⊕ (reading of {date})\n\n"));
     out.push_str("One interpretation per metric, written once in the `sigil-earth` service and served with the data (`/v1/earth/tips`): **what** it is, **today**'s computed sentence, **how to read it**, what it is **not**, the **K family** link, and a **Danish** line. Regenerated on every publication.\n\n");

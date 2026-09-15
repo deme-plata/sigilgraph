@@ -11,9 +11,13 @@
 //! Every number the pages show is computed here, once, and published with its inputs and a
 //! provenance tag (measured / predicted / model / derived / assumed). Nothing is computed in
 //! a browser that is not also here.
+//!
+//! Channels: K⊕ (rotation: pole + day length, IERS/GFZ) and, since 2026-09-15, K_bio (the
+//! biosphere's breathing from Mauna Loa CO₂, with the Lloyd/Landauer/ATP ops ladder) — `bio.rs`.
 
 pub mod alert;
 pub mod attest;
+pub mod bio;
 pub mod buzz;
 pub mod eam;
 pub mod eop;

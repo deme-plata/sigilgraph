@@ -239,7 +239,7 @@ export function moverCard(m: Mover): string {
   return `<div class="card mover" title="${esc(m.id)}">
     <div class="img" style="background-image:url('${m.cover}')"><span class="prov">${prov(m.provenance)}</span></div>
     <div class="meta"><div class="name">${esc(m.name)}</div><div class="blurb" style="height:auto">${esc(m.sub)}</div>
-      ${m.series && m.series.length > 2 ? `<div class="sparkwrap">${sparkline(m.series, 180, 34, (m.change ?? 0) < 0 ? 'down' : 'up')}</div>` : ''}
+      ${m.series && m.series.length > 2 ? `<div class="sparkwrap">${sparkline(m.series, 180, 34, m.series[m.series.length - 1] < m.series[0] ? 'down' : 'up')}</div>` : ''}
       <div class="kv"><div><div class="k">Hashrate</div><div class="v">${esc(m.value)}</div></div><div style="text-align:right"><div class="k">Today</div><div class="delta">${delta(m.change)}</div></div></div>
     </div></div>`
 }

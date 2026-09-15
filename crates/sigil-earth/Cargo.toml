@@ -32,6 +32,7 @@ sha2 = "0.10"
 # node's chunked routes (/v1/transactions, /v1/shielded/leaves). Same client sigil-top uses.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "http2", "rustls-tls-webpki-roots"] }
 sigil-shield = { path = "../sigil-shield" }
+sigil-oracle = { path = "../sigil-oracle" }
 flux-swarm-secret = { path = "../../../flux/crates/flux-swarm-secret" }
 # `sigil-earth publish`: the attested bytes join the Flux data layer — the fluxc-mcp aether bundle
 # store (same shard/encrypt primitives the nodes use), a local flux-db time series, a flux-search

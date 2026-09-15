@@ -8710,6 +8710,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sigil-oracle",
  "sigil-shield",
  "tokio",
  "tokio-stream",

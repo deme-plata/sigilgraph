@@ -26,6 +26,7 @@ pub mod forecast;
 pub mod model;
 pub mod out;
 pub mod publish;
+pub mod push;
 pub mod remote;
 pub mod serve;
 pub mod time;

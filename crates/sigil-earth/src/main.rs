@@ -24,6 +24,7 @@ fn usage() -> ! {
          sigil-earth verify  [--out DIR] | verify --remote https://sigilgraph.org [--viewing-key HEX]\n  \
          sigil-earth attest  --seed-file FILE [--out DIR] [--fluxc PATH] [--amount N] [--dry-run]\n  \
          sigil-earth buzz    --text \"...\" [--channel sigil]\n  \
+         sigil-earth push    --seed-file FEEDER.seed [--node URL] [--fee N] [--dry-run] [--state FILE]\n  \
          sigil-earth publish [--data DIR] [--nodes URL,URL] [--aether-store DIR] [--db DIR] [--search-index FILE] [--state FILE] [--dry-run] [--allow-unattested]",
         sigil_earth::VERSION
     );
@@ -140,6 +141,19 @@ fn main() -> Result<()> {
             let rep = sigil_earth::publish::run(&o)?;
             println!("{}", serde_json::to_string_pretty(&rep)?);
             if rep["ok"] == true { Ok(()) } else { Err(anyhow!("publish: at least one node refused — see report")) }
+        }
+        "push" => {
+            let o = sigil_earth::push::Opts {
+                data: out_dir,
+                node: opt(&args, "--node").unwrap_or_else(|| sigil_earth::push::DEFAULT_NODE.into()),
+                seed_file: PathBuf::from(opt(&args, "--seed-file").ok_or_else(|| anyhow!("push needs --seed-file (the delegated feeder wallet)"))?),
+                fee: opt(&args, "--fee").and_then(|s| s.parse().ok()).unwrap_or(0),
+                dry_run: flag(&args, "--dry-run"),
+                state: PathBuf::from(opt(&args, "--state").unwrap_or_else(|| format!("{STATE_DIR}/gauge-push.json"))),
+            };
+            let rep = sigil_earth::push::run(&o)?;
+            println!("{}", serde_json::to_string_pretty(&rep)?);
+            if rep["ok"] == true { Ok(()) } else { Err(anyhow!("push: at least one feed refused — see results (feeder not delegated / gate dormant?)")) }
         }
         "buzz" => {
             let text = opt(&args, "--text").ok_or_else(|| anyhow!("buzz needs --text"))?;

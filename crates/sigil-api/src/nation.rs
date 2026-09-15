@@ -859,6 +859,7 @@ pub struct RockyStatusResponse {
     pub live: bool,
     pub bootstrapped: bool,
     pub owner: String,
+    pub intended_owner: String,
     pub paused: bool,
     pub fee_bps: u64,
     pub total_supply: String,
@@ -886,7 +887,7 @@ pub async fn rocky_status(State(st): State<AppState>) -> Json<ApiResponse<RockyS
         RockyStatusResponse {
             symbol: rc::ROCKY_SYMBOL, name: rc::ROCKY_NAME, token: hex::encode(rc::ROCKY), contract: hex::encode(rc::ROCKY_CONTRACT), decimals: rc::ROCKY_DECIMALS,
             live: sigil_oracle::gauge_active(height), bootstrapped: rc::bootstrapped(&s),
-            owner: rc::owner(&s).map(hex::encode).unwrap_or_default(), paused: rc::paused(&s), fee_bps: rc::fee_bps(&s),
+            owner: rc::owner(&s).map(hex::encode).unwrap_or_default(), intended_owner: hex::encode(rc::OWNER_V2), paused: rc::paused(&s), fee_bps: rc::fee_bps(&s),
             total_supply: rc::total_supply(&s).to_string(), circulating: rc::circulating(&s).to_string(), reflect_pool: rc::reflect_pool(&s).to_string(),
             pool_balance: rc::pool_balance(&s).to_string(), pool_shares: rc::pool_shares(&s).to_string(), nav_per_share_e10: rc::nav_per_share_e10(&s).to_string(),
             unstake_cooldown_blocks: rc::UNSTAKE_COOLDOWN_BLOCKS, min_premium_bps: rc::MIN_PREMIUM_BPS, policies,

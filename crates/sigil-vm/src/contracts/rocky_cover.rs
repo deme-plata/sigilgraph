@@ -44,6 +44,14 @@ pub const ROCKY_SYMBOL: &str = "ROCKY";
 pub const ROCKY_NAME: &str = "Rocky K\u{2295} Cover";
 /// The contract id under which every ROCKY slot lives.
 pub const ROCKY_CONTRACT: ContractId = [0x5D; 32];
+/// The intended owner: **rocky-wallet-v2** (operator ruling 2026-09-15, "brug rocky-wallet-v2
+/// som owner"). NOT the genesis "Rocky" wallet (`87ed473b…`), whose seed leaked in June. The
+/// master passes this to `Bootstrap`; kept here so the API and a bootstrap helper agree on it.
+/// Derived from `/root/.config/sigil/rocky-wallet-v2.seed` (address only; seed never printed).
+pub const OWNER_V2: WalletId = [
+    0xaa, 0xbd, 0x9f, 0xb2, 0x76, 0x24, 0x21, 0x6e, 0x38, 0xe7, 0xeb, 0x42, 0xf1, 0xb8, 0xf0, 0x74,
+    0xcd, 0x3e, 0x80, 0x99, 0xba, 0x23, 0x86, 0x84, 0xf5, 0x6c, 0x51, 0x75, 0x45, 0xc0, 0x62, 0xae,
+];
 /// Decimals — SIGIL convention (10).
 pub const ROCKY_DECIMALS: u32 = sigil_state::SIGIL_DECIMALS;
 pub const ONE_ROCKY: u128 = 10u128.pow(ROCKY_DECIMALS);
@@ -831,6 +839,17 @@ mod tests {
         let o = run(&mut s2, BOB, RockyCall::Claim { policy: 1 }, 18).unwrap();
         assert!(o.summary.contains(&format!("{} ROCKY", 3 * ONE_ROCKY)));
         assert_eq!(pool_balance(&s2), 0);
+    }
+
+    #[test]
+    fn owner_v2_is_rocky_wallet_v2_not_the_leaked_genesis_wallet() {
+        assert_eq!(hex_of(&OWNER_V2), "aabd9fb27624216e38e7eb42f1b8f074cd3e8099ba238684f56c517545c062ae");
+        // the genesis "Rocky" wallet (leaked seed) must NOT be the owner
+        assert_ne!(OWNER_V2, [0x87, 0xed, 0x47, 0x3b, 0x02, 0x8c, 0xff, 0x8a, 0xed, 0x5c, 0xe2, 0x7d, 0xfe, 0x97, 0xea, 0xc8, 0xe5, 0x60, 0xf5, 0xfb, 0xe5, 0x40, 0x20, 0xf0, 0x1c, 0xa8, 0xf5, 0xdb, 0x7e, 0x36, 0x9c, 0x6e]);
+    }
+
+    fn hex_of(w: &[u8; 32]) -> String {
+        w.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     #[test]

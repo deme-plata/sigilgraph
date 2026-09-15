@@ -23,7 +23,8 @@ fn usage() -> ! {
          sigil-earth alert   --inject-k X [--out DIR] [--dry-run] [--webhook] [--buzz]\n  \
          sigil-earth verify  [--out DIR] | verify --remote https://sigilgraph.org [--viewing-key HEX]\n  \
          sigil-earth attest  --seed-file FILE [--out DIR] [--fluxc PATH] [--amount N] [--dry-run]\n  \
-         sigil-earth buzz    --text \"...\" [--channel sigil]",
+         sigil-earth buzz    --text \"...\" [--channel sigil]\n  \
+         sigil-earth publish [--data DIR] [--nodes URL,URL] [--aether-store DIR] [--db DIR] [--search-index FILE] [--state FILE] [--dry-run] [--allow-unattested]",
         sigil_earth::VERSION
     );
     std::process::exit(2)
@@ -121,6 +122,22 @@ fn main() -> Result<()> {
             } else {
                 Err(anyhow!("anchor not executed"))
             }
+        }
+        "publish" => {
+            let o = sigil_earth::publish::Opts {
+                data: out_dir,
+                nodes: opt(&args, "--nodes").unwrap_or_else(|| sigil_earth::publish::DEFAULT_NODES.into())
+                    .split(',').map(|s| s.trim().trim_end_matches('/').to_string()).filter(|s| !s.is_empty()).collect(),
+                aether_store: PathBuf::from(opt(&args, "--aether-store").or_else(|| std::env::var("FLUX_AETHER_STORE").ok()).unwrap_or_else(|| sigil_earth::publish::DEFAULT_AETHER_STORE.into())),
+                db: PathBuf::from(opt(&args, "--db").unwrap_or_else(|| sigil_earth::publish::DEFAULT_DB.into())),
+                search_index: PathBuf::from(opt(&args, "--search-index").unwrap_or_else(|| sigil_earth::publish::DEFAULT_SEARCH_INDEX.into())),
+                state: PathBuf::from(opt(&args, "--state").unwrap_or_else(|| format!("{STATE_DIR}/publish.json"))),
+                dry_run: flag(&args, "--dry-run"),
+                allow_unattested: flag(&args, "--allow-unattested"),
+            };
+            let rep = sigil_earth::publish::run(&o)?;
+            println!("{}", serde_json::to_string_pretty(&rep)?);
+            if rep["ok"] == true { Ok(()) } else { Err(anyhow!("publish: at least one node refused — see report")) }
         }
         "buzz" => {
             let text = opt(&args, "--text").ok_or_else(|| anyhow!("buzz needs --text"))?;

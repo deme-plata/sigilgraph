@@ -21,6 +21,7 @@ pub mod fetch;
 pub mod forecast;
 pub mod model;
 pub mod out;
+pub mod publish;
 pub mod remote;
 pub mod serve;
 pub mod time;

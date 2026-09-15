@@ -4326,6 +4326,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "h2"
+version = "0.4.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "fnv",
+ "futures-core",
+ "futures-sink",
+ "http 1.4.1",
+ "indexmap 2.14.0",
+ "slab",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4644,7 +4663,7 @@ dependencies = [
  "futures-channel",
  "futures-core",
  "futures-util",
- "h2",
+ "h2 0.3.27",
  "http 0.2.12",
  "http-body 0.4.6",
  "httparse",
@@ -4668,6 +4687,7 @@ dependencies = [
  "bytes",
  "futures-channel",
  "futures-core",
+ "h2 0.4.19",
  "http 1.4.1",
  "http-body 1.0.1",
  "httparse",
@@ -7517,6 +7537,7 @@ dependencies = [
  "futures-channel",
  "futures-core",
  "futures-util",
+ "h2 0.4.19",
  "http 1.4.1",
  "http-body 1.0.1",
  "http-body-util",
@@ -8667,6 +8688,32 @@ dependencies = [
  "flux-sqisign",
  "hex",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "sigil-earth"
+version = "5.1.1"
+dependencies = [
+ "anyhow",
+ "axum",
+ "blake3",
+ "ed25519-dalek",
+ "flux-aether",
+ "flux-db",
+ "flux-search",
+ "flux-swarm-secret",
+ "futures-util",
+ "hex",
+ "rand 0.8.6",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sigil-shield",
+ "tokio",
+ "tokio-stream",
+ "tower-http 0.5.2",
+ "ureq",
 ]
 
 [[package]]

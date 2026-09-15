@@ -118,7 +118,7 @@ export function shell(): string {
           <div><h5>Build</h5><a href="/downloads/sigil-vm-src.tar.gz">Page source (.tar.gz)</a><a href="https://github.com/deme-plata/sigilgraph" target="_blank" rel="noopener">GitHub</a><a href="/sigil-top-openapi.json" target="_blank" rel="noopener">OpenAPI</a><a href="/flux-versions.html" target="_blank" rel="noopener">Flux versions</a></div>
         </div>
       </div>
-      <div class="foot-bottom"><span>© 2026 SIGIL Graph · sigilgraph.org</span><span id="footTs" class="mono"></span><span class="muted">Built with the Flux Vite engine · shipped through <span class="mono">ship.sh</span></span></div>
+      <div class="foot-bottom"><span>© 2026 SIGIL Graph · sigilgraph.org</span><span id="footTs" class="mono"></span><span class="muted">Built with the Flux Vite engine · shipped through <span class="mono">ship.sh</span></span><button class="foot-keys" id="footKeys">Keyboard <kbd>?</kbd></button></div>
     </footer>
   </main>
   <aside class="panel" id="panel">

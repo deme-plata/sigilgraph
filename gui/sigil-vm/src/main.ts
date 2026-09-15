@@ -160,6 +160,7 @@ document.addEventListener('click', (ev) => {
   if (ds.hero !== undefined) { heroIdx = Number(ds.hero); renderHero(); return }
   if (btn.id === 'chainChip') { $('#chainMenu').classList.toggle('open'); return }
   if (btn.id === 'retryNow') { poll(); return }
+  if (btn.id === 'footKeys') { openShortcuts(); return }
   if (btn.id === 'themeBtn') { theme = theme === 'dark' ? 'light' : 'dark'; applyTheme(theme); try { localStorage.setItem('sigilvm-theme', theme) } catch { /* */ } return }
   if (btn.id === 'panelBtn') { app.classList.toggle('panel-open'); try { localStorage.setItem('sigilvm-panel', app.classList.contains('panel-open') ? 'open' : 'closed') } catch { /* */ } return }
   if (btn.id === 'bnWallet') { ev.preventDefault(); app.classList.toggle('panel-open'); renderPanel(); return }
@@ -214,6 +215,13 @@ document.addEventListener('input', (ev) => {
 })
 document.addEventListener('keydown', (ev) => {
   if (ev.key === '/' && document.activeElement?.tagName !== 'INPUT') { ev.preventDefault(); ($('#q') as HTMLInputElement).focus() }
+  if (ev.key === '?' && document.activeElement?.tagName !== 'INPUT') { ev.preventDefault(); openShortcuts() }
+  if (document.activeElement?.tagName !== 'INPUT' && !ev.metaKey && !ev.ctrlKey) {
+    if (ev.key === 'w') { app.classList.toggle('panel-open') }
+    if (ev.key === 't') { theme = theme === 'dark' ? 'light' : 'dark'; applyTheme(theme); try { localStorage.setItem('sigilvm-theme', theme) } catch { /* */ } }
+    if (ev.key === 's') { $('#dex').scrollIntoView({ behavior: 'smooth' }) }
+    if (ev.key === 'g') { window.scrollTo({ top: 0, behavior: 'smooth' }) }
+  }
   if (ev.key === 'Escape') { closeModal(); $('#qres').classList.remove('open'); $('#chainMenu').classList.remove('open') }
   const list = document.querySelector('#modal.open .list') as HTMLElement | null
   if (list && (ev.key === 'ArrowDown' || ev.key === 'ArrowUp' || ev.key === 'Enter')) {
@@ -234,6 +242,14 @@ function openCollection(id: string): void { const c = snap?.collections.find((x)
 function openTokenPicker(which: 'from' | 'to'): void {
   if (!snap) return
   openModal(`<h4>Select a token <span class="muted" style="font-size:11px;font-weight:500">↑↓ Enter</span></h4><div class="list">${snap.tokens.map((t) => `<button data-pick="${t.id}" data-which="${which}"><img src="${t.icon}" alt=""><div><div class="s">${t.symbol}</div><div class="n">${ui.esc(t.name)}</div></div><span class="r">${balances[t.id] === undefined ? '' : fmt.num(balances[t.id], 4)}</span></button>`).join('')}</div>`)
+}
+function openShortcuts(): void {
+  openModal(`<h4>Keyboard shortcuts</h4><div class="keys">
+    <div><kbd>/</kbd><span>Search</span></div><div><kbd>?</kbd><span>This sheet</span></div>
+    <div><kbd>w</kbd><span>Toggle wallet panel</span></div><div><kbd>t</kbd><span>Toggle light / dark</span></div>
+    <div><kbd>s</kbd><span>Jump to Swap &amp; Tokens</span></div><div><kbd>g</kbd><span>Back to top</span></div>
+    <div><kbd>↑</kbd><kbd>↓</kbd><kbd>⏎</kbd><span>Pick a token</span></div><div><kbd>Esc</kbd><span>Close anything</span></div>
+  </div>`)
 }
 function openSlippage(): void {
   openModal(`<h4>Slippage tolerance</h4><div class="quick">${[0.1, 0.5, 1, 3].map((s) => `<button data-slip="${s}" class="${swapSt.slippage === s ? 'on' : ''}">${s}%</button>`).join('')}</div><p class="muted" style="font-size:12px">Applied by the wallet when it builds the proof. The desk shows the number; it does not sign.</p>`)

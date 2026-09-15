@@ -593,6 +593,12 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
 .bottomnav a.on { color: #fff; }
 .bottomnav a.on svg { color: var(--cyan); }
 
+.keys { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 18px; }
+.keys div { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); }
+.keys kbd, .foot-keys kbd { font-family: var(--mono); font-size: 11px; min-width: 24px; text-align: center; padding: 3px 6px; border-radius: 6px; border: 1px solid var(--line-2); background: var(--surface-3); color: var(--ink); box-shadow: 0 2px 0 rgba(0,0,0,.3); }
+.foot-keys { display: inline-flex; align-items: center; gap: 6px; color: var(--muted-2); font-size: 12px; }
+.foot-keys:hover { color: var(--ink); }
+
 /* ── responsive ─────────────────────────────────────────────────────── */
 @media (max-width: 1320px) {
   .navlinks { display: none; }

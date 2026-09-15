@@ -15,8 +15,8 @@
   --line-2: rgba(255, 255, 255, .14);
   --ink: #ffffff;
   --ink-2: #d6d6de;
-  --muted: #9a9aa6;
-  --muted-2: #6f6f7c;
+  --muted: #a4a4b0;
+  --muted-2: #7a7a88;
   --cyan: #00D9FF;
   --purple: #6B46C1;
   --violet: #8b5cf6;
@@ -220,6 +220,7 @@ img { display: block; }
 
 /* ── live ticker (marquee of what the chain just did) ───────────────── */
 .ticker { position: relative; overflow: hidden; height: 34px; margin: -6px 0 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent); -webkit-mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent); }
+.tk-track:empty { display: block; height: 34px; width: 100%; border-radius: 10px; background: linear-gradient(90deg, rgba(255,255,255,.04) 25%, rgba(255,255,255,.09) 50%, rgba(255,255,255,.04) 75%); background-size: 800px 100%; animation: shimmer 1.4s infinite linear; }
 .tk-track { display: inline-flex; align-items: center; height: 34px; white-space: nowrap; animation: marquee 60s linear infinite; will-change: transform; }
 .ticker:hover .tk-track { animation-play-state: paused; }
 @keyframes marquee { from { transform: translateX(0) } to { transform: translateX(-50%) } }
@@ -490,9 +491,13 @@ img { display: block; }
 .pempty .big svg { width: 40px; height: 40px; }
 .panel .pf { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; padding: 12px; border-top: 1px solid var(--line); }
 .panel .pf .btn { height: 40px; }
-.pact { display: flex; gap: 10px; align-items: flex-start; padding: 10px 8px; border-bottom: 1px solid var(--line); font-size: 12.5px; }
-.pact .t { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
-.pact .w { color: var(--ink-2); }
+.pact { display: flex; gap: 10px; align-items: center; padding: 9px 8px; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.pact .ic { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; background: rgba(255,255,255,.05); color: var(--muted); flex: 0 0 32px; }
+.pact .ic svg { width: 16px; height: 16px; }
+.pact .ic.blue { color: var(--cyan); } .pact .ic.gold { color: var(--gold-b); } .pact .ic.red { color: var(--bad); }
+.pact .w { color: #fff; font-weight: 600; min-width: 0; flex: 1; }
+.pact .w small { display: block; color: var(--muted); font-weight: 500; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pact .t { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; margin-left: auto; }
 
 /* ── footer / legend ────────────────────────────────────────────────── */
 .legend { margin-top: 44px; border-top: 1px solid var(--line); padding-top: 20px; color: var(--muted); font-size: 12.5px; display: grid; gap: 8px; }

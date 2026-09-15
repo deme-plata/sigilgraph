@@ -406,51 +406,14 @@ export function panelNfts(addr: string | null, s: Snapshot): string {
 
 export function panelActivity(s: Snapshot): string {
   const rows: string[] = []
-  const b = s.recent?.blocks.slice(0, 6) ?? []
-  for (const x of b) rows.push(`<div class="pact"><span class="t">#${fmt.int(x.height)}</span><span class="w">${x.is_blue ? 'blue' : 'red'} block · blue score ${fmt.int(x.blue_score)}</span></div>`)
-  for (const e of (s.docket?.entries ?? []).slice(-3).reverse()) rows.push(`<div class="pact"><span class="t">docket #${e.seq}</span><span class="w">${esc(e.kind)}</span></div>`)
+  const row = (ic: string, cls: string, main: string, sub: string, t: string) => rows.push(`<div class="pact"><span class="ic ${cls}">${ic}</span><span class="w">${main}<small>${sub}</small></span><span class="t">${t}</span></div>`)
+  for (const x of (s.recent?.blocks.slice(0, 8) ?? [])) row(I.grid, x.is_blue ? 'blue' : 'red', `Block ${fmt.int(x.height)}`, `${x.is_blue ? 'blue' : 'red'} · blue score ${fmt.int(x.blue_score)} · ${fmt.short(hex(x.producer), 4)}`, 'now')
+  for (const m of (s.miners?.miners ?? []).slice(0, 3)) row(I.coins, '', esc(m.rig || fmt.short(m.wallet, 6)), `${fmt.hps(m.hash_rate)} · ${m.shielded ? 'shielded' : 'transparent'}`, fmt.ago(m.last_seen_secs_ago))
+  for (const e of (s.docket?.entries ?? []).slice(-3).reverse()) row(I.book, 'gold', esc(e.kind.replace(/([A-Z])/g, ' $1').trim()), `docket #${e.seq} · ${fmt.short(e.leaf, 5)}`, e.height ? `blk ${fmt.int(e.height)}` : 'genesis')
   const a = s.earth?.attest_last?.anchor
-  if (a?.tx_hash) rows.push(`<div class="pact"><span class="t">${a.ts ? new Date(a.ts).toLocaleTimeString() : ''}</span><span class="w">K⊕ attest anchored · ${fmt.short(a.tx_hash, 6)}</span></div>`)
+  if (a?.tx_hash) row(I.eye, 'gold', 'K⊕ attestation anchored', `${a.amount ?? '—'} glyphs · ${fmt.short(a.tx_hash, 6)}`, a.ts ? new Date(a.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '')
+  if (s.head.ok) row(I.swap, '', 'Finality certificate', `${s.head.finalityGate} · height ${fmt.int(s.head.finalityHeight)} · ${s.head.committee} validators`, `${fmt.int(s.head.lagBlocks)} blk`)
   return rows.join('') || `<div class="pempty">No activity read yet.</div>`
-}
-
-export function collectionModal(c: Collection, s: Snapshot): string {
-  const items: string[] = []
-  const item = (t: string, sub: string, m = '', h = '') => items.push(`<div class="cm-item"><div class="t">${esc(t)}</div><div class="s">${esc(sub)}</div>${m ? `<div class="m">${m}</div>` : ''}${h ? `<div class="h" title="${esc(h)}">${esc(h)}</div>` : ''}</div>`)
-  switch (c.id) {
-    case 'rigs': for (const m of (s.miners?.miners ?? []).slice().sort((a, b) => b.hash_rate - a.hash_rate)) item(m.rig || fmt.short(m.wallet, 6), `${m.kind.toUpperCase()} · ${m.shielded ? 'shielded' : 'transparent'} · ${fmt.ago(m.last_seen_secs_ago)}`, fmt.hps(m.hash_rate) + ` <span class="muted">${s.miners && s.miners.net_hps ? (m.hash_rate / s.miners.net_hps * 100).toFixed(1) + '%' : ''}</span>`, m.wallet); break
-    case 'honours': case 'bench': {
-      const want = c.id === 'honours' ? 'HonourConferred' : 'JusticeAppointed'
-      for (const e of (s.docket?.entries ?? []).filter((x) => x.kind === want)) { const ev = e.event as { order?: string; citation?: string; name?: string; recipient?: number[]; justice?: number[] }; item(ev.order || ev.name || `${e.kind} #${e.seq}`, ev.citation ? ev.citation.slice(0, 140) : (e.height ? `block ${fmt.int(e.height)}` : 'genesis bench'), `docket #${e.seq}`, e.leaf) }
-      break }
-    case 'blocks': for (const b of (s.recent?.blocks ?? []).slice(0, 24)) item(`Block ${fmt.int(b.height)}`, `${b.is_blue ? 'blue' : 'red'} · blue score ${fmt.int(b.blue_score)}`, `producer ${fmt.short(hex(b.producer), 6)}`, hex(b.hash)); break
-    case 'notes': { const h = s.head; item('Notes in pool', 'sealed 32-byte notes', fmt.int(h.notes)); item('Capacity (epoch 0)', 'Merkle leaves', fmt.int(h.capacity)); item('Free leaves', 'capacity − notes', fmt.int(h.capacity - h.notes)); item('Nullifiers', 'notes spent, ever', fmt.int(h.nullifiers)); item('Registered wallets', 'published viewing keys', fmt.int(h.registered)); item('Value locked', 'sum of shielded deposits', fmt.num(h.valueLocked, 4) + ' SIGIL'); break }
-    case 'earth': { const a = s.earth?.attest_last?.anchor; if (a) { item('Last attestation', a.ts ? new Date(a.ts).toLocaleString() : '', `${a.amount ?? '—'} glyphs + ${a.fee ? fmt.int(a.fee) : '—'} fee`, a.tx_hash || ''); item('Memo', 'sigil-earth-attest-v1', esc(a.memo || '—')); if (a.wallet) item('Attester wallet', 'published viewing key', '', a.wallet) } else item('No attestation read', 'sigil-earth offline?'); break }
-    case 'treasury': { item('Treasury', 'nation welfare vault', fmt.num(s.head.treasurySigil, 4) + ' SIGIL'); item('Payout asset', 'stipends are paid in', 'USDS'); item('Financed by', 'dev-fee carve', '200 of 750 bps'); break }
-    case 'rocky': { const r = s.rocky; if (r) { item(r.symbol, r.name, r.live ? 'live' : 'gated'); item('Total supply', 'minted so far', fmt.num(glyphsToSigil(r.total_supply, r.decimals), 4)); item('Pool balance', 'cover pool', fmt.num(glyphsToSigil(r.pool_balance, r.decimals), 4)); item('Fee', 'reflection fee', r.fee_bps + ' bps'); item('Policies', 'cover policies written', String(r.policies.length)); item('Contract', 'native sigil-vm contract', '', r.contract) } break }
-    case 'bridge': { const b = s.collections.find((x) => x.id === 'bridge'); item('Locks', 'SIGIL locked for the Polygon leg', String(b?.items ?? 0)); item('Vault', 'lock destination', c.floor); item('Relayer', 'held — mints wait', c.volume); break }
-    case 'coins': item('No batch anchored', 'the collection is empty on chain', '0 coins'); item('Plan', 'NTAG215 · first tap wins', '1–10 SIGIL each'); break
-    default: item('Illustrative', 'no on-chain items for this collection', '—')
-  }
-  return `<div class="cm-head" style="background-image:url('${c.cover}')"><button class="ibtn x" id="modalClose">${I.x}</button></div>
-    <div class="cm-title"><img src="${c.cover}" alt=""><div><h3>${esc(c.name)}${ver(c.verified)}</h3><div class="by">${esc(c.by || '')} ${prov(c.provenance)}</div></div></div>
-    <div class="cm-stats"><div class="cell"><div class="k">Floor</div><div class="v">${esc(c.floor)}</div></div><div class="cell"><div class="k">Items</div><div class="v">${c.items === null ? '—' : fmt.int(c.items)}</div></div><div class="cell"><div class="k">Owners</div><div class="v">${c.owners === null ? '—' : fmt.int(c.owners)}</div></div><div class="cell"><div class="k">Volume</div><div class="v">${esc(c.volume)}</div></div></div>
-    <div class="cm-body"><p class="blurb">${esc(c.blurb)}</p><div class="cm-items">${items.join('') || '<div class="pempty">Nothing to list.</div>'}</div></div>
-    <div class="cm-foot"><a class="btn primary" href="${c.link}" target="_blank" rel="noopener">Open source page ↗</a><button class="btn ghost" id="modalClose2">Close</button></div>`
-}
-
-export function ticker(s: Snapshot): string {
-  const items: string[] = []
-  const it = (icon: string, label: string, val: string, cls = '') => items.push(`<span class="tk-item ${cls}"><span class="tk-ic">${icon}</span><span class="tk-l">${label}</span><span class="tk-v">${val}</span></span>`)
-  for (const b of (s.recent?.blocks ?? []).slice(0, 6)) it(I.grid, `block ${fmt.int(b.height)}`, `${b.is_blue ? 'blue' : 'red'} · score ${fmt.int(b.blue_score)} · ${fmt.short(hex(b.producer), 4)}`, b.is_blue ? 'blue' : 'red')
-  for (const m of (s.miners?.miners ?? []).slice(0, 4)) it(I.coins, m.rig || fmt.short(m.wallet, 6), `${fmt.hps(m.hash_rate)} · ${fmt.ago(m.last_seen_secs_ago)}`)
-  const a = s.earth?.attest_last?.anchor
-  if (a?.tx_hash) it(I.eye, 'K⊕ attest', `${a.amount ?? '—'} glyphs · ${fmt.short(a.tx_hash, 6)}`, 'gold')
-  for (const e of (s.docket?.entries ?? []).slice(-2)) it(I.book, `docket #${e.seq}`, e.kind, 'gold')
-  if (s.head.ok) it(I.swap, 'finality', `${s.head.finalityGate} · ${fmt.int(s.head.lagBlocks)} blk behind tip`)
-  if (!items.length) return ''
-  const row = items.join('')
-  return row + row // duplicated so the marquee loops seamlessly
 }
 
 export function legend(s: Snapshot): string {

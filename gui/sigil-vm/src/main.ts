@@ -35,6 +35,22 @@ try { const saved = localStorage.getItem('sigilvm-theme'); theme = saved === 'li
 applyTheme(theme)
 try { if (localStorage.getItem('sigilvm-panel') === 'open') app.classList.add('panel-open') } catch { /* */ }
 if (innerWidth >= 1600 && !app.classList.contains('panel-open')) app.classList.add('panel-open')
+// One door for the wallet panel. In drawer mode (≤1100px it overlays the page) it behaves like a dialog: focus moves
+// in, the page behind goes inert, and closing hands focus back to whoever opened it.
+let panelOpener: HTMLElement | null = null
+function setPanel(open: boolean, persist = true): void {
+  const was = app.classList.contains('panel-open')
+  app.classList.toggle('panel-open', open)
+  if (persist) { try { localStorage.setItem('sigilvm-panel', open ? 'open' : 'closed') } catch { /* */ } }
+  const drawer = innerWidth <= 1100
+  if (open && !was) {
+    panelOpener = document.activeElement as HTMLElement | null
+    if (drawer) { $('#main').setAttribute('inert', ''); document.querySelector('.topbar')?.setAttribute('inert', ''); document.querySelector('.bottomnav')?.removeAttribute('inert'); setTimeout(() => (document.getElementById('panelClose') || document.querySelector<HTMLElement>('.panel button'))?.focus(), 30) }
+  } else if (!open && was) {
+    $('#main').removeAttribute('inert'); document.querySelector('.topbar')?.removeAttribute('inert')
+    if (drawer && panelOpener && document.contains(panelOpener)) panelOpener.focus()
+  }
+}
 
 function toast(msg: string, cls = ''): void {
   const host = $('#toasts')
@@ -195,7 +211,7 @@ async function poll(): Promise<void> {
 document.addEventListener('click', (ev) => {
   const t = ev.target as HTMLElement
   if (t.id === 'modal') { closeModal(); return }
-  if (t.id === 'panelScrim') { app.classList.remove('panel-open'); try { localStorage.setItem('sigilvm-panel', 'closed') } catch { /* */ } return }
+  if (t.id === 'panelScrim') { setPanel(false); return }
   // th before tr: a header click used to resolve to its <tr>, so th[data-sort] was never found and the token table never re-sorted
   const btn = t.closest('th[data-sort], button, a, tr, [data-hero], [data-coll], [data-swap], [data-copy]') as HTMLElement | null
   if (!btn) return
@@ -205,13 +221,13 @@ document.addEventListener('click', (ev) => {
   if (btn.id === 'retryNow') { poll(); return }
   if (btn.id === 'footKeys') { openShortcuts(); return }
   if (btn.id === 'themeBtn') { theme = theme === 'dark' ? 'light' : 'dark'; applyTheme(theme); try { localStorage.setItem('sigilvm-theme', theme) } catch { /* */ } return }
-  if (btn.id === 'panelBtn') { app.classList.toggle('panel-open'); try { localStorage.setItem('sigilvm-panel', app.classList.contains('panel-open') ? 'open' : 'closed') } catch { /* */ } return }
-  if (btn.id === 'bnWallet') { ev.preventDefault(); app.classList.toggle('panel-open'); renderPanel(); return }
+  if (btn.id === 'panelBtn') { setPanel(!app.classList.contains('panel-open')); return }
+  if (btn.id === 'bnWallet') { ev.preventDefault(); setPanel(!app.classList.contains('panel-open'), false); renderPanel(); return }
   if (btn.id === 'swapConnect' || btn.id === 'swapConnect2') { openWalletModal(); return }
-  if (btn.id === 'walletBtn') { if (wallet) { app.classList.add('panel-open'); return } openWalletModal(); return }
-  if (btn.id === 'panelClose') { app.classList.remove('panel-open'); try { localStorage.setItem('sigilvm-panel', 'closed') } catch { /* */ } return }
+  if (btn.id === 'walletBtn') { if (wallet) { setPanel(true, false); return } openWalletModal(); return }
+  if (btn.id === 'panelClose') { setPanel(false); return }
   if (btn.id === 'pDisconnect') { wallet = null; try { localStorage.removeItem('sigilvm-wallet') } catch { /* */ } for (const k in balances) delete balances[k]; renderChain(); renderPanel(); renderSwap(); return }
-  if (btn.id === 'bellBtn') { $('#bellBadge').hidden = true; panelTab = 'activity'; app.classList.add('panel-open'); renderPanel(); return }
+  if (btn.id === 'bellBtn') { $('#bellBadge').hidden = true; panelTab = 'activity'; setPanel(true, false); renderPanel(); return }
   if (btn.id === 'cartBtn') { toast('The cart lights up when listings exist on SIGIL VM — none do yet.', 'warn'); return }
   if (ds.cmtab) { const box = $('#modalBox'); box.querySelectorAll('.cm-tabs button').forEach((b) => b.classList.toggle('on', b === btn)); box.querySelectorAll<HTMLElement>('.cm-pane').forEach((pn) => { pn.hidden = pn.dataset.pane !== ds.cmtab }); return }
   if (ds.ptok) { tokSt.open = ds.ptok; renderTokens(); const row = document.querySelector(`#tokens tr[data-tok="${ds.ptok}"]`); (row || $('#tokens')).scrollIntoView({ behavior: 'smooth', block: 'center' }); return }
@@ -247,7 +263,7 @@ document.addEventListener('click', (ev) => {
   if (btn.id === 'modalClose' || btn.id === 'modalClose2' || btn.closest('#modal') === btn) { closeModal(); return }
   if (ds.pick && ds.which) { if (ds.which === 'from') { if (swapSt.to === ds.pick) swapSt.to = swapSt.from; swapSt.from = ds.pick } else { if (swapSt.from === ds.pick) swapSt.from = swapSt.to; swapSt.to = ds.pick } closeModal(); renderSwap(); return }
   if (ds.slip) { swapSt.slippage = Number(ds.slip); closeModal(); renderSwap(); return }
-  if (btn.id === 'walletUse') { const inp = $('#walletIn') as HTMLInputElement; const v = inp.value.trim().toLowerCase().replace(/^sigil1s:/, '').split(':')[0]; if (!/^[0-9a-f]{64}$/.test(v)) { inp.classList.add('over'); inp.setAttribute('aria-invalid', 'true'); const hint = $('#walletHint'); if (hint) hint.textContent = `That is ${v.length} characters — a SIGIL wallet id is 64 hex characters (0-9, a-f).`; inp.focus(); return } wallet = v; try { localStorage.setItem('sigilvm-wallet', v) } catch { /* */ } closeModal(); app.classList.add('panel-open'); poll(); return }
+  if (btn.id === 'walletUse') { const inp = $('#walletIn') as HTMLInputElement; const v = inp.value.trim().toLowerCase().replace(/^sigil1s:/, '').split(':')[0]; if (!/^[0-9a-f]{64}$/.test(v)) { inp.classList.add('over'); inp.setAttribute('aria-invalid', 'true'); const hint = $('#walletHint'); if (hint) hint.textContent = `That is ${v.length} characters — a SIGIL wallet id is 64 hex characters (0-9, a-f).`; inp.focus(); return } wallet = v; try { localStorage.setItem('sigilvm-wallet', v) } catch { /* */ } closeModal(); setPanel(true, false); poll(); return }
   const nav = btn.closest('[data-nav]') as HTMLElement | null
   if (nav) { document.querySelectorAll('[data-nav]').forEach((a) => a.classList.toggle('on', (a as HTMLElement).dataset.nav === nav.dataset.nav)) }
 })
@@ -284,13 +300,13 @@ document.addEventListener('keydown', (ev) => {
   if (ev.key === '/' && document.activeElement?.tagName !== 'INPUT') { ev.preventDefault(); ($('#q') as HTMLInputElement).focus() }
   if (ev.key === '?' && document.activeElement?.tagName !== 'INPUT') { ev.preventDefault(); openShortcuts() }
   if (document.activeElement?.tagName !== 'INPUT' && !ev.metaKey && !ev.ctrlKey) {
-    if (ev.key === 'w') { app.classList.toggle('panel-open') }
+    if (ev.key === 'w') { setPanel(!app.classList.contains('panel-open'), false) }
     if (ev.key === 't') { theme = theme === 'dark' ? 'light' : 'dark'; applyTheme(theme); try { localStorage.setItem('sigilvm-theme', theme) } catch { /* */ } }
     if (ev.key === 's') { $('#dex').scrollIntoView({ behavior: 'smooth' }) }
     if (ev.key === 'g') { window.scrollTo({ top: 0, behavior: 'smooth' }) }
   }
   const modalWasOpen = $('#modal').classList.contains('open')
-  if (ev.key === 'Escape') { closeModal(); $('#qres').classList.remove('open'); $('#chainMenu').classList.remove('open'); if (innerWidth <= 1100 && app.classList.contains('panel-open') && !modalWasOpen) { app.classList.remove('panel-open'); try { localStorage.setItem('sigilvm-panel', 'closed') } catch { /* */ } } }
+  if (ev.key === 'Escape') { closeModal(); $('#qres').classList.remove('open'); $('#chainMenu').classList.remove('open'); if (innerWidth <= 1100 && app.classList.contains('panel-open') && !modalWasOpen) setPanel(false) }
   if (ev.key === 'Enter' && document.activeElement?.id === 'q') { const first = $('#qres').querySelector('.r') as HTMLElement | null; if (first) { first.click(); $('#qres').classList.remove('open') } }
   const list = document.querySelector('#modal.open .list') as HTMLElement | null
   if (list && (ev.key === 'ArrowDown' || ev.key === 'ArrowUp' || ev.key === 'Enter')) {
@@ -383,7 +399,7 @@ function globalSearch(q: string): void {
   if (/^[0-9a-f]{64}$/.test(q)) rows.push(`<div class="h">Wallet</div><div class="r" id="qWallet"><img src="${avatarSvg(q, q.slice(0, 1).toUpperCase())}" alt=""><div><div class="n mono">${fmt.short(q, 8)}</div><div class="s">open in panel · balances and records</div></div></div>`)
   box.innerHTML = rows.join('') || '<div class="h">No matches on this node</div>'
   box.classList.add('open')
-  const qw = box.querySelector('#qWallet'); if (qw) qw.addEventListener('click', () => { wallet = q; try { localStorage.setItem('sigilvm-wallet', q) } catch { /* */ } app.classList.add('panel-open'); box.classList.remove('open'); poll() })
+  const qw = box.querySelector('#qWallet'); if (qw) qw.addEventListener('click', () => { wallet = q; try { localStorage.setItem('sigilvm-wallet', q) } catch { /* */ } setPanel(true, false); box.classList.remove('open'); poll() })
 }
 
 $('#hero').addEventListener('mouseenter', () => { heroHover = true })
@@ -445,7 +461,7 @@ toTop.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smoot
 
 // ── boot ──────────────────────────────────────────────────────────────────
 try { const w = localStorage.getItem('sigilvm-wallet'); if (w) wallet = w } catch { /* */ }
-try { const qw = new URLSearchParams(location.search).get('wallet'); if (qw && /^[0-9a-f]{64}$/i.test(qw)) { wallet = qw.toLowerCase(); app.classList.add('panel-open'); localStorage.setItem('sigilvm-wallet', wallet) } else if (qw) { setTimeout(() => toast(`Ignored ?wallet=${qw.slice(0, 12)}${qw.length > 12 ? '…' : ''} — a SIGIL wallet id is 64 hex characters (this is ${qw.length}).`, 'warn'), 400) } } catch { /* */ }
+try { const qw = new URLSearchParams(location.search).get('wallet'); if (qw && /^[0-9a-f]{64}$/i.test(qw)) { wallet = qw.toLowerCase(); setPanel(true, false); localStorage.setItem('sigilvm-wallet', wallet) } else if (qw) { setTimeout(() => toast(`Ignored ?wallet=${qw.slice(0, 12)}${qw.length > 12 ? '…' : ''} — a SIGIL wallet id is 64 hex characters (this is ${qw.length}).`, 'warn'), 400) } } catch { /* */ }
 poll()
 setInterval(() => { if (!document.hidden) poll() }, 10_000)
 document.addEventListener('visibilitychange', () => { if (!document.hidden) poll() })

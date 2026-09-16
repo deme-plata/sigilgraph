@@ -421,7 +421,7 @@ document.addEventListener('click', (ev) => { const t = ev.target as HTMLElement;
 // ── modals ────────────────────────────────────────────────────────────────
 let modalOpener: HTMLElement | null = null
 function openModal(html: string, cls = ''): void {
-  const box = $('#modalBox'); box.className = 'box ' + cls; box.innerHTML = (cls ? '' : `<button class="ibtn x" id="modalClose">${I.x}</button>`) + html
+  const box = $('#modalBox'); box.className = 'box ' + cls; box.innerHTML = (cls ? '' : `<button class="ibtn x" id="modalClose" aria-label="Close" title="Close (Esc)">${I.x}</button>`) + html
   modalOpener = document.activeElement as HTMLElement | null
   $('#chainMenu').classList.remove('open'); $('#qres').classList.remove('open'); pv.hidden = true // popovers close under a dialog
   const modal = $('#modal'); modal.classList.add('open'); modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true')

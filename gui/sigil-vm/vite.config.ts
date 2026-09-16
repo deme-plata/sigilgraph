@@ -13,6 +13,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         'sigil-vm': resolve(__dirname, 'sigil-vm.html'),
+        'sigil-vm-showcase': resolve(__dirname, 'sigil-vm-showcase.html'),
         index: resolve(__dirname, 'index.html'),
       },
       output: {

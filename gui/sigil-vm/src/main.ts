@@ -24,6 +24,7 @@ const tokSt: ui.TokenTableState = { q: '', filter: 'all', sort: 'supply', dir: '
 let collapsed = false
 let cat = 'all'
 
+try { if (new URLSearchParams(location.search).get('embed')) app.classList.add('embed') } catch { /* */ }
 try { wallet = localStorage.getItem('sigil-wallet-address') } catch { /* blocked */ }
 // theme: saved choice, else the OS preference; the toggle flips and persists
 function applyTheme(t: 'dark' | 'light'): void { document.documentElement.setAttribute('data-theme', t); const b = document.getElementById('themeBtn'); if (b) b.innerHTML = t === 'dark' ? I.sun : I.moon }

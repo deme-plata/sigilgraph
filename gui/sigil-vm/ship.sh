@@ -22,8 +22,9 @@ echo "▶ pre-render snapshot into dist/sigil-vm.html (readable without JavaScri
 node "$HERE/snapshot.mjs"
 echo "▶ deploy → $SITE (SIGIL root, additive)"
 cp dist/sigil-vm.html "$SITE/sigil-vm.html"
+cp dist/sigil-vm-showcase.html "$SITE/sigil-vm-showcase.html"
 cp dist/assets/sigil-vm-*.js dist/assets/sigil-vm-*.css "$SITE/assets/"
-for f in sigil-vm.html $(cd dist && ls assets/sigil-vm-*); do
+for f in sigil-vm.html sigil-vm-showcase.html $(cd dist && ls assets/sigil-vm-*); do
   code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "https://sigilgraph.org/$f"); echo "  $f $code"; [ "$code" = 200 ] || exit 1
 done
 echo "▶ commit + push"

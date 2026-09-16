@@ -244,7 +244,7 @@ export function dropCard(d: Drop): string {
   const st: Record<Drop['status'], string> = { live: 'chip live', minting: 'chip derived', upcoming: 'chip gold', blocked: 'chip bad' }
   const lbl: Record<Drop['status'], string> = { live: 'live', minting: 'minting', upcoming: 'upcoming', blocked: 'blocked' }
   return `<a class="card drop wide" href="${d.link}" target="_blank" rel="noopener">
-    <div class="img" style="background-image:url('${d.cover}')"><span class="prov">${prov(d.provenance)}</span><span class="status ${st[d.status]}"><i class="d"></i>${lbl[d.status]}</span><span class="cta"><span class="cta-blurb">${esc(d.detail)}</span><span class="cta-btn">Open drop ↗</span></span></div>
+    <div class="img" style="background-image:url('${d.cover}')"><span class="prov">${prov(d.provenance)}</span>${d.status === 'live' && d.provenance === 'live' ? '' : `<span class="status ${st[d.status]}"><i class="d"></i>${lbl[d.status]}</span>`}<span class="cta"><span class="cta-blurb">${esc(d.detail)}</span><span class="cta-btn">Open drop ↗</span></span></div>
     <div class="meta">
       <div class="name">${esc(d.name)}</div>
       <div class="when"${d.countdown ? ` data-cd-target="${d.countdown.target}" data-cd-height="${d.countdown.height}" data-cd-rate="${d.countdown.blkPerSec ?? ''}" data-cd-at="${d.countdown.at}"` : ''}>${esc(d.when)}</div>

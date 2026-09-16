@@ -121,6 +121,7 @@ img { display: block; }
 .chip.gold { color: var(--gold-b); border-color: rgba(212,175,55,.4); background: rgba(212,175,55,.1); }
 .chip.bad { color: var(--bad); border-color: rgba(240,85,77,.4); background: rgba(240,85,77,.08); }
 .chip .d { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
+.card .img .chip, .hero .eyebrow .chip { background: rgba(10,10,14,.62); backdrop-filter: blur(6px); } /* chips sit on artwork — an 8% tint over a white glyph stroke made PRETEND unreadable */
 .up { color: var(--ok); } .down { color: var(--bad); } .flat { color: var(--muted); }
 .mono { font-family: var(--mono); }
 .muted { color: var(--muted); }

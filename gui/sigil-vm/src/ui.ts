@@ -446,9 +446,18 @@ export function panelNfts(addr: string | null, s: Snapshot): string {
   return `<div class="pgrid">${mine.map((n) => `<button class="pnft" data-coll="${n.id}"${n.cite ? ` title="${esc(n.cite)}"` : ''}><div class="img" style="background-image:url('${n.cover}')"></div><div class="m"><div class="n">${esc(n.name)}</div><div class="c">${esc(n.coll)}</div></div></button>`).join('')}</div>`
 }
 
-export function panelActivity(s: Snapshot): string {
+export function panelActivity(s: Snapshot, mine: string | null = null): string {
   const rows: string[] = []
-  const row = (ic: string, cls: string, main: string, sub: string, t: string, coll = '') => rows.push(`<button class="pact"${coll ? ` data-coll="${coll}"` : ''}><span class="ic ${cls}">${ic}</span><span class="w">${main}<small>${sub}</small></span><span class="t">${t}</span></button>`)
+  const row = (ic: string, cls: string, main: string, sub: string, t: string, coll = '', you = false) => rows.push(`<button class="pact${you ? ' you' : ''}"${coll ? ` data-coll="${coll}"` : ''}><span class="ic ${cls}">${ic}</span><span class="w">${main}<small>${sub}</small></span><span class="t">${t}</span></button>`)
+  // the connected wallet's own records first (OpenSea leads a wallet's activity with the wallet's own), then the chain's
+  if (mine) {
+    const before = rows.length
+    for (const e of (s.docket?.entries ?? []).slice().reverse()) { const ev = e.event as { justice?: number[]; recipient?: number[]; order?: string; rank?: string }; if (hex(ev.justice ?? ev.recipient) !== mine) continue; row(I.book, 'gold', e.kind === 'HonourConferred' ? `${ev.order || 'Honour'} conferred on you` : `${(ev.rank || 'Justice').replace(/([A-Z])/g, ' $1').trim()} — your seat`, `docket #${e.seq} · ${fmt.short(e.leaf, 5)}`, e.height ? `blk ${fmt.int(e.height)}` : 'genesis', e.kind === 'HonourConferred' ? 'honours' : 'bench', true) }
+    for (const m of (s.miners?.miners ?? [])) if (m.wallet.toLowerCase() === mine) row(I.coins, '', `${esc(m.rig || 'your rig')} — yours`, `${fmt.hps(m.hash_rate)} · ${m.shielded ? 'shielded' : 'transparent'}`, fmt.ago(m.last_seen_secs_ago), 'rigs', true)
+    const a0 = s.earth?.attest_last?.anchor; if (a0?.tx_hash && (a0.wallet || '').includes(mine)) row(I.eye, 'gold', 'Your K⊕ attestation anchored', `${a0.amount ?? '—'} glyphs · ${fmt.short(a0.tx_hash, 6)}`, a0.ts ? new Date(a0.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '', 'earth', true)
+    rows.splice(before, 0, `<div class="ph2">${rows.length > before ? 'Yours' : 'No records for this wallet yet'}</div>`)
+    rows.push('<div class="ph2">Chain</div>')
+  }
   for (const x of (s.recent?.blocks.slice(0, 8) ?? [])) row(I.grid, x.is_blue ? 'blue' : 'red', `Block ${fmt.int(x.height)}`, `${x.is_blue ? 'blue' : 'red'} · blue score ${fmt.int(x.blue_score)} · ${fmt.short(hex(x.producer), 4)}`, blockAgo(s, x.height), 'blocks')
   for (const m of (s.miners?.miners ?? []).slice(0, 3)) row(I.coins, '', esc(m.rig || fmt.short(m.wallet, 6)), `${fmt.hps(m.hash_rate)} · ${m.shielded ? 'shielded' : 'transparent'}`, fmt.ago(m.last_seen_secs_ago), 'rigs')
   for (const e of (s.docket?.entries ?? []).slice(-3).reverse()) row(I.book, 'gold', esc(e.kind.replace(/([A-Z])/g, ' $1').trim()), `docket #${e.seq} · ${fmt.short(e.leaf, 5)}`, e.height ? `blk ${fmt.int(e.height)}` : 'genesis', e.kind === 'HonourConferred' ? 'honours' : 'bench')

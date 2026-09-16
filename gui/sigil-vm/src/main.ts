@@ -188,8 +188,8 @@ function renderPanel(): void {
   $('#panelHead').innerHTML = ui.panelHead(wallet, snap, balances)
   $('#nTok').textContent = wallet ? String(snap.tokens.length) : ''
   const body = $('#panelBody')
-  body.innerHTML = panelTab === 'tokens' ? ui.panelTokens(wallet, snap, balances) : panelTab === 'nfts' ? ui.panelNfts(wallet, snap) : ui.panelActivity(snap)
-  $('#nNft').textContent = wallet ? String(body.querySelectorAll('.pnft').length || '') : ''
+  body.innerHTML = panelTab === 'tokens' ? ui.panelTokens(wallet, snap, balances) : panelTab === 'nfts' ? ui.panelNfts(wallet, snap) : ui.panelActivity(snap, wallet)
+  $('#nNft').textContent = wallet ? String((ui.panelNfts(wallet, snap).match(/class="pnft"/g) || []).length || '') : '' // counted from the NFT markup itself — reading the body only counted while that tab was showing
   document.querySelectorAll('#panelTabs button').forEach((b) => b.classList.toggle('on', (b as HTMLElement).dataset.ptab === panelTab))
 }
 let openCollId: string | null = null

@@ -68,6 +68,11 @@ try {
           const bg = bgOf(e); if (!bg) return; const l1 = lum(fg.a < 1 ? blend(fg, bg) : fg), l2 = lum(bg); const ratio = (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05)
           if (ratio < 3) out.push(`${e.tagName.toLowerCase()}.${String(e.className).split(' ')[0]} "${t.slice(0, 18)}" ${ratio.toFixed(2)}:1`)
         }); return out.slice(0, 6) }
+      // the keyboard ring of the focused element against the background it sits on (offset ≥ 0 → the parent's)
+      window.__ringContrast = () => { const el = document.activeElement; if (!el || el === document.body) return null
+        const cs = getComputedStyle(el); if (cs.outlineStyle === 'none' || parseFloat(cs.outlineWidth) < 1) return { key: el.id || el.className, ratio: 0, why: 'no outline' }
+        const oc = parse(cs.outlineColor); const bg = bgOf(parseFloat(cs.outlineOffset) >= 0 && el.parentElement ? el.parentElement : el); if (!bg) return null
+        const l1 = lum(oc.a < 1 ? blend(oc, bg) : oc), l2 = lum(bg); return { key: (el.id ? '#' + el.id : el.tagName.toLowerCase() + '.' + String(el.className).split(' ')[0]), ratio: (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05) } }
     })
     const dialogProbe = async (open) => {
       await page.evaluate(open); await page.waitForTimeout(350)
@@ -111,6 +116,13 @@ try {
     if (lowContrast.length) bad.push('low contrast: ' + lowContrast.join(', '))
     if (panelLow.length) bad.push('panel: ' + panelLow.join(', '))
     if (dlg.length) bad.push(dlg.join('; '))
+    // keyboard ring: 24 Tab stops at the widest desktop width, each ring ≥3:1 against what surrounds it (light was 1.6:1 on 09-16)
+    if (w === 1440) {
+      const dim = []
+      for (let i = 0; i < 24; i++) { await page.keyboard.press('Tab'); await page.waitForTimeout(220); const r = await page.evaluate(() => window.__ringContrast()); if (r && r.ratio < 3) dim.push(`${r.key} ${r.ratio.toFixed(2)}:1${r.why ? ' ' + r.why : ''}`) }
+      if (dim.length) bad.push('focus ring: ' + [...new Set(dim)].slice(0, 6).join(', '))
+      await page.evaluate(() => document.activeElement?.blur?.())
+    }
     if (m.docW > w) bad.push(`page overflows ${m.docW}/${w}`)
     if (m.topW > w) bad.push(`topbar overflows ${m.topW}/${w}`)
     if (!m.wallet) bad.push('wallet button off-screen')

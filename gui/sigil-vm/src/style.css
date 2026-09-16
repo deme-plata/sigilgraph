@@ -505,6 +505,8 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 .tokens-tools { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
 .tokens-tools .s { position: relative; flex: 1; min-width: 200px; }
 .tokens-tools .s input { width: 100%; background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.1); border-radius: 12px; padding: 12px 14px 12px 40px; outline: none; }
+/* the inputs swap their outline for a soft border tint on focus (mouse); a keyboard focus still gets the real ring, drawn over the border */
+.search input:focus-visible, .amt input:focus-visible, .tokens-tools .s input:focus-visible, .modal .box input:focus-visible { outline: 2px solid var(--focus); outline-offset: -1px; }
 .tokens-tools .s input:focus { border-color: rgba(0,217,255,.5); }
 .tokens-tools .s svg { position: absolute; left: 12px; top: 13px; width: 18px; height: 18px; color: var(--muted); }
 .tokens-tools .f { display: flex; gap: 8px; }

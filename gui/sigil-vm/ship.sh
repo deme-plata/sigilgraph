@@ -16,8 +16,11 @@ echo "▶ fluxc build"; timeout 300 "$FLUX/target/debug/fluxc" build --frontend-
 test -f dist/sigil-vm.html || { echo "✗ no dist/sigil-vm.html"; exit 1; }
 echo "▶ verify (flux-vite-engine)"
 ( cd "$FLUX" && timeout 300 ./target/debug/examples/verify "$HERE" "$SHOT" ) | grep -E 'build-SAP|render ──|console|→'
-echo "▶ layout guard (5 widths × 2 themes, live node through the site proxy)"
+echo "▶ layout guard (6 widths × 2 themes + dialogs + panel + contrast) ∥ outage gate (12 route families, degrade honestly)"
+node "$HERE/outage.mjs" > "$HERE/.outage.log" 2>&1 & OUT_PID=$!
 node "$HERE/guard.mjs"
+wait $OUT_PID || { cat "$HERE/.outage.log"; echo "✗ outage gate failed"; exit 1; }
+tail -1 "$HERE/.outage.log"
 echo "▶ pre-render snapshot into dist/sigil-vm.html (readable without JavaScript)"
 node "$HERE/snapshot.mjs"
 echo "▶ deploy → $SITE (SIGIL root, additive)"

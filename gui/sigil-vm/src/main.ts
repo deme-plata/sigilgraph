@@ -215,6 +215,18 @@ async function poll(): Promise<void> {
   } finally { polling = false }
 }
 
+// ── toggle semantics ──────────────────────────────────────────────────────
+// Renderers mark the active choice with class="on"; screen readers need the same fact as ARIA. Toggle groups get
+// aria-pressed, real tab strips (panel, collection sheet) get tablist/tab/aria-selected. A debounced observer keeps
+// it true after every re-render without each renderer having to remember.
+function syncToggleAria(): void {
+  document.querySelectorAll<HTMLElement>('.tabs, .seg, .cats, .tokens-tools .f').forEach((g) => { g.setAttribute('role', 'group'); g.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', b.classList.contains('on') ? 'true' : 'false')) })
+  document.querySelectorAll<HTMLElement>('.ptabs, .cm-tabs').forEach((g) => { g.setAttribute('role', 'tablist'); g.querySelectorAll('button').forEach((b) => { b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', b.classList.contains('on') ? 'true' : 'false') }) })
+}
+let ariaTimer = 0
+new MutationObserver(() => { clearTimeout(ariaTimer); ariaTimer = window.setTimeout(syncToggleAria, 30) }).observe(app, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] })
+syncToggleAria()
+
 // ── events (delegated) ────────────────────────────────────────────────────
 document.addEventListener('click', (ev) => {
   const t = ev.target as HTMLElement

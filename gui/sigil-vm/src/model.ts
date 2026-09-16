@@ -380,9 +380,9 @@ function buildCollections(miners: Miners | null, anchor: Anchor | null, docket: 
   })
   c.push({
     cat: 'story', id: 'book', by: 'by the sigil-book crate', name: 'Shadows in the Chain', glyph: 'book', verified: false, cover: coverSvg('Shadows in the Chain', 'book'),
-    blurb: 'The SIGIL novel, chapter by chapter. Not an on-chain record — illustrative listing.',
-    items: null, owners: null, floor: '—', floorChange: null, volume: '—', volumeChange: null, sales: null,
-    provenance: 'pretend', link: '/downloads/',
+    blurb: 'The SIGIL novel, chapter by chapter. A published PDF, not an on-chain record — the one collection here that is a story.',
+    items: null, owners: null, floor: 'free PDF', floorChange: null, volume: 'v28', volumeChange: null, sales: null,
+    provenance: 'pretend', link: '/downloads/shadows-in-the-chain.pdf',
   })
   return c
 }

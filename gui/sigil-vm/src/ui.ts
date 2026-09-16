@@ -105,7 +105,7 @@ export function shell(): string {
       <div class="sec-head">
         <div><h2 id="h-trending">Trending Collections</h2><div class="sub">Two columns, OpenSea-style. Volume and floor are the collection's own live measures.</div></div>
         <div class="right">
-          <div class="tabs" id="trendMode"><button class="on" data-mode="trending">Trending</button><button data-mode="top">Top</button></div>
+          <div class="tabs" id="trendMode"><button class="on" data-mode="trending">Trending</button><button data-mode="top">Top</button><button data-mode="watch" id="trendWatch">Watching<span class="n" id="nWatch"></span></button></div>
           <div class="tabs pill" id="trendWin"><button data-win="1h">1h</button><button data-win="6h">6h</button><button class="on" data-win="24h">24h</button><button data-win="7d">7d</button></div>
           <a class="viewall" href="/sigil-explorer.html" target="_blank" rel="noopener">View all</a>
         </div>
@@ -284,18 +284,22 @@ export function saleCard(x: Sale): string {
 }
 
 // ── trending table ────────────────────────────────────────────────────────
-export function trending(s: Snapshot, mode: 'trending' | 'top', win: string): string {
-  const list = [...s.collections]
+export type TrendMode = 'trending' | 'top' | 'watch'
+// the watchlist is the visitor's own (localStorage) — a star per row, and a 'Watching' view that shows only starred collections
+export function trending(s: Snapshot, mode: TrendMode, win: string, watch: ReadonlySet<string> = new Set()): string {
+  const list = mode === 'watch' ? s.collections.filter((c) => watch.has(c.id)) : [...s.collections]
+  if (mode === 'watch' && !list.length) return `<div class="tcol"><div class="tempty watch-empty">Nothing watched yet — tap ☆ on any collection and it lands here (kept in this browser).</div></div>`
   const chg = (c: Collection): number | null => c.id === 'rigs' && win === '24h' ? (c.volumeChange ?? s.changes[c.id]?.[win] ?? null) : (s.changes[c.id]?.[win] ?? null)
   // "trending" = biggest measured growth in the window (items), unmeasured rows after, then by activity; "top" = by items
-  list.sort((a, b) => mode === 'top'
+  list.sort((a, b) => mode !== 'trending'
     ? (b.items ?? -1) - (a.items ?? -1)
     : ((chg(b) ?? -Infinity) - (chg(a) ?? -Infinity)) || (((b.sales ?? 0) * 3 + (b.provenance === 'live' ? 1 : 0)) - ((a.sales ?? 0) * 3 + (a.provenance === 'live' ? 1 : 0))))
   const half = Math.ceil(list.length / 2)
   const table = (rows: Collection[], off: number) => `<table aria-label="Trending collections, ranks ${off + 1} to ${off + rows.length}"><thead><tr><th>#</th><th>Collection</th><th class="r">Floor</th><th class="r" title="change in items over the window — sampled in your browser once a minute; shows — until enough samples exist">${win} chg</th><th class="r">Volume</th><th class="r">Items</th><th class="r">Owners</th></tr></thead><tbody>
-    ${rows.map((c, i) => `<tr data-coll="${c.id}" data-link="${c.link}" tabindex="0"><td class="rank">${off + i + 1}</td><td><div class="coll"><img src="${c.cover}" alt=""><div><div class="n">${esc(c.name)}${ver(c.verified)}</div><div class="s">${prov(c.provenance)}</div></div></div></td>
+    ${rows.map((c, i) => `<tr data-coll="${c.id}" data-link="${c.link}" tabindex="0"><td class="rank">${off + i + 1}</td><td><div class="coll"><img src="${c.cover}" alt=""><div><div class="n">${esc(c.name)}${ver(c.verified)}</div><div class="s">${prov(c.provenance)}</div></div><button class="star" data-watch="${c.id}" aria-pressed="${watch.has(c.id) ? 'true' : 'false'}" aria-label="${watch.has(c.id) ? 'Stop watching' : 'Watch'} ${esc(c.name)}" title="${watch.has(c.id) ? 'Stop watching' : 'Watch'}">${watch.has(c.id) ? '★' : '☆'}</button></div></td>
       <td class="r num">${esc(c.floor)}</td><td class="r num" title="items now vs. items ${win} ago, sampled by this browser">${delta(chg(c))}</td><td class="r num">${esc(c.volume)}</td><td class="r num">${c.items === null ? '—' : fmt.int(c.items)}</td><td class="r num">${c.owners === null ? '—' : fmt.int(c.owners)}<span class="chev">${I.right}</span></td></tr>`).join('')}
   </tbody></table>`
+  if (list.length <= 3) return `<div class="tcol wide">${table(list, 0)}</div>` // a short watchlist does not need a second, empty column
   return `<div class="tcol">${table(list.slice(0, half), 0)}</div><div class="tcol">${table(list.slice(half), half)}</div>`
 }
 

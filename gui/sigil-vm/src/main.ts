@@ -18,7 +18,10 @@ let heroIdx = 0
 let heroTimer: number | undefined
 let wallet: string | null = null
 const balances: Record<string, number> = {}
-let trendMode: 'trending' | 'top' = 'trending'
+let trendMode: ui.TrendMode = 'trending'
+const watch = new Set<string>() // the visitor's watchlist — theirs, in this browser
+try { for (const id of JSON.parse(localStorage.getItem('sigilvm-watch') || '[]')) if (typeof id === 'string') watch.add(id) } catch { /* */ }
+function renderTrending(): void { if (!snap) return; $('#trendingTable').innerHTML = ui.trending(snap, trendMode, trendWin, watch); const n = document.getElementById('nWatch'); if (n) n.textContent = watch.size ? String(watch.size) : '' }
 let trendWin = '24h'
 let panelTab: 'tokens' | 'nfts' | 'activity' = 'tokens'
 const swapSt: ui.SwapState = { mode: 'market', from: NATIVE_TOKEN, to: '', amount: '', limitPrice: '', limitDir: 'buy', slippage: 0.5 }
@@ -134,7 +137,7 @@ function renderRows(): void {
   $('#dropsRow').innerHTML = snap.drops.map(ui.dropCard).join('')
   swapWithFlash($('#moversRow'), snap.movers.map(ui.moverCard).join('') || '<div class="pempty">No miners read — node offline?</div>')
   $('#salesRow').innerHTML = snap.sales.map(ui.saleCard).join('') || '<div class="pempty">Nothing settled this week that the node reports.</div>'
-  swapWithFlash($('#trendingTable'), ui.trending(snap, trendMode, trendWin))
+  swapWithFlash($('#trendingTable'), ui.trending(snap, trendMode, trendWin, watch)); { const n = document.getElementById('nWatch'); if (n) n.textContent = watch.size ? String(watch.size) : '' }
   $('#legend').innerHTML = ui.legend(snap)
   $('#footTs').textContent = `poll ${new Date(snap.at).toLocaleTimeString()} · height ${fmt.int(snap.head.height)}`
 }
@@ -305,8 +308,8 @@ function keepFocus(btn: HTMLElement): void {
   queueMicrotask(() => {
     if (document.contains(btn) || (document.activeElement && document.activeElement !== document.body)) return
     const twin = Array.from(document.querySelectorAll<HTMLElement>(key.tag)).find((e) => e.id === key.id && JSON.stringify(e.dataset) === key.data && (e.textContent || '').trim().slice(0, 40) === key.text)
+      || (first ? Array.from(document.querySelectorAll<HTMLElement>(`${key.tag}[data-${first[0].replace(/[A-Z]/g, (m) => '-' + m.toLowerCase())}="${first[1]}"]`))[0] : undefined) // its text may have changed (sort arrow, ☆→★) — the data attribute is the identity
       || (key.cls ? Array.from(document.querySelectorAll<HTMLElement>(key.tag)).find((e) => e.className === key.cls && (e.textContent || '').trim().slice(0, 40) === key.text) : undefined)
-      || (first ? Array.from(document.querySelectorAll<HTMLElement>(`${key.tag}[data-${first[0].replace(/[A-Z]/g, (m) => '-' + m.toLowerCase())}="${first[1]}"]`))[0] : undefined) // a sort header's text carries the arrow that just flipped
     twin?.focus({ preventScroll: true })
   })
 }
@@ -341,9 +344,10 @@ document.addEventListener('click', (ev) => {
   if (ds.ptab) { panelTab = ds.ptab as typeof panelTab; renderPanel(); return }
   if (btn.id === 'pSend' || btn.id === 'pReceive') { window.open('/sigil-wallet-tron-embedded.html', '_blank', 'noopener'); return }
   if (btn.id === 'pSwap') { location.hash = '#swap'; $('#dex').scrollIntoView({ behavior: 'smooth' }); return }
-  if (ds.mode && btn.closest('#trendMode')) { trendMode = ds.mode as typeof trendMode; document.querySelectorAll('#trendMode button').forEach((b) => b.classList.toggle('on', b === btn)); if (snap) $('#trendingTable').innerHTML = ui.trending(snap, trendMode, trendWin); return }
+  if (ds.mode && btn.closest('#trendMode')) { trendMode = ds.mode as typeof trendMode; document.querySelectorAll('#trendMode button').forEach((b) => b.classList.toggle('on', b === btn)); renderTrending(); return }
   if (ds.cat) { cat = ds.cat; document.querySelectorAll('#cats button').forEach((b) => b.classList.toggle('on', b === btn)); renderRows(); $('#featured').scrollIntoView({ behavior: 'smooth', block: 'start' }); return }
-  if (ds.win) { trendWin = ds.win; document.querySelectorAll('#trendWin button').forEach((b) => b.classList.toggle('on', b === btn)); if (snap) $('#trendingTable').innerHTML = ui.trending(snap, trendMode, trendWin); return }
+  if (ds.win) { trendWin = ds.win; document.querySelectorAll('#trendWin button').forEach((b) => b.classList.toggle('on', b === btn)); renderTrending(); return }
+  if (ds.watch) { ev.preventDefault(); ev.stopPropagation(); if (watch.has(ds.watch)) watch.delete(ds.watch); else watch.add(ds.watch); try { localStorage.setItem('sigilvm-watch', JSON.stringify([...watch])) } catch { /* */ } renderTrending(); return }
   if (ds.copy) { ev.preventDefault(); ev.stopPropagation(); navigator.clipboard?.writeText(ds.copy).then(() => toast(`Copied ${ds.copy!.length === 64 ? 'id' : 'hash'} ${ds.copy!.slice(0, 8)}…`)).catch(() => toast('Clipboard blocked.', 'warn')); return }
   if (ds.coll && !ev.ctrlKey && !ev.metaKey && !(ev as MouseEvent).button) { ev.preventDefault(); openCollection(ds.coll); return }
   const arrows = btn.closest('.arrows') as HTMLElement | null

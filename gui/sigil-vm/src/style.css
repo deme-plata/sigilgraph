@@ -509,6 +509,8 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 .td-wrap { background: rgba(255,255,255,.03); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; display: grid; gap: 12px; animation: rise .2s ease; }
 .td-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px 16px; }
 .td-cell .k { font-size: 10.5px; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
+.td-cell.wide { grid-column: 1 / -1; }
+.td-cell .v { overflow: hidden; text-overflow: ellipsis; }
 .td-cell .v { font-size: 13px; margin-top: 2px; }
 .td-spark .k { font-size: 10.5px; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; }
 .td-spark .spark { display: block; margin: 0; width: 100%; max-width: 420px; height: 48px; }

@@ -8,6 +8,7 @@ import { I } from './icons'
 import { avatarSvg } from './art'
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string): T => document.querySelector(sel) as T
+const pv = document.createElement('div')
 const app = $('#root')
 app.innerHTML = ui.shell()
 
@@ -287,6 +288,7 @@ let modalOpener: HTMLElement | null = null
 function openModal(html: string, cls = ''): void {
   const box = $('#modalBox'); box.className = 'box ' + cls; box.innerHTML = (cls ? '' : `<button class="ibtn x" id="modalClose">${I.x}</button>`) + html
   modalOpener = document.activeElement as HTMLElement | null
+  $('#chainMenu').classList.remove('open'); $('#qres').classList.remove('open'); pv.hidden = true // popovers close under a dialog
   const modal = $('#modal'); modal.classList.add('open'); modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true')
   $('#main').setAttribute('inert', ''); $('#panel').setAttribute('inert', ''); document.querySelector('.topbar')?.setAttribute('inert', ''); document.querySelector('.rail')?.setAttribute('inert', '')
   const first = box.querySelector<HTMLElement>('input, button:not(#modalClose), [tabindex="0"]') || box.querySelector<HTMLElement>('button'); first?.focus()
@@ -386,7 +388,7 @@ fetch('/downloads/sigil-wallet-latest.json', { headers: { accept: 'application/j
 }).catch(() => { /* keep the stable link */ })
 
 // trending hover preview (OpenSea shows a quick card on hover)
-const pv = document.createElement('div'); pv.className = 'preview'; pv.hidden = true; document.body.appendChild(pv)
+pv.className = 'preview'; pv.hidden = true; document.body.appendChild(pv)
 document.addEventListener('mouseover', (ev) => {
   const tr = (ev.target as HTMLElement).closest('#trendingTable tr[data-coll]') as HTMLElement | null
   if (!tr || !snap) { return }

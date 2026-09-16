@@ -404,8 +404,8 @@ function tokenDetailRow(t: Token, s: Snapshot): string {
   const spark = t.symbol === 'SIGIL' && s.hashHist.length > 2 ? `<div class="td-spark"><div class="k">Network hashrate (mining issuance) · ${fmt.pct(s.head.hashChange)}</div>${sparkline(s.hashHist, 800, 56, (s.head.hashChange ?? 0) < 0 ? 'down' : 'up')}</div>` : ''
   const links = t.symbol === 'wSIGIL3'
     ? `<a class="btn ghost sm" href="https://polygonscan.com/token/0x3FCED760b0DE6d57F96835C6110b1227941Ec2e9" target="_blank" rel="noopener">Polygonscan ↗</a><a class="btn ghost sm" href="/bridge-slider.html" target="_blank" rel="noopener">Bridge ↗</a>`
-    : t.symbol === 'ROCKY' ? `<a class="btn ghost sm" href="/kristensen-board.html" target="_blank" rel="noopener">K board ↗</a><a class="btn ghost sm" href="/api.html" target="_blank" rel="noopener">/v1/rocky ↗</a>`
-    : t.symbol === 'USDS' ? `<a class="btn ghost sm" href="/api.html" target="_blank" rel="noopener">/v1/usds/status ↗</a>`
+    : t.symbol === 'ROCKY' ? `<a class="btn ghost sm" href="/kristensen-board.html" target="_blank" rel="noopener">K board ↗</a><a class="btn ghost sm" href="/v1/rocky" target="_blank" rel="noopener" title="the node's own record, JSON">/v1/rocky ↗</a>`
+    : t.symbol === 'USDS' ? `<a class="btn ghost sm" href="/sigil-wallet-tron-embedded.html" target="_blank" rel="noopener">USDS desk (wallet) ↗</a><a class="btn ghost sm" href="/v1/usds/status" target="_blank" rel="noopener" title="the node's own record, JSON">/v1/usds/status ↗</a>`
     : `<a class="btn ghost sm" href="/sigil-explorer.html" target="_blank" rel="noopener">Explorer ↗</a><a class="btn ghost sm" href="/api.html" target="_blank" rel="noopener">API ↗</a>`
   return `<tr class="td-row" id="td-${t.symbol.replace(/[^A-Za-z0-9]/g, '')}"><td colspan="11"><div class="td-wrap"><div class="td-grid">${rows.join('')}</div>${spark}<div class="td-links">${links}</div></div></td></tr>`
 }

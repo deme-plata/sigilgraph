@@ -324,14 +324,14 @@ function buildCollections(miners: Miners | null, anchor: Anchor | null, docket: 
   c.push({
     cat: 'court', id: 'honours', by: 'by the SIGIL Supreme Court', name: 'Elefantordenen', glyph: 'seal', verified: true, cover: coverSvg('Elefantordenen', 'seal'),
     blurb: 'Honours conferred by the SIGIL Supreme Court. Each is a leaf in a verified docket chain.',
-    items: honours, owners: honours, floor: '1 honour', floorChange: null,
+    items: honours, owners: honours, floor: docket ? '1 honour' : '—', floorChange: null,
     volume: docket ? `${fmt.int(docket.total)} docket entries` : '—', volumeChange: null, sales: honours,
     provenance: docket ? 'live' : 'pretend', link: '/sigil-wallet-tron-embedded.html#court',
   })
   c.push({
     cat: 'court', id: 'bench', by: 'by the constitution', name: 'Justices of the Bench', glyph: 'shield', verified: true, cover: coverSvg('Justices of the Bench', 'shield'),
     blurb: 'Appointed justices. The bench that hears cases, rules and seals precedents.',
-    items: justices, owners: justices, floor: '1 seat', floorChange: null,
+    items: justices, owners: justices, floor: docket ? '1 seat' : '—', floorChange: null,
     volume: docket?.chain_verified ? 'chain verified ✓' : '—', volumeChange: null, sales: justices,
     provenance: docket ? 'live' : 'pretend', link: '/sigil-wallet-tron-embedded.html#court',
   })
@@ -355,7 +355,7 @@ function buildCollections(miners: Miners | null, anchor: Anchor | null, docket: 
   c.push({
     cat: 'science', id: 'earth', by: 'by sigil-earth · IERS + GFZ', name: 'Kristensen Earth K⊕', glyph: 'earth', verified: true, cover: coverSvg('Kristensen Earth', 'earth'),
     blurb: 'Earth-rotation attestations anchored on SIGIL from a wallet with a published viewing key.',
-    items: earth ? (earth.row ?? (attest?.memo && /:(\d+):/.test(attest.memo) ? Number(RegExp.$1) : null)) : null, owners: 1,
+    items: earth ? (earth.row ?? (attest?.memo && /:(\d+):/.test(attest.memo) ? Number(RegExp.$1) : null)) : null, owners: earth ? 1 : null, // one attester wallet — but only a fact when the feed answered
     floor: attest?.amount ? `${attest.amount} glyphs` : '—', floorChange: null,
     volume: attest?.tx_hash ? `anchored ${fmt.short(attest.tx_hash, 6)}` : '—', volumeChange: null, sales: attest?.executed ? 1 : 0,
     provenance: earth ? 'live' : 'pretend', link: '/kristensen-earth.html',

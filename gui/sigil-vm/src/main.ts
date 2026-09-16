@@ -318,7 +318,17 @@ document.addEventListener('keydown', (ev) => {
   }
   const modalWasOpen = $('#modal').classList.contains('open')
   if (ev.key === 'Escape') { closeModal(); $('#qres').classList.remove('open'); $('#chainMenu').classList.remove('open'); if (innerWidth <= 1100 && app.classList.contains('panel-open') && !modalWasOpen) setPanel(false) }
-  if (ev.key === 'Enter' && document.activeElement?.id === 'q') { const first = $('#qres').querySelector('.r') as HTMLElement | null; if (first) { first.click(); $('#qres').classList.remove('open') } }
+  // search results: ↑/↓ move a highlight through the hits, Enter opens the highlighted one (or the first)
+  const qres = $('#qres')
+  if (qres.classList.contains('open') && (document.activeElement?.id === 'q' || document.activeElement?.classList.contains('r')) && (ev.key === 'ArrowDown' || ev.key === 'ArrowUp' || ev.key === 'Enter')) {
+    const hits = Array.from(qres.querySelectorAll<HTMLElement>('.r'))
+    const cur = hits.findIndex((h) => h.classList.contains('on'))
+    if (ev.key === 'Enter') { const pick = hits[cur >= 0 ? cur : 0]; if (pick) { pick.click(); qres.classList.remove('open') } return }
+    ev.preventDefault()
+    const n = ev.key === 'ArrowDown' ? Math.min(hits.length - 1, cur + 1) : Math.max(0, cur - 1)
+    hits.forEach((h, i) => h.classList.toggle('on', i === n)); hits[n]?.scrollIntoView({ block: 'nearest' })
+    return
+  }
   const list = document.querySelector('#modal.open .list') as HTMLElement | null
   if (list && (ev.key === 'ArrowDown' || ev.key === 'ArrowUp' || ev.key === 'Enter')) {
     const items = Array.from(list.querySelectorAll<HTMLButtonElement>('button'))
@@ -394,7 +404,7 @@ function globalSearch(q: string): void {
   if (!q || !snap) { box.classList.remove('open'); return }
   const rows: string[] = []
   const cs = snap.collections.filter((c) => c.name.toLowerCase().includes(q) || c.blurb.toLowerCase().includes(q)).slice(0, 4)
-  if (cs.length) rows.push('<div class="h">Collections</div>' + cs.map((c) => `<div class="r" data-coll="${c.id}"><img src="${c.cover}" alt=""><div><div class="n">${ui.esc(c.name)}</div><div class="s">${c.items === null ? '—' : fmt.int(c.items)} items · open</div></div></div>`).join(''))
+  if (cs.length) rows.push('<div class="h">Collections</div>' + cs.map((c) => `<div class="r" data-coll="${c.id}"><img src="${c.cover}" alt=""><div><div class="n">${ui.esc(c.name)}</div><div class="s">${c.items === null ? '—' : fmt.int(c.items)} ${c.items === 1 ? 'item' : 'items'} · open</div></div></div>`).join(''))
   const ts = snap.tokens.filter((t) => (t.symbol + t.name).toLowerCase().includes(q)).slice(0, 4)
   if (ts.length) rows.push('<div class="h">Tokens</div>' + ts.map((t) => `<div class="r" data-swap="${t.id}"><img src="${t.icon}" alt=""><div><div class="n">${t.symbol}</div><div class="s">${ui.esc(t.statusNote)}</div></div></div>`).join(''))
   const ms = (snap.miners?.miners ?? []).filter((m) => (m.rig + m.wallet).toLowerCase().includes(q)).slice(0, 4)

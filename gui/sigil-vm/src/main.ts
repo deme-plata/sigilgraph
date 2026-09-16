@@ -443,12 +443,13 @@ function openModal(html: string, cls = ''): void {
   modalOpener = document.activeElement as HTMLElement | null
   $('#chainMenu').classList.remove('open'); $('#qres').classList.remove('open'); pv.hidden = true // popovers close under a dialog
   const modal = $('#modal'); modal.classList.add('open'); modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true')
+  const h = box.querySelector<HTMLElement>('h2, h3, h4'); if (h) { h.id = 'modalTitle'; modal.setAttribute('aria-labelledby', 'modalTitle'); modal.removeAttribute('aria-label') } else { modal.removeAttribute('aria-labelledby'); modal.setAttribute('aria-label', 'Dialog') } // the dialog is named by its own heading
   $('#main').setAttribute('inert', ''); $('#panel').setAttribute('inert', ''); document.querySelector('.topbar')?.setAttribute('inert', ''); document.querySelector('.rail')?.setAttribute('inert', '')
   const first = box.querySelector<HTMLElement>('input, button:not(#modalClose), [tabindex="0"]') || box.querySelector<HTMLElement>('button'); first?.focus()
 }
 function closeModal(): void {
   const modal = $('#modal'); if (!modal.classList.contains('open')) return
-  modal.classList.remove('open'); modal.removeAttribute('role'); modal.removeAttribute('aria-modal')
+  modal.classList.remove('open'); modal.removeAttribute('role'); modal.removeAttribute('aria-modal'); modal.removeAttribute('aria-labelledby'); modal.removeAttribute('aria-label')
   $('#main').removeAttribute('inert'); $('#panel').removeAttribute('inert'); document.querySelector('.topbar')?.removeAttribute('inert'); document.querySelector('.rail')?.removeAttribute('inert')
   modalOpener?.focus?.(); modalOpener = null; openCollId = null
 }
@@ -465,7 +466,7 @@ document.addEventListener('keydown', (ev) => {
 function openCollection(id: string): void { const c = snap?.collections.find((x) => x.id === id); if (c) { openCollId = id; openModal(ui.collectionModal(c, snap!), 'coll') } }
 function openTokenPicker(which: 'from' | 'to'): void {
   if (!snap) return
-  openModal(`<h4>Select a token <span class="muted kbd-only" style="font-size:11px;font-weight:500">↑↓ Enter</span></h4><div class="list">${snap.tokens.map((t) => `<button data-pick="${t.id}" data-which="${which}"><img src="${t.icon}" alt=""><div><div class="s">${t.symbol}</div><div class="n">${ui.esc(t.name)}</div></div><span class="r">${balances[t.id] === undefined ? '' : fmt.num(balances[t.id], 4)}</span></button>`).join('')}</div>`)
+  openModal(`<h4>Select a token <span class="muted kbd-only" style="font-size:11px;font-weight:500" aria-hidden="true">↑↓ Enter</span></h4><div class="list">${snap.tokens.map((t) => `<button data-pick="${t.id}" data-which="${which}"><img src="${t.icon}" alt=""><div><div class="s">${t.symbol}</div><div class="n">${ui.esc(t.name)}</div></div><span class="r">${balances[t.id] === undefined ? '' : fmt.num(balances[t.id], 4)}</span></button>`).join('')}</div>`)
 }
 function openShortcuts(): void {
   openModal(`<h4>Keyboard shortcuts</h4><div class="keys">

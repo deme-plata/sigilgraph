@@ -62,7 +62,7 @@ export function shell(): string {
       <div class="chain-wrap"><button class="chain-chip" id="chainChip" title="sigil-g2 · sigil-api"><i class="d"></i><span class="t">sigil-g2</span><span id="chainHeight">—</span><span class="car">▾</span></button>
         <div class="chain-menu" id="chainMenu">
           <div class="cm on"><i class="d on"></i><div><b>SIGIL g2</b><small>mainnet · sigil-api :18181</small></div><span class="chip live">live</span></div>
-          <a class="cm" href="https://polygonscan.com/token/0x3FCED760" target="_blank" rel="noopener"><i class="d" style="background:#8247e5;color:#8247e5"></i><div><b>Polygon</b><small>wSIGIL3 · Uniswap pool</small></div><span class="chip derived">external</span></a>
+          <a class="cm" href="https://polygonscan.com/token/0x3FCED760b0DE6d57F96835C6110b1227941Ec2e9" target="_blank" rel="noopener"><i class="d" style="background:#8247e5;color:#8247e5"></i><div><b>Polygon</b><small>wSIGIL3 · Uniswap pool</small></div><span class="chip derived">external</span></a>
           <div class="cm dis"><i class="d" style="background:#555"></i><div><b>Soneium</b><small>wSIGIL leg · not deployed</small></div><span class="chip bad">blocked</span></div>
         </div></div>
       <button class="ibtn" id="themeBtn" title="Theme" aria-label="Toggle light / dark">${I.sun}</button>
@@ -402,7 +402,7 @@ function tokenDetailRow(t: Token, s: Snapshot): string {
   ]
   const spark = t.symbol === 'SIGIL' && s.hashHist.length > 2 ? `<div class="td-spark"><div class="k">Network hashrate (mining issuance) · ${fmt.pct(s.head.hashChange)}</div>${sparkline(s.hashHist, 800, 56, (s.head.hashChange ?? 0) < 0 ? 'down' : 'up')}</div>` : ''
   const links = t.symbol === 'wSIGIL3'
-    ? `<a class="btn ghost sm" href="https://polygonscan.com/token/0x3FCED760" target="_blank" rel="noopener">Polygonscan ↗</a><a class="btn ghost sm" href="/bridge-slider.html" target="_blank" rel="noopener">Bridge ↗</a>`
+    ? `<a class="btn ghost sm" href="https://polygonscan.com/token/0x3FCED760b0DE6d57F96835C6110b1227941Ec2e9" target="_blank" rel="noopener">Polygonscan ↗</a><a class="btn ghost sm" href="/bridge-slider.html" target="_blank" rel="noopener">Bridge ↗</a>`
     : t.symbol === 'ROCKY' ? `<a class="btn ghost sm" href="/kristensen-board.html" target="_blank" rel="noopener">K board ↗</a><a class="btn ghost sm" href="/api.html" target="_blank" rel="noopener">/v1/rocky ↗</a>`
     : t.symbol === 'USDS' ? `<a class="btn ghost sm" href="/api.html" target="_blank" rel="noopener">/v1/usds/status ↗</a>`
     : `<a class="btn ghost sm" href="/sigil-explorer.html" target="_blank" rel="noopener">Explorer ↗</a><a class="btn ghost sm" href="/api.html" target="_blank" rel="noopener">API ↗</a>`

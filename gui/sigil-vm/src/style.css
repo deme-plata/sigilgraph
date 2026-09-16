@@ -744,6 +744,8 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
   .cm-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   #walletBtn { padding: 0 12px; }
   #walletBtn span { display: none; }
+  #walletBtn { position: relative; }
+  #walletBtn.connected::after { content: ''; position: absolute; top: 5px; right: 5px; width: 9px; height: 9px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 2px var(--bg); } /* connected marker — the icon alone looked identical either way */
   .search { max-width: none; min-width: 0; flex: 1 1 120px; }
   .search input { height: 40px; padding-left: 38px; padding-right: 10px; }
   .sec-head h2 { font-size: 19px; }

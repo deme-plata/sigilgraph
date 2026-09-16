@@ -111,6 +111,7 @@ function renderChain(): void {
   d.classList.toggle('on', snap.head.ok)
   $('#chainHeight').textContent = snap.head.ok ? fmt.int(snap.head.height) : 'offline'
   $('#walletLbl').textContent = wallet ? fmt.short(wallet, 5) : 'Connect wallet'
+  const wb = $('#walletBtn'); wb.classList.toggle('connected', !!wallet); wb.setAttribute('aria-label', wallet ? `Wallet ${fmt.short(wallet, 5)} connected — open the wallet panel` : 'Connect a wallet') // the label span is hidden on phones; the name must not vanish with it
 }
 function currentQuote() {
   if (!snap) return null

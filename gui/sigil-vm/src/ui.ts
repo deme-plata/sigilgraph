@@ -271,7 +271,7 @@ export function trending(s: Snapshot, mode: 'trending' | 'top', win: string): st
     : ((chg(b) ?? -Infinity) - (chg(a) ?? -Infinity)) || (((b.sales ?? 0) * 3 + (b.provenance === 'live' ? 1 : 0)) - ((a.sales ?? 0) * 3 + (a.provenance === 'live' ? 1 : 0))))
   const half = Math.ceil(list.length / 2)
   const table = (rows: Collection[], off: number) => `<table><thead><tr><th>#</th><th>Collection</th><th class="r">Floor</th><th class="r" title="change in items over the window — sampled in your browser once a minute; shows — until enough samples exist">${win} chg</th><th class="r">Volume</th><th class="r">Items</th><th class="r">Owners</th></tr></thead><tbody>
-    ${rows.map((c, i) => `<tr data-coll="${c.id}" data-link="${c.link}"><td class="rank">${off + i + 1}</td><td><div class="coll"><img src="${c.cover}" alt=""><div><div class="n">${esc(c.name)}${ver(c.verified)}</div><div class="s">${prov(c.provenance)}</div></div></div></td>
+    ${rows.map((c, i) => `<tr data-coll="${c.id}" data-link="${c.link}" tabindex="0"><td class="rank">${off + i + 1}</td><td><div class="coll"><img src="${c.cover}" alt=""><div><div class="n">${esc(c.name)}${ver(c.verified)}</div><div class="s">${prov(c.provenance)}</div></div></div></td>
       <td class="r num">${esc(c.floor)}</td><td class="r num" title="items now vs. items ${win} ago, sampled by this browser">${delta(chg(c))}</td><td class="r num">${esc(c.volume)}</td><td class="r num">${c.items === null ? '—' : fmt.int(c.items)}</td><td class="r num">${c.owners === null ? '—' : fmt.int(c.owners)}<span class="chev">${I.right}</span></td></tr>`).join('')}
   </tbody></table>`
   return `<div class="tcol">${table(list.slice(0, half), 0)}</div><div class="tcol">${table(list.slice(half), half)}</div>`

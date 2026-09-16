@@ -217,6 +217,8 @@ document.addEventListener('input', (ev) => {
   if (t.id === 'q') { globalSearch(t.value) }
 })
 document.addEventListener('keydown', (ev) => {
+  // Enter / Space on a card, row or tile that is a role=button div behaves like a click
+  if ((ev.key === 'Enter' || ev.key === ' ') && (document.activeElement as HTMLElement | null)?.matches('[role="button"][data-coll], tr[data-coll]')) { ev.preventDefault(); (document.activeElement as HTMLElement).click(); return }
   if (ev.key === '/' && document.activeElement?.tagName !== 'INPUT') { ev.preventDefault(); ($('#q') as HTMLInputElement).focus() }
   if (ev.key === '?' && document.activeElement?.tagName !== 'INPUT') { ev.preventDefault(); openShortcuts() }
   if (document.activeElement?.tagName !== 'INPUT' && !ev.metaKey && !ev.ctrlKey) {

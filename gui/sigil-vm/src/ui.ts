@@ -74,7 +74,7 @@ export function shell(): string {
     <div class="ticker" id="ticker" aria-label="Live chain activity"><div class="tk-track" id="tickerTrack"></div></div>
     <section id="market" class="section" style="margin-top:0">
       <div class="hero skel-hero" id="hero"><div class="bg"></div><div class="veil"></div><div class="body"><div class="eyebrow"><span class="chip gold"><i class="d"></i>reading the chain…</span></div><div class="sk sk-h1"></div><div class="sk sk-p"></div><div class="stats"><div class="stat sk-stat"></div><div class="stat sk-stat"></div><div class="stat sk-stat"></div><div class="stat sk-stat"></div></div><div class="cta"><div class="sk sk-btn"></div><div class="sk sk-btn"></div></div></div></div>
-      <div class="strip" id="strip">${skStrip()}</div>
+      <div class="strip-wrap"><div class="strip" id="strip">${skStrip()}</div></div>
       <div id="foryou"><div class="foryou"><div class="fy-col"><div class="sk sk-k"></div><div class="sk sk-p"></div><div class="sk sk-p"></div><div class="sk sk-p short"></div></div><div class="fy-col"><div class="sk sk-k"></div><div class="sk sk-p"></div><div class="sk sk-p"></div><div class="sk sk-p short"></div></div></div></div>
     </section>
     <div class="cats" id="cats">
@@ -186,12 +186,12 @@ export function hero(s: Snapshot, idx: number): string {
 
 export function strip(s: Snapshot): string {
   const h = s.head
-  const cell = (k: string, v: string, small = '', coll = '') => `<button class="cell"${coll ? ` data-coll="${coll}"` : ''}><div class="k">${k}</div><div class="v">${v}</div>${small ? `<div class="s">${small}</div>` : ''}</button>`
+  const cell = (k: string, v: string, small = '', coll = '', extra = '') => `<button class="cell"${coll ? ` data-coll="${coll}"` : ''}><div class="k">${k}</div><div class="v"><span class="vt">${v}</span>${extra}</div>${small ? `<div class="s">${small}</div>` : ''}</button>`
   return [
     cell('Height', fmt.int(h.height), h.blkPerSec ? `${h.blkPerSec.toFixed(1)} blk/s` : 'measuring rate…', 'blocks'),
     cell('Finality', h.finalityGate, `h ${fmt.int(h.finalityHeight)} · ${h.committee} validators`, 'blocks'),
     cell('Supply', fmt.num(h.supplySigil) + ' SIGIL', `${(h.mintedPct).toFixed(2)}% of 21M`, 'rigs'),
-    cell('Hashrate', fmt.hps(h.netHps) + (s.hashHist.length > 2 ? sparkline(s.hashHist, 90, 22, h.hashChange !== null && h.hashChange < 0 ? 'down' : 'up') : ''), `${h.liveMiners} miners${h.hashChange !== null ? ' · ' + fmt.pct(h.hashChange) : ''}`, 'rigs'),
+    cell('Hashrate', fmt.hps(h.netHps), `${h.liveMiners} miners${h.hashChange !== null ? ' · ' + fmt.pct(h.hashChange) : ''}`, 'rigs', s.hashHist.length > 2 ? sparkline(s.hashHist, 90, 22, h.hashChange !== null && h.hashChange < 0 ? 'down' : 'up') : ''),
     cell('Shielded pool', fmt.int(h.notes) + ' notes', `${fmt.num(h.valueLocked)} SIGIL locked · ${fmt.int(h.nullifiers)} spent`, 'notes'),
     cell('Treasury', fmt.num(h.treasurySigil) + ' SIGIL', 'nation welfare', 'treasury'),
   ].join('')

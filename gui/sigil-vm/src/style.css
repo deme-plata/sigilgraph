@@ -303,11 +303,16 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 .cats button.on { background: var(--chip-on-bg); color: var(--chip-on-ink); border-color: var(--chip-on-bg); }
 
 /* ── chain strip (below hero) ───────────────────────────────────────── */
-.strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(136px, 1fr)); gap: 10px; margin-top: 14px; }
+.strip-wrap { container-type: inline-size; }
+.strip { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin-top: 14px; }
+/* six cells need ~170px each for '174.83K SIGIL' in 16px mono; below that go 3×2, then 2×3 */
+@container (max-width: 1100px) { .strip { grid-template-columns: repeat(3, 1fr); } }
+@container (max-width: 520px) { .strip { grid-template-columns: repeat(2, 1fr); } }
 .strip .cell { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; text-align: left; width: 100%; transition: .15s; }
 .strip button.cell:hover { border-color: var(--line-2); background: var(--surface-2); transform: translateY(-1px); }
 .strip .k { font-size: 10.5px; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
-.strip .v { font-family: var(--mono); font-size: 16px; font-weight: 600; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; }
+.strip .v { font-family: var(--mono); font-size: 16px; font-weight: 600; margin-top: 2px; display: flex; align-items: center; min-width: 0; }
+.strip .v .vt { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } /* ellipsis on the text child, never on the flex row */
 .strip .v .spark { flex: 0 0 auto; }
 .strip .s { font-size: 11px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
@@ -695,7 +700,6 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
   .hero .thumbs { display: none; }
   .hero .stat:last-child { display: none; }
   .hero .stat { min-width: 84px; padding: 7px 12px; }
-  .strip { grid-template-columns: repeat(3, 1fr); }
   .actions .ibtn#bellBtn, .actions .ibtn#cartBtn { display: none; }
   .chain-chip .t { display: none; }
 }

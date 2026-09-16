@@ -329,6 +329,13 @@ document.addEventListener('keydown', (ev) => {
     if (ev.key === 's') { $('#dex').scrollIntoView({ behavior: 'smooth' }) }
     if (ev.key === 'g') { window.scrollTo({ top: 0, behavior: 'smooth' }) }
   }
+  // tablists: ←/→ (and Home/End) move between tabs and activate them, as the tab pattern expects
+  const tab = (document.activeElement as HTMLElement | null)?.closest('[role="tablist"] > button') as HTMLButtonElement | null
+  if (tab && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(ev.key)) {
+    const tabs = Array.from(tab.parentElement!.querySelectorAll<HTMLButtonElement>('button')); const i = tabs.indexOf(tab)
+    const n = ev.key === 'Home' ? 0 : ev.key === 'End' ? tabs.length - 1 : (i + (ev.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length
+    ev.preventDefault(); tabs[n].click(); tabs[n].focus(); return
+  }
   const modalWasOpen = $('#modal').classList.contains('open')
   if (ev.key === 'Escape') { closeModal(); $('#qres').classList.remove('open'); $('#chainMenu').classList.remove('open'); if (innerWidth <= 1100 && app.classList.contains('panel-open') && !modalWasOpen) setPanel(false) }
   // search results: ↑/↓ move a highlight through the hits, Enter opens the highlighted one (or the first)

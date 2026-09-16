@@ -239,6 +239,19 @@ async function poll(): Promise<void> {
   } finally { polling = false }
 }
 
+// ── row arrows: greyed at the ends (OpenSea) ───────────────────────────────
+function syncRowArrows(): void {
+  document.querySelectorAll<HTMLElement>('.arrows[data-scroll]').forEach((a) => {
+    const row = document.getElementById(a.dataset.scroll!); if (!row) return
+    const [l, r] = Array.from(a.querySelectorAll('button'))
+    const max = row.scrollWidth - row.clientWidth
+    if (l) l.disabled = row.scrollLeft <= 2
+    if (r) r.disabled = max <= 2 || row.scrollLeft >= max - 2
+  })
+}
+document.addEventListener('scroll', (e) => { const t = e.target as HTMLElement; if (t && t.classList?.contains('row')) syncRowArrows() }, { capture: true, passive: true })
+addEventListener('resize', syncRowArrows)
+
 // ── toggle semantics ──────────────────────────────────────────────────────
 // Renderers mark the active choice with class="on"; screen readers need the same fact as ARIA. Toggle groups get
 // aria-pressed, real tab strips (panel, collection sheet) get tablist/tab/aria-selected. A debounced observer keeps
@@ -256,7 +269,7 @@ function syncToggleAria(): void {
   })
 }
 let ariaTimer = 0
-new MutationObserver(() => { clearTimeout(ariaTimer); ariaTimer = window.setTimeout(syncToggleAria, 30) }).observe(app, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] })
+new MutationObserver(() => { clearTimeout(ariaTimer); ariaTimer = window.setTimeout(() => { syncToggleAria(); syncRowArrows() }, 30) }).observe(app, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] })
 syncToggleAria()
 
 // ── events (delegated) ────────────────────────────────────────────────────

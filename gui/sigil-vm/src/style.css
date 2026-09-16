@@ -244,6 +244,8 @@ img { display: block; }
 .arrows { display: flex; gap: 4px; }
 .arrows button { width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); display: grid; place-items: center; }
 .arrows button:hover { background: var(--surface-3); }
+.arrows button:disabled { opacity: .35; cursor: default; }
+.arrows button:disabled:hover { background: transparent; }
 .arrows svg { width: 16px; height: 16px; }
 
 /* ── hero ───────────────────────────────────────────────────────────── */

@@ -398,7 +398,7 @@ export function panelHead(addr: string | null, s: Snapshot, balances: Record<str
   const native = balances['0'.repeat(64)] ?? 0
   const rig = s.miners?.miners.find((m) => m.wallet.toLowerCase() === addr.toLowerCase())
   const glyphs = balances['0'.repeat(64)] !== undefined ? Math.round(native * 1e10) : null
-  return `<div class="who"><img src="${avatarSvg(addr, addr.slice(0, 1).toUpperCase())}" alt=""><div><div class="a" title="${esc(addr)}">${fmt.short(addr, 6)} <button class="copy" data-copy="${esc(addr)}" title="Copy wallet id">⧉</button></div><div class="b">sigil-g2 · ${s.head.ok ? 'live' : 'offline'}${rig ? ` · mining as ${esc(rig.rig)}` : ''}</div></div><button class="ibtn x" id="pDisconnect" title="Forget">${I.x}</button></div>
+  return `<div class="who"><img src="${avatarSvg(addr, addr.slice(0, 1).toUpperCase())}" alt=""><div><div class="a" title="${esc(addr)}">${fmt.short(addr, 6)} <button class="copy" data-copy="${esc(addr)}" title="Copy wallet id">${I.copy}</button></div><div class="b">sigil-g2 · ${s.head.ok ? 'live' : 'offline'}${rig ? ` · mining as ${esc(rig.rig)}` : ''}</div></div><button class="ibtn x" id="pDisconnect" title="Forget">${I.x}</button></div>
     <div class="total"><div class="k">Portfolio</div><div class="v">${native.toLocaleString('en-US', { maximumFractionDigits: 4 })}<small>SIGIL</small></div><div class="muted" style="font-size:11.5px">${glyphs !== null ? fmt.int(glyphs) + ' glyphs · ' : ''}USD value unavailable — no oracle price on chain yet</div></div>`
 }
 
@@ -437,7 +437,7 @@ export function panelActivity(s: Snapshot): string {
 
 export function collectionModal(c: Collection, s: Snapshot): string {
   const items: string[] = []
-  const item = (t: string, sub: string, m = '', h = '') => items.push(`<${h ? 'button' : 'div'} class="cm-item${h ? ' copyable' : ''}"${h ? ` data-copy="${esc(h)}" title="Click to copy ${esc(h.length === 64 ? 'this id' : 'this hash')}"` : ''}><div class="t">${esc(t)}</div><div class="s">${esc(sub)}</div>${m ? `<div class="m">${m}</div>` : ''}${h ? `<div class="h"><span class="hx">${esc(h)}</span><span class="cp">⧉</span></div>` : ''}</${h ? 'button' : 'div'}>`)
+  const item = (t: string, sub: string, m = '', h = '') => items.push(`<${h ? 'button' : 'div'} class="cm-item${h ? ' copyable' : ''}"${h ? ` data-copy="${esc(h)}" title="Click to copy ${esc(h.length === 64 ? 'this id' : 'this hash')}"` : ''}><div class="t">${esc(t)}</div><div class="s">${esc(sub)}</div>${m ? `<div class="m">${m}</div>` : ''}${h ? `<div class="h"><span class="hx">${esc(h)}</span><span class="cp">${I.copy}</span></div>` : ''}</${h ? 'button' : 'div'}>`)
   switch (c.id) {
     case 'rigs': for (const m of (s.miners?.miners ?? []).slice().sort((a, b) => b.hash_rate - a.hash_rate)) item(m.rig || fmt.short(m.wallet, 6), `${m.kind.toUpperCase()} · ${m.shielded ? 'shielded' : 'transparent'} · ${fmt.ago(m.last_seen_secs_ago)}`, fmt.hps(m.hash_rate) + ` <span class="muted">${s.miners && s.miners.net_hps ? (m.hash_rate / s.miners.net_hps * 100).toFixed(1) + '%' : ''}</span>`, m.wallet); break
     case 'honours': case 'bench': {

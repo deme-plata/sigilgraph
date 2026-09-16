@@ -398,6 +398,20 @@ document.addEventListener('mouseover', (ev) => {
 document.addEventListener('mouseout', (ev) => { if ((ev.target as HTMLElement).closest('#trendingTable tr[data-coll]')) pv.hidden = true })
 document.addEventListener('scroll', () => { pv.hidden = true }, { passive: true })
 
+// scroll spy: the rail and nav marker follow the section in view (click still wins for the moment of the click)
+const SPY: Record<string, string> = { market: 'market', featured: 'featured', drops: 'drops', trending: 'trending', movers: 'trending', sales: 'trending', dex: 'dex' }
+const spyTargets = Object.keys(SPY).map((id) => document.getElementById(id)).filter(Boolean) as HTMLElement[]
+let spyLock = 0
+const spy = new IntersectionObserver((entries) => {
+  if (Date.now() < spyLock) return
+  const visible = entries.filter((e) => e.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)
+  if (!visible.length) return
+  const nav = SPY[(visible[0].target as HTMLElement).id]
+  document.querySelectorAll<HTMLElement>('[data-nav]').forEach((a) => a.classList.toggle('on', a.dataset.nav === nav || (nav === 'dex' && a.dataset.nav === 'swap' && false)))
+}, { rootMargin: `-${72 + 60}px 0px -55% 0px`, threshold: 0 })
+spyTargets.forEach((t) => spy.observe(t))
+document.addEventListener('click', (ev) => { if ((ev.target as HTMLElement).closest('[data-nav]')) spyLock = Date.now() + 900 })
+
 // ── boot ──────────────────────────────────────────────────────────────────
 try { const w = localStorage.getItem('sigilvm-wallet'); if (w) wallet = w } catch { /* */ }
 try { const qw = new URLSearchParams(location.search).get('wallet'); if (qw && /^[0-9a-f]{64}$/i.test(qw)) { wallet = qw.toLowerCase(); app.classList.add('panel-open'); localStorage.setItem('sigilvm-wallet', wallet) } } catch { /* */ }

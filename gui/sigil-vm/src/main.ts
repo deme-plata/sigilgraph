@@ -73,13 +73,37 @@ let heroHover = false
 function renderHero(): void {
   if (!snap) return
   $('#hero').innerHTML = ui.hero(snap, heroIdx)
+  heroShown = snap.featured[heroIdx % snap.featured.length]?.id ?? ''
+  refreshBelowHero()
+  armHero()
+}
+let heroShown = ''
+// A poll must not rebuild the hero: that restarted the 7 s progress bar every 10 s and rescheduled the rotation, so the
+// carousel only ever advanced in step with polls. Patch the live text in place; fall back to a rebuild if the shape changed.
+function refreshHero(): void {
+  if (!snap) return
+  const host = $('#hero'); if (!host.querySelector('h1') || (snap.featured[heroIdx % snap.featured.length]?.id ?? '') !== heroShown) { renderHero(); return } // the featured order moved under us → rebuild
+  const tpl = document.createElement('template'); tpl.innerHTML = ui.hero(snap, heroIdx)
+  const sel = '.eyebrow .chip, h1, .by, p, .stats .k, .stats .v'
+  const cur = host.querySelectorAll<HTMLElement>(sel), nxt = tpl.content.querySelectorAll<HTMLElement>(sel)
+  if (cur.length !== nxt.length) { renderHero(); return }
+  cur.forEach((el, i) => { if (el.innerHTML !== nxt[i].innerHTML) { el.innerHTML = nxt[i].innerHTML; if (el.classList.contains('v')) { el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1400) } } })
+  refreshBelowHero()
+}
+function refreshBelowHero(): void {
+  if (!snap) return
   swapWithFlash($('#strip'), ui.strip(snap))
   swapWithFlash($('#foryou'), ui.forYou(snap))
+}
+function armHero(): void {
   clearTimeout(heroTimer)
   // a reduced-motion visitor gets a still hero (thumbnails still switch it by hand)
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) return
-  heroTimer = window.setTimeout(() => { if (!heroHover) heroIdx++; renderHero() }, 7000)
+  // hovering pauses the carousel: the slide stays, the progress bar pauses (CSS), and a due advance waits until the
+  // pointer leaves — re-rendering under a hovering pointer used to rebuild the hero and reset the bar
+  heroTimer = window.setTimeout(() => { if (heroHover) { heroPending = true; return } heroIdx++; renderHero() }, 7000)
 }
+let heroPending = false
 // OpenSea flashes a value that changed between polls; we diff the rendered text per cell.
 function swapWithFlash(host: HTMLElement, html: string): void {
   const before = new Map<string, string>()
@@ -162,7 +186,7 @@ function renderAll(): void {
   renderChain()
   if (snap && snap.offline) { showOffline(true); return } // keep the skeletons; zeros would read as measurements
   showOffline(false)
-  renderHero(); renderRows(); renderSwap(); renderTokens(); renderPanel()
+  refreshHero(); renderRows(); renderSwap(); renderTokens(); renderPanel()
   // an open collection page refreshes its stats and the active pane in place (keeps tab + scroll)
   if (openCollId && $('#modal').classList.contains('open')) {
     const c = snap!.collections.find((x) => x.id === openCollId)
@@ -452,7 +476,7 @@ function globalSearch(q: string): void {
 }
 
 $('#hero').addEventListener('mouseenter', () => { heroHover = true })
-$('#hero').addEventListener('mouseleave', () => { heroHover = false })
+$('#hero').addEventListener('mouseleave', () => { heroHover = false; if (heroPending) { heroPending = false; clearTimeout(heroTimer); heroTimer = window.setTimeout(() => { heroIdx++; renderHero() }, 1200) } })
 
 // live countdowns: between polls, advance the estimated height with the measured block rate
 setInterval(() => {

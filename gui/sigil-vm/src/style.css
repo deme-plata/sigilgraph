@@ -274,6 +274,7 @@ img { display: block; }
 .hero .dots { position: absolute; left: 40px; top: 28px; display: flex; gap: 6px; }
 .hero .dots button { width: 28px; height: 3px; border-radius: 3px; background: rgba(255,255,255,.25); overflow: hidden; display: block; padding: 0; position: relative; }
 .hero .dots button::before { content: ''; position: absolute; inset: -8px 0; } /* 19px tap target on a 3px bar */
+.hero:hover .dots button.on::after { animation-play-state: paused; }
 .hero .dots button.on::after { content: ""; display: block; height: 100%; width: 100%; background: #fff; animation: fill 7s linear; transform-origin: left; }
 @keyframes fill { from { transform: scaleX(0) } to { transform: scaleX(1) } }
 

@@ -89,7 +89,7 @@ try {
     ]
     // text contrast: any visible text leaf under 3:1 against its nearest painted background (chips over artwork and
     // gradient-clipped text excluded). 3:1 is a floor to catch invisible text, not the AA target — that is audited by hand.
-    const lowContrast = await page.evaluate(() => window.__lowContrast(document.body, '.card .img, .hero, .cm-head, .pv-img, .skip, .preview, .toast, #offline, .modal, .panel, .cats'))
+    const lowContrast = await page.evaluate(() => window.__lowContrast(document.body, '.card .img, .hero h1, .hero p, .hero .by, .hero .blurb, .hero .eyebrow, .hero .stats, .hero .thumbs, .hero .dots, .cm-head, .pv-img, .skip, .preview, .toast, #offline, .modal, .panel, .cats'))
     // the wallet panel (connected, drawer or docked) — its own text, its own surfaces
     await page.evaluate(() => { document.getElementById('walletBtn')?.click() }); await page.waitForTimeout(250)
     await page.evaluate(() => { const i = document.getElementById('walletIn'); if (i) { i.value = '490248e6068fd93a40ee6c11b3f04ce0b87f3d62da64299291396898b566a78b'; document.getElementById('walletUse')?.click() } }); await page.waitForTimeout(1200)

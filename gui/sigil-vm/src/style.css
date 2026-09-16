@@ -169,6 +169,7 @@ img { display: block; }
 :root[data-theme="light"] .btn.ghost { background: #fff; }
 /* light: every hover above used to paint #fff text onto #e8e8ee (invisible) — var(--ink) fixes the text; these fix the fills */
 :root[data-theme="light"] .slider .track { background: rgba(0,0,0,.08); }
+:root[data-theme="light"] .hero .btn.ghost { background: rgba(0,0,0,.45); color: #fff; border-color: rgba(255,255,255,.18); } /* the light ghost fill (#fff) outranked the hero rule and made "Swap SIGIL" white-on-white over the art */
 :root[data-theme="light"] .field label .bal .maxbtn { color: #0a739a; } /* raw cyan is 1.6:1 on a light card; this is 4.8:1 */
 :root[data-theme="light"] .modal .box .list button:hover, :root[data-theme="light"] .modal .box .list button:focus-visible { background: rgba(0,0,0,.05); }
 :root[data-theme="light"] .cats { box-shadow: 0 10px 14px -10px rgba(0,0,0,.14); }

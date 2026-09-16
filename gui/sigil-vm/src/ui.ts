@@ -469,14 +469,14 @@ export function collectionModal(c: Collection, s: Snapshot): string {
 
 export function ticker(s: Snapshot): string {
   const items: string[] = []
-  const it = (icon: string, label: string, val: string, cls = '') => items.push(`<span class="tk-item ${cls}"><span class="tk-ic">${icon}</span><span class="tk-l">${label}</span><span class="tk-v">${val}</span></span>`)
-  if (s.head.ok) it(I.coins, 'network', `${fmt.hps(s.head.netHps)} · ${s.head.liveMiners} rigs${s.head.blkPerSec ? ' · ' + s.head.blkPerSec.toFixed(1) + ' blk/s' : ''}`, 'gold')
-  for (const b of (s.recent?.blocks ?? []).slice(0, 6)) it(I.grid, `block ${fmt.int(b.height)}`, `${b.is_blue ? 'blue' : 'red'} · score ${fmt.int(b.blue_score)} · ${fmt.short(hex(b.producer), 4)}`, b.is_blue ? 'blue' : 'red')
-  for (const m of (s.miners?.miners ?? []).slice(0, 4)) it(I.coins, m.rig || fmt.short(m.wallet, 6), `${fmt.hps(m.hash_rate)} · ${fmt.ago(m.last_seen_secs_ago)}`)
+  const it = (icon: string, label: string, val: string, cls = '', coll = '') => items.push(`<button class="tk-item ${cls}"${coll ? ` data-coll="${coll}"` : ''}><span class="tk-ic">${icon}</span><span class="tk-l">${label}</span><span class="tk-v">${val}</span></button>`)
+  if (s.head.ok) it(I.coins, 'network', `${fmt.hps(s.head.netHps)} · ${s.head.liveMiners} rigs${s.head.blkPerSec ? ' · ' + s.head.blkPerSec.toFixed(1) + ' blk/s' : ''}`, 'gold', 'rigs')
+  for (const b of (s.recent?.blocks ?? []).slice(0, 6)) it(I.grid, `block ${fmt.int(b.height)}`, `${b.is_blue ? 'blue' : 'red'} · score ${fmt.int(b.blue_score)} · ${fmt.short(hex(b.producer), 4)}`, b.is_blue ? 'blue' : 'red', 'blocks')
+  for (const m of (s.miners?.miners ?? []).slice(0, 4)) it(I.coins, m.rig || fmt.short(m.wallet, 6), `${fmt.hps(m.hash_rate)} · ${fmt.ago(m.last_seen_secs_ago)}`, '', 'rigs')
   const a = s.earth?.attest_last?.anchor
-  if (a?.tx_hash) it(I.eye, 'K⊕ attest', `${a.amount ?? '—'} glyphs · ${fmt.short(a.tx_hash, 6)}`, 'gold')
-  for (const e of (s.docket?.entries ?? []).slice(-2)) it(I.book, `docket #${e.seq}`, e.kind, 'gold')
-  if (s.head.ok) it(I.swap, 'finality', `${s.head.finalityGate} · ${fmt.int(s.head.lagBlocks)} blk behind tip`)
+  if (a?.tx_hash) it(I.eye, 'K⊕ attest', `${a.amount ?? '—'} glyphs · ${fmt.short(a.tx_hash, 6)}`, 'gold', 'earth')
+  for (const e of (s.docket?.entries ?? []).slice(-2)) it(I.book, `docket #${e.seq}`, e.kind, 'gold', e.kind === 'HonourConferred' ? 'honours' : 'bench')
+  if (s.head.ok) it(I.swap, 'finality', `${s.head.finalityGate} · ${fmt.int(s.head.lagBlocks)} blk behind tip`, '', 'blocks')
   if (!items.length) return ''
   const row = items.join('')
   return row + row // duplicated so the marquee loops seamlessly

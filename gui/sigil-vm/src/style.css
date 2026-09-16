@@ -263,7 +263,9 @@ img { display: block; }
 .tk-track { display: inline-flex; align-items: center; height: 34px; white-space: nowrap; animation: marquee 60s linear infinite; will-change: transform; }
 .ticker:hover .tk-track { animation-play-state: paused; }
 @keyframes marquee { from { transform: translateX(0) } to { transform: translateX(-50%) } }
-.tk-item { display: inline-flex; align-items: center; gap: 7px; padding: 0 18px; font-size: 12px; color: var(--ink-2); border-right: 1px solid var(--line); }
+.tk-item { display: inline-flex; align-items: center; gap: 7px; padding: 0 18px; height: 34px; font-size: 12px; color: var(--ink-2); border-right: 1px solid var(--line); }
+button.tk-item:hover { background: rgba(255,255,255,.05); }
+button.tk-item:hover .tk-l { text-decoration: underline; }
 .tk-item .tk-ic { display: inline-flex; width: 14px; height: 14px; color: var(--muted); }
 .tk-item .tk-ic svg { width: 14px; height: 14px; }
 .tk-item .tk-l { font-weight: 700; color: #fff; }

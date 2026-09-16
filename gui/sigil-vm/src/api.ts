@@ -7,12 +7,9 @@ export const GLYPHS_PER_SIGIL = 1e10 // g2: 10 decimals, base unit "glyph"
 export const NATIVE_TOKEN = '0'.repeat(64)
 
 function resolveBase(): string {
-  try {
-    const q = new URLSearchParams(location.search).get('api')
-    if (q) { localStorage.setItem('sigilvm-api', q); return q.replace(/\/+$/, '') }
-    const s = localStorage.getItem('sigilvm-api')
-    if (s) return s.replace(/\/+$/, '')
-  } catch { /* storage may be blocked */ }
+  const q = new URLSearchParams(location.search).get('api')
+  if (q) { try { localStorage.setItem('sigilvm-api', q) } catch { /* remembering is optional; honouring the URL is not */ } return q.replace(/\/+$/, '') }
+  try { const s = localStorage.getItem('sigilvm-api'); if (s) return s.replace(/\/+$/, '') } catch { /* storage may be blocked */ }
   return ''
 }
 export const API_BASE = resolveBase()

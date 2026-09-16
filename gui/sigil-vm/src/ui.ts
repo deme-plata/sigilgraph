@@ -173,7 +173,7 @@ export function hero(s: Snapshot, idx: number): string {
   const h = s.head
   return `
     <div class="bg" style="background-image:url('${c.cover}')"></div><div class="veil"></div>
-    <div class="dots">${list.map((_, i) => `<i class="${i === idx % list.length ? 'on' : ''}"></i>`).join('')}</div>
+    <div class="dots">${list.map((c, i) => `<button class="${i === idx % list.length ? 'on' : ''}" data-hero="${i}" aria-label="Show ${esc(c.name)}"></button>`).join('')}</div>
     <div class="body">
       <div class="eyebrow">${prov(c.provenance)}<span class="chip gold">featured collection</span>${h.ok ? '<span class="chip live"><i class="d"></i>sigil-g2 · block ' + fmt.int(h.height) + '</span>' : '<span class="chip bad">node unreachable</span>'}</div>
       <h1>${esc(c.name)}${ver(c.verified)}</h1>
@@ -376,6 +376,7 @@ export function tokenTable(s: Snapshot, st: TokenTableState): string {
         <td>${t.supply === null ? '<span class="muted">—</span>' : fmt.num(t.supply) + (t.maxSupply ? ` <span class="muted">/ ${fmt.num(t.maxSupply, 0)}</span>` : '')}</td>
         <td>${t.liquidity === null ? '<span class="muted">—</span>' : fmt.num(t.liquidity)}</td><td>${t.holders === null ? '<span class="muted">—</span>' : fmt.int(t.holders)}</td><td>${t.ageBlocks === null ? '<span class="muted">—</span>' : fmt.num(t.ageBlocks, 1) + ' blk'}</td>
         <td><div class="act"><button class="sw" data-swap="${t.id}">Swap</button><button data-info="${t.id}">${st.open === t.id ? 'Close' : 'Info'}</button></div></td></tr>${st.open === t.id ? tokenDetailRow(t, s) : ''}`).join('')}
+    ${list.length ? '' : `<tr class="empty"><td colspan="11"><div class="tempty">${st.q ? `Nothing matches “${esc(st.q)}”.` : st.filter === 'gainers' ? 'No gainers — there is no on-chain price yet, so nothing has moved. The moment an oracle or a pool publishes one, this fills in.' : 'No losers — there is no on-chain price yet, so nothing has moved.'}</div></td></tr>`}
     </tbody></table></div>
     <div class="muted" style="font-size:11.5px;margin-top:10px">Price, 1h/24h/7d and volume read “—” because sigil-g2 has no price oracle feeding these tokens yet (USDS oracle: not fed; ROCKY: gated). Supply, holders, age and liquidity are live from the node.</div>
   </div></div>`

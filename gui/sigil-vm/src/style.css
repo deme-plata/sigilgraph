@@ -269,8 +269,9 @@ img { display: block; }
 .hero .thumbs button.on { opacity: 1; border-color: #fff; transform: scale(1.06); }
 .hero .thumbs button:hover { opacity: 1; }
 .hero .dots { position: absolute; left: 40px; top: 28px; display: flex; gap: 6px; }
-.hero .dots i { width: 28px; height: 3px; border-radius: 3px; background: rgba(255,255,255,.25); overflow: hidden; display: block; }
-.hero .dots i.on::after { content: ""; display: block; height: 100%; width: 100%; background: #fff; animation: fill 7s linear; transform-origin: left; }
+.hero .dots button { width: 28px; height: 3px; border-radius: 3px; background: rgba(255,255,255,.25); overflow: hidden; display: block; padding: 0; position: relative; }
+.hero .dots button::before { content: ''; position: absolute; inset: -8px 0; } /* 19px tap target on a 3px bar */
+.hero .dots button.on::after { content: ""; display: block; height: 100%; width: 100%; background: #fff; animation: fill 7s linear; transform-origin: left; }
 @keyframes fill { from { transform: scaleX(0) } to { transform: scaleX(1) } }
 
 .offline { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: -6px 0 14px; padding: 10px 14px; border-radius: 12px; border: 1px solid rgba(240,85,77,.4); background: rgba(240,85,77,.08); font-size: 13px; }
@@ -532,6 +533,8 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 
 .ttable tr.td-row td { padding: 0 8px 12px; text-align: left; font-family: var(--sans); white-space: normal; }
 .ttable tr.td-row:hover { background: transparent; }
+.ttable tr.empty td { padding: 22px 12px; text-align: center; white-space: normal; font-family: var(--sans); }
+.ttable .tempty { color: var(--muted); font-size: 13px; max-width: 520px; margin: 0 auto; }
 .td-wrap { background: rgba(255,255,255,.03); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; display: grid; gap: 12px; animation: rise .2s ease; }
 .td-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px 16px; }
 .td-cell .k { font-size: 10.5px; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }

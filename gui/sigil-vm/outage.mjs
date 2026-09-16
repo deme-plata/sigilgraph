@@ -25,7 +25,9 @@ const FAMS = {
   dagknight: ['#trendingTable', []],
   bridge: ['#trendingTable', []],
   usds: ['#dropsRow', []],
+  balance: ['.panel', ['Portfolio 0 SIGIL', 'Portfolio 0\n']], // with a wallet in the URL — the panel total once read '0 SIGIL' when /v1/balance failed
 }
+const WALLET_QS = '?wallet=490248e6068fd93a40ee6c11b3f04ce0b87f3d62da64299291396898b566a78b'
 const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] })
 const fails = []
 try {
@@ -34,12 +36,12 @@ try {
     await ctx.addInitScript(() => { try { localStorage.setItem('sigilvm-theme', 'dark') } catch {} })
     const page = await ctx.newPage()
     await page.route(new RegExp('/v1/' + fam + '(/|$|\\?)'), (r) => r.abort('connectionrefused'))
-    await page.goto(`http://127.0.0.1:${PORT}/index.html`, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {})
+    await page.goto(`http://127.0.0.1:${PORT}/index.html${fam === 'balance' ? WALLET_QS : ''}`, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {})
     await page.waitForSelector('#featuredRow .card, #offline', { timeout: 20000 }).catch(() => {})
     await page.waitForTimeout(800)
     const r = await page.evaluate(([sel]) => ({
       offline: !!document.getElementById('offline'), nan: document.body.innerText.includes('NaN'),
-      text: document.body.innerText.replace(/\s+/g, ' '),
+      text: document.body.innerText.replace(/\s+/g, ' ') + ' ' + [...document.querySelectorAll('.panel .total')].map((e) => e.innerText.replace(/\s+/g, ' ')).join(' '),
       admits: /unread|did not answer|—/.test([...document.querySelectorAll(sel)].map((e) => e.innerText).join(' ')),
       pretend: document.querySelectorAll('.chip.pretend, .chip.gold').length,
     }), [sel])

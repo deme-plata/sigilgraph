@@ -235,7 +235,7 @@ img { display: block; }
 .sec-head > div:first-child { min-width: 0; }
 .sec-head h2 { margin: 0; font-family: var(--display); font-size: 21px; font-weight: 700; letter-spacing: -.015em; }
 .sec-head .sub { color: var(--muted); font-size: 12.5px; margin-top: 3px; max-width: 760px; }
-.sec-head .right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sec-head .right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; } /* when the long sub-line forces a wrap (tablet), the arrows land at the right edge, as on desktop */
 .sec-head .viewall { color: var(--ink-2); font-weight: 600; font-size: 13px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); }
 .sec-head .viewall:hover { background: var(--hover); }
 .arrows { display: flex; gap: 4px; }

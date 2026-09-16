@@ -652,7 +652,7 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
   .cm-stats { grid-template-columns: 1fr 1fr; }
   #walletBtn { padding: 0 12px; }
   #walletBtn span { display: none; }
-  .search { max-width: none; }
+  .search { max-width: none; min-width: 0; flex: 1 1 120px; }
   .search input { height: 40px; padding-left: 38px; padding-right: 10px; }
   .sec-head h2 { font-size: 19px; }
   .sec-head .sub { font-size: 12px; }

@@ -405,7 +405,7 @@ document.addEventListener('keydown', (ev) => {
     ev.preventDefault(); tabs[n].click(); tabs[n].focus(); return
   }
   const modalWasOpen = $('#modal').classList.contains('open')
-  if (ev.key === 'Escape') { closeModal(); $('#qres').classList.remove('open'); $('#chainMenu').classList.remove('open'); if (innerWidth <= 1100 && app.classList.contains('panel-open') && !modalWasOpen) setPanel(false) }
+  if (ev.key === 'Escape') { closeModal(); $('#qres').classList.remove('open'); if ($('#chainMenu').classList.contains('open') && (document.activeElement as HTMLElement | null)?.closest('.chain-wrap')) $('#chainChip').focus(); $('#chainMenu').classList.remove('open'); if (innerWidth <= 1100 && app.classList.contains('panel-open') && !modalWasOpen) setPanel(false) }
   // search results: ↑/↓ move a highlight through the hits, Enter opens the highlighted one (or the first)
   const qres = $('#qres')
   if (qres.classList.contains('open') && (document.activeElement?.id === 'q' || document.activeElement?.classList.contains('r')) && (ev.key === 'ArrowDown' || ev.key === 'ArrowUp' || ev.key === 'Enter')) {
@@ -427,6 +427,8 @@ document.addEventListener('keydown', (ev) => {
     items[n]?.focus()
   }
 })
+// a popover that loses keyboard focus closes (Tab past its last link used to leave the chain menu hanging open)
+document.querySelector('.chain-wrap')?.addEventListener('focusout', (ev) => { const to = (ev as FocusEvent).relatedTarget as HTMLElement | null; if (!to || !to.closest('.chain-wrap')) $('#chainMenu').classList.remove('open') })
 document.addEventListener('click', (ev) => { const t = ev.target as HTMLElement; if (!t.closest('.search')) $('#qres').classList.remove('open'); if (!t.closest('.chain-wrap')) $('#chainMenu').classList.remove('open') })
 
 // ── modals ────────────────────────────────────────────────────────────────

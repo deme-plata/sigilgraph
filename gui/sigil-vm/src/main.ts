@@ -481,7 +481,10 @@ document.addEventListener('keydown', (ev) => {
   if (ev.shiftKey && (i <= 0)) { ev.preventDefault(); f[f.length - 1].focus() }
   else if (!ev.shiftKey && (i === f.length - 1 || i < 0)) { ev.preventDefault(); f[0].focus() }
 })
-function openCollection(id: string): void { const c = snap?.collections.find((x) => x.id === id); if (c) { openCollId = id; openModal(ui.collectionModal(c, snap!, watch.has(id)), 'coll') } }
+// recently opened collections (this browser) feed the empty search's 'Recent' group
+const recent: string[] = []
+try { for (const id of JSON.parse(localStorage.getItem('sigilvm-recent') || '[]')) if (typeof id === 'string' && recent.length < 4) recent.push(id) } catch { /* */ }
+function openCollection(id: string): void { const c = snap?.collections.find((x) => x.id === id); if (c) { openCollId = id; openModal(ui.collectionModal(c, snap!, watch.has(id)), 'coll'); const i = recent.indexOf(id); if (i >= 0) recent.splice(i, 1); recent.unshift(id); recent.splice(4); try { localStorage.setItem('sigilvm-recent', JSON.stringify(recent)) } catch { /* */ } } }
 function openTokenPicker(which: 'from' | 'to'): void {
   if (!snap) return
   openModal(`<h4>Select a token <span class="muted kbd-only" style="font-size:11px;font-weight:500" aria-hidden="true">↑↓ Enter</span></h4><div class="list">${snap.tokens.map((t) => `<button data-pick="${t.id}" data-which="${which}"><img src="${t.icon}" alt=""><div><div class="s">${t.symbol}</div><div class="n">${ui.esc(t.name)}</div></div><span class="r">${balances[t.id] === undefined ? '' : fmt.num(balances[t.id], 4)}</span></button>`).join('')}</div>`)
@@ -520,6 +523,8 @@ function globalSearch(q: string): void {
   const rows: string[] = []
   // an empty box offers a start (OpenSea's empty search lists what is trending): the biggest collections and the native tokens — all live figures
   const cs = q ? snap.collections.filter((c) => c.name.toLowerCase().includes(q) || c.blurb.toLowerCase().includes(q)).slice(0, 4) : snap.featured.slice(0, 4)
+  const rc = q ? [] : recent.map((id) => snap!.collections.find((c) => c.id === id)).filter((c): c is NonNullable<typeof c> => !!c)
+  if (rc.length) rows.push('<div class="h">Recent</div>' + rc.map((c) => `<div class="r" data-coll="${c.id}"><img src="${c.cover}" alt=""><div><div class="n">${ui.esc(c.name)}</div><div class="s">${c.items === null ? '—' : fmt.int(c.items)} ${c.items === 1 ? 'item' : 'items'} · open</div></div></div>`).join(''))
   if (!q) rows.push('<div class="h">Trending now · by items on chain</div>')
   if (cs.length) rows.push((q ? '<div class="h">Collections</div>' : '') + cs.map((c) => `<div class="r" data-coll="${c.id}"><img src="${c.cover}" alt=""><div><div class="n">${ui.esc(c.name)}</div><div class="s">${c.items === null ? '—' : fmt.int(c.items)} ${c.items === 1 ? 'item' : 'items'} · open</div></div></div>`).join(''))
   const ts = (q ? snap.tokens.filter((t) => (t.symbol + t.name).toLowerCase().includes(q)) : snap.tokens.filter((t) => t.status !== 'external' && t.status !== 'dormant')).slice(0, 4)

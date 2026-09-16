@@ -21,7 +21,8 @@ try {
   await page.waitForSelector('#featuredRow .card', { timeout: 20000 })
   await page.waitForTimeout(800)
   html = await page.evaluate(() => {
-    const t = (el) => (el?.textContent || '').replace(/\s+/g, ' ').trim()
+    // 'after next poll' promises a refresh the static copy will never make — say when the figure was taken instead
+    const t = (el) => (el?.textContent || '').replace(/\s+/g, ' ').trim().replace(/\b(rate|age) after next poll\b/g, '$1 not sampled at deploy')
     const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))
     const strip = [...document.querySelectorAll('#strip .cell')].map((c) => `<li><b>${esc(t(c.querySelector('.k')))}</b> ${esc(t(c.querySelector('.v')))} <i>${esc(t(c.querySelector('.s')))}</i></li>`).join('')
     const fy = [...document.querySelectorAll('#foryou .fy-col p')].map((p) => `<p>${esc(t(p))}</p>`).join('')

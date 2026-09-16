@@ -505,7 +505,7 @@ export function ticker(s: Snapshot): string {
   if (s.head.ok) it(I.swap, 'finality', `${s.head.finalityGate} · ${fmt.int(s.head.lagBlocks)} blk behind tip`, '', 'blocks')
   if (!items.length) return ''
   const row = items.join('')
-  return row + row // duplicated so the marquee loops seamlessly
+  return row + `<span class="tk-dup" aria-hidden="true">${row}</span>` // duplicated so the marquee loops seamlessly; the copy is hidden from readers and dropped under reduced motion
 }
 
 function collectionActivity(c: Collection, s: Snapshot): string {

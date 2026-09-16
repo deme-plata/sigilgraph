@@ -94,7 +94,7 @@ img { display: block; }
 @keyframes shimmer { 0% { background-position: -400px 0 } 100% { background-position: 400px 0 } }
 @keyframes flashv { 0% { background: rgba(0,217,255,.28); box-shadow: 0 0 0 4px rgba(0,217,255,.18) } 100% { background: transparent; box-shadow: none } }
 .flash { animation: flashv 1.4s ease-out; border-radius: 6px; }
-@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; } .ticker { display: none; } } /* dots stay: with auto-rotation off they are the only way to switch the hero, and the fill bar is a static marker */
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; } } /* the ticker's reduced-motion rules sit after its own rules (same specificity — here they would lose). dots stay: with auto-rotation off they are the only way to switch the hero, and the fill bar is a static marker */
 
 /* ── first-paint skeletons ──────────────────────────────────────────── */
 .sk { border-radius: 8px; background: linear-gradient(90deg, rgba(255,255,255,.05) 25%, rgba(255,255,255,.11) 50%, rgba(255,255,255,.05) 75%); background-size: 800px 100%; animation: shimmer 1.4s infinite linear; }
@@ -287,6 +287,8 @@ img { display: block; }
 .ticker { position: relative; overflow: hidden; height: 34px; margin: -6px 0 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent); -webkit-mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent); }
 .tk-track:empty { display: block; height: 34px; width: 100%; border-radius: 10px; background: linear-gradient(90deg, rgba(255,255,255,.04) 25%, rgba(255,255,255,.09) 50%, rgba(255,255,255,.04) 75%); background-size: 800px 100%; animation: shimmer 1.4s infinite linear; }
 .tk-track { display: inline-flex; align-items: center; height: 34px; white-space: nowrap; animation: marquee 60s linear infinite; will-change: transform; }
+.tk-dup { display: inline-flex; align-items: center; }
+@media (prefers-reduced-motion: reduce) { .ticker { height: auto; overflow-x: auto; mask-image: none; -webkit-mask-image: none; scrollbar-width: thin; } .tk-track { animation: none; } .tk-dup { display: none; } } /* the ticker stays (it used to vanish, taking the live block line with it): the marquee stops and the strip scrolls by hand, without its loop copy */
 .ticker:hover .tk-track { animation-play-state: paused; }
 @keyframes marquee { from { transform: translateX(0) } to { transform: translateX(-50%) } }
 .tk-item { display: inline-flex; align-items: center; gap: 7px; padding: 0 18px; height: 34px; font-size: 12px; color: var(--ink-2); border-right: 1px solid var(--line); }

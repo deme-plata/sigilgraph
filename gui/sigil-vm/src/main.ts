@@ -195,6 +195,7 @@ async function poll(): Promise<void> {
 document.addEventListener('click', (ev) => {
   const t = ev.target as HTMLElement
   if (t.id === 'modal') { closeModal(); return }
+  if (t.id === 'panelScrim') { app.classList.remove('panel-open'); try { localStorage.setItem('sigilvm-panel', 'closed') } catch { /* */ } return }
   // th before tr: a header click used to resolve to its <tr>, so th[data-sort] was never found and the token table never re-sorted
   const btn = t.closest('th[data-sort], button, a, tr, [data-hero], [data-coll], [data-swap], [data-copy]') as HTMLElement | null
   if (!btn) return

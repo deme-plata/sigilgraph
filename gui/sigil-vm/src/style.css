@@ -550,6 +550,8 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 .td-links { display: flex; gap: 8px; flex-wrap: wrap; }
 
 /* ── right wallet panel (OpenSea) ───────────────────────────────────── */
+.pscrim { display: none; }
+@keyframes fade { from { opacity: 0 } to { opacity: 1 } }
 .panel { position: fixed; top: var(--top); right: 0; bottom: 0; width: var(--panel); z-index: 45; background: var(--bg-2); border-left: 1px solid var(--line); display: flex; flex-direction: column; transform: translateX(100%); transition: transform .25s ease; }
 .app.panel-open .panel { transform: none; }
 .panel .ph { padding: 16px 18px 10px; border-bottom: 1px solid var(--line); }
@@ -715,6 +717,7 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
   .chain-chip .t { display: none; }
 }
 @media (max-width: 1100px) {
+  .app.panel-open .pscrim { display: block; position: fixed; inset: var(--top) 0 0 0; background: rgba(0,0,0,.5); z-index: 44; animation: fade .2s ease; } /* the panel overlays the page below 1100px — a scrim says so, and tapping it closes */
   .app.panel-open .main { margin-right: 0; }
   .panel { width: min(var(--panel), 100vw); box-shadow: -20px 0 60px rgba(0,0,0,.6); }
 }

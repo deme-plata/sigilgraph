@@ -134,6 +134,7 @@ export function shell(): string {
       <div class="foot-bottom"><span>© 2026 SIGIL Graph · sigilgraph.org</span><span id="footTs" class="mono"></span><span class="muted">Built with the Flux Vite engine · shipped through <span class="mono">ship.sh</span></span><button class="foot-keys" id="footKeys">Keyboard <kbd>?</kbd></button></div>
     </footer>
   </main>
+  <div class="pscrim" id="panelScrim" aria-hidden="true"></div>
   <aside class="panel" id="panel">
     <div class="ph" id="panelHead"></div>
     <div class="ptabs" id="panelTabs"><button class="on" data-ptab="tokens">Tokens<span class="n" id="nTok"></span></button><button data-ptab="nfts">NFTs<span class="n" id="nNft"></span></button><button data-ptab="activity">Activity</button></div>

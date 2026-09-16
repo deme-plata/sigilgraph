@@ -449,7 +449,7 @@ document.addEventListener('keydown', (ev) => {
 })
 // a popover that loses keyboard focus closes (Tab past its last link used to leave the chain menu hanging open)
 // coming back to a search that still holds text shows its hits again (they close whenever focus leaves)
-document.getElementById('q')?.addEventListener('focus', (ev) => { const i = ev.target as HTMLInputElement; if (i.value.trim()) globalSearch(i.value) })
+document.getElementById('q')?.addEventListener('focus', (ev) => { globalSearch((ev.target as HTMLInputElement).value) }) // empty → the 'Trending now' start
 document.querySelector('.search')?.addEventListener('focusout', (ev) => { const to = (ev as FocusEvent).relatedTarget as HTMLElement | null; if (!to || !to.closest('.search')) $('#qres').classList.remove('open') })
 document.querySelector('.chain-wrap')?.addEventListener('focusout', (ev) => { const to = (ev as FocusEvent).relatedTarget as HTMLElement | null; if (!to || !to.closest('.chain-wrap')) $('#chainMenu').classList.remove('open') })
 document.addEventListener('click', (ev) => { const t = ev.target as HTMLElement; if (!t.closest('.search')) $('#qres').classList.remove('open'); if (!t.closest('.chain-wrap')) $('#chainMenu').classList.remove('open') })
@@ -516,13 +516,15 @@ function openWalletModal(): void {
 function globalSearch(q: string): void {
   const box = $('#qres')
   q = q.trim().toLowerCase()
-  if (!q || !snap) { box.classList.remove('open'); return }
+  if (!snap) { box.classList.remove('open'); return }
   const rows: string[] = []
-  const cs = snap.collections.filter((c) => c.name.toLowerCase().includes(q) || c.blurb.toLowerCase().includes(q)).slice(0, 4)
-  if (cs.length) rows.push('<div class="h">Collections</div>' + cs.map((c) => `<div class="r" data-coll="${c.id}"><img src="${c.cover}" alt=""><div><div class="n">${ui.esc(c.name)}</div><div class="s">${c.items === null ? '—' : fmt.int(c.items)} ${c.items === 1 ? 'item' : 'items'} · open</div></div></div>`).join(''))
-  const ts = snap.tokens.filter((t) => (t.symbol + t.name).toLowerCase().includes(q)).slice(0, 4)
+  // an empty box offers a start (OpenSea's empty search lists what is trending): the biggest collections and the native tokens — all live figures
+  const cs = q ? snap.collections.filter((c) => c.name.toLowerCase().includes(q) || c.blurb.toLowerCase().includes(q)).slice(0, 4) : snap.featured.slice(0, 4)
+  if (!q) rows.push('<div class="h">Trending now · by items on chain</div>')
+  if (cs.length) rows.push((q ? '<div class="h">Collections</div>' : '') + cs.map((c) => `<div class="r" data-coll="${c.id}"><img src="${c.cover}" alt=""><div><div class="n">${ui.esc(c.name)}</div><div class="s">${c.items === null ? '—' : fmt.int(c.items)} ${c.items === 1 ? 'item' : 'items'} · open</div></div></div>`).join(''))
+  const ts = (q ? snap.tokens.filter((t) => (t.symbol + t.name).toLowerCase().includes(q)) : snap.tokens.filter((t) => t.status !== 'external' && t.status !== 'dormant')).slice(0, 4)
   if (ts.length) rows.push('<div class="h">Tokens</div>' + ts.map((t) => `<div class="r" data-swap="${t.id}"><img src="${t.icon}" alt=""><div><div class="n">${t.symbol}</div><div class="s">${ui.esc(t.statusNote)}</div></div></div>`).join(''))
-  const ms = (snap.miners?.miners ?? []).filter((m) => (m.rig + m.wallet).toLowerCase().includes(q)).slice(0, 4)
+  const ms = q ? (snap.miners?.miners ?? []).filter((m) => (m.rig + m.wallet).toLowerCase().includes(q)).slice(0, 4) : []
   // a block height typed in: find it in the recent set, or say it is older / not minted yet
   const hq = q.replace(/[,\s]/g, '')
   if (/^\d{4,}$/.test(hq)) {

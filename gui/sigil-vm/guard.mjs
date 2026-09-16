@@ -40,6 +40,7 @@ try {
       docW: document.documentElement.scrollWidth, topW: document.querySelector('.topbar')?.scrollWidth ?? 0,
       wallet: (document.querySelector('#walletBtn')?.getBoundingClientRect().right ?? 0) <= innerWidth,
       offline: !!document.getElementById('offline'), cards: document.querySelectorAll('#featuredRow .card').length,
+      totopAtTop: scrollY < 10 && (document.getElementById('toTop')?.getBoundingClientRect().height || 0) > 0, // [hidden] must actually hide (an author display: beat it for weeks)
       tokens: document.querySelectorAll('#tokens tbody tr[data-tok]').length,
       // hidden horizontal overflow inside a box that is NOT a deliberate carousel — how the trending table clipped at 1600px
       clipped: Array.from(document.querializeAll ? [] : document.querySelectorAll('*')).filter((e) => {
@@ -128,6 +129,7 @@ try {
     if (!m.wallet) bad.push('wallet button off-screen')
     if (m.clipped.length) bad.push('clipped: ' + m.clipped.join(', '))
     if (m.offline) bad.push('offline banner (node unreachable from the guard)')
+    if (m.totopAtTop) bad.push('back-to-top visible at the top of the page ([hidden] not honoured)')
     if (m.cards < 1 || m.tokens < 1) bad.push(`empty sections cards=${m.cards} tokens=${m.tokens}`)
     if (bad404.length) bad.push('404: ' + bad404.join(', '))
     if (errs.length) bad.push('errors: ' + errs.join(' | '))

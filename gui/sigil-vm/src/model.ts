@@ -238,19 +238,19 @@ function buildHead(supply: Supply | null, miners: Miners | null, anchor: Anchor 
     netHps: miners ? miners.net_hps : NaN,       // NaN = the mining route did not answer; every formatter prints — for it
     liveMiners: miners ? miners.live_miners : NaN,
     finalityGate: cert?.certificate.gate ?? '—',
-    finalityHeight: cert?.certificate.height ?? 0,
-    committee: cert?.certificate.committee_size ?? 0,
-    supplySigil: glyphsToSigil(supply?.native_supply),
-    maxSupplySigil: glyphsToSigil(supply?.max_supply),
-    mintedPct: supply?.minted_pct ?? 0,
-    valueLocked: glyphsToSigil(anchor?.value_locked),
-    notes: anchor?.notes ?? 0,
-    nullifiers: anchor?.nullifiers ?? 0,
-    registered: anchor?.registered ?? 0,
-    capacity: anchor?.capacity ?? 0,
-    treasurySigil: glyphsToSigil(nation?.treasury_glyphs),
+    finalityHeight: cert ? cert.certificate.height : NaN,
+    committee: cert ? cert.certificate.committee_size : NaN,
+    supplySigil: supply ? glyphsToSigil(supply.native_supply) : NaN,
+    maxSupplySigil: supply ? glyphsToSigil(supply.max_supply) : NaN,
+    mintedPct: supply ? (supply.minted_pct ?? 0) : NaN,
+    valueLocked: anchor ? glyphsToSigil(anchor.value_locked) : NaN,
+    notes: anchor ? anchor.notes : NaN,
+    nullifiers: anchor ? anchor.nullifiers : NaN,
+    registered: anchor ? anchor.registered : NaN,
+    capacity: anchor ? anchor.capacity : NaN,
+    treasurySigil: nation ? glyphsToSigil(nation.treasury_glyphs) : NaN,
     ok,
-    lagBlocks: Math.max(0, (miners?.height ?? nation?.height ?? 0) - (cert?.certificate.height ?? 0)),
+    lagBlocks: cert ? Math.max(0, (miners?.height ?? nation?.height ?? cert.certificate.height) - cert.certificate.height) : NaN, // no certificate read → unknown, never 'N blocks behind'
   }
 }
 

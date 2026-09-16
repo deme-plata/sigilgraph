@@ -197,11 +197,11 @@ export function strip(s: Snapshot): string {
   const cell = (k: string, v: string, small = '', coll = '', extra = '') => `<button class="cell"${coll ? ` data-coll="${coll}"` : ''}><div class="k">${k}</div><div class="v"><span class="vt">${v}</span>${extra}</div>${small ? `<div class="s">${small}</div>` : ''}</button>`
   return [
     cell('Height', fmt.int(h.height), h.blkPerSec ? `${h.blkPerSec.toFixed(1)} blk/s` : 'measuring rate…', 'blocks'),
-    cell('Finality', h.finalityGate, `h ${fmt.int(h.finalityHeight)} · ${h.committee} validators`, 'blocks'),
-    cell('Supply', fmt.num(h.supplySigil) + ' SIGIL', `${(h.mintedPct).toFixed(2)}% of 21M`, 'rigs'),
+    cell('Finality', h.finalityGate, isFinite(h.committee) ? `h ${fmt.int(h.finalityHeight)} · ${fmt.int(h.committee)} validators` : 'certificate unread this poll', 'blocks'),
+    cell('Supply', isFinite(h.supplySigil) ? fmt.num(h.supplySigil) + ' SIGIL' : '—', isFinite(h.mintedPct) ? `${h.mintedPct.toFixed(2)}% of 21M` : 'supply unread this poll', 'rigs'),
     cell('Hashrate', fmt.hps(h.netHps), `${fmt.int(h.liveMiners)} miners${h.hashChange !== null ? ' · ' + fmt.pct(h.hashChange) : ''}`, 'rigs', s.hashHist.length > 2 ? sparkline(s.hashHist, 90, 22, h.hashChange !== null && h.hashChange < 0 ? 'down' : 'up') : ''),
-    cell('Shielded pool', fmt.int(h.notes) + ' notes', `${fmt.num(h.valueLocked)} SIGIL locked · ${fmt.int(h.nullifiers)} spent`, 'notes'),
-    cell('Treasury', fmt.num(h.treasurySigil) + ' SIGIL', 'nation welfare', 'treasury'),
+    cell('Shielded pool', isFinite(h.notes) ? fmt.int(h.notes) + ' notes' : '—', isFinite(h.notes) ? `${fmt.num(h.valueLocked)} SIGIL locked · ${fmt.int(h.nullifiers)} spent` : 'anchor unread this poll', 'notes'),
+    cell('Treasury', isFinite(h.treasurySigil) ? fmt.num(h.treasurySigil) + ' SIGIL' : '—', isFinite(h.treasurySigil) ? 'nation welfare' : 'nation route unread this poll', 'treasury'),
   ].join('')
 }
 
@@ -226,10 +226,10 @@ export function forYou(s: Snapshot): string {
   return `<div class="foryou">
     <div class="fy-col">
       <div class="fy-h">For you <span class="muted">— money words, not instruments</span></div>
-      <p><b>Is my payment final?</b> ${h.ok ? `The finality certificate sits ${fmt.int(h.lagBlocks)} block${h.lagBlocks === 1 ? '' : 's'} behind the tip${lagS !== null ? ` ≈ <b>${lagS < 1 ? '<1' : lagS.toFixed(0)} s</b>` : ''} (gate <span class="mono">${esc(h.finalityGate)}</span>, ${h.committee} validators).` : 'Node unreachable — no certificate read.'} ${tag('MEASURED', 'live')}</p>
-      <p><b>What protects it?</b> ${isFinite(h.netHps) ? `${fmt.int(h.liveMiners)} live rigs at ${fmt.hps(h.netHps)} (BLAKE4 + VDF)` : 'Rigs and hashrate unread this poll — the mining route did not answer'}, ${fmt.int(h.notes)} sealed notes holding ${fmt.num(h.valueLocked)} SIGIL, and a hybrid post-quantum block check on the producer. ${tag('MEASURED', 'live')}</p>
-      <p><b>What is it worth?</b> ${fmt.num(h.supplySigil)} of 21M SIGIL minted (${h.mintedPct.toFixed(2)}%). There is <b>no on-chain price</b>: the USDS oracle is not fed and no SIGIL pool exists on g2. The only market is the wSIGIL3 pool on Polygon, off this chain. ${tag('MEASURED', 'live')} ${tag('EXTERNAL', 'derived')}</p>
-      <p><b>Can I pay with it?</b> Yes — privately only. Transparent sends are retired, so every payment is a sealed note: ${h.capacity ? `<b>${fmt.int(Math.max(0, h.capacity - h.notes))}</b> of ${fmt.int(h.capacity)} leaves are free this epoch, ` : ''}${fmt.int(h.registered)} wallets have published receiving keys, and ${fmt.int(h.nullifiers)} notes have ever been spent. The proof and the signature happen in your wallet app, never on this page. ${tag('MEASURED', 'live')}</p>
+      <p><b>Is my payment final?</b> ${h.ok && !isFinite(h.lagBlocks) ? 'No finality certificate was read this poll — the finality route did not answer, so this page cannot say.' : h.ok ? `The finality certificate sits ${fmt.int(h.lagBlocks)} block${h.lagBlocks === 1 ? '' : 's'} behind the tip${lagS !== null ? ` ≈ <b>${lagS < 1 ? '<1' : lagS.toFixed(0)} s</b>` : ''} (gate <span class="mono">${esc(h.finalityGate)}</span>, ${h.committee} validators).` : 'Node unreachable — no certificate read.'} ${tag('MEASURED', 'live')}</p>
+      <p><b>What protects it?</b> ${isFinite(h.netHps) ? `${fmt.int(h.liveMiners)} live rigs at ${fmt.hps(h.netHps)} (BLAKE4 + VDF)` : 'Rigs and hashrate unread this poll — the mining route did not answer'}, ${isFinite(h.notes) ? `${fmt.int(h.notes)} sealed notes holding ${fmt.num(h.valueLocked)} SIGIL` : 'a shielded pool whose anchor was unread this poll'}, and a hybrid post-quantum block check on the producer. ${tag('MEASURED', 'live')}</p>
+      <p><b>What is it worth?</b> ${isFinite(h.supplySigil) ? `${fmt.num(h.supplySigil)} of 21M SIGIL minted (${h.mintedPct.toFixed(2)}%).` : 'Supply unread this poll — the supply route did not answer.'} There is <b>no on-chain price</b>: the USDS oracle is not fed and no SIGIL pool exists on g2. The only market is the wSIGIL3 pool on Polygon, off this chain. ${tag('MEASURED', 'live')} ${tag('EXTERNAL', 'derived')}</p>
+      <p><b>Can I pay with it?</b> Yes — privately only. Transparent sends are retired, so every payment is a sealed note. ${isFinite(h.notes) ? `${h.capacity ? `<b>${fmt.int(Math.max(0, h.capacity - h.notes))}</b> of ${fmt.int(h.capacity)} leaves are free this epoch, ` : ''}${fmt.int(h.registered)} wallets have published receiving keys, and ${fmt.int(h.nullifiers)} notes have ever been spent.` : 'The pool anchor was unread this poll, so its free leaves and spent notes cannot be stated.'} The proof and the signature happen in your wallet app, never on this page. ${tag('MEASURED', 'live')}</p>
     </div>
     <div class="fy-col">
       <div class="fy-h">What's next <span class="muted">— ETAs from live height and block rate</span></div>

@@ -523,7 +523,7 @@ img { display: block; }
 .panel .ptabs button.on { color: #fff; border-bottom-color: var(--cyan); }
 .panel .ptabs button .n { margin-left: 6px; font-family: var(--mono); font-size: 11px; color: var(--muted-2); }
 .panel .pbody { flex: 1; overflow: auto; padding: 10px 12px; }
-.prow { display: flex; align-items: center; gap: 10px; padding: 10px 8px; border-radius: 10px; }
+.prow { display: flex; align-items: center; gap: 10px; padding: 10px 8px; border-radius: 10px; width: 100%; text-align: left; }
 .prow:hover { background: rgba(255,255,255,.04); }
 .prow img { width: 36px; height: 36px; border-radius: 50%; }
 .prow .l .s { font-weight: 700; }

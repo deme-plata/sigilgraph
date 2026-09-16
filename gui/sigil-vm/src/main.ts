@@ -171,6 +171,7 @@ document.addEventListener('click', (ev) => {
   if (btn.id === 'bellBtn') { $('#bellBadge').hidden = true; panelTab = 'activity'; app.classList.add('panel-open'); renderPanel(); return }
   if (btn.id === 'cartBtn') { toast('The cart lights up when listings exist on SIGIL VM — none do yet.', 'warn'); return }
   if (ds.cmtab) { const box = $('#modalBox'); box.querySelectorAll('.cm-tabs button').forEach((b) => b.classList.toggle('on', b === btn)); box.querySelectorAll<HTMLElement>('.cm-pane').forEach((pn) => { pn.hidden = pn.dataset.pane !== ds.cmtab }); return }
+  if (ds.ptok) { tokSt.open = ds.ptok; renderTokens(); const row = document.querySelector(`#tokens tr[data-tok="${ds.ptok}"]`); (row || $('#tokens')).scrollIntoView({ behavior: 'smooth', block: 'center' }); return }
   if (ds.ptab) { panelTab = ds.ptab as typeof panelTab; renderPanel(); return }
   if (btn.id === 'pSend' || btn.id === 'pReceive') { window.open('/sigil-wallet-tron-embedded.html', '_blank', 'noopener'); return }
   if (btn.id === 'pSwap') { location.hash = '#swap'; $('#dex').scrollIntoView({ behavior: 'smooth' }); return }

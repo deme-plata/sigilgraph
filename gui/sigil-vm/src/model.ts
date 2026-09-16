@@ -123,6 +123,7 @@ export interface Snapshot {
   sales: Sale[]
   tokens: Token[]
   pools: Pool[]
+  poolsRead: boolean   // false = /v1/pools did not answer this poll; pools is then [] but means nothing
   miners: Miners | null
   docket: Docket | null
   recent: Recent | null
@@ -225,7 +226,7 @@ export async function buildSnapshot(): Promise<Snapshot> {
   const oldest = Math.min(...Object.values(ser).flat().map((x) => x.t).concat([at]))
   const sampleAgeMin = Math.round((at - oldest) / 60e3)
   const featured = [...collections].sort((a, b) => (b.items ?? 0) - (a.items ?? 0)).slice(0, 6)
-  lastSnapshot = { at, head, collections, featured, drops, movers, sales, tokens, pools: pools ?? [], miners, docket, recent, earth, rocky, usds, bridge, nation, anchor, offline, hashHist, changes, sampleAgeMin, gaugeFresh: gauge ? gauge.feeds.filter((f) => f.fresh).length : null, gaugeFeeds: gauge?.feeds.length ?? 0 }
+  lastSnapshot = { at, head, collections, featured, drops, movers, sales, tokens, pools: pools ?? [], poolsRead: pools !== null, miners, docket, recent, earth, rocky, usds, bridge, nation, anchor, offline, hashHist, changes, sampleAgeMin, gaugeFresh: gauge ? gauge.feeds.filter((f) => f.fresh).length : null, gaugeFeeds: gauge?.feeds.length ?? 0 }
   return lastSnapshot
 }
 
@@ -400,14 +401,15 @@ function buildDrops(usds: Usds | null, rocky: Rocky | null, gauge: Gauge | null,
   const d: Drop[] = []
   const rockyLive = Number(gauge?.live_height ?? 0)
   const left = rockyLive && height ? rockyLive - height : null
+  const rockyUnread = rocky === null && (left === null || left <= 0) // the gate has passed (or is unknown) and the rocky route did not answer — no countdown can be honest
   d.push({
     id: 'rocky', name: 'ROCKY · K⊕ Cover token', glyph: 'shield', cover: coverSvg('ROCKY drop', 'shield', { symbol: 'ROCKY' }),
     status: rocky?.live ? (rocky.bootstrapped ? 'live' : 'minting') : 'upcoming',
-    when: rocky?.live ? `live at block ${fmt.int(rockyLive)}` : left !== null ? (blkPerSec ? `${fmt.blocksToEta(left, blkPerSec)} · ${fmt.int(left)} blocks to ${fmt.int(rockyLive)}` : `${fmt.int(left)} blocks to ${fmt.int(rockyLive)} · measuring rate…`) : '—',
+    when: rockyUnread ? 'state unread this poll — the rocky route did not answer' : rocky?.live ? `live at block ${fmt.int(rockyLive)}` : left !== null ? (blkPerSec ? `${fmt.blocksToEta(left, blkPerSec)} · ${fmt.int(left)} blocks to ${fmt.int(rockyLive)}` : `${fmt.int(left)} blocks to ${fmt.int(rockyLive)} · measuring rate…`) : '—',
     detail: 'GaugePush + ROCKY activate together at GAUGE_LIVE_HEIGHT. Countdown is measured from the live height and block rate.',
-    provenance: gauge ? 'live' : 'pretend', link: '/kristensen-board.html',
-    progress: rockyLive && height ? Math.min(1, height / rockyLive) : null,
-    countdown: rockyLive && height && !rocky?.live ? { target: rockyLive, height, blkPerSec, at: Date.now() } : undefined,
+    provenance: gauge && !rockyUnread ? 'live' : 'pretend', link: '/kristensen-board.html',
+    progress: rockyLive && height && !rockyUnread ? Math.min(1, height / rockyLive) : null,
+    countdown: rockyLive && height && !rocky?.live && !rockyUnread ? { target: rockyLive, height, blkPerSec, at: Date.now() } : undefined,
   })
   d.push({
     id: 'usds', name: 'USDS · SIGIL Dollar', glyph: 'token', cover: coverSvg('USDS drop', 'token', { symbol: 'USDS' }),

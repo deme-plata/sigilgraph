@@ -220,7 +220,7 @@ export function forYou(s: Snapshot): string {
     if (s.gaugeFresh !== null) next.push(`<li>${tag('MEASURED', 'live')} <b>K⊕ gauge feeds</b> — ${s.gaugeFresh} of ${s.gaugeFeeds} feeds fresh on chain${s.gaugeFresh === 0 ? '; the feeder wallet has not pushed yet' : ''}.</li>`)
   }
   next.push(`<li>${tag('DESIGN', 'gold')} <b>USDS oracle feed</b> — ${s.usds?.price_fresh ? 'fed and fresh' : 'not fed yet'}; until a feeder pushes a price, USDS mints cannot be quoted in dollars.</li>`)
-  next.push(`<li>${tag('MEASURED', 'live')} <b>First DEX pool</b> — <span class="mono">/v1/pools</span> holds ${s.pools.length} pool${s.pools.length === 1 ? '' : 's'}; the swap module below quotes the instant liquidity exists.</li>`)
+  next.push(`<li>${tag(s.poolsRead ? 'MEASURED' : 'UNREAD', s.poolsRead ? 'live' : 'pretend')} <b>First DEX pool</b> — <span class="mono">/v1/pools</span> ${s.poolsRead ? `holds ${s.pools.length} pool${s.pools.length === 1 ? '' : 's'}` : 'did not answer this poll'}; the swap module below quotes the instant liquidity exists.</li>`)
   next.push(`<li>${tag('DESIGN', 'gold')} <b>SIGIL Coins</b> — first NFC tag written and claimed back on one phone, then a 100-coin batch anchored.</li>`)
   next.push(`<li>${tag('EXTERNAL', 'derived')} <b>wSIGIL3 mints</b> — Polygon token + pool exist; bridge mints wait on the relayer (${s.collections.find((c) => c.id === 'bridge')?.items ?? 0} locks so far).</li>`)
   return `<div class="foryou">
@@ -314,7 +314,7 @@ export function swapModule(s: Snapshot, st: SwapState, balances: Record<string, 
     <div class="field"><label><span>To (Estimated)</span><span class="bal">${wallet ? `${to.symbol} · ${balances[to.id] !== undefined ? balances[to.id].toFixed(4) : '—'}` : esc(to.symbol)}</span></label>
       <div class="amt"><input id="swapOut" type="text" readonly placeholder="0.0" value="${q ? q.out.toFixed(6) : ''}">${sel('to', to)}</div></div>
     ${noPool
-      ? `<div class="info warnbox">No liquidity pool exists on sigil-g2 for ${esc(from.symbol)}/${esc(to.symbol)} yet — <span class="mono">/v1/pools</span> is empty, so there is no quote to show. The module is wired to the constant-product formula and lights up the moment a pool is added.</div>`
+      ? `<div class="info warnbox">${s.poolsRead ? `No liquidity pool exists on sigil-g2 for ${esc(from.symbol)}/${esc(to.symbol)} yet — <span class="mono">/v1/pools</span> is empty, so there is no quote to show. The module is wired to the constant-product formula and lights up the moment a pool is added.` : `<span class="mono">/v1/pools</span> did not answer this poll, so no quote can be shown — retrying every 10 s.`}</div>`
       : `<div class="info"><div><span class="k">Rate</span><span class="v">1 ${esc(from.symbol)} ≈ ${q && amt > 0 ? (q.out / amt).toFixed(6) : '—'} ${esc(to.symbol)}</span></div><div><span class="k">Price impact</span><span class="v ${q && q.impact > 5 ? 'down' : ''}">${q ? q.impact.toFixed(2) + '%' : '—'}</span></div><div><span class="k">Fee</span><span class="v">0.30%</span></div><div><span class="k">Slippage</span><span class="v">${st.slippage.toFixed(1)}%</span></div></div>`}
     ${!wallet ? `<button class="btn primary lg full swapbtn" id="swapConnect2">Connect wallet</button>` : `<button class="btn primary lg full swapbtn${balances[from.id] !== undefined && amt > bal ? ' insufficient' : ''}" id="swapGo" ${noPool || amt <= 0 || (balances[from.id] !== undefined && amt > bal) ? 'disabled' : ''}>${amt <= 0 ? 'Enter an amount' : balances[from.id] !== undefined && amt > bal ? `Insufficient ${esc(from.symbol)} balance` : noPool ? 'No pool yet' : `Swap ${esc(from.symbol)} → ${esc(to.symbol)}`}</button>`}
     <div class="muted" style="font-size:11.5px;margin-top:8px;text-align:center">Signing and the STARK proof happen in your wallet — this page never sees a seed.</div>`
@@ -339,7 +339,7 @@ export function routeCard(s: Snapshot, st: SwapState): string {
   const lagS = h.blkPerSec ? h.lagBlocks / h.blkPerSec : null
   const free = Math.max(0, h.capacity - h.notes)
   return `<div class="qcard route"><div class="glow"></div><div class="inner">
-    <div class="head"><h3>Route &amp; pool</h3><span class="chip ${s.pools.length ? 'live' : 'gold'}"><i class="d"></i>${s.pools.length} pool${s.pools.length === 1 ? '' : 's'} on g2</span></div>
+    <div class="head"><h3>Route &amp; pool</h3><span class="chip ${!s.poolsRead ? 'pretend' : s.pools.length ? 'live' : 'gold'}"><i class="d"></i>${s.poolsRead ? `${s.pools.length} pool${s.pools.length === 1 ? '' : 's'} on g2` : 'pools unread'}</span></div>
     <div class="route-pair"><img src="${from.icon}" alt=""><span>${esc(from.symbol)}</span><span class="arr">→</span><img src="${to.icon}" alt=""><span>${esc(to.symbol)}</span></div>
     <div class="info">
       <div><span class="k">Pool</span><span class="v">${s.pools.length ? 'constant product' : 'none yet'}</span></div>

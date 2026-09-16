@@ -289,7 +289,7 @@ export function swapModule(s: Snapshot, st: SwapState, balances: Record<string, 
   const noPool = !s.pools.length
   const sel = (which: 'from' | 'to', t: Token) => `<button class="tsel" data-sel="${which}"><img src="${t.icon}" alt=""><span>${esc(t.symbol)}</span><span class="car">▼</span></button>`
   const marketForm = `
-    <div class="field"><label><span>From</span><span class="bal">Balance: ${bal.toFixed(4)}<b data-max="1">MAX</b></span></label>
+    <div class="field"><label><span>From</span><span class="bal">Balance: ${bal.toFixed(4)}<button class="maxbtn" data-max="1">MAX</button></span></label>
       <div class="amt"><input id="swapAmt" type="number" inputmode="decimal" placeholder="0.0" value="${esc(st.amount)}" min="0" step="any">${sel('from', from)}</div></div>
     <div class="slider"><div class="lab"><span>Quick Select Amount</span><b>${pctv.toFixed(0)}%</b></div>
       <div class="track"><div class="fill" style="width:${pctv}%"></div><input id="swapRange" type="range" min="0" max="100" step="1" value="${pctv.toFixed(0)}"></div>

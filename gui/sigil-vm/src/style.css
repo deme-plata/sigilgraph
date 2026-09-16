@@ -415,8 +415,8 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 .field { margin-top: 12px; }
 .field label { font-size: 13px; color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
 .field label .bal { font-family: var(--mono); font-size: 12px; }
-.field label .bal b { color: var(--cyan); cursor: pointer; margin-left: 6px; font-weight: 600; }
-.field label .bal b:hover { color: var(--violet); }
+.field label .bal .maxbtn { color: var(--cyan); cursor: pointer; margin-left: 6px; font-weight: 700; font-family: var(--mono); font-size: 12px; padding: 0; }
+.field label .bal .maxbtn:hover { color: var(--violet); }
 .amt { position: relative; margin-top: 6px; display: flex; gap: 8px; }
 .amt input { flex: 1; min-width: 0; background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.1); border-radius: 12px; padding: 12px 14px; font-size: 20px; font-family: var(--mono); outline: none; transition: .15s; -moz-appearance: textfield; appearance: textfield; }
 .amt input::-webkit-outer-spin-button, .amt input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }

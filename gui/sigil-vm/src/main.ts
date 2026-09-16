@@ -22,6 +22,7 @@ let trendMode: 'trending' | 'top' = 'trending'
 let trendWin = '24h'
 let panelTab: 'tokens' | 'nfts' | 'activity' = 'tokens'
 const swapSt: ui.SwapState = { mode: 'market', from: NATIVE_TOKEN, to: '', amount: '', limitPrice: '', limitDir: 'buy', slippage: 0.5 }
+try { const sl = Number(localStorage.getItem('sigilvm-slippage')); if ([0.1, 0.5, 1, 3].includes(sl)) swapSt.slippage = sl } catch { /* */ } // a preference, remembered like the theme
 const tokSt: ui.TokenTableState = { q: '', filter: 'all', sort: 'supply', dir: 'desc', open: null }
 let collapsed = false
 let cat = 'all'
@@ -273,7 +274,7 @@ document.addEventListener('click', (ev) => {
   if (th) { const k = th.dataset.sort as ui.TokenTableState['sort']; if (tokSt.sort === k) tokSt.dir = tokSt.dir === 'asc' ? 'desc' : 'asc'; else { tokSt.sort = k; tokSt.dir = 'desc' } renderTokens(); return }
   if (btn.id === 'modalClose' || btn.id === 'modalClose2' || btn.closest('#modal') === btn) { closeModal(); return }
   if (ds.pick && ds.which) { if (ds.which === 'from') { if (swapSt.to === ds.pick) swapSt.to = swapSt.from; swapSt.from = ds.pick } else { if (swapSt.from === ds.pick) swapSt.from = swapSt.to; swapSt.to = ds.pick } closeModal(); renderSwap(); return }
-  if (ds.slip) { swapSt.slippage = Number(ds.slip); closeModal(); renderSwap(); return }
+  if (ds.slip) { swapSt.slippage = Number(ds.slip); try { localStorage.setItem('sigilvm-slippage', ds.slip) } catch { /* */ } closeModal(); renderSwap(); return }
   if (btn.id === 'walletUse') { const inp = $('#walletIn') as HTMLInputElement; const v = inp.value.trim().toLowerCase().replace(/^sigil1s:/, '').split(':')[0]; if (!/^[0-9a-f]{64}$/.test(v)) { inp.classList.add('over'); inp.setAttribute('aria-invalid', 'true'); const hint = $('#walletHint'); if (hint) hint.textContent = `That is ${v.length} characters — a SIGIL wallet id is 64 hex characters (0-9, a-f).`; inp.focus(); return } wallet = v; try { localStorage.setItem('sigilvm-wallet', v) } catch { /* */ } closeModal(); setPanel(true, false); poll(); return }
   const nav = btn.closest('[data-nav]') as HTMLElement | null
   if (nav) { document.querySelectorAll('[data-nav]').forEach((a) => a.classList.toggle('on', (a as HTMLElement).dataset.nav === nav.dataset.nav)) }

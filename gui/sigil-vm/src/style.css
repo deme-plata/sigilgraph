@@ -357,7 +357,7 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 .card .img::before { content: ''; position: absolute; inset: 0; background: inherit; transition: transform .6s cubic-bezier(.2,.7,.2,1); will-change: transform; }
 .card:hover .img::before { transform: scale(1.06); }
 @media (prefers-reduced-motion: reduce) { .card:hover .img::before { transform: none; } }
-.card .img .prov { position: absolute; top: 10px; left: 10px; }
+.card .img .prov { position: absolute; top: 10px; left: 10px; display: flex; gap: 6px; }
 .card .img .status { position: absolute; top: 10px; right: 10px; z-index: 2; }
 .card .img .prov { z-index: 2; }
 .card .meta { padding: 11px 14px 13px; }

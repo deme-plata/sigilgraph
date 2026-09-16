@@ -276,9 +276,10 @@ export function moverCard(m: Mover): string {
     </div></div>`
 }
 
-export function saleCard(x: Sale): string {
+export function saleCard(x: Sale, mine: string | null = null): string {
+  const you = !!mine && !!x.wallet && x.wallet === mine
   return `<div class="card sale" data-proof="${esc(x.proof)}" data-coll="${x.collection.startsWith('Elefant') ? 'honours' : x.collection.startsWith('Justices') ? 'bench' : x.collection.startsWith('Kristensen') ? 'earth' : x.collection.startsWith('DagKnight') ? 'blocks' : x.collection.startsWith("Miners") ? 'rigs' : x.collection === 'Drops' ? 'treasury' : ''}" role="button" tabindex="0">
-    <div class="img" style="background-image:url('${x.cover}')"><span class="prov">${prov(x.provenance)}</span><span class="cta"><span class="cta-blurb mono">${esc(x.proof)}</span><span class="cta-btn" data-copy="${esc(x.proof)}">Copy proof</span></span></div>
+    <div class="img" style="background-image:url('${x.cover}')"><span class="prov">${prov(x.provenance)}${you ? '<span class="chip live yours"><i class="d"></i>yours</span>' : ''}</span><span class="cta"><span class="cta-blurb mono">${esc(x.proof)}</span><span class="cta-btn" data-copy="${esc(x.proof)}">Copy proof</span></span></div>
     <div class="meta"><div class="name">${esc(x.name)}</div><div class="byline">${esc(x.collection)} · ${esc(x.when)}</div>
       <div class="kv"><div><div class="k">Settled</div><div class="v">${esc(x.price)}</div></div><div style="text-align:right"><div class="k">Proof</div><div class="v mono" title="${esc(x.proof)}">${fmt.short(x.proof, 5)}</div></div></div></div></div>`
 }

@@ -67,6 +67,7 @@ export interface Sale {
   when: string
   proof: string  // tx hash / leaf
   provenance: Provenance
+  wallet?: string // whose record it is (64-hex) — the page marks the connected wallet's own
 }
 
 export interface Token {
@@ -497,7 +498,7 @@ function buildSales(earth: Earth | null, docket: Docket | null, usds: Usds | nul
   if (a?.tx_hash) s.push({
     id: 'attest', name: `Attestation · ${a.memo?.split(':')[1] ? 'row #' + a.memo.split(':')[1] : 'latest'}`, collection: 'Kristensen Earth K⊕',
     cover: coverSvg('Kristensen Earth', 'earth'), price: `${a.amount ?? '—'} glyphs + ${a.fee ? fmt.int(a.fee) : '—'} fee`,
-    when: a.ts ? new Date(a.ts).toLocaleString() : '—', proof: a.tx_hash, provenance: 'live',
+    when: a.ts ? new Date(a.ts).toLocaleString() : '—', proof: a.tx_hash, provenance: 'live', wallet: (a.wallet || '').toLowerCase() || undefined,
   })
   for (const e of docket?.entries ?? []) {
     const ev = e.event as { order?: string; citation?: string; rank?: string; justice?: number[]; recipient?: number[]; approvals?: number; operator_cosigned?: boolean }
@@ -507,7 +508,7 @@ function buildSales(earth: Earth | null, docket: Docket | null, usds: Usds | nul
       id: `docket-${e.seq}`,
       name: e.kind === 'HonourConferred' ? `${ev.order ?? 'Honour'} · ${fmt.short(who, 4)}` : `${rank || 'Justice'} · ${fmt.short(who, 4)}`,
       collection: e.kind === 'HonourConferred' ? `Elefantordenen · ${fmt.n(ev.approvals ?? null, 'approval')}${ev.operator_cosigned ? ' · co-signed' : ''}` : 'Justices of the Bench',
-      cover: coverSvg(who || e.kind + e.seq, e.kind === 'HonourConferred' ? 'seal' : 'shield'), price: `docket #${e.seq}`,
+      cover: coverSvg(who || e.kind + e.seq, e.kind === 'HonourConferred' ? 'seal' : 'shield'), price: `docket #${e.seq}`, wallet: who || undefined,
       when: e.height ? `block ${fmt.int(e.height)}` : 'genesis bench', proof: e.leaf, provenance: 'live',
     })
   }

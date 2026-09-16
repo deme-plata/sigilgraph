@@ -203,7 +203,7 @@ document.addEventListener('click', (ev) => {
   if (ds.sel) { openTokenPicker(ds.sel as 'from' | 'to'); return }
   if (ds.max) { const b = balances[swapSt.from] ?? 0; swapSt.amount = b ? String(Math.floor(b * 1e4) / 1e4) : ''; renderSwap(); return }
   if (ds.pct) { const b = balances[swapSt.from] ?? 0; swapSt.amount = String(Math.floor(b * Number(ds.pct) / 100 * 1e4) / 1e4); renderSwap(); return }
-  if (btn.id === 'swapFlip') { const f = swapSt.from; swapSt.from = swapSt.to; swapSt.to = f; renderSwap(); return }
+  if (btn.id === 'swapFlip') { const q = currentQuote(); const f = swapSt.from; swapSt.from = swapSt.to; swapSt.to = f; swapSt.amount = q ? String(Math.floor(q.out * 1e4) / 1e4) : ''; renderSwap(); return }
   if (ds.dir) { swapSt.limitDir = ds.dir as 'buy' | 'sell'; renderSwap(); return }
   if (btn.id === 'swapCollapse') { collapsed = true; renderSwap(); return }
   if (btn.id === 'swapExpand') { collapsed = false; renderSwap(); return }

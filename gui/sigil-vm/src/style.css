@@ -826,6 +826,13 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
 /* short viewports (phone landscape ≈ 390px tall): the collection sheet's 170px banner + stats + tabs left the item
    pane and the footer below the fold with nothing visible to scroll — shrink the banner, hide the stat tiles */
 @media (max-height: 520px) {
+  /* a landscape phone: the 480px hero was taller than the whole viewport — let its text set the height and drop the thumbs */
+  .hero { height: auto; min-height: 0; }
+  .hero .body { position: relative; padding: 44px 28px 20px; }
+  .hero h1 { font-size: 32px; }
+  .hero p { margin-bottom: 12px; }
+  .hero .stats { margin-bottom: 14px; }
+  .hero .thumbs { display: none; }
   .modal .box.coll { max-height: 96vh; }
   .cm-head { height: 64px; flex-basis: 64px; }
   .cm-title { margin-top: -30px; }

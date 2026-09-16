@@ -87,6 +87,18 @@ try {
       ...(await dialogProbe(() => { const c = [...document.querySelectorAll('#featuredRow .card')].find((x) => x.dataset.coll === 'earth') || document.querySelector('#featuredRow .card'); c?.click() })).map((x) => 'collection sheet: ' + x),
       ...(await dialogProbe(() => document.getElementById('walletBtn')?.click())).map((x) => 'connect sheet: ' + x),
     ]
+    // search dropdown: type two letters and require the results box inside the viewport (its 340px minimum ran 108px
+    // past a 390px phone on 09-16) with at least one hit
+    dlg.push(...await page.evaluate(async () => {
+      const i = document.querySelector('.search input'); if (!i) return ['search: no input']
+      i.focus(); i.value = 'si'; i.dispatchEvent(new Event('input', { bubbles: true }))
+      await new Promise((r) => setTimeout(r, 400))
+      const q = document.getElementById('qres'); const b = q.getBoundingClientRect(); const bad = []
+      if (!q.classList.contains('open') || !q.querySelector('.r')) bad.push('search: no results for "si"')
+      if (b.left < 0 || b.right > innerWidth + 0.5 || b.top < 0 || b.bottom > innerHeight) bad.push(`search: results box ${Math.round(b.left)},${Math.round(b.top)}→${Math.round(b.right)},${Math.round(b.bottom)} outside ${innerWidth}x${innerHeight}`)
+      i.value = ''; i.dispatchEvent(new Event('input', { bubbles: true })); q.classList.remove('open'); i.blur()
+      return bad
+    }))
     // text contrast: any visible text leaf under 3:1 against its nearest painted background (chips over artwork and
     // gradient-clipped text excluded). 3:1 is a floor to catch invisible text, not the AA target — that is audited by hand.
     const lowContrast = await page.evaluate(() => window.__lowContrast(document.body, '.card .img, .hero h1, .hero p, .hero .by, .hero .blurb, .hero .eyebrow, .hero .stats, .hero .thumbs, .hero .dots, .cm-head, .pv-img, .skip, .preview, .toast, #offline, .modal, .panel, .cats'))

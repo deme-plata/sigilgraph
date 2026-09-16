@@ -145,7 +145,7 @@ img { display: block; }
 .search input:focus { border-color: rgba(0,217,255,.5); box-shadow: 0 0 0 3px rgba(0,217,255,.12); }
 .search .ico { position: absolute; left: 13px; top: 12px; width: 18px; height: 18px; color: var(--muted); }
 .search kbd { position: absolute; right: 12px; top: 12px; font-family: var(--mono); font-size: 10px; color: var(--muted); border: 1px solid var(--line-2); border-radius: 6px; padding: 2px 6px; }
-.search-results { position: absolute; top: 50px; left: 0; right: 0; min-width: 340px; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 12px; padding: 6px; display: none; box-shadow: 0 20px 60px rgba(0,0,0,.6); max-height: 380px; overflow: auto; }
+.search-results { position: absolute; top: 50px; left: 0; right: 0; min-width: 340px; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 12px; padding: 6px; display: none; box-shadow: 0 20px 60px rgba(0,0,0,.6); max-height: min(380px, calc(100vh - var(--top) - 16px)); max-height: min(380px, calc(100dvh - var(--top) - 16px)); overflow: auto; }
 .search-results.open { display: block; }
 .search-results .r { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; cursor: pointer; }
 .search-results .r:hover, .search-results .r.on { background: var(--hover); outline: 1px solid rgba(0,217,255,.45); outline-offset: -1px; }
@@ -762,6 +762,7 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
   #walletBtn.connected::after { content: ''; position: absolute; top: 5px; right: 5px; width: 9px; height: 9px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 2px var(--bg); } /* connected marker — the icon alone looked identical either way */
   .search { max-width: none; min-width: 0; flex: 1 1 120px; }
   .search input { height: 40px; padding-left: 38px; padding-right: 10px; }
+  .search-results { position: fixed; left: 12px; right: 12px; top: calc(var(--top) + 4px); min-width: 0; max-height: calc(100dvh - var(--top) - 16px); } /* the 340px dropdown ran 108px past a 390px viewport — on phones it is a sheet under the top bar */
   .sec-head h2 { font-size: 19px; }
   .sec-head .sub { font-size: 12px; }
   .sec-head .right { flex: 1 1 100%; }

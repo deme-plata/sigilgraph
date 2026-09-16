@@ -149,9 +149,9 @@ export function shell(): string {
   </aside>
   <nav class="bottomnav" aria-label="Mobile navigation">
     <a href="#market" data-nav="market" class="on">${I.home}<span>Home</span></a>
-    <a href="#featured" data-nav="featured">${I.compass}<span>Discover</span></a>
+    <a href="#featured" data-nav="featured" data-also="trending">${I.compass}<span>Discover</span></a>
     <a href="#drops" data-nav="drops">${I.rocket}<span>Drops</span></a>
-    <a href="#swap" data-nav="swap">${I.swap}<span>Swap</span></a>
+    <a href="#swap" data-nav="swap" data-also="dex">${I.swap}<span>Swap</span></a>
     <a href="#" id="bnWallet">${I.wallet}<span>Wallet</span></a>
   </nav>
   <button class="totop" id="toTop" aria-label="Back to top" hidden>${I.up}</button>

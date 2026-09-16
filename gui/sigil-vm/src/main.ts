@@ -542,8 +542,8 @@ const spy = new IntersectionObserver((entries) => {
   const visible = entries.filter((e) => e.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)
   if (!visible.length) return
   const nav = SPY[(visible[0].target as HTMLElement).id]
-  // the bottom nav has no DEX tab, only Swap — so at the DEX its Swap tab is the one that lights (the rail keeps DEX and Swap apart)
-  document.querySelectorAll<HTMLElement>('[data-nav]').forEach((a) => a.classList.toggle('on', a.dataset.nav === nav || (nav === 'dex' && a.dataset.nav === 'swap' && !!a.closest('.bottomnav'))))
+  // the five-tab bottom nav has no DEX or Trending tab: its Swap covers the DEX and Discover covers Trending/Movers/Sales (data-also); the rail keeps every section apart
+  document.querySelectorAll<HTMLElement>('[data-nav]').forEach((a) => a.classList.toggle('on', a.dataset.nav === nav || (a.dataset.also || '').split(' ').includes(nav)))
 }, { rootMargin: `-${72 + 60}px 0px -55% 0px`, threshold: 0 })
 spyTargets.forEach((t) => spy.observe(t))
 document.addEventListener('click', (ev) => { if ((ev.target as HTMLElement).closest('[data-nav]')) spyLock = Date.now() + 900 })

@@ -183,7 +183,7 @@ img { display: block; }
 :root[data-theme="light"] .flash { animation-name: flashv-l; }
 @keyframes flashv-l { 0% { background: rgba(0,180,220,.25) } 100% { background: transparent } }
 .btn.primary:hover { filter: brightness(1.1); transform: translateY(-1px); }
-.btn.ghost { background: rgba(255,255,255,.05); border-color: var(--line); color: #fff; }
+.btn.ghost { background: rgba(255,255,255,.05); border-color: var(--line); color: var(--ink); }
 .btn.ghost:hover { background: var(--hover-2); }
 .btn.gold { background: linear-gradient(96deg, var(--gold-b), var(--gold) 55%, #9a7d22); color: #000; }
 .btn.lg { height: 52px; padding: 0 24px; font-size: 16px; border-radius: 14px; }
@@ -572,7 +572,7 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 .panel .total .v small { font-size: 14px; color: var(--muted); margin-left: 6px; }
 .panel .ptabs { display: flex; gap: 2px; padding: 8px 12px 0; border-bottom: 1px solid var(--line); }
 .panel .ptabs button { padding: 10px 12px; font-weight: 700; color: var(--muted); border-bottom: 2px solid transparent; font-size: 14px; }
-.panel .ptabs button.on { color: #fff; border-bottom-color: var(--cyan); }
+.panel .ptabs button.on { color: var(--ink); border-bottom-color: var(--cyan); }
 .panel .ptabs button .n { margin-left: 6px; font-family: var(--mono); font-size: 11px; color: var(--muted-2); }
 .panel .pbody { flex: 1; overflow: auto; padding: 10px 12px; }
 .prow { display: flex; align-items: center; gap: 10px; padding: 10px 8px; border-radius: 10px; width: 100%; text-align: left; }
@@ -777,7 +777,6 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
 /* light-mode readability overrides */
 :root[data-theme="light"] .tag { color: #0b0b0e; }
 :root[data-theme="light"] .info.warnbox { color: #6b4300; border-color: rgba(224,165,60,.6); background: rgba(224,165,60,.14); }
-:root[data-theme="light"] .btn.ghost { color: var(--ink); }
 :root[data-theme="light"] .ibtn, :root[data-theme="light"] .qcard .head .icons button, :root[data-theme="light"] .arrows button { color: var(--ink-2); }
 :root[data-theme="light"] .seg button.on { color: #fff; }
 :root[data-theme="light"] .tabs.pill button.on { color: #fff; }
@@ -786,7 +785,6 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
 :root[data-theme="light"] .ttable .act button.sw { color: #fff; }
 :root[data-theme="light"] .tokens-tools .f button.on { background: var(--grad); color: #fff; } /* the light .f button fill above outranks .on by specificity — restate the gradient */
 :root[data-theme="light"] .flip button svg { color: #fff; }
-:root[data-theme="light"] .panel .ptabs button.on { color: var(--ink); }
 :root[data-theme="light"] .chip.live { background: rgba(52,199,123,.14); color: #157a45; }
 :root[data-theme="light"] .chip.derived { background: rgba(0,217,255,.14); color: #0b7a8f; }
 :root[data-theme="light"] .chip.pretend { background: rgba(224,165,60,.16); color: #8a5a00; }

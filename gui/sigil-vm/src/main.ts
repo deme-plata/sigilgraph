@@ -297,6 +297,19 @@ addEventListener('resize', () => { clearTimeout(clipTimer); clipTimer = window.s
 syncClipTitles()
 
 // ── events (delegated) ────────────────────────────────────────────────────
+// most handlers below re-render their section with innerHTML, which throws the keyboard's focus to <body>. When the
+// activated control was focused, find its twin in the new markup (same tag, id, data-* and text) and put focus back.
+function keepFocus(btn: HTMLElement): void {
+  if (document.activeElement !== btn) return
+  const key = { tag: btn.tagName, id: btn.id, data: JSON.stringify(btn.dataset), text: (btn.textContent || '').trim().slice(0, 40), cls: btn.className }; const first = Object.entries(btn.dataset)[0]
+  queueMicrotask(() => {
+    if (document.contains(btn) || (document.activeElement && document.activeElement !== document.body)) return
+    const twin = Array.from(document.querySelectorAll<HTMLElement>(key.tag)).find((e) => e.id === key.id && JSON.stringify(e.dataset) === key.data && (e.textContent || '').trim().slice(0, 40) === key.text)
+      || (key.cls ? Array.from(document.querySelectorAll<HTMLElement>(key.tag)).find((e) => e.className === key.cls && (e.textContent || '').trim().slice(0, 40) === key.text) : undefined)
+      || (first ? Array.from(document.querySelectorAll<HTMLElement>(`${key.tag}[data-${first[0].replace(/[A-Z]/g, (m) => '-' + m.toLowerCase())}="${first[1]}"]`))[0] : undefined) // a sort header's text carries the arrow that just flipped
+    twin?.focus({ preventScroll: true })
+  })
+}
 document.addEventListener('click', (ev) => {
   const t = ev.target as HTMLElement
   if (t.id === 'modal') { closeModal(); return }
@@ -304,6 +317,7 @@ document.addEventListener('click', (ev) => {
   // th before tr: a header click used to resolve to its <tr>, so th[data-sort] was never found and the token table never re-sorted
   const btn = t.closest('th[data-sort], button, a, tr, [data-hero], [data-coll], [data-swap], [data-copy]') as HTMLElement | null
   if (!btn) return
+  keepFocus(btn)
   const ds = btn.dataset
   if (ds.hero !== undefined) { heroIdx = Number(ds.hero); renderHero(); return }
   if (btn.id === 'chainChip') { $('#chainMenu').classList.toggle('open'); return }

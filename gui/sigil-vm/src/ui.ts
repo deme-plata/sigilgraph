@@ -370,7 +370,8 @@ export function tokenTable(s: Snapshot, st: TokenTableState): string {
     const av = (a[st.sort] as number | null) ?? -Infinity, bv = (b[st.sort] as number | null) ?? -Infinity
     return st.dir === 'asc' ? (av as number) - (bv as number) : (bv as number) - (av as number)
   })
-  const th = (k: string, label: string, title = '') => `<th data-sort="${k}" title="${title}">${label}${st.sort === k ? (st.dir === 'asc' ? ' ↑' : ' ↓') : ''}</th>`
+  // a sortable header is a keyboard control too (Enter/Space sort it) and says which way the column is sorted
+  const th = (k: string, label: string, title = '') => `<th data-sort="${k}" aria-sort="${st.sort === k ? (st.dir === 'asc' ? 'ascending' : 'descending') : 'none'}"><button class="sortbtn" data-sort="${k}" title="${title || 'sort by ' + label}">${label}${st.sort === k ? (st.dir === 'asc' ? ' ↑' : ' ↓') : ''}</button></th>`
   const usd = (n: number | null) => (n === null ? '<span class="muted">—</span>' : '$' + fmt.num(n, 4))
   const tagCls = (t: string) => t.toLowerCase().replace(/\s/g, '')
   return `<div class="qcard pinkish"><div class="glow"></div><div class="inner">

@@ -243,8 +243,30 @@ document.addEventListener('keydown', (ev) => {
 document.addEventListener('click', (ev) => { const t = ev.target as HTMLElement; if (!t.closest('.search')) $('#qres').classList.remove('open'); if (!t.closest('.chain-wrap')) $('#chainMenu').classList.remove('open') })
 
 // ── modals ────────────────────────────────────────────────────────────────
-function openModal(html: string, cls = ''): void { const box = $('#modalBox'); box.className = 'box ' + cls; box.innerHTML = (cls ? '' : `<button class="ibtn x" id="modalClose">${I.x}</button>`) + html; $('#modal').classList.add('open') }
-function closeModal(): void { $('#modal').classList.remove('open') }
+let modalOpener: HTMLElement | null = null
+function openModal(html: string, cls = ''): void {
+  const box = $('#modalBox'); box.className = 'box ' + cls; box.innerHTML = (cls ? '' : `<button class="ibtn x" id="modalClose">${I.x}</button>`) + html
+  modalOpener = document.activeElement as HTMLElement | null
+  const modal = $('#modal'); modal.classList.add('open'); modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true')
+  $('#main').setAttribute('inert', ''); $('#panel').setAttribute('inert', ''); document.querySelector('.topbar')?.setAttribute('inert', ''); document.querySelector('.rail')?.setAttribute('inert', '')
+  const first = box.querySelector<HTMLElement>('input, button:not(#modalClose), [tabindex="0"]') || box.querySelector<HTMLElement>('button'); first?.focus()
+}
+function closeModal(): void {
+  const modal = $('#modal'); if (!modal.classList.contains('open')) return
+  modal.classList.remove('open'); modal.removeAttribute('role'); modal.removeAttribute('aria-modal')
+  $('#main').removeAttribute('inert'); $('#panel').removeAttribute('inert'); document.querySelector('.topbar')?.removeAttribute('inert'); document.querySelector('.rail')?.removeAttribute('inert')
+  modalOpener?.focus?.(); modalOpener = null
+}
+// focus trap: Tab cycles inside the open modal
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Tab') return
+  const modal = $('#modal'); if (!modal.classList.contains('open')) return
+  const f = Array.from(modal.querySelectorAll<HTMLElement>('a[href], button, input, [tabindex="0"]')).filter((e) => !e.hidden && e.offsetParent !== null)
+  if (!f.length) return
+  const i = f.indexOf(document.activeElement as HTMLElement)
+  if (ev.shiftKey && (i <= 0)) { ev.preventDefault(); f[f.length - 1].focus() }
+  else if (!ev.shiftKey && (i === f.length - 1 || i < 0)) { ev.preventDefault(); f[0].focus() }
+})
 function openCollection(id: string): void { const c = snap?.collections.find((x) => x.id === id); if (c) openModal(ui.collectionModal(c, snap!), 'coll') }
 function openTokenPicker(which: 'from' | 'to'): void {
   if (!snap) return

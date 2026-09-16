@@ -16,7 +16,7 @@ const serve = spawn('/home/storage/deepseek-codewhale/flux/target/debug/fluxc', 
 })
 await new Promise((r) => setTimeout(r, 1500))
 console.log(`guard serving dist on 127.0.0.1:${PORT}`)
-const widths = [390, 820, 1024, 1440, 1920]
+const widths = [390, 820, 1024, 1440, 1600, 1920] // 1600 = the tightest panel-auto-open layout (main 1156px), where the trending table clipped on 09-16
 const fails = []
 const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] })
 try {
@@ -40,11 +40,20 @@ try {
       wallet: (document.querySelector('#walletBtn')?.getBoundingClientRect().right ?? 0) <= innerWidth,
       offline: !!document.getElementById('offline'), cards: document.querySelectorAll('#featuredRow .card').length,
       tokens: document.querySelectorAll('#tokens tbody tr[data-tok]').length,
+      // hidden horizontal overflow inside a box that is NOT a deliberate carousel — how the trending table clipped at 1600px
+      clipped: Array.from(document.querializeAll ? [] : document.querySelectorAll('*')).filter((e) => {
+        const cs = getComputedStyle(e); if (!/auto|scroll|hidden|clip/.test(cs.overflowX)) return false
+        if (e.scrollWidth <= e.clientWidth + 1) return false
+        if (e.closest('.row, .cats, .ticker, .ttable, .hero, .card .img, .navlinks, .modal, .preview, .tabs')) return false
+        if (/^(TD|TH|SPAN|SMALL|B|I|A|BUTTON|DIV)$/.test(e.tagName) && (cs.textOverflow === 'ellipsis')) return false // intentional ellipsis
+        return true
+      }).map((e) => `${e.tagName.toLowerCase()}.${String(e.className).split(' ')[0]} ${e.scrollWidth}>${e.clientWidth}`).slice(0, 6),
     }))
     const bad = []
     if (m.docW > w) bad.push(`page overflows ${m.docW}/${w}`)
     if (m.topW > w) bad.push(`topbar overflows ${m.topW}/${w}`)
     if (!m.wallet) bad.push('wallet button off-screen')
+    if (m.clipped.length) bad.push('clipped: ' + m.clipped.join(', '))
     if (m.offline) bad.push('offline banner (node unreachable from the guard)')
     if (m.cards < 1 || m.tokens < 1) bad.push(`empty sections cards=${m.cards} tokens=${m.tokens}`)
     if (bad404.length) bad.push('404: ' + bad404.join(', '))

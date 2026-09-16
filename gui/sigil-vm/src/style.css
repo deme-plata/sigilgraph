@@ -638,7 +638,8 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
 .cm-item .t { font-weight: 700; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cm-item .s { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cm-item .m { font-family: var(--mono); font-size: 12px; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cm-item .h { font-family: var(--mono); font-size: 10px; color: var(--muted-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 4px; display: flex; gap: 6px; align-items: center; }
+.cm-item .h { font-family: var(--mono); font-size: 10px; color: var(--muted-2); margin-top: 4px; display: flex; gap: 6px; align-items: center; min-width: 0; }
+.cm-item .h .hx { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } /* the ellipsis has to live on a child — a flex container never renders one */
 .cm-item .h .cp { margin-left: auto; opacity: 0; transition: .15s; color: var(--cyan); }
 .cm-item.copyable { text-align: left; width: 100%; cursor: copy; }
 .cm-item.copyable:hover .cp { opacity: 1; }

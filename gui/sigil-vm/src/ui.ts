@@ -437,7 +437,7 @@ export function panelActivity(s: Snapshot): string {
 
 export function collectionModal(c: Collection, s: Snapshot): string {
   const items: string[] = []
-  const item = (t: string, sub: string, m = '', h = '') => items.push(`<${h ? 'button' : 'div'} class="cm-item${h ? ' copyable' : ''}"${h ? ` data-copy="${esc(h)}" title="Click to copy ${esc(h.length === 64 ? 'this id' : 'this hash')}"` : ''}><div class="t">${esc(t)}</div><div class="s">${esc(sub)}</div>${m ? `<div class="m">${m}</div>` : ''}${h ? `<div class="h">${esc(h)}<span class="cp">⧉</span></div>` : ''}</${h ? 'button' : 'div'}>`)
+  const item = (t: string, sub: string, m = '', h = '') => items.push(`<${h ? 'button' : 'div'} class="cm-item${h ? ' copyable' : ''}"${h ? ` data-copy="${esc(h)}" title="Click to copy ${esc(h.length === 64 ? 'this id' : 'this hash')}"` : ''}><div class="t">${esc(t)}</div><div class="s">${esc(sub)}</div>${m ? `<div class="m">${m}</div>` : ''}${h ? `<div class="h"><span class="hx">${esc(h)}</span><span class="cp">⧉</span></div>` : ''}</${h ? 'button' : 'div'}>`)
   switch (c.id) {
     case 'rigs': for (const m of (s.miners?.miners ?? []).slice().sort((a, b) => b.hash_rate - a.hash_rate)) item(m.rig || fmt.short(m.wallet, 6), `${m.kind.toUpperCase()} · ${m.shielded ? 'shielded' : 'transparent'} · ${fmt.ago(m.last_seen_secs_ago)}`, fmt.hps(m.hash_rate) + ` <span class="muted">${s.miners && s.miners.net_hps ? (m.hash_rate / s.miners.net_hps * 100).toFixed(1) + '%' : ''}</span>`, m.wallet); break
     case 'honours': case 'bench': {

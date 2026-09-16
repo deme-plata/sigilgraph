@@ -342,7 +342,12 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 .card { scroll-snap-align: start; flex: 0 0 236px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; transition: transform .18s, box-shadow .18s, border-color .18s; position: relative; }
 .card { box-shadow: 0 1px 0 rgba(255,255,255,.03) inset, 0 6px 18px rgba(0,0,0,.28); }
 .card:hover { transform: translateY(-4px); box-shadow: var(--card-shadow); border-color: var(--line-2); }
-.card .img { aspect-ratio: 1; background-size: cover; background-position: center; position: relative; }
+.card .img { aspect-ratio: 1; background-size: cover; background-position: center; position: relative; overflow: hidden; }
+/* OpenSea's hover: the art itself eases in a touch while the card lifts. The art is repainted on a pseudo-element so the
+   chips and the overlay stay put. */
+.card .img::before { content: ''; position: absolute; inset: 0; background: inherit; transition: transform .6s cubic-bezier(.2,.7,.2,1); will-change: transform; }
+.card:hover .img::before { transform: scale(1.06); }
+@media (prefers-reduced-motion: reduce) { .card:hover .img::before { transform: none; } }
 .card .img .prov { position: absolute; top: 10px; left: 10px; }
 .card .img .status { position: absolute; top: 10px; right: 10px; z-index: 2; }
 .card .img .prov { z-index: 2; }

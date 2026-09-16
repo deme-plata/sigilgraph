@@ -678,8 +678,9 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
 .bottomnav { display: none; position: fixed; left: 0; right: 0; bottom: 0; z-index: 48; background: var(--bnav-bg); backdrop-filter: blur(16px); border-top: 1px solid var(--line); padding: 6px max(6px, env(safe-area-inset-right, 0px)) calc(6px + env(safe-area-inset-bottom, 0px)) max(6px, env(safe-area-inset-left, 0px)); grid-template-columns: repeat(5, 1fr); }
 .bottomnav a { display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 6px 0; color: var(--muted); font-size: 10.5px; font-weight: 600; border-radius: 10px; }
 .bottomnav a svg { width: 21px; height: 21px; }
-.bottomnav a.on { color: #fff; }
+.bottomnav a.on { color: var(--ink); } /* was #fff — the active tab label vanished on the light nav */
 .bottomnav a.on svg { color: var(--cyan); }
+:root[data-theme="light"] .bottomnav a.on svg { color: #0a739a; }
 
 .keys { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 18px; }
 .keys div { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); }

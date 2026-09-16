@@ -67,7 +67,30 @@ try {
       ...(await dialogProbe(() => { const c = [...document.querySelectorAll('#featuredRow .card')].find((x) => x.dataset.coll === 'earth') || document.querySelector('#featuredRow .card'); c?.click() })).map((x) => 'collection sheet: ' + x),
       ...(await dialogProbe(() => document.getElementById('walletBtn')?.click())).map((x) => 'connect sheet: ' + x),
     ]
+    // text contrast: any visible text leaf under 3:1 against its nearest painted background (chips over artwork and
+    // gradient-clipped text excluded). 3:1 is a floor to catch invisible text, not the AA target — that is audited by hand.
+    const lowContrast = await page.evaluate(() => {
+      const parse = (c) => { const m = c.match(/[\d.]+/g) || []; return { r: +m[0] || 0, g: +m[1] || 0, b: +m[2] || 0, a: m.length > 3 ? +m[3] : 1 } }
+      const lum = ({ r, g, b }) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4 }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b) }
+      const blend = (fg, bg) => ({ r: fg.r * fg.a + bg.r * (1 - fg.a), g: fg.g * fg.a + bg.g * (1 - fg.a), b: fg.b * fg.a + bg.b * (1 - fg.a), a: 1 })
+      // composite bottom-up from the body through every painted ancestor; a gradient/image background anywhere in the chain
+      // means we cannot know the colour — return null and skip the leaf
+      const bgOf = (e) => { const layers = []; let n = e; while (n && n !== document.documentElement) { const cs = getComputedStyle(n); if (cs.backgroundImage && cs.backgroundImage !== 'none') return null; const c = parse(cs.backgroundColor); if (c.a > 0) layers.push(c); n = n.parentElement } let acc = parse(getComputedStyle(document.body).backgroundColor); if (acc.a < 1) acc = blend(acc, { r: 255, g: 255, b: 255, a: 1 }); for (const c of layers.reverse()) acc = c.a >= 1 ? c : blend(c, acc); return acc }
+      const out = []
+      document.querySelectorAll('body *').forEach((e) => {
+        if (e.children.length) return; const t = e.textContent.trim(); if (!t) return
+        const cs = getComputedStyle(e); if (cs.display === 'none' || cs.visibility === 'hidden' || +cs.opacity === 0) return
+        if (cs.color === 'rgba(0, 0, 0, 0)' || cs.webkitBackgroundClip === 'text' || cs.backgroundClip === 'text') return
+        if (e.closest('.card .img, .hero, .cm-head, .pv-img, .skip, .preview, .toast, #offline, .modal, .panel, .cats')) return
+        const r = e.getBoundingClientRect(); if (r.width < 2 || r.height < 2 || r.bottom < 0 || r.top > innerHeight * 8) return
+        const fg = parse(cs.color); if (fg.a < 0.5) return
+        const bg = bgOf(e); if (!bg) return; const l1 = lum(fg.a < 1 ? blend(fg, bg) : fg), l2 = lum(bg); const ratio = (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05)
+        if (ratio < 3) out.push(`${e.tagName.toLowerCase()}.${String(e.className).split(' ')[0]} "${t.slice(0, 18)}" ${ratio.toFixed(2)}:1`)
+      })
+      return out.slice(0, 6)
+    })
     const bad = []
+    if (lowContrast.length) bad.push('low contrast: ' + lowContrast.join(', '))
     if (dlg.length) bad.push(dlg.join('; '))
     if (m.docW > w) bad.push(`page overflows ${m.docW}/${w}`)
     if (m.topW > w) bad.push(`topbar overflows ${m.topW}/${w}`)

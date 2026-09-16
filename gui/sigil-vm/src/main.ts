@@ -224,7 +224,11 @@ document.addEventListener('click', (ev) => {
   const ds = btn.dataset
   if (ds.hero !== undefined) { heroIdx = Number(ds.hero); renderHero(); return }
   if (btn.id === 'chainChip') { $('#chainMenu').classList.toggle('open'); return }
-  if (btn.id === 'retryNow') { poll(); return }
+  if (btn.id === 'retryNow') {
+    const b = btn as HTMLButtonElement; b.disabled = true; b.textContent = 'Retrying…'
+    Promise.resolve(poll()).finally(() => { const still = document.getElementById('retryNow') as HTMLButtonElement | null; if (still) { still.disabled = false; still.textContent = 'Retry now'; toast('Still no answer from the node.', 'warn') } else toast('Node answered — live again.') })
+    return
+  }
   if (btn.id === 'footKeys') { openShortcuts(); return }
   if (btn.id === 'themeBtn') { theme = theme === 'dark' ? 'light' : 'dark'; applyTheme(theme); try { localStorage.setItem('sigilvm-theme', theme) } catch { /* */ } return }
   if (btn.id === 'panelBtn') { setPanel(!app.classList.contains('panel-open')); return }

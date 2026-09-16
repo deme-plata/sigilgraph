@@ -16,12 +16,13 @@ const serve = spawn('/home/storage/deepseek-codewhale/flux/target/debug/fluxc', 
 })
 await new Promise((r) => setTimeout(r, 1500))
 console.log(`guard serving dist on 127.0.0.1:${PORT}`)
-const widths = [390, 820, 1024, 1440, 1600, 1920] // 1600 = the tightest panel-auto-open layout (main 1156px), where the trending table clipped on 09-16
+const widths = [390, 820, 1024, 1440, 1600, 1920, [844, 390]] // 1600 = the tightest panel-auto-open layout (main 1156px), where the trending table clipped on 09-16; [844,390] = phone landscape, where the collection sheet had no room for its items (tick 274)
 const fails = []
 const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] })
 try {
-  for (const scheme of ['dark', 'light']) for (const w of widths) {
-    const ctx = await browser.newContext({ viewport: { width: w, height: 900 }, colorScheme: scheme, isMobile: w < 760, hasTouch: w < 760 })
+  for (const scheme of ['dark', 'light']) for (const wh of widths) {
+    const [w, h] = Array.isArray(wh) ? wh : [wh, 900]
+    const ctx = await browser.newContext({ viewport: { width: w, height: h }, colorScheme: scheme, isMobile: w < 760 || h < 500, hasTouch: w < 760 || h < 500 })
     // index.html pins the theme to dark when localStorage has none, so a fresh context ignores colorScheme —
     // every "light" pass had been rendering dark. Seed the persisted theme before any page script runs.
     await ctx.addInitScript((t) => { try { localStorage.setItem('sigilvm-theme', t) } catch {} }, scheme)
@@ -74,6 +75,7 @@ try {
         const box = document.querySelector('#modal.open .box'); if (!box) return ['dialog did not open']
         const br = box.getBoundingClientRect(); const out = []
         if (br.right > innerWidth + 1 || br.left < -1) out.push(`box ${Math.round(br.left)}..${Math.round(br.right)} vs ${innerWidth}`)
+        const act = box.querySelector('.cm-foot, .cm-actions, .modal .box > .row:last-child, #walletUse'); if (act) { const ar = act.getBoundingClientRect(); if (ar.bottom > innerHeight + 1 || ar.height === 0) out.push(`actions off-screen (bottom ${Math.round(ar.bottom)} vs ${innerHeight})`) }
         box.querySelectorAll('*').forEach((e) => { const rr = e.getBoundingClientRect(); if (rr.width > 0 && rr.right > br.right + 1 && !e.closest('.list, .cm-items')) out.push(`${e.tagName.toLowerCase()}.${String(e.className).split(' ')[0]} +${Math.round(rr.right - br.right)}px`) })
         for (const x of window.__lowContrast(box, '.cm-head, .card .img')) out.push('low contrast ' + x)
         return out.slice(0, 5)
@@ -105,8 +107,8 @@ try {
     if (m.cards < 1 || m.tokens < 1) bad.push(`empty sections cards=${m.cards} tokens=${m.tokens}`)
     if (bad404.length) bad.push('404: ' + bad404.join(', '))
     if (errs.length) bad.push('errors: ' + errs.join(' | '))
-    console.log(`${bad.length ? '✗' : '✓'} ${scheme} ${w}px${bad.length ? ' — ' + bad.join('; ') : ''}`)
-    if (bad.length) fails.push(`${scheme}@${w}: ${bad.join('; ')}`)
+    console.log(`${bad.length ? '✗' : '✓'} ${scheme} ${w}${h !== 900 ? '×' + h : ''}px${bad.length ? ' — ' + bad.join('; ') : ''}`)
+    if (bad.length) fails.push(`${scheme}@${w}x${h}: ${bad.join('; ')}`)
     await ctx.close()
   }
 } finally {

@@ -852,3 +852,12 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
   .chip { border-color: rgba(0,0,0,.3); }
 }
 .ext { font-size: .85em; opacity: .75; }
+/* forced colours (Windows high contrast): backgrounds are flattened to Canvas, so every state that was only a fill —
+   the active segment/tab/filter/category, the slider fill, the hero progress bars — needs a system-colour marker */
+@media (forced-colors: active) {
+  .cats button.on, .tabs button.on, .tabs.pill button.on, .seg button.on, .seg button.on.limit, .tokens-tools .f button.on, .panel .ptabs button.on, .cm-tabs button.on { forced-color-adjust: none; background: Highlight; color: HighlightText; border-color: Highlight; }
+  .slider .track { border: 1px solid ButtonText; }
+  .slider .track .fill { forced-color-adjust: none; background: Highlight; }
+  .hero .dots button { height: 5px; border: 1px solid ButtonText; background: Canvas; }
+  .hero .dots button.on::after { forced-color-adjust: none; background: ButtonText; }
+}

@@ -125,6 +125,25 @@ try {
       for (let i = 0; i < 24; i++) { await page.keyboard.press('Tab'); await page.waitForTimeout(220); const r = await page.evaluate(() => window.__ringContrast()); if (r && r.ratio < 3) dim.push(`${r.key} ${r.ratio.toFixed(2)}:1${r.why ? ' ' + r.why : ''}`) }
       if (dim.length) bad.push('focus ring: ' + [...new Set(dim)].slice(0, 6).join(', '))
       await page.evaluate(() => document.activeElement?.blur?.())
+      // states the page only reaches by hand — each opened, then scanned (a state the gate never enters is one it never checks)
+      const stateLow = await page.evaluate(async () => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms)); const esc = () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+        const states = {
+          'token drawer': async () => { document.querySelector('#tokens [data-info]')?.click(); await wait(150); return document.querySelector('#tokens tr.td-row') },
+          'gainers empty': async () => { document.querySelector('.tokens-tools .f button:nth-child(2)')?.click(); await wait(150); return document.querySelector('#tokens') },
+          'chain menu': async () => { document.getElementById('chainChip')?.click(); await wait(150); return document.getElementById('chainMenu') },
+          'keys sheet': async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true })); await wait(150); return document.querySelector('#modal .box') },
+          'slippage': async () => { esc(); document.querySelector('.qcard .ibtn')?.click(); await wait(150); return document.querySelector('#modal .box') },
+          'panel activity': async () => { esc(); document.getElementById('bellBtn')?.click(); await wait(250); return document.querySelector('.panel') },
+          'token picker': async () => { document.querySelector('.tsel[data-sel="from"]')?.click(); await wait(150); return document.querySelector('#modal .box') },
+          'watch empty': async () => { esc(); document.getElementById('trendWatch')?.click(); await wait(150); return document.getElementById('trendingTable') },
+        }
+        const out = []
+        for (const [name, fn] of Object.entries(states)) { const root = await fn(); if (!root) { out.push(name + ': not reached'); continue } for (const x of window.__lowContrast(root, '.card .img, .pv-img')) out.push(name + ': ' + x) }
+        esc(); document.querySelector('.tokens-tools .f button:first-child')?.click(); document.querySelector('#trendMode button:first-child')?.click(); document.getElementById('chainMenu')?.classList.remove('open')
+        return out
+      })
+      if (stateLow.length) bad.push('states: ' + stateLow.slice(0, 8).join('; '))
     }
     if (m.docW > w) bad.push(`page overflows ${m.docW}/${w}`)
     if (m.topW > w) bad.push(`topbar overflows ${m.topW}/${w}`)

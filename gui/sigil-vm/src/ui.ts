@@ -47,9 +47,9 @@ export function shell(): string {
     <a class="brand" href="/sigil-vm.html"><span class="cube">🔮</span><span>SIGIL <span class="vm">VM</span></span><small>MARKET · DEX</small></a>
     <div class="search">
       <span class="ico">${I.search}</span>
-      <input id="q" type="search" placeholder="Search collections, tokens, rigs, wallets…" autocomplete="off" />
+      <input id="q" type="search" placeholder="Search collections, tokens, rigs, wallets…" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="qres" aria-expanded="false" aria-label="Search collections, tokens, rigs, wallets" />
       <kbd>/</kbd>
-      <div class="search-results" id="qres"></div>
+      <div class="search-results" id="qres" role="listbox" aria-label="Search results" tabindex="-1"></div>
     </div>
     <nav class="navlinks" aria-label="Primary">
       <a href="#market" class="on" data-nav="market" data-also="featured">Market</a>

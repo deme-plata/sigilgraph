@@ -267,6 +267,7 @@ addEventListener('resize', syncRowArrows)
 function syncToggleAria(): void {
   // popover + theme toggles say their state: the chain chip's menu open/closed, the theme button's NEXT theme
   document.getElementById('chainChip')?.setAttribute('aria-expanded', $('#chainMenu').classList.contains('open') ? 'true' : 'false')
+  document.getElementById('q')?.setAttribute('aria-expanded', $('#qres').classList.contains('open') ? 'true' : 'false')
   const tb = document.getElementById('themeBtn'); if (tb) { const l = theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'; if (tb.getAttribute('aria-label') !== l) { tb.setAttribute('aria-label', l); tb.title = l } }
   document.querySelectorAll<HTMLElement>('.tabs, .seg, .cats, .tokens-tools .f').forEach((g) => { g.setAttribute('role', 'group'); g.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', b.classList.contains('on') ? 'true' : 'false')) })
   document.querySelectorAll<HTMLElement>('.ptabs, .cm-tabs').forEach((g) => { g.setAttribute('role', 'tablist'); g.querySelectorAll('button').forEach((b) => { b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', b.classList.contains('on') ? 'true' : 'false') }) })
@@ -414,7 +415,8 @@ document.addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter') { const pick = hits[cur >= 0 ? cur : 0]; if (pick) { pick.click(); qres.classList.remove('open') } return }
     ev.preventDefault()
     const n = ev.key === 'ArrowDown' ? Math.min(hits.length - 1, cur + 1) : Math.max(0, cur - 1)
-    hits.forEach((h, i) => h.classList.toggle('on', i === n)); hits[n]?.scrollIntoView({ block: 'nearest' })
+    hits.forEach((h, i) => { h.classList.toggle('on', i === n); h.setAttribute('aria-selected', i === n ? 'true' : 'false') }); hits[n]?.scrollIntoView({ block: 'nearest' })
+    if (hits[n]) $('#q').setAttribute('aria-activedescendant', hits[n].id)
     return
   }
   const list = document.querySelector('#modal.open .list') as HTMLElement | null
@@ -428,6 +430,9 @@ document.addEventListener('keydown', (ev) => {
   }
 })
 // a popover that loses keyboard focus closes (Tab past its last link used to leave the chain menu hanging open)
+// coming back to a search that still holds text shows its hits again (they close whenever focus leaves)
+document.getElementById('q')?.addEventListener('focus', (ev) => { const i = ev.target as HTMLInputElement; if (i.value.trim()) globalSearch(i.value) })
+document.querySelector('.search')?.addEventListener('focusout', (ev) => { const to = (ev as FocusEvent).relatedTarget as HTMLElement | null; if (!to || !to.closest('.search')) $('#qres').classList.remove('open') })
 document.querySelector('.chain-wrap')?.addEventListener('focusout', (ev) => { const to = (ev as FocusEvent).relatedTarget as HTMLElement | null; if (!to || !to.closest('.chain-wrap')) $('#chainMenu').classList.remove('open') })
 document.addEventListener('click', (ev) => { const t = ev.target as HTMLElement; if (!t.closest('.search')) $('#qres').classList.remove('open'); if (!t.closest('.chain-wrap')) $('#chainMenu').classList.remove('open') })
 
@@ -509,6 +514,8 @@ function globalSearch(q: string): void {
   if (ms.length) rows.push('<div class="h">Rigs</div>' + ms.map((m) => `<div class="r"><img src="${snap!.collections[0].cover}" alt=""><div><div class="n">${ui.esc(m.rig)}</div><div class="s">${fmt.hps(m.hash_rate)} · ${fmt.short(m.wallet, 6)}</div></div></div>`).join(''))
   if (/^[0-9a-f]{64}$/.test(q)) rows.push(`<div class="h">Wallet</div><div class="r" id="qWallet"><img src="${avatarSvg(q, q.slice(0, 1).toUpperCase())}" alt=""><div><div class="n mono">${fmt.short(q, 8)}</div><div class="s">open in panel · balances and records</div></div></div>`)
   box.innerHTML = rows.join('') || '<div class="h">No matches on this node</div>'
+  box.querySelectorAll('.r').forEach((r, i) => { r.setAttribute('role', 'option'); r.id = 'qr-' + i; r.setAttribute('aria-selected', 'false') }); box.querySelectorAll('.h').forEach((h) => h.setAttribute('role', 'presentation'))
+  $('#q').removeAttribute('aria-activedescendant')
   box.classList.add('open')
   const qw = box.querySelector('#qWallet'); if (qw) qw.addEventListener('click', () => { wallet = q; try { localStorage.setItem('sigilvm-wallet', q) } catch { /* */ } setPanel(true, false); box.classList.remove('open'); poll() })
 }

@@ -204,6 +204,7 @@ document.addEventListener('click', (ev) => {
   if (btn.id === 'bnWallet') { ev.preventDefault(); app.classList.toggle('panel-open'); renderPanel(); return }
   if (btn.id === 'swapConnect' || btn.id === 'swapConnect2') { openWalletModal(); return }
   if (btn.id === 'walletBtn') { if (wallet) { app.classList.add('panel-open'); return } openWalletModal(); return }
+  if (btn.id === 'panelClose') { app.classList.remove('panel-open'); try { localStorage.setItem('sigilvm-panel', 'closed') } catch { /* */ } return }
   if (btn.id === 'pDisconnect') { wallet = null; try { localStorage.removeItem('sigilvm-wallet') } catch { /* */ } for (const k in balances) delete balances[k]; renderChain(); renderPanel(); renderSwap(); return }
   if (btn.id === 'bellBtn') { $('#bellBadge').hidden = true; panelTab = 'activity'; app.classList.add('panel-open'); renderPanel(); return }
   if (btn.id === 'cartBtn') { toast('The cart lights up when listings exist on SIGIL VM — none do yet.', 'warn'); return }

@@ -55,6 +55,7 @@ export interface Mover {
   provenance: Provenance
   series?: number[]
   share?: number
+  idle?: boolean
 }
 
 export interface Sale {
@@ -443,6 +444,7 @@ function buildMovers(miners: Miners | null, mem: Mem, at: number, hist: { histor
         id: m.wallet, name: m.rig || fmt.short(m.wallet, 6), sub: `${m.kind.toUpperCase()} · ${m.shielded ? 'shielded' : 'transparent'} · ${fmt.ago(m.last_seen_secs_ago)}`,
         cover: coverSvg(m.rig || m.wallet, 'rig'), value: fmt.hps(m.hash_rate), change, provenance: change === null ? 'live' : 'derived', series: mem.series![m.wallet],
         share: miners.net_hps > 0 ? (m.hash_rate / miners.net_hps) * 100 : undefined,
+        idle: m.hash_rate <= 0,
       }
     })
   // net hashrate as the first mover when history exists

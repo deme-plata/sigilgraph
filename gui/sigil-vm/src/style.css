@@ -338,6 +338,9 @@ img { display: block; }
 .card.sale .proof { font-family: var(--mono); font-size: 10.5px; color: var(--muted-2); margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card.skel .img { background: linear-gradient(90deg, var(--surface) 25%, var(--surface-3) 50%, var(--surface) 75%); background-size: 800px 100%; animation: shimmer 1.4s infinite linear; }
 
+.card.mover.idle .img { filter: saturate(.35) brightness(.7); }
+.card.mover.idle .delta { color: var(--muted-2); }
+
 /* ── trending table ─────────────────────────────────────────────────── */
 .tabs { display: inline-flex; gap: 2px; padding: 3px; border-radius: 10px; background: var(--surface); border: 1px solid var(--line); }
 .tabs button { padding: 6px 12px; border-radius: 8px; font-weight: 600; font-size: 13px; color: var(--muted); }

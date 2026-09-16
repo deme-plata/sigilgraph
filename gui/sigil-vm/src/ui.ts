@@ -196,7 +196,7 @@ export function strip(s: Snapshot): string {
   const h = s.head
   const cell = (k: string, v: string, small = '', coll = '', extra = '') => `<button class="cell"${coll ? ` data-coll="${coll}"` : ''}><div class="k">${k}</div><div class="v"><span class="vt">${v}</span>${extra}</div>${small ? `<div class="s">${small}</div>` : ''}</button>`
   return [
-    cell('Height', fmt.int(h.height), h.blkPerSec ? `${h.blkPerSec.toFixed(1)} blk/s` : 'measuring rate…', 'blocks'),
+    cell('Height', fmt.int(h.height), h.blkPerSec ? `${h.blkPerSec.toFixed(1)} blk/s` : 'rate after next poll', 'blocks'),
     cell('Finality', h.finalityGate, isFinite(h.committee) ? `h ${fmt.int(h.finalityHeight)} · ${fmt.n(h.committee, 'validator')}` : 'certificate unread this poll', 'blocks'),
     cell('Supply', isFinite(h.supplySigil) ? fmt.num(h.supplySigil) + ' SIGIL' : '—', isFinite(h.mintedPct) ? `${h.mintedPct.toFixed(2)}% of 21M` : 'supply unread this poll', 'rigs'),
     cell('Hashrate', fmt.hps(h.netHps), `${fmt.n(h.liveMiners, 'miner')}${h.hashChange !== null ? ' · ' + fmt.pct(h.hashChange) : ''}`, 'rigs', s.hashHist.length > 2 ? sparkline(s.hashHist, 90, 22, h.hashChange !== null && h.hashChange < 0 ? 'down' : 'up') : ''),
@@ -490,7 +490,7 @@ export function ticker(s: Snapshot): string {
   if (s.head.ok) it(I.coins, 'network', `${fmt.hps(s.head.netHps)} · ${fmt.n(s.head.liveMiners, 'rig')}${s.head.blkPerSec ? ' · ' + s.head.blkPerSec.toFixed(1) + ' blk/s' : ''}`, 'gold', 'rigs')
   const behind = s.recent?.blocks.length && s.head.height ? Math.max(0, s.head.height - s.recent.blocks[0].height) : 0
   // the recent set's lag is one fact, said once — it used to trail every block item
-  if (behind > 50) it(I.grid, 'recent set', `${fmt.int(behind)} blk behind the tip · ${s.head.blkPerSec ? '≈ ' + fmt.ago(behind / s.head.blkPerSec).replace(' ago', '') + ' old' : 'age unknown'}`, '', 'blocks')
+  if (behind > 50) it(I.grid, 'recent set', `${fmt.int(behind)} blk behind the tip · ${s.head.blkPerSec ? '≈ ' + fmt.ago(behind / s.head.blkPerSec).replace(' ago', '') + ' old' : 'age after next poll'}`, '', 'blocks')
   for (const b of (s.recent?.blocks ?? []).slice(0, 6)) it(I.grid, `block ${fmt.int(b.height)}`, `${b.is_blue ? 'blue' : 'red'} · score ${fmt.int(b.blue_score)} · ${fmt.short(hex(b.producer), 4)}`, b.is_blue ? 'blue' : 'red', 'blocks')
   for (const m of (s.miners?.miners ?? []).slice(0, 4)) it(I.coins, m.rig || fmt.short(m.wallet, 6), `${fmt.hps(m.hash_rate)} · ${fmt.ago(m.last_seen_secs_ago)}`, '', 'rigs')
   const a = s.earth?.attest_last?.anchor

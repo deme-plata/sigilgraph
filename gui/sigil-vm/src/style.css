@@ -542,7 +542,8 @@ img { display: block; }
 .pempty .big svg { width: 40px; height: 40px; }
 .panel .pf { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; padding: 12px; border-top: 1px solid var(--line); }
 .panel .pf .btn { height: 40px; }
-.pact { display: flex; gap: 10px; align-items: center; padding: 9px 8px; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.pact { display: flex; gap: 10px; align-items: center; padding: 9px 8px; border-bottom: 1px solid var(--line); font-size: 12.5px; width: 100%; text-align: left; border-radius: 8px; }
+button.pact:hover { background: rgba(255,255,255,.04); }
 .pact .ic { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; background: rgba(255,255,255,.05); color: var(--muted); flex: 0 0 32px; }
 .pact .ic svg { width: 16px; height: 16px; }
 .pact .ic.blue { color: var(--cyan); } .pact .ic.gold { color: var(--gold-b); } .pact .ic.red { color: var(--bad); }

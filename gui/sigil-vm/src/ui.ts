@@ -420,13 +420,13 @@ export function panelNfts(addr: string | null, s: Snapshot): string {
 
 export function panelActivity(s: Snapshot): string {
   const rows: string[] = []
-  const row = (ic: string, cls: string, main: string, sub: string, t: string) => rows.push(`<div class="pact"><span class="ic ${cls}">${ic}</span><span class="w">${main}<small>${sub}</small></span><span class="t">${t}</span></div>`)
-  for (const x of (s.recent?.blocks.slice(0, 8) ?? [])) row(I.grid, x.is_blue ? 'blue' : 'red', `Block ${fmt.int(x.height)}`, `${x.is_blue ? 'blue' : 'red'} · blue score ${fmt.int(x.blue_score)} · ${fmt.short(hex(x.producer), 4)}`, 'now')
-  for (const m of (s.miners?.miners ?? []).slice(0, 3)) row(I.coins, '', esc(m.rig || fmt.short(m.wallet, 6)), `${fmt.hps(m.hash_rate)} · ${m.shielded ? 'shielded' : 'transparent'}`, fmt.ago(m.last_seen_secs_ago))
-  for (const e of (s.docket?.entries ?? []).slice(-3).reverse()) row(I.book, 'gold', esc(e.kind.replace(/([A-Z])/g, ' $1').trim()), `docket #${e.seq} · ${fmt.short(e.leaf, 5)}`, e.height ? `blk ${fmt.int(e.height)}` : 'genesis')
+  const row = (ic: string, cls: string, main: string, sub: string, t: string, coll = '') => rows.push(`<button class="pact"${coll ? ` data-coll="${coll}"` : ''}><span class="ic ${cls}">${ic}</span><span class="w">${main}<small>${sub}</small></span><span class="t">${t}</span></button>`)
+  for (const x of (s.recent?.blocks.slice(0, 8) ?? [])) row(I.grid, x.is_blue ? 'blue' : 'red', `Block ${fmt.int(x.height)}`, `${x.is_blue ? 'blue' : 'red'} · blue score ${fmt.int(x.blue_score)} · ${fmt.short(hex(x.producer), 4)}`, 'now', 'blocks')
+  for (const m of (s.miners?.miners ?? []).slice(0, 3)) row(I.coins, '', esc(m.rig || fmt.short(m.wallet, 6)), `${fmt.hps(m.hash_rate)} · ${m.shielded ? 'shielded' : 'transparent'}`, fmt.ago(m.last_seen_secs_ago), 'rigs')
+  for (const e of (s.docket?.entries ?? []).slice(-3).reverse()) row(I.book, 'gold', esc(e.kind.replace(/([A-Z])/g, ' $1').trim()), `docket #${e.seq} · ${fmt.short(e.leaf, 5)}`, e.height ? `blk ${fmt.int(e.height)}` : 'genesis', e.kind === 'HonourConferred' ? 'honours' : 'bench')
   const a = s.earth?.attest_last?.anchor
-  if (a?.tx_hash) row(I.eye, 'gold', 'K⊕ attestation anchored', `${a.amount ?? '—'} glyphs · ${fmt.short(a.tx_hash, 6)}`, a.ts ? new Date(a.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '')
-  if (s.head.ok) row(I.swap, '', 'Finality certificate', `${s.head.finalityGate} · height ${fmt.int(s.head.finalityHeight)} · ${s.head.committee} validators`, `${fmt.int(s.head.lagBlocks)} blk`)
+  if (a?.tx_hash) row(I.eye, 'gold', 'K⊕ attestation anchored', `${a.amount ?? '—'} glyphs · ${fmt.short(a.tx_hash, 6)}`, a.ts ? new Date(a.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '', 'earth')
+  if (s.head.ok) row(I.swap, '', 'Finality certificate', `${s.head.finalityGate} · height ${fmt.int(s.head.finalityHeight)} · ${s.head.committee} validators`, `${fmt.int(s.head.lagBlocks)} blk`, 'blocks')
   return rows.join('') || `<div class="pempty">No activity read yet.</div>`
 }
 

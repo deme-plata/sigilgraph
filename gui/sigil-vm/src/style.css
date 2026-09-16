@@ -299,9 +299,10 @@ img { display: block; }
 .fy-col p b { color: var(--ink); }
 .fy-col p .chip { vertical-align: 1px; margin-left: 2px; }
 .fy-next { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
-.fy-next li { display: flex; gap: 8px; align-items: baseline; font-size: 13px; color: var(--ink-2); padding: 8px 10px; border-radius: 10px; background: rgba(255,255,255,.03); border: 1px solid var(--line); }
+.fy-next li { display: block; font-size: 13px; color: var(--ink-2); padding: 8px 10px; border-radius: 10px; background: rgba(255,255,255,.03); border: 1px solid var(--line); line-height: 1.5; }
+.fy-next li .chip { margin-right: 6px; vertical-align: 1px; }
 .fy-next li b { color: var(--ink); }
-.fy-next li .chip { flex: 0 0 auto; }
+
 
 /* ── card rows ──────────────────────────────────────────────────────── */
 .row { display: flex; gap: 14px; overflow-x: auto; scroll-snap-type: x mandatory; padding: 4px 2px 12px; scrollbar-width: none; }

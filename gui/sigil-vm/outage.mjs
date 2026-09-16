@@ -54,6 +54,19 @@ try {
     if (bad.length) fails.push(fam)
     await ctx.close()
   }
+  // storage blocked (private mode): the page must still render live, with ?api= honoured, and log no errors
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'dark' })
+    await ctx.addInitScript(() => { const boom = () => { throw new DOMException('blocked', 'SecurityError') }; Object.defineProperty(window, 'localStorage', { get: boom }); Object.defineProperty(window, 'sessionStorage', { get: boom }) })
+    const page = await ctx.newPage(); const errs = []
+    page.on('pageerror', (e) => errs.push(e.message.slice(0, 120)))
+    await page.goto(`http://127.0.0.1:${PORT}/index.html?api=http://127.0.0.1:8459`, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {})
+    await page.waitForSelector('#featuredRow .card:not(.skel), #offline', { timeout: 20000 }).catch(() => {})
+    const r = await page.evaluate(() => ({ cards: document.querySelectorAll('#featuredRow .card:not(.skel)').length, offline: !!document.getElementById('offline') }))
+    const bad = []; if (r.offline || r.cards < 1) bad.push(`did not render live (cards=${r.cards}, offline=${r.offline})`); if (errs.length) bad.push('errors: ' + errs.join(' | '))
+    console.log(`${bad.length ? '✗' : '✓'} storage blocked${bad.length ? ' — ' + bad.join('; ') : ''}`); if (bad.length) fails.push('storage')
+    await ctx.close()
+  }
 } finally { await browser.close(); try { process.kill(-serve.pid) } catch {} }
 if (fails.length) { console.log('OUTAGE GATE FAILED'); process.exit(1) }
 console.log('OUTAGE GATE PASSED')

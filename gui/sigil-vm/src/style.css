@@ -396,7 +396,9 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 #swap { display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; }
 @container (max-width: 899px) { #swap .qcard { max-width: 620px; width: 100%; margin: 0 auto; } }
 @container (min-width: 900px) { #swap { grid-template-columns: minmax(360px, 560px) 1fr; } }
-@container (min-width: 1180px) { .dex { grid-template-columns: minmax(380px, 460px) 1fr; } #swap { grid-template-columns: 1fr; } }
+/* ≥1180: the route card moves under the token table (column 2) so the two columns end near the same line —
+   swap-over-route left a ~530px hole beside the five-row token table. #swap dissolves into the .dex grid. */
+@container (min-width: 1180px) { .dex { grid-template-columns: minmax(380px, 460px) 1fr; grid-template-rows: auto auto; } #swap { display: contents; } #swap > .qcard:not(.route) { grid-column: 1; grid-row: 1 / span 2; } #tokens { grid-column: 2; grid-row: 1; } #swap > .qcard.route { grid-column: 2; grid-row: 2; } }
 .qcard.route .glow { background: linear-gradient(90deg, var(--gold), var(--cyan)); opacity: .2; }
 .qcard.route .inner { border-color: rgba(212,175,55,.22); }
 .route-pair { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 16px; margin: 4px 0 10px; }
@@ -744,7 +746,7 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
 :root[data-theme="light"] .btn.primary { color: #fff; }
 :root[data-theme="light"] .swapbtn.primary { color: #fff; }
 :root[data-theme="light"] .ttable .act button.sw { color: #fff; }
-:root[data-theme="light"] .tokens-tools .f button.on { color: #fff; }
+:root[data-theme="light"] .tokens-tools .f button.on { background: var(--grad); color: #fff; } /* the light .f button fill above outranks .on by specificity — restate the gradient */
 :root[data-theme="light"] .flip button svg { color: #fff; }
 :root[data-theme="light"] .panel .ptabs button.on { color: var(--ink); }
 :root[data-theme="light"] .chip.live { background: rgba(52,199,123,.14); color: #157a45; }

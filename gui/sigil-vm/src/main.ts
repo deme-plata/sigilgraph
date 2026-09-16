@@ -394,7 +394,8 @@ document.addEventListener('mouseover', (ev) => {
   pv.innerHTML = `<div class="pv-img" style="background-image:url('${c.cover}')"></div><div class="pv-b"><div class="pv-n">${ui.esc(c.name)}</div><div class="pv-by">${ui.esc(c.by || '')}</div><div class="pv-t">${ui.esc(c.blurb)}</div><div class="pv-kv"><span>Floor <b>${ui.esc(c.floor)}</b></span><span>Items <b>${c.items === null ? '—' : fmt.int(c.items)}</b></span></div></div>`
   pv.hidden = false
   const r = tr.getBoundingClientRect(); const w = 300
-  pv.style.top = `${Math.min(innerHeight - 190, r.top)}px`
+  const ph = pv.getBoundingClientRect().height || 280
+  pv.style.top = `${Math.max(8, Math.min(innerHeight - ph - 8, r.top))}px`
   pv.style.left = `${r.right + w + 16 < innerWidth ? r.right + 8 : Math.max(8, r.left - w - 8)}px`
 })
 document.addEventListener('mouseout', (ev) => { if ((ev.target as HTMLElement).closest('#trendingTable tr[data-coll]')) pv.hidden = true })

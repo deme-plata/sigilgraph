@@ -482,7 +482,9 @@ function buildMovers(miners: Miners | null, mem: Mem, at: number, hist: { histor
     const first = h[0], last = h[h.length - 1]
     out.unshift({
       id: 'net', name: 'Network hashrate', sub: `${fmt.n(last.miners, 'miner')} · ${fmt.ago((Date.now() / 1000) - first.timestamp)} window`,
-      cover: coverSvg('Network hashrate', 'braid'), value: fmt.hps(last.hashrate),
+      // the figure is the live net_hps the rig shares are computed against (the history's last point is up to 60 s old
+      // and disagreed with the shares by ~5 %); the window change and the sparkline stay on the history
+      cover: coverSvg('Network hashrate', 'braid'), value: fmt.hps(miners ? miners.net_hps : last.hashrate),
       change: first.hashrate > 0 ? ((last.hashrate - first.hashrate) / first.hashrate) * 100 : null, provenance: 'derived', series: h.map((p) => p.hashrate),
     })
   }

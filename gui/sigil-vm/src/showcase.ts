@@ -8,10 +8,12 @@ interface Frame { name: string; src: string; w: number; h: number; screen: { x: 
 // inset a few px so the neon bezel line stays visible on top of the page.
 const FRAMES: Record<string, Frame> = {
   neon: { name: 'Neon bezel', src: '/frames/sigil-vm-bezel-neon.png', w: 1536, h: 1024, screen: { x: 168, y: 119, w: 1189, h: 784 }, layout: 1440 },
+  multiverse: { name: 'Multiverse', src: '/frames/sigil-vm-multiverse.png', w: 1672, h: 941, screen: { x: 258, y: 100, w: 1166, h: 712 }, layout: 1440 },
 }
+const DEFAULT_FRAME = 'multiverse'
 
 const q = new URLSearchParams(location.search)
-const frameKey = q.get('frame') && FRAMES[q.get('frame')!] ? q.get('frame')! : 'neon'
+const frameKey = q.get('frame') && FRAMES[q.get('frame')!] ? q.get('frame')! : DEFAULT_FRAME
 const frame = FRAMES[frameKey]
 // ?screen=x,y,w,h overrides the measured box (calibration); ?layout=1280 changes the page's virtual width
 const ov = (q.get('screen') || '').split(',').map(Number)
@@ -46,6 +48,9 @@ function fit(): void {
 }
 fit()
 addEventListener('resize', fit)
+// frame switcher
+const sw = document.getElementById('frames')!
+sw.innerHTML = Object.entries(FRAMES).map(([k, f]) => `<a class="pill${k === frameKey ? ' on' : ''}" href="?frame=${k}">${f.name}</a>`).join('')
 
 // calibration: press k to show the box, arrows move it, shift+arrows resize, c copies ?screen=
 let calibOn = false

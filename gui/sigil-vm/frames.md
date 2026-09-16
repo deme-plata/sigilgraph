@@ -8,3 +8,4 @@ calibration box, arrows move it, shift+arrows resize, alt = 10 px steps, `c` cop
 | key | file | image | screen box (x,y,w,h) |
 |---|---|---|---|
 | neon | frames/sigil-vm-bezel-neon.png | 1536×1024 | 168,119,1189,784 |
+| multiverse (default) | frames/sigil-vm-multiverse.png | 1672×941 | 258,100,1166,712 — measured on the neon lines by saturation (measure.py --th picks up nebula; use the saturation pass in the skill) |

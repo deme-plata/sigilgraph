@@ -164,6 +164,7 @@ img { display: block; }
 :root[data-theme="light"] .btn.ghost { background: #fff; }
 /* light: every hover above used to paint #fff text onto #e8e8ee (invisible) — var(--ink) fixes the text; these fix the fills */
 :root[data-theme="light"] .slider .track { background: rgba(0,0,0,.08); }
+:root[data-theme="light"] .modal .box .list button:hover, :root[data-theme="light"] .modal .box .list button:focus-visible { background: rgba(0,0,0,.05); }
 :root[data-theme="light"] .cats { box-shadow: 0 10px 14px -10px rgba(0,0,0,.14); }
 :root[data-theme="light"] .qcard .head .icons button:hover { background: rgba(0,0,0,.06); }
 :root[data-theme="light"] .rail a:hover, :root[data-theme="light"] .rail a.on { background: rgba(0,0,0,.06); }
@@ -601,17 +602,17 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
 @keyframes bump { 0% { transform: scale(1) } 50% { transform: scale(1.04) } 100% { transform: scale(1) } }
 .modal { position: fixed; inset: 0; z-index: 90; background: rgba(0,0,0,.6); backdrop-filter: blur(6px); display: none; place-items: center; }
 .modal.open { display: grid; }
-.modal .box { width: min(440px, 92vw); max-height: 90vh; overflow: auto; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 16px; padding: 18px; animation: rise .2s ease; }
-.modal .box h4 { margin: 0 0 12px; font-size: 17px; }
+.modal .box { position: relative; width: min(440px, 92vw); max-height: 90vh; overflow: auto; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 16px; padding: 18px; animation: rise .2s ease; }
+.modal .box h4 { margin: 0 0 12px; font-size: 17px; padding-right: 44px; }
 .modal .box .list { display: grid; gap: 4px; max-height: 50vh; overflow: auto; }
 .modal .box .list button { display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: 10px; text-align: left; }
-.modal .box .list button:hover, .modal .box .list button:focus-visible { background: rgba(255,255,255,.06); outline: 1px solid rgba(0,217,255,.5); }
+.modal .box .list button:hover, .modal .box .list button:focus-visible { background: rgba(255,255,255,.06); outline: 1px solid rgba(0,217,255,.5); outline-offset: -1px; } /* inside the button: the list's overflow clipped the ring on the first row */
 .modal .box .list img { width: 30px; height: 30px; border-radius: 50%; }
 .modal .box .list .s { font-weight: 700; }
 .modal .box .list .n { font-size: 11.5px; color: var(--muted); }
 .modal .box .list .r { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--muted); }
 .modal .box .quick button.on { background: var(--grad); color: #000; border-color: transparent; }
-.modal .x { float: right; color: var(--muted); }
+.modal .x { position: absolute; top: 12px; right: 12px; color: var(--muted); } /* was float:right + a phone top/right nudge on a position:relative .ibtn — which pushed it 14px DOWN into the first row */
 .modal pre { background: #000; border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 11.5px; overflow: auto; max-height: 40vh; }
 
 .modal .box.coll { width: min(880px, 94vw); padding: 0; overflow: hidden; display: flex; flex-direction: column; }
@@ -771,4 +772,4 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
 
 /* embedded inside the showcase frame: no phone bar, no auto panel */
 .app.embed .bottomnav { display: none !important; }
-@media (hover: none) and (pointer: coarse) { .foot-keys { display: none; } } /* no keyboard, no shortcut hint */
+@media (hover: none) and (pointer: coarse) { .foot-keys, .kbd-only { display: none; } } /* no keyboard, no shortcut hint */

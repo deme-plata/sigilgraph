@@ -326,7 +326,7 @@ document.addEventListener('keydown', (ev) => {
 function openCollection(id: string): void { const c = snap?.collections.find((x) => x.id === id); if (c) { openCollId = id; openModal(ui.collectionModal(c, snap!), 'coll') } }
 function openTokenPicker(which: 'from' | 'to'): void {
   if (!snap) return
-  openModal(`<h4>Select a token <span class="muted" style="font-size:11px;font-weight:500">↑↓ Enter</span></h4><div class="list">${snap.tokens.map((t) => `<button data-pick="${t.id}" data-which="${which}"><img src="${t.icon}" alt=""><div><div class="s">${t.symbol}</div><div class="n">${ui.esc(t.name)}</div></div><span class="r">${balances[t.id] === undefined ? '' : fmt.num(balances[t.id], 4)}</span></button>`).join('')}</div>`)
+  openModal(`<h4>Select a token <span class="muted kbd-only" style="font-size:11px;font-weight:500">↑↓ Enter</span></h4><div class="list">${snap.tokens.map((t) => `<button data-pick="${t.id}" data-which="${which}"><img src="${t.icon}" alt=""><div><div class="s">${t.symbol}</div><div class="n">${ui.esc(t.name)}</div></div><span class="r">${balances[t.id] === undefined ? '' : fmt.num(balances[t.id], 4)}</span></button>`).join('')}</div>`)
 }
 function openShortcuts(): void {
   openModal(`<h4>Keyboard shortcuts</h4><div class="keys">

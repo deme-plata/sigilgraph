@@ -115,11 +115,25 @@ function renderPanel(): void {
   $('#nNft').textContent = wallet ? String(body.querySelectorAll('.pnft').length || '') : ''
   document.querySelectorAll('#panelTabs button').forEach((b) => b.classList.toggle('on', (b as HTMLElement).dataset.ptab === panelTab))
 }
+let openCollId: string | null = null
 function renderAll(): void {
   renderChain()
   if (snap && snap.offline) { showOffline(true); return } // keep the skeletons; zeros would read as measurements
   showOffline(false)
   renderHero(); renderRows(); renderSwap(); renderTokens(); renderPanel()
+  // an open collection page refreshes its stats and the active pane in place (keeps tab + scroll)
+  if (openCollId && $('#modal').classList.contains('open')) {
+    const c = snap!.collections.find((x) => x.id === openCollId)
+    if (c) {
+      const box = $('#modalBox'); const activeTab = (box.querySelector('.cm-tabs button.on') as HTMLElement | null)?.dataset.cmtab || 'items'
+      const scroll = (box.querySelector('.cm-body') as HTMLElement | null)?.scrollTop ?? 0
+      const fresh = new DOMParser().parseFromString(`<div>${ui.collectionModal(c, snap!)}</div>`, 'text/html')
+      const stats = fresh.querySelector('.cm-stats'); if (stats) box.querySelector('.cm-stats')!.innerHTML = stats.innerHTML
+      const pane = fresh.querySelector(`.cm-pane[data-pane="${activeTab}"]`); const cur = box.querySelector(`.cm-pane[data-pane="${activeTab}"]`)
+      if (pane && cur && cur.innerHTML !== pane.innerHTML) { cur.innerHTML = pane.innerHTML; (box.querySelector('.cm-body') as HTMLElement).scrollTop = scroll }
+      const n = fresh.querySelector('.cm-tabs button[data-cmtab="items"] .n'); const curN = box.querySelector('.cm-tabs button[data-cmtab="items"] .n'); if (n && curN) curN.textContent = n.textContent
+    }
+  }
 }
 function showOffline(on: boolean): void {
   let el = document.getElementById('offline')
@@ -255,7 +269,7 @@ function closeModal(): void {
   const modal = $('#modal'); if (!modal.classList.contains('open')) return
   modal.classList.remove('open'); modal.removeAttribute('role'); modal.removeAttribute('aria-modal')
   $('#main').removeAttribute('inert'); $('#panel').removeAttribute('inert'); document.querySelector('.topbar')?.removeAttribute('inert'); document.querySelector('.rail')?.removeAttribute('inert')
-  modalOpener?.focus?.(); modalOpener = null
+  modalOpener?.focus?.(); modalOpener = null; openCollId = null
 }
 // focus trap: Tab cycles inside the open modal
 document.addEventListener('keydown', (ev) => {
@@ -267,7 +281,7 @@ document.addEventListener('keydown', (ev) => {
   if (ev.shiftKey && (i <= 0)) { ev.preventDefault(); f[f.length - 1].focus() }
   else if (!ev.shiftKey && (i === f.length - 1 || i < 0)) { ev.preventDefault(); f[0].focus() }
 })
-function openCollection(id: string): void { const c = snap?.collections.find((x) => x.id === id); if (c) openModal(ui.collectionModal(c, snap!), 'coll') }
+function openCollection(id: string): void { const c = snap?.collections.find((x) => x.id === id); if (c) { openCollId = id; openModal(ui.collectionModal(c, snap!), 'coll') } }
 function openTokenPicker(which: 'from' | 'to'): void {
   if (!snap) return
   openModal(`<h4>Select a token <span class="muted" style="font-size:11px;font-weight:500">↑↓ Enter</span></h4><div class="list">${snap.tokens.map((t) => `<button data-pick="${t.id}" data-which="${which}"><img src="${t.icon}" alt=""><div><div class="s">${t.symbol}</div><div class="n">${ui.esc(t.name)}</div></div><span class="r">${balances[t.id] === undefined ? '' : fmt.num(balances[t.id], 4)}</span></button>`).join('')}</div>`)

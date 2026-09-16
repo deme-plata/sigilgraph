@@ -39,6 +39,7 @@ if (innerWidth >= 1600 && !app.classList.contains('panel-open')) app.classList.a
 // One door for the wallet panel. In drawer mode (≤1100px it overlays the page) it behaves like a dialog: focus moves
 // in, the page behind goes inert, and closing hands focus back to whoever opened it.
 let panelOpener: HTMLElement | null = null
+let lastNav = 'market' // the section the scroll-spy last lit (declared up here: setPanel runs at boot, before the spy is built)
 function setPanel(open: boolean, persist = true): void {
   const was = app.classList.contains('panel-open')
   app.classList.toggle('panel-open', open)
@@ -51,6 +52,9 @@ function setPanel(open: boolean, persist = true): void {
     $('#main').removeAttribute('inert'); document.querySelector('.topbar')?.removeAttribute('inert')
     if (drawer && panelOpener && document.contains(panelOpener)) panelOpener.focus()
   }
+  // the phone tab bar says which sheet is up: Wallet lights while the drawer is open and the section tab stands down
+  const bn = document.getElementById('bnWallet'); if (bn) { bn.classList.toggle('on', open && drawer); bn.setAttribute('aria-expanded', open && drawer ? 'true' : 'false') }
+  applyNav(lastNav)
 }
 // a tablet rotated with the panel open crosses the drawer/docked line — inert must follow the mode, not the click
 addEventListener('resize', () => {
@@ -551,15 +555,19 @@ document.addEventListener('scroll', () => { pv.hidden = true }, { passive: true 
 
 // scroll spy: the rail and nav marker follow the section in view (click still wins for the moment of the click)
 const SPY: Record<string, string> = { market: 'market', featured: 'featured', drops: 'drops', trending: 'trending', movers: 'trending', sales: 'trending', dex: 'dex' }
+// the five-tab bottom nav has no DEX or Trending tab: its Swap covers the DEX and Discover covers Trending/Movers/Sales (data-also);
+// the rail keeps every section apart. While the wallet drawer covers the page (≤1100px) the bottom nav's section tab stands down.
+function applyNav(nav: string): void {
+  const drawerOpen = innerWidth <= 1100 && app.classList.contains('panel-open')
+  document.querySelectorAll<HTMLElement>('[data-nav]').forEach((a) => a.classList.toggle('on', (a.dataset.nav === nav || (a.dataset.also || '').split(' ').includes(nav)) && !(drawerOpen && !!a.closest('.bottomnav'))))
+}
 const spyTargets = Object.keys(SPY).map((id) => document.getElementById(id)).filter(Boolean) as HTMLElement[]
 let spyLock = 0
 const spy = new IntersectionObserver((entries) => {
   if (Date.now() < spyLock) return
   const visible = entries.filter((e) => e.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)
   if (!visible.length) return
-  const nav = SPY[(visible[0].target as HTMLElement).id]
-  // the five-tab bottom nav has no DEX or Trending tab: its Swap covers the DEX and Discover covers Trending/Movers/Sales (data-also); the rail keeps every section apart
-  document.querySelectorAll<HTMLElement>('[data-nav]').forEach((a) => a.classList.toggle('on', a.dataset.nav === nav || (a.dataset.also || '').split(' ').includes(nav)))
+  lastNav = SPY[(visible[0].target as HTMLElement).id]; applyNav(lastNav)
 }, { rootMargin: `-${72 + 60}px 0px -55% 0px`, threshold: 0 })
 spyTargets.forEach((t) => spy.observe(t))
 document.addEventListener('click', (ev) => { if ((ev.target as HTMLElement).closest('[data-nav]')) spyLock = Date.now() + 900 })
@@ -585,7 +593,7 @@ toTop.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smoot
 
 // ── boot ──────────────────────────────────────────────────────────────────
 try { const w = localStorage.getItem('sigilvm-wallet'); if (w) wallet = w } catch { /* */ }
-try { const qw = new URLSearchParams(location.search).get('wallet'); if (qw && /^[0-9a-f]{64}$/i.test(qw)) { const w = qw.toLowerCase(); wallet = w; localStorage.setItem('sigilvm-wallet', w); if (innerWidth > 1100) setPanel(true, false); else setTimeout(() => toast(`Wallet ${w.slice(0, 6)}…${w.slice(-4)} connected — tap Wallet for balances and records.`), 400) } /* ≤1100px the panel is a drawer over the page: a visitor arriving from the gate should land on the market, not on a dialog */ else if (qw) { setTimeout(() => toast(`Ignored ?wallet=${qw.slice(0, 12)}${qw.length > 12 ? '…' : ''} — a SIGIL wallet id is 64 hex characters (this is ${qw.length}).`, 'warn'), 400) } } catch { /* */ }
+try { const qw = new URLSearchParams(location.search).get('wallet'); if (qw && /^[0-9a-f]{64}$/i.test(qw)) { const w = qw.toLowerCase(); wallet = w; localStorage.setItem('sigilvm-wallet', w); if (innerWidth > 1100) setPanel(true, false); else setTimeout(() => { if (!app.classList.contains('panel-open')) toast(`Wallet ${w.slice(0, 6)}…${w.slice(-4)} connected — tap Wallet for balances and records.`) }, 400) } /* ≤1100px the panel is a drawer over the page: a visitor arriving from the gate should land on the market, not on a dialog */ else if (qw) { setTimeout(() => toast(`Ignored ?wallet=${qw.slice(0, 12)}${qw.length > 12 ? '…' : ''} — a SIGIL wallet id is 64 hex characters (this is ${qw.length}).`, 'warn'), 400) } } catch { /* */ }
 poll()
 setInterval(() => { if (!document.hidden) poll() }, 10_000)
 document.addEventListener('visibilitychange', () => { if (!document.hidden) poll() })

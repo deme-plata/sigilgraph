@@ -107,6 +107,8 @@ try {
     }))
     // text contrast: any visible text leaf under 3:1 against its nearest painted background (chips over artwork and
     // gradient-clipped text excluded). 3:1 is a floor to catch invisible text, not the AA target — that is audited by hand.
+    await page.evaluate(() => document.querySelector('#trendingTable .star')?.click()) // one starred row, so the ★ colour is in the scan (1.4:1 in light on 09-17)
+    await page.waitForTimeout(120)
     const lowContrast = await page.evaluate(() => window.__lowContrast(document.body, '.card .img, .hero h1, .hero p, .hero .by, .hero .blurb, .hero .eyebrow, .hero .stats, .hero .thumbs, .hero .dots, .cm-head, .pv-img, .skip, .preview, .toast, #offline, .modal, .panel, .cats'))
     // the wallet panel (connected, drawer or docked) — its own text, its own surfaces
     await page.evaluate(() => { document.getElementById('walletBtn')?.click() }); await page.waitForTimeout(250)

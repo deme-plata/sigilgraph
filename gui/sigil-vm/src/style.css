@@ -416,8 +416,9 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 .trending tbody tr { cursor: pointer; transition: background .12s; }
 .trending tbody tr:hover { background: var(--hover); }
 .trending .tcol.wide { grid-column: 1 / -1; }
-.trending .star { flex: 0 0 auto; margin-left: auto; padding: 2px 5px; font-size: 15px; line-height: 1; color: var(--muted); border-radius: 6px; opacity: .55; transition: .15s; } /* in the name cell — the owners cell is hidden at most widths */
+.trending .star { flex: 0 0 auto; margin-left: auto; padding: 2px 5px; font-size: 15px; line-height: 1; color: var(--muted); border-radius: 6px; opacity: .7; transition: .15s; } /* in the name cell — the owners cell is hidden at most widths */
 .trending tbody tr:hover .star, .trending .star:focus-visible, .trending .star[aria-pressed="true"] { opacity: 1; }
+:root[data-theme="light"] .trending .star:hover, :root[data-theme="light"] .trending .star[aria-pressed="true"], :root[data-theme="light"] .cm-foot [data-watch][aria-pressed="true"] { color: #8a6d00; } /* --gold-b reads 1.4:1 on the white table */
 .trending .star:hover, .trending .star[aria-pressed="true"] { color: var(--gold-b); }
 .trending .watch-empty { padding: 26px 16px; color: var(--muted); font-size: 13px; text-align: center; }
 .trending .chev { display: inline-block; width: 16px; height: 16px; vertical-align: -3px; margin-left: 6px; color: var(--muted); opacity: 0; transform: translateX(-4px); transition: .15s; }

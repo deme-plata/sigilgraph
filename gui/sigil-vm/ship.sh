@@ -16,6 +16,8 @@ echo "▶ fluxc build"; timeout 300 "$FLUX/target/debug/fluxc" build --frontend-
 test -f dist/sigil-vm.html || { echo "✗ no dist/sigil-vm.html"; exit 1; }
 echo "▶ verify (flux-vite-engine)"
 ( cd "$FLUX" && timeout 300 ./target/debug/examples/verify "$HERE" "$SHOT" ) | grep -E 'build-SAP|render ──|console|→'
+echo "▶ layout guard (5 widths × 2 themes, live node through the site proxy)"
+node "$HERE/guard.mjs"
 echo "▶ deploy → $SITE (SIGIL root, additive)"
 cp dist/sigil-vm.html "$SITE/sigil-vm.html"
 cp dist/assets/sigil-vm-*.js dist/assets/sigil-vm-*.css "$SITE/assets/"

@@ -209,7 +209,7 @@ async function poll(): Promise<void> {
     renderAll()
     // a deep link (#dex, #trending…) scrolled before the live content existed — re-anchor once the page has its real height
     if (firstPaint && location.hash && !snap.offline) { const target = document.querySelector(location.hash.split('=')[0]); if (target) requestAnimationFrame(() => target.scrollIntoView({ behavior: 'instant', block: 'start' })) }
-    if (!snap.offline && prevHeight && snap.head.height > prevHeight) { const b = $('#bellBadge'); b.hidden = false }
+    if (!snap.offline && prevHeight && snap.head.height > prevHeight) { const b = $('#bellBadge'); b.hidden = false; $('#bellBtn').setAttribute('aria-label', `Activity — ${fmt.n(snap.head.height - prevHeight, 'new block')} since you looked`) }
   } catch (e) {
     toast('poll failed: ' + (e as Error).message, 'bad')
   } finally { polling = false }
@@ -239,7 +239,7 @@ document.addEventListener('click', (ev) => {
   if (btn.id === 'walletBtn') { if (wallet) { setPanel(true, false); return } openWalletModal(); return }
   if (btn.id === 'panelClose') { setPanel(false); return }
   if (btn.id === 'pDisconnect') { wallet = null; try { localStorage.removeItem('sigilvm-wallet') } catch { /* */ } for (const k in balances) delete balances[k]; renderChain(); renderPanel(); renderSwap(); return }
-  if (btn.id === 'bellBtn') { $('#bellBadge').hidden = true; panelTab = 'activity'; setPanel(true, false); renderPanel(); return }
+  if (btn.id === 'bellBtn') { $('#bellBadge').hidden = true; btn.setAttribute('aria-label', 'Activity'); panelTab = 'activity'; setPanel(true, false); renderPanel(); return }
   if (btn.id === 'cartBtn') { toast('The cart lights up when listings exist on SIGIL VM — none do yet.', 'warn'); return }
   if (ds.cmtab) { const box = $('#modalBox'); box.querySelectorAll('.cm-tabs button').forEach((b) => b.classList.toggle('on', b === btn)); box.querySelectorAll<HTMLElement>('.cm-pane').forEach((pn) => { pn.hidden = pn.dataset.pane !== ds.cmtab }); return }
   if (ds.ptok) { tokSt.open = ds.ptok; renderTokens(); const row = document.querySelector(`#tokens tr[data-tok="${ds.ptok}"]`); (row || $('#tokens')).scrollIntoView({ behavior: 'smooth', block: 'center' }); return }

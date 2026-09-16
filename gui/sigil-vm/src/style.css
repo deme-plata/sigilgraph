@@ -437,10 +437,10 @@ img { display: block; }
 .info.warnbox { border-color: rgba(224,165,60,.4); background: rgba(224,165,60,.08); color: #ffdca8; display: block; }
 .swapbtn { margin-top: 14px; }
 .limit { display: grid; gap: 12px; }
-.limit .pair { display: flex; gap: 10px; align-items: flex-end; }
+.limit .pair { display: flex; gap: 10px; align-items: flex-start; }
 .limit .pair .sm { font-size: 11.5px; color: var(--muted); margin-bottom: 4px; }
 .limit .pair .tsel { width: 100%; justify-content: center; height: 46px; }
-.limit .arrow { color: var(--muted); font-size: 18px; padding-bottom: 12px; }
+.limit .arrow { color: var(--muted); font-size: 18px; padding-top: 34px; }
 .limit .dir { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .limit .dir button { padding: 10px; border-radius: 12px; font-size: 13px; font-weight: 600; border: 1px solid rgba(255,255,255,.1); background: rgba(255,255,255,.05); color: var(--muted); }
 .limit .dir button.on.buy { background: rgba(0,255,136,.12); border-color: rgba(0,255,136,.5); color: var(--green); }

@@ -103,7 +103,7 @@ export function shell(): string {
     </section>
     <section id="trending" class="section" aria-labelledby="h-trending">
       <div class="sec-head">
-        <div><h2 id="h-trending">Trending Collections</h2><div class="sub">Two columns, OpenSea-style. Volume and floor are the collection's own live measures.</div></div>
+        <div><h2 id="h-trending">Trending Collections</h2><div class="sub">Ranked the way OpenSea ranks. Volume and floor are each collection's own live measures; the change column is what this browser has watched.</div></div>
         <div class="right">
           <div class="tabs" id="trendMode"><button class="on" data-mode="trending">Trending</button><button data-mode="top">Top</button><button data-mode="watch" id="trendWatch">Watching<span class="n" id="nWatch"></span></button></div>
           <div class="tabs pill" id="trendWin"><button data-win="1h">1h</button><button data-win="6h">6h</button><button class="on" data-win="24h">24h</button><button data-win="7d">7d</button></div>

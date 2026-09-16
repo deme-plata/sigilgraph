@@ -221,7 +221,7 @@ document.addEventListener('click', (ev) => {
   if (btn.id === 'modalClose' || btn.id === 'modalClose2' || btn.closest('#modal') === btn) { closeModal(); return }
   if (ds.pick && ds.which) { if (ds.which === 'from') { if (swapSt.to === ds.pick) swapSt.to = swapSt.from; swapSt.from = ds.pick } else { if (swapSt.from === ds.pick) swapSt.from = swapSt.to; swapSt.to = ds.pick } closeModal(); renderSwap(); return }
   if (ds.slip) { swapSt.slippage = Number(ds.slip); closeModal(); renderSwap(); return }
-  if (btn.id === 'walletUse') { const v = ($('#walletIn') as HTMLInputElement).value.trim().toLowerCase(); if (!/^[0-9a-f]{64}$/.test(v)) { toast('A SIGIL wallet id is 64 hex characters.', 'warn'); return } wallet = v; try { localStorage.setItem('sigilvm-wallet', v) } catch { /* */ } closeModal(); app.classList.add('panel-open'); poll(); return }
+  if (btn.id === 'walletUse') { const inp = $('#walletIn') as HTMLInputElement; const v = inp.value.trim().toLowerCase().replace(/^sigil1s:/, '').split(':')[0]; if (!/^[0-9a-f]{64}$/.test(v)) { inp.classList.add('over'); inp.setAttribute('aria-invalid', 'true'); const hint = $('#walletHint'); if (hint) hint.textContent = `That is ${v.length} characters — a SIGIL wallet id is 64 hex characters (0-9, a-f).`; inp.focus(); return } wallet = v; try { localStorage.setItem('sigilvm-wallet', v) } catch { /* */ } closeModal(); app.classList.add('panel-open'); poll(); return }
   const nav = btn.closest('[data-nav]') as HTMLElement | null
   if (nav) { document.querySelectorAll('[data-nav]').forEach((a) => a.classList.toggle('on', (a as HTMLElement).dataset.nav === nav.dataset.nav)) }
 })
@@ -248,9 +248,11 @@ document.addEventListener('input', (ev) => {
   if (t.id === 'limitPx') { swapSt.limitPrice = t.value; return }
   if (t.id === 'tokQ') { tokSt.q = t.value; const box = $('#tokens .ttable tbody'); if (snap) { box.innerHTML = (new DOMParser().parseFromString(ui.tokenTable(snap, tokSt), 'text/html').querySelector('tbody') as HTMLElement).innerHTML } return }
   if (t.id === 'q') { globalSearch(t.value) }
+  if (t.id === 'walletIn') { t.classList.remove('over'); t.removeAttribute('aria-invalid'); const h = document.getElementById('walletHint'); if (h) h.textContent = /^[0-9a-f]{64}$/i.test(t.value.trim()) ? '✓ looks like a wallet id' : '' }
 })
 document.addEventListener('focusin', (ev) => { const t = ev.target as HTMLElement; if (t.matches && t.matches('tr[data-coll], [role="button"][data-coll]')) t.scrollIntoView({ block: 'center', behavior: 'smooth' }) })
 document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' && (document.activeElement as HTMLElement | null)?.id === 'walletIn') { ev.preventDefault(); (document.getElementById('walletUse') as HTMLButtonElement | null)?.click(); return }
   // Enter / Space on a card, row or tile that is a role=button div behaves like a click
   if ((ev.key === 'Enter' || ev.key === ' ') && (document.activeElement as HTMLElement | null)?.matches('[role="button"][data-coll], tr[data-coll]')) { ev.preventDefault(); (document.activeElement as HTMLElement).click(); return }
   if (ev.key === '/' && document.activeElement?.tagName !== 'INPUT') { ev.preventDefault(); ($('#q') as HTMLInputElement).focus() }
@@ -325,7 +327,7 @@ function openWalletModal(): void {
   try { gate = localStorage.getItem('sigil-wallet-address') } catch { /* */ }
   openModal(`<h4>Connect a SIGIL wallet</h4>
     <p class="muted" style="font-size:12.5px">Read-only. Paste a 64-hex wallet id to see its balances and on-chain records. Signing stays in the wallet app.</p>
-    <div class="amt"><input id="walletIn" placeholder="64-hex wallet id" value="${gate ?? ''}" spellcheck="false"></div>
+    <div class="amt"><input id="walletIn" placeholder="64-hex wallet id" value="${gate ?? ''}" spellcheck="false" autocomplete="off"></div><div id="walletHint" class="muted" style="font-size:11.5px;margin-top:6px;min-height:16px"></div>
     <div style="display:flex;gap:8px;margin-top:12px"><button class="btn primary" id="walletUse">Use this wallet</button><a class="btn ghost" href="/enter-sigil.html" target="_blank" rel="noopener">${I.ext} Open the gate</a></div>
     ${gate ? '<p class="muted" style="font-size:11.5px;margin-top:10px">Prefilled from the gate on this origin.</p>' : ''}`)
 }

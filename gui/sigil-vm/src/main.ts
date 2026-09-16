@@ -201,8 +201,8 @@ document.addEventListener('click', (ev) => {
   // swap module
   if (ds.mode && btn.closest('.seg')) { swapSt.mode = ds.mode as 'market' | 'limit'; renderSwap(); return }
   if (ds.sel) { openTokenPicker(ds.sel as 'from' | 'to'); return }
-  if (ds.max) { const b = balances[swapSt.from] ?? 0; swapSt.amount = b ? b.toFixed(8) : ''; renderSwap(); return }
-  if (ds.pct) { const b = balances[swapSt.from] ?? 0; swapSt.amount = (b * Number(ds.pct) / 100).toFixed(8); renderSwap(); return }
+  if (ds.max) { const b = balances[swapSt.from] ?? 0; swapSt.amount = b ? String(Math.floor(b * 1e4) / 1e4) : ''; renderSwap(); return }
+  if (ds.pct) { const b = balances[swapSt.from] ?? 0; swapSt.amount = String(Math.floor(b * Number(ds.pct) / 100 * 1e4) / 1e4); renderSwap(); return }
   if (btn.id === 'swapFlip') { const f = swapSt.from; swapSt.from = swapSt.to; swapSt.to = f; renderSwap(); return }
   if (ds.dir) { swapSt.limitDir = ds.dir as 'buy' | 'sell'; renderSwap(); return }
   if (btn.id === 'swapCollapse') { collapsed = true; renderSwap(); return }
@@ -242,7 +242,7 @@ document.addEventListener('input', (ev) => {
     const rate = document.querySelector('.info:not(.warnbox) .v'); if (rate && q && amt > 0) rate.textContent = `1 ${from.symbol} ≈ ${(q.out / amt).toFixed(6)} ${to.symbol}`
     return
   }
-  if (t.id === 'swapRange') { const b = balances[swapSt.from] ?? 0; swapSt.amount = (b * Number(t.value) / 100).toFixed(8); renderSwap(); return }
+  if (t.id === 'swapRange') { const b = balances[swapSt.from] ?? 0; swapSt.amount = String(Math.floor(b * Number(t.value) / 100 * 1e4) / 1e4); renderSwap(); return }
   if (t.id === 'limitPx') { swapSt.limitPrice = t.value; return }
   if (t.id === 'tokQ') { tokSt.q = t.value; const box = $('#tokens .ttable tbody'); if (snap) { box.innerHTML = (new DOMParser().parseFromString(ui.tokenTable(snap, tokSt), 'text/html').querySelector('tbody') as HTMLElement).innerHTML } return }
   if (t.id === 'q') { globalSearch(t.value) }

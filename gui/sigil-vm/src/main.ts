@@ -491,7 +491,8 @@ function openShortcuts(): void {
     <div><kbd>/</kbd><span>Search</span></div><div><kbd>?</kbd><span>This sheet</span></div>
     <div><kbd>w</kbd><span>Toggle wallet panel</span></div><div><kbd>t</kbd><span>Toggle light / dark</span></div>
     <div><kbd>s</kbd><span>Jump to Swap &amp; Tokens</span></div><div><kbd>g</kbd><span>Back to top</span></div>
-    <div><kbd>↑</kbd><kbd>↓</kbd><kbd>⏎</kbd><span>Pick a token</span></div><div><kbd>Esc</kbd><span>Close anything</span></div>
+    <div><kbd>↑</kbd><kbd>↓</kbd><kbd>⏎</kbd><span>Pick a token or a search hit</span></div><div><kbd>Esc</kbd><span>Close anything</span></div>
+    <div><kbd>←</kbd><kbd>→</kbd><span>Move between tabs</span></div><div><kbd>⏎</kbd><kbd>Space</kbd><span>Open a focused card or row</span></div>
   </div>`)
 }
 function openSlippage(): void {

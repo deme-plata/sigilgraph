@@ -709,7 +709,10 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
 :root[data-theme="light"] .bottomnav a.on svg { color: #0a739a; }
 
 .keys { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 18px; }
-.keys div { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); }
+.keys div { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); min-width: 0; }
+.keys div span { flex: 1 1 0; min-width: 0; }
+.keys kbd { flex: 0 0 auto; }
+@media (max-width: 520px) { .keys { grid-template-columns: 1fr; gap: 8px; } } /* two columns on a phone squeezed 'Space' into its own sentence */
 .keys kbd, .foot-keys kbd { font-family: var(--mono); font-size: 11px; min-width: 24px; text-align: center; padding: 3px 6px; border-radius: 6px; border: 1px solid var(--line-2); background: var(--surface-3); color: var(--ink); box-shadow: 0 2px 0 rgba(0,0,0,.3); }
 .foot-keys { display: inline-flex; align-items: center; gap: 6px; color: var(--muted-2); font-size: 12px; }
 .foot-keys:hover { color: var(--ink); }

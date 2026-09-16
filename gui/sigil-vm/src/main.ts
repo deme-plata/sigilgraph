@@ -30,7 +30,7 @@ let cat = 'all'
 try { if (new URLSearchParams(location.search).get('embed')) app.classList.add('embed') } catch { /* */ }
 try { wallet = localStorage.getItem('sigil-wallet-address') } catch { /* blocked */ }
 // theme: saved choice, else the OS preference; the toggle flips and persists
-function applyTheme(t: 'dark' | 'light'): void { document.documentElement.setAttribute('data-theme', t); document.querySelector('meta[name=theme-color]')?.setAttribute('content', t === 'dark' ? '#0b0b0f' : '#f6f6f9'); /* phone browser chrome follows the page */ const b = document.getElementById('themeBtn'); if (b) b.innerHTML = t === 'dark' ? I.sun : I.moon }
+function applyTheme(t: 'dark' | 'light'): void { document.documentElement.setAttribute('data-theme', t); queueMicrotask(() => { if (document.getElementById('themeBtn')) syncToggleAria() }); document.querySelector('meta[name=theme-color]')?.setAttribute('content', t === 'dark' ? '#0b0b0f' : '#f6f6f9'); /* phone browser chrome follows the page */ const b = document.getElementById('themeBtn'); if (b) b.innerHTML = t === 'dark' ? I.sun : I.moon }
 let theme: 'dark' | 'light' = 'dark'
 try { const saved = localStorage.getItem('sigilvm-theme'); theme = saved === 'light' || saved === 'dark' ? saved : (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark') } catch { /* */ }
 applyTheme(theme)
@@ -265,6 +265,9 @@ addEventListener('resize', syncRowArrows)
 // aria-pressed, real tab strips (panel, collection sheet) get tablist/tab/aria-selected. A debounced observer keeps
 // it true after every re-render without each renderer having to remember.
 function syncToggleAria(): void {
+  // popover + theme toggles say their state: the chain chip's menu open/closed, the theme button's NEXT theme
+  document.getElementById('chainChip')?.setAttribute('aria-expanded', $('#chainMenu').classList.contains('open') ? 'true' : 'false')
+  const tb = document.getElementById('themeBtn'); if (tb) { const l = theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'; if (tb.getAttribute('aria-label') !== l) { tb.setAttribute('aria-label', l); tb.title = l } }
   document.querySelectorAll<HTMLElement>('.tabs, .seg, .cats, .tokens-tools .f').forEach((g) => { g.setAttribute('role', 'group'); g.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', b.classList.contains('on') ? 'true' : 'false')) })
   document.querySelectorAll<HTMLElement>('.ptabs, .cm-tabs').forEach((g) => { g.setAttribute('role', 'tablist'); g.querySelectorAll('button').forEach((b) => { b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', b.classList.contains('on') ? 'true' : 'false') }) })
   // every link that leaves the page in a new tab says so: a ↗ after its text (cards carry it in their overlay already)

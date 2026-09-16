@@ -59,7 +59,7 @@ export function shell(): string {
       <a href="/sigil-explorer.html" target="_blank" rel="noopener">Explorer</a>
     </nav>
     <div class="actions">
-      <div class="chain-wrap"><button class="chain-chip" id="chainChip" title="sigil-g2 · sigil-api"><i class="d"></i><span class="t">sigil-g2</span><span id="chainHeight">—</span><span class="car">▾</span></button>
+      <div class="chain-wrap"><button class="chain-chip" id="chainChip" title="sigil-g2 · sigil-api" aria-haspopup="true" aria-controls="chainMenu" aria-expanded="false"><i class="d"></i><span class="t">sigil-g2</span><span id="chainHeight">—</span><span class="car">▾</span></button>
         <div class="chain-menu" id="chainMenu">
           <div class="cm on"><i class="d on"></i><div><b>SIGIL g2</b><small>mainnet · sigil-api :18181</small></div><span class="chip live">live</span></div>
           <a class="cm" href="https://polygonscan.com/token/0x3FCED760b0DE6d57F96835C6110b1227941Ec2e9" target="_blank" rel="noopener"><i class="d" style="background:#8247e5;color:#8247e5"></i><div><b>Polygon</b><small>wSIGIL3 · Uniswap pool</small></div><span class="chip derived">external</span></a>

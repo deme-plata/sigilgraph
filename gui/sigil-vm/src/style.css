@@ -233,6 +233,7 @@ img { display: block; }
 .section, .dex > *, .qcard, .qcard .inner, .row, .trending { min-width: 0; }
 .app.panel-open .main { margin-right: var(--panel); }
 .section { margin-top: 38px; animation: rise .35s ease both; scroll-margin-top: calc(var(--top) + 76px); }
+#swap > * { scroll-margin-top: calc(var(--top) + 76px); } /* the swap cards are anchor targets on wide screens (see anchorBox) */
 #swap, #tokens { scroll-margin-top: calc(var(--top) + 76px); } /* clears the sticky category bar — the Swap tab landed the module title under it */
 .sec-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
 .sec-head > div:first-child { min-width: 0; }

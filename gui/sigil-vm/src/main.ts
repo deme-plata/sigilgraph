@@ -232,7 +232,7 @@ async function poll(): Promise<void> {
     await loadBalances()
     renderAll()
     // a deep link (#dex, #trending…) scrolled before the live content existed — re-anchor once the page has its real height
-    if (firstPaint && location.hash && !snap.offline) { const target = document.querySelector(location.hash.split('=')[0]); if (target) requestAnimationFrame(() => target.scrollIntoView({ behavior: 'instant', block: 'start' })) }
+    if (firstPaint && location.hash && !snap.offline) { const target = anchorBox(location.hash); if (target) requestAnimationFrame(() => target.scrollIntoView({ behavior: 'instant', block: 'start' })) }
     if (!snap.offline && prevHeight && snap.head.height > prevHeight) { const b = $('#bellBadge'); b.hidden = false; $('#bellBtn').setAttribute('aria-label', `Activity — ${fmt.n(snap.head.height - prevHeight, 'new block')} since you looked`) }
   } catch (e) {
     toast('poll failed: ' + (e as Error).message, 'bad')
@@ -547,6 +547,20 @@ const spy = new IntersectionObserver((entries) => {
 }, { rootMargin: `-${72 + 60}px 0px -55% 0px`, threshold: 0 })
 spyTargets.forEach((t) => spy.observe(t))
 document.addEventListener('click', (ev) => { if ((ev.target as HTMLElement).closest('[data-nav]')) spyLock = Date.now() + 900 })
+
+// an anchor whose target has no box scrolls nowhere: #swap is display:contents on wide screens (its two cards sit in the DEX
+// grid), so the rail's Swap link and a #swap deep link did nothing above 1180px. Resolve such a target to its first boxed child.
+function anchorBox(hash: string): Element | null {
+  let el: Element | null = null; try { el = document.querySelector(hash.split('=')[0]) } catch { return null } if (!el) return null
+  return el.getClientRects().length ? el : (Array.from(el.children).find((c) => c.getClientRects().length) ?? el)
+}
+document.addEventListener('click', (ev) => {
+  const a = (ev.target as HTMLElement).closest('a[href^="#"]') as HTMLAnchorElement | null
+  if (!a || a.getAttribute('href')!.length < 2) return
+  const href = a.getAttribute('href')!; let el: Element | null = null; try { el = document.querySelector(href) } catch { return } if (!el || el.getClientRects().length) return
+  const box = anchorBox(href); if (!box || box === el) return
+  ev.preventDefault(); history.replaceState(null, '', a.getAttribute('href')); box.scrollIntoView({ behavior: 'smooth', block: 'start' })
+})
 
 // back-to-top after a screen of scrolling
 const toTop = $('#toTop')

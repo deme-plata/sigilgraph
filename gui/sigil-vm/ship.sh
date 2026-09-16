@@ -30,6 +30,12 @@ cp dist/assets/sigil-vm-*.js dist/assets/sigil-vm-*.css "$SITE/assets/"
 for f in sigil-vm.html sigil-vm-showcase.html $(cd dist && ls assets/sigil-vm-*); do
   code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "https://sigilgraph.org/$f"); echo "  $f $code"; [ "$code" = 200 ] || exit 1
 done
+# the footer's "Page source (.tar.gz)" is repacked every ship (it sat at the 09-15 build for 150 ticks): stable name + one per day
+echo "▶ source tarball → $SITE/downloads (stable + dated)"
+day=$(date +%F); tmp=$(mktemp -d /home/storage/sigil-scratch/sigil-vm-ui/src-XXXX)
+tar czf "$tmp/sigil-vm-src.tar.gz" -C .. --exclude=node_modules --exclude=dist --exclude=target --exclude='.outage.log' sigil-vm
+cp "$tmp/sigil-vm-src.tar.gz" "$SITE/downloads/sigil-vm-src-$day.tar.gz" && cp "$tmp/sigil-vm-src.tar.gz" "$SITE/downloads/sigil-vm-src.tar.gz"; rm -rf "$tmp"
+code=$(curl -s -o /dev/null -m 10 -w '%{http_code} %{size_download}' "https://sigilgraph.org/downloads/sigil-vm-src.tar.gz"); echo "  sigil-vm-src.tar.gz $code"; [ "${code%% *}" = 200 ] || exit 1
 echo "▶ commit + push"
 cd /home/storage/deepseek-codewhale/sigil
 git add gui/sigil-vm

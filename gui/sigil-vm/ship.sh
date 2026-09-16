@@ -18,6 +18,8 @@ echo "▶ verify (flux-vite-engine)"
 ( cd "$FLUX" && timeout 300 ./target/debug/examples/verify "$HERE" "$SHOT" ) | grep -E 'build-SAP|render ──|console|→'
 echo "▶ layout guard (5 widths × 2 themes, live node through the site proxy)"
 node "$HERE/guard.mjs"
+echo "▶ pre-render snapshot into dist/sigil-vm.html (readable without JavaScript)"
+node "$HERE/snapshot.mjs"
 echo "▶ deploy → $SITE (SIGIL root, additive)"
 cp dist/sigil-vm.html "$SITE/sigil-vm.html"
 cp dist/assets/sigil-vm-*.js dist/assets/sigil-vm-*.css "$SITE/assets/"

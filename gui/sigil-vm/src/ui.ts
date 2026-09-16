@@ -483,12 +483,12 @@ export function collectionModal(c: Collection, s: Snapshot): string {
         <div class="td-cell" style="grid-column: span 2"><div class="k">Provenance</div><div class="v">${prov(c.provenance)} — ${c.provenance === 'live' ? 'read from sigil-api this poll' : c.provenance === 'derived' ? 'calculated over live numbers' : 'illustrative, no chain source yet'}</div></div>
         <div class="td-cell"><div class="k">Category</div><div class="v">${esc(c.cat)}</div></div>
         <div class="td-cell"><div class="k">By</div><div class="v">${esc(c.by || '—')}</div></div>
-        <div class="td-cell" style="grid-column: span 2"><div class="k">Source page</div><div class="v"><a class="mono" href="${c.link}" target="_blank" rel="noopener">${esc(c.link)}</a></div></div>
+        <div class="td-cell" style="grid-column: span 2"><div class="k">${c.link.startsWith('/v1/') ? 'Node record' : 'Source page'}</div><div class="v"><a class="mono" href="${c.link}" target="_blank" rel="noopener">${esc(c.link)}</a></div></div>
         <div class="td-cell two"><div class="k">Window changes</div><div class="v mono" style="white-space:nowrap">${['1h', '6h', '24h', '7d'].map((w) => `<span style="color:var(--muted)">${w}</span> ${fmt.pct(s.changes[c.id]?.[w] ?? null)}`).join(' &nbsp;')}</div></div>
         <div class="td-cell two"><div class="k">Last poll</div><div class="v mono" style="white-space:nowrap">${new Date(s.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} · h ${fmt.int(s.head.height)}</div></div>
       </div></div>
     </div>
-    <div class="cm-foot"><a class="btn primary" href="${c.link}" target="_blank" rel="noopener">Open source page ↗</a><button class="btn ghost" id="modalClose2">Close</button></div>`
+    <div class="cm-foot"><a class="btn primary" href="${c.link}" target="_blank" rel="noopener">${c.link.startsWith('/v1/') ? 'Open the node record (JSON) ↗' : 'Open source page ↗'}</a><button class="btn ghost" id="modalClose2">Close</button></div>`
 }
 
 export function ticker(s: Snapshot): string {

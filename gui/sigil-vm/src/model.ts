@@ -397,7 +397,7 @@ function buildCollections(miners: Miners | null, anchor: Anchor | null, docket: 
     blurb: 'Cover policies underwritten by the ROCKY pool against K⊕ p99 excursions. First native contract that executes.',
     items: rocky?.policies.length ?? null, owners: null, floor: rocky ? `${rocky.fee_bps} bps fee` : '—', floorChange: null,
     volume: rocky ? `${fmt.num(glyphsToSigil(rocky.pool_balance, rocky.decimals))} ROCKY pooled` : '—', volumeChange: null, sales: rocky?.policies.length ?? null,
-    provenance: rocky ? 'live' : 'pretend', link: '/kristensen-board.html',
+    provenance: rocky ? 'live' : 'pretend', link: '/v1/rocky', // no site page documents ROCKY yet — the node's own record is the honest source
   })
   c.push({
     cat: 'bridge', id: 'bridge', by: 'by the relayer', name: 'Bridge Locks', glyph: 'braid', verified: true, cover: coverSvg('Bridge Locks', 'braid'),

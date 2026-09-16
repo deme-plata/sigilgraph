@@ -378,13 +378,18 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 .tabs.pill button.on { background: var(--grad); color: #000; }
 .trending { display: grid; grid-template-columns: 1fr; gap: 0 28px; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 6px 12px; }
 @media (min-width: 1180px) { .trending { grid-template-columns: 1fr 1fr; } }
-.trending .tcol { min-width: 0; overflow-x: auto; container-type: inline-size; }
+.trending .tcol { min-width: 0; overflow-x: clip; container-type: inline-size; }
 @container (max-width: 760px) { .trending th:nth-child(7), .trending td:nth-child(7) { display: none; } }
 @container (max-width: 700px) { .trending th:nth-child(6), .trending td:nth-child(6) { display: none; } }
 @container (max-width: 600px) { .trending th:nth-child(4), .trending td:nth-child(4) { display: none; } }
 @container (max-width: 440px) { .trending th:nth-child(5), .trending td:nth-child(5) { display: none; } .trending .coll .n { max-width: 118px; font-size: 13px; } .trending .coll .s { display: none; } .trending .coll { gap: 8px; } .trending .coll img { width: 34px; height: 34px; flex-basis: 34px; } .trending td:nth-child(3) { font-size: 12px; } .trending .rank { width: 18px; font-size: 12px; } .trending td, .trending th { padding-left: 3px; padding-right: 3px; } .trending table { table-layout: fixed; } .trending th:nth-child(1), .trending td:nth-child(1) { width: 26px; } .trending th:nth-child(3), .trending td:nth-child(3) { width: 96px; } }
-.trending td:nth-child(3), .trending td:nth-child(5) { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
-.trending table { width: 100%; border-collapse: collapse; }
+.trending table { width: 100%; border-collapse: collapse; table-layout: fixed; } /* fixed: the columns share the tcol and ellipsize — auto layout let '0 batches anchored' push the right column past its edge with the panel open at 1600px */
+.trending th:nth-child(1), .trending td:nth-child(1) { width: 28px; }
+.trending th:nth-child(3), .trending td:nth-child(3) { width: 118px; }
+.trending th:nth-child(4), .trending td:nth-child(4) { width: 84px; }
+.trending th:nth-child(5), .trending td:nth-child(5) { width: 164px; }
+.trending th:nth-child(6), .trending td:nth-child(6), .trending th:nth-child(7), .trending td:nth-child(7) { width: 104px; }
+.trending td.r, .trending td:nth-child(3), .trending td:nth-child(5) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .trending th { text-align: left; font-size: 11.5px; color: var(--muted); font-weight: 600; padding: 12px 8px; border-bottom: 1px solid var(--line); letter-spacing: .02em; white-space: nowrap; }
 .trending th.r, .trending td.r { text-align: right; }
 .trending td { padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }

@@ -804,3 +804,14 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
 /* embedded inside the showcase frame: no phone bar, no auto panel */
 .app.embed .bottomnav { display: none !important; }
 @media (hover: none) and (pointer: coarse) { .foot-keys, .kbd-only, .sec-head .arrows { display: none; } .sec-head .right:not(:has(> :not(.arrows))) { display: none; } } /* touch: rows swipe, the arrow pair only made an orphan row; a controls row holding nothing else collapses too */ /* no keyboard, no shortcut hint */
+/* short viewports (phone landscape ≈ 390px tall): the collection sheet's 170px banner + stats + tabs left the item
+   pane and the footer below the fold with nothing visible to scroll — shrink the banner, hide the stat tiles */
+@media (max-height: 520px) {
+  .modal .box.coll { max-height: 96vh; }
+  .cm-head { height: 64px; flex-basis: 64px; }
+  .cm-title { margin-top: -30px; }
+  .cm-title img { width: 56px; height: 56px; border-radius: 14px; }
+  .cm-title h3 { font-size: 18px; }
+  .cm-stats { display: none; }
+  .cm-tabs { padding-top: 6px; }
+}

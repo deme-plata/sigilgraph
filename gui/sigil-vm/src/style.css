@@ -860,4 +860,5 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
   .slider .track .fill { forced-color-adjust: none; background: Highlight; }
   .hero .dots button { height: 5px; border: 1px solid ButtonText; background: Canvas; }
   .hero .dots button.on::after { forced-color-adjust: none; background: ButtonText; }
+  .panel .ptabs button.on .n, .cm-tabs button.on .n { color: HighlightText; } /* forced-color-adjust is inherited: the count badge kept its muted ink on the Highlight fill */
 }

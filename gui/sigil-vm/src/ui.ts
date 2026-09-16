@@ -12,8 +12,12 @@ const delta = (n: number | null, d = 1): string => {
   return `<span class="${c}">${fmt.pct(n, d)}</span>`
 }
 export function sparkline(values: number[], w = 120, h = 32, cls = 'up'): string {
-  const v = values.filter((x) => isFinite(x))
+  let v = values.filter((x) => isFinite(x))
   if (v.length < 2) return ''
+  // a series that spans more than 20× (a GPU rig joining a CPU network) flattens to a line at zero on a
+  // linear scale — switch to log so both the baseline and the spike stay legible
+  const pos = v.filter((x) => x > 0)
+  if (pos.length > 1 && Math.max(...pos) / Math.min(...pos) > 20) v = v.map((x) => (x > 0 ? Math.log10(x) : Math.log10(Math.min(...pos))))
   const min = Math.min(...v), max = Math.max(...v), span = max - min || 1
   const pts = v.map((x, i) => `${((i / (v.length - 1)) * (w - 2) + 1).toFixed(1)},${(h - 2 - ((x - min) / span) * (h - 4)).toFixed(1)}`)
   const id = 'sp' + Math.abs(v.length * 31 + Math.round(v[0])).toString(36)

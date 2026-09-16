@@ -833,6 +833,15 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
   .hero p { margin-bottom: 12px; }
   .hero .stats { margin-bottom: 14px; }
   .hero .thumbs { display: none; }
+  /* the wallet drawer: head + tabs + actions left the token list 23px tall — a tight head and slimmer actions */
+  .panel .ph { padding: 8px 14px 6px; }
+  .panel .who img { width: 30px; height: 30px; border-radius: 9px; }
+  .panel .total { margin-top: 4px; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .panel .total .v { font-size: 20px; }
+  .panel .total .muted { flex-basis: 100%; font-size: 10.5px !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } /* still says "balance unread" when it must */
+  .panel .ptabs button { padding: 6px 10px; font-size: 13px; }
+  .panel .pf { padding: 6px 10px; }
+  .panel .pf .btn { padding: 7px 10px; font-size: 13px; }
   .modal .box.coll { max-height: 96vh; }
   .cm-head { height: 64px; flex-basis: 64px; }
   .cm-title { margin-top: -30px; }

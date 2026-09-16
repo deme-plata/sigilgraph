@@ -29,6 +29,7 @@ const ver = (v: boolean) => (v ? '<span class="verified" title="on-chain record 
 // ── shell ─────────────────────────────────────────────────────────────────
 export function shell(): string {
   return `
+  <a class="skip" href="#main">Skip to content</a>
   <header class="topbar">
     <a class="brand" href="/sigil-vm.html"><span class="cube">🔮</span><span>SIGIL <span class="vm">VM</span></span><small>MARKET · DEX</small></a>
     <div class="search">
@@ -475,7 +476,7 @@ export function collectionModal(c: Collection, s: Snapshot): string {
 
 export function ticker(s: Snapshot): string {
   const items: string[] = []
-  const it = (icon: string, label: string, val: string, cls = '', coll = '') => items.push(`<button class="tk-item ${cls}"${coll ? ` data-coll="${coll}"` : ''}><span class="tk-ic">${icon}</span><span class="tk-l">${label}</span><span class="tk-v">${val}</span></button>`)
+  const it = (icon: string, label: string, val: string, cls = '', coll = '') => items.push(`<button class="tk-item ${cls}" tabindex="-1"${coll ? ` data-coll="${coll}"` : ''}><span class="tk-ic">${icon}</span><span class="tk-l">${label}</span><span class="tk-v">${val}</span></button>`)
   if (s.head.ok) it(I.coins, 'network', `${fmt.hps(s.head.netHps)} · ${s.head.liveMiners} rigs${s.head.blkPerSec ? ' · ' + s.head.blkPerSec.toFixed(1) + ' blk/s' : ''}`, 'gold', 'rigs')
   const behind = s.recent?.blocks.length && s.head.height ? Math.max(0, s.head.height - s.recent.blocks[0].height) : 0
   for (const b of (s.recent?.blocks ?? []).slice(0, 6)) it(I.grid, `block ${fmt.int(b.height)}`, `${b.is_blue ? 'blue' : 'red'} · score ${fmt.int(b.blue_score)} · ${fmt.short(hex(b.producer), 4)}${behind > 50 ? ` · set is ${fmt.int(behind)} blk behind tip` : ''}`, b.is_blue ? 'blue' : 'red', 'blocks')

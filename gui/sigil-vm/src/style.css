@@ -133,6 +133,8 @@ img { display: block; }
   background: var(--topbar-bg); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border-bottom: 1px solid var(--line);
 }
 .brand { display: flex; align-items: center; gap: 10px; font-family: var(--display); font-weight: 800; font-size: 19px; letter-spacing: .02em; white-space: nowrap; }
+.skip { position: fixed; top: 8px; left: 8px; z-index: 200; padding: 8px 12px; border-radius: 8px; background: var(--chip-on-bg); color: var(--chip-on-ink); font-weight: 700; font-size: 13px; transform: translateY(-200%); transition: transform .12s; }
+.skip:focus { transform: none; outline: 2px solid var(--cyan); } /* first Tab stop; the ticker's 30 items are out of the tab order (tabindex=-1) so the hero is a few Tabs away */
 .brand .cube { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; background: linear-gradient(135deg, var(--gold-b), var(--gold) 55%, #9a7d22); color: #000; font-size: 17px; box-shadow: 0 0 22px rgba(212,175,55,.35); }
 .brand .vm { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .brand small { font-family: var(--mono); font-size: 10px; color: var(--muted); font-weight: 500; letter-spacing: .12em; margin-left: 2px; }

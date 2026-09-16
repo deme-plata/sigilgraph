@@ -69,7 +69,7 @@ export function shell(): string {
       <button class="ibtn" id="bellBtn" title="Activity" aria-label="Activity">${I.bell}<i class="badge" id="bellBadge" hidden></i></button>
       <button class="ibtn" id="cartBtn" title="Cart (coming with listings)" aria-label="Cart">${I.cart}</button>
       <button class="btn primary" id="walletBtn">${I.wallet}<span id="walletLbl">Connect wallet</span></button>
-      <button class="ibtn" id="panelBtn" title="Toggle wallet panel" aria-label="Toggle wallet panel">${I.panel}</button>
+      <button class="ibtn" id="panelBtn" title="Toggle wallet panel" aria-label="Toggle wallet panel" aria-controls="panel" aria-expanded="false">${I.panel}</button>
     </div>
   </header>
   <aside class="rail" aria-label="Sections">
@@ -152,7 +152,7 @@ export function shell(): string {
     <a href="#featured" data-nav="featured" data-also="trending">${I.compass}<span>Discover</span></a>
     <a href="#drops" data-nav="drops">${I.rocket}<span>Drops</span></a>
     <a href="#swap" data-nav="swap" data-also="dex">${I.swap}<span>Swap</span></a>
-    <a href="#" id="bnWallet">${I.wallet}<span>Wallet</span></a>
+    <a href="#" id="bnWallet" aria-controls="panel" aria-expanded="false">${I.wallet}<span>Wallet</span></a>
   </nav>
   <button class="totop" id="toTop" aria-label="Back to top" hidden>${I.up}</button>
   <div class="modal" id="modal"><div class="box" id="modalBox"></div></div>

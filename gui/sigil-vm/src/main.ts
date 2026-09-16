@@ -36,6 +36,7 @@ try { const saved = localStorage.getItem('sigilvm-theme'); theme = saved === 'li
 applyTheme(theme)
 try { if (localStorage.getItem('sigilvm-panel') === 'open') app.classList.add('panel-open') } catch { /* */ }
 if (innerWidth >= 1600 && !app.classList.contains('panel-open')) app.classList.add('panel-open')
+if (app.classList.contains('panel-open')) document.getElementById('panelBtn')?.setAttribute('aria-expanded', 'true')
 // One door for the wallet panel. In drawer mode (≤1100px it overlays the page) it behaves like a dialog: focus moves
 // in, the page behind goes inert, and closing hands focus back to whoever opened it.
 let panelOpener: HTMLElement | null = null
@@ -54,6 +55,9 @@ function setPanel(open: boolean, persist = true): void {
   }
   // the phone tab bar says which sheet is up: Wallet lights while the drawer is open and the section tab stands down
   const bn = document.getElementById('bnWallet'); if (bn) { bn.classList.toggle('on', open && drawer); bn.setAttribute('aria-expanded', open && drawer ? 'true' : 'false') }
+  // the toggles say what they did; the drawer is a dialog while it covers the page, a plain complementary column otherwise
+  document.getElementById('panelBtn')?.setAttribute('aria-expanded', open ? 'true' : 'false')
+  const panel = document.getElementById('panel'); if (panel) { if (open && drawer) { panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-modal', 'true') } else { panel.removeAttribute('role'); panel.removeAttribute('aria-modal') } }
   applyNav(lastNav)
 }
 // a tablet rotated with the panel open crosses the drawer/docked line — inert must follow the mode, not the click

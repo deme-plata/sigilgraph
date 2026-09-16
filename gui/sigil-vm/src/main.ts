@@ -216,6 +216,7 @@ document.addEventListener('input', (ev) => {
   if (t.id === 'tokQ') { tokSt.q = t.value; const box = $('#tokens .ttable tbody'); if (snap) { box.innerHTML = (new DOMParser().parseFromString(ui.tokenTable(snap, tokSt), 'text/html').querySelector('tbody') as HTMLElement).innerHTML } return }
   if (t.id === 'q') { globalSearch(t.value) }
 })
+document.addEventListener('focusin', (ev) => { const t = ev.target as HTMLElement; if (t.matches && t.matches('tr[data-coll], [role="button"][data-coll]')) t.scrollIntoView({ block: 'center', behavior: 'smooth' }) })
 document.addEventListener('keydown', (ev) => {
   // Enter / Space on a card, row or tile that is a role=button div behaves like a click
   if ((ev.key === 'Enter' || ev.key === ' ') && (document.activeElement as HTMLElement | null)?.matches('[role="button"][data-coll], tr[data-coll]')) { ev.preventDefault(); (document.activeElement as HTMLElement).click(); return }

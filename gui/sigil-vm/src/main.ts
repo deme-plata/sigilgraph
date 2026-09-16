@@ -569,7 +569,7 @@ toTop.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smoot
 
 // ── boot ──────────────────────────────────────────────────────────────────
 try { const w = localStorage.getItem('sigilvm-wallet'); if (w) wallet = w } catch { /* */ }
-try { const qw = new URLSearchParams(location.search).get('wallet'); if (qw && /^[0-9a-f]{64}$/i.test(qw)) { wallet = qw.toLowerCase(); setPanel(true, false); localStorage.setItem('sigilvm-wallet', wallet) } else if (qw) { setTimeout(() => toast(`Ignored ?wallet=${qw.slice(0, 12)}${qw.length > 12 ? '…' : ''} — a SIGIL wallet id is 64 hex characters (this is ${qw.length}).`, 'warn'), 400) } } catch { /* */ }
+try { const qw = new URLSearchParams(location.search).get('wallet'); if (qw && /^[0-9a-f]{64}$/i.test(qw)) { const w = qw.toLowerCase(); wallet = w; localStorage.setItem('sigilvm-wallet', w); if (innerWidth > 1100) setPanel(true, false); else setTimeout(() => toast(`Wallet ${w.slice(0, 6)}…${w.slice(-4)} connected — tap Wallet for balances and records.`), 400) } /* ≤1100px the panel is a drawer over the page: a visitor arriving from the gate should land on the market, not on a dialog */ else if (qw) { setTimeout(() => toast(`Ignored ?wallet=${qw.slice(0, 12)}${qw.length > 12 ? '…' : ''} — a SIGIL wallet id is 64 hex characters (this is ${qw.length}).`, 'warn'), 400) } } catch { /* */ }
 poll()
 setInterval(() => { if (!document.hidden) poll() }, 10_000)
 document.addEventListener('visibilitychange', () => { if (!document.hidden) poll() })

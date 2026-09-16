@@ -179,15 +179,14 @@ export function hero(s: Snapshot, idx: number): string {
 
 export function strip(s: Snapshot): string {
   const h = s.head
-  const cell = (k: string, v: string, small = '') => `<div class="cell"><div class="k">${k}</div><div class="v">${v}</div>${small ? `<div class="s">${small}</div>` : ''}</div>`
-  void s
+  const cell = (k: string, v: string, small = '', coll = '') => `<button class="cell"${coll ? ` data-coll="${coll}"` : ''}><div class="k">${k}</div><div class="v">${v}</div>${small ? `<div class="s">${small}</div>` : ''}</button>`
   return [
-    cell('Height', fmt.int(h.height), h.blkPerSec ? `${h.blkPerSec.toFixed(1)} blk/s` : 'measuring rate…'),
-    cell('Finality', h.finalityGate, `h ${fmt.int(h.finalityHeight)} · ${h.committee} validators`),
-    cell('Supply', fmt.num(h.supplySigil) + ' SIGIL', `${(h.mintedPct).toFixed(2)}% of 21M`),
-    cell('Hashrate', fmt.hps(h.netHps) + (s.hashHist.length > 2 ? sparkline(s.hashHist, 90, 22, h.hashChange !== null && h.hashChange < 0 ? 'down' : 'up') : ''), `${h.liveMiners} miners${h.hashChange !== null ? ' · ' + fmt.pct(h.hashChange) : ''}`),
-    cell('Shielded pool', fmt.int(h.notes) + ' notes', `${fmt.num(h.valueLocked)} SIGIL locked · ${fmt.int(h.nullifiers)} spent`),
-    cell('Treasury', fmt.num(h.treasurySigil) + ' SIGIL', 'nation welfare'),
+    cell('Height', fmt.int(h.height), h.blkPerSec ? `${h.blkPerSec.toFixed(1)} blk/s` : 'measuring rate…', 'blocks'),
+    cell('Finality', h.finalityGate, `h ${fmt.int(h.finalityHeight)} · ${h.committee} validators`, 'blocks'),
+    cell('Supply', fmt.num(h.supplySigil) + ' SIGIL', `${(h.mintedPct).toFixed(2)}% of 21M`, 'rigs'),
+    cell('Hashrate', fmt.hps(h.netHps) + (s.hashHist.length > 2 ? sparkline(s.hashHist, 90, 22, h.hashChange !== null && h.hashChange < 0 ? 'down' : 'up') : ''), `${h.liveMiners} miners${h.hashChange !== null ? ' · ' + fmt.pct(h.hashChange) : ''}`, 'rigs'),
+    cell('Shielded pool', fmt.int(h.notes) + ' notes', `${fmt.num(h.valueLocked)} SIGIL locked · ${fmt.int(h.nullifiers)} spent`, 'notes'),
+    cell('Treasury', fmt.num(h.treasurySigil) + ' SIGIL', 'nation welfare', 'treasury'),
   ].join('')
 }
 

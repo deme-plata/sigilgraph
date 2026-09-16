@@ -285,7 +285,8 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 
 /* ── chain strip (below hero) ───────────────────────────────────────── */
 .strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(136px, 1fr)); gap: 10px; margin-top: 14px; }
-.strip .cell { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; }
+.strip .cell { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; text-align: left; width: 100%; transition: .15s; }
+.strip button.cell:hover { border-color: var(--line-2); background: var(--surface-2); transform: translateY(-1px); }
 .strip .k { font-size: 10.5px; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
 .strip .v { font-family: var(--mono); font-size: 16px; font-weight: 600; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; }
 .strip .v .spark { flex: 0 0 auto; }

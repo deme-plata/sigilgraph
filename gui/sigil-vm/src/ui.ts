@@ -497,10 +497,10 @@ function collectionActivity(c: Collection, s: Snapshot): string {
 export function legend(s: Snapshot): string {
   const live = s.collections.filter((c) => c.provenance === 'live').length
   const pretend = s.collections.filter((c) => c.provenance === 'pretend').length
-  return `<div class="l"><strong style="color:#fff">What is measured here</strong></div>
+  return `<div class="l"><strong style="color:var(--ink)">What is measured here</strong><a class="viewall" href="/downloads/sigil-vm-inventory.md" target="_blank" rel="noopener" style="margin-left:auto">Full inventory · what is real, what is mock</a></div>
     <div class="l">${prov('live')}<span>read from sigil-api on this poll (${live} collections, every strip figure, tokens SIGIL/USDS/ROCKY, drops, sales proofs)</span></div>
     <div class="l">${prov('derived')}<span>a stated calculation over live numbers (block rate, rig change vs. today's first sample, network hashrate window)</span></div>
-    <div class="l">${prov('pretend')}<span>illustrative — no chain source yet (${pretend} collections, wSIGIL3/SSHARE rows, USD prices, the cart)</span></div>
+    <div class="l">${prov('pretend')}<span>illustrative — no chain source yet (${pretend} collection${pretend === 1 ? '' : 's'}, wSIGIL3/SSHARE rows, USD prices, the cart)</span></div>
     <div class="l"><span class="mono">${s.offline ? 'node unreachable — showing shells only' : 'last poll ' + new Date(s.at).toLocaleTimeString()} · window changes sampled in this browser for ${s.sampleAgeMin < 60 ? s.sampleAgeMin + ' min' : (s.sampleAgeMin / 60).toFixed(1) + ' h'} (1h needs ≥24 min, 24h ≥ 9.6 h, 7d ≥ 2.8 d)</span></div>`
 }
 

@@ -51,7 +51,7 @@ export function shell(): string {
       <kbd>/</kbd>
       <div class="search-results" id="qres"></div>
     </div>
-    <nav class="navlinks">
+    <nav class="navlinks" aria-label="Primary">
       <a href="#market" class="on" data-nav="market">Market</a>
       <a href="#drops" data-nav="drops">Drops</a>
       <a href="#trending" data-nav="trending">Trending</a>
@@ -72,7 +72,7 @@ export function shell(): string {
       <button class="ibtn" id="panelBtn" title="Toggle wallet panel" aria-label="Toggle wallet panel">${I.panel}</button>
     </div>
   </header>
-  <aside class="rail">
+  <aside class="rail" aria-label="Sections">
     <a href="#market" class="on" data-nav="market">${I.home}<span class="tip">Home</span></a>
     <a href="#featured" data-nav="featured">${I.compass}<span class="tip">Discover</span></a>
     <a href="#trending" data-nav="trending">${I.grid}<span class="tip">Collections</span></a>
@@ -85,7 +85,7 @@ export function shell(): string {
   </aside>
   <main class="main" id="main">
     <div class="ticker" id="ticker" aria-label="Live chain activity"><div class="tk-track" id="tickerTrack"></div></div>
-    <section id="market" class="section" style="margin-top:0">
+    <section id="market" class="section" style="margin-top:0" aria-label="Market overview">
       <div class="hero skel-hero" id="hero"><div class="bg"></div><div class="veil"></div><div class="body"><div class="eyebrow"><span class="chip gold"><i class="d"></i>reading the chain…</span></div><div class="sk sk-h1"></div><div class="sk sk-p"></div><div class="stats"><div class="stat sk-stat"></div><div class="stat sk-stat"></div><div class="stat sk-stat"></div><div class="stat sk-stat"></div></div><div class="cta"><div class="sk sk-btn"></div><div class="sk sk-btn"></div></div></div></div>
       <div class="strip-wrap"><div class="strip" id="strip">${skStrip()}</div></div>
       <div id="foryou"><div class="foryou"><div class="fy-col"><div class="sk sk-k"></div><div class="sk sk-p"></div><div class="sk sk-p"></div><div class="sk sk-p short"></div></div><div class="fy-col"><div class="sk sk-k"></div><div class="sk sk-p"></div><div class="sk sk-p"></div><div class="sk sk-p short"></div></div></div></div>
@@ -93,17 +93,17 @@ export function shell(): string {
     <div class="cats" id="cats">
       <button class="on" data-cat="all">All</button><button data-cat="chain">Chain</button><button data-cat="mining">Mining</button><button data-cat="court">Court</button><button data-cat="shielded">Shielded</button><button data-cat="tokens">Tokens</button><button data-cat="bridge">Bridge</button><button data-cat="science">Science</button><button data-cat="physical">Physical</button><button data-cat="story">Story</button>
     </div>
-    <section id="featured" class="section">
-      <div class="sec-head"><div><h2>Featured Collections</h2><div class="sub">Record families the chain can prove — ranked by items on chain.</div></div><div class="right"><div class="arrows" data-scroll="featuredRow"><button aria-label="Scroll left">${I.left}</button><button aria-label="Scroll right">${I.right}</button></div><a class="viewall" href="#trending">View all</a></div></div>
+    <section id="featured" class="section" aria-labelledby="h-featured">
+      <div class="sec-head"><div><h2 id="h-featured">Featured Collections</h2><div class="sub">Record families the chain can prove — ranked by items on chain.</div></div><div class="right"><div class="arrows" data-scroll="featuredRow"><button aria-label="Scroll left">${I.left}</button><button aria-label="Scroll right">${I.right}</button></div><a class="viewall" href="#trending">View all</a></div></div>
       <div class="row" id="featuredRow">${skeleton(5)}</div>
     </section>
-    <section id="drops" class="section">
-      <div class="sec-head"><div><h2>Featured Drops</h2><div class="sub">Activations gated by block height. Countdowns are measured from the live height and block rate.</div></div><div class="right"><div class="arrows" data-scroll="dropsRow"><button aria-label="Scroll left">${I.left}</button><button aria-label="Scroll right">${I.right}</button></div></div></div>
+    <section id="drops" class="section" aria-labelledby="h-drops">
+      <div class="sec-head"><div><h2 id="h-drops">Featured Drops</h2><div class="sub">Activations gated by block height. Countdowns are measured from the live height and block rate.</div></div><div class="right"><div class="arrows" data-scroll="dropsRow"><button aria-label="Scroll left">${I.left}</button><button aria-label="Scroll right">${I.right}</button></div></div></div>
       <div class="row" id="dropsRow">${skeleton(4, 'drop wide')}</div>
     </section>
-    <section id="trending" class="section">
+    <section id="trending" class="section" aria-labelledby="h-trending">
       <div class="sec-head">
-        <div><h2>Trending Collections</h2><div class="sub">Two columns, OpenSea-style. Volume and floor are the collection's own live measures.</div></div>
+        <div><h2 id="h-trending">Trending Collections</h2><div class="sub">Two columns, OpenSea-style. Volume and floor are the collection's own live measures.</div></div>
         <div class="right">
           <div class="tabs" id="trendMode"><button class="on" data-mode="trending">Trending</button><button data-mode="top">Top</button></div>
           <div class="tabs pill" id="trendWin"><button data-win="1h">1h</button><button data-win="6h">6h</button><button class="on" data-win="24h">24h</button><button data-win="7d">7d</button></div>
@@ -112,16 +112,16 @@ export function shell(): string {
       </div>
       <div class="trending" id="trendingTable">${skTrending()}</div>
     </section>
-    <section id="movers" class="section">
-      <div class="sec-head"><div><h2>Top Movers Today</h2><div class="sub">Rigs by hashrate. Change is measured against the first sample this page took today (kept in your browser).</div></div><div class="right"><div class="arrows" data-scroll="moversRow"><button aria-label="Scroll left">${I.left}</button><button aria-label="Scroll right">${I.right}</button></div></div></div>
+    <section id="movers" class="section" aria-labelledby="h-movers">
+      <div class="sec-head"><div><h2 id="h-movers">Top Movers Today</h2><div class="sub">Rigs by hashrate. Change is measured against the first sample this page took today (kept in your browser).</div></div><div class="right"><div class="arrows" data-scroll="moversRow"><button aria-label="Scroll left">${I.left}</button><button aria-label="Scroll right">${I.right}</button></div></div></div>
       <div class="row" id="moversRow">${skeleton(6, 'mover')}</div>
     </section>
-    <section id="sales" class="section">
-      <div class="sec-head"><div><h2>Highest Weekly Sales</h2><div class="sub">Settlements the chain can prove this week — each card carries its tx hash or docket leaf. No marketplace sales exist on SIGIL yet; nothing here is a price.</div></div><div class="right"><div class="arrows" data-scroll="salesRow"><button aria-label="Scroll left">${I.left}</button><button aria-label="Scroll right">${I.right}</button></div></div></div>
+    <section id="sales" class="section" aria-labelledby="h-sales">
+      <div class="sec-head"><div><h2 id="h-sales">Highest Weekly Sales</h2><div class="sub">Settlements the chain can prove this week — each card carries its tx hash or docket leaf. No marketplace sales exist on SIGIL yet; nothing here is a price.</div></div><div class="right"><div class="arrows" data-scroll="salesRow"><button aria-label="Scroll left">${I.left}</button><button aria-label="Scroll right">${I.right}</button></div></div></div>
       <div class="row" id="salesRow">${skeleton(6, 'sale')}</div>
     </section>
-    <section id="dex" class="section">
-      <div class="sec-head"><div><h2>Swap &amp; Tokens</h2><div class="sub">The Quillon Graph DEX modules, on SIGIL: the swap module and the token list side by side. Signing happens in your wallet.</div></div><div class="right"><a class="viewall" href="/sigil-dex.html" target="_blank" rel="noopener">Trading desk</a></div></div>
+    <section id="dex" class="section" aria-labelledby="h-dex">
+      <div class="sec-head"><div><h2 id="h-dex">Swap &amp; Tokens</h2><div class="sub">The Quillon Graph DEX modules, on SIGIL: the swap module and the token list side by side. Signing happens in your wallet.</div></div><div class="right"><a class="viewall" href="/sigil-dex.html" target="_blank" rel="noopener">Trading desk</a></div></div>
       <div class="dex"><div id="swap">${skSwap()}</div><div id="tokens">${skTokens()}</div></div>
     </section>
     <div class="legend" id="legend"></div>
@@ -141,7 +141,7 @@ export function shell(): string {
     </footer>
   </main>
   <div class="pscrim" id="panelScrim" aria-hidden="true"></div>
-  <aside class="panel" id="panel">
+  <aside class="panel" id="panel" aria-label="Wallet">
     <div class="ph" id="panelHead"></div>
     <div class="ptabs" id="panelTabs"><button class="on" data-ptab="tokens">Tokens<span class="n" id="nTok"></span></button><button data-ptab="nfts">NFTs<span class="n" id="nNft"></span></button><button data-ptab="activity">Activity</button></div>
     <div class="pbody" id="panelBody"></div>
@@ -292,7 +292,7 @@ export function trending(s: Snapshot, mode: 'trending' | 'top', win: string): st
     ? (b.items ?? -1) - (a.items ?? -1)
     : ((chg(b) ?? -Infinity) - (chg(a) ?? -Infinity)) || (((b.sales ?? 0) * 3 + (b.provenance === 'live' ? 1 : 0)) - ((a.sales ?? 0) * 3 + (a.provenance === 'live' ? 1 : 0))))
   const half = Math.ceil(list.length / 2)
-  const table = (rows: Collection[], off: number) => `<table><thead><tr><th>#</th><th>Collection</th><th class="r">Floor</th><th class="r" title="change in items over the window — sampled in your browser once a minute; shows — until enough samples exist">${win} chg</th><th class="r">Volume</th><th class="r">Items</th><th class="r">Owners</th></tr></thead><tbody>
+  const table = (rows: Collection[], off: number) => `<table aria-label="Trending collections, ranks ${off + 1} to ${off + rows.length}"><thead><tr><th>#</th><th>Collection</th><th class="r">Floor</th><th class="r" title="change in items over the window — sampled in your browser once a minute; shows — until enough samples exist">${win} chg</th><th class="r">Volume</th><th class="r">Items</th><th class="r">Owners</th></tr></thead><tbody>
     ${rows.map((c, i) => `<tr data-coll="${c.id}" data-link="${c.link}" tabindex="0"><td class="rank">${off + i + 1}</td><td><div class="coll"><img src="${c.cover}" alt=""><div><div class="n">${esc(c.name)}${ver(c.verified)}</div><div class="s">${prov(c.provenance)}</div></div></div></td>
       <td class="r num">${esc(c.floor)}</td><td class="r num" title="items now vs. items ${win} ago, sampled by this browser">${delta(chg(c))}</td><td class="r num">${esc(c.volume)}</td><td class="r num">${c.items === null ? '—' : fmt.int(c.items)}</td><td class="r num">${c.owners === null ? '—' : fmt.int(c.owners)}<span class="chev">${I.right}</span></td></tr>`).join('')}
   </tbody></table>`
@@ -377,7 +377,7 @@ export function tokenTable(s: Snapshot, st: TokenTableState): string {
     <h3 style="margin-bottom:16px">Available Tokens</h3>
     <div class="tokens-tools"><div class="s">${I.search}<input id="tokQ" placeholder="Search by name, symbol, or token id…" value="${esc(st.q)}"></div>
       <div class="f">${(['all', 'gainers', 'losers'] as const).map((f) => `<button class="${st.filter === f ? 'on' : ''}" data-filter="${f}">${f[0].toUpperCase() + f.slice(1)}</button>`).join('')}</div></div>
-    <div class="ttable"><table><thead><tr><th>Token</th>${th('price', 'Price', 'USD price · none of these has an on-chain oracle reading yet')}${th('change1h', '1h')}${th('change24h', '24h')}${th('change7d', '7d')}${th('volume24h', 'Vol')}${th('supply', 'Supply')}${th('liquidity', 'Liq')}${th('holders', 'Holders')}${th('ageBlocks', 'Age')}<th>Actions</th></tr></thead><tbody>
+    <div class="ttable"><table aria-label="Available tokens"><thead><tr><th>Token</th>${th('price', 'Price', 'USD price · none of these has an on-chain oracle reading yet')}${th('change1h', '1h')}${th('change24h', '24h')}${th('change7d', '7d')}${th('volume24h', 'Vol')}${th('supply', 'Supply')}${th('liquidity', 'Liq')}${th('holders', 'Holders')}${th('ageBlocks', 'Age')}<th>Actions</th></tr></thead><tbody>
       ${list.map((t, i) => `<tr data-tok="${t.id}" style="animation-delay:${i * 50}ms"><td><div class="tk"><img src="${t.icon}" alt=""><div><div class="sym"><span class="status-dot ${t.status}" title="${esc(t.statusNote)}"></span>${esc(t.symbol)}${t.tags.map((g) => `<span class="tag ${tagCls(g)}">${esc(g)}</span>`).join('')}</div><div class="nm">${esc(t.name)} · ${esc(t.statusNote)}</div></div></div></td>
         <td>${usd(t.price)}</td><td>${delta(t.change1h)}</td><td>${delta(t.change24h)}</td><td>${delta(t.change7d)}</td><td>${t.volume24h === null ? '<span class="muted">—</span>' : fmt.num(t.volume24h)}</td>
         <td>${t.supply === null ? '<span class="muted">—</span>' : fmt.num(t.supply) + (t.maxSupply ? ` <span class="muted">/ ${fmt.num(t.maxSupply, 0)}</span>` : '')}</td>

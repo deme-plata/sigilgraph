@@ -138,7 +138,7 @@ export function shell(): string {
     <div class="ph" id="panelHead"></div>
     <div class="ptabs" id="panelTabs"><button class="on" data-ptab="tokens">Tokens<span class="n" id="nTok"></span></button><button data-ptab="nfts">NFTs<span class="n" id="nNft"></span></button><button data-ptab="activity">Activity</button></div>
     <div class="pbody" id="panelBody"></div>
-    <div class="pf"><button class="btn ghost" id="pSend">Send</button><button class="btn ghost" id="pReceive">Receive</button><button class="btn primary" id="pSwap">Swap</button></div>
+    <div class="pf"><button class="btn ghost" id="pSend" title="Opens the SIGIL wallet app — signing never happens on this page">Send ↗</button><button class="btn ghost" id="pReceive" title="Opens the SIGIL wallet app to show your payment code">Receive ↗</button><button class="btn primary" id="pSwap">Swap</button></div>
   </aside>
   <nav class="bottomnav" aria-label="Mobile navigation">
     <a href="#market" data-nav="market" class="on">${I.home}<span>Home</span></a>

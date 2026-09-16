@@ -52,7 +52,7 @@ export function shell(): string {
       <div class="search-results" id="qres"></div>
     </div>
     <nav class="navlinks" aria-label="Primary">
-      <a href="#market" class="on" data-nav="market">Market</a>
+      <a href="#market" class="on" data-nav="market" data-also="featured">Market</a>
       <a href="#drops" data-nav="drops">Drops</a>
       <a href="#trending" data-nav="trending">Trending</a>
       <a href="#dex" data-nav="dex">DEX</a>

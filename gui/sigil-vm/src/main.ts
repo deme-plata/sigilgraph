@@ -348,7 +348,7 @@ document.addEventListener('click', (ev) => {
   // token table
   if (ds.filter) { tokSt.filter = ds.filter as typeof tokSt.filter; renderTokens(); return }
   if (ds.swap) { swapSt.to = ds.swap; if (swapSt.from === ds.swap) swapSt.from = NATIVE_TOKEN === ds.swap ? snap!.tokens[1].id : NATIVE_TOKEN; renderSwap(); $('#dex').scrollIntoView({ behavior: 'smooth' }); return }
-  if (ds.info) { tokSt.open = tokSt.open === ds.info ? null : ds.info; renderTokens(); return }
+  if (ds.info) { tokSt.open = tokSt.open === ds.info ? null : ds.info; renderTokens(); (document.querySelector(`#tokens [data-info="${ds.info}"]`) as HTMLElement | null)?.focus({ preventScroll: true }); return } // the table re-renders: keep the keyboard on the same Info/Close button
   const trow = btn.closest('tr[data-tok]') as HTMLElement | null
   if (trow && !ds.swap) { tokSt.open = tokSt.open === trow.dataset.tok ? null : trow.dataset.tok!; renderTokens(); return }
   const th = btn.closest('th[data-sort]') as HTMLElement | null

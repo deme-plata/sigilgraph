@@ -382,7 +382,7 @@ export function tokenTable(s: Snapshot, st: TokenTableState): string {
         <td>${usd(t.price)}</td><td>${delta(t.change1h)}</td><td>${delta(t.change24h)}</td><td>${delta(t.change7d)}</td><td>${t.volume24h === null ? '<span class="muted">—</span>' : fmt.num(t.volume24h)}</td>
         <td>${t.supply === null ? '<span class="muted">—</span>' : fmt.num(t.supply) + (t.maxSupply ? ` <span class="muted">/ ${fmt.num(t.maxSupply, 0)}</span>` : '')}</td>
         <td>${t.liquidity === null ? '<span class="muted">—</span>' : fmt.num(t.liquidity)}</td><td>${t.holders === null ? '<span class="muted">—</span>' : fmt.int(t.holders)}</td><td>${t.ageBlocks === null ? '<span class="muted">—</span>' : fmt.num(t.ageBlocks, 1) + ' blk'}</td>
-        <td><div class="act"><button class="sw" data-swap="${t.id}">Swap</button><button data-info="${t.id}">${st.open === t.id ? 'Close' : 'Info'}</button></div></td></tr>${st.open === t.id ? tokenDetailRow(t, s) : ''}`).join('')}
+        <td><div class="act"><button class="sw" data-swap="${t.id}">Swap</button><button data-info="${t.id}" aria-expanded="${st.open === t.id ? 'true' : 'false'}" aria-controls="td-${t.symbol.replace(/[^A-Za-z0-9]/g, '')}">${st.open === t.id ? 'Close' : 'Info'}</button></div></td></tr>${st.open === t.id ? tokenDetailRow(t, s) : ''}`).join('')}
     ${list.length ? '' : `<tr class="empty"><td colspan="11"><div class="tempty">${st.q ? `Nothing matches “${esc(st.q)}”.` : st.filter === 'gainers' ? 'No gainers — there is no on-chain price yet, so nothing has moved. The moment an oracle or a pool publishes one, this fills in.' : 'No losers — there is no on-chain price yet, so nothing has moved.'}</div></td></tr>`}
     </tbody></table></div>
     <div class="muted" style="font-size:11.5px;margin-top:10px">Price, 1h/24h/7d and volume read “—” because sigil-g2 has no price oracle feeding these tokens yet (USDS oracle: not fed; ROCKY: gated). Supply, holders, age and liquidity are live from the node.</div>
@@ -406,7 +406,7 @@ function tokenDetailRow(t: Token, s: Snapshot): string {
     : t.symbol === 'ROCKY' ? `<a class="btn ghost sm" href="/kristensen-board.html" target="_blank" rel="noopener">K board ↗</a><a class="btn ghost sm" href="/api.html" target="_blank" rel="noopener">/v1/rocky ↗</a>`
     : t.symbol === 'USDS' ? `<a class="btn ghost sm" href="/api.html" target="_blank" rel="noopener">/v1/usds/status ↗</a>`
     : `<a class="btn ghost sm" href="/sigil-explorer.html" target="_blank" rel="noopener">Explorer ↗</a><a class="btn ghost sm" href="/api.html" target="_blank" rel="noopener">API ↗</a>`
-  return `<tr class="td-row"><td colspan="11"><div class="td-wrap"><div class="td-grid">${rows.join('')}</div>${spark}<div class="td-links">${links}</div></div></td></tr>`
+  return `<tr class="td-row" id="td-${t.symbol.replace(/[^A-Za-z0-9]/g, '')}"><td colspan="11"><div class="td-wrap"><div class="td-grid">${rows.join('')}</div>${spark}<div class="td-links">${links}</div></div></td></tr>`
 }
 
 // ── wallet panel ──────────────────────────────────────────────────────────

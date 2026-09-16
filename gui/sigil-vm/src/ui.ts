@@ -193,7 +193,7 @@ export function hero(s: Snapshot, idx: number): string {
         <div class="stat"><div class="k">Volume</div><div class="v">${esc(c.volume)}</div></div>
         ${(() => { const ch = s.changes[c.id]?.['24h'] ?? (c.id === 'rigs' ? c.volumeChange : null); if (ch !== null && ch !== undefined) return `<div class="stat"><div class="k">24h</div><div class="v">${delta(ch)}</div></div>`; if (c.id === 'blocks' && h.blkPerSec) return `<div class="stat"><div class="k">Rate</div><div class="v">${h.blkPerSec.toFixed(1)} blk/s</div></div>`; if (c.id === 'rigs' && h.hashChange !== null) return `<div class="stat"><div class="k">Window</div><div class="v">${delta(h.hashChange)}</div></div>`; return '' })()}
       </div>
-      <div class="cta"><a class="btn primary lg" href="${c.link}" target="_blank" rel="noopener">View collection</a><a class="btn ghost lg" href="#swap">Swap SIGIL</a></div>
+      <div class="cta"><button class="btn primary lg" data-coll="${c.id}">View collection</button><a class="btn ghost lg" href="#swap">Swap SIGIL</a></div>
     </div>
     <div class="thumbs">${list.map((x, i) => `<button data-hero="${i}" class="${i === idx % list.length ? 'on' : ''}" title="${esc(x.name)}"><img src="${x.cover}" alt=""></button>`).join('')}</div>`
 }

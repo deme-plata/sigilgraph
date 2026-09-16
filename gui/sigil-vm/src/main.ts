@@ -5,6 +5,7 @@ import { api, fmt, NATIVE_TOKEN } from './api'
 import { buildSnapshot, quote, type Snapshot } from './model'
 import * as ui from './ui'
 import { I } from './icons'
+import { avatarSvg } from './art'
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string): T => document.querySelector(sel) as T
 const app = $('#root')
@@ -290,7 +291,7 @@ function globalSearch(q: string): void {
     rows.push(`<div class="h">Block</div><div class="r" data-coll="blocks"><img src="${snap.collections.find((c) => c.id === 'blocks')!.cover}" alt=""><div><div class="n mono">#${fmt.int(h)}</div><div class="s">${sub}</div></div></div>`)
   }
   if (ms.length) rows.push('<div class="h">Rigs</div>' + ms.map((m) => `<div class="r"><img src="${snap!.collections[0].cover}" alt=""><div><div class="n">${ui.esc(m.rig)}</div><div class="s">${fmt.hps(m.hash_rate)} · ${fmt.short(m.wallet, 6)}</div></div></div>`).join(''))
-  if (/^[0-9a-f]{64}$/.test(q)) rows.push(`<div class="h">Wallet</div><div class="r" id="qWallet"><div><div class="n mono">${fmt.short(q, 8)}</div><div class="s">open in panel</div></div></div>`)
+  if (/^[0-9a-f]{64}$/.test(q)) rows.push(`<div class="h">Wallet</div><div class="r" id="qWallet"><img src="${avatarSvg(q, q.slice(0, 1).toUpperCase())}" alt=""><div><div class="n mono">${fmt.short(q, 8)}</div><div class="s">open in panel · balances and records</div></div></div>`)
   box.innerHTML = rows.join('') || '<div class="h">No matches on this node</div>'
   box.classList.add('open')
   const qw = box.querySelector('#qWallet'); if (qw) qw.addEventListener('click', () => { wallet = q; app.classList.add('panel-open'); box.classList.remove('open'); poll() })

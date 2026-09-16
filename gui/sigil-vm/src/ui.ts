@@ -24,6 +24,13 @@ export function sparkline(values: number[], w = 120, h = 32, cls = 'up'): string
   const id = 'sp' + (++sparkSeq).toString(36)
   return `<svg class="spark ${cls}" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" preserveAspectRatio="none"><defs><linearGradient id="${id}" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="currentColor" stop-opacity=".35"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs><path d="M${pts[0]} L${pts.join(' L')} L${w - 1},${h - 1} L1,${h - 1}Z" fill="url(#${id})" stroke="none"/><polyline points="${pts.join(' ')}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/><circle cx="${pts[pts.length - 1].split(',')[0]}" cy="${pts[pts.length - 1].split(',')[1]}" r="2" fill="currentColor"/></svg>`
 }
+// A block's age from height distance × the measured block rate (blocks carry no timestamp) — DERIVED, hence the ≈.
+function blockAgo(s: Snapshot, height: number): string {
+  const d = s.head.height - height
+  if (d <= 0) return 'tip'
+  if (!s.head.blkPerSec) return `${fmt.int(d)} blk ago`
+  return '≈ ' + fmt.ago(d / s.head.blkPerSec)
+}
 const ver = (v: boolean) => (v ? '<span class="verified" title="on-chain record family">✓</span>' : '')
 
 // ── shell ─────────────────────────────────────────────────────────────────
@@ -428,7 +435,7 @@ export function panelNfts(addr: string | null, s: Snapshot): string {
 export function panelActivity(s: Snapshot): string {
   const rows: string[] = []
   const row = (ic: string, cls: string, main: string, sub: string, t: string, coll = '') => rows.push(`<button class="pact"${coll ? ` data-coll="${coll}"` : ''}><span class="ic ${cls}">${ic}</span><span class="w">${main}<small>${sub}</small></span><span class="t">${t}</span></button>`)
-  for (const x of (s.recent?.blocks.slice(0, 8) ?? [])) row(I.grid, x.is_blue ? 'blue' : 'red', `Block ${fmt.int(x.height)}`, `${x.is_blue ? 'blue' : 'red'} · blue score ${fmt.int(x.blue_score)} · ${fmt.short(hex(x.producer), 4)}`, 'now', 'blocks')
+  for (const x of (s.recent?.blocks.slice(0, 8) ?? [])) row(I.grid, x.is_blue ? 'blue' : 'red', `Block ${fmt.int(x.height)}`, `${x.is_blue ? 'blue' : 'red'} · blue score ${fmt.int(x.blue_score)} · ${fmt.short(hex(x.producer), 4)}`, blockAgo(s, x.height), 'blocks')
   for (const m of (s.miners?.miners ?? []).slice(0, 3)) row(I.coins, '', esc(m.rig || fmt.short(m.wallet, 6)), `${fmt.hps(m.hash_rate)} · ${m.shielded ? 'shielded' : 'transparent'}`, fmt.ago(m.last_seen_secs_ago), 'rigs')
   for (const e of (s.docket?.entries ?? []).slice(-3).reverse()) row(I.book, 'gold', esc(e.kind.replace(/([A-Z])/g, ' $1').trim()), `docket #${e.seq} · ${fmt.short(e.leaf, 5)}`, e.height ? `blk ${fmt.int(e.height)}` : 'genesis', e.kind === 'HonourConferred' ? 'honours' : 'bench')
   const a = s.earth?.attest_last?.anchor
@@ -494,7 +501,7 @@ function collectionActivity(c: Collection, s: Snapshot): string {
   const rows: string[] = []
   const row = (ic: string, cls: string, main: string, sub: string, t: string) => rows.push(`<div class="pact"><span class="ic ${cls}">${ic}</span><span class="w">${main}<small>${sub}</small></span><span class="t">${t}</span></div>`)
   switch (c.id) {
-    case 'blocks': for (const b of (s.recent?.blocks ?? []).slice(0, 30)) row(I.grid, b.is_blue ? 'blue' : 'red', `Block ${fmt.int(b.height)}`, `${b.is_blue ? 'blue' : 'red'} · score ${fmt.int(b.blue_score)} · producer ${fmt.short(hex(b.producer), 6)}`, 'now'); break
+    case 'blocks': for (const b of (s.recent?.blocks ?? []).slice(0, 30)) row(I.grid, b.is_blue ? 'blue' : 'red', `Block ${fmt.int(b.height)}`, `${b.is_blue ? 'blue' : 'red'} · score ${fmt.int(b.blue_score)} · producer ${fmt.short(hex(b.producer), 6)}`, blockAgo(s, b.height)); break
     case 'rigs': for (const m of (s.miners?.miners ?? [])) row(I.coins, '', esc(m.rig || fmt.short(m.wallet, 6)), `${fmt.hps(m.hash_rate)} · ${m.kind.toUpperCase()} · ${m.shielded ? 'shielded' : 'transparent'}`, fmt.ago(m.last_seen_secs_ago)); if (s.miners) row(I.swap, '', 'Blocks accepted', `${fmt.int(s.miners.blocks_accepted)} blocks · ${fmt.int(s.miners.shares_accepted)} shares`, 'session'); break
     case 'honours': case 'bench': for (const e of (s.docket?.entries ?? []).slice().reverse()) { const ev = e.event as { rank?: string; order?: string; justice?: number[]; recipient?: number[] }; row(I.book, 'gold', esc(ev.order ? `${ev.order} conferred` : `${(ev.rank || 'Justice').replace(/([A-Z])/g, ' $1').trim()} appointed`), `${fmt.short(hex(ev.justice ?? ev.recipient), 6)} · docket #${e.seq} · leaf ${fmt.short(e.leaf, 6)}`, e.height ? `blk ${fmt.int(e.height)}` : 'genesis') } break
     case 'notes': row(I.eye, '', 'Nullifiers', `${fmt.int(s.head.nullifiers)} notes spent, ever`, 'total'); row(I.eye, '', 'Notes in pool', `${fmt.int(s.head.notes)} of ${fmt.int(s.head.capacity)}`, 'now'); break

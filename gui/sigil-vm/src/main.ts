@@ -100,10 +100,12 @@ function renderSwap(): void {
     return
   }
   host.style.width = ''
+  // type=number inputs report selectionStart as null, so remember the caret as 'end of value' and restore it there
   const active = document.activeElement as HTMLInputElement | null
-  const keep = active && active.id === 'swapAmt' ? { s: active.selectionStart, e: active.selectionEnd } : null
+  const keepFocus = !!active && (active.id === 'swapAmt' || active.id === 'limitPx')
+  const keepId = active?.id
   host.innerHTML = ui.swapModule(snap, swapSt, balances, currentQuote()) + ui.routeCard(snap, swapSt)
-  if (keep) { const el = $('#swapAmt') as HTMLInputElement; el.focus(); try { el.setSelectionRange(keep.s ?? 0, keep.e ?? 0) } catch { /* */ } }
+  if (keepFocus && keepId) { const el = document.getElementById(keepId) as HTMLInputElement | null; if (el) { el.focus(); const v = el.value; el.value = ''; el.value = v } }
 }
 function renderTokens(): void { if (snap) $('#tokens').innerHTML = ui.tokenTable(snap, tokSt) }
 function renderPanel(): void {

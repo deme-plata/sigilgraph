@@ -687,6 +687,8 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
 .cm-pane .pact:last-child { border-bottom: 0; }
 .cm-body p.blurb { color: var(--ink-2); margin: 0 0 14px; font-size: 13.5px; }
 .cm-items { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
+.cm-item.you { border-color: rgba(47,191,113,.55); box-shadow: inset 0 0 0 1px rgba(47,191,113,.25); }
+.cm-item .s .chip.yours { margin-right: 4px; vertical-align: 1px; }
 .cm-item { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; min-width: 0; transition: .15s; display: grid; align-content: start; } /* a <button> centres its content vertically when the grid stretches it — three-line items floated 12px below four-line neighbours */
 .cm-item:hover { border-color: var(--line-2); transform: translateY(-2px); }
 .cm-item .t { font-weight: 700; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

@@ -204,7 +204,7 @@ function renderAll(): void {
     if (c) {
       const box = $('#modalBox'); const activeTab = (box.querySelector('.cm-tabs button.on') as HTMLElement | null)?.dataset.cmtab || 'items'
       const scroll = (box.querySelector('.cm-body') as HTMLElement | null)?.scrollTop ?? 0
-      const fresh = new DOMParser().parseFromString(`<div>${ui.collectionModal(c, snap!, watch.has(c.id))}</div>`, 'text/html')
+      const fresh = new DOMParser().parseFromString(`<div>${ui.collectionModal(c, snap!, watch.has(c.id), wallet)}</div>`, 'text/html')
       const stats = fresh.querySelector('.cm-stats'); if (stats) box.querySelector('.cm-stats')!.innerHTML = stats.innerHTML
       const pane = fresh.querySelector(`.cm-pane[data-pane="${activeTab}"]`); const cur = box.querySelector(`.cm-pane[data-pane="${activeTab}"]`)
       if (pane && cur && cur.innerHTML !== pane.innerHTML) { cur.innerHTML = pane.innerHTML; (box.querySelector('.cm-body') as HTMLElement).scrollTop = scroll }
@@ -484,7 +484,7 @@ document.addEventListener('keydown', (ev) => {
 // recently opened collections (this browser) feed the empty search's 'Recent' group
 const recent: string[] = []
 try { for (const id of JSON.parse(localStorage.getItem('sigilvm-recent') || '[]')) if (typeof id === 'string' && recent.length < 4) recent.push(id) } catch { /* */ }
-function openCollection(id: string): void { const c = snap?.collections.find((x) => x.id === id); if (c) { openCollId = id; openModal(ui.collectionModal(c, snap!, watch.has(id)), 'coll'); const i = recent.indexOf(id); if (i >= 0) recent.splice(i, 1); recent.unshift(id); recent.splice(4); try { localStorage.setItem('sigilvm-recent', JSON.stringify(recent)) } catch { /* */ } } }
+function openCollection(id: string): void { const c = snap?.collections.find((x) => x.id === id); if (c) { openCollId = id; openModal(ui.collectionModal(c, snap!, watch.has(id), wallet), 'coll'); const i = recent.indexOf(id); if (i >= 0) recent.splice(i, 1); recent.unshift(id); recent.splice(4); try { localStorage.setItem('sigilvm-recent', JSON.stringify(recent)) } catch { /* */ } } }
 function openTokenPicker(which: 'from' | 'to'): void {
   if (!snap) return
   openModal(`<h4>Select a token <span class="muted kbd-only" style="font-size:11px;font-weight:500" aria-hidden="true">↑↓ Enter</span></h4><div class="list">${snap.tokens.map((t) => `<button data-pick="${t.id}" data-which="${which}"><img src="${t.icon}" alt=""><div><div class="s">${t.symbol}</div><div class="n">${ui.esc(t.name)}</div></div><span class="r">${balances[t.id] === undefined ? '' : fmt.num(balances[t.id], 4)}</span></button>`).join('')}</div>`)

@@ -289,7 +289,8 @@ document.addEventListener('keydown', (ev) => {
     if (ev.key === 's') { $('#dex').scrollIntoView({ behavior: 'smooth' }) }
     if (ev.key === 'g') { window.scrollTo({ top: 0, behavior: 'smooth' }) }
   }
-  if (ev.key === 'Escape') { closeModal(); $('#qres').classList.remove('open'); $('#chainMenu').classList.remove('open') }
+  const modalWasOpen = $('#modal').classList.contains('open')
+  if (ev.key === 'Escape') { closeModal(); $('#qres').classList.remove('open'); $('#chainMenu').classList.remove('open'); if (innerWidth <= 1100 && app.classList.contains('panel-open') && !modalWasOpen) { app.classList.remove('panel-open'); try { localStorage.setItem('sigilvm-panel', 'closed') } catch { /* */ } } }
   if (ev.key === 'Enter' && document.activeElement?.id === 'q') { const first = $('#qres').querySelector('.r') as HTMLElement | null; if (first) { first.click(); $('#qres').classList.remove('open') } }
   const list = document.querySelector('#modal.open .list') as HTMLElement | null
   if (list && (ev.key === 'ArrowDown' || ev.key === 'ArrowUp' || ev.key === 'Enter')) {

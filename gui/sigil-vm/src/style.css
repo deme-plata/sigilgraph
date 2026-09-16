@@ -717,6 +717,7 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
   .chain-chip .t { display: none; }
 }
 @media (max-width: 1100px) {
+  body:has(.app.panel-open) { overflow: hidden; } /* drawer mode: the page must not scroll behind it */
   .app.panel-open .pscrim { display: block; position: fixed; inset: var(--top) 0 0 0; background: rgba(0,0,0,.5); z-index: 44; animation: fade .2s ease; } /* the panel overlays the page below 1100px — a scrim says so, and tapping it closes */
   .app.panel-open .main { margin-right: 0; }
   .panel { width: min(var(--panel), 100vw); box-shadow: -20px 0 60px rgba(0,0,0,.6); }

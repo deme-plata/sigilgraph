@@ -355,7 +355,7 @@ function globalSearch(q: string): void {
   if (/^[0-9a-f]{64}$/.test(q)) rows.push(`<div class="h">Wallet</div><div class="r" id="qWallet"><img src="${avatarSvg(q, q.slice(0, 1).toUpperCase())}" alt=""><div><div class="n mono">${fmt.short(q, 8)}</div><div class="s">open in panel · balances and records</div></div></div>`)
   box.innerHTML = rows.join('') || '<div class="h">No matches on this node</div>'
   box.classList.add('open')
-  const qw = box.querySelector('#qWallet'); if (qw) qw.addEventListener('click', () => { wallet = q; app.classList.add('panel-open'); box.classList.remove('open'); poll() })
+  const qw = box.querySelector('#qWallet'); if (qw) qw.addEventListener('click', () => { wallet = q; try { localStorage.setItem('sigilvm-wallet', q) } catch { /* */ } app.classList.add('panel-open'); box.classList.remove('open'); poll() })
 }
 
 $('#hero').addEventListener('mouseenter', () => { heroHover = true })
@@ -397,7 +397,7 @@ document.addEventListener('scroll', () => { pv.hidden = true }, { passive: true 
 
 // ── boot ──────────────────────────────────────────────────────────────────
 try { const w = localStorage.getItem('sigilvm-wallet'); if (w) wallet = w } catch { /* */ }
-try { const qw = new URLSearchParams(location.search).get('wallet'); if (qw && /^[0-9a-f]{64}$/i.test(qw)) { wallet = qw.toLowerCase(); app.classList.add('panel-open') } } catch { /* */ }
+try { const qw = new URLSearchParams(location.search).get('wallet'); if (qw && /^[0-9a-f]{64}$/i.test(qw)) { wallet = qw.toLowerCase(); app.classList.add('panel-open'); localStorage.setItem('sigilvm-wallet', wallet) } } catch { /* */ }
 poll()
 setInterval(() => { if (!document.hidden) poll() }, 10_000)
 document.addEventListener('visibilitychange', () => { if (!document.hidden) poll() })

@@ -267,9 +267,10 @@ export function dropCard(d: Drop): string {
     </div></a>`
 }
 
-export function moverCard(m: Mover): string {
-  return `<div class="card mover${m.idle ? ' idle' : ''}" title="${esc(m.id)}" data-coll="rigs" role="button" tabindex="0">
-    <div class="img" style="background-image:url('${m.cover}')"><span class="prov">${prov(m.provenance)}</span>${m.idle ? '<span class="status chip"><i class="d"></i>idle</span>' : m.sub.startsWith('GPU') ? '<span class="status chip derived"><i class="d"></i>GPU</span>' : ''}<span class="cta"><span class="cta-blurb">${m.idle ? 'idle · last seen ' : ''}${esc(m.sub)}<br><span class="mono">wallet ${fmt.short(m.id, 8)}</span></span><span class="cta-btn">Open rigs ↗</span></span></div>
+export function moverCard(m: Mover, mine: string | null = null): string {
+  const you = !!mine && m.id.toLowerCase() === mine // a mover's id is its rig's wallet
+  return `<div class="card mover${m.idle ? ' idle' : ''}${you ? ' you' : ''}" title="${esc(m.id)}" data-coll="rigs" role="button" tabindex="0">
+    <div class="img" style="background-image:url('${m.cover}')"><span class="prov">${prov(m.provenance)}${you ? '<span class="chip live yours"><i class="d"></i>yours</span>' : ''}</span>${m.idle ? '<span class="status chip"><i class="d"></i>idle</span>' : m.sub.startsWith('GPU') ? '<span class="status chip derived"><i class="d"></i>GPU</span>' : ''}<span class="cta"><span class="cta-blurb">${m.idle ? 'idle · last seen ' : ''}${esc(m.sub)}<br><span class="mono">wallet ${fmt.short(m.id, 8)}</span></span><span class="cta-btn">Open rigs ↗</span></span></div>
     <div class="meta"><div class="name">${esc(m.name)}</div><div class="blurb" style="height:auto">${esc(m.sub)}</div>
       ${m.series && m.series.length > 2 ? `<div class="sparkwrap">${sparkline(m.series, 180, 34, m.series[m.series.length - 1] < m.series[0] ? 'down' : 'up')}</div>` : m.idle ? '' : `<div class="sparkwrap ph" title="The sparkline is sampled in this browser, one point per poll">sampling · ${Math.max(0, 3 - (m.series?.length ?? 0))} more poll${3 - (m.series?.length ?? 0) === 1 ? '' : 's'}</div>`}
       <div class="kv"><div><div class="k">Hashrate</div><div class="v">${esc(m.value)}</div></div><div style="text-align:right">${m.change !== null ? `<div class="k">Today</div><div class="delta">${delta(m.change)}</div>` : m.share !== undefined ? `<div class="k">Share</div><div class="delta share">${m.share.toFixed(1)}%</div>` : `<div class="k">Today</div><div class="delta">—</div>`}</div></div>

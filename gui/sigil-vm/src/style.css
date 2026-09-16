@@ -695,7 +695,9 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
   .toasts { bottom: 76px; }
   .actions .ibtn#bellBtn, .actions .ibtn#cartBtn, .actions #panelBtn, .actions .chain-wrap { display: none; }
   .modal { place-items: end center; }
-  .modal .box.coll { width: 100vw; max-height: 94vh; border-radius: 18px 18px 0 0; animation: sheet .22s ease; }
+  .modal .box { width: 100vw; border-radius: 18px 18px 0 0; animation: sheet .22s ease; padding-bottom: calc(18px + env(safe-area-inset-bottom)); }
+  .modal .box.coll { max-height: 94vh; padding-bottom: 0; }
+  .modal .box:not(.coll) .x { top: 14px; right: 14px; }
   .cm-title h3 { font-size: 20px; }
   .cm-title img { width: 72px; height: 72px; }
   .cm-head { height: 120px; flex-basis: 120px; }

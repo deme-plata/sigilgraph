@@ -16,7 +16,7 @@ const serve = spawn('/home/storage/deepseek-codewhale/flux/target/debug/fluxc', 
 })
 await new Promise((r) => setTimeout(r, 1500))
 console.log(`guard serving dist on 127.0.0.1:${PORT}`)
-const widths = [390, 820, 1024, 1440, 1600, 1920, [844, 390]] // 1600 = the tightest panel-auto-open layout (main 1156px), where the trending table clipped on 09-16; [844,390] = phone landscape, where the collection sheet had no room for its items (tick 274)
+const widths = [[360, 640], 390, 820, 1024, 1440, 1600, 1920, [844, 390]] // 1600 = the tightest panel-auto-open layout (main 1156px), where the trending table clipped on 09-16; [844,390] = phone landscape, where the collection sheet had no room for its items (tick 274)
 const fails = []
 const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] })
 try {

@@ -372,7 +372,7 @@ function tokenDetailRow(t: Token, s: Snapshot): string {
   const rows = [
     cell('Token id', `<span class="mono" title="${esc(t.id)}">${fmt.short(t.id, 10)}</span>`),
     cell('Decimals', String(t.decimals)),
-    cell('Status', `<span class="status-dot ${t.status}"></span>${esc(t.status)} — ${esc(t.statusNote)}`),
+    cell('Status', `<span class="status-dot ${t.status}"></span>${esc(t.statusNote)}`),
     cell('Supply', t.supply === null ? '—' : fmt.num(t.supply, 4) + (t.maxSupply ? ` / ${fmt.num(t.maxSupply, 0)}` : '')),
     cell('Holders', t.holders === null ? '—' : fmt.int(t.holders) + ' registered'),
     cell('Liquidity', t.liquidity === null ? 'no pool' : fmt.num(t.liquidity)),

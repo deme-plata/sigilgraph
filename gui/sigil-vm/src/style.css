@@ -846,3 +846,4 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
   .btn.primary, .swapbtn, .tabs.pill button.on, .tokens-tools .f button.on { background: #e8e8ee !important; color: #0b0b0e !important; }
   .chip { border-color: rgba(0,0,0,.3); }
 }
+.ext { font-size: .85em; opacity: .75; }

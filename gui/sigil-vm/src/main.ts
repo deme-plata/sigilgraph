@@ -222,6 +222,14 @@ async function poll(): Promise<void> {
 function syncToggleAria(): void {
   document.querySelectorAll<HTMLElement>('.tabs, .seg, .cats, .tokens-tools .f').forEach((g) => { g.setAttribute('role', 'group'); g.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', b.classList.contains('on') ? 'true' : 'false')) })
   document.querySelectorAll<HTMLElement>('.ptabs, .cm-tabs').forEach((g) => { g.setAttribute('role', 'tablist'); g.querySelectorAll('button').forEach((b) => { b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', b.classList.contains('on') ? 'true' : 'false') }) })
+  // every link that leaves the page in a new tab says so: a ↗ after its text (cards carry it in their overlay already)
+  document.querySelectorAll<HTMLAnchorElement>('a[target="_blank"]:not([data-ext])').forEach((a) => {
+    a.dataset.ext = '1'
+    const txt = a.textContent?.trim() ?? ''
+    if (!a.title) a.title = (txt ? txt + ' — ' : '') + 'opens in a new tab'
+    if (!txt || /↗/.test(txt) || a.classList.contains('card') || a.querySelector('.cta-btn')) return
+    const host = a.querySelector('.tip') || a; host.insertAdjacentHTML('beforeend', '<span class="ext" aria-hidden="true"> ↗</span>')
+  })
 }
 let ariaTimer = 0
 new MutationObserver(() => { clearTimeout(ariaTimer); ariaTimer = window.setTimeout(syncToggleAria, 30) }).observe(app, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] })

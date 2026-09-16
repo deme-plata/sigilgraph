@@ -434,7 +434,7 @@ function buildDrops(usds: Usds | null, rocky: Rocky | null, gauge: Gauge | null,
     status: usds?.live ? 'live' : 'upcoming',
     when: usds ? (usds.live ? `live since block ${fmt.int(usds.live_height)}` : `activates at ${fmt.int(usds.live_height)}`) : '—',
     detail: usds ? `Fixed-buffer stablecoin · mint buffer ${usds.mint_buffer_bps ?? '—'} bps · supply ${fmt.num(glyphsToSigil(usds.usds_supply, usds.usds_decimals))} USDS · oracle ${usds.price_fresh ? 'fresh' : 'not fed yet'}` : '',
-    provenance: usds ? 'live' : 'pretend', link: '/api.html#usds', progress: usds?.live ? 1 : null,
+    provenance: usds ? 'live' : 'pretend', link: '/sigil-wallet-tron-embedded.html', progress: usds?.live ? 1 : null,
   })
   d.push({
     id: 'coins', name: 'SIGIL Coins · first NFC batch', glyph: 'coin', cover: coverSvg('Coins drop', 'coin', { symbol: 'NTAG215' }),

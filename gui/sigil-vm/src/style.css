@@ -531,7 +531,8 @@ img { display: block; }
 .prow .r { margin-left: auto; text-align: right; font-family: var(--mono); font-size: 13px; }
 .prow .r .u { font-size: 11px; color: var(--muted); }
 .pgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.pnft { border-radius: 12px; overflow: hidden; background: var(--surface); border: 1px solid var(--line); }
+.pnft { border-radius: 12px; overflow: hidden; background: var(--surface); border: 1px solid var(--line); text-align: left; padding: 0; width: 100%; transition: .15s; }
+.pnft:hover { border-color: var(--line-2); transform: translateY(-2px); }
 .pnft .img { aspect-ratio: 1; background-size: cover; background-position: center; }
 .pnft .m { padding: 8px 10px; }
 .pnft .m .n { font-weight: 700; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

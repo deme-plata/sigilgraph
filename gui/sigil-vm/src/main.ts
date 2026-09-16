@@ -412,6 +412,11 @@ const spy = new IntersectionObserver((entries) => {
 spyTargets.forEach((t) => spy.observe(t))
 document.addEventListener('click', (ev) => { if ((ev.target as HTMLElement).closest('[data-nav]')) spyLock = Date.now() + 900 })
 
+// back-to-top after a screen of scrolling
+const toTop = $('#toTop')
+addEventListener('scroll', () => { toTop.hidden = scrollY < innerHeight * 0.9 }, { passive: true })
+toTop.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }))
+
 // ── boot ──────────────────────────────────────────────────────────────────
 try { const w = localStorage.getItem('sigilvm-wallet'); if (w) wallet = w } catch { /* */ }
 try { const qw = new URLSearchParams(location.search).get('wallet'); if (qw && /^[0-9a-f]{64}$/i.test(qw)) { wallet = qw.toLowerCase(); app.classList.add('panel-open'); localStorage.setItem('sigilvm-wallet', wallet) } } catch { /* */ }

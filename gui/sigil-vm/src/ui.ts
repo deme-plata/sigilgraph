@@ -134,6 +134,7 @@ export function shell(): string {
     <a href="#swap" data-nav="swap">${I.swap}<span>Swap</span></a>
     <a href="#" id="bnWallet">${I.wallet}<span>Wallet</span></a>
   </nav>
+  <button class="totop" id="toTop" aria-label="Back to top" hidden>${I.up}</button>
   <div class="modal" id="modal"><div class="box" id="modalBox"></div></div>
   <div class="toasts" id="toasts"></div>`
 }

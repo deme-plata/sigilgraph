@@ -76,7 +76,7 @@ function renderRows(): void {
   const feat = cat === 'all' ? snap.featured : snap.collections.filter((c) => c.cat === cat)
   $('#featuredRow').classList.toggle('grid', cat !== 'all')
   swapWithFlash($('#featuredRow'), feat.map(ui.collectionCard).join('') || '<div class="pempty">No collections in this category.</div>')
-  const tt = $('#tickerTrack'); const th = ui.ticker(snap); if (tt.innerHTML !== th) tt.innerHTML = th
+  const tt = $('#tickerTrack'); const th = ui.ticker(snap); if (tt.innerHTML !== th) { tt.innerHTML = th; tt.style.animationDuration = `${Math.max(20, (tt.scrollWidth / 2) / 80)}s` } // constant ~80 px/s whatever the item count (a fixed 60 s made a long ticker race and a short one crawl)
   $('#dropsRow').innerHTML = snap.drops.map(ui.dropCard).join('')
   swapWithFlash($('#moversRow'), snap.movers.map(ui.moverCard).join('') || '<div class="pempty">No miners read — node offline?</div>')
   $('#salesRow').innerHTML = snap.sales.map(ui.saleCard).join('') || '<div class="pempty">Nothing settled this week that the node reports.</div>'

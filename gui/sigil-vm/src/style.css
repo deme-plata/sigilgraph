@@ -726,7 +726,6 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
   .ticker { margin-top: 0; }
   .tk-item .tk-v { display: none; }
   .tk-item { padding: 0 12px; }
-  .tk-track { animation-duration: 40s; }
   .panel { bottom: 62px; }
   .toasts { bottom: calc(132px + env(safe-area-inset-bottom, 0px)); right: 12px; left: 12px; }
   .actions .ibtn#bellBtn, .actions .ibtn#cartBtn, .actions #panelBtn, .actions .chain-wrap { display: none; }

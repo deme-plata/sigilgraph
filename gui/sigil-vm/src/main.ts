@@ -226,7 +226,22 @@ document.addEventListener('click', (ev) => {
 })
 document.addEventListener('input', (ev) => {
   const t = ev.target as HTMLInputElement
-  if (t.id === 'swapAmt') { swapSt.amount = t.value; renderSwap(); return }
+  if (t.id === 'swapAmt') {
+    // update only the dependent parts while typing — a full re-render of a type=number input eats a trailing "."
+    swapSt.amount = t.value
+    if (!snap) return
+    const q = currentQuote(); const bal = balances[swapSt.from] ?? 0; const amt = Number(swapSt.amount) || 0
+    const pct = bal > 0 ? Math.min(100, (amt / bal) * 100) : 0
+    const out = $('#swapOut') as HTMLInputElement | null; if (out) out.value = q ? q.out.toFixed(6) : ''
+    const lab = document.querySelector('.slider .lab b'); if (lab) lab.textContent = pct.toFixed(0) + '%'
+    const fill = document.querySelector('.slider .fill') as HTMLElement | null; if (fill) fill.style.width = pct + '%'
+    const rng = $('#swapRange') as HTMLInputElement | null; if (rng) rng.value = pct.toFixed(0)
+    const from = snap.tokens.find((x) => x.id === swapSt.from)!, to = snap.tokens.find((x) => x.id === swapSt.to)!
+    const go = $('#swapGo') as HTMLButtonElement | null
+    if (go) { const noPool = !snap.pools.length; go.disabled = noPool || amt <= 0; go.textContent = amt <= 0 ? 'Enter an amount' : noPool ? 'No pool yet' : `Swap ${from.symbol} → ${to.symbol}` }
+    const rate = document.querySelector('.info:not(.warnbox) .v'); if (rate && q && amt > 0) rate.textContent = `1 ${from.symbol} ≈ ${(q.out / amt).toFixed(6)} ${to.symbol}`
+    return
+  }
   if (t.id === 'swapRange') { const b = balances[swapSt.from] ?? 0; swapSt.amount = (b * Number(t.value) / 100).toFixed(8); renderSwap(); return }
   if (t.id === 'limitPx') { swapSt.limitPrice = t.value; return }
   if (t.id === 'tokQ') { tokSt.q = t.value; const box = $('#tokens .ttable tbody'); if (snap) { box.innerHTML = (new DOMParser().parseFromString(ui.tokenTable(snap, tokSt), 'text/html').querySelector('tbody') as HTMLElement).innerHTML } return }

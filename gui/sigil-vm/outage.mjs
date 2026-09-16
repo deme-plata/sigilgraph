@@ -67,6 +67,18 @@ try {
     console.log(`${bad.length ? '✗' : '✓'} storage blocked${bad.length ? ' — ' + bad.join('; ') : ''}`); if (bad.length) fails.push('storage')
     await ctx.close()
   }
+  // print: light, no fixed chrome, hero flows (tick 285)
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1000, height: 1200 }, colorScheme: 'dark' })
+    const page = await ctx.newPage()
+    await page.goto(`http://127.0.0.1:${PORT}/index.html`, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {})
+    await page.waitForSelector('#featuredRow .card:not(.skel), #offline', { timeout: 20000 }).catch(() => {})
+    await page.emulateMedia({ media: 'print' }); await page.waitForTimeout(300)
+    const r = await page.evaluate(() => ({ bg: getComputedStyle(document.body).backgroundColor, bars: ['.topbar', '.rail', '.bottomnav', '.ticker', '.panel'].filter((s) => getComputedStyle(document.querySelector(s)).display !== 'none'), heroH: document.querySelector('.hero').getBoundingClientRect().height, h1: !!document.querySelector('.hero h1')?.getBoundingClientRect().height }))
+    const bad = []; if (r.bg !== 'rgb(255, 255, 255)') bad.push('body not white: ' + r.bg); if (r.bars.length) bad.push('fixed chrome printed: ' + r.bars.join(',')); if (r.heroH < 100 || !r.h1) bad.push('hero collapsed in print')
+    console.log(`${bad.length ? '✗' : '✓'} print${bad.length ? ' — ' + bad.join('; ') : ''}`); if (bad.length) fails.push('print')
+    await ctx.close()
+  }
 } finally { await browser.close(); try { process.kill(-serve.pid) } catch {} }
 if (fails.length) { console.log('OUTAGE GATE FAILED'); process.exit(1) }
 console.log('OUTAGE GATE PASSED')

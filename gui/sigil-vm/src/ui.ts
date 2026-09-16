@@ -199,7 +199,7 @@ export function strip(s: Snapshot): string {
     cell('Height', fmt.int(h.height), h.blkPerSec ? `${h.blkPerSec.toFixed(1)} blk/s` : 'measuring rate…', 'blocks'),
     cell('Finality', h.finalityGate, `h ${fmt.int(h.finalityHeight)} · ${h.committee} validators`, 'blocks'),
     cell('Supply', fmt.num(h.supplySigil) + ' SIGIL', `${(h.mintedPct).toFixed(2)}% of 21M`, 'rigs'),
-    cell('Hashrate', fmt.hps(h.netHps), `${h.liveMiners} miners${h.hashChange !== null ? ' · ' + fmt.pct(h.hashChange) : ''}`, 'rigs', s.hashHist.length > 2 ? sparkline(s.hashHist, 90, 22, h.hashChange !== null && h.hashChange < 0 ? 'down' : 'up') : ''),
+    cell('Hashrate', fmt.hps(h.netHps), `${fmt.int(h.liveMiners)} miners${h.hashChange !== null ? ' · ' + fmt.pct(h.hashChange) : ''}`, 'rigs', s.hashHist.length > 2 ? sparkline(s.hashHist, 90, 22, h.hashChange !== null && h.hashChange < 0 ? 'down' : 'up') : ''),
     cell('Shielded pool', fmt.int(h.notes) + ' notes', `${fmt.num(h.valueLocked)} SIGIL locked · ${fmt.int(h.nullifiers)} spent`, 'notes'),
     cell('Treasury', fmt.num(h.treasurySigil) + ' SIGIL', 'nation welfare', 'treasury'),
   ].join('')
@@ -227,7 +227,7 @@ export function forYou(s: Snapshot): string {
     <div class="fy-col">
       <div class="fy-h">For you <span class="muted">— money words, not instruments</span></div>
       <p><b>Is my payment final?</b> ${h.ok ? `The finality certificate sits ${fmt.int(h.lagBlocks)} block${h.lagBlocks === 1 ? '' : 's'} behind the tip${lagS !== null ? ` ≈ <b>${lagS < 1 ? '<1' : lagS.toFixed(0)} s</b>` : ''} (gate <span class="mono">${esc(h.finalityGate)}</span>, ${h.committee} validators).` : 'Node unreachable — no certificate read.'} ${tag('MEASURED', 'live')}</p>
-      <p><b>What protects it?</b> ${fmt.int(h.liveMiners)} live rigs at ${fmt.hps(h.netHps)} (BLAKE4 + VDF), ${fmt.int(h.notes)} sealed notes holding ${fmt.num(h.valueLocked)} SIGIL, and a hybrid post-quantum block check on the producer. ${tag('MEASURED', 'live')}</p>
+      <p><b>What protects it?</b> ${isFinite(h.netHps) ? `${fmt.int(h.liveMiners)} live rigs at ${fmt.hps(h.netHps)} (BLAKE4 + VDF)` : 'Rigs and hashrate unread this poll — the mining route did not answer'}, ${fmt.int(h.notes)} sealed notes holding ${fmt.num(h.valueLocked)} SIGIL, and a hybrid post-quantum block check on the producer. ${tag('MEASURED', 'live')}</p>
       <p><b>What is it worth?</b> ${fmt.num(h.supplySigil)} of 21M SIGIL minted (${h.mintedPct.toFixed(2)}%). There is <b>no on-chain price</b>: the USDS oracle is not fed and no SIGIL pool exists on g2. The only market is the wSIGIL3 pool on Polygon, off this chain. ${tag('MEASURED', 'live')} ${tag('EXTERNAL', 'derived')}</p>
       <p><b>Can I pay with it?</b> Yes — privately only. Transparent sends are retired, so every payment is a sealed note: ${h.capacity ? `<b>${fmt.int(Math.max(0, h.capacity - h.notes))}</b> of ${fmt.int(h.capacity)} leaves are free this epoch, ` : ''}${fmt.int(h.registered)} wallets have published receiving keys, and ${fmt.int(h.nullifiers)} notes have ever been spent. The proof and the signature happen in your wallet app, never on this page. ${tag('MEASURED', 'live')}</p>
     </div>
@@ -486,7 +486,7 @@ export function collectionModal(c: Collection, s: Snapshot): string {
 export function ticker(s: Snapshot): string {
   const items: string[] = []
   const it = (icon: string, label: string, val: string, cls = '', coll = '') => items.push(`<button class="tk-item ${cls}" tabindex="-1"${coll ? ` data-coll="${coll}"` : ''}><span class="tk-ic">${icon}</span><span class="tk-l">${label}</span><span class="tk-v">${val}</span></button>`)
-  if (s.head.ok) it(I.coins, 'network', `${fmt.hps(s.head.netHps)} · ${s.head.liveMiners} rigs${s.head.blkPerSec ? ' · ' + s.head.blkPerSec.toFixed(1) + ' blk/s' : ''}`, 'gold', 'rigs')
+  if (s.head.ok) it(I.coins, 'network', `${fmt.hps(s.head.netHps)} · ${fmt.int(s.head.liveMiners)} rigs${s.head.blkPerSec ? ' · ' + s.head.blkPerSec.toFixed(1) + ' blk/s' : ''}`, 'gold', 'rigs')
   const behind = s.recent?.blocks.length && s.head.height ? Math.max(0, s.head.height - s.recent.blocks[0].height) : 0
   // the recent set's lag is one fact, said once — it used to trail every block item
   if (behind > 50) it(I.grid, 'recent set', `${fmt.int(behind)} blk behind the tip · ${s.head.blkPerSec ? '≈ ' + fmt.ago(behind / s.head.blkPerSec).replace(' ago', '') + ' old' : 'age unknown'}`, '', 'blocks')

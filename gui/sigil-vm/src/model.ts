@@ -235,8 +235,8 @@ function buildHead(supply: Supply | null, miners: Miners | null, anchor: Anchor 
     hashChange,
     height: miners?.height ?? nation?.height ?? cert?.certificate.height ?? 0,
     blkPerSec,
-    netHps: miners?.net_hps ?? 0,
-    liveMiners: miners?.live_miners ?? 0,
+    netHps: miners ? miners.net_hps : NaN,       // NaN = the mining route did not answer; every formatter prints — for it
+    liveMiners: miners ? miners.live_miners : NaN,
     finalityGate: cert?.certificate.gate ?? '—',
     finalityHeight: cert?.certificate.height ?? 0,
     committee: cert?.certificate.committee_size ?? 0,

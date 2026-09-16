@@ -22,6 +22,9 @@ const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] }
 try {
   for (const scheme of ['dark', 'light']) for (const w of widths) {
     const ctx = await browser.newContext({ viewport: { width: w, height: 900 }, colorScheme: scheme, isMobile: w < 760, hasTouch: w < 760 })
+    // index.html pins the theme to dark when localStorage has none, so a fresh context ignores colorScheme —
+    // every "light" pass had been rendering dark. Seed the persisted theme before any page script runs.
+    await ctx.addInitScript((t) => { try { localStorage.setItem('sigilvm-theme', t) } catch {} }, scheme)
     const page = await ctx.newPage()
     const errs = []
     page.on('pageerror', (e) => errs.push('PAGEERR ' + e.message.slice(0, 120)))

@@ -307,7 +307,7 @@ function buildCollections(miners: Miners | null, anchor: Anchor | null, docket: 
     cat: 'mining', id: 'rigs', by: miners ? `by ${miners.live_miners} rigs` : undefined, name: "Miners' Rigs", glyph: 'rig', verified: true, cover: coverSvg("Miners' Rigs", 'rig'),
     blurb: 'Every rig submitting shares to the braid right now. Rank = hashrate share.',
     items: miners?.live_miners ?? null, owners: miners ? new Set(miners.miners.map((m) => m.wallet)).size : null,
-    floor: miners ? fmt.hps(Math.min(...miners.miners.map((m) => m.hash_rate))) : '—', floorChange: null,
+    floor: miners && miners.miners.length ? fmt.hps(Math.min(...miners.miners.filter((m) => m.hash_rate > 0).map((m) => m.hash_rate).concat([Infinity]))).replace('Infinity H/s', '—') : '—', floorChange: null,
     volume: miners ? fmt.hps(miners.net_hps) : '—', volumeChange: netChange, sales: miners?.blocks_accepted ?? null,
     provenance: miners ? 'live' : 'pretend', link: '/sigil-explorer.html',
   })

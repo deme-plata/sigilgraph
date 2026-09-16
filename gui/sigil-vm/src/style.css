@@ -408,7 +408,8 @@ img { display: block; }
 .field label .bal b { color: var(--cyan); cursor: pointer; margin-left: 6px; font-weight: 600; }
 .field label .bal b:hover { color: var(--violet); }
 .amt { position: relative; margin-top: 6px; display: flex; gap: 8px; }
-.amt input { flex: 1; min-width: 0; background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.1); border-radius: 12px; padding: 12px 14px; font-size: 20px; font-family: var(--mono); outline: none; transition: .15s; }
+.amt input { flex: 1; min-width: 0; background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.1); border-radius: 12px; padding: 12px 14px; font-size: 20px; font-family: var(--mono); outline: none; transition: .15s; -moz-appearance: textfield; appearance: textfield; }
+.amt input::-webkit-outer-spin-button, .amt input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .amt input:focus { border-color: rgba(0,217,255,.5); }
 .amt input[readonly] { color: var(--ink-2); }
 .tsel { display: flex; align-items: center; gap: 8px; padding: 0 14px; border-radius: 12px; background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.1); font-weight: 700; white-space: nowrap; transition: .15s; }

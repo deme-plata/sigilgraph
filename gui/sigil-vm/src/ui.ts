@@ -458,7 +458,7 @@ export function panelActivity(s: Snapshot): string {
   return rows.join('') || `<div class="pempty">No activity read yet.</div>`
 }
 
-export function collectionModal(c: Collection, s: Snapshot): string {
+export function collectionModal(c: Collection, s: Snapshot, watched = false): string {
   const items: string[] = []
   const item = (t: string, sub: string, m = '', h = '') => items.push(`<${h ? 'button' : 'div'} class="cm-item${h ? ' copyable' : ''}"${h ? ` data-copy="${esc(h)}" title="Click to copy ${esc(h.length === 64 ? 'this id' : 'this hash')}"` : ''}><div class="t">${esc(t)}</div><div class="s">${esc(sub)}</div>${m ? `<div class="m">${m}</div>` : ''}${h ? `<div class="h"><span class="hx">${esc(h)}</span><span class="cp">${I.copy}</span></div>` : ''}</${h ? 'button' : 'div'}>`)
   switch (c.id) {
@@ -492,7 +492,7 @@ export function collectionModal(c: Collection, s: Snapshot): string {
         <div class="td-cell two"><div class="k">Last poll</div><div class="v mono" style="white-space:nowrap">${new Date(s.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} · h ${fmt.int(s.head.height)}</div></div>
       </div></div>
     </div>
-    <div class="cm-foot"><a class="btn primary" href="${c.link}" target="_blank" rel="noopener">${c.link.startsWith('/v1/') ? 'Open the node record (JSON) ↗' : 'Open source page ↗'}</a><button class="btn ghost" id="modalClose2">Close</button></div>`
+    <div class="cm-foot"><a class="btn primary" href="${c.link}" target="_blank" rel="noopener" title="${c.link.startsWith('/v1/') ? 'the node\'s own record, JSON' : 'source page'}">${c.link.startsWith('/v1/') ? '<span class="long">Open the node record (JSON)</span><span class="short">Record</span>' : '<span class="long">Open source page</span><span class="short">Source</span>'} ↗</a><button class="btn ghost" data-watch="${c.id}" aria-pressed="${watched ? 'true' : 'false'}" title="Kept in this browser — shows under Trending › Watching">${watched ? '★ Watching' : '☆ Watch'}</button><button class="btn ghost" id="modalClose2">Close</button></div>`
 }
 
 export function ticker(s: Snapshot): string {

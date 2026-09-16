@@ -204,7 +204,7 @@ function renderAll(): void {
     if (c) {
       const box = $('#modalBox'); const activeTab = (box.querySelector('.cm-tabs button.on') as HTMLElement | null)?.dataset.cmtab || 'items'
       const scroll = (box.querySelector('.cm-body') as HTMLElement | null)?.scrollTop ?? 0
-      const fresh = new DOMParser().parseFromString(`<div>${ui.collectionModal(c, snap!)}</div>`, 'text/html')
+      const fresh = new DOMParser().parseFromString(`<div>${ui.collectionModal(c, snap!, watch.has(c.id))}</div>`, 'text/html')
       const stats = fresh.querySelector('.cm-stats'); if (stats) box.querySelector('.cm-stats')!.innerHTML = stats.innerHTML
       const pane = fresh.querySelector(`.cm-pane[data-pane="${activeTab}"]`); const cur = box.querySelector(`.cm-pane[data-pane="${activeTab}"]`)
       if (pane && cur && cur.innerHTML !== pane.innerHTML) { cur.innerHTML = pane.innerHTML; (box.querySelector('.cm-body') as HTMLElement).scrollTop = scroll }
@@ -347,7 +347,7 @@ document.addEventListener('click', (ev) => {
   if (ds.mode && btn.closest('#trendMode')) { trendMode = ds.mode as typeof trendMode; document.querySelectorAll('#trendMode button').forEach((b) => b.classList.toggle('on', b === btn)); renderTrending(); return }
   if (ds.cat) { cat = ds.cat; document.querySelectorAll('#cats button').forEach((b) => b.classList.toggle('on', b === btn)); renderRows(); $('#featured').scrollIntoView({ behavior: 'smooth', block: 'start' }); return }
   if (ds.win) { trendWin = ds.win; document.querySelectorAll('#trendWin button').forEach((b) => b.classList.toggle('on', b === btn)); renderTrending(); return }
-  if (ds.watch) { ev.preventDefault(); ev.stopPropagation(); if (watch.has(ds.watch)) watch.delete(ds.watch); else watch.add(ds.watch); try { localStorage.setItem('sigilvm-watch', JSON.stringify([...watch])) } catch { /* */ } renderTrending(); return }
+  if (ds.watch) { ev.preventDefault(); ev.stopPropagation(); if (watch.has(ds.watch)) watch.delete(ds.watch); else watch.add(ds.watch); try { localStorage.setItem('sigilvm-watch', JSON.stringify([...watch])) } catch { /* */ } renderTrending(); const on = watch.has(ds.watch); document.querySelectorAll<HTMLElement>(`.cm-foot [data-watch="${ds.watch}"]`).forEach((b) => { b.setAttribute('aria-pressed', on ? 'true' : 'false'); b.textContent = on ? '★ Watching' : '☆ Watch' }); return } // the sheet's button follows without a re-render (its focus stays put)
   if (ds.copy) { ev.preventDefault(); ev.stopPropagation(); navigator.clipboard?.writeText(ds.copy).then(() => toast(`Copied ${ds.copy!.length === 64 ? 'id' : 'hash'} ${ds.copy!.slice(0, 8)}…`)).catch(() => toast('Clipboard blocked.', 'warn')); return }
   if (ds.coll && !ev.ctrlKey && !ev.metaKey && !(ev as MouseEvent).button) { ev.preventDefault(); openCollection(ds.coll); return }
   const arrows = btn.closest('.arrows') as HTMLElement | null
@@ -481,7 +481,7 @@ document.addEventListener('keydown', (ev) => {
   if (ev.shiftKey && (i <= 0)) { ev.preventDefault(); f[f.length - 1].focus() }
   else if (!ev.shiftKey && (i === f.length - 1 || i < 0)) { ev.preventDefault(); f[0].focus() }
 })
-function openCollection(id: string): void { const c = snap?.collections.find((x) => x.id === id); if (c) { openCollId = id; openModal(ui.collectionModal(c, snap!), 'coll') } }
+function openCollection(id: string): void { const c = snap?.collections.find((x) => x.id === id); if (c) { openCollId = id; openModal(ui.collectionModal(c, snap!, watch.has(id)), 'coll') } }
 function openTokenPicker(which: 'from' | 'to'): void {
   if (!snap) return
   openModal(`<h4>Select a token <span class="muted kbd-only" style="font-size:11px;font-weight:500" aria-hidden="true">↑↓ Enter</span></h4><div class="list">${snap.tokens.map((t) => `<button data-pick="${t.id}" data-which="${which}"><img src="${t.icon}" alt=""><div><div class="s">${t.symbol}</div><div class="n">${ui.esc(t.name)}</div></div><span class="r">${balances[t.id] === undefined ? '' : fmt.num(balances[t.id], 4)}</span></button>`).join('')}</div>`)

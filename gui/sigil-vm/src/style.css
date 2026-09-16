@@ -696,7 +696,9 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
 .cm-item .h .cp { margin-left: auto; opacity: 0; transition: .15s; color: var(--cyan); }
 .cm-item.copyable { text-align: left; width: 100%; cursor: copy; }
 .cm-item.copyable:hover .cp { opacity: 1; }
-.cm-foot { display: flex; gap: 8px; padding: 12px 22px 18px; flex: 0 0 auto; border-top: 1px solid var(--line); }
+.cm-foot { display: flex; gap: 8px; padding: 12px 22px 18px; flex: 0 0 auto; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.cm-foot .btn { white-space: nowrap; }
+.cm-foot .btn.primary { flex: 1 1 auto; text-align: center; } .cm-foot .btn.primary .short { display: none; } /* three buttons: the source link takes the slack, Watch + Close wrap under it on a phone */
 
 .bottomnav { display: none; position: fixed; left: 0; right: 0; bottom: 0; z-index: 48; background: var(--bnav-bg); backdrop-filter: blur(16px); border-top: 1px solid var(--line); padding: 6px max(6px, env(safe-area-inset-right, 0px)) calc(6px + env(safe-area-inset-bottom, 0px)) max(6px, env(safe-area-inset-left, 0px)); grid-template-columns: repeat(5, 1fr); }
 .bottomnav a { display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 6px 0; color: var(--muted); font-size: 10.5px; font-weight: 600; border-radius: 10px; }
@@ -773,6 +775,7 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
   #walletBtn.connected::after { content: ''; position: absolute; top: 5px; right: 5px; width: 9px; height: 9px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 2px var(--bg); } /* connected marker — the icon alone looked identical either way */
   .search { max-width: none; min-width: 0; flex: 1 1 120px; }
   .search input { height: 40px; padding-left: 38px; padding-right: 10px; }
+  .cm-foot .btn.primary .long { display: none; } .cm-foot .btn.primary .short { display: inline; } /* 'Source ↗' — three buttons stay on one row (a second row pushed the sheet past a 640px screen) */
   .search-results { position: fixed; left: 12px; right: 12px; top: calc(var(--top) + 4px); min-width: 0; max-height: calc(100dvh - var(--top) - 16px); } /* the 340px dropdown ran 108px past a 390px viewport — on phones it is a sheet under the top bar */
   .sec-head h2 { font-size: 19px; }
   .sec-head .sub { font-size: 12px; }

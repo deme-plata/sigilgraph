@@ -159,9 +159,12 @@ async function poll(): Promise<void> {
   polling = true
   try {
     const prevHeight = snap?.head.height ?? 0
+    const firstPaint = !snap
     snap = await buildSnapshot()
     await loadBalances()
     renderAll()
+    // a deep link (#dex, #trending…) scrolled before the live content existed — re-anchor once the page has its real height
+    if (firstPaint && location.hash && !snap.offline) { const target = document.querySelector(location.hash.split('=')[0]); if (target) requestAnimationFrame(() => target.scrollIntoView({ behavior: 'instant', block: 'start' })) }
     if (!snap.offline && prevHeight && snap.head.height > prevHeight) { const b = $('#bellBadge'); b.hidden = false }
   } catch (e) {
     toast('poll failed: ' + (e as Error).message, 'bad')

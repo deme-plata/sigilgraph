@@ -182,14 +182,20 @@ function windowChange(arr: Sample[] | undefined, win: string, at: number): numbe
 }
 
 let lastSnapshot: Snapshot | null = null
+let heavyAt = 0
+let heavyCache: { recent: Recent | null; hist: { history: HashPoint[] } | null } = { recent: null, hist: null }
 export const getLast = () => lastSnapshot
 
 export async function buildSnapshot(): Promise<Snapshot> {
   const at = Date.now()
-  const [supply, miners, anchor, docket, nation, usds, rocky, gauge, bridge, cert, recent, pools, hist, earth] = await Promise.all([
+  // the two heavy routes (~90 KB each, the site proxy does not gzip them) refresh every 60 s; everything else every poll
+  const heavyDue = at - heavyAt > 60_000 || !heavyCache.recent
+  const [supply, miners, anchor, docket, nation, usds, rocky, gauge, bridge, cert, recentNew, pools, histNew, earth] = await Promise.all([
     api.supply(), api.miners(), api.anchor(), api.docket(), api.nation(), api.usds(), api.rocky(), api.gauge(),
-    api.bridge(), api.cert(), api.recent(), api.pools(), api.hashHistory(), api.earth(),
+    api.bridge(), api.cert(), heavyDue ? api.recent() : Promise.resolve(heavyCache.recent), api.pools(), heavyDue ? api.hashHistory() : Promise.resolve(heavyCache.hist), api.earth(),
   ])
+  if (heavyDue) { heavyAt = at; heavyCache = { recent: recentNew, hist: histNew } }
+  const recent = recentNew, hist = histNew
   const offline = !supply && !miners && !anchor
   const mem = loadMem()
 

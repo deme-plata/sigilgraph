@@ -101,6 +101,8 @@ export const fmt = {
     return n.toFixed(a < 1 && a > 0 ? Math.max(d, 4) : d)
   },
   int(n: number): string { return isFinite(n) ? Math.round(n).toLocaleString('en-US') : '—' },
+  /** count + noun with the right number: n(1,'rig') → '1 rig', n(4,'rig') → '4 rigs', n(NaN,'rig') → '— rigs' */
+  n(count: number | null | undefined, one: string, many = one + 's'): string { const c = count ?? NaN; return `${fmt.int(c)} ${c === 1 ? one : many}` },
   pct(n: number | null | undefined, d = 1): string {
     if (n === null || n === undefined || !isFinite(n)) return '—'
     return (n > 0 ? '+' : '') + n.toFixed(d) + '%'

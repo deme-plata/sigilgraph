@@ -333,7 +333,7 @@ function buildCollections(miners: Miners | null, anchor: Anchor | null, docket: 
   })()
 
   c.push({
-    cat: 'mining', id: 'rigs', by: miners ? `by ${miners.live_miners} rigs` : undefined, name: "Miners' Rigs", glyph: 'rig', verified: true, cover: coverSvg("Miners' Rigs", 'rig'),
+    cat: 'mining', id: 'rigs', by: miners ? `by ${fmt.n(miners.live_miners, 'rig')}` : undefined, name: "Miners' Rigs", glyph: 'rig', verified: true, cover: coverSvg("Miners' Rigs", 'rig'),
     blurb: 'Every rig submitting shares to the braid right now. Rank = hashrate share.',
     items: miners?.live_miners ?? null, owners: miners ? new Set(miners.miners.map((m) => m.wallet)).size : null,
     floor: miners && miners.miners.length ? fmt.hps(Math.min(...miners.miners.filter((m) => m.hash_rate > 0).map((m) => m.hash_rate).concat([Infinity]))).replace('Infinity H/s', '—') : '—', floorChange: null,
@@ -344,7 +344,7 @@ function buildCollections(miners: Miners | null, anchor: Anchor | null, docket: 
     cat: 'court', id: 'honours', by: 'by the SIGIL Supreme Court', name: 'Elefantordenen', glyph: 'seal', verified: true, cover: coverSvg('Elefantordenen', 'seal'),
     blurb: 'Honours conferred by the SIGIL Supreme Court. Each is a leaf in a verified docket chain.',
     items: honours, owners: honours, floor: docket ? '1 honour' : '—', floorChange: null,
-    volume: docket ? `${fmt.int(docket.total)} docket entries` : '—', volumeChange: null, sales: honours,
+    volume: docket ? `${fmt.n(docket.total, 'docket entry', 'docket entries')}` : '—', volumeChange: null, sales: honours,
     provenance: docket ? 'live' : 'pretend', link: '/sigil-wallet-tron-embedded.html#court',
   })
   c.push({
@@ -363,7 +363,7 @@ function buildCollections(miners: Miners | null, anchor: Anchor | null, docket: 
     provenance: recent ? 'live' : 'pretend', link: '/sigil-explorer.html',
   })
   c.push({
-    cat: 'shielded', id: 'notes', by: anchor ? `by ${fmt.int(anchor.registered)} registered wallets` : undefined, name: 'Shielded Notes', glyph: 'eye', verified: true, cover: coverSvg('Shielded Notes', 'eye'),
+    cat: 'shielded', id: 'notes', by: anchor ? `by ${fmt.n(anchor.registered, 'registered wallet')}` : undefined, name: 'Shielded Notes', glyph: 'eye', verified: true, cover: coverSvg('Shielded Notes', 'eye'),
     blurb: 'Sealed 32-byte notes in the shielded pool. First tap wins; a spent note is worth zero everywhere.',
     items: anchor?.notes ?? null, owners: anchor?.registered ?? null,
     floor: anchor ? `${fmt.int(anchor.capacity - anchor.notes)} free` : '—', floorChange: null,
@@ -481,7 +481,7 @@ function buildMovers(miners: Miners | null, mem: Mem, at: number, hist: { histor
   if (h && h.length > 1) {
     const first = h[0], last = h[h.length - 1]
     out.unshift({
-      id: 'net', name: 'Network hashrate', sub: `${last.miners} miners · ${fmt.ago((Date.now() / 1000) - first.timestamp)} window`,
+      id: 'net', name: 'Network hashrate', sub: `${fmt.n(last.miners, 'miner')} · ${fmt.ago((Date.now() / 1000) - first.timestamp)} window`,
       cover: coverSvg('Network hashrate', 'braid'), value: fmt.hps(last.hashrate),
       change: first.hashrate > 0 ? ((last.hashrate - first.hashrate) / first.hashrate) * 100 : null, provenance: 'derived', series: h.map((p) => p.hashrate),
     })
@@ -504,7 +504,7 @@ function buildSales(earth: Earth | null, docket: Docket | null, usds: Usds | nul
     s.push({
       id: `docket-${e.seq}`,
       name: e.kind === 'HonourConferred' ? `${ev.order ?? 'Honour'} · ${fmt.short(who, 4)}` : `${rank || 'Justice'} · ${fmt.short(who, 4)}`,
-      collection: e.kind === 'HonourConferred' ? `Elefantordenen · ${ev.approvals ?? '—'} approvals${ev.operator_cosigned ? ' · co-signed' : ''}` : 'Justices of the Bench',
+      collection: e.kind === 'HonourConferred' ? `Elefantordenen · ${fmt.n(ev.approvals ?? null, 'approval')}${ev.operator_cosigned ? ' · co-signed' : ''}` : 'Justices of the Bench',
       cover: coverSvg(who || e.kind + e.seq, e.kind === 'HonourConferred' ? 'seal' : 'shield'), price: `docket #${e.seq}`,
       when: e.height ? `block ${fmt.int(e.height)}` : 'genesis bench', proof: e.leaf, provenance: 'live',
     })

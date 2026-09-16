@@ -724,7 +724,8 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
   .bottomnav { display: grid; }
   .main { padding: 14px 16px 90px; }
   .ticker { margin-top: 0; }
-  .tk-item .tk-v { display: none; }
+  .tk-item.blue .tk-v, .tk-item.red .tk-v { display: none; } /* phones: block items are height-only; network / recent set / rigs / finality keep their value — a bare label says nothing */
+  .tk-item { padding: 0 12px; }
   .tk-item { padding: 0 12px; }
   .panel { bottom: 62px; }
   .toasts { bottom: calc(132px + env(safe-area-inset-bottom, 0px)); right: 12px; left: 12px; }

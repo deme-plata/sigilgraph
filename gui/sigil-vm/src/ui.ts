@@ -31,6 +31,12 @@ function blockAgo(s: Snapshot, height: number): string {
   if (!s.head.blkPerSec) return `${fmt.int(d)} blk ago`
   return '≈ ' + fmt.ago(d / s.head.blkPerSec)
 }
+// the verified badge travels with the last word, so a narrow screen never wraps the badge onto a line of its own
+function nameWithBadge(name: string, verified: boolean): string {
+  const i = name.lastIndexOf(' ')
+  if (i < 0) return `<span class="nb">${esc(name)}${ver(verified)}</span>`
+  return `${esc(name.slice(0, i))} <span class="nb">${esc(name.slice(i + 1))}${ver(verified)}</span>`
+}
 const ver = (v: boolean) => (v ? '<span class="verified" title="on-chain record family">✓</span>' : '')
 
 // ── shell ─────────────────────────────────────────────────────────────────
@@ -177,7 +183,7 @@ export function hero(s: Snapshot, idx: number): string {
     <div class="dots">${list.map((c, i) => `<button class="${i === idx % list.length ? 'on' : ''}" data-hero="${i}" aria-label="Show ${esc(c.name)}"></button>`).join('')}</div>
     <div class="body">
       <div class="eyebrow">${prov(c.provenance)}<span class="chip gold">featured collection</span>${h.ok ? '<span class="chip live"><i class="d"></i>sigil-g2 · block ' + fmt.int(h.height) + '</span>' : '<span class="chip bad">node unreachable</span>'}</div>
-      <h1>${esc(c.name)}${ver(c.verified)}</h1>
+      <h1>${nameWithBadge(c.name, c.verified)}</h1>
       ${c.by ? `<div class="by">${esc(c.by)}</div>` : ''}
       <p>${esc(c.blurb)}</p>
       <div class="stats">
@@ -243,7 +249,7 @@ export function collectionCard(c: Collection): string {
   return `<a class="card" href="${c.link}" target="_blank" rel="noopener" data-coll="${c.id}">
     <div class="img" style="background-image:url('${c.cover}')"><span class="prov">${prov(c.provenance)}</span><span class="cta"><span class="cta-blurb">${esc(c.blurb)}</span><span class="cta-btn">View collection ↗</span></span></div>
     <div class="meta">
-      <div class="name">${esc(c.name)}${ver(c.verified)}</div>
+      <div class="name">${nameWithBadge(c.name, c.verified)}</div>
       ${c.by ? `<div class="byline">${esc(c.by)}</div>` : ''}
       <div class="kv"><div><div class="k">Floor</div><div class="v">${esc(c.floor)}</div></div><div style="text-align:right"><div class="k">Items</div><div class="v">${c.items === null ? '—' : fmt.int(c.items)}</div></div></div>
     </div></a>`

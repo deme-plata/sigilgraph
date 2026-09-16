@@ -815,3 +815,4 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
   .cm-stats { display: none; }
   .cm-tabs { padding-top: 6px; }
 }
+.nb { white-space: nowrap; }

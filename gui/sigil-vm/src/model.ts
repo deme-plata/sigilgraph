@@ -130,6 +130,7 @@ export interface Snapshot {
   rocky: Rocky | null
   usds: Usds | null
   bridge: Bridge | null
+  nation: Nation | null
   offline: boolean
   hashHist: number[]
   changes: Record<string, Record<string, number | null>>
@@ -217,7 +218,7 @@ export async function buildSnapshot(): Promise<Snapshot> {
   const oldest = Math.min(...Object.values(ser).flat().map((x) => x.t).concat([at]))
   const sampleAgeMin = Math.round((at - oldest) / 60e3)
   const featured = [...collections].sort((a, b) => (b.items ?? 0) - (a.items ?? 0)).slice(0, 6)
-  lastSnapshot = { at, head, collections, featured, drops, movers, sales, tokens, pools: pools ?? [], miners, docket, recent, earth, rocky, usds, bridge, offline, hashHist, changes, sampleAgeMin, gaugeFresh: gauge ? gauge.feeds.filter((f) => f.fresh).length : null, gaugeFeeds: gauge?.feeds.length ?? 0 }
+  lastSnapshot = { at, head, collections, featured, drops, movers, sales, tokens, pools: pools ?? [], miners, docket, recent, earth, rocky, usds, bridge, nation, offline, hashHist, changes, sampleAgeMin, gaugeFresh: gauge ? gauge.feeds.filter((f) => f.fresh).length : null, gaugeFeeds: gauge?.feeds.length ?? 0 }
   return lastSnapshot
 }
 

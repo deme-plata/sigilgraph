@@ -40,7 +40,7 @@ export interface Miners { height: number; net_hps: number; live_miners: number; 
 export interface Anchor { anchor: string; capacity: number; epoch: number; notes: number; nullifiers: number; registered: number; value_locked: string }
 export interface DocketEntry { seq: number; height: number; kind: string; leaf: string; event: Record<string, unknown> }
 export interface Docket { total: number; head: string; root: string; chain_verified: boolean; histogram: Record<string, number>; entries: DocketEntry[] }
-export interface Nation { active: boolean; height: number; treasury_glyphs: string; treasury_wallet: string; stipend_glyphs: string; payout_asset: string; usds_live_height: number; welfare_bps: number }
+export interface Nation { active: boolean; height: number; activation_height: number; treasury_glyphs: string; treasury_wallet: string; stipend_glyphs: string; payout_asset: string; usds_live_height: number; welfare_bps: number; claim_interval_blocks: number; authority_wallet: string }
 export interface Usds { price: string; price_fresh: boolean; mint_buffer_bps?: number; usds_supply: string; vault_sigil: string; live: boolean; live_height: number; height: number; usds_decimals: number; fee_bps: number; token_id: string }
 export interface Rocky { symbol: string; name: string; token: string; contract: string; decimals: number; live: boolean; bootstrapped: boolean; total_supply: string; circulating: string; pool_balance: string; fee_bps: number; policies: unknown[] }
 export interface Gauge { height: number; live_height: string; live: boolean; feeds: { name: string; value: number | null; fresh: boolean }[] }

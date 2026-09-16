@@ -29,7 +29,7 @@ let cat = 'all'
 try { if (new URLSearchParams(location.search).get('embed')) app.classList.add('embed') } catch { /* */ }
 try { wallet = localStorage.getItem('sigil-wallet-address') } catch { /* blocked */ }
 // theme: saved choice, else the OS preference; the toggle flips and persists
-function applyTheme(t: 'dark' | 'light'): void { document.documentElement.setAttribute('data-theme', t); const b = document.getElementById('themeBtn'); if (b) b.innerHTML = t === 'dark' ? I.sun : I.moon }
+function applyTheme(t: 'dark' | 'light'): void { document.documentElement.setAttribute('data-theme', t); document.querySelector('meta[name=theme-color]')?.setAttribute('content', t === 'dark' ? '#0b0b0f' : '#f6f6f9'); /* phone browser chrome follows the page */ const b = document.getElementById('themeBtn'); if (b) b.innerHTML = t === 'dark' ? I.sun : I.moon }
 let theme: 'dark' | 'light' = 'dark'
 try { const saved = localStorage.getItem('sigilvm-theme'); theme = saved === 'light' || saved === 'dark' ? saved : (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark') } catch { /* */ }
 applyTheme(theme)

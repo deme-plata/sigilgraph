@@ -246,7 +246,7 @@ export function dropCard(d: Drop): string {
 }
 
 export function moverCard(m: Mover): string {
-  return `<div class="card mover${m.idle ? ' idle' : ''}" title="${esc(m.id)}">
+  return `<div class="card mover${m.idle ? ' idle' : ''}" title="${esc(m.id)}" data-coll="rigs" role="button" tabindex="0">
     <div class="img" style="background-image:url('${m.cover}')"><span class="prov">${prov(m.provenance)}</span>${m.idle ? '<span class="status chip"><i class="d"></i>idle</span>' : ''}</div>
     <div class="meta"><div class="name">${esc(m.name)}</div><div class="blurb" style="height:auto">${esc(m.sub)}</div>
       ${m.series && m.series.length > 2 ? `<div class="sparkwrap">${sparkline(m.series, 180, 34, m.series[m.series.length - 1] < m.series[0] ? 'down' : 'up')}</div>` : ''}
@@ -255,7 +255,7 @@ export function moverCard(m: Mover): string {
 }
 
 export function saleCard(x: Sale): string {
-  return `<div class="card sale" data-proof="${esc(x.proof)}">
+  return `<div class="card sale" data-proof="${esc(x.proof)}" data-coll="${x.collection.startsWith('Elefant') ? 'honours' : x.collection.startsWith('Justices') ? 'bench' : x.collection.startsWith('Kristensen') ? 'earth' : x.collection.startsWith('DagKnight') ? 'blocks' : x.collection.startsWith("Miners") ? 'rigs' : x.collection === 'Drops' ? 'treasury' : ''}" role="button" tabindex="0">
     <div class="img" style="background-image:url('${x.cover}')"><span class="prov">${prov(x.provenance)}</span><span class="cta"><span class="cta-blurb mono">${esc(x.proof)}</span><span class="cta-btn" data-copy="${esc(x.proof)}">Copy proof</span></span></div>
     <div class="meta"><div class="name">${esc(x.name)}</div><div class="byline">${esc(x.collection)} · ${esc(x.when)}</div>
       <div class="kv"><div><div class="k">Settled</div><div class="v">${esc(x.price)}</div></div><div style="text-align:right"><div class="k">Proof</div><div class="v mono" title="${esc(x.proof)}">${fmt.short(x.proof, 5)}</div></div></div></div></div>`

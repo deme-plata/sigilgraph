@@ -331,7 +331,8 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 .card .bar { height: 4px; background: rgba(255,255,255,.08); border-radius: 4px; overflow: hidden; margin-top: 10px; }
 .card .bar i { display: block; height: 100%; background: var(--grad); }
 .card .when { font-family: var(--mono); font-size: 12px; margin-top: 8px; color: var(--ink-2); }
-.card.mover { flex-basis: 212px; }
+.card.mover { flex-basis: 212px; cursor: pointer; }
+.card.sale { cursor: pointer; }
 .card.mover .img { aspect-ratio: 4/3; }
 .card.mover .delta { font-family: var(--mono); font-size: 20px; font-weight: 700; margin-top: 4px; }
 .card.mover .delta.share { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }

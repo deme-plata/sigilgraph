@@ -587,6 +587,8 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
 .toast { background: var(--surface-2); border: 1px solid var(--line-2); border-left: 3px solid var(--cyan); border-radius: 10px; padding: 10px 14px; font-size: 13px; box-shadow: 0 10px 30px rgba(0,0,0,.5); animation: rise .2s ease; max-width: 360px; }
 .toast.warn { border-left-color: var(--warn); }
 .toast.bad { border-left-color: var(--bad); }
+.toast.bump { animation: bump .25s ease; }
+@keyframes bump { 0% { transform: scale(1) } 50% { transform: scale(1.04) } 100% { transform: scale(1) } }
 .modal { position: fixed; inset: 0; z-index: 90; background: rgba(0,0,0,.6); backdrop-filter: blur(6px); display: none; place-items: center; }
 .modal.open { display: grid; }
 .modal .box { width: min(440px, 92vw); max-height: 90vh; overflow: auto; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 16px; padding: 18px; animation: rise .2s ease; }

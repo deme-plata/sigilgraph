@@ -37,8 +37,13 @@ try { if (localStorage.getItem('sigilvm-panel') === 'open') app.classList.add('p
 if (innerWidth >= 1600 && !app.classList.contains('panel-open')) app.classList.add('panel-open')
 
 function toast(msg: string, cls = ''): void {
+  const host = $('#toasts')
+  // the same message twice just refreshes the existing toast; the stack never grows past 3
+  const same = Array.from(host.children).find((c) => c.textContent === msg) as HTMLElement | undefined
+  if (same) { same.classList.remove('bump'); void same.offsetWidth; same.classList.add('bump'); clearTimeout(Number(same.dataset.t)); same.dataset.t = String(setTimeout(() => same.remove(), 4200)); return }
+  while (host.children.length >= 3) host.firstElementChild?.remove()
   const t = document.createElement('div'); t.className = 'toast ' + cls; t.textContent = msg
-  $('#toasts').appendChild(t); setTimeout(() => t.remove(), 4200)
+  host.appendChild(t); t.dataset.t = String(setTimeout(() => t.remove(), 4200))
 }
 
 // ── render passes ─────────────────────────────────────────────────────────

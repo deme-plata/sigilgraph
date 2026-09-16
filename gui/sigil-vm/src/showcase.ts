@@ -31,8 +31,12 @@ img.src = frame.src
 app.src = appSrc + (appSrc.includes('?') ? '&' : '?') + 'embed=1'
 
 function fit(): void {
-  // letterbox the frame into the viewport, keeping its aspect
+  // a landscape frame on a portrait phone is a postage stamp — below 760px, or when the scale would drop under
+  // 0.45, show the frame as a poster with a big "enter" button that opens the real page instead
   const vw = innerWidth, vh = innerHeight
+  const kPre = Math.min(vw / frame.w, vh / frame.h)
+  const tooSmall = vw < 760 || (frame.screen.w * kPre) / layoutW < 0.45
+  document.body.classList.toggle('poster', tooSmall)
   const k = Math.min(vw / frame.w, vh / frame.h)
   const W = Math.round(frame.w * k), H = Math.round(frame.h * k)
   stage.style.width = W + 'px'; stage.style.height = H + 'px'
@@ -48,6 +52,7 @@ function fit(): void {
 }
 fit()
 addEventListener('resize', fit)
+document.getElementById('enter')!.setAttribute('href', appSrc)
 // frame switcher
 const sw = document.getElementById('frames')!
 sw.innerHTML = Object.entries(FRAMES).map(([k, f]) => `<a class="pill${k === frameKey ? ' on' : ''}" href="?frame=${k}">${f.name}</a>`).join('')

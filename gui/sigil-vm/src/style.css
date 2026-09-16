@@ -870,7 +870,7 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
    sections and cards do not split across pages. Theme tokens flip to light regardless of the on-screen choice. */
 @media print {
   :root, :root[data-theme="dark"] { --bg: #ffffff; --bg-2: #ffffff; --surface: #ffffff; --surface-2: #f4f4f7; --surface-3: #e8e8ee; --line: rgba(0,0,0,.14); --line-2: rgba(0,0,0,.24); --ink: #0b0b0e; --ink-2: #2a2a33; --muted: #4a4a58; --muted-2: #5e5e6c; --hover: transparent; --card-shadow: none; --rail: 0px; --top: 0px; --panel: 0px; }
-  .topbar, .rail, .panel, .pscrim, .ticker, .bottomnav, .totop, .toasts, .skip, .cats, .arrows, .viewall, .hero .thumbs, .hero .dots, .card .img .cta, .modal, .preview, .foot-keys { display: none !important; }
+  .topbar, .rail, .panel, .pscrim, .ticker, .bottomnav, .totop, .toasts, .skip, .cats, .arrows, .viewall, .hero .thumbs, .hero .dots, .card .img .cta, .modal, .preview, .foot-keys, .trending .star, #trendWatch, .trending .chev { display: none !important; }
   body { background: #fff; color: #0b0b0e; }
   .main { margin: 0 !important; padding: 0 12mm !important; }
   .app.panel-open .main { margin-right: 0 !important; }

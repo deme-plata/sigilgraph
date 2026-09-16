@@ -523,12 +523,16 @@ document.addEventListener('mouseover', (ev) => {
   const tr = (ev.target as HTMLElement).closest('#trendingTable tr[data-coll]') as HTMLElement | null
   if (!tr || !snap) { return }
   const c = snap.collections.find((x) => x.id === tr.dataset.coll); if (!c) return
+  // the card lives in the gutter beside the table; with no gutter on either side (≈≤1180px) it would sit on top of the
+  // neighbouring rows' names, so it stays away — the row already carries the facts and a tap opens the sheet
+  const r = tr.getBoundingClientRect(); const w = 300
+  const fitsRight = r.right + w + 16 < innerWidth, fitsLeft = r.left - w - 16 >= 0
+  if ((!fitsRight && !fitsLeft) || matchMedia('(hover: none)').matches) { pv.hidden = true; return }
   pv.innerHTML = `<div class="pv-img" style="background-image:url('${c.cover}')"></div><div class="pv-b"><div class="pv-n">${ui.esc(c.name)}</div><div class="pv-by">${ui.esc(c.by || '')}</div><div class="pv-t">${ui.esc(c.blurb)}</div><div class="pv-kv"><span>Floor <b>${ui.esc(c.floor)}</b></span><span>Items <b>${c.items === null ? '—' : fmt.int(c.items)}</b></span></div></div>`
   pv.hidden = false
-  const r = tr.getBoundingClientRect(); const w = 300
   const ph = pv.getBoundingClientRect().height || 280
   pv.style.top = `${Math.max(8, Math.min(innerHeight - ph - 8, r.top))}px`
-  pv.style.left = `${r.right + w + 16 < innerWidth ? r.right + 8 : Math.max(8, r.left - w - 8)}px`
+  pv.style.left = `${fitsRight ? r.right + 8 : r.left - w - 8}px`
 })
 document.addEventListener('mouseout', (ev) => { if ((ev.target as HTMLElement).closest('#trendingTable tr[data-coll]')) pv.hidden = true })
 document.addEventListener('scroll', () => { pv.hidden = true }, { passive: true })

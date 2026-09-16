@@ -180,7 +180,7 @@ function renderAll(): void {
 function showOffline(on: boolean): void {
   let el = document.getElementById('offline')
   if (on) {
-    if (!el) { el = document.createElement('div'); el.id = 'offline'; el.className = 'offline'; $('#main').prepend(el) }
+    if (!el) { el = document.createElement('div'); el.id = 'offline'; el.className = 'offline'; el.setAttribute('role', 'alert'); $('#main').prepend(el) }
     el.innerHTML = `<span class="chip bad"><i class="d"></i>node unreachable</span><span>sigil-api did not answer. Nothing on this page is a measurement until it does — retrying every 10 s.</span><button class="btn ghost sm" id="retryNow">Retry now</button><span class="muted mono" style="font-size:11px">or add <code>?api=http://host:18181</code></span>`
   } else if (el) el.remove()
   // the hero skeleton's eyebrow must not claim progress while the node is unreachable

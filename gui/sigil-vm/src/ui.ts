@@ -156,7 +156,7 @@ export function shell(): string {
   </nav>
   <button class="totop" id="toTop" aria-label="Back to top" hidden>${I.up}</button>
   <div class="modal" id="modal"><div class="box" id="modalBox"></div></div>
-  <div class="toasts" id="toasts"></div>`
+  <div class="toasts" id="toasts" role="status" aria-live="polite" aria-relevant="additions"></div>`
 }
 
 

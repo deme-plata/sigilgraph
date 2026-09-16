@@ -744,7 +744,6 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
   .sec-head h2 { font-size: 19px; }
   .sec-head .sub { font-size: 12px; }
   .sec-head .right { flex: 1 1 100%; }
-  .sec-head .right:empty, .sec-head .right:not(:has(:not(.arrows))) { display: none; }
   .card .kv .v { font-size: 12px; } /* 'blue 646,900' + '19,613,700' fit a 200px card without truncating */
   .sec-head .right .viewall { margin-left: auto; } /* when the toggles wrap, View all sits at the right edge, not orphaned left */
   .topbar .actions { flex: 0 0 auto; }
@@ -797,4 +796,4 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
 
 /* embedded inside the showcase frame: no phone bar, no auto panel */
 .app.embed .bottomnav { display: none !important; }
-@media (hover: none) and (pointer: coarse) { .foot-keys, .kbd-only, .sec-head .arrows { display: none; } } /* touch: rows swipe, the arrow pair only made an orphan row */ /* no keyboard, no shortcut hint */
+@media (hover: none) and (pointer: coarse) { .foot-keys, .kbd-only, .sec-head .arrows { display: none; } .sec-head .right:not(:has(> :not(.arrows))) { display: none; } } /* touch: rows swipe, the arrow pair only made an orphan row; a controls row holding nothing else collapses too */ /* no keyboard, no shortcut hint */

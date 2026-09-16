@@ -311,7 +311,8 @@ img { display: block; }
 .card:hover { transform: translateY(-4px); box-shadow: 0 1px 0 rgba(255,255,255,.05) inset, 0 20px 44px rgba(0,0,0,.55); border-color: var(--line-2); }
 .card .img { aspect-ratio: 1; background-size: cover; background-position: center; position: relative; }
 .card .img .prov { position: absolute; top: 10px; left: 10px; }
-.card .img .status { position: absolute; top: 10px; right: 10px; }
+.card .img .status { position: absolute; top: 10px; right: 10px; z-index: 2; }
+.card .img .prov { z-index: 2; }
 .card .meta { padding: 11px 14px 13px; }
 .card .name { font-weight: 700; font-size: 14.5px; letter-spacing: -.01em; display: flex; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card .byline { color: var(--muted); font-size: 11.5px; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -322,6 +323,7 @@ img { display: block; }
 .card .kv .v { font-family: var(--mono); font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card.wide { flex-basis: 320px; }
 .card.drop .img { aspect-ratio: 16/10; }
+.card.drop .img::after { content: ""; position: absolute; inset: 0 0 auto 0; height: 44px; background: linear-gradient(180deg, rgba(0,0,0,.45), transparent); pointer-events: none; }
 .card .bar { height: 4px; background: rgba(255,255,255,.08); border-radius: 4px; overflow: hidden; margin-top: 10px; }
 .card .bar i { display: block; height: 100%; background: var(--grad); }
 .card .when { font-family: var(--mono); font-size: 12px; margin-top: 8px; color: var(--ink-2); }

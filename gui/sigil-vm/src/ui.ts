@@ -391,8 +391,10 @@ function tokenDetailRow(t: Token, s: Snapshot): string {
 export function panelHead(addr: string | null, s: Snapshot, balances: Record<string, number>): string {
   if (!addr) return `<div class="who"><img src="${avatarSvg('nobody', '?')}" alt=""><div><div class="a">No wallet connected</div><div class="b">Open the gate to load your SIGIL wallet</div></div></div><div class="total"><div class="k">Portfolio</div><div class="v">—</div></div>`
   const native = balances['0'.repeat(64)] ?? 0
-  return `<div class="who"><img src="${avatarSvg(addr, addr.slice(0, 1).toUpperCase())}" alt=""><div><div class="a">${fmt.short(addr, 6)}</div><div class="b">sigil-g2 · ${s.head.ok ? 'live' : 'offline'}</div></div><button class="ibtn x" id="pDisconnect" title="Forget">${I.x}</button></div>
-    <div class="total"><div class="k">Portfolio</div><div class="v">${fmt.num(native, 4)}<small>SIGIL</small></div><div class="muted" style="font-size:11.5px">USD value unavailable — no oracle price on chain yet</div></div>`
+  const rig = s.miners?.miners.find((m) => m.wallet.toLowerCase() === addr.toLowerCase())
+  const glyphs = balances['0'.repeat(64)] !== undefined ? Math.round(native * 1e10) : null
+  return `<div class="who"><img src="${avatarSvg(addr, addr.slice(0, 1).toUpperCase())}" alt=""><div><div class="a" title="${esc(addr)}">${fmt.short(addr, 6)} <button class="copy" data-copy="${esc(addr)}" title="Copy wallet id">⧉</button></div><div class="b">sigil-g2 · ${s.head.ok ? 'live' : 'offline'}${rig ? ` · mining as ${esc(rig.rig)}` : ''}</div></div><button class="ibtn x" id="pDisconnect" title="Forget">${I.x}</button></div>
+    <div class="total"><div class="k">Portfolio</div><div class="v">${native.toLocaleString('en-US', { maximumFractionDigits: 4 })}<small>SIGIL</small></div><div class="muted" style="font-size:11.5px">${glyphs !== null ? fmt.int(glyphs) + ' glyphs · ' : ''}USD value unavailable — no oracle price on chain yet</div></div>`
 }
 
 export function panelTokens(addr: string | null, s: Snapshot, balances: Record<string, number>): string {

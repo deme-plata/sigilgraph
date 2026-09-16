@@ -115,7 +115,16 @@ function renderSwap(): void {
   host.innerHTML = ui.swapModule(snap, swapSt, balances, currentQuote(), wallet) + ui.routeCard(snap, swapSt)
   if (keepFocus && keepId) { const el = document.getElementById(keepId) as HTMLInputElement | null; if (el) { el.focus(); const v = el.value; el.value = ''; el.value = v } }
 }
-function renderTokens(): void { if (snap) $('#tokens').innerHTML = ui.tokenTable(snap, tokSt) }
+// The detail row spans the table with colspan. In fixed table layout (≤520px container) a colspan wider than the
+// VISIBLE column count makes Chrome invent phantom columns for the hidden ones and hand them the Token column's
+// width (measured: Token th 160px → 18px the moment a drawer opened). Span exactly the visible columns instead.
+function fitDetailSpan(): void {
+  const td = document.querySelector<HTMLTableCellElement>('#tokens tr.td-row td'); if (!td) return
+  const n = Array.from(document.querySelectorAll('#tokens thead th')).filter((th) => getComputedStyle(th).display !== 'none').length
+  if (n && td.colSpan !== n) td.colSpan = n
+}
+function renderTokens(): void { if (snap) { $('#tokens').innerHTML = ui.tokenTable(snap, tokSt); fitDetailSpan() } }
+if ('ResizeObserver' in window) new ResizeObserver(() => fitDetailSpan()).observe($('#tokens'))
 function renderPanel(): void {
   if (!snap) return
   $('#panelHead').innerHTML = ui.panelHead(wallet, snap, balances)

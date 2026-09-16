@@ -269,8 +269,20 @@ function syncToggleAria(): void {
   })
 }
 let ariaTimer = 0
-new MutationObserver(() => { clearTimeout(ariaTimer); ariaTimer = window.setTimeout(() => { syncToggleAria(); syncRowArrows() }, 30) }).observe(app, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] })
+new MutationObserver(() => { clearTimeout(ariaTimer); ariaTimer = window.setTimeout(() => { syncToggleAria(); syncRowArrows(); syncClipTitles() }, 30) }).observe(app, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] })
 syncToggleAria()
+// a clipped line gives its full text on hover: every ellipsised element that actually overflows carries its text as a
+// title (and drops it again when it fits — widths change with the viewport, so this runs after renders and resizes)
+const CLIP = '.strip .vt, .strip .s, .card .name, .card .byline, .card .kv .v, .card.sale .proof, .trending td.r, .trending td:nth-child(3), .trending td:nth-child(5), .trending .coll .n, .ttable .tk .nm, .td-cell .v, .pnft .m .n, .pact .w small, .cm-stats .v, .cm-item .t, .cm-item .s, .cm-item .m, .cm-item .h .hx'
+function syncClipTitles(): void {
+  for (const el of document.querySelectorAll<HTMLElement>(CLIP)) {
+    if (el.scrollWidth > el.clientWidth + 1) { const t = (el.textContent || '').replace(/\s+/g, ' ').trim(); if (t && el.title !== t && (!el.title || el.dataset.clip)) { el.title = t; el.dataset.clip = '1' } }
+    else if (el.dataset.clip) { el.removeAttribute('title'); delete el.dataset.clip }
+  }
+}
+let clipTimer = 0
+addEventListener('resize', () => { clearTimeout(clipTimer); clipTimer = window.setTimeout(syncClipTitles, 120) })
+syncClipTitles()
 
 // ── events (delegated) ────────────────────────────────────────────────────
 document.addEventListener('click', (ev) => {

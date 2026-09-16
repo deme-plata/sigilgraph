@@ -530,7 +530,7 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 .td-cell .v { overflow: hidden; text-overflow: ellipsis; }
 .td-cell .v { font-size: 13px; margin-top: 2px; }
 .td-spark .k { font-size: 10.5px; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; }
-.td-spark .spark { display: block; margin: 0; width: 100%; max-width: 420px; height: 48px; }
+.td-spark .spark { display: block; margin: 0; width: 100%; height: 56px; } /* spans the drawer; the stroke is non-scaling so stretching does not thicken it */
 .td-links { display: flex; gap: 8px; flex-wrap: wrap; }
 
 /* ── right wallet panel (OpenSea) ───────────────────────────────────── */

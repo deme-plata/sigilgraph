@@ -22,7 +22,7 @@ export function sparkline(values: number[], w = 120, h = 32, cls = 'up'): string
   const min = Math.min(...v), max = Math.max(...v), span = max - min || 1
   const pts = v.map((x, i) => `${((i / (v.length - 1)) * (w - 2) + 1).toFixed(1)},${(h - 2 - ((x - min) / span) * (h - 4)).toFixed(1)}`)
   const id = 'sp' + (++sparkSeq).toString(36)
-  return `<svg class="spark ${cls}" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" preserveAspectRatio="none"><defs><linearGradient id="${id}" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="currentColor" stop-opacity=".35"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs><path d="M${pts[0]} L${pts.join(' L')} L${w - 1},${h - 1} L1,${h - 1}Z" fill="url(#${id})" stroke="none"/><polyline points="${pts.join(' ')}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/><circle cx="${pts[pts.length - 1].split(',')[0]}" cy="${pts[pts.length - 1].split(',')[1]}" r="2" fill="currentColor"/></svg>`
+  return `<svg class="spark ${cls}" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" preserveAspectRatio="none"><defs><linearGradient id="${id}" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="currentColor" stop-opacity=".35"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs><path d="M${pts[0]} L${pts.join(' L')} L${w - 1},${h - 1} L1,${h - 1}Z" fill="url(#${id})" stroke="none"/><polyline points="${pts.join(' ')}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/><circle cx="${pts[pts.length - 1].split(',')[0]}" cy="${pts[pts.length - 1].split(',')[1]}" r="2" fill="currentColor"/></svg>`
 }
 const ver = (v: boolean) => (v ? '<span class="verified" title="on-chain record family">✓</span>' : '')
 
@@ -385,7 +385,7 @@ function tokenDetailRow(t: Token, s: Snapshot): string {
     cell('Liquidity', t.liquidity === null ? 'no pool' : fmt.num(t.liquidity)),
     cell('Provenance', prov(t.provenance)),
   ]
-  const spark = t.symbol === 'SIGIL' && s.hashHist.length > 2 ? `<div class="td-spark"><div class="k">Network hashrate (mining issuance) · ${fmt.pct(s.head.hashChange)}</div>${sparkline(s.hashHist, 320, 48, (s.head.hashChange ?? 0) < 0 ? 'down' : 'up')}</div>` : ''
+  const spark = t.symbol === 'SIGIL' && s.hashHist.length > 2 ? `<div class="td-spark"><div class="k">Network hashrate (mining issuance) · ${fmt.pct(s.head.hashChange)}</div>${sparkline(s.hashHist, 800, 56, (s.head.hashChange ?? 0) < 0 ? 'down' : 'up')}</div>` : ''
   const links = t.symbol === 'wSIGIL3'
     ? `<a class="btn ghost sm" href="https://polygonscan.com/token/0x3FCED760" target="_blank" rel="noopener">Polygonscan ↗</a><a class="btn ghost sm" href="/bridge-slider.html" target="_blank" rel="noopener">Bridge ↗</a>`
     : t.symbol === 'ROCKY' ? `<a class="btn ghost sm" href="/kristensen-board.html" target="_blank" rel="noopener">K board ↗</a><a class="btn ghost sm" href="/api.html" target="_blank" rel="noopener">/v1/rocky ↗</a>`

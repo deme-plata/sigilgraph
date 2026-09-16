@@ -187,15 +187,33 @@ let heavyAt = 0
 let heavyCache: { recent: Recent | null; hist: { history: HashPoint[] } | null } = { recent: null, hist: null }
 export const getLast = () => lastSnapshot
 
-export async function buildSnapshot(): Promise<Snapshot> {
+/** First paint may pass `soft`: routes that have not answered within `ms` count as unread for THIS render (dash, never
+ *  a zero) and the page paints with what arrived; when the stragglers settle, `onLate` fires so the caller re-polls.
+ *  If NOTHING answered by the deadline the render waits for the full fan-out instead — a slow link must not paint a
+ *  false "node unreachable". */
+export async function buildSnapshot(soft?: { ms: number; onLate: (full: Snapshot) => void }): Promise<Snapshot> {
   const at = Date.now()
   // the two heavy routes (~90 KB each, the site proxy does not gzip them) refresh every 60 s; everything else every poll
   const heavyDue = at - heavyAt > 60_000 || !heavyCache.recent
-  const [supply, miners, anchor, docket, nation, usds, rocky, gauge, bridge, cert, recentNew, pools, histNew, earth] = await Promise.all([
+  const reqs = [
     api.supply(), api.miners(), api.anchor(), api.docket(), api.nation(), api.usds(), api.rocky(), api.gauge(),
     api.bridge(), api.cert(), heavyDue ? api.recent() : Promise.resolve(heavyCache.recent), api.pools(), heavyDue ? api.hashHistory() : Promise.resolve(heavyCache.hist), api.earth(),
-  ])
-  if (heavyDue) { heavyAt = at; heavyCache = { recent: recentNew, hist: histNew } }
+  ] as const
+  let results: Results
+  if (soft) {
+    const LATE = Symbol('late'); let late = false
+    const timer = new Promise<typeof LATE>((r) => setTimeout(() => r(LATE), soft.ms))
+    results = (await Promise.all(reqs.map((p) => Promise.race([p, timer]).then((v) => (v === LATE ? ((late = true), null) : v))))) as unknown as Results
+    if (late && results.every((v) => v === null)) results = (await Promise.all(reqs)) as unknown as Results // nothing yet: wait, do not paint offline
+    else if (late) Promise.all(reqs).then((full) => soft.onLate(assemble(full as unknown as Results, at, heavyDue))).catch(() => { /* the regular poll will catch up */ })
+  } else results = (await Promise.all(reqs)) as unknown as Results
+  return assemble(results, at, heavyDue)
+}
+
+type Results = [Supply | null, Miners | null, Anchor | null, Docket | null, Nation | null, Usds | null, Rocky | null, Gauge | null, Bridge | null, Cert | null, Recent | null, Pool[] | null, { history: HashPoint[] } | null, Earth | null]
+function assemble(results: Results, at: number, heavyDue: boolean): Snapshot {
+  const [supply, miners, anchor, docket, nation, usds, rocky, gauge, bridge, cert, recentNew, pools, histNew, earth] = results
+  if (heavyDue && (recentNew || histNew)) { heavyAt = at; heavyCache = { recent: recentNew, hist: histNew } }
   const recent = recentNew, hist = histNew
   const offline = !supply && !miners && !anchor
   const mem = loadMem()

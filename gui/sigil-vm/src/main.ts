@@ -202,7 +202,8 @@ async function poll(): Promise<void> {
   try {
     const prevHeight = snap?.head.height ?? 0
     const firstPaint = !snap
-    snap = await buildSnapshot()
+    // first paint: give every route 2.5 s, paint with what arrived (late routes read as unread), re-poll when they settle
+    snap = await buildSnapshot(firstPaint ? { ms: 2500, onLate: (full) => { if (!polling) { snap = full; void loadBalances().then(renderAll) } } } : undefined)
     await loadBalances()
     renderAll()
     // a deep link (#dex, #trending…) scrolled before the live content existed — re-anchor once the page has its real height

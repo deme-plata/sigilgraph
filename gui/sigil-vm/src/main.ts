@@ -238,7 +238,8 @@ document.addEventListener('input', (ev) => {
     const rng = $('#swapRange') as HTMLInputElement | null; if (rng) rng.value = pct.toFixed(0)
     const from = snap.tokens.find((x) => x.id === swapSt.from)!, to = snap.tokens.find((x) => x.id === swapSt.to)!
     const go = $('#swapGo') as HTMLButtonElement | null
-    if (go) { const noPool = !snap.pools.length; go.disabled = noPool || amt <= 0; go.textContent = amt <= 0 ? 'Enter an amount' : noPool ? 'No pool yet' : `Swap ${from.symbol} → ${to.symbol}` }
+    if (go) { const noPool = !snap.pools.length; const over = balances[from.id] !== undefined && amt > bal; go.disabled = noPool || amt <= 0 || over; go.classList.toggle('insufficient', over); go.textContent = amt <= 0 ? 'Enter an amount' : over ? `Insufficient ${from.symbol} balance` : noPool ? 'No pool yet' : `Swap ${from.symbol} → ${to.symbol}` }
+    const amtEl = $('#swapAmt'); if (amtEl) amtEl.classList.toggle('over', balances[from.id] !== undefined && amt > bal)
     const rate = document.querySelector('.info:not(.warnbox) .v'); if (rate && q && amt > 0) rate.textContent = `1 ${from.symbol} ≈ ${(q.out / amt).toFixed(6)} ${to.symbol}`
     return
   }

@@ -443,7 +443,7 @@ toTop.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smoot
 
 // ── boot ──────────────────────────────────────────────────────────────────
 try { const w = localStorage.getItem('sigilvm-wallet'); if (w) wallet = w } catch { /* */ }
-try { const qw = new URLSearchParams(location.search).get('wallet'); if (qw && /^[0-9a-f]{64}$/i.test(qw)) { wallet = qw.toLowerCase(); app.classList.add('panel-open'); localStorage.setItem('sigilvm-wallet', wallet) } } catch { /* */ }
+try { const qw = new URLSearchParams(location.search).get('wallet'); if (qw && /^[0-9a-f]{64}$/i.test(qw)) { wallet = qw.toLowerCase(); app.classList.add('panel-open'); localStorage.setItem('sigilvm-wallet', wallet) } else if (qw) { setTimeout(() => toast(`Ignored ?wallet=${qw.slice(0, 12)}${qw.length > 12 ? '…' : ''} — a SIGIL wallet id is 64 hex characters (this is ${qw.length}).`, 'warn'), 400) } } catch { /* */ }
 poll()
 setInterval(() => { if (!document.hidden) poll() }, 10_000)
 document.addEventListener('visibilitychange', () => { if (!document.hidden) poll() })

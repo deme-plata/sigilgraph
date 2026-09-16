@@ -49,7 +49,26 @@ try {
         return true
       }).map((e) => `${e.tagName.toLowerCase()}.${String(e.className).split(' ')[0]} ${e.scrollWidth}>${e.clientWidth}`).slice(0, 6),
     }))
+    // dialogs: open the widest collection sheet and the connect sheet, and look for anything poking out of the box
+    // (tick 217: stat tiles ran 16px past the phone sheet under its own overflow clip)
+    const dialogProbe = async (open) => {
+      await page.evaluate(open); await page.waitForTimeout(350)
+      const r = await page.evaluate(() => {
+        const box = document.querySelector('#modal.open .box'); if (!box) return ['dialog did not open']
+        const br = box.getBoundingClientRect(); const out = []
+        if (br.right > innerWidth + 1 || br.left < -1) out.push(`box ${Math.round(br.left)}..${Math.round(br.right)} vs ${innerWidth}`)
+        box.querySelectorAll('*').forEach((e) => { const rr = e.getBoundingClientRect(); if (rr.width > 0 && rr.right > br.right + 1 && !e.closest('.list, .cm-items')) out.push(`${e.tagName.toLowerCase()}.${String(e.className).split(' ')[0]} +${Math.round(rr.right - br.right)}px`) })
+        return out.slice(0, 5)
+      })
+      await page.keyboard.press('Escape'); await page.waitForTimeout(150)
+      return r
+    }
+    const dlg = [
+      ...(await dialogProbe(() => { const c = [...document.querySelectorAll('#featuredRow .card')].find((x) => x.dataset.coll === 'earth') || document.querySelector('#featuredRow .card'); c?.click() })).map((x) => 'collection sheet: ' + x),
+      ...(await dialogProbe(() => document.getElementById('walletBtn')?.click())).map((x) => 'connect sheet: ' + x),
+    ]
     const bad = []
+    if (dlg.length) bad.push(dlg.join('; '))
     if (m.docW > w) bad.push(`page overflows ${m.docW}/${w}`)
     if (m.topW > w) bad.push(`topbar overflows ${m.topW}/${w}`)
     if (!m.wallet) bad.push('wallet button off-screen')

@@ -17,7 +17,7 @@
   --ink: #ffffff;
   --ink-2: #d6d6de;
   --muted: #a4a4b0;
-  --muted-2: #7a7a88;
+  --muted-2: #83839a; /* ≥4.5:1 on every dark surface (was 4.26 on --surface) */
   --cyan: #00D9FF;
   --purple: #6B46C1;
   --violet: #8b5cf6;
@@ -48,7 +48,7 @@
 }
 :root[data-theme="light"] {
   --bg: #f6f6f9; --bg-2: #ffffff; --surface: #ffffff; --surface-2: #f3f3f7; --surface-3: #e8e8ee; --glass: rgba(255,255,255,.78);
-  --line: rgba(0,0,0,.08); --line-2: rgba(0,0,0,.15); --hover: rgba(0,0,0,.045); --hover-2: rgba(0,0,0,.08); --card-shadow: 0 14px 34px rgba(20,20,40,.14); --ink: #0b0b0e; --ink-2: #2a2a33; --muted: #5d5d6a; --muted-2: #8b8b98;
+  --line: rgba(0,0,0,.08); --line-2: rgba(0,0,0,.15); --hover: rgba(0,0,0,.045); --hover-2: rgba(0,0,0,.08); --card-shadow: 0 14px 34px rgba(20,20,40,.14); --ink: #0b0b0e; --ink-2: #2a2a33; --muted: #5d5d6a; --muted-2: #6e6e7c; /* 4.65:1 on the light page (was 3.12 — failed AA) */
   --topbar-bg: rgba(255,255,255,.84); --bnav-bg: rgba(255,255,255,.95); --th-bg: rgba(255,255,255,.95); --chip-on-bg: #0b0b0e; --chip-on-ink: #fff; --hero-veil: 20,20,26;
   color-scheme: light;
 }

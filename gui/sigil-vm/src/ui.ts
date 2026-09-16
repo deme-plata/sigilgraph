@@ -432,18 +432,18 @@ export function panelTokens(addr: string | null, s: Snapshot, balances: Record<s
 
 export function panelNfts(addr: string | null, s: Snapshot): string {
   if (!addr) return `<div class="pempty"><div class="big">${I.grid}</div>Your on-chain records — honours, seats, rigs, attestations — appear here once a wallet is connected.</div>`
-  const mine: { name: string; coll: string; cover: string; id: string }[] = []
+  const mine: { name: string; coll: string; cover: string; id: string; cite?: string }[] = []
   const a = addr.toLowerCase()
   for (const e of s.docket?.entries ?? []) {
     const ev = e.event as { recipient?: number[]; justice?: number[]; order?: string }
     const rec = (ev.recipient || ev.justice || []).map((b) => b.toString(16).padStart(2, '0')).join('')
-    if (rec === a) mine.push({ id: e.kind === 'HonourConferred' ? 'honours' : 'bench', name: e.kind === 'HonourConferred' ? (ev.order || 'Honour') : 'Justice seat', coll: e.kind === 'HonourConferred' ? 'Elefantordenen' : 'Justices of the Bench', cover: s.collections.find((c) => c.id === (e.kind === 'HonourConferred' ? 'honours' : 'bench'))!.cover })
+    if (rec === a) mine.push({ id: e.kind === 'HonourConferred' ? 'honours' : 'bench', name: e.kind === 'HonourConferred' ? `Honour${(ev as { rank?: string }).rank ? ' · ' + (ev as { rank?: string }).rank : ''} · docket #${e.seq}` : `Justice seat · docket #${e.seq}`, coll: e.kind === 'HonourConferred' ? (ev.order || 'Elefantordenen') : 'Justices of the Bench', cite: (ev as { citation?: string }).citation || '', cover: s.collections.find((c) => c.id === (e.kind === 'HonourConferred' ? 'honours' : 'bench'))!.cover })
   }
   for (const m of s.miners?.miners ?? []) if (m.wallet.toLowerCase() === a) mine.push({ id: 'rigs', name: m.rig || 'rig', coll: "Miners' Rigs", cover: s.collections.find((c) => c.id === 'rigs')!.cover })
   const ew = s.earth?.attest_last?.anchor?.wallet || ''
   if (ew.includes(a)) mine.push({ id: 'earth', name: 'K⊕ attester', coll: 'Kristensen Earth', cover: s.collections.find((c) => c.id === 'earth')!.cover })
   if (!mine.length) return `<div class="pempty"><div class="big">${I.eye}</div>No on-chain records for ${fmt.short(addr, 6)} yet.<br><span class="muted">Mine a block, earn an honour, or anchor an attestation.</span></div>`
-  return `<div class="pgrid">${mine.map((n) => `<button class="pnft" data-coll="${n.id}"><div class="img" style="background-image:url('${n.cover}')"></div><div class="m"><div class="n">${esc(n.name)}</div><div class="c">${esc(n.coll)}</div></div></button>`).join('')}</div>`
+  return `<div class="pgrid">${mine.map((n) => `<button class="pnft" data-coll="${n.id}"${n.cite ? ` title="${esc(n.cite)}"` : ''}><div class="img" style="background-image:url('${n.cover}')"></div><div class="m"><div class="n">${esc(n.name)}</div><div class="c">${esc(n.coll)}</div></div></button>`).join('')}</div>`
 }
 
 export function panelActivity(s: Snapshot): string {

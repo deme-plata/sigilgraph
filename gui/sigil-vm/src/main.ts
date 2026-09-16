@@ -51,6 +51,11 @@ function setPanel(open: boolean, persist = true): void {
     if (drawer && panelOpener && document.contains(panelOpener)) panelOpener.focus()
   }
 }
+// a tablet rotated with the panel open crosses the drawer/docked line — inert must follow the mode, not the click
+addEventListener('resize', () => {
+  const open = app.classList.contains('panel-open'), drawer = innerWidth <= 1100
+  for (const el of [$('#main'), document.querySelector('.topbar')]) { if (!el) continue; if (open && drawer) el.setAttribute('inert', ''); else if (!$('#modal').classList.contains('open')) el.removeAttribute('inert') }
+})
 
 function toast(msg: string, cls = ''): void {
   const host = $('#toasts')

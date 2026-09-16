@@ -281,6 +281,14 @@ function globalSearch(q: string): void {
   const ts = snap.tokens.filter((t) => (t.symbol + t.name).toLowerCase().includes(q)).slice(0, 4)
   if (ts.length) rows.push('<div class="h">Tokens</div>' + ts.map((t) => `<div class="r" data-swap="${t.id}"><img src="${t.icon}" alt=""><div><div class="n">${t.symbol}</div><div class="s">${ui.esc(t.statusNote)}</div></div></div>`).join(''))
   const ms = (snap.miners?.miners ?? []).filter((m) => (m.rig + m.wallet).toLowerCase().includes(q)).slice(0, 4)
+  // a block height typed in: find it in the recent set, or say it is older / not minted yet
+  const hq = q.replace(/[,\s]/g, '')
+  if (/^\d{4,}$/.test(hq)) {
+    const h = Number(hq)
+    const blk = snap.recent?.blocks.find((x) => x.height === h)
+    const sub = blk ? `${blk.is_blue ? 'blue' : 'red'} · score ${fmt.int(blk.blue_score)} · in the recent set` : h <= snap.head.height ? 'older than the recent set · open the braid' : 'not minted yet'
+    rows.push(`<div class="h">Block</div><div class="r" data-coll="blocks"><img src="${snap.collections.find((c) => c.id === 'blocks')!.cover}" alt=""><div><div class="n mono">#${fmt.int(h)}</div><div class="s">${sub}</div></div></div>`)
+  }
   if (ms.length) rows.push('<div class="h">Rigs</div>' + ms.map((m) => `<div class="r"><img src="${snap!.collections[0].cover}" alt=""><div><div class="n">${ui.esc(m.rig)}</div><div class="s">${fmt.hps(m.hash_rate)} · ${fmt.short(m.wallet, 6)}</div></div></div>`).join(''))
   if (/^[0-9a-f]{64}$/.test(q)) rows.push(`<div class="h">Wallet</div><div class="r" id="qWallet"><div><div class="n mono">${fmt.short(q, 8)}</div><div class="s">open in panel</div></div></div>`)
   box.innerHTML = rows.join('') || '<div class="h">No matches on this node</div>'

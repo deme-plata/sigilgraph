@@ -72,6 +72,7 @@ img { display: block; }
 @keyframes pulse { 0%, 100% { opacity: .5; transform: scale(1) } 50% { opacity: 1; transform: scale(1.06) } }
 @keyframes glow { 0%, 100% { box-shadow: 0 0 10px rgba(6,182,212,.5) } 33% { box-shadow: 0 0 20px rgba(139,92,246,.8) } 66% { box-shadow: 0 0 10px rgba(236,72,153,.5) } }
 @keyframes rise { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: none } }
+@keyframes sheet { from { transform: translateY(40px); opacity: .6 } to { transform: none; opacity: 1 } }
 @keyframes shimmer { 0% { background-position: -400px 0 } 100% { background-position: 400px 0 } }
 @keyframes flashv { 0% { background: rgba(0,217,255,.28); box-shadow: 0 0 0 4px rgba(0,217,255,.18) } 100% { background: transparent; box-shadow: none } }
 .flash { animation: flashv 1.4s ease-out; border-radius: 6px; }
@@ -643,6 +644,12 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
   .panel { bottom: 62px; }
   .toasts { bottom: 76px; }
   .actions .ibtn#bellBtn, .actions .ibtn#cartBtn, .actions #panelBtn, .actions .chain-wrap { display: none; }
+  .modal { place-items: end center; }
+  .modal .box.coll { width: 100vw; max-height: 94vh; border-radius: 18px 18px 0 0; animation: sheet .22s ease; }
+  .cm-title h3 { font-size: 20px; }
+  .cm-title img { width: 72px; height: 72px; }
+  .cm-head { height: 120px; flex-basis: 120px; }
+  .cm-stats { grid-template-columns: 1fr 1fr; }
   #walletBtn { padding: 0 12px; }
   #walletBtn span { display: none; }
   .search { max-width: none; }

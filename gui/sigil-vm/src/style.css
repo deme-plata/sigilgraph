@@ -310,7 +310,7 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 
 /* ── for you ────────────────────────────────────────────────────────── */
 .foryou { display: grid; grid-template-columns: 1fr; gap: 14px; margin-top: 14px; align-items: start; }
-@media (min-width: 1100px) { .foryou { grid-template-columns: 1.15fr 1fr; } }
+@media (min-width: 1100px) { .foryou { grid-template-columns: 1fr 1.2fr; align-items: stretch; } }
 .fy-col { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; }
 .fy-h { font-family: var(--display); font-weight: 700; font-size: 15px; margin-bottom: 8px; }
 .fy-h .muted { font-family: var(--sans); font-weight: 500; font-size: 12.5px; }

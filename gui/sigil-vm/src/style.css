@@ -92,7 +92,7 @@ img { display: block; }
 @keyframes shimmer { 0% { background-position: -400px 0 } 100% { background-position: 400px 0 } }
 @keyframes flashv { 0% { background: rgba(0,217,255,.28); box-shadow: 0 0 0 4px rgba(0,217,255,.18) } 100% { background: transparent; box-shadow: none } }
 .flash { animation: flashv 1.4s ease-out; border-radius: 6px; }
-@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; } .ticker { display: none; } .hero .dots { display: none; } }
 
 /* ── first-paint skeletons ──────────────────────────────────────────── */
 .sk { border-radius: 8px; background: linear-gradient(90deg, rgba(255,255,255,.05) 25%, rgba(255,255,255,.11) 50%, rgba(255,255,255,.05) 75%); background-size: 800px 100%; animation: shimmer 1.4s infinite linear; }

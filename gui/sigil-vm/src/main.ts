@@ -48,6 +48,8 @@ function renderHero(): void {
   swapWithFlash($('#strip'), ui.strip(snap))
   swapWithFlash($('#foryou'), ui.forYou(snap))
   clearTimeout(heroTimer)
+  // a reduced-motion visitor gets a still hero (thumbnails still switch it by hand)
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return
   heroTimer = window.setTimeout(() => { if (!heroHover) heroIdx++; renderHero() }, 7000)
 }
 // OpenSea flashes a value that changed between polls; we diff the rendered text per cell.

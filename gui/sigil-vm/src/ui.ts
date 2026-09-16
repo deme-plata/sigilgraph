@@ -121,7 +121,7 @@ export function shell(): string {
       <div class="row" id="salesRow">${skeleton(6, 'sale')}</div>
     </section>
     <section id="dex" class="section" aria-labelledby="h-dex">
-      <div class="sec-head"><div><h2 id="h-dex">Swap &amp; Tokens</h2><div class="sub">The Quillon Graph DEX modules, on SIGIL: the swap module and the token list side by side. Signing happens in your wallet.</div></div><div class="right"><a class="viewall" href="/sigil-dex.html" target="_blank" rel="noopener">Trading desk</a></div></div>
+      <div class="sec-head"><div><h2 id="h-dex">Swap &amp; Tokens</h2><div class="sub">The Quillon Graph DEX modules, on SIGIL: the swap module and the token list. Signing happens in your wallet.</div></div><div class="right"><a class="viewall" href="/sigil-dex.html" target="_blank" rel="noopener">Trading desk</a></div></div>
       <div class="dex"><div id="swap">${skSwap()}</div><div id="tokens">${skTokens()}</div></div>
     </section>
     <div class="legend" id="legend"></div>

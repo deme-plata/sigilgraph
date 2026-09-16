@@ -130,7 +130,7 @@ function swapWithFlash(host: HTMLElement, html: string): void {
 }
 function renderRows(): void {
   if (!snap) return
-  const feat = cat === 'all' ? snap.featured : snap.collections.filter((c) => c.cat === cat)
+  const feat = cat === 'all' ? snap.featured : snap.collections.filter((c) => c.cat === cat).sort((a, b) => (b.items ?? 0) - (a.items ?? 0)) // the subtitle promises 'ranked by items' — for a category too
   $('#featuredRow').classList.toggle('grid', cat !== 'all')
   swapWithFlash($('#featuredRow'), feat.map(ui.collectionCard).join('') || '<div class="pempty">No collections in this category.</div>')
   const tt = $('#tickerTrack'); const th = ui.ticker(snap); if (tt.innerHTML !== th) { tt.innerHTML = th; tt.style.animationDuration = `${Math.max(20, (tt.scrollWidth / 2) / 80)}s` } // constant ~80 px/s whatever the item count (a fixed 60 s made a long ticker race and a short one crawl)

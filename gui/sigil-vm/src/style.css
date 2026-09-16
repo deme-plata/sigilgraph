@@ -717,6 +717,8 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
   .search input { height: 40px; padding-left: 38px; padding-right: 10px; }
   .sec-head h2 { font-size: 19px; }
   .sec-head .sub { font-size: 12px; }
+  .sec-head .right { flex: 1 1 100%; }
+  .sec-head .right .viewall { margin-left: auto; } /* when the toggles wrap, View all sits at the right edge, not orphaned left */
   .topbar .actions { flex: 0 0 auto; }
   #walletBtn { width: 40px; padding: 0; }
   .hero { height: auto; min-height: 380px; }
@@ -767,3 +769,4 @@ footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 
 
 /* embedded inside the showcase frame: no phone bar, no auto panel */
 .app.embed .bottomnav { display: none !important; }
+@media (hover: none) and (pointer: coarse) { .foot-keys { display: none; } } /* no keyboard, no shortcut hint */

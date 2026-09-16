@@ -280,7 +280,7 @@ export function trending(s: Snapshot, mode: 'trending' | 'top', win: string): st
 // ── DEX: swap module (Quillon-shaped) ─────────────────────────────────────
 export interface SwapState { mode: 'market' | 'limit'; from: string; to: string; amount: string; limitPrice: string; limitDir: 'buy' | 'sell'; slippage: number }
 
-export function swapModule(s: Snapshot, st: SwapState, balances: Record<string, number>, q: { out: number; impact: number } | null): string {
+export function swapModule(s: Snapshot, st: SwapState, balances: Record<string, number>, q: { out: number; impact: number } | null, wallet: string | null = null): string {
   const tk = (id: string) => s.tokens.find((t) => t.id === id) || s.tokens[0]
   const from = tk(st.from), to = tk(st.to)
   const bal = balances[from.id] ?? 0
@@ -289,18 +289,18 @@ export function swapModule(s: Snapshot, st: SwapState, balances: Record<string, 
   const noPool = !s.pools.length
   const sel = (which: 'from' | 'to', t: Token) => `<button class="tsel" data-sel="${which}"><img src="${t.icon}" alt=""><span>${esc(t.symbol)}</span><span class="car">▼</span></button>`
   const marketForm = `
-    <div class="field"><label><span>From</span><span class="bal">Balance: ${bal.toFixed(4)}<button class="maxbtn" data-max="1">MAX</button></span></label>
+    <div class="field"><label><span>From</span><span class="bal">${wallet ? `Balance: ${bal.toFixed(4)}<button class="maxbtn" data-max="1">MAX</button>` : `<button class="maxbtn" id="swapConnect">Connect wallet to see balance</button>`}</span></label>
       <div class="amt"><input id="swapAmt" type="number" inputmode="decimal" placeholder="0.0" value="${esc(st.amount)}" min="0" step="any">${sel('from', from)}</div></div>
     <div class="slider"><div class="lab"><span>Quick Select Amount</span><b>${pctv.toFixed(0)}%</b></div>
       <div class="track"><div class="fill" style="width:${pctv}%"></div><input id="swapRange" type="range" min="0" max="100" step="1" value="${pctv.toFixed(0)}"></div>
       <div class="quick">${[25, 50, 75, 100].map((p) => `<button data-pct="${p}">${p}%</button>`).join('')}</div></div>
     <div class="flip"><button id="swapFlip" title="Flip">${I.updown}</button></div>
-    <div class="field"><label><span>To (Estimated)</span><span class="bal">${to.symbol} · ${(balances[to.id] ?? 0).toFixed(4)}</span></label>
+    <div class="field"><label><span>To (Estimated)</span><span class="bal">${wallet ? `${to.symbol} · ${(balances[to.id] ?? 0).toFixed(4)}` : esc(to.symbol)}</span></label>
       <div class="amt"><input id="swapOut" type="text" readonly placeholder="0.0" value="${q ? q.out.toFixed(6) : ''}">${sel('to', to)}</div></div>
     ${noPool
       ? `<div class="info warnbox">No liquidity pool exists on sigil-g2 for ${esc(from.symbol)}/${esc(to.symbol)} yet — <span class="mono">/v1/pools</span> is empty, so there is no quote to show. The module is wired to the constant-product formula and lights up the moment a pool is added.</div>`
       : `<div class="info"><div><span class="k">Rate</span><span class="v">1 ${esc(from.symbol)} ≈ ${q && amt > 0 ? (q.out / amt).toFixed(6) : '—'} ${esc(to.symbol)}</span></div><div><span class="k">Price impact</span><span class="v ${q && q.impact > 5 ? 'down' : ''}">${q ? q.impact.toFixed(2) + '%' : '—'}</span></div><div><span class="k">Fee</span><span class="v">0.30%</span></div><div><span class="k">Slippage</span><span class="v">${st.slippage.toFixed(1)}%</span></div></div>`}
-    <button class="btn primary lg full swapbtn${balances[from.id] !== undefined && amt > bal ? ' insufficient' : ''}" id="swapGo" ${noPool || amt <= 0 || (balances[from.id] !== undefined && amt > bal) ? 'disabled' : ''}>${amt <= 0 ? 'Enter an amount' : balances[from.id] !== undefined && amt > bal ? `Insufficient ${esc(from.symbol)} balance` : noPool ? 'No pool yet' : `Swap ${esc(from.symbol)} → ${esc(to.symbol)}`}</button>
+    ${!wallet ? `<button class="btn primary lg full swapbtn" id="swapConnect2">Connect wallet</button>` : `<button class="btn primary lg full swapbtn${balances[from.id] !== undefined && amt > bal ? ' insufficient' : ''}" id="swapGo" ${noPool || amt <= 0 || (balances[from.id] !== undefined && amt > bal) ? 'disabled' : ''}>${amt <= 0 ? 'Enter an amount' : balances[from.id] !== undefined && amt > bal ? `Insufficient ${esc(from.symbol)} balance` : noPool ? 'No pool yet' : `Swap ${esc(from.symbol)} → ${esc(to.symbol)}`}</button>`}
     <div class="muted" style="font-size:11.5px;margin-top:8px;text-align:center">Signing and the STARK proof happen in your wallet — this page never sees a seed.</div>`
   const limitForm = `<div class="limit">
     <div class="pair"><div style="flex:1"><div class="sm">Sell</div>${sel('from', from)}<div class="sm" style="text-align:right;margin-top:4px">Balance: ${bal.toFixed(4)}</div></div><div class="arrow">→</div><div style="flex:1"><div class="sm">Buy</div>${sel('to', to)}<div class="sm" style="text-align:right;margin-top:4px">${to.symbol} · ${(balances[to.id] ?? 0).toFixed(4)}</div></div></div>

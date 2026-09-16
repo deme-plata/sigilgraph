@@ -104,7 +104,7 @@ function renderSwap(): void {
   const active = document.activeElement as HTMLInputElement | null
   const keepFocus = !!active && (active.id === 'swapAmt' || active.id === 'limitPx')
   const keepId = active?.id
-  host.innerHTML = ui.swapModule(snap, swapSt, balances, currentQuote()) + ui.routeCard(snap, swapSt)
+  host.innerHTML = ui.swapModule(snap, swapSt, balances, currentQuote(), wallet) + ui.routeCard(snap, swapSt)
   if (keepFocus && keepId) { const el = document.getElementById(keepId) as HTMLInputElement | null; if (el) { el.focus(); const v = el.value; el.value = ''; el.value = v } }
 }
 function renderTokens(): void { if (snap) $('#tokens').innerHTML = ui.tokenTable(snap, tokSt) }
@@ -182,6 +182,7 @@ document.addEventListener('click', (ev) => {
   if (btn.id === 'themeBtn') { theme = theme === 'dark' ? 'light' : 'dark'; applyTheme(theme); try { localStorage.setItem('sigilvm-theme', theme) } catch { /* */ } return }
   if (btn.id === 'panelBtn') { app.classList.toggle('panel-open'); try { localStorage.setItem('sigilvm-panel', app.classList.contains('panel-open') ? 'open' : 'closed') } catch { /* */ } return }
   if (btn.id === 'bnWallet') { ev.preventDefault(); app.classList.toggle('panel-open'); renderPanel(); return }
+  if (btn.id === 'swapConnect' || btn.id === 'swapConnect2') { openWalletModal(); return }
   if (btn.id === 'walletBtn') { if (wallet) { app.classList.add('panel-open'); return } openWalletModal(); return }
   if (btn.id === 'pDisconnect') { wallet = null; try { localStorage.removeItem('sigilvm-wallet') } catch { /* */ } for (const k in balances) delete balances[k]; renderChain(); renderPanel(); renderSwap(); return }
   if (btn.id === 'bellBtn') { $('#bellBadge').hidden = true; panelTab = 'activity'; app.classList.add('panel-open'); renderPanel(); return }

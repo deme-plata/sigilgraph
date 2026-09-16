@@ -475,6 +475,13 @@ function globalSearch(q: string): void {
   const qw = box.querySelector('#qWallet'); if (qw) qw.addEventListener('click', () => { wallet = q; try { localStorage.setItem('sigilvm-wallet', q) } catch { /* */ } setPanel(true, false); box.classList.remove('open'); poll() })
 }
 
+// swipe on the hero (phones): a horizontal drag of ≥48px switches the slide; vertical drags keep scrolling the page
+{ let sx = 0, sy = 0, live = false
+  const hero = $('#hero')
+  hero.addEventListener('pointerdown', (e) => { if (e.pointerType === 'mouse') return; sx = e.clientX; sy = e.clientY; live = true }, { passive: true })
+  hero.addEventListener('pointerup', (e) => { if (!live) return; live = false; const dx = e.clientX - sx, dy = e.clientY - sy; if (Math.abs(dx) < 48 || Math.abs(dx) < Math.abs(dy) * 1.5 || !snap) return; heroIdx = (heroIdx + (dx < 0 ? 1 : snap.featured.length - 1)) % snap.featured.length; renderHero() }, { passive: true })
+  hero.addEventListener('pointercancel', () => { live = false }, { passive: true })
+}
 $('#hero').addEventListener('mouseenter', () => { heroHover = true })
 $('#hero').addEventListener('mouseleave', () => { heroHover = false; if (heroPending) { heroPending = false; clearTimeout(heroTimer); heroTimer = window.setTimeout(() => { heroIdx++; renderHero() }, 1200) } })
 

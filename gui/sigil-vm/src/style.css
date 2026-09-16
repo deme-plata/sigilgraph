@@ -247,7 +247,7 @@ img { display: block; }
 .arrows svg { width: 16px; height: 16px; }
 
 /* ── hero ───────────────────────────────────────────────────────────── */
-.hero { position: relative; height: 480px; border-radius: 20px; overflow: hidden; border: 1px solid var(--line); background: var(--surface); }
+.hero { touch-action: pan-y; position: relative; height: 480px; border-radius: 20px; overflow: hidden; border: 1px solid var(--line); background: var(--surface); }
 .hero .bg { position: absolute; inset: 0; background-size: cover; background-position: center; transform: scale(1.02); transition: opacity .6s ease; filter: saturate(1.1); animation: kenburns 14s ease-in-out infinite alternate; }
 @keyframes kenburns { from { transform: scale(1.02) translate(0, 0) } to { transform: scale(1.1) translate(-1.5%, 1%) } }
 .hero .veil { position: absolute; inset: 0; background: linear-gradient(90deg, rgba(var(--hero-veil),.92) 0%, rgba(var(--hero-veil),.65) 45%, rgba(var(--hero-veil),.15) 100%), linear-gradient(0deg, rgba(var(--hero-veil),.9) 0%, transparent 55%); }

@@ -198,7 +198,7 @@ document.addEventListener('click', (ev) => {
   if (ds.mode && btn.closest('#trendMode')) { trendMode = ds.mode as typeof trendMode; document.querySelectorAll('#trendMode button').forEach((b) => b.classList.toggle('on', b === btn)); if (snap) $('#trendingTable').innerHTML = ui.trending(snap, trendMode, trendWin); return }
   if (ds.cat) { cat = ds.cat; document.querySelectorAll('#cats button').forEach((b) => b.classList.toggle('on', b === btn)); renderRows(); $('#featured').scrollIntoView({ behavior: 'smooth', block: 'start' }); return }
   if (ds.win) { trendWin = ds.win; document.querySelectorAll('#trendWin button').forEach((b) => b.classList.toggle('on', b === btn)); if (snap) $('#trendingTable').innerHTML = ui.trending(snap, trendMode, trendWin); return }
-  if (ds.copy) { ev.preventDefault(); ev.stopPropagation(); navigator.clipboard?.writeText(ds.copy).then(() => toast('Proof copied.')).catch(() => toast('Clipboard blocked.', 'warn')); return }
+  if (ds.copy) { ev.preventDefault(); ev.stopPropagation(); navigator.clipboard?.writeText(ds.copy).then(() => toast(`Copied ${ds.copy!.length === 64 ? 'id' : 'hash'} ${ds.copy!.slice(0, 8)}…`)).catch(() => toast('Clipboard blocked.', 'warn')); return }
   if (ds.coll && !ev.ctrlKey && !ev.metaKey && !(ev as MouseEvent).button) { ev.preventDefault(); openCollection(ds.coll); return }
   const arrows = btn.closest('.arrows') as HTMLElement | null
   if (arrows && btn.tagName === 'BUTTON') { const row = $('#' + arrows.dataset.scroll); const dir = Array.from(arrows.children).indexOf(btn) === 0 ? -1 : 1; row.scrollBy({ left: dir * (row.clientWidth * 0.8), behavior: 'smooth' }); return }

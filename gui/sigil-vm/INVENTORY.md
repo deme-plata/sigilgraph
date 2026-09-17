@@ -175,3 +175,21 @@ Your estimate of one month is right *for the surface*; the marketplace underneat
 Every week ends the way this one did: through the Flux Vite engine gate, shot at five widths in two themes, labelled live / derived / pretend — with fewer "pretend" chips each Friday.
 
 **Not in the month (and should not be):** price oracles beyond USDS, cross-chain listings, limit-order books. Those are chains of their own.
+
+---
+
+## 4. Addendum — 2026-09-17 (ticks 306–355)
+
+New since the inventory above. None of it invents a chain figure; the first three are the visitor's own, kept in the browser.
+
+| addition | status | note |
+|---|---|---|
+| Watchlist — ☆ on Trending rows and in the collection sheet, a **Watching** view | BROWSER-ONLY | `localStorage sigilvm-watch`; nothing on chain |
+| Empty search start — **Recent** (last 4 collections opened here) + **Trending now** (top 4 by items) + native tokens | BROWSER-ONLY / LIVE | Recent is local; Trending now and tokens are the live snapshot |
+| **yours** marks — sheet items, Weekly Sales cards, Top Movers cards, panel NFTs and Activity ("Yours" group) for the connected wallet | LIVE | matched on the on-chain wallet id (rig wallet, justice, honour recipient, attester) |
+| Drop status **external** (wSIGIL3 Polygon leg) | PRETEND | live on Polygon, read from nowhere on this page — the old card wore PRETEND and LIVE together |
+| Links: Rocky K⊕ Cover → `/v1/rocky`, USDS → the wallet's USDS desk + `/v1/usds/status`, bench/honours → wallet `#court` (court.js now opens on that hash) | LIVE | every "source page" was followed to what it actually shows |
+| Gate: keyboard-ring contrast (24 Tab stops/theme), 8 by-hand states scanned, search dropdown at every viewport, `[hidden]` honoured, one starred row before the scan | — | `guard.mjs` |
+| Reduced motion keeps the ticker (hand-scrollable); forced colours get Highlight markers; landscape phones get a text-height hero and a compact drawer | — | `style.css` media blocks |
+
+Still exactly as pretend as before: listings, sales, prices, liquidity, signing from the page, item metadata, chain-wide series.

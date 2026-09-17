@@ -316,6 +316,8 @@ function keepFocus(btn: HTMLElement): void {
 document.addEventListener('click', (ev) => {
   const t = ev.target as HTMLElement
   if (t.id === 'modal') { closeModal(); return }
+  // a chip's explanation is a tooltip on desktop; on a touch screen a tap on a free-standing chip says it in a toast
+  { const chip = t.closest('.chip[title], .status[title]') as HTMLElement | null; if (chip && chip.title && !chip.closest('button, a, tr[data-coll], [role="button"], .modal .box .list')) { toast(chip.title); return } }
   if (t.id === 'panelScrim') { setPanel(false); return }
   // th before tr: a header click used to resolve to its <tr>, so th[data-sort] was never found and the token table never re-sorted
   const btn = t.closest('th[data-sort], button, a, tr, [data-hero], [data-coll], [data-swap], [data-copy]') as HTMLElement | null

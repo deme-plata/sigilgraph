@@ -492,6 +492,7 @@ function closeModal(fromHistory = false, handoff = false): void {
   sheetPushed = false
   if (modalPushed && !fromHistory && !handoff) { modalPushed = false; try { if ((history.state as { modal?: number } | null)?.modal) history.back() } catch { /* */ } }
   if (fromHistory) modalPushed = false
+  if (openCollId) document.title = BASE_TITLE
   modalOpener?.focus?.(); modalOpener = null; openCollId = null
 }
 addEventListener('popstate', () => {
@@ -515,7 +516,8 @@ document.addEventListener('keydown', (ev) => {
 const recent: string[] = []
 try { for (const id of JSON.parse(localStorage.getItem('sigilvm-recent') || '[]')) if (typeof id === 'string' && recent.length < 4) recent.push(id) } catch { /* */ }
 let sheetPushed = false // true when opening the sheet pushed a history entry (a click); false for a deep-linked arrival, where Back should leave the page
-function openCollection(id: string, fromUrl = false): void { const c = snap?.collections.find((x) => x.id === id); if (c) { openCollId = id; openModal(ui.collectionModal(c, snap!, watch.has(id), wallet), 'coll'); try { if (fromUrl) { history.replaceState({ coll: id }, '', '#coll=' + id); sheetPushed = false } else if ((history.state as { coll?: string } | null)?.coll !== id) { history.pushState({ coll: id }, '', '#coll=' + id); sheetPushed = true } } catch { /* Back closes the sheet */ } const i = recent.indexOf(id); if (i >= 0) recent.splice(i, 1); recent.unshift(id); recent.splice(4); try { localStorage.setItem('sigilvm-recent', JSON.stringify(recent)) } catch { /* */ } } }
+const BASE_TITLE = document.title
+function openCollection(id: string, fromUrl = false): void { const c = snap?.collections.find((x) => x.id === id); if (c) { openCollId = id; openModal(ui.collectionModal(c, snap!, watch.has(id), wallet), 'coll'); document.title = `${c.name} · SIGIL VM` /* the tab and the history entry name the collection */; try { if (fromUrl) { history.replaceState({ coll: id }, '', '#coll=' + id); sheetPushed = false } else if ((history.state as { coll?: string } | null)?.coll !== id) { history.pushState({ coll: id }, '', '#coll=' + id); sheetPushed = true } } catch { /* Back closes the sheet */ } const i = recent.indexOf(id); if (i >= 0) recent.splice(i, 1); recent.unshift(id); recent.splice(4); try { localStorage.setItem('sigilvm-recent', JSON.stringify(recent)) } catch { /* */ } } }
 function openTokenPicker(which: 'from' | 'to'): void {
   if (!snap) return
   openModal(`<h4>Select a token <span class="muted kbd-only" style="font-size:11px;font-weight:500" aria-hidden="true">↑↓ Enter</span></h4><div class="list">${snap.tokens.map((t) => `<button data-pick="${t.id}" data-which="${which}"><img src="${t.icon}" alt=""><div><div class="s">${t.symbol}</div><div class="n">${ui.esc(t.name)}</div></div><span class="r">${balances[t.id] === undefined ? '' : fmt.num(balances[t.id], 4)}</span></button>`).join('')}</div>`)

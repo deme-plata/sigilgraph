@@ -5,7 +5,12 @@ import { avatarSvg } from './art'
 import type { Snapshot, Collection, Drop, Mover, Sale, Token, Provenance } from './model'
 
 const esc = (s: unknown): string => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string))
-const prov = (p: Provenance, small = true): string => `<span class="chip ${p}${small ? '' : ' big'}"><i class="d"></i>${p}</span>`
+const PROV_WHY: Record<Provenance, string> = {
+  live: 'LIVE — read from sigil-api on this 10-second poll',
+  derived: 'DERIVED — a stated calculation over live numbers (block rate, window change, share of network)',
+  pretend: 'PRETEND — illustrative; no chain source exists for this yet',
+}
+const prov = (p: Provenance, small = true): string => `<span class="chip ${p}${small ? '' : ' big'}" title="${PROV_WHY[p]}"><i class="d"></i>${p}</span>`
 const delta = (n: number | null, d = 1): string => {
   if (n === null || n === undefined || !isFinite(n)) return '<span class="flat">—</span>'
   const c = n > 0.05 ? 'up' : n < -0.05 ? 'down' : 'flat'
@@ -61,7 +66,7 @@ export function shell(): string {
     <div class="actions">
       <div class="chain-wrap"><button class="chain-chip" id="chainChip" title="sigil-g2 · sigil-api" aria-haspopup="true" aria-controls="chainMenu" aria-expanded="false"><i class="d"></i><span class="t">sigil-g2</span><span id="chainHeight">—</span><span class="car">▾</span></button>
         <div class="chain-menu" id="chainMenu">
-          <div class="cm on"><i class="d on"></i><div><b>SIGIL g2</b><small>mainnet · sigil-api :18181</small></div><span class="chip live">live</span></div>
+          <div class="cm on"><i class="d on"></i><div><b>SIGIL g2</b><small>mainnet · sigil-api :18181</small></div><span class="chip live" title="/v1/health answers">live</span></div>
           <a class="cm" href="https://polygonscan.com/token/0x3FCED760b0DE6d57F96835C6110b1227941Ec2e9" target="_blank" rel="noopener"><i class="d" style="background:#8247e5;color:#8247e5"></i><div><b>Polygon</b><small>wSIGIL3 · Uniswap pool</small></div><span class="chip derived">external</span></a>
           <div class="cm dis"><i class="d" style="background:#555"></i><div><b>Soneium</b><small>wSIGIL leg · not deployed</small></div><span class="chip bad">blocked</span></div>
         </div></div>
@@ -198,7 +203,7 @@ export function hero(s: Snapshot, idx: number): string {
     <div class="bg" style="background-image:url('${c.cover}')"></div><div class="veil"></div>
     <div class="dots">${list.map((c, i) => `<button class="${i === idx % list.length ? 'on' : ''}" data-hero="${i}" aria-label="Show ${esc(c.name)}"></button>`).join('')}</div>
     <div class="body">
-      <div class="eyebrow">${prov(c.provenance)}<span class="chip gold">featured collection</span>${h.ok ? '<span class="chip live"><i class="d"></i>sigil-g2 · block ' + fmt.int(h.height) + '</span>' : '<span class="chip bad">node unreachable</span>'}</div>
+      <div class="eyebrow">${prov(c.provenance)}<span class="chip gold" title="one of the six biggest collections by items on chain, rotating">featured collection</span>${h.ok ? '<span class="chip live" title="the chain and its height this poll (/v1/mining/miners)"><i class="d"></i>sigil-g2 · block ' + fmt.int(h.height) + '</span>' : '<span class="chip bad">node unreachable</span>'}</div>
       <h1>${nameWithBadge(c.name, c.verified)}</h1>
       ${c.by ? `<div class="by">${esc(c.by)}</div>` : ''}
       <p>${esc(c.blurb)}</p>
@@ -232,7 +237,8 @@ export function forYou(s: Snapshot): string {
   const h = s.head
   const lagS = h.blkPerSec ? h.lagBlocks / h.blkPerSec : null
   const rockyDrop = s.drops.find((d) => d.id === 'rocky')
-  const tag = (t: string, cls = '') => `<span class="chip ${cls}">${t}</span>`
+  const TAG_WHY: Record<string, string> = { MEASURED: 'a live figure quoted in words', DESIGN: 'how it will work — not on chain yet', EXTERNAL: "another chain's state, read from nowhere on this page" }
+  const tag = (t: string, cls = '') => `<span class="chip ${cls}" title="${TAG_WHY[t] || ''}">${t}</span>`
   const next: string[] = []
   if (rockyDrop) {
     const r = s.rocky
@@ -275,8 +281,9 @@ export function collectionCard(c: Collection): string {
 export function dropCard(d: Drop): string {
   const st: Record<Drop['status'], string> = { live: 'chip live', minting: 'chip derived', upcoming: 'chip gold', blocked: 'chip bad', external: 'chip derived' }
   const lbl: Record<Drop['status'], string> = { live: 'live', minting: 'minting', upcoming: 'upcoming', blocked: 'blocked', external: 'external' }
+  const why: Record<Drop['status'], string> = { live: 'live on chain now', minting: 'live on chain and minting now', upcoming: 'gated by a block height not reached yet — the countdown is measured', blocked: 'blocked — the card says on what', external: 'live on another chain; nothing on this page reads it' }
   return `<a class="card drop wide" href="${d.link}" target="_blank" rel="noopener">
-    <div class="img" style="background-image:url('${d.cover}')"><span class="prov">${prov(d.provenance)}</span>${d.status === 'live' && d.provenance === 'live' ? '' : `<span class="status ${st[d.status]}"><i class="d"></i>${lbl[d.status]}</span>`}<span class="cta"><span class="cta-blurb">${esc(d.detail)}</span><span class="cta-btn">Open drop ↗</span></span></div>
+    <div class="img" style="background-image:url('${d.cover}')"><span class="prov">${prov(d.provenance)}</span>${d.status === 'live' && d.provenance === 'live' ? '' : `<span class="status ${st[d.status]}" title="${why[d.status]}"><i class="d"></i>${lbl[d.status]}</span>`}<span class="cta"><span class="cta-blurb">${esc(d.detail)}</span><span class="cta-btn">Open drop ↗</span></span></div>
     <div class="meta">
       <div class="name">${esc(d.name)}</div>
       <div class="when"${d.countdown ? ` data-cd-target="${d.countdown.target}" data-cd-height="${d.countdown.height}" data-cd-rate="${d.countdown.blkPerSec ?? ''}" data-cd-at="${d.countdown.at}"` : ''}>${esc(d.when)}</div>
@@ -368,7 +375,7 @@ export function routeCard(s: Snapshot, st: SwapState): string {
   const lagS = h.blkPerSec ? h.lagBlocks / h.blkPerSec : null
   const free = Math.max(0, h.capacity - h.notes)
   return `<div class="qcard route"><div class="glow"></div><div class="inner">
-    <div class="head"><h3>Route &amp; pool</h3><span class="chip ${!s.poolsRead ? 'pretend' : s.pools.length ? 'live' : 'gold'}"><i class="d"></i>${s.poolsRead ? `${s.pools.length} pool${s.pools.length === 1 ? '' : 's'} on g2` : 'pools unread'}</span></div>
+    <div class="head"><h3>Route &amp; pool</h3><span class="chip ${!s.poolsRead ? 'pretend' : s.pools.length ? 'live' : 'gold'}" title="${s.poolsRead ? '/v1/pools this poll' : '/v1/pools did not answer this poll'}"><i class="d"></i>${s.poolsRead ? `${s.pools.length} pool${s.pools.length === 1 ? '' : 's'} on g2` : 'pools unread'}</span></div>
     <div class="route-pair"><img src="${from.icon}" alt=""><span>${esc(from.symbol)}</span><span class="arr">→</span><img src="${to.icon}" alt=""><span>${esc(to.symbol)}</span></div>
     <div class="info">
       <div><span class="k">Pool</span><span class="v">${s.pools.length ? 'constant product' : 'none yet'}</span></div>

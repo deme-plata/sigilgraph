@@ -151,6 +151,11 @@ try {
     if (m.clipped.length) bad.push('clipped: ' + m.clipped.join(', '))
     if (m.offline) bad.push('offline banner (node unreachable from the guard)')
     if (m.totopAtTop) bad.push('back-to-top visible at the top of the page ([hidden] not honoured)')
+    // phones: every control takes a tap at ≥24×24 (ticker items and the hero bars, whose hit areas are pseudo-elements, excluded)
+    if (w <= 400) {
+      const small = await page.evaluate(() => { const out = {}; for (const e of document.querySelectorAll('button, a, [role=button], input, [tabindex="0"]')) { const r = e.getBoundingClientRect(); if (r.width <= 0 || r.height <= 0 || e.closest('.ticker, .hero .dots')) continue; if (r.width < 24 || r.height < 24) { const k = (e.className || e.id || e.tagName).toString().slice(0, 22) + ' ' + Math.round(r.width) + 'x' + Math.round(r.height); out[k] = (out[k] || 0) + 1 } } return Object.entries(out).map(([k, n]) => k + (n > 1 ? ' ×' + n : '')) })
+      if (small.length) bad.push('tap targets under 24px: ' + small.slice(0, 6).join(', '))
+    }
     if (m.cards < 1 || m.tokens < 1) bad.push(`empty sections cards=${m.cards} tokens=${m.tokens}`)
     if (bad404.length) bad.push('404: ' + bad404.join(', '))
     if (errs.length) bad.push('errors: ' + errs.join(' | '))

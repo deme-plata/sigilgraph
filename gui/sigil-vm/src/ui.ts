@@ -511,7 +511,7 @@ export function collectionModal(c: Collection, s: Snapshot, watched = false, min
     <div class="cm-tabs"><button class="on" data-cmtab="items">Items <span class="n">${items.length}</span></button><button data-cmtab="activity">Activity</button><button data-cmtab="info">Info</button></div>
     <div class="cm-body">
       <div class="cm-pane" data-pane="items"><div class="cm-items">${items.join('') || '<div class="pempty">Nothing to list.</div>'}</div></div>
-      <div class="cm-pane" data-pane="activity" hidden>${collectionActivity(c, s)}</div>
+      <div class="cm-pane" data-pane="activity" hidden>${collectionActivity(c, s, mine)}</div>
       <div class="cm-pane" data-pane="info" hidden><p class="blurb">${esc(c.blurb)}</p><div class="td-grid">
         <div class="td-cell" style="grid-column: span 2"><div class="k">Provenance</div><div class="v">${prov(c.provenance)} — ${c.provenance === 'live' ? 'read from sigil-api this poll' : c.provenance === 'derived' ? 'calculated over live numbers' : 'illustrative, no chain source yet'}</div></div>
         <div class="td-cell"><div class="k">Category</div><div class="v">${esc(c.cat)}</div></div>
@@ -543,13 +543,13 @@ export function ticker(s: Snapshot): string {
   return row + `<span class="tk-dup" aria-hidden="true">${row}</span>` // duplicated so the marquee loops seamlessly; the copy is hidden from readers and dropped under reduced motion
 }
 
-function collectionActivity(c: Collection, s: Snapshot): string {
+function collectionActivity(c: Collection, s: Snapshot, mine: string | null = null): string {
   const rows: string[] = []
-  const row = (ic: string, cls: string, main: string, sub: string, t: string) => rows.push(`<div class="pact"><span class="ic ${cls}">${ic}</span><span class="w">${main}<small>${sub}</small></span><span class="t">${t}</span></div>`)
+  const row = (ic: string, cls: string, main: string, sub: string, t: string, you = false) => rows.push(`<div class="pact${you ? ' you' : ''}"><span class="ic ${cls}">${ic}</span><span class="w">${main}${you ? ' <span class="chip live yours"><i class="d"></i>yours</span>' : ''}<small>${sub}</small></span><span class="t">${t}</span></div>`)
   switch (c.id) {
     case 'blocks': for (const b of (s.recent?.blocks ?? []).slice(0, 30)) row(I.grid, b.is_blue ? 'blue' : 'red', `Block ${fmt.int(b.height)}`, `${b.is_blue ? 'blue' : 'red'} · score ${fmt.int(b.blue_score)} · producer ${fmt.short(hex(b.producer), 6)}`, blockAgo(s, b.height)); break
-    case 'rigs': for (const m of (s.miners?.miners ?? [])) row(I.coins, '', esc(m.rig || fmt.short(m.wallet, 6)), `${fmt.hps(m.hash_rate)} · ${m.kind.toUpperCase()} · ${m.shielded ? 'shielded' : 'transparent'}`, fmt.ago(m.last_seen_secs_ago)); if (s.miners) row(I.swap, '', 'Blocks accepted', `${fmt.n(s.miners.blocks_accepted, 'block')} · ${fmt.int(s.miners.shares_accepted)} shares`, 'session'); break
-    case 'honours': case 'bench': for (const e of (s.docket?.entries ?? []).slice().reverse()) { const ev = e.event as { rank?: string; order?: string; justice?: number[]; recipient?: number[] }; row(I.book, 'gold', esc(ev.order ? `${ev.order} conferred` : `${(ev.rank || 'Justice').replace(/([A-Z])/g, ' $1').trim()} appointed`), `${fmt.short(hex(ev.justice ?? ev.recipient), 6)} · docket #${e.seq} · leaf ${fmt.short(e.leaf, 6)}`, e.height ? `blk ${fmt.int(e.height)}` : 'genesis') } break
+    case 'rigs': for (const m of (s.miners?.miners ?? [])) row(I.coins, '', esc(m.rig || fmt.short(m.wallet, 6)), `${fmt.hps(m.hash_rate)} · ${m.kind.toUpperCase()} · ${m.shielded ? 'shielded' : 'transparent'}`, fmt.ago(m.last_seen_secs_ago), !!mine && m.wallet.toLowerCase() === mine); if (s.miners) row(I.swap, '', 'Blocks accepted', `${fmt.n(s.miners.blocks_accepted, 'block')} · ${fmt.int(s.miners.shares_accepted)} shares`, 'session'); break
+    case 'honours': case 'bench': for (const e of (s.docket?.entries ?? []).slice().reverse()) { const ev = e.event as { rank?: string; order?: string; justice?: number[]; recipient?: number[] }; row(I.book, 'gold', esc(ev.order ? `${ev.order} conferred` : `${(ev.rank || 'Justice').replace(/([A-Z])/g, ' $1').trim()} appointed`), `${fmt.short(hex(ev.justice ?? ev.recipient), 6)} · docket #${e.seq} · leaf ${fmt.short(e.leaf, 6)}`, e.height ? `blk ${fmt.int(e.height)}` : 'genesis', !!mine && hex(ev.justice ?? ev.recipient) === mine) } break
     case 'notes': row(I.eye, '', 'Nullifiers', `${fmt.n(s.head.nullifiers, 'note')} spent, ever`, 'total'); row(I.eye, '', 'Notes in pool', `${fmt.int(s.head.notes)} of ${fmt.int(s.head.capacity)}`, 'now'); break
     case 'earth': { const a = s.earth?.attest_last?.anchor; if (a?.tx_hash) row(I.eye, 'gold', 'Attestation anchored', `${a.amount ?? '—'} glyphs · tx ${fmt.short(a.tx_hash, 8)}`, a.ts ? new Date(a.ts).toLocaleString() : ''); break }
     default: break

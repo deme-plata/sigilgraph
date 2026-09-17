@@ -362,7 +362,7 @@ export function routeCard(s: Snapshot, st: SwapState): string {
       <div><span class="k">Output lands as</span><span class="v">a shielded note (${fmt.int(free)} free)</span></div>
     </div>
     <div class="route-cta"><a class="btn ghost" href="/sigil-wallet-tron-embedded.html" target="_blank" rel="noopener">Add liquidity</a><a class="btn ghost" href="/sigil-dex.html" target="_blank" rel="noopener">Trading desk ↗</a></div>
-    <div class="muted" style="font-size:11.5px;margin-top:10px">Everything above is read from the node this poll. A pool is a ${'`'}PoolState${'`'} in the DEX state root; until one is committed there is nothing to route through.</div>
+    <div class="muted" style="font-size:11.5px;margin-top:10px">Pool, settle time and free leaves are read from the node this poll; the fee is the DEX’s constant (0.3 %); slippage is your setting. A pool is a ${'`'}PoolState${'`'} in the DEX state root — until one is committed there is nothing to route through.</div>
   </div></div>`
 }
 

@@ -335,7 +335,7 @@ export function swapModule(s: Snapshot, st: SwapState, balances: Record<string, 
     <div class="field"><label>Amount (${esc(from.symbol)})</label><div class="amt"><input id="swapAmt" type="number" placeholder="0.0" value="${esc(st.amount)}"><button class="tsel" data-max="1" style="color:#fbbf24">MAX</button></div></div>
     <div class="field"><label>Trigger condition</label><div class="dir" style="margin-top:6px"><button class="${st.limitDir === 'buy' ? 'on buy' : ''}" data-dir="buy">Buy when price ↓ below</button><button class="${st.limitDir === 'sell' ? 'on sell' : ''}" data-dir="sell">Sell when price ↑ above</button></div></div>
     <div class="field"><label>Limit price (${esc(to.symbol)} per ${esc(from.symbol)})</label><div class="amt"><input id="limitPx" type="number" placeholder="0.0" value="${esc(st.limitPrice)}"></div></div>
-    <div class="info warnbox">Limit orders need an order book on SIGIL VM. The desk keeps them client-side until a pool and a keeper exist — nothing is placed on chain from here yet.</div>
+    <div class="info warnbox">Limit orders need an order book on SIGIL VM, and there is none yet: nothing you type here is kept or placed anywhere. The button wakes up when a pool and a keeper exist.</div>
     <button class="btn lg full swapbtn" style="background:linear-gradient(90deg,#fbbf24,#f97316);color:#000" disabled>Place limit order (soon)</button></div>`
   return `<div class="qcard"><div class="glow"></div><div class="inner">
     <div class="head"><h3>Swap Tokens</h3><div class="icons"><button id="swapSettings" title="Slippage">${I.settings}</button><button id="swapCollapse" title="Collapse">${I.left}</button></div></div>

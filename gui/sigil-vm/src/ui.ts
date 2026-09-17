@@ -89,7 +89,7 @@ export function shell(): string {
     <a href="/sigil-explorer.html" target="_blank" rel="noopener">${I.eye}<span class="tip">Explorer</span></a>
   </aside>
   <main class="main" id="main">
-    <div class="ticker" id="ticker" aria-label="Live chain activity"><div class="tk-track" id="tickerTrack"></div></div>
+    <div class="ticker" id="ticker" role="marquee" aria-label="Live chain activity"><div class="tk-track" id="tickerTrack"></div></div>
     <section id="market" class="section" style="margin-top:0" aria-label="Market overview">
       <div class="hero skel-hero" id="hero"><div class="bg"></div><div class="veil"></div><div class="body"><div class="eyebrow"><span class="chip gold"><i class="d"></i>reading the chain…</span></div><div class="sk sk-h1"></div><div class="sk sk-p"></div><div class="stats"><div class="stat sk-stat"></div><div class="stat sk-stat"></div><div class="stat sk-stat"></div><div class="stat sk-stat"></div></div><div class="cta"><div class="sk sk-btn"></div><div class="sk sk-btn"></div></div></div></div>
       <div class="strip-wrap"><div class="strip" id="strip">${skStrip()}</div></div>

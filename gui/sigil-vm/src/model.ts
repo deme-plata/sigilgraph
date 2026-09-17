@@ -100,7 +100,8 @@ export interface ChainHead {
   finalityGate: string
   finalityHeight: number
   committee: number
-  supplySigil: number
+  supplySigil: number      // minted = transparent wallets + value sealed in the shielded pool (NaN until both routes answer)
+  transparentSigil: number // what /v1/supply calls native_supply: the sum of transparent balances — it FALLS when coins are shielded
   maxSupplySigil: number
   mintedPct: number
   valueLocked: number
@@ -260,9 +261,12 @@ function buildHead(supply: Supply | null, miners: Miners | null, anchor: Anchor 
     finalityGate: cert?.certificate.gate ?? '—',
     finalityHeight: cert ? cert.certificate.height : NaN,
     committee: cert ? cert.certificate.committee_size : NaN,
-    supplySigil: supply ? glyphsToSigil(supply.native_supply) : NaN,
+    // 09-17: native_supply dropped 179K → 150K while the pool's value_locked rose by the same 29K — shielding moves coins out
+    // of the wallet map, so 'supply' on its own undercounts what was minted. Minted = transparent + shielded.
+    supplySigil: supply && anchor ? glyphsToSigil(supply.native_supply) + glyphsToSigil(anchor.value_locked) : NaN,
+    transparentSigil: supply ? glyphsToSigil(supply.native_supply) : NaN,
     maxSupplySigil: supply ? glyphsToSigil(supply.max_supply) : NaN,
-    mintedPct: supply ? (supply.minted_pct ?? 0) : NaN,
+    mintedPct: supply && anchor ? (glyphsToSigil(supply.native_supply) + glyphsToSigil(anchor.value_locked)) / glyphsToSigil(supply.max_supply) * 100 : NaN,
     valueLocked: anchor ? glyphsToSigil(anchor.value_locked) : NaN,
     notes: anchor ? anchor.notes : NaN,
     nullifiers: anchor ? anchor.nullifiers : NaN,
@@ -284,7 +288,7 @@ function buildTokens(supply: Supply | null, usds: Usds | null, rocky: Rocky | nu
   t.push({
     id: NATIVE_TOKEN, symbol: 'SIGIL', name: 'SIGIL (native)', decimals: 10, icon: tokenIconSvg('SIGIL'),
     status: 'live', statusNote: 'native coin · 1 SIGIL = 10¹⁰ glyphs',
-    supply: glyphsToSigil(supply?.native_supply), maxSupply: glyphsToSigil(supply?.max_supply),
+    supply: supply && anchor ? glyphsToSigil(supply.native_supply) + glyphsToSigil(anchor.value_locked) : null, maxSupply: glyphsToSigil(supply?.max_supply), // minted = transparent + shielded
     holders: anchor?.registered ?? null, ageBlocks: height || null,
     price: null, change1h: null, change24h: null, change7d: null, volume24h: null, liquidity: liq(NATIVE_TOKEN),
     provenance: supply ? 'live' : 'pretend', tags: ['NATIVE'],

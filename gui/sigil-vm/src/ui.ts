@@ -113,7 +113,7 @@ export function shell(): string {
       <div class="trending" id="trendingTable">${skTrending()}</div>
     </section>
     <section id="movers" class="section" aria-labelledby="h-movers">
-      <div class="sec-head"><div><h2 id="h-movers">Top Movers Today</h2><div class="sub">Rigs by hashrate. Change is measured against the first sample this page took today (kept in your browser).</div></div><div class="right"><div class="arrows" data-scroll="moversRow"><button aria-label="Scroll left">${I.left}</button><button aria-label="Scroll right">${I.right}</button></div></div></div>
+      <div class="sec-head"><div><h2 id="h-movers">Top Movers Today</h2><div class="sub">Rigs by hashrate. A rig's change is measured against the first sample this page took today (kept in your browser); the network card's change comes from the node's own hashrate history.</div></div><div class="right"><div class="arrows" data-scroll="moversRow"><button aria-label="Scroll left">${I.left}</button><button aria-label="Scroll right">${I.right}</button></div></div></div>
       <div class="row" id="moversRow">${skeleton(6, 'mover')}</div>
     </section>
     <section id="sales" class="section" aria-labelledby="h-sales">

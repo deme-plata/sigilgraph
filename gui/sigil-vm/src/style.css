@@ -438,7 +438,7 @@ button.tk-item:hover .tk-l { text-decoration: underline; }
 .dex { display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; }
 #swap { display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; }
 @container (max-width: 899px) { #swap .qcard { max-width: 620px; width: 100%; margin: 0 auto; } }
-@container (min-width: 900px) { #swap { grid-template-columns: minmax(360px, 560px) 1fr; } }
+@container (min-width: 900px) { #swap { grid-template-columns: minmax(360px, 560px) 1fr; align-items: stretch; } #swap .qcard.route .inner { height: 100%; box-sizing: border-box; display: flex; flex-direction: column; } #swap .qcard.route .inner > .muted:last-child { margin-top: auto !important; padding-top: 10px; } /* the footnote carries an inline margin */ } /* side by side, the route card matches the swap module's height with its footnote at the foot (it used to stop 166px short) */
 /* ≥1180: the route card moves under the token table (column 2) so the two columns end near the same line —
    swap-over-route left a ~530px hole beside the five-row token table. #swap dissolves into the .dex grid. */
 @container (min-width: 1180px) { .dex { grid-template-columns: minmax(380px, 460px) 1fr; grid-template-rows: auto auto; } #swap { display: contents; } #swap > .qcard:not(.route) { grid-column: 1; grid-row: 1 / span 2; } #tokens { grid-column: 2; grid-row: 1; } #swap > .qcard.route { grid-column: 2; grid-row: 2; } }

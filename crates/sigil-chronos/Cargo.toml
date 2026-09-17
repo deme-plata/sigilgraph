@@ -145,6 +145,10 @@ name = "sigil-kparam-battle"
 path = "src/bin/sigil-kparam-battle.rs"
 
 [[bin]]
+name = "sigil-breathing"
+path = "src/bin/sigil-breathing.rs"
+
+[[bin]]
 name = "chronos_virtual"
 path = "src/bin/chronos_virtual.rs"
 

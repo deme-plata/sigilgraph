@@ -469,6 +469,20 @@ export function panelActivity(s: Snapshot, mine: string | null = null): string {
   return rows.join('') || `<div class="pempty">No activity read yet.</div>`
 }
 
+// OpenSea's four card figures, said in each record family's own terms (a floor is never a price here)
+const FIGURES: Record<string, string> = {
+  blocks: 'Floor = blue score of the newest block in the recent set · Items = chain height · Owners = distinct producers in the recent set · Volume = blocks in the recent set',
+  rigs: 'Floor = the weakest live rig\'s hashrate · Items = live rigs · Owners = distinct rig wallets · Volume = network hashrate',
+  notes: 'Floor = free leaves this epoch (capacity − notes) · Items = notes in the pool · Owners = wallets with a published viewing key · Volume = SIGIL sealed in the pool',
+  earth: 'Floor = glyphs paid per attestation · Items = attestation rows · Owners = the attester wallet · Volume = the last anchored tx',
+  bench: 'Floor = one seat · Items = seats · Owners = justices · Volume = whether the bench root is chain-verified',
+  honours: 'Floor = one honour · Items = honours conferred · Owners = recipients · Volume = docket entries',
+  treasury: 'Floor = the treasury balance · Items = one vault · Owners = the nation · Volume = the welfare carve in bps',
+  rocky: 'Floor = the cover fee in bps · Items = policies written · Owners = not exposed by /v1/rocky · Volume = ROCKY in the cover pool',
+  bridge: 'Floor = SIGIL in the vault · Items = locks · Owners = not exposed by /v1/bridge/status · Volume = relayer state (open / paused)',
+  coins: 'Floor = no batch yet · Items = batches anchored · Owners = holders of anchored coins · Volume = batches anchored',
+  book: 'Floor = the PDF is free · Items = none on chain · Owners = none on chain · Volume = the manuscript version',
+}
 export function collectionModal(c: Collection, s: Snapshot, watched = false, mine: string | null = null): string {
   const items: string[] = []
   // an item that belongs to the connected wallet says so (OpenSea's 'you own this'): a 'yours' chip and a class to lift it
@@ -499,6 +513,7 @@ export function collectionModal(c: Collection, s: Snapshot, watched = false, min
         <div class="td-cell" style="grid-column: span 2"><div class="k">Provenance</div><div class="v">${prov(c.provenance)} — ${c.provenance === 'live' ? 'read from sigil-api this poll' : c.provenance === 'derived' ? 'calculated over live numbers' : 'illustrative, no chain source yet'}</div></div>
         <div class="td-cell"><div class="k">Category</div><div class="v">${esc(c.cat)}</div></div>
         <div class="td-cell"><div class="k">By</div><div class="v">${esc(c.by || '—')}</div></div>
+        <div class="td-cell" style="grid-column: 1 / -1"><div class="k">What the four figures are here</div><div class="v" style="white-space:normal;font-family:var(--sans);font-size:12.5px">${esc(FIGURES[c.id] || 'floor, items, owners and volume are this record family\'s own live measures — there is no price')}</div></div>
         <div class="td-cell" style="grid-column: span 2"><div class="k">${c.link.startsWith('/v1/') ? 'Node record' : 'Source page'}</div><div class="v"><a class="mono" href="${c.link}" target="_blank" rel="noopener">${esc(c.link)}</a></div></div>
         <div class="td-cell two"><div class="k">Window changes</div><div class="v mono" style="white-space:nowrap">${['1h', '6h', '24h', '7d'].map((w) => `<span style="color:var(--muted)">${w}</span> ${fmt.pct(s.changes[c.id]?.[w] ?? null)}`).join(' &nbsp;')}</div></div>
         <div class="td-cell two"><div class="k">Last poll</div><div class="v mono" style="white-space:nowrap">${new Date(s.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} · h ${fmt.int(s.head.height)}</div></div>
